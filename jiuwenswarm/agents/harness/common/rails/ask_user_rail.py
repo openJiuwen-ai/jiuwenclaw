@@ -209,13 +209,15 @@ class StructuredAskUserRail(AskUserRail):
     def __init__(
         self,
         tool_names: Optional[Iterable[str]] = None,
+        language: Optional[str] = None,
     ):
         super().__init__(tool_names=tool_names)
         self._structured_tools: list[StructuredAskUserTool] = []
+        self._language = language
 
     def init(self, agent):
         """Register the extended ask_user tool with structured questions schema."""
-        language = resolve_language()
+        language = self._language or resolve_language()
         agent_id = getattr(getattr(agent, "card", None), "id", None)
         tool = StructuredAskUserTool(language=language, agent_id=agent_id)
         self._structured_tools = [tool]

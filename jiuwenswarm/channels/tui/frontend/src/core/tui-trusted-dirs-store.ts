@@ -1,4 +1,4 @@
-import { existsSync, readdirSync, statSync } from "node:fs";
+import { readdirSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { resolve } from "node:path";
 
@@ -86,6 +86,7 @@ function persist(): void {
  * Defaults to process.cwd() but can be overridden.
  */
 let _currentProjectDir: string | null = null;
+let _currentCwd: string | null = null;
 
 /**
  * Override the project directory used for scoping trusted dirs.
@@ -101,6 +102,23 @@ export function setCurrentProjectDir(dir: string): void {
  * Get the current project scope directory (absolute path).
  */
 export function getCurrentProjectDir(): string {
+  return getProjectKey();
+}
+
+/**
+ * Override the dynamic cwd sent with each request.
+ */
+export function setCurrentCwd(dir: string): void {
+  _currentCwd = normalizePath(dir);
+}
+
+/**
+ * Get the dynamic cwd for runtime execution.
+ */
+export function getCurrentCwd(): string {
+  if (_currentCwd) {
+    return _currentCwd;
+  }
   return getProjectKey();
 }
 
@@ -122,7 +140,17 @@ function getProjectKey(): string {
 export function getTrustedDirs(): string[] {
   ensureLoaded();
   const key = getProjectKey();
-  return [...(_trustedDirsByProject![key] || [])];
+  const projectDirs = _trustedDirsByProject![key] || [];
+  const validDirs = projectDirs.filter((dir) => validateDirPath(dir) === "valid");
+  if (validDirs.length !== projectDirs.length) {
+    if (validDirs.length > 0) {
+      _trustedDirsByProject![key] = validDirs;
+    } else {
+      delete _trustedDirsByProject![key];
+    }
+    persist();
+  }
+  return [...validDirs];
 }
 
 /**
@@ -136,15 +164,18 @@ export function addTrustedDir(path: string): "added" | "exists" | "not_found" | 
   if (!normalized) {
     return "invalid";
   }
-  if (!existsSync(normalized)) {
-    return "not_found";
-  }
   try {
     const stats = statSync(normalized);
     if (!stats.isDirectory()) {
       return "invalid";
     }
-  } catch {
+  } catch (err: any) {
+    if (err.code === "EACCES" || err.code === "EPERM") {
+      return "no_access";
+    }
+    if (err.code === "ENOENT") {
+      return "not_found";
+    }
     return "invalid";
   }
   const access = checkDirAccess(normalized);
@@ -170,7 +201,7 @@ function checkDirAccess(normalized: string): "valid" | "no_access" | "invalid" {
   try {
     readdirSync(normalized);
   } catch (err: any) {
-    if (err.code === "EACCES") {
+    if (err.code === "EACCES" || err.code === "EPERM") {
       return "no_access";
     }
     return "invalid";
@@ -188,15 +219,18 @@ export function validateDirPath(path: string): "valid" | "not_found" | "invalid"
   if (!normalized) {
     return "invalid";
   }
-  if (!existsSync(normalized)) {
-    return "not_found";
-  }
   try {
     const stats = statSync(normalized);
     if (!stats.isDirectory()) {
       return "invalid";
     }
-  } catch {
+  } catch (err: any) {
+    if (err.code === "EACCES" || err.code === "EPERM") {
+      return "no_access";
+    }
+    if (err.code === "ENOENT") {
+      return "not_found";
+    }
     return "invalid";
   }
   const access = checkDirAccess(normalized);
@@ -217,15 +251,18 @@ export function setTrustedDir(path: string): "set" | "not_found" | "invalid" | "
   if (!normalized) {
     return "invalid";
   }
-  if (!existsSync(normalized)) {
-    return "not_found";
-  }
   try {
     const stats = statSync(normalized);
     if (!stats.isDirectory()) {
       return "invalid";
     }
-  } catch {
+  } catch (err: any) {
+    if (err.code === "EACCES" || err.code === "EPERM") {
+      return "no_access";
+    }
+    if (err.code === "ENOENT") {
+      return "not_found";
+    }
     return "invalid";
   }
   const access = checkDirAccess(normalized);

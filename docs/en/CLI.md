@@ -61,9 +61,10 @@ Sets the working mode for the current channel. The Agent uses this when construc
 |---------|-------------|
 | `/mode agent.plan` | Agent mode + planning style (default) |
 | `/mode agent.fast` | Agent mode + auto-execution style |
-| `/mode code.plan` | Code mode + planning style |
 | `/mode code.normal` | Code mode + direct execution style (default) |
 | `/mode code.team` | Code mode + team style |
+
+> Note: this table is the Gateway controlled-channel whitelist. The TUI local `/mode` command also supports `/mode plan` (equivalent to `agent.plan`) and `/mode team.normal` (equivalent to `team`); those forms are not recognized by Gateway controlled channels.
 
 **Usage**
 
@@ -71,17 +72,11 @@ Sets the working mode for the current channel. The Agent uses this when construc
 /mode agent
 ```
 
-or
-
-```text
-/mode code.plan
-```
-
 The Gateway will:
 1. Intercept this message
 2. Cancel tasks in the current session (if mode changes)
 3. Update `ChannelControlState.mode`
-4. Reply with a system message, e.g.: `[Received CLI command], mode changed to code.plan`
+4. Reply with a system message, e.g.: `[Received CLI command], mode changed to code.normal`
 
 ---
 
@@ -93,10 +88,12 @@ Switches secondary style within the current primary mode, more concise than `/mo
 
 | Command | When in agent mode | When in code mode |
 |---------|--------------------|--------------------|
-| `/switch plan` | → `agent.plan` | → `code.plan` |
+| `/switch plan` | → `agent.plan` | Not supported |
 | `/switch fast` | → `agent.fast` | Not supported |
 | `/switch normal` | Not supported | → `code.normal` |
 | `/switch team` | Not supported | → `code.team` |
+
+> The TUI source contains a `/switch` implementation, but the default TUI command registry does not currently register it. In TUI, prefer `/mode ...` or `/plan` for sub-mode switching.
 
 **Usage**
 

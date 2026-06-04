@@ -42,25 +42,41 @@ if getattr(sys, "frozen", False):
             pass
 
     # Windows: 防止 subprocess 弹出控制台窗口（console=False 编译时 git 等命令会弹出黑框）
-    # Monkey-patch asyncio.create_subprocess_exec，自动添加 CREATE_NO_WINDOW 标志
+    # Monkey-patch asyncio.create_subprocess_exec 和 subprocess.Popen，
+    # 自动添加 CREATE_NO_WINDOW 标志
     if os.name == "nt":
         import asyncio
         import subprocess
 
+        _CREATE_NO_WINDOW = subprocess.CREATE_NO_WINDOW
+
         _original_create_subprocess_exec = asyncio.create_subprocess_exec
 
         def _patched_create_subprocess_exec(*args, creationflags=0, **kwargs):
-            # 合并 CREATE_NO_WINDOW，不覆盖用户指定的其他标志
             return _original_create_subprocess_exec(
                 *args,
-                creationflags=creationflags | subprocess.CREATE_NO_WINDOW,
+                creationflags=creationflags | _CREATE_NO_WINDOW,
                 **kwargs,
             )
 
         asyncio.create_subprocess_exec = _patched_create_subprocess_exec
 
+        _original_popen_init = subprocess.Popen.__init__
+
+        def _patched_popen_init(self, *args, creationflags=0, **kwargs):
+            _original_popen_init(self, *args, creationflags=creationflags | _CREATE_NO_WINDOW, **kwargs)
+
+        subprocess.Popen.__init__ = _patched_popen_init
+
 _DESKTOP_RUN_AGENT = "--desktop-run-agent"
 _DESKTOP_RUN_GATEWAY = "--desktop-run-gateway"
+
+# 子进程 flag 集合，这些模式下需要将错误写入日志文件，
+# 因为 console=False 的 PyInstaller exe 在 Windows 上无法通过 stderr 捕获错误。
+_DESKTOP_INSTALL_UPDATE = "--desktop-install-update"
+
+_CHILD_FLAGS = {"--desktop-run-app", "--desktop-run-web",
+        _DESKTOP_RUN_AGENT, _DESKTOP_RUN_GATEWAY, _DESKTOP_INSTALL_UPDATE}
 
 # ── 单实例锁（在重量级 import 之前执行） ──────────────────────────
 _SINGLE_INSTANCE_LOCK_FD: int | None = None
@@ -199,6 +215,10 @@ def _dispatch() -> None:
     if _pop_flag(_DESKTOP_RUN_GATEWAY):
         from jiuwenswarm.gateway.app_gateway import main as gateway_main
         gateway_main()
+        return
+    if _DESKTOP_INSTALL_UPDATE in sys.argv:
+        from jiuwenswarm.channels.desktop.desktop_app import main as desktop_main
+        desktop_main()
         return
     # 子命令：浏览器启动（供主进程 subprocess 调用）
     if "--browser-start-client" in sys.argv:

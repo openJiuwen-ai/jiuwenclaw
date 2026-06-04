@@ -179,8 +179,8 @@ if sys.platform == "darwin":
         info_plist={
             "CFBundleName": "JiuwenSwarm",
             "CFBundleDisplayName": "JiuwenSwarm",
-            "CFBundleShortVersionString": "0.2.0",
-            "CFBundleVersion": "0.2.0",
+            "CFBundleShortVersionString": "0.2.1",
+            "CFBundleVersion": "0.2.1",
             "NSHighResolutionCapable": "True",
         },
     )

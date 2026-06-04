@@ -32,6 +32,43 @@ def test_evolution_helpers_parse_approval_and_outcome_events():
     assert evolution_helpers.extract_evolution_request_id(approval) == "team_skill_evolve_req1"
 
 
+def test_evolution_helpers_parse_noop_outcome_status_from_sdk_metadata():
+    outcome = SimpleNamespace(
+        type="llm_reasoning",
+        payload={
+            "_evolution_meta": {
+                "event_kind": "outcome",
+                "rail_kind": "regular",
+                "status": "no_evolution_no_records",
+                "stage": "completed",
+                "skill_name": "powerpoint-pptx",
+                "source": "experience_updater",
+            },
+            "content": "[Evolution] no applied updates for skill=powerpoint-pptx\n",
+        },
+    )
+
+    assert evolution_helpers.evolution_outcome_from_event(outcome) == {
+        "status": "no_evolution_no_records",
+        "message": "[Evolution] no applied updates for skill=powerpoint-pptx\n",
+    }
+
+
+@pytest.mark.parametrize(
+    ("rail", "expected"),
+    [
+        (SimpleNamespace(evolution_total_timeout_secs=600), 605),
+        (object(), 900),
+    ],
+)
+def test_resolve_evolution_event_timeout_matches_sdk_budget(rail, expected):
+    assert evolution_helpers.resolve_evolution_event_timeout_sec(
+        rail,
+        fallback_sec=900,
+        grace_sec=5,
+    ) == expected
+
+
 def test_evolution_helpers_extract_request_id_from_evolution_meta():
     progress = SimpleNamespace(
         type="llm_reasoning",
@@ -201,6 +238,60 @@ def test_evolution_helpers_group_approvals_skips_missing_request_ids():
     assert warnings == ["sess-1"]
     assert list(grouped) == ["team_skill_evolve_real"]
     assert grouped["team_skill_evolve_real"] == [real_request_id]
+
+
+def test_evolution_helpers_resolve_approved_record_ids_by_answer_index():
+    accepted, approved_ids = evolution_helpers.approved_record_ids_from_answers(
+        [
+            {"selected_options": ["接收"]},
+            {"selected_options": ["拒绝"]},
+            {"selected_options": ["Accept"]},
+        ],
+        evolution_helpers.EVOLUTION_ACCEPT_LABELS,
+        ["rec-1", "rec-2", "rec-3"],
+    )
+
+    assert accepted is True
+    assert approved_ids == ["rec-1", "rec-3"]
+
+
+def test_evolution_helpers_preserve_legacy_whole_request_without_record_ids():
+    accepted, approved_ids = evolution_helpers.approved_record_ids_from_answers(
+        [{"selected_options": ["接收"]}],
+        evolution_helpers.EVOLUTION_ACCEPT_LABELS,
+    )
+
+    assert accepted is True
+    assert approved_ids is None
+
+
+def test_evolution_helpers_do_not_whole_approve_when_snapshot_id_is_missing():
+    accepted, approved_ids = evolution_helpers.approved_record_ids_from_answers(
+        [{"selected_options": ["接收"]}],
+        evolution_helpers.EVOLUTION_ACCEPT_LABELS,
+        [""],
+    )
+
+    assert accepted is True
+    assert approved_ids == []
+
+
+def test_evolution_helpers_extract_record_ids_from_pending_snapshot():
+    rail = SimpleNamespace(
+        _pending_approval_snapshots={
+            "skill_evolve_req1": SimpleNamespace(
+                payload=[
+                    SimpleNamespace(id="rec-1"),
+                    SimpleNamespace(id="rec-2"),
+                ],
+            ),
+        },
+    )
+
+    assert evolution_helpers.record_ids_from_pending_approval(
+        rail,
+        "skill_evolve_req1",
+    ) == ["rec-1", "rec-2"]
 
 
 def test_evolution_helpers_builds_team_cycle_request_id():

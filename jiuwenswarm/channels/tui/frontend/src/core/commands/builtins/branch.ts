@@ -25,8 +25,17 @@ export function createBranchCommand(): SlashCommand {
         return;
       }
 
-      if (ctx.entries.length === 0) {
-        ctx.addItem(addError(ctx.sessionId, "no conversation to branch from"));
+      const hasMainConversation = ctx.entries.some(
+        (e) => e.kind === "user" || e.kind === "assistant",
+      );
+      if (!hasMainConversation) {
+        // Distinguish: no entries at all → "No conversation to branch"
+        //               has sidechain/team activity but no main conversation → "No messages to branch"
+        const message =
+          ctx.teamMessageEvents.length > 0
+            ? "No messages to branch"
+            : "No conversation to branch";
+        ctx.addItem(addError(ctx.sessionId, message));
         return;
       }
 
@@ -45,7 +54,7 @@ export function createBranchCommand(): SlashCommand {
         const originalSessionId = ctx.sessionId;
         ctx.updateSession(forkSessionId);
         ctx.clearEntries();
-        ctx.addItem(addCommandEcho(forkSessionId, "/branch"));
+        ctx.addItem(addCommandEcho(forkSessionId, customTitle ? `/branch ${customTitle}` : "/branch"));
         ctx.addItem(
           addInfo(
             forkSessionId,
@@ -59,7 +68,14 @@ export function createBranchCommand(): SlashCommand {
         await ctx.restoreHistory(forkSessionId);
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
-        ctx.addItem(addError(ctx.sessionId, `branch failed: ${message}`));
+        // Translate backend filesystem-level errors to user-friendly messages
+        const userMessage =
+          message.includes("source session not found")
+            ? "No conversation to branch"
+            : message.includes("target session already exists")
+              ? "Branch session already exists"
+              : `branch failed: ${message}`;
+        ctx.addItem(addError(ctx.sessionId, userMessage));
       }
     },
   };

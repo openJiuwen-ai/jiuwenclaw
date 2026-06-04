@@ -11,6 +11,7 @@ from __future__ import annotations
 import subprocess
 import sys
 import time
+import os
 
 from dotenv import load_dotenv
 
@@ -49,6 +50,7 @@ reset_free_search_runtime_flags()
 
 def main() -> None:
     import argparse
+    import json
 
     parser = argparse.ArgumentParser(
         prog="jiuwenswarm-app",
@@ -90,6 +92,12 @@ def main() -> None:
         gateway_cmd.extend(["--dotenv", str(dotenv_path)])
 
     _popen_kwargs: dict = {}
+
+    if "JIUWENSWARM_START_CMD" not in os.environ:
+        try:
+            os.environ["JIUWENSWARM_START_CMD"] = json.dumps(sys.argv[:])
+        except (TypeError, ValueError, OverflowError):
+            os.environ["JIUWENSWARM_START_CMD"] = json.dumps([str(a) for a in sys.argv[:]])
 
     agent = subprocess.Popen(agent_cmd, **_popen_kwargs)
     gateway = None

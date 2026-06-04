@@ -376,12 +376,15 @@ class GatewayServer:
         except Exception:  # pragma: no cover
             from websockets import serve as ws_serve
 
+        ws_max_size = 8 * 2**20  # 8 MB — matches AgentServer link
+
         self._server = await ws_serve(
             self._connection_handler,
             self.config.host,
             self.config.port,
             ping_interval=20,
             ping_timeout=600,
+            max_size=ws_max_size,
         )
         self._running = True
         paths = ", ".join(self.config.routes.keys())
@@ -521,22 +524,38 @@ class GatewayServer:
             self._clients.discard(ws)
             return
 
+        normal_close = False
         try:
             async for raw in ws:
                 await self._handle_raw_message(ws, raw, matched_path, route)
+            normal_close = True
         except ConnectionClosedError:
             logger.info("[App] WebSocket connection closed: channel=%s", route.channel_id)
         finally:
+            if normal_close:
+                logger.info(
+                    "[App] WebSocket connection closed (normal): channel=%s",
+                    route.channel_id,
+                )
             self._clients.discard(ws)
-            stale_request_ids = [request_id for request_id, client in self._request_to_client.items() if client is ws]
-            for request_id in stale_request_ids:
-                self._request_to_client.pop(request_id, None)
-            stale_session_keys = [key for key, client in self._session_to_client.items() if client is ws]
+            stale_request_keys = [
+                key for key, client in self._request_to_client.items() if client is ws
+            ]
+            for request_key in stale_request_keys:
+                self._request_to_client.pop(request_key, None)
+            stale_session_keys = [
+                key for key, client in self._session_to_client.items() if client is ws
+            ]
             for session_key in stale_session_keys:
                 self._session_to_client.pop(session_key, None)
             if route.disconnect_handler is not None:
                 try:
-                    result = route.disconnect_handler(ws, stale_session_keys)
+                    # Pass stale_request_keys so the handler can recover session_ids
+                    # via in-flight stream bookkeeping even when _session_to_client
+                    # was overwritten by a subsequent reconnect on the same session.
+                    result = route.disconnect_handler(
+                        ws, stale_session_keys, stale_request_keys,
+                    )
                     if asyncio.iscoroutine(result):
                         await result
                 except Exception:
@@ -821,18 +840,25 @@ async def _run(
     max_retries = int(os.getenv("AGENT_CONNECT_RETRY", "20"))
     retry_interval = float(os.getenv("AGENT_CONNECT_RETRY_INTERVAL", "3"))
 
+    # 从扩展注册表获取 AgentServerClient
     agent_server_ext = extension_registry.get_agent_server_client_extension()
     if agent_server_ext is not None:
         logger.info("[App] using extension AgentServerClient: %s", agent_server_ext.metadata.name)
         client = agent_server_ext.get_client()
     else:
         client = WebSocketAgentServerClient(ping_interval=20.0, ping_timeout=600.0)
-    await _connect_with_retry(
-        client,
-        agent_server_url,
-        max_retries=max_retries,
-        interval=retry_interval,
-    )
+
+    # 如果是 WebSocket 客户端，需要连接；如果是 YuanrongFrontendAgentClient，无需连接
+    if isinstance(client, WebSocketAgentServerClient):
+        await _connect_with_retry(
+            client,
+            agent_server_url,
+            max_retries=max_retries,
+            interval=retry_interval,
+        )
+    else:
+        # YuanrongFrontendAgentClient 是 HTTP 客户端，无需连接
+        await client.connect("")
 
     message_handler = MessageHandler(client)
     await message_handler.start_forwarding()

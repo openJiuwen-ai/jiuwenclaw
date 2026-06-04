@@ -19,9 +19,8 @@ class ConfigValidator:
     """Validates git and gitcode configuration for scheduled tasks.
 
     Required fields:
-        - git.user_name: Git commit username
+        - git.user_name: Git commit username (同时设置 fork_owner 和 gitcode.username)
         - git.user_email: Git commit email
-        - git.fork_owner: Fork repository owner
         - gitcode.access_token: GitCode API token (optional, can use env var)
     """
 
@@ -29,21 +28,19 @@ class ConfigValidator:
         {
             "id": "git.user_name",
             "key": "user_name",
-            "prompt": "请输入 git 用户名（用于 commit）",
+            "prompt": "请输入用户名（用于 git commit、创建 PR、GitCode 登录）",
             "section": "git",
             "optional": False,
+            # 合并标记：此字段值同时设置 fork_owner 和 gitcode.username
+            "also_set": [
+                {"section": "git", "key": "fork_owner"},
+                {"section": "gitcode", "key": "username"},
+            ],
         },
         {
             "id": "git.user_email",
             "key": "user_email",
             "prompt": "请输入 git 邮箱（用于 commit）",
-            "section": "git",
-            "optional": False,
-        },
-        {
-            "id": "git.fork_owner",
-            "key": "fork_owner",
-            "prompt": "请输入 fork 仓库所有者（如 'SnapeK'）",
             "section": "git",
             "optional": False,
         },
@@ -114,6 +111,20 @@ class ConfigValidator:
             if not value:
                 missing.append(field)
 
+        # For merged user_name field, also check if fork_owner/gitcode.username exist
+        # (they may have been set before the merge, so treat as valid if present)
+        user_name_missing = any(f["id"] == "git.user_name" for f in missing)
+        if user_name_missing:
+            # Check if fork_owner or gitcode.username exist as fallback
+            fork_owner = self._get_config_value("git", "fork_owner")
+            gitcode_username = self._get_config_value("gitcode", "username")
+            if fork_owner or gitcode_username:
+                # Remove user_name from missing - we can use existing values
+                missing = [f for f in missing if f["id"] != "git.user_name"]
+                logger.info(
+                    "[ConfigValidator] git.user_name missing but fork_owner/gitcode.username exists, treating as valid"
+                )
+
         return {
             "valid": len(missing) == 0,
             "missing_fields": missing,
@@ -125,7 +136,7 @@ class ConfigValidator:
 
         Args:
             fields: Dict mapping field_id to user-provided value
-                e.g., {"git.user_name": "SnapeK"}
+                e.g., {"git.user_name": "auto-harness"}
 
         Returns:
             {"success": bool, "updated_fields": list}
@@ -145,6 +156,19 @@ class ConfigValidator:
 
                     config[section][key] = value
                     updated.append(field_id)
+
+                    # Handle also_set: propagate value to related fields
+                    also_set = field_def.get("also_set", [])
+                    for target in also_set:
+                        target_section = target["section"]
+                        target_key = target["key"]
+                        if target_section not in config:
+                            config[target_section] = {}
+                        config[target_section][target_key] = value
+                        logger.info(
+                            "[ConfigValidator] Also set %s.%s = %s",
+                            target_section, target_key, value,
+                        )
                     break
 
         self._save_config_yaml(config)

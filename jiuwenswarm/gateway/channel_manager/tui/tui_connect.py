@@ -18,6 +18,7 @@ from openjiuwen.core.foundation.llm.schema.config import (
     ModelClientConfig,
     ModelRequestConfig,
 )
+from openjiuwen.auto_harness.schema import load_auto_harness_config
 
 from jiuwenswarm.common.config import (
     get_config,
@@ -41,6 +42,7 @@ from jiuwenswarm.common.utils import get_user_workspace_dir
 logger = logging.getLogger(__name__)
 
 # Auto-Harness config file path
+_DEFAULT_REPO_URL = "https://gitcode.com/openJiuwen/agent-core.git"
 _AUTO_HARNESS_CONFIG_DIR = get_user_workspace_dir() / "auto-harness"
 _AUTO_HARNESS_CONFIG_FILE = _AUTO_HARNESS_CONFIG_DIR / "config.yaml"
 _AUTO_HARNESS_LOCAL_REPO = _AUTO_HARNESS_CONFIG_DIR / "repo" / "openJiuwen--agent-core"
@@ -54,32 +56,51 @@ def _get_auto_harness_config() -> dict[str, Any]:
     """Load auto-harness config.yaml with auto-fill for ci_gate defaults."""
     config: dict[str, Any] = {}
 
-    if _AUTO_HARNESS_CONFIG_FILE.exists():
-        try:
-            config = yaml.safe_load(_AUTO_HARNESS_CONFIG_FILE.read_text(encoding="utf-8")) or {}
-        except Exception as e:
-            logger.warning("[auto-harness config] Failed to load: %s", e)
-            config = {}
+    if not _AUTO_HARNESS_CONFIG_FILE.exists():
+        load_auto_harness_config(str(_AUTO_HARNESS_CONFIG_FILE))
+
+    try:
+        config = yaml.safe_load(_AUTO_HARNESS_CONFIG_FILE.read_text(encoding="utf-8")) or {}
+    except Exception as e:
+        logger.warning("[auto-harness config] Failed to load: %s", e)
+        config = {}
 
     # Auto-fill ci_gate defaults if missing
     ci_gate = config.get("ci_gate") or {}
+    git_config = config.get("git") or {}
     needs_save = False
+
+    git_remote = git_config.get("remote")
+    if not git_remote:
+        git_config["remote"] = "autoharness"
 
     # Ensure local_repo is a string (not Path object which causes YAML serialization issues)
     local_repo = config.get("local_repo")
+    repo_url = config.get("repo_url")
     if not local_repo:
         config["local_repo"] = str(_AUTO_HARNESS_LOCAL_REPO)
         needs_save = True
+
+    if not repo_url:
+        config["repo_url"] = str(_DEFAULT_REPO_URL)
+        needs_save = True
+
     elif hasattr(local_repo, "__fspath__"):  # Path-like object
         config["local_repo"] = str(local_repo)
         needs_save = True
 
     if not ci_gate.get("python_executable"):
-        ci_gate["python_executable"] = _DEFAULT_CI_GATE_PYTHON_EXECUTABLE
+        ci_gate["python_executable"] = str(_DEFAULT_CI_GATE_PYTHON_EXECUTABLE)
         needs_save = True
 
     if not ci_gate.get("install_command"):
         ci_gate["install_command"] = _DEFAULT_CI_GATE_INSTALL_COMMAND
+        needs_save = True
+
+    budget = config.get("budget", {})
+    max_tasks_per_session = budget.get("max_tasks_per_session", 5)
+    if max_tasks_per_session > 5:
+        budget["max_tasks_per_session"] = 5
         needs_save = True
 
     if needs_save:
@@ -101,11 +122,19 @@ def _save_auto_harness_config(config: dict[str, Any]) -> None:
 
 
 def _update_auto_harness_git_user_name(value: str) -> None:
-    """Update git.user_name in auto-harness config."""
+    """Update git.user_name, fork_owner, and gitcode.username in auto-harness config.
+    - git.user_name: 用于 git commit
+    - git.fork_owner: 用于创建 PR
+    - gitcode.username: GitCode 登录用户名
+    """
     config = _get_auto_harness_config()
     if "git" not in config:
         config["git"] = {}
     config["git"]["user_name"] = value
+    config["git"]["fork_owner"] = value  # 合并：用户名同时作为 fork_owner
+    if "gitcode" not in config:
+        config["gitcode"] = {}
+    config["gitcode"]["username"] = value  # 合并：用户名同时作为 gitcode.username
     _save_auto_harness_config(config)
 
 
@@ -118,39 +147,12 @@ def _update_auto_harness_git_user_email(value: str) -> None:
     _save_auto_harness_config(config)
 
 
-def _update_auto_harness_git_fork_owner(value: str) -> None:
-    """Update git.fork_owner in auto-harness config."""
-    config = _get_auto_harness_config()
-    if "git" not in config:
-        config["git"] = {}
-    config["git"]["fork_owner"] = value
-    _save_auto_harness_config(config)
-
-
-def _update_auto_harness_git_remote(value: str) -> None:
-    """Update git.remote in auto-harness config."""
-    config = _get_auto_harness_config()
-    if "git" not in config:
-        config["git"] = {}
-    config["git"]["remote"] = value
-    _save_auto_harness_config(config)
-
-
 def _update_auto_harness_gitcode_access_token(value: str) -> None:
     """Update gitcode.access_token in auto-harness config."""
     config = _get_auto_harness_config()
     if "gitcode" not in config:
         config["gitcode"] = {}
     config["gitcode"]["access_token"] = value
-    _save_auto_harness_config(config)
-
-
-def _update_auto_harness_gitcode_username(value: str) -> None:
-    """Update gitcode.username in auto-harness config."""
-    config = _get_auto_harness_config()
-    if "gitcode" not in config:
-        config["gitcode"] = {}
-    config["gitcode"]["username"] = value
     _save_auto_harness_config(config)
 
 # ── 需要转发到 Agent 的方法集合 ──────────────────────────────
@@ -178,6 +180,7 @@ CLI_FORWARD_REQ_METHODS = frozenset(
         "skills.list",
         "skills.installed",
         "skills.get",
+        "skills.toggle",
         "skills.install",
         "skills.import_local",
         "skills.marketplace.add",
@@ -203,6 +206,12 @@ CLI_FORWARD_REQ_METHODS = frozenset(
         "skills.evolution.status",
         "skills.evolution.get",
         "skills.evolution.save",
+        "plugins.list",
+        "plugins.install",
+        "plugins.uninstall",
+        "plugins.enable",
+        "plugins.disable",
+        "plugins.reload",
         "permissions.tools.get",
         "permissions.tools.update",
         "permissions.rules.get",
@@ -213,6 +222,15 @@ CLI_FORWARD_REQ_METHODS = frozenset(
         "extensions.delete",
         "extensions.toggle",
         "session.fork",
+        # Agent configuration
+        "agents.list",
+        "agents.get",
+        "agents.create",
+        "agents.update",
+        "agents.delete",
+        "agents.enable",
+        "agents.disable",
+        "agents.tools_list",
         # Schedule task management
         "schedule.check_config",
         "schedule.update_config",
@@ -244,6 +262,7 @@ CLI_FORWARD_NO_LOCAL_HANDLER_METHODS = frozenset(
         "skills.list",
         "skills.installed",
         "skills.get",
+        "skills.toggle",
         "skills.install",
         "skills.import_local",
         "skills.marketplace.add",
@@ -269,6 +288,12 @@ CLI_FORWARD_NO_LOCAL_HANDLER_METHODS = frozenset(
         "skills.evolution.status",
         "skills.evolution.get",
         "skills.evolution.save",
+        "plugins.list",
+        "plugins.install",
+        "plugins.uninstall",
+        "plugins.enable",
+        "plugins.disable",
+        "plugins.reload",
         "permissions.tools.get",
         "permissions.tools.update",
         "permissions.rules.get",
@@ -279,6 +304,15 @@ CLI_FORWARD_NO_LOCAL_HANDLER_METHODS = frozenset(
         "extensions.delete",
         "extensions.toggle",
         "session.fork",
+        # Agent configuration
+        "agents.list",
+        "agents.get",
+        "agents.create",
+        "agents.update",
+        "agents.delete",
+        "agents.enable",
+        "agents.disable",
+        "agents.tools_list",
         # Schedule task management
         "schedule.check_config",
         "schedule.update_config",
@@ -364,12 +398,10 @@ _CLI_CONFIG_YAML_SETTERS: dict[str, Any] = {
     "memory_forbidden_enabled": update_memory_forbidden_enabled_in_config,
     "preferred_language": update_preferred_language_in_config,
     # Auto-Harness config items (stored in ~/.jiuwenswarm/auto-harness/config.yaml)
+    # 用户名同时设置 git.user_name, fork_owner, gitcode.username（三者合一）
     "auto_harness_git_user_name": _update_auto_harness_git_user_name,
     "auto_harness_git_user_email": _update_auto_harness_git_user_email,
-    "auto_harness_git_fork_owner": _update_auto_harness_git_fork_owner,
-    "auto_harness_git_remote": _update_auto_harness_git_remote,
     "auto_harness_gitcode_access_token": _update_auto_harness_gitcode_access_token,
-    "auto_harness_gitcode_username": _update_auto_harness_gitcode_username,
 }
 
 _CLI_CONFIG_YAML_KEYS = frozenset(_CLI_CONFIG_YAML_SETTERS.keys())
@@ -470,6 +502,16 @@ def _build_config_schema() -> list[dict]:
          "options": ["zh", "en"], "source": "yaml", "default": "zh"},
         {"key": "evolution_auto_scan", "label": "自动扫描技能", "group": "Features",
          "type": "toggle", "source": "env", "default": "false"},
+        # Auto-Harness (定时任务配置) - 合并为三项
+        {"key": "auto_harness_git_user_name", "label": "用户名", "group": "Auto-Harness",
+         "type": "string", "source": "yaml", "default": empty,
+         "description": "GitCode用户名，用于 git commit、创建 PR"},
+        {"key": "auto_harness_git_user_email", "label": "邮箱", "group": "Auto-Harness",
+         "type": "string", "source": "yaml", "default": empty,
+         "description": "GitCode用户邮箱，用于 git commit"},
+        {"key": "auto_harness_gitcode_access_token", "label": "GitCode Access Token", "group": "Auto-Harness",
+         "type": "password", "sensitive": True, "source": "yaml", "default": empty,
+         "description": "GitCode Access token，也可通过环境变量 GITCODE_ACCESS_TOKEN 配置"},
     ]
 
 
@@ -656,6 +698,22 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
             payload.setdefault("permissions_enabled", "false")
             payload.setdefault("memory_forbidden_enabled", "false")
             payload.setdefault("preferred_language", "zh")
+        
+        # Auto-Harness config values (from ~/.jiuwenclaw/auto-harness/config.yaml)
+        # 合并显示：用户名、邮箱、Access Token 三项
+        try:
+            ah_config = _get_auto_harness_config()
+            git_cfg = ah_config.get("git") or {}
+            gitcode_cfg = ah_config.get("gitcode") or {}
+            payload["auto_harness_git_user_name"] = git_cfg.get("user_name") or ""
+            payload["auto_harness_git_user_email"] = git_cfg.get("user_email") or ""
+            # Check env var first for access_token
+            ah_token = os.getenv("GITCODE_ACCESS_TOKEN") or gitcode_cfg.get("access_token") or ""
+            payload["auto_harness_gitcode_access_token"] = ah_token
+        except Exception:
+            payload.setdefault("auto_harness_git_user_name", "")
+            payload.setdefault("auto_harness_git_user_email", "")
+            payload.setdefault("auto_harness_gitcode_access_token", "")
 
         payload["schema"] = _build_config_schema()
         await channel.send_response(ws, req_id, ok=True, payload=payload)
@@ -966,6 +1024,10 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
             title=str(params.get("title") or "").strip(),
             mode=params.get("mode", "code.normal"),
         )
+        # 触发 SessionStart hook
+        mh = bind.message_handler
+        if mh:
+            mh.trigger_session_start_hook(target, source="tui")
         await channel.send_response(ws, req_id, ok=True, payload={"session_id": target})
 
     async def _session_delete(ws, req_id, params, session_id):
@@ -1324,6 +1386,54 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
                 code=code,
             )
 
+    async def _session_color_set(ws, req_id, params, session_id):
+        """设置 session 的 accent_color。"""
+        from jiuwenswarm.server.runtime.session.session_metadata import (
+            get_session_metadata,
+            _write_metadata_sync,
+            _read_metadata,
+        )
+
+        if not isinstance(params, dict):
+            await channel.send_response(
+                ws, req_id, ok=False, error="params must be object", code="BAD_REQUEST"
+            )
+            return
+        target = str(params.get("session_id") or session_id).strip()
+        if not target:
+            await channel.send_response(
+                ws, req_id, ok=False, error="session_id is required", code="BAD_REQUEST"
+            )
+            return
+
+        color = params.get("color")
+        valid_colors = ["default", "blue", "green", "pink", "purple", "red", "yellow"]
+
+        if color is None:
+            # 查询模式
+            metadata = get_session_metadata(target)
+            accent_color = metadata.get("accent_color", "default") if metadata else "default"
+            await channel.send_response(
+                ws, req_id, ok=True,
+                payload={"session_id": target, "accent_color": accent_color}
+            )
+            return
+
+        if str(color) not in valid_colors:
+            await channel.send_response(
+                ws, req_id, ok=False, error=f"invalid color: {color}", code="BAD_REQUEST"
+            )
+            return
+
+        # 设置模式 - 同步写入确保跨进程可见
+        metadata = _read_metadata(target)
+        metadata["accent_color"] = str(color)
+        _write_metadata_sync(target, metadata)
+        await channel.send_response(
+            ws, req_id, ok=True,
+            payload={"session_id": target, "accent_color": str(color)}
+        )
+
     async def _chat_send(ws, req_id, params, session_id):
         await channel.send_response(
             ws, req_id, ok=True, payload={"accepted": True, "session_id": session_id}
@@ -1681,13 +1791,22 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
             for entry in models:
                 mcc = entry.get("model_client_config", {})
                 mco = entry.get("model_config_obj", {})
+                model_name = mcc.get("model_name", "")
+                # 解析模型的上下文窗口大小
+                context_window_tokens = 0
+                try:
+                    from openjiuwen.core.context_engine.context.context_utils import ContextUtils
+                    context_window_tokens = ContextUtils.resolve_context_max(model_name=model_name)
+                except Exception:
+                    logger.debug("Failed to resolve context_window_tokens for model %s", model_name, exc_info=True)
                 result.append({
-                    "model_name": mcc.get("model_name", ""),
+                    "model_name": model_name,
                     "api_base": mcc.get("api_base", ""),
                     "api_key": mcc.get("api_key", ""),
                     "model_provider": mcc.get("client_provider", ""),
                     "temperature": mco.get("temperature", 0.95),
                     "alias": entry.get("alias", ""),
+                    "context_window_tokens": context_window_tokens,
                 })
             active_model = result[0]["model_name"] if result else ""
             await channel.send_response(ws, req_id, ok=True, payload={
@@ -1706,6 +1825,7 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
     channel.register_local_handler(path, "session.create", _session_create)
     channel.register_local_handler(path, "session.delete", _session_delete)
     channel.register_local_handler(path, "session.rename", _session_rename)
+    channel.register_local_handler(path, "session.color_set", _session_color_set)
     channel.register_local_handler(path, "session.rewind", _session_rewind)
     channel.register_local_handler(path, "session.rewind_and_restore", _session_rewind_and_restore)
     channel.register_local_handler(path, "session.restore_files", _session_restore_files)
@@ -1716,6 +1836,23 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
     channel.register_local_handler(path, "chat.user_answer", _chat_user_answer)
     channel.register_local_handler(path, "history.get", _history_get)
     channel.register_local_handler(path, "command.model", _command_model)
+
+    # ── Hooks RPC handlers ─────────────────────────────────────────────
+    async def _hooks_list(ws, req_id, params, session_id):
+        from jiuwenswarm.common.hooks_config import load_hooks_config
+        try:
+            hooks_config = load_hooks_config(get_config())
+            summary = hooks_config.get_event_summary()
+            await channel.send_response(ws, req_id, ok=True,
+                                        payload={
+                                            "events": summary,
+                                            "disable_all_hooks": hooks_config.disable_all_hooks,
+                                            "source": "config.yaml",
+                                        })
+        except Exception as exc:
+            await channel.send_response(ws, req_id, ok=False, error=str(exc), code="INTERNAL_ERROR")
+
+    channel.register_local_handler(path, "hooks.list", _hooks_list)
 
     # ── Memory RPC handlers ────────────────────────────────────────────
     from jiuwenswarm.agents.harness.common.memory_rpc import (
@@ -1728,6 +1865,9 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
     from jiuwenswarm.common.utils import get_agent_workspace_dir
 
     def _resolve_project_dir(params):
+        project_dir = params.get("project_dir")
+        if isinstance(project_dir, str) and project_dir:
+            return project_dir
         trusted_dirs = params.get("trusted_dirs")
         if isinstance(trusted_dirs, list) and trusted_dirs:
             return str(trusted_dirs[0])
@@ -1999,11 +2139,24 @@ def build_cli_route_binding(bind: CliRouteBindParams) -> GatewayRouteBinding:
             )
         )
 
-    async def _tui_disconnect(_ws: Any, stale_session_keys: list[tuple[str, str]]) -> None:
+    async def _tui_disconnect(
+        _ws: Any,
+        stale_session_keys: list[tuple[str, str]],
+        stale_request_keys: list[tuple[str, str]] | None = None,
+    ) -> None:
         mh = bind.message_handler
-        if mh is None or not stale_session_keys:
+        if mh is None:
             return
-        await mh.cancel_agent_sessions_on_disconnect(stale_session_keys)
+        # NOTE: do not early-return on empty stale_session_keys; in-flight streams
+        # may still be tracked under stale_request_keys even when _session_to_client
+        # was overwritten by a later reconnect on the same session_id.
+        request_keys = stale_request_keys or []
+        if not stale_session_keys and not request_keys:
+            return
+        await mh.cancel_agent_sessions_on_disconnect(
+            stale_session_keys,
+            stale_request_keys=request_keys,
+        )
 
     return GatewayRouteBinding(
         path=bind.path,

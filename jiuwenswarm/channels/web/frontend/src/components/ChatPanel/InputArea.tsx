@@ -1,5 +1,6 @@
 import { useState, useRef, useCallback, KeyboardEvent, useEffect } from 'react';
 import { useTranslation } from 'react-i18next';
+import { Square } from 'lucide-react';
 import { useSpeechRecognition } from '../../hooks';
 
 // import { stopAllTts } from '../../utils';
@@ -13,6 +14,7 @@ import sendActiveIcon from '../../assets/send_active.svg';
 interface InputAreaProps {
   onSubmit: (content: string) => void;
   onInterrupt: (newInput?: string) => void;
+  onCancel: () => void;
   onSwitchMode: (mode: AgentMode) => void;
   isProcessing: boolean;
   onNewSession: () => Promise<void>;
@@ -32,6 +34,7 @@ function ClusterIcon({ className }: { className?: string }) {
 export function InputArea({
   onSubmit,
   onInterrupt,
+  onCancel,
   onSwitchMode,
   isProcessing,
   onNewSession,
@@ -184,6 +187,20 @@ export function InputArea({
     }
   }, [inputValue, pendingVoiceText, isInterruptible, isListening, onSubmit, onInterrupt, stopListening, isAgentMode, isTeamMode, addToTaskQueue, setInputValue]);
 
+  const trimmedDraft = (inputValue + pendingVoiceText).trim();
+  const hasDraft = trimmedDraft.length > 0 || isListening;
+  const showStop = isProcessing && !isPaused && !hasDraft;
+  const canSubmit = hasDraft || showStop;
+
+  const handleSendButtonClick = useCallback(() => {
+    if (showStop) {
+      onCancel();
+      return;
+    }
+
+    handleSubmit();
+  }, [handleSubmit, showStop, onCancel]);
+
   const handleKeyDown = useCallback(
     (e: KeyboardEvent<HTMLTextAreaElement>) => {
       if (e.key !== 'Enter' || e.shiftKey) return;
@@ -303,7 +320,6 @@ export function InputArea({
     ? inputValue + pendingVoiceText + interimTranscript
     : inputValue + pendingVoiceText;
 
-  const canSend = inputValue.trim().length > 0 || isListening;
   const currentMode = modes.find((item) => item.value === mode) ?? modes[0];
   const evolutionLabel = getEvolutionPillLabel(mode, evolutionStatus, t);
 
@@ -495,21 +511,26 @@ export function InputArea({
 
           <button
             type="button"
-            onClick={handleSubmit}
-            disabled={!canSend}
+            onClick={handleSendButtonClick}
+            disabled={!canSubmit}
             className={cx(
               'chat-input-btn chat-input-btn--send',
-              canSend ? 'chat-input-btn--send-active' : 'chat-input-btn--disabled',
+              showStop && 'chat-input-btn--stop',
+              canSubmit ? 'chat-input-btn--send-active' : 'chat-input-btn--disabled',
             )}
-            title={t('chat.send')}
+            title={showStop ? t('chat.stop') : t('chat.send')}
             data-testid="chat-send"
           >
-            <img
-              className="chat-input-btn-icon chat-input-btn-icon--image"
-              src={canSend ? sendActiveIcon : sendIcon}
-              alt=""
-              aria-hidden="true"
-            />
+            {showStop ? (
+              <Square className="chat-input-btn-icon" fill="currentColor" strokeWidth={1.8} aria-hidden="true" />
+            ) : (
+              <img
+                className="chat-input-btn-icon chat-input-btn-icon--image"
+                src={canSubmit ? sendActiveIcon : sendIcon}
+                alt=""
+                aria-hidden="true"
+              />
+            )}
           </button>
         </div>
       </div>

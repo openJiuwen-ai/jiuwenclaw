@@ -4,16 +4,20 @@
  * 聊天面板，包含消息列表和输入区域
  */
 
-import React, { useRef, useEffect, useLayoutEffect, useCallback } from 'react';
+import React, { useRef, useEffect, useLayoutEffect, useCallback, useMemo } from 'react';
+import { ArrowRight, Sparkles } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
-import { useChatStore } from '../../stores';
-import { AgentMode, UserAnswer } from '../../types';
+import { useChatStore, useSessionStore, useTodoStore } from '../../stores';
+import { AgentMode, Message, UserAnswer } from '../../types';
 import { MessageList } from './MessageList';
+import { ContextCompressionLines } from './MessageItem';
 import { InputArea } from './InputArea';
 import { SubtaskProgress } from './SubtaskProgress';
 import { InlineQuestionCard } from './InlineQuestionCard';
 import { HistoryPagerBar } from './HistoryPagerBar';
 import { HarnessProgressBar } from './HarnessProgressBar';
+import { AgentTeamActivityCard } from './TeamEventGroupDisplay';
+import { isTeamActivityMessage, parseTeamEventMessage } from './teamEventUtils';
 import './ChatPanel.css';
 
 export interface ChatHistoryPagerProps {
@@ -26,6 +30,7 @@ export interface ChatHistoryPagerProps {
 interface ChatPanelProps {
   onSendMessage: (content: string) => void;
   onInterrupt: (newInput?: string) => void;
+  onCancel: () => void;
   onSwitchMode: (mode: AgentMode) => void;
   isProcessing: boolean;
   onNewSession: () => Promise<void>;
@@ -48,19 +53,98 @@ function ThinkingIndicator() {
   );
 }
 
-
 function SuggestionCard({ text, onClick }: { text: string; onClick: () => void }) {
   return (
     <button className="chat-suggestion-card" onClick={onClick}>
-      <svg className="chat-suggestion-card__icon" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2}>
-        <path strokeLinecap="round" strokeLinejoin="round" d="M9.813 15.904L9 18.75l-.813-2.846a4.5 4.5 0 00-3.09-3.09L2.25 12l2.846-.813a4.5 4.5 0 003.09-3.09L9 5.25l.813 2.846a4.5 4.5 0 003.09 3.09L15.75 12l-2.846.813a4.5 4.5 0 00-3.09 3.09z" />
-      </svg>
+      <Sparkles className="chat-suggestion-card__icon" strokeWidth={2} />
       <span className="chat-suggestion-card__text">{text}</span>
-      <svg className="chat-suggestion-card__arrow" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2}>
-        <path strokeLinecap="round" strokeLinejoin="round" d="M13.5 4.5L21 12m0 0l-7.5 7.5M21 12H3" />
-      </svg>
+      <ArrowRight className="chat-suggestion-card__arrow" strokeWidth={2} />
     </button>
   );
+}
+
+function InterruptResultBubble() {
+  const { interruptResult } = useChatStore();
+  const message = interruptResult?.message?.trim();
+
+  if (!message || interruptResult?.success) {
+    return null;
+  }
+
+  return (
+    <div
+      className="chat-interrupt-bubble chat-interrupt-bubble--error"
+      role="alert"
+    >
+      {message}
+    </div>
+  );
+}
+
+function ActiveTeamGroupEntry({ isProcessing }: { isProcessing: boolean }) {
+  const { messages } = useChatStore();
+  const {
+    mode,
+    teamHistoryMessages,
+    teamMemberExecutionEvents,
+    teamTaskEvents,
+    teamTasks,
+  } = useSessionStore();
+  const { todos } = useTodoStore();
+  const activeTeamMessages = useMemo(
+    () => getActiveTeamMessages(teamHistoryMessages, messages),
+    [teamHistoryMessages, messages]
+  );
+  const hasTeamActivity = activeTeamMessages.length > 0
+    || teamTasks.length > 0
+    || teamTaskEvents.length > 0
+    || todos.some((todo) => Boolean(todo.claimedBy))
+    || teamMemberExecutionEvents.length > 0;
+
+  if (mode !== 'team' || !hasTeamActivity) {
+    return null;
+  }
+
+  return (
+    <AgentTeamActivityCard
+      messages={activeTeamMessages}
+      isProcessing={isProcessing}
+      tasks={teamTasks}
+      taskEvents={teamTaskEvents}
+      todos={todos}
+      executionEvents={teamMemberExecutionEvents}
+    />
+  );
+}
+
+function getActiveTeamMessages(historyMessages: Message[], messages: Message[]): Message[] {
+  const seen = new Set<string>();
+  return [...historyMessages, ...messages]
+    .filter(isTeamActivityMessage)
+    .filter((message) => {
+      const key = getTeamMessageIdentity(message);
+      if (seen.has(key)) {
+        return false;
+      }
+      seen.add(key);
+      return true;
+    });
+}
+
+function getTeamMessageIdentity(message: Message): string {
+  const event = parseTeamEventMessage(message);
+  if (!event) {
+    return message.id || `${message.timestamp}:${message.content}`;
+  }
+  return [
+    'team',
+    event.type,
+    event.messageId,
+    event.fromMember,
+    event.toMember || '',
+    event.timestamp || '',
+    event.content,
+  ].join(':');
 }
 
 function WelcomeHeading() {
@@ -86,6 +170,7 @@ function WelcomeHeading() {
 export function ChatPanel({
   onSendMessage,
   onInterrupt,
+  onCancel,
   onSwitchMode,
   isProcessing,
   onNewSession,
@@ -93,7 +178,14 @@ export function ChatPanel({
   historyPager = null,
 }: ChatPanelProps) {
   const { t } = useTranslation();
-  const { messages, isThinking, toolExecutionOrder } = useChatStore();
+  const {
+    messages,
+    isThinking,
+    toolExecutionOrder,
+    contextCompressionRuntime,
+    contextCompressionSummary,
+  } = useChatStore();
+  const { mode } = useSessionStore();
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const scrollContainerRef = useRef<HTMLDivElement>(null);
   const prependScrollSnapRef = useRef<{ sh: number; st: number } | null>(null);
@@ -101,6 +193,10 @@ export function ChatPanel({
   const suppressNextScrollToEndRef = useRef(false);
   const [isSending, setIsSending] = React.useState(false);
   const hasTimelineContent = messages.length > 0 || toolExecutionOrder.length > 0;
+  const hasConversation = Boolean(historyPager || hasTimelineContent);
+  const chatContentClassName = hasConversation
+    ? `chat-content${mode === 'team' ? ' chat-content--team' : ''}`
+    : 'chat-content chat-content--welcome';
   const suggestions = [
     t('chat.welcomeSuggestions.journey'),
     t('chat.welcomeSuggestions.skills'),
@@ -148,7 +244,7 @@ export function ChatPanel({
         behavior: historyPager?.loadedPages === 1 ? 'auto' : 'smooth',
       });
     }
-  }, [messages, isThinking, historyPager]);
+  }, [messages, isThinking, contextCompressionRuntime, contextCompressionSummary, historyPager]);
 
   useLayoutEffect(() => {
     if (!historyPager) {
@@ -198,8 +294,6 @@ export function ChatPanel({
     (text: string) => handleSendMessage(text),
     [handleSendMessage],
   );
-  const hasConversation = Boolean(historyPager || hasTimelineContent);
-
   return (
     <div className="chat-panel-shell flex flex-col h-full" data-testid="chat-panel">
       {/* HarnessProgressBar - sticky header, doesn't scroll with messages */}
@@ -207,7 +301,7 @@ export function ChatPanel({
         <HarnessProgressBar />
       </div>
       <div ref={scrollContainerRef} className="chat-scroll flex-1 overflow-y-auto" onScroll={handleScroll} onWheel={handleWheel}>
-        <div className={hasConversation ? 'chat-content' : 'chat-content chat-content--welcome'}>
+        <div className={chatContentClassName}>
           {hasConversation ? (
             <>
               {historyPager && (
@@ -226,6 +320,10 @@ export function ChatPanel({
                   <InlineQuestionCard onSubmit={onUserAnswer} />
                   {/* 思考中指示器 */}
                   {isThinking && <ThinkingIndicator />}
+                  <ContextCompressionLines
+                    runtime={contextCompressionRuntime}
+                    summary={contextCompressionSummary}
+                  />
                 </>
               ) : (
                 <div className="flex items-center justify-center h-32">
@@ -242,9 +340,12 @@ export function ChatPanel({
                 {t('chat.welcomeSubtext')}
               </p>
               <div className="chat-welcome__composer">
+                <ActiveTeamGroupEntry isProcessing={isProcessing} />
+                <InterruptResultBubble />
                 <InputArea
                   onSubmit={handleSendMessage}
                   onInterrupt={onInterrupt}
+                  onCancel={onCancel}
                   onSwitchMode={onSwitchMode}
                   isProcessing={isProcessing}
                   onNewSession={onNewSession}
@@ -263,9 +364,12 @@ export function ChatPanel({
 
       {hasConversation && (
         <div className="chat-compose">
+          <ActiveTeamGroupEntry isProcessing={isProcessing} />
+          <InterruptResultBubble />
           <InputArea
             onSubmit={handleSendMessage}
             onInterrupt={onInterrupt}
+            onCancel={onCancel}
             onSwitchMode={onSwitchMode}
             isProcessing={isProcessing}
             onNewSession={onNewSession}

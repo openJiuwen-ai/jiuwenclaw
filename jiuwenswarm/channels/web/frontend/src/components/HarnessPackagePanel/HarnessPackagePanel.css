@@ -489,3 +489,184 @@
   opacity: 0.5;
   cursor: not-allowed;
 }
+
+/* Deactivate Button */
+.harness-package-panel__deactivate-btn {
+  padding: 8px 20px;
+  font-size: 14px;
+  font-weight: 500;
+  border-radius: var(--radius-md);
+  border: 1px solid var(--warning);
+  background: var(--warning-subtle);
+  color: var(--warning);
+  cursor: pointer;
+  transition: all 0.2s;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.2);
+}
+
+.harness-package-panel__deactivate-btn:hover:not(:disabled) {
+  background: var(--warning);
+  color: var(--warning-foreground);
+  border-color: var(--warning);
+}
+
+.harness-package-panel__deactivate-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* Deactivate All Button */
+.harness-package-panel__deactivate-all-btn {
+  padding: 8px 16px;
+  font-size: 14px;
+  font-weight: 500;
+  border-radius: var(--radius-md);
+  border: 1px solid var(--border);
+  background: var(--bg-elevated);
+  color: var(--text);
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+.harness-package-panel__deactivate-all-btn:hover:not(:disabled) {
+  background: var(--bg-hover);
+  border-color: var(--border-strong);
+}
+
+.harness-package-panel__deactivate-all-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* Package List */
+.harness-package-panel__list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px 20px;
+}
+
+.harness-package-panel__list-item {
+  display: flex;
+  align-items: center;
+  padding: 12px 16px;
+  background: var(--card);
+  border-radius: var(--radius-md);
+  border: 1px solid var(--border);
+  gap: 16px;
+  box-shadow: var(--shadow-sm), inset 0 1px 0 var(--card-highlight);
+}
+
+.harness-package-panel__list-item--native {
+  background: var(--bg-elevated);
+}
+
+.harness-package-panel__list-name {
+  flex: 1;
+  font-size: 14px;
+  color: var(--text);
+}
+
+.harness-package-panel__version-label {
+  font-size: 12px;
+  color: var(--muted);
+  margin-left: 8px;
+}
+
+.harness-package-panel__list-status {
+  display: flex;
+  align-items: center;
+}
+
+.harness-package-panel__status-badge {
+  padding: 4px 10px;
+  font-size: 12px;
+  border-radius: var(--radius-sm);
+  background: var(--bg-elevated);
+  color: var(--muted);
+  border: 1px solid var(--border);
+}
+
+.harness-package-panel__status-badge--active {
+  background: var(--ok-subtle);
+  color: var(--ok);
+  border-color: var(--border-ok);
+}
+
+.harness-package-panel__list-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.harness-package-panel__deactivate-btn {
+  padding: 6px 12px;
+  font-size: 12px;
+  border-radius: var(--radius-md);
+  border: 1px solid var(--border-warning);
+  background: var(--warning-subtle);
+  color: var(--warning);
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+.harness-package-panel__deactivate-btn:hover:not(:disabled) {
+  background: var(--warning);
+  color: var(--warning-foreground);
+  border-color: var(--warning);
+}
+
+.harness-package-panel__deactivate-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.harness-package-panel__delete-btn-small {
+  padding: 6px 12px;
+  font-size: 12px;
+  border-radius: var(--radius-md);
+  border: 1px solid var(--border-danger);
+  background: transparent;
+  color: var(--danger);
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+.harness-package-panel__delete-btn-small:hover:not(:disabled) {
+  background: var(--danger-subtle);
+  border-color: var(--danger);
+}
+
+.harness-package-panel__delete-btn-small:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* Tree Section */
+.harness-package-panel__tree-section {
+  display: flex;
+  flex-direction: column;
+  margin-top: 8px;
+  padding: 0 20px 16px 20px;
+  background: var(--card);
+  border-radius: var(--radius-md);
+  border: 1px solid var(--border);
+  overflow: hidden;
+  box-shadow: var(--shadow-sm), inset 0 1px 0 var(--card-highlight);
+}
+
+.harness-package-panel__tree-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--border);
+  font-size: 13px;
+  color: var(--text);
+}
+
+.harness-package-panel__tree-section .harness-package-panel__tree {
+  flex: 1;
+  overflow: auto;
+  padding: 8px;
+}

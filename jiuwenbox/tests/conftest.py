@@ -9,8 +9,6 @@ import pytest
 
 pytest_plugins = ["pytest_asyncio"]
 
-from jiuwenbox.models.policy import SecurityPolicy
-
 
 def pytest_addoption(parser):
     parser.addoption(
@@ -136,15 +134,6 @@ def server_host_port_session(pytestconfig):
 
 
 @pytest.fixture(scope="session")
-def proxy_port_session(pytestconfig):
-    """Session-scoped proxy port."""
-    return (
-        pytestconfig.getoption("proxy_port")
-        or int(os.environ.get("JIUWENBOX_PROXY_PORT", "8322"))
-    )
-
-
-@pytest.fixture(scope="session")
 def test_llm_endpoint(pytestconfig):
     """LLM endpoint URL for testing."""
     return (
@@ -176,9 +165,3 @@ def test_llm_model(pytestconfig):
 def llm_available(docker_gateway_ip):
     """Extract LLM availability from topology check result."""
     return docker_gateway_ip.get("llm_available", False)
-
-
-@pytest.fixture
-def policy() -> SecurityPolicy:
-    """Return the default policy."""
-    return SecurityPolicy()

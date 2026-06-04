@@ -299,8 +299,11 @@ def _build_commands(mode: str, dotenv_path: Path | None = None) -> list[tuple[st
 
 def _start_process(name: str, cmd: list[str], cwd: Path) -> subprocess.Popen[bytes]:
     """Start a single subprocess."""
+    import json
     print(f"[start_services] starting {name}: {' '.join(cmd)} (cwd={cwd})")
-    return subprocess.Popen(cmd, cwd=str(cwd))
+    env = os.environ.copy()
+    env["JIUWENSWARM_START_CMD"] = json.dumps(sys.argv[:])
+    return subprocess.Popen(cmd, cwd=str(cwd), env=env)
 
 
 def _terminate_processes(processes: dict[str, subprocess.Popen[bytes]]) -> None:

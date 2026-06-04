@@ -15,6 +15,8 @@ import {
   EvolutionStatusPayload,
   UsageSummary,
   FileDownloadItem,
+  ContextCompressionRuntime,
+  ContextCompressionSummary,
 } from '../types';
 import { useTodoStore } from './todoStore';
 
@@ -61,6 +63,7 @@ interface ChatState {
   pausedTask: string | null;  // 暂停的任务描述
   interruptResult: InterruptResultPayload | null;  // 最近的中断结果
   switchingMode: boolean;  // 是否正在切换模式
+  isNewSession: boolean;  // 是否刚创建新会话（跳过历史加载）
   currentStreamContent: string;
   currentStreamId: string | null;
   streamBuffers: Map<string, string>;
@@ -68,6 +71,8 @@ interface ChatState {
   toolExecutions: Map<string, ToolExecution>;
   toolExecutionOrder: string[];
   orphanResults: Map<string, ToolResult>;
+  contextCompressionRuntime?: ContextCompressionRuntime;
+  contextCompressionSummary?: ContextCompressionSummary;
   toolMetrics: {
     toolCallDedupDropped: number;
     toolResultDedupDropped: number;
@@ -92,6 +97,7 @@ interface ChatState {
   setPaused: (paused: boolean, task?: string | null) => void;
   setInterruptResult: (result: InterruptResultPayload | null) => void;
   setSwitchingMode: (switching: boolean) => void;
+  setNewSession: (isNew: boolean) => void;
   addToolCall: (toolCall: ToolCall, options?: { startedAt?: string }) => void;
   addToolResult: (toolResult: ToolResult, options?: { updatedAt?: string }) => void;
   markTimedOutExecutions: () => void;
@@ -112,6 +118,10 @@ interface ChatState {
   setUsageSummary: (messageId: string, usage: UsageSummary) => void;
   // File download items
   addFileItems: (files: FileDownloadItem[]) => void;
+  setContextCompressionStatus: (
+    runtime?: ContextCompressionRuntime,
+    summary?: ContextCompressionSummary
+  ) => void;
 }
 
 export const useChatStore = create<ChatState>((set, get) => ({
@@ -124,6 +134,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
   pausedTask: null,
   interruptResult: null,
   switchingMode: false,
+  isNewSession: false,
   currentStreamContent: '',
   currentStreamId: null,
   streamBuffers: new Map(),
@@ -131,6 +142,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
   toolExecutions: new Map(),
   toolExecutionOrder: [],
   orphanResults: new Map(),
+  contextCompressionRuntime: undefined,
+  contextCompressionSummary: undefined,
   toolMetrics: {
     toolCallDedupDropped: 0,
     toolResultDedupDropped: 0,
@@ -247,7 +260,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
   setSwitchingMode: (switching) => {
     // 切换模式时，同时重置所有相关状态
     if (switching) {
-      set({ 
+      set({
         switchingMode: true,
         isProcessing: false,
         isPaused: false,
@@ -257,6 +270,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
     } else {
       set({ switchingMode: false });
     }
+  },
+
+  setNewSession: (isNew) => {
+    set({ isNewSession: isNew });
   },
 
   addToolCall: (toolCall, options) => {
@@ -541,6 +558,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
       toolExecutions: new Map(),
       toolExecutionOrder: [],
       orphanResults: new Map(),
+      contextCompressionRuntime: undefined,
+      contextCompressionSummary: undefined,
       toolMetrics: {
         toolCallDedupDropped: 0,
         toolResultDedupDropped: 0,
@@ -618,5 +637,12 @@ export const useChatStore = create<ChatState>((set, get) => ({
           : msg
       ),
     }));
+  },
+
+  setContextCompressionStatus: (runtime, summary) => {
+    set({
+      contextCompressionRuntime: runtime,
+      contextCompressionSummary: summary,
+    });
   },
 }));

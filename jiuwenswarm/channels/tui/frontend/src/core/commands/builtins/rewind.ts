@@ -48,8 +48,15 @@ const RESET = "\x1b[0m";
 
 function toRelativePath(absPath: string, workspaceDir?: string): string {
   if (!workspaceDir) return absPath;
-  const prefix = workspaceDir.endsWith("/") ? workspaceDir : workspaceDir + "/";
-  if (absPath.startsWith(prefix)) return absPath.slice(prefix.length);
+  // Normalize separators to / for cross-platform comparison
+  const normAbs = absPath.replace(/\\/g, "/");
+  const normBase = workspaceDir.replace(/\\/g, "/");
+  const prefix = normBase.endsWith("/") ? normBase : normBase + "/";
+  if (normAbs.toLowerCase().startsWith(prefix.toLowerCase())) {
+    const rel = normAbs.slice(prefix.length);
+    // Preserve original separators from absPath for display
+    return absPath.slice(absPath.length - rel.length);
+  }
   return absPath;
 }
 
@@ -110,25 +117,26 @@ export function createRewindCommand(): SlashCommand {
         } else {
           const workspaceDir = ctx.getWorkspaceDir();
 
-          const turnOptions: { label: string; description: string }[] = [
+          const turnOptions: { label: string; description: string; details?: string[] }[] = [
             {
               label: "current",
               description: "Stay at current session (no change)",
             },
           ];
           for (const t of turns) {
-            let desc = t.content_preview;
+            const desc = t.content_preview;
+            const details: string[] = [];
             if (t.files && t.files.length > 0) {
-              const fileList = t.files
-                .map((f) => formatFileChange(f, workspaceDir))
-                .join(", ");
-              desc += `  [${fileList}]`;
+              for (const f of t.files) {
+                details.push(formatFileChange(f, workspaceDir));
+              }
             } else if (t.stats.filesChanged > 0) {
-              desc += `  [files: ${t.stats.filesChanged} +${t.stats.linesAdded}/-${t.stats.linesRemoved}]`;
+              details.push(`files: ${t.stats.filesChanged} +${t.stats.linesAdded}/-${t.stats.linesRemoved}`);
             }
             turnOptions.push({
               label: String(t.turn_index),
               description: desc,
+              details: details.length > 0 ? details : undefined,
             });
           }
 

@@ -369,6 +369,11 @@ def e2a_response_from_agent_chunk(
             "event_type": event_type,
             "source_chunk_type": sct,
         }
+        # Preserve team-member attribution fields for frontend display
+        for _key in ("role", "member_name"):
+            _val = pl.get(_key)
+            if _val is not None:
+                body_chunk[_key] = _val
     else:
         body_chunk = {
             "delta_kind": "custom",
@@ -504,6 +509,11 @@ def e2a_response_to_agent_chunk(e2a: E2AResponse) -> "AgentResponseChunk":
             }
             if sct is not None:
                 pl["source_chunk_type"] = sct
+            # Preserve team-member attribution fields for frontend display
+            for _key in ("role", "member_name"):
+                _val = body.get(_key)
+                if _val is not None:
+                    pl[_key] = _val
             return AgentResponseChunk(
                 request_id=rid,
                 channel_id=ch,

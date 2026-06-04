@@ -27,12 +27,14 @@ Runtime layout:
 内置模板位于包内 ``jiuwenswarm/resources/``（含 ``agent/`` 下各技能模板以及 ``skills_state.json``）。
 """
 
+import ctypes
 import json
 import os
 import re
 import sys
 import datetime
 import shutil
+import socket
 import time
 from pathlib import Path
 from dataclasses import dataclass
@@ -43,6 +45,120 @@ from ruamel.yaml import YAML
 
 _LOG_FILE_MAX_BYTES = 20 * 1024 * 1024
 _LOG_FILE_BACKUP_COUNT = 20
+
+
+@dataclass
+class CopyDiffResult:
+    """Result of copy operation with diff tracking."""
+    added_dirs: list[str]
+    added_files: list[str]
+    overwritten_files: list[str]
+
+
+class TrackCopyDiff:
+    """上下文管理器：自动追踪拷贝前后差异。
+
+    支持文件和目录两种模式：
+        # 目录模式（默认）
+        with TrackCopyDiff(dest=dst_dir) as diff:
+            shutil.copytree(src_dir, dst_dir)
+
+        # 文件模式
+        with TrackCopyDiff(dest=dst_file, is_file=True) as diff:
+            shutil.copy2(src_file, dst_file)
+
+        # 累积多次结果
+        cumulative_diff = CopyDiffResult([], [], [])
+        with TrackCopyDiff(dest=dst_dir1, cumulative=cumulative_diff):
+            shutil.copytree(src1, dst_dir1)
+        with TrackCopyDiff(dest=dst_dir2, cumulative=cumulative_diff):
+            shutil.copytree(src2, dst_dir2)
+
+        # overwrite 模式不统计差异
+        with TrackCopyDiff(dest=dst_dir, overwrite=True) as diff:
+            shutil.copytree(src_dir, dst_dir)
+
+    追踪内容:
+    - added_dirs: 新增文件所在的父目录列表（目录模式）
+    - added_files: 新增的文件列表
+    - overwritten_files: 被覆盖的文件列表（时间戳变化）
+    """
+
+    def __init__(
+        self,
+        dest: Path,
+        cumulative: Optional[CopyDiffResult] = None,
+        is_file: bool = False,
+        overwrite: bool = False,
+    ):
+        self.dest = dest
+        self.overwrite = overwrite
+        self.before_files: dict[str, float] = {}
+        self._is_file_mode = is_file
+        self.diff = cumulative if cumulative else CopyDiffResult([], [], [])
+
+    def __enter__(self) -> CopyDiffResult:
+        # overwrite 模式不追踪
+        if self.overwrite:
+            return self.diff
+
+        # 文件模式：只记录目标文件状态
+        if self._is_file_mode:
+            if self.dest.exists() and self.dest.is_file():
+                self.before_files[""] = self.dest.stat().st_mtime
+            return self.diff
+
+        # 目录模式：记录目标目录文件状态
+        if self.dest.exists():
+            for f in self.dest.rglob("*"):
+                if f.is_file():
+                    full_path = str(f)
+                    self.before_files[full_path] = f.stat().st_mtime
+        return self.diff
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        # overwrite 模式不追踪差异
+        if self.overwrite:
+            return False
+
+        # 文件模式：统计单个文件变化
+        if self._is_file_mode:
+            if self.dest.exists() and self.dest.is_file():
+                mtime = self.dest.stat().st_mtime
+                if "" not in self.before_files:
+                    # 新增文件
+                    self.diff.added_files.append(str(self.dest))
+                elif mtime != self.before_files[""]:
+                    # 文件被覆盖
+                    self.diff.overwritten_files.append(str(self.dest))
+            return False
+
+        # 目录模式：对比差异
+        added_files: list[str] = []
+        overwritten_files: list[str] = []
+        added_dirs: set[str] = set()
+
+        if self.dest.exists():
+            for f in self.dest.rglob("*"):
+                if f.is_file():
+                    full_path = str(f)
+                    mtime = f.stat().st_mtime
+                    if full_path not in self.before_files:
+                        # 新增文件
+                        added_files.append(full_path)
+                        # 父目录也使用全路径（与其他字段保持一致）
+                        added_dirs.add(str(f.parent))
+                    elif mtime != self.before_files[full_path]:
+                        # 文件被覆盖（时间戳变化）
+                        overwritten_files.append(full_path)
+
+        # 累积到现有结果（而非替换）
+        self.diff.added_dirs = sorted(set(self.diff.added_dirs) | added_dirs)
+        self.diff.added_files = sorted(set(self.diff.added_files) | set(added_files))
+        self.diff.overwritten_files = sorted(
+            set(self.diff.overwritten_files) | set(overwritten_files)
+        )
+        return False  # 不抑制异常
 
 
 @dataclass
@@ -738,7 +854,7 @@ def prepare_workspace(
     overwrite: bool = True,
     preferred_language: Optional[str] = None,
     workspace_dir: Optional[Path] = None,
-) -> None:
+) -> CopyDiffResult:
     package_root = _find_package_root()
     if not package_root:
         raise RuntimeError("package root not found")
@@ -747,6 +863,9 @@ def prepare_workspace(
         workspace_dir = get_user_workspace_dir()
     else:
         workspace_dir = Path(workspace_dir)
+
+    # 初始化累积结果（用于追踪所有复制操作）
+    cumulative_diff = CopyDiffResult([], [], [])
     workspace_dir.mkdir(parents=True, exist_ok=True)
 
     # Migrate from legacy jiuwenclaw_workspace directory name to workspace
@@ -802,12 +921,24 @@ def prepare_workspace(
     config_yaml_dest = config_dest_dir / "config.yaml"
 
     if overwrite or not config_yaml_dest.exists():
-        shutil.copy2(config_yaml_src, config_yaml_dest)
+        with TrackCopyDiff(
+            dest=config_yaml_dest,
+            is_file=True,
+            cumulative=cumulative_diff,
+            overwrite=overwrite,
+        ):
+            shutil.copy2(config_yaml_src, config_yaml_dest)
 
     builtin_rules_src = resources_dir / "builtin_rules.yaml"
     builtin_rules_dest = config_dest_dir / "builtin_rules.yaml"
     if builtin_rules_src.is_file() and (overwrite or not builtin_rules_dest.exists()):
-        shutil.copy2(builtin_rules_src, builtin_rules_dest)
+        with TrackCopyDiff(
+            dest=builtin_rules_dest,
+            is_file=True,
+            cumulative=cumulative_diff,
+            overwrite=overwrite,
+        ):
+            shutil.copy2(builtin_rules_src, builtin_rules_dest)
 
     resolved_lang = _resolve_preferred_language(config_yaml_dest, preferred_language)
 
@@ -830,7 +961,13 @@ def prepare_workspace(
         )
     env_dest = workspace_dir / "config" / ".env"
     if overwrite or not env_dest.exists():
-        shutil.copy2(env_template_src, env_dest)
+        with TrackCopyDiff(
+            dest=env_dest,
+            is_file=True,
+            cumulative=cumulative_diff,
+            overwrite=overwrite,
+        ):
+            shutil.copy2(env_template_src, env_dest)
 
     # ----- copy runtime dirs (new layout) -----
     agent_root = workspace_dir / "agent"
@@ -845,6 +982,20 @@ def prepare_workspace(
 
     template_agent_workspace = template_agent_dir / "workspace"
     template_agent_memory = template_agent_dir / "workspace" / "memory"
+
+    def copy_if_missing(src: str | Path, dst: str | Path) -> str | Path:
+        """增量复制：目标已存在则跳过。
+
+        Args:
+            src: 源文件路径
+            dst: 目标文件路径
+
+        Returns:
+            目标文件路径（已存在则直接返回，否则返回复制后的路径）
+        """
+        if os.path.exists(dst):
+            return dst
+        return shutil.copy2(src, dst)
 
     def _copy_dir(
         src_dir: Path,
@@ -865,19 +1016,32 @@ def prepare_workspace(
         if not dst_dir.exists():
             shutil.copytree(src_dir, dst_dir, ignore=ignore)
         else:
-            shutil.copytree(src_dir, dst_dir, dirs_exist_ok=True, ignore=ignore)
+            shutil.copytree(
+                src_dir, dst_dir, dirs_exist_ok=True, ignore=ignore,
+                copy_function=copy_if_missing,
+            )
 
     # Copy DeepAgent workspace template (includes agent-data.json, memory, skills)
     # Ignore _ZH.md and _EN.md files - they are handled separately
     if template_agent_workspace.exists():
-        _copy_dir(
-            template_agent_workspace,
-            deepagent_workspace,
-            ignore_patterns=("*_ZH.md", "*_EN.md", "skills"),
-        )
+        with TrackCopyDiff(
+            dest=deepagent_workspace,
+            cumulative=cumulative_diff,
+            overwrite=overwrite,
+        ):
+            _copy_dir(
+                template_agent_workspace,
+                deepagent_workspace,
+                ignore_patterns=("*_ZH.md", "*_EN.md", "skills"),
+            )
     else:
         deepagent_workspace.mkdir(parents=True, exist_ok=True)
-    _copy_dir(template_agent_memory, agent_memory, ignore_patterns=("*_ZH.md", "*_EN.md"))
+    with TrackCopyDiff(
+        dest=agent_memory,
+        cumulative=cumulative_diff,
+        overwrite=overwrite,
+    ):
+        _copy_dir(template_agent_memory, agent_memory, ignore_patterns=("*_ZH.md", "*_EN.md"))
 
     # Copy multi-language files based on resolved language
     # Files with _ZH/_EN suffix are copied to the workspace without suffix
@@ -893,7 +1057,13 @@ def prepare_workspace(
         src_path = template_agent_workspace / src_name
         dst_path = deepagent_workspace / dst_name
         if src_path.exists() and not dst_path.exists():
-            shutil.copy2(src_path, dst_path)
+            with TrackCopyDiff(
+                dest=dst_path,
+                is_file=True,
+                cumulative=cumulative_diff,
+                overwrite=overwrite,
+            ):
+                shutil.copy2(src_path, dst_path)
 
     # skills state: shipped under resources/
     skills_state_src = template_root / "skills_state.json"
@@ -901,7 +1071,13 @@ def prepare_workspace(
         agent_skills.mkdir(parents=True, exist_ok=True)
         dest_skill_state = agent_skills / "skills_state.json"
         if not dest_skill_state.exists():
-            shutil.copy2(skills_state_src, agent_skills / "skills_state.json")
+            with TrackCopyDiff(
+                dest=dest_skill_state,
+                is_file=True,
+                cumulative=cumulative_diff,
+                overwrite=overwrite,
+            ):
+                shutil.copy2(skills_state_src, dest_skill_state)
 
     # sessions is runtime-only (template may not include it)
     agent_sessions.mkdir(parents=True, exist_ok=True)
@@ -910,6 +1086,8 @@ def prepare_workspace(
 
     migrate_config_from_template(config_yaml_src, config_yaml_dest)
     set_preferred_language_in_config_file(config_yaml_dest, resolved_lang)
+
+    return cumulative_diff
 
 
 def _close_log_handlers() -> None:
@@ -925,6 +1103,38 @@ def _close_log_handlers() -> None:
             root.removeHandler(handler)
         except Exception:
             pass  # Ignore errors during cleanup
+
+
+def _print_diff_summary(diff_result: CopyDiffResult, overwrite: bool) -> None:
+    """打印文件变更统计摘要。
+
+    Args:
+        diff_result: 包含 added_dirs, added_files, overwritten_files 的结果
+        overwrite: 是否为覆盖模式（True 时不显示统计）
+    """
+    if overwrite:
+        return
+
+    total_files = len(diff_result.added_files) + len(diff_result.overwritten_files)
+    if total_files == 0:
+        print("[jiuwenswarm-init] 初始化完成：工作区已就绪，无新文件需创建 / Init complete: workspace ready, no new files needed")
+        return
+
+    print("[jiuwenswarm-init] 初始化完成，文件变更如下：/ Init complete, file changes:")
+    if diff_result.added_files:
+        print(f"  新增文件 / New files: {len(diff_result.added_files)}")
+        for f in diff_result.added_files[:10]:
+            print(f"    + {f}")
+        if len(diff_result.added_files) > 10:
+            print(f"    ...等 {len(diff_result.added_files) - 10} 个 / ...and {len(diff_result.added_files) - 10} more")
+    if diff_result.overwritten_files:
+        print(f"  更新文件 / Updated files: "
+              f"{len(diff_result.overwritten_files)}")
+        for f in diff_result.overwritten_files[:10]:
+            print(f"    ~ {f}")
+        if len(diff_result.overwritten_files) > 10:
+            print(f"    ...等 {len(diff_result.overwritten_files) - 10} 个 / "
+              f"...and {len(diff_result.overwritten_files) - 10} more")
 
 
 def init_user_workspace(
@@ -985,15 +1195,14 @@ def init_user_workspace(
                 shutil.rmtree(workspace_dir)
                 print(f"[jiuwenswarm-init] Removed workspace directory: {workspace_dir}")
             except OSError as e:
-                print(f"[jiuwenswarm-init] ERROR: Failed to remove workspace: {e}")
+                print(f"[jiuwenswarm-init] ERROR: Failed to remove "
+                  f"workspace: {e}")
                 return "cancelled"
         else:
             # Merge mode: inform about preservation
-            print(
-                "[jiuwenswarm-init] Without -f/--force flag, "
-                "existing files will be preserved and merged with template."
-            )
-            print("[jiuwenswarm-init] This action cannot be undone.")
+            print("[jiuwenswarm-init] 增量初始化：只添加缺失文件，不覆盖已有文件 / "
+              "Incremental init: only adds missing files, preserves existing")
+            print("[jiuwenswarm-init] 此操作不可撤销 / This action cannot be undone.")
             if _is_interactive():
                 confirmation = input("[jiuwenswarm-init] Do you want to continue? (yes/no): ").strip().lower()
 
@@ -1008,7 +1217,8 @@ def init_user_workspace(
         print("[jiuwenswarm-init] Initialization cancelled. Exiting.")
         return "cancelled"
     print(f"[jiuwenswarm-init] 将使用语言 / Language: {lang}")
-    prepare_workspace(overwrite, preferred_language=lang, workspace_dir=workspace_dir)
+    diff_result = prepare_workspace(overwrite, preferred_language=lang, workspace_dir=workspace_dir)
+    _print_diff_summary(diff_result, overwrite)
 
     return workspace_dir
 
@@ -1421,6 +1631,93 @@ def setup_logger(log_level: Optional[str] = None) -> logging.Logger:
     stream_handler.addFilter(privacy_filter)
     root.addHandler(stream_handler)
     return root
+
+
+def wait_for_tcp_port(
+    host: str,
+    port: int,
+    *,
+    timeout: float = 15.0,
+    max_attempts: int | None = None,
+    initial_delay: float = 0.1,
+    max_delay: float = 2.0,
+    connect_timeout: float = 1.0,
+    target_state: str = "connected",
+) -> bool:
+    """Wait for a TCP port to reach the desired state with exponential backoff.
+
+    Args:
+        host: Target host.
+        port: Target port.
+        timeout: Total wall-clock timeout in seconds.
+        max_attempts: Maximum number of connection attempts (None = unlimited within timeout).
+        initial_delay: Initial sleep interval between attempts (doubles each round).
+        max_delay: Maximum sleep interval cap.
+        connect_timeout: Per-attempt socket connect timeout.
+        target_state: ``"connected"`` — wait until the port accepts a connection;
+                      ``"disconnected"`` — wait until the port refuses connections.
+
+    Returns:
+        ``True`` if the target state is reached within limits, ``False`` otherwise.
+    """
+    deadline = time.monotonic() + timeout
+    delay = initial_delay
+    attempt = 0
+
+    while time.monotonic() < deadline:
+        if max_attempts is not None and attempt >= max_attempts:
+            return False
+        attempt += 1
+
+        try:
+            with socket.create_connection((host, port), timeout=connect_timeout):
+                if target_state == "connected":
+                    return True
+        except OSError:
+            if target_state == "disconnected":
+                return True
+
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return False
+        time.sleep(min(delay, remaining))
+        delay = min(delay * 2, max_delay)
+
+    return False
+
+
+def wait_for_pid_exit(pid: int, timeout: float = 60.0) -> None:
+    """Wait for a process to exit, with a timeout and warning on failure.
+
+    On Windows, ``os.kill(pid, 0)`` only checks PID existence via
+    ``OpenProcess`` — it does NOT check whether the process is still running.
+    We use ``WaitForSingleObject`` with a zero timeout instead, which
+    reliably detects exited processes.
+    """
+    deadline = time.monotonic() + timeout
+    if sys.platform == "win32":
+        _synchronize = 0x00100000
+        _kernel32 = ctypes.windll.kernel32
+        _kernel32.OpenProcess.restype = ctypes.c_void_p
+        _kernel32.WaitForSingleObject.argtypes = [ctypes.c_void_p, ctypes.c_ulong]
+        _kernel32.WaitForSingleObject.restype = ctypes.c_ulong
+        while time.monotonic() < deadline:
+            handle = _kernel32.OpenProcess(_synchronize, False, pid)
+            if not handle:
+                return
+            exited = _kernel32.WaitForSingleObject(handle, 0) == 0
+            _kernel32.CloseHandle(handle)
+            if exited:
+                return
+            time.sleep(0.5)
+    else:
+        while time.monotonic() < deadline:
+            try:
+                os.kill(pid, 0)
+            except OSError:
+                return
+            time.sleep(0.5)
+    logger.warning("process %d did not exit within %.1f seconds", pid, timeout)
 
 
 setup_logger()

@@ -85,6 +85,16 @@ export interface ActivateInteractionState {
 }
 
 /**
+ * File tree entry for caching
+ */
+export interface CachedFileTreeEntry {
+  name: string;
+  path: string;
+  is_dir: boolean;
+  children?: CachedFileTreeEntry[];
+}
+
+/**
  * Harness state interface
  */
 interface HarnessState {
@@ -113,14 +123,21 @@ interface HarnessState {
   packages: PackageInfo[];
   // Native version info
   nativeVersion: NativeVersionInfo | null;
-  // Currently active package ID
-  activePackageId: string | null;
+  // Currently active package IDs (multiple can be active simultaneously)
+  activePackageIds: string[];
   // Selected package ID in dropdown (not yet activated)
   selectedPackageId: string | null;
   // Loading state for packages
   loadingPackages: boolean;
   // Activating state
   activatingPackage: boolean;
+  // Deactivating state
+  deactivatingPackage: boolean;
+
+  // File tree cache by runtime path (key: runtimePath, value: file tree)
+  extensionFileTreeCache: Record<string, CachedFileTreeEntry[]>;
+  // Loading state for file tree by path
+  fileTreeLoadingPaths: Record<string, boolean>;
 
   // Actions
   setStageDefinitions: (stages: HarnessStageDefinition[]) => void;
@@ -141,11 +158,19 @@ interface HarnessState {
   setActivateInteraction: (state: ActivateInteractionState | null) => void;
   reset: () => void;
 
-  setPackages: (packages: PackageInfo[], nativeVersion: NativeVersionInfo, activeId: string | null) => void;
-  setActivePackageId: (id: string | null) => void;
+  setPackages: (packages: PackageInfo[], nativeVersion: NativeVersionInfo, activeIds: string[]) => void;
+  isPackageActive: (packageId: string) => boolean;
   setSelectedPackageId: (id: string | null) => void;
   setLoadingPackages: (loading: boolean) => void;
   setActivatingPackage: (activating: boolean) => void;
+  setDeactivatingPackage: (deactivating: boolean) => void;
+
+  // File tree cache actions
+  setFileTreeCache: (runtimePath: string, files: CachedFileTreeEntry[]) => void;
+  getFileTreeCache: (runtimePath: string) => CachedFileTreeEntry[] | undefined;
+  clearFileTreeCache: (runtimePath?: string) => void;
+  setFileTreeLoading: (runtimePath: string, loading: boolean) => void;
+  isFileTreeLoading: (runtimePath: string) => boolean;
 }
 
 /**
@@ -204,7 +229,7 @@ function hasLaterActiveStage(stageResults: HarnessStageInfo[], stage: string): b
   );
 }
 
-export const useHarnessStore = create<HarnessState>((set) => ({
+export const useHarnessStore = create<HarnessState>((set, get) => ({
   stageDefinitions: [],
   harnessMessages: [],
   stageResults: [],
@@ -220,10 +245,14 @@ export const useHarnessStore = create<HarnessState>((set) => ({
 
   packages: [],
   nativeVersion: null,
-  activePackageId: null,
+  activePackageIds: [],
   selectedPackageId: null,
   loadingPackages: false,
   activatingPackage: false,
+  deactivatingPackage: false,
+
+  extensionFileTreeCache: {},
+  fileTreeLoadingPaths: {},
 
   setStageDefinitions: (stages) => {
     // Only set stages once - ignore subsequent updates
@@ -444,24 +473,31 @@ export const useHarnessStore = create<HarnessState>((set) => ({
       activateInteraction: null,
       packages: [],
       nativeVersion: null,
-      activePackageId: null,
+      activePackageIds: [],
       selectedPackageId: null,
       loadingPackages: false,
       activatingPackage: false,
+      deactivatingPackage: false,
+      extensionFileTreeCache: {},
+      fileTreeLoadingPaths: {},
     });
   },
 
-  setPackages: (packages, nativeVersion, activeId) => {
+  setPackages: (packages, nativeVersion, activeIds) => {
+    const currentSelection = get().selectedPackageId;
+    const allIds = ['native', ...packages.map(p => p.id)];
+    const newSelection = (currentSelection && allIds.includes(currentSelection)) ? currentSelection : 'native';
     set({
       packages,
       nativeVersion,
-      activePackageId: activeId,
-      selectedPackageId: activeId,
+      activePackageIds: activeIds,
+      selectedPackageId: newSelection,
     });
   },
 
-  setActivePackageId: (id) => {
-    set({ activePackageId: id });
+  isPackageActive: (packageId) => {
+    const state = get();
+    return state.activePackageIds.includes(packageId);
   },
 
   setSelectedPackageId: (id) => {
@@ -474,5 +510,60 @@ export const useHarnessStore = create<HarnessState>((set) => ({
 
   setActivatingPackage: (activating) => {
     set({ activatingPackage: activating });
+  },
+
+  setDeactivatingPackage: (deactivating) => {
+    set({ deactivatingPackage: deactivating });
+  },
+
+  // File tree cache actions
+  setFileTreeCache: (runtimePath, files) => {
+    set((state) => ({
+      extensionFileTreeCache: {
+        ...state.extensionFileTreeCache,
+        [runtimePath]: files,
+      },
+      fileTreeLoadingPaths: {
+        ...state.fileTreeLoadingPaths,
+        [runtimePath]: false,
+      },
+    }));
+  },
+
+  getFileTreeCache: (runtimePath) => {
+    return get().extensionFileTreeCache[runtimePath];
+  },
+
+  clearFileTreeCache: (runtimePath) => {
+    if (runtimePath) {
+      set((state) => {
+        const newCache = { ...state.extensionFileTreeCache };
+        delete newCache[runtimePath];
+        const newLoading = { ...state.fileTreeLoadingPaths };
+        delete newLoading[runtimePath];
+        return {
+          extensionFileTreeCache: newCache,
+          fileTreeLoadingPaths: newLoading,
+        };
+      });
+    } else {
+      set({
+        extensionFileTreeCache: {},
+        fileTreeLoadingPaths: {},
+      });
+    }
+  },
+
+  setFileTreeLoading: (runtimePath, loading) => {
+    set((state) => ({
+      fileTreeLoadingPaths: {
+        ...state.fileTreeLoadingPaths,
+        [runtimePath]: loading,
+      },
+    }));
+  },
+
+  isFileTreeLoading: (runtimePath) => {
+    return get().fileTreeLoadingPaths[runtimePath] || false;
   },
 }));

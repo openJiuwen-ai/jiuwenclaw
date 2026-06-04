@@ -39,7 +39,7 @@ Without clear layering and a single source of truth, the project risks: **semant
 
 **Definition**: User messages arriving at the Gateway that are identified by `MessageHandler` (or its unified entry point), potentially **only changing session/mode/routing without entering Agent conversation**.
 
-**Typical commands**: `/new_session`, `/mode agent|code|team` and `/switch plan|fast|normal` on controlled channels, plus direct forms like `/mode agent.plan|agent.fast|code.plan|code.normal` (per current implementation).
+**Typical commands**: `/new_session`, `/mode agent|code|team` and `/switch plan|fast|normal|team` on controlled channels, plus direct forms like `/mode agent.plan|agent.fast|code.normal|code.team` (per current implementation). The TUI local command additionally supports `/mode plan` and `/mode team.normal`; those forms are not part of the Gateway controlled-channel whitelist.
 
 **Requirements**:
 

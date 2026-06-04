@@ -8,7 +8,6 @@ The BPF program is written to an anonymous memfd whose fd is passed to bwrap.
 from __future__ import annotations
 
 import logging
-import os
 import platform
 import struct
 from functools import lru_cache
@@ -33,7 +32,6 @@ BPF_RET = 0x06
 SECCOMP_RET_ALLOW = 0x7FFF_0000
 SECCOMP_RET_ERRNO = 0x0005_0000
 SECCOMP_RET_KILL_PROCESS = 0x8000_0000
-SECCOMP_RET_LOG = 0x7FFC_0000
 
 ERRNO_EPERM = 1
 ERRNO_ENOSYS = 38
@@ -277,19 +275,3 @@ def _assemble_bpf(blocked_nrs: list[int]) -> bytes:
     return bytes(prog)
 
 
-def open_seccomp_filter(policy: SyscallPolicy) -> int:
-    """Build the seccomp filter and return an fd positioned at the start."""
-    data = build_seccomp_filter(policy)
-    if not hasattr(os, "memfd_create"):
-        raise RuntimeError("os.memfd_create is required for seccomp filters")
-
-    fd = os.memfd_create("jiuwenbox-seccomp", getattr(os, "MFD_CLOEXEC", 0x0001))
-    try:
-        offset = 0
-        while offset < len(data):
-            offset += os.write(fd, data[offset:])
-        os.lseek(fd, 0, os.SEEK_SET)
-    except Exception:
-        os.close(fd)
-        raise
-    return fd

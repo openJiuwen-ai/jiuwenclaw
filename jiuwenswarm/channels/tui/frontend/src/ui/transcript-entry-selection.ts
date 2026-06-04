@@ -68,8 +68,22 @@ export function selectTranscriptEntries(snapshot: AppSnapshot): SelectedTranscri
       .reverse()
       .find((entry) => entry.kind === "thinking")?.id ?? undefined;
 
-  if (snapshot.transcriptMode === "compact") {
+  const isLiveTurn = snapshot.isProcessing || snapshot.cancellableWork;
+  const liveThinking =
+    isLiveTurn && latestThinkingId
+      ? entries.find((entry) => entry.kind === "thinking" && entry.id === latestThinkingId)
+      : undefined;
+  // compact 始终隐藏 thinking；detailed 仅在任务进行中把 live thinking 钉在底部，避免穿插在工具输出中间。
+  if (snapshot.transcriptMode === "compact" || isLiveTurn) {
     entries = entries.filter((entry) => entry.kind !== "thinking");
+    if (liveThinking) {
+      entries = [...entries, liveThinking];
+    }
+  }
+  if (snapshot.transcriptMode === "compact") {
+    entries = entries.filter(
+      (entry) => !(entry.kind === "info" && entry.transcriptOnly),
+    );
   }
 
   return { entries, latestThinkingId };

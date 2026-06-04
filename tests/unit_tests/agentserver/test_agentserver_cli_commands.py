@@ -117,7 +117,7 @@ async def test_handle_command_compact_returns_custom_instructions(server, fake_w
     )
 
     class MockAgent:
-        async def compress_context(self, session_id):
+        async def compress_context(self, session_id, *, return_state=False):
             return {
                 "result": "compressed",
                 "stats": {
@@ -128,7 +128,7 @@ async def test_handle_command_compact_returns_custom_instructions(server, fake_w
 
     mock_agent = MockAgent()
 
-    async def mock_get_agent(channel_id, mode, project_dir=None):
+    async def mock_get_agent(channel_id, mode, project_dir=None, sub_mode=None):
         return mock_agent
 
     async def mock_send_push(msg):
@@ -160,6 +160,58 @@ async def test_handle_command_compact_returns_custom_instructions(server, fake_w
             "ok": True,
         }
     ]
+
+
+@pytest.mark.asyncio
+async def test_handle_command_compact_pushes_current_compression_state_event(server, fake_ws, monkeypatch):
+    request = AgentRequest(
+        request_id="req-compact",
+        channel_id="tui",
+        session_id="session-1",
+        req_method=ReqMethod.COMMAND_COMPACT,
+        params={"mode": "agent.plan"},
+    )
+
+    class MockAgent:
+        async def compress_context(self, session_id, *, return_state=False):
+            return {
+                "result": "compressed",
+                "stats": {
+                    "raw_total_tokens": 1000,
+                    "total_tokens": 300,
+                },
+                "state": {
+                    "status": "completed",
+                    "phase": "active_compress",
+                    "compact_summary": "manual compact summary",
+                },
+                "compact_summary": "manual compact summary",
+            }
+
+    pushed = []
+
+    async def mock_get_agent(channel_id, mode, project_dir=None, sub_mode=None):
+        return MockAgent()
+
+    async def mock_send_push(msg):
+        pushed.append(msg)
+
+    monkeypatch.setattr(
+        server.get_agent_manager_for_test(),
+        "get_agent",
+        mock_get_agent,
+    )
+    monkeypatch.setattr(server, "send_push", mock_send_push)
+
+    await server.handle_command_compact_for_test(fake_ws, request, asyncio.Lock())
+
+    compression_state_pushes = [
+        item for item in pushed
+        if item.get("payload", {}).get("event_type") == "context.compression_state"
+    ]
+    assert len(compression_state_pushes) == 1
+    assert compression_state_pushes[0]["session_id"] == "session-1"
+    assert compression_state_pushes[0]["payload"]["compact_summary"] == "manual compact summary"
 
 
 @pytest.mark.asyncio

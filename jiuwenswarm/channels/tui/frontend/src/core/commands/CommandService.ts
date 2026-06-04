@@ -87,9 +87,9 @@ export class CommandService {
     return this.commands.get(target);
   }
 
-  getAll(): SlashCommand[] {
+  getAll(includeHidden = false): SlashCommand[] {
     return this.topLevelCommands
-      .filter((command) => !command.hidden)
+      .filter((command) => includeHidden || !command.hidden)
       .sort((a, b) => a.name.localeCompare(b.name));
   }
 
@@ -130,7 +130,7 @@ export class CommandService {
   }
 
   async execute(raw: string, ctx: CommandContext): Promise<void> {
-    const parsed = parseSlashCommand(raw.trim(), this.getAll());
+    const parsed = parseSlashCommand(raw.trim(), this.getAll(true));
     const command = parsed.command;
     if (!command) {
       // /<skill> <query> shorthand: check if the unknown name matches an installed skill.

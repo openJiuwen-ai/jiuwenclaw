@@ -69,6 +69,7 @@ from openjiuwen.core.sys_operation.config import (
 
 from jiuwenswarm.common.utils import (
     get_agent_memory_dir,
+    get_agent_skills_dir,
     get_config_file,
     get_deepagent_agent_md_path,
     get_deepagent_heartbeat_path,
@@ -84,12 +85,31 @@ PreserveFileSharingMode = Literal["mount"]
 _PRESERVE_FILE_SHARING_MODE: PreserveFileSharingMode = "mount"
 
 
-_INTRINSIC_FILE_PATH_FUNCS = (
+# Read-write intrinsic 文件: deep agent 在沙箱里持续读写的 markdown state 文件.
+# 这些路径由 _record_rw_bind 处理 (mode=rw + 0666), 不存在时由 _ensure_intrinsic_file
+# 自动 touch 空文件.
+_INTRINSIC_RW_FILE_PATH_FUNCS = (
     get_deepagent_agent_md_path,
     get_deepagent_heartbeat_path,
     get_deepagent_identity_md_path,
     get_deepagent_soul_md_path,
     get_deepagent_user_md_path,
+)
+
+# Read-only intrinsic 文件: 沙箱必须能读但绝不能写的 host 资源.
+# 当前只含 ``config.yaml`` (jiuwenswarm 主配置, 含模型 API key / OAuth secret /
+# 用户偏好等), 即使整个 ``/`` 已被 ro-bind / project_dir 把 ``~/.jiuwenswarm/``
+# 暴露进沙箱, 这条 ro bind 也能配合末尾 ``--remount-ro`` 兜住, 让沙箱内的 agent
+# 不能写回任何修改。
+#
+# 与 _INTRINSIC_RW_FILE_PATH_FUNCS 的差异:
+#   - 走 _record_ro_resource_bind (mode=ro bind + read_only_promote 兜底), 既让
+#     首挂语义直观, 又能在出现 rw 父挂覆盖时由末尾 --remount-ro 翻回 ro;
+#   - **不**自动创建空文件: config.yaml 缺失意味着 jiuwenswarm 装得有问题,
+#     塞一份空 yaml 会让 loadconfig 端解析失败更早夯死 + 真实问题被掩盖。
+#     这里改成 warn + 跳过, 让上层早点暴露。
+_INTRINSIC_RO_FILE_PATH_FUNCS = (
+    get_config_file,
 )
 
 
@@ -135,62 +155,98 @@ def _ensure_intrinsic_file(path: Path) -> bool:
         return False
 
 
-def _ensure_intrinsic_dir(path: Path) -> bool:
-    """确保固有目录存在; 不存在则 ``mkdir -p``。返回是否就绪可用。"""
-    try:
-        path.mkdir(parents=True, exist_ok=True)
-        if not path.is_dir():
-            logger.warning(
-                "[sysop_builder] intrinsic path %s exists but is not a directory; "
-                "skipping from sandbox bind/upload list",
-                path,
-            )
-            return False
-        return True
-    except OSError as exc:
-        logger.warning(
-            "[sysop_builder] could not ensure intrinsic dir %s: %s; "
-            "skipping from sandbox bind/upload list",
-            path,
-            exc,
-        )
-        return False
+def _collect_intrinsic_targets() -> tuple[list[str], list[str], list[str]]:
+    """收集 deep agent 固有路径 (host 上的绝对路径), 分 rw / ro 两类返回.
 
+    分类规则:
 
-def _collect_intrinsic_targets() -> tuple[list[str], list[str]]:
-    """收集 deep agent 固有文件路径与目录路径 (host 上的绝对路径).
+    - **rw_files** (``mode=rw``, ``0666``): agent 在沙箱里持续读写的 state 文件
+      (``_INTRINSIC_RW_FILE_PATH_FUNCS``). 不存在时由 :func:`_ensure_intrinsic_file`
+      自动 touch 空文件, 保证 bwrap ``--bind`` 的 host_src 存在。
+    - **rw_dirs** (``mode=rw``, ``0777``): agent 需要读写的目录 (``daily_memory``).
+      **不自动创建**——host 上不存在 (例如该 agent 还没生成过 daily_memory)
+      时, 跳过该条目, 不进沙箱 bind list, 也不主动 ``mkdir``。 这样可避免:
+      (a) 因 ``get_agent_memory_dir()`` 解析出意外路径而误建目录;
+      (b) 用户清理本地 memory 后, sandbox 启动反而把它静默重建。
+    - **ro_files** (``mode=ro``, ``0444``): 沙箱必须只读访问的 host 资源
+      (``_INTRINSIC_RO_FILE_PATH_FUNCS``, 当前只有 ``config.yaml``). **绝不**自动
+      创建——主配置缺失意味着 jiuwenswarm 没装好, 创建空文件只会让真问题晚些时候
+      在 loadconfig 时炸出, 加大排查难度; 这里改成 warn + 跳过。
 
-    会对每个解析到的路径做存在性检查; 不存在则创建空文件 / 空目录,
-    保证下游 bind_mount 时 host_path 一定存在。 创建失败的条目会被静默剔除,
-    避免污染 sandbox 启动路径。
+    解析或副作用失败的条目都被静默剔除 (rw) / warn-跳过 (ro), 防止污染 sandbox 启动路径。
 
     Returns:
-        ``(file_paths, dir_paths)``; 解析或创建失败的条目均跳过。
+        ``(rw_files, rw_dirs, ro_files)``.
     """
-    file_paths: list[str] = []
-    dir_paths: list[str] = []
+    rw_files: list[str] = []
+    rw_dirs: list[str] = []
+    ro_files: list[str] = []
 
-    for func in _INTRINSIC_FILE_PATH_FUNCS:
+    for func in _INTRINSIC_RW_FILE_PATH_FUNCS:
         try:
             raw = func()
         except Exception as exc:  # noqa: BLE001
-            logger.debug("[sysop_builder] intrinsic file path func failed: %s", exc)
+            logger.debug(
+                "[sysop_builder] intrinsic rw file path func failed: %s", exc,
+            )
             continue
         if raw is None:
             continue
         path = Path(raw)
         if _ensure_intrinsic_file(path):
-            file_paths.append(str(path))
+            rw_files.append(str(path))
 
     try:
         daily_memory = Path(get_agent_memory_dir()) / "daily_memory"
     except Exception as exc:  # noqa: BLE001
         logger.debug("[sysop_builder] daily_memory dir resolve failed: %s", exc)
     else:
-        if _ensure_intrinsic_dir(daily_memory):
-            dir_paths.append(str(daily_memory))
+        # mount 前显式检查 host 上是否存在 daily_memory 目录; 不存在则跳过, 不
+        # 自动 ``mkdir``。 bwrap 在 ``--bind`` 时要求 host_src 必须存在, 这里
+        # 提前剔掉避免后续沙箱启动失败; 同时拒绝"沙箱启动反而把已被用户清理
+        # 的 memory 目录静默重建"的行为。
+        if daily_memory.is_dir():
+            rw_dirs.append(str(daily_memory))
+        else:
+            logger.info(
+                "[sysop_builder] daily_memory %s does not exist on host; "
+                "skipping from sandbox bind list (mount only when present)",
+                daily_memory,
+            )
 
-    return file_paths, dir_paths
+    for func in _INTRINSIC_RO_FILE_PATH_FUNCS:
+        try:
+            raw = func()
+        except Exception as exc:  # noqa: BLE001
+            logger.debug(
+                "[sysop_builder] intrinsic ro file path func failed: %s", exc,
+            )
+            continue
+        if raw is None:
+            continue
+        try:
+            resolved = Path(raw).expanduser().resolve()
+        except OSError as exc:
+            logger.warning(
+                "[sysop_builder] intrinsic ro file %s could not be resolved: %s; "
+                "skipping from sandbox bind list",
+                raw, exc,
+            )
+            continue
+        if not resolved.exists():
+            # 故意不 _ensure_intrinsic_file: 见函数 docstring 关于 ro 类不自动建空文件
+            # 的原因。这里 warn 不报错让 sandbox 仍能启动 (沙箱内 agent 只是看不到
+            # 这条 ro 文件); 真正的 jiuwenswarm 主进程会在 loadconfig 阶段炸出更准确
+            # 的错误。
+            logger.warning(
+                "[sysop_builder] intrinsic ro file %s does not exist on host; "
+                "skipping from sandbox bind list",
+                resolved,
+            )
+            continue
+        ro_files.append(str(resolved))
+
+    return rw_files, rw_dirs, ro_files
 
 
 def _resolve_project_dir(override: str | Path | None) -> Path | None:
@@ -247,10 +303,55 @@ def _resolve_project_dir(override: str | Path | None) -> Path | None:
     return None
 
 
+def _resolve_agent_skills_dir() -> Path | None:
+    """Resolve the package-bundled built-in skills dir for sandbox mounting.
+
+    :func:`get_agent_skills_dir` returns the path inside the installed
+    jiuwenswarm package (``resources/agent/workspace/skills`` or its
+    fallback ``resources/agent/skills``). The sandboxed agent both reads
+    the bundled skill templates and may mutate / install new skills under
+    this directory at runtime, so :func:`build_filesystem_policy` binds it
+    rw (intentionally **not** added to ``filesystem_policy.read_only``).
+    Mutations therefore propagate back to the host package install, which
+    is by design for the skills lifecycle.
+
+    Returns ``None`` when:
+      - resolution itself raises (broken install / unusual layout);
+      - the resolved path doesn't exist on disk;
+      - the resolved path exists but isn't a directory.
+
+    A ``None`` return is treated by ``build_filesystem_policy`` as "skip
+    silently" (development checkouts without the ``resources/`` directory
+    shipped will keep working; the sandbox just won't see the built-in
+    skills, same as before this hook was added).
+    """
+    try:
+        raw = get_agent_skills_dir()
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("[sysop_builder] builtin skills dir resolve failed: %s", exc)
+        return None
+    try:
+        resolved = Path(raw).expanduser().resolve()
+    except OSError as exc:
+        logger.debug(
+            "[sysop_builder] builtin skills dir %s could not be resolved: %s",
+            raw, exc,
+        )
+        return None
+    if not resolved.is_dir():
+        logger.debug(
+            "[sysop_builder] builtin skills dir %s is not a directory; skipping",
+            resolved,
+        )
+        return None
+    return resolved
+
+
 def build_filesystem_policy(
     files_runtime: dict[str, Any] | None,
     *,
     project_dir: str | Path | None = None,
+    is_code_agent: bool = False,
 ) -> tuple[dict[str, Any], list[dict[str, str]]]:
     """组装 jiuwenbox 沙箱的 filesystem policy.
 
@@ -258,9 +359,19 @@ def build_filesystem_policy(
         files_runtime: ``config.yaml::sandbox.files`` 的字典，可能包含
             ``allow`` / ``deny`` 列表（项支持 str 或 {path, permissions} 形式）
         project_dir: 当前工程目录的覆盖值, 缺省时回落到 :func:`_resolve_project_dir`
-            (优先级 override -> 环境变量 -> ``cwd``). 解析成功时会作为 ``rw``
-            bind mount 进沙箱, 并同步登记到 allow 列表; 解析失败 (例如指向
-            ``/``) 时静默跳过。
+            (优先级 override -> 环境变量 -> ``cwd``). 仅在 ``is_code_agent=True``
+            时会被消费并作为 ``rw`` bind mount 进沙箱; ``is_code_agent=False``
+            时该字段被完全忽略 (不会有 fallback 挂 workspace 之类), 沙箱里也
+            不会出现对应 rw bind。 解析失败 (例如指向 ``/``) 时静默跳过。
+        is_code_agent: 是否是 code-agent 形态. ``True`` → mount 用户工程目录
+            (``project_dir`` / ``cwd``, 由 :func:`_resolve_project_dir` 解析),
+            agent 在沙箱里直接编辑用户仓库; ``False`` (默认, deep agent 等
+            通用形态) → **完全不挂主写入根**, 沙箱只保留 intrinsic 文件
+            (AGENT/HEARTBEAT/...) + daily_memory + agent_skills + 用户
+            显式 ``files.allow``。 不挂 workspace 是为了避免把 agent-server
+            进程的工作区 (含历史 session checkpoint / 边角持久化文件) 整片
+            暴露进沙箱; 真要带额外 host 路径请走 ``/sandbox files allow`` 显式
+            声明。
 
     Returns:
         ``(policy_dict, upload_list)``:
@@ -375,7 +486,48 @@ def build_filesystem_policy(
         if sandbox_path not in read_only_promote:
             read_only_promote.append(sandbox_path)
 
-    intrinsic_files, intrinsic_dirs = _collect_intrinsic_targets()
+    def _record_ro_resource_bind(host_path: str, sandbox_path: str) -> None:
+        """Register a built-in readonly resource bind (intrinsic host data).
+
+        Used for resources the sandbox must be able to *read* but never
+        write — currently only :func:`get_config_file` (sensitive
+        credentials). The intent is distinct from :func:`_record_user_deny_bind`,
+        which represents a user-driven ``files.deny`` entry where the
+        underlying host path is normally rw and deny is just an extra
+        constraint. Here the host path is *intrinsically* read-only from
+        the sandbox's perspective and there is no user-side rw semantics
+        to preserve.
+
+        The built-in skills directory is intentionally **not** routed
+        through this helper; it is rw-mountable so the sandboxed agent
+        can also edit / install skills. See the call site in
+        :func:`build_filesystem_policy`.
+
+        Implementation: ``mode=ro`` bind + ``read_only_promote`` belt-and-
+        suspenders.
+
+        - ``mode=ro`` makes the first-pass mount land in bwrap's
+          ``--ro-bind`` stage, which is the natural and self-documenting
+          encoding for "ro intrinsic resource".
+        - The :data:`read_only_promote` entry survives the case where a
+          later rw parent bind (e.g. a user-configured ``files.allow`` on
+          the parent directory of ``config.yaml``) overlays the same
+          subtree and silently upgrades the mount back to rw. bwrap's
+          ``created_paths`` set is the union of ro_binds + rw_binds
+          destinations (see ``bwrap.py``), so the trailing
+          ``--remount-ro <path>`` is guaranteed to fire on this dst and
+          flip it back to read-only regardless of which stage owned the
+          mount last.
+        """
+        bind_mounts.append({
+            "host_path": host_path,
+            "sandbox_path": sandbox_path,
+            "mode": "ro",
+        })
+        if sandbox_path not in read_only_promote:
+            read_only_promote.append(sandbox_path)
+
+    intrinsic_files, intrinsic_dirs, intrinsic_ro_files = _collect_intrinsic_targets()
 
     for path in intrinsic_files:
         _record_rw_bind(path, path, is_dir=False, permissions="0666")
@@ -383,12 +535,40 @@ def build_filesystem_policy(
     for path in intrinsic_dirs:
         _record_rw_bind(path, path, is_dir=True, permissions="0777")
 
-    # 当前工程目录 (cwd) 走 rw bind, 让 sandbox 内的 agent 能读写用户的代码
-    # 仓库。 解析失败 / 指向 ``/`` 一律跳过 (由 _resolve_project_dir 内部 warn)。
-    resolved_project = _resolve_project_dir(project_dir)
-    if resolved_project is not None:
-        project_str = str(resolved_project)
-        _record_rw_bind(project_str, project_str, is_dir=True, permissions="0777")
+    # Readonly intrinsic 资源 (目前只有 ``config.yaml``): 跟 agent_skills 同类,
+    # 沙箱必须能读但绝不能写。统一走 ``_record_ro_resource_bind``, 末尾
+    # ``--remount-ro`` 兜底, 保证 "父 rw + 子 ro" 拓扑下 ro 仍然鲁棒。
+    #
+    # config.yaml 的过去实现是散落在 build_filesystem_policy 末尾的内联 try/except
+    # 调用 ``_record_user_deny_bind``——但 config.yaml 是服务强制 deny 而非用户主动
+    # deny, 跟 ``files.deny`` 用户配置完全是两种语义; 归到这里跟 agent_skills /
+    # 未来其他 ro intrinsic 一起统一处理, 语义和入口都更清晰。
+    for path in intrinsic_ro_files:
+        _record_ro_resource_bind(path, path)
+
+    agent_skills = _resolve_agent_skills_dir()
+    if agent_skills is not None:
+        skills_str = str(agent_skills)
+        _record_rw_bind(skills_str, skills_str, is_dir=True, permissions="0777")
+
+    # 仅 code-agent 才挂用户工程目录 (cwd / 显式 project_dir): code-agent 的
+    # 核心场景就是在用户仓库里读写源码, 不挂工程目录 agent 几乎无事可做。
+    # 解析失败 / 指向 ``/`` 由 _resolve_project_dir 内部 warn 并返回 ``None``,
+    # 这里静默跳过。
+    #
+    # 非 code-agent (deep agent 等通用形态) **不挂任何"主写入根"**: 通用
+    # agent 没有"用户工程"的概念, 它持续读写的状态都是 intrinsic 文件
+    # (AGENT/HEARTBEAT/IDENTITY/SOUL/USER.md, 上面 _record_rw_bind 已分别
+    # 挂入) + daily_memory + agent_skills + 用户显式配置的 files.allow,
+    # 不需要再额外 rw-bind 一整个 workspace 目录; 把 workspace 整挂会顺势
+    # 暴露 agent 不该让沙箱读写的边角文件 (历史 session checkpoint 等),
+    # 安全收益不明确, 反而扩大 attack surface。 真要往沙箱带额外路径,
+    # 走 ``/sandbox files allow`` 显式声明。
+    if is_code_agent:
+        resolved_project = _resolve_project_dir(project_dir)
+        if resolved_project is not None:
+            project_str = str(resolved_project)
+            _record_rw_bind(project_str, project_str, is_dir=True, permissions="0777")
 
     # ``files.allow`` 与 ``files.deny`` 走完全对称的处理流程:
     #
@@ -430,24 +610,9 @@ def build_filesystem_policy(
         if path not in read_write_promote:
             read_write_promote.append(path)
 
-    # jiuwenswarm 自己的 config.yaml 永远 deny_write: 文件里有模型 API key /
-    # OAuth secret 之类的凭据。 即便 ``/`` 被 ro-bind 进沙箱 (code-agent-
-    # policy.yaml 默认行为) 或 project_dir 把整个 ``~/.jiuwenswarm/`` 暴露
-    # 进来, 沙箱内还能读到这份 config.yaml; 我们这条 auto-deny 通过
-    # ``_record_user_deny_bind`` 把它翻成 ``bind_mount rw`` + ``read_only``
-    # patch, 末尾 ``--remount-ro`` 把它从用户 ``allow`` 升出来的 rw 区域里
-    # 挑出来禁写。 读权限不变 (符合 deny_write 语义), 但 agent 已无法把任何
-    # 修改写回 host config.yaml.
-    try:
-        config_yaml_path = str(Path(get_config_file()).expanduser().resolve())
-        if config_yaml_path and Path(config_yaml_path).exists():
-            _record_user_deny_bind(config_yaml_path, config_yaml_path)
-    except Exception as exc:  # noqa: BLE001
-        logger.warning(
-            "[sysop_builder] could not resolve config.yaml for auto deny: %s",
-            exc,
-        )
-
+    # jiuwenswarm 自己的 config.yaml 走 ``_INTRINSIC_RO_FILE_PATH_FUNCS`` 路径,
+    # 跟 agent_skills 一起在上面统一注册; 这里不再单独处理。 (见
+    # ``_collect_intrinsic_targets`` 与 ``_record_ro_resource_bind`` 的注释.)
     for entry in files_runtime.get("deny") or []:
         normalized = _normalize_fs_entry(entry, default_permissions="0000")
         if normalized is None:
@@ -489,8 +654,10 @@ def create_sandbox_sysop_card(
     *,
     files_runtime: dict[str, Any] | None = None,
     excluded_commands: list[str] | None = None,
-    idle_ttl_seconds: int = 600,
+    idle_ttl_seconds: int | None = None,
+    idle_check_interval: int | None = None,
     project_dir: str | Path | None = None,
+    is_code_agent: bool = False,
 ) -> SysOperationCard | None:
     """构造 jiuwenbox 沙箱模式 SysOperationCard.
 
@@ -499,9 +666,18 @@ def create_sandbox_sysop_card(
         sandbox_type: jiuwenbox provider 名, 通常为 ``jiuwenbox``
         files_runtime: ``config.yaml::sandbox.files`` 字典, 含 allow/deny
         excluded_commands: 命令 glob 列表; 命中时 provider 直接走本地
-        idle_ttl_seconds: 沙箱空闲超时
+        idle_ttl_seconds: 沙箱空闲超时 (秒). 默认 ``None`` 表示不进行 idle 驱逐;
+            jiuwenbox provider 会把它转成 ``timeout.idle_timeout`` 注入到
+            ``create_sandbox`` 的 policy 中。
+        idle_check_interval: idle reaper 轮询间隔 (秒). 默认 ``None`` 让
+            jiuwenbox 服务端使用自身默认值; jiuwenbox provider 会把它转成
+            ``timeout.idle_check_interval`` 注入到 policy 中, 与
+            ``idle_ttl_seconds`` 同样传递给沙箱.
         project_dir: 透传给 :func:`build_filesystem_policy` 的工程目录覆盖值;
-            ``None`` 时由其内部回落到 ``cwd``.
+            仅当 ``is_code_agent=True`` 时被消费, 否则忽略.
+        is_code_agent: 是否是 code-agent. 透传给 :func:`build_filesystem_policy`:
+            ``True`` 时把 ``project_dir`` 挂为 rw bind, ``False`` 时不挂任何
+            "主写入根" (workspace 也不挂); 见该函数 docstring 的详细说明.
 
     Returns:
         构造成功返回 ``SysOperationCard``; 失败 (``build_filesystem_policy``
@@ -515,6 +691,7 @@ def create_sandbox_sysop_card(
         policy, upload_list = build_filesystem_policy(
             files_runtime,
             project_dir=project_dir,
+            is_code_agent=is_code_agent,
         )
         extra_params: dict[str, Any] = {
             "policy": policy,
@@ -525,6 +702,14 @@ def create_sandbox_sysop_card(
             "preserve_file_sharing_mode": _PRESERVE_FILE_SHARING_MODE,
             "preserve_files_upload": upload_list,
         }
+        # ``idle_check_interval`` 走 ``extra_params`` 而非 ``launcher_config`` 上
+        # 的独立字段, 这样不需要给 ``SandboxLauncherConfig`` 加 jiuwenbox 私有的
+        # schema —— ``idle_check_interval`` 是 jiuwenbox 服务端 reaper 轮询间隔,
+        # 别的 provider 用不到, 只在 jiuwenbox provider 里读出来 PUT 到
+        # ``/api/v1/timeout``。 ``None`` 时不写入 extra_params, 让 provider 端
+        # 走 "缺省即沿用 server 默认值" 的语义。
+        if idle_check_interval is not None:
+            extra_params["idle_check_interval"] = idle_check_interval
 
         gateway_config = SandboxGatewayConfig(
             isolation=SandboxIsolationConfig(container_scope=ContainerScope.SYSTEM),
@@ -544,7 +729,8 @@ def create_sandbox_sysop_card(
         fs_policy = policy.get("filesystem_policy", {}) if isinstance(policy, dict) else {}
         logger.info(
             "[sysop_builder] sandbox SysOperationCard created:\n"
-            "  base_url=%s sandbox_type=%s idle_ttl=%ds\n"
+            "  base_url=%s sandbox_type=%s\n"
+            "  idle_ttl=%s idle_check_interval=%s\n"
             "  preserve_file_sharing_mode=%s\n"
             "  excluded_commands(%d)=%s\n"
             "  filesystem_policy.files(%d)=%s\n"
@@ -557,6 +743,7 @@ def create_sandbox_sysop_card(
             sandbox_url,
             sandbox_type,
             idle_ttl_seconds,
+            idle_check_interval,
             _PRESERVE_FILE_SHARING_MODE,
             len(extra_params["excluded_commands"]),
             extra_params["excluded_commands"] or "[]",
@@ -648,6 +835,8 @@ def _resolve_display_path(raw: str | Path | None) -> str | None:
 
 def list_auto_managed_sandbox_paths(
     project_dir: str | Path | None = None,
+    *,
+    is_code_agent: bool = False,
 ) -> dict[str, list[dict[str, str]]]:
     """Auto-configured sandbox entries that users cannot mutate via ``/sandbox``.
 
@@ -655,8 +844,10 @@ def list_auto_managed_sandbox_paths(
     with regardless of user-supplied ``files.allow`` / ``files.deny``:
 
     - intrinsic agent files (AGENT/HEARTBEAT/IDENTITY/SOUL/USER.md) +
-      ``daily_memory`` dir + project directory are all rw bind-mounted from
-      host.
+      ``daily_memory`` dir + agent_skills dir are always rw bind-mounted
+      from host. The user project directory is rw bind-mounted only when
+      ``is_code_agent=True``; deep / generic adapters skip this mount
+      entirely (workspace is **not** auto-mounted as a fallback).
     - jiuwenswarm's own ``config.yaml`` is auto-added to ``deny_write`` so
       Landlock blocks writes to the api-key file even when the bind mounts
       otherwise expose the parent directory.
@@ -664,7 +855,14 @@ def list_auto_managed_sandbox_paths(
     Args:
         project_dir: explicit project-root override (typically
             ``trusted_dirs[0]`` cached on the adapter); ``None`` skips the
-            project entry rather than falling back to cwd.
+            project entry rather than falling back to cwd. Only consumed
+            when ``is_code_agent=True``.
+        is_code_agent: 与 :func:`build_filesystem_policy` 同义——决定是否
+            把 ``project_dir`` 加进 allow_write. ``False`` 时连 project
+            条目也不会出现 (不存在 workspace fallback), 跟 build 侧保持
+            完全一致; 否则 TUI 列出来的 ``files.allow_write`` 跟沙箱启动
+            后实际 mount 的目录会脱节, 用户看到一条 "项目目录已挂"
+            但实际并没有挂。
 
     Returns:
         ``{"allow_write": [...], "deny_write": [...]}`` where each entry is
@@ -674,12 +872,12 @@ def list_auto_managed_sandbox_paths(
     allow: list[dict[str, str]] = []
     deny: list[dict[str, str]] = []
 
-    for func in _INTRINSIC_FILE_PATH_FUNCS:
+    for func in _INTRINSIC_RW_FILE_PATH_FUNCS:
         try:
             raw = func()
         except Exception as exc:  # noqa: BLE001
             logger.debug(
-                "[sysop_builder] auto view: intrinsic path func failed: %s",
+                "[sysop_builder] auto view: intrinsic rw path func failed: %s",
                 exc,
             )
             continue
@@ -691,19 +889,32 @@ def list_auto_managed_sandbox_paths(
         )
 
     try:
-        daily_memory = str(Path(get_agent_memory_dir()) / "daily_memory")
+        daily_memory_path = Path(get_agent_memory_dir()) / "daily_memory"
     except Exception as exc:  # noqa: BLE001
         logger.debug(
             "[sysop_builder] auto view: daily_memory resolve failed: %s",
             exc,
         )
     else:
-        _append_unique(
-            allow,
-            {"path": daily_memory + "/", "permissions": "0777", "kind": "directory"},
-        )
+        # 显示侧与 ``_collect_intrinsic_targets`` 的 mount 决策保持一致: host
+        # 上没有 daily_memory 目录就不进 auto-managed allow_write 列表 (不会
+        # 实际被 mount, UI 列出来会误导用户)。
+        if daily_memory_path.is_dir():
+            _append_unique(
+                allow,
+                {
+                    "path": str(daily_memory_path) + "/",
+                    "permissions": "0777",
+                    "kind": "directory",
+                },
+            )
 
-    if project_dir is not None:
+    # 显示侧的"主写入根"必须跟 :func:`build_filesystem_policy` 完全镜像:
+    # 仅 code-agent 才挂 project_dir, 非 code-agent 这一栏直接为空 (没有
+    # workspace fallback)。 不一致就会让 TUI 列的 allow_write 跟沙箱里实际
+    # mount 的 rw bind 脱节, 用户看到 "项目目录已挂", 但 deep agent 模式
+    # 下实际并没有挂 — 那条 entry 一来本来就不存在。
+    if is_code_agent and project_dir is not None:
         try:
             resolved_project: Path | None = Path(project_dir).expanduser().resolve()
         except OSError as exc:
@@ -729,23 +940,51 @@ def list_auto_managed_sandbox_paths(
                 },
             )
 
-    # config.yaml 一律加入 auto-deny: 注: 现在 deny 用 ``bind_mount rw + 末尾
-    # --remount-ro`` 实现 (见 ``build_filesystem_policy`` 的
-    # ``_record_user_deny_bind``), "父 rw + 子 deny" 已经是合法配置, 不再有
-    # 过去 ``_validate_deny_not_under_writable`` 那种冲突自检的负担。
-    try:
-        config_yaml_path = str(Path(get_config_file()).expanduser().resolve())
-    except Exception as exc:  # noqa: BLE001
-        logger.debug(
-            "[sysop_builder] auto view: config.yaml resolve failed: %s",
-            exc,
-        )
-    else:
-        if config_yaml_path:
-            _append_unique(
-                deny,
-                {"path": config_yaml_path, "permissions": "0000", "kind": "file"},
+    # Readonly intrinsic 文件 (含 config.yaml) 统一从 _INTRINSIC_RO_FILE_PATH_FUNCS
+    # 派生, 跟 :func:`build_filesystem_policy` 里 _record_ro_resource_bind 注册的
+    # 集合一一对应。 路径不存在 / 解析失败时只 debug-log 跳过, 跟 build 侧的 warn
+    # 是一回事 (build 侧负责报告状态, 展示侧静默)。
+    for func in _INTRINSIC_RO_FILE_PATH_FUNCS:
+        try:
+            raw = func()
+        except Exception as exc:  # noqa: BLE001
+            logger.debug(
+                "[sysop_builder] auto view: intrinsic ro path func failed: %s",
+                exc,
             )
+            continue
+        if raw is None:
+            continue
+        try:
+            resolved = Path(raw).expanduser().resolve()
+        except OSError as exc:
+            logger.debug(
+                "[sysop_builder] auto view: intrinsic ro path %r resolve failed: %s",
+                raw, exc,
+            )
+            continue
+        _append_unique(
+            deny,
+            {"path": str(resolved), "permissions": "0444", "kind": "file"},
+        )
+
+    # Built-in skills directory mirrors what :func:`build_filesystem_policy`
+    # registers via ``_record_rw_bind``. We surface it under ``allow_write``
+    # so ``/sandbox files list`` makes the writable mount visible to
+    # operators (otherwise the directory would appear inside the sandbox
+    # without any breadcrumb in the file panel). The path resolution here
+    # is silent on failure: a dev checkout without ``resources/`` shipped
+    # should not raise from a display helper.
+    agent_skills = _resolve_agent_skills_dir()
+    if agent_skills is not None:
+        _append_unique(
+            allow,
+            {
+                "path": str(agent_skills) + "/",
+                "permissions": "0777",
+                "kind": "directory",
+            },
+        )
 
     return {"allow_write": allow, "deny_write": deny}
 
@@ -754,6 +993,7 @@ def list_effective_sandbox_files(
     files_runtime: dict[str, Any] | None,
     *,
     project_dir: str | Path | None = None,
+    is_code_agent: bool = False,
 ) -> dict[str, list[dict[str, str]]]:
     """Read-only "what will the sandbox actually allow / deny writes to" view.
 
@@ -778,7 +1018,10 @@ def list_effective_sandbox_files(
         ``{"allow_write": [...], "deny_write": [...]}`` where every entry is
         ``{"path": str, "permissions": str, "kind": "file" | "directory"}``.
     """
-    auto = list_auto_managed_sandbox_paths(project_dir=project_dir)
+    auto = list_auto_managed_sandbox_paths(
+        project_dir=project_dir,
+        is_code_agent=is_code_agent,
+    )
     allow = list(auto["allow_write"])
     deny = list(auto["deny_write"])
 
@@ -812,6 +1055,7 @@ def find_auto_managed_match(
     path: str,
     *,
     project_dir: str | Path | None = None,
+    is_code_agent: bool = False,
 ) -> tuple[str, str] | None:
     """Return ``(bucket, canonical_path)`` if ``path`` is auto-managed; else ``None``.
 
@@ -834,7 +1078,10 @@ def find_auto_managed_match(
     target = _resolve_display_path(path)
     if target is None:
         return None
-    auto = list_auto_managed_sandbox_paths(project_dir=project_dir)
+    auto = list_auto_managed_sandbox_paths(
+        project_dir=project_dir,
+        is_code_agent=is_code_agent,
+    )
     for bucket in ("allow_write", "deny_write"):
         for entry in auto.get(bucket, []):
             candidate = _resolve_display_path(entry.get("path", ""))

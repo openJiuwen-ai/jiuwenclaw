@@ -19,14 +19,16 @@ import {
 } from "./builtins/evolve.js";
 import { createExitCommand } from "./builtins/exit.js";
 import { createHelpCommand } from "./builtins/help.js";
-import { createHotkeyCommand } from "./builtins/hotkey.js";
+import { createHooksCommand } from "./builtins/hooks.js";
 import { createInitCommand } from "./builtins/init.js";
 import { createModelCommand } from "./builtins/model.js";
 import { createMcpCommand } from "./builtins/mcp.js";
 import { createMemoryCommand } from "./builtins/memory.js";
+import { createPluginCommand } from "./builtins/plugin.js";
+import { createReloadPluginsCommand } from "./builtins/reload-plugins.js";
 import { createModeCommand } from "./builtins/mode.js";
 import { createPermissionsCommand } from "./builtins/permissions.js";
-import { createPlanCommand } from "./builtins/plan.js";
+// Re-enable next release: import { createPlanCommand } from "./builtins/plan.js";
 import { createResumeCommand } from "./builtins/resume.js";
 import { createRenameCommand } from "./builtins/rename.js";
 import { createRewindCommand } from "./builtins/rewind.js";
@@ -36,6 +38,7 @@ import { createStatusCommand } from "./builtins/status.js";
 import { createStatusLineCommand } from "./builtins/statusline.js";
 import { createSkillsCommand } from "./builtins/skills.js";
 import { createTeamSkillsCommand } from "./builtins/teamskills.js";
+import { createAgentsCommand } from "./builtins/agents.js";
 import { createAutoHarnessCommand } from "./builtins/auto-harness.js";
 import { createThemeCommand } from "./builtins/theme.js";
 import { createWorkspaceCommand } from "./builtins/workspace-dir.js";
@@ -43,7 +46,9 @@ import { createUsageCommand } from "./builtins/usage.js";
 
 export function createBuiltinCommands(): SlashCommand[] {
   const commands: SlashCommand[] = [
+    createAgentsCommand(),
     createHelpCommand(() => commands),
+    createHooksCommand(),
     createBranchCommand(),
     createClearCommand(),
     createInitCommand(),
@@ -65,7 +70,7 @@ export function createBuiltinCommands(): SlashCommand[] {
     createMcpCommand(),
     createModeCommand(),
     createPermissionsCommand(),
-    createPlanCommand(),
+    // createPlanCommand(),
     createResumeCommand(),
     createRenameCommand(),
     createRewindCommand(),
@@ -79,8 +84,9 @@ export function createBuiltinCommands(): SlashCommand[] {
     createThemeCommand(),
     createWorkspaceCommand(),
     createUsageCommand(),
-    createHotkeyCommand(),
     createMemoryCommand(),
+    createPluginCommand(),
+    createReloadPluginsCommand(),
   ];
 
   return commands;

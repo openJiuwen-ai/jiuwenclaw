@@ -126,6 +126,7 @@ export function createExportCommand(): SlashCommand {
     usage: "/export [filename]",
     example: "/export my-chat.txt",
     kind: CommandKind.BUILT_IN,
+    hidden: true,
     takesArgs: true,
     action: async (ctx, args) => {
       const content = renderEntriesToPlainText(ctx.entries);

@@ -229,8 +229,9 @@ export function TeamSkillsHubModal({
           throw new Error(data.detail || t("skills.teamskillshub.errors.installFailed"));
         }
         const skillName = data.skill?.name || item.name;
+        const displayName = item.display_name || skillName;
         setInstalledNames((prev) => new Set([...prev, skillName]));
-        showMessage("success", t("skills.teamskillshub.messages.installed", { name: skillName }));
+        showMessage("success", t("skills.teamskillshub.messages.installed", { name: displayName }));
         await onInstalled?.(skillName);
       } catch (error) {
         console.error(error);

@@ -144,4 +144,8 @@ def test_format_skills_list_for_notice() -> None:
 
 def test_first_batch_registry_ids() -> None:
     ids = {e.id for e in FIRST_BATCH_REGISTRY}
-    assert ids == {"new_session", "mode", "switch", "skills", "resume", "workspace_dir", "branch", "rewind", "recap"}
+    expected = {
+        "new_session", "mode", "switch", "skills", "resume",
+        "workspace_dir", "branch", "rewind", "recap", "agents",
+    }
+    assert ids == expected

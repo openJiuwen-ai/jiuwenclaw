@@ -11,6 +11,7 @@ import pytest
 from openjiuwen.agent_teams.schema.team import TeamRole
 
 from jiuwenswarm.agents.harness.team import TeamMonitorHandler
+from jiuwenswarm.server.runtime.agent_adapter import evolution_helpers
 from jiuwenswarm.server.runtime.agent_adapter import team_helpers
 
 
@@ -107,7 +108,7 @@ class _TeamHelpersTestApi:
         query: str,
     ) -> None:
         consumer = getattr(team_helpers, "_consume_stream_with_query")
-        await consumer(channel_id, session_id, spec, query)
+        await consumer(channel_id, session_id, spec, query, round_id=1)
 
     @staticmethod
     async def consume_monitor_events(
@@ -700,6 +701,38 @@ async def test_team_evolution_monitor_times_out_after_idle_progress(monkeypatch)
 
 
 @pytest.mark.anyio
+async def test_team_evolution_monitor_uses_sdk_timeout_before_legacy_fallback(monkeypatch):
+    class _SdkTimeoutProgressRail(_FakeProgressOnlyRail):
+        @property
+        def evolution_total_timeout_secs(self) -> float:
+            return 0.01
+
+    _FakeTransport.pushes = []
+    rail = _SdkTimeoutProgressRail()
+
+    monkeypatch.setattr(
+        "jiuwenswarm.server.gateway_push.WebSocketGatewayPushTransport",
+        _FakeTransport,
+    )
+    monkeypatch.setattr(team_helpers, "TEAM_EVOLUTION_IDLE_SLEEP_SEC", 0.001)
+    monkeypatch.setattr(team_helpers, "TEAM_EVOLUTION_EVENT_TIMEOUT_SEC", 100.0)
+    monkeypatch.setattr(evolution_helpers, "TEAM_EVOLUTION_EVENT_TIMEOUT_GRACE_SEC", 0.001)
+
+    await asyncio.wait_for(
+        _TeamHelpersTestApi.watch_team_evolution_and_push("web", "sess-sdk-timeout", rail),
+        timeout=0.2,
+    )
+
+    status_pushes = [
+        push for push in _FakeTransport.pushes
+        if push["payload"]["event_type"] == "chat.evolution_status"
+    ]
+    assert [push["payload"]["status"] for push in status_pushes] == ["start", "end"]
+    assert status_pushes[-1]["payload"]["stage"] == "hidden"
+    assert rail.cleanup_calls == 1
+
+
+@pytest.mark.anyio
 async def test_ensure_team_evolution_watcher_starts_without_reasoning_gate(monkeypatch):
     registered: dict[str, asyncio.Task] = {}
 
@@ -1126,7 +1159,7 @@ async def test_process_team_message_stream_does_not_emit_evolution_status_for_no
 
 
 @pytest.mark.anyio
-async def test_consume_stream_with_query_broadcasts_only_leader_team_outputs(monkeypatch):
+async def test_consume_stream_with_query_broadcasts_leader_and_teammate_outputs(monkeypatch):
     broadcasted: list[dict] = []
     ready_calls: list[tuple[str, str]] = []
 
@@ -1149,6 +1182,7 @@ async def test_consume_stream_with_query_broadcasts_only_leader_team_outputs(mon
             type="answer",
             payload={"output": {"output": "teammate answer"}, "result_type": "answer"},
             role=TeamRole.TEAMMATE,
+            source_member="analyst",
         )
         yield SimpleNamespace(
             type="answer",
@@ -1208,31 +1242,101 @@ async def test_consume_stream_with_query_broadcasts_only_leader_team_outputs(mon
 
     assert ready_calls == [("sess-leader-only", "demo-team")]
     assert [event["event_type"] for event in broadcasted] == [
+        "chat.processing_status",
         "team.runtime_ready",
         "chat.final",
+        "chat.final",
     ]
-    assert broadcasted[1]["content"] == "leader answer"
+    # All events before round_complete carry is_processing=True, is_complete=False
+    assert broadcasted[0]["is_processing"] is True
+    assert broadcasted[0]["is_complete"] is False
+    assert broadcasted[2]["content"] == "leader answer"
+    # Teammate event includes role and member_name
+    assert broadcasted[3]["content"] == "teammate answer"
+    assert broadcasted[3]["role"] == TeamRole.TEAMMATE.value
+    assert broadcasted[3]["member_name"] == "analyst"
 
 
-def test_extract_hide_dm_directive_strips_prefix_and_flags():
-    cleaned, hide_dm = team_helpers._extract_hide_dm_directive(  # pylint: disable=protected-access
+def test_extract_query_directives_strips_hide_dm_prefix_and_flags():
+    cleaned, hide_dm, debug = team_helpers._extract_query_directives(  # pylint: disable=protected-access
         "/hide_dm please summarize"
     )
     assert hide_dm is True
+    assert debug is False
     assert cleaned == "please summarize"
 
 
-def test_extract_hide_dm_directive_ignores_non_prefix():
-    cleaned, hide_dm = team_helpers._extract_hide_dm_directive(  # pylint: disable=protected-access
+@pytest.mark.anyio
+async def test_consume_stream_with_query_deduplicates_ask_user_questions(monkeypatch):
+    broadcasted: list[dict] = []
+
+    async def _fake_stream(**kwargs):
+        yield SimpleNamespace(
+            type="chat.ask_user_question",
+            payload={
+                "request_id": "tool-ask-1",
+                "questions": [{"question": "请选择", "header": "选择", "options": []}],
+            },
+            role=TeamRole.LEADER,
+        )
+        yield SimpleNamespace(
+            type="chat.ask_user_question",
+            payload={
+                "request_id": "tool-ask-1",
+                "questions": [{"question": "请选择", "header": "选择", "options": []}],
+            },
+            role=TeamRole.LEADER,
+        )
+
+    class _FakeRunner:
+        run_agent_team_streaming = staticmethod(_fake_stream)
+
+    class _FakeManager:
+        @staticmethod
+        def clear_pending_runtime(session_id: str) -> None:
+            pass
+
+        @staticmethod
+        def pop_stream_task(session_id: str) -> None:
+            pass
+
+    monkeypatch.setattr(team_helpers, "Runner", _FakeRunner)
+    monkeypatch.setattr(team_helpers, "get_team_manager", lambda channel_id: _FakeManager())
+    monkeypatch.setattr(
+        team_helpers,
+        "_broadcast_event",
+        lambda channel_id, session_id, event: broadcasted.append(event),
+    )
+
+    await _TeamHelpersTestApi.consume_stream_with_query(
+        "web",
+        "sess-ask-dedupe",
+        SimpleNamespace(team_name="demo-team"),
+        "hello",
+    )
+
+    ask_events = [
+        event
+        for event in broadcasted
+        if event.get("event_type") == "chat.ask_user_question"
+    ]
+    assert len(ask_events) == 1
+    assert ask_events[0]["request_id"] == "tool-ask-1"
+
+
+def test_extract_query_directives_ignores_non_prefix():
+    cleaned, hide_dm, debug = team_helpers._extract_query_directives(  # pylint: disable=protected-access
         "/hide_dmsomething else"
     )
     assert hide_dm is False
+    assert debug is False
     assert cleaned == "/hide_dmsomething else"
 
 
-def test_extract_hide_dm_directive_handles_bare_directive():
-    cleaned, hide_dm = team_helpers._extract_hide_dm_directive("/hide_dm")  # pylint: disable=protected-access
+def test_extract_query_directives_handles_bare_hide_dm():
+    cleaned, hide_dm, debug = team_helpers._extract_query_directives("/hide_dm")  # pylint: disable=protected-access
     assert hide_dm is True
+    assert debug is False
     assert cleaned == ""
 
 
@@ -1297,7 +1401,8 @@ async def test_consume_stream_with_query_propagates_hide_dm_to_monitor(monkeypat
         "sess-hide-dm",
         SimpleNamespace(team_name="demo-team"),
         "hello",
-        hide_dm=True,
+        round_id=1,
+        envs={"hide_dm": True},
     )
 
     assert captured == {
@@ -1415,6 +1520,52 @@ async def test_handle_team_slash_command_submits_explicit_evolve_request(monkeyp
             }
         ],
         "question_count": 1,
+    }
+
+
+@pytest.mark.anyio
+async def test_handle_team_slash_command_maps_generation_failed_status(monkeypatch):
+    class _FakeStore:
+        @staticmethod
+        def skill_exists(skill_name: str) -> bool:
+            return skill_name == "demo-skill"
+
+        @staticmethod
+        def skill_definition_exists(skill_name: str) -> bool:
+            return skill_name == "demo-skill"
+
+        @staticmethod
+        def list_skill_names() -> list[str]:
+            return ["demo-skill"]
+
+    class _FakeRail:
+        store = _FakeStore()
+
+        @staticmethod
+        async def request_user_evolution(skill_name: str, user_query: str):
+            return SimpleNamespace(
+                status="generation_failed",
+                message="llm unavailable",
+                approval_event=None,
+                records=[],
+            )
+
+    class _FakeManager:
+        @staticmethod
+        def get_team_skill_rail(session_id: str):
+            return _FakeRail()
+
+    monkeypatch.setattr(team_helpers, "get_team_manager", lambda channel_id: _FakeManager())
+
+    result = await _TeamHelpersTestApi.handle_team_slash_command(
+        "web",
+        "sess-team-evolve",
+        "/evolve demo-skill improve review flow",
+    )
+
+    assert result == {
+        "output": "llm unavailable",
+        "result_type": "error",
     }
 
 

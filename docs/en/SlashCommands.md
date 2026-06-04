@@ -32,8 +32,9 @@ Executed locally in the terminal UI, not through Gateway control pipeline.
 | `/evolve_simplify` | Simplify and consolidate one skill's evolution records (see below) |
 | `/evolve_rebuild` | Rebuild `SKILL.md` from archives and evolution records (see below) |
 | `/sandbox` | Set sandbox mode (see below) |
+| `/auto-harness` | Auto-Harness task management (`run`/`schedule`, see below) |
 
-> Note: `/mode` controlled switching logic is primarily on Gateway side, see "`/mode` and `/switch`" below.
+> Note: `/mode` controlled switching logic is primarily on Gateway side, see "`/mode` and `/switch`" below. The TUI local command additionally supports `/mode plan` and `/mode team.normal`; see the TUI guide for details.
 
 ### Gateway / Agent Parsing (Controlled Channel)
 
@@ -107,12 +108,13 @@ Manages directories AI can access for file read, edit, and execute operations.
 - Direct syntax:
   - `/mode agent.plan` -> `agent.plan`
   - `/mode agent.fast` -> `agent.fast`
-  - `/mode code.plan` -> `code.plan`
   - `/mode code.normal` -> `code.normal`
+  - `/mode code.team` -> `code.team`
 - Second-level switching:
   - agent family: `/switch plan` <-> `agent.plan`, `/switch fast` <-> `agent.fast`
-  - code family: `/switch plan` <-> `code.plan`, `/switch normal` <-> `code.normal`
+  - code family: `/switch normal` <-> `code.normal`, `/switch team` <-> `code.team`
 - Invalid combinations (e.g., `/switch fast` under `code.*`) return: `Invalid command`.
+- Controlled channels do not accept `/mode plan` or `/mode team.normal`.
 - Note: Standalone `/team` command removed, use `/mode team` instead.
 
 ### `/resume`
@@ -173,7 +175,7 @@ Manages directories AI can access for file read, edit, and execute operations.
   1. Select scope: `Team-shared` (JIUWENSWARM.md), `Personal` (JIUWENSWARM.local.md), or `Both`.
   2. Detect existing configs: Auto-detect `CLAUDE.md`, `.cursorrules`, `copilot-instructions.md` etc.
   3. Generate configs: Create project config files based on selection.
-- Auto mode switch: If in `code.plan`, auto-switches to `code.normal` for write permission.
+- Auto mode switch: Code initialization runs in `code.normal` for write permission.
 
 ### `/mcp` (MCP Server Management)
 
@@ -317,6 +319,7 @@ Manage cron jobs via RPC calls to the backend `CronController`, sharing the same
 | Command | Description |
 |---|---|
 | `/cron` or `/cron list` | List all cron jobs |
+| `/cron show <job_id>` | Show detailed info for a specific job |
 | `/cron add name=<name> cron_expr=<expression> description=<desc> [other params]` | Create a new cron job |
 | `/cron update <job_id> key=value ...` | Update specific fields of a job |
 | `/cron delete <job_id>` | Delete a job |
@@ -331,7 +334,7 @@ Manage cron jobs via RPC calls to the backend `CronController`, sharing the same
 | `name` | Yes | Job name |
 | `cron_expr` | Yes | Cron expression, supports two formats: 5-field (min hour day month dow) or 7-field Quartz (sec min hour day month dow year). 5-field is auto-converted to 7-field (second=0, year=*). Examples: daily 9am = `0 9 * * *` (5-field) or `0 0 9 * * ? *` (7-field) |
 | `description` | Yes | Job description — the input prompt the Agent receives when executing |
-| `targets` | No | Push channel, default `tui`; options: `tui`, `web`, `feishu`, `whatsapp`, `wecom`, `xiaoyi`, `wechat`, or `feishu_enterprise:<app_id>` |
+| `targets` | No | Push channel, default `tui`; options: `tui`, `web`, `feishu`, `whatsapp`, `wecom`, `xiaoyi`, `wechat`, `dingtalk`, or `feishu_enterprise:<app_id>` |
 | `timezone` | No | IANA timezone, default `Asia/Shanghai` |
 | `mode` | No | Execution mode: `agent` (default, suitable for simple reminder-type tasks) or `plan` (for more complex reasoning tasks, allowing the Agent to plan the steps first before executing) |
 | `wake_offset_seconds` | No | Wake-up offset in seconds, default 300 |
@@ -344,6 +347,7 @@ Manage cron jobs via RPC calls to the backend `CronController`, sharing the same
   - `/cron add name=weekly-report cron_expr="0 9 * * 1" description="Generate weekly report" targets=web`
 
 - `update` usage: Only pass the fields you want to change, e.g., `/cron update <id> name=new-name enabled=false`
+- `show` display: full job details in key-value format (id, name, status, cron_expr, timezone, description, targets, mode, wake_offset_seconds, delete_after_run)
 - `list` display: sequence number, full job ID, name, cron expression, enabled status, description snippet
 - `preview` display: wake_at and push_at timestamps for each upcoming execution
 
@@ -571,11 +575,12 @@ Configure the TUI footer status bar with a custom shell command that dynamically
 | `/statusline` or `/statusline get` | View current status line configuration |
 | `/statusline set <shell-command>` | Set the status line command (its output will appear in the TUI footer) |
 | `/statusline clear` | Remove the status line configuration (footer bar will hide) |
-| `/statusline help` | Show the JSON input fields reference |
+| `/statusline help` | Show usage guide (writing patterns, practical examples, field list) |
+| `/statusline json` | Show the actual current JSON data values (useful for debugging jq expressions) |
 
 #### Concepts
 
-- **StatusLine**: A one-line text area at the bottom of the TUI that displays user-defined dynamic information. When a custom statusline is configured, the built-in status line is automatically hidden to avoid redundant information.
+- **StatusLine**: A text area at the bottom of the TUI that displays user-defined dynamic information, supporting multi-line output. When a custom statusline is configured, the built-in status line is automatically hidden to avoid redundant information.
 - **Shell command**: The configured shell command is automatically executed every 2 seconds; its stdout output is rendered as the status bar text.
 - **JSON input**: Each execution receives current session info as JSON, which can be parsed with `jq` or other tools. On POSIX (Linux/macOS), JSON is passed via stdin pipe; on Windows, due to MSYS2 pipe inheritance limitations, the system automatically writes JSON to a temp file and replaces `$(cat)` in the command with `$(cat "filepath")` — the user doesn't need to modify their command format.
 - **Prerequisites**: Requires `jq` (https://stedolan.github.io/jq/) for JSON parsing; Windows users also need to add Git Bash's `usr\bin` directory to the system PATH (e.g., `E:\Git\usr\bin`).
@@ -589,7 +594,7 @@ The command receives the following JSON data on each execution:
 | `session_id` | Current session ID |
 | `session_name` | Session title (set via `/rename`) |
 | `cwd` | Current working directory |
-| `mode` | Current mode (`agent.plan` / `agent.fast` / `code.plan` / `code.normal` / `team`) |
+| `mode` | Current mode (`agent.plan` / `agent.fast` / `code.normal` / `code.team` / `team`) |
 | `model` | Current model name |
 | `provider` | Model provider |
 | `version` | jiuwenswarm version |
@@ -607,9 +612,13 @@ The command receives the following JSON data on each execution:
 | `evolution_status` | Evolution status (`idle` / `running`) |
 | `active_subtask_count` | Number of active subtasks |
 | `todo_count` | Number of todo items |
+| `trusted_dirs` | Trusted workspace directories (array of path strings) |
 | `usage.total_input_tokens` | Total input tokens for session |
 | `usage.total_output_tokens` | Total output tokens for session |
 | `usage.total_tokens` | Total tokens for session |
+| `context_window.context_window_size` | Model max context window tokens (e.g. 200000) |
+| `context_window.used_percentage` | Context occupancy percentage (0-100) |
+| `context_window.remaining_percentage` | Context remaining percentage (0-100) |
 
 #### Command Writing Template
 
@@ -621,10 +630,10 @@ Use the following template to write commands. `input=$(cat)` reads JSON into a v
 /statusline set 'input=$(cat); field1=$(echo "$input" | jq -r '.field1 // "default"'); field2=$(echo "$input" | jq -r '.field2 // "default"'); echo "format string"'
 ```
 
-**Recommended universal command** (shows mode, model, tokens, connection):
+**Recommended universal command** (shows mode, model, tokens, context %, connection):
 
 ```
-/statusline set 'input=$(cat); mode=$(echo "$input" | jq -r '.mode // "?"'); model=$(echo "$input" | jq -r '.model // "?"'); tokens=$(echo "$input" | jq -r '.usage.total_tokens // 0'); conn=$(echo "$input" | jq -r '.connection // "?"'); echo "$mode | $model | tokens:$tokens | $conn"'
+/statusline set 'input=$(cat); mode=$(echo "$input" | jq -r '.mode // "?"'); model=$(echo "$input" | jq -r '.model // "?"'); tokens=$(echo "$input" | jq -r '.usage.total_tokens // 0'); pct=$(echo "$input" | jq -r '.context_window.used_percentage // 0'); conn=$(echo "$input" | jq -r '.connection // "?"'); echo "$mode | $model | ctx:${pct}% | tokens:$tokens | $conn"'
 ```
 
 **Field extraction quick reference**:
@@ -645,18 +654,26 @@ Use the following template to write commands. `input=$(cat)` reads JSON into a v
 | Evolution status | `jq -r '.evolution_status // "idle"'` |
 | Subtask count | `jq -r '.active_subtask_count // 0'` |
 | Todo count | `jq -r '.todo_count // 0'` |
+| Trusted dirs | `jq -r '(.trusted_dirs // []) | join(" ")'` |
 | Total input tokens | `jq -r '.usage.total_input_tokens // 0'` |
 | Total output tokens | `jq -r '.usage.total_output_tokens // 0'` |
 | Total tokens | `jq -r '.usage.total_tokens // 0'` |
+| Context window size | `jq -r '.context_window.context_window_size // 0'` |
+| Context used % | `jq -r '.context_window.used_percentage // 0'` |
+| Context remaining % | `jq -r '.context_window.remaining_percentage // 0'` |
 
 #### More Examples
 
 - `/statusline` — View current configuration
 - `/statusline set 'input=$(cat); model=$(echo "$input" | jq -r .model); echo "$model"'` — Show model name only
 - `/statusline set 'input=$(cat); proc=$(echo "$input" | jq -r .is_processing); model=$(echo "$input" | jq -r .model); echo "$proc | $model"'` — Show processing state and model
+- `/statusline set 'input=$(cat); pct=$(echo "$input" | jq -r .context_window.used_percentage); rem=$(echo "$input" | jq -r .context_window.remaining_percentage); cw=$(echo "$input" | jq -r ".context_window.context_window_size / 1000"); echo "ctx:${pct}% used (${rem}% left, ${cw}K window)"'` — Show context window occupancy with percentage bar
+- `/statusline set 'input=$(cat); pct=$(echo "$input" | jq -r ".context_window.used_percentage // 0"); if [ "$pct" -ge 90 ]; then warn="⚠HIGH"; elif [ "$pct" -ge 70 ]; then warn="~MED"; else warn="OK"; fi; echo "ctx:${pct}% $warn"'` — Show context % with threshold warning (≥90% HIGH, ≥70% MED)
 - `/statusline set 'input=$(cat); err=$(echo "$input" | jq -r .last_error); if [ "$err" != "null" ] && [ "$err" != "" ]; then echo "error: $err"; else echo "ok"; fi'` — Show error when present, otherwise "ok"
+- `/statusline set 'input=$(cat); dirs=$(echo "$input" | jq -r '.trusted_dirs // [] | join(" ")'); mode=$(echo "$input" | jq -r '.mode // "?"'); echo "$mode | dirs:$dirs"'` — Show mode and trusted workspace directories
 - `/statusline clear` — Remove status line configuration
-- `/statusline help` — View JSON input fields reference
+- `/statusline help` — View usage guide (writing patterns, practical examples, available fields)
+- `/statusline json` — View actual current JSON data values (useful for debugging jq expressions)
 
 #### Behavior Details
 
@@ -674,11 +691,80 @@ Use the following template to write commands. `input=$(cat)` reads JSON into a v
 {
   "statusLine": {
     "type": "command",
-    "command": "input=$(cat); mode=$(echo \"$input\" | jq -r '.mode // \"?\"'); model=$(echo \"$input\" | jq -r '.model // \"?\"'); tokens=$(echo \"$input\" | jq -r '.usage.total_tokens // 0'); echo \"$mode | $model | tokens:$tokens\"",
+    "command": "input=$(cat); mode=$(echo \"$input\" | jq -r '.mode // \"?\"'); model=$(echo \"$input\" | jq -r '.model // \"?\"'); pct=$(echo \"$input\" | jq -r '.context_window.used_percentage // 0'); tokens=$(echo \"$input\" | jq -r '.usage.total_tokens // 0'); echo \"$mode | $model | ctx:${pct}% | tokens:$tokens\"",
     "padding": 0
   }
 }
 ```
+
+### `/auto-harness` (Auto-Harness Task Management)
+
+Manage Auto-Harness task creation, execution, and monitoring. Auto-Harness generates harness extension packages via automated pipelines, supporting two pipeline types:
+
+- **optimize_expert_harness** (backend value `extended_evolve_pipeline`): Generate a local harness extension package
+- **optimize_meta_harness** (backend value `meta_evolve_pipeline`): Submit PR (requires git config)
+
+During pipeline execution, extension packages are **activated automatically by default** — no manual user confirmation is needed. Logs display `harness.extension_ready` (extension ready, showing directory and component info) and `harness.activate_interaction` (activation confirmation prompt) events.
+
+#### Configuration Requirements
+
+Using the `optimize_meta_harness` pipeline requires the following fields to be configured (via `/config edit` or `/status config`):
+
+| Field | Required | Description |
+|---|---|---|
+| `git.user_name` | Yes | Git commit username |
+| `git.user_email` | Yes | Git commit email |
+| `git.fork_owner` | Yes | Fork repository owner (e.g., `SnapeK`) |
+| `gitcode.access_token` | No | GitCode API token (can also be provided via environment variable `GITCODE_ACCESS_TOKEN`) |
+
+If configuration is incomplete, the task creation will prompt the missing fields.
+
+#### Subcommands
+
+| Command | Description |
+|---|---|
+| `/auto-harness run [--pipeline <pipeline>] <query>` | Execute a one-time Auto-Harness task |
+| `/auto-harness schedule start --interval <hours> [--pipeline <pipeline>] <query>` | Create a scheduled task |
+| `/auto-harness schedule list` | List all tasks |
+| `/auto-harness schedule status <task_id>` | View task details |
+| `/auto-harness schedule logs <task_id> [--history <n>]` | View task execution logs |
+| `/auto-harness schedule cancel <task_id>` | Cancel a task |
+| `/auto-harness schedule delete <task_id>` | Delete a task |
+
+#### `/auto-harness run` (One-time Execution)
+
+- Usage: `/auto-harness run [--pipeline <pipeline>] <query>`
+- Flow:
+  1. If pipeline is not specified, interactively select the pipeline type
+  2. If `optimize_meta_harness` is selected, automatically check git config completeness
+  3. Create and execute a one-time task
+  4. Automatically enter real-time log streaming mode (similar to `tail -f`)
+- Examples:
+  - `/auto-harness run Optimize database query performance` — No pipeline specified, interactive selection
+  - `/auto-harness run --pipeline optimize_expert_harness Optimize context compression` — Specify pipeline
+
+#### `/auto-harness schedule start` (Create Scheduled Task)
+
+- Usage: `/auto-harness schedule start --interval <hours> [--pipeline <pipeline>] <query>`
+- Parameters:
+  - `--interval` / `-i` (required): Execution interval in hours; options: `1`, `2`, `4`, `8`, `12`, `24`
+  - `--pipeline` / `-p` (optional): Pipeline type; interactively selected if not specified
+  - `<query>` (required): Optimization target description
+- Flow:
+  1. If pipeline is not specified, interactively select
+  2. If `optimize_meta_harness` is selected, check git config
+  3. Interactively confirm whether to run immediately
+  4. Create the scheduled task
+- Examples:
+  - `/auto-harness schedule start --interval 4 Optimize context compression`
+  - `/auto-harness schedule start -i 2 -p optimize_meta_harness Submit database optimization PR`
+
+#### `/auto-harness schedule logs` (View Execution Logs)
+
+- Usage: `/auto-harness schedule logs <task_id> [--history <n>]`
+- Modes:
+  - Default: Stream current running logs in real-time (`tail -f` mode); Ctrl+C to interrupt
+  - `--history <n>`: View historical execution logs (`view` mode, `n` is the history index, 0 = most recent)
 
 ---
 

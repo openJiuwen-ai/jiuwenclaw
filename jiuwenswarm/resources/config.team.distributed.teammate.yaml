@@ -719,12 +719,14 @@ modes:
       tools:
   code:
     # 动态 Rails — 列表中出现的 = 启用；不出现的 = 不启用
-    # 固定 Rails（RuntimePromptRail/ResponsePromptRail/JiuClawStreamEventRail/SecurityRail/PermissionInterruptRail）
-    # 写死在代码中，不在此配置
+    # 固定 Rails（以下 Rails 已在代码中固定挂载，无需在此配置）：
+    #   RuntimePromptRail, ResponsePromptRail, JiuClawStreamEventRail, SecurityRail,
+    #   PermissionInterruptRail, SysOperationRail(FileSystemRail), LspRail,
+    #   ProjectMemoryRail, CodingMemoryRail, AgentModeRail, StructuredAskUserRail,
+    #   ConfirmInterruptRail, ContextProcessorRail
     rails:
       - FileSystemRail
       - SkillUseRail
-      - LspRail
 
     # 动态 Tools — 列表中出现的 = 启用
     # send_file_to_user 由运行时 _update_session_tools 注册，不在此配置
@@ -781,3 +783,14 @@ modes:
         type: postgresql
         params:
           connection_string: postgresql+asyncpg://postgres:postgres@127.0.0.1:5432/jiuwen_team
+
+      # ============================================================
+      # Team 级共享记忆（TeamMemoryConfig）
+      # ============================================================
+      memory:
+        enabled: false
+        scenario: "general"
+        auto_extract: true
+        shared_memory: true
+        member_memory_prompt_mode: "proactive"
+        timezone_offset_hours: 8.0

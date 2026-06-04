@@ -10,6 +10,7 @@ import json
 import logging
 import uuid
 from datetime import datetime, timezone, timedelta
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, Optional
 
 from openjiuwen.auto_harness.pipelines import META_EVOLVE_PIPELINE
@@ -20,6 +21,64 @@ if TYPE_CHECKING:
     from .task_store import TaskStore
 
 logger = logging.getLogger(__name__)
+
+
+def _sync_append_log(log_path: Path, line: str) -> None:
+    """Synchronous append+flush for log file — called via asyncio.to_thread."""
+    with log_path.open("a", encoding="utf-8") as f:
+        f.write(line)
+        f.flush()
+
+
+def _determine_pipeline_status_from_log(log_path) -> dict[str, Any]:
+    """Parse a JSON Lines log file and determine whether the pipeline succeeded.
+
+    Rules:
+    - meta_evolve_pipeline: every stage must have harness.stage_result with status="success".
+    - extended_evolve_pipeline: build_verify must appear (any status), activate must be "success".
+
+    Returns:
+        {"failed": bool, "error": str}
+    """
+    pipeline_type: str = ""
+    pipeline_stages: list[str] = []
+    stage_results: dict[str, str] = {}
+
+    try:
+        with log_path.open("r", encoding="utf-8") as lf:
+            for line in lf:
+                try:
+                    entry = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if entry.get("event_type") == "harness.message" and entry.get("stages") and entry.get("pipeline"):
+                    pipeline_stages = [s.get("slot") for s in entry["stages"]]
+                    pipeline_type = entry.get("pipeline", "")
+                if entry.get("event_type") == "harness.stage_result" and not entry.get("scope"):
+                    slot = entry.get("stage")
+                    status = entry.get("status")
+                    if slot:
+                        stage_results[slot] = status
+    except Exception as exc:
+        logger.warning("[Scheduler] Failed to read log %s: %s", log_path, exc)
+        return {"failed": False, "error": ""}
+
+    if pipeline_type == "extended_evolve_pipeline":
+        if "build_verify" not in stage_results:
+            return {"failed": True, "error": "Stage 'build_verify' not appeared"}
+        if stage_results.get("activate") != "success":
+            return {"failed": True, "error": f"Stage 'activate' {stage_results.get('activate', 'not completed')}"}
+        return {"failed": False, "error": ""}
+
+    for slot in pipeline_stages:
+        result = stage_results.get(slot)
+        if result != "success":
+            return {
+                "failed": True,
+                "error": f"Stage '{slot}' {stage_results.get(slot, 'not completed')}",
+            }
+
+    return {"failed": False, "error": ""}
 
 
 class Scheduler:
@@ -155,6 +214,19 @@ class Scheduler:
         # Get current execution_id to build session_id
         task_data = self._task_store.get_task(task_id)
         execution_id = task_data.get("current_execution_id") if task_data else None
+        started_at_str = None
+        log_path_str = None
+
+        # Try to get started_at from execution_history (most recent)
+        if task_data:
+            history = task_data.get("execution_history", [])
+            if history:
+                # Find the execution record for this execution_id
+                for record in reversed(history):
+                    if record.get("execution_id") == execution_id:
+                        started_at_str = record.get("started_at")
+                        log_path_str = record.get("log_path")
+                        break
 
         # Cancel the internal service run first (orchestrator execution)
         if execution_id:
@@ -163,13 +235,50 @@ class Scheduler:
             self._service.cancel_session_run(session_id)
 
         # Cancel the scheduler-level asyncio.Task
+        logger.info("[Scheduler] Cancelling asyncio.Task for task %s", task_id)
         exec_task.cancel()
         try:
             await exec_task
         except asyncio.CancelledError:
-            pass
+            logger.info("[Scheduler] CancelledError caught for task %s", task_id)
 
+        # Remove from running dict (before adding execution record to avoid race)
         self._running_executions.pop(task_id, None)
+
+        # Record execution history if we have execution_id
+        # (This ensures history is recorded even if _execute_scheduled_task's finally block didn't run)
+        if execution_id and task_data:
+            completed_at = datetime.now(timezone.utc)
+            logger.info(
+                "[Scheduler] Recording execution history for cancelled task %s, execution_id %s",
+                task_id, execution_id
+            )
+
+            # Build log path if not found
+            if not log_path_str:
+                log_path = self._task_store.get_log_path(task_id, execution_id)
+                log_path_str = str(log_path)
+
+            # Use current time as started_at if not found
+            if not started_at_str:
+                started_at_str = completed_at.isoformat()
+
+            await self._task_store.add_execution_record(task_id, {
+                "execution_id": execution_id,
+                "started_at": started_at_str,
+                "completed_at": completed_at.isoformat(),
+                "status": "cancelled",
+                "error": "User cancelled",
+                "log_path": log_path_str,
+            })
+
+            # Update task status to cancelled
+            await self._task_store.update_task(task_id, {
+                "status": "cancelled",
+                "current_execution_id": None,
+            })
+            logger.info("[Scheduler] Task %s execution %s marked as cancelled in history", task_id, execution_id)
+
         logger.info("[Scheduler] Cancelled execution for task: %s", task_id)
         return True
 
@@ -235,6 +344,7 @@ class Scheduler:
         query = task.get("query")
         interval_hours = task.get("interval_hours", 4)
         model_name = task.get("model_name")
+        pipeline = task.get("pipeline")  # Pipeline preference from task
 
         if not task_id or not query:
             logger.warning("[Scheduler] Invalid task data: %s", task)
@@ -244,7 +354,7 @@ class Scheduler:
         session_id = f"sched_{task_id}_{execution_id}"
 
         # Update status to running
-        self._task_store.update_task(task_id, {
+        await self._task_store.update_task(task_id, {
             "status": "running",
             "current_execution_id": execution_id,
         })
@@ -254,11 +364,7 @@ class Scheduler:
         final_status = "success"
         error_msg = ""
 
-        # Open log file for appending (JSON Lines format)
-        log_file = None
-
         try:
-            log_file = log_path.open("a", encoding="utf-8")
             # Agent should already be set on service by the request handler
             # (similar to how _handle_command_compact works)
             logger.info(
@@ -269,6 +375,9 @@ class Scheduler:
             # Build request for execution
             from jiuwenswarm.common.schema.agent import AgentRequest
 
+            # Resolve pipeline preference (use task's pipeline or default to META_EVOLVE_PIPELINE)
+            pipeline_preference = pipeline if pipeline else META_EVOLVE_PIPELINE
+
             request = AgentRequest(
                 request_id=execution_id,
                 channel_id="tui",
@@ -276,7 +385,7 @@ class Scheduler:
                 params={
                     "mode": "auto_harness",
                     "scheduled": True,
-                    "pipeline_preference": META_EVOLVE_PIPELINE,
+                    "pipeline_preference": pipeline_preference,
                 },
             )
 
@@ -288,17 +397,18 @@ class Scheduler:
             )
 
             # Execute via service.run() - service already has agent set
+            # Auto-accept interactions: scheduled runs have no interactive channel
             async for chunk in self._service.run(
-                request, session_id, execution_id, query, model=model
+                request, session_id, execution_id, query=query, model=model, auto_accept=True
             ):
                 if chunk.payload:
                     # Skip context compression events - not needed in logs
                     event_type = chunk.payload.get("event_type", "")
-                    if event_type in ("context.compressed", "context_compression_state"):
+                    if event_type in ("context.usage", "context.compression_state"):
                         continue
-                    # Append log chunk immediately (JSON Lines format)
-                    log_file.write(json.dumps(chunk.payload, ensure_ascii=False) + "\n")
-                    log_file.flush()
+                    # Append log chunk via thread pool (avoids blocking event loop)
+                    line = json.dumps(chunk.payload, ensure_ascii=False) + "\n"
+                    await asyncio.to_thread(_sync_append_log, log_path, line)
 
             logger.info(
                 "[Scheduler] Task %s execution %s completed successfully",
@@ -315,13 +425,15 @@ class Scheduler:
             logger.exception("[Scheduler] Task %s execution %s failed: %s", task_id, execution_id, e)
 
         finally:
-            # Close log file
-            if log_file:
-                log_file.close()
+            if final_status == "success" and log_path.exists():
+                result = _determine_pipeline_status_from_log(log_path)
+                if result["failed"]:
+                    final_status = "failed"
+                    error_msg = result["error"]
 
             # Record execution
             completed_at = datetime.now(timezone.utc)
-            self._task_store.add_execution_record(task_id, {
+            await self._task_store.add_execution_record(task_id, {
                 "execution_id": execution_id,
                 "started_at": started_at.isoformat(),
                 "completed_at": completed_at.isoformat(),
@@ -332,25 +444,22 @@ class Scheduler:
 
             # Update next run time if not cancelled
             if final_status != "cancelled":
-                # Check if this is a one-time task
                 is_one_time = task.get("is_one_time", False)
                 if is_one_time:
-                    # One-time task: mark as completed (no rescheduling)
-                    self._task_store.update_task(task_id, {
-                        "status": "completed",
+                    await self._task_store.update_task(task_id, {
+                        "status": final_status,
                         "current_execution_id": None,
                     })
-                    logger.info("[Scheduler] One-time task %s completed", task_id)
+                    logger.info("[Scheduler] One-time task %s finished with status: %s", task_id, final_status)
                 else:
-                    # Recurring task: reschedule
                     next_run = completed_at + timedelta(hours=interval_hours)
-                    self._task_store.update_task(task_id, {
+                    await self._task_store.update_task(task_id, {
                         "status": "pending",
                         "current_execution_id": None,
                         "next_run_time": next_run.isoformat(),
                     })
             else:
-                self._task_store.update_task(task_id, {
+                await self._task_store.update_task(task_id, {
                     "status": "cancelled",
                     "current_execution_id": None,
                 })

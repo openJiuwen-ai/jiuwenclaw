@@ -19,6 +19,7 @@ from openjiuwen.agent_teams.agent.team_agent import TeamAgent
 from openjiuwen.agent_teams.paths import team_home
 from openjiuwen.agent_teams.schema.blueprint import TeamAgentSpec
 from openjiuwen.agent_teams.context import reset_session_id, set_session_id
+from openjiuwen.agent_evolving.trajectory import InMemoryTrajectoryRegistry
 from openjiuwen.core.runner import Runner
 from openjiuwen.harness import DeepAgent
 from openjiuwen.harness.rails import (
@@ -55,7 +56,7 @@ from jiuwenswarm.agents.harness.team.distributed_runtime import (
     try_start_pg_cluster,
 )
 from jiuwenswarm.agents.harness.team.monitor_handler import TeamMonitorHandler
-from jiuwenswarm.agents.harness.team.remote_member_bootstrap import release_a2x_reservations_for_team
+from jiuwenswarm.agents.harness.team.remote_member_bootstrap import release_a2x_reservations_for_session
 from jiuwenswarm.common.config import get_config, get_default_models
 from jiuwenswarm.agents.harness.team.team_runtime_inheritance import (
     MemberInfo,
@@ -118,7 +119,8 @@ class TeamRailMountContext:
 
 async def _stop_team_messager(team_agent: Any, *, session_id: str) -> None:
     """Stop a team's mailbox transport so per-team ZMQ sockets release their ports."""
-    messager = getattr(team_agent, "_messager", None) or getattr(team_agent, "mailbox_transport", None)
+    infra = getattr(team_agent, "infra", None)
+    messager = getattr(infra, "messager", None) if infra is not None else None
     stop = getattr(messager, "stop", None)
     if not callable(stop):
         return
@@ -146,6 +148,7 @@ class TeamManager:
 
     def __init__(self):
         self._team_agents: dict[str, TeamAgent] = {}
+        self._runner_team_agents: dict[str, TeamAgent] = {}
         self._team_monitors: dict[str, TeamMonitorHandler] = {}
         self._stream_tasks: dict[str, asyncio.Task] = {}
         self._lock = asyncio.Lock()
@@ -363,6 +366,10 @@ class TeamManager:
             spec,
             session_id=session_id,
         )
+        self.apply_team_plan_mode(
+            spec,
+            request_metadata=request_metadata,
+        )
         spec.agent_customizer = self.build_agent_customizer(
             spec,
             deep_agent,
@@ -372,6 +379,19 @@ class TeamManager:
             request_metadata=request_metadata,
         )
         return spec
+
+    @staticmethod
+    def apply_team_plan_mode(
+        spec: TeamAgentSpec,
+        *,
+        request_metadata: dict[str, Any] | None,
+    ) -> None:
+        mode = str((request_metadata or {}).get("mode") or "").strip().lower()
+        if mode == "team.plan":
+            try:
+                spec.enable_team_plan = True
+            except (AttributeError, ValueError):
+                object.__setattr__(spec, "enable_team_plan", True)
 
     async def prepare_runtime_activation(self, session_id: str, team_name: str) -> None:
         await self.prepare_session_switch(
@@ -556,7 +576,7 @@ class TeamManager:
             else str(team_home(spec.team_name) / "team-workspace")
         )
         team_ws_skills_dir = Path(team_ws_root) / "skills"
-        team_ws_trajectories_dir = Path(team_ws_root) / "trajectories"
+        team_trajectory_registry = InMemoryTrajectoryRegistry()
 
         def resolve_member_spec(
             member_name: str | None,
@@ -715,14 +735,39 @@ class TeamManager:
                 member_name,
                 role,
             )
-            agent_ws = agent.deep_config.workspace if agent.deep_config else None
+            member_deep_config = getattr(agent, "deep_config", None)
+            agent_ws = (
+                getattr(member_deep_config, "workspace", None)
+                if member_deep_config
+                else None
+            )
             if agent_ws:
-                logger.debug("[TeamManager] member workspace.root_path=%s", agent_ws.root_path)
+                logger.debug(
+                    "[TeamManager] member workspace.root_path=%s",
+                    getattr(agent_ws, "root_path", None),
+                )
             else:
                 logger.warning("[TeamManager] agent deep_config.workspace is None")
             parent_adapter_mode = str(
                 getattr(deep_agent, "_jiuwenswarm_adapter_mode", "") or ""
             ).lower()
+            parent_deep_config = getattr(deep_agent, "deep_config", None)
+            parent_workspace = (
+                getattr(parent_deep_config, "workspace", None)
+                if parent_deep_config
+                else None
+            )
+            parent_project_dir = (
+                str(getattr(deep_agent, "_jiuwenswarm_project_dir", "") or "")
+                or str(getattr(deep_agent, "_jiuwenswarm_code_project_dir", "") or "")
+                or (
+                    str(getattr(parent_workspace, "root_path", ""))
+                    if parent_workspace and getattr(parent_workspace, "root_path", None)
+                    else ""
+                )
+            )
+            if parent_project_dir and member_deep_config is not None:
+                setattr(agent, "_jiuwenswarm_project_dir", parent_project_dir)
 
             inheritable_cards = filter_inheritable_ability_cards(deep_agent)
             existing_ability_ids = {card.id for card in agent.ability_manager.list() or []}
@@ -740,28 +785,30 @@ class TeamManager:
                 len(existing_ability_ids),
             )
 
-            member_workspace = agent.deep_config.workspace if agent.deep_config else None
+            member_workspace = agent_ws
+            member_workspace_root = getattr(member_workspace, "root_path", None)
             member_skills_dir_resolved: Path | None = None
             member_skill_manager: Any | None = None
-            if member_workspace and member_workspace.root_path:
-                member_skills_dir = Path(member_workspace.root_path) / "skills"
+            if member_workspace and member_workspace_root:
+                member_skills_dir = Path(member_workspace_root) / "skills"
                 member_skills_dir_resolved = member_skills_dir
                 skills_configured, selected_skills = resolve_member_skills(member_name, role)
 
-                # Copy member-configured skills to member's own skills directory
-                # Note: global skills are already copied to team shared directory in create_team
+                # Copy member-configured skills, then mirror team-shared skills so
+                # SkillManager / skills_state on the member workspace can discover them.
                 try:
                     # Ensure member skills directory exists
                     member_skills_dir.mkdir(parents=True, exist_ok=True)
                     if skills_configured and selected_skills:
                         copy_member_configured_skills(member_skills_dir, selected_skills)
+                    _sync_skills_dir(team_ws_skills_dir, member_skills_dir)
                     # Member directory always needs skills_state.json
                     write_member_skill_state(member_skills_dir)
                 except Exception as exc:
                     logger.warning("[TeamManager] skill copy failed: %s", exc)
 
                 try:
-                    member_skill_manager = SkillManager(workspace_dir=str(member_workspace.root_path))
+                    member_skill_manager = SkillManager(workspace_dir=str(member_workspace_root))
                 except Exception as exc:
                     logger.warning("[TeamManager] member SkillManager setup failed: %s", exc)
 
@@ -769,12 +816,12 @@ class TeamManager:
                 try:
                     agent.add_rail(
                         MemberSkillToolkitRail(
-                            workspace_dir=str(member_workspace.root_path),
+                            workspace_dir=str(member_workspace_root),
                         )
                     )
                     logger.info(
                         "[TeamManager] MemberSkillToolkitRail queued for member workspace: %s",
-                        member_workspace.root_path,
+                        member_workspace_root,
                     )
                 except Exception as exc:
                     logger.warning("[TeamManager] MemberSkillToolkitRail setup failed: %s", exc)
@@ -785,9 +832,21 @@ class TeamManager:
                         configure_code_team_member_agent,
                     )
 
-                    parent_workspace = (
-                        deep_agent.deep_config.workspace if deep_agent.deep_config else None
+                    request_mode = str((request_metadata or {}).get("mode") or "").strip().lower()
+                    role_name = str(getattr(role, "value", role) or "").strip().lower()
+                    team_plan_enabled = (
+                        request_mode == "team.plan"
+                        or bool(getattr(spec, "enable_team_plan", False))
                     )
+                    is_team_plan_leader = team_plan_enabled and role_name == "leader"
+                    team_plan_runtime_language = None
+                    if is_team_plan_leader:
+                        config_language = str(
+                            getattr(spec, "language", None)
+                            or get_config().get("preferred_language", "zh")
+                        )
+                        team_plan_runtime_language = config_language
+
                     configure_code_team_member_agent(
                         agent,
                         parent_agent=deep_agent,
@@ -796,11 +855,9 @@ class TeamManager:
                         role=role,
                         session_id=session_id,
                         channel_id=resolved_channel,
-                        project_dir=(
-                            str(parent_workspace.root_path)
-                            if parent_workspace and parent_workspace.root_path
-                            else None
-                        ),
+                        project_dir=parent_project_dir or None,
+                        runtime_language=team_plan_runtime_language,
+                        force_english_runtime_prompt=not is_team_plan_leader,
                     )
                 except Exception as exc:
                     logger.warning(
@@ -814,9 +871,9 @@ class TeamManager:
             team_workspace = TeamWorkspaceInfo(
                 root_dir=str(Path(team_ws_root)),
                 skills_dir=str(team_ws_skills_dir),
-                trajectories_dir=str(team_ws_trajectories_dir),
                 team_id=spec.team_name,
                 config=get_config(),
+                trajectory_registry=team_trajectory_registry,
             )
 
             try:
@@ -969,9 +1026,25 @@ class TeamManager:
         logger.info("[TeamManager] Copied global skills dir to team shared: %s", team_shared_skills_dir)
 
     @staticmethod
+    def _resolve_team_shared_skills_dir(spec: TeamAgentSpec) -> Path:
+        ws_config = spec.workspace
+        ws_path = ws_config.root_path if ws_config and ws_config.root_path else None
+        if not ws_path:
+            ws_path = str(team_home(spec.team_name) / "team-workspace")
+        return Path(ws_path) / "skills"
+
+    @staticmethod
+    def _sync_team_shared_skills_to_agent_global(spec: TeamAgentSpec) -> None:
+        """Mirror team-shared skills into the local agent skills dir for SkillUseRail."""
+        team_shared_skills_dir = TeamManager._resolve_team_shared_skills_dir(spec)
+        global_skills_dir = get_agent_skills_dir()
+        _sync_skills_dir(team_shared_skills_dir, global_skills_dir)
+
+    @staticmethod
     def ensure_team_shared_skills_initialized(spec: TeamAgentSpec) -> None:
         """Ensure team shared skills are available in the team workspace."""
         TeamManager._copy_global_skills_to_team_shared_dir(spec)
+        TeamManager._sync_team_shared_skills_to_agent_global(spec)
 
     async def create_team(
         self,
@@ -1012,10 +1085,10 @@ class TeamManager:
             if self._is_distributed_mode(config_base):
                 try:
                     from jiuwenswarm.agents.harness.team.remote_member_bootstrap import (
-                        attach_clean_team_remote_destroy_wrapper,
                         attach_distributed_local_spawn_guard,
                         attach_remote_bootstrap_ack_listener,
                         attach_remote_teammate_bootstrap_listener,
+                        attach_shutdown_member_remote_cleanup_wrapper,
                         attach_spawn_member_remote_bootstrap_wrapper,
                     )
 
@@ -1029,7 +1102,7 @@ class TeamManager:
                         session_id=session_id,
                         channel_id=channel_id,
                     )
-                    attach_clean_team_remote_destroy_wrapper(
+                    attach_shutdown_member_remote_cleanup_wrapper(
                         team_agent,
                         session_id=session_id,
                         channel_id=channel_id,
@@ -1080,34 +1153,39 @@ class TeamManager:
                 request_metadata,
             )
 
-    async def interact(self, session_id: str, user_input: str) -> bool:
+    async def interact(self, session_id: str, user_input: Any) -> tuple[bool, str | None]:
         try:
             if session_id != self._active_session_id or not self._active_team_name:
+                reason = "not_active" if not self._active_team_name else "session_mismatch"
                 logger.warning(
                     "[TeamManager] interact ignored for non-active team session: "
-                    "session_id=%s active_session_id=%s active_team_name=%s",
+                    "session_id=%s active_session_id=%s active_team_name=%s reason=%s",
                     session_id,
                     self._active_session_id,
                     self._active_team_name,
+                    reason,
                 )
-                return False
+                return False, reason
 
             team_name = self._active_team_name
-            success = await Runner.interact_agent_team(
+            result = await Runner.interact_agent_team(
                 user_input,
                 team_name=team_name,
                 session_id=session_id,
             )
-            if not success:
+            if not result:
+                reason = getattr(result, "reason", None) or "runner_failed"
                 logger.warning(
-                    "[TeamManager] interact failed against runner runtime: session_id=%s team=%s",
+                    "[TeamManager] interact failed against runner runtime: session_id=%s team=%s reason=%s",
                     session_id,
                     team_name,
+                    reason,
                 )
-            return success
+                return False, reason
+            return True, None
         except Exception as exc:
             logger.error("[TeamManager] interact failed: session_id=%s, error=%s", session_id, exc)
-            return False
+            return False, "exception"
 
     # TeamSkillEvolutionRail accessors.
 
@@ -1121,6 +1199,8 @@ class TeamManager:
         """Find the TeamSkillEvolutionRail that owns a pending approval with this request_id."""
         for rail in self._team_skill_rails.values():
             if request_id in getattr(rail, "_pending_approval_snapshots", {}):
+                return rail
+            if request_id in getattr(rail, "_pending_governance", {}):
                 return rail
         return None
 
@@ -1339,7 +1419,7 @@ class TeamManager:
                 try:
                     cleaned = await team_agent.destroy_team(force=True)
                 finally:
-                    await release_a2x_reservations_for_team(team_agent)
+                    await release_a2x_reservations_for_session(session_id, team_agent=team_agent)
                     await _stop_team_messager(team_agent, session_id=session_id)
             finally:
                 reset_session_id(token)
@@ -1435,12 +1515,14 @@ class TeamManager:
             )
             return False
 
+        self._runner_team_agents[session_id] = team_agent
+
         try:
             from jiuwenswarm.agents.harness.team.remote_member_bootstrap import (
-                attach_clean_team_remote_destroy_wrapper,
                 attach_distributed_local_spawn_guard,
                 attach_remote_bootstrap_ack_listener,
                 attach_remote_teammate_bootstrap_listener,
+                attach_shutdown_member_remote_cleanup_wrapper,
                 attach_spawn_member_remote_bootstrap_wrapper,
             )
 
@@ -1454,7 +1536,7 @@ class TeamManager:
                 session_id=session_id,
                 channel_id=channel_id,
             )
-            attach_clean_team_remote_destroy_wrapper(
+            attach_shutdown_member_remote_cleanup_wrapper(
                 team_agent,
                 session_id=session_id,
                 channel_id=channel_id,
@@ -1506,7 +1588,7 @@ class TeamManager:
                 )
 
         try:
-            await release_a2x_reservations_for_team(team_agent)
+            await release_a2x_reservations_for_session(session_id, team_agent=team_agent)
         except Exception as exc:
             logger.warning(
                 "[TeamManager] release A2X reservations failed: session_id=%s error=%s",
@@ -1522,6 +1604,35 @@ class TeamManager:
                 exc,
             )
         return stopped
+
+    async def _stop_runner_team_agent_transport(self, session_id: str) -> None:
+        if not self._is_distributed_mode(get_config()):
+            self._runner_team_agents.pop(session_id, None)
+            return
+
+        team_agent = self._runner_team_agents.pop(session_id, None)
+        if team_agent is None:
+            return
+
+        stop_coordination = getattr(team_agent, "stop_coordination", None)
+        if callable(stop_coordination):
+            try:
+                await stop_coordination()
+            except Exception as exc:
+                logger.warning(
+                    "[TeamManager] stop Runner-owned team coordination failed: session_id=%s error=%s",
+                    session_id,
+                    exc,
+                )
+
+        try:
+            await _stop_team_messager(team_agent, session_id=session_id)
+        except Exception as exc:
+            logger.warning(
+                "[TeamManager] stop Runner-owned team messager failed: session_id=%s error=%s",
+                session_id,
+                exc,
+            )
 
     async def _cleanup_runtime_locals(self, session_id: str) -> None:
         watcher_task = self._team_evolution_watchers.pop(session_id, None)
@@ -1608,7 +1719,8 @@ class TeamManager:
                 cleaned = await self._destroy_team(session_id)
             else:
                 cleaned = False
-                await self._cleanup_runtime_locals(session_id)
+
+            await self._cleanup_runtime_locals(session_id)
 
             self.clear_active_runtime(session_id)
             self.clear_pending_runtime(session_id)
@@ -1673,10 +1785,7 @@ class TeamManager:
                         exc,
                     )
 
-            if has_local_team_runtime:
-                cleaned = await self._destroy_team(session_id)
-            else:
-                cleaned = False
+            cleaned = False
 
             # Cleanup locals (watcher, stream, monitor, skill rails)
             await self._cleanup_runtime_locals(session_id)
@@ -1700,6 +1809,7 @@ class TeamManager:
             has_local_team_runtime = self._has_local_team_runtime(session_id)
             has_team_runtime = (
                 has_local_team_runtime
+                or session_id in self._runner_team_agents
                 or session_id in self._team_monitors
                 or self._active_session_id == session_id
                 or self._pending_session_id == session_id
@@ -1732,6 +1842,17 @@ class TeamManager:
                         team_name,
                         exc,
                     )
+            if not has_local_team_runtime:
+                try:
+                    team_agent = self._runner_team_agents.get(session_id)
+                    await release_a2x_reservations_for_session(session_id, team_agent=team_agent)
+                except Exception as exc:
+                    logger.warning(
+                        "[TeamManager] release A2X reservations failed: session_id=%s error=%s",
+                        session_id,
+                        exc,
+                    )
+                await self._stop_runner_team_agent_transport(session_id)
 
             self.clear_active_runtime(session_id)
             self.clear_pending_runtime(session_id)

@@ -84,7 +84,10 @@ function showRuntime(
 }
 
 function usageText(): string {
-  return [
+  // The InfoMessageComponent renderer only prepends the "· " bullet to the
+  // first physical line of the content, so we indent every subsequent line
+  // with two spaces to keep "/sandbox …" left-aligned with line 1.
+  const lines = [
     "/sandbox                              show current runtime status",
     "/sandbox enable                       enter sandbox mode (spawns jiuwenbox + recreates agent)",
     "/sandbox disable                      leave sandbox mode (recreates agent)",
@@ -95,7 +98,8 @@ function usageText(): string {
     "/sandbox files deny <path>            deny accessing <path> in sandbox",
     "/sandbox files remove <path>          remove the path from both allow & deny",
     "/sandbox files list                   list configured files",
-  ].join("\n");
+  ];
+  return lines.map((line, i) => (i === 0 ? line : `  ${line}`)).join("\n");
 }
 
 export function createSandboxCommand(): SlashCommand {
@@ -105,6 +109,7 @@ export function createSandboxCommand(): SlashCommand {
     usage: "/sandbox <enable|disable|exclude|files> ...",
     example: "/sandbox enable",
     kind: CommandKind.BUILT_IN,
+    hidden: true,
     takesArgs: true,
     action: async (ctx, args) => {
       const raw = (args ?? "").trim();

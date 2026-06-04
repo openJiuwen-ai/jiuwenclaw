@@ -17,7 +17,7 @@ from logging.handlers import RotatingFileHandler
 
 import webview
 
-from jiuwenswarm.common.utils import get_user_workspace_dir, get_logs_dir
+from jiuwenswarm.common.utils import get_user_workspace_dir, get_logs_dir, wait_for_pid_exit, wait_for_tcp_port
 
 
 BACKEND_HOST = "127.0.0.1"
@@ -176,43 +176,33 @@ def _wait_for_http(
     )
 
 
-def _wait_for_pid_exit(pid: int, timeout: float = 60.0) -> None:
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        try:
-            os.kill(pid, 0)
-        except OSError:
-            return
-        time.sleep(0.5)
+def _wait_for_port_release(host: str, port: int, timeout: float = 15.0) -> bool:
+    return wait_for_tcp_port(host, port, timeout=timeout, target_state="disconnected")
 
 
-def _launch_windows_installer_helper(installer_path: str, app_executable: str) -> None:
+def _launch_windows_installer_helper(installer_path: str, app_executable: str, parent_pid: int = 0) -> None:
     target = Path(installer_path).expanduser().resolve()
-    app_path = Path(app_executable).expanduser().resolve()
 
-    _wait_for_pid_exit(os.getppid())
+    logger.info("[update-helper] starting, target=%s, parent_pid=%d", target, parent_pid)
 
-    subprocess.run(
-        [
-            str(target),
-            "/VERYSILENT",
-            "/SUPPRESSMSGBOXES",
-            "/NORESTART",
-            "/SP-",
-            "/CLOSEAPPLICATIONS",
-        ],
-        check=False,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        creationflags=_creationflags(),
-    )
-    time.sleep(2)
-    subprocess.Popen(
-        [str(app_path)],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        creationflags=_creationflags(),
-    )
+    wait_pid = parent_pid if parent_pid else os.getppid()
+    logger.info("[update-helper] waiting for process %d to exit", wait_pid)
+    wait_for_pid_exit(wait_pid)
+    logger.info("[update-helper] parent process %d has exited, waiting for ports to release", wait_pid)
+
+    _wait_for_port_release(BACKEND_HOST, BACKEND_PORT, timeout=15.0)
+    _wait_for_port_release(FRONTEND_HOST, FRONTEND_PORT, timeout=15.0)
+    logger.info("[update-helper] ports released, proceeding with install")
+
+    try:
+        subprocess.Popen(
+            [str(target)],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        logger.info("[update-helper] installer launched successfully (interactive)")
+    except Exception as exc:
+        logger.error("[update-helper] installer launch failed: %s", exc)
 
 
 class _WindowApi:
@@ -395,10 +385,6 @@ class DesktopRuntime:
             logger.error("[desktop] failed to show download complete: %s", exc)
 
     def install_update(self, installer_path: str) -> bool:
-        if os.name != "nt":
-            logger.warning("[desktop] update install is only supported on Windows")
-            return False
-
         target = Path(installer_path).expanduser().resolve()
         if not target.is_file():
             logger.error("[desktop] installer not found: %s", target)
@@ -406,27 +392,119 @@ class DesktopRuntime:
 
         app_executable = Path(sys.executable).resolve()
 
+        if os.name == "nt":
+            ok = self._launch_windows_install_helper(target, app_executable)
+        elif sys.platform == "darwin":
+            ok = self._launch_macos_install_helper(target)
+        else:
+            ok = self._launch_linux_install_helper(target, app_executable)
+
+        if not ok:
+            logger.error("[desktop] failed to launch update helper for %s", sys.platform)
+            return False
+
+        logger.info("[desktop] launched update helper for %s, parent pid=%d", sys.platform, os.getpid())
+        self.close_window()
+        return True
+
+    @staticmethod
+    def _launch_macos_install_helper(target: Path) -> bool:
+        parent_pid = os.getpid()
+        updates_dir = get_user_workspace_dir() / ".updates"
+        updates_dir.mkdir(parents=True, exist_ok=True)
+
+        if not os.access(updates_dir, os.W_OK):
+            logger.error("[desktop] no write permission for updates directory: %s", updates_dir)
+            return False
+
+        helper_content = f"""#!/bin/bash
+set -e
+PARENT_PID={parent_pid}
+while kill -0 "$PARENT_PID" 2>/dev/null; do
+    sleep 1
+done
+open "{target}"
+"""
+        helper_path = updates_dir / "_install_helper.sh"
+        helper_path.write_text(helper_content, encoding="utf-8")
+        helper_path.chmod(0o755)
+
+        subprocess.Popen(
+            ["/bin/bash", str(helper_path)],
+            start_new_session=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        logger.info("[desktop] macOS install helper launched, target=%s", target)
+        return True
+
+    @staticmethod
+    def _launch_linux_install_helper(target: Path, app_executable: Path) -> bool:
+        parent_pid = os.getpid()
+        updates_dir = get_user_workspace_dir() / ".updates"
+        updates_dir.mkdir(parents=True, exist_ok=True)
+
+        if not os.access(updates_dir, os.W_OK):
+            logger.error("[desktop] no write permission for updates directory: %s", updates_dir)
+            return False
+
+        install_dir = str(app_executable.parent.resolve())
+        backup_dir = f"{install_dir}.bak.$RANDOM"
+
+        helper_content = f"""#!/bin/bash
+set -e
+PARENT_PID={parent_pid}
+while kill -0 "$PARENT_PID" 2>/dev/null; do
+    sleep 1
+done
+
+BACKUP="{backup_dir}"
+if [ -d "{install_dir}" ]; then
+    mv "{install_dir}" "$BACKUP"
+fi
+mkdir -p "{install_dir}"
+tar xzf "{target}" -C "{install_dir}"
+rm -rf "$BACKUP" 2>/dev/null || true
+nohup "{install_dir}/jiuwenswarm" >/dev/null 2>&1 &
+"""
+        helper_path = updates_dir / "_install_helper.sh"
+        helper_path.write_text(helper_content, encoding="utf-8")
+        helper_path.chmod(0o755)
+
+        subprocess.Popen(
+            ["/bin/bash", str(helper_path)],
+            start_new_session=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        logger.info("[desktop] Linux install helper launched, target=%s", target)
+        return True
+
+    @staticmethod
+    def _launch_windows_install_helper(target: Path, app_executable: Path) -> bool:
         detached_flags = (
             getattr(subprocess, "DETACHED_PROCESS", 0)
             | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
             | _creationflags()
         )
+        helper_cmd = _build_child_command(
+            "update-helper",
+            [
+                "--installer-path",
+                str(target),
+                "--app-executable",
+                str(app_executable),
+                "--parent-pid",
+                str(os.getpid()),
+            ],
+        )
+        logger.info("[desktop] launching update helper: %s", helper_cmd)
         subprocess.Popen(
-            _build_child_command(
-                "update-helper",
-                [
-                    "--installer-path",
-                    str(target),
-                    "--app-executable",
-                    str(app_executable),
-                ],
-            ),
+            helper_cmd,
             creationflags=detached_flags,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
-        logger.info("[desktop] launched update installer helper: %s", target)
-        self.close_window()
         return True
 
     def shutdown(self) -> None:
@@ -453,7 +531,26 @@ class DesktopRuntime:
 
         self.processes.clear()
 
+    @staticmethod
+    def _clear_wkwebview_system_cache() -> None:
+        """Clear WKWebView HTTP cache directory.
+
+        On macOS, WKWebView caches HTTP responses (JS/CSS etc.) in
+        ~/Library/Caches/<bundle_id>/, independent of pywebview's storage_path.
+        These cached frontend assets can persist across different DMG versions,
+        causing stale UI. Only Caches is cleared to preserve localStorage/IndexedDB
+        stored in ~/Library/WebKit/<bundle_id>/.
+        """
+        if sys.platform != "darwin":
+            return
+        cache_dir = Path.home() / "Library" / "Caches" / "com.jiuwenswarm.desktop"
+        if cache_dir.exists():
+            shutil.rmtree(cache_dir)
+            logger.info("[desktop] cleared WKWebView HTTP cache: %s", cache_dir)
+
     def run(self, window_title: str, width: int, height: int, debug: bool) -> None:
+        self._clear_wkwebview_system_cache()
+
         storage_path = get_user_workspace_dir() / "tmp" / "webview"
         if storage_path.exists():
             shutil.rmtree(storage_path)
@@ -566,7 +663,7 @@ transition:opacity .4s ease,transform .4s ease}
 <script>
 const tips=[
 "多智能体协作 —— 编排多个专业 Agent 协同工作，群体智能涌现",
-"多端接入 —— 支持 Web、飞书、微信、钉钉、Telegram 等多种交互方式",
+"多端接入 —— 支持 Web、飞书、钉钉、Telegram 等多种交互方式",
 "贴身任务管家 —— 精准理解复杂指令，智能排期，有条不紊完成任务",
 "自主演进 —— 根据你的反馈自动调整技能，持续进化，越用越懂你"
 ];
@@ -676,13 +773,14 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument(UPDATE_HELPER_FLAG, action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--installer-path", default="", help=argparse.SUPPRESS)
     parser.add_argument("--app-executable", default="", help=argparse.SUPPRESS)
+    parser.add_argument("--parent-pid", type=int, default=0, help=argparse.SUPPRESS)
     return parser.parse_args()
 
 
 def main() -> None:
     args = _parse_args()
     if getattr(args, "desktop_install_update", False):
-        _launch_windows_installer_helper(args.installer_path, args.app_executable)
+        _launch_windows_installer_helper(args.installer_path, args.app_executable, args.parent_pid)
         return
 
     runtime = DesktopRuntime(

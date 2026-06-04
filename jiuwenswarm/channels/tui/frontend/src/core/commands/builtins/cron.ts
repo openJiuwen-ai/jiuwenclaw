@@ -21,17 +21,118 @@ interface CronJobListPayload {
   jobs: CronJobPayload[];
 }
 
-const TARGET_CHANNELS = ["tui", "web", "feishu", "whatsapp", "wecom", "xiaoyi", "wechat"];
+const TARGET_CHANNELS = ["tui", "web", "feishu", "whatsapp", "wecom", "xiaoyi", "wechat", "dingtalk"];
 const MODES = ["agent", "plan"];
+
+// ── cron expression syntax validation ──
+
+interface CronFieldRange {
+  min: number;
+  max: number;
+  allowQuestion: boolean;
+}
+
+const CRON_5FIELD_RANGES: CronFieldRange[] = [
+  { min: 0, max: 59, allowQuestion: false }, // minute
+  { min: 0, max: 23, allowQuestion: false }, // hour
+  { min: 1, max: 31, allowQuestion: true },  // day
+  { min: 1, max: 12, allowQuestion: false }, // month
+  { min: 0, max: 7, allowQuestion: true },   // dow (0=Sun,7=Sun)
+];
+
+const CRON_7FIELD_RANGES: CronFieldRange[] = [
+  { min: 0, max: 59, allowQuestion: false }, // second
+  { min: 0, max: 59, allowQuestion: false }, // minute
+  { min: 0, max: 23, allowQuestion: false }, // hour
+  { min: 1, max: 31, allowQuestion: true },  // day
+  { min: 1, max: 12, allowQuestion: false }, // month
+  { min: 1, max: 7, allowQuestion: true },   // dow
+  // year handled separately
+];
+
+const FIELD_NAMES_5 = ["minute(0-59)", "hour(0-23)", "day(1-31)", "month(1-12)", "dow(0-7)"];
+const FIELD_NAMES_7 = ["second(0-59)", "minute(0-59)", "hour(0-23)", "day(1-31)", "month(1-12)", "dow(1-7)", "year"];
+
+function isValidCronValue(value: string, range: CronFieldRange): boolean {
+  if (value === "*") return true;
+  if (range.allowQuestion && value === "?") return true;
+
+  const parts = value.split(",");
+  for (const part of parts) {
+    if (part.includes("/")) {
+      const [rangePart, stepStr] = part.split("/");
+      const step = parseInt(stepStr, 10);
+      if (isNaN(step) || step <= 0) return false;
+      if (rangePart === "*") continue;
+      if (!isValidCronRange(rangePart, range.min, range.max)) return false;
+    } else if (part.includes("-")) {
+      if (!isValidCronRange(part, range.min, range.max)) return false;
+    } else {
+      const num = parseInt(part, 10);
+      if (isNaN(num)) return false;
+      if (range.min === 0 && range.max === 7 && (num < 0 || num > 7)) return false;
+      if (range.min !== 0 || range.max !== 7) {
+        if (num < range.min || num > range.max) return false;
+      }
+    }
+  }
+  return true;
+}
+
+function isValidCronRange(range: string, min: number, max: number): boolean {
+  const [startStr, endStr] = range.split("-");
+  if (!startStr || !endStr) return false;
+  const start = parseInt(startStr, 10);
+  const end = parseInt(endStr, 10);
+  if (isNaN(start) || isNaN(end)) return false;
+  if (min === 0 && max === 7) return start >= 0 && end <= 7 && start <= end;
+  return start >= min && end <= max && start <= end;
+}
+
+function validateCronExpr(expr: string): string | null {
+  const trimmed = expr.trim();
+  if (!trimmed) return "cron_expr 不能为空";
+
+  const fields = trimmed.split(/\s+/);
+  const fieldCount = fields.length;
+
+  if (fieldCount !== 5 && fieldCount !== 7) {
+    return `cron_expr 需要 5 字段(周期)或 7 字段(单次)，当前有 ${fieldCount} 个字段`;
+  }
+
+  const ranges = fieldCount === 5 ? CRON_5FIELD_RANGES : CRON_7FIELD_RANGES;
+  const names = fieldCount === 5 ? FIELD_NAMES_5 : FIELD_NAMES_7;
+
+  for (let i = 0; i < fields.length; i++) {
+    // Year field (7-field, index 6) has special handling
+    if (fieldCount === 7 && i === 6) {
+      if (fields[i] === "*") continue;
+      const yearNum = parseInt(fields[i], 10);
+      if (isNaN(yearNum) || yearNum < 1970 || yearNum > 2099) {
+        return `${names[i]} 字段无效: year 需为 1970-2099 或 *`;
+      }
+      continue;
+    }
+
+    if (!isValidCronValue(fields[i], ranges[i])) {
+      return `${names[i]} 字段无效: "${fields[i]}"`;
+    }
+  }
+
+  return null; // valid
+}
+
+// ── end cron validation ──
 
 export function createCronCommand(): SlashCommand {
   return {
     name: "cron",
     altNames: ["crontab"],
     description: "管理定时任务（cron jobs）——到点让 Agent 帮你做事",
-    usage: "/cron [list|add|update|delete|toggle|run|preview]",
+    usage: "/cron [list|show|add|update|delete|toggle|run|preview]",
     example:
       '/cron list\n' +
+      '/cron show <id>\n' +
       '/cron add name=晨报 cron_expr="0 9 * * *" description="生成简短的中文健康打卡提醒" targets=tui\n' +
       '/cron update <id> description="新的任务内容"\n' +
       "/cron delete <id>\n" +
@@ -49,6 +150,15 @@ export function createCronCommand(): SlashCommand {
         takesArgs: false,
         isSafeConcurrent: true,
         action: async (ctx) => _handleList(ctx),
+      },
+      {
+        name: "show",
+        description: "查看定时任务详情",
+        usage: "/cron show <job_id>",
+        argGuide: "<job_id>",
+        kind: CommandKind.BUILT_IN,
+        takesArgs: true,
+        action: async (ctx, args) => _handleShow(ctx, parseArgs(`show ${args}`)),
       },
       {
         name: "add",
@@ -120,6 +230,9 @@ export function createCronCommand(): SlashCommand {
       const sub = parts[0];
 
       switch (sub) {
+        case "show":
+          await _handleShow(ctx, parts);
+          break;
         case "add":
           await _handleAdd(ctx, raw);
           break;
@@ -142,7 +255,7 @@ export function createCronCommand(): SlashCommand {
           ctx.addItem(
             addError(
               ctx.sessionId,
-              `Unknown sub-command: "${sub}". Use: list, add, update, delete, toggle, run, preview`,
+              `Unknown sub-command: "${sub}". Use: list, show, add, update, delete, toggle, run, preview`,
             ),
           );
       }
@@ -183,12 +296,56 @@ async function _handleList(ctx: CommandContext): Promise<void> {
   }
 }
 
+async function _handleShow(ctx: CommandContext, parts: string[]): Promise<void> {
+  const jobId = parts[1];
+  if (!jobId) {
+    ctx.addItem(addError(ctx.sessionId, "Usage: /cron show <job_id>"));
+    return;
+  }
+
+  try {
+    const payload = await ctx.request("cron.job.get", { id: jobId }) as { job: CronJobPayload } | null;
+    if (!payload || !payload.job) {
+      ctx.addItem(addError(ctx.sessionId, `Job not found: ${jobId}`));
+      return;
+    }
+
+    const job = payload.job;
+    const statusTag = job.expired ? "EXPIRED" : job.enabled ? "ON" : "OFF";
+    const isOneShot = job.delete_after_run === true;
+    const taskType = isOneShot ? "单次任务" : "周期任务";
+
+    ctx.addItem(
+      addInfo(ctx.sessionId, `Cron Job: ${job.name}`, "clock", {
+        view: "kv",
+        title: `Cron Job Detail [${taskType}]`,
+        items: [
+          { label: "id", value: job.id },
+          { label: "name", value: job.name },
+          { label: "status", value: statusTag },
+          { label: "cron_expr", value: job.cron_expr },
+          { label: "timezone", value: job.timezone },
+          { label: "description", value: job.description || "-" },
+          { label: "targets", value: job.targets },
+          { label: "mode", value: job.mode || "agent" },
+          { label: "wake_offset_seconds", value: String(job.wake_offset_seconds ?? 300) },
+          { label: "delete_after_run", value: String(isOneShot) },
+        ],
+      }),
+    );
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    ctx.addItem(addError(ctx.sessionId, `Failed to get cron job: ${message}`));
+  }
+}
+
 async function _handleAdd(ctx: CommandContext, raw: string): Promise<void> {
   const addPart = raw.replace(/^add\s+/, "");
   const kvPairs: Record<string, string> = {};
 
   // Handle quoted values like description="..." and cron_expr="0 9 * * *"
-  const quotedRegex = /(\w+)="([^"]+)"/g;
+  // Also capture empty quoted values like description="" (key="" means empty string)
+  const quotedRegex = /(\w+)="([^"]*)"/g;
   let m: RegExpExecArray | null;
   while ((m = quotedRegex.exec(addPart)) !== null) {
     kvPairs[m[1]] = m[2];
@@ -196,13 +353,13 @@ async function _handleAdd(ctx: CommandContext, raw: string): Promise<void> {
   // Handle unquoted key=value pairs (skip ones already captured by quoted regex)
   const unquotedRegex = /(\w+)=(\S+)/g;
   while ((m = unquotedRegex.exec(addPart)) !== null) {
-    if (!kvPairs[m[1]]) {
+    if (!(m[1] in kvPairs)) {
       kvPairs[m[1]] = m[2];
     }
   }
 
   const requiredFields = ["name", "cron_expr", "description"];
-  const missing = requiredFields.filter((f) => !kvPairs[f]);
+  const missing = requiredFields.filter((f) => !kvPairs[f] || kvPairs[f].trim() === "");
   if (missing.length > 0) {
     ctx.addItem(
       addError(
@@ -217,6 +374,14 @@ async function _handleAdd(ctx: CommandContext, raw: string): Promise<void> {
   if (!kvPairs.timezone) kvPairs.timezone = "Asia/Shanghai";
   if (!kvPairs.mode) kvPairs.mode = "agent";
 
+  // cron_expr syntax validation
+  const cronError = validateCronExpr(kvPairs.cron_expr);
+  if (cronError) {
+    ctx.addItem(addError(ctx.sessionId, `cron_expr 语法错误: ${cronError}`));
+    return;
+  }
+
+  // targets validation
   if (
     !TARGET_CHANNELS.includes(kvPairs.targets.toLowerCase()) &&
     !kvPairs.targets.startsWith("feishu_enterprise:")
@@ -235,6 +400,22 @@ async function _handleAdd(ctx: CommandContext, raw: string): Promise<void> {
       addError(ctx.sessionId, `Invalid mode: "${kvPairs.mode}". Valid: ${MODES.join(", ")}`),
     );
     return;
+  }
+
+  if (kvPairs.delete_after_run && kvPairs.delete_after_run !== "true" && kvPairs.delete_after_run !== "false") {
+    ctx.addItem(
+      addError(ctx.sessionId, `Invalid delete_after_run: "${kvPairs.delete_after_run}". Valid: "true" or "false"`),
+    );
+    return;
+  }
+
+  // wake_offset_seconds validation
+  if (kvPairs.wake_offset_seconds) {
+    const wos = parseInt(kvPairs.wake_offset_seconds, 10);
+    if (isNaN(wos) || wos < 0) {
+      ctx.addItem(addError(ctx.sessionId, `Invalid wake_offset_seconds: "${kvPairs.wake_offset_seconds}". Must be a non-negative integer`));
+      return;
+    }
   }
 
   try {
@@ -263,6 +444,7 @@ async function _handleAdd(ctx: CommandContext, raw: string): Promise<void> {
           { label: "targets", value: job.targets },
           { label: "mode", value: job.mode },
           { label: "enabled", value: String(job.enabled) },
+          { label: "delete_after_run", value: String(job.delete_after_run) },
         ],
       }),
     );
@@ -307,8 +489,8 @@ async function _handleUpdate(ctx: CommandContext, raw: string, parts: string[]):
 
   const patch: Record<string, unknown> = {};
 
-  // Handle quoted values like description="..."
-  const quotedRegex = /(\w+)="([^"]+)"/g;
+  // Handle quoted values like description="..." (also captures empty key="")
+  const quotedRegex = /(\w+)="([^"]*)"/g;
   let m: RegExpExecArray | null;
   while ((m = quotedRegex.exec(updatePart)) !== null) {
     patch[m[1]] = m[2];
@@ -316,7 +498,7 @@ async function _handleUpdate(ctx: CommandContext, raw: string, parts: string[]):
   // Handle unquoted key=value pairs
   const unquotedRegex = /(\w+)=(\S+)/g;
   while ((m = unquotedRegex.exec(updatePart)) !== null) {
-    if (!patch[m[1]]) {
+    if (!(m[1] in patch)) {
       patch[m[1]] = m[2];
     }
   }
@@ -326,12 +508,51 @@ async function _handleUpdate(ctx: CommandContext, raw: string, parts: string[]):
     return;
   }
 
-  // Convert numeric fields
-  if ("wake_offset_seconds" in patch) {
-    patch.wake_offset_seconds = parseInt(String(patch.wake_offset_seconds), 10);
+  // Validate each field in the patch
+  if ("name" in patch && !String(patch.name).trim()) {
+    ctx.addItem(addError(ctx.sessionId, "name 不能为空"));
+    return;
+  }
+  if ("cron_expr" in patch) {
+    const cronError = validateCronExpr(String(patch.cron_expr));
+    if (cronError) {
+      ctx.addItem(addError(ctx.sessionId, `cron_expr 语法错误: ${cronError}`));
+      return;
+    }
+  }
+  if ("description" in patch && !String(patch.description).trim()) {
+    ctx.addItem(addError(ctx.sessionId, "description 不能为空"));
+    return;
+  }
+  if ("targets" in patch) {
+    const t = String(patch.targets).trim().toLowerCase();
+    if (!TARGET_CHANNELS.includes(t) && !String(patch.targets).startsWith("feishu_enterprise:")) {
+      ctx.addItem(addError(ctx.sessionId, `Invalid target channel: "${patch.targets}". Valid: ${TARGET_CHANNELS.join(", ")}, feishu_enterprise:<app_id>`));
+      return;
+    }
+  }
+  if ("mode" in patch) {
+    const m = String(patch.mode).trim().toLowerCase();
+    if (!MODES.includes(m)) {
+      ctx.addItem(addError(ctx.sessionId, `Invalid mode: "${patch.mode}". Valid: ${MODES.join(", ")}`));
+      return;
+    }
   }
   if ("delete_after_run" in patch) {
-    patch.delete_after_run = String(patch.delete_after_run).toLowerCase() === "true";
+    const raw = String(patch.delete_after_run).toLowerCase();
+    if (raw !== "true" && raw !== "false") {
+      ctx.addItem(addError(ctx.sessionId, `Invalid delete_after_run: "${patch.delete_after_run}". Valid: "true" or "false"`));
+      return;
+    }
+    patch.delete_after_run = raw === "true";
+  }
+  if ("wake_offset_seconds" in patch) {
+    const wos = parseInt(String(patch.wake_offset_seconds), 10);
+    if (isNaN(wos) || wos < 0) {
+      ctx.addItem(addError(ctx.sessionId, `Invalid wake_offset_seconds: "${patch.wake_offset_seconds}". Must be a non-negative integer`));
+      return;
+    }
+    patch.wake_offset_seconds = wos;
   }
 
   try {
@@ -360,6 +581,12 @@ async function _handleToggle(ctx: CommandContext, parts: string[]): Promise<void
 
   if (!jobId || !onOff) {
     ctx.addItem(addError(ctx.sessionId, "Usage: /cron toggle <job_id> on|off"));
+    return;
+  }
+
+  const validOnOff = ["on", "off", "true", "false"];
+  if (!validOnOff.includes(onOff.toLowerCase())) {
+    ctx.addItem(addError(ctx.sessionId, `Invalid toggle value: "${onOff}". Must be "on" or "off"`));
     return;
   }
 
@@ -416,14 +643,23 @@ async function _handlePreview(ctx: CommandContext, parts: string[]): Promise<voi
   const count = parseInt(parts[2] || "5", 10);
 
   try {
+    // Fetch job details to determine task type (one-shot vs recurring)
+    // delete_after_run=true means execute once then auto-delete = one-shot
+    const jobPayload = await ctx.request("cron.job.get", { id: jobId }) as { job: CronJobPayload } | null;
+    const job = jobPayload?.job;
+    const isOneShot = job?.delete_after_run === true;
+    const taskType = isOneShot ? "单次任务" : "周期任务";
+    const typeIcon = isOneShot ? "one-shot" : "recurring";
+
+    const previewCount = isOneShot ? 1 : count;
     const payload = await ctx.request("cron.job.preview", {
       id: jobId,
-      count,
+      count: previewCount,
     }) as { next: Array<{ wake_at: string; push_at: string } | string> };
     const nextRuns = payload.next ?? [];
 
     if (nextRuns.length === 0) {
-      ctx.addItem(addInfo(ctx.sessionId, `No upcoming runs for job ${jobId} (may be expired or disabled)`, "clock"));
+      ctx.addItem(addInfo(ctx.sessionId, `No upcoming runs for job ${jobId} (${taskType}, may be expired or disabled)`, "clock"));
       return;
     }
 
@@ -438,9 +674,9 @@ async function _handlePreview(ctx: CommandContext, parts: string[]): Promise<voi
     });
 
     ctx.addItem(
-      addInfo(ctx.sessionId, `Next ${nextRuns.length} runs for job ${jobId}`, "clock", {
+      addInfo(ctx.sessionId, `${taskType} · Next ${nextRuns.length} runs for job ${jobId}`, "clock", {
         view: "list",
-        title: "Cron Job Preview",
+        title: `Cron Job Preview [${typeIcon}]`,
         items,
       }),
     );

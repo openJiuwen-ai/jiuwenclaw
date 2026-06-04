@@ -7,7 +7,7 @@ PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 APP_NAME="JiuwenSwarm.app"
 APP_PATH="$PROJECT_ROOT/dist/$APP_NAME"
 DMG_ROOT="$PROJECT_ROOT/dist/dmg-root"
-VERSION="0.2.0"
+VERSION="0.2.1"
 DMG_PATH="$PROJECT_ROOT/dist/JiuwenSwarm-$VERSION.dmg"
 
 printf '=== JiuwenSwarm macOS package build ===\n'

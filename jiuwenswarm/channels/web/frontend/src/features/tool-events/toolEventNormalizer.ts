@@ -40,12 +40,33 @@ function resolveToolCallId(payload: UnknownPayload, fallback?: UnknownPayload): 
   return undefined;
 }
 
+function resolveMemberName(payload: UnknownPayload, fallback?: UnknownPayload): string | undefined {
+  const candidates = [
+    payload.member_name,
+    fallback?.member_name,
+  ];
+  for (const item of candidates) {
+    if (typeof item === 'string' && item.trim()) {
+      return item.trim();
+    }
+  }
+
+  let role = '';
+  if (typeof payload.role === 'string') {
+    role = payload.role;
+  } else if (typeof fallback?.role === 'string') {
+    role = fallback.role;
+  }
+  return role.trim().toLowerCase() === 'teammate' ? 'teammate' : undefined;
+}
+
 export interface NormalizedToolCall {
   id: string;
   name: string;
   arguments: Record<string, unknown>;
   description?: string;
   formatted_args?: string;
+  memberName?: string;
 }
 
 export interface NormalizedToolResult {
@@ -71,6 +92,7 @@ export function normalizeToolCallPayload(payload: UnknownPayload): NormalizedToo
     typeof toolCallPayload.formatted_args === 'string'
       ? toolCallPayload.formatted_args
       : undefined;
+  const memberName = resolveMemberName(toolCallPayload, payload);
 
   return {
     id,
@@ -78,6 +100,7 @@ export function normalizeToolCallPayload(payload: UnknownPayload): NormalizedToo
     arguments: parseArguments(toolCallPayload.arguments),
     description,
     formatted_args,
+    memberName,
   };
 }
 

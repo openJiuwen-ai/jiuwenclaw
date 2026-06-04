@@ -54,6 +54,28 @@ class SendFileToolkit:
             bool(self._request_metadata),
         )
 
+    def update_runtime_context(
+        self,
+        *,
+        request_id: str,
+        session_id: str,
+        channel_id: str,
+        metadata: dict[str, Any] | None = None,
+    ) -> None:
+        """Update per-request runtime context without recreating the toolkit/tool.
+        """
+        self.request_id = request_id
+        self.session_id = session_id
+        self.channel_id = channel_id
+        self._request_metadata = dict(metadata) if metadata else None
+        logger.debug(
+            "[SendFileToolkit] update_runtime_context request_id=%s session_id=%s channel_id=%s has_metadata=%s",
+            request_id,
+            session_id,
+            channel_id,
+            bool(self._request_metadata),
+        )
+
     async def send_file(self, abs_file_path_list: Union[List[str], str]) -> str:
         """Send files to user.
 
@@ -140,6 +162,21 @@ class SendFileToolkit:
                     for file_path in valid_files
                 ]
 
+            import time
+            from jiuwenswarm.server.runtime.session.session_history import (
+                append_history_record,
+            )
+            append_history_record(
+                session_id=self.session_id,
+                request_id=self.request_id,
+                channel_id=self.channel_id,
+                role="assistant",
+                event_type="chat.file",
+                content="",
+                timestamp=time.time(),
+                extra={"files": files_payload},
+            )
+
             msg = {
                 "request_id": self.request_id,
                 "channel_id": self.channel_id,
@@ -173,7 +210,6 @@ class SendFileToolkit:
         Returns:
             List of tools for sending files.
         """
-        session_id = self.session_id
 
         def make_tool(
             name: str,

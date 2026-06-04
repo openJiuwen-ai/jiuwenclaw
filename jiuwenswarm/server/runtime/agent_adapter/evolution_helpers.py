@@ -5,13 +5,20 @@
 from __future__ import annotations
 
 import logging
+import math
+import os
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Callable
+
+from jiuwenswarm.server.runtime.skill import filter_visible_skill_names
 
 logger = logging.getLogger(__name__)
 
+_EVOLUTION_FILENAME = "evolutions.json"
 TEAM_EVOLUTION_IDLE_SLEEP_SEC = 1.0
 TEAM_EVOLUTION_EVENT_TIMEOUT_SEC = 900.0
+TEAM_EVOLUTION_EVENT_TIMEOUT_GRACE_SEC = 5.0
 TEAM_EVOLUTION_START_STAGE = "collecting"
 TEAM_EVOLUTION_START_MESSAGE = "Running team skill evolution analysis..."
 TEAM_EVOLUTION_NOOP_STAGE = "no_evolution_generated"
@@ -93,6 +100,204 @@ _SDK_PROGRESS_TERMINAL_STAGES = {
     "timed_out",
 }
 
+EVOLUTION_ACCEPT_LABELS = ("accept", "接收", "接受")
+EVOLUTION_EXECUTE_LABELS = ("execute", "执行")
+REGULAR_EVOLUTION_SLASH_WARNING_PHRASES = (
+    "未生成可保存经验",
+    "未发现明确的演进信号",
+)
+TEAM_EVOLUTION_SLASH_WARNING_PHRASES = (
+    "未生成可保存经验",
+    "未生成新的团队技能演进经验",
+)
+_EVOLUTION_SLASH_COMMANDS = (
+    "evolve_simplify",
+    "evolve_rebuild",
+    "evolve_rollback",
+    "evolve_list",
+)
+
+
+def _resolve_skill_dir(store: Any, skill_name: str) -> Path | None:
+    resolver = getattr(store, "resolve_skill_dir", None)
+    if callable(resolver):
+        try:
+            resolved = resolver(skill_name)
+        except TypeError:
+            resolved = None
+        if resolved is not None:
+            return Path(resolved)
+
+    base_dirs = getattr(store, "base_dirs", None)
+    if base_dirs is None:
+        base_dir = getattr(store, "base_dir", None)
+        base_dirs = [base_dir] if base_dir is not None else []
+
+    for base_dir in base_dirs or []:
+        candidate = Path(base_dir) / skill_name
+        if candidate.is_dir():
+            return candidate
+    return None
+
+
+def _available_skill_names(store: Any) -> str:
+    try:
+        names = filter_visible_skill_names(store.list_skill_names())
+    except Exception:
+        names = []
+    return "、".join(names) or "（无可用 Skill）"
+
+
+def _skill_exists(store: Any, skill_name: str) -> bool:
+    exists = getattr(store, "skill_exists", None)
+    if callable(exists):
+        try:
+            return bool(exists(skill_name))
+        except Exception:
+            return False
+    return _resolve_skill_dir(store, skill_name) is not None
+
+
+def _skill_definition_exists(store: Any, skill_name: str) -> bool:
+    checker = getattr(store, "skill_definition_exists", None)
+    if callable(checker):
+        try:
+            return bool(checker(skill_name))
+        except Exception:
+            return False
+
+    skill_dir = _resolve_skill_dir(store, skill_name)
+    if skill_dir is None:
+        return _skill_exists(store, skill_name)
+    return (skill_dir / "SKILL.md").is_file()
+
+
+def validate_evolution_skill(
+    store: Any,
+    skill_name: str,
+    require_skill_md: bool,
+) -> str | None:
+    """Validate that an evolution command can target ``skill_name``."""
+    if not _skill_exists(store, skill_name):
+        return f"未找到 Skill '{skill_name}'。当前可用：{_available_skill_names(store)}"
+
+    if require_skill_md and not _skill_definition_exists(store, skill_name):
+        return f"Skill '{skill_name}' 缺少 SKILL.md，无法执行演进生成。"
+
+    return None
+
+
+def validate_evolution_log_writable(store: Any, skill_name: str) -> str | None:
+    """Validate the local evolution log target is writable when it can be inspected."""
+    skill_dir = _resolve_skill_dir(store, skill_name)
+    if skill_dir is None:
+        return None
+
+    log_path = skill_dir / _EVOLUTION_FILENAME
+    target = log_path if log_path.exists() else skill_dir
+    if not os.access(target, os.W_OK):
+        if log_path.exists():
+            return f"Skill '{skill_name}' 的 evolutions.json 不可写，无法保存演进经验。"
+        return f"Skill '{skill_name}' 目录不可写，无法保存演进经验。"
+    return None
+
+
+def evolution_status_response(
+    evolve_result: Any,
+    *,
+    generation_failed_output: str,
+    no_records_output: str,
+) -> dict[str, str] | None:
+    """Map SDK ``EvolutionRequestResult.status`` to a user-facing response."""
+    status = str(getattr(evolve_result, "status", "") or "").strip()
+    if not status:
+        return None
+
+    message = str(getattr(evolve_result, "message", "") or "").strip()
+
+    if status == "generation_failed":
+        output = _user_facing_generation_error(message) or generation_failed_output
+        return {"output": output, "result_type": "error"}
+
+    if status == "skipped_skill_definition_not_found":
+        output = "Skill 缺少 SKILL.md，无法执行演进生成。"
+        if message:
+            output = f"{output}\n{message}"
+        return {"output": output, "result_type": "error"}
+
+    if status == "persistence_failed":
+        output = "演进经验保存失败"
+        if message:
+            output = f"{output}：{message}"
+        return {"output": output, "result_type": "error"}
+
+    if status == "no_evolution_no_records":
+        output = no_records_output
+        if message:
+            output = f"{output}\n{message}"
+        return {"output": output, "result_type": "answer"}
+
+    return None
+
+
+def _user_facing_generation_error(message: str) -> str:
+    """Hide low-level toolchain error chains from user-facing LLM failure text."""
+    lowered = message.lower()
+    internal_markers = (
+        "toolchain",
+        "tool_call",
+        "invoke_failed",
+        "execution error",
+        "optimizer",
+    )
+    if any(marker in lowered for marker in internal_markers):
+        return "LLM 服务调用失败，请检查模型配置或稍后重试"
+    return message
+
+
+def evolution_slash_display_level(
+    result_type: str,
+    content: str,
+    *,
+    warning_phrases: tuple[str, ...] = REGULAR_EVOLUTION_SLASH_WARNING_PHRASES,
+) -> str:
+    """Return frontend display severity for an evolution slash result."""
+    if result_type == "error":
+        return "error"
+    if any(phrase in content for phrase in warning_phrases):
+        return "warning"
+    return "info"
+
+
+def evolution_slash_command_name(query: str) -> str:
+    """Return the evolution slash command name without the leading slash."""
+    stripped = str(query or "").strip()
+    for command in _EVOLUTION_SLASH_COMMANDS:
+        if stripped.startswith(f"/{command}"):
+            return command
+    return "evolve"
+
+
+def evolution_slash_result(
+    command: str,
+    result: dict[str, Any],
+    *,
+    warning_phrases: tuple[str, ...] = REGULAR_EVOLUTION_SLASH_WARNING_PHRASES,
+) -> dict[str, Any]:
+    """Annotate an evolution slash command result for frontend rendering."""
+    annotated = dict(result)
+    annotated.setdefault("source", "slash_command")
+    annotated.setdefault("slash_command", command)
+    if "display_level" not in annotated:
+        result_type = str(annotated.get("result_type", "answer")).strip().lower()
+        output = str(annotated.get("output", ""))
+        annotated["display_level"] = evolution_slash_display_level(
+            result_type,
+            output,
+            warning_phrases=warning_phrases,
+        )
+    return annotated
+
 
 def event_payload_dict(evt: Any) -> dict[str, Any]:
     if hasattr(evt, "payload") and isinstance(evt.payload, dict):
@@ -111,6 +316,162 @@ def event_type(evt: Any) -> str:
     return payload_type if isinstance(payload_type, str) else ""
 
 
+def evolution_meta_from_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    for key in ("evolution_meta", "_evolution_meta"):
+        meta = payload.get(key)
+        if isinstance(meta, dict):
+            return meta
+    return {}
+
+
+def evolution_meta_from_params(params: Any) -> dict[str, Any]:
+    if not isinstance(params, dict):
+        return {}
+    return dict(evolution_meta_from_payload(params))
+
+
+def answer_selects_option(
+    answer: Any,
+    labels: tuple[str, ...],
+) -> bool:
+    if not isinstance(answer, dict):
+        return False
+    normalized_labels = {label.strip().lower() for label in labels}
+    for option in answer.get("selected_options", []) or []:
+        if isinstance(option, str) and option.strip().lower() in normalized_labels:
+            return True
+    return False
+
+
+def answers_select_option(answers: list[Any], labels: tuple[str, ...]) -> bool:
+    return any(answer_selects_option(answer, labels) for answer in answers)
+
+
+def approved_record_ids_from_answers(
+    answers: list[Any],
+    labels: tuple[str, ...],
+    record_ids_by_index: list[str] | None = None,
+) -> tuple[bool, list[str] | None]:
+    """Map generic indexed answers back to SDK record ids when host state has them.
+
+    Frontends intentionally remain unaware of evolution ``record_id`` fields.
+    If no record ids are available, callers receive ``None`` for
+    ``approved_record_ids`` and can preserve legacy all-or-nothing approval.
+    """
+    accepted = False
+    approved_ids: list[str] = []
+    seen_ids: set[str] = set()
+
+    for index, answer in enumerate(answers):
+        if not answer_selects_option(answer, labels):
+            continue
+        accepted = True
+
+        record_id = ""
+        if record_ids_by_index is not None and index < len(record_ids_by_index):
+            record_id = str(record_ids_by_index[index] or "").strip()
+        if not record_id or record_id in seen_ids:
+            continue
+        seen_ids.add(record_id)
+        approved_ids.append(record_id)
+
+    if not accepted:
+        return False, []
+    if record_ids_by_index is None:
+        return True, None
+    return True, approved_ids
+
+
+def record_ids_from_pending_approval(
+    rail: Any,
+    request_id: str,
+) -> list[str] | None:
+    pending_snapshots = getattr(rail, "_pending_approval_snapshots", None)
+    if not isinstance(pending_snapshots, dict):
+        return None
+    pending = pending_snapshots.get(request_id)
+    payload = getattr(pending, "payload", None)
+    if not isinstance(payload, list):
+        return None
+
+    record_ids: list[str] = []
+    has_record_id = False
+    for record in payload:
+        raw_record_id = getattr(record, "id", None)
+        if raw_record_id is None and isinstance(record, dict):
+            raw_record_id = record.get("id") or record.get("record_id")
+        record_id = str(raw_record_id or "").strip()
+        record_ids.append(record_id)
+        has_record_id = has_record_id or bool(record_id)
+    return record_ids if has_record_id else None
+
+
+async def approve_evolution_records(
+    rail: Any,
+    request_id: str,
+    approved_record_ids: list[str] | None,
+    *,
+    legacy_fallback: bool = False,
+) -> None:
+    if hasattr(rail, "approve_record"):
+        if approved_record_ids is None:
+            await rail.approve_record(request_id)
+        else:
+            await rail.approve_record(
+                request_id,
+                approved_record_ids=approved_record_ids,
+            )
+        return
+
+    if legacy_fallback:
+        await rail.on_approve(request_id)
+        return
+
+    await rail.approve_record(request_id)
+
+
+async def reject_evolution_records(
+    rail: Any,
+    request_id: str,
+    *,
+    legacy_fallback: bool = False,
+) -> None:
+    if hasattr(rail, "reject_record"):
+        await rail.reject_record(request_id)
+        return
+
+    if legacy_fallback:
+        await rail.on_reject(request_id)
+        return
+
+    await rail.reject_record(request_id)
+
+
+def resolve_evolution_event_timeout_sec(
+    rail: Any,
+    *,
+    fallback_sec: float | None = None,
+    grace_sec: float | None = None,
+) -> float:
+    """Resolve host watcher timeout from the SDK rail's background evolution timeout."""
+    fallback = TEAM_EVOLUTION_EVENT_TIMEOUT_SEC if fallback_sec is None else fallback_sec
+    grace = TEAM_EVOLUTION_EVENT_TIMEOUT_GRACE_SEC if grace_sec is None else grace_sec
+
+    try:
+        sdk_timeout = getattr(rail, "evolution_total_timeout_secs", None)
+    except Exception as exc:
+        logger.debug("Failed to read SDK evolution timeout from property: %s", exc)
+        return fallback
+
+    try:
+        parsed_timeout = float(sdk_timeout)
+    except (TypeError, ValueError):
+        return fallback
+    if not math.isfinite(parsed_timeout) or parsed_timeout <= 0:
+        return fallback
+    return parsed_timeout + max(grace, 0.0)
+
+
 def is_evolution_approval_event(evt: Any) -> bool:
     if event_type(evt) == "chat.ask_user_question":
         return True
@@ -120,11 +481,10 @@ def is_evolution_approval_event(evt: Any) -> bool:
 
 def evolution_event_kind(evt: Any) -> str:
     payload = event_payload_dict(evt)
-    meta = payload.get("_evolution_meta")
-    if isinstance(meta, dict):
-        event_kind = meta.get("event_kind")
-        if isinstance(event_kind, str) and event_kind:
-            return event_kind
+    meta = evolution_meta_from_payload(payload)
+    event_kind = meta.get("event_kind")
+    if isinstance(event_kind, str) and event_kind:
+        return event_kind
     if is_evolution_approval_event(evt):
         return "approval"
     return "stream"
@@ -138,8 +498,8 @@ def evolution_outcome_from_event(evt: Any) -> dict[str, str]:
     payload = event_payload_dict(evt)
     if not isinstance(payload, dict):
         return {"status": "completed", "message": str(payload)}
-    meta = payload.get("_evolution_meta")
-    meta_status = meta.get("status") if isinstance(meta, dict) else None
+    meta = evolution_meta_from_payload(payload)
+    meta_status = meta.get("status")
     status = (
         str(payload.get("status") or meta_status or "completed").strip().lower()
         or "completed"
@@ -152,9 +512,8 @@ def extract_evolution_request_id(evt: Any) -> str | None:
     payload = event_payload_dict(evt)
     request_id = payload.get("request_id")
     if not request_id:
-        meta = payload.get("_evolution_meta")
-        if isinstance(meta, dict):
-            request_id = meta.get("request_id")
+        meta = evolution_meta_from_payload(payload)
+        request_id = meta.get("request_id")
     if isinstance(request_id, str):
         request_id = request_id.strip()
     return request_id or None
@@ -162,8 +521,8 @@ def extract_evolution_request_id(evt: Any) -> str | None:
 
 def evolution_progress_status_from_event(evt: Any) -> EvolutionProgressStatus | None:
     payload = event_payload_dict(evt)
-    meta = payload.get("_evolution_meta")
-    if not isinstance(meta, dict):
+    meta = evolution_meta_from_payload(payload)
+    if not meta:
         return None
     event_kind = str(meta.get("event_kind") or "").strip().lower()
     if event_kind != "progress":
@@ -264,9 +623,9 @@ def team_evolution_terminal_progress(evt: Any) -> dict[str, str] | None:
             "stage": progress.stage,
             "message": progress.message,
         }
-    meta = payload.get("_evolution_meta")
-    meta_status = meta.get("status") if isinstance(meta, dict) else None
-    meta_stage = meta.get("stage") if isinstance(meta, dict) else None
+    meta = evolution_meta_from_payload(payload)
+    meta_status = meta.get("status")
+    meta_stage = meta.get("stage")
     status = str(payload.get("status") or meta_status or "").strip().lower()
     stage = str(payload.get("stage") or meta_stage or "").strip().lower()
     if status == "end" or stage in {"completed", "failed", "timed_out"}:

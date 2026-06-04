@@ -36,6 +36,7 @@ export interface ModelEntry {
   model_provider: string;
   timeout?: number;
   temperature?: number;
+  context_window_tokens?: number;
   /** 同 model_name 组内的默认勾选标识 */
   is_default?: boolean;
   /** 可选别名，用于快捷切换模型（如 "mimo" → "xiaomi/mimo-v2-omni"） */
@@ -85,7 +86,7 @@ export interface NativeVersionInfo {
 export interface PackagesPayload {
   packages: PackageInfo[];
   native_version: NativeVersionInfo;
-  active_package_id: string | null;
+  active_package_ids: string[];
   last_updated?: string;
 }
 
@@ -96,4 +97,10 @@ export interface ActivatePayload {
   config_path: string;
   message: string;
   loaded_resources?: string[];
+}
+
+export interface DeactivatePayload {
+  deactivated_package_id: string;
+  extension_name: string;
+  message: string;
 }

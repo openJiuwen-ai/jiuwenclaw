@@ -22,14 +22,14 @@ from openjiuwen.harness.factory import create_deep_agent
 from openjiuwen.harness.prompts import resolve_language
 from openjiuwen.harness.rails import SysOperationRail
 from openjiuwen.harness.schema.config import SubAgentConfig
-from jiuwenswarm.common.config import get_config
+from jiuwenswarm.common.config import get_default_models
 from jiuwenswarm.common.utils import get_agent_workspace_dir
+
 
 logger = logging.getLogger(__name__)
 
 # Constants for wiki workspace resolution
-DEFAULT_WIKI_DIR = "llm_wiki"
-REDIRECT_WORKSPACES = {"", "llm_wiki", "wiki_lib"}
+DEFAULT_WIKI_DIR = ".llm_wiki"
 
 DEFAULT_WIKI_AGENT_SYSTEM_PROMPT_EN = (
     "You are an LLM Wiki Maintainer. You manage a workspace consisting of three primary directories:\n"
@@ -311,7 +311,7 @@ class LLMWiki:
                 "ingested_at": entry["ingested_at"],
             }
 
-        destination = self.sources_dir / source_path.name
+        destination = self.sources_dir / f"{sha256[:8]}_{source_path.name}"
         if source_path.resolve() != destination.resolve():
             shutil.copy2(source_path, destination)
 
@@ -341,54 +341,65 @@ class LLMWiki:
     async def lint(self) -> Dict[str, Any]:
         query = (
             "Health-check the `wiki/` directory."
-            f" Actively evaluate all topic pages to discover orphaned documents or related, un-linked concepts."
-            f" You MUST proactively use your file editing tools to forge new Markdown cross-links between related"
-            f" pages, transforming isolated files into a highly connected knowledge graph."
-            f" Report the links you established."
+            " Actively evaluate all topic pages to discover orphaned documents or related, un-linked concepts."
+            " You MUST proactively use your file editing tools to forge new Markdown cross-links between related"
+            " pages, transforming isolated files into a highly connected knowledge graph."
+            " Report the links you established."
+            " FINALLY, you MUST append a detailed summary of the repairs and link established into `wiki/log.md`!"
         )
         return await self.agent.invoke({"query": query}, session=self._session)
 
 
 def _get_default_model() -> Model:
-    config = get_config()
-    default_model_conf = config.get("models", {}).get("default", {})
-    client_config = default_model_conf.get("model_client_config", {})
-    req_config = default_model_conf.get("model_config_obj", {})
+    defaults = get_default_models()
+    model_conf = next((m for m in defaults if m.get("is_default")), defaults[0] if defaults else {})
 
-    if client_config and client_config.get("custom_headers") == "":
+    client_config = model_conf.get("model_client_config", {})
+    req_config = model_conf.get("model_config_obj", {})
+
+    if client_config.get("custom_headers") == "":
         del client_config["custom_headers"]
 
-    model_name = client_config.get("model_name", "default")
-    if "model" not in req_config:
-        req_config["model"] = model_name
+    # Provide safe fallbacks for required fields to prevent ValidationError
+    client_config.setdefault("api_key", "")
+    client_config.setdefault("api_base", "")
+    client_config.setdefault("client_provider", "OpenAI")
+    client_config.setdefault("model_name", "default")
+    req_config.setdefault("model", client_config["model_name"])
 
     return Model(
-        model_client_config=(
-            ModelClientConfig(**client_config)
-            if client_config
-            else ModelClientConfig(model_name=model_name)
-        ),
-        model_config=(
-            ModelRequestConfig(**req_config) if req_config else ModelRequestConfig(model=model_name)
-        ),
+        model_client_config=ModelClientConfig(**client_config),
+        model_config=ModelRequestConfig(**req_config),
     )
 
 
-def _resolve_workspace(workspace: str) -> str:
+def _resolve_workspace(workspace: str) -> Path:
     """
-    Ensure legacy or empty workspace strings are safely mapped into the new central workspace.
+    Ensure workspace strings are safely mapped into the central or target workspace as absolute paths.
     """
     cleaned_workspace = (workspace or "").strip()
-    if cleaned_workspace in REDIRECT_WORKSPACES:
-        return str(get_agent_workspace_dir() / DEFAULT_WIKI_DIR)
-    return workspace
+    base_dir = get_agent_workspace_dir()
+
+    if not cleaned_workspace or cleaned_workspace == DEFAULT_WIKI_DIR:
+        return (base_dir / DEFAULT_WIKI_DIR).resolve()
+
+    workspace_path = Path(cleaned_workspace).expanduser()
+    if not workspace_path.is_absolute():
+        workspace_path = base_dir / workspace_path
+
+    if workspace_path.name != DEFAULT_WIKI_DIR:
+        workspace_path = workspace_path / DEFAULT_WIKI_DIR
+
+    return workspace_path.resolve()
 
 
 @tool(
     name="wiki_ingest",
-    description="Ingest a source file (PDF, TXT, MD) into the LLM Wiki."
+    description="Ingest a source file (PDF, TXT, MD) or a directory into the LLM Wiki."
     " By default, identical files (by SHA-256) are skipped perfectly (deduplication)."
-    " Set `force=True` if the user explicitly asks to re-ingest, rebuild, or force the ingestion.",
+    " Set `force=True` if the user explicitly asks to re-ingest, rebuild, or force the ingestion."
+    " The `workspace` parameter is the root folder where the `.llm_wiki` will be created."
+    " If the user specifies a target directory like 'wiki_lib' or 'bibliography', pass that exact path as `workspace`.",
 )
 async def wiki_ingest(
     source: str,
@@ -400,22 +411,26 @@ async def wiki_ingest(
     try:
         model = _get_default_model()
         final_workspace = _resolve_workspace(workspace)
-        wiki = LLMWiki(workspace=final_workspace, model=model, sys_operation=sys_operation)
+        wiki = LLMWiki(workspace=str(final_workspace), model=model, sys_operation=sys_operation)
         await wiki.ensure_initialized()
 
-        src_path = Path(source)
+        src_path = Path(source).expanduser()
+        if not src_path.is_absolute():
+            src_path = get_agent_workspace_dir() / src_path
+
         if not src_path.exists():
             return f"Error: Source {source} not found."
+
+        # Ensure we avoid circular ingestion by skipping the .llm_wiki directory itself
+        protected_root = str(final_workspace).lower()
 
         targets = []
         if src_path.is_dir():
             for ext in (".pdf", ".md", ".txt"):
                 for p in src_path.glob(f"**/*{ext}"):
                     posix_path = p.as_posix()
-                    # Prevent the wiki from ingesting its own internal architecture
-                    if any(
-                        protected in posix_path for protected in ["/wiki/", "/schema/", "/sources/"]
-                    ):
+                    # Skip if the file is located inside the .llm_wiki workspace
+                    if posix_path.lower().startswith(protected_root):
                         continue
                     targets.append(p)
         else:
@@ -438,7 +453,9 @@ async def wiki_ingest(
 
 @tool(
     name="wiki_query",
-    description="Query the LLM Wiki's compiled knowledge base directly via Natural Language.",
+    description="Query the LLM Wiki's compiled knowledge base directly via Natural Language."
+    " The `workspace` parameter is the folder containing the `.llm_wiki`."
+    " If the user specifies a target directory like 'wiki_lib' or 'bibliography', pass that exact path as `workspace`.",
 )
 async def wiki_query(
     query: str, workspace: str = "", sys_operation: Optional[SysOperation] = None
@@ -449,7 +466,12 @@ async def wiki_query(
     try:
         model = _get_default_model()
         final_workspace = _resolve_workspace(workspace)
-        wiki = LLMWiki(workspace=final_workspace, model=model, sys_operation=sys_operation)
+        if not final_workspace.exists():
+            return (
+                f"Error: The workspace '{workspace}' does not have an initialized LLM Wiki."
+                " You must use 'wiki_ingest' first to create the knowledge base."
+            )
+        wiki = LLMWiki(workspace=str(final_workspace), model=model, sys_operation=sys_operation)
         await wiki.ensure_initialized()
 
         result = await wiki.query(question=query)
@@ -464,14 +486,21 @@ async def wiki_query(
 
 @tool(
     name="wiki_lint",
-    description="Health-check and trigger automatic repairs of broken links, orphans, or anomalies in the LLM Wiki.",
+    description="Health-check and trigger automatic repairs of broken links, orphans, or anomalies in the LLM Wiki."
+    " The `workspace` parameter is the root folder containing the `.llm_wiki`."
+    " If the user specifies a target directory like 'wiki_lib' or 'bibliography', pass that exact path as `workspace`.",
 )
 async def wiki_lint(workspace: str = "", sys_operation: Optional[SysOperation] = None) -> str:
     """Lints the LLM Wiki."""
     try:
         model = _get_default_model()
         final_workspace = _resolve_workspace(workspace)
-        wiki = LLMWiki(workspace=final_workspace, model=model, sys_operation=sys_operation)
+        if not final_workspace.exists():
+            return (
+                f"Error: The workspace '{workspace}' does not have an initialized LLM Wiki."
+                " You must use 'wiki_ingest' first to create the knowledge base."
+            )
+        wiki = LLMWiki(workspace=str(final_workspace), model=model, sys_operation=sys_operation)
         await wiki.ensure_initialized()
 
         result = await wiki.lint()

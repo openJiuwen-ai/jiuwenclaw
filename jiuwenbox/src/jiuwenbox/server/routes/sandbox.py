@@ -32,7 +32,6 @@ def _mgr():
 
 class CreateSandboxRequest(BaseModel):
     command: list[str] = Field(default_factory=list)
-    workdir: str | None = None
     env: dict[str, str] = Field(default_factory=dict)
     policy: dict[str, Any] | None = None
     policy_mode: PolicyMode = PolicyMode.OVERRIDE
@@ -56,10 +55,7 @@ class ListFilesQuery(BaseModel):
 
 @router.post("/sandboxes", response_model=SandboxRef, status_code=201)
 async def create_sandbox(request: CreateSandboxRequest):
-    spec = SandboxSpec(
-        workdir=request.workdir,
-        env=request.env,
-    )
+    spec = SandboxSpec(env=request.env)
     return await _mgr().create_sandbox(
         spec,
         policy_data=request.policy,

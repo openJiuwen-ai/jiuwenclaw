@@ -2,7 +2,7 @@
 ; 用法: "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" scripts\installer.iss
 
 #define MyAppName "JiuwenSwarm"
-#define MyAppVersion "0.2.0"
+#define MyAppVersion "0.2.1"
 #define MyAppPublisher "openJiuwen"
 #define MyAppExeName "jiuwenswarm.exe"
 #define MyAppURL "https://openjiuwen.com"
@@ -45,4 +45,5 @@ Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; Tasks: de
 
 [Run]
 ; shellexec 让程序通过 ShellExecute 启动，正确处理 UAC 权限请求
-Filename: "{app}\{#MyAppExeName}"; Description: "{cm:LaunchProgram,{#MyAppName}}"; Flags: nowait postinstall skipifsilent shellexec
+; postinstall 在安装向导最后一页显示"运行 JiuwenSwarm"复选框，由用户决定是否启动
+Filename: "{app}\{#MyAppExeName}"; Flags: nowait postinstall shellexec

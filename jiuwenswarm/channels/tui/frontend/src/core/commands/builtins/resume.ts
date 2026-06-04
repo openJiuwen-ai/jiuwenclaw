@@ -1,9 +1,11 @@
 import { addError, addInfo } from "../helpers.js";
 import { CommandKind, type SlashCommand } from "../types.js";
+import type { AccentColorName } from "../../../ui/theme.js";
 
 export interface SessionMeta {
   session_id: string;
   title?: string;
+  accent_color?: AccentColorName;
   channel_id?: string;
   created_at?: number;
   last_message_at?: number;
@@ -74,6 +76,7 @@ export function createResumeCommand(): SlashCommand {
           const nextSessionId = sessionIdMatch.session_id;
           ctx.updateSession(nextSessionId);
           ctx.clearEntries();
+          ctx.setAccentColor(sessionIdMatch.accent_color || "default");
           ctx.addItem(addInfo(nextSessionId, `Resumed session ${nextSessionId}`, "r"));
           void ctx.restoreHistory(nextSessionId);
           void (async () => {
@@ -100,6 +103,7 @@ export function createResumeCommand(): SlashCommand {
           const nextSessionId = titleMatches[0]!.session_id;
           ctx.updateSession(nextSessionId);
           ctx.clearEntries();
+          ctx.setAccentColor(titleMatches[0].accent_color || "default");
           ctx.addItem(addInfo(nextSessionId, `Resumed session ${nextSessionId}`, "r"));
           void ctx.restoreHistory(nextSessionId);
           void (async () => {

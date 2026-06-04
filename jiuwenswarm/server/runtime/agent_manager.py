@@ -23,6 +23,35 @@ logger = logging.getLogger(__name__)
 ACP_DEFAULT_CAPABILITIES: dict[str, Any] = build_acp_initialize_result()
 
 
+def _normalize_channel_id(channel_id: str | None) -> str:
+    return str(channel_id or "default").strip() or "default"
+
+
+def _normalize_mode(mode: str | None) -> str:
+    return str(mode or "agent").strip() or "agent"
+
+
+def _normalize_sub_mode(sub_mode: str | None) -> str:
+    return str(sub_mode or "").strip()
+
+
+def _normalize_project_dir(project_dir: str | None) -> str:
+    raw = str(project_dir or "").strip()
+    if not raw:
+        return ""
+    try:
+        return os.path.normcase(os.path.abspath(os.path.expanduser(raw)))
+    except Exception:
+        return raw
+
+
+def _make_agent_cache_key(mode: str | None, sub_mode: str | None, project_dir: str | None) -> str:
+    mode_key = _normalize_mode(mode)
+    sub_mode_key = _normalize_sub_mode(sub_mode)
+    project_key = _normalize_project_dir(project_dir)
+    return f"{mode_key}:{sub_mode_key}:{project_key}"
+
+
 def _build_acp_agent_config(extra_config: dict[str, Any] | None = None) -> dict[str, Any]:
     """Return the dedicated ACP agent profile config.
 
@@ -58,7 +87,12 @@ class AgentManager:
         self._latest_env_overrides: dict[str, Any] = {}
 
     async def _create_agent(
-        self, agent_key: str, mode: str = "agent", config: dict[str, Any] | None = None, sub_mode: str = None
+        self,
+        agent_key: str,
+        mode: str = "agent",
+        config: dict[str, Any] | None = None,
+        sub_mode: str = None,
+        cache_key: str | None = None,
     ) -> "JiuWenClaw":
         """创建 Agent 实例.
 
@@ -77,17 +111,36 @@ class AgentManager:
                 os.environ.pop(key, None)
             else:
                 os.environ[key] = str(env_value)
-        logger.info("[AgentManager] Creating %s agent (mode=%s, sub_mode=%s)", agent_key, mode, sub_mode)
+        channel_key = _normalize_channel_id(agent_key)
+        mode_key = _normalize_mode(mode)
+        sub_mode_key = _normalize_sub_mode(sub_mode)
+        project_dir = _normalize_project_dir((config or {}).get("project_dir"))
+        if project_dir:
+            config = dict(config or {})
+            config["project_dir"] = project_dir
+        agent_cache_key = cache_key or _make_agent_cache_key(mode_key, sub_mode_key, project_dir)
+        logger.info(
+            "[AgentManager] Creating %s agent (mode=%s, sub_mode=%s, project_dir=%s)",
+            channel_key,
+            mode_key,
+            sub_mode_key or None,
+            project_dir or None,
+        )
         agent = JiuWenClaw()
-        await agent.create_instance(config, mode=mode, sub_mode=sub_mode)
-        self.agents.setdefault(agent_key, {})[mode] = agent
+        await agent.create_instance(config, mode=mode_key, sub_mode=sub_mode_key or None)
+        setattr(agent, "_jiuwenswarm_agent_cache_key", agent_cache_key)
+        setattr(agent, "_jiuwenswarm_agent_mode", mode_key)
+        setattr(agent, "_jiuwenswarm_agent_sub_mode", sub_mode_key)
+        setattr(agent, "_jiuwenswarm_agent_project_dir", project_dir)
+        self.agents.setdefault(channel_key, {})[agent_cache_key] = agent
         # 记录创建参数, recreate_agent() 时可原样复用
-        self._agent_create_params.setdefault(agent_key, {})[mode] = {
-            "mode": mode,
-            "sub_mode": sub_mode,
-            "config": config,
+        self._agent_create_params.setdefault(channel_key, {})[agent_cache_key] = {
+            "mode": mode_key,
+            "sub_mode": sub_mode_key or None,
+            "config": dict(config or {}),
+            "cache_key": agent_cache_key,
         }
-        logger.info("[AgentManager] %s agent created", agent_key)
+        logger.info("[AgentManager] %s agent created cache_key=%s", channel_key, agent_cache_key)
         return agent
 
     async def initialize(
@@ -104,7 +157,8 @@ class AgentManager:
         Returns:
             对于 ACP 通道，返回 capabilities；对于其他通道，返回 None
         """
-        if channel_id == "acp":
+        channel_key = _normalize_channel_id(channel_id)
+        if channel_key == "acp":
             logger.info("[AgentManager] ACP initialize")
             if extra_config:
                 client_capabilities = extra_config.get("client_capabilities")
@@ -154,7 +208,8 @@ class AgentManager:
         if explicit_session_id:
             logger.info("[AgentManager] session ensured: channel_id=%s session_id=%s", channel_id, explicit_session_id)
             return explicit_session_id
-        if channel_id == "acp":
+        channel_key = _normalize_channel_id(channel_id)
+        if channel_key == "acp":
             session_id = f"acp_{uuid.uuid4().hex[:8]}"
             logger.info("[AgentManager] ACP session created: session_id=%s", session_id)
             return session_id
@@ -180,21 +235,38 @@ class AgentManager:
         Returns:
             JiuWenClaw | None: Agent 实例
         """
-        if channel_id in self.agents and mode in self.agents[channel_id]:
-            return self.agents[channel_id][mode]
-        else:
-            config = {}
-            if project_dir:
-                config["project_dir"] = project_dir
-            if channel_id == "acp":
-                config = {
-                    **config,
-                    **_build_acp_agent_config()
-                }
-            await self._create_agent(channel_id, mode, config, sub_mode)
-        return self.agents.get(channel_id, {}).get(mode)
+        channel_key = _normalize_channel_id(channel_id)
+        mode_key = _normalize_mode(mode)
+        sub_mode_key = _normalize_sub_mode(sub_mode)
+        project_key = _normalize_project_dir(project_dir)
+        cache_key = _make_agent_cache_key(mode_key, sub_mode_key, project_key)
+        channel_agents = self.agents.get(channel_key, {})
+        if cache_key in channel_agents:
+            return channel_agents[cache_key]
 
-    def get_agent_nowait(self, channel_id: str = "") -> "JiuWenClaw | None":
+        config = {}
+        if project_key:
+            config["project_dir"] = project_key
+        if channel_key == "acp":
+            config = {
+                **config,
+                **_build_acp_agent_config()
+            }
+        return await self._create_agent(
+            channel_key,
+            mode_key,
+            config,
+            sub_mode_key or None,
+            cache_key=cache_key,
+        )
+
+    def get_agent_nowait(
+        self,
+        channel_id: str = "",
+        mode: str | None = None,
+        project_dir: str | None = None,
+        sub_mode: str | None = None,
+    ) -> "JiuWenClaw | None":
         """获取 Agent 实例（同步，不自动创建）.
 
         Args:
@@ -203,10 +275,34 @@ class AgentManager:
         Returns:
             JiuWenClaw | None: Agent 实例，如果不存在则返回 None
         """
-        channel_key = channel_id or "default"
+        channel_key = _normalize_channel_id(channel_id)
         channel_agents = self.agents.get(channel_key, {})
-        if isinstance(channel_agents, dict):
-            return channel_agents.get("agent") or next(iter(channel_agents.values()), None)
+        if not isinstance(channel_agents, dict):
+            return None
+
+        if mode is not None or project_dir is not None or sub_mode is not None:
+            cache_key = _make_agent_cache_key(mode, sub_mode, project_dir)
+            agent = channel_agents.get(cache_key)
+            if agent is not None:
+                return agent
+
+        requested_mode = _normalize_mode(mode) if mode is not None else ""
+        requested_sub_mode = _normalize_sub_mode(sub_mode) if sub_mode is not None else ""
+        requested_project_dir = _normalize_project_dir(project_dir) if project_dir is not None else ""
+        for agent in channel_agents.values():
+            if requested_mode and getattr(agent, "_jiuwenswarm_agent_mode", "") != requested_mode:
+                continue
+            if requested_sub_mode and getattr(agent, "_jiuwenswarm_agent_sub_mode", "") != requested_sub_mode:
+                continue
+            if requested_project_dir and getattr(agent, "_jiuwenswarm_agent_project_dir", "") != requested_project_dir:
+                continue
+            return agent
+
+        if mode is None and project_dir is None and sub_mode is None:
+            for agent in channel_agents.values():
+                if getattr(agent, "_jiuwenswarm_agent_mode", "") == "agent":
+                    return agent
+            return next(iter(channel_agents.values()), None)
         return None
 
     async def reload_agents_config(self, config, env) -> None:
@@ -315,6 +411,7 @@ class AgentManager:
                     mode=params.get("mode") or mode_key,
                     config=params.get("config"),
                     sub_mode=params.get("sub_mode"),
+                    cache_key=params.get("cache_key") or mode_key,
                 )
             except Exception as exc:  # noqa: BLE001
                 logger.error(
@@ -328,6 +425,66 @@ class AgentManager:
             existing_modes,
         )
         return existing_modes
+
+    async def process_message(self, request: Any) -> Any:
+        """处理非流式请求.
+
+        Args:
+            request: AgentRequest 对象
+
+        Returns:
+            AgentResponse 对象
+        """
+        try:
+            channel_id = getattr(request, "channel_id", "")
+            params = getattr(request, "params", {}) if isinstance(getattr(request, "params", {}), dict) else {}
+            mode_full = params.get("mode", "agent.plan")
+            mode = str(mode_full).split(".")[0] if mode_full else "agent"
+            workspace_dir = params.get("workspace_dir")
+
+            agent = await self.get_agent(
+                channel_id=channel_id,
+                mode=mode,
+                project_dir=workspace_dir,
+            )
+            if agent is None:
+                raise RuntimeError(f"[AgentManager] No agent available for channel {channel_id}")
+
+            return await agent.process_message(request)
+        except Exception as e:
+            logger.error(f"[AgentManager] Error in process_message: {e}", exc_info=True)
+            raise
+
+    async def process_message_stream(self, request: Any):
+        """处理流式请求.
+
+        Args:
+            request: AgentRequest 对象
+
+        Yields:
+            AgentResponseChunk 对象
+        """
+        try:
+            channel_id = getattr(request, "channel_id", "")
+            params = getattr(request, "params", {}) if isinstance(getattr(request, "params", {}), dict) else {}
+            mode_full = params.get("mode", "agent.plan")
+            mode = str(mode_full).split(".")[0] if mode_full else "agent"
+            workspace_dir = params.get("workspace_dir")
+
+            agent = await self.get_agent(
+                channel_id=channel_id,
+                mode=mode,
+                project_dir=workspace_dir,
+            )
+            if agent is None:
+                raise RuntimeError(f"[AgentManager] No agent available for channel {channel_id}")
+
+            # 流式处理
+            async for chunk in agent.process_message_stream(request):
+                yield chunk
+        except Exception as e:
+            logger.error(f"[AgentManager] Error in process_message_stream: {e}", exc_info=True)
+            raise
 
     async def cleanup(self) -> None:
         """清理所有 agent 实例."""

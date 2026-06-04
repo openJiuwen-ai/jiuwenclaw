@@ -37,6 +37,9 @@ from openjiuwen.auto_harness import (
     AutoHarnessOrchestrator,
     create_auto_harness_orchestrator,
 )
+from openjiuwen.auto_harness.infra.git_auth import (
+    build_git_auth_env,
+)
 from openjiuwen.auto_harness.schema import (
     ExtensionDesign,
     OptimizationTask,
@@ -79,7 +82,7 @@ _DEFAULT_CI_GATE_INSTALL_COMMAND = "uv sync --active --group dev --extra cli"
 def reset_harness_packages_state() -> None:
     """Reset harness package state to native agent on service startup.
 
-    On service startup, clear active_package_id if there's historical activation info.
+    On service startup, clear active_package_ids if there's historical activation info.
     This ensures the agent always starts fresh in native mode.
     """
     try:
@@ -88,22 +91,21 @@ def reset_harness_packages_state() -> None:
             return
 
         data = json.loads(_HARNESS_PACKAGES_FILE.read_text(encoding="utf-8"))
-        active_package_id = data.get("active_package_id")
+        active_package_ids = data.get("active_package_ids", [])
 
-        if not active_package_id:
-            logger.debug("[AutoHarnessService] No active package in metadata, already native")
+        if not active_package_ids:
+            logger.debug("[AutoHarnessService] No active packages in metadata, already native")
             return
 
-        extension_name = data.get("active_extension_name", active_package_id)
         logger.info(
-            "[AutoHarnessService] Resetting to native agent, clearing previous: %s (%s)",
-            extension_name,
-            active_package_id,
+            "[AutoHarnessService] Resetting to native agent, clearing previous: %s",
+            active_package_ids,
         )
 
-        # Reset active_package_id to null (native state)
-        data["active_package_id"] = None
-        data["active_extension_name"] = None
+        # Reset active_package_ids to empty list (native state)
+        data["active_package_ids"] = []
+        data.pop("active_package_id", None)  # Remove legacy field if exists
+        data.pop("active_extension_name", None)  # Remove legacy field
         native_version = data.get("native_version", {})
         if native_version and native_version.get("is_active", False) == False:
             data["native_version"]["is_active"] = True
@@ -115,7 +117,7 @@ def reset_harness_packages_state() -> None:
             encoding="utf-8"
         )
         logger.info(
-            "[AutoHarnessService] Reset to native agent state, cleared active_package_id"
+            "[AutoHarnessService] Reset to native agent state, cleared active_package_ids"
         )
 
     except Exception as e:
@@ -265,11 +267,17 @@ class AutoHarnessService:
 
         ci_gate = config_dict.get("ci_gate") or {}
         if not ci_gate.get("python_executable"):
-            ci_gate["python_executable"] = _DEFAULT_CI_GATE_PYTHON_EXECUTABLE
+            ci_gate["python_executable"] = str(_DEFAULT_CI_GATE_PYTHON_EXECUTABLE)
             needs_save = True
 
         if not ci_gate.get("install_command"):
             ci_gate["install_command"] = _DEFAULT_CI_GATE_INSTALL_COMMAND
+            needs_save = True
+
+        budget = config_dict.get("budget", {})
+        max_tasks_per_session = budget.get("max_tasks_per_session", 5)
+        if max_tasks_per_session > 5:
+            budget["max_tasks_per_session"] = 5
             needs_save = True
 
         if needs_save:
@@ -342,6 +350,11 @@ class AutoHarnessService:
         """Start the scheduling loop (called by AgentWebSocketServer)."""
         if self._scheduler is None:
             self._init_scheduler()
+        # Reconcile legacy task statuses (async — requires file I/O)
+        if self._task_store is not None and self._task_store.has_legacy_completed_tasks():
+            corrected = await self._task_store.reconcile_task_statuses()
+            if corrected > 0:
+                logger.info("[AutoHarnessService] Reconciled %d legacy task statuses", corrected)
         if self._scheduler is not None:
             await self._scheduler.start()
             logger.info("[AutoHarnessService] Scheduler started")
@@ -411,6 +424,7 @@ class AutoHarnessService:
         self,
         args: list[str],
         cwd: Optional[Path] = None,
+        env: Optional[dict[str, str]] = None,
     ) -> tuple[int, str, str]:
         """Run a git command asynchronously."""
         try:
@@ -418,6 +432,7 @@ class AutoHarnessService:
                 "git",
                 *args,
                 cwd=str(cwd) if cwd else None,
+                env=env,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             )
@@ -435,10 +450,28 @@ class AutoHarnessService:
             )
             return (1, "", str(exc))
 
-    async def clone_or_update_repo(self, repo_url: str) -> Path:
-        """Clone or update remote repository to local cache (per §5.5)."""
+    async def clone_or_update_repo(
+        self,
+        repo_url: str,
+        harness_config: Optional[AutoHarnessConfig] = None,
+    ) -> Path:
+        """Clone or update remote repository to local cache."""
+        # Derive git settings from harness_config
+        cfg = harness_config
+        git_remote_name = cfg.git_remote if cfg else ""
+        gitcode_username = cfg.resolve_gitcode_username() if cfg else ""
+        gitcode_token = cfg.resolve_gitcode_token() if cfg else ""
+        git_user_name = cfg.git_user_name if cfg else ""
+        git_user_email = cfg.git_user_email if cfg else ""
+
         repo_name = self._extract_repo_name(repo_url)
         local_path = self.repo_cache_dir / repo_name
+
+        # Build auth env for git commands that need credentials
+        git_env = build_git_auth_env(
+            username=gitcode_username,
+            token=gitcode_token,
+        ) if gitcode_username and gitcode_token else None
 
         if local_path.exists() and (local_path / ".git").exists():
             # Update existing repository: fetch + reset (per §5.5)
@@ -468,9 +501,63 @@ class AutoHarnessService:
 
             ret, _, stderr = await self._run_git_command(
                 ["clone", repo_url, str(local_path)],
+                env=git_env,
             )
             if ret != 0:
                 raise RuntimeError(f"Failed to clone repository {repo_url}: {stderr}")
+
+        # Ensure the named fork remote exists (e.g. "autoharness").
+        # GitOperations.push() pushes to the fork remote, so it must point
+        # to the fork repo, not the upstream repo.
+        fork_owner = cfg.fork_owner if cfg else ""
+        upstream_owner = cfg.upstream_owner if cfg else ""
+        if git_remote_name and git_remote_name != "origin":
+            # Derive fork URL from repo_url by replacing upstream_owner
+            # with fork_owner. If they are the same, reuse repo_url directly.
+            fork_url = repo_url
+            if fork_owner and upstream_owner and fork_owner != upstream_owner:
+                fork_url = repo_url.replace(
+                    f"/{upstream_owner}/",
+                    f"/{fork_owner}/",
+                )
+
+            # Check if the remote already exists
+            ret, stdout, _ = await self._run_git_command(
+                ["remote"],
+                cwd=local_path,
+            )
+            existing_remotes = stdout.strip().splitlines() if ret == 0 else []
+
+            if git_remote_name in existing_remotes:
+                # Update the remote URL to the fork URL
+                await self._run_git_command(
+                    ["remote", "set-url", git_remote_name, fork_url],
+                    cwd=local_path,
+                )
+            else:
+                # Add the named remote pointing to the fork
+                await self._run_git_command(
+                    ["remote", "add", git_remote_name, fork_url],
+                    cwd=local_path,
+                )
+            logger.info(
+                "[AutoHarnessService] Ensured remote '%s' -> %s",
+                git_remote_name,
+                fork_url,
+            )
+
+        # Configure git user identity in the local repo so commits have
+        # proper authorship even on servers without global git config.
+        if git_user_name:
+            await self._run_git_command(
+                ["config", "user.name", git_user_name],
+                cwd=local_path,
+            )
+        if git_user_email:
+            await self._run_git_command(
+                ["config", "user.email", git_user_email],
+                cwd=local_path,
+            )
 
         return local_path
 
@@ -527,9 +614,15 @@ class AutoHarnessService:
 
         # Derive git settings from repo_url. Preserve git.base_branch from
         # config.yaml so local Auto-Harness runs can target feature branches.
+        # Preserve git_remote as the named remote (e.g. "autoharness") from
+        # config.yaml so that GitOperations.push() uses a named remote instead
+        # of a raw URL. The named remote is added in clone_or_update_repo().
         if not config.git_base_branch:
+            config.git_base_branch = "develop-auto-harness"
+        if config.pipeline_preference == EXTENDED_EVOLVE_PIPELINE:
             config.git_base_branch = "develop"
-        config.git_remote = repo_url
+        if not config.git_remote:
+            config.git_remote = "origin"
 
         # Parse upstream owner/repo from URL
         repo_name = self._extract_repo_name(repo_url)
@@ -993,7 +1086,10 @@ class AutoHarnessService:
                 if self._base_config and self._base_config.repo_url
                 else _DEFAULT_REPO_URL
             )
-            local_repo = await self.clone_or_update_repo(repo_url)
+            local_repo = await self.clone_or_update_repo(
+                repo_url,
+                harness_config=self._base_config,
+            )
             config = self.build_auto_harness_config(
                 repo_url,
                 local_repo,
@@ -1134,8 +1230,10 @@ class AutoHarnessService:
         request: Any,
         session_id: str,
         request_id: str,
-        query: str,
+        *,
+        query: str = "",
         model: Optional[Model] = None,
+        auto_accept: bool = False,
     ) -> AsyncIterator[AgentResponseChunk]:
         """Run auto_harness session and stream chunks as WebSocket events.
 
@@ -1201,7 +1299,10 @@ class AutoHarnessService:
         pipeline_preference = params.get("pipeline_preference")
         try:
             # Clone/update repository
-            local_repo = await self.clone_or_update_repo(repo_url)
+            local_repo = await self.clone_or_update_repo(
+                repo_url,
+                harness_config=self._base_config,
+            )
             logger.info("[AutoHarnessService] Repo ready at: %s", local_repo)
 
             # Build config with per-request overrides
@@ -1241,7 +1342,7 @@ class AutoHarnessService:
                 """Produce chunks from orchestrator stream."""
                 try:
                     async for chunk in orchestrator.run_session_stream(tasks=tasks):
-                        if cancelled:
+                        if cancelled or active_run.cancelled:
                             logger.info(
                                 "[AutoHarnessService] Stream cancelled, stopping producer"
                             )
@@ -1292,7 +1393,7 @@ class AutoHarnessService:
             # out-of-band resume signal; this original stream stays open.
             try:
                 async for response_chunk, should_suspend in self._consume_stream(
-                    active_run, rid, cid,
+                    active_run, rid, cid, auto_accept=auto_accept,
                 ):
                     if should_suspend:
                         active_run.suspended = True
@@ -1473,8 +1574,16 @@ class AutoHarnessService:
         active_run: ActiveAutoHarnessRun,
         request_id: str,
         channel_id: Optional[str],
+        auto_accept: bool = False,
     ) -> AsyncIterator[tuple[AgentResponseChunk, bool]]:
-        """Consume stream queue, yielding (chunk, should_suspend) pairs."""
+        """Consume stream queue, yielding (chunk, should_suspend) pairs.
+
+        Args:
+            auto_accept: When True, automatically resolve __interaction__
+                chunks by calling orchestrator.run_session_stream() with
+                accept message, instead of suspending for external resume.
+                Used by scheduler runs that don't have interactive channels.
+        """
         queue = active_run.stream_queue
         if queue is None:
             return
@@ -1486,6 +1595,12 @@ class AutoHarnessService:
                     timeout=0.1,
                 )
             except asyncio.TimeoutError:
+                if active_run.cancelled:
+                    logger.info(
+                        "[AutoHarnessService] Consumer detected cancellation, breaking, session=%s",
+                        active_run.session_id,
+                    )
+                    break
                 if producer_task.done():
                     logger.info(
                         "[AutoHarnessService] Producer done while queue idle, session=%s",
@@ -1530,6 +1645,22 @@ class AutoHarnessService:
                     if isinstance(interaction_id, str) and interaction_id:
                         active_run.pending_interaction_id = interaction_id
 
+                    # Auto-accept: resolve interaction without suspending
+                    if auto_accept and active_run.orchestrator is not None:
+                        logger.info(
+                            "[AutoHarnessService] Auto-accepting interaction %s, session=%s",
+                            interaction_id, active_run.session_id,
+                        )
+                        active_run.orchestrator.run_session_stream(
+                            message={
+                                "interaction_id": interaction_id or "",
+                                "action": "accept",
+                                "feedback": "",
+                            }
+                        )
+                        # Do NOT yield as should_suspend; continue consuming
+                        is_interaction = False
+
             for response_chunk in self._map_chunk_to_response(
                 chunk,
                 request_id,
@@ -1542,6 +1673,13 @@ class AutoHarnessService:
                 active_run.completed = True
                 logger.info(
                     "[AutoHarnessService] Consumer received terminal event, session=%s",
+                    active_run.session_id,
+                )
+                break
+
+            if active_run.cancelled:
+                logger.info(
+                    "[AutoHarnessService] Consumer cancelled during processing, session=%s",
                     active_run.session_id,
                 )
                 break
@@ -1655,7 +1793,7 @@ class AutoHarnessService:
         )
 
     def cancel_session_run(self, session_id: str) -> bool:
-        """Cancel active run for a session (per §5.2)."""
+        """Cancel active run for a session."""
         active_run = self._active_runs.get(session_id)
         if active_run is None:
             logger.info("[AutoHarnessService] No active run for session %s", session_id)
@@ -1664,7 +1802,11 @@ class AutoHarnessService:
         logger.info("[AutoHarnessService] Cancelling run for session %s", session_id)
         active_run.cancelled = True
 
-        # Cancel the task
+        # Signal the orchestrator to stop (pipelines check should_cancel)
+        if active_run.orchestrator is not None:
+            active_run.orchestrator.cancel()
+
+        # Cancel the asyncio task
         if not active_run.task.done():
             active_run.task.cancel()
 
@@ -1741,7 +1883,7 @@ class AutoHarnessService:
                 "extension_name": "Native Agent",
                 "is_active": True,
             },
-            "active_package_id": None,
+            "active_package_ids": [],
             "last_updated": datetime.now(timezone.utc).isoformat(),
         }
 
@@ -1811,31 +1953,53 @@ class AutoHarnessService:
                 return pkg
         return None
 
-    def update_active_status(self, package_id: str) -> dict[str, Any]:
-        """Update active_package_id in packages metadata (Mock implementation)."""
+    def update_active_status(self, package_id: str, operation: str = "add") -> dict[str, Any]:
+        """Update active_package_ids in packages metadata.
+
+        Args:
+            package_id: The package ID to add/remove from active list
+            operation: "add" to activate, "remove" to deactivate
+
+        Returns:
+            Updated packages data dict
+        """
         data = self.load_packages()
 
-        # Update is_active for all packages
-        for pkg in data.get("packages", []):
-            pkg["is_active"] = pkg.get("id") == package_id
+        # Get current active_package_ids list (migrate from legacy if needed)
+        active_ids = data.get("active_package_ids", [])
+        if not isinstance(active_ids, list):
+            # Migration: convert legacy single id to list
+            legacy_id = data.get("active_package_id")
+            active_ids = [legacy_id] if legacy_id else []
+            data.pop("active_package_id", None)
+            data.pop("active_extension_name", None)
 
-        # Update native_version
+        if operation == "add":
+            if package_id not in active_ids:
+                active_ids.append(package_id)
+            # Update is_active for this package
+            for pkg in data.get("packages", []):
+                if pkg.get("id") == package_id:
+                    pkg["is_active"] = True
+                    pkg["activated_at"] = datetime.now(timezone.utc).isoformat()
+        elif operation == "remove":
+            if package_id in active_ids:
+                active_ids.remove(package_id)
+            # Update is_active for this package
+            for pkg in data.get("packages", []):
+                if pkg.get("id") == package_id:
+                    pkg["is_active"] = False
+
+        data["active_package_ids"] = active_ids
+
+        # Update native_version: active when no packages are active
         native = data.get("native_version", {})
-        native["is_active"] = package_id == "native"
+        native["is_active"] = len(active_ids) == 0
         data["native_version"] = native
 
-        # Update active_package_id
-        data["active_package_id"] = package_id if package_id != "native" else None
         data["last_updated"] = datetime.now(timezone.utc).isoformat()
-
-        # Update activated_at for the active package
-        if package_id != "native":
-            active_pkg = self.find_package_by_id(data, package_id)
-            if active_pkg:
-                active_pkg["activated_at"] = datetime.now(timezone.utc).isoformat()
-
         self.save_packages(data)
-        logger.info("[AutoHarnessService] Updated active package: %s", package_id)
+        logger.info("[AutoHarnessService] Updated active packages: %s (operation=%s)", active_ids, operation)
 
         return data
 
@@ -1844,15 +2008,14 @@ class AutoHarnessService:
         return self.load_packages()
 
     async def activate_package(self, package_id: str) -> dict[str, Any]:
-        """Activate a harness package by loading its config or resetting to native agent.
+        """Activate a harness package by loading its config (stacking on existing).
 
-        Simplified activation flow:
-        1. Check current active package from metadata
-        2. If switching to native: unload current package (if any) via unload_harness_config
-        3. If switching to another package: unload current package first, then load new one
+        Stacked activation flow:
+        1. Load the new package config (stack on any existing active packages)
+        2. Update metadata: add package_id to active_package_ids list
 
         Args:
-            package_id: The package ID to activate, or "native" to reset to original agent
+            package_id: The package ID to activate
 
         Returns:
             Payload for frontend response with activation details
@@ -1866,46 +2029,19 @@ class AutoHarnessService:
             type(self._agent).__name__ if self._agent else None,
         )
         data = self.load_packages()
-        current_active_id = data.get("active_package_id")
 
-        # Step 1: Unload current active package if exists and different from target
-        if current_active_id and current_active_id != package_id and self._agent is not None:
-            current_package = self.find_package_by_id(data, current_active_id)
-            if current_package:
-                current_config_path = current_package.get("config_path", "")
-                if current_config_path and Path(current_config_path).exists():
-                    try:
-                        unloaded = await self._agent.unload_harness_config(current_config_path)
-                        logger.info(
-                            "[AutoHarnessService] Unloaded current package %s: %s",
-                            current_active_id,
-                            unloaded
-                        )
-                    except FileNotFoundError:
-                        logger.warning(
-                            "[AutoHarnessService] Current package config not found, skip unload: %s",
-                            current_config_path,
-                        )
-                    except Exception as exc:
-                        logger.warning(
-                            "[AutoHarnessService] Failed to unload current package %s: %s",
-                            current_active_id,
-                            exc,
-                        )
-
-        # Step 2: Handle native agent (just update status, no load needed)
-        if package_id == "native":
-            self.update_active_status("native")
-            logger.info("[AutoHarnessService] Switched to native agent")
+        # Check if already active
+        active_ids = data.get("active_package_ids", [])
+        if package_id in active_ids:
+            logger.info("[AutoHarnessService] Package %s already active", package_id)
             return {
-                "activated_package_id": "native",
-                "extension_name": "Native Agent",
+                "activated_package_id": package_id,
+                "extension_name": "",
                 "runtime_path": "",
                 "config_path": "",
-                "message": "已切换回原生 Agent 模式",
+                "message": "扩展已处于激活状态",
             }
 
-        # Step 3: Handle specific package activation
         package = self.find_package_by_id(data, package_id)
         if package is None:
             raise ValueError(f"Package not found: {package_id}")
@@ -1919,7 +2055,7 @@ class AutoHarnessService:
 
         if self._agent is None:
             logger.warning("[AutoHarnessService] No agent available for activation")
-            self.update_active_status(package_id)
+            self.update_active_status(package_id, "add")
             return {
                 "activated_package_id": package_id,
                 "extension_name": package.get("extension_name", ""),
@@ -1930,7 +2066,7 @@ class AutoHarnessService:
 
         try:
             loaded_resources = await self._agent.load_harness_config(config_path)
-            self.update_active_status(package_id)
+            self.update_active_status(package_id, "add")
             logger.info(
                 "[AutoHarnessService] Activated package %s, loaded resources: %s",
                 package_id,
@@ -1952,8 +2088,73 @@ class AutoHarnessService:
             logger.exception("[AutoHarnessService] Activate package %s failed: %s", package_id, exc)
             raise ValueError(f"激活扩展失败: {exc}") from exc
 
+    async def deactivate_package(self, package_id: str) -> dict[str, Any]:
+        """Deactivate a harness package by unloading its config.
+
+        Args:
+            package_id: The package ID to deactivate
+
+        Returns:
+            Payload for frontend response with deactivation details
+
+        Raises:
+            ValueError: Package not found or not active
+        """
+        logger.info(
+            "[AutoHarnessService] deactivate_package called: package_id=%s, agent=%s",
+            package_id,
+            type(self._agent).__name__ if self._agent else None,
+        )
+        data = self.load_packages()
+
+        # Check if package is in active list
+        active_ids = data.get("active_package_ids", [])
+        if package_id not in active_ids:
+            logger.info("[AutoHarnessService] Package %s is not active", package_id)
+            return {
+                "deactivated_package_id": package_id,
+                "extension_name": "",
+                "message": "扩展未处于激活状态",
+            }
+
+        package = self.find_package_by_id(data, package_id)
+        if package is None:
+            raise ValueError(f"Package not found: {package_id}")
+
+        config_path = package.get("config_path", "")
+        extension_name = package.get("extension_name", "")
+
+        if self._agent is not None and config_path and Path(config_path).exists():
+            try:
+                unloaded_resources = await self._agent.unload_harness_config(config_path)
+                logger.info(
+                    "[AutoHarnessService] Deactivated package %s, unloaded resources: %s",
+                    package_id,
+                    unloaded_resources,
+                )
+            except FileNotFoundError:
+                logger.warning(
+                    "[AutoHarnessService] Config file not found for deactivation: %s",
+                    config_path,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "[AutoHarnessService] Failed to unload package %s: %s",
+                    package_id,
+                    exc,
+                )
+
+        self.update_active_status(package_id, "remove")
+        logger.info("[AutoHarnessService] Package %s deactivated", package_id)
+
+        return {
+            "deactivated_package_id": package_id,
+            "extension_name": extension_name,
+            "message": f"扩展 {extension_name} 已去激活",
+        }
+
     def delete_package(self, package_id: str) -> dict[str, Any]:
-        """Delete a package and optionally switch to native agent if it was active.
+        """Delete a package and optionally remove from active list if it was active.
 
         Args:
             package_id: The package ID to delete
@@ -1971,7 +2172,8 @@ class AutoHarnessService:
 
         # Check if package is currently active
         was_active = package.get("is_active", False)
-        active_package_id = data.get("active_package_id")
+        active_ids = data.get("active_package_ids", [])
+        was_in_active_list = package_id in active_ids
 
         # Delete runtime directory if exists
         runtime_path = package.get("runtime_path", "")
@@ -1989,17 +2191,24 @@ class AutoHarnessService:
         packages = [p for p in packages if p.get("id") != package_id]
         data["packages"] = packages
 
-        # If deleted package was active, switch to native
+        # If deleted package was active, remove from active_ids and update native status
         switched_to_native = False
-        if was_active or active_package_id == package_id:
-            data["active_package_id"] = None
-            for pkg in packages:
-                pkg["is_active"] = False
+        if was_active or was_in_active_list:
+            active_ids = [id for id in active_ids if id != package_id]
+            data["active_package_ids"] = active_ids
+            # Update native status: active when no packages are active
             native = data.get("native_version", {})
-            native["is_active"] = True
+            if len(active_ids) == 0:
+                native["is_active"] = True
+                switched_to_native = True
+            else:
+                native["is_active"] = False
             data["native_version"] = native
-            switched_to_native = True
-            logger.info("[AutoHarnessService] Deleted active package %s, switched to native agent", package_id)
+            logger.info("[AutoHarnessService] Deleted active package %s, remaining active: %s", package_id, active_ids)
+
+        # Remove legacy fields if present
+        data.pop("active_package_id", None)
+        data.pop("active_extension_name", None)
 
         data["last_updated"] = datetime.now(timezone.utc).isoformat()
         self.save_packages(data)
@@ -2206,7 +2415,8 @@ class AutoHarnessService:
         query: str,
         interval_hours: int,
         run_immediately: bool = False,
-        model: Optional[Model] = None
+        model: Optional[Model] = None,
+        pipeline: Optional[str] = None
     ) -> dict[str, Any]:
         """Create a new scheduled task.
 
@@ -2215,6 +2425,7 @@ class AutoHarnessService:
             interval_hours: Execution interval in hours
             run_immediately: If True, trigger immediate execution after creation
             model: Model configuration from JiuwenClaw (model_name stored for execution)
+            pipeline: Pipeline preference (extended_evolve_pipeline or meta_evolve_pipeline)
 
         Returns:
             {"task_id": str, "next_run_time": str, "message": str}
@@ -2244,9 +2455,10 @@ class AutoHarnessService:
             "current_execution_id": None,
             "execution_history": [],
             "model_name": model_name,
+            "pipeline": pipeline,  # Pipeline preference
         }
 
-        self._task_store.add_task(task_data)
+        await self._task_store.add_task(task_data)
 
         logger.info(
             "[AutoHarnessService] Created scheduled task: %s, interval=%sh, next_run=%s, run_immediately=%s",
@@ -2271,7 +2483,8 @@ class AutoHarnessService:
     async def run_task(
         self,
         query: str,
-        model: Optional[Model] = None
+        model: Optional[Model] = None,
+        pipeline: Optional[str] = None
     ) -> dict[str, Any]:
         """Create and immediately execute a one-time task.
 
@@ -2282,6 +2495,7 @@ class AutoHarnessService:
         Args:
             query: The optimization goal/task description
             model: Model configuration from JiuwenClaw
+            pipeline: Pipeline preference (extended_evolve_pipeline or meta_evolve_pipeline)
 
         Returns:
             {"task_id": str, "status": "running", "message": str}
@@ -2309,9 +2523,10 @@ class AutoHarnessService:
             "current_execution_id": None,
             "execution_history": [],
             "model_name": model_name,
+            "pipeline": pipeline,  # Pipeline preference
         }
 
-        self._task_store.add_task(task_data)
+        await self._task_store.add_task(task_data)
 
         logger.info(
             "[AutoHarnessService] Created one-time task: %s, will execute immediately",
@@ -2344,11 +2559,11 @@ class AutoHarnessService:
         if self._task_store is None or self._scheduler is None:
             return {"error": "调度器未初始化"}
 
-        # Cancel running execution if exists
-        self._scheduler.cancel_execution(task_id)
+        # Cancel running execution if exists (async - must await)
+        await self._scheduler.cancel_execution(task_id)
 
         # Update status
-        self._task_store.update_task(task_id, {"status": "cancelled"})
+        await self._task_store.update_task(task_id, {"status": "cancelled"})
 
         logger.info("[AutoHarnessService] Cancelled scheduled task: %s", task_id)
 
@@ -2375,10 +2590,10 @@ class AutoHarnessService:
 
         # Cancel running execution if exists
         if self._scheduler is not None and task.get("status") == "running":
-            self._scheduler.cancel_execution(task_id)
+            await self._scheduler.cancel_execution(task_id)
 
         # Delete task from store (includes removing log files)
-        deleted = self._task_store.delete_task(task_id)
+        deleted = await self._task_store.delete_task(task_id)
         if not deleted:
             return {"error": "删除失败", "task_id": task_id}
 
@@ -2386,7 +2601,7 @@ class AutoHarnessService:
 
         return {"task_id": task_id}
 
-    def get_scheduled_task_status(self, task_id: str) -> Optional[dict[str, Any]]:
+    async def get_scheduled_task_status(self, task_id: str) -> Optional[dict[str, Any]]:
         """Get task status and details.
 
         Returns:
@@ -2396,7 +2611,7 @@ class AutoHarnessService:
             return None
         return self._task_store.get_task(task_id)
 
-    def list_scheduled_tasks(self) -> list[dict[str, Any]]:
+    async def list_scheduled_tasks(self) -> list[dict[str, Any]]:
         """List all scheduled tasks.
 
         Returns:
@@ -2406,7 +2621,7 @@ class AutoHarnessService:
             return []
         return self._task_store.list_tasks()
 
-    def get_scheduled_task_logs(
+    async def get_scheduled_task_logs(
         self,
         task_id: str,
         log_type: str = "current",
@@ -2428,4 +2643,4 @@ class AutoHarnessService:
         """
         if self._task_store is None:
             return {"error": "任务存储未初始化"}
-        return self._task_store.get_logs(task_id, log_type, history_index, offset, limit)
+        return await self._task_store.get_logs(task_id, log_type, history_index, offset, limit)

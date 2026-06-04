@@ -237,6 +237,8 @@ class WebChannel(BaseChannel):
 
             ws_serve = websockets.serve
 
+        ws_max_size = 8 * 2**20  # 8 MB — matches AgentServer link
+
         self._server = await ws_serve(
             self._connection_handler,
             self.config.host,
@@ -244,6 +246,7 @@ class WebChannel(BaseChannel):
             process_request=self._process_request,
             ping_interval=20,
             ping_timeout=20,
+            max_size=ws_max_size,
         )
         self._running = True
         logger.info(
@@ -354,7 +357,8 @@ class WebChannel(BaseChannel):
             if event_name in ("connection.ack", "todo.updated", "chat.tool_call", "chat.tool_result",
                               "chat.processing_status", "chat.interrupt_result", "chat.evolution_status",
                               "chat.error", "heartbeat.relay",
-                              "context.compressed", "chat.ask_user_question", "chat.subtask_update",
+                              "context.usage", "context.compression_state",
+                              "chat.ask_user_question", "chat.subtask_update",
                               "history.message",
                               "chat.session_result", "chat.usage_metadata",
                               "chat.usage_summary", "chat.file") \
@@ -374,6 +378,11 @@ class WebChannel(BaseChannel):
                     "session_id": msg.session_id,
                     "content": content,
                 }
+                # teammate 消息：保留 role 和 member_name 供前端区分成员
+                for _key in ("role", "member_name"):
+                    _val = msg.payload.get(_key)
+                    if _val is not None:
+                        payload[_key] = _val
                 # 定时任务推送：附带 cron 元数据，供前端识别并替换占位消息（避免误写入流式气泡）
                 if event_name == "chat.final":
                     cron_extra = msg.payload.get("cron")

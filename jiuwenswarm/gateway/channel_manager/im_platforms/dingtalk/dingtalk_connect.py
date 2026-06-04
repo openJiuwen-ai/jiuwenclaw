@@ -489,9 +489,13 @@ class DingTalkChannel(BaseChannel):
 
     def _extract_chat_id(self, msg: Message) -> str | None:
         """从消息对象中提取聊天ID"""
-        chat_id = msg.id if msg.id else None
-        if not chat_id:
-            chat_id = msg.session_id
+        metadata = msg.metadata if isinstance(msg.metadata, dict) else {}
+        chat_id = (
+            metadata.get("dingtalk_sender_id")
+            or metadata.get("dingtalk_chat_id")
+            or msg.id
+            or msg.session_id
+        )
         return chat_id
 
     def _build_group_message_payload(self, content: str, open_conversation_id: str) -> dict:
@@ -712,6 +716,20 @@ class DingTalkChannel(BaseChannel):
         """
         try:
             logger.info(f"钉钉入站消息: {message.content} 来自 {message.sender_name}")
+            # 记录最近一次可回发的钉钉会话身份，供 cron推送兜底使用。
+            try:
+                from jiuwenswarm.common.config import update_channel_in_config
+
+                update_channel_in_config(
+                    "dingtalk",
+                    {
+                        "last_sender_id": message.sender_id or "",
+                        "last_conversation_id": message.conversation_id or "",
+                        "last_conversation_type": message.conversation_type or "1",
+                    },
+                )
+            except Exception as config_error:
+                logger.warning(f"DingTalkChannel 更新回发身份失败: {config_error}")
             await self._process_incoming_message(
                 chat_id=message.sender_id,
                 sender_id=message.sender_id,

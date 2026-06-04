@@ -34,17 +34,33 @@ class SessionManager:
         """获取 session_id，默认为 'default'."""
         return session_id or "default"
 
-    async def cancel_session_task(self, session_id: str, log_msg_prefix: str = "") -> None:
+    async def cancel_session_task(
+        self,
+        session_id: str,
+        log_msg_prefix: str = "",
+        wait_timeout: float | None = None,
+    ) -> None:
         """取消指定 session 的非流式任务."""
         task = self._session_tasks.get(session_id)
         if task is not None and not task.done():
             logger.info(
                 "[SessionManager] %s取消 session 非流式任务: session_id=%s",
-                log_msg_prefix, session_id,
+                log_msg_prefix,
+                session_id,
             )
             task.cancel()
             try:
-                await task
+                if wait_timeout is None:
+                    await task
+                else:
+                    await asyncio.wait_for(task, timeout=wait_timeout)
+            except asyncio.TimeoutError:
+                logger.warning(
+                    "[SessionManager] %scancel_session_task wait timeout: session_id=%s wait_timeout=%s",
+                    log_msg_prefix,
+                    session_id,
+                    wait_timeout,
+                )
             except (asyncio.CancelledError, Exception):
                 pass
             self._session_tasks[session_id] = None
@@ -61,7 +77,10 @@ class SessionManager:
 
     async def ensure_session_processor(self, session_id: str) -> None:
         """确保 session 的任务处理器在运行."""
-        if session_id not in self._session_processors or self._session_processors[session_id].done():
+        if (
+            session_id not in self._session_processors
+            or self._session_processors[session_id].done()
+        ):
             self._session_queues[session_id] = asyncio.PriorityQueue()
             self._session_priorities[session_id] = 0
 
@@ -74,7 +93,9 @@ class SessionManager:
                         if task_func is None:
                             break
 
-                        self._session_tasks[session_id] = asyncio.create_task(task_func())
+                        self._session_tasks[session_id] = asyncio.create_task(
+                            task_func()
+                        )
                         try:
                             await self._session_tasks[session_id]
                         finally:
@@ -82,7 +103,10 @@ class SessionManager:
                             queue.task_done()
 
                     except asyncio.CancelledError:
-                        logger.info("[SessionManager] Session 任务处理器被取消: session_id=%s", session_id)
+                        logger.info(
+                            "[SessionManager] Session 任务处理器被取消: session_id=%s",
+                            session_id,
+                        )
                         break
                     except Exception as e:
                         logger.error("[SessionManager] Session 任务处理器异常: %s", e)
@@ -91,9 +115,14 @@ class SessionManager:
                 self._session_priorities.pop(session_id, None)
                 self._session_tasks.pop(session_id, None)
                 self._session_processors.pop(session_id, None)
-                logger.info("[SessionManager] Session 任务处理器已关闭: session_id=%s", session_id)
+                logger.info(
+                    "[SessionManager] Session 任务处理器已关闭: session_id=%s",
+                    session_id,
+                )
 
-            self._session_processors[session_id] = asyncio.create_task(process_session_queue())
+            self._session_processors[session_id] = asyncio.create_task(
+                process_session_queue()
+            )
 
     async def submit_task(
         self,

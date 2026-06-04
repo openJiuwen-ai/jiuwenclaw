@@ -20,17 +20,32 @@ class _FakeMember:
         self.mode = mode
 
 
+class _FakeTask:
+    def __init__(self, task_id: str = "task-1", title: str = "test task",
+                 content: str = "do something", status: str = "created",
+                 assignee: str | None = None, updated_at: int | None = None):
+        self.task_id = task_id
+        self.team_name = "team-1"
+        self.title = title
+        self.content = content
+        self.status = status
+        self.assignee = assignee
+        self.updated_at = updated_at
+
+
 class _FakeMonitor:
     def __init__(
         self,
         members: list[_FakeMember],
         leader_member_name: str | None,
         events: list[MonitorEvent] | None = None,
+        tasks: list[_FakeTask] | None = None,
     ):
         self.team_id = "team-1"
         self._members = members
         self._leader_member_name = leader_member_name
         self._events = events or []
+        self._tasks = tasks or []
 
     async def start(self) -> None:
         pass
@@ -50,6 +65,9 @@ class _FakeMonitor:
             return None
         return SimpleNamespace(leader_member_name=self._leader_member_name)
 
+    async def get_tasks(self) -> list[_FakeTask]:
+        return list(self._tasks)
+
 
 @pytest.mark.anyio
 async def test_get_team_snapshot_filters_leader_member() -> None:
@@ -57,6 +75,7 @@ async def test_get_team_snapshot_filters_leader_member() -> None:
         _FakeMonitor(
             members=[_FakeMember("team_leader"), _FakeMember("worker-1")],
             leader_member_name="team_leader",
+            tasks=[_FakeTask(task_id="task-1", title="research", status="created", assignee="worker-1")],
         ),
         "sess-1",
     )
@@ -71,6 +90,17 @@ async def test_get_team_snapshot_filters_leader_member() -> None:
                 "status": "ready",
                 "execution_status": None,
                 "mode": "normal",
+            }
+        ],
+        "tasks": [
+            {
+                "task_id": "task-1",
+                "team_name": "team-1",
+                "title": "research",
+                "content": "do something",
+                "status": "created",
+                "assignee": "worker-1",
+                "updated_at": None,
             }
         ],
         "team_id": "team-1",
@@ -106,6 +136,7 @@ async def test_get_team_snapshot_keeps_members_when_team_info_unavailable() -> N
                 "mode": "normal",
             },
         ],
+        "tasks": [],
         "team_id": "team-1",
     }
 

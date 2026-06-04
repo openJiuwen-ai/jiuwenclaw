@@ -1,3 +1,4 @@
+import { join } from "path";
 import { addError, addInfo, makeItem } from "../helpers.js";
 import { CommandKind, type SlashCommand } from "../types.js";
 import { getEditorInfo } from "../../utils/editor.js";
@@ -236,12 +237,56 @@ async function editMemoryInteractive(
     });
     const files = payload.files ?? [];
 
-    if (files.length === 0) {
+    // Get workspace and project directories
+    const workspaceDir = ctx.getWorkspaceDir() || "";
+    const projectDir = ctx.getCurrentProjectDir();
+
+    // Check if project and local memory exist
+    const hasProjectMemory = files.some(
+      (f) => f.path.endsWith("JIUWENSWARM.md") && !f.path.endsWith("JIUWENSWARM.local.md"),
+    );
+    const hasLocalMemory = files.some((f) => f.path.endsWith("JIUWENSWARM.local.md"));
+
+    // Add default options if not exist
+    const projectMemoryPath = join(projectDir, "JIUWENSWARM.md");
+    const localMemoryPath = join(projectDir, "JIUWENSWARM.local.md");
+
+    const allFiles: MemoryFile[] = [
+      ...files,
+      ...(hasProjectMemory
+        ? []
+        : [
+            {
+              path: projectMemoryPath,
+              relative_path: "JIUWENSWARM.md",
+              kind: "project",
+              exists: false,
+              size: 0,
+              mtime: 0,
+              lines: 0,
+            },
+          ]),
+      ...(hasLocalMemory
+        ? []
+        : [
+            {
+              path: localMemoryPath,
+              relative_path: "JIUWENSWARM.local.md",
+              kind: "local",
+              exists: false,
+              size: 0,
+              mtime: 0,
+              lines: 0,
+            },
+          ]),
+    ];
+
+    if (allFiles.length === 0) {
       ctx.addItem(addInfo(ctx.sessionId, "No memory files to edit.", "m"));
       return;
     }
 
-    const options = files.map((f) => ({
+    const options = allFiles.map((f) => ({
       label: f.relative_path,
       description: `${f.kind} · ${f.lines} lines${f.exists ? "" : " (new)"}`,
     }));
@@ -269,7 +314,7 @@ async function editMemoryInteractive(
       return;
     }
 
-    const selectedFile = files.find(
+    const selectedFile = allFiles.find(
       (f) => f.relative_path === selectedLabel || f.path === selectedLabel,
     );
 
@@ -291,7 +336,12 @@ async function editMemoryByPath(
   path: string,
 ): Promise<void> {
   try {
-    const payload = await ctx.request<MemoryEditResult>("memory.edit", { path });
+    const trustedDirs = ctx.getTrustedDirs();
+    const payload = await ctx.request<MemoryEditResult>("memory.edit", {
+      path,
+      trusted_dirs: trustedDirs.length > 0 ? trustedDirs : undefined,
+      cwd: ctx.getWorkspaceDir(),
+    });
 
     if (!payload.editable) {
       ctx.addItem(addError(ctx.sessionId, `Cannot edit: ${path} — path not in allowed memory directories.`));

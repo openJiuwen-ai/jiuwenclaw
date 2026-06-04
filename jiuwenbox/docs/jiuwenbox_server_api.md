@@ -220,7 +220,6 @@ print(resp.json())
 
 | 字段 | 类型 | 必填 | 说明 |
 | --- | --- | --- | --- |
-| `workdir` | string/null | 否 | 兼容字段 |
 | `env` | object | 否 | 沙箱公共环境变量 |
 | `policy` | object/null | 否 | 覆盖或追加的 policy 数据 |
 | `policy_mode` | string | 否 | `override` 或 `append`，默认 `override` |
@@ -752,6 +751,73 @@ print(resp.json())
   }
 }
 ```
+
+### 查询 timeout 配置
+
+接口：`GET /api/v1/timeout`
+
+用途：返回服务级别的空闲沙箱回收 (idle reaper) 当前生效的配置，
+对应 `policy.timeout`。`idle_timeout` 为 `null` 表示 reaper 已关闭。
+
+Python 请求示例：
+
+```python
+import requests
+
+resp = requests.get("http://127.0.0.1:8321/api/v1/timeout", timeout=30)
+print(resp.json())
+```
+
+响应示例：
+
+```json
+{
+  "idle_timeout": 1800,
+  "idle_check_interval": 60
+}
+```
+
+### 更新 timeout 配置
+
+接口：`PUT /api/v1/timeout`
+
+用途：原子更新 idle reaper 的一个或两个字段，并立即重启 reaper。
+请求体里**仅显式出现的字段会被应用**，省略的字段保留当前值，
+所以可以单独翻 `idle_timeout` 而不影响 `idle_check_interval`。
+
+请求字段：
+
+| 字段 | 类型 | 说明 |
+| --- | --- | --- |
+| `idle_timeout` | number 或 `null` | 空闲超时秒数。`null` 或 `<= 0` 关闭 reaper。可省略以保留当前值。 |
+| `idle_check_interval` | number | reaper 轮询间隔秒数，必须 `> 0`；**不允许** `null`，省略字段以保留当前值。 |
+
+Python 请求示例：
+
+```python
+import requests
+
+resp = requests.put(
+    "http://127.0.0.1:8321/api/v1/timeout",
+    json={"idle_timeout": 1200},
+    timeout=30,
+)
+print(resp.status_code)
+print(resp.json())
+```
+
+响应示例（成功，返回更新后的完整 `TimeoutPolicy`）：
+
+```json
+{
+  "idle_timeout": 1200,
+  "idle_check_interval": 60
+}
+```
+
+校验失败（如 `idle_check_interval <= 0`，或显式传入
+`idle_check_interval: null`）返回 `400 Bad Request`，body 中包含
+具体错误描述。
 
 ## 代理接口
 

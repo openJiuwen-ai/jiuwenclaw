@@ -31,7 +31,7 @@ parse_dotenv_early("jiuwenswarm-web")
 from jiuwenswarm.agents.harness.common.tools.ssl_config import get_insecure_ssl_context, get_ssl_verify
 from jiuwenswarm.agents.harness.team.bootstrap import configure_agent_teams_home
 from jiuwenswarm.common.utils import get_agent_root_dir, get_logs_dir, \
-    get_root_dir, get_user_workspace_dir, is_package_installation
+    get_root_dir, get_user_workspace_dir, is_package_installation, wait_for_tcp_port
 
 configure_agent_teams_home()
 
@@ -842,6 +842,10 @@ class _SpaStaticHandler(SimpleHTTPRequestHandler):
         self.send_error(405, "method not allowed")
 
     def do_HEAD(self) -> None:  # noqa: N802
+        parsed = urlparse(self.path)
+        if self._is_file_api_route():
+            self._handle_file_api_get(parsed)
+            return
         if self._dispatch_proxy():
             return
         super().do_HEAD()
@@ -903,6 +907,18 @@ def _setup_logger(logs_root: Path, log_level: str) -> logging.Logger:
     file_handler.setFormatter(formatter)
     lg.addHandler(file_handler)
     return lg
+
+
+def _wait_for_gateway(ws_target: str, logger: logging.Logger) -> None:
+    """Wait for the gateway WebSocket target to become available."""
+    parsed = urlparse(ws_target)
+    host = parsed.hostname or "127.0.0.1"
+    port = parsed.port or (443 if parsed.scheme in ("wss", "https") else 80)
+    logger.info("[jiuwenswarm-web] waiting for gateway %s:%s ...", host, port)
+    if wait_for_tcp_port(host, port, timeout=15.0, max_attempts=15, target_state="connected"):
+        logger.info("[jiuwenswarm-web] gateway available")
+    else:
+        logger.warning("[jiuwenswarm-web] gateway not available after 15 seconds")
 
 
 def main() -> None:
@@ -1016,11 +1032,29 @@ def main() -> None:
     logger.info("[jiuwenswarm-web] /ws  -> %s", ws_target)
     logger.info("[jiuwenswarm-web] ws disable compress: %s", args.ws_disable_compress)
     logger.info("[jiuwenswarm-web] /file-api roots -> %s, %s, %s", workspace_root, agent_teams_root, logs_root)
+
+    _wait_for_gateway(ws_target, logger)
+
+    _web_info_path = (get_user_workspace_dir() / ".updates").resolve()
+    _web_info_path.mkdir(parents=True, exist_ok=True)
+    _web_info_file = _web_info_path / "web_process.json"
+    try:
+        _web_info_file.write_text(
+            json.dumps({"pid": os.getpid(), "argv": sys.argv[:]}, indent=2),
+            encoding="utf-8",
+        )
+    except Exception as exc:
+        logger.warning("Failed to write web process info: %s", exc)
+
     try:
         server.serve_forever()
     except KeyboardInterrupt:
         pass
     finally:
+        try:
+            _web_info_file.unlink(missing_ok=True)
+        except Exception as exc:
+            logger.warning("Failed to remove web process info: %s", exc)
         server.server_close()
         logger.info("[jiuwenswarm-web] server closed")
 

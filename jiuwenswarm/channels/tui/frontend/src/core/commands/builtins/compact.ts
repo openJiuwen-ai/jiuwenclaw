@@ -8,6 +8,8 @@ interface CompactResponse {
     total_tokens: number;
     raw_total_tokens: number;
   };
+  summary?: string;
+  compact_summary?: string;
 }
 
 export function createCompactCommand(): SlashCommand {
@@ -27,6 +29,11 @@ export function createCompactCommand(): SlashCommand {
 
         const result = payload?.result;
         const stats = payload?.stats;
+        const compactSummary = typeof payload?.compact_summary === "string" && payload.compact_summary.trim()
+          ? payload.compact_summary.trim()
+          : typeof payload?.summary === "string" && payload.summary.trim()
+            ? payload.summary.trim()
+            : "";
 
         if (result === "busy") {
           ctx.addItem(
@@ -42,13 +49,11 @@ export function createCompactCommand(): SlashCommand {
           const rate = stats.raw_total_tokens > 0
             ? ((stats.raw_total_tokens - stats.total_tokens) / stats.raw_total_tokens * 100).toFixed(1)
             : "0";
-          ctx.addItem(
-            addInfo(
-              ctx.sessionId,
-              `✓ Context compacted: ${afterK}K/${beforeK}K tokens (${rate}% saved)`,
-              "i",
-            ),
-          );
+          const statsSummary = `✓ Context compacted: ${afterK}K/${beforeK}K tokens (${rate}% saved)`;
+          // A compact summary is rendered by the follow-up context_compression_state push.
+          if (!compactSummary) {
+            ctx.addItem(addInfo(ctx.sessionId, statsSummary, "i"));
+          }
         } else if (result === "noop") {
           ctx.addItem(
             addInfo(

@@ -123,6 +123,7 @@ export interface SubtaskUpdatePayload {
 export interface QuestionOption {
   label: string;
   description?: string;
+  value?: string;
 }
 
 /**
@@ -142,6 +143,7 @@ export interface AskUserQuestionPayload {
   request_id: string;
   questions: Question[];
   source?: string; // 来源标识，用于区分自进化确认和工具权限确认
+  evolutionMeta?: Record<string, unknown>;
 }
 
 /**
@@ -158,4 +160,5 @@ export interface UserAnswer {
 export interface UserAnswerPayload {
   request_id: string;
   answers: UserAnswer[];
+  evolution_meta?: Record<string, unknown>;
 }

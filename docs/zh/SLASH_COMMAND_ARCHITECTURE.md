@@ -39,7 +39,7 @@
 
 **定义**：到达 Gateway 用户消息中，由 `MessageHandler`（或其后继统一入口）识别后，**可能只改会话/模式/路由，而不进入 Agent 对话**的指令。
 
-**典型**：`/new_session`、受控通道上的 `/mode agent|code|team` 与 `/switch plan|fast|normal`，以及 `/mode agent.plan|agent.fast|code.plan|code.normal` 直达写法（以当前实现为准）。
+**典型**：`/new_session`、受控通道上的 `/mode agent|code|team` 与 `/switch plan|fast|normal|team`，以及 `/mode agent.plan|agent.fast|code.normal|code.team` 直达写法（以当前实现为准）。TUI 本地额外支持 `/mode plan`、`/mode team.normal`，这些不属于 Gateway 受控通道白名单。
 
 **要求**：
 

@@ -1,7 +1,4 @@
-# HEARTBEAT
-
 <!-- Add your periodic tasks for DeepAgents here -->
-
 
 <!-- Examples -->
 

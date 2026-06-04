@@ -82,6 +82,7 @@ export function createContextCommand(): SlashCommand {
     usage: "/context",
     example: "/context",
     kind: CommandKind.BUILT_IN,
+    hidden: true,
     takesArgs: false,
     action: async (ctx) => {
       try {

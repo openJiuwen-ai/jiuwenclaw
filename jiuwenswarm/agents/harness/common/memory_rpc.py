@@ -52,10 +52,19 @@ def _get_allowed_dirs(workspace: str, project_dir: str | None = None) -> list[st
 
 
 def _is_in_allowed_dirs(abs_path: str, workspace: str, project_dir: str | None = None) -> bool:
-    for allowed_dir in _get_allowed_dirs(workspace, project_dir):
-        if abs_path == allowed_dir or abs_path.startswith(allowed_dir + os.sep):
-            return True
-    return False
+    # On Windows, path comparison should be case-insensitive
+    if os.name == "nt":
+        abs_path_lower = abs_path.lower()
+        for allowed_dir in _get_allowed_dirs(workspace, project_dir):
+            allowed_dir_lower = allowed_dir.lower()
+            if abs_path_lower == allowed_dir_lower or abs_path_lower.startswith(allowed_dir_lower + os.sep):
+                return True
+        return False
+    else:
+        for allowed_dir in _get_allowed_dirs(workspace, project_dir):
+            if abs_path == allowed_dir or abs_path.startswith(allowed_dir + os.sep):
+                return True
+        return False
 
 
 def _validate_edit_path(raw_path: str, workspace: str, project_dir: str | None = None) -> tuple[bool, str]:
@@ -79,10 +88,16 @@ def _validate_edit_path(raw_path: str, workspace: str, project_dir: str | None =
     if basename in ("JIUWENSWARM.md", "JIUWENSWARM.local.md"):
         parent = os.path.dirname(abs_path)
         workspace_norm = os.path.normpath(workspace)
-        if parent == workspace_norm:
-            return (True, abs_path)
-        if project_dir and parent == os.path.normpath(project_dir):
-            return (True, abs_path)
+        if os.name == "nt":
+            if parent.lower() == workspace_norm.lower():
+                return (True, abs_path)
+            if project_dir and parent.lower() == os.path.normpath(project_dir).lower():
+                return (True, abs_path)
+        else:
+            if parent == workspace_norm:
+                return (True, abs_path)
+            if project_dir and parent == os.path.normpath(project_dir):
+                return (True, abs_path)
 
     return (False, f"Path not in allowed memory directories: {raw_path}")
 
@@ -107,17 +122,37 @@ def _relative_path(abs_path: str, workspace: str, project_dir: str | None = None
     abs_path_norm = os.path.normpath(abs_path)
     if project_dir:
         project_dir_norm = os.path.normpath(project_dir)
-        if abs_path_norm.startswith(project_dir_norm + os.sep) or abs_path_norm == project_dir_norm:
+        # On Windows, use case-insensitive comparison
+        if os.name == "nt":
+            abs_lower = abs_path_norm.lower()
+            proj_lower = project_dir_norm.lower()
+            if abs_lower.startswith(proj_lower + os.sep) or abs_lower == proj_lower:
+                try:
+                    return os.path.relpath(abs_path, project_dir)
+                except ValueError:
+                    pass
+        else:
+            if abs_path_norm.startswith(project_dir_norm + os.sep) or abs_path_norm == project_dir_norm:
+                try:
+                    return os.path.relpath(abs_path, project_dir)
+                except ValueError:
+                    pass
+    workspace_norm = os.path.normpath(workspace)
+    # On Windows, use case-insensitive comparison
+    if os.name == "nt":
+        abs_lower = abs_path_norm.lower()
+        ws_lower = workspace_norm.lower()
+        if abs_lower.startswith(ws_lower + os.sep) or abs_lower == ws_lower:
             try:
-                return os.path.relpath(abs_path, project_dir)
+                return os.path.relpath(abs_path, workspace)
             except ValueError:
                 pass
-    workspace_norm = os.path.normpath(workspace)
-    if abs_path_norm.startswith(workspace_norm + os.sep) or abs_path_norm == workspace_norm:
-        try:
-            return os.path.relpath(abs_path, workspace)
-        except ValueError:
-            pass
+    else:
+        if abs_path_norm.startswith(workspace_norm + os.sep) or abs_path_norm == workspace_norm:
+            try:
+                return os.path.relpath(abs_path, workspace)
+            except ValueError:
+                pass
     return abs_path
 
 

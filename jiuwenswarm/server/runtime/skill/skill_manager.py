@@ -96,8 +96,16 @@ def _get_marketplace_dir() -> "Path":
     return get_agent_skills_dir() / "_marketplace"
 
 
-def _get_state_file() -> "Path":
-    return get_agent_skills_dir() / "skills_state.json"
+from jiuwenswarm.server.runtime.skill.skilldev.state_utils import (
+    get_registered_skill_names,
+    get_skill_enabled,
+    get_state_file,
+    list_disabled_skills,
+    list_execution_disabled_skills,
+    normalize_local_skills,
+    normalize_skill_configs,
+    set_skill_enabled,
+)
 
 
 class SkillNetEmptyDownloadError(Exception):
@@ -284,6 +292,59 @@ def _safe_rmtree(path: Path) -> bool:
     return False
 
 
+def _handle_copy_error(exc: OSError, dest: Path, logger_prefix: str, src: Path | None = None) -> dict[str, Any]:
+    """处理文件/目录复制失败的统一错误处理函数.
+    
+    Args:
+        exc: 捕获到的 OSError 异常（包括 shutil.Error）
+        dest: 目标路径（会被清理）
+        logger_prefix: 日志前缀（用于区分不同操作）
+        src: 源路径（可选，用于日志记录）
+    
+    Returns:
+        错误响应字典
+    """
+    # 记录错误日志
+    if src:
+        logger.error("[SkillManager] %s copy failed: src=%s dest=%s error=%s", logger_prefix, src, dest, exc)
+    else:
+        logger.error("[SkillManager] %s copy failed: dest=%s error=%s", logger_prefix, dest, exc)
+    
+    # 清理可能已部分创建的目录
+    if dest.exists():
+        _safe_rmtree(dest)
+    
+    # 获取错误消息字符串（支持普通 OSError 和 shutil.Error）
+    error_msg = str(exc)    
+    # 检查是否是路径太长错误 (WinError 206)
+    if "WinError 206" in error_msg or "206" in error_msg:
+        return {
+            "success": False,
+            "detail": (
+                "文件名或路径过长：可能是skill 内部子文件路径过长"
+                "或当前工作路径过长，请尝试缩短 skill 名称，"
+                "使用更短的目录路径，或者开启windows长路径支持"
+            ),
+        }
+
+    # 检查是否是路径不存在错误 (WinError 3)
+    if "WinError 3" in error_msg or "系统找不到指定的路径" in error_msg:
+        return {
+            "success": False,
+            "detail": (
+                "路径不存在：可能是skill 内部子文件路径过长"
+                "或当前工作路径过长，请尝试缩短 skill 名称，"
+                "使用更短的目录路径，或者开启windows长路径支持"
+            ),
+        }
+
+    # 返回通用错误信息
+    return {
+        "success": False,
+        "detail": error_msg if error_msg else f"复制失败 ({type(exc).__name__})",
+    }
+
+
 class SkillManager:
     """Skill 管理器，对应 skills.* 请求方法."""
 
@@ -348,16 +409,15 @@ class SkillManager:
     async def handle_skills_installed(self, params: dict) -> dict:
         """返回已安装的 marketplace 插件列表.
 
-        按前端期望格式返回：plugin_name, marketplace, spec, version, installed_at, git_commit, skills[]
+        按前端期望格式返回：plugin_name, marketplace, spec, version, installed_at, git_commit, skills[], enabled
         """
         raw_plugins = self._get_installed_plugins()
         plugins = []
         for p in raw_plugins:
+            p = self._normalize_plugin(p)
             name = p.get("name", "")
             marketplace = p.get("marketplace", "")
-            # 构造 spec (plugin_name@marketplace_name)
             spec = f"{name}@{marketplace}" if marketplace else name
-            # 转换字段名以符合前端期望
             plugin = {
                 "plugin_name": name,
                 "marketplace": marketplace,
@@ -365,7 +425,7 @@ class SkillManager:
                 "version": p.get("version", ""),
                 "installed_at": p.get("installed_at", ""),
                 "git_commit": p.get("commit", ""),
-                # skills 数组：通常一个 plugin 包含同名 skill
+                "enabled": self.get_skill_enabled(name),
                 "skills": [name] if name else [],
             }
             plugins.append(plugin)
@@ -401,6 +461,7 @@ class SkillManager:
                 else:
                     meta["is_builtin_source"] = False
                 meta["has_evolutions"] = (child / _EVOLUTION_FILENAME).is_file()
+                self._apply_enabled_config(meta, meta.get("name", ""))
                 return meta
 
         # 再在 marketplace 目录中查找
@@ -425,9 +486,33 @@ class SkillManager:
                         meta["is_builtin"] = False
                         meta["is_builtin_source"] = False
                         meta["has_evolutions"] = False
+                        self._apply_enabled_config(meta, meta.get("name", ""))
                         return meta
 
         raise ValueError(f"未找到 skill: {name}")
+
+    async def handle_skills_toggle(self, params: dict) -> dict:
+        """切换已安装本地 skill 的 enabled 状态。"""
+        name = params.get("name", "")
+        enabled = params.get("enabled")
+        if not name:
+            return {"success": False, "detail": "缺少参数: name"}
+        if not isinstance(enabled, bool):
+            return {"success": False, "detail": "缺少参数: enabled (bool)"}
+        try:
+            name = _safe_path_name(name, "skill")
+        except ValueError as exc:
+            _log_rejected_name("skills.toggle", "skill", name, exc)
+            return {"success": False, "detail": str(exc)}
+
+        self.set_skill_enabled(name, enabled)
+        return {
+            "success": True,
+            "name": name,
+            "enabled": enabled,
+            "config": {"enabled": enabled},
+            "detail": "配置已更新；下次 reload / rebuild / 新会话后执行面生效。",
+        }
 
     async def handle_skills_evolution_status(self, params: dict) -> dict:
         """检查某个 skill 是否存在 evolutions.json."""
@@ -1902,8 +1987,11 @@ class SkillManager:
                 if not force:
                     return {"success": False, "detail": f"skill {skill_name} 已存在"}
                 _safe_rmtree(dest)
-            dest.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(src, dest / src.name)
+            try:
+                dest.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(src, dest / src.name)
+            except OSError as exc:
+                return _handle_copy_error(exc, dest, "local import file", src)
         elif src.is_dir():
             md = self._try_find_skill_file(src)
             if md is None:
@@ -1920,7 +2008,10 @@ class SkillManager:
                 if not force:
                     return {"success": False, "detail": f"skill {skill_name} 已存在"}
                 _safe_rmtree(dest)
-            shutil.copytree(src, dest)
+            try:
+                shutil.copytree(src, dest)
+            except OSError as exc:
+                return _handle_copy_error(exc, dest, "local import dir", src)
         else:
             return {"success": False, "detail": f"不支持的路径类型: {origin}"}
 
@@ -2323,6 +2414,7 @@ class SkillManager:
 
             meta["source"] = source
             meta["installed"] = True
+            meta["enabled"] = self.get_skill_enabled(meta.get("name", ""))
             # 判断是否为内置技能（传入 child 路径，通过实际路径判断）
             meta["is_builtin"] = self._is_builtin_skill(meta.get("name", ""), self._get_installed_plugins(), child)
             builtin_dir = get_builtin_skills_dir()
@@ -2372,6 +2464,7 @@ class SkillManager:
             meta["is_builtin_source"] = True
             meta["installed"] = False
             meta["has_evolutions"] = False
+            self._apply_enabled_config(meta, meta.get("name", ""))
             # 不在列表中返回 body
             meta.pop("body", None)
             results.append(meta)
@@ -2486,6 +2579,7 @@ class SkillManager:
                 meta["is_builtin"] = False
                 meta["installed"] = False
                 meta["has_evolutions"] = False
+                self._apply_enabled_config(meta, meta.get("name", ""))
                 meta.pop("body", None)
                 results.append(meta)
 
@@ -3368,6 +3462,156 @@ class SkillManager:
                 )
 
     # -----------------------------------------------------------------------
+    # Plugin handlers (plugins.*)
+    # -----------------------------------------------------------------------
+
+    async def handle_plugins_list(self, params: dict) -> dict:
+        """列出所有已安装插件（含启用/禁用状态）."""
+        raw = self._get_installed_plugins()
+        plugins = []
+        for p in raw:
+            p = self._normalize_plugin(p)
+            name = p.get("name", "")
+            marketplace = p.get("marketplace", "")
+            spec = f"{name}@{marketplace}" if marketplace else name
+            plugins.append({
+                "plugin_name": name,
+                "marketplace": marketplace,
+                "spec": spec,
+                "version": p.get("version", ""),
+                "installed_at": p.get("installed_at", ""),
+                "git_commit": p.get("commit", ""),
+                "skills": p.get("skills", [name] if name else []),
+                "enabled": p.get("enabled", True),
+            })
+        return {"plugins": plugins}
+
+    async def handle_plugins_install(self, params: dict) -> dict:
+        """安装插件，支持 marketplace spec 或本地路径/URL."""
+        spec = params.get("spec", "")
+        if not spec:
+            return {"success": False, "detail": "缺少参数: spec"}
+
+        # 检测本地路径或 URL
+        is_local = spec.startswith("/") or spec.startswith("./") or spec.startswith("../") or spec.startswith("~")
+        is_url = spec.startswith("http://") or spec.startswith("https://")
+
+        if is_local or is_url:
+            # 使用 import_local 流程，然后注册为 plugin
+            result = await self.handle_skills_import_local({"path": spec, "force": params.get("force", False)})
+            if result.get("success"):
+                # 从返回结果中提取 plugin name 并设为 enabled
+                skill_name = result.get("skill", {}).get("name", "") if isinstance(result.get("skill"), dict) else ""
+                if not skill_name:
+                    # fallback: 从路径提取名称
+                    skill_name = os.path.basename(spec.rstrip("/").rstrip(".git"))
+                # 确保在 installed_plugins 中有记录
+                existing = [p for p in self._get_installed_plugins() if p.get("name") == skill_name]
+                if not existing:
+                    self._add_installed_plugin({
+                        "name": skill_name,
+                        "marketplace": "",
+                        "version": "",
+                        "commit": "",
+                        "source": "local",
+                        "installed_at": datetime.now(timezone.utc).isoformat(),
+                        "skills": [skill_name],
+                    })
+                self._set_plugin_enabled(skill_name, True)
+            return result
+
+        # marketplace install
+        result = await self.handle_skills_install(params)
+        if result.get("success"):
+            plugin_name = spec.rsplit("@", 1)[0] if "@" in spec else spec
+            self._set_plugin_enabled(plugin_name, True)
+        return result
+
+    async def handle_plugins_uninstall(self, params: dict) -> dict:
+        """卸载插件，复用 skills.uninstall 逻辑."""
+        name = params.get("name", "")
+        if name:
+            try:
+                safe_name = _safe_path_name(name, "plugin")
+                disabled_dir = self._skills_dir / "_disabled_plugins" / safe_name
+                if disabled_dir.exists():
+                    _safe_rmtree(disabled_dir)
+            except ValueError:
+                pass
+        return await self.handle_skills_uninstall(params)
+
+    async def handle_plugins_enable(self, params: dict) -> dict:
+        """启用插件."""
+        name = params.get("name", "")
+        if not name:
+            return {"success": False, "detail": "缺少参数: name"}
+        ok = self._set_plugin_enabled(name, True)
+        if not ok:
+            return {"success": False, "detail": f"未找到插件: {name}"}
+        return {"success": True, "detail": f"插件 {name} 已启用，请执行 /reload-plugins 使其生效"}
+
+    async def handle_plugins_disable(self, params: dict) -> dict:
+        """禁用插件."""
+        name = params.get("name", "")
+        if not name:
+            return {"success": False, "detail": "缺少参数: name"}
+        ok = self._set_plugin_enabled(name, False)
+        if not ok:
+            return {"success": False, "detail": f"未找到插件: {name}"}
+        return {"success": True, "detail": f"插件 {name} 已禁用，请执行 /reload-plugins 使其生效"}
+
+    async def handle_plugins_reload(self, params: dict) -> dict:
+        """重载插件：根据 enabled 状态物理移动技能目录，然后统计摘要."""
+        # 规范化所有插件记录
+        for p in self._get_installed_plugins():
+            self._normalize_plugin(p)
+        self._save_state()
+
+        # 根据 enabled 状态物理移动技能目录
+        disabled_cache = self._skills_dir / "_disabled_plugins"
+        all_plugins = self._get_installed_plugins()
+
+        for p in all_plugins:
+            name = p.get("name", "")
+            if not name:
+                continue
+            skill_dir = self._skills_dir / name
+            cached_dir = disabled_cache / name
+
+            if p.get("enabled", True):
+                # 启用状态：从 disabled 缓存恢复
+                if cached_dir.exists() and not skill_dir.exists():
+                    disabled_cache.mkdir(parents=True, exist_ok=True)
+                    shutil.move(str(cached_dir), str(skill_dir))
+            else:
+                # 禁用状态：移动到 disabled 缓存
+                if skill_dir.exists():
+                    disabled_cache.mkdir(parents=True, exist_ok=True)
+                    if cached_dir.exists():
+                        _safe_rmtree(cached_dir)
+                    shutil.move(str(skill_dir), str(cached_dir))
+
+        # 统计
+        enabled_plugins = [p for p in all_plugins if p.get("enabled", True)]
+        disabled_plugins = [p for p in all_plugins if not p.get("enabled", True)]
+
+        total_skills = 0
+        for p in enabled_plugins:
+            skills = p.get("skills", [])
+            if not skills and p.get("name"):
+                skills = [p["name"]]
+            total_skills += len(skills)
+
+        return {
+            "success": True,
+            "plugins_count": len(enabled_plugins),
+            "disabled_count": len(disabled_plugins),
+            "skills_count": total_skills,
+            "detail": f"Reloaded: {len(enabled_plugins)} plugins · {total_skills} skills"
+            + (f" ({len(disabled_plugins)} disabled)" if disabled_plugins else ""),
+        }
+
+    # -----------------------------------------------------------------------
     # 状态持久化
     # -----------------------------------------------------------------------
 
@@ -3470,7 +3714,13 @@ class SkillManager:
         state.setdefault("marketplaces", [])
         state.setdefault("installed_plugins", [])
         state.setdefault("local_skills", [])
+        state.setdefault("skill_configs", {})
         state["marketplaces"] = self.normalize_marketplaces(state.get("marketplaces"))
+        state["local_skills"] = normalize_local_skills(
+            state.get("local_skills"),
+            self._collect_existing_local_skill_names(),
+        )
+        state["skill_configs"] = normalize_skill_configs(state.get("skill_configs"))
 
     def _get_installed_plugins(self) -> list[dict]:
         return self._state.get("installed_plugins", [])
@@ -3486,6 +3736,53 @@ class SkillManager:
     def get_local_skills(self) -> list[dict]:
         """返回本地技能安装记录的拷贝。"""
         return list(self._state.get("local_skills", []))
+
+    def _collect_existing_local_skill_names(self) -> set[str]:
+        names: set[str] = set()
+        if not self._skills_dir.exists():
+            return names
+
+        for child in self._skills_dir.iterdir():
+            if not child.is_dir() or child.name.startswith("_"):
+                continue
+            md = self._try_find_skill_file(child)
+            if md is None:
+                continue
+            meta = self._parse_skill_md(md)
+            if not isinstance(meta, dict):
+                continue
+            name = str(meta.get("name") or child.name).strip()
+            if name:
+                names.add(name)
+        return names
+
+    def _apply_enabled_config(
+        self,
+        payload: dict[str, Any],
+        skill_name: str,
+        *,
+        default_enabled: bool | None = None,
+    ) -> None:
+        enabled = (
+            default_enabled
+            if default_enabled is not None and not skill_name
+            else self.get_skill_enabled(skill_name)
+        )
+        payload["enabled"] = enabled
+        payload["config"] = {"enabled": enabled}
+
+    def get_skill_enabled(self, skill_name: str) -> bool:
+        return get_skill_enabled(self._state, skill_name)
+
+    def set_skill_enabled(self, skill_name: str, enabled: bool) -> None:
+        set_skill_enabled(self._state, skill_name, enabled)
+        self._save_state()
+
+    def list_disabled_skills(self) -> list[str]:
+        return list_disabled_skills(self._state)
+
+    def list_execution_disabled_skills(self) -> list[str]:
+        return list_execution_disabled_skills(self._state)
 
     def get_skill_meta(self, skill_name: str) -> dict[str, Any] | None:
         """返回本地 skill 的解析元数据，附带目录与 skill 文件路径。"""
@@ -3523,7 +3820,7 @@ class SkillManager:
 
     def _add_installed_plugin(self, plugin: dict) -> None:
         plugins = self._state.setdefault("installed_plugins", [])
-        # 更新已有记录
+        plugin = self._normalize_plugin(plugin)
         for i, p in enumerate(plugins):
             if p.get("name") == plugin.get("name"):
                 plugins[i] = plugin
@@ -3536,6 +3833,26 @@ class SkillManager:
         plugins = self._state.get("installed_plugins", [])
         self._state["installed_plugins"] = [p for p in plugins if p.get("name") != name]
         self._save_state()
+
+    def _set_plugin_enabled(self, name: str, enabled: bool) -> bool:
+        """设置插件的启用/禁用状态."""
+        plugins = self._state.get("installed_plugins", [])
+        updated = False
+        for p in plugins:
+            if p.get("name") == name:
+                p["enabled"] = bool(enabled)
+                updated = True
+                break
+        if not updated:
+            return False
+        self._save_state()
+        return True
+
+    @staticmethod
+    def _normalize_plugin(p: dict) -> dict:
+        """规范化插件记录，补全 enabled 字段."""
+        p.setdefault("enabled", True)
+        return p
 
     def _add_local_skill(self, skill: dict) -> None:
         local = self._state.setdefault("local_skills", [])

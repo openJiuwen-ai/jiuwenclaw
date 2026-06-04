@@ -12,12 +12,121 @@ import re
 import shlex
 import shutil
 import subprocess
+import time
 from pathlib import Path
-from typing import Sequence
+from typing import Any, Sequence
 
 from openjiuwen.core.foundation.tool import tool
+from openjiuwen.core.sys_operation.shell_process_registry import (
+    consume_shell_session_cancelled,
+    register_shell_process,
+    resolve_shell_session_id,
+    terminate_shell_process,
+    unregister_shell_process,
+)
 
 from jiuwenswarm.common.utils import get_agent_workspace_dir
+
+
+class CommandCancelled(Exception):
+    """Raised when a blocking command is terminated by user interrupt."""
+
+
+# ── jiuwenswarm-tui 反复 spawn 护栏 ────────────────────────────────
+#
+# Background:
+#   The agent has been observed entering reflexive loops where it spawns the
+#   ``jiuwenswarm-tui`` binary (directly or via ``@microsoft/tui-test`` specs)
+#   over and over, each subprocess opening a real WebSocket session against
+#   the same gateway. Every spawn does full session init + teardown, burns
+#   API tokens, floods the gateway with TUI sessions opening/closing within
+#   seconds, and ends up confusing the user (the agent's child TUIs appear
+#   to "mysteriously open and close" on screen).
+#
+# Scope:
+#   Only ``mcp_exec_command`` invocations that *start* a TUI subprocess are
+#   throttled. Reading docs, listing files, building wheels, etc. are
+#   untouched. Throttling is per-session_id so two unrelated user sessions
+#   never block each other.
+#
+# Policy:
+#   Max ``TUI_SPAWN_LIMIT`` spawns per ``_TUI_SPAWN_WINDOW_SECONDS`` per
+#   session. When exceeded we return an error string explaining the limit
+#   and pointing the agent at non-spawning alternatives. No silent failure.
+TUI_SPAWN_LIMIT = 3
+_TUI_SPAWN_WINDOW_SECONDS = 300.0
+_TUI_SPAWN_HISTORY: dict[str, list[float]] = {}
+_TUI_SPAWN_LAST_PURGE: float = 0.0
+
+_TUI_SPAWN_PATTERNS: tuple[re.Pattern[str], ...] = (
+    # Direct invocation of the installed binary.
+    re.compile(r"\bjiuwenswarm-tui(?:\s|$|['\"])", re.IGNORECASE),
+    # @microsoft/tui-test runner driving a spec that launches the TUI.
+    # We deliberately keep this loose; false positives just mean the agent
+    # is asked to slow down on something that *probably* spawns TUIs.
+    re.compile(r"\bnode\b[^|;&\n]*\.spec\.ts\b", re.IGNORECASE),
+)
+
+
+def _command_spawns_tui(command: str) -> bool:
+    return any(p.search(command) for p in _TUI_SPAWN_PATTERNS)
+
+
+def _purge_stale_tui_spawn_buckets(now: float) -> None:
+    """Remove buckets whose entries have all expired.
+
+    Called opportunistically from ``_enforce_tui_spawn_budget`` so the
+    module-level ``_TUI_SPAWN_HISTORY`` dict does not grow without bound
+    as sessions come and go.  We rate-limit the sweep to at most once per
+    window; it is O(n_buckets) and only needed when traffic is heavy enough
+    for stale keys to matter.
+    """
+    global _TUI_SPAWN_LAST_PURGE
+    if now - _TUI_SPAWN_LAST_PURGE < _TUI_SPAWN_WINDOW_SECONDS:
+        return
+    _TUI_SPAWN_LAST_PURGE = now
+    cutoff = now - _TUI_SPAWN_WINDOW_SECONDS
+    stale_keys = [
+        bucket
+        for bucket, history in _TUI_SPAWN_HISTORY.items()
+        if not history or history[-1] < cutoff
+    ]
+    for bucket in stale_keys:
+        del _TUI_SPAWN_HISTORY[bucket]
+
+
+def _enforce_tui_spawn_budget(command: str, session_id: str) -> str | None:
+    """Return an error string if this session has exceeded the spawn budget; else None.
+
+    ``session_id`` may be empty (no contextvar set). In that case we still
+    throttle under a synthetic "__global__" bucket so unattached invocations
+    can't trivially bypass the limit by clearing the session id.
+    """
+    if not _command_spawns_tui(command):
+        return None
+    bucket = (session_id or "").strip() or "__global__"
+    now = time.monotonic()
+    _purge_stale_tui_spawn_buckets(now)
+    history = _TUI_SPAWN_HISTORY.get(bucket, [])
+    cutoff = now - _TUI_SPAWN_WINDOW_SECONDS
+    history = [t for t in history if t >= cutoff]
+    if len(history) >= TUI_SPAWN_LIMIT:
+        oldest = history[0]
+        retry_in = max(1, int(_TUI_SPAWN_WINDOW_SECONDS - (now - oldest)))
+        _TUI_SPAWN_HISTORY[bucket] = history
+        return (
+            f"jiuwenswarm-tui spawn budget exceeded for this session "
+            f"({TUI_SPAWN_LIMIT} spawns / {int(_TUI_SPAWN_WINDOW_SECONDS)}s). "
+            f"Retry in ~{retry_in}s, or — preferred — stop driving the TUI "
+            f"via @microsoft/tui-test loops. To validate TUI behaviour, "
+            f"inspect existing recordings/snapshots, exercise the gateway "
+            f"with a non-interactive script, or ask the user to run the TUI "
+            f"manually. Each real TUI spawn opens a full gateway session and "
+            f"burns API tokens; treat it as expensive."
+        )
+    history.append(now)
+    _TUI_SPAWN_HISTORY[bucket] = history
+    return None
 
 
 _DANGEROUS_COMMAND_PATTERNS: list[tuple[re.Pattern[str], str]] = [
@@ -33,6 +142,33 @@ _DANGEROUS_COMMAND_PATTERNS: list[tuple[re.Pattern[str], str]] = [
     (
         re.compile(r"\bremove-item\b[^\n\r]*-recurse[^\n\r]*-force", re.IGNORECASE),
         "blocked pattern: Remove-Item -Recurse -Force",
+    ),
+    (
+        re.compile(r"\bpkill\b[^\n\r;|&]*jiuwenswarm", re.IGNORECASE),
+        "blocked pattern: pkill targeting jiuwenswarm (includes user TUI)",
+    ),
+    (
+        re.compile(r"\bkillall\b[^\n\r;|&]*jiuwenswarm", re.IGNORECASE),
+        "blocked pattern: killall targeting jiuwenswarm (includes user TUI)",
+    ),
+    (
+        re.compile(r"\bpkill\b[^\n\r;|&]*jiuwenclaw", re.IGNORECASE),
+        "blocked pattern: pkill targeting jiuwenclaw backend",
+    ),
+    (
+        re.compile(r"\bkillall\b[^\n\r;|&]*jiuwenclaw", re.IGNORECASE),
+        "blocked pattern: killall targeting jiuwenclaw backend",
+    ),
+    (
+        re.compile(r"\bkill\b[^\n\r;|&]*jiuwenswarm", re.IGNORECASE),
+        "blocked pattern: kill targeting jiuwenswarm (includes user TUI)",
+    ),
+    (
+        re.compile(
+            r"jiuwenswarm[^\n\r;|&]{0,240}\|\s*xargs\s+kill\b",
+            re.IGNORECASE,
+        ),
+        "blocked pattern: xargs kill pipeline targeting jiuwenswarm",
     ),
 ]
 
@@ -85,13 +221,58 @@ def _check_command_safety(command: str) -> str | None:
     return None
 
 
+def _context_cwd() -> Path:
+    try:
+        from openjiuwen.core.sys_operation.cwd import get_cwd
+
+        return Path(get_cwd()).resolve()
+    except Exception:
+        return get_agent_workspace_dir().resolve()
+
+
+def _context_project_root() -> Path:
+    try:
+        from openjiuwen.core.sys_operation.cwd import get_project_root
+
+        return Path(get_project_root()).resolve()
+    except Exception:
+        return _context_cwd()
+
+
+def _context_workspace_root() -> Path | None:
+    try:
+        from openjiuwen.core.sys_operation.cwd import get_workspace
+
+        workspace = get_workspace()
+        return Path(workspace).resolve() if workspace else None
+    except Exception:
+        return None
+
+
+def _is_relative_to(path: Path, root: Path) -> bool:
+    try:
+        path.relative_to(root)
+        return True
+    except ValueError:
+        return False
+
+
 def _resolve_command_workdir(workdir: str) -> Path:
-    project_root = get_agent_workspace_dir()
-    candidate = Path(workdir) if workdir else project_root
+    current_cwd = _context_cwd()
+    project_root = _context_project_root()
+    candidate = Path(workdir) if workdir else current_cwd
     if not candidate.is_absolute():
-        candidate = project_root / candidate
+        candidate = current_cwd / candidate
     candidate = candidate.resolve()
-    candidate.relative_to(project_root)
+
+    allowed_roots = [project_root]
+    workspace_root = _context_workspace_root()
+    if workspace_root is not None:
+        allowed_roots.append(workspace_root)
+    allowed_roots.append(get_agent_workspace_dir().resolve())
+
+    if not any(_is_relative_to(candidate, root) for root in allowed_roots):
+        raise ValueError("workdir is outside project workspace")
     return candidate
 
 
@@ -338,21 +519,71 @@ def _run_command_sync(
     timeout_seconds: int,
     workdir: Path,
     shell_type: str,
+    session_id: str | None = None,
 ) -> tuple[subprocess.CompletedProcess[str], str]:
     plan, use_shell, resolved_shell = _resolve_execution_plan(command, shell_type)
-    # bash/sh on Windows output UTF-8; cmd/PowerShell use system code page.
     encoding = _resolve_encoding(resolved_shell)
-    result = subprocess.run(
+    popen_kw: dict[str, Any] = {}
+    if os.name != "nt":
+        _jw_start_new_session = os.getenv("JW_START_NEW_SESSION", "true").strip().lower()
+        if _jw_start_new_session not in ("0", "false", "no", "off"):
+            popen_kw["start_new_session"] = True
+    proc = subprocess.Popen(
         plan,
         shell=use_shell,
         cwd=str(workdir),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
         text=True,
         encoding=encoding,
-        errors='replace',
-        capture_output=True,
-        timeout=timeout_seconds,
+        errors="replace",
+        **popen_kw,
     )
-    return result, resolved_shell
+    sid = (session_id or "").strip()
+    if sid:
+        register_shell_process(sid, proc)
+    stdout: str = ""
+    stderr: str = ""
+    deadline = time.monotonic() + timeout_seconds
+    try:
+        while proc.poll() is None:
+            if time.monotonic() >= deadline:
+                terminate_shell_process(proc)
+                raise subprocess.TimeoutExpired(cmd=command, timeout=timeout_seconds) from None
+            # Check cancel flag inside the poll loop for responsive cancellation.
+            # Without this, a long-running command could block for up to 600s
+            # after the user cancels, waiting for communicate() to drain pipes.
+            if sid and consume_shell_session_cancelled(sid):
+                terminate_shell_process(proc)
+                raise CommandCancelled(command)
+            time.sleep(0.1)
+        # Child exited, but grandchildren may still hold pipe FDs open.
+        # Use the remaining deadline as communicate() timeout to avoid blocking
+        # forever when a grandchild inherits stdout/stderr (e.g. `cmd &` in shell).
+        remaining = max(deadline - time.monotonic(), 1.0)
+        try:
+            stdout, stderr = proc.communicate(timeout=remaining)
+        except subprocess.TimeoutExpired:
+            terminate_shell_process(proc)
+            raise subprocess.TimeoutExpired(cmd=command, timeout=timeout_seconds) from None
+        # Final cancel check after communicate drains — covers the case where
+        # cancel arrived between the last poll iteration and communicate().
+        if sid and consume_shell_session_cancelled(sid):
+            raise CommandCancelled(command)
+    except CommandCancelled:
+        raise
+    except Exception:
+        terminate_shell_process(proc)
+        raise
+    finally:
+        if sid:
+            unregister_shell_process(sid, proc)
+    return subprocess.CompletedProcess(
+        args=plan,
+        returncode=proc.returncode if proc.returncode is not None else -1,
+        stdout=stdout or "",
+        stderr=stderr or "",
+    ), resolved_shell
 
 
 def _run_command_background(
@@ -365,6 +596,11 @@ def _run_command_background(
     error_msg is None on success.
     """
     plan, use_shell, resolved_shell = _resolve_execution_plan(command, shell_type)
+    popen_kw = {}
+    if os.name != "nt":
+        _jw_start_new_session = os.getenv("JW_START_NEW_SESSION", "true").strip().lower()
+        if _jw_start_new_session not in ("0", "false", "no", "off"):
+            popen_kw["start_new_session"] = True
     proc = subprocess.Popen(
         plan,
         shell=use_shell,
@@ -373,6 +609,7 @@ def _run_command_background(
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
         text=True,
+        **popen_kw,
     )
     try:
         exit_code = proc.wait(timeout=grace_seconds)
@@ -412,6 +649,15 @@ async def mcp_exec_command(
     if blocked_reason:
         return f"[ERROR]: command rejected for safety ({blocked_reason})."
 
+    # Guardrail: rate-limit jiuwenswarm-tui spawn loops. Returns a friendly
+    # error (not a safety block) so the LLM can recover and pick an
+    # alternative path. Bucket is per-session so unrelated sessions don't
+    # interfere; resolution falls back to "__global__" when no session id
+    # contextvar is set.
+    spawn_block = _enforce_tui_spawn_budget(command, resolve_shell_session_id() or "")
+    if spawn_block:
+        return f"[ERROR]: {spawn_block}"
+
     try:
         resolved_workdir = _resolve_command_workdir(workdir)
     except Exception:
@@ -422,7 +668,7 @@ async def mcp_exec_command(
     except (TypeError, ValueError):
         timeout_seconds = 300
     try:
-        max_timeout_seconds = int(os.getenv("MCP_EXEC_COMMAND_MAX_TIMEOUT_SECONDS") or "3600")
+        max_timeout_seconds = int(os.getenv("MCP_EXEC_COMMAND_MAX_TIMEOUT_SECONDS") or "600")
     except ValueError:
         max_timeout_seconds = 3600
     max_timeout_seconds = max(1, max_timeout_seconds)
@@ -466,7 +712,20 @@ async def mcp_exec_command(
             timeout_seconds,
             resolved_workdir,
             normalized_shell_type,
+            resolve_shell_session_id(),
         )
+    except CommandCancelled:
+        payload = {
+            "command": command,
+            "cwd": str(resolved_workdir),
+            "shell_type": normalized_shell_type,
+            "resolved_shell": normalized_shell_type,
+            "exit_code": -1,
+            "stdout": "",
+            "stderr": "[Interrupted] Command cancelled by user.",
+            "cancelled": True,
+        }
+        return json.dumps(payload, ensure_ascii=False, indent=2)
     except subprocess.TimeoutExpired:
         return f"[ERROR]: command timed out after {timeout_seconds}s."
     except Exception as exc:
@@ -482,3 +741,8 @@ async def mcp_exec_command(
         "stderr": _clip_text(result.stderr or "", max_output_chars),
     }
     return json.dumps(payload, ensure_ascii=False, indent=2)
+
+
+def reset_tui_spawn_history() -> None:
+    """Clear the TUI spawn history (for testing)."""
+    _TUI_SPAWN_HISTORY.clear()

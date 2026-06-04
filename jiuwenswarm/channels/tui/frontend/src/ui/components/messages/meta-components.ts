@@ -83,6 +83,62 @@ export class InfoMessageComponent implements Component {
   render(width: number): string[] {
     const meta = this.entry.meta;
 
+    if (meta?.view === "compact_boundary") {
+      const lines = renderWrappedText(
+        Math.max(1, width),
+        "· Conversation compacted (ctrl+o for summary)",
+        palette.text.dim,
+      );
+      for (const item of meta.items ?? []) {
+        const value = item.value ? `: ${item.value}` : "";
+        lines.push(
+          ...renderClaudeResponseLines(
+            width,
+            renderWrappedText(
+              Math.max(1, width - 4),
+              `${item.label}${value}`,
+              palette.text.assistant,
+            ),
+            palette.text.assistant,
+          ),
+        );
+        if (item.description) {
+          lines.push(
+            ...renderClaudeResponseLines(
+              width,
+              renderWrappedText(Math.max(1, width - 4), item.description, palette.text.dim),
+              palette.text.dim,
+            ),
+          );
+        }
+      }
+      return lines;
+    }
+
+    if (meta?.view === "compact_summary") {
+      const lines: string[] = [];
+      lines.push(...renderWrappedText(Math.max(1, width), "· Compaction summary", palette.text.info));
+      lines.push(
+        ...renderClaudeResponseLines(
+          width,
+          renderWrappedText(
+            Math.max(1, width - 4),
+            "The earlier conversation has been compacted into the following memory block, which will be used as historical context going forward:",
+            palette.text.dim,
+          ),
+          palette.text.dim,
+        ),
+      );
+      lines.push(
+        ...renderClaudeResponseLines(
+          width,
+          renderWrappedText(Math.max(1, width - 4), this.entry.content, palette.text.assistant),
+          palette.text.assistant,
+        ),
+      );
+      return lines;
+    }
+
     if (meta?.view === "help" && meta.groups?.length) {
       return renderGroupedHelpView(width, meta);
     }

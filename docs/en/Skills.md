@@ -54,13 +54,13 @@ User request → agent identifies need → load matched skill → execute workfl
 
 JiuwenSwarm supports multiple sources:
 
-| Source | Description | Characteristics |
-|------|------|------|
+| Source | Description                                                                     | Characteristics |
+|------|---------------------------------------------------------------------------------|------|
 | **Built-in skills** | Core skills shipped with the product; you still install them from the Skills UI | Matches the product release |
-| **SkillNet** | A general AI skill management and connection platform | Anonymous usage allowed; configuring a GitHub token improves API quota and stability |
-| **ClawHub** | Skill “app store” in the OpenClaw ecosystem | Search and install in the web UI; https://clawhub.ai/skills |
-| **Marketplace** | Third-party marketplace sources | Add the source URL first; community-contributed |
-| **Local import** | User-authored skill files | Fully customizable; ideal for development/debug |
+| **SkillNet** | A general AI skill management and connection platform                           | Anonymous usage allowed; configuring a GitHub token improves API quota and stability |
+| **ClawHub** | Skill “app store” in the JiuwenSwarm ecosystem                                  | Search and install in the web UI; https://clawhub.ai/skills |
+| **Marketplace** | Third-party marketplace sources                                                 | Add the source URL first; community-contributed |
+| **Local import** | User-authored skill files                                                       | Fully customizable; ideal for development/debug |
 
 > **Security notice:** Skills may involve file modification, command execution, or external service calls. Always check source and description first; prefer trusted sources.
 
@@ -229,9 +229,9 @@ In the list, use **View skill experience** to browse evolution entries for that 
 - **Source**: where the entry came from (e.g. detected signal, chat, or execution context)
 - **Time**: when the record was created or written
 - **Context**: session/task background that triggered the entry
-- **Experience content**: the concrete change text, corresponding to fields such as `change.content`
+- **Experience content**: the concrete change text, corresponding to the `change.content` field
 
-> **How to see data:** Turn on self-evolution-related settings in **Configuration** first (for example **evolution auto-scan**, mapped to `evolution_auto_scan` / env `EVOLUTION_AUTO_SCAN`; see [Configuration](Configuration.md) and [Skill self-evolution](SkillSelfEvolution.md)). After that, **use the skill once in chat** (or trigger one evolution-worthy signal). Then open **View skill experience** to see entries as above.
+> **How to see data:** When a skill already has saved evolution experience, **View skill experience** becomes available in the skill list. If there is no data yet, that skill has no saved evolution records. Records can be generated manually with `/evolve <skill_name> [user_query]`, or automatically in failure/correction scenarios after enabling **Auto-detect evolution signals** under **Self-Evolution Configuration**. See [Configuration](Configuration.md) and [Skill self-evolution](SkillSelfEvolution.md).
 
 > **Why it helps:** Skill experience reflects self-evolution and improvements from real use, so you can judge ongoing usefulness and maintainers get actionable input.
 

@@ -331,6 +331,7 @@ export function createTeamSkillsCommand(): SlashCommand {
     usage: "/teamskills [init|validate|pack|info|search|list|install|uninstall|config|publish|delete]",
     example: "/teamskills publish ./my-skill --version 1.0.0 --token <TOKEN>",
     kind: CommandKind.BUILT_IN,
+    hidden: true,
     action: async (ctx) => {
       ctx.addItem(
         makeItem(

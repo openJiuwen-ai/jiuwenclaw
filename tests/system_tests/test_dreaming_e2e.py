@@ -23,7 +23,7 @@ import pytest
 pytestmark = [pytest.mark.integration, pytest.mark.system]
 
 try:
-    from jiuwenclaw.agents.harness.common.memory.dreaming import DreamingOrchestrator  # noqa: F401
+    from jiuwenswarm.agents.harness.common.memory.dreaming import DreamingOrchestrator  # noqa: F401
 except ImportError:
     pytest.skip("openjiuwen dreaming module is not available", allow_module_level=True)
 
@@ -72,7 +72,7 @@ class TestDreamingE2EAgent:
 
     @pytest.mark.asyncio
     async def test_sweep_writes_dreaming_md(self, tmp_path):
-        from jiuwenclaw.agents.harness.common.memory.dreaming.sweeper import Sweeper
+        from jiuwenswarm.agents.harness.common.memory.dreaming.sweeper import Sweeper
 
         sessions_root = tmp_path / "sessions"
         output_dir = tmp_path / "memory"
@@ -109,7 +109,7 @@ class TestDreamingE2EAgent:
 
     @pytest.mark.asyncio
     async def test_dedup_skips_existing_title(self, tmp_path):
-        from jiuwenclaw.agents.harness.common.memory.dreaming.sweeper import Sweeper
+        from jiuwenswarm.agents.harness.common.memory.dreaming.sweeper import Sweeper
 
         sessions_root = tmp_path / "sessions"
         output_dir = tmp_path / "memory"
@@ -147,7 +147,7 @@ class TestDreamingE2EAgent:
 
     @pytest.mark.asyncio
     async def test_incremental_scan_reprocesses_updated_session(self, tmp_path):
-        from jiuwenclaw.agents.harness.common.memory.dreaming.sweeper import Sweeper
+        from jiuwenswarm.agents.harness.common.memory.dreaming.sweeper import Sweeper
 
         sessions_root = tmp_path / "sessions"
         output_dir = tmp_path / "memory"
@@ -213,7 +213,7 @@ class TestDreamingE2EAgent:
 
     @pytest.mark.asyncio
     async def test_skips_unchanged_session(self, tmp_path):
-        from jiuwenclaw.agents.harness.common.memory.dreaming.sweeper import Sweeper
+        from jiuwenswarm.agents.harness.common.memory.dreaming.sweeper import Sweeper
 
         sessions_root = tmp_path / "sessions"
         output_dir = tmp_path / "memory"
@@ -257,7 +257,7 @@ class TestDreamingE2ECode:
 
     @pytest.mark.asyncio
     async def test_sweep_writes_consolidated_files(self, tmp_path):
-        from jiuwenclaw.agents.harness.common.memory.dreaming.sweeper import Sweeper
+        from jiuwenswarm.agents.harness.common.memory.dreaming.sweeper import Sweeper
 
         sessions_root = tmp_path / "sessions"
         output_dir = tmp_path / "coding_memory"
@@ -293,7 +293,7 @@ class TestDreamingE2ECode:
 
     @pytest.mark.asyncio
     async def test_content_hash_dedup(self, tmp_path):
-        from jiuwenclaw.agents.harness.common.memory.dreaming.sweeper import Sweeper
+        from jiuwenswarm.agents.harness.common.memory.dreaming.sweeper import Sweeper
 
         sessions_root = tmp_path / "sessions"
         output_dir = tmp_path / "coding_memory"
@@ -328,7 +328,7 @@ class TestDreamingE2ELifecycle:
 
     @pytest.mark.asyncio
     async def test_start_stop(self, tmp_path, monkeypatch):
-        from jiuwenclaw.agents.harness.common.memory.dreaming import (
+        from jiuwenswarm.agents.harness.common.memory.dreaming import (
             start_dreaming,
             stop_dreaming,
             get_dreaming_orchestrator,
@@ -357,7 +357,7 @@ class TestDreamingE2ELifecycle:
 
     @pytest.mark.asyncio
     async def test_start_disabled_config(self, tmp_path, monkeypatch):
-        from jiuwenclaw.agents.harness.common.memory.dreaming import (
+        from jiuwenswarm.agents.harness.common.memory.dreaming import (
             start_dreaming,
             get_dreaming_orchestrator,
         )

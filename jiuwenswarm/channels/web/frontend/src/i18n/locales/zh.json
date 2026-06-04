@@ -34,6 +34,9 @@
   },
   "team": {
     "members": "团队成员",
+    "membersTab": "Team成员",
+    "statusTab": "状态",
+    "filesTab": "文件",
     "taskEventLog": "任务事件日志",
     "task": "任务",
     "executing": "正在执行",
@@ -43,7 +46,123 @@
     "statusRestarting": "重启中",
     "statusShutdownRequested": "请求关闭",
     "statusShutdown": "已关闭",
-    "statusError": "错误"
+    "statusError": "错误",
+    "collapse": "收起",
+    "taskOverview": "任务概览",
+    "elapsedTime": "已花费时间: {{value}}",
+    "noTasks": "暂无任务",
+    "noMemberData": "暂无成员数据",
+    "selectMember": "请选择 Team 成员",
+    "detailTabs": {
+      "members": "成员",
+      "group": "群聊"
+    },
+    "leader": "Team leader",
+    "memberSeparator": "、",
+    "groupChat": "群聊",
+    "allMembers": "所有人",
+    "noGroupMessages": "暂无群聊消息",
+    "memberTasksTitle": "{{member}} 执行的任务",
+    "memberTasks": "Ta的任务",
+    "noMemberTasks": "暂无可归属到该成员的任务",
+    "noProcessData": "暂无该成员的执行过程数据",
+    "collapseView": "收起视图",
+    "expandView": "展开视图",
+    "expand": "展开",
+    "runningMode": "运行模式：{{mode}}",
+    "taskFallback": "任务 {{id}}",
+    "memberStatus": {
+      "running": "进行中",
+      "idle": "空闲",
+      "restarting": "重启中",
+      "shutdown": "已关闭",
+      "error": "异常",
+      "unstarted": "未启动",
+      "unknown": "未知"
+    },
+    "taskStatus": {
+      "completed": "已完成",
+      "in_progress": "进行中",
+      "cancelled": "已取消",
+      "error": "异常",
+      "pending": "等待中"
+    },
+    "taskEvents": {
+      "completed": "任务已完成",
+      "claimed": "任务已认领",
+      "created": "任务已创建",
+      "cancelled": "任务已取消",
+      "unblocked": "任务解除阻塞",
+      "updated": "任务状态更新"
+    },
+    "taskDetail": {
+      "sourcePrompt": "来源请求：{{prompt}}",
+      "noDetail": "后端未提供更详细的任务描述"
+    },
+    "elapsed": {
+      "daysHours": "{{days}}天{{hours}}小时",
+      "hoursMinutes": "{{hours}}h{{minutes}}m",
+      "minutesSeconds": "{{minutes}}min{{seconds}}s",
+      "seconds": "{{seconds}}s"
+    },
+    "process": {
+      "memberMessage": "成员协作消息",
+      "broadcastMessage": "广播消息",
+      "p2pMessage": "点对点消息",
+      "collaborationMessage": "协作消息",
+      "sentTo": "发给 {{member}}",
+      "sentMessage": "发送消息",
+      "receivedMessage": "接收消息",
+      "fields": {
+        "type": "类型",
+        "member": "成员",
+        "tool": "工具",
+        "content": "内容",
+        "call": "调用",
+        "result": "结果",
+        "sender": "发送方",
+        "receiver": "接收方",
+        "eventType": "事件类型",
+        "taskId": "任务 ID",
+        "taskStatus": "任务状态",
+        "description": "说明"
+      },
+      "execution": {
+        "final": "任务完成总结",
+        "toolCall": "工具调用",
+        "toolCallTitle": "调用 {{tool}}",
+        "toolResult": "工具结果",
+        "toolResultTitle": "{{tool}} 结果",
+        "file": "文件",
+        "sentFile": "发送文件",
+        "event": "执行事件"
+      }
+    },
+    "planning": {
+      "tab": "任务规划",
+      "progressTitle": "任务进度",
+      "token": "Token",
+      "elapsedTime": "已用时 {{value}}",
+      "taskList": "任务列表",
+      "taskListAria": "{{task}} 任务列表",
+      "resources": "任务资源",
+      "skills": "技能",
+      "files": "文件",
+      "unassigned": "未分配",
+      "unassignedAvatar": "未分配 avatar",
+      "views": {
+        "list": "列表视图",
+        "structure": "结构视图",
+        "board": "任务板视图"
+      },
+      "columns": {
+        "waiting": "等待中",
+        "running": "进行中",
+        "completed": "已完成",
+        "cancelled": "已取消",
+        "failed": "任务失败"
+      }
+    }
   },
   "teams": {
     "title": "团队管理",
@@ -70,26 +189,20 @@
     }
   },
   "statusBar": {
-    "cancel": "取消",
-    "pause": "暂停",
-    "resume": "恢复",
-    "processing": "处理中...",
     "evolving": "正在检测是否需要技能演进...",
     "evolutionStages": {
       "collecting": "正在准备技能演进检测...",
       "detecting": "正在检测是否需要技能演进...",
-      "generating": "检测到信号，正在生成演进经验...",
+      "generating": "检测到改进信号，正在生成演进经验...",
       "awaitingApproval": "演进经验已生成，等待审批...",
-      "noEvolutionGenerated": "无演进生成",
+      "noEvolutionGenerated": "未生成演进经验",
       "noEvolutionNoSkill": "未生成演进经验：未识别到相关技能",
-      "noEvolutionNoSignal": "未生成演进经验：未发现可沉淀的改进点",
-      "noEvolutionNoRecords": "未生成演进经验：未生成可保存的经验",
+      "noEvolutionNoSignal": "未发现需要沉淀的改进点",
+      "noEvolutionNoRecords": "未发现可沉淀的演进经验",
       "completed": "技能演进已完成",
       "timedOut": "技能演进已超时",
       "failed": "技能演进失败"
-    },
-    "paused": "已暂停",
-    "pausedWithTask": "已暂停: {{task}}..."
+    }
   },
   "chat": {
     "placeholder": "Enter 发送，Shift+Enter 换行",
@@ -118,6 +231,7 @@
     "removeTask": "移除任务",
     "holdToSpeak": "按住说话",
     "send": "发送 (Enter)",
+    "stop": "停止",
     "modelSelector": {
       "tooltip": "切换对话使用的模型"
     },
@@ -126,6 +240,8 @@
     "modeSwitchConfirm": "当前会话有历史消息，切换模式将新建会话。是否继续？",
     "teamPause": "暂停",
     "teamPauseHint": "团队暂停后，直接发送下一条消息即可继续",
+    "teamBroadcastTarget": "@所有人",
+    "contextCompressionCompleted": "本轮完成上下文压缩 {{count}} 次",
     "historyPager": {
       "loadedOfTotal": "历史已加载 {{loaded}} / {{total}} 页",
       "loadingMore": "加载中…",
@@ -177,7 +293,7 @@
     "versionInfo": "版本信息",
     "nativeVersion": "原生版本",
     "harnessVersion": "Auto Harness 版本",
-    "currentActive": "当前激活",
+    "currentActive": "已激活",
     "hotActivate": "热生效",
     "activating": "正在激活...",
     "activateSuccess": "版本切换成功",
@@ -218,7 +334,14 @@
     "packageExists": "同名扩展已存在",
     "invalidZipFormat": "无效的 zip 文件格式",
     "missingHarnessConfig": "Zip 文件必须包含 harness_config.yaml",
-    "selectZipFile": "选择 .zip 文件导入"
+    "selectZipFile": "选择 .zip 文件导入",
+    "deactivate": "去激活",
+    "deactivating": "正在去激活...",
+    "deactivateFailed": "去激活失败",
+    "deactivateSuccess": "去激活成功",
+    "deactivateAll": "全部去激活",
+    "allDeactivated": "所有扩展已去激活",
+    "activePackages": "已激活扩展"
   },
   "todoList": {
     "title": "任务列表",
@@ -309,7 +432,6 @@
       "web": "网页 (web)",
       "feishu": "飞书 (feishu)",
       "wechat": "微信 (wechat)",
-      "wecom": "企业微信 (wecom)",
       "xiaoyi": "小艺 (xiaoyi)",
       "dingtalk": "钉钉 (dingtalk)"
     },
@@ -366,7 +488,7 @@
     "skillnet": {
       "usageNoticeTitle": "提示",
       "usageNotice1": "SkillNet 在线搜索走公网服务，若出现超时或失败，可能是网络拥堵或服务繁忙，请稍后再试。",
-      "usageNotice2": "从 SkillNet 安装技能时，文件实际从 GitHub 下载，<strong>请保证运行 JiuwenClaw 的环境能访问 GitHub</strong>（网络、代理等）。",
+      "usageNotice2": "从 SkillNet 安装技能时，文件实际从 GitHub 下载，<strong>请保证运行 JiuwenSwarm 的环境能访问 GitHub</strong>（网络、代理等）。",
       "usageNotice3": "从 GitHub 拉取依赖其 API：未认证（匿名）约 60 次/小时/本机 IP；若安装失败并提示限流，请隔一段时间再试。如需提高速率限制，请在<configLink>配置页面</configLink>中配置 github_token。",
       "configPageLinkAria": "前往配置页面"
     }
@@ -519,15 +641,39 @@
     "empty": "暂未获取到配置，请确认后端服务状态。",
     "selectModelProvider": "请选择模型提供商",
     "enterValue": "请输入配置值",
+    "validation": {
+      "agentNameRequired": "Agent 名称不能为空",
+      "agentModelProviderRequired": "Agent 模型提供商不能为空",
+      "agentModelApiBaseRequired": "Agent API Base URL 不能为空",
+      "agentModelApiKeyRequired": "Agent API Key 不能为空",
+      "agentModelNameRequired": "Agent 模型名称不能为空",
+      "teamRequired": "已配置 Agent，但未配置 Team，请至少添加一个 Team",
+      "teamNameRequired": "Team 名称不能为空",
+      "teamLifecycleRequired": "Team 生命周期不能为空",
+      "teamTeammateModeRequired": "Team 成员模式不能为空",
+      "teamSpawnModeRequired": "Team 启动模式不能为空",
+      "leaderMemberNameRequired": "Team「{{team}}」Leader 成员名称不能为空",
+      "leaderMemberNameInvalid": "Team「{{team}}」Leader 成员名称「{{name}}」格式无效：必须以小写字母开头，后跟小写字母、数字或连字符",
+      "leaderDisplayNameRequired": "Team「{{team}}」Leader 显示名称不能为空",
+      "leaderPersonaRequired": "Team「{{team}}」Leader 人设不能为空",
+      "leaderAgentKeyRequired": "Team「{{team}}」Leader Agent Key 不能为空",
+      "teammateAgentKeyRequired": "Team「{{team}}」Teammate Agent Key 不能为空",
+      "memberNameRequired": "Team「{{team}}」成员名称不能为空",
+      "memberNameInvalid": "Team「{{team}}」成员名称「{{name}}」格式无效：必须以小写字母开头，后跟小写字母、数字或连字符",
+      "memberDisplayNameRequired": "Team「{{team}}」成员「{{name}}」显示名称不能为空",
+      "memberPersonaRequired": "Team「{{team}}」成员「{{name}}」人设不能为空",
+      "memberAgentKeyRequired": "Team「{{team}}」成员「{{name}}」Agent Key 不能为空",
+      "memberNameConflictWithLeader": "Team「{{team}}」成员名称「{{name}}」与 Leader 成员名称冲突"
+    },
     "keys": {
       "memoryForbiddenEnabled": "启用",
       "memoryForbiddenDescription": "禁止记忆内容描述",
       "memoryForbiddenDescriptionPlaceholder": "例如：密码、API密钥、Secret、Token、信用卡号、身份证号、手机号等敏感信息",
-      "agentSkillsPlaceholder": "技能用逗号隔开",
+      "agentSkillsPlaceholder": "点击选择技能",
+      "agentSkillsEmpty": "暂无已安装技能",
       "agentName": "名称",
       "agentModel": "模型",
       "agentSkills": "技能",
-      "agentMaxIterations": "最大迭代次数",
       "agentCompletionTimeout": "完成超时时间",
       "teamName": "团队名称",
       "teamLifecycle": "生命周期",
@@ -585,16 +731,18 @@
       "deleteConfirmTitle": "确认删除模型？",
       "deleteConfirmMessage": "确定要删除模型 \"{{modelName}}\" 吗？",
       "deleteConfirmMessageSimple": "模型 \"{{modelName}}\" 正在被 {{count}} 个 Agent 引用，删除后相关 Agent 将无法使用该模型。",
-      "referenceLostWarning": "Agent引用模型丢失警告",
+      "referenceLostWarning": "Agent引用模型丢失警告，请重新配置Agent模型",
       "notSelected": "未选择模型"
     },
     "agentList": {
       "addAgent": "添加Agent",
       "removeAgent": "删除",
       "untitled": "未命名",
+      "duplicateName": "Agent名称已存在",
       "deleteConfirmTitle": "确认删除Agent？",
       "deleteConfirmMessage": "确定要删除 Agent \"{{agentName}}\" 吗？",
-      "deleteConfirmMessageSimple": "Agent \"{{agentName}}\" 正在被 Team 引用。"
+      "deleteConfirmMessageSimple": "Agent \"{{agentName}}\" 正在被 Team 引用。",
+      "nameChangeWarning": "正在修改被引用的Agent名称，请重新配置Agent Key"
     },
     "team": {
       "leader": "Leader",
@@ -613,7 +761,7 @@
       "deleteMemberConfirmMessage": "确定要删除成员 \"{{memberName}}\" 吗？",
       "duplicateMemberName": "成员名称已存在",
       "memberNameEnglishOnly": "成员名称只能包含英文字母",
-      "memberNameFormatInvalid": "成员名称仅支持字母/数字/下划线",
+      "memberNameFormatInvalid": "成员名称必须以小写字母开头，后跟小写字母、数字或连字符",
       "referencedByTeams": "被 {{count}} 个 Team 引用"
     },
     "groups": {
@@ -626,7 +774,7 @@
       "thirdParty": { "label": "第三方服务配置", "hint": "API Key 配置" },
       "freeSearch": { "label": "免费搜索引擎配置", "hint": "控制免费搜索引擎启用" },
       "evolution": { "label": "自演进配置", "hint": "Skills 在线自演进参数" },
-      "agents": { "label": "多Agent配置", "hint": "仅供集群模式使用" },
+      "agents": { "label": "多Agent配置", "hint": "仅供集群模式使用，且必须添加Team" },
       "team": { "label": "Team配置", "hint": "多智能体团队配置" },
       "contextEngine": { "label": "上下文压缩", "hint": "控制对话上下文是否启用压缩" },
       "permissions": { "label": "工具安全护栏", "hint": "控制工具调用时的权限检查" },
@@ -643,13 +791,13 @@
       "kvCacheAffinity": "算力亲和（KV 释放）"
     },
     "permissionsTools": {
-      "title": "整工具防护（permissions.tools）",
+      "title": "工具防护（permissions.tools）",
       "subtitle": "按工具名设置 allow / ask / deny，立即写入配置并热更新；不含基于 pattern 的规则。",
       "refresh": "刷新列表",
       "refreshing": "加载中…",
       "needConnection": "请先连接服务器后再管理工具权限。",
       "loadingList": "正在加载工具权限…",
-      "empty": "尚未配置任何整工具规则，可在下方添加。",
+      "empty": "尚未配置任何工具规则，可在下方添加。",
       "colTool": "工具名",
       "colLevel": "策略",
       "colActions": "操作",
@@ -659,7 +807,7 @@
       "delete": "删除",
       "deleteConfirm": "确定从 permissions.tools 中删除「{{tool}}」吗？",
         "invalidValue": "配置值非标准格式，选择策略后将写回为合法值。当前：{{raw}}",
-        "addTitle": "添加整工具规则",
+        "addTitle": "添加工具规则",
         "toolPlaceholder": "例如 mcp_exec_command",
         "duplicateTool": "工具已存在：{{tool}}",
         "add": "添加",
@@ -714,6 +862,7 @@
       "tui": "终端 (tui)",
       "xiaoyi": "小艺 (xiaoyi)",
       "feishu": "飞书 (feishu)",
+      "dingtalk": "钉钉 (dingtalk)",
       "whatsapp": "WhatsApp (whatsapp)",
       "wecom": "企业微信 (wecom)",
       "wechat": "微信 (wechat)"
@@ -809,6 +958,17 @@
       "mySkills": "我的技能",
       "marketplace": "技能广场"
     },
+    "mySkillsTabs": {
+      "all": "全部",
+      "enabled": "启用",
+      "disabled": "禁用"
+    },
+    "enable": "启用",
+    "noDisabledSkills": "暂无禁用的技能",
+    "noEnabledSkills": "暂无启用的技能",
+    "setEnabledError": "设置技能启用状态失败",
+    "setEnabledSuccess": "已启用技能 {name}",
+    "setDisabledSuccess": "已禁用技能 {name}",
     "marketplaceTabs": {
       "builtin": "预置"
     },
@@ -826,7 +986,9 @@
       "importLocal": "导入本地技能",
       "sourceManager": "源管理",
       "backToList": "返回列表",
-      "viewEvolution": "查看技能经验"
+      "viewEvolution": "查看技能经验",
+      "enabling": "启用中...",
+      "disabling": "禁用中..."
     },
     "builtIn": "内置",
     "status": {
@@ -853,6 +1015,10 @@
     "totalCount": "共 {{count}} 个",
     "listError": "获取技能失败，请检查后端服务",
     "noMatches": "暂无匹配的技能",
+    "viewMode": {
+      "list": "列表模式",
+      "grid": "平铺模式"
+    },
     "detailLoading": "加载详情中...",
     "detailError": "加载详情失败",
     "evolution": {
@@ -997,7 +1163,7 @@
       "installed": "已安装：{{spec}}",
       "imported": "已导入：{{name}}",
       "uninstalled": "已卸载：{{pluginName}}",
-      "skillNetInstalled": "已从 SkillNet 安装：{{name}}"
+      "skillNetInstalled": "已安装：{{name}}"
     },
     "errors": {
       "installFailed": "安装失败",
@@ -1048,6 +1214,7 @@
     "copyMessage": "复制消息",
     "stopReading": "停止朗读",
     "readMessage": "朗读消息",
+    "fileExpired": "已过期",
     "parallelProgress": "并行任务执行中 ({{completedCount}}/{{total}} 完成)",
     "subtask": {
       "starting": "启动中...",
@@ -1074,6 +1241,37 @@
       "pending": "{{pendingCount}} 个执行中",
       "timeout": "{{timeoutCount}} 个超时",
       "latest": "↓ 最新"
+    },
+    "teamActivity": {
+      "preparing": "Agent Team 正在准备",
+      "currentActivity": "{{member}} - {{summary}}",
+      "progress": {
+        "completed": "任务完成",
+        "inactive": "当前无进行中的活动",
+        "activeMembers": "活跃成员数： {{count}}"
+      },
+      "status": {
+        "completed": "任务完成",
+        "cancelled": "任务取消",
+        "thinking": "正在思考",
+        "message": "发送消息",
+        "file": "发送文件",
+        "executingTool": "执行工具",
+        "toolCall": "工具调用"
+      },
+      "summary": {
+        "task": "{{status}}：{{content}}",
+        "message": "发送消息：{{content}}",
+        "file": "发送文件：{{content}}",
+        "tool": "调用工具：{{content}}"
+      },
+      "counts": {
+        "tasks": "执行任务",
+        "messages": "发送消息",
+        "tools": "工具调用"
+      },
+      "openGroupChat": "展开群聊",
+      "openGroupChatTitle": "展开群聊消息"
     },
     "inlineQuestion": {
       "header": "演进审批",
@@ -1132,13 +1330,16 @@
     "downloadAndInstall": "下载更新",
     "downloading": "下载中...",
     "installNow": "安装并重启",
+    "pipUpgrade": "升级",
+    "pipRestart": "立即重启",
     "currentVersion": "当前版本",
     "latestVersion": "最新版本",
     "state": "更新状态",
     "publishedAt": "发布时间",
     "releaseNotes": "更新说明",
     "downloadProgress": "下载进度",
-    "readyToInstall": "安装包已下载完成，点击“安装并重启”后将退出当前应用并静默升级。",
+    "readyToInstall": "安装包已下载完成，点击「安装并重启」后将退出当前应用并静默升级。",
+    "restartPendingHint": "升级完成，请点击「立即重启」重启服务。",
     "unsupported": "当前平台暂不支持此更新流程。",
     "noReleaseNotes": "暂无更新说明。",
     "states": {
@@ -1148,6 +1349,9 @@
       "update_available": "发现新版本",
       "downloading": "下载中",
       "downloaded": "已下载完成",
+      "upgrading": "升级中...",
+      "restart_pending": "等待重启",
+      "restarting": "重启中...",
       "installing": "安装中",
       "error": "检查失败",
       "unsupported": "当前平台不支持",
@@ -1158,6 +1362,7 @@
       "loadConfigFailed": "获取更新配置失败",
       "checkFailed": "检查更新失败",
       "downloadFailed": "下载更新失败",
+      "upgradeFailed": "安装更新失败",
       "saveConfigFailed": "保存更新配置失败",
       "installUnavailable": "当前环境无法直接触发安装，请确认在 Windows 桌面应用内运行。",
       "installFailed": "启动更新安装失败"
@@ -1185,6 +1390,7 @@
     "heartbeatTitle": "心跳消息",
     "heartbeatClose": "关闭",
     "heartbeatViewFull": "点击查看完整心跳消息",
+    "securityAlertTitle": "安全警告",
     "noContent": "无详细内容",
     "restarting": "正在重启服务",
     "restartSuccess": "重启成功",

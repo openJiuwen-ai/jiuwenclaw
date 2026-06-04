@@ -87,6 +87,8 @@ function connectionStatusLabel(status: AppSnapshot["connectionStatus"]): string 
       return "backend unavailable · retrying";
     case "auth_failed":
       return "auth failed";
+    case "message_too_big":
+      return "消息过大 · 连接被断开";
     case "idle":
       return "backend unavailable";
     case "connected":
@@ -119,7 +121,7 @@ function buildStatusLines(
     isTeamWorking(snapshot.teamMemberEvents, snapshot.teamMessageEvents);
 
   const right = snapshot.lastError
-    ? `error:${snapshot.lastError}`
+    ? `error:${snapshot.lastError.split('\n')[0].slice(0, 50)}`
     : snapshot.isInterrupted
       ? renderInterruptedStatus()
     : snapshot.isPaused
@@ -160,10 +162,11 @@ function buildStatusLineBar(snapshot: AppSnapshot, width: number): string[] {
   const paddingX = sl?.padding ?? 0;
   const paddedWidth = width - paddingX * 2;
   if (paddedWidth <= 0) return [];
-  const text = snapshot.statusLineText.length > paddedWidth
-    ? snapshot.statusLineText.slice(0, paddedWidth)
-    : snapshot.statusLineText;
-  return [padToWidth(palette.text.dim(text), paddedWidth)];
+  return snapshot.statusLineText.split(/\r?\n/).map((line) => {
+    const truncated = line.length > paddedWidth ? line.slice(0, paddedWidth) : line;
+    const inner = padToWidth(palette.text.dim(truncated), paddedWidth);
+    return " ".repeat(paddingX) + inner + " ".repeat(paddingX);
+  });
 }
 
 function buildShortcutLines(width: number): string[] {
@@ -186,12 +189,19 @@ export function buildAppScreenLines(snapshot: AppSnapshot, options: ScreenLayout
     options.animationPhase,
     options.runningElapsedMs,
   );
-  const shortcutLines = options.showShortcutHelp ? buildShortcutLines(options.width) : [];
   const statusLineBarLines = buildStatusLineBar(snapshot, options.width);
 
-  // When a custom statusline bar is active, replace the built-in status lines
-  // to avoid redundant information (both show session name, mode, etc.)
-  const effectiveStatusLines = statusLineBarLines.length > 0 ? [] : statusLines;
+  // When a custom statusline is active, hide shortcut hints (matching Claude Code).
+  const suppressShortcuts = statusLineBarLines.length > 0;
+  const shortcutLines = (!suppressShortcuts && options.showShortcutHelp)
+    ? buildShortcutLines(options.width)
+    : [];
+
+  // Built-in status lines are always shown alongside the custom statusline,
+  // matching Claude Code's approach (both render together).
+  // Custom statusline is placed ABOVE the built-in status lines so that the
+  // "Working" animation always stays at the screen bottom for visual prominence.
+  const effectiveStatusLines = statusLines;
 
   const transcriptLines = buildTranscriptLines(
     snapshot,
@@ -249,8 +259,8 @@ export function buildAppScreenLines(snapshot: AppSnapshot, options: ScreenLayout
     ...options.questionLines,
     ...options.editorLines,
     ...options.composerPreviewLines,
-    ...effectiveStatusLines,
     ...statusLineBarLines,
+    ...effectiveStatusLines,
     ...shortcutLines,
   ];
   const height = Math.floor(options.height ?? 0);
@@ -276,7 +286,8 @@ export function buildAppScreenLines(snapshot: AppSnapshot, options: ScreenLayout
   const teamWorking =
     isTeamMode(snapshot.mode) &&
     isTeamWorking(snapshot.teamMemberEvents, snapshot.teamMessageEvents);
-  const liveTranscript = snapshot.isProcessing || snapshot.isPaused || teamWorking;
+  const liveTranscript =
+    snapshot.isProcessing || snapshot.isPaused || snapshot.cancellableWork || teamWorking;
   if (requestedOffset === 0 && !liveTranscript) {
     return [...transcriptLines, ...fixedLines];
   }

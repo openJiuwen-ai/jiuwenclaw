@@ -12,6 +12,7 @@ import { getWsBase } from '../utils/env';
 import i18n from '../i18n';
 
 type EventHandler = (event: WsEvent) => void;
+type TypedEventHandler<TPayload> = (event: WsEvent & { payload: TPayload }) => void;
 type StateHandler = (state: WebConnectionState) => void;
 
 interface PendingRequest {
@@ -97,9 +98,13 @@ class WebClient {
     };
   }
 
-  on(eventName: string, handler: EventHandler): () => void {
+  on<TPayload = Record<string, unknown>>(
+    eventName: string,
+    handler: TypedEventHandler<TPayload>
+  ): () => void {
     const set = this.handlers.get(eventName) ?? new Set<EventHandler>();
-    set.add(handler);
+    const eventHandler = handler as EventHandler;
+    set.add(eventHandler);
     this.handlers.set(eventName, set);
 
     return () => {
@@ -107,7 +112,7 @@ class WebClient {
       if (!target) {
         return;
       }
-      target.delete(handler);
+      target.delete(eventHandler);
       if (target.size === 0) {
         this.handlers.delete(eventName);
       }

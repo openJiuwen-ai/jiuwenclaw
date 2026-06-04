@@ -19,7 +19,6 @@ import { LogsPanel } from './components/LogsPanel';
 import { ChannelsPanel } from './components/ChannelsPanel';
 import { BrowserPanel } from './components/BrowserPanel';
 import { UpdatePanel } from './components/UpdatePanel';
-import { StatusBar } from './components/StatusBar';
 import { ExtensionsHubPanel } from './components/ExtensionsHubPanel';
 
 import { FEATURE_APP_UPDATER_UI } from './featureFlags';
@@ -37,12 +36,46 @@ import {
 } from './features/tool-events/toolEventNormalizer';
 import { useWebSocket } from './hooks';
 import { webRequest } from './services/webClient';
+import { useTeamPanelState } from './features/teamPanelState';
 import { AgentMode, UserAnswer, ModelEntry } from './types';
 import { useSessionStore, useChatStore, useTodoStore, useHarnessStore } from './stores';
 import { useTranslation } from 'react-i18next';
 import './App.css';
 
 type MainNavKey = 'chat' | 'skills' | 'agents' | 'teams' | 'sessions' | 'heartbeat' | 'cron' | 'channels' | 'extensions' | 'configpanel' | 'logspanel' | 'browserpanel' | 'updatepanel';
+
+type AgentsTeamsSavePayload = {
+  agents: Record<string, {
+    model: { provider: string; api_base: string; api_key: string; model: string };
+    skills: string[];
+    completion_timeout: number;
+  }>;
+  team: Array<{
+    team_name: string;
+    lifecycle: string;
+    teammate_mode: string;
+    spawn_mode: string;
+    leader: { member_name: string; display_name: string; persona: string; agent_key: string };
+    teammate: { agent_key: string };
+    predefined_members: Array<{ member_name: string; display_name: string; persona: string; prompt_hint: string; agent_key: string }>;
+  }>;
+};
+
+type ConfigSaveAllPayload = {
+  config?: Record<string, string>;
+  models?: ModelEntry[];
+  agents?: AgentsTeamsSavePayload["agents"];
+  team?: AgentsTeamsSavePayload["team"];
+};
+
+function clearTeamRuntimeState(): void {
+  const sessionStore = useSessionStore.getState();
+  sessionStore.setTeamMembers([]);
+  sessionStore.setTeamTaskEvents([]);
+  sessionStore.setTeamTasks([]);
+  sessionStore.setTeamMemberExecutionEvents([]);
+  sessionStore.setTeamHistoryMessages([]);
+}
 
 // 错误边界组件
 interface ErrorBoundaryState {
@@ -133,6 +166,7 @@ function storeSessionId(sessionId: string | null) {
 
 function AppContent() {
   const { t, i18n } = useTranslation();
+  const tRef = useRef(t);
   // 优先使用存储的会话 ID，避免每次刷新创建新会话
   const [sessionId, setSessionId] = useState<string>(() => {
     const stored = getStoredSessionId();
@@ -151,12 +185,19 @@ function AppContent() {
   const [heartbeatToastVisible, setHeartbeatToastVisible] = useState(false);
   const [heartbeatToastMessage, setHeartbeatToastMessage] = useState('');
   const [heartbeatModalOpen, setHeartbeatModalOpen] = useState(false);
+  const [securityAlertVisible, setSecurityAlertVisible] = useState(false);
+  const [securityAlertContent, setSecurityAlertContent] = useState('');
   const [hasVisitedSkills, setHasVisitedSkills] = useState(false);
   const [hasVisitedChannels, setHasVisitedChannels] = useState(false);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const startupUpdateCheckRef = useRef(false);
   /** 从 SkillNet 等入口跳转配置页时，首次展开对应配置分组（如第三方服务） */
   const [configInitialExpandGroup, setConfigInitialExpandGroup] = useState<string | null>(null);
+
+  useEffect(() => {
+    tRef.current = t;
+  }, [t]);
+
   useEffect(() => {
     if (activeNav !== 'configpanel') {
       setConfigInitialExpandGroup(null);
@@ -198,7 +239,42 @@ function AppContent() {
     sessionIdRef.current = sessionId;
   }, [sessionId]);
 
-  const { setCurrentSession, setSessions, setAvailableModels, setMode, mode, heartbeatMessage, heartbeatUpdatedAt, teamTaskEvents, teamMembers } = useSessionStore();
+  const { setCurrentSession, setSessions, setAvailableModels, setMode, mode, heartbeatMessage, heartbeatUpdatedAt, teamTaskEvents, teamTasks, teamMembers, setTeamLeaderMemberIds } = useSessionStore();
+  const {
+    teamAreaExpanded,
+    teamAreaActiveTab,
+    teamAreaActiveDetailTab,
+    teamAreaSelectedMemberId,
+    setTeamAreaExpanded,
+    setTeamAreaActiveTab,
+    setTeamAreaActiveDetailTab,
+    setTeamAreaSelectedMemberId,
+  } = useTeamPanelState();
+  const [chatPanelWidthPct, setChatPanelWidthPct] = useState(33.33);
+
+  const handleDividerMouseDown = useCallback((e: React.MouseEvent) => {
+    e.preventDefault();
+    const startX = e.clientX;
+    const startPct = chatPanelWidthPct;
+    const container = (e.currentTarget as HTMLElement).parentElement;
+    if (!container) return;
+    const containerWidth = container.getBoundingClientRect().width;
+
+    const onMouseMove = (ev: MouseEvent) => {
+      const dx = ev.clientX - startX;
+      const newPct = Math.min(70, Math.max(20, startPct + (dx / containerWidth) * 100));
+      setChatPanelWidthPct(newPct);
+    };
+
+    const onMouseUp = () => {
+      document.removeEventListener('mousemove', onMouseMove);
+      document.removeEventListener('mouseup', onMouseUp);
+    };
+
+    document.addEventListener('mousemove', onMouseMove);
+    document.addEventListener('mouseup', onMouseUp);
+  }, [chatPanelWidthPct]);
+
   const {
     clearMessages,
     clearSubtasks,
@@ -207,12 +283,24 @@ function AppContent() {
     addToolResult,
     prependMessages,
     isProcessing,
-    isLoadingHistory,
     setProcessing,
     setThinking,
     setLoadingHistory,
     setPaused,
+    messages,
   } = useChatStore();
+
+  useEffect(() => {
+    if (!serverConfig) {
+      setTeamLeaderMemberIds([]);
+      return;
+    }
+    const leaderIds = Object.entries(serverConfig)
+      .filter(([key]) => /^team_leader_member_name_\d+$/.test(key) || /^team_\d+_leader_member_name$/.test(key))
+      .map(([, value]) => (typeof value === 'string' ? value.trim() : ''))
+      .filter(Boolean);
+    setTeamLeaderMemberIds(leaderIds);
+  }, [serverConfig, setTeamLeaderMemberIds]);
 
   const disposeInFlightHistoryHandles = useCallback(() => {
     historyLoadingMoreRef.current = false;
@@ -228,21 +316,25 @@ function AppContent() {
   const { extensionReady, reset: resetHarnessStore } = useHarnessStore();
 
   const toolPanelHasContent = useMemo(() => {
+    const hasMessages = messages.length > 0;
+    const hasHeartbeat = Boolean(heartbeatMessage);
     switch (mode) {
       case 'auto_harness':
-        return Boolean(extensionReady?.runtimePath);
+        return Boolean(extensionReady?.runtimePath) || hasMessages || hasHeartbeat;
       case 'team':
-        return teamTaskEvents.length > 0 || teamMembers.length > 0;
+        return teamTaskEvents.length > 0 || teamTasks.length > 0 || teamMembers.length > 0 || hasMessages || hasHeartbeat;
       default:
-        return todos.length > 0;
+        return todos.length > 0 || hasMessages || hasHeartbeat;
     }
-  }, [mode, todos.length, teamTaskEvents.length, teamMembers.length, extensionReady?.runtimePath]);
+  }, [mode, todos.length, teamTaskEvents.length, teamTasks.length, teamMembers.length, extensionReady?.runtimePath, messages.length, heartbeatMessage]);
+  const isTeamAreaExpanded = mode === 'team' && teamAreaExpanded && toolPanelHasContent;
 
   // WebSocket 连接 - provider 由后端配置决定 - provider 由后端配置决定，前端默认不在 URL query 传递
   const {
     isConnected,
     request,
     sendMessage,
+    pause,
     cancel,
     supplement,
     switchMode,
@@ -362,6 +454,27 @@ function AppContent() {
     }
   }, []);
 
+  const securityAlertTimerRef = useRef<number | null>(null);
+
+  useEffect(() => {
+    const handleSecurityAlert = (e: CustomEvent) => {
+      setSecurityAlertContent(e.detail.message);
+      setSecurityAlertVisible(true);
+      if (securityAlertTimerRef.current) {
+        clearTimeout(securityAlertTimerRef.current);
+      }
+      securityAlertTimerRef.current = setTimeout(() => {
+        setSecurityAlertVisible(false);
+        securityAlertTimerRef.current = null;
+      }, 5000);
+    };
+    window.addEventListener('security-alert', handleSecurityAlert as EventListener);
+    return () => {
+      window.removeEventListener('security-alert', handleSecurityAlert as EventListener);
+      if (securityAlertTimerRef.current) clearTimeout(securityAlertTimerRef.current);
+    };
+  }, []);
+
   const validateModelConfig = useCallback(
     async (fields: {
       api_base: string;
@@ -420,36 +533,36 @@ function AppContent() {
     }
   }, [clearRestartAutoCloseTimer, closeRestartModal, request]);
 
-  const handleAgentsTeamsSave = useCallback(async (payload: {
-    agents: Record<string, {
-      model: { provider: string; api_base: string; api_key: string; model: string };
-      skills: string[];
-      max_iterations: number;
-      completion_timeout: number;
-    }>;
-    team: Array<{
-      team_name: string;
-      lifecycle: string;
-      teammate_mode: string;
-      spawn_mode: string;
-      leader: { member_name: string; display_name: string; persona: string; agent_key: string };
-      teammate: { agent_key: string };
-      predefined_members: Array<{ member_name: string; display_name: string; persona: string; prompt_hint: string; agent_key: string }>;
-    }>;
-  }) => {
-    const result = await request<{ updated?: string[]; applied_without_restart?: boolean }>(
-      'config.set',
-      payload as unknown as Record<string, string>
-    );
-    // 更新前端配置缓存
+const applyConfigSaveUiState = useCallback((appliedWithoutRestart: boolean) => {
+    setConfigError(null);
+    setRestartModalOpen(true);
+    setRestartSuccess(false);
+    setRestartSeenDisconnect(false);
+    setAppliedWithoutRestart(appliedWithoutRestart);
+    clearRestartAutoCloseTimer();
+    if (appliedWithoutRestart) {
+      setRestartSuccess(true);
+      restartAutoCloseTimerRef.current = window.setTimeout(() => {
+        closeRestartModal();
+      }, 5000);
+    }
+  }, [clearRestartAutoCloseTimer, closeRestartModal]);
+
+  const buildAgentsTeamsFlatConfig = useCallback((payload: AgentsTeamsSavePayload) => {
     const updates: Record<string, string> = {};
+    const agentCount = Object.keys(payload.agents).length;
     Object.entries(payload.agents).forEach(([name, agent], idx) => {
       updates[`agent_name_${idx}`] = name;
       updates[`agent_model_${idx}`] = agent.model.model;
       updates[`agent_skills_${idx}`] = agent.skills.join(',');
-      updates[`agent_max_iterations_${idx}`] = String(agent.max_iterations);
       updates[`agent_completion_timeout_${idx}`] = String(agent.completion_timeout);
     });
+    for (let i = agentCount; i < 10; i++) {
+      updates[`agent_name_${i}`] = "";
+      updates[`agent_model_${i}`] = "";
+      updates[`agent_skills_${i}`] = "";
+      updates[`agent_completion_timeout_${i}`] = "";
+    }
     payload.team.forEach((team, idx) => {
       updates[`team_name_${idx}`] = team.team_name;
       updates[`team_lifecycle_${idx}`] = team.lifecycle;
@@ -460,27 +573,68 @@ function AppContent() {
       updates[`team_leader_persona_${idx}`] = team.leader.persona;
       updates[`team_leader_agent_key_${idx}`] = team.leader.agent_key;
       updates[`team_teammate_agent_key_${idx}`] = team.teammate.agent_key;
-      // 保存 predefined_members
-      if (team.predefined_members && team.predefined_members.length > 0) {
-        updates[`team_predefined_members_${idx}`] = JSON.stringify(team.predefined_members);
-      } else {
-        updates[`team_predefined_members_${idx}`] = "";
-      }
+      updates[`team_predefined_members_${idx}`] = team.predefined_members?.length
+        ? JSON.stringify(team.predefined_members)
+        : "";
     });
-    setServerConfig((prev: Record<string, unknown> | null) => ({ ...prev, ...updates }));
-    setConfigError(null);
-    setRestartModalOpen(true);
-    setRestartSuccess(false);
-    setRestartSeenDisconnect(false);
-    setAppliedWithoutRestart(result?.applied_without_restart === true);
-    clearRestartAutoCloseTimer();
-    if (result?.applied_without_restart === true) {
-      setRestartSuccess(true);
-      restartAutoCloseTimerRef.current = window.setTimeout(() => {
-        closeRestartModal();
-      }, 5000);
+for (let i = payload.team.length; i < 10; i++) {
+      updates[`team_name_${i}`] = "";
+      updates[`team_lifecycle_${i}`] = "";
+      updates[`team_teammate_mode_${i}`] = "";
+      updates[`team_spawn_mode_${i}`] = "";
+      updates[`team_leader_member_name_${i}`] = "";
+      updates[`team_leader_display_name_${i}`] = "";
+      updates[`team_leader_persona_${i}`] = "";
+      updates[`team_leader_agent_key_${i}`] = "";
+      updates[`team_teammate_agent_key_${i}`] = "";
+      updates[`team_predefined_members_${i}`] = "";
     }
-  }, [clearRestartAutoCloseTimer, closeRestartModal, request]);
+    return updates;
+  }, []);
+
+  const handleAgentsTeamsSave = useCallback(async (payload: AgentsTeamsSavePayload) => {
+    const result = await request<{ updated?: string[]; applied_without_restart?: boolean }>(
+      'config.set',
+      payload as unknown as Record<string, string>
+    );
+    // 更新前端配置缓存
+    const updates = buildAgentsTeamsFlatConfig(payload);
+    setServerConfig((prev: Record<string, unknown> | null) => ({ ...prev, ...updates }));
+    applyConfigSaveUiState(result?.applied_without_restart === true);
+  }, [applyConfigSaveUiState, buildAgentsTeamsFlatConfig, request]);
+
+  const saveAllConfigAndRestart = useCallback(async (payload: ConfigSaveAllPayload) => {
+    const result = await request<{ updated?: string[]; applied_without_restart?: boolean }>(
+      'config.save_all',
+      payload as unknown as Record<string, unknown>
+    );
+    setServerConfig((prev) => {
+      const next: Record<string, unknown> = { ...(prev ?? {}) };
+      if (payload.config) {
+        Object.assign(next, payload.config);
+        if (typeof prev?.memory_forbidden_description === 'object' && prev.memory_forbidden_description !== null
+            && !Array.isArray(prev.memory_forbidden_description)
+            && payload.config.memory_forbidden_description !== undefined) {
+          const prevDict = prev.memory_forbidden_description as Record<string, string>;
+          const lang = i18n.language || 'zh';
+          next.memory_forbidden_description = {
+            ...prevDict,
+            [lang]: payload.config.memory_forbidden_description,
+          };
+        }
+      }
+      if (payload.agents !== undefined || payload.team !== undefined) {
+        const agents = payload.agents || {};
+        const team = payload.team || [];
+        Object.assign(next, buildAgentsTeamsFlatConfig({
+          agents,
+          team,
+        }));
+      }
+      return next;
+    });
+    applyConfigSaveUiState(result?.applied_without_restart === true);
+  }, [applyConfigSaveUiState, buildAgentsTeamsFlatConfig, i18n.language, request]);
 
   useEffect(() => {
     if (!restartModalOpen || restartSuccess) {
@@ -575,7 +729,16 @@ function AppContent() {
     
     // 仅处理以 sess_ 开头的会话 ID
     if (!sessionId.startsWith('sess_')) return;
-    
+
+    // 新建会话时跳过历史加载
+    const isNew = useChatStore.getState().isNewSession;
+    if (isNew) {
+      useChatStore.getState().setNewSession(false);
+      setHistoryPagerMeta(null);  // 新会话无历史，不显示分页栏
+      setLoadingHistory(false);
+      return;
+    }
+
     // 清理之前的历史加载句柄
     disposeInFlightHistoryHandles();
     setHistoryPagerMeta(null);
@@ -617,7 +780,7 @@ function AppContent() {
           addMessage({
             id: `history-restore-empty-${Date.now()}`,
             role: 'system',
-            content: t('sessions.restoreEmpty'),
+            content: tRef.current('sessions.restoreEmpty'),
             timestamp: new Date().toISOString(),
           });
         }
@@ -639,6 +802,7 @@ function AppContent() {
                 arguments: n.arguments,
                 description: n.description,
                 formatted_args: n.formatted_args,
+                memberName: n.memberName,
               },
               { startedAt: item.at }
             );
@@ -729,7 +893,7 @@ function AppContent() {
           addMessage({
             id: `history-load-failed-${Date.now()}`,
             role: 'system',
-            content: t('sessions.errors.restoreFailed', { sessionId }),
+            content: tRef.current('sessions.errors.restoreFailed', { sessionId }),
             timestamp: new Date().toISOString(),
           });
         }
@@ -740,7 +904,6 @@ function AppContent() {
     sessionId,
     historyBootstrapKey,
     request,
-    t,
     addMessage,
     addToolCall,
     addToolResult,
@@ -757,14 +920,15 @@ function AppContent() {
     }
     // 切换模式/新建会话时直接设置状态，避免闪现
     useChatStore.getState().setSwitchingMode(true);
+    useChatStore.getState().setNewSession(true);  // 标记新建会话，跳过历史加载
     useChatStore.getState().setInterruptResult(null);
     useChatStore.getState().setProcessing(false);
     useChatStore.getState().setThinking(false);
     useChatStore.getState().setPaused(false);
     // 集群模式下新建会话时清空成员列表和事件列表
     if (mode === 'team') {
-      useSessionStore.getState().setTeamMembers([]);
-      useSessionStore.getState().setTeamTaskEvents([]);
+      clearTeamRuntimeState();
+      setTeamAreaExpanded(false);
     }
     disposeInFlightHistoryHandles();
     setHistoryPagerMeta(null);
@@ -773,6 +937,12 @@ function AppContent() {
     setThinking(false);
     setPaused(false);
     clearMessages();
+    const { setContextCompressionStats } = useSessionStore.getState();
+    setContextCompressionStats({
+      rate: 0,
+      beforeCompressed: 0,
+      afterCompressed: 0,
+    });
     clearTodos();
     resetHarnessStore();
     const newSid = generateSessionId();
@@ -833,6 +1003,7 @@ function AppContent() {
     resetHarnessStore,
     sessionId,
     setCurrentSession,
+    setTeamAreaExpanded,
     setPaused,
     setProcessing,
     setThinking,
@@ -849,13 +1020,11 @@ function AppContent() {
     useChatStore.getState().setPaused(false);
     // 切换到集群模式时清空成员列表和事件列表
     if (mode === 'team') {
-      useSessionStore.getState().setTeamMembers([]);
-      useSessionStore.getState().setTeamTaskEvents([]);
+      clearTeamRuntimeState();
     }
     // 从集群模式切换到其他模式时，也需要清空成员列表和事件列表
     if (mode !== 'team' && useSessionStore.getState().mode === 'team') {
-      useSessionStore.getState().setTeamMembers([]);
-      useSessionStore.getState().setTeamTaskEvents([]);
+      clearTeamRuntimeState();
     }
     void switchMode(sessionId, mode);
   }, [sessionId, switchMode]);
@@ -877,8 +1046,12 @@ function AppContent() {
   const handleCancel = useCallback(() => {
     const currentSessionId = sessionIdRef.current;
     if (!currentSessionId || currentSessionId === 'new') return;
+    if (mode === 'team') {
+      void pause(currentSessionId);
+      return;
+    }
     void cancel(currentSessionId);
-  }, [cancel]);
+  }, [cancel, mode, pause]);
 
   const handleUserAnswer = useCallback((requestId: string, answers: UserAnswer[], source?: string) => {
     const currentSessionId = sessionIdRef.current;
@@ -922,6 +1095,7 @@ function AppContent() {
                 arguments: n.arguments,
                 description: n.description,
                 formatted_args: n.formatted_args,
+                memberName: n.memberName,
               },
               { startedAt: item.at }
             );
@@ -1047,6 +1221,7 @@ function AppContent() {
       setProcessing(false);
       setThinking(false);
       setPaused(false);
+      clearTeamRuntimeState();
       clearMessages();
       clearTodos();
       clearSubtasks();
@@ -1113,7 +1288,7 @@ function AppContent() {
       />
 
       {/* Main Content */}
-      <main className="content">
+      <main className={`content ${isTeamAreaExpanded ? 'content--team-expanded' : ''}`}>
         {configError && (
           <div className="card mb-4">
             <div className="text-sm text-text-muted">
@@ -1128,13 +1303,17 @@ function AppContent() {
 
         {activeNav === 'chat' && (
           <>
-            <div className="flex-1 flex min-h-0 overflow-hidden card">
-              {/* Chat Panel */}
-              <div className="flex-1 flex flex-col min-w-0 min-h-0">
-                <div className="flex-1 min-h-0">
+            <div className={`flex-1 flex min-h-0 overflow-hidden ${isTeamAreaExpanded ? '' : 'card'}`}>
+              {/* Chat Panel - 在展开时可拖拽调整宽度 */}
+              <div
+                className={`flex flex-col min-w-0 min-h-0 ${isTeamAreaExpanded ? '' : 'flex-1'}`}
+                style={isTeamAreaExpanded ? { width: `${chatPanelWidthPct}%` } : undefined}
+              >
+                <div className={`flex-1 min-h-0 ${isTeamAreaExpanded ? 'card rounded-l-lg rounded-r-none' : ''}`}>
                   <ChatPanel
                     onSendMessage={handleSendMessage}
                     onInterrupt={handleInterrupt}
+                    onCancel={handleCancel}
                     onSwitchMode={handleSwitchMode}
                     isProcessing={isProcessing}
                     onNewSession={handleNewSession}
@@ -1151,33 +1330,31 @@ function AppContent() {
                     }
                   />
                 </div>
-
-                {/* StatusBar - 仅在有右侧面板内容时显示 */}
-                {toolPanelHasContent && (
-                  <StatusBar
-                    onCancel={mode === 'team' ? undefined : handleCancel}
-                    teamMode={mode === 'team'}
-                    isLoadingHistory={isLoadingHistory}
-                  />
-                )}
               </div>
 
-              {/* Tool Panel - 仅在有内容时显示 */}
+              {/* 可拖拽分割线 */}
+              {isTeamAreaExpanded && (
+                <div
+                  className="shrink-0 w-1 cursor-col-resize bg-[var(--bg)] hover:bg-gray-400 active:bg-gray-500 transition-colors"
+                  onMouseDown={handleDividerMouseDown}
+                />
+              )}
+
+              {/* Tool Panel / Expanded Team Panel */}
               {toolPanelHasContent && (
-                <ToolPanel />
+                <ToolPanel
+                  sessionId={sessionId}
+                  teamAreaExpanded={teamAreaExpanded}
+                  teamAreaActiveTab={teamAreaActiveTab}
+                  teamAreaActiveDetailTab={teamAreaActiveDetailTab}
+                  teamAreaSelectedMemberId={teamAreaSelectedMemberId}
+                  setTeamAreaExpanded={setTeamAreaExpanded}
+                  setTeamAreaActiveTab={setTeamAreaActiveTab}
+                  setTeamAreaActiveDetailTab={setTeamAreaActiveDetailTab}
+                  setTeamAreaSelectedMemberId={setTeamAreaSelectedMemberId}
+                />
               )}
             </div>
-
-            {/* StatusBar - 当没有右侧面板时，单独显示在底部 */}
-            {!toolPanelHasContent && (
-              <div className={`transition-opacity duration-200 ${isLoadingHistory ? 'opacity-0 pointer-events-none' : ''}`}>
-                <StatusBar
-                  onCancel={mode === 'team' ? undefined : handleCancel}
-                  teamMode={mode === 'team'}
-                  isLoadingHistory={isLoadingHistory}
-                />
-              </div>
-            )}
           </>
         )}
         {activeNav === 'agents' && (
@@ -1216,6 +1393,7 @@ function AppContent() {
               config={serverConfig}
               isConnected={isConnected}
               onSaveConfig={saveConfigAndRestart}
+              onSaveAllConfig={saveAllConfigAndRestart}
               onValidateModel={validateModelConfig}
               initialExpandGroupTag={configInitialExpandGroup}
               onModelsReplaceAll={handleModelsReplaceAll}
@@ -1319,6 +1497,38 @@ function AppContent() {
                 {heartbeatToastPreview}
               </span>
             </button>
+          </div>
+        </div>
+      )}
+
+      {/* 安全警告提示 */}
+      {securityAlertVisible && (
+        <div className="app-toast-wrapper app-toast-wrapper--top">
+          <div className="app-heartbeat-toast animate-rise">
+            <div className="app-heartbeat-toast__header">
+              <div className="app-heartbeat-toast__title">
+                <span>⚠️</span>
+                <span className="text-xs font-medium text-text">{t('app.securityAlertTitle')}</span>
+              </div>
+              <button
+                type="button"
+                onClick={() => {
+                  setSecurityAlertVisible(false);
+                  if (securityAlertTimerRef.current) {
+                    clearTimeout(securityAlertTimerRef.current);
+                    securityAlertTimerRef.current = null;
+                  }
+                }}
+                className="app-heartbeat-toast__close"
+              >
+                <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2}>
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
+                </svg>
+              </button>
+            </div>
+            <div className="app-heartbeat-toast__content text-sm">
+              {securityAlertContent}
+            </div>
           </div>
         </div>
       )}

@@ -6,6 +6,10 @@ import {
   isHistoryDonePayload,
 } from "./history-parser.js";
 import { normalizeFinalContent } from "./final-content.js";
+import {
+  formatCompressionStartedLine,
+  formatCompressionUsage,
+} from "./compression-formatters.js";
 import type { EventFrame } from "./protocol.js";
 import {
   StreamingState,
@@ -23,9 +27,12 @@ import type { ConnectionStatus } from "./ws-client.js";
 import { createId, findLastIndex, isIgnorableHistoryRestoreError } from "./app-state-helpers.js";
 import { isClientMode, type ClientMode } from "./modes.js";
 
+type PreferredLanguage = "zh" | "en";
+
 export interface PendingQuestion {
   requestId: string;
   source?: string;
+  evolutionMeta?: Record<string, unknown>;
   questions: PendingQuestionItem[];
 }
 
@@ -39,11 +46,39 @@ export interface PendingQuestionItem {
 export interface PendingQuestionOption {
   label: string;
   description?: string;
+  details?: string[];
 }
 
 export interface UserAnswer {
   selected_options: string[];
   custom_input?: string;
+}
+
+// Harness extension ready info
+export interface HarnessExtensionReady {
+  extensionName: string;
+  runtimePath: string;
+  sessionRuntimePath?: string;
+  extensionRuntimePath?: string;
+  configPath: string;
+  runtimeExtensions?: RuntimeExtensionInfo[];
+  verifyReport?: Record<string, unknown>;
+  componentsSummary?: Record<string, unknown>;
+}
+
+export interface RuntimeExtensionInfo {
+  extensionName: string;
+  runtimePath: string;
+  configPath: string;
+}
+
+// Harness activate interaction state
+export interface HarnessActivateInteraction {
+  interactionId: string;
+  extensionName: string;
+  runtimePath: string;
+  options: string[];
+  pending: boolean;
 }
 
 export interface AppEventDelegate {
@@ -52,6 +87,7 @@ export interface AppEventDelegate {
   setSessionId(sessionId: string): void;
   setMode(mode: ClientMode): void;
   getMode(): ClientMode;
+  getPreferredLanguage(): PreferredLanguage;
   getEntries(): HistoryItem[];
   setEntries(entries: HistoryItem[]): void;
   setStreamingState(state: StreamingState): void;
@@ -64,6 +100,8 @@ export interface AppEventDelegate {
   appendTeamMessageEvent(event: TeamMessageEvent): void;
   setEvolutionStatus(status: "idle" | "running"): void;
   setContextCompression(stats: ContextCompressionStats | null): void;
+  setContextWindowLimit(n: number | null): void;
+  setContextUsedPercentage(n: number | null): void;
   setSessionTitle(title: string): void;
   safeFetchSessionTitle(sessionId: string): void;
   addToolCallPayload(
@@ -84,6 +122,7 @@ export interface AppEventDelegate {
     requestId?: string,
     at?: string,
   ): void;
+  setCurrentWorkspaceFromTool(path: string): void;
   clearToolExecutionState(): void;
   /** 用户中断：将 running 的工具标为已结束，避免 TUI 继续转圈 */
   markRunningToolsInterrupted(): void;
@@ -105,13 +144,34 @@ export interface AppEventDelegate {
   appendUsageSummary(usage: Record<string, unknown>, model?: string): void;
   /** 回合结束时记录执行耗时条目到对话区。 */
   addWorkedForEntry(): void;
+  /** Set harness extension ready info (for file tree display) */
+  setHarnessExtensionReady(info: HarnessExtensionReady | null): void;
+  /** Set harness activate interaction state (for user confirmation) */
+  setHarnessActivateInteraction(state: HarnessActivateInteraction | null): void;
+  /** Get current harness activate interaction state */
+  getHarnessActivateInteraction(): HarnessActivateInteraction | null;
+  /** Auto-activate extension (send activate_response with action="accept") */
+  autoActivateExtension(interactionId: string): void;
 }
 
-function _handleSwitchModeToolResult(
+function _handleAgentModeToolResult(
   delegate: AppEventDelegate,
   payload: Record<string, unknown>,
 ): void {
-  if (payload.tool_name !== "switch_mode") return;
+  const toolName = typeof payload.tool_name === "string" ? payload.tool_name : "";
+  if (toolName !== "switch_mode" && toolName !== "exit_plan_mode") return;
+
+  if (toolName === "exit_plan_mode") {
+    const existingMode = delegate.getMode();
+    if (existingMode === "code.plan") {
+      delegate.setMode("code.normal");
+    } else if (existingMode === "team.plan") {
+      delegate.setMode("team");
+    } else if (existingMode === "agent.plan") {
+      delegate.setMode("agent.fast");
+    }
+    return;
+  }
 
   const resultRaw = payload.result;
   let subMode: string | null = null;
@@ -147,7 +207,7 @@ function _handleSwitchModeToolResult(
   const existingMode = delegate.getMode();
   let newMode: ClientMode | null = null;
   if (existingMode.startsWith("code.")) {
-    newMode = subMode === "plan" ? "code.plan" : subMode === "team" ? "code.team" : "code.normal";
+    newMode = subMode === "team" ? "code.team" : "code.normal";
   } else if (existingMode.startsWith("agent.")) {
     newMode = subMode === "plan" ? "agent.plan" : "agent.fast";
   }
@@ -157,8 +217,148 @@ function _handleSwitchModeToolResult(
   }
 }
 
+function _getToolResultPayload(payload: Record<string, unknown>): Record<string, unknown> {
+  const nested = payload.tool_result;
+  if (nested && typeof nested === "object" && !Array.isArray(nested)) {
+    return nested as Record<string, unknown>;
+  }
+  return payload;
+}
+
+function normalizeVisibleMode(mode: ClientMode): ClientMode {
+  if (mode === "code.plan") return "code.normal";
+  if (mode === "team.plan") return "team";
+  return mode;
+}
+
+function _extractPathFromToolResult(
+  payload: Record<string, unknown>,
+  pathKeys: string[],
+): string | null {
+  const toolPayload = _getToolResultPayload(payload);
+  const data = toolPayload.data;
+  if (typeof toolPayload.success === "boolean" && toolPayload.success === false) {
+    return null;
+  }
+  for (const source of [toolPayload, payload]) {
+    for (const key of pathKeys) {
+      const path = source[key];
+      if (typeof path === "string" && path.trim()) {
+        return path.trim();
+      }
+    }
+  }
+  if (data && typeof data === "object" && !Array.isArray(data)) {
+    const record = data as Record<string, unknown>;
+    for (const key of pathKeys) {
+      const path = record[key];
+      if (typeof path === "string" && path.trim()) {
+        return path.trim();
+      }
+    }
+  }
+
+  const resultRaw = toolPayload.result ?? payload.result;
+  if (typeof resultRaw !== "string") {
+    return null;
+  }
+  if (/success\s*=\s*False/.test(resultRaw)) {
+    return null;
+  }
+
+  try {
+    const parsed = JSON.parse(resultRaw);
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+      const parsedData = (parsed as Record<string, unknown>).data;
+      if (parsedData && typeof parsedData === "object" && !Array.isArray(parsedData)) {
+        const record = parsedData as Record<string, unknown>;
+        for (const key of pathKeys) {
+          const path = record[key];
+          if (typeof path === "string" && path.trim()) {
+            return path.trim();
+          }
+        }
+      }
+    }
+  } catch {
+    // ToolOutput is often rendered as a Python repr string.
+  }
+
+  for (const key of pathKeys) {
+    const match = resultRaw.match(new RegExp(`${key}['"]\\s*:\\s*['"]([^'"]+)['"]`));
+    if (match?.[1]?.trim()) {
+      return match[1].trim();
+    }
+  }
+  return null;
+}
+
+function _getToolName(payload: Record<string, unknown>): string {
+  const toolPayload = _getToolResultPayload(payload);
+  return typeof payload.tool_name === "string"
+    ? payload.tool_name
+    : typeof toolPayload.tool_name === "string"
+      ? toolPayload.tool_name
+      : typeof toolPayload.name === "string"
+        ? toolPayload.name
+        : "";
+}
+
+function _handleWorktreeToolResult(
+  delegate: AppEventDelegate,
+  payload: Record<string, unknown>,
+): void {
+  const toolName = _getToolName(payload);
+  if (toolName === "enter_worktree") {
+    const worktreePath = _extractPathFromToolResult(payload, ["worktree_path"]);
+    if (worktreePath) {
+      delegate.setCurrentWorkspaceFromTool(worktreePath);
+    }
+    return;
+  }
+
+  if (toolName === "exit_worktree") {
+    const restorePath = _extractPathFromToolResult(payload, [
+      "original_cwd",
+      "workspace_path",
+    ]);
+    if (restorePath) {
+      delegate.setCurrentWorkspaceFromTool(restorePath);
+    }
+  }
+}
+
 function appendEntry(delegate: AppEventDelegate, entry: HistoryItem): void {
   delegate.setEntries([...delegate.getEntries(), entry]);
+}
+
+function formatInterruptResultMessage(language: PreferredLanguage, intent: string, success: boolean, payloadMessage: unknown): string {
+  const rawMessage = typeof payloadMessage === "string" ? payloadMessage.trim() : "";
+  if (language !== "en") {
+    if (rawMessage) return rawMessage;
+    return success ? "当前会话任务已终止" : "当前会话任务终止失败";
+  }
+  const englishDefaults: Record<string, { success: string; failure: string }> = {
+    cancel: { success: "Task cancelled", failure: "Failed to cancel task" },
+    pause: { success: "Task paused", failure: "Failed to pause task" },
+    resume: { success: "Task resumed", failure: "Failed to resume task" },
+    switch: { success: "Task switched", failure: "Failed to switch task" },
+  };
+  const defaults = englishDefaults[intent] ?? englishDefaults.cancel!;
+  if (!rawMessage) return success ? defaults.success : defaults.failure;
+  const knownChineseMessages: Record<string, string> = {
+    "任务已取消": "Task cancelled",
+    "当前会话任务已终止": "Task cancelled",
+    "当前会话任务终止失败": "Failed to cancel task",
+    "任务中断失败": "Failed to interrupt task",
+    "任务暂停失败": "Failed to pause task",
+    "任务恢复失败": "Failed to resume task",
+    "任务切换失败": "Failed to switch task",
+    "已切换到新任务": "Switched to new task",
+  };
+  if (knownChineseMessages[rawMessage]) return knownChineseMessages[rawMessage];
+  if (/[\u4e00-\u9fff]/.test(rawMessage)) return success ? defaults.success : defaults.failure;
+  return rawMessage;
 }
 
 function appendThinkingChunk(
@@ -168,12 +368,14 @@ function appendThinkingChunk(
 ): void {
   const entries = delegate.getEntries();
   const lastEntry = entries[entries.length - 1];
+  const at = new Date().toISOString();
   if (lastEntry && lastEntry.kind === "thinking" && lastEntry.sessionId === activeSessionId) {
     delegate.setEntries([
       ...entries.slice(0, -1),
       {
         ...lastEntry,
         content: `${lastEntry.content}${content}`,
+        at,
       },
     ]);
     return;
@@ -184,7 +386,7 @@ function appendThinkingChunk(
     id: createId("reasoning"),
     sessionId: activeSessionId,
     content,
-    at: new Date().toISOString(),
+    at,
   });
 }
 
@@ -274,6 +476,7 @@ function handleDelta(
   const entries = delegate.getEntries();
   if (payload.source_chunk_type === "llm_reasoning") {
     appendThinkingChunk(delegate, activeSessionId, content);
+    delegate.setStreamingState(StreamingState.Responding);
     return true;
   }
 
@@ -373,8 +576,13 @@ function handleFinal(
           },
         ],
   );
-  delegate.setStreamingState(StreamingState.Idle);
   delegate.addWorkedForEntry();
+  // Defensive: chat.final is the definitive end-of-response marker.
+  // The primary Idle transition is driven by chat.processing_status
+  // (is_processing=false), but if that frame is lost (server crash,
+  // connection drop, cancel path), the UI would be stuck in Responding.
+  // Setting Idle here is safe — processing_status will override if needed.
+  delegate.setStreamingState(StreamingState.Idle);
   return true;
 }
 
@@ -386,6 +594,7 @@ function handleReasoning(
   const content = typeof payload.content === "string" ? payload.content : "";
   if (!content) return false;
   appendThinkingChunk(delegate, activeSessionId, content);
+  delegate.setStreamingState(StreamingState.Responding);
   return true;
 }
 
@@ -483,8 +692,16 @@ function handleContextCompressed(
   payload: Record<string, unknown>,
 ): boolean {
   const rate = typeof payload.rate === "number" ? payload.rate : 0;
-  const before = typeof payload.before_compressed === "number" ? payload.before_compressed : null;
-  const after = typeof payload.after_compressed === "number" ? payload.after_compressed : null;
+  const before = typeof payload.context_max === "number"
+    ? payload.context_max
+    : typeof payload.before_compressed === "number"
+      ? payload.before_compressed
+      : null;
+  const after = typeof payload.tokens_used === "number"
+    ? payload.tokens_used
+    : typeof payload.after_compressed === "number"
+      ? payload.after_compressed
+      : null;
   delegate.setContextCompression({
     rate,
     beforeCompressed: before,
@@ -538,11 +755,13 @@ function handleContextCompressionState(
   const before = asRecord(payload.before);
   const after = asRecord(payload.after);
   const saved = asRecord(payload.saved);
+  const compressionUsage = asRecord(payload.compression_usage);
   const status = readString(payload.status, "unknown");
   const phase = readString(payload.phase, "unknown");
   const processor = readString(payload.processor, "unknown") || "unknown";
   const model = readString(payload.model);
-  const summary = readString(payload.summary);
+  const summary = readString(payload.compact_summary);
+  const statsSummary = readString(payload.summary);
   const error = readString(payload.error);
 
   const savedParts = [
@@ -551,32 +770,107 @@ function handleContextCompressionState(
     formatPercent(saved.percent),
   ].filter((part) => !part.startsWith("-"));
 
+  const normalizedStatus = status.trim().toLowerCase();
+  const hasAfterStats = readNumber(after.tokens) !== null;
+  const savedTokens = readNumber(saved.tokens) ?? 0;
+  const savedMessages = readNumber(saved.messages) ?? 0;
+  const shouldUpdateCompressionStats =
+    hasAfterStats && (normalizedStatus === "completed" || normalizedStatus === "compressed");
+  if (shouldUpdateCompressionStats) {
+    delegate.setContextCompression({
+      rate: readNumber(after.context_percent) ?? 0,
+      beforeCompressed: readNumber(before.tokens),
+      afterCompressed: readNumber(after.tokens),
+      ...(summary ? { summary } : {}),
+      trigger: "auto",
+    });
+  }
+
+  const isCompacted =
+    (Boolean(summary) || savedTokens > 0 || savedMessages > 0) &&
+    !error &&
+    normalizedStatus !== "error" &&
+    normalizedStatus !== "failed" &&
+    normalizedStatus !== "skipped";
+  const isError = Boolean(error) || normalizedStatus === "error" || normalizedStatus === "failed";
+  const detailItems = [
+    { label: "Processor", value: processor },
+    { label: "Phase", value: phase },
+    ...(model ? [{ label: "Model", value: model }] : []),
+    { label: "Messages", value: formatChange(before.messages, after.messages) },
+    { label: "Tokens", value: formatChange(before.tokens, after.tokens) },
+    {
+      label: "Context",
+      value: formatChange(before.context_percent, after.context_percent, formatPercent),
+    },
+    ...(savedParts.length ? [{ label: "Saved", value: savedParts.join(" | ") }] : []),
+    ...(Object.keys(compressionUsage).length
+      ? [{ label: "Compression usage", value: formatCompressionUsage(compressionUsage) }]
+      : []),
+    { label: "Duration", value: formatDuration(payload.duration_ms) },
+    ...(statsSummary ? [{ label: "Summary", description: statsSummary }] : []),
+    ...(error ? [{ label: "Error", description: error }] : []),
+  ];
+
+  if (!isCompacted && !isError) {
+    if (normalizedStatus === "started" || normalizedStatus === "noop") {
+      const detailEntry: HistoryItem = {
+        kind: "info",
+        id: createId("context-compression-detail"),
+        sessionId: activeSessionId,
+        content: `Context compression ${status}`,
+        icon: "i",
+        transcriptOnly: true,
+        meta: {
+          title: `Context compression ${status}`,
+          items: detailItems,
+        },
+        at: new Date().toISOString(),
+      };
+      if (normalizedStatus === "started") {
+        appendEntry(delegate, {
+          kind: "info",
+          id: createId("context-compression-started"),
+          sessionId: activeSessionId,
+          content: formatCompressionStartedLine(processor, phase, before),
+          icon: "i",
+          meta: { view: "dim" },
+          at: new Date().toISOString(),
+        });
+      }
+      appendEntry(delegate, detailEntry);
+    }
+    return true;
+  }
+
   appendEntry(delegate, {
     kind: "info",
     id: createId("context-compression"),
     sessionId: activeSessionId,
-    content: `Context compression ${status}`,
+    content: isCompacted ? "Conversation compacted" : `Context compression ${status}`,
     icon: "i",
     meta: {
-      title: `Context compression ${status}`,
-      items: [
-        { label: "Processor", value: processor },
-        { label: "Phase", value: phase },
-        ...(model ? [{ label: "Model", value: model }] : []),
-        { label: "Messages", value: formatChange(before.messages, after.messages) },
-        { label: "Tokens", value: formatChange(before.tokens, after.tokens) },
-        {
-          label: "Context",
-          value: formatChange(before.context_percent, after.context_percent, formatPercent),
-        },
-        ...(savedParts.length ? [{ label: "Saved", value: savedParts.join(" | ") }] : []),
-        { label: "Duration", value: formatDuration(payload.duration_ms) },
-        ...(summary ? [{ label: "Summary", description: summary }] : []),
-        ...(error ? [{ label: "Error", description: error }] : []),
-      ],
+      ...(isCompacted ? { view: "compact_boundary" as const } : {}),
+      title: isCompacted ? "Conversation compacted" : `Context compression ${status}`,
+      items: detailItems,
     },
     at: new Date().toISOString(),
   });
+  if (isCompacted) {
+    appendEntry(delegate, {
+      kind: "info",
+      id: createId("context-compact-summary"),
+      sessionId: activeSessionId,
+      content: summary,
+      icon: "i",
+      transcriptOnly: true,
+      meta: {
+        view: "compact_summary",
+        title: "Compaction summary",
+      },
+      at: new Date().toISOString(),
+    });
+  }
   return true;
 }
 
@@ -783,12 +1077,13 @@ export function handleIncomingFrame(delegate: AppEventDelegate, frame: EventFram
       return true;
 
     case "chat.tool_result":
-      _handleSwitchModeToolResult(delegate, payload);
+      _handleAgentModeToolResult(delegate, payload);
       delegate.addToolResultPayload(
         payload,
         activeSessionId,
         typeof payload.request_id === "string" ? payload.request_id : undefined,
       );
+      _handleWorktreeToolResult(delegate, payload);
       return true;
 
     case "chat.processing_status":
@@ -812,12 +1107,7 @@ export function handleIncomingFrame(delegate: AppEventDelegate, frame: EventFram
           return true;
         }
         const success = payload.success !== false;
-        const message =
-          typeof payload.message === "string" && payload.message.trim()
-            ? payload.message
-            : success
-              ? "当前会话任务已终止"
-              : "当前会话任务终止失败";
+        const message = formatInterruptResultMessage(delegate.getPreferredLanguage(), intent, success, payload.message);
         if (success) {
           delegate.setStreamingState(StreamingState.Interrupted);
           delegate.getActiveSubtasks().clear();
@@ -860,9 +1150,16 @@ export function handleIncomingFrame(delegate: AppEventDelegate, frame: EventFram
       if (!requestId || questions.length === 0) {
         return connectionChanged;
       }
+      const evolutionMeta =
+        payload.evolution_meta && typeof payload.evolution_meta === "object"
+          ? (payload.evolution_meta as Record<string, unknown>)
+          : payload._evolution_meta && typeof payload._evolution_meta === "object"
+            ? (payload._evolution_meta as Record<string, unknown>)
+            : undefined;
       delegate.setPendingQuestion({
         requestId,
         source: typeof payload.source === "string" ? payload.source : undefined,
+        evolutionMeta,
         questions,
       });
       delegate.setStreamingState(StreamingState.WaitingForConfirmation);
@@ -896,10 +1193,10 @@ export function handleIncomingFrame(delegate: AppEventDelegate, frame: EventFram
     case "chat.file":
       return handleMediaEvent(delegate, payload, activeSessionId, effectiveEvent);
 
-    case "context.compressed":
+    case "context.usage":
       return handleContextCompressed(delegate, payload);
 
-    case "context_compression_state":
+    case "context.compression_state":
       return handleContextCompressionState(delegate, payload, activeSessionId);
 
     case "chat.subtask_update":
@@ -920,7 +1217,7 @@ export function handleIncomingFrame(delegate: AppEventDelegate, frame: EventFram
     case "session.updated": {
       const mode = typeof payload.mode === "string" ? payload.mode : "";
       if (isClientMode(mode)) {
-        delegate.setMode(mode);
+        delegate.setMode(normalizeVisibleMode(mode));
       }
       if (typeof payload.title === "string") {
         delegate.setSessionTitle(payload.title);
@@ -944,7 +1241,107 @@ export function handleIncomingFrame(delegate: AppEventDelegate, frame: EventFram
           : {},
         typeof payload.model === "string" ? payload.model : undefined,
       );
+      if (typeof payload.usage_percent === "number") {
+        delegate.setContextUsedPercentage(payload.usage_percent);
+      }
+      if (typeof payload.context_window_tokens === "number") {
+        delegate.setContextWindowLimit(payload.context_window_tokens);
+      }
       return true;
+
+    case "harness.extension_ready": {
+      const extensionName = typeof payload.extension_name === "string" ? payload.extension_name : "";
+      const runtimePath = typeof payload.runtime_path === "string" ? payload.runtime_path : "";
+      const sessionRuntimePath = typeof payload.session_runtime_path === "string" ? payload.session_runtime_path : runtimePath;
+      const extensionRuntimePath = typeof payload.extension_runtime_path === "string" ? payload.extension_runtime_path : "";
+      const configPath = typeof payload.config_path === "string" ? payload.config_path : "";
+      const runtimeExtensions = Array.isArray(payload.runtime_extensions)
+        ? payload.runtime_extensions
+            .filter((item) => typeof item === "object" && item !== null)
+            .map((item) => {
+              const obj = item as Record<string, unknown>;
+              return {
+                extensionName: typeof obj.extension_name === "string" ? obj.extension_name : "",
+                runtimePath: typeof obj.runtime_path === "string" ? obj.runtime_path : "",
+                configPath: typeof obj.config_path === "string" ? obj.config_path : "",
+              };
+            })
+            .filter((item) => item.extensionName && item.runtimePath)
+        : [];
+      const verifyReport = typeof payload.verify_report === "object" && payload.verify_report !== null && !Array.isArray(payload.verify_report)
+        ? payload.verify_report as Record<string, unknown>
+        : {};
+      const componentsSummary = typeof payload.components_summary === "object" && payload.components_summary !== null && !Array.isArray(payload.components_summary)
+        ? payload.components_summary as Record<string, unknown>
+        : {};
+
+      delegate.setHarnessExtensionReady({
+        extensionName,
+        runtimePath,
+        sessionRuntimePath,
+        extensionRuntimePath,
+        configPath,
+        runtimeExtensions,
+        verifyReport,
+        componentsSummary,
+      });
+
+      // Show info entry for extension ready
+      appendEntry(delegate, {
+        kind: "info",
+        id: createId("harness-extension-ready"),
+        sessionId: activeSessionId,
+        content: `🔧 扩展已生成: ${extensionName}`,
+        icon: "i",
+        meta: {
+          title: `扩展生成完成: ${extensionName}`,
+          items: [
+            { label: "运行路径", value: runtimePath },
+            { label: "配置路径", value: configPath },
+            ...(runtimeExtensions.length > 0 ? [{ label: "依赖扩展", value: runtimeExtensions.map(e => e.extensionName).join(", ") }] : []),
+          ],
+        },
+        at: new Date().toISOString(),
+      });
+      return true;
+    }
+
+    case "harness.activate_interaction": {
+      const interactionId = typeof payload.interaction_id === "string" ? payload.interaction_id : "";
+      const extensionName = typeof payload.extension_name === "string" ? payload.extension_name : "";
+      const runtimePath = typeof payload.runtime_path === "string" ? payload.runtime_path : "";
+      const options: string[] = Array.isArray(payload.options) ? payload.options : ["accept", "reject"];
+
+      delegate.setHarnessActivateInteraction({
+        interactionId,
+        extensionName,
+        runtimePath,
+        options,
+        pending: false,
+      });
+
+      // TUI is a log-viewing interface - auto-activate without user confirmation
+      // Log activation info and send response directly
+      appendEntry(delegate, {
+        kind: "info",
+        id: createId("harness-activate"),
+        sessionId: activeSessionId,
+        content: `扩展 **${extensionName}** 激活请求已收到，正在自动激活生效...`,
+        icon: "i",
+        meta: {
+          title: `扩展激活: ${extensionName}`,
+          items: [
+            { label: "扩展名称", value: extensionName },
+            { label: "运行路径", value: runtimePath },
+          ],
+        },
+        at: new Date().toISOString(),
+      });
+
+      // Auto-activate extension (send activate_response with action="accept")
+      delegate.autoActivateExtension(interactionId);
+      return true;
+    }
 
     default:
       return connectionChanged;

@@ -117,6 +117,12 @@ else:
 load_dotenv(dotenv_path=get_env_file(), override=True)
 reset_free_search_runtime_flags()
 
+from jiuwenswarm.agents.harness.common.tools.bash_tool_safety import (
+    install_shell_tool_safety_hooks,
+)
+
+install_shell_tool_safety_hooks()
+
 
 async def _run(host: str, port: int) -> None:
     from openjiuwen.core.runner import Runner

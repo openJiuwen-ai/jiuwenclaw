@@ -9,7 +9,7 @@ import { useTranslation } from 'react-i18next';
 import clsx from 'clsx';
 import { ToolExecution } from '../../types';
 import { formatToolArguments, formatToolResult } from '../../utils';
-import { TeamMemberAvatar } from './MessageItem';
+import { TeamMemberAvatar } from '../TeamMemberAvatar';
 
 interface ToolGroupDisplayProps {
   executions: ToolExecution[];
@@ -314,14 +314,17 @@ export function ToolGroupDisplay({
   const scrollRef = useRef<HTMLDivElement>(null);
   const [groupOpen, setGroupOpen] = useState(true);
   const [userScrolled, setUserScrolled] = useState(false);
-  const totalPairs = executions.length;
-  const hasPending = executions.some((execution) => execution.status === 'pending');
+  const visibleExecutions = teamLayout
+    ? executions.filter((execution) => !execution.toolCall.memberName)
+    : executions;
+  const totalPairs = visibleExecutions.length;
+  const hasPending = visibleExecutions.some((execution) => execution.status === 'pending');
 
   useEffect(() => {
     if (hasPending) {
       setGroupOpen(true);
     }
-  }, [hasPending, executions.length]);
+  }, [hasPending, visibleExecutions.length]);
 
   const handleScroll = useCallback(() => {
     const element = scrollRef.current;
@@ -347,7 +350,7 @@ export function ToolGroupDisplay({
     if (groupOpen && !userScrolled) {
       scrollInner(false);
     }
-  }, [executions.length, groupOpen, userScrolled, scrollInner]);
+  }, [visibleExecutions.length, groupOpen, userScrolled, scrollInner]);
 
   const scrollToBottom = useCallback(() => {
     setUserScrolled(false);
@@ -355,6 +358,9 @@ export function ToolGroupDisplay({
   }, [scrollInner]);
 
   const headerLabel = t('chatUi.toolGroup.executed', { totalPairs });
+  if (visibleExecutions.length === 0) {
+    return null;
+  }
 
   return (
     <div
@@ -392,7 +398,7 @@ export function ToolGroupDisplay({
           {groupOpen && (
             <>
               <div ref={scrollRef} className="tool-tree__list" onScroll={handleScroll}>
-                {executions.map((execution) => (
+                {visibleExecutions.map((execution) => (
                   <ToolExecutionRow key={execution.toolCallId} execution={execution} />
                 ))}
               </div>

@@ -32,8 +32,9 @@
 | `/evolve_simplify` | 整理、合并某个 Skill 的演进经验（见下文） |
 | `/evolve_rebuild` | 基于归档与演进记录重建 `SKILL.md`（见下文） |
 | `/sandbox` | 设置沙箱模式（见下文） |
+| `/auto-harness` | Auto-Harness 任务管理（`run`/`schedule`，见下文） |
 
-> 说明：`/mode` 的受控切换逻辑以 Gateway 侧行为为主，详见下文「`/mode` 与 `/switch`」。
+> 说明：本页的 `/mode` 与 `/switch` 以 Gateway 受控通道行为为主。TUI 本地命令另支持 `/mode plan`、`/mode team.normal`，详见 [TUI 使用指南](TUI使用指南.md)。
 
 ### Gateway / Agent 侧解析（受控通道）
 
@@ -107,12 +108,13 @@
 - 直达写法：
   - `/mode agent.plan` -> `agent.plan`
   - `/mode agent.fast` -> `agent.fast`
-  - `/mode code.plan` -> `code.plan`
   - `/mode code.normal` -> `code.normal`
+  - `/mode code.team` -> `code.team`
 - 二级切换：
   - agent 族：`/switch plan` <-> `agent.plan`，`/switch fast` <-> `agent.fast`
-  - code 族：`/switch plan` <-> `code.plan`，`/switch normal` <-> `code.normal`
+  - code 族：`/switch normal` <-> `code.normal`，`/switch team` <-> `code.team`
 - 非法组合（如在 `code.*` 下执行 `/switch fast`）返回：`非法指令`。
+- 受控通道不接受 `/mode plan`、`/mode team.normal`。
 - 备注：独立 `/team` 命令已移除，请统一使用 `/mode team`。
 
 ### `/resume`
@@ -173,7 +175,7 @@
   1. 选择范围：`团队共享`（JIUWENSWARM.md）、`个人私有`（JIUWENSWARM.local.md）或 `都要`。
   2. 检测已有配置：自动检测 `CLAUDE.md`、`.cursorrules`、`copilot-instructions.md` 等文件。
   3. 生成配置：根据选择生成项目配置文件。
-- 自动模式切换：若当前处于 `code.plan` 模式，会自动切换到 `code.normal` 以便写入文件。
+- 自动模式切换：Code 初始化会使用 `code.normal` 以便写入文件。
 
 ### `/mcp`（MCP 服务管理）
 
@@ -339,6 +341,7 @@
 | 命令 | 说明 |
 |---|---|
 | `/cron` 或 `/cron list` | 列出所有定时任务 |
+| `/cron show <job_id>` | 查看指定任务的详细信息 |
 | `/cron add name=<名称> cron_expr=<表达式> description=<描述> [其他参数]` | 新增定时任务 |
 | `/cron update <job_id> key=value ...` | 更新指定任务的部分字段 |
 | `/cron delete <job_id>` | 删除指定任务 |
@@ -353,7 +356,7 @@
 | `name` | 是 | 任务名称 |
 | `cron_expr` | 是 | Cron 表达式，支持两种格式：5 字段（分 时 日 月 周）或 7 字段 Quartz（秒 分 时 日 月 周 年）。5 字段会自动转换为 7 字段（补 second=0, year=*）。示例：每天 9 点 = `0 9 * * *`（5 字段）或 `0 0 9 * * ? *`（7 字段） |
 | `description` | 是 | 任务描述，即 Agent 执行时收到的输入指令 |
-| `targets` | 否 | 推送渠道，默认 `tui`；可选：`tui`、`web`、`feishu`、`whatsapp`、`wecom`、`xiaoyi`、`wechat` 或 `feishu_enterprise:<app_id>` |
+| `targets` | 否 | 推送渠道，默认 `tui`；可选：`tui`、`web`、`feishu`、`whatsapp`、`wecom`、`xiaoyi`、`wechat`、`dingtalk` 或 `feishu_enterprise:<app_id>` |
 | `timezone` | 否 | IANA 时区，默认 `Asia/Shanghai` |
 | `mode` | 否 | 执行模式：`agent`（默认，适用于简单提醒类任务）或 `plan`（较复杂的推理任务，让Agent先规划步骤再执行） |
 | `wake_offset_seconds` | 否 | 提前唤醒秒数，默认 300 |
@@ -366,6 +369,7 @@
   - `/cron add name=每周一报 cron_expr="0 9 * * 1" description="生成本周周报" targets=web`
 
 - `update` 用法：只需传入要修改的字段，如 `/cron update <id> name=新名称 enabled=false`
+- `show` 显示内容：以 key-value 格式展示任务全部字段（id、name、status、cron_expr、timezone、description、targets、mode、wake_offset_seconds、delete_after_run）
 - `list` 显示内容：序号、完整 job ID、名称、cron 表达式、启用状态、描述摘要
 - `preview` 显示内容：每次执行计划的唤醒时间和推送时间
 
@@ -582,11 +586,12 @@
 | `/statusline` 或 `/statusline get` | 查看当前状态栏配置 |
 | `/statusline set <shell-command>` | 设置状态栏命令（命令输出将显示在 TUI 底部） |
 | `/statusline clear` | 清除状态栏配置（底部栏将不再显示） |
-| `/statusline help` | 显示状态栏 JSON 输入字段参考 |
+| `/statusline help` | 显示使用指南（含写法模式、实用示例、字段列表） |
+| `/statusline json` | 显示当前实际的 JSON 数据值（方便调试 jq 表达式） |
 
 #### 概念说明
 
-- **状态栏（StatusLine）**：TUI 底部的一行文字区域，实时显示用户自定义的动态信息。配置了自定义状态栏后，内置状态栏会自动隐藏，避免信息冗余。
+- **状态栏（StatusLine）**：TUI 底部的文字区域，实时显示用户自定义的动态信息，支持多行输出。配置了自定义状态栏后，内置状态栏会自动隐藏，避免信息冗余。
 - **Shell 命令**：用户配置的 shell 命令每 2 秒自动执行一次，其 stdout 输出渲染为状态栏文字。
 - **JSON 输入**：每次执行时，系统将当前会话信息以 JSON 格式传入命令，用户可在命令中用 `jq` 等工具解析。POSIX（Linux/macOS）通过 stdin 管道传入；Windows 上因 MSYS2 管道继承限制，系统自动将 JSON 写入临时文件，并将命令中的 `$(cat)` 替换为 `$(cat "文件路径")`，用户无需修改命令格式。
 - **前置依赖**：需要 `jq`（https://stedolan.github.io/jq/）用于解析 JSON；Windows 用户还需将 Git Bash 的 `usr\bin` 目录加入系统 PATH（如 `E:\Git\usr\bin`）。
@@ -600,7 +605,7 @@
 | `session_id` | 当前会话 ID |
 | `session_name` | 会话标题（通过 `/rename` 设置） |
 | `cwd` | 当前工作目录 |
-| `mode` | 当前模式（`agent.plan` / `agent.fast` / `code.plan` / `code.normal` / `team`） |
+| `mode` | 当前模式（`agent.plan` / `agent.fast` / `code.normal` / `code.team` / `team`） |
 | `model` | 当前模型名称 |
 | `provider` | 模型提供商 |
 | `version` | jiuwenswarm 版本号 |
@@ -618,9 +623,13 @@
 | `evolution_status` | 演化状态（`idle` / `running`） |
 | `active_subtask_count` | 活跃子任务数 |
 | `todo_count` | 待办事项数 |
+| `trusted_dirs` | 可信工作目录列表（路径字符串数组） |
 | `usage.total_input_tokens` | 会话总输入 token |
 | `usage.total_output_tokens` | 会话总输出 token |
 | `usage.total_tokens` | 会话总 token |
+| `context_window.context_window_size` | 模型最大上下文窗口 token 数（如 200000） |
+| `context_window.used_percentage` | 上下文占用百分比（0-100） |
+| `context_window.remaining_percentage` | 上下文剩余百分比（0-100） |
 
 #### 命令编写模板
 
@@ -632,10 +641,10 @@
 /statusline set 'input=$(cat); 字段1=$(echo "$input" | jq -r '.字段1 // "默认值"'); 字段2=$(echo "$input" | jq -r '.字段2 // "默认值"'); echo "格式化字符串"'
 ```
 
-**推荐通用命令**（显示模式、模型、token、连接状态）：
+**推荐通用命令**（显示模式、模型、token、上下文占用、连接状态）：
 
 ```
-/statusline set 'input=$(cat); mode=$(echo "$input" | jq -r '.mode // "?"'); model=$(echo "$input" | jq -r '.model // "?"'); tokens=$(echo "$input" | jq -r '.usage.total_tokens // 0'); conn=$(echo "$input" | jq -r '.connection // "?"'); echo "$mode | $model | tokens:$tokens | $conn"'
+/statusline set 'input=$(cat); mode=$(echo "$input" | jq -r '.mode // "?"'); model=$(echo "$input" | jq -r '.model // "?"'); tokens=$(echo "$input" | jq -r '.usage.total_tokens // 0'); pct=$(echo "$input" | jq -r '.context_window.used_percentage // 0'); conn=$(echo "$input" | jq -r '.connection // "?"'); echo "$mode | $model | ctx:${pct}% | tokens:$tokens | $conn"'
 ```
 
 **各字段提取速查**：
@@ -656,18 +665,26 @@
 | 演化状态 | `jq -r '.evolution_status // "idle"'` |
 | 子任务数 | `jq -r '.active_subtask_count // 0'` |
 | 待办数 | `jq -r '.todo_count // 0'` |
+| 可信目录 | `jq -r '(.trusted_dirs // []) | join(" ")'` |
 | 总输入 token | `jq -r '.usage.total_input_tokens // 0'` |
 | 总输出 token | `jq -r '.usage.total_output_tokens // 0'` |
 | 总 token | `jq -r '.usage.total_tokens // 0'` |
+| 上下文窗口大小 | `jq -r '.context_window.context_window_size // 0'` |
+| 上下文占用 % | `jq -r '.context_window.used_percentage // 0'` |
+| 上下文剩余 % | `jq -r '.context_window.remaining_percentage // 0'` |
 
 #### 更多示例
 
 - `/statusline` — 查看当前配置
 - `/statusline set 'input=$(cat); model=$(echo "$input" | jq -r .model); echo "$model"'` — 只显示模型名
 - `/statusline set 'input=$(cat); proc=$(echo "$input" | jq -r .is_processing); model=$(echo "$input" | jq -r .model); echo "$proc | $model"'` — 显示是否在处理和模型名
+- `/statusline set 'input=$(cat); pct=$(echo "$input" | jq -r .context_window.used_percentage); rem=$(echo "$input" | jq -r .context_window.remaining_percentage); cw=$(echo "$input" | jq -r ".context_window.context_window_size / 1000"); echo "ctx:${pct}% used (${rem}% left, ${cw}K window)"'` — 显示上下文窗口占用百分比
+- `/statusline set 'input=$(cat); pct=$(echo "$input" | jq -r ".context_window.used_percentage // 0"); if [ "$pct" -ge 90 ]; then warn="⚠HIGH"; elif [ "$pct" -ge 70 ]; then warn="~MED"; else warn="OK"; fi; echo "ctx:${pct}% $warn"'` — 显示上下文占用百分比并带阈值警告（≥90% HIGH，≥70% MED）
 - `/statusline set 'input=$(cat); err=$(echo "$input" | jq -r .last_error); if [ "$err" != "null" ] && [ "$err" != "" ]; then echo "error: $err"; else echo "ok"; fi'` — 有错误时显示错误信息，无错误时显示 ok
+- `/statusline set 'input=$(cat); dirs=$(echo "$input" | jq -r '.trusted_dirs // [] | join(" ")'); mode=$(echo "$input" | jq -r '.mode // "?"'); echo "$mode | dirs:$dirs"'` — 显示模式与可信工作目录
 - `/statusline clear` — 清除状态栏配置
-- `/statusline help` — 查看 JSON 输入字段参考
+- `/statusline help` — 查看使用指南（含写法模式、实用示例、可用字段）
+- `/statusline json` — 查看当前实际的 JSON 数据值（方便调试 jq 表达式）
 
 #### 行为细节
 
@@ -685,11 +702,80 @@
 {
   "statusLine": {
     "type": "command",
-    "command": "input=$(cat); mode=$(echo \"$input\" | jq -r '.mode // \"?\"'); model=$(echo \"$input\" | jq -r '.model // \"?\"'); tokens=$(echo \"$input\" | jq -r '.usage.total_tokens // 0'); echo \"$mode | $model | tokens:$tokens\"",
+    "command": "input=$(cat); mode=$(echo \"$input\" | jq -r '.mode // \"?\"'); model=$(echo \"$input\" | jq -r '.model // \"?\"'); pct=$(echo \"$input\" | jq -r '.context_window.used_percentage // 0'); tokens=$(echo \"$input\" | jq -r '.usage.total_tokens // 0'); echo \"$mode | $model | ctx:${pct}% | tokens:$tokens\"",
     "padding": 0
   }
 }
 ```
+
+### `/auto-harness`（Auto-Harness 任务管理）
+
+管理 Auto-Harness 任务的创建、执行与监控。Auto-Harness 通过自动化 Pipeline 生成 harness 扩展包，支持两种 Pipeline 类型：
+
+- **optimize_expert_harness**（后端值 `extended_evolve_pipeline`）：生成本地 harness 扩展包
+- **optimize_meta_harness**（后端值 `meta_evolve_pipeline`）：提交 PR（需配置 git）
+
+Pipeline 执行过程中，扩展包**默认自动激活生效**，无需用户手动确认。日志中会展示 `harness.extension_ready`（扩展已就绪，显示目录与组件信息）和 `harness.activate_interaction`（激活确认提示）事件。
+
+#### 配置要求
+
+使用 `optimize_meta_harness` Pipeline 需配置以下字段（通过 `/config edit` 或 `/status config` 编辑）：
+
+| 字段 | 必填 | 说明 |
+|---|---|---|
+| `git.user_name` | 是 | Git commit 用户名 |
+| `git.user_email` | 是 | Git commit 箱 |
+| `git.fork_owner` | 是 | Fork 仓库所有者（如 `SnapeK`） |
+| `gitcode.access_token` | 否 | GitCode API Token（也可通过环境变量 `GITCODE_ACCESS_TOKEN` 提供） |
+
+若配置不完整，创建任务时会提示缺失字段。
+
+#### 子命令
+
+| 命令 | 说明 |
+|---|---|
+| `/auto-harness run [--pipeline <pipeline>] <query>` | 执行一次性 Auto-Harness 任务 |
+| `/auto-harness schedule start --interval <hours> [--pipeline <pipeline>] <query>` | 创建定时任务 |
+| `/auto-harness schedule list` | 列出所有任务 |
+| `/auto-harness schedule status <task_id>` | 查看任务详情 |
+| `/auto-harness schedule logs <task_id> [--history <n>]` | 查看任务执行日志 |
+| `/auto-harness schedule cancel <task_id>` | 取消任务 |
+| `/auto-harness schedule delete <task_id>` | 删除任务 |
+
+#### `/auto-harness run`（一次性执行）
+
+- 用法：`/auto-harness run [--pipeline <pipeline>] <query>`
+- 流程：
+  1. 若未指定 pipeline，交互式选择 Pipeline 类型
+  2. 若选择 `optimize_meta_harness`，自动检查 git 配置是否完整
+  3. 创建并执行一次性任务
+  4. 自动进入实时日志跟踪模式（类似 `tail -f`）
+- 示例：
+  - `/auto-harness run 优化数据库查询性能` — 未指定 pipeline，交互选择
+  - `/auto-harness run --pipeline optimize_expert_harness 优化上下文压缩能力` — 指定 pipeline
+
+#### `/auto-harness schedule start`（创建定时任务）
+
+- 用法：`/auto-harness schedule start --interval <hours> [--pipeline <pipeline>] <query>`
+- 参数：
+  - `--interval` / `-i`（必填）：执行间隔（小时），可选值 `1`、`2`、`4`、`8`、`12`、`24`
+  - `--pipeline` / `-p`（可选）：Pipeline 类型，未指定时交互选择
+  - `<query>`（必填）：优化目标描述
+- 流程：
+  1. 若未指定 pipeline，交互式选择
+  2. 若选择 `optimize_meta_harness`，检查 git 配置
+  3. 交互确认是否立即执行一次
+  4. 创建定时任务
+- 示例：
+  - `/auto-harness schedule start --interval 4 优化上下文压缩能力`
+  - `/auto-harness schedule start -i 2 -p optimize_meta_harness 提交数据库优化PR`
+
+#### `/auto-harness schedule logs`（查看执行日志）
+
+- 用法：`/auto-harness schedule logs <task_id> [--history <n>]`
+- 模式：
+  - 默认：实时跟踪当前运行日志（`tail -f` 模式），支持 Ctrl+C 中断
+  - `--history <n>`：查看历史执行日志（`view` 模式，`n` 为历史索引，0 为最近一次）
 
 ---
 

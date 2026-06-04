@@ -50,6 +50,8 @@ interface ClawHubSearchModalProps {
   externalSearchQuery?: string;
   /** 当前已安装技能名（用于判断是否已安装） */
   installedSkillNames?: ReadonlySet<string>;
+  /** 已安装技能的来源标识（规范化），用于精确匹配 ClawHub slug */
+  installedSkillOrigins?: ReadonlySet<string>;
   /** 视图模式：列表或平铺 */
   viewMode?: "list" | "grid";
   onClose: () => void;
@@ -62,6 +64,7 @@ export function ClawHubSearchModal({
   sessionId,
   externalSearchQuery,
   installedSkillNames,
+  installedSkillOrigins,
   viewMode = "list",
   onClose,
   onInstalled,
@@ -78,6 +81,7 @@ export function ClawHubSearchModal({
   const [installingSlug, setInstallingSlug] = useState<string | null>(null);
   const [installedSlugs, setInstalledSlugs] = useState<Set<string>>(new Set());
   const [tokenLoading, setTokenLoading] = useState(true);
+  const [showToken, setShowToken] = useState(false);
 
   const withSession = useCallback(
     (params?: Record<string, unknown>) => ({
@@ -261,9 +265,10 @@ export function ClawHubSearchModal({
         throw new Error(message);
       }
       const skillName = data.skill?.name || slug;
-      // 更新本地已安装状�?
+      const displayName = item.display_name || skillName;
+      // 更新本地已安装状态
       setInstalledSlugs(prev => new Set([...prev, slug]));
-      showMessage("success", t("skills.clawhub.messages.installed", { name: skillName }));
+      showMessage("success", t("skills.clawhub.messages.installed", { name: displayName }));
       // 通知父组件刷新技能列�?
       await onInstalled?.(skillName);
     } catch (err) {
@@ -321,7 +326,7 @@ export function ClawHubSearchModal({
                 <div className="text-sm text-text-muted">{t("skills.clawhub.noResults")}</div>
               ) : (
                 results.map((item) => {
-                  const isInstalled = installedSkillNames?.has(item.slug) ?? false;
+                  const isInstalled = installedSlugs.has(item.slug) || (installedSkillNames?.has(item.slug) ?? false) || (installedSkillNames?.has(item.display_name) ?? false) || (installedSkillOrigins?.has(`clawhub:${item.slug}`) ?? false);
                   const isInstalling = installingSlug === item.slug;
                   const avatar = getSkillAvatar(item.display_name || item.slug);
                   return (
@@ -444,13 +449,32 @@ export function ClawHubSearchModal({
               <label className="block text-sm font-medium text-text mb-2">
                 {t("skills.clawhub.tokenLabel")}
               </label>
-              <input
-                type="password"
-                value={token}
-                onChange={(e) => setToken(e.target.value)}
-                placeholder={t("skills.clawhub.tokenPlaceholder")}
-                className="w-full px-3 py-2 rounded-md bg-secondary border border-border text-sm text-text placeholder:text-text-muted"
-              />
+              <div className="relative">
+                <input
+                  type={showToken ? "text" : "password"}
+                  value={token}
+                  onChange={(e) => setToken(e.target.value)}
+                  placeholder={t("skills.clawhub.tokenPlaceholder")}
+                  className="w-full px-3 py-2 pr-10 rounded-md bg-secondary border border-border text-sm text-text placeholder:text-text-muted"
+                />
+                <button
+                  type="button"
+                  onClick={() => setShowToken(!showToken)}
+                  className="absolute right-3 top-1/2 -translate-y-1/2 text-text-muted hover:text-text transition-colors"
+                  aria-label={showToken ? t("common.hide") : t("common.show")}
+                >
+                  {showToken ? (
+                    <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13.875 18.825A10.05 10.05 0 0112 19c-4.478 0-8.268-2.943-9.543-7a9.97 9.97 0 011.563-3.029m5.858.908a3 3 0 114.243 4.243M9.878 9.878l4.242 4.242M9.88 9.88l-3.29-3.29m7.532 7.532l3.29 3.29M3 3l3.59 3.59m0 0A9.953 9.953 0 0112 5c4.478 0 8.268 2.943 9.543 7a10.025 10.025 0 01-4.132 5.411m0 0L21 21" />
+                    </svg>
+                  ) : (
+                    <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z" />
+                    </svg>
+                  )}
+                </button>
+              </div>
             </div>
             <div className="flex items-center gap-3 justify-end">
               <button
@@ -586,7 +610,7 @@ export function ClawHubSearchModal({
                 ) : (
                   results.map((item) => {
                     // 使用本地状态判断是否已安装（刚安装的会立即更新）
-                    const isInstalled = installedSlugs.has(item.slug) || (installedSkillNames?.has(item.slug) ?? false);
+                    const isInstalled = installedSlugs.has(item.slug) || (installedSkillNames?.has(item.slug) ?? false) || (installedSkillNames?.has(item.display_name) ?? false) || (installedSkillOrigins?.has(`clawhub:${item.slug}`) ?? false);
                     const isInstalling = installingSlug === item.slug;
                     const avatar = getSkillAvatar(item.display_name || item.slug);
                     return (

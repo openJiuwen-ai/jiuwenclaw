@@ -1543,6 +1543,7 @@ class FeishuChannel(BaseChannel):
 
         except Exception as e:
             logger.error(f"发送飞书消息时发生异常: {e}")
+            raise
 
     def _detect_workspace_files(self, text: str) -> list[str]:
         """从文本中提取 workspace 下实际存在的文件路径。
@@ -2781,7 +2782,8 @@ class FeishuChannel(BaseChannel):
     ) -> None:
         """构建并发送飞书消息（在线程池中执行同步 SDK 调用，支持重试）。"""
         loop = asyncio.get_running_loop()
-        
+        last_error: Exception | None = None
+
         for attempt in range(request.max_retries):
             try:
                 def _do_send():
@@ -2810,6 +2812,9 @@ class FeishuChannel(BaseChannel):
                         response.code,
                         response.msg,
                     )
+                    last_error = RuntimeError(
+                        f"飞书发送消息失败: code={response.code} msg={response.msg}"
+                    )
                     if attempt < request.max_retries - 1:
                         await asyncio.sleep(1 * (attempt + 1))
                         continue
@@ -2817,7 +2822,7 @@ class FeishuChannel(BaseChannel):
                     logger.info("飞书消息发送成功: msg_type=%s%s", request.msg_type,
                                 f" {request.log_label}" if request.log_label else "")
                     return
-                    
+
             except Exception as e:
                 logger.warning(
                     "飞书发送消息异常 (尝试 %d/%d, msg_type=%s%s): %s",
@@ -2826,11 +2831,13 @@ class FeishuChannel(BaseChannel):
                     f" {request.log_label}" if request.log_label else "",
                     e,
                 )
+                last_error = e
                 if attempt < request.max_retries - 1:
                     await asyncio.sleep(1 * (attempt + 1))
                     continue
-                else:
-                    logger.error("发送飞书消息异常: %s", e)
+
+        if last_error is not None:
+            raise last_error
 
     async def _send_image_message(
         self,

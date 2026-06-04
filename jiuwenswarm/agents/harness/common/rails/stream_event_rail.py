@@ -3,7 +3,7 @@
 """JiuClawStreamEventRail — Stream event emission, pause checks, context fix.
 
 Migrated from JiuClawReActAgent:
-  - _emit_tool_call / _emit_tool_result / _emit_todo_updated / _emit_context_compression
+  - _emit_tool_call / _emit_tool_result / _emit_todo_updated / _emit_context_usage
   - _fix_incomplete_tool_context
   - Pause checkpoint logic
 """
@@ -32,6 +32,9 @@ from openjiuwen.harness.schema.task import TodoStatus
 from openjiuwen.harness.tools import TodoListTool
 from openjiuwen.harness.workspace.workspace import WorkspaceNode
 
+from jiuwenswarm.agents.harness.common.rails.interrupt.interrupt_helpers import (
+    convert_interactions_to_ask_user_question,
+)
 from jiuwenswarm.common.utils import logger
 
 _TODO_TOOL_NAMES = frozenset(["todo_create", "todo_get", "todo_list", "todo_modify"])
@@ -41,6 +44,53 @@ def _structured_tool_result_payload(result: Any) -> Any | None:
     if isinstance(result, (dict, list)):
         return result
     return None
+
+
+def _parse_tool_call_arguments(tool_call: Any) -> dict[str, Any]:
+    raw_args = getattr(tool_call, "arguments", None) if tool_call else None
+    if isinstance(raw_args, dict):
+        return raw_args
+    if isinstance(raw_args, str):
+        try:
+            parsed = json.loads(raw_args)
+        except (TypeError, ValueError):
+            return {}
+        return parsed if isinstance(parsed, dict) else {}
+    return {}
+
+
+def _extract_tool_interrupt(value: Any) -> Any | None:
+    if value is None:
+        return None
+    if value.__class__.__name__ == "ToolInterruptException" and hasattr(value, "request"):
+        return value
+
+    for attr_name in ("cause", "__cause__"):
+        cause = getattr(value, attr_name, None)
+        if cause is not None and cause is not value:
+            interrupt = _extract_tool_interrupt(cause)
+            if interrupt is not None:
+                return interrupt
+    return None
+
+
+def _ask_user_question_payload_from_interrupt(tool_call: Any, interrupt: Any) -> dict[str, Any] | None:
+    request_id = str(
+        getattr(getattr(interrupt, "request", None), "tool_call_id", None)
+        or getattr(tool_call, "id", "")
+        or ""
+    ).strip()
+    if not request_id:
+        return None
+
+    value_obj = getattr(interrupt, "request", None)
+    if value_obj is None:
+        args = _parse_tool_call_arguments(tool_call)
+        if not args:
+            return None
+        value_obj = {"tool_args": args, "questions": args.get("questions", [])}
+
+    return convert_interactions_to_ask_user_question([{"id": request_id, "value": value_obj}])
 
 
 def _boolish_false(value: Any) -> bool:
@@ -135,61 +185,162 @@ class JiuClawStreamEventRail(DeepAgentRail):
 
     priority = 80
 
-    def __init__(self) -> None:
+    # Key used in ctx.extra to carry session_id from before_invoke to checkpoints.
+    # ctx.extra persists across all events within a single invoke, so sub-agent
+    # checkpoints inherit the parent's session_id (correct: parent abort → sub stops).
+    _SID_KEY = "__jiuwenswarm_session_id__"
+    _SHELL_SID_TOKEN_KEY = "__jiuwenswarm_shell_session_token__"
+
+    def __init__(self, *, member_name: str | None = None, role: str | None = None) -> None:
         super().__init__()
         self._deep_agent: Optional[Any] = None
-        self._pause_event = asyncio.Event()
-        self._pause_event.set()
-        self._abort_requested = False
-        self._conversation_id: str = ""
+        self._member_name = str(member_name or "").strip()
+        self._role = str(role or "").strip().lower()
+        # Per-session pause/abort state.  Keyed by session_id (conversation_id).
+        # Shared adapter instances serve multiple concurrent sessions; scalar state
+        # would cause cross-session contamination (session A cancel kills session B).
+        self._abort_requested: dict[str, bool] = {}
+        self._pause_events: dict[str, asyncio.Event] = {}
+        # Per-session conversation context
+        self._conversation_ids: dict[str, str] = {}
+        self._main_sessions: dict[str, Session] = {}
         self._stream_tasks: set[asyncio.Task] = set()
-        self._main_session: Optional[Session] = None
+        # Shared across sessions (same workspace → same tool instance)
         self._main_todo_tool: Optional[TodoListTool] = None
         # Track in-flight tool calls for cancellation status emission
         self._inflight_tool_calls: dict[str, dict[str, Any]] = {}
-        # Store cancelled tool info for interrupt response
-        self._cancelled_tool_results: list[dict[str, Any]] = []
+        # Store cancelled tool info for interrupt response (per-session to avoid
+        # cross-session leakage in concurrent collect→get→clear sequences).
+        self._cancelled_tool_results: dict[str, list[dict[str, Any]]] = {}
 
     def init(self, agent: Any) -> None:
         self._deep_agent = agent
 
+    def _get_prompt_language(self) -> str:
+        """Get the current prompt language from the agent's system_prompt_builder."""
+        return getattr(
+            getattr(self._deep_agent, "system_prompt_builder", None),
+            "language", None,
+        ) or "cn"
+
+    def _tool_interrupted_message(self, tool_name: str) -> str:
+        """Build a language-aware tool interruption message."""
+        if self._get_prompt_language() == "en":
+            return f"[Tool interrupted] Tool {tool_name} was interrupted by the user and has no result."
+        return f"[工具执行被中断] 工具 {tool_name} 执行过程中被用户打断，没有执行结果。"
+
+    def _resolve_sid(self, ctx: AgentCallbackContext, session: Session | None = None) -> str:
+        """Resolve the per-session key used by this rail.
+
+        99aa04963 made pause/abort and conversation state per-session. Most
+        callbacks inherit ctx.extra from before_invoke, but tool callbacks can
+        arrive without that value depending on agent-core callback boundaries.
+        Fall back to the captured main session identity so main-agent tool calls
+        can still find their conversation_id while unrelated sessions remain
+        isolated.
+        """
+        sid = ctx.extra.get(self._SID_KEY, "")
+        if isinstance(sid, str) and sid:
+            return sid
+        if session is not None:
+            for known_sid, known_session in self._main_sessions.items():
+                if session is known_session:
+                    ctx.extra[self._SID_KEY] = known_sid
+                    return known_sid
+        return "default"
+
     # -- pause / resume / abort API for interface.py --
+    # All methods accept session_id to scope state per-session on shared adapters.
 
-    def pause(self) -> None:
-        self._pause_event.clear()
+    def _get_pause_event(self, sid: str) -> asyncio.Event:
+        """Lazily get/create pause event for a session. Created events start in set (unpaused)."""
+        event = self._pause_events.get(sid)
+        if event is None:
+            event = asyncio.Event()
+            event.set()
+            self._pause_events[sid] = event
+        return event
 
-    def resume(self) -> None:
-        self._abort_requested = False
-        self._pause_event.set()
+    def pause(self, session_id: str = "") -> None:
+        sid = session_id or "default"
+        self._get_pause_event(sid).clear()
 
-    def abort(self) -> None:
-        self._abort_requested = True
-        self._pause_event.set()
+    def resume(self, session_id: str = "") -> None:
+        sid = session_id or "default"
+        self._abort_requested.pop(sid, None)
+        self._get_pause_event(sid).set()
 
-    def reset_abort(self) -> None:
-        self._abort_requested = False
+    def abort(self, session_id: str = "") -> None:
+        sid = session_id or "default"
+        self._abort_requested[sid] = True
+        self._get_pause_event(sid).set()
+        if sid:
+            try:
+                from openjiuwen.core.sys_operation.shell_process_registry import (
+                    kill_shell_processes_for_session_tree,
+                )
 
-    def reset_for_new_task(self) -> None:
+                killed = kill_shell_processes_for_session_tree(sid)
+                if killed:
+                    logger.info(
+                        "[StreamEventRail] killed %d shell process(es) for session=%s",
+                        killed,
+                        sid,
+                    )
+            except Exception:
+                logger.debug(
+                    "[StreamEventRail] kill_commands_for_session failed",
+                    exc_info=True,
+                )
+
+    def reset_abort(self, session_id: str = "") -> None:
+        sid = session_id or "default"
+        self._abort_requested.pop(sid, None)
+
+    def reset_for_new_task(self, session_id: str = "") -> None:
         """Unblock the pause event for the next task without touching the abort flag.
 
         Called on cancel so that a new task can start without being stuck at
-        the _pause_event.wait() checkpoint.
+        the _pause_event.wait() checkpoint. The abort flag is intentionally
+        NOT cleared here — it must remain True until the next task's
+        process_message_*_impl calls reset_abort() at entry, ensuring the
+        in-flight checkpoint (before_model_call / before_tool_call) can still
+        observe the flag and raise CancelledError.
         """
-        self._pause_event.set()
-        self._conversation_id = ""
-        self._main_session = None
-        self._main_todo_tool = None
+        sid = session_id or "default"
+        self._get_pause_event(sid).set()
+        self._conversation_ids.pop(sid, None)
+        self._main_sessions.pop(sid, None)
 
-    def get_cancelled_tool_results(self) -> list[dict[str, Any]]:
+    def cleanup_session(self, session_id: str = "") -> None:
+        """Remove ALL per-session state for *session_id*.
+
+        Called by the adapter when the last task for a session completes
+        (Counter drops to 0). Prevents unbounded growth of the per-session
+        dicts on long-lived adapters serving many unique sessions.
+        """
+        sid = session_id or "default"
+        self._abort_requested.pop(sid, None)
+        self._pause_events.pop(sid, None)
+        self._conversation_ids.pop(sid, None)
+        self._main_sessions.pop(sid, None)
+        self._cancelled_tool_results.pop(sid, None)
+
+    def get_cancelled_tool_results(self, session_id: str = "") -> list[dict[str, Any]]:
         """Get cancelled tool results collected during interrupt.
+
+        Args:
+            session_id: Return results for this session only.
 
         Returns list of tool_result dicts for gateway to forward to frontend.
         """
-        return list(self._cancelled_tool_results)
+        sid = session_id or "default"
+        return list(self._cancelled_tool_results.get(sid, []))
 
-    def clear_cancelled_tool_results(self) -> None:
+    def clear_cancelled_tool_results(self, session_id: str = "") -> None:
         """Clear cancelled tool results after they've been retrieved."""
-        self._cancelled_tool_results.clear()
+        sid = session_id or "default"
+        self._cancelled_tool_results.pop(sid, None)
 
     def collect_cancelled_tool_updates(self, session_id: str = "") -> None:
         """Collect cancelled tool info for interrupt response.
@@ -197,6 +348,8 @@ class JiuClawStreamEventRail(DeepAgentRail):
         Args:
             session_id: Only collect tools for this session. If empty, collect all.
         """
+        sid = session_id or "default"
+        bucket = self._cancelled_tool_results.setdefault(sid, [])
         for tc_id, info in list(self._inflight_tool_calls.items()):
             # Only collect tools matching the target session
             if session_id and info.get("session_id") != session_id:
@@ -204,7 +357,7 @@ class JiuClawStreamEventRail(DeepAgentRail):
             tc = info.get("tool_call")
             if tc is None:
                 continue
-            self._cancelled_tool_results.append({
+            bucket.append({
                 "tool_name": getattr(tc, "name", ""),
                 "tool_call_id": tc_id,
                 "result": "[Interrupted] Tool execution cancelled by user.",
@@ -213,7 +366,7 @@ class JiuClawStreamEventRail(DeepAgentRail):
             self._inflight_tool_calls.pop(tc_id, None)
         logger.info(
             "[StreamEventRail] collected %d cancelled tools for session=%s",
-            len(self._cancelled_tool_results),
+            len(bucket),
             session_id,
         )
 
@@ -229,33 +382,71 @@ class JiuClawStreamEventRail(DeepAgentRail):
         # on conv_id naming conventions.
         if ctx.session is None:
             return
-        new_id = ctx.inputs.conversation_id or ""
-        if new_id:
-            self._conversation_id = new_id
-        self._main_session = ctx.session
+        # Use the real conversation_id as the session key; fall back to "default"
+        # only for the pause/abort state lookup key (sid).  Do NOT store the
+        # "default" sentinel as a conversation_id value — after_tool_call uses
+        # truthiness to decide whether to emit todo.updated, and a literal
+        # "default" would trigger _emit_todo_updated with a bogus session key.
+        raw_conv_id = ctx.inputs.conversation_id or ""
+        sid = raw_conv_id or "default"
+        if raw_conv_id:
+            self._conversation_ids[sid] = raw_conv_id
+        self._main_sessions[sid] = ctx.session
+        # Carry session_id through ctx.extra so checkpoints (before_model_call,
+        # before_tool_call) within this invoke can look up per-session state.
+        # Sub-agents inherit this from the parent's invoke since they don't
+        # fire their own before_invoke (ctx.session is None → early return above).
+        ctx.extra[self._SID_KEY] = sid
+        try:
+            from openjiuwen.core.sys_operation.shell_process_registry import (
+                set_shell_session_id,
+            )
+
+            ctx.extra[self._SHELL_SID_TOKEN_KEY] = set_shell_session_id(raw_conv_id or sid)
+        except Exception:
+            logger.debug("[StreamEventRail] set_shell_session_id failed", exc_info=True)
+
+    async def after_invoke(self, ctx: AgentCallbackContext) -> None:
+        token = ctx.extra.pop(self._SHELL_SID_TOKEN_KEY, None)
+        if token is None:
+            return
+        try:
+            from openjiuwen.core.sys_operation.shell_process_registry import (
+                reset_shell_session_id,
+            )
+
+            reset_shell_session_id(token)
+        except Exception:
+            logger.debug("[StreamEventRail] reset_shell_session_id failed", exc_info=True)
 
     # ------------------------------------------------------------------
     # before_model_call: pause check + context fix + compression info
     # ------------------------------------------------------------------
 
     async def before_model_call(self, ctx: AgentCallbackContext) -> None:
-        await self._pause_event.wait()
-        if self._abort_requested:
+        sid = self._resolve_sid(ctx, ctx.session)
+        await self._get_pause_event(sid).wait()
+        if self._abort_requested.get(sid, False):
             raise asyncio.CancelledError("Agent abort requested")
 
         if ctx.context is not None:
             await self._fix_incomplete_tool_context(ctx.context)
 
     async def after_model_call(self, ctx: AgentCallbackContext) -> None:
-        await self._emit_context_compression(ctx)
+        await self._emit_context_usage(
+            ctx,
+            member_name=self._member_name or None,
+            role=self._role or None,
+        )
 
     # ------------------------------------------------------------------
     # before_tool_call: pause check + emit tool_call event
     # ------------------------------------------------------------------
 
     async def before_tool_call(self, ctx: AgentCallbackContext) -> None:
-        await self._pause_event.wait()
-        if self._abort_requested:
+        sid = self._resolve_sid(ctx, ctx.session)
+        await self._get_pause_event(sid).wait()
+        if self._abort_requested.get(sid, False):
             raise asyncio.CancelledError("Agent abort requested")
 
         session = ctx.session
@@ -269,7 +460,7 @@ class JiuClawStreamEventRail(DeepAgentRail):
                 self._inflight_tool_calls[tc_id] = {
                     "tool_call": tc,
                     "session": session,
-                    "session_id": self._conversation_id,  # conversation_id == session_id
+                    "session_id": sid,
                 }
 
     # ------------------------------------------------------------------
@@ -288,16 +479,25 @@ class JiuClawStreamEventRail(DeepAgentRail):
             self._inflight_tool_calls.pop(tc_id, None)
 
         await self._emit_tool_result(session, tc, ctx.inputs.tool_result)
+        await self._emit_ask_user_question_if_interrupted(
+            session,
+            tc,
+            ctx.inputs.tool_name,
+            ctx.inputs.tool_result,
+            ctx.exception,
+        )
 
         tool_name = ctx.inputs.tool_name
-        if not self._conversation_id:
+        sid = self._resolve_sid(ctx, session)
+        conv_id = self._conversation_ids.get(sid, "")
+        if not conv_id:
             return
         if tool_name in _TODO_TOOL_NAMES:
             # Emit the main-agent todo snapshot after every todo tool call.  The
             # todo tool itself is loaded from the main workspace below, so this
             # stays authoritative even when a resumed/supplement turn uses a
             # different stream session object.
-            await self._emit_todo_updated(session, self._conversation_id)
+            await self._emit_todo_updated(session, conv_id)
 
     # ------------------------------------------------------------------
     # on_model_exception: attempt context repair
@@ -359,6 +559,34 @@ class JiuClawStreamEventRail(DeepAgentRail):
             )
         except Exception:
             logger.debug("tool_result emit failed", exc_info=True)
+
+    @staticmethod
+    async def _emit_ask_user_question_if_interrupted(
+        session: Session,
+        tool_call: Any,
+        tool_name: str,
+        result: Any,
+        exception: Any = None,
+    ) -> None:
+        if str(tool_name or "").strip() != "ask_user":
+            return
+        interrupt = _extract_tool_interrupt(result) or _extract_tool_interrupt(exception)
+        if interrupt is None:
+            return
+        payload = _ask_user_question_payload_from_interrupt(tool_call, interrupt)
+        if not payload:
+            logger.debug("[StreamEventRail] ask_user interrupt payload unavailable")
+            return
+        try:
+            await session.write_stream(
+                OutputSchema(
+                    type="chat.ask_user_question",
+                    index=0,
+                    payload=payload,
+                )
+            )
+        except Exception:
+            logger.debug("ask_user question emit failed", exc_info=True)
 
     @staticmethod
     async def _emit_tool_update(session: Session, tool_call: Any, *, status: str) -> None:
@@ -475,8 +703,13 @@ class JiuClawStreamEventRail(DeepAgentRail):
         ]
 
     @staticmethod
-    async def _emit_context_compression(ctx: AgentCallbackContext) -> None:
-        """Emit context compression stats based on raw_total_tokens and current context tokens."""
+    async def _emit_context_usage(
+        ctx: AgentCallbackContext,
+        *,
+        member_name: str | None = None,
+        role: str | None = None,
+    ) -> None:
+        """Emit context usage stats (context_max, tokens_used, rate)."""
         session = ctx.session
         if session is None:
             return
@@ -498,33 +731,50 @@ class JiuClawStreamEventRail(DeepAgentRail):
         try:
             # raw_total_tokens: model max context window — use agent-core's resolver
             # with built-in dict + 200000 fallback (never returns 0)
-            raw_total_tokens = ContextUtils.resolve_context_max(model_name=model_name)
+            raw_total_tokens = ContextUtils.resolve_context_max(
+                model_name=model_name,
+                fallback_context_window_tokens=getattr(context, "_context_window_tokens", None),
+                model_context_window_tokens=getattr(context, "_model_context_window_tokens", None),
+            )
 
-            # current_context_tokens: actual usage from usage_metadata
+            # The context window contains model input, not the generated reply.
+            # Some providers only expose total_tokens, so keep it as a fallback.
             response = ctx.inputs.response
             usage_metadata = {}
             if response and hasattr(response, 'usage_metadata') and response.usage_metadata:
                 usage_metadata = response.usage_metadata.model_dump()
-            current_context_tokens = usage_metadata.get("total_tokens", 0) if isinstance(usage_metadata, dict) else 0
+            current_context_tokens = 0
+            if isinstance(usage_metadata, dict):
+                for token_key in ("input_tokens", "prompt_tokens", "total_tokens"):
+                    token_value = usage_metadata.get(token_key)
+                    if token_value is not None:
+                        current_context_tokens = token_value
+                        break
 
             if raw_total_tokens != 0:
                 rate = current_context_tokens / raw_total_tokens * 100
             else:
                 rate = 0
 
+            payload = {
+                "rate": rate,
+                "context_max": raw_total_tokens,
+                "tokens_used": current_context_tokens,
+            }
+            if role:
+                payload["role"] = role
+            if member_name:
+                payload["member_name"] = member_name
+
             await session.write_stream(
                 OutputSchema(
-                    type="context.compressed",
+                    type="context.usage",
                     index=0,
-                    payload={
-                        "rate": rate,
-                        "before_compressed": raw_total_tokens,
-                        "after_compressed": current_context_tokens,
-                    },
+                    payload=payload,
                 )
             )
         except Exception:
-            logger.debug("context_compression emit failed", exc_info=True)
+            logger.debug("context_usage emit failed", exc_info=True)
 
     def _ensure_json_arguments(self, arguments: Any) -> str:
         """Ensure tool call arguments are valid JSON string.
@@ -675,7 +925,7 @@ class JiuClawStreamEventRail(DeepAgentRail):
                                 await context.add_messages(tool_message_cache[tool_call_id])
                             else:
                                 await context.add_messages(ToolMessage(
-                                        content=f"[工具执行被中断] 工具 {tool_name} 执行过程中被用户打断，没有执行结果。",
+                                        content=self._tool_interrupted_message(tool_name),
                                         tool_call_id=tool_call_id,
                                 ))
                         tool_id_cache = []
@@ -710,7 +960,7 @@ class JiuClawStreamEventRail(DeepAgentRail):
                             await context.add_messages(tool_message_cache[tool_call_id])
                         else:
                             await context.add_messages(ToolMessage(
-                                    content=f"[工具执行被中断] 工具 {tool_name} 执行过程中被用户打断，没有执行结果。",
+                                    content=self._tool_interrupted_message(tool_name),
                                     tool_call_id=tool_call_id,
                             ))
                     tool_id_cache = []
@@ -724,7 +974,7 @@ class JiuClawStreamEventRail(DeepAgentRail):
                         await context.add_messages(tool_message_cache[tool_call_id])
                     else:
                         await context.add_messages(ToolMessage(
-                                content=f"[工具执行被中断] 工具 {tool_name} 执行过程中被用户打断，没有执行结果。",
+                                content=self._tool_interrupted_message(tool_name),
                                 tool_call_id=tool_call_id,
                         ))
         except Exception as e:

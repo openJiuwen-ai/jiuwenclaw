@@ -2,6 +2,7 @@
 
 """Unit tests for utils module."""
 
+import importlib
 import os
 import sys
 from pathlib import Path
@@ -308,17 +309,20 @@ class TestAdditionalHardcodedPaths:
             f"Expected: {expected_path.resolve()}, Got: {extensions_dir.resolve()}"
 
     @staticmethod
-    def test_config_module_dir_structure():
-        """Test config.py _CONFIG_MODULE_DIR uses get_config_dir()."""
-        from jiuwenswarm.common.config import _CONFIG_MODULE_DIR
-        from jiuwenswarm.common.utils import get_config_dir
+    def test_config_module_dir_structure(tmp_path):
+        """Test config.py _CONFIG_MODULE_DIR honors explicit config dir."""
+        config_dir = tmp_path / "config"
+        config_dir.mkdir()
 
-        config_dir = get_config_dir()
-        expected_path = config_dir
+        import jiuwenswarm.common.config as config_module
 
-        # Use absolute path comparison
-        assert str(_CONFIG_MODULE_DIR.resolve()) == str(expected_path.resolve()), \
-            f"Expected: {expected_path.resolve()}, Got: {_CONFIG_MODULE_DIR.resolve()}"
+        with patch.dict(os.environ, {"JIUWENSWARM_CONFIG_DIR": str(config_dir)}):
+            config_module = importlib.reload(config_module)
+            module_config_dir = config_module.__dict__["_CONFIG_MODULE_DIR"]
+            assert str(module_config_dir.resolve()) == str(config_dir.resolve()), \
+                f"Expected: {config_dir.resolve()}, Got: {module_config_dir.resolve()}"
+
+        importlib.reload(config_module)
 
     @staticmethod
     def test_interactions_dir_structure():
@@ -335,5 +339,3 @@ class TestAdditionalHardcodedPaths:
 
         assert str(actual_path.resolve()) == str(expected_path.resolve()), \
             f"Expected: {expected_path.resolve()}, Got: {actual_path.resolve()}"
-
-    

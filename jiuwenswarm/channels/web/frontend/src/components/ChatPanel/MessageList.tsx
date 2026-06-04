@@ -8,7 +8,6 @@ import { useMemo } from 'react';
 import { Message, ToolExecution } from '../../types';
 import { MessageItem, getMessageActor } from './MessageItem';
 import { ToolGroupDisplay } from './ToolGroupDisplay';
-import { TeamEventGroupDisplay } from './TeamEventGroupDisplay';
 import { useChatStore, useSessionStore } from '../../stores';
 import { isTeamMemberCollaborationMessage } from './teamEventUtils';
 
@@ -50,12 +49,6 @@ type RenderItem =
       key: string;
       showAvatar: boolean;
       executions: ToolExecution[];
-    }
-  | {
-      type: 'teamEventGroup';
-      key: string;
-      showAvatar: boolean;
-      messages: Message[];
     };
 
 /**
@@ -124,7 +117,6 @@ function buildRenderItems(items: TimelineItem[], isTeamMode: boolean): RenderIte
   const renderItems: RenderItem[] = [];
   let currentSegment = {
     toolExecutions: [] as ToolExecution[],
-    teamMessages: [] as { key: string; message: Message }[],
     messages: [] as { key: string; message: Message }[],
   };
 
@@ -137,15 +129,6 @@ function buildRenderItems(items: TimelineItem[], isTeamMode: boolean): RenderIte
         executions: currentSegment.toolExecutions,
       });
       currentSegment.toolExecutions = [];
-    }
-    if (currentSegment.teamMessages.length > 0) {
-      renderItems.push({
-        type: 'teamEventGroup',
-        key: `team-event-group-${currentSegment.teamMessages[0].key}`,
-        showAvatar: true,
-        messages: currentSegment.teamMessages.map((item) => item.message),
-      });
-      currentSegment.teamMessages = [];
     }
     for (const { key, message } of currentSegment.messages) {
       renderItems.push({
@@ -161,7 +144,6 @@ function buildRenderItems(items: TimelineItem[], isTeamMode: boolean): RenderIte
   const flushSegmentIfPresent = () => {
     if (
       currentSegment.toolExecutions.length > 0 ||
-      currentSegment.teamMessages.length > 0 ||
       currentSegment.messages.length > 0
     ) {
       flushCurrentSegment();
@@ -175,7 +157,6 @@ function buildRenderItems(items: TimelineItem[], isTeamMode: boolean): RenderIte
     }
 
     if (isTeamMemberCollaborationMessage(item.message)) {
-      currentSegment.teamMessages.push({ key: item.key, message: item.message });
       continue;
     }
 
@@ -223,12 +204,6 @@ function buildRenderItems(items: TimelineItem[], isTeamMode: boolean): RenderIte
       continue;
     }
 
-    if (renderItem.type === 'teamEventGroup') {
-      renderItem.showAvatar = !clusterBlockActive;
-      clusterBlockActive = true;
-      continue;
-    }
-
     const actor = getMessageActor(renderItem.message);
     if (actor === 'team_leader') {
       renderItem.showAvatar = !clusterBlockActive;
@@ -269,21 +244,12 @@ export function ChatTimelineList({
             />
           );
         }
-        if (item.type === 'toolGroup') {
-          return (
-            <ToolGroupDisplay
-              key={item.key}
-              executions={item.executions}
-              showAvatar={item.showAvatar}
-              teamLayout={isTeamMode}
-            />
-          );
-        }
         return (
-          <TeamEventGroupDisplay
+          <ToolGroupDisplay
             key={item.key}
-            messages={item.messages}
+            executions={item.executions}
             showAvatar={item.showAvatar}
+            teamLayout={isTeamMode}
           />
         );
       })}

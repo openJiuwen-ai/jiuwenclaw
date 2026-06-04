@@ -4,7 +4,8 @@ export type ClientMode =
   | "code.plan"
   | "code.normal"
   | "code.team"
-  | "team";
+  | "team"
+  | "team.plan";
 
 export function isClientMode(value: string): value is ClientMode {
   return (
@@ -13,10 +14,11 @@ export function isClientMode(value: string): value is ClientMode {
     value === "code.plan" ||
     value === "code.normal" ||
     value === "code.team" ||
-    value === "team"
+    value === "team" ||
+    value === "team.plan"
   );
 }
 
 export function isTeamMode(mode: ClientMode): boolean {
-  return mode === "team" || mode === "code.team";
+  return mode === "team" || mode === "team.plan" || mode === "code.team";
 }

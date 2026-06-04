@@ -2,7 +2,11 @@
 
 import pytest
 
-from jiuwenswarm.gateway.channel_manager.web.app_web_handlers import WebHandlersBindParams, _register_web_handlers
+from jiuwenswarm.gateway.channel_manager.web.app_web_handlers import (
+    WebHandlersBindParams,
+    _flatten_modes_team_for_config_panel,
+    _register_web_handlers,
+)
 
 
 class FakeWebChannel:
@@ -95,3 +99,33 @@ async def test_config_set_returns_bad_request_when_team_payload_is_invalid(monke
         "error": "duplicate team_name: alpha_team",
         "code": "BAD_REQUEST",
     }
+
+
+def test_config_panel_flatten_reads_standalone_agent_registry():
+    raw = {
+        "web_config_panel": {
+            "agent_team_agents": {
+                "agent_1": {
+                    "model": {
+                        "model_request_config": {
+                            "model": "gpt-4.1",
+                            "api_base": "https://api.openai.com/v1",
+                            "api_key": "${OPENAI_API_KEY}",
+                        },
+                        "model_client_config": {"client_provider": "OpenAI"},
+                    },
+                    "skills": ["coding"],
+                    "max_iterations": 12,
+                    "completion_timeout": 34,
+                }
+            }
+        }
+    }
+
+    flat = _flatten_modes_team_for_config_panel(raw)
+
+    assert flat["agent_name_0"] == "agent_1"
+    assert flat["agent_model_0"] == "gpt-4.1"
+    assert flat["agent_skills_0"] == "coding"
+    assert flat["agent_max_iterations_0"] == "12"
+    assert flat["agent_completion_timeout_0"] == "34"

@@ -38,4 +38,4 @@ def is_team_params(params: Mapping[str, Any] | None) -> bool:
     if not isinstance(params, Mapping):
         return False
     mode = str(params.get("mode") or "").strip().lower()
-    return bool(params.get("team")) or mode in {"team", "code.team"}
+    return bool(params.get("team")) or mode in {"team", "team.plan", "code.team"}

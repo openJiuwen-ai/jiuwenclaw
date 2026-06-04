@@ -37,6 +37,7 @@ export function createUsageCommand(): SlashCommand {
     usage: "/usage",
     example: "/usage",
     kind: CommandKind.BUILT_IN,
+    hidden: true,
     action: async (ctx) => {
       if (ctx.enterStatusView) {
         ctx.enterStatusView("usage");

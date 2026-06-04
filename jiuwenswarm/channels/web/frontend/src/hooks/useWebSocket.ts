@@ -5,6 +5,7 @@
  */
 
 import { useEffect, useRef, useCallback, useState } from 'react';
+import { useTranslation } from 'react-i18next';
 import {
   ConnectionAckPayload,
   WebConnectOptions,
@@ -24,10 +25,12 @@ import {
   ToolCall,
   UsageSummary,
   FileDownloadItem,
+  ContextCompressionRuntime,
+  ContextCompressionSummary,
 } from '../types';
 import { useChatStore, useTodoStore, useSessionStore, useHarnessStore } from '../stores';
+import type { TeamTask, TeamTaskStatus } from '../stores/sessionStore';
 import { webClient } from '../services/webClient';
-import i18n from '../i18n';
 import {
   fetchTtsAudio,
   playAudioBase64,
@@ -41,6 +44,190 @@ import {
 } from '../features/tool-events/toolEventNormalizer';
 
 const WS_RECONNECT_EVENT = 'jiuwenclaw:ws-reconnect-request';
+
+const TEAM_TASK_STATUS_SET = new Set<TeamTaskStatus>([
+  'pending',
+  'blocked',
+  'claimed',
+  'plan_approved',
+  'completed',
+  'cancelled',
+]);
+
+function normalizeTeamTaskStatus(
+  status: unknown,
+  fallback: TeamTaskStatus = 'pending'
+): TeamTaskStatus {
+  return typeof status === 'string' && TEAM_TASK_STATUS_SET.has(status as TeamTaskStatus)
+    ? status as TeamTaskStatus
+    : fallback;
+}
+
+function pickString(...values: unknown[]) {
+  for (const value of values) {
+    if (typeof value === 'string' && value.trim()) {
+      return value;
+    }
+  }
+  return undefined;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
+}
+
+function getPayloadSessionId(payload: Record<string, unknown>): string | undefined {
+  const direct = pickString(payload.session_id);
+  if (direct) {
+    return direct;
+  }
+  const nestedPayload = payload.payload;
+  if (isRecord(nestedPayload)) {
+    const nested = pickString(nestedPayload.session_id);
+    if (nested) {
+      return nested;
+    }
+    const nestedEvent = nestedPayload.event;
+    if (isRecord(nestedEvent)) {
+      return pickString(nestedEvent.session_id);
+    }
+  }
+  const event = payload.event;
+  if (isRecord(event)) {
+    return pickString(event.session_id);
+  }
+  return undefined;
+}
+
+function normalizeStringArray(value: unknown): string[] | undefined {
+  if (!Array.isArray(value)) {
+    return undefined;
+  }
+  const normalized = value.filter(
+    (item): item is string => typeof item === 'string' && item.trim().length > 0
+  );
+  return normalized.length ? normalized : undefined;
+}
+
+function statusFromTaskEventType(type: string, explicitStatus: unknown): TeamTaskStatus {
+  if (type === 'team.task.claimed') return normalizeTeamTaskStatus(explicitStatus, 'claimed');
+  if (type === 'team.task.completed') return normalizeTeamTaskStatus(explicitStatus, 'completed');
+  if (type === 'team.task.cancelled') return normalizeTeamTaskStatus(explicitStatus, 'cancelled');
+  if (type === 'team.task.unblocked') return normalizeTeamTaskStatus(explicitStatus, 'pending');
+  return normalizeTeamTaskStatus(explicitStatus);
+}
+
+function normalizeTaskEvent(value: unknown): TeamTask | null {
+  if (!value || typeof value !== 'object') {
+    return null;
+  }
+  const raw = value as Record<string, unknown>;
+  const taskId = pickString(raw.task_id, raw.id);
+  if (!taskId) {
+    return null;
+  }
+  const type = pickString(raw.type) || '';
+  const explicitTitle = pickString(raw.title, raw.name, raw.description);
+  const content = pickString(raw.content);
+  return {
+    task_id: taskId,
+    title: explicitTitle,
+    content,
+    status: statusFromTaskEventType(type, raw.status),
+    assignee: pickString(raw.assignee, raw.member_id, raw.claimed_by, raw.claimedBy, raw.from_member),
+    team_id: pickString(raw.team_id),
+    timestamp: typeof raw.timestamp === 'number' ? raw.timestamp : Date.now(),
+    skills: normalizeStringArray(raw.skills),
+    files: normalizeStringArray(raw.files),
+  };
+}
+
+function normalizeTaskRecord(
+  value: unknown,
+  fallbackStatus: TeamTaskStatus = 'pending'
+): TeamTask | null {
+  if (!value || typeof value !== 'object') {
+    return null;
+  }
+  const raw = value as Record<string, unknown>;
+  const taskId = pickString(raw.task_id, raw.id);
+  if (!taskId) {
+    return null;
+  }
+  const title = pickString(raw.title, raw.name, raw.description);
+  const content = pickString(raw.content);
+  return {
+    task_id: taskId,
+    title,
+    content,
+    status: normalizeTeamTaskStatus(raw.status, fallbackStatus),
+    assignee: pickString(raw.assignee, raw.member_id, raw.claimed_by, raw.claimedBy, raw.from_member),
+    team_id: pickString(raw.team_id),
+    timestamp: typeof raw.timestamp === 'number' ? raw.timestamp : Date.now(),
+    skills: normalizeStringArray(raw.skills),
+    files: normalizeStringArray(raw.files),
+  };
+}
+
+function parseShutdownMemberName(value: unknown): string | undefined {
+  if (typeof value !== 'string') {
+    return undefined;
+  }
+  const match = value.match(/Member shutdown:\s*member_name=([^\s,]+)/);
+  return match?.[1]?.trim() || undefined;
+}
+
+function getShutdownMemberFromToolCall(toolCall: ToolCall): string | undefined {
+  if (toolCall.name !== 'shutdown_member') {
+    return undefined;
+  }
+  return pickString(
+    toolCall.arguments.member_name,
+    toolCall.arguments.member_id,
+    toolCall.arguments.name
+  );
+}
+
+function getShutdownMemberFromToolResult(toolResult: ToolResult): string | undefined {
+  if (toolResult.toolName !== 'shutdown_member') {
+    return parseShutdownMemberName(toolResult.result);
+  }
+  return parseShutdownMemberName(toolResult.result) || parseShutdownMemberName(toolResult.summary);
+}
+
+function upsertTaskRecords(values: unknown, fallbackStatus: TeamTaskStatus = 'pending') {
+  if (!Array.isArray(values)) {
+    const task = normalizeTaskRecord(values, fallbackStatus);
+    if (task) {
+      useSessionStore.getState().upsertTeamTask(task);
+    }
+    return;
+  }
+  values.forEach((item) => {
+    const task = normalizeTaskRecord(item, fallbackStatus);
+    if (task) {
+      useSessionStore.getState().upsertTeamTask(task);
+    }
+  });
+}
+
+function applyTeamTaskToolCall(toolCall: ToolCall) {
+  if (toolCall.name === 'create_task') {
+    upsertTaskRecords(Array.isArray(toolCall.arguments.tasks) ? toolCall.arguments.tasks : toolCall.arguments);
+    return;
+  }
+  if (toolCall.name === 'update_task') {
+    const taskId = pickString(toolCall.arguments.task_id, toolCall.arguments.id);
+    const existingStatus = taskId
+      ? useSessionStore.getState().teamTasks.find((task) => task.task_id === taskId)?.status
+      : undefined;
+    upsertTaskRecords(toolCall.arguments, existingStatus || 'pending');
+    return;
+  }
+  if (toolCall.name === 'claim_task') {
+    return;
+  }
+}
 
 interface UseWebSocketOptions {
   activeSessionId?: string;
@@ -89,6 +276,20 @@ interface UseWebSocketReturn {
   getInflightCount: () => number;
 }
 
+interface ContextCompressionStatePayload {
+  status: string;
+  summary: string;
+  operation_id: string;
+  phase: string;
+  processor: string;
+}
+
+interface PendingContextCompressionStart {
+  timer: ReturnType<typeof setTimeout>;
+  runtimeState: Omit<ContextCompressionRuntime, 'status'>;
+  shown: boolean;
+}
+
 function normalizeAgentMode(rawMode: unknown): AgentMode {
   if (typeof rawMode !== 'string') return 'agent.plan';
   const normalized = rawMode.trim().toLowerCase();
@@ -99,6 +300,7 @@ function normalizeAgentMode(rawMode: unknown): AgentMode {
 }
 
 const EVENT_DEDUP_WINDOW_MS = 1500;
+const CONTEXT_COMPRESSION_START_DELAY_MS = 300;
 
 function normalizeEventTimestampIso(value: unknown): string {
   if (typeof value === 'number' && Number.isFinite(value)) {
@@ -115,6 +317,52 @@ function normalizeEventTimestampIso(value: unknown): string {
     }
   }
   return new Date().toISOString();
+}
+
+function isTeamTeammateMessagePayload(payload: Record<string, unknown>): boolean {
+  return typeof payload.role === 'string' && payload.role.trim().toLowerCase() === 'teammate';
+}
+
+function isHiddenTeamTeammateMessagePayload(mode: AgentMode, payload: Record<string, unknown>): boolean {
+  return mode === 'team' && isTeamTeammateMessagePayload(payload);
+}
+
+function getTeamPayloadMemberName(payload: Record<string, unknown>): string | undefined {
+  return pickString(payload.member_name, payload.member_id, payload.source_member);
+}
+
+function eventTimestampMs(payload: Record<string, unknown>): number {
+  const value = payload.timestamp;
+  if (typeof value === 'number' && Number.isFinite(value)) {
+    return value > 1_000_000_000_000 ? value : value * 1000;
+  }
+  if (typeof value === 'string') {
+    const parsed = Date.parse(value);
+    if (!Number.isNaN(parsed)) {
+      return parsed;
+    }
+  }
+  return Date.now();
+}
+
+function stableEventId(...parts: unknown[]): string {
+  return parts
+    .map((part) => String(part ?? '').trim())
+    .filter(Boolean)
+    .join(':')
+    .replace(/[^a-zA-Z0-9:_-]+/g, '-')
+    .slice(0, 180);
+}
+
+function stringifyCompact(value: unknown): string {
+  if (typeof value === 'string') {
+    return value;
+  }
+  try {
+    return JSON.stringify(value);
+  } catch {
+    return String(value ?? '');
+  }
 }
 
 function stringifyPayloadForDedup(payload: Record<string, unknown>): string {
@@ -139,6 +387,7 @@ function makeEventDedupKey(eventName: string, payload: Record<string, unknown>):
 }
 
 export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
+  const { t } = useTranslation();
   const {
     activeSessionId,
     provider,
@@ -166,7 +415,24 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
   const onErrorRef = useRef(onError);
   const sendMessageRef = useRef<typeof sendMessage>();
   const recentEventRef = useRef<Map<string, number>>(new Map());
+  const teamToolCallMemberRef = useRef<Map<string, string>>(new Map());
+  const shutdownMemberToolCallRef = useRef<Map<string, string>>(new Map());
+  const clearedTeamPanelSessionRef = useRef<string | null>(null);
+  const teamMemberOutputEventRef = useRef<Map<string, string>>(new Map());
   const eventDedupDroppedRef = useRef<Record<string, number>>({});
+  const contextCompressionSummaryRef = useRef<ContextCompressionSummary>({
+    count: 0,
+    summaries: [],
+  });
+  const pendingContextCompressionStartRef =
+    useRef<PendingContextCompressionStart | null>(null);
+  const holdContextUsageUntilVisibleReplyRef = useRef(false);
+  const contextUsageHoldSessionIdRef = useRef<string | null>(null);
+  const pendingContextUsageRef = useRef<{
+    rate: number;
+    beforeCompressed: number | null;
+    afterCompressed: number | null;
+  } | null>(null);
 
   // Stores
   const {
@@ -189,6 +455,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
     setPendingQuestion,
     removeFromTaskQueue,
     addFileItems,
+    setContextCompressionStatus,
   } = useChatStore();
   const { setTodos, clearTodos } = useTodoStore();
   const {
@@ -246,8 +513,8 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
 
   const shouldHandleSessionEvent = useCallback(
     (payload: Record<string, unknown>): boolean => {
-      const payloadSessionId = payload.session_id;
-      if (typeof payloadSessionId !== 'string' || !payloadSessionId) {
+      const payloadSessionId = getPayloadSessionId(payload);
+      if (!payloadSessionId) {
         return true;
       }
       const currentSessionId = activeSessionIdRef.current;
@@ -269,40 +536,6 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
       onConnectRef.current?.(ackPayload);
     },
     [setAvailableTools, setConnected]
-  );
-
-  const restoreTeamMembersOnReconnect = useCallback(
-    async (sessionId: string) => {
-      if (!sessionId || sessionId === 'new') {
-        return;
-      }
-      try {
-        const snapshot = await webClient.request<{
-          members: Array<{
-            member_id: string;
-            name?: string;
-            status: string;
-            execution_status?: string;
-            mode?: string;
-          }>;
-          team_id: string;
-        }>('team.snapshot', { session_id: sessionId });
-
-        if (snapshot?.members) {
-          useSessionStore.getState().setTeamMembers(
-            snapshot.members.map((m, idx) => ({
-              id: `member-${m.member_id || idx}`,
-              member_id: m.member_id || '',
-              status: m.status || '',
-              timestamp: Date.now(),
-            }))
-          );
-        }
-      } catch (error) {
-        console.error('[team.snapshot] restore failed:', error);
-      }
-    },
-    []
   );
 
   // 断开连接
@@ -348,11 +581,126 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
     }
   }, [updateMessage]);
 
+  const clearPendingContextCompressionStart = useCallback(() => {
+    const pending = pendingContextCompressionStartRef.current;
+    if (pending) {
+      clearTimeout(pending.timer);
+      pendingContextCompressionStartRef.current = null;
+    }
+  }, []);
+
+  const resetContextCompressionTurn = useCallback(() => {
+    clearPendingContextCompressionStart();
+    contextCompressionSummaryRef.current = { count: 0, summaries: [] };
+    setContextCompressionStatus(undefined);
+  }, [clearPendingContextCompressionStart, setContextCompressionStatus]);
+
+  const finishContextCompressionTurn = useCallback(() => {
+    clearPendingContextCompressionStart();
+    const summary = contextCompressionSummaryRef.current;
+    setContextCompressionStatus(undefined, summary.count > 0 ? summary : undefined);
+  }, [clearPendingContextCompressionStart, setContextCompressionStatus]);
+
+  const handleContextCompressionState = useCallback(
+    (payload: ContextCompressionStatePayload) => {
+      const status = payload.status.trim().toLowerCase();
+      const summary = payload.summary.trim();
+      if (!status || !summary) return;
+
+      const operationId = payload.operation_id.trim();
+      const phase = payload.phase.trim() || undefined;
+      const processor = payload.processor.trim() || undefined;
+      const runtimeState = {
+        summary,
+        operationId,
+        phase,
+        processor,
+      };
+
+      if (status === 'completed') {
+        clearPendingContextCompressionStart();
+        const current = contextCompressionSummaryRef.current;
+        const nextSummary = {
+          count: current.count + 1,
+          summaries: [...current.summaries, summary],
+        };
+        contextCompressionSummaryRef.current = nextSummary;
+        setContextCompressionStatus({
+          ...runtimeState,
+          status: 'completed',
+        });
+        return;
+      }
+
+      if (status === 'started' || status === 'running') {
+        clearPendingContextCompressionStart();
+        const pending: PendingContextCompressionStart = {
+          runtimeState,
+          shown: false,
+          timer: setTimeout(() => {
+            if (pendingContextCompressionStartRef.current !== pending) return;
+            pending.shown = true;
+            setContextCompressionStatus({
+              ...pending.runtimeState,
+              status: 'running',
+            });
+          }, CONTEXT_COMPRESSION_START_DELAY_MS),
+        };
+        pendingContextCompressionStartRef.current = pending;
+        return;
+      }
+
+      if (status === 'noop' || status === 'skipped') {
+        const pending = pendingContextCompressionStartRef.current;
+        if (pending && !pending.shown) {
+          clearPendingContextCompressionStart();
+          return;
+        }
+        if (pending) {
+          clearPendingContextCompressionStart();
+        }
+        setContextCompressionStatus({
+          ...runtimeState,
+          status: 'unchanged',
+        });
+        return;
+      }
+
+      if (status === 'failed' || status === 'error') {
+        clearPendingContextCompressionStart();
+        setContextCompressionStatus({
+          ...runtimeState,
+          status: 'failed',
+        });
+      }
+    },
+    [clearPendingContextCompressionStart, setContextCompressionStatus]
+  );
+
+  useEffect(() => {
+    return clearPendingContextCompressionStart;
+  }, [clearPendingContextCompressionStart]);
+
   // 发送聊天消息
   const sendMessage = useCallback(
     async (content: string, sessionId: string) => {
       if (!content.trim()) return;
 
+      const isInitialUserMessage = !useChatStore
+        .getState()
+        .messages.some((message) => message.role === 'user');
+      if (isInitialUserMessage) {
+        holdContextUsageUntilVisibleReplyRef.current = true;
+        contextUsageHoldSessionIdRef.current = sessionId;
+        pendingContextUsageRef.current = null;
+        setContextCompressionStats({
+          rate: 0,
+          beforeCompressed: 0,
+          afterCompressed: 0,
+        });
+      }
+
+      resetContextCompressionTurn();
       userInputVersionRef.current += 1;
       stopAllTts();
 
@@ -377,6 +725,9 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
         useHarnessStore.getState().reset();
       }
       if (currentMode === 'team') {
+        if (clearedTeamPanelSessionRef.current === sessionId) {
+          clearedTeamPanelSessionRef.current = null;
+        }
         setPaused(false);
       }
       try {
@@ -391,17 +742,25 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
         setConnectionStats({ lastError: webError.message });
         setProcessing(false);
         setThinking(false);
-        const errorMsg = webError.message || i18n.t('network.sendMessageFailed');
+        const errorMsg = webError.message || t('network.sendMessageFailed');
         onErrorRef.current?.(errorMsg);
         addMessage({
           id: `error-${Date.now()}`,
           role: 'system',
-          content: i18n.t('network.errorPrefix', { message: errorMsg }),
+          content: t('network.errorPrefix', { message: errorMsg }),
           timestamp: new Date().toISOString(),
         });
       }
     },
-    [addMessage, request, setProcessing, setThinking]
+    [
+      addMessage,
+      request,
+      resetContextCompressionTurn,
+      setContextCompressionStats,
+      setProcessing,
+      setThinking,
+      t,
+    ]
   );
 
   // 存储sendMessage函数到ref
@@ -418,6 +777,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
     ) => {
       const newInput = options?.newInput;
       if (intent === 'supplement' && newInput) {
+        resetContextCompressionTurn();
         userInputVersionRef.current += 1;
         stopAllTts();
         if (useSessionStore.getState().mode === 'team') {
@@ -448,10 +808,17 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
       } catch (error) {
         const webError = error as WebError;
         setConnectionStats({ lastError: webError.message });
-        onErrorRef.current?.(webError.message || i18n.t('network.interruptFailed'));
+        onErrorRef.current?.(webError.message || t('network.interruptFailed'));
       }
     },
-    [addMessage, closeActiveTeamLeaderMessages, request, setConnectionStats]
+    [
+      addMessage,
+      closeActiveTeamLeaderMessages,
+      request,
+      resetContextCompressionTurn,
+      setConnectionStats,
+      t,
+    ]
   );
 
   // 暂停 - 显式暂停当前任务
@@ -462,10 +829,10 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
       } catch (error) {
         const webError = error as WebError;
         setConnectionStats({ lastError: webError.message });
-        onErrorRef.current?.(webError.message || i18n.t('network.pauseFailed'));
+        onErrorRef.current?.(webError.message || t('network.pauseFailed'));
       }
     },
-    [interrupt, setConnectionStats]
+    [interrupt, setConnectionStats, t]
   );
 
   const cancel = useCallback(
@@ -475,10 +842,10 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
       } catch (error) {
         const webError = error as WebError;
         setConnectionStats({ lastError: webError.message });
-        onErrorRef.current?.(webError.message || i18n.t('network.cancelFailed'));
+        onErrorRef.current?.(webError.message || t('network.cancelFailed'));
       }
     },
-    [interrupt, setConnectionStats]
+    [interrupt, setConnectionStats, t]
   );
 
   const supplement = useCallback(
@@ -488,10 +855,10 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
       } catch (error) {
         const webError = error as WebError;
         setConnectionStats({ lastError: webError.message });
-        onErrorRef.current?.(webError.message || i18n.t('network.supplementFailed'));
+        onErrorRef.current?.(webError.message || t('network.supplementFailed'));
       }
     },
-    [interrupt, setConnectionStats]
+    [interrupt, setConnectionStats, t]
   );
 
   // 恢复 - 恢复暂停的任务
@@ -503,10 +870,10 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
       } catch (error) {
         const webError = error as WebError;
         setConnectionStats({ lastError: webError.message });
-        onErrorRef.current?.(webError.message || i18n.t('network.resumeFailed'));
+        onErrorRef.current?.(webError.message || t('network.resumeFailed'));
       }
     },
-    [interrupt, setConnectionStats, setPaused]
+    [interrupt, setConnectionStats, setPaused, t]
   );
 
   // 切换模式
@@ -549,13 +916,24 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
   const sendUserAnswer = useCallback(
     async (sessionId: string, requestId: string, answers: UserAnswer[], source?: string) => {
       try {
-        // 如果是工具权限确认，发送 chat.send
+        const pendingQuestion = useChatStore.getState().pendingQuestion;
+        const evolutionMeta =
+          pendingQuestion?.request_id === requestId
+            ? pendingQuestion.evolutionMeta
+            : undefined;
+        const evolutionMetaPayload =
+          evolutionMeta && typeof evolutionMeta === 'object'
+            ? { evolution_meta: evolutionMeta }
+            : {};
+        // 如果是需要走 interrupt/interact 的确认，发送 chat.send
         if (source === 'permission_interrupt') {
           await request('chat.send', {
             session_id: sessionId,
             query: '',
             request_id: requestId,
             answers: answers,
+            source,
+            ...evolutionMetaPayload,
           });
         } else if (source === 'activate_confirm') {
           const action = answers[0]?.selected_options[0] === '拒绝' ? 'reject' : 'accept';
@@ -580,16 +958,17 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
             session_id: sessionId,
             request_id: requestId,
             answers,
+            ...evolutionMetaPayload,
           });
         }
         setPendingQuestion(null);
       } catch (error) {
         const webError = error as WebError;
         setConnectionStats({ lastError: webError.message });
-        onErrorRef.current?.(webError.message || i18n.t('network.submitAnswerFailed'));
+        onErrorRef.current?.(webError.message || t('network.submitAnswerFailed'));
       }
     },
-    [request, setConnectionStats, setPendingQuestion]
+    [request, setConnectionStats, setPendingQuestion, t]
   );
 
   // activeSessionIdRef 已在渲染阶段同步更新，无需额外 effect
@@ -617,7 +996,22 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
 
   useEffect(() => {
     activeSessionIdRef.current = activeSessionId;
+    if (contextUsageHoldSessionIdRef.current !== activeSessionId) {
+      holdContextUsageUntilVisibleReplyRef.current = false;
+      contextUsageHoldSessionIdRef.current = null;
+      pendingContextUsageRef.current = null;
+    }
   }, [activeSessionId]);
+
+  const revealPendingContextUsage = useCallback(() => {
+    holdContextUsageUntilVisibleReplyRef.current = false;
+    contextUsageHoldSessionIdRef.current = null;
+    const pending = pendingContextUsageRef.current;
+    pendingContextUsageRef.current = null;
+    if (pending) {
+      setContextCompressionStats(pending);
+    }
+  }, [setContextCompressionStats]);
 
   // 会话切换时不再重置上下文压缩信息，保持本地存储的状态
   // useEffect(() => {
@@ -672,11 +1066,104 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
     setThinking(false);
   }, [setThinking]);
 
+  const getTeamMemberOutputKey = useCallback(
+    (payload: Record<string, unknown>, memberId: string): string => stableEventId(
+      'member-output-key',
+      getPayloadSessionId(payload),
+      memberId,
+      payload.rid,
+      payload.request_id
+    ),
+    []
+  );
+
+  const getOrCreateTeamMemberOutputEventId = useCallback(
+    (payload: Record<string, unknown>, memberId: string): string => {
+      const key = getTeamMemberOutputKey(payload, memberId);
+      const existing = teamMemberOutputEventRef.current.get(key);
+      if (existing) {
+        return existing;
+      }
+      const id = stableEventId(
+        'member-output',
+        getPayloadSessionId(payload),
+        memberId,
+        payload.rid,
+        payload.request_id,
+        Date.now()
+      );
+      teamMemberOutputEventRef.current.set(key, id);
+      return id;
+    },
+    [getTeamMemberOutputKey]
+  );
+
+  const takeTeamMemberOutputEventId = useCallback(
+    (payload: Record<string, unknown>, memberId: string): string | undefined => {
+      const key = getTeamMemberOutputKey(payload, memberId);
+      const id = teamMemberOutputEventRef.current.get(key);
+      if (id) {
+        teamMemberOutputEventRef.current.delete(key);
+      }
+      return id;
+    },
+    [getTeamMemberOutputKey]
+  );
+
+  const appendTeamMemberOutputDelta = useCallback(
+    (payload: Record<string, unknown>, memberId: string, content: string) => {
+      if (!content) {
+        return;
+      }
+      const id = getOrCreateTeamMemberOutputEventId(payload, memberId);
+      const existingContent =
+        useSessionStore.getState().teamMemberExecutionEvents.find((event) => event.id === id)?.content || '';
+      useSessionStore.getState().addTeamMemberExecutionEvent({
+        id,
+        member_id: memberId,
+        kind: 'final',
+        timestamp: eventTimestampMs(payload),
+        title: t('team.process.execution.final'),
+        content: `${existingContent}${content}`,
+      });
+    },
+    [getOrCreateTeamMemberOutputEventId, t]
+  );
+
   useEffect(() => {
+    const applyTeamMemberShutdown = (memberId: string, sessionId?: string) => {
+      const normalizedMemberId = memberId.trim();
+      if (!normalizedMemberId) {
+        return;
+      }
+      const sessionStore = useSessionStore.getState();
+      const nextMembers = sessionStore.teamMembers.filter(
+        (member) => member.member_id !== normalizedMemberId
+      );
+      if (nextMembers.length === sessionStore.teamMembers.length) {
+        return;
+      }
+      sessionStore.setTeamMembers(nextMembers);
+      if (nextMembers.length === 0) {
+        clearedTeamPanelSessionRef.current = sessionId || null;
+        clearTodos();
+        const currentSessionStore = useSessionStore.getState();
+        currentSessionStore.setTeamMembers([]);
+        currentSessionStore.setTeamTaskEvents([]);
+        currentSessionStore.setTeamTasks([]);
+        currentSessionStore.setTeamMemberExecutionEvents([]);
+        currentSessionStore.setTeamHistoryMessages([]);
+      }
+    };
+
+    const isTeamPanelClearedForPayload = (payload: Record<string, unknown>) => {
+      const sessionId = getPayloadSessionId(payload) || activeSessionIdRef.current || undefined;
+      return Boolean(sessionId && clearedTeamPanelSessionRef.current === sessionId);
+    };
+
     const unsubs = [
       webClient.on('connection.ack', ({ payload }) => {
         handleConnectionAck(payload);
-        void restoreTeamMembersOnReconnect(activeSessionIdRef.current || '');
       }),
       webClient.on('hello', ({ payload }) => {
         handleConnectionAck(payload);
@@ -684,10 +1171,24 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
       webClient.on('chat.delta', ({ payload }) => {
         if (!shouldHandleSessionEvent(payload)) return;
 
+        // 页面刷新后，如果收到活跃事件但 isProcessing=false，自动恢复执行状态
+        if (!useChatStore.getState().isProcessing && !useChatStore.getState().isLoadingHistory) {
+          setProcessing(true);
+        }
+
         const currentMode = useSessionStore.getState().mode;
         const content = typeof payload.content === 'string' ? payload.content : '';
 
-        // team 模式下，累积 chat.delta 内容
+        if (isHiddenTeamTeammateMessagePayload(currentMode, payload)) {
+          const memberId = getTeamPayloadMemberName(payload);
+          if (memberId) {
+            appendTeamMemberOutputDelta(payload, memberId, content);
+          }
+          return;
+        }
+        if (content) {
+          revealPendingContextUsage();
+        }
         if (currentMode === 'team' && content) {
           clearThinkingForVisibleOutput();
           const existingMsg = findActiveTeamLeaderMessage();
@@ -728,13 +1229,44 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
         }
         appendStreamContent(content);
       }),
+      webClient.on('chat.reasoning', ({ payload }) => {
+        if (!shouldHandleSessionEvent(payload)) return;
+
+        // 页面刷新后，如果收到活跃事件但 isProcessing=false，自动恢复执行状态
+        if (!useChatStore.getState().isProcessing && !useChatStore.getState().isLoadingHistory) {
+          setProcessing(true);
+        }
+      }),
       webClient.on('chat.final', ({ payload }) => {
         if (!shouldHandleSessionEvent(payload)) return;
 
         const currentMode = useSessionStore.getState().mode;
         const content = normalizeFinalContent(payload);
+        finishContextCompressionTurn();
 
-        // team 模式下，将 chat.final 作为 team_leader 消息处理
+        // team 模式下，过滤成员输出，只保留外层 leader 回复。
+        if (isHiddenTeamTeammateMessagePayload(currentMode, payload)) {
+          const memberId = getTeamPayloadMemberName(payload);
+          if (memberId) {
+            const timestamp = eventTimestampMs(payload);
+            const outputEventId = takeTeamMemberOutputEventId(payload, memberId);
+            if (!content.trim()) {
+              return;
+            }
+            useSessionStore.getState().addTeamMemberExecutionEvent({
+              id: outputEventId || stableEventId('final', payload.session_id, memberId, payload.rid, timestamp, content.slice(0, 48)),
+              member_id: memberId,
+              kind: 'final',
+              timestamp,
+              title: t('team.process.execution.final'),
+              content,
+            });
+          }
+          return;
+        }
+        if (content) {
+          revealPendingContextUsage();
+        }
         if (currentMode === 'team' && content) {
           clearThinkingForVisibleOutput();
           const existingMsg = findActiveTeamLeaderMessage();
@@ -872,7 +1404,29 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
         if (!shouldHandleSessionEvent(payload)) return;
         const files = (payload.files ?? []) as FileDownloadItem[];
         if (!files.length) return;
-        if (useSessionStore.getState().mode === 'team') {
+        const currentMode = useSessionStore.getState().mode;
+        if (isHiddenTeamTeammateMessagePayload(currentMode, payload)) {
+          const memberId = getTeamPayloadMemberName(payload);
+          if (memberId) {
+            const timestamp = eventTimestampMs(payload);
+            useSessionStore.getState().addTeamMemberExecutionEvent({
+              id: stableEventId('file', payload.session_id, memberId, timestamp, files.map((file) => file.name).join(',')),
+              member_id: memberId,
+              kind: 'file',
+              timestamp,
+              title: t('team.process.execution.sentFile'),
+              content: files.map((file) => file.name).join('\n'),
+              files: files.map((file) => ({
+                name: file.name,
+                size: file.size,
+                mime_type: file.mime_type,
+                download_url: file.download_url,
+              })),
+            });
+          }
+          return;
+        }
+        if (currentMode === 'team') {
           const target = findActiveTeamLeaderMessage();
           if (target) {
             updateMessage(target.id, {
@@ -895,11 +1449,41 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
       webClient.on('chat.tool_call', ({ payload }) => {
         if (!shouldHandleSessionEvent(payload)) return;
         if (shouldDropDuplicatedEvent('chat.tool_call', payload)) return;
+        // 页面刷新后，如果收到活跃事件但 isProcessing=false，自动恢复执行状态
+        if (!useChatStore.getState().isProcessing && !useChatStore.getState().isLoadingHistory) {
+          setProcessing(true);
+        }
+        const currentMode = useSessionStore.getState().mode;
         clearThinkingForVisibleOutput();
         const toolCall = normalizeToolCallPayload(payload);
+        const shutdownMemberId = getShutdownMemberFromToolCall(toolCall);
+        if (shutdownMemberId) {
+          shutdownMemberToolCallRef.current.set(toolCall.id, shutdownMemberId);
+        }
+        if (isHiddenTeamTeammateMessagePayload(currentMode, payload)) {
+          if (currentMode === 'team' && !isTeamPanelClearedForPayload(payload)) {
+            applyTeamTaskToolCall(toolCall);
+          }
+          const memberId = getTeamPayloadMemberName(payload) || toolCall.memberName;
+          if (memberId) {
+            teamToolCallMemberRef.current.set(toolCall.id, memberId);
+            const timestamp = eventTimestampMs(payload);
+            useSessionStore.getState().addTeamMemberExecutionEvent({
+              id: stableEventId('tool-call', payload.session_id, memberId, toolCall.id, timestamp),
+              member_id: memberId,
+              kind: 'tool_call',
+              timestamp,
+              title: t('team.process.execution.toolCallTitle', { tool: toolCall.name }),
+              content: toolCall.description || toolCall.formatted_args || stringifyCompact(toolCall.arguments),
+              tool_name: toolCall.name,
+              tool_call_id: toolCall.id,
+            });
+          }
+          return;
+        }
         const { currentStreamId, messages } = useChatStore.getState();
         const currentStreamMessage =
-          useSessionStore.getState().mode === 'team'
+          currentMode === 'team'
             ? findActiveTeamLeaderMessage()
             : currentStreamId
               ? messages.find((msg) => msg.id === currentStreamId)
@@ -910,38 +1494,108 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
             ? { startedAt: currentStreamMessage.timestamp }
             : undefined
         );
+        if (currentMode === 'team' && !isTeamPanelClearedForPayload(payload)) {
+          applyTeamTaskToolCall(toolCall);
+        }
       }),
       webClient.on('chat.tool_result', ({ payload }) => {
         if (!shouldHandleSessionEvent(payload)) return;
         if (shouldDropDuplicatedEvent('chat.tool_result', payload)) return;
-        addToolResult(normalizeToolResultPayload(payload));
+        const currentMode = useSessionStore.getState().mode;
+        const toolResult = normalizeToolResultPayload(payload);
+        const activeSessionId = getPayloadSessionId(payload) || activeSessionIdRef.current || undefined;
+        const shutdownMemberId =
+          (toolResult.toolCallId
+            ? shutdownMemberToolCallRef.current.get(toolResult.toolCallId)
+            : undefined) ||
+          getShutdownMemberFromToolResult(toolResult);
+        if (isHiddenTeamTeammateMessagePayload(currentMode, payload)) {
+          const memberId =
+            getTeamPayloadMemberName(payload) ||
+            (toolResult.toolCallId ? teamToolCallMemberRef.current.get(toolResult.toolCallId) : undefined);
+          if (memberId) {
+            const timestamp = eventTimestampMs(payload);
+            useSessionStore.getState().addTeamMemberExecutionEvent({
+              id: stableEventId('tool-result', payload.session_id, memberId, toolResult.toolCallId, timestamp),
+              member_id: memberId,
+              kind: 'tool_result',
+              timestamp,
+              title: t('team.process.execution.toolResultTitle', { tool: toolResult.toolName }),
+              content: toolResult.summary || stringifyCompact(toolResult.result),
+              tool_name: toolResult.toolName,
+              tool_call_id: toolResult.toolCallId,
+            });
+          }
+          if (shutdownMemberId) {
+            if (toolResult.toolCallId) {
+              shutdownMemberToolCallRef.current.delete(toolResult.toolCallId);
+            }
+            applyTeamMemberShutdown(
+              shutdownMemberId,
+              activeSessionId
+            );
+          }
+          return;
+        }
+        if (shutdownMemberId) {
+          if (toolResult.toolCallId) {
+            shutdownMemberToolCallRef.current.delete(toolResult.toolCallId);
+          }
+          applyTeamMemberShutdown(
+            shutdownMemberId,
+            activeSessionId
+          );
+        }
+        addToolResult(toolResult);
       }),
       webClient.on('todo.updated', ({ payload }) => {
         if (!shouldHandleSessionEvent(payload)) return;
         if (shouldDropDuplicatedEvent('todo.updated', payload)) return;
+        if (isTeamPanelClearedForPayload(payload)) {
+          return;
+        }
         const todos = Array.isArray(payload.todos) ? payload.todos : [];
         setTodos(todos as Parameters<typeof setTodos>[0]);
       }),
-      webClient.on('context.compressed', ({ payload }) => {
+      webClient.on('context.usage', ({ payload }) => {
         if (!shouldHandleSessionEvent(payload)) return;
+        const currentMode = useSessionStore.getState().mode;
+        if (isHiddenTeamTeammateMessagePayload(currentMode, payload)) return;
         const rate =
           typeof payload.rate === 'number' ? payload.rate : 0;
-        const beforeCompressed =
-          typeof payload.before_compressed === 'number' && Number.isFinite(payload.before_compressed)
-            ? payload.before_compressed
+        const contextMax =
+          typeof payload.context_max === 'number' && Number.isFinite(payload.context_max)
+            ? payload.context_max
             : null;
-        const afterCompressed =
-          typeof payload.after_compressed === 'number' && Number.isFinite(payload.after_compressed)
-            ? payload.after_compressed
+        const tokensUsed =
+          typeof payload.tokens_used === 'number' && Number.isFinite(payload.tokens_used)
+            ? payload.tokens_used
             : null;
-        setContextCompressionStats({ rate, beforeCompressed, afterCompressed });
-        console.debug('[ws] context.compressed', {
+        const stats = { rate, beforeCompressed: contextMax, afterCompressed: tokensUsed };
+        if (holdContextUsageUntilVisibleReplyRef.current) {
+          pendingContextUsageRef.current = stats;
+          setContextCompressionStats({
+            rate: 0,
+            beforeCompressed: 0,
+            afterCompressed: 0,
+          });
+        } else {
+          setContextCompressionStats(stats);
+        }
+        console.debug('[ws] context.usage', {
           session_id: payload.session_id,
           rate,
-          before_compressed: beforeCompressed,
-          after_compressed: afterCompressed,
+          context_max: contextMax,
+          tokens_used: tokensUsed,
         });
       }),
+      webClient.on<ContextCompressionStatePayload>(
+        'context.compression_state',
+        ({ payload }) => {
+          if (!shouldHandleSessionEvent(payload)) return;
+          handleContextCompressionState(payload);
+        }
+      ),
       webClient.on('heartbeat.relay', ({ payload }) => {
         const heartbeatText =
           typeof payload.heartbeat === 'string' ? payload.heartbeat : '';
@@ -974,6 +1628,9 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
           return;
         }
         const isProcessingNow = Boolean(payload.is_processing);
+        if (isProcessingNow && useChatStore.getState().isPaused) {
+          return;
+        }
         setProcessing(isProcessingNow);
         if (!isProcessingNow) {
           setThinking(false);
@@ -1004,16 +1661,17 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
         if (shouldDropDuplicatedEvent('chat.error', payload)) return;
         setThinking(false);
         const errorMsg =
-          typeof payload.error === 'string' ? payload.error : i18n.t('network.unknownError');
+          typeof payload.error === 'string' ? payload.error : t('network.unknownError');
         // 忽略 "invalid page_idx or session history not found" 错误，因为这是新会话的正常情况
         if (errorMsg.includes('invalid page_idx or session history not found')) {
+          useChatStore.getState().setLoadingHistory(false);
           return;
         }
         onErrorRef.current?.(errorMsg);
         addMessage({
           id: `error-${Date.now()}`,
           role: 'system',
-          content: i18n.t('network.errorPrefix', { message: errorMsg }),
+          content: t('network.errorPrefix', { message: errorMsg }),
           timestamp: new Date().toISOString(),
         });
       }),
@@ -1070,7 +1728,20 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
       }),
       webClient.on('chat.ask_user_question', ({ payload }) => {
         if (!shouldHandleSessionEvent(payload)) return;
-        setPendingQuestion(payload as unknown as AskUserQuestionPayload);
+        const questionPayload = payload as Record<string, unknown>;
+        const evolutionMeta =
+          questionPayload.evolution_meta && typeof questionPayload.evolution_meta === 'object'
+            ? (questionPayload.evolution_meta as Record<string, unknown>)
+            : questionPayload._evolution_meta && typeof questionPayload._evolution_meta === 'object'
+              ? (questionPayload._evolution_meta as Record<string, unknown>)
+              : undefined;
+        const normalizedPayload: AskUserQuestionPayload = {
+          request_id: typeof questionPayload.request_id === 'string' ? questionPayload.request_id : '',
+          source: typeof questionPayload.source === 'string' ? questionPayload.source : undefined,
+          questions: Array.isArray(questionPayload.questions) ? questionPayload.questions : [],
+          ...(evolutionMeta ? { evolutionMeta } : {}),
+        };
+        setPendingQuestion(normalizedPayload);
       }),
       // 同时监听 session_result 事件，以处理后端可能发送的不同格式
       webClient.on('session_result', ({ payload }) => {
@@ -1172,11 +1843,28 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
         if (shouldDropDuplicatedEvent('team.task', payload)) {
           return;
         }
+        if (isTeamPanelClearedForPayload(payload)) {
+          return;
+        }
         clearThinkingForVisibleOutput();
         const p = payload as { payload?: { event?: unknown }; event?: unknown };
         const event = p.payload?.event || p.event;
         if (event) {
-          const e = event as { type?: string; team_id?: string; task_id?: string; status?: string; timestamp?: number };
+          const e = event as {
+            type?: string;
+            team_id?: string;
+            task_id?: string;
+            status?: string;
+            timestamp?: number;
+            member_id?: string;
+            assignee?: string;
+            team_name?: string;
+            title?: string;
+            name?: string;
+            description?: string;
+            content?: string;
+            updated_at?: number | string | null;
+          };
           useSessionStore.getState().addTeamTaskEvent({
             id: `task-${Date.now()}`,
             type: e.type || '',
@@ -1184,7 +1872,17 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
             task_id: e.task_id || '',
             status: e.status || '',
             timestamp: e.timestamp || Date.now(),
+            member_id: e.member_id,
+            assignee: e.assignee,
+            team_name: e.team_name,
+            title: e.title || e.name || e.description,
+            content: e.content,
+            updated_at: e.updated_at,
           });
+          const normalizedTask = normalizeTaskEvent(event);
+          if (normalizedTask) {
+            useSessionStore.getState().upsertTeamTask(normalizedTask);
+          }
         }
       }),
       webClient.on('team.member', ({ payload }) => {
@@ -1192,23 +1890,54 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
         if (shouldDropDuplicatedEvent('team.member', payload)) {
           return;
         }
-        clearThinkingForVisibleOutput();
         const p = payload as { payload?: { event?: unknown }; event?: unknown };
         const event = p.payload?.event || p.event;
         if (event) {
-          const e = event as { type?: string; member_id?: string; status?: string; new_status?: string; timestamp?: number };
-          if (e.type === 'team.member.status_changed' && e.member_id && e.new_status) {
+          const e = event as {
+            type?: string;
+            member_id?: string;
+            status?: string;
+            new_status?: string;
+            timestamp?: number;
+            name?: string;
+            execution_status?: string | null;
+            mode?: string;
+          };
+          const activeSessionId = getPayloadSessionId(payload) || activeSessionIdRef.current || undefined;
+          if (e.type === 'team.member.shutdown' && e.member_id) {
+            applyTeamMemberShutdown(e.member_id, activeSessionId);
+          } else if (activeSessionId && clearedTeamPanelSessionRef.current === activeSessionId) {
+            return;
+          } else if (e.type === 'team.member.status_changed' && e.member_id && e.new_status) {
             useSessionStore.getState().updateTeamMemberStatus(
               e.member_id,
               e.new_status,
               e.timestamp
             );
-          } else {
+          } else if (e.type === 'team.member.execution_changed' && e.member_id) {
+            const existingMember = useSessionStore.getState().teamMembers.some(
+              (member) => member.member_id === e.member_id
+            );
+            if (existingMember) {
+              useSessionStore.getState().addTeamMember({
+                id: `member-${Date.now()}`,
+                member_id: e.member_id,
+                status: e.status || '',
+                timestamp: e.timestamp || Date.now(),
+                name: e.name,
+                execution_status: e.execution_status || e.new_status,
+                mode: e.mode,
+              });
+            }
+          } else if (!e.type || e.type === 'team.member.spawned' || e.type === 'team.member.restarted') {
             useSessionStore.getState().addTeamMember({
               id: `member-${Date.now()}`,
               member_id: e.member_id || '',
               status: e.status || '',
               timestamp: e.timestamp || Date.now(),
+              name: e.name,
+              execution_status: e.execution_status,
+              mode: e.mode,
             });
           }
         }
@@ -1243,6 +1972,15 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
         if (!shouldHandleSessionEvent(payload)) return;
         const content = typeof payload.content === 'string' ? payload.content : '';
         const stage = typeof payload.stage === 'string' ? payload.stage : undefined;
+
+        // Check for security alert
+        const metadata = (payload as { metadata?: { is_security_alert?: boolean } }).metadata;
+        if (metadata?.is_security_alert) {
+          window.dispatchEvent(new CustomEvent('security-alert', {
+            detail: { message: content }
+          }));
+        }
+
         useHarnessStore.getState().addHarnessMessage(content, stage);
 
         // Pipeline start message contains stages array: { content, pipeline, stages: [{slot, display_name}] }
@@ -1401,10 +2139,15 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
     addMessage,
     addToolCall,
     addToolResult,
+    appendTeamMemberOutputDelta,
     appendStreamContent,
     clearSubtasks,
+    clearTodos,
+    finishContextCompressionTurn,
     handleConnectionAck,
+    handleContextCompressionState,
     handleTtsPlayback,
+    revealPendingContextUsage,
     setMode,
     setPaused,
     setPendingQuestion,
@@ -1421,6 +2164,8 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
     shouldDropDuplicatedEvent,
     startStreaming,
     stopStreaming,
+    t,
+    takeTeamMemberOutputEventId,
     updateMessage,
     updateSubtask,
   ]);

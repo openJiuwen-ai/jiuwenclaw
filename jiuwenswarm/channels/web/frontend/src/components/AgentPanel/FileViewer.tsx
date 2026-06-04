@@ -267,6 +267,9 @@ export function FileViewer({ filePath, fileName, reloadNonce = 0 }: FileViewerPr
             >
               <option value="auto">Auto Detect</option>
               <option value="utf-8">UTF-8</option>
+              <option value="utf-16">UTF-16</option>
+              <option value="utf-16le">UTF-16LE</option>
+              <option value="utf-16be">UTF-16BE</option>
               <option value="gbk">GBK</option>
               <option value="gb2312">GB2312</option>
               <option value="big5">Big5</option>

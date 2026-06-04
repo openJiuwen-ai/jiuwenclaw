@@ -33,11 +33,20 @@ export function createCopyCommand(): SlashCommand {
       }
 
       const texts = getRecentAssistantMessages(ctx);
-      const text = texts[index - 1];
-      if (!text) {
-        ctx.addItem(addError(ctx.sessionId, `No assistant response found for /copy ${index}`));
+      if (texts.length === 0) {
+        ctx.addItem(addError(ctx.sessionId, "No assistant message to copy"));
         return;
       }
+
+      if (index > texts.length) {
+        const countText = texts.length === 1 ? "message" : "messages";
+        ctx.addItem(
+          addError(ctx.sessionId, `Only ${texts.length} assistant ${countText} available to copy`),
+        );
+        return;
+      }
+
+      const text = texts[index - 1];
 
       if (!copyToClipboard(text)) {
         ctx.addItem(addError(ctx.sessionId, "Clipboard integration is unavailable on this system"));

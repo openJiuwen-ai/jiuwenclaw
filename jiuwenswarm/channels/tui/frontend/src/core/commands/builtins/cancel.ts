@@ -10,7 +10,7 @@ export function createCancelCommand(): SlashCommand {
     isSafeConcurrent: true,
     kind: CommandKind.BUILT_IN,
     action: (ctx) => {
-      ctx.sendEventOnly("chat.interrupt", { intent: "cancel" });
+      ctx.sendEventOnly("chat.interrupt", { intent: "cancel", mode: ctx.mode });
       ctx.addItem(addInfo(ctx.sessionId, "Task interrupted", "i"));
     },
   };

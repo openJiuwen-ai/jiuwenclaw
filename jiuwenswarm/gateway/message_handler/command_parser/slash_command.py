@@ -291,6 +291,13 @@ FIRST_BATCH_REGISTRY: tuple[SlashCommandEntry, ...] = (
         req_method="command.recap",
         notes="客户端命令，生成会话快速回顾（read-only）；TUI → Gateway → AgentServer。",
     ),
+    SlashCommandEntry(
+        id="agents",
+        canonical_text="/agents",
+        scope="client",
+        req_method="agents.list",
+        notes="TUI agent 配置管理菜单；TUI 通过 agents.* 方法与后端交互。",
+    ),
 )
 
 

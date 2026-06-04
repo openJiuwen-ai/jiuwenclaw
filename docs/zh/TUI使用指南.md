@@ -72,9 +72,9 @@
 | `/evolve_simplify` | - | 整理、合并某技能的演进经验 | `/evolve_simplify myskill 合并重复经验` | `agent.plan` / `team` |
 | `/init` | - | 在 **Code 模式** 下初始化 `JIUWENSWARM.md` / `JIUWENSWARM.local.md` | `/init` | **仅 `code.*`** |
 | `/mcp` | - | 管理 MCP 服务 | `/mcp list`、`/mcp add ...` | 全部 |
-| `/mode` | - | 切换或查看模式 | `/mode`、`/mode code` | 全部 |
+| `/mode` | - | 切换或查看模式 | `/mode`、`/mode code`、`/mode team` | 全部 |
 | `/permissions` | - | 设置 `permissions.tools` 中单工具的 allow/ask/deny | `/permissions ask write_file` | 全部 |
-| `/plan` | - | 进入当前模式族的 plan 子模式，或发送规划请求 | `/plan`、`/plan open`、`/plan 迁移步骤` | 非 `team` |
+| `/plan` | - | 进入 Agent 规划模式，或发送规划请求 | `/plan`、`/plan open`、`/plan 迁移步骤` | 非 `team` |
 | `/rename` | - | 查看/重命名/清空当前会话标题 | `/rename`、`/rename 标题`、`/rename clear` | 全部 |
 | `/resume` | `/continue` | 列出或恢复历史会话；无参 `/resume` 与 `/continue` 在 TUI 中可打开交互列表（见下） | `/resume list`、`/resume <id>` | 全部 |
 | `/skills` | - | 技能与市场源管理 | `/skills`、`/skills install ...` | 全部 |
@@ -101,9 +101,12 @@
 
 - **`/mode`**（`mode.ts`）  
   - 无参数：显示当前模式。  
-  - 有参数：映射为 `agent.plan`、`agent.fast`、`code.plan`、`code.normal`、`team` 之一，并尝试 `mode.set` RPC，同时更新本地 UI 状态。  
-  - 简写：`/mode agent` → `agent.plan`；`/mode code` → `code.normal`。
-- **同族子模式**：可用 **`/mode code.plan`**、**`/mode agent.fast`** 等直达；**`/switch plan|fast|normal`** 在 `switch.ts` 中实现，但 **默认构建未注册**，需要子模式时请用 `/mode` 直达或 **`/plan`**（见下）在 Agent/Code 族内进入 plan。
+  - TUI 当前接受：`agent`、`plan`、`agent.plan`、`agent.fast`、`code`、`code.normal`、`code.team`、`team`、`team.normal`。
+  - 实际映射：`agent` / `plan` → `agent.plan`；`code` → `code.normal`；`team.normal` → `team`；其它直达值保持不变。
+  - 切换时会尝试调用 `mode.set` RPC，同时更新本地 UI 状态；如果后端不支持 `mode.set`，TUI 仍会在后续发送消息时通过当前模式传递。
+  - 从 `team` / `code.team` 离开 Team 族且当前有 Team 任务运行时，TUI 会先弹出确认，确认后发送 `chat.interrupt` 再切换。
+- **与 Gateway 受控通道的差异**：受控通道只接受 `/mode agent|code|team|agent.plan|agent.fast|code.normal|code.team`；`/mode plan`、`/mode team.normal` 是 TUI 本地命令能力，不属于 Gateway slash 白名单。
+- **同族子模式**：可用 **`/mode agent.fast`**、**`/mode code.normal`**、**`/mode code.team`** 等直达；**`/switch plan|fast|normal|team`** 在 `switch.ts` 中实现，但 **默认 TUI 注册表未注册**。
 
 #### `/workspace`（可信目录）
 
@@ -115,7 +118,6 @@
 #### `/init`（仅 Code 模式）
 
 - 必须在 `code.*` 下执行；否则提示先 `/mode code`。
-- 若当前为 `code.plan`，会自动切到 `code.normal` 以便写文件。
 - 需能解析工作目录：优先 `trustedDirs[0]`，否则 `process.cwd()`；无法解析时提示先 `/workspace set <path>`。
 - 交互选择范围：团队共享 `JIUWENSWARM.md`、个人 `JIUWENSWARM.local.md` 或两者；然后向后端发送编排提示（`logAsUser: false`）。
 - 详见 [Slash命令表.md](Slash命令表.md) 与源码 `init.ts`。
@@ -178,6 +180,7 @@
 
 - `agent.plan`：用于单 Agent Skill 自演进；其它 Agent / Code 子模式不处理这组命令。
 - `team`：使用团队技能演进 rail；`/evolve <skill_name> <user_query>`、`/evolve_list`、`/evolve_simplify`、`/evolve_rebuild` 可用。
+- 无参数 `/evolve` 仅在 `agent.plan` 下返回待处理演进记录摘要；Team 模式会要求补充 Skill 名称和演进意图。
 
 审批与状态：
 
@@ -190,7 +193,7 @@
 #### `/plan`
 
 - 在 `team` 模式下不可用。
-- 无参数：进入当前族下的 plan（Agent → `agent.plan`，Code → `code.plan`）。
+- 无参数：进入 `agent.plan`。
 - `open`：仅提示已进入规划模式。
 - 其它文本：在切换到 plan 后作为规划请求发送。
 
@@ -351,7 +354,6 @@
 |------|------|------|
 | Agent（规划） | `agent.plan` | 全工具 + 主动记忆，偏规划 |
 | Agent（快速） | `agent.fast` | 全工具 + 被动记忆，偏快 |
-| Code（规划） | `code.plan` | 编码 + 编码记忆，偏规划；写文件能力受限场景更多 |
 | Code（常规） | `code.normal` | 编码 + 编码记忆，偏执行 |
 | Team | `team` | 多 Agent 协作 |
 
@@ -369,11 +371,11 @@
 ### 推荐工作流
 
 1. **进入 Code 模式**  
-   ` /mode code` → 默认 `code.normal`；需要先看方案再动手时可 ` /mode code.plan`，或在已是 Code 族时用 **`/plan`** 进入 `code.plan`。
+   ` /mode code` → 默认 `code.normal`。
 2. **划定可信目录**  
    ` /workspace add .` 或 ` /workspace set /path/to/repo`，确保 Agent 文件工具允许访问你的工程树。
 3. **（可选）项目级说明文件**  
-   在 `code.*` 下执行 ` /init`，按提示选择团队/个人/两者，生成 `JIUWENSWARM.md` 等；若从 `code.plan` 开始，命令会自动切到 `code.normal` 以便写入。
+   在 `code.*` 下执行 ` /init`，按提示选择团队/个人/两者，生成 `JIUWENSWARM.md` 等。
 4. **日常编码对话**  
    直接描述需求；模型会通过白名单工具与编码记忆完成任务。
 5. **查看本轮改动**  
@@ -398,7 +400,7 @@
 | 现象 | 处理 |
 |------|------|
 | `/init` 提示需要 Code 模式 | 先执行 `/mode code` |
-| 无法写文件或总被要求确认 | 确认处于 `code.normal`；`code.plan` 更偏规划；`/init` 会自动从 `code.plan` 切到 `code.normal` |
+| 无法写文件或总被要求确认 | 确认处于 `code.normal` |
 | 文件路径不在允许范围 | 使用 `/workspace add` 将仓库根或子目录加入可信列表 |
 | 连接失败 | 检查 Gateway 是否监听、`--url` 是否正确、防火墙 |
 | 未安装 `rg` | 安装 ripgrep 以改善搜索体验（欢迎屏提示） |

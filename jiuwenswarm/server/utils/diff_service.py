@@ -23,22 +23,23 @@ class DiffService:
     def __init__(self) -> None:
         self._agent_id = "jiuwenswarm"
 
-    def get_turn_diffs(self, session_id: str) -> list[dict[str, Any]]:
+    def get_turn_diffs(self, session_id: str, project_dir: str | None = None) -> list[dict[str, Any]]:
         """获取 session 的所有 turn diff（完整信息）.
 
         Args:
             session_id: 会话 ID
+            project_dir: 项目目录路径（可选，若不提供则从 session metadata 读取）
 
         Returns:
             turn diff 列表，按时间倒序排列（most recent first）
         """
-        turns = self._compute_turn_diffs(session_id)
+        turns = self._compute_turn_diffs(session_id, project_dir)
         return list(reversed(turns))
 
-    def _compute_turn_diffs(self, session_id: str) -> list[dict[str, Any]]:
+    def _compute_turn_diffs(self, session_id: str, project_dir: str | None = None) -> list[dict[str, Any]]:
         """计算 turn-based diffs."""
         history = self._read_history(session_id)
-        agent_history = self._read_agent_history(session_id)
+        agent_history = self._read_agent_history(session_id, project_dir)
 
         if not history:
             return []
@@ -51,15 +52,11 @@ class DiffService:
 
             if record["role"] == "user":
                 turn_start = record["timestamp"]
-                turn_end = None
-
-                for j in range(i + 1, len(history)):
-                    next_record = history[j]
-                    if next_record["role"] == "user":
-                        break
-                    if self._is_turn_end(next_record):
-                        turn_end = next_record["timestamp"]
-                        break
+                # Use next user message timestamp as turn end boundary.
+                # A turn logically spans from one user message to the next,
+                # so this captures all file edits within the turn's scope
+                # (including those after chat.final but before the next user msg).
+                turn_end = self._find_next_user_time(history, i)
 
                 turns.append({
                     "turnIndex": len(turns) + 1,
@@ -158,20 +155,59 @@ class DiffService:
         except Exception:
             return []
 
-    def _read_agent_history(self, session_id: str | None = None) -> dict[str, Any]:
+    @staticmethod
+    def _get_project_dir_from_metadata(session_id: str) -> str | None:
+        """从 session metadata.json 中读取项目目录."""
+        metadata_file = get_agent_sessions_dir() / session_id / "metadata.json"
+        if not metadata_file.exists():
+            return None
+        try:
+            metadata = json.loads(metadata_file.read_text(encoding="utf-8"))
+            # 从 channel_metadata.cwd 或 delivery_context.route_metadata.cwd 获取
+            channel_meta = metadata.get("channel_metadata", {})
+            if isinstance(channel_meta, dict):
+                cwd = channel_meta.get("cwd")
+                if isinstance(cwd, str) and cwd.strip():
+                    return cwd.strip()
+            delivery_ctx = metadata.get("delivery_context", {})
+            if isinstance(delivery_ctx, dict):
+                route_meta = delivery_ctx.get("route_metadata", {})
+                if isinstance(route_meta, dict):
+                    cwd = route_meta.get("cwd")
+                    if isinstance(cwd, str) and cwd.strip():
+                        return cwd.strip()
+        except (json.JSONDecodeError, OSError) as e:
+            logger.debug("Failed to read metadata file %s: %s", metadata_file, e)
+        return None
+
+    def _is_valid_file_ops_file(
+        self, name: str, session_id: str | None, require_session: bool = False
+    ) -> bool:
+        """检查文件名是否是有效的 file_ops 文件."""
+        if not name.startswith(f"file_ops_{self._agent_id}_"):
+            return False
+        if not name.endswith(".json"):
+            return False
+        if require_session:
+            return session_id is not None and session_id in name
+        return session_id is None or session_id in name
+
+    def _read_agent_history(self, session_id: str | None = None, project_dir: str | None = None) -> dict[str, Any]:
         """读取 .agent_history（同时读取全局与 session-specific 文件并合并）.
 
         Args:
             session_id: 若提供，额外扫描匹配该 session 的 file_ops 文件。
+            project_dir: 项目目录路径，若提供则也从项目目录读取 .agent_history。
         """
         result: dict[str, Any] = {}
 
+        # 1. 从 Agent Workspace 和 User Workspace 读取（公共位置）
         paths = [
             get_agent_workspace_dir() / ".agent_history" / f"file_ops_{self._agent_id}.json",
             get_user_workspace_dir() / ".agent_history" / f"file_ops_{self._agent_id}.json",
         ]
 
-        # session-specific file_ops（如 file_ops_jiuwenswarm_tui_xxx.json）
+        # 2. session-specific file_ops（如 file_ops_jiuwenswarm_tui_xxx.json）
         if session_id:
             for base_dir in (get_agent_workspace_dir(), get_user_workspace_dir()):
                 hist_dir = base_dir / ".agent_history"
@@ -179,21 +215,66 @@ class DiffService:
                     continue
                 for f in hist_dir.iterdir():
                     name = f.name
-                    if (
-                        name.startswith(f"file_ops_{self._agent_id}_")
-                        and name.endswith(".json")
-                        and session_id in name
-                    ):
+                    if self._is_valid_file_ops_file(name, session_id, require_session=True):
                         paths.append(f)
+
+        # 3. 从项目目录读取（实际写入位置）
+        # 如果未传入 project_dir，尝试从 session metadata 获取
+        if project_dir is None and session_id:
+            project_dir = self._get_project_dir_from_metadata(session_id)
+        if project_dir:
+            project_hist_dir = Path(project_dir) / ".agent_history"
+            if project_hist_dir.is_dir():
+                # 读取 session-specific file_ops 文件
+                for f in project_hist_dir.iterdir():
+                    name = f.name
+                    if self._is_valid_file_ops_file(name, session_id):
+                        paths.append(f)
+                # 也读取全局 file_ops 文件（不带 session_id 后缀的）
+                global_file = project_hist_dir / f"file_ops_{self._agent_id}.json"
+                if global_file.exists():
+                    paths.append(global_file)
+
+        # 用于规范化路径，避免大小写差异导致的重复
+        def normalize_path(p: str) -> str:
+            """规范化路径：统一大小写和斜杠方向"""
+            # 使用 pathlib.Path 规范化路径
+            try:
+                return str(Path(p).resolve())
+            except Exception:
+                return p.replace("\\", "/").lower()
 
         for history_file in paths:
             if history_file.exists():
                 try:
                     data = json.loads(history_file.read_text(encoding="utf-8"))
                     for file_path, entries in data.items():
-                        if file_path not in result:
-                            result[file_path] = []
-                        result[file_path].extend(entries)
+                        # 规范化路径，避免大小写差异导致的重复
+                        normalized_path = normalize_path(file_path)
+                        if normalized_path not in result:
+                            result[normalized_path] = []
+                        # 合并条目，避免时间戳相近的重复记录
+                        for entry in entries:
+                            # 检查是否已存在相同时间戳（±1秒）的相同操作
+                            ts = entry.get("timestamp", "")
+                            action = entry.get("action", "")
+                            is_duplicate = False
+                            for existing in result[normalized_path]:
+                                existing_ts = existing.get("timestamp", "")
+                                existing_action = existing.get("action", "")
+                                if action == existing_action:
+                                    # 比较时间戳是否相近（同一秒内）
+                                    try:
+                                        t1 = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+                                        t2 = datetime.fromisoformat(existing_ts.replace("Z", "+00:00"))
+                                        if abs((t1 - t2).total_seconds()) < 2:
+                                            is_duplicate = True
+                                            break
+                                    except (ValueError, TypeError):
+                                        # 时间戳格式无效，无法比较，跳过此条目比较
+                                        continue
+                            if not is_duplicate:
+                                result[normalized_path].append(entry)
                 except Exception as e:
                     logger.warning(f"Failed to read agent history file {history_file}: {e}")
 
@@ -246,9 +327,24 @@ class DiffService:
     @staticmethod
     def _compute_hunks(
         old_content: str | None,
-        new_content: str,
+        new_content: str | None,
     ) -> list[dict[str, Any]]:
         """计算结构化 diff hunks."""
+        # 处理删除文件的情况：new_content 为 None
+        if new_content is None:
+            if old_content is None:
+                return []
+            # 文件被删除：显示所有行被移除
+            lines = old_content.splitlines()
+            return [{
+                "oldStart": 1,
+                "oldLines": len(lines),
+                "newStart": 0,
+                "newLines": 0,
+                "lines": [f"-{line}" for line in lines],
+            }]
+
+        # 处理新建文件的情况：old_content 为 None
         if old_content is None:
             lines = new_content.splitlines()
             return [{
@@ -307,7 +403,7 @@ class DiffService:
         )
 
     def get_files_to_restore(
-        self, session_id: str, turn_index: int
+        self, session_id: str, turn_index: int, project_dir: str | None = None
     ) -> dict[str, dict[str, Any]]:
         """返回需要恢复的文件及其目标内容.
 
@@ -318,6 +414,7 @@ class DiffService:
         Args:
             session_id: 会话 ID
             turn_index: 目标回退轮次（1-based，即 /rewind 使用的编号）
+            project_dir: 项目目录路径（可选，若不提供则从 session metadata 读取）
 
         Returns:
             { file_path: { "restore_content": str | None, "action": "write" | "delete" } }
@@ -341,7 +438,7 @@ class DiffService:
             return {}
 
         # 2. 读取 file_ops 日志
-        agent_history = self._read_agent_history(session_id)
+        agent_history = self._read_agent_history(session_id, project_dir)
 
         # 3. 对于每个文件，找到第一条 timestamp >= target_timestamp 的 entry
         #    该 entry 的 old_content 即为目标 turn 开始前的文件状态

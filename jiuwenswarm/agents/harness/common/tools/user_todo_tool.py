@@ -193,28 +193,32 @@ def _write_todos_file(file_path: str, todos: List[TodoItem]):
 
 @tool(
     name="user_todos",
-    description="管理用户的个人待办事项和日程安排（如会议、提醒、计划）。当用户提到未来的安排或计划时应主动调用。注意：\
-        这是用户的个人待办工具，不要用于 agent 内部的任务规划（内部任务规划请用 todo_create/todo_insert 等工具）。",
+    description=(
+        "Manage the user's personal todo items and schedule (meetings, reminders, plans). "
+        "Proactively invoke when the user mentions future arrangements or plans. "
+        "NOTE: This is the user's personal todo tool — do NOT use it for internal agent "
+        "task planning (use todo_create/todo_insert for internal task tracking)."
+    ),
 )
 async def user_todos(params: UserTodosParams) -> Dict[str, Any]:
-    """管理用户的待办事项列表。支持按 channel 隔离，每个 channel 有独立的待办列表。
+    """Manage the user's per-channel todo list. Each channel has an isolated todo list.
 
     Args:
-        params: 待办事项操作参数，包含以下字段：
-            - action: 操作类型，可选值: list, get, create, update, delete, search
-            - channel_id: Channel ID，用于隔离不同 channel 的待办事项（默认使用全局 channel_id）
-            - todo_id: 待办事项 ID（用于 get, update, delete 操作）
-            - title: 待办事项标题（用于 create, update 操作）
-            - status: 状态 (pending, in_progress, completed, cancelled)
-            - priority: 优先级 (high, medium, low)
-            - due_at: 截止时间 (ISO 格式)
-            - remind_at: 提醒时间 (ISO 格式)
-            - created_by: 创建者
-            - description: 详细描述
-            - query: 搜索关键词（用于 search 操作）
+        params: Todo operation parameters:
+            - action: Operation type, one of: list, get, create, update, delete, search
+            - channel_id: Channel ID for per-channel isolation (defaults to global channel_id)
+            - todo_id: Todo item ID (for get, update, delete)
+            - title: Todo title (for create, update)
+            - status: Status (pending, in_progress, completed, cancelled)
+            - priority: Priority (high, medium, low)
+            - due_at: Due time (ISO format)
+            - remind_at: Reminder time (ISO format)
+            - created_by: Creator
+            - description: Detailed description
+            - query: Search keyword (for search action)
 
     Returns:
-        操作结果字典
+        Operation result dict
     """
     if isinstance(params, dict):
         params = UserTodosParams(**{k: v for k, v in params.items() if k in UserTodosParams.__dataclass_fields__})
@@ -292,7 +296,7 @@ async def _handle_user_todos(params: UserTodosParams) -> Dict[str, Any]:
             return {
                 "success": True,
                 "todo": new_todo.to_dict(),
-                "message": f"待办事项已创建: {params.title}",
+                "message": f"Todo created: {params.title}",
             }
         
         elif params.action == "update":
@@ -329,7 +333,7 @@ async def _handle_user_todos(params: UserTodosParams) -> Dict[str, Any]:
             return {
                 "success": True,
                 "todo": todo.to_dict(),
-                "message": f"待办事项已更新: {todo.title}",
+                "message": f"Todo updated: {todo.title}",
             }
         
         elif params.action == "delete":
@@ -349,7 +353,7 @@ async def _handle_user_todos(params: UserTodosParams) -> Dict[str, Any]:
             
             return {
                 "success": True,
-                "message": f"待办事项已删除: {todo.title}",
+                "message": f"Todo deleted: {todo.title}",
             }
         
         elif params.action == "search":

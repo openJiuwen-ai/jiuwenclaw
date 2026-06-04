@@ -27,7 +27,7 @@ from unittest import mock
 import pytest
 
 try:
-    from jiuwenclaw.agents.harness.common.memory.dreaming.sweeper import Sweeper  # noqa: F401
+    from jiuwenswarm.agents.harness.common.memory.dreaming.sweeper import Sweeper  # noqa: F401
     _DREAMING_AVAILABLE = True
 except ImportError:
     _DREAMING_AVAILABLE = False

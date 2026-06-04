@@ -106,7 +106,7 @@ export function createInitCommand(): SlashCommand {
       }
 
       // ---- Guard 3: workspace root ----
-      // ctx.getWorkspaceDir() 现在优先返回 trustedDirs[0]，fallback process.cwd()
+      // ctx.getWorkspaceDir() follows the current project directory, then falls back to process.cwd().
       const rootDir =
         ctx.getWorkspaceDir() ||
         (typeof process !== "undefined" ? process.cwd() : "");
@@ -190,7 +190,7 @@ export function createInitCommand(): SlashCommand {
         ),
       };
 
-      const prompt = buildInitPrompt({ rootDir, scopeKey, language, existing });
+      const prompt = buildInitPrompt({ rootDir, scopeKey, existing });
 
       // ---- Send ----
       // The earlier guard 2 already called setMode("code.normal") if needed.

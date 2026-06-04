@@ -5,6 +5,7 @@ import logging
 import json
 import queue
 import threading
+import time
 from pathlib import Path
 from typing import Any
 
@@ -48,6 +49,53 @@ def _read_history(path: Path) -> list[dict[str, Any]]:
     if isinstance(data, list):
         return data
     return []
+
+
+_TEAM_RELEVANT_EVENT_TYPES = frozenset({
+    "team.message",
+    "team.member",
+    "team.task",
+    "team.event",
+    "chat.tool_call", "chat.tracer_agent",
+    "chat.final", "chat.tool_result", "chat.file",
+})
+
+
+def _is_team_relevant(item: dict[str, Any]) -> bool:
+    et = item.get("event_type")
+    if not isinstance(et, str):
+        return False
+    if et in _TEAM_RELEVANT_EVENT_TYPES:
+        if et in ("chat.tool_call", "chat.tracer_agent"):
+            mode = item.get("mode")
+            return isinstance(mode, str) and mode.strip().lower() == "team"
+        if et in ("chat.final", "chat.tool_result", "chat.file"):
+            role = item.get("role")
+            return isinstance(role, str) and role.strip().lower() == "teammate"
+        return True
+    return False
+
+
+def read_team_history_records(session_id: str) -> list[dict[str, Any]]:
+    """读取指定会话的历史记录，仅返回 team 模式相关的记录。"""
+    fpath = _history_file(session_id)
+    all_records = _read_history(fpath)
+    # write_text 非原子写入（先截断再写入），读取可能命中截断窗口，
+    # 用递增间隔重试最多 5 次等待写入完成
+    if not all_records and fpath.exists():
+        for attempt in range(1, 6):
+            time.sleep(0.2 * attempt)
+            all_records = _read_history(fpath)
+            if all_records:
+                logger.info("read_team_history_records: recovered on retry %d", attempt)
+                break
+        if not all_records:
+            logger.warning(
+                "read_team_history_records: all retries exhausted, file_size=%d",
+                fpath.stat().st_size,
+            )
+
+    return [item for item in all_records if isinstance(item, dict) and _is_team_relevant(item)]
 
 
 def _write_item(session_id: str, item: dict[str, Any]) -> None:
@@ -153,6 +201,58 @@ def append_history_record(
             )
     except Exception as exc:
         logger.warning("更新会话元数据失败: %s", exc)
+
+
+def append_compact_history_records(
+    *,
+    session_id: str,
+    request_id: str,
+    channel_id: str,
+    summary: str | None,
+    timestamp: float,
+    trigger: str = "auto",
+    stats: dict[str, Any] | None = None,
+    mode: str | None = None,
+) -> None:
+    """Persist a compact boundary and optional transcript-only summary."""
+    clean_summary = (summary or "").strip()
+    metadata = {
+        "compact_metadata": {
+            "trigger": trigger,
+            **(_serialize_value(stats) if isinstance(stats, dict) else {}),
+        },
+    }
+
+    append_history_record(
+        session_id=session_id,
+        request_id=request_id,
+        channel_id=channel_id,
+        role="assistant",
+        event_type="context.compact_boundary",
+        content="Conversation compacted",
+        timestamp=timestamp,
+        extra=metadata,
+        mode=mode,
+    )
+
+    if not clean_summary:
+        return
+
+    append_history_record(
+        session_id=session_id,
+        request_id=request_id,
+        channel_id=channel_id,
+        role="assistant",
+        event_type="context.compact_summary",
+        content=clean_summary,
+        timestamp=timestamp + 0.001,
+        extra={
+            **metadata,
+            "is_compact_summary": True,
+            "transcript_only": True,
+        },
+        mode=mode,
+    )
 
 
 def truncate_history_records(*, session_id: str, cut_index: int) -> dict[str, Any]:

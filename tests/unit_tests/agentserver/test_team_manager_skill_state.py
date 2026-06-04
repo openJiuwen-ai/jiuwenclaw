@@ -146,6 +146,11 @@ def test_code_team_customizer_applies_code_profile_to_member(monkeypatch, tmp_pa
             },
         )(),
     )
+    monkeypatch.setattr(
+        TeamManager,
+        "register_member_runtime_tools",
+        staticmethod(lambda *args, **kwargs: None),
+    )
 
     calls = []
 
@@ -222,6 +227,107 @@ def test_code_team_customizer_applies_code_profile_to_member(monkeypatch, tmp_pa
     assert calls[0]["channel_id"] == "tui"
     assert calls[0]["project_dir"] == str(parent_project)
     assert calls[0]["skill_manager"] is not None
+    assert calls[0]["runtime_language"] is None
+    assert calls[0]["force_english_runtime_prompt"] is True
+
+
+def test_team_plan_leader_uses_preferred_language_for_code_profile(monkeypatch, tmp_path):
+    """team.plan leader should not inherit code profile's English-only runtime prompt."""
+    global_skills_dir = tmp_path / "global_skills"
+    global_skills_dir.mkdir(parents=True)
+    (global_skills_dir / "skills_state.json").write_text(
+        json.dumps({"marketplaces": [], "installed_plugins": [], "local_skills": []}),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.agents.harness.team.team_manager.get_agent_skills_dir",
+        lambda: global_skills_dir,
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.agents.harness.team.team_manager.build_member_rails",
+        lambda **kwargs: [],
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.agents.harness.team.team_manager.get_config",
+        lambda: {"preferred_language": "zh"},
+    )
+    monkeypatch.setattr(
+        TeamManager,
+        "register_member_runtime_tools",
+        staticmethod(lambda *args, **kwargs: None),
+    )
+
+    calls = []
+
+    def fake_configure_code_member(agent, **kwargs):
+        calls.append({"agent": agent, **kwargs})
+
+    monkeypatch.setattr(
+        "jiuwenswarm.server.runtime.agent_adapter.interface_code.configure_code_team_member_agent",
+        fake_configure_code_member,
+    )
+
+    spec = TeamAgentSpec.model_validate(
+        {
+            "team_name": "demo_team",
+            "agents": {
+                "leader": {},
+                "member_a": {},
+            },
+            "language": "cn",
+        }
+    )
+    parent_project = tmp_path / "project"
+    parent_project.mkdir()
+    parent_agent = SimpleNamespace(
+        _jiuwenswarm_adapter_mode="code",
+        _jiuwenswarm_code_project_dir=str(parent_project),
+        deep_config=SimpleNamespace(
+            workspace=SimpleNamespace(root_path=str(parent_project)),
+            sys_operation=None,
+        ),
+        ability_manager=SimpleNamespace(list=lambda: []),
+    )
+    customizer = TeamManager.build_agent_customizer(
+        spec=spec,
+        deep_agent=parent_agent,
+        session_id="session-1",
+        request_id="request-1",
+        channel_id="tui",
+        request_metadata={"mode": "team.plan"},
+    )
+
+    class AbilityManager:
+        def __init__(self):
+            self.cards = []
+
+        def list(self):
+            return list(self.cards)
+
+        def add(self, card):
+            self.cards.append(card)
+
+    class Agent:
+        def __init__(self):
+            self.deep_config = SimpleNamespace(
+                workspace=SimpleNamespace(root_path=str(tmp_path / "leader_workspace")),
+                sys_operation=None,
+            )
+            self.ability_manager = AbilityManager()
+            self.card = SimpleNamespace(id="team_leader", name="leader")
+            self.rails = []
+
+        def add_rail(self, rail):
+            self.rails.append(rail)
+
+    agent = Agent()
+
+    customizer(agent, member_name="team_leader", role="leader")
+
+    assert len(calls) == 1
+    assert calls[0]["agent"] is agent
+    assert calls[0]["runtime_language"] == "cn"
+    assert calls[0]["force_english_runtime_prompt"] is False
 
 
 def test_configure_code_team_member_uses_relative_coding_memory_path(monkeypatch, tmp_path):

@@ -349,7 +349,6 @@ export function HeartbeatPanel() {
                     >
                       <option value="web">{t('heartbeat.channels.web')}</option>
                       <option value="feishu">{t('heartbeat.channels.feishu')}</option>
-                      <option value="wecom">{t('heartbeat.channels.wecom')}</option>
                       <option value="xiaoyi" disabled style={{ color: '#8c8c96ff'}}>{t('heartbeat.channels.xiaoyi')}</option>
                       <option value="dingtalk" disabled style={{ color: '#8c8c96ff' }}>{t('heartbeat.channels.dingtalk')}</option>
                     </select>

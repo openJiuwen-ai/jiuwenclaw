@@ -1,8 +1,19 @@
 import { addError, addInfo } from "../helpers.js";
 import { CommandKind, type SlashCommand } from "../types.js";
-import { getAccentColorOptions } from "../../../ui/theme.js";
+import { getAccentColorOptions, type AccentColorName } from "../../../ui/theme.js";
 
 const COLOR_OPTIONS = getAccentColorOptions();
+const RESET_ALIASES = ["default", "reset", "none", "gray", "grey"] as const;
+
+function normalizeColorArg(value: string): AccentColorName | null {
+  if (RESET_ALIASES.includes(value as (typeof RESET_ALIASES)[number])) {
+    return "default";
+  }
+  if (COLOR_OPTIONS.includes(value as AccentColorName)) {
+    return value as AccentColorName;
+  }
+  return null;
+}
 
 export function createColorCommand(): SlashCommand {
   return {
@@ -28,7 +39,8 @@ export function createColorCommand(): SlashCommand {
         );
         return;
       }
-      if (!COLOR_OPTIONS.includes(value as (typeof COLOR_OPTIONS)[number])) {
+      const normalizedColor = normalizeColorArg(value);
+      if (!normalizedColor) {
         ctx.addItem(
           addError(
             ctx.sessionId,
@@ -37,8 +49,12 @@ export function createColorCommand(): SlashCommand {
         );
         return;
       }
-      ctx.setAccentColor(value as (typeof COLOR_OPTIONS)[number]);
-      ctx.addItem(addInfo(ctx.sessionId, `Session accent color set to ${value}`, "c"));
+      ctx.setAccentColor(normalizedColor);
+      void ctx.request("session.color_set", {
+        session_id: ctx.sessionId,
+        color: normalizedColor,
+      }).catch(() => {});
+      ctx.addItem(addInfo(ctx.sessionId, `Session accent color set to ${normalizedColor}`, "c"));
     },
   };
 }

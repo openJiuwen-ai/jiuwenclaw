@@ -16,7 +16,7 @@ import heartbeatIcon from '../../assets/sidebar/heartbeat.svg';
 import cronIcon from '../../assets/sidebar/cron.svg';
 import skillIcon from '../../assets/sidebar/skill.svg';
 import channelIcon from '../../assets/sidebar/channel.svg';
-// import pluginIcon from '../../assets/sidebar/plugin.svg'; // 临时隐藏 extensions tab
+import pluginIcon from '../../assets/sidebar/plugin.svg';
 import configIcon from '../../assets/sidebar/config.svg';
 import webIcon from '../../assets/sidebar/web.svg';
 import logsIcon from '../../assets/sidebar/logs.svg';
@@ -67,7 +67,7 @@ const mainNavItems: NavItem[] = [
   { key: 'cron', labelKey: 'nav.cron', icon: <img src={cronIcon} alt="" /> },
   { key: 'skills', labelKey: 'nav.skills', icon: <img src={skillIcon} alt="" /> },
   { key: 'channels', labelKey: 'nav.channels', icon: <img src={channelIcon} alt="" /> },
-  // { key: 'extensions', labelKey: 'nav.extensions', icon: <img src={pluginIcon} alt="" /> }, // 临时隐藏
+  { key: 'extensions', labelKey: 'nav.extensions', icon: <img src={pluginIcon} alt="" /> },
 ];
 
 const settingsNavItems: NavItem[] = [

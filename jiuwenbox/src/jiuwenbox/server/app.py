@@ -10,7 +10,7 @@ from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import ValidationError
@@ -23,6 +23,7 @@ from jiuwenbox.server.sandbox_manager import (
     SandboxNotFoundError,
     SandboxStateError,
 )
+from jiuwenbox.server.policy_reader import PolicyReader
 from jiuwenbox.server.proxy_manager import ProxyManager
 from jiuwenbox.server.policy_engine import PolicyValidationError
 from jiuwenbox.server.runtime.process import enable_child_subreaper
@@ -41,6 +42,12 @@ logger = logging.getLogger(__name__)
 
 _sandbox_manager: SandboxManager | None = None
 _proxy_manager: ProxyManager | None = None
+# Set during lifespan startup when the policy file only configures
+# ``inference_privacy_proxies``. In that mode we intentionally skip
+# building a ``SandboxManager``; ``get_sandbox_manager`` consults this
+# flag to surface a clean 503 instead of lazily constructing one on
+# the first sandbox-API call.
+_proxy_only_mode: bool = False
 
 # Every sandbox API call that talks to the in-sandbox daemon (exec, write_file,
 # read_file, list_dir) is dispatched via ``loop.run_in_executor(None, ...)``
@@ -122,7 +129,7 @@ def _configure_loop_default_executor() -> None:
     )
 
 
-def _build_sandbox_manager() -> SandboxManager:
+def _build_sandbox_manager(policy_reader: PolicyReader | None = None) -> SandboxManager:
     """Construct the global ``SandboxManager``, honoring ``--save-logs DIR``.
 
     Behaviour matrix:
@@ -156,7 +163,7 @@ def _build_sandbox_manager() -> SandboxManager:
             "audit JSONL.",
             ENV_SAVE_LOGS_DIR,
         )
-        return SandboxManager()
+        return SandboxManager(policy_reader=policy_reader)
     save_dir = Path(save_dir_raw).expanduser()
     try:
         save_dir.mkdir(parents=True, exist_ok=True)
@@ -168,25 +175,32 @@ def _build_sandbox_manager() -> SandboxManager:
             "Cannot create %s=%s (%s); falling back to disabled log persistence",
             ENV_SAVE_LOGS_DIR, save_dir_raw, exc,
         )
-        return SandboxManager()
+        return SandboxManager(policy_reader=policy_reader)
     logger.info("Per-sandbox audit log will be saved under %s", save_dir)
     return SandboxManager(
         audit_logger=AuditLogger(log_dir=save_dir, filename_strategy="timestamped"),
+        policy_reader=policy_reader,
     )
 
 
 def get_sandbox_manager() -> SandboxManager:
     global _sandbox_manager
     if _sandbox_manager is None:
+        if _proxy_only_mode:
+            # Refuse to lazily resurrect the sandbox subsystem when the
+            # operator explicitly opted into proxy-only mode. The route
+            # handler will see this as a clean 503 via the exception
+            # handler registered in ``create_app``.
+            raise HTTPException(
+                status_code=503,
+                detail=(
+                    "Sandbox subsystem is disabled: policy only configures "
+                    "inference_privacy_proxies. Add sandbox configuration "
+                    "to the policy file to enable sandbox APIs."
+                ),
+            )
         _sandbox_manager = _build_sandbox_manager()
     return _sandbox_manager
-
-
-def get_proxy_manager() -> ProxyManager:
-    global _proxy_manager
-    if _proxy_manager is None:
-        _proxy_manager = ProxyManager()
-    return _proxy_manager
 
 
 def _chmod_uds_socket_if_any() -> None:
@@ -224,7 +238,7 @@ def _chmod_uds_socket_if_any() -> None:
 
 @asynccontextmanager
 async def lifespan(_application: FastAPI):
-    global _sandbox_manager, _proxy_manager
+    global _sandbox_manager, _proxy_manager, _proxy_only_mode
     # Both of these have to run after uvicorn has spun up its event loop -
     # ``set_default_executor`` requires a running loop, and raising NOFILE is
     # only effective within the live process. They are also independent of
@@ -232,29 +246,54 @@ async def lifespan(_application: FastAPI):
     # already benefits from the larger executor.
     _raise_open_file_limit()
     _configure_loop_default_executor()
-    # Become the subreaper for our descendant tree *before* any sandbox
-    # spawns bwrap. PR_SET_CHILD_SUBREAPER only affects *future* children,
-    # so doing it here (after the loop is up but before SandboxManager
-    # might create a runtime that spawns bwrap) is the earliest safe point.
-    # No-op on non-Linux / when prctl is denied; logs internally.
-    enable_child_subreaper()
-    _sandbox_manager = _build_sandbox_manager()
-    _proxy_manager = ProxyManager()
-    # Wire the SIGCHLD-driven zombie reaper onto the running uvicorn loop.
-    # This must happen after ``_build_sandbox_manager`` (so a runtime is
-    # constructed and can publish its ``register_zombie_reaper`` method)
-    # but before ``_proxy_manager.start`` (which may itself fork helper
-    # processes whose orphans we now want reaped). Failure is non-fatal:
-    # the manager logs and the server keeps running; zombies just won't
-    # be cleaned up automatically until the next ``stop()``/``cleanup()``.
-    try:
-        loop = asyncio.get_running_loop()
-        _sandbox_manager.register_zombie_reaper(loop)
-    except Exception:  # noqa: BLE001
-        logger.exception(
-            "register_zombie_reaper failed during lifespan startup; bwrap "
-            "<defunct> processes may accumulate under the box-server pid",
+    # Share a single ``PolicyReader`` between the proxy and sandbox subsystems
+    # so the YAML file is parsed once. ``is_proxy_only`` re-reads the file,
+    # but the cost is negligible and the alternative (pre-loading the parsed
+    # SecurityPolicy here) would force every caller through this object too.
+    policy_reader = PolicyReader()
+    _proxy_only_mode = policy_reader.is_proxy_only()
+    if _proxy_only_mode:
+        # Proxy-only deployment: the operator configured only the inference
+        # privacy router, so we skip every sandbox-side moving part (no
+        # ``ProcessRuntime``, no subreaper, no idle/zombie reapers, no
+        # state-dir scrubbing). The ``/health`` endpoint and sandbox routes
+        # still work; they just observe ``_sandbox_manager is None`` and
+        # report "no sandboxes" / 503 respectively.
+        logger.info(
+            "Proxy-only policy detected (no sandbox config); skipping "
+            "sandbox subsystem startup",
         )
+    else:
+        # Become the subreaper for our descendant tree *before* any sandbox
+        # spawns bwrap. PR_SET_CHILD_SUBREAPER only affects *future*
+        # children, so doing it here (after the loop is up but before
+        # SandboxManager might create a runtime that spawns bwrap) is the
+        # earliest safe point. No-op on non-Linux / when prctl is denied;
+        # logs internally.
+        enable_child_subreaper()
+        _sandbox_manager = _build_sandbox_manager(policy_reader=policy_reader)
+        # Wire the SIGCHLD-driven zombie reaper onto the running uvicorn
+        # loop. Failure is non-fatal: the manager logs and the server keeps
+        # running; zombies just won't be cleaned up automatically until the
+        # next ``stop()``/``cleanup()``.
+        try:
+            loop = asyncio.get_running_loop()
+            _sandbox_manager.register_zombie_reaper(loop)
+        except Exception:  # noqa: BLE001
+            logger.exception(
+                "register_zombie_reaper failed during lifespan startup; bwrap "
+                "<defunct> processes may accumulate under the box-server pid",
+            )
+        # 起 idle sandbox reaper: 只在 root policy 的 ``timeout.idle_timeout``
+        # 显式配置时生效, 否则是 no-op (默认禁用), 跟未引入本特性前行为完全等价。
+        try:
+            _sandbox_manager.start_idle_reaper()
+        except Exception:  # noqa: BLE001
+            logger.exception(
+                "start_idle_reaper failed during lifespan startup; idle sandboxes "
+                "will not be auto-reaped",
+            )
+    _proxy_manager = ProxyManager(policy_reader=policy_reader)
     logger.info("box-server started (version %s)", __version__)
     await _proxy_manager.start()
     # 在 proxy 起来之后、yield (接受请求) 之前给 UDS 打权限: 此刻 uvicorn 已
@@ -272,6 +311,18 @@ async def lifespan(_application: FastAPI):
             await _proxy_manager.stop()
         except Exception:  # noqa: BLE001
             logger.exception("proxy_manager.stop failed during lifespan shutdown")
+        # Stop the idle reaper *before* shutdown_all_sandboxes so the reaper
+        # cannot race with the explicit teardown below (both grab
+        # ``manager._lock`` and call ``delete_sandbox``; letting them
+        # interleave just wastes time deleting things that are about to be
+        # deleted anyway).
+        try:
+            if _sandbox_manager is not None:
+                await _sandbox_manager.stop_idle_reaper()
+        except Exception:  # noqa: BLE001
+            logger.exception(
+                "sandbox_manager.stop_idle_reaper failed during lifespan shutdown",
+            )
         # Tear down every live sandbox before exiting. Without this, each
         # sandbox-daemon.py (spawned with ``start_new_session=True`` so it owns
         # its session/pgrp) would be reparented to init when uvicorn dies and
@@ -306,6 +357,12 @@ async def lifespan(_application: FastAPI):
             logger.exception(
                 "sandbox_manager.unregister_zombie_reaper failed during lifespan shutdown",
             )
+        # Reset the proxy-only flag so subsequent in-process boots (most
+        # notably the unit-test harness, which spins up create_app() many
+        # times) start from a clean slate; otherwise a previous run with
+        # an inference-only policy would force later sandbox-mode runs
+        # through the 503 short-circuit in ``get_sandbox_manager``.
+        _proxy_only_mode = False
         logger.info("box-server shutting down")
 
 
@@ -385,9 +442,16 @@ def create_app() -> FastAPI:
         from jiuwenbox.models.common import HealthResponse
         from jiuwenbox.supervisor.landlock import detect_landlock_abi
 
-        mgr = get_sandbox_manager()
-        sandboxes = await mgr.list_sandboxes()
-        active = sum(1 for s in sandboxes if s.phase.value == "ready")
+        # Proxy-only deployments never construct a SandboxManager. Reading
+        # the module global directly (instead of going through
+        # ``get_sandbox_manager``) avoids lazily spinning up
+        # ``ProcessRuntime`` from inside ``/health`` and lets us report
+        # zero active sandboxes truthfully.
+        if _sandbox_manager is None:
+            active = 0
+        else:
+            sandboxes = await _sandbox_manager.list_sandboxes()
+            active = sum(1 for s in sandboxes if s.phase.value == "ready")
 
         return HealthResponse(
             version=__version__,

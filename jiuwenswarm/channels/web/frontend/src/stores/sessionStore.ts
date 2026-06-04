@@ -3,7 +3,7 @@
  */
 
 import { create } from 'zustand';
-import { Session, AgentMode, WebConnectionState, ModelEntry } from '../types';
+import { Session, AgentMode, WebConnectionState, ModelEntry, Message } from '../types';
 
 const STORAGE_KEY = 'jiuwenclaw_context_compression';
 const MODE_STORAGE_KEY = 'jiuwenclaw_mode';
@@ -67,6 +67,51 @@ function normalizeSession(session: Session): Session {
   };
 }
 
+const FINAL_EVENT_DUPLICATE_WINDOW_MS = 60_000;
+
+function normalizeExecutionContent(content?: string): string {
+  return (content || '').replace(/\s+/g, ' ').trim();
+}
+
+function isDuplicateFinalExecutionEvent(
+  existing: TeamMemberExecutionEvent,
+  next: TeamMemberExecutionEvent
+): boolean {
+  if (existing.kind !== 'final' || next.kind !== 'final') {
+    return false;
+  }
+  if (existing.member_id !== next.member_id) {
+    return false;
+  }
+  if (!normalizeExecutionContent(existing.content)) {
+    return false;
+  }
+  if (normalizeExecutionContent(existing.content) !== normalizeExecutionContent(next.content)) {
+    return false;
+  }
+  return Math.abs((existing.timestamp || 0) - (next.timestamp || 0)) <= FINAL_EVENT_DUPLICATE_WINDOW_MS;
+}
+
+function dedupeTeamMemberExecutionEvents(
+  events: TeamMemberExecutionEvent[]
+): TeamMemberExecutionEvent[] {
+  const deduped: TeamMemberExecutionEvent[] = [];
+  for (const event of events) {
+    const duplicateIndex = deduped.findIndex((item) => isDuplicateFinalExecutionEvent(item, event));
+    if (duplicateIndex >= 0) {
+      deduped[duplicateIndex] = {
+        ...deduped[duplicateIndex],
+        ...event,
+        id: deduped[duplicateIndex].id,
+        timestamp: Math.min(deduped[duplicateIndex].timestamp || event.timestamp, event.timestamp),
+      };
+      continue;
+    }
+    deduped.push(event);
+  }
+  return deduped;
+}
+
 interface ConnectionStats {
   state: WebConnectionState;
   inflight: number;
@@ -92,13 +137,39 @@ interface ContextCompressionStats {
   afterCompressed: number | null;
 }
 
-interface TeamTaskEvent {
+export interface TeamTaskEvent {
   id: string;
   type: string;
   team_id: string;
   task_id: string;
   status: string;
   timestamp: number;
+  member_id?: string;
+  assignee?: string;
+  team_name?: string;
+  title?: string;
+  content?: string;
+  updated_at?: number | string | null;
+}
+
+export type TeamTaskStatus =
+  | 'pending'
+  | 'blocked'
+  | 'claimed'
+  | 'plan_approved'
+  | 'completed'
+  | 'cancelled';
+
+export interface TeamTask {
+  task_id: string;
+  title?: string;
+  content?: string;
+  status: TeamTaskStatus;
+  assignee?: string;
+  team_id?: string;
+  timestamp?: number;
+  skills?: string[];
+  files?: string[];
 }
 
 interface TeamMember {
@@ -106,6 +177,32 @@ interface TeamMember {
   member_id: string;
   status: string;
   timestamp: number;
+  name?: string;
+  execution_status?: string | null;
+  mode?: string;
+}
+
+export type TeamMemberExecutionEventKind =
+  | 'final'
+  | 'tool_call'
+  | 'tool_result'
+  | 'file';
+
+export interface TeamMemberExecutionEvent {
+  id: string;
+  member_id: string;
+  kind: TeamMemberExecutionEventKind;
+  timestamp: number;
+  title: string;
+  content?: string;
+  tool_name?: string;
+  tool_call_id?: string;
+  files?: Array<{
+    name: string;
+    size?: number;
+    mime_type?: string;
+    download_url?: string;
+  }>;
 }
 
 interface SessionState {
@@ -124,7 +221,11 @@ interface SessionState {
   heartbeatUpdatedAt: string | null;
   heartbeatHistory: HeartbeatHistoryItem[];
   teamTaskEvents: TeamTaskEvent[];
+  teamTasks: TeamTask[];
   teamMembers: TeamMember[];
+  teamLeaderMemberIds: string[];
+  teamMemberExecutionEvents: TeamMemberExecutionEvent[];
+  teamHistoryMessages: Message[];
   availableModels: ModelEntry[];
   selectedModelName: string | null;
   /** 过滤 is_default=true 的模型，供聊天窗口 ModelSelector 使用 */
@@ -150,9 +251,17 @@ interface SessionState {
   ) => void;
   setTeamTaskEvents: (events: TeamTaskEvent[]) => void;
   addTeamTaskEvent: (event: TeamTaskEvent) => void;
+  setTeamTasks: (tasks: TeamTask[]) => void;
+  upsertTeamTask: (task: TeamTask) => void;
+  updateTeamTask: (taskId: string, patch: Partial<TeamTask>) => void;
   setTeamMembers: (members: TeamMember[]) => void;
+  setTeamLeaderMemberIds: (memberIds: string[]) => void;
+  addTeamLeaderMemberId: (memberId: string) => void;
   addTeamMember: (member: TeamMember) => void;
   updateTeamMemberStatus: (memberId: string, newStatus: string, timestamp?: number) => void;
+  setTeamMemberExecutionEvents: (events: TeamMemberExecutionEvent[]) => void;
+  addTeamMemberExecutionEvent: (event: TeamMemberExecutionEvent) => void;
+  setTeamHistoryMessages: (messages: Message[]) => void;
   setAvailableModels: (models: ModelEntry[], activeModel?: string) => void;
   setSelectedModelName: (name: string) => void;
 }
@@ -180,7 +289,11 @@ export const useSessionStore = create<SessionState>((set) => ({
   heartbeatUpdatedAt: null,
   heartbeatHistory: [],
   teamTaskEvents: [],
+  teamTasks: [],
   teamMembers: [],
+  teamLeaderMemberIds: [],
+  teamMemberExecutionEvents: [],
+  teamHistoryMessages: [],
   availableModels: [],
   chatAvailableModels: [],
   selectedModelName: (() => {
@@ -192,6 +305,10 @@ export const useSessionStore = create<SessionState>((set) => ({
     set((state) => ({
       currentSession: normalizedSession,
       mode: normalizedSession?.mode || state.mode,
+      teamHistoryMessages:
+        normalizedSession && normalizedSession.session_id === state.currentSession?.session_id
+          ? state.teamHistoryMessages
+          : [],
     }));
   },
 
@@ -364,8 +481,71 @@ export const useSessionStore = create<SessionState>((set) => ({
       return { teamTaskEvents: [event, ...state.teamTaskEvents] };
     });
   },
+  setTeamTasks: (tasks) => {
+    set({ teamTasks: tasks });
+  },
+  upsertTeamTask: (task) => {
+    set((state) => {
+      const existingIndex = state.teamTasks.findIndex(
+        (item) => item.task_id === task.task_id
+      );
+      if (existingIndex >= 0) {
+        const updatedTasks = [...state.teamTasks];
+        updatedTasks[existingIndex] = {
+          ...updatedTasks[existingIndex],
+          ...task,
+          title: task.title ?? updatedTasks[existingIndex].title,
+          content: task.content ?? updatedTasks[existingIndex].content,
+          assignee: task.assignee ?? updatedTasks[existingIndex].assignee,
+          team_id: task.team_id ?? updatedTasks[existingIndex].team_id,
+          skills: task.skills ?? updatedTasks[existingIndex].skills,
+          files: task.files ?? updatedTasks[existingIndex].files,
+        };
+        return { teamTasks: updatedTasks };
+      }
+      return { teamTasks: [task, ...state.teamTasks] };
+    });
+  },
+  updateTeamTask: (taskId, patch) => {
+    set((state) => {
+      const existingIndex = state.teamTasks.findIndex(
+        (task) => task.task_id === taskId
+      );
+      if (existingIndex < 0) {
+        return state;
+      }
+      const updatedTasks = [...state.teamTasks];
+      updatedTasks[existingIndex] = {
+        ...updatedTasks[existingIndex],
+        ...patch,
+        title: patch.title ?? updatedTasks[existingIndex].title,
+        content: patch.content ?? updatedTasks[existingIndex].content,
+        assignee: patch.assignee ?? updatedTasks[existingIndex].assignee,
+        team_id: patch.team_id ?? updatedTasks[existingIndex].team_id,
+        skills: patch.skills ?? updatedTasks[existingIndex].skills,
+        files: patch.files ?? updatedTasks[existingIndex].files,
+      };
+      return { teamTasks: updatedTasks };
+    });
+  },
   setTeamMembers: (members) => {
     set({ teamMembers: members });
+  },
+  setTeamLeaderMemberIds: (memberIds) => {
+    const normalized = Array.from(
+      new Set(memberIds.map((memberId) => memberId.trim()).filter(Boolean))
+    );
+    set({ teamLeaderMemberIds: normalized });
+  },
+  addTeamLeaderMemberId: (memberId) => {
+    const normalized = memberId.trim();
+    if (!normalized) return;
+    set((state) => {
+      if (state.teamLeaderMemberIds.includes(normalized)) {
+        return state;
+      }
+      return { teamLeaderMemberIds: [...state.teamLeaderMemberIds, normalized] };
+    });
   },
   addTeamMember: (member) => {
     set((state) => {
@@ -374,9 +554,14 @@ export const useSessionStore = create<SessionState>((set) => ({
       );
       if (existingIndex >= 0) {
         const updatedMembers = [...state.teamMembers];
+        const existingMember = updatedMembers[existingIndex];
         updatedMembers[existingIndex] = {
-          ...updatedMembers[existingIndex],
+          ...existingMember,
           ...member,
+          status:
+            typeof member.status === 'string' && member.status.trim() !== ''
+              ? member.status
+              : existingMember.status,
         };
         return { teamMembers: updatedMembers };
       }
@@ -399,6 +584,46 @@ export const useSessionStore = create<SessionState>((set) => ({
       }
       return state;
     });
+  },
+  setTeamMemberExecutionEvents: (events) => {
+    set({ teamMemberExecutionEvents: dedupeTeamMemberExecutionEvents(events).slice(0, 300) });
+  },
+  addTeamMemberExecutionEvent: (event) => {
+    set((state) => {
+      const eventPatch = Object.fromEntries(
+        Object.entries(event).filter(([, value]) => value !== undefined)
+      ) as TeamMemberExecutionEvent;
+      const duplicateIndex = state.teamMemberExecutionEvents.findIndex(
+        (item) => isDuplicateFinalExecutionEvent(item, eventPatch)
+      );
+      if (duplicateIndex >= 0) {
+        const updatedEvents = [...state.teamMemberExecutionEvents];
+        updatedEvents[duplicateIndex] = {
+          ...updatedEvents[duplicateIndex],
+          ...eventPatch,
+          id: updatedEvents[duplicateIndex].id,
+          timestamp: Math.min(updatedEvents[duplicateIndex].timestamp || eventPatch.timestamp, eventPatch.timestamp),
+        };
+        return { teamMemberExecutionEvents: updatedEvents };
+      }
+      const existingIndex = state.teamMemberExecutionEvents.findIndex(
+        (item) => item.id === event.id
+      );
+      if (existingIndex >= 0) {
+        const updatedEvents = [...state.teamMemberExecutionEvents];
+        updatedEvents[existingIndex] = {
+          ...updatedEvents[existingIndex],
+          ...eventPatch,
+        };
+        return { teamMemberExecutionEvents: updatedEvents };
+      }
+      return {
+        teamMemberExecutionEvents: [eventPatch, ...state.teamMemberExecutionEvents].slice(0, 300),
+      };
+    });
+  },
+  setTeamHistoryMessages: (messages) => {
+    set({ teamHistoryMessages: messages });
   },
   setAvailableModels: (models, activeModel) => {
     set(() => {

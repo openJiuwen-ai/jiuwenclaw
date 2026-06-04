@@ -11,7 +11,7 @@
 import { useState, useCallback, useMemo, useEffect } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useChatStore } from '../../stores';
-import { UserAnswer } from '../../types';
+import { UserAnswer, QuestionOption } from '../../types';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 
@@ -43,7 +43,8 @@ export function InlineQuestionCard({ onSubmit }: InlineQuestionCardProps) {
       return (pendingQuestion?.questions ?? []).map((q, idx) => {
         const sel = selMap.get(idx);
         if (sel) return { selected_options: [sel] };
-        return { selected_options: q.options.length > 0 ? [q.options[0].label] : [] };
+        const firstOption = q.options[0];
+        return { selected_options: firstOption ? [firstOption.value || firstOption.label] : [] };
       });
     },
     [pendingQuestion]
@@ -60,11 +61,12 @@ export function InlineQuestionCard({ onSubmit }: InlineQuestionCardProps) {
   );
 
   const handleSelect = useCallback(
-    (questionIndex: number, optionLabel: string) => {
+    (questionIndex: number, option: QuestionOption) => {
       if (submitted) return;
 
+      const value = option.value || option.label;
       const next = new Map(selections);
-      next.set(questionIndex, optionLabel);
+      next.set(questionIndex, value);
       setSelections(next);
 
       if (!isBatch) {
@@ -76,9 +78,14 @@ export function InlineQuestionCard({ onSubmit }: InlineQuestionCardProps) {
 
   const handleAcceptAll = useCallback(() => {
     if (!pendingQuestion || submitted) return;
-    const acceptLabel = t('chatUi.inlineQuestion.accept');
     const all = new Map<number, string>();
-    pendingQuestion.questions.forEach((_, idx) => all.set(idx, acceptLabel));
+    pendingQuestion.questions.forEach((q, idx) => {
+      const acceptOption = q.options.find(o =>
+        o.label === t('chatUi.inlineQuestion.accept') ||
+        o.label === '本次允许'
+      );
+      all.set(idx, acceptOption?.value || acceptOption?.label || '');
+    });
     setSelections(all);
     doSubmit(all);
   }, [pendingQuestion, submitted, t, doSubmit]);
@@ -186,7 +193,7 @@ export function InlineQuestionCard({ onSubmit }: InlineQuestionCardProps) {
           style={{ maxHeight: '60vh' }}
         >
           {pendingQuestion.questions.map((question, qIndex) => {
-            const selectedLabel = selections.get(qIndex);
+            const selectedValue = selections.get(qIndex);
 
             return (
               <div
@@ -210,6 +217,7 @@ export function InlineQuestionCard({ onSubmit }: InlineQuestionCardProps) {
                 {/* 选项按钮 */}
                 <div className="px-4 pb-3 flex flex-col gap-2">
                   {question.options.map((option) => {
+                    const optionValue = option.value || option.label;
                     const isAccept = option.label === t('chatUi.inlineQuestion.accept')
                       || option.label === t('chatUi.inlineQuestion.allowOnce')
                       || option.label === '本次允许';
@@ -217,12 +225,12 @@ export function InlineQuestionCard({ onSubmit }: InlineQuestionCardProps) {
                       || option.label === '总是允许';
                     const isReject = option.label === t('chatUi.inlineQuestion.reject')
                       || option.label === '拒绝';
-                    const isSelected = selectedLabel === option.label;
+                    const isSelected = selectedValue === optionValue;
 
                     return (
                       <button
                         key={option.label}
-                        onClick={() => handleSelect(qIndex, option.label)}
+                        onClick={() => handleSelect(qIndex, option)}
                         disabled={submitted}
                         className="w-full text-left px-4 py-2.5 text-sm font-medium rounded-lg transition-all"
                         style={{

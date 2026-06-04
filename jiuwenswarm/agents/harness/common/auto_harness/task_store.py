@@ -5,13 +5,22 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
+import shutil
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
+from .scheduler import _determine_pipeline_status_from_log
+
 logger = logging.getLogger(__name__)
+
+
+def _sync_write_json(path: Path, data: str) -> None:
+    """Synchronous JSON file write — called via asyncio.to_thread."""
+    path.write_text(data, encoding="utf-8")
 
 
 class TaskStore:
@@ -25,12 +34,17 @@ class TaskStore:
                 ├── exec_001/
                 │   └── log.json        # Structured log
                 └── latest -> exec_001  # Symlink to latest
+
+    Uses in-memory cache for reads to avoid blocking the asyncio event loop.
+    Writes persist to disk via asyncio.to_thread.
     """
 
     def __init__(self, data_dir: Path):
         self._data_dir = data_dir
         self._tasks_file = data_dir / "scheduled-tasks.json"
         self._runs_dir = data_dir / "runs"
+        self._tasks_cache: Optional[dict[str, Any]] = None
+        self._save_lock: asyncio.Lock = asyncio.Lock()
         self._ensure_dirs()
 
     def _ensure_dirs(self) -> None:
@@ -38,42 +52,52 @@ class TaskStore:
         self._runs_dir.mkdir(parents=True, exist_ok=True)
 
     def _load_tasks(self) -> dict[str, Any]:
-        """Load tasks from JSON file."""
+        """Load tasks — returns in-memory cache if available, otherwise reads from file."""
+        if self._tasks_cache is not None:
+            return self._tasks_cache
+
         if not self._tasks_file.exists():
-            return {"tasks": [], "last_updated": None}
+            result = {"tasks": [], "last_updated": None}
+            self._tasks_cache = result
+            return result
+
         try:
             data = json.loads(self._tasks_file.read_text(encoding="utf-8"))
+            self._tasks_cache = data
             return data
         except Exception as e:
             logger.warning("[TaskStore] Failed to load tasks file: %s", e)
-            return {"tasks": [], "last_updated": None}
+            result = {"tasks": [], "last_updated": None}
+            self._tasks_cache = result
+            return result
 
-    def _save_tasks(self, data: dict[str, Any]) -> None:
-        """Save tasks to JSON file."""
+    async def _save_tasks(self, data: dict[str, Any]) -> None:
+        """Save tasks — updates in-memory cache first, then persists to disk via to_thread."""
         data["last_updated"] = datetime.now(timezone.utc).isoformat()
-        self._tasks_file.write_text(
-            json.dumps(data, ensure_ascii=False, indent=2),
-            encoding="utf-8"
-        )
+        self._tasks_cache = data
 
-    def add_task(self, task: dict[str, Any]) -> None:
+        json_str = json.dumps(data, ensure_ascii=False, indent=2)
+        async with self._save_lock:
+            await asyncio.to_thread(_sync_write_json, self._tasks_file, json_str)
+
+    async def add_task(self, task: dict[str, Any]) -> None:
         """Add a new scheduled task."""
         data = self._load_tasks()
         data["tasks"].append(task)
-        self._save_tasks(data)
+        await self._save_tasks(data)
         logger.info("[TaskStore] Added task: %s", task.get("task_id"))
 
-    def update_task(self, task_id: str, updates: dict[str, Any]) -> None:
+    async def update_task(self, task_id: str, updates: dict[str, Any]) -> None:
         """Update an existing task."""
         data = self._load_tasks()
         for task in data.get("tasks", []):
             if task.get("task_id") == task_id:
                 task.update(updates)
                 break
-        self._save_tasks(data)
+        await self._save_tasks(data)
 
     def get_task(self, task_id: str) -> Optional[dict[str, Any]]:
-        """Get task by ID."""
+        """Get task by ID — reads from in-memory cache (zero I/O)."""
         data = self._load_tasks()
         for task in data.get("tasks", []):
             if task.get("task_id") == task_id:
@@ -81,7 +105,7 @@ class TaskStore:
         return None
 
     def list_tasks(self) -> list[dict[str, Any]]:
-        """List all tasks."""
+        """List all tasks — reads from in-memory cache (zero I/O)."""
         data = self._load_tasks()
         return data.get("tasks", [])
 
@@ -101,7 +125,6 @@ class TaskStore:
                 if now >= next_run:
                     pending.append(task)
             except ValueError:
-                # Invalid ISO format - skip task but log for debugging
                 logger.warning(
                     "[TaskStore] Invalid next_run_time format for task %s: %s",
                     task.get("task_id"), next_run_str
@@ -109,7 +132,7 @@ class TaskStore:
                 continue
         return pending
 
-    def delete_task(self, task_id: str) -> bool:
+    async def delete_task(self, task_id: str) -> bool:
         """Delete a task and its log files.
 
         Args:
@@ -121,7 +144,6 @@ class TaskStore:
         data = self._load_tasks()
         tasks = data.get("tasks", [])
 
-        # Find and remove the task
         task_found = False
         new_tasks = []
         for task in tasks:
@@ -133,16 +155,14 @@ class TaskStore:
         if not task_found:
             return False
 
-        # Update tasks file
         data["tasks"] = new_tasks
-        self._save_tasks(data)
+        await self._save_tasks(data)
 
-        # Remove log directory
+        # Remove log directory (in thread to avoid blocking event loop)
         run_dir = self._runs_dir / task_id
         if run_dir.exists():
             try:
-                import shutil
-                shutil.rmtree(run_dir)
+                await asyncio.to_thread(shutil.rmtree, run_dir)
                 logger.info("[TaskStore] Removed log directory for task: %s", task_id)
             except Exception as e:
                 logger.warning("[TaskStore] Failed to remove log directory: %s", e)
@@ -150,7 +170,7 @@ class TaskStore:
         logger.info("[TaskStore] Deleted task: %s", task_id)
         return True
 
-    def add_execution_record(self, task_id: str, record: dict[str, Any]) -> None:
+    async def add_execution_record(self, task_id: str, record: dict[str, Any]) -> None:
         """Add execution record to task history."""
         data = self._load_tasks()
         for task in data.get("tasks", []):
@@ -159,7 +179,7 @@ class TaskStore:
                 history.append(record)
                 task["execution_history"] = history
                 break
-        self._save_tasks(data)
+        await self._save_tasks(data)
 
     def get_log_path(self, task_id: str, execution_id: str) -> Path:
         """Get path for execution log file."""
@@ -169,10 +189,7 @@ class TaskStore:
 
     @staticmethod
     def write_log(path: Path, chunks: list[dict[str, Any]]) -> None:
-        """Write structured log chunks to file (JSON Lines format).
-
-        Each chunk is written as a separate JSON line for streaming support.
-        """
+        """Write structured log chunks to file (JSON Lines format)."""
         with path.open("w", encoding="utf-8") as f:
             for chunk in chunks:
                 f.write(json.dumps(chunk, ensure_ascii=False) + "\n")
@@ -209,9 +226,8 @@ class TaskStore:
                         if read_all or len(logs) < limit:
                             logs.append(entry)
                         else:
-                            break  # Reached limit
+                            break
                     except json.JSONDecodeError:
-                        # Skip malformed lines, but don't count them
                         pass
             return logs
         except Exception as e:
@@ -243,16 +259,16 @@ class TaskStore:
                     if not line:
                         continue
                     try:
-                        json.loads(line)  # Validate but don't store
+                        json.loads(line)
                         count += 1
                     except json.JSONDecodeError:
-                        pass  # Skip invalid lines
+                        pass
             return count
         except Exception as e:
             logger.warning("[TaskStore] Failed to count log lines: %s", e)
             return 0
 
-    def get_logs(
+    async def get_logs(
         self,
         task_id: str,
         log_type: str,
@@ -260,7 +276,7 @@ class TaskStore:
         offset: int = 0,
         limit: int = 500
     ) -> dict[str, Any]:
-        """Get logs for a task.
+        """Get logs for a task — file reads are done via asyncio.to_thread.
 
         Args:
             task_id: Task identifier
@@ -277,14 +293,13 @@ class TaskStore:
             return {"error": "任务不存在", "task_id": task_id}
 
         if log_type == "current":
-            # Get currently running execution
             current_exec_id = task.get("current_execution_id")
             if not current_exec_id:
                 return {"error": "当前无正在执行的日志", "task_id": task_id}
 
             log_path = self._runs_dir / task_id / current_exec_id / "log.json"
-            logs = self.read_log(log_path, offset, limit)
-            total_lines = self.get_log_line_count(log_path)
+            logs = await asyncio.to_thread(self.read_log, log_path, offset, limit)
+            total_lines = await asyncio.to_thread(self.get_log_line_count, log_path)
             return {
                 "logs": logs,
                 "execution_id": current_exec_id,
@@ -299,11 +314,9 @@ class TaskStore:
             if not history:
                 return {"error": "无历史执行记录", "task_id": task_id}
 
-            # history_index: 0=latest, 1=second latest, etc.
             if history_index < 0 or history_index >= len(history):
                 return {"error": f"历史记录索引超出范围 (0-{len(history)-1})", "task_id": task_id}
 
-            # Sort by completed_at descending
             sorted_history = sorted(
                 history,
                 key=lambda r: r.get("completed_at", ""),
@@ -319,8 +332,8 @@ class TaskStore:
             if not log_path.exists():
                 log_path = self._runs_dir / task_id / record.get("execution_id", "") / "log.json"
 
-            logs = self.read_log(log_path, offset, limit)
-            total_lines = self.get_log_line_count(log_path)
+            logs = await asyncio.to_thread(self.read_log, log_path, offset, limit)
+            total_lines = await asyncio.to_thread(self.get_log_line_count, log_path)
             if logs:
                 return {
                     "logs": logs,
@@ -334,3 +347,52 @@ class TaskStore:
             return {"error": "日志文件不存在或为空", "record": record}
 
         return {"error": f"未知的 log_type: {log_type}"}
+
+    def has_legacy_completed_tasks(self) -> bool:
+        """Check if any task still has the blanket "completed" status (pre-migration)."""
+        data = self._load_tasks()
+        return any(t.get("status") == "completed" for t in data.get("tasks", []))
+
+    async def reconcile_task_statuses(self) -> int:
+        """Re-check completed tasks against their logs and fix stale status values."""
+        data = self._load_tasks()
+        corrected = 0
+
+        for task in data.get("tasks", []):
+            task_id = task.get("task_id")
+            old_status = task.get("status")
+
+            if old_status not in ("completed", "success", "failed"):
+                continue
+
+            history = task.get("execution_history", [])
+            if not history:
+                continue
+
+            latest = history[-1]
+            log_path_str = latest.get("log_path", "")
+            if not log_path_str:
+                continue
+
+            log_path = Path(log_path_str)
+            if not log_path.exists():
+                continue
+
+            result = _determine_pipeline_status_from_log(log_path)
+            new_status = "failed" if result["failed"] else "success"
+
+            if new_status != old_status:
+                task["status"] = new_status
+                latest["status"] = new_status
+                if result["error"]:
+                    latest["error"] = result["error"]
+                corrected += 1
+                logger.info(
+                    "[TaskStore] Reconciled task %s: %s -> %s",
+                    task_id, old_status, new_status,
+                )
+
+        if corrected > 0:
+            await self._save_tasks(data)
+
+        return corrected

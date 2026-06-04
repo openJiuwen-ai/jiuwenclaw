@@ -3,7 +3,7 @@ import type { Frame, ReqFrame, ResFrame } from "./protocol.js";
 import { isResFrame } from "./protocol.js";
 
 export type FrameHandler = (frame: Frame) => void;
-export type ConnectionStatus = "idle" | "connecting" | "connected" | "reconnecting" | "auth_failed";
+export type ConnectionStatus = "idle" | "connecting" | "connected" | "reconnecting" | "auth_failed" | "message_too_big";
 
 interface PendingRequest {
   resolve: (frame: ResFrame) => void;
@@ -144,6 +144,12 @@ export class WsClient {
         return;
       }
 
+      if (code === 1009) {
+        this.setStatus("message_too_big");
+        this.rejectAllPending(new Error("消息过大，服务器拒绝了连接。请缩短输入内容后重试。"));
+        return;
+      }
+
       if (code === 1013) {
         this.setStatus("idle");
         this.rejectAllPending(new Error("cli channel busy"));
@@ -198,6 +204,21 @@ export class WsClient {
     if (this.reconnectTimer) {
       clearTimeout(this.reconnectTimer);
       this.reconnectTimer = null;
+    }
+  }
+
+  /**
+   * Cancel a specific pending request by ID.
+   * Clears the timeout timer, removes the entry, and rejects the Promise.
+   * Used when a command is interrupted (Ctrl+C) to clean up the WS request
+   * immediately instead of waiting for timeout.
+   */
+  cancelRequest(id: string, reason = "cancelled"): void {
+    const pending = this.pending.get(id);
+    if (pending) {
+      clearTimeout(pending.timer);
+      this.pending.delete(id);
+      pending.reject(new Error(reason));
     }
   }
 

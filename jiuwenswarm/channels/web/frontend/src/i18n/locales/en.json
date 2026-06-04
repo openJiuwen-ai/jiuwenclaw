@@ -34,6 +34,9 @@
   },
   "team": {
     "members": "Team Members",
+    "membersTab": "Team Members",
+    "statusTab": "Status",
+    "filesTab": "Files",
     "taskEventLog": "Task Event Log",
     "task": "Task",
     "executing": "Executing",
@@ -43,7 +46,123 @@
     "statusRestarting": "Restarting",
     "statusShutdownRequested": "Shutdown Requested",
     "statusShutdown": "Shutdown",
-    "statusError": "Error"
+    "statusError": "Error",
+    "collapse": "Collapse",
+    "taskOverview": "Task Overview",
+    "elapsedTime": "Elapsed time: {{value}}",
+    "noTasks": "No tasks",
+    "noMemberData": "No member data",
+    "selectMember": "Select a team member",
+    "detailTabs": {
+      "members": "Members",
+      "group": "Group Chat"
+    },
+    "leader": "Team leader",
+    "memberSeparator": ", ",
+    "groupChat": "Group Chat",
+    "allMembers": "all",
+    "noGroupMessages": "No group messages",
+    "memberTasksTitle": "Tasks executed by {{member}}",
+    "memberTasks": "Their tasks",
+    "noMemberTasks": "No tasks assigned to this member",
+    "noProcessData": "No execution process data for this member",
+    "collapseView": "Collapse view",
+    "expandView": "Expand view",
+    "expand": "Expand",
+    "runningMode": "Mode: {{mode}}",
+    "taskFallback": "Task {{id}}",
+    "memberStatus": {
+      "running": "Running",
+      "idle": "Idle",
+      "restarting": "Restarting",
+      "shutdown": "Shutdown",
+      "error": "Error",
+      "unstarted": "Unstarted",
+      "unknown": "Unknown"
+    },
+    "taskStatus": {
+      "completed": "Completed",
+      "in_progress": "Running",
+      "cancelled": "Cancelled",
+      "error": "Error",
+      "pending": "Waiting"
+    },
+    "taskEvents": {
+      "completed": "Task completed",
+      "claimed": "Task claimed",
+      "created": "Task created",
+      "cancelled": "Task cancelled",
+      "unblocked": "Task unblocked",
+      "updated": "Task status updated"
+    },
+    "taskDetail": {
+      "sourcePrompt": "Source prompt: {{prompt}}",
+      "noDetail": "No detailed task description was provided"
+    },
+    "elapsed": {
+      "daysHours": "{{days}}d {{hours}}h",
+      "hoursMinutes": "{{hours}}h {{minutes}}m",
+      "minutesSeconds": "{{minutes}}m {{seconds}}s",
+      "seconds": "{{seconds}}s"
+    },
+    "process": {
+      "memberMessage": "Member collaboration message",
+      "broadcastMessage": "Broadcast message",
+      "p2pMessage": "Direct message",
+      "collaborationMessage": "Collaboration message",
+      "sentTo": "Sent to {{member}}",
+      "sentMessage": "Sent message",
+      "receivedMessage": "Received message",
+      "fields": {
+        "type": "Type",
+        "member": "Member",
+        "tool": "Tool",
+        "content": "Content",
+        "call": "Call",
+        "result": "Result",
+        "sender": "Sender",
+        "receiver": "Receiver",
+        "eventType": "Event type",
+        "taskId": "Task ID",
+        "taskStatus": "Task status",
+        "description": "Description"
+      },
+      "execution": {
+        "final": "Task completion summary",
+        "toolCall": "Tool call",
+        "toolCallTitle": "Calling {{tool}}",
+        "toolResult": "Tool result",
+        "toolResultTitle": "{{tool}} result",
+        "file": "File",
+        "sentFile": "Sent file",
+        "event": "Execution event"
+      }
+    },
+    "planning": {
+      "tab": "Task Planning",
+      "progressTitle": "Task Progress",
+      "token": "Token",
+      "elapsedTime": "Elapsed {{value}}",
+      "taskList": "Task List",
+      "taskListAria": "{{task}} task list",
+      "resources": "Task resources",
+      "skills": "Skills",
+      "files": "Files",
+      "unassigned": "Unassigned",
+      "unassignedAvatar": "Unassigned avatar",
+      "views": {
+        "list": "List view",
+        "structure": "Structure view",
+        "board": "Board view"
+      },
+      "columns": {
+        "waiting": "Waiting",
+        "running": "Running",
+        "completed": "Completed",
+        "cancelled": "Cancelled",
+        "failed": "Failed"
+      }
+    }
   },
   "teams": {
     "title": "Team Management",
@@ -70,26 +189,20 @@
     }
   },
   "statusBar": {
-    "cancel": "Cancel",
-    "pause": "Pause",
-    "resume": "Resume",
-    "processing": "Processing...",
     "evolving": "Checking whether skill evolution is needed...",
     "evolutionStages": {
       "collecting": "Preparing skill evolution check...",
       "detecting": "Checking whether skill evolution is needed...",
-      "generating": "Signal detected, generating evolution experience...",
+      "generating": "Improvement signal found, generating evolution experience...",
       "awaitingApproval": "Evolution proposal ready, awaiting approval...",
-      "noEvolutionGenerated": "No evolution generated",
+      "noEvolutionGenerated": "No evolution experience generated",
       "noEvolutionNoSkill": "No evolution generated: no related skill found",
-      "noEvolutionNoSignal": "No evolution generated: no durable improvement found",
-      "noEvolutionNoRecords": "No evolution generated: no savable experience produced",
+      "noEvolutionNoSignal": "No improvement worth preserving found",
+      "noEvolutionNoRecords": "No evolution experience worth preserving",
       "completed": "Skill evolution completed",
       "timedOut": "Skill evolution timed out",
       "failed": "Skill evolution failed"
-    },
-    "paused": "Paused",
-    "pausedWithTask": "Paused: {{task}}..."
+    }
   },
   "chat": {
     "placeholder": "Enter to send, Shift+Enter for new line",
@@ -118,6 +231,7 @@
     "removeTask": "Remove task",
     "holdToSpeak": "Hold to speak",
     "send": "Send (Enter)",
+    "stop": "Stop",
     "modelSelector": {
       "tooltip": "Switch the model used for chat"
     },
@@ -126,6 +240,8 @@
     "modeSwitchConfirm": "Current session has history messages. Switching mode will create a new session. Continue?",
     "teamPause": "Pause",
     "teamPauseHint": "After pausing a team, send the next message to continue",
+    "teamBroadcastTarget": "@all",
+    "contextCompressionCompleted": "Completed context compression {{count}} time(s) this turn",
     "historyPager": {
       "loadedOfTotal": "Loaded {{loaded}} / {{total}} pages",
       "loadingMore": "Loading...",
@@ -177,7 +293,7 @@
     "versionInfo": "Version Info",
     "nativeVersion": "Native Version",
     "harnessVersion": "Auto Harness Version",
-    "currentActive": "Currently Active",
+    "currentActive": "Activated",
     "hotActivate": "Hot Activate",
     "activating": "Activating...",
     "activateSuccess": "Version switched successfully",
@@ -218,7 +334,14 @@
     "packageExists": "Package with this name already exists",
     "invalidZipFormat": "Invalid zip file format",
     "missingHarnessConfig": "Zip must contain harness_config.yaml",
-    "selectZipFile": "Select a .zip file to import"
+    "selectZipFile": "Select a .zip file to import",
+    "deactivate": "Deactivate",
+    "deactivating": "Deactivating...",
+    "deactivateFailed": "Deactivation failed",
+    "deactivateSuccess": "Deactivation successful",
+    "deactivateAll": "Deactivate All",
+    "allDeactivated": "All packages deactivated",
+    "activePackages": "Active Packages"
   },
   "todoList": {
     "title": "Task list",
@@ -309,7 +432,6 @@
       "web": "Web (web)",
       "feishu": "Lark (feishu)",
       "wechat": "WeChat (wechat)",
-      "wecom": "WeCom (wecom)",
       "xiaoyi": "Xiaoyi (xiaoyi)",
       "dingtalk": "DingTalk (dingtalk)"
     },
@@ -367,7 +489,7 @@
     "skillnet": {
       "usageNoticeTitle": "Notes",
       "usageNotice1": "SkillNet search uses a public service; timeouts or errors may be due to network congestion or server load—try again later.",
-      "usageNotice2": "Installing a skill downloads files from GitHub. <strong>Ensure the machine running JiuwenClaw can reach GitHub</strong> (network / proxy).",
+      "usageNotice2": "Installing a skill downloads files from GitHub. <strong>Ensure the machine running JiuwenSwarm can reach GitHub</strong> (network / proxy).",
       "usageNotice3": "GitHub's API limits anonymous (unauthenticated) use to about 60 requests per hour per IP. If install fails with rate limiting, wait and retry later. For increased rate limits, configure github_token on the <configLink>configuration page</configLink>.",
       "configPageLinkAria": "Go to configuration page"
     }
@@ -520,15 +642,39 @@
     "empty": "No configuration loaded yet. Please check the backend service status.",
     "selectModelProvider": "Select a model provider",
     "enterValue": "Enter a configuration value",
+    "validation": {
+      "agentNameRequired": "Agent name cannot be empty",
+      "agentModelProviderRequired": "Agent model provider cannot be empty",
+      "agentModelApiBaseRequired": "Agent API Base URL cannot be empty",
+      "agentModelApiKeyRequired": "Agent API Key cannot be empty",
+      "agentModelNameRequired": "Agent model name cannot be empty",
+      "teamRequired": "Agents configured but no Team found, please add at least one Team",
+      "teamNameRequired": "Team name cannot be empty",
+      "teamLifecycleRequired": "Team lifecycle cannot be empty",
+      "teamTeammateModeRequired": "Team teammate mode cannot be empty",
+      "teamSpawnModeRequired": "Team spawn mode cannot be empty",
+      "leaderMemberNameRequired": "Team '{{team}}' Leader member name cannot be empty",
+      "leaderMemberNameInvalid": "Team '{{team}}' Leader member name '{{name}}' is invalid: must start with a lowercase letter, followed by lowercase letters, digits, or hyphens",
+      "leaderDisplayNameRequired": "Team '{{team}}' Leader display name cannot be empty",
+      "leaderPersonaRequired": "Team '{{team}}' Leader persona cannot be empty",
+      "leaderAgentKeyRequired": "Team '{{team}}' Leader Agent Key cannot be empty",
+      "teammateAgentKeyRequired": "Team '{{team}}' Teammate Agent Key cannot be empty",
+      "memberNameRequired": "Team '{{team}}' member name cannot be empty",
+      "memberNameInvalid": "Team '{{team}}' member name '{{name}}' is invalid: must start with a lowercase letter, followed by lowercase letters, digits, or hyphens",
+      "memberDisplayNameRequired": "Team '{{team}}' member '{{name}}' display name cannot be empty",
+      "memberPersonaRequired": "Team '{{team}}' member '{{name}}' persona cannot be empty",
+      "memberAgentKeyRequired": "Team '{{team}}' member '{{name}}' Agent Key cannot be empty",
+      "memberNameConflictWithLeader": "Team '{{team}}' member name '{{name}}' conflicts with Leader member name"
+    },
     "keys": {
       "memoryForbiddenEnabled": "Enable",
       "memoryForbiddenDescription": "Forbidden memory content description",
       "memoryForbiddenDescriptionPlaceholder": "e.g. passwords, API keys, secrets, tokens, credit card numbers, ID numbers, phone numbers",
-      "agentSkillsPlaceholder": "Separate skills with commas",
+      "agentSkillsPlaceholder": "Click to select skills",
+      "agentSkillsEmpty": "No installed skills",
       "agentName": "Name",
       "agentModel": "Model",
       "agentSkills": "Skills",
-      "agentMaxIterations": "Max Iterations",
       "agentCompletionTimeout": "Completion Timeout",
       "teamName": "Team Name",
       "teamLifecycle": "Lifecycle",
@@ -586,16 +732,18 @@
       "deleteConfirmTitle": "Delete Model?",
       "deleteConfirmMessage": "Are you sure you want to delete model \"{{modelName}}\"?",
       "deleteConfirmMessageSimple": "Model \"{{modelName}}\" is referenced by {{count}} Agent(s). After deletion, related Agents will no longer be able to use this model.",
-      "referenceLostWarning": "Model Reference Lost Warning",
+      "referenceLostWarning": "Model Reference Lost Warning, please reconfigure the Agent model",
       "notSelected": "No model selected"
     },
     "agentList": {
       "addAgent": "Add Agent",
       "removeAgent": "Remove",
       "untitled": "Untitled",
+      "duplicateName": "Agent name already exists",
       "deleteConfirmTitle": "Delete Agent?",
       "deleteConfirmMessage": "Are you sure you want to delete agent \"{{agentName}}\"?",
-      "deleteConfirmMessageSimple": "Agent \"{{agentName}}\" is referenced by team(s)."
+      "deleteConfirmMessageSimple": "Agent \"{{agentName}}\" is referenced by team(s).",
+      "nameChangeWarning": "Modifying a referenced Agent name, please reconfigure Agent Key"
     },
     "team": {
       "leader": "Leader",
@@ -614,7 +762,7 @@
       "deleteMemberConfirmMessage": "Are you sure you want to delete member \"{{memberName}}\"?",
       "duplicateMemberName": "Member name already exists",
       "memberNameEnglishOnly": "Member name can only contain English letters",
-      "memberNameFormatInvalid": "Member name only supports letters/numbers/underscore",
+      "memberNameFormatInvalid": "Member name must start with a lowercase letter, followed by lowercase letters, digits, or hyphens",
       "referencedByTeams": "Referenced by {{count}} Team(s)"
     },
     "groups": {
@@ -627,7 +775,7 @@
       "thirdParty": { "label": "Third-Party Services", "hint": "API key settings" },
       "freeSearch": { "label": "Free Search Engines", "hint": "Enable free search engines" },
       "evolution": { "label": "Evolution Settings", "hint": "Online skill evolution settings" },
-      "agents": { "label": "Multi-Agent Configuration", "hint": "For cluster mode only" },
+      "agents": { "label": "Multi-Agent Configuration", "hint": "For cluster mode only, Team required" },
       "team": { "label": "Team Configuration", "hint": "Multi-agent team settings" },
       "contextEngine": { "label": "Context Compression", "hint": "Enable or disable dialogue context compression" },
       "permissions": { "label": "Tool Safety Guardrail", "hint": "Enable or disable permission checks for tool calls" },
@@ -644,13 +792,13 @@
       "kvCacheAffinity": "Compute affinity (KV cache release)"
     },
     "permissionsTools": {
-      "title": "Per-tool guardrail (permissions.tools)",
+      "title": "Tool Guardrail (permissions.tools)",
       "subtitle": "Set allow / ask / deny per tool name; writes config and hot-reloads. Pattern-based rules are not managed here.",
       "refresh": "Refresh",
       "refreshing": "Loading…",
       "needConnection": "Connect to the server to manage tool permissions.",
       "loadingList": "Loading tool permissions…",
-      "empty": "No per-tool rules yet. Add one below.",
+      "empty": "No tool rules yet. Add one below.",
       "colTool": "Tool",
       "colLevel": "Policy",
       "colActions": "Actions",
@@ -660,7 +808,7 @@
       "delete": "Remove",
       "deleteConfirm": "Remove “{{tool}}” from permissions.tools?",
         "invalidValue": "Non-standard value; choosing a policy will rewrite it. Current: {{raw}}",
-        "addTitle": "Add per-tool rule",
+        "addTitle": "Add tool rule",
         "toolPlaceholder": "e.g. mcp_exec_command",
         "duplicateTool": "Tool already exists: {{tool}}",
         "add": "Add",
@@ -715,6 +863,7 @@
       "tui": "Terminal (tui)",
       "xiaoyi": "Xiaoyi (xiaoyi)",
       "feishu": "Lark (feishu)",
+      "dingtalk": "DingTalk (dingtalk)",
       "whatsapp": "WhatsApp (whatsapp)",
       "wecom": "WeCom (wecom)",
       "wechat": "WeChat (wechat)"
@@ -810,6 +959,17 @@
       "mySkills": "My Skills",
       "marketplace": "Marketplace"
     },
+    "mySkillsTabs": {
+      "all": "All",
+      "enabled": "Enabled",
+      "disabled": "Disabled"
+    },
+    "enable": "Enable",
+    "noDisabledSkills": "No disabled skills",
+    "noEnabledSkills": "No enabled skills",
+    "setEnabledError": "Failed to set skill enabled status",
+    "setEnabledSuccess": "Skill {name} enabled",
+    "setDisabledSuccess": "Skill {name} disabled",
     "marketplaceTabs": {
       "builtin": "Built-in"
     },
@@ -827,7 +987,9 @@
       "importLocal": "Import Local Skill",
       "sourceManager": "Source Manager",
       "backToList": "Back to List",
-      "viewEvolution": "View Skill Experience"
+      "viewEvolution": "View Skill Experience",
+      "enabling": "Enabling...",
+      "disabling": "Disabling..."
     },
     "builtIn": "Built-in",
     "status": {
@@ -854,6 +1016,10 @@
     "totalCount": "{{count}} total",
     "listError": "Failed to load skills. Please check the backend service.",
     "noMatches": "No matching skills",
+    "viewMode": {
+      "list": "List view",
+      "grid": "Grid view"
+    },
     "detailLoading": "Loading details...",
     "detailError": "Failed to load details",
     "evolution": {
@@ -998,7 +1164,7 @@
       "installed": "Installed: {{spec}}",
       "imported": "Imported: {{name}}",
       "uninstalled": "Uninstalled: {{pluginName}}",
-      "skillNetInstalled": "Installed from SkillNet: {{name}}"
+      "skillNetInstalled": "Installed: {{name}}"
     },
     "errors": {
       "installFailed": "Install failed",
@@ -1049,6 +1215,7 @@
     "copyMessage": "Copy message",
     "stopReading": "Stop reading",
     "readMessage": "Read message",
+    "fileExpired": "Expired",
     "parallelProgress": "Parallel tasks running ({{completedCount}}/{{total}} complete)",
     "subtask": {
       "starting": "Starting...",
@@ -1075,6 +1242,37 @@
       "pending": "{{pendingCount}} running",
       "timeout": "{{timeoutCount}} timed out",
       "latest": "↓ Latest"
+    },
+    "teamActivity": {
+      "preparing": "Agent Team is preparing",
+      "currentActivity": "{{member}} - {{summary}}",
+      "progress": {
+        "completed": "Task completed",
+        "inactive": "No activity",
+        "activeMembers": "Active members: {{count}}"
+      },
+      "status": {
+        "completed": "Task completed",
+        "cancelled": "Task cancelled",
+        "thinking": "Thinking",
+        "message": "Sent message",
+        "file": "Sent file",
+        "executingTool": "Running tool",
+        "toolCall": "Tool call"
+      },
+      "summary": {
+        "task": "{{status}}: {{content}}",
+        "message": "Sent message: {{content}}",
+        "file": "Sent file: {{content}}",
+        "tool": "Calling tool: {{content}}"
+      },
+      "counts": {
+        "tasks": "Tasks executed",
+        "messages": "Messages sent",
+        "tools": "Tool calls"
+      },
+      "openGroupChat": "Open group chat",
+      "openGroupChatTitle": "Open group chat messages"
     },
     "inlineQuestion": {
       "header": "Evolution approval",
@@ -1133,6 +1331,8 @@
     "downloadAndInstall": "Download update",
     "downloading": "Downloading...",
     "installNow": "Install and restart",
+    "pipUpgrade": "Upgrade",
+    "pipRestart": "Restart now",
     "currentVersion": "Current version",
     "latestVersion": "Latest version",
     "state": "Update state",
@@ -1140,6 +1340,7 @@
     "releaseNotes": "Release notes",
     "downloadProgress": "Download progress",
     "readyToInstall": "The installer is ready. Click “Install and restart” to close the app and perform a silent upgrade.",
+    "restartPendingHint": "Upgrade complete. Click “Restart now” to restart the service.",
     "unsupported": "This update flow is not supported on the current platform.",
     "noReleaseNotes": "No release notes available.",
     "states": {
@@ -1149,6 +1350,9 @@
       "update_available": "Update available",
       "downloading": "Downloading",
       "downloaded": "Downloaded",
+      "upgrading": "Upgrading...",
+      "restart_pending": "Restart pending",
+      "restarting": "Restarting...",
       "installing": "Installing",
       "error": "Check failed",
       "unsupported": "Unsupported platform",
@@ -1159,6 +1363,7 @@
       "loadConfigFailed": "Failed to load updater config",
       "checkFailed": "Failed to check for updates",
       "downloadFailed": "Failed to download the update",
+      "upgradeFailed": "Failed to install the update",
       "saveConfigFailed": "Failed to save updater config",
       "installUnavailable": "The installer cannot be started here. Please run inside the Windows desktop app.",
       "installFailed": "Failed to launch the update installer"
@@ -1186,6 +1391,7 @@
     "heartbeatTitle": "Heartbeat message",
     "heartbeatClose": "Close",
     "heartbeatViewFull": "Click to view full message",
+    "securityAlertTitle": "Security Alert",
     "noContent": "No details",
     "restarting": "Restarting service",
     "restartSuccess": "Restart successful",

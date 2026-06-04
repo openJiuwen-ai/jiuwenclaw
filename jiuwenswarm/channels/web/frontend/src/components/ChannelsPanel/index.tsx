@@ -1856,13 +1856,7 @@ export function ChannelsPanel({ isConnected }: ChannelsPanelProps) {
                           <button
                             type="button"
                             onClick={() => void handleSaveDingtalkConfig()}
-                            disabled={
-                              !hasDingtalkConfigChanges ||
-                              dingtalkSaving ||
-                              !isConnected ||
-                              !dingtalkDraft.client_id.trim() ||
-                              !dingtalkDraft.client_secret.trim()
-                            }
+                            disabled={!hasDingtalkConfigChanges || dingtalkSaving || !isConnected}
                             className="btn primary !px-3 !py-1.5 disabled:opacity-50 disabled:cursor-not-allowed"
                           >
                             {dingtalkSaving ? t('common.saving') : t('common.save')}
@@ -1982,7 +1976,7 @@ export function ChannelsPanel({ isConnected }: ChannelsPanelProps) {
                           <button
                             type="button"
                             onClick={() => void handleSaveConfig()}
-                            disabled={!hasConfigChanges || saving || !isConnected || !draft.app_id.trim() || !draft.app_secret.trim()}
+                            disabled={!hasConfigChanges || saving || !isConnected}
                             className="btn primary !px-3 !py-1.5 disabled:opacity-50 disabled:cursor-not-allowed"
                           >
                             {saving ? t('common.saving') : t('common.save')}
@@ -2329,12 +2323,7 @@ export function ChannelsPanel({ isConnected }: ChannelsPanelProps) {
                           <button
                             type="button"
                             onClick={() => void handleSaveDiscordConfig()}
-                            disabled={
-                              !hasDiscordConfigChanges ||
-                              discordSaving ||
-                              !isConnected ||
-                              !discordDraft.bot_token.trim()
-                            }
+                            disabled={!hasDiscordConfigChanges || discordSaving || !isConnected}
                             className="btn primary !px-3 !py-1.5 disabled:opacity-50 disabled:cursor-not-allowed"
                           >
                             {discordSaving ? t('common.saving') : t('common.save')}
@@ -2796,13 +2785,7 @@ export function ChannelsPanel({ isConnected }: ChannelsPanelProps) {
                           <button
                             type="button"
                             onClick={() => void handleSaveWecomConfig()}
-                            disabled={
-                              !hasWecomConfigChanges ||
-                              wecomSaving ||
-                              !isConnected ||
-                              !wecomDraft.bot_id.trim() ||
-                              !wecomDraft.secret.trim()
-                            }
+                            disabled={!hasWecomConfigChanges || wecomSaving || !isConnected}
                             className="btn primary !px-3 !py-1.5 disabled:opacity-50 disabled:cursor-not-allowed"
                           >
                             {wecomSaving ? t('common.saving') : t('common.save')}

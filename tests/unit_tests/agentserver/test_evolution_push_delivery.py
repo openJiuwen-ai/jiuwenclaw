@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import asyncio
 from types import SimpleNamespace
 
 import pytest
 
+from jiuwenswarm.server.runtime.agent_adapter import evolution_helpers
 from jiuwenswarm.server.runtime.agent_adapter import interface_deep as interface_deep_module
 from jiuwenswarm.server.runtime.agent_adapter.interface_deep import JiuWenClawDeepAdapter
 
@@ -33,6 +35,23 @@ def _outcome_event(status: str, message: str) -> SimpleNamespace:
         payload={
             "_evolution_meta": {"event_kind": "outcome", "status": status},
             "content": message,
+        },
+    )
+
+
+def _sdk_noop_outcome_event(skill_name: str = "powerpoint-pptx") -> SimpleNamespace:
+    return SimpleNamespace(
+        type="llm_reasoning",
+        payload={
+            "_evolution_meta": {
+                "event_kind": "outcome",
+                "rail_kind": "regular",
+                "status": "no_evolution_no_records",
+                "stage": "completed",
+                "skill_name": skill_name,
+                "source": "experience_updater",
+            },
+            "content": f"[Evolution] no applied updates for skill={skill_name}\n",
         },
     )
 
@@ -71,6 +90,34 @@ class _FakeEvolutionRail:
 
     async def cleanup_background_tasks(self) -> None:
         self.cleanup_calls += 1
+
+
+class _FakeApprovalRail:
+    def __init__(
+        self,
+        *,
+        request_id: str = "",
+        record_ids: list[str] | None = None,
+    ) -> None:
+        self.approved: list[tuple[str, list[str] | None]] = []
+        self.rejected: list[str] = []
+        if record_ids is not None:
+            self._pending_approval_snapshots = {
+                request_id: SimpleNamespace(
+                    payload=[SimpleNamespace(id=record_id) for record_id in record_ids],
+                ),
+            }
+
+    async def approve_record(
+        self,
+        request_id: str,
+        *,
+        approved_record_ids: list[str] | None = None,
+    ) -> None:
+        self.approved.append((request_id, approved_record_ids))
+
+    async def reject_record(self, request_id: str) -> None:
+        self.rejected.append(request_id)
 
 
 class _TestAdapter(JiuWenClawDeepAdapter):
@@ -162,6 +209,39 @@ async def test_normal_evolution_watcher_does_not_push_status_without_sdk_events(
 
     assert _FakeTransport.pushes == []
     assert rail.drain_waits
+    assert rail.cleanup_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_normal_evolution_watcher_uses_sdk_timeout_before_legacy_fallback(monkeypatch):
+    class _SdkTimeoutRail(_FakeEvolutionRail):
+        @property
+        def evolution_total_timeout_secs(self) -> float:
+            return 0.01
+
+    _FakeTransport.pushes = []
+    rail = _SdkTimeoutRail([[_progress_event("generating", stage="generating_updates")]])
+    adapter = _TestAdapter.build_with_rail(rail)
+
+    monkeypatch.setattr(
+        "jiuwenswarm.server.gateway_push.WebSocketGatewayPushTransport",
+        _FakeTransport,
+    )
+    monkeypatch.setattr(interface_deep_module, "TEAM_EVOLUTION_IDLE_SLEEP_SEC", 0.001)
+    monkeypatch.setattr(interface_deep_module, "TEAM_EVOLUTION_EVENT_TIMEOUT_SEC", 100.0)
+    monkeypatch.setattr(evolution_helpers, "TEAM_EVOLUTION_EVENT_TIMEOUT_GRACE_SEC", 0.001)
+
+    await asyncio.wait_for(
+        adapter.watch_evolution_and_push("stream-rid", "web", "sess-sdk-timeout"),
+        timeout=0.2,
+    )
+
+    status_pushes = [
+        push for push in _FakeTransport.pushes
+        if push["payload"]["event_type"] == "chat.evolution_status"
+    ]
+    assert [push["payload"]["status"] for push in status_pushes] == ["start", "end"]
+    assert status_pushes[-1]["payload"]["stage"] == "hidden"
     assert rail.cleanup_calls == 1
 
 
@@ -270,6 +350,31 @@ async def test_normal_evolution_watcher_reads_outcome_status_from_metadata(monke
 
 
 @pytest.mark.asyncio
+async def test_normal_evolution_watcher_ends_on_sdk_noop_outcome_without_prior_progress(monkeypatch):
+    _FakeTransport.pushes = []
+    rail = _FakeEvolutionRail([[_sdk_noop_outcome_event()]])
+    adapter = _TestAdapter.build_with_rail(rail)
+
+    monkeypatch.setattr(
+        "jiuwenswarm.server.gateway_push.WebSocketGatewayPushTransport",
+        _FakeTransport,
+    )
+
+    await adapter.watch_evolution_and_push("stream-rid", "web", "sess-sdk-noop-only")
+
+    status_pushes = [
+        push for push in _FakeTransport.pushes
+        if push["payload"]["event_type"] == "chat.evolution_status"
+    ]
+    assert [push["payload"]["status"] for push in status_pushes] == ["start", "end"]
+    assert [push["payload"]["stage"] for push in status_pushes] == [
+        "no_evolution_no_records",
+        "no_evolution_no_records",
+    ]
+    assert rail.cleanup_calls == 1
+
+
+@pytest.mark.asyncio
 async def test_normal_evolution_watcher_pushes_passive_progress_before_approval(monkeypatch):
     _FakeTransport.pushes = []
     rail = _FakeEvolutionRail(
@@ -350,19 +455,8 @@ async def test_normal_evolution_watcher_hides_timed_out_terminal_progress(monkey
 
 
 @pytest.mark.asyncio
-async def test_team_skill_evolve_approval_uses_record_api(monkeypatch):
-    class _FakeTeamRail:
-        def __init__(self) -> None:
-            self.approved: list[str] = []
-            self.rejected: list[str] = []
-
-        async def approve_record(self, request_id: str) -> None:
-            self.approved.append(request_id)
-
-        async def reject_record(self, request_id: str) -> None:
-            self.rejected.append(request_id)
-
-    rail = _FakeTeamRail()
+async def test_team_skill_evolve_approval_keeps_legacy_whole_request_without_record_ids(monkeypatch):
+    rail = _FakeApprovalRail()
     adapter = object.__new__(JiuWenClawDeepAdapter)
     monkeypatch.setattr(
         JiuWenClawDeepAdapter,
@@ -382,25 +476,51 @@ async def test_team_skill_evolve_approval_uses_record_api(monkeypatch):
     )
 
     assert handled is True
-    assert rail.approved == ["team_skill_evolve_req1"]
+    assert rail.approved == [("team_skill_evolve_req1", None)]
+    assert rail.rejected == []
+
+
+@pytest.mark.asyncio
+async def test_team_skill_evolve_approval_passes_selected_record_ids(monkeypatch):
+    rail = _FakeApprovalRail(
+        request_id="team_skill_evolve_req1",
+        record_ids=["team-rec-1", "team-rec-2", "team-rec-3"],
+    )
+    adapter = object.__new__(JiuWenClawDeepAdapter)
+    monkeypatch.setattr(
+        JiuWenClawDeepAdapter,
+        "find_team_skill_rail",
+        staticmethod(lambda request_id, channel_id=None: rail),
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.agents.harness.team.sync_team_skills_across_managers",
+        lambda session_id: None,
+    )
+
+    handled = await adapter.handle_team_skill_evolve_approval(
+        "team_skill_evolve_req1",
+        [
+            {"selected_options": ["accept"]},
+            {"selected_options": ["reject"]},
+            {"selected_options": ["接收"]},
+        ],
+        session_id="sess-1",
+        channel_id="web",
+    )
+
+    assert handled is True
+    assert rail.approved == [("team_skill_evolve_req1", ["team-rec-1", "team-rec-3"])]
     assert rail.rejected == []
 
 
 @pytest.mark.asyncio
 async def test_team_skill_evolve_approval_pushes_terminal_status(monkeypatch):
-    class _FakeTeamRail:
-        async def approve_record(self, request_id: str) -> None:
-            return None
-
-        async def reject_record(self, request_id: str) -> None:
-            return None
-
     _FakeTransport.pushes = []
     adapter = object.__new__(JiuWenClawDeepAdapter)
     monkeypatch.setattr(
         JiuWenClawDeepAdapter,
         "find_team_skill_rail",
-        staticmethod(lambda request_id, channel_id=None: _FakeTeamRail()),
+        staticmethod(lambda request_id, channel_id=None: _FakeApprovalRail()),
     )
     monkeypatch.setattr(
         "jiuwenswarm.agents.harness.team.sync_team_skills_across_managers",

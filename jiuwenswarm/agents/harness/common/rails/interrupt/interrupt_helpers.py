@@ -295,19 +295,23 @@ def convert_interactions_to_ask_user_question(state_outputs: list) -> dict | Non
     if not state_outputs:
         return None
 
-    interaction = state_outputs[0]
-    if hasattr(interaction, "id"):
-        request_id = interaction.id
-        value_obj = interaction.value
-    elif isinstance(interaction, dict):
-        request_id = interaction.get("id", "")
-        value_obj = interaction.get("value", {})
-    else:
+    interactions = list(_iter_interactions(state_outputs))
+    if not interactions:
         return None
 
-    questions_raw = _extract_questions_from_value(value_obj)
+    # A controller output can contain both a permission interrupt shell and the
+    # real ask_user interrupt. Prefer the structured ask_user payload; otherwise
+    # the frontend may receive an empty permission prompt and have no request_id
+    # to resume the waiting tool call.
+    for interaction in interactions:
+        request_id, value_obj = _extract_interaction_parts(interaction)
+        if not request_id:
+            continue
 
-    if questions_raw is not None:
+        questions_raw = _extract_questions_from_value(value_obj)
+        if questions_raw is None:
+            continue
+
         questions = _build_multi_questions(questions_raw)
         return {
             "event_type": "chat.ask_user_question",
@@ -316,16 +320,46 @@ def convert_interactions_to_ask_user_question(state_outputs: list) -> dict | Non
             "source": "ask_user_interrupt",
         }
 
-    question_data = extract_question_from_interaction(interaction)
-    if not question_data:
-        return None
+    for interaction in interactions:
+        request_id, _value_obj = _extract_interaction_parts(interaction)
+        if not request_id:
+            continue
 
-    return {
-        "event_type": "chat.ask_user_question",
-        "request_id": request_id,
-        "questions": [question_data],
-        "source": "permission_interrupt",
-    }
+        question_data = extract_question_from_interaction(interaction)
+        if not question_data:
+            continue
+
+        return {
+            "event_type": "chat.ask_user_question",
+            "request_id": request_id,
+            "questions": [question_data],
+            "source": "permission_interrupt",
+        }
+
+    return None
+
+
+def _iter_interactions(state_outputs: list) -> Any:
+    """Yield interaction objects, flattening nested interaction lists."""
+    for interaction in state_outputs:
+        if isinstance(interaction, (list, tuple)):
+            yield from _iter_interactions(list(interaction))
+        else:
+            yield interaction
+
+
+def _extract_interaction_parts(interaction: Any) -> tuple[str, Any]:
+    """Return ``(request_id, value)`` for dict or InteractionOutput-like objects."""
+    if hasattr(interaction, "id"):
+        request_id = getattr(interaction, "id", "")
+        value_obj = interaction.value
+    elif isinstance(interaction, dict):
+        request_id = interaction.get("id", "")
+        value_obj = interaction.get("value", {})
+    else:
+        return "", None
+
+    return str(request_id or "").strip(), value_obj
 
 
 def _extract_questions_from_value(value_obj: Any) -> list | None:
@@ -403,20 +437,31 @@ def extract_question_from_interaction(payload: Any) -> dict | None:
 
     tool_name = ""
     message = ""
+    ui_options = None
 
     if hasattr(payload, 'value'):
         value_obj = payload.value
         message = getattr(value_obj, 'message', '') or getattr(value_obj, 'question', '')
         tool_name = getattr(value_obj, 'tool_name', '')
+        ui_options = getattr(value_obj, 'ui_options', None)
     elif isinstance(payload, dict):
         value_obj = payload.get('value', {})
         if isinstance(value_obj, dict):
             message = value_obj.get('message', '') or value_obj.get('question', '')
             tool_name = value_obj.get('tool_name', '')
+            ui_options = value_obj.get('ui_options', None)
         else:
             message = payload.get('message', '') or payload.get('question', '')
     else:
         return None
+
+    if ui_options and isinstance(ui_options, list) and len(ui_options) > 0:
+        return {
+            "question": message or f"工具 `{tool_name}` 需要授权才能执行",
+            "header": f"权限审批: {tool_name}" if tool_name else "权限审批",
+            "options": ui_options,
+            "multi_select": False,
+        }
 
     return {
         "question": message or f"工具 `{tool_name}` 需要授权才能执行",

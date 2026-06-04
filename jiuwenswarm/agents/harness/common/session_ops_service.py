@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import json
 import logging
 import re
@@ -7,7 +8,7 @@ import shutil
 from pathlib import Path
 from typing import Any, TYPE_CHECKING
 
-from jiuwenswarm.common.utils import get_agent_sessions_dir
+from jiuwenswarm.common.utils import get_agent_sessions_dir, get_agent_workspace_dir
 
 if TYPE_CHECKING:
     from openjiuwen.harness import DeepAgent
@@ -461,11 +462,12 @@ async def rewind_session_context(
         logger.warning("rewind_session_context: pre_run failed for %s: %s", session_id, exc)
         return False
 
-    # Wipe stale context / deep_agent_state in the checkpointer so
+    # Wipe stale context / deepagent state in the checkpointer so
     # _load_state_from_session + the agent loop start from our rebuild.
+    from openjiuwen.harness.schema.state import _SESSION_STATE_KEY
     try:
         session.update_state({"context": None})
-        session.update_state({"deep_agent_state": None})
+        session.update_state({_SESSION_STATE_KEY: None})
     except Exception as exc:
         logger.warning("rewind_session_context: state wipe failed for %s: %s", session_id, exc)
 
@@ -503,6 +505,127 @@ async def rewind_session_context(
         session_id, turn_index, len(context_messages), persist_ok,
     )
     return True
+
+
+def _flush_source_state(deep_agent: "DeepAgent", session_id: str) -> None:
+    react = deep_agent.react_agent
+    if react is None:
+        return
+    ctx = react.context_engine.get_context(session_id=session_id)
+    session_obj = getattr(ctx, "session", None)
+    if session_obj is not None:
+        deep_agent.save_state(session_obj)
+
+
+async def copy_session_state(
+    source_session_id: str,
+    target_session_id: str,
+    card: Any,
+    deep_agent: "DeepAgent | None" = None,
+) -> bool:
+    """Copy DeepAgentState from source to target session via Checkpointer.
+
+    Reads source state from the Checkpointer SQLite database, transforms it
+    for a branched session (reset iteration, clear transient state, generate
+    new plan slug), and writes it to the target session's Checkpointer entry.
+
+    Returns True on success, False if state copy was skipped or failed.
+    """
+    from openjiuwen.core.single_agent import create_agent_session
+    from openjiuwen.harness.schema.state import _SESSION_STATE_KEY
+
+    # Flush source runtime state to Checkpointer if deep_agent is available
+    if deep_agent is not None:
+        try:
+            _flush_source_state(deep_agent, source_session_id)
+        except Exception as exc:
+            logger.debug(
+                "copy_session_state: cannot flush source state: %s", exc
+            )
+
+    # Read source state from Checkpointer
+    source_session = None
+    source_state_dict: Any = None
+    try:
+        source_session = create_agent_session(
+            session_id=source_session_id, card=card
+        )
+        await source_session.pre_run()
+        source_state_dict = source_session.get_state(_SESSION_STATE_KEY)
+    except Exception as exc:
+        logger.warning(
+            "copy_session_state: cannot read source state from Checkpointer: %s",
+            exc,
+        )
+        return False
+    finally:
+        if source_session is not None:
+            try:
+                await source_session.post_run()
+            except Exception as exc:
+                logger.warning(
+                    "copy_session_state: error during source session cleanup: %s", exc
+                )
+
+    if not source_state_dict:
+        logger.info(
+            "copy_session_state: no DeepAgentState for %s, skipping",
+            source_session_id,
+        )
+        return False
+
+    # Transform state for branched session (deep copy to avoid mutating source)
+    modified_state = copy.deepcopy(source_state_dict)
+    modified_state["iteration"] = 0
+    modified_state["stop_condition_state"] = None
+    modified_state["pending_follow_ups"] = []
+
+    # Generate new plan slug and copy plan file (like Claude Code's /branch)
+    plan_mode = modified_state.get("plan_mode") or {}
+    old_slug = plan_mode.get("plan_slug")
+    if old_slug:
+        try:
+            from openjiuwen.harness.tools.agent_mode_tools import (
+                get_or_create_plan_slug,
+                resolve_plan_file_path,
+            )
+
+            workspace_root = str(get_agent_workspace_dir())
+            new_slug = get_or_create_plan_slug(workspace_root)
+            old_plan_path = resolve_plan_file_path(workspace_root, old_slug)
+            new_plan_path = resolve_plan_file_path(workspace_root, new_slug)
+            if old_plan_path.exists():
+                shutil.copy2(old_plan_path, new_plan_path)
+            plan_mode["plan_slug"] = new_slug
+            modified_state["plan_mode"] = plan_mode
+            logger.info(
+                "copy_session_state: plan file copied: %s → %s",
+                old_slug, new_slug,
+            )
+        except Exception as exc:
+            logger.debug(
+                "copy_session_state: plan file copy failed (non-critical): %s",
+                exc,
+            )
+
+    # Write transformed state to target via Checkpointer
+    try:
+        target_session = create_agent_session(
+            session_id=target_session_id, card=card
+        )
+        await target_session.pre_run()
+        target_session.update_state({_SESSION_STATE_KEY: modified_state})
+        await target_session.post_run()
+        logger.info(
+            "copy_session_state: copied DeepAgentState from %s to %s",
+            source_session_id, target_session_id,
+        )
+        return True
+    except Exception as exc:
+        logger.warning(
+            "copy_session_state: failed to write target state: %s", exc
+        )
+        return False
 
 
 async def copy_session_context(

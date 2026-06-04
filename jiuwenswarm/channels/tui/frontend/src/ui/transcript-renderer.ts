@@ -73,7 +73,7 @@ export function buildTranscriptLines(
 ): string[] {
   const { entries: displayEntries, latestThinkingId } = selectTranscriptEntries(snapshot);
 
-  const allLines: string[] = [...buildWelcomeLines(width, snapshot.connectionStatus, snapshot.modelInfo, snapshot.mode, snapshot.memoryWarnings)];
+  const allLines: string[] = [...buildWelcomeLines(width, snapshot.connectionStatus, snapshot.modelInfo, snapshot.mode, snapshot.memoryWarnings, snapshot.preferredLanguage)];
   const showPendingInput =
     typeof pendingInput === "string" &&
     pendingInput.length > 0 &&
@@ -116,7 +116,8 @@ export function buildTranscriptLines(
       compact: snapshot.transcriptMode === "compact",
       collapsed,
       thinkingExpanded: showFullThinking,
-      activeThinkingId: snapshot.isProcessing ? latestThinkingId : undefined,
+      activeThinkingId:
+        snapshot.isProcessing || snapshot.cancellableWork ? latestThinkingId : undefined,
       toolDetailsExpanded: showToolDetails,
       animationPhase,
     });

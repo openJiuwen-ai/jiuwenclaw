@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import logging
 import asyncio
+import time
 from abc import ABC
 from typing import TYPE_CHECKING, Any, Awaitable, Callable
 
@@ -156,6 +157,8 @@ class ChannelManager(ABC):
                         await channel.send(msg)
                     except Exception as e:
                         logger.error("send to channel %s: %s", msg.channel_id, e, exc_info=True)
+                        if msg.id and msg.id.startswith("cron-push-"):
+                            await self._notify_cron_delivery_error(msg, e)
                 else:
                     logger.warning(
                         "[ChannelManager] 未找到 Channel，丢弃 robot_messages: channel_id=%s id=%s",
@@ -163,6 +166,31 @@ class ChannelManager(ABC):
                     )
             except asyncio.CancelledError:
                 break
+
+    async def _notify_cron_delivery_error(self, original_msg: "Message", error: Exception) -> None:
+        """推送失败时，通过 web channel 发送 chat.error 通知前端。"""
+        from jiuwenswarm.common.schema.message import EventType, Message
+
+        cron_info = (original_msg.payload or {}).get("cron", {})
+        job_name = cron_info.get("job_name", "")
+        error_text = f"定时任务「{job_name}」推送到 {original_msg.channel_id} 失败：{error}"
+        error_msg = Message(
+            id=f"cron-delivery-error-{original_msg.id}",
+            type="event",
+            channel_id="web",
+            session_id=original_msg.session_id,
+            params={},
+            timestamp=time.time(),
+            ok=False,
+            payload={"event_type": "chat.error", "error": error_text},
+            event_type=EventType.CHAT_ERROR,
+        )
+        web_channel = self._channels.get("web")
+        if web_channel:
+            try:
+                await web_channel.send(error_msg)
+            except Exception:
+                logger.warning("[ChannelManager] 发送 cron 推送失败通知到 web 也失败了")
 
     async def start_dispatch(self) -> None:
         """启动出队派发任务（消费 MessageHandler.robot_messages 并发送到各 Channel）."""

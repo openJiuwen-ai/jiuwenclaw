@@ -333,7 +333,9 @@ class AcpGatewayBridge:
 
     async def send_message(self, msg: Message, ws: Any) -> bool:
         ctx = self._request_ctx_by_request_id.get(str(getattr(msg, "id", "")))
-        payload = dict(getattr(msg, "payload", None) or {})
+        payload = getattr(msg, "payload", None) or {}
+        if not isinstance(payload, dict):
+            payload = {}
         session_id = str(getattr(msg, "session_id", None) or "")
 
         if ctx is None:

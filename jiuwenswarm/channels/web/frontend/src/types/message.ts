@@ -29,6 +29,19 @@ export interface FileDownloadItem {
   download_token: string;
 }
 
+export interface ContextCompressionRuntime {
+  status: 'running' | 'completed' | 'unchanged' | 'failed';
+  summary: string;
+  operationId: string;
+  phase?: string;
+  processor?: string;
+}
+
+export interface ContextCompressionSummary {
+  count: number;
+  summaries: string[];
+}
+
 export interface Message {
   id: string;
   role: MessageRole;
@@ -54,6 +67,7 @@ export interface ToolCall {
   arguments: Record<string, unknown>;
   description?: string;  // 操作描述，如 "创建 3 个任务"
   formatted_args?: string;  // 格式化参数摘要
+  memberName?: string;
 }
 
 export interface ToolResult {

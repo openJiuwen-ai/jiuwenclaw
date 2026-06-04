@@ -26,7 +26,10 @@ from jiuwenswarm.server.runtime.agent_adapter.agent_adapters import (
     resolve_sdk_choice,
 )
 from jiuwenswarm.agents.harness.common.memory.config import get_memory_mode
-from jiuwenswarm.server.runtime.session.session_history import append_history_record
+from jiuwenswarm.server.runtime.session.session_history import (
+    append_compact_history_records,
+    append_history_record,
+)
 from jiuwenswarm.server.runtime.session.session_manager import SessionManager
 from jiuwenswarm.server.runtime.skill.skill_manager import SkillManager
 from jiuwenswarm.server.utils.utils import is_team_params
@@ -43,6 +46,45 @@ from jiuwenswarm.common.utils import (
     reset_free_search_runtime_flags,
 )
 
+
+def _compact_stats_from_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    stats: dict[str, Any] = {}
+    for key in ("status", "phase", "processor", "model", "before", "after", "saved", "duration_ms"):
+        if key in payload:
+            stats[key] = payload.get(key)
+    return stats
+
+
+def _is_successful_compaction_payload(payload: dict[str, Any]) -> bool:
+    if payload.get("error"):
+        return False
+    status = str(payload.get("status") or "").strip().lower()
+    return status not in {"error", "failed", "skipped"}
+
+
+def _append_compact_history_from_payload(
+    *,
+    payload: dict[str, Any],
+    session_id: str,
+    request_id: str,
+    channel_id: str,
+    mode: str,
+) -> None:
+    summary_text = str(payload.get("compact_summary") or "").strip()
+    if not summary_text or not _is_successful_compaction_payload(payload):
+        return
+    append_compact_history_records(
+        session_id=session_id,
+        request_id=request_id,
+        channel_id=channel_id,
+        summary=summary_text,
+        timestamp=time.time(),
+        trigger="auto",
+        stats=_compact_stats_from_payload(payload),
+        mode=mode,
+    )
+
+
 load_dotenv(dotenv_path=get_env_file(), override=True)
 reset_free_search_runtime_flags()
 
@@ -57,6 +99,7 @@ _SKILL_ROUTES: dict[ReqMethod, str] = {
     ReqMethod.SKILLS_LIST: "handle_skills_list",
     ReqMethod.SKILLS_INSTALLED: "handle_skills_installed",
     ReqMethod.SKILLS_GET: "handle_skills_get",
+    ReqMethod.SKILLS_TOGGLE: "handle_skills_toggle",
     ReqMethod.SKILLS_MARKETPLACE_LIST: "handle_skills_marketplace_list",
     ReqMethod.SKILLS_INSTALL: "handle_skills_install",
     ReqMethod.SKILLS_UNINSTALL: "handle_skills_uninstall",
@@ -83,6 +126,15 @@ _SKILL_ROUTES: dict[ReqMethod, str] = {
     ReqMethod.SKILLS_EVOLUTION_STATUS: "handle_skills_evolution_status",
     ReqMethod.SKILLS_EVOLUTION_GET: "handle_skills_evolution_get",
     ReqMethod.SKILLS_EVOLUTION_SAVE: "handle_skills_evolution_save",
+}
+
+_PLUGIN_ROUTES: dict[ReqMethod, str] = {
+    ReqMethod.PLUGINS_LIST: "handle_plugins_list",
+    ReqMethod.PLUGINS_INSTALL: "handle_plugins_install",
+    ReqMethod.PLUGINS_UNINSTALL: "handle_plugins_uninstall",
+    ReqMethod.PLUGINS_ENABLE: "handle_plugins_enable",
+    ReqMethod.PLUGINS_DISABLE: "handle_plugins_disable",
+    ReqMethod.PLUGINS_RELOAD: "handle_plugins_reload",
 }
 
 _SKILL_COMMAND_REGEX = re.compile(
@@ -245,6 +297,8 @@ class JiuWenClaw:
         raw_mode = params.get("mode", "")
         if isinstance(raw_mode, str):
             mode = raw_mode.strip().lower()
+            if mode == "team.plan":
+                return "code"
             if mode == "code" or mode.startswith("code."):
                 return "code"
         return "agent"
@@ -288,6 +342,10 @@ class JiuWenClaw:
             asyncio.create_task(adapter.try_start_dreaming(
                 busy_checker=lambda: sm.has_active_tasks(),))
 
+    def build_inputs(self, request: AgentRequest) -> Tuple[dict[str, Any], str, str]:
+        """构建 adapter 所需的 inputs 字典（公共接口）."""
+        return self._build_inputs(request)
+
     def _build_inputs(self, request: AgentRequest) -> Tuple[dict[str, Any], str, str]:
         """构建 adapter 所需的 inputs 字典."""
         from openjiuwen.core.session.interaction.interactive_input import InteractiveInput
@@ -305,6 +363,25 @@ class JiuWenClaw:
             for d in raw_trusted_dirs:
                 if isinstance(d, str) and d.strip():
                     trusted_dirs.append(d.strip())
+        metadata = request.metadata or {}
+        param_project_dir = request.params.get("project_dir")
+        metadata_project_dir = metadata.get("project_dir") if isinstance(metadata, dict) else None
+        project_dir = (
+            param_project_dir.strip()
+            if isinstance(param_project_dir, str) and param_project_dir.strip()
+            else metadata_project_dir.strip()
+            if isinstance(metadata_project_dir, str) and metadata_project_dir.strip()
+            else None
+        )
+        param_cwd = request.params.get("cwd")
+        metadata_cwd = metadata.get("cwd") if isinstance(metadata, dict) else None
+        cwd = (
+            param_cwd.strip()
+            if isinstance(param_cwd, str) and param_cwd.strip()
+            else metadata_cwd.strip()
+            if isinstance(metadata_cwd, str) and metadata_cwd.strip()
+            else None
+        )
         if request.metadata and request.metadata.get("interaction_context"):
             logger.info(
                 "[_build_inputs][DEBUG] request.params.query=\n%s",
@@ -351,6 +428,10 @@ class JiuWenClaw:
         # 传递 trusted_dirs 参数（用于 RuntimePromptRail 添加路径限制策略）
         if trusted_dirs:
             inputs["trusted_dirs"] = trusted_dirs
+        if project_dir:
+            inputs["project_dir"] = project_dir
+        if cwd:
+            inputs["cwd"] = cwd
 
         run = request.params.get("run")
         if run:
@@ -404,23 +485,28 @@ class JiuWenClaw:
             )
             return interactive_input
 
+        if source and source != "permission_interrupt":
+            return None
+
         answer = answers[0] if answers else {}
         selected_options = answer.get("selected_options", []) if isinstance(answer, dict) else []
         custom_input = answer.get("custom_input", "") if isinstance(answer, dict) else ""
 
-        if "本次允许" in selected_options:
+        value = selected_options[0] if selected_options else ""
+
+        if value in ("approve", "本次允许", "Approve"):
             confirm_payload = {"approved": True, "auto_confirm": False, "feedback": ""}
-        elif "总是允许" in selected_options:
+        elif value in ("always_allow", "总是允许", "Always Allow"):
             confirm_payload = {
                 "approved": True,
                 "auto_confirm": True,
                 "persist_allow": True,
                 "feedback": "",
             }
-        elif "拒绝" in selected_options:
+        elif value in ("reject", "拒绝", "Reject"):
             confirm_payload = {"approved": False, "auto_confirm": False, "feedback": custom_input or "用户拒绝"}
         else:
-            confirm_payload = {"approved": False, "auto_confirm": False, "feedback": "未知选项"}
+            confirm_payload = {"approved": False, "auto_confirm": False, "feedback": f"未知选项: {value}"}
 
         interactive_input.update(request_id, confirm_payload)
         logger.info(
@@ -472,6 +558,7 @@ class JiuWenClaw:
                 "handle_skills_install",
                 "handle_skills_uninstall",
                 "handle_skills_import_local",
+                "handle_skills_toggle",
                 "handle_skills_skillnet_install",
                 "handle_skills_clawhub_download",
                 "handle_skills_team_skills_hub_install",
@@ -482,6 +569,40 @@ class JiuWenClaw:
                 await self.create_instance()
         except Exception as exc:
             logger.error("[JiuWenClaw] skills 请求处理失败: %s", exc)
+            return AgentResponse(
+                request_id=request.request_id,
+                channel_id=request.channel_id,
+                ok=False,
+                payload={"error": str(exc)},
+                metadata=request.metadata,
+            )
+        return AgentResponse(
+            request_id=request.request_id,
+            channel_id=request.channel_id,
+            ok=True,
+            payload=payload,
+            metadata=request.metadata,
+        )
+
+    async def _handle_plugins_request(self, request: AgentRequest) -> AgentResponse | None:
+        """处理 Plugin 相关请求，返回 None 表示不是 Plugin 请求."""
+        if request.req_method not in _PLUGIN_ROUTES:
+            return None
+
+        handler_name = _PLUGIN_ROUTES[request.req_method]
+        handler = getattr(self._skill_manager, handler_name)
+        try:
+            payload = await handler(request.params)
+            # install / uninstall / reload 之后重建 Agent 实例
+            _reload_after = handler_name in [
+                "handle_plugins_install",
+                "handle_plugins_uninstall",
+                "handle_plugins_reload",
+            ]
+            if _reload_after:
+                await self.create_instance()
+        except Exception as exc:
+            logger.error("[JiuWenClaw] plugins 请求处理失败: %s", exc)
             return AgentResponse(
                 request_id=request.request_id,
                 channel_id=request.channel_id,
@@ -541,14 +662,21 @@ class JiuWenClaw:
             await self._session_manager.cancel_session_task(session_id, "interrupt(supplement): ")
             return response
 
-        # cancel: 仅取消当前 session 的任务，避免误伤其它并发会话
-        await self._session_manager.cancel_session_task(session_id, f"interrupt(intent={intent}): ")
+        # cancel: 先调用 adapter.process_interrupt（此时 session 仍在 _active_session_ids 中，
+        # guard 能通过），再 cancel_session_task（其 finally 会把 session 从 _active_session_ids 移除）。
+        # 顺序不能反，否则 process_interrupt 的 session guard 会误判为 "not active" 而跳过 abort。
+        response = await adapter.process_interrupt(request)
         await self._cancel_team_work_for_session(
             session_id,
             request.channel_id,
             log_prefix=f"interrupt(intent={intent}): ",
         )
-        return await adapter.process_interrupt(request)
+        await self._session_manager.cancel_session_task(
+            session_id,
+            f"interrupt(intent={intent}): ",
+            wait_timeout=5.0,
+        )
+        return response
 
     @staticmethod
     def _build_interrupt_result_response(
@@ -602,13 +730,22 @@ class JiuWenClaw:
             )
 
         if intent in {"pause", "cancel"}:
-            await self._session_manager.cancel_session_task(session_id, reason)
             if intent == "pause":
                 paused = await team_manager.pause_session_runtime(session_id, reason=reason)
+                await self._session_manager.cancel_session_task(
+                    session_id,
+                    reason,
+                    wait_timeout=5.0,
+                )
                 message = "团队已暂停" if paused else "当前没有可暂停的团队任务"
             else:
                 # Use cancel_session_runtime to remove from Runner pool
                 cancelled = await team_manager.cancel_session_runtime(session_id, reason=reason)
+                await self._session_manager.cancel_session_task(
+                    session_id,
+                    reason,
+                    wait_timeout=5.0,
+                )
                 message = "团队当前执行已结束" if cancelled else "当前没有可取消的团队任务"
             success = paused if intent == "pause" else cancelled
             return self._build_interrupt_result_response(
@@ -668,6 +805,10 @@ class JiuWenClaw:
         skills_response = await self._handle_skills_request(request)
         if skills_response is not None:
             return skills_response
+
+        plugins_response = await self._handle_plugins_request(request)
+        if plugins_response is not None:
+            return plugins_response
 
         session_id = self._session_manager.get_session_id(request.session_id)
         query = request.params.get("query", "")
@@ -768,7 +909,7 @@ class JiuWenClaw:
         mode = request.params.get("mode", "") if isinstance(request.params, dict) else ""
         team_flag = request.params.get("team", False) if isinstance(request.params, dict) else False
         is_team_mode = team_flag or (
-            isinstance(mode, str) and mode.strip().lower() in {"team", "code.team"}
+            isinstance(mode, str) and mode.strip().lower() in {"team", "team.plan", "code.team"}
         )
         is_auto_harness_resume = (
             isinstance(mode, str)
@@ -798,10 +939,13 @@ class JiuWenClaw:
 
         # Team 模式：使用原始 query，而不是 build_user_prompt 包装后的内容
         if is_team_mode:
-            inputs["query"] = raw_query
+            from openjiuwen.core.session.interaction.interactive_input import InteractiveInput
+
+            if not isinstance(inputs.get("query"), InteractiveInput):
+                inputs["query"] = raw_query
             logger.info(
                 "[JiuWenClaw] Team模式使用原始query: %s",
-                raw_query[:100] if raw_query else "",
+                raw_query[:100] if isinstance(raw_query, str) and raw_query else type(inputs.get("query")).__name__,
             )
 
         # cloud memory: before chat hook
@@ -905,6 +1049,14 @@ class JiuWenClaw:
                             should_record = et.startswith("chat.")
                             if not should_record and et == EventType.TEAM_MESSAGE.value:
                                 should_record = True
+                            if et == "context_compression_state":
+                                _append_compact_history_from_payload(
+                                    payload=data.payload,
+                                    session_id=session_id,
+                                    request_id=rid,
+                                    channel_id=cid,
+                                    mode=request.params.get("mode", "unknown"),
+                                )
 
                             if should_record:
                                 payload_dict = dict(data.payload)
@@ -937,6 +1089,14 @@ class JiuWenClaw:
                         should_record = et.startswith("chat.")
                         if not should_record and et == EventType.TEAM_MESSAGE.value:
                             should_record = True
+                        if et == "context_compression_state":
+                            _append_compact_history_from_payload(
+                                payload=data,
+                                session_id=session_id,
+                                request_id=rid,
+                                channel_id=cid,
+                                mode=request.params.get("mode", "unknown"),
+                            )
 
                         if should_record:
                             extra_fields = {k: v for k, v in data.items() if k not in ("event_type", "content")}
@@ -997,7 +1157,13 @@ class JiuWenClaw:
     def get_instance(self):
         return self._adapter._instance
 
-    async def compress_context(self, session_id: str, session: Any = None) -> dict[str, Any]:
+    async def compress_context(
+            self,
+            session_id: str,
+            session: Any = None,
+            *,
+            return_state: bool = False,
+    ) -> dict[str, Any]:
         """主动触发上下文压缩。
 
         Args:
@@ -1015,6 +1181,7 @@ class JiuWenClaw:
         return await adapter.compress_context(
             session_id=session_id,
             session=session,
+            return_state=return_state,
         )
 
     async def get_context_usage(self, session_id: str) -> dict[str, Any]:

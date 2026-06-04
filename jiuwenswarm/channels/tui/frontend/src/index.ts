@@ -30,7 +30,8 @@ Options:
   process.exit(0);
 }
 
-if (!process.stdin.isTTY || !process.stdout.isTTY) {
+// 允许通过环境变量跳过 TTY 检查（用于自动化测试）
+if (!process.env.JIUWENSWARM_TUI_HEADLESS && (!process.stdin.isTTY || !process.stdout.isTTY)) {
   console.error("jiuwenswarm-tui requires an interactive TTY");
   process.exit(1);
 }
@@ -103,11 +104,13 @@ tui.setFocus(screen);
 process.on("SIGTERM", () => {
   void closeUi(0);
 });
-// 双击 Ctrl+C 退出：第一次中断当前任务，1 秒内再按一次退出进程。
+// 双击 Ctrl+C 退出：第一次中断当前任务，3 秒内再按一次退出进程。
+// 当 Ctrl+C 消费在取消命令（如 /recap）上时，重置计时器，
+// 需要再连按两次才能退出，而非只需一次。
 let lastInterruptTime = 0;
 process.on("SIGINT", () => {
   const now = Date.now();
-  if (now - lastInterruptTime < 1000) {
+  if (now - lastInterruptTime < 3000) {
     void closeUi(0);
     return;
   }

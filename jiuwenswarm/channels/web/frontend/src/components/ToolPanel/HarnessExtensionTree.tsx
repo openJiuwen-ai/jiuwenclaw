@@ -4,11 +4,12 @@
  * Displays a file tree for runtime extension files in auto_harness mode.
  * Uses runtime_path from extension_ready event to fetch file listing.
  * Supports hierarchical directory structure with expand/collapse.
+ * Uses global cache to avoid repeated API calls.
  */
 
 import { useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { useHarnessStore } from '../../stores';
+import { useHarnessStore, CachedFileTreeEntry } from '../../stores';
 import { webRequest } from '../../services/webClient';
 import { ReadOnlyFileModal } from './ReadOnlyFileModal';
 
@@ -26,6 +27,8 @@ interface HarnessExtensionTreeProps {
   extensionName?: string;
   /** Whether to show export button (default: true for ToolPanel, false for HarnessPackagePanel) */
   showExport?: boolean;
+  /** Force refresh (bypass cache) */
+  forceRefresh?: boolean;
 }
 
 const compareByName = (a: string, b: string) => a.localeCompare(b, 'zh-Hans-CN');
@@ -43,9 +46,37 @@ function isPreviewableFile(fileName: string): boolean {
   );
 }
 
+// Convert cached entries to FileInfo format
+function cachedToFileInfo(cached: CachedFileTreeEntry[]): FileInfo[] {
+  return cached.map(entry => ({
+    name: entry.name,
+    path: entry.path,
+    is_dir: entry.is_dir,
+    children: entry.children ? cachedToFileInfo(entry.children) : undefined,
+  }));
+}
+
+// Convert FileInfo to cached format
+function fileInfoToCached(files: FileInfo[]): CachedFileTreeEntry[] {
+  return files.map(file => ({
+    name: file.name,
+    path: file.path,
+    is_dir: file.is_dir,
+    children: file.children ? fileInfoToCached(file.children) : undefined,
+  }));
+}
+
 export function HarnessExtensionTree(props?: HarnessExtensionTreeProps) {
   const { t } = useTranslation();
-  const { extensionReady, packages } = useHarnessStore();
+  const {
+    extensionReady,
+    packages,
+    getFileTreeCache,
+    setFileTreeCache,
+    clearFileTreeCache,
+    setFileTreeLoading,
+    isFileTreeLoading,
+  } = useHarnessStore();
   const [files, setFiles] = useState<FileInfo[]>([]);
   const [loading, setLoading] = useState(false);
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -67,7 +98,7 @@ export function HarnessExtensionTree(props?: HarnessExtensionTreeProps) {
   const packageId = currentPackage?.id || null;
   const canExport = !isSessionRuntimeRoot && packageId && packageId !== 'native';
 
-  // Recursively fetch directory contents
+  // Recursively fetch directory contents (parallel fetch for subdirectories)
   const fetchDirectoryContents = async (dirPath: string): Promise<FileInfo[]> => {
     const encodedPath = encodeURIComponent(dirPath);
     const url = `/file-api/list-files?dir=${encodedPath}`;
@@ -95,34 +126,55 @@ export function HarnessExtensionTree(props?: HarnessExtensionTreeProps) {
       return compareByName(a.name, b.name);
     });
 
-    // Recursively fetch contents for subdirectories
-    for (const entry of entries) {
-      if (entry.is_dir) {
-        try {
-          entry.children = await fetchDirectoryContents(entry.path);
-        } catch (err) {
+    // Parallel fetch contents for all subdirectories using Promise.all
+    const subdirEntries = entries.filter(e => e.is_dir);
+    const subdirFetches = subdirEntries.map(entry =>
+      fetchDirectoryContents(entry.path)
+        .then(children => { entry.children = children; return entry; })
+        .catch(err => {
           console.error(`Failed to load subdirectory ${entry.path}:`, err);
           entry.children = [];
-        }
-      }
-    }
+          return entry;
+        })
+    );
+    await Promise.all(subdirFetches);
 
     return entries;
   };
 
-  const loadFiles = async () => {
+  const loadFiles = async (forceRefresh = false) => {
     if (!runtimePath) {
       setFiles([]);
       setLoading(false);
       return;
     }
 
+    // Check cache first (unless force refresh)
+    if (!forceRefresh && !props?.forceRefresh) {
+      const cached = getFileTreeCache(runtimePath);
+      if (cached && cached.length > 0) {
+        setFiles(cachedToFileInfo(cached));
+        // Auto-expand root level directories from cache
+        const rootDirPaths = cached.filter(f => f.is_dir).map(f => f.path);
+        setExpandedPaths(new Set(rootDirPaths));
+        return;
+      }
+    }
+
+    // Check if already loading this path (prevent duplicate requests)
+    if (isFileTreeLoading(runtimePath)) {
+      return;
+    }
+
     setLoading(true);
     setLoadError(null);
+    setFileTreeLoading(runtimePath, true);
 
     try {
       const fileList = await fetchDirectoryContents(runtimePath);
       setFiles(fileList);
+      // Save to cache
+      setFileTreeCache(runtimePath, fileInfoToCached(fileList));
       // Auto-expand root level directories
       const rootDirPaths = fileList.filter(f => f.is_dir).map(f => f.path);
       setExpandedPaths(new Set(rootDirPaths));
@@ -132,7 +184,13 @@ export function HarnessExtensionTree(props?: HarnessExtensionTreeProps) {
       setFiles([]);
     } finally {
       setLoading(false);
+      setFileTreeLoading(runtimePath, false);
     }
+  };
+
+  const handleRefresh = () => {
+    clearFileTreeCache(runtimePath);
+    loadFiles(true);
   };
 
   useEffect(() => {
@@ -161,10 +219,6 @@ export function HarnessExtensionTree(props?: HarnessExtensionTreeProps) {
     setModalOpen(false);
   };
 
-  const handleRefresh = () => {
-    loadFiles();
-  };
-
   const handleExport = async () => {
     if (!packageId) return;
 
@@ -172,26 +226,40 @@ export function HarnessExtensionTree(props?: HarnessExtensionTreeProps) {
     setExportError(null);
 
     try {
-      // Send via WebSocket
-      const result = await webRequest<{ file_content: string; filename: string }>('harness.export', {
+      // Send via WebSocket - now returns download URL instead of base64 content
+      const result = await webRequest<{
+        download_url?: string;  // new format - HTTP download URL
+        file_content?: string;  // legacy format - base64 encoded
+        filename: string;
+      }>('harness.export', {
         package_id: packageId,
       });
 
-      // Decode base64 content and download
-      const binaryString = atob(result.file_content);
-      const bytes = new Uint8Array(binaryString.length);
-      for (let i = 0; i < binaryString.length; i++) {
-        bytes[i] = binaryString.charCodeAt(i);
+      if (result.download_url) {
+        // New format: direct HTTP download (avoids WebSocket size limits)
+        const a = document.createElement('a');
+        a.href = result.download_url;
+        a.download = result.filename || `${extensionName || 'package'}.zip`;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+      } else if (result.file_content) {
+        // Legacy format: decode base64 and download (for backwards compatibility)
+        const binaryString = atob(result.file_content);
+        const bytes = new Uint8Array(binaryString.length);
+        for (let i = 0; i < binaryString.length; i++) {
+          bytes[i] = binaryString.charCodeAt(i);
+        }
+        const blob = new Blob([bytes], { type: 'application/zip' });
+        const url = window.URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = result.filename || `${extensionName || 'package'}.zip`;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        window.URL.revokeObjectURL(url);
       }
-      const blob = new Blob([bytes], { type: 'application/zip' });
-      const url = window.URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = result.filename || `${extensionName || 'package'}.zip`;
-      document.body.appendChild(a);
-      a.click();
-      document.body.removeChild(a);
-      window.URL.revokeObjectURL(url);
     } catch (err) {
       console.error('Export failed:', err);
       setExportError(err instanceof Error ? err.message : t('harnessPackage.exportError'));

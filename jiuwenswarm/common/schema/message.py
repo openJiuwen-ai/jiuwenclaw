@@ -61,10 +61,20 @@ class ReqMethod(Enum):
     FILES_GET = "files.get"
     TTS_SYNTHESIZE = "tts.synthesize"
 
+    AGENTS_LIST = "agents.list"
+    AGENTS_GET = "agents.get"
+    AGENTS_CREATE = "agents.create"
+    AGENTS_UPDATE = "agents.update"
+    AGENTS_DELETE = "agents.delete"
+    AGENTS_ENABLE = "agents.enable"
+    AGENTS_DISABLE = "agents.disable"
+    AGENTS_TOOLS_LIST = "agents.tools_list"
+
     SKILLS_MARKETPLACE_LIST = "skills.marketplace.list"
     SKILLS_LIST = "skills.list"
     SKILLS_INSTALLED = "skills.installed"
     SKILLS_GET = "skills.get"
+    SKILLS_TOGGLE = "skills.toggle"
     SKILLS_INSTALL = "skills.install"
     SKILLS_IMPORT_LOCAL = "skills.import_local"
     SKILLS_MARKETPLACE_ADD = "skills.marketplace.add"
@@ -91,10 +101,20 @@ class ReqMethod(Enum):
     SKILLS_EVOLUTION_GET = "skills.evolution.get"
     SKILLS_EVOLUTION_SAVE = "skills.evolution.save"
 
+    # Plugin management (reuses skills marketplace infrastructure)
+    PLUGINS_LIST = "plugins.list"
+    PLUGINS_INSTALL = "plugins.install"
+    PLUGINS_UNINSTALL = "plugins.uninstall"
+    PLUGINS_ENABLE = "plugins.enable"
+    PLUGINS_DISABLE = "plugins.disable"
+    PLUGINS_RELOAD = "plugins.reload"
+
     EXTENSIONS_LIST = "extensions.list"
     EXTENSIONS_IMPORT = "extensions.import"
     EXTENSIONS_DELETE = "extensions.delete"
     EXTENSIONS_TOGGLE = "extensions.toggle"
+
+    HOOKS_LIST = "hooks.list"
 
     HEARTBEAT_GET_CONF = "heartbeat.get_conf"
     HEARTBEAT_SET_CONF = "heartbeat.set_conf"
@@ -136,11 +156,13 @@ class ReqMethod(Enum):
     UPDATER_SET_CONF = "updater.set_conf"
 
     TEAM_SNAPSHOT = "team.snapshot"
+    TEAM_HISTORY_GET = "team.history.get"
 
     # Harness package management
     HARNESS_PACKAGES_GET = "harness.packages.get"
     HARNESS_PACKAGES_SCAN = "harness.packages.scan"
     HARNESS_PACKAGES_ACTIVATE = "harness.packages.activate"
+    HARNESS_PACKAGES_DEACTIVATE = "harness.packages.deactivate"
     HARNESS_PACKAGES_DELETE = "harness.packages.delete"
     HARNESS_PACKAGES_IMPORT = "harness.packages.import"
     HARNESS_PACKAGES_EXPORT = "harness.packages.export"
@@ -170,7 +192,7 @@ class EventType(Enum):
     CHAT_TOOL_CALL = "chat.tool_call"
     CHAT_TOOL_UPDATE = "chat.tool_update"
     CHAT_TOOL_RESULT = "chat.tool_result"
-    CONTEXT_COMPRESSED = "context.compressed"
+    CONTEXT_USAGE = "context.usage"
     TODO_UPDATED = "todo.updated"
     CHAT_PROCESSING_STATUS = "chat.processing_status"
     CHAT_ERROR = "chat.error"

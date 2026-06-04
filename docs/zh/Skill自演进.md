@@ -187,62 +187,161 @@ User: 不对，我说的是查询上海不是北京
 
 ## 如何使用
 
-使用 JiuwenSwarm 时，你可以通过以下方式与 Skill 演进功能交互：
+使用 Skill 自演进时，可以先按下面顺序判断自己要做什么：
+
+- 想让系统在后台自动发现并沉淀经验：开启自动扫描。
+- 想立即针对某个已有 Skill 生成经验：使用 `/evolve` 系列命令。
+- 想让系统在缺少合适 Skill 时自动提出新 Skill 创建建议：开启 Skill 自动创建。
 
 ### 自演进配置开关
 
-skill 自动演进功能通过在配置信息中开启自演进配置项 `evolution_auto_scan` 开关启用。
+在配置页的 **自演进配置** 中，可以按需要开启：
+
+- **自动检测可演进信号**：让系统在对话和工具执行后自动扫描失败、纠错等演进信号；对应配置 `evolution.auto_scan`，默认关闭。
+- **自动建议创建新技能**：让系统在缺少合适 Skill 时提出新 Skill 创建建议；对应配置 `evolution.skill_create`，默认关闭。
+
+如果通过配置文件管理，对应写法是：
+
+```yaml
+evolution:
+  auto_scan: false
+  skill_create: false
+```
+
+- 环境变量 `EVOLUTION_AUTO_SCAN` 会覆盖 `auto_scan`，`SKILL_CREATE` 会覆盖 `skill_create`。
 
 ![打开自演进自动检测](../assets/images/skill演进_自动检测开关.png)
 
-### 自动演进（无需干预）
+### 自动演进
 
-系统会在每次工具执行和对话结束后自动检测演进信号。当检测到执行异常或用户纠错时，会自动生成演进记录并存入 `evolutions.json`。
+开启 **自动检测可演进信号** 后，系统会在工具执行和对话结束后自动检测演进信号。常见信号包括工具失败、执行报错、用户纠错和明确负反馈。
 
-你无需做任何操作，演进在后台静默进行。下次调用该 Skill 时，会自动加载包含演进经验的内容。
+如果检测到有效信号，系统会为相关 Skill 生成演进经验。下次调用该 Skill 时，这些经验会被自动加载，帮助 Agent 避免重复错误。
 
 ![自动触发](../assets/images/skill演进_自动触发.png)
 
-### 手动触发演进
+### 手动触发已有 Skill 演进
 
-如果希望立即为某个 Skill 触发演进，可以输入：
+如果你刚遇到某个 Skill 的失败、偏差或需要补充的经验，可以直接输入：
 
 ```bash
-/evolve <skill_name>
+/evolve <skill_name> [user_query]
 ```
 
 例如：
 
 ```bash
-/evolve xlsx
+/evolve xlsx 创建发票文件前需要向我确定具体要求
 ```
-
-系统会扫描最近的对话和执行记录，为该 Skill 生成演进经验，并显示生成结果。
 
 ![手动触发](../assets/images/skill演进_手动触发.png)
 
-### 查看演进状态
+在**规划模式**下，系统会优先扫描当前会话中的工具失败和用户纠错信号。如果没有检测到明确演进信号，可以在命令后补充 `user_query`，直接说明希望 Skill 改进什么。
 
-想知道哪些 Skill 有待固化的演进经验，可以输入：
+在**集群模式**下，`/evolve <skill_name>` 必须带上演进意图，例如：
 
 ```bash
-/evolve list
+/evolve pptx 让团队报告导出失败时给出可恢复步骤
 ```
 
-系统会列出所有包含待演进记录的 Skill 及具体内容摘要。
+### 查看和整理演进经验
 
-![信息总览](../assets/images/skill演进_信息总览.png)
+想查看某个 Skill 的详细经验库和评分，可以输入：
+
+```bash
+/evolve_list <skill_name> [--sort score]
+```
+
+例如：
+
+```bash
+/evolve_list xlsx --sort score
+```
+
+在**规划模式**下，无参数 `/evolve` 仍会返回当前可见 Skill 的待处理演进记录摘要；Team 模式不支持裸 `/evolve`，必须提供 Skill 名称和演进意图。因此日常查看经验库时，建议使用 `/evolve_list <skill_name>`。
+
+如果某个 Skill 的经验库开始重复、过长或价值不清，可以让系统生成整理方案：
+
+```bash
+/evolve_simplify <skill_name> [user_intent]
+```
+
+例如：
+
+```bash
+/evolve_simplify xlsx 合并重复的导出失败经验
+```
+
+整理方案不会静默落盘。系统会弹出审批，确认后才执行，拒绝后会丢弃本次整理。
+
+![查看和整理演进经验](../assets/images/skill演进_查看和整理经验.png)
+
+### 重建 Skill 文档
+
+当某个 Skill 积累了较多演进经验，希望把经验重新组织进 `SKILL.md` 时，可以输入：
+
+```bash
+/evolve_rebuild <skill_name> [user_intent]
+```
+
+例如：
+
+```bash
+/evolve_rebuild xlsx 增加环境缺少工具时的应对策略
+```
+
+这个命令会生成后续执行任务，并继续作为普通 Agent / Team 任务运行。它不是直接覆盖 `SKILL.md` 的快捷按钮，实际改动仍会通过任务执行和审批流程完成。
+
+![重建SKILL](../assets/images/skill演进_重建.png)
+
+### Skill 自动创建
+
+已有 Skill 自演进解决的是“已有 Skill 怎么变好”。如果当前任务暴露出缺少合适 Skill 的问题，可以开启 Skill 自动创建：
+
+```yaml
+evolution:
+  skill_create: true
+```
+
+开启后，系统会注册 `SkillCreateRail`。在集群模式中，会注册 `TeamSkillCreateRail`。当系统判断当前任务需要沉淀成新 Skill 时，会提出创建建议，并通过后续任务完成 Skill 创建。
+
+注意：
+
+- `skill_create` 默认关闭，适合在希望主动沉淀新能力时开启。
+- 环境变量 `SKILL_CREATE=true` 会覆盖配置文件。
+
+### 适用模式
+
+| 模式 | 支持情况 |
+|---|---|
+| 规划模式 `agent.plan` | 支持已有 Skill 演进、经验查看、整理、重建和 Skill 自动创建。 |
+| 集群模式 `team` | 支持团队 Skill 演进、经验查看、整理、重建；`/evolve <skill_name>` 必须带演进意图。 |
+| Code 模式 / `agent.fast` | 不支持 `/evolve` 系列 Skill 自演进命令。 |
+
+### 审批和状态
+
+- `/evolve` 和 `/evolve_simplify` 生成变更后不会静默写入，会推送确认问题。
+- 接受后，后端接受本次演进记录并写入或固化；拒绝后丢弃本次生成内容。
+- Team 技能演进接受后会同步团队技能目录。
+- 演进或审批未完成时，后续输入会先排队，等待演进完成后再发送。
 
 ### 如何管理演进经验
 
-演进经验存储在 Skill 目录下的 `evolutions.json` 文件中，你可以直接编辑该文件来管理演进经验。
+演进经验存储在 Skill 目录下的 `evolutions.json` 文件中。日常建议优先使用：
+
+- Web 前端 **查看技能经验**：编辑经验内容 `change.content`，或删除整条经验后保存。
+- `/evolve_list <skill_name>`：查看经验库和评分。
+- `/evolve_simplify <skill_name> [user_intent]`：整理、合并、清理经验库。
+- `/evolve_rebuild <skill_name> [user_intent]`：把经验重新组织进 `SKILL.md`。
+
+不要修改 `change.content` 之外的字段，例如 `id`、`source`、`timestamp`、`context`、`section`、`action`、`target`、`relevant`、`applied`。这些字段由系统生成和维护。
 
 **目录位置：**
 
 ```
 ~/.jiuwenswarm/workspace/agent/skills/<skill_name>/
 ├── SKILL.md           # Skill 源文档
-├── evolutions.json    # 演进经验记录 ← 在这里编辑
+├── evolutions.json    # 演进经验记录
 └── ...
 ```
 
@@ -268,11 +367,4 @@ skill 自动演进功能通过在配置信息中开启自演进配置项 `evolut
 }
 ```
 
-**常用操作：**
-
-- 添加新记录：在 `entries` 数组中追加新对象
-- 修改记录：直接编辑对应字段
-- 删除记录：从数组中移除
-- 标记已固化：将 `applied` 设为 `true`
-
-修改后在下次对话时会自动加载。
+前端保存后，下次对话会自动加载更新后的经验内容。

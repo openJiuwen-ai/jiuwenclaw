@@ -33,6 +33,7 @@ import {
 } from "../core/commands/CommandService.js";
 import type { SlashCommand } from "../core/commands/types.js";
 import { addCommandEcho, addError, addInfo } from "../core/commands/helpers.js";
+import { CheckboxList, CheckboxGroup as CheckboxGroupType } from "./components/checkbox-list.js";
 import type { FileAttachment } from "../core/protocol.js";
 import {
   type ModelListPayload,
@@ -42,10 +43,20 @@ import type { SessionListPayload, SessionMeta } from "../core/commands/builtins/
 import type { ConfigItemSchema } from "../core/commands/builtins/config.js";
 import type { McpListItem, McpListPayload } from "../core/commands/builtins/mcp.js";
 import { buildModeAutocompleteItems } from "../core/commands/builtins/mode.js";
+import { PIPELINE_VALUES, PIPELINE_OPTIONS, INTERVAL_VALUES, INTERVAL_OPTIONS, FLAG_OPTIONS } from "../core/commands/builtins/auto-harness.js";
 import { isTeamMode } from "../core/modes.js";
-import { addTrustedDir, getTrustedDirs, isTrustedDir, setCurrentProjectDir } from "../core/tui-trusted-dirs-store.js";
+import {
+  addTrustedDir,
+  getCurrentCwd,
+  getCurrentProjectDir,
+  getTrustedDirs,
+  isTrustedDir,
+  setCurrentCwd,
+  setCurrentProjectDir,
+} from "../core/tui-trusted-dirs-store.js";
 import { handleAppScreenKeyInput } from "./keymap.js";
 import { buildAppScreenLines } from "./screen-layout.js";
+import { buildTranscriptLines } from "./transcript-renderer.js";
 import {
   isTeamWorking,
   orderedMemberIds,
@@ -55,6 +66,9 @@ import { padToWidth } from "./rendering/text.js";
 import { editorTheme, palette, selectListTheme, setCurrentThemeName } from "./theme.js";
 
 const END_CURSOR = "\x1b[7m \x1b[0m";
+const ENABLE_MOUSE_TRACKING = "\x1b[?1000h\x1b[?1006h";
+const DISABLE_MOUSE_TRACKING = "\x1b[?1000l\x1b[?1006l";
+const TRANSCRIPT_WHEEL_SCROLL_LINES = 3;
 const PERMISSION_TOOL_RE = /工具\s+`([^`]+)`\s+需要授权/;
 const PERMISSION_RISK_RE = /安全风险评估：\**\s*([^\s*]+)?\s*\**([^*\n]+?风险)\**/m;
 const PERMISSION_QUOTE_RE = /^>\s*(.+)$/gm;
@@ -80,6 +94,15 @@ function wrapText(text: string, maxWidth: number): string[] {
 }
 const RUNNING_TIMER_RESET_GRACE_MS = 15_000;
 
+function getSgrMouseWheelOffset(data: string, currentOffset: number): number | null {
+  if (!data.startsWith("\x1b[<") || !data.endsWith("M")) return null;
+  const [buttonCode] = data.slice(3, -1).split(";");
+
+  if (buttonCode === "64") return currentOffset + TRANSCRIPT_WHEEL_SCROLL_LINES;
+  if (buttonCode === "65") return Math.max(0, currentOffset - TRANSCRIPT_WHEEL_SCROLL_LINES);
+  return null;
+}
+
 type PermissionSummary = {
   tool?: string;
   risk?: string;
@@ -99,6 +122,16 @@ type ModelListState = {
   list: SelectList;
   models: string[];
   current: string;
+};
+
+type ToolSelectorState = {
+  list: CheckboxList;
+  name: string;
+  description: string;
+  when_to_use: string;
+  defaultPrompt: string;
+  location: string;
+  generate: boolean;
 };
 
 type ThemeListState = {
@@ -137,15 +170,21 @@ type McpToolDetailState = {
   tool: McpToolItem;
 };
 
-type ConfigEditorPhase = "select_group" | "select_item" | "select_value" | "input_value";
+type ConfigEditorPhase = "search_list" | "select_value" | "input_value";
+
+type ConfigEditorMode = "edit" | "reset";
 
 type ConfigEditorState = {
   phase: ConfigEditorPhase;
+  mode: ConfigEditorMode;  // edit=修改值, reset=重置到默认值
   schemaList: ConfigItemSchema[];
   currentValues: Record<string, string>;
-  selectedGroup: string | null;
   selectedKey: string | null;
+  searchQuery: string;
+  searchMode: boolean;      // true=搜索模式(输入字符过滤), false=浏览模式(导航操作)
   list: SelectList;
+  previousPhase: ConfigEditorPhase | null;  // select_value/input_value 返回时用
+  savedList: SelectList | null;             // 进入子面板前保存的扁平列表，返回时恢复
 };
 
 type StatusViewTab = "status" | "usage" | "config";
@@ -470,6 +509,71 @@ function filterResumeSessions(sessions: SessionMeta[], query: string): SelectIte
     .map(sessionToSelectItem);
 }
 
+function formatConfigValue(schema: ConfigItemSchema, val: string): string {
+  if (schema.type === "toggle") {
+    return val === "true" ? "已启用" : "已禁用";
+  }
+  if (schema.sensitive) {
+    if (!val) return "(空)";
+    return val.length > 8 ? `${val.slice(0, 4)}****${val.slice(-4)}` : "***";
+  }
+  return val || "(空)";
+}
+
+function filterConfigItems(
+  schemas: ConfigItemSchema[],
+  currentValues: Record<string, string>,
+  query: string,
+): SelectItem[] {
+  const normalizedQuery = query.toLowerCase();
+
+  // 有搜索词时：纯扁平过滤列表
+  if (normalizedQuery) {
+    return schemas
+      .filter((schema) =>
+        schema.key.toLowerCase().includes(normalizedQuery) ||
+        schema.label.toLowerCase().includes(normalizedQuery) ||
+        (schema.description ?? "").toLowerCase().includes(normalizedQuery) ||
+        schema.group.toLowerCase().includes(normalizedQuery)
+      )
+      .map((schema) => {
+        const val = currentValues[schema.key] ?? "";
+        const displayVal = formatConfigValue(schema, val);
+        return {
+          value: schema.key,
+          label: `${schema.label}: ${displayVal}`,
+          description: schema.description ?? schema.label,
+        };
+      });
+  }
+
+  // 无搜索词时：按分组排列，分组间用分隔符
+  const groups: Record<string, ConfigItemSchema[]> = {};
+  for (const schema of schemas) {
+    const group = schema.group || "Other";
+    if (!groups[group]) groups[group] = [];
+    groups[group].push(schema);
+  }
+  const items: SelectItem[] = [];
+  for (const [groupName, groupSchemas] of Object.entries(groups)) {
+    items.push({
+      value: `__group_${groupName}__`,
+      label: `── ${groupName} ──`,
+      description: `${groupSchemas.length} 项`,
+    });
+    for (const schema of groupSchemas) {
+      const val = currentValues[schema.key] ?? "";
+      const displayVal = formatConfigValue(schema, val);
+      items.push({
+        value: schema.key,
+        label: `  ${schema.label}: ${displayVal}`,
+        description: schema.description ?? schema.label,
+      });
+    }
+  }
+  return items;
+}
+
 export class AppScreen implements Component, Focusable {
   private readonly editor: Editor;
   private readonly unsubscribe: () => void;
@@ -481,9 +585,13 @@ export class AppScreen implements Component, Focusable {
   private syncingComposerInput = false;
   private pendingQuestionAnswers = new Map<number, string>();
   private questionList: SelectList | null = null;
+  private questionDetailsMap: Map<string, string[]> | null = null;
   private otherInputMode = false;
+  private ctrlCPendingForQuestion = false;
+  private ctrlCPendingForQuestionTimer: ReturnType<typeof setTimeout> | null = null;
   private resumeSessionList: ResumeSessionListState | null = null;
   private modelList: ModelListState | null = null;
+  private toolSelector: ToolSelectorState | null = null;
   private mcpList: McpListState | null = null;
   private mcpDetail: McpDetailState | null = null;
   private mcpTools: McpToolsState | null = null;
@@ -508,6 +616,8 @@ export class AppScreen implements Component, Focusable {
   private pendingSubmittedBaseline = 0;
   private pendingSubmittedSessionId: string | null = null;
   private transcriptScrollOffset = 0;
+  private lastTranscriptLineCount = 0;
+  private lastTranscriptLineWidth = 0;
   /** Image attachments keyed by composer `@path` tokens (e.g. cached base64 for terminal preview). */
   private composerAttachments: FileAttachment[] = [];
   /** FileViewer state for viewing large content (e.g., formatted logs) */
@@ -552,8 +662,10 @@ export class AppScreen implements Component, Focusable {
     this.state.getInputValueRef(() => this.editor.getText());
     // Initialize project scope from the user's actual cwd
     setCurrentProjectDir(process.cwd());
+    setCurrentCwd(process.cwd());
     // Initialize startup prompt for workspace trust
     this.initStartupPrompt();
+    this.tui.terminal.write(ENABLE_MOUSE_TRACKING);
   }
 
   private initStartupPrompt(): void {
@@ -605,11 +717,21 @@ export class AppScreen implements Component, Focusable {
       clearTimeout(this.transientNoticeTimer);
       this.transientNoticeTimer = null;
     }
+    this.clearCtrlCPendingForQuestion();
     if (this.animationTimer) {
       clearInterval(this.animationTimer);
       this.animationTimer = null;
     }
+    this.tui.terminal.write(DISABLE_MOUSE_TRACKING);
     this.unsubscribe();
+  }
+
+  private clearCtrlCPendingForQuestion(): void {
+    this.ctrlCPendingForQuestion = false;
+    if (this.ctrlCPendingForQuestionTimer) {
+      clearTimeout(this.ctrlCPendingForQuestionTimer);
+      this.ctrlCPendingForQuestionTimer = null;
+    }
   }
 
   invalidate(): void {
@@ -745,6 +867,9 @@ export class AppScreen implements Component, Focusable {
   }
 
   handleInput(data: string): void {
+    // 更新用户活动时间戳（用于 auto-recap 空闲检测）
+    this.state.recordActivity();
+
     // FileViewer mode: handle input separately
     if (this.fileViewerState) {
       this.handleFileViewerInput(data);
@@ -760,21 +885,53 @@ export class AppScreen implements Component, Focusable {
       : false;
 
     const hasOverlay =
+      this.startupPromptList !== null ||
+      this.resumeSessionList !== null ||
+      this.statusViewState !== null ||
       this.mcpDetail !== null ||
       this.mcpToolDetail !== null ||
       this.mcpList !== null ||
       this.mcpTools !== null ||
       this.modelList !== null ||
+      this.toolSelector !== null ||
       this.themeList !== null ||
       this.configEditorState !== null;
 
+    if (!pendingQuestion && !hasOverlay && this.handleTranscriptScrollInput(data)) {
+      return;
+    }
+
     if (!pendingQuestion && snapshot.cancellableWork && matchesKey(data, "escape") && !hasOverlay) {
-      this.state.cancel();
+      if (isTeamMode(snapshot.mode)) {
+        this.state.pause();
+      } else {
+        this.state.cancel();
+      }
       return;
     }
 
     if (this.startupPromptList !== null && matchesKey(data, "ctrl+c")) {
       this.startupPromptList.handleInput(data);
+      this.tui.requestRender();
+      return;
+    }
+
+    // Ctrl+C during pending question: first press shows hint, second press within 1s cancels
+    if (pendingQuestion && matchesKey(data, "ctrl+c")) {
+      if (this.ctrlCPendingForQuestion) {
+        this.clearCtrlCPendingForQuestion();
+        this.transientNotice = null;
+        this.interruptTask();
+        return;
+      }
+      this.ctrlCPendingForQuestion = true;
+      this.transientNotice = "Press Ctrl+C again to exit";
+      this.ctrlCPendingForQuestionTimer = setTimeout(() => {
+        this.ctrlCPendingForQuestion = false;
+        this.ctrlCPendingForQuestionTimer = null;
+        this.transientNotice = null;
+        this.tui.requestRender();
+      }, 3000);
       this.tui.requestRender();
       return;
     }
@@ -822,7 +979,19 @@ export class AppScreen implements Component, Focusable {
       },
       hasServerTask: () => this.state.hasServerTask(),
       requestLocalInterrupt: () => {
-        this.state.requestLocalInterrupt();
+        return this.state.requestLocalInterrupt();
+      },
+      showCtrlCExitHint: () => {
+        if (this.transientNoticeTimer) {
+          clearTimeout(this.transientNoticeTimer);
+        }
+        this.transientNotice = "Press Ctrl+C again to exit";
+        this.transientNoticeTimer = setTimeout(() => {
+          this.transientNotice = null;
+          this.transientNoticeTimer = null;
+          this.tui.requestRender();
+        }, 3000);
+        this.tui.requestRender();
       },
     });
     if (handled) {
@@ -878,45 +1047,7 @@ export class AppScreen implements Component, Focusable {
 
     if (!snapshot.pendingQuestion && this.statusViewState !== null) {
       if (this.statusViewState.phase === "config_editor") {
-        if (this.configEditorState?.phase === "input_value") {
-          if (matchesKey(data, "escape")) {
-            if (this.configEditorState.selectedGroup) {
-              const groupSchemas = this.configEditorState.schemaList.filter(
-                (s) => s.group === this.configEditorState!.selectedGroup,
-              );
-              this.showConfigGroupItems(
-                this.configEditorState.selectedGroup,
-                groupSchemas,
-                this.configEditorState.currentValues,
-              );
-            } else {
-              this.configEditorState = null;
-              this.statusViewState = {
-                ...this.statusViewState,
-                phase: "tab_view",
-                tab: "config",
-                list: this.buildStatusViewTabState("config", this.statusViewState.statusPayload, this.statusViewState.configPayload),
-              };
-            }
-            this.tui.requestRender();
-            return;
-          }
-          if (matchesKey(data, "return")) {
-            const text = this.editor.getText().trim();
-            if (text && this.configEditorState.selectedKey) {
-              const key = this.configEditorState.selectedKey;
-              const schema = this.configEditorState.schemaList.find((s) => s.key === key);
-              if (schema) {
-                void this.applyConfigEditorSet(key, text, schema, this.configEditorState.currentValues);
-                this.editor.setText("");
-              }
-            }
-            return;
-          }
-          this.editor.handleInput(data);
-        } else if (this.configEditorState) {
-          this.configEditorState.list.handleInput(data);
-        }
+        this.handleConfigEditorInput(data);
         this.tui.requestRender();
         return;
       }
@@ -938,47 +1069,19 @@ export class AppScreen implements Component, Focusable {
     }
 
     if (!snapshot.pendingQuestion && this.configEditorState !== null) {
-      if (this.configEditorState.phase === "input_value") {
-        // Handle Esc to cancel input and go back to group selection
-        if (matchesKey(data, "escape")) {
-          if (this.configEditorState.selectedGroup) {
-            const groupSchemas = this.configEditorState.schemaList.filter(
-              (s) => s.group === this.configEditorState!.selectedGroup,
-            );
-            this.showConfigGroupItems(
-              this.configEditorState.selectedGroup,
-              groupSchemas,
-              this.configEditorState.currentValues,
-            );
-          } else {
-            this.configEditorState = null;
-            this.tui.requestRender();
-          }
-          return;
-        }
-        // Handle Enter to submit the config value (single-line input)
-        if (matchesKey(data, "return")) {
-          const text = this.editor.getText().trim();
-          if (text && this.configEditorState.selectedKey) {
-            const key = this.configEditorState.selectedKey;
-            const schema = this.configEditorState.schemaList.find((s) => s.key === key);
-            if (schema) {
-              void this.applyConfigEditorSet(key, text, schema, this.configEditorState.currentValues);
-              this.editor.setText("");
-            }
-          }
-          return;
-        }
-        this.editor.handleInput(data);
-      } else {
-        this.configEditorState.list.handleInput(data);
-      }
+      this.handleConfigEditorInput(data);
       this.tui.requestRender();
       return;
     }
 
     if (!snapshot.pendingQuestion && this.modelList !== null) {
       this.modelList.list.handleInput(data);
+      this.tui.requestRender();
+      return;
+    }
+
+    if (!snapshot.pendingQuestion && this.toolSelector !== null) {
+      this.toolSelector.list.handleInput(data);
       this.tui.requestRender();
       return;
     }
@@ -1062,16 +1165,13 @@ export class AppScreen implements Component, Focusable {
     if (snapshot.pendingQuestion && this.otherInputMode) {
       if (matchesKey(data, "escape")) {
         this.otherInputMode = false;
+        this.editor.setText("");
         this.syncQuestionList(this.state.getSnapshot());
         this.tui.requestRender();
         return;
       }
       this.editor.handleInput(data);
       this.tui.requestRender();
-      return;
-    }
-
-    if (!snapshot.pendingQuestion && this.handleTranscriptScrollInput(data)) {
       return;
     }
 
@@ -1106,10 +1206,12 @@ export class AppScreen implements Component, Focusable {
     this.editor.borderColor = snapshot.pendingQuestion
       ? palette.border.question
       : palette.border.panel;
-    // When in config editor input_value phase, editor is rendered inside buildConfigEditorLines
-    // to avoid duplicate rendering, don't include editorLines in that case
-    const isConfigInputValue = this.configEditorState?.phase === "input_value";
-    const editorLines = isConfigInputValue
+    // When config editor is active (any phase), hide the main editor to prevent
+    // IME composing text from appearing in the bottom input box instead of the config panel.
+    // input_value phase: editor is rendered inside buildConfigEditorLines.
+    // search_list/select_value phase: no text input needed in the main editor.
+    const isConfigEditorActive = this.configEditorState !== null;
+    const editorLines = isConfigEditorActive
       ? []
       : this.applySlashCommandHint(this.editor.render(width), width);
     const composerPreviewLines: string[] = [];
@@ -1119,6 +1221,7 @@ export class AppScreen implements Component, Focusable {
       ...(!this.statusViewState ? this.buildConfigEditorLines(width) : []),
       ...this.buildResumeSessionListLines(width),
       ...this.buildModelListLines(width),
+      ...this.buildToolSelectorLines(width),
       ...this.buildMcpListLines(width),
       ...this.buildMcpDetailLines(width),
       ...this.buildMcpToolsLines(width),
@@ -1126,16 +1229,40 @@ export class AppScreen implements Component, Focusable {
       ...this.buildThemeListLines(width),
       ...this.buildPendingQuestionLines(snapshot, width),
     ];
+    const showFullThinking = snapshot.transcriptMode === "detailed";
+    const showToolDetails = snapshot.transcriptMode === "detailed";
+    const pendingInput = this.pendingSubmittedInput ?? undefined;
+    const pendingInputBaseline = this.pendingSubmittedInput
+      ? this.pendingSubmittedBaseline
+      : undefined;
+    const transcriptLineCount = buildTranscriptLines(
+      snapshot,
+      width,
+      showFullThinking,
+      showToolDetails,
+      this.animationPhase,
+      pendingInput,
+      pendingInputBaseline,
+    ).length;
+    if (
+      this.transcriptScrollOffset > 0 &&
+      this.lastTranscriptLineWidth === width &&
+      transcriptLineCount > this.lastTranscriptLineCount
+    ) {
+      this.transcriptScrollOffset += transcriptLineCount - this.lastTranscriptLineCount;
+    }
+    this.lastTranscriptLineCount = transcriptLineCount;
+    this.lastTranscriptLineWidth = width;
     return buildAppScreenLines(snapshot, {
       width,
       height: this.tui.terminal.rows,
       questionLines,
       editorLines,
       composerPreviewLines,
-      pendingInput: this.pendingSubmittedInput ?? undefined,
-      pendingInputBaseline: this.pendingSubmittedInput ? this.pendingSubmittedBaseline : undefined,
-      showFullThinking: snapshot.transcriptMode === "detailed",
-      showToolDetails: snapshot.transcriptMode === "detailed",
+      pendingInput,
+      pendingInputBaseline,
+      showFullThinking,
+      showToolDetails,
       showShortcutHelp: false,
       todosCollapsed: this.todosCollapsed,
       showTeamPanel: this.showTeamPanel,
@@ -1160,19 +1287,25 @@ export class AppScreen implements Component, Focusable {
     const text = raw.trim();
     if (!text) return;
 
-    const { content, attachments } = this.buildOutgoingMessage(text);
+    // 更新用户活动时间戳（用于 auto-recap 空闲检测）
+    this.state.recordActivity();
 
-    // Config editor input_value phase: submit the typed value
-    if (this.configEditorState?.phase === "input_value" && this.configEditorState.selectedKey) {
-      const key = this.configEditorState.selectedKey;
-      const schema = this.configEditorState.schemaList.find((s) => s.key === key);
-      if (schema) {
-        void this.applyConfigEditorSet(key, text, schema, this.configEditorState.currentValues);
+    // When config editor is active (any phase), don't send chat messages
+    if (this.configEditorState !== null) {
+      if (this.configEditorState.phase === "input_value" && this.configEditorState.selectedKey) {
+        const key = this.configEditorState.selectedKey;
+        const schema = this.configEditorState.schemaList.find((s) => s.key === key);
+        if (schema) {
+          void this.applyConfigEditorSetAndStay(key, text, schema, this.configEditorState.currentValues);
+        }
+        this.editor.setText("");
+        this.composerAttachments = [];
       }
-      this.editor.setText("");
-      this.composerAttachments = [];
+      // For search_list / select_value phases, just ignore the submit
       return;
     }
+
+    const { content, attachments } = this.buildOutgoingMessage(text);
 
     if (!content) return;
 
@@ -1209,7 +1342,120 @@ export class AppScreen implements Component, Focusable {
       return;
     }
 
+    // Intercept /agents create to show tool selector
+    if (/^\/agents\s+create/.test(text)) {
+      const args = text.replace(/^\/agents\s+create\s*/, "").trim();
+      let location = "user";
+      let trimmed = args;
+      if (trimmed.startsWith("--project ")) {
+        location = "project";
+        trimmed = trimmed.slice("--project ".length).trim();
+      } else if (trimmed.startsWith("--local ")) {
+        location = "local";
+        trimmed = trimmed.slice("--local ".length).trim();
+      }
+
+      if (!trimmed) {
+        this.state.addItem(
+          addError(snapshot.sessionId, "用法: /agents create [--project|--local] <名称> <描述>"),
+        );
+        this.tui.requestRender();
+        return;
+      }
+
+      const spaceIdx = trimmed.indexOf(" ");
+      const rawName = spaceIdx > 0 ? trimmed.slice(0, spaceIdx).trim() : trimmed;
+      const name = rawName.replace(/[,，]+$/, "").trim();
+      const desc = spaceIdx > 0 ? trimmed.slice(spaceIdx + 1).trim() : (name || "");
+
+      const when_to_use = `当你需要${desc}时使用`;
+      const defaultPrompt = [
+        `你是 ${name}，专注于：${desc}。`,
+        "",
+        "## 工作流程",
+        "1. 理解任务：明确输入、目标和约束条件",
+        "2. 收集信息：利用搜索和文件读取工具获取必要的上下文",
+        "3. 分析处理：基于收集的信息进行系统性分析",
+        "4. 输出结果：提供清晰、可执行的结论或方案",
+        "",
+        "## 核心原则",
+        "- 先理解再行动，不盲目猜测",
+        "- 用代码和证据说话，不做空洞判断",
+        "- 不确定时主动说明，标注假设和风险",
+        "- 复杂问题分步骤推进，每步确认结果",
+        "",
+        "## 输出规范",
+        "- 关键结论前置，细节在后",
+        "- 使用结构化格式（列表、表格、代码块）",
+        "- 引用具体文件路径和行号",
+        "- 区分事实结论和推测判断",
+      ].join("\n");
+
+      await this.openToolSelector(name, desc, when_to_use, defaultPrompt, location, true);
+      this.editor.addToHistory(text);
+      this.editor.setText("");
+      this.state.addItem(addCommandEcho(snapshot.sessionId, text));
+      return;
+    }
+
     if (text.startsWith("/")) {
+      // Check for mode switch when there's ongoing work
+      if (/^\/(?:mode|switch)\s/.test(text) && snapshot.cancellableWork) {
+        const currentMode = snapshot.mode;
+        const isTeamMode = currentMode === "code.team" || currentMode === "team";
+        // Parse the target mode from the command
+        const modeMatch = text.match(/^\/(?:mode|switch)\s+(\S+)/);
+        const targetMode = modeMatch?.[1] ?? "";
+        const targetIsTeamMode = targetMode === "code.team" || targetMode === "team";
+        // Only warn when leaving team mode
+        if (isTeamMode && !targetIsTeamMode) {
+          const answers = await this.state.askQuestions(
+            [
+              {
+                header: "模式切换",
+                question: `当前有任务正在运行，切换到 ${targetMode} 模式会中断这些任务。`,
+                options: [
+                  { label: "中断任务并切换", description: "停止当前任务，切换到新模式" },
+                  { label: "取消切换", description: "继续执行当前任务" },
+                ],
+              },
+            ],
+            "mode_switch_confirm",
+          );
+          const selected = answers[0]?.selected_options?.[0];
+          if (selected !== "中断任务并切换") {
+            this.state.addItem(addInfo(snapshot.sessionId, "模式切换已取消", "m"));
+            this.editor.addToHistory(text);
+            this.editor.setText("");
+            return;
+          }
+          // User confirmed, send cancel request and wait for it to complete
+          this.state.sendEventOnly("chat.interrupt", { intent: "cancel", mode: currentMode });
+          // Wait for the interrupt to complete: streamingState changes and entries are updated
+          // Since setStreamingState now calls emitChange, we just need to poll for state change
+          const waitForInterrupt = (timeoutMs = 10000): Promise<void> => {
+            return new Promise((resolve) => {
+              const startTime = Date.now();
+              const check = () => {
+                const elapsed = Date.now() - startTime;
+                if (elapsed >= timeoutMs) {
+                  resolve();
+                  return;
+                }
+                const snap = this.state.getSnapshot();
+                if (!snap.cancellableWork && snap.streamingState !== "responding") {
+                  // Give a brief delay to ensure termination entries are rendered
+                  setTimeout(resolve, 50);
+                } else {
+                  setTimeout(check, 100);
+                }
+              };
+              check();
+            });
+          };
+          await waitForInterrupt();
+        }
+      }
       if (/^\/(?:resume|continue)\s*$/.test(text)) {
         this.editor.addToHistory(text);
         this.editor.setText("");
@@ -1261,8 +1507,8 @@ export class AppScreen implements Component, Focusable {
           setInput: (text: string) => {
             this.editor.setText(text);
           },
-          enterConfigEditor: (focusKey, configPayload) => {
-            this.openConfigEditor(focusKey, configPayload);
+          enterConfigEditor: (focusKey, configPayload, mode) => {
+            this.openConfigEditor(focusKey, configPayload, mode);
           },
           openInEditor: (filePath: string) => {
             openInExternalEditor(this.tui, filePath);
@@ -1344,10 +1590,12 @@ export class AppScreen implements Component, Focusable {
       this.activeQuestionIndex = 0;
       this.pendingQuestionAnswers.clear();
       this.questionList = null;
+      this.questionDetailsMap = null;
       if (!this.editor.getText() && this.draftBeforeQuestion) {
         this.editor.setText(this.draftBeforeQuestion);
       }
       this.draftBeforeQuestion = "";
+      this.clearCtrlCPendingForQuestion();
     }
     this.syncTeamPanelSelection(snapshot);
     this.syncAnimationLoop(snapshot);
@@ -1374,6 +1622,13 @@ export class AppScreen implements Component, Focusable {
   }
 
   private handleTranscriptScrollInput(data: string): boolean {
+    const wheelOffset = getSgrMouseWheelOffset(data, this.transcriptScrollOffset);
+    if (wheelOffset !== null) {
+      this.transcriptScrollOffset = wheelOffset;
+      this.tui.requestRender();
+      return true;
+    }
+
     const pageSize = Math.max(1, Math.floor(this.tui.terminal.rows * 0.8));
     if (matchesKey(data, "pageUp") || matchesKey(data, "shift+pageUp")) {
       this.transcriptScrollOffset += pageSize;
@@ -1481,9 +1736,14 @@ export class AppScreen implements Component, Focusable {
     if (!nextSessionId) {
       return;
     }
+    // 在清空 resumeSessionList 之前获取 accent_color
+    const sessions = this.resumeSessionList?.sessions ?? [];
+    const matchedSession = sessions.find((s) => s.session_id === nextSessionId);
+    const accentColor = matchedSession?.accent_color ?? "default";
     this.resumeSessionList = null;
     this.state.updateSession(nextSessionId);
     this.state.clearEntries();
+    this.state.setAccentColor(accentColor);
     await this.state.restoreHistory(nextSessionId);
     // 异步获取被恢复会话的标题并更新终端窗口标题
     void (async () => {
@@ -1667,6 +1927,85 @@ export class AppScreen implements Component, Focusable {
     }
   }
 
+  private async openToolSelector(
+    name: string,
+    description: string,
+    when_to_use: string,
+    defaultPrompt: string,
+    location: string,
+    generate: boolean,
+  ): Promise<void> {
+    const snapshot = this.state.getSnapshot();
+    try {
+      const payload = await this.state.request<{
+        tools?: Array<{ name: string; internal_name: string; description: string; group: string }>;
+        groups?: string[];
+        disallowed_for_subagents?: string[];
+      }>("agents.tools_list", {});
+
+      const toolDefs = payload.tools || [];
+      const groupsOrder = payload.groups || [];
+      const disallowed = new Set(payload.disallowed_for_subagents || []);
+
+      // Default checked groups: 核心, 搜索, 代码智能
+      const defaultCheckedGroups = new Set(["核心", "搜索", "代码智能"]);
+
+      // Build CheckboxGroups
+      const groups: CheckboxGroupType[] = [];
+      const groupMap = new Map<string, Array<{ label: string; value: string; checked: boolean; description?: string }>>();
+
+      for (const group of groupsOrder) {
+        groupMap.set(group, []);
+      }
+
+      for (const t of toolDefs) {
+        // Skip tools that are disallowed for subagents
+        if (disallowed.has(t.name) || disallowed.has(t.internal_name)) continue;
+
+        const items = groupMap.get(t.group) || groupMap.get("高级") || [];
+        items.push({
+          label: t.name,
+          value: t.name,
+          checked: defaultCheckedGroups.has(t.group),
+          description: t.description,
+        });
+        groupMap.set(t.group, items);
+      }
+
+      for (const group of groupsOrder) {
+        const items = groupMap.get(group) || [];
+        if (items.length > 0) {
+          groups.push({ name: group, items });
+        }
+      }
+
+      const list = new CheckboxList(groups, 10);
+      list.onSelect = (selectedTools) => {
+        this.handleToolSelection(selectedTools, name, description, when_to_use, defaultPrompt, location, generate);
+      };
+      list.onCancel = () => {
+        this.toolSelector = null;
+        this.tui.requestRender();
+      };
+
+      this.toolSelector = {
+        list,
+        name,
+        description,
+        when_to_use,
+        defaultPrompt,
+        location,
+        generate,
+      };
+      this.tui.requestRender();
+    } catch (e) {
+      this.state.addItem(
+        addError(snapshot.sessionId, `获取工具列表失败: ${e}`),
+      );
+      this.tui.requestRender();
+    }
+  }
+
   private async handleModelSelection(modelName: string): Promise<void> {
     if (!modelName) {
       return;
@@ -1704,6 +2043,63 @@ export class AppScreen implements Component, Focusable {
     }
   }
 
+  private async handleToolSelection(
+    selectedTools: string[],
+    name: string,
+    description: string,
+    when_to_use: string,
+    defaultPrompt: string,
+    location: string,
+    generate: boolean,
+  ): Promise<void> {
+    this.toolSelector = null;
+    this.tui.requestRender();
+
+    try {
+      const payload = await this.state.request<{
+        agent?: { file_path?: string };
+        error?: string;
+        generated?: boolean;
+        applied?: boolean;
+        reload_error?: string | null;
+      }>(
+        "agents.create",
+        {
+          name,
+          description,
+          when_to_use,
+          prompt: defaultPrompt,
+          location,
+          tools: selectedTools.length > 0 ? selectedTools : ["*"],
+          generate,
+        },
+        60000,
+      );
+
+      const snapshot = this.state.getSnapshot();
+      if (payload.error) {
+        this.state.addItem(
+          addError(snapshot.sessionId, `创建失败: ${payload.error}`),
+        );
+      } else {
+        const generated = payload.generated ? " (LLM 生成)" : "";
+        const locLabel = location !== "user" ? ` (${location})` : "";
+        const toolsLabel = selectedTools.length > 0 ? ` | 工具: ${selectedTools.join(", ")}` : " | 工具: *";
+        this.state.addItem(
+          addInfo(
+            snapshot.sessionId,
+            `Agent 已创建: ${name}${generated}${locLabel}${toolsLabel}\n文件: ${payload.agent?.file_path ?? `~/.jiuwenswarm/agents/${name}.md`}\n使用 /agents get ${name} 查看详情`,
+          ),
+        );
+      }
+    } catch (e) {
+      this.state.addItem(
+        addError(this.state.getSnapshot().sessionId, `创建失败: ${e}`),
+      );
+    }
+    this.tui.requestRender();
+  }
+
   private buildModelListLines(width: number): string[] {
     if (!this.modelList) {
       return [];
@@ -1716,6 +2112,11 @@ export class AppScreen implements Component, Focusable {
       ...this.modelList.list.render(width),
       padToWidth(palette.text.dim("choose model · Enter switch · Esc cancel"), width),
     ];
+  }
+
+  private buildToolSelectorLines(width: number): string[] {
+    if (this.toolSelector === null) return [];
+    return this.toolSelector.list.render(width);
   }
 
   private async openMcpList(): Promise<void> {
@@ -2081,54 +2482,400 @@ export class AppScreen implements Component, Focusable {
     };
   }
 
+  private handleConfigEditorInput(data: string): void {
+    if (!this.configEditorState) return;
+    const state = this.configEditorState;
+
+    // ── search_list phase ──
+    if (state.phase === "search_list") {
+      if (state.searchMode) {
+        // Search mode: intercept printable chars, backspace, ESC
+        const printableChar = this.getPrintableChar(data);
+        if (printableChar !== undefined) {
+          const newQuery = state.searchQuery + printableChar;
+          this.updateConfigSearchQuery(newQuery);
+        } else if (matchesKey(data, "backspace")) {
+          const newQuery = state.searchQuery.slice(0, -1);
+          this.updateConfigSearchQuery(newQuery);
+        } else if (matchesKey(data, "escape")) {
+          // Layered ESC: clear search query first, then exit search mode
+          if (state.searchQuery) {
+            this.updateConfigSearchQuery("");
+            this.configEditorState = { ...this.configEditorState!, searchMode: false };
+          } else {
+            this.configEditorState = { ...this.configEditorState!, searchMode: false };
+          }
+        } else if (matchesKey(data, "return") || matchesKey(data, "space")) {
+          const selectedItem = state.list.getSelectedItem();
+          if (selectedItem) {
+            if (selectedItem.value.startsWith("__group_")) return;
+            const schema = state.schemaList.find((s) => s.key === selectedItem.value);
+            if (schema) {
+              this.handleConfigItemSelectionFromFlatList(schema);
+            }
+          }
+        } else if (matchesKey(data, "up") || matchesKey(data, "down")) {
+          state.list.handleInput(data);
+        }
+      } else {
+        // Browse mode: navigation + actions
+        const printableChar = this.getPrintableChar(data);
+        if (data === "/" || printableChar !== undefined) {
+          // Re-enter search mode
+          const initialChar = data === "/" ? "" : (printableChar ?? "");
+          this.configEditorState = { ...this.configEditorState!, searchMode: true };
+          this.updateConfigSearchQuery(initialChar);
+        } else if (matchesKey(data, "escape")) {
+          this.closeConfigEditor();
+        } else if (matchesKey(data, "return") || matchesKey(data, "space")) {
+          const selectedItem = state.list.getSelectedItem();
+          if (selectedItem) {
+            if (selectedItem.value.startsWith("__group_")) return;
+            const schema = state.schemaList.find((s) => s.key === selectedItem.value);
+            if (schema) {
+              this.handleConfigItemSelectionFromFlatList(schema);
+            }
+          }
+        } else {
+          state.list.handleInput(data);
+        }
+      }
+      return;
+    }
+
+    // ── select_value phase ──
+    if (state.phase === "select_value") {
+      if (matchesKey(data, "escape")) {
+        // Return to search_list with saved list
+        const savedList = state.savedList;
+        this.configEditorState = {
+          ...state,
+          phase: state.previousPhase ?? "search_list",
+          selectedKey: null,
+          previousPhase: null,
+          savedList: null,
+          list: savedList ?? state.list,
+        };
+        // If no savedList, rebuild the flat list
+        if (!savedList) {
+          this.refreshConfigEditorList();
+        }
+        return;
+      }
+      // Delegate to list for navigation + selection
+      state.list.handleInput(data);
+      return;
+    }
+
+    // ── input_value phase ──
+    if (state.phase === "input_value") {
+      if (matchesKey(data, "escape")) {
+        // Return to search_list with saved list
+        const savedList = state.savedList;
+        this.configEditorState = {
+          ...state,
+          phase: state.previousPhase ?? "search_list",
+          selectedKey: null,
+          previousPhase: null,
+          savedList: null,
+          list: savedList ?? state.list,
+        };
+        if (!savedList) {
+          this.refreshConfigEditorList();
+        }
+        this.editor.setText("");
+        return;
+      }
+      if (matchesKey(data, "return")) {
+        const text = this.editor.getText().trim();
+        if (text && state.selectedKey) {
+          const key = state.selectedKey;
+          const schema = state.schemaList.find((s) => s.key === key);
+          if (schema) {
+            void this.applyConfigEditorSetAndStay(key, text, schema, state.currentValues);
+          }
+          this.editor.setText("");
+        }
+        return;
+      }
+      this.editor.handleInput(data);
+      return;
+    }
+  }
+
   private buildConfigEditorLines(width: number): string[] {
     if (!this.configEditorState) {
       return [];
     }
     const state = this.configEditorState;
-    const title =
-      state.phase === "select_group"
-        ? "Configuration Editor"
-        : state.phase === "select_item"
-          ? state.selectedGroup ?? "Config"
-          : state.phase === "select_value"
-            ? `Select value for "${state.selectedKey}"`
-            : `Enter new value for "${state.selectedKey}"`;
-    const hint =
-      state.phase === "input_value"
-        ? "Enter value · Esc back"
-        : "↑/↓ choose · Enter confirm · Esc cancel";
+    const blank = "";  // Spacer line for visual breathing room
 
-    const lines: string[] = [
-      padToWidth(palette.status.warning(title), width),
-    ];
+    const lines: string[] = [];
 
-    if (
-      (state.phase === "select_value" || state.phase === "input_value") &&
-      state.selectedKey
-    ) {
+    // Title line
+    if (state.phase === "search_list") {
+      const title = state.mode === "reset" ? "重置配置项" : "配置编辑器";
+      lines.push(padToWidth(palette.status.warning(title), width));
+    } else if (state.phase === "select_value") {
       const schema = state.schemaList.find((s) => s.key === state.selectedKey);
-      const rawVal = state.currentValues[state.selectedKey] ?? "";
-      const currentVal = schema?.sensitive
-        ? rawVal.length > 8 ? `${rawVal.slice(0, 4)}****${rawVal.slice(-4)}` : rawVal ? "***" : "(empty)"
-        : rawVal || "(empty)";
-      lines.push(padToWidth(palette.text.dim(`current: ${currentVal}`), width));
+      lines.push(padToWidth(palette.status.warning(`选择 "${schema?.label ?? state.selectedKey}" 的值`), width));
+    } else {
+      const schema = state.schemaList.find((s) => s.key === state.selectedKey);
+      lines.push(padToWidth(palette.status.warning(`输入 "${schema?.label ?? state.selectedKey}" 的新值`), width));
     }
 
+    lines.push(blank);  // Gap between title and content
+
+    // Search box for search_list phase
+    if (state.phase === "search_list") {
+      const searchHint = state.mode === "reset"
+        ? "输入搜索 · ↑/↓ 选择 · Enter/空格 重置 · / 搜索 · Esc 关闭"
+        : "输入搜索 · ↑/↓ 选择 · Enter/空格 修改 · / 搜索 · Esc 关闭";
+      if (state.searchMode) {
+        lines.push(padToWidth(palette.text.primary(`搜索: ${state.searchQuery}${END_CURSOR}`), width));
+      } else {
+        lines.push(padToWidth(palette.text.dim(searchHint), width));
+      }
+      lines.push(blank);  // Gap between search box and list
+    }
+
+    // Current value display for select_value / input_value
+    if ((state.phase === "select_value" || state.phase === "input_value") && state.selectedKey) {
+      const schema = state.schemaList.find((s) => s.key === state.selectedKey);
+      const rawVal = state.currentValues[state.selectedKey] ?? "";
+      const currentVal = formatConfigValue(schema!, rawVal);
+      lines.push(padToWidth(palette.text.dim(`当前值: ${currentVal}`), width));
+      lines.push(blank);  // Gap between current value and content
+    }
+
+    // Content area
     if (state.phase === "input_value") {
       lines.push(...this.editor.render(width));
     } else {
       lines.push(...state.list.render(width));
     }
 
+    lines.push(blank);  // Gap between content and hint
+
+    // Hint line
+    const actionLabel = state.mode === "reset" ? "重置" : "修改";
+    let hint: string;
+    if (state.phase === "search_list") {
+      hint = state.searchMode
+        ? "Backspace 删除 · ↑/↓ 导航 · Enter 选择 · Esc 清除搜索"
+        : `↑/↓ 选择 · Enter/空格 ${actionLabel} · / 搜索 · Esc 关闭`;
+    } else if (state.phase === "input_value") {
+      hint = "输入值 · Enter 确认 · Esc 返回";
+    } else {
+      hint = "↑/↓ 选择 · Enter 确认 · Esc 返回";
+    }
     lines.push(padToWidth(palette.text.dim(hint), width));
     return lines;
+  }
+
+  private updateConfigSearchQuery(query: string): void {
+    if (!this.configEditorState) return;
+    const filteredItems = filterConfigItems(
+      this.configEditorState.schemaList,
+      this.configEditorState.currentValues,
+      query,
+    );
+    const list = new SelectList(
+      filteredItems,
+      Math.min(Math.max(filteredItems.length, 1), 10),
+      selectListTheme,
+      { minPrimaryColumnWidth: 24, maxPrimaryColumnWidth: 42 },
+    );
+    list.onSelect = (item) => {
+      if (item.value.startsWith("__group_")) return; // Skip group headers
+      const schema = this.configEditorState!.schemaList.find((s) => s.key === item.value);
+      if (!schema) return;
+      this.handleConfigItemSelectionFromFlatList(schema);
+    };
+    list.onCancel = () => {
+      this.closeConfigEditor();
+    };
+    this.configEditorState = {
+      ...this.configEditorState,
+      list,
+      searchQuery: query,
+    };
+    this.tui.requestRender();
+  }
+
+  private handleConfigItemSelectionFromFlatList(
+    schema: ConfigItemSchema,
+  ): void {
+    const currentValues = this.configEditorState!.currentValues;
+    const mode = this.configEditorState!.mode;
+
+    // reset 模式：直接重置为默认值，不需要子面板
+    if (mode === "reset") {
+      const defaultValue = schema.default ?? "";
+      if (defaultValue) {
+        void this.applyConfigEditorSetAndStay(schema.key, defaultValue, schema, currentValues);
+      } else {
+        this.state.addItem(addInfo(this.state.getSnapshot().sessionId, `${schema.key} has no default value`, "c"));
+      }
+      return;
+    }
+
+    // edit 模式：原有逻辑
+    if (schema.type === "toggle") {
+      const currentVal = currentValues[schema.key] ?? "false";
+      const newValue = currentVal === "true" ? "false" : "true";
+      void this.applyConfigEditorSetAndStay(schema.key, newValue, schema, currentValues);
+      return;
+    }
+
+    // Save current list for returning later
+    const savedList = this.configEditorState!.list;
+
+    if (schema.type === "select" && schema.options) {
+      const valueList = this.buildConfigValueSelectList(schema, currentValues);
+      this.configEditorState = {
+        ...this.configEditorState!,
+        phase: "select_value",
+        selectedKey: schema.key,
+        previousPhase: "search_list",
+        savedList,
+        list: valueList,
+      };
+      this.tui.requestRender();
+      return;
+    }
+
+    // string / password → input mode
+    this.editor.setText("");
+    this.configEditorState = {
+      ...this.configEditorState!,
+      phase: "input_value",
+      selectedKey: schema.key,
+      previousPhase: "search_list",
+      savedList,
+    };
+    this.tui.requestRender();
+  }
+
+  private buildConfigValueSelectList(
+    schema: ConfigItemSchema,
+    currentValues: Record<string, string>,
+  ): SelectList {
+    const currentValue = currentValues[schema.key] ?? "";
+    const items: SelectItem[] = (schema.options ?? []).map((option) => ({
+      value: option,
+      label: option,
+      description: option === currentValue ? "(current)" : undefined,
+    }));
+    const list = new SelectList(items, Math.min(Math.max(items.length, 1), 8), selectListTheme, {
+      minPrimaryColumnWidth: 24,
+      maxPrimaryColumnWidth: 42,
+    });
+    list.onSelect = (item) => {
+      void this.applyConfigEditorSetAndStay(schema.key, item.value, schema, currentValues);
+    };
+    return list;
+  }
+
+  private async applyConfigEditorSetAndStay(
+    key: string,
+    value: string,
+    schema: ConfigItemSchema,
+    currentValues: Record<string, string>,
+  ): Promise<void> {
+    const isReset = this.configEditorState?.mode === "reset";
+    const valueDisplay = schema.sensitive ? "***" : value;
+    const statusLabel = isReset ? "已重置" : "已应用";
+    const restartLabel = isReset ? "已重置(需重启)" : "需重启";
+
+    // Handle frontend-only config keys (theme)
+    if (key === "theme") {
+      this.state.setThemeName(value as import("./theme.js").ThemeName);
+      currentValues[key] = value;
+      this.state.addItem(addInfo(this.state.getSnapshot().sessionId, `✓ ${key}: ${valueDisplay} (${statusLabel})`, "c"));
+      this.refreshConfigEditorList();
+      return;
+    }
+    try {
+      const result = await this.state.request<{
+        updated: string[];
+        applied_without_restart: boolean;
+      }>("config.set", { [key]: value });
+      currentValues[key] = value;
+      const msg = result.applied_without_restart
+        ? `✓ ${key}: ${valueDisplay} (${statusLabel})`
+        : `✓ ${key}: ${valueDisplay} (${restartLabel})`;
+      this.state.addItem(addInfo(this.state.getSnapshot().sessionId, msg, "c"));
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.state.addItem(addError(this.state.getSnapshot().sessionId, `config.set failed: ${message}`));
+    }
+    this.refreshConfigEditorList();
+  }
+
+  private refreshConfigEditorList(): void {
+    if (!this.configEditorState) return;
+
+    // After a change, return to the flat list with browse mode so user can see updated values
+    const filteredItems = filterConfigItems(
+      this.configEditorState.schemaList,
+      this.configEditorState.currentValues,
+      this.configEditorState.searchQuery,
+    );
+    const list = new SelectList(
+      filteredItems,
+      Math.min(Math.max(filteredItems.length, 1), 10),
+      selectListTheme,
+      { minPrimaryColumnWidth: 24, maxPrimaryColumnWidth: 42 },
+    );
+    list.onSelect = (item) => {
+      if (item.value.startsWith("__group_")) return; // Skip group headers
+      const schema = this.configEditorState!.schemaList.find((s) => s.key === item.value);
+      if (!schema) return;
+      this.handleConfigItemSelectionFromFlatList(schema);
+    };
+    list.onCancel = () => {
+      this.closeConfigEditor();
+    };
+
+    // If we were in StatusView, return to config tab
+    if (this.statusViewState) {
+      this.statusViewState.phase = "tab_view";
+      this.statusViewState.tab = "config";
+      this.rebuildStatusViewTabList();
+      this.configEditorState = null;
+      this.tui.requestRender();
+      return;
+    }
+
+    this.configEditorState = {
+      ...this.configEditorState,
+      phase: "search_list",
+      selectedKey: null,
+      previousPhase: null,
+      savedList: null,
+      searchMode: false,
+      list,
+    };
+    this.tui.requestRender();
+  }
+
+  private closeConfigEditor(): void {
+    if (this.statusViewState) {
+      this.statusViewState.phase = "tab_view";
+      this.statusViewState.tab = "config";
+      this.rebuildStatusViewTabList();
+    }
+    this.configEditorState = null;
+    this.tui.requestRender();
   }
 
   private openConfigEditor(
     focusKey?: string,
     configPayload?: Record<string, unknown> & { schema?: ConfigItemSchema[] },
+    mode?: ConfigEditorMode,
   ): void {
+    const editorMode: ConfigEditorMode = mode ?? "edit";
     const schemaList = configPayload?.schema ?? [];
     if (schemaList.length === 0) {
       this.state.addItem(addError(this.state.getSnapshot().sessionId, "No config schema available"));
@@ -2141,247 +2888,63 @@ export class AppScreen implements Component, Focusable {
 
     if (focusKey) {
       const schema = schemaList.find((s) => s.key === focusKey);
-      if (schema && schema.type === "select" && schema.options) {
-        // 用临时的 select_group 状态承载 schemaList/currentValues，再 showConfigValueSelect 会替换成 select_value
+      if (schema) {
+        // Initialize base state then immediately transition to the item's sub-panel
+        const filteredItems = filterConfigItems(schemaList, currentValues, "");
+        const baseList = new SelectList(
+          filteredItems,
+          Math.min(Math.max(filteredItems.length, 1), 10),
+          selectListTheme,
+          { minPrimaryColumnWidth: 24, maxPrimaryColumnWidth: 42 },
+        );
         this.configEditorState = {
-          phase: "select_group",
+          phase: "search_list",
+          mode: editorMode,
           schemaList,
           currentValues,
-          selectedGroup: null,
           selectedKey: null,
-          list: new SelectList([], 1, selectListTheme),
+          searchQuery: "",
+          searchMode: true,
+          list: baseList,
+          previousPhase: null,
+          savedList: null,
         };
-        this.showConfigValueSelect(schema, currentValues);
+        this.handleConfigItemSelectionFromFlatList(schema);
         return;
       }
     }
 
-    this.showConfigGroupSelector(schemaList, currentValues);
-  }
-
-  private showConfigGroupSelector(
-    schemaList: ConfigItemSchema[],
-    currentValues: Record<string, string>,
-  ): void {
-    const groups: Record<string, ConfigItemSchema[]> = {};
-    for (const schema of schemaList) {
-      const group = schema.group || "Other";
-      if (!groups[group]) groups[group] = [];
-      groups[group].push(schema);
-    }
-
-    const groupItems: SelectItem[] = Object.keys(groups).map((groupName) => ({
-      value: groupName,
-      label: groupName,
-      description: `${groups[groupName].length} items`,
-    }));
+    // Default: start in search_list mode with search enabled (search-first approach)
+    const filteredItems = filterConfigItems(schemaList, currentValues, "");
     const list = new SelectList(
-      groupItems,
-      Math.min(Math.max(groupItems.length, 1), 8),
+      filteredItems,
+      Math.min(Math.max(filteredItems.length, 1), 10),
       selectListTheme,
       { minPrimaryColumnWidth: 24, maxPrimaryColumnWidth: 42 },
     );
     list.onSelect = (item) => {
-      this.showConfigGroupItems(item.value, groups[item.value], currentValues);
+      if (item.value.startsWith("__group_")) return; // Skip group headers
+      const schema = this.configEditorState!.schemaList.find((s) => s.key === item.value);
+      if (!schema) return;
+      this.handleConfigItemSelectionFromFlatList(schema);
     };
     list.onCancel = () => {
-      if (this.statusViewState) {
-        this.statusViewState.phase = "tab_view";
-        this.statusViewState.tab = "config";
-        this.rebuildStatusViewTabList();
-        this.configEditorState = null;
-        this.tui.requestRender();
-      } else {
-        this.configEditorState = null;
-        this.tui.requestRender();
-      }
+      this.closeConfigEditor();
     };
+
     this.configEditorState = {
-      phase: "select_group",
+      phase: "search_list",
+      mode: editorMode,
       schemaList,
       currentValues,
-      selectedGroup: null,
       selectedKey: null,
+      searchQuery: "",
+      searchMode: true,
       list,
+      previousPhase: null,
+      savedList: null,
     };
     this.tui.requestRender();
-  }
-
-  private showConfigGroupItems(
-    groupName: string,
-    schemas: ConfigItemSchema[],
-    currentValues: Record<string, string>,
-  ): void {
-    const items: SelectItem[] = schemas.map((schema) => {
-      const val = currentValues[schema.key] ?? "";
-      const displayVal =
-        schema.type === "toggle"
-          ? val === "true" ? "Enabled" : "Disabled"
-          : schema.sensitive
-            ? val.length > 8 ? `${val.slice(0, 4)}****${val.slice(-4)}` : "***"
-            : val;
-      return {
-        value: schema.key,
-        label: `${schema.label}: ${displayVal}`,
-        description: schema.description,
-      };
-    });
-    items.push({ value: "__back__", label: "Back", description: "" });
-    const list = new SelectList(items, Math.min(Math.max(items.length, 1), 8), selectListTheme, {
-      minPrimaryColumnWidth: 24,
-      maxPrimaryColumnWidth: 42,
-    });
-    list.onSelect = (item) => {
-      if (item.value === "__back__") {
-        this.showConfigGroupSelector(this.configEditorState!.schemaList, currentValues);
-        return;
-      }
-      const schema = schemas.find((s) => s.key === item.value);
-      if (!schema) return;
-      this.handleConfigItemSelection(schema, currentValues);
-    };
-    list.onCancel = () => {
-      if (this.statusViewState) {
-        this.statusViewState.phase = "tab_view";
-        this.statusViewState.tab = "config";
-        this.rebuildStatusViewTabList();
-        this.configEditorState = null;
-        this.tui.requestRender();
-      } else {
-        this.showConfigGroupSelector(this.configEditorState!.schemaList, currentValues);
-      }
-    };
-    this.configEditorState = {
-      phase: "select_item",
-      schemaList: this.configEditorState!.schemaList,
-      currentValues,
-      selectedGroup: groupName,
-      selectedKey: null,
-      list,
-    };
-    this.tui.requestRender();
-  }
-
-  private handleConfigItemSelection(
-    schema: ConfigItemSchema,
-    currentValues: Record<string, string>,
-  ): void {
-    if (schema.type === "toggle") {
-      const currentVal = currentValues[schema.key] ?? "false";
-      const newValue = currentVal === "true" ? "false" : "true";
-      void this.applyConfigEditorSet(schema.key, newValue, schema, currentValues);
-      return;
-    }
-    if (schema.type === "select" && schema.options) {
-      this.showConfigValueSelect(schema, currentValues);
-      return;
-    }
-    // string / password → input mode
-    this.editor.setText("");
-    this.configEditorState = {
-      phase: "input_value",
-      schemaList: this.configEditorState!.schemaList,
-      currentValues,
-      selectedGroup: this.configEditorState!.selectedGroup,
-      selectedKey: schema.key,
-      list: this.configEditorState!.list,
-    };
-    this.tui.requestRender();
-  }
-
-  private showConfigValueSelect(
-    schema: ConfigItemSchema,
-    currentValues: Record<string, string>,
-  ): void {
-    const currentValue = currentValues[schema.key] ?? "";
-    const items: SelectItem[] = (schema.options ?? []).map((option) => ({
-      value: option,
-      label: option,
-      description: option === currentValue ? "(current)" : undefined,
-    }));
-    const list = new SelectList(items, Math.min(Math.max(items.length, 1), 8), selectListTheme, {
-      minPrimaryColumnWidth: 24,
-      maxPrimaryColumnWidth: 42,
-    });
-    list.onSelect = (item) => {
-      void this.applyConfigEditorSet(schema.key, item.value, schema, currentValues);
-    };
-    list.onCancel = () => {
-      if (this.configEditorState?.selectedGroup) {
-        const groupSchemas = this.configEditorState.schemaList.filter(
-          (s) => s.group === this.configEditorState!.selectedGroup,
-        );
-        this.showConfigGroupItems(this.configEditorState.selectedGroup, groupSchemas, currentValues);
-      } else if (this.statusViewState) {
-        this.statusViewState.phase = "tab_view";
-        this.statusViewState.tab = "config";
-        this.rebuildStatusViewTabList();
-        this.configEditorState = null;
-        this.tui.requestRender();
-      } else {
-        this.configEditorState = null;
-        this.tui.requestRender();
-      }
-    };
-    this.configEditorState = {
-      phase: "select_value",
-      schemaList: this.configEditorState!.schemaList,
-      currentValues,
-      selectedGroup: this.configEditorState?.selectedGroup ?? null,
-      selectedKey: schema.key,
-      list,
-    };
-    this.tui.requestRender();
-  }
-
-  private async applyConfigEditorSet(
-    key: string,
-    value: string,
-    schema: ConfigItemSchema,
-    currentValues: Record<string, string>,
-  ): Promise<void> {
-    // Handle frontend-only config keys
-    if (key === "theme") {
-      this.state.setThemeName(value as import("./theme.js").ThemeName);
-      currentValues[key] = value;
-      this.state.addItem(addInfo(this.state.getSnapshot().sessionId, `✓ ${key}: ${value} (applied)`, "c"));
-      if (this.statusViewState) {
-        this.statusViewState.phase = "tab_view";
-        this.statusViewState.tab = "config";
-        this.rebuildStatusViewTabList();
-        this.configEditorState = null;
-        this.tui.requestRender();
-      } else {
-        this.configEditorState = null;
-        this.tui.requestRender();
-      }
-      return;
-    }
-    try {
-      const result = await this.state.request<{
-        updated: string[];
-        applied_without_restart: boolean;
-      }>("config.set", { [key]: value });
-      currentValues[key] = value;
-      const msg = result.applied_without_restart
-        ? `✓ ${key}: ${schema.sensitive ? "***" : value} (applied)`
-        : `✓ ${key}: ${schema.sensitive ? "***" : value} (restart required)`;
-      this.state.addItem(addInfo(this.state.getSnapshot().sessionId, msg, "c"));
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      this.state.addItem(addError(this.state.getSnapshot().sessionId, `config.set failed: ${message}`));
-    }
-    if (this.statusViewState) {
-      // Return to config tab in StatusView instead of closing entirely
-      this.statusViewState.phase = "tab_view";
-      this.statusViewState.tab = "config";
-      this.rebuildStatusViewTabList();
-      this.configEditorState = null;
-      this.tui.requestRender();
-    } else {
-      this.configEditorState = null;
-      this.tui.requestRender();
-    }
   }
 
   // ──────────────────────────── StatusView ────────────────────────────
@@ -2622,22 +3185,34 @@ export class AppScreen implements Component, Focusable {
     }
 
     this.statusViewState.phase = "config_editor";
+
+    // Initialize search_list state then navigate to the item's sub-panel
+    const filteredItems = filterConfigItems(schemaList, currentValues, "");
+    const baseList = new SelectList(
+      filteredItems,
+      Math.min(Math.max(filteredItems.length, 1), 10),
+      selectListTheme,
+      { minPrimaryColumnWidth: 24, maxPrimaryColumnWidth: 42 },
+    );
     this.configEditorState = {
-      phase: "select_group",
+      phase: "search_list",
+      mode: "edit",
       schemaList,
       currentValues,
-      selectedGroup: null,
       selectedKey: null,
-      list: new SelectList([], 1, selectListTheme),
+      searchQuery: "",
+      searchMode: true,
+      list: baseList,
+      previousPhase: null,
+      savedList: null,
     };
-
-    // Navigate directly to the item's group or value
-    const group = schema.group || "Other";
-    const groupSchemas = schemaList.filter((s) => (s.group || "Other") === group);
-    this.showConfigGroupItems(group, groupSchemas, currentValues);
+    // Navigate directly to the item's sub-panel
+    this.handleConfigItemSelectionFromFlatList(schema);
   }
 
   private closeStatusView(): void {
+    const sessionId = this.state.getSnapshot().sessionId;
+    this.state.addItem(addInfo(sessionId, "Status dialog dismissed", "✓"));
     this.statusViewState = null;
     this.configEditorState = null;
     this.tui.requestRender();
@@ -2698,7 +3273,7 @@ export class AppScreen implements Component, Focusable {
   }
 
   private collectComposerAttachments(text: string): FileAttachment[] {
-    const cwd = getTrustedDirs()[0] || process.cwd();
+    const cwd = getCurrentCwd() || process.cwd();
     return extractAttachmentsFromText(text, {
       cwd,
       classifyAttachment: (path) => (this.isAcceptedAttachment(path) ? (isImageAttachment(path) ? "image" : "file") : null),
@@ -2775,14 +3350,17 @@ export class AppScreen implements Component, Focusable {
       }
       return;
     }
-    this.runningStoppedAtMs = null;
     if (snapshot.isProcessing) {
-      if (this.runningStartedAtMs === null) {
+      if (
+        this.runningStartedAtMs === null ||
+        this.runningStoppedAtMs !== null
+      ) {
         this.runningStartedAtMs = Date.now();
       }
     } else if (teamWorking) {
       this.runningStartedAtMs = teamStartedAt ?? this.runningStartedAtMs ?? Date.now();
     }
+    this.runningStoppedAtMs = null;
     if (this.animationTimer) {
       return;
     }
@@ -2926,7 +3504,7 @@ export class AppScreen implements Component, Focusable {
   ): ComposerAutocompleteProvider {
     // Convert each installed skill to a TuiSlashCommand so CombinedAutocompleteProvider
     // treats /<skillName> exactly like any other slash command for name completion.
-    const registeredNames = new Set(this.commands.getAll().map((c) => c.name));
+    const registeredNames = new Set(this.commands.getAll(true).map((c) => c.name));
     const skillCommands: TuiSlashCommand[] = skills
       .filter((skill) => !registeredNames.has(skill.name))
       .map((skill) => ({
@@ -2938,7 +3516,7 @@ export class AppScreen implements Component, Focusable {
       new CombinedAutocompleteProvider(
         // Skill shorthands come last so they appear at the bottom of the dropdown.
         [...this.buildSlashCommands(), ...skillCommands],
-        getTrustedDirs()[0] || process.cwd(),
+        getCurrentCwd() || process.cwd(),
         resolveFdBinary(),
       ),
     );
@@ -2988,6 +3566,56 @@ export class AppScreen implements Component, Focusable {
             if (currentCommand.completion) {
               if (currentCommand.name === "mode") {
                 return buildModeAutocompleteItems();
+              }
+              // Special handling for auto-harness completions with descriptions
+              // Check top-level command name (command.name) since matchedPath only contains subcommands
+              if (command.name === "auto-harness") {
+                const remainingArgs = remainingTokens.join(" ");
+                const items = await currentCommand.completion(this.state.getCommandContext(), remainingArgs);
+                const prefix = matchedPath.length > 0 ? matchedPath.join(" ") + " " : "";
+
+                // Map completions to AutocompleteItem with descriptions
+                return items.map((value) => {
+                  let desc = "";
+
+                  // Check for subcommand descriptions (schedule -> start, list, etc.)
+                  if (currentCommand.subCommands) {
+                    const subCmd = currentCommand.subCommands.find(s => value.includes(s.name) || value === s.name);
+                    if (subCmd) {
+                      desc = subCmd.description;
+                    }
+                  }
+
+                  // Check for flag descriptions (--interval, --pipeline, -i, -p)
+                  const flagMatch = Object.keys(FLAG_OPTIONS).find(f => value.includes(f));
+                  if (flagMatch) {
+                    const flagDesc = FLAG_OPTIONS[flagMatch as keyof typeof FLAG_OPTIONS]?.desc || "";
+                    desc = desc ? `${desc} | ${flagDesc}` : flagDesc;
+                  }
+
+                  // Check for pipeline descriptions
+                  const pipelineName = PIPELINE_VALUES.find((p: string) => value.includes(p));
+                  if (pipelineName) {
+                    const pipelineDesc = PIPELINE_OPTIONS[pipelineName as keyof typeof PIPELINE_OPTIONS]?.desc || "";
+                    desc = desc ? `${desc} | ${pipelineDesc}` : pipelineDesc;
+                  }
+
+                  // Check for interval descriptions
+                  const intervalValue = INTERVAL_VALUES.find((v: string) => {
+                    const parts = value.split(/\s+/);
+                    return parts.includes(v) && (parts.includes("--interval") || parts.includes("-i"));
+                  });
+                  if (intervalValue) {
+                    const intervalDesc = INTERVAL_OPTIONS[intervalValue as keyof typeof INTERVAL_OPTIONS]?.desc || "";
+                    desc = desc ? `${desc} | ${intervalDesc}` : intervalDesc;
+                  }
+
+                  return {
+                    value: prefix + value,
+                    label: value,
+                    description: desc,
+                  };
+                });
               }
               const remainingArgs = remainingTokens.join(" ");
               const items = await currentCommand.completion(this.state.getCommandContext(), remainingArgs);
@@ -3062,7 +3690,33 @@ export class AppScreen implements Component, Focusable {
     }
 
     if (this.questionList !== null) {
-      lines.push(...this.questionList.render(width));
+      const listLines = this.questionList.render(width);
+
+      // Insert details sub-lines right after the currently selected item
+      // instead of appending them after the entire list.
+      const selectedItem = this.questionList.getSelectedItem();
+      if (selectedItem && this.questionDetailsMap) {
+        const details = this.questionDetailsMap.get(selectedItem.value);
+        if (details && details.length > 0) {
+          const detailLines = details.map((d) =>
+            padToWidth(palette.text.dim(`              ${d}`), width),
+          );
+          // SelectList.render() layout: [visible item 0..N-1, (scroll indicator?)]
+          // Replicate its scroll-window calculation to find where the selected
+          // item sits, then splice detail lines right after it.
+          const filteredLen: number = this.questionList["filteredItems"]?.length ?? 0;
+          const selectedIdx: number = this.questionList["selectedIndex"] ?? 0;
+          const maxVis: number = this.questionList["maxVisible"] ?? 6;
+          const scrollStart = Math.max(
+            0,
+            Math.min(selectedIdx - Math.floor(maxVis / 2), filteredLen - maxVis),
+          );
+          const insertAt = Math.max(0, Math.min(selectedIdx - scrollStart + 1, listLines.length));
+          listLines.splice(insertAt, 0, ...detailLines);
+        }
+      }
+
+      lines.push(...listLines);
       lines.push(
         padToWidth(
           palette.text.dim(
@@ -3074,6 +3728,9 @@ export class AppScreen implements Component, Focusable {
         ),
       );
     }
+    if (this.ctrlCPendingForQuestion) {
+      lines.push(padToWidth(palette.status.warning("Press Ctrl+C again to exit"), width));
+    }
     return lines;
   }
 
@@ -3081,12 +3738,14 @@ export class AppScreen implements Component, Focusable {
     const pendingQuestion = snapshot.pendingQuestion;
     if (!pendingQuestion) {
       this.questionList = null;
+      this.questionDetailsMap = null;
       return;
     }
 
     const question = pendingQuestion.questions[this.activeQuestionIndex];
     if (!question || question.options.length === 0) {
       this.questionList = null;
+      this.questionDetailsMap = null;
       return;
     }
 
@@ -3098,11 +3757,27 @@ export class AppScreen implements Component, Focusable {
           : option.label,
       description: option.description,
     }));
+
+    // Build details map for options that have sub-lines (e.g. rewind file changes)
+    const detailsMap = new Map<string, string[]>();
+    for (const option of question.options) {
+      if (option.details && option.details.length > 0) {
+        detailsMap.set(option.label, option.details);
+      }
+    }
+    this.questionDetailsMap = detailsMap;
+
     const maxVisible = pendingQuestion.source === "permission_interrupt" ? 4 : 6;
+    // For questions with details sub-lines (e.g. rewind), use a narrower label column
+    // so the description starts sooner and details can align beneath it.
+    const layout = detailsMap.size > 0
+      ? { minPrimaryColumnWidth: 10, maxPrimaryColumnWidth: 10 }
+      : { minPrimaryColumnWidth: 34, maxPrimaryColumnWidth: 42 };
     const list = new SelectList(
       items,
       Math.min(Math.max(items.length, 1), maxVisible),
       selectListTheme,
+      layout,
     );
     list.onSelect = (item) => {
       this.handleQuestionSelection(item.value);
@@ -3114,6 +3789,9 @@ export class AppScreen implements Component, Focusable {
       } else {
         this.handleQuestionSelection("");
       }
+    };
+    list.onSelectionChange = () => {
+      this.invalidate();
     };
     const selectedValue = this.pendingQuestionAnswers.get(this.activeQuestionIndex);
     const selectedIndex = selectedValue

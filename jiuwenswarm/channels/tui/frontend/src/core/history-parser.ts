@@ -739,8 +739,41 @@ export function parseHistoryFrame(frame: EventFrame): HistoryItem | null {
     };
   }
 
+  if (eventType === "context.compact_boundary") {
+    return {
+      kind: "info",
+      id,
+      sessionId,
+      content: pickFirstString(record, ["content", "text", "body"]) ?? "Conversation compacted",
+      icon: "i",
+      meta: {
+        view: "compact_boundary",
+        title: "Conversation compacted",
+      },
+      at,
+    };
+  }
+
+  if (eventType === "context.compact_summary") {
+    const content = pickFirstString(record, ["content", "text", "body"]) ?? "";
+    if (!content) return null;
+    return {
+      kind: "info",
+      id,
+      sessionId,
+      content,
+      icon: "i",
+      transcriptOnly: true,
+      meta: {
+        view: "compact_summary",
+        title: "Compaction summary",
+      },
+      at,
+    };
+  }
+
   if (
-    eventType === "context.compressed" ||
+    eventType === "context.usage" ||
     eventType === "chat.subtask_update" ||
     eventType === "chat.evolution_status" ||
     eventType === "chat.processing_status" ||

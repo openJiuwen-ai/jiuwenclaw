@@ -191,16 +191,48 @@ def test_member_configured_skills_copied_to_own_dir(tmp_path, monkeypatch):
 
     customizer(agent, member_name="member_a", role="teammate")
 
-    # Member directory only contains configured skill-a
+    # Team-shared skills are mirrored into the member workspace on spawn.
     member_skills_dir = member_root / "skills"
     assert (member_skills_dir / "skill-a").exists()
-    assert not (member_skills_dir / "skill-b").exists()
-    assert not (member_skills_dir / "skill-c").exists()
+    assert (member_skills_dir / "skill-b").exists()
+    assert (member_skills_dir / "skill-c").exists()
 
-    # Verify member directory's skills_state.json only contains skill-a
     member_state = json.loads((member_skills_dir / "skills_state.json").read_text(encoding="utf-8"))
-    installed_names = [p["name"] for p in member_state["installed_plugins"]]
-    assert installed_names == ["skill-a"]
+    installed_names = sorted(p["name"] for p in member_state["installed_plugins"])
+    assert installed_names == ["skill-a", "skill-b", "skill-c"]
+
+
+def test_ensure_team_shared_skills_syncs_team_only_skill_to_global(tmp_path, monkeypatch):
+    """Team-shared-only skills should be mirrored into agent global for SkillUseRail."""
+    global_skills_dir = tmp_path / "global_skills"
+    global_skills_dir.mkdir(parents=True)
+    (global_skills_dir / "skills_state.json").write_text("{}", encoding="utf-8")
+
+    monkeypatch.setattr(
+        "jiuwenswarm.agents.harness.team.team_manager.get_agent_skills_dir",
+        lambda: global_skills_dir,
+    )
+
+    team_workspace = tmp_path / "team_workspace"
+    team_workspace.mkdir(parents=True)
+    team_shared_skills = team_workspace / "skills"
+    team_shared_skills.mkdir(parents=True)
+    team_only = team_shared_skills / "pptx-craft"
+    team_only.mkdir()
+    (team_only / "SKILL.md").write_text("---\nname: pptx-craft\n---\n", encoding="utf-8")
+    (team_shared_skills / ".team_skills_copied").write_text("", encoding="utf-8")
+
+    spec = TeamAgentSpec.model_validate(
+        {
+            "team_name": "demo_team",
+            "agents": {"leader": {}, "teammate": {}},
+            "workspace": {"root_path": str(team_workspace), "enabled": True},
+        }
+    )
+
+    TeamManager().ensure_team_shared_skills_initialized(spec)
+
+    assert (global_skills_dir / "pptx-craft" / "SKILL.md").exists()
 
 
 def test_member_no_configured_skills_has_state_file(tmp_path, monkeypatch):
@@ -279,7 +311,7 @@ def test_member_no_configured_skills_has_state_file(tmp_path, monkeypatch):
 
     customizer(agent, member_name="member_a", role="teammate")
 
-    # Member directory should not have any skill (not configured)
+    # No team-shared skill dirs; member workspace stays empty aside from state file.
     member_skills_dir = member_root / "skills"
     assert not (member_skills_dir / "skill-a").exists()
     assert not (member_skills_dir / "skill-b").exists()

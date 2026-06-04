@@ -11,12 +11,15 @@ interface UpdateStatusPayload {
   latest_version?: unknown;
   state?: unknown;
   has_update?: unknown;
+  install_mode?: unknown;
   matched_asset?: unknown;
   release_notes?: unknown;
   published_at?: unknown;
   downloaded_path?: unknown;
   downloaded_bytes?: unknown;
   total_bytes?: unknown;
+  current_activity?: unknown;
+  restart_command?: unknown;
   error?: unknown;
   platform_supported?: unknown;
 }
@@ -103,7 +106,7 @@ export function UpdatePanel({ isConnected, request }: UpdatePanelProps) {
   }, [refreshConfig, refreshStatus]);
 
   useEffect(() => {
-    if (normalizeString(status?.state) !== 'downloading') {
+    if (normalizeString(status?.state) !== 'downloading' && normalizeString(status?.state) !== 'upgrading') {
       return;
     }
     const timer = window.setInterval(() => {
@@ -181,20 +184,38 @@ export function UpdatePanel({ isConnected, request }: UpdatePanelProps) {
     }
   }, [status?.downloaded_path, t]);
 
+  const handleUpgrade = useCallback(async () => {
+    if (!isConnected) return;
+    setError(null);
+    try {
+      const payload = await request<UpdateStatusPayload>('updater.upgrade');
+      setStatus(payload);
+      setError(normalizeString(payload?.error) || null);
+    } catch (upgradeError) {
+      setError(upgradeError instanceof Error ? upgradeError.message : t('updatePanel.errors.upgradeFailed'));
+    }
+  }, [isConnected, request, t]);
+
   const state = normalizeString(status?.state) || 'idle';
   const hasUpdate = normalizeBoolean(status?.has_update);
+  const installMode = normalizeString(status?.install_mode) || 'desktop';
+  const isPipMode = installMode === 'pip';
   const currentVersion = normalizeString(status?.current_version) || '-';
   const latestVersion = normalizeString(status?.latest_version) || '-';
   const releaseNotes = normalizeString(status?.release_notes);
   const publishedAt = formatPublishedAt(normalizeString(status?.published_at), i18n.language);
   const downloadedBytes = normalizeNumber(status?.downloaded_bytes);
   const totalBytes = normalizeNumber(status?.total_bytes);
+  const currentActivity = normalizeString(status?.current_activity);
+  const restartCommand = normalizeString(status?.restart_command);
   const progress = useMemo(() => {
     if (totalBytes <= 0) return 0;
     return Math.max(0, Math.min(100, Math.round((downloadedBytes / totalBytes) * 100)));
   }, [downloadedBytes, totalBytes]);
   const canDownload = isConnected && hasUpdate && state !== 'downloading' && state !== 'downloaded';
   const canInstall = state === 'downloaded' && normalizeString(status?.downloaded_path).length > 0;
+  const canUpgradePip = isPipMode && hasUpdate && state !== 'upgrading' && state !== 'restart_pending' && state !== 'restarting';
+  const canRestartPip = isPipMode && state === 'restart_pending';
   const platformSupported = status == null ? true : normalizeBoolean(status.platform_supported);
   const configEnabled = normalizeBoolean(config?.enabled);
 
@@ -210,12 +231,25 @@ export function UpdatePanel({ isConnected, request }: UpdatePanelProps) {
             <button onClick={() => void handleCheck()} className="btn secondary" disabled={!isConnected || checking}>
               {checking ? t('updatePanel.checking') : t('updatePanel.checkNow')}
             </button>
-            <button onClick={() => void handleDownload()} className="btn primary" disabled={!canDownload}>
-              {state === 'downloading' ? t('updatePanel.downloading') : t('updatePanel.downloadAndInstall')}
-            </button>
-            <button onClick={() => void handleInstall()} className="btn secondary" disabled={!canInstall}>
-              {t('updatePanel.installNow')}
-            </button>
+            {isPipMode ? (
+              <>
+                <button onClick={() => void handleDownload()} className="btn primary" disabled={!canUpgradePip}>
+                  {state === 'upgrading' ? t('updatePanel.downloading') : t('updatePanel.pipUpgrade')}
+                </button>
+                <button onClick={() => void handleUpgrade()} className="btn secondary" disabled={!canRestartPip}>
+                  {t('updatePanel.pipRestart')}
+                </button>
+              </>
+            ) : (
+              <>
+                <button onClick={() => void handleDownload()} className="btn primary" disabled={!canDownload}>
+                  {state === 'downloading' ? t('updatePanel.downloading') : t('updatePanel.downloadAndInstall')}
+                </button>
+                <button onClick={() => void handleInstall()} className="btn secondary" disabled={!canInstall}>
+                  {t('updatePanel.installNow')}
+                </button>
+              </>
+            )}
           </div>
         </div>
 
@@ -253,15 +287,30 @@ export function UpdatePanel({ isConnected, request }: UpdatePanelProps) {
           </div>
         </div>
 
-        {state === 'downloading' && (
+        {(state === 'downloading' || state === 'upgrading' || (isPipMode && state === 'restart_pending')) && (
           <div className="rounded-xl border border-accent/30 bg-accent/10 px-4 py-4">
             <div className="flex items-center justify-between gap-3 text-sm text-text">
               <span>{t('updatePanel.downloadProgress')}</span>
-              <span className="mono">{progress}% · {formatBytes(downloadedBytes)} / {formatBytes(totalBytes)}</span>
+              <span className="mono">{progress}%{isPipMode ? '' : ` · ${formatBytes(downloadedBytes)} / ${formatBytes(totalBytes)}`}</span>
             </div>
             <div className="mt-3 h-2 overflow-hidden rounded-full bg-secondary/80">
               <div className="h-full rounded-full bg-accent transition-all duration-200" style={{ width: `${progress}%` }} />
             </div>
+            {currentActivity && (
+              <div className="mt-2 text-xs font-mono text-text-muted truncate" title={currentActivity}>
+                {currentActivity}
+              </div>
+            )}
+            {isPipMode && state === 'restart_pending' && (
+              <div className="mt-3 text-sm text-text">
+                {t('updatePanel.restartPendingHint')}
+                {restartCommand && (
+                  <div className="mt-2">
+                    <code className="block rounded bg-secondary/60 px-2 py-1.5 text-xs font-mono break-all select-all">{restartCommand}</code>
+                  </div>
+                )}
+              </div>
+            )}
           </div>
         )}
 

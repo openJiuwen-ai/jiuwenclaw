@@ -109,25 +109,65 @@ def _parse_typed_chunk(chunk: Any, _has_streamed_content: bool) -> dict[str, Any
     chunk_type = getattr(chunk, "type", "")
     payload = getattr(chunk, "payload", {})
 
+    if chunk_type == "chat.ask_user_question":
+        return parse_ask_user_question_payload(payload)
+
     if isinstance(chunk_type, str) and "." in chunk_type:
+        if chunk_type == "context.compression_state":
+            if hasattr(payload, "model_dump"):
+                try:
+                    payload_dict = payload.model_dump(mode="json")
+                except Exception:
+                    payload_dict = payload.model_dump()
+            elif isinstance(payload, dict):
+                payload_dict = payload
+            else:
+                payload_dict = {}
+            if payload_dict:
+                return {
+                    "event_type": "context.compression_state",
+                    "status": payload_dict.get("status", ""),
+                    "phase": payload_dict.get("phase", ""),
+                    "processor": payload_dict.get("processor", ""),
+                    "summary": payload_dict.get("summary", ""),
+                    "operation_id": payload_dict.get("operation_id", ""),
+                }
         if isinstance(payload, dict):
             return {
                 "event_type": chunk_type,
                 **{k: _serialize_chunk_recursive(v) if isinstance(v, (dict, list)) else _serialize_value(v)
                    for k, v in payload.items()},
             }
+        if hasattr(payload, "model_dump"):
+            try:
+                payload_dict = payload.model_dump(mode="json")
+            except Exception:
+                payload_dict = payload.model_dump()
+            return {
+                "event_type": chunk_type,
+                **{k: _serialize_chunk_recursive(v) if isinstance(v, (dict, list)) else _serialize_value(v)
+                   for k, v in payload_dict.items()},
+            }
         return {"event_type": chunk_type, "content": str(payload)}
 
     if chunk_type == "controller_output" and payload is not None:
+        interactions = _find_interaction_payloads(payload)
+        if interactions:
+            return _parse_interaction_payload(interactions)
         inner_t = getattr(payload, "type", None)
+        if inner_t is None and isinstance(payload, dict):
+            inner_t = payload.get("type")
         inner_val = (
             getattr(inner_t, "value", inner_t) if inner_t is not None else None
         )
         if inner_val == "task_completion":
             return None
         if inner_val == "task_failed":
+            data = getattr(payload, "data", None)
+            if data is None and isinstance(payload, dict):
+                data = payload.get("data", [])
             error = next(
-                (item.text for item in payload.data if hasattr(item, "text")),
+                (item.text for item in data if hasattr(item, "text")),
                 "任务执行失败",
             )
             return {"event_type": "chat.error", "error": error}
@@ -267,18 +307,34 @@ def _parse_typed_chunk(chunk: Any, _has_streamed_content: bool) -> dict[str, Any
         )
         return {"event_type": "todo.updated", "todos": todos}
 
-    if chunk_type == "context.compressed":
+    if chunk_type == "context.usage":
         if isinstance(payload, dict):
-            return {
-                "event_type": "context.compressed",
+            usage_payload = {
+                "event_type": "context.usage",
                 "rate": payload.get("rate", 0),
-                "before_compressed": payload.get("before_compressed") or 0,
-                "after_compressed": payload.get("after_compressed") or 0,
+                "context_max": payload.get("context_max") or 0,
+                "tokens_used": payload.get("tokens_used") or 0,
             }
+            for key in ("role", "member_name"):
+                value = payload.get(key)
+                if value is not None:
+                    usage_payload[key] = value
+            return usage_payload
+
+    if chunk_type == "__interaction__":
+        return _parse_interaction_payload(payload)
 
     if isinstance(payload, dict):
         if "event_type" in payload:
-            if payload.get("event_type") == "chat.tracer_agent":
+            inner_event = payload.get("event_type")
+            # Team-level control events (team.runtime_ready, team.completed)
+            # carry their own event_type namespace — pass through as-is
+            # rather than wrapping under "chat.{chunk_type}".
+            if isinstance(inner_event, str) and inner_event.startswith("team."):
+                return {
+                    **{k: _serialize_value(v) for k, v in payload.items()},
+                }
+            if inner_event == "chat.tracer_agent":
                 return {
                     "event_type": f"chat.{chunk_type}",
                     **{k: _serialize_chunk_recursive(v) if isinstance(v, (dict, list)) else _serialize_value(v)
@@ -297,6 +353,110 @@ def _parse_typed_chunk(chunk: Any, _has_streamed_content: bool) -> dict[str, Any
         "event_type": f"chat.{chunk_type}",
         "content": str(payload),
     }
+
+
+def parse_ask_user_question_payload(payload: Any) -> dict[str, Any]:
+    question_payload = payload if isinstance(payload, dict) else {}
+    question_payload = dict(question_payload)
+    evolution_meta = question_payload.get("evolution_meta")
+    legacy_evolution_meta = question_payload.get("_evolution_meta")
+    if not isinstance(evolution_meta, dict) and isinstance(legacy_evolution_meta, dict):
+        question_payload["evolution_meta"] = dict(legacy_evolution_meta)
+    question_payload.pop("_evolution_meta", None)
+    return {
+        "event_type": "chat.ask_user_question",
+        **question_payload,
+    }
+
+
+def _parse_interaction_payload(payload: Any) -> dict[str, Any] | None:
+    """Convert a Core interaction payload into a frontend ask-user event."""
+    if isinstance(payload, dict) and payload.get("interaction_type") == "activate_confirm":
+        return {
+            "event_type": "harness.activate_interaction",
+            "interaction_type": "activate_confirm",
+            "interaction_id": payload.get("interaction_id", ""),
+            "extension_name": payload.get("extension_name", ""),
+            "runtime_path": payload.get("runtime_path", ""),
+            "session_runtime_path": payload.get("session_runtime_path", ""),
+            "extension_runtime_path": payload.get(
+                "extension_runtime_path", payload.get("runtime_path", "")
+            ),
+            "options": payload.get("options", ["accept", "reject"]),
+        }
+    from jiuwenswarm.agents.harness.common.rails.interrupt.interrupt_helpers import (
+        convert_interactions_to_ask_user_question,
+    )
+
+    return convert_interactions_to_ask_user_question([payload])
+
+
+def _find_interaction_payloads(
+    obj: Any,
+    *,
+    _depth: int = 0,
+    _seen: set[int] | None = None,
+) -> list[Any]:
+    """Find nested ``__interaction__`` payloads inside controller output."""
+    if obj is None or _depth > 8:
+        return []
+    if _seen is None:
+        _seen = set()
+    obj_id = id(obj)
+    if obj_id in _seen:
+        return []
+    _seen.add(obj_id)
+
+    obj_type = getattr(obj, "type", None)
+    if obj_type == "__interaction__":
+        return [getattr(obj, "payload", None)]
+
+    if isinstance(obj, dict):
+        if obj.get("type") == "__interaction__":
+            return [obj.get("payload")]
+        if obj.get("event_type") == "chat.ask_user_question":
+            return [{
+                "id": obj.get("request_id", ""),
+                "value": {"questions": obj.get("questions", [])},
+            }]
+        found: list[Any] = []
+        for value in obj.values():
+            found.extend(_find_interaction_payloads(value, _depth=_depth + 1, _seen=_seen))
+        return found
+
+    if isinstance(obj, (list, tuple)):
+        found: list[Any] = []
+        for value in obj:
+            found.extend(_find_interaction_payloads(value, _depth=_depth + 1, _seen=_seen))
+        return found
+
+    if hasattr(obj, "model_dump"):
+        try:
+            dumped = obj.model_dump(mode="python")
+        except Exception:
+            dumped = obj.model_dump()
+        return _find_interaction_payloads(dumped, _depth=_depth + 1, _seen=_seen)
+
+    found: list[Any] = []
+    for attr_name in ("payload", "data", "value", "result"):
+        if hasattr(obj, attr_name):
+            found.extend(_find_interaction_payloads(
+                getattr(obj, attr_name),
+                _depth=_depth + 1,
+                _seen=_seen,
+            ))
+    return found
+
+
+def _find_interaction_payload(
+    obj: Any,
+    *,
+    _depth: int = 0,
+    _seen: set[int] | None = None,
+) -> Any | None:
+    """Find a nested ``__interaction__`` payload inside controller output."""
+    matches = _find_interaction_payloads(obj, _depth=_depth, _seen=_seen)
+    return matches[0] if matches else None
 
 
 def _parse_event_typed_chunk(chunk: Any) -> dict[str, Any]:

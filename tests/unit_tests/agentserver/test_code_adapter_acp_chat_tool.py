@@ -4,6 +4,7 @@
 
 from types import SimpleNamespace
 
+from jiuwenswarm.server.runtime.agent_adapter import interface_code
 from jiuwenswarm.server.runtime.agent_adapter.interface_code import JiuwenClawCodeAdapter
 
 
@@ -52,3 +53,32 @@ def test_code_adapter_skips_acp_chat_without_profiles(monkeypatch):
     cards = JiuwenClawCodeAdapter().build_code_tool_cards("agent-id")
 
     assert cards == []
+
+
+def test_code_adapter_builds_coding_memory_rail_without_embedding_config(monkeypatch, tmp_path):
+    created: dict[str, object] = {}
+
+    class _FakeCodingMemoryRail:
+        def __init__(self, *, coding_memory_dir, embedding_config, language):
+            created["coding_memory_dir"] = coding_memory_dir
+            created["embedding_config"] = embedding_config
+            created["language"] = language
+
+    monkeypatch.setattr(interface_code, "CodingMemoryRail", _FakeCodingMemoryRail)
+
+    project_dir = tmp_path / "project"
+    agent_workspace_dir = tmp_path / "agent_workspace"
+
+    rail = interface_code.create_coding_memory_rail(
+        project_dir=str(project_dir),
+        agent_workspace_dir=str(agent_workspace_dir),
+        config={"preferred_language": "zh", "embed": {}},
+    )
+
+    assert isinstance(rail, _FakeCodingMemoryRail)
+    assert created["coding_memory_dir"] == str(
+        tmp_path / "agent_workspace" / "coding_memory" / "project"
+    )
+    assert created["embedding_config"].model_name == "text-embedding-v3"
+    assert created["embedding_config"].base_url == ""
+    assert created["embedding_config"].api_key is None

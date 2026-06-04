@@ -223,7 +223,7 @@ modes:
 """,
             encoding="utf-8",
         )
-        monkeypatch.setattr("jiuwenswarm.common.config._CONFIG_YAML_PATH", temp_config_file)
+        monkeypatch.setattr("jiuwenswarm.common.config.CONFIG_YAML_PATH", temp_config_file)
 
         replace_teams_in_config(TestTeamModesConfig._front_payload(["alpha_team"]))
 
@@ -235,8 +235,9 @@ modes:
             "member_name": "alpha_team_leader",
             "display_name": "alpha_team leader",
             "persona": "Lead planning and coordination",
+            "agent_key": "agent_1",
         }
-        assert all("agent_key" not in item for item in saved["predefined_members"])
+        assert [item["agent_key"] for item in saved["predefined_members"]] == ["agent_1", "agent_2"]
         assert saved["agents"]["leader"]["model"]["model_client_config"]["client_provider"] == "OpenAI"
         assert saved["agents"]["leader"]["model"]["model_client_config"]["timeout"] == 1800
         assert saved["agents"]["leader"]["model"]["model_client_config"]["verify_ssl"] is False
@@ -244,8 +245,12 @@ modes:
         assert saved["agents"]["leader"]["model"]["model_request_config"]["model"] == "gpt-4.1"
         assert saved["agents"]["analyst"]["skills"] == ["team-management"]
         assert saved["agents"]["coder"]["skills"] == ["coding"]
-        assert "teammate" not in saved
+        assert saved.get("teammate") is None
         assert "teammate" not in saved["agents"]
+        registry = raw["web_config_panel"]["agent_team_agents"]
+        assert set(registry) == {"agent_1", "agent_2"}
+        assert registry["agent_1"]["model"]["model_request_config"]["model"] == "gpt-4.1"
+        assert registry["agent_2"]["skills"] == ["coding"]
 
     @staticmethod
     def test_replace_teams_in_config_expands_reused_agent_specs_without_yaml_aliases(
@@ -262,7 +267,7 @@ modes:
 """,
             encoding="utf-8",
         )
-        monkeypatch.setattr("jiuwenswarm.common.config._CONFIG_YAML_PATH", temp_config_file)
+        monkeypatch.setattr("jiuwenswarm.common.config.CONFIG_YAML_PATH", temp_config_file)
 
         replace_teams_in_config(TestTeamModesConfig._front_payload(["alpha_team"], include_teammate=True))
 
@@ -271,18 +276,46 @@ modes:
         assert "*id" not in saved_text
         raw = yaml.safe_load(saved_text)
         saved = raw["modes"]["team"]["alpha_team"]
-        # teammate 字段（与 agents 同级）已废弃，不再写入 config.yaml
-        assert "teammate" not in saved
-        # agents.teammate 仍保留
+        # Team-level teammate keeps the selected source agent key for UI round-trip.
+        assert saved["teammate"] == {"agent_key": "agent_2"}
         assert saved["agents"]["teammate"]["skills"] == ["coding"]
         assert saved["agents"]["teammate"] is not saved["agents"]["coder"]
+
+    @staticmethod
+    def test_replace_teams_in_config_persists_agent_registry_without_team(
+        monkeypatch: pytest.MonkeyPatch,
+        temp_config_file: Path,
+    ):
+        temp_config_file.write_text(
+            """
+channels:
+  web:
+    enabled: true
+modes:
+  agent:
+    fast: {}
+""",
+            encoding="utf-8",
+        )
+        monkeypatch.setattr("jiuwenswarm.common.config._CONFIG_YAML_PATH", temp_config_file)
+        payload = TestTeamModesConfig._front_payload(["alpha_team"])
+        payload["team"] = []
+
+        replace_teams_in_config(payload)
+
+        raw = yaml.safe_load(temp_config_file.read_text(encoding="utf-8"))
+        assert "team" not in raw["modes"]
+        registry = raw["web_config_panel"]["agent_team_agents"]
+        assert set(registry) == {"agent_1", "agent_2"}
+        assert registry["agent_1"]["model"]["model_request_config"]["model"] == "gpt-4.1"
+        assert registry["agent_2"]["skills"] == ["coding"]
 
     @staticmethod
     def test_replace_teams_in_config_only_writes_teammate_when_explicitly_provided(
         monkeypatch: pytest.MonkeyPatch,
         temp_config_file: Path,
     ):
-        monkeypatch.setattr("jiuwenswarm.common.config._CONFIG_YAML_PATH", temp_config_file)
+        monkeypatch.setattr("jiuwenswarm.common.config.CONFIG_YAML_PATH", temp_config_file)
 
         replace_teams_in_config(TestTeamModesConfig._front_payload(["alpha_team"]))
 
@@ -296,7 +329,7 @@ modes:
         monkeypatch: pytest.MonkeyPatch,
         temp_config_file: Path,
     ):
-        monkeypatch.setattr("jiuwenswarm.common.config._CONFIG_YAML_PATH", temp_config_file)
+        monkeypatch.setattr("jiuwenswarm.common.config.CONFIG_YAML_PATH", temp_config_file)
 
         with pytest.raises(ValueError, match="duplicate team_name"):
             replace_teams_in_config(TestTeamModesConfig._front_payload(["alpha_team", "alpha_team"]))
@@ -306,7 +339,7 @@ modes:
         monkeypatch: pytest.MonkeyPatch,
         temp_config_file: Path,
     ):
-        monkeypatch.setattr("jiuwenswarm.common.config._CONFIG_YAML_PATH", temp_config_file)
+        monkeypatch.setattr("jiuwenswarm.common.config.CONFIG_YAML_PATH", temp_config_file)
         payload = TestTeamModesConfig._front_payload(["alpha_team"])
         payload["team"][0]["predefined_members"][1]["agent_key"] = "missing_agent"
 
@@ -318,7 +351,7 @@ modes:
         monkeypatch: pytest.MonkeyPatch,
         temp_config_file: Path,
     ):
-        monkeypatch.setattr("jiuwenswarm.common.config._CONFIG_YAML_PATH", temp_config_file)
+        monkeypatch.setattr("jiuwenswarm.common.config.CONFIG_YAML_PATH", temp_config_file)
         payload = TestTeamModesConfig._front_payload(["alpha_team"], include_teammate=True)
         payload["team"][0]["teammate"]["agent_key"] = "missing_agent"
 
@@ -330,7 +363,7 @@ modes:
         monkeypatch: pytest.MonkeyPatch,
         temp_config_file: Path,
     ):
-        monkeypatch.setattr("jiuwenswarm.common.config._CONFIG_YAML_PATH", temp_config_file)
+        monkeypatch.setattr("jiuwenswarm.common.config.CONFIG_YAML_PATH", temp_config_file)
 
         replace_teams_in_config(TestTeamModesConfig._front_payload(["alpha_team", "beta_team"]))
         replace_teams_in_config(TestTeamModesConfig._front_payload(["gamma_team"]))
@@ -343,7 +376,7 @@ modes:
         monkeypatch: pytest.MonkeyPatch,
         temp_config_file: Path,
     ):
-        monkeypatch.setattr("jiuwenswarm.common.config._CONFIG_YAML_PATH", temp_config_file)
+        monkeypatch.setattr("jiuwenswarm.common.config.CONFIG_YAML_PATH", temp_config_file)
         payload = TestTeamModesConfig._front_payload(["alpha_team"])
         payload["team"][0]["predefined_members"][1]["member_name"] = "analyst"
 

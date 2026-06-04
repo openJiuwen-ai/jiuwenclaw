@@ -85,6 +85,7 @@ class TestInitSessionMetadata:
         assert data["title"] == "test title"
         assert data["message_count"] == 0
         assert data["mode"] == "unknown"
+        assert data["round_id"] == 0
         assert isinstance(data["created_at"], float)
         assert isinstance(data["last_message_at"], float)
 
@@ -98,6 +99,7 @@ class TestInitSessionMetadata:
         assert data["user_id"] == ""
         assert data["title"] == ""
         assert data["mode"] == "unknown"
+        assert data["round_id"] == 0
 
 
 # ===========================================================================
@@ -230,7 +232,81 @@ class TestGetSessionMetadata:
 
 
 # ===========================================================================
-# get_all_sessions_metadata
+# increment_session_round_count
+# ===========================================================================
+class TestIncrementSessionRoundCount:
+    @staticmethod
+    def test_first_increment_returns_1(sessions_dir):
+        from jiuwenswarm.server.runtime.session.session_metadata import (
+            init_session_metadata,
+            increment_session_round_count,
+            _METADATA_QUEUE,
+        )
+
+        init_session_metadata(session_id="sess_round1")
+        result = increment_session_round_count("sess_round1")
+        _METADATA_QUEUE.join()
+
+        assert result == 1
+        data = _read_json(sessions_dir / "sess_round1" / "metadata.json")
+        assert data["round_id"] == 1
+
+    @staticmethod
+    def test_increments_sequentially(sessions_dir):
+        from jiuwenswarm.server.runtime.session.session_metadata import (
+            init_session_metadata,
+            increment_session_round_count,
+            _METADATA_QUEUE,
+        )
+
+        init_session_metadata(session_id="sess_round_seq")
+        for expected in range(1, 4):
+            result = increment_session_round_count("sess_round_seq")
+            _METADATA_QUEUE.join()
+            assert result == expected
+
+        data = _read_json(sessions_dir / "sess_round_seq" / "metadata.json")
+        assert data["round_id"] == 3
+
+    @staticmethod
+    def test_defaults_to_0_when_no_metadata(sessions_dir):
+        from jiuwenswarm.server.runtime.session.session_metadata import (
+            increment_session_round_count,
+            _METADATA_QUEUE,
+        )
+
+        (sessions_dir / "sess_no_meta").mkdir()
+        result = increment_session_round_count("sess_no_meta")
+        _METADATA_QUEUE.join()
+
+        assert result == 1
+        data = _read_json(sessions_dir / "sess_no_meta" / "metadata.json")
+        assert data["round_id"] == 1
+
+    @staticmethod
+    def test_persists_across_restarts(sessions_dir):
+        from jiuwenswarm.server.runtime.session.session_metadata import (
+            init_session_metadata,
+            increment_session_round_count,
+            _METADATA_QUEUE,
+        )
+
+        init_session_metadata(session_id="sess_persist")
+        increment_session_round_count("sess_persist")
+        _METADATA_QUEUE.join()
+
+        # Simulate restart: re-import and read from disk
+        from jiuwenswarm.server.runtime.session.session_metadata import (
+            increment_session_round_count,
+        )
+        result = increment_session_round_count("sess_persist")
+        _METADATA_QUEUE.join()
+
+        assert result == 2
+        data = _read_json(sessions_dir / "sess_persist" / "metadata.json")
+        assert data["round_id"] == 2
+
+
 # ===========================================================================
 class TestGetAllSessionsMetadata:
     @staticmethod
@@ -260,12 +336,12 @@ class TestGetAllSessionsMetadata:
         _write_metadata_sync("old", {
             "session_id": "old", "last_message_at": now - 100,
             "channel_id": "", "user_id": "", "created_at": now - 100,
-            "title": "", "message_count": 0,
+            "title": "", "message_count": 0, "round_id": 0,
         })
         _write_metadata_sync("new", {
             "session_id": "new", "last_message_at": now,
             "channel_id": "", "user_id": "", "created_at": now,
-            "title": "", "message_count": 0,
+            "title": "", "message_count": 0, "round_id": 0,
         })
 
         sessions, _ = get_all_sessions_metadata()
@@ -298,7 +374,7 @@ class TestGetAllSessionsMetadata:
             _write_metadata_sync(f"o{i}", {
                 "session_id": f"o{i}", "last_message_at": now - i,
                 "channel_id": "", "user_id": "", "created_at": now - i,
-                "title": "", "message_count": 0,
+                "title": "", "message_count": 0, "round_id": 0,
             })
 
         sessions, total = get_all_sessions_metadata(limit=2, offset=2)
@@ -416,6 +492,7 @@ class TestChannelMetadata:
             "last_message_at": 1000.0,
             "title": "",
             "message_count": 0,
+            "round_id": 0,
             "channel_metadata": {"traceparent": "original"},
         })
 

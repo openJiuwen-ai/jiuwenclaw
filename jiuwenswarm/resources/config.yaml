@@ -176,6 +176,56 @@ acp_agents:
      env:
        OPENAI_API_KEY: ${OPENAI_API_KEY}   # 仅由此 env 注入子进程（不读 workspace .env / 父进程）
 
+# ============================================================
+# Agent 配置（可被 team.agents / modes.team.<name>.agents 引用）
+# ============================================================
+# 每个 agent 定义一个可复用的 agent 配置模板，支持以下字段（均可选）：
+#
+#   model:                  # 不配则继承 models.default
+#     model_client_config:
+#       client_provider: OpenAI
+#       api_base: https://api.deepseek.com
+#       api_key: sk-xxx
+#       timeout: 1800
+#       verify_ssl: false
+#       custom_headers: {}
+#     model_request_config:
+#       model: deepseek-chat
+#   skills:                 # 不配则不自动填充
+#     - skill_a
+#     - skill_b
+#   workspace:              # 默认 {"stable_base": true}
+#     stable_base: true
+#   max_iterations: 200     # 默认 200
+#   completion_timeout: 600.0  # 默认 600.0
+#
+# 示例：给不同 agent 配置不同模型和技能
+#   agent_coder:
+#     model:
+#       model_client_config:
+#         client_provider: OpenAI
+#         api_base: https://api.deepseek.com
+#         api_key: sk-xxx
+#       model_request_config:
+#         model: deepseek-chat
+#     skills:
+#       - code_review
+#       - unit_test
+#     max_iterations: 300
+#
+agents:
+  agent_leader:
+    workspace:
+      stable_base: true
+    max_iterations: 200
+    completion_timeout: 600.0
+
+  agent_teammate:
+    workspace:
+      stable_base: true
+    max_iterations: 200
+    completion_timeout: 600.0
+
 telemetry:
   enabled: false                    # 总开关（环境变量 OTEL_ENABLED 优先）
   exporter: otlp                    # otlp / console / none
@@ -218,12 +268,12 @@ react:
   stream_character_threshold: 2000
   context_engine_config:
     enable_kv_cache_release: false
+    enable_openrouter_model_context_window_tokens: true
     enable_reload: true
     enabled: true
     message_summary_offloader_config:
       messages_threshold: null
-      tokens_threshold: 60000
-      large_message_threshold: 60000
+      large_message_threshold: 10000
       offload_message_type: [ "tool" ]
       protected_tool_names: ["read_file:*SKILL.md", "reload_original_context_messages"]
       messages_to_keep: null
@@ -320,6 +370,16 @@ gateway:
   # 取值：per_chat_bot（默认，同 chat+bot 共享会话）, per_chat_bot_user（按 user 分会话）
   session_map_scope: per_chat_bot
 
+  # AgentClient 配置 - Gateway 连接到 AgentServer 的方式
+  # type: websocket（默认，WebSocket 连接） | yuanrong（openYuanRong 函数调用）
+  agent_client:
+    type: websocket # websocket | yuanrong
+    # yuanrong 函数模式配置下面参数
+    frontend_endpoint:
+    function_version_urn:
+    concurrency: 1
+    invoke_timeout_s: 60
+
 heartbeat:
   # 心跳间隔（秒），默认 3600
   every: 3600
@@ -329,6 +389,21 @@ heartbeat:
   active_hours:
     start: 08:00
     end: 22:00
+
+# 执行护栏：工具循环检测与主动中断
+execution_guard:
+  # 断路器：检测工具重复/交替/无进展循环，critical 级会强制结束当次回答
+  circuit_breaker:
+    # 总开关。断路器会主动中断 agent（force-finish），默认关闭，需显式开启
+    enabled: false
+    # 相同工具+参数重复达到该次数时告警（仅日志，不中断）
+    warning_threshold: 10
+    # Ping-Pong 两工具交替且无进展达到该次数时中断
+    critical_threshold: 20
+    # 工具连续无进展（结果不变）达到该次数时兜底中断
+    global_breaker_threshold: 30
+    # 未知/错误工具连续调用达到该次数时停止重试并中断
+    unknown_tool_threshold: 10
 
 channels:
   web:
@@ -480,6 +555,8 @@ permissions:
     write_file: ask
     edit_file: ask
     search_replace: ask
+    # ask_user 只向用户提问，不修改系统，自动放行避免权限中断阻塞问题选项呈现
+    ask_user: allow
     write_memory: allow
     edit_memory: allow
     read_memory: allow
@@ -649,7 +726,61 @@ updater:
 extensions:
   # 扩展包搜索目录（字符串），用 ';' 分割多个目录：
   # EXTENSION_DIRS="E:/a;D:/b"
-  extension_dirs: ${EXTENSION_DIRS:-}
+  extension_dirs: ${EXTENSION_DIRS:-jiuwenswarm/extensions}
+
+
+# ============================================================
+# Hooks 配置
+# 17 个事件类型，支持 command / prompt 两种 hook 类型
+# 字段说明：
+#   - disable_all_hooks: 全局关闭所有 hooks
+#   - <事件名>:
+#       - matcher: 匹配表达式（工具名|管道OR|正则|"*"）
+#       - hooks:
+#           - type: command | prompt
+#           - command / prompt: 执行的命令或 prompt 模板
+#             支持 $ARGUMENTS（hook input JSON）和 $TOOL_NAME 变量
+#           - timeout: 超时秒数（默认 30s）
+#           - shell: bash | sh | zsh（仅 command 类型）
+#           - model: LLM 模型名（仅 prompt 类型，空则用默认轻量模型）
+#           - status_message: 执行时显示的提示信息
+# 退出码语义（command 类型）：
+#   0 = 成功继续  2 = 阻止执行  其他 = 非阻塞错误
+# ============================================================
+hooks:
+  disable_all_hooks: false
+
+  # PreToolUse: 工具执行前拦截
+  # PreToolUse:
+  #   - matcher: "Write|Edit"
+  #     hooks:
+  #       - type: command
+  #         command: "echo 'about to write file'"
+  #         timeout: 30
+  #         shell: "bash"
+  #         status_message: "Running pre-write hook..."
+
+  # PostToolUse: 工具执行后拦截
+  # PostToolUse:
+  #   - matcher: "Bash"
+  #     hooks:
+  #       - type: prompt
+  #         prompt: "审查命令输出安全性: $ARGUMENTS"
+  #         timeout: 15
+
+  # SessionStart: 会话开始时
+  # SessionStart:
+  #   - matcher: "*"
+  #     hooks:
+  #       - type: command
+  #         command: "echo 'session started'"
+
+  # Stop: Agent 结束前
+  # Stop:
+  #   - matcher: "*"
+  #     hooks:
+  #       - type: command
+  #         command: "echo 'agent stopping'"
 
 
 team:
@@ -669,16 +800,8 @@ team:
     persona: "天才项目管理专家，擅长任务分解和团队协调"
 
   agents:
-    leader:
-      workspace:
-        stable_base: true
-      max_iterations: 200
-      completion_timeout: 600.0
-    teammate:
-      workspace:
-        stable_base: true
-      max_iterations: 200
-      completion_timeout: 600.0
+    leader: $agent_leader
+    teammate: $agent_teammate
 
   workspace:
     enabled: true
@@ -758,16 +881,12 @@ modes:
       spawn_mode: inprocess
 
       leader:
-        member_name: team_leader
+        member_name: team-leader
         display_name: 团队领导
         persona: "天才项目管理专家，擅长任务分解和团队协调"
 
       agents:
-        leader:
-          workspace:
-            stable_base: true
-          max_iterations: 200
-          completion_timeout: 600.0
+        leader: $agent_leader
 
       workspace:
         enabled: true
@@ -777,3 +896,39 @@ modes:
 
       storage:
         type: sqlite
+
+      # ============================================================
+      # Team 级共享记忆（TeamMemoryConfig）
+      # ============================================================
+      # 与常规 Agent 的 per-session 记忆不同，Team 记忆是一个独立的、
+      # 跨成员的共享记忆系统，由 TeamMemoryManager 统一管理。
+      #
+      # 启用后，每个 Team 成员的记忆操作不再是孤立的个人记忆，
+      # 而是读写同一份 TEAM_MEMORY.md（位于 team_memory_dir 下）。
+      # 这允许成员之间通过记忆文件共享上下文（如项目背景、决策记录等）。
+      # ============================================================
+      memory:
+        # ---------- 总开关 ----------
+        # 关闭时 TeamMemoryManager 不创建，成员记忆回退到各自独立的 MemoryRail
+        enabled: false
+
+        # ---------- 场景标识 ----------
+        # "general" — 通用场景，记忆提取 prompt 偏重项目背景与决策
+        # "coding"  — 编码场景，记忆提取 prompt 偏重技术方案与架构决策
+        scenario: "general"
+
+        # ---------- 自动提取 ----------
+        # true  — 每轮对话结束后，后台自动总结并写入 TEAM_MEMORY.md
+        # false — 仅当 LLM 主动调用记忆工具时才写入
+        # 仅在 lifecycle=persistent 时生效；temporary 团队不触发自动提取
+        auto_extract: true
+
+        # ---------- 共享记忆 ----------
+        # true  — 所有成员共享同一份 TEAM_MEMORY.md（默认）
+        # false — 每个成员维护独立记忆文件（按 member_name 分目录）
+        shared_memory: true
+
+        # ---------- 记忆注入模式 ----------
+        # 控制记忆内容如何注入到每个成员的 system prompt 中：
+        #   "proactive" — 每轮对话开始时主动注入最新记忆摘要
+        member_memory_prompt_mode: "proactive"

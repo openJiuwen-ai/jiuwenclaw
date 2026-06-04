@@ -10,6 +10,8 @@ import logging
 import os
 from pathlib import Path
 
+import yaml
+
 from jiuwenbox.logging_config import configure_logging
 from jiuwenbox.models.policy import SecurityPolicy
 from jiuwenbox.server.policy_engine import PolicyEngine
@@ -18,6 +20,13 @@ configure_logging()
 logger = logging.getLogger(__name__)
 
 JIUWENBOX_POLICY_PATH_ENV = "JIUWENBOX_POLICY_PATH"
+
+# Top-level YAML keys that don't represent sandbox-related configuration.
+# A policy file whose effective sandbox-config keys are empty (i.e. its
+# top-level key set is a subset of ``_META_KEYS | {"inference_privacy_proxies"}``)
+# is treated as proxy-only and the server skips sandbox initialisation.
+_META_KEYS: frozenset[str] = frozenset({"version", "name"})
+_PROXY_ONLY_ALLOWED_KEYS: frozenset[str] = _META_KEYS | {"inference_privacy_proxies"}
 
 
 class PolicyReader:
@@ -54,3 +63,34 @@ class PolicyReader:
 
     def load_policy_from_file(self, path: Path) -> SecurityPolicy:
         return self.policy_engine.load_policy_from_file(path)
+
+    def is_proxy_only(self) -> bool:
+        """Return True iff the YAML file only configures the inference proxy.
+
+        "Proxy-only" means the operator wants jiuwenbox to act purely as an
+        inference privacy router: the YAML's top-level keys are limited to
+        :data:`_PROXY_ONLY_ALLOWED_KEYS` and the proxy listener is actually
+        enabled (``listen_port > 0``). When this is the case the server skips
+        the sandbox subsystem entirely (no ``ProcessRuntime``, no idle
+        reaper, no zombie reaper) and only runs the proxy lifecycle.
+        """
+        if not self.policy_path.exists():
+            return False
+        try:
+            with open(self.policy_path) as f:
+                data = yaml.safe_load(f)
+        except (OSError, yaml.YAMLError):
+            return False
+        if not isinstance(data, dict):
+            return False
+        top_keys = set(data.keys())
+        if not top_keys.issubset(_PROXY_ONLY_ALLOWED_KEYS):
+            return False
+        proxy_section = data.get("inference_privacy_proxies")
+        if not isinstance(proxy_section, dict):
+            return False
+        try:
+            port = int(proxy_section.get("listen_port", 0) or 0)
+        except (TypeError, ValueError):
+            return False
+        return port > 0

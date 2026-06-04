@@ -27,13 +27,13 @@ interface ExtensionsHubPanelProps {
 
 export function ExtensionsHubPanel({ sessionId, isConnected }: ExtensionsHubPanelProps) {
   const { t } = useTranslation();
-  const [activeTab, setActiveTab] = useState<HubTabKey>('rails');
+  const [activeTab, setActiveTab] = useState<HubTabKey>('harnesspkg');
 
   const tabs: TabItem[] = [
     {
       key: 'harnesspkg',
       label: t('nav.harnesspkg', 'Plugins'),
-      hidden: true, // Temporarily hidden from web UI, core functionality preserved for future re-enable
+      hidden: false, // Temporarily hidden from web UI, core functionality preserved for future re-enable
       icon: (
         <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={1.5}>
           <path strokeLinecap="round" strokeLinejoin="round" d="M21 7.5l-9-5.25L3 7.5m18 0l-9 5.25m9-5.25v9l-9 5.25M3 7.5l9 5.25M3 7.5v9l9 5.25m0-9v9" />
@@ -56,23 +56,21 @@ export function ExtensionsHubPanel({ sessionId, isConnected }: ExtensionsHubPane
   return (
     <div className="extensions-hub-panel">
       {/* Tab Header - only show when multiple tabs visible */}
-      {visibleTabs.length > 1 && (
-        <div className="extensions-hub-panel__header">
-          <div className="extensions-hub-panel__tabs">
-            {visibleTabs.map((tab) => (
-              <button
-                type="button"
-                key={tab.key}
-                onClick={() => setActiveTab(tab.key)}
-                className={`extensions-hub-panel__tab ${activeTab === tab.key ? 'extensions-hub-panel__tab--active' : ''}`}
-              >
-                {tab.icon}
-                <span>{tab.label}</span>
-              </button>
-            ))}
-          </div>
+      <div className="extensions-hub-panel__header">
+        <div className="extensions-hub-panel__tabs">
+          {visibleTabs.map((tab) => (
+            <button
+              type="button"
+              key={tab.key}
+              onClick={() => setActiveTab(tab.key)}
+              className={`extensions-hub-panel__tab ${activeTab === tab.key ? 'extensions-hub-panel__tab--active' : ''}`}
+            >
+              {tab.icon}
+              <span>{tab.label}</span>
+            </button>
+          ))}
         </div>
-      )}
+      </div>
 
       {/* Tab Content */}
       <div className="extensions-hub-panel__content">

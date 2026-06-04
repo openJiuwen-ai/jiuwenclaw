@@ -9,7 +9,7 @@ import { useEffect, useState, useCallback, useRef } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useHarnessStore } from '../../stores';
 import { webRequest } from '../../services/webClient';
-import { PackageInfo, PackagesPayload, ActivatePayload } from '../../types';
+import { PackageInfo, PackagesPayload, ActivatePayload, DeactivatePayload } from '../../types';
 import { HarnessExtensionTree } from '../ToolPanel/HarnessExtensionTree';
 import './HarnessPackagePanel.css';
 
@@ -29,21 +29,25 @@ export function HarnessPackagePanel({ sessionId }: HarnessPackagePanelProps) {
   const {
     packages,
     nativeVersion,
-    activePackageId,
+    activePackageIds,
     selectedPackageId,
     loadingPackages,
     activatingPackage,
+    deactivatingPackage,
+    isPackageActive,
     setPackages,
-    setActivePackageId,
     setSelectedPackageId,
     setLoadingPackages,
     setActivatingPackage,
+    setDeactivatingPackage,
     setExtensionReady,
   } = useHarnessStore();
 
   const [loadError, setLoadError] = useState<string | null>(null);
   const [activateError, setActivateError] = useState<string | null>(null);
   const [activateSuccess, setActivateSuccess] = useState<string | null>(null);
+  const [deactivateError, setDeactivateError] = useState<string | null>(null);
+  const [deactivateSuccess, setDeactivateSuccess] = useState<string | null>(null);
   const [deleteConfirmOpen, setDeleteConfirmOpen] = useState(false);
   const [deletingPackage, setDeletingPackage] = useState(false);
   const [deleteError, setDeleteError] = useState<string | null>(null);
@@ -54,31 +58,52 @@ export function HarnessPackagePanel({ sessionId }: HarnessPackagePanelProps) {
   const [exportError, setExportError] = useState<string | null>(null);
   const [importSuccess, setImportSuccess] = useState<string | null>(null);
   const [exportSuccess, setExportSuccess] = useState<string | null>(null);
+  const [deactivatingAll, setDeactivatingAll] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
-  // Fetch packages on mount
+  // Fetch packages from cache (initial load)
   const fetchPackages = useCallback(async () => {
     setLoadingPackages(true);
     setLoadError(null);
 
     try {
       const payload = await webRequest<PackagesPayload>('harness.packages', undefined);
-      const activeId = payload.active_package_id || null;
+      const activeIds = payload.active_package_ids || [];
       setPackages(
         payload.packages || [],
         payload.native_version || { id: 'native', extension_name: 'Native Agent', is_active: true },
-        activeId
+        activeIds
       );
-      // Set selectedPackageId to active_package_id or 'native' as default
-      setSelectedPackageId(activeId || 'native');
     } catch (err) {
       console.error('Failed to fetch packages:', err);
       setLoadError(err instanceof Error ? err.message : t('harnessPackage.loadPackagesFailed'));
     } finally {
       setLoadingPackages(false);
     }
-  }, [setLoadingPackages, setPackages, setSelectedPackageId, t]);
+  }, [setLoadingPackages, setPackages, t]);
 
+  // Re-scan packages directory (refresh button)
+  const scanPackages = useCallback(async () => {
+    setLoadingPackages(true);
+    setLoadError(null);
+
+    try {
+      const payload = await webRequest<PackagesPayload>('harness.packages.scan', undefined);
+      const activeIds = payload.active_package_ids || [];
+      setPackages(
+        payload.packages || [],
+        payload.native_version || { id: 'native', extension_name: 'Native Agent', is_active: true },
+        activeIds
+      );
+    } catch (err) {
+      console.error('Failed to scan packages:', err);
+      setLoadError(err instanceof Error ? err.message : t('harnessPackage.loadPackagesFailed'));
+    } finally {
+      setLoadingPackages(false);
+    }
+  }, [setLoadingPackages, setPackages, t]);
+
+  // Initial load - scan packages directory (refresh) on mount
   useEffect(() => {
     fetchPackages();
   }, [fetchPackages]);
@@ -94,6 +119,9 @@ export function HarnessPackagePanel({ sessionId }: HarnessPackagePanelProps) {
   // Check if selected is native version
   const isSelectedNative = selectedPackageId === 'native';
 
+  // Check if selected package is active
+  const isSelectedActive = selectedPackageId ? isPackageActive(selectedPackageId) : false;
+
   // Handle version selection change
   const handleVersionChange = (e: React.ChangeEvent<HTMLSelectElement>) => {
     const value = e.target.value;
@@ -101,6 +129,8 @@ export function HarnessPackagePanel({ sessionId }: HarnessPackagePanelProps) {
     // Clear status messages when switching
     setActivateError(null);
     setActivateSuccess(null);
+    setDeactivateError(null);
+    setDeactivateSuccess(null);
     setDeleteError(null);
     setDeleteSuccess(null);
     setImportError(null);
@@ -109,27 +139,44 @@ export function HarnessPackagePanel({ sessionId }: HarnessPackagePanelProps) {
     setExportSuccess(null);
   };
 
-  // Handle hot activate
-  const handleHotActivate = async () => {
-    if (!selectedPackageId) return;
+  // Handle activate/deactivate based on current status
+  const handleToggleActive = async () => {
+    if (!selectedPackageId || selectedPackageId === 'native') return;
 
-    setActivatingPackage(true);
-    setActivateError(null);
-    setActivateSuccess(null);
+    if (isSelectedActive) {
+      // Deactivate
+      setDeactivatingPackage(true);
+      setDeactivateError(null);
+      setDeactivateSuccess(null);
 
-    try {
-      const payload = await webRequest<ActivatePayload>('harness.activate', {
-        package_id: selectedPackageId,
-        session_id: sessionId,
-      });
+      try {
+        const payload = await webRequest<DeactivatePayload>('harness.deactivate', {
+          package_id: selectedPackageId,
+        });
 
-      setActivePackageId(payload.activated_package_id);
-      setActivateSuccess(payload.message);
+        setDeactivateSuccess(payload.message);
+        await fetchPackages();
+      } catch (err) {
+        console.error('Failed to deactivate package:', err);
+        setDeactivateError(err instanceof Error ? err.message : t('harnessPackage.deactivateFailed'));
+      } finally {
+        setDeactivatingPackage(false);
+      }
+    } else {
+      // Activate
+      setActivatingPackage(true);
+      setActivateError(null);
+      setActivateSuccess(null);
 
-      // Update extensionReady if activating a package
-      if (payload.activated_package_id === 'native' || selectedPackageId === 'native') {
-        setExtensionReady(null);
-      } else {
+      try {
+        const payload = await webRequest<ActivatePayload>('harness.activate', {
+          package_id: selectedPackageId,
+          session_id: sessionId,
+        });
+
+        setActivateSuccess(payload.message);
+
+        // Update extensionReady for the activated package
         setExtensionReady({
           extensionName: payload.extension_name,
           runtimePath: payload.runtime_path,
@@ -137,15 +184,41 @@ export function HarnessPackagePanel({ sessionId }: HarnessPackagePanelProps) {
           verifyReport: {},
           componentsSummary: {},
         });
+
+        await fetchPackages();
+      } catch (err) {
+        console.error('Failed to activate package:', err);
+        setActivateError(err instanceof Error ? err.message : t('harnessPackage.activateFailed'));
+      } finally {
+        setActivatingPackage(false);
+      }
+    }
+  };
+
+  // Handle deactivate all packages
+  const handleDeactivateAll = async () => {
+    if (activePackageIds.length === 0) return;
+
+    setDeactivatingAll(true);
+    setDeactivateError(null);
+    setDeactivateSuccess(null);
+
+    try {
+      // Deactivate each active package
+      for (const packageId of activePackageIds) {
+        await webRequest<DeactivatePayload>('harness.deactivate', {
+          package_id: packageId,
+        });
       }
 
-      // Refresh packages to update is_active status and dropdown display
+      setDeactivateSuccess(t('harnessPackage.allDeactivated'));
+      setExtensionReady(null);
       await fetchPackages();
     } catch (err) {
-      console.error('Failed to activate package:', err);
-      setActivateError(err instanceof Error ? err.message : t('harnessPackage.activateFailed'));
+      console.error('Failed to deactivate all packages:', err);
+      setDeactivateError(err instanceof Error ? err.message : t('harnessPackage.deactivateFailed'));
     } finally {
-      setActivatingPackage(false);
+      setDeactivatingAll(false);
     }
   };
 
@@ -172,7 +245,6 @@ export function HarnessPackagePanel({ sessionId }: HarnessPackagePanelProps) {
 
       // If switched to native, update state
       if (payload.switched_to_native) {
-        setActivePackageId(null);
         setExtensionReady(null);
         setSelectedPackageId('native');
       }
@@ -204,26 +276,40 @@ export function HarnessPackagePanel({ sessionId }: HarnessPackagePanelProps) {
     setExportSuccess(null);
 
     try {
-      // Send via WebSocket
-      const result = await webRequest<{ file_content: string; filename: string }>('harness.export', {
+      // Send via WebSocket - now returns download URL instead of base64 content
+      const result = await webRequest<{
+        download_url?: string;  // new format - HTTP download URL
+        file_content?: string;  // legacy format - base64 encoded
+        filename: string;
+      }>('harness.export', {
         package_id: selectedPackageId,
       });
 
-      // Decode base64 content and download
-      const binaryString = atob(result.file_content);
-      const bytes = new Uint8Array(binaryString.length);
-      for (let i = 0; i < binaryString.length; i++) {
-        bytes[i] = binaryString.charCodeAt(i);
+      if (result.download_url) {
+        // New format: direct HTTP download (avoids WebSocket size limits)
+        const a = document.createElement('a');
+        a.href = result.download_url;
+        a.download = result.filename || `${selectedPackage?.extension_name || 'package'}.zip`;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+      } else if (result.file_content) {
+        // Legacy format: decode base64 and download (for backwards compatibility)
+        const binaryString = atob(result.file_content);
+        const bytes = new Uint8Array(binaryString.length);
+        for (let i = 0; i < binaryString.length; i++) {
+          bytes[i] = binaryString.charCodeAt(i);
+        }
+        const blob = new Blob([bytes], { type: 'application/zip' });
+        const url = window.URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = result.filename || `${selectedPackage?.extension_name || 'package'}.zip`;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        window.URL.revokeObjectURL(url);
       }
-      const blob = new Blob([bytes], { type: 'application/zip' });
-      const url = window.URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = result.filename || `${selectedPackage?.extension_name || 'package'}.zip`;
-      document.body.appendChild(a);
-      a.click();
-      document.body.removeChild(a);
-      window.URL.revokeObjectURL(url);
 
       setExportSuccess(t('harnessPackage.exportSuccess'));
     } catch (err) {
@@ -292,20 +378,18 @@ export function HarnessPackagePanel({ sessionId }: HarnessPackagePanelProps) {
 
     // Package options
     packages.forEach((pkg) => {
+      const isActive = isPackageActive(pkg.id);
       options.push(
         <option key={pkg.id} value={pkg.id}>
           {pkg.extension_name}
           {pkg.version_label ? ` - ${pkg.version_label}` : ''}
-          {pkg.is_active ? ` (${t('harnessPackage.currentActive')})` : ''}
+          {isActive ? ` (${t('harnessPackage.currentActive')})` : ''}
         </option>
       );
     });
 
     return options;
   };
-
-  // Check if selected version differs from active
-  const canActivate = selectedPackageId !== activePackageId && selectedPackageId !== null;
 
   // Format date for display
   const formatDate = (dateStr: string | undefined) => {
@@ -358,6 +442,8 @@ export function HarnessPackagePanel({ sessionId }: HarnessPackagePanelProps) {
       return null;
     }
 
+    const isActive = isPackageActive(selectedPackage.id);
+
     return (
       <div className="harness-package-panel__info">
         <div className="harness-package-panel__info-title">
@@ -383,8 +469,8 @@ export function HarnessPackagePanel({ sessionId }: HarnessPackagePanelProps) {
           <span className="harness-package-panel__info-label">
             {t('harnessPackage.status')}
           </span>
-          <span className={`harness-package-panel__info-badge ${selectedPackage.is_active ? 'harness-package-panel__info-badge--active' : ''}`}>
-            {selectedPackage.is_active ? t('harnessPackage.active') : t('harnessPackage.inactive')}
+          <span className={`harness-package-panel__info-badge ${isActive ? 'harness-package-panel__info-badge--active' : ''}`}>
+            {isActive ? t('harnessPackage.active') : t('harnessPackage.inactive')}
           </span>
         </div>
         <div className="harness-package-panel__info-item">
@@ -395,7 +481,7 @@ export function HarnessPackagePanel({ sessionId }: HarnessPackagePanelProps) {
             {formatDate(selectedPackage.created_at)}
           </span>
         </div>
-        {selectedPackage.is_active && selectedPackage.activated_at && (
+        {isActive && selectedPackage.activated_at && (
           <div className="harness-package-panel__info-item">
             <span className="harness-package-panel__info-label">
               {t('harnessPackage.activatedAt')}
@@ -473,12 +559,22 @@ export function HarnessPackagePanel({ sessionId }: HarnessPackagePanelProps) {
         <div className="harness-package-panel__header-actions">
           <button
             type="button"
-            onClick={fetchPackages}
+            onClick={scanPackages}
             className="harness-package-panel__refresh-btn"
             disabled={loadingPackages}
           >
             {loadingPackages ? t('common.refreshing') : t('harnessPackage.refresh')}
           </button>
+          {activePackageIds.length > 0 && (
+            <button
+              type="button"
+              onClick={handleDeactivateAll}
+              className="harness-package-panel__deactivate-all-btn"
+              disabled={deactivatingAll}
+            >
+              {deactivatingAll ? t('harnessPackage.deactivating') : t('harnessPackage.deactivateAll')}
+            </button>
+          )}
           <button
             type="button"
             onClick={handleImportClick}
@@ -546,20 +642,26 @@ export function HarnessPackagePanel({ sessionId }: HarnessPackagePanelProps) {
         </div>
       </div>
 
-      {/* Footer - Activate Section */}
+      {/* Footer - Activate/Deactivate Section */}
       <div className="harness-package-panel__footer">
         <div className="harness-package-panel__actions">
-          {/* Hot Activate Button */}
-          <button
-            type="button"
-            onClick={handleHotActivate}
-            className="harness-package-panel__activate-btn"
-            disabled={!canActivate || activatingPackage}
-          >
-            {activatingPackage
-              ? t('harnessPackage.activating')
-              : t('harnessPackage.hotActivate')}
-          </button>
+          {/* Toggle Active Button - changes based on status */}
+          {!isSelectedNative && (
+            <button
+              type="button"
+              onClick={handleToggleActive}
+              className={isSelectedActive ? 'harness-package-panel__deactivate-btn' : 'harness-package-panel__activate-btn'}
+              disabled={activatingPackage || deactivatingPackage}
+            >
+              {activatingPackage
+                ? t('harnessPackage.activating')
+                : deactivatingPackage
+                  ? t('harnessPackage.deactivating')
+                  : isSelectedActive
+                    ? t('harnessPackage.deactivate')
+                    : t('harnessPackage.hotActivate')}
+            </button>
+          )}
 
           {/* Delete Button */}
           <button
@@ -584,6 +686,16 @@ export function HarnessPackagePanel({ sessionId }: HarnessPackagePanelProps) {
           {activateError && (
             <div className="harness-package-panel__error-msg">
               {activateError}
+            </div>
+          )}
+          {deactivateSuccess && (
+            <div className="harness-package-panel__success">
+              {deactivateSuccess}
+            </div>
+          )}
+          {deactivateError && (
+            <div className="harness-package-panel__error-msg">
+              {deactivateError}
             </div>
           )}
           {deleteSuccess && (
@@ -632,7 +744,7 @@ export function HarnessPackagePanel({ sessionId }: HarnessPackagePanelProps) {
                   extensionName: selectedPackage.extension_name,
                 })}
               </p>
-              {selectedPackage.is_active && (
+              {isPackageActive(selectedPackage.id) && (
                 <p className="harness-package-panel__modal-warning">
                   {t('harnessPackage.deleteActiveWarning')}
                 </p>

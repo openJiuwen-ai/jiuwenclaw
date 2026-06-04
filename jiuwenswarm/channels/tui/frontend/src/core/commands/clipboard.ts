@@ -24,6 +24,30 @@ function tryClipboardUtf8OnWindows(text: string): boolean {
   }
 }
 
+function isTmux(): boolean {
+  return !!process.env.TMUX;
+}
+
+function isScreen(): boolean {
+  return !!process.env.STYLE;
+}
+
+function tryOsc52(text: string): boolean {
+  try {
+    const base64 = Buffer.from(text, "utf-8").toString("base64");
+    let osc52 = `\x1b]52;c;${base64}\x07`;
+    if (isTmux()) {
+      osc52 = `\x1bPtmux;${osc52}\x1b\\`;
+    } else if (isScreen()) {
+      osc52 = `\x1bP${osc52}\x1b\\`;
+    }
+    process.stdout.write(osc52);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 export function copyToClipboard(text: string): boolean {
   if (!text) return false;
 
@@ -44,6 +68,10 @@ export function copyToClipboard(text: string): boolean {
   }
 
   if (process.env.DISPLAY && tryClipboard("xsel", ["--clipboard", "--input"], text)) {
+    return true;
+  }
+
+  if (tryOsc52(text)) {
     return true;
   }
 

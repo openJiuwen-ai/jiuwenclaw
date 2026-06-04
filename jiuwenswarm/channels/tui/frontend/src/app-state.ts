@@ -1,5 +1,5 @@
 import { addError, addInfo } from "./core/commands/helpers.js";
-import type { CommandContext } from "./core/commands/types.js";
+import type { CommandContext, PreferredLanguage } from "./core/commands/types.js";
 import {
   computeTimeoutAt,
   isIgnorableHistoryRestoreError,
@@ -22,6 +22,8 @@ import {
   type PendingQuestion,
   type PendingQuestionItem,
   type UserAnswer,
+  type HarnessExtensionReady,
+  type HarnessActivateInteraction,
 } from "./core/event-handlers.js";
 import { isTeamMode, type ClientMode } from "./core/modes.js";
 import { isEventFrame, type EventFrame, type FileAttachment } from "./core/protocol.js";
@@ -56,9 +58,11 @@ import {
   clearTrustedDirs,
   setCurrentProjectDir,
   getCurrentProjectDir,
+  setCurrentCwd,
+  getCurrentCwd,
 } from "./core/tui-trusted-dirs-store.js";
 import { loadTuiConfig, type StatusLineSetting } from "./core/tui-config-store.js";
-import { execFile } from "node:child_process";
+import { execFile, spawnSync } from "node:child_process";
 import { writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, sep } from "node:path";
@@ -75,6 +79,12 @@ export interface SessionUsageSummary {
   total_output_tokens: number;
   total_tokens: number;
   byModel: ModelUsageEntry[];
+}
+
+interface VisibleUserRequest {
+  requestId: string;
+  content: string;
+  sessionId: string;
 }
 
 export interface AppSnapshot {
@@ -106,7 +116,10 @@ export interface AppSnapshot {
   teamMessageEvents: TeamMessageEvent[];
   evolutionStatus: "idle" | "running";
   contextCompression: ContextCompressionStats | null;
+  contextWindowLimit: number | null;
+  contextUsedPercentage: number | null;
   modelInfo: { provider: string; model: string; version: string };
+  preferredLanguage: PreferredLanguage;
   sessionTitle: string;
   statusLineText: string | null;
   memoryWarnings: {
@@ -126,6 +139,36 @@ function formatElapsed(ms: number): string {
   const minutes = Math.floor(totalSeconds / 60);
   const seconds = totalSeconds % 60;
   return minutes > 0 ? `${minutes}m ${seconds}s` : `${seconds}s`;
+}
+
+function normalizePreferredLanguage(value: unknown): PreferredLanguage {
+  return typeof value === "string" && value.trim().toLowerCase() === "en" ? "en" : "zh";
+}
+
+const LOCAL_FILE_SEARCH_TOOL_NAMES = new Set([
+  "grep",
+  "rg",
+  "ripgrep",
+  "search",
+]);
+
+// ── Auto-recap (自动回顾) 常量 ──
+/** 用户空闲多久后自动触发回顾（5分钟）。 */
+const AUTO_RECAP_IDLE_THRESHOLD_MS = 5 * 60_000;
+/** 周期性检查空闲状态的时间间隔（30秒）。 */
+const AUTO_RECAP_CHECK_INTERVAL_MS = 30_000;
+
+function isLocalFileSearchTool(name: string): boolean {
+  return LOCAL_FILE_SEARCH_TOOL_NAMES.has(name.trim().toLowerCase());
+}
+
+function detectRipgrep(): boolean {
+  try {
+    const result = spawnSync("rg", ["--version"], { stdio: "ignore" });
+    return result.status === 0;
+  } catch {
+    return false;
+  }
 }
 
 export class CliPiAppState {
@@ -159,6 +202,8 @@ export class CliPiAppState {
   private teamMessageEvents: TeamMessageEvent[] = [];
   private evolutionStatus: "idle" | "running" = "idle";
   private contextCompression: ContextCompressionStats | null = null;
+  private contextWindowLimit: number | null = null;
+  private contextUsedPercentage: number | null = null;
   private toolExecutions = new Map<string, ToolExecution>();
   private toolExecutionOrder: string[] = [];
   private orphanToolResults = new Map<
@@ -183,6 +228,7 @@ export class CliPiAppState {
     model: "",
     version: "",
   };
+  private preferredLanguage: PreferredLanguage = "zh";
   private memoryWarnings: {
     path: string;
     kind: string;
@@ -195,24 +241,45 @@ export class CliPiAppState {
   private suppressInterruptResult = false;
   /** 本地中断请求标志，cancel() 调用时立即置 true，用于 long-running 命令的中断检测。 */
   private interruptRequested = false;
+  /** 当前正在执行的斜杠命令 WS 请求 ID，用于 Ctrl+C 时立即取消。 */
+  private activeCommandRequestId: string | null = null;
+  private lastVisibleUserRequest: VisibleUserRequest | null = null;
+  /** 保存 askQuestions 之前的 streamingState，用于在对话框关闭后恢复。 */
+  private streamingStateBeforeQuestion: StreamingState | null = null;
   /** 当前回合的起始时间戳，用于在回合结束时计算执行耗时。 */
   private turnStartedAt: number | null = null;
+  /** ── Auto-recap 字段 ── */
+  /** 最后一次用户交互时间戳，用于判断空闲时长。 */
+  private lastActivityAt: number = Date.now();
+  /** 自动回顾状态机：idle → pending → generated → idle（用户发言后重置）。 */
+  private autoRecapState: "idle" | "pending" | "generated" = "idle";
+  /** 周期检查空闲状态的定时器。 */
+  private autoRecapTimer: ReturnType<typeof setInterval> | null = null;
+  private ripgrepAvailable: boolean | null = null;
+  private ripgrepSearchTipShown = false;
+  /** Harness extension ready info (for file tree display) */
+  private harnessExtensionReady: HarnessExtensionReady | null = null;
+  /** Harness activate interaction state (for user confirmation) */
+  private harnessActivateInteraction: HarnessActivateInteraction | null = null;
   private readonly eventDelegate: AppEventDelegate = {
     getConnectionStatus: () => this.connectionStatus,
     getSessionId: () => this.sessionId,
     setSessionId: (sessionId) => {
       this.sessionId = sessionId;
+      this.lastVisibleUserRequest = null;
     },
     setMode: (mode) => {
       this.mode = mode;
     },
     getMode: () => this.mode,
+    getPreferredLanguage: () => this.preferredLanguage,
     getEntries: () => this.entries,
     setEntries: (entries) => {
       this.entries = entries;
     },
     setStreamingState: (state) => {
       this.streamingState = state;
+      this.emitChange();
     },
     setPendingQuestion: (question) => {
       this.pendingQuestion = question;
@@ -239,6 +306,12 @@ export class CliPiAppState {
     setContextCompression: (stats) => {
       this.contextCompression = stats;
     },
+    setContextWindowLimit: (n) => {
+      this.contextWindowLimit = n;
+    },
+    setContextUsedPercentage: (n) => {
+      this.contextUsedPercentage = n;
+    },
     addToolCallPayload: (payload, sessionId, requestId, startedAt) => {
       this.addToolCallPayload(payload, sessionId, requestId, startedAt);
     },
@@ -247,6 +320,9 @@ export class CliPiAppState {
     },
     addSyntheticToolExecution: (tool, sessionId, requestId, at) => {
       this.addSyntheticToolExecution(tool, sessionId, requestId, at);
+    },
+    setCurrentWorkspaceFromTool: (path) => {
+      this.setCurrentWorkspaceFromTool(path);
     },
     clearToolExecutionState: () => {
       this.clearToolExecutionState();
@@ -311,6 +387,30 @@ export class CliPiAppState {
         addInfo(this.sessionId, `Worked for ${formatElapsed(elapsed)}`, undefined, { view: "dim" }),
       );
     },
+    setHarnessExtensionReady: (info) => {
+      this.harnessExtensionReady = info;
+    },
+    setHarnessActivateInteraction: (state) => {
+      this.harnessActivateInteraction = state;
+    },
+    getHarnessActivateInteraction: () => this.harnessActivateInteraction,
+    autoActivateExtension: (interactionId: string) => {
+      // TUI auto-activates extensions without user confirmation
+      this.sendEventOnly(
+        "chat.send",
+        {
+          query: "",
+          content: "",
+          mode: "auto_harness",
+          activate_response: {
+            interaction_id: interactionId,
+            action: "accept",
+            feedback: "",
+          },
+        },
+        true,
+      );
+    },
   };
 
   constructor(
@@ -323,10 +423,6 @@ export class CliPiAppState {
       setCurrentThemeName(config.theme);
       this.themeName = config.theme;
     }
-    if (config.accentColor) {
-      setCurrentAccentColor(config.accentColor);
-      this.accentColor = config.accentColor;
-    }
   }
 
   start(): void {
@@ -336,6 +432,9 @@ export class CliPiAppState {
       if (status === "connected") {
         await this.fetchModelInfo();
       }
+      if (status === "message_too_big") {
+        this.addItem(addError(this.sessionId, "消息过大，服务器拒绝了连接。请缩短输入内容后重新发送。"));
+      }
     });
 
     this.unlistenFrames = this.wsClient.onFrame((frame) => {
@@ -344,6 +443,7 @@ export class CliPiAppState {
 
     this.wsClient.connect();
     this.startStatusLinePoll();
+    this.startAutoRecapTimer();
   }
 
   stop(): void {
@@ -365,6 +465,7 @@ export class CliPiAppState {
     this.unlistenFrames = null;
     this.stopStatusLinePoll();
     this.stopMemoryRefresh();
+    this.stopAutoRecapTimer();
     this.wsClient.disconnect();
   }
 
@@ -394,11 +495,17 @@ export class CliPiAppState {
       const activeModel = activeModelName
         ? models.find((m) => m.model_name === activeModelName)
         : models[0];
+      this.preferredLanguage = normalizePreferredLanguage(config.preferred_language);
       this.modelInfo = {
         provider: String(activeModel?.model_provider ?? config.model_provider ?? ""),
         model: activeModelName || String(config.model ?? ""),
         version: String(config.app_version ?? ""),
       };
+
+      // 从 models.list 的模型数据中提取上下文窗口大小（不需要agent初始化）
+      if (activeModel && typeof activeModel.context_window_tokens === "number") {
+        this.contextWindowLimit = activeModel.context_window_tokens;
+      }
 
       const memoryResult =
         memoryPayload.status === "fulfilled" &&
@@ -518,7 +625,10 @@ export class CliPiAppState {
       teamMessageEvents: [...this.teamMessageEvents],
       evolutionStatus: this.evolutionStatus,
       contextCompression: this.contextCompression ? { ...this.contextCompression } : null,
+      contextWindowLimit: this.contextWindowLimit,
+      contextUsedPercentage: this.contextUsedPercentage,
       modelInfo: this.modelInfo,
+      preferredLanguage: this.preferredLanguage,
       sessionTitle: this.sessionTitle,
       statusLineText: this.statusLineText,
       memoryWarnings: [...this.memoryWarnings],
@@ -530,9 +640,21 @@ export class CliPiAppState {
     return this.interruptRequested;
   }
 
-  /** Set local interrupt flag (for long-running local commands like log streaming) */
-  requestLocalInterrupt(): void {
+  /**
+   * Set local interrupt flag (for long-running local commands like log streaming).
+   * Returns true if an active command WS request was cancelled — this signals
+   * to the Ctrl+C handler that the interrupt consumed the keystroke and the
+   * "double-press-to-exit" timer should be reset.
+   */
+  requestLocalInterrupt(): boolean {
     this.interruptRequested = true;
+    // 立即取消正在执行的命令 WS 请求（如 /recap），避免等待 60 秒超时
+    if (this.activeCommandRequestId) {
+      this.wsClient.cancelRequest(this.activeCommandRequestId, "cancelled");
+      this.activeCommandRequestId = null;
+      return true; // 命令请求被取消 → Ctrl+C 被消费，不应触发"连按两次退出"
+    }
+    return false;
   }
 
   /** Clear local interrupt flag (called after handling interrupt) */
@@ -557,7 +679,9 @@ export class CliPiAppState {
       askQuestions: this.askQuestions,
       sendMessage: this.sendMessage,
       sessionId: snapshot.sessionId,
+      preferredLanguage: snapshot.preferredLanguage,
       entries: snapshot.entries,
+      teamMessageEvents: snapshot.teamMessageEvents,
       themeName: snapshot.themeName,
       accentColor: snapshot.accentColor,
       updateSession: this.updateSession,
@@ -576,6 +700,7 @@ export class CliPiAppState {
       mode: snapshot.mode,
       setMode: this.setMode,
       setModel: this.setModel,
+      setPreferredLanguage: this.setPreferredLanguage,
       setThemeName: this.setThemeName,
       setAccentColor: this.setAccentColor,
       transcriptMode: snapshot.transcriptMode,
@@ -594,14 +719,23 @@ export class CliPiAppState {
       setTrustedDir: setTrustedDir,
       removeTrustedDir: removeTrustedDir,
       clearTrustedDirs: clearTrustedDirs,
-      setCurrentProjectDir: setCurrentProjectDir,
+      setCurrentProjectDir: (dir: string) => {
+        setCurrentProjectDir(dir);
+        setCurrentCwd(dir);
+      },
       getCurrentProjectDir: getCurrentProjectDir,
-      getWorkspaceDir: () => getTrustedDirs()[0] || process.cwd(),
+      getWorkspaceDir: () => getCurrentCwd() || process.cwd(),
       enterConfigEditor: undefined, // AppScreen injects the real handler when executing slash commands.
       setInput: this._setInputRef ?? undefined,
       enterStatusView: undefined,
       getUsageSummary: () => this.getUsageSummary(),
       restartStatusLine: () => this.restartStatusLinePoll(),
+      getStatusLineJsonInput: () => this.buildStatusLineJsonInput(),
+      hasRunningTeamTasks: () => {
+        const snapshot = this.getSnapshot();
+        // Use cancellableWork which covers all stages: processing, running tools, subtasks, team working
+        return snapshot.cancellableWork;
+      },
     };
   }
 
@@ -632,7 +766,8 @@ export class CliPiAppState {
   ): string => {
     const id = `tui_${Date.now().toString(16)}_${Math.random().toString(36).slice(2, 6)}`;
     const trustedDirs = getTrustedDirs();
-    const workspaceDir = trustedDirs[0] || process.cwd();
+    const projectDir = getCurrentProjectDir() || process.cwd();
+    const cwd = getCurrentCwd() || projectDir;
     this.wsClient.send({
       type: "req",
       id,
@@ -642,7 +777,8 @@ export class CliPiAppState {
         ...params,
         session_id: (params.session_id as string | undefined) ?? this.sessionId,
         ...(trustedDirs.length > 0 ? { trusted_dirs: trustedDirs } : {}),
-        ...(workspaceDir ? { cwd: workspaceDir } : {}),
+        ...(projectDir ? { project_dir: projectDir } : {}),
+        ...(cwd ? { cwd } : {}),
       },
     });
     return id;
@@ -654,25 +790,41 @@ export class CliPiAppState {
     timeoutMs?: number,
   ): Promise<T> => {
     const id = `tui_${Date.now().toString(16)}_${Math.random().toString(36).slice(2, 6)}`;
+    // 记录当前命令请求 ID，以便 Ctrl+C 时能立即取消 WS 请求
+    this.activeCommandRequestId = id;
     const trustedDirs = getTrustedDirs();
-    const workspaceDir = trustedDirs[0] || process.cwd();
-    const response = await this.wsClient.request(
-      id,
-      method,
-      {
-        ...params,
-        session_id: params.session_id ?? this.sessionId,
-        ...(trustedDirs.length > 0 ? { trusted_dirs: trustedDirs } : {}),
-        ...(workspaceDir ? { cwd: workspaceDir } : {}),
-      },
-      timeoutMs ?? 30000,
-    );
-    return response.payload as T;
+    const projectDir = getCurrentProjectDir() || process.cwd();
+    const cwd = getCurrentCwd() || projectDir;
+    try {
+      const response = await this.wsClient.request(
+        id,
+        method,
+        {
+          ...params,
+          session_id: params.session_id ?? this.sessionId,
+          ...(trustedDirs.length > 0 ? { trusted_dirs: trustedDirs } : {}),
+          ...(projectDir ? { project_dir: projectDir } : {}),
+          ...(cwd ? { cwd } : {}),
+        },
+        timeoutMs ?? 30000,
+      );
+      return response.payload as T;
+    } finally {
+      // 请求完成后清理追踪（无论成功/失败/取消）
+      if (this.activeCommandRequestId === id) {
+        this.activeCommandRequestId = null;
+      }
+    }
   };
 
   readonly updateSession = (newId: string): void => {
     this.sessionId = newId;
+    this.lastVisibleUserRequest = null;
     this.usageByModel.clear();
+    if (this.accentColor !== "default") {
+      this.accentColor = "default";
+      setCurrentAccentColor("default");
+    }
     this.emitChange();
   };
 
@@ -701,6 +853,10 @@ export class CliPiAppState {
     } else {
       this.lastError = null;
     }
+    // 用户发言后重置自动回顾状态，允许下一次空闲时触发新的回顾
+    if (item.kind === "user") {
+      this.autoRecapState = "idle";
+    }
     this.emitChange();
   };
 
@@ -721,10 +877,14 @@ export class CliPiAppState {
     this.teamMessageEvents = [];
     this.evolutionStatus = "idle";
     this.contextCompression = null;
+    this.contextWindowLimit = null;
+    this.contextUsedPercentage = null;
     this.clearToolExecutionState();
     this.historyEntries = [];
     this.historyTotalPages = null;
     this.historyPageDoneResolvers.clear();
+    this.harnessExtensionReady = null;
+    this.harnessActivateInteraction = null;
     this.emitChange();
   };
 
@@ -739,6 +899,13 @@ export class CliPiAppState {
     const trimmed = name.trim();
     if (trimmed && this.modelInfo.model !== trimmed) {
       this.modelInfo = { ...this.modelInfo, model: trimmed };
+      this.emitChange();
+    }
+  };
+
+  readonly setPreferredLanguage = (language: PreferredLanguage): void => {
+    if (this.preferredLanguage !== language) {
+      this.preferredLanguage = language;
       this.emitChange();
     }
   };
@@ -819,8 +986,17 @@ export class CliPiAppState {
   ): string | null => {
     if (this.connectionStatus !== "connected") return null;
     const mode = modeOverride ?? this.mode;
+    // Pre-check: reject messages whose serialized frame exceeds 7 MB (gateway
+    // server max_size is 8 MB; leave 1 MB margin for JSON overhead).
+    const estimatedSize = JSON.stringify({ type: "req", method: "chat.send", params: { content, query: content, mode, ...(attachments?.length ? { attachments } : {}) } }).length;
+    if (estimatedSize > 7 * 1024 * 1024) {
+      this.addItem(addError(this.sessionId, `消息过大（约 ${Math.round(estimatedSize / 1024 / 1024)} MB），请缩短输入内容。`));
+      this.emitChange();
+      return null;
+    }
     if (this.streamingState !== StreamingState.Idle) {
-      this.sendEventOnly("chat.interrupt", { intent: "cancel" });
+      this.suppressInterruptResult = true;
+      this.sendEventOnly("chat.interrupt", { intent: "cancel", mode: this.mode });
     }
     const requestId = this.sendEventOnly(
       "chat.send",
@@ -834,6 +1010,9 @@ export class CliPiAppState {
     );
     this.lastError = null;
     if (options?.logAsUser !== false) {
+      this.lastVisibleUserRequest = { requestId, content, sessionId: this.sessionId };
+      // 用户发言后重置自动回顾状态，允许下一次空闲时触发新的回顾
+      this.autoRecapState = "idle";
       this.entries = [
         ...this.entries,
         {
@@ -844,6 +1023,8 @@ export class CliPiAppState {
           at: new Date().toISOString(),
         },
       ];
+    } else {
+      this.lastVisibleUserRequest = null;
     }
     this.streamingState = StreamingState.Responding;
     this.turnStartedAt = Date.now();
@@ -855,12 +1036,22 @@ export class CliPiAppState {
     if (this.connectionStatus !== "connected") return null;
     const trimmed = content.trim();
     if (!trimmed) return null;
+    // Same pre-check as sendMessage: reject oversized frames.
+    const estimatedSize = JSON.stringify({ type: "req", method: "chat.interrupt", params: { intent: "supplement", new_input: trimmed, ...(attachments?.length ? { attachments } : {}) } }).length;
+    if (estimatedSize > 7 * 1024 * 1024) {
+      this.addItem(addError(this.sessionId, `消息过大（约 ${Math.round(estimatedSize / 1024 / 1024)} MB），请缩短输入内容。`));
+      this.emitChange();
+      return null;
+    }
     const requestId = this.sendEventOnly("chat.interrupt", {
       intent: "supplement",
       new_input: trimmed,
+      mode: this.mode,
       ...(attachments?.length ? { attachments } : {}),
     });
     this.lastError = null;
+    // 用户发言后重置自动回顾状态（supplement 也是用户消息）
+    this.autoRecapState = "idle";
     this.entries = [
       ...this.entries,
       {
@@ -887,14 +1078,36 @@ export class CliPiAppState {
     if (options?.showNotice === false) {
       this.suppressInterruptResult = true;
     }
+    // Reject local pending question immediately so local commands (e.g. /export) can terminate
+    if (this.localPendingQuestion) {
+      this.localPendingQuestion.reject(new Error("interrupted by Ctrl+C"));
+      this.localPendingQuestion = null;
+      this.pendingQuestion = null;
+      this.streamingState = StreamingState.Idle;
+    }
     // Set local interrupt flag immediately for long-running command detection
     this.interruptRequested = true;
+    // 同时取消正在执行的命令 WS 请求（与 requestLocalInterrupt 保持一致）
+    if (this.activeCommandRequestId) {
+      this.wsClient.cancelRequest(this.activeCommandRequestId, "cancelled");
+      this.activeCommandRequestId = null;
+    }
     const hadLocalWork = this.getSnapshot().cancellableWork;
-    this.sendEventOnly("chat.interrupt", { intent: "cancel" });
+    this.sendEventOnly("chat.interrupt", { intent: "cancel", mode: this.mode });
     if (options?.showNotice !== false && hadLocalWork) {
       this.addItem(addInfo(this.sessionId, "Request Interrupted", "i"));
     }
     return true;
+  }
+
+  pause(): boolean {
+    if (this.connectionStatus !== "connected") {
+      return false;
+    }
+    this.interruptRequested = true;
+    const hadLocalWork = this.getSnapshot().cancellableWork;
+    this.sendEventOnly("chat.interrupt", { intent: "pause", mode: this.mode });
+    return hadLocalWork;
   }
 
   resume(): void {
@@ -910,13 +1123,19 @@ export class CliPiAppState {
       const resolver = this.localPendingQuestion;
       this.localPendingQuestion = null;
       this.pendingQuestion = null;
-      this.streamingState = StreamingState.Idle;
+      // 恢复之前的 streamingState
+      this.streamingState = this.streamingStateBeforeQuestion ?? StreamingState.Idle;
+      this.streamingStateBeforeQuestion = null;
       resolver.resolve(answers);
       this.emitChange();
       return;
     }
     const source = this.pendingQuestion.source;
-    if (source === "permission_interrupt" || source === "ask_user_interrupt") {
+
+    if (
+      source === "permission_interrupt" ||
+      source === "ask_user_interrupt"
+    ) {
       this.sendEventOnly(
         "chat.send",
         {
@@ -929,14 +1148,22 @@ export class CliPiAppState {
         true,
       );
     } else {
-      this.sendEventOnly("chat.user_answer", {
+      const params: Record<string, unknown> = {
         request_id: this.pendingQuestion.requestId,
         answers,
         mode: this.mode,
-      });
+      };
+      if (this.pendingQuestion.evolutionMeta) {
+        params.evolution_meta = this.pendingQuestion.evolutionMeta;
+      }
+      this.sendEventOnly(
+        "chat.user_answer",
+        params,
+      );
     }
     this.pendingQuestion = null;
     this.streamingState = StreamingState.Idle;
+    this.streamingStateBeforeQuestion = null;
     this.emitChange();
   }
 
@@ -956,6 +1183,8 @@ export class CliPiAppState {
     }
 
     const requestId = `local_${Date.now().toString(16)}_${Math.random().toString(36).slice(2, 6)}`;
+    // 保存之前的 streamingState，用于在对话框关闭后恢复（如果之前是在运行状态）
+    this.streamingStateBeforeQuestion = this.streamingState;
     this.pendingQuestion = {
       requestId,
       source,
@@ -1092,10 +1321,24 @@ export class CliPiAppState {
    */
   readonly tryAutoRestoreAfterCancel = async (): Promise<void> => {
     // 条件 1：输入框为空
-    if (this._getInputValueRef && this._getInputValueRef().trim() !== "") return;
+    if (this._getInputValueRef && this._getInputValueRef().trim() !== "") {
+      this.lastVisibleUserRequest = null;
+      return;
+    }
+
+    const visibleRequest = this.lastVisibleUserRequest;
+    if (!visibleRequest || visibleRequest.sessionId !== this.sessionId) return;
+    const clearVisibleRequest = () => {
+      if (this.lastVisibleUserRequest === visibleRequest) {
+        this.lastVisibleUserRequest = null;
+      }
+    };
 
     const entries = this.getSnapshot().entries;
-    if (!entries || entries.length === 0) return;
+    if (!entries || entries.length === 0) {
+      clearVisibleRequest();
+      return;
+    }
 
     // 找最后一个实质 user message
     const nonSyntheticTags = ["<local-command-stdout>", "<bash-stdout>", "<task-notification>"];
@@ -1108,7 +1351,20 @@ export class CliPiAppState {
       lastUserIdx = i;
       break;
     }
-    if (lastUserIdx < 0) return;
+    if (lastUserIdx < 0) {
+      clearVisibleRequest();
+      return;
+    }
+    const lastUser = entries[lastUserIdx];
+    if (
+      !lastUser ||
+      lastUser.kind !== "user" ||
+      lastUser.sessionId !== visibleRequest.sessionId ||
+      lastUser.content.trim() !== visibleRequest.content.trim()
+    ) {
+      clearVisibleRequest();
+      return;
+    }
 
     // 判断 lastUserIdx 之后是否只有合成/系统类消息
     const hasSubstantialAfter = entries.slice(lastUserIdx + 1).some((e) => {
@@ -1122,7 +1378,10 @@ export class CliPiAppState {
       return false;
     });
 
-    if (hasSubstantialAfter) return; // 有实质内容，不自动回退
+    if (hasSubstantialAfter) {
+      clearVisibleRequest();
+      return; // 有实质内容，不自动回退
+    }
 
     // 获取 turn 列表以确定 lastUserIdx 对应的 turn_index
     try {
@@ -1131,10 +1390,16 @@ export class CliPiAppState {
         total?: number;
       }>("history.list_turns", { session_id: this.sessionId });
       const turns = turnsPayload.turns ?? [];
-      if (turns.length === 0) return;
+      if (turns.length === 0) {
+        clearVisibleRequest();
+        return;
+      }
 
-      const lastTurn = turns[turns.length - 1];
-      if (!lastTurn) return;
+      const restoreTurn = this.findAutoRestoreTurn(turns, visibleRequest);
+      if (!restoreTurn) {
+        clearVisibleRequest();
+        return;
+      }
 
       const rewindPayload = await this.request<{
         content?: string;
@@ -1146,15 +1411,16 @@ export class CliPiAppState {
         restore_errors?: { file: string; error: string }[];
       }>("session.rewind_and_restore", {
         session_id: this.sessionId,
-        turn_index: lastTurn.turn_index,
+        turn_index: restoreTurn.turn_index,
       });
 
       this.entries = [];
       this.emitChange();
       await this.restoreHistory(this.sessionId);
 
-      const restoreText = rewindPayload.content ?? lastTurn.content_preview ?? "";
+      const restoreText = rewindPayload.content ?? restoreTurn.content_preview ?? "";
       this._setInputRef?.(restoreText);
+      clearVisibleRequest();
 
       this.addItem(
         addInfo(
@@ -1167,8 +1433,28 @@ export class CliPiAppState {
       );
     } catch {
       // 自动回退失败不影响 cancel 本身
+      clearVisibleRequest();
     }
   };
+
+  private findAutoRestoreTurn(
+    turns: { turn_index: number; content_preview: string; content?: string; request_id?: string }[],
+    visibleRequest: VisibleUserRequest,
+  ): { turn_index: number; content_preview: string; content?: string; request_id?: string } | null {
+    const byRequestId = turns.find((turn) => turn.request_id === visibleRequest.requestId);
+    if (byRequestId) return byRequestId;
+
+    const target = visibleRequest.content.trim();
+    if (!target) return null;
+    const targetPreview = target.slice(0, 80);
+    const matches = turns.filter((turn) => {
+      if (typeof turn.content === "string" && turn.content.trim()) {
+        return turn.content.trim() === target;
+      }
+      return turn.content_preview.trim() === targetPreview;
+    });
+    return matches.length === 1 ? matches[0]! : null;
+  }
 
   private applyHistoryEntriesToTranscript(): void {
     // AgentServer 为了让分页优先返回最新页，在 `_handle_history_get_stream` 中把整条历史做了
@@ -1330,6 +1616,35 @@ export class CliPiAppState {
     return changed;
   }
 
+  private hasRipgrep(): boolean {
+    if (this.ripgrepAvailable === null) {
+      this.ripgrepAvailable = detectRipgrep();
+    }
+    return this.ripgrepAvailable;
+  }
+
+  private maybeAddRipgrepSearchTip(tool: ToolCallDisplay, sessionId: string): void {
+    if (
+      this.ripgrepSearchTipShown ||
+      !isLocalFileSearchTool(tool.name) ||
+      this.hasRipgrep()
+    ) {
+      return;
+    }
+    this.ripgrepSearchTipShown = true;
+    this.entries = [
+      ...this.entries,
+      addInfo(
+        sessionId,
+        "Tips: 未检测到 ripgrep (rg)，本次文件搜索可能较慢。" +
+          "建议安装 rg 以优化文件搜索效果。",
+        "i",
+        { view: "dim" },
+      ),
+    ];
+    this.lastError = null;
+  }
+
   private addToolCallPayload(
     payload: Record<string, unknown>,
     sessionId: string,
@@ -1345,6 +1660,7 @@ export class CliPiAppState {
       return;
     }
 
+    this.maybeAddRipgrepSearchTip(tool, sessionId);
     const started = startedAt ?? new Date().toISOString();
     const orphan = this.orphanToolResults.get(tool.callId);
     const nextTool = orphan
@@ -1549,6 +1865,48 @@ export class CliPiAppState {
     return undefined;
   }
 
+  private setCurrentWorkspaceFromTool(path: string): void {
+    const previousCwd = getCurrentCwd();
+    const result = setTrustedDir(path);
+    if (result !== "set") {
+      this.entries = [
+        ...this.entries,
+        addError(this.sessionId, `Failed to switch workspace: ${path}`),
+      ];
+      return;
+    }
+
+    try {
+      setCurrentCwd(path);
+    } catch (error) {
+      setCurrentCwd(previousCwd);
+      const message = error instanceof Error ? error.message : String(error);
+      this.entries = [
+        ...this.entries,
+        addError(this.sessionId, `Failed to switch workspace: ${path} (${message})`),
+      ];
+      return;
+    }
+
+    try {
+      this.sendEventOnly("command.add_dir", {
+        path,
+        remember: true,
+      });
+    } catch (error) {
+      console.warn("Failed to sync workspace directory to server:", error);
+    }
+
+    this.entries = [
+      ...this.entries,
+      addInfo(this.sessionId, `Workspace switched: ${path}`, "c", {
+        view: "kv",
+        title: "Workspace",
+        items: [{ label: "path", value: path }],
+      }),
+    ];
+  }
+
   private addSyntheticToolExecution(
     tool: ToolCallDisplay,
     sessionId: string,
@@ -1594,6 +1952,83 @@ export class CliPiAppState {
     }
   }
 
+  // ── Auto-recap (自动回顾) 方法 ──
+
+  /** 更新用户活动时间戳，表示用户刚刚与 TUI 交互。 */
+  recordActivity(): void {
+    this.lastActivityAt = Date.now();
+  }
+
+  private startAutoRecapTimer(): void {
+    this.autoRecapTimer = setInterval(() => {
+      this.checkAutoRecap();
+    }, AUTO_RECAP_CHECK_INTERVAL_MS);
+  }
+
+  private stopAutoRecapTimer(): void {
+    if (this.autoRecapTimer) {
+      clearInterval(this.autoRecapTimer);
+      this.autoRecapTimer = null;
+    }
+  }
+
+  /** 周期性检查是否满足自动回顾条件。 */
+  private checkAutoRecap(): void {
+    // 条件1：空闲时间 >= 5分钟
+    if (Date.now() - this.lastActivityAt < AUTO_RECAP_IDLE_THRESHOLD_MS) {
+      return;
+    }
+    // 条件2：本次空闲期间还没有生成过回顾
+    if (this.autoRecapState !== "idle") {
+      return;
+    }
+    // 条件3：当前没有正在执行的任务
+    const snapshot = this.getSnapshot();
+    if (snapshot.isProcessing || snapshot.cancellableWork) {
+      return;
+    }
+    // 条件4：WebSocket 已连接
+    if (this.connectionStatus !== "connected") {
+      return;
+    }
+
+    this.triggerAutoRecap();
+  }
+
+  /** 自动触发回顾，调用后端生成摘要并显示。 */
+  private async triggerAutoRecap(): Promise<void> {
+    this.autoRecapState = "pending";
+    this.addItem(addInfo(this.sessionId, "※ Auto-recaping...", "※", { source: "auto_recap" }));
+
+    try {
+      const payload = await this.request<Record<string, unknown>>(
+        "command.recap",
+        { mode: this.mode },
+        60_000,
+      );
+
+      const status = payload.status as string;
+      if (status === "ok") {
+        const summary = payload.summary as string;
+        this.addItem(addInfo(this.sessionId, `※ ${summary}`, "※", { source: "auto_recap" }));
+        this.autoRecapState = "generated";
+      } else if (status === "no_turn") {
+        // 当前会话没有可回顾的内容，设为 generated 防止反复触发
+        this.autoRecapState = "generated";
+      } else {
+        // failed：后端生成失败（如模型调用出错），设为 generated 防止反复触发
+        // 用户发言后会重置为 idle，届时再重新尝试
+        this.autoRecapState = "generated";
+      }
+    } catch {
+      // 请求失败或被取消（如 Ctrl+C、WS 断连），设为 generated 防止反复触发
+      this.autoRecapState = "generated";
+    }
+
+    // 无论成功/失败/取消，更新活动时间以避免反复触发
+    this.lastActivityAt = Date.now();
+  }
+
   restartStatusLinePoll(): void {
     this.stopStatusLinePoll();
     this.statusLineText = null;
@@ -1604,8 +2039,7 @@ export class CliPiAppState {
   private buildStatusLineJsonInput(): Record<string, unknown> {
     const snapshot = this.getSnapshot();
     const usage = this.getUsageSummary();
-    const trustedDirs = getTrustedDirs();
-    const cwd = trustedDirs[0] || process.cwd();
+    const cwd = getCurrentCwd() || process.cwd();
     return {
       session_id: snapshot.sessionId,
       session_name: snapshot.sessionTitle,
@@ -1614,6 +2048,7 @@ export class CliPiAppState {
       model: snapshot.modelInfo.model,
       provider: snapshot.modelInfo.provider,
       version: snapshot.modelInfo.version,
+      preferred_language: snapshot.preferredLanguage,
       connection: snapshot.connectionStatus,
       theme: snapshot.themeName,
       accent_color: snapshot.accentColor,
@@ -1628,10 +2063,18 @@ export class CliPiAppState {
       evolution_status: snapshot.evolutionStatus,
       active_subtask_count: snapshot.activeSubtasks.length,
       todo_count: snapshot.todos.length,
+      trusted_dirs: getTrustedDirs(),
       usage: {
         total_input_tokens: usage.total_input_tokens,
         total_output_tokens: usage.total_output_tokens,
         total_tokens: usage.total_tokens,
+      },
+      context_window: {
+        context_window_size: snapshot.contextWindowLimit ?? 0,
+        used_percentage: snapshot.contextUsedPercentage ?? 0,
+        remaining_percentage: snapshot.contextUsedPercentage != null
+          ? Math.max(0, 100 - (snapshot.contextUsedPercentage ?? 0))
+          : 0,
       },
     };
   }
@@ -1652,11 +2095,9 @@ export class CliPiAppState {
 
     try {
       if (isWindows) {
-        // On Windows, sh.exe from MSYS2/Git Bash can't read stdin in $(cat)
-        // inside sh -c. Solution: write JSON to a temp file and:
-        // 1. Replace $(cat) (no args) with $(cat "filepath") for inline commands
-        // 2. Export JIUWENSWARM_SL_FILE so script files can use it too:
-        //    input=$(cat "$JIUWENSWARM_SL_FILE")
+        // On Windows: pipe stdin (like POSIX) so `jq -r '.field'` works directly.
+        // Also write a temp file and export JIUWENSWARM_SL_FILE as a fallback for
+        // `$(cat "$JIUWENSWARM_SL_FILE")` style commands (sh -c can't $(cat) stdin).
         const tmpFile = join(tmpdir(), "jiuwenswarm-sl.json");
         writeFileSync(tmpFile, jsonInput, "utf8");
         const msysPath = tmpFile
@@ -1669,16 +2110,19 @@ export class CliPiAppState {
         const child = execFile(
           "sh",
           ["-c", fullCmd],
-          { timeout: 3_000, maxBuffer: 10_240, cwd: process.cwd() },
+          { timeout: 3_000, maxBuffer: 10_240, cwd: getCurrentCwd() || process.cwd() },
           (err, stdout) => {
             if (err) return;
-            const text = stdout.trim();
+            const text = stdout.trim().replace(/\r\n/g, "\n");
             if (text !== this.statusLineText) {
               this.statusLineText = text || null;
               this.emitChange();
             }
           },
         );
+        // Pipe stdin so commands that read stdin directly (jq, python, etc.) work
+        // on Windows the same way they do on POSIX — aligning with Claude Code behavior.
+        child.stdin?.end(jsonInput);
       } else {
         // On POSIX, stdin piping works correctly in sh -c.
         const child = execFile(
@@ -1687,7 +2131,7 @@ export class CliPiAppState {
           { timeout: 3_000, maxBuffer: 10_240 },
           (err, stdout) => {
             if (err) return;
-            const text = stdout.trim();
+            const text = stdout.trim().replace(/\r\n/g, "\n");
             if (text !== this.statusLineText) {
               this.statusLineText = text || null;
               this.emitChange();

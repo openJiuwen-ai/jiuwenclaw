@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import json
 import logging
 import os
 import re
@@ -47,6 +48,7 @@ from jiuwenswarm.common.utils import (
     get_user_workspace_dir
 )
 from jiuwenswarm.agents.harness.common.auto_harness import AutoHarnessService
+from jiuwenswarm.agents.harness.common.tools.web_file_download import build_file_download_info
 from jiuwenswarm.common.version import __version__
 
 for _jiuwen_log in LogManager.get_all_loggers().values():
@@ -185,6 +187,7 @@ _FORWARD_REQ_METHODS = frozenset({
     "skills.list",
     "skills.installed",
     "skills.get",
+    "skills.toggle",
     "skills.install",
     "skills.import_local",
     "skills.marketplace.add",
@@ -210,11 +213,27 @@ _FORWARD_REQ_METHODS = frozenset({
     "skills.evolution.status",
     "skills.evolution.get",
     "skills.evolution.save",
+    "plugins.list",
+    "plugins.install",
+    "plugins.uninstall",
+    "plugins.enable",
+    "plugins.disable",
+    "plugins.reload",
     "extensions.list",
     "extensions.import",
     "extensions.delete",
     "extensions.toggle",
     "team.snapshot",
+    "team.history.get",
+    # Agent configuration
+    "agents.list",
+    "agents.get",
+    "agents.create",
+    "agents.update",
+    "agents.delete",
+    "agents.enable",
+    "agents.disable",
+    "agents.tools_list",
     # Schedule task management
     "schedule.check_config",
     "schedule.update_config",
@@ -235,10 +254,12 @@ _FORWARD_NO_LOCAL_HANDLER_METHODS = frozenset({
     "team.delete",
     "browser.start",
     "team.snapshot",
+    "team.history.get",
     "skills.marketplace.list",
     "skills.list",
     "skills.installed",
     "skills.get",
+    "skills.toggle",
     "skills.install",
     "skills.import_local",
     "skills.marketplace.add",
@@ -264,10 +285,25 @@ _FORWARD_NO_LOCAL_HANDLER_METHODS = frozenset({
     "skills.evolution.status",
     "skills.evolution.get",
     "skills.evolution.save",
+    "plugins.list",
+    "plugins.install",
+    "plugins.uninstall",
+    "plugins.enable",
+    "plugins.disable",
+    "plugins.reload",
     "extensions.list",
     "extensions.import",
     "extensions.delete",
     "extensions.toggle",
+    # Agent configuration
+    "agents.list",
+    "agents.get",
+    "agents.create",
+    "agents.update",
+    "agents.delete",
+    "agents.enable",
+    "agents.disable",
+    "agents.tools_list",
 })
 
 # 配置信息：config.get 返回、config.set 可修改的键（前端 param 名 -> 环境变量名）
@@ -340,6 +376,111 @@ _CONFIG_YAML_KEYS = frozenset({
     "memory_forbidden_enabled",
     "memory_forbidden_description",
 })
+
+
+def _flatten_modes_team_for_config_panel(raw: dict[str, Any]) -> dict[str, str]:
+    """Return the legacy flat fields consumed by the web config panel."""
+    modes = raw.get("modes")
+    teams_raw = modes.get("team") if isinstance(modes, dict) else {}
+    if not isinstance(teams_raw, dict):
+        teams_raw = {}
+
+    flat: dict[str, str] = {}
+    agent_specs: dict[str, dict[str, Any]] = {}
+
+    panel_cfg = raw.get("web_config_panel")
+    if isinstance(panel_cfg, dict):
+        registry = panel_cfg.get("agent_team_agents")
+        if isinstance(registry, dict):
+            for agent_key, spec in registry.items():
+                if isinstance(agent_key, str) and isinstance(spec, dict):
+                    agent_specs[agent_key] = spec
+
+    def add_agent(agent_key: str, spec: Any) -> str:
+        if not agent_key:
+            return ""
+        if isinstance(spec, dict) and agent_key not in agent_specs:
+            agent_specs[agent_key] = spec
+        return agent_key
+
+    def model_name_from_spec(spec: dict[str, Any]) -> str:
+        model_cfg = spec.get("model")
+        if not isinstance(model_cfg, dict):
+            return ""
+        if model_cfg.get("model") is not None:
+            return str(model_cfg.get("model") or "")
+        request_cfg = model_cfg.get("model_request_config")
+        if isinstance(request_cfg, dict) and request_cfg.get("model") is not None:
+            return str(request_cfg.get("model") or "")
+        client_cfg = model_cfg.get("model_client_config")
+        if isinstance(client_cfg, dict) and client_cfg.get("model_name") is not None:
+            return str(client_cfg.get("model_name") or "")
+        return ""
+
+    for team_idx, (team_name, team_spec) in enumerate(teams_raw.items()):
+        if team_idx >= 10 or not isinstance(team_spec, dict):
+            continue
+        team_prefix = f"team_{team_idx}_"
+        flat[f"{team_prefix}name"] = str(team_spec.get("team_name") or team_name or "")
+        flat[f"{team_prefix}lifecycle"] = str(team_spec.get("lifecycle") or "")
+        flat[f"{team_prefix}teammate_mode"] = str(team_spec.get("teammate_mode") or "")
+        flat[f"{team_prefix}spawn_mode"] = str(team_spec.get("spawn_mode") or "")
+
+        agents = team_spec.get("agents")
+        if not isinstance(agents, dict):
+            agents = {}
+
+        leader = team_spec.get("leader")
+        if isinstance(leader, dict):
+            for key in ("member_name", "display_name", "persona"):
+                flat[f"{team_prefix}leader_{key}"] = str(leader.get(key) or "")
+        leader_key = str(leader.get("agent_key") or "") if isinstance(leader, dict) else ""
+        if not leader_key:
+            leader_key = f"{team_name}_leader"
+        flat[f"{team_prefix}leader_agent_key"] = add_agent(leader_key, agents.get("leader"))
+
+        teammate_spec = agents.get("teammate")
+        if isinstance(teammate_spec, dict):
+            teammate = team_spec.get("teammate")
+            teammate_key = str(teammate.get("agent_key") or "") if isinstance(teammate, dict) else ""
+            if not teammate_key:
+                teammate_key = f"{team_name}_teammate"
+            flat[f"{team_prefix}teammate_agent_key"] = add_agent(teammate_key, teammate_spec)
+        else:
+            flat[f"{team_prefix}teammate_agent_key"] = ""
+
+        members_out: list[dict[str, str]] = []
+        members = team_spec.get("predefined_members")
+        if isinstance(members, list):
+            for member in members:
+                if not isinstance(member, dict):
+                    continue
+                member_name = str(member.get("member_name") or "")
+                agent_key = str(member.get("agent_key") or "")
+                if not agent_key:
+                    agent_key = f"{team_name}_{member_name}" if member_name else ""
+                if agent_key:
+                    add_agent(agent_key, agents.get(member_name))
+                members_out.append({
+                    "member_name": member_name,
+                    "display_name": str(member.get("display_name") or ""),
+                    "persona": str(member.get("persona") or ""),
+                    "prompt_hint": str(member.get("prompt_hint") or ""),
+                    "agent_key": agent_key,
+                })
+        flat[f"{team_prefix}predefined_members"] = json.dumps(members_out, ensure_ascii=False)
+
+    for agent_idx, (agent_key, spec) in enumerate(agent_specs.items()):
+        if agent_idx >= 10:
+            break
+        flat[f"agent_name_{agent_idx}"] = agent_key
+        flat[f"agent_model_{agent_idx}"] = model_name_from_spec(spec)
+        skills = spec.get("skills")
+        flat[f"agent_skills_{agent_idx}"] = ",".join(str(item) for item in skills) if isinstance(skills, list) else ""
+        flat[f"agent_max_iterations_{agent_idx}"] = str(spec.get("max_iterations") or 200)
+        flat[f"agent_completion_timeout_{agent_idx}"] = str(spec.get("completion_timeout") or 600)
+
+    return flat
 
 
 async def _clear_agent_config_cache(agent_client=None) -> None:
@@ -499,6 +640,7 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
                 payload["free_search_ddg_enabled"] = "false"
             if not payload.get("free_search_bing_enabled"):
                 payload["free_search_bing_enabled"] = "false"
+            payload.update(_flatten_modes_team_for_config_panel(raw))
         except Exception:  # noqa: BLE001
             payload.setdefault("context_engine_enabled", "false")
             payload.setdefault("kv_cache_affinity_enabled", "false")
@@ -542,16 +684,24 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
         except OSError as e:
             logger.warning("[config.set] 写回 .env 失败: %s", e)
 
-    async def _config_set(ws, req_id, params, session_id):
-        """根据前端消息内容更新配置（支持 .env 与 config.yaml 中的键），并写回对应文件。"""
-        if not isinstance(params, dict):
-            await channel.send_response(ws, req_id, ok=False, error="params must be object", code="BAD_REQUEST")
-            return
-        for key, val in params.items():
+    class _ConfigBadRequest(ValueError):
+        pass
+
+    class _ConfigInternalError(RuntimeError):
+        pass
+
+    def _encrypt_config_params(params: dict[str, Any]) -> dict[str, Any]:
+        encrypted = dict(params)
+        for key, val in list(encrypted.items()):
             from jiuwenswarm.extensions.registry import ExtensionRegistry
             if (("api_key" in key.lower() or "token" in key.lower())
                     and ExtensionRegistry.get_instance().get_crypto_provider()):
-                params[key] = ExtensionRegistry.get_instance().get_crypto_provider().encrypt(val)
+                encrypted[key] = ExtensionRegistry.get_instance().get_crypto_provider().encrypt(val)
+        return encrypted
+
+    def _apply_config_payload(params: dict[str, Any]) -> tuple[dict[str, str], list[str]]:
+        """Apply config.set-style payload to .env/config.yaml without triggering reload."""
+        params = _encrypt_config_params(params)
         env_updates: dict[str, str] = {}
         yaml_updated: list[str] = []
         available_model_providers = [provider.value for provider in ProviderType]
@@ -561,12 +711,7 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
                 continue
             val = params[param_key]
             if param_key.endswith("_provider") and val and val not in available_model_providers:
-                await channel.send_response(
-                    ws, req_id, ok=False,
-                    error=f"Model provider must in: {available_model_providers} ",
-                    code="BAD_REQUEST"
-                )
-                return
+                raise _ConfigBadRequest(f"Model provider must in: {available_model_providers} ")
             if val is None:
                 env_updates[env_key] = ""
             else:
@@ -580,24 +725,10 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
                 replace_teams_in_config(params)
                 yaml_updated.append("modes.team")
             except ValueError as exc:
-                await channel.send_response(
-                    ws,
-                    req_id,
-                    ok=False,
-                    error=str(exc),
-                    code="BAD_REQUEST",
-                )
-                return
+                raise _ConfigBadRequest(str(exc)) from exc
             except Exception as exc:  # noqa: BLE001
                 logger.warning("[config.set] 写回 modes.team 失败: %s", exc)
-                await channel.send_response(
-                    ws,
-                    req_id,
-                    ok=False,
-                    error="failed to update modes.team",
-                    code="INTERNAL_ERROR",
-                )
-                return
+                raise _ConfigInternalError("failed to update modes.team") from exc
 
         for param_key in _CONFIG_YAML_KEYS:
             if param_key not in params:
@@ -622,14 +753,135 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
 
         for env_key, value in env_updates.items():
             os.environ[env_key] = value
-        applied_without_restart = True
-
         if env_updates:
             _persist_env_updates(env_updates)
             logger.info("[config.set] 已更新 .env: %s", list(env_updates.keys()))
         if yaml_updated:
-            await _clear_agent_config_cache(_resolve(agent_client))
             logger.info("[config.set] 已更新 config.yaml: %s", yaml_updated)
+
+        return env_updates, yaml_updated
+
+    async def _notify_config_saved_once(
+            env_updates: dict[str, str],
+            yaml_updated: list[str],
+            *,
+            force: bool = False,
+    ) -> None:
+        """Trigger at most one hot reload after all file writes are complete."""
+        if not force and not (env_updates or yaml_updated):
+            return
+        if on_config_saved:
+            config_payload = get_config()
+            callback_result = on_config_saved(
+                set(env_updates.keys()) | set(yaml_updated),
+                env_updates=dict(env_updates),
+                config_payload=config_payload,
+            )
+            if inspect.isawaitable(callback_result):
+                await callback_result
+        else:
+            await _clear_agent_config_cache(_resolve(agent_client))
+
+    def _build_models_defaults_from_frontend(raw_models: Any) -> list[dict[str, Any]]:
+        if not isinstance(raw_models, list) or not raw_models:
+            raise _ConfigBadRequest("models must be a non-empty list")
+
+        available_model_providers = [p.value for p in ProviderType]
+        parsed: list[dict] = []
+        aliases_seen: dict[str, int] = {}
+        for idx, item in enumerate(raw_models):
+            if not isinstance(item, dict):
+                raise _ConfigBadRequest(f"models[{idx}] must be object")
+            model_name = str(item.get("model_name") or "").strip()
+            if not model_name:
+                raise _ConfigBadRequest(f"models[{idx}].model_name is required")
+            origin_index_raw = item.get("origin_index")
+            if origin_index_raw is None:
+                origin_index = None
+            else:
+                try:
+                    origin_index = int(origin_index_raw)
+                except (TypeError, ValueError):
+                    origin_index = None
+            api_key = str(item.get("api_key") or "").strip()
+            # New entries must carry a non-empty api_key. Existing entries may legitimately
+            # be empty when the source is ``${API_KEY:-}`` and the env var is unset; in that
+            # case origin_index lets replace_all preserve the original placeholder.
+            if not api_key and origin_index is None:
+                raise _ConfigBadRequest(f"models[{idx}].api_key is required")
+            api_base = str(item.get("api_base") or "").strip()
+            model_provider = str(item.get("model_provider") or "").strip()
+            if model_provider and model_provider not in available_model_providers:
+                raise _ConfigBadRequest(f"models[{idx}].model_provider must be one of: {available_model_providers}")
+            try:
+                temperature = float(item.get("temperature", 0.95))
+            except (ValueError, TypeError):
+                temperature = 0.95
+            try:
+                timeout = int(item.get("timeout", 1800))
+            except (ValueError, TypeError):
+                timeout = 1800
+            verify_ssl = bool(item.get("verify_ssl", False))
+            is_default = bool(item.get("is_default", False))
+            alias = str(item.get("alias") or "").strip()
+
+            if alias:
+                if alias in aliases_seen:
+                    prev_idx = aliases_seen[alias]
+                    raise _ConfigBadRequest(f"Alias '{alias}' is used by both models[{prev_idx}] and models[{idx}]")
+                aliases_seen[alias] = idx
+
+            parsed.append({
+                "model_name": model_name,
+                "api_base": api_base,
+                "api_key": api_key,
+                "model_provider": model_provider,
+                "temperature": temperature,
+                "is_default": is_default,
+                "timeout": timeout,
+                "verify_ssl": verify_ssl,
+                "alias": alias,
+                "origin_index": origin_index,
+            })
+
+        # alias 与其他条目的 model_name 冲突校验
+        for i, p in enumerate(parsed):
+            a = p["alias"]
+            if not a:
+                continue
+            for j, q in enumerate(parsed):
+                if i == j:
+                    continue
+                if q["model_name"] == a:
+                    raise _ConfigBadRequest(f"Alias '{a}' on models[{i}] conflicts with model_name on models[{j}]")
+
+        from jiuwenswarm.extensions.registry import ExtensionRegistry
+        crypto = ExtensionRegistry.get_instance().get_crypto_provider()
+
+        raw_cfg = get_config_raw()
+        raw_defaults = raw_cfg.get("models", {}).get("defaults") if isinstance(raw_cfg, dict) else None
+        if not isinstance(raw_defaults, list):
+            raw_defaults = []
+        resolved_defaults = get_default_models()
+
+        new_models = _merge_models_for_replace_all(parsed, raw_defaults, resolved_defaults, crypto)
+        from jiuwenswarm.common.config import _infer_is_default
+        return _infer_is_default(new_models)
+
+    async def _config_set(ws, req_id, params, session_id):
+        """根据前端消息内容更新配置（支持 .env 与 config.yaml 中的键），并写回对应文件。"""
+        if not isinstance(params, dict):
+            await channel.send_response(ws, req_id, ok=False, error="params must be object", code="BAD_REQUEST")
+            return
+        try:
+            env_updates, yaml_updated = _apply_config_payload(params)
+        except _ConfigBadRequest as exc:
+            await channel.send_response(ws, req_id, ok=False, error=str(exc), code="BAD_REQUEST")
+            return
+        except _ConfigInternalError as exc:
+            await channel.send_response(ws, req_id, ok=False, error=str(exc), code="INTERNAL_ERROR")
+            return
+        applied_without_restart = True
 
         updated_param_keys = [k for k, e in _CONFIG_SET_ENV_MAP.items() if e in env_updates] + yaml_updated
         await channel.send_response(
@@ -638,18 +890,10 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
         )
 
         if env_updates or yaml_updated:
-            if on_config_saved:
-                try:
-                    config_payload = get_config()
-                    callback_result = on_config_saved(
-                        set(env_updates.keys()) | set(yaml_updated),
-                        env_updates=dict(env_updates),
-                        config_payload=config_payload,
-                    )
-                    if inspect.isawaitable(callback_result):
-                        await callback_result
-                except Exception as e:  # noqa: BLE001
-                    logger.warning("[config.set] on_config_saved failed: %s", e)
+            try:
+                await _notify_config_saved_once(env_updates, yaml_updated)
+            except Exception as e:  # noqa: BLE001
+                logger.warning("[config.set] on_config_saved failed: %s", e)
 
     async def _config_validate_model(ws, req_id, params, session_id, max_tokens_bounds=None):
         """Send a minimal chat completion (user message \"Hi\") using draft default-model fields.
@@ -792,8 +1036,19 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
                 mcc = entry.get("model_client_config", {})
                 mco = entry.get("model_config_obj", {})
                 is_default = entry.get("is_default", False)
+                model_name = mcc.get("model_name", "")
+                context_window_tokens = 0
+                try:
+                    from openjiuwen.core.context_engine.context.context_utils import ContextUtils
+                    context_window_tokens = ContextUtils.resolve_context_max(model_name=model_name)
+                except Exception:
+                    logger.debug(
+                        "Failed to resolve context_window_tokens for model %s",
+                        model_name,
+                        exc_info=True,
+                    )
                 result.append({
-                    "model_name": mcc.get("model_name", ""),
+                    "model_name": model_name,
                     "api_base": mcc.get("api_base", ""),
                     "api_key": mcc.get("api_key", ""),
                     "model_provider": mcc.get("client_provider", ""),
@@ -801,6 +1056,7 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
                     "is_default": is_default,
                     "alias": entry.get("alias", ""),
                     "origin_index": idx,
+                    "context_window_tokens": context_window_tokens,
                 })
                 # active_model 为列表首位的模型（主对话默认）
             active_model = result[0]["model_name"] if result else ""
@@ -825,146 +1081,86 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
         if not isinstance(params, dict):
             await channel.send_response(ws, req_id, ok=False, error="params must be object", code="BAD_REQUEST")
             return
-        raw_models = params.get("models")
-        if not isinstance(raw_models, list) or not raw_models:
-            await channel.send_response(
-                ws, req_id, ok=False,
-                error="models must be a non-empty list",
-                code="BAD_REQUEST",
-            )
-            return
-
-        available_model_providers = [p.value for p in ProviderType]
-        parsed: list[dict] = []
-        aliases_seen: dict[str, int] = {}
-        for idx, item in enumerate(raw_models):
-            if not isinstance(item, dict):
-                await channel.send_response(
-                    ws, req_id, ok=False,
-                    error=f"models[{idx}] must be object",
-                    code="BAD_REQUEST",
-                )
-                return
-            model_name = str(item.get("model_name") or "").strip()
-            if not model_name:
-                await channel.send_response(
-                    ws, req_id, ok=False,
-                    error=f"models[{idx}].model_name is required",
-                    code="BAD_REQUEST",
-                )
-                return
-            origin_index_raw = item.get("origin_index")
-            if origin_index_raw is None:
-                origin_index = None
-            else:
-                try:
-                    origin_index = int(origin_index_raw)
-                except (TypeError, ValueError):
-                    origin_index = None
-            api_key = str(item.get("api_key") or "").strip()
-            # New entries must carry a non-empty api_key. Existing entries may legitimately
-            # be empty when the source is ``${API_KEY:-}`` and the env var is unset; in that
-            # case origin_index lets replace_all preserve the original placeholder.
-            if not api_key and origin_index is None:
-                await channel.send_response(
-                    ws, req_id, ok=False,
-                    error=f"models[{idx}].api_key is required",
-                    code="BAD_REQUEST",
-                )
-                return
-            api_base = str(item.get("api_base") or "").strip()
-            model_provider = str(item.get("model_provider") or "").strip()
-            if model_provider and model_provider not in available_model_providers:
-                await channel.send_response(
-                    ws, req_id, ok=False,
-                    error=f"models[{idx}].model_provider must be one of: {available_model_providers}",
-                    code="BAD_REQUEST",
-                )
-                return
-            try:
-                temperature = float(item.get("temperature", 0.95))
-            except (ValueError, TypeError):
-                temperature = 0.95
-            try:
-                timeout = int(item.get("timeout", 1800))
-            except (ValueError, TypeError):
-                timeout = 1800
-            verify_ssl = bool(item.get("verify_ssl", False))
-            is_default = bool(item.get("is_default", False))
-            alias = str(item.get("alias") or "").strip()
-
-            if alias:
-                if alias in aliases_seen:
-                    prev_idx = aliases_seen[alias]
-                    await channel.send_response(
-                        ws, req_id, ok=False,
-                        error=f"Alias '{alias}' is used by both models[{prev_idx}] and models[{idx}]",
-                        code="BAD_REQUEST",
-                    )
-                    return
-                aliases_seen[alias] = idx
-
-            parsed.append({
-                "model_name": model_name,
-                "api_base": api_base,
-                "api_key": api_key,
-                "model_provider": model_provider,
-                "temperature": temperature,
-                "is_default": is_default,
-                "timeout": timeout,
-                "verify_ssl": verify_ssl,
-                "alias": alias,
-                "origin_index": origin_index,
-            })
-
-        # alias 与其他条目的 model_name 冲突校验
-        for i, p in enumerate(parsed):
-            a = p["alias"]
-            if not a:
-                continue
-            for j, q in enumerate(parsed):
-                if i == j:
-                    continue
-                if q["model_name"] == a:
-                    await channel.send_response(
-                        ws, req_id, ok=False,
-                        error=f"Alias '{a}' on models[{i}] conflicts with model_name on models[{j}]",
-                        code="BAD_REQUEST",
-                    )
-                    return
-
-        from jiuwenswarm.extensions.registry import ExtensionRegistry
-        crypto = ExtensionRegistry.get_instance().get_crypto_provider()
-
-        raw_cfg = get_config_raw()
-        raw_defaults = raw_cfg.get("models", {}).get("defaults") if isinstance(raw_cfg, dict) else None
-        if not isinstance(raw_defaults, list):
-            raw_defaults = []
-        resolved_defaults = get_default_models()
-
-        new_models = _merge_models_for_replace_all(parsed, raw_defaults, resolved_defaults, crypto)
-
         try:
-            from jiuwenswarm.common.config import _infer_is_default
-            new_models = _infer_is_default(new_models)
+            new_models = _build_models_defaults_from_frontend(params.get("models"))
             update_default_models_in_config(new_models)
 
-            await _clear_agent_config_cache(_resolve(agent_client))
-            if on_config_saved:
-                config_payload = get_config()
-                callback_result = on_config_saved(
-                    set(),
-                    env_updates={},
-                    config_payload=config_payload,
-                )
-                if inspect.isawaitable(callback_result):
-                    await callback_result
+            await _notify_config_saved_once({}, ["models.defaults"], force=True)
 
             await channel.send_response(ws, req_id, ok=True, payload={
                 "count": len(new_models),
             })
+        except _ConfigBadRequest as exc:
+            await channel.send_response(ws, req_id, ok=False, error=str(exc), code="BAD_REQUEST")
         except Exception as exc:  # noqa: BLE001
             logger.warning("[models.replace_all] %s", exc)
+            await channel.send_response(ws, req_id, ok=False, error=str(exc), code="INTERNAL_ERROR")
+
+    async def _config_save_all(ws, req_id, params, session_id):
+        """Batch-save config panel changes and trigger a single hot reload.
+
+        Accepted payload keys:
+        - config: config.set-style key/value updates
+        - models: complete models.defaults draft list
+        - agents/team: team editor payload
+        """
+        if not isinstance(params, dict):
+            await channel.send_response(ws, req_id, ok=False, error="params must be object", code="BAD_REQUEST")
+            return
+
+        env_updates: dict[str, str] = {}
+        yaml_updated: list[str] = []
+        models_count: int | None = None
+
+        try:
+            new_models: list[dict[str, Any]] | None = None
+            if "models" in params:
+                new_models = _build_models_defaults_from_frontend(params.get("models"))
+
+            config_params: dict[str, Any] = {}
+            raw_config_params = params.get("config")
+            if raw_config_params is not None:
+                if not isinstance(raw_config_params, dict):
+                    raise _ConfigBadRequest("config must be object")
+                config_params.update(raw_config_params)
+
+            if "agents" in params:
+                config_params["agents"] = params.get("agents")
+            if "team" in params:
+                config_params["team"] = params.get("team")
+
+            if config_params:
+                applied_env, applied_yaml = _apply_config_payload(config_params)
+                env_updates.update(applied_env)
+                yaml_updated.extend(applied_yaml)
+
+            if new_models is not None:
+                update_default_models_in_config(new_models)
+                yaml_updated.append("models.defaults")
+                models_count = len(new_models)
+
+            await channel.send_response(
+                ws,
+                req_id,
+                ok=True,
+                payload={
+                    "updated": [k for k, e in _CONFIG_SET_ENV_MAP.items() if e in env_updates] + yaml_updated,
+                    "applied_without_restart": True,
+                    "models_count": models_count,
+                },
+            )
+
+            if env_updates or yaml_updated:
+                try:
+                    await _notify_config_saved_once(env_updates, yaml_updated, force=True)
+                except Exception as e:  # noqa: BLE001
+                    logger.warning("[config.save_all] on_config_saved failed: %s", e)
+        except _ConfigBadRequest as exc:
+            await channel.send_response(ws, req_id, ok=False, error=str(exc), code="BAD_REQUEST")
+        except _ConfigInternalError as exc:
+            await channel.send_response(ws, req_id, ok=False, error=str(exc), code="INTERNAL_ERROR")
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[config.save_all] %s", exc)
             await channel.send_response(ws, req_id, ok=False, error=str(exc), code="INTERNAL_ERROR")
 
     async def _models_validate(ws, req_id, params, session_id):
@@ -995,6 +1191,11 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
         payload = service.start_download()
         await channel.send_response(ws, req_id, ok=True, payload=payload)
 
+    async def _updater_upgrade(ws, req_id, params, session_id):
+        service = updater_service or UpdaterService()
+        payload = await asyncio.to_thread(service.start_upgrade)
+        await channel.send_response(ws, req_id, ok=True, payload=payload)
+
     async def _updater_get_conf(ws, req_id, params, session_id):
         service = updater_service or UpdaterService()
         await channel.send_response(ws, req_id, ok=True, payload=service.get_runtime_config())
@@ -1008,7 +1209,7 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
         if "enabled" in params:
             updates["enabled"] = bool(params.get("enabled"))
         for key in ("repo_owner", "repo_name", "release_api_url", "asset_name_pattern",
-                "sha256_name_pattern", "release_api_type", "pypi_mirror"):
+                "release_api_type", "pypi_mirror"):
             if key in params:
                 updates[key] = str(params.get(key) or "").strip()
         for plat in ("windows", "macos", "linux"):
@@ -2006,6 +2207,7 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
 
     channel.register_method("config.get", _config_get)
     channel.register_method("config.set", _config_set)
+    channel.register_method("config.save_all", _config_save_all)
     channel.register_method("config.validate_model", _config_validate_model)
     channel.register_method("models.list", _models_list)
     channel.register_method("models.replace_all", _models_replace_all)
@@ -2019,7 +2221,23 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
     channel.register_method("path.get", _path_get)
     channel.register_method("path.set", _path_set)
 
+    async def _hooks_list(ws, req_id, params, session_id):
+        from jiuwenswarm.common.hooks_config import load_hooks_config
+        try:
+            hooks_config = load_hooks_config(get_config())
+            summary = hooks_config.get_event_summary()
+            await channel.send_response(ws, req_id, ok=True,
+                                        payload={
+                                            "events": summary,
+                                            "disable_all_hooks": hooks_config.disable_all_hooks,
+                                            "source": "config.yaml",
+                                        })
+        except Exception as e:
+            await channel.send_response(ws, req_id, ok=False,
+                                        error=str(e), code="INTERNAL_ERROR")
+
     channel.register_method("memory.compute", _memory_compute)
+    channel.register_method("hooks.list", _hooks_list)
 
     channel.register_method("chat.send", _chat_send)
     channel.register_method("chat.resume", _chat_resume)
@@ -2031,6 +2249,7 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
     channel.register_method("updater.get_status", _updater_get_status)
     channel.register_method("updater.check", _updater_check)
     channel.register_method("updater.download", _updater_download)
+    channel.register_method("updater.upgrade", _updater_upgrade)
     channel.register_method("updater.get_conf", _updater_get_conf)
     channel.register_method("updater.set_conf", _updater_set_conf)
     channel.register_method("heartbeat.get_conf", _heartbeat_get_conf)
@@ -2227,7 +2446,6 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
                 AutoHarnessService,
             )
             from pathlib import Path
-            import json
 
             try:
                 if req_method == ReqMethod.HARNESS_PACKAGES_GET:
@@ -2308,6 +2526,7 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
     _register_harness("harness.packages", _HarnessReq.HARNESS_PACKAGES_GET)
     _register_harness("harness.packages.scan", _HarnessReq.HARNESS_PACKAGES_SCAN)
     _register_harness("harness.activate", _HarnessReq.HARNESS_PACKAGES_ACTIVATE)
+    _register_harness("harness.deactivate", _HarnessReq.HARNESS_PACKAGES_DEACTIVATE)
     _register_harness("harness.delete", _HarnessReq.HARNESS_PACKAGES_DELETE)
 
     async def _harness_import_handler(ws, req_id, params, session_id):
@@ -2366,8 +2585,11 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
     channel.register_method("harness.import", _harness_import_handler)
 
     async def _harness_export_handler(ws, req_id, params, session_id):
-        """Export a harness package via WebSocket (returns base64 encoded zip content)."""
-        # Get package_id
+        """Export a harness package - returns download URL instead of base64 content.
+
+        Uses HTTP download endpoint to avoid WebSocket message size limits.
+        The temporary zip file will be cleaned up after download or token expiry.
+        """
         package_id = params.get("package_id")
         if not package_id:
             await channel.send_response(ws, req_id, ok=False, error="Missing package_id", code="BAD_REQUEST")
@@ -2376,23 +2598,25 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
         try:
             service = AutoHarnessService(rail=None, agent=None)
             zip_path = service.export_package(package_id)
-            # Read zip file and encode as base64
-            zip_content = zip_path.read_bytes()
-            zip_content_b64 = base64.b64encode(zip_content).decode("utf-8")
-            filename = zip_path.name
+
+            download_info = build_file_download_info(
+                str(zip_path),
+                zip_path.name,
+                session_id,
+                expires_in=600,  # 10 minutes
+            )
 
             await channel.send_response(ws, req_id, ok=True, payload={
                 "ok": True,
-                "file_content": zip_content_b64,
-                "filename": filename,
+                "download_url": download_info["download_url"],
+                "download_token": download_info["download_token"],
+                "filename": download_info["name"],
+                "file_size": download_info["size"],
+                "expires_at": download_info["expires_at"],
                 "message": "Package exported successfully",
             })
-
-            # Cleanup temp zip file
-            try:
-                zip_path.unlink(missing_ok=True)
-            except Exception:
-                pass
+            # No cleanup here - file will be served via HTTP download endpoint
+            # and cleaned up after download or when token expires
         except ValueError as exc:
             msg = str(exc)
             if "not found" in msg.lower():

@@ -247,17 +247,12 @@ Self-evolution controls the automatic improvement of JiuwenSwarm's Skills.
 
 ![Self-Evolution Configuration Example](../assets/images/config_self_evolve.png)
 
-### Toggle
+### Toggles
 
-- **Field**: `evolution.enabled`
-- **Default**: `false` (disabled)
-- **Purpose**: When enabled, the system detects issues in Skill execution and generates improvement suggestions to continuously optimize performance.
+The frontend shows two options under **Self-Evolution Configuration**:
 
-When enabled, the system will:
-
-1. Monitor Skill execution and dialogue history
-2. Detect execution failures, user feedback, and improvement signals
-3. Automatically generate and log refinement suggestions
+- **Auto-detect evolution signals**: disabled by default. When enabled, the system scans failures, corrections, and other evolution signals after chat and tool execution. This maps to `evolution.auto_scan`; env `EVOLUTION_AUTO_SCAN` takes precedence.
+- **Auto-suggest new skill creation**: disabled by default. When enabled, the system can propose creating a new Skill when no suitable Skill exists. This maps to `evolution.skill_create`; env `SKILL_CREATE` takes precedence.
 
 > 📖 For details on the self-evolution mechanism, see [Skill self-evolution](SkillSelfEvolution.md).
 

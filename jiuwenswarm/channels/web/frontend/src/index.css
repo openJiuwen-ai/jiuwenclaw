@@ -360,6 +360,21 @@ select {
   }
 }
 
+@keyframes text-muted-breath {
+  0% {
+    color: var(--text);
+    opacity: 0.78;
+  }
+  50% {
+    color: #e4e4e7;
+    opacity: 1;
+  }
+  100% {
+    color: var(--text);
+    opacity: 0.78;
+  }
+}
+
 @keyframes pulse-subtle {
   0%,
   100% {
@@ -447,6 +462,7 @@ select {
   .shell--collapsed {
     grid-template-columns: 48px minmax(0, 1fr);
     grid-template-areas: "nav content";
+    --tool-panel-width: 396px;
   }
 
   /* Topbar */
@@ -580,6 +596,11 @@ select {
     overflow-y: auto;
     overflow-x: hidden;
     background: linear-gradient(180deg, var(--bg-accent), var(--bg));
+  }
+
+  /* Content when team area is expanded and nav is collapsed */
+  .content--team-expanded {
+    padding-left: 16px; /* 当导航栏收缩时，左侧也有 padding */
   }
 
   :root[data-theme="light"] .content {
@@ -861,6 +882,25 @@ select {
     line-height: 1.7142857;
   }
 
+  .context-compression-running-text {
+    display: inline-block;
+    color: var(--text);
+    animation: text-muted-breath 2.8s ease-in-out infinite;
+  }
+
+  .chat-content--team .context-compression-lines {
+    width: min(95%, 920px);
+    margin: 0 auto;
+    display: grid;
+    grid-template-columns: 36px minmax(0, 1fr);
+    gap: 12px;
+    align-items: start;
+  }
+
+  .chat-content--team .context-compression-lines::before {
+    content: '';
+  }
+
   /* Chat input task queue */
   .chat-input-task-queue {
     margin-bottom: 12px;
@@ -1072,30 +1112,12 @@ select {
 
   /* ====== Team Event Group Cards ====== */
   .team-event-group {
-    margin: 8px auto;
-    width: min(85%, 720px);
-    border-radius: var(--radius-lg);
+    margin: 0;
+    width: 100%;
+    border-radius: 6px;
     border: 1px solid var(--border);
     background: transparent;
     overflow: hidden;
-  }
-
-  .team-event-group-shell {
-    width: min(95%, 920px);
-    margin: 8px auto;
-    display: grid;
-    grid-template-columns: 36px minmax(0, 1fr);
-    gap: 12px;
-    align-items: start;
-  }
-
-  .team-event-group-shell__spacer {
-    min-width: 0;
-  }
-
-  .team-event-group-shell .team-event-group {
-    width: 100%;
-    margin: 0;
   }
 
   :root[data-theme="light"] .team-event-group {
@@ -1109,16 +1131,20 @@ select {
     align-items: center;
     justify-content: space-between;
     gap: 12px;
-    padding: 7px 10px;
+    padding: 7px 12px;
     border: 0;
-    border-bottom: 1px solid var(--border);
     background: transparent;
     color: var(--text);
+    cursor: pointer;
     text-align: left;
   }
 
   :root[data-theme="light"] .team-event-group-summary {
     background: transparent;
+  }
+
+  .team-event-group-summary:hover {
+    background: color-mix(in srgb, var(--secondary) 65%, transparent);
   }
 
   .team-event-group-summary__main {
@@ -1156,36 +1182,60 @@ select {
     line-height: 1.2;
   }
 
-  .team-event-group-summary__separator {
-    color: var(--muted);
-    font-size: 13px;
-    line-height: 1.2;
-    opacity: 0.65;
-  }
-
-  .team-event-group-summary__meta {
-    color: var(--muted);
-    font-size: 13px;
-    font-weight: 400;
-  }
-
-  .team-event-group-preview {
-    display: flex;
-    align-items: baseline;
-    gap: 8px;
-    padding: 6px 10px;
-    color: var(--muted);
-    font-size: var(--font-size-xs);
-    min-width: 0;
-    border-bottom: 1px solid var(--border);
-  }
-
-  .team-event-group-preview__members {
-    min-width: 0;
+  .team-event-group-summary__activity {
+    min-width: 140px;
+    flex: 1 1 auto;
     overflow: hidden;
+    color: var(--text);
+    font-size: 13px;
+    line-height: 1.35;
+    text-align: right;
     text-overflow: ellipsis;
     white-space: nowrap;
+  }
+
+  .team-event-group-summary__chevron {
     color: var(--muted);
+    flex: 0 0 auto;
+    font-size: 16px;
+    line-height: 1;
+    opacity: 0.55;
+  }
+
+  .team-event-group-list--activity {
+    max-height: 220px;
+    padding: 8px 10px 10px;
+    border-top: 1px solid var(--border);
+  }
+
+  .team-event-group-row--activity {
+    grid-template-columns: 30px minmax(0, 1fr);
+    padding: 7px 4px;
+  }
+
+  .team-event-group-row--activity + .team-event-group-row--activity {
+    border-top: 1px solid color-mix(in srgb, var(--border) 64%, transparent);
+  }
+
+  .team-event-group-chip--status {
+    background: color-mix(in srgb, var(--accent) 12%, transparent);
+    color: var(--accent);
+  }
+
+  @media (max-width: 640px) {
+    .team-event-group-summary {
+      align-items: flex-start;
+      gap: 8px;
+    }
+
+    .team-event-group-summary__main {
+      flex: 0 0 auto;
+    }
+
+    .team-event-group-summary__activity {
+      min-width: 0;
+      text-align: left;
+    }
   }
 
   .team-event-group-list {
@@ -1201,6 +1251,19 @@ select {
     gap: 8px;
     align-items: start;
     padding: 5px 10px;
+    width: 100%;
+    border: 0;
+    background: transparent;
+    color: inherit;
+    text-align: left;
+  }
+
+  button.team-event-group-row {
+    cursor: pointer;
+  }
+
+  button.team-event-group-row:hover {
+    background: color-mix(in srgb, var(--secondary) 54%, transparent);
   }
 
   .team-event-group-row__avatar {
@@ -1234,6 +1297,34 @@ select {
     white-space: nowrap;
     color: var(--text-strong);
     font-weight: 600;
+  }
+
+  .team-event-member-counts {
+    min-width: 0;
+    margin-left: auto;
+    display: inline-grid;
+    grid-template-columns: repeat(3, 36px);
+    align-items: center;
+    justify-content: end;
+    column-gap: 6px;
+    color: var(--text-muted);
+    font-size: 12px;
+    font-weight: 500;
+    line-height: 1.3;
+  }
+
+  .team-event-member-count {
+    display: inline-flex;
+    align-items: center;
+    justify-content: flex-start;
+    gap: 3px;
+    white-space: nowrap;
+  }
+
+  .team-event-member-count svg {
+    width: 13px;
+    height: 13px;
+    stroke-width: 1.9;
   }
 
   .team-event-group-row__content {
@@ -1545,6 +1636,33 @@ select {
     margin-left: 2px;
     vertical-align: text-bottom;
   }
+
+  /* Skill action button - white/black in light mode, gray/white in dark mode */
+  .skill-action-btn {
+    width: 76px;
+    height: 28px;
+    border-radius: 24px;
+    font-size: var(--font-size-sm);
+    border: 1px solid #000000;
+    background: #ffffff;
+    color: #000000;
+    transition: background var(--duration-fast) ease, border-color var(--duration-fast) ease;
+    white-space: nowrap;
+  }
+
+  .skill-action-btn:hover {
+    background: #f0f0f0;
+  }
+
+  :root:not([data-theme="light"]) .skill-action-btn {
+    border-color: #4b5563;
+    background: #374151;
+    color: #ffffff;
+  }
+
+  :root:not([data-theme="light"]) .skill-action-btn:hover {
+    background: #4b5563;
+  }
 }
 
 /* ===========================================
@@ -1584,6 +1702,22 @@ select {
 
 .animate-scale-in {
   animation: scale-in 0.2s var(--ease-out);
+}
+
+/* Slide in from right - Drawer animation */
+@keyframes slide-in-right {
+  from {
+    transform: translateX(100%);
+    opacity: 0;
+  }
+  to {
+    transform: translateX(0);
+    opacity: 1;
+  }
+}
+
+.animate-slide-in-right {
+  animation: slide-in-right 0.3s var(--ease-out) forwards;
 }
 
 /* ===========================================

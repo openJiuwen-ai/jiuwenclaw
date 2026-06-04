@@ -72,13 +72,17 @@ async def test_team_interrupt_pause_like_intents_use_team_manager(
 ) -> None:
     claw = _InterruptHarness()
     fake_manager = _FakeTeamManager(pause_result=True)
-    cancelled: list[tuple[str, str]] = []
+    cancelled: list[tuple[str, str, float | None]] = []
 
     def _unexpected_adapter():
         raise AssertionError("team interrupt should not use deep adapter interrupt path")
 
-    async def _fake_cancel_session_task(session_id: str, reason: str = "") -> None:
-        cancelled.append((session_id, reason))
+    async def _fake_cancel_session_task(
+        session_id: str,
+        reason: str = "",
+        wait_timeout: float | None = None,
+    ) -> None:
+        cancelled.append((session_id, reason, wait_timeout))
 
     monkeypatch.setattr(claw, "_ensure_adapter", _unexpected_adapter)
     monkeypatch.setattr(
@@ -95,7 +99,7 @@ async def test_team_interrupt_pause_like_intents_use_team_manager(
         "success": True,
         "message": expected_message,
     }
-    assert cancelled == [("team-session-1", f"interrupt(intent={intent}): ")]
+    assert cancelled == [("team-session-1", f"interrupt(intent={intent}): ", 5.0)]
     if intent == "pause":
         assert fake_manager.pause_calls == [("team-session-1", f"interrupt(intent={intent}): ")]
         assert fake_manager.cancel_calls == []
@@ -108,13 +112,17 @@ async def test_team_interrupt_pause_like_intents_use_team_manager(
 async def test_team_interrupt_resume_is_ack_only(monkeypatch: pytest.MonkeyPatch) -> None:
     claw = _InterruptHarness()
     fake_manager = _FakeTeamManager(pause_result=True)
-    cancelled: list[tuple[str, str]] = []
+    cancelled: list[tuple[str, str, float | None]] = []
 
     def _unexpected_adapter():
         raise AssertionError("team resume should not use deep adapter interrupt path")
 
-    async def _fake_cancel_session_task(session_id: str, reason: str = "") -> None:
-        cancelled.append((session_id, reason))
+    async def _fake_cancel_session_task(
+        session_id: str,
+        reason: str = "",
+        wait_timeout: float | None = None,
+    ) -> None:
+        cancelled.append((session_id, reason, wait_timeout))
 
     monkeypatch.setattr(claw, "_ensure_adapter", _unexpected_adapter)
     monkeypatch.setattr(
@@ -142,13 +150,17 @@ async def test_code_team_interrupt_uses_team_manager_without_team_flag(
 ) -> None:
     claw = _InterruptHarness()
     fake_manager = _FakeTeamManager(pause_result=True)
-    cancelled: list[tuple[str, str]] = []
+    cancelled: list[tuple[str, str, float | None]] = []
 
     def _unexpected_adapter():
         raise AssertionError("code.team interrupt should not use deep adapter interrupt path")
 
-    async def _fake_cancel_session_task(session_id: str, reason: str = "") -> None:
-        cancelled.append((session_id, reason))
+    async def _fake_cancel_session_task(
+        session_id: str,
+        reason: str = "",
+        wait_timeout: float | None = None,
+    ) -> None:
+        cancelled.append((session_id, reason, wait_timeout))
 
     monkeypatch.setattr(claw, "_ensure_adapter", _unexpected_adapter)
     monkeypatch.setattr(
@@ -167,6 +179,6 @@ async def test_code_team_interrupt_uses_team_manager_without_team_flag(
         "success": True,
         "message": "团队已暂停",
     }
-    assert cancelled == [("team-session-1", "interrupt(intent=pause): ")]
+    assert cancelled == [("team-session-1", "interrupt(intent=pause): ", 5.0)]
     assert fake_manager.pause_calls == [("team-session-1", "interrupt(intent=pause): ")]
     assert fake_manager.cancel_calls == []

@@ -47,8 +47,12 @@ class ProxyManager:
 
         proxy_mgr = get_proxy_manager()
         await proxy_mgr.load_from_policy(proxy_config)
+        # 同时打印 host 和 port; 与 launcher 里 ``http://host:port`` 的
+        # 格式对齐, 方便运维 grep 拼接 curl。
+        listen_host = proxy_config.listen_host or "127.0.0.1"
         logger.info(
-            "Started inference privacy proxies from policy on port %d",
+            "Inference privacy proxy listening on http://%s:%d",
+            listen_host,
             proxy_config.listen_port,
         )
 
@@ -61,14 +65,3 @@ class ProxyManager:
             except Exception as e:
                 logger.warning("Failed to stop proxy '%s': %s", proxy_info["name"], e)
         logger.info("Stopped all inference privacy proxies")
-
-
-_proxy_manager: ProxyManager | None = None
-
-
-def get_proxy_manager_instance() -> ProxyManager:
-    """Get the global ProxyManager instance (wrapper for inference privacy proxy manager)."""
-    global _proxy_manager
-    if _proxy_manager is None:
-        _proxy_manager = ProxyManager()
-    return _proxy_manager

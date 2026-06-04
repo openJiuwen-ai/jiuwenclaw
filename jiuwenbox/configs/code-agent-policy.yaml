@@ -81,8 +81,6 @@ filesystem_policy:
   device:
     - host_path: "/dev/null"
       sandbox_path: "/dev/null"
-    - host_path: "/dev/tty"
-      sandbox_path: "/dev/tty"
     - host_path: "/dev/random"
       sandbox_path: "/dev/random"
     - host_path: "/dev/urandom"

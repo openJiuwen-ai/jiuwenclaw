@@ -2,6 +2,7 @@ import { Message } from '../../types';
 
 export interface ParsedTeamEvent {
   type: string;
+  messageId: string;
   fromMember: string;
   toMember?: string;
   content: string;
@@ -36,6 +37,7 @@ export function parseTeamEventMessage(message: Message): ParsedTeamEvent | null 
     }
 
     const type = typeof event.type === 'string' ? event.type : '';
+    const messageId = typeof event.message_id === 'string' ? event.message_id : '';
     const fromMember = typeof event.from_member === 'string' ? event.from_member : '';
     const toMember = typeof event.to_member === 'string' ? event.to_member : undefined;
     const messageContent = typeof event.content === 'string' ? event.content : '';
@@ -45,6 +47,7 @@ export function parseTeamEventMessage(message: Message): ParsedTeamEvent | null 
 
     return {
       type,
+      messageId,
       fromMember,
       toMember,
       content: messageContent,
@@ -64,4 +67,8 @@ export function isTeamMemberCollaborationMessage(message: Message): boolean {
     return false;
   }
   return !event.isLeaderToUser;
+}
+
+export function isTeamActivityMessage(message: Message): boolean {
+  return Boolean(parseTeamEventMessage(message));
 }

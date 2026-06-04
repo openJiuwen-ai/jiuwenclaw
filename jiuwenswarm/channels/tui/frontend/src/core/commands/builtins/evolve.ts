@@ -2,22 +2,22 @@ import { makeItem, parseArgs } from "../helpers.js";
 import { CommandKind, type SlashCommand } from "../types.js";
 
 /**
- * /evolve - Trigger skill evolution or list pending summaries
- * Usage: /evolve [list | <skill_name> [<user_query>...]]
+ * /evolve - Trigger skill evolution
+ * Usage: /evolve <skill_name> [<user_query>...]
  */
 export function createEvolveCommand(): SlashCommand {
   return {
     name: "evolve",
-    description: "Trigger skill evolution for <skill_name> (optionally with user_query), or list pending summaries if 'list' or no argument",
-    usage: "/evolve [list | <skill_name> [<user_query>...]]",
+    description: "Trigger skill evolution for <skill_name> (optionally with user_query)",
+    usage: "/evolve <skill_name> [<user_query>...]",
     example: "/evolve pptx improve error handling",
     kind: CommandKind.BUILT_IN,
+    hidden: true,
     takesArgs: true,
     action: (ctx, args) => {
       const skillArg = args.trim();
-      // /evolve, /evolve list, or /evolve <skill_name> [<user_query>...]
+      // Forward as-is. Agent mode still accepts bare /evolve for a pending-record summary.
       const text = skillArg ? `/evolve ${skillArg}` : `/evolve`;
-
       const requestId = ctx.sendMessage(text);
       if (!requestId) {
         ctx.addItem(
@@ -39,6 +39,7 @@ export function createEvolveListCommand(): SlashCommand {
     usage: "/evolve_list <skill_name> [--sort score]",
     example: "/evolve_list pptx --sort score",
     kind: CommandKind.BUILT_IN,
+    hidden: true,
     takesArgs: true,
     action: (ctx, args) => {
       const parsedArgs = parseArgs(args);
@@ -68,15 +69,16 @@ export function createEvolveListCommand(): SlashCommand {
 
 /**
  * /evolve_simplify - Simplify evolution proposals for a skill
- * Usage: /evolve_simplify <skill_name> [--dry-run]
+ * Usage: /evolve_simplify <skill_name> [user_intent]
  */
 export function createEvolveSimplifyCommand(): SlashCommand {
   return {
     name: "evolve_simplify",
     description: "Simplify evolution experiences for a skill into smaller tasks",
-    usage: "/evolve_simplify <skill_name> [--dry-run]",
-    example: "/evolve_simplify pptx --dry-run",
+    usage: "/evolve_simplify <skill_name> [user_intent]",
+    example: "/evolve_simplify pptx merge duplicate export-failure records",
     kind: CommandKind.BUILT_IN,
+    hidden: true,
     takesArgs: true,
     action: (ctx, args) => {
       const parsedArgs = parseArgs(args);
@@ -87,13 +89,13 @@ export function createEvolveSimplifyCommand(): SlashCommand {
           makeItem(
             ctx.sessionId,
             "error",
-            "usage: /evolve_simplify <skill_name> [--dry-run] - Provide the name of the skill",
+            "usage: /evolve_simplify <skill_name> [user_intent] - Provide the name of the skill",
           ),
         );
         return;
       }
 
-      // Forward all arguments to backend (including --dry-run if present)
+      // Forward all arguments to backend; trailing text is treated as cleanup intent.
       const requestId = ctx.sendMessage(`/evolve_simplify ${args.trim()}`);
       if (!requestId) {
         ctx.addItem(
@@ -115,6 +117,7 @@ export function createEvolveRebuildCommand(): SlashCommand {
     usage: "/evolve_rebuild <skill_name> [<user_query>...]",
     example: "/evolve_rebuild pptx improve error handling",
     kind: CommandKind.BUILT_IN,
+    hidden: true,
     takesArgs: true,
     action: (ctx, args) => {
       const parsedArgs = parseArgs(args);
@@ -140,4 +143,3 @@ export function createEvolveRebuildCommand(): SlashCommand {
     },
   };
 }
-

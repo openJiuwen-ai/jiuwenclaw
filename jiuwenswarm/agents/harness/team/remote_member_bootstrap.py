@@ -23,7 +23,7 @@ import shutil
 import socket
 import types
 import uuid
-from typing import Any
+from typing import Any, NamedTuple
 
 logger = logging.getLogger(__name__)
 
@@ -35,16 +35,16 @@ _WRAPPED_SESSION_ID_ATTR = "_jiuwen_spawn_member_remote_bootstrap_session_id"
 _WRAPPED_CHANNEL_ID_ATTR = "_jiuwen_spawn_member_remote_bootstrap_channel_id"
 _WRAPPED_REMOTE_NAMES_ATTR = "_jiuwen_spawn_member_remote_bootstrap_remote_names"
 _WRAPPED_REMOTE_ALL_ATTR = "_jiuwen_spawn_member_remote_bootstrap_remote_all"
-_CLEAN_TEAM_WRAPPED_ATTR = "_jiuwen_clean_team_remote_destroy_wrapped"
-_CLEAN_TEAM_TEAM_AGENT_ATTR = "_jiuwen_clean_team_remote_destroy_team_agent"
-_CLEAN_TEAM_SESSION_ID_ATTR = "_jiuwen_clean_team_remote_destroy_session_id"
-_CLEAN_TEAM_CHANNEL_ID_ATTR = "_jiuwen_clean_team_remote_destroy_channel_id"
 _LOCAL_SPAWN_GUARD_ATTR = "_jiuwen_distributed_local_spawn_guard_attached"
 _SEND_MESSAGE_GUARDED_ATTR = "_jiuwen_distributed_send_message_guarded"
 _ACK_LISTENER_ATTR = "_jiuwen_remote_bootstrap_ack_listener_attached"
 _TEAMMATE_BOOTSTRAP_LISTENER_ATTR = "_jiuwen_remote_teammate_bootstrap_listener_attached"
+_SHUTDOWN_CLEANUP_WRAPPED_ATTR = "_jiuwen_shutdown_member_remote_cleanup_wrapped"
+_SHUTDOWN_CLEANUP_SESSION_ID_ATTR = "_jiuwen_shutdown_member_remote_cleanup_session_id"
+_SHUTDOWN_CLEANUP_CHANNEL_ID_ATTR = "_jiuwen_shutdown_member_remote_cleanup_channel_id"
 _METADATA_REMOTE_ALL_KEY = "jiuwen_remote_all_spawn_members"
-_A2X_RESERVATIONS_ATTR = "_jiuwen_a2x_blank_agent_reservations"
+_A2X_RESERVATIONS_BY_SESSION: dict[str, list[tuple[str, Any, dict[str, Any]]]] = {}
+_SHUTDOWN_CLEANUP_TASKS: dict[str, asyncio.Task] = {}
 
 # Remote claw → leader: JSON body on a normal team P2P message (DB + MESSAGE topic).
 REMOTE_BOOTSTRAP_ACK_TYPE = "jiuwen.remote_bootstrap_ack"
@@ -54,6 +54,13 @@ _TRANSPORT_BOOTSTRAP_DIRECT_ADDR_KEY = "bootstrap_direct_addr"
 _TRANSPORT_BOOTSTRAP_KNOWN_PEERS_KEY = "bootstrap_known_peers"
 
 _DYNAMIC_MEMBER_AGENTS: dict[tuple[str, str], Any] = {}
+
+
+class RemoteSpawnPrecheck(NamedTuple):
+    """Result for remote spawn fail-fast validation."""
+
+    error: str | None = None
+    registry_reservation: Any | None = None
 
 
 def remote_member_names(config_base: dict[str, Any] | None = None) -> set[str]:
@@ -211,6 +218,130 @@ def _resolve_bootstrap_peer_for_member(member_name: str, config_base: dict[str, 
     if agent_id and addr:
         return agent_id, addr
     return _pick(_iter_peers("known_peers"))
+
+
+def _team_name_for_agent(team_agent: Any) -> str:
+    team_name_fn = getattr(team_agent, "_team_name", None)
+    if callable(team_name_fn):
+        try:
+            name = team_name_fn()
+            if isinstance(name, str) and name.strip():
+                return name.strip()
+        except Exception as exc:
+            logger.debug("[RemoteMemberBootstrap] _team_name lookup failed: %s", exc)
+    tb = getattr(team_agent, "team_backend", None)
+    name = getattr(tb, "team_name", "") if tb is not None else ""
+    return str(name or "").strip()
+
+
+async def _existing_team_member(team_agent: Any | None, member_name: str) -> Any | None:
+    if team_agent is None:
+        return None
+    tb = getattr(team_agent, "team_backend", None)
+    if tb is None:
+        return None
+    get_member = getattr(tb, "get_member", None)
+    if not callable(get_member):
+        return None
+    try:
+        return await get_member(member_name)
+    except TypeError:
+        team_name = _team_name_for_agent(team_agent)
+        if not team_name:
+            return None
+        return await get_member(member_name, team_name)
+
+
+def _validate_remote_spawn_inputs(inputs: dict[str, Any] | None) -> str | None:
+    data = inputs or {}
+    member_name = data.get("member_name")
+    if not isinstance(member_name, str) or not member_name.strip():
+        return "member_name is required for remote spawn"
+    display_name = data.get("display_name")
+    if not isinstance(display_name, str) or not display_name.strip():
+        return "display_name is required for remote spawn"
+    desc = data.get("desc")
+    if desc is None or not str(desc).strip():
+        return "desc is required for remote spawn"
+    return None
+
+
+async def _release_registry_reservation(
+    reservation: Any | None,
+    *,
+    member_name: str,
+    reason: str,
+) -> None:
+    if reservation is None:
+        return
+    logger.warning(
+        "[RemoteMemberBootstrap] releasing A2X reservation member=%s service_id=%s endpoint=%s reason=%s",
+        member_name,
+        getattr(reservation, "service_id", ""),
+        getattr(reservation, "endpoint", ""),
+        reason,
+    )
+    for method_name in ("release", "close"):
+        method = getattr(reservation, method_name, None)
+        if not callable(method):
+            continue
+        try:
+            result = method()
+            if hasattr(result, "__await__"):
+                await result
+        except Exception as exc:
+            logger.warning(
+                "[RemoteMemberBootstrap] A2X reservation %s failed member=%s: %s",
+                method_name,
+                member_name,
+                exc,
+            )
+
+
+async def precheck_and_reserve_remote_spawn(
+    member_name: str,
+    config_base: dict[str, Any] | None = None,
+    *,
+    team_agent: Any | None = None,
+) -> RemoteSpawnPrecheck:
+    """Reserve a blank remote teammate before spawn_member mutates the team DB."""
+    key = str(member_name or "").strip()
+    if not key:
+        return RemoteSpawnPrecheck(error="Remote member name is required.")
+
+    existing = await _existing_team_member(team_agent, key)
+    if existing is not None:
+        team_name = _team_name_for_agent(team_agent) if team_agent is not None else ""
+        suffix = f" in team {team_name}" if team_name else ""
+        return RemoteSpawnPrecheck(error=f"Remote member {key} already exists{suffix}.")
+
+    if config_base is None:
+        from jiuwenswarm.common.config import get_config as _get_config
+
+        config_base = _get_config()
+
+    try:
+        from jiuwenswarm.agents.harness.team.a2x.a2x_registry_runtime import reserve_blank_teammate_agent
+
+        reservation = await reserve_blank_teammate_agent(
+            config_base,
+            source="leader-spawn-precheck",
+        )
+    except Exception as exc:
+        logger.warning(
+            "[RemoteMemberBootstrap] A2X blank teammate precheck failed member=%s: %s",
+            key,
+            exc,
+        )
+        return RemoteSpawnPrecheck(
+            error=f"Failed to reserve blank teammate for remote member {key}: {exc}"
+        )
+
+    if reservation is None:
+        return RemoteSpawnPrecheck(
+            error=f"No blank teammate available to host remote member {key}."
+        )
+    return RemoteSpawnPrecheck(registry_reservation=reservation)
 
 
 def _normalize_leader_agent_id(raw: Any, *, team_name: str, leader_member_name: str) -> str:
@@ -498,6 +629,8 @@ async def _send_bootstrap_message(
     session_id: str,
     member_name: str,
     prompt: str | None,
+    *,
+    registry_reservation: Any | None = None,
 ) -> bool:
     mm = team_agent.message_manager
     messager = getattr(team_agent, "_messager", None) or getattr(team_agent, "mailbox_transport", None)
@@ -513,24 +646,29 @@ async def _send_bootstrap_message(
         member_name=member_name,
         prompt=prompt,
     )
-    registry_reservation = None
     peer_agent_id = ""
     peer_addr = ""
-    try:
-        from jiuwenswarm.common.config import get_config as _get_config
-        from jiuwenswarm.agents.harness.team.a2x.a2x_registry_runtime import reserve_blank_teammate_agent
+    if registry_reservation is not None:
+        peer_agent_id = registry_reservation.service_id
+        peer_addr = _normalize_leader_direct_addr(registry_reservation.endpoint)
+        envelope["a2x_dataset"] = getattr(registry_reservation, "dataset", "")
+        envelope["a2x_service_id"] = getattr(registry_reservation, "service_id", "")
+    else:
+        try:
+            from jiuwenswarm.common.config import get_config as _get_config
+            from jiuwenswarm.agents.harness.team.a2x.a2x_registry_runtime import reserve_blank_teammate_agent
 
-        registry_reservation = await reserve_blank_teammate_agent(
-            _get_config(),
-            source="leader-spawn-member",
-        )
-        if registry_reservation is not None:
-            peer_agent_id = registry_reservation.service_id
-            peer_addr = _normalize_leader_direct_addr(registry_reservation.endpoint)
-            envelope["a2x_dataset"] = getattr(registry_reservation, "dataset", "")
-            envelope["a2x_service_id"] = getattr(registry_reservation, "service_id", "")
-    except Exception as exc:
-        logger.warning("[RemoteMemberBootstrap] A2X blank teammate reservation failed: %s", exc)
+            registry_reservation = await reserve_blank_teammate_agent(
+                _get_config(),
+                source="leader-spawn-member",
+            )
+            if registry_reservation is not None:
+                peer_agent_id = registry_reservation.service_id
+                peer_addr = _normalize_leader_direct_addr(registry_reservation.endpoint)
+                envelope["a2x_dataset"] = getattr(registry_reservation, "dataset", "")
+                envelope["a2x_service_id"] = getattr(registry_reservation, "service_id", "")
+        except Exception as exc:
+            logger.warning("[RemoteMemberBootstrap] A2X blank teammate reservation failed: %s", exc)
 
     if not peer_agent_id or not peer_addr:
         peer_agent_id, peer_addr = _resolve_bootstrap_peer_for_member(member_name)
@@ -627,26 +765,62 @@ async def _send_bootstrap_message(
     return False
 
 
+async def send_bootstrap_message(
+    team_agent: Any,
+    session_id: str,
+    member_name: str,
+    prompt: str | None,
+    **kwargs: Any,
+) -> bool:
+    return await _send_bootstrap_message(
+        team_agent,
+        session_id,
+        member_name,
+        prompt,
+        registry_reservation=kwargs.get("registry_reservation"),
+    )
+
+
 def _remember_a2x_reservation(
     team_agent: Any,
     session_id: str,
     member_name: str,
     reservation: Any,
 ) -> None:
-    reservations = getattr(team_agent, _A2X_RESERVATIONS_ATTR, None)
-    if not isinstance(reservations, list):
-        reservations = []
-        setattr(team_agent, _A2X_RESERVATIONS_ATTR, reservations)
-    reservations.append((str(session_id or "").strip(), member_name, reservation))
+    key = str(session_id or "").strip()
+    if not key:
+        logger.warning(
+            "[RemoteMemberBootstrap] skip A2X reservation tracking: missing session_id member=%s",
+            member_name,
+        )
+        return
+    destroy_envelope = build_team_destroy_envelope(
+        team_agent,
+        session_id=key,
+        member_name=member_name,
+        reservation=reservation,
+    )
+    reservations = _A2X_RESERVATIONS_BY_SESSION.setdefault(key, [])
+    reservations.append((member_name, reservation, destroy_envelope))
+    logger.info(
+        "[RemoteMemberBootstrap] tracked A2X reservation for session teardown "
+        "session_id=%s member=%s service_id=%s endpoint=%s",
+        key,
+        member_name,
+        getattr(reservation, "service_id", ""),
+        getattr(reservation, "endpoint", ""),
+    )
 
 
 async def _notify_reserved_teammate_team_destroy(
-    team_agent: Any,
-    session_id: str,
+    team_agent: Any | None,
     member_name: str,
     reservation: Any,
+    envelope: dict[str, Any],
 ) -> None:
-    messager = getattr(team_agent, "_messager", None) or getattr(team_agent, "mailbox_transport", None)
+    messager = None
+    if team_agent is not None:
+        messager = getattr(team_agent, "_messager", None) or getattr(team_agent, "mailbox_transport", None)
     peer_agent_id = str(getattr(reservation, "service_id", "") or "").strip()
     peer_addr = _normalize_leader_direct_addr(getattr(reservation, "endpoint", ""))
     if not peer_agent_id or not peer_addr:
@@ -659,12 +833,6 @@ async def _notify_reserved_teammate_team_destroy(
             peer_addr,
         )
         return
-    envelope = build_team_destroy_envelope(
-        team_agent,
-        session_id=session_id,
-        member_name=member_name,
-        reservation=reservation,
-    )
     delivered = False
     try:
         from openjiuwen.agent_teams.messager.base import MessagerPeerConfig
@@ -710,22 +878,44 @@ async def _notify_reserved_teammate_team_destroy(
         )
 
 
-async def release_a2x_reservations_for_team(team_agent: Any) -> None:
-    """Notify reserved teammates on team teardown and close leader-held registry clients."""
-    reservations = getattr(team_agent, _A2X_RESERVATIONS_ATTR, None)
-    if not isinstance(reservations, list) or not reservations:
+async def release_a2x_reservations_for_session(
+    session_id: str,
+    *,
+    team_agent: Any | None = None,
+) -> None:
+    """Notify reserved teammates for a distributed session teardown and close registry clients."""
+    from jiuwenswarm.common.config import get_config as _get_config
+
+    if not _is_distributed_leader_runtime(_get_config()):
+        logger.debug(
+            "[RemoteMemberBootstrap] non-distributed leader runtime; skip A2X reservation release "
+            "session_id=%s",
+            session_id,
+        )
         return
-    setattr(team_agent, _A2X_RESERVATIONS_ATTR, [])
-    for session_id, member_name, reservation in reservations:
+
+    key = str(session_id or "").strip()
+    reservations = _A2X_RESERVATIONS_BY_SESSION.pop(key, [])
+    if not reservations:
+        logger.debug("[RemoteMemberBootstrap] no A2X reservations to release session_id=%s", key)
+        return
+
+    for member_name, reservation, destroy_envelope in reservations:
         await _notify_reserved_teammate_team_destroy(
             team_agent,
-            session_id,
             member_name,
             reservation,
+            destroy_envelope,
         )
         close = getattr(reservation, "close", None)
         if callable(close):
             await close()
+    logger.info(
+        "[RemoteMemberBootstrap] released A2X reservations for distributed session teardown "
+        "session_id=%s count=%d",
+        key,
+        len(reservations),
+    )
 
 
 async def _ensure_remote_member_record(
@@ -737,14 +927,14 @@ async def _ensure_remote_member_record(
     tb = getattr(team_agent, "team_backend", None)
     if tb is None:
         return
+    spawn_member = getattr(tb, "spawn_member", None)
+    if not callable(spawn_member):
+        return
     get_member = getattr(tb, "get_member", None)
     if callable(get_member):
         existing = await get_member(member_name)
         if existing is not None:
             return
-    spawn_member = getattr(tb, "spawn_member", None)
-    if not callable(spawn_member):
-        return
 
     from openjiuwen.agent_teams.schema.status import ExecutionStatus, MemberMode, MemberStatus
     from openjiuwen.core.single_agent.schema.agent_card import AgentCard
@@ -763,6 +953,10 @@ async def _ensure_remote_member_record(
         name=display_name,
         description=desc or display_name,
     )
+    teammate_mode = getattr(tb, "teammate_mode", MemberMode.BUILD_MODE)
+    if not isinstance(teammate_mode, MemberMode):
+        teammate_mode = MemberMode(str(teammate_mode or MemberMode.BUILD_MODE.value))
+
     result = await spawn_member(
         member_name=member_name,
         display_name=display_name,
@@ -771,7 +965,7 @@ async def _ensure_remote_member_record(
         prompt=prompt,
         status=MemberStatus.UNSTARTED,
         execution_status=ExecutionStatus.IDLE,
-        mode=MemberMode.BUILD_MODE,
+        mode=teammate_mode,
     )
     if not bool(getattr(result, "success", result)):
         logger.warning(
@@ -851,27 +1045,24 @@ def attach_spawn_member_remote_bootstrap_wrapper(
     orig_invoke = tool.invoke
 
     async def wrapped_invoke(self: Any, inputs: dict[str, Any], **kwargs: Any) -> Any:
-        result = await orig_invoke(inputs, **kwargs)
+        from openjiuwen.harness.tools.base_tool import ToolOutput
+
+        registry_reservation = None
+        key = ""
+        active_team_agent = getattr(self, _WRAPPED_TEAM_AGENT_ATTR, team_agent)
+        active_session_id = str(
+            getattr(self, _WRAPPED_SESSION_ID_ATTR, session_id) or session_id
+        ).strip() or session_id
         try:
-            ok = bool(getattr(result, "success", False))
-            if not ok:
-                logger.info(
-                    "[RemoteMemberBootstrap] spawn_member result not success; skip remote bootstrap: inputs=%s",
-                    inputs,
-                )
-                return result
             mname = (inputs or {}).get("member_name")
             if not isinstance(mname, str):
                 logger.info(
                     "[RemoteMemberBootstrap] spawn_member missing member_name(str); skip remote bootstrap: inputs=%s",
                     inputs,
                 )
-                return result
+                return await orig_invoke(inputs, **kwargs)
+
             key = mname.strip()
-            active_team_agent = getattr(self, _WRAPPED_TEAM_AGENT_ATTR, team_agent)
-            active_session_id = str(
-                getattr(self, _WRAPPED_SESSION_ID_ATTR, session_id) or session_id
-            ).strip() or session_id
             active_remote_names = getattr(self, _WRAPPED_REMOTE_NAMES_ATTR, remote_names)
             if not isinstance(active_remote_names, set):
                 active_remote_names = set(active_remote_names or [])
@@ -884,7 +1075,8 @@ def attach_spawn_member_remote_bootstrap_wrapper(
                     active_remote_all,
                     sorted(active_remote_names),
                 )
-                return result
+                return await orig_invoke(inputs, **kwargs)
+
             logger.info(
                 "[RemoteMemberBootstrap] spawn_member member=%s entering remote claw bootstrap path "
                 "(remote_all=%s remote_names=%s)",
@@ -892,6 +1084,39 @@ def attach_spawn_member_remote_bootstrap_wrapper(
                 active_remote_all,
                 sorted(active_remote_names),
             )
+            precheck = await precheck_and_reserve_remote_spawn(
+                key,
+                config_base,
+                team_agent=active_team_agent,
+            )
+            registry_reservation = precheck.registry_reservation
+            if precheck.error:
+                return ToolOutput(success=False, error=precheck.error)
+            validation_error = _validate_remote_spawn_inputs(inputs)
+            if validation_error:
+                await _release_registry_reservation(
+                    registry_reservation,
+                    member_name=key,
+                    reason="invalid remote spawn inputs",
+                )
+                registry_reservation = None
+                return ToolOutput(success=False, error=validation_error)
+
+            result = await orig_invoke(inputs, **kwargs)
+            ok = bool(getattr(result, "success", False))
+            if not ok:
+                logger.info(
+                    "[RemoteMemberBootstrap] spawn_member result not success; skip remote bootstrap: inputs=%s",
+                    inputs,
+                )
+                await _release_registry_reservation(
+                    registry_reservation,
+                    member_name=key,
+                    reason="spawn_member failed",
+                )
+                registry_reservation = None
+                return result
+
             await _ensure_remote_member_record(active_team_agent, key, inputs)
             # openjiuwen native spawn path may mark member as READY immediately.
             # For remote teammates, force it back to UNSTARTED and wait for ACK to set READY.
@@ -900,8 +1125,7 @@ def attach_spawn_member_remote_bootstrap_wrapper(
 
                 tb = getattr(active_team_agent, "team_backend", None)
                 db = getattr(tb, "db", None) if tb is not None else None
-                _tn = getattr(active_team_agent, "_team_name", None)
-                team_name = _tn() if callable(_tn) else None
+                team_name = _team_name_for_agent(active_team_agent)
                 if db is not None and isinstance(team_name, str) and team_name.strip():
                     await db.update_member_status(key, team_name, MemberStatus.UNSTARTED.value)
                     logger.info(
@@ -916,43 +1140,88 @@ def attach_spawn_member_remote_bootstrap_wrapper(
                     key,
                     exc,
                 )
-            delivered = await _send_bootstrap_message(
-                active_team_agent,
-                active_session_id,
-                key,
-                (inputs or {}).get("prompt"),
-            )
+
+            try:
+                delivered = await send_bootstrap_message(
+                    active_team_agent,
+                    active_session_id,
+                    key,
+                    (inputs or {}).get("prompt"),
+                    registry_reservation=registry_reservation,
+                )
+                delivery_error = None
+            except Exception as exc:
+                logger.warning(
+                    "[RemoteMemberBootstrap] bootstrap delivery raised member=%s: %s",
+                    key,
+                    exc,
+                )
+                delivered = False
+                delivery_error = exc
+
             if delivered:
+                registry_reservation = None
+                logger.info(
+                    "[RemoteMemberBootstrap] bootstrap delivered member=%s team=%s; "
+                    "status remains UNSTARTED until MESSAGE ACK sets ready",
+                    key,
+                    _team_name_for_agent(active_team_agent),
+                )
+                return result
+
+            try:
+                from openjiuwen.agent_teams.schema.status import MemberStatus
+
+                tb = getattr(active_team_agent, "team_backend", None)
+                db = getattr(tb, "db", None) if tb is not None else None
+                team_name = _team_name_for_agent(active_team_agent)
+                if db is not None and isinstance(team_name, str) and team_name.strip():
+                    await db.update_member_status(key, team_name, MemberStatus.ERROR.value)
+            except Exception as exc:
+                logger.warning(
+                    "[RemoteMemberBootstrap] failed to mark remote member ERROR after bootstrap failure "
+                    "member=%s: %s",
+                    key,
+                    exc,
+                )
+            await _release_registry_reservation(
+                registry_reservation,
+                member_name=key,
+                reason="bootstrap not delivered",
+            )
+            registry_reservation = None
+            detail = f": {delivery_error}" if delivery_error is not None else ""
+            return ToolOutput(
+                success=False,
+                error=f"Remote bootstrap not delivered for member {key}; member marked error{detail}.",
+            )
+        except Exception as exc:
+            logger.warning("[RemoteMemberBootstrap] post-spawn hook failed: %s", exc)
+            if key:
                 try:
                     from openjiuwen.agent_teams.schema.status import MemberStatus
 
                     tb = getattr(active_team_agent, "team_backend", None)
                     db = getattr(tb, "db", None) if tb is not None else None
-                    _tn = getattr(active_team_agent, "_team_name", None)
-                    team_name = _tn() if callable(_tn) else None
+                    team_name = _team_name_for_agent(active_team_agent)
                     if db is not None and isinstance(team_name, str) and team_name.strip():
-                        ok = await db.update_member_status(key, team_name, MemberStatus.READY.value)
-                        if ok:
-                            logger.info(
-                                "[RemoteMemberBootstrap] direct ACK applied member=%s team=%s -> status=ready",
-                                key,
-                                team_name,
-                            )
-                        else:
-                            logger.warning(
-                                "[RemoteMemberBootstrap] direct ACK update_member_status failed member=%s team=%s",
-                                key,
-                                team_name,
-                            )
-                except Exception as exc:
+                        await db.update_member_status(key, team_name, MemberStatus.ERROR.value)
+                except Exception as mark_exc:
                     logger.warning(
-                        "[RemoteMemberBootstrap] direct ACK status update failed member=%s: %s",
+                        "[RemoteMemberBootstrap] failed to mark remote member ERROR after hook exception "
+                        "member=%s: %s",
                         key,
-                        exc,
+                        mark_exc,
                     )
-        except Exception as exc:
-            logger.warning("[RemoteMemberBootstrap] post-spawn hook failed: %s", exc)
-        return result
+            await _release_registry_reservation(
+                registry_reservation,
+                member_name=key,
+                reason="post-spawn hook exception",
+            )
+            return ToolOutput(
+                success=False,
+                error=f"Remote bootstrap failed for member {key or '<unknown>'}: {exc}",
+            )
 
     tool.invoke = types.MethodType(wrapped_invoke, tool)
     setattr(tool, _WRAPPED_ATTR, True)
@@ -964,18 +1233,176 @@ def attach_spawn_member_remote_bootstrap_wrapper(
     )
 
 
-def attach_clean_team_remote_destroy_wrapper(
+async def _all_teammates_shutdown_requested_or_done(team_agent: Any) -> bool:
+    tb = getattr(team_agent, "team_backend", None)
+    list_members = getattr(tb, "list_members", None) if tb is not None else None
+    if not callable(list_members):
+        logger.debug("[RemoteMemberBootstrap] shutdown cleanup skipped: missing public list_members")
+        return False
+
+    from openjiuwen.agent_teams.schema.status import MemberStatus
+
+    closed_statuses = {
+        MemberStatus.SHUTDOWN_REQUESTED.value,
+        MemberStatus.SHUTDOWN.value,
+    }
+
+    members = await list_members()
+    if not members:
+        return False
+
+    for member in members:
+        status = str(getattr(member, "status", "") or "").strip().lower()
+        if status not in closed_statuses:
+            logger.debug(
+                "[RemoteMemberBootstrap] shutdown cleanup waiting for member=%s status=%s",
+                getattr(member, "member_name", None),
+                status,
+            )
+            return False
+    return True
+
+
+def _schedule_shutdown_cleanup(session_id: str, channel_id: str | None) -> None:
+    sid = str(session_id or "").strip()
+    if not sid:
+        return
+    existing_task = _SHUTDOWN_CLEANUP_TASKS.get(sid)
+    if existing_task is None or existing_task.done():
+        _SHUTDOWN_CLEANUP_TASKS[sid] = asyncio.create_task(
+            _delayed_shutdown_cleanup(sid, channel_id)
+        )
+    logger.info(
+        "[RemoteMemberBootstrap] marked session for post-stream shutdown cleanup "
+        "session_id=%s channel=%s",
+        sid,
+        channel_id,
+    )
+
+
+async def _delayed_shutdown_cleanup(session_id: str, channel_id: str | None) -> bool:
+    try:
+        # Give the leader response a short chance to flush before stopping the team stream.
+        await asyncio.sleep(2.0)
+        return await run_pending_shutdown_cleanup_for_session(
+            session_id,
+            channel_id=channel_id,
+        )
+    finally:
+        current_task = asyncio.current_task()
+        if _SHUTDOWN_CLEANUP_TASKS.get(session_id) is current_task:
+            _SHUTDOWN_CLEANUP_TASKS.pop(session_id, None)
+
+
+async def wait_for_pending_shutdown_cleanup_for_session(
+    session_id: str,
+    *,
+    timeout: float = 15.0,
+) -> bool:
+    sid = str(session_id or "").strip()
+    task = _SHUTDOWN_CLEANUP_TASKS.get(sid)
+    if task is None:
+        return False
+    try:
+        return bool(await asyncio.wait_for(asyncio.shield(task), timeout=timeout))
+    except asyncio.TimeoutError:
+        logger.warning(
+            "[RemoteMemberBootstrap] timed out waiting for shutdown cleanup session_id=%s",
+            sid,
+        )
+        return False
+
+
+async def _push_shutdown_cleanup_notice(
+    *,
+    session_id: str,
+    channel_id: str | None,
+    deleted: bool,
+) -> None:
+    try:
+        from jiuwenswarm.server.gateway_push import WebSocketGatewayPushTransport
+        from jiuwenswarm.server.runtime.session.session_metadata import build_server_push_message
+
+        request_id = f"team_shutdown_cleanup_{session_id}"
+        content = (
+            "团队已清空并解散，远端成员已恢复为空闲状态。"
+            if deleted
+            else "团队解散清理未完成，请查看后端日志确认原因。"
+        )
+        await WebSocketGatewayPushTransport().send_push(
+            build_server_push_message(
+                session_id=session_id,
+                request_id=request_id,
+                fallback_channel_id=channel_id,
+                payload={
+                    "event_type": "chat.final",
+                    "request_id": request_id,
+                    "session_id": session_id,
+                    "content": content,
+                },
+            )
+        )
+    except Exception as exc:
+        logger.warning(
+            "[RemoteMemberBootstrap] shutdown cleanup notice push failed "
+            "session_id=%s error=%s",
+            session_id,
+            exc,
+        )
+
+
+async def run_pending_shutdown_cleanup_for_session(
+    session_id: str,
+    channel_id: str | None = None,
+) -> bool:
+    """Delete a distributed team session after all teammates have been asked to shut down."""
+    sid = str(session_id or "").strip()
+    if not sid:
+        return False
+    active_channel_id = channel_id
+    try:
+        from jiuwenswarm.agents.harness.team import get_team_manager
+
+        manager = get_team_manager(active_channel_id)
+        deleted = await manager.delete_session_runtime(sid, reason="team.shutdown_all_members: ")
+        logger.info(
+            "[RemoteMemberBootstrap] post-stream shutdown cleanup finished "
+            "session_id=%s deleted=%s",
+            sid,
+            deleted,
+        )
+        await _push_shutdown_cleanup_notice(
+            session_id=sid,
+            channel_id=active_channel_id,
+            deleted=bool(deleted),
+        )
+        return bool(deleted)
+    except Exception as exc:
+        logger.warning(
+            "[RemoteMemberBootstrap] post-stream shutdown cleanup failed session_id=%s error=%s",
+            sid,
+            exc,
+        )
+        await _push_shutdown_cleanup_notice(
+            session_id=sid,
+            channel_id=active_channel_id,
+            deleted=False,
+        )
+        return False
+
+
+def attach_shutdown_member_remote_cleanup_wrapper(
     team_agent: Any,
     *,
     session_id: str,
     channel_id: str | None,
 ) -> None:
-    """Monkey-patch clean_team so remote teammates return to the blank registry pool."""
+    """Delete a distributed team session after every teammate has been shut down."""
     from jiuwenswarm.common.config import get_config as _get_config
 
     config_base = _get_config()
     if not _is_distributed_leader_runtime(config_base):
-        logger.debug("[RemoteMemberBootstrap] non-distributed leader runtime; skip clean_team wrapper")
+        logger.debug("[RemoteMemberBootstrap] non-distributed leader runtime; skip shutdown cleanup wrapper")
         return
 
     from openjiuwen.agent_teams.schema.team import TeamRole
@@ -985,29 +1412,30 @@ def attach_clean_team_remote_destroy_wrapper(
         return
     leader = _team_agent_deep_agent(team_agent)
     if leader is None:
-        logger.debug("[RemoteMemberBootstrap] skip clean_team wrapper: missing leader DeepAgent")
+        logger.debug("[RemoteMemberBootstrap] skip shutdown cleanup wrapper: missing leader DeepAgent")
         return
 
-    tool_id = _team_tool_id(leader, "clean_team")
+    tool_id = _team_tool_id(leader, "shutdown_member")
     tag = getattr(getattr(leader, "card", None), "id", None)
     tool = Runner.resource_mgr.get_tool(tool_id, tag=tag) if tag else None
     if tool is None:
         tool = Runner.resource_mgr.get_tool(tool_id)
     if tool is None:
         logger.debug(
-            "[RemoteMemberBootstrap] tool %s not in Runner.resource_mgr (session_id=%s channel=%s)",
+            "[RemoteMemberBootstrap] tool %s not in Runner.resource_mgr; skip shutdown cleanup wrapper "
+            "session_id=%s channel=%s",
             tool_id,
             session_id,
             channel_id,
         )
         return
 
-    setattr(tool, _CLEAN_TEAM_TEAM_AGENT_ATTR, team_agent)
-    setattr(tool, _CLEAN_TEAM_SESSION_ID_ATTR, session_id)
-    setattr(tool, _CLEAN_TEAM_CHANNEL_ID_ATTR, channel_id)
-    if getattr(tool, _CLEAN_TEAM_WRAPPED_ATTR, False):
+    setattr(tool, _SHUTDOWN_CLEANUP_SESSION_ID_ATTR, session_id)
+    setattr(tool, _SHUTDOWN_CLEANUP_CHANNEL_ID_ATTR, channel_id)
+    setattr(tool, _WRAPPED_TEAM_AGENT_ATTR, team_agent)
+    if getattr(tool, _SHUTDOWN_CLEANUP_WRAPPED_ATTR, False):
         logger.info(
-            "[RemoteMemberBootstrap] rebound clean_team wrapper tool_id=%s session_id=%s channel=%s",
+            "[RemoteMemberBootstrap] rebound shutdown cleanup wrapper tool_id=%s session_id=%s channel=%s",
             tool_id,
             session_id,
             channel_id,
@@ -1021,27 +1449,32 @@ def attach_clean_team_remote_destroy_wrapper(
         try:
             if not bool(getattr(result, "success", False)):
                 return result
-            active_team_agent = getattr(self, _CLEAN_TEAM_TEAM_AGENT_ATTR, team_agent)
+            active_team_agent = getattr(self, _WRAPPED_TEAM_AGENT_ATTR, team_agent)
+            if not await _all_teammates_shutdown_requested_or_done(active_team_agent):
+                return result
             active_session_id = str(
-                getattr(self, _CLEAN_TEAM_SESSION_ID_ATTR, session_id) or session_id
+                getattr(self, _SHUTDOWN_CLEANUP_SESSION_ID_ATTR, session_id) or session_id
             ).strip() or session_id
-            await release_a2x_reservations_for_team(active_team_agent)
+            active_channel_id = getattr(self, _SHUTDOWN_CLEANUP_CHANNEL_ID_ATTR, channel_id)
             logger.info(
-                "[RemoteMemberBootstrap] clean_team released remote teammate reservations "
+                "[RemoteMemberBootstrap] all teammates are shutdown-requested; scheduling team cleanup "
                 "session_id=%s channel=%s",
                 active_session_id,
-                getattr(self, _CLEAN_TEAM_CHANNEL_ID_ATTR, channel_id),
+                active_channel_id,
             )
+            _schedule_shutdown_cleanup(active_session_id, active_channel_id)
         except Exception as exc:
-            logger.warning(
-                "[RemoteMemberBootstrap] clean_team remote reservation release failed: %s",
-                exc,
-            )
+            logger.warning("[RemoteMemberBootstrap] shutdown cleanup hook failed: %s", exc)
         return result
 
     tool.invoke = types.MethodType(wrapped_invoke, tool)
-    setattr(tool, _CLEAN_TEAM_WRAPPED_ATTR, True)
-    logger.info("[RemoteMemberBootstrap] attached clean_team wrapper tool_id=%s", tool_id)
+    setattr(tool, _SHUTDOWN_CLEANUP_WRAPPED_ATTR, True)
+    logger.info(
+        "[RemoteMemberBootstrap] attached shutdown cleanup wrapper tool_id=%s session_id=%s channel=%s",
+        tool_id,
+        session_id,
+        channel_id,
+    )
 
 
 def attach_distributed_local_spawn_guard(
@@ -1243,6 +1676,18 @@ def attach_remote_bootstrap_ack_listener(
                 "[RemoteMemberBootstrap] ACK: teammate reports bootstrap not fully applied member=%s id=%s",
                 ack_member,
                 message_id,
+            )
+            return
+        existing_member = await _existing_team_member(team_agent, ack_member)
+        if existing_member is None:
+            try:
+                await mm.mark_message_read(message_id, leader_name)
+            except Exception as exc:
+                logger.warning("[RemoteMemberBootstrap] ACK: mark_message_read failed: %s", exc)
+            logger.warning(
+                "[RemoteMemberBootstrap] ACK: no roster row for member=%s team=%s; skip READY update",
+                ack_member,
+                team_name,
             )
             return
 

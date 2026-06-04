@@ -125,6 +125,10 @@ export function extractAttachmentsFromText(
 
   for (const match of matches) {
     const rawPath = match[2] ?? match[3] ?? "";
+    // Skip @agent-xxx and @"xxx (agent)" mentions — they're agent references, not files
+    if (rawPath.startsWith("agent-") || rawPath.endsWith(" (agent)")) {
+      continue;
+    }
     const candidate = buildAttachmentCandidate(rawPath, options);
     if (!candidate) {
       continue;
@@ -137,6 +141,33 @@ export function extractAttachmentsFromText(
   }
 
   return attachments;
+}
+
+/**
+ * Extract agent type names from @agent-xxx and @"xxx (agent)" mentions.
+ * Returns deduplicated list of agent type names (without "agent-" prefix).
+ */
+export function extractAgentMentions(content: string): string[] {
+  if (!content) return [];
+
+  const results: string[] = [];
+
+  // Match quoted format: @"<type> (agent)"
+  const quotedAgentRegex = /(^|[\t ])@"([\w:.@-]+) \(agent\)"/gm;
+  let match;
+  while ((match = quotedAgentRegex.exec(content)) !== null) {
+    if (match[2]) {
+      results.push(match[2]);
+    }
+  }
+
+  // Match unquoted format: @agent-<type>
+  const unquotedAgentRegex = /(^|[\t ])@(agent-[\w:.@-]+)/gm;
+  while ((match = unquotedAgentRegex.exec(content)) !== null) {
+    results.push(match[2].slice("agent-".length));
+  }
+
+  return [...new Set(results)];
 }
 
 export function extractFilePathsFromPaste(

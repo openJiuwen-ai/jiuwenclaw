@@ -90,6 +90,35 @@ def normalize_ips(values: list[str]) -> list[str]:
     return resolved
 
 
+def _rule_policy_is_empty(rule: NetworkRulePolicy) -> bool:
+    """Return True when a rule policy defines no allow/block entries.
+
+    Callers use this to decide whether the operator has opted out of all
+    network restrictions. The ``default`` field (``deny``/``allow``) is not
+    treated as a "rule" because it only matters once at least one
+    allow/block entry is configured.
+    """
+    return not (
+        rule.allowed_domains
+        or rule.blocked_domains
+        or rule.allowed_ips
+        or rule.blocked_ips
+        or rule.allowed_ports
+        or rule.blocked_ports
+    )
+
+
+def policy_has_network_rules(policy: NetworkPolicy) -> bool:
+    """Return True when the policy declares any explicit egress/ingress rule.
+
+    A policy that only sets ``mode`` (and leaves both ``egress`` and
+    ``ingress`` empty) is considered to have no rules. In that case the
+    server runtime can skip iptables programming entirely, so hosts that
+    do not ship ``iptables``/``iptables-nft`` still work.
+    """
+    return not (_rule_policy_is_empty(policy.egress) and _rule_policy_is_empty(policy.ingress))
+
+
 def build_network_rules(policy: NetworkRulePolicy) -> ResolvedNetworkRules:
     """Resolve domains/IPs and build a direction-agnostic network rule set."""
     rules = ResolvedNetworkRules(
@@ -119,7 +148,13 @@ def _existing_binaries(paths: tuple[str, ...]) -> list[str]:
     for path in paths:
         if path in result:
             continue
-        if path.startswith("/") and not shutil.which(path):
+        # ``shutil.which`` resolves both absolute paths and bare command
+        # names through ``$PATH``. Filtering both keeps callers from trying
+        # to ``exec`` a binary that simply is not installed on the host
+        # (otherwise ``subprocess.run`` would raise ``FileNotFoundError``
+        # later, which bypasses the ``NetworkSetupError`` handlers wired
+        # up by the server runtime).
+        if not shutil.which(path):
             continue
         result.append(path)
     return result
@@ -150,7 +185,17 @@ def _run_iptables_binary(
     if namespace:
         cmd = [IP_BINARY, "netns", "exec", namespace, *cmd]
     logger.debug("%s: %s", binary, " ".join(cmd))
-    result = subprocess.run(cmd, capture_output=True, text=True, check=False)
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, check=False)
+    except FileNotFoundError as exc:
+        # ``iptables`` (or ``ip`` when running inside a netns) is not on
+        # ``$PATH``. Surface this as a regular ``NetworkSetupError`` so the
+        # graceful handlers in the server runtime can downgrade it to a
+        # warning instead of crashing sandbox creation.
+        raise NetworkSetupError(
+            f"Required binary '{exc.filename or cmd[0]}' is not installed; "
+            f"cannot run '{' '.join(cmd)}'."
+        ) from exc
     if check and result.returncode != 0:
         raise NetworkSetupError(_format_command_error(cmd, result))
     return result
@@ -187,30 +232,15 @@ def _select_iptables_binary(ip_version: int, namespace: str | None = None) -> st
     raise NetworkSetupError(f"No working {family} iptables backend{target}. {detail}")
 
 
-def _run_iptables(
-    args: list[str],
-    check: bool = True,
-    namespace: str | None = None,
-    ip_version: int = 4,
-) -> subprocess.CompletedProcess:
-    """Run an iptables/ip6tables command."""
-    binary = _select_iptables_binary(ip_version, namespace)
-    return _run_iptables_binary(binary, args, check=check, namespace=namespace)
-
-
 def run_iptables(
     args: list[str],
     check: bool = True,
     namespace: str | None = None,
     ip_version: int = 4,
 ) -> subprocess.CompletedProcess:
-    """Run an iptables/ip6tables command for callers outside this module."""
-    return _run_iptables(
-        args,
-        check=check,
-        namespace=namespace,
-        ip_version=ip_version,
-    )
+    """Run an iptables/ip6tables command, picking the available backend."""
+    binary = _select_iptables_binary(ip_version, namespace)
+    return _run_iptables_binary(binary, args, check=check, namespace=namespace)
 
 
 def _ip_version(value: str) -> int:
@@ -229,7 +259,7 @@ def _run_iptables_for_ip(
     if ip_version == 6 and not _ip6tables_available(namespace):
         return subprocess.CompletedProcess(args=[], returncode=0, stdout="", stderr="")
 
-    return _run_iptables(
+    return run_iptables(
         args,
         check=check,
         namespace=namespace,
@@ -243,16 +273,16 @@ def _run_iptables_both(
     namespace: str | None = None,
 ) -> None:
     """Run a protocol-agnostic firewall rule for both IPv4 and IPv6."""
-    _run_iptables(args, check=check, namespace=namespace, ip_version=4)
+    run_iptables(args, check=check, namespace=namespace, ip_version=4)
     if _ip6tables_available(namespace):
-        _run_iptables(args, check=check, namespace=namespace, ip_version=6)
+        run_iptables(args, check=check, namespace=namespace, ip_version=6)
 
 
 @lru_cache(maxsize=128)
 def _ip6tables_available(namespace: str | None = None) -> bool:
     """Return whether ip6tables can manage rules in the target namespace."""
     try:
-        result = _run_iptables(
+        result = run_iptables(
             ["-L", "OUTPUT", "-n"],
             check=False,
             namespace=namespace,
@@ -321,16 +351,6 @@ def delete_named_namespace(namespace: str) -> None:
 def setup_loopback(namespace: str | None = None) -> None:
     """Bring up the loopback interface inside the network namespace."""
     _run_ip(["link", "set", "lo", "up"], namespace=namespace)
-
-
-def build_egress_rules(egress: NetworkRulePolicy) -> ResolvedNetworkRules:
-    """Resolve egress policy into iptables-ready rules."""
-    return build_network_rules(egress)
-
-
-def build_ingress_rules(ingress: NetworkRulePolicy) -> ResolvedNetworkRules:
-    """Resolve ingress policy into iptables-ready rules."""
-    return build_network_rules(ingress)
 
 
 def _apply_egress_rules(rules: ResolvedNetworkRules, namespace: str | None = None) -> None:
@@ -445,6 +465,6 @@ def setup_network_isolation(policy: NetworkPolicy, namespace: str | None = None)
         logger.info("Network mode is 'host', skipping isolation")
         return
 
-    egress_rules = build_egress_rules(policy.egress)
-    ingress_rules = build_ingress_rules(policy.ingress)
+    egress_rules = build_network_rules(policy.egress)
+    ingress_rules = build_network_rules(policy.ingress)
     apply_iptables_rules(egress_rules, ingress_rules, namespace=namespace)

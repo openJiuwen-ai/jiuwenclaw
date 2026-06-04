@@ -303,6 +303,7 @@ export default function CronPanel({ sessionId }: CronPanelProps) {
     { value: 'tui', label: t('cron.targets.tui'), disabled: !enabledChannels.has('tui') },
     { value: 'xiaoyi', label: t('cron.targets.xiaoyi'), disabled: !enabledChannels.has('xiaoyi') },
     { value: 'feishu', label: t('cron.targets.feishu'), disabled: !enabledChannels.has('feishu') },
+    { value: 'dingtalk', label: t('cron.targets.dingtalk'), disabled: !enabledChannels.has('dingtalk') },
     { value: 'whatsapp', label: t('cron.targets.whatsapp'), disabled: !enabledChannels.has('whatsapp') },
     { value: 'wecom', label: t('cron.targets.wecom'), disabled: !enabledChannels.has('wecom') },
     { value: 'wechat', label: t('cron.targets.wechat'), disabled: !enabledChannels.has('wechat') },

@@ -2,18 +2,12 @@
 """Process-based runtime adapter (bare-metal mode).
 
 Spawns bubblewrap directly for each sandbox lifecycle process and for each
-``exec`` request. The previous design wrapped every spawn with a Python
-``box-supervisor`` middleman (``python3 -m jiuwenbox.supervisor.main``); for
-hot-path workloads (uploads, exec, listings, downloads) that added ~150 ms of
-Python interpreter cold start plus YAML/Pydantic policy parsing per call.
-
-This adapter performs the equivalent setup in-process and reuses the
-expensive artifacts (seccomp BPF program, encoded Landlock payload, copies of
-the in-sandbox launcher scripts) for the lifetime of the sandbox while
-preserving the same security guarantees: bubblewrap still applies all
-namespace/mount/seccomp/Landlock isolation, the sandbox still runs through
-the dedicated launcher script, and the seccomp memfd still flows through
-``pass_fds`` so it cannot be observed by sandboxed code.
+``exec`` request. Setup runs in-process and reuses the expensive artifacts
+(seccomp BPF program, encoded Landlock payload, copies of the in-sandbox
+launcher scripts) for the lifetime of the sandbox: bubblewrap still applies
+all namespace/mount/seccomp/Landlock isolation, the sandbox still runs
+through the dedicated launcher script, and the seccomp memfd still flows
+through ``pass_fds`` so it cannot be observed by sandboxed code.
 """
 
 from __future__ import annotations
@@ -73,9 +67,6 @@ from jiuwenbox.supervisor.seccomp import build_seccomp_filter
 
 configure_logging()
 logger = logging.getLogger(__name__)
-RUNTIME_SANDBOX_ENV = "JIUWENBOX_SANDBOX_ENV"
-RUNTIME_SANDBOX_WORKDIR = "JIUWENBOX_SANDBOX_WORKDIR"
-RUNTIME_POLICY_BINDS = "JIUWENBOX_POLICY_BINDS"
 SERVER_PROTECT_PORTS_ENV = "JIUWENBOX_SERVER_PROTECT_PORTS"
 # Host-level firewall protection: for ``network.mode: host`` sandboxes we
 # attempt to install an iptables OUTPUT block by-sandbox-uid against the
@@ -84,8 +75,8 @@ SERVER_PROTECT_PORTS_ENV = "JIUWENBOX_SERVER_PROTECT_PORTS"
 # API. The default tracks the listener configured via ``JIUWENBOX_LISTEN``
 # (set by ``launcher.py``); operators who run the server on a non-default
 # port no longer have to remember to also bump this list. When
-# ``JIUWENBOX_LISTEN`` is UDS or unparseable we fall back to the historical
-# default of port 8321 so existing setups behave unchanged. The list can
+# ``JIUWENBOX_LISTEN`` is UDS or unparseable we fall back to the
+# historical default of port 8321 so existing setups behave unchanged. The list can
 # still be overridden via ``JIUWENBOX_SERVER_PROTECT_PORTS=...``
 # (comma-separated integers) or disabled entirely by exporting empty.
 #
@@ -103,7 +94,7 @@ def _derive_protect_ports_from_listen() -> tuple[int, ...]:
     """Extract a TCP port from ``$JIUWENBOX_LISTEN`` for self-protection.
 
     Recognized shapes (matching ``launcher.parse_listen``):
-        - ``tcp://host:port``  -> ``(port,)``
+        - ``http://host:port`` -> ``(port,)``
         - ``unix:///abs/path`` -> ``()`` (no TCP port to protect)
 
     Anything else (env unset, malformed) returns the historical default of
@@ -116,11 +107,11 @@ def _derive_protect_ports_from_listen() -> tuple[int, ...]:
         return DEFAULT_SERVER_PROTECT_PORTS
     if uri.startswith("unix://"):
         return ()
-    if uri.startswith("tcp://"):
-        # ``tcp://0.0.0.0:8321`` -> ``("0.0.0.0", "8321")``. ``rsplit``
-        # guards against IPv6 hosts like ``tcp://[::]:8321`` where ``:``
+    if uri.startswith("http://"):
+        # ``http://0.0.0.0:8321`` -> ``("0.0.0.0", "8321")``. ``rsplit``
+        # guards against IPv6 hosts like ``http://[::]:8321`` where ``:``
         # appears multiple times.
-        host_port = uri[len("tcp://"):]
+        host_port = uri[len("http://"):]
         try:
             _, port_str = host_port.rsplit(":", 1)
             port = int(port_str)
@@ -156,6 +147,12 @@ DAEMON_CONNECT_TIMEOUT_SECONDS = 2.0
 DAEMON_SHUTDOWN_TIMEOUT_SECONDS = 3.0
 DAEMON_STARTUP_GRACE_SECONDS = 0.3
 DAEMON_MAX_RESPONSE_BYTES = 256 * 1024 * 1024
+# Upper bound on how much of the daemon's spawn-time stdout/stderr we
+# include in the ``RuntimeError`` raised when the supervisor exits before
+# becoming ready. 16 KiB comfortably fits a Python traceback plus a few
+# lines of bwrap/seccomp/landlock diagnostics, while keeping the resulting
+# exception message bounded for callers that surface it over HTTP.
+DAEMON_STARTUP_LOG_MAX_BYTES = 16 * 1024
 # File ops (upload/download/list) are CPU-cheap on the daemon side - it
 # is just an open/read/write or scandir call. Cap the IPC roundtrip at a
 # short upper bound so a wedged daemon does not stall HTTP requests.
@@ -203,11 +200,6 @@ RECOVERABLE_DAEMON_ERRNOS: frozenset[int] = frozenset(
         errno.EWOULDBLOCK,
     ),
 )
-
-# Convenience union for any errno we should *not* let bubble out of an
-# IPC roundtrip as an unhandled OSError (which would otherwise crash the
-# route handler and surface as ``Server disconnected``).
-TRANSIENT_DAEMON_ERRNOS: frozenset[int] = FATAL_DAEMON_ERRNOS | RECOVERABLE_DAEMON_ERRNOS
 
 
 @dataclasses.dataclass(frozen=True)
@@ -707,8 +699,7 @@ class ProcessRuntime(RuntimeAdapter):
     def _open_seccomp_fd_from_bytes(bpf: bytes) -> int:
         """Create an anonymous memfd preloaded with ``bpf`` for bwrap.
 
-        Mirrors :func:`jiuwenbox.supervisor.seccomp.open_seccomp_filter` but
-        works from cached BPF bytes so the BPF program does not have to be
+        Works from cached BPF bytes so the BPF program does not have to be
         re-assembled for every exec.
         """
         if not hasattr(os, "memfd_create"):
@@ -739,10 +730,8 @@ class ProcessRuntime(RuntimeAdapter):
     ) -> list[str]:
         """Build a ready-to-spawn bwrap argv vector for ``command``.
 
-        This collapses the work that used to happen inside the long-lived
-        ``box-supervisor`` Python process into the box-server itself. Caches
-        populated during :meth:`create` (policy binds, launcher scripts,
-        seccomp BPF, landlock payload) keep the per-call cost low.
+        Caches populated during :meth:`create` (policy binds, launcher
+        scripts, seccomp BPF, landlock payload) keep the per-call cost low.
         """
         config = BwrapConfig.from_policy(policy, list(command))
         if sandbox_env:
@@ -927,7 +916,7 @@ class ProcessRuntime(RuntimeAdapter):
             # bound. ``launcher.main`` always writes the resolved listen
             # URI back to ``$JIUWENBOX_LISTEN`` (see launcher.py:234) so
             # this stays consistent even when the operator passed
-            # ``--listen tcp://0.0.0.0:18321``.
+            # ``--listen http://0.0.0.0:18321``.
             return list(_derive_protect_ports_from_listen())
         if not raw_ports.strip():
             return []
@@ -1018,6 +1007,20 @@ class ProcessRuntime(RuntimeAdapter):
         policy: SecurityPolicy,
     ) -> None:
         if policy.network.mode != NetworkMode.HOST:
+            return
+
+        if not network_module.policy_has_network_rules(policy.network):
+            # The operator declared ``mode: host`` and did not list any
+            # egress/ingress entries, so they have explicitly opted out of
+            # all network restrictions. Skip the implicit iptables-based
+            # box-server self-protection in that case: it lets jiuwenbox
+            # run on hosts that do not ship ``iptables`` / ``iptables-nft``
+            # at all, matching the behavior promised by the policy.
+            logger.debug(
+                "Skipping host firewall install for sandbox %s "
+                "(policy declares no egress/ingress rules)",
+                sandbox_id,
+            )
             return
 
         ports = self._server_protect_ports()
@@ -1247,52 +1250,6 @@ class ProcessRuntime(RuntimeAdapter):
         if not namespace:
             return command
         return [network_module.IP_BINARY, "netns", "exec", namespace, *command]
-
-    @staticmethod
-    def _apply_runtime_env(
-        process_env: dict[str, str],
-        *,
-        netns_name: str | None,
-        policy_binds: list[dict[str, str]],
-        sandbox_env: dict[str, str] | None = None,
-        sandbox_workdir: str | None = None,
-    ) -> None:
-        if netns_name:
-            process_env["JIUWENBOX_NETNS_READY"] = "1"
-        if policy_binds:
-            process_env[RUNTIME_POLICY_BINDS] = json.dumps(
-                policy_binds,
-                separators=(",", ":"),
-            )
-        else:
-            process_env.pop(RUNTIME_POLICY_BINDS, None)
-        if sandbox_env is not None:
-            process_env[RUNTIME_SANDBOX_ENV] = json.dumps(
-                sandbox_env,
-                separators=(",", ":"),
-            )
-        if sandbox_workdir:
-            process_env[RUNTIME_SANDBOX_WORKDIR] = sandbox_workdir
-        else:
-            process_env.pop(RUNTIME_SANDBOX_WORKDIR, None)
-
-    def _network_mode_for_cleanup(self, sandbox_id: str) -> NetworkMode | None:
-        mode = self._network_modes.get(sandbox_id)
-        if mode is not None:
-            return mode
-
-        policy_path = self._policy_paths.get(sandbox_id)
-        if policy_path is None or not policy_path.exists():
-            return None
-
-        try:
-            mode = self._load_policy(policy_path).network.mode
-        except Exception:
-            logger.warning("Failed to reload policy for sandbox %s during cleanup", sandbox_id, exc_info=True)
-            return None
-
-        self._network_modes[sandbox_id] = mode
-        return mode
 
     def _policy_for_sandbox(self, sandbox_id: str, policy_path: Path) -> SecurityPolicy:
         policy = self._runtime_policies.get(sandbox_id)
@@ -1625,7 +1582,6 @@ class ProcessRuntime(RuntimeAdapter):
         self,
         sandbox_id: str,
         policy_path: Path,
-        workdir: str | None = None,
         env: dict[str, str] | None = None,
     ) -> int:
         existing = self._processes.get(sandbox_id)
@@ -1677,7 +1633,7 @@ class ProcessRuntime(RuntimeAdapter):
             policy,
             list(SANDBOX_DAEMON_COMMAND),
             is_daemon=True,
-            workdir=workdir,
+            workdir=None,
             sandbox_env=env,
             netns_attached=netns_name is not None,
             seccomp_fd=seccomp_fd,
@@ -1686,10 +1642,9 @@ class ProcessRuntime(RuntimeAdapter):
         daemon_cmd = self._wrap_command_in_namespace(bwrap_args, netns_name)
 
         process_env = {**os.environ, **(env or {})}
-        # Forward the listener fd number to bwrap (and onward to the
-        # daemon) via env so the daemon can recover it without having to
-        # parse ``argv``.
-        process_env[LISTENER_FD_ENV] = str(listener_fd)
+        # ``LISTENER_FD_ENV`` is injected into the sandboxed process via
+        # ``BwrapConfig.env`` -> ``bwrap --setenv``; bwrap itself never
+        # consumes it, so we no longer set it on the bwrap parent env.
 
         logger.info("Spawning sandbox daemon for %s", sandbox_id)
         logger.debug("Sandbox daemon bwrap command for %s: %s", sandbox_id, daemon_cmd)
@@ -1755,23 +1710,32 @@ class ProcessRuntime(RuntimeAdapter):
 
         preexec = _preexec_attach_to_cgroup if cgroup_procs_paths else None
 
+        # Capture daemon stdout/stderr into an anonymous tempfile so that
+        # if the supervisor dies before becoming ready we can include the
+        # actual error (Python traceback, bwrap/seccomp/landlock message,
+        # missing binary, ...) in the ``RuntimeError`` surfaced upstream.
+        # The previous implementation routed both streams to ``DEVNULL``,
+        # which left operators with only ``exited with code 1`` to go on.
+        # The file is unlinked at create time so it cannot leak onto disk
+        # under any host path; the parent always closes its handle after
+        # startup verification, and the daemon's own fd is reaped by the
+        # kernel when the supervisor exits.
+        startup_log_file = tempfile.TemporaryFile(
+            prefix=f"jiuwenbox-{sandbox_id}-startup-",
+            suffix=".log",
+        )
         try:
-            # Daemon stdout/stderr is unconditionally dropped at the
-            # kernel level: the audit.log already captures per-command
-            # stdout/stderr (truncated to 4 KiB) and the historical
-            # runtime.log file was removed. Anyone needing the raw
-            # stream should run the container with ``-it`` and inspect
-            # the bwrap output live; persistence is intentionally gone.
             proc = subprocess.Popen(
                 daemon_cmd,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
+                stdout=startup_log_file,
+                stderr=subprocess.STDOUT,
                 env=process_env,
                 pass_fds=pass_fds,
                 start_new_session=True,
                 preexec_fn=preexec,
             )
         except Exception:
+            startup_log_file.close()
             if seccomp_fd is not None:
                 _safe_close_fd(seccomp_fd)
             try:
@@ -1805,7 +1769,17 @@ class ProcessRuntime(RuntimeAdapter):
         if cgroup_handle is not None:
             self._cgroup_handles[sandbox_id] = cgroup_handle
 
-        await self._wait_daemon_ready(sandbox_id, proc, netns_name)
+        try:
+            await self._wait_daemon_ready(
+                sandbox_id, proc, netns_name, startup_log_file,
+            )
+        finally:
+            # Parent no longer needs the fd; the daemon keeps writing into
+            # its own (kernel-anonymous) copy until it exits.
+            try:
+                startup_log_file.close()
+            except OSError:
+                pass
         logger.info("Sandbox daemon started for %s (pid=%d)", sandbox_id, proc.pid)
         return proc.pid
 
@@ -1814,6 +1788,7 @@ class ProcessRuntime(RuntimeAdapter):
         sandbox_id: str,
         proc: subprocess.Popen,
         netns_name: str | None,
+        startup_log_file: Any | None = None,
     ) -> None:
         """Verify the daemon is alive and mark its IPC channel ready.
 
@@ -1824,9 +1799,16 @@ class ProcessRuntime(RuntimeAdapter):
         ``accept()`` (so the very first request does not block waiting for
         a worker thread to spin up) and confirm the bwrap parent has not
         already exited with an error.
+
+        ``startup_log_file`` is the tempfile that captured the daemon's
+        stdout/stderr; on failure :meth:`_verify_daemon_alive` reads from
+        it to enrich the resulting ``RuntimeError`` with the underlying
+        diagnostic (Python traceback, bwrap message, ...). It is optional
+        so existing call sites and tests that build the runtime by hand
+        can still drive the verification step without one.
         """
         await asyncio.sleep(DAEMON_STARTUP_GRACE_SECONDS)
-        self._verify_daemon_alive(sandbox_id, proc, netns_name)
+        self._verify_daemon_alive(sandbox_id, proc, netns_name, startup_log_file)
         self._daemon_socket_ready[sandbox_id] = True
 
     def _verify_daemon_alive(
@@ -1834,21 +1816,56 @@ class ProcessRuntime(RuntimeAdapter):
         sandbox_id: str,
         proc: subprocess.Popen,
         netns_name: str | None,
+        startup_log_file: Any | None = None,
     ) -> None:
         if proc.poll() is None:
             return
         self._processes.pop(sandbox_id, None)
         self._cleanup_sandbox_artifacts(sandbox_id, netns_name)
-        # Raw daemon stdout/stderr is no longer persisted (see the
-        # ``Popen(DEVNULL)`` call in ``_spawn_supervisor``); we surface
-        # only the returncode here. For deeper debugging the operator
-        # should re-run with ``docker run -it`` so the bwrap output
-        # streams to the terminal.
-        raise RuntimeError(
-            f"Sandbox daemon exited during startup with code {proc.returncode}; "
-            f"runtime stdout/stderr persistence is disabled (only audit.log "
-            f"is written)."
+        log_excerpt = self._read_daemon_startup_log(startup_log_file)
+        message = (
+            f"Sandbox daemon exited during startup with code {proc.returncode}."
         )
+        if log_excerpt:
+            message = (
+                f"{message} Captured daemon stdout/stderr (truncated to "
+                f"{DAEMON_STARTUP_LOG_MAX_BYTES} bytes):\n{log_excerpt}"
+            )
+        else:
+            # The previous code path advertised "stdout/stderr persistence
+            # is disabled"; we now always try to capture, so an empty log
+            # really does mean the daemon died silently (e.g. via a fast
+            # ``exit(1)`` before printing anything).
+            message = (
+                f"{message} No stdout/stderr was captured before the "
+                f"daemon exited; re-run with the container attached "
+                f"(``docker run -it``) to see live bwrap output."
+            )
+        raise RuntimeError(message)
+
+    @staticmethod
+    def _read_daemon_startup_log(startup_log_file: Any | None) -> str:
+        """Return a bounded UTF-8 excerpt of the daemon's startup log.
+
+        The file is the anonymous tempfile installed by ``_spawn_supervisor``
+        as the daemon's stdout/stderr. By the time we get here the daemon
+        has already exited (``_verify_daemon_alive`` only calls in after
+        ``proc.poll()`` returned a non-None code), so ``read`` will not
+        block waiting for additional bytes. All errors are swallowed and
+        turned into a synthetic placeholder line: failing to enrich the
+        diagnostic must never mask the original ``RuntimeError``.
+        """
+        if startup_log_file is None:
+            return ""
+        try:
+            startup_log_file.seek(0)
+            data = startup_log_file.read(DAEMON_STARTUP_LOG_MAX_BYTES)
+        except (OSError, ValueError) as exc:
+            return f"<failed to read daemon startup log: {exc}>"
+        if not data:
+            return ""
+        text = data.decode("utf-8", errors="replace").rstrip()
+        return text
 
     def _cleanup_sandbox_artifacts(
         self,

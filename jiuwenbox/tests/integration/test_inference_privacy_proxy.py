@@ -1,7 +1,6 @@
 """Integration tests for HTTP-aware inference privacy proxy with path routing."""
 
 import asyncio
-import copy
 import http.client
 import json
 import logging
@@ -25,42 +24,7 @@ from jiuwenbox.proxy.inference_privacy_proxy_manager import (
 )
 
 NUM_THREADS = 5
-
-SYSTEM_BIND_MOUNTS = [
-    {"host_path": "/bin", "sandbox_path": "/bin", "mode": "ro"},
-    {"host_path": "/sbin", "sandbox_path": "/sbin", "mode": "ro"},
-    {"host_path": "/usr", "sandbox_path": "/usr", "mode": "ro"},
-    {"host_path": "/lib", "sandbox_path": "/lib", "mode": "ro"},
-    {"host_path": "/lib64", "sandbox_path": "/lib64", "mode": "ro"},
-    {"host_path": "/etc/resolv.conf", "sandbox_path": "/etc/resolv.conf", "mode": "ro"},
-    {"host_path": "/etc/hosts", "sandbox_path": "/etc/hosts", "mode": "ro"},
-    {"host_path": "/etc/nsswitch.conf", "sandbox_path": "/etc/nsswitch.conf", "mode": "ro"},
-    {"host_path": "/etc/host.conf", "sandbox_path": "/etc/host.conf", "mode": "ro"},
-    {"host_path": "/etc/ssl/certs", "sandbox_path": "/etc/ssl/certs", "mode": "ro"},
-    {"host_path": "/etc/ssl/openssl.cnf", "sandbox_path": "/etc/ssl/openssl.cnf", "mode": "ro"},
-    {"host_path": "/opt", "sandbox_path": "/opt", "mode": "ro"},
-]
-TMP_DIRECTORY = {"path": "/tmp", "permissions": "1777"}
-LONG_RUNNING_COMMAND = ["python3", "-c", "import time; time.sleep(36000)"]
 logger = logging.getLogger(__name__)
-
-
-def _with_runtime_support(policy: dict) -> dict:
-    runtime_policy = copy.deepcopy(policy)
-    filesystem_policy = runtime_policy.setdefault("filesystem_policy", {})
-    bind_mounts = filesystem_policy.setdefault("bind_mounts", [])
-    for mount in SYSTEM_BIND_MOUNTS:
-        if mount not in bind_mounts:
-            bind_mounts.append(mount.copy())
-
-    directories = filesystem_policy.setdefault("directories", [])
-    if "/tmp" in filesystem_policy.get("read_write", []) and not any(
-        d == "/tmp" or (isinstance(d, dict) and d.get("path") == "/tmp")
-        for d in directories
-    ):
-        directories.append(TMP_DIRECTORY.copy())
-
-    return runtime_policy
 
 
 @pytest.fixture

@@ -84,10 +84,17 @@ def normalize_distributed_transport_fields(
     params = transport_cfg.get("params", {})
     if not isinstance(params, dict):
         return normalized_cfg
+
+    role = runtime_role(config_base)
+    if role == "leader":
+        # Apply even when pubsub/direct_addr are pre-filled in the YAML template.
+        params.pop("known_peers", None)
+        params.pop("bootstrap_peers", None)
+        params.pop("bootstrap_known_peers", None)
+
     if params.get("pubsub_publish_addr") and params.get("pubsub_subscribe_addr"):
         return normalized_cfg
 
-    role = runtime_role(config_base)
     leader_cfg = params.get("leader", {}) if isinstance(params.get("leader"), dict) else {}
     teammate_cfg = params.get("teammate", {}) if isinstance(params.get("teammate"), dict) else {}
     leader_host = str(leader_cfg.get("host", "127.0.0.1")).strip() or "127.0.0.1"
@@ -106,29 +113,22 @@ def normalize_distributed_transport_fields(
         18557,
         "team.transport.params.leader.sub_port",
     )
-    teammate_host = str(teammate_cfg.get("host", "127.0.0.1")).strip() or "127.0.0.1"
-    teammate_direct_port = parse_port(
-        teammate_cfg.get("direct_port"),
-        18600,
-        "team.transport.params.teammate.direct_port",
-    )
-
-    local_member_name = runtime_member_name(config_base, normalized_cfg) or "teammate_1"
-    leader_member_name = "team_leader"
-    leader_identity_cfg = normalized_cfg.get("leader", {})
-    if isinstance(leader_identity_cfg, dict):
-        leader_member_name = str(leader_identity_cfg.get("member_name", "")).strip() or leader_member_name
-
     if role == "leader":
         local_direct_addr = f"tcp://0.0.0.0:{leader_direct_port}"
-        known_peers = [
-            {
-                "agent_id": local_member_name,
-                "addrs": [f"tcp://{teammate_host}:{teammate_direct_port}"],
-            }
-        ]
         pubsub_bind = True
     else:
+        leader_member_name = "team_leader"
+        leader_identity_cfg = normalized_cfg.get("leader", {})
+        if isinstance(leader_identity_cfg, dict):
+            leader_member_name = (
+                str(leader_identity_cfg.get("member_name", "")).strip() or leader_member_name
+            )
+        teammate_host = str(teammate_cfg.get("host", "127.0.0.1")).strip() or "127.0.0.1"
+        teammate_direct_port = parse_port(
+            teammate_cfg.get("direct_port"),
+            18600,
+            "team.transport.params.teammate.direct_port",
+        )
         local_direct_addr = f"tcp://0.0.0.0:{teammate_direct_port}"
         known_peers = [
             {
@@ -137,12 +137,12 @@ def normalize_distributed_transport_fields(
             }
         ]
         pubsub_bind = False
+        params["known_peers"] = known_peers
+        params["bootstrap_peers"] = known_peers
 
     params["direct_addr"] = local_direct_addr
     params["pubsub_publish_addr"] = f"tcp://{leader_host}:{leader_pub_port}"
     params["pubsub_subscribe_addr"] = f"tcp://{leader_host}:{leader_sub_port}"
-    params["known_peers"] = known_peers
-    params["bootstrap_peers"] = known_peers
     metadata = params.get("metadata", {})
     if not isinstance(metadata, dict):
         metadata = {}

@@ -13,7 +13,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from openjiuwen.agent_evolving.trajectory import FileTrajectoryStore, TrajectoryStore
 from openjiuwen.core.foundation.tool import ToolCard
 from openjiuwen.harness.rails import (
     SysOperationRail,
@@ -24,6 +23,7 @@ from openjiuwen.harness.rails import (
     TeamSkillEvolutionRail,
     TeamSkillCreateRail,
 )
+from openjiuwen.harness.rails.context_engineer import ContextProcessorRail
 
 from jiuwenswarm.agents.harness.common.rails.avatar_rail import AvatarPromptRail
 from jiuwenswarm.agents.harness.common.rails.response_prompt_rail import ResponsePromptRail
@@ -31,6 +31,7 @@ from jiuwenswarm.agents.harness.common.rails.runtime_prompt_rail import RuntimeP
 from jiuwenswarm.agents.harness.common.rails.stream_event_rail import JiuClawStreamEventRail
 from jiuwenswarm.agents.harness.team.rails.team_workspace_report_path_rail import TeamWorkspaceReportPathRail
 from jiuwenswarm.common.config import get_config
+from jiuwenswarm.server.runtime.skill import load_execution_disabled_skills
 
 logger = logging.getLogger(__name__)
 
@@ -55,9 +56,9 @@ class TeamWorkspaceInfo:
     """Team 共享 workspace 信息."""
     root_dir: str | None = None
     skills_dir: str | None = None
-    trajectories_dir: str | None = None
     team_id: str | None = None
     config: dict[str, Any] | None = None
+    trajectory_registry: Any | None = None
 
 
 RAIL_WHITELIST = frozenset({
@@ -74,6 +75,7 @@ RAIL_WHITELIST = frozenset({
     "TeamSkillCreateRail",
     "SkillEvolutionRail",
     "TeamWorkspaceReportPathRail",
+    "ContextProcessorRail",
 })
 
 TOOL_WHITELIST = frozenset({
@@ -92,7 +94,6 @@ TOOL_WHITELIST = frozenset({
     "search_skill",
     "install_skill",
     "uninstall_skill",
-    "task_tool",
     "user_todos",
     "get_user_location",
     "create_note",
@@ -152,25 +153,11 @@ def build_member_rails(
     language = runtime.language
     team_ws_root = team_workspace.root_dir
     team_ws_skills_dir = team_workspace.skills_dir
-    team_trajectories_dir = team_workspace.trajectories_dir
     team_id = team_workspace.team_id
     config = team_workspace.config
+    team_trajectory_registry = team_workspace.trajectory_registry
 
     rails_list = []
-    shared_team_trajectory_store: TrajectoryStore | None = None
-    if team_trajectories_dir:
-        try:
-            shared_team_trajectory_store = FileTrajectoryStore(Path(team_trajectories_dir))
-            logger.info(
-                "[TeamRuntime] Shared team trajectory store created: %s",
-                team_trajectories_dir,
-            )
-        except Exception as exc:
-            logger.warning(
-                "[TeamRuntime] Shared team trajectory store failed: dir=%s error=%s",
-                team_trajectories_dir,
-                exc,
-            )
 
     try:
         rail = RuntimePromptRail(
@@ -197,7 +184,10 @@ def build_member_rails(
         logger.warning("[TeamRuntime] FileSystemRail failed: %s", exc)
 
     try:
-        rail = JiuClawStreamEventRail()
+        rail = JiuClawStreamEventRail(
+            member_name=member_info.agent_name,
+            role=member_info.role,
+        )
         rails_list.append(rail)
         logger.info("[TeamRuntime] JiuClawStreamEventRail created")
     except Exception as exc:
@@ -252,25 +242,28 @@ def build_member_rails(
             Path(team_ws_skills_dir).mkdir(parents=True, exist_ok=True)
             llm_model, actual_model_name = build_evolution_llm()
             evolution_auto_scan = get_evolution_auto_scan_enabled(config)
+            bound_team_trajectory_registry = team_trajectory_registry if team_id else None
             team_skill_rail = TeamSkillEvolutionRail(
                 skills_dir=team_ws_skills_dir,
                 llm=llm_model,
                 model=actual_model_name,
                 language=language,
-                team_trajectory_store=shared_team_trajectory_store,
+                trajectory_source=bound_team_trajectory_registry,
+                trajectory_sink=bound_team_trajectory_registry,
+                member_role=role,
                 auto_scan=evolution_auto_scan,
                 auto_save=False,
                 team_id=team_id,
-                trajectories_dir=Path(team_trajectories_dir) if team_trajectories_dir else None,
+                disabled_skills=load_execution_disabled_skills(),
             )
             rails_list.append(team_skill_rail)
             logger.info(
                 "[TeamRuntime] TeamSkillEvolutionRail created: skills_dir=%s, "
-                "model=%s, auto_scan=%s, team_trajectories_dir=%s",
+                "model=%s, auto_scan=%s, team_trajectory_registry=%s",
                 team_ws_skills_dir,
                 actual_model_name,
                 evolution_auto_scan,
-                team_trajectories_dir,
+                bool(bound_team_trajectory_registry),
             )
         except Exception as exc:
             logger.warning("[TeamRuntime] TeamSkillEvolutionRail failed: %s", exc, exc_info=True)
@@ -298,10 +291,17 @@ def build_member_rails(
         evo_rail = build_skill_evolution_rail(
             skills_dir=team_ws_skills_dir,
             config=config,
-            team_trajectory_store=shared_team_trajectory_store,
+            team_trajectory_sink=team_trajectory_registry,
+            team_id=team_id,
         )
         if evo_rail is not None:
             rails_list.append(evo_rail)
+
+    # Context compression rail for all members (leader + teammates).
+    if get_context_engine_enabled(config):
+        rail = _build_context_processor_rail(config)
+        if rail is not None:
+            rails_list.append(rail)
 
     logger.info("[TeamRuntime] Total rails built: %d", len(rails_list))
     return rails_list
@@ -471,6 +471,9 @@ def build_evolution_llm(
 
     model_client_config, model_config_obj, model_name = resolve_model_config(config)
 
+    from jiuwenswarm.common.openrouter_attribution import inject_attribution_headers
+    inject_attribution_headers(model_client_config)
+
     request_config = ModelRequestConfig(
         model=model_name,
         temperature=model_config_obj.get("temperature", 0.95),
@@ -482,7 +485,8 @@ def build_evolution_llm(
 def build_skill_evolution_rail(
     skills_dir: str,
     config: dict[str, Any] | None = None,
-    team_trajectory_store: TrajectoryStore | None = None,
+    team_trajectory_sink: Any | None = None,
+    team_id: str | None = None,
 ) -> Any | None:
     """为 Team member 构造 SkillEvolutionRail.
 
@@ -503,15 +507,87 @@ def build_skill_evolution_rail(
             model=model_name,
             auto_scan=evolution_auto_scan,
             auto_save=True,
-            team_trajectory_store=team_trajectory_store,
+            disabled_skills=load_execution_disabled_skills(),
         )
+        if team_trajectory_sink is not None and team_id:
+            rail.set_trajectory_sink(
+                team_trajectory_sink,
+                team_id=team_id,
+                member_role="teammate",
+            )
         logger.info(
-            "[TeamRuntime] SkillEvolutionRail created: model=%s, auto_scan=%s, shared_team_store=%s",
+            "[TeamRuntime] SkillEvolutionRail created: model=%s, auto_scan=%s, "
+            "team_trajectory_sink=%s",
             model_name,
             evolution_auto_scan,
-            bool(team_trajectory_store),
+            team_trajectory_sink is not None and bool(team_id),
         )
         return rail
     except Exception as exc:
         logger.warning("[TeamRuntime] SkillEvolutionRail creation failed: %s", exc, exc_info=True)
+        return None
+
+
+def get_context_engine_enabled(config: dict[str, Any] | None) -> bool:
+    """Check whether context compression is enabled in config.
+
+    Reads ``react.context_engine_config.enabled`` (default True).
+    """
+    if not isinstance(config, dict):
+        return True
+    react = config.get("react", {})
+    if isinstance(react, dict):
+        ctx_cfg = react.get("context_engine_config", {})
+        if isinstance(ctx_cfg, dict):
+            return ctx_cfg.get("enabled", True)
+    return True
+
+
+def _build_context_processor_rail(config: dict[str, Any] | None) -> ContextProcessorRail | None:
+    """Build a preset ContextProcessorRail for team members with user config thresholds.
+
+    Mirrors the logic in interface_deep._build_context_processor_rail:
+    reads processor configs from react.context_engine_config and passes
+    them as (name, dict) pairs to ContextProcessorRail.
+    """
+    try:
+        from typing import List, Tuple
+
+        user_processors: List[Tuple[str, dict]] = []
+        ctx_cfg: dict[str, Any] = {}
+        if isinstance(config, dict):
+            react = config.get("react", {})
+            if isinstance(react, dict):
+                ctx_cfg = react.get("context_engine_config", {})
+                if not isinstance(ctx_cfg, dict):
+                    ctx_cfg = {}
+
+        offloader_cfg = ctx_cfg.get("message_summary_offloader_config", {})
+        if isinstance(offloader_cfg, dict) and offloader_cfg:
+            user_processors.append(("MessageSummaryOffloader", offloader_cfg))
+
+        compressor_cfg = ctx_cfg.get("dialogue_compressor_config", {})
+        if isinstance(compressor_cfg, dict) and compressor_cfg:
+            user_processors.append(("DialogueCompressor", compressor_cfg))
+
+        current_round_cfg = ctx_cfg.get("current_round_compressor_config", {})
+        if isinstance(current_round_cfg, dict) and current_round_cfg:
+            user_processors.append(("CurrentRoundCompressor", current_round_cfg))
+
+        round_level_cfg = ctx_cfg.get("round_level_compressor_config", {})
+        if isinstance(round_level_cfg, dict) and round_level_cfg:
+            user_processors.append(("RoundLevelCompressor", round_level_cfg))
+
+        rail = ContextProcessorRail(
+            processors=user_processors if user_processors else None,
+            preset=True,
+        )
+        logger.info(
+            "[TeamRuntime] ContextProcessorRail created (preset=True), "
+            "user_processors=%s",
+            [p[0] for p in user_processors] if user_processors else "none",
+        )
+        return rail
+    except Exception as exc:
+        logger.warning("[TeamRuntime] ContextProcessorRail creation failed: %s", exc, exc_info=True)
         return None

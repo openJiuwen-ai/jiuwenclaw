@@ -85,7 +85,6 @@ SANDBOX_LAUNCHER_PATH = f"{SANDBOX_RESERVED_DIR}/landlock-launcher.py"
 SANDBOX_DAEMON_COMMAND = ["python3", "-S", SANDBOX_DAEMON_SANDBOX_PATH]
 LISTENER_FD_ENV = "JIUWENBOX_CONTROL_LISTENER_FD"
 
-REQUEST_TYPE_PING = "ping"
 REQUEST_TYPE_EXEC = "exec"
 REQUEST_TYPE_SHUTDOWN = "shutdown"
 REQUEST_TYPE_WRITE_FILE = "write_file"
@@ -692,11 +691,6 @@ def _handle_connection(conn: socket.socket, state: DaemonState) -> None:
         request_type = header.get("type")
         if request_type == REQUEST_TYPE_EXEC:
             _handle_exec(conn, header, state)
-        elif request_type == REQUEST_TYPE_PING:
-            _send_response(
-                conn,
-                {"v": PROTOCOL_VERSION, "ok": True, "type": "pong"},
-            )
         elif request_type == REQUEST_TYPE_SHUTDOWN:
             _send_response(
                 conn,

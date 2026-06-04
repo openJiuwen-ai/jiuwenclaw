@@ -1,4 +1,4 @@
-import type { HistoryItem } from "../types.js";
+import type { HistoryItem, TeamMessageEvent } from "../types.js";
 import type { AccentColorName, ThemeName } from "../../ui/theme.js";
 import type { PendingQuestionItem, UserAnswer } from "../event-handlers.js";
 import type { FileAttachment } from "../protocol.js";
@@ -6,7 +6,9 @@ import type { ConfigItemSchema } from "./builtins/config.js";
 import type { ClientMode } from "../modes.js";
 import type { SessionUsageSummary } from "../../app-state.js";
 
-export type ConnectionStatus = "idle" | "connecting" | "connected" | "reconnecting" | "auth_failed";
+export type ConnectionStatus = "idle" | "connecting" | "connected" | "reconnecting" | "auth_failed" | "message_too_big";
+
+export type PreferredLanguage = "zh" | "en";
 
 export type StatusViewTab = "status" | "usage" | "config";
 
@@ -42,7 +44,10 @@ export interface CommandContext {
     options?: { logAsUser?: boolean },
   ) => string | null;
   sessionId: string;
+  preferredLanguage: PreferredLanguage;
   entries: HistoryItem[];
+  /** Sidechain / team messages (not part of main conversation entries) */
+  teamMessageEvents: TeamMessageEvent[];
   themeName: ThemeName;
   accentColor: AccentColorName;
   updateSession: (id: string) => void;
@@ -59,6 +64,7 @@ export interface CommandContext {
   mode: ClientMode;
   setMode: (mode: ClientMode) => void;
   setModel: (name: string) => void;
+  setPreferredLanguage: (language: PreferredLanguage) => void;
   setThemeName: (theme: ThemeName) => void;
   setAccentColor: (color: AccentColorName) => void;
   transcriptMode: "compact" | "detailed";
@@ -86,12 +92,17 @@ export interface CommandContext {
   enterConfigEditor?: (
     focusKey?: string,
     configPayload?: Record<string, unknown> & { schema?: ConfigItemSchema[] },
+    mode?: "edit" | "reset",
   ) => void;
   enterStatusView?: (tab?: StatusViewTab) => void;
   openInEditor?: (filePath: string) => void;
   /** Enter FileViewer mode to view large content (e.g., formatted logs) */
   enterFileViewer?: (content: string, title: string, source: string) => void;
   restartStatusLine?: () => void;
+  /** Get the current JSON data that would be piped to the statusline command */
+  getStatusLineJsonInput?: () => Record<string, unknown>;
+  /** Check if there are running team-related tasks that would be interrupted by mode switch */
+  hasRunningTeamTasks?: () => boolean;
 }
 
 export interface SlashCommand {
@@ -107,6 +118,7 @@ export interface SlashCommand {
    * e.g.  "name=任务名 cron_expr=\"时间\" description=\"让Agent做什么\""
    */
   argGuide?: string;
+  /** 在/help中隐藏，但仍可执行 */
   hidden?: boolean;
   isSafeConcurrent?: boolean;
   kind: CommandKind;

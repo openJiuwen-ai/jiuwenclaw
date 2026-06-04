@@ -183,6 +183,8 @@ class CronTools:
             return CronTargetChannel.WHATSAPP.value
         if channel.startswith("wechat"):
             return CronTargetChannel.WECHAT.value
+        if channel.startswith("dingtalk"):
+            return CronTargetChannel.DINGTALK.value
         if channel.startswith("tui"):
             return CronTargetChannel.TUI.value
 

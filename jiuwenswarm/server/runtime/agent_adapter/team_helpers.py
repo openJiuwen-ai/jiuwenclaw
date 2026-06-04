@@ -6,11 +6,14 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import time
 from typing import Any, AsyncIterator
 
+from openjiuwen.agent_teams.paths import get_agent_teams_home
 from openjiuwen.agent_teams.runtime import RunActionKind
 from openjiuwen.agent_teams.schema.team import TeamRole
+from openjiuwen.agent_teams.monitor import TeamStreamLogger
 from openjiuwen.core.runner import Runner
 from openjiuwen.harness import DeepAgent
 
@@ -18,8 +21,10 @@ from jiuwenswarm.agents.harness.team import get_team_manager
 from jiuwenswarm.server.runtime.session.session_metadata import (
     build_server_push_message,
     get_session_metadata,
+    increment_session_round_count,
     update_session_metadata,
 )
+from jiuwenswarm.server.runtime.session.session_history import append_history_record
 from jiuwenswarm.agents.harness.team.monitor_handler import TeamMonitorHandler
 from jiuwenswarm.server.utils.stream_utils import parse_stream_chunk
 from jiuwenswarm.common.schema.agent import AgentResponseChunk
@@ -30,6 +35,7 @@ from jiuwenswarm.server.runtime.agent_adapter.evolution_helpers import (
     TEAM_EVOLUTION_HIDDEN_TERMINAL_STAGES,
     TEAM_EVOLUTION_HIDDEN_STAGE,
     TEAM_EVOLUTION_IDLE_SLEEP_SEC,
+    TEAM_EVOLUTION_SLASH_WARNING_PHRASES,
     TEAM_EVOLUTION_START_MESSAGE,
     TEAM_EVOLUTION_START_STAGE,
     broadcast_evolution_progress,
@@ -37,6 +43,9 @@ from jiuwenswarm.server.runtime.agent_adapter.evolution_helpers import (
     event_type,
     evolution_outcome_from_event,
     evolution_progress_status_from_event,
+    evolution_slash_command_name,
+    evolution_slash_result,
+    evolution_status_response,
     extract_evolution_request_id,
     group_evolution_approvals,
     is_evolution_outcome_event,
@@ -44,9 +53,12 @@ from jiuwenswarm.server.runtime.agent_adapter.evolution_helpers import (
     progress_for_request,
     push_evolution_event,
     push_evolution_status,
+    resolve_evolution_event_timeout_sec,
     team_evolution_end_update,
     terminal_progress_from_events,
     terminal_stage,
+    validate_evolution_log_writable,
+    validate_evolution_skill,
     visible_evolution_progress_from_events,
 )
 
@@ -58,20 +70,41 @@ _TEAM_CREATE_KINDS = {
     RunActionKind.NEW_TEAM_IN_SESSION.value,
 }
 _HIDE_DM_PREFIX = "/hide_dm"
+_STREAM_TRACE_ENV_KEY = "JIUWENSWARM_TEAM_STREAM_TRACE"
+_DEBUG_PREFIX = "/debug"
+
+_INTERACT_REASON_ERROR_MAP: dict[str, str] = {
+    "not_active": "Team is initializing, please try again later",
+    "session_mismatch": "Session state mismatch, please refresh and retry",
+    "gate_closed": "Team is shutting down, please try again later",
+    "unknown_human_agent": "Member not found, please check the name",
+    "human_agent_not_enabled": "Human agent is not yet available, please try again later",
+    "no_team_backend": "Team backend not ready, please try again later",
+}
 
 
-def _extract_hide_dm_directive(query: str) -> tuple[str, bool]:
-    """Strip a leading ``/hide_dm`` directive from the first team query.
+def _strip_directive(query: str, prefix: str) -> tuple[str, bool]:
+    """Strip a leading slash directive from a query string.
 
     Returns the cleaned query and whether the directive was present.
     """
     stripped = query.lstrip()
-    if not stripped.startswith(_HIDE_DM_PREFIX):
+    if not stripped.startswith(prefix):
         return query, False
-    remainder = stripped[len(_HIDE_DM_PREFIX):]
+    remainder = stripped[len(prefix):]
     if remainder and not remainder[0].isspace():
         return query, False
     return remainder.lstrip(), True
+
+
+def _extract_query_directives(query: str) -> tuple[str, bool, bool]:
+    """Strip all leading slash directives from the first team query.
+
+    Returns (cleaned_query, hide_dm, debug).
+    """
+    query, hide_dm = _strip_directive(query, _HIDE_DM_PREFIX)
+    query, debug = _strip_directive(query, _DEBUG_PREFIX)
+    return query, hide_dm, debug
 
 
 def sync_team_identity_metadata(
@@ -219,6 +252,13 @@ def _approval_result_from_event_or_items(
 def _is_leader_output(chunk: Any) -> bool:
     """Return whether a team OutputSchema chunk should be shown to claw users."""
     chunk_type = getattr(chunk, "type", None)
+    payload = getattr(chunk, "payload", None)
+    # team.runtime_ready and team.completed are leader-level control events
+    # that carry no per-member content but must be forwarded to the frontend.
+    if chunk_type == "message" and isinstance(payload, dict):
+        event_type_str = payload.get("event_type")
+        if event_type_str in ("team.runtime_ready", "team.completed"):
+            return True
     if chunk_type == "team.runtime_ready":
         return True
 
@@ -230,6 +270,42 @@ def _is_leader_output(chunk: Any) -> bool:
 
     role_value = getattr(role, "value", role)
     return str(role_value).strip().lower() == TeamRole.LEADER.value
+
+
+def _is_teammate_output(chunk: Any) -> bool:
+    """Return whether a team OutputSchema chunk is from a teammate."""
+    role = getattr(chunk, "role", None)
+    if role is None:
+        return False
+    if role == TeamRole.TEAMMATE:
+        return True
+    role_value = getattr(role, "value", role)
+    return str(role_value).strip().lower() == TeamRole.TEAMMATE.value
+
+
+def _enrich_teammate_event(parsed: dict[str, Any], chunk: Any) -> dict[str, Any]:
+    """Enrich a parsed teammate event with role and source_member for frontend display."""
+    parsed["role"] = TeamRole.TEAMMATE.value
+    # TeamOutputSchema uses source_member (not member_name) for the member identifier
+    source_member = getattr(chunk, "source_member", None)
+    if source_member:
+        parsed["member_name"] = str(source_member)
+    return parsed
+
+
+def _is_duplicate_ask_user_question(
+    parsed: dict[str, Any],
+    emitted_request_ids: set[str],
+) -> bool:
+    if parsed.get("event_type") != "chat.ask_user_question":
+        return False
+    request_id = str(parsed.get("request_id") or "").strip()
+    if not request_id:
+        return False
+    if request_id in emitted_request_ids:
+        return True
+    emitted_request_ids.add(request_id)
+    return False
 
 
 def _team_processing_done_chunk(
@@ -341,9 +417,9 @@ async def _resolve_team_rebuild_followup(
     if not skill_name:
         return None, "请指定 Skill 名称：`/evolve_rebuild <skill_name> [user_intent]`"
 
-    if not store.skill_exists(skill_name):
-        available = "、".join(store.list_skill_names()) or "（无可用 Skill）"
-        return None, f"未找到 Skill '{skill_name}'。当前可用：{available}"
+    validation_error = validate_evolution_skill(store, skill_name, require_skill_md=False)
+    if validation_error is not None:
+        return None, validation_error
 
     try:
         followup_prompt = await rail.request_rebuild(skill_name, user_intent)
@@ -384,12 +460,9 @@ async def _handle_team_evolve_list_command(
             "result_type": "error",
         }
 
-    if not store.skill_exists(skill_name):
-        available = "、".join(store.list_skill_names()) or "（无可用 Skill）"
-        return {
-            "output": f"未找到 Skill '{skill_name}'。当前可用：{available}",
-            "result_type": "error",
-        }
+    validation_error = validate_evolution_skill(store, skill_name, require_skill_md=False)
+    if validation_error is not None:
+        return {"output": validation_error, "result_type": "error"}
 
     records = await store.get_records_by_score(skill_name)
     if not records:
@@ -469,12 +542,13 @@ async def _handle_team_slash_command(
                 "result_type": "error",
             }
 
-        if not store.skill_exists(skill_name):
-            available = "、".join(store.list_skill_names()) or "（无可用 Skill）"
-            return {
-                "output": f"未找到 Skill '{skill_name}'。当前可用：{available}",
-                "result_type": "error",
-            }
+        validation_error = validate_evolution_skill(store, skill_name, require_skill_md=True)
+        if validation_error is not None:
+            return {"output": validation_error, "result_type": "error"}
+
+        writable_error = validate_evolution_log_writable(store, skill_name)
+        if writable_error is not None:
+            return {"output": writable_error, "result_type": "error"}
 
         try:
             simplify_result = await rail.request_simplify(skill_name, user_intent)
@@ -507,18 +581,19 @@ async def _handle_team_slash_command(
     skill_name = parts[1].strip()
     user_query = parts[2].strip() if len(parts) > 2 else ""
 
-    if not store.skill_exists(skill_name):
-        available = "、".join(store.list_skill_names()) or "（无可用 Skill）"
-        return {
-            "output": f"未找到 Skill '{skill_name}'。当前可用：{available}",
-            "result_type": "error",
-        }
-
     if not user_query:
         return {
             "output": "请补充演进意图：`/evolve <skill_name> <user_query>`",
             "result_type": "error",
         }
+
+    validation_error = validate_evolution_skill(store, skill_name, require_skill_md=True)
+    if validation_error is not None:
+        return {"output": validation_error, "result_type": "error"}
+
+    writable_error = validate_evolution_log_writable(store, skill_name)
+    if writable_error is not None:
+        return {"output": writable_error, "result_type": "error"}
 
     try:
         evolve_result = await rail.request_user_evolution(skill_name, user_query)
@@ -538,6 +613,13 @@ async def _handle_team_slash_command(
             "output": f"Skill '{skill_name}' 演进请求已提交，请等待审批。",
             "result_type": "answer",
         }
+    status_response = evolution_status_response(
+        evolve_result,
+        generation_failed_output="llm error",
+        no_records_output="已请求团队 Skill 演进，但本次未生成可保存经验。",
+    )
+    if status_response is not None:
+        return status_response
     return _approval_result_from_event_or_items(
         skill_name=skill_name,
         event=getattr(evolve_result, "approval_event", None),
@@ -559,24 +641,40 @@ async def process_team_message_stream(
 
     team_manager = get_team_manager(channel_id)
     query = inputs.get("query", "")
+    query_text = query if isinstance(query, str) else ""
+    try:
+        from jiuwenswarm.agents.harness.team.remote_member_bootstrap import (
+            wait_for_pending_shutdown_cleanup_for_session,
+        )
+
+        await wait_for_pending_shutdown_cleanup_for_session(session_id)
+    except Exception as exc:
+        logger.warning(
+            "[TeamHelpers] waiting for pending shutdown cleanup failed: session_id=%s error=%s",
+            session_id,
+            exc,
+        )
     is_first_request = not team_manager.has_stream_task(session_id)
     request_queue: asyncio.Queue | None = None
 
     hide_dm = False
+    debug = False
     if is_first_request:
-        query, hide_dm = _extract_hide_dm_directive(str(query or ""))
-        if hide_dm:
+        query, hide_dm, debug = _extract_query_directives(str(query or ""))
+        if hide_dm or debug:
             logger.info(
-                "[TeamHelpers] hide_dm directive captured for first team request: "
-                "channel_id=%s session_id=%s",
+                "[TeamHelpers] query directives captured for first team request: "
+                "channel_id=%s session_id=%s hide_dm=%s debug=%s",
                 _resolve_channel_id(channel_id),
                 session_id,
+                hide_dm,
+                debug,
             )
 
     slash_result = await _handle_team_slash_command(
         channel_id,
         session_id,
-        str(query or ""),
+        query_text,
     )
     if slash_result is not None:
         approval_chunks = slash_result.get("approval_chunks")
@@ -597,12 +695,22 @@ async def process_team_message_stream(
             )
             return
 
+        slash_result = evolution_slash_result(
+            evolution_slash_command_name(query_text),
+            slash_result,
+            warning_phrases=TEAM_EVOLUTION_SLASH_WARNING_PHRASES,
+        )
         result_type = str(slash_result.get("result_type", "answer")).strip().lower()
         content = str(slash_result.get("output", ""))
+        slash_meta = {
+            "source": slash_result.get("source"),
+            "slash_command": slash_result.get("slash_command"),
+            "display_level": slash_result.get("display_level"),
+        }
         payload = (
-            {"event_type": "chat.error", "error": content}
+            {"event_type": "chat.error", "error": content, **slash_meta}
             if result_type == "error"
-            else {"event_type": "chat.final", "content": content}
+            else {"event_type": "chat.final", "content": content, **slash_meta}
         )
         yield AgentResponseChunk(
             request_id=rid,
@@ -622,12 +730,15 @@ async def process_team_message_stream(
     try:
         if deep_agent is None:
             raise RuntimeError("DeepAgent not initialized")
+        request_metadata = dict(request.metadata or {})
+        if isinstance(getattr(request, "params", None), dict):
+            request_metadata.setdefault("mode", request.params.get("mode"))
         team_spec = await team_manager.get_enriched_team_spec(
             session_id=session_id,
             deep_agent=deep_agent,
             request_id=rid,
             channel_id=channel_id,
-            request_metadata=request.metadata,
+            request_metadata=request_metadata,
         )
     except Exception as exc:
         logger.exception("[TeamHelpers] TeamAgent create failed: %s", exc)
@@ -650,7 +761,7 @@ async def process_team_message_stream(
     followup_prompt, rebuild_error = await _resolve_team_rebuild_followup(
         channel_id,
         session_id,
-        str(query or ""),
+        query_text,
     )
     if rebuild_error is not None:
         yield AgentResponseChunk(
@@ -684,13 +795,20 @@ async def process_team_message_stream(
                 session_id,
             )
 
+            stream_envs: dict[str, Any] = {}
+            if hide_dm:
+                stream_envs["hide_dm"] = True
+            if debug:
+                stream_envs[_STREAM_TRACE_ENV_KEY] = "1"
+            round_id = increment_session_round_count(session_id)
             stream_task = asyncio.create_task(
                 _consume_stream_with_query(
                     channel_id,
                     session_id,
                     team_spec,
                     query,
-                    hide_dm=hide_dm,
+                    round_id=round_id,
+                    envs=stream_envs or None,
                 )
             )
             team_manager.register_stream_task(session_id, stream_task)
@@ -701,14 +819,23 @@ async def process_team_message_stream(
                 session_id,
             )
             if query:
-                success = await team_manager.interact(session_id, query)
+                success, reason = await team_manager.interact(session_id, query)
                 if not success:
+                    logger.warning(
+                        "[TeamHelpers] interact failed: channel_id=%s session_id=%s reason=%s query=%s",
+                        _resolve_channel_id(channel_id),
+                        session_id,
+                        reason,
+                        query[:200],
+                    )
+                    error_msg = _INTERACT_REASON_ERROR_MAP.get(reason or "",
+                        "Failed to send message, please try again later")
                     yield AgentResponseChunk(
                         request_id=rid,
                         channel_id=channel_id,
                         payload={
                             "event_type": "chat.error",
-                            "error": "interact failed",
+                            "error": error_msg,
                         },
                         is_complete=False,
                     )
@@ -804,26 +931,63 @@ async def _consume_stream_with_query(
     session_id: str,
     team_spec: Any,
     initial_query: str,
-    hide_dm: bool = False,
+    *,
+    round_id: int,
+    envs: dict[str, Any] | None = None,
 ) -> None:
     """Consume the team stream in the background and broadcast parsed events."""
+    _envs = envs or {}
+    hide_dm: bool = bool(_envs.get("hide_dm", False))
     received_chunks = 0
+    emitted_ask_user_request_ids: set[str] = set()
     try:
         logger.info(
-            "[TeamHelpers] stream started: channel_id=%s session_id=%s",
+            "[TeamHelpers] stream started: channel_id=%s session_id=%s round_id=%s",
             _resolve_channel_id(channel_id),
             session_id,
+            round_id,
         )
+        # Broadcast a round-start signal so the frontend can mark the
+        # current conversation turn as "processing" before any chunks
+        # arrive.  Pairs with ``chat.processing_status(is_complete=True)`` on completion.
+        _broadcast_event(
+            channel_id,
+            session_id,
+            {
+                "event_type": "chat.processing_status",
+                "session_id": session_id,
+                "rid": round_id,
+                "is_processing": True,
+                "is_complete": False,
+            },
+        )
+        stream_trace_enabled = bool(
+            _envs.get(_STREAM_TRACE_ENV_KEY) or os.environ.get(_STREAM_TRACE_ENV_KEY)
+        )
+        lg: TeamStreamLogger | None = None
+        if stream_trace_enabled:
+            traces_dir = get_agent_teams_home() / "traces"
+            traces_dir.mkdir(parents=True, exist_ok=True)
+            lg = TeamStreamLogger(file_path=str(traces_dir / f"dump-team-{session_id}.txt"))
         async for chunk in Runner.run_agent_team_streaming(
             agent_team=team_spec,
             inputs={"query": initial_query},
             session=session_id,
+            envs=envs,
+            stream_logger=lg,
         ):
             received_chunks += 1
-            if not _is_leader_output(chunk):
+            is_leader = _is_leader_output(chunk)
+            is_teammate = _is_teammate_output(chunk)
+            if not is_leader and not is_teammate:
                 continue
             parsed = parse_stream_chunk(chunk)
             if parsed is not None:
+                if _is_duplicate_ask_user_question(parsed, emitted_ask_user_request_ids):
+                    continue
+                parsed["rid"] = round_id
+                if is_teammate:
+                    parsed = _enrich_teammate_event(parsed, chunk)
                 if parsed.get("event_type") == "team.runtime_ready":
                     ready_team_name = str(parsed.get("team_name") or team_spec.team_name)
                     activation_kind = str(parsed.get("activation_kind") or "").strip()
@@ -852,6 +1016,23 @@ async def _consume_stream_with_query(
                         session_id,
                         source="runtime_ready",
                     )
+                elif parsed.get("event_type") == "team.completed":
+                    # Team completed this round — broadcast a single
+                    # round-complete signal that also carries team stats.
+                    _broadcast_event(
+                        channel_id,
+                        session_id,
+                        {
+                            "event_type": "chat.processing_status",
+                            "session_id": session_id,
+                            "rid": round_id,
+                            "is_processing": False,
+                            "is_complete": True,
+                            "member_count": parsed.get("member_count"),
+                            "task_count": parsed.get("task_count"),
+                        },
+                    )
+                    continue
                 _broadcast_event(channel_id, session_id, parsed)
 
         # If stream ended without any chunks, broadcast an error event
@@ -919,6 +1100,7 @@ async def _consume_monitor_events(
             session_id,
         )
         async for event in monitor_handler.events():
+            _persist_team_member_status_event(channel_id, session_id, event)
             _broadcast_event(channel_id, session_id, event)
 
         logger.info(
@@ -940,6 +1122,43 @@ async def _consume_monitor_events(
             session_id,
             exc,
         )
+
+
+def _persist_team_member_status_event(
+    channel_id: str | None,
+    session_id: str,
+    event: dict[str, Any],
+) -> None:
+    """Persist member status changes so team.history.get can restore refresh state."""
+    if event.get("event_type") != "team.member":
+        return
+
+    payload = event.get("event")
+    if not isinstance(payload, dict):
+        return
+    if payload.get("type") != "team.member.status_changed":
+        return
+
+    member_id = str(payload.get("member_id") or "").strip()
+    new_status = str(payload.get("new_status") or "").strip()
+    if not member_id or not new_status:
+        return
+
+    timestamp = time.time()
+    append_history_record(
+        session_id=session_id,
+        request_id=f"team-status-{member_id}-{int(timestamp * 1000)}",
+        channel_id=_resolve_channel_id(channel_id),
+        role="assistant",
+        content="",
+        timestamp=timestamp,
+        event_type="team.member",
+        extra={
+            "session_id": session_id,
+            "event": dict(payload),
+        },
+        mode="team",
+    )
 
 
 def _on_team_watcher_done(task: asyncio.Task) -> None:
@@ -975,7 +1194,7 @@ async def _watch_team_evolution_and_push(
     fallback_cycle_index = 0
     active_cycle_request_id: str | None = None
 
-    async def _cleanup_rail() -> None:
+    async def _cleanup_evolution_rail() -> None:
         cleanup = getattr(rail, "cleanup_background_tasks", None)
         if cleanup is None:
             return
@@ -1016,6 +1235,10 @@ async def _watch_team_evolution_and_push(
 
     try:
         last_event_at = time.monotonic()
+        event_timeout_sec = resolve_evolution_event_timeout_sec(
+            rail,
+            fallback_sec=TEAM_EVOLUTION_EVENT_TIMEOUT_SEC,
+        )
         while True:
             if not getattr(rail, "auto_scan", True):
                 if active_cycle_request_id is not None:
@@ -1029,14 +1252,14 @@ async def _watch_team_evolution_and_push(
                         ),
                         build_server_push_message,
                     )
-                await _cleanup_rail()
+                await _cleanup_evolution_rail()
                 return
 
             events = await rail.drain_pending_approval_events(wait=False) or []
             if not events:
                 if active_cycle_request_id is not None:
                     idle_for = time.monotonic() - last_event_at
-                    if idle_for >= TEAM_EVOLUTION_EVENT_TIMEOUT_SEC:
+                    if idle_for >= event_timeout_sec:
                         logger.warning(
                             "[TeamHelpers] evolution monitor timed out: session_id=%s "
                             "request_id=%s idle_for=%.1fs",
@@ -1052,12 +1275,12 @@ async def _watch_team_evolution_and_push(
                                 stage=TEAM_EVOLUTION_HIDDEN_STAGE,
                                 message=(
                                     "Team skill evolution analysis timed out after "
-                                    f"{TEAM_EVOLUTION_EVENT_TIMEOUT_SEC:.0f}s without host events"
+                                    f"{event_timeout_sec:.0f}s without host events"
                                 ),
                             ),
                             build_server_push_message,
                         )
-                        await _cleanup_rail()
+                        await _cleanup_evolution_rail()
                         return
                 await asyncio.sleep(TEAM_EVOLUTION_IDLE_SLEEP_SEC)
                 continue

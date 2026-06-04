@@ -28,7 +28,7 @@ export interface SystemMeta {
 }
 
 export interface InfoMeta {
-  view?: "help" | "list" | "kv" | "dim";
+  view?: "help" | "list" | "kv" | "dim" | "compact_boundary" | "compact_summary";
   title?: string;
   items?: Array<{ label: string; value?: string; description?: string }>;
   groups?: Array<{
@@ -36,6 +36,8 @@ export interface InfoMeta {
     items: Array<{ label: string; value?: string; description?: string }>;
   }>;
   version?: string;
+  /** 标记消息来源，用于区分手动触发和自动触发的回顾。 */
+  source?: "auto_recap";
 }
 
 export interface ToolCallDisplay {
@@ -82,6 +84,8 @@ export interface ContextCompressionStats {
   rate: number;
   beforeCompressed: number | null;
   afterCompressed: number | null;
+  summary?: string;
+  trigger?: "manual" | "auto";
 }
 
 export type TodoStatus = "pending" | "in_progress" | "completed";
@@ -219,6 +223,7 @@ export type HistoryItem =
       icon?: string;
       meta?: InfoMeta;
       mediaItems?: MediaItem[];
+      transcriptOnly?: boolean;
       at: string;
     }
   | {

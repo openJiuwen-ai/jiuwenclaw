@@ -82,7 +82,7 @@ class CronController:
             return normalize_target_channel_id(self._target_channel.value)
         if not is_valid_target_channel_id(raw_s):
             raise ValueError(
-                "targets must be one of tui/web/feishu/whatsapp/wecom/xiaoyi"
+                "targets must be one of tui/web/feishu/dingtalk/whatsapp/wecom/xiaoyi/wechat"
                 " or feishu_enterprise:<app_id>"
             )
         return normalize_target_channel_id(raw_s)
@@ -364,8 +364,11 @@ class CronController:
                         "targets": {
                             "type": "string",
                             "enum": [e.value for e in CronTargetChannel],
-                            "description": "Delivery channel: tui, web, feishu, whatsapp, wecom, xiaoyi. "
-                                           "If omitted, use the current request source channel.",
+                            "description": (
+                                "Delivery channel: tui, web, feishu, dingtalk, "
+                                "whatsapp, wecom, xiaoyi, wechat. "
+                                "If omitted, use the current request source channel."
+                            ),
                         },
                         "enabled": {
                             "type": "boolean",
@@ -409,7 +412,9 @@ class CronController:
                                 "targets": {
                                     "type": "string",
                                     "enum": [e.value for e in CronTargetChannel],
-                                    "description": "推送频道：web/feishu/whatsapp",
+                                    "description": (
+                                        "推送频道：web/tui/feishu/dingtalk/whatsapp/wecom/xiaoyi/wechat"
+                                    ),
                                 },
                             },
                         },

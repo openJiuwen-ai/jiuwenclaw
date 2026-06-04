@@ -2,7 +2,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
-import type { AccentColorName, ThemeName } from "../ui/theme.js";
+import type { ThemeName } from "../ui/theme.js";
 
 const CONFIG_DIR = join(homedir(), ".jiuwenswarm-tui");
 const CONFIG_FILE = join(CONFIG_DIR, "config.json");
@@ -15,7 +15,6 @@ export interface StatusLineSetting {
 
 export interface TuiConfig {
   theme?: ThemeName;
-  accentColor?: AccentColorName;
   /**
    * Project-scoped trusted directories.
    * Key = normalized project cwd path, value = list of trusted dir paths for that project.

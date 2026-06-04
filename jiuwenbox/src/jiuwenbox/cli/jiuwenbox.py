@@ -298,7 +298,6 @@ class _CliClient:
         env: dict[str, str] | None = None,
         policy: Any = None,
         policy_mode: str | None = None,
-        workdir: str | None = None,
     ) -> dict[str, Any]:
         body: dict[str, Any] = {}
         if env is not None:
@@ -307,8 +306,6 @@ class _CliClient:
             body["policy"] = policy
         if policy_mode is not None:
             body["policy_mode"] = policy_mode
-        if workdir is not None:
-            body["workdir"] = workdir
         return dict(self._post(f"{_API_PREFIX}/sandboxes", json=body).json())
 
     def sandbox_list(self) -> list[dict[str, Any]]:

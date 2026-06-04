@@ -79,9 +79,10 @@ class FakeTeamManager:
 
 
 class FakeContextProcessorRail:
-    def __init__(self, *, processors=None, preset=None):
+    def __init__(self, *, processors=None, preset=None, session_memory=None):
         self.processors = processors
         self.preset = preset
+        self.session_memory = session_memory
 
 
 class FakeContextAssembleRail:
@@ -181,6 +182,57 @@ def test_interface_deep_parse_stream_chunk_preserves_tool_update():
     }
 
 
+def test_interface_deep_parse_stream_chunk_preserves_message_metadata():
+    """Test that metadata field is preserved in message type for security alerts."""
+    parsed = parse_stream_chunk(
+        types.SimpleNamespace(
+            type="message",
+            payload={
+                "role": "system",
+                "content": "[WARNING] API key/secret detected in read_file result.",
+                "metadata": {
+                    "is_security_alert": True,
+                    "level": "warning",
+                    "alert_type": "api_key_leakage",
+                    "display_mode": "popup",
+                    "rail": "ApikeyguardalertRail",
+                },
+            },
+        )
+    )
+
+    assert parsed["event_type"] == "chat.message"
+    assert parsed["content"] == "[WARNING] API key/secret detected in read_file result."
+    assert parsed["role"] == "system"
+    assert "metadata" in parsed
+    assert parsed["metadata"]["is_security_alert"] is True
+    assert parsed["metadata"]["level"] == "warning"
+    assert parsed["metadata"]["alert_type"] == "api_key_leakage"
+    assert parsed["metadata"]["display_mode"] == "popup"
+    assert parsed["metadata"]["rail"] == "ApikeyguardalertRail"
+
+
+def test_parse_stream_chunk_preserves_evolution_meta_for_ask_user_question():
+    parsed = parse_stream_chunk(
+        types.SimpleNamespace(
+            type="chat.ask_user_question",
+            payload={
+                "request_id": "evolve_simplify_team123",
+                "evolution_meta": {
+                    "event_kind": "approval",
+                    "rail_kind": "team",
+                    "request_id": "evolve_simplify_team123",
+                },
+                "questions": [{"header": "Skill 精简审批", "question": "是否执行？"}],
+            },
+        )
+    )
+
+    assert parsed["event_type"] == "chat.ask_user_question"
+    assert parsed["evolution_meta"]["rail_kind"] == "team"
+    assert "_evolution_meta" not in parsed
+
+
 def test_parse_stream_chunk_serializes_team_runtime_enum_kind():
     parsed = parse_stream_chunk(
         {
@@ -195,6 +247,118 @@ def test_parse_stream_chunk_serializes_team_runtime_enum_kind():
         "activation_kind": RunActionKind.NEW_TEAM_IN_SESSION.value,
         "team_name": "demo-team",
     }
+
+
+def test_parse_stream_chunk_converts_interaction_to_ask_user_question():
+    parsed = parse_stream_chunk(
+        types.SimpleNamespace(
+            type="__interaction__",
+            payload={
+                "id": "tool-call-1",
+                "value": {
+                    "questions": [
+                        {
+                            "question": "Choose UI",
+                            "header": "UI",
+                            "options": [
+                                {"label": "CLI", "description": "Text UI"},
+                                {"label": "Web", "description": "Browser UI"},
+                            ],
+                        }
+                    ]
+                },
+            },
+        )
+    )
+
+    assert parsed is not None
+    assert parsed["event_type"] == "chat.ask_user_question"
+    assert parsed["request_id"] == "tool-call-1"
+    assert parsed["source"] == "ask_user_interrupt"
+    assert parsed["questions"][0]["question"] == "Choose UI"
+
+
+def test_parse_stream_chunk_unwraps_controller_output_interaction():
+    parsed = parse_stream_chunk(
+        types.SimpleNamespace(
+            type="controller_output",
+            payload={
+                "type": "task_completion",
+                "data": [
+                    {
+                        "type": "json",
+                        "data": {
+                            "result_type": "interrupt",
+                            "interaction": {
+                                "type": "__interaction__",
+                                "payload": {
+                                    "id": "ask-user-1",
+                                    "value": {
+                                        "questions": [
+                                            {
+                                                "question": "Need details?",
+                                                "header": "Details",
+                                                "options": [],
+                                            }
+                                        ]
+                                    },
+                                },
+                            },
+                        },
+                    }
+                ],
+            },
+        )
+    )
+
+    assert parsed is not None
+    assert parsed["event_type"] == "chat.ask_user_question"
+    assert parsed["request_id"] == "ask-user-1"
+    assert parsed["source"] == "ask_user_interrupt"
+    assert parsed["questions"][0]["question"] == "Need details?"
+
+
+def test_parse_stream_chunk_prefers_ask_user_when_controller_has_mixed_interactions():
+    parsed = parse_stream_chunk(
+        types.SimpleNamespace(
+            type="controller_output",
+            payload={
+                "data": [
+                    {
+                        "type": "__interaction__",
+                        "payload": {
+                            "id": "",
+                            "value": {
+                                "message": "工具 `` 需要授权才能执行",
+                                "tool_name": "",
+                            },
+                        },
+                    },
+                    {
+                        "type": "__interaction__",
+                        "payload": {
+                            "id": "ask-user-2",
+                            "value": {
+                                "questions": [
+                                    {
+                                        "question": "Choose algorithm details",
+                                        "header": "Details",
+                                        "options": [],
+                                    }
+                                ]
+                            },
+                        },
+                    },
+                ],
+            },
+        )
+    )
+
+    assert parsed is not None
+    assert parsed["event_type"] == "chat.ask_user_question"
+    assert parsed["request_id"] == "ask-user-2"
+    assert parsed["source"] == "ask_user_interrupt"
+    assert parsed["questions"][0]["question"] == "Choose algorithm details"
 
 
 def test_sync_team_identity_metadata_updates_only_for_create_kinds(monkeypatch):
@@ -1200,6 +1364,34 @@ def test_build_context_processor_rail_prefers_summary_offloader_config(monkeypat
     assert rail.processors == [
         ("MessageSummaryOffloader", {"tokens_threshold": 6000}),
     ]
+
+
+def test_build_context_processor_rail_passes_session_memory_config(monkeypatch):
+    monkeypatch.setattr(
+        interface_deep_module,
+        "ContextProcessorRail",
+        FakeContextProcessorRail,
+    )
+    adapter = DeepAdapterHarness()
+
+    rail = adapter.build_context_processor_rail_for_test(
+        {
+            "context_engine_config": {
+                "session_memory_config": {
+                    "trigger_tokens": 12000,
+                    "update_mode": "direct_replace",
+                },
+            }
+        }
+    )
+
+    assert isinstance(rail, FakeContextProcessorRail)
+    assert rail.preset is True
+    assert rail.processors is None
+    assert rail.session_memory == {
+        "trigger_tokens": 12000,
+        "update_mode": "direct_replace",
+    }
 
 
 def test_build_context_assemble_rail_returns_context_assemble_rail_instance(monkeypatch):
