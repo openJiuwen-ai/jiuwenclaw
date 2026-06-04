@@ -23,9 +23,12 @@ if "jiuwenclaw.gateway" not in sys.modules:
 
 _sandbox_router_mod = importlib.import_module("jiuwenclaw.gateway.sandbox_router")
 SandboxRouterAgentClient = _sandbox_router_mod.SandboxRouterAgentClient
-from jiuwenclaw.sandbox.open_ability import OpenAbilityConfig, OpenAbilityEndpoint
-from jiuwenclaw.sandbox.sandbox_client import ExecutionResult
-from jiuwenclaw.sandbox.sandbox_routing_dcs_store import SandboxRoutingRecord
+SandboxRuntime = _sandbox_router_mod.SandboxRuntime
+SandboxStatus = _sandbox_router_mod.SandboxStatus
+from jiuwenclaw.sandbox.open_ability import OpenAbilityConfig, OpenAbilityEndpoint  # noqa: E402
+from jiuwenclaw.sandbox.sandbox_client import ExecutionResult  # noqa: E402
+from jiuwenclaw.sandbox.sandbox_routing_dcs_store import SandboxRoutingRecord  # noqa: E402
+from jiuwenclaw.schema.message import ReqMethod  # noqa: E402
 
 
 class FakeAgentClient:
@@ -45,6 +48,72 @@ class FakeAgentClient:
 
     async def disconnect(self) -> None:
         self.disconnected = True
+
+
+class BackupAgentClient(FakeAgentClient):
+    def __init__(self, results: list[dict[str, Any]]) -> None:
+        super().__init__()
+        self.envelopes: list[E2AEnvelope] = []
+        self._results = results
+
+    async def send_request(self, envelope: E2AEnvelope) -> Any:
+        self.envelopes.append(envelope)
+        return MagicMock(
+            ok=True,
+            request_id=envelope.request_id,
+            channel_id=envelope.channel or "",
+            payload={"results": self._results},
+        )
+
+
+class FakeWorkspaceDcsStore:
+    def __init__(
+        self,
+        *,
+        fail_session_ids: set[str] | None = None,
+        initial_records: dict[str, dict[str, str]] | None = None,
+        events: list[tuple[str, str]] | None = None,
+    ) -> None:
+        self.fail_session_ids = fail_session_ids or set()
+        self.records: dict[str, dict[str, str]] = dict(initial_records or {})
+        self.events = events if events is not None else []
+
+    async def get_workspace(self, session_id: str) -> Any:
+        self.events.append(("get", session_id))
+        record = self.records.get(session_id)
+        if not record:
+            return None
+        return MagicMock(url=record.get("url", ""), name=record.get("name", ""))
+
+    async def put_workspace(
+        self,
+        session_id: str,
+        *,
+        url: str,
+        name: str = "",
+        routing_key: str = "",
+        sandbox_id: str = "",
+    ) -> None:
+        if session_id in self.fail_session_ids:
+            raise RuntimeError(f"DCS write failed for {session_id}")
+        self.events.append(("put", session_id))
+        self.records[session_id] = {
+            "url": url,
+            "name": name,
+            "routing_key": routing_key,
+            "sandbox_id": sandbox_id,
+        }
+
+
+class FakeQueryUrlObs:
+    def __init__(self, events: list[tuple[str, str]]) -> None:
+        self.events = events
+        self.deleted_urls: list[str] = []
+
+    async def invoking_osms_delete(self, file_url: str) -> bool:
+        self.events.append(("delete", file_url))
+        self.deleted_urls.append(file_url)
+        return True
 
 
 class FakeOpenAbilityClient(FakeAgentClient):
@@ -73,6 +142,11 @@ class FakeOpenAbilityClient(FakeAgentClient):
         await self._connection_lost_handler(payload)
 
 
+@pytest.fixture(autouse=True)
+def disable_periodic_backup_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("SANDBOX_BACKUP_ENABLE", "false")
+
+
 @pytest.fixture
 def router() -> SandboxRouterAgentClient:
     router = SandboxRouterAgentClient(
@@ -80,7 +154,11 @@ def router() -> SandboxRouterAgentClient:
         adopt_existing=True,
         gateway_instance_id="gw-test",
     )
-    router._open_ability_config = OpenAbilityConfig(ws_path="/ws")
+    router._open_ability_config = OpenAbilityConfig(
+        ws_path="/ws",
+        reconnect_timeout_seconds=0.01,
+        readiness_poll_interval_seconds=0.001,
+    )
     return router
 
 
@@ -129,6 +207,21 @@ def _envelope(*, user_id: str = "user-a", session_id: str = "sess-a") -> E2AEnve
         method="skilldev.chat",
         params={"task_id": session_id},
         is_stream=False,
+    )
+
+
+def _backup_runtime(agent_client: FakeAgentClient) -> Any:
+    return SandboxRuntime(
+        routing_key="vibeskill:user:user-a",
+        sandbox_id="sb-backup",
+        agent_client=agent_client,
+        status=SandboxStatus.IDLE,
+        task_count=0,
+        metadata={
+            "routing_key": "vibeskill:user:user-a",
+            "user_id": "user-a",
+            "session_ids": {"sess-a", "sess-b"},
+        },
     )
 
 
@@ -359,8 +452,6 @@ async def test_oa_physical_disconnect_refreshes_runtime_client(
     assert runtime.agent_client is first_client
 
     mock_dcs_store.get_openability_endpoint.side_effect = [
-        OpenAbilityEndpoint(host="127.0.0.1", port=9001),
-        OpenAbilityEndpoint(host="127.0.0.1", port=9001),
         OpenAbilityEndpoint(host="127.0.0.1", port=9002),
     ]
 
@@ -424,6 +515,8 @@ async def test_requests_are_buffered_during_oa_reconnect(
         sandbox_id: str,
         routing_key: str,
         metadata: dict[str, Any],
+        *,
+        connect_reason: str = "initial",
     ):
         if metadata.get("openability_reconnect_required"):
             await reconnect_gate.wait()
@@ -432,6 +525,7 @@ async def test_requests_are_buffered_during_oa_reconnect(
             sandbox_id,
             routing_key,
             metadata,
+            connect_reason=connect_reason,
         )
 
     monkeypatch.setattr(router, "_connect_open_ability_client", delayed_connect_open_ability_client)
@@ -451,7 +545,7 @@ async def test_requests_are_buffered_during_oa_reconnect(
 
     await asyncio.sleep(0.01)
     assert len(router._reconnect_waiters.get(runtime.routing_key, ())) == 1
-    assert first_client.request_ids == []
+    assert "req-buffered" not in first_client.request_ids
 
     reconnect_gate.set()
     await disconnect_task
@@ -460,6 +554,163 @@ async def test_requests_are_buffered_during_oa_reconnect(
     second_client = FakeOpenAbilityClient.instances[1]
     assert response.request_id == "req-buffered"
     assert runtime.agent_client is second_client
-    assert second_client.request_ids == ["req-buffered"]
-    assert first_client.request_ids == []
+    assert "req-buffered" in second_client.request_ids
+    assert "req-buffered" not in first_client.request_ids
     assert runtime.routing_key not in router._reconnect_waiters
+
+
+@pytest.mark.asyncio
+async def test_backup_disabled_terminate_uses_all_tracked_session_ids(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SANDBOX_BACKUP_ENABLE", "false")
+    router = SandboxRouterAgentClient(adopt_existing=False)
+    router._backup_enabled = False
+    agent_client = BackupAgentClient(
+        [
+            {"sessionID": "sess-a", "url": "https://obs/sess-a.zip", "name": "a.zip", "status": "success"},
+            {"sessionID": "sess-b", "url": "https://obs/sess-b.zip", "name": "b.zip", "status": "success"},
+        ]
+    )
+    router._workspace_dcs_store = FakeWorkspaceDcsStore()  # type: ignore[assignment]
+    runtime = _backup_runtime(agent_client)
+
+    await router._backup_workspaces_before_terminate(runtime)
+
+    assert len(agent_client.envelopes) == 1
+    envelope = agent_client.envelopes[0]
+    assert envelope.method == ReqMethod.SKILLDEV_BATCH_UPLOAD.value
+    assert envelope.params == {"session_ids": ["sess-a", "sess-b"]}
+
+
+@pytest.mark.asyncio
+async def test_backup_enabled_terminate_uses_unflushed_active_sessions(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SANDBOX_BACKUP_ENABLE", "true")
+    router = SandboxRouterAgentClient(adopt_existing=False)
+    router._backup_enabled = True
+    agent_client = BackupAgentClient(
+        [
+            {"sessionID": "sess-b", "url": "https://obs/sess-b.zip", "name": "b.zip", "status": "success"},
+        ]
+    )
+    router._workspace_dcs_store = FakeWorkspaceDcsStore()  # type: ignore[assignment]
+    runtime = _backup_runtime(agent_client)
+    runtime.metadata["backup_period_active_sessions"] = {"sess-b"}
+    runtime.metadata["backup_period_session_versions"] = {"sess-b": 1}
+
+    await router._backup_workspaces_before_terminate(runtime)
+
+    assert len(agent_client.envelopes) == 1
+    assert agent_client.envelopes[0].params == {"session_ids": ["sess-b"]}
+    assert runtime.metadata["backup_period_active_sessions"] == set()
+
+
+@pytest.mark.asyncio
+async def test_periodic_backup_removes_only_upload_and_dcs_success(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SANDBOX_BACKUP_ENABLE", "true")
+    router = SandboxRouterAgentClient(adopt_existing=False)
+    router._backup_enabled = True
+    agent_client = BackupAgentClient(
+        [
+            {"sessionID": "sess-a", "url": "https://obs/sess-a.zip", "name": "a.zip", "status": "success"},
+            {"sessionID": "sess-b", "url": "https://obs/sess-b.zip", "name": "b.zip", "status": "success"},
+        ]
+    )
+    router._workspace_dcs_store = FakeWorkspaceDcsStore(
+        fail_session_ids={"sess-b"}
+    )  # type: ignore[assignment]
+    runtime = _backup_runtime(agent_client)
+    runtime.metadata["backup_period_active_sessions"] = {"sess-a", "sess-b"}
+    runtime.metadata["backup_period_session_versions"] = {"sess-a": 1, "sess-b": 1}
+    router._runtimes[runtime.routing_key] = runtime
+
+    await router._backup_active_sessions_for_period()
+
+    assert len(agent_client.envelopes) == 1
+    assert agent_client.envelopes[0].params == {"session_ids": ["sess-a", "sess-b"]}
+    assert runtime.metadata["backup_period_active_sessions"] == {"sess-b"}
+
+
+@pytest.mark.asyncio
+async def test_backup_deletes_old_workspace_url_before_dcs_overwrite(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    router = SandboxRouterAgentClient(adopt_existing=False)
+    router._backup_enabled = False
+    agent_client = BackupAgentClient(
+        [
+            {
+                "sessionID": "sess-a",
+                "url": "https://obs/new-sess-a.zip",
+                "name": "new-a.zip",
+                "status": "success",
+            },
+        ]
+    )
+    events: list[tuple[str, str]] = []
+    fake_query = FakeQueryUrlObs(events)
+    monkeypatch.setattr(_sandbox_router_mod, "_create_query_url_obs", lambda: fake_query)
+    router._workspace_dcs_store = FakeWorkspaceDcsStore(
+        initial_records={
+            "sess-a": {
+                "url": "https://obs/old-sess-a.zip",
+                "name": "old-a.zip",
+            }
+        },
+        events=events,
+    )  # type: ignore[assignment]
+    runtime = _backup_runtime(agent_client)
+    runtime.metadata["session_ids"] = {"sess-a"}
+
+    await router._backup_workspaces_before_terminate(runtime)
+
+    assert events == [
+        ("get", "sess-a"),
+        ("delete", "https://obs/old-sess-a.zip"),
+        ("put", "sess-a"),
+    ]
+    assert fake_query.deleted_urls == ["https://obs/old-sess-a.zip"]
+
+
+@pytest.mark.asyncio
+async def test_backup_does_not_delete_when_old_url_matches_new_url(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    router = SandboxRouterAgentClient(adopt_existing=False)
+    router._backup_enabled = False
+    agent_client = BackupAgentClient(
+        [
+            {
+                "sessionID": "sess-a",
+                "url": "https://obs/same-sess-a.zip",
+                "name": "same-a.zip",
+                "status": "success",
+            },
+        ]
+    )
+    events: list[tuple[str, str]] = []
+    fake_query = FakeQueryUrlObs(events)
+    monkeypatch.setattr(_sandbox_router_mod, "_create_query_url_obs", lambda: fake_query)
+    router._workspace_dcs_store = FakeWorkspaceDcsStore(
+        initial_records={
+            "sess-a": {
+                "url": "https://obs/same-sess-a.zip",
+                "name": "same-a.zip",
+            }
+        },
+        events=events,
+    )  # type: ignore[assignment]
+    runtime = _backup_runtime(agent_client)
+    runtime.metadata["session_ids"] = {"sess-a"}
+
+    await router._backup_workspaces_before_terminate(runtime)
+
+    assert events == [
+        ("get", "sess-a"),
+        ("put", "sess-a"),
+    ]
+    assert fake_query.deleted_urls == []

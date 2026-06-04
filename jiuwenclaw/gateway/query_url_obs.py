@@ -28,3 +28,18 @@ class QueryUrlOSMS:
             self.trace_id,
         )
         return url
+
+    async def invoking_osms_delete(self, file_url: str) -> bool:
+        """Delete the given OBS object via OSMS.
+
+        Deployment should replace this placeholder with an implementation that
+        calls the OSMS HTTP API to delete the object referenced by ``file_url``.
+        """
+        url = str(file_url or "").strip()
+        if not url:
+            return False
+        logger.debug(
+            "QueryUrlOSMS placeholder: skip delete url (trace_id=%s)",
+            self.trace_id,
+        )
+        return True

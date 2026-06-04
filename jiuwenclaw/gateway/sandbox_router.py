@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import secrets
 import time
 from collections import deque
@@ -40,6 +41,27 @@ _WORKSPACE_SKIP_METHODS = frozenset({
     ReqMethod.SKILLDEV_BATCH_DOWNLOAD.value,
 })
 _VIBESKILL_CHANNEL_ID = "vibeskill"
+_SANDBOX_BACKUP_ENABLE_ENV = "SANDBOX_BACKUP_ENABLE"
+_SANDBOX_BACKUP_PERIOD_SECONDS_ENV = "SANDBOX_BACKUP_PERIOD_SECONDS"
+_SANDBOX_BACKUP_DEFAULT_PERIOD_SECONDS = 600.0
+
+
+def _env_bool(name: str, *, default: bool) -> bool:
+    raw = str(os.environ.get(name, "")).strip().lower()
+    if not raw:
+        return default
+    return raw not in {"0", "false", "no", "off"}
+
+
+def _env_float(name: str, *, default: float) -> float:
+    raw = str(os.environ.get(name, "")).strip()
+    if not raw:
+        return default
+    try:
+        return float(raw)
+    except ValueError:
+        logger.warning("Invalid %s=%r, using default %.1f", name, raw, default)
+        return default
 
 
 def _tracked_session_ids_from_metadata(metadata: dict[str, Any]) -> list[str]:
@@ -141,6 +163,15 @@ class SandboxRouterAgentClient(AgentServerClient):
             settings.link_heartbeat_check_interval_seconds
         )
         self._link_heartbeat_task: asyncio.Task | None = None
+        self._backup_enabled = _env_bool(_SANDBOX_BACKUP_ENABLE_ENV, default=True)
+        self._backup_period_seconds = max(
+            1.0,
+            _env_float(
+                _SANDBOX_BACKUP_PERIOD_SECONDS_ENV,
+                default=_SANDBOX_BACKUP_DEFAULT_PERIOD_SECONDS,
+            ),
+        )
+        self._backup_task: asyncio.Task | None = None
         self._adopt_existing_enabled = (
             sandbox_adopt_existing_enabled()
             if adopt_existing is None
@@ -177,6 +208,13 @@ class SandboxRouterAgentClient(AgentServerClient):
             except asyncio.CancelledError:
                 pass
             self._link_heartbeat_task = None
+        if self._backup_task is not None:
+            self._backup_task.cancel()
+            try:
+                await self._backup_task
+            except asyncio.CancelledError:
+                pass
+            self._backup_task = None
         if self._idle_task is not None:
             self._idle_task.cancel()
             try:
@@ -734,6 +772,11 @@ class SandboxRouterAgentClient(AgentServerClient):
                 self._link_heartbeat_watch_loop(),
                 name="sandbox-router-link-heartbeat-watch",
             )
+        if self._backup_enabled and self._backup_task is None:
+            self._backup_task = loop.create_task(
+                self._periodic_backup_loop(),
+                name="sandbox-router-periodic-backup",
+            )
 
     async def _link_heartbeat_watch_loop(self) -> None:
         while not self._closed:
@@ -995,6 +1038,97 @@ class SandboxRouterAgentClient(AgentServerClient):
             session_ids = set()
             runtime.metadata["session_ids"] = session_ids
         session_ids.add(session_id)
+        if self._backup_enabled:
+            self._mark_backup_period_session_active(runtime, session_id)
+
+    @staticmethod
+    def _backup_period_active_sessions(runtime: SandboxRuntime) -> set[str]:
+        active_sessions = runtime.metadata.get("backup_period_active_sessions")
+        if not isinstance(active_sessions, set):
+            active_sessions = set()
+            runtime.metadata["backup_period_active_sessions"] = active_sessions
+        return active_sessions
+
+    @staticmethod
+    def _backup_period_session_versions(runtime: SandboxRuntime) -> dict[str, int]:
+        versions = runtime.metadata.get("backup_period_session_versions")
+        if not isinstance(versions, dict):
+            versions = {}
+            runtime.metadata["backup_period_session_versions"] = versions
+        return versions
+
+    def _mark_backup_period_session_active(
+        self,
+        runtime: SandboxRuntime,
+        session_id: str,
+    ) -> None:
+        sid = str(session_id or "").strip()
+        if not sid:
+            return
+        active_sessions = self._backup_period_active_sessions(runtime)
+        versions = self._backup_period_session_versions(runtime)
+        active_sessions.add(sid)
+        try:
+            current_version = int(versions.get(sid) or 0)
+        except (TypeError, ValueError):
+            current_version = 0
+        versions[sid] = current_version + 1
+
+    async def _periodic_backup_loop(self) -> None:
+        while not self._closed:
+            await asyncio.sleep(self._backup_period_seconds)
+            await self._backup_active_sessions_for_period()
+
+    async def _backup_active_sessions_for_period(self) -> None:
+        snapshots: list[tuple[SandboxRuntime, list[str], dict[str, int]]] = []
+        async with self._pool_lock:
+            for runtime in self._runtimes.values():
+                if runtime.status in {
+                    SandboxStatus.TERMINATING,
+                    SandboxStatus.TERMINATED,
+                }:
+                    continue
+                if self._runtime_needs_openability_refresh(runtime):
+                    continue
+                active_sessions = self._backup_period_active_sessions(runtime)
+                if not active_sessions:
+                    continue
+                versions = self._backup_period_session_versions(runtime)
+                session_ids = sorted(str(sid).strip() for sid in active_sessions if str(sid).strip())
+                version_snapshot = {
+                    sid: int(versions.get(sid) or 0)
+                    for sid in session_ids
+                }
+                if session_ids:
+                    snapshots.append((runtime, session_ids, version_snapshot))
+
+        for runtime, session_ids, version_snapshot in snapshots:
+            try:
+                persisted = await self._backup_workspaces(
+                    runtime,
+                    session_ids,
+                    reason="periodic",
+                )
+            except Exception:  # noqa: BLE001
+                logger.exception(
+                    "Periodic workspace backup failed: sandbox_id=%s routing_key=%s "
+                    "session_ids=%s",
+                    runtime.sandbox_id,
+                    runtime.routing_key,
+                    session_ids,
+                )
+                continue
+            if not persisted:
+                continue
+            async with self._pool_lock:
+                active_sessions = self._backup_period_active_sessions(runtime)
+                versions = self._backup_period_session_versions(runtime)
+                for sid in persisted:
+                    if sid not in active_sessions:
+                        continue
+                    if int(versions.get(sid) or 0) == version_snapshot.get(sid):
+                        active_sessions.discard(sid)
+                        versions.pop(sid, None)
 
     async def _ensure_workspace_restored(
         self,
@@ -1145,26 +1279,51 @@ class SandboxRouterAgentClient(AgentServerClient):
             )
 
     async def _backup_workspaces_before_terminate(self, runtime: SandboxRuntime) -> None:
-        raw_session_ids = runtime.metadata.get("session_ids")
-        if not raw_session_ids:
-            return
-        if isinstance(raw_session_ids, set):
-            session_ids = sorted(str(sid).strip() for sid in raw_session_ids if str(sid).strip())
+        if self._backup_enabled:
+            raw_session_ids = runtime.metadata.get("backup_period_active_sessions")
         else:
-            session_ids = [
+            raw_session_ids = runtime.metadata.get("session_ids")
+        session_ids = self._normalize_session_ids(raw_session_ids)
+        if not session_ids:
+            return
+        persisted = await self._backup_workspaces(
+            runtime,
+            session_ids,
+            reason="terminate",
+        )
+        if self._backup_enabled and persisted:
+            active_sessions = self._backup_period_active_sessions(runtime)
+            versions = self._backup_period_session_versions(runtime)
+            for sid in persisted:
+                active_sessions.discard(sid)
+                versions.pop(sid, None)
+
+    @staticmethod
+    def _normalize_session_ids(raw_session_ids: Any) -> list[str]:
+        if isinstance(raw_session_ids, set):
+            return sorted(str(sid).strip() for sid in raw_session_ids if str(sid).strip())
+        if isinstance(raw_session_ids, (list, tuple)):
+            return [
                 str(sid).strip()
                 for sid in raw_session_ids
                 if str(sid).strip()
             ]
-        if not session_ids:
-            return
+        sid = str(raw_session_ids or "").strip()
+        return [sid] if sid else []
 
+    async def _backup_workspaces(
+        self,
+        runtime: SandboxRuntime,
+        session_ids: list[str],
+        *,
+        reason: str,
+    ) -> set[str]:
         user_id = str(runtime.metadata.get("user_id") or "").strip()
         if not user_id:
             user_id = self._user_id_from_routing_key(runtime.routing_key) or ""
 
         request_id = (
-            f"sandbox-backup-{int(time.time() * 1000):x}-{secrets.token_hex(3)}"
+            f"sandbox-backup-{reason}-{int(time.time() * 1000):x}-{secrets.token_hex(3)}"
         )
         backup_env = e2a_from_agent_fields(
             request_id=request_id,
@@ -1182,27 +1341,29 @@ class SandboxRouterAgentClient(AgentServerClient):
             payload = resp.payload if isinstance(resp.payload, dict) else {}
             logger.warning(
                 "Workspace backup failed before terminate: sandbox_id=%s routing_key=%s "
-                "request_id=%s error=%s failed_session_ids=%s",
+                "request_id=%s reason=%s error=%s failed_session_ids=%s",
                 sandbox_id,
                 runtime.routing_key,
                 request_id,
+                reason,
                 payload.get("error"),
                 session_ids,
             )
-            return
+            return set()
 
         payload = resp.payload if isinstance(resp.payload, dict) else {}
         results = payload.get("results")
         if not isinstance(results, list):
             logger.warning(
                 "Workspace backup returned no results: sandbox_id=%s routing_key=%s "
-                "request_id=%s failed_session_ids=%s",
+                "request_id=%s reason=%s failed_session_ids=%s",
                 sandbox_id,
                 runtime.routing_key,
                 request_id,
+                reason,
                 session_ids,
             )
-            return
+            return set()
 
         succeeded: list[dict[str, str]] = []
         failed_session_ids: list[str] = []
@@ -1227,19 +1388,53 @@ class SandboxRouterAgentClient(AgentServerClient):
                 failed_session_ids.append(sid)
 
         logger.info(
-            "Workspace backup before terminate: sandbox_id=%s routing_key=%s "
-            "request_id=%s succeeded=%s failed_session_ids=%s",
+            "Workspace backup completed: sandbox_id=%s routing_key=%s "
+            "request_id=%s reason=%s succeeded=%s failed_session_ids=%s",
             sandbox_id,
             runtime.routing_key,
             request_id,
+            reason,
             [{"session_id": e["session_id"], "url": e["url"]} for e in succeeded],
             failed_session_ids,
         )
 
         store = self._get_workspace_dcs_store()
         routing_key = runtime.routing_key
+        persisted_session_ids: set[str] = set()
+        query_url_obs: Any | None = None
         for entry in succeeded:
             try:
+                try:
+                    old_record = await store.get_workspace(entry["session_id"])
+                except Exception:  # noqa: BLE001
+                    old_record = None
+                    logger.exception(
+                        "Failed to read old workspace snapshot from DCS before overwrite: "
+                        "session_id=%s sandbox_id=%s",
+                        entry["session_id"],
+                        sandbox_id,
+                    )
+                old_url = str(getattr(old_record, "url", "") or "").strip()
+                if old_url and old_url != entry["url"]:
+                    if query_url_obs is None:
+                        query_url_obs = _create_query_url_obs()
+                    try:
+                        deleted = await query_url_obs.invoking_osms_delete(old_url)
+                    except Exception:  # noqa: BLE001
+                        logger.exception(
+                            "Failed to delete old workspace OBS object before DCS overwrite: "
+                            "session_id=%s sandbox_id=%s",
+                            entry["session_id"],
+                            sandbox_id,
+                        )
+                    else:
+                        if not deleted:
+                            logger.warning(
+                                "OSMS delete old workspace OBS object returned false: "
+                                "session_id=%s sandbox_id=%s",
+                                entry["session_id"],
+                                sandbox_id,
+                            )
                 await store.put_workspace(
                     entry["session_id"],
                     url=entry["url"],
@@ -1247,6 +1442,7 @@ class SandboxRouterAgentClient(AgentServerClient):
                     routing_key=routing_key,
                     sandbox_id=sandbox_id,
                 )
+                persisted_session_ids.add(entry["session_id"])
             except Exception:  # noqa: BLE001
                 logger.exception(
                     "Failed to persist workspace snapshot to DCS: session_id=%s "
@@ -1254,6 +1450,7 @@ class SandboxRouterAgentClient(AgentServerClient):
                     entry["session_id"],
                     sandbox_id,
                 )
+        return persisted_session_ids
 
     def _new_open_ability_ws_client(
         self,
@@ -1732,6 +1929,8 @@ class SandboxRouterAgentClient(AgentServerClient):
                 if isinstance(session_ids, set):
                     untracked = sid in session_ids
                     session_ids.discard(sid)
+                self._backup_period_active_sessions(runtime).discard(sid)
+                self._backup_period_session_versions(runtime).pop(sid, None)
                 self._restored_session_ids(runtime).discard(sid)
                 remaining_session_ids = _tracked_session_ids_from_metadata(runtime.metadata)
 
