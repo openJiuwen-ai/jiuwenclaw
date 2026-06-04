@@ -1,0 +1,125 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "skill-compass/eval-result",
+  "title": "Skill Compass Evaluation Result",
+  "description": "Complete evaluation result for a SKILL.md file across six dimensions",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "skill_name",
+    "skill_path",
+    "skill_type",
+    "scores",
+    "overall_score",
+    "verdict",
+    "weakest_dimension",
+    "suggestions",
+    "reviewed",
+    "metadata"
+  ],
+  "properties": {
+    "skill_name": { "type": "string" },
+    "skill_path": { "type": "string" },
+    "skill_type": { "type": "string", "enum": ["atom", "composite", "meta"] },
+    "scores": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "structure",
+        "trigger",
+        "security",
+        "functional",
+        "comparative",
+        "compliance"
+      ],
+      "properties": {
+        "structure": { "$ref": "#/$defs/dimensionScore" },
+        "trigger": { "$ref": "#/$defs/dimensionScore" },
+        "functional": { "$ref": "#/$defs/dimensionScore" },
+        "comparative": { "$ref": "#/$defs/dimensionScore" },
+        "security": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["score", "max", "pass", "findings", "tools_used"],
+          "properties": {
+            "score": { "type": "integer", "minimum": 0, "maximum": 10 },
+            "max": { "type": "integer", "const": 10 },
+            "pass": { "type": "boolean" },
+            "findings": { "type": "array", "items": { "type": "object" } },
+            "tools_used": { "type": "array", "items": { "type": "string" } },
+            "details": { "type": "string" },
+            "metadata": { "type": "object" }
+          }
+        },
+        "compliance": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["score", "max", "pass", "details", "sub_scores", "issues"],
+          "properties": {
+            "score": { "type": "integer", "minimum": 0, "maximum": 10 },
+            "max": { "type": "integer", "const": 10 },
+            "pass": { "type": "boolean" },
+            "details": { "type": "string" },
+            "sub_scores": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "name": { "type": "number", "minimum": 0, "maximum": 10 },
+                "description": { "type": "number", "minimum": 0, "maximum": 10 },
+                "body": { "type": "number", "minimum": 0, "maximum": 10 }
+              }
+            },
+            "issues": { "type": "array", "items": { "type": "object" } },
+            "tools_used": { "type": "array", "items": { "type": "string" } },
+            "metadata": { "type": "object" }
+          }
+        }
+      }
+    },
+    "overall_score": { "type": "integer", "minimum": 0, "maximum": 100 },
+    "verdict": { "type": "string", "enum": ["PASS", "CAUTION", "FAIL"] },
+    "reviewed": { "type": "boolean" },
+    "weakest_dimension": {
+      "type": "string",
+      "enum": ["structure", "trigger", "security", "functional", "comparative", "compliance"]
+    },
+    "suggestions": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["dimension", "score", "suggestion"],
+        "properties": {
+          "dimension": { "type": "string" },
+          "score": { "type": "integer", "minimum": 0, "maximum": 10 },
+          "suggestion": { "type": "string" }
+        }
+      }
+    },
+    "metadata": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["evaluated_at", "evaluator"],
+      "properties": {
+        "evaluated_at": { "type": "string", "format": "date-time" },
+        "evaluator": { "type": "string", "const": "skill-compass" },
+        "packaged_path": { "type": "string" }
+      }
+    }
+  },
+  "$defs": {
+    "dimensionScore": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["score", "max", "details"],
+      "properties": {
+        "score": { "type": "integer", "minimum": 0, "maximum": 10 },
+        "max": { "type": "integer", "const": 10 },
+        "details": { "type": "string" },
+        "sub_scores": { "type": "object" },
+        "issues": { "type": "array", "items": { "type": "object" } },
+        "metadata": { "type": "object" }
+      }
+    }
+  }
+}

@@ -500,7 +500,7 @@ class SkillDevDeepAdapter:
                     request_id=rid,
                     channel_id=cid,
                     payload={
-                        "event_type": "skilldev.search_results", 
+                        "event_type": "skilldev.search_results",
                         "skillList": skills,
                         "num": len(skills),
                         "total": total,
@@ -698,8 +698,73 @@ class SkillDevDeepAdapter:
         rid: str,
         cid: str,
     ) -> AsyncIterator[AgentResponseChunk]:
+        static_result, static_report = self._get_static_review_report(task_workspace)
         benchmark, report, iteration = self._get_review_benchmark(task_workspace)
-        if benchmark and report and iteration:
+        has_static = static_result is not None
+        has_dynamic = benchmark is not None and report is not None and iteration >= 0
+
+        # Frontend review events: combined > static-only > dynamic-only.
+        if has_static and has_dynamic:
+            logger.info("[session=%s] [SkillDevDeepAdapter] 静态和动态评估结果审阅", task_id)
+            merged_report = static_report or ""
+            if report:
+                merged_report = f"{merged_report}\n\n---\n\n{report}" if merged_report else report
+            yield AgentResponseChunk(
+                request_id=rid,
+                channel_id=cid,
+                payload={
+                    "event_type": "skilldev.confirm_request",
+                    "confirm_type": "combined_review",
+                    "title": "评估结果审阅",
+                    "message": "请审阅静态评估和动态评测结果并决定下一步。",
+                    "data": {
+                        "static_benchmark": static_result,
+                        "dyn_benchmark": benchmark,
+                        "report": merged_report,
+                        "iteration": iteration,
+                    },
+                    "actions": [
+                        {"id": "accept", "label": "通过，继续", "style": "primary"},
+                        {"id": "improve", "label": "根据建议优化", "style": "secondary"},
+                    ],
+                    "task_id": task_id,
+                },
+                is_complete=False,
+            )
+            return
+
+        if has_static:
+            verdict = str(static_result.get("verdict") or "").upper()
+            actions = [
+                {"id": "accept", "label": "质量达标，继续", "style": "primary"},
+                {"id": "improve", "label": "根据建议优化", "style": "secondary"},
+            ]
+            if verdict == "FAIL":
+                actions = [
+                    {"id": "improve", "label": "根据建议优化", "style": "primary"},
+                    {"id": "force_dynamic", "label": "仍然运行动态评估", "style": "secondary"},
+                ]
+            logger.info("[session=%s] [SkillDevDeepAdapter] 静态评估结果审阅: %s", task_id, verdict)
+            yield AgentResponseChunk(
+                request_id=rid,
+                channel_id=cid,
+                payload={
+                    "event_type": "skilldev.confirm_request",
+                    "confirm_type": "static_review",
+                    "title": "静态评估结果审阅",
+                    "message": "请审阅静态评估结果并决定下一步。",
+                    "data": {
+                        "benchmark": static_result,
+                        "report": static_report,
+                    },
+                    "actions": actions,
+                    "task_id": task_id,
+                },
+                is_complete=False,
+            )
+            return
+
+        if has_dynamic:
             logger.info("[session=%s] [SkillDevDeepAdapter] 评测结果审阅: %s", task_id, iteration)
             yield AgentResponseChunk(
                 request_id=rid,
@@ -707,7 +772,7 @@ class SkillDevDeepAdapter:
                 payload={
                     "event_type": "skilldev.confirm_request",
                     "confirm_type": "review",
-                    "title": "评测结果审阅",
+                    "title": "动态评测结果审阅",
                     "message": "请审阅评测结果并决定下一步。",
                     "data": {
                         "benchmark": benchmark,
@@ -807,6 +872,42 @@ class SkillDevDeepAdapter:
         if request.session_id:
             return str(request.session_id)
         return uuid.uuid4().hex
+
+    @staticmethod
+    def _get_static_review_report(
+        task_workspace: Path,
+    ) -> tuple[dict[str, Any] | None, str | None]:
+        """Load static_report.json / static_report.md from evals/static.
+
+        Returns (static_result_dict, report_markdown).
+        """
+        static_dir = task_workspace / "evals" / "static"
+        report_json = static_dir / "static_report.json"
+        if not report_json.is_file():
+            return None, None
+
+        try:
+            static_result = json.loads(report_json.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            logger.warning("[SkillDevDeepAdapter] static report load failed: %s", exc)
+            return None, None
+
+        if not isinstance(static_result, dict) or static_result.get("reviewed", False):
+            return None, None
+
+        updated = {**static_result, "reviewed": True}
+        try:
+            report_json.write_text(
+                json.dumps(updated, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+        except OSError as exc:
+            logger.warning("[SkillDevDeepAdapter] static report mark reviewed failed: %s", exc)
+            return None, None
+
+        report_md = static_dir / "static_report.md"
+        report = report_md.read_text(encoding="utf-8") if report_md.is_file() else ""
+        return static_result, report
 
     @staticmethod
     def _get_review_benchmark(

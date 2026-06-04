@@ -1,6 +1,6 @@
 ---
 name: skill-creator
-description: Create new skills, modify and improve existing skills, and measure skill performance. Use when users want to create a skill from scratch, edit, or optimize an existing skill, run evals to test a skill, benchmark skill performance with variance analysis, or optimize a skill's description for better triggering accuracy.
+description: Create new skills, modify and improve existing skills, and measure skill quality or performance. Use when users want to create a skill from scratch, edit, or optimize an existing skill, run static quality scoring with skill-compass, run evals to test a skill, benchmark skill performance with variance analysis, or optimize a skill's description for better triggering accuracy.
 ---
 
 # Skill Creator
@@ -15,7 +15,7 @@ The default flow:
 
 Optional branches (run between Step 2 and the final gate):
 
-- **Evaluations are opt-in only.** If the user explicitly asks to test, evaluate, benchmark, compare, or iterate using eval results, read `references/evaluation.md` and follow it exactly.
+- **Evaluations are opt-in only.** If the user explicitly asks to test, evaluate, benchmark, compare, or iterate using eval results, use the evaluation definitions, trigger table, and execution rules in "Optional Workflows" below.
 - **Description optimization is opt-in only.** If the user explicitly asks to optimize the skill description or improve triggering accuracy, read `references/description-optimization.md` and follow it exactly. Description candidates must obey the description limits defined above in "Frontmatter — hard constraints".
 - **Order when both are requested:** evaluation first (stabilizes behavior), then description optimization (describes final behavior).
 - After all optional branches complete, run the **full verification gate** once as the final step.
@@ -23,7 +23,7 @@ Optional branches (run between Step 2 and the final gate):
 Your TODO plan should mirror the active workflow:
 
 - Default work: capture intent, write or update skill files, run verification gate.
-- Add evaluation tasks only when the user explicitly requested evals or benchmark-style testing.
+- Add evaluation tasks only when the evaluation scope table in "Optional Workflows" selects static and/or dynamic evaluation; when that table selects "Static + dynamic", include both tasks, run static evaluation first, keep dynamic evaluation pending until the static verdict is known, and mark dynamic evaluation skipped only when static evaluation did not pass (verdict is `FAIL`).
 - Add description-optimization tasks only when the user explicitly requested trigger or description optimization.
 
 **Hard rules — violating any of these is a bug:**
@@ -152,9 +152,30 @@ Self-check before ending the conversation: did the full gate pass? If not, run i
 
 ## Optional Workflows
 
-- `references/evaluation.md` — full opt-in evaluation and benchmark process.
+- `../skill-compass/SKILL.md` — full opt-in static evaluation process.
+- `references/evaluation.md` — full opt-in dynamic evaluation and benchmark process.
 - `references/description-optimization.md` — full opt-in description optimization process.
 - `references/schemas.md` — JSON schemas for evals.json, grading.json, etc.
+
+**Evaluation definitions:**
+
+- Static evaluation: read and execute `../skill-compass/SKILL.md`; write reports to `<workspace>/evals/static/static_report.json` and `<workspace>/evals/static/static_report.md`.
+- Dynamic evaluation: read and execute `references/evaluation.md`; use `<workspace>/evals/iteration-N/benchmark.json` and `benchmark.md` outputs.
+
+Evaluations are off by default. Trigger static and/or dynamic evaluation only when the original user request explicitly contains one of these intents:
+
+| User intent | Evaluation scope |
+|-------------|------------------|
+| "帮我做静态评估" / "检查 skill 质量" / "分析可触发性" | Static only |
+| "帮我跑动态评估" / "帮我创建几个测试例测试一下" | Dynamic only |
+| "帮我全面评估" / "静态+动态都跑" | Static + dynamic |
+
+**Execution rules:**
+
+- Run the selected evaluation branch only after Step 2 has produced the skill files and before the final verification gate.
+- Static only: run static evaluation.
+- Dynamic only: run dynamic evaluation.
+- Static + dynamic: run static evaluation first. If static evaluation did not pass (verdict is `FAIL`), skip dynamic evaluation. If static evaluation passed (verdict is `PASS` or `CAUTION`), continue into dynamic evaluation automatically; do not ask the user whether to run dynamic evaluation.
 
 **Integration with the verification gate:**
 
