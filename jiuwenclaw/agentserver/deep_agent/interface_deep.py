@@ -1526,6 +1526,28 @@ class JiuWenClawDeepAdapter:
             return self._task_execution_rail.get_current_task_id()
         return get_current_task_id()
 
+    def _outer_loop_has_remaining_tasks(self, session_id: str) -> bool:
+        """Return True when DeepAgent OuterLoop still has pending task-plan items."""
+        deep = self._instance
+        if deep is None:
+            return False
+        deep_config = getattr(deep, "_deep_config", None)
+        if deep_config is None or not getattr(deep_config, "enable_task_loop", False):
+            return False
+        loop_session = getattr(deep, "_loop_session", None)
+        has_remaining_fn = getattr(deep, "_has_remaining_tasks", None)
+        if loop_session is None or not callable(has_remaining_fn):
+            return False
+        try:
+            return bool(has_remaining_fn(loop_session))
+        except Exception:
+            logger.debug(
+                "[JiuWenClawDeepAdapter] OuterLoop remaining-task check failed session_id=%s",
+                session_id,
+                exc_info=True,
+            )
+            return False
+
     def _apply_model_to_react_agent(self, model: Model) -> None:
         """将指定模型应用到 react_agent 实例（替换 _llm 和 _config 字段）。
 
@@ -4971,8 +4993,11 @@ class JiuWenClawDeepAdapter:
                         # When llm_output has already streamed the full user-facing text,
                         # keep chat.final as a completion marker only to avoid duplicating
                         # the final answer block downstream.
+                        trace_session_id = _LLM_TRACE_SESSION_ID.get() or ""
+                        if self._outer_loop_has_remaining_tasks(trace_session_id):
+                            return None
                         log_chat_final(
-                            session_id=_LLM_TRACE_SESSION_ID.get(),
+                            session_id=trace_session_id,
                             request_id=_LLM_TRACE_REQUEST_ID.get(),
                             iteration=_LLM_TRACE_ITERATION.get(),
                             model_name=_LLM_TRACE_MODEL_NAME.get(),
