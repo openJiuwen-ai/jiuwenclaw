@@ -1272,6 +1272,7 @@ class VibeSkillChannel(BaseChannel):
             "skilldev.agent_output": self._handle_skilldev_agent_output,
             "skilldev.tool_call": self._handle_skilldev_tool_call,
             "skilldev.tool_result": self._handle_skilldev_tool_result,
+            "skilldev.file_ready": self._handle_skilldev_file_ready,
             "skilldev.todos_update": self._handle_skilldev_todos_update,
             "skilldev.confirm_request": self._handle_skilldev_confirm_request,
             "skilldev.ask_user_question": self._handle_skilldev_ask_user_question,
@@ -1439,6 +1440,38 @@ class VibeSkillChannel(BaseChannel):
             }
         )
         ctx["_skilldev_stream_last_kind"] = "tool"
+        return self._prepend_message_announcement(ctx, external_sid, responses)
+
+    async def _handle_skilldev_file_ready(
+        self,
+        payload: dict,
+        external_sid: str | None,
+        session_id: str | None,
+    ) -> list[dict]:
+        """skilldev.file_ready — upload_file 成功后的文件 part（type=file）。"""
+        if not session_id:
+            return []
+        file_info = payload.get("file")
+        if not isinstance(file_info, dict):
+            return []
+        url = str(file_info.get("url") or "").strip()
+        if not url:
+            return []
+        ctx = self._ensure_message_context(session_id)
+        part = self._append_file_part(
+            session_id,
+            url=url,
+            name=str(file_info.get("name") or ""),
+            size_bytes=file_info.get("size_bytes"),
+            mime=str(file_info.get("mime") or ""),
+        )
+        ctx["_skilldev_stream_last_kind"] = "file"
+        ctx["_skilldev_active_reasoning_part"] = None
+        ctx["_skilldev_active_output_part"] = None
+        responses = [{
+            "type": "message.part.updated",
+            "properties": self._serialize_part(part, external_sid),
+        }]
         return self._prepend_message_announcement(ctx, external_sid, responses)
 
     async def _handle_skilldev_todos_update(
@@ -2338,6 +2371,30 @@ class VibeSkillChannel(BaseChannel):
         """SkillDev agent 流式专用：追加 text/reasoning part，与同会话 chat 使用的 part_by_type 隔离。"""
         return self._append_text_part(session_id, part_type)
 
+    def _append_file_part(
+        self,
+        session_id: str | None,
+        *,
+        url: str,
+        name: str,
+        size_bytes: Any,
+        mime: str,
+    ) -> dict[str, Any]:
+        """追加 file part（upload_file 产物，发往小艺 message.part.updated）。"""
+        ctx = self._ensure_message_context(session_id)
+        part = {
+            "id": f"prt_{secrets.token_hex(6)}",
+            "sessionID": session_id,
+            "messageID": ctx["message_id"],
+            "type": "file",
+            "url": url,
+            "name": name,
+            "size_bytes": size_bytes,
+            "mime": mime,
+        }
+        ctx["parts"].append(part)
+        return part
+
     def _ensure_tool_part(
         self, session_id: str | None, call_id: str, tool_name: str
     ) -> tuple[dict[str, Any], bool]:
@@ -2703,6 +2760,7 @@ class VibeSkillChannel(BaseChannel):
             "skilldev.agent_output",
             "skilldev.tool_call",
             "skilldev.tool_result",
+            "skilldev.file_ready",
             "skilldev.todos_update",
             "skilldev.confirm_request",
             "skilldev.ask_user_question",

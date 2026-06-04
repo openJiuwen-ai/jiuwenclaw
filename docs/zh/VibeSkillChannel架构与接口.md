@@ -346,6 +346,7 @@ SkillDev 事件映射：
 | `skilldev.agent_output` | `message.updated` + `message.part.updated/delta` | assistant 文本流式输出（payload 仅 `delta`） |
 | `skilldev.tool_call` | `message.part.updated` | 工具调用开始，part 类型为 `tool` |
 | `skilldev.tool_result` | `message.part.updated` | 工具调用结束，写入 `state.output`（即使 part 已存在也会推送） |
+| `skilldev.file_ready` | `message.part.updated` | `upload_file` 成功后的文件 part（`type=file`，含 `url` / `name` / `size_bytes` / `mime`） |
 | `skilldev.todos_update` | `todo.updated` | Todo 列表更新 |
 | `skilldev.ask_user_question` | `question.asked` | 结构化澄清提问（`questions` 列表） |
 | `skilldev.confirm_request` | `review.asked` | 按 `confirm_type` 分流：`review` / `static_review` / `combined_review`；`properties.type` 与 `confirm_type` 一致，其余字段来自 `data` |

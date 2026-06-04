@@ -196,6 +196,7 @@ class EventType(Enum):
     SKILLDEV_COMPLETED = "skilldev.completed"
     SKILLDEV_TOOL_CALL = "skilldev.tool_call"
     SKILLDEV_TOOL_RESULT = "skilldev.tool_result"
+    SKILLDEV_FILE_READY = "skilldev.file_ready"
 
 
 class Mode(Enum):
