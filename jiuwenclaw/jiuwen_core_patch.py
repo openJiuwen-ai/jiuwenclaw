@@ -145,7 +145,20 @@ class RetryMixin:
 
     @classmethod
     def _get_retry_config(cls) -> LlmRetryConfig:
-        """从 config.yaml 读取重试配置，未配置则使用代码默认值。"""
+        """从环境变量或 config.yaml 读取重试配置，未配置则使用代码默认值。
+
+        max_attempts 获取优先级：环境变量 > config.yaml > 代码默认值
+        """
+        # 优先从环境变量读取
+        env_max_attempts = os.getenv("LLM_RETRY_MAX_ATTEMPTS")
+        if env_max_attempts is not None:
+            try:
+                env_max_attempts = int(env_max_attempts)
+            except (ValueError, TypeError) as e:
+                llm_logger.warning(f"Invalid LLM_RETRY_MAX_ATTEMPTS env value '{env_max_attempts}': {e}")
+                env_max_attempts = None
+
+        # 从 config.yaml 读取
         try:
             from jiuwenclaw.config import get_config
             cfg = get_config()
@@ -154,7 +167,7 @@ class RetryMixin:
             if retry_cfg:
                 return LlmRetryConfig(
                     enabled=retry_cfg.get("enabled", True),
-                    max_attempts=retry_cfg.get("max_attempts", 3),
+                    max_attempts=env_max_attempts if env_max_attempts is not None else retry_cfg.get("max_attempts", 3),
                     initial_backoff=retry_cfg.get("initial_backoff", 10.0),
                     max_backoff=retry_cfg.get("max_backoff", 60.0),
                     backoff_factor=retry_cfg.get("backoff_factor", 2.0),
@@ -162,7 +175,7 @@ class RetryMixin:
                 )
         except Exception:
             llm_logger.warning("Failed to get retry config from config.yaml, use default values.")
-        return LlmRetryConfig()
+        return LlmRetryConfig(max_attempts=env_max_attempts if env_max_attempts is not None else 4)
 
     def _is_retryable_error(self, exc: Exception, cfg: LlmRetryConfig) -> bool:
         """判断错误是否可重试。
@@ -390,7 +403,13 @@ class PatchOpenAIModelClient(RetryMixin, OpenAIModelClient):
             final_timeout,
             self.model_client_config.max_retries
         )
-        session_id = self.model_client_config.model_extra.get("session", "default")
+        session_value = self.model_client_config.model_extra.get("session", {})
+        if isinstance(session_value, dict):
+            session_id = session_value.get("sessionId") or "default"
+        elif isinstance(session_value, str):
+            session_id = session_value
+        else:
+            session_id = "default"
         default_headers = build_default_headers(session_id)
         return AsyncOpenAI(
             api_key=self.model_client_config.api_key,
