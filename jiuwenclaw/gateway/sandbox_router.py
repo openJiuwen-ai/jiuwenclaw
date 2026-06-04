@@ -997,9 +997,30 @@ class SandboxRouterAgentClient(AgentServerClient):
             if session_id in restored_ids:
                 return
 
+            logger.info(
+                "Querying workspace snapshot from DCS: session_id=%s sandbox_id=%s",
+                session_id,
+                runtime.sandbox_id,
+            )
             record = await self._get_workspace_dcs_store().get_workspace(session_id)
             if record is None:
+                logger.info(
+                    "Workspace snapshot not found in DCS: session_id=%s sandbox_id=%s",
+                    session_id,
+                    runtime.sandbox_id,
+                )
                 return
+
+            logger.info(
+                "Found workspace snapshot in DCS: session_id=%s sandbox_id=%s "
+                "url=%s name=%s workspace_sandbox_id=%s routing_key=%s",
+                session_id,
+                runtime.sandbox_id,
+                record.url,
+                record.name,
+                str(record.sandbox_id or "").strip() or "n/a",
+                str(record.routing_key or "").strip() or "n/a",
+            )
 
             if self._should_skip_workspace_restore_for_live_sandbox(runtime, record):
                 restored_ids.add(session_id)
@@ -1022,6 +1043,20 @@ class SandboxRouterAgentClient(AgentServerClient):
             )
             query_url_obs = _create_query_url_obs()
             latest_url = await query_url_obs.get_latest_obs_url(record.url)
+            if latest_url != record.url:
+                logger.info(
+                    "Refreshed OBS download URL for workspace restore: session_id=%s "
+                    "sandbox_id=%s",
+                    session_id,
+                    runtime.sandbox_id,
+                )
+            else:
+                logger.info(
+                    "Using workspace OBS URL for restore: session_id=%s sandbox_id=%s url=%s",
+                    session_id,
+                    runtime.sandbox_id,
+                    latest_url,
+                )
             restore_env = e2a_from_agent_fields(
                 request_id=request_id,
                 channel_id=str(envelope.channel or "") or _VIBESKILL_CHANNEL_ID,

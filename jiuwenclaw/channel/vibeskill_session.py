@@ -69,14 +69,35 @@ class VibeSkillSessionStore:
     async def _load_from_dcs(self, session_id: str) -> VibeSkillSession | None:
         if self._dcs is None:
             return None
+        logger.info(
+            "[VibeSkillSessionStore] Querying session metadata from DCS: session_id=%s",
+            session_id,
+        )
         session = await self._dcs.load_session(session_id)
         if session is None:
+            logger.info(
+                "[VibeSkillSessionStore] Session metadata not found in DCS: session_id=%s",
+                session_id,
+            )
             return None
         async with self._lock:
             existing = self._sessions.get(session_id)
             if existing is not None:
                 return existing
             self._index_locally(session)
+        state_value = (
+            session.state.value
+            if isinstance(session.state, VibeSkillSessionState)
+            else session.state
+        )
+        logger.info(
+            "[VibeSkillSessionStore] Loaded session metadata from DCS: session_id=%s "
+            "mode=%s state=%s user_id=%s",
+            session_id,
+            session.mode,
+            state_value,
+            str((session.metadata or {}).get("user_id") or "").strip() or "n/a",
+        )
         return session
 
     async def get_or_create(
