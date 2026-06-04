@@ -100,11 +100,13 @@ def get_resolved_project_dir(
 ) -> str:
     """从 metadata 读取 project_dir，无效或未设置时返回全局 agent workspace。"""
     default_s = str(get_agent_workspace_dir().resolve())
-    if _safe_session_subdir(session_id, sessions_root) is None:
+    session_dir = _safe_session_subdir(session_id, sessions_root)
+    if session_dir is None:
         return default_s
     sessions_root_s = str(sessions_root) if sessions_root else None
     meta = _read_metadata(session_id, sessions_root_s)
     pd = meta.get("project_dir")
+    default_s = str(session_dir)
     if not isinstance(pd, str) or not pd.strip():
         meta["project_dir"] = default_s
         _enqueue_write(session_id, meta, sessions_root_s)

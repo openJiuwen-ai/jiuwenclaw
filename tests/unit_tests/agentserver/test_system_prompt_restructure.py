@@ -214,10 +214,10 @@ async def test_runtime_rail_multi_tenant_workspace_dirs():
     
     # 验证完整的绝对路径格式（兼容 Windows/Linux 路径分隔符）
     expected_config = str(expected_base / "config")
-    expected_workspace = str(expected_base / "jiuwenclaw_workspace")
-    expected_memory = str(expected_base / "jiuwenclaw_workspace" / "memory")
-    expected_skills = str(expected_base / "jiuwenclaw_workspace" / "skills")
-    expected_todo = str(expected_base / "jiuwenclaw_workspace" / "todo")
+    expected_workspace = str(expected_base / "agent" / "jiuwenclaw_workspace")
+    expected_memory = str(expected_base / "agent" /"jiuwenclaw_workspace" / "memory")
+    expected_skills = str(expected_base / "agent" /"jiuwenclaw_workspace" / "skills")
+    expected_todo = str(expected_base / "agent" /"jiuwenclaw_workspace" / "todo")
     
     # Windows 下 Path 会转换为 \ 分隔符，需要兼容
     expected_config_win = expected_config.replace("/", "\\")
