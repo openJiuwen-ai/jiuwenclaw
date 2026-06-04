@@ -129,7 +129,7 @@ deploy_gateway() {
 
     # start gateway
     ensure_available_port "GATEWAY_NODE_PORT"
-    if [ "${DEPLOY_VARS["DEPLOYMENT_MODE"]}" == "distributed" ]; then
+    if [ "${DEPLOY_VARS["DEPLOYMENT_MODE"]}" == "active-standby" ]; then
         DEPLOY_VARS["GATEWAY_REPLICAS"]="2"
     fi
     gen_gateway_file
