@@ -220,11 +220,11 @@ class _SessionRequest(ISessionRequest):
 
     @property
     def session_concurrency(self) -> int:
-        return int(os.getenv("AGENT_SERVER_SESSION_CONCURRENCY"))
+        return int(os.getenv("AGENT_SERVER_SESSION_CONCURRENCY", "3"))
 
     @property
     def session_ttl(self) -> int:
-        return int(os.getenv("AGENT_SERVER_SESSION_TTL"))
+        return int(os.getenv("AGENT_SERVER_SESSION_TTL", "60"))
 
     @property
     def priority(self) -> "MessagePriority":
@@ -294,15 +294,15 @@ class RuntimeManagementAgentClient(AgentServerClient):
 
         namespace = os.getenv("AGENT_SERVER_NAMESPACE")
         self._namespace = os.getenv("AGENT_SERVER_NAMESPACE")
-        container_name = os.getenv("AGENT_SERVER_CONTAINER_NAME")
-        container_port = int(os.getenv("AGENT_SERVER_PORT"))
-        port_name = os.getenv("AGENT_SERVER_PORT_NAME")
-        image_pull_policy = os.getenv("AGENT_SERVER_IMAGE_PULL_POLICY")
-        min_idle_services = int(os.getenv("AGENT_SERVER_MIN_IDLE_SERVICES"))
-        max_services = int(os.getenv("AGENT_SERVER_MAX_SERVICES"))
-        service_concurrency = int(os.getenv("AGENT_SERVER_SERVICE_CONCURRENCY"))
-        service_ttl = int(os.getenv("AGENT_SERVER_SERVICE_TTL"))
-        autoscale_interval = float(os.getenv("AGENT_SERVER_AUTOSCALE_INTERVAL"))
+        container_name = os.getenv("AGENT_SERVER_CONTAINER_NAME", "agentserver")
+        container_port = int(os.getenv("AGENT_SERVER_PORT", "8080"))
+        port_name = os.getenv("AGENT_SERVER_PORT_NAME", "http")
+        image_pull_policy = os.getenv("AGENT_SERVER_IMAGE_PULL_POLICY", "IfNotPresent")
+        min_idle_services = int(os.getenv("AGENT_SERVER_MIN_IDLE_SERVICES", "1"))
+        max_services = int(os.getenv("AGENT_SERVER_MAX_SERVICES", "20"))
+        service_concurrency = int(os.getenv("AGENT_SERVER_SERVICE_CONCURRENCY", "30"))
+        service_ttl = int(os.getenv("AGENT_SERVER_SERVICE_TTL", "180"))
+        autoscale_interval = float(os.getenv("AGENT_SERVER_AUTOSCALE_INTERVAL", "5"))
         nfs_server = os.getenv("AGENT_SERVER_NFS_SERVER", "")
         nfs_path = os.getenv("AGENT_SERVER_NFS_PATH", "/")
         nfs_mount_path = os.getenv("AGENT_SERVER_NFS_MOUNT_PATH")
@@ -325,10 +325,10 @@ class RuntimeManagementAgentClient(AgentServerClient):
         node_name = os.getenv("NODE_NAME")
         kubeconfig = os.getenv("AGENT_SERVER_KUBECONFIG") or None
         self._kubeconfig = os.getenv("AGENT_SERVER_KUBECONFIG") or None
-        readiness_initial_delay = int(os.getenv("AGENT_SERVER_READINESS_INITIAL_DELAY"))
-        readiness_period = int(os.getenv("AGENT_SERVER_READINESS_PERIOD"))
-        ready_timeout = int(os.getenv("AGENT_SERVER_READY_TIMEOUT"))
-        ready_poll_interval = int(os.getenv("AGENT_SERVER_READY_POLL_INTERVAL"))
+        readiness_initial_delay = int(os.getenv("AGENT_SERVER_READINESS_INITIAL_DELAY", "10"))
+        readiness_period = int(os.getenv("AGENT_SERVER_READINESS_PERIOD", "5"))
+        ready_timeout = int(os.getenv("AGENT_SERVER_READY_TIMEOUT", "300"))
+        ready_poll_interval = int(os.getenv("AGENT_SERVER_READY_POLL_INTERVAL", "5"))
 
         model_provider = os.getenv("MODEL_PROVIDER")
         model_name = os.getenv("MODEL_NAME")
@@ -566,6 +566,17 @@ class RuntimeManagementAgentClient(AgentServerClient):
         factory = _Factory()
 
         def create_service_manager() -> ServiceManager:
+            # 每次调用时都通过 load_all_service_configs 获取最新的 service_templates
+            service_templates = None
+            try:
+                import asyncio
+                loop = asyncio.get_running_loop()
+                # 在当前事件循环中同步等待异步调用
+                service_templates = loop.run_until_complete(load_all_service_configs())
+            except RuntimeError:
+                # 没有运行中的事件循环，暂时不加载
+                logger.debug("[RuntimeManagementAgentClient] no running event loop during create_service_manager")
+
             return ServiceManager(
                 service_factory=factory,
                 dual_queue=dual_q,
@@ -575,6 +586,7 @@ class RuntimeManagementAgentClient(AgentServerClient):
                 max_services=max_services,
                 autoscale_interval=autoscale_interval,
                 service_idle_ttl=service_ttl,
+                service_templates=service_templates,
             )
 
         self._access: Any = Access(create_service_manager)
@@ -624,15 +636,15 @@ class RuntimeManagementAgentClient(AgentServerClient):
             return
 
         agent_image = os.getenv("AGENT_SERVER_IMAGE")
-        service_concurrency = int(os.getenv("AGENT_SERVER_SERVICE_CONCURRENCY"))
-        min_idle_services = int(os.getenv("AGENT_SERVER_MIN_IDLE_SERVICES"))
-        max_services = int(os.getenv("AGENT_SERVER_MAX_SERVICES"))
-        target_port = int(os.getenv("AGENT_SERVER_PORT"))
-        service_ttl = int(os.getenv("AGENT_SERVER_SERVICE_TTL"))
-        message_timeout = int(os.getenv("AGENT_SERVER_MESSAGE_TIMEOUT"))
-        autoscale_interval = float(os.getenv("AGENT_SERVER_AUTOSCALE_INTERVAL"))
-        session_concurrency = int(os.getenv("AGENT_SERVER_SESSION_CONCURRENCY"))
-        session_ttl = int(os.getenv("AGENT_SERVER_SESSION_TTL"))
+        service_concurrency = int(os.getenv("AGENT_SERVER_SERVICE_CONCURRENCY", "30"))
+        min_idle_services = int(os.getenv("AGENT_SERVER_MIN_IDLE_SERVICES", "1"))
+        max_services = int(os.getenv("AGENT_SERVER_MAX_SERVICES", "20"))
+        target_port = int(os.getenv("AGENT_SERVER_PORT", "8080"))
+        service_ttl = int(os.getenv("AGENT_SERVER_SERVICE_TTL", "180"))
+        message_timeout = int(os.getenv("AGENT_SERVER_MESSAGE_TIMEOUT", "60"))
+        autoscale_interval = float(os.getenv("AGENT_SERVER_AUTOSCALE_INTERVAL", "5"))
+        session_concurrency = int(os.getenv("AGENT_SERVER_SESSION_CONCURRENCY", "3"))
+        session_ttl = int(os.getenv("AGENT_SERVER_SESSION_TTL", "60"))
 
         acc_cfg = AccessConfig(
             image=agent_image,
