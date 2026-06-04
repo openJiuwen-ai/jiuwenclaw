@@ -835,3 +835,194 @@ class TestInstanceLock:
 
         # Clean up
         first_lock.release()
+
+
+class TestStopInstanceProcess:
+    """Test stop_instance_process behavior.
+
+    Verifies fix for Issue #1269: stop_instance_process() unconditionally
+    returned True and deleted PID file without checking if process actually
+    stopped within the timeout window.
+    """
+
+    @staticmethod
+    def test_no_pid_file_returns_true(tmp_path):
+        """No PID file means instance is already stopped."""
+        config = InstanceConfig(
+            name="test",
+            workspace=tmp_path,
+            ports={},
+        )
+        result = stop_instance_process(config, timeout=1.0)
+        assert result is True
+
+    @staticmethod
+    def test_zero_pid_deletes_pid_file_and_returns_true(tmp_path):
+        """Invalid/zero PID in file: delete file and return True."""
+        config = InstanceConfig(
+            name="test",
+            workspace=tmp_path,
+            ports={},
+        )
+        write_pid_file(config, 12345)  # Write valid file first
+        # Then patch read_pid_file to return zero pid
+        with patch(
+            "jiuwenswarm.instance_manager.status.read_pid_file",
+            return_value={"pid": 0, "started_at": time.time()},
+        ):
+            result = stop_instance_process(config, timeout=1.0)
+            assert result is True
+
+    @staticmethod
+    def test_process_already_dead_returns_true(tmp_path):
+        """Process already dead: clean up PID file and return True."""
+        config = InstanceConfig(
+            name="test",
+            workspace=tmp_path,
+            ports={},
+        )
+        write_pid_file(config, 99999)
+        with patch(
+            "jiuwenswarm.instance_manager.status.read_pid_file",
+            return_value={"pid": 99999, "started_at": time.time()},
+        ), patch(
+            "jiuwenswarm.instance_manager.status.is_process_alive",
+            return_value=False,
+        ):
+            result = stop_instance_process(config, timeout=1.0)
+            assert result is True
+            # PID file should be deleted for dead process
+            assert not config.get_pid_file_path().exists()
+
+    @staticmethod
+    def test_process_stops_within_timeout_returns_true(tmp_path):
+        """Process alive but dies within timeout: return True, delete PID file."""
+        config = InstanceConfig(
+            name="test",
+            workspace=tmp_path,
+            ports={},
+        )
+        write_pid_file(config, 99999)
+        alive_calls = []
+
+        def mock_is_alive(pid):
+            alive_calls.append(pid)
+            # First call: alive, subsequent calls: dead
+            return len(alive_calls) < 2
+
+        with patch(
+            "jiuwenswarm.instance_manager.status.read_pid_file",
+            return_value={"pid": 99999, "started_at": time.time()},
+        ), patch(
+            "jiuwenswarm.instance_manager.status.is_process_alive",
+            side_effect=mock_is_alive,
+        ), patch(
+            "jiuwenswarm.instance_manager.status.platform.system",
+            return_value="Linux",
+        ), patch("os.kill"):
+            result = stop_instance_process(config, timeout=2.0)
+            assert result is True
+            # PID file should be deleted
+            assert not config.get_pid_file_path().exists()
+
+    @staticmethod
+    def test_process_never_stops_returns_false(tmp_path):
+        """Process stays alive after timeout: return False, keep PID file."""
+        config = InstanceConfig(
+            name="test",
+            workspace=tmp_path,
+            ports={},
+        )
+        # Write PID file so it exists before patching
+        write_pid_file(config, 99999)
+
+        with patch(
+            "jiuwenswarm.instance_manager.status.read_pid_file",
+            return_value={"pid": 99999, "started_at": time.time()},
+        ), patch(
+            "jiuwenswarm.instance_manager.status.is_process_alive",
+            return_value=True,
+        ), patch(
+            "jiuwenswarm.instance_manager.status.platform.system",
+            return_value="Linux",
+        ), patch("os.kill"):
+            result = stop_instance_process(config, timeout=1.0)
+            assert result is False
+            # PID file should NOT be deleted when process didn't stop
+            assert config.get_pid_file_path().exists()
+
+    @staticmethod
+    def test_process_not_stopped_logs_warning(tmp_path):
+        """When process doesn't stop, a warning is logged."""
+        config = InstanceConfig(
+            name="test-inst",
+            workspace=tmp_path,
+            ports={},
+        )
+        write_pid_file(config, 99999)
+
+        with patch(
+            "jiuwenswarm.instance_manager.status.logger"
+        ) as mock_logger, patch(
+            "jiuwenswarm.instance_manager.status.read_pid_file",
+            return_value={"pid": 99999, "started_at": time.time()},
+        ), patch(
+            "jiuwenswarm.instance_manager.status.is_process_alive",
+            return_value=True,
+        ), patch(
+            "jiuwenswarm.instance_manager.status.platform.system",
+            return_value="Linux",
+        ), patch("os.kill"):
+            result = stop_instance_process(config, timeout=1.0)
+
+        assert result is False
+        # Warning should have been logged
+        mock_logger.warning.assert_called_once()
+        # logger.warning uses %-formatting: the first arg is the format string,
+        # and the remaining args are the format values
+        pos_args = mock_logger.warning.call_args[0]
+        assert "test-inst" in str(pos_args)
+        assert "99999" in str(pos_args)
+
+    @staticmethod
+    def test_successful_stop_logs_info(tmp_path):
+        """When process stops successfully, an info message is logged."""
+        config = InstanceConfig(
+            name="test-inst",
+            workspace=tmp_path,
+            ports={},
+        )
+        write_pid_file(config, 99999)
+
+        # Simulate: process is alive initially, then dies after kill
+        alive_state = [True]
+
+        def mock_is_alive(pid):
+            # First call (check before kill): alive
+            # After that: dead (process has been killed)
+            if alive_state[0]:
+                alive_state[0] = False
+                return True
+            return False
+
+        with patch(
+            "jiuwenswarm.instance_manager.status.logger"
+        ) as mock_logger, patch(
+            "jiuwenswarm.instance_manager.status.read_pid_file",
+            return_value={"pid": 99999, "started_at": time.time()},
+        ), patch(
+            "jiuwenswarm.instance_manager.status.is_process_alive",
+            side_effect=mock_is_alive,
+        ), patch(
+            "jiuwenswarm.instance_manager.status.platform.system",
+            return_value="Linux",
+        ), patch("os.kill"):
+            result = stop_instance_process(config, timeout=2.0)
+
+        assert result is True
+        # Find the "stopped" info call among all info calls
+        stopped_calls = [
+            c for c in mock_logger.info.call_args_list
+            if "stopped" in str(c)
+        ]
+        assert len(stopped_calls) > 0

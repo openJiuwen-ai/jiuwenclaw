@@ -451,7 +451,14 @@ def stop_instance_process(config: InstanceConfig, timeout: float = 10.0) -> bool
             break
         time.sleep(0.5)
 
-    # Cleanup PID file
-    delete_pid_file(config)
-    logger.info("Instance '%s' stopped", config.name)
-    return True
+    stopped = not is_process_alive(pid)
+    # Only clean up PID file if process actually stopped
+    if stopped:
+        delete_pid_file(config)
+        logger.info("Instance '%s' stopped", config.name)
+    else:
+        logger.warning(
+            "Instance '%s' did not stop within timeout (PID %d still alive)",
+            config.name, pid
+        )
+    return stopped
