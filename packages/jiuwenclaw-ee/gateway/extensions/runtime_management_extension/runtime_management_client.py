@@ -515,7 +515,6 @@ class RuntimeManagementAgentClient(AgentServerClient):
                             capabilities_add=["SYS_ADMIN", "NET_ADMIN"],
                             seccomp_unconfined=True,
                             apparmor_unconfined=True,
-                            proc_mount_unmasked=True,
                             allow_privilege_escalation=True,
                             privileged=True,
                             host_path_mounts=jiuwenbox_host_mounts,
