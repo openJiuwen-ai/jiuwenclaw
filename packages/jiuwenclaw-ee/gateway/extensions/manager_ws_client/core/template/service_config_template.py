@@ -247,29 +247,4 @@ async def apply_service_config_template(
         or payload.get("template_id")
         or (payload.get("template") or {}).get("template_id"),
     )
-    _trigger_runtime_management_config_update(op)
     return result
-
-
-def _trigger_runtime_management_config_update(op: str) -> None:
-    try:
-        from jiuwenclaw.extensions.registry import ExtensionRegistry
-
-        registry = ExtensionRegistry.get_instance()
-        ext = registry.get_agent_server_client_extension()
-        if ext is None or not hasattr(ext, "get_client"):
-            return
-        client = ext.get_client()
-        if client is None or not hasattr(client, "set_or_update_server_config"):
-            return
-        client.set_or_update_server_config(config={"service_template": True})
-        logger.info(
-            "[ManagerWsClient] triggered runtime management config update "
-            "after service_config_templates %s",
-            op,
-        )
-    except Exception as exc:  # noqa: BLE001
-        logger.warning(
-            "[ManagerWsClient] failed to trigger runtime management config update: %s",
-            exc,
-        )
