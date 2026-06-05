@@ -12,6 +12,7 @@ from typing import Any
 from openjiuwen.core.foundation.tool import LocalFunction, ToolCard
 
 from jiuwenclaw.agentserver.skilldev.utils import create_upload_file_obs
+from jiuwenclaw.agentserver.skilldev.utils.path_utils import resolve_and_validate_path
 
 logger = logging.getLogger(__name__)
 
@@ -122,19 +123,18 @@ async def _upload_file_tool_impl(**inputs: Any) -> dict[str, Any]:
         logger.error("[upload_file_tool] file_path 为空")
         return UploadFileErrorOutput(error="file_path 为必填参数").to_dict()
 
-    # 标准化路径
-    original_path = file_path
-    file_path = os.path.expanduser(file_path)
-    if original_path != file_path:
-        logger.debug("[upload_file_tool] 路径展开: %s -> %s", original_path, file_path)
+    # 路径安全校验（工作区边界 + 存在性 + 类型）
+    is_valid, resolved_path, error_msg = resolve_and_validate_path(
+        file_path,
+        must_exist=True,
+        must_be_file=True,
+    )
+    if not is_valid:
+        logger.error("[upload_file_tool] 路径校验失败: %s", error_msg)
+        return UploadFileErrorOutput(error=error_msg or "路径校验失败").to_dict()
 
-    if not os.path.exists(file_path):
-        logger.error("[upload_file_tool] 文件不存在: %s", file_path)
-        return UploadFileErrorOutput(error=f"文件不存在: {file_path}").to_dict()
-
-    if not os.path.isfile(file_path):
-        logger.error("[upload_file_tool] 路径不是文件: %s", file_path)
-        return UploadFileErrorOutput(error=f"路径不是文件: {file_path}").to_dict()
+    file_path = resolved_path
+    logger.debug("[upload_file_tool] 标准化后路径: %s", file_path)
 
     # 获取文件信息
     file_name = os.path.basename(file_path)
@@ -162,8 +162,9 @@ async def _upload_file_tool_impl(**inputs: Any) -> dict[str, Any]:
         ).to_dict()
 
     except Exception as e:
+        # 详细错误记录到日志，向用户返回泛化错误
         logger.exception("[upload_file_tool] 上传过程中发生错误: %s", e)
-        return UploadFileErrorOutput(error=f"上传过程中发生错误: {str(e)}").to_dict()
+        return UploadFileErrorOutput(error="文件上传失败，请稍后重试").to_dict()
 
 
 def get_upload_file_tool() -> LocalFunction:
