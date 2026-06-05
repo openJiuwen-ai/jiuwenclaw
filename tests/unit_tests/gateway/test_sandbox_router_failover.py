@@ -83,7 +83,12 @@ class FakeWorkspaceDcsStore:
         record = self.records.get(session_id)
         if not record:
             return None
-        return MagicMock(url=record.get("url", ""), name=record.get("name", ""))
+        return types.SimpleNamespace(
+            url=record.get("url", ""),
+            name=record.get("name", ""),
+            routing_key=record.get("routing_key", ""),
+            sandbox_id=record.get("sandbox_id", ""),
+        )
 
     async def put_workspace(
         self,
@@ -109,6 +114,10 @@ class FakeQueryUrlObs:
     def __init__(self, events: list[tuple[str, str]]) -> None:
         self.events = events
         self.deleted_urls: list[str] = []
+
+    async def get_latest_obs_url(self, file_url: str) -> str:
+        self.events.append(("latest", file_url))
+        return file_url
 
     async def invoking_osms_delete(self, file_url: str) -> bool:
         self.events.append(("delete", file_url))
@@ -557,6 +566,107 @@ async def test_requests_are_buffered_during_oa_reconnect(
     assert "req-buffered" in second_client.request_ids
     assert "req-buffered" not in first_client.request_ids
     assert runtime.routing_key not in router._reconnect_waiters
+
+
+@pytest.mark.asyncio
+async def test_adopted_runtime_restores_workspace_from_different_sandbox(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    router = SandboxRouterAgentClient(adopt_existing=False)
+    agent_client = BackupAgentClient(
+        [
+            {
+                "sessionID": "sess-a",
+                "status": "success",
+            },
+        ]
+    )
+    events: list[tuple[str, str]] = []
+    fake_query = FakeQueryUrlObs(events)
+    monkeypatch.setattr(_sandbox_router_mod, "_create_query_url_obs", lambda: fake_query)
+    router._workspace_dcs_store = FakeWorkspaceDcsStore(
+        initial_records={
+            "sess-a": {
+                "url": "https://obs/old-sess-a.zip",
+                "name": "old-a.zip",
+                "routing_key": "vibeskill:user:user-a",
+                "sandbox_id": "sb-old",
+            }
+        },
+        events=events,
+    )  # type: ignore[assignment]
+    runtime = SandboxRuntime(
+        routing_key="vibeskill:user:user-a",
+        sandbox_id="sb-live",
+        agent_client=agent_client,
+        status=SandboxStatus.IDLE,
+        task_count=0,
+        metadata={
+            "routing_key": "vibeskill:user:user-a",
+            "user_id": "user-a",
+            "adopted": True,
+        },
+    )
+
+    await router._ensure_workspace_restored(runtime, _envelope())
+
+    assert events == [
+        ("get", "sess-a"),
+        ("latest", "https://obs/old-sess-a.zip"),
+    ]
+    assert len(agent_client.envelopes) == 1
+    restore_envelope = agent_client.envelopes[0]
+    assert restore_envelope.method == ReqMethod.SKILLDEV_BATCH_DOWNLOAD.value
+    assert restore_envelope.params == {
+        "items": [
+            {
+                "sessionID": "sess-a",
+                "url": "https://obs/old-sess-a.zip",
+                "name": "old-a.zip",
+            }
+        ]
+    }
+    assert runtime.metadata["restored_session_ids"] == {"sess-a"}
+
+
+@pytest.mark.asyncio
+async def test_workspace_restore_skips_when_snapshot_is_from_same_sandbox(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    router = SandboxRouterAgentClient(adopt_existing=False)
+    agent_client = BackupAgentClient([])
+    events: list[tuple[str, str]] = []
+    fake_query = FakeQueryUrlObs(events)
+    monkeypatch.setattr(_sandbox_router_mod, "_create_query_url_obs", lambda: fake_query)
+    router._workspace_dcs_store = FakeWorkspaceDcsStore(
+        initial_records={
+            "sess-a": {
+                "url": "https://obs/live-sess-a.zip",
+                "name": "live-a.zip",
+                "routing_key": "vibeskill:user:user-a",
+                "sandbox_id": "sb-live",
+            }
+        },
+        events=events,
+    )  # type: ignore[assignment]
+    runtime = SandboxRuntime(
+        routing_key="vibeskill:user:user-a",
+        sandbox_id="sb-live",
+        agent_client=agent_client,
+        status=SandboxStatus.IDLE,
+        task_count=0,
+        metadata={
+            "routing_key": "vibeskill:user:user-a",
+            "user_id": "user-a",
+            "adopted": True,
+        },
+    )
+
+    await router._ensure_workspace_restored(runtime, _envelope())
+
+    assert events == [("get", "sess-a")]
+    assert agent_client.envelopes == []
+    assert runtime.metadata["restored_session_ids"] == {"sess-a"}
 
 
 @pytest.mark.asyncio

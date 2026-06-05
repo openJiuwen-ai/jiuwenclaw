@@ -996,9 +996,7 @@ class SandboxRouterAgentClient(AgentServerClient):
         runtime: SandboxRuntime,
         record: WorkspaceRecord,
     ) -> bool:
-        """Skip batch_download when reusing a live sandbox whose disk already holds workspace."""
-        if runtime.metadata.get("adopted"):
-            return True
+        """Skip batch_download only when the snapshot came from this live sandbox."""
         record_sandbox_id = str(record.sandbox_id or "").strip()
         runtime_sandbox_id = str(runtime.sandbox_id or "").strip()
         return bool(
