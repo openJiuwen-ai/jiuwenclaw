@@ -21,7 +21,7 @@ dependencies = [
     "pgvector>=0.4.2",
     "websockets>=12.0",
     "aiohttp>=3.9.0",
-    "redis>=5.0.0",
+    "redis==7.4.0",
     "psutil>=7.2.2",
     "aiosqlite>=0.22.1",
     "croniter>=2.0.0",
