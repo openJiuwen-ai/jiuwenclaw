@@ -97,6 +97,7 @@ create_gateway_env_configmap() {
     local mode="${DEPLOY_VARS["MODE"]}"
     local env_template_file="${CONFIG["GATEWAY_ENV_TEMPLATE_FILE"]}"
     local env_file="${CONFIG["GATEWAY_ENV_FILE"]}"
+    local deploy_mode="${DEPLOY_VARS["DEPLOYMENT_MODE"]}"
 
     if [ "${client_type}" != "jiuwen" ]; then
         return
@@ -106,6 +107,10 @@ create_gateway_env_configmap() {
         DEPLOY_VARS["AGENT_SERVER_NFS_MOUNT_PATH"]="/root/.jiuwenclaw"
     else
         DEPLOY_VARS["AGENT_SERVER_NFS_MOUNT_PATH"]="/home/app/.jiuwenclaw"
+    fi
+
+    if [ "${deploy_mode}" == "active-standby" ]; then
+         DEPLOY_VARS["GATEWAY_INSTANCE_ID"]="gateway-${namespace}"
     fi
 
     render_config_template "${env_template_file}" "${env_file}" "DEPLOY_VARS"
