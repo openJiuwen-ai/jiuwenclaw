@@ -2403,7 +2403,7 @@ class MessageHandler(ABC):
                 else:
                     await self.publish_robot_messages(out)
                 _pub_elapsed = (asyncio.get_event_loop().time() - _pub_t0) * 1000
-                logger.info(
+                logger.debug(
                     "[STREAM_DIAG][MsgHandler] published seq=%s rid=%s publish=%.1fms",
                     getattr(chunk, "sequence", "?"), rid, _pub_elapsed,
                 )

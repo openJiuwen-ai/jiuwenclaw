@@ -140,8 +140,7 @@ class SandboxRoutingDcsStore:
             ttl_seconds=self._ttl_seconds,
         )
         logger.info(
-            "Saved sandbox routing to DCS: routing_key=%s sandbox_id=%s gateway_id=%s",
-            key,
+            "Saved sandbox routing to DCS: sandbox_id=%s gateway_id=%s",
             sid,
             record.gateway_id,
         )
@@ -175,8 +174,7 @@ class SandboxRoutingDcsStore:
         if not claimed:
             return False
         logger.info(
-            "Claimed sandbox routing in DCS (NX): routing_key=%s sandbox_id=%s",
-            key,
+            "Claimed sandbox routing in DCS (NX): sandbox_id=%s",
             sid,
         )
         return True
@@ -205,4 +203,4 @@ class SandboxRoutingDcsStore:
         if not key:
             return
         await self._dcs.delete(self._routing_key(key))
-        logger.info("Deleted sandbox routing from DCS: routing_key=%s", key)
+        logger.info("Deleted sandbox routing from DCS")

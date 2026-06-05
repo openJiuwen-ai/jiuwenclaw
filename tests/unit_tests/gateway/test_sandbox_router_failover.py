@@ -238,6 +238,20 @@ def _backup_runtime(agent_client: FakeAgentClient) -> Any:
     )
 
 
+def test_system_session_is_not_tracked_for_workspace_backup() -> None:
+    router = SandboxRouterAgentClient(adopt_existing=False)
+    router._backup_enabled = True
+    runtime = _backup_runtime(BackupAgentClient([]))
+    runtime.metadata["session_ids"] = set()
+    envelope = _envelope(user_id="", session_id="heartbeat_abc123")
+
+    router._track_session_for_runtime(runtime, envelope)
+
+    assert runtime.metadata["session_ids"] == set()
+    assert runtime.metadata.get("backup_period_active_sessions") is None
+    assert runtime.metadata.get("backup_period_session_versions") is None
+
+
 @pytest.mark.asyncio
 async def test_adopt_existing_skips_create_sandbox(
     router: SandboxRouterAgentClient,
@@ -779,6 +793,48 @@ async def test_backup_enabled_terminate_uses_unflushed_active_sessions(
 
 
 @pytest.mark.asyncio
+async def test_system_session_skips_workspace_restore() -> None:
+    router = SandboxRouterAgentClient(adopt_existing=False)
+    events: list[tuple[str, str]] = []
+    router._workspace_dcs_store = FakeWorkspaceDcsStore(
+        initial_records={
+            "heartbeat_abc123": {
+                "url": "https://obs/heartbeat.zip",
+                "name": "heartbeat.zip",
+            }
+        },
+        events=events,
+    )  # type: ignore[assignment]
+    agent_client = BackupAgentClient([])
+    runtime = _backup_runtime(agent_client)
+
+    await router._ensure_workspace_restored(
+        runtime,
+        _envelope(user_id="", session_id="heartbeat_abc123"),
+    )
+
+    assert events == []
+    assert agent_client.envelopes == []
+
+
+@pytest.mark.asyncio
+async def test_system_sessions_are_filtered_before_terminate_backup() -> None:
+    router = SandboxRouterAgentClient(adopt_existing=False)
+    router._backup_enabled = False
+    agent_client = BackupAgentClient([])
+    runtime = _backup_runtime(agent_client)
+    runtime.metadata["session_ids"] = {
+        "__heartbeat__",
+        "heartbeat_abc123",
+        "cron-abc123",
+    }
+
+    await router._backup_workspaces_before_terminate(runtime)
+
+    assert agent_client.envelopes == []
+
+
+@pytest.mark.asyncio
 async def test_periodic_backup_removes_only_upload_and_dcs_success(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -825,6 +881,19 @@ async def test_backup_deletes_old_workspace_url_before_dcs_overwrite(
     events: list[tuple[str, str]] = []
     fake_query = FakeQueryUrlObs(events)
     monkeypatch.setattr(_sandbox_router_mod, "_create_query_url_obs", lambda: fake_query)
+    log_messages: list[tuple[str, tuple[Any, ...]]] = []
+
+    class FakeLogger:
+        def info(self, message: str, *args: Any) -> None:
+            log_messages.append((message, args))
+
+        def warning(self, message: str, *args: Any) -> None:
+            log_messages.append((message, args))
+
+        def exception(self, message: str, *args: Any) -> None:
+            log_messages.append((message, args))
+
+    monkeypatch.setattr(_sandbox_router_mod, "logger", FakeLogger())
     router._workspace_dcs_store = FakeWorkspaceDcsStore(
         initial_records={
             "sess-a": {
@@ -845,6 +914,12 @@ async def test_backup_deletes_old_workspace_url_before_dcs_overwrite(
         ("put", "sess-a"),
     ]
     assert fake_query.deleted_urls == ["https://obs/old-sess-a.zip"]
+    rendered_logs = "\n".join(
+        message % args if args else message
+        for message, args in log_messages
+    )
+    assert "Deleted old workspace OBS object before DCS overwrite" in rendered_logs
+    assert "https://obs/old-sess-a.zip" not in rendered_logs
 
 
 @pytest.mark.asyncio

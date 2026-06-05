@@ -164,7 +164,7 @@ class ChannelManager(ABC):
                 msg = await consume(timeout=1.0)
                 if msg is None:
                     continue
-                logger.info(
+                logger.debug(
                     "[ChannelManager] 从 robot_messages 取出，准备派发: id=%s channel_id=%s type=%s",
                     msg.id, msg.channel_id, msg.type,
                 )
@@ -172,7 +172,7 @@ class ChannelManager(ABC):
                 if channel:
                     try:
                         await channel.send(msg)
-                        logger.info(
+                        logger.debug(
                             "[ChannelManager] 已派发到 Channel: channel_id=%s id=%s",
                             msg.channel_id, msg.id,
                         )

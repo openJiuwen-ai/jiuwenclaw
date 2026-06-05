@@ -373,9 +373,11 @@ class OpenAbilityWebSocketClient(AgentServerClient):
         self._ensure_connected()
         envelope.is_stream = True
         rid = _wire_request_id_key(envelope.request_id)
+        session_id = str(envelope.session_id or "").strip() or "n/a"
         logger.info(
-            "[E2A][oa][stream] sandbox_id=%s request_id=%s method=%s",
+            "[E2A][oa][stream][out] sandbox_id=%s session_id=%s request_id=%s method=%s",
             self._sandbox_id,
+            session_id,
             rid,
             envelope.method,
         )
@@ -403,15 +405,25 @@ class OpenAbilityWebSocketClient(AgentServerClient):
                 else:
                     data = await queue.get()
                 chunk = parse_agent_server_wire_chunk(data)
-                logger.debug(
-                    "%s 收到流式 chunk request_id=%s is_complete=%s",
-                    _LOG_LABEL,
+                logger.info(
+                    "[E2A][oa][stream][in] sandbox_id=%s session_id=%s request_id=%s "
+                    "method=%s is_complete=%s",
+                    self._sandbox_id,
+                    session_id,
                     rid,
+                    envelope.method,
                     chunk.is_complete,
                 )
                 yield chunk
                 if chunk.is_complete:
                     saw_complete = True
+            logger.info(
+                "[E2A][oa][stream][done] sandbox_id=%s session_id=%s request_id=%s method=%s",
+                self._sandbox_id,
+                session_id,
+                rid,
+                envelope.method,
+            )
         except asyncio.CancelledError:
             logger.info("%s 流式接收被取消: request_id=%s", _LOG_LABEL, rid)
             raise

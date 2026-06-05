@@ -41,6 +41,7 @@ _WORKSPACE_SKIP_METHODS = frozenset({
     ReqMethod.SKILLDEV_BATCH_DOWNLOAD.value,
 })
 _VIBESKILL_CHANNEL_ID = "vibeskill"
+_SYSTEM_SESSION_ID_PREFIXES = ("__", "heartbeat_", "cron")
 _SANDBOX_BACKUP_ENABLE_ENV = "SANDBOX_BACKUP_ENABLE"
 _SANDBOX_BACKUP_PERIOD_SECONDS_ENV = "SANDBOX_BACKUP_PERIOD_SECONDS"
 _SANDBOX_BACKUP_DEFAULT_PERIOD_SECONDS = 600.0
@@ -274,9 +275,8 @@ class SandboxRouterAgentClient(AgentServerClient):
                 if payload:
                     runtime.metadata["last_link_heartbeat_payload"] = dict(payload)
                 logger.info(
-                    "Recorded AgentServer link heartbeat: sandbox_id=%s routing_key=%s",
+                    "Recorded AgentServer link heartbeat: sandbox_id=%s",
                     sid,
-                    runtime.routing_key,
                 )
                 return
         logger.info(
@@ -335,27 +335,24 @@ class SandboxRouterAgentClient(AgentServerClient):
             ok = bool(resp.ok)
             if ok:
                 logger.info(
-                    "Link return path probe OK: sandbox_id=%s routing_key=%s request_id=%s",
+                    "Link return path probe OK: sandbox_id=%s request_id=%s",
                     sandbox_id,
-                    routing_key,
                     request_id,
                 )
                 if metadata is not None:
                     metadata["last_link_probe_at"] = time.time()
             else:
                 logger.warning(
-                    "Link return path probe rejected: sandbox_id=%s routing_key=%s request_id=%s payload=%s",
+                    "Link return path probe rejected: sandbox_id=%s request_id=%s payload=%s",
                     sandbox_id,
-                    routing_key,
                     request_id,
                     resp.payload,
                 )
             return ok
         except Exception as exc:  # noqa: BLE001
             logger.warning(
-                "Link return path probe failed: sandbox_id=%s routing_key=%s request_id=%s error=%s",
+                "Link return path probe failed: sandbox_id=%s request_id=%s error=%s",
                 sandbox_id,
-                routing_key,
                 request_id,
                 exc,
             )
@@ -534,9 +531,7 @@ class SandboxRouterAgentClient(AgentServerClient):
         endpoint = await self._get_dcs_store().get_openability_endpoint(record.sandbox_id)
         if endpoint is None:
             logger.warning(
-                "Stale sandbox routing mapping (no OA endpoint): routing_key=%s sandbox_id=%s "
-                "session_id=%s",
-                routing_key,
+                "Stale sandbox routing mapping (no OA endpoint): sandbox_id=%s session_id=%s",
                 record.sandbox_id,
                 session_id or "",
             )
@@ -545,9 +540,8 @@ class SandboxRouterAgentClient(AgentServerClient):
             )
             return None
         logger.info(
-            "Adopting existing sandbox from DCS: routing_key=%s sandbox_id=%s "
-            "session_id=%s prior_gateway=%s",
-            routing_key,
+            "Adopting existing sandbox from DCS: sandbox_id=%s session_id=%s "
+            "prior_gateway=%s",
             record.sandbox_id,
             session_id or "",
             record.gateway_id,
@@ -590,9 +584,8 @@ class SandboxRouterAgentClient(AgentServerClient):
                 )
                 if not routing_claimed:
                     logger.info(
-                        "Lost routing NX race; adopting peer sandbox: routing_key=%s "
+                        "Lost routing NX race; adopting peer sandbox: "
                         "sandbox_id=%s session_id=%s",
-                        routing_key,
                         sandbox_id,
                         session_id or "",
                     )
@@ -613,7 +606,7 @@ class SandboxRouterAgentClient(AgentServerClient):
                     if adopted is not None:
                         return adopted
                     raise RuntimeError(
-                        f"routing NX lost for {routing_key} but no adoptable sandbox in DCS"
+                        "routing NX lost but no adoptable sandbox in DCS"
                     )
 
             registration = await self._register_sandbox_record(sandbox_id)
@@ -806,9 +799,7 @@ class SandboxRouterAgentClient(AgentServerClient):
 
     async def _handle_stale_link_heartbeat(self, runtime: SandboxRuntime) -> None:
         logger.warning(
-            "AgentServer link heartbeat timeout: routing_key=%s sandbox_id=%s "
-            "timeout=%.1fs last=%s",
-            runtime.routing_key,
+            "AgentServer link heartbeat timeout: sandbox_id=%s timeout=%.1fs last=%s",
             runtime.sandbox_id,
             self._link_heartbeat_timeout_seconds,
             runtime.metadata.get("last_link_heartbeat_at"),
@@ -817,8 +808,7 @@ class SandboxRouterAgentClient(AgentServerClient):
             runtime.metadata["openability_connected_at"] = time.time()
             logger.info(
                 "Recovered link return path via probe after heartbeat timeout: "
-                "routing_key=%s sandbox_id=%s",
-                runtime.routing_key,
+                "sandbox_id=%s",
                 runtime.sandbox_id,
             )
             return
@@ -829,7 +819,6 @@ class SandboxRouterAgentClient(AgentServerClient):
             payload={
                 "event": "agentserver.link.heartbeat.timeout",
                 "sandbox_id": runtime.sandbox_id,
-                "routing_key": runtime.routing_key,
                 "timeout_seconds": self._link_heartbeat_timeout_seconds,
                 "last_link_heartbeat_at": runtime.metadata.get("last_link_heartbeat_at"),
             },
@@ -845,8 +834,7 @@ class SandboxRouterAgentClient(AgentServerClient):
                 if self._runtime_needs_openability_refresh(runtime):
                     logger.debug(
                         "Skipping idle sandbox reclaim during OA reconnect: "
-                        "routing_key=%s sandbox_id=%s",
-                        routing_key,
+                        "sandbox_id=%s",
                         runtime.sandbox_id,
                     )
                     continue
@@ -866,9 +854,8 @@ class SandboxRouterAgentClient(AgentServerClient):
             await self._backup_workspaces_before_terminate(runtime)
         except Exception:  # noqa: BLE001
             logger.exception(
-                "Workspace backup failed before sandbox terminate: routing_key=%s "
+                "Workspace backup failed before sandbox terminate: "
                 "sandbox_id=%s session_ids=%s",
-                routing_key,
                 sandbox_id,
                 tracked_session_ids,
             )
@@ -884,9 +871,8 @@ class SandboxRouterAgentClient(AgentServerClient):
                 else:
                     logger.warning(
                         "Skipped DCS/routing cleanup after failed sandbox delete: "
-                        "sandbox_id=%s routing_key=%s session_ids=%s",
+                        "sandbox_id=%s session_ids=%s",
                         sandbox_id,
-                        routing_key,
                         tracked_session_ids,
                     )
             finally:
@@ -954,8 +940,7 @@ class SandboxRouterAgentClient(AgentServerClient):
             await self._get_routing_dcs_store().delete_routing(routing_key)
         except Exception:  # noqa: BLE001
             logger.exception(
-                "Failed to delete sandbox routing mapping: routing_key=%s sandbox_id=%s",
-                routing_key,
+                "Failed to delete sandbox routing mapping: sandbox_id=%s",
                 sid,
             )
 
@@ -982,6 +967,11 @@ class SandboxRouterAgentClient(AgentServerClient):
             uid = key[len(prefix) :].strip()
             return uid or None
         return None
+
+    @staticmethod
+    def _is_system_session_id(session_id: str | None) -> bool:
+        sid = str(session_id or "").strip()
+        return bool(sid and sid.startswith(_SYSTEM_SESSION_ID_PREFIXES))
 
     @staticmethod
     def _restored_session_ids(runtime: SandboxRuntime) -> set[str]:
@@ -1026,7 +1016,11 @@ class SandboxRouterAgentClient(AgentServerClient):
         if method in _WORKSPACE_SKIP_METHODS:
             return
         session_id = str(envelope.session_id or "").strip()
-        if not session_id or session_id == "batch":
+        if (
+            not session_id
+            or session_id == "batch"
+            or self._is_system_session_id(session_id)
+        ):
             return
         user_id = str(envelope.user_id or "").strip()
         if user_id:
@@ -1061,7 +1055,7 @@ class SandboxRouterAgentClient(AgentServerClient):
         session_id: str,
     ) -> None:
         sid = str(session_id or "").strip()
-        if not sid:
+        if not sid or self._is_system_session_id(sid):
             return
         active_sessions = self._backup_period_active_sessions(runtime)
         versions = self._backup_period_session_versions(runtime)
@@ -1092,7 +1086,7 @@ class SandboxRouterAgentClient(AgentServerClient):
                 if not active_sessions:
                     continue
                 versions = self._backup_period_session_versions(runtime)
-                session_ids = sorted(str(sid).strip() for sid in active_sessions if str(sid).strip())
+                session_ids = self._normalize_session_ids(active_sessions)
                 version_snapshot = {
                     sid: int(versions.get(sid) or 0)
                     for sid in session_ids
@@ -1109,10 +1103,8 @@ class SandboxRouterAgentClient(AgentServerClient):
                 )
             except Exception:  # noqa: BLE001
                 logger.exception(
-                    "Periodic workspace backup failed: sandbox_id=%s routing_key=%s "
-                    "session_ids=%s",
+                    "Periodic workspace backup failed: sandbox_id=%s session_ids=%s",
                     runtime.sandbox_id,
-                    runtime.routing_key,
                     session_ids,
                 )
                 continue
@@ -1137,7 +1129,11 @@ class SandboxRouterAgentClient(AgentServerClient):
         if method in _WORKSPACE_SKIP_METHODS:
             return
         session_id = str(envelope.session_id or "").strip()
-        if not session_id or session_id == "batch":
+        if (
+            not session_id
+            or session_id == "batch"
+            or self._is_system_session_id(session_id)
+        ):
             return
         if session_id in self._restored_session_ids(runtime):
             return
@@ -1164,13 +1160,12 @@ class SandboxRouterAgentClient(AgentServerClient):
 
             logger.info(
                 "Found workspace snapshot in DCS: session_id=%s sandbox_id=%s "
-                "url=%s name=%s workspace_sandbox_id=%s routing_key=%s",
+                "url=%s name=%s workspace_sandbox_id=%s",
                 session_id,
                 runtime.sandbox_id,
                 record.url,
                 record.name,
                 str(record.sandbox_id or "").strip() or "n/a",
-                str(record.routing_key or "").strip() or "n/a",
             )
 
             if self._should_skip_workspace_restore_for_live_sandbox(runtime, record):
@@ -1299,15 +1294,21 @@ class SandboxRouterAgentClient(AgentServerClient):
     @staticmethod
     def _normalize_session_ids(raw_session_ids: Any) -> list[str]:
         if isinstance(raw_session_ids, set):
-            return sorted(str(sid).strip() for sid in raw_session_ids if str(sid).strip())
+            return sorted(
+                str(sid).strip()
+                for sid in raw_session_ids
+                if str(sid).strip()
+                and not SandboxRouterAgentClient._is_system_session_id(str(sid).strip())
+            )
         if isinstance(raw_session_ids, (list, tuple)):
             return [
                 str(sid).strip()
                 for sid in raw_session_ids
                 if str(sid).strip()
+                and not SandboxRouterAgentClient._is_system_session_id(str(sid).strip())
             ]
         sid = str(raw_session_ids or "").strip()
-        return [sid] if sid else []
+        return [sid] if sid and not SandboxRouterAgentClient._is_system_session_id(sid) else []
 
     async def _backup_workspaces(
         self,
@@ -1316,6 +1317,9 @@ class SandboxRouterAgentClient(AgentServerClient):
         *,
         reason: str,
     ) -> set[str]:
+        session_ids = self._normalize_session_ids(session_ids)
+        if not session_ids:
+            return set()
         user_id = str(runtime.metadata.get("user_id") or "").strip()
         if not user_id:
             user_id = self._user_id_from_routing_key(runtime.routing_key) or ""
@@ -1338,10 +1342,9 @@ class SandboxRouterAgentClient(AgentServerClient):
         if not resp.ok:
             payload = resp.payload if isinstance(resp.payload, dict) else {}
             logger.warning(
-                "Workspace backup failed before terminate: sandbox_id=%s routing_key=%s "
+                "Workspace backup failed before terminate: sandbox_id=%s "
                 "request_id=%s reason=%s error=%s failed_session_ids=%s",
                 sandbox_id,
-                runtime.routing_key,
                 request_id,
                 reason,
                 payload.get("error"),
@@ -1353,10 +1356,9 @@ class SandboxRouterAgentClient(AgentServerClient):
         results = payload.get("results")
         if not isinstance(results, list):
             logger.warning(
-                "Workspace backup returned no results: sandbox_id=%s routing_key=%s "
+                "Workspace backup returned no results: sandbox_id=%s "
                 "request_id=%s reason=%s failed_session_ids=%s",
                 sandbox_id,
-                runtime.routing_key,
                 request_id,
                 reason,
                 session_ids,
@@ -1386,10 +1388,9 @@ class SandboxRouterAgentClient(AgentServerClient):
                 failed_session_ids.append(sid)
 
         logger.info(
-            "Workspace backup completed: sandbox_id=%s routing_key=%s "
+            "Workspace backup completed: sandbox_id=%s "
             "request_id=%s reason=%s succeeded=%s failed_session_ids=%s",
             sandbox_id,
-            runtime.routing_key,
             request_id,
             reason,
             [{"session_id": e["session_id"], "url": e["url"]} for e in succeeded],
@@ -1429,6 +1430,13 @@ class SandboxRouterAgentClient(AgentServerClient):
                         if not deleted:
                             logger.warning(
                                 "OSMS delete old workspace OBS object returned false: "
+                                "session_id=%s sandbox_id=%s",
+                                entry["session_id"],
+                                sandbox_id,
+                            )
+                        else:
+                            logger.info(
+                                "Deleted old workspace OBS object before DCS overwrite: "
                                 "session_id=%s sandbox_id=%s",
                                 entry["session_id"],
                                 sandbox_id,
@@ -1500,10 +1508,9 @@ class SandboxRouterAgentClient(AgentServerClient):
         last_failure = "none"
         trigger_session_id = str(metadata.get("session_id") or "").strip()
         logger.info(
-            "Beginning OpenAbility reconnect window: sandbox_id=%s routing_key=%s "
-            "session_id=%s reason=%s timeout_seconds=%.1f poll_interval_seconds=%.1f",
+            "Beginning OpenAbility reconnect window: sandbox_id=%s session_id=%s "
+            "reason=%s timeout_seconds=%.1f poll_interval_seconds=%.1f",
             sandbox_id,
-            routing_key,
             trigger_session_id,
             connect_reason,
             open_ability_cfg.reconnect_timeout_seconds,
@@ -1519,11 +1526,10 @@ class SandboxRouterAgentClient(AgentServerClient):
                 last_failure = f"dcs-read-error:{exc}"
                 logger.warning(
                     "OpenAbility reconnect attempt %s: DCS endpoint read failed, "
-                    "will retry: sandbox_id=%s routing_key=%s reason=%s "
+                    "will retry: sandbox_id=%s reason=%s "
                     "remaining_seconds=%.1f error=%s",
                     attempt,
                     sandbox_id,
-                    routing_key,
                     connect_reason,
                     remaining_seconds,
                     exc,
@@ -1538,11 +1544,10 @@ class SandboxRouterAgentClient(AgentServerClient):
                 last_failure = "endpoint-missing-in-dcs"
                 logger.info(
                     "OpenAbility reconnect attempt %s: endpoint not in DCS yet, "
-                    "will retry: sandbox_id=%s routing_key=%s reason=%s "
+                    "will retry: sandbox_id=%s reason=%s "
                     "remaining_seconds=%.1f",
                     attempt,
                     sandbox_id,
-                    routing_key,
                     connect_reason,
                     remaining_seconds,
                 )
@@ -1560,11 +1565,10 @@ class SandboxRouterAgentClient(AgentServerClient):
             client = self._new_open_ability_ws_client(sandbox_id, routing_key)
             logger.info(
                 "OpenAbility reconnect attempt %s: connecting WebSocket: "
-                "sandbox_id=%s routing_key=%s session_id=%s reason=%s "
+                "sandbox_id=%s session_id=%s reason=%s "
                 "endpoint=%s uri=%s remaining_seconds=%.1f",
                 attempt,
                 sandbox_id,
-                routing_key,
                 trigger_session_id,
                 connect_reason,
                 endpoint_label,
@@ -1580,11 +1584,10 @@ class SandboxRouterAgentClient(AgentServerClient):
                 last_failure = f"connect-failed:{exc}"
                 logger.warning(
                     "OpenAbility reconnect attempt %s: WebSocket connect failed, "
-                    "will retry: sandbox_id=%s routing_key=%s reason=%s "
+                    "will retry: sandbox_id=%s reason=%s "
                     "endpoint=%s uri=%s remaining_seconds=%.1f error=%s",
                     attempt,
                     sandbox_id,
-                    routing_key,
                     connect_reason,
                     endpoint_label,
                     ws_uri,
@@ -1608,11 +1611,10 @@ class SandboxRouterAgentClient(AgentServerClient):
                 last_failure = "link-probe-failed"
                 logger.warning(
                     "OpenAbility reconnect attempt %s: link probe failed, will retry: "
-                    "sandbox_id=%s routing_key=%s reason=%s endpoint=%s uri=%s "
+                    "sandbox_id=%s reason=%s endpoint=%s uri=%s "
                     "remaining_seconds=%.1f",
                     attempt,
                     sandbox_id,
-                    routing_key,
                     connect_reason,
                     endpoint_label,
                     ws_uri,
@@ -1630,10 +1632,9 @@ class SandboxRouterAgentClient(AgentServerClient):
             metadata["openability_connected_at"] = time.time()
             metadata.pop("last_link_heartbeat_at", None)
             logger.info(
-                "OpenAbility reconnect window succeeded: sandbox_id=%s routing_key=%s "
-                "session_id=%s reason=%s endpoint=%s uri=%s attempts=%s",
+                "OpenAbility reconnect window succeeded: sandbox_id=%s session_id=%s "
+                "reason=%s endpoint=%s uri=%s attempts=%s",
                 sandbox_id,
-                routing_key,
                 trigger_session_id,
                 connect_reason,
                 endpoint_label,
@@ -1643,10 +1644,9 @@ class SandboxRouterAgentClient(AgentServerClient):
             return client
 
         logger.error(
-            "OpenAbility reconnect window exhausted: sandbox_id=%s routing_key=%s "
-            "session_id=%s reason=%s timeout_seconds=%.1f attempts=%s last_failure=%s",
+            "OpenAbility reconnect window exhausted: sandbox_id=%s session_id=%s "
+            "reason=%s timeout_seconds=%.1f attempts=%s last_failure=%s",
             sandbox_id,
-            routing_key,
             trigger_session_id,
             connect_reason,
             open_ability_cfg.reconnect_timeout_seconds,
@@ -1655,7 +1655,7 @@ class SandboxRouterAgentClient(AgentServerClient):
         )
         raise OpenAbilityReconnectTimeoutError(
             f"OpenAbility reconnect window exhausted for sandbox_id={sandbox_id} "
-            f"routing_key={routing_key} reason={connect_reason} "
+            f"reason={connect_reason} "
             f"timeout_seconds={open_ability_cfg.reconnect_timeout_seconds} "
             f"attempts={attempt} last_failure={last_failure}"
         )
@@ -1695,9 +1695,8 @@ class SandboxRouterAgentClient(AgentServerClient):
             session_ids = _tracked_session_ids_from_metadata(runtime.metadata)
             open_ability_cfg = self._get_open_ability_config()
             logger.warning(
-                "Detected OA physical disconnect: routing_key=%s sandbox_id=%s "
-                "session_ids=%s reconnect_timeout_seconds=%.1f",
-                routing_key,
+                "Detected OA physical disconnect: sandbox_id=%s session_ids=%s "
+                "reconnect_timeout_seconds=%.1f",
                 sandbox_id,
                 session_ids,
                 open_ability_cfg.reconnect_timeout_seconds,
@@ -1729,9 +1728,8 @@ class SandboxRouterAgentClient(AgentServerClient):
             )
         except OpenAbilityReconnectTimeoutError as exc:
             logger.error(
-                "Failed to refresh OA client after reconnect window: routing_key=%s "
+                "Failed to refresh OA client after reconnect window: "
                 "sandbox_id=%s session_ids=%s reason=%s error=%s",
-                runtime.routing_key,
                 runtime.sandbox_id,
                 session_ids,
                 reason,
@@ -1740,9 +1738,7 @@ class SandboxRouterAgentClient(AgentServerClient):
             return False
         except Exception:  # noqa: BLE001
             logger.exception(
-                "Failed to refresh OA client: routing_key=%s sandbox_id=%s "
-                "session_ids=%s reason=%s",
-                runtime.routing_key,
+                "Failed to refresh OA client: sandbox_id=%s session_ids=%s reason=%s",
                 runtime.sandbox_id,
                 session_ids,
                 reason,
@@ -1762,13 +1758,11 @@ class SandboxRouterAgentClient(AgentServerClient):
             await self._disconnect_agent_client(runtime.sandbox_id, old_client)
         except Exception:  # noqa: BLE001
             logger.exception(
-                "Failed to disconnect stale OA client: routing_key=%s sandbox_id=%s",
-                runtime.routing_key,
+                "Failed to disconnect stale OA client: sandbox_id=%s",
                 runtime.sandbox_id,
             )
         logger.info(
-            "Refreshed OA client: routing_key=%s sandbox_id=%s session_ids=%s reason=%s",
-            runtime.routing_key,
+            "Refreshed OA client: sandbox_id=%s session_ids=%s reason=%s",
             runtime.sandbox_id,
             _tracked_session_ids_from_metadata(runtime.metadata),
             reason,
@@ -1786,8 +1780,7 @@ class SandboxRouterAgentClient(AgentServerClient):
             await self._disconnect_agent_client(runtime.sandbox_id, runtime.agent_client)
         except Exception:  # noqa: BLE001
             logger.exception(
-                "Failed to disconnect dropped OA client: routing_key=%s sandbox_id=%s",
-                runtime.routing_key,
+                "Failed to disconnect dropped OA client: sandbox_id=%s",
                 runtime.sandbox_id,
             )
         self._notify_next_waiter()
@@ -1795,9 +1788,8 @@ class SandboxRouterAgentClient(AgentServerClient):
         reconnect_timeout = self._get_open_ability_config().reconnect_timeout_seconds
         logger.warning(
             "Dropped runtime after OA reconnect window exhausted; next request will "
-            "re-adopt from DCS: routing_key=%s sandbox_id=%s session_ids=%s "
+            "re-adopt from DCS: sandbox_id=%s session_ids=%s "
             "reconnect_timeout_seconds=%.1f",
-            runtime.routing_key,
             runtime.sandbox_id,
             session_ids,
             reconnect_timeout,
@@ -1838,27 +1830,24 @@ class SandboxRouterAgentClient(AgentServerClient):
                 )
             except Exception:  # noqa: BLE001
                 logger.exception(
-                    "Sandbox duration refresh failed: sandbox_id=%s routing_key=%s",
+                    "Sandbox duration refresh failed: sandbox_id=%s",
                     runtime.sandbox_id,
-                    runtime.routing_key,
                 )
                 return
             if not result.success:
                 logger.warning(
-                    "Sandbox duration refresh rejected: sandbox_id=%s routing_key=%s "
+                    "Sandbox duration refresh rejected: sandbox_id=%s "
                     "remaining_seconds=%.1f error=%s",
                     runtime.sandbox_id,
-                    runtime.routing_key,
                     remaining_before,
                     result.error,
                 )
                 return
             runtime.expires_at = time.time() + duration_seconds
             logger.info(
-                "Sandbox duration refreshed: sandbox_id=%s routing_key=%s "
+                "Sandbox duration refreshed: sandbox_id=%s "
                 "remaining_before_seconds=%.1f new_duration_seconds=%d",
                 runtime.sandbox_id,
-                runtime.routing_key,
                 remaining_before,
                 duration_seconds,
             )
@@ -1870,9 +1859,8 @@ class SandboxRouterAgentClient(AgentServerClient):
             await self._get_dcs_store().refresh_sandbox_ttl(sandbox_id)
         except Exception:  # noqa: BLE001
             logger.exception(
-                "Failed to refresh sandbox metadata DCS TTL: sandbox_id=%s routing_key=%s",
+                "Failed to refresh sandbox metadata DCS TTL: sandbox_id=%s",
                 sandbox_id,
-                runtime.routing_key,
             )
 
         if self._adopt_existing_enabled:
@@ -1884,9 +1872,8 @@ class SandboxRouterAgentClient(AgentServerClient):
                 )
             except Exception:  # noqa: BLE001
                 logger.exception(
-                    "Failed to refresh sandbox routing DCS TTL: sandbox_id=%s routing_key=%s",
+                    "Failed to refresh sandbox routing DCS TTL: sandbox_id=%s",
                     sandbox_id,
-                    runtime.routing_key,
                 )
 
     async def release_session(
