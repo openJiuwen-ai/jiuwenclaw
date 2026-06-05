@@ -50,7 +50,6 @@ def _patch_gateway_queries(
 RoutingContext = schemas.RoutingContext
 normalize_template_ref = _utils.normalize_template_ref
 fill_missing_template_ref_slots = _utils.fill_missing_template_ref_slots
-agent_rule_matches = expressions.agent_rule_matches
 evaluate_match_expr = expressions.evaluate_match_expr
 resolve_slot_template_id_map = expressions.resolve_slot_template_id_map
 resolve_template_slot_ref = expressions.resolve_template_slot_ref
@@ -208,8 +207,20 @@ def test_agent_rule_user_match(sales_ctx: RoutingContext) -> None:
         "agent_id": "${user_id}",
         "match_expr": "user_id == 'alice'",
     }
-    assert agent_rule_matches(rule, sales_ctx) is True
-    assert agent_rule_matches(rule, replace(sales_ctx, user_id="bob")) is False
+    assert evaluate_match_expr(rule.get("match_expr"), sales_ctx) is True
+    assert evaluate_match_expr(rule.get("match_expr"), replace(sales_ctx, user_id="bob")) is False
+
+
+def test_agent_rule_agent_id_template_does_not_filter_match(
+    sales_ctx: RoutingContext,
+) -> None:
+    """``agent_id`` 模板不参与匹配，仅 ``match_expr`` 决定命中。"""
+    rule = {
+        "agent_id": "${group_id}",
+        "match_expr": "",
+    }
+    assert evaluate_match_expr(rule.get("match_expr"), sales_ctx) is True
+    assert evaluate_match_expr(rule.get("match_expr"), replace(sales_ctx, user_id="bob")) is True
 
 
 def test_agent_rule_fixed_agent_id_does_not_filter_match(sales_ctx: RoutingContext) -> None:
@@ -217,8 +228,8 @@ def test_agent_rule_fixed_agent_id_does_not_filter_match(sales_ctx: RoutingConte
         "agent_id": "default_agent_id_1",
         "match_expr": "",
     }
-    assert agent_rule_matches(rule, sales_ctx) is True
-    assert agent_rule_matches(rule, replace(sales_ctx, user_id="bob")) is True
+    assert evaluate_match_expr(rule.get("match_expr"), sales_ctx) is True
+    assert evaluate_match_expr(rule.get("match_expr"), replace(sales_ctx, user_id="bob")) is True
 
 
 def test_match_expr_empty_is_true(sales_ctx: RoutingContext) -> None:

@@ -1,6 +1,6 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2026-2026. All rights reserved
 
-"""策略表达式求值（``match_expr``；Agent 规则另可校验 ``agent_id`` 模板）。"""
+"""策略表达式求值（``match_expr``；Agent / Service 规则匹配均仅看 ``match_expr``）。"""
 
 from __future__ import annotations
 
@@ -186,35 +186,6 @@ def substitute_template(template: str, ctx: RoutingContext) -> str:
     return _VAR_PATTERN.sub(_repl, template or "").strip()
 
 
-def agent_rule_matches(rule: dict[str, Any], ctx: RoutingContext) -> bool:
-    """判断 Agent 策略行是否命中当前路由上下文。
-
-    **匹配以 ``match_expr`` 为准**（空表达式视为全匹配）。``agent_id`` 为
-    ``${user_id}`` 等模板时，解析结果须与 ``ctx.user_id`` 一致；**固定字面量**
-    ``agent_id`` 仅作路由标识，不参与匹配过滤。
-
-    入参举例::
-
-        rule = {
-            "agent_id": "${user_id}",
-            "match_expr": "user_id == 'alice'",
-            "service_policy_id": 1,
-        }
-        ctx = RoutingContext(group_id="g_demo_sales", bot_id="bot_main", user_id="alice")
-
-    返回值举例::
-
-        True  # 模板 ``agent_id`` 与 ``match_expr`` 均满足
-        False  # ``ctx.user_id="bob"`` 或 ``match_expr`` 比较为假
-    """
-    raw_agent_id = str(rule.get("agent_id") or "").strip()
-    if raw_agent_id and "${" in raw_agent_id:
-        resolved = substitute_template(raw_agent_id, ctx)
-        if resolved and resolved != ctx.user_id:
-            return False
-    return evaluate_match_expr(rule.get("match_expr"), ctx)
-
-
 def evaluate_match_expr(expr: Any, ctx: RoutingContext) -> bool:
     """对 ``match_expr`` 求值，判断当前上下文是否满足策略条件。
 
@@ -345,7 +316,6 @@ def _safe_eval_value(node: ast.AST, env: dict[str, str]) -> Any:
 
 
 __all__ = (
-    "agent_rule_matches",
     "evaluate_match_expr",
     "resolve_slot_template_id_map",
     "resolve_template_slot_ref",

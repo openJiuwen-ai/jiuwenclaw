@@ -1,5 +1,5 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
-"""Claw Manager：日志脱敏内置种子与 Gateway sync push。"""
+"""Claw Manager：日志脱敏内置种子、Gateway sync push 与 REST CRUD。"""
 
 from __future__ import annotations
 
@@ -8,10 +8,31 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from conftest import ManagerApiHarness
 from jiuwenclaw_manager.core.application_config.log_masking_rule import (
     _builtin_seed_rows,
     seed_builtin_log_masking_rules,
 )
+from jiuwenclaw_manager.models.application_config_models import LOG_MASKING_RULE_TABLE_DEF
+
+_BUILTIN_IDS = {row["rule_id"] for row in _builtin_seed_rows("placeholder")}
+
+
+async def _bootstrap_builtin_rules(h: ManagerApiHarness) -> None:
+    await h.create_instance(name="log-masking-rest-ut")
+    await seed_builtin_log_masking_rules(h.handler, h.jiuwenclaw_id)
+
+
+def _log_masking_url(h: ManagerApiHarness, suffix: str = "") -> str:
+    return h.scoped_url(f"/log-masking-rules{suffix}")
+
+
+async def _mdb_rule_ids(h: ManagerApiHarness) -> set[str]:
+    rows = await h.handler.list_records(
+        LOG_MASKING_RULE_TABLE_DEF.table_name,
+        {"jiuwenclaw_id": h.jiuwenclaw_id},
+    )
+    return {str(getattr(row, "rule_id", "") or "") for row in rows}
 
 
 @pytest.mark.asyncio
@@ -178,3 +199,141 @@ async def test_rest_update_ignores_source_field():
     assert "source" not in kwargs["updates"]
     db_updates = handler.update.await_args.args[2]
     assert "source" not in db_updates
+
+
+# ---------------------------------------------------------------------------
+# 《日志脱敏规则下发.md》§10.3 REST CRUD
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_rest_list_and_get_after_bootstrap(manager_api: ManagerApiHarness):
+    """§10.3.1：bootstrap 后列表含 builtin 种子，单条 builtin_email 可查询。"""
+    h = manager_api
+    await _bootstrap_builtin_rules(h)
+
+    list_resp = await h.http.get(_log_masking_url(h))
+    assert list_resp.status_code == 200
+    list_body = list_resp.json()
+    assert list_body["code"] == 200
+    items = list_body["data"]["items"]
+    assert items
+    rule_ids = {item["rule_id"] for item in items}
+    assert "builtin_email" in rule_ids
+    assert _BUILTIN_IDS.issubset(rule_ids)
+
+    enabled_resp = await h.http.get(_log_masking_url(h), params={"enabled": "true"})
+    assert enabled_resp.status_code == 200
+    enabled_ids = {
+        item["rule_id"] for item in enabled_resp.json()["data"]["items"]
+    }
+    assert "builtin_email" in enabled_ids
+
+    get_resp = await h.http.get(_log_masking_url(h, "/builtin_email"))
+    assert get_resp.status_code == 200
+    assert get_resp.json()["data"]["rule_id"] == "builtin_email"
+
+
+@pytest.mark.asyncio
+async def test_rest_create_custom_rule(manager_api: ManagerApiHarness):
+    """§10.3.2：POST 生成 UUID，source 为 custom。"""
+    h = manager_api
+    await _bootstrap_builtin_rules(h)
+
+    create_resp = await h.http.post(
+        _log_masking_url(h),
+        json={
+            "rule_name": "订单号脱敏",
+            "description": "REST 验证用",
+            "pattern": r"ORD-[0-9]{10,}",
+            "replacement": "******",
+            "priority": 60,
+            "enabled": True,
+        },
+    )
+    assert create_resp.status_code == 200
+    created = create_resp.json()["data"]
+    assert created["source"] == "custom"
+    rule_id = created["rule_id"]
+    assert rule_id
+    assert len(rule_id) >= 8
+
+
+@pytest.mark.asyncio
+async def test_rest_create_invalid_pattern_returns_400(
+    manager_api: ManagerApiHarness,
+):
+    """§10.3.2：非法 pattern 返回 400，MDB 无新增行。"""
+    h = manager_api
+    await _bootstrap_builtin_rules(h)
+    before = await _mdb_rule_ids(h)
+
+    bad_resp = await h.http.post(
+        _log_masking_url(h),
+        json={"rule_name": "bad", "pattern": "(", "enabled": True},
+    )
+    assert bad_resp.status_code == 400
+    assert await _mdb_rule_ids(h) == before
+
+
+@pytest.mark.asyncio
+async def test_rest_patch_custom_rule_and_disable_builtin_email(
+    manager_api: ManagerApiHarness,
+):
+    """§10.3.3：PATCH 自定义规则 replacement/priority；关闭 builtin_email。"""
+    h = manager_api
+    await _bootstrap_builtin_rules(h)
+
+    create_resp = await h.http.post(
+        _log_masking_url(h),
+        json={
+            "rule_name": "订单号脱敏",
+            "pattern": r"ORD-[0-9]{10,}",
+            "replacement": "******",
+            "priority": 60,
+            "enabled": True,
+        },
+    )
+    assert create_resp.status_code == 200
+    rule_id = create_resp.json()["data"]["rule_id"]
+
+    patch_resp = await h.http.patch(
+        _log_masking_url(h, f"/{rule_id}"),
+        json={"enabled": True, "replacement": "REDACT", "priority": 120},
+    )
+    assert patch_resp.status_code == 200
+    patched = patch_resp.json()["data"]
+    assert patched["replacement"] == "REDACT"
+    assert patched["priority"] == 120
+
+    disable_resp = await h.http.patch(
+        _log_masking_url(h, "/builtin_email"),
+        json={"enabled": False},
+    )
+    assert disable_resp.status_code == 200
+    assert disable_resp.json()["data"]["enabled"] is False
+
+
+@pytest.mark.asyncio
+async def test_rest_delete_then_get_404(manager_api: ManagerApiHarness):
+    """§10.3.4：DELETE 后再次 GET 返回 404。"""
+    h = manager_api
+    await _bootstrap_builtin_rules(h)
+
+    create_resp = await h.http.post(
+        _log_masking_url(h),
+        json={
+            "rule_name": "订单号脱敏",
+            "pattern": r"ORD-[0-9]{10,}",
+            "priority": 60,
+            "enabled": True,
+        },
+    )
+    assert create_resp.status_code == 200
+    rule_id = create_resp.json()["data"]["rule_id"]
+
+    delete_resp = await h.http.delete(_log_masking_url(h, f"/{rule_id}"))
+    assert delete_resp.status_code == 200
+
+    missing_resp = await h.http.get(_log_masking_url(h, f"/{rule_id}"))
+    assert missing_resp.status_code == 404
