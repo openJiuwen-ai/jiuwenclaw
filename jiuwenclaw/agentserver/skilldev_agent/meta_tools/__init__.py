@@ -14,11 +14,13 @@ from jiuwenclaw.agentserver.skilldev_agent.meta_tools.skilldev_tool_context impo
     load_agent_output_schema,
     resolve_session_id,
 )
+from jiuwenclaw.agentserver.skilldev_agent.meta_tools.upload_file_tool import get_upload_file_tool
 
 __all__ = [
     "get_agent_as_a_tool",
     "get_function_call_tool",
     "get_invoke_tool",
+    "get_upload_file_tool",
     "resolve_session_id",
     "load_agent_output_schema",
     "extract_output_schema",

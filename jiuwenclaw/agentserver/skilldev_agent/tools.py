@@ -33,8 +33,9 @@ from jiuwenclaw.agentserver.tools.harness_named_web_tools import (
 )
 from jiuwenclaw.agentserver.tools.subagent_tools import fork_agent, spawn_subagent
 from jiuwenclaw.agentserver.skilldev_agent.meta_tools.exec_tool import get_exec_tool
-from jiuwenclaw.agentserver.skilldev_agent.meta_tools.invoke_tool import (
+from jiuwenclaw.agentserver.skilldev_agent.meta_tools import (
     get_invoke_tool,
+    get_upload_file_tool
 )
 
 
@@ -83,10 +84,10 @@ class EditTool(EditFileTool):
 class WebSearchTool(JiuwenHarnessFreeSearchTool):
 
     def __init__(
-        self,
-        language: str = "cn",
-        agent_id: Optional[str] = None,
-        card: Optional[ToolCard] = None,
+            self,
+            language: str = "cn",
+            agent_id: Optional[str] = None,
+            card: Optional[ToolCard] = None,
     ) -> None:
         super().__init__(
             language=language,
@@ -104,10 +105,10 @@ class WebSearchTool(JiuwenHarnessFreeSearchTool):
 
 class WebFetchTool(JiuwenHarnessFetchWebpageTool):
     def __init__(
-        self,
-        language: str = "cn",
-        agent_id: Optional[str] = None,
-        card: Optional[ToolCard] = None,
+            self,
+            language: str = "cn",
+            agent_id: Optional[str] = None,
+            card: Optional[ToolCard] = None,
     ) -> None:
         super().__init__(
             language=language,
@@ -136,10 +137,10 @@ HARNESS_TOOL_CLASSES = {
 
 
 def build_skilldev_tools(
-    *,
-    sys_operation: SysOperation,
-    language: str = "cn",
-    agent_id: Optional[str] = None,
+        *,
+        sys_operation: SysOperation,
+        language: str = "cn",
+        agent_id: Optional[str] = None,
 ) -> list[Tool]:
     """Build the dedicated SkillDev Agent tool set.
 
@@ -157,6 +158,7 @@ def build_skilldev_tools(
             get_ask_user_question_tool(),
             get_exec_tool(),
             get_invoke_tool(),
+            get_upload_file_tool(),
             spawn_subagent
         ]
     )
