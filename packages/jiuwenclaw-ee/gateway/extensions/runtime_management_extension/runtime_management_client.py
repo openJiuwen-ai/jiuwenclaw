@@ -565,18 +565,8 @@ class RuntimeManagementAgentClient(AgentServerClient):
         dual_q: PriorityDualAsyncQueues[QueueItem] = PriorityDualAsyncQueues(1000, 100)
         factory = _Factory()
 
-        def create_service_manager() -> ServiceManager:
-            # 每次调用时都通过 load_all_service_configs 获取最新的 service_templates
-            service_templates = None
-            try:
-                import asyncio
-                loop = asyncio.get_running_loop()
-                # 在当前事件循环中同步等待异步调用
-                service_templates = loop.run_until_complete(load_all_service_configs())
-            except RuntimeError:
-                # 没有运行中的事件循环，暂时不加载
-                logger.debug("[RuntimeManagementAgentClient] no running event loop during create_service_manager")
-
+        async def create_service_manager() -> ServiceManager:
+            service_templates = await load_all_service_configs()
             return ServiceManager(
                 service_factory=factory,
                 dual_queue=dual_q,
