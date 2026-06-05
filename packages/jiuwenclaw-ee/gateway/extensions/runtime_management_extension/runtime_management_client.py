@@ -133,6 +133,8 @@ async def load_all_service_configs() -> list[dict[str, Any]]:
         db = gateway_db_mod.GatewayDb.current()
         rows = await db.list_records("service_config_template", filters={"enabled": True})
         logger.info("[RuntimeManagementAgentClient] load_all_service_configs: count=%s", len(rows))
+        for row in rows:
+            logger.info("[RuntimeManagementAgentClient] service_config: %s", row)
         return rows
     except Exception as exc:
         logger.warning("[RuntimeManagementAgentClient] load_all_service_configs failed: %s", exc)
