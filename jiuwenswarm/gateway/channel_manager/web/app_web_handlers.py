@@ -2460,7 +2460,7 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
                             ws, req_id, ok=False, error="Cannot delete native agent version", code="BAD_REQUEST")
                         return
                     service = AutoHarnessService(rail=None, agent=None)
-                    payload = await asyncio.to_thread(service.delete_package, package_id)
+                    payload = await service.delete_package(package_id)
                     await channel.send_response(ws, req_id, ok=True, payload=payload)
                     return
                 else:

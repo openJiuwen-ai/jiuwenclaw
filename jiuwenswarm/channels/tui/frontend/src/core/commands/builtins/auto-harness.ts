@@ -1796,7 +1796,7 @@ function parseAndAggregateLogs(
           // Check if all expected stages have reported success
           const allStagesSuccessful = expectedStages.length > 0 &&
             expectedStages.every(stage => stagesWithSuccessResult.has(stage));
-          finalStatus = allStagesSuccessful && !hasFailure ? "success" : "failed";
+          finalStatus = allStagesSuccessful ? "success" : "failed";
         } else {
           // For other pipelines: any failure means task failed
           finalStatus = hasFailure ? "failed" : (log.status || "success");

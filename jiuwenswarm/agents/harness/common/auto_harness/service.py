@@ -2299,11 +2299,19 @@ class AutoHarnessService:
             "message": f"扩展 {extension_name} 已取消激活",
         }
 
-    def delete_package(self, package_id: str) -> dict[str, Any]:
+    async def delete_package(
+        self,
+        package_id: str,
+        channel_id: str | None = None,
+    ) -> dict[str, Any]:
         """Delete a package and optionally remove from active list if it was active.
+
+        If the package is active, it will be deactivated first by unloading its config
+        and broadcasting the change to other agent instances.
 
         Args:
             package_id: The package ID to delete
+            channel_id: Optional channel ID to limit broadcast scope
 
         Returns:
             Payload with deletion result and active package switch info if applicable
@@ -2320,6 +2328,40 @@ class AutoHarnessService:
         was_active = package.get("is_active", False)
         active_ids = data.get("active_package_ids", [])
         was_in_active_list = package_id in active_ids
+        config_path = package.get("config_path", "")
+
+        # If package is active, deactivate it first
+        if was_active or was_in_active_list:
+            # Unload from current agent instance
+            if self._agent is not None and config_path and Path(config_path).exists():
+                try:
+                    unloaded_resources = await self._agent.unload_harness_config(config_path)
+                    logger.info(
+                        "[AutoHarnessService] Deactivated package %s during delete, unloaded resources: %s",
+                        package_id,
+                        unloaded_resources,
+                    )
+                except FileNotFoundError:
+                    logger.warning(
+                        "[AutoHarnessService] Config file not found for deactivation during delete: %s",
+                        config_path,
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "[AutoHarnessService] Failed to unload package %s during delete: %s",
+                        package_id,
+                        exc,
+                    )
+
+            # Broadcast to all agent.fast/agent.plan instances
+            if self._agent_manager and config_path and Path(config_path).exists():
+                await self._agent_manager.broadcast_package_change_to_single_agents(
+                    package_id,
+                    config_path,
+                    "deactivate",
+                    channel_id=channel_id,
+                    skip_instance=self._agent,
+                )
 
         # Delete runtime directory if exists
         runtime_path = package.get("runtime_path", "")

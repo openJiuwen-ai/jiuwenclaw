@@ -4931,7 +4931,7 @@ class AgentWebSocketServer:
 
         try:
             service = AutoHarnessService(rail=None, agent=None)
-            payload = await asyncio.to_thread(service.delete_package, package_id)
+            payload = await service.delete_package(package_id)
             resp = AgentResponse(
                 request_id=request.request_id,
                 channel_id=request.channel_id,
