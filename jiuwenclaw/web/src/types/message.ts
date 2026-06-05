@@ -68,6 +68,7 @@ export interface ToolExecution {
   timeoutAt: string;
   timedOutAt?: string;
   resultArrivedAfterTimeout?: boolean;
+  requestId?: string;
 }
 
 export interface Conversation {

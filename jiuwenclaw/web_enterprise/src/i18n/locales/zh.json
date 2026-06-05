@@ -1003,5 +1003,8 @@
       "sendFile": "发送文件",
       "sendFileDesc": "向用户发送文件"
     }
+  },
+  "security": {
+    "contentRetracted": "内容已因安全原因撤回"
   }
 }

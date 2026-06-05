@@ -697,15 +697,48 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
           handleTtsPlayback(targetId, mediaPayload.content);
         }
       }),
-      webClient.on('chat.tool_call', ({ payload }) => {
+webClient.on('chat.tool_call', ({ payload }) => {
         if (!shouldHandleSessionEvent(payload)) return;
         if (shouldDropDuplicatedEvent('chat.tool_call', payload)) return;
-        setThinking(false);
-        const { currentStreamId, currentStreamContent } = useChatStore.getState();
-        if (currentStreamId && currentStreamContent) {
-          updateMessage(currentStreamId, { isStreaming: false });
-          stopStreaming();
-          handleTtsPlayback(currentStreamId, currentStreamContent);
+        // 页面刷新后，如果收到活跃事件但 isProcessing=false，自动恢复执行状态
+        if (!useChatStore.getState().isProcessing && !useChatStore.getState().isLoadingHistory) {
+          setProcessing(true);
+        }
+        const currentMode = useSessionStore.getState().mode;
+        clearThinkingForVisibleOutput();
+        const toolCall = normalizeToolCallPayload(payload);
+        const shutdownMemberId = getShutdownMemberFromToolCall(toolCall);
+        if (shutdownMemberId) {
+          shutdownMemberToolCallRef.current.set(toolCall.id, shutdownMemberId);
+        }
+        if (isHiddenTeamTeammateMessagePayload(currentMode, payload)) {
+          if (currentMode === 'team' && !isTeamPanelClearedForPayload(payload)) {
+            applyTeamTaskToolCall(toolCall);
+          }
+          const memberId = getTeamPayloadMemberName(payload) || toolCall.memberName;
+          if (memberId) {
+            teamToolCallMemberRef.current.set(toolCall.id, memberId);
+            const timestamp = eventTimestampMs(payload);
+            useSessionStore.getState().addTeamMemberExecutionEvent({
+              id: stableEventId('tool-call', payload.session_id, memberId, toolCall.id, timestamp),
+              member_id: memberId,
+              kind: 'tool_call',
+              timestamp,
+              title: t('team.process.execution.toolCallTitle', { tool: toolCall.name }),
+              content: toolCall.description || toolCall.formatted_args || stringifyCompact(toolCall.arguments),
+              tool_name: toolCall.name,
+              tool_call_id: toolCall.id,
+            });
+          }
+          return;
+        }
+        const { currentStreamId, messages } = useChatStore.getState();
+        const currentStreamMessage =
+          currentMode === 'team'
+            ? findActiveTeamLeaderMessage()
+            : currentStreamId
+              ? messages.find((msg) => msg.id === currentStreamId)
+              : undefined;
         }
         const normalized = normalizeToolCallPayload(payload);
         addToolCall({
@@ -845,6 +878,66 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
           content: i18n.t('network.errorPrefix', { message: errorMsg }),
           timestamp: new Date().toISOString(),
         });
+      }),
+      webClient.on('security.alert', ({ payload }) => {
+        if (!shouldHandleSessionEvent(payload)) return;
+
+        const alertMsg =
+          typeof payload.message === 'string'
+            ? payload.message
+            : '安全警告';
+
+        window.dispatchEvent(new CustomEvent('security-alert', {
+          detail: {
+            message: alertMsg,
+            message_id: payload.message_id || '',
+            tool_call_id: payload.tool_call_id || '',
+            alert_type: payload.alert_type || 'security',
+            tool_name: payload.tool_name || '',
+          }
+        }));
+      }),
+      webClient.on('chat.retract', (event: WsEvent) => {
+        if (!shouldHandleSessionEvent(event.payload)) return;
+
+        const retractMsg =
+          typeof event.payload.message === 'string'
+            ? event.payload.message
+            : '内容已因安全原因撤回';
+
+        const { currentStreamId, messages } = useChatStore.getState();
+
+        // Replace current streaming message first
+        if (currentStreamId) {
+          updateMessage(currentStreamId, {
+            content: retractMsg,
+            isStreaming: false,
+          });
+          stopStreaming();
+        }
+
+        // Replace ALL assistant messages after the last user message
+        const lastUserIdx = messages.findLastIndex((m) => m.role === 'user');
+        if (lastUserIdx >= 0) {
+          for (let i = lastUserIdx + 1; i < messages.length; i++) {
+            if (messages[i].role === 'assistant') {
+              updateMessage(messages[i].id, { content: retractMsg });
+            }
+          }
+        } else {
+          for (const msg of messages) {
+            if (msg.role === 'assistant') {
+              updateMessage(msg.id, { content: retractMsg });
+            }
+          }
+        }
+
+        setProcessing(false);
+        setThinking(false);
+        activeRequestIdRef.current = null;
+
+        const retractRequestId = typeof event.request_id === 'string' ? event.request_id : undefined;
+        useChatStore.getState().clearCurrentTurnData(retractRequestId);
       }),
       webClient.on('chat.interrupt_result', ({ payload }) => {
         if (!shouldHandleSessionEvent(payload)) return;

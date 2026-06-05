@@ -145,6 +145,7 @@ class EventType(Enum):
     CHAT_USAGE_METADATA = "chat.usage_metadata"
     CHAT_USAGE_SUMMARY = "chat.usage_summary"
     CHAT_FINAL = "chat.final"
+    CHAT_RETRACT = "chat.retract"
     CHAT_MEDIA = "chat.media"
     CHAT_FILE = "chat.file"
     CHAT_TOOL_CALL = "chat.tool_call"

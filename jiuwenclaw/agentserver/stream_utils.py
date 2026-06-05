@@ -384,7 +384,23 @@ def _parse_typed_chunk(chunk: Any, _has_streamed_content: bool) -> dict[str, Any
                 "output_tokens": payload.get("output_tokens"),
                 "total_tokens": payload.get("total_tokens"),
             }
-        return {"event_type": "context.usage"}
+
+    if chunk_type == "chat.retract":
+        if isinstance(payload, dict):
+            return {
+                "event_type": "chat.retract",
+                **{k: v for k, v in payload.items()},
+            }
+        return None
+
+    if chunk_type == "chat.ask_user_question":
+        return {
+            "event_type": "chat.ask_user_question",
+            **(payload if isinstance(payload, dict) else {}),
+        }
+
+    if chunk_type == "__interaction__":
+        return _parse_interaction_payload(payload)
 
     if isinstance(payload, dict):
         if "event_type" in payload:

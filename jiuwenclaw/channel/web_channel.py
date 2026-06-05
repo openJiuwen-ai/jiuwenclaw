@@ -307,6 +307,43 @@ class WebChannel(BaseChannel):
         )
         return forbidden_origin_response(args)
 
+    _FULL_PAYLOAD_EVENTS = {
+        "connection.ack",
+        "todo.updated",
+        "chat.tool_call",
+        "chat.tool_result",
+        "chat.processing_status",
+        "chat.interrupt_result",
+        "chat.evolution_status",
+        "chat.error",
+        "heartbeat.relay",
+        "context.compressed",
+        "context.usage",
+        "context.compression_state",
+        "chat.ask_user_question",
+        "chat.invocation_paused",
+        "chat.subtask_update",
+        "history.message",
+        "chat.session_result",
+        "chat.usage_metadata",
+        "chat.usage_summary",
+        "chat.file",
+        "chat.retract",
+        "security.alert",
+    }
+
+    def _should_pass_full_payload(self, event_name: str) -> bool:
+        """判断是否需要传递完整的 payload 结构."""
+        if event_name in self._FULL_PAYLOAD_EVENTS:
+            return True
+        if event_name.startswith("team."):
+            return True
+        if event_name.startswith("skilldev."):
+            return True
+        if event_name.startswith("harness."):
+            return True
+        return False
+
     async def send(self, msg: Message) -> None:
         """向客户端发送消息（默认封装为 event 帧广播）."""
         if not self._clients:
@@ -350,15 +387,7 @@ class WebChannel(BaseChannel):
         payload = {}
 
         if isinstance(msg.payload, dict):
-            # 对于需要传递完整结构化数据的事件类型
-            if event_name in ("connection.ack", "todo.updated", "chat.tool_call", "chat.tool_result",
-                    "chat.processing_status", "chat.interrupt_result", "chat.evolution_status", "chat.tool_calls.delta",
-                    "chat.error", "heartbeat.relay",
-                    "context.compressed", "context.usage", "chat.ask_user_question", "chat.invocation_paused",
-                    "chat.subtask_update",
-                    "history.message",
-                    "chat.session_result", "chat.usage_metadata",
-                    "chat.usage_summary") or event_name.startswith("skilldev.") or event_name.startswith("team."):
+            if self._should_pass_full_payload(event_name):
                 # 传递完整 payload，保留所有字段
                 payload = {**msg.payload}
                 # 确保包含 session_id

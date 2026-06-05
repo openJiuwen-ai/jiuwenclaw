@@ -5290,10 +5290,27 @@ class JiuWenClawDeepAdapter:
                     return {"event_type": "context.usage"}
 
                 if chunk_type == "chat.ask_user_question":
-                    return {
-                        "event_type": "chat.ask_user_question",
-                        **(payload if isinstance(payload, dict) else {}),
-                    }
+                    if isinstance(payload, dict):
+                        return {
+                            "event_type": "chat.ask_user_question",
+                            **(payload if isinstance(payload, dict) else {}),
+                        }
+
+                if chunk_type == "security.alert":
+                    if isinstance(payload, dict):
+                        return {
+                            "event_type": "security.alert",
+                            **payload,
+                        }
+                    return None
+
+                if chunk_type == "chat.retract":
+                    if isinstance(payload, dict):
+                        return {
+                            "event_type": "chat.retract",
+                            **payload,
+                        }
+                    return None
 
                 if chunk_type == "__interaction__":
                     return convert_interactions_to_ask_user_question([payload])
