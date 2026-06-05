@@ -9,7 +9,77 @@ allowed_tools: [webSearch, readFile]
 
 # MHQA RAG Optimizer
 
-Use this skill when a user asks a complex question that requires reasoning across two or more retrieved documents (multi-hop QA), or when RAG answer quality is low on compositional or chained questions. The skill applies context-ordering heuristics derived from research on how the causal mask in decoder-only LMs limits cross-document reasoning.
+## 功能概述
+
+MHQA RAG Optimizer 是一个面向 **多跳问答（Multi-hop QA）** 的 RAG 上下文编排技能。它在不修改模型、不微调的前提下，通过调整检索文档在提示词中的顺序，提升需要跨多篇文档推理的问题的准确率。
+
+**核心能力：**
+
+- **推理链排序**：将检索到的文档按「第一跳 → 第二跳 → … → 末跳」的推理顺序排列，使模型更容易沿证据链作答。
+- **噪声隔离**：将无关文档推到上下文两端，缩短 gold 文档之间的距离，减少干扰。
+- **多数投票（可选）**：对同一组文档随机置换顺序 `k` 次，分别调用模型（`temperature=0`），取出现次数最多的答案，作为对单次排序的补充稳健策略。
+
+**适用场景：**
+
+- 用户问题需要串联 2 篇及以上文档才能回答（例如：「电影 X 的导演出生在哪个国家？」）
+- Agent 已检索到多篇文档，需要综合生成答案
+- 组合型、链式推理类 RAG 问题准确率不稳定或偏低
+
+**输出：**
+
+- 基于重排上下文生成的最终答案
+- 简要说明每个推理跳所依赖的文档（可选）
+
+本技能是 **提示词与上下文编排层**，不替代检索系统；假设文档已由 RAG 或其他方式获取。
+
+## 配置方式
+
+### 1. 安装与启用
+
+在 JiuwenClaw 前端 **技能** 页面安装内置技能 `mhqa-rag-optimizer` 即可。本技能 **无需** 修改 `config/config.yaml` 或额外服务配置；加载后由 Agent 按下方 Workflow 执行上下文重排与作答。
+
+### 2. 环境变量（使用 `permute_and_vote.py` 脚本时）
+
+| 变量名 | 含义 | 默认值 |
+|--------|------|--------|
+| `OPENAI_API_KEY` | OpenAI 或兼容端点的 API Key | 无（必填） |
+| `OPENAI_BASE_URL` | 可选，OpenAI 兼容 API 基地址 | 无 |
+| `MHQA_MODEL` | 默认模型名称 | `gpt-4o-mini` |
+
+Agent 直接在对话中重排文档并生成答案时，使用 JiuwenClaw 已配置的模型即可，**不依赖** 上述环境变量。
+
+### 3. 脚本依赖
+
+使用多数投票脚本前安装 `openai` 包：
+
+```bash
+pip install openai
+```
+
+### 4. 脚本调用示例
+
+将每篇检索文档保存为独立文本文件后执行：
+
+```bash
+python scripts/permute_and_vote.py \
+  --question "What country is the birthplace of the director of Inception?" \
+  --docs doc1.txt doc2.txt doc3.txt \
+  --k 5 \
+  --output result.json
+```
+
+| 参数 | 说明 |
+|------|------|
+| `--question` | 多跳问题（必填） |
+| `--docs` | 检索文档路径，可多个（必填） |
+| `--k` | 随机置换次数，每次一次 API 调用（默认 `5`） |
+| `--seed` | 随机种子，便于复现 |
+| `--model` | 模型名，默认读 `MHQA_MODEL` 或 `gpt-4o-mini` |
+| `--api-key` | API Key，默认读 `OPENAI_API_KEY` |
+| `--base-url` | 兼容端点地址，默认读 `OPENAI_BASE_URL` |
+| `--output` | 可选，将 JSON 结果写入文件 |
+
+脚本返回 `majority_answer`（`k` 次运行中出现次数最多的答案）及每次置换的明细。
 
 ## 背景与原理
 
