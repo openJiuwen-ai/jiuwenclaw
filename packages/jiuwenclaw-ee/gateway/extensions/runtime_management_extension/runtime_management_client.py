@@ -125,9 +125,12 @@ async def load_effective_service_config_for_request(request: AgentRequest) -> An
 async def load_all_service_configs() -> list[dict[str, Any]]:
     """查询全量 service_config_template（enabled=True）。"""
     try:
-        from ...manager_ws_client.core.enterprise_config.gateway_db import GatewayDb
+        from jiuwenclaw.infrastructure.module_importer import (
+            import_manager_ws_client_module,
+        )
 
-        db = GatewayDb.current()
+        gateway_db_mod = import_manager_ws_client_module("core.enterprise_config.gateway_db")
+        db = gateway_db_mod.GatewayDb.current()
         rows = await db.list_records("service_config_template", filters={"enabled": True})
         logger.info("[RuntimeManagementAgentClient] load_all_service_configs: count=%s", len(rows))
         return rows
@@ -594,10 +597,10 @@ class RuntimeManagementAgentClient(AgentServerClient):
         env: dict[str, str] | None = None,
     ) -> None:
         """触发热更新配置。"""
-        # 判断 config 中 service_template 是否为 true，否则不执行更新
-        if not config.get("service_template"):
+        # 判断 config 中 enterprise_config_update 是否为 true，否则不执行更新
+        if not config.get("enterprise_config_update"):
             logger.debug(
-                "[RuntimeManagementAgentClient] skip config update: service_template is not true"
+                "[RuntimeManagementAgentClient] skip config update: enterprise_config_update is not true"
             )
             return
 
