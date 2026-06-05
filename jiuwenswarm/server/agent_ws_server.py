@@ -4930,8 +4930,24 @@ class AgentWebSocketServer:
             return
 
         try:
-            service = AutoHarnessService(rail=None, agent=None)
-            payload = await service.delete_package(package_id)
+            mode, sub_mode = _apply_resolved_mode_to_request(request)
+            agent_mode = "agent" if mode == "auto_harness" else mode
+            agent = await self._agent_manager.get_agent(
+                channel_id=request.channel_id,
+                project_dir=resolve_request_project_dir(request),
+                mode=agent_mode,
+                sub_mode=sub_mode
+            )
+            agent_instance = None
+            if agent is not None:
+                agent_instance = agent.get_instance()
+
+            service = AutoHarnessService(
+                rail=None,
+                agent=agent_instance,
+                agent_manager=self._agent_manager,
+            )
+            payload = await service.delete_package(package_id, channel_id=request.channel_id)
             resp = AgentResponse(
                 request_id=request.request_id,
                 channel_id=request.channel_id,
