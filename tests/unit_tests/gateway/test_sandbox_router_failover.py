@@ -109,6 +109,10 @@ class FakeWorkspaceDcsStore:
             "sandbox_id": sandbox_id,
         }
 
+    async def delete_workspace(self, session_id: str) -> None:
+        self.events.append(("delete_workspace", session_id))
+        self.records.pop(session_id, None)
+
 
 class FakeQueryUrlObs:
     def __init__(self, events: list[tuple[str, str]]) -> None:
@@ -667,6 +671,63 @@ async def test_workspace_restore_skips_when_snapshot_is_from_same_sandbox(
     assert events == [("get", "sess-a")]
     assert agent_client.envelopes == []
     assert runtime.metadata["restored_session_ids"] == {"sess-a"}
+
+
+@pytest.mark.asyncio
+async def test_release_session_deletes_workspace_obs_before_dcs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    router = SandboxRouterAgentClient(adopt_existing=False)
+    events: list[tuple[str, str]] = []
+    fake_query = FakeQueryUrlObs(events)
+    monkeypatch.setattr(_sandbox_router_mod, "_create_query_url_obs", lambda: fake_query)
+    router._workspace_dcs_store = FakeWorkspaceDcsStore(
+        initial_records={
+            "sess-a": {
+                "url": "https://obs/sess-a.zip",
+                "name": "sess-a.zip",
+                "routing_key": "vibeskill:user:user-a",
+                "sandbox_id": "sb-old",
+            }
+        },
+        events=events,
+    )  # type: ignore[assignment]
+    runtime = SandboxRuntime(
+        routing_key="vibeskill:user:user-a",
+        sandbox_id="sb-live",
+        agent_client=FakeAgentClient(),
+        status=SandboxStatus.IDLE,
+        task_count=0,
+        metadata={
+            "routing_key": "vibeskill:user:user-a",
+            "user_id": "user-a",
+            "session_ids": {"sess-a"},
+            "restored_session_ids": {"sess-a"},
+            "backup_period_active_sessions": {"sess-a"},
+            "backup_period_session_versions": {"sess-a": 1},
+        },
+    )
+    router._runtimes[runtime.routing_key] = runtime
+
+    result = await router.release_session("sess-a", user_id="user-a")
+
+    assert result["ok"] is True
+    assert result["workspace_purged"] is True
+    assert result["workspace_obs_url"] == "https://obs/sess-a.zip"
+    assert result["workspace_obs_delete_attempted"] is True
+    assert result["workspace_obs_deleted"] is True
+    assert result["untracked"] is True
+    assert result["remaining_session_ids"] == []
+    assert events == [
+        ("get", "sess-a"),
+        ("delete", "https://obs/sess-a.zip"),
+        ("delete_workspace", "sess-a"),
+    ]
+    assert fake_query.deleted_urls == ["https://obs/sess-a.zip"]
+    assert runtime.metadata["session_ids"] == set()
+    assert runtime.metadata["restored_session_ids"] == set()
+    assert runtime.metadata["backup_period_active_sessions"] == set()
+    assert runtime.metadata["backup_period_session_versions"] == {}
 
 
 @pytest.mark.asyncio

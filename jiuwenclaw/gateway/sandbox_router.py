@@ -1906,9 +1906,57 @@ class SandboxRouterAgentClient(AgentServerClient):
         uid = str(user_id or "").strip() or sid
         routing_key = self._routing_key(uid, sid)
 
+        workspace_obs_url = ""
+        workspace_obs_delete_attempted = False
+        workspace_obs_deleted = False
         workspace_purged = False
+        workspace_store: WorkspaceDcsStore | None = None
         try:
-            await self._get_workspace_dcs_store().delete_workspace(sid)
+            workspace_store = self._get_workspace_dcs_store()
+            record = await workspace_store.get_workspace(sid)
+        except Exception:  # noqa: BLE001
+            record = None
+            logger.exception(
+                "Failed to read workspace snapshot on session release: session_id=%s",
+                sid,
+            )
+        if record is not None:
+            workspace_obs_url = str(record.url or "").strip()
+            if workspace_obs_url:
+                workspace_obs_delete_attempted = True
+                try:
+                    workspace_obs_deleted = bool(
+                        await _create_query_url_obs().invoking_osms_delete(
+                            workspace_obs_url
+                        )
+                    )
+                except Exception:  # noqa: BLE001
+                    logger.exception(
+                        "Failed to delete workspace OBS object on session release: "
+                        "session_id=%s url=%s",
+                        sid,
+                        workspace_obs_url,
+                    )
+                else:
+                    if workspace_obs_deleted:
+                        logger.info(
+                            "Deleted workspace OBS object on session release: "
+                            "session_id=%s url=%s",
+                            sid,
+                            workspace_obs_url,
+                        )
+                    else:
+                        logger.warning(
+                            "OSMS delete workspace OBS object returned false on session release: "
+                            "session_id=%s url=%s",
+                            sid,
+                            workspace_obs_url,
+                        )
+
+        try:
+            if workspace_store is None:
+                workspace_store = self._get_workspace_dcs_store()
+            await workspace_store.delete_workspace(sid)
             workspace_purged = True
         except Exception:  # noqa: BLE001
             logger.exception(
@@ -1938,6 +1986,9 @@ class SandboxRouterAgentClient(AgentServerClient):
             "routing_key": routing_key,
             "sandbox_id": sandbox_id,
             "workspace_purged": workspace_purged,
+            "workspace_obs_url": workspace_obs_url,
+            "workspace_obs_delete_attempted": workspace_obs_delete_attempted,
+            "workspace_obs_deleted": workspace_obs_deleted,
             "untracked": untracked,
             "remaining_session_ids": remaining_session_ids,
             "sandbox": "unchanged",

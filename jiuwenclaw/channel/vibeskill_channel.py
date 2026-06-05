@@ -2226,6 +2226,9 @@ class VibeSkillChannel(BaseChannel):
         websocket_closed = await self._close_northbound_ws_for_session(sid)
 
         workspace_purged = False
+        workspace_obs_delete_attempted = False
+        workspace_obs_deleted = False
+        workspace_obs_url = ""
         sandbox_untracked = False
         release_fn = getattr(self._agent_client, "release_session", None)
         if callable(release_fn):
@@ -2236,6 +2239,15 @@ class VibeSkillChannel(BaseChannel):
                 )
                 if isinstance(release_result, dict):
                     workspace_purged = bool(release_result.get("workspace_purged"))
+                    workspace_obs_delete_attempted = bool(
+                        release_result.get("workspace_obs_delete_attempted")
+                    )
+                    workspace_obs_deleted = bool(
+                        release_result.get("workspace_obs_deleted")
+                    )
+                    workspace_obs_url = str(
+                        release_result.get("workspace_obs_url") or ""
+                    ).strip()
                     sandbox_untracked = bool(release_result.get("untracked"))
             except Exception:
                 logger.exception(
@@ -2252,6 +2264,9 @@ class VibeSkillChannel(BaseChannel):
             "wasBusy": was_busy,
             "websocketClosed": websocket_closed,
             "workspacePurged": workspace_purged,
+            "workspaceObsDeleteAttempted": workspace_obs_delete_attempted,
+            "workspaceObsDeleted": workspace_obs_deleted,
+            "workspaceObsUrl": workspace_obs_url,
             "sandboxUntracked": sandbox_untracked,
         }
 
