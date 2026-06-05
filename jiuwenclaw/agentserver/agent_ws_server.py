@@ -584,11 +584,11 @@ class AgentWebSocketServer:
                 logger.error("[AgentWebSocketServer] OpenAbility 连接重试次数超过上限，放弃")
                 break
 
-            # 指数退避：前3次快速重连(3秒)，之后逐渐增加，最大60秒
+            # 指数退避：前3次快速重连(3秒)，之后逐渐增加，最大5秒
             if retry_count <= 3:
                 delay = self._oa_connect_retry_interval
             else:
-                delay = min(self._oa_connect_retry_interval * (2 ** (retry_count - 3)), 60.0)
+                delay = min(self._oa_connect_retry_interval * (2 ** (retry_count - 3)), 5)
 
             logger.info("[AgentWebSocketServer] %.1f秒后尝试重连 OpenAbility...", delay)
             await asyncio.sleep(delay)
