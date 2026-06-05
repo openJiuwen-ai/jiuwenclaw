@@ -15,6 +15,11 @@ from openjiuwen.core.foundation.llm import Model, UserMessage
 from openjiuwen.core.foundation.llm.schema.config import ModelClientConfig, ModelRequestConfig
 from openjiuwen.core.foundation.tool import tool
 
+from jiuwenclaw.agentserver.tools.image_gen_post_watermark import (
+    PostWatermarkConfig,
+    apply_post_watermark_to_file,
+    load_post_watermark_config,
+)
 from jiuwenclaw.agentserver.tools.multimodal_config import apply_image_gen_model_config_from_yaml
 from jiuwenclaw.agentserver.tools.ssl_config import get_requests_verify
 from jiuwenclaw.agentserver.tools.subagent_executor.context_vars import (
@@ -310,7 +315,12 @@ def _describe_response_for_error(response: Any) -> str:
     return repr(response)[:500]
 
 
-def _save_generated_images(response: Any, *, prompt: str) -> list[Path]:
+def _save_generated_images(
+    response: Any,
+    *,
+    prompt: str,
+    watermark_config: PostWatermarkConfig | None = None,
+) -> list[Path]:
     items = _iter_response_image_items(response)
     if not items:
         raise ValueError(
@@ -322,6 +332,9 @@ def _save_generated_images(response: Any, *, prompt: str) -> list[Path]:
     slug = _sanitize_filename_part(prompt)
     saved: list[Path] = []
     out_dir = _output_dir()
+    wm_cfg = watermark_config if watermark_config is not None else load_post_watermark_config(
+        get_config()
+    )
 
     for idx, item in enumerate(items, start=1):
         url = str(item.get("url") or "").strip()
@@ -333,10 +346,12 @@ def _save_generated_images(response: Any, *, prompt: str) -> list[Path]:
             _download_image(url, dest)
             if dest.stat().st_size == 0:
                 raise ValueError(f"Downloaded empty image from URL: {url}")
+            apply_post_watermark_to_file(dest, wm_cfg)
             saved.append(dest.resolve())
             continue
         if b64:
             _write_base64_image(b64, dest)
+            apply_post_watermark_to_file(dest, wm_cfg)
             saved.append(dest.resolve())
             continue
 
@@ -401,7 +416,11 @@ async def _text_to_image_impl(inputs: dict[str, Any]) -> str:
         model=model_name,
         **gen_kwargs,
     )
-    paths = _save_generated_images(response, prompt=prompt)
+    paths = _save_generated_images(
+        response,
+        prompt=prompt,
+        watermark_config=load_post_watermark_config(get_config()),
+    )
     lines = [
         f"Generated {len(paths)} image(s) from prompt.",
         "Local file paths (use for attachments or send_file):",
@@ -419,6 +438,8 @@ async def _text_to_image_impl(inputs: dict[str, Any]) -> str:
         "(DashScope: 1920*1080; OpenAI/Huawei MaaS: 1024x1024 — * and x separators accepted), "
         "negative_prompt, n (image count; DashScope-only: prompt_extend; "
         "Huawei MaaS/OpenAI-compatible: watermark, seed). "
+        "After save, a configurable post watermark (default: semi-transparent 'AI Generated' "
+        "at bottom-right via models.image_gen.post_watermark in config). "
         "Output: local file path(s). When effective_project_dir is active, images are saved "
         "under effective_project_dir/generated_images/; otherwise under the agent workspace "
         "generated_images directory."

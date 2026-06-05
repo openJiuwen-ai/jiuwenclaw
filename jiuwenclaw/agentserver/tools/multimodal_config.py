@@ -25,6 +25,26 @@ def _get_embed_config(config_base: dict[str, Any]) -> dict[str, Any]:
     return embed if isinstance(embed, dict) else {}
 
 
+def _get_model_section(config_base: dict[str, Any], model_type: str) -> dict[str, Any]:
+    """Return the full ``models.{model_type}`` block (not only model_client_config)."""
+    if not isinstance(config_base, dict):
+        return {}
+
+    raw_models = config_base.get("models")
+    if isinstance(raw_models, dict):
+        inner = raw_models.get(model_type)
+        return inner if isinstance(inner, dict) else {}
+
+    if not isinstance(raw_models, list):
+        return {}
+
+    for block in raw_models:
+        if isinstance(block, dict) and model_type in block:
+            inner = block.get(model_type)
+            return inner if isinstance(inner, dict) else {}
+    return {}
+
+
 def _get_model_config(config_base: dict[str, Any], model_type: str) -> dict[str, Any]:
     """
     从 config.yaml 中读取指定类型的模型配置
@@ -36,29 +56,11 @@ def _get_model_config(config_base: dict[str, Any], model_type: str) -> dict[str,
     Returns:
         模型配置字典
     """
-    if not isinstance(config_base, dict):
+    inner = _get_model_section(config_base, model_type)
+    if not inner:
         return {}
-
-    raw_models = config_base.get("models")
-    if isinstance(raw_models, dict):
-        inner = raw_models.get(model_type)
-        if isinstance(inner, dict):
-            mc = inner.get("model_config") or inner.get("model_client_config")
-            if isinstance(mc, dict):
-                return mc
-        return {}
-
-    if not isinstance(raw_models, list):
-        return {}
-
-    for block in raw_models:
-        if isinstance(block, dict) and model_type in block:
-            inner = block.get(model_type)
-            if isinstance(inner, dict):
-                mc = inner.get("model_config") or inner.get("model_client_config")
-                if isinstance(mc, dict):
-                    return mc
-    return {}
+    mc = inner.get("model_config") or inner.get("model_client_config")
+    return mc if isinstance(mc, dict) else {}
 
 
 _EMBED_MODEL_KEY_MAP = {
