@@ -74,7 +74,7 @@ async def _resolve_policy_match(ctx: RoutingContext) -> _PolicyMatchResult:
             order_by="priority DESC",
         )
         for rule in agent_rules:
-            if expressions.agent_rule_matches(rule, ctx):
+            if expressions.evaluate_match_expr(rule.get("match_expr"), ctx):
                 matched_agent = rule
                 merged_refs = merge_template_ref(
                     merged_refs,

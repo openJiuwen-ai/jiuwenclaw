@@ -68,7 +68,7 @@ async def list_instances(
     return ResponseModel(code=200, message="success", data=data)
 
 
-@instance_router.put("/{jiuwenclaw_id}", response_model=ResponseModel)
+@instance_router.patch("/{jiuwenclaw_id}", response_model=ResponseModel)
 async def update_instance(
     jiuwenclaw_id: str,
     body: InstanceUpdateBody,

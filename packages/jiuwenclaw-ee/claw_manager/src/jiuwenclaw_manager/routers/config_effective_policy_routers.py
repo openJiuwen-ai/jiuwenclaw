@@ -102,7 +102,7 @@ async def get_template_mapping(
     return ResponseModel(code=200, message="success", data=row.model_dump())
 
 
-@mapping_router.put("/{mapping_id}", response_model=ResponseModel)
+@mapping_router.patch("/{mapping_id}", response_model=ResponseModel)
 async def update_template_mapping(
     jiuwenclaw_id: str,
     mapping_id: int,
@@ -196,7 +196,7 @@ async def get_global_policy(
     return ResponseModel(code=200, message="success", data=row.model_dump())
 
 
-@global_router.put("/{policy_id}", response_model=ResponseModel)
+@global_router.patch("/{policy_id}", response_model=ResponseModel)
 async def update_global_policy(
     jiuwenclaw_id: str,
     policy_id: int,
@@ -290,7 +290,7 @@ async def get_service_policy(
     return ResponseModel(code=200, message="success", data=row.model_dump())
 
 
-@service_router.put("/{policy_id}", response_model=ResponseModel)
+@service_router.patch("/{policy_id}", response_model=ResponseModel)
 async def update_service_policy(
     jiuwenclaw_id: str,
     policy_id: int,
@@ -387,7 +387,7 @@ async def get_agent_policy(
     return ResponseModel(code=200, message="success", data=row.model_dump())
 
 
-@agent_router.put("/{policy_id}", response_model=ResponseModel)
+@agent_router.patch("/{policy_id}", response_model=ResponseModel)
 async def update_agent_policy(
     jiuwenclaw_id: str,
     policy_id: int,

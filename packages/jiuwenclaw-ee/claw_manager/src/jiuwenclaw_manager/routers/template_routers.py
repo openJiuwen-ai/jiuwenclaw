@@ -109,7 +109,7 @@ async def get_model_template(
     return ResponseModel(code=200, message="success", data=row.model_dump())
 
 
-@templates_router.put("/model-templates/{template_id}", response_model=ResponseModel)
+@templates_router.patch("/model-templates/{template_id}", response_model=ResponseModel)
 async def update_model_template(
     template_id: str,
     body: ModelTemplateUpdateBody,
@@ -194,7 +194,7 @@ async def get_extension_config_template(
     return ResponseModel(code=200, message="success", data=row.model_dump())
 
 
-@templates_router.put(
+@templates_router.patch(
     "/extension-config-templates/{template_id}", response_model=ResponseModel
 )
 async def update_extension_config_template(
@@ -283,7 +283,7 @@ async def get_skill_whitelist_template(
     return ResponseModel(code=200, message="success", data=row.model_dump())
 
 
-@templates_router.put(
+@templates_router.patch(
     "/skill-whitelist-templates/{template_id}", response_model=ResponseModel
 )
 async def update_skill_whitelist_template(
@@ -371,7 +371,7 @@ async def get_service_config_template(
     return ResponseModel(code=200, message="success", data=row.model_dump())
 
 
-@templates_router.put(
+@templates_router.patch(
     "/service-config-templates/{template_id}", response_model=ResponseModel
 )
 async def update_service_config_template(
