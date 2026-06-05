@@ -1,6 +1,7 @@
 import asyncio
 import json
 import logging
+import os
 import sys
 import time
 from dataclasses import dataclass
@@ -8,6 +9,11 @@ from dataclasses import dataclass
 import aiohttp
 
 logger = logging.getLogger(__name__)
+
+WS_BASE = os.environ.get(
+    "VIBESKILL_WS_BASE",
+    "ws://127.0.0.1:19003/api/v1/messages",
+)
 
 
 @dataclass
@@ -33,7 +39,7 @@ def _build_auto_answers(questions: list[dict]) -> list[list[str]]:
 
 
 async def _run_one_client(session_id: str, agent_id: str, query: str, timeout_seconds: int = 1200) -> ClientResult:
-    uri = f"ws://127.0.0.1:19003/api/v1/messages?sessionID={session_id}"
+    uri = f"{WS_BASE}?sessionID={session_id}"
     start_at = time.time()
     logger.info("[client %s] connecting: %s", agent_id, uri)
 

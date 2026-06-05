@@ -1,7 +1,7 @@
 #!/bin/bash
 set -euo pipefail
 
-API_BASE="http://127.0.0.1:19002"
+API_BASE="http://127.0.0.1:19003"
 WS_HOST="127.0.0.1"
 WS_PORT=19003
 

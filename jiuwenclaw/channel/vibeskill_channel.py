@@ -117,15 +117,88 @@ def _resolve_message_send_import_type(data: dict[str, Any]) -> str:
     return _IMPORT_TYPE_VIBE
 
 
+class _AiohttpWebSocketAdapter:
+    """将 aiohttp ``WebSocketResponse`` 适配为 websockets 风格的连接对象。
+
+    `_handle_ws_connection` 及相关方法以 websockets 的接口编写
+    （``async for raw in ws`` / ``ws.send`` / ``ws.close`` / ``ws.request`` /
+    ``ws.closed``）。本适配器让统一端口（aiohttp）下的业务逻辑无需改动。
+
+    注意：实例需可哈希（作为 ``_session_to_ws`` 等字典的 key），默认对象身份哈希即满足。
+    """
+
+    def __init__(self, ws: Any, request: Any) -> None:
+        self._ws = ws
+        # request 暴露 .path / .query_string / .headers，与 _handle_ws_connection 约定一致
+        self.request = request
+        self.remote_address = getattr(request, "remote", None) or "unknown"
+        self.close_code: int | None = None
+        self.close_reason: str | None = None
+
+    @property
+    def closed(self) -> bool:
+        return bool(getattr(self._ws, "closed", False))
+
+    async def send(self, data: str) -> None:
+        await self._ws.send_str(data)
+
+    async def close(self, code: int = 1000, reason: str = "") -> None:
+        self.close_code = code
+        self.close_reason = reason
+        try:
+            await self._ws.close(code=code, message=str(reason).encode("utf-8"))
+        except Exception:
+            logger.debug("[VibeSkillChannel] aiohttp ws close failed", exc_info=True)
+
+    def __aiter__(self) -> "_AiohttpWebSocketAdapter":
+        return self
+
+    async def __anext__(self) -> str:
+        from aiohttp import WSMsgType
+
+        msg = await self._ws.receive()
+        if msg.type == WSMsgType.TEXT:
+            return msg.data
+        if msg.type == WSMsgType.BINARY:
+            return msg.data.decode("utf-8", errors="replace")
+        # CLOSE / CLOSING / CLOSED / ERROR -> 结束迭代
+        raise StopAsyncIteration
+
+
 @dataclass
 class VibeSkillConfig:
-    """VibeSkill Channel 配置。"""
+    """VibeSkill Channel 配置。
+
+    端口策略：
+    - 默认 **统一端口**（``port``，默认 19003）：HTTP 与 WebSocket 共用同一 aiohttp Server，
+      主要由路径区分协议（``Upgrade`` 仅作为 WebSocket 握手校验）。
+    - 兼容 **双端口**：当显式设置 ``http_port`` / ``ws_port`` 且二者不同（或与 ``port`` 不一致）时，
+      回退到旧的「HTTP(asyncio) + WS(websockets) 双监听」实现，便于灰度回滚。
+    """
 
     enabled: bool = True
     channel_id: str = VIBESKILL_CHANNEL_ID
     default_session_id: str = "vibeskill_session"
-    http_port: int = 19002  # 独立 HTTP 端口
-    ws_port: int = 19003  # 独立 WebSocket 端口
+    # 统一监听端口（默认 19003）；HTTP 与 WebSocket 共用
+    port: int = 19003
+    # 兼容字段：显式设置后回退到双端口模式（废弃，后续大版本移除）
+    http_port: int | None = None
+    ws_port: int | None = None
+
+    def resolved_http_port(self) -> int:
+        return self.http_port if self.http_port is not None else self.port
+
+    def resolved_ws_port(self) -> int:
+        return self.ws_port if self.ws_port is not None else self.port
+
+    def unified_port_enabled(self) -> bool:
+        """是否启用单端口统一模式。
+
+        仅当未显式指定双端口、或显式指定的两个端口与统一端口完全一致时为 True。
+        """
+        http_p = self.resolved_http_port()
+        ws_p = self.resolved_ws_port()
+        return http_p == ws_p
 
 
 class VibeSkillChannel(BaseChannel):
@@ -166,6 +239,9 @@ class VibeSkillChannel(BaseChannel):
         self._on_message_cb: Callable[[Message], Any] | None = None
         self._http_server: asyncio.Server | None = None
         self._ws_server: Any | None = None
+        # 统一端口模式（aiohttp）相关
+        self._aiohttp_runner: Any | None = None
+        self._aiohttp_site: Any | None = None
         self._ws_heartbeat_tasks: dict[Any, asyncio.Task] = {}
         self._message_ctx: dict[str, dict[str, Any]] = {}
         # question.replied 清空 _message_ctx 后，进行中的 tool 结果仍须落到 tool_call 时的 messageID/partID
@@ -194,16 +270,47 @@ class VibeSkillChannel(BaseChannel):
             return
         self._running = True
 
+        if self.config.unified_port_enabled():
+            await self._start_unified()
+        else:
+            await self._start_dual_port()
+
+    async def _start_unified(self) -> None:
+        """统一端口模式：HTTP 与 WebSocket 共用同一 aiohttp Server。"""
+        from aiohttp import web
+
+        app = self._build_aiohttp_app()
+        runner = web.AppRunner(app)
+        await runner.setup()
+        port = self.config.port
+        site = web.TCPSite(runner, self._listen_host, port)
+        await site.start()
+        self._aiohttp_runner = runner
+        self._aiohttp_site = site
+        logger.info(
+            "[VibeSkillChannel] unified server started: "
+            "http://%s:%d/api/v1 (REST) + ws://%s:%d/api/v1/messages (WebSocket)",
+            self._listen_host,
+            port,
+            self._listen_host,
+            port,
+        )
+
+    async def _start_dual_port(self) -> None:
+        """兼容模式：HTTP(asyncio) + WebSocket(websockets) 双端口监听。"""
+        http_port = self.config.resolved_http_port()
+        ws_port = self.config.resolved_ws_port()
+
         # 启动独立 HTTP 服务器处理 VibeSkill REST 请求
         self._http_server = await asyncio.start_server(
             self._handle_http_connection,
             self._listen_host,
-            self.config.http_port,
+            http_port,
         )
         logger.info(
             "[VibeSkillChannel] HTTP server started: http://%s:%d/api/v1",
             self._listen_host,
-            self.config.http_port,
+            http_port,
         )
 
         # 启动独立 WebSocket 服务器
@@ -211,15 +318,62 @@ class VibeSkillChannel(BaseChannel):
         self._ws_server = await websockets.serve(
             self._handle_ws_connection,
             self._listen_host,
-            self.config.ws_port,
+            ws_port,
             ping_interval=20,
             ping_timeout=60,
         )
         logger.info(
             "[VibeSkillChannel] WebSocket server started: ws://%s:%d/api/v1/messages",
             self._listen_host,
-            self.config.ws_port,
+            ws_port,
         )
+
+    def _build_aiohttp_app(self) -> Any:
+        """构造统一端口 aiohttp Application（REST + WebSocket 路由）。"""
+        from aiohttp import web
+
+        app = web.Application()
+        # WebSocket 入口（仅 GET + Upgrade）
+        app.router.add_get("/api/v1/messages", self._aiohttp_ws_handler)
+        # 其余 REST 接口，复用现有 http_handler 路由表
+        app.router.add_route("*", "/api/v1/{tail:.*}", self._aiohttp_http_handler)
+        return app
+
+    async def _aiohttp_http_handler(self, request: Any) -> Any:
+        """aiohttp REST 适配层：Request -> 现有 http_handler()。"""
+        from aiohttp import web
+
+        method = request.method
+        path = request.path_qs  # 含 query string，与 http_handler 的 urlparse 约定一致
+        headers = {k.lower(): v for k, v in request.headers.items()}
+        body = await request.read()
+        status, resp_headers, resp_body = await self.http_handler(
+            method, path, headers, body
+        )
+        # Connection 头由 aiohttp 自行管理，避免与 keep-alive 冲突
+        resp_headers = {
+            k: v for k, v in (resp_headers or {}).items() if k.lower() != "connection"
+        }
+        return web.Response(status=status, headers=resp_headers, body=resp_body)
+
+    async def _aiohttp_ws_handler(self, request: Any) -> Any:
+        """aiohttp WebSocket 适配层：Request -> 现有 _handle_ws_connection()。"""
+        from aiohttp import web
+
+        # 非 WebSocket 升级请求打到 /api/v1/messages 时，明确返回 426
+        upgrade = str(request.headers.get("Upgrade", "")).strip().lower()
+        if upgrade != "websocket":
+            return web.Response(
+                status=426,
+                headers={"Content-Type": "application/json"},
+                body=b'{"error": "Upgrade Required: use WebSocket"}',
+            )
+
+        ws = web.WebSocketResponse()
+        await ws.prepare(request)
+        adapter = _AiohttpWebSocketAdapter(ws, request)
+        await self._handle_ws_connection(adapter)
+        return ws
 
     @staticmethod
     def _get_local_ip() -> str:
@@ -232,6 +386,20 @@ class VibeSkillChannel(BaseChannel):
 
     async def stop(self) -> None:
         self._running = False
+        # 统一端口模式：关闭 aiohttp site / runner
+        if self._aiohttp_site is not None:
+            try:
+                await self._aiohttp_site.stop()
+            except Exception:
+                logger.exception("[VibeSkillChannel] aiohttp site stop failed")
+            self._aiohttp_site = None
+        if self._aiohttp_runner is not None:
+            try:
+                await self._aiohttp_runner.cleanup()
+            except Exception:
+                logger.exception("[VibeSkillChannel] aiohttp runner cleanup failed")
+            self._aiohttp_runner = None
+        # 双端口模式：关闭 asyncio HTTP / websockets server
         if self._http_server is not None:
             self._http_server.close()
             await self._http_server.wait_closed()

@@ -44,7 +44,7 @@
 ```mermaid
 graph TB
     subgraph 外部入口
-        VSK[VibeSkill Channel<br/>HTTP:19002 / WS:19003]
+        VSK[VibeSkill Channel<br/>:19003 HTTP+WS]
     end
 
     subgraph Gateway层
@@ -77,7 +77,7 @@ graph LR
     end
 
     subgraph VibeSkillChannel
-        VSK[VibeSkill Channel<br/>HTTP:19002 / WS:19003]
+        VSK[VibeSkill Channel<br/>:19003 HTTP+WS]
     end
 
     subgraph 共享资源
@@ -142,7 +142,7 @@ sequenceDiagram
 graph TB
     subgraph Gateway["Gateway（网关）"]
         subgraph 外部入口
-            VSK[VibeSkill Channel<br/>HTTP:19002 / WS:19003]
+            VSK[VibeSkill Channel<br/>:19003 HTTP+WS]
         end
 
         subgraph 消息处理层
@@ -235,7 +235,7 @@ graph LR
     end
 
     subgraph VibeSkillChannel
-        VSK[VibeSkill Channel<br/>HTTP:19002 / WS:19003]
+        VSK[VibeSkill Channel<br/>:19003 HTTP+WS]
     end
 
     subgraph 路由层

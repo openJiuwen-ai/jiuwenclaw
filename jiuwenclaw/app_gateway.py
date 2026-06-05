@@ -391,17 +391,16 @@ class GatewayServer:
             """WebSocket protocol that also handles HTTP requests on the same endpoint."""
 
             async def process_request(self, path, headers):
-                # Check if it's a WebSocket upgrade request
-                upgrade = str(headers.get("Upgrade", "")).lower()
-                connection = str(headers.get("Connection", "")).lower()
+                # Route by URL path first to avoid misclassifying HTTP requests
+                # that accidentally carry Upgrade-related headers.
+                request_path = str(path).split("?", 1)[0]
+                if request_path not in gateway_server.config.routes:
+                    # It's an HTTP request (or unsupported WS path).
+                    # VibeSkill HTTP is handled by VibeSkillChannel's own HTTP server on a separate port.
+                    return (404, {"Content-Type": "application/json"}, b'{"error": "Not found"}')
 
-                if "websocket" in upgrade and "upgrade" in connection:
-                    # It's a WebSocket upgrade - proceed with normal WS handling
-                    return await super().process_request(path, headers)
-
-                # It's an HTTP request - websockets 16.0 doesn't support non-GET methods
-                # VibeSkill HTTP is handled by VibeSkillChannel's own HTTP server on a separate port
-                return (404, {"Content-Type": "application/json"}, b'{"error": "Not found"}')
+                # It's a known WebSocket path - let the WS library validate handshake headers.
+                return await super().process_request(path, headers)
 
         logger.info("[GatewayServer] calling ws_serve on %s:%s", self.config.host, self.config.port)
         self._server = await ws_serve(
@@ -1085,9 +1084,27 @@ async def _run(
     )
     await vibeskill_inbound_server.start()
 
-    # VibeSkill 有自己的 HTTP Server 和 WebSocket Server，不再走 GatewayServer
+    # VibeSkill 统一端口（默认 19003，HTTP + WebSocket 共用）；
+    # 显式设置 VIBESKILL_HTTP_PORT / VIBESKILL_WS_PORT 可回退到双端口兼容模式。
+    def _env_int(name: str) -> int | None:
+        raw = os.getenv(name, "").strip()
+        if not raw:
+            return None
+        try:
+            return int(raw)
+        except ValueError:
+            logger.warning("[App] invalid %s=%r, ignored", name, raw)
+            return None
+
+    _vibeskill_port = _env_int("VIBESKILL_PORT") or 19003
+    _vibeskill_config = VibeSkillConfig(
+        channel_id="vibeskill",
+        port=_vibeskill_port,
+        http_port=_env_int("VIBESKILL_HTTP_PORT"),
+        ws_port=_env_int("VIBESKILL_WS_PORT"),
+    )
     vibeskill_channel = VibeSkillChannel(
-        config=VibeSkillConfig(channel_id="vibeskill"),
+        config=_vibeskill_config,
         router=channel_manager,
         agent_client=client,
     )

@@ -10,8 +10,8 @@ VibeSkill Channel 是 JiuwenClaw 为 VibeSkill 前端提供的专用接入层，
 
 | 服务 | 默认地址 | 用途 |
 |------|----------|------|
-| HTTP | `http://{local_ip}:19002/api/v1` | 会话、文件、版本、导出、注册 Skill 等 REST 接口 |
-| WebSocket | `ws://{local_ip}:19003/api/v1/messages` | 前端实时对话、SkillDev 流式事件、确认问题回填 |
+| HTTP | `http://{local_ip}:19003/api/v1` | 会话、文件、版本、导出、注册 Skill 等 REST 接口（统一端口） |
+| WebSocket | `ws://{local_ip}:19003/api/v1/messages` | 前端实时对话、SkillDev 流式事件、确认问题回填（统一端口） |
 
 核心职责：
 
@@ -26,8 +26,8 @@ VibeSkill Channel 是 JiuwenClaw 为 VibeSkill 前端提供的专用接入层，
 ```mermaid
 flowchart LR
     FE["VibeSkill 前端"]
-    HTTP["VibeSkillChannel HTTP Server<br/>19002 /api/v1"]
-    WS["VibeSkillChannel WebSocket Server<br/>19003 /api/v1/messages"]
+    HTTP["VibeSkillChannel Unified Server<br/>19003 /api/v1"]
+    WS["VibeSkillChannel WebSocket<br/>19003 /api/v1/messages"]
     STORE["VibeSkillSessionStore<br/>状态与内外 ID 映射"]
     CM["ChannelManager"]
     MH["MessageHandler"]
@@ -66,8 +66,9 @@ flowchart LR
 | `enabled` | `True` | 是否启用频道 |
 | `channel_id` | `vibeskill` | 注册到 `ChannelManager` 的频道 ID |
 | `default_session_id` | `vibeskill_session` | 默认会话 ID，当前主流程主要使用动态 session |
-| `http_port` | `19002` | 独立 HTTP 服务端口 |
-| `ws_port` | `19003` | 独立 WebSocket 服务端口 |
+| `port` | `19003` | 统一监听端口（HTTP + WebSocket） |
+| `http_port` | 无 | 显式设置则回退双端口 HTTP 端口 |
+| `ws_port` | 无 | 显式设置则回退双端口 WS 端口 |
 
 ### 3.2 `VibeSkillSessionStore`
 
@@ -398,7 +399,7 @@ SkillDev 事件映射：
 创建 SkillCreate 会话：
 
 ```bash
-curl -X POST http://127.0.0.1:19002/api/v1/session \
+curl -X POST http://127.0.0.1:19003/api/v1/session \
   -H 'Content-Type: application/json' \
   -d '{"mode":"SkillCreate"}'
 ```
@@ -422,7 +423,7 @@ curl -X POST http://127.0.0.1:19002/api/v1/session \
 创建 Standard 会话：
 
 ```bash
-curl -X POST http://127.0.0.1:19002/api/v1/session \
+curl -X POST http://127.0.0.1:19003/api/v1/session \
   -H 'Content-Type: application/json' \
   -d '{"mode":"Standard"}'
 ```

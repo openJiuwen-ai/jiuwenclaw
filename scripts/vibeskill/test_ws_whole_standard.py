@@ -35,7 +35,7 @@ import aiohttp
 
 logger = logging.getLogger("vibeskill.standard.cli")
 
-HTTP_BASE = os.environ.get("VIBESKILL_HTTP_BASE", "http://127.0.0.1:19002")
+HTTP_BASE = os.environ.get("VIBESKILL_HTTP_BASE", "http://127.0.0.1:19003")
 WS_BASE = os.environ.get(
     "VIBESKILL_WS_BASE",
     "ws://127.0.0.1:19003/api/v1/messages",
