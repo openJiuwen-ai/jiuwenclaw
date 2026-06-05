@@ -131,7 +131,7 @@ class AgentWebSocketServer:
         # OA 模式相关
         self._oa_ws_uri: str | None = os.getenv("AGENTSERVER_TO_OA_WS_URL", "").strip() or None
         self._oa_mode: bool = sandbox_routing_enabled()
-        self._oa_connect_retry_interval: float = float(os.getenv("AGENTSERVER_TO_OA_RETRY_INTERVAL", "3.0"))  # 默认3秒快速重连
+        self._oa_connect_retry_interval: float = float(os.getenv("AGENTSERVER_TO_OA_RETRY_INTERVAL", "1.0"))  # 默认1秒快速重连
         self._oa_connect_max_retries: int = int(os.getenv("AGENTSERVER_TO_OA_MAX_RETRIES", "0"))  # 0 表示无限重试
         self._oa_receiver_task: asyncio.Task | None = None
         self._oa_running: bool = False
@@ -584,11 +584,7 @@ class AgentWebSocketServer:
                 logger.error("[AgentWebSocketServer] OpenAbility 连接重试次数超过上限，放弃")
                 break
 
-            # 指数退避：前3次快速重连(3秒)，之后逐渐增加，最大5秒
-            if retry_count <= 3:
-                delay = self._oa_connect_retry_interval
-            else:
-                delay = min(self._oa_connect_retry_interval * (2 ** (retry_count - 3)), 5)
+            delay = self._oa_connect_retry_interval
 
             logger.info("[AgentWebSocketServer] %.1f秒后尝试重连 OpenAbility...", delay)
             await asyncio.sleep(delay)
