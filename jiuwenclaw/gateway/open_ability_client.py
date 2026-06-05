@@ -328,9 +328,11 @@ class OpenAbilityWebSocketClient(AgentServerClient):
         self._ensure_connected()
         envelope.is_stream = False
         rid = _wire_request_id_key(envelope.request_id)
+        session_id = str(envelope.session_id or "").strip() or "n/a"
         logger.info(
-            "[E2A][oa][nostream] sandbox_id=%s request_id=%s method=%s",
+            "[E2A][oa][nostream][out] sandbox_id=%s session_id=%s request_id=%s method=%s",
             self._sandbox_id,
+            session_id,
             rid,
             envelope.method,
         )
@@ -354,6 +356,13 @@ class OpenAbilityWebSocketClient(AgentServerClient):
                     f"OpenAbility 非流式请求超时 (request_id={rid}, "
                     f"timeout={self._request_timeout_seconds}s)"
                 ) from e
+            logger.info(
+                "[E2A][oa][nostream][in] sandbox_id=%s session_id=%s request_id=%s method=%s",
+                self._sandbox_id,
+                session_id,
+                rid,
+                envelope.method,
+            )
             return parse_agent_server_wire_unary(data)
         finally:
             await self._drain_and_remove_queue(rid)
