@@ -43,6 +43,8 @@ Any D6 violation means `compliance.pass = false` and the final verdict is `FAIL`
 
 ## Procedure
 
+Skill Compass requires Node.js. Before running the evaluation, verify that a usable Node.js installation is available on the current system; if it is not, install Node.js before continuing.
+
 1. Load the target `SKILL.md`. If the file does not exist, stop with `Error: File not found: <skillPath>`.
 2. Parse YAML frontmatter. If malformed, continue with D1 frontmatter score 0 and record the parse error.
 3. Run local pre-analysis:
