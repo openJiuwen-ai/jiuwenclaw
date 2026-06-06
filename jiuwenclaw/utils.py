@@ -31,6 +31,7 @@ import json
 import os
 import re
 import sys
+import threading
 import time
 import datetime
 import asyncio
@@ -1490,6 +1491,66 @@ def format_session_log(session_id: str | None, content: str) -> str:
     return f"[session={sid}] {content}"
 
 
+_EXCEPTION_LOGGING_INSTALLED = False
+
+
+def asyncio_exception_handler(loop: asyncio.AbstractEventLoop, context: dict[str, Any]) -> None:
+    """Log asyncio loop/task failures with stack traces on the jiuwenclaw logger."""
+    exc = context.get("exception")
+    message = context.get("message") or "asyncio event loop error"
+    task = context.get("task") or context.get("future")
+    task_name = getattr(task, "get_name", lambda: "")() if task is not None else ""
+    log = logging.getLogger("jiuwenclaw.asyncio")
+    if exc is not None:
+        log.error(
+            "%s (task=%s)",
+            message,
+            task_name or task,
+            exc_info=exc,
+        )
+        return
+    log.error("%s context=%r", message, context)
+
+
+def configure_asyncio_event_loop_logging(loop: asyncio.AbstractEventLoop | None = None) -> None:
+    """Attach :func:`asyncio_exception_handler` to the running (or given) event loop."""
+    target = loop or asyncio.get_running_loop()
+    target.set_exception_handler(asyncio_exception_handler)
+
+
+def install_global_exception_logging() -> None:
+    """Route uncaught main-thread / thread exceptions to jiuwenclaw logger with tracebacks."""
+    global _EXCEPTION_LOGGING_INSTALLED
+    if _EXCEPTION_LOGGING_INSTALLED:
+        return
+    _EXCEPTION_LOGGING_INSTALLED = True
+
+    log = logging.getLogger("jiuwenclaw")
+    original_sys_excepthook = sys.excepthook
+
+    def _sys_excepthook(exc_type, exc_value, exc_tb) -> None:
+        if issubclass(exc_type, KeyboardInterrupt):
+            original_sys_excepthook(exc_type, exc_value, exc_tb)
+            return
+        log.critical("Uncaught exception", exc_info=(exc_type, exc_value, exc_tb))
+        original_sys_excepthook(exc_type, exc_value, exc_tb)
+
+    sys.excepthook = _sys_excepthook
+
+    if hasattr(threading, "excepthook"):
+        original_thread_excepthook = threading.excepthook
+
+        def _thread_excepthook(args: threading.ExceptHookArgs) -> None:
+            log.critical(
+                "Uncaught exception in thread %s",
+                args.thread,
+                exc_info=(args.exc_type, args.exc_value, args.exc_traceback),
+            )
+            original_thread_excepthook(args)
+
+        threading.excepthook = _thread_excepthook
+
+
 def setup_logger(log_level: Optional[str] = None) -> logging.Logger:
     """配置 ``jiuwenclaw`` 根日志：控制台 + 分组件文件 + 汇总 full.log。
 
@@ -1554,6 +1615,7 @@ def setup_logger(log_level: Optional[str] = None) -> logging.Logger:
     stream_handler.setFormatter(formatter)
     stream_handler.addFilter(privacy_filter)
     root.addHandler(stream_handler)
+    install_global_exception_logging()
     return root
 
 

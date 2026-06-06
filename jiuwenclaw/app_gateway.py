@@ -33,6 +33,7 @@ from jiuwenclaw.channel.acp_channel import AcpGatewayBridge
 from jiuwenclaw.gateway.route_binding import GatewayRouteBinding
 from jiuwenclaw.jiuwen_core_patch import apply_openai_model_client_patch
 from jiuwenclaw.utils import (
+    configure_asyncio_event_loop_logging,
     get_user_workspace_dir,
     get_env_file,
     prepare_workspace,
@@ -193,11 +194,10 @@ async def _connect_with_retry(
             return
         except Exception as exc:  # noqa: BLE001
             if attempt >= max_retries:
-                logger.error(
-                    "[App] connect AgentServer failed after %d tries: %s  last=%s",
+                logger.exception(
+                    "[App] connect AgentServer failed after %d tries: %s",
                     attempt,
                     uri,
-                    exc,
                 )
                 raise
             logger.warning(
@@ -683,7 +683,7 @@ class GatewayServer:
                 if ws_closed:
                     logger.warning("GatewayServer local handler aborted on closed ws (%s): %s", method, e)
                     return
-                logger.error("GatewayServer local handler error (%s): %s", method, e)
+                logger.exception("GatewayServer local handler error (%s)", method)
                 try:
                     await self.send_response(
                         ws, req_id, ok=False,
@@ -747,6 +747,7 @@ async def _run(
     web_port: int,
     web_path: str,
 ) -> None:
+    configure_asyncio_event_loop_logging()
     from jiuwenclaw.channel.dingding import DingTalkChannel, DingTalkConfig
     from jiuwenclaw.channel.feishu import FeishuChannel, FeishuConfig
     from jiuwenclaw.channel.whatsapp_channel import WhatsAppChannel, WhatsAppChannelConfig
@@ -989,12 +990,12 @@ async def _run(
                 )
                 await client.send_request(restart_env)
             return True
-        except Exception as e:  # noqa: BLE001
-            logger.error("[App] hot config reload failed: %s", e)
+        except Exception:  # noqa: BLE001
+            logger.exception("[App] hot config reload failed")
             return False
     # 启动时将配置同步给agentserver（可通过配置关闭）
     sync_config_enabled_cfg = sync_config_cfg.get("enabled") if isinstance(sync_config_cfg, dict) else None
-    sync_config_on_startup = _get_bool_config("SYNC_CONFIG_ON_STARTUP", sync_config_enabled_cfg, default=True)
+    sync_config_on_startup = _get_bool_config("SYNC_CONFIG_ON_STARTUP", sync_config_enabled_cfg, default=False)
 
     if sync_config_on_startup:
         callback_result = _on_config_saved(
@@ -1833,14 +1834,20 @@ def main() -> None:
     web_port = args.port or int(os.getenv("WEB_PORT", "19000"))
     web_path = args.web_path or os.getenv("WEB_PATH", "/ws")
 
-    asyncio.run(
-        _run(
-            agent_server_url=agent_server_url,
-            web_host=web_host,
-            web_port=web_port,
-            web_path=web_path,
+    try:
+        asyncio.run(
+            _run(
+                agent_server_url=agent_server_url,
+                web_host=web_host,
+                web_port=web_port,
+                web_path=web_path,
+            )
         )
-    )
+    except KeyboardInterrupt:
+        logger.info("[App] interrupted by user")
+    except Exception:
+        logger.exception("[App] Gateway fatal error")
+        raise
 
 
 if __name__ == "__main__":
