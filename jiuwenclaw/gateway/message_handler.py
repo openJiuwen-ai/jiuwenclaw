@@ -2031,290 +2031,315 @@ class MessageHandler(ABC):
                         await self._process_remote_session_list_request(msg)
                         continue
 
-                # 检查是否是中断请求
-                if msg.req_method == ReqMethod.CHAT_ANSWER:
-                    # 先正常转发用户审批答案，再按会话自动派发排队的新输入
-                    agent_msg = await self._prepare_agent_dispatch_message(msg)
-                    env = self.message_to_e2a(agent_msg)
-                    await self._process_non_stream_request(msg, env)
-                    answer_request_id = (msg.params or {}).get("request_id")
-                    if self._is_evolution_approval_request_id(answer_request_id):
-                        self._clear_pending_evolution_approval(msg.session_id)
-                        self._clear_session_evolution_in_progress(msg.session_id)
-                        queued_payload = self._pop_queued_supplement_input(msg.session_id)
-                        queued_input = str((queued_payload or {}).get("new_input") or "").strip()
-                        queued_attachments = (queued_payload or {}).get("attachments")
-                        if queued_input:
-                            queued_msg = self._build_queued_chat_send_message(
-                                msg,
-                                queued_input,
-                                queued_attachments if isinstance(queued_attachments, list) else None,
-                            )
-                            self._user_messages.put_nowait(queued_msg)
-                            logger.info(
-                                "[MessageHandler] evolution approval answered, queued supplement dispatched: id=%s session_id=%s",
-                                queued_msg.id,
-                                msg.session_id,
-                            )
-                    continue
-
-                if msg.req_method in (ReqMethod.CHAT_CANCEL, ReqMethod.SKILLDEV_CANCEL):
-                    logger.info(
-                        "[MessageHandler] 收到中断请求: id=%s channel_id=%s method=%s",
-                        msg.id, msg.channel_id, msg.req_method,
-                    )
-                    # skilldev.cancel 仅支持取消当前任务，与 chat.interrupt intent=cancel 对齐
-                    if msg.req_method == ReqMethod.SKILLDEV_CANCEL:
-                        params = dict(msg.params or {})
-                        params.setdefault("intent", "cancel")
-                        sid = params.get("session_id") or params.get("task_id") or msg.session_id
-                        if isinstance(sid, str) and sid.strip():
-                            msg.session_id = sid.strip()
-                            params["session_id"] = sid.strip()
-                        msg.params = params
-                        await self._cancel_agent_work_for_session(msg, msg.session_id)
-                        continue
-
-                    new_input = (msg.params or {}).get("new_input")
-                    has_new_input = isinstance(new_input, str) and new_input.strip()
-                    raw_attachments = (msg.params or {}).get("attachments")
-                    supplement_attachments = (
-                        raw_attachments if isinstance(raw_attachments, list) else None
-                    )
-                    intent = (msg.params or {}).get("intent", "cancel")
-
-                    if has_new_input:
-                        if (
-                            self._is_session_evolution_in_progress(msg.session_id)
-                            or (
-                                isinstance(msg.session_id, str)
-                                and msg.session_id in self._pending_evolution_approval
-                            )
-                        ):
-                            queued_input = new_input.strip()
-                            self._queue_supplement_input(
-                                msg.session_id,
-                                queued_input,
-                                supplement_attachments,
-                            )
-                            logger.info(
-                                "[MessageHandler] evolution phase pending, queue supplement input: session_id=%s",
-                                msg.session_id,
-                            )
-                            await self._send_interrupt_result_notification(
-                                msg.id,
-                                msg.channel_id,
-                                msg.session_id,
-                                "supplement",
-                                message="已加入队列，等待演进完成",
-                            )
-                            continue
-
-                        # 有新输入：取消旧任务 → 保留 todo → 启动新任务（非并发）
-
-                        # 1. 取消 gateway 侧当前 session 相关的流式任务（而非所有任务）
-                        tasks_to_cancel = []
-                        rids_cancelled = []
-                        current_sid = msg.session_id
-                        for rid, task in list(self._stream_tasks.items()):
-                            # 只取消与当前 session_id 关联的任务
-                            if self._stream_sessions.get(rid) != current_sid:
-                                continue
-                            if not task.done():
-                                logger.info(
-                                    "[MessageHandler] supplement: 取消流式任务 request_id=%s session_id=%s",
-                                    rid, current_sid,
-                                )
-                                task.cancel()
-                                tasks_to_cancel.append(task)
-                                rids_cancelled.append(rid)
-                        if tasks_to_cancel:
-                            await asyncio.gather(*tasks_to_cancel, return_exceptions=True)
-
-                        # 2. 通知前端 supplement（前端据此判断 is_processing 状态）
-                        await self._send_interrupt_result_notification(
-                            msg.id, msg.channel_id, msg.session_id, "supplement",
-                        )
-
-                        # 3. 发送 supplement intent 到 AgentServer（取消任务但保留 todo）
-                        #    用 await 确保 agent 侧先完成取消再启动新任务
-                        from jiuwenclaw.e2a.gateway_normalize import e2a_from_agent_fields
-
-                        agent_msg = await self._prepare_agent_dispatch_message(msg)
-                        supplement_env = e2a_from_agent_fields(
-                            request_id=f"supplement_{int(time.time() * 1000):x}",
-                            channel_id=msg.channel_id,
-                            session_id=agent_msg.session_id,
-                            req_method=ReqMethod.CHAT_CANCEL,
-                            params={"intent": "supplement", "session_id": agent_msg.session_id},
-                            is_stream=False,
-                            timestamp=time.time(),
-                        )
-                        try:
-                            await self._send_interrupt_to_agent(supplement_env)
-                        except Exception:
-                            pass  # 即使失败也继续启动新任务
-
-                        # 4. 入队新任务（单一任务，不并发）
-                        from jiuwenclaw.schema.message import Message
-
-                        new_req_id = f"req_{int(time.time() * 1000):x}_{msg.id}"
-                        sup_meta = dict(msg.metadata) if msg.metadata else None
-                        new_msg = Message(
-                            id=new_req_id,
-                            type="req",
-                            channel_id=msg.channel_id,
-                            session_id=msg.session_id,
-                            params={
-                                "query": new_input.strip(),
-                                "session_id": msg.session_id,
-                                "is_supplement": True,
-                                **(
-                                    {"attachments": supplement_attachments}
-                                    if supplement_attachments
-                                    else {}
-                                ),
-                            },
-                            timestamp=time.time(),
-                            ok=True,
-                            req_method=ReqMethod.CHAT_SEND,
-                            is_stream=True,
-                            provider=msg.provider,
-                            chat_id=msg.chat_id,
-                            user_id=msg.user_id,
-                            bot_id=msg.bot_id,
-                            metadata=sup_meta,
-                        )
-                        self._user_messages.put_nowait(new_msg)
-                        logger.info(
-                            "[MessageHandler] supplement: 旧任务已取消，新任务已入队: id=%s session_id=%s",
-                            new_msg.id, msg.session_id,
-                        )
-
-                    elif intent == "cancel":
-                        await self._cancel_agent_work_for_session(msg, msg.session_id)
-
-                    elif intent in ("pause", "resume"):
-                        # 暂停/恢复：不取消流式任务，转发给 AgentServer 处理 ReAct 循环
-                        agent_msg = await self._prepare_agent_dispatch_message(msg)
-                        env_interrupt = self.message_to_e2a(agent_msg)
-                        asyncio.create_task(self._send_interrupt_to_agent(env_interrupt))
-                        # 通知前端状态变更
-                        await self._send_interrupt_result_notification(
-                            msg.id, msg.channel_id, msg.session_id, intent,
-                        )
-
-                    continue
-
-                # ---- Inbound Pipeline（数字分身入站过滤）----
-                if self._inbound_pipeline is not None and msg.req_method == ReqMethod.CHAT_SEND:
-                    try:
-                        should_forward = await self._inbound_pipeline.apply(msg)
-                    except Exception:
-                        logger.exception("Inbound pipeline error, fallback to forwarding")
-                    else:
-                        if not should_forward:
-                            continue  # 不相关消息，跳过
-
-                # ---- Resolve @file references in chat.send content ----
-                if msg.req_method == ReqMethod.CHAT_SEND and msg.params:
-                    content = msg.params.get("query") or msg.params.get("content") or ""
-                    attachments = msg.params.get("attachments")
-                    cwd = None
-                    if isinstance(msg.metadata, dict):
-                        cwd = msg.metadata.get("cwd")
-                    enriched = content
-                    if attachments:
-                        enriched = self._resolve_structured_attachments(
-                            content,
-                            attachments,
-                            cwd=cwd,
-                        )
-                    elif content and "@" in content:
-                        enriched = self._resolve_at_file_references(content, cwd=cwd)
-                    if enriched != content:
-                        msg.params = dict(msg.params)
-                        msg.params["query"] = enriched
-                        if "content" in msg.params:
-                            msg.params["content"] = enriched
-                        logger.info(
-                            "[MessageHandler] attachments resolved in chat.send: id=%s",
-                            msg.id,
-                        )
-
-                logger.info(
-                    "[MessageHandler] 从 user_messages 取出，发往 AgentServer: id=%s channel_id=%s is_stream=%s",
-                    msg.id, msg.channel_id, msg.is_stream,
+                # 出队即派发后台任务：单一队列只负责顺序出队，后续所有 await 不阻塞循环
+                asyncio.create_task(
+                    self._process_user_message(msg),
+                    name=f"gw-msg-{str(msg.id or 'msg')[:24]}",
                 )
-                # remote 模式：用户 chat.send 时在网关索引记录 role=user 预览
-                self._maybe_update_session_index_on_user_msg(msg)
-                stream_rid = msg.id
-                try:
-                    agent_msg = await self._prepare_agent_dispatch_message(msg)
-                    await self._trigger_before_chat_request_hook(agent_msg)
-                    env = self.message_to_e2a(agent_msg)
-
-                    # 分布式文件传输：将 Gateway 本地文件传输到 AgentServer
-                    try:
-                        if self._should_transfer_files(env):
-                            env = await self._transfer_files_to_agent_server(env, msg)
-                    except Exception as e:
-                        logger.exception(
-                            "[MessageHandler] 文件传输过程异常: request_id=%s error=%s, 继续使用原路径",
-                            env.request_id,
-                            e,
-                        )
-
-                    stream_rid = env.request_id or msg.id
-                    if env.is_stream:
-                        # 流式处理：启动后台任务，支持多任务并发
-                        # 通知前端新任务开始处理
-                        await self._send_processing_status(
-                            stream_rid, msg.session_id, msg.channel_id, is_processing=True,
-                        )
-                        task = asyncio.create_task(
-                            self.process_stream(env, msg.session_id, msg.metadata)
-                        )
-                        self._stream_tasks[stream_rid] = task
-                        self._stream_sessions[stream_rid] = msg.session_id
-                        self._stream_metadata[stream_rid] = msg.metadata
-                        self._stream_modes[stream_rid] = (
-                            msg.params.get("mode", "plan") if isinstance(msg.params, dict) else "plan"
-                        )
-                        logger.info(
-                            "[MessageHandler] Stream 任务已启动（后台运行）: request_id=%s channel_id=%s 当前并发=%d",
-                            stream_rid, msg.channel_id, len(self._stream_tasks),
-                        )
-                        # 不 await，让流式任务在后台运行，_forward_loop 继续处理下一个消息
-                    elif self._non_stream_rpc_may_run_parallel(env):
-                        # 非流式且非聊天：后台执行，避免慢 RPC（如 SkillNet）阻塞队列中的其它请求
-                        method_label = env.method or "none"
-                        asyncio.create_task(
-                            self._process_non_stream_request(msg, env),
-                            name=f"gw-nonstr-{method_label}-{stream_rid[:24]}",
-                        )
-                        logger.info(
-                            "[MessageHandler] 非流式 RPC 已后台执行: id=%s method=%s",
-                            msg.id,
-                            method_label,
-                        )
-                    else:
-                        await self._process_non_stream_request(msg, env)
-                except Exception as e:
-                    logger.exception(
-                        "[MessageHandler] 发往 AgentServer 失败: id=%s channel_id=%s",
-                        msg.id,
-                        msg.channel_id,
-                    )
-                    err_msg = self._build_error_out_message(msg, e)
-                    await self.publish_robot_messages(err_msg)
-                    logger.info(
-                        "[MessageHandler] 错误响应已写入 robot_messages: id=%s channel_id=%s",
-                        msg.id,
-                        msg.channel_id,
-                    )
             except asyncio.CancelledError:
                 break
+
+    async def _process_user_message(self, msg: "Message") -> None:
+        """后台处理单条出队消息（中断/答复/聊天派发等），不阻塞 _forward_loop。
+
+        从 _forward_loop 中整体抽出：循环负责顺序出队并 create_task，本方法负责
+        所有耗时 await（OA 请求、cancel、文件传输、非流式 RPC），避免慢请求阻塞队列。
+        """
+        from jiuwenclaw.schema.message import ReqMethod
+
+        try:
+            # 检查是否是中断请求
+            if msg.req_method == ReqMethod.CHAT_ANSWER:
+                # 先正常转发用户审批答案，再按会话自动派发排队的新输入
+                agent_msg = await self._prepare_agent_dispatch_message(msg)
+                env = self.message_to_e2a(agent_msg)
+                await self._process_non_stream_request(msg, env)
+                answer_request_id = (msg.params or {}).get("request_id")
+                if self._is_evolution_approval_request_id(answer_request_id):
+                    self._clear_pending_evolution_approval(msg.session_id)
+                    self._clear_session_evolution_in_progress(msg.session_id)
+                    queued_payload = self._pop_queued_supplement_input(msg.session_id)
+                    queued_input = str((queued_payload or {}).get("new_input") or "").strip()
+                    queued_attachments = (queued_payload or {}).get("attachments")
+                    if queued_input:
+                        queued_msg = self._build_queued_chat_send_message(
+                            msg,
+                            queued_input,
+                            queued_attachments if isinstance(queued_attachments, list) else None,
+                        )
+                        self._user_messages.put_nowait(queued_msg)
+                        logger.info(
+                            "[MessageHandler] evolution approval answered, queued supplement dispatched: id=%s session_id=%s",
+                            queued_msg.id,
+                            msg.session_id,
+                        )
+                return
+
+            if msg.req_method in (ReqMethod.CHAT_CANCEL, ReqMethod.SKILLDEV_CANCEL):
+                logger.info(
+                    "[MessageHandler] 收到中断请求: id=%s channel_id=%s method=%s",
+                    msg.id, msg.channel_id, msg.req_method,
+                )
+                # skilldev.cancel 仅支持取消当前任务，与 chat.interrupt intent=cancel 对齐
+                if msg.req_method == ReqMethod.SKILLDEV_CANCEL:
+                    params = dict(msg.params or {})
+                    params.setdefault("intent", "cancel")
+                    sid = params.get("session_id") or params.get("task_id") or msg.session_id
+                    if isinstance(sid, str) and sid.strip():
+                        msg.session_id = sid.strip()
+                        params["session_id"] = sid.strip()
+                    msg.params = params
+                    await self._cancel_agent_work_for_session(msg, msg.session_id)
+                    return
+
+                new_input = (msg.params or {}).get("new_input")
+                has_new_input = isinstance(new_input, str) and new_input.strip()
+                raw_attachments = (msg.params or {}).get("attachments")
+                supplement_attachments = (
+                    raw_attachments if isinstance(raw_attachments, list) else None
+                )
+                intent = (msg.params or {}).get("intent", "cancel")
+
+                if has_new_input:
+                    if (
+                        self._is_session_evolution_in_progress(msg.session_id)
+                        or (
+                            isinstance(msg.session_id, str)
+                            and msg.session_id in self._pending_evolution_approval
+                        )
+                    ):
+                        queued_input = new_input.strip()
+                        self._queue_supplement_input(
+                            msg.session_id,
+                            queued_input,
+                            supplement_attachments,
+                        )
+                        logger.info(
+                            "[MessageHandler] evolution phase pending, queue supplement input: session_id=%s",
+                            msg.session_id,
+                        )
+                        await self._send_interrupt_result_notification(
+                            msg.id,
+                            msg.channel_id,
+                            msg.session_id,
+                            "supplement",
+                            message="已加入队列，等待演进完成",
+                        )
+                        return
+
+                    # 有新输入：取消旧任务 → 保留 todo → 启动新任务（非并发）
+
+                    # 1. 取消 gateway 侧当前 session 相关的流式任务（而非所有任务）
+                    tasks_to_cancel = []
+                    rids_cancelled = []
+                    current_sid = msg.session_id
+                    for rid, task in list(self._stream_tasks.items()):
+                        # 只取消与当前 session_id 关联的任务
+                        if self._stream_sessions.get(rid) != current_sid:
+                            continue
+                        if not task.done():
+                            logger.info(
+                                "[MessageHandler] supplement: 取消流式任务 request_id=%s session_id=%s",
+                                rid, current_sid,
+                            )
+                            task.cancel()
+                            tasks_to_cancel.append(task)
+                            rids_cancelled.append(rid)
+                    if tasks_to_cancel:
+                        await asyncio.gather(*tasks_to_cancel, return_exceptions=True)
+
+                    # 2. 通知前端 supplement（前端据此判断 is_processing 状态）
+                    await self._send_interrupt_result_notification(
+                        msg.id, msg.channel_id, msg.session_id, "supplement",
+                    )
+
+                    # 3. 发送 supplement intent 到 AgentServer（取消任务但保留 todo）
+                    #    用 await 确保 agent 侧先完成取消再启动新任务
+                    from jiuwenclaw.e2a.gateway_normalize import e2a_from_agent_fields
+
+                    agent_msg = await self._prepare_agent_dispatch_message(msg)
+                    supplement_env = e2a_from_agent_fields(
+                        request_id=f"supplement_{int(time.time() * 1000):x}",
+                        channel_id=msg.channel_id,
+                        session_id=agent_msg.session_id,
+                        req_method=ReqMethod.CHAT_CANCEL,
+                        params={"intent": "supplement", "session_id": agent_msg.session_id},
+                        is_stream=False,
+                        timestamp=time.time(),
+                    )
+                    try:
+                        await self._send_interrupt_to_agent(supplement_env)
+                    except Exception:
+                        pass  # 即使失败也继续启动新任务
+
+                    # 4. 入队新任务（单一任务，不并发）
+                    from jiuwenclaw.schema.message import Message
+
+                    new_req_id = f"req_{int(time.time() * 1000):x}_{msg.id}"
+                    sup_meta = dict(msg.metadata) if msg.metadata else None
+                    new_msg = Message(
+                        id=new_req_id,
+                        type="req",
+                        channel_id=msg.channel_id,
+                        session_id=msg.session_id,
+                        params={
+                            "query": new_input.strip(),
+                            "session_id": msg.session_id,
+                            "is_supplement": True,
+                            **(
+                                {"attachments": supplement_attachments}
+                                if supplement_attachments
+                                else {}
+                            ),
+                        },
+                        timestamp=time.time(),
+                        ok=True,
+                        req_method=ReqMethod.CHAT_SEND,
+                        is_stream=True,
+                        provider=msg.provider,
+                        chat_id=msg.chat_id,
+                        user_id=msg.user_id,
+                        bot_id=msg.bot_id,
+                        metadata=sup_meta,
+                    )
+                    self._user_messages.put_nowait(new_msg)
+                    logger.info(
+                        "[MessageHandler] supplement: 旧任务已取消，新任务已入队: id=%s session_id=%s",
+                        new_msg.id, msg.session_id,
+                    )
+
+                elif intent == "cancel":
+                    await self._cancel_agent_work_for_session(msg, msg.session_id)
+
+                elif intent in ("pause", "resume"):
+                    # 暂停/恢复：不取消流式任务，转发给 AgentServer 处理 ReAct 循环
+                    agent_msg = await self._prepare_agent_dispatch_message(msg)
+                    env_interrupt = self.message_to_e2a(agent_msg)
+                    interrupt_task = asyncio.create_task(
+                        self._send_interrupt_to_agent(env_interrupt)
+                    )
+                    # 通知前端状态变更（不等待 OA 中断响应）
+                    await self._send_interrupt_result_notification(
+                        msg.id, msg.channel_id, msg.session_id, intent,
+                    )
+                    await interrupt_task
+
+                return
+
+            # ---- Inbound Pipeline（数字分身入站过滤）----
+            if self._inbound_pipeline is not None and msg.req_method == ReqMethod.CHAT_SEND:
+                try:
+                    should_forward = await self._inbound_pipeline.apply(msg)
+                except Exception:
+                    logger.exception("Inbound pipeline error, fallback to forwarding")
+                else:
+                    if not should_forward:
+                        return  # 不相关消息，跳过
+
+            # ---- Resolve @file references in chat.send content ----
+            if msg.req_method == ReqMethod.CHAT_SEND and msg.params:
+                content = msg.params.get("query") or msg.params.get("content") or ""
+                attachments = msg.params.get("attachments")
+                cwd = None
+                if isinstance(msg.metadata, dict):
+                    cwd = msg.metadata.get("cwd")
+                enriched = content
+                if attachments:
+                    enriched = self._resolve_structured_attachments(
+                        content,
+                        attachments,
+                        cwd=cwd,
+                    )
+                elif content and "@" in content:
+                    enriched = self._resolve_at_file_references(content, cwd=cwd)
+                if enriched != content:
+                    msg.params = dict(msg.params)
+                    msg.params["query"] = enriched
+                    if "content" in msg.params:
+                        msg.params["content"] = enriched
+                    logger.info(
+                        "[MessageHandler] attachments resolved in chat.send: id=%s",
+                        msg.id,
+                    )
+
+            logger.info(
+                "[MessageHandler] 从 user_messages 取出，发往 AgentServer: id=%s channel_id=%s is_stream=%s",
+                msg.id, msg.channel_id, msg.is_stream,
+            )
+            # remote 模式：用户 chat.send 时在网关索引记录 role=user 预览
+            self._maybe_update_session_index_on_user_msg(msg)
+            stream_rid = msg.id
+            try:
+                agent_msg = await self._prepare_agent_dispatch_message(msg)
+                await self._trigger_before_chat_request_hook(agent_msg)
+                env = self.message_to_e2a(agent_msg)
+
+                # 分布式文件传输：将 Gateway 本地文件传输到 AgentServer
+                try:
+                    if self._should_transfer_files(env):
+                        env = await self._transfer_files_to_agent_server(env, msg)
+                except Exception as e:
+                    logger.exception(
+                        "[MessageHandler] 文件传输过程异常: request_id=%s error=%s, 继续使用原路径",
+                        env.request_id,
+                        e,
+                    )
+
+                stream_rid = env.request_id or msg.id
+                if env.is_stream:
+                    # 流式处理：启动后台任务，支持多任务并发
+                    # 通知前端新任务开始处理
+                    await self._send_processing_status(
+                        stream_rid, msg.session_id, msg.channel_id, is_processing=True,
+                    )
+                    task = asyncio.create_task(
+                        self.process_stream(env, msg.session_id, msg.metadata)
+                    )
+                    self._stream_tasks[stream_rid] = task
+                    self._stream_sessions[stream_rid] = msg.session_id
+                    self._stream_metadata[stream_rid] = msg.metadata
+                    self._stream_modes[stream_rid] = (
+                        msg.params.get("mode", "plan") if isinstance(msg.params, dict) else "plan"
+                    )
+                    logger.info(
+                        "[MessageHandler] Stream 任务已启动（后台运行）: request_id=%s channel_id=%s 当前并发=%d",
+                        stream_rid, msg.channel_id, len(self._stream_tasks),
+                    )
+                    await task
+                elif self._non_stream_rpc_may_run_parallel(env):
+                    # 非流式且非聊天：后台执行，避免慢 RPC（如 SkillNet）阻塞队列中的其它请求
+                    method_label = env.method or "none"
+                    non_stream_task = asyncio.create_task(
+                        self._process_non_stream_request(msg, env),
+                        name=f"gw-nonstr-{method_label}-{stream_rid[:24]}",
+                    )
+                    logger.info(
+                        "[MessageHandler] 非流式 RPC 已后台执行: id=%s method=%s",
+                        msg.id,
+                        method_label,
+                    )
+                    await non_stream_task
+                else:
+                    await self._process_non_stream_request(msg, env)
+            except Exception as e:
+                logger.exception(
+                    "[MessageHandler] 发往 AgentServer 失败: id=%s channel_id=%s",
+                    msg.id,
+                    msg.channel_id,
+                )
+                err_msg = self._build_error_out_message(msg, e)
+                await self.publish_robot_messages(err_msg)
+                logger.info(
+                    "[MessageHandler] 错误响应已写入 robot_messages: id=%s channel_id=%s",
+                    msg.id,
+                    msg.channel_id,
+                )
+        except Exception:
+            logger.exception(
+                "[MessageHandler] 后台处理消息失败: id=%s channel_id=%s",
+                msg.id,
+                msg.channel_id,
+            )
 
     async def process_stream(
         self,
