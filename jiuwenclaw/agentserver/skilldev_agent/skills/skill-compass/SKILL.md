@@ -91,25 +91,41 @@ Skill Compass requires Node.js. Before running the evaluation, verify that a usa
     - `PASS`: `overall_score >= 70`, `D3.pass == true`, `D6.pass == true`, and no D3 High findings
 12. Identify the weakest dimension. On ties, use priority:
     `security > compliance > functional > trigger > structure > comparative`.
-13. Generate at most 5 improvement suggestions for dimensions scoring below 8.
+13. Generate at most 5 improvement suggestions for dimensions scoring below 8. Suggestions belong only in `static_report.md`; do not save them in `static_report.json`.
 14. Before saving JSON or Markdown, recompute every contribution, `sum_contributions`, and `overall_score` from the final D1-D6 scores using the exact formula in step 10. If any drafted contribution, total, or `overall_score` differs from the recomputed value, replace it and use the recomputed value for verdict rules and both reports. Do not save inconsistent scores.
 15. Save both outputs:
     - JSON: `<workspace>/evals/static/static_report.json`
     - Markdown summary: `<workspace>/evals/static/static_report.md`
     Create `<workspace>/evals/static/` if needed and overwrite the two report files on every run. Do not read existing reports to create before/after comparisons.
     Treat every run as a fresh snapshot, including runs after the target skill was optimized from a previous static report.
+16. After saving `static_report.json`, immediately validate that the file is parseable JSON. If parsing fails for any reason, discard the invalid JSON draft, regenerate `static_report.json` from the schema and final scores, overwrite the file, and validate it again before continuing. Do not present or use an invalid JSON file.
 
 ## JSON Output
 
-Conform to `{baseDir}/schemas/eval-result.json`:
+### Schema Contract
+
+`static_report.json` is the machine-readable source of truth for the evaluation result. It must conform to `{baseDir}/schemas/eval-result.json` exactly, using the final recomputed scores and verdict from the evaluation flow above.
+
+Include these required result areas:
 
 - `skill_name`, `skill_path`, `skill_type`
-- `scores.structure`, `scores.trigger`, `scores.security`, `scores.functional`, `scores.comparative`, `scores.compliance`
+- `scores.structure`, `scores.trigger`, `scores.security`, `scores.functional`, `scores.comparative`, `scores.compliance`: each value must be only the final integer score from 0 to 10
 - `overall_score`, `verdict`, `weakest_dimension`
-- `suggestions`
 - `metadata`: include `evaluated_at`, `evaluator: "skill-compass"`, and `packaged_path` when available
 
-The JSON output must contain only fields allowed by `{baseDir}/schemas/eval-result.json`. Do not add comparison fields such as `previous_score`, `before_score`, `after_score`, `delta`, or `improvement` anywhere in the JSON, including `metadata`, score objects, and `suggestions`.
+Each field must use the type and value constraints declared in the schema. Under `scores`, save only the six dimension score numbers; each score value must be an integer, not an object, array, string, or diagnostic record. `verdict` and `weakest_dimension` must use the allowed enum values, and `metadata.evaluator` must be exactly `"skill-compass"`.
+
+The JSON output must contain only fields allowed by `{baseDir}/schemas/eval-result.json`. Do not add `suggestions` or comparison fields such as `previous_score`, `before_score`, `after_score`, `delta`, or `improvement` anywhere in the JSON.
+
+### Strict JSON Serialization
+
+`static_report.json` must be saved as strict parseable JSON on disk, not as a Markdown example or a loose JavaScript/Python object. The adapter reads this file with a JSON parser, so any invalid character, missing comma, trailing comma, or unescaped quote makes the report unusable.
+
+- The file must contain one complete JSON object only. Do not wrap it in Markdown fences, explanatory text, comments, or partial snippets.
+- Use strict JSON syntax: double-quoted property names, double-quoted string values, lowercase `true`/`false`/`null`, commas between all object properties and array items, and no trailing commas.
+- Escape every double quote, backslash, and control character inside string values according to JSON rules. When human-readable text needs quoted phrases, prefer single quotes inside the string or escape double quotes as `\"`.
+- Do not use Python/JavaScript-only syntax such as `True`, `False`, `None`, `undefined`, single-quoted strings, comments, or unquoted keys.
+- Before writing the final file, mentally parse each object and array boundary to ensure every `{`, `}`, `[`, `]`, `:`, and `,` is in a valid position.
 
 ## Markdown Summary
 

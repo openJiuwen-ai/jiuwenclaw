@@ -13,7 +13,6 @@
     "overall_score",
     "verdict",
     "weakest_dimension",
-    "suggestions",
     "metadata"
   ],
   "properties": {
@@ -36,43 +35,8 @@
         "trigger": { "$ref": "#/$defs/dimensionScore" },
         "functional": { "$ref": "#/$defs/dimensionScore" },
         "comparative": { "$ref": "#/$defs/dimensionScore" },
-        "security": {
-          "type": "object",
-          "additionalProperties": false,
-          "required": ["score", "max", "pass", "findings", "tools_used"],
-          "properties": {
-            "score": { "type": "integer", "minimum": 0, "maximum": 10 },
-            "max": { "type": "integer", "const": 10 },
-            "pass": { "type": "boolean" },
-            "findings": { "type": "array", "items": { "type": "object" } },
-            "tools_used": { "type": "array", "items": { "type": "string" } },
-            "details": { "type": "string" },
-            "metadata": { "type": "object" }
-          }
-        },
-        "compliance": {
-          "type": "object",
-          "additionalProperties": false,
-          "required": ["score", "max", "pass", "details", "sub_scores", "issues"],
-          "properties": {
-            "score": { "type": "integer", "minimum": 0, "maximum": 10 },
-            "max": { "type": "integer", "const": 10 },
-            "pass": { "type": "boolean" },
-            "details": { "type": "string" },
-            "sub_scores": {
-              "type": "object",
-              "additionalProperties": false,
-              "properties": {
-                "name": { "type": "number", "minimum": 0, "maximum": 10 },
-                "description": { "type": "number", "minimum": 0, "maximum": 10 },
-                "body": { "type": "number", "minimum": 0, "maximum": 10 }
-              }
-            },
-            "issues": { "type": "array", "items": { "type": "object" } },
-            "tools_used": { "type": "array", "items": { "type": "string" } },
-            "metadata": { "type": "object" }
-          }
-        }
+        "security": { "$ref": "#/$defs/dimensionScore" },
+        "compliance": { "$ref": "#/$defs/dimensionScore" }
       }
     },
     "overall_score": { "type": "integer", "minimum": 0, "maximum": 100 },
@@ -80,19 +44,6 @@
     "weakest_dimension": {
       "type": "string",
       "enum": ["structure", "trigger", "security", "functional", "comparative", "compliance"]
-    },
-    "suggestions": {
-      "type": "array",
-      "items": {
-        "type": "object",
-        "additionalProperties": false,
-        "required": ["dimension", "score", "suggestion"],
-        "properties": {
-          "dimension": { "type": "string" },
-          "score": { "type": "integer", "minimum": 0, "maximum": 10 },
-          "suggestion": { "type": "string" }
-        }
-      }
     },
     "metadata": {
       "type": "object",
@@ -107,17 +58,9 @@
   },
   "$defs": {
     "dimensionScore": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["score", "max", "details"],
-      "properties": {
-        "score": { "type": "integer", "minimum": 0, "maximum": 10 },
-        "max": { "type": "integer", "const": 10 },
-        "details": { "type": "string" },
-        "sub_scores": { "type": "object" },
-        "issues": { "type": "array", "items": { "type": "object" } },
-        "metadata": { "type": "object" }
-      }
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 10
     }
   }
 }
