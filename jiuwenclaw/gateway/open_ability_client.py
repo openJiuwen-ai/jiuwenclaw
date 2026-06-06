@@ -55,6 +55,14 @@ def _to_json(data: Any) -> str:
         return repr(data)
 
 
+def _frame_size(frame: Any) -> int | str:
+    if isinstance(frame, str):
+        return len(frame.encode("utf-8"))
+    if isinstance(frame, bytes):
+        return len(frame)
+    return "n/a"
+
+
 def _build_ws_origin(uri: str) -> str | None:
     try:
         parsed = urlsplit(uri)
@@ -216,6 +224,12 @@ class OpenAbilityWebSocketClient(AgentServerClient):
                             frame_preview = list(raw.keys())[:8]
                         else:
                             frame_preview = type(raw).__name__
+                        logger.info(
+                            "[E2A][oa][recv] sandbox_id=%s request_id=n/a frame_type=%s bytes=%s decode=fail",
+                            self._sandbox_id,
+                            type(raw).__name__,
+                            _frame_size(raw),
+                        )
                         logger.warning(
                             "%s 入站帧解包失败: %s frame_preview=%s",
                             _LOG_LABEL,
@@ -223,6 +237,14 @@ class OpenAbilityWebSocketClient(AgentServerClient):
                             frame_preview,
                         )
                         continue
+                    request_id = _wire_request_id_key(data.get("request_id"))
+                    logger.info(
+                        "[E2A][oa][recv] sandbox_id=%s request_id=%s frame_type=%s bytes=%s decode=ok",
+                        self._sandbox_id,
+                        request_id or "n/a",
+                        type(raw).__name__,
+                        _frame_size(raw),
+                    )
                     meta = data.get("metadata")
                     if isinstance(meta, dict) and meta.get(E2A_WIRE_SERVER_PUSH_KEY):
                         if self._on_server_push is not None:
@@ -236,7 +258,6 @@ class OpenAbilityWebSocketClient(AgentServerClient):
                         continue
                     if self._dispatch_link_heartbeat(data):
                         continue
-                    request_id = _wire_request_id_key(data.get("request_id"))
                     async with self._queue_lock:
                         if request_id in self._cancelled_request_ids:
                             logger.debug(
@@ -247,6 +268,12 @@ class OpenAbilityWebSocketClient(AgentServerClient):
                             continue
                         if request_id and request_id in self._message_queues:
                             await self._message_queues[request_id].put(data)
+                            logger.info(
+                                "[E2A][oa][queued] sandbox_id=%s request_id=%s qsize=%s",
+                                self._sandbox_id,
+                                request_id,
+                                self._message_queues[request_id].qsize(),
+                            )
                         else:
                             logger.debug(
                                 "%s 收到无目标队列的消息: request_id=%s",
