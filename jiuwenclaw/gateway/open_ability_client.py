@@ -407,6 +407,7 @@ class OpenAbilityWebSocketClient(AgentServerClient):
                 chunk = parse_agent_server_wire_chunk(data)
                 payload = chunk.payload if isinstance(chunk.payload, dict) else {}
                 event_type = str(payload.get("event_type") or "").strip() or "n/a"
+                sequence = getattr(chunk, "sequence", "n/a")
                 logger.info(
                     "[E2A][oa][stream][in] sandbox_id=%s session_id=%s request_id=%s "
                     "method=%s event_type=%s sequence=%s is_complete=%s",
@@ -415,7 +416,7 @@ class OpenAbilityWebSocketClient(AgentServerClient):
                     rid,
                     envelope.method,
                     event_type,
-                    chunk.sequence,
+                    sequence,
                     chunk.is_complete,
                 )
                 yield chunk
