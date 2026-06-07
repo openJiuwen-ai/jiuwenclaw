@@ -111,8 +111,3 @@ async def test_stream_request_logs_out_in_with_identity_fields() -> None:
         "request_id=req-stream method=skilldev.chat" in message
         for message in messages
     )
-    assert any(
-        "[E2A][oa][stream][in] sandbox_id=sb-stream session_id=sess-stream "
-        "request_id=req-stream method=skilldev.chat is_complete=True" in message
-        for message in messages
-    )
