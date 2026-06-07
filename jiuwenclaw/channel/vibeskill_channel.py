@@ -28,6 +28,10 @@ from jiuwenclaw.channel.vibeskill_session import (
 from jiuwenclaw.channel.vibeskill_session_dcs_store import VibeSkillSessionDcsStore
 
 from jiuwenclaw.channel.vibeskill_file_utils import skilldev_tree_to_file_tree_nodes
+from jiuwenclaw.agentserver.skilldev.session_history.restore_chunks import (
+    RestoreChunkDecodeError,
+    decode_restore_payload_from_stream,
+)
 from jiuwenclaw.schema.message import Message, ReqMethod
 from jiuwenclaw.utils import SafeRotatingFileHandler, SensitiveDataFilter
 
@@ -3724,30 +3728,23 @@ class VibeSkillChannel(BaseChannel):
                 session_id=session_id,
                 req_method=ReqMethod.SKILLDEV_RESTORE,
                 params=restore_params,
-                is_stream=False,
+                is_stream=True,
                 timestamp=time.time(),
                 user_id=self._session_user_id(session_id),
             )
 
-            resp = await self._send_agent_request(env)
-            if not resp:
-                return self._json_response(502, {"error": "agent request failed"})
-
-            # 检查 agentserver 是否返回错误
-            if not getattr(resp, "ok", True):
-                error_payload = getattr(resp, "payload", None) or {}
-                if isinstance(error_payload, dict):
-                    error_msg = error_payload.get("error", "unknown_error")
-                else:
-                    error_msg = str(error_payload)
-                logger.info(
-                    "[VibeSkillChannel] skilldev.restore error: session_id=%s error=%s",
-                    session_id,
-                    error_msg,
+            try:
+                payload = await decode_restore_payload_from_stream(
+                    self._agent_client.send_request_stream(env)
                 )
-                return self._json_response(500, {"error": error_msg})
-
-            payload = getattr(resp, "payload", None) if hasattr(resp, "payload") else None
+            except RestoreChunkDecodeError as exc:
+                logger.info(
+                    "[VibeSkillChannel] skilldev.restore stream error: session_id=%s code=%s error=%s",
+                    session_id,
+                    exc.code,
+                    exc,
+                )
+                return self._json_response(500, {"error": str(exc), "code": exc.code})
 
             if not payload:
                 # skilldev.restore 返回空，检查 session 是否存在

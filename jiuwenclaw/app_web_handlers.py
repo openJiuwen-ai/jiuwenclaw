@@ -51,6 +51,10 @@ from jiuwenclaw.utils import (
     get_agent_sessions_dir,
     get_multi_tenant_user_workspace_dir,
 )
+from jiuwenclaw.agentserver.skilldev.session_history.restore_chunks import (
+    RestoreChunkDecodeError,
+    decode_restore_payload_from_stream,
+)
 from jiuwenclaw.version import __version__
 from jiuwenclaw.local_env_config import decrypt, encrypt
 
@@ -135,7 +139,6 @@ _FORWARD_REQ_METHODS = frozenset({
     "skilldev.respond",
     "skilldev.status",
     "skilldev.session.list",
-    "skilldev.restore",
     "skilldev.parse_skill",
     "skilldev.download",
     "skilldev.cancel",
@@ -181,7 +184,6 @@ _FORWARD_NO_LOCAL_HANDLER_METHODS = frozenset({
     "skilldev.respond",
     "skilldev.status",
     "skilldev.session.list",
-    "skilldev.restore",
     "skilldev.parse_skill",
     "skilldev.download",
     "skilldev.file.list",
@@ -1286,6 +1288,72 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             payload["task_id"] = task_id
         await channel.send_response(ws, req_id, ok=True, payload=payload)
 
+    async def _skilldev_restore(ws, req_id, params, session_id):
+        ac = _resolve(agent_client)
+        if ac is None or (
+            hasattr(ac, "server_ready") and not getattr(ac, "server_ready", False)
+        ):
+            await channel.send_response(
+                ws,
+                req_id,
+                ok=False,
+                error="agent server is not ready",
+                code="AGENT_NOT_READY",
+            )
+            return
+
+        restore_params = dict(params) if isinstance(params, dict) else {}
+        task_id = str(restore_params.get("task_id") or session_id or "").strip()
+        if not task_id:
+            await channel.send_response(
+                ws,
+                req_id,
+                ok=False,
+                error="task_id is required",
+                code="BAD_REQUEST",
+            )
+            return
+        restore_params["task_id"] = task_id
+
+        try:
+            from jiuwenclaw.e2a.gateway_normalize import e2a_from_agent_fields
+            from jiuwenclaw.schema.message import ReqMethod
+
+            env = e2a_from_agent_fields(
+                request_id=str(req_id) if req_id else "",
+                channel_id=channel.channel_id,
+                session_id=task_id,
+                req_method=ReqMethod.SKILLDEV_RESTORE,
+                params=restore_params,
+                is_stream=True,
+                timestamp=time.time(),
+            )
+            payload = await decode_restore_payload_from_stream(
+                ac.send_request_stream(env)
+            )
+        except RestoreChunkDecodeError as exc:
+            logger.info("[skilldev.restore] stream decode failed: code=%s error=%s", exc.code, exc)
+            await channel.send_response(
+                ws,
+                req_id,
+                ok=False,
+                error=str(exc),
+                code=exc.code,
+            )
+            return
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("[skilldev.restore] forward to agent failed: %s", exc)
+            await channel.send_response(
+                ws,
+                req_id,
+                ok=False,
+                error=str(exc),
+                code="INTERNAL_ERROR",
+            )
+            return
+
+        await channel.send_response(ws, req_id, ok=True, payload=payload)
+
     async def _chat_user_answer(ws, req_id, params, session_id):
         payload = {"accepted": True, "session_id": session_id}
         request_id = params.get("request_id") if isinstance(params, dict) else None
@@ -2056,6 +2124,7 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
     channel.register_method("chat.resume", _chat_resume)
     channel.register_method("chat.interrupt", _chat_interrupt)
     channel.register_method("skilldev.cancel", _skilldev_cancel)
+    channel.register_method("skilldev.restore", _skilldev_restore)
     channel.register_method("chat.user_answer", _chat_user_answer)
     channel.register_method("skilldev.user_answer", _skilldev_user_answer)
     channel.register_method("history.get", _history_get)

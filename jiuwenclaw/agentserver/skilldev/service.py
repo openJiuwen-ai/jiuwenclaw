@@ -45,6 +45,12 @@ from jiuwenclaw.agentserver.skilldev.schema import (
 )
 from jiuwenclaw.agentserver.skilldev.common_utils import safe_extract_zip, repack_skill_dir
 from jiuwenclaw.agentserver.skilldev.stages.validate_stage import parse_skill_frontmatter
+from jiuwenclaw.agentserver.skilldev.session_history.restore_chunks import (
+    RESTORE_RESPONSE_TOO_LARGE_CODE,
+    RESTORE_UNARY_SAFE_BYTES,
+    encode_restore_payload_chunks,
+    restore_payload_to_json_bytes,
+)
 from jiuwenclaw.agentserver.skilldev.utils.download_file_from_url import download_file
 
 
@@ -97,7 +103,16 @@ class SkillDevService:
             return
 
         handler = getattr(self, handler_name)
-        result = handler(request.params, request.request_id, request.channel_id, request.session_id)
+        if handler_name == "_handle_restore":
+            result = handler(
+                request.params,
+                request.request_id,
+                request.channel_id,
+                request.session_id,
+                request.is_stream,
+            )
+        else:
+            result = handler(request.params, request.request_id, request.channel_id, request.session_id)
 
         if inspect.isasyncgen(result):
             async for chunk in result:
@@ -465,21 +480,64 @@ class SkillDevService:
             is_complete=True,
         )
 
-    def _handle_restore(
-        self, params: dict, request_id: str, channel_id: str, session_id: str
-    ) -> AgentResponseChunk:
+    async def _handle_restore(
+        self,
+        params: dict,
+        request_id: str,
+        channel_id: str,
+        session_id: str,
+        is_stream: bool = False,
+    ) -> AsyncIterator[AgentResponseChunk]:
         if self._deps.session_history is None:
-            return self._error_chunk(request_id, channel_id, "session history service is unavailable")
+            yield self._error_chunk(request_id, channel_id, "session history service is unavailable")
+            return
         task_id = str(params.get("task_id") or "").strip()
         if not task_id:
-            return self._error_chunk(request_id, channel_id, "缺少 task_id 参数")
+            yield self._error_chunk(request_id, channel_id, "缺少 task_id 参数")
+            return
         restored = self._deps.session_history.restore_session(task_id)
         if restored is None:
-            return self._error_chunk(request_id, channel_id, f"任务 {task_id} 不存在")
-        return AgentResponseChunk(
+            yield self._error_chunk(request_id, channel_id, f"任务 {task_id} 不存在")
+            return
+        payload = {"ok": True, **restored}
+        if is_stream:
+            for chunk in encode_restore_payload_chunks(
+                payload,
+                request_id=request_id,
+                channel_id=channel_id,
+                task_id=task_id,
+            ):
+                yield chunk
+            yield AgentResponseChunk(
+                request_id=request_id,
+                channel_id=channel_id,
+                payload={"is_complete": True},
+                is_complete=True,
+            )
+            return
+
+        payload_bytes = restore_payload_to_json_bytes(payload)
+        if len(payload_bytes) > RESTORE_UNARY_SAFE_BYTES:
+            yield AgentResponseChunk(
+                request_id=request_id,
+                channel_id=channel_id,
+                payload={
+                    "event_type": "skilldev.error",
+                    "code": RESTORE_RESPONSE_TOO_LARGE_CODE,
+                    "error": (
+                        "skilldev.restore response is too large for a unary frame; "
+                        "retry with is_stream=true"
+                    ),
+                    "size_bytes": len(payload_bytes),
+                    "max_unary_bytes": RESTORE_UNARY_SAFE_BYTES,
+                },
+                is_complete=True,
+            )
+            return
+        yield AgentResponseChunk(
             request_id=request_id,
             channel_id=channel_id,
-            payload={"ok": True, **restored},
+            payload=payload,
             is_complete=True,
         )
 
