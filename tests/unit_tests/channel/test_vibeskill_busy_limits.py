@@ -6,7 +6,8 @@ from typing import Any
 import pytest
 
 from jiuwenclaw.channel.vibeskill_channel import VibeSkillChannel, VibeSkillConfig
-from jiuwenclaw.channel.vibeskill_session import VibeSkillSessionState
+from jiuwenclaw.channel.vibeskill_session import VIBESKILL_CHANNEL_ID, VibeSkillSessionState
+from jiuwenclaw.schema.message import Message
 
 
 class FakeRouter:
@@ -131,6 +132,60 @@ async def test_message_send_prefers_user_limit_when_both_limits_match(channel_fa
     assert router.delivered == []
     task_errors = _events(ws, "task.error")
     assert task_errors[-1]["properties"]["error"] == "用户最多可同时运行1个skill任务"
+
+
+@pytest.mark.asyncio
+async def test_skilldev_error_without_ws_releases_busy_session(channel_factory) -> None:
+    channel, _router = channel_factory(max_busy_sessions_user=1)
+    session = await channel._store.get_or_create(session_id="sid-failed", mode="SkillCreate")
+    await channel._store.set_metadata(session.session_id, {"user_id": "user-a"})
+    await channel._store.set_state(session.session_id, VibeSkillSessionState.BUSY)
+
+    await channel.send(
+        Message(
+            id="evt-1",
+            type="event",
+            channel_id=VIBESKILL_CHANNEL_ID,
+            session_id=session.session_id,
+            params={},
+            timestamp=0.0,
+            ok=True,
+            payload={"event_type": "skilldev.error", "error": "skill create failed"},
+        )
+    )
+
+    assert await channel._store.get_state(session.session_id) is VibeSkillSessionState.IDLE
+
+
+@pytest.mark.asyncio
+async def test_busy_limit_allows_new_task_after_skilldev_error_without_ws(channel_factory) -> None:
+    channel, router = channel_factory(max_busy_sessions_user=1)
+    failed = await channel._store.get_or_create(session_id="sid-failed", mode="SkillCreate")
+    current = await channel._store.get_or_create(session_id="sid-current", mode="SkillCreate")
+    await channel._store.set_metadata(failed.session_id, {"user_id": "user-a"})
+    await channel._store.set_metadata(current.session_id, {"user_id": "user-a"})
+    await channel._store.set_state(failed.session_id, VibeSkillSessionState.BUSY)
+
+    await channel.send(
+        Message(
+            id="evt-1",
+            type="event",
+            channel_id=VIBESKILL_CHANNEL_ID,
+            session_id=failed.session_id,
+            params={},
+            timestamp=0.0,
+            ok=True,
+            payload={"event_type": "skilldev.error", "error": "skill create failed"},
+        )
+    )
+
+    ws = FakeWebSocket()
+    handled = await channel._handle_message_send(ws, _message_send(current.session_id))
+
+    assert handled is True
+    assert len(router.delivered) == 1
+    assert await channel._store.get_state(current.session_id) is VibeSkillSessionState.BUSY
+    assert _events(ws, "task.error") == []
 
 
 @pytest.mark.asyncio

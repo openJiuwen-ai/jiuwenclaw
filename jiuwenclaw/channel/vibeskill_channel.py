@@ -710,6 +710,91 @@ class VibeSkillChannel(BaseChannel):
             except Exception as e:
                 logger.debug("[VibeSkillChannel] Error closing writer: %s", e)
 
+    async def _apply_outbound_session_state(self, msg: Message) -> None:
+        """终态出站事件须更新 session store，与北向 WS 是否仍可投递无关。
+
+        ``outbound_intercept`` 仅在 ``send()`` 找到可用 WS 时才会执行；skill 创建失败等场景下
+        客户端可能已断连或映射已清理，若不在此处兜底置 idle，会残留 ghost busy session，
+        进而触发 max_busy_sessions 限流。
+        """
+        if msg.type != "event" or not isinstance(msg.payload, dict):
+            return
+
+        session_id = str(msg.session_id or "").strip()
+        if not session_id:
+            return
+
+        event_type = str(msg.payload.get("event_type") or "").strip()
+        payload = msg.payload
+
+        try:
+            if event_type == "skilldev.error":
+                await self._store.set_state(session_id, VibeSkillSessionState.IDLE)
+                logger.info(
+                    "[VibeSkillChannel] session state -> idle, source=skilldev.error(no_ws), session_id=%s",
+                    session_id,
+                )
+                return
+
+            if event_type == "skilldev.agent_completed":
+                await self._store.set_state(session_id, VibeSkillSessionState.IDLE)
+                await self._store.set_exportable(session_id, False)
+                logger.info(
+                    "[VibeSkillChannel] session state -> idle, source=skilldev.agent_completed(no_ws), session_id=%s",
+                    session_id,
+                )
+                return
+
+            if event_type == "skilldev.completed":
+                await self._store.set_state(session_id, VibeSkillSessionState.COMPLETED)
+                await self._store.set_exportable(session_id, True)
+                logger.info(
+                    "[VibeSkillChannel] session state -> completed, source=skilldev.completed(no_ws), session_id=%s",
+                    session_id,
+                )
+                return
+
+            if event_type == "chat.error":
+                await self._store.set_state(session_id, VibeSkillSessionState.IDLE)
+                logger.info(
+                    "[VibeSkillChannel] session state -> idle, source=chat.error(no_ws), session_id=%s",
+                    session_id,
+                )
+                return
+
+            if event_type == "chat.final" or event_type in _CHAT_INTERRUPT_RESULT_EVENT_TYPES:
+                session_obj = await self._store.get_session(session_id)
+                if session_obj is None:
+                    return
+                intent = str(payload.get("intent") or "").strip().lower()
+                is_terminal = event_type == "chat.final" or intent in ("", "cancel")
+                if not is_terminal:
+                    return
+                if session_obj.mode == "Standard":
+                    await self._store.set_state(session_id, VibeSkillSessionState.IDLE)
+                    logger.info(
+                        "[VibeSkillChannel] session state -> idle, source=%s(no_ws), session_id=%s",
+                        event_type,
+                        session_id,
+                    )
+                    return
+                if (
+                    session_obj.mode == "SkillCreate"
+                    and event_type == "chat.final"
+                    and await self._store.get_state(session_id) == VibeSkillSessionState.BUSY
+                ):
+                    await self._store.set_state(session_id, VibeSkillSessionState.IDLE)
+                    logger.info(
+                        "[VibeSkillChannel] session state -> idle, source=chat.final.skillcreate_cancel(no_ws), session_id=%s",
+                        session_id,
+                    )
+        except Exception:
+            logger.exception(
+                "[VibeSkillChannel] apply outbound session state failed, event_type=%s session_id=%s",
+                event_type,
+                session_id,
+            )
+
     async def send(self, msg: Message) -> None:
         """ChannelManager 分发的出站消息，推送给对应的 WebSocket client。"""
         session_id = str(msg.session_id or "").strip()
@@ -728,9 +813,11 @@ class VibeSkillChannel(BaseChannel):
         ws = self._session_to_ws.get(session_id)
         if ws is None:
             logger.warning(f"[VibeSkillChannel] send() no ws found for session_id={session_id}")
+            await self._apply_outbound_session_state(msg)
             return
         if bool(getattr(ws, "closed", False)):
             logger.warning(f"[VibeSkillChannel] send() ws already closed for session_id={session_id}")
+            await self._apply_outbound_session_state(msg)
             return
 
         # 使用 outbound_intercept 转换消息格式并推送
