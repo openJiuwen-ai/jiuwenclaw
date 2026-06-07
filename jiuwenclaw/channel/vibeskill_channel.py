@@ -3511,6 +3511,19 @@ class VibeSkillChannel(BaseChannel):
         if service_id:
             params["service_id"] = service_id
 
+    @staticmethod
+    def _is_restore_task_missing_error(exc: RestoreChunkDecodeError) -> bool:
+        """skilldev.restore 在尚无 checkpoint 时返回「任务 xxx 不存在」。"""
+        return "不存在" in str(exc)
+
+    async def _empty_session_messages_response(
+        self, session_id: str
+    ) -> tuple[int, dict, bytes]:
+        session_exists = await self._store.get_session(session_id) is not None
+        if not session_exists:
+            return self._json_response(404, {"error": "session_not_found"})
+        return self._json_response(200, {"total": 0, "messages": []})
+
     async def _send_agent_request(self, env) -> Any:
         """发送请求到 AgentServer 并返回响应。"""
         return await self._agent_client.send_request(env)
@@ -3738,6 +3751,15 @@ class VibeSkillChannel(BaseChannel):
                     self._agent_client.send_request_stream(env)
                 )
             except RestoreChunkDecodeError as exc:
+                if self._is_restore_task_missing_error(exc):
+                    session_obj = await self._store.get_session(session_id)
+                    if session_obj is not None:
+                        logger.info(
+                            "[VibeSkillChannel] skilldev.restore no checkpoint yet, "
+                            "returning empty messages: session_id=%s",
+                            session_id,
+                        )
+                        return self._json_response(200, {"total": 0, "messages": []})
                 logger.info(
                     "[VibeSkillChannel] skilldev.restore stream error: session_id=%s code=%s error=%s",
                     session_id,
@@ -3747,12 +3769,7 @@ class VibeSkillChannel(BaseChannel):
                 return self._json_response(500, {"error": str(exc), "code": exc.code})
 
             if not payload:
-                # skilldev.restore 返回空，检查 session 是否存在
-                session_exists = await self._store.get_session(session_id) is not None
-                if not session_exists:
-                    return self._json_response(404, {"error": "session_not_found"})
-                # Session 存在但没有历史，返回空列表
-                return self._json_response(200, {"total": 0, "messages": []})
+                return await self._empty_session_messages_response(session_id)
 
             # 转换 timeline_items 为 client 消息格式
             timeline_items = payload.get("timeline_items", []) if isinstance(payload, dict) else []
