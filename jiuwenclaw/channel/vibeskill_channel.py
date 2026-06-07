@@ -184,6 +184,9 @@ class VibeSkillConfig:
     # 兼容字段：显式设置后回退到双端口模式（废弃，后续大版本移除）
     http_port: int | None = None
     ws_port: int | None = None
+    # 单 gateway 内 VibeSkill message.send busy session 限流；None/<=0 表示不限流。
+    max_busy_sessions_user: int | None = None
+    max_busy_sessions: int | None = None
 
     def resolved_http_port(self) -> int:
         return self.http_port if self.http_port is not None else self.port
@@ -264,6 +267,90 @@ class VibeSkillChannel(BaseChannel):
     def _deliver_to_message_handler(self, msg: Message) -> None:
         channel_manager = cast("ChannelManager", self.bus)
         channel_manager.deliver_to_message_handler(msg)
+
+    @staticmethod
+    def _effective_busy_limit(limit: int | None) -> int | None:
+        if limit is None or limit <= 0:
+            return None
+        return limit
+
+    @staticmethod
+    def _busy_session_owner_id(session: VibeSkillSession) -> str:
+        user_id = str((session.metadata or {}).get("user_id") or "").strip()
+        return user_id or str(session.session_id or "").strip()
+
+    async def _busy_limit_error_for_message_send(
+        self,
+        *,
+        session: VibeSkillSession,
+        user_id: str | None,
+    ) -> str | None:
+        user_limit = self._effective_busy_limit(self.config.max_busy_sessions_user)
+        gateway_limit = self._effective_busy_limit(self.config.max_busy_sessions)
+        if user_limit is None and gateway_limit is None:
+            return None
+
+        current_user_id = str(user_id or "").strip() or str(session.session_id or "").strip()
+        sessions = await self._store.list_sessions()
+        busy_sessions = [
+            item for item in sessions
+            if item.state == VibeSkillSessionState.BUSY
+        ]
+
+        if user_limit is not None:
+            user_busy_count = sum(
+                1
+                for item in busy_sessions
+                if self._busy_session_owner_id(item) == current_user_id
+            )
+            if user_busy_count >= user_limit:
+                logger.warning(
+                    "[VibeSkillChannel] busy session user limit exceeded: "
+                    "user_id=%s session_id=%s busy_count=%d limit=%d",
+                    current_user_id,
+                    session.session_id,
+                    user_busy_count,
+                    user_limit,
+                )
+                return f"用户最多可同时运行{user_limit}个skill任务"
+
+        if gateway_limit is not None and len(busy_sessions) >= gateway_limit:
+            logger.warning(
+                "[VibeSkillChannel] busy session gateway limit exceeded: "
+                "session_id=%s busy_count=%d limit=%d",
+                session.session_id,
+                len(busy_sessions),
+                gateway_limit,
+            )
+            return "服务端繁忙，请稍后再试"
+
+        return None
+
+    async def _send_message_send_busy_limit_error(
+        self,
+        ws: Any,
+        data: dict[str, Any],
+        *,
+        session: VibeSkillSession,
+        external_sid: str | None,
+        error_text: str,
+    ) -> None:
+        for response in self._build_error_responses(
+            session.session_id,
+            external_sid,
+            error_text,
+        ):
+            await self._send_ws_json(
+                ws,
+                response,
+                source="message.send.busy_limit",
+            )
+        await self._send_ws_res_error(
+            ws,
+            data,
+            error_text,
+            source="message.send.busy_limit_ack",
+        )
 
     async def start(self) -> None:
         if self._running:
@@ -870,6 +957,25 @@ class VibeSkillChannel(BaseChannel):
         if session_user_id and not self._store.get_user_id(session.session_id):
             await self._store.set_metadata(session.session_id, {"user_id": session_user_id})
 
+        external_sid = (
+            session_id
+            or await self._resolve_external_session_id(session.session_id)
+            or session.session_id
+        )
+        busy_limit_error = await self._busy_limit_error_for_message_send(
+            session=session,
+            user_id=session_user_id,
+        )
+        if busy_limit_error is not None:
+            await self._send_message_send_busy_limit_error(
+                ws,
+                data,
+                session=session,
+                external_sid=external_sid,
+                error_text=busy_limit_error,
+            )
+            return True
+
         # 根据 session mode 路由
         if session.mode == "Standard":
             return await self._handle_chat_message(ws, data, session, session_id)
@@ -885,11 +991,7 @@ class VibeSkillChannel(BaseChannel):
         )
         await self._emit_session_status(
             ws=ws,
-            external_sid=(
-                session_id
-                or await self._resolve_external_session_id(session.session_id)
-                or session.session_id
-            ),
+            external_sid=external_sid,
             status_type=VibeSkillSessionState.BUSY.value,
         )
 

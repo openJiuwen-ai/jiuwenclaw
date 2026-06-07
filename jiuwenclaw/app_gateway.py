@@ -1103,6 +1103,8 @@ async def _run(
         port=_vibeskill_port,
         http_port=_env_int("VIBESKILL_HTTP_PORT"),
         ws_port=_env_int("VIBESKILL_WS_PORT"),
+        max_busy_sessions_user=_env_int("MAX_BUSY_SESSIONS_USER"),
+        max_busy_sessions=_env_int("MAX_BUSY_SESSIONS"),
     )
     vibeskill_channel = VibeSkillChannel(
         config=_vibeskill_config,
