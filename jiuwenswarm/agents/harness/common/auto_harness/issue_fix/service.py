@@ -114,12 +114,12 @@ class IssueFixService:
                 numbers.append(number)
         return tuple(numbers)
 
-    async def watch_gitcode_issues_once(
+    async def process_gitcode_issues_once(
         self,
         params: dict[str, Any],
         model: Optional[Model] = None,
     ) -> dict[str, Any]:
-        """Run one GitCode issue ingestion pass and create auto-harness tasks."""
+        """Process GitCode issues once and create auto-harness tasks."""
         del model
         token = self._resolve_access_token(params)
         if not token:
@@ -182,7 +182,7 @@ class IssueFixService:
             state_store=self._issue_state_store,
             harness_service=self._harness_service,
         )
-        return await runner.watch_once(options)
+        return await runner.process_issues_once(options)
 
     async def list_gitcode_issue_states(self) -> dict[str, Any]:
         issues = []

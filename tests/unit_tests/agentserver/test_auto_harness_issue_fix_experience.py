@@ -8,7 +8,7 @@ from jiuwenswarm.agents.harness.common.auto_harness.issue_fix.issue_runner impor
 )
 from jiuwenswarm.agents.harness.common.auto_harness.issue_fix.issue_state_store import IssueStateStore
 from jiuwenswarm.agents.harness.common.auto_harness.issue_fix.task_factory import (
-    build_issue_fix_task_from_query,
+    build_issue_fix_task,
 )
 from jiuwenswarm.agents.harness.common.auto_harness.progress import determine_pipeline_status_from_log
 from jiuwenswarm.agents.harness.common.auto_harness.task_store import TaskStore
@@ -45,9 +45,11 @@ class _FakeClient:
 class _FakeHarnessService:
     def __init__(self):
         self.queries = []
+        self.optimization_tasks = []
 
-    async def run_task(self, query: str, model=None, pipeline=None):
+    async def run_task(self, query: str, model=None, pipeline=None, optimization_task=None):
         self.queries.append(query)
+        self.optimization_tasks.append(optimization_task)
         return {"task_id": "sch_fake", "message": "started"}
 
     async def get_scheduled_task_status(self, task_id: str):
@@ -70,7 +72,7 @@ def test_assess_issue_difficulty_marks_unclear_or_high_for_human():
     assert result["level"] in {"high", "unclear"}
 
 
-def test_watch_once_skips_hard_issue_as_needs_human(tmp_path: Path):
+def test_process_issues_once_skips_hard_issue_as_needs_human(tmp_path: Path):
     hard_issue = _issue(
         494,
         "MCP 支持前端配置",
@@ -85,7 +87,7 @@ def test_watch_once_skips_hard_issue_as_needs_human(tmp_path: Path):
     )
 
     result = asyncio.run(
-        runner.watch_once(
+        runner.process_issues_once(
             IssueWatchOptions(
                 owner="openJiuwen",
                 repo="jiuwenswarm",
@@ -102,7 +104,7 @@ def test_watch_once_skips_hard_issue_as_needs_human(tmp_path: Path):
     assert service.queries == []
 
 
-def test_watch_once_starts_medium_or_lower_issue(tmp_path: Path):
+def test_process_issues_once_starts_medium_or_lower_issue(tmp_path: Path):
     easy_issue = _issue(
         1266,
         "InstanceLock.release Windows NameError",
@@ -117,7 +119,7 @@ def test_watch_once_starts_medium_or_lower_issue(tmp_path: Path):
     )
 
     result = asyncio.run(
-        runner.watch_once(
+        runner.process_issues_once(
             IssueWatchOptions(
                 owner="openJiuwen",
                 repo="jiuwenswarm",
@@ -130,6 +132,7 @@ def test_watch_once_starts_medium_or_lower_issue(tmp_path: Path):
 
     assert result["started"][0]["task_id"] == "sch_fake"
     assert "GitCode Issue #1266" in service.queries[0]
+    assert service.optimization_tasks[0].issue_ref == "#1266"
 
 
 def test_task_progress_extracts_pr_and_failure_code():
@@ -160,9 +163,8 @@ def test_task_progress_extracts_pr_and_failure_code():
 
 
 def test_issue_fix_task_factory_preserves_issue_ref():
-    task = build_issue_fix_task_from_query("请自动修复 GitCode Issue #1272。\n标题: demo")
+    task = build_issue_fix_task(1272, "请自动修复 GitCode Issue #1272。\n标题: demo")
 
-    assert task is not None
     assert task.topic == "fix-issue-1272"
     assert task.issue_ref == "#1272"
 

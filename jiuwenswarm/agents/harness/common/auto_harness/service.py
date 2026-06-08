@@ -64,7 +64,6 @@ from .scheduler import Scheduler
 from .task_store import TaskStore
 from .config_validator import ConfigValidator
 from .issue_fix import IssueFixService, IssueStateStore
-from .issue_fix.task_factory import build_issue_fix_task_from_query
 
 logger = logging.getLogger(__name__)
 
@@ -81,11 +80,39 @@ _DEFAULT_CI_GATE_PYTHON_EXECUTABLE = sys.executable
 _DEFAULT_CI_GATE_INSTALL_COMMAND = "uv sync --active --group dev --extra cli"
 
 
-def _build_auto_harness_task_from_query(query: str) -> OptimizationTask:
-    """Build a structured auto-harness task from a user query."""
-    issue_task = build_issue_fix_task_from_query(query)
-    if issue_task is not None:
-        return issue_task
+def _serialize_optimization_task(task: OptimizationTask | dict[str, Any]) -> dict[str, Any]:
+    """Serialize an explicit optimization task into scheduler-safe metadata."""
+    if isinstance(task, OptimizationTask):
+        status = getattr(task.status, "value", task.status)
+        return {
+            "topic": task.topic,
+            "description": task.description,
+            "files": list(task.files or []),
+            "issue_ref": task.issue_ref,
+            "expected_effect": task.expected_effect,
+            "pipeline_name": task.pipeline_name,
+            "status": status,
+        }
+    return dict(task)
+
+
+def _build_auto_harness_task(query: str, payload: Optional[dict[str, Any]] = None) -> OptimizationTask:
+    """Build the auto-harness task for a run.
+
+    Ordinary queries become plain tasks. Scenario-specific callers can pass an
+    explicit payload so the main auto-harness flow does not infer task type from
+    natural-language query text.
+    """
+    if payload:
+        return OptimizationTask(
+            topic=str(payload.get("topic") or query),
+            description=str(payload.get("description") or query),
+            files=list(payload.get("files") or []),
+            issue_ref=payload.get("issue_ref") or None,
+            expected_effect=str(payload.get("expected_effect") or ""),
+            pipeline_name=str(payload.get("pipeline_name") or ""),
+            status=payload.get("status") or "pending",
+        )
     return OptimizationTask(
         topic=query,
         description=query,
@@ -423,17 +450,25 @@ class AutoHarnessService:
 
         return result
 
+    async def process_gitcode_issues_once(
+        self,
+        params: dict[str, Any],
+        model: Optional[Model] = None,
+    ) -> dict[str, Any]:
+        """Delegate one GitCode issue processing pass to the issue-fix capability."""
+        if self._issue_fix_service is None:
+            self._init_scheduler()
+        if self._issue_fix_service is None:
+            return {"error": "issue 修复服务未初始化"}
+        return await self._issue_fix_service.process_gitcode_issues_once(params, model)
+
     async def watch_gitcode_issues_once(
         self,
         params: dict[str, Any],
         model: Optional[Model] = None,
     ) -> dict[str, Any]:
-        """Delegate GitCode issue ingestion to the issue-fix capability."""
-        if self._issue_fix_service is None:
-            self._init_scheduler()
-        if self._issue_fix_service is None:
-            return {"error": "issue 修复服务未初始化"}
-        return await self._issue_fix_service.watch_gitcode_issues_once(params, model)
+        """Compatibility entry for the existing issue.watch_once RPC command."""
+        return await self.process_gitcode_issues_once(params, model)
 
     async def list_gitcode_issue_states(self) -> dict[str, Any]:
         """Delegate issue state listing to the issue-fix capability."""
@@ -1432,11 +1467,11 @@ class AutoHarnessService:
                 pipeline_preference=pipeline_preference
             )
 
-            # Build optimization task from query.
-            # Explicit GitCode issue-fix tasks must keep a stable issue_ref so
-            # the meta pipeline can skip exploratory assess/plan and avoid
-            # parsing placeholder tasks from the agent's natural-language output.
-            tasks = [_build_auto_harness_task_from_query(query)]
+            # Build optimization task from explicit request metadata when a
+            # scenario provides one; otherwise keep ordinary query handling
+            # generic and free of scenario-specific parsing.
+            optimization_task_payload = params.get("optimization_task")
+            tasks = [_build_auto_harness_task(query, optimization_task_payload)]
 
             # Create orchestrator
             orchestrator = create_auto_harness_orchestrator(
@@ -2599,7 +2634,8 @@ class AutoHarnessService:
         self,
         query: str,
         model: Optional[Model] = None,
-        pipeline: Optional[str] = None
+        pipeline: Optional[str] = None,
+        optimization_task: Optional[OptimizationTask | dict[str, Any]] = None,
     ) -> dict[str, Any]:
         """Create and immediately execute a one-time task.
 
@@ -2611,6 +2647,7 @@ class AutoHarnessService:
             query: The optimization goal/task description
             model: Model configuration from JiuwenClaw
             pipeline: Pipeline preference (extended_evolve_pipeline or meta_evolve_pipeline)
+            optimization_task: Optional explicit task metadata for specialized callers
 
         Returns:
             {"task_id": str, "status": "running", "message": str}
@@ -2640,6 +2677,8 @@ class AutoHarnessService:
             "model_name": model_name,
             "pipeline": pipeline,  # Pipeline preference
         }
+        if optimization_task is not None:
+            task_data["optimization_task"] = _serialize_optimization_task(optimization_task)
 
         await self._task_store.add_task(task_data)
 

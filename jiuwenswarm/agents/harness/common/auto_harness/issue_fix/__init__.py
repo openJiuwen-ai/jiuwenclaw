@@ -6,11 +6,10 @@ from .gitcode_issue_client import GitCodeIssue, GitCodeIssueClient
 from .issue_runner import GitCodeIssueRunner, IssueWatchOptions
 from .issue_state_store import IssueStateStore
 from .service import IssueFixService
-from .task_factory import build_issue_fix_task_from_query, extract_gitcode_issue_number
+from .task_factory import build_issue_fix_task
 
 __all__ = [
-    "build_issue_fix_task_from_query",
-    "extract_gitcode_issue_number",
+    "build_issue_fix_task",
     "GitCodeIssue",
     "GitCodeIssueClient",
     "GitCodeIssueRunner",

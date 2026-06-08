@@ -16,12 +16,19 @@ from openjiuwen.auto_harness.pipelines import META_EVOLVE_PIPELINE
 
 from .gitcode_issue_client import GitCodeIssue, GitCodeIssueClient
 from .issue_state_store import IssueStateStore
+from .task_factory import build_issue_fix_task
 
 logger = logging.getLogger(__name__)
 
 
 class AutoHarnessTaskService(Protocol):
-    async def run_task(self, query: str, model: Any = None, pipeline: Optional[str] = None) -> dict[str, Any]:
+    async def run_task(
+        self,
+        query: str,
+        model: Any = None,
+        pipeline: Optional[str] = None,
+        optimization_task: Any = None,
+    ) -> dict[str, Any]:
         ...
 
     async def get_scheduled_task_status(self, task_id: str) -> Optional[dict[str, Any]]:
@@ -439,7 +446,7 @@ class GitCodeIssueRunner:
                 results.append(updated)
         return results
 
-    async def watch_once(self, options: IssueWatchOptions) -> dict[str, Any]:
+    async def process_issues_once(self, options: IssueWatchOptions) -> dict[str, Any]:
         """Fetch eligible issues and create one-time auto-harness tasks."""
 
         reconciled = await self.reconcile(options)
@@ -504,6 +511,7 @@ class GitCodeIssueRunner:
                 continue
 
             query = self.build_issue_fix_query(issue, owner=options.owner, repo=options.repo)
+            task = build_issue_fix_task(issue.number, query)
             if options.dry_run:
                 started.append({
                     "issue": issue.number,
@@ -526,7 +534,11 @@ class GitCodeIssueRunner:
                     "difficulty": assessment,
                 },
             )
-            result = await self._harness_service.run_task(query, pipeline=options.pipeline)
+            result = await self._harness_service.run_task(
+                query,
+                pipeline=options.pipeline,
+                optimization_task=task,
+            )
             updates = {
                 "status": "task_created",
                 "task_id": result.get("task_id"),

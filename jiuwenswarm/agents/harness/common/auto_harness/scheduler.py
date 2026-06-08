@@ -328,16 +328,20 @@ class Scheduler:
 
             # Resolve pipeline preference (use task's pipeline or default to META_EVOLVE_PIPELINE)
             pipeline_preference = pipeline if pipeline else META_EVOLVE_PIPELINE
+            params = {
+                "mode": "auto_harness",
+                "scheduled": True,
+                "pipeline_preference": pipeline_preference,
+            }
+            optimization_task = task.get("optimization_task")
+            if isinstance(optimization_task, dict):
+                params["optimization_task"] = optimization_task
 
             request = AgentRequest(
                 request_id=execution_id,
                 channel_id="tui",
                 session_id=session_id,
-                params={
-                    "mode": "auto_harness",
-                    "scheduled": True,
-                    "pipeline_preference": pipeline_preference,
-                },
+                params=params,
             )
 
             # Resolve model from jiuwenswarm config (same approach as interface_deep)
