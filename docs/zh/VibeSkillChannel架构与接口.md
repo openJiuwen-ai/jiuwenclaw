@@ -352,7 +352,7 @@ SkillDev 事件映射：
 | `skilldev.ask_user_question` | `question.asked` | 结构化澄清提问（`questions` 列表） |
 | `skilldev.confirm_request` | `review.asked` | 按 `confirm_type` 分流：`review` / `static_review` / `combined_review`；`properties.type` 与 `confirm_type` 一致，其余字段来自 `data` |
 | `skilldev.agent_completed` | `session.status` | 单轮 Agent 结束、等待用户确认，状态置为 idle，随后关闭北向 WS |
-| `skilldev.error` | `message.*` + `task.error` + `session.status` | 输出错误文本 part，状态置为 idle |
+| `skilldev.error` | `task.error` + `session.status` | 输出错误（由 `task.error.error` 承载），状态置为 idle |
 | `skilldev.completed` | `task.completed` + `session.status` | 状态置为 completed |
 
 通用 chat 事件映射（Standard 模式）：
@@ -361,7 +361,7 @@ SkillDev 事件映射：
 |------------------|----------|------|
 | `chat.delta` | `message.part.delta` | 标准对话流式增量 |
 | `chat.final` | `message.updated` + `task.completed` | 标准对话结束，Standard session 置为 idle |
-| `chat.error` | `message.updated`(error part) + `task.error` + `task.completed` + `session.status idle` | 错误收口；error 文本若过长会被截断为 `_CHAT_ERROR_MAX_TEXT_LEN` |
+| `chat.error` | `task.error` + `task.completed` + `session.status idle` | 错误收口；error 文本若过长会被截断为 `_CHAT_ERROR_MAX_TEXT_LEN` |
 | `chat.tool_call` | `message.part.updated`（tool part, status=running） | 工具调用开始；`tool_call.function.arguments` 若为 JSON 字符串会被解析进 `state.input` |
 | `chat.tool_result` | `message.part.updated`（tool part, status=completed/error） | 工具结果，含 `state.output`（来自 payload.result） |
 | `chat.ask_user_question` | `question.asked` | 结构化提问；Standard 模式登记 `dispatch="chat"`，后续 `question.replied` 经 `chat.user_answer` 回写 |

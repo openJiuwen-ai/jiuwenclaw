@@ -2924,18 +2924,18 @@ class VibeSkillChannel(BaseChannel):
         *,
         include_task_completed: bool = False,
     ) -> list[dict[str, Any]]:
-        """统一构造错误收口事件序列：``message.updated``（错误文本 part）+ ``task.error``
+        """统一构造错误收口事件序列：``task.error``
         [+ ``task.completed``] + ``session.status`` idle。
 
         - ``skilldev.error`` 通用错误收口（SkillCreate 模式）：不发 ``task.completed``，
           由后续 ``skilldev.completed`` / ``skilldev.agent_completed`` 自行收口；
         - ``chat.error``（Standard / 通用 chat 路径）：需要追加 ``task.completed`` 让前端
           spinner / busy 状态退出。
+
+        注意：这里刻意不再下发 `message.updated` / `message.part.updated`，
+        由 `task.error` / `res.error` / `session.status` 承担错误展示与收口，避免与 part 展示路径重复。
         """
         responses: list[dict[str, Any]] = []
-        responses.extend(
-            self._emit_skilldev_error_text_part(session_id, external_sid, error_text),
-        )
         responses.append({
             "type": "task.error",
             "properties": {
