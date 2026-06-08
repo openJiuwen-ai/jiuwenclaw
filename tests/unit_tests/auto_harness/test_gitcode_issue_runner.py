@@ -58,11 +58,10 @@ def _issue(number: int, labels: tuple[str, ...] = ("auto-harness",)) -> GitCodeI
         number=number,
         title=f"Issue {number}",
         body=(
-            "请修复 `jiuwenswarm/agents/harness/common/auto_harness/service.py` "
-            "中 issue 自动修复任务的状态处理问题。当前流程在明确的 "
-            "GitCode issue 输入下应创建独立任务、保持 issue 编号、并在 PR "
-            "正文里写明修改方案和验证结果。该问题影响范围较小，可以通过 "
-            "runner 单元测试覆盖。"
+            "please fix a clearly scoped bug in the local command parser. "
+            "The failure is reproducible with the existing unit test and "
+            "the expected change is limited to one implementation file and "
+            "one matching test file."
         ),
         html_url=f"https://gitcode.com/openJiuwen/jiuwenswarm/issues/{number}",
         labels=labels,

@@ -64,9 +64,7 @@ from jiuwenswarm.common.utils import get_user_workspace_dir
 from .scheduler import Scheduler
 from .task_store import TaskStore
 from .config_validator import ConfigValidator
-from .gitcode_issue_client import GitCodeIssueClient
-from .issue_runner import GitCodeIssueRunner, IssueWatchOptions
-from .issue_state_store import IssueStateStore
+from .issue_fix import IssueFixService, IssueStateStore
 
 logger = logging.getLogger(__name__)
 
@@ -236,6 +234,7 @@ class AutoHarnessService:
         self._task_store: Optional[TaskStore] = None
         self._config_validator: Optional[ConfigValidator] = None
         self._issue_state_store: Optional[IssueStateStore] = None
+        self._issue_fix_service: Optional[IssueFixService] = None
 
         # Initialize scheduler components
         self._init_scheduler()
@@ -377,6 +376,13 @@ class AutoHarnessService:
                 service=self,
                 task_store=self._task_store,
             )
+            self._issue_fix_service = IssueFixService(
+                task_store=self._task_store,
+                issue_state_store=self._issue_state_store,
+                harness_service=self,
+                base_config_getter=lambda: self._base_config,
+                default_repo_url=_DEFAULT_REPO_URL,
+            )
             logger.info("[AutoHarnessService] Scheduler components initialized")
         except Exception as e:
             logger.warning("[AutoHarnessService] Failed to init scheduler: %s", e)
@@ -434,175 +440,25 @@ class AutoHarnessService:
 
         return result
 
-    @staticmethod
-    def _parse_repo_owner_name(repo: str) -> tuple[str, str]:
-        """Parse owner/repo from a GitCode URL or owner/repo string."""
-        raw = str(repo or "").strip()
-        if not raw:
-            return ("", "")
-        cleaned = raw.rstrip("/")
-        if cleaned.endswith(".git"):
-            cleaned = cleaned[:-4]
-        parts = [part for part in cleaned.split("/") if part]
-        if len(parts) >= 2:
-            return (parts[-2], parts[-1])
-        return ("", "")
-
-    def _resolve_issue_watch_repo(self, params: dict[str, Any]) -> tuple[str, str]:
-        owner = str(params.get("owner") or "").strip()
-        repo = str(params.get("repo_name") or "").strip()
-        if owner and repo:
-            return (owner, repo)
-        repo_param = str(params.get("repo") or "").strip()
-        if repo_param:
-            parsed_owner, parsed_repo = self._parse_repo_owner_name(repo_param)
-            if parsed_owner and parsed_repo:
-                return (parsed_owner, parsed_repo)
-        repo_url = (
-            self._base_config.repo_url
-            if self._base_config and self._base_config.repo_url
-            else _DEFAULT_REPO_URL
-        )
-        return self._parse_repo_owner_name(repo_url)
-
-    def _resolve_gitcode_token(self, params: dict[str, Any]) -> str:
-        token = str(params.get("access_token") or "").strip()
-        if token:
-            return token
-        env_token = os.getenv("GITCODE_ACCESS_TOKEN")
-        if env_token:
-            return env_token.strip()
-        if self._base_config is not None:
-            try:
-                return str(self._base_config.resolve_gitcode_token() or "").strip()
-            except Exception:
-                pass
-        return ""
-
-    @staticmethod
-    def _coerce_str_tuple(value: Any, default: tuple[str, ...]) -> tuple[str, ...]:
-        if value is None:
-            return default
-        if isinstance(value, str):
-            return tuple(part.strip() for part in value.split(",") if part.strip())
-        if isinstance(value, list | tuple):
-            return tuple(str(part).strip() for part in value if str(part).strip())
-        return default
-
-    @staticmethod
-    def _coerce_int_tuple(value: Any) -> tuple[int, ...]:
-        if value is None:
-            return ()
-        raw_parts: list[Any]
-        if isinstance(value, str):
-            raw_parts = [part.strip() for part in value.replace("，", ",").split(",")]
-        elif isinstance(value, int):
-            raw_parts = [value]
-        elif isinstance(value, list | tuple):
-            raw_parts = list(value)
-        else:
-            return ()
-
-        numbers: list[int] = []
-        for part in raw_parts:
-            try:
-                number = int(part)
-            except (TypeError, ValueError):
-                continue
-            if number > 0 and number not in numbers:
-                numbers.append(number)
-        return tuple(numbers)
-
     async def watch_gitcode_issues_once(
         self,
         params: dict[str, Any],
         model: Optional[Model] = None,
     ) -> dict[str, Any]:
-        """Run one GitCode issue ingestion pass and create auto-harness tasks."""
-        if self._task_store is None or self._scheduler is None or self._issue_state_store is None:
+        """Delegate GitCode issue ingestion to the issue-fix capability."""
+        if self._issue_fix_service is None:
             self._init_scheduler()
-        if self._issue_state_store is None:
-            return {"error": "issue 状态存储未初始化"}
-
-        token = self._resolve_gitcode_token(params)
-        if not token:
-            return {"error": "缺少 GitCode Access Token，请配置 gitcode.access_token 或 GITCODE_ACCESS_TOKEN"}
-
-        owner, repo = self._resolve_issue_watch_repo(params)
-        if not owner or not repo:
-            return {"error": "无法解析 GitCode 仓库，请传入 repo=openJiuwen/jiuwenswarm"}
-
-        try:
-            max_issues = int(params.get("max_issues", 1))
-        except (TypeError, ValueError):
-            max_issues = 1
-        max_issues = max(1, min(max_issues, 5))
-
-        try:
-            per_page = int(params.get("per_page", 20))
-        except (TypeError, ValueError):
-            per_page = 20
-        per_page = max(1, min(per_page, 100))
-
-        pipeline = str(params.get("pipeline") or META_EVOLVE_PIPELINE)
-        issue_numbers = self._coerce_int_tuple(
-            params.get("issue_numbers")
-            or params.get("issues")
-            or params.get("issue")
-            or params.get("numbers")
-        )
-        if issue_numbers:
-            max_issues = len(issue_numbers)
-        try:
-            start_interval_seconds = float(params.get("start_interval_seconds", 0) or 0)
-        except (TypeError, ValueError):
-            start_interval_seconds = 0.0
-        if start_interval_seconds <= 0 and max_issues > 1:
-            # openjiuwen auto_harness currently uses second-level timestamps
-            # for some readonly worktree paths. Stagger immediate issue tasks
-            # to avoid "worktree already exists" collisions.
-            start_interval_seconds = 1.2
-        options = IssueWatchOptions(
-            owner=owner,
-            repo=repo,
-            issue_numbers=issue_numbers,
-            labels=self._coerce_str_tuple(params.get("labels"), ("auto-harness",)),
-            exclude_labels=self._coerce_str_tuple(
-                params.get("exclude_labels"),
-                ("blocked", "wontfix", "needs-discussion"),
-            ),
-            max_issues=max_issues,
-            per_page=per_page,
-            pipeline=pipeline,
-            comment_on_start=bool(params.get("comment_on_start", False)),
-            dry_run=bool(params.get("dry_run", False)),
-            start_interval_seconds=start_interval_seconds,
-            max_auto_difficulty=str(params.get("max_auto_difficulty") or "medium"),
-        )
-        client = GitCodeIssueClient(token=token)
-        runner = GitCodeIssueRunner(
-            client=client,
-            state_store=self._issue_state_store,
-            harness_service=self,
-        )
-        return await runner.watch_once(options)
+        if self._issue_fix_service is None:
+            return {"error": "issue 修复服务未初始化"}
+        return await self._issue_fix_service.watch_gitcode_issues_once(params, model)
 
     async def list_gitcode_issue_states(self) -> dict[str, Any]:
-        if self._issue_state_store is None:
+        """Delegate issue state listing to the issue-fix capability."""
+        if self._issue_fix_service is None:
             self._init_scheduler()
-        if self._issue_state_store is None:
+        if self._issue_fix_service is None:
             return {"issues": []}
-        issues = []
-        for issue in self._issue_state_store.list():
-            enriched = dict(issue)
-            task_id = str(enriched.get("task_id") or "")
-            if self._task_store is not None and task_id:
-                task = self._task_store.get_task(task_id)
-                if task is not None:
-                    enriched["task_status"] = task.get("status")
-                    enriched["progress"] = await self._task_store.summarize_task_progress(task)
-            issues.append(enriched)
-        return {"issues": issues}
+        return await self._issue_fix_service.list_gitcode_issue_states()
 
     @staticmethod
     def _extract_repo_name(repo_url: str) -> str:
