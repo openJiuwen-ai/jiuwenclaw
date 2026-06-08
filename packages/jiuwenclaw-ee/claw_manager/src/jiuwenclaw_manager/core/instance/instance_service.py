@@ -4,13 +4,12 @@ from __future__ import annotations
 
 import json
 import logging
-import uuid
 from collections.abc import Sequence
 from typing import Any
 
 from openjiuwen_runtime.foundation.db.handler import DBHandler
 
-from jiuwenclaw_manager.infrastructure.utils import iso_datetime, utc_now
+from jiuwenclaw_manager.infrastructure.utils import iso_datetime, new_uuid4, utc_now
 from jiuwenclaw_manager.schemas.instance_schemas import (
     CreateInstanceBody,
     InstanceDetail,
@@ -62,7 +61,7 @@ _MAX_JIUWENCLAW_ID_ATTEMPTS = 10
 async def generate_unique_jiuwenclaw_id(handler: DBHandler) -> str:
     """生成 ``instance_info`` 中尚未占用的 ``jiuwenclaw_id``。"""
     for _ in range(_MAX_JIUWENCLAW_ID_ATTEMPTS):
-        jiuwenclaw_id = f"sp-{uuid.uuid4().hex[:12]}"
+        jiuwenclaw_id = new_uuid4()
         if await get_instance_row(handler, jiuwenclaw_id) is None:
             return jiuwenclaw_id
     raise RuntimeError("failed to generate unique jiuwenclaw_id after retries")

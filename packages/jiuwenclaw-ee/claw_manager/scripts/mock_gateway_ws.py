@@ -10,7 +10,8 @@
 用法：
     python3 scripts/mock_gateway_ws.py
     GATEWAY_MANAGER_WS_URL=ws://127.0.0.1:8766 python3 scripts/mock_gateway_ws.py
-    INSTANCE_IDS="sp-aaa,sp-bbb" python3 scripts/mock_gateway_ws.py  # 也可显式指定
+    INSTANCE_IDS="b26bc496-dfee-488b-a2ab-8bae8ce94985,\\
+        c1d2e3f4-a5b6-7890-abcd-ef1234567890" python3 scripts/mock_gateway_ws.py  # 也可显式指定
 
 依赖：仅 stdlib + websockets（jiuwenclaw_manager 已带）。
 """

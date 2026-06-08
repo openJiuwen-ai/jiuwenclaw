@@ -15,7 +15,7 @@
 
     # 单场景：alice → S1 销售组 AgentServer 池（2.5.1）
     uv run python packages/jiuwenclaw-ee/claw_manager/scripts/enterprise_runtime_service_config.py \\
-        --group-id g_demo_sales --bot-id bot_main --user-id alice sp-xxxxxxxxxxxx
+        --group-id g_demo_sales --bot-id bot_main --user-id alice b26bc496-dfee-488b-a2ab-8bae8ce94985
 
     # 一次跑完文档 3.2.1–3.2.3 三个演示场景
     uv run python packages/jiuwenclaw-ee/claw_manager/scripts/enterprise_runtime_service_config.py \\
