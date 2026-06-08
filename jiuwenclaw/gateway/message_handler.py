@@ -1534,7 +1534,7 @@ class MessageHandler(ABC):
             chunk, session_id=session_id, metadata=bus_metadata
         )
         await self.publish_robot_messages(out)
-        logger.info(
+        logger.debug(
             "[MessageHandler] server_push 已写入 robot_messages: request_id=%s channel_id=%s",
             rid,
             chunk.channel_id,

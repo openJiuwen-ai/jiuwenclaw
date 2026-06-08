@@ -319,33 +319,36 @@ class _SpaStaticHandler(SimpleHTTPRequestHandler):
 
         msg_type = payload.get("type")
         if msg_type == "req":
+            params = payload.get("params")
             self.logger.info(
-                "[ws][%s][req] id=%s method=%s params=%s",
+                "[ws][%s][req] id=%s method=%s has_params=%s",
                 direction,
                 self._format_ws_part(payload.get("id")),
                 self._format_ws_part(payload.get("method")),
-                self._format_ws_part(payload.get("params")),
+                bool(params) if isinstance(params, dict) else False,
             )
             return
         if msg_type == "res":
+            res_payload = payload.get("payload")
             self.logger.info(
-                "[ws][%s][res] id=%s ok=%s payload=%s error=%s code=%s",
+                "[ws][%s][res] id=%s ok=%s has_payload=%s has_error=%s code=%s",
                 direction,
                 self._format_ws_part(payload.get("id")),
                 self._format_ws_part(payload.get("ok")),
-                self._format_ws_part(payload.get("payload")),
-                self._format_ws_part(payload.get("error")),
+                bool(res_payload) if isinstance(res_payload, dict) else False,
+                payload.get("error") is not None,
                 self._format_ws_part(payload.get("code")),
             )
             return
         if msg_type == "event":
+            event_payload = payload.get("payload")
             self.logger.info(
-                "[ws][%s][event] event=%s seq=%s stream_id=%s payload=%s",
+                "[ws][%s][event] event=%s seq=%s stream_id=%s has_payload=%s",
                 direction,
                 self._format_ws_part(payload.get("event")),
                 self._format_ws_part(payload.get("seq")),
                 self._format_ws_part(payload.get("stream_id")),
-                self._format_ws_part(payload.get("payload")),
+                bool(event_payload) if isinstance(event_payload, dict) else False,
             )
 
     def _is_api_route(self) -> bool:

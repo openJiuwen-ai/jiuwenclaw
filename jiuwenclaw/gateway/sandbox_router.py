@@ -343,10 +343,10 @@ class SandboxRouterAgentClient(AgentServerClient):
                     metadata["last_link_probe_at"] = time.time()
             else:
                 logger.warning(
-                    "Link return path probe rejected: sandbox_id=%s request_id=%s payload=%s",
+                    "Link return path probe rejected: sandbox_id=%s request_id=%s ok=%s",
                     sandbox_id,
                     request_id,
-                    resp.payload,
+                    resp.ok,
                 )
             return ok
         except Exception as exc:  # noqa: BLE001

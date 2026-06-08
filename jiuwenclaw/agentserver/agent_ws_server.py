@@ -770,8 +770,12 @@ class AgentWebSocketServer:
         try:
             data = json.loads(raw)
             logger.info(
-                "[AgentWebSocketServer] inbound raw payload: %s",
-                data,
+                "[AgentWebSocketServer] inbound message: type=%s request_id=%s channel=%s method=%s is_stream=%s",
+                data.get("type") if isinstance(data, dict) else None,
+                data.get("request_id") if isinstance(data, dict) else None,
+                (data.get("channel") or data.get("channel_id")) if isinstance(data, dict) else None,
+                (data.get("method") or data.get("req_method")) if isinstance(data, dict) else None,
+                data.get("is_stream") if isinstance(data, dict) else None,
             )
 
             # OA 模式下消息格式转换
@@ -1344,16 +1348,14 @@ class AgentWebSocketServer:
         from datetime import datetime
         from jiuwenclaw.agentserver.session_metadata import get_resolved_project_dir
         from jiuwenclaw.utils import get_agent_sessions_dir
-        logger.info("[AgentWebSocketServer] command.ls %s", request.params)
+        logger.info("[AgentWebSocketServer] command.ls request_id=%s", request.request_id)
         try:
             params = request.params or {}
             relative_path = str(params.get("path", ".")).strip()
 
             session_id = request.session_id or "default"
             workspace_dir = Path(get_resolved_project_dir(session_id, get_agent_sessions_dir()))
-            logger.info("[AgentWebSocketServer] command.ls workspace_dir: %s", workspace_dir)
             target_path = (workspace_dir / relative_path).resolve()
-            logger.info("[AgentWebSocketServer] command.ls target_path: %s", target_path)
 
             try:
                 target_path.relative_to(workspace_dir.resolve())
@@ -1385,7 +1387,11 @@ class AgentWebSocketServer:
                             "is_dir": item.is_dir(),
                             "error": str(e),
                         })
-            logger.info("[AgentWebSocketServer] command.ls entries: %s", entries)
+            logger.info(
+                "[AgentWebSocketServer] command.ls response: request_id=%s entry_count=%d",
+                request.request_id,
+                len(entries),
+            )
             resp = AgentResponse(
                 request_id=request.request_id,
                 channel_id=request.channel_id,
@@ -1410,7 +1416,7 @@ class AgentWebSocketServer:
     async def _handle_command_view(self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock) -> None:
         from jiuwenclaw.agentserver.session_metadata import get_resolved_project_dir
         from jiuwenclaw.utils import get_agent_sessions_dir
-        logger.info("[AgentWebSocketServer] command.view %s", request.params)
+        logger.info("[AgentWebSocketServer] command.view request_id=%s", request.request_id)
         try:
             params = request.params or {}
             relative_path = str(params.get("path", "")).strip()
@@ -1545,7 +1551,7 @@ class AgentWebSocketServer:
             logger.info(
                 format_session_log(
                     session_id,
-                    f"[AgentWebSocketServer] command.diff response: turns={turns}",
+                    f"[AgentWebSocketServer] command.diff response: turn_count={len(turns) if isinstance(turns, list) else 0}",
                 )
             )
 

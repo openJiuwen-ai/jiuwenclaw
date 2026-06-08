@@ -607,9 +607,16 @@ class WebChannel(BaseChannel):
             except asyncio.QueueFull:
                 dropped += 1
         _bc_elapsed = (asyncio.get_event_loop().time() - _bc_t0) * 1000
-        logger.info(
-            "[STREAM_DIAG][WebChannel] broadcast clients=%d elapsed=%.1fms len=%d dropped=%d",
-            len(self._clients), _bc_elapsed, len(data), dropped,
+        event_name = str(frame.get("event") or "") if frame.get("type") == "event" else ""
+        is_stream_chunk = event_name in {
+            "chat.delta",
+            "chat.reasoning",
+            "chat.tool_calls.delta",
+        }
+        log_fn = logger.debug if is_stream_chunk else logger.info
+        log_fn(
+            "[STREAM_DIAG][WebChannel] broadcast clients=%d elapsed=%.1fms len=%d dropped=%d event=%s",
+            len(self._clients), _bc_elapsed, len(data), dropped, event_name or "n/a",
         )
         if dropped:
             logger.warning(

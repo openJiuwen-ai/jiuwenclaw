@@ -48,13 +48,6 @@ def _e2a_to_wire(envelope: E2AEnvelope) -> dict[str, Any]:
     return envelope.to_dict()
 
 
-def _to_json(data: Any) -> str:
-    try:
-        return json.dumps(data, ensure_ascii=False, sort_keys=True, default=str)
-    except Exception:
-        return repr(data)
-
-
 def _build_ws_origin(uri: str) -> str | None:
     try:
         parsed = urlsplit(uri)
@@ -213,7 +206,7 @@ class OpenAbilityWebSocketClient(AgentServerClient):
                             text = raw.decode("utf-8") if isinstance(raw, bytes) else raw
                             frame_preview = text[:160]
                         elif isinstance(raw, dict):
-                            frame_preview = list(raw.keys())[:8]
+                            frame_preview = "dict"
                         else:
                             frame_preview = type(raw).__name__
                         logger.warning(
@@ -345,7 +338,15 @@ class OpenAbilityWebSocketClient(AgentServerClient):
         try:
             async with self._lock:
                 payload = _e2a_to_wire(envelope)
-                logger.debug("%s 发送(非流式): %s", _LOG_LABEL, _to_json(payload))
+                logger.debug(
+                    "%s 发送(非流式): sandbox_id=%s session_id=%s request_id=%s method=%s payload_bytes=%d",
+                    _LOG_LABEL,
+                    self._sandbox_id,
+                    session_id,
+                    rid,
+                    envelope.method,
+                    len(json.dumps(payload, ensure_ascii=False, default=str).encode("utf-8")),
+                )
                 await self._send_wire_payload(payload)
             try:
                 data = await asyncio.wait_for(
@@ -390,7 +391,15 @@ class OpenAbilityWebSocketClient(AgentServerClient):
         try:
             async with self._lock:
                 payload = _e2a_to_wire(envelope)
-                logger.debug("%s 发送(流式): %s", _LOG_LABEL, _to_json(payload))
+                logger.debug(
+                    "%s 发送(流式): sandbox_id=%s session_id=%s request_id=%s method=%s payload_bytes=%d",
+                    _LOG_LABEL,
+                    self._sandbox_id,
+                    session_id,
+                    rid,
+                    envelope.method,
+                    len(json.dumps(payload, ensure_ascii=False, default=str).encode("utf-8")),
+                )
                 await self._send_wire_payload(payload)
             saw_complete = False
             while True:

@@ -113,9 +113,9 @@ class PermissionInterruptRail(ConfirmInterruptRail):
                 model_name=model_name,
             )
         logger.info(
-            "[PermissionEngine] permission.rail.init tool_names=%s tools_keys=%s llm_enabled=%s model_name=%s",
-            list(self._tool_names),
-            list((self._static_config.get("tools") or {}).keys()),
+            "[PermissionEngine] permission.rail.init tool_count=%d configured_tool_count=%d llm_enabled=%s model_name=%s",
+            len(self._tool_names),
+            len(self._static_config.get("tools") or {}),
             self._engine.llm is not None,
             self._engine.model_name,
         )
@@ -315,9 +315,9 @@ class PermissionInterruptRail(ConfirmInterruptRail):
         if tool_names is not None:
             self._tool_names.update(str(x).strip() for x in tool_names if str(x).strip())
         logger.info(
-            "[PermissionEngine] permission.rail.config_updated intercept=all diagnostic_tool_names=%s "
+            "[PermissionEngine] permission.rail.config_updated intercept=all diagnostic_tool_count=%d "
             "llm_enabled=%s model_name=%s",
-            list(self._tool_names),
+            len(self._tool_names),
             self._engine.llm is not None,
             self._engine.model_name,
         )
@@ -744,10 +744,10 @@ class PermissionInterruptRail(ConfirmInterruptRail):
                 owner_scopes = self._static_config.get("owner_scopes", {})
                 logger.info(
                     "[PermissionEngine] permission.rail.owner_scope_lookup "
-                    "channel_id=%s user_id=%s owner_scope_channels=%s",
+                    "channel_id=%s user_id=%s owner_scope_channel_count=%d",
                     perm_ctx.channel_id,
                     perm_ctx.principal_user_id,
-                    list(owner_scopes.keys()) if owner_scopes else [],
+                    len(owner_scopes) if isinstance(owner_scopes, dict) else 0,
                 )
                 if isinstance(owner_scopes, dict) and owner_scopes:
                     cid = perm_ctx.channel_id.strip()
@@ -1218,17 +1218,17 @@ class PermissionInterruptRail(ConfirmInterruptRail):
                 session_id=session_id,
             )
         except Exception as exc:
-            logger.warning("[PermissionEngine] permission.acp.request_failed error=%s", exc)
+            logger.warning("[PermissionEngine] permission.acp.request_failed error_type=%s", type(exc).__name__)
             return None
 
         if not isinstance(response, dict):
-            logger.warning("[PermissionEngine] permission.acp.invalid_response response=%s", response)
+            logger.warning("[PermissionEngine] permission.acp.invalid_response response_type=%s", type(response).__name__)
             return None
 
         if isinstance(response.get("error"), dict):
             err = response["error"]
             message = str(err.get("message") or "Permission request failed")
-            logger.warning("[PermissionEngine] permission.acp.error_response message=%s", message)
+            logger.warning("[PermissionEngine] permission.acp.error_response code=%s", err.get("code"))
             return PermissionConfirmResponse(
                 approved=False,
                 auto_confirm=False,
@@ -1274,9 +1274,9 @@ class PermissionInterruptRail(ConfirmInterruptRail):
             )
 
         logger.warning(
-            "[PermissionEngine] permission.acp.unknown_outcome outcome=%s payload=%s",
+            "[PermissionEngine] permission.acp.unknown_outcome outcome=%s has_payload=%s",
             outcome_kind,
-            result_payload,
+            bool(result_payload),
         )
         return PermissionConfirmResponse(
             approved=False,

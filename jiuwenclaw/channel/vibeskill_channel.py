@@ -2565,22 +2565,34 @@ class VibeSkillChannel(BaseChannel):
             source=source,
         )
 
+    @staticmethod
+    def _is_streaming_chunk_ws_send(source: str, payload: dict[str, Any]) -> bool:
+        if "delta" in source.lower():
+            return True
+        return str(payload.get("type") or "").strip() == "message.part.delta"
+
     async def _send_ws_json(self, ws: Any, payload: dict[str, Any], source: str) -> None:
         payload_str = json.dumps(payload, ensure_ascii=False)
-        max_log_length = 2000
-        if len(payload_str) > max_log_length:
-            payload_for_log = f"{payload_str[:max_log_length]}...<truncated>"
-        else:
-            payload_for_log = payload_str
-        logger.info("[VibeSkillChannel] WS send (%s): %s", source, payload_for_log)
+        log_fn = (
+            logger.debug
+            if self._is_streaming_chunk_ws_send(source, payload)
+            else logger.info
+        )
         _sid_out = "n/a"
+        _payload_type = str(payload.get("type") or "").strip() or "n/a"
         if isinstance(payload, dict):
             _props = payload.get("properties")
             if isinstance(_props, dict):
                 _sid_out = str(_props.get("sessionID") or "").strip() or _sid_out
             if _sid_out == "n/a":
                 _sid_out = str(payload.get("sessionID") or "").strip() or _sid_out
-        logger.info("[VibeSkillChannel] %s sent, session_id=%s", source, _sid_out)
+        log_fn(
+            "[VibeSkillChannel] WS send: source=%s type=%s session_id=%s payload_bytes=%d",
+            source,
+            _payload_type,
+            _sid_out,
+            len(payload_str.encode("utf-8")),
+        )
         try:
             await ws.send(payload_str)
         except Exception as exc:

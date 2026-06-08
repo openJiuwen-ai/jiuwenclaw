@@ -558,8 +558,10 @@ class JiuWenClaw:
 
         interactive_input.update(request_id, confirm_payload)
         logger.info(
-            "[JiuWenClaw] InteractiveInput.update: request_id=%s payload=%s",
-            request_id, confirm_payload
+            "[JiuWenClaw] InteractiveInput.update: request_id=%s approved=%s auto_confirm=%s",
+            request_id,
+            confirm_payload.get("approved"),
+            confirm_payload.get("auto_confirm"),
         )
 
         return interactive_input

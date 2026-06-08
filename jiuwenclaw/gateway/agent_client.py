@@ -9,7 +9,6 @@ import asyncio
 import json
 from abc import ABC, abstractmethod
 from collections.abc import Awaitable, Callable
-from dataclasses import asdict
 from typing import Any, AsyncIterator
 from urllib.parse import urlsplit
 
@@ -39,14 +38,6 @@ def _wire_request_id_key(request_id: Any) -> str:
     if request_id is None:
         return ""
     return str(request_id)
-
-
-def _to_json(data: Any) -> str:
-    """将任意对象序列化为日志友好的 JSON 字符串."""
-    try:
-        return json.dumps(data, ensure_ascii=False, sort_keys=True, default=str)
-    except Exception:
-        return repr(data)
 
 
 def _build_ws_origin(uri: str) -> str | None:
@@ -176,9 +167,13 @@ class WebSocketAgentServerClient(AgentServerClient):
         # 读取 AgentServer 的 connection.ack 事件
         try:
             raw = await asyncio.wait_for(self._ws.recv(), timeout=5.0)
-            logger.info("[WebSocketAgentServerClient] connect 首帧(raw): %s", raw)
             data = json.loads(raw)
-            logger.info("[WebSocketAgentServerClient] connect 首帧(parsed): %s", _to_json(data))
+            logger.info(
+                "[WebSocketAgentServerClient] connect 首帧: type=%s event=%s request_id=%s",
+                data.get("type"),
+                data.get("event"),
+                data.get("request_id"),
+            )
             if data.get("type") == "event" and data.get("event") == "connection.ack":
                 self._server_ready = True
                 logger.info("[WebSocketAgentServerClient] 收到 connection.ack，AgentServer 已就绪")
@@ -286,8 +281,11 @@ class WebSocketAgentServerClient(AgentServerClient):
             envelope.is_stream,
         )
         logger.debug(
-            "[WebSocketAgentServerClient] 发送请求(非流式) E2A: %s",
-            _to_json(envelope.to_dict()),
+            "[WebSocketAgentServerClient] 发送请求(非流式) E2A: request_id=%s channel=%s method=%s has_params=%s",
+            rid,
+            envelope.channel,
+            envelope.method,
+            bool(envelope.params),
         )
 
         if rid in self._message_queues:
@@ -304,7 +302,13 @@ class WebSocketAgentServerClient(AgentServerClient):
             # 发送请求
             async with self._lock:
                 payload = _e2a_to_wire(envelope)
-                logger.info("[WebSocketAgentServerClient] 发送请求(非流式) payload: %s", _to_json(payload))
+                logger.debug(
+                    "[WebSocketAgentServerClient] 发送请求(非流式) wire: request_id=%s channel=%s method=%s payload_bytes=%d",
+                    rid,
+                    envelope.channel,
+                    envelope.method,
+                    len(json.dumps(payload, ensure_ascii=False, default=str).encode("utf-8")),
+                )
                 await self._ws.send(json.dumps(payload, ensure_ascii=False))
 
             try:
@@ -318,9 +322,19 @@ class WebSocketAgentServerClient(AgentServerClient):
                 raise RuntimeError(
                     f"AgentServer 非流式请求超时 (request_id={rid}, timeout={_UNARY_REQUEST_TIMEOUT_SECONDS}s)"
                 ) from e
-            logger.info("[WebSocketAgentServerClient] 收到响应(非流式) raw: %s", json.dumps(data, ensure_ascii=False))
+            logger.debug(
+                "[WebSocketAgentServerClient] 收到响应(非流式) wire: request_id=%s kind=%s status=%s",
+                data.get("request_id"),
+                data.get("kind"),
+                data.get("status"),
+            )
             resp = parse_agent_server_wire_unary(data)
-            logger.info("[WebSocketAgentServerClient] 收到完整响应 AgentResponse: %s", _to_json(asdict(resp)))
+            logger.info(
+                "[WebSocketAgentServerClient] 收到完整响应 AgentResponse: request_id=%s ok=%s has_payload=%s",
+                resp.request_id,
+                resp.ok,
+                bool(resp.payload),
+            )
             return resp
         finally:
             # 清理队列
@@ -340,8 +354,11 @@ class WebSocketAgentServerClient(AgentServerClient):
             envelope.is_stream,
         )
         logger.debug(
-            "[WebSocketAgentServerClient] 发送请求(流式) E2A: %s",
-            _to_json(envelope.to_dict()),
+            "[WebSocketAgentServerClient] 发送请求(流式) E2A: request_id=%s channel=%s method=%s has_params=%s",
+            rid,
+            envelope.channel,
+            envelope.method,
+            bool(envelope.params),
         )
 
         if rid in self._message_queues:
@@ -358,7 +375,13 @@ class WebSocketAgentServerClient(AgentServerClient):
             # 发送请求
             async with self._lock:
                 payload = _e2a_to_wire(envelope)
-                logger.info("[WebSocketAgentServerClient] 发送请求(流式) payload: %s", _to_json(payload))
+                logger.debug(
+                    "[WebSocketAgentServerClient] 发送请求(流式) wire: request_id=%s channel=%s method=%s payload_bytes=%d",
+                    rid,
+                    envelope.channel,
+                    envelope.method,
+                    len(json.dumps(payload, ensure_ascii=False, default=str).encode("utf-8")),
+                )
                 await self._ws.send(json.dumps(payload, ensure_ascii=False))
 
             # 从队列中接收流式响应
@@ -375,12 +398,20 @@ class WebSocketAgentServerClient(AgentServerClient):
                         break
                 else:
                     data = await queue.get()
-                logger.info("[WebSocketAgentServerClient] 收到流式事件 raw: %s", json.dumps(data, ensure_ascii=False))
+                logger.debug(
+                    "[WebSocketAgentServerClient] 收到流式事件 wire: request_id=%s kind=%s status=%s",
+                    data.get("request_id"),
+                    data.get("kind"),
+                    data.get("status"),
+                )
                 chunk = parse_agent_server_wire_chunk(data)
                 chunk_count += 1
-                logger.info(
-                    "[WebSocketAgentServerClient] 收到流式 chunk #%s AgentResponseChunk: %s",
-                    chunk_count, _to_json(asdict(chunk)),
+                logger.debug(
+                    "[WebSocketAgentServerClient] 收到流式 chunk #%s AgentResponseChunk: request_id=%s is_complete=%s has_payload=%s",
+                    chunk_count,
+                    chunk.request_id,
+                    chunk.is_complete,
+                    bool(chunk.payload),
                 )
                 yield chunk
                 if chunk.is_complete:
@@ -777,7 +808,7 @@ async def _run_verification() -> None:
         assert resp1.request_id == "req-1"
         assert resp1.ok is True
         assert "Echo:" in str(resp1.payload)
-        logger.info("[main] 非流式验证通过: payload=%s", resp1.payload)
+        logger.info("[main] 非流式验证通过: request_id=%s ok=%s", resp1.request_id, resp1.ok)
 
         # 2. 流式请求
         req2 = e2a_from_agent_fields(
@@ -791,8 +822,7 @@ async def _run_verification() -> None:
             chunks.append(ch)
         assert len(chunks) == 3
         assert chunks[-1].is_complete
-        full_content = "".join(c.payload.get("content", "") for c in chunks if c.payload)
-        logger.info("[main] 流式验证通过: 共 %s 个 chunk, 拼接内容=%r", len(chunks), full_content)
+        logger.info("[main] 流式验证通过: 共 %s 个 chunk", len(chunks))
     finally:
         await client.disconnect()
         server.close()
