@@ -9,6 +9,7 @@ import secrets
 import socket
 import time
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, cast
 from urllib.parse import parse_qs, urlparse
@@ -36,21 +37,34 @@ from jiuwenclaw.schema.message import Message, ReqMethod
 from jiuwenclaw.utils import SafeRotatingFileHandler, SensitiveDataFilter
 
 logger = logging.getLogger(__name__)
+interface_logger = logging.getLogger(f"{__name__}.interface")
 
 _INTERFACE_LOG_HANDLER_ATTR = "_jiuwenclaw_interface_log_file_handler"
+_INTERFACE_LOG_HANDLER_PATH_ATTR = "_jiuwenclaw_interface_log_file_path"
 _INTERFACE_LOG_MAX_BYTES = 20 * 1024 * 1024
 _INTERFACE_LOG_BACKUP_COUNT = 20
 
 
 def _configure_interface_log_path() -> None:
-    """若设置环境变量 `INTERFACE_LOG_PATH`，将本模块日志额外写入该文件路径。"""
+    """若设置环境变量 `INTERFACE_LOG_PATH`，写入独立接口日志文件。"""
     raw = os.environ.get("INTERFACE_LOG_PATH", "").strip()
+    existing_handlers = [
+        h for h in interface_logger.handlers
+        if getattr(h, _INTERFACE_LOG_HANDLER_ATTR, False)
+    ]
     if not raw:
+        for h in existing_handlers:
+            interface_logger.removeHandler(h)
+            h.close()
         return
-    for h in logger.handlers:
-        if getattr(h, _INTERFACE_LOG_HANDLER_ATTR, False):
-            return
+
     log_path = Path(raw).expanduser().resolve()
+    for h in existing_handlers:
+        if getattr(h, _INTERFACE_LOG_HANDLER_PATH_ATTR, None) == str(log_path):
+            return
+        interface_logger.removeHandler(h)
+        h.close()
+
     try:
         log_path.parent.mkdir(parents=True, exist_ok=True)
     except OSError as exc:
@@ -60,10 +74,7 @@ def _configure_interface_log_path() -> None:
             exc,
         )
         return
-    formatter = logging.Formatter(
-        fmt="%(asctime)s.%(msecs)03d [%(process)d] %(levelname)s %(name)s %(filename)s:%(lineno)d: %(message)s",
-        datefmt="%Y-%m-%d %H:%M:%S",
-    )
+    formatter = logging.Formatter(fmt="%(message)s")
     try:
         fh = SafeRotatingFileHandler(
             filename=str(log_path),
@@ -79,9 +90,128 @@ def _configure_interface_log_path() -> None:
         )
         return
     setattr(fh, _INTERFACE_LOG_HANDLER_ATTR, True)
+    setattr(fh, _INTERFACE_LOG_HANDLER_PATH_ATTR, str(log_path))
     fh.setFormatter(formatter)
     fh.addFilter(SensitiveDataFilter())
-    logger.addHandler(fh)
+    interface_logger.addHandler(fh)
+    interface_logger.setLevel(logging.INFO)
+    interface_logger.propagate = False
+
+
+def _clean_interface_log_field(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, bool):
+        text = "true" if value else "false"
+    else:
+        text = str(value)
+    return (
+        text.replace("|", " ")
+        .replace("\r", " ")
+        .replace("\n", " ")
+        .replace("\t", " ")
+    )
+
+
+def _interface_log_time() -> str:
+    now = datetime.fromtimestamp(time.time())
+    return f"{now:%Y-%m-%d %H:%M:%S}.{now.microsecond // 1000:03d}"
+
+
+def _interface_log_severity_for_status(status: int | None) -> str:
+    if status is not None and status >= 500:
+        return "ERROR"
+    if status is not None and status >= 400:
+        return "WARN"
+    return "INFO"
+
+
+def _log_interface_event(
+    *,
+    severity: str,
+    session_id: str | None = None,
+    interface_type: str,
+    http_url: str | None = None,
+    ws_event: str | None = None,
+    response_time_ms: int | None = None,
+    return_code: int | None = None,
+    ws_closed_ok: bool | None = None,
+) -> None:
+    """写入固定 9 字段接口日志：Time|Severity|SessionID|...|WSClosedOK。"""
+    if not interface_logger.handlers:
+        return
+    row = [
+        _interface_log_time(),
+        severity,
+        session_id,
+        interface_type,
+        http_url,
+        ws_event,
+        "" if response_time_ms is None else response_time_ms,
+        "" if return_code is None else return_code,
+        "" if ws_closed_ok is None else ws_closed_ok,
+    ]
+    interface_logger.info("|".join(_clean_interface_log_field(field) for field in row))
+
+
+def _interface_response_time_ms(start: float) -> int:
+    return max(0, int((time.monotonic() - start) * 1000))
+
+
+def _extract_session_id_from_http_path(path: str) -> str:
+    request_path = urlparse(str(path or "")).path
+    if request_path.startswith("/api/v1/session/"):
+        rest = request_path[len("/api/v1/session/"):].strip("/")
+        return rest.split("/")[0] if rest else ""
+    return ""
+
+
+def _http_response_log_context(path: str, method: str) -> tuple[str, str]:
+    """返回 HTTP 响应主日志用的 (session_id, path)。"""
+    request_path = urlparse(str(path or "")).path
+    meth_u = (method or "").strip().upper() or "?"
+    if request_path == "/api/v1/session" and meth_u == "POST":
+        sid_resp = "n/a"
+    elif request_path.startswith("/api/v1/session/"):
+        rest = request_path[len("/api/v1/session/"):].strip("/")
+        sid_resp = rest.split("/")[0] if rest else "n/a"
+    else:
+        sid_resp = "n/a"
+    path_for_log = str(path or "")
+    if len(path_for_log) > 512:
+        path_for_log = f"{path_for_log[:512]}...<truncated>"
+    return sid_resp, path_for_log
+
+
+def _extract_session_id_from_http_response(
+    path: str,
+    method: str,
+    body: bytes,
+) -> str:
+    request_path = urlparse(str(path or "")).path
+    if request_path != "/api/v1/session" or str(method or "").upper() != "POST":
+        return ""
+    try:
+        payload = json.loads(body.decode("utf-8"))
+    except Exception:
+        return ""
+    if not isinstance(payload, dict):
+        return ""
+    return str(payload.get("sessionID") or payload.get("sessionId") or "").strip()
+
+
+def _ws_close_code(ws: Any) -> int | None:
+    raw = getattr(ws, "close_code", None)
+    try:
+        return int(raw) if raw is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _ws_closed_ok(ws: Any, *, had_error: bool) -> bool:
+    if had_error:
+        return False
+    return _ws_close_code(ws) in (1000, 1001)
 
 
 _configure_interface_log_path()
@@ -166,6 +296,10 @@ class _AiohttpWebSocketAdapter:
             return msg.data
         if msg.type == WSMsgType.BINARY:
             return msg.data.decode("utf-8", errors="replace")
+        self.close_code = getattr(self._ws, "close_code", None)
+        if msg.type == WSMsgType.ERROR:
+            exc = self._ws.exception()
+            self.close_reason = str(exc) if exc is not None else "ws_error"
         # CLOSE / CLOSING / CLOSED / ERROR -> 结束迭代
         raise StopAsyncIteration
 
@@ -228,6 +362,7 @@ class VibeSkillChannel(BaseChannel):
         super().__init__(config, router)
         self.config: VibeSkillConfig = config
         self._agent_client = agent_client
+        _configure_interface_log_path()
         self._dcs_store: VibeSkillSessionDcsStore | None = VibeSkillSessionDcsStore.from_env()
         if self._dcs_store is not None:
             logger.info(
@@ -490,12 +625,44 @@ class VibeSkillChannel(BaseChannel):
         """aiohttp REST 适配层：Request -> 现有 http_handler()。"""
         from aiohttp import web
 
+        start = time.monotonic()
         method = request.method
         path = request.path_qs  # 含 query string，与 http_handler 的 urlparse 约定一致
-        headers = {k.lower(): v for k, v in request.headers.items()}
-        body = await request.read()
-        status, resp_headers, resp_body = await self.http_handler(
-            method, path, headers, body
+        try:
+            headers = {k.lower(): v for k, v in request.headers.items()}
+            body = await request.read()
+            status, resp_headers, resp_body = await self.http_handler(
+                method, path, headers, body
+            )
+        except Exception:
+            _log_interface_event(
+                severity="ERROR",
+                session_id=_extract_session_id_from_http_path(path),
+                interface_type="HTTP",
+                http_url=f"{str(method or '').upper()} {path}",
+                response_time_ms=_interface_response_time_ms(start),
+                return_code=500,
+            )
+            raise
+
+        session_id = (
+            _extract_session_id_from_http_path(path)
+            or _extract_session_id_from_http_response(path, method, resp_body)
+        )
+        _log_interface_event(
+            severity=_interface_log_severity_for_status(status),
+            session_id=session_id,
+            interface_type="HTTP",
+            http_url=f"{str(method or '').upper()} {path}",
+            response_time_ms=_interface_response_time_ms(start),
+            return_code=status,
+        )
+        _sid_resp, _path_resp_log = _http_response_log_context(path, method)
+        logger.info(
+            "[VibeSkillChannel] HTTP 响应已发送, status=%s session_id=%s path=%s",
+            status,
+            _sid_resp,
+            _path_resp_log,
         )
         # Connection 头由 aiohttp 自行管理，避免与 keep-alive 冲突
         resp_headers = {
@@ -507,9 +674,19 @@ class VibeSkillChannel(BaseChannel):
         """aiohttp WebSocket 适配层：Request -> 现有 _handle_ws_connection()。"""
         from aiohttp import web
 
+        start = time.monotonic()
         # 非 WebSocket 升级请求打到 /api/v1/messages 时，明确返回 426
         upgrade = str(request.headers.get("Upgrade", "")).strip().lower()
         if upgrade != "websocket":
+            path = getattr(request, "path_qs", None) or getattr(request, "path", "/api/v1/messages")
+            method = str(getattr(request, "method", "GET") or "GET").upper()
+            _log_interface_event(
+                severity="WARN",
+                interface_type="HTTP",
+                http_url=f"{method} {path}",
+                response_time_ms=_interface_response_time_ms(start),
+                return_code=426,
+            )
             return web.Response(
                 status=426,
                 headers={"Content-Type": "application/json"},
@@ -568,8 +745,15 @@ class VibeSkillChannel(BaseChannel):
         if request is None:
             logger.warning("[VibeSkillChannel] No request object found")
             await ws.close(code=1008, reason="no request")
+            _log_interface_event(
+                severity="ERROR",
+                interface_type="WebSocket",
+                ws_event="close",
+                ws_closed_ok=False,
+            )
             return
 
+        had_ws_error = False
         # aiohttp: request.path 是路径, request.query_string 是 query string
         path = getattr(request, 'path', '/')
         query_string = getattr(request, 'query_string', '')
@@ -587,6 +771,7 @@ class VibeSkillChannel(BaseChannel):
             # 验证路径
             if request_path != "/api/v1/messages":
                 logger.warning(f"[VibeSkillChannel] Invalid path: {request_path}")
+                had_ws_error = True
                 await ws.close(code=1008, reason="unsupported path")
                 return
 
@@ -597,6 +782,7 @@ class VibeSkillChannel(BaseChannel):
                 ok, error_msg = check_ws_auth(self._auth_enabled, request.headers)
                 if not ok:
                     logger.warning("[Auth] ws check fail: %s", error_msg)
+                    had_ws_error = True
                     await ws.close(code=1008, reason="authentication failed")
                     return
                 logger.info("[Auth] ws check ok")
@@ -610,6 +796,7 @@ class VibeSkillChannel(BaseChannel):
                 session = await self._store.resolve_session(session_id)
                 if not session:
                     self._clients.discard(ws)
+                    had_ws_error = True
                     await ws.close(code=1008, reason="session_not_found")
                     return
                 session_id = session.session_id
@@ -644,6 +831,16 @@ class VibeSkillChannel(BaseChannel):
                     await self._send_ws_json(ws, {
                         "type": "res", "id": "", "ok": False, "error": "invalid json"
                     }, source="inbound.invalid_json")
+                    _log_interface_event(
+                        severity="WARN",
+                        session_id=(
+                            sorted(self._ws_sessions.get(ws, set()))[0]
+                            if self._ws_sessions.get(ws)
+                            else ""
+                        ),
+                        interface_type="WebSocket",
+                        ws_event="invalid_json",
+                    )
                     continue
 
                 _inbound_sid = (
@@ -666,12 +863,36 @@ class VibeSkillChannel(BaseChannel):
                 )
 
                 # 调用 inbound_intercept 处理入站消息
-                handled = await self.inbound_intercept(ws, data)
+                try:
+                    handled = await self.inbound_intercept(ws, data)
+                except Exception:
+                    _log_interface_event(
+                        severity="ERROR",
+                        session_id=_inbound_sid if _inbound_sid != "n/a" else "",
+                        interface_type="WebSocket",
+                        ws_event=(
+                            str(data.get("type") or "").strip()
+                            if isinstance(data, dict)
+                            else ""
+                        ),
+                    )
+                    raise
                 if not handled:
                     await self._send_ws_json(ws, {
                         "type": "res", "id": "", "ok": False, "error": "unhandled"
                     }, source="inbound.unhandled")
+                _log_interface_event(
+                    severity="INFO" if handled else "WARN",
+                    session_id=_inbound_sid if _inbound_sid != "n/a" else "",
+                    interface_type="WebSocket",
+                    ws_event=(
+                        str(data.get("type") or "").strip()
+                        if isinstance(data, dict)
+                        else ""
+                    ),
+                )
         except Exception as e:
+            had_ws_error = True
             logger.exception(
                 "[VibeSkillChannel] WS error: %s, type=%s, remote=%s, sessions=%s, "
                 "ws_close_code=%s, ws_close_reason=%s",
@@ -683,12 +904,24 @@ class VibeSkillChannel(BaseChannel):
                 getattr(ws, "close_reason", None),
             )
         finally:
+            bound_sessions = sorted(self._ws_sessions.get(ws, set()))
+            close_session_id = bound_sessions[0] if bound_sessions else ""
+            _log_interface_event(
+                severity="INFO" if _ws_closed_ok(ws, had_error=had_ws_error) else "WARN",
+                session_id=close_session_id,
+                interface_type="WebSocket",
+                ws_event="close",
+                ws_closed_ok=_ws_closed_ok(ws, had_error=had_ws_error),
+            )
             self._clients.discard(ws)
             await self.cleanup(ws)
             logger.info(f"[VibeSkillChannel] WS disconnected, clients: {len(self._clients)}")
 
     async def _handle_http_connection(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         """处理 HTTP 连接（用于 REST 请求）。"""
+        method = ""
+        raw_path = ""
+        start = time.monotonic()
         try:
             # 读取请求行
             request_line = await reader.readline()
@@ -702,6 +935,7 @@ class VibeSkillChannel(BaseChannel):
 
             method = parts[0]
             raw_path = parts[1] if len(parts) > 1 else "/"
+            start = time.monotonic()
 
             # 读取 headers
             headers: dict[str, str] = {}
@@ -729,17 +963,19 @@ class VibeSkillChannel(BaseChannel):
             status, resp_headers, resp_body = await self.http_handler(
                 method, raw_path, headers, body
             )
+            _log_interface_event(
+                severity=_interface_log_severity_for_status(status),
+                session_id=(
+                    _extract_session_id_from_http_path(raw_path)
+                    or _extract_session_id_from_http_response(raw_path, method, resp_body)
+                ),
+                interface_type="HTTP",
+                http_url=f"{(method or '').strip().upper()} {raw_path}",
+                response_time_ms=_interface_response_time_ms(start),
+                return_code=status,
+            )
 
-            _rp = urlparse(raw_path).path
-            _meth_u = (method or "").strip().upper() or "?"
-            if _rp == "/api/v1/session" and _meth_u == "POST":
-                _sid_resp = "n/a"
-            elif _rp.startswith("/api/v1/session/"):
-                _rest_r = _rp[len("/api/v1/session/"):].strip("/")
-                _sid_resp = _rest_r.split("/")[0] if _rest_r else "n/a"
-            else:
-                _sid_resp = "n/a"
-            _path_resp_log = raw_path if len(raw_path) <= 512 else f"{raw_path[:512]}...<truncated>"
+            _sid_resp, _path_resp_log = _http_response_log_context(raw_path, method)
             logger.info(
                 "[VibeSkillChannel] HTTP 响应已发送, status=%s session_id=%s path=%s",
                 status,
@@ -759,6 +995,15 @@ class VibeSkillChannel(BaseChannel):
             await writer.drain()
         except Exception as e:
             logger.warning("[VibeSkillChannel] HTTP handler error: %s", e)
+            if method and raw_path:
+                _log_interface_event(
+                    severity="ERROR",
+                    session_id=_extract_session_id_from_http_path(raw_path),
+                    interface_type="HTTP",
+                    http_url=f"{(method or '').strip().upper()} {raw_path}",
+                    response_time_ms=_interface_response_time_ms(start),
+                    return_code=500,
+                )
         finally:
             try:
                 writer.close()
