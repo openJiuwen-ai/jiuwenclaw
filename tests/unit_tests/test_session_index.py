@@ -25,6 +25,16 @@ def index_dir(tmp_path, monkeypatch):
     return gw_dir
 
 
+@pytest.fixture(autouse=True)
+def reset_web_session_storage_cache():
+    """隔离 is_remote_storage 模块级缓存，避免用例间相互污染。"""
+    from jiuwenclaw.gateway import session_index
+
+    session_index._web_session_storage = None
+    yield
+    session_index._web_session_storage = None
+
+
 def _read_index(index_dir: Path) -> list:
     p = index_dir / "session_index.json"
     if not p.exists():

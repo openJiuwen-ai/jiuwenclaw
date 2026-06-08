@@ -30,6 +30,7 @@ MAX_SESSIONS = 10
 CONTENT_PREVIEW_LEN = 200
 
 _lock = threading.Lock()
+_web_session_storage: str | None = None
 
 
 def _index_path() -> Path:
@@ -127,8 +128,12 @@ def list_sessions_page(
 
 def is_remote_storage() -> bool:
     """根据配置判断是否启用网关索引（remote）模式。"""
+    global _web_session_storage
+    if _web_session_storage is not None:
+        return _web_session_storage == "remote"
     val = os.getenv("GATEWAY_WEB_SESSION_STORAGE", "").strip().lower()
     if val in ("remote", "local"):
+        _web_session_storage = val
         return val == "remote"
     try:
         from jiuwenclaw.config import get_config
@@ -136,6 +141,7 @@ def is_remote_storage() -> bool:
         raw = str(
             (get_config().get("gateway") or {}).get("web_session_storage", "local") or "local"
         ).strip().lower()
+        _web_session_storage = raw
         return raw == "remote"
     except Exception as exc:  # noqa: BLE001
         logger.warning("[session_index] 读取 web_session_storage 配置失败，使用 local: %s", exc)
