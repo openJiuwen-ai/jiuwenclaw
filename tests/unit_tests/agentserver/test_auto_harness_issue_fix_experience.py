@@ -1,12 +1,12 @@
 import asyncio
 from pathlib import Path
 
-from jiuwenswarm.agents.harness.common.auto_harness.gitcode_issue_client import GitCodeIssue
-from jiuwenswarm.agents.harness.common.auto_harness.issue_runner import (
+from jiuwenswarm.agents.harness.common.auto_harness.issue_fix.gitcode_issue_client import GitCodeIssue
+from jiuwenswarm.agents.harness.common.auto_harness.issue_fix.issue_runner import (
     GitCodeIssueRunner,
     IssueWatchOptions,
 )
-from jiuwenswarm.agents.harness.common.auto_harness.issue_state_store import IssueStateStore
+from jiuwenswarm.agents.harness.common.auto_harness.issue_fix.issue_state_store import IssueStateStore
 from jiuwenswarm.agents.harness.common.auto_harness.task_store import TaskStore
 
 

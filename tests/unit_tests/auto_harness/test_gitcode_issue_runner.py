@@ -7,12 +7,12 @@ from typing import Any
 
 import pytest
 
-from jiuwenswarm.agents.harness.common.auto_harness.gitcode_issue_client import GitCodeIssue
-from jiuwenswarm.agents.harness.common.auto_harness.issue_runner import (
+from jiuwenswarm.agents.harness.common.auto_harness.issue_fix.gitcode_issue_client import GitCodeIssue
+from jiuwenswarm.agents.harness.common.auto_harness.issue_fix.issue_runner import (
     GitCodeIssueRunner,
     IssueWatchOptions,
 )
-from jiuwenswarm.agents.harness.common.auto_harness.issue_state_store import IssueStateStore
+from jiuwenswarm.agents.harness.common.auto_harness.issue_fix.issue_state_store import IssueStateStore
 
 
 class FakeGitCodeClient:
@@ -169,7 +169,10 @@ async def test_watch_once_staggers_multiple_started_tasks(tmp_path: Path, monkey
     async def fake_sleep(seconds: float):
         sleeps.append(seconds)
 
-    monkeypatch.setattr("jiuwenswarm.agents.harness.common.auto_harness.issue_runner.asyncio.sleep", fake_sleep)
+    monkeypatch.setattr(
+        "jiuwenswarm.agents.harness.common.auto_harness.issue_fix.issue_runner.asyncio.sleep",
+        fake_sleep,
+    )
     client = FakeGitCodeClient([
         _issue(20, labels=("bug",)),
         _issue(21, labels=("bug",)),
