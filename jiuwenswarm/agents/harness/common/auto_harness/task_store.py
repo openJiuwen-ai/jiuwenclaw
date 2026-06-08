@@ -13,7 +13,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
-from .progress import (
+from .run_log_status import (
     META_EVOLVE_STAGE_ORDER,
     STAGE_DISPLAY_NAMES,
     determine_pipeline_status_from_log,

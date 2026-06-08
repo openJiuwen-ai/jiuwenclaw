@@ -1,6 +1,6 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 
-"""Structured log progress helpers for scheduled auto-harness tasks."""
+"""Structured run-log status helpers for scheduled auto-harness tasks."""
 
 from __future__ import annotations
 
@@ -248,7 +248,7 @@ def determine_pipeline_status_from_log(log_path: Path) -> dict[str, Any]:
                     if slot:
                         stage_results[slot] = status
     except Exception as exc:
-        logger.warning("[AutoHarnessProgress] Failed to read log %s: %s", log_path, exc)
+        logger.warning("[AutoHarnessRunLogStatus] Failed to read log %s: %s", log_path, exc)
         return {"failed": False, "error": ""}
 
     if pipeline_type == "extended_evolve_pipeline":
@@ -287,5 +287,5 @@ def has_terminal_session_event(log_path: Path) -> bool:
                 ):
                     return True
     except Exception as exc:
-        logger.warning("[AutoHarnessProgress] Failed to scan terminal event in %s: %s", log_path, exc)
+        logger.warning("[AutoHarnessRunLogStatus] Failed to scan terminal event in %s: %s", log_path, exc)
     return False

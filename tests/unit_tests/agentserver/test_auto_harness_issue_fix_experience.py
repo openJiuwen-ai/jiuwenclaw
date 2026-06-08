@@ -10,7 +10,7 @@ from jiuwenswarm.agents.harness.common.auto_harness.issue_fix.issue_state_store 
 from jiuwenswarm.agents.harness.common.auto_harness.issue_fix.task_factory import (
     build_issue_fix_task,
 )
-from jiuwenswarm.agents.harness.common.auto_harness.progress import determine_pipeline_status_from_log
+from jiuwenswarm.agents.harness.common.auto_harness.run_log_status import determine_pipeline_status_from_log
 from jiuwenswarm.agents.harness.common.auto_harness.task_store import TaskStore
 
 

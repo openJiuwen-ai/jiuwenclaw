@@ -16,7 +16,7 @@ from typing import TYPE_CHECKING, Any, Optional
 from openjiuwen.auto_harness.pipelines import META_EVOLVE_PIPELINE
 from openjiuwen.core.foundation.llm import Model
 
-from .progress import determine_pipeline_status_from_log, has_terminal_session_event
+from .run_log_status import determine_pipeline_status_from_log, has_terminal_session_event
 
 if TYPE_CHECKING:
     from .service import AutoHarnessService
