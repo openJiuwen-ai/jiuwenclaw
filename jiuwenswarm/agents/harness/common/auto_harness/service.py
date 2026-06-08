@@ -64,6 +64,7 @@ from .scheduler import Scheduler
 from .task_store import TaskStore
 from .config_validator import ConfigValidator
 from .issue_fix import IssueFixService, IssueStateStore
+from .issue_fix.gitcode_auth import configure_gitcode_auth
 
 logger = logging.getLogger(__name__)
 
@@ -531,59 +532,6 @@ class AutoHarnessService:
             )
             return (1, "", str(exc))
 
-    async def _run_git_config_secret(
-        self,
-        args: list[str],
-        cwd: Path,
-    ) -> tuple[int, str, str]:
-        """Run a git config command that may contain secrets.
-
-        Keep this separate from _run_git_command so failures never log the
-        command arguments, which may include an Authorization header.
-        """
-        try:
-            process = await asyncio.create_subprocess_exec(
-                "git",
-                *args,
-                cwd=str(cwd),
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-            )
-            stdout, stderr = await process.communicate()
-            return (
-                process.returncode or 0,
-                stdout.decode("utf-8", errors="replace"),
-                stderr.decode("utf-8", errors="replace"),
-            )
-        except Exception as exc:
-            logger.error("[AutoHarnessService] Secret git config command failed: %s", exc)
-            return (1, "", str(exc))
-
-    async def _configure_gitcode_auth(
-        self,
-        local_path: Path,
-        *,
-        username: str,
-        token: str,
-        push_remote: str,
-    ) -> None:
-        """Configure non-interactive GitCode auth for agent-run git commands."""
-        if not username or not token:
-            return
-        await self._run_git_config_secret(["config", "credential.helper", ""], local_path)
-        await self._run_git_config_secret(["config", "credential.interactive", "never"], local_path)
-        await self._run_git_config_secret(
-            [
-                "config",
-                "--unset-all",
-                "http.https://gitcode.com/.extraheader",
-            ],
-            local_path,
-        )
-        await self._run_git_config_secret(["config", "push.default", "current"], local_path)
-        if push_remote:
-            await self._run_git_config_secret(["config", "remote.pushDefault", push_remote], local_path)
-
     async def clone_or_update_repo(
         self,
         repo_url: str,
@@ -692,7 +640,7 @@ class AutoHarnessService:
                 cwd=local_path,
             )
 
-        await self._configure_gitcode_auth(
+        await configure_gitcode_auth(
             local_path,
             username=gitcode_username,
             token=gitcode_token,
