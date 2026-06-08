@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+import uuid
+
 import pytest
 
 from conftest import ManagerApiHarness
@@ -22,7 +24,8 @@ async def test_instance_create_list_get_patch_delete(manager_api: ManagerApiHarn
     assert create_resp.status_code == 200
     created = create_resp.json()["data"]
     jid = created["jiuwenclaw_id"]
-    assert jid.startswith("sp-")
+    parsed = uuid.UUID(jid)
+    assert str(parsed) == jid
 
     get_after_create = await h.http.get(h.instances_url(f"/{jid}"))
     assert get_after_create.status_code == 200

@@ -18,9 +18,10 @@
 7. §2.7 ``config-effective/global-policies``（每实例唯一；已存在则 PUT 更新）
 8. §2.8 两条 ``config-default-template-mappings``（2.8.1–2.8.2）
 
-典型用法（PowerShell 一行）::
+典型用法（PowerShell，项目根目录）::
 
-    uv run python packages/jiuwenclaw-ee/claw_manager/scripts/enterprise_config_demo_data_config.py sp-xxxxxxxxxxxx
+    uv run python packages/jiuwenclaw-ee/claw_manager/scripts/enterprise_config_demo_data_config.py \\
+        b26bc496-dfee-488b-a2ab-8bae8ce94985
 
 可选环境变量 ``CLAWMANAGER_BASE_URL`` 覆盖 Manager 根地址。
 """
@@ -673,7 +674,7 @@ def _parse_args() -> argparse.Namespace:
     )
     p.add_argument(
         "jiuwenclaw_id",
-        help="provision-local 返回的 jiuwenclaw_id（如 sp-xxxxxxxxxxxx）",
+        help="provision-local 返回的 jiuwenclaw_id（如 b26bc496-dfee-488b-a2ab-8bae8ce94985）",
     )
     p.add_argument(
         "--manager-base",
