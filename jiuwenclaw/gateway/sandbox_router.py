@@ -45,6 +45,7 @@ _SYSTEM_SESSION_ID_PREFIXES = ("__", "heartbeat_", "cron")
 _SANDBOX_BACKUP_ENABLE_ENV = "SANDBOX_BACKUP_ENABLE"
 _SANDBOX_BACKUP_PERIOD_SECONDS_ENV = "SANDBOX_BACKUP_PERIOD_SECONDS"
 _SANDBOX_BACKUP_DEFAULT_PERIOD_SECONDS = 600.0
+_SANDBOX_TOTAL_CAPACITY_BUSY_ERROR = "服务端繁忙，请稍后再试"
 
 
 def _env_bool(name: str, *, default: bool) -> bool:
@@ -118,6 +119,7 @@ class SandboxRouterAgentClient(AgentServerClient):
         self,
         *,
         max_sandboxes: int | None = None,
+        max_total_sandboxes: int | None = None,
         queue_max_size: int | None = None,
         queue_timeout_seconds: float | None = None,
         idle_timeout_seconds: float | None = None,
@@ -135,6 +137,14 @@ class SandboxRouterAgentClient(AgentServerClient):
         self._max_sandboxes = max(
             1,
             int(max_sandboxes if max_sandboxes is not None else settings.max_sandboxes),
+        )
+        self._max_total_sandboxes = max(
+            0,
+            int(
+                max_total_sandboxes
+                if max_total_sandboxes is not None
+                else settings.max_total_sandboxes
+            ),
         )
         self._queue_enabled = True
         self._queue_max_size = max(
@@ -592,6 +602,46 @@ class SandboxRouterAgentClient(AgentServerClient):
         await self._maybe_refresh_sandbox_duration(runtime)
         return runtime
 
+    async def _get_dcs_active_sandbox_count(self) -> int | None:
+        try:
+            return await self._get_routing_dcs_store().count_routing_entries()
+        except Exception:  # noqa: BLE001
+            logger.exception("Failed to count sandbox routing entries in DCS")
+            return None
+
+    async def _log_dcs_active_sandbox_count(
+        self,
+        event: str,
+        *,
+        sandbox_id: str | None = None,
+    ) -> None:
+        active_count = await self._get_dcs_active_sandbox_count()
+        if active_count is None:
+            return
+        logger.info(
+            "DCS active sandbox count after %s: count=%d sandbox_id=%s",
+            event,
+            active_count,
+            str(sandbox_id or ""),
+        )
+
+    async def _ensure_dcs_sandbox_total_capacity(self) -> None:
+        if self._max_total_sandboxes <= 0:
+            return
+        active_count = await self._get_dcs_active_sandbox_count()
+        if active_count is None:
+            logger.warning(
+                "Skipping global total capacity check because DCS routing count failed"
+            )
+            return
+        if active_count >= self._max_total_sandboxes:
+            logger.warning(
+                "Global sandbox total capacity reached: active_count=%d limit=%d",
+                active_count,
+                self._max_total_sandboxes,
+            )
+            raise RuntimeError(_SANDBOX_TOTAL_CAPACITY_BUSY_ERROR)
+
     async def _create_and_bind_sandbox(
         self,
         routing_key: str,
@@ -603,6 +653,7 @@ class SandboxRouterAgentClient(AgentServerClient):
         dcs_registered = False
         routing_claimed = False
         try:
+            await self._ensure_dcs_sandbox_total_capacity()
             sandbox_client = self._get_sandbox_client()
             result = await sandbox_client.create_sandbox()
             if not result.success:
@@ -652,7 +703,7 @@ class SandboxRouterAgentClient(AgentServerClient):
                 "session_id": session_id,
                 **registration,
             }
-            return await self._build_runtime_from_sandbox(
+            runtime = await self._build_runtime_from_sandbox(
                 routing_key,
                 sandbox_id=sandbox_id,
                 user_id=user_id,
@@ -662,6 +713,11 @@ class SandboxRouterAgentClient(AgentServerClient):
                     sandbox_id, routing_key, metadata
                 ),
             )
+            await self._log_dcs_active_sandbox_count(
+                "sandbox create",
+                sandbox_id=sandbox_id,
+            )
+            return runtime
         except Exception:
             if sandbox_id and routing_claimed:
                 await self._delete_routing_mapping(
@@ -915,6 +971,10 @@ class SandboxRouterAgentClient(AgentServerClient):
                     runtime.status = SandboxStatus.TERMINATED
                     self._runtimes.pop(routing_key, None)
                 self._notify_next_waiter()
+                await self._log_dcs_active_sandbox_count(
+                    "sandbox terminate",
+                    sandbox_id=sandbox_id,
+                )
 
     async def _delete_remote_sandbox(self, sandbox_id: str) -> bool:
         """Delete the remote sandbox. Return False on failure so DCS metadata can be retained."""

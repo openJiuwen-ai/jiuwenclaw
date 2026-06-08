@@ -11,6 +11,7 @@ from jiuwenclaw.utils import logger
 
 # Backward-compatible alias for tests / imports.
 SandboxRoutingDcsConfig = DcsClusterConfig
+SANDBOX_ROUTING_REDIS_PREFIX = "jiuwen:sandboxRouting:"
 
 
 def get_gateway_instance_id() -> str:
@@ -70,7 +71,11 @@ class SandboxRoutingDcsStore:
 
     @staticmethod
     def _routing_key(routing_key: str) -> str:
-        return f"jiuwen:sandboxRouting:{routing_key}"
+        return f"{SANDBOX_ROUTING_REDIS_PREFIX}{routing_key}"
+
+    async def count_routing_entries(self) -> int:
+        """Count active ``jiuwen:sandboxRouting:*`` entries in DCS."""
+        return await self._dcs.count_keys(f"{SANDBOX_ROUTING_REDIS_PREFIX}*")
 
     @staticmethod
     def _serialize(record: SandboxRoutingRecord) -> str:

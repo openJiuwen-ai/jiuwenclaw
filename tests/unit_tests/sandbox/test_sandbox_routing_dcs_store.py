@@ -41,6 +41,15 @@ class InMemoryFakeRedis:
     async def aclose(self) -> None:
         return None
 
+    async def scan_iter(self, *, match: str = "*", count: int = 10):
+        prefix = match[:-1] if match.endswith("*") else match
+        for key in self._data:
+            if match.endswith("*"):
+                if key.startswith(prefix):
+                    yield key
+            elif key == match:
+                yield key
+
 
 def _make_store() -> tuple[SandboxRoutingDcsStore, InMemoryFakeRedis]:
     cfg = DcsClusterConfig(host="fake", port=2881, password=None, ttl_seconds=3600)
@@ -96,6 +105,15 @@ async def test_routing_ttl_from_sandbox_dcs_ttl_env(
     key = "vibeskill:user:u1"
     await store.save_routing(key, sandbox_id="sb-1", gateway_id="gw-1")
     assert fake._ttl[f"jiuwen:sandboxRouting:{key}"] == 7200
+
+
+@pytest.mark.asyncio
+async def test_count_routing_entries_scans_prefix() -> None:
+    store, fake = _make_store()
+    fake._data["jiuwen:sandboxRouting:vibeskill:user:u1"] = "{}"
+    fake._data["jiuwen:sandboxRouting:vibeskill:user:u2"] = "{}"
+    fake._data["jiuwen:sandboxApiKey:sb-1"] = "hash"
+    assert await store.count_routing_entries() == 2
 
 
 @pytest.mark.asyncio
