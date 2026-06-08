@@ -43,6 +43,7 @@ def _determine_pipeline_status_from_log(log_path) -> dict[str, Any]:
     pipeline_type: str = ""
     pipeline_stages: list[str] = []
     stage_results: dict[str, str] = {}
+    issue_fix_skip_assess_plan = False
 
     try:
         with log_path.open("r", encoding="utf-8") as lf:
@@ -54,6 +55,11 @@ def _determine_pipeline_status_from_log(log_path) -> dict[str, Any]:
                 if entry.get("event_type") == "harness.message" and entry.get("stages") and entry.get("pipeline"):
                     pipeline_stages = [s.get("slot") for s in entry["stages"]]
                     pipeline_type = entry.get("pipeline", "")
+                if (
+                    entry.get("event_type") == "harness.message"
+                    and "显式 GitCode issue 修复任务，跳过 assess/plan" in str(entry.get("content") or "")
+                ):
+                    issue_fix_skip_assess_plan = True
                 if entry.get("event_type") == "harness.stage_result" and not entry.get("scope"):
                     slot = entry.get("stage")
                     status = entry.get("status")
@@ -71,6 +77,8 @@ def _determine_pipeline_status_from_log(log_path) -> dict[str, Any]:
         return {"failed": False, "error": ""}
 
     for slot in pipeline_stages:
+        if issue_fix_skip_assess_plan and slot in {"assess", "plan"}:
+            continue
         result = stage_results.get(slot)
         if result != "success":
             return {
@@ -79,6 +87,25 @@ def _determine_pipeline_status_from_log(log_path) -> dict[str, Any]:
             }
 
     return {"failed": False, "error": ""}
+
+
+def _has_terminal_session_event(log_path: Path) -> bool:
+    """Return whether a structured run log contains a terminal session event."""
+    try:
+        with log_path.open("r", encoding="utf-8") as lf:
+            for line in lf:
+                try:
+                    entry = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if (
+                    entry.get("event_type") == "harness.session_finished"
+                    and entry.get("is_terminal") is True
+                ):
+                    return True
+    except Exception as exc:
+        logger.warning("[Scheduler] Failed to scan terminal event in %s: %s", log_path, exc)
+    return False
 
 
 class Scheduler:
@@ -406,9 +433,33 @@ class Scheduler:
                     event_type = chunk.payload.get("event_type", "")
                     if event_type in ("context.usage", "context.compression_state"):
                         continue
+                    if event_type == "harness.message" and chunk.payload.get("stage"):
+                        logger.info(
+                            "[Scheduler] Task %s execution %s stage=%s message=%s",
+                            task_id,
+                            execution_id,
+                            chunk.payload.get("stage"),
+                            str(chunk.payload.get("content") or "")[:160],
+                        )
+                    elif event_type == "harness.stage_result":
+                        logger.info(
+                            "[Scheduler] Task %s execution %s stage=%s status=%s error=%s",
+                            task_id,
+                            execution_id,
+                            chunk.payload.get("stage"),
+                            chunk.payload.get("status"),
+                            str(chunk.payload.get("error") or "")[:200],
+                        )
                     # Append log chunk via thread pool (avoids blocking event loop)
                     line = json.dumps(chunk.payload, ensure_ascii=False) + "\n"
                     await asyncio.to_thread(_sync_append_log, log_path, line)
+                    if event_type == "harness.session_finished" and chunk.payload.get("is_terminal") is True:
+                        logger.info(
+                            "[Scheduler] Task %s execution %s received terminal session event",
+                            task_id,
+                            execution_id,
+                        )
+                        break
 
             logger.info(
                 "[Scheduler] Task %s execution %s completed successfully",
@@ -425,6 +476,12 @@ class Scheduler:
             logger.exception("[Scheduler] Task %s execution %s failed: %s", task_id, execution_id, e)
 
         finally:
+            if final_status == "success" and log_path.exists() and not _has_terminal_session_event(log_path):
+                logger.warning(
+                    "[Scheduler] Task %s execution %s ended without terminal session event",
+                    task_id,
+                    execution_id,
+                )
             if final_status == "success" and log_path.exists():
                 result = _determine_pipeline_status_from_log(log_path)
                 if result["failed"]:

@@ -8,14 +8,62 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 import shutil
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
-from .scheduler import _determine_pipeline_status_from_log
+from .scheduler import _determine_pipeline_status_from_log, _has_terminal_session_event
 
 logger = logging.getLogger(__name__)
+
+META_EVOLVE_STAGE_ORDER = [
+    "assess",
+    "plan",
+    "implement",
+    "verify",
+    "commit",
+    "publish",
+    "learnings",
+]
+
+STAGE_DISPLAY_NAMES = {
+    "assess": "评估",
+    "plan": "规划",
+    "implement": "实现",
+    "verify": "验证",
+    "commit": "提交",
+    "publish": "发布 PR",
+    "learnings": "经验总结",
+    "build_verify": "构建验证",
+    "activate": "激活",
+}
+
+
+def _classify_failure(error: str, last_message: str = "") -> str:
+    """Return a stable failure code suitable for compact UI display."""
+    text = f"{error}\n{last_message}".lower()
+    if "missing required labels" in text:
+        return "missing_required_labels"
+    if "no allowed files" in text or "no changes" in text or "did not create a new commit" in text:
+        return "no_effective_diff"
+    if "git branch push failed" in text or "push failed" in text:
+        return "push_rejected"
+    if "gitcode pr creation failed" in text or "http error 400" in text or "bad request" in text:
+        return "pr_api_failed"
+    if "lint" in text or "type-check" in text or "ci" in text or "verify" in text:
+        return "verify_failed"
+    if "file must be read before editing" in text or "tool" in text:
+        return "agent_tool_error"
+    return "unknown_failure"
+
+
+def _extract_pr_url_from_text(text: str) -> str:
+    for url in re.findall(r"https://gitcode\.com/[^\s)>\"]+", text):
+        if re.search(r"/(?:pulls|pull_requests|merge_requests)/\d+", url):
+            return url
+    return ""
 
 
 def _sync_write_json(path: Path, data: str) -> None:
@@ -108,6 +156,194 @@ class TaskStore:
         """List all tasks — reads from in-memory cache (zero I/O)."""
         data = self._load_tasks()
         return data.get("tasks", [])
+
+    def _latest_log_path_for_task(self, task: dict[str, Any]) -> Optional[Path]:
+        """Return the best log file to summarize task progress."""
+        task_id = str(task.get("task_id") or "")
+        current_execution_id = str(task.get("current_execution_id") or "")
+        if task_id and current_execution_id:
+            current = self._runs_dir / task_id / current_execution_id / "log.json"
+            if current.exists():
+                return current
+
+        history = task.get("execution_history") or []
+        if history:
+            sorted_history = sorted(
+                history,
+                key=lambda r: r.get("completed_at") or r.get("started_at") or "",
+                reverse=True,
+            )
+            for record in sorted_history:
+                log_path_str = str(record.get("log_path") or "")
+                candidates = []
+                if log_path_str:
+                    candidates.append(Path(log_path_str))
+                execution_id = str(record.get("execution_id") or "")
+                if task_id and execution_id:
+                    candidates.append(self._runs_dir / task_id / execution_id / "log.json")
+                for candidate in candidates:
+                    if candidate.exists():
+                        return candidate
+        return None
+
+    @staticmethod
+    def _format_progress_summary(progress: dict[str, Any]) -> str:
+        failed_stage = progress.get("failed_stage")
+        current_stage = progress.get("current_stage")
+        completed = progress.get("completed_stages") or []
+        total = len(progress.get("stages") or [])
+        if failed_stage:
+            return f"失败于 {STAGE_DISPLAY_NAMES.get(failed_stage, failed_stage)}"
+        if current_stage:
+            return f"{len(completed)}/{total} 已完成，正在 {STAGE_DISPLAY_NAMES.get(current_stage, current_stage)}"
+        if total and len(completed) >= total:
+            return f"{len(completed)}/{total} 已完成"
+        if total:
+            return f"{len(completed)}/{total} 已完成"
+        return "暂无阶段日志"
+
+    @classmethod
+    def summarize_progress_from_logs(cls, logs: list[dict[str, Any]]) -> dict[str, Any]:
+        """Summarize stage progress from structured harness logs."""
+        pipeline = ""
+        stage_order: list[str] = []
+        stage_status: dict[str, str] = {}
+        stage_messages: dict[str, list[str]] = {}
+        last_stage_message = ""
+        last_message_stage = ""
+        last_event_type = ""
+        last_error = ""
+        pr_url = ""
+
+        for entry in logs:
+            event_type = str(entry.get("event_type") or "")
+            last_event_type = event_type or last_event_type
+            if event_type == "harness.message":
+                if entry.get("pipeline") and entry.get("stages"):
+                    pipeline = str(entry.get("pipeline") or pipeline)
+                    stage_order = [
+                        str(stage.get("slot") or "")
+                        for stage in entry.get("stages") or []
+                        if stage.get("slot")
+                    ]
+                stage = str(entry.get("stage") or "")
+                content = str(entry.get("content") or "")
+                if content and not pr_url:
+                    pr_url = _extract_pr_url_from_text(content)
+                if stage:
+                    last_message_stage = stage
+                    if content:
+                        last_stage_message = content
+                        stage_messages.setdefault(stage, []).append(content)
+            elif event_type == "harness.stage_result" and not entry.get("scope"):
+                stage = str(entry.get("stage") or "")
+                status = str(entry.get("status") or "")
+                if stage:
+                    stage_status[stage] = status
+                    if entry.get("error"):
+                        last_error = str(entry.get("error") or "")
+                    if stage not in stage_order:
+                        stage_order.append(stage)
+                    messages = entry.get("messages") or []
+                    if messages:
+                        stage_messages.setdefault(stage, []).extend(str(msg) for msg in messages)
+                        if not pr_url:
+                            pr_url = _extract_pr_url_from_text("\n".join(str(msg) for msg in messages))
+            elif event_type == "harness.session_finished":
+                if entry.get("error"):
+                    last_error = str(entry.get("error") or "")
+
+        if not stage_order:
+            stage_order = list(META_EVOLVE_STAGE_ORDER)
+            for stage in stage_status:
+                if stage not in stage_order:
+                    stage_order.append(stage)
+
+        completed = [
+            stage for stage in stage_order
+            if stage_status.get(stage) == "success"
+        ]
+        failed_stage = next(
+            (
+                stage for stage in stage_order
+                if stage_status.get(stage) == "failed"
+            ),
+            "",
+        )
+        current_stage = ""
+        if not failed_stage:
+            if last_message_stage and stage_status.get(last_message_stage) not in {"success", "failed"}:
+                current_stage = last_message_stage
+            else:
+                current_stage = next(
+                    (
+                        stage for stage in stage_order
+                        if stage_status.get(stage) != "success"
+                    ),
+                    "",
+                )
+
+        stages = []
+        for stage in stage_order:
+            status = stage_status.get(stage)
+            if not status:
+                status = "running" if stage == current_stage else "pending"
+            recent_messages = stage_messages.get(stage) or []
+            stages.append({
+                "stage": stage,
+                "name": STAGE_DISPLAY_NAMES.get(stage, stage),
+                "status": status,
+                "messages": recent_messages[-3:],
+            })
+
+        progress = {
+            "pipeline": pipeline,
+            "stages": stages,
+            "completed_stages": completed,
+            "current_stage": current_stage,
+            "failed_stage": failed_stage,
+            "last_message": last_stage_message,
+            "last_event_type": last_event_type,
+            "last_error": last_error,
+            "failure_code": _classify_failure(last_error, last_stage_message) if failed_stage else "",
+            "pr_url": pr_url,
+        }
+        progress["summary"] = cls._format_progress_summary(progress)
+        return progress
+
+    async def summarize_task_progress(self, task: dict[str, Any]) -> dict[str, Any]:
+        """Read the latest task log and return a compact progress summary."""
+        log_path = self._latest_log_path_for_task(task)
+        if not log_path:
+            return {
+                "summary": "暂无执行日志",
+                "stages": [
+                    {
+                        "stage": stage,
+                        "name": STAGE_DISPLAY_NAMES.get(stage, stage),
+                        "status": "pending",
+                        "messages": [],
+                    }
+                    for stage in META_EVOLVE_STAGE_ORDER
+                ],
+                "completed_stages": [],
+                "current_stage": "",
+                "failed_stage": "",
+            }
+        logs = await asyncio.to_thread(self.read_log, log_path, 0, -1)
+        progress = self.summarize_progress_from_logs(logs)
+        progress["log_path"] = str(log_path)
+        return progress
+
+    async def enrich_task_with_progress(self, task: dict[str, Any]) -> dict[str, Any]:
+        """Return a shallow task copy with latest progress attached."""
+        enriched = dict(task)
+        enriched["progress"] = await self.summarize_task_progress(task)
+        return enriched
+
+    async def enrich_tasks_with_progress(self, tasks: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Attach progress summaries to a list of tasks."""
+        return [await self.enrich_task_with_progress(task) for task in tasks]
 
     def list_pending_tasks(self) -> list[dict[str, Any]]:
         """List tasks with status 'pending' that are due for execution."""
@@ -349,12 +585,12 @@ class TaskStore:
         return {"error": f"未知的 log_type: {log_type}"}
 
     def has_legacy_completed_tasks(self) -> bool:
-        """Check if any task still has the blanket "completed" status (pre-migration)."""
+        """Check if any task may need log-based status reconciliation."""
         data = self._load_tasks()
-        return any(t.get("status") == "completed" for t in data.get("tasks", []))
+        return any(t.get("status") in {"completed", "running"} for t in data.get("tasks", []))
 
     async def reconcile_task_statuses(self) -> int:
-        """Re-check completed tasks against their logs and fix stale status values."""
+        """Re-check task logs and fix stale status values."""
         data = self._load_tasks()
         corrected = 0
 
@@ -362,20 +598,27 @@ class TaskStore:
             task_id = task.get("task_id")
             old_status = task.get("status")
 
-            if old_status not in ("completed", "success", "failed"):
+            if old_status not in ("completed", "success", "failed", "running"):
                 continue
 
             history = task.get("execution_history", [])
-            if not history:
+            latest = history[-1] if history else None
+            current_execution_id = str(task.get("current_execution_id") or "")
+            log_path = None
+            if current_execution_id:
+                candidate = self._runs_dir / str(task_id) / current_execution_id / "log.json"
+                if candidate.exists():
+                    log_path = candidate
+            if log_path is None and latest:
+                log_path_str = latest.get("log_path", "")
+                if log_path_str:
+                    candidate = Path(log_path_str)
+                    if candidate.exists():
+                        log_path = candidate
+            if log_path is None:
                 continue
 
-            latest = history[-1]
-            log_path_str = latest.get("log_path", "")
-            if not log_path_str:
-                continue
-
-            log_path = Path(log_path_str)
-            if not log_path.exists():
+            if old_status == "running" and not _has_terminal_session_event(log_path):
                 continue
 
             result = _determine_pipeline_status_from_log(log_path)
@@ -383,6 +626,16 @@ class TaskStore:
 
             if new_status != old_status:
                 task["status"] = new_status
+                task["current_execution_id"] = None
+                if latest is None or latest.get("execution_id") != current_execution_id:
+                    latest = {
+                        "execution_id": current_execution_id,
+                        "started_at": task.get("created_at"),
+                        "completed_at": datetime.now(timezone.utc).isoformat(),
+                        "log_path": str(log_path),
+                    }
+                    history.append(latest)
+                    task["execution_history"] = history
                 latest["status"] = new_status
                 if result["error"]:
                     latest["error"] = result["error"]

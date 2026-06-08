@@ -118,6 +118,178 @@ function getPipelineCompletions(_partial: string, parts: string[]): string[] {
 
 // Helper functions
 
+type AutoHarnessStageProgress = {
+  stage: string;
+  name?: string;
+  status: string;
+  messages?: string[];
+};
+
+type AutoHarnessProgress = {
+  summary?: string;
+  stages?: AutoHarnessStageProgress[];
+  completed_stages?: string[];
+  current_stage?: string;
+  failed_stage?: string;
+  last_message?: string;
+  last_error?: string;
+  failure_code?: string;
+  pr_url?: string;
+};
+
+type IssueFixTaskStatus = {
+  error?: string;
+  task_id?: string;
+  status?: string;
+  progress?: AutoHarnessProgress;
+};
+
+type IssueFixWatchItem = {
+  issue: number;
+  taskId?: string;
+  status: string;
+  reason?: string;
+  lastMessage?: string;
+  currentStage?: string;
+  failedStage?: string;
+  failureCode?: string;
+  prUrl?: string;
+};
+
+const ISSUE_FIX_WATCH_INTERVAL_MS = 5000;
+const ISSUE_FIX_WATCH_MAX_POLLS = 720; // 1 hour at 5s, command can be interrupted with Ctrl-C.
+const ISSUE_FIX_TERMINAL_STATUSES = new Set(["success", "failed", "cancelled", "skipped", "needs_human"]);
+const ISSUE_DIFFICULTY_VALUES = new Set(["low", "medium", "high", "unclear"]);
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function stageProgressIcon(status?: string): string {
+  switch (status) {
+    case "success":
+      return "✅";
+    case "failed":
+      return "❌";
+    case "running":
+      return "🔄";
+    case "pending":
+      return "⏳";
+    default:
+      return "·";
+  }
+}
+
+function latestStageWithStatus(progress: AutoHarnessProgress | undefined, status: string): string {
+  if (!progress?.stages) return "";
+  const stage = progress.stages.find((item) => item.status === status);
+  return stage?.stage || "";
+}
+
+function taskStatusToIssueFixItem(
+  issue: number,
+  taskId: string | undefined,
+  task: IssueFixTaskStatus | undefined,
+  fallbackStatus = "queued",
+  reason = "",
+): IssueFixWatchItem {
+  if (!taskId) {
+    return {
+      issue,
+      status: fallbackStatus,
+      reason,
+      lastMessage: reason,
+    };
+  }
+  if (!task || task.error) {
+    return {
+      issue,
+      taskId,
+      status: "unknown",
+      reason: task?.error || reason || "任务状态暂不可用",
+      lastMessage: task?.error || reason || "任务状态暂不可用",
+    };
+  }
+  const progress = task.progress;
+  const status = task.status || fallbackStatus;
+  return {
+    issue,
+    taskId,
+    status: status === "pending" ? "queued" : status,
+    currentStage: progress?.current_stage || latestStageWithStatus(progress, "running"),
+    failedStage: progress?.failed_stage || latestStageWithStatus(progress, "failed"),
+    failureCode: progress?.failure_code || "",
+    prUrl: progress?.pr_url || "",
+    lastMessage: progress?.last_message || progress?.last_error || reason,
+  };
+}
+
+function formatIssueFixStatusLine(item: IssueFixWatchItem): string {
+  const issue = `#${item.issue}`.padEnd(7, " ");
+  const status = (item.status || "unknown").padEnd(9, " ");
+  let stageText = "";
+  if (item.status === "running") {
+    stageText = item.currentStage ? `${item.currentStage} …` : "starting …";
+  } else if (item.status === "failed") {
+    stageText = item.failedStage ? `${item.failedStage} ×` : "failed";
+  } else if (item.status === "success") {
+    stageText = "done ✓";
+  } else if (item.status === "queued") {
+    stageText = "";
+  } else if (item.status === "skipped") {
+    stageText = "skipped";
+  } else if (item.status === "needs_human") {
+    stageText = "needs-human";
+  } else {
+    stageText = item.currentStage || item.reason || "";
+  }
+  const fail = item.failureCode ? `   cause: ${item.failureCode}` : "";
+  const pr = item.prUrl ? `   PR: ${item.prUrl}` : "";
+  const last = item.lastMessage ? `   last: ${item.lastMessage}` : "";
+  return `${issue} ${status}${stageText}${fail}${pr}${last}`;
+}
+
+function formatIssueFixStatusBlock(items: IssueFixWatchItem[]): string {
+  return items
+    .slice()
+    .sort((a, b) => a.issue - b.issue)
+    .map(formatIssueFixStatusLine)
+    .join("\n");
+}
+
+function isIssueFixWatchDone(items: IssueFixWatchItem[]): boolean {
+  return items.every((item) => ISSUE_FIX_TERMINAL_STATUSES.has(item.status));
+}
+
+function issueStartIntervalSeconds(concurrency: number): number {
+  if (concurrency <= 1) return 8;
+  if (concurrency === 2) return 2;
+  return 1.2;
+}
+
+function formatProgressLine(progress?: AutoHarnessProgress): string {
+  if (!progress) return "";
+  const summary = progress.summary || "";
+  if (!summary) return "";
+  return `   进度: ${summary}`;
+}
+
+function formatProgressBlock(progress?: AutoHarnessProgress): string[] {
+  if (!progress || !progress.stages || progress.stages.length === 0) {
+    return [];
+  }
+  const lines = ["", "阶段进度:"];
+  for (const stage of progress.stages) {
+    const name = stage.name || stage.stage;
+    const icon = stageProgressIcon(stage.status);
+    lines.push(`  ${icon} ${name}: ${stage.status}`);
+  }
+  if (progress.last_message) {
+    lines.push(`  最近: ${progress.last_message}`);
+  }
+  return lines;
+}
+
 function parseScheduleStartArgs(args: string): { interval: number; pipeline: string; query: string } {
   const parts = parseArgs(args);
 
@@ -373,9 +545,9 @@ const scheduleListCommand: SlashCommand = {
   action: async (ctx, _args) => {
     ctx.addItem(addInfo(ctx.sessionId, "\n🔍 正在查询任务...\n", "i"));
 
-    const result = await ctx.request<{ tasks?: Array<{ task_id: string; query: string; status: string; interval_hours: number; next_run_time: string; created_at: string; is_one_time?: boolean; pipeline?: string }> }>("schedule.list", {});
+    const result = await ctx.request<{ tasks?: Array<{ task_id: string; query: string; status: string; interval_hours: number; next_run_time: string; created_at: string; is_one_time?: boolean; pipeline?: string; progress?: AutoHarnessProgress }> }>("schedule.list", {});
 
-    const tasks = result.tasks as Array<{ task_id: string; query: string; status: string; interval_hours: number; next_run_time: string; created_at: string; is_one_time?: boolean; pipeline?: string }> | undefined;
+    const tasks = result.tasks as Array<{ task_id: string; query: string; status: string; interval_hours: number; next_run_time: string; created_at: string; is_one_time?: boolean; pipeline?: string; progress?: AutoHarnessProgress }> | undefined;
     if (!tasks || tasks.length === 0) {
       ctx.addItem(addInfo(ctx.sessionId, "\n📭 暂无任务\n💡 使用 /auto-harness schedule start 创建定时任务\n   使用 /auto-harness run 创建一次性任务\n", "i"));
       return;
@@ -401,6 +573,8 @@ const scheduleListCommand: SlashCommand = {
       } else {
         lines.push(`   状态: ${task.status} | 间隔: ${task.interval_hours}h | 下次执行: ${formatLocalTime(task.next_run_time)}${pipelineInfo ? ` | ${pipelineInfo}` : ""}`);
       }
+      const progressLine = formatProgressLine(task.progress);
+      if (progressLine) lines.push(progressLine);
       lines.push(`   创建时间: ${formatLocalTime(task.created_at)}`);
       lines.push("");
     }
@@ -439,7 +613,7 @@ const scheduleStatusCommand: SlashCommand = {
       return;
     }
 
-    const result = await ctx.request<{ error?: string; task_id?: string; query?: string; status?: string; interval_hours?: number; created_at?: string; next_run_time?: string; current_execution_id?: string; execution_history?: Array<{ execution_id: string; status: string; completed_at?: string }>; is_one_time?: boolean; pipeline?: string }>("schedule.status", { task_id });
+    const result = await ctx.request<{ error?: string; task_id?: string; query?: string; status?: string; interval_hours?: number; created_at?: string; next_run_time?: string; current_execution_id?: string; execution_history?: Array<{ execution_id: string; status: string; completed_at?: string }>; is_one_time?: boolean; pipeline?: string; progress?: AutoHarnessProgress }>("schedule.status", { task_id });
 
     if (result.error) {
       ctx.addItem(
@@ -473,6 +647,7 @@ const scheduleStatusCommand: SlashCommand = {
       lines.push(`\n🔄 当前执行: ${result.current_execution_id}`);
       lines.push(`💡 使用 /auto-harness schedule logs ${result.task_id} 查看实时日志`);
     }
+    lines.push(...formatProgressBlock(result.progress));
 
     const history = result.execution_history as Array<{ execution_id: string; status: string; completed_at?: string }> | undefined;
     if (history && history.length > 0) {
@@ -2025,6 +2200,412 @@ const runCommand: SlashCommand = {
   },
 };
 
+function parseIssueNumbers(value: string): number[] {
+  return value
+    .split(/[,\s，]+/)
+    .map((v) => parseInt(v.trim(), 10))
+    .filter((v, index, arr) => Number.isFinite(v) && v > 0 && arr.indexOf(v) === index);
+}
+
+function parseIssueWatchArgs(args: string): { repo: string; labels: string[]; max_issues: number; dry_run: boolean; comment_on_start: boolean; pipeline: string; issue_numbers: number[]; max_auto_difficulty: string; concurrency: number } {
+  const parts = parseArgs(args);
+  let repo = "openJiuwen/jiuwenswarm";
+  let labels = ["auto-harness"];
+  let max_issues = 1;
+  let dry_run = false;
+  let comment_on_start = false;
+  let pipeline = "meta_evolve_pipeline";
+  let issue_numbers: number[] = [];
+  let max_auto_difficulty = "medium";
+  let concurrency = 1;
+
+  let i = 0;
+  while (i < parts.length) {
+    const part = parts[i];
+    if (part === "--repo" && i + 1 < parts.length) {
+      repo = parts[i + 1];
+      i += 2;
+    } else if ((part === "--label" || part === "--labels") && i + 1 < parts.length) {
+      labels = parts[i + 1].split(",").map((v) => v.trim()).filter(Boolean);
+      i += 2;
+    } else if ((part === "--max" || part === "--max-issues") && i + 1 < parts.length) {
+      const parsed = parseInt(parts[i + 1], 10);
+      max_issues = Number.isFinite(parsed) ? parsed : 1;
+      i += 2;
+    } else if ((part === "--issue" || part === "--issues") && i + 1 < parts.length) {
+      issue_numbers = parseIssueNumbers(parts[i + 1]);
+      i += 2;
+    } else if (part === "--pipeline" && i + 1 < parts.length) {
+      pipeline = resolvePipelineName(parts[i + 1]);
+      i += 2;
+    } else if ((part === "--max-difficulty" || part === "--difficulty") && i + 1 < parts.length) {
+      max_auto_difficulty = parts[i + 1].toLowerCase();
+      i += 2;
+    } else if (part === "--concurrency" && i + 1 < parts.length) {
+      const parsed = parseInt(parts[i + 1], 10);
+      concurrency = Number.isFinite(parsed) && parsed > 0 ? parsed : 1;
+      i += 2;
+    } else if (part === "--dry-run") {
+      dry_run = true;
+      i += 1;
+    } else if (part === "--comment") {
+      comment_on_start = true;
+      i += 1;
+    } else {
+      i += 1;
+    }
+  }
+
+  if (issue_numbers.length > 0) {
+    max_issues = issue_numbers.length;
+  }
+
+  return { repo, labels, max_issues, dry_run, comment_on_start, pipeline, issue_numbers, max_auto_difficulty, concurrency };
+}
+
+function parseIssueFixArgs(args: string): { repo: string; issue_numbers: number[]; dry_run: boolean; comment_on_start: boolean; pipeline: string; max_auto_difficulty: string; concurrency: number } {
+  const parts = parseArgs(args);
+  let repo = "openJiuwen/jiuwenswarm";
+  let dry_run = false;
+  let comment_on_start = false;
+  let pipeline = "meta_evolve_pipeline";
+  let max_auto_difficulty = "medium";
+  let concurrency = 1;
+  const numberParts: string[] = [];
+
+  let i = 0;
+  while (i < parts.length) {
+    const part = parts[i];
+    if (part === "--repo" && i + 1 < parts.length) {
+      repo = parts[i + 1];
+      i += 2;
+    } else if (part === "--pipeline" && i + 1 < parts.length) {
+      pipeline = resolvePipelineName(parts[i + 1]);
+      i += 2;
+    } else if ((part === "--max-difficulty" || part === "--difficulty") && i + 1 < parts.length) {
+      max_auto_difficulty = parts[i + 1].toLowerCase();
+      i += 2;
+    } else if (part === "--concurrency" && i + 1 < parts.length) {
+      const parsed = parseInt(parts[i + 1], 10);
+      concurrency = Number.isFinite(parsed) && parsed > 0 ? parsed : 1;
+      i += 2;
+    } else if (part === "--dry-run") {
+      dry_run = true;
+      i += 1;
+    } else if (part === "--comment") {
+      comment_on_start = true;
+      i += 1;
+    } else {
+      numberParts.push(part);
+      i += 1;
+    }
+  }
+
+  return {
+    repo,
+    issue_numbers: parseIssueNumbers(numberParts.join(",")),
+    dry_run,
+    comment_on_start,
+    pipeline,
+    max_auto_difficulty,
+    concurrency,
+  };
+}
+
+function formatIssueWatchResult(result: {
+  fetched?: number;
+  started?: Array<{ number?: number; issue?: number; task_id?: string; status?: string; title?: string; difficulty?: { level?: string; score?: number; reasons?: string[] } }>;
+  skipped?: Array<{ issue?: number; reason?: string; status?: string; human_label?: string; difficulty?: { level?: string; score?: number; reasons?: string[] } }>;
+  reconciled?: Array<{ number?: number; status?: string; pr_url?: string }>;
+}): string {
+  const lines = ["\nGitCode issue 处理完成", "━━━━━━━━━━━━━━━━━━━━━━"];
+  lines.push(`拉取数量: ${result.fetched ?? 0}`);
+  lines.push(`新建任务: ${result.started?.length ?? 0}`);
+  for (const item of result.started || []) {
+    const difficulty = item.difficulty?.level ? ` difficulty=${item.difficulty.level}` : "";
+    lines.push(`  #${item.number ?? item.issue}: ${item.task_id || item.status || "dry-run"}${difficulty}`);
+  }
+  if (result.reconciled && result.reconciled.length > 0) {
+    lines.push(`状态更新: ${result.reconciled.length}`);
+    for (const item of result.reconciled) {
+      lines.push(`  #${item.number}: ${item.status}${item.pr_url ? ` ${item.pr_url}` : ""}`);
+    }
+  }
+  if (result.skipped && result.skipped.length > 0) {
+    lines.push(`跳过: ${result.skipped.length}`);
+    for (const item of result.skipped.slice(0, 10)) {
+      const difficulty = item.difficulty?.level ? ` difficulty=${item.difficulty.level}` : "";
+      const human = item.human_label ? ` label=${item.human_label}` : "";
+      lines.push(`  #${item.issue}: ${item.reason || item.status || "skipped"}${difficulty}${human}`);
+    }
+  }
+  lines.push("━━━━━━━━━━━━━━━━━━━━━━");
+  return lines.join("\n");
+}
+
+const issueWatchOnceCommand: SlashCommand = {
+  name: "watch-once",
+  description: "拉取 GitCode issue 并创建 auto_harness 任务",
+  usage: "/auto-harness issue watch-once [--repo owner/repo] [--label auto-harness] [--max 1] [--issues 1272,1271] [--dry-run]",
+  example: "/auto-harness issue watch-once --repo openJiuwen/jiuwenswarm --label auto-harness --max 1",
+  kind: CommandKind.BUILT_IN,
+  takesArgs: true,
+  action: async (ctx, args) => {
+    const parsed = parseIssueWatchArgs(args);
+    if (!PIPELINE_BACKEND_VALUES.includes(parsed.pipeline)) {
+      ctx.addItem(addError(ctx.sessionId, `无效的 pipeline: ${parsed.pipeline}`));
+      return;
+    }
+    if (!ISSUE_DIFFICULTY_VALUES.has(parsed.max_auto_difficulty)) {
+      ctx.addItem(addError(ctx.sessionId, `无效的难度上限: ${parsed.max_auto_difficulty}\n可选值: low, medium, high, unclear`));
+      return;
+    }
+
+    const configCheck = await ctx.request<{ valid: boolean; missing_fields?: Array<{ id: string; prompt: string }> }>("schedule.check_config", {});
+    const missingFields = configCheck.missing_fields as Array<{ id: string; prompt: string }> | undefined;
+    if (missingFields && missingFields.length > 0) {
+      const missingList = missingFields.map(f => `  - ${f.prompt}`).join("\n");
+      ctx.addItem(addInfo(ctx.sessionId, `GitCode issue 自动处理需要配置:\n${missingList}\n\n请使用 /config edit 配置这些字段后重试`));
+      return;
+    }
+
+    ctx.addItem(addInfo(ctx.sessionId, `\n正在扫描 GitCode issue...\n仓库: ${parsed.repo}\n${parsed.issue_numbers.length > 0 ? `指定 Issue: ${parsed.issue_numbers.map(n => `#${n}`).join(", ")}` : `标签: ${parsed.labels.join(", ")}`}\n`, "i"));
+    const result = await ctx.request<{
+      error?: string;
+      fetched?: number;
+      started?: Array<{ number?: number; issue?: number; task_id?: string; status?: string; title?: string }>;
+      skipped?: Array<{ issue?: number; reason?: string; status?: string }>;
+      reconciled?: Array<{ number?: number; status?: string; pr_url?: string }>;
+    }>("issue.watch_once", {
+      repo: parsed.repo,
+      labels: parsed.labels,
+      issue_numbers: parsed.issue_numbers,
+      max_issues: parsed.max_issues,
+      dry_run: parsed.dry_run,
+      comment_on_start: parsed.comment_on_start,
+      pipeline: parsed.pipeline,
+      max_auto_difficulty: parsed.max_auto_difficulty,
+      start_interval_seconds: issueStartIntervalSeconds(parsed.concurrency),
+    });
+
+    if (result.error) {
+      ctx.addItem(addError(ctx.sessionId, `扫描失败: ${result.error}`));
+      return;
+    }
+
+    ctx.addItem(addInfo(ctx.sessionId, formatIssueWatchResult(result)));
+  },
+};
+
+const issueFixCommand: SlashCommand = {
+  name: "fix",
+  description: "指定单个或多个 GitCode issue 创建独立修复任务",
+  usage: "/auto-harness issue fix <issue_numbers> [--repo owner/repo] [--max-difficulty medium] [--concurrency 1] [--dry-run]",
+  example: "/auto-harness issue fix 1272,1271,1270 --repo openJiuwen/jiuwenswarm --max-difficulty medium --concurrency 1",
+  kind: CommandKind.BUILT_IN,
+  takesArgs: true,
+  action: async (ctx, args) => {
+    const parsed = parseIssueFixArgs(args);
+    if (parsed.issue_numbers.length === 0) {
+      ctx.addItem(addError(ctx.sessionId, "请提供 issue 编号\n示例: /auto-harness issue fix 1272,1271,1270"));
+      return;
+    }
+    if (!PIPELINE_BACKEND_VALUES.includes(parsed.pipeline)) {
+      ctx.addItem(addError(ctx.sessionId, `无效的 pipeline: ${parsed.pipeline}`));
+      return;
+    }
+    if (!ISSUE_DIFFICULTY_VALUES.has(parsed.max_auto_difficulty)) {
+      ctx.addItem(addError(ctx.sessionId, `无效的难度上限: ${parsed.max_auto_difficulty}\n可选值: low, medium, high, unclear`));
+      return;
+    }
+
+    const configCheck = await ctx.request<{ valid: boolean; missing_fields?: Array<{ id: string; prompt: string }> }>("schedule.check_config", {});
+    const missingFields = configCheck.missing_fields as Array<{ id: string; prompt: string }> | undefined;
+    if (missingFields && missingFields.length > 0) {
+      const missingList = missingFields.map(f => `  - ${f.prompt}`).join("\n");
+      ctx.addItem(addInfo(ctx.sessionId, `GitCode issue 自动处理需要配置:\n${missingList}\n\n请使用 /config edit 配置这些字段后重试`));
+      return;
+    }
+
+    ctx.addItem(addInfo(ctx.sessionId, `\n正在为指定 GitCode issue 创建修复任务...\n仓库: ${parsed.repo}\nIssue: ${parsed.issue_numbers.map(n => `#${n}`).join(", ")}\n自动修复难度上限: ${parsed.max_auto_difficulty}\n并发启动: ${parsed.concurrency}\n`, "i"));
+    const result = await ctx.request<{
+      error?: string;
+      fetched?: number;
+      started?: Array<{ number?: number; issue?: number; task_id?: string; status?: string; title?: string }>;
+      skipped?: Array<{ issue?: number; reason?: string; status?: string }>;
+      reconciled?: Array<{ number?: number; status?: string; pr_url?: string }>;
+    }>("issue.watch_once", {
+      repo: parsed.repo,
+      issue_numbers: parsed.issue_numbers,
+      max_issues: parsed.issue_numbers.length,
+      dry_run: parsed.dry_run,
+      comment_on_start: parsed.comment_on_start,
+      pipeline: parsed.pipeline,
+      max_auto_difficulty: parsed.max_auto_difficulty,
+      start_interval_seconds: issueStartIntervalSeconds(parsed.concurrency),
+    });
+
+    if (result.error) {
+      ctx.addItem(addError(ctx.sessionId, `创建失败: ${result.error}`));
+      return;
+    }
+
+    ctx.addItem(addInfo(ctx.sessionId, formatIssueWatchResult(result)));
+    if (parsed.dry_run) {
+      return;
+    }
+
+    const taskByIssue = new Map<number, string>();
+    for (const started of result.started || []) {
+      const issue = Number(started.issue ?? started.number ?? 0);
+      const taskId = started.task_id || "";
+      if (issue > 0 && taskId) {
+        taskByIssue.set(issue, taskId);
+      }
+    }
+
+    const skippedByIssue = new Map<number, string>();
+    for (const skipped of result.skipped || []) {
+      const issue = Number(skipped.issue ?? 0);
+      if (issue > 0) {
+        skippedByIssue.set(issue, skipped.reason || skipped.status || "skipped");
+      }
+    }
+
+    try {
+      const stateResult = await ctx.request<{
+        issues?: Array<{ key?: string; number?: number; task_id?: string; status?: string }>;
+      }>("issue.state.list", {}, 30000);
+      for (const issueState of stateResult.issues || []) {
+        const number = Number(issueState.number || String(issueState.key || "").split("#").pop() || 0);
+        const taskId = issueState.task_id || "";
+        if (parsed.issue_numbers.includes(number) && taskId && !taskByIssue.has(number)) {
+          taskByIssue.set(number, taskId);
+          skippedByIssue.delete(number);
+        }
+      }
+    } catch {
+      // Best effort only; newly-created tasks already carry task_id in watch_once result.
+    }
+
+    const watchItems = parsed.issue_numbers.map((issue) => {
+      const taskId = taskByIssue.get(issue);
+      const skippedReason = skippedByIssue.get(issue);
+      return taskId
+        ? taskStatusToIssueFixItem(issue, taskId, undefined, "queued")
+        : taskStatusToIssueFixItem(
+            issue,
+            undefined,
+            undefined,
+            skippedReason ? "skipped" : "queued",
+            skippedReason || "",
+          );
+    });
+    if (!watchItems.some((item) => item.taskId)) {
+      return;
+    }
+
+    ctx.addItem(addInfo(ctx.sessionId, `\nAuto-Harness issue fix 进度\n━━━━━━━━━━━━━━━━━━━━━━\n${formatIssueFixStatusBlock(watchItems)}\n━━━━━━━━━━━━━━━━━━━━━━`, "i"));
+
+    let previousBlock = formatIssueFixStatusBlock(watchItems);
+    let lastEmittedAt = Date.now();
+    for (let poll = 0; poll < ISSUE_FIX_WATCH_MAX_POLLS; poll++) {
+      if (ctx.isInterruptRequested()) {
+        ctx.clearInterruptRequested();
+        ctx.addItem(addInfo(ctx.sessionId, "已停止本地进度刷新，后台任务会继续执行。可用 /auto-harness schedule status <task_id> 查看单任务状态。", "i"));
+        return;
+      }
+      await sleep(ISSUE_FIX_WATCH_INTERVAL_MS);
+
+      const updatedItems: IssueFixWatchItem[] = [];
+      for (const issue of parsed.issue_numbers) {
+        const taskId = taskByIssue.get(issue);
+        const skippedReason = skippedByIssue.get(issue);
+        if (!taskId) {
+          updatedItems.push(
+            taskStatusToIssueFixItem(
+              issue,
+              undefined,
+              undefined,
+              skippedReason ? "skipped" : "queued",
+              skippedReason || "",
+            ),
+          );
+          continue;
+        }
+        let task: IssueFixTaskStatus;
+        try {
+          task = await ctx.request<IssueFixTaskStatus>("schedule.status", { task_id: taskId }, 30000);
+        } catch (error) {
+          task = {
+            error: error instanceof Error ? error.message : String(error),
+          };
+        }
+        updatedItems.push(taskStatusToIssueFixItem(issue, taskId, task, "queued"));
+      }
+
+      const block = formatIssueFixStatusBlock(updatedItems);
+      const shouldEmitHeartbeat = Date.now() - lastEmittedAt >= 30000;
+      if (block !== previousBlock || shouldEmitHeartbeat) {
+        ctx.addItem(addInfo(ctx.sessionId, `\nAuto-Harness issue fix 进度\n━━━━━━━━━━━━━━━━━━━━━━\n${block}\n━━━━━━━━━━━━━━━━━━━━━━`, "i"));
+        previousBlock = block;
+        lastEmittedAt = Date.now();
+      }
+      if (isIssueFixWatchDone(updatedItems)) {
+        return;
+      }
+    }
+    ctx.addItem(addInfo(ctx.sessionId, "本地进度刷新已达到 1 小时上限，后台任务会继续执行。", "i"));
+  },
+};
+
+const issueStateCommand: SlashCommand = {
+  name: "state",
+  description: "查看 GitCode issue 自动处理状态",
+  usage: "/auto-harness issue state",
+  kind: CommandKind.BUILT_IN,
+  takesArgs: false,
+  action: async (ctx, _args) => {
+    const result = await ctx.request<{ issues?: Array<{ key?: string; status?: string; task_id?: string; task_status?: string; title?: string; pr_url?: string; progress?: AutoHarnessProgress }> }>("issue.state.list", {});
+    const issues = result.issues || [];
+    if (issues.length === 0) {
+      ctx.addItem(addInfo(ctx.sessionId, "\n暂无 GitCode issue 处理记录\n"));
+      return;
+    }
+    const lines = ["\nGitCode issue 处理记录", "━━━━━━━━━━━━━━━━━━━━━━"];
+    for (const issue of issues.slice(-20)) {
+      const taskStatus = issue.task_status ? ` | task: ${issue.task_status}` : "";
+      lines.push(`${issue.key || ""} | ${issue.status || "unknown"}${issue.task_id ? ` | ${issue.task_id}` : ""}${taskStatus}`);
+      if (issue.title) lines.push(`  ${issue.title}`);
+      const progressLine = formatProgressLine(issue.progress);
+      if (progressLine) lines.push(progressLine);
+      if (issue.pr_url) lines.push(`  ${issue.pr_url}`);
+    }
+    lines.push("━━━━━━━━━━━━━━━━━━━━━━");
+    ctx.addItem(addInfo(ctx.sessionId, lines.join("\n")));
+  },
+};
+
+const issueCommand: SlashCommand = {
+  name: "issue",
+  description: "GitCode issue 自动处理",
+  usage: "/auto-harness issue <fix|watch-once|state>",
+  kind: CommandKind.BUILT_IN,
+  takesArgs: true,
+  subCommands: [issueFixCommand, issueWatchOnceCommand, issueStateCommand],
+  completion: (_ctx, partial) => {
+    const subNames = ["fix", "watch-once", "state"];
+    const prefix = partial.trim().toLowerCase();
+    if (!prefix) return subNames;
+    return subNames.filter((n) => n.startsWith(prefix));
+  },
+  action: (ctx, args) => {
+    if (!args.trim()) {
+      ctx.addItem(addError(ctx.sessionId, "用法: /auto-harness issue <fix|watch-once|state>\n示例:\n  /auto-harness issue fix 1272,1271\n  /auto-harness issue watch-once --repo openJiuwen/jiuwenswarm --label auto-harness\n  /auto-harness issue state"));
+    }
+  },
+};
+
 // Main auto-harness command
 
 export function createAutoHarnessCommand(): SlashCommand {
@@ -2034,9 +2615,9 @@ export function createAutoHarnessCommand(): SlashCommand {
     hidden: false, // Temporarily hidden from TUI, core functionality preserved for future re-enable
     kind: CommandKind.BUILT_IN,
     takesArgs: true,
-    subCommands: [runCommand, scheduleCommand],
+    subCommands: [runCommand, scheduleCommand, issueCommand],
     completion: (_ctx, partial) => {
-      const subNames = ["run", "schedule"];
+      const subNames = ["run", "schedule", "issue"];
       const prefix = partial.trim().toLowerCase();
       if (!prefix) return subNames;
       return subNames.filter((n) => n.startsWith(prefix));
@@ -2045,7 +2626,7 @@ export function createAutoHarnessCommand(): SlashCommand {
       const text = args.trim();
       if (!text) {
         ctx.addItem(
-          addError(ctx.sessionId, "用法: /auto-harness <run|schedule> [参数]\n子命令:\n  run       创建并执行一次性任务\n  schedule  管理定时任务\n示例:\n  /auto-harness run 优化上下文压缩能力\n  /auto-harness schedule list\n  /auto-harness schedule logs <task_id>")
+          addError(ctx.sessionId, "用法: /auto-harness <run|schedule|issue> [参数]\n子命令:\n  run       创建并执行一次性任务\n  schedule  管理定时任务\n  issue     处理 GitCode issue\n示例:\n  /auto-harness run 优化上下文压缩能力\n  /auto-harness schedule list\n  /auto-harness issue fix 1272,1271")
         );
       }
     },

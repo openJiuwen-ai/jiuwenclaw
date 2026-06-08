@@ -22,6 +22,7 @@ from copy import copy
 import json
 import logging
 import os
+import re
 import shutil
 import sys
 from dataclasses import dataclass
@@ -48,7 +49,7 @@ from openjiuwen.auto_harness.schema import (
     load_auto_harness_config,
 )
 from openjiuwen.auto_harness.contexts import TaskContext, TaskRuntime
-from openjiuwen.auto_harness.pipelines import EXTENDED_EVOLVE_PIPELINE
+from openjiuwen.auto_harness.pipelines import EXTENDED_EVOLVE_PIPELINE, META_EVOLVE_PIPELINE
 from openjiuwen.auto_harness.pipelines.extended_evolve_pipeline import (
     ExtensionTaskPipeline,
 )
@@ -63,6 +64,9 @@ from jiuwenswarm.common.utils import get_user_workspace_dir
 from .scheduler import Scheduler
 from .task_store import TaskStore
 from .config_validator import ConfigValidator
+from .gitcode_issue_client import GitCodeIssueClient
+from .issue_runner import GitCodeIssueRunner, IssueWatchOptions
+from .issue_state_store import IssueStateStore
 
 logger = logging.getLogger(__name__)
 
@@ -77,6 +81,35 @@ _DEFAULT_LOCAL_REPO = _AUTO_HARNESS_DATA_DIR / "repo" / "openJiuwen--agent-core"
 # Default values for ci_gate config
 _DEFAULT_CI_GATE_PYTHON_EXECUTABLE = sys.executable
 _DEFAULT_CI_GATE_INSTALL_COMMAND = "uv sync --active --group dev --extra cli"
+
+
+def _extract_gitcode_issue_number(query: str) -> str:
+    """Extract an issue number from the explicit GitCode issue-fix query."""
+    match = re.search(
+        r"GitCode\s+Issue\s*#?\s*(\d+)|\bIssue\s*#\s*(\d+)",
+        query,
+        flags=re.IGNORECASE,
+    )
+    if not match:
+        return ""
+    return next((group for group in match.groups() if group), "")
+
+
+def _build_auto_harness_task_from_query(query: str) -> OptimizationTask:
+    """Build a structured task, preserving issue identity when present."""
+    issue_number = _extract_gitcode_issue_number(query)
+    if issue_number:
+        return OptimizationTask(
+            topic=f"fix-issue-{issue_number}",
+            description=query,
+            issue_ref=f"#{issue_number}",
+            status="pending",
+        )
+    return OptimizationTask(
+        topic=query,
+        description=query,
+        status="pending",
+    )
 
 
 def reset_harness_packages_state() -> None:
@@ -202,6 +235,7 @@ class AutoHarnessService:
         self._scheduler: Optional[Scheduler] = None
         self._task_store: Optional[TaskStore] = None
         self._config_validator: Optional[ConfigValidator] = None
+        self._issue_state_store: Optional[IssueStateStore] = None
 
         # Initialize scheduler components
         self._init_scheduler()
@@ -334,6 +368,7 @@ class AutoHarnessService:
         """Initialize scheduler components (lazy, not started until needed)."""
         try:
             self._task_store = TaskStore(self.data_dir)
+            self._issue_state_store = IssueStateStore(self.data_dir)
             self._config_validator = ConfigValidator(
                 self.config_path,
                 base_config=self._base_config
@@ -350,11 +385,13 @@ class AutoHarnessService:
         """Start the scheduling loop (called by AgentWebSocketServer)."""
         if self._scheduler is None:
             self._init_scheduler()
-        # Reconcile legacy task statuses (async — requires file I/O)
-        if self._task_store is not None and self._task_store.has_legacy_completed_tasks():
+        # Reconcile stale task statuses (async — requires file I/O).
+        # This also fixes runs that emitted a terminal harness.session_finished
+        # event but were left as "running" by an older scheduler process.
+        if self._task_store is not None:
             corrected = await self._task_store.reconcile_task_statuses()
             if corrected > 0:
-                logger.info("[AutoHarnessService] Reconciled %d legacy task statuses", corrected)
+                logger.info("[AutoHarnessService] Reconciled %d stale task statuses", corrected)
         if self._scheduler is not None:
             await self._scheduler.start()
             logger.info("[AutoHarnessService] Scheduler started")
@@ -396,6 +433,176 @@ class AutoHarnessService:
             self._load_base_config()
 
         return result
+
+    @staticmethod
+    def _parse_repo_owner_name(repo: str) -> tuple[str, str]:
+        """Parse owner/repo from a GitCode URL or owner/repo string."""
+        raw = str(repo or "").strip()
+        if not raw:
+            return ("", "")
+        cleaned = raw.rstrip("/")
+        if cleaned.endswith(".git"):
+            cleaned = cleaned[:-4]
+        parts = [part for part in cleaned.split("/") if part]
+        if len(parts) >= 2:
+            return (parts[-2], parts[-1])
+        return ("", "")
+
+    def _resolve_issue_watch_repo(self, params: dict[str, Any]) -> tuple[str, str]:
+        owner = str(params.get("owner") or "").strip()
+        repo = str(params.get("repo_name") or "").strip()
+        if owner and repo:
+            return (owner, repo)
+        repo_param = str(params.get("repo") or "").strip()
+        if repo_param:
+            parsed_owner, parsed_repo = self._parse_repo_owner_name(repo_param)
+            if parsed_owner and parsed_repo:
+                return (parsed_owner, parsed_repo)
+        repo_url = (
+            self._base_config.repo_url
+            if self._base_config and self._base_config.repo_url
+            else _DEFAULT_REPO_URL
+        )
+        return self._parse_repo_owner_name(repo_url)
+
+    def _resolve_gitcode_token(self, params: dict[str, Any]) -> str:
+        token = str(params.get("access_token") or "").strip()
+        if token:
+            return token
+        env_token = os.getenv("GITCODE_ACCESS_TOKEN")
+        if env_token:
+            return env_token.strip()
+        if self._base_config is not None:
+            try:
+                return str(self._base_config.resolve_gitcode_token() or "").strip()
+            except Exception:
+                pass
+        return ""
+
+    @staticmethod
+    def _coerce_str_tuple(value: Any, default: tuple[str, ...]) -> tuple[str, ...]:
+        if value is None:
+            return default
+        if isinstance(value, str):
+            return tuple(part.strip() for part in value.split(",") if part.strip())
+        if isinstance(value, list | tuple):
+            return tuple(str(part).strip() for part in value if str(part).strip())
+        return default
+
+    @staticmethod
+    def _coerce_int_tuple(value: Any) -> tuple[int, ...]:
+        if value is None:
+            return ()
+        raw_parts: list[Any]
+        if isinstance(value, str):
+            raw_parts = [part.strip() for part in value.replace("，", ",").split(",")]
+        elif isinstance(value, int):
+            raw_parts = [value]
+        elif isinstance(value, list | tuple):
+            raw_parts = list(value)
+        else:
+            return ()
+
+        numbers: list[int] = []
+        for part in raw_parts:
+            try:
+                number = int(part)
+            except (TypeError, ValueError):
+                continue
+            if number > 0 and number not in numbers:
+                numbers.append(number)
+        return tuple(numbers)
+
+    async def watch_gitcode_issues_once(
+        self,
+        params: dict[str, Any],
+        model: Optional[Model] = None,
+    ) -> dict[str, Any]:
+        """Run one GitCode issue ingestion pass and create auto-harness tasks."""
+        if self._task_store is None or self._scheduler is None or self._issue_state_store is None:
+            self._init_scheduler()
+        if self._issue_state_store is None:
+            return {"error": "issue 状态存储未初始化"}
+
+        token = self._resolve_gitcode_token(params)
+        if not token:
+            return {"error": "缺少 GitCode Access Token，请配置 gitcode.access_token 或 GITCODE_ACCESS_TOKEN"}
+
+        owner, repo = self._resolve_issue_watch_repo(params)
+        if not owner or not repo:
+            return {"error": "无法解析 GitCode 仓库，请传入 repo=openJiuwen/jiuwenswarm"}
+
+        try:
+            max_issues = int(params.get("max_issues", 1))
+        except (TypeError, ValueError):
+            max_issues = 1
+        max_issues = max(1, min(max_issues, 5))
+
+        try:
+            per_page = int(params.get("per_page", 20))
+        except (TypeError, ValueError):
+            per_page = 20
+        per_page = max(1, min(per_page, 100))
+
+        pipeline = str(params.get("pipeline") or META_EVOLVE_PIPELINE)
+        issue_numbers = self._coerce_int_tuple(
+            params.get("issue_numbers")
+            or params.get("issues")
+            or params.get("issue")
+            or params.get("numbers")
+        )
+        if issue_numbers:
+            max_issues = len(issue_numbers)
+        try:
+            start_interval_seconds = float(params.get("start_interval_seconds", 0) or 0)
+        except (TypeError, ValueError):
+            start_interval_seconds = 0.0
+        if start_interval_seconds <= 0 and max_issues > 1:
+            # openjiuwen auto_harness currently uses second-level timestamps
+            # for some readonly worktree paths. Stagger immediate issue tasks
+            # to avoid "worktree already exists" collisions.
+            start_interval_seconds = 1.2
+        options = IssueWatchOptions(
+            owner=owner,
+            repo=repo,
+            issue_numbers=issue_numbers,
+            labels=self._coerce_str_tuple(params.get("labels"), ("auto-harness",)),
+            exclude_labels=self._coerce_str_tuple(
+                params.get("exclude_labels"),
+                ("blocked", "wontfix", "needs-discussion"),
+            ),
+            max_issues=max_issues,
+            per_page=per_page,
+            pipeline=pipeline,
+            comment_on_start=bool(params.get("comment_on_start", False)),
+            dry_run=bool(params.get("dry_run", False)),
+            start_interval_seconds=start_interval_seconds,
+            max_auto_difficulty=str(params.get("max_auto_difficulty") or "medium"),
+        )
+        client = GitCodeIssueClient(token=token)
+        runner = GitCodeIssueRunner(
+            client=client,
+            state_store=self._issue_state_store,
+            harness_service=self,
+        )
+        return await runner.watch_once(options)
+
+    async def list_gitcode_issue_states(self) -> dict[str, Any]:
+        if self._issue_state_store is None:
+            self._init_scheduler()
+        if self._issue_state_store is None:
+            return {"issues": []}
+        issues = []
+        for issue in self._issue_state_store.list():
+            enriched = dict(issue)
+            task_id = str(enriched.get("task_id") or "")
+            if self._task_store is not None and task_id:
+                task = self._task_store.get_task(task_id)
+                if task is not None:
+                    enriched["task_status"] = task.get("status")
+                    enriched["progress"] = await self._task_store.summarize_task_progress(task)
+            issues.append(enriched)
+        return {"issues": issues}
 
     @staticmethod
     def _extract_repo_name(repo_url: str) -> str:
@@ -450,6 +657,59 @@ class AutoHarnessService:
             )
             return (1, "", str(exc))
 
+    async def _run_git_config_secret(
+        self,
+        args: list[str],
+        cwd: Path,
+    ) -> tuple[int, str, str]:
+        """Run a git config command that may contain secrets.
+
+        Keep this separate from _run_git_command so failures never log the
+        command arguments, which may include an Authorization header.
+        """
+        try:
+            process = await asyncio.create_subprocess_exec(
+                "git",
+                *args,
+                cwd=str(cwd),
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            stdout, stderr = await process.communicate()
+            return (
+                process.returncode or 0,
+                stdout.decode("utf-8", errors="replace"),
+                stderr.decode("utf-8", errors="replace"),
+            )
+        except Exception as exc:
+            logger.error("[AutoHarnessService] Secret git config command failed: %s", exc)
+            return (1, "", str(exc))
+
+    async def _configure_gitcode_auth(
+        self,
+        local_path: Path,
+        *,
+        username: str,
+        token: str,
+        push_remote: str,
+    ) -> None:
+        """Configure non-interactive GitCode auth for agent-run git commands."""
+        if not username or not token:
+            return
+        await self._run_git_config_secret(["config", "credential.helper", ""], local_path)
+        await self._run_git_config_secret(["config", "credential.interactive", "never"], local_path)
+        await self._run_git_config_secret(
+            [
+                "config",
+                "--unset-all",
+                "http.https://gitcode.com/.extraheader",
+            ],
+            local_path,
+        )
+        await self._run_git_config_secret(["config", "push.default", "current"], local_path)
+        if push_remote:
+            await self._run_git_config_secret(["config", "remote.pushDefault", push_remote], local_path)
+
     async def clone_or_update_repo(
         self,
         repo_url: str,
@@ -479,6 +739,7 @@ class AutoHarnessService:
             ret, _, stderr = await self._run_git_command(
                 ["fetch", "origin"],
                 cwd=local_path,
+                env=git_env,
             )
             if ret != 0:
                 logger.warning("[AutoHarnessService] Git fetch failed: %s", stderr)
@@ -486,6 +747,7 @@ class AutoHarnessService:
             ret, _, stderr = await self._run_git_command(
                 ["reset", "--hard", "origin/HEAD"],
                 cwd=local_path,
+                env=git_env,
             )
             if ret != 0:
                 logger.warning("[AutoHarnessService] Git reset failed: %s", stderr)
@@ -511,16 +773,16 @@ class AutoHarnessService:
         # to the fork repo, not the upstream repo.
         fork_owner = cfg.fork_owner if cfg else ""
         upstream_owner = cfg.upstream_owner if cfg else ""
-        if git_remote_name and git_remote_name != "origin":
-            # Derive fork URL from repo_url by replacing upstream_owner
-            # with fork_owner. If they are the same, reuse repo_url directly.
-            fork_url = repo_url
-            if fork_owner and upstream_owner and fork_owner != upstream_owner:
-                fork_url = repo_url.replace(
-                    f"/{upstream_owner}/",
-                    f"/{fork_owner}/",
-                )
+        # Derive fork URL from repo_url by replacing upstream_owner with
+        # fork_owner. If they are the same, reuse repo_url directly.
+        fork_url = repo_url
+        if fork_owner and upstream_owner and fork_owner != upstream_owner:
+            fork_url = repo_url.replace(
+                f"/{upstream_owner}/",
+                f"/{fork_owner}/",
+            )
 
+        if git_remote_name and git_remote_name != "origin":
             # Check if the remote already exists
             ret, stdout, _ = await self._run_git_command(
                 ["remote"],
@@ -545,6 +807,23 @@ class AutoHarnessService:
                 git_remote_name,
                 fork_url,
             )
+
+        # Keep origin as the upstream fetch remote, but route accidental
+        # `git push origin <branch>` calls to the fork. Some LLM-driven command
+        # paths may bypass GitOperations.push(), so this prevents writes to the
+        # upstream repo and makes manual push commands use the configured fork.
+        if fork_url != repo_url:
+            await self._run_git_command(
+                ["remote", "set-url", "--push", "origin", fork_url],
+                cwd=local_path,
+            )
+
+        await self._configure_gitcode_auth(
+            local_path,
+            username=gitcode_username,
+            token=gitcode_token,
+            push_remote=git_remote_name or "origin",
+        )
 
         # Configure git user identity in the local repo so commits have
         # proper authorship even on servers without global git config.
@@ -618,7 +897,7 @@ class AutoHarnessService:
         # config.yaml so that GitOperations.push() uses a named remote instead
         # of a raw URL. The named remote is added in clone_or_update_repo().
         if not config.git_base_branch:
-            config.git_base_branch = "develop-auto-harness"
+            config.git_base_branch = "develop"
         if config.pipeline_preference == EXTENDED_EVOLVE_PIPELINE:
             config.git_base_branch = "develop"
         if not config.git_remote:
@@ -1314,14 +1593,11 @@ class AutoHarnessService:
                 pipeline_preference=pipeline_preference
             )
 
-            # Build optimization task from query
-            tasks = [
-                OptimizationTask(
-                    topic=query,
-                    description=query,
-                    status="pending",
-                )
-            ]
+            # Build optimization task from query.
+            # Explicit GitCode issue-fix tasks must keep a stable issue_ref so
+            # the meta pipeline can skip exploratory assess/plan and avoid
+            # parsing placeholder tasks from the agent's natural-language output.
+            tasks = [_build_auto_harness_task_from_query(query)]
 
             # Create orchestrator
             orchestrator = create_auto_harness_orchestrator(
@@ -2609,7 +2885,10 @@ class AutoHarnessService:
         """
         if self._task_store is None:
             return None
-        return self._task_store.get_task(task_id)
+        task = self._task_store.get_task(task_id)
+        if task is None:
+            return None
+        return await self._task_store.enrich_task_with_progress(task)
 
     async def list_scheduled_tasks(self) -> list[dict[str, Any]]:
         """List all scheduled tasks.
@@ -2619,7 +2898,9 @@ class AutoHarnessService:
         """
         if self._task_store is None:
             return []
-        return self._task_store.list_tasks()
+        return await self._task_store.enrich_tasks_with_progress(
+            self._task_store.list_tasks()
+        )
 
     async def get_scheduled_task_logs(
         self,

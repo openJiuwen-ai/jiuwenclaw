@@ -11,6 +11,9 @@ from .service import (
 from .scheduler import Scheduler
 from .task_store import TaskStore
 from .config_validator import ConfigValidator
+from .gitcode_issue_client import GitCodeIssue, GitCodeIssueClient
+from .issue_runner import GitCodeIssueRunner, IssueWatchOptions
+from .issue_state_store import IssueStateStore
 
 __all__ = [
     "AutoHarnessService",
@@ -19,4 +22,9 @@ __all__ = [
     "Scheduler",
     "TaskStore",
     "ConfigValidator",
+    "GitCodeIssue",
+    "GitCodeIssueClient",
+    "GitCodeIssueRunner",
+    "IssueStateStore",
+    "IssueWatchOptions",
 ]
