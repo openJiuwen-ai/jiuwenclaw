@@ -128,6 +128,7 @@ export interface Question {
   header: string;
   options: QuestionOption[];
   multi_select?: boolean;
+  allow_auto_confirm?: boolean;
 }
 
 /**

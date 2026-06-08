@@ -31,9 +31,15 @@ export function InlineQuestionCard({ onSubmit }: InlineQuestionCardProps) {
     setSubmitted(false);
   }, [requestId]);
 
-  const isBatch = (pendingQuestion?.questions.length ?? 0) > 1;
+const isBatch = (pendingQuestion?.questions.length ?? 0) > 1;
 
-  const allAnswered = useMemo(() => {
+const hasAlwaysAllowOption = useMemo(() => {
+    if (!pendingQuestion) return true;
+    const firstQuestion = pendingQuestion.questions[0];
+    return firstQuestion?.allow_auto_confirm !== false;
+  }, [pendingQuestion]);
+
+const allAnswered = useMemo(() => {
     if (!pendingQuestion) return false;
     return pendingQuestion.questions.every((_, idx) => selections.has(idx));
   }, [pendingQuestion, selections]);
@@ -89,6 +95,17 @@ export function InlineQuestionCard({ onSubmit }: InlineQuestionCardProps) {
     setSelections(all);
     doSubmit(all);
   }, [pendingQuestion, submitted, t, doSubmit]);
+
+const filterOptions = useCallback((options: QuestionOption[], questionIndex: number) => {
+    if (questionIndex === 0 && !hasAlwaysAllowOption) {
+      return options.filter(option => {
+        const isAlwaysAllow = option.label === t('chatUi.inlineQuestion.alwaysAllow')
+          || option.label === '总是允许';
+        return !isAlwaysAllow;
+      });
+    }
+    return options;
+  }, [hasAlwaysAllowOption, t]);
 
   const handleSubmitBatch = useCallback(() => {
     if (!allAnswered || submitted) return;
@@ -240,7 +257,7 @@ export function InlineQuestionCard({ onSubmit }: InlineQuestionCardProps) {
 
                 {/* 选项按钮 */}
                 <div className="px-4 pb-3 flex flex-col gap-2">
-                  {question.options.map((option) => {
+                  {filterOptions(question.options, qIndex).map((option) => {
                     const optionValue = option.value || option.label;
                     const isAccept = option.label === t('chatUi.inlineQuestion.accept')
                       || option.label === t('chatUi.inlineQuestion.allowOnce')

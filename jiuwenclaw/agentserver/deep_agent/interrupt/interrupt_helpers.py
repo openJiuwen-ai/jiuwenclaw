@@ -154,18 +154,21 @@ def extract_question_from_interaction(payload: Any) -> dict | None:
     tool_name = ""
     message = ""
     ui_options = None
+    allow_auto_confirm = True
 
     if hasattr(payload, 'value'):
         value_obj = payload.value
         message = getattr(value_obj, 'message', '') or getattr(value_obj, 'question', '')
         tool_name = getattr(value_obj, 'tool_name', '')
         ui_options = getattr(value_obj, 'ui_options', None)
+        allow_auto_confirm = getattr(value_obj, 'allow_auto_confirm', True)
     elif isinstance(payload, dict):
         value_obj = payload.get('value', {})
         if isinstance(value_obj, dict):
             message = value_obj.get('message', '') or value_obj.get('question', '')
             tool_name = value_obj.get('tool_name', '')
             ui_options = value_obj.get('ui_options', None)
+            allow_auto_confirm = value_obj.get('allow_auto_confirm', True)
         else:
             message = payload.get('message', '') or payload.get('question', '')
     else:
@@ -177,15 +180,21 @@ def extract_question_from_interaction(payload: Any) -> dict | None:
             "header": f"权限审批: {tool_name}" if tool_name else "权限审批",
             "options": ui_options,
             "multi_select": False,
+            "allow_auto_confirm": allow_auto_confirm,
         }
 
+    options = [
+        {"label": "本次允许", "description": "仅本次授权执行"},
+        {"label": "拒绝", "description": "拒绝执行此工具"},
+    ]
+    
+    if allow_auto_confirm:
+        options.insert(1, {"label": "总是允许", "description": "记住该规则，以后自动放行"})
+    
     return {
         "question": message or f"工具 `{tool_name}` 需要授权才能执行",
         "header": _header_for_permission_question(message, tool_name),
-        "options": [
-            {"label": "本次允许", "description": "仅本次授权执行"},
-            {"label": "总是允许", "description": "记住该规则，以后自动放行"},
-            {"label": "拒绝", "description": "拒绝执行此工具"},
-        ],
+        "options": options,
         "multi_select": False,
+        "allow_auto_confirm": allow_auto_confirm,
     }
