@@ -234,6 +234,12 @@ _OPENABILITY_BACKEND_INTERRUPTED_ERROR = "后端网络连接中断，请重试�
 # skilldev.confirm_request 中映射为 review.asked 的 confirm_type 集合
 _SKILLDEV_REVIEW_CONFIRM_TYPES = frozenset({"review", "static_review", "combined_review"})
 
+# token 级流式 skilldev 事件：outbound_intercept 接收日志降为 DEBUG，避免热路径 INFO 刷屏
+_SKILLDEV_STREAM_EVENT_TYPES = frozenset({
+    "skilldev.agent_thinking",
+    "skilldev.agent_output",
+})
+
 
 def _resolve_message_send_import_type(data: dict[str, Any]) -> str:
     """message.send 的 importType，默认 vibeImport。"""
@@ -1791,7 +1797,8 @@ class VibeSkillChannel(BaseChannel):
 
         handler = skilldev_events.get(event_type)
         if handler:
-            logger.info(
+            log_fn = logger.debug if event_type in _SKILLDEV_STREAM_EVENT_TYPES else logger.info
+            log_fn(
                 "[VibeSkillChannel] %s received, session_id=%s",
                 event_type,
                 str(msg.session_id or "").strip() or "n/a",
