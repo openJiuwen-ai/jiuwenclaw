@@ -4,6 +4,7 @@
 
 import os
 import sys
+import logging
 from pathlib import Path
 from unittest.mock import patch
 
@@ -98,6 +99,16 @@ class TestLoggerSetup:
         handler_types = [type(h).__name__ for h in logger.handlers]
         assert "StreamHandler" in handler_types
         assert handler_types.count("SafeRotatingFileHandler") == 5
+
+    @staticmethod
+    def test_log_level_env_overrides_file_handlers(monkeypatch):
+        """LOG_LEVEL should control console and file handler levels."""
+        monkeypatch.setenv("LOG_LEVEL", "ERROR")
+        logger = utils.setup_logger()
+
+        assert logger.level == logging.ERROR
+        for handler in logger.handlers:
+            assert handler.level == logging.ERROR
 
 
 class TestUserWorkspace:
