@@ -60,11 +60,11 @@ from jiuwenswarm.agents.harness.common.rails.stream_event_rail import JiuClawStr
 from jiuwenswarm.common.schema.agent import AgentResponseChunk
 from jiuwenswarm.common.utils import get_user_workspace_dir
 
+from .capabilities import AutoHarnessCapabilityRegistry, create_default_capability_registry
 from .scheduler import Scheduler
 from .task_store import TaskStore
 from .config_validator import ConfigValidator
-from .issue_fix import IssueFixService, IssueStateStore
-from .issue_fix.gitcode_auth import configure_gitcode_auth
+from .repo_auth import configure_gitcode_auth
 
 logger = logging.getLogger(__name__)
 
@@ -244,8 +244,7 @@ class AutoHarnessService:
         self._scheduler: Optional[Scheduler] = None
         self._task_store: Optional[TaskStore] = None
         self._config_validator: Optional[ConfigValidator] = None
-        self._issue_state_store: Optional[IssueStateStore] = None
-        self._issue_fix_service: Optional[IssueFixService] = None
+        self._capabilities: Optional[AutoHarnessCapabilityRegistry] = None
 
         # Initialize scheduler components
         self._init_scheduler()
@@ -378,7 +377,6 @@ class AutoHarnessService:
         """Initialize scheduler components (lazy, not started until needed)."""
         try:
             self._task_store = TaskStore(self.data_dir)
-            self._issue_state_store = IssueStateStore(self.data_dir)
             self._config_validator = ConfigValidator(
                 self.config_path,
                 base_config=self._base_config
@@ -387,9 +385,9 @@ class AutoHarnessService:
                 service=self,
                 task_store=self._task_store,
             )
-            self._issue_fix_service = IssueFixService(
+            self._capabilities = create_default_capability_registry(
+                data_dir=self.data_dir,
                 task_store=self._task_store,
-                issue_state_store=self._issue_state_store,
                 harness_service=self,
                 base_config_getter=lambda: self._base_config,
                 default_repo_url=_DEFAULT_REPO_URL,
@@ -451,17 +449,27 @@ class AutoHarnessService:
 
         return result
 
+    async def handle_capability(
+        self,
+        capability: str,
+        action: str,
+        params: dict[str, Any],
+        model: Optional[Model] = None,
+    ) -> dict[str, Any]:
+        """Dispatch a scenario-specific auto-harness capability."""
+        if self._capabilities is None:
+            self._init_scheduler()
+        if self._capabilities is None:
+            return {"error": "auto-harness 能力服务未初始化"}
+        return await self._capabilities.handle(capability, action, params, model)
+
     async def process_gitcode_issues_once(
         self,
         params: dict[str, Any],
         model: Optional[Model] = None,
     ) -> dict[str, Any]:
-        """Delegate one GitCode issue processing pass to the issue-fix capability."""
-        if self._issue_fix_service is None:
-            self._init_scheduler()
-        if self._issue_fix_service is None:
-            return {"error": "issue 修复服务未初始化"}
-        return await self._issue_fix_service.process_gitcode_issues_once(params, model)
+        """Compatibility entry for GitCode issue processing."""
+        return await self.handle_capability("issue", "process_once", params, model)
 
     async def watch_gitcode_issues_once(
         self,
@@ -472,12 +480,11 @@ class AutoHarnessService:
         return await self.process_gitcode_issues_once(params, model)
 
     async def list_gitcode_issue_states(self) -> dict[str, Any]:
-        """Delegate issue state listing to the issue-fix capability."""
-        if self._issue_fix_service is None:
-            self._init_scheduler()
-        if self._issue_fix_service is None:
-            return {"issues": []}
-        return await self._issue_fix_service.list_gitcode_issue_states()
+        """Compatibility entry for GitCode issue state listing."""
+        result = await self.handle_capability("issue", "state_list", {})
+        if "issues" not in result:
+            return {"issues": [], **result}
+        return result
 
     @staticmethod
     def _extract_repo_name(repo_url: str) -> str:

@@ -1,6 +1,6 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 
-"""GitCode repository authentication helpers for issue-fix automation."""
+"""GitCode repository authentication helpers."""
 
 from __future__ import annotations
 

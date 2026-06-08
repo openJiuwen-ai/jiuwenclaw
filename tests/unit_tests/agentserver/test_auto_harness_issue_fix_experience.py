@@ -7,6 +7,10 @@ from jiuwenswarm.agents.harness.common.auto_harness.issue_fix.issue_runner impor
     IssueWatchOptions,
 )
 from jiuwenswarm.agents.harness.common.auto_harness.issue_fix.issue_state_store import IssueStateStore
+from jiuwenswarm.agents.harness.common.auto_harness.issue_fix.run_progress import (
+    enrich_issue_fix_progress,
+    infer_issue_fix_skipped_stages,
+)
 from jiuwenswarm.agents.harness.common.auto_harness.issue_fix.task_factory import (
     build_issue_fix_task,
 )
@@ -135,7 +139,7 @@ def test_process_issues_once_starts_medium_or_lower_issue(tmp_path: Path):
     assert service.optimization_tasks[0].issue_ref == "#1266"
 
 
-def test_task_progress_extracts_pr_and_failure_code():
+def test_task_progress_extracts_pr_and_failure_code(tmp_path: Path):
     logs = [
         {
             "event_type": "harness.message",
@@ -155,7 +159,12 @@ def test_task_progress_extracts_pr_and_failure_code():
         },
     ]
 
-    progress = TaskStore.summarize_progress_from_logs(logs)
+    store = TaskStore(tmp_path)
+    store.register_run_log_status_extension(
+        skipped_stage_inferer=infer_issue_fix_skipped_stages,
+        progress_enricher=enrich_issue_fix_progress,
+    )
+    progress = store.summarize_progress_from_logs(logs)
 
     assert progress["failed_stage"] == "publish"
     assert progress["failure_code"] == "pr_api_failed"
@@ -182,7 +191,10 @@ def test_pipeline_status_accepts_structured_skipped_stages(tmp_path: Path):
         encoding="utf-8",
     )
 
-    assert determine_pipeline_status_from_log(log_path) == {"failed": False, "error": ""}
+    assert determine_pipeline_status_from_log(
+        log_path,
+        skipped_stage_inferers=[infer_issue_fix_skipped_stages],
+    ) == {"failed": False, "error": ""}
 
 
 def test_pipeline_status_accepts_legacy_issue_fix_skip_message(tmp_path: Path):
@@ -198,4 +210,7 @@ def test_pipeline_status_accepts_legacy_issue_fix_skip_message(tmp_path: Path):
         encoding="utf-8",
     )
 
-    assert determine_pipeline_status_from_log(log_path) == {"failed": False, "error": ""}
+    assert determine_pipeline_status_from_log(
+        log_path,
+        skipped_stage_inferers=[infer_issue_fix_skipped_stages],
+    ) == {"failed": False, "error": ""}

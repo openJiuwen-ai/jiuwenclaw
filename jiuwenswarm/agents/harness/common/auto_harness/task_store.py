@@ -15,7 +15,9 @@ from typing import Any, Optional
 
 from .run_log_status import (
     META_EVOLVE_STAGE_ORDER,
+    ProgressEnricher,
     STAGE_DISPLAY_NAMES,
+    SkippedStageInferer,
     determine_pipeline_status_from_log,
     has_terminal_session_event,
     summarize_progress_from_logs,
@@ -50,6 +52,8 @@ class TaskStore:
         self._runs_dir = data_dir / "runs"
         self._tasks_cache: Optional[dict[str, Any]] = None
         self._save_lock: asyncio.Lock = asyncio.Lock()
+        self._skipped_stage_inferers: list[SkippedStageInferer] = []
+        self._progress_enrichers: list[ProgressEnricher] = []
         self._ensure_dirs()
 
     def _ensure_dirs(self) -> None:
@@ -114,6 +118,18 @@ class TaskStore:
         data = self._load_tasks()
         return data.get("tasks", [])
 
+    def register_run_log_status_extension(
+        self,
+        *,
+        skipped_stage_inferer: SkippedStageInferer | None = None,
+        progress_enricher: ProgressEnricher | None = None,
+    ) -> None:
+        """Register optional run-log status extensions for specialized capabilities."""
+        if skipped_stage_inferer is not None and skipped_stage_inferer not in self._skipped_stage_inferers:
+            self._skipped_stage_inferers.append(skipped_stage_inferer)
+        if progress_enricher is not None and progress_enricher not in self._progress_enrichers:
+            self._progress_enrichers.append(progress_enricher)
+
     def _latest_log_path_for_task(self, task: dict[str, Any]) -> Optional[Path]:
         """Return the best log file to summarize task progress."""
         task_id = str(task.get("task_id") or "")
@@ -143,10 +159,22 @@ class TaskStore:
                         return candidate
         return None
 
-    @staticmethod
-    def summarize_progress_from_logs(logs: list[dict[str, Any]]) -> dict[str, Any]:
+    def summarize_progress_from_logs(self, logs: Optional[list[dict[str, Any]]] = None) -> dict[str, Any]:
         """Summarize stage progress from structured harness logs."""
-        return summarize_progress_from_logs(logs)
+        if logs is None:
+            logs = []
+        return summarize_progress_from_logs(
+            logs,
+            skipped_stage_inferers=self._skipped_stage_inferers,
+            progress_enrichers=self._progress_enrichers,
+        )
+
+    def determine_pipeline_status_from_log(self, log_path: Path) -> dict[str, Any]:
+        """Determine pipeline status with registered run-log extensions."""
+        return determine_pipeline_status_from_log(
+            log_path,
+            skipped_stage_inferers=self._skipped_stage_inferers,
+        )
 
     async def summarize_task_progress(self, task: dict[str, Any]) -> dict[str, Any]:
         """Read the latest task log and return a compact progress summary."""
@@ -458,7 +486,7 @@ class TaskStore:
             if old_status == "running" and not has_terminal_session_event(log_path):
                 continue
 
-            result = determine_pipeline_status_from_log(log_path)
+            result = self.determine_pipeline_status_from_log(log_path)
             new_status = "failed" if result["failed"] else "success"
 
             if new_status != old_status:

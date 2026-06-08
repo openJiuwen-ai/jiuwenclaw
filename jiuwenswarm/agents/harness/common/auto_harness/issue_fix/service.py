@@ -33,6 +33,19 @@ class IssueFixService:
         self._base_config_getter = base_config_getter
         self._default_repo_url = default_repo_url
 
+    async def handle(
+        self,
+        action: str,
+        params: dict[str, Any],
+        model: Optional[Model] = None,
+    ) -> dict[str, Any]:
+        """Dispatch issue-fix capability actions."""
+        if action in {"process_once", "watch_once"}:
+            return await self.process_gitcode_issues_once(params, model)
+        if action in {"state_list", "list_states"}:
+            return await self.list_gitcode_issue_states()
+        return {"error": f"未知 issue-fix 操作: {action}"}
+
     @staticmethod
     def _parse_repo_identifier(repo: str) -> tuple[str, str]:
         """Parse owner/repo from a GitCode URL or owner/repo string."""

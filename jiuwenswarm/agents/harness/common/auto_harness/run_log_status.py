@@ -6,9 +6,8 @@ from __future__ import annotations
 
 import json
 import logging
-import re
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 logger = logging.getLogger(__name__)
 
@@ -34,27 +33,26 @@ STAGE_DISPLAY_NAMES = {
     "activate": "激活",
 }
 
-_LEGACY_SKIP_STAGE_MARKERS = {
-    "显式 GitCode issue 修复任务，跳过 assess/plan": ("assess", "plan"),
-}
+SkippedStageInferer = Callable[[str], tuple[str, ...]]
+ProgressEnricher = Callable[[dict[str, Any], list[dict[str, Any]]], dict[str, Any]]
 
 
-def infer_skipped_stages_from_message(content: str) -> tuple[str, ...]:
-    """Normalize legacy skip messages into structured skipped stages."""
-    return next(
-        (
-            stages for marker, stages in _LEGACY_SKIP_STAGE_MARKERS.items()
-            if marker in content
-        ),
-        (),
-    )
+def infer_skipped_stages_from_message(
+    content: str,
+    inferers: list[SkippedStageInferer] | None = None,
+) -> tuple[str, ...]:
+    """Infer skipped stages with optional scenario-specific extensions."""
+    skipped: list[str] = []
+    for inferer in inferers or []:
+        for stage in inferer(content):
+            if stage not in skipped:
+                skipped.append(stage)
+    return tuple(skipped)
 
 
 def classify_failure(error: str, last_message: str = "") -> str:
     """Return a stable failure code suitable for compact UI display."""
     text = f"{error}\n{last_message}".lower()
-    if "missing required labels" in text:
-        return "missing_required_labels"
     if (
         "no allowed files" in text
         or "no changes" in text
@@ -63,25 +61,11 @@ def classify_failure(error: str, last_message: str = "") -> str:
         return "no_effective_diff"
     if "git branch push failed" in text or "push failed" in text:
         return "push_rejected"
-    if (
-        "gitcode pr creation failed" in text
-        or "http error 400" in text
-        or "bad request" in text
-    ):
-        return "pr_api_failed"
     if "lint" in text or "type-check" in text or "ci" in text or "verify" in text:
         return "verify_failed"
     if "file must be read before editing" in text or "tool" in text:
         return "agent_tool_error"
     return "unknown_failure"
-
-
-def extract_pr_url_from_text(text: str) -> str:
-    """Find the first concrete GitCode PR/MR URL in a log message."""
-    for url in re.findall(r"https://gitcode\.com/[^\s)>\"]+", text):
-        if re.search(r"/(?:pulls|pull_requests|merge_requests)/\d+", url):
-            return url
-    return ""
 
 
 def format_progress_summary(progress: dict[str, Any]) -> str:
@@ -101,7 +85,12 @@ def format_progress_summary(progress: dict[str, Any]) -> str:
     return "暂无阶段日志"
 
 
-def summarize_progress_from_logs(logs: list[dict[str, Any]]) -> dict[str, Any]:
+def summarize_progress_from_logs(
+    logs: list[dict[str, Any]],
+    *,
+    skipped_stage_inferers: list[SkippedStageInferer] | None = None,
+    progress_enrichers: list[ProgressEnricher] | None = None,
+) -> dict[str, Any]:
     """Summarize stage progress from structured harness logs."""
     pipeline = ""
     stage_order: list[str] = []
@@ -111,7 +100,6 @@ def summarize_progress_from_logs(logs: list[dict[str, Any]]) -> dict[str, Any]:
     last_message_stage = ""
     last_event_type = ""
     last_error = ""
-    pr_url = ""
 
     for entry in logs:
         event_type = str(entry.get("event_type") or "")
@@ -126,12 +114,10 @@ def summarize_progress_from_logs(logs: list[dict[str, Any]]) -> dict[str, Any]:
                 ]
             stage = str(entry.get("stage") or "")
             content = str(entry.get("content") or "")
-            for skipped_stage in infer_skipped_stages_from_message(content):
+            for skipped_stage in infer_skipped_stages_from_message(content, skipped_stage_inferers):
                 stage_status.setdefault(skipped_stage, "skipped")
                 if skipped_stage not in stage_order:
                     stage_order.append(skipped_stage)
-            if content and not pr_url:
-                pr_url = extract_pr_url_from_text(content)
             if stage:
                 last_message_stage = stage
                 if content:
@@ -149,10 +135,6 @@ def summarize_progress_from_logs(logs: list[dict[str, Any]]) -> dict[str, Any]:
                 messages = entry.get("messages") or []
                 if messages:
                     stage_messages.setdefault(stage, []).extend(str(msg) for msg in messages)
-                    if not pr_url:
-                        pr_url = extract_pr_url_from_text(
-                            "\n".join(str(msg) for msg in messages)
-                        )
         elif event_type == "harness.session_finished" and entry.get("error"):
             last_error = str(entry.get("error") or "")
 
@@ -212,13 +194,18 @@ def summarize_progress_from_logs(logs: list[dict[str, Any]]) -> dict[str, Any]:
         "last_event_type": last_event_type,
         "last_error": last_error,
         "failure_code": classify_failure(last_error, last_stage_message) if failed_stage else "",
-        "pr_url": pr_url,
     }
+    for enricher in progress_enrichers or []:
+        progress = enricher(progress, logs)
     progress["summary"] = format_progress_summary(progress)
     return progress
 
 
-def determine_pipeline_status_from_log(log_path: Path) -> dict[str, Any]:
+def determine_pipeline_status_from_log(
+    log_path: Path,
+    *,
+    skipped_stage_inferers: list[SkippedStageInferer] | None = None,
+) -> dict[str, Any]:
     """Parse a JSON Lines log file and determine whether the pipeline succeeded."""
     pipeline_type = ""
     pipeline_stages: list[str] = []
@@ -240,7 +227,7 @@ def determine_pipeline_status_from_log(log_path: Path) -> dict[str, Any]:
                     pipeline_type = entry.get("pipeline", "")
                 if entry.get("event_type") == "harness.message":
                     content = str(entry.get("content") or "")
-                    for skipped_stage in infer_skipped_stages_from_message(content):
+                    for skipped_stage in infer_skipped_stages_from_message(content, skipped_stage_inferers):
                         stage_results.setdefault(skipped_stage, "skipped")
                 if entry.get("event_type") == "harness.stage_result" and not entry.get("scope"):
                     slot = entry.get("stage")
