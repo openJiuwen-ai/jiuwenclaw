@@ -3,10 +3,9 @@ from jiuwenclaw.utils import build_default_headers
 import os
 import asyncio
 import logging
-from typing import Any, Optional
+from typing import Any, Optional, AsyncIterator, Callable
 from contextvars import ContextVar
 from dataclasses import dataclass
-from typing import Any, Optional, AsyncIterator
 
 from pydantic import Field
 import httpx
@@ -143,39 +142,66 @@ class RetryMixin:
 
         return ", ".join(parts)
 
+    @staticmethod
+    def _get_env_value(env_var: str, default: Any, type_func: Callable[[str], Any]) -> Any:
+        """从环境变量读取并转换值，失败时记录警告并返回默认值。
+
+        Args:
+            env_var: 环境变量名
+            default: 默认值
+            type_func: 类型转换函数 (int/float等)
+
+        Returns:
+            转换后的环境变量值或默认值
+        """
+        env_val = os.getenv(env_var)
+        if env_val is None:
+            return default
+        try:
+            return type_func(env_val)
+        except (ValueError, TypeError) as e:
+            llm_logger.warning(f"Invalid {env_var} env value '{env_val}': {e}")
+            return default
+
     @classmethod
     def _get_retry_config(cls) -> LlmRetryConfig:
         """从环境变量或 config.yaml 读取重试配置，未配置则使用代码默认值。
 
-        max_attempts 获取优先级：环境变量 > config.yaml > 代码默认值
+        优先级：环境变量 > config.yaml > 代码默认值
         """
-        # 优先从环境变量读取
-        env_max_attempts = os.getenv("LLM_RETRY_MAX_ATTEMPTS")
-        if env_max_attempts is not None:
-            try:
-                env_max_attempts = int(env_max_attempts)
-            except (ValueError, TypeError) as e:
-                llm_logger.warning(f"Invalid LLM_RETRY_MAX_ATTEMPTS env value '{env_max_attempts}': {e}")
-                env_max_attempts = None
+        # 从环境变量读取
+        env_max_attempts = RetryMixin._get_env_value("LLM_RETRY_MAX_ATTEMPTS", None, int)
+        env_max_backoff = RetryMixin._get_env_value("LLM_RETRY_MAX_BACKOFF", None, float)
 
-        # 从 config.yaml 读取
+        # 构建默认配置（环境变量优先）
+        defaults = LlmRetryConfig(
+            max_attempts=env_max_attempts if env_max_attempts is not None else 4,
+            max_backoff=env_max_backoff if env_max_backoff is not None else 60.0,
+        )
+
+        # 从 config.yaml 读取并合并配置
         try:
             from jiuwenclaw.config import get_config
             cfg = get_config()
-            react_cfg = (cfg or {}).get("react", {})
-            retry_cfg = (react_cfg or {}).get("llm_retry", {})
-            if retry_cfg:
-                return LlmRetryConfig(
-                    enabled=retry_cfg.get("enabled", True),
-                    max_attempts=env_max_attempts if env_max_attempts is not None else retry_cfg.get("max_attempts", 3),
-                    initial_backoff=retry_cfg.get("initial_backoff", 10.0),
-                    max_backoff=retry_cfg.get("max_backoff", 60.0),
-                    backoff_factor=retry_cfg.get("backoff_factor", 2.0),
-                    retry_on_rate_limit=retry_cfg.get("retry_on_rate_limit", True),
-                )
-        except Exception:
-            llm_logger.warning("Failed to get retry config from config.yaml, use default values.")
-        return LlmRetryConfig(max_attempts=env_max_attempts if env_max_attempts is not None else 4)
+            retry_cfg = ((cfg or {}).get("react", {}) or {}).get("llm_retry", {})
+            if not retry_cfg:
+                return defaults
+
+            def get_val(key: str, env_val: Any, code_default: Any) -> Any:
+                """获取配置值，优先级：环境变量 > config.yaml > 代码默认值"""
+                return env_val if env_val is not None else retry_cfg.get(key, code_default)
+
+            return LlmRetryConfig(
+                enabled=retry_cfg.get("enabled", True),
+                max_attempts=get_val("max_attempts", env_max_attempts, 3),
+                initial_backoff=retry_cfg.get("initial_backoff", 10.0),
+                max_backoff=get_val("max_backoff", env_max_backoff, 60.0),
+                backoff_factor=retry_cfg.get("backoff_factor", 2.0),
+                retry_on_rate_limit=retry_cfg.get("retry_on_rate_limit", True),
+            )
+        except Exception as e:
+            llm_logger.warning("Failed to get retry config from config.yaml, use default values. %s", e)
+            return defaults
 
     def _is_retryable_error(self, exc: Exception, cfg: LlmRetryConfig) -> bool:
         """判断错误是否可重试。

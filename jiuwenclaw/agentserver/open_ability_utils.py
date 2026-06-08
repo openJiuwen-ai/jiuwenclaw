@@ -74,7 +74,7 @@ def init_oa_message(msg_type, data=None):
     data = data or {}
     return {
         "msgType": msg_type,
-        "sessionId": data.get("session_id"),
+        "sessionId": data.get("service_id"),
         "taskId": data.get("request_id"),
         "msgDetail": "{}" if not data else json.dumps(data, ensure_ascii=False),
     }
