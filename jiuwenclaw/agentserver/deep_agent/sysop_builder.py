@@ -269,6 +269,7 @@ def build_filesystem_policy(
 def create_sandbox_sysop_card(
     sandbox_url: str,
     sandbox_type: str,
+    agent_id: str,
     *,
     workspace_dir: str | Path | None = None,
     files_runtime: dict[str, Any] | None = None,
@@ -337,7 +338,10 @@ def create_sandbox_sysop_card(
             extra_params["idle_check_interval"] = idle_check_interval
 
         gateway_config = SandboxGatewayConfig(
-            isolation=SandboxIsolationConfig(container_scope=ContainerScope.SYSTEM),
+            isolation=SandboxIsolationConfig(
+                container_scope=ContainerScope.CUSTOM,
+                custom_id=agent_id,
+            ),
             launcher_config=PreDeployLauncherConfig(
                 base_url=sandbox_url,
                 sandbox_type=sandbox_type,

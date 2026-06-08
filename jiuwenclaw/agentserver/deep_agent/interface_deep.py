@@ -1549,24 +1549,7 @@ class JiuWenClawDeepAdapter:
         return rail
 
     def _create_sys_operation(self) -> SysOperation | None:
-        """Create a sys operation with workspace as working directory.
-
-        是否走沙箱由 ``JIUWENCLAW_SANDBOX_ENABLED`` 决定（同时要求
-        ``JIUWENCLAW_SANDBOX_URL`` / ``JIUWENCLAW_SANDBOX_TYPE`` 已配置）。
-        其他 sandbox 字段 (``excluded_commands`` / ``files`` /
-        ``idle_ttl_seconds`` / ``idle_check_interval``) 透传给
-        ``create_sandbox_sysop_card``, 分别写入 ``launcher_config.extra_params``
-        与 ``launcher_config`` 上的同名字段。
-
-        注意: 每次都从 ``get_sandbox_endpoint`` / ``get_sandbox_runtime`` 读最新
-        sandbox 配置 (现已切换到 ``JIUWENCLAW_SANDBOX_*`` 环境变量驱动, 不再
-        读 ``config.yaml::sandbox``); 改 env 后重启 agent-server 即可生效。
-        ``startup_mode`` 的合法性校验由 getter 完成。
-
-        当前 claw2b 不负责拉起 jiuwenbox，``startup_mode`` 仅支持 ``external``,
-        表示 “使用 ``JIUWENCLAW_SANDBOX_URL`` 配置的端点连接由外部启动的 jiuwenbox”
-        (在 K8s / 企业部署里 jiuwenbox-server 由 Deployment / sidecar 独立托管)。
-        """
+        """Create a sys operation with workspace as working directory."""
         try:
             endpoint = get_sandbox_endpoint()
             runtime = get_sandbox_runtime()
@@ -1587,6 +1570,7 @@ class JiuWenClawDeepAdapter:
                 sysop_card = create_sandbox_sysop_card(
                     sandbox_url,
                     sandbox_type,
+                    self._agent_id,
                     workspace_dir=self._workspace_dir,
                     files_runtime=runtime.get("files"),
                     excluded_commands=runtime.get("excluded_commands"),
@@ -1594,10 +1578,6 @@ class JiuWenClawDeepAdapter:
                     idle_check_interval=runtime.get("idle_check_interval"),
                 )
             else:
-                # 用户经常踩这种坑: ``JIUWENCLAW_SANDBOX_ENABLED=true`` 但漏配
-                # ``URL`` (或历史上漏配 ``TYPE``, 现在 TYPE 已经默认 ``jiuwenbox``).
-                # 此时静默走 local 模式, 现象上跟"完全没启用 sandbox"一样, 难
-                # 排查, 这里把缺哪个 env 直接打 warn 出来。
                 if sandbox_enabled and not (sandbox_url and sandbox_type):
                     missing = []
                     if not sandbox_url:
