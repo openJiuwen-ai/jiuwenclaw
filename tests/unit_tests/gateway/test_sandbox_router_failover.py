@@ -473,6 +473,16 @@ async def test_oa_physical_disconnect_refreshes_runtime_client(
     )
 
     runtime = await router._acquire_runtime(_envelope())
+    callback_events: list[tuple[str, dict[str, Any]]] = []
+
+    async def on_connection_lost(payload: dict[str, Any]) -> None:
+        callback_events.append(("lost", payload))
+
+    async def on_reconnected(payload: dict[str, Any]) -> None:
+        callback_events.append(("reconnected", payload))
+
+    router.set_openability_connection_lost_handler(on_connection_lost)
+    router.set_openability_reconnected_handler(on_reconnected)
 
     assert len(FakeOpenAbilityClient.instances) == 1
     first_client = FakeOpenAbilityClient.instances[0]
@@ -483,6 +493,7 @@ async def test_oa_physical_disconnect_refreshes_runtime_client(
     ]
 
     await first_client.emit_connection_lost({"event": "openability.connection_lost"})
+    await asyncio.sleep(0)
 
     assert len(FakeOpenAbilityClient.instances) == 2
     second_client = FakeOpenAbilityClient.instances[1]
@@ -490,6 +501,11 @@ async def test_oa_physical_disconnect_refreshes_runtime_client(
     assert second_client.connected_uri == "ws://127.0.0.1:9002/ws"
     assert first_client.disconnected is True
     assert runtime.metadata.get("openability_reconnect_required") is False
+    assert [event for event, _payload in callback_events] == ["lost", "reconnected"]
+    assert callback_events[0][1]["session_ids"] == ["sess-a"]
+    assert callback_events[0][1]["user_id"] == "user-a"
+    assert callback_events[1][1]["session_ids"] == ["sess-a"]
+    assert callback_events[1][1]["user_id"] == "user-a"
 
 
 @pytest.mark.asyncio

@@ -2,7 +2,7 @@
 preferred_language: zh
 
 # 日志目录：~/.jiuwenclaw/.logs/
-# gateway.log / channel.log / agent_server.log 按源码路径分流；full.log 为汇总。
+# gateway.log / channel.log / agent_server.log 按源码路径分流。
 # level：未单独指定时的默认级别。console_level：控制台；可省略则用 level。
 # 环境变量 LOG_LEVEL 覆盖控制台与各日志文件级别。
 logging:
@@ -11,7 +11,6 @@ logging:
   gateway: INFO
   channel: INFO
   agent_server: INFO
-  full: INFO
 
 memory:
   mode: ${MEMORY_MODE:-local}

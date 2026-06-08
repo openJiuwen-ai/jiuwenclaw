@@ -99,6 +99,7 @@ _CHAT_ERROR_TRUNCATION_SUFFIX = "...(truncated)"
 # event_type 始终是 "chat.interrupt_result"（intent in cancel/pause/resume/supplement）。为避免
 # 行为悄悄退化，这里把两种命名都视为同一事件并集中处理。
 _CHAT_INTERRUPT_RESULT_EVENT_TYPES = frozenset({"chat.interrupt_result", "chat.cancel"})
+_OPENABILITY_BACKEND_INTERRUPTED_ERROR = "后端网络连接中断，请重试请求"
 
 # skilldev.confirm_request 中映射为 review.asked 的 confirm_type 集合
 _SKILLDEV_REVIEW_CONFIRM_TYPES = frozenset({"review", "static_review", "combined_review"})
@@ -354,6 +355,61 @@ class VibeSkillChannel(BaseChannel):
             data,
             error_text,
             source="message.send.busy_limit_ack",
+        )
+
+    def _is_openability_reconnecting(self, session: VibeSkillSession) -> bool:
+        checker = getattr(self._agent_client, "is_openability_reconnecting", None)
+        if not callable(checker):
+            return False
+        try:
+            return bool(
+                checker(
+                    user_id=self._session_user_id(session.session_id),
+                    session_id=session.session_id,
+                )
+            )
+        except Exception:
+            logger.exception(
+                "[VibeSkillChannel] is_openability_reconnecting failed: session_id=%s",
+                session.session_id,
+            )
+            return False
+
+    async def _send_message_send_openability_error(
+        self,
+        ws: Any,
+        data: dict[str, Any],
+        *,
+        session: VibeSkillSession,
+        external_sid: str | None,
+    ) -> None:
+        try:
+            await self._store.set_state(session.session_id, VibeSkillSessionState.IDLE)
+            logger.info(
+                "[VibeSkillChannel] session state -> idle, source=message.send.openability_disconnected, session_id=%s",
+                session.session_id,
+            )
+        except Exception:
+            logger.exception(
+                "[VibeSkillChannel] set_state failed for OA disconnect error, session_id=%s",
+                session.session_id,
+            )
+
+        for response in self._build_error_responses(
+            session.session_id,
+            external_sid,
+            _OPENABILITY_BACKEND_INTERRUPTED_ERROR,
+        ):
+            await self._send_ws_json(
+                ws,
+                response,
+                source="message.send.openability_disconnected",
+            )
+        await self._send_ws_res_error(
+            ws,
+            data,
+            _OPENABILITY_BACKEND_INTERRUPTED_ERROR,
+            source="message.send.openability_disconnected_ack",
         )
 
     async def start(self) -> None:
@@ -1053,6 +1109,15 @@ class VibeSkillChannel(BaseChannel):
             or await self._resolve_external_session_id(session.session_id)
             or session.session_id
         )
+        if self._is_openability_reconnecting(session):
+            await self._send_message_send_openability_error(
+                ws,
+                data,
+                session=session,
+                external_sid=external_sid,
+            )
+            return True
+
         busy_limit_error = await self._busy_limit_error_for_message_send(
             session=session,
             user_id=session_user_id,

@@ -10,7 +10,7 @@ import os
 import re
 import secrets
 import time
-from abc import ABC, abstractmethod
+from abc import ABC
 from dataclasses import dataclass, replace
 from enum import Enum
 from pathlib import Path
@@ -33,6 +33,7 @@ _ACP_CHANNEL_ID = "acp"
 _ACP_ORIGINAL_SESSION_ID_KEY = "acp_original_session_id"
 _DEFAULT_INLINE_FILE_SIZE_LIMIT = 128 * 1024
 _VIBESKILL_CHANNEL_ID = "vibeskill"
+_OPENABILITY_BACKEND_INTERRUPTED_ERROR = "后端网络连接中断，请重试请求"
 _KNOWN_JIUWENCLAW_SESSION_PREFIXES = (
     "sess_",
     "acp_",
@@ -129,6 +130,9 @@ class MessageHandler(ABC):
         self._stream_sessions: dict[str, str | None] = {}  # request_id -> session_id
         self._stream_metadata: dict[str, dict[str, Any] | None] = {}  # request_id -> request metadata
         self._stream_modes: dict[str, str] = {}  # request_id -> mode
+        self._stream_channels: dict[str, str] = {}  # request_id -> channel_id
+        self._stream_user_ids: dict[str, str | None] = {}  # request_id -> user_id
+        self._suppress_stream_cancelled_final: set[str] = set()
         self._pending_evolution_approval: dict[str, str] = {}  # session_id -> approval_request_id
         self._queued_supplement_input: dict[str, dict[str, Any]] = {}  # session_id -> queued supplement payload
         self._session_evolution_in_progress: set[str] = set()
@@ -166,6 +170,14 @@ class MessageHandler(ABC):
 
         if hasattr(self._agent_client, "set_server_push_handler"):
             self._agent_client.set_server_push_handler(self._handle_agent_server_push)
+        if hasattr(self._agent_client, "set_openability_connection_lost_handler"):
+            self._agent_client.set_openability_connection_lost_handler(
+                self._handle_openability_connection_lost
+            )
+        if hasattr(self._agent_client, "set_openability_reconnected_handler"):
+            self._agent_client.set_openability_reconnected_handler(
+                self._handle_openability_reconnected
+            )
 
         # 文件传输处理器（延迟初始化）
         self._file_transfer_handler = None
@@ -175,6 +187,126 @@ class MessageHandler(ABC):
 
     def set_outbound_pipeline(self, pipeline: Any) -> None:
         self._outbound_pipeline = pipeline
+
+    def _active_vibeskill_stream_sessions(
+        self,
+        session_ids: Any = None,
+    ) -> dict[str, str | None]:
+        if isinstance(session_ids, (list, tuple, set)):
+            allowed = {str(sid).strip() for sid in session_ids if str(sid).strip()}
+        else:
+            allowed = set()
+
+        active: dict[str, str | None] = {}
+        for rid, sid in list(self._stream_sessions.items()):
+            session_id = str(sid or "").strip()
+            if not session_id:
+                continue
+            if allowed and session_id not in allowed:
+                continue
+            if self._stream_channels.get(rid) != _VIBESKILL_CHANNEL_ID:
+                continue
+            active.setdefault(session_id, self._stream_user_ids.get(rid))
+        return active
+
+    async def _handle_openability_connection_lost(self, payload: dict[str, Any]) -> None:
+        active_sessions = self._active_vibeskill_stream_sessions(payload.get("session_ids"))
+        if not active_sessions:
+            return
+
+        from jiuwenclaw.schema.message import EventType, Message
+
+        for session_id in active_sessions:
+            err_msg = Message(
+                id=f"openability-disconnect-{int(time.time() * 1000):x}-{secrets.token_hex(3)}",
+                type="event",
+                channel_id=_VIBESKILL_CHANNEL_ID,
+                session_id=session_id,
+                params={},
+                timestamp=time.time(),
+                ok=False,
+                payload={
+                    "event_type": EventType.SKILLDEV_ERROR.value,
+                    "error": _OPENABILITY_BACKEND_INTERRUPTED_ERROR,
+                    "message": _OPENABILITY_BACKEND_INTERRUPTED_ERROR,
+                },
+                event_type=EventType.SKILLDEV_ERROR,
+                metadata=None,
+            )
+            await self.publish_robot_messages(err_msg)
+        logger.warning(
+            "[MessageHandler] OA disconnected; VibeSkill streams closed with task.error: sessions=%s",
+            sorted(active_sessions),
+        )
+
+    async def _handle_openability_reconnected(self, payload: dict[str, Any]) -> None:
+        active_sessions = self._active_vibeskill_stream_sessions(payload.get("session_ids"))
+        payload_user_id = str(payload.get("user_id") or "").strip() or None
+        for session_id, user_id in active_sessions.items():
+            await self._cancel_gateway_streams_for_session(
+                session_id,
+                suppress_cancelled_final=True,
+            )
+            await self._send_skilldev_cancel_to_agent_after_openability_reconnect(
+                session_id,
+                user_id=user_id or payload_user_id,
+            )
+
+    async def _cancel_gateway_streams_for_session(
+        self,
+        session_id: str,
+        *,
+        suppress_cancelled_final: bool = False,
+    ) -> list[str]:
+        sid = str(session_id or "").strip()
+        if not sid:
+            return []
+        tasks_to_cancel: list[asyncio.Task] = []
+        rids_cancelled: list[str] = []
+        for rid, task in list(self._stream_tasks.items()):
+            if self._stream_sessions.get(rid) != sid:
+                continue
+            if not task.done():
+                if suppress_cancelled_final:
+                    self._suppress_stream_cancelled_final.add(rid)
+                task.cancel()
+                tasks_to_cancel.append(task)
+                rids_cancelled.append(rid)
+        if tasks_to_cancel:
+            await asyncio.gather(*tasks_to_cancel, return_exceptions=True)
+        return rids_cancelled
+
+    async def _send_skilldev_cancel_to_agent_after_openability_reconnect(
+        self,
+        session_id: str,
+        *,
+        user_id: str | None,
+    ) -> None:
+        from jiuwenclaw.schema.message import Message, ReqMethod
+
+        sid = str(session_id or "").strip()
+        if not sid:
+            return
+        cancel_msg = Message(
+            id=f"openability-reconnect-cancel-{int(time.time() * 1000):x}-{secrets.token_hex(3)}",
+            type="req",
+            channel_id=_VIBESKILL_CHANNEL_ID,
+            session_id=sid,
+            params={"task_id": sid, "session_id": sid, "intent": "cancel"},
+            timestamp=time.time(),
+            ok=True,
+            req_method=ReqMethod.SKILLDEV_CANCEL,
+            is_stream=False,
+            user_id=user_id,
+        )
+        agent_msg = await self._prepare_agent_dispatch_message(cancel_msg)
+        env_interrupt = self.message_to_e2a(agent_msg)
+        await self._send_interrupt_to_agent(env_interrupt)
+        logger.info(
+            "[MessageHandler] skilldev.cancel sent after OA reconnect: session_id=%s user_id=%s",
+            sid,
+            user_id or "n/a",
+        )
 
     @classmethod
     def get_instance(cls, agent_client: "AgentServerClient | None" = None) -> "MessageHandler":
@@ -1461,11 +1593,6 @@ class MessageHandler(ABC):
     async def _handle_agent_server_push(self, wire: dict[str, Any]) -> None:
         """AgentServer ``send_push`` 下行：与 RPC 共用连接但不得占用 unary/stream 等待队列。"""
         from jiuwenclaw.e2a.wire_codec import parse_agent_server_wire_chunk
-        from jiuwenclaw.e2a.constants import (
-            FILE_DOWNLOAD_START,
-            FILE_DOWNLOAD_CHUNK,
-            FILE_DOWNLOAD_COMPLETE,
-        )
 
         try:
             chunk = parse_agent_server_wire_chunk(wire)
@@ -2298,6 +2425,8 @@ class MessageHandler(ABC):
                     self._stream_tasks[stream_rid] = task
                     self._stream_sessions[stream_rid] = msg.session_id
                     self._stream_metadata[stream_rid] = msg.metadata
+                    self._stream_channels[stream_rid] = msg.channel_id
+                    self._stream_user_ids[stream_rid] = msg.user_id
                     self._stream_modes[stream_rid] = (
                         msg.params.get("mode", "plan") if isinstance(msg.params, dict) else "plan"
                     )
@@ -2442,16 +2571,25 @@ class MessageHandler(ABC):
                 "[MessageHandler] Stream 被取消: request_id=%s",
                 rid,
             )
-            await self._publish_stream_cancelled_final(
-                rid, channel_id, session_id, request_metadata,
-            )
+            if rid in self._suppress_stream_cancelled_final:
+                logger.info(
+                    "[MessageHandler] 跳过流式取消结束帧: request_id=%s",
+                    rid,
+                )
+            else:
+                await self._publish_stream_cancelled_final(
+                    rid, channel_id, session_id, request_metadata,
+                )
             raise  # 重新抛出，让调用者知道任务被取消
         finally:
             # 清理状态
             self._stream_tasks.pop(rid, None)
             self._stream_sessions.pop(rid, None)
             self._stream_metadata.pop(rid, None)
+            self._stream_channels.pop(rid, None)
+            self._stream_user_ids.pop(rid, None)
             self._stream_modes.pop(rid, None)
+            self._suppress_stream_cancelled_final.discard(rid)
             if session_id is not None and session_id not in self._stream_sessions.values():
                 # Fallback cleanup when stream exits unexpectedly without evolution end signal.
                 self._clear_session_evolution_in_progress(session_id)
@@ -2991,7 +3129,10 @@ class MessageHandler(ABC):
         self._stream_tasks.clear()
         self._stream_sessions.clear()
         self._stream_metadata.clear()
+        self._stream_channels.clear()
+        self._stream_user_ids.clear()
         self._stream_modes.clear()
+        self._suppress_stream_cancelled_final.clear()
         self._session_evolution_in_progress.clear()
         self._pending_evolution_approval.clear()
         self._queued_supplement_input.clear()

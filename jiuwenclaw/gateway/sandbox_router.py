@@ -196,6 +196,12 @@ class SandboxRouterAgentClient(AgentServerClient):
         self._on_server_push: (
             Callable[[dict[str, Any]], Awaitable[None]] | None
         ) = None
+        self._on_openability_connection_lost: (
+            Callable[[dict[str, Any]], Awaitable[None]] | None
+        ) = None
+        self._on_openability_reconnected: (
+            Callable[[dict[str, Any]], Awaitable[None]] | None
+        ) = None
 
     async def connect(self, uri: str) -> None:
         self._ensure_idle_task()
@@ -256,6 +262,35 @@ class SandboxRouterAgentClient(AgentServerClient):
             ac = runtime.agent_client
             if hasattr(ac, "set_server_push_handler"):
                 ac.set_server_push_handler(handler)
+
+    def set_openability_connection_lost_handler(
+        self,
+        handler: Callable[[dict[str, Any]], Awaitable[None]] | None,
+    ) -> None:
+        self._on_openability_connection_lost = handler
+
+    def set_openability_reconnected_handler(
+        self,
+        handler: Callable[[dict[str, Any]], Awaitable[None]] | None,
+    ) -> None:
+        self._on_openability_reconnected = handler
+
+    def is_openability_reconnecting(
+        self,
+        *,
+        user_id: str | None = None,
+        session_id: str | None = None,
+    ) -> bool:
+        try:
+            routing_key = self._routing_key(user_id, session_id)
+        except ValueError:
+            return False
+        runtime = self._runtimes.get(routing_key)
+        return bool(
+            runtime is not None
+            and runtime.status != SandboxStatus.TERMINATED
+            and self._runtime_needs_openability_refresh(runtime)
+        )
 
     async def record_link_heartbeat(
         self,
@@ -1693,6 +1728,16 @@ class SandboxRouterAgentClient(AgentServerClient):
             runtime.metadata["openability_disconnect_at"] = time.time()
             runtime.last_active_at = time.time()
             session_ids = _tracked_session_ids_from_metadata(runtime.metadata)
+            if self._on_openability_connection_lost is not None:
+                asyncio.create_task(self._on_openability_connection_lost(
+                    {
+                        **dict(payload),
+                        "sandbox_id": sandbox_id,
+                        "routing_key": routing_key,
+                        "user_id": str(runtime.metadata.get("user_id") or "").strip(),
+                        "session_ids": session_ids,
+                    }
+                ))
             open_ability_cfg = self._get_open_ability_config()
             logger.warning(
                 "Detected OA physical disconnect: sandbox_id=%s session_ids=%s "
@@ -1754,6 +1799,17 @@ class SandboxRouterAgentClient(AgentServerClient):
         runtime.metadata["openability_reconnect_required"] = False
         runtime.metadata["openability_reconnected_at"] = time.time()
         await self._flush_reconnect_waiters(runtime.routing_key)
+        if self._on_openability_reconnected is not None:
+            asyncio.create_task(self._on_openability_reconnected(
+                {
+                    "event": "openability.reconnected",
+                    "sandbox_id": runtime.sandbox_id,
+                    "routing_key": runtime.routing_key,
+                    "user_id": str(runtime.metadata.get("user_id") or "").strip(),
+                    "session_ids": _tracked_session_ids_from_metadata(runtime.metadata),
+                    "reason": reason,
+                }
+            ))
         try:
             await self._disconnect_agent_client(runtime.sandbox_id, old_client)
         except Exception:  # noqa: BLE001

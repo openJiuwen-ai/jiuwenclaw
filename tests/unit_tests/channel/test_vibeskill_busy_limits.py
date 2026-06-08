@@ -18,6 +18,19 @@ class FakeRouter:
         self.delivered.append(msg)
 
 
+class FakeAgentClient:
+    def __init__(self) -> None:
+        self.reconnecting = False
+
+    def is_openability_reconnecting(
+        self,
+        *,
+        user_id: str | None = None,
+        session_id: str | None = None,
+    ) -> bool:
+        return self.reconnecting
+
+
 class FakeWebSocket:
     def __init__(self) -> None:
         self.sent: list[dict[str, Any]] = []
@@ -53,7 +66,7 @@ def channel_factory(monkeypatch: pytest.MonkeyPatch):
     def _make_channel(**config_overrides: Any) -> tuple[VibeSkillChannel, FakeRouter]:
         router = FakeRouter()
         config = VibeSkillConfig(**config_overrides)
-        channel = VibeSkillChannel(config=config, router=router, agent_client=None)
+        channel = VibeSkillChannel(config=config, router=router, agent_client=FakeAgentClient())
         return channel, router
 
     return _make_channel
@@ -201,3 +214,27 @@ async def test_user_busy_limit_falls_back_to_session_id_without_user_metadata(ch
     assert router.delivered == []
     task_errors = _events(ws, "task.error")
     assert task_errors[-1]["properties"]["error"] == "用户最多可同时运行1个skill任务"
+
+
+@pytest.mark.asyncio
+async def test_message_send_rejects_while_openability_reconnecting(channel_factory) -> None:
+    channel, router = channel_factory()
+    assert isinstance(channel._agent_client, FakeAgentClient)
+    channel._agent_client.reconnecting = True
+    session = await channel._store.get_or_create(session_id="sid-current", mode="SkillCreate")
+    await channel._store.set_metadata(session.session_id, {"user_id": "user-a"})
+    await channel._store.set_state(session.session_id, VibeSkillSessionState.BUSY)
+    ws = FakeWebSocket()
+
+    handled = await channel._handle_message_send(ws, _message_send(session.session_id))
+
+    assert handled is True
+    assert router.delivered == []
+    assert await channel._store.get_state(session.session_id) is VibeSkillSessionState.IDLE
+    task_errors = _events(ws, "task.error")
+    assert task_errors[-1]["properties"]["error"] == "后端网络连接中断，请重试请求"
+    statuses = _events(ws, "session.status")
+    assert statuses[-1]["properties"]["status"]["type"] == "idle"
+    res = _events(ws, "res")
+    assert res[-1]["ok"] is False
+    assert res[-1]["error"] == "后端网络连接中断，请重试请求"

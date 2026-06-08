@@ -22,7 +22,7 @@ Runtime layout:
 - <root>/agent/sessions
 - <root>/agent/jiuwenclaw_workspace/agent-data.json
 - <root>/agent/.checkpoint
-- <root>/agent/.logs（gateway.log / channel.log / agent_server.log / full.log）
+- <root>/agent/.logs（gateway.log / channel.log / agent_server.log）
 
 内置模板位于包内 ``jiuwenclaw/resources/``（含 ``agent/`` 下各技能模板以及 ``skills_state.json``）。
 """
@@ -58,7 +58,6 @@ class LoggingLevels:
     gateway: int
     channel: int
     agent_server: int
-    full: int
 
 
 @dataclass
@@ -240,20 +239,19 @@ def _resolve_logging_levels(
     gateway = _coerce("gateway")
     channel = _coerce("channel")
     agent_server = _coerce("agent_server")
-    full = _coerce("full")
 
     if log_level_override is not None:
         v = _parse_log_level(log_level_override)
-        console = gateway = channel = agent_server = full = v
+        console = gateway = channel = agent_server = v
         logger_level = v
     else:
         env_level = os.getenv("LOG_LEVEL")
         if env_level:
             v = _parse_log_level(env_level, base)
-            console = gateway = channel = agent_server = full = v
-        logger_level = min(gateway, channel, agent_server, full)
+            console = gateway = channel = agent_server = v
+        logger_level = min(gateway, channel, agent_server)
 
-    return LoggingLevels(logger_level, console, gateway, channel, agent_server, full)
+    return LoggingLevels(logger_level, console, gateway, channel, agent_server)
 
 
 # 用户数据根（config、agent、.logs 等）。供 config 模块在 import 时读取；仅依赖 os/path，不引用本包其它模块。
@@ -1552,14 +1550,14 @@ def install_global_exception_logging() -> None:
 
 
 def setup_logger(log_level: Optional[str] = None) -> logging.Logger:
-    """配置 ``jiuwenclaw`` 根日志：控制台 + 分组件文件 + 汇总 full.log。
+    """配置 ``jiuwenclaw`` 根日志：控制台 + 分组件文件。
 
     各模块应使用 ``logging.getLogger(__name__)``，分文件规则：
     - ``jiuwenclaw.channel.*`` → channel.log
     - ``jiuwenclaw.agentserver.*`` → agent_server.log
     - 其余 ``jiuwenclaw.*``（含 ``jiuwenclaw.app``、gateway、evolution、utils 等）→ gateway.log
 
-    所有分类日志同时写入 ``full.log``。输出目录：``~/.jiuwenclaw/agent/.logs/``。
+    输出目录：``~/.jiuwenclaw/agent/.logs/``。
 
     级别由 ``config.yaml`` 的 ``logging`` 段控制；环境变量 ``LOG_LEVEL`` 覆盖控制台与各日志文件级别
     （``log_level`` 参数为 ``None`` 时）。若传入 ``log_level``（如单测），则控制台与各文件级别均为该值。
@@ -1606,7 +1604,6 @@ def setup_logger(log_level: Optional[str] = None) -> logging.Logger:
     _add_rotating("channel.log", levels.channel, _ComponentNameFilter("channel"))
     _add_rotating("agent_server.log", levels.agent_server,
         _CompositeFilter([_ComponentNameFilter("agent_server"), _ComponentNameFilter("permissions")]))
-    _add_rotating("full.log", levels.full, None)
     json_formatter = JsonOnlyFormatter()
     _add_rotating("permissions.log", levels.agent_server, _ComponentNameFilter("permissions"), json_formatter)
 
