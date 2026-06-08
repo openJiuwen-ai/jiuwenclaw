@@ -127,13 +127,14 @@ Mapping rules:
 | (固定) | `### Function: agent_as_a_tool` heading（恒为此字符串，不用 `name`/`agentId`） |
 | `agentId` | `- **toolName**: <agentId>` |
 | `description` | `- **description**` |
-| `parameters` | `- **参数**: （由平台自动注入）` |
+| `parameters` | `- **参数**: <one-line flattened parameters JSON body>` |
 | (n/a) | `- **约束**` |
 | (n/a) | `- **语义**` |
 
 - `### Function:` 标题恒为 `agent_as_a_tool`。
 - `- **toolName**` 必须填 `agentId`，运行时按它路由。
-- `- **参数**` 不要内联 JSON schema。
+- `- **参数**` 从 `<workspace>/resources/agents/available_agents.json` 中对应 agentDefinition 的 `parameters` 字段生成，直接把该 JSON 体压缩并平铺成一行；不要改写成自定义参数说明格式。
+- 如果 `parameters` 为空对象，写 `{}`。
 - `- **约束**` 仅在有顺序或前置条件时写。
 - `- **语义**` 仅在触发措辞会路由到不同 agent 时写。
 
@@ -143,5 +144,5 @@ Example — given the `travelAgent` definition above, generate:
 ### Function: agent_as_a_tool
 - **toolName**: aaabbbccc
 - **description**: 查询出行相关资讯与方案
-- **参数**: （由平台自动注入）
+- **参数**: {"type":"object","properties":{"query":{"type":"string","description":"用户查询问题内容"},"filesInfo":{"type":"Array<Object>","description":"附带的文件资料信息"}},"required":["query"]}
 ```

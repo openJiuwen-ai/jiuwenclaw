@@ -116,11 +116,12 @@ Mapping rules:
 |------------|----------------|
 | `toolName` | `### Function: <toolName>` heading + `- **toolName**` |
 | `description` | `- **description**` |
-| `arguments` | `- **参数**: （由平台自动注入）` |
+| `arguments` | `- **参数**: <one-line flattened arguments JSON body>` |
 | (n/a) | `- **约束**` |
 | (n/a) | `- **语义**` |
 
-- `- **参数**` 不要内联 JSON schema，运行时会注入。
+- `- **参数**` 从 `<workspace>/resources/available-tools/<bundleName>__<toolName>.json` 的 `arguments` 字段生成，直接把该 JSON 体压缩并平铺成一行；不要改写成自定义参数说明格式。
+- 如果 `arguments` 为空对象，写 `{}`。
 - `- **约束**` 仅在工具有顺序、幂等性或前置条件时写。
 - `- **语义**` 仅在触发措辞会路由到不同工具时写（如"删除" vs "取消"）。
 
@@ -130,7 +131,7 @@ Example — given the `weather_query` JSON above, generate:
 ### Function: weather_query
 - **toolName**: weather_query
 - **description**: 查询指定城市的实时天气信息
-- **参数**: （由平台自动注入）
+- **参数**: {"type":"object","properties":{"city":{"type":"string","description":"城市名称。支持中文（北京、上海）或拼音（beijing）或英文（Beijing）。"}},"required":["city"]}
 ```
 
 No 约束 / 语义 line because the definition implies no special preconditions or trigger-phrase routing.
