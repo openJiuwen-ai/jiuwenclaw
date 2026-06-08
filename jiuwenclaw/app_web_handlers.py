@@ -53,7 +53,7 @@ from jiuwenclaw.utils import (
 )
 from jiuwenclaw.agentserver.skilldev.session_history.restore_chunks import (
     RestoreChunkDecodeError,
-    decode_restore_payload_from_stream,
+    decode_restore_payload_from_stream_with_retry,
 )
 from jiuwenclaw.version import __version__
 from jiuwenclaw.local_env_config import decrypt, encrypt
@@ -1316,20 +1316,29 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
         restore_params["task_id"] = task_id
 
         try:
+            import secrets
+            import time
+
             from jiuwenclaw.e2a.gateway_normalize import e2a_from_agent_fields
             from jiuwenclaw.schema.message import ReqMethod
 
-            env = e2a_from_agent_fields(
-                request_id=str(req_id) if req_id else "",
-                channel_id=channel.channel_id,
-                session_id=task_id,
-                req_method=ReqMethod.SKILLDEV_RESTORE,
-                params=restore_params,
-                is_stream=True,
-                timestamp=time.time(),
-            )
-            payload = await decode_restore_payload_from_stream(
-                ac.send_request_stream(env)
+            def _open_restore_stream():
+                stream_request_id = (
+                    f"skilldev-restore-{int(time.time() * 1000):x}-{secrets.token_hex(3)}"
+                )
+                env = e2a_from_agent_fields(
+                    request_id=stream_request_id,
+                    channel_id=channel.channel_id,
+                    session_id=task_id,
+                    req_method=ReqMethod.SKILLDEV_RESTORE,
+                    params=restore_params,
+                    is_stream=True,
+                    timestamp=time.time(),
+                )
+                return ac.send_request_stream(env)
+
+            payload = await decode_restore_payload_from_stream_with_retry(
+                _open_restore_stream,
             )
         except RestoreChunkDecodeError as exc:
             logger.info("[skilldev.restore] stream decode failed: code=%s error=%s", exc.code, exc)

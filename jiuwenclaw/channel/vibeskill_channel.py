@@ -30,7 +30,7 @@ from jiuwenclaw.channel.vibeskill_session_dcs_store import VibeSkillSessionDcsSt
 from jiuwenclaw.channel.vibeskill_file_utils import skilldev_tree_to_file_tree_nodes
 from jiuwenclaw.agentserver.skilldev.session_history.restore_chunks import (
     RestoreChunkDecodeError,
-    decode_restore_payload_from_stream,
+    decode_restore_payload_from_stream_with_retry,
 )
 from jiuwenclaw.schema.message import Message, ReqMethod
 from jiuwenclaw.utils import SafeRotatingFileHandler, SensitiveDataFilter
@@ -3896,23 +3896,29 @@ class VibeSkillChannel(BaseChannel):
             return self._json_response(400, {"error": "missing_session_id"})
 
         try:
-            request_id = f"vibeskill-session-msg-{int(time.time() * 1000):x}-{secrets.token_hex(3)}"
             restore_params: dict[str, Any] = {"task_id": session_id}
             self._apply_tenant_service_id(restore_params, session_id)
-            env = e2a_from_agent_fields(
-                request_id=request_id,
-                channel_id=VIBESKILL_CHANNEL_ID,
-                session_id=session_id,
-                req_method=ReqMethod.SKILLDEV_RESTORE,
-                params=restore_params,
-                is_stream=True,
-                timestamp=time.time(),
-                user_id=self._session_user_id(session_id),
-            )
+
+            def _open_restore_stream():
+                request_id = (
+                    f"vibeskill-session-msg-{int(time.time() * 1000):x}-{secrets.token_hex(3)}"
+                )
+                env = e2a_from_agent_fields(
+                    request_id=request_id,
+                    channel_id=VIBESKILL_CHANNEL_ID,
+                    session_id=session_id,
+                    req_method=ReqMethod.SKILLDEV_RESTORE,
+                    params=restore_params,
+                    is_stream=True,
+                    timestamp=time.time(),
+                    user_id=self._session_user_id(session_id),
+                )
+                return self._agent_client.send_request_stream(env)
 
             try:
-                payload = await decode_restore_payload_from_stream(
-                    self._agent_client.send_request_stream(env)
+                payload = await decode_restore_payload_from_stream_with_retry(
+                    _open_restore_stream,
+                    log_label="VibeSkillChannel",
                 )
             except RestoreChunkDecodeError as exc:
                 if self._is_restore_task_missing_error(exc):

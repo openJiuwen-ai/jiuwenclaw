@@ -12,7 +12,9 @@ from jiuwenclaw.agentserver.skilldev.session_history.restore_chunks import (
     RESTORE_RESPONSE_TOO_LARGE_CODE,
     RestoreChunkDecodeError,
     decode_restore_payload_from_stream,
+    decode_restore_payload_from_stream_with_retry,
     encode_restore_payload_chunks,
+    is_retriable_restore_decode_error,
 )
 from jiuwenclaw.e2a.wire_codec import encode_agent_chunk_for_wire
 from jiuwenclaw.schema.agent import AgentRequest, AgentResponseChunk
@@ -96,6 +98,29 @@ async def test_restore_chunks_roundtrip_large_single_timeline_item_and_wire_size
     restored = await decode_restore_payload_from_stream(
         _aiter([*chunks, AgentResponseChunk("restore-large", "web", {"is_complete": True}, True)])
     )
+    assert restored == payload
+
+
+@pytest.mark.asyncio
+async def test_restore_chunks_tolerate_terminal_before_last_data_chunk():
+    payload = _restore_payload(text="x" * 50_000)
+    chunks = list(
+        encode_restore_payload_chunks(
+            payload,
+            request_id="restore-reorder",
+            channel_id="web",
+            task_id="task-1",
+        )
+    )
+    terminal = AgentResponseChunk(
+        "restore-reorder",
+        "web",
+        {"is_complete": True},
+        True,
+    )
+    reordered = [*chunks[:-1], terminal, chunks[-1]]
+
+    restored = await decode_restore_payload_from_stream(_aiter(reordered))
     assert restored == payload
 
 
@@ -213,6 +238,44 @@ async def test_restore_service_unary_large_payload_returns_small_error():
     assert chunks[0].payload["event_type"] == "skilldev.error"
     assert chunks[0].payload["code"] == RESTORE_RESPONSE_TOO_LARGE_CODE
     assert len(json.dumps(chunks[0].payload).encode("utf-8")) < 60_000
+
+
+@pytest.mark.asyncio
+async def test_restore_decode_retry_recovers_on_second_attempt():
+    payload = _restore_payload(text="x" * 50_000)
+    chunks = list(
+        encode_restore_payload_chunks(
+            payload,
+            request_id="restore-retry",
+            channel_id="web",
+            task_id="task-1",
+        )
+    )
+    terminal = AgentResponseChunk("restore-retry", "web", {"is_complete": True}, True)
+    broken = [chunks[0], terminal]
+    good = [*chunks, terminal]
+    calls = {"count": 0}
+
+    def open_stream():
+        calls["count"] += 1
+        if calls["count"] == 1:
+            return _aiter(broken)
+        return _aiter(good)
+
+    restored = await decode_restore_payload_from_stream_with_retry(open_stream, max_attempts=2)
+    assert restored == payload
+    assert calls["count"] == 2
+
+
+def test_is_retriable_restore_decode_error():
+    missing = RestoreChunkDecodeError("restore stream missing chunks: expected 7, got 6")
+    assert is_retriable_restore_decode_error(missing) is True
+
+    duplicate = RestoreChunkDecodeError("duplicate restore chunk index")
+    assert is_retriable_restore_decode_error(duplicate) is False
+
+    skilldev = RestoreChunkDecodeError("任务 task-1 不存在", code="SKILLDEV_RESTORE_ERROR")
+    assert is_retriable_restore_decode_error(skilldev) is False
 
 
 @pytest.mark.asyncio
