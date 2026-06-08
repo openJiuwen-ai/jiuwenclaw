@@ -146,14 +146,16 @@ def copy_dependency_references(skill_path: Path) -> bool:
     if not pairs:
         return True
 
-    missing = [src for src, _ in pairs if not src.exists()]
-    if missing:
-        for src in missing:
-            logger.error("Dependency reference not found: %s", src)
-        return False
-
     for source, rel_dest in pairs:
         dest = skill_path / rel_dest
+        if not source.exists():
+            if dest.exists():
+                logger.info(
+                    "Source not in workspace but already in skill: %s", rel_dest
+                )
+                continue
+            logger.error("Dependency reference not found: %s", source)
+            return False
         dest.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(source, dest)
         logger.info("Copied dependency reference: %s", dest.relative_to(skill_path))
