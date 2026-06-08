@@ -34,7 +34,7 @@ class IssueFixService:
         self._default_repo_url = default_repo_url
 
     @staticmethod
-    def _parse_repo_owner_name(repo: str) -> tuple[str, str]:
+    def _parse_repo_identifier(repo: str) -> tuple[str, str]:
         """Parse owner/repo from a GitCode URL or owner/repo string."""
         raw = str(repo or "").strip()
         if not raw:
@@ -47,14 +47,14 @@ class IssueFixService:
             return (parts[-2], parts[-1])
         return ("", "")
 
-    def _resolve_issue_watch_repo(self, params: dict[str, Any]) -> tuple[str, str]:
+    def _resolve_target_repo(self, params: dict[str, Any]) -> tuple[str, str]:
         owner = str(params.get("owner") or "").strip()
         repo = str(params.get("repo_name") or "").strip()
         if owner and repo:
             return (owner, repo)
         repo_param = str(params.get("repo") or "").strip()
         if repo_param:
-            parsed_owner, parsed_repo = self._parse_repo_owner_name(repo_param)
+            parsed_owner, parsed_repo = self._parse_repo_identifier(repo_param)
             if parsed_owner and parsed_repo:
                 return (parsed_owner, parsed_repo)
         base_config = self._base_config_getter()
@@ -63,9 +63,9 @@ class IssueFixService:
             if base_config is not None and base_config.repo_url
             else self._default_repo_url
         )
-        return self._parse_repo_owner_name(repo_url)
+        return self._parse_repo_identifier(repo_url)
 
-    def _resolve_gitcode_token(self, params: dict[str, Any]) -> str:
+    def _resolve_access_token(self, params: dict[str, Any]) -> str:
         token = str(params.get("access_token") or "").strip()
         if token:
             return token
@@ -81,7 +81,7 @@ class IssueFixService:
         return ""
 
     @staticmethod
-    def _coerce_str_tuple(value: Any, default: tuple[str, ...]) -> tuple[str, ...]:
+    def _parse_string_tuple(value: Any, default: tuple[str, ...]) -> tuple[str, ...]:
         if value is None:
             return default
         if isinstance(value, str):
@@ -91,7 +91,7 @@ class IssueFixService:
         return default
 
     @staticmethod
-    def _coerce_int_tuple(value: Any) -> tuple[int, ...]:
+    def _parse_issue_numbers(value: Any) -> tuple[int, ...]:
         if value is None:
             return ()
         raw_parts: list[Any]
@@ -121,11 +121,11 @@ class IssueFixService:
     ) -> dict[str, Any]:
         """Run one GitCode issue ingestion pass and create auto-harness tasks."""
         del model
-        token = self._resolve_gitcode_token(params)
+        token = self._resolve_access_token(params)
         if not token:
             return {"error": "缺少 GitCode Access Token，请配置 gitcode.access_token 或 GITCODE_ACCESS_TOKEN"}
 
-        owner, repo = self._resolve_issue_watch_repo(params)
+        owner, repo = self._resolve_target_repo(params)
         if not owner or not repo:
             return {"error": "无法解析 GitCode 仓库，请传入 repo=openJiuwen/jiuwenswarm"}
 
@@ -142,7 +142,7 @@ class IssueFixService:
         per_page = max(1, min(per_page, 100))
 
         pipeline = str(params.get("pipeline") or META_EVOLVE_PIPELINE)
-        issue_numbers = self._coerce_int_tuple(
+        issue_numbers = self._parse_issue_numbers(
             params.get("issue_numbers")
             or params.get("issues")
             or params.get("issue")
@@ -163,8 +163,8 @@ class IssueFixService:
             owner=owner,
             repo=repo,
             issue_numbers=issue_numbers,
-            labels=self._coerce_str_tuple(params.get("labels"), ("auto-harness",)),
-            exclude_labels=self._coerce_str_tuple(
+            labels=self._parse_string_tuple(params.get("labels"), ("auto-harness",)),
+            exclude_labels=self._parse_string_tuple(
                 params.get("exclude_labels"),
                 ("blocked", "wontfix", "needs-discussion"),
             ),

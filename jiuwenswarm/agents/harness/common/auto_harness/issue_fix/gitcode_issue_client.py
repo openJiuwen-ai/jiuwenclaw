@@ -178,20 +178,3 @@ class GitCodeIssueClient:
             json_body={"body": body},
         )
         return data if isinstance(data, dict) else {}
-
-    def create_pull_request(
-        self,
-        *,
-        owner: str,
-        repo: str,
-        title: str,
-        head: str,
-        base: str,
-        body: str = "",
-    ) -> dict[str, Any]:
-        data = self._request(
-            "POST",
-            f"/repos/{owner}/{repo}/pulls",
-            json_body={"title": title, "head": head, "base": base, "body": body},
-        )
-        return data if isinstance(data, dict) else {}

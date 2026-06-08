@@ -64,7 +64,7 @@ class GitCodeIssueRunner:
         self._harness_service = harness_service
 
     @staticmethod
-    def build_query(issue: GitCodeIssue, *, owner: str, repo: str) -> str:
+    def build_issue_fix_query(issue: GitCodeIssue, *, owner: str, repo: str) -> str:
         issue_url = issue.html_url or f"https://gitcode.com/{owner}/{repo}/issues/{issue.number}"
         labels = ", ".join(issue.labels) if issue.labels else "(none)"
         return (
@@ -93,11 +93,11 @@ class GitCodeIssueRunner:
         )
 
     @staticmethod
-    def _label_set(issue: GitCodeIssue) -> set[str]:
+    def _normalized_label_set(issue: GitCodeIssue) -> set[str]:
         return {label.strip().lower() for label in issue.labels if label.strip()}
 
     @staticmethod
-    def _has_open_pull_request(pulls: list[dict[str, Any]]) -> bool:
+    def _contains_open_pull_request(pulls: list[dict[str, Any]]) -> bool:
         for pull in pulls:
             state = str(pull.get("state") or pull.get("status") or "").lower()
             if not state or state in {"open", "opened", "active"}:
@@ -113,7 +113,7 @@ class GitCodeIssueRunner:
         """
         title = issue.title or ""
         body = issue.body or ""
-        labels = cls._label_set(issue)
+        labels = cls._normalized_label_set(issue)
         text = f"{title}\n{body}"
         lower = text.lower()
         reasons: list[str] = []
@@ -233,12 +233,12 @@ class GitCodeIssueRunner:
         }
 
     @classmethod
-    def _difficulty_allowed(cls, assessment: dict[str, Any], max_level: str) -> bool:
+    def _is_difficulty_within_limit(cls, assessment: dict[str, Any], max_level: str) -> bool:
         level = str(assessment.get("level") or "unclear")
         return cls._DIFFICULTY_ORDER.get(level, 99) <= cls._DIFFICULTY_ORDER.get(max_level, 2)
 
     @staticmethod
-    def _extract_pr_number_from_url(url: str) -> int | None:
+    def _extract_pull_request_number_from_url(url: str) -> int | None:
         match = re.search(r"/(?:pulls|pull_requests|merge_requests)/(\d+)(?:\D|$)", url)
         if not match:
             return None
@@ -248,7 +248,7 @@ class GitCodeIssueRunner:
             return None
 
     @classmethod
-    def _normalize_pr_from_url(cls, url: str) -> dict[str, Any] | None:
+    def _build_pull_request_record_from_url(cls, url: str) -> dict[str, Any] | None:
         url = url.strip()
         if not url.startswith("https://gitcode.com/"):
             return None
@@ -257,13 +257,13 @@ class GitCodeIssueRunner:
         if not re.search(r"/(?:pulls|pull_requests|merge_requests)/\d+", url):
             return None
         result: dict[str, Any] = {"html_url": url, "url": url}
-        number = cls._extract_pr_number_from_url(url)
+        number = cls._extract_pull_request_number_from_url(url)
         if number is not None:
             result["number"] = number
         return result
 
     @classmethod
-    def _extract_pr_from_task_log(cls, task: Optional[dict[str, Any]]) -> dict[str, Any] | None:
+    def _find_pull_request_in_task_log(cls, task: Optional[dict[str, Any]]) -> dict[str, Any] | None:
         """Find a real PR/MR URL in the latest scheduled task log."""
         if not task:
             return None
@@ -292,13 +292,13 @@ class GitCodeIssueRunner:
                 text_parts.extend(str(item) for item in entry.get("messages") or [])
                 for text in text_parts:
                     for url in re.findall(r"https://gitcode\.com/[^\s)>\"]+", text):
-                        pr = cls._normalize_pr_from_url(url)
+                        pr = cls._build_pull_request_record_from_url(url)
                         if pr:
                             return pr
         return None
 
     @classmethod
-    def _find_issue_pr_in_repo_pulls(
+    def _find_issue_pull_request_in_repository_pulls(
         cls,
         pulls: list[dict[str, Any]],
         *,
@@ -326,7 +326,12 @@ class GitCodeIssueRunner:
                 return pull
         return None
 
-    async def _skip(self, options: IssueWatchOptions, issue: GitCodeIssue, reason: str) -> dict[str, Any]:
+    async def _record_skipped_issue(
+        self,
+        options: IssueWatchOptions,
+        issue: GitCodeIssue,
+        reason: str,
+    ) -> dict[str, Any]:
         await self._state_store.update(
             options.owner,
             options.repo,
@@ -339,7 +344,7 @@ class GitCodeIssueRunner:
         )
         return {"issue": issue.number, "status": "skipped", "reason": reason}
 
-    async def _needs_human(
+    async def _record_issue_needs_human(
         self,
         options: IssueWatchOptions,
         issue: GitCodeIssue,
@@ -383,11 +388,11 @@ class GitCodeIssueRunner:
             task = await self._harness_service.get_scheduled_task_status(task_id) if task_id else None
             task_status = str((task or {}).get("status") or "")
             pulls = self._client.list_issue_pull_requests(owner=options.owner, repo=options.repo, number=number)
-            fallback_pr = self._extract_pr_from_task_log(task)
+            fallback_pr = self._find_pull_request_in_task_log(task)
             repo_pr = None
             if not pulls and not fallback_pr:
                 try:
-                    repo_pr = self._find_issue_pr_in_repo_pulls(
+                    repo_pr = self._find_issue_pull_request_in_repository_pulls(
                         self._client.list_pull_requests(
                             owner=options.owner,
                             repo=options.repo,
@@ -463,12 +468,12 @@ class GitCodeIssueRunner:
             if issue.number <= 0:
                 continue
 
-            labels = self._label_set(issue)
+            labels = self._normalized_label_set(issue)
             if not options.issue_numbers and required_labels and not required_labels.issubset(labels):
-                skipped.append(await self._skip(options, issue, "missing required labels"))
+                skipped.append(await self._record_skipped_issue(options, issue, "missing required labels"))
                 continue
             if blocked_labels.intersection(labels):
-                skipped.append(await self._skip(options, issue, "excluded label present"))
+                skipped.append(await self._record_skipped_issue(options, issue, "excluded label present"))
                 continue
 
             previous = self._state_store.get(options.owner, options.repo, issue.number)
@@ -485,16 +490,20 @@ class GitCodeIssueRunner:
                 repo=options.repo,
                 number=issue.number,
             )
-            if self._has_open_pull_request(pulls):
-                skipped.append(await self._skip(options, issue, "linked pull request already exists"))
+            if self._contains_open_pull_request(pulls):
+                skipped.append(await self._record_skipped_issue(
+                    options,
+                    issue,
+                    "linked pull request already exists",
+                ))
                 continue
 
             assessment = self.assess_issue_difficulty(issue)
-            if not self._difficulty_allowed(assessment, options.max_auto_difficulty):
-                skipped.append(await self._needs_human(options, issue, assessment))
+            if not self._is_difficulty_within_limit(assessment, options.max_auto_difficulty):
+                skipped.append(await self._record_issue_needs_human(options, issue, assessment))
                 continue
 
-            query = self.build_query(issue, owner=options.owner, repo=options.repo)
+            query = self.build_issue_fix_query(issue, owner=options.owner, repo=options.repo)
             if options.dry_run:
                 started.append({
                     "issue": issue.number,
