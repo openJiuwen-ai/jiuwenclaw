@@ -435,20 +435,16 @@ class ForkAgentExecutor:
             )
 
             react_config = (config_base or {}).get("react", {}) or {}
-            rail = build_jiuwen_progressive_tool_rail_from_react_config(
+            return build_jiuwen_progressive_tool_rail_from_react_config(
                 react_config,
                 language=language,
                 profile="subagent",
-                debug_context={
-                    "kind": kind,
-                    "task_id": task_id,
-                    "role_id": role_id,
-                },
+                agent_id=task_id,
+                subagent_kind=kind,
             )
-            return rail
         except Exception as exc:
             logger.warning(
-                "[ProgressiveTool] subagent rail build failed kind=%s task_id=%s role_id=%s: %s",
+                "[ProgressiveToolRail] subagent rail build failed kind=%s task_id=%s role_id=%s: %s",
                 kind,
                 task_id,
                 role_id,
@@ -878,6 +874,14 @@ Approach each task methodically and deliver high-quality results.
         IMPORTANT: Does NOT exclude fork_agent, allowing spawn to call fork.
         """
         try:
+            from jiuwenclaw.agentserver.deep_agent.interface_deep import (
+                _PROGRESSIVE_META_TOOL_NAMES,
+                is_subagent_tool_lazy_load_enabled,
+            )
+
+            react_config = (get_config() or {}).get("react", {}) or {}
+            skip_meta_tools = not is_subagent_tool_lazy_load_enabled(react_config)
+
             parent_tools = self._parent_agent.ability_manager.list()
             if not parent_tools:
                 logger.debug("[SpawnAgent] Parent agent has no tools to inherit")
@@ -892,6 +896,12 @@ Approach each task methodically and deliver high-quality results.
 
                     if tool_name in EXCLUDED_TOOLS_SPAWN:
                         logger.debug(f"[SpawnAgent] Skipping excluded tool: {tool_name}")
+                        continue
+                    if skip_meta_tools and tool_name in _PROGRESSIVE_META_TOOL_NAMES:
+                        logger.debug(
+                            "[SpawnAgent] Skipping progressive meta tool: %s",
+                            tool_name,
+                        )
                         continue
 
                     if hasattr(tool, "card"):
@@ -1040,6 +1050,14 @@ Execute the given task using inherited context and available tools.
         Excludes fork_agent to prevent recursive forking.
         """
         try:
+            from jiuwenclaw.agentserver.deep_agent.interface_deep import (
+                _PROGRESSIVE_META_TOOL_NAMES,
+                is_subagent_tool_lazy_load_enabled,
+            )
+
+            react_config = (get_config() or {}).get("react", {}) or {}
+            skip_meta_tools = not is_subagent_tool_lazy_load_enabled(react_config)
+
             parent_tools = self._parent_agent.ability_manager.list()
             if not parent_tools:
                 logger.debug("[ForkAgent] Parent agent has no tools to inherit")
@@ -1054,6 +1072,12 @@ Execute the given task using inherited context and available tools.
 
                     if tool_name in EXCLUDED_TOOLS_FORK:
                         logger.debug(f"[ForkAgent] Skipping excluded tool: {tool_name}")
+                        continue
+                    if skip_meta_tools and tool_name in _PROGRESSIVE_META_TOOL_NAMES:
+                        logger.debug(
+                            "[ForkAgent] Skipping progressive meta tool: %s",
+                            tool_name,
+                        )
                         continue
 
                     if hasattr(tool, "card"):

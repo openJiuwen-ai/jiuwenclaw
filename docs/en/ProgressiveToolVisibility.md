@@ -1,149 +1,104 @@
-# Progressive tool visibility
+# Progressive Tool Visibility: Show Only Needed Tools to the Model
 
-When JiuwenClaw registers many built-in tools, skill tools, or MCP tools, sending the full tool schema on every model call increases context token usage and makes wrong tool selection more likely. **Progressive tool visibility** compresses the model-side `tools` list: frequently used tools stay visible; others are discovered and loaded on demand via `search_and_load_tools`.
+When JiuwenClaw integrates many built-in tools, skill tools, or MCP tools, sending the complete tool schema on every model call creates two problems: increased context token usage and higher likelihood of the model selecting the wrong tool from a large pool. **Progressive tool visibility** compresses the model-side `tools` list: always-visible tools are directly accessible, while other registered tools are accessed on-demand via `tools_search` + `invoke_tool`.
 
-This feature only changes **which tool schemas are sent to the model**. It does not change tool registration, permission checks, or real execution paths. This version also does **not** defer MCP server connections—MCP servers still register and connect through the existing flow.
+This capability only changes "which tool schemas are sent to the model" — it does not affect tool registration, permission validation, or actual execution pipelines. MCP servers still register and connect through the existing flow.
 
-## How it works
+## How It Works
 
-After enabling, tools fall into two categories:
+When enabled, the system divides tools into two categories:
 
 | Type | Description |
 | :--- | :--- |
-| **Always visible** | Listed in `eager_tools`; full schema is sent on every model call. Use for files, shell, sub-agents, skills, user prompts, etc. |
-| **On-demand visible** | Registered at runtime but hidden from the model `tools` list until loaded via `search_and_load_tools` |
+| **Always Visible Tools** | Listed in `eager_tools`, full schema included in every model call, can be invoked directly |
+| **On-Demand Visible Tools** | Registered at runtime but not included in the model's `tools` list; summarized in the "On-Demand Tool Navigation" section of the system prompt |
 
-When the model needs a capability that is not currently visible, it calls `search_and_load_tools`. That meta tool searches registered tools, adds matches to the current session’s visible set, and on the **next** model step those tools appear in `tools` so the model can call them directly.
+The model-side `tools` schema is **fixed to** `eager_tools` (beneficial for LLM prefix caching). When using on-demand tools:
+
+1. Call `tools_search` with the `tool_name` matching the navigation list to get the complete `input_schema`
+2. Call `invoke_tool` with the exact `tool_name` and `arguments`
+
+There's no need to load on-demand tools into the next round's schema.
 
 ## Configuration
 
-Settings live under `react.tool_lazy_load` in `config.yaml`:
+Configuration is located at `react.tool_lazy_load` in `config.yaml` (consistent with the default example in `config.yaml`):
 
 ```yaml
 react:
   tool_lazy_load:
     enabled: true
-    search_max_results: 5
-    default_load_limit: 3
-    max_loaded_tools: 1024
-    defer_mcp: false
-    defer_builtin: false
+    enable_for_models:
+      - glm
     eager_tools:
-      - search_and_load_tools
-      - ask_user_question
-      - spawn_subagent
-      - fork_agent
-      - read_file
-      - write_file
-      - edit_file
-      - grep
-      - glob
+      - tools_search
+      - invoke_tool
       - bash
+      - read_file
+      # ...
     subagents:
       enabled: true
       inherit_parent_eager_tools: false
       eager_tools:
-        - search_and_load_tools
+        - tools_search
+        - invoke_tool
 ```
 
-### Main switch
+### Main Switch
 
-| Setting | Description |
+| Configuration | Description |
 | :--- | :--- |
-| `enabled` | Turn progressive visibility on (`true`) or off (`false`) |
-| `JIUWENCLAW_TOOL_LAZY_LOAD` | Environment override; `true` / `false` |
+| `enabled` | Whether to enable progressive tool visibility |
 
-When disabled, behavior reverts to exposing the full tool list to the model.
+### Model whitelist
 
-### Search and load limits
-
-| Setting | Description |
+| Configuration | Description |
 | :--- | :--- |
-| `search_max_results` | Maximum candidates returned by one `search_and_load_tools` search |
-| `default_load_limit` | Default Top N tools to load when the model omits `limit` |
-| `max_loaded_tools` | Maximum on-demand visible tools kept in the current session |
+| `enable_for_models` | Substring whitelist on `model_name` (case-insensitive). **Empty list** = progressive visibility for all models. **Non-empty** = only matched models get filtered schema; others see the full tools list |
 
-If the visible set exceeds `max_loaded_tools` after loading, earlier entries are kept and overflow names go to `skipped_tools`; they will not become callable on the next model step. Tools in `eager_tools` remain visible regardless.
+Log `[ProgressiveToolRail] lazy load bypassed for model=...` means the current model did not match the whitelist and schema filtering was skipped.
 
-### Always-visible tools (`eager_tools`)
+When `enabled` is false, model calls see the complete tool list.
 
-Use `eager_tools` for tools that should be fully exposed on the first turn. Recommended minimum:
+### Always Visible Tools
 
-| Category | Recommendation |
+`eager_tools` declares the tools exposed to the model every round. The system automatically adds `tools_search` and `invoke_tool`.
+
+| Tool Type | Recommendation |
 | :--- | :--- |
-| Discovery | Keep `search_and_load_tools`—without it the model cannot load hidden tools |
-| User interaction | `ask_user_question` |
-| Files & shell | Common read/write/search/shell tools |
-| Sub-agents | `spawn_subagent`, `fork_agent` if the main agent should delegate |
-| Skills | `skill_tool`, `skill_complete` if skills are core to your workflow |
+| Tool Discovery & Invocation | `tools_search`, `invoke_tool` (auto-added) |
+| User Interaction | `ask_user_question` |
+| File & Command | Common file read/write, search, shell tools |
+| Sub-Agent | `spawn_subagent`, `fork_agent` (when main Agent needs delegation) |
 
-If `search_and_load_tools` is missing from `eager_tools`, the runtime adds it automatically.
+On-demand visible tools = all registered tools − `eager_tools`, no separate configuration list needed.
 
-## Sub-agents
+## Sub-Agent Behavior
 
-`spawn_subagent` and `fork_agent` child agents can use progressive visibility:
-
-```yaml
-subagents:
-  enabled: true
-  inherit_parent_eager_tools: false
-  eager_tools:
-    - search_and_load_tools
-```
-
-| Setting | Description |
-| :--- | :--- |
-| `subagents.enabled` | Enable progressive visibility for spawn/fork sub-agents |
-| `subagents.inherit_parent_eager_tools` | Reuse the main agent’s `eager_tools` |
-| `subagents.eager_tools` | Sub-agent-specific always-visible tools |
-
-The default is conservative: only `search_and_load_tools` for sub-agents, so inherited tools do not flood the child’s schema. Each sub-agent task uses its own session; loaded-tool state does not leak to the parent or other sub-agents.
-
-## Difference from MCP lazy loading
-
-This release only compresses **model-side** tool visibility:
-
-| Capability | This release |
-| :--- | :--- |
-| Smaller `tools` schema in LLM requests | Yes |
-| Less tool-selection noise | Yes |
-| Skip MCP connection at startup | No |
-| MCP catalog-only index | No |
-| Connect MCP on first tool hit | No |
-
-Startup time dominated by MCP connections is unchanged; the main win is fewer tool-schema tokens per model call and clearer tool choice.
+`spawn_subagent` / `fork_agent` can be enabled separately via `subagents.enabled`. Sub-agents by default exclude `spawn_subagent` and `fork_agent` from `eager_tools` (to avoid nested delegation). Each sub-agent uses `agent_id=task_id` to register an independent meta tool instance.
 
 ## Troubleshooting
 
-Look for log lines prefixed with `[ProgressiveTool]`:
+Key log prefix: `[ProgressiveToolRail]`
 
-| Log fragment | Meaning |
+| Log Fragment | Meaning |
 | :--- | :--- |
-| `enabled profile=...` | Progressive rail mounted for main or sub-agent |
-| `invoke registered=... visible=... always=...` | Registered tool count, session visible count, always-visible (`eager_tools`) count |
-| `filter tools X -> Y` | Tools filtered before the model call (`X` → `Y`) |
-| `search_and_load query=... matched=... loaded=... skipped=...` | Result of `search_and_load_tools` (search, load, cap overflow) |
-
-- **`registered`**: tools known to the agent this turn.
-- **`visible`**: names in session state (`__progressive_visible_tool_names__`), including loaded on-demand tools.
-- **`always`**: size of configured `eager_tools`; these stay callable even if not listed in session `visible`.
-
-For full messages and tools sent to the model, enable LLM IO trace at debug level. Day-to-day checks usually start with `[ProgressiveTool]` logs.
+| `enabled profile=...` | Main Agent or sub-Agent has mounted the rail |
+| `invoke total=... eager=... deferred=...` | Registered / always-visible / on-demand tool counts |
+| `filter tools X -> Y` | Schema filtering before sending to model |
+| `lazy load bypassed for model=...` | Current model not in `enable_for_models`; schema not filtered |
+| `search tool_name=... matches=...` | `tools_search` exact lookup by registered name |
 
 ## FAQ
 
-### Why does the model call `search_and_load_tools` first?
+### Why does the model call `tools_search` / `invoke_tool` first?
 
-The target tool is not in the current `tools` list. The model must search and load it; the next turn can call the real tool. This reduces first-turn schema size.
+The target tool is not in the current `tools` schema and must be invoked indirectly through meta tools.
 
-### Why was a tool found but not callable on the next turn?
+### Does this affect tool permissions?
 
-Check `skipped_tools` in the tool result. Names over `max_loaded_tools` are skipped and will not appear in the next `tools` list.
+No. It only controls the model-side schema and navigation prompts, and does not bypass permission rails or disabled tools.
 
-### Does this bypass tool permissions?
+### What's the difference from the legacy `search_and_load_tools` approach?
 
-No. It only controls schema visibility. Permission rails, `disabled_tools`, and execution behavior are unchanged.
-
-### Are sessions isolated?
-
-Yes. Loaded-tool state lives in per-session state. User sessions, main agent, and sub-agent tasks do not share visible-tool lists.
+The current implementation uses **fixed schema + meta tool indirect invocation**, and no longer dynamically adds on-demand tools to the next round's `tools` list. The configuration key remains `tool_lazy_load`, and the implementation class is `JiuWenProgressiveToolRail`.

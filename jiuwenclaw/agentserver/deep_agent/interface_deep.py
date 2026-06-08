@@ -380,108 +380,123 @@ def _normalize_tool_names(value: Any, default: list[str] | None = None) -> list[
     return list(default or [])
 
 
+_DEFAULT_PROGRESSIVE_EAGER_TOOLS = [
+    "tools_search",
+    "invoke_tool",
+    "read_file",
+    "write_file",
+    "edit_file",
+    "grep",
+    "glob",
+    "bash",
+]
+
+_SUBAGENT_PROGRESSIVE_EAGER_EXCLUDE_BY_KIND: dict[str, frozenset[str]] = {
+    "spawn": frozenset({"fork_agent", "spawn_subagent"}),
+    "fork": frozenset({"fork_agent", "spawn_subagent"}),
+}
+
+_PROGRESSIVE_META_TOOL_NAMES = frozenset({"tools_search", "invoke_tool"})
+
+
+def is_subagent_tool_lazy_load_enabled(react_config: dict[str, Any] | None) -> bool:
+    """True when react.tool_lazy_load and subagents are both enabled."""
+    config = react_config if isinstance(react_config, dict) else {}
+    lazy_cfg = config.get("tool_lazy_load") or {}
+    if not isinstance(lazy_cfg, dict):
+        return False
+    if not _parse_bool_switch(lazy_cfg.get("enabled", False), default=False):
+        return False
+    sub_cfg = lazy_cfg.get("subagents") or {}
+    if not isinstance(sub_cfg, dict):
+        return False
+    return _parse_bool_switch(sub_cfg.get("enabled", False), default=False)
+
+
+def _ensure_progressive_meta_tools(eager_tools: list[str]) -> list[str]:
+    if "tools_search" not in eager_tools:
+        eager_tools.insert(0, "tools_search")
+    if "invoke_tool" not in eager_tools:
+        eager_tools.insert(1, "invoke_tool")
+    return eager_tools
+
+
 def build_jiuwen_progressive_tool_rail_from_react_config(
     react_config: dict[str, Any],
     *,
     language: str,
     profile: str = "main",
-    debug_context: dict[str, Any] | None = None,
+    agent_id: str | None = None,
+    subagent_kind: str | None = None,
 ) -> JiuWenProgressiveToolRail | None:
     """Build JiuWenProgressiveToolRail from react.tool_lazy_load config.
 
-    ``profile='subagent'`` reads optional ``tool_lazy_load.subagents`` overrides
-    while inheriting top-level limits by default.
+    Fixed eager-tools schema; deferred tools are reached via tools_search + invoke_tool.
+    For spawn/fork subagents, set profile=\"subagent\" and configure react.tool_lazy_load.subagents.
     """
     config = react_config if isinstance(react_config, dict) else {}
-    tool_lazy_cfg = config.get("tool_lazy_load") or {}
-    if not isinstance(tool_lazy_cfg, dict):
-        tool_lazy_cfg = {}
+    lazy_cfg = config.get("tool_lazy_load") or {}
+    if not isinstance(lazy_cfg, dict):
+        lazy_cfg = {}
 
-    env_enabled = os.getenv("JIUWENCLAW_TOOL_LAZY_LOAD")
-    raw_enabled = env_enabled if env_enabled is not None else tool_lazy_cfg.get("enabled", "false")
-    enabled = _parse_bool_switch(raw_enabled, default=False)
-    if not enabled:
+    if not _parse_bool_switch(lazy_cfg.get("enabled", False), default=False):
         return None
 
-    subagent_cfg = tool_lazy_cfg.get("subagents") if profile == "subagent" else None
-    if not isinstance(subagent_cfg, dict):
-        subagent_cfg = {}
-    if profile == "subagent" and not _parse_bool_switch(subagent_cfg.get("enabled", True), default=True):
-        return None
+    enable_for_models = _normalize_tool_names(lazy_cfg.get("enable_for_models", []), [])
 
-    default_eager_tools = [
-        "search_and_load_tools",
-        "ask_user_question",
-        "read_file",
-        "write_file",
-        "edit_file",
-        "list_files",
-        "grep",
-        "glob",
-        "bash",
-    ]
-    if profile == "subagent" and not bool(subagent_cfg.get("inherit_parent_eager_tools", False)):
-        eager_source = subagent_cfg.get("eager_tools", ["search_and_load_tools"])
-    elif "eager_tools" in tool_lazy_cfg:
-        eager_source = tool_lazy_cfg.get("eager_tools")
+    normalized_profile = (profile or "main").strip().lower()
+    if normalized_profile == "subagent":
+        sub_cfg = lazy_cfg.get("subagents") or {}
+        if not isinstance(sub_cfg, dict):
+            sub_cfg = {}
+        if not _parse_bool_switch(sub_cfg.get("enabled", False), default=False):
+            return None
+
+        main_eager = _ensure_progressive_meta_tools(
+            _normalize_tool_names(
+                lazy_cfg.get("eager_tools", _DEFAULT_PROGRESSIVE_EAGER_TOOLS),
+                _DEFAULT_PROGRESSIVE_EAGER_TOOLS,
+            )
+        )
+        if _parse_bool_switch(sub_cfg.get("inherit_parent_eager_tools"), default=False):
+            eager_tools = list(main_eager)
+        else:
+            eager_tools = _ensure_progressive_meta_tools(
+                _normalize_tool_names(
+                    sub_cfg.get("eager_tools", _DEFAULT_PROGRESSIVE_EAGER_TOOLS),
+                    _DEFAULT_PROGRESSIVE_EAGER_TOOLS,
+                )
+            )
+
+        kind = (subagent_kind or "").strip().lower()
+        excluded = _SUBAGENT_PROGRESSIVE_EAGER_EXCLUDE_BY_KIND.get(kind)
+        if excluded:
+            eager_tools = [name for name in eager_tools if name not in excluded]
+            eager_tools = _ensure_progressive_meta_tools(eager_tools)
     else:
-        eager_source = default_eager_tools
-    eager_tools = _normalize_tool_names(eager_source, default_eager_tools)
-
-    env_eager = os.getenv("JIUWENCLAW_TOOL_LAZY_EAGER")
-    if env_eager and profile == "main":
-        eager_tools = _normalize_tool_names(env_eager)
-
-    # search_and_load_tools is the only discovery meta tool; keep it visible even if users
-    # accidentally omit it from the authoritative eager_tools config.
-    always_visible = list(dict.fromkeys(["search_and_load_tools", *eager_tools]))
-
-    default_visible_source = (
-        subagent_cfg.get("default_visible_tools")
-        if profile == "subagent" and "default_visible_tools" in subagent_cfg
-        else tool_lazy_cfg.get("default_visible_tools")
-    )
-    default_visible_tools = _normalize_tool_names(default_visible_source)
-
-    def cfg_value(name: str, default: Any) -> Any:
-        if profile == "subagent" and name in subagent_cfg:
-            return subagent_cfg.get(name)
-        return tool_lazy_cfg.get(name, default)
-
-    search_max_results = _parse_int(cfg_value("search_max_results", 5), 5)
-    default_load_limit = _parse_int(cfg_value("default_load_limit", 3), 3)
-    max_loaded_tools = _parse_int(cfg_value("max_loaded_tools", 12), 12)
-    enable_for_models = _normalize_tool_names(
-        cfg_value("enable_for_models", []),
-    )
+        eager_tools = _ensure_progressive_meta_tools(
+            _normalize_tool_names(
+                lazy_cfg.get("eager_tools", _DEFAULT_PROGRESSIVE_EAGER_TOOLS),
+                _DEFAULT_PROGRESSIVE_EAGER_TOOLS,
+            )
+        )
 
     normalized_language = resolve_language(language)
-    ctx_suffix = ""
-    if debug_context:
-        parts = [f"{key}={value}" for key, value in debug_context.items() if value is not None]
-        if parts:
-            ctx_suffix = f" ({', '.join(parts)})"
     logger.info(
-        "[ProgressiveTool] enabled profile=%s always_visible=%s max_loaded=%s "
-        "search_max=%s default_load_limit=%s enable_for_models=%s%s",
-        profile,
-        always_visible,
-        max_loaded_tools,
-        search_max_results,
-        default_load_limit,
+        "[ProgressiveToolRail] enabled profile=%s kind=%s eager_tools=%s agent_id=%s enable_for_models=%s",
+        normalized_profile,
+        subagent_kind or "",
+        eager_tools,
+        agent_id,
         enable_for_models,
-        ctx_suffix,
     )
+
     return JiuWenProgressiveToolRail(
         enabled=True,
-        always_visible_tools=always_visible,
-        default_visible_tools=default_visible_tools,
-        max_loaded_tools=max_loaded_tools,
-        search_max_results=search_max_results,
-        default_load_limit=default_load_limit,
+        eager_tools=eager_tools,
         language=normalized_language,
+        agent_id=agent_id,
         enable_for_models=enable_for_models,
-        debug_context={"profile": profile, **(debug_context or {})},
     )
 
 
@@ -2012,15 +2027,21 @@ class JiuWenClawDeepAdapter:
             rail = None
         return rail
 
-    def _build_progressive_tool_rail(self, config: dict[str, Any]) -> JiuWenProgressiveToolRail | None:
-        """Build progressive tool visibility rail from react.tool_lazy_load config."""
+    def _build_progressive_tool_rail(
+        self,
+        config: dict[str, Any],
+    ) -> JiuWenProgressiveToolRail | None:
+        """Build progressive tool rail from react.tool_lazy_load config."""
         rail = build_jiuwen_progressive_tool_rail_from_react_config(
             config,
             language=self._resolve_runtime_language(),
             profile="main",
+            agent_id=self._agent_id,
         )
-        if rail is None:
-            self._progressive_tool_rail = None
+        if rail is not None:
+            logger.info(
+                "[JiuWenClawDeepAdapter] ProgressiveToolRail enabled (fixed schema mode)"
+            )
         return rail
 
     def _build_fast_subagent_permission_rail(self) -> Any | None:

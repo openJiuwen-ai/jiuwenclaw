@@ -440,19 +440,18 @@ react:
     # false = 不向 agent 注册 search_skill（install_skill、uninstall_skill 仍注册）
     search_skill_enabled: ${SEARCH_SKILL_ENABLED:-false}
 
-  # 工具渐进可见性：本版只压缩模型侧 tools 列表，不改变 MCP server 启动注册/连接行为
+  # 工具渐进可见：tools schema 固定为 eager_tools，其余工具按需通过 meta 工具访问
+  # 常驻可见工具直接出现在 schema；按需可见工具通过 tools_search + invoke_tool 调用
   tool_lazy_load:
-    enabled: true              # true | false；可用 JIUWENCLAW_TOOL_LAZY_LOAD 覆盖
-    # 仅对白名单内 model_name 子串匹配启用懒加载（如 glm-5）；未命中则 tools 全量可见
+    enabled: true              # true | false；启用后模型侧 tools schema 固定
+    # 仅对白名单内 model_name 子串匹配启用渐进可见（如 glm）；空列表 = 所有模型均启用
     enable_for_models:
       - glm
-    search_max_results: 5      # search_and_load_tools 单次搜索最多返回的候选工具数
-    default_load_limit: 3      # search_and_load_tools 未显式传 limit 时默认加载的 Top N 工具
-    max_loaded_tools: 1024     # 当前 session 中最多保留的按需可见工具数，超过后由 rail 按策略限制
-    defer_mcp: false           # 预留；本版固定不做 MCP catalog-only/首次连接激活
-    defer_builtin: false
+    # 常驻可见（eager_tools）：每轮模型调用都带完整 schema，可直接调用
+    # 必须包含 tools_search 和 invoke_tool（系统会自动补齐）
     eager_tools:
-      - search_and_load_tools
+      - tools_search           # 搜索按需可见工具并返回 schema
+      - invoke_tool            # 按 schema 调用按需可见工具
       - web_search
       - fetch_webpage
       - ask_user_question
@@ -474,10 +473,11 @@ react:
       - todo_modify
       - reload_original_context_messages
     subagents:
-      enabled: false
+      enabled: true
       inherit_parent_eager_tools: true
       eager_tools:
-        - search_and_load_tools
+        - tools_search
+        - invoke_tool
 
   # Skills 在线自演进配置
   evolution:
