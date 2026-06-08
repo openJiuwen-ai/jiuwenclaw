@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import importlib
+import uuid as uuid_mod
 import json
 import logging
 import os
@@ -282,13 +283,15 @@ class E2aEnvelopResponseParser(IResponseParser):
 class RuntimeManagementAgentClient(AgentServerClient):
     """Runtime Management Agent Client."""
 
-    _POD_LABEL_KEY = "jiuwenclaw-component"
-    _POD_LABEL_VALUE = "agentserver"
-    _POD_LABEL = {_POD_LABEL_KEY: _POD_LABEL_VALUE}
-    _POD_LABEL_SELECTOR = f"{_POD_LABEL_KEY}={_POD_LABEL_VALUE}"
+    POD_LABEL_KEY = "jiuwenclaw-component"
+    POD_LABEL_VALUE = "agentserver"
+    POD_LABEL = {POD_LABEL_KEY: POD_LABEL_VALUE}
+    GATEWAY_ID_LABEL_KEY = "jiuwenclaw-gateway-id"
+    POD_LABEL_SELECTOR = f"{POD_LABEL_KEY}={POD_LABEL_VALUE}"
 
     def __init__(self) -> None:
         """初始化 Runtime Management 客户端。"""
+        self._gateway_id = uuid_mod.uuid4().hex[:8]
 
         agent_image = os.getenv("AGENT_SERVER_IMAGE")
         agent_runtime = os.getenv("AGENT_RUNTIME")
@@ -425,7 +428,8 @@ class RuntimeManagementAgentClient(AgentServerClient):
                 base["LOG_ROOT_PATH"] = "/home/app/.logs"
             return base
 
-        class _Factory(IServiceInstanceFactory):
+        class \
+                _Factory(IServiceInstanceFactory):
             async def new_service(
                     self, response_parser: IResponseParser, service_template: Optional[dict[str, Any]] = None
             ) -> IServiceHandler:
@@ -528,7 +532,10 @@ class RuntimeManagementAgentClient(AgentServerClient):
                         name_prefix="jiuwenclaw",
                         namespace=namespace,
                         pod_name=cfg["pod_name"] if "pod_name" in cfg else container_name,
-                        extra_labels=dict(RuntimeManagementAgentClient._POD_LABEL),
+                        extra_labels={
+                            **RuntimeManagementAgentClient.POD_LABEL,
+                            RuntimeManagementAgentClient.GATEWAY_ID_LABEL_KEY: self._gateway_id,
+                        },
                         kubeconfig=kubeconfig,
                         readiness_initial_delay=(int(cfg["readiness_initial_delay"])
                                                  if "readiness_initial_delay" in cfg else readiness_initial_delay),
@@ -584,6 +591,7 @@ class RuntimeManagementAgentClient(AgentServerClient):
                 service_templates=service_templates,
             )
 
+        self._create_service_manager = create_service_manager
         self._access: Any = Access(create_service_manager)
         self._connected = False
 
@@ -630,6 +638,10 @@ class RuntimeManagementAgentClient(AgentServerClient):
         if self._connected:
             return
 
+        await self._init_access()
+
+    async def _init_access(self) -> None:
+        """初始化（或重新初始化）Access：读取环境变量构建配置，调用 Access.init。"""
         agent_image = os.getenv("AGENT_SERVER_IMAGE")
         service_concurrency = int(os.getenv("AGENT_SERVER_SERVICE_CONCURRENCY", "30"))
         min_idle_services = int(os.getenv("AGENT_SERVER_MIN_IDLE_SERVICES", "1"))
@@ -668,13 +680,34 @@ class RuntimeManagementAgentClient(AgentServerClient):
         )
         self._connected = True
 
-    async def cleanup_all_pods(self) -> None:
-        """主备切换时调用：清理所有 AgentServer Pod。"""
+    async def reinit_access(self) -> None:
+        """主备切换为 PRIMARY 时调用：shutdown 旧 Access 并创建新实例重新初始化。"""
+        logger.info("[RuntimeManagementAgentClient] reinit_access: shutting down old Access")
         try:
+            if self._access and hasattr(self._access, "shutdown"):
+                await self._access.shutdown()
+        except Exception as exc:
+            logger.warning("[RuntimeManagementAgentClient] reinit_access shutdown error: %s", exc)
+        self._connected = False
+        self._access = Access(self._create_service_manager)
+        await self._init_access()
+        logger.info("[RuntimeManagementAgentClient] reinit_access: done")
+
+    async def cleanup_all_pods(self) -> None:
+        """主备切换时调用：清理其他 Gateway 遗留的 AgentServer Pod，保留自身创建的。"""
+        try:
+            label_selector = (
+                f"{self.POD_LABEL_KEY}={self.POD_LABEL_VALUE}"
+                f",{self.GATEWAY_ID_LABEL_KEY}!={self._gateway_id}"
+            )
+            logger.info(
+                "[RuntimeManagementAgentClient] cleanup_all_pods: gateway_id=%s selector=%s",
+                self._gateway_id, label_selector,
+            )
             await self._access.cleanup_all_pods(
                 namespace=self._namespace,
                 kubeconfig=self._kubeconfig,
-                label_selector=self._POD_LABEL_SELECTOR,
+                label_selector=label_selector,
             )
         except Exception as exc:
             logger.exception("[RuntimeManagementAgentClient] cleanup_all_pods failed: %s", exc)

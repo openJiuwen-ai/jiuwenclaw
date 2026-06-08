@@ -1764,8 +1764,9 @@ async def _run(
         if hasattr(client, "cleanup_all_pods"):
             async def _session_on_role_change(role: Role) -> None:
                 if role == Role.PRIMARY:
-                    logger.info("[App] 角色切换为 PRIMARY，开始清理旧主遗留的所有 Pod")
+                    logger.info("[App] 角色切换为 PRIMARY，清理旧主遗留 Pod 并重新初始化 Access")
                     await client.cleanup_all_pods()
+                    await client.reinit_access()
                 else:
                     logger.info("[App] 角色切换为 STANDBY")
             leader_election.register_callback(_session_on_role_change)
