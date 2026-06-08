@@ -7,6 +7,10 @@ from jiuwenswarm.agents.harness.common.auto_harness.issue_fix.issue_runner impor
     IssueWatchOptions,
 )
 from jiuwenswarm.agents.harness.common.auto_harness.issue_fix.issue_state_store import IssueStateStore
+from jiuwenswarm.agents.harness.common.auto_harness.issue_fix.task_factory import (
+    build_issue_fix_task_from_query,
+)
+from jiuwenswarm.agents.harness.common.auto_harness.progress import determine_pipeline_status_from_log
 from jiuwenswarm.agents.harness.common.auto_harness.task_store import TaskStore
 
 
@@ -153,3 +157,43 @@ def test_task_progress_extracts_pr_and_failure_code():
     assert progress["failed_stage"] == "publish"
     assert progress["failure_code"] == "pr_api_failed"
     assert progress["pr_url"].endswith("/merge_requests/2379")
+
+
+def test_issue_fix_task_factory_preserves_issue_ref():
+    task = build_issue_fix_task_from_query("请自动修复 GitCode Issue #1272。\n标题: demo")
+
+    assert task is not None
+    assert task.topic == "fix-issue-1272"
+    assert task.issue_ref == "#1272"
+
+
+def test_pipeline_status_accepts_structured_skipped_stages(tmp_path: Path):
+    log_path = tmp_path / "log.json"
+    log_path.write_text(
+        "\n".join([
+            '{"event_type":"harness.message","pipeline":"meta_evolve_pipeline",'
+            '"stages":[{"slot":"assess"},{"slot":"plan"},{"slot":"implement"}]}',
+            '{"event_type":"harness.stage_result","stage":"assess","status":"skipped"}',
+            '{"event_type":"harness.stage_result","stage":"plan","status":"skipped"}',
+            '{"event_type":"harness.stage_result","stage":"implement","status":"success"}',
+        ]),
+        encoding="utf-8",
+    )
+
+    assert determine_pipeline_status_from_log(log_path) == {"failed": False, "error": ""}
+
+
+def test_pipeline_status_accepts_legacy_issue_fix_skip_message(tmp_path: Path):
+    log_path = tmp_path / "legacy-log.json"
+    log_path.write_text(
+        "\n".join([
+            '{"event_type":"harness.message","pipeline":"meta_evolve_pipeline",'
+            '"stages":[{"slot":"assess"},{"slot":"plan"},{"slot":"implement"}]}',
+            '{"event_type":"harness.message","content":"检测到显式 GitCode issue 修复任务，'
+            '跳过 assess/plan，直接进入实现/验证/提交/发布流程。"}',
+            '{"event_type":"harness.stage_result","stage":"implement","status":"success"}',
+        ]),
+        encoding="utf-8",
+    )
+
+    assert determine_pipeline_status_from_log(log_path) == {"failed": False, "error": ""}

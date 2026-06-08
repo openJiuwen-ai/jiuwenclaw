@@ -22,7 +22,6 @@ from copy import copy
 import json
 import logging
 import os
-import re
 import shutil
 import sys
 from dataclasses import dataclass
@@ -49,7 +48,7 @@ from openjiuwen.auto_harness.schema import (
     load_auto_harness_config,
 )
 from openjiuwen.auto_harness.contexts import TaskContext, TaskRuntime
-from openjiuwen.auto_harness.pipelines import EXTENDED_EVOLVE_PIPELINE, META_EVOLVE_PIPELINE
+from openjiuwen.auto_harness.pipelines import EXTENDED_EVOLVE_PIPELINE
 from openjiuwen.auto_harness.pipelines.extended_evolve_pipeline import (
     ExtensionTaskPipeline,
 )
@@ -65,6 +64,7 @@ from .scheduler import Scheduler
 from .task_store import TaskStore
 from .config_validator import ConfigValidator
 from .issue_fix import IssueFixService, IssueStateStore
+from .issue_fix.task_factory import build_issue_fix_task_from_query
 
 logger = logging.getLogger(__name__)
 
@@ -81,28 +81,11 @@ _DEFAULT_CI_GATE_PYTHON_EXECUTABLE = sys.executable
 _DEFAULT_CI_GATE_INSTALL_COMMAND = "uv sync --active --group dev --extra cli"
 
 
-def _extract_gitcode_issue_number(query: str) -> str:
-    """Extract an issue number from the explicit GitCode issue-fix query."""
-    match = re.search(
-        r"GitCode\s+Issue\s*#?\s*(\d+)|\bIssue\s*#\s*(\d+)",
-        query,
-        flags=re.IGNORECASE,
-    )
-    if not match:
-        return ""
-    return next((group for group in match.groups() if group), "")
-
-
 def _build_auto_harness_task_from_query(query: str) -> OptimizationTask:
-    """Build a structured task, preserving issue identity when present."""
-    issue_number = _extract_gitcode_issue_number(query)
-    if issue_number:
-        return OptimizationTask(
-            topic=f"fix-issue-{issue_number}",
-            description=query,
-            issue_ref=f"#{issue_number}",
-            status="pending",
-        )
+    """Build a structured auto-harness task from a user query."""
+    issue_task = build_issue_fix_task_from_query(query)
+    if issue_task is not None:
+        return issue_task
     return OptimizationTask(
         topic=query,
         description=query,

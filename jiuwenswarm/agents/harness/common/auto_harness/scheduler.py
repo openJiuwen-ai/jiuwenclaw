@@ -16,6 +16,8 @@ from typing import TYPE_CHECKING, Any, Optional
 from openjiuwen.auto_harness.pipelines import META_EVOLVE_PIPELINE
 from openjiuwen.core.foundation.llm import Model
 
+from .progress import determine_pipeline_status_from_log, has_terminal_session_event
+
 if TYPE_CHECKING:
     from .service import AutoHarnessService
     from .task_store import TaskStore
@@ -28,84 +30,6 @@ def _sync_append_log(log_path: Path, line: str) -> None:
     with log_path.open("a", encoding="utf-8") as f:
         f.write(line)
         f.flush()
-
-
-def _determine_pipeline_status_from_log(log_path) -> dict[str, Any]:
-    """Parse a JSON Lines log file and determine whether the pipeline succeeded.
-
-    Rules:
-    - meta_evolve_pipeline: every stage must have harness.stage_result with status="success".
-    - extended_evolve_pipeline: build_verify must appear (any status), activate must be "success".
-
-    Returns:
-        {"failed": bool, "error": str}
-    """
-    pipeline_type: str = ""
-    pipeline_stages: list[str] = []
-    stage_results: dict[str, str] = {}
-    issue_fix_skip_assess_plan = False
-
-    try:
-        with log_path.open("r", encoding="utf-8") as lf:
-            for line in lf:
-                try:
-                    entry = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                if entry.get("event_type") == "harness.message" and entry.get("stages") and entry.get("pipeline"):
-                    pipeline_stages = [s.get("slot") for s in entry["stages"]]
-                    pipeline_type = entry.get("pipeline", "")
-                if (
-                    entry.get("event_type") == "harness.message"
-                    and "显式 GitCode issue 修复任务，跳过 assess/plan" in str(entry.get("content") or "")
-                ):
-                    issue_fix_skip_assess_plan = True
-                if entry.get("event_type") == "harness.stage_result" and not entry.get("scope"):
-                    slot = entry.get("stage")
-                    status = entry.get("status")
-                    if slot:
-                        stage_results[slot] = status
-    except Exception as exc:
-        logger.warning("[Scheduler] Failed to read log %s: %s", log_path, exc)
-        return {"failed": False, "error": ""}
-
-    if pipeline_type == "extended_evolve_pipeline":
-        if "build_verify" not in stage_results:
-            return {"failed": True, "error": "Stage 'build_verify' not appeared"}
-        if stage_results.get("activate") != "success":
-            return {"failed": True, "error": f"Stage 'activate' {stage_results.get('activate', 'not completed')}"}
-        return {"failed": False, "error": ""}
-
-    for slot in pipeline_stages:
-        if issue_fix_skip_assess_plan and slot in {"assess", "plan"}:
-            continue
-        result = stage_results.get(slot)
-        if result != "success":
-            return {
-                "failed": True,
-                "error": f"Stage '{slot}' {stage_results.get(slot, 'not completed')}",
-            }
-
-    return {"failed": False, "error": ""}
-
-
-def _has_terminal_session_event(log_path: Path) -> bool:
-    """Return whether a structured run log contains a terminal session event."""
-    try:
-        with log_path.open("r", encoding="utf-8") as lf:
-            for line in lf:
-                try:
-                    entry = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                if (
-                    entry.get("event_type") == "harness.session_finished"
-                    and entry.get("is_terminal") is True
-                ):
-                    return True
-    except Exception as exc:
-        logger.warning("[Scheduler] Failed to scan terminal event in %s: %s", log_path, exc)
-    return False
 
 
 class Scheduler:
@@ -476,14 +400,14 @@ class Scheduler:
             logger.exception("[Scheduler] Task %s execution %s failed: %s", task_id, execution_id, e)
 
         finally:
-            if final_status == "success" and log_path.exists() and not _has_terminal_session_event(log_path):
+            if final_status == "success" and log_path.exists() and not has_terminal_session_event(log_path):
                 logger.warning(
                     "[Scheduler] Task %s execution %s ended without terminal session event",
                     task_id,
                     execution_id,
                 )
             if final_status == "success" and log_path.exists():
-                result = _determine_pipeline_status_from_log(log_path)
+                result = determine_pipeline_status_from_log(log_path)
                 if result["failed"]:
                     final_status = "failed"
                     error_msg = result["error"]
