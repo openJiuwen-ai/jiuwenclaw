@@ -13,6 +13,7 @@ import {
   SubtaskUpdatePayload,
   AskUserQuestionPayload,
   UsageSummary,
+  FileDownloadItem,
 } from '../types';
 import { useTodoStore } from './todoStore';
 
@@ -100,6 +101,8 @@ interface ChatState {
   setInputValue: (value: string) => void;
   // Usage summary
   setUsageSummary: (messageId: string, usage: UsageSummary) => void;
+  // File download items
+  addFileItems: (files: FileDownloadItem[]) => void;
 }
 
 export const useChatStore = create<ChatState>((set, get) => ({
@@ -528,5 +531,24 @@ export const useChatStore = create<ChatState>((set, get) => ({
         msg.id === messageId ? { ...msg, usageSummary: usage } : msg
       ),
     }));
+  },
+
+  addFileItems: (files) => {
+    // 将文件项附加到最新的 assistant 消息上
+    set((state) => {
+      const messages = [...state.messages];
+      // 找到最后一条 assistant 消息
+      for (let i = messages.length - 1; i >= 0; i--) {
+        if (messages[i].role === 'assistant') {
+          const existingFiles = messages[i].fileItems || [];
+          messages[i] = {
+            ...messages[i],
+            fileItems: [...existingFiles, ...files],
+          };
+          break;
+        }
+      }
+      return { messages };
+    });
   },
 }));

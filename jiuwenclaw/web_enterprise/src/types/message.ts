@@ -21,6 +21,15 @@ export interface UsageSummary {
   total_cost?: number;
 }
 
+export interface FileDownloadItem {
+  name: string;
+  size: number;
+  mime_type: string;
+  download_url: string;
+  download_token: string;
+  expires_at?: number;
+}
+
 export interface Message {
   id: string;
   role: MessageRole;
@@ -29,6 +38,8 @@ export interface Message {
   audioBase64?: string;
   audioMime?: string;
   mediaItems?: MediaItem[];
+  fileItems?: FileDownloadItem[];
+  isHarnessMessage?: boolean;
   // 工具调用相关
   toolCall?: ToolCall;
   toolResult?: ToolResult;

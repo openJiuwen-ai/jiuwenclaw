@@ -29,6 +29,12 @@ export interface HistoryToolReplayItem {
   payload: Record<string, unknown>;
 }
 
+export interface HistoryHarnessReplayItem {
+  kind: 'harness_message' | 'harness_stage_result';
+  at: string;
+  payload: Record<string, unknown>;
+}
+
 type HistoryTimelineEntry =
   | { kind: 'message'; message: Message }
   | { kind: 'tool_call'; at: string; payload: Record<string, unknown> }
