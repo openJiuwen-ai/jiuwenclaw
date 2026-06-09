@@ -4,6 +4,7 @@ Standalone Python workflow module: META + JSON Schema literals +
 explicit swarmflow primitive imports + async def run(args).
 """
 import json
+from string import Template
 
 from swarmflow import agent, compact, map_parallel, parallel, phase
 
@@ -44,41 +45,56 @@ def extract_json(text, fallback=None):
     3. JSON embedded in prose — scan for outermost {…} and parse.
     Falls back to *fallback* (default {}) if nothing parses.
     """
+    fallback_value = {} if fallback is None else fallback
     if isinstance(text, dict):
         return text
     if not isinstance(text, str):
-        return fallback or {}
+        return fallback_value
     text = text.strip()
     # Direct parse
     try:
-        return json.loads(text)
+        parsed = json.loads(text)
+        return parsed if isinstance(parsed, dict) else fallback_value
     except (json.JSONDecodeError, ValueError):
         pass
     # Scan for outermost { ... }
     depth = 0
     start = None
+    in_string = False
+    escaped = False
     for i, ch in enumerate(text):
+        if in_string:
+            if escaped:
+                escaped = False
+            elif ch == "\\":
+                escaped = True
+            elif ch == '"':
+                in_string = False
+            continue
+        if ch == '"':
+            in_string = True
         if ch == '{':
             if depth == 0:
                 start = i
             depth += 1
-        elif ch == '}':
+        elif ch == '}' and depth > 0:
             depth -= 1
             if depth == 0 and start is not None:
                 try:
-                    return json.loads(text[start:i + 1])
+                    parsed = json.loads(text[start:i + 1])
+                    return parsed if isinstance(parsed, dict) else fallback_value
                 except (json.JSONDecodeError, ValueError):
                     start = None
-    return fallback or {}
+    return fallback_value
 
 
 def safe_get(obj, key, default=""):
     """Safely get a key from an agent result, handling None/non-dict."""
     if obj is None:
-        return default
+        return str(default)
     if isinstance(obj, dict):
-        return obj.get(key, default)
-    return default
+        return str(obj.get(key, default))
+    return str(default)
 
 
 def parse_args(args):
@@ -94,20 +110,33 @@ def parse_args(args):
 
 
 # ---------------------------------------------------------------------------
-# Prompt builders — keep prompts inside this script
+# Prompt builders — keep prompts inside this script.
+# Use string.Template ($-placeholders) so literal braces in prompt prose or JSON
+# examples are never interpreted as Python expressions (an f-string would treat
+# a literal `{N}` as the variable N and raise NameError at runtime).
 # ---------------------------------------------------------------------------
 
-def build_inline_prompt(role_id, payload):
-    """Build an inline prompt requesting JSON output."""
-    return f"""You are {role_id}.
+INLINE_PROMPT = Template(
+    """You are $role_id.
 
 Task input:
-{json.dumps(payload, ensure_ascii=False) if isinstance(payload, (dict, list)) else payload}
+$payload
 
 IMPORTANT: Return ONLY a valid JSON object. No markdown fences, no explanation, just JSON.
 Fields expected: "result" (string), "verdict" (string).
 You may include additional fields if they add value.
 """
+)
+
+
+def build_inline_prompt(role_id, payload):
+    """Build an inline prompt requesting JSON output."""
+    payload_text = (
+        json.dumps(payload, ensure_ascii=False)
+        if isinstance(payload, (dict, list))
+        else str(payload)
+    )
+    return INLINE_PROMPT.substitute(role_id=role_id, payload=payload_text)
 
 
 # ---------------------------------------------------------------------------
@@ -163,13 +192,20 @@ async def run(args):
 # - Keep META a pure literal; do not use calls, names, f-strings, or concatenation.
 # - Keep a top-level async def run(args) entrypoint.
 # - Keep all prompts in this file as constants or prompt-builder functions.
+# - Build prompts with string.Template as shown above, not f-strings/str.format
+#   (see the prompt-builder comment for why). The validator rejects f-strings
+#   that reference undefined names.
 # - Use explicit `from swarmflow import ...` imports.
 # - Use JSON Schema literals for structured agent outputs. Keep schema but
-#   REMOVE "additionalProperties": False — it is too strict for LLM outputs and
-#   causes agent() to silently return None when the LLM adds extra fields.
-# - ALWAYS wrap agent() return values with extract_json(..., fallback={...}).
-#   agent() may return None (schema validation failed) or a raw string (no
-#   schema match); extract_json handles both gracefully.
+#   REMOVE "additionalProperties": False and "required" — both are too strict
+#   for LLM outputs and can cause agent() to silently return None.
+# - For this template, every agent() call should request JSON and be wrapped
+#   with extract_json(..., fallback={...}). agent() may return None (schema
+#   validation failed) or a raw string (no schema match); extract_json handles
+#   both gracefully.
+# - After extract_json(...), verify semantic key fields before treating a
+#   result as successful. Missing or empty key fields should trigger fallback,
+#   retry, or degraded handling.
 # - ALWAYS call parse_args(args) at the top of run(). Swarmflow may pass args
 #   as a JSON string instead of a dict.
 # - Use safe_get(obj, key, default) instead of obj["key"] or obj.get("key")
@@ -179,9 +215,12 @@ async def run(args):
 # - Fixed heterogeneous roles: parallel([lambda: agent(...), ...]).
 # - Homogeneous dynamic item fan-out: map_parallel(items, fn).
 # - Per-item ordered multi-stage processing: pipeline(items, stage1, stage2).
+#   If you use extra primitives such as pipeline/log/flatten_filter, add them
+#   to the explicit swarmflow import.
 # - A single agent() or consecutive awaited agent() calls are sequential.
-# - Encode actual parallel/pipeline/gate/retry/degraded behavior here. workflow.md
-#   explains this script but must not define a different topology.
+# - Encode actual parallel/pipeline/gate/retry/degraded behavior here. When
+#   workflow.md exists, it explains this script but must not define a different
+#   topology.
 # - For custom parallel thunks, bind loop variables in lambda defaults to avoid
 #   late-binding bugs.
 # - Cache validation: when loading cached results from incremental runs, verify

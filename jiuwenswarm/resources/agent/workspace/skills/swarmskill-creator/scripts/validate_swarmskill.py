@@ -32,6 +32,8 @@ What this script catches (deterministic):
     - scripts/workflow.py, when present, is legal Python with literal META and
       async def run(args), explicit swarmflow primitive imports, inline prompts,
       no template placeholders, and no obvious dangerous calls or local absolute paths
+    - scripts/workflow.py has no f-string referencing an undefined name (the
+      literal-brace trap: `{N}` in prompt text parsed as an expression)
 
 What this script does NOT catch (judgment calls — see reference/compliance-checklist.md):
     - Whether mottos are mutually antagonistic (anti-convergence quality)
@@ -43,6 +45,7 @@ What this script does NOT catch (judgment calls — see reference/compliance-che
 from __future__ import annotations
 
 import ast
+import builtins
 import sys
 import re
 import logging
@@ -552,6 +555,78 @@ def _agent_phase_mismatches(run_node: ast.AsyncFunctionDef) -> list[str]:
     return mismatches
 
 
+def _collect_bound_names(tree: ast.Module) -> set[str]:
+    """Over-approximate every name that could be bound anywhere in the module.
+
+    Intentionally scope-agnostic: collecting names module-wide errs toward
+    fewer false positives for the f-string check below.
+    """
+    bound: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            bound.add(node.name)
+            a = node.args
+            for arg in (*a.posonlyargs, *a.args, *a.kwonlyargs):
+                bound.add(arg.arg)
+            if a.vararg:
+                bound.add(a.vararg.arg)
+            if a.kwarg:
+                bound.add(a.kwarg.arg)
+        elif isinstance(node, ast.Lambda):
+            a = node.args
+            for arg in (*a.posonlyargs, *a.args, *a.kwonlyargs):
+                bound.add(arg.arg)
+            if a.vararg:
+                bound.add(a.vararg.arg)
+            if a.kwarg:
+                bound.add(a.kwarg.arg)
+        elif isinstance(node, ast.ClassDef):
+            bound.add(node.name)
+        elif isinstance(node, ast.Import):
+            for alias in node.names:
+                bound.add(alias.asname or alias.name.split(".")[0])
+        elif isinstance(node, ast.ImportFrom):
+            for alias in node.names:
+                bound.add(alias.asname or alias.name)
+        elif isinstance(node, ast.Name) and isinstance(node.ctx, (ast.Store, ast.Del)):
+            # Covers assignments, for/with targets, comprehension vars, walrus.
+            bound.add(node.id)
+        elif isinstance(node, ast.ExceptHandler) and node.name:
+            bound.add(node.name)
+        elif isinstance(node, (ast.Global, ast.Nonlocal)):
+            bound.update(node.names)
+    return bound
+
+
+def _fstring_undefined_names(tree: ast.Module) -> list[tuple[int, str]]:
+    """Find names referenced inside f-strings that are never bound anywhere.
+
+    Catches the literal-brace trap: a prompt with `{N}` inside an f-string is
+    parsed as the expression N and raises NameError at runtime (valid syntax,
+    so ast.parse alone never flags it).
+    """
+    bound = _collect_bound_names(tree)
+    builtin_names = set(dir(builtins))
+    findings: list[tuple[int, str]] = []
+    seen: set[tuple[int, str]] = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.JoinedStr):
+            continue
+        for value in node.values:
+            if not isinstance(value, ast.FormattedValue):
+                continue
+            for sub in ast.walk(value.value):
+                if isinstance(sub, ast.Name) and isinstance(sub.ctx, ast.Load):
+                    if sub.id in bound or sub.id in builtin_names:
+                        continue
+                    line = getattr(sub, "lineno", getattr(node, "lineno", 0))
+                    key = (line, sub.id)
+                    if key not in seen:
+                        seen.add(key)
+                        findings.append(key)
+    return findings
+
+
 def validate_swarmflow_script(path: Path, skill_name: str, report: Report) -> None:
     file_label = "scripts/workflow.py"
     if not path.exists():
@@ -572,6 +647,15 @@ def validate_swarmflow_script(path: Path, skill_name: str, report: Report) -> No
     except SyntaxError as e:
         report.err(file_label, f"Python syntax error: {e.msg} at line {e.lineno}")
         return
+
+    for line, name in _fstring_undefined_names(tree):
+        report.err(
+            file_label,
+            f"line {line}: f-string references undefined name {name!r} — a literal "
+            f"brace like {{{name}}} in prompt text is parsed as a Python expression "
+            f"and crashes at runtime. Use string.Template ($-placeholders) or "
+            f"concatenate the dynamic part instead.",
+        )
 
     meta_node: ast.AST | None = None
     run_node: ast.AsyncFunctionDef | None = None

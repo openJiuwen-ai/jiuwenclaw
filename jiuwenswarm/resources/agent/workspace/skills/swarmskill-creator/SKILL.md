@@ -164,7 +164,7 @@ Generate `scripts/workflow.py` from [templates/scripts/workflow.py.template](tem
 1. Keep top-level `META` as a pure literal.
 2. Keep the entrypoint `async def run(args)`.
 3. Import runtime primitives explicitly from `swarmflow`.
-4. Keep agent prompts inside the script as constants or prompt-builder functions.
+4. Keep agent prompts inside the script as constants or prompt-builder functions. Avoid f-strings (and `str.format`) for multi-line prompt prose: literal braces such as `{N}`, JSON examples, or template placeholders are interpreted as Python expressions and raise `NameError` at runtime. Prefer `string.Template` (`$`-placeholders) for prompts with dynamic parts, or concatenate the dynamic tail onto a plain string constant. The validator deterministically rejects any f-string that references an undefined name, so this class of bug fails at validation rather than mid-run.
 5. Use JSON Schema literals for structured agent outputs. **Do NOT include `"additionalProperties": False` or `"required"`** — both are too strict for LLM outputs and cause `agent()` to silently return `None`. Use a permissive schema that only declares `"type": "object"` and `"properties"` to guide the LLM's output format, then extract only the fields you need with `safe_get()`.
 6. Use stable labels for every `agent(...)` call.
 7. When an `agent(...)` call passes a `phase=` argument, that value MUST equal the active `phase("...")` event for that block. Mismatched phase labels break runtime statistics.
