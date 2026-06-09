@@ -1,0 +1,551 @@
+# Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
+
+"""Config-sourced capability specs for swarm team members.
+
+This module is the rewritten "member capability" assembly: a member's rails,
+tools and sub-agents are declared entirely as ``RailSpec`` / ``BuiltinToolSpec``
+/ ``SubAgentSpec`` references to ``swarm.*`` providers, derived from the config
+source and the member role. It deliberately depends on **no DeepAgent instance**
+— only on the config mapping and the provider name constants re-exported by
+:mod:`jiuwenswarm.agents.swarm.registry`.
+
+``build_member_deep_agent_spec`` folds those specs onto a base ``DeepAgentSpec``
+so openjiuwen builds the member from the merged spec. Two modes are supported:
+
+* ``team`` — the chat team profile (common rails + base tools).
+* ``code.team`` / ``team.plan`` — the code profile (``swarm.code_*`` rails, code
+    sub-agents, code system prompt), all still purely declarative.
+"""
+
+from __future__ import annotations
+
+import os
+from typing import (
+    Any,
+    Callable,
+)
+
+from openjiuwen.agent_teams.schema.deep_agent_spec import (
+    BuiltinToolSpec,
+    DeepAgentSpec,
+    RailSpec,
+    SubAgentSpec,
+)
+from openjiuwen.core.single_agent import AgentCard
+from openjiuwen.harness.prompts import resolve_language
+from openjiuwen.harness.rails import SkillUseRail
+
+from jiuwenswarm.agents.harness.team.team_runtime_inheritance import (
+    get_context_engine_enabled,
+    get_evolution_auto_scan_enabled,
+    get_skill_create_enabled,
+    resolve_model_config,
+)
+from jiuwenswarm.agents.swarm import registry
+from jiuwenswarm.agents.swarm.providers import tools as _tools
+
+# Modes that route to the code adapter and get the code member profile.
+_CODE_MODES: frozenset[str] = frozenset({"code.team", "team.plan"})
+
+# Rails common to both roles, in mount order. Each entry is a ``swarm.*``
+# provider name re-exported from the registry (no hard-coded strings).
+_COMMON_RAIL_NAMES: tuple[str, ...] = (
+    registry.RUNTIME_PROMPT,
+    registry.TEAM_SKILL_STORAGE_POLICY,
+    registry.TEAM_SHARED_SKILL_LINK_REFRESH,
+    registry.RESPONSE_PROMPT,
+    registry.SYS_OPERATION,
+    registry.STREAM_EVENT,
+    registry.TASK_PLANNING,
+    registry.SECURITY,
+    registry.HEARTBEAT,
+    registry.AVATAR_PROMPT,
+    registry.TEAM_WORKSPACE_REPORT_PATH,
+    registry.CONTEXT_PROCESSOR,
+    registry.PLUGIN_RAILS,
+)
+
+# Tools common to both roles. Each element self-gates on config, so all are
+# declared; an unconfigured element simply yields no tools.
+_COMMON_TOOL_NAMES: tuple[str, ...] = (
+    registry.WEB_SEARCH,
+    registry.WEB_FETCH,
+    registry.WEB_PAID_SEARCH,
+    registry.VISION,
+    registry.AUDIO,
+    # Skill-management tools (search/install/uninstall_skill) are registered by
+    # the MEMBER_SKILL_TOOLKIT rail (appended below), which owns them with a
+    # link-refresh callback. Declaring SKILL_TOOLKIT here too only double-
+    # registers the same-named tools, logging a refresh + duplicate-ability
+    # warning per tool every build; the rail is the sole registrar.
+    registry.USER_TODOS,
+    registry.VIDEO,
+    registry.IMAGE_GEN,
+    registry.XIAOYI_PHONE,
+    registry.CRON_TOOLS,
+    registry.SEND_FILE,
+)
+
+# Parameterless code-profile rails (the code variant of the common rails plus
+# code-specific rails). ``code_confirm_interrupt`` and ``member_skill_toolkit``
+# carry params and are appended separately.
+_CODE_RAIL_NAMES: tuple[str, ...] = (
+    registry.CODE_RUNTIME_PROMPT,
+    registry.RESPONSE_PROMPT,
+    registry.STREAM_EVENT,
+    registry.SECURITY,
+    registry.CODE_LSP,
+    registry.CODE_PROJECT_MEMORY,
+    registry.PERMISSION_INTERRUPT,
+    registry.SYS_OPERATION,
+    registry.CODE_CODING_MEMORY,
+    registry.CODE_AGENT_MODE,
+    registry.STRUCTURED_ASK_USER,
+    registry.CONTEXT_PROCESSOR,
+    registry.CODE_TASK_PLANNING,
+    registry.CODE_AGENT_RAIL,
+    registry.USER_HOOKS,
+    registry.CODE_SKILL_USE,
+    registry.CODE_WORKTREE,
+)
+
+# Rails shared with the team profile, appended to the code profile.
+_CODE_SHARED_RAIL_NAMES: tuple[str, ...] = (
+    registry.TEAM_WORKSPACE_REPORT_PATH,
+    registry.PLUGIN_RAILS,
+)
+
+# Code member tools: the common tool set plus the code-exclusive acp_chat.
+_CODE_TOOL_NAMES: tuple[str, ...] = (
+    registry.WEB_SEARCH,
+    registry.WEB_FETCH,
+    registry.WEB_PAID_SEARCH,
+    registry.VISION,
+    registry.AUDIO,
+    # See _COMMON_TOOL_NAMES: skill tools come from the MEMBER_SKILL_TOOLKIT
+    # rail; declaring SKILL_TOOLKIT here too would double-register them.
+    registry.USER_TODOS,
+    registry.VIDEO,
+    registry.IMAGE_GEN,
+    registry.XIAOYI_PHONE,
+    registry.CODE_EXTRA_TOOLS,
+    registry.CRON_TOOLS,
+    registry.SEND_FILE,
+)
+
+# code_agent sub-agents are always-on (explore / plan) or config-gated.
+_DEFAULT_SUBAGENT_MAX_ITERATIONS = 15
+
+
+def _is_code_mode(mode: str) -> bool:
+    """Return whether *mode* routes to the code member profile."""
+    return mode in _CODE_MODES
+
+
+def _resolve_member_skills(config: dict[str, Any], role: str) -> list[str]:
+    """Resolve the skill names selected for *role* from the config source.
+
+    Mirrors the legacy ``resolve_member_skills``: reads ``config.agents.<role>.skills``
+    and returns the cleaned, non-empty names.
+
+    Args:
+        config: The resolved ``config.yaml`` mapping (team blueprint shape).
+        role: The member role ("leader" or "teammate").
+
+    Returns:
+        The selected skill names for the role (possibly empty).
+    """
+    agents = config.get("agents") if isinstance(config, dict) else None
+    if not isinstance(agents, dict):
+        return []
+    member = agents.get(role)
+    if not isinstance(member, dict):
+        return []
+    skills = member.get("skills")
+    if not isinstance(skills, list):
+        return []
+    return [str(skill).strip() for skill in skills if str(skill).strip()]
+
+
+# ---------------------------------------------------------------------------
+# Config-attribute extraction: harness settings (config.yaml) baked into spec
+# ``params`` at spec-build time. Per-request environment values stay on the
+# build context; only these attributes are projected into ``RailSpec.params`` /
+# ``BuiltinToolSpec.params``.
+# ---------------------------------------------------------------------------
+
+
+def _config_section(config: dict[str, Any], key: str) -> dict[str, Any]:
+    """Return ``config[key]`` as a dict (empty when absent or the wrong type)."""
+    section = (config or {}).get(key, {})
+    return section if isinstance(section, dict) else {}
+
+
+def _evolution_model_config(config: dict[str, Any]) -> dict[str, Any]:
+    """Resolve the serializable evolution model config (the LLM is built later)."""
+    model_client_config, model_config_obj, model_name = resolve_model_config(
+        config or {}
+    )
+    return {
+        "model_client_config": model_client_config,
+        "model_config_obj": model_config_obj,
+        "model_name": model_name,
+    }
+
+
+def _skill_mode(config: dict[str, Any]) -> str:
+    """Resolve the validated skill-use mode from ``react.skill_mode``."""
+    react = _config_section(config, "react")
+    raw = react.get("skill_mode", SkillUseRail.SKILL_MODE_ALL)
+    valid = {SkillUseRail.SKILL_MODE_AUTO_LIST, SkillUseRail.SKILL_MODE_ALL}
+    return raw if isinstance(raw, str) and raw in valid else SkillUseRail.SKILL_MODE_ALL
+
+
+def _additional_directories(config: dict[str, Any]) -> list[str]:
+    """Resolve project-memory additional directories from config + env."""
+    react = _config_section(config, "react")
+    raw = react.get("project_memory", {}).get("additional_directories")
+    if raw is None:
+        raw = os.getenv("JIUWENSWARM_ADDITIONAL_DIRECTORIES", "")
+    if isinstance(raw, str):
+        return [item.strip() for item in raw.split(os.pathsep) if item.strip()]
+    if isinstance(raw, (list, tuple, set)):
+        return [str(item).strip() for item in raw if str(item).strip()]
+    return []
+
+
+def _permission_model_name(config: dict[str, Any]) -> str:
+    """Resolve the permission rail's model name from config."""
+    return (
+        _config_section(config, "models")
+        .get("default", {})
+        .get("model_client_config", {})
+        .get("model_name", "gpt-4")
+    )
+
+
+def _acp_enabled(config: dict[str, Any]) -> bool:
+    """Resolve whether ACP agents are configured (gates the acp_chat tool)."""
+    acp_cfg = (config or {}).get("acp_agents")
+    return isinstance(acp_cfg, dict) and bool(acp_cfg)
+
+
+def _context_processor_params(config: dict[str, Any]) -> dict[str, Any]:
+    """Attribute params for the context-compression rail."""
+    return {
+        "context_engine_enabled": get_context_engine_enabled(config),
+        "context_engine_config": _config_section(config, "context_engine_config"),
+    }
+
+
+def _permission_params(config: dict[str, Any]) -> dict[str, Any]:
+    """Attribute params for the permission-interrupt rail."""
+    return {
+        "permissions_config": _config_section(config, "permissions"),
+        "model_name": _permission_model_name(config),
+    }
+
+
+def _evolution_rail_params(config: dict[str, Any]) -> dict[str, Any]:
+    """Attribute params for the team / member skill-evolution rails."""
+    return {
+        "evolution_model_config": _evolution_model_config(config),
+        "auto_scan": get_evolution_auto_scan_enabled(config),
+    }
+
+
+# Per-element attribute params, keyed by provider name; empty for parameterless.
+_RAIL_PARAM_BUILDERS: dict[str, Callable[[dict[str, Any]], dict[str, Any]]] = {
+    registry.CONTEXT_PROCESSOR: _context_processor_params,
+    registry.CODE_PROJECT_MEMORY: lambda c: {
+        "additional_directories": _additional_directories(c)
+    },
+    registry.PERMISSION_INTERRUPT: _permission_params,
+    registry.CODE_CODING_MEMORY: lambda c: {
+        "embed_config": _config_section(c, "embed")
+    },
+    registry.USER_HOOKS: lambda c: {"hooks_section": _config_section(c, "hooks")},
+    registry.CODE_SKILL_USE: lambda c: {"skill_mode": _skill_mode(c)},
+    registry.CODE_WORKTREE: lambda c: {"enabled": True},
+}
+
+
+def _vision_tool_params(config: dict[str, Any]) -> dict[str, Any]:
+    """Bake the core vision element's VisionModelConfig kwargs (empty disables it)."""
+    return {"vision_model_config": _tools.vision_model_config_params(config)}
+
+
+def _audio_tool_params(config: dict[str, Any]) -> dict[str, Any]:
+    """Bake the core audio element's dedicated flag + AudioModelConfig kwargs."""
+    return {
+        "dedicated": _tools.audio_dedicated_configured(config),
+        "audio_model_config": _tools.audio_model_config_params(config),
+    }
+
+
+_TOOL_PARAM_BUILDERS: dict[str, Callable[[dict[str, Any]], dict[str, Any]]] = {
+    registry.SEND_FILE: lambda c: {"channels_config": _config_section(c, "channels")},
+    registry.CODE_EXTRA_TOOLS: lambda c: {"acp_enabled": _acp_enabled(c)},
+    registry.VISION: _vision_tool_params,
+    registry.AUDIO: _audio_tool_params,
+}
+
+
+def _rail_params(name: str, config: dict[str, Any]) -> dict[str, Any]:
+    """Return attribute params baked into rail *name* (empty when parameterless)."""
+    builder = _RAIL_PARAM_BUILDERS.get(name)
+    return builder(config) if builder else {}
+
+
+def _tool_params(name: str, config: dict[str, Any]) -> dict[str, Any]:
+    """Return attribute params baked into tool *name* (empty when parameterless)."""
+    builder = _TOOL_PARAM_BUILDERS.get(name)
+    return builder(config) if builder else {}
+
+
+def _role_evolution_rails(config: dict[str, Any], role: str) -> list[RailSpec]:
+    """Return the role-specific skill-evolution rails (shared by both profiles)."""
+    if role == "leader":
+        return [
+            RailSpec(
+                type=registry.TEAM_SKILL_EVOLUTION,
+                params=_evolution_rail_params(config),
+            ),
+            RailSpec(
+                type=registry.TEAM_SKILL_CREATE,
+                params={"skill_create": get_skill_create_enabled(config)},
+            ),
+        ]
+    return [
+        RailSpec(
+            type=registry.MEMBER_SKILL_EVOLUTION, params=_evolution_rail_params(config)
+        ),
+    ]
+
+
+def _build_team_capability_specs(
+    config: dict[str, Any],
+    role: str,
+) -> tuple[list[RailSpec], list[BuiltinToolSpec]]:
+    """Build the chat-team profile rail/tool specs for a member."""
+    rails_specs: list[RailSpec] = [
+        RailSpec(type=name, params=_rail_params(name, config))
+        for name in _COMMON_RAIL_NAMES
+    ]
+    rails_specs.append(
+        RailSpec(
+            type=registry.MEMBER_SKILL_TOOLKIT,
+            params={"skills": _resolve_member_skills(config, role)},
+        )
+    )
+    rails_specs.extend(_role_evolution_rails(config, role))
+
+    tool_specs: list[BuiltinToolSpec] = [
+        BuiltinToolSpec(type=name, params=_tool_params(name, config))
+        for name in _COMMON_TOOL_NAMES
+    ]
+    return rails_specs, tool_specs
+
+
+def _build_code_capability_specs(
+    config: dict[str, Any],
+    role: str,
+) -> tuple[list[RailSpec], list[BuiltinToolSpec]]:
+    """Build the code profile (code.team / team.plan) rail/tool specs for a member."""
+    rails_specs: list[RailSpec] = [
+        RailSpec(type=name, params=_rail_params(name, config))
+        for name in _CODE_RAIL_NAMES
+    ]
+    rails_specs.append(
+        RailSpec(
+            type=registry.CODE_CONFIRM_INTERRUPT,
+            params={"tool_names": ["switch_mode", "exit_plan_mode"]},
+        )
+    )
+    rails_specs.append(
+        RailSpec(
+            type=registry.MEMBER_SKILL_TOOLKIT,
+            params={"skills": _resolve_member_skills(config, role)},
+        )
+    )
+    rails_specs.extend(
+        RailSpec(type=name, params=_rail_params(name, config))
+        for name in _CODE_SHARED_RAIL_NAMES
+    )
+    rails_specs.extend(_role_evolution_rails(config, role))
+
+    tool_specs: list[BuiltinToolSpec] = [
+        BuiltinToolSpec(type=name, params=_tool_params(name, config))
+        for name in _CODE_TOOL_NAMES
+    ]
+    return rails_specs, tool_specs
+
+
+def build_member_capability_specs(
+    config: dict[str, Any],
+    mode: str,
+    role: str,
+) -> tuple[list[RailSpec], list[BuiltinToolSpec]]:
+    """Build the rail and tool specs for a team member.
+
+    Branches by mode: the code modes get the code profile (``swarm.code_*``
+    rails), all other modes get the chat-team profile. The member-skill toolkit
+    rail carries the role's selected skill names, and the role adds its skill
+    evolution rails.
+
+    Args:
+        config: The resolved ``config.yaml`` mapping (team blueprint shape).
+        mode: The request mode ("team" / "code.team" / "team.plan").
+        role: The member role ("leader" or "teammate").
+
+    Returns:
+        A ``(rails_specs, tool_specs)`` tuple of openjiuwen specs.
+    """
+    if _is_code_mode(mode):
+        return _build_code_capability_specs(config, role)
+    return _build_team_capability_specs(config, role)
+
+
+def _is_subagent_enabled(sub_cfg: Any) -> bool:
+    """Return whether a ``react.subagents.<name>`` entry is enabled."""
+    return isinstance(sub_cfg, dict) and bool(sub_cfg.get("enabled", False))
+
+
+def _subagent_language(mode: str, role: str, config: dict[str, Any]) -> str:
+    """Resolve the code sub-agent runtime language (mirrors ``code_runtime_language``).
+
+    Code mode is English-only except the team.plan leader, which uses the
+    configured preferred language. Baked into ``factory_kwargs`` so the generic
+    openjiuwen sub-agent providers stay free of swarm mode/role policy.
+    """
+    if mode == "team.plan" and role == "leader":
+        return resolve_language((config or {}).get("preferred_language", "zh"))
+    return "en"
+
+
+def _code_subagent_spec(
+    name: str,
+    factory_name: str,
+    react_cfg: dict[str, Any],
+    language: str,
+) -> SubAgentSpec:
+    """Build a declarative ``SubAgentSpec`` for a code sub-agent provider.
+
+    The ``agent_card`` / ``system_prompt`` are placeholders: ``SubAgentSpec.build``
+    short-circuits to the registered provider (by ``factory_name``), which returns
+    a fully-formed ``SubAgentConfig``.
+    """
+    subagents_cfg = (
+        react_cfg.get("subagents", {}) if isinstance(react_cfg, dict) else {}
+    )
+    sub_cfg = subagents_cfg.get(name) if isinstance(subagents_cfg, dict) else None
+    max_iterations = react_cfg.get("max_iterations", _DEFAULT_SUBAGENT_MAX_ITERATIONS)
+    if isinstance(sub_cfg, dict) and sub_cfg.get("max_iterations"):
+        max_iterations = sub_cfg["max_iterations"]
+    return SubAgentSpec(
+        agent_card=AgentCard(name=name),
+        system_prompt="",
+        factory_name=factory_name,
+        factory_kwargs={
+            "max_iterations": int(max_iterations),
+            "language": language,
+        },
+    )
+
+
+def build_member_subagent_specs(
+    config: dict[str, Any],
+    mode: str,
+    role: str,
+) -> list[SubAgentSpec]:
+    """Build the declarative code sub-agent specs (empty for non-code modes).
+
+    explore / plan are always present, while code / browser are config-gated via
+    ``react.subagents.<name>.enabled``.
+
+    Args:
+        config: The resolved ``config.yaml`` mapping.
+        mode: The request mode.
+        role: The member role (reserved, both roles get the same sub-agents).
+
+    Returns:
+        The ``SubAgentSpec`` list (empty when not a code mode).
+    """
+    if not _is_code_mode(mode):
+        return []
+    react = (config or {}).get("react", {})
+    react = react if isinstance(react, dict) else {}
+    subagents_cfg = react.get("subagents", {}) if isinstance(react, dict) else {}
+    language = _subagent_language(mode, role, config)
+
+    specs: list[SubAgentSpec] = [
+        _code_subagent_spec("explore_agent", registry.EXPLORE_AGENT, react, language),
+        _code_subagent_spec("plan_agent", registry.PLAN_AGENT, react, language),
+    ]
+    if isinstance(subagents_cfg, dict):
+        if _is_subagent_enabled(subagents_cfg.get("code_agent")):
+            specs.append(
+                _code_subagent_spec("code_agent", registry.CODE_AGENT, react, language)
+            )
+        if _is_subagent_enabled(subagents_cfg.get("browser_agent")):
+            specs.append(
+                _code_subagent_spec(
+                    "browser_agent", registry.BROWSER_AGENT, react, language
+                )
+            )
+    return specs
+
+
+def build_member_deep_agent_spec(
+    config: dict[str, Any],
+    mode: str,
+    role: str,
+    base_spec: DeepAgentSpec,
+) -> DeepAgentSpec:
+    """Fold the member capability specs onto *base_spec*.
+
+    Appends the rails/tools (and, for code modes, sub-agents + the code system
+    prompt) after the base spec's existing entries and returns a new
+    ``DeepAgentSpec`` (the input is left unmodified).
+
+    Args:
+        config: The resolved ``config.yaml`` mapping.
+        mode: The request mode ("team" / "code.team" / "team.plan").
+        role: The member role ("leader" or "teammate").
+        base_spec: The base member ``DeepAgentSpec`` to extend.
+
+    Returns:
+        A new ``DeepAgentSpec`` with the capability specs applied.
+    """
+    rails_specs, tool_specs = build_member_capability_specs(config, mode, role)
+
+    merged_rails = list(base_spec.rails or [])
+    merged_rails.extend(rails_specs)
+    merged_tools = list(base_spec.tools or [])
+    merged_tools.extend(tool_specs)
+
+    update: dict[str, Any] = {"rails": merged_rails, "tools": merged_tools}
+    if not _is_code_mode(mode):
+        update["enable_skill_discovery"] = True
+
+    subagent_specs = build_member_subagent_specs(config, mode, role)
+    if subagent_specs:
+        merged_subagents = list(base_spec.subagents or [])
+        merged_subagents.extend(subagent_specs)
+        update["subagents"] = merged_subagents
+
+    if _is_code_mode(mode):
+        from jiuwenswarm.agents.harness.code.prompt.code_prompt_builder import (
+            build_code_system_prompt,
+        )
+
+        update["system_prompt"] = build_code_system_prompt()
+
+    return base_spec.model_copy(update=update)
+
+
+__all__ = [
+    "build_member_capability_specs",
+    "build_member_subagent_specs",
+    "build_member_deep_agent_spec",
+]

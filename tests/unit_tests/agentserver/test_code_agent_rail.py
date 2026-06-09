@@ -168,42 +168,31 @@ class TestCodeAgentRail:
         rail = CodeAgentRail(workspace_dir="/tmp")
         agent = MagicMock()
         agent_def = _make_agent_def(name="reviewer")
-        with (
-            patch.object(rail, "_load_custom_agents", return_value=[agent_def]),
-            patch(
-                "jiuwenswarm.server.runtime.agent_adapter.code_agent_rail.Runner.resource_mgr"
-            ) as mock_mgr,
-        ):
+        with patch.object(rail, "_load_custom_agents", return_value=[agent_def]):
             rail.init(agent)
         assert rail._agent_tool is not None
+        # Registration now goes through the unified ability_manager.add_ability.
+        agent.ability_manager.add_ability.assert_called_once()
 
     def test_uninit_removes_tool(self):
         rail = CodeAgentRail(workspace_dir="/tmp")
         agent = MagicMock()
         agent_def = _make_agent_def(name="reviewer")
-        with (
-            patch.object(rail, "_load_custom_agents", return_value=[agent_def]),
-            patch(
-                "jiuwenswarm.server.runtime.agent_adapter.code_agent_rail.Runner.resource_mgr"
-            ) as mock_mgr,
-        ):
+        with patch.object(rail, "_load_custom_agents", return_value=[agent_def]):
             rail.init(agent)
         assert rail._agent_tool is not None
         rail.uninit(agent)
         assert rail._agent_tool is None
         assert rail._agent is None
+        # Removal mirrors add_ability via ability_manager.remove_ability.
+        agent.ability_manager.remove_ability.assert_called_once()
 
     def test_init_twice_replaces_tool(self):
         """Initializing twice should create a new AgentTool each time."""
         rail = CodeAgentRail(workspace_dir="/tmp")
         agent = MagicMock()
         agent_def = _make_agent_def(name="reviewer")
-        with (
-            patch.object(rail, "_load_custom_agents", return_value=[agent_def]),
-            patch(
-                "jiuwenswarm.server.runtime.agent_adapter.code_agent_rail.Runner.resource_mgr"
-            ),
-        ):
+        with patch.object(rail, "_load_custom_agents", return_value=[agent_def]):
             rail.init(agent)
             first_tool = rail._agent_tool
             rail.init(agent)

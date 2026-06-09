@@ -181,6 +181,16 @@ def test_cli_sandbox_create_and_get(server_url, tracking_sandboxes):
     assert data.get("phase") in ("ready", "provisioning", "stopped")
 
 
+def test_cli_sandbox_create_with_custom_id(server_url, tracking_sandboxes):
+    custom_id = "my-sb_cli01"
+    proc, data = _run_cli_json(
+        ["sandbox", "create", "--sandbox-id", custom_id],
+        base_url=server_url,
+    )
+    assert data.get("id") == custom_id
+    tracking_sandboxes.append(custom_id)
+
+
 def test_cli_sandbox_ls(server_url, tracking_sandboxes):
     _create_sandbox_via_cli(server_url, tracking_sandboxes)
 

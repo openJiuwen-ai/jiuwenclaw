@@ -41,34 +41,11 @@ if [[ -d "$NODE_MODULES" ]]; then
     NODE_MODULES_MOVED=true
 fi
 
-# 把 jiuwenbox/configs 临时 stage 到 jiuwenbox/src/jiuwenbox/configs，使其
-# 落在 ``jiuwenbox`` 包目录内, 这样 [tool.setuptools.package-data] 才能把它
-# 随 wheel 一并打入 (setuptools 不支持把包外目录作为 package_data 引入)。
-JBX_CFG_SRC="$PROJECT_ROOT/jiuwenbox/configs"
-JBX_CFG_DST="$PROJECT_ROOT/jiuwenbox/src/jiuwenbox/configs"
-JBX_CFG_STAGED=false
-if [[ -d "$JBX_CFG_SRC" ]]; then
-    if [[ -e "$JBX_CFG_DST" ]]; then
-        echo "[build] 警告: $JBX_CFG_DST 已存在, 跳过 stage (可能是上一次未清理)" >&2
-    else
-        echo "[build] 临时 stage jiuwenbox configs → $JBX_CFG_DST"
-        cp -R "$JBX_CFG_SRC" "$JBX_CFG_DST"
-        JBX_CFG_STAGED=true
-    fi
-else
-    echo "[build] 警告: 未找到 $JBX_CFG_SRC, wheel 中不会带 jiuwenbox/configs" >&2
-fi
-
 cleanup() {
     # 恢复 node_modules
     if [[ "$NODE_MODULES_MOVED" == "true" && -d "$NODE_MODULES_BAK" ]]; then
         mv "$NODE_MODULES_BAK" "$NODE_MODULES"
         echo "[build] 已恢复 node_modules"
-    fi
-    # 清理 jiuwenbox configs 的 staging 副本
-    if [[ "$JBX_CFG_STAGED" == "true" && -d "$JBX_CFG_DST" ]]; then
-        rm -rf "$JBX_CFG_DST"
-        echo "[build] 已清理 staged jiuwenbox configs"
     fi
 }
 trap cleanup EXIT

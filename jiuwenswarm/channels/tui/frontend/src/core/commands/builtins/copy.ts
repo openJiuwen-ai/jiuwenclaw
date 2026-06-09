@@ -22,7 +22,7 @@ export function createCopyCommand(): SlashCommand {
     example: "/copy 2",
     kind: CommandKind.BUILT_IN,
     takesArgs: true,
-    action: (ctx, args) => {
+    action: async (ctx, args) => {
       const arg = args.trim();
       const index = arg ? Number.parseInt(arg, 10) : 1;
       if (!Number.isInteger(index) || index < 1) {
@@ -48,7 +48,8 @@ export function createCopyCommand(): SlashCommand {
 
       const text = texts[index - 1];
 
-      if (!copyToClipboard(text)) {
+      const ok = await copyToClipboard(text);
+      if (!ok) {
         ctx.addItem(addError(ctx.sessionId, "Clipboard integration is unavailable on this system"));
         return;
       }

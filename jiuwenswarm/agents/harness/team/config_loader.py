@@ -290,6 +290,9 @@ def _build_predefined_members(team_raw: dict[str, Any]) -> list[dict[str, Any]]:
         member_spec["member_name"] = member_name
         member_spec["display_name"] = str(identity_name).strip()
         member_spec["persona"] = member_spec.get("persona") or ""
+        # openjiuwen TeamMemberSpec 现按 role_type 判别联合类型，缺省补 teammate
+        role_type = str(member_spec.get("role_type") or "").strip()
+        member_spec["role_type"] = role_type or "teammate"
 
         predefined_members.append(member_spec)
 
@@ -315,6 +318,7 @@ def load_team_spec_dict(config_base: dict[str, Any] | None = None) -> dict[str, 
     spec_dict["teammate_mode"] = team_raw.get("teammate_mode", "build_mode")
     spec_dict["spawn_mode"] = team_raw.get("spawn_mode", "inprocess")
     spec_dict["enable_hitt"] = team_raw.get("enable_hitt", True)
+    spec_dict["enable_swarmflow"] = team_raw.get("enable_swarmflow", True)
     spec_dict["leader"] = _build_leader_spec(team_raw)
     spec_dict["agents"] = agents
     spec_dict["language"] = str(config_base.get("preferred_language", "zh")).strip().lower()

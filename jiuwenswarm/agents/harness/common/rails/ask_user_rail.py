@@ -222,23 +222,24 @@ class StructuredAskUserRail(AskUserRail):
         tool = StructuredAskUserTool(language=language, agent_id=agent_id)
         self._structured_tools = [tool]
 
-        from openjiuwen.core.runner.runner import Runner
-        Runner.resource_mgr.add_tool(self._structured_tools)
-
+        # Unified registration: add_ability qualifies the stateful tool id to
+        # ``{name}_{owner_id}`` and binds it in the resource manager, so
+        # teardown_tools drops it at round-end instead of leaking a bare id that
+        # refresh-warns on the next native rebuild.
         for tool in self._structured_tools:
-            agent.ability_manager.add(tool.card)
+            agent.ability_manager.add_ability(tool.card, tool)
 
     def uninit(self, agent):
         """Remove the extended ask_user tool."""
+        if not hasattr(agent, "ability_manager"):
+            self._structured_tools = []
+            return
         for tool in self._structured_tools:
             name = getattr(tool.card, "name", None)
-            if name and hasattr(agent, "ability_manager"):
-                agent.ability_manager.remove(name)
-
-            tool_id = tool.card.id
-            if tool_id:
-                from openjiuwen.core.runner.runner import Runner
-                Runner.resource_mgr.remove_tool(tool_id)
+            if name:
+                # Mirror add_ability: removes the agent-qualified id from both
+                # this manager and the shared resource manager.
+                agent.ability_manager.remove_ability(name)
         self._structured_tools = []
 
     def get_structured_tools(self) -> list[StructuredAskUserTool]:

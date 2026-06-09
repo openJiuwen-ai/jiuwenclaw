@@ -14,6 +14,7 @@ import yaml
 
 logger = logging.getLogger(__name__)
 from ruamel.yaml import YAML
+from ruamel.yaml.scalarstring import DoubleQuotedScalarString
 
 from jiuwenswarm.common.utils import get_config_dir, get_config_file
 
@@ -262,6 +263,15 @@ def update_permissions_enabled_in_config(value: bool) -> None:
     if "permissions" not in data:
         data["permissions"] = {}
     data["permissions"]["enabled"] = value
+    dump_yaml_round_trip(CONFIG_YAML_PATH, data)
+
+
+def update_auto_recap_enabled_in_config(value: bool) -> None:
+    """更新 auto_recap.enabled（自动回顾开关）并写回。"""
+    data = load_yaml_round_trip(CONFIG_YAML_PATH)
+    if "auto_recap" not in data:
+        data["auto_recap"] = {}
+    data["auto_recap"]["enabled"] = value
     dump_yaml_round_trip(CONFIG_YAML_PATH, data)
 
 
@@ -740,6 +750,10 @@ def update_default_models_in_config(models_list: list[dict[str, Any]]) -> None:
     data = load_yaml_round_trip(CONFIG_YAML_PATH)
     if "models" not in data:
         data["models"] = {}
+    # alias 为字符串时强制带双引号写出，避免 "yes"/"no"/"on"/"off" 等被 YAML 1.1 解析为布尔值
+    for entry in models_list:
+        if isinstance(entry, dict) and isinstance(entry.get("alias"), str):
+            entry["alias"] = DoubleQuotedScalarString(entry["alias"])
     data["models"]["defaults"] = models_list
     if "default" in data["models"]:
         del data["models"]["default"]
@@ -1236,6 +1250,17 @@ def update_memory_forbidden_in_config(updates: dict[str, Any]) -> None:
     dump_yaml_round_trip(CONFIG_YAML_PATH, data)
 
 
+def update_a2ui_in_config(updates: dict[str, Any]) -> None:
+    """更新 a2ui 配置段并写回 config.yaml。"""
+    data = _load_yaml_round_trip(_CONFIG_YAML_PATH)
+    if "a2ui" not in data:
+        data["a2ui"] = {}
+    section = data["a2ui"]
+    for key, value in updates.items():
+        section[key] = value
+    _dump_yaml_round_trip(_CONFIG_YAML_PATH, data)
+
+
 def _deep_merge(
     template: dict[str, Any],
     user: dict[str, Any],
@@ -1640,15 +1665,18 @@ def _looks_like_bare_filename(value: str) -> bool:
 def _jiuwenbox_configs_dir() -> Path | None:
     """探测仓库或安装位置上的 ``jiuwenbox/configs/`` 目录。
 
-    优先在仓库目录树里寻找 (开发场景, ``code_agent/jiuwenbox/configs``);
-    失败再尝试已 ``pip install`` 的 jiuwenbox 包同级 ``configs/``。
+    优先在仓库目录树里寻找 (开发场景, ``jiuwenbox/src/jiuwenbox/configs``);
+    失败再尝试已 ``pip install`` 的 jiuwenbox 包内 ``configs/``。
     """
     here = Path(__file__).resolve()
 
     for ancestor in here.parents[1:7]:
-        candidate = ancestor / "jiuwenbox" / "configs"
-        if candidate.is_dir():
-            return candidate
+        for candidate in (
+            ancestor / "jiuwenbox" / "src" / "jiuwenbox" / "configs",
+            ancestor / "jiuwenbox" / "configs",
+        ):
+            if candidate.is_dir():
+                return candidate
     try:
         import jiuwenbox  # type: ignore[import-not-found]
     except ImportError:
@@ -1657,9 +1685,7 @@ def _jiuwenbox_configs_dir() -> Path | None:
         pkg_dir = Path(jiuwenbox.__file__).resolve().parent
     except Exception:  # noqa: BLE001
         return None
-    # wheel 安装版: ``scripts/build.sh`` 把 ``jiuwenbox/configs/`` 临时 stage 到
-    # ``jiuwenbox/src/jiuwenbox/configs/`` 后再打包, 安装后表现为
-    # ``<site-packages>/jiuwenbox/configs/``。优先按这个布局找。
+    # wheel 安装版: policy 模板随包打入 ``<site-packages>/jiuwenbox/configs/``。
     direct = pkg_dir / "configs"
     if direct.is_dir():
         return direct

@@ -7,7 +7,7 @@ from types import SimpleNamespace
 import pytest
 from openjiuwen.agent_teams.monitor.models import MonitorEvent, MonitorEventType
 
-from jiuwenswarm.agents.harness.team.monitor_handler import TeamMonitorHandler
+from jiuwenswarm.agents.harness.team.handlers.team_monitor_handler import TeamMonitorHandler
 
 
 class _FakeMember:

@@ -23,6 +23,7 @@ from openjiuwen.harness.prompts import resolve_language
 from openjiuwen.harness.rails import SysOperationRail
 from openjiuwen.harness.schema.config import SubAgentConfig
 from jiuwenswarm.common.config import get_default_models
+from jiuwenswarm.common.reasoning_injector import build_reasoning_model_request_kwargs
 from jiuwenswarm.common.utils import get_agent_workspace_dir
 
 
@@ -365,11 +366,18 @@ def _get_default_model() -> Model:
     client_config.setdefault("api_base", "")
     client_config.setdefault("client_provider", "OpenAI")
     client_config.setdefault("model_name", "default")
-    req_config.setdefault("model", client_config["model_name"])
+    model_name = req_config.get("model") or client_config["model_name"]
+    req_config.setdefault("model", model_name)
+
+    runtime_req_config = build_reasoning_model_request_kwargs(
+        model_client_config=client_config,
+        model_config_obj=req_config,
+        model_name=model_name,
+    )
 
     return Model(
         model_client_config=ModelClientConfig(**client_config),
-        model_config=ModelRequestConfig(**req_config),
+        model_config=ModelRequestConfig(**runtime_req_config),
     )
 
 

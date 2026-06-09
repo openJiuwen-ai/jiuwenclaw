@@ -6,6 +6,7 @@
 - [Page overview (web UI)](Page-Overview.md)
 - [E2A protocol (Gateway↔Agent)](E2A-protocol.md)
 - [A2A integration](A2A.md)
+- [A2UI generated UI](A2UI.md)
 - [Configuration](Configuration.md)
 - [Distributed Team](DistributedTeam.md)
 - [Multi-Instance](MultiInstance.md)

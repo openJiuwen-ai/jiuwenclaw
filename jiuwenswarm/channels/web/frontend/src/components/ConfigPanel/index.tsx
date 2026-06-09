@@ -136,7 +136,6 @@ interface AgentEntry {
   name: string;
   model: AgentModel;
   skills: string[];
-  completion_timeout: number;
 }
 
 interface Teammate {
@@ -184,14 +183,13 @@ interface ConfigPanelProps {
   initialExpandGroupTag?: string | null;
   /** 一次性原子提交完整模型列表，覆盖增删改重排 */
   onModelsReplaceAll?: (models: ModelEntry[]) => Promise<void>;
-  onModelValidate?: (fields: { api_base: string; api_key: string; model: string; model_provider: string }) => Promise<void>;
+  onModelValidate?: (fields: { api_base: string; api_key: string; model: string; model_provider: string; reasoning_level?: string }) => Promise<void>;
   onModelsRefresh?: () => Promise<void>;
   /** 多Agent和Teams操作回调 */
   onAgentsTeamsSave?: (payload: {
     agents: Record<string, {
       model: { provider: string; api_base: string; api_key: string; model: string };
       skills: string[];
-      completion_timeout: number;
     }>;
     team: Array<{
       team_name: string;
@@ -209,7 +207,6 @@ interface AgentsTeamsPayload {
   agents: Record<string, {
     model: { provider: string; api_base: string; api_key: string; model: string };
     skills: string[];
-    completion_timeout: number;
   }>;
   team: Array<{
     team_name: string;
@@ -282,12 +279,13 @@ function getFieldLengthErrorKey(field: keyof ModelEntry, value: string): string 
       return null;
   }
 }
-const AGENT_KEYS = new Set(["name", "model", "skills", "completion_timeout"]);
+const AGENT_KEYS = new Set(["name", "model", "skills"]);
 const TEAM_KEYS = new Set(["team_name", "lifecycle", "teammate_mode", "spawn_mode"]);
 const FREE_SEARCH_BOOLEAN_KEYS = new Set(["free_search_ddg_enabled", "free_search_bing_enabled"]);
 const FREE_SEARCH_KEYS = new Set([...FREE_SEARCH_BOOLEAN_KEYS]);
 const HIDDEN_CONFIG_KEYS = new Set(["free_search_proxy_url"]);
 const MEMORY_KEYS = new Set(["memory_forbidden_enabled", "memory_forbidden_description"]);
+const A2UI_KEYS = new Set(["a2ui_enabled"]);
 
 function classifyKey(key: string): string {
   if (MODEL_DEFAULT_KEYS.has(key)) return "model_default";
@@ -302,6 +300,7 @@ function classifyKey(key: string): string {
   if (TEAM_KEYS.has(key)) return "team";
   if (FREE_SEARCH_KEYS.has(key)) return "free_search";
   if (MEMORY_KEYS.has(key)) return "memory";
+  if (A2UI_KEYS.has(key)) return "a2ui";
   if (key === "context_engine_enabled" || key === "kv_cache_affinity_enabled") return "context_engine";
   if (key === "permissions_enabled") return "permissions";
   if (key.startsWith("feishu")) return "feishu";
@@ -393,6 +392,14 @@ function getGroupIcon(tag: string) {
       </svg>
     );
   }
+  if (tag === "a2ui") {
+    return (
+      <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={1.8}>
+        <path strokeLinecap="round" strokeLinejoin="round" d="M4.5 5.25h15A1.5 1.5 0 0121 6.75v10.5a1.5 1.5 0 01-1.5 1.5h-15A1.5 1.5 0 013 17.25V6.75a1.5 1.5 0 011.5-1.5z" />
+        <path strokeLinecap="round" strokeLinejoin="round" d="M7.5 9.75h9M7.5 14.25h5.25" />
+      </svg>
+    );
+  }
   return (
     <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={1.8}>
       <path strokeLinecap="round" strokeLinejoin="round" d="M11.25 6h9m-9 6h9m-9 6h9M3.75 6h.008v.008H3.75V6zm0 6h.008v.008H3.75V12zm0 6h.008v.008H3.75V18z" />
@@ -414,6 +421,7 @@ function getGroupToneClass(tag: string): string {
   if (tag === "memory") return "text-purple-500 bg-purple-500/10 border-purple-500/20";
   if (tag === "context_engine") return "text-sky-500 bg-sky-500/10 border-sky-500/20";
   if (tag === "permissions") return "text-rose-500 bg-rose-500/10 border-rose-500/20";
+  if (tag === "a2ui") return "text-fuchsia-500 bg-fuchsia-500/10 border-fuchsia-500/20";
   if (tag === "email") return "text-emerald-500 bg-emerald-500/10 border-emerald-500/20";
   return "text-text-muted bg-secondary/70 border-border";
 }
@@ -436,7 +444,8 @@ function isBooleanKey(key: string): boolean {
     key === "context_engine_enabled" ||
     key === "kv_cache_affinity_enabled" ||
     key === "permissions_enabled" ||
-    key === "memory_forbidden_enabled"
+    key === "memory_forbidden_enabled" ||
+    key === "a2ui_enabled"
   );
 }
 
@@ -454,6 +463,7 @@ function getBooleanKeyLabel(key: string, t: (key: string) => string): string {
     kv_cache_affinity_enabled: t('config.booleanLabels.kvCacheAffinity'),
     permissions_enabled: t('config.booleanLabels.enabled'),
     memory_forbidden_enabled: t('config.booleanLabels.enabled'),
+    a2ui_enabled: t('config.booleanLabels.enabled'),
   };
   return labels[key] ?? key;
 }
@@ -495,9 +505,10 @@ function getGroupMeta(t: (key: string) => string): Record<string, { label: strin
     team: { label: t('config.groups.team.label'), order: 7.6, hint: t('config.groups.team.hint') },
     context_engine: { label: t('config.groups.contextEngine.label'), order: 8, hint: t('config.groups.contextEngine.hint') },
     permissions: { label: t('config.groups.permissions.label'), order: 9, hint: t('config.groups.permissions.hint') },
-    memory: { label: t('config.groups.memory.label'), order: 10, hint: t('config.groups.memory.hint') },
-    email: { label: t('config.groups.email.label'), order: 11, hint: t('config.groups.email.hint') },
-    other: { label: t('config.groups.other.label'), order: 12, hint: t('config.groups.other.hint') },
+    a2ui: { label: t('config.groups.a2ui.label'), order: 10, hint: t('config.groups.a2ui.hint') },
+    memory: { label: t('config.groups.memory.label'), order: 11, hint: t('config.groups.memory.hint') },
+    email: { label: t('config.groups.email.label'), order: 12, hint: t('config.groups.email.hint') },
+    other: { label: t('config.groups.other.label'), order: 13, hint: t('config.groups.other.hint') },
   };
 }
 
@@ -517,7 +528,6 @@ const KEY_DISPLAY_I18N: Record<string, string> = {
   name: "config.keys.agentName",
   model: "config.keys.agentModel",
   skills: "config.keys.agentSkills",
-  completion_timeout: "config.keys.agentCompletionTimeout",
 };
 const KEY_PLACEHOLDER_I18N: Record<string, string> = {
   memory_forbidden_description: "config.keys.memoryForbiddenDescriptionPlaceholder",
@@ -536,7 +546,6 @@ const KEY_SORT_PRIORITY: Record<string, number> = {
   memory_forbidden_description: 1,
   model: 0,
   skills: 1,
-  completion_timeout: 3,
 };
 
 function getKeyDisplayLabel(key: string, t: (key: string) => string): string {
@@ -763,6 +772,7 @@ function GroupSection({
 }
 
 const MODEL_PROVIDER_OPTIONS = ["OpenAI", "OpenRouter", "DashScope", "SiliconFlow", "InferenceAffinity", "DeepSeek"] as const;
+const REASONING_LEVEL_OPTIONS = ["off", "low", "medium", "high"] as const;
 
 /** 多默认模型管理（受控组件，编辑状态由父组件持有） */
 function MultiModelSection({
@@ -777,7 +787,7 @@ function MultiModelSection({
 }: {
   models: ModelEntry[];
   onModelsChange: (models: ModelEntry[]) => void;
-  onModelValidate?: (fields: { api_base: string; api_key: string; model: string; model_provider: string }) => Promise<void>;
+  onModelValidate?: (fields: { api_base: string; api_key: string; model: string; model_provider: string; reasoning_level?: string }) => Promise<void>;
   isConnected: boolean;
   agents?: AgentEntry[];
   onDeleteModel?: (idx: number, modelName: string, references: string[]) => void;
@@ -789,13 +799,13 @@ function MultiModelSection({
   const [expandedIdx, setExpandedIdx] = useState<number | null>(0);
   const [addingNew, setAddingNew] = useState(false);
   const [newModel, setNewModel] = useState<ModelEntry>({
-    model_name: "", api_base: "", api_key: "", model_provider: "OpenAI",
+    model_name: "", api_base: "", api_key: "", model_provider: "OpenAI", reasoning_level: "",
   });
   const [localError, setLocalError] = useState<string | null>(null);
   const [validateToast, setValidateToast] = useState<{ show: boolean; success: boolean; message: string }>({ show: false, success: true, message: "" });
 
   const resetNewModelDraft = () => {
-    setNewModel({ model_name: "", api_base: "", api_key: "", model_provider: "OpenAI", alias: "" });
+    setNewModel({ model_name: "", api_base: "", api_key: "", model_provider: "OpenAI", alias: "", reasoning_level: "" });
     setLocalError(null);
   };
 
@@ -838,6 +848,7 @@ function MultiModelSection({
       await onModelValidate({
         api_base: model.api_base, api_key: model.api_key,
         model: model.model_name, model_provider: model.model_provider,
+        reasoning_level: model.reasoning_level || undefined,
       });
       setValidateResults((prev) => ({ ...prev, [idx]: "ok" }));
       setValidateToast({ show: true, success: true, message: t("config.validateModel.success") });
@@ -1025,7 +1036,7 @@ function MultiModelSection({
     onModelsChange([...models, entry]);
     setExpandedIdx(models.length); // 自动展开新增的条目
     setAddingNew(false);
-    setNewModel({ model_name: "", api_base: "", api_key: "", model_provider: "OpenAI", alias: "" });
+    setNewModel({ model_name: "", api_base: "", api_key: "", model_provider: "OpenAI", alias: "", reasoning_level: "" });
   };
 
   return (
@@ -1130,7 +1141,7 @@ function MultiModelSection({
               </div>
               {isExpanded && (
                 <div className="border-t border-border px-3 py-2 space-y-2">
-                  {(["model_name", "alias", "api_base", "api_key", "model_provider"] as const).map((field) => (
+                  {(["model_name", "alias", "api_base", "api_key", "model_provider", "reasoning_level"] as const).map((field) => (
                     <div key={field} className="flex items-center gap-2 text-xs">
                       <label className="w-28 text-text-muted shrink-0">
                         {field}{["api_key", "api_base", "model_name", "model_provider"].includes(field) && <span className="text-danger ml-0.5">*</span>}
@@ -1143,6 +1154,15 @@ function MultiModelSection({
                         >
                           <option value="" disabled>{t("config.selectModelProvider")}</option>
                           {MODEL_PROVIDER_OPTIONS.map((p) => <option key={p} value={p}>{p}</option>)}
+                        </select>
+                      ) : field === "reasoning_level" ? (
+                        <select
+                          value={models[idx]?.reasoning_level ?? ""}
+                          onChange={(e) => updateModel(idx, field, e.target.value)}
+                          className="flex-1 rounded border border-border bg-bg px-2 py-1 text-text text-xs"
+                        >
+                          <option value="">{t("config.modelList.reasoningDefault")}</option>
+                          {REASONING_LEVEL_OPTIONS.map((level) => <option key={level} value={level}>{level}</option>)}
                         </select>
                       ) : (
                         <input
@@ -1177,7 +1197,7 @@ function MultiModelSection({
 
         {addingNew ? (
           <div className="rounded-lg border border-accent/40 bg-accent/5 px-3 py-2 space-y-2">
-            {(["model_name", "alias", "api_base", "api_key", "model_provider"] as const).map((field) => (
+            {(["model_name", "alias", "api_base", "api_key", "model_provider", "reasoning_level"] as const).map((field) => (
               <div key={field} className="flex items-center gap-2 text-xs">
                 <label className="w-28 text-text-muted shrink-0">
                   {field}{["api_key", "api_base", "model_name", "model_provider"].includes(field) && <span className="text-danger ml-0.5">*</span>}
@@ -1190,6 +1210,15 @@ function MultiModelSection({
                   >
                     <option value="" disabled>{t("config.selectModelProvider")}</option>
                     {MODEL_PROVIDER_OPTIONS.map((p) => <option key={p} value={p}>{p}</option>)}
+                  </select>
+                ) : field === "reasoning_level" ? (
+                  <select
+                    value={newModel.reasoning_level ?? ""}
+                    onChange={(e) => handleNewModelChange(field, e.target.value)}
+                    className="flex-1 rounded border border-border bg-bg px-2 py-1 text-text text-xs"
+                  >
+                    <option value="">{t("config.modelList.reasoningDefault")}</option>
+                    {REASONING_LEVEL_OPTIONS.map((level) => <option key={level} value={level}>{level}</option>)}
                   </select>
                 ) : (
                   <input
@@ -1237,7 +1266,6 @@ function MultiAgentSection({
   availableModels,
   installedSkills,
   onDeleteAgent,
-  onAgentNameChangeWarning,
   t,
 }: {
   agents: AgentEntry[];
@@ -1247,7 +1275,6 @@ function MultiAgentSection({
   availableModels: ModelEntry[];
   installedSkills?: { name: string; installed?: boolean }[];
   onDeleteAgent?: (idx: number, agentName: string, references: string[]) => void;
-  onAgentNameChangeWarning: (warning: string | null) => void;
   t: (key: string, options?: Record<string, unknown>) => string;
 }) {
   const [expandedIdx, setExpandedIdx] = useState<number | null>(0);
@@ -1257,7 +1284,6 @@ function MultiAgentSection({
     name: "",
     model: { provider: "", api_base: "", api_key: "", model: "" },
     skills: [],
-    completion_timeout: 600,
   });
 
   // 检查 agent 是否被 team 引用
@@ -1308,7 +1334,6 @@ function MultiAgentSection({
       if (oldName && oldName !== value) {
         const references = getAgentReferences(oldName);
         if (references.length > 0) {
-          onAgentNameChangeWarning(t("config.agentList.nameChangeWarning"));
           const updatedTeams = teams.map((team) => ({
             ...team,
             leader: team.leader?.agent_key === oldName ? { ...team.leader, agent_key: "" } : team.leader,
@@ -1318,8 +1343,6 @@ function MultiAgentSection({
             ),
           }));
           onTeamsChange(updatedTeams);
-        } else {
-          onAgentNameChangeWarning(null);
         }
       }
     }
@@ -1372,10 +1395,10 @@ function MultiAgentSection({
     onAgentsChange([...agents, { ...newAgent, name }]);
     setExpandedIdx(agents.length);
     setAddingNew(false);
-    setNewAgent({ name: "", model: { provider: "", api_base: "", api_key: "", model: "" }, skills: [], completion_timeout: 600 });
+    setNewAgent({ name: "", model: { provider: "", api_base: "", api_key: "", model: "" }, skills: [] });
   };
 
-  const agentFields: (keyof AgentEntry)[] = ["name", "skills", "completion_timeout"];
+  const agentFields: (keyof AgentEntry)[] = ["name", "skills"];
 
   // Agent 必填字段
   const AGENT_REQUIRED_FIELDS = new Set(["name"]);
@@ -1468,18 +1491,6 @@ function MultiAgentSection({
                         placeholder={t("config.keys.agentSkillsPlaceholder")}
                         emptyMessage={t("config.keys.agentSkillsEmpty")}
                       />
-                    ) : field === "completion_timeout" ? (
-                      <input
-                        type="number"
-                        step="0.1"
-                        min="0"
-                        value={agent[field] ?? 0}
-                        onChange={(e) => {
-                          const v = parseFloat(e.target.value.replace(/^0+/, '')) || 0;
-                          updateAgentField(idx, field, v >= 0 ? v : 0);
-                        }}
-                        className="flex-1 rounded border border-border bg-bg px-2 py-1 text-text text-xs"
-                      />
                     ) : (
                       <input
                         type="text"
@@ -1566,18 +1577,6 @@ function MultiAgentSection({
                   onChange={(selected) => setNewAgent((p) => ({ ...p, skills: selected }))}
                   placeholder={t("config.keys.agentSkillsPlaceholder")}
                   emptyMessage={t("config.keys.agentSkillsEmpty")}
-                />
-              ) : field === "completion_timeout" ? (
-                <input
-                  type="number"
-                  step="0.1"
-                  min="0"
-                  value={newAgent[field] ?? 0}
-                  onChange={(e) => {
-                    const v = parseFloat(e.target.value.replace(/^0+/, '')) || 0;
-                    setNewAgent((p) => ({ ...p, [field]: v >= 0 ? v : 0 }));
-                  }}
-                  className="flex-1 rounded border border-border bg-bg px-2 py-1 text-text text-xs"
                 />
               ) : (
                 <input
@@ -2287,7 +2286,7 @@ export function ConfigPanel({
   const [draftModels, setDraftModels] = useState<ModelEntry[]>(() => storeAvailableModels.map((m) => ({ ...m })));
 
   // 从 localStorage 加载缓存的 agents 和 teams
-  const loadCachedAgentsTeams = (): { agents: AgentEntry[]; teams: TeamEntry[]; edited?: boolean } | null => {
+  const loadCachedAgentsTeams = (): { agents: AgentEntry[]; teams: TeamEntry[]; edited?: boolean; userCleared?: boolean } | null => {
     try {
       const cached = localStorage.getItem('jiuwenclaw_agents_teams_cache');
       if (cached) {
@@ -2300,9 +2299,9 @@ export function ConfigPanel({
   };
 
   // 仅缓存当前页面未保存的 agents 和 teams 草稿；后端配置始终是页面初始化来源。
-  const saveCachedAgentsTeams = (agents: AgentEntry[], teams: TeamEntry[]) => {
+  const saveCachedAgentsTeams = (agents: AgentEntry[], teams: TeamEntry[], userCleared?: boolean) => {
     try {
-      localStorage.setItem('jiuwenclaw_agents_teams_cache', JSON.stringify({ agents, teams, edited: true }));
+      localStorage.setItem('jiuwenclaw_agents_teams_cache', JSON.stringify({ agents, teams, edited: true, userCleared }));
     } catch (e) {
       console.error('Failed to save agents/teams cache:', e);
     }
@@ -2323,6 +2322,8 @@ export function ConfigPanel({
   const [initialTeams, setInitialTeams] = useState<TeamEntry[]>(cached?.teams || []);
   const [agentsTeamsEdited, setAgentsTeamsEdited] = useState(cached?.edited ?? false);
   const [agentsTeamsUserEdited, setAgentsTeamsUserEdited] = useState(false);
+  // 标志用户是否手动清空过 agent/team，用于区分"主动删除"和"从未配置"
+  const [userClearedAgentsTeams, setUserClearedAgentsTeams] = useState(cached?.userCleared ?? false);
   const [configTab, setConfigTab] = useState<ConfigMainTab>("model");
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -2332,7 +2333,6 @@ export function ConfigPanel({
   const [deleteTeamConfirm, setDeleteTeamConfirm] = useState<{ idx: number; teamName: string } | null>(null);
   const [deleteTeamMemberConfirm, setDeleteTeamMemberConfirm] = useState<{ teamIdx: number; memberIdx: number; memberName: string } | null>(null);
   const [installedSkills, setInstalledSkills] = useState<{ name: string; installed?: boolean }[]>([]);
-  const [agentNameChangeWarning, setAgentNameChangeWarning] = useState<string | null>(null);
 
   const markAgentsTeamsEdited = () => {
     setAgentsTeamsEdited(true);
@@ -2357,15 +2357,6 @@ export function ConfigPanel({
     };
     fetchSkills();
   }, []);
-
-  useEffect(() => {
-    if (agentNameChangeWarning) {
-      const timer = setTimeout(() => {
-        setAgentNameChangeWarning(null);
-      }, 3000);
-      return () => clearTimeout(timer);
-    }
-  }, [agentNameChangeWarning]);
 
   const handleDeleteAgent = (idx: number, agentName: string, references: string[]) => {
     setDeleteAgentConfirm({ idx, agentName, references });
@@ -2464,7 +2455,12 @@ export function ConfigPanel({
       const copy = [...prev];
       const team = copy[deleteTeamMemberConfirm.teamIdx];
       if (team && team.predefined_members) {
-        team.predefined_members = team.predefined_members.filter((_, i) => i !== deleteTeamMemberConfirm.memberIdx);
+        // Deep-clone the team object so we don't mutate the reference shared
+        // with initialTeams, which would break the hasAgentsTeamsChanges check.
+        copy[deleteTeamMemberConfirm.teamIdx] = {
+          ...team,
+          predefined_members: team.predefined_members.filter((_, i) => i !== deleteTeamMemberConfirm.memberIdx),
+        };
       }
       return copy;
     });
@@ -2498,6 +2494,8 @@ export function ConfigPanel({
   }, [storeAvailableModels]);
 
   const agentsFromConfig = useMemo<AgentEntry[]>(() => {
+    // 用户主动清空过，忽略后端返回的默认配置
+    if (userClearedAgentsTeams) return [];
     const agents: AgentEntry[] = [];
     for (let i = 0; i < 10; i++) {
       const name = normalizedConfig[`agent_name_${i}`] || normalizedConfig[`agent_${i}_name`];
@@ -2513,13 +2511,14 @@ export function ConfigPanel({
           model: matchedModel.model_name || "",
         } : { provider: "", api_base: "", api_key: "", model: modelName },
         skills: (normalizedConfig[`agent_skills_${i}`] || normalizedConfig[`agent_${i}_skills`] || "").split(/[,，]/).map((s: string) => s.trim()).filter(Boolean),
-        completion_timeout: Number(normalizedConfig[`agent_completion_timeout_${i}`]) ?? Number(normalizedConfig[`agent_${i}_completion_timeout`]) ?? 600,
       });
     }
     return agents;
-  }, [normalizedConfig, storeAvailableModels]);
+  }, [normalizedConfig, storeAvailableModels, userClearedAgentsTeams]);
 
   const teamsFromConfig = useMemo<TeamEntry[]>(() => {
+    // 用户主动清空过，忽略后端返回的默认配置
+    if (userClearedAgentsTeams) return [];
     const teams: TeamEntry[] = [];
     const validAgentKeys = new Set<string>();
     for (let i = 0; i < 10; i++) {
@@ -2562,16 +2561,24 @@ export function ConfigPanel({
       });
     }
     return teams;
-  }, [normalizedConfig]);
+  }, [normalizedConfig, userClearedAgentsTeams]);
 
   useEffect(() => {
     if (agentsTeamsEdited) return;
     setDraftAgents(agentsFromConfig);
     setDraftTeams(teamsFromConfig);
+    // 同时更新初始值，用于比较是否有修改
+    setInitialAgents(agentsFromConfig);
+    setInitialTeams(teamsFromConfig);
     if (agentsFromConfig.length === 0 && teamsFromConfig.length === 0) {
-      clearCachedAgentsTeams();
+      // 如果用户主动清空过，保留缓存标志以便下次识别；否则清除缓存
+      if (userClearedAgentsTeams) {
+        saveCachedAgentsTeams([], [], true);
+      } else {
+        clearCachedAgentsTeams();
+      }
     }
-  }, [agentsFromConfig, teamsFromConfig, agentsTeamsEdited]);
+  }, [agentsFromConfig, teamsFromConfig, agentsTeamsEdited, userClearedAgentsTeams]);
 
   // 自动保存 agents 和 teams 到 localStorage
   useEffect(() => {
@@ -2579,11 +2586,13 @@ export function ConfigPanel({
       return;
     }
     if (draftAgents.length > 0 || draftTeams.length > 0) {
-      saveCachedAgentsTeams(draftAgents, draftTeams);
+      saveCachedAgentsTeams(draftAgents, draftTeams, userClearedAgentsTeams);
     } else {
-      clearCachedAgentsTeams();
+      // 用户手动清空所有 agent/team，设置 userCleared 标志
+      setUserClearedAgentsTeams(true);
+      saveCachedAgentsTeams([], [], true);
     }
-  }, [draftAgents, draftTeams, agentsTeamsEdited]);
+  }, [draftAgents, draftTeams, agentsTeamsEdited, userClearedAgentsTeams]);
 
   const groups = useMemo<ConfigGroup[]>(() => {
     if (!Object.keys(normalizedConfig).length) return [];
@@ -2683,13 +2692,48 @@ export function ConfigPanel({
       return dm.model_name !== om.model_name || dm.api_base !== om.api_base
         || dm.api_key !== om.api_key || dm.model_provider !== om.model_provider
         || (dm.alias ?? "") !== (om.alias ?? "")
+        || (dm.reasoning_level ?? "") !== (om.reasoning_level ?? "")
         || dm.is_default !== om.is_default
         || (dm.temperature ?? 0.95) !== (om.temperature ?? 0.95)
         || (dm.timeout ?? 1800) !== (om.timeout ?? 1800);
     });
   }, [draftModels, storeAvailableModels]);
 
-  const hasAgentsTeamsChanges = agentsTeamsEdited;
+  const hasAgentsTeamsChanges = useMemo(() => {
+    // 比较 agents
+    if (draftAgents.length !== initialAgents.length) return true;
+    for (let i = 0; i < draftAgents.length; i++) {
+      const da = draftAgents[i];
+      const ia = initialAgents[i];
+      if (!ia) return true;
+      if (da.name !== ia.name) return true;
+      if (da.skills.length !== ia.skills.length || da.skills.some((s, j) => s !== ia.skills[j])) return true;
+      if (da.model.provider !== ia.model.provider || da.model.api_base !== ia.model.api_base
+          || da.model.api_key !== ia.model.api_key || da.model.model !== ia.model.model) return true;
+    }
+    // 比较 teams
+    if (draftTeams.length !== initialTeams.length) return true;
+    for (let i = 0; i < draftTeams.length; i++) {
+      const dt = draftTeams[i];
+      const it = initialTeams[i];
+      if (!it) return true;
+      if (dt.team_name !== it.team_name || dt.lifecycle !== it.lifecycle
+          || dt.teammate_mode !== it.teammate_mode || dt.spawn_mode !== it.spawn_mode) return true;
+      if (dt.leader.member_name !== it.leader.member_name || dt.leader.display_name !== it.leader.display_name
+          || dt.leader.persona !== it.leader.persona || dt.leader.agent_key !== it.leader.agent_key) return true;
+      if (dt.teammate.agent_key !== it.teammate.agent_key) return true;
+      if (dt.predefined_members.length !== it.predefined_members.length) return true;
+      for (let j = 0; j < dt.predefined_members.length; j++) {
+        const dpm = dt.predefined_members[j];
+        const ipm = it.predefined_members[j];
+        if (!ipm) return true;
+        if (dpm.member_name !== ipm.member_name || dpm.display_name !== ipm.display_name
+            || dpm.persona !== ipm.persona || dpm.prompt_hint !== ipm.prompt_hint
+            || dpm.agent_key !== ipm.agent_key) return true;
+      }
+    }
+    return false;
+  }, [draftAgents, draftTeams, initialAgents, initialTeams]);
   const hasChanges = hasConfigChanges || hasModelChanges || hasAgentsTeamsChanges;
   const missingRequiredModelFields = useMemo(
     () => REQUIRED_MODEL_FIELDS.filter((key) => !(draftValues[key] ?? "").trim()),
@@ -2748,7 +2792,7 @@ export function ConfigPanel({
     return null;
   };
 
-  const agentsTeamsValidationError = getAgentsTeamsValidationError();
+  const agentsTeamsValidationError = agentsTeamsUserEdited ? getAgentsTeamsValidationError() : null;
 
   const handleFieldChange = (key: string, value: string) => {
     setDraftValues((prev) => ({ ...prev, [key]: value }));
@@ -2826,7 +2870,6 @@ export function ConfigPanel({
     setAgentsTeamsUserEdited(false);
     setError(null);
     setModelError(null);
-    setAgentNameChangeWarning(null);
   };
 
   const buildAgentsTeamsPayload = (): AgentsTeamsPayload => {
@@ -2836,7 +2879,6 @@ export function ConfigPanel({
       agentsPayload[agent.name] = {
         model: { ...agent.model },
         skills: agent.skills,
-        completion_timeout: agent.completion_timeout,
       };
     }
     const validAgentKeys = new Set(Object.keys(agentsPayload));
@@ -2862,7 +2904,13 @@ export function ConfigPanel({
   };
 
   const updateCacheAfterSave = () => {
-    saveCachedAgentsTeams(draftAgents, draftTeams);
+    // 如果用户主动清空过，保留 userCleared 标志，否则清除缓存
+    if (userClearedAgentsTeams) {
+      saveCachedAgentsTeams([], [], true);
+    } else {
+      clearCachedAgentsTeams();
+    }
+    setAgentsTeamsEdited(false);
     setAgentsTeamsUserEdited(false);
   };
 
@@ -3014,7 +3062,7 @@ export function ConfigPanel({
             <button
               type="button"
               onClick={() => void handleSaveAndRestart()}
-              disabled={!hasChanges || saving || hasMissingRequiredModelFields || hasMissingModelApiKey || hasMissingModelApiBase || hasDuplicateAgentNames || (agentsTeamsUserEdited && !!agentsTeamsValidationError) || (isProcessing && mode !== 'team')}
+              disabled={!hasChanges || saving || hasMissingRequiredModelFields || hasMissingModelApiKey || hasMissingModelApiBase || hasDuplicateAgentNames || !!agentsTeamsValidationError || (isProcessing && mode !== 'team')}
               className="btn primary !px-3 !py-1.5 disabled:opacity-50 disabled:cursor-not-allowed"
             >
               {saving ? t('common.saving') : t('common.save')}
@@ -3036,11 +3084,6 @@ export function ConfigPanel({
             {t('config.modelList.apiBaseRequired')}
           </div>
         ) : null}
-        {!error && agentNameChangeWarning ? (
-          <div className="mb-4 rounded-md border border-amber-500 bg-amber-50 dark:bg-amber-900/20 px-3 py-2 text-sm text-amber-700 dark:text-amber-300">
-            {agentNameChangeWarning}
-          </div>
-        ) : null}
         {!error && hasDuplicateAgentNames ? (
           <div className="mb-4 rounded-md border border-[var(--border-danger)] bg-danger-subtle px-3 py-2 text-sm text-danger">
             {t('config.agentList.duplicateName')}
@@ -3048,7 +3091,7 @@ export function ConfigPanel({
         ) : null
         }
         {
-          !error && agentsTeamsUserEdited && agentsTeamsValidationError ? (
+          !error && agentsTeamsValidationError ? (
             <div className="mb-4 rounded-md border border-[var(--border-danger)] bg-danger-subtle px-3 py-2 text-sm text-danger">
               {agentsTeamsValidationError}
             </div>
@@ -3170,13 +3213,19 @@ export function ConfigPanel({
                     <div className="border-t border-border p-4">
                       <MultiAgentSection
                         agents={draftAgents}
-                        onAgentsChange={(agents) => { setDraftAgents(agents); markAgentsTeamsEdited(); }}
+                        onAgentsChange={(agents) => {
+                          setDraftAgents(agents);
+                          markAgentsTeamsEdited();
+                          // 用户重新添加 agent，清除 userCleared 标志
+                          if (agents.length > 0 && userClearedAgentsTeams) {
+                            setUserClearedAgentsTeams(false);
+                          }
+                        }}
                         teams={draftTeams}
                         onTeamsChange={(teams) => { setDraftTeams(teams); setAgentsTeamsEdited(true); }}
                         availableModels={draftModels}
                         installedSkills={installedSkills}
                         onDeleteAgent={handleDeleteAgent}
-                        onAgentNameChangeWarning={setAgentNameChangeWarning}
                         t={t}
                       />
                     </div>
@@ -3199,7 +3248,14 @@ export function ConfigPanel({
                     <div className="border-t border-border p-4">
                       <TeamsSection
                         teams={draftTeams}
-                        onTeamsChange={(teams) => { setDraftTeams(teams); markAgentsTeamsEdited(); }}
+                        onTeamsChange={(teams) => {
+                          setDraftTeams(teams);
+                          markAgentsTeamsEdited();
+                          // 用户重新添加 team，清除 userCleared 标志
+                          if (teams.length > 0 && userClearedAgentsTeams) {
+                            setUserClearedAgentsTeams(false);
+                          }
+                        }}
                         agents={draftAgents}
                         onDeleteTeam={handleDeleteTeam}
                         onDeleteTeamMember={handleDeleteTeamMember}

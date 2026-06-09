@@ -6,11 +6,12 @@ import { CommandKind, type SlashCommand } from "../types.js";
 type SwitchArg = "plan" | "fast" | "normal" | "team";
 
 const AGENT_MODES = new Set<ClientMode>(["agent.plan", "agent.fast"]);
-const CODE_MODES = new Set<ClientMode>(["code.normal", "code.team"]);
+const CODE_MODES = new Set<ClientMode>(["code.normal", "code.team", "code.plan"]);
 
 function resolveRequestedMode(currentMode: ClientMode, switchArg: SwitchArg): ClientMode | null {
   if (switchArg === "plan") {
     if (AGENT_MODES.has(currentMode)) return "agent.plan";
+    if (CODE_MODES.has(currentMode)) return "code.plan";
     return null;
   }
   if (switchArg === "fast") {

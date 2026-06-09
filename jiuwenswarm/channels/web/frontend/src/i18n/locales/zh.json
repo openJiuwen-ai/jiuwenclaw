@@ -335,12 +335,12 @@
     "invalidZipFormat": "无效的 zip 文件格式",
     "missingHarnessConfig": "Zip 文件必须包含 harness_config.yaml",
     "selectZipFile": "选择 .zip 文件导入",
-    "deactivate": "去激活",
-    "deactivating": "正在去激活...",
-    "deactivateFailed": "去激活失败",
-    "deactivateSuccess": "去激活成功",
-    "deactivateAll": "全部去激活",
-    "allDeactivated": "所有扩展已去激活",
+    "deactivate": "取消激活",
+    "deactivating": "正在取消激活...",
+    "deactivateFailed": "取消激活失败",
+    "deactivateSuccess": "取消激活成功",
+    "deactivateAll": "全部取消激活",
+    "allDeactivated": "所有扩展已取消激活",
     "activePackages": "已激活扩展"
   },
   "todoList": {
@@ -674,7 +674,6 @@
       "agentName": "名称",
       "agentModel": "模型",
       "agentSkills": "技能",
-      "agentCompletionTimeout": "完成超时时间",
       "teamName": "团队名称",
       "teamLifecycle": "生命周期",
       "teamTeammateMode": "成员模式",
@@ -723,6 +722,7 @@
       "aliasTooLong": "别名过长，请控制在 100 字符以内",
       "apiBaseTooLong": "API Base URL 过长，请控制在 100 字符以内",
       "apiKeyTooLong": "API Key 过长，请控制在 500 字符以内",
+      "reasoningDefault": "使用默认值",
       "alias": "别名",
       "aliasPlaceholder": "选填，默认为空"
     },
@@ -741,8 +741,7 @@
       "duplicateName": "Agent名称已存在",
       "deleteConfirmTitle": "确认删除Agent？",
       "deleteConfirmMessage": "确定要删除 Agent \"{{agentName}}\" 吗？",
-      "deleteConfirmMessageSimple": "Agent \"{{agentName}}\" 正在被 Team 引用。",
-      "nameChangeWarning": "正在修改被引用的Agent名称，请重新配置Agent Key"
+      "deleteConfirmMessageSimple": "Agent \"{{agentName}}\" 正在被 Team 引用。"
     },
     "team": {
       "leader": "Leader",
@@ -778,6 +777,7 @@
       "team": { "label": "Team配置", "hint": "多智能体团队配置" },
       "contextEngine": { "label": "上下文压缩", "hint": "控制对话上下文是否启用压缩" },
       "permissions": { "label": "工具安全护栏", "hint": "控制工具调用时的权限检查" },
+      "a2ui": { "label": "A2UI", "hint": "开启或关闭生成式界面渲染与 A2UI 运行时提示词" },
       "memory": { "label": "记忆系统敏感信息过滤", "hint": "配置禁止写入记忆的敏感信息类型" },
       "email": { "label": "邮箱配置", "hint": "邮件账号与令牌参数" },
       "other": { "label": "其他配置", "hint": "未归类的扩展参数" }
@@ -1123,7 +1123,7 @@
       "configDescription": "请输入从 ClawHub 平台获取的 CLI Token，用于访问 ClawHub 技能库。",
       "tokenLabel": "CLI Token",
       "tokenPlaceholder": "请输入 ClawHub CLI Token (clh_...)",
-      "tokenConfigured": "已配置 Token: {{token}}",
+      "tokenConfigured": "已配置 Token",
       "messages": {
         "tokenSaved": "Token 已保存",
         "installed": "已安装：{{name}}"
@@ -1284,6 +1284,21 @@
       "submit": "确认提交",
       "entryCount": "共 {{count}} 条演进经验"
     }
+  },
+  "share": {
+    "export": "导出长图",
+    "exporting": "正在导出长图...",
+    "generating": "正在生成",
+    "exportUnavailable": "会话结束后可导出长图",
+    "exportFailed": "导出长图失败",
+    "mainConversation": "正文对话",
+    "noMainConversation": "暂无正文对话",
+    "groupChat": "群聊记录",
+    "noGroupChat": "暂无群聊记录",
+    "everyone": "所有人",
+    "generatedBy": "由 openJiuwen AI 生成",
+    "website": "官网地址：{{url}}",
+    "repository": "代码仓：{{url}}"
   },
   "network": {
     "wsError": "WebSocket 连接异常",

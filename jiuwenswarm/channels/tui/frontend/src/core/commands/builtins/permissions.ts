@@ -3,12 +3,6 @@ import { CommandKind, type SlashCommand } from "../types.js";
 
 const VALID_LEVELS = new Set(["allow", "ask", "deny"]);
 
-const LEVEL_TO_SEVERITY: Record<string, string> = {
-  allow: "LOW",
-  ask: "HIGH",
-  deny: "CRITICAL",
-};
-
 const RULE_MATCH_RE = /^(\S+?)\((.+)\)$/;
 
 function formatToolsSection(tools: Record<string, string>): string {
@@ -25,8 +19,8 @@ function formatRulesSection(rules: Array<Record<string, unknown>>): string {
       const id = String(r.id || "?");
       const tools = Array.isArray(r.tools) ? r.tools.join(",") : String(r.tools || "");
       const pattern = String(r.pattern || "");
-      const severity = String(r.severity || r.action || "");
-      return `  [${id}]  ${tools}  pattern: ${pattern}  severity: ${severity}`;
+      const decision = String(r.action || r.severity || "");
+      return `  [${id}]  ${tools}  pattern: ${pattern}  ${r.action ? "action" : "severity"}: ${decision}`;
     })
     .join("\n");
 }
@@ -92,7 +86,6 @@ export function createPermissionsCommand(): SlashCommand {
       if (ruleMatch) {
         const [, toolRaw, pattern] = ruleMatch;
         const tool = toolRaw.toLowerCase();
-        const severity = LEVEL_TO_SEVERITY[level] || "HIGH";
         const ruleId = `cli_rule_${tool}_${pattern.replace(/[^a-zA-Z0-9]/g, "_")}`.toLowerCase();
 
         try {
@@ -103,7 +96,7 @@ export function createPermissionsCommand(): SlashCommand {
                 id: ruleId,
                 tools: [tool],
                 pattern,
-                severity,
+                action: level,
               },
             },
             60_000,
@@ -111,7 +104,7 @@ export function createPermissionsCommand(): SlashCommand {
           ctx.addItem(
             addInfo(
               ctx.sessionId,
-              `已创建规则 [${ruleId}]  tools: ${tool}  pattern: ${pattern}  severity: ${severity}`,
+              `已创建规则 [${ruleId}]  tools: ${tool}  pattern: ${pattern}  action: ${level}`,
               "i",
             ),
           );
@@ -123,14 +116,14 @@ export function createPermissionsCommand(): SlashCommand {
                 "permissions.rules.update",
                 {
                   id: ruleId,
-                  patch: { tools: [tool], pattern, severity },
+                  patch: { tools: [tool], pattern, action: level },
                 },
                 60_000,
               );
               ctx.addItem(
                 addInfo(
                   ctx.sessionId,
-                  `已更新规则 [${ruleId}]  tools: ${tool}  pattern: ${pattern}  severity: ${severity}`,
+                  `已更新规则 [${ruleId}]  tools: ${tool}  pattern: ${pattern}  action: ${level}`,
                   "i",
                 ),
               );

@@ -79,8 +79,12 @@ class CodeTaskPlanningRail(TaskPlanningRail):
                         "en",
                         agent_id,
                     )
-                    Runner.resource_mgr.add_tool(new_tool)
-                    agent.ability_manager.add(new_tool.card)
+                    # Unified registration (mirrors the parent TaskPlanningRail):
+                    # add_ability qualifies the stateful tool id to
+                    # ``{name}_{owner_id}`` and lets teardown_tools drop it at
+                    # round-end, instead of leaking a bare id that refresh-warns
+                    # on the next native rebuild.
+                    agent.ability_manager.add_ability(new_tool.card, new_tool)
                     tools.append(new_tool)
             self.tools = tools
         except Exception as exc:

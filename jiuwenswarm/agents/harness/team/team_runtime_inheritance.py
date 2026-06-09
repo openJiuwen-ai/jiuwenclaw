@@ -31,6 +31,7 @@ from jiuwenswarm.agents.harness.common.rails.runtime_prompt_rail import RuntimeP
 from jiuwenswarm.agents.harness.common.rails.stream_event_rail import JiuClawStreamEventRail
 from jiuwenswarm.agents.harness.team.rails.team_workspace_report_path_rail import TeamWorkspaceReportPathRail
 from jiuwenswarm.common.config import get_config
+from jiuwenswarm.common.reasoning_injector import build_reasoning_model_request_kwargs
 from jiuwenswarm.server.runtime.skill import load_execution_disabled_skills
 
 logger = logging.getLogger(__name__)
@@ -475,8 +476,11 @@ def build_evolution_llm(
     inject_attribution_headers(model_client_config)
 
     request_config = ModelRequestConfig(
-        model=model_name,
-        temperature=model_config_obj.get("temperature", 0.95),
+        **build_reasoning_model_request_kwargs(
+            model_client_config=model_client_config,
+            model_config_obj=model_config_obj,
+            model_name=model_name,
+        )
     )
     client_config = ModelClientConfig(**model_client_config)
     return Model(model_client_config=client_config, model_config=request_config), model_name

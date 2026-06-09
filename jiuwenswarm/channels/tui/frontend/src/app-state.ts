@@ -62,6 +62,7 @@ import {
   getCurrentCwd,
 } from "./core/tui-trusted-dirs-store.js";
 import { loadTuiConfig, type StatusLineSetting } from "./core/tui-config-store.js";
+import { applyWorkflowUpdate, type WorkflowRun } from "./core/workflows.js";
 import { execFile, spawnSync } from "node:child_process";
 import { writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -114,6 +115,7 @@ export interface AppSnapshot {
   teamMemberEvents: TeamMemberEvent[];
   teamTaskEvents: TeamTaskEvent[];
   teamMessageEvents: TeamMessageEvent[];
+  workflowRuns: WorkflowRun[];
   evolutionStatus: "idle" | "running";
   contextCompression: ContextCompressionStats | null;
   contextWindowLimit: number | null;
@@ -150,6 +152,30 @@ const LOCAL_FILE_SEARCH_TOOL_NAMES = new Set([
   "rg",
   "ripgrep",
   "search",
+]);
+
+const DEFERRED_TRANSCRIPT_EVENTS = new Set([
+  "chat.delta",
+  "chat.final",
+  "chat.reasoning",
+  "chat.error",
+  "chat.tool_call",
+  "chat.tool_result",
+  "chat.interrupt_result",
+  "chat.ask_user_question",
+  "chat.media",
+  "chat.file",
+  "chat.subtask_update",
+  "chat.session_result",
+  "session_result",
+  "history.message",
+  "context.compression_state",
+  "todo.updated",
+  "team.member",
+  "team.task",
+  "team.message",
+  "harness.extension_ready",
+  "harness.activate_interaction",
 ]);
 
 // ── Auto-recap (自动回顾) 常量 ──
@@ -200,6 +226,7 @@ export class CliPiAppState {
   private teamMemberEvents: TeamMemberEvent[] = [];
   private teamTaskEvents: TeamTaskEvent[] = [];
   private teamMessageEvents: TeamMessageEvent[] = [];
+  private workflowRuns: WorkflowRun[] = [];
   private evolutionStatus: "idle" | "running" = "idle";
   private contextCompression: ContextCompressionStats | null = null;
   private contextWindowLimit: number | null = null;
@@ -255,12 +282,16 @@ export class CliPiAppState {
   private autoRecapState: "idle" | "pending" | "generated" = "idle";
   /** 周期检查空闲状态的定时器。 */
   private autoRecapTimer: ReturnType<typeof setInterval> | null = null;
+  /** 是否启用自动回顾（从 config.yaml 读取，默认 true）。 */
+  private autoRecapEnabled: boolean = true;
   private ripgrepAvailable: boolean | null = null;
   private ripgrepSearchTipShown = false;
   /** Harness extension ready info (for file tree display) */
   private harnessExtensionReady: HarnessExtensionReady | null = null;
   /** Harness activate interaction state (for user confirmation) */
   private harnessActivateInteraction: HarnessActivateInteraction | null = null;
+  private deferTranscriptFrames = false;
+  private deferredTranscriptFrames: EventFrame[] = [];
   private readonly eventDelegate: AppEventDelegate = {
     getConnectionStatus: () => this.connectionStatus,
     getSessionId: () => this.sessionId,
@@ -299,6 +330,9 @@ export class CliPiAppState {
     },
     appendTeamMessageEvent: (event) => {
       this.teamMessageEvents = [...this.teamMessageEvents.slice(-99), event];
+    },
+    applyWorkflowUpdate: (workflow) => {
+      this.applyWorkflowUpdate(workflow);
     },
     setEvolutionStatus: (status) => {
       this.evolutionStatus = status;
@@ -443,7 +477,8 @@ export class CliPiAppState {
 
     this.wsClient.connect();
     this.startStatusLinePoll();
-    this.startAutoRecapTimer();
+    // auto-recap timer 由 fetchModelInfo() 在拿到配置后启动，
+    // 避免在配置为 disabled 时仍提前启动 timer。
   }
 
   stop(): void {
@@ -496,6 +531,15 @@ export class CliPiAppState {
         ? models.find((m) => m.model_name === activeModelName)
         : models[0];
       this.preferredLanguage = normalizePreferredLanguage(config.preferred_language);
+      this.autoRecapEnabled = config.auto_recap_enabled !== "false";
+      // 同步 auto-recap timer：WS 连接后才拿到配置，需根据实际值启停 timer
+      if (this.autoRecapEnabled) {
+        if (!this.autoRecapTimer) {
+          this.startAutoRecapTimer();
+        }
+      } else {
+        this.stopAutoRecapTimer();
+      }
       this.modelInfo = {
         provider: String(activeModel?.model_provider ?? config.model_provider ?? ""),
         model: activeModelName || String(config.model ?? ""),
@@ -528,6 +572,8 @@ export class CliPiAppState {
       this.emitChange();
     } catch {
       // ignore error, use defaults
+      // config.get 失败时，按默认值 true 启动 auto-recap timer
+      this.startAutoRecapTimer();
     }
   }
 
@@ -623,6 +669,16 @@ export class CliPiAppState {
       teamMemberEvents: [...this.teamMemberEvents],
       teamTaskEvents: [...this.teamTaskEvents],
       teamMessageEvents: [...this.teamMessageEvents],
+      workflowRuns: this.workflowRuns.map((workflow) => ({
+        ...workflow,
+        phases: workflow.phases.map((phase) => ({
+          ...phase,
+          agents: phase.agents.map((agent) => ({
+            ...agent,
+            activity: agent.activity ? [...agent.activity] : undefined,
+          })),
+        })),
+      })),
       evolutionStatus: this.evolutionStatus,
       contextCompression: this.contextCompression ? { ...this.contextCompression } : null,
       contextWindowLimit: this.contextWindowLimit,
@@ -817,10 +873,53 @@ export class CliPiAppState {
     }
   };
 
+  readonly loadWorkflowSnapshot = async (sessionId = this.sessionId): Promise<void> => {
+    const payload = await this.request<{
+      type?: string;
+      workflows?: unknown[];
+      session_id?: string;
+    }>(
+      "command.workflows",
+      {
+        action: "list",
+        session_id: sessionId,
+      },
+      10000,
+    );
+    this.applyWorkflowSnapshotPayload(payload);
+  };
+
+  readonly applyWorkflowSnapshotPayload = (payload: {
+    type?: unknown;
+    workflows?: unknown;
+    [key: string]: unknown;
+  }): void => {
+    const workflows = Array.isArray(payload.workflows) ? payload.workflows : [];
+    if (payload.type !== "workflow_run_snapshot" && workflows.length === 0) {
+      return;
+    }
+    this.setWorkflowRuns(
+      workflows.filter((item): item is WorkflowRun =>
+        Boolean(item && typeof item === "object" && !Array.isArray(item) && "id" in item),
+      ),
+    );
+  };
+
+  readonly setWorkflowRuns = (workflows: WorkflowRun[]): void => {
+    this.workflowRuns = workflows;
+    this.emitChange();
+  };
+
+  readonly applyWorkflowUpdate = (workflow: WorkflowRun): void => {
+    this.workflowRuns = applyWorkflowUpdate(this.workflowRuns, workflow);
+    this.emitChange();
+  };
+
   readonly updateSession = (newId: string): void => {
     this.sessionId = newId;
     this.lastVisibleUserRequest = null;
     this.usageByModel.clear();
+    this.workflowRuns = [];
     if (this.accentColor !== "default") {
       this.accentColor = "default";
       setCurrentAccentColor("default");
@@ -860,6 +959,26 @@ export class CliPiAppState {
     this.emitChange();
   };
 
+  readonly beginDeferredTranscript = (): void => {
+    this.deferTranscriptFrames = true;
+  };
+
+  readonly flushDeferredTranscript = (): void => {
+    if (!this.deferTranscriptFrames && this.deferredTranscriptFrames.length === 0) {
+      return;
+    }
+    this.deferTranscriptFrames = false;
+    const frames = this.deferredTranscriptFrames;
+    this.deferredTranscriptFrames = [];
+    let changed = false;
+    for (const frame of frames) {
+      changed = handleIncomingFrame(this.eventDelegate, frame) || changed;
+    }
+    if (changed) {
+      this.emitChange();
+    }
+  };
+
   readonly clearEntries = (): void => {
     if (this.localPendingQuestion) {
       this.localPendingQuestion.reject(new Error("input flow was interrupted"));
@@ -885,6 +1004,8 @@ export class CliPiAppState {
     this.historyPageDoneResolvers.clear();
     this.harnessExtensionReady = null;
     this.harnessActivateInteraction = null;
+    this.deferTranscriptFrames = false;
+    this.deferredTranscriptFrames = [];
     this.emitChange();
   };
 
@@ -1134,8 +1255,10 @@ export class CliPiAppState {
 
     if (
       source === "permission_interrupt" ||
+      source === "confirm_interrupt" ||
       source === "ask_user_interrupt"
     ) {
+      const resumeMode = this.pendingQuestion.resumeMode ?? this.mode;
       this.sendEventOnly(
         "chat.send",
         {
@@ -1143,10 +1266,11 @@ export class CliPiAppState {
           request_id: this.pendingQuestion.requestId,
           answers,
           source,
-          mode: this.mode,
+          mode: resumeMode,
         },
         true,
       );
+      this.streamingState = StreamingState.Responding;
     } else {
       const params: Record<string, unknown> = {
         request_id: this.pendingQuestion.requestId,
@@ -1162,7 +1286,9 @@ export class CliPiAppState {
       );
     }
     this.pendingQuestion = null;
-    this.streamingState = StreamingState.Idle;
+    if (this.streamingState !== StreamingState.Responding) {
+      this.streamingState = StreamingState.Idle;
+    }
     this.streamingStateBeforeQuestion = null;
     this.emitChange();
   }
@@ -1960,6 +2086,9 @@ export class CliPiAppState {
   }
 
   private startAutoRecapTimer(): void {
+    if (this.autoRecapTimer) {
+      return; // 防止重复启动导致 timer 泄漏
+    }
     this.autoRecapTimer = setInterval(() => {
       this.checkAutoRecap();
     }, AUTO_RECAP_CHECK_INTERVAL_MS);
@@ -2156,9 +2285,26 @@ export class CliPiAppState {
       return;
     }
     const typedFrame = frame as EventFrame;
+    if (this.shouldDeferTranscriptFrame(typedFrame)) {
+      this.deferredTranscriptFrames.push(typedFrame);
+      return;
+    }
     if (handleIncomingFrame(this.eventDelegate, typedFrame)) {
       this.emitChange();
     }
+  }
+
+  private shouldDeferTranscriptFrame(frame: EventFrame): boolean {
+    if (!this.deferTranscriptFrames) {
+      return false;
+    }
+    const payload = frame.payload;
+    const effectiveEvent = typeof payload.event_type === "string" ? payload.event_type : frame.event;
+    if (!DEFERRED_TRANSCRIPT_EVENTS.has(effectiveEvent)) {
+      return false;
+    }
+    const eventSessionId = typeof payload.session_id === "string" ? payload.session_id : "";
+    return !eventSessionId || eventSessionId === this.sessionId;
   }
 
   private scheduleHistoryFlush(): void {

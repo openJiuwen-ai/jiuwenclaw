@@ -2,10 +2,10 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 """ProjectMemoryRail -- jiuwenswarm product-side rail.
 
-On every ``before_model_call``, rebuild the ``project_memory`` section from
-cached discovery results. Cache invalidation happens explicitly on write-like
-tool calls, mode/workspace switches, and also falls back to a lightweight
-filesystem snapshot check for correctness.
+On every ``before_model_call``, rebuild the session-scoped ``project_memory``
+prompt attachment from cached discovery results. Cache invalidation happens
+explicitly on write-like tool calls, mode/workspace switches, and also falls
+back to a lightweight filesystem snapshot check for correctness.
 
 This rail lives in jiuwenswarm (not agent-core) so that:
 
@@ -18,6 +18,10 @@ import os
 from typing import TYPE_CHECKING
 
 from openjiuwen.core.single_agent.rail.base import AgentCallbackContext
+from openjiuwen.harness.prompts.prompt_attachment_manager import (
+    PromptAttachmentKind,
+    PromptAttachmentScope,
+)
 from openjiuwen.harness.rails.base import DeepAgentRail
 
 from jiuwenswarm.agents.harness.common.rails.project_memory import (
@@ -34,7 +38,7 @@ if TYPE_CHECKING:
 
 
 class ProjectMemoryRail(DeepAgentRail):
-    """Auto-load project memory files and inject them into the system prompt.
+    """Auto-load project memory files and inject them as a prompt attachment.
 
     Loaded sources (all read-only; only ``JIUWENSWARM.md`` and
     ``JIUWENSWARM.local.md`` are written by ``/init``):
@@ -80,17 +84,19 @@ class ProjectMemoryRail(DeepAgentRail):
         self._language: str = language
         self._max_chars: int = max_chars
         self._additional_directories: tuple[str, ...] = tuple(additional_directories or ())
-        self._system_prompt_builder = None
+        self._agent = None
+        self.attachment_manager = None
 
     # ------------------------------------------------------------------
     # Lifecycle
     # ------------------------------------------------------------------
 
     def init(self, agent: "DeepAgent") -> None:
-        self._system_prompt_builder = getattr(agent, "system_prompt_builder", None)
-        if self._system_prompt_builder is None:
+        self._agent = agent
+        self.attachment_manager = getattr(agent, "prompt_attachment_manager", None)
+        if self.attachment_manager is None:
             logger.warning(
-                "[ProjectMemoryRail] agent has no system_prompt_builder; disabled"
+                "[ProjectMemoryRail] agent has no prompt attachment manager; disabled"
             )
             return
         logger.info(
@@ -100,15 +106,11 @@ class ProjectMemoryRail(DeepAgentRail):
         )
 
     def uninit(self, agent: "DeepAgent") -> None:
-        """Clear the injected section to avoid stale content on rail swap."""
+        """Clear discovery cache on rail swap."""
+        del agent
         clear_project_memory_cache(self.resolve_workspace_path())
-        if self._system_prompt_builder is not None:
-            try:
-                self._system_prompt_builder.remove_section(SECTION_NAME)
-            except Exception as exc:  # noqa: BLE001 -- defensive; never crash teardown
-                logger.warning(
-                    "[ProjectMemoryRail] remove_section on uninit failed: %s", exc
-                )
+        self._agent = None
+        self.attachment_manager = None
 
     # ------------------------------------------------------------------
     # Public knobs (per-request hot updates, parallel to RuntimePromptRail)
@@ -146,8 +148,8 @@ class ProjectMemoryRail(DeepAgentRail):
     # ------------------------------------------------------------------
 
     async def before_model_call(self, ctx: AgentCallbackContext) -> None:  # noqa: ARG002
-        """Refresh the ``project_memory`` section from cached discovery state."""
-        if self._system_prompt_builder is None:
+        """Refresh the session-scoped ``project_memory`` attachment."""
+        if self._agent is None:
             return
 
         workspace_path = self.resolve_workspace_path()
@@ -172,15 +174,8 @@ class ProjectMemoryRail(DeepAgentRail):
 
         merged = merge_memory_content(files, max_chars=self._max_chars)
 
-        # Always drop the previous section so the current state of disk wins.
-        try:
-            self._system_prompt_builder.remove_section(SECTION_NAME)
-        except Exception as exc:  # noqa: BLE001 -- builder API surface is broad
-            logger.warning(
-                "[ProjectMemoryRail] remove_section failed (continuing): %s", exc
-            )
-
         if not merged.strip():
+            await self._clear_prompt_attachment(ctx)
             return
 
         section = build_project_memory_section(
@@ -189,7 +184,7 @@ class ProjectMemoryRail(DeepAgentRail):
             priority=self.SECTION_PRIORITY,
         )
         if section is not None:
-            self._system_prompt_builder.add_section(section)
+            await self._upsert_prompt_attachment(ctx, section)
 
     async def after_tool_call(self, ctx: AgentCallbackContext) -> None:
         """Explicitly invalidate memory discovery cache after write-like tools."""
@@ -216,6 +211,35 @@ class ProjectMemoryRail(DeepAgentRail):
             if root:
                 return str(root)
         return self._workspace_path
+
+    async def _upsert_prompt_attachment(self, ctx: AgentCallbackContext, section) -> None:
+        if self.attachment_manager is None:
+            logger.warning("[ProjectMemoryRail] skip project memory: prompt attachment manager unavailable")
+            return
+        try:
+            await self.attachment_manager.for_context(ctx).upsert_from_section(
+                section=section,
+                scope=PromptAttachmentScope.SESSION,
+                kind=PromptAttachmentKind.MEMORY,
+                source="jiuwenswarm.project_memory",
+                priority=self.SECTION_PRIORITY,
+                language=self._language,
+                metadata={"workspace": self.resolve_workspace_path()},
+                content_kind="text/markdown",
+            )
+        except ValueError as exc:
+            logger.warning("[ProjectMemoryRail] skip project memory prompt attachment: %s", exc)
+
+    async def _clear_prompt_attachment(self, ctx: AgentCallbackContext) -> None:
+        if self.attachment_manager is None:
+            return
+        try:
+            await self.attachment_manager.for_context(ctx).clear_section(
+                section=SECTION_NAME,
+                scope=PromptAttachmentScope.SESSION,
+            )
+        except ValueError as exc:
+            logger.warning("[ProjectMemoryRail] skip clearing project memory prompt attachment: %s", exc)
 
 
 __all__ = ["ProjectMemoryRail"]

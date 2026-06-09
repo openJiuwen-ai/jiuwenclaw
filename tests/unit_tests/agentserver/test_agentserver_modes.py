@@ -360,6 +360,9 @@ def test_handle_stream_accepts_team_mode_without_sub_mode(monkeypatch):
         def __init__(self):
             self.seen_request = None
 
+        def get_instance(self):
+            return self
+
         async def process_message_stream(self, request):
             self.seen_request = request
             yield AgentResponseChunk(
@@ -432,6 +435,9 @@ def test_handle_stream_accepts_code_team_sub_mode(monkeypatch):
     class FakeAgent:
         def __init__(self):
             self.seen_request = None
+
+        def get_instance(self):
+            return self
 
         async def process_message_stream(self, request):
             self.seen_request = request

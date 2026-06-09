@@ -187,6 +187,9 @@ def rewind_session(
         # 剥离 <file-content> 块（系统注入的文件元数据，非用户实际输入）
         removed_turn_content = re.sub(r"<file-content[^>]*>.*?</file-content>", "", raw, flags=re.DOTALL).strip()
 
+    # 在截断 history 之前，记录目标 turn 的时间戳（用于后续清理 file_ops）
+    cut_timestamp = history[cut_index].get("timestamp")
+
     result = truncate_history_records(session_id=session_id, cut_index=cut_index)
 
     from jiuwenswarm.server.runtime.session.session_metadata import update_session_metadata
@@ -195,6 +198,16 @@ def rewind_session(
         session_id=session_id,
         set_message_count=result["remaining_records"],
     )
+
+    # 清理 session-specific file_ops 日志，使 turn diff 显示与截断后的 history 一致
+    # 必须在 truncate_history_records 之后调用，但传入截断前获取的时间戳
+    if cut_timestamp is not None:
+        try:
+            from jiuwenswarm.server.utils.diff_service import get_diff_service
+
+            get_diff_service().truncate_file_ops_by_timestamp(session_id, cut_timestamp)
+        except Exception as exc:
+            logger.warning("rewind_session: failed to truncate file_ops: %s", exc)
 
     return {
         "session_id": session_id,
@@ -227,6 +240,7 @@ def _is_selectable_user_message(content: str) -> bool:
 def list_session_turns(
     *,
     session_id: str,
+    project_dir: str | None = None,
 ) -> dict[str, Any]:
     sessions_dir = get_agent_sessions_dir()
     history_path = sessions_dir / session_id / "history.json"
@@ -249,7 +263,7 @@ def list_session_turns(
         from jiuwenswarm.server.utils.diff_service import get_diff_service
 
         diff_service = get_diff_service()
-        turn_diffs = diff_service.get_turn_diffs(session_id)
+        turn_diffs = diff_service.get_turn_diffs(session_id, project_dir)
         if isinstance(turn_diffs, list):
             for td in turn_diffs:
                 ti = td.get("turnIndex")
@@ -416,8 +430,66 @@ async def rewind_session_context(
         return True
 
     # --- 2. Convert history.json records → openjiuwen BaseMessage list ---
+    #
+    # history.json stores raw streaming events, NOT clean messages.
+    # A single user turn produces many records across multiple LLM API calls:
+    #
+    #   Per LLM call:
+    #     chat.reasoning (N chunks)  → thinking text (concatenated)
+    #     chat.usage_metadata         → end-of-call marker (skip)
+    #     EITHER:
+    #       chat.tool_call (1..N)     → AssistantMessage(reasoning + tool_calls)
+    #       chat.tool_result (per tc) → ToolMessage
+    #     OR:
+    #       chat.delta (N chunks)     → skip (fragments of chat.final)
+    #       chat.final                → AssistantMessage(reasoning + content)
+    #
+    #   Other events (all skipped):
+    #     chat.tool_update            → intermediate tool progress
+    #     chat.usage_summary          → turn-level usage stats
+    #     chat.ask_user_question      → UI interaction event
+    #
+    # Aligned with claude-code's approach: preserve thinking (reasoning),
+    # tool_call/tool_result structure, and final text to fully reconstruct
+    # the conversation context for the LLM.
+    #
+    # State machine:
+    #   - reasoning_buffer: accumulates chat.reasoning text chunks
+    #   - current_tool_calls: collects tool_calls for the current LLM call
+    #   - When a NEW reasoning chunk arrives after tool_calls were collected,
+    #     flush the pending AssistantMessage (one LLM call boundary crossed)
+    #   - Consecutive tool_calls without reasoning between them belong to
+    #     the same LLM call (parallel tool execution)
+
     context_messages: list[Any] = []
+    skipped = 0
+    reasoning_buffer: list[str] = []
+    current_tool_calls: list[dict[str, Any]] = []
+    # Track all tool_call_ids that have been emitted in AssistantMessages.
+    # Used to detect orphaned tool_results (e.g. ask_user's preliminary
+    # empty result that arrives before the actual chat.tool_call event).
+    emitted_tool_call_ids: set[str] = set()
+
+    def _flush_pending_assistant() -> None:
+        """Create an AssistantMessage from buffered reasoning + tool_calls."""
+        nonlocal reasoning_buffer, current_tool_calls
+        reasoning = "".join(reasoning_buffer).strip()
+        tool_calls = current_tool_calls
+        reasoning_buffer = []
+        current_tool_calls = []
+        if not reasoning and not tool_calls:
+            return
+        # Record emitted tool_call_ids for orphan detection
+        for tc in tool_calls:
+            emitted_tool_call_ids.add(tc["id"])
+        context_messages.append(AssistantMessage(
+            content="",
+            reasoning_content=reasoning if reasoning else None,
+            tool_calls=tool_calls if tool_calls else None,
+        ))
+
     for record in history_records:
+        event_type = (record.get("event_type") or "").strip()
         role = (record.get("role") or "").strip().lower()
         content = record.get("content", "")
         if isinstance(content, list):
@@ -426,19 +498,140 @@ async def rewind_session_context(
                 if isinstance(p, str) or (isinstance(p, dict) and p.get("type") == "text")
             )
         content = str(content)
-        if not content.strip():
+
+        # ── User message ──
+        if role == "user":
+            if content.strip():
+                context_messages.append(UserMessage(content=content))
             continue
 
-        # Only convert user / assistant / tool roles; skip system messages.
-        if role == "user":
-            context_messages.append(UserMessage(content=content))
-        elif role == "assistant":
-            context_messages.append(AssistantMessage(content=content))
-        elif role == "tool":
-            tool_call_id = record.get("tool_call_id") or "rewind-restored"
-            context_messages.append(ToolMessage(tool_call_id=tool_call_id, content=content))
-        # system / other roles are intentionally skipped — they are
-        # regenerated by the agent on the next turn.
+        # ── Only process assistant events below ──
+        if role != "assistant":
+            skipped += 1
+            continue
+
+        if event_type == "chat.reasoning":
+            # New reasoning after tool_calls → flush previous LLM call
+            if current_tool_calls and reasoning_buffer == []:
+                _flush_pending_assistant()
+            if content:
+                reasoning_buffer.append(content)
+
+        elif event_type == "chat.tool_call":
+            tc = record.get("tool_call", {})
+            if not isinstance(tc, dict):
+                skipped += 1
+                continue
+            tc_name = tc.get("name", "")
+            tc_id = tc.get("tool_call_id", "")
+            tc_args = tc.get("arguments", "")
+            if not tc_name or not tc_id:
+                skipped += 1
+                continue
+            if isinstance(tc_args, dict):
+                tc_args = json.dumps(tc_args, ensure_ascii=False)
+            elif not isinstance(tc_args, str):
+                tc_args = str(tc_args)
+            current_tool_calls.append({
+                "type": "function",
+                "id": tc_id,
+                "function": {"name": tc_name, "arguments": tc_args},
+            })
+
+        elif event_type == "chat.tool_result":
+            tc_id = record.get("tool_call_id", "")
+            result_content = str(record.get("result", ""))
+            if not tc_id:
+                skipped += 1
+                continue
+            # Check if this tool_result has a matching tool_call — either
+            # in the current buffer (pending flush) or already emitted.
+            # Interactive tools like ask_user emit a preliminary empty
+            # tool_result BEFORE the chat.tool_call event; skip those to
+            # avoid orphaned ToolMessages (the real result arrives later
+            # after the actual tool_call event and is handled correctly).
+            pending_ids = {tc["id"] for tc in current_tool_calls}
+            if tc_id not in pending_ids and tc_id not in emitted_tool_call_ids:
+                skipped += 1
+                continue
+            # Flush pending AssistantMessage (reasoning + tool_calls) before
+            # emitting ToolMessages — ensures correct message ordering:
+            #   AssistantMessage(tool_calls) → ToolMessage(result)
+            if reasoning_buffer or current_tool_calls:
+                _flush_pending_assistant()
+            context_messages.append(ToolMessage(
+                tool_call_id=tc_id,
+                content=result_content,
+            ))
+
+        elif event_type == "chat.final":
+            # Final text response — flush any pending state first
+            if current_tool_calls:
+                _flush_pending_assistant()
+            reasoning = "".join(reasoning_buffer).strip()
+            reasoning_buffer = []
+            if content.strip() or reasoning:
+                context_messages.append(AssistantMessage(
+                    content=content.strip() if content.strip() else "",
+                    reasoning_content=reasoning if reasoning else None,
+                ))
+
+        else:
+            # chat.delta, chat.tool_update, chat.usage_metadata,
+            # chat.usage_summary, chat.ask_user_question
+            skipped += 1
+
+    # Flush any remaining state (e.g. interrupted turn with only reasoning)
+    if reasoning_buffer or current_tool_calls:
+        _flush_pending_assistant()
+
+    # --- 2b. Post-processing (aligned with claude-code's deserialization pipeline) ---
+
+    # Filter out AssistantMessages whose tool_calls have no matching ToolMessage.
+    # Analogous to claude-code's filterUnresolvedToolUses — these occur when
+    # the history was truncated mid-turn (e.g. interrupted stream or crash)
+    # and would cause API errors (the model can't see tool results that don't exist).
+    tool_result_ids: set[str] = set()
+    for msg in context_messages:
+        if isinstance(msg, ToolMessage) and msg.tool_call_id:
+            tool_result_ids.add(msg.tool_call_id)
+
+    filtered_messages: list[Any] = []
+    removed_unresolved = 0
+    for msg in context_messages:
+        if isinstance(msg, AssistantMessage) and msg.tool_calls:
+            # Keep only tool_calls that have a matching ToolMessage result
+            resolved = [
+                tc for tc in msg.tool_calls
+                if (tc.model_dump() if hasattr(tc, "model_dump") else tc).get("id") in tool_result_ids
+            ]
+            unresolved_count = len(msg.tool_calls) - len(resolved)
+            if unresolved_count > 0:
+                removed_unresolved += unresolved_count
+                if not resolved and not msg.content and not msg.reasoning_content:
+                    # Entire message was only unresolved tool_calls — drop it
+                    continue
+                # Rebuild message with only resolved tool_calls
+                msg = AssistantMessage(
+                    content=msg.content or "",
+                    reasoning_content=msg.reasoning_content,
+                    tool_calls=resolved if resolved else None,
+                )
+        filtered_messages.append(msg)
+    context_messages = filtered_messages
+
+    if removed_unresolved > 0:
+        logger.info(
+            "rewind_session_context: removed %d unresolved tool_call(s)", removed_unresolved
+        )
+
+    # If conversation ends with an AssistantMessage, append a synthetic
+    # continuation user message so the next API call has proper role
+    # alternation.  Analogous to claude-code's NO_RESPONSE_REQUESTED sentinel.
+    if context_messages and isinstance(context_messages[-1], AssistantMessage):
+        context_messages.append(UserMessage(
+            content="[Continue from where the conversation was rewound.]"
+        ))
 
     if not context_messages:
         logger.info("rewind_session_context: no convertible messages in history for %s", session_id)
@@ -501,8 +694,8 @@ async def rewind_session_context(
 
     logger.info(
         "rewind_session_context: session=%s turn=%d rebuilt context with %d messages "
-        "(from truncated history.json) persist=%s",
-        session_id, turn_index, len(context_messages), persist_ok,
+        "(skipped %d streaming/metadata records) persist=%s",
+        session_id, turn_index, len(context_messages), skipped, persist_ok,
     )
     return True
 

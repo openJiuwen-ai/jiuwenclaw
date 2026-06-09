@@ -17,6 +17,7 @@ import select
 import socket
 import ssl
 import sys
+import time
 from functools import partial
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -31,7 +32,7 @@ parse_dotenv_early("jiuwenswarm-web")
 from jiuwenswarm.agents.harness.common.tools.ssl_config import get_insecure_ssl_context, get_ssl_verify
 from jiuwenswarm.agents.harness.team.bootstrap import configure_agent_teams_home
 from jiuwenswarm.common.utils import get_agent_root_dir, get_logs_dir, \
-    get_root_dir, get_user_workspace_dir, is_package_installation, wait_for_tcp_port
+    get_agent_sessions_dir, get_root_dir, get_user_workspace_dir, is_package_installation, wait_for_tcp_port
 
 configure_agent_teams_home()
 
@@ -340,6 +341,9 @@ class _SpaStaticHandler(SimpleHTTPRequestHandler):
     def _is_file_api_route(self) -> bool:
         return urlparse(self.path).path.startswith("/file-api/")
 
+    def _is_share_api_route(self) -> bool:
+        return urlparse(self.path).path.startswith("/share-api/")
+
     def _is_websocket_upgrade(self) -> bool:
         upgrade = self.headers.get("Upgrade", "")
         connection = self.headers.get("Connection", "")
@@ -536,16 +540,98 @@ class _SpaStaticHandler(SimpleHTTPRequestHandler):
         if self.command != "HEAD":
             self.wfile.write(data)
 
+    @staticmethod
+    def _parse_query(query: str) -> dict[str, str]:
+        parsed: dict[str, str] = {}
+        if not query:
+            return parsed
+        for pair in query.split("&"):
+            if "=" in pair:
+                k, v = pair.split("=", 1)
+            else:
+                k, v = pair, ""
+            parsed[unquote(k)] = unquote(v)
+        return parsed
+
+    def _resolve_session_title(self, session_dir: Path, history: list[dict[str, Any]]) -> str:
+        metadata_path = session_dir / "metadata.json"
+        if metadata_path.exists():
+            try:
+                metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+                title = metadata.get("title") if isinstance(metadata, dict) else None
+                if isinstance(title, str) and title.strip():
+                    return title.strip()
+            except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+                pass
+        for record in history:
+            if record.get("role") == "user":
+                content = record.get("content")
+                if isinstance(content, str) and content.strip():
+                    return content.strip().replace("\n", " ")[:80]
+        return session_dir.name
+
+    def _build_share_snapshot(
+        self,
+        *,
+        session_id: str,
+    ) -> tuple[dict[str, Any], str]:
+        sessions_root = get_agent_sessions_dir().resolve()
+        session_dir = (sessions_root / session_id).resolve()
+        try:
+            if os.path.commonpath([str(sessions_root), str(session_dir)]) != str(sessions_root):
+                raise FileNotFoundError("history_not_found")
+        except ValueError as exc:
+            raise FileNotFoundError("history_not_found") from exc
+
+        history_path = session_dir / "history.json"
+        if not session_dir.exists() or not history_path.exists():
+            raise FileNotFoundError("history_not_found")
+        try:
+            history_raw = json.loads(history_path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError as exc:
+            raise ValueError("invalid_history_json") from exc
+        if not isinstance(history_raw, list):
+            raise ValueError("invalid_history_shape")
+
+        history = [item for item in history_raw if isinstance(item, dict)]
+        exported_at = time.strftime("%Y-%m-%dT%H:%M:%S%z")
+        timestamp = time.strftime("%Y%m%d-%H%M%S")
+        filename = f"jiuwenswarm-share-{timestamp}.png"
+        snapshot = {
+            "session_id": session_id,
+            "metadata": {
+                "title": self._resolve_session_title(session_dir, history),
+                "exported_at": exported_at,
+                "filename": filename,
+            },
+            "records": history_raw,
+        }
+        return snapshot, filename
+
+    def _handle_share_api_get(self, parsed) -> None:
+        if parsed.path != "/share-api/snapshot":
+            self._write_json(404, {"error": "not_found"})
+            return
+        query = self._parse_query(parsed.query)
+        session_id = query.get("session_id", "").strip()
+        if not session_id:
+            self._write_json(400, {"error": "missing_session_id"})
+            return
+        try:
+            snapshot, filename = self._build_share_snapshot(
+                session_id=session_id,
+            )
+        except FileNotFoundError:
+            self._write_json(404, {"error": "history_not_found"})
+            return
+        except ValueError as exc:
+            self._write_json(400, {"error": str(exc)})
+            return
+        self._write_json(200, {"filename": filename, "snapshot": snapshot})
+
     def _handle_file_api_get(self, parsed) -> None:
         path = parsed.path
-        query = {}
-        if parsed.query:
-            for pair in parsed.query.split("&"):
-                if "=" in pair:
-                    k, v = pair.split("=", 1)
-                else:
-                    k, v = pair, ""
-                query[unquote(k)] = unquote(v)
+        query = self._parse_query(parsed.query)
 
         if path == "/file-api/list-markdown":
             dir_arg = query.get("dir", "")
@@ -805,6 +891,9 @@ class _SpaStaticHandler(SimpleHTTPRequestHandler):
 
     def do_GET(self) -> None:  # noqa: N802
         parsed = urlparse(self.path)
+        if self._is_share_api_route():
+            self._handle_share_api_get(parsed)
+            return
         if self._is_file_api_route():
             self._handle_file_api_get(parsed)
             return

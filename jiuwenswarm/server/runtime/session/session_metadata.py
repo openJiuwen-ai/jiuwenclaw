@@ -5,6 +5,7 @@ import copy
 import json
 import logging
 import queue
+import re
 import shutil
 import threading
 from pathlib import Path
@@ -30,6 +31,34 @@ _TITLE_MAX_LEN = 50
 # 心跳任务会话目录前缀，不参与 session.list 等列表展示
 _HEARTBEAT_SESSION_PREFIX = "heartbeat_"
 _DELIVERY_KIND_SERVER_PUSH = "server_push"
+
+# 匹配所有小写 XML 块（对齐 Claude Code stripDisplayTags），
+# 如 <system-reminder>、<file-content>、<command-name> 等系统/工具注入内容
+_INJECTED_TAG_RE = re.compile(
+    r"<([a-z][\w-]*)(?:\s[^>]*)?>.*?</\1>\n?", re.DOTALL
+)
+# 匹配截断的 XML 开始标签（标题被 _TITLE_MAX_LEN 截断时可能只剩开始标签）
+_INJECTED_TAG_START_RE = re.compile(
+    r"<[a-z][\w-]*(?:\s[^>]*)?>?"
+)
+
+
+def _sanitize_title(title: str) -> str:
+    """清理标题中的系统注入 XML 标签（对齐 Claude Code stripDisplayTags）。
+
+    匹配所有小写 XML 标签（如 <system-reminder>、<file-content>、<command-name>），
+    不匹配用户提及的大写 HTML/JSX（如 <Button>、<Component>）。
+
+    处理两种情况：
+    1. 完整的 <tag>...</tag> 块（正则移除）
+    2. 被 _TITLE_MAX_LEN 截断的 <tag ... 开头（无闭合标签，整段丢弃）
+    """
+    if not title:
+        return title
+    cleaned = _INJECTED_TAG_RE.sub("", title).strip()
+    if _INJECTED_TAG_START_RE.match(cleaned):
+        return ""
+    return cleaned
 
 
 def _current_timestamp() -> float:
@@ -125,7 +154,12 @@ def _enqueue_write(session_id: str, metadata: dict[str, Any]) -> None:
 
 def _auto_title(content: str) -> str:
     """从首条用户消息自动生成会话标题"""
-    title = content.strip().replace("\n", " ")
+    # 先剥离所有小写 XML 注入标签（对齐 Claude Code stripDisplayTags），
+    # 避免将系统提示/文件注入/工具标签误识别为会话标题
+    cleaned = _INJECTED_TAG_RE.sub("", content).strip()
+    if not cleaned:
+        return ""
+    title = cleaned.replace("\n", " ")
     if len(title) > _TITLE_MAX_LEN:
         title = title[:_TITLE_MAX_LEN] + "..."
     return title
@@ -245,7 +279,13 @@ def get_session_metadata(session_id: str, cache_bust: bool = False) -> dict[str,
         session_id: 会话 ID
         cache_bust: 强制跳过缓存，直接从磁盘读取（用于跨进程同步场景）
     """
-    return _read_metadata(session_id, cache_bust)
+    metadata = _read_metadata(session_id, cache_bust)
+    # 清理已有会话中可能被误写入的系统注入标签标题（<system-reminder>、<file-content> 等）
+    if isinstance(metadata, dict) and metadata.get("title"):
+        sanitized = _sanitize_title(metadata["title"])
+        if sanitized != metadata["title"]:
+            metadata["title"] = sanitized
+    return metadata
 
 
 def increment_session_round_count(session_id: str) -> int:
@@ -446,6 +486,13 @@ def get_all_sessions_metadata(
             }
 
         sessions.append(metadata)
+
+    # 清理已有会话中可能被误写入的系统注入标签标题（<system-reminder>、<file-content> 等）
+    for s in sessions:
+        if s.get("title"):
+            sanitized = _sanitize_title(s["title"])
+            if sanitized != s["title"]:
+                s["title"] = sanitized
 
     # 按最后消息时间倒序排序
     sessions.sort(key=lambda x: x.get("last_message_at", 0), reverse=True)

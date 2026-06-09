@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import logging
 from typing import Any, Awaitable, Callable
 
@@ -33,6 +34,16 @@ class SessionManager:
     def get_session_id(session_id: str | None) -> str:
         """获取 session_id，默认为 'default'."""
         return session_id or "default"
+
+    @staticmethod
+    def _is_oneshot_session(session_id: str) -> bool:
+        """判断是否为一次性 session（心跳/定时任务），其 session_id 永不复用.
+
+        这类 session 每次都用全新 session_id，任务执行完后 processor 不会再有
+        新任务进来，必须主动回收，否则 processor 协程永久阻塞在 queue.get()，
+        连同队列/字典条目泄漏。判定口径与 interface_deep 中一致.
+        """
+        return session_id.startswith("heartbeat") or session_id.startswith("cron")
 
     async def cancel_session_task(
         self,
@@ -89,12 +100,19 @@ class SessionManager:
                 queue = self._session_queues[session_id]
                 while True:
                     try:
-                        priority, task_func = await queue.get()
+                        item = await queue.get()
+                        # Queue items are (priority, task_func, ctx) tuples.
+                        # The sentinel to stop the processor is (priority, None, None).
+                        priority, task_func, task_ctx = item
                         if task_func is None:
                             break
 
+                        # Pass the captured ContextVar context to create_task
+                        # so the new Task inherits the caller's ContextVars
+                        # (workspace, cwd, project_root, etc.) rather than
+                        # the processor Task's (possibly stale) context.
                         self._session_tasks[session_id] = asyncio.create_task(
-                            task_func()
+                            task_func(), context=task_ctx
                         )
                         try:
                             await self._session_tasks[session_id]
@@ -138,7 +156,10 @@ class SessionManager:
         await self.ensure_session_processor(session_id)
         self._session_priorities[session_id] -= 1
         priority = self._session_priorities[session_id]
-        await self._session_queues[session_id].put((priority, task_func))
+        # Snapshot ContextVars so the agent task inherits the caller's
+        # context (workspace, cwd, project_root set by init_cwd, etc.)
+        ctx = contextvars.copy_context()
+        await self._session_queues[session_id].put((priority, task_func, ctx))
 
     async def submit_and_wait(
         self,
@@ -166,9 +187,22 @@ class SessionManager:
 
         self._session_priorities[session_id] -= 1
         priority = self._session_priorities[session_id]
-        await self._session_queues[session_id].put((priority, wrapped_task))
+        # Snapshot ContextVars so the agent task inherits the caller's
+        # context (workspace, cwd, project_root set by init_cwd, etc.)
+        ctx = contextvars.copy_context()
+        await self._session_queues[session_id].put((priority, wrapped_task, ctx))
 
-        return await result_future
+        try:
+            return await result_future
+        finally:
+            # 一次性 session（heartbeat/cron）session_id 永不复用，任务结束后
+            # 不会再有新任务进来。这里发一个 None 哨兵让 processor 退出 while 循环，
+            # 走既有清理逻辑回收队列/字典条目，避免 processor 协程永久泄漏。
+            # 哨兵用较大正数优先级，确保排在所有已入队任务之后执行（不抢占未跑的任务）。
+            if self._is_oneshot_session(session_id):
+                queue = self._session_queues.get(session_id)
+                if queue is not None:
+                    await queue.put((1_000_000_000, None, None))
 
     def get_current_task(self, session_id: str) -> asyncio.Task | None:
         """获取当前 session 正在执行的任务."""

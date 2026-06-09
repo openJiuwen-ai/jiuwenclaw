@@ -12,6 +12,7 @@ classifiers = [
     "License :: OSI Approved :: Apache Software License",
 ]
 dependencies = [
+    "a2ui-agent-sdk==0.2.1",
     "chromadb>=1.5.0",
     "ruamel.yaml>=0.18.0",
     "lark-oapi>=1.5.3",

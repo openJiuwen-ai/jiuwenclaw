@@ -429,6 +429,33 @@ def parse_remote_teammate_bootstrap_json(content: str) -> dict[str, Any] | None:
     return data
 
 
+def _swarm_assembly_hint(team_agent: Any) -> dict[str, str]:
+    """Extract provider-assembly hints (mode / project_dir) from a leader spec.
+
+    Reads the serializable ``build_context_seed`` the swarm enrichment leaves on
+    the spec, falling back to the live ``build_context``. Returns an empty dict
+    when the team was built via the legacy customizer path, so the teammate
+    keeps the legacy rebuild.
+    """
+    spec = getattr(team_agent, "spec", None)
+    if spec is None:
+        return {}
+    seed = getattr(spec, "build_context_seed", None)
+    if isinstance(seed, dict) and seed:
+        mode = str(seed.get("mode") or "").strip()
+        project_dir = str(seed.get("project_dir") or "").strip()
+    else:
+        build_context = getattr(spec, "build_context", None)
+        mode = str(getattr(build_context, "mode", "") or "").strip()
+        project_dir = str(getattr(build_context, "project_dir", "") or "").strip()
+    hint: dict[str, str] = {}
+    if mode:
+        hint["mode"] = mode
+    if project_dir:
+        hint["project_dir"] = project_dir
+    return hint
+
+
 def build_bootstrap_envelope(
     team_agent: Any,
     *,
@@ -450,7 +477,7 @@ def build_bootstrap_envelope(
         leader_member_name=str(leader_member_name or ""),
     )
     leader_direct_addr = _normalize_leader_direct_addr(messager.get("direct_addr"))
-    return {
+    envelope = {
         "type": "jiuwen.remote_teammate_bootstrap",
         "version": 1,
         "bootstrap_id": str(uuid.uuid4()),
@@ -463,6 +490,10 @@ def build_bootstrap_envelope(
         "messager": messager,
         "prompt": prompt or "",
     }
+    # Carry provider-assembly hints so the remote teammate rebuilds with the
+    # same request mode / project dir (empty dict for the legacy path).
+    envelope.update(_swarm_assembly_hint(team_agent))
+    return envelope
 
 
 def build_team_destroy_envelope(
@@ -1933,8 +1964,16 @@ async def _ensure_dynamic_member_execution_loop(
     channel_id: str = "default",
     leader_agent_id: str = "",
     leader_direct_addr: str = "",
+    assembly_mode: str = "",
+    assembly_project_dir: str = "",
 ) -> tuple[bool, bool]:
-    """Best-effort bootstrap for teammate runtime loop after dynamic member takeover."""
+    """Best-effort bootstrap for teammate runtime loop after dynamic member takeover.
+
+    When ``assembly_mode`` is set (provider-based assembly), the auxiliary leader
+    is rebuilt provider-style so the serialized spec carries provider declarations
+    plus the ``build_context_seed`` that the teammate uses to reconstruct its
+    build context — no customizer closure crosses the process boundary.
+    """
     sid = str(session_id or "").strip()
     member = str(target_member or "").strip()
     if not sid or not member:
@@ -1965,10 +2004,16 @@ async def _ensure_dynamic_member_execution_loop(
             return False, False
 
         team_manager = get_team_manager(channel_id)
+        request_metadata: dict[str, Any] | None = None
+        if assembly_mode:
+            request_metadata = {"mode": assembly_mode}
+            if assembly_project_dir:
+                request_metadata["project_dir"] = assembly_project_dir
         leader_team_agent = await team_manager.get_or_create_team(
             sid,
             deep_agent,
             channel_id=channel_id,
+            request_metadata=request_metadata,
         )
         helper_token = set_session_id(sid)
         try:
@@ -2156,6 +2201,10 @@ async def _apply_bootstrap_envelope_from_control_plane(
         return adopted_member
     leader_agent_id = str(envelope.get("leader_agent_id", "")).strip()
     leader_direct_addr = str(envelope.get("leader_direct_addr", "")).strip()
+    # Provider-assembly hints (empty for the legacy customizer path) so the
+    # teammate's auxiliary leader is rebuilt provider-style with the same mode.
+    assembly_mode = str(envelope.get("mode", "")).strip()
+    assembly_project_dir = str(envelope.get("project_dir", "")).strip()
 
     effective_sid = envelope_session_id
     loop_key = (effective_sid, target_member)
@@ -2184,6 +2233,8 @@ async def _apply_bootstrap_envelope_from_control_plane(
                 channel_id="default",
                 leader_agent_id=leader_agent_id,
                 leader_direct_addr=leader_direct_addr,
+                assembly_mode=assembly_mode,
+                assembly_project_dir=assembly_project_dir,
             )
             if kicked:
                 logger.info(

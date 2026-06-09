@@ -45,6 +45,7 @@ from jiuwenswarm.common.utils import (
     get_env_file,
     reset_free_search_runtime_flags,
 )
+from jiuwenswarm.server.runtime.a2ui.integration import finalize_assistant_response_if_a2ui
 
 
 def _compact_stats_from_payload(payload: dict[str, Any]) -> dict[str, Any]:
@@ -89,6 +90,7 @@ load_dotenv(dotenv_path=get_env_file(), override=True)
 reset_free_search_runtime_flags()
 
 logger = logging.getLogger(__name__)
+
 
 # SkillDev 请求方法集合（统一委托给 SkillDevService）
 _SKILLDEV_METHODS: frozenset[ReqMethod] = frozenset(
@@ -159,9 +161,14 @@ def _handle_skills_use_slash_command(query: str) -> Tuple[list, str]:
         return [], query
 
 
-def build_user_prompt(content: str, files: dict, channel: str, language: str, *, 
+def build_user_prompt(content: str | dict, files: dict, channel: str, language: str, *,
     trusted_dirs: list[str] | None = None, metadata: dict[str, Any] | None = None) -> str:
     """Build user prompt for the agent."""
+    from jiuwenswarm.server.runtime.a2ui.integration import build_user_prompt_if_a2ui_event
+
+    a2ui_prompt = build_user_prompt_if_a2ui_event(content, channel=channel, language=language)
+    if a2ui_prompt is not None:
+        return a2ui_prompt
 
     interaction_prefix = ""
     if metadata:
@@ -169,9 +176,12 @@ def build_user_prompt(content: str, files: dict, channel: str, language: str, *,
         if interaction_ctx:
             interaction_prefix = f"\n{interaction_ctx}\n\n"
 
-    skills_to_use, new_content = _handle_skills_use_slash_command(content)
-    if new_content:
-        content = new_content
+    if isinstance(content, str):
+        skills_to_use, new_content = _handle_skills_use_slash_command(content)
+        if new_content:
+            content = new_content
+    else:
+        skills_to_use = []
 
     if language == "zh":
         prompt = "你收到一条消息：\n"
@@ -367,8 +377,10 @@ class JiuWenClaw:
 
         config_base = get_config()
         memory_mode = get_memory_mode(config_base)
-        query = request.params.get("query", "")
-        channel = request.session_id.split('_')[0] if request.session_id else "web"
+        query = request.params.get("query")
+        if query is None or query == "":
+            query = request.params.get("content", "")
+        channel = request.channel_id or (request.session_id.split('_')[0] if request.session_id else "web")
         language = config_base.get("preferred_language", "zh")
 
         # Get trusted directories from request params (passed by TUI)
@@ -486,13 +498,23 @@ class JiuWenClaw:
 
         if source == "ask_user_interrupt":
             answers_dict = {}
+            free_text_answer = ""
             for answer in answers:
                 if isinstance(answer, dict):
-                    question_text = answer.get("question", "")
+                    question_text = str(answer.get("question", "") or "").strip()
                     selected_options = answer.get("selected_options", [])
-                    answer_value = selected_options[0] if selected_options else ""
+                    custom_input = str(answer.get("custom_input", "") or "").strip()
+                    answer_value = ""
+                    if selected_options:
+                        answer_value = str(selected_options[0] or "").strip()
+                    elif custom_input:
+                        answer_value = custom_input
                     if question_text and answer_value:
                         answers_dict[question_text] = answer_value
+                    elif answer_value:
+                        free_text_answer = answer_value
+            if not answers_dict and free_text_answer:
+                answers_dict["__free_text__"] = free_text_answer
             interactive_input.update(request_id, {"answers": answers_dict})
             logger.info(
                 "[JiuWenClaw] AskUserRail InteractiveInput.update: request_id=%s payload=%s",
@@ -500,7 +522,10 @@ class JiuWenClaw:
             )
             return interactive_input
 
-        if source and source != "permission_interrupt":
+        if source and source not in {
+            "permission_interrupt",
+            "confirm_interrupt",
+        }:
             return None
 
         answer = answers[0] if answers else {}
@@ -509,7 +534,7 @@ class JiuWenClaw:
 
         value = selected_options[0] if selected_options else ""
 
-        if value in ("approve", "本次允许", "Approve"):
+        if value in ("approve", "本次允许", "Approve", "Proceed", "批准", "开始执行"):
             confirm_payload = {"approved": True, "auto_confirm": False, "feedback": ""}
         elif value in ("always_allow", "总是允许", "Always Allow"):
             confirm_payload = {
@@ -518,8 +543,13 @@ class JiuWenClaw:
                 "persist_allow": True,
                 "feedback": "",
             }
-        elif value in ("reject", "拒绝", "Reject"):
-            confirm_payload = {"approved": False, "auto_confirm": False, "feedback": custom_input or "用户拒绝"}
+        elif value in ("reject", "拒绝", "Reject", "继续规划", "其他意见"):
+            feedback = custom_input or (
+                "用户希望继续规划" if value in ("Keep planning", "继续规划", "其他意见") else "用户拒绝"
+            )
+            confirm_payload = {"approved": False, "auto_confirm": False, "feedback": feedback}
+        elif custom_input:
+            confirm_payload = {"approved": False, "auto_confirm": False, "feedback": custom_input}
         else:
             confirm_payload = {"approved": False, "auto_confirm": False, "feedback": f"未知选项: {value}"}
 
@@ -868,6 +898,16 @@ class JiuWenClaw:
         if result.ok and result.payload.get("content"):
             content = result.payload["content"]
             content_str = content if isinstance(content, str) else str(content)
+            repair_call = getattr(adapter, "repair_model_response", None)
+            content_str = await finalize_assistant_response_if_a2ui(
+                content_str,
+                channel=request.channel_id,
+                user_query=raw_query,
+                request_id=request.request_id or "",
+                repair_call=repair_call,
+            )
+            if isinstance(content, str):
+                result.payload["content"] = content_str
             append_history_record(
                 session_id=session_id,
                 request_id=request.request_id,
@@ -1146,6 +1186,35 @@ class JiuWenClaw:
         except asyncio.CancelledError:
             logger.info("[JiuWenClaw] 流式处理被中断: request_id=%s", rid)
             raise
+
+        assistant_message = final_answer_content or "".join(final_answer_chunks)
+        repair_call = getattr(adapter, "repair_model_response", None)
+        finalized_assistant_message = await finalize_assistant_response_if_a2ui(
+            assistant_message,
+            channel=cid,
+            user_query=raw_query,
+            request_id=rid or "",
+            repair_call=repair_call,
+        )
+        if finalized_assistant_message and finalized_assistant_message != assistant_message:
+            append_history_record(
+                session_id=session_id,
+                request_id=rid,
+                channel_id=cid,
+                role="assistant",
+                event_type="chat.final",
+                content=finalized_assistant_message,
+                timestamp=time.time(),
+                mode=request.params.get("mode", "unknown"),
+            )
+            final_answer_content = finalized_assistant_message
+            final_answer_chunks = []
+            yield AgentResponseChunk(
+                request_id=rid,
+                channel_id=cid,
+                payload={"event_type": "chat.final", "content": finalized_assistant_message},
+                is_complete=False,
+            )
 
         # cloud memory: after chat hook
         if memory_mode == "cloud":

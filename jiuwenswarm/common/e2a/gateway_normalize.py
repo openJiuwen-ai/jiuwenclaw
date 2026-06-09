@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING, Any
 from jiuwenswarm.common.e2a.constants import (
     E2A_RESPONSE_KIND_ACP_OUTPUT_REQUEST,
     E2A_RESPONSE_KIND_CRON,
+    E2A_RESPONSE_KIND_PLAN_APPROVAL_REQUIRED,
     E2A_RESPONSE_KIND_E2A_CHUNK,
     E2A_RESPONSE_KIND_E2A_COMPLETE,
     E2A_RESPONSE_KIND_E2A_ERROR,
@@ -562,6 +563,20 @@ def e2a_response_to_agent_chunk(e2a: E2AResponse) -> "AgentResponseChunk":
                 "jsonrpc": dict(body),
             },
             is_complete=False,
+        )
+
+    if kind == E2A_RESPONSE_KIND_PLAN_APPROVAL_REQUIRED:
+        return AgentResponseChunk(
+            request_id=rid,
+            channel_id=ch,
+            payload={
+                "event_type": "plan.approval_required",
+                "plan_content": body.get("plan_content", ""),
+                "plan_slug": body.get("plan_slug", ""),
+                "plan_path": body.get("plan_path", ""),
+                "session_id": e2a.session_id or "",
+            },
+            is_complete=True,
         )
 
     raise ValueError(

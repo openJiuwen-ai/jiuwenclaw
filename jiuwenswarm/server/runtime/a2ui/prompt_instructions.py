@@ -1,0 +1,124 @@
+# Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
+
+"""Request-scoped A2UI prompt rail instructions."""
+
+from __future__ import annotations
+
+
+def build_a2ui_autonomy_instruction(language: str = "en") -> str:
+    template_binding_rule_en = (
+        " For repeated list/card data, use A2UI template binding correctly: "
+        "Duplicate dataModelUpdate keys are invalid. Encode arrays as one "
+        'collection key with indexed valueMap entries such as "0", "1", where '
+        "each item contains its own nested valueMap fields. Inside template "
+        "components, use item-relative paths like 'name', 'price', or "
+        "'/item/name' for Text, Image, and Button.action.context values; do not "
+        "use collection-absolute paths such as '/phones/name' inside templates."
+    )
+    image_url_rule_en = (
+        " Do not invent image URLs. If external facts or images are needed, use "
+        "the available tools briefly, then converge to the final A2UI response. "
+        "Use a user-provided HTTPS URL or a verified stable source URL; do not "
+        "use guessed upload.wikimedia.org thumbnail paths."
+    )
+    icon_font_rule_en = (
+        " The host app may not have the Material Symbols icon font available. "
+        "Avoid A2UI Icon for semantic content such as product or status icons; "
+        "use Text literalString emoji or text labels instead so ligature fallback "
+        "text does not appear."
+    )
+    autonomy_rule_en = (
+        " A2UI is optional. Use A2UI only when a generated interface improves "
+        "the user's experience over plain text. Do not force A2UI for greetings, "
+        "short explanations, simple factual answers, or unstructured prose. Good "
+        "A2UI candidates include information collection forms, actionable "
+        "confirmations, multi-result comparison, object detail views, media-rich "
+        "cards, dashboards/status/inventory/task summaries, and tool-result "
+        "presentations. For real-world recommendation, comparison, shopping, "
+        "ranking, price, travel, restaurant, or product requests, use tools first "
+        "when available, then decide whether A2UI is the best final presentation. "
+        "If the user already provided complete structured data or asks for a demo, "
+        "you may render directly without tools. Never write tool_call, invoke, or "
+        "function-call tags as plain text."
+    )
+    requested_component_rule_en = (
+        " You must match the requested component type: for an input box or "
+        "text field request, generate TextField/Form UI; generate a card list "
+        "only when the user asks for cards or a card list. Card/list UI is "
+        "not a universal fallback. For a single object detail request, build a "
+        "single object detail layout, not a multi-card demo. Do not substitute a "
+        "fixed demo for the requested component. For any user-editable "
+        "TextField, bind TextField.text to a data model path, initialize that "
+        "path with dataModelUpdate, and include the submitted value in "
+        "Button.action.context using a path reference. Do not emit an empty "
+        "Button.action.context for form submissions."
+        + template_binding_rule_en
+        + image_url_rule_en
+        + icon_font_rule_en
+    )
+
+    template_binding_rule_zh = (
+        " 使用 List 或卡片列表展示重复数据时，dataModelUpdate 的 key 不能重复。"
+        "请把数组编码为一个集合 key，并在 valueMap 中使用 \"0\"、\"1\" 这类索引项；"
+        "每个 item 包含自己的嵌套 valueMap 字段。模板组件和 Button.action.context "
+        "内使用 item-relative path，例如 name、price 或 /item/name；"
+        "不要在模板内使用 /phones/name 这类集合绝对路径。"
+    )
+    image_url_rule_zh = (
+        " 不要编造图片 URL。如果需要外部事实或图片，可以短暂使用可用工具，"
+        "随后必须收敛到最终 A2UI 响应。使用用户提供的 HTTPS URL "
+        "或已验证的稳定来源 URL；不要使用猜测出来的 upload.wikimedia.org thumbnail 路径。"
+    )
+    autonomy_rule_zh = (
+        " A2UI 是可选能力。只有当生成式 UI 比纯文本更能改善用户体验时才使用 A2UI。"
+        "不要为寒暄、两三句话解释、简单事实回答或无结构普通文本强行生成 A2UI。"
+        "适合 A2UI 的通用场景包括：信息收集表单、可操作确认、多结果比较、"
+        "单对象详情、带媒体的卡片、仪表盘/状态/库存/任务摘要，以及工具结果的交互式展示。"
+        "对于真实世界推荐、对比、选购、排行、价格、旅行、餐厅或产品请求，"
+        "如果有可用工具，应先使用工具获取依据，再判断 A2UI 是否是最佳最终展示方式。"
+        "如果用户已经提供完整结构化数据，或明确要求演示 UI，可以直接渲染而不调用工具。"
+        "绝不能把 tool_call、invoke 或函数调用标签当作普通文本输出。"
+    )
+    requested_component_rule_zh = (
+        " 必须匹配用户请求的组件类型：如果用户要求输入框或文本框，生成 TextField/Form UI；"
+        "只有用户要求卡片或卡片列表时才生成 card list。Card/list 不是万能 fallback。"
+        "单个对象详情请求应生成单对象详情布局，不要生成多卡片 demo。"
+        "不要用固定 demo 替代用户请求的组件。对可编辑 TextField，必须把 TextField.text "
+        "绑定到 data model 路径，用 dataModelUpdate 初始化该路径，并在 Button.action.context "
+        "中用 path reference 包含提交值。表单提交不能输出空的 Button.action.context。"
+        + template_binding_rule_zh
+        + image_url_rule_zh
+        + icon_font_rule_en
+        + autonomy_rule_zh
+    )
+
+    if language in {"zh", "cn"}:
+        return (
+            "A2UI 是可选能力；不要强行使用 A2UI。"
+            "如果富交互界面比纯文本更适合当前回答，可以输出一段很短的说明，"
+            "然后输出一个合法的 <a2ui-json>...</a2ui-json> block。"
+            "如果不适合 A2UI，请直接纯文本回答。不要承诺使用 A2UI 却只输出 Markdown。"
+            "如果确实需要外部事实或图片，可以短暂使用可用工具，"
+            "随后自行判断是否用 A2UI 呈现。"
+            "block 内必须是 A2UI 0.8 server-to-client message list，"
+            "并且必须先 beginRendering，再 surfaceUpdate，再按需 dataModelUpdate。"
+            + requested_component_rule_zh
+        )
+    return (
+        "A2UI is optional. Keep tools available. If a rich interactive interface "
+        "is better than plain text for this answer, output a very short intro "
+        "followed by one valid <a2ui-json>...</a2ui-json> block. If A2UI is not "
+        "appropriate, answer in plain text. Do not promise to show the result with "
+        "A2UI and then output only Markdown. If external facts or images are needed, "
+        "use the available tools briefly, then decide whether A2UI is the best "
+        "presentation. The block must contain an A2UI 0.8 "
+        "server-to-client message list, with beginRendering before "
+        "surfaceUpdate and dataModelUpdate only when needed."
+        + autonomy_rule_en
+        + requested_component_rule_en
+    )
+
+
+__all__ = [
+    "build_a2ui_autonomy_instruction",
+]

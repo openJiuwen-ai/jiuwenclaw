@@ -18,6 +18,8 @@ from openjiuwen.core.runner import Runner
 from openjiuwen.harness import DeepAgent
 
 from jiuwenswarm.agents.harness.team import get_team_manager
+from jiuwenswarm.agents.harness.team.handlers.workflow_monitor_handler import WorkflowMonitorHandler
+from jiuwenswarm.agents.harness.team.handlers.workflow_state import WorkflowRunState
 from jiuwenswarm.server.runtime.session.session_metadata import (
     build_server_push_message,
     get_session_metadata,
@@ -25,7 +27,7 @@ from jiuwenswarm.server.runtime.session.session_metadata import (
     update_session_metadata,
 )
 from jiuwenswarm.server.runtime.session.session_history import append_history_record
-from jiuwenswarm.agents.harness.team.monitor_handler import TeamMonitorHandler
+from jiuwenswarm.agents.harness.team.handlers.team_monitor_handler import TeamMonitorHandler
 from jiuwenswarm.server.utils.stream_utils import parse_stream_chunk
 from jiuwenswarm.common.schema.agent import AgentResponseChunk
 from jiuwenswarm.server.runtime.agent_adapter.evolution_helpers import (
@@ -65,6 +67,8 @@ from jiuwenswarm.server.runtime.agent_adapter.evolution_helpers import (
 logger = logging.getLogger(__name__)
 
 _pending_waiters: dict[tuple[str, str], list[tuple[str, asyncio.Queue]]] = {}
+_WORKFLOW_RUNS_STATE_KEY = "workflow_runs"
+
 _TEAM_CREATE_KINDS = {
     RunActionKind.CREATE.value,
     RunActionKind.NEW_TEAM_IN_SESSION.value,
@@ -141,56 +145,141 @@ def sync_team_identity_metadata(
     )
 
 
+def persist_workflow_runs(runs: dict[str, WorkflowRunState], session_id: str) -> None:
+    """Persist WorkflowRunState dict to session metadata (file-based store)."""
+    from jiuwenswarm.server.runtime.session.session_metadata import _read_metadata, _enqueue_write
+    runs_data = {run_id: run_state.model_dump() for run_id, run_state in runs.items()}
+    metadata = _read_metadata(session_id, cache_bust=True)
+    metadata[_WORKFLOW_RUNS_STATE_KEY] = runs_data
+    _enqueue_write(session_id, metadata)
+
+
+def restore_workflow_runs(session_id: str) -> dict[str, WorkflowRunState] | None:
+    """Restore WorkflowRunState dict from session metadata."""
+    from jiuwenswarm.server.runtime.session.session_metadata import _read_metadata
+    metadata = _read_metadata(session_id, cache_bust=True)
+    runs_data = metadata.get(_WORKFLOW_RUNS_STATE_KEY)
+    if not runs_data:
+        return None
+    return {
+        run_id: WorkflowRunState.model_validate(run_data)
+        for run_id, run_data in runs_data.items()
+    }
+
+
 def _resolve_channel_id(channel_id: str | None) -> str:
     return str(channel_id or "default").strip() or "default"
 
 
-async def ensure_monitor_for_active_runtime(
+async def ensure_monitor_handlers_for_active_runtime(
     channel_id: str | None,
     session_id: str,
     team_name: str,
     hide_dm: bool = False,
+    enable_swarmflow: bool = False,
 ) -> None:
-    """Attach TeamMonitorHandler using the public Runner team monitor accessor."""
+    """Attach TeamMonitorHandler and optionally WorkflowMonitorHandler for the active runtime.
+
+    Both handlers obtain their own TeamMonitor from Runner (independent listeners on
+    team_agent). WorkflowMonitorHandler is only created when enable_swarmflow is True.
+    """
     tm = get_team_manager(channel_id)
-    existing = tm.get_monitor(session_id)
-    if existing is not None and existing.is_running:
+
+    # --- TeamMonitorHandler ---
+    existing_monitor = tm.get_monitor(session_id)
+    if existing_monitor is None or not existing_monitor.is_running:
+        monitor = await Runner.get_agent_team_monitor(
+            team_name=team_name,
+            session_id=session_id,
+            hide_dm=hide_dm,
+        )
+        if monitor is None:
+            logger.warning(
+                "[TeamHelpers] active team monitor unavailable: channel_id=%s session_id=%s team_name=%s",
+                _resolve_channel_id(channel_id),
+                session_id,
+                team_name,
+            )
+        else:
+            monitor_handler = TeamMonitorHandler(monitor, session_id)
+            try:
+                await monitor_handler.start()
+                tm.register_monitor(session_id, monitor_handler)
+                logger.info(
+                    "[TeamHelpers] Monitor started: channel_id=%s session_id=%s team_name=%s",
+                    _resolve_channel_id(channel_id),
+                    session_id,
+                    team_name,
+                )
+                if monitor_handler.is_running:
+                    asyncio.create_task(
+                        _consume_monitor_events(channel_id, session_id, monitor_handler)
+                    )
+            except Exception as exc:
+                logger.warning("[TeamHelpers] Monitor start failed: %s", exc)
+
+    # --- WorkflowMonitorHandler (only when swarmflow is enabled) ---
+    if not enable_swarmflow:
         return
 
-    monitor = await Runner.get_agent_team_monitor(
+    existing_wf = tm.get_workflow_handler(session_id)
+    if existing_wf is not None and existing_wf.is_running:
+        return
+
+    # Build initial_runs: merge in-memory runs from a stopped handler with
+    # disk-restored runs. In-memory data is more up-to-date (may contain
+    # events not yet persisted), so it takes priority over disk data.
+    initial_runs: dict[str, WorkflowRunState] | None = None
+    if existing_wf is not None:
+        # Stopped handler still holds _runs in memory — prefer these
+        initial_runs = existing_wf.get_run_states()
+        # Merge disk-restored runs for any IDs not present in memory
+        restored_from_disk = restore_workflow_runs(session_id)
+        if restored_from_disk:
+            for run_id, run_state in restored_from_disk.items():
+                if run_id not in initial_runs:
+                    initial_runs[run_id] = run_state
+        # Clean up the stale handler reference
+        tm.pop_workflow_handler(session_id)
+    else:
+        # No in-memory handler — restore from disk only
+        initial_runs = restore_workflow_runs(session_id)
+
+    wf_monitor = await Runner.get_agent_team_monitor(
         team_name=team_name,
         session_id=session_id,
-        hide_dm=hide_dm,
     )
-    if monitor is None:
+    if wf_monitor is None:
         logger.warning(
-            "[TeamHelpers] active team monitor unavailable: channel_id=%s session_id=%s team_name=%s",
+            "[TeamHelpers] workflow monitor unavailable: channel_id=%s session_id=%s team_name=%s",
             _resolve_channel_id(channel_id),
             session_id,
             team_name,
         )
         return
 
-    monitor_handler = TeamMonitorHandler(monitor, session_id)
+    wf_handler = WorkflowMonitorHandler(
+        monitor=wf_monitor,
+        session_id=session_id,
+        channel_id=channel_id,
+        initial_runs=initial_runs,
+    )
     try:
-        await monitor_handler.start()
-        tm.register_monitor(session_id, monitor_handler)
+        await wf_handler.start()
+        tm.register_workflow_handler(session_id, wf_handler)
         logger.info(
-            "[TeamHelpers] Monitor started from public runner API: channel_id=%s session_id=%s team_name=%s",
+            "[TeamHelpers] WorkflowMonitorHandler started: channel_id=%s session_id=%s team_name=%s",
             _resolve_channel_id(channel_id),
             session_id,
             team_name,
         )
-        if monitor_handler.is_running:
+        if wf_handler.is_running:
             asyncio.create_task(
-                _consume_monitor_events(
-                    channel_id,
-                    session_id,
-                    monitor_handler,
-                )
+                _consume_workflow_events(channel_id, session_id, wf_handler),
+                name=f"workflow_events_{_resolve_channel_id(channel_id)}_{session_id}",
             )
     except Exception as exc:
-        logger.warning("[TeamHelpers] Monitor start failed from public runner API: %s", exc)
+        logger.warning("[TeamHelpers] WorkflowMonitorHandler start failed: %s", exc)
 
 
 def _broadcast_event(
@@ -728,14 +817,16 @@ async def process_team_message_stream(
         return
 
     try:
-        if deep_agent is None:
-            raise RuntimeError("DeepAgent not initialized")
         request_metadata = dict(request.metadata or {})
         if isinstance(getattr(request, "params", None), dict):
             request_metadata.setdefault("mode", request.params.get("mode"))
-        team_spec = await team_manager.get_enriched_team_spec(
+        resolved_mode = str(request_metadata.get("mode") or "").strip()
+        # Provider-based assembly: build members from the shared config source,
+        # no pre-built parent DeepAgent required.
+        team_spec = await team_manager.get_swarm_enriched_team_spec(
             session_id=session_id,
-            deep_agent=deep_agent,
+            mode=resolved_mode,
+            project_dir=request_metadata.get("project_dir"),
             request_id=rid,
             channel_id=channel_id,
             request_metadata=request_metadata,
@@ -782,7 +873,7 @@ async def process_team_message_stream(
 
     try:
         if is_first_request:
-            team_manager.ensure_team_shared_skills_initialized(team_spec)
+            team_manager.ensure_team_shared_skills_ready_for_session(session_id, team_spec)
             await team_manager.prepare_runtime_activation(session_id, team_name)
             request_queue = asyncio.Queue()
             waiter_key = (_resolve_channel_id(channel_id), session_id)
@@ -853,6 +944,7 @@ async def process_team_message_stream(
                 session_id,
                 rid,
             )
+            yield _team_processing_done_chunk(rid, channel_id, session_id)
             yield AgentResponseChunk(
                 request_id=rid,
                 channel_id=channel_id,
@@ -1005,11 +1097,12 @@ async def _consume_stream_with_query(
                         session_id=session_id,
                         channel_id=channel_id,
                     )
-                    await ensure_monitor_for_active_runtime(
+                    await ensure_monitor_handlers_for_active_runtime(
                         channel_id,
                         session_id,
                         ready_team_name,
                         hide_dm=hide_dm,
+                        enable_swarmflow=bool(getattr(team_spec, "enable_swarmflow", False)),
                     )
                     ensure_team_evolution_watcher(
                         channel_id,
@@ -1118,6 +1211,59 @@ async def _consume_monitor_events(
     except Exception as exc:
         logger.error(
             "[TeamHelpers] monitor event loop failed: channel_id=%s session_id=%s error=%s",
+            _resolve_channel_id(channel_id),
+            session_id,
+            exc,
+        )
+
+
+async def _consume_workflow_events(
+    channel_id: str | None,
+    session_id: str,
+    workflow_handler: WorkflowMonitorHandler,
+) -> None:
+    """Consume workflow events in the background and broadcast them."""
+    try:
+        logger.info(
+            "[TeamHelpers] workflow event loop started: channel_id=%s session_id=%s",
+            _resolve_channel_id(channel_id),
+            session_id,
+        )
+        async for event in workflow_handler.events():
+            # WF_DBG: 维测日志 — 广播前打印事件关键字段
+            wf = event.get("workflow", {})
+            logger.info(
+                "[WF_DBG _consume_workflow_events] broadcast: "
+                "channel_id=%s session_id=%s event_type=%s "
+                "workflow_id=%s workflow_name=%s status=%s "
+                "phases_count=%d agent_count=%d completed_agent_count=%d",
+                _resolve_channel_id(channel_id),
+                session_id,
+                event.get("event_type", ""),
+                wf.get("id", ""),
+                wf.get("name", ""),
+                wf.get("status", ""),
+                len(wf.get("phases", [])),
+                wf.get("agent_count", 0),
+                wf.get("completed_agent_count", 0),
+            )
+            _broadcast_event(channel_id, session_id, event)
+
+        logger.info(
+            "[TeamHelpers] workflow event loop ended: channel_id=%s session_id=%s",
+            _resolve_channel_id(channel_id),
+            session_id,
+        )
+    except asyncio.CancelledError:
+        logger.debug(
+            "[TeamHelpers] workflow event loop cancelled: channel_id=%s session_id=%s",
+            _resolve_channel_id(channel_id),
+            session_id,
+        )
+        raise
+    except Exception as exc:
+        logger.error(
+            "[TeamHelpers] workflow event loop failed: channel_id=%s session_id=%s error=%s",
             _resolve_channel_id(channel_id),
             session_id,
             exc,

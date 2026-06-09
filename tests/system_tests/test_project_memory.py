@@ -10,14 +10,16 @@ from __future__ import annotations
 import os
 import tempfile
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
 
+from openjiuwen.harness.prompts.prompt_attachment_manager import PromptAttachmentManager
+
 from jiuwenswarm.server.runtime.agent_adapter.interface_code import JiuwenClawCodeAdapter
 from jiuwenswarm.server.runtime.agent_adapter.interface_deep import JiuWenClawDeepAdapter
 from jiuwenswarm.agents.harness.common.rails.project_memory import (
-    SECTION_NAME,
     clear_project_memory_cache,
     discover_and_load_memory_files,
     merge_memory_content,
@@ -59,7 +61,28 @@ def _make_agent_with_builder() -> MagicMock:
     builder.remove_section = MagicMock(side_effect=_remove)
     agent = MagicMock()
     agent.system_prompt_builder = builder
+    agent.prompt_attachment_manager = PromptAttachmentManager()
     return agent
+
+
+def _make_ctx(agent: MagicMock, session_id: str = "sess1") -> SimpleNamespace:
+    return SimpleNamespace(
+        agent=agent,
+        session=SimpleNamespace(session_id=session_id),
+        inputs=SimpleNamespace(),
+        extra={},
+    )
+
+
+async def _project_memory_attachment(agent: MagicMock, session_id: str = "sess1"):
+    items = await agent.prompt_attachment_manager.collect_for_turn(session_id, "turn1")
+    project_items = [item for item in items if item.id.endswith(".project_memory")]
+    return project_items[-1] if project_items else None
+
+
+async def _project_memory_body(agent: MagicMock, session_id: str = "sess1") -> str:
+    item = await _project_memory_attachment(agent, session_id)
+    return item.content if item is not None else ""
 
 
 @pytest.fixture(autouse=True)
@@ -86,14 +109,12 @@ class TestProjectMemoryRailEndToEnd:
             rail = ProjectMemoryRail(workspace=str(root), language="en")
             agent = _make_agent_with_builder()
             rail.init(agent)
-            await rail.before_model_call(ctx=MagicMock())
+            await rail.before_model_call(ctx=_make_ctx(agent))
 
-            sections = agent.system_prompt_builder.added_sections
-            assert sections
-            section = sections[-1]
-            assert section.name == SECTION_NAME
-            assert "PROJECT-RULE-1" in section.content["en"]
-            assert "PROJECT-RULE-1" in section.content["cn"]
+            section = await _project_memory_attachment(agent)
+            assert section is not None
+            assert section.id == "session.sess1.project_memory"
+            assert "PROJECT-RULE-1" in section.content
 
     @pytest.mark.asyncio
     async def test_rail_reloads_after_file_change(self):
@@ -105,14 +126,14 @@ class TestProjectMemoryRailEndToEnd:
             rail = ProjectMemoryRail(workspace=str(root), language="en")
             agent = _make_agent_with_builder()
             rail.init(agent)
-            await rail.before_model_call(ctx=MagicMock())
-            body1 = agent.system_prompt_builder.added_sections[-1].content["en"]
+            await rail.before_model_call(ctx=_make_ctx(agent))
+            body1 = await _project_memory_body(agent)
             assert "VERSION-1" in body1
 
             _touch(root, "JIUWENSWARM.md", "VERSION-2")
             clear_project_memory_cache(str(root))
-            await rail.before_model_call(ctx=MagicMock())
-            body2 = agent.system_prompt_builder.added_sections[-1].content["en"]
+            await rail.before_model_call(ctx=_make_ctx(agent))
+            body2 = await _project_memory_body(agent)
             assert "VERSION-2" in body2
             assert "VERSION-1" not in body2
 
@@ -126,14 +147,11 @@ class TestProjectMemoryRailEndToEnd:
             rail = ProjectMemoryRail(workspace=str(root), language="en")
             agent = _make_agent_with_builder()
             rail.init(agent)
-            await rail.before_model_call(ctx=MagicMock())
-            assert agent.system_prompt_builder.added_sections
+            await rail.before_model_call(ctx=_make_ctx(agent))
+            assert await _project_memory_attachment(agent) is not None
 
             rail.uninit(agent)
-            assert [
-                s for s in agent.system_prompt_builder.added_sections
-                if s.name == SECTION_NAME
-            ] == []
+            assert rail.attachment_manager is None
 
     @pytest.mark.asyncio
     async def test_rail_no_section_when_workspace_empty(self):
@@ -144,13 +162,9 @@ class TestProjectMemoryRailEndToEnd:
             rail = ProjectMemoryRail(workspace=str(root), language="en")
             agent = _make_agent_with_builder()
             rail.init(agent)
-            await rail.before_model_call(ctx=MagicMock())
+            await rail.before_model_call(ctx=_make_ctx(agent))
 
-            project_sections = [
-                s for s in agent.system_prompt_builder.added_sections
-                if s.name == SECTION_NAME
-            ]
-            assert project_sections == []
+            assert await _project_memory_attachment(agent) is None
 
     @pytest.mark.asyncio
     async def test_rail_additional_directories_via_env(self, monkeypatch):
@@ -173,9 +187,9 @@ class TestProjectMemoryRailEndToEnd:
             )
             agent = _make_agent_with_builder()
             rail.init(agent)
-            await rail.before_model_call(ctx=MagicMock())
+            await rail.before_model_call(ctx=_make_ctx(agent))
 
-            body = agent.system_prompt_builder.added_sections[-1].content["en"]
+            body = await _project_memory_body(agent)
             assert "EXTRA-PROJECT-RULE" in body
 
 
@@ -610,8 +624,8 @@ class TestProjectMemoryRailCacheInvalidation:
             rail.init(agent)
 
             # First load
-            await rail.before_model_call(ctx=MagicMock())
-            body1 = agent.system_prompt_builder.added_sections[-1].content["en"]
+            await rail.before_model_call(ctx=_make_ctx(agent))
+            body1 = await _project_memory_body(agent)
             assert "ORIGINAL-CONTENT" in body1
 
             # Simulate write tool call — should invalidate cache
@@ -624,8 +638,8 @@ class TestProjectMemoryRailCacheInvalidation:
             _touch(root, "JIUWENSWARM.md", "UPDATED-CONTENT")
 
             # Reload after invalidation
-            await rail.before_model_call(ctx=MagicMock())
-            body2 = agent.system_prompt_builder.added_sections[-1].content["en"]
+            await rail.before_model_call(ctx=_make_ctx(agent))
+            body2 = await _project_memory_body(agent)
             assert "UPDATED-CONTENT" in body2
             assert "ORIGINAL-CONTENT" not in body2
 
@@ -641,8 +655,8 @@ class TestProjectMemoryRailCacheInvalidation:
             rail.init(agent)
 
             # First load
-            await rail.before_model_call(ctx=MagicMock())
-            body1 = agent.system_prompt_builder.added_sections[-1].content["en"]
+            await rail.before_model_call(ctx=_make_ctx(agent))
+            body1 = await _project_memory_body(agent)
             assert "STABLE-CONTENT" in body1
 
             # Simulate read tool call — should NOT invalidate
@@ -685,21 +699,18 @@ class TestProjectMemoryRailLanguagePropagation:
             rail = ProjectMemoryRail(workspace=str(root), language="cn")
             agent = _make_agent_with_builder()
             rail.init(agent)
-            await rail.before_model_call(ctx=MagicMock())
+            await rail.before_model_call(ctx=_make_ctx(agent))
 
-            section = agent.system_prompt_builder.added_sections[-1]
-            assert "项目记忆" in section.content["cn"]
-            assert "Project Memory" in section.content["en"]
+            cn_body = await _project_memory_body(agent)
+            assert "项目记忆" in cn_body
 
             # Switch to English
             rail.set_language("en")
             assert rail.get_language() == "en"
 
-            # Reload — section content keys stay bilingual (both cn+en always populated)
-            await rail.before_model_call(ctx=MagicMock())
-            section2 = agent.system_prompt_builder.added_sections[-1]
-            assert "项目记忆" in section2.content["cn"]
-            assert "Project Memory" in section2.content["en"]
+            await rail.before_model_call(ctx=_make_ctx(agent))
+            en_body = await _project_memory_body(agent)
+            assert "Project Memory" in en_body
 
     @pytest.mark.asyncio
     async def test_get_language_returns_initial_language(self):

@@ -21,7 +21,8 @@ from jiuwenswarm.agents.harness.team.team_manager import (
     reset_team_manager,
     stop_team_session_runtime_across_managers,
 )
-from jiuwenswarm.agents.harness.team.monitor_handler import TeamMonitorHandler
+from jiuwenswarm.agents.harness.team.handlers.team_monitor_handler import TeamMonitorHandler
+from jiuwenswarm.agents.harness.team.handlers.workflow_monitor_handler import WorkflowMonitorHandler
 
 __all__ = [
     "load_team_spec_dict",
@@ -34,4 +35,5 @@ __all__ = [
     "reset_team_manager",
     "stop_team_session_runtime_across_managers",
     "TeamMonitorHandler",
+    "WorkflowMonitorHandler",
 ]

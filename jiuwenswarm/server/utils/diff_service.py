@@ -392,6 +392,269 @@ class DiffService:
         return hunks
 
     @staticmethod
+    def _run_git_command(project_dir: str, args: list[str]) -> str | None:
+        """在 project_dir 中运行 git 命令，返回 stdout 或 None."""
+        import subprocess
+
+        try:
+            result = subprocess.run(
+                ["git"] + args,
+                cwd=project_dir,
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            if result.returncode != 0:
+                return None
+            return result.stdout
+        except Exception:
+            return None
+
+    @staticmethod
+    def _is_git_repo(project_dir: str) -> bool:
+        """检查 project_dir 是否是一个 git 仓库."""
+        import subprocess
+
+        try:
+            result = subprocess.run(
+                ["git", "rev-parse", "--git-dir"],
+                cwd=project_dir,
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+            return result.returncode == 0
+        except Exception:
+            return False
+
+    @staticmethod
+    def _parse_git_numstat(output: str) -> dict[str, dict[str, int | bool]]:
+        """解析 git diff --numstat 输出为 per-file 统计.
+
+        输入格式:
+            3\t2\tpath/to/file.py
+            -\t-\tbinary_file.png
+
+        返回:
+            { "/abs/path/file.py": {"added": 3, "removed": 2, "isBinary": false}, ... }
+        """
+        result: dict[str, dict[str, int | bool]] = {}
+        for line in output.strip().splitlines():
+            if not line.strip():
+                continue
+            parts = line.split("\t")
+            if len(parts) < 3:
+                continue
+            added_str, removed_str, file_path = parts[0], parts[1], parts[2]
+            is_binary = added_str == "-" and removed_str == "-"
+            result[file_path] = {
+                "added": 0 if is_binary else int(added_str),
+                "removed": 0 if is_binary else int(removed_str),
+                "isBinary": is_binary,
+            }
+        return result
+
+    @staticmethod
+    def _parse_git_diff_hunks(output: str) -> dict[str, list[dict[str, Any]]]:
+        """解析 git diff 输出为按文件分组的 hunk 列表.
+
+        每个 hunk 格式与 _compute_hunks() 一致:
+            {
+                "oldStart": int, "oldLines": int,
+                "newStart": int, "newLines": int,
+                "lines": ["-removed line", "+added line", " context line"],
+            }
+        """
+        import re
+
+        files: dict[str, list[dict[str, Any]]] = {}
+        current_file: str | None = None
+        current_hunk: dict[str, Any] | None = None
+
+        # 匹配 diff 头部: diff --git a/path b/path, --- a/path, +++ b/path
+        # 对于删除文件，+++ b/ 行是 +++ /dev/null 不会匹配，需要回退到 --- a/ 行
+        file_header_new_re = re.compile(r"^\+\+\+ b/(.+)$")
+        file_header_old_re = re.compile(r"^--- a/(.+)$")
+        # 匹配 hunk 头部: @@ -oldStart,oldLines +newStart,newLines @@
+        hunk_header_re = re.compile(
+            r"^@@\s+-(\d+)(?:,(\d+))?\s+\+(\d+)(?:,(\d+))?\s+@@"
+        )
+
+        for line in output.splitlines():
+            # 检测文件头（优先 +++ b/ 行）
+            file_match = file_header_new_re.match(line)
+            if file_match:
+                current_file = file_match.group(1)
+                if current_file not in files:
+                    files[current_file] = []
+                current_hunk = None
+                continue
+
+            # 回退：对于删除文件，+++ b/ 不匹配（是 +++ /dev/null），
+            # 从 --- a/ 行提取文件路径
+            file_match = file_header_old_re.match(line)
+            if file_match:
+                path = file_match.group(1)
+                if path != "/dev/null":
+                    current_file = path
+                    if current_file not in files:
+                        files[current_file] = []
+                    current_hunk = None
+                continue
+
+            if current_file is None:
+                continue
+
+            # 检测 hunk 头
+            hunk_match = hunk_header_re.match(line)
+            if hunk_match:
+                old_start = int(hunk_match.group(1))
+                old_lines = int(hunk_match.group(2) or "1")
+                new_start = int(hunk_match.group(3))
+                new_lines = int(hunk_match.group(4) or "1")
+
+                current_hunk = {
+                    "oldStart": old_start,
+                    "oldLines": old_lines,
+                    "newStart": new_start,
+                    "newLines": new_lines,
+                    "lines": [],
+                }
+                files[current_file].append(current_hunk)
+                continue
+
+            if current_hunk is None:
+                continue
+
+            # 收集 hunk 行（+, -, 空格前缀的上下文行）
+            if line.startswith("+") or line.startswith("-") or line.startswith(" "):
+                current_hunk["lines"].append(line)
+
+        return files
+
+    def _get_untracked_files(
+        self, project_dir: str
+    ) -> dict[str, dict[str, Any]]:
+        """获取未跟踪文件列表并生成合成 diff（全部为新增行）."""
+        output = self._run_git_command(
+            project_dir,
+            ["ls-files", "--others", "--exclude-standard"],
+        )
+        if not output or not output.strip():
+            return {}
+
+        files: dict[str, dict[str, Any]] = {}
+        for rel_path in output.strip().splitlines():
+            rel_path = rel_path.strip()
+            if not rel_path:
+                continue
+            abs_path = str(Path(project_dir) / rel_path)
+            try:
+                content = Path(abs_path).read_text(encoding="utf-8", errors="replace")
+            except (OSError, ValueError):
+                # 二进制文件或无法读取，只记录文件名不含 hunk
+                content = None
+
+            if content is not None:
+                lines = content.splitlines()
+                hunks = [{
+                    "oldStart": 0,
+                    "oldLines": 0,
+                    "newStart": 1,
+                    "newLines": len(lines),
+                    "lines": [f"+{line}" for line in lines],
+                }]
+                lines_added = len(lines)
+            else:
+                hunks = []
+                lines_added = 0
+
+            files[abs_path] = {
+                "filePath": abs_path,
+                "hunks": hunks,
+                "isNewFile": True,
+                "linesAdded": lines_added,
+                "linesRemoved": 0,
+                "lastEditTime": None,
+            }
+
+        return files
+
+    def get_git_diff(self, project_dir: str | None) -> dict[str, Any] | None:
+        """获取工作区相对于 HEAD 的 git diff.
+
+        包含两类改动：
+        1. 已跟踪文件的修改（git diff HEAD）
+        2. 未跟踪的新文件（git ls-files --others --exclude-standard）
+
+        Args:
+            project_dir: 项目目录路径.
+
+        Returns:
+            {
+                "stats": {"filesChanged": int, "linesAdded": int, "linesRemoved": int},
+                "files": { file_path: { "filePath": str, "hunks": [...],
+                    "isNewFile": bool, "linesAdded": int, "linesRemoved": int } }
+            }
+            如果不是 git 仓库或没有任何改动（含未跟踪文件），返回 None.
+        """
+        if not project_dir:
+            return None
+        if not self._is_git_repo(project_dir):
+            return None
+
+        files: dict[str, dict[str, Any]] = {}
+        total_added = 0
+        total_removed = 0
+
+        # 1. 已跟踪文件的改动: git diff HEAD
+        shortstat = self._run_git_command(project_dir, ["diff", "HEAD", "--shortstat"])
+        has_tracked_changes = shortstat and shortstat.strip() != ""
+
+        if has_tracked_changes:
+            numstat_output = self._run_git_command(project_dir, ["diff", "HEAD", "--numstat"])
+            diff_output = self._run_git_command(project_dir, ["diff", "HEAD"])
+            if numstat_output and diff_output:
+                per_file_stats = self._parse_git_numstat(numstat_output)
+                all_hunks = self._parse_git_diff_hunks(diff_output)
+
+                for rel_path, stats in per_file_stats.items():
+                    abs_path = str(Path(project_dir) / rel_path)
+                    hunks = all_hunks.get(rel_path, [])
+                    lines_added = stats["added"]
+                    lines_removed = stats["removed"]
+                    total_added += lines_added
+                    total_removed += lines_removed
+
+                    files[abs_path] = {
+                        "filePath": abs_path,
+                        "hunks": hunks,
+                        "isNewFile": False,
+                        "linesAdded": lines_added,
+                        "linesRemoved": lines_removed,
+                        "lastEditTime": None,
+                    }
+
+        # 2. 未跟踪的新文件: git ls-files --others --exclude-standard
+        untracked = self._get_untracked_files(project_dir)
+        for abs_path, file_info in untracked.items():
+            if abs_path not in files:  # 避免重复（理论上不会）
+                files[abs_path] = file_info
+                total_added += file_info["linesAdded"]
+
+        if not files:
+            return None
+
+        return {
+            "stats": {
+                "filesChanged": len(files),
+                "linesAdded": total_added,
+                "linesRemoved": total_removed,
+            },
+            "files": files,
+        }
+
+    @staticmethod
     def _finalize_turn(turn: dict[str, Any]) -> None:
         """完成 turn 的统计信息计算."""
         turn["stats"]["filesChanged"] = len(turn["files"])
@@ -462,6 +725,78 @@ class DiffService:
                     break  # 只需要第一条匹配的 entry
 
         return files_to_restore
+
+
+    def truncate_file_ops_by_timestamp(self, session_id: str, cutoff_ts: float) -> None:
+        """截断 session-specific file_ops 日志，移除 timestamp >= cutoff_ts 的条目.
+
+        在 rewind 操作后调用，确保 file_ops 日志与截断后的 history.json 一致。
+        仅处理 session-specific 文件（文件名包含 session_id），不动全局 file_ops。
+
+        Args:
+            session_id: 会话 ID
+            cutoff_ts: 截断阈值（Unix timestamp），>= 此时间的条目将被移除
+        """
+
+        # 收集所有 session-specific file_ops 文件
+        file_ops_paths: list[Path] = []
+        for base_dir in (get_agent_workspace_dir(), get_user_workspace_dir()):
+            hist_dir = base_dir / ".agent_history"
+            if not hist_dir.is_dir():
+                continue
+            for f in hist_dir.iterdir():
+                if self._is_valid_file_ops_file(f.name, session_id, require_session=True):
+                    file_ops_paths.append(f)
+
+        # 也从项目目录扫描
+        project_dir = self._get_project_dir_from_metadata(session_id)
+        if project_dir:
+            project_hist_dir = Path(project_dir) / ".agent_history"
+            if project_hist_dir.is_dir():
+                for f in project_hist_dir.iterdir():
+                    if self._is_valid_file_ops_file(f.name, session_id, require_session=True):
+                        if f not in file_ops_paths:
+                            file_ops_paths.append(f)
+
+        for file_ops_path in file_ops_paths:
+            try:
+                data = json.loads(file_ops_path.read_text(encoding="utf-8"))
+                if not isinstance(data, dict):
+                    continue
+
+                truncated = False
+                new_data: dict[str, Any] = {}
+                for file_path, entries in data.items():
+                    if not isinstance(entries, list):
+                        continue
+                    filtered = []
+                    for e in entries:
+                        try:
+                            entry_ts = self._iso_to_timestamp(e.get("timestamp", ""))
+                        except (ValueError, TypeError):
+                            filtered.append(e)  # 无法解析的条目保留
+                            continue
+                        if entry_ts < cutoff_ts:
+                            filtered.append(e)
+                    if len(filtered) != len(entries):
+                        truncated = True
+                    if filtered:
+                        new_data[file_path] = filtered
+
+                if truncated:
+                    file_ops_path.write_text(
+                        json.dumps(new_data, ensure_ascii=False, indent=2),
+                        encoding="utf-8",
+                    )
+                    logger.info(
+                        "truncate_file_ops: cleaned %s (cutoff_ts=%s)",
+                        file_ops_path.name, cutoff_ts,
+                    )
+            except Exception as exc:
+                logger.warning(
+                    "truncate_file_ops: failed to process %s: %s",
+                    file_ops_path, exc,
+                )
 
 
 _diff_service: DiffService | None = None

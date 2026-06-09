@@ -19,6 +19,20 @@ def _set_handler_formatters(logger: logging.Logger, formatter: logging.Formatter
         handler.setFormatter(formatter)
 
 
+def patch_uvicorn_logging() -> None:
+    """Patch uvicorn's default LOGGING_CONFIG and rename ``uvicorn.error`` logger.
+
+    Uvicorn uses the logger name ``uvicorn.error`` for normal server lifecycle
+    messages (not errors). Rename it to ``uvicorn`` for clearer log output, and
+    apply jiuwenbox's timestamped format to the default formatter.
+    """
+    from uvicorn.config import LOGGING_CONFIG
+
+    LOGGING_CONFIG["formatters"]["default"]["fmt"] = LOG_FORMAT
+    LOGGING_CONFIG["formatters"]["default"]["datefmt"] = LOG_DATE_FORMAT
+    logging.getLogger("uvicorn.error").name = "uvicorn"
+
+
 def configure_logging(level: int = logging.INFO) -> None:
     """Configure process logging with jiuwenbox's default timestamped format."""
     logging.basicConfig(level=level, format=LOG_FORMAT, datefmt=LOG_DATE_FORMAT)
@@ -26,3 +40,4 @@ def configure_logging(level: int = logging.INFO) -> None:
     _set_handler_formatters(logging.getLogger(), formatter)
     for logger_name in UVICORN_LOGGER_NAMES:
         _set_handler_formatters(logging.getLogger(logger_name), formatter)
+    patch_uvicorn_logging()

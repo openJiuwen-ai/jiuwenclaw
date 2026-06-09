@@ -220,10 +220,6 @@ def test_refresh_team_shared_skill_links_across_managers_uses_registered_session
         "jiuwenswarm.agents.harness.team.team_manager.get_agent_skills_dir",
         lambda: global_skills_dir,
     )
-    monkeypatch.setattr(
-        "jiuwenswarm.agents.harness.team.team_manager.get_agent_workspace_dir",
-        lambda: tmp_path / "global-workspace",
-    )
 
     manager = get_team_manager("web")
     manager.register_team_shared_skill_link_target("sess-1", team_shared_skills)
@@ -316,109 +312,6 @@ async def test_register_team_rail_context_keeps_leader_context() -> None:
     assert manager.get_team_rail_context("sess-1") is leader_context
 
 
-def test_build_agent_customizer_shares_one_trajectory_registry_per_runtime(
-    tmp_path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    captured_registries = []
-
-    class _FakeAbilityManager:
-        @staticmethod
-        def list():
-            return []
-
-    class _FakeAgentWithWorkspace:
-        def __init__(self, root_path):
-            self.card = type("Card", (), {"name": "agent"})()
-            self.ability_manager = _FakeAbilityManager()
-            self.deep_config = type(
-                "DeepConfig",
-                (),
-                {
-                    "workspace": type(
-                        "Workspace",
-                        (),
-                        {"root_path": str(root_path)},
-                    )()
-                },
-            )()
-            self.added_rails = []
-
-        def add_rail(self, rail):
-            self.added_rails.append(rail)
-
-    global_skills_dir = tmp_path / "global-skills"
-    global_skills_dir.mkdir()
-    (global_skills_dir / "skills_state.json").write_text("{}", encoding="utf-8")
-
-    spec = type(
-        "Spec",
-        (),
-        {
-            "team_name": "demo-team",
-            "workspace": type(
-                "Workspace",
-                (),
-                {"root_path": str(tmp_path / "team-workspace")},
-            )(),
-            "agents": {},
-        },
-    )()
-    deep_agent = _FakeAgentWithWorkspace(tmp_path / "parent-workspace")
-
-    monkeypatch.setattr(
-        "jiuwenswarm.agents.harness.team.team_manager.get_agent_skills_dir",
-        lambda: global_skills_dir,
-    )
-    monkeypatch.setattr(
-        "jiuwenswarm.agents.harness.team.team_manager.get_agent_workspace_dir",
-        lambda: tmp_path / "global-workspace",
-    )
-    monkeypatch.setattr(
-        "jiuwenswarm.agents.harness.team.team_manager.SkillManager",
-        lambda workspace_dir: object(),
-    )
-    monkeypatch.setattr(
-        "jiuwenswarm.agents.harness.team.team_manager.MemberSkillToolkitRail",
-        lambda workspace_dir, **kwargs: object(),
-    )
-
-    def _fake_build_member_rails(**kwargs):
-        captured_registries.append(kwargs["team_workspace"].trajectory_registry)
-        return []
-
-    monkeypatch.setattr(
-        "jiuwenswarm.agents.harness.team.team_manager.build_member_rails",
-        _fake_build_member_rails,
-    )
-    monkeypatch.setattr(
-        "jiuwenswarm.agents.harness.team.team_manager.filter_inheritable_ability_cards",
-        lambda deep_agent: [],
-    )
-    monkeypatch.setattr(
-        "jiuwenswarm.agents.harness.team.team_manager.get_default_model_name",
-        lambda: "model",
-    )
-    monkeypatch.setattr(
-        TeamManager,
-        "register_member_runtime_tools",
-        staticmethod(lambda *args, **kwargs: None),
-    )
-
-    customizer = TeamManager.build_agent_customizer(
-        spec,
-        deep_agent,
-        "sess-1",
-        channel_id="web",
-    )
-    customizer(_FakeAgentWithWorkspace(tmp_path / "leader-workspace"), role="leader")
-    customizer(_FakeAgentWithWorkspace(tmp_path / "member-workspace"), role="teammate")
-
-    assert len(captured_registries) == 2
-    assert captured_registries[0] is not None
-    assert captured_registries[0] is captured_registries[1]
-
-
 @pytest.mark.asyncio
 async def test_update_evolution_config_skips_rail_rebuild_when_skill_create_disabled(
     monkeypatch: pytest.MonkeyPatch,
@@ -507,7 +400,6 @@ async def test_team_manager_keeps_single_session_per_channel(monkeypatch: pytest
     def fake_load_team_spec(session_id: str):
         class _Spec:
             team_name = f"team-{session_id}"
-            agent_customizer = None
             workspace = _FakeWorkspace()
 
             @staticmethod
@@ -523,6 +415,12 @@ async def test_team_manager_keeps_single_session_per_channel(monkeypatch: pytest
         TeamManager,
         "_initialize_team_shared_skill_links",
         staticmethod(lambda spec: None),
+    )
+    # Provider assembly is covered by the swarm suite; stub it so this
+    # session-management test runs on the minimal fake spec.
+    monkeypatch.setattr(
+        "jiuwenswarm.agents.swarm.enrich_team_spec_for_swarm",
+        lambda spec, **kwargs: None,
     )
 
     web_manager = get_team_manager("web")
@@ -548,7 +446,6 @@ async def test_create_team_does_not_run_global_runtime_cleanup(monkeypatch: pyte
     def fake_load_team_spec(_session_id: str):
         class _Spec:
             team_name = "demo-team"
-            agent_customizer = None
             workspace = _FakeWorkspace()
 
             @staticmethod
@@ -563,6 +460,12 @@ async def test_create_team_does_not_run_global_runtime_cleanup(monkeypatch: pyte
         TeamManager,
         "_initialize_team_shared_skill_links",
         staticmethod(lambda spec: None),
+    )
+    # Provider assembly is covered by the swarm suite; stub it so this
+    # session-management test runs on the minimal fake spec.
+    monkeypatch.setattr(
+        "jiuwenswarm.agents.swarm.enrich_team_spec_for_swarm",
+        lambda spec, **kwargs: None,
     )
     manager = TeamManager()
 
@@ -582,7 +485,6 @@ async def test_create_team_appends_session_id_to_team_name(monkeypatch: pytest.M
     class _Spec:
         def __init__(self) -> None:
             self.team_name = "demo_team"
-            self.agent_customizer = None
             self.workspace = _FakeWorkspace()
 
         def build(self):
@@ -594,6 +496,12 @@ async def test_create_team_appends_session_id_to_team_name(monkeypatch: pytest.M
         TeamManager,
         "_initialize_team_shared_skill_links",
         staticmethod(lambda spec: None),
+    )
+    # Provider assembly is covered by the swarm suite; stub it so this
+    # session-management test runs on the minimal fake spec.
+    monkeypatch.setattr(
+        "jiuwenswarm.agents.swarm.enrich_team_spec_for_swarm",
+        lambda spec, **kwargs: None,
     )
     manager = TeamManager()
 
@@ -613,7 +521,6 @@ async def test_create_team_appends_session_id_to_web_team_name(monkeypatch: pyte
     class _Spec:
         def __init__(self) -> None:
             self.team_name = "demo_team"
-            self.agent_customizer = None
             self.workspace = _FakeWorkspace()
 
         def build(self):
@@ -625,6 +532,12 @@ async def test_create_team_appends_session_id_to_web_team_name(monkeypatch: pyte
         TeamManager,
         "_initialize_team_shared_skill_links",
         staticmethod(lambda spec: None),
+    )
+    # Provider assembly is covered by the swarm suite; stub it so this
+    # session-management test runs on the minimal fake spec.
+    monkeypatch.setattr(
+        "jiuwenswarm.agents.swarm.enrich_team_spec_for_swarm",
+        lambda spec, **kwargs: None,
     )
     manager = TeamManager()
 
@@ -1000,3 +913,24 @@ def test_resolve_session_team_name_returns_none_when_metadata_missing(
     team_name = manager.resolve_session_team_name_for_test("sess-missing")
 
     assert team_name is None
+
+
+def test_register_workflow_handler() -> None:
+    tm = TeamManager()
+    fake_handler = type("FakeWorkflowHandler", (), {"session_id": "sess_1"})()
+    tm.register_workflow_handler("sess_1", fake_handler)
+    assert tm.get_workflow_handler("sess_1") is fake_handler
+
+
+def test_pop_workflow_handler() -> None:
+    tm = TeamManager()
+    fake_handler = type("FakeWorkflowHandler", (), {"session_id": "sess_1"})()
+    tm.register_workflow_handler("sess_1", fake_handler)
+    popped = tm.pop_workflow_handler("sess_1")
+    assert popped is fake_handler
+    assert tm.get_workflow_handler("sess_1") is None
+
+
+def test_get_workflow_handler_returns_none_for_unknown() -> None:
+    tm = TeamManager()
+    assert tm.get_workflow_handler("unknown_sess") is None

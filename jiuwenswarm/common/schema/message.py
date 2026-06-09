@@ -27,6 +27,7 @@ class ReqMethod(Enum):
     COMMAND_RESUME = "command.resume"
     COMMAND_SANDBOX = "command.sandbox"
     COMMAND_SESSION = "command.session"
+    COMMAND_WORKFLOWS = "command.workflows"
     COMMAND_STATUS = "command.status"
 
     CONFIG_GET = "config.get"
@@ -201,10 +202,12 @@ class EventType(Enum):
     CHAT_EVOLUTION_STATUS = "chat.evolution_status"
     CHAT_SUBTASK_UPDATE = "chat.subtask_update"
     CHAT_ASK_USER_QUESTION = "chat.ask_user_question"
+    PLAN_APPROVAL_REQUIRED = "plan.approval_required"
     CHAT_SESSION_RESULT = "chat.session_result"
     TEAM_MEMBER = "team.member"
     TEAM_TASK = "team.task"
     TEAM_MESSAGE = "team.message"
+    WORKFLOW_UPDATED = "workflow.updated"
     HEARTBEAT_RELAY = "heartbeat.relay"
     HISTORY_GET = "history.message"
 

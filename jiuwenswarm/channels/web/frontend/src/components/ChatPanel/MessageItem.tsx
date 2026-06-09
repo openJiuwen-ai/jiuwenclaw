@@ -22,12 +22,14 @@ import {
 import { StreamingContent } from './StreamingContent';
 import { ToolCallDisplay } from './ToolCallDisplay';
 import { MediaRenderer } from './MediaRenderer';
+import { A2UIMessageContent } from '../../features/a2ui/A2UIMessageContent';
+import { a2uiContentToText } from '../../features/a2ui/a2uiContent';
 import { formatTimestamp, onTtsStop, sanitizeTtsText } from '../../utils';
 import { useSpeechSynthesis } from '../../hooks';
 import clsx from 'clsx';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
-import { parseTeamEventMessage } from './teamEventUtils';
+import { isTeamP2PMessageToUser, parseTeamEventMessage } from './teamEventUtils';
 import { TeamMemberAvatar } from '../TeamMemberAvatar';
 
 export function MarkdownMessageBody({
@@ -265,7 +267,8 @@ export function MessageItem({
     if (isSpeaking) {
       stop();
     } else if (content) {
-      const cleanContent = sanitizeTtsText(content);
+      const readableContent = a2uiContentToText(content) || content;
+      const cleanContent = sanitizeTtsText(readableContent);
       if (cleanContent) {
         speak(cleanContent);
       }
@@ -283,11 +286,12 @@ export function MessageItem({
 
   const handleCopy = useCallback(async () => {
     if (!content) return;
+    const copyContent = a2uiContentToText(content) || content;
     try {
-      await navigator.clipboard.writeText(content);
+      await navigator.clipboard.writeText(copyContent);
     } catch {
       const textarea = document.createElement('textarea');
-      textarea.value = content;
+      textarea.value = copyContent;
       textarea.style.position = 'fixed';
       textarea.style.opacity = '0';
       document.body.appendChild(textarea);
@@ -397,8 +401,8 @@ export function MessageItem({
 	     if (content && content.startsWith('team.event:')) {
 	       const event = parseTeamEventMessage(message);
 	       if (event) {
-	           // team_leader 发给用户的消息（不是 p2p 也不是 broadcast）
-	           if (event.isLeaderToUser) {
+	           // 面向用户的团队消息直接展示在主会话
+	           if (event.isLeaderToUser || isTeamP2PMessageToUser(event)) {
 	             return (
 	               <TeamLeaderPlainTextMessage
 	                 member={event.fromMember}
@@ -511,7 +515,16 @@ export function MessageItem({
             data-testid={!isUser ? 'thinking-panel' : undefined}
           >
             {isStreaming ? (
-              <StreamingContent content={content} isStreaming={true} />
+              isUser ? (
+                <StreamingContent content={content} isStreaming={true} />
+              ) : (
+                <A2UIMessageContent
+                  content={content}
+                  messageId={id}
+                  isStreaming={true}
+                  testId="thinking-body"
+                />
+              )
             ) : (
               <>
                 {isUser ? (
@@ -519,8 +532,9 @@ export function MessageItem({
                     <span className="whitespace-pre-wrap">{content}</span>
                   </div>
                 ) : (
-                  <MarkdownMessageBody
+                  <A2UIMessageContent
                     content={content}
+                    messageId={id}
                     testId="thinking-body"
                   />
                 )}

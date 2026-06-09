@@ -140,14 +140,19 @@ Memory is plain Markdown; the agent uses file tools:
 - **Use**: Day log, running context.
 - **Updates**: Append via `write` / `edit`; summarization may run when conversations are long.
 
-## When writes happen
+## Memory Write Triggers
 
-| Kind | Target | How | Example |
-|------|--------|-----|---------|
-| Decisions, preferences, facts | `memory/MEMORY.md` | write / edit | “Project uses Python 3.12” |
-| Profile | `memory/USER.md` | write / edit | User name, job, interests |
-| Daily notes | `memory/YYYY-MM-DD.md` | write / edit | “Shipped login fix today” |
-| “Remember this” | `memory/YYYY-MM-DD.md` | write | User asks to remember a fact |
+During interactions with users, JiuwenSwarm automatically triggers memory writes when needed, persisting key information to memory files for long-term storage.
+
+| Information Type | Target File | Operation | Example |
+|------------------|-------------|-----------|---------|
+| Decisions, preferences, persistent facts | `memory/MEMORY.md` | write / edit tools | "Project uses Python 3.12", "Prefers pytest framework" |
+| User personal information | `memory/USER.md` | write / edit tools | User name, occupation, hobbies |
+| Daily notes, runtime context | `memory/YYYY-MM-DD.md` | write / edit tools | "Fixed login bug today", "Deployed v2.1" |
+| User says "remember this" | `memory/YYYY-MM-DD.md` | write tool | "Remember I stored project files on D drive" |
+
+![Memory Write Triggers](../assets/images/记忆.png)
+![Memory Write](../assets/images/记忆写入.png)
 
 ## Dreaming: Sleep-Time Memory Consolidation
 

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import inspect
 import logging
 import os
@@ -21,10 +22,14 @@ from openjiuwen.core.foundation.llm.schema.config import (
 from openjiuwen.auto_harness.schema import load_auto_harness_config
 
 from jiuwenswarm.common.config import (
+    CONFIG_YAML_PATH,
+    dump_yaml_round_trip,
     get_config,
     get_config_raw,
     get_default_models,
+    load_yaml_round_trip,
     resolve_env_vars,
+    update_auto_recap_enabled_in_config,
     update_context_engine_enabled_in_config,
     update_memory_forbidden_enabled_in_config,
     update_permissions_enabled_in_config,
@@ -35,6 +40,7 @@ from jiuwenswarm.common.config import (
     ensure_defaults_list_in_config,
     update_preferred_language_in_config,
 )
+from jiuwenswarm.common.reasoning_injector import build_reasoning_model_request_kwargs
 from jiuwenswarm.gateway.routing.route_binding import GatewayRouteBinding
 from jiuwenswarm.common.version import __version__
 from jiuwenswarm.common.utils import get_user_workspace_dir
@@ -169,6 +175,7 @@ CLI_FORWARD_REQ_METHODS = frozenset(
         "command.resume",
         "command.sandbox",
         "command.session",
+        "command.workflows",
         "command.status",
         "chat.send",
         "chat.interrupt",
@@ -256,6 +263,7 @@ CLI_FORWARD_NO_LOCAL_HANDLER_METHODS = frozenset(
         "command.resume",
         "command.sandbox",
         "command.session",
+        "command.workflows",
         "command.status",
         "browser.start",
         "skills.marketplace.list",
@@ -393,6 +401,7 @@ _CLI_CONFIG_SET_ENV_MAP = {
 }
 
 _CLI_CONFIG_YAML_SETTERS: dict[str, Any] = {
+    "auto_recap_enabled": update_auto_recap_enabled_in_config,
     "context_engine_enabled": update_context_engine_enabled_in_config,
     "permissions_enabled": update_permissions_enabled_in_config,
     "memory_forbidden_enabled": update_memory_forbidden_enabled_in_config,
@@ -500,6 +509,8 @@ def _build_config_schema() -> list[dict]:
          "type": "toggle", "source": "yaml", "default": "false"},
         {"key": "preferred_language", "label": "显示语言", "group": "Features", "type": "select",
          "options": ["zh", "en"], "source": "yaml", "default": "zh"},
+        {"key": "auto_recap_enabled", "label": "自动回顾", "group": "Features",
+         "type": "toggle", "source": "yaml", "default": "true"},
         {"key": "evolution_auto_scan", "label": "自动扫描技能", "group": "Features",
          "type": "toggle", "source": "env", "default": "false"},
         # Auto-Harness (定时任务配置) - 合并为三项
@@ -638,6 +649,10 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
                 "true" if mem_cfg.get("enabled", False) else "false"
             )
             payload["preferred_language"] = raw.get("preferred_language") or "zh"
+            auto_recap_cfg = raw.get("auto_recap") or {}
+            payload["auto_recap_enabled"] = (
+                "true" if auto_recap_cfg.get("enabled", True) else "false"
+            )
 
             # Resolve model-related fields from config.yaml.
             # When models.defaults list is in use, it is the canonical source
@@ -694,6 +709,7 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
                 except Exception as e:
                     logger.warning("[config.get] Failed to resolve %s model config: %s", _section_name, e)
         except Exception:
+            payload.setdefault("auto_recap_enabled", "true")
             payload.setdefault("context_engine_enabled", "false")
             payload.setdefault("permissions_enabled", "false")
             payload.setdefault("memory_forbidden_enabled", "false")
@@ -795,9 +811,145 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
         # env 变量直接写 os.environ 立即生效；YAML 改动需要 agent 重启/热重载才生效
         applied_without_restart = not yaml_updated
 
+        # ── 同步 env-only 模型/多模态/嵌入配置到 config.yaml ──
+        # config.set 对 source:"env" 的配置项只更新 os.environ 和 .env，
+        # 不更新 config.yaml 本体。但 command.status / command.model 等读取配置时
+        # 优先从 config.yaml 对应 section 的 model_client_config 获取值。
+        # 若值是硬编码（非 ${MODEL_NAME} 语法），env 变量更新无法传播。
+        # 因此需将修改后的值同步写入 config.yaml 的对应 section。
+        #
+        # 映射关系：param_key → (yaml_path, mcc_key)
+        #   models.defaults[0].model_client_config → 主模型 (model/model_provider/api_base/api_key)
+        #   models.vision.model_client_config → 视觉 (vision_*)
+        #   models.video.model_client_config → 视频 (video_*)
+        #   models.audio.model_client_config → 音频 (audio_*)
+        #   embed → 嵌入 (embed_*)
+
+        _mcc_param_key_map = {
+            "model_name": "model",
+            "client_provider": "model_provider",
+            "api_base": "api_base",
+            "api_key": "api_key",
+        }
+        _multimodal_mcc_prefix_map = {
+            "vision": "vision_",
+            "video": "video_",
+            "audio": "audio_",
+        }
+        _embed_param_key_map = {
+            "embed_api_key": "embed_api_key",
+            "embed_api_base": "embed_api_base",
+            "embed_model": "embed_model",
+        }
+
+        _yaml_sections_updated: list[str] = []
+
+        # ── 1) 主模型: models.defaults[0].model_client_config ──
+        _changed_main_params = {
+            pk: params[pk] for mk, pk in _mcc_param_key_map.items()
+            if pk in params
+        }
+        if _changed_main_params:
+            try:
+                _raw = load_yaml_round_trip(CONFIG_YAML_PATH)
+                _defs = (_raw.get("models") or {}).get("defaults")
+                if not (isinstance(_defs, list) and _defs):
+                    _defs = ensure_defaults_list_in_config()
+                    _raw = load_yaml_round_trip(CONFIG_YAML_PATH)  # reload after ensure
+                    _defs = (_raw.get("models") or {}).get("defaults")
+                if isinstance(_defs, list) and _defs:
+                    _first = _defs[0]
+                    if isinstance(_first, dict):
+                        _mcc = _first.get("model_client_config")
+                        if not isinstance(_mcc, dict):
+                            _mcc = {}
+                            _first["model_client_config"] = _mcc
+                        for _mcc_key, _param_key in _mcc_param_key_map.items():
+                            if _param_key in _changed_main_params:
+                                _val = str(_changed_main_params[_param_key]).strip()
+                                if _param_key == "model_provider":
+                                    _val = _normalize_provider_value(_val)
+                                _mcc[_mcc_key] = _val
+                        dump_yaml_round_trip(CONFIG_YAML_PATH, _raw)
+                        _yaml_sections_updated.append("models.defaults[0]")
+                        logger.info(
+                            "[cli config.set] synced models.defaults[0].model_client_config: %s",
+                            list(_changed_main_params.keys()),
+                        )
+            except Exception as e:
+                logger.warning("[cli config.set] failed to sync models.defaults: %s", e)
+
+        # ── 2) 多模态: models.{vision,video,audio}.model_client_config ──
+        for _section_name, _prefix in _multimodal_mcc_prefix_map.items():
+            _changed_mm_params = {}
+            for _mcc_key, _base_pk in _mcc_param_key_map.items():
+                _mm_pk = _prefix + _base_pk  # e.g. "vision_model", "vision_provider"
+                if _mm_pk in params:
+                    _changed_mm_params[_mcc_key] = params[_mm_pk]
+            if not _changed_mm_params:
+                continue
+            try:
+                _raw = load_yaml_round_trip(CONFIG_YAML_PATH)
+                _models = _raw.get("models")
+                if not isinstance(_models, dict):
+                    _models = {}
+                    _raw["models"] = _models
+                _section = _models.get(_section_name)
+                if not isinstance(_section, dict):
+                    _section = {}
+                    _models[_section_name] = _section
+                _mcc = _section.get("model_client_config")
+                if not isinstance(_mcc, dict):
+                    _mcc = {}
+                    _section["model_client_config"] = _mcc
+                for _mcc_key, _val in _changed_mm_params.items():
+                    _val = str(_val).strip()
+                    if _mcc_key == "client_provider":
+                        _val = _normalize_provider_value(_val)
+                    _mcc[_mcc_key] = _val
+                dump_yaml_round_trip(CONFIG_YAML_PATH, _raw)
+                _yaml_sections_updated.append(f"models.{_section_name}")
+                logger.info(
+                    "[cli config.set] synced models.%s.model_client_config: %s",
+                    _section_name, list(_changed_mm_params.keys()),
+                )
+            except Exception as e:
+                logger.warning(
+                    "[cli config.set] failed to sync models.%s: %s", _section_name, e,
+                )
+
+        # ── 3) 嵌入: embed section ──
+        _changed_embed_params = {
+            pk: params[pk] for pk, _ in _embed_param_key_map.items()
+            if pk in params
+        }
+        if _changed_embed_params:
+            try:
+                _raw = load_yaml_round_trip(CONFIG_YAML_PATH)
+                _embed = _raw.get("embed")
+                if not isinstance(_embed, dict):
+                    _embed = {}
+                    _raw["embed"] = _embed
+                for _pk, _yaml_key in _embed_param_key_map.items():
+                    if _pk in _changed_embed_params:
+                        _embed[_yaml_key] = str(_changed_embed_params[_pk]).strip()
+                dump_yaml_round_trip(CONFIG_YAML_PATH, _raw)
+                _yaml_sections_updated.append("embed")
+                logger.info(
+                    "[cli config.set] synced embed section: %s",
+                    list(_changed_embed_params.keys()),
+                )
+            except Exception as e:
+                logger.warning("[cli config.set] failed to sync embed: %s", e)
+
+        if _yaml_sections_updated:
+            applied_without_restart = False  # YAML 改动需要热重载才生效
+
         if env_updates:
             _persist_env_updates(env_updates)
-        if yaml_updated:
+
+        # 当 models / embed / yaml 配置改动时，通知 AgentServer 清缓存并热重载
+        if yaml_updated or _yaml_sections_updated:
             real_client = (
                 agent_client.get("value")
                 if isinstance(agent_client, dict)
@@ -873,7 +1025,20 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
             api_base = api_base.rsplit("/chat/completions", 1)[0]
         api_base = api_base.rstrip("/")
 
-        model_request_config = ModelRequestConfig(model=model, temperature=0)
+        model_config_obj = {"temperature": 0}
+        if "reasoning_level" in params:
+            model_config_obj["reasoning_level"] = params.get("reasoning_level")
+        reasoning_mcc = {
+            "client_provider": model_provider,
+            "api_base": api_base,
+        }
+        model_request_config = ModelRequestConfig(
+            **build_reasoning_model_request_kwargs(
+                model_client_config=reasoning_mcc,
+                model_config_obj=model_config_obj,
+                model_name=model,
+            )
+        )
         model_client_config = ModelClientConfig(
             client_id="config-validate",
             client_provider=model_provider,
@@ -984,9 +1149,63 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
             if isinstance(resp.payload, dict)
             else []
         )
-        cli_sessions = [
-            s for s in all_sessions if s.get("channel_id", "") == "tui"
-        ][:limit]
+        # 按项目目录过滤 + 排除当前会话（对齐 Claude Code /resume 行为）
+        project_dir = (
+            str(params.get("project_dir", "")).strip()
+            if isinstance(params, dict) else ""
+        )
+        # 规范化路径以处理 macOS 符号链接（如 /tmp → /private/tmp）
+        if project_dir:
+            try:
+                project_dir = os.path.realpath(project_dir)
+            except OSError:
+                pass
+        current_sid = str(session_id or "").strip()
+
+        def _session_matches_project(s):
+            if not project_dir:
+                return True
+            ch_meta = s.get("channel_metadata") or {}
+            session_project = (
+                ch_meta.get("project_dir") or ch_meta.get("cwd") or ""
+            ).strip()
+            if not session_project:
+                return True  # 无项目信息的会话作为兜底保留
+            try:
+                session_project = os.path.realpath(session_project)
+            except OSError:
+                pass
+            return (
+                session_project == project_dir
+                or session_project.startswith(project_dir + "/")
+            )
+
+        cli_sessions = []
+        for s in all_sessions:
+            if s.get("channel_id", "") != "tui":
+                continue
+            if not _session_matches_project(s):
+                continue
+            if s.get("session_id", "") == current_sid:
+                continue
+            cli_sessions.append(s)
+        # 按 last_message_at 降序排序（最近活跃优先）
+        cli_sessions.sort(
+            key=lambda s: s.get("last_message_at", 0) or 0, reverse=True
+        )
+        cli_sessions = cli_sessions[:limit]
+
+        # 附带每个会话的 project_dir 供前端判断跨项目恢复
+        for s in cli_sessions:
+            ch_meta = s.get("channel_metadata") or {}
+            sp = (ch_meta.get("project_dir") or ch_meta.get("cwd") or "").strip()
+            if sp:
+                try:
+                    sp = os.path.realpath(sp)
+                except OSError:
+                    pass
+            s["project_dir"] = sp
+
         await channel.send_response(ws, req_id, ok=True, payload={"sessions": cli_sessions})
 
     async def _session_create(ws, req_id, params, session_id):
@@ -1475,6 +1694,7 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
             params = {}
         action = params.get("action")
         model_name = params.get("model")
+        model_index = params.get("index")
 
         real_client = (
             agent_client.get("value")
@@ -1644,17 +1864,11 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
                 names,
                 os.getenv("MODEL_NAME", "unknown"),
             )
-            env = e2a_from_agent_fields(
-                request_id=req_id,
-                channel_id="cli",
-                session_id=session_id,
-                req_method=ReqMethod.COMMAND_MODEL,
-                params={},
-                is_stream=False,
-                timestamp=time.time(),
-            )
-            resp = await real_client.send_request(env)
-            payload = resp.payload if resp.ok else {}
+            # 列出模型全部数据均可从本地 config.yaml 获取，
+            # 无需等待 AgentServer 响应（其返回的 current/available 会被本地值覆盖）。
+            # 若 await send_request() 阻塞 >30s，会导致 TUI WS 超时且后续请求排队，
+            # 故直接以本地数据构建 payload 立即回包。
+            payload: dict = {}
             payload["available_models"] = names
             _raw = get_config_raw()
             _defs = (_raw.get("models") or {}).get("defaults")
@@ -1691,7 +1905,9 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
                     _valid_names.add(_al)
         if not _valid_names:
             _valid_names = set(get_model_names())
-        if target not in _valid_names:
+        # 当有 model_index 时跳过名称验证（前端已通过列表选择，索引即可信）
+        _skip_name_check = model_index is not None
+        if not _skip_name_check and target not in _valid_names:
             logger.warning(
                 "[cli command.model] 模型不存在: %s, 可用: %s",
                 target,
@@ -1722,15 +1938,28 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
         _raw_defaults = ensure_defaults_list_in_config()
         _target_entry = None
         _target_idx = None
-        for _i, _e in enumerate(_raw_defaults):
-            if not isinstance(_e, dict):
-                continue
-            _ename = resolve_env_vars(str((_e.get("model_client_config") or {}).get("model_name", "")))
-            _ealias = resolve_env_vars(str(_e.get("alias", ""))) if _e.get("alias") else ""
-            if _ename == target or _ealias == target:
-                _target_entry = _e
-                _target_idx = _i
-                break
+
+        # 如果前端传了 index，直接按索引定位（支持同名模型区分）
+        if model_index is not None:
+            try:
+                _idx = int(model_index)
+                if 0 <= _idx < len(_raw_defaults) and isinstance(_raw_defaults[_idx], dict):
+                    _target_entry = _raw_defaults[_idx]
+                    _target_idx = _idx
+            except (ValueError, TypeError):
+                pass
+
+        # 回退到按名称/alias查找
+        if _target_entry is None:
+            for _i, _e in enumerate(_raw_defaults):
+                if not isinstance(_e, dict):
+                    continue
+                _ename = resolve_env_vars(str((_e.get("model_client_config") or {}).get("model_name", "")))
+                _ealias = resolve_env_vars(str(_e.get("alias", ""))) if _e.get("alias") else ""
+                if _ename == target or _ealias == target:
+                    _target_entry = _e
+                    _target_idx = _i
+                    break
         _other_entries = [_e for _i, _e in enumerate(_raw_defaults) if _i != _target_idx]
         if _target_entry is None:
             await channel.send_response(ws, req_id, ok=False, error=f"Model '{target}' config not found")
@@ -1755,32 +1984,43 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
             return
         update_default_models_in_config([_target_entry] + _other_entries)
         logger.info("[cli command.model] 切换，已更新 models.defaults 首位: %s", target)
-        _reload_env = e2a_from_agent_fields(
-            request_id=req_id,
-            channel_id="cli",
-            session_id=session_id,
-            req_method=ReqMethod.AGENT_RELOAD_CONFIG,
-            params={},
-            is_stream=False,
-            timestamp=time.time(),
-        )
-        await real_client.send_request(_reload_env)
-        if on_config_saved:
-            try:
-                _cb = on_config_saved(set(), env_updates={}, config_payload=get_config())
-                if inspect.isawaitable(_cb):
-                    await _cb
-            except Exception as _e2:
-                logger.warning("[cli model.switch] on_config_saved failed: %s", _e2)
         _target_model_name = resolve_env_vars(
             str((_target_entry.get("model_client_config") or {}).get("model_name", target)))
-        logger.info("[cli command.model] 切换完成: current=%s", _target_model_name)
+
+        # 先回包再执行 Agent 热重载（与 config.set 保持一致），
+        # 避免 WebSocket 长时间无响应、CLI 误以为无反馈 / 超时。
         await channel.send_response(ws, req_id, ok=True, payload={
             "current": _target_model_name,
             "requested": target,
             "type": "switched",
             "applied": True,
         })
+
+        # 后台触发 AgentServer reload + on_config_saved（不阻塞 WS 消息循环）
+        async def _model_switch_background():
+            _reload_env = e2a_from_agent_fields(
+                request_id=req_id,
+                channel_id="cli",
+                session_id=session_id,
+                req_method=ReqMethod.AGENT_RELOAD_CONFIG,
+                params={},
+                is_stream=False,
+                timestamp=time.time(),
+            )
+            try:
+                await real_client.send_request(_reload_env)
+            except Exception as _e_reload:
+                logger.warning("[cli model.switch] AGENT_RELOAD_CONFIG failed: %s", _e_reload)
+            if on_config_saved:
+                try:
+                    _cb = on_config_saved(set(), env_updates={}, config_payload=get_config())
+                    if inspect.isawaitable(_cb):
+                        await _cb
+                except Exception as _e2:
+                    logger.warning("[cli model.switch] on_config_saved failed: %s", _e2)
+            logger.info("[cli command.model] 切换完成: current=%s", _target_model_name)
+
+        asyncio.create_task(_model_switch_background())
         return
 
     async def _models_list(ws, req_id, params, session_id):

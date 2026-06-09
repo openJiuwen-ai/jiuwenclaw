@@ -532,6 +532,12 @@ export function SkillNetSearchModal({
             </div>
           )}
 
+          {loadState === "loading" && (
+            <div className="text-sm text-text-muted">{t("common.loading")}</div>
+          )}
+          {loadState === "error" && (
+            <div className="text-sm text-text-muted">{t("skills.skillNet.searchFailed")}</div>
+          )}
           {loadState === "success" && (
             <div className={`mt-4 flex-1 min-h-0 overflow-y-auto ${viewMode === "grid" ? "flex flex-wrap gap-4 content-start" : "space-y-3"}`}>
               {results.length === 0 ? (

@@ -968,6 +968,9 @@ interface ParsedLogSection {
   pipeline?: string;
   stages?: Array<{ slot: string; display_name: string }>;
   completed_stages?: string[];
+  // Stage result tracking (for warning icon display)
+  stages_with_success_result?: string[];
+  stages_with_result?: string[];
   // Extension info (for extended_evolve_pipeline)
   extension_order?: string[];
   extensions_by_name?: Record<string, ExtensionProgressInfo>;
@@ -1265,15 +1268,35 @@ function formatLogSection(section: ParsedLogSection, detailed: boolean = false):
     case "stage":
       const stageDisplayName = section.stages?.find((s) => s.slot === section.stage)?.display_name || section.stage || "?";
 
+      // 扩展级事件（含"扩展"但非"阶段完成"）不更新阶段完成状态
+      const isExtensionLevel = section.content.includes("扩展") && !section.content.includes("阶段完成");
+
       if (section.status) {
-        const activeStage = section.status !== 'success' && section.status !== 'failed' ? section.stage : undefined;
+        // 扩展级事件始终显示▶；阶段级事件仅在非终态时显示
+        let activeStage: string | undefined;
+        if (isExtensionLevel) {
+          activeStage = section.stage;
+        } else {
+          activeStage = section.status !== 'success' && section.status !== 'failed' ? section.stage : undefined;
+        }
+
         const effectiveCompleted = [...(section.completed_stages || [])];
-        if (section.status === 'success' && section.stage && !effectiveCompleted.includes(section.stage)) {
-          if (section.pipeline !== 'extended_evolve_pipeline' || section.stage !== 'build_verify') {
+        const effectiveSuccessSet = new Set(section.stages_with_success_result || []);
+        const effectiveResultSet = new Set(section.stages_with_result || []);
+
+        // 仅阶段级事件更新完成状态
+        if (!isExtensionLevel && section.stage && !effectiveCompleted.includes(section.stage)) {
+          if (section.status === 'success' || section.status === 'failed') {
             effectiveCompleted.push(section.stage);
+            if (section.status === 'failed') {
+              effectiveResultSet.add(section.stage);
+            } else if (section.status === 'success') {
+              effectiveSuccessSet.add(section.stage);
+            }
           }
         }
-        const progressBar = formatStageProgress(section.stages, effectiveCompleted, activeStage, section.gap_count, section.extension_order?.length);
+
+        const progressBar = formatStageProgress(section.stages, effectiveCompleted, activeStage, section.gap_count, section.extension_order?.length, effectiveSuccessSet, effectiveResultSet);
         const icon = section.status === "success" ? "✅" : section.status === "failed" ? "❌" : "⏸️";
         const color = section.status === "success" ? ANSI.green : section.status === "failed" ? ANSI.red : ANSI.yellow;
         const statusText = section.status === "success" ? "完成" : section.status === "failed" ? "失败" : section.status;
@@ -1313,7 +1336,15 @@ function formatLogSection(section: ParsedLogSection, detailed: boolean = false):
         return `\n${progressBar}\n${color}${ANSI.bold}${icon} ${stageDisplayName} ${statusText}${ANSI.reset}${detailsBlock}\n`;
       }
 
-      const startProgressBar = formatStageProgress(section.stages, section.completed_stages, section.stage, section.gap_count, section.extension_order?.length);
+      const startProgressBar = formatStageProgress(
+        section.stages,
+        section.completed_stages,
+        section.stage,
+        section.gap_count,
+        section.extension_order?.length,
+        new Set(section.stages_with_success_result || []),
+        new Set(section.stages_with_result || [])
+      );
       const showContent = section.content && section.content !== stageDisplayName;
       const normalizedContent = (section.content || "").trim();
 
@@ -1385,7 +1416,10 @@ function formatStageProgress(
   currentStage?: string,
   // Inline count display for progress bar
   gapCount?: number,
-  extensionCount?: number
+  extensionCount?: number,
+  // Track which stages succeeded vs failed (for warning icon display)
+  stagesWithSuccessResult?: Set<string>,
+  stagesWithResult?: Set<string>
 ): string {
   if (!stages || stages.length === 0) return "";
 
@@ -1403,6 +1437,8 @@ function formatStageProgress(
   const parts = stages.map((s) => {
     const isCompleted = completedStages?.includes(s.slot);
     const isCurrent = currentStage === s.slot;
+    const hasSuccess = stagesWithSuccessResult?.has(s.slot);
+    const hasResult = stagesWithResult?.has(s.slot);
 
     // Add inline count for specific stages
     let inlineCount = '';
@@ -1414,7 +1450,14 @@ function formatStageProgress(
     }
 
     if (isCompleted) {
-      return `${ANSI.green}✓ ${s.display_name}${inlineCount}${ANSI.reset}`;
+      // 成功→✓(绿)；失败(hasResult无success)→⚠(黄)
+      if (hasSuccess) {
+        return `${ANSI.green}✓ ${s.display_name}${inlineCount}${ANSI.reset}`;
+      } else if (hasResult) {
+        return `${ANSI.yellow}⚠  ${s.display_name}${inlineCount}${ANSI.reset}`;
+      } else {
+        return `${ANSI.green}✓ ${s.display_name}${inlineCount}${ANSI.reset}`;
+      }
     } else if (isCurrent) {
       return `${ANSI.yellow}▶ ${s.display_name}${inlineCount}${ANSI.reset}`;
     } else {
@@ -1447,9 +1490,11 @@ interface ParseState {
   gapCount: number;
   ciFixCount: number;
   hasFailure: boolean;  // Track if any stage or extension failed during execution
-  // Track stages that have reported success via harness.stage_result
+  // scope=""且status="success"的阶段
   stagesWithSuccessResult: Set<string>;
-  // Track stages that have appeared (reported any result, including running/success/failed)
+  // scope=""且status为终态(success/failed)的阶段
+  stagesWithResult: Set<string>;
+  // 已出现过的阶段(任意status)
   stagesAppeared: Set<string>;
 }
 
@@ -1467,10 +1512,9 @@ function parseAndAggregateLogs(
   const extensionsByName: Record<string, ExtensionProgressInfo> = initialState?.extensionsByName ?? {};
   let gapCount = initialState?.gapCount ?? 0;
   let ciFixCount = initialState?.ciFixCount ?? 0;
-  let hasFailure = initialState?.hasFailure ?? false;  // Track if any stage/extension failed
-  // Track stages that have explicitly reported success via harness.stage_result (scope="")
+  let hasFailure = initialState?.hasFailure ?? false;
   const stagesWithSuccessResult: Set<string> = initialState?.stagesWithSuccessResult ?? new Set<string>();
-  // Track stages that have appeared (reported any result, including running/success/failed)
+  const stagesWithResult: Set<string> = initialState?.stagesWithResult ?? new Set<string>();
   const stagesAppeared: Set<string> = initialState?.stagesAppeared ?? new Set<string>();
 
   // Note: pipeline type is determined dynamically in the loop when pipelineInfo is set
@@ -1627,6 +1671,8 @@ function parseAndAggregateLogs(
             stages: pipelineInfo?.stages,
             pipeline: pipelineInfo?.pipeline,
             completed_stages: [...completedStages],
+            stages_with_success_result: [...stagesWithSuccessResult],
+            stages_with_result: [...stagesWithResult],
             extension_order: [...extensionOrder],
             extensions_by_name: extensionsSnapshot,
             gap_count: gapCount,
@@ -1637,39 +1683,36 @@ function parseAndAggregateLogs(
         if (log.stage && !scope && (log.status === 'success' || log.status === 'failed') && !completedStages.includes(log.stage)) {
           // extended_evolve_pipeline: build_verify 不在此处计入完成，等 activate 出现后再计入
           if (pipelineInfo?.pipeline === 'extended_evolve_pipeline' && log.stage === 'build_verify') {
-            // 跳过，不加入 completedStages
+            stagesWithResult.add(log.stage);
           } else {
             completedStages.push(log.stage);
+            stagesWithResult.add(log.stage);
           }
           if (log.status === 'failed') hasFailure = true;
-          // Track stages that have explicitly reported success (scope="", status="success")
           if (log.status === 'success') {
             stagesWithSuccessResult.add(log.stage);
           }
         }
-        // Track all stages that have appeared (any status including running)
         if (log.stage && !scope) {
           stagesAppeared.add(log.stage);
         }
-        // Track current running stage (from any scope="" event)
         if (log.stage && !scope && log.stage !== currentStage) {
           currentStage = log.stage;
         }
 
-        // extended_evolve_pipeline: 当 activate 出现时，将 build_verify 计入完成
+        // extended_evolve_pipeline: activate出现时将build_verify计入完成
         if (pipelineInfo?.pipeline === 'extended_evolve_pipeline' && log.stage === 'activate' && !scope) {
-          if (!completedStages.includes('build_verify') && stagesWithSuccessResult.has('build_verify')) {
+          if (!completedStages.includes('build_verify') && stagesWithResult.has('build_verify')) {
             completedStages.push('build_verify');
           }
         }
 
-        // For activate stage: skip "running" status (merge/interaction sub-events handle display)
-        // Only show the final "success" completion
+        // activate阶段跳过running状态，仅显示最终success
         if (log.stage === 'activate' && log.status === 'running' && !scope) {
           break;
         }
 
-        // For meta_evolve_pipeline: track CI fix count from messages
+        // meta_evolve_pipeline: 统计CI修复次数
         const stageMessages = log.messages || [];
         if (pipelineInfo?.pipeline === "meta_evolve_pipeline" && log.stage === "verify") {
           for (const msg of stageMessages) {
@@ -1719,6 +1762,8 @@ function parseAndAggregateLogs(
           stages: pipelineInfo?.stages,
           pipeline: pipelineInfo?.pipeline,
           completed_stages: [...completedStages],
+          stages_with_success_result: [...stagesWithSuccessResult],
+          stages_with_result: [...stagesWithResult],
           // Include extension info for display (snapshot at this point)
           extension_order: [...extensionOrder],
           extensions_by_name: stageExtSnapshot,
@@ -1751,7 +1796,7 @@ function parseAndAggregateLogs(
           // Check if all expected stages have reported success
           const allStagesSuccessful = expectedStages.length > 0 &&
             expectedStages.every(stage => stagesWithSuccessResult.has(stage));
-          finalStatus = allStagesSuccessful && !hasFailure ? "success" : "failed";
+          finalStatus = allStagesSuccessful ? "success" : "failed";
         } else {
           // For other pipelines: any failure means task failed
           finalStatus = hasFailure ? "failed" : (log.status || "success");
@@ -1813,7 +1858,7 @@ function parseAndAggregateLogs(
     }
   }
 
-  return { sections, state: { pipelineInfo, completedStages, currentStage, extensionOrder, extensionsByName, gapCount, ciFixCount, hasFailure, stagesWithSuccessResult, stagesAppeared } };
+  return { sections, state: { pipelineInfo, completedStages, currentStage, extensionOrder, extensionsByName, gapCount, ciFixCount, hasFailure, stagesWithSuccessResult, stagesWithResult, stagesAppeared } };
 }
 
 // Format log section for history display (detailed with colors)

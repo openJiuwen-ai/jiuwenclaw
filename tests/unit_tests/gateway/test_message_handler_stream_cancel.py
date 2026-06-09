@@ -1,3 +1,5 @@
+# Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
+
 """Tests for gateway stream task cancellation before chat.send."""
 
 from __future__ import annotations
@@ -48,13 +50,14 @@ def _chat_send_message(
     *,
     channel_id: str = "tui",
     session_id: str = "sess_new",
+    mode: str = "agent.plan",
 ) -> Message:
     return Message(
         id="req-new",
         type="req",
         channel_id=channel_id,
         session_id=session_id,
-        params={"mode": "agent.plan", "query": "hello"},
+        params={"mode": mode, "query": "hello"},
         timestamp=0.0,
         ok=True,
         req_method=ReqMethod.CHAT_SEND,
@@ -176,6 +179,20 @@ def test_is_single_user_channel_includes_cli_alias() -> None:
     assert _is_single_user_channel("acp")
     assert _is_single_user_channel("cli")
     assert not _is_single_user_channel("web")
+
+
+def test_team_chat_send_keeps_existing_team_stream() -> None:
+    _should_cancel_existing_stream_before_chat_send = getattr(
+        MessageHandler,
+        "_should_cancel_existing_stream_before_chat_send",
+    )
+
+    assert not _should_cancel_existing_stream_before_chat_send(
+        _chat_send_message(channel_id="web", session_id="sess_team", mode="team"),
+    )
+    assert _should_cancel_existing_stream_before_chat_send(
+        _chat_send_message(channel_id="web", session_id="sess_agent", mode="agent.plan"),
+    )
 
 
 # ── cancel_agent_sessions_on_disconnect ─────────────────────────

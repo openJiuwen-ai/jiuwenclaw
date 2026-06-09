@@ -349,6 +349,83 @@ def test_load_team_spec_dict_preserves_explicit_enable_hitt_false(monkeypatch, t
     assert spec["enable_hitt"] is False
 
 
+def test_load_team_spec_dict_defaults_enable_swarmflow_to_true(monkeypatch, tmp_path):
+    """Missing enable_swarmflow should default to enabled for team mode."""
+    config = {
+        "models": {
+            "default": {
+                "model_client_config": {
+                    "model_name": "gpt-swarmflow-default",
+                    "client_provider": "openai",
+                },
+                "model_config_obj": {},
+            }
+        },
+        **_wrap_modes_team(
+            {
+                "demo_team": {
+                    "team_name": "demo_team",
+                    "agents": {
+                        "leader": {},
+                    },
+                }
+            }
+        ),
+    }
+
+    monkeypatch.setattr(
+        "jiuwenswarm.agents.harness.team.config_loader.get_config",
+        lambda: config,
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.agents.harness.team.config_loader.get_agent_teams_home",
+        lambda: tmp_path / ".agent_teams",
+    )
+
+    spec = load_team_spec_dict()
+
+    assert spec["enable_swarmflow"] is True
+
+
+def test_load_team_spec_dict_preserves_explicit_enable_swarmflow_false(monkeypatch, tmp_path):
+    """Explicit enable_swarmflow false should not be overwritten by defaults."""
+    config = {
+        "models": {
+            "default": {
+                "model_client_config": {
+                    "model_name": "gpt-swarmflow-disabled",
+                    "client_provider": "openai",
+                },
+                "model_config_obj": {},
+            }
+        },
+        **_wrap_modes_team(
+            {
+                "demo_team": {
+                    "team_name": "demo_team",
+                    "enable_swarmflow": False,
+                    "agents": {
+                        "leader": {},
+                    },
+                }
+            }
+        ),
+    }
+
+    monkeypatch.setattr(
+        "jiuwenswarm.agents.harness.team.config_loader.get_config",
+        lambda: config,
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.agents.harness.team.config_loader.get_agent_teams_home",
+        lambda: tmp_path / ".agent_teams",
+    )
+
+    spec = load_team_spec_dict()
+
+    assert spec["enable_swarmflow"] is False
+
+
 def test_load_team_spec_dict_keeps_role_defaults_when_member_alias_is_added(monkeypatch, tmp_path):
     """Role keys should remain usable after member_name aliases are injected."""
     config = {

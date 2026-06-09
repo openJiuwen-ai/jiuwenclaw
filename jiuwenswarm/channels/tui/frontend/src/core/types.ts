@@ -161,8 +161,30 @@ export interface TurnDiff {
   };
 }
 
+export interface GitDiffFile {
+  filePath: string;
+  hunks: Hunk[];
+  isNewFile: boolean;
+  linesAdded: number;
+  linesRemoved: number;
+  lastEditTime: string | null;
+}
+
+export interface GitDiffStats {
+  filesChanged: number;
+  linesAdded: number;
+  linesRemoved: number;
+}
+
+export interface GitDiffData {
+  stats: GitDiffStats;
+  files: Record<string, GitDiffFile>;
+}
+
 export interface DiffMeta {
   turns: TurnDiff[];
+  gitDiff?: GitDiffData | null;
+  showDetail?: boolean;
 }
 
 export type HistoryItem =

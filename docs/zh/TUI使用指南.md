@@ -57,6 +57,7 @@
 |------|------|------|------|----------|
 | `/help` | - | 列出已注册 Slash 命令 | `/help` | 全部 |
 | `/hotkey` | - | 显示快捷键与 `/help` 提示 | `/hotkey` | 全部 |
+| `/hooks` | - | 浏览已配置的 hooks（只读） | `/hooks` | 全部 |
 | `/exit` | `/quit` | 退出 TUI | `/exit` | 全部 |
 | `/clear` | `/reset`, `/new` | 新建会话 ID、清空当前 transcript（忙时拒绝） | `/clear` | 全部 |
 | `/copy` | - | 复制最近第 N 条助手回复到剪贴板 | `/copy` 或 `/copy 2` | 全部 |
@@ -83,6 +84,7 @@
 | `/workspace` | `/workspace_dir`, `/workspace-dir` | 管理文件操作可信目录 | `/workspace add .` | 全部 |
 | `/export` | - | 导出当前会话到文件或剪贴板 | `/export`、`/export my-chat` | 全部 |
 | `/status` | - | 查看运行状态概览、用量、配置 | `/status`、`/status usage` | 全部 |
+| `/agents` | - | 管理 Agent 配置（list, get, create, update, enable, disable, delete） | `/agents list`、`/agents get Explore` | 全部 |
 | `/branch` | `/fork` | 从当前对话点创建分支会话 | `/branch fix-login-bug` | 全部 |
 | `/rewind` | `/checkpoint` | 回退对话到指定轮次之前 | `/rewind 2` | 全部 |
 | `/memory` | `/mem` | 记忆管理（状态、文件、开关、目录） | `/memory status` | 全部 |
@@ -114,6 +116,59 @@
 - `add`：默认路径为当前工作目录；成功后会 `command.add_dir` 同步到服务端并 `remember: true`。
 - `set`：重置为单个可信目录；若已有列表会二次确认。
 - 详见 [Slash命令表.md](Slash命令表.md) 的 `/workspace` 小节。
+
+#### `/agents`（Agent 管理）
+
+管理自定义 Agent（子代理）的全生命周期：查看、创建、更新、启用/禁用、删除。Agent 定义支持四级来源，按优先级 project > user > local > builtin 覆盖。
+
+- **解析位置**：TUI 本地解析，通过 RPC 调用后端 `agents.*` 端点。
+- **注意**：该命令在注册表中标记为 `hidden: true`，不会出现在 `/help` 列表中，但可以直接使用。
+
+**子命令**：
+
+| 子命令 | 用法 | 说明 |
+|--------|------|------|
+| `list` | `/agents list` | 列出所有 Agent（名称、来源、启用状态、描述） |
+| `get` | `/agents get <name>` | 查看指定 Agent 详细信息（含 System Prompt 正文） |
+| `create` | `/agents create [--project\|--local] <名称> <描述>` | 创建自定义 Agent，LLM 自动生成 prompt |
+| `update` | `/agents update <name> [--generate] <新描述>` | 更新 Agent 描述；加 `--generate` 由 LLM 重写 prompt |
+| `enable` | `/agents enable <name>` | 启用自定义 Agent |
+| `disable` | `/agents disable <name>` | 禁用自定义 Agent |
+| `delete` | `/agents delete <name>` | 删除自定义 Agent |
+
+**Agent 来源**：
+
+| 来源 | 存储位置 | 说明 |
+|------|----------|------|
+| `builtin` | 代码内置 | 系统预置 Agent，不可启用/禁用/删除 |
+| `user` | `~/.jiuwenswarm/agents/` | 用户级 Agent（默认 `create` 位置） |
+| `project` | `<workspace>/.jiuwenswarm/agents/` | 项目级 Agent（`--project`） |
+| `local` | `<workspace>/.jiuwenswarm/agents-local/` | 本地 Agent（`--local`） |
+
+**`create` 行为要点**：
+- 默认由 LLM 自动生成 `when_to_use` 和 `system_prompt`（失败时回退到内置模板）。
+- 创建成功后自动写入 `config.yaml` 的 `react.subagents.<name>.enabled = true` 并热加载。
+- 响应面板显示 LLM 生成标记、文件路径。
+- 超时：60 秒。
+
+**`update` 行为要点**：
+- 无描述参数时展示当前 Agent 详情（同 `get`）。
+- `--generate` 标志触发 LLM 重写 prompt（默认不使用 LLM，用请求中的模板值）。
+- 更新后自动热加载配置。
+
+**`enable` / `disable` 约束**：
+- 不能对内置 Agent（`source: builtin`）执行启用/禁用操作。
+
+**`delete` 约束**：
+- 删除后自动从 `config.yaml` 的 `react.subagents` 中移除并热加载。
+- 内置 Agent 不可删除。
+
+**`get` 详细信息字段**：
+名称、描述、状态、来源、调用时机、模型、颜色、权限模式、记忆范围、最大迭代、工具列表、禁用工具、技能列表、文件路径、System Prompt 正文。
+
+**无参数行为**：`/agents` 无参数时等同 `/agents list`，列出所有 Agent。
+
+**Tab 补全**：`get`、`update`、`enable`、`disable`、`delete` 子命令支持按 Agent 名称 Tab 补全。
 
 #### `/init`（仅 Code 模式）
 
@@ -266,6 +321,24 @@
 - `excluded_commands` 的匹配：按完整命令字符串匹配，不仅看 `argv[0]`；写 glob 时要把参数也覆盖进去（例如 `"git *"` 而不是 `git`）。本质等同于沙箱穿透口，不要对 `rm -rf` / `curl` 这类高风险命令使用。
 - add / remove 严格校验：`exclude add` 已存在 pattern、`exclude remove` 不存在 pattern 都会报错；`files allow|deny` 在同 bucket 已有 path 或对侧 bucket 已有 path（allow/deny 冲突）会报错，先 `files remove` 再 add；`files remove` 没匹配到也会报错。避免"看起来执行了实际什么也没改"。
 - 示例：`/sandbox enable`、`/sandbox status`、`/sandbox files allow ./tmp/ 0777`、`/sandbox exclude add "git *"`。
+
+#### `/hooks`（浏览 Hooks 配置）
+
+- 用法：`/hooks`（无参数、无子命令，只读）。
+- 调用 `hooks.list` RPC 从 Gateway 获取 `config.yaml` 中 `hooks` 段的摘要。
+- 展示：
+  - **事件列表**：按 hook 数量降序排列，每行显示事件名、hook 数量、matcher 分布。
+  - **状态面板**：配置来源（`config.yaml`）、全局开关（`enabled` / `DISABLED`）、Total Hooks、Active Events（有配置的事件数 / 17）。
+  - **Hook 详情卡片**：每个 hook 按 Type、Command/Prompt、Timeout、Shell、Status 展示。
+- 无配置时：显示 `No hooks configured.`，提示通过 `/config edit` 编辑配置。
+- Hooks 概念：
+  - **17 种触发事件**：Agent Rail 层（`PreToolUse`、`PostToolUse`、`PostToolUseFailure`、`Stop`、`PermissionRequest`、`PermissionDenied`、`SubagentStart`、`SubagentStop`、`BeforeModelCall`、`AfterModelCall`）和 Gateway 层（`UserPromptSubmit`、`SessionStart`、`SessionEnd`、`Notification`、`ConfigChange`、`InstructionsLoaded`、`Setup`）。
+  - **2 种 Hook 类型**：`command`（执行 shell 命令，退出码 0 = 成功、2 = 阻断）和 `prompt`（LLM 审查，响应 JSON `decision: "block"` 阻断）。
+  - **阻断行为**：PreToolUse 阻断可跳过工具调用并将原因反馈给模型。
+  - **输入修改**：PreToolUse hook 可通过 stdout JSON 的 `modifiedInput` 修改工具参数。
+  - **附加上下文**：可通过 stdout JSON 的 `additionalContext` 注入信息到工具结果或模型上下文。
+  - **全局开关**：`config.yaml` 中 `hooks.disable_all_hooks: true` 禁用所有 hooks。
+- 详见 [Slash命令表.md](Slash命令表.md) 的 `/hooks` 小节。
 
 #### `/clear` 与忙状态
 

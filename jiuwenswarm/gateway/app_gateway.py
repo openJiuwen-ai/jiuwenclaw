@@ -665,11 +665,15 @@ class GatewayServer:
             params = dict(params)
             params.setdefault("mode", mode.value)
 
-            # 从 params 中提取 cwd，注入到 metadata 中以便 message_handler 解析 @file 引用
+            # 从 params 中提取 cwd/project_dir，注入到 metadata 中
+            # cwd 供 message_handler 解析 @file 引用；project_dir 供 session.list 按项目过滤
             metadata = {"method": method}
             cwd = params.get("cwd")
             if cwd and isinstance(cwd, str) and cwd.strip():
                 metadata["cwd"] = cwd.strip()
+            project_dir = params.get("project_dir")
+            if project_dir and isinstance(project_dir, str) and project_dir.strip():
+                metadata["project_dir"] = project_dir.strip()
 
             is_stream = bool(data.get("is_stream", False))
 

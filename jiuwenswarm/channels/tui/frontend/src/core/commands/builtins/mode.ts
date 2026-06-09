@@ -11,9 +11,11 @@ export function buildModeAutocompleteItems(): AutocompleteItem[] {
     { value: "agent.plan", label: "    plan" },
     { value: "agent.fast", label: "    fast" },
     { value: "code", label: "code" },
+    { value: "code.plan", label: "    plan" },
     { value: "code.normal", label: "    normal" },
     { value: "code.team", label: "    team" },
     { value: "team", label: "team" },
+    { value: "team.plan", label: "    plan" },
     { value: "team.normal", label: "    normal" },
   ];
 }
@@ -24,9 +26,11 @@ export function createModeCommand(): SlashCommand {
     "code",
     "agent.plan",
     "agent.fast",
+    "code.plan",
     "code.normal",
     "code.team",
     "team",
+    "team.plan",
     "team.normal",
   ] as const;
   /** 用户输入的简写 → 实际会话模式（/mode agent → agent.plan，/mode code → code.normal）。 */
@@ -36,9 +40,11 @@ export function createModeCommand(): SlashCommand {
     code: "code.normal",
     "agent.plan": "agent.plan",
     "agent.fast": "agent.fast",
+    "code.plan": "code.plan",
     "code.normal": "code.normal",
     "code.team": "code.team",
     team: "team",
+    "team.plan": "team.plan",
     "team.normal": "team",
   };
 
@@ -72,7 +78,7 @@ export function createModeCommand(): SlashCommand {
           makeItem(
             ctx.sessionId,
             "error",
-            "usage: /mode <agent|code|code.normal|code.team|team|team.normal>",
+            "usage: /mode <agent|code|code.plan|code.normal|code.team|team|team.plan>",
           ),
         );
         return;

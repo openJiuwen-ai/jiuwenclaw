@@ -10,6 +10,8 @@ export interface SessionMeta {
   created_at?: number;
   last_message_at?: number;
   message_count?: number;
+  /** 会话所属项目目录（由 gateway 从 channel_metadata 中提取） */
+  project_dir?: string;
 }
 
 export interface SessionListPayload {
@@ -26,6 +28,30 @@ export interface ResumeResumePayload {
   preview?: string;
 }
 
+const COMPLETION_MAX_ITEMS = 10;
+
+async function doResume(
+  ctx: Parameters<SlashCommand["action"]>[0],
+  session: SessionMeta,
+): Promise<void> {
+  ctx.updateSession(session.session_id);
+  ctx.clearEntries();
+  ctx.setAccentColor(session.accent_color || "default");
+  ctx.addItem(addInfo(session.session_id, `Resumed session ${session.session_id}`, "r"));
+  void ctx.restoreHistory(session.session_id);
+  void (async () => {
+    try {
+      const meta = await ctx.request<{ session_id: string; title: string }>(
+        "session.rename",
+        { session_id: session.session_id },
+      );
+      ctx.setSessionTitle(meta.title || "");
+    } catch {
+      ctx.setSessionTitle("");
+    }
+  })();
+}
+
 export function createResumeCommand(): SlashCommand {
   return {
     name: "resume",
@@ -35,10 +61,39 @@ export function createResumeCommand(): SlashCommand {
     example: "/resume",
     kind: CommandKind.BUILT_IN,
     takesArgs: true,
+
+    completion: async (ctx, partial) => {
+      const value = partial.trim();
+      if (!value) return [];
+
+      try {
+        const listPayload = await ctx.request<SessionListPayload>("session.list", {});
+        const allSessions = listPayload.sessions ?? [];
+        const query = value.toLowerCase();
+
+        const matches = allSessions.filter((s) => {
+          const title = (s.title?.trim() || "").toLowerCase();
+          return title.includes(query);
+        });
+
+        const seen = new Set<string>();
+        return matches
+          .filter((s) => {
+            const key = s.title?.trim() || s.session_id;
+            if (seen.has(key)) return false;
+            seen.add(key);
+            return true;
+          })
+          .slice(0, COMPLETION_MAX_ITEMS)
+          .map((s) => s.title?.trim() || s.session_id);
+      } catch {
+        return [];
+      }
+    },
+
     action: async (ctx, args) => {
       const value = args.trim();
       try {
-        // 获取 session 列表用于匹配
         const listPayload = await ctx.request<SessionListPayload>("session.list", {});
         const allSessions = listPayload.sessions ?? [];
 
@@ -68,65 +123,51 @@ export function createResumeCommand(): SlashCommand {
           return;
         }
 
-        // 1. 先检查是否完全匹配 session_id
+        // 1. Session ID exact/prefix match
         const sessionIdMatch = allSessions.find(
-          (s) => s.session_id === value || s.session_id.startsWith(value) && value.length >= 8,
+          (s) =>
+            s.session_id === value ||
+            (s.session_id.startsWith(value) && value.length >= 8),
         );
         if (sessionIdMatch) {
-          const nextSessionId = sessionIdMatch.session_id;
-          ctx.updateSession(nextSessionId);
-          ctx.clearEntries();
-          ctx.setAccentColor(sessionIdMatch.accent_color || "default");
-          ctx.addItem(addInfo(nextSessionId, `Resumed session ${nextSessionId}`, "r"));
-          void ctx.restoreHistory(nextSessionId);
-          void (async () => {
-            try {
-              const meta = await ctx.request<{ session_id: string; title: string }>(
-                "session.rename",
-                { session_id: nextSessionId },
-              );
-              ctx.setSessionTitle(meta.title || "");
-            } catch {
-              ctx.setSessionTitle("");
-            }
-          })();
+          await doResume(ctx, sessionIdMatch);
           return;
         }
 
-        // 2. 检查是否完全匹配 title（显示内容，title 或 fallback 的 session_id）
+        // 2. Case-insensitive substring match on title (对齐 CC)
+        const query = value.toLowerCase();
         const titleMatches = allSessions.filter((s) => {
-          const displayLabel = s.title?.trim() || s.session_id;
-          return displayLabel === value;
+          const title = (s.title?.trim() || "").toLowerCase();
+          return title.includes(query);
         });
 
         if (titleMatches.length === 1) {
-          const nextSessionId = titleMatches[0]!.session_id;
-          ctx.updateSession(nextSessionId);
-          ctx.clearEntries();
-          ctx.setAccentColor(titleMatches[0].accent_color || "default");
-          ctx.addItem(addInfo(nextSessionId, `Resumed session ${nextSessionId}`, "r"));
-          void ctx.restoreHistory(nextSessionId);
-          void (async () => {
-            try {
-              const meta = await ctx.request<{ session_id: string; title: string }>(
-                "session.rename",
-                { session_id: nextSessionId },
-              );
-              ctx.setSessionTitle(meta.title || "");
-            } catch {
-              ctx.setSessionTitle("");
-            }
-          })();
+          await doResume(ctx, titleMatches[0]!);
           return;
         }
 
-        // 3. 多个 title 匹配
+        // 3. 多个 title 匹配 —— 展示列表
         if (titleMatches.length > 1) {
+          const items = titleMatches.map((s, i) => {
+            const lastActive = s.last_message_at
+              ? new Date(s.last_message_at * 1000).toLocaleString()
+              : "-";
+            const title = s.title || "(untitled)";
+            return {
+              label: String(i + 1),
+              value: `${s.session_id}  |  ${title}  |  msgs: ${s.message_count ?? 0}  |  ${lastActive}`,
+            };
+          });
           ctx.addItem(
             addInfo(
               ctx.sessionId,
-              `Found ${titleMatches.length} sessions matching "${value}". Please use /resume to pick a specific session.`,
+              `Found ${titleMatches.length} sessions matching "${value}":`,
               "r",
+              {
+                view: "list",
+                title: "Matching Sessions",
+                items,
+              },
             ),
           );
           return;
@@ -134,7 +175,11 @@ export function createResumeCommand(): SlashCommand {
 
         // 4. 没有匹配
         ctx.addItem(
-          addInfo(ctx.sessionId, `Session "${value}" was not found. Use /resume to see available sessions.`, "r"),
+          addInfo(
+            ctx.sessionId,
+            `Session "${value}" was not found. Use /resume to see available sessions.`,
+            "r",
+          ),
         );
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);

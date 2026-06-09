@@ -26,12 +26,17 @@ import {
 import type { ConnectionStatus } from "./ws-client.js";
 import { createId, findLastIndex, isIgnorableHistoryRestoreError } from "./app-state-helpers.js";
 import { isClientMode, type ClientMode } from "./modes.js";
+import type { WorkflowRun } from "./workflows.js";
 
 type PreferredLanguage = "zh" | "en";
 
 export interface PendingQuestion {
   requestId: string;
   source?: string;
+  /** Mode active when the interrupt was raised; used when resuming the tool call. */
+  resumeMode?: ClientMode;
+  planPath?: string;
+  planSlug?: string;
   evolutionMeta?: Record<string, unknown>;
   questions: PendingQuestionItem[];
 }
@@ -41,6 +46,8 @@ export interface PendingQuestionItem {
   question: string;
   options: PendingQuestionOption[];
   multiSelect?: boolean;
+  planPath?: string;
+  planSlug?: string;
 }
 
 export interface PendingQuestionOption {
@@ -98,6 +105,7 @@ export interface AppEventDelegate {
   appendTeamMemberEvent(event: TeamMemberEvent): void;
   appendTeamTaskEvent(event: TeamTaskEvent): void;
   appendTeamMessageEvent(event: TeamMessageEvent): void;
+  applyWorkflowUpdate(workflow: WorkflowRun): void;
   setEvolutionStatus(status: "idle" | "running"): void;
   setContextCompression(stats: ContextCompressionStats | null): void;
   setContextWindowLimit(n: number | null): void;
@@ -162,14 +170,7 @@ function _handleAgentModeToolResult(
   if (toolName !== "switch_mode" && toolName !== "exit_plan_mode") return;
 
   if (toolName === "exit_plan_mode") {
-    const existingMode = delegate.getMode();
-    if (existingMode === "code.plan") {
-      delegate.setMode("code.normal");
-    } else if (existingMode === "team.plan") {
-      delegate.setMode("team");
-    } else if (existingMode === "agent.plan") {
-      delegate.setMode("agent.fast");
-    }
+    // Plan exit is deferred until the user approves in chat; keep UI plan mode.
     return;
   }
 
@@ -226,7 +227,6 @@ function _getToolResultPayload(payload: Record<string, unknown>): Record<string,
 }
 
 function normalizeVisibleMode(mode: ClientMode): ClientMode {
-  if (mode === "code.plan") return "code.normal";
   if (mode === "team.plan") return "team";
   return mode;
 }
@@ -426,6 +426,8 @@ function normalizePendingQuestion(payload: Record<string, unknown>): PendingQues
     .map((item) => ({
       header: typeof item.header === "string" ? item.header : "Question",
       question: typeof item.question === "string" ? item.question : "",
+      planPath: typeof item.plan_path === "string" ? item.plan_path : undefined,
+      planSlug: typeof item.plan_slug === "string" ? item.plan_slug : undefined,
       options: Array.isArray(item.options)
         ? item.options
             .filter((option): option is Record<string, unknown> =>
@@ -1041,6 +1043,22 @@ function handleTeamMessageEvent(
   return true;
 }
 
+function handleWorkflowUpdated(
+  delegate: AppEventDelegate,
+  payload: Record<string, unknown>,
+): boolean {
+  const normalized = normalizeNestedPayload(payload);
+  const workflow = normalized.workflow;
+  if (!workflow || typeof workflow !== "object" || Array.isArray(workflow)) {
+    return false;
+  }
+  if (typeof (workflow as Record<string, unknown>).id !== "string") {
+    return false;
+  }
+  delegate.applyWorkflowUpdate(workflow as unknown as WorkflowRun);
+  return true;
+}
+
 export function handleIncomingFrame(delegate: AppEventDelegate, frame: EventFrame): boolean {
   const connectionChanged = handleConnectionAck(delegate, frame);
 
@@ -1144,6 +1162,18 @@ export function handleIncomingFrame(delegate: AppEventDelegate, frame: EventFram
       return true;
     }
 
+    case "plan.approval_required":
+      // Text-only plan approval: plan + marker already appear in the chat stream.
+      return connectionChanged;
+
+    case "plan.mode_exited": {
+      const mode = typeof payload.mode === "string" ? payload.mode : "code.normal";
+      if (mode === "code.normal" && delegate.getMode().startsWith("code.")) {
+        delegate.setMode("code.normal");
+      }
+      return true;
+    }
+
     case "chat.ask_user_question": {
       const requestId = typeof payload.request_id === "string" ? payload.request_id : "";
       const questions = normalizePendingQuestion(payload);
@@ -1156,9 +1186,21 @@ export function handleIncomingFrame(delegate: AppEventDelegate, frame: EventFram
           : payload._evolution_meta && typeof payload._evolution_meta === "object"
             ? (payload._evolution_meta as Record<string, unknown>)
             : undefined;
+      const source = typeof payload.source === "string" ? payload.source : undefined;
+      const planPath =
+        typeof payload.plan_path === "string" && payload.plan_path.trim()
+          ? payload.plan_path.trim()
+          : questions[0]?.planPath;
+      const planSlug =
+        typeof payload.plan_slug === "string" && payload.plan_slug.trim()
+          ? payload.plan_slug.trim()
+          : questions[0]?.planSlug;
       delegate.setPendingQuestion({
         requestId,
-        source: typeof payload.source === "string" ? payload.source : undefined,
+        source,
+        resumeMode: delegate.getMode(),
+        planPath,
+        planSlug,
         evolutionMeta,
         questions,
       });
@@ -1233,6 +1275,9 @@ export function handleIncomingFrame(delegate: AppEventDelegate, frame: EventFram
 
     case "team.message":
       return handleTeamMessageEvent(delegate, payload);
+
+    case "workflow.updated":
+      return handleWorkflowUpdated(delegate, payload);
 
     case "chat.usage_summary":
       delegate.appendUsageSummary(

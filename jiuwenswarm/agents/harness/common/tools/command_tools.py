@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import locale
 import os
@@ -578,6 +579,13 @@ def _run_command_sync(
     finally:
         if sid:
             unregister_shell_process(sid, proc)
+        # Close pipe FDs that communicate() would have closed on the
+        # normal path.  Without this, exception paths (cancel / timeout)
+        # leak FDs and trigger ResourceWarning.
+        for stream in (proc.stdout, proc.stdin, proc.stderr):
+            if stream is not None:
+                with contextlib.suppress(Exception):
+                    stream.close()
     return subprocess.CompletedProcess(
         args=plan,
         returncode=proc.returncode if proc.returncode is not None else -1,

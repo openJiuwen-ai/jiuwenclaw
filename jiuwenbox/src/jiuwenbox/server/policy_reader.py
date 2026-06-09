@@ -12,6 +12,7 @@ from pathlib import Path
 
 import yaml
 
+from jiuwenbox.bundled_configs import default_policy_path
 from jiuwenbox.logging_config import configure_logging
 from jiuwenbox.models.policy import SecurityPolicy
 from jiuwenbox.server.policy_engine import PolicyEngine
@@ -38,18 +39,42 @@ class PolicyReader:
         policy_path: Path | None = None,
     ) -> None:
         self.policy_engine = policy_engine or PolicyEngine()
-        self.policy_path = (
-            Path(policy_path)
-            if policy_path is not None
-            else self._resolve_policy_path()
-        )
+        if policy_path is not None:
+            self.policy_path = Path(policy_path)
+            self._policy_source = "constructor"
+        else:
+            self.policy_path = self._resolve_policy_path()
+            if os.environ.get(JIUWENBOX_POLICY_PATH_ENV):
+                self._policy_source = JIUWENBOX_POLICY_PATH_ENV
+            else:
+                self._policy_source = "bundled default"
+        self._log_resolved_policy_path()
+
+    def _log_resolved_policy_path(self) -> None:
+        try:
+            resolved = self.policy_path.resolve()
+        except OSError:
+            resolved = self.policy_path
+        if resolved.exists():
+            logger.info(
+                "Loading security policy from %s (%s)",
+                resolved,
+                self._policy_source,
+            )
+        else:
+            logger.warning(
+                "Security policy file not found at %s (%s); "
+                "will fall back to SecurityPolicy defaults on load",
+                resolved,
+                self._policy_source,
+            )
 
     @staticmethod
     def _resolve_policy_path() -> Path:
         env_path = os.environ.get(JIUWENBOX_POLICY_PATH_ENV)
         if env_path:
             return Path(env_path).expanduser()
-        return Path(__file__).resolve().parents[3] / "configs" / "default-policy.yaml"
+        return default_policy_path()
 
     def load_policy(self) -> SecurityPolicy:
         if self.policy_path.exists():

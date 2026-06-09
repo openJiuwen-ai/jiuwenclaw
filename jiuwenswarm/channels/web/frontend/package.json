@@ -12,8 +12,11 @@
     "preview": "vite preview"
   },
   "dependencies": {
+    "@a2ui/react": "0.8.0",
+    "@a2ui/web_core": "0.8.0",
     "@tailwindcss/typography": "^0.5.19",
     "clsx": "^2.1.0",
+    "html-to-image": "1.11.13",
     "i18next": "^25.8.18",
     "i18next-browser-languagedetector": "^8.2.1",
     "lucide-react": "1.16.0",

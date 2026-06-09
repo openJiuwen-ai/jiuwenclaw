@@ -17,7 +17,6 @@ from __future__ import annotations
 
 import logging
 import os
-import re
 from dataclasses import dataclass
 from typing import Any, Callable
 
@@ -29,16 +28,10 @@ from openjiuwen.harness.factory import create_deep_agent
 from openjiuwen.harness.prompts import resolve_language
 from openjiuwen.harness.rails import (
     AgentModeRail,
-    ConfirmInterruptRail,
     CodingMemoryRail,
     SysOperationRail,
     LspRail
 )
-from openjiuwen.harness.rails.agent_mode_rail import (
-    DEFAULT_PLAN_MODE_ALLOWED_TOOLS,
-)
-from openjiuwen.harness.prompts.builder import PromptSection
-from openjiuwen.harness.prompts.sections import SectionName
 from openjiuwen.harness.rails.context_engineer.context_assemble_rail import ContextAssembleRail
 from openjiuwen.harness.lsp import InitializeOptions
 from openjiuwen.harness.schema.config import SubAgentConfig
@@ -60,7 +53,10 @@ from jiuwenswarm.agents.harness.common.rails.interrupt.interrupt_helpers import 
 from jiuwenswarm.agents.harness.code.prompt.code_prompt_builder import (
     build_code_system_prompt,
 )
-from jiuwenswarm.agents.harness.code.rails import CodeTaskPlanningRail
+from jiuwenswarm.agents.harness.code.rails import (
+    CodeTaskPlanningRail,
+    PlanApprovalRail,
+)
 from jiuwenswarm.agents.harness.common.rails import (
     ProjectMemoryRail,
     StructuredAskUserRail,
@@ -69,22 +65,13 @@ from jiuwenswarm.agents.harness.common.memory.config import get_memory_mode
 from jiuwenswarm.agents.harness.common.tools import SkillToolkit
 from jiuwenswarm.agents.harness.common.tools.acp_chat import acp_chat
 from jiuwenswarm.common.config import get_config
-from jiuwenswarm.common.utils import get_agent_workspace_dir
+from jiuwenswarm.common.coding_memory_paths import resolve_project_coding_memory_dir
 from jiuwenswarm.server.runtime.agent_adapter.code_agent_rail import CodeAgentRail
 from jiuwenswarm.common.hooks_config import load_hooks_config
 from jiuwenswarm.server.hooks.user_hook_rail import UserHookRail
 from jiuwenswarm.common.utils import get_agent_workspace_dir
 
 logger = logging.getLogger(__name__)
-
-# ---------------------------------------------------------------------------
-# Tool name sets (mirrored from agent_mode_rail.py)
-# ---------------------------------------------------------------------------
-
-_TODO_TOOL_NAMES = frozenset({"todo_create", "todo_list", "todo_modify"})
-_SESSION_TOOL_NAMES = frozenset({"sessions_list", "sessions_cancel", "sessions_spawn"})
-_HIDDEN_IN_PLAN_LOCAL = _TODO_TOOL_NAMES | _SESSION_TOOL_NAMES
-_HIDDEN_IN_NORMAL_LOCAL = frozenset({"enter_plan_mode", "exit_plan_mode"})
 
 # ---------------------------------------------------------------------------
 # Static plan mode system prompt note (KV-cache-friendly: same content every turn)
@@ -110,20 +97,6 @@ read-only commands).
 Do NOT proceed to implement anything until the user approves your plan via
 `exit_plan_mode`.
 """
-
-# ---------------------------------------------------------------------------
-# Non-git write operations to block in plan mode's bash tool.
-# The parent AgentModeRail only blocks git-write commands (commit/push/add/etc).
-# These additional patterns block common shell write operations.
-# ---------------------------------------------------------------------------
-
-_NON_GIT_WRITE_RE = re.compile(
-    r"\b(mkdir|touch|mv|cp|chmod|chown|dd|tee|wget|curl\s+.*\s*-[a-zA-Z]*O)\b"
-    r"|\brm\s+(-[a-zA-Z]*[rf]|/|[~.])"
-    r"|\b(7z|tar|zip|unzip|gzip|gunzip)\s+"
-    r"|>\s*\S"
-    r"|>>"
-)
 
 # ---------------------------------------------------------------------------
 # Plan mode instructions for enter_plan_mode tool_result
@@ -176,7 +149,7 @@ Goal: Write the final plan to the plan file.
 - Include a Verification section
 
 #### Phase 5: End Planning Phase
-Call exit_plan_mode to end the planning phase. You must output the content of the final plan file.
+Call exit_plan_mode to end the planning phase.
 
 ### Turn Ending Rules
 Your turn can only end in one of these two ways:
@@ -218,6 +191,7 @@ _RAIL_BUILD_NAMES: dict[str, str] = {
     "CodingMemoryRail": "_build_coding_memory_rail",
     "WorktreeRail": "_build_worktree_rail_via_config",
     "CodeAgentRail": "_build_code_agent_rail",
+    "PlanApprovalRail": "_build_plan_approval_rail",
 }
 
 _TOOL_BUILD_NAMES: dict[str, str] = {
@@ -239,6 +213,63 @@ class _RailBuildInfo:
 
     def __post_init__(self):
         self.params = self.params or {}
+
+
+def _resolve_coding_memory_dir(
+    *,
+    project_dir: str | None,
+    agent_workspace_dir: str,
+) -> str:
+    """Resolve the app-owned CodingMemory directory scoped by project."""
+    return resolve_project_coding_memory_dir(
+        agent_workspace_dir=agent_workspace_dir,
+        project_dir=project_dir,
+    )
+
+
+def _build_coding_memory_directory_node(
+    coding_memory_dir: str,
+    *,
+    description: str,
+) -> dict[str, Any]:
+    return {
+        "name": "coding_memory",
+        "description": description,
+        "path": coding_memory_dir,
+        "children": [
+            {
+                "name": "MEMORY.md",
+                "description": "Coding 记忆索引",
+                "path": "MEMORY.md",
+                "children": [],
+                "is_file": True,
+                "default_content": "",
+            },
+        ],
+    }
+
+
+def _set_workspace_coding_memory_directory(
+    workspace: Any,
+    *,
+    project_dir: str | None,
+    agent_workspace_dir: str,
+    description: str = "Coding Agent memory",
+) -> None:
+    set_directory = getattr(workspace, "set_directory", None)
+    if not callable(set_directory):
+        return
+
+    coding_memory_dir = _resolve_coding_memory_dir(
+        project_dir=project_dir,
+        agent_workspace_dir=agent_workspace_dir,
+    )
+    set_directory(
+        _build_coding_memory_directory_node(
+            coding_memory_dir,
+            description=description,
+        )
+    )
 
 
 def create_coding_memory_rail(
@@ -266,8 +297,10 @@ def create_coding_memory_rail(
             "registering tools with memory fallback provider"
         )
 
-    project_name = os.path.basename(project_dir) if project_dir else "default"
-    coding_memory_dir = os.path.join(agent_workspace_dir, "coding_memory", project_name)
+    coding_memory_dir = _resolve_coding_memory_dir(
+        project_dir=project_dir,
+        agent_workspace_dir=agent_workspace_dir,
+    )
     os.makedirs(coding_memory_dir, exist_ok=True)
 
     return CodingMemoryRail(
@@ -281,236 +314,22 @@ def create_coding_memory_rail(
     )
 
 
-class JiuwenAgentModeRail(AgentModeRail):
-    """扩展 AgentModeRail，对齐 Claude Code 的 plan 模式行为。
+# ─── Plan mode allowed tools for code mode ──────────────────────────────
+# Excludes switch_mode so the LLM cannot unilaterally exit plan mode.
 
-    核心改动（相比父类 AgentModeRail）：
-
-    1. **System prompt 稳定化** — before_model_call 不再增删 system prompt 段
-       （MODE_INSTRUCTIONS / TODO / SESSION_TOOLS），从而避免 mode 切换导致
-       KVCacheManager 检测到 system message 变化而全量释放 KV 缓存。
-
-    2. **Plan 指令进对话** — plan 模式行为指令通过 enter_plan_mode 的
-       tool_result 返回（对齐 Claude Code），而非注入 system prompt。
-
-    3. **屏蔽 switch_mode** — plan 模式下 LLM 无法单方面退出 plan 模式
-       （Claude Code 根本没有 switch_mode 工具）。
-    """
-
-    def __init__(self, **kwargs: Any) -> None:
-        # 从 plan 模式工具白名单中移除 switch_mode，
-        # 阻止 LLM 在 plan 模式下自行切换到 normal 模式
-        allowed_tools = [
-            t for t in DEFAULT_PLAN_MODE_ALLOWED_TOOLS if t != "switch_mode"
-        ]
-        super().__init__(allowed_tools=allowed_tools, **kwargs)
-
-    # ------------------------------------------------------------------
-    # init — monkey-patch EnterPlanModeTool
-    # ------------------------------------------------------------------
-
-    def init(self, agent: "DeepAgent") -> None:
-        """注册工具 + monkey-patch EnterPlanModeTool + ExitPlanModeTool."""
-        super().init(agent)
-        self._patch_enter_plan_mode_tool()
-        self._patch_exit_plan_mode_tool()
-
-    def _patch_enter_plan_mode_tool(self) -> None:
-        """Monkey-patch EnterPlanModeTool.invoke() 使其返回完整 plan 指令.
-
-        对齐 Claude Code：plan 模式行为指令在 tool_result 中返回，
-        而非注入 system prompt。
-        """
-        for tool in self._tools:
-            if getattr(tool.card, "name", "") != "enter_plan_mode":
-                continue
-
-            original_invoke = tool.invoke
-
-            async def patched_invoke(inputs, _orig=original_invoke, **kwargs):
-                result = await _orig(inputs, **kwargs)
-                return result + _ENTER_PLAN_MODE_INSTRUCTIONS_EN
-
-            tool.invoke = patched_invoke
-            logger.info(
-                "[JiuwenAgentModeRail] Patched enter_plan_mode.invoke() "
-                "to return full plan instructions in tool_result"
-            )
-            break
-
-    def _patch_exit_plan_mode_tool(self) -> None:
-        """Monkey-patch ExitPlanModeTool.invoke() to append exit notification.
-
-        Aligns with Claude Code's plan_mode_exit attachment: after exiting
-        plan mode, the model receives an explicit notification that it can
-        now edit files. Without this, the model only sees MODE_INSTRUCTIONS
-        removed from the system prompt but gets no explicit signal that
-        write operations are now permitted.
-        """
-        for tool in self._tools:
-            if getattr(tool.card, "name", "") != "exit_plan_mode":
-                continue
-
-            original_invoke = tool.invoke
-
-            async def patched_invoke(inputs, _orig=original_invoke, **kwargs):
-                result = await _orig(inputs, **kwargs)
-                return result + "\n\n" + _EXIT_PLAN_MODE_NOTIFICATION
-
-            tool.invoke = patched_invoke
-            logger.info(
-                "[JiuwenAgentModeRail] Patched exit_plan_mode.invoke() "
-                "to append plan mode exit notification in tool_result"
-            )
-            break
-
-    # ------------------------------------------------------------------
-    # before_model_call — 工具过滤，不修改 system prompt
-    # ------------------------------------------------------------------
-
-    async def before_model_call(self, ctx: Any) -> None:
-        """工具过滤 + plan 模式约束注入 + prompt 段清理。
-
-        刻意 **不调用** super().before_model_call(ctx) —
-        父类会增删 MODE_INSTRUCTIONS / TODO / SESSION_TOOLS 段，
-        导致 system prompt 变化 → KV 缓存全量释放。
-
-        替代方案：
-        - plan 模式：注入 **静态** MODE_INSTRUCTIONS 段（内容不随 plan_file
-          状态变化，保持 KV 缓存跨 turn 稳定）+ 工具白名单过滤
-        - normal 模式：移除 MODE_INSTRUCTIONS 段 + 隐藏 plan 工具
-        """
-        agent = self._agent
-        session = ctx.session
-        plan_state = agent.load_state(session).plan_mode
-
-        # ---- 工具过滤 + prompt 段管理 ----
-        if plan_state.mode == "plan":
-            # plan 模式：注入静态 plan 模式系统提示词约束
-            # （内容不随 enter_plan_mode 调用状态变化，KV 缓存友好）
-            if self.system_prompt_builder:
-                section = PromptSection(
-                    name=SectionName.MODE_INSTRUCTIONS,
-                    content={"en": _PLAN_MODE_SYSTEM_NOTE},
-                    priority=85,
-                )
-                self.system_prompt_builder.add_section(section)
-                # 移除 TaskPlanningRail/SubagentRail 在更高优先级下
-                # 添加的 TODO/SESSION_TOOLS 段，避免 LLM 在 system prompt
-                # 中看到隐藏工具的描述
-                self.system_prompt_builder.remove_section(SectionName.TODO)
-                self.system_prompt_builder.remove_section(SectionName.SESSION_TOOLS)
-
-            # plan 模式：白名单 + 移除 switch_mode + 隐藏 todo/session 工具
-            if isinstance(ctx.inputs.tools, list):
-                filtered = []
-                for t in ctx.inputs.tools:
-                    tool_name = getattr(t, "name", "")
-                    if tool_name in self._allowed_tools:
-                        if tool_name != "switch_mode" and tool_name not in _HIDDEN_IN_PLAN_LOCAL:
-                            filtered.append(t)
-                ctx.inputs.tools = filtered
-        else:
-            # normal 模式：移除 MODE_INSTRUCTIONS + 隐藏 plan 工具
-            if self.system_prompt_builder:
-                self.system_prompt_builder.remove_section(SectionName.MODE_INSTRUCTIONS)
-            if isinstance(ctx.inputs.tools, list):
-                ctx.inputs.tools = [
-                    t for t in ctx.inputs.tools
-                    if getattr(t, "name", "") not in _HIDDEN_IN_NORMAL_LOCAL
-                ]
-
-        self._sync_task_tool_for_model_tool_inputs(ctx)
-
-        # 防御性清理：非 plan 模式下移除 AgentModeRail 自身注册的 task_tool。
-        # 当通过 switch_mode 强制退出 plan 模式（绕过 exit_plan_mode）时，
-        # _owns_task_tool 未被清理，_sync_task_tool 会将 task_tool 注入工具列表。
-        # 注意：仅在 self._owns_task_tool 为 True 时过滤，避免误删 SubagentRail
-        # 注册的 task_tool（SubagentRail 在 agent 初始化时无条件注册 task_tool）。
-        if (
-            plan_state.mode != "plan"
-            and self._owns_task_tool
-            and isinstance(ctx.inputs.tools, list)
-        ):
-            ctx.inputs.tools = [
-                t for t in ctx.inputs.tools
-                if getattr(t, "name", "") != "task_tool"
-            ]
-
-    # ------------------------------------------------------------------
-    # before_tool_call — 增强 bash 写操作拦截（补齐父类盲区）
-    # ------------------------------------------------------------------
-
-    async def before_tool_call(self, ctx: Any) -> None:
-        """父类逻辑 + 非 git bash 写操作拦截.
-
-        父类 AgentModeRail.before_tool_call 仅拦截 git 写操作
-        （commit/push/add 等），未拦截 mkdir/touch/rm/mv/cp 等
-        通用 shell 写操作。此处补齐这一盲区。
-        """
-        await super().before_tool_call(ctx)
-
-        # 已被父类拒绝的调用无需二次拦截
-        if ctx.extra.get("_skip_tool"):
-            return
-
-        # 仅在 plan 模式下追加检查
-        agent = self._agent
-        session = ctx.session
-        plan_state = agent.load_state(session).plan_mode
-        if plan_state.mode != "plan":
-            return
-
-        # bash 工具：拦截非 git 写操作
-        tool_name = ctx.inputs.tool_name
-        if tool_name == "bash":
-            command = self._extract_bash_command(ctx)
-            if _NON_GIT_WRITE_RE.search(command):
-                logger.info(
-                    "reject bash call: non-git write operation in plan mode"
-                )
-                bash_msg = (
-                    f"[AgentModeRail] Write operations are blocked in "
-                    f"plan mode ({command!r})."
-                )
-                self._reject_tool(ctx, bash_msg)
-                return
-
-    # ------------------------------------------------------------------
-    # after_tool_call — 保留父类行为 + 补充模式恢复
-    # ------------------------------------------------------------------
-
-    async def after_tool_call(self, ctx: Any) -> None:
-        """父类逻辑 + exit_plan_mode 后补充恢复模式（仅在 tool 未恢复时）.
-
-        ExitPlanModeTool.invoke() 在 plan 有内容时已调用 restore_mode_after_plan_exit，
-        此处只在 tool 未调用 restore 时（plan 内容为空 / hook 阻止工具执行）补充调用，
-        避免重复调用导致 pre_plan_mode=None → mode 被覆盖为 "normal" 的问题.
-
-        注意：不检查 ctx.extra.get('_skip_tool') — 当 hook 阻止 exit_plan_mode 执行时，
-        _skip_tool=True 但 restore 未被调用，补充恢复是唯一的机会。
-        pre_plan_mode is not None 检查已能防止重复恢复。
-        """
-        await super().after_tool_call(ctx)
-
-        tool_name = ctx.inputs.tool_name
-        if tool_name == "exit_plan_mode":
-            agent = self._agent
-            session = ctx.session
-            state = agent.load_state(session)
-            # pre_plan_mode 不为 None 说明 ExitPlanModeTool 未调用 restore
-            # （plan 内容为空时的提前返回路径），此时需要补充恢复
-            if state.plan_mode.pre_plan_mode is not None:
-                try:
-                    agent.restore_mode_after_plan_exit(session)
-                    logger.info(
-                        "[JiuwenAgentModeRail] Restored mode after plan exit "
-                        "(plan was empty, tool did not restore)"
-                    )
-                except Exception as exc:
-                    logger.warning(
-                        "[JiuwenAgentModeRail] Failed to restore mode: %s", exc
-                    )
+_CODE_PLAN_ALLOWED_TOOLS: list[str] = [
+    "enter_plan_mode",
+    "exit_plan_mode",
+    "ask_user",
+    "task_tool",
+    "read_file",
+    "grep",
+    "list_files",
+    "glob",
+    "bash",
+    "write_file",
+    "edit_file",
+]
 
 
 class JiuwenClawCodeAdapter(JiuWenClawDeepAdapter):
@@ -632,6 +451,17 @@ class JiuwenClawCodeAdapter(JiuWenClawDeepAdapter):
         configured_subagents, _should_add_general = self._build_configured_subagents(model, config, config_base)
         configured_subagents = configured_subagents or []
 
+        workspace = Workspace(
+            root_path=self._workspace_dir or "./",
+            language=self._resolve_runtime_language(),
+        )
+        _set_workspace_coding_memory_directory(
+            workspace,
+            project_dir=self._project_dir,
+            agent_workspace_dir=self._agent_workspace_dir,
+            description="Coding Agent 记忆模块",
+        )
+
         self._instance = create_deep_agent(
             model=model,
             card=agent_card,
@@ -641,10 +471,7 @@ class JiuwenClawCodeAdapter(JiuWenClawDeepAdapter):
             rails=rails_list if rails_list else [],
             enable_task_loop=config.get("enable_task_loop", True),
             max_iterations=config.get("max_iterations", 15),
-            workspace=Workspace(
-                root_path=self._workspace_dir or "./",
-                language=self._resolve_runtime_language(),
-            ),
+            workspace=workspace,
             sys_operation=sys_operation,
             language=self._resolve_runtime_language(),
             auto_create_workspace=False
@@ -671,24 +498,6 @@ class JiuwenClawCodeAdapter(JiuWenClawDeepAdapter):
             "_jiuwenswarm_project_dir",
             self._project_dir or self._workspace_dir,
         )
-
-        _project_name = os.path.basename(self._project_dir) if self._project_dir else "default"
-        coding_memory_workspace_path = os.path.join("coding_memory", _project_name)
-        self._instance.deep_config.workspace.set_directory({
-            "name": "coding_memory",
-            "description": "Coding Agent 记忆模块",
-            "path": coding_memory_workspace_path,
-            "children": [
-                {
-                    "name": "MEMORY.md",
-                    "description": "Coding 记忆索引",
-                    "path": "MEMORY.md",
-                    "children": [],
-                    "is_file": True,
-                    "default_content": "",
-                },
-            ],
-        })
 
         # code 模式不传: vision_model_config, audio_model_config,
         # context_engine_config, completion_timeout
@@ -739,11 +548,12 @@ class JiuwenClawCodeAdapter(JiuWenClawDeepAdapter):
             _RailBuildInfo(
                 "_code_confirm_interrupt_rail",
                 self._build_confirm_interrupt_rail,
-                {"tool_names": ["switch_mode", "exit_plan_mode"]},
+                {"tool_names": ["switch_mode"]},
             ),
             _RailBuildInfo("_context_processor_rail", self._build_context_processor_rail),
             _RailBuildInfo("_code_task_planning_rail", self._build_code_task_planning_rail),
             _RailBuildInfo("_code_agent_rail", self._build_code_agent_rail),
+            _RailBuildInfo("_code_plan_approval_rail", self._build_plan_approval_rail),
         ]
 
         # 动态 Rails — 从 config.yaml::modes.code.rails 读取
@@ -837,11 +647,17 @@ class JiuwenClawCodeAdapter(JiuWenClawDeepAdapter):
             return None
 
     def _build_agent_mode_rail(self) -> AgentModeRail | None:
-        """构建 JiuwenAgentModeRail（屏蔽 plan 模式下的 switch_mode）."""
+        """构建 CodeAgentModeRail（plan 退出需用户批准后生效）."""
         try:
-            return JiuwenAgentModeRail()
+            from jiuwenswarm.agents.harness.code.rails.code_agent_mode_rail import (
+                CodeAgentModeRail,
+            )
+
+            return CodeAgentModeRail(
+                allowed_tools=_CODE_PLAN_ALLOWED_TOOLS,
+            )
         except Exception as exc:
-            logger.warning("[JiuwenClawCodeAdapter] AgentModeRail create failed: %s", exc)
+            logger.warning("[JiuwenClawCodeAdapter] CodeAgentModeRail create failed: %s", exc)
             return None
 
     @staticmethod
@@ -861,12 +677,18 @@ class JiuwenClawCodeAdapter(JiuWenClawDeepAdapter):
             logger.warning("[JiuwenClawCodeAdapter] StructuredAskUserRail create failed: %s", exc)
             return None
 
-    def _build_confirm_interrupt_rail(self, tool_names: list[str] | None = None) -> ConfirmInterruptRail | None:
-        """构建 ConfirmInterruptRail."""
+    def _build_confirm_interrupt_rail(self, tool_names: list[str] | None = None) -> Any | None:
+        """构建 CodeConfirmInterruptRail（控制类工具需用户确认，含可读提示）."""
         try:
-            return ConfirmInterruptRail(tool_names=tool_names or ["switch_mode"])
+            from jiuwenswarm.agents.harness.code.rails.code_confirm_interrupt_rail import (
+                CodeConfirmInterruptRail,
+            )
+
+            # exit_plan_mode 由 PlanApprovalRail 负责计划审批，不再走 ConfirmInterrupt。
+            filtered = [name for name in (tool_names or []) if name != "exit_plan_mode"]
+            return CodeConfirmInterruptRail(tool_names=filtered or ["switch_mode"])
         except Exception as exc:
-            logger.warning("[JiuwenClawCodeAdapter] ConfirmInterruptRail create failed: %s", exc)
+            logger.warning("[JiuwenClawCodeAdapter] CodeConfirmInterruptRail create failed: %s", exc)
             return None
 
     def _build_lsp_rail_via_config(self) -> Any:
@@ -1213,18 +1035,30 @@ class JiuwenClawCodeAdapter(JiuWenClawDeepAdapter):
             logger.warning("[JiuwenClawCodeAdapter] CodeAgentRail create failed: %s", exc)
             return None
 
+    def _build_plan_approval_rail(self) -> PlanApprovalRail | None:
+        """构建 PlanApprovalRail，管理 plan 审批生命周期。"""
+        try:
+            rail = PlanApprovalRail()
+            logger.info("[JiuwenClawCodeAdapter] PlanApprovalRail created")
+            return rail
+        except Exception as exc:
+            logger.warning("[JiuwenClawCodeAdapter] PlanApprovalRail create failed: %s", exc)
+            return None
+
     def _get_current_agent_rails(
         self, config: dict[str, Any], config_base: dict[str, Any] | None = None
     ) -> list[Any]:
-        """扩展父类方法，将 CodeAgentRail 纳入热重载范围。
+        """扩展父类方法，将 Code/Plan 专属 Rail 纳入热重载范围。
 
         父类 _get_current_agent_rails 只返回 skill/context/memory 等 rail，
-        CodeAgentRail 不在其中。覆盖此方法确保 config reload 时
-        CodeAgentRail 被正确重新初始化。
+        CodeAgentRail 和 PlanApprovalRail 不在其中。覆盖此方法确保 config reload
+        时这些 rail 被正确重新初始化。
         """
         rails_list = super()._get_current_agent_rails(config, config_base)
         if self._code_agent_rail is not None:
             rails_list.append(self._code_agent_rail)
+        if self._code_plan_approval_rail is not None:
+            rails_list.append(self._code_plan_approval_rail)
         return rails_list
 
     # ─── Runtime config ──────────────────────────
@@ -1502,7 +1336,8 @@ class JiuwenClawCodeAdapter(JiuWenClawDeepAdapter):
             or react_config.get("workspace_dir")
             or str(get_agent_workspace_dir())
         )
-        self._agent_workspace_dir = member_workspace_root or str(get_agent_workspace_dir())
+        # Coding memory is application data; keep it out of member/project cwd.
+        self._agent_workspace_dir = str(get_agent_workspace_dir())
         self._instance_overrides = {
             "agent_name": self._agent_name,
             "project_dir": self._project_dir,
@@ -1519,6 +1354,12 @@ class JiuwenClawCodeAdapter(JiuWenClawDeepAdapter):
         tool_cards = self.build_code_tool_cards(agent_id)
         added_tools = _merge_tool_cards(agent, tool_cards)
 
+        _set_coding_memory_directory(
+            agent,
+            self._project_dir,
+            self._agent_workspace_dir,
+        )
+
         rails = self._build_agent_rails(react_config, config_base, mode="code")
         added_rails = sum(1 for rail in rails if _queue_rail_if_missing(agent, rail))
 
@@ -1530,7 +1371,6 @@ class JiuwenClawCodeAdapter(JiuWenClawDeepAdapter):
             if _queue_rail_if_missing(agent, subagent_rail):
                 added_rails += 1
 
-        _set_coding_memory_directory(agent, self._project_dir)
         setattr(agent, "_jiuwenswarm_adapter_mode", "code")
         setattr(agent, "_jiuwenswarm_code_project_dir", self._project_dir or self._workspace_dir)
         setattr(agent, "_jiuwenswarm_project_dir", self._project_dir or self._workspace_dir)
@@ -1652,30 +1492,19 @@ def _resolve_member_workspace_root(agent: Any) -> str | None:
     return None
 
 
-def _set_coding_memory_directory(agent: Any, project_dir: str | None) -> None:
+def _set_coding_memory_directory(
+    agent: Any,
+    project_dir: str | None,
+    agent_workspace_dir: str,
+) -> None:
     deep_config = getattr(agent, "deep_config", None)
     workspace = getattr(deep_config, "workspace", None)
-    set_directory = getattr(workspace, "set_directory", None)
-    if not callable(set_directory):
-        return
-
-    project_name = os.path.basename(project_dir) if project_dir else "default"
-    coding_memory_workspace_path = os.path.join("coding_memory", project_name)
-    set_directory({
-        "name": "coding_memory",
-        "description": "Coding Agent memory",
-        "path": coding_memory_workspace_path,
-        "children": [
-            {
-                "name": "MEMORY.md",
-                "description": "Coding memory",
-                "path": "MEMORY.md",
-                "children": [],
-                "is_file": True,
-                "default_content": "",
-            },
-        ],
-    })
+    _set_workspace_coding_memory_directory(
+        workspace,
+        project_dir=project_dir,
+        agent_workspace_dir=agent_workspace_dir,
+        description="Coding Agent memory",
+    )
 
 
 def configure_code_team_member_agent(

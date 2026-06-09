@@ -1,0 +1,57 @@
+# Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
+
+from jiuwenswarm.server.runtime.a2ui.prompt_instructions import (
+    build_a2ui_autonomy_instruction,
+)
+from jiuwenswarm.server.runtime.a2ui.runtime.prompt import (
+    build_a2ui_client_event_prompt,
+    build_a2ui_prompt_section,
+)
+
+
+def test_a2ui_prompt_discourages_icon_ligature_dependency():
+    instruction = build_a2ui_autonomy_instruction("en")
+
+    assert "Avoid A2UI Icon for semantic content" in instruction
+    assert "Material Symbols" in instruction
+    assert "emoji or text labels" in instruction
+
+
+def test_a2ui_prompt_is_autonomous_not_forced():
+    instruction = build_a2ui_autonomy_instruction("en")
+
+    assert "A2UI is optional" in instruction
+    assert "If A2UI is not appropriate, answer in plain text" in instruction
+    assert "Do not promise to show the result with A2UI and then output only Markdown" in instruction
+
+
+def test_a2ui_zh_prompt_section_is_readable():
+    prompt = build_a2ui_prompt_section("zh")
+
+    assert "你是 jiuwenswarm 的 A2UI 生成器" in prompt
+    assert "当用户需要列表、卡片、表单" in prompt
+    assert "浣犳槸" not in prompt
+    assert "鐢熸垚" not in prompt
+
+
+def test_a2ui_zh_client_event_prompt_is_readable():
+    prompt = build_a2ui_client_event_prompt(
+        {
+            "type": "a2ui.client_event",
+            "event": {
+                "userAction": {
+                    "name": "submit_form",
+                    "surfaceId": "surface-1",
+                    "sourceComponentId": "submit",
+                    "context": {"name": "张三"},
+                },
+            },
+        },
+        channel="web",
+        language="zh",
+    )
+
+    assert "你收到了一次 A2UI 组件交互" in prompt
+    assert "张三" in prompt
+    assert "submit_form" in prompt
+    assert "浣犳敹" not in prompt

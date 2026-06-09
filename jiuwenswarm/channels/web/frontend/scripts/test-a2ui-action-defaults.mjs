@@ -1,0 +1,331 @@
+import assert from 'node:assert/strict';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import ts from 'typescript';
+
+const root = new URL('..', import.meta.url);
+const sourceUrl = new URL('src/features/a2ui/actionDefaults.ts', root);
+const tempDir = await mkdtemp(join(tmpdir(), 'a2ui-action-defaults-'));
+
+async function importTsModule(url) {
+  const source = await readFile(url, 'utf8');
+  const transpiled = ts.transpileModule(source, {
+    compilerOptions: {
+      module: ts.ModuleKind.ES2020,
+      target: ts.ScriptTarget.ES2020,
+      importsNotUsedAsValues: ts.ImportsNotUsedAsValues.Remove,
+    },
+  });
+  const outputPath = join(tempDir, 'actionDefaults.mjs');
+  await writeFile(outputPath, transpiled.outputText, 'utf8');
+  return import(`file://${outputPath.replace(/\\/g, '/')}`);
+}
+
+const {
+  clearA2UIActionDefaults,
+  enrichA2UIClientEventWithDefaults,
+  recordA2UIActionDefaults,
+} = await importTsModule(sourceUrl);
+
+function selectionMessages(defaultValue = 'chinese') {
+  return [
+    { beginRendering: { surfaceId: 'surface-1', root: 'root' } },
+    {
+      surfaceUpdate: {
+        surfaceId: 'surface-1',
+        components: [
+          {
+            id: 'food-choice',
+            component: {
+              MultipleChoice: {
+                selections: { path: '/food/type' },
+                options: [
+                  { label: { literalString: '中餐' }, value: defaultValue },
+                  { label: { literalString: '西餐' }, value: 'western' },
+                ],
+              },
+            },
+          },
+          {
+            id: 'submit',
+            component: {
+              Button: {
+                child: 'submit-label',
+                action: {
+                  name: 'submit_form',
+                  context: [
+                    { key: 'foodType', value: { path: '/food/type' } },
+                  ],
+                },
+              },
+            },
+          },
+        ],
+      },
+    },
+  ];
+}
+
+clearA2UIActionDefaults();
+recordA2UIActionDefaults(selectionMessages());
+
+assert.deepEqual(
+  enrichA2UIClientEventWithDefaults({
+    userAction: {
+      name: 'submit_form',
+      sourceComponentId: 'submit',
+      surfaceId: 'surface-1',
+      timestamp: '2026-05-30T00:00:00.000Z',
+      context: { foodType: null },
+    },
+  }).userAction.context,
+  { foodType: ['chinese'] },
+  'unmodified visible default should be sent instead of null',
+);
+
+assert.deepEqual(
+  enrichA2UIClientEventWithDefaults({
+    userAction: {
+      name: 'submit_form',
+      sourceComponentId: 'submit',
+      surfaceId: 'surface-1',
+      timestamp: '2026-05-30T00:00:00.000Z',
+      context: { foodType: [] },
+    },
+  }).userAction.context,
+  { foodType: ['chinese'] },
+  'same-option selection that leaves an empty array should use visible default',
+);
+
+assert.deepEqual(
+  enrichA2UIClientEventWithDefaults({
+    userAction: {
+      name: 'submit_form',
+      sourceComponentId: 'submit',
+      surfaceId: 'surface-1',
+      timestamp: '2026-05-30T00:00:00.000Z',
+      context: { foodType: {} },
+    },
+  }).userAction.context,
+  { foodType: ['chinese'] },
+  'choice context represented as an empty object should use visible default',
+);
+
+assert.deepEqual(
+  enrichA2UIClientEventWithDefaults({
+    userAction: {
+      name: 'submit_form',
+      sourceComponentId: 'submit',
+      surfaceId: 'surface-1',
+      timestamp: '2026-05-30T00:00:00.000Z',
+      context: { foodType: 'western' },
+    },
+  }).userAction.context,
+  { foodType: 'western' },
+  'non-empty user selection should not be overwritten',
+);
+
+clearA2UIActionDefaults();
+recordA2UIActionDefaults([
+  {
+    surfaceUpdate: {
+      surfaceId: 'surface-1',
+      components: [
+        {
+          id: 'priority-choice',
+          component: {
+            SingleChoice: {
+              selections: { path: '/priority' },
+              options: [
+                { label: { literalString: 'Low' }, value: 'low' },
+                { label: { literalString: 'High' }, value: 'high' },
+              ],
+            },
+          },
+        },
+        {
+          id: 'submit',
+          component: {
+            Button: {
+              child: 'submit-label',
+              action: {
+                name: 'submit_form',
+                context: [{ key: 'priority', value: { path: '/priority' } }],
+              },
+            },
+          },
+        },
+      ],
+    },
+  },
+]);
+
+assert.deepEqual(
+  enrichA2UIClientEventWithDefaults({
+    userAction: {
+      name: 'submit_form',
+      sourceComponentId: 'submit',
+      surfaceId: 'surface-1',
+      timestamp: '2026-05-30T00:00:00.000Z',
+      context: { priority: {} },
+    },
+  }).userAction.context,
+  { priority: ['low'] },
+  'any choice-like component with options and selections.path should provide a visible default',
+);
+
+clearA2UIActionDefaults();
+recordA2UIActionDefaults([
+  {
+    surfaceUpdate: {
+      surfaceId: 'surface-1',
+      components: [
+        {
+          id: 'rating-choice',
+          component: {
+            SingleChoice: {
+              selections: { path: '/rating' },
+              options: [
+                { label: { literalString: 'One' }, value: 1 },
+                { label: { literalString: 'Two' }, value: 2 },
+              ],
+            },
+          },
+        },
+        {
+          id: 'submit',
+          component: {
+            Button: {
+              child: 'submit-label',
+              action: {
+                name: 'submit_form',
+                context: [{ key: 'rating', value: { path: '/rating' } }],
+              },
+            },
+          },
+        },
+      ],
+    },
+  },
+]);
+
+assert.deepEqual(
+  enrichA2UIClientEventWithDefaults({
+    userAction: {
+      name: 'submit_form',
+      sourceComponentId: 'submit',
+      surfaceId: 'surface-1',
+      timestamp: '2026-05-30T00:00:00.000Z',
+      context: { rating: {} },
+    },
+  }).userAction.context,
+  { rating: [1] },
+  'choice defaults should preserve non-string option values',
+);
+
+clearA2UIActionDefaults();
+recordA2UIActionDefaults([
+  {
+    surfaceUpdate: {
+      surfaceId: 'surface-1',
+      components: [
+        {
+          id: 'food-choice',
+          component: {
+            MultipleChoice: {
+              selections: { path: '/food/type', literalArray: ['fallback'] },
+              options: [],
+            },
+          },
+        },
+        {
+          id: 'submit',
+          component: {
+            Button: {
+              child: 'submit-label',
+              action: {
+                name: 'submit_form',
+                context: [{ key: 'foodType', value: { path: '/food/type' } }],
+              },
+            },
+          },
+        },
+      ],
+    },
+  },
+]);
+
+assert.deepEqual(
+  enrichA2UIClientEventWithDefaults({
+    userAction: {
+      name: 'submit_form',
+      sourceComponentId: 'submit',
+      surfaceId: 'surface-1',
+      timestamp: '2026-05-30T00:00:00.000Z',
+      context: {},
+    },
+  }).userAction.context,
+  { foodType: ['fallback'] },
+  'literalArray should be used when no option is visible',
+);
+
+clearA2UIActionDefaults();
+recordA2UIActionDefaults([
+  {
+    surfaceUpdate: {
+      surfaceId: 'surface-1',
+      components: [
+        {
+          id: 'food-choice',
+          component: {
+            MultipleChoice: {
+              selections: { path: '/food/type' },
+              options: [
+                { label: { literalString: 'Chinese' }, value: 'chinese' },
+                { label: { literalString: 'Western' }, value: 'western' },
+              ],
+            },
+          },
+        },
+      ],
+    },
+  },
+]);
+recordA2UIActionDefaults([
+  {
+    surfaceUpdate: {
+      surfaceId: 'surface-1',
+      components: [
+        {
+          id: 'submit',
+          component: {
+            Button: {
+              child: 'submit-label',
+              action: {
+                name: 'submit_form',
+                context: [{ key: 'foodType', value: { path: '/food/type' } }],
+              },
+            },
+          },
+        },
+      ],
+    },
+  },
+]);
+
+assert.deepEqual(
+  enrichA2UIClientEventWithDefaults({
+    userAction: {
+      name: 'submit_form',
+      sourceComponentId: 'submit',
+      surfaceId: 'surface-1',
+      timestamp: '2026-05-30T00:00:00.000Z',
+      context: { foodType: null },
+    },
+  }).userAction.context,
+  { foodType: ['chinese'] },
+  'defaults recorded in an earlier surface update should be available to later buttons',
+);
+
+await rm(tempDir, { recursive: true, force: true });

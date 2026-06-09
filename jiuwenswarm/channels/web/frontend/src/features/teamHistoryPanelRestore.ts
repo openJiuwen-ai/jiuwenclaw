@@ -624,6 +624,14 @@ function collectTeamState(records: Record<string, unknown>[], sessionId: string)
         applyMemberShutdown(memberId);
         continue;
       }
+      if (!shouldKeepMember(memberId)) {
+        continue;
+      }
+      const memberStatus = pickString(event, ['new_status', 'status']);
+      if (memberStatus === 'shut_down') {
+        applyMemberShutdown(memberId);
+        continue;
+      }
       const memberEventType = pickString(event, ['type']);
       if (
         shutdownMembers.has(memberId) &&
@@ -695,6 +703,10 @@ function collectTeamState(records: Record<string, unknown>[], sessionId: string)
   };
 }
 
+export function parseTeamHistoryPanelRecords(records: unknown[], sessionId: string): TeamHistoryPanelState {
+  return collectTeamState(records.filter(isRecord), sessionId);
+}
+
 export async function loadTeamHistoryPanelState(
   sessionId: string,
   signal?: AbortSignal
@@ -705,5 +717,5 @@ export async function loadTeamHistoryPanelState(
     { signal, timeoutMs: 30_000 }
   );
   const records = Array.isArray(result?.records) ? result.records : [];
-  return collectTeamState(records, sessionId);
+  return parseTeamHistoryPanelRecords(records, sessionId);
 }

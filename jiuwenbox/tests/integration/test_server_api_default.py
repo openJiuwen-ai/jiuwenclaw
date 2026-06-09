@@ -2,24 +2,30 @@
 """Integration tests for box-server API endpoints."""
 
 import copy
+import ipaddress
+import json
 import logging
 import posixpath
+import re
 import socket
 import textwrap
 import time
 import uuid
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 import httpx
 import pytest
 import yaml
 
+from jiuwenbox.bundled_configs import default_policy_path
 from jiuwenbox.models.policy import SecurityPolicy
+from jiuwenbox.models.sandbox import SANDBOX_ID_FORMAT_MESSAGE
 from jiuwenbox.supervisor import network as network_module
 from jiuwenbox.supervisor.bwrap import BwrapConfig
 
 _DEFAULT_POLICY = yaml.safe_load(
-    (Path(__file__).resolve().parents[2] / "configs" / "default-policy.yaml").read_text(encoding="utf-8")
+    default_policy_path().read_text(encoding="utf-8")
 )
 _DEFAULT_FILESYSTEM_POLICY = _DEFAULT_POLICY["filesystem_policy"]
 
@@ -194,6 +200,91 @@ def _unused_host_network_tcp_port_from_sandbox(client, sandbox_id: str) -> int:
     return int(data["stdout"].strip())
 
 
+def _isolated_network_policy(*, uplink_subnet: str = "") -> dict:
+    network = {
+        "mode": "isolated",
+        "egress": {"default": "allow"},
+    }
+    if uplink_subnet:
+        network["uplink"] = {"subnet": uplink_subnet}
+    return {
+        "name": "uplink-test-policy",
+        "filesystem_policy": {
+            "read_only": ["/usr", "/lib", "/lib64", "/etc", "/opt"],
+            "read_write": ["/tmp"],
+        },
+        "network": network,
+    }
+
+
+_UPLINK_INFO_SCRIPT = textwrap.dedent(
+    """
+    import ipaddress
+    import json
+    import re
+    import subprocess
+    import sys
+
+    def run_ip(args):
+        try:
+            return subprocess.check_output(
+                ["ip", *args],
+                stderr=subprocess.DEVNULL,
+                text=True,
+            )
+        except (FileNotFoundError, subprocess.CalledProcessError):
+            return ""
+
+    default_route = run_ip(["-4", "route", "show", "default"])
+    dev_match = re.search(r"dev\\s+(\\S+)", default_route)
+    if not dev_match:
+        sys.exit(1)
+    device = dev_match.group(1)
+
+    addr_output = run_ip(["-4", "-o", "addr", "show", "dev", device])
+    inet_match = re.search(r"inet\\s+(\\d+\\.\\d+\\.\\d+\\.\\d+)/(\\d+)", addr_output)
+    if not inet_match:
+        sys.exit(2)
+    sandbox_ip = ipaddress.IPv4Address(inet_match.group(1))
+    prefix_len = int(inet_match.group(2))
+
+    gateway_match = re.search(r"via\\s+(\\d+\\.\\d+\\.\\d+\\.\\d+)", default_route)
+    if not gateway_match:
+        sys.exit(3)
+    gateway = ipaddress.IPv4Address(gateway_match.group(1))
+
+    block = ipaddress.ip_network(f"{sandbox_ip}/{prefix_len}", strict=False)
+    print(json.dumps({
+        "block": str(block),
+        "sandbox_ip": str(sandbox_ip),
+        "gateway": str(gateway),
+    }))
+    """
+).strip()
+
+
+def _uplink_info_from_sandbox(
+    client,
+    sandbox_id: str,
+) -> tuple[ipaddress.IPv4Network, ipaddress.IPv4Address, ipaddress.IPv4Address]:
+    """Read uplink /30 details from inside the sandbox (works when server runs in a container)."""
+    response = client.post(f"/api/v1/sandboxes/{sandbox_id}/exec", json={
+        "command": ["python3", "-c", _UPLINK_INFO_SCRIPT],
+        "timeout_seconds": 5,
+    })
+    assert response.status_code == 200, response.text
+    data = response.json()
+    assert data["exit_code"] == 0, data
+    payload = json.loads(data["stdout"])
+    block = ipaddress.ip_network(payload["block"], strict=False)
+    sandbox_ip = ipaddress.IPv4Address(payload["sandbox_ip"])
+    gateway = ipaddress.IPv4Address(payload["gateway"])
+    assert block.prefixlen == 30, block
+    assert sandbox_ip == block.network_address + 2, (sandbox_ip, block)
+    assert gateway == block.network_address + 1, (gateway, block)
+    return block, sandbox_ip, gateway
+
+
 def _capability_check_script(cap_bit: int) -> str:
     return textwrap.dedent(
         f"""
@@ -309,7 +400,6 @@ def client(server_endpoint):
 def create_sandbox_with_policy(client):
     def factory(
         *,
-        name_prefix: str,
         policy: dict,
         policy_mode: str = "override",
     ) -> dict:
@@ -391,6 +481,82 @@ class TestSandboxCRUD:
 
         resp = client.get(f"/api/v1/sandboxes/{sandbox_id}")
         assert resp.status_code == 404
+
+    @staticmethod
+    def test_create_sandbox_auto_generated_id_format(client):
+        resp = client.post("/api/v1/sandboxes", json={})
+        assert resp.status_code == 201, resp.text
+        sandbox_id = resp.json()["id"]
+        assert re.fullmatch(r"^[0-9a-f]{8}-[0-9a-f]{3}$", sandbox_id), sandbox_id
+
+    @staticmethod
+    def test_create_sandbox_with_custom_id(client):
+        custom_id = f"my-sb_{uuid.uuid4().hex[:6]}"
+        resp = client.post("/api/v1/sandboxes", json={"sandbox_id": custom_id})
+        assert resp.status_code == 201, resp.text
+        assert resp.json()["id"] == custom_id
+
+    @staticmethod
+    def test_create_sandbox_with_custom_id_abcd(client):
+        custom_id = f"abcd-{uuid.uuid4().hex[:4]}"
+        resp = client.post("/api/v1/sandboxes", json={"sandbox_id": custom_id})
+        assert resp.status_code == 201, resp.text
+        assert resp.json()["id"] == custom_id
+
+    @staticmethod
+    def test_create_sandbox_empty_sandbox_id_generates(client):
+        resp = client.post("/api/v1/sandboxes", json={"sandbox_id": ""})
+        assert resp.status_code == 201, resp.text
+        sandbox_id = resp.json()["id"]
+        assert re.fullmatch(r"^[0-9a-f]{8}-[0-9a-f]{3}$", sandbox_id), sandbox_id
+
+    @staticmethod
+    @pytest.mark.parametrize(
+        "invalid_id",
+        [
+            "abc",
+            "ABC123",
+            "my sb",
+            " abcd ",
+            "a" * 17,
+            "id!",
+        ],
+    )
+    def test_create_sandbox_rejects_invalid_custom_id(client, invalid_id):
+        resp = client.post("/api/v1/sandboxes", json={"sandbox_id": invalid_id})
+        assert resp.status_code == 400, resp.text
+        assert SANDBOX_ID_FORMAT_MESSAGE in resp.json()["error"]
+
+    @staticmethod
+    def test_create_sandbox_rejects_duplicate_id(client):
+        custom_id = f"dup-{uuid.uuid4().hex[:4]}"
+        first = client.post("/api/v1/sandboxes", json={"sandbox_id": custom_id})
+        assert first.status_code == 201, first.text
+
+        second = client.post("/api/v1/sandboxes", json={"sandbox_id": custom_id})
+        assert second.status_code == 409, second.text
+        assert custom_id in second.json()["error"]
+
+    @staticmethod
+    def test_create_sandbox_concurrent_duplicate_id(server_endpoint):
+        custom_id = f"race-{uuid.uuid4().hex[:4]}"
+
+        def _create() -> httpx.Response:
+            with _build_httpx_client(server_endpoint, timeout=30.0) as thread_client:
+                return thread_client.post(
+                    "/api/v1/sandboxes",
+                    json={"sandbox_id": custom_id},
+                )
+
+        try:
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                futures = [pool.submit(_create) for _ in range(2)]
+                statuses = sorted(f.result().status_code for f in as_completed(futures))
+
+            assert statuses == [201, 409], statuses
+        finally:
+            with _build_httpx_client(server_endpoint, timeout=30.0) as cleanup_client:
+                cleanup_client.delete(f"/api/v1/sandboxes/{custom_id}")
 
 
 class TestSandboxLifecycle:
@@ -611,7 +777,7 @@ class TestPolicyAPI:
         }
         assert data["capabilities"] == {"add": [], "drop": []}
         assert data["landlock"]["compatibility"] == "best_effort"
-        assert data["network"]["mode"] == "host"
+        assert data["network"]["mode"] == "isolated"
         assert data["network"]["egress"]["allowed_domains"] == ["baidu.com"]
         assert data["network"]["egress"]["allowed_ips"] == ["127.0.0.1/32", "::1/128"]
         assert data["network"]["egress"]["blocked_ips"] == ["169.254.169.254/32"]
@@ -1148,7 +1314,6 @@ class TestPolicyEnforcement:
         create_sandbox_with_policy,
     ):
         sandbox = create_sandbox_with_policy(
-            name_prefix="fs-rw",
             policy={
                 "name": "fs-rw-policy",
                 "filesystem_policy": {
@@ -1182,7 +1347,6 @@ class TestPolicyEnforcement:
         create_sandbox_with_policy,
     ):
         sandbox = create_sandbox_with_policy(
-            name_prefix="fs-ro",
             policy={
                 "name": "fs-ro-policy",
                 "filesystem_policy": {
@@ -1209,7 +1373,6 @@ class TestPolicyEnforcement:
         create_sandbox_with_policy,
     ):
         sandbox = create_sandbox_with_policy(
-            name_prefix="fs-dir",
             policy={
                 "name": "fs-dir-policy",
                 "filesystem_policy": {
@@ -1254,7 +1417,6 @@ class TestPolicyEnforcement:
         create_sandbox_with_policy,
     ):
         sandbox = create_sandbox_with_policy(
-            name_prefix="fs-nested-dir",
             policy={
                 "name": "fs-nested-dir-policy",
                 "filesystem_policy": {
@@ -1302,7 +1464,6 @@ class TestPolicyEnforcement:
         create_sandbox_with_policy,
     ):
         sandbox = create_sandbox_with_policy(
-            name_prefix="fs-file",
             policy={
                 "name": "fs-file-policy",
                 "filesystem_policy": {
@@ -1353,7 +1514,6 @@ class TestPolicyEnforcement:
         create_sandbox_with_policy,
     ):
         sandbox = create_sandbox_with_policy(
-            name_prefix="fs-home-dir",
             policy={
                 "name": "fs-home-dir-policy",
                 "filesystem_policy": {
@@ -1417,7 +1577,6 @@ class TestPolicyEnforcement:
         create_sandbox_with_policy,
     ):
         sandbox = create_sandbox_with_policy(
-            name_prefix="exec-options",
             policy={
                 "name": "exec-options-policy",
                 "filesystem_policy": {
@@ -1454,7 +1613,6 @@ class TestPolicyEnforcement:
         create_sandbox_with_policy,
     ):
         sandbox = create_sandbox_with_policy(
-            name_prefix="policy-env",
             policy={
                 "name": "policy-env-policy",
                 "environment": {
@@ -1501,7 +1659,6 @@ class TestPolicyEnforcement:
         create_sandbox_with_policy,
     ):
         sandbox = create_sandbox_with_policy(
-            name_prefix="exec-js",
             policy={
                 "name": "exec-js-policy",
                 "filesystem_policy": {
@@ -1537,7 +1694,6 @@ class TestPolicyEnforcement:
         create_sandbox_with_policy,
     ):
         sandbox = create_sandbox_with_policy(
-            name_prefix="download-missing",
             policy={
                 "name": "download-missing-policy",
                 "filesystem_policy": {
@@ -1562,7 +1718,6 @@ class TestPolicyEnforcement:
         create_sandbox_with_policy,
     ):
         sandbox = create_sandbox_with_policy(
-            name_prefix="download-dir",
             policy={
                 "name": "download-dir-policy",
                 "filesystem_policy": {
@@ -1587,7 +1742,6 @@ class TestPolicyEnforcement:
         create_sandbox_with_policy,
     ):
         sandbox = create_sandbox_with_policy(
-            name_prefix="list-files",
             policy={
                 "name": "list-files-policy",
                 "filesystem_policy": {
@@ -1645,7 +1799,6 @@ class TestPolicyEnforcement:
         create_sandbox_with_policy,
     ):
         sandbox = create_sandbox_with_policy(
-            name_prefix="search-files",
             policy={
                 "name": "search-files-policy",
                 "filesystem_policy": {
@@ -1693,7 +1846,6 @@ class TestPolicyEnforcement:
         create_sandbox_with_policy,
     ):
         sandbox = create_sandbox_with_policy(
-            name_prefix="process-root",
             policy={
                 "name": "process-root-policy",
                 "filesystem_policy": {
@@ -1734,7 +1886,6 @@ class TestPolicyEnforcement:
         create_sandbox_with_policy,
     ):
         sandbox = create_sandbox_with_policy(
-            name_prefix="syscall-block",
             policy={
                 "name": "syscall-block-policy",
                 "filesystem_policy": {
@@ -1799,7 +1950,6 @@ class TestPolicyEnforcement:
         create_sandbox_with_policy,
     ):
         sandbox = create_sandbox_with_policy(
-            name_prefix="pid-ns",
             policy={
                 "name": "pid-ns-policy",
                 "filesystem_policy": {
@@ -1833,7 +1983,6 @@ class TestPolicyEnforcement:
         create_sandbox_with_policy,
     ):
         sandbox = create_sandbox_with_policy(
-            name_prefix="cap-drop",
             policy={
                 "name": "cap-drop-policy",
                 "filesystem_policy": {
@@ -1872,7 +2021,6 @@ class TestPolicyEnforcement:
         create_sandbox_with_policy,
     ):
         sandbox = create_sandbox_with_policy(
-            name_prefix="cap-add",
             policy={
                 "name": "cap-add-policy",
                 "filesystem_policy": {
@@ -1988,15 +2136,13 @@ class TestPolicyEnforcement:
         assert "unexpected-success" not in data["stdout"]
 
     @staticmethod
-    def test_network_mode_isolated_blocks_http_requests(
+    def test_network_mode_isolated_allows_external_http_requests(
         client,
         create_sandbox_with_policy,
-        server_endpoint,
     ):
         sandbox = create_sandbox_with_policy(
-            name_prefix="net-isolated",
             policy={
-                "name": "net-isolated-policy",
+                "name": "net-isolated-uplink-policy",
                 "filesystem_policy": {
                     "read_only": ["/usr", "/lib", "/lib64", "/etc", "/opt"],
                     "read_write": ["/tmp"],
@@ -2008,18 +2154,70 @@ class TestPolicyEnforcement:
             },
         )
 
-        script = (
-            "import sys, urllib.request; "
-            "urllib.request.urlopen(sys.argv[1], timeout=2).read(); "
-            "print('unexpected-success')"
-        )
+        script = textwrap.dedent(
+            """
+            import sys
+            import urllib.request
+
+            request = urllib.request.Request(
+                sys.argv[1],
+                headers={"User-Agent": "jiuwenbox-integration-test"},
+            )
+            with urllib.request.urlopen(request, timeout=10) as response:
+                print(response.status)
+                print(response.geturl())
+            """
+        ).strip()
         response = client.post(f"/api/v1/sandboxes/{sandbox['id']}/exec", json={
-            "command": ["python", "-c", script, _sandbox_health_url(server_endpoint)],
-            "timeout_seconds": 5,
+            "command": ["python3", "-c", script, "https://www.baidu.com/"],
+            "timeout_seconds": 15,
         })
         assert response.status_code == 200
         data = response.json()
-        assert data["exit_code"] != 0
+        assert data["exit_code"] == 0, data
+        assert "baidu.com" in data["stdout"].lower()
+
+    @staticmethod
+    def test_network_mode_isolated_blocked_ip_rejects_egress(
+        client,
+        create_sandbox_with_policy,
+    ):
+        blocked_ip = socket.gethostbyname("www.baidu.com")
+        sandbox = create_sandbox_with_policy(
+            policy={
+                "name": "net-isolated-block-policy",
+                "filesystem_policy": {
+                    "read_only": ["/usr", "/lib", "/lib64", "/etc", "/opt"],
+                    "read_write": ["/tmp"],
+                },
+                "network": {
+                    "mode": "isolated",
+                    "egress": {
+                        "default": "allow",
+                        "blocked_ips": [f"{blocked_ip}/32"],
+                    },
+                },
+            },
+        )
+
+        script = textwrap.dedent(
+            """
+            import sys
+            import socket
+
+            ip = sys.argv[1]
+            with socket.create_connection((ip, 443), timeout=10):
+                pass
+            print("unexpected-success")
+            """
+        ).strip()
+        response = client.post(f"/api/v1/sandboxes/{sandbox['id']}/exec", json={
+            "command": ["python3", "-c", script, blocked_ip],
+            "timeout_seconds": 15,
+        })
+        assert response.status_code == 200
+        data = response.json()
+        assert data["exit_code"] != 0, data
         assert "unexpected-success" not in data["stdout"]
 
     @staticmethod
@@ -2028,7 +2226,6 @@ class TestPolicyEnforcement:
         create_sandbox_with_policy,
     ):
         sandbox = create_sandbox_with_policy(
-            name_prefix="net-host",
             policy={
                 "name": "net-host-policy",
                 "filesystem_policy": {
@@ -2071,7 +2268,6 @@ class TestPolicyEnforcement:
         create_sandbox_with_policy,
     ):
         sandbox = create_sandbox_with_policy(
-            name_prefix="net-host-listener",
             policy={
                 "name": "net-host-listener-policy",
                 "filesystem_policy": {
@@ -2253,7 +2449,6 @@ class TestPolicyEnforcement:
         create_sandbox_with_policy,
     ):
         sandbox = create_sandbox_with_policy(
-            name_prefix="ingress-allow",
             policy={
                 "name": "ingress-allow-policy",
                 "filesystem_policy": {
@@ -2287,7 +2482,6 @@ class TestPolicyEnforcement:
         create_sandbox_with_policy,
     ):
         sandbox = create_sandbox_with_policy(
-            name_prefix="ingress-block",
             policy={
                 "name": "ingress-block-policy",
                 "filesystem_policy": {
@@ -2322,7 +2516,6 @@ class TestPolicyEnforcement:
         create_sandbox_with_policy,
     ):
         sandbox = create_sandbox_with_policy(
-            name_prefix="netns-persist",
             policy={
                 "name": "netns-persist-policy",
                 "filesystem_policy": {
@@ -2428,7 +2621,6 @@ class TestPolicyEnforcement:
         the happy path here is the locked-down path.
         """
         sandbox = create_sandbox_with_policy(
-            name_prefix="reserved-script-integrity",
             policy=TestPolicyEnforcement._RESERVED_INTEGRITY_POLICY,
         )
 
@@ -2581,7 +2773,6 @@ class TestPolicyEnforcement:
         download) still produce the expected results.
         """
         sandbox = create_sandbox_with_policy(
-            name_prefix="reserved-script-survival",
             policy=TestPolicyEnforcement._RESERVED_INTEGRITY_POLICY,
         )
         sandbox_id = sandbox["id"]
@@ -2890,7 +3081,6 @@ class TestReservedSandboxPaths:
             },
         }
         sandbox = create_sandbox_with_policy(
-            name_prefix="non-reserved",
             policy=policy,
         )
         assert sandbox["phase"] == "ready", sandbox
@@ -3002,6 +3192,102 @@ class TestBwrapFilesystem:
         assert _has_arg_pair(args, "--tmpfs", "/etc")
         assert _has_mount(args, "--ro-bind", "/etc/resolv.conf", "/etc/resolv.conf")
         assert _has_arg_pair(args, "--remount-ro", "/etc")
+
+
+class TestNetworkUplink:
+    @staticmethod
+    def test_isolated_uplink_auto_allocates_cgnat_pool_block(
+        client,
+        create_sandbox_with_policy,
+    ):
+        sandbox = create_sandbox_with_policy(policy=_isolated_network_policy())
+        block, sandbox_ip, _gateway = _uplink_info_from_sandbox(client, sandbox["id"])
+        assert block.subnet_of(ipaddress.ip_network("100.64.0.0/10"))
+        assert sandbox_ip == block.network_address + 2
+
+    @staticmethod
+    def test_isolated_uplink_user_pool_allocates_within_subnet(
+        client,
+        create_sandbox_with_policy,
+    ):
+        pool = "10.55.0.0/24"
+        sandbox = create_sandbox_with_policy(
+            policy=_isolated_network_policy(uplink_subnet=pool),
+        )
+        block, _sandbox_ip, _gateway = _uplink_info_from_sandbox(client, sandbox["id"])
+        assert block.subnet_of(ipaddress.ip_network(pool, strict=False))
+
+    @staticmethod
+    def test_isolated_uplink_skips_route_occupied_block(client):
+        pool = "10.55.0.0/24"
+        policy = _with_runtime_support(_isolated_network_policy(uplink_subnet=pool))
+
+        first_response = client.post("/api/v1/sandboxes", json={
+            "policy_mode": "override",
+            "policy": policy,
+            "sandbox_id": f"uplk1_{uuid.uuid4().hex[:6]}",
+        })
+        assert first_response.status_code == 201, first_response.text
+        first = first_response.json()
+        assert first["phase"] == "ready", first
+        first_block, _, _ = _uplink_info_from_sandbox(client, first["id"])
+
+        second_response = client.post("/api/v1/sandboxes", json={
+            "policy_mode": "override",
+            "policy": policy,
+            "sandbox_id": f"uplk2_{uuid.uuid4().hex[:6]}",
+        })
+        assert second_response.status_code == 201, second_response.text
+        second = second_response.json()
+        assert second["phase"] == "ready", second
+        second_block, _, _ = _uplink_info_from_sandbox(client, second["id"])
+        assert first_block != second_block
+
+    @staticmethod
+    def test_isolated_uplink_concurrent_sandboxes_use_distinct_blocks(client):
+        policy = _with_runtime_support(
+            _isolated_network_policy(uplink_subnet="10.55.0.0/24"),
+        )
+
+        def create_one(index: int):
+            return client.post("/api/v1/sandboxes", json={
+                "policy_mode": "override",
+                "policy": policy,
+                "sandbox_id": f"uplk{index:02d}_{uuid.uuid4().hex[:6]}",
+            })
+
+        with ThreadPoolExecutor(max_workers=4) as executor:
+            responses = list(executor.map(create_one, range(4)))
+
+        sandbox_ids: list[str] = []
+        for response in responses:
+            assert response.status_code == 201, response.text
+            sandbox = response.json()
+            assert sandbox["phase"] == "ready", sandbox
+            sandbox_ids.append(sandbox["id"])
+
+        blocks = [
+            _uplink_info_from_sandbox(client, sandbox_id)[0]
+            for sandbox_id in sandbox_ids
+        ]
+        assert len({str(block) for block in blocks}) == len(blocks)
+
+    @staticmethod
+    def test_isolated_uplink_reports_error_when_pool_has_no_free_block(client):
+        # Policy allows pools up to /24; /30 is rejected at validation time.
+        # 169.254.0.0/24 is a valid pool, but every /30 overlaps the reserved
+        # link-local range and is filtered out by the allocator.
+        pool = "169.254.0.0/24"
+        response = client.post("/api/v1/sandboxes", json={
+            "policy_mode": "override",
+            "policy": _with_runtime_support(
+                _isolated_network_policy(uplink_subnet=pool),
+            ),
+            "sandbox_id": f"uplkex_{uuid.uuid4().hex[:6]}",
+        })
+        assert response.status_code == 201, response.text
+        sandbox = response.json()
+        assert sandbox["phase"] == "error", sandbox
 
 
 class TestNetworkIptables:
@@ -3296,7 +3582,6 @@ class TestBindRootEntries:
     ):
         host_root = bind_root_entries_host_tree
         sandbox = create_sandbox_with_policy(
-            name_prefix="bind-root-entries-ro",
             policy={
                 "name": "bind-root-entries-ro-policy",
                 "filesystem_policy": {
@@ -3355,7 +3640,6 @@ class TestBindRootEntries:
     ):
         host_root = bind_root_entries_host_tree
         sandbox = create_sandbox_with_policy(
-            name_prefix="bind-root-entries-rw",
             policy={
                 "name": "bind-root-entries-rw-policy",
                 "filesystem_policy": {
@@ -3401,7 +3685,6 @@ class TestBindRootEntries:
         # confirm the bind actually shares the host inode rather than landing
         # on a tmpfs unique to this sandbox.
         verify_sandbox = create_sandbox_with_policy(
-            name_prefix="bind-root-entries-rw-verify",
             policy={
                 "name": "bind-root-entries-rw-verify-policy",
                 "filesystem_policy": {
@@ -3440,7 +3723,6 @@ class TestBindRootEntries:
     ):
         host_root = bind_root_entries_host_tree
         sandbox = create_sandbox_with_policy(
-            name_prefix="bind-root-entries-filter",
             policy={
                 "name": "bind-root-entries-filter-policy",
                 "filesystem_policy": {
@@ -3484,7 +3766,6 @@ class TestBindRootEntries:
         # to be independent of that topology.
         missing = f"/tmp/jiuwenbox-bind-root-entries-missing-{uuid.uuid4().hex}"
         sandbox = create_sandbox_with_policy(
-            name_prefix="bind-root-entries-missing",
             policy={
                 "name": "bind-root-entries-missing-policy",
                 "filesystem_policy": {
@@ -3529,7 +3810,6 @@ class TestBindRootEntries:
         host_root = bind_root_entries_host_tree
         nested_host_root = f"{host_root}/nested_dir"
         sandbox = create_sandbox_with_policy(
-            name_prefix="bind-root-entries-roundtrip",
             policy={
                 "name": "bind-root-entries-roundtrip-policy",
                 "filesystem_policy": {
@@ -3677,7 +3957,6 @@ class TestBindRootEntries:
 
         try:
             sandbox = create_sandbox_with_policy(
-                name_prefix="bind-root-entries-app-build-rw-overlay",
                 policy={
                     "name": "bind-root-entries-app-build-rw-overlay-policy",
                     "filesystem_policy": {
@@ -3773,7 +4052,6 @@ class TestBindRootEntries:
             # wrote, proving the rw bind shares the host inode rather than a
             # per-sandbox tmpfs.
             verify_sandbox = create_sandbox_with_policy(
-                name_prefix="bind-root-entries-app-build-verify",
                 policy={
                     "name": "bind-root-entries-app-build-verify-policy",
                     "filesystem_policy": {
@@ -3940,7 +4218,6 @@ class TestCgroupPolicy:
     @staticmethod
     def test_no_cgroup_field_skips_setup_entirely(client, create_sandbox_with_policy):
         sandbox = create_sandbox_with_policy(
-            name_prefix="cgroup-skip-noField",
             policy=TestCgroupPolicy._expect_no_limit_policy(None),
         )
         TestCgroupPolicy._assert_skip_path_runs_cleanly(client, sandbox["id"])
@@ -3948,7 +4225,6 @@ class TestCgroupPolicy:
     @staticmethod
     def test_empty_cgroup_field_skips_setup(client, create_sandbox_with_policy):
         sandbox = create_sandbox_with_policy(
-            name_prefix="cgroup-skip-empty",
             policy=TestCgroupPolicy._expect_no_limit_policy({}),
         )
         TestCgroupPolicy._assert_skip_path_runs_cleanly(client, sandbox["id"])
@@ -3956,7 +4232,6 @@ class TestCgroupPolicy:
     @staticmethod
     def test_all_null_cgroup_field_skips_setup(client, create_sandbox_with_policy):
         sandbox = create_sandbox_with_policy(
-            name_prefix="cgroup-skip-allNull",
             policy=TestCgroupPolicy._expect_no_limit_policy({
                 "memory_max": None,
                 "cpu_max": None,
@@ -4086,7 +4361,6 @@ class TestCgroupPolicy:
         create_sandbox_with_policy,
     ):
         sandbox = create_sandbox_with_policy(
-            name_prefix="cgroup-roundtrip",
             policy={
                 "name": "cgroup-roundtrip-policy",
                 "filesystem_policy": {
@@ -4120,7 +4394,6 @@ class TestCgroupPolicy:
         create_sandbox_with_policy,
     ):
         sandbox = create_sandbox_with_policy(
-            name_prefix="cgroup-memory-limit",
             policy={
                 "name": "cgroup-memory-policy",
                 "filesystem_policy": {
@@ -4168,7 +4441,6 @@ class TestCgroupPolicy:
         create_sandbox_with_policy,
     ):
         sandbox = create_sandbox_with_policy(
-            name_prefix="cgroup-pids-limit",
             policy={
                 "name": "cgroup-pids-policy",
                 "filesystem_policy": {
@@ -4232,7 +4504,6 @@ class TestCgroupPolicy:
         create_sandbox_with_policy,
     ):
         sandbox = create_sandbox_with_policy(
-            name_prefix="cgroup-cpu-throttle",
             policy={
                 "name": "cgroup-cpu-policy",
                 "filesystem_policy": {

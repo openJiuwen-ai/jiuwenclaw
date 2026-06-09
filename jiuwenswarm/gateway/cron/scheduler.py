@@ -309,12 +309,14 @@ class CronSchedulerService:
         elif ev.kind == "push":
             await self._on_push(job, ev.run_id)
             if job.delete_after_run:
-                logger.info("[Cron] delete_after_run job=%s, deleting after push", job.id)
+                # 不删除，改为标记过期（与自然过期的一次性任务行为一致）
+                logger.info("[Cron] delete_after_run job=%s, marking expired after push", job.id)
                 try:
-                    await self._store.delete_job(job.id)
-                    self._jobs.pop(job.id, None)
-                except Exception as delete_exc:
-                    logger.warning("[Cron] delete_after_run failed job=%s: %s", job.id, delete_exc)
+                    await self._store.update_job(job.id, {"enabled": False, "expired": True})
+                    job.enabled = False
+                    job.expired = True
+                except Exception as update_exc:
+                    logger.warning("[Cron] mark expired after push failed job=%s: %s", job.id, update_exc)
                 return
             try:
                 push_dt, wake_dt, next_run_id = self._compute_next_run(job, now_ts=self._now_fn())

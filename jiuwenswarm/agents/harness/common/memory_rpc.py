@@ -22,6 +22,7 @@ from jiuwenswarm.agents.harness.common.rails.project_memory import (
     discover_and_load_memory_files,
     get_large_memory_files,
 )
+from jiuwenswarm.common.coding_memory_paths import resolve_project_coding_memory_dir
 from jiuwenswarm.common.config import get_config
 
 logger = logging.getLogger(__name__)
@@ -34,8 +35,10 @@ def _is_forbidden_enabled(config: dict[str, Any] | None) -> bool:
 
 
 def _get_coding_memory_dir(workspace: str, project_dir: str | None = None) -> str:
-    _project_name = os.path.basename(project_dir) if project_dir else "default"
-    return os.path.join(workspace, "coding_memory", _project_name)
+    return resolve_project_coding_memory_dir(
+        agent_workspace_dir=workspace,
+        project_dir=project_dir,
+    )
 
 
 def _get_allowed_dirs(workspace: str, project_dir: str | None = None) -> list[str]:

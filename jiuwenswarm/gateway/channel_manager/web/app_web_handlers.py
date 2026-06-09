@@ -38,8 +38,15 @@ from jiuwenswarm.common.config import (
     update_permissions_enabled_in_config,
     update_memory_forbidden_enabled_in_config,
     update_memory_forbidden_description_in_config,
+    update_a2ui_in_config,
     update_updater_in_config,
 )
+from jiuwenswarm.server.runtime.a2ui.integration import (
+    get_a2ui_config_payload,
+    get_default_a2ui_config_payload,
+    validate_a2ui_config_update,
+)
+from jiuwenswarm.common.reasoning_injector import build_reasoning_model_request_kwargs
 from jiuwenswarm.common.updater import UpdaterService
 from jiuwenswarm.common.utils import (
     get_agent_sessions_dir,
@@ -78,6 +85,18 @@ def _values_match(parsed_val: Any, resolved_val: Any) -> bool:
     return str(parsed_val if parsed_val is not None else "") == str(
         resolved_val if resolved_val is not None else ""
     )
+
+
+def _serialize_reasoning_level(value: Any) -> Any:
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    from ruamel.yaml.scalarstring import DoubleQuotedScalarString
+    # Always emit a quoted YAML string so the same field never round-trips
+    # as a mix of plain scalars and quoted scalars.
+    return DoubleQuotedScalarString(text)
 
 
 def _merge_models_for_replace_all(
@@ -122,6 +141,12 @@ def _merge_models_for_replace_all(
                 new_mcc["client_provider"] = item["model_provider"]
             if not _values_match(item["temperature"], resolved_mco.get("temperature")):
                 new_mco["temperature"] = item["temperature"]
+            reasoning_level = item.get("reasoning_level", "")
+            if not _values_match(reasoning_level, resolved_mco.get("reasoning_level")):
+                if reasoning_level:
+                    new_mco["reasoning_level"] = _serialize_reasoning_level(reasoning_level)
+                else:
+                    new_mco.pop("reasoning_level", None)
             if not _values_match(item["timeout"], resolved_mcc.get("timeout")):
                 new_mcc["timeout"] = item["timeout"]
             if not _values_match(item["alias"], (resolved_entry or {}).get("alias")):
@@ -148,6 +173,8 @@ def _merge_models_for_replace_all(
                 },
                 "model_config_obj": {
                     "temperature": item["temperature"],
+                    **({"reasoning_level": _serialize_reasoning_level(item.get("reasoning_level"))}
+                       if item.get("reasoning_level") else {}),
                 },
                 "is_default": item["is_default"],
                 "alias": item["alias"],
@@ -375,6 +402,7 @@ _CONFIG_YAML_KEYS = frozenset({
     "permissions_enabled",
     "memory_forbidden_enabled",
     "memory_forbidden_description",
+    "a2ui_enabled",
 })
 
 
@@ -636,6 +664,7 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             payload["memory_forbidden_enabled"] = "true" if memory_cfg.get("enabled", False) else "false"
             memory_desc = memory_cfg.get("description") or {}
             payload["memory_forbidden_description"] = memory_desc
+            payload.update(get_a2ui_config_payload(raw))
             if not payload.get("free_search_ddg_enabled"):
                 payload["free_search_ddg_enabled"] = "false"
             if not payload.get("free_search_bing_enabled"):
@@ -649,6 +678,8 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             payload.setdefault("evolution_auto_scan", "false")
             payload.setdefault("memory_forbidden_enabled", "false")
             payload.setdefault("memory_forbidden_description", "")
+            for key, value in get_default_a2ui_config_payload().items():
+                payload.setdefault(key, value)
             payload.setdefault("free_search_ddg_enabled", "false")
             payload.setdefault("free_search_bing_enabled", "false")
         await channel.send_response(ws, req_id, ok=True, payload=payload)
@@ -747,6 +778,11 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
                 elif param_key == "memory_forbidden_description":
                     desc_val = str(val).strip()
                     update_memory_forbidden_description_in_config({preferred_lang: desc_val})
+                elif param_key.startswith("a2ui_"):
+                    ok, update, error = validate_a2ui_config_update(param_key, val)
+                    if not ok:
+                        raise _ConfigBadRequest(error or "invalid A2UI config")
+                    update_a2ui_in_config(update)
                 yaml_updated.append(param_key)
             except Exception as e:  # noqa: BLE001
                 logger.warning("[config.set] 写回 config.yaml 失败 %s: %s", param_key, e)
@@ -824,6 +860,7 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             verify_ssl = bool(item.get("verify_ssl", False))
             is_default = bool(item.get("is_default", False))
             alias = str(item.get("alias") or "").strip()
+            reasoning_level = str(item.get("reasoning_level") or "").strip()
 
             if alias:
                 if alias in aliases_seen:
@@ -841,6 +878,7 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
                 "timeout": timeout,
                 "verify_ssl": verify_ssl,
                 "alias": alias,
+                "reasoning_level": reasoning_level,
                 "origin_index": origin_index,
             })
 
@@ -942,9 +980,19 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
 
         verify_ssl = bool(params.get("verify_ssl", False))
 
+        model_config_obj = {"temperature": 0}
+        if "reasoning_level" in params:
+            model_config_obj["reasoning_level"] = params.get("reasoning_level")
+        reasoning_mcc = {
+            "client_provider": model_provider,
+            "api_base": api_base,
+        }
         model_request_config = ModelRequestConfig(
-            model=model,
-            temperature=0,
+            **build_reasoning_model_request_kwargs(
+                model_client_config=reasoning_mcc,
+                model_config_obj=model_config_obj,
+                model_name=model,
+            )
         )
         model_client_config = ModelClientConfig(
             client_id="config-validate",
@@ -1053,6 +1101,7 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
                     "api_key": mcc.get("api_key", ""),
                     "model_provider": mcc.get("client_provider", ""),
                     "temperature": mco.get("temperature", 0.95),
+                    "reasoning_level": "off" if mco.get("reasoning_level") is False else mco.get("reasoning_level", ""),
                     "is_default": is_default,
                     "alias": entry.get("alias", ""),
                     "origin_index": idx,
@@ -2450,18 +2499,19 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             try:
                 if req_method == ReqMethod.HARNESS_PACKAGES_GET:
                     packages_file = Path(_HARNESS_PACKAGES_FILE)
-                    if packages_file.exists():
-                        data = json.loads(packages_file.read_text(encoding="utf-8"))
+                    if await asyncio.to_thread(packages_file.exists):
+                        raw_text = await asyncio.to_thread(packages_file.read_text, encoding="utf-8")
+                        data = await asyncio.to_thread(json.loads, raw_text)
                     else:
                         service = AutoHarnessService(rail=None, agent=None)
-                        data = service.scan_runtime_extensions()
-                        service.save_packages(data)
+                        data = await asyncio.to_thread(service.scan_runtime_extensions)
+                        await asyncio.to_thread(service.save_packages, data)
                     await channel.send_response(ws, req_id, ok=True, payload=data)
                     return
                 elif req_method == ReqMethod.HARNESS_PACKAGES_SCAN:
                     service = AutoHarnessService(rail=None, agent=None)
-                    data = service.scan_runtime_extensions()
-                    service.save_packages(data)
+                    data = await asyncio.to_thread(service.scan_runtime_extensions)
+                    await asyncio.to_thread(service.save_packages, data)
                     await channel.send_response(ws, req_id, ok=True, payload=data)
                     return
                 elif req_method == ReqMethod.HARNESS_PACKAGES_DELETE:
@@ -2471,7 +2521,7 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
                             ws, req_id, ok=False, error="Cannot delete native agent version", code="BAD_REQUEST")
                         return
                     service = AutoHarnessService(rail=None, agent=None)
-                    payload = service.delete_package(package_id)
+                    payload = await service.delete_package(package_id)
                     await channel.send_response(ws, req_id, ok=True, payload=payload)
                     return
                 else:

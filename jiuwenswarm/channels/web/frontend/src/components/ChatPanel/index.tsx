@@ -5,7 +5,8 @@
  */
 
 import React, { useRef, useEffect, useLayoutEffect, useCallback, useMemo } from 'react';
-import { ArrowRight, Sparkles } from 'lucide-react';
+import { ArrowRight, LoaderCircle, Share2, Sparkles } from 'lucide-react';
+import type { TFunction } from 'i18next';
 import { useTranslation } from 'react-i18next';
 import { useChatStore, useSessionStore, useTodoStore } from '../../stores';
 import { AgentMode, Message, UserAnswer } from '../../types';
@@ -35,6 +36,9 @@ interface ChatPanelProps {
   isProcessing: boolean;
   onNewSession: () => Promise<void>;
   onUserAnswer: (requestId: string, answers: UserAnswer[]) => void;
+  onExportShare?: () => void | Promise<void>;
+  isExportingShare?: boolean;
+  canExportShare?: boolean;
   /** 自会话管理恢复历史后出现；支持分页加载更早消息 */
   historyPager?: ChatHistoryPagerProps | null;
 }
@@ -166,6 +170,19 @@ function WelcomeHeading() {
   );
 }
 
+function getShareExportTitle(
+  t: TFunction,
+  isExportingShare: boolean,
+  canExportShare: boolean
+): string {
+  if (isExportingShare) {
+    return t('share.exporting');
+  }
+  if (!canExportShare) {
+    return t('share.exportUnavailable');
+  }
+  return t('share.export');
+}
 
 export function ChatPanel({
   onSendMessage,
@@ -175,6 +192,9 @@ export function ChatPanel({
   isProcessing,
   onNewSession,
   onUserAnswer,
+  onExportShare,
+  isExportingShare = false,
+  canExportShare = false,
   historyPager = null,
 }: ChatPanelProps) {
   const { t } = useTranslation();
@@ -201,6 +221,8 @@ export function ChatPanel({
     t('chat.welcomeSuggestions.journey'),
     t('chat.welcomeSuggestions.skills'),
   ];
+  const shouldShowShareExport = Boolean(onExportShare && hasConversation);
+  const shareExportTitle = getShareExportTitle(t, isExportingShare, canExportShare);
 
   // 跟踪用户是否正在查看历史消息（不在底部）
   const userScrolledUpRef = useRef(false);
@@ -298,6 +320,31 @@ export function ChatPanel({
     <div className="chat-panel-shell flex flex-col h-full" data-testid="chat-panel">
       {/* HarnessProgressBar - sticky header, doesn't scroll with messages */}
       <div className="sticky top-0 z-10 px-3 pt-2 bg-bg/95 backdrop-blur-sm">
+        {shouldShowShareExport && (
+          <div className="mb-2 flex justify-end">
+            <button
+              type="button"
+              className={`icon-btn share-export-btn ${isExportingShare ? 'share-export-btn--loading' : ''}`}
+              data-testid="share-export"
+              title={shareExportTitle}
+              aria-label={shareExportTitle}
+              aria-busy={isExportingShare}
+              disabled={!canExportShare || isExportingShare}
+              onClick={() => {
+                void onExportShare?.();
+              }}
+            >
+              {isExportingShare ? (
+                <>
+                  <LoaderCircle className="share-export-btn__spinner" size={16} strokeWidth={2} />
+                  <span className="share-export-btn__label">{t('share.generating')}</span>
+                </>
+              ) : (
+                <Share2 size={16} strokeWidth={2} />
+              )}
+            </button>
+          </div>
+        )}
         <HarnessProgressBar />
       </div>
       <div ref={scrollContainerRef} className="chat-scroll flex-1 overflow-y-auto" onScroll={handleScroll} onWheel={handleWheel}>

@@ -23,7 +23,6 @@ type SandboxResponse = {
   effective_files?: SandboxEffectiveFiles;
   jiuwenbox?: { host?: string; port?: number; ready?: boolean };
   agent_recreated?: boolean;
-  rebuilt_modes?: string[];
   jiuwenbox_stopped?: boolean;
 };
 
@@ -109,7 +108,6 @@ export function createSandboxCommand(): SlashCommand {
     usage: "/sandbox <enable|disable|exclude|files> ...",
     example: "/sandbox enable",
     kind: CommandKind.BUILT_IN,
-    hidden: true,
     takesArgs: true,
     action: async (ctx, args) => {
       const raw = (args ?? "").trim();
@@ -133,12 +131,11 @@ export function createSandboxCommand(): SlashCommand {
           const jb = payload.jiuwenbox;
           const host = jb?.host ?? "127.0.0.1";
           const port = jb?.port ?? 8321;
-          const rebuilt = payload.rebuilt_modes ?? [];
-          const rebuiltText = rebuilt.length ? ` (rebuilt: ${rebuilt.join(", ")})` : "";
+          const jbText = `jiuwenbox @ ${host}:${port}`;
           ctx.addItem(
             addInfo(
               ctx.sessionId,
-              `Sandbox enabled (jiuwenbox @ ${host}:${port}); agent rebuilt${rebuiltText}.`,
+              `Sandbox enabled (${jbText}).`,
               "s",
             ),
           );
@@ -148,21 +145,19 @@ export function createSandboxCommand(): SlashCommand {
 
         if (sub === "disable") {
           const payload = await ctx.request<SandboxResponse>("command.sandbox", { sub: "disable" });
-          const rebuilt = payload.rebuilt_modes ?? [];
-          const rebuiltText = rebuilt.length ? ` (rebuilt: ${rebuilt.join(", ")})` : "";
           const jb = payload.jiuwenbox;
           let jbText = "";
           if (payload.jiuwenbox_stopped) {
             const host = jb?.host ?? "127.0.0.1";
             const port = jb?.port ?? 8321;
-            jbText = `; jiuwenbox stopped @ ${host}:${port}`;
+            jbText = `jiuwenbox stopped @ ${host}:${port}`;
           } else if (jb?.host && jb?.port) {
-            jbText = `; jiuwenbox @ ${jb.host}:${jb.port} left running (external)`;
+            jbText = `jiuwenbox @ ${jb.host}:${jb.port} left running (external)`;
           }
           ctx.addItem(
             addInfo(
               ctx.sessionId,
-              `Sandbox disabled; agent rebuilt${rebuiltText}${jbText}.`,
+              `Sandbox disabled (${jbText}).`,
               "s",
             ),
           );

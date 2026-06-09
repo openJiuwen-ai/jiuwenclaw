@@ -10,7 +10,6 @@ from types import SimpleNamespace
 import pytest
 from openjiuwen.agent_teams.schema.team import TeamRole
 
-from jiuwenswarm.agents.harness.team import TeamMonitorHandler
 from jiuwenswarm.server.runtime.agent_adapter import evolution_helpers
 from jiuwenswarm.server.runtime.agent_adapter import team_helpers
 
@@ -65,56 +64,56 @@ class _FakeProgressOnlyRail(_FakeRail):
 class _TeamHelpersTestApi:
     @staticmethod
     async def watch_team_evolution_and_push(
-        channel_id: str | None,
-        session_id: str,
-        rail: object,
+            channel_id: str | None,
+            session_id: str,
+            rail: object,
     ) -> None:
         watcher = getattr(team_helpers, "_watch_team_evolution_and_push")
         await watcher(channel_id, session_id, rail)
 
     @staticmethod
     def ensure_team_evolution_watcher(
-        channel_id: str | None,
-        session_id: str,
-        *,
-        source: str = "unknown",
+            channel_id: str | None,
+            session_id: str,
+            *,
+            source: str = "unknown",
     ) -> None:
         ensure_watcher = getattr(team_helpers, "ensure_team_evolution_watcher")
         ensure_watcher(channel_id, session_id, source=source)
 
     @staticmethod
     async def handle_team_evolve_list_command(
-        channel_id: str | None,
-        session_id: str,
-        query: str,
+            channel_id: str | None,
+            session_id: str,
+            query: str,
     ) -> dict[str, object] | None:
         handler = getattr(team_helpers, "_handle_team_evolve_list_command")
         return await handler(channel_id, session_id, query)
 
     @staticmethod
     async def handle_team_slash_command(
-        channel_id: str | None,
-        session_id: str,
-        query: str,
+            channel_id: str | None,
+            session_id: str,
+            query: str,
     ) -> dict[str, object] | None:
         handler = getattr(team_helpers, "_handle_team_slash_command")
         return await handler(channel_id, session_id, query)
 
     @staticmethod
     async def consume_stream_with_query(
-        channel_id: str | None,
-        session_id: str,
-        spec: object,
-        query: str,
+            channel_id: str | None,
+            session_id: str,
+            spec: object,
+            query: str,
     ) -> None:
         consumer = getattr(team_helpers, "_consume_stream_with_query")
         await consumer(channel_id, session_id, spec, query, round_id=1)
 
     @staticmethod
     async def consume_monitor_events(
-        channel_id: str | None,
-        session_id: str,
-        monitor_handler: object,
+            channel_id: str | None,
+            session_id: str,
+            monitor_handler: object,
     ) -> None:
         consumer = getattr(team_helpers, "_consume_monitor_events")
         await consumer(channel_id, session_id, monitor_handler)
@@ -209,7 +208,7 @@ async def test_team_evolution_monitor_waits_for_real_request_id(monkeypatch):
 
 @pytest.mark.anyio
 async def test_team_evolution_monitor_starts_cycle_for_started_progress_without_request_id(
-    monkeypatch,
+        monkeypatch,
 ):
     _FakeTransport.pushes = []
     progress_event = SimpleNamespace(
@@ -515,9 +514,9 @@ async def test_team_evolution_monitor_uses_delivery_context_metadata(monkeypatch
     ],
 )
 async def test_team_evolution_monitor_reads_terminal_outcome_from_host_events(
-    monkeypatch,
-    status: str,
-    expected_stage: str,
+        monkeypatch,
+        status: str,
+        expected_stage: str,
 ):
     _FakeTransport.pushes = []
     outcome_event = SimpleNamespace(
@@ -556,7 +555,7 @@ async def test_team_evolution_monitor_reads_terminal_outcome_from_host_events(
 
 @pytest.mark.anyio
 async def test_team_evolution_monitor_maps_noop_progress_to_no_evolution_generated(
-    monkeypatch,
+        monkeypatch,
 ):
     _FakeTransport.pushes = []
     progress_event = SimpleNamespace(
@@ -634,8 +633,8 @@ async def test_team_evolution_monitor_uses_approval_request_id_without_provision
         if event_type == "chat.ask_user_question":
             approval_pushes.append(push)
         if (
-            event_type == "chat.evolution_status"
-            and push["payload"]["status"] == "start"
+                event_type == "chat.evolution_status"
+                and push["payload"]["status"] == "start"
         ):
             status_starts.append(push)
     assert len(status_starts) == 1
@@ -747,8 +746,8 @@ async def test_ensure_team_evolution_watcher_starts_without_reasoning_gate(monke
 
         @staticmethod
         def register_team_evolution_watcher(
-            session_id: str,
-            task: asyncio.Task,
+                session_id: str,
+                task: asyncio.Task,
         ) -> None:
             registered[session_id] = task
 
@@ -789,8 +788,8 @@ async def test_ensure_team_evolution_watcher_skips_disabled_auto_scan(monkeypatc
 
         @staticmethod
         def register_team_evolution_watcher(
-            session_id: str,
-            task: asyncio.Task,
+                session_id: str,
+                task: asyncio.Task,
         ) -> None:
             registered[session_id] = task
 
@@ -829,6 +828,17 @@ async def test_consume_stream_with_query_launches_watcher_after_runtime_ready(mo
             calls.append(f"pop:{session_id}")
             return None
 
+        @staticmethod
+        def resolve_team_agent(session_id: str):
+            return None
+
+        @staticmethod
+        def get_workflow_handler(session_id: str):
+            return None
+
+        @staticmethod
+        def register_workflow_handler(session_id: str, handler: object) -> None:
+            calls.append(f"register_workflow_handler:{session_id}")
 
     async def _fake_stream(**kwargs):
         yield SimpleNamespace(kind="ready")
@@ -855,14 +865,15 @@ async def test_consume_stream_with_query_launches_watcher_after_runtime_ready(mo
     )
 
     async def _fake_monitor(
-        channel_id: str | None,
-        session_id: str,
-        team_name: str,
-        hide_dm: bool = False,
+            channel_id: str | None,
+            session_id: str,
+            team_name: str,
+            hide_dm: bool = False,
+            enable_swarmflow: bool = False,
     ) -> None:
         calls.append(f"monitor:{session_id}:{team_name}")
 
-    monkeypatch.setattr(team_helpers, "ensure_monitor_for_active_runtime", _fake_monitor)
+    monkeypatch.setattr(team_helpers, "ensure_monitor_handlers_for_active_runtime", _fake_monitor)
     monkeypatch.setattr(
         team_helpers,
         "ensure_team_evolution_watcher",
@@ -1001,9 +1012,9 @@ async def test_process_team_message_stream_handles_team_evolve_list(monkeypatch)
 
     chunks = []
     async for chunk in team_helpers.process_team_message_stream(
-        request,
-        inputs,
-        object(),
+            request,
+            inputs,
+            object(),
     ):
         chunks.append(chunk)
 
@@ -1019,6 +1030,59 @@ async def test_process_team_message_stream_handles_team_evolve_list(monkeypatch)
     }
     assert chunks[1].is_complete is False
     assert chunks[2].is_complete is True
+
+
+@pytest.mark.anyio
+async def test_process_team_message_stream_emits_processing_done_for_followup(monkeypatch):
+    class _FakeManager:
+        interact_calls: list[tuple[str, str]] = []
+
+        @staticmethod
+        def has_stream_task(session_id: str) -> bool:
+            assert session_id == "sess-team-followup"
+            return True
+
+        @staticmethod
+        async def get_swarm_enriched_team_spec(**kwargs):
+            return SimpleNamespace(team_name="unit-team")
+
+        @classmethod
+        async def interact(cls, session_id: str, query: str):
+            cls.interact_calls.append((session_id, query))
+            return True, None
+
+    monkeypatch.setattr(team_helpers, "get_team_manager", lambda channel_id: _FakeManager())
+
+    request = SimpleNamespace(
+        session_id="sess-team-followup",
+        request_id="req-team-followup",
+        channel_id="web",
+        metadata=None,
+        params={"mode": "team"},
+    )
+    inputs = {"query": "$human-reporter claim task"}
+
+    chunks = []
+    async for chunk in team_helpers.process_team_message_stream(
+        request,
+        inputs,
+        object(),
+    ):
+        chunks.append(chunk)
+
+    assert _FakeManager.interact_calls == [
+        ("sess-team-followup", "$human-reporter claim task"),
+    ]
+    assert len(chunks) == 2
+    assert chunks[0].payload == {
+        "event_type": "chat.processing_status",
+        "session_id": "sess-team-followup",
+        "is_processing": False,
+        "is_complete": True,
+    }
+    assert chunks[0].is_complete is False
+    assert chunks[1].payload is None
+    assert chunks[1].is_complete is True
 
 
 @pytest.mark.anyio
@@ -1078,9 +1142,9 @@ async def test_process_team_message_stream_emits_processing_done_for_evolve_appr
 
     chunks = []
     async for chunk in team_helpers.process_team_message_stream(
-        request,
-        inputs,
-        object(),
+            request,
+            inputs,
+            object(),
     ):
         chunks.append(chunk)
 
@@ -1145,9 +1209,9 @@ async def test_process_team_message_stream_does_not_emit_evolution_status_for_no
 
     chunks = []
     async for chunk in team_helpers.process_team_message_stream(
-        request,
-        inputs,
-        object(),
+            request,
+            inputs,
+            object(),
     ):
         chunks.append(chunk)
 
@@ -1216,10 +1280,22 @@ async def test_consume_stream_with_query_broadcasts_leader_and_teammate_outputs(
 
         @staticmethod
         async def attach_distributed_hooks_for_runner_runtime(
-            team_name: str,
-            session_id: str,
-            channel_id: str,
+                team_name: str,
+                session_id: str,
+                channel_id: str,
         ) -> None:
+            pass
+
+        @staticmethod
+        def resolve_team_agent(session_id: str):
+            return None
+
+        @staticmethod
+        def get_workflow_handler(session_id: str):
+            return None
+
+        @staticmethod
+        def register_workflow_handler(session_id: str, handler: object) -> None:
             pass
 
     monkeypatch.setattr(team_helpers, "Runner", _FakeRunner)
@@ -1384,11 +1460,15 @@ async def test_consume_stream_with_query_propagates_hide_dm_to_monitor(monkeypat
 
         @staticmethod
         async def attach_distributed_hooks_for_runner_runtime(
-            team_name: str,
-            session_id: str,
-            channel_id: str,
+                team_name: str,
+                session_id: str,
+                channel_id: str,
         ) -> None:
             pass
+
+        @staticmethod
+        def resolve_team_agent(session_id: str):
+            return None
 
     monkeypatch.setattr(team_helpers, "Runner", _FakeRunner)
     monkeypatch.setattr(team_helpers, "get_team_manager", lambda channel_id: _FakeManager())
@@ -1617,3 +1697,246 @@ async def test_handle_team_slash_command_simplify_reports_noop(monkeypatch):
         "output": "Skill 'demo-skill' 经验库状态良好，无需整理。",
         "result_type": "answer",
     }
+
+
+# ---------------------------------------------------------------------------
+# WorkflowMonitorHandler integration tests
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.anyio
+async def test_ensure_monitor_handlers_creates_workflow_handler_when_swarmflow_enabled(monkeypatch):
+    """creates a WorkflowMonitorHandler and registers it when enable_swarmflow=True."""
+    registered_handlers: dict[str, object] = {}
+    channel_id = "web"
+    session_id = "sess-wf-int"
+    team_name = "demo-team"
+
+    class _FakeMonitor:
+        async def start(self) -> None:
+            pass
+
+        async def stop(self) -> None:
+            pass
+
+        async def workflow_events(self):
+            return
+            yield
+
+        async def events(self):
+            return
+            yield
+
+    class _FakeRunner:
+        @staticmethod
+        async def get_agent_team_monitor(team_name: str, session_id: str, **kwargs):
+            return _FakeMonitor()
+
+    class _FakeManager:
+        @staticmethod
+        def get_monitor(sid: str):
+            return None
+
+        @staticmethod
+        def register_monitor(sid: str, handler: object) -> None:
+            pass
+
+        @staticmethod
+        def get_workflow_handler(sid: str):
+            return registered_handlers.get(sid)
+
+        @staticmethod
+        def register_workflow_handler(sid: str, handler: object) -> None:
+            registered_handlers[sid] = handler
+
+    monkeypatch.setattr(team_helpers, "Runner", _FakeRunner)
+    monkeypatch.setattr(team_helpers, "get_team_manager", lambda cid: _FakeManager())
+
+    consume_calls: list[tuple] = []
+
+    async def _fake_consume_wf(cid, sid, handler):
+        consume_calls.append((cid, sid, handler))
+
+    async def _fake_consume_monitor(cid, sid, handler):
+        pass
+
+    monkeypatch.setattr(team_helpers, "_consume_workflow_events", _fake_consume_wf)
+    monkeypatch.setattr(team_helpers, "_consume_monitor_events", _fake_consume_monitor)
+
+    await team_helpers.ensure_monitor_handlers_for_active_runtime(
+        channel_id, session_id, team_name, enable_swarmflow=True,
+    )
+
+    wf_handler = registered_handlers.get(session_id)
+    assert wf_handler is not None
+    assert wf_handler.session_id == session_id
+    assert wf_handler.is_running is True
+
+    await asyncio.sleep(0)
+    assert len(consume_calls) == 1
+    assert consume_calls[0][0] == channel_id
+    assert consume_calls[0][1] == session_id
+
+
+@pytest.mark.anyio
+async def test_ensure_monitor_handlers_skips_workflow_handler_when_swarmflow_disabled(monkeypatch):
+    """not create WorkflowMonitorHandler when enable_swarmflow=False (the default)."""
+    registered_wf_handlers: dict[str, object] = {}
+    channel_id = "web"
+    session_id = "sess-no-swarmflow"
+    team_name = "demo-team"
+
+    class _FakeMonitor:
+        async def start(self) -> None:
+            pass
+
+        async def stop(self) -> None:
+            pass
+
+        async def events(self):
+            return
+            yield
+
+    class _FakeRunner:
+        @staticmethod
+        async def get_agent_team_monitor(team_name: str, session_id: str, **kwargs):
+            return _FakeMonitor()
+
+    class _FakeManager:
+        @staticmethod
+        def get_monitor(sid: str):
+            return None
+
+        @staticmethod
+        def register_monitor(sid: str, handler: object) -> None:
+            pass
+
+        @staticmethod
+        def get_workflow_handler(sid: str):
+            return registered_wf_handlers.get(sid)
+
+        @staticmethod
+        def register_workflow_handler(sid: str, handler: object) -> None:
+            registered_wf_handlers[sid] = handler
+
+    monkeypatch.setattr(team_helpers, "Runner", _FakeRunner)
+    monkeypatch.setattr(team_helpers, "get_team_manager", lambda cid: _FakeManager())
+    monkeypatch.setattr(team_helpers, "_consume_monitor_events", lambda *a: None)
+
+    await team_helpers.ensure_monitor_handlers_for_active_runtime(
+        channel_id, session_id, team_name, enable_swarmflow=False,
+    )
+
+    assert registered_wf_handlers.get(session_id) is None
+
+
+@pytest.mark.anyio
+async def test_consume_workflow_events_broadcasts_each_event(monkeypatch):
+    """_consume_workflow_events iterates over handler.events() and broadcasts each."""
+    broadcasted: list[dict[str, object]] = []
+    event = {
+        "event_type": "workflow.updated",
+        "session_id": "sess-wf-consume",
+        "workflow": {"name": "test-flow", "status": "running"},
+    }
+
+    class _FakeWorkflowHandler:
+        is_running = True
+
+        async def events(self):
+            yield event
+
+    monkeypatch.setattr(team_helpers, "_broadcast_event", lambda *args: broadcasted.append(args[2]))
+
+    handler = _FakeWorkflowHandler()
+    await team_helpers._consume_workflow_events(  # pylint: disable=protected-access
+        "web", "sess-wf-consume", handler,
+    )
+
+    assert broadcasted == [event]
+
+
+@pytest.mark.anyio
+async def test_consume_stream_with_query_calls_ensure_workflow_handler_after_runtime_ready(monkeypatch):
+    """After runtime_ready, calls ensure_workflow_handler_for_active_runtime if a team_agent is available."""
+    calls: list[str] = []
+
+    async def _fake_stream(**kwargs):
+        yield SimpleNamespace(
+            type="team.runtime_ready",
+            payload={
+                "event_type": "team.runtime_ready",
+                "team_name": "demo-team",
+                "activation_kind": "create",
+            },
+            role=TeamRole.LEADER,
+        )
+
+    class _FakeRunner:
+        run_agent_team_streaming = staticmethod(_fake_stream)
+
+    def _record_add_event_listener(cb):
+        calls.append("add_event_listener")
+
+    fake_team_agent = SimpleNamespace()
+    fake_team_agent.add_event_listener = _record_add_event_listener
+
+    class _FakeManager:
+        @staticmethod
+        def commit_runtime_ready(session_id: str, team_name: str) -> None:
+            calls.append(f"commit:{session_id}:{team_name}")
+
+        @staticmethod
+        def clear_pending_runtime(session_id: str) -> None:
+            pass
+
+        @staticmethod
+        def pop_stream_task(session_id: str) -> None:
+            pass
+
+        @staticmethod
+        def get_monitor(session_id: str):
+            return None
+
+        @staticmethod
+        async def attach_distributed_hooks_for_runner_runtime(**kwargs) -> None:
+            calls.append("hooks")
+
+        @staticmethod
+        def resolve_team_agent(session_id: str):
+            return fake_team_agent
+
+        @staticmethod
+        def get_workflow_handler(session_id: str):
+            return None
+
+        @staticmethod
+        def register_workflow_handler(session_id: str, handler: object) -> None:
+            calls.append("register_workflow_handler")
+
+        @staticmethod
+        def register_stream_task(session_id: str, task: asyncio.Task) -> None:
+            calls.append("register_stream_task")
+
+    async def _fake_monitor(*args, **kwargs):
+        calls.append("ensure_monitor_handlers")
+
+    monkeypatch.setattr(team_helpers, "Runner", _FakeRunner)
+    monkeypatch.setattr(team_helpers, "get_team_manager", lambda cid: _FakeManager())
+    monkeypatch.setattr(team_helpers, "_broadcast_event", lambda *a, **kw: None)
+    monkeypatch.setattr(team_helpers, "sync_team_identity_metadata", lambda **kw: calls.append("sync"))
+    monkeypatch.setattr(team_helpers, "ensure_monitor_handlers_for_active_runtime", _fake_monitor)
+    monkeypatch.setattr(team_helpers, "ensure_team_evolution_watcher", lambda *a, **kw: calls.append("watcher"))
+    monkeypatch.setattr(team_helpers, "get_session_metadata", lambda sid: {})
+    monkeypatch.setattr(team_helpers, "update_session_metadata", lambda **kw: None)
+    monkeypatch.setattr(team_helpers, "_consume_workflow_events", lambda *a: None)
+
+    await _TeamHelpersTestApi.consume_stream_with_query(
+        "web",
+        "sess-wf-ready",
+        SimpleNamespace(team_name="demo-team"),
+        "hello",
+    )
+
+    # The merged function is called once for both monitor and workflow handler
+    assert "ensure_monitor_handlers" in calls

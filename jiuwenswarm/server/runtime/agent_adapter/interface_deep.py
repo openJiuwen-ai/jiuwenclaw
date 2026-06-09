@@ -18,6 +18,7 @@ import time
 from collections import Counter
 from contextvars import ContextVar, Token
 from dataclasses import dataclass
+from pathlib import Path
 from shutil import which
 from typing import TYPE_CHECKING, Any, AsyncIterator, Callable, List, Optional, Tuple
 
@@ -50,6 +51,7 @@ from openjiuwen.harness import (
 )
 from openjiuwen.harness.factory import create_deep_agent
 from openjiuwen.harness.prompts import resolve_language
+from openjiuwen.harness.prompts.prompt_attachment_manager import PromptAttachmentScope
 from openjiuwen.harness.rails import (
     SkillUseRail,
     TaskPlanningRail,
@@ -143,6 +145,7 @@ from jiuwenswarm.server.runtime.session.session_metadata import build_server_pus
 from jiuwenswarm.server.runtime.session.session_history import append_history_record
 from jiuwenswarm.server.runtime.skill import filter_visible_skill_names
 from jiuwenswarm.server.runtime.skill.skill_manager import SkillManager
+from jiuwenswarm.server.runtime.prompt_attachment_loader import PromptAttachmentLoader
 from jiuwenswarm.server.runtime.agent_adapter.evolution_helpers import (
     EVOLUTION_ACCEPT_LABELS,
     EVOLUTION_EXECUTE_LABELS,
@@ -218,11 +221,13 @@ from jiuwenswarm.agents.harness.common.tools.xiaoyi_phone_tools import (
     image_reading,
 )
 from jiuwenswarm.common.config import get_config, get_default_models, get_sandbox_runtime, resolve_env_vars
+from jiuwenswarm.common.reasoning_injector import build_reasoning_model_request_kwargs
 from jiuwenswarm.server.runtime.agent_adapter.sysop_builder import (
     build_filesystem_policy,
     create_local_sysop_card,
     create_sandbox_sysop_card,
 )
+from jiuwenswarm.agents.harness.common.auto_harness.service import _HARNESS_PACKAGES_FILE
 from jiuwenswarm.agents.harness.common.plugins.rail_manager import get_rail_manager
 from jiuwenswarm.gateway.cron import CronTargetChannel
 from jiuwenswarm.common.schema.agent import AgentRequest, AgentResponse, AgentResponseChunk
@@ -238,6 +243,7 @@ from jiuwenswarm.common.utils import (
     get_deepagent_soul_md_path,
     get_deepagent_user_md_path,
     get_env_file,
+    get_prompt_attachment_dir,
     reset_free_search_runtime_flags,
 )
 
@@ -547,6 +553,7 @@ class JiuWenClawDeepAdapter:
         self._context_processor_rail: ContextProcessorRail | None = None
         self._runtime_prompt_rail: RuntimePromptRail | None = None
         self._response_prompt_rail: ResponsePromptRail | None = None
+        self._prompt_attachment_loader: PromptAttachmentLoader | None = None
         self._security_rail: SecurityRail | None = None
         self._memory_rail: MemoryRail | None = None
         self._external_memory_rail: Any = None
@@ -884,7 +891,7 @@ class JiuWenClawDeepAdapter:
                 self._a2x_config.get("role", "teammate"),
                 self._a2x_config.get("base_url", ""),
             )
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             self._a2x_client = None
             self._a2x_config = {}
             self._a2x_blank_service_id = ""
@@ -926,7 +933,7 @@ class JiuWenClawDeepAdapter:
         channel = session_id.split("_", 1)[0]
         if channel == "sess":
             return "web"
-        if channel in {"acp", "cron", "heartbeat", "feishu", "web", "dingtalk", "wecom"}:
+        if channel in {"acp", "cron", "heartbeat", "feishu", "web", "dingtalk", "wecom", "tui"}:
             return channel
         return "web"
 
@@ -1676,13 +1683,16 @@ class JiuWenClawDeepAdapter:
     def _build_model_from_entry(mcc: dict, mco: dict) -> Model:
         """根据单个模型条目的 model_client_config / model_config_obj 构建 Model 实例。"""
         name = mcc.get("model_name", "")
-        m_config = ModelRequestConfig(
-            model=name,
-            temperature=mco.get("temperature", 0.95),
-        )
         mcc_fields = {k: v for k, v in mcc.items() if k != "model_name"}
         if not mcc_fields.get("client_provider"):
             mcc_fields["client_provider"] = "OpenAI"
+        m_config = ModelRequestConfig(
+            **build_reasoning_model_request_kwargs(
+                model_client_config=mcc_fields,
+                model_config_obj=mco,
+                model_name=name,
+            )
+        )
         return Model(model_client_config=ModelClientConfig(**mcc_fields), model_config=m_config)
 
     def _build_model_cache_from_defaults(self, config: dict) -> None:
@@ -2089,7 +2099,7 @@ class JiuWenClawDeepAdapter:
                 from openjiuwen.extensions.sys_operation.sandbox.providers.jiuwenbox import (
                     force_recreate_jiuwenbox_sandbox,
                 )
-            except Exception as exc:  # noqa: BLE001
+            except Exception as exc:
                 logger.warning(
                     "[JiuWenSwarmDeepAdapter] force_recreate_jiuwenbox_sandbox import "
                     "failed: %s",
@@ -2108,7 +2118,7 @@ class JiuWenClawDeepAdapter:
                     "[JiuWenSwarmDeepAdapter] sandbox instance recreated: %s",
                     new_sandbox_id,
                 )
-            except Exception as exc:  # noqa: BLE001
+            except Exception as exc:
                 logger.warning(
                     "[JiuWenSwarmDeepAdapter] force_recreate_jiuwenbox_sandbox "
                     "failed: %s",
@@ -2125,6 +2135,84 @@ class JiuWenClawDeepAdapter:
             logger.warning("[JiuWenClawDeepAdapter] SysOperationRail create failed: %s", exc)
             fs_rail = None
         return fs_rail
+
+    @staticmethod
+    def _get_active_package_config_paths() -> list[str]:
+        """Read harness-packages.json to get config_path from active packages.
+
+        Returns:
+            List of harness_config.yaml paths from active packages.
+        """
+        config_paths: list[str] = []
+        try:
+            if not _HARNESS_PACKAGES_FILE.exists():
+                return config_paths
+
+            data = json.loads(_HARNESS_PACKAGES_FILE.read_text(encoding="utf-8"))
+            active_ids = data.get("active_package_ids", [])
+            if not active_ids:
+                return config_paths
+
+            for pkg in data.get("packages", []):
+                pkg_id = pkg.get("id", "")
+                if pkg_id not in active_ids:
+                    continue
+
+                config_path = pkg.get("config_path", "")
+                if not config_path:
+                    continue
+
+                config_file = Path(config_path)
+                if config_file.exists():
+                    config_paths.append(str(config_file))
+                    logger.info(
+                        "[JiuWenClawDeepAdapter] Found active package config: %s (package=%s)",
+                        config_path,
+                        pkg_id,
+                    )
+        except Exception as exc:
+            logger.warning(
+                "[JiuWenClawDeepAdapter] Failed to read active packages config paths: %s",
+                exc,
+            )
+
+        return config_paths
+
+    async def _load_active_packages(self) -> list[str]:
+        """Load all active packages via load_harness_config.
+
+        Called after agent instance is created to restore previously activated
+        packages (skills, rails, tools) from harness-packages.json.
+
+        Returns:
+            List of loaded resource names.
+        """
+        if self._instance is None:
+            return []
+
+        config_paths = self._get_active_package_config_paths()
+        if not config_paths:
+            return []
+
+        loaded: list[str] = []
+        for config_path in config_paths:
+            try:
+                resources = await self._instance.load_harness_config(config_path)
+                if resources:
+                    loaded.extend(resources)
+                    logger.info(
+                        "[JiuWenClawDeepAdapter] Loaded active package from %s: %s",
+                        config_path,
+                        resources,
+                    )
+            except Exception as exc:
+                logger.warning(
+                    "[JiuWenClawDeepAdapter] Failed to load active package %s: %s",
+                    config_path,
+                    exc,
+                )
+
+        return loaded
 
     def _build_skill_rail(
         self, config: dict[str, Any], include_tools: bool = False
@@ -2553,10 +2641,22 @@ class JiuWenClawDeepAdapter:
                     False,
                 )
 
-        self._skill_rail = self._build_skill_rail(
-            config,
-            include_tools=self._skill_include_tools_for_profile(),
-        )
+        # Reuse existing SkillUseRail to preserve dynamically loaded skills
+        # from activate_package() / load_harness_config()
+        if self._skill_rail is None:
+            self._skill_rail = self._build_skill_rail(
+                config,
+                include_tools=self._skill_include_tools_for_profile(),
+            )
+        else:
+            # Update existing rail's skill_mode if changed
+            new_skill_mode = self._resolve_skill_mode(config)
+            if self._skill_rail.skill_mode != new_skill_mode:
+                self._skill_rail.skill_mode = new_skill_mode
+            # Update disabled_skills
+            new_disabled = self._skill_manager.list_execution_disabled_skills()
+            if self._skill_rail.disabled_skills != new_disabled:
+                self._skill_rail.disabled_skills = new_disabled
 
         if not self._filesystem_rail_enabled_for_profile():
             self._filesystem_rail = None
@@ -2779,6 +2879,8 @@ class JiuWenClawDeepAdapter:
             "project_dir", config.get("project_dir")
         )
         self._workspace_dir = config.get("workspace_dir", str(get_agent_workspace_dir()))
+        self._prompt_attachment_loader = PromptAttachmentLoader(self._prompt_attachment_root())
+        self._prompt_attachment_loader.ensure_layout()
 
         model = self._create_model(config_base)
         await self._try_init_a2x_client(config_base)
@@ -2842,8 +2944,54 @@ class JiuWenClawDeepAdapter:
             "[JiuWenClawDeepAdapter] 初始化完成: agent_name=%s, mode=%s, sub_mode=%s", self._agent_name, mode, sub_mode
         )
 
+        # 加载已激活的 packages（skills, rails, tools）
+        await self._load_active_packages()
+
         # 动态加载用户自定义的 Rail 扩展
         await self.load_user_rails()
+
+    async def _sync_prompt_attachments_for_request(self, session_id: str, invoke_turn_id: str) -> None:
+        """Hot-load prompt attachment files for the current request.
+
+        Prompt attachment loading must not block the user request path. Failures are
+        logged and the original Runner flow continues without attachment injection.
+        """
+
+        if self._instance is None:
+            return
+        if self._prompt_attachment_loader is None:
+            self._prompt_attachment_loader = PromptAttachmentLoader(self._prompt_attachment_root())
+            self._prompt_attachment_loader.ensure_layout()
+        try:
+            await self._prompt_attachment_loader.sync_to_agent(
+                self._instance,
+                session_id=session_id,
+                invoke_turn_id=invoke_turn_id,
+            )
+        except Exception as exc:
+            logger.warning("[JiuWenClawDeepAdapter] prompt attachment sync skipped: %s", exc)
+
+    async def _clear_prompt_attachments_for_request(self, session_id: str, invoke_turn_id: str) -> None:
+        """Clear all turn-scope prompt attachments for one completed request."""
+
+        if self._instance is None:
+            return
+        manager = getattr(self._instance, "prompt_attachment_manager", None)
+        if manager is None:
+            return
+        try:
+            await manager.remove_by_filter(
+                session_id=session_id,
+                invoke_turn_id=invoke_turn_id,
+                scope=PromptAttachmentScope.TURN,
+            )
+        except Exception as exc:
+            logger.warning("[JiuWenClawDeepAdapter] prompt attachment turn cleanup skipped: %s", exc)
+
+    def _prompt_attachment_root(self) -> Path:
+        if self._workspace_dir == str(get_agent_workspace_dir()):
+            return get_prompt_attachment_dir()
+        return Path(self._workspace_dir) / "prompt_attachment"
 
     async def load_user_rails(self) -> None:
         """动态加载用户自定义的 Rail 扩展."""
@@ -3191,6 +3339,8 @@ class JiuWenClawDeepAdapter:
                 channel_id=_CRON_TOOL_CHANNEL_ID.get(),
                 request_id=request_id,
                 sub_agent_config=sub_agent_config,
+                max_concurrent_tasks=20,  # 最多同时运行20个子任务
+                task_timeout=600.0,  # 每个子任务超时时间10分钟
             )
             for ms_tool in multi_session_toolkit.get_tools():
                 Runner.resource_mgr.add_tool(ms_tool)
@@ -3387,6 +3537,8 @@ class JiuWenClawDeepAdapter:
             )
             self._runtime_prompt_rail.set_model_name(self._resolve_model_name())
             self._runtime_prompt_rail.set_mode(runtime_config.mode)
+        if self._response_prompt_rail:
+            self._response_prompt_rail.set_channel(resolved_channel)
         circuit_breaker_rail = getattr(self, "_circuit_breaker_rail", None)
         if circuit_breaker_rail is not None:
             circuit_breaker_rail.set_language(resolved_language)
@@ -4668,7 +4820,7 @@ class JiuWenClawDeepAdapter:
 
     async def _handle_slash_command(
         self,
-        query: str,
+        query: Any,
         session_id: str = "default",
         mode: str = "agent.plan",
     ) -> dict[str, Any] | None:
@@ -4678,6 +4830,9 @@ class JiuWenClawDeepAdapter:
         The dict may contain an ``approval_chunks`` list that the caller
         should forward to the frontend as separate stream events.
         """
+        if not isinstance(query, str):
+            return None
+
         stripped = query.strip()
 
         if stripped.startswith("/evolve_simplify"):
@@ -4884,6 +5039,9 @@ class JiuWenClawDeepAdapter:
                     project_dir=inputs.get("project_dir"),
                 )
             )
+            inputs = dict(inputs)
+            inputs["_invoke_turn_id"] = request.request_id
+            await self._sync_prompt_attachments_for_request(session_id, request.request_id)
             result = await Runner.run_agent(agent=self._instance, inputs=inputs)
         except asyncio.CancelledError:
             logger.info(
@@ -4896,6 +5054,7 @@ class JiuWenClawDeepAdapter:
             logger.error("[JiuWenClawDeepAdapter] Agent 任务执行异常: %s", e)
             raise
         finally:
+            await self._clear_prompt_attachments_for_request(session_id, request.request_id)
             self._unregister_session_agent_task(session_id)
             TOOL_PERMISSION_CHANNEL_ID.reset(token_cid)
             cleanup_permission_context(token_perm)
@@ -4972,6 +5131,19 @@ class JiuWenClawDeepAdapter:
                     self._stream_event_rail,
                     agent=self._instance,
                 )
+
+            await self._update_runtime_config(
+                self._RuntimeConfig(
+                    session_id=request.session_id,
+                    mode=mode,
+                    request_id=request.request_id,
+                    channel_id=request.channel_id,
+                    request_metadata=request.metadata,
+                    trusted_dirs=inputs.get("trusted_dirs"),
+                    cwd=inputs.get("cwd"),
+                    project_dir=inputs.get("project_dir"),
+                )
+            )
 
             activate_response = request.params.get("activate_response")
             if isinstance(activate_response, dict):
@@ -5096,6 +5268,9 @@ class JiuWenClawDeepAdapter:
             )
             if self._stream_event_rail is not None:
                 self._stream_event_rail.reset_abort(session_id)
+            inputs = dict(inputs)
+            inputs["_invoke_turn_id"] = rid
+            await self._sync_prompt_attachments_for_request(session_id, rid)
             async for chunk in Runner.run_agent_streaming(self._instance, inputs):
                 if not (hasattr(chunk, "type") and hasattr(chunk, "payload")):
                     parsed = self._parse_stream_chunk(chunk)
@@ -5315,6 +5490,7 @@ class JiuWenClawDeepAdapter:
                 is_complete=False,
             )
         finally:
+            await self._clear_prompt_attachments_for_request(session_id, rid)
             self._unregister_session_agent_task(session_id)
             TOOL_PERMISSION_CHANNEL_ID.reset(token_cid)
             cleanup_permission_context(token_perm)
@@ -6027,7 +6203,7 @@ class JiuWenClawDeepAdapter:
         if not messages:
             return {"status": "no_turn"}
 
-        prompt = build_recap_prompt(memory=None)
+        prompt = build_recap_prompt(memory=None, language=self._resolve_prompt_language())
         summary_text = await self._call_model_for_recap(messages, prompt)
         if not summary_text:
             return {"status": "failed", "error": "Model returned empty response"}
@@ -6153,13 +6329,31 @@ class JiuWenClawDeepAdapter:
         try:
             result = await self._model.invoke(
                 recap_messages,
-                max_tokens=300,
                 temperature=0,
             )
             return getattr(result, "content", None) or str(result)
         except Exception:
             logger.exception("[generate_recap] model call failed")
             return None
+
+    async def repair_model_response(self, prompt: str) -> str | None:
+        """Run a focused repair prompt using the currently selected chat model."""
+        if self._model is None:
+            logger.warning("[JiuWenClawDeepAdapter] repair skipped: no model instance available")
+            return None
+        from openjiuwen.core.foundation.llm.schema.message import UserMessage
+
+        result = await self._model.invoke(
+            [UserMessage(content=prompt)],
+            temperature=0,
+        )
+        content = getattr(result, "content", None)
+        if isinstance(content, str):
+            return content
+        output = getattr(result, "output", None)
+        if isinstance(output, str):
+            return output
+        return str(result) if result is not None else None
 
     async def _count_full_context_tokens(
         self,

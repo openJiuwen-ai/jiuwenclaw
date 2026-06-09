@@ -31,7 +31,9 @@
 | `/evolve_list` | 查看某个 Skill 的演进经验库（见下文） |
 | `/evolve_simplify` | 整理、合并某个 Skill 的演进经验（见下文） |
 | `/evolve_rebuild` | 基于归档与演进记录重建 `SKILL.md`（见下文） |
+| `/hooks` | 浏览已配置的 hooks（只读，见下文） |
 | `/sandbox` | 设置沙箱模式（见下文） |
+| `/agents` | 管理 Agent 配置（list, get, create, update, enable, disable, delete，见下文） |
 | `/auto-harness` | Auto-Harness 任务管理（`run`/`schedule`，见下文） |
 
 > 说明：本页的 `/mode` 与 `/switch` 以 Gateway 受控通道行为为主。TUI 本地命令另支持 `/mode plan`、`/mode team.normal`，详见 [TUI 使用指南](TUI使用指南.md)。
@@ -522,6 +524,200 @@
 - `/sandbox status` — 查看 runtime 与生效路径
 - `/sandbox files allow ./tmp/ 0777` — 允许沙箱以 0777 写入 `./tmp/`
 - `/sandbox exclude add "git *"` — 让 `git` 命令穿透到本地执行，不进沙箱
+
+### `/hooks`（浏览 Hooks 配置）
+
+查看当前 `config.yaml` 中配置的所有 hooks 的摘要信息（只读）。
+
+#### 用法
+
+- `/hooks`（无参数、无子命令）
+
+#### 数据来源
+
+TUI 通过 `hooks.list` RPC 请求 Gateway，Gateway 从 `config.yaml` 的 `hooks` 段加载配置并返回摘要。
+
+#### 展示内容
+
+`/hooks` 分三个层级展示 hooks 配置：
+
+1. **事件列表（Level 1）**：按 hook 数量降序排列所有事件，每行显示事件名与 hook 数量，描述列显示各 matcher 的 hook 数量分布。
+2. **状态面板**：
+   - `Source` — 配置来源（`config.yaml`）
+   - `Global Status` — 全局开关状态（`enabled` / `DISABLED`）
+   - `Total Hooks` — 所有事件的 hook 总数
+   - `Active Events` — 至少配置了 1 个 hook 的事件数 / 总事件数（共 17 种事件）
+3. **Hook 详情卡片（Level 2）**：按 `事件 > matcher` 分组，每个 hook 展示：
+   - `Type` — `command`（shell 命令）或 `prompt`（LLM 审查）
+   - `Command` / `Prompt` — hook 的具体内容
+   - `Timeout` — 超时时间（秒）
+   - `Shell` — 执行 shell（command hook 专用）
+   - `Status` — 状态消息
+
+#### 无配置时
+
+若 `config.yaml` 中没有配置任何 hooks，显示 `No hooks configured.` 并提示通过 `/config edit` 编辑配置。
+
+#### Hooks 概念速览
+
+Hooks 是在特定事件触发时自动执行的扩展逻辑，支持以下 17 种事件：
+
+| 事件 | 执行层 | 触发时机 |
+|---|---|---|
+| `PreToolUse` | Agent Rail | 工具调用之前 |
+| `PostToolUse` | Agent Rail | 工具调用成功之后 |
+| `PostToolUseFailure` | Agent Rail | 工具调用失败之后 |
+| `Stop` | Agent Rail | Agent 响应结束 |
+| `PermissionRequest` | Agent Rail | 权限请求时 |
+| `PermissionDenied` | Agent Rail | 权限被拒绝时 |
+| `SubagentStart` | Agent Rail | 子 Agent 启动 |
+| `SubagentStop` | Agent Rail | 子 Agent 停止 |
+| `BeforeModelCall` | Agent Rail | 模型调用之前 |
+| `AfterModelCall` | Agent Rail | 模型调用之后 |
+| `UserPromptSubmit` | Gateway | 用户提交消息 |
+| `SessionStart` | Gateway | 会话开始 |
+| `SessionEnd` | Gateway | 会话结束 |
+| `Notification` | Gateway | 通知发送 |
+| `ConfigChange` | Gateway | 配置变更 |
+| `InstructionsLoaded` | Gateway | 指令加载 |
+| `Setup` | Gateway | 初始化 |
+
+支持两种 hook 类型：
+
+| 类型 | 说明 | 关键参数 |
+|---|---|---|
+| `command` | 执行 shell 命令（子进程）。通过环境变量 `$ARGUMENTS` 接收 JSON 上下文。退出码 0 = 成功，2 = 阻断。 | `command`、`timeout`（默认 30s）、`shell`（默认 bash） |
+| `prompt` | 调用 LLM 审查。模板中 `$ARGUMENTS` 替换为 JSON 上下文，`$TOOL_NAME` 替换为工具名。LLM 响应中的 JSON `decision: "block"` 可阻断。 | `prompt`、`timeout`（默认 15s）、`model` |
+
+- **阻断行为**：退出码 2（command）或 `decision: "block"`（prompt）会阻止当前操作（如跳过工具调用），并将原因反馈给模型。
+- **输入修改**：PreToolUse hook 可通过 stdout JSON 的 `modifiedInput` 字段修改工具输入参数。
+- **附加上下文**：可通过 stdout JSON 的 `additionalContext` 字段注入额外信息到工具结果或模型上下文。
+- **全局开关**：`config.yaml` 中 `hooks.disable_all_hooks: true` 可禁用所有 hooks。
+
+#### 配置示例
+
+```yaml
+hooks:
+  PreToolUse:
+    - matcher: "write_file"
+      hooks:
+        - type: command
+          command: "echo 'write_file 即将执行' >> /tmp/hooks.log"
+          timeout: 10
+    - matcher: "bash|run_command"
+      hooks:
+        - type: prompt
+          prompt: "审查以下命令是否安全: $ARGUMENTS"
+          timeout: 20
+  SessionStart:
+    - matcher: "*"
+      hooks:
+        - type: command
+          command: "echo '会话开始: $ARGUMENTS' >> /tmp/hooks.log"
+```
+
+#### 示例
+
+- `/hooks` — 浏览当前所有 hooks 配置
+
+### `/agents`（Agent 管理）
+
+管理自定义 Agent（子代理 / Subagent）的全生命周期：查看、创建、更新、启用/禁用、删除。Agent 定义存储为 Markdown 文件，支持四级来源按优先级覆盖。
+
+- **解析位置**：TUI 本地解析，通过 RPC 调用后端 `agents.*` 端点。
+- **适用模式**：全部。
+- **注意**：该命令在注册表中标记为隐藏（`hidden: true`），不在 `/help` 中列出，但可直接使用。
+
+#### 子命令
+
+| 命令 | 说明 |
+|---|---|
+| `/agents` 或 `/agents list` | 列出所有 Agent（名称、来源、启用状态、描述摘要） |
+| `/agents get <name>` | 查看指定 Agent 完整详情（含 System Prompt 正文） |
+| `/agents create [--project\|--local] <名称> <描述>` | 创建自定义 Agent，LLM 自动生成 prompt |
+| `/agents update <name> [--generate] <新描述>` | 更新 Agent 描述；加 `--generate` 由 LLM 重写 prompt |
+| `/agents enable <name>` | 启用自定义 Agent（内置 Agent 不可操作） |
+| `/agents disable <name>` | 禁用自定义 Agent（内置 Agent 不可操作） |
+| `/agents delete <name>` | 删除自定义 Agent（内置 Agent 不可操作） |
+
+#### Agent 来源与存储
+
+| 来源 | 存储位置 | 优先级 | 可管理 |
+|------|----------|--------|--------|
+| `builtin` | 代码内置 | 最低 | 不可启用/禁用/删除 |
+| `local` | `<workspace>/.jiuwenswarm/agents-local/` | 本地 | 可全生命周期管理 |
+| `user` | `~/.jiuwenswarm/agents/` | 用户 | 可全生命周期管理（默认 `create` 位置） |
+| `project` | `<workspace>/.jiuwenswarm/agents/` | 最高 | 可全生命周期管理 |
+
+同名 Agent 按 `project > user > local > builtin` 优先级覆盖，被覆盖的 Agent 标记 `shadowed_by`。
+
+#### Agent 定义字段
+
+| 字段 | 说明 |
+|------|------|
+| `name` | Agent 名称（唯一标识） |
+| `description` | 简要描述 |
+| `prompt` | System Prompt 正文 |
+| `source` | 来源（`builtin` / `user` / `project` / `local`） |
+| `file_path` | Agent 定义文件路径 |
+| `model` | 指定模型（`null` 表示使用默认） |
+| `tools` | 可用工具列表 |
+| `disallowed_tools` | 禁用工具列表 |
+| `color` | 显示颜色 |
+| `permission_mode` | 权限模式 |
+| `memory_scope` | 记忆范围 |
+| `when_to_use` | 调用时机描述 |
+| `max_iterations` | 最大迭代次数（默认 200） |
+| `skills` | 关联技能列表 |
+| `enabled` | 启用状态（`true` / `false` / `null`） |
+| `shadowed_by` | 被哪个来源覆盖（`null` 表示活跃） |
+
+#### `/agents create` 行为要点
+
+- **参数解析**：`--project` / `--local` 为位置标志，需放在名称之前（如 `/agents create --project my-agent 描述`）。
+- **LLM 生成**：默认调用当前模型自动生成 `when_to_use` 和 `system_prompt`，失败时回退到内置模板。
+- **自动启用**：创建成功后自动写入 `config.yaml` 的 `react.subagents.<name>.enabled = true` 并热加载配置。
+- **超时**：60 秒。
+- **输出**：显示 LLM 生成标记、存储位置、文件路径。
+
+#### `/agents update` 行为要点
+
+- **无参数**：不提供描述时，展示当前 Agent 详情（等同 `get`）并提示用法。
+- **`--generate`**：显式触发 LLM 重写 prompt；不加此标志时使用请求中的模板值。
+- **自动热加载**：更新后自动重载 Agent 配置。
+
+#### `/agents enable` / `disable` 约束
+
+- 内置 Agent（`source == "builtin"`）无法启用/禁用，后端返回错误。
+- 操作会写入 `config.yaml` 的 `react.subagents.<name>.enabled` 并热加载。
+
+#### `/agents delete` 约束
+
+- 内置 Agent 不可删除。
+- 删除后自动从 `config.yaml` 的 `react.subagents` 中移除并热加载。
+
+#### `/agents get` 展示内容
+
+以键值对展示所有 Agent 定义字段，并在末尾完整输出 System Prompt 正文。
+
+#### Tab 补全
+
+`get`、`update`、`enable`、`disable`、`delete` 子命令支持按 Agent 名称 Tab 补全（通过 `agents.list` RPC 获取名称列表）。
+
+#### 示例
+
+```bash
+/agents                            # 列出所有 Agent
+/agents list                       # 同上
+/agents get Explore                # 查看 Explore Agent 详情
+/agents create bug-hunter 根因分析专家        # 创建用户级 Agent
+/agents create --project proj-agent 项目级   # 创建项目级 Agent
+/agents create --local local-agent 本地专用  # 创建本地 Agent
+/agents update bug-hunter --generate 更好的描述  # 更新并用 LLM 重写 prompt
+/agents enable bug-hunter           # 启用 Agent
+/agents disable bug-hunter          # 禁用 Agent
+/agents delete my-agent             # 删除 Agent
+```
 
 ### `/status`（查看运行状态）
 

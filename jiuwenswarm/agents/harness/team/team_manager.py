@@ -10,14 +10,12 @@ import logging
 import re
 from dataclasses import dataclass
 from pathlib import Path
-from types import SimpleNamespace
-from typing import Any, Callable
+from typing import Any
 
 from openjiuwen.agent_teams.agent.team_agent import TeamAgent
 from openjiuwen.agent_teams.paths import team_home
 from openjiuwen.agent_teams.schema.blueprint import TeamAgentSpec
 from openjiuwen.agent_teams.context import reset_session_id, set_session_id
-from openjiuwen.agent_evolving.trajectory import InMemoryTrajectoryRegistry
 from openjiuwen.core.runner import Runner
 from openjiuwen.harness import DeepAgent
 from openjiuwen.harness.rails import (
@@ -25,15 +23,6 @@ from openjiuwen.harness.rails import (
     TeamSkillCreateRail,
     TeamSkillEvolutionRail,
 )
-from jiuwenswarm.agents.harness.common.plugins.rail_manager import get_rail_manager
-from jiuwenswarm.agents.harness.team.rails.team_member_skill_toolkit_rail import (
-    MemberSkillToolkitRail,
-)
-from jiuwenswarm.agents.harness.team.rails.team_shared_skill_link_refresh_rail import (
-    TeamSharedSkillLinkRefreshRail,
-)
-from jiuwenswarm.server.runtime.skill.skill_manager import SkillManager
-
 from jiuwenswarm.agents.harness.team.bootstrap import configure_agent_teams_home
 
 configure_agent_teams_home()
@@ -56,29 +45,19 @@ from jiuwenswarm.agents.harness.team.distributed_runtime import (
     runtime_role,
     try_start_pg_cluster,
 )
-from jiuwenswarm.agents.harness.team.monitor_handler import TeamMonitorHandler
+from jiuwenswarm.agents.harness.team.handlers.team_monitor_handler import TeamMonitorHandler
 from jiuwenswarm.agents.harness.team.remote_member_bootstrap import release_a2x_reservations_for_session
-from jiuwenswarm.agents.harness.team.team_skill_links import (
-    is_valid_skill_dir,
-    link_skill_dir,
-    path_exists_or_link,
-    prune_skill_dir_links,
-    remove_skill_dir_link,
-    sync_skill_dir_links,
-)
+from jiuwenswarm.agents.harness.team.team_skill_links import sync_skill_dir_links
 from jiuwenswarm.common.config import get_config, get_default_models
 from jiuwenswarm.agents.harness.team.team_runtime_inheritance import (
     MemberInfo,
-    RAIL_WHITELIST,
     RuntimeInfo,
     TeamWorkspaceInfo,
     get_evolution_auto_scan_enabled,
     get_skill_create_enabled,
     build_member_rails,
-    filter_inheritable_ability_cards,
-    get_default_model_name,
 )
-from jiuwenswarm.common.utils import get_agent_skills_dir, get_agent_workspace_dir
+from jiuwenswarm.common.utils import get_agent_skills_dir
 from jiuwenswarm.server.runtime.session.session_metadata import get_session_metadata
 
 logger = logging.getLogger(__name__)
@@ -156,6 +135,8 @@ class TeamManager:
         self._team_evolution_watchers: dict[str, asyncio.Task] = {}
         # session_id -> team workspace skills directory used as the shared link view.
         self._team_shared_skill_link_targets: dict[str, Path] = {}
+        # session_id → workflow handler instance
+        self._workflow_handlers: dict[str, Any] = {}
 
     def has_stream_task(self, session_id: str) -> bool:
         return session_id in self._stream_tasks
@@ -337,29 +318,47 @@ class TeamManager:
 
         return TeamAgentSpec.model_validate(spec_dict)
 
-    async def get_enriched_team_spec(
+
+    async def get_swarm_enriched_team_spec(
         self,
         session_id: str,
-        deep_agent: DeepAgent,
+        *,
+        mode: str,
+        project_dir: str | None = None,
         request_id: str | None = None,
         channel_id: str | None = None,
         request_metadata: dict[str, Any] | None = None,
     ) -> TeamAgentSpec:
+        """Build a team spec via provider-based assembly (no parent DeepAgent).
+
+        Sources every member capability from the shared config source through
+        ``enrich_team_spec_for_swarm`` instead of inheriting from a pre-built
+        single agent, so creating a team never requires constructing one first.
+
+        Args:
+            session_id: Active session id.
+            mode: Request mode (e.g. "team").
+            project_dir: Resolved project directory, if any.
+            request_id: Originating request id, if any.
+            channel_id: Raw channel id from the request, if any.
+            request_metadata: Request metadata mapping.
+
+        Returns:
+            The enriched ``TeamAgentSpec`` ready to build (``build_context`` set;
+            assembly is fully declarative, no imperative post-processing).
+        """
+        from jiuwenswarm.agents.swarm import enrich_team_spec_for_swarm
+
         config_base = get_config()
         await self._ensure_postgresql_for_leader(config_base)
         spec = self._load_team_spec(session_id)
-        self._apply_session_scoped_team_name(
+        self._apply_session_scoped_team_name(spec, session_id=session_id)
+        self.apply_team_plan_mode(spec, request_metadata=request_metadata)
+        enrich_team_spec_for_swarm(
             spec,
             session_id=session_id,
-        )
-        self.apply_team_plan_mode(
-            spec,
-            request_metadata=request_metadata,
-        )
-        spec.agent_customizer = self.build_agent_customizer(
-            spec,
-            deep_agent,
-            session_id,
+            mode=mode,
+            project_dir=project_dir,
             request_id=request_id,
             channel_id=channel_id,
             request_metadata=request_metadata,
@@ -466,427 +465,6 @@ class TeamManager:
         )
         return None
 
-    @staticmethod
-    def register_member_runtime_tools(
-        agent: DeepAgent,
-        *,
-        session_id: str,
-        request_id: str | None,
-        channel_id: str | None,
-        request_metadata: dict[str, Any] | None,
-    ) -> None:
-        from jiuwenswarm.agents.harness.common.tools.cron.cron_runtime import CronRuntimeBridge
-        from jiuwenswarm.agents.harness.common.tools.send_file_to_user import SendFileToolkit
-
-        agent_id = getattr(getattr(agent, "card", None), "id", None)
-        cron_runtime = CronRuntimeBridge()
-        cron_context = SimpleNamespace(
-            tool_scope=f"team_member_{agent_id or 'unknown'}",
-            channel_id=channel_id or "web",
-            session_id=session_id,
-            metadata=request_metadata,
-            mode="team",
-        )
-
-        try:
-            cron_tools = cron_runtime.build_tools(
-                context=cron_context,
-                agent_id=agent_id,
-                language=getattr(agent.deep_config, "language", "cn")
-            )
-            for cron_tool in cron_tools:
-                if not Runner.resource_mgr.get_tool(cron_tool.card.id):
-                    Runner.resource_mgr.add_tool(cron_tool)
-                agent.ability_manager.add(cron_tool.card)
-            logger.info("[TeamManager] Registered %d cron tools for member agent=%s", len(cron_tools), agent_id)
-        except Exception as exc:
-            logger.warning("[TeamManager] cron tool registration failed for member agent=%s: %s", agent_id, exc)
-
-        if not request_id or not channel_id:
-            logger.info("[TeamManager] SendFileToolkit skipped: missing request_id or channel_id")
-            return
-
-        try:
-            config = get_config()
-            send_file_enabled = (
-                config.get("channels", {})
-                .get(str(channel_id), {})
-                .get("send_file_allowed")
-            )
-            # web channel defaults to True, others default to False
-            if send_file_enabled is None:
-                send_file_enabled = (channel_id == "web")
-            if not send_file_enabled:
-                logger.info(
-                    "[TeamManager] SendFileToolkit skipped: send_file_allowed=False for channel=%s",
-                    channel_id,
-                )
-                return
-
-            for existing in list(agent.ability_manager.list() or []):
-                if getattr(existing, "name", "").startswith("send_file_to_user"):
-                    agent.ability_manager.remove(existing.name)
-
-            send_file_toolkit = SendFileToolkit(
-                request_id=request_id,
-                session_id=session_id,
-                channel_id=channel_id,
-                metadata=request_metadata,
-            )
-            for sf_tool in send_file_toolkit.get_tools():
-                Runner.resource_mgr.add_tool(sf_tool)
-                agent.ability_manager.add(sf_tool.card)
-            logger.info("[TeamManager] SendFileToolkit registered for channel=%s", channel_id)
-        except Exception as exc:
-            logger.warning("[TeamManager] SendFileToolkit registration failed: %s", exc)
-
-    @staticmethod
-    def build_agent_customizer(
-        spec: TeamAgentSpec,
-        deep_agent: DeepAgent,
-        session_id: str,
-        *,
-        request_id: str | None = None,
-        channel_id: str | None = None,
-        request_metadata: dict[str, Any] | None = None,
-    ) -> Callable[..., None]:
-        global_skills_dir = get_agent_skills_dir()
-        resolved_channel = channel_id or "default"
-        resolved_model_name = get_default_model_name()
-
-        # Resolve team shared workspace skills directory for TeamSkillEvolutionRail.
-        ws_config = spec.workspace
-        team_ws_root = (
-            ws_config.root_path if ws_config and ws_config.root_path
-            else str(team_home(spec.team_name) / "team-workspace")
-        )
-        team_ws_skills_dir = Path(team_ws_root) / "skills"
-        team_trajectory_registry = InMemoryTrajectoryRegistry()
-
-        def resolve_member_spec(
-            member_name: str | None,
-            role: str | None,
-        ) -> Any:
-            if member_name and member_name in spec.agents:
-                return spec.agents[member_name]
-            if role and role in spec.agents:
-                return spec.agents[role]
-            return spec.agents.get("leader")
-
-        def resolve_member_skills(
-            member_name: str | None,
-            role: str | None,
-        ) -> tuple[bool, list[str]]:
-            member_spec = resolve_member_spec(member_name, role)
-            if member_spec is None or not hasattr(member_spec, "skills"):
-                return False, []
-
-            skills = getattr(member_spec, "skills", None)
-            if skills is None:
-                return False, []
-
-            return True, [str(skill).strip() for skill in skills if str(skill).strip()]
-
-        def link_member_configured_skills(
-            member_skills_dir: Path,
-            selected_skills: list[str],
-        ) -> None:
-            """Synchronize member-configured skills into the member's skills directory."""
-            if not global_skills_dir.exists():
-                logger.warning("[TeamManager] global_skills_dir does not exist: %s", global_skills_dir)
-                return
-
-            selected_skill_set = set(selected_skills)
-            member_skills_dir.mkdir(parents=True, exist_ok=True)
-            prune_skill_dir_links(global_skills_dir, member_skills_dir, selected_skill_set)
-            linked_count = 0
-            for skill_dir in global_skills_dir.iterdir():
-                if not is_valid_skill_dir(skill_dir):
-                    continue
-                if skill_dir.name not in selected_skill_set:
-                    continue
-                dest = member_skills_dir / skill_dir.name
-                if path_exists_or_link(dest):
-                    continue
-                link_skill_dir(skill_dir, dest)
-                linked_count += 1
-                logger.info("[TeamManager] Linked skill '%s' to member workspace", skill_dir.name)
-
-            existing_skill_names = {
-                path.name for path in member_skills_dir.iterdir() if path_exists_or_link(path)
-            }
-            missing = sorted(selected_skill_set - existing_skill_names)
-            if missing:
-                logger.warning("[TeamManager] configured skills not found in global dir: %s", missing)
-
-            logger.info("[TeamManager] Total configured skills linked to member: %d", linked_count)
-
-        def extract_skill_name_from_tool_result(result: dict[str, object]) -> str:
-            """Extract a skill name from a skill tool result."""
-            skill = result.get("skill")
-            if isinstance(skill, dict):
-                skill_name = str(skill.get("name", "")).strip()
-                if skill_name:
-                    return skill_name
-            return str(result.get("skill_name", "") or result.get("name", "")).strip()
-
-        def customizer(
-            agent: DeepAgent,
-            member_name: str | None = None,
-            role: str | None = None,
-        ) -> None:
-            logger.info(
-                "[TeamManager] customizer called: channel=%s member_name=%s role=%s",
-                resolved_channel,
-                member_name,
-                role,
-            )
-            member_deep_config = getattr(agent, "deep_config", None)
-            agent_ws = (
-                getattr(member_deep_config, "workspace", None)
-                if member_deep_config
-                else None
-            )
-            if agent_ws:
-                logger.debug(
-                    "[TeamManager] member workspace.root_path=%s",
-                    getattr(agent_ws, "root_path", None),
-                )
-            else:
-                logger.warning("[TeamManager] agent deep_config.workspace is None")
-            parent_adapter_mode = str(
-                getattr(deep_agent, "_jiuwenswarm_adapter_mode", "") or ""
-            ).lower()
-            parent_deep_config = getattr(deep_agent, "deep_config", None)
-            parent_workspace = (
-                getattr(parent_deep_config, "workspace", None)
-                if parent_deep_config
-                else None
-            )
-            parent_project_dir = (
-                str(getattr(deep_agent, "_jiuwenswarm_project_dir", "") or "")
-                or str(getattr(deep_agent, "_jiuwenswarm_code_project_dir", "") or "")
-                or (
-                    str(getattr(parent_workspace, "root_path", ""))
-                    if parent_workspace and getattr(parent_workspace, "root_path", None)
-                    else ""
-                )
-            )
-            if parent_project_dir and member_deep_config is not None:
-                setattr(agent, "_jiuwenswarm_project_dir", parent_project_dir)
-
-            inheritable_cards = filter_inheritable_ability_cards(deep_agent)
-            existing_ability_ids = {card.id for card in agent.ability_manager.list() or []}
-            added_count = 0
-            for card in inheritable_cards:
-                if card.id not in existing_ability_ids:
-                    agent.ability_manager.add(card)
-                    existing_ability_ids.add(card.id)
-                    added_count += 1
-                else:
-                    logger.debug("[TeamManager] Ability '%s' already exists, skipped", card.name)
-            logger.info(
-                "[TeamManager] Added %d inheritable abilities (total: %d)",
-                added_count,
-                len(existing_ability_ids),
-            )
-
-            member_workspace = agent_ws
-            member_workspace_root = getattr(member_workspace, "root_path", None)
-            member_skill_manager: Any | None = None
-            if member_workspace and member_workspace_root:
-                agent_workspace_dir = get_agent_workspace_dir()
-                member_skills_dir = Path(member_workspace_root) / "skills"
-                skills_configured, selected_skills = resolve_member_skills(member_name, role)
-
-                def refresh_member_skill_links(result: dict[str, object]) -> None:
-                    """Refresh linked skill views after a member skill tool mutation."""
-                    if result.get("skill_removed") or result.get("removed"):
-                        skill_name = extract_skill_name_from_tool_result(result)
-                        if skill_name:
-                            remove_skill_dir_link(member_skills_dir / skill_name)
-                        get_team_manager(resolved_channel).refresh_team_shared_skill_links(session_id)
-                        return
-                    get_team_manager(resolved_channel).refresh_team_shared_skill_links(session_id)
-
-                # Link member-configured skills so the member workspace exposes
-                # only that member's skill view.
-                try:
-                    member_skills_dir.mkdir(parents=True, exist_ok=True)
-                    if skills_configured and selected_skills:
-                        link_member_configured_skills(member_skills_dir, selected_skills)
-                except Exception as exc:
-                    logger.warning("[TeamManager] skill link refresh failed: %s", exc)
-
-                try:
-                    member_skill_manager = SkillManager(workspace_dir=str(agent_workspace_dir))
-                except Exception as exc:
-                    logger.warning("[TeamManager] member SkillManager setup failed: %s", exc)
-
-                # Create shared SkillManager and SkillToolkit for member installs.
-                try:
-                    agent.add_rail(
-                        MemberSkillToolkitRail(
-                            workspace_dir=str(agent_workspace_dir),
-                            manager=member_skill_manager,
-                            refresh_links=refresh_member_skill_links,
-                        )
-                    )
-                    logger.info(
-                        "[TeamManager] MemberSkillToolkitRail queued for skill workspace: %s",
-                        agent_workspace_dir,
-                    )
-                except Exception as exc:
-                    logger.warning("[TeamManager] MemberSkillToolkitRail setup failed: %s", exc)
-
-            if parent_adapter_mode == "code":
-                try:
-                    from jiuwenswarm.server.runtime.agent_adapter.interface_code import (
-                        configure_code_team_member_agent,
-                    )
-
-                    request_mode = str((request_metadata or {}).get("mode") or "").strip().lower()
-                    role_name = str(getattr(role, "value", role) or "").strip().lower()
-                    team_plan_enabled = (
-                        request_mode == "team.plan"
-                        or bool(getattr(spec, "enable_team_plan", False))
-                    )
-                    is_team_plan_leader = team_plan_enabled and role_name == "leader"
-                    team_plan_runtime_language = None
-                    if is_team_plan_leader:
-                        config_language = str(
-                            getattr(spec, "language", None)
-                            or get_config().get("preferred_language", "zh")
-                        )
-                        team_plan_runtime_language = config_language
-
-                    configure_code_team_member_agent(
-                        agent,
-                        parent_agent=deep_agent,
-                        skill_manager=member_skill_manager,
-                        member_name=member_name,
-                        role=role,
-                        session_id=session_id,
-                        channel_id=resolved_channel,
-                        project_dir=parent_project_dir or None,
-                        runtime_language=team_plan_runtime_language,
-                        force_english_runtime_prompt=not is_team_plan_leader,
-                    )
-                except Exception as exc:
-                    logger.warning(
-                        "[TeamManager] code team member adapter setup failed: member=%s role=%s error=%s",
-                        member_name,
-                        role,
-                        exc,
-                    )
-
-            # Build all member rails (common + skill rails via role).
-            team_workspace = TeamWorkspaceInfo(
-                root_dir=str(Path(team_ws_root)),
-                skills_dir=str(global_skills_dir),
-                team_id=spec.team_name,
-                config=get_config(),
-                trajectory_registry=team_trajectory_registry,
-            )
-            team_manager = get_team_manager(resolved_channel)
-            team_manager.register_team_shared_skill_link_target(
-                session_id,
-                team_ws_skills_dir,
-            )
-
-            def refresh_team_shared_skill_links() -> None:
-                """Refresh this session's team shared skill links."""
-                team_manager.refresh_team_shared_skill_links(session_id)
-
-            agent.add_rail(
-                TeamSharedSkillLinkRefreshRail(
-                    global_skills_dir=global_skills_dir,
-                    refresh_links=refresh_team_shared_skill_links,
-                )
-            )
-
-            try:
-                member_rails = build_member_rails(
-                    member_info=MemberInfo(
-                        agent_name=getattr(agent.card, "name", "team_member"),
-                        model_name=resolved_model_name,
-                        role=role
-                    ),
-                    runtime=RuntimeInfo(channel=resolved_channel),
-                    team_workspace=team_workspace,
-                )
-                team_skill_rail: Any | None = None
-                team_skill_create_rail: Any | None = None
-                for rail in member_rails:
-                    if type(rail).__name__ in RAIL_WHITELIST:
-                        agent.add_rail(rail)
-                        if isinstance(rail, (TeamSkillEvolutionRail, TeamSkillCreateRail)):
-                            get_team_manager(resolved_channel).register_team_live_rail(
-                                session_id,
-                                agent,
-                                rail,
-                            )
-                    else:
-                        logger.debug("[TeamManager] Skipping non-whitelisted rail: %s", type(rail).__name__)
-                    if isinstance(rail, TeamSkillEvolutionRail):
-                        team_skill_rail = rail
-                    elif isinstance(rail, SkillEvolutionRail):
-                        get_team_manager(resolved_channel).register_team_member_skill_evolution_rail(
-                            session_id,
-                            rail,
-                        )
-                    elif isinstance(rail, TeamSkillCreateRail):
-                        team_skill_create_rail = rail
-                logger.info("[TeamManager] Added %d rails for team member", len(member_rails))
-                # Register TeamSkillEvolutionRail with TeamManager for approval.
-                if team_skill_rail is not None:
-                    tm = get_team_manager(resolved_channel)
-                    tm.register_team_skill_rail(session_id, team_skill_rail)
-                    logger.info(
-                        "[TeamManager] TeamSkillEvolutionRail mounted on leader (skills_dir=%s)",
-                        team_ws_skills_dir,
-                    )
-                if team_skill_create_rail is not None:
-                    get_team_manager(resolved_channel).register_team_skill_create_rail(
-                        session_id,
-                        team_skill_create_rail,
-                    )
-                if role == "leader":
-                    get_team_manager(resolved_channel).register_team_rail_context(
-                        session_id,
-                        TeamRailMountContext(
-                            agent=agent,
-                            member_info=MemberInfo(
-                                agent_name=getattr(agent.card, "name", "team_member"),
-                                model_name=resolved_model_name,
-                                role=role,
-                            ),
-                            runtime=RuntimeInfo(channel=resolved_channel),
-                            team_workspace=team_workspace,
-                        ),
-                    )
-            except Exception as exc:
-                logger.warning("[TeamManager] build_member_rails failed: %s", exc)
-
-            rail_manager = get_rail_manager()
-            for rail_name in rail_manager.get_registered_rail_names():
-                try:
-                    rail_instance = rail_manager.load_rail_instance_without_enabled_check(rail_name)
-                    if rail_instance is not None:
-                        agent.add_rail(rail_instance)
-                        logger.info("[TeamManager] Added extension rail: %s", rail_name)
-                except Exception as exc:
-                    logger.warning("[TeamManager] add rail %s failed: %s", rail_name, exc)
-
-            TeamManager.register_member_runtime_tools(
-                agent,
-                session_id=session_id,
-                request_id=request_id,
-                channel_id=channel_id,
-                request_metadata=request_metadata,
-            )
-
-        return customizer
 
     @staticmethod
     def _is_postgresql_storage(team_cfg: dict[str, Any]) -> bool:
@@ -951,6 +529,14 @@ class TeamManager:
         """Ensure team shared skills are available in the team workspace."""
         TeamManager._initialize_team_shared_skill_links(spec)
 
+    def ensure_team_shared_skills_ready_for_session(self, session_id: str, spec: TeamAgentSpec) -> None:
+        """Ensure team shared skills are initialized and registered for refresh."""
+        self.ensure_team_shared_skills_initialized(spec)
+        self.register_team_shared_skill_link_target(
+            session_id,
+            self._resolve_team_shared_skills_dir(spec),
+        )
+
     def register_team_shared_skill_link_target(self, session_id: str, target: Path) -> None:
         """Register the team shared skills directory for link refresh."""
         self._team_shared_skill_link_targets[session_id] = target
@@ -994,10 +580,20 @@ class TeamManager:
             session_id=session_id,
         )
 
-        spec.agent_customizer = self.build_agent_customizer(
+        resolved_mode = str((request_metadata or {}).get("mode") or "").strip()
+        # Provider-based assembly: source every member capability from the shared
+        # config source, no pre-built parent DeepAgent / customizer. Mirrors
+        # get_swarm_enriched_team_spec so a team rebuilt here (e.g. the distributed
+        # teammate's auxiliary leader) carries provider declarations plus the
+        # serializable build_context_seed.
+        from jiuwenswarm.agents.swarm import enrich_team_spec_for_swarm
+
+        self.apply_team_plan_mode(spec, request_metadata=request_metadata)
+        enrich_team_spec_for_swarm(
             spec,
-            deep_agent,
-            session_id,
+            session_id=session_id,
+            mode=resolved_mode,
+            project_dir=(request_metadata or {}).get("project_dir"),
             request_id=request_id,
             channel_id=channel_id,
             request_metadata=request_metadata,
@@ -1011,11 +607,7 @@ class TeamManager:
             team_agent = spec.build()
             self._team_agents[session_id] = team_agent
             # After build, initialize team shared skill links.
-            self.ensure_team_shared_skills_initialized(spec)
-            self.register_team_shared_skill_link_target(
-                session_id,
-                self._resolve_team_shared_skills_dir(spec),
-            )
+            self.ensure_team_shared_skills_ready_for_session(session_id, spec)
 
             if self._is_distributed_mode(config_base):
                 try:
@@ -1362,6 +954,15 @@ class TeamManager:
     def register_monitor(self, session_id: str, handler: TeamMonitorHandler) -> None:
         self._team_monitors[session_id] = handler
 
+    def register_workflow_handler(self, session_id: str, handler: Any) -> None:
+        self._workflow_handlers[session_id] = handler
+
+    def get_workflow_handler(self, session_id: str) -> Any | None:
+        return self._workflow_handlers.get(session_id)
+
+    def pop_workflow_handler(self, session_id: str) -> Any | None:
+        return self._workflow_handlers.pop(session_id, None)
+
     def register_stream_task(self, session_id: str, task: asyncio.Task) -> None:
         self._stream_tasks[session_id] = task
 
@@ -1578,6 +1179,17 @@ class TeamManager:
             except Exception as exc:
                 logger.warning(
                     "[TeamManager] monitor stop failed: session_id=%s error=%s",
+                    session_id,
+                    exc,
+                )
+
+        workflow_handler = self.pop_workflow_handler(session_id)
+        if workflow_handler is not None:
+            try:
+                await workflow_handler.stop()
+            except Exception as exc:
+                logger.warning(
+                    "[TeamManager] workflow handler stop failed: session_id=%s error=%s",
                     session_id,
                     exc,
                 )

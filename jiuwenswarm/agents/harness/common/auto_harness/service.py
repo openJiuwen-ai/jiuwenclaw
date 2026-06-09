@@ -173,10 +173,20 @@ class AutoHarnessService:
     Instantiated as member variable of JiuWenClawDeepAdapter for proper lifecycle management.
     """
 
-    def __init__(self, rail: Any, agent: Any | None = None) -> None:
+    def __init__(
+        self,
+        rail: Any,
+        agent: Any | None = None,
+        agent_manager: Any | None = None,
+    ) -> None:
         """Initialize service - load base config, create data directories.
 
         Per §5.6.2: config.yaml is bootstrapped if not exists.
+
+        Args:
+            rail: Stream event rail for output.
+            agent: DeepAgent instance for load/unload harness config.
+            agent_manager: AgentManager for broadcasting package changes to all agent instances.
         """
         # Directory paths (per §5.6.4)
         self.data_dir = _AUTO_HARNESS_DATA_DIR
@@ -187,6 +197,7 @@ class AutoHarnessService:
 
         self._stream_event_rail = rail
         self._agent = agent
+        self._agent_manager = agent_manager
 
         # Active runs tracked by session_id (per §5.2)
         self._active_runs: dict[str, ActiveAutoHarnessRun] = {}
@@ -1675,6 +1686,23 @@ class AutoHarnessService:
                     "[AutoHarnessService] Consumer received terminal event, session=%s",
                     active_run.session_id,
                 )
+
+                # When EXTENDED_EVOLVE_PIPELINE finishes, refresh packages cache
+                # so other channels can pick up newly generated packages.
+                if self._base_config and self._base_config.pipeline_preference == EXTENDED_EVOLVE_PIPELINE:
+                    try:
+                        data = await asyncio.to_thread(self.scan_runtime_extensions)
+                        await asyncio.to_thread(self.save_packages, data)
+                        logger.info(
+                            "[AutoHarnessService] Packages cache refreshed after %s, session=%s",
+                            self._base_config.pipeline_preference,
+                            active_run.session_id,
+                        )
+                    except Exception as exc:
+                        logger.warning(
+                            "[AutoHarnessService] Failed to refresh packages cache: %s",
+                            exc,
+                        )
                 break
 
             if active_run.cancelled:
@@ -1854,44 +1882,131 @@ class AutoHarnessService:
         except Exception:
             return datetime.now(timezone.utc).isoformat()
 
-    def scan_runtime_extensions(self) -> dict[str, Any]:
-        """Scan runtime_extensions directory and generate packages info."""
+    def scan_runtime_extensions(self, skip_load: bool = False) -> dict[str, Any]:
+        """Scan runtime_extensions directory and sync packages info with existing state.
+
+        This method:
+        1. Preserves existing package metadata (ID, is_active, activated_at, etc.)
+        2. Adds newly discovered packages from filesystem
+        3. Removes packages that no longer exist in filesystem
+        4. Preserves active_package_ids state
+
+        Args:
+            skip_load: If True, skip loading existing data (used to prevent recursion
+                       when called from load_packages fallback).
+        """
         runtime_root = self.data_dir / "runtime_extensions"
+
+        # Load existing data to preserve state (skip to prevent recursion)
+        if skip_load:
+            existing_data: dict[str, Any] = {
+                "packages": [],
+                "active_package_ids": [],
+                "native_version": {
+                    "id": "native",
+                    "extension_name": "Native Agent",
+                    "is_active": True,
+                },
+            }
+        else:
+            existing_data = self._load_packages_no_fallback()
+            if existing_data is None:
+                existing_data = {
+                    "packages": [],
+                    "active_package_ids": [],
+                    "native_version": {
+                        "id": "native",
+                        "extension_name": "Native Agent",
+                        "is_active": True,
+                    },
+                }
+
+        existing_packages = existing_data.get("packages", [])
+        active_package_ids = existing_data.get("active_package_ids", [])
+
+        # Build lookup by runtime_path for efficient matching
+        # Use copy to avoid modifying original dict
+        existing_by_path: dict[str, dict[str, Any]] = {}
+        for pkg in existing_packages:
+            path_key = pkg.get("runtime_path", "")
+            if path_key:
+                existing_by_path[path_key] = copy(pkg)
+
         packages: list[dict[str, Any]] = []
+        discovered_paths: set[str] = set()
 
         try:
             for path in runtime_root.glob("*/*"):
                 if path.is_dir() and (path / "harness_config.yaml").is_file():
-                    package = {
-                        "id": self.generate_package_id(path),
-                        "extension_name": path.name,
-                        "runtime_path": str(path.resolve()),
-                        "config_path": str((path / "harness_config.yaml").resolve()),
-                        "created_at": self._get_created_time(path),
-                        "is_active": False,
-                        "version_label": "",
-                        "description": "",
-                    }
-                    packages.append(package)
+                    resolved_path = str(path.resolve())
+                    discovered_paths.add(resolved_path)
+
+                    # Check if package already exists (preserve all metadata)
+                    existing_pkg = existing_by_path.get(resolved_path)
+                    if existing_pkg:
+                        # Package already tracked - preserve all existing metadata unchanged
+                        packages.append(existing_pkg)
+                    else:
+                        # New package discovered - create fresh entry (inactive by default)
+                        package = {
+                            "id": self.generate_package_id(path),
+                            "extension_name": path.name,
+                            "runtime_path": resolved_path,
+                            "config_path": str((path / "harness_config.yaml").resolve()),
+                            "created_at": self._get_created_time(path),
+                            "is_active": False,
+                            "version_label": "",
+                            "description": "",
+                        }
+                        packages.append(package)
+                        logger.info(
+                            "[AutoHarnessService] Discovered new package: %s",
+                            package["extension_name"],
+                        )
         except Exception as exc:
             logger.warning("[AutoHarnessService] Failed to scan runtime_extensions: %s", exc)
 
+        # Filter active_package_ids: keep only those that still exist on disk
+        valid_active_ids = [
+            pkg_id for pkg_id in active_package_ids
+            if any(pkg.get("id") == pkg_id for pkg in packages)
+        ]
+
+        # Log removed packages (no longer on disk)
+        for old_pkg in existing_packages:
+            old_path = old_pkg.get("runtime_path", "")
+            if old_path and old_path not in discovered_paths:
+                logger.info(
+                    "[AutoHarnessService] Package removed from filesystem: %s",
+                    old_pkg.get("extension_name", "unknown"),
+                )
+                if old_pkg.get("id") in active_package_ids:
+                    logger.info(
+                        "[AutoHarnessService] Active package deleted, deactivated: %s",
+                        old_pkg.get("id"),
+                    )
+
+        # Determine native_version active status
+        native_is_active = len(valid_active_ids) == 0
+        native_version = {
+            "id": "native",
+            "extension_name": "Native Agent",
+            "is_active": native_is_active,
+        }
+
         return {
             "packages": packages,
-            "native_version": {
-                "id": "native",
-                "extension_name": "Native Agent",
-                "is_active": True,
-            },
-            "active_package_ids": [],
+            "native_version": native_version,
+            "active_package_ids": valid_active_ids,
             "last_updated": datetime.now(timezone.utc).isoformat(),
         }
 
-    def load_packages(self) -> dict[str, Any]:
-        """Load packages metadata from harness-packages.json.
+    @staticmethod
+    def _load_packages_no_fallback() -> dict[str, Any] | None:
+        """Load packages metadata from harness-packages.json without fallback scan.
 
-        If the file doesn't exist, scan runtime_extensions directory,
-        save the result to the file, and return the data.
+        Returns None if file doesn't exist or loading fails.
+        This prevents recursion when called from scan_runtime_extensions.
         """
         try:
             if _HARNESS_PACKAGES_FILE.exists():
@@ -1899,9 +2014,20 @@ class AutoHarnessService:
                 return data
         except Exception as exc:
             logger.warning("[AutoHarnessService] Failed to load packages file: %s", exc)
+        return None
 
-        # Fallback: scan directory and save result
-        data = self.scan_runtime_extensions()
+    def load_packages(self) -> dict[str, Any]:
+        """Load packages metadata from harness-packages.json.
+
+        If the file doesn't exist, scan runtime_extensions directory,
+        save the result to the file, and return the data.
+        """
+        data = self._load_packages_no_fallback()
+        if data is not None:
+            return data
+
+        # Fallback: scan directory and save result (skip_load=True prevents recursion)
+        data = self.scan_runtime_extensions(skip_load=True)
         self.save_packages(data)
         logger.info("[AutoHarnessService] Created packages metadata from scan")
         return data
@@ -2007,15 +2133,21 @@ class AutoHarnessService:
         """Get packages info for frontend API."""
         return self.load_packages()
 
-    async def activate_package(self, package_id: str) -> dict[str, Any]:
+    async def activate_package(
+        self,
+        package_id: str,
+        channel_id: str | None = None,
+    ) -> dict[str, Any]:
         """Activate a harness package by loading its config (stacking on existing).
 
         Stacked activation flow:
         1. Load the new package config (stack on any existing active packages)
         2. Update metadata: add package_id to active_package_ids list
+        3. Broadcast to all agent.fast/agent.plan instances in the channel
 
         Args:
             package_id: The package ID to activate
+            channel_id: Optional channel ID to limit broadcast scope
 
         Returns:
             Payload for frontend response with activation details
@@ -2067,6 +2199,17 @@ class AutoHarnessService:
         try:
             loaded_resources = await self._agent.load_harness_config(config_path)
             self.update_active_status(package_id, "add")
+
+            # Broadcast to all agent.fast/agent.plan instances (skip current, already loaded)
+            if self._agent_manager:
+                await self._agent_manager.broadcast_package_change_to_single_agents(
+                    package_id,
+                    config_path,
+                    "activate",
+                    channel_id=channel_id,
+                    skip_instance=self._agent,
+                )
+
             logger.info(
                 "[AutoHarnessService] Activated package %s, loaded resources: %s",
                 package_id,
@@ -2078,7 +2221,7 @@ class AutoHarnessService:
                 "runtime_path": package.get("runtime_path", ""),
                 "config_path": config_path,
                 "loaded_resources": loaded_resources,
-                "message": f"扩展已热生效，加载资源: {len(loaded_resources)} 项",
+                "message": f"扩展已热生效（规划与性能模式），加载资源: {len(loaded_resources)} 项",
             }
         except FileNotFoundError as exc:
             raise ValueError(f"配置文件不存在: {exc}") from exc
@@ -2088,11 +2231,21 @@ class AutoHarnessService:
             logger.exception("[AutoHarnessService] Activate package %s failed: %s", package_id, exc)
             raise ValueError(f"激活扩展失败: {exc}") from exc
 
-    async def deactivate_package(self, package_id: str) -> dict[str, Any]:
+    async def deactivate_package(
+        self,
+        package_id: str,
+        channel_id: str | None = None,
+    ) -> dict[str, Any]:
         """Deactivate a harness package by unloading its config.
+
+        Deactivation flow:
+        1. Unload from current agent instance
+        2. Broadcast to all agent.fast/agent.plan instances in the channel
+        3. Update metadata: remove package_id from active_package_ids list
 
         Args:
             package_id: The package ID to deactivate
+            channel_id: Optional channel ID to limit broadcast scope
 
         Returns:
             Payload for frontend response with deactivation details
@@ -2144,20 +2297,38 @@ class AutoHarnessService:
                     exc,
                 )
 
+        # Broadcast to all agent.fast/agent.plan instances before updating status
+        if self._agent_manager and config_path and Path(config_path).exists():
+            await self._agent_manager.broadcast_package_change_to_single_agents(
+                package_id,
+                config_path,
+                "deactivate",
+                channel_id=channel_id,
+                skip_instance=self._agent,
+            )
+
         self.update_active_status(package_id, "remove")
         logger.info("[AutoHarnessService] Package %s deactivated", package_id)
 
         return {
             "deactivated_package_id": package_id,
             "extension_name": extension_name,
-            "message": f"扩展 {extension_name} 已去激活",
+            "message": f"扩展 {extension_name} 已取消激活",
         }
 
-    def delete_package(self, package_id: str) -> dict[str, Any]:
+    async def delete_package(
+        self,
+        package_id: str,
+        channel_id: str | None = None,
+    ) -> dict[str, Any]:
         """Delete a package and optionally remove from active list if it was active.
+
+        If the package is active, it will be deactivated first by unloading its config
+        and broadcasting the change to other agent instances.
 
         Args:
             package_id: The package ID to delete
+            channel_id: Optional channel ID to limit broadcast scope
 
         Returns:
             Payload with deletion result and active package switch info if applicable
@@ -2174,6 +2345,40 @@ class AutoHarnessService:
         was_active = package.get("is_active", False)
         active_ids = data.get("active_package_ids", [])
         was_in_active_list = package_id in active_ids
+        config_path = package.get("config_path", "")
+
+        # If package is active, deactivate it first
+        if was_active or was_in_active_list:
+            # Unload from current agent instance
+            if self._agent is not None and config_path and Path(config_path).exists():
+                try:
+                    unloaded_resources = await self._agent.unload_harness_config(config_path)
+                    logger.info(
+                        "[AutoHarnessService] Deactivated package %s during delete, unloaded resources: %s",
+                        package_id,
+                        unloaded_resources,
+                    )
+                except FileNotFoundError:
+                    logger.warning(
+                        "[AutoHarnessService] Config file not found for deactivation during delete: %s",
+                        config_path,
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "[AutoHarnessService] Failed to unload package %s during delete: %s",
+                        package_id,
+                        exc,
+                    )
+
+            # Broadcast to all agent.fast/agent.plan instances
+            if self._agent_manager and config_path and Path(config_path).exists():
+                await self._agent_manager.broadcast_package_change_to_single_agents(
+                    package_id,
+                    config_path,
+                    "deactivate",
+                    channel_id=channel_id,
+                    skip_instance=self._agent,
+                )
 
         # Delete runtime directory if exists
         runtime_path = package.get("runtime_path", "")

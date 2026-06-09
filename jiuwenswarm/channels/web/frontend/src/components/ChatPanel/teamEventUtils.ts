@@ -66,9 +66,13 @@ export function isTeamMemberCollaborationMessage(message: Message): boolean {
   if (!event) {
     return false;
   }
-  return !event.isLeaderToUser;
+  return !event.isLeaderToUser && !isTeamP2PMessageToUser(event);
 }
 
 export function isTeamActivityMessage(message: Message): boolean {
   return Boolean(parseTeamEventMessage(message));
+}
+
+export function isTeamP2PMessageToUser(event: ParsedTeamEvent): boolean {
+  return event.type === 'team.message.p2p' && event.toMember === 'user';
 }

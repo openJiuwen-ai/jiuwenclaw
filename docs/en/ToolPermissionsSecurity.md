@@ -121,7 +121,100 @@ When the user selects **"Remember this rule"** or equivalent persistence logic d
 
 ---
 
-## 6. CLI: `/add-dir` and `persist_cli_trusted_directory`
+## 6. `/permissions` Command Usage Guide
+
+The TUI `/permissions` command is a quick interface for managing tool permissions and rules. It supports **viewing** all permissions, **setting tool-level permissions**, and **creating parameter-level rules**.
+
+### 6.1 View All Permissions (No Arguments)
+
+```
+/permissions
+```
+
+Called without arguments, it requests both `permissions.tools.get` and `permissions.rules.get`, outputting two sections:
+
+```
+── Tool Permissions ──
+  bash          →  ask
+  write_file    →  ask
+  read_file     →  allow
+  mcp__context7 →  allow
+
+── Rules ──
+  [cli_rule_bash_ls_*]  bash  pattern: ls *  action: allow
+  [rule_001]  write_file  pattern: re:.*\.env$  action: deny
+```
+
+### 6.2 Set Tool-Level Permissions
+
+```
+/permissions <allow|ask|deny> <tool_name>
+```
+
+Calls `permissions.tools.update` to write the specified tool into `permissions.tools`. Tool names are normalized to lowercase.
+
+**Examples:**
+
+| Command | Effect |
+|---------|--------|
+| `/permissions ask write_file` | Requires confirmation before writing files |
+| `/permissions allow bash` | Allows bash to execute directly |
+| `/permissions deny bash` | Rejects all bash calls (highest priority — skips parameter rules) |
+
+### 6.3 Create Parameter-Level Rules (with Pattern)
+
+```
+/permissions <allow|ask|deny> <tool_name>(<pattern>)
+```
+
+Calls `permissions.rules.create` to create a parameter-level rule. If a rule with the same ID already exists (ID collision), it automatically falls back to `permissions.rules.update`.
+
+**Pattern syntax:**
+
+- Plain text: literal match, e.g. `ls *` (glob-style wildcard).
+- Regex: prefixed with `re:`, e.g. `re:.*\.env$` (matches the full command string).
+
+**Direct `action` field (no severity mapping):**
+
+The `/permissions` command writes the user's `allow/ask/deny` choice **directly into the rule's `action` field**, rather than indirectly mapping through `severity`. When the engine resolves a parameter-level rule, if an explicit `action` is present, it **uses that action directly — bypassing the severity mapping table** (see §2.1).
+
+This means:
+- `/permissions deny bash(re:.*rm -rf.*)` → `action: deny` → **rejects in any mode** (independent of `permission_mode`).
+- `/permissions ask write_file(re:.*\.env$)` → `action: ask` → **always requires confirmation**.
+
+> **Why not severity?** The previous implementation mapped `deny` → `severity: CRITICAL`, but in `normal` mode CRITICAL resolves to `ask`, not `deny` — contradicting the user's intent. Writing `action` directly ensures the user's `allow/ask/deny` intent is faithfully expressed.
+
+**Rule ID generation:** Format is `cli_rule_<tool>_<pattern-escaped>`, e.g. `cli_rule_bash_ls_*`.
+
+**Examples:**
+
+| Command | Generated rule |
+|---------|---------------|
+| `/permissions allow bash(ls *)` | tools: `[bash]`, pattern: `ls *`, action: `allow` |
+| `/permissions deny bash(re:.*rm -rf.*)` | tools: `[bash]`, pattern: `re:.*rm -rf.*`, action: `deny` |
+| `/permissions ask write_file(re:.*\.env$)` | tools: `[write_file]`, pattern: `re:.*\.env$`, action: `ask` |
+
+### 6.4 Error Messages
+
+| Condition | Message |
+|-----------|---------|
+| Level not in allow/ask/deny | `无效级别 "xxx"，仅允许：allow、ask、deny` |
+| Empty tool name | `工具名不能为空。` |
+| API request failure | Shows the specific RPC method name and error message |
+
+### 6.5 Mapping to Configuration
+
+| Command action | Config path written | RPC method |
+|---------------|---------------------|------------|
+| `/permissions ask bash` | `permissions.tools.bash = "ask"` | `permissions.tools.update` |
+| `/permissions allow bash(ls *)` | New entry in `permissions.rules` array | `permissions.rules.create` |
+| View without arguments | Reads `permissions.tools` + `permissions.rules` | `permissions.tools.get` + `permissions.rules.get` |
+
+> **Note:** `/permissions` sets global tool permissions. For digital persona / group chat scenarios, `owner_scopes` permissions must be configured separately via the channel panel — see [Channels](Channels.md).
+
+---
+
+## 7. CLI: `/add-dir` and `persist_cli_trusted_directory`
 
 In the terminal TUI, `/add-dir <path>` sends a `command.add_dir` request. The server calls `persist_cli_trusted_directory`. Key behaviors:
 
@@ -134,7 +227,7 @@ If not using `tiered_policy`, typically **only** `external_directory` is updated
 
 ---
 
-## 7. Related Files (Developer Reference)
+## 8. Related Files (Developer Reference)
 
 | Module | Path |
 |--------|------|
@@ -143,10 +236,11 @@ If not using `tiered_policy`, typically **only** `external_directory` is updated
 | Owner scopes | `jiuwenswarm/agents/harness/common/rails/permissions/owner_scopes.py` |
 | Tool permission RPC | `jiuwenswarm/agents/harness/common/rails/permissions/permissions_config_rpc.py` |
 | Tool permission context | `jiuwenswarm/agents/harness/common/rails/permissions/tool_permission_context.py` |
+| TUI `/permissions` | `jiuwenswarm/channels/tui/frontend/src/core/commands/builtins/permissions.ts` |
 
 ---
 
-## 8. See Also
+## 9. See Also
 
 - [Configuration](Configuration.md): `JIUWENSWARM_CONFIG_DIR`, configuration file location.
 - [CLI Commands](CLI.md): CLI/TUI entry points (including slash commands).

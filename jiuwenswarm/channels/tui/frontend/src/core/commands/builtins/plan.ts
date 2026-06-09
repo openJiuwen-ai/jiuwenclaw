@@ -1,17 +1,19 @@
 import { addInfo } from "../helpers.js";
 import { CommandKind, type SlashCommand } from "../types.js";
 
+const CODE_MODES = new Set(["code.normal", "code.team", "code.plan"]);
+
 export function createPlanCommand(): SlashCommand {
   return {
     name: "plan",
-    hidden: true, // TUI release: not registered in registry.ts; re-enable next version
-    description: "Switch to agent plan mode, or send a planning request",
+
+    description: "Switch to plan mode, or send a planning request",
     usage: "/plan [open|<description>]",
     example: "/plan outline the migration steps",
     kind: CommandKind.BUILT_IN,
     takesArgs: true,
     action: (ctx, args) => {
-      if (ctx.mode === "team") {
+      if (ctx.mode === "team" || ctx.mode === "team.plan") {
         ctx.addItem(
           addInfo(
             ctx.sessionId,
@@ -23,7 +25,8 @@ export function createPlanCommand(): SlashCommand {
       }
 
       const value = args.trim();
-      const target = "agent.plan";
+      // Preserve the mode family: code.* → code.plan, agent.* → agent.plan
+      const target = CODE_MODES.has(ctx.mode) ? "code.plan" : "agent.plan";
       if (ctx.mode !== target) {
         ctx.setMode(target);
       }

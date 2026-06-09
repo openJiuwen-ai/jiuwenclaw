@@ -8,6 +8,7 @@ and building permission rails.
 from __future__ import annotations
 
 import json
+import re
 from typing import Any
 
 from jiuwenswarm.common.utils import logger
@@ -282,11 +283,142 @@ def build_permission_rail(
 
 
 
+def _read_value_field(value_obj: Any, field_name: str, default: Any = "") -> Any:
+    if hasattr(value_obj, field_name):
+        return getattr(value_obj, field_name, default)
+    if isinstance(value_obj, dict):
+        return value_obj.get(field_name, default)
+    return default
+
+
+def _normalize_tool_args(raw: Any) -> dict | None:
+    if raw is None:
+        return None
+    if isinstance(raw, dict):
+        return raw
+    if isinstance(raw, str):
+        try:
+            parsed = json.loads(raw)
+        except (ValueError, TypeError):
+            return None
+        return parsed if isinstance(parsed, dict) else None
+    return None
+
+
+def _is_ask_user_interrupt_value(value_obj: Any) -> bool:
+    tool_name = str(_read_value_field(value_obj, "tool_name", "") or "").strip()
+    if tool_name == "ask_user":
+        return True
+    if hasattr(value_obj, "payload_schema") and hasattr(value_obj, "questions"):
+        return True
+    if isinstance(value_obj, dict) and "payload_schema" in value_obj and "questions" in value_obj:
+        return True
+    tool_args = _normalize_tool_args(_read_value_field(value_obj, "tool_args", None))
+    if isinstance(tool_args, dict) and str(tool_args.get("query") or "").strip():
+        if not tool_args.get("questions"):
+            return True
+    return False
+
+
+def _build_plain_ask_user_question(value_obj: Any) -> dict | None:
+    """Build a free-text ask_user question when no structured options are present."""
+    if not _is_ask_user_interrupt_value(value_obj):
+        return None
+    if _extract_questions_from_value(value_obj) is not None:
+        return None
+
+    query = ""
+    tool_args = _normalize_tool_args(_read_value_field(value_obj, "tool_args", None))
+    if isinstance(tool_args, dict):
+        query = str(tool_args.get("query") or "").strip()
+    if not query:
+        query = str(_read_value_field(value_obj, "message", "") or "").strip()
+    if not query:
+        query = str(_read_value_field(value_obj, "question", "") or "").strip()
+    if not query:
+        return None
+
+    return {
+        "question": query,
+        "header": "Question",
+        "options": [],
+        "multi_select": False,
+    }
+
+
+_PERMISSION_INTERRUPT_MARKERS = (
+    "需要授权才能执行",
+    "requires permission",
+    "Permission denied",
+    "安全风险评估",
+)
+_CONFIRM_INTERRUPT_TOOLS = frozenset({"switch_mode", "exit_plan_mode"})
+
+
+def _read_interrupt_fields(value_obj: Any) -> tuple[str, str, dict | None]:
+    """Return ``(tool_name, message, tool_args)`` from an interrupt value object."""
+    tool_name = ""
+    message = ""
+    tool_args: dict | None = None
+
+    if hasattr(value_obj, "tool_name"):
+        tool_name = str(getattr(value_obj, "tool_name", "") or "").strip()
+    if hasattr(value_obj, "message"):
+        message = str(getattr(value_obj, "message", "") or "").strip()
+    if not message and hasattr(value_obj, "question"):
+        message = str(getattr(value_obj, "question", "") or "").strip()
+    tool_args = _normalize_tool_args(getattr(value_obj, "tool_args", None))
+
+    if isinstance(value_obj, dict):
+        tool_name = tool_name or str(value_obj.get("tool_name", "") or "").strip()
+        message = message or str(
+            value_obj.get("message", "") or value_obj.get("question", "") or ""
+        ).strip()
+        if tool_args is None:
+            tool_args = _normalize_tool_args(value_obj.get("tool_args"))
+
+    return tool_name, message, tool_args
+
+
+def _is_permission_interrupt_message(message: str, tool_name: str) -> bool:
+    """Heuristic: PermissionInterruptRail copy vs ConfirmInterruptRail copy."""
+    normalized = message.strip()
+    if any(marker in normalized for marker in _PERMISSION_INTERRUPT_MARKERS):
+        return True
+    if normalized.startswith("**工具 `") or normalized.startswith("**Tool `"):
+        return True
+    if tool_name and tool_name not in _CONFIRM_INTERRUPT_TOOLS:
+        return True
+    if normalized in {"", "Please approve or reject?"}:
+        return tool_name not in _CONFIRM_INTERRUPT_TOOLS
+    return False
+
+
+def _parse_plan_metadata_from_message(message: str) -> tuple[str, str]:
+    plan_path = ""
+    plan_slug = ""
+    path_match = re.search(r"\*\*Plan file:\*\* `([^`]+)`", message)
+    if path_match:
+        plan_path = path_match.group(1).strip()
+    slug_match = re.search(r"\*\*Plan id:\*\* `([^`]+)`", message)
+    if slug_match:
+        plan_slug = slug_match.group(1).strip()
+    return plan_path, plan_slug
+
+
+def _resolve_interrupt_source(tool_name: str, message: str) -> str:
+    if _is_permission_interrupt_message(message, tool_name):
+        return "permission_interrupt"
+    return "confirm_interrupt"
+
+
 def convert_interactions_to_ask_user_question(state_outputs: list) -> dict | None:
     """Convert __interaction__ list to frontend chat.ask_user_question format.
 
-    AskUserRail 中断: value 有 questions 字段 → source="ask_user_interrupt"
+    AskUserRail 中断: value 有 questions 字段，或 ask_user 的 plain query
+        → source="ask_user_interrupt"
     PermissionRail 中断: value 无 questions 字段 → source="permission_interrupt"
+    ConfirmInterruptRail 中断: 控制类工具确认 → source="confirm_interrupt"
 
     state_outputs 中的元素可能是:
     - InteractionOutput 对象 (有 id, value 属性, value 是 ToolCallInterruptRequest)
@@ -321,7 +453,21 @@ def convert_interactions_to_ask_user_question(state_outputs: list) -> dict | Non
         }
 
     for interaction in interactions:
-        request_id, _value_obj = _extract_interaction_parts(interaction)
+        request_id, value_obj = _extract_interaction_parts(interaction)
+        if not request_id:
+            continue
+
+        plain_question = _build_plain_ask_user_question(value_obj)
+        if plain_question:
+            return {
+                "event_type": "chat.ask_user_question",
+                "request_id": request_id,
+                "questions": [plain_question],
+                "source": "ask_user_interrupt",
+            }
+
+    for interaction in interactions:
+        request_id, value_obj = _extract_interaction_parts(interaction)
         if not request_id:
             continue
 
@@ -329,12 +475,22 @@ def convert_interactions_to_ask_user_question(state_outputs: list) -> dict | Non
         if not question_data:
             continue
 
-        return {
+        tool_name, message, _tool_args = _read_interrupt_fields(value_obj)
+        source = _resolve_interrupt_source(tool_name, message)
+
+        payload = {
             "event_type": "chat.ask_user_question",
             "request_id": request_id,
             "questions": [question_data],
-            "source": "permission_interrupt",
+            "source": source,
         }
+        plan_path = str(question_data.get("plan_path") or "").strip()
+        plan_slug = str(question_data.get("plan_slug") or "").strip()
+        if plan_path:
+            payload["plan_path"] = plan_path
+        if plan_slug:
+            payload["plan_slug"] = plan_slug
+        return payload
 
     return None
 
@@ -435,26 +591,36 @@ def extract_question_from_interaction(payload: Any) -> dict | None:
     if payload is None:
         return None
 
-    tool_name = ""
-    message = ""
-
-    if hasattr(payload, 'value'):
+    if hasattr(payload, "value"):
         value_obj = payload.value
-        message = getattr(value_obj, 'message', '') or getattr(value_obj, 'question', '')
-        tool_name = getattr(value_obj, 'tool_name', '')
     elif isinstance(payload, dict):
-        value_obj = payload.get('value', {})
-        if isinstance(value_obj, dict):
-            message = value_obj.get('message', '') or value_obj.get('question', '')
-            tool_name = value_obj.get('tool_name', '')
-        else:
-            message = payload.get('message', '') or payload.get('question', '')
+        value_obj = payload.get("value", payload)
     else:
         return None
 
+    tool_name, message, tool_args = _read_interrupt_fields(value_obj)
+    source = _resolve_interrupt_source(tool_name, message)
+
+    generic_confirm_message = message.strip() in {"", "Please approve or reject?"}
+    needs_message = not message or (source == "confirm_interrupt" and generic_confirm_message)
+    if tool_name and needs_message:
+        if source == "confirm_interrupt":
+            from jiuwenswarm.agents.harness.code.rails.code_confirm_interrupt_rail import (
+                build_confirm_interrupt_message,
+            )
+
+            message = build_confirm_interrupt_message(tool_name, tool_args or {})
+        elif not message:
+            message = f"工具 `{tool_name}` 需要授权才能执行"
+
+    if source == "confirm_interrupt":
+        header = f"操作确认: {tool_name}" if tool_name else "操作确认"
+    else:
+        header = f"权限审批: {tool_name}" if tool_name else "权限审批"
+
     return {
-        "question": message or f"工具 `{tool_name}` 需要授权才能执行",
-        "header": f"权限审批: {tool_name}" if tool_name else "权限审批",
+        "question": message,
+        "header": header,
         "options": [
             {"label": "本次允许", "description": "仅本次授权执行"},
             {"label": "总是允许", "description": "记住该规则，以后自动放行"},

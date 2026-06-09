@@ -28,7 +28,7 @@ import { createPluginCommand } from "./builtins/plugin.js";
 import { createReloadPluginsCommand } from "./builtins/reload-plugins.js";
 import { createModeCommand } from "./builtins/mode.js";
 import { createPermissionsCommand } from "./builtins/permissions.js";
-// Re-enable next release: import { createPlanCommand } from "./builtins/plan.js";
+import { createPlanCommand } from "./builtins/plan.js";
 import { createResumeCommand } from "./builtins/resume.js";
 import { createRenameCommand } from "./builtins/rename.js";
 import { createRewindCommand } from "./builtins/rewind.js";
@@ -37,6 +37,7 @@ import { createSessionCommand } from "./builtins/session.js";
 import { createStatusCommand } from "./builtins/status.js";
 import { createStatusLineCommand } from "./builtins/statusline.js";
 import { createSkillsCommand } from "./builtins/skills.js";
+import { createSwarmFlowsCommand } from "./builtins/swarmflows.js";
 import { createTeamSkillsCommand } from "./builtins/teamskills.js";
 import { createAgentsCommand } from "./builtins/agents.js";
 import { createAutoHarnessCommand } from "./builtins/auto-harness.js";
@@ -70,7 +71,7 @@ export function createBuiltinCommands(): SlashCommand[] {
     createMcpCommand(),
     createModeCommand(),
     createPermissionsCommand(),
-    // createPlanCommand(),
+    createPlanCommand(),
     createResumeCommand(),
     createRenameCommand(),
     createRewindCommand(),
@@ -79,6 +80,7 @@ export function createBuiltinCommands(): SlashCommand[] {
     createSkillsCommand(),
     createStatusCommand(),
     createStatusLineCommand(),
+    createSwarmFlowsCommand(),
     createTeamSkillsCommand(),
     createAutoHarnessCommand(),
     createThemeCommand(),

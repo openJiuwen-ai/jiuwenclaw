@@ -379,11 +379,9 @@ export function InputArea({
           isListening
             ? t('chat.placeholderVoice')
             : isTeamMode
-              ? isPaused
-                ? t('chat.teamPauseHint')
-                : isInterruptible
-                ? t('chat.placeholderTeamModeProcessing')
-                : t('chat.placeholderTeamMode')
+              ? isInterruptible && !isPaused
+              ? t('chat.placeholderTeamModeProcessing')
+              : t('chat.placeholderTeamMode')
               : isAutoHarnessMode
                 ? t('autoHarness.inputPlaceholder')
                 : isAgentMode && isInterruptible

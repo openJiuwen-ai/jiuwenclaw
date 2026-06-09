@@ -16,7 +16,6 @@ from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import build_error
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.foundation.tool import Tool, ToolCard
-from openjiuwen.core.runner import Runner
 from openjiuwen.harness.rails.base import DeepAgentRail
 from openjiuwen.harness.tools.base_tool import ToolOutput
 from openjiuwen.harness.workspace.workspace import Workspace
@@ -384,8 +383,10 @@ class CodeAgentRail(DeepAgentRail):
             parent_agent=self._agent,
             custom_agents=custom_agents,
         )
-        Runner.resource_mgr.add_tool([self._agent_tool])
-        self._agent.ability_manager.add(self._agent_tool.card)
+        # Unified registration: add_ability qualifies the stateful tool id and
+        # binds it in the resource manager, so teardown_tools drops it at
+        # round-end instead of leaking a bare id that refresh-warns on rebuild.
+        self._agent.ability_manager.add_ability(self._agent_tool.card, self._agent_tool)
         logger.info(
             "[CodeAgentRail] Agent tool registered with %d custom agent(s): %s",
             len(custom_agents),
@@ -399,15 +400,11 @@ class CodeAgentRail(DeepAgentRail):
             name = getattr(self._agent_tool.card, "name", None)
             if name:
                 try:
-                    agent.ability_manager.remove(name)
+                    # Mirror add_ability: removes the agent-qualified id from
+                    # both this manager and the shared resource manager.
+                    agent.ability_manager.remove_ability(name)
                 except Exception as e:
-                    logger.debug("Failed to remove agent tool '%s' from ability_manager: %s", name, e)
-            tool_id = self._agent_tool.card.id
-            if tool_id:
-                try:
-                    Runner.resource_mgr.remove_tool(tool_id)
-                except Exception as e:
-                    logger.debug("Failed to remove tool '%s' from resource_mgr: %s", tool_id, e)
+                    logger.debug("Failed to remove agent tool '%s': %s", name, e)
         self._agent_tool = None
 
     def _load_custom_agents(self) -> list:

@@ -37,7 +37,7 @@ SAVE_LOGS_CONTAINER_DIR="${JIUWENBOX_SAVE_LOGS_CONTAINER_DIR:-/var/log/jiuwenbox
 
 POLICY_CONFIG=""
 CONTAINER_POLICY_PATH="/app/runtime-config/policy.yaml"
-CONTAINER_DEFAULT_POLICY_PATH="/app/configs/default-policy.yaml"
+# Unset JIUWENBOX_POLICY_PATH → launcher uses bundled ``jiuwenbox/configs/default-policy.yaml``.
 DOCKER_ENV_ARGS=()
 DOCKER_VOLUME_ARGS=()
 DOCKER_PORT_ARGS=()
@@ -59,20 +59,20 @@ Options:
 
 Examples (HTTP, default):
   scripts/run_docker.sh
-  scripts/run_docker.sh configs/default-policy.yaml
+  scripts/run_docker.sh src/jiuwenbox/configs/default-policy.yaml
   JIUWENBOX_HOST_PORT=18321 scripts/run_docker.sh
 
 Examples (Unix Domain Socket):
   mkdir -p /tmp/jiuwenbox-sock
   JIUWENBOX_LISTEN=unix:///run/jiuwenbox/jiuwenbox.sock \
   JIUWENBOX_UDS_HOST_DIR=/tmp/jiuwenbox-sock \
-    scripts/run_docker.sh configs/default-policy.yaml
+    scripts/run_docker.sh src/jiuwenbox/configs/default-policy.yaml
 
   curl --unix-socket /tmp/jiuwenbox-sock/jiuwenbox.sock http://localhost/health
 
 Examples (persist sandbox audit log to host):
   scripts/run_docker.sh --save-logs /tmp/jiuwenbox-logs
-  scripts/run_docker.sh configs/default-policy.yaml --save-logs /tmp/jiuwenbox-logs
+  scripts/run_docker.sh src/jiuwenbox/configs/default-policy.yaml --save-logs /tmp/jiuwenbox-logs
   # ls /tmp/jiuwenbox-logs
   # <id>-20260515T112345.audit.log
 EOF
@@ -81,7 +81,7 @@ EOF
 # 第一遍扫描: 把脚本自己识别的 long flag (目前只有 --save-logs) 从 ``$@``
 # 里抠出来, 剩下的位置参数 + 透传给 ``docker run`` 的尾部都保留原顺序。
 # 这样用户既可以写 ``run_docker.sh --save-logs DIR configs/foo.yaml``
-# 也可以写 ``run_docker.sh configs/foo.yaml --save-logs DIR``, 而原来"第一个
+# 也可以写 ``run_docker.sh path/to/foo.yaml --save-logs DIR``, 而原来"第一个
 # 非 -* 实参当 policy-config" / "尾部任意 docker run 参数透传" 的行为不变。
 SAVE_LOGS_CLI=""
 REMAINING_ARGS=()
@@ -218,8 +218,7 @@ if [[ -n "$POLICY_CONFIG" ]]; then
   DOCKER_VOLUME_ARGS+=(-v "${POLICY_CONFIG_ABS}:${CONTAINER_POLICY_PATH}:ro")
   echo "  policy:    $POLICY_CONFIG_ABS"
 else
-  DOCKER_ENV_ARGS+=(-e "JIUWENBOX_POLICY_PATH=${CONTAINER_DEFAULT_POLICY_PATH}")
-  echo "  policy:    ${CONTAINER_DEFAULT_POLICY_PATH} (container default)"
+  echo "  policy:    bundled default-policy.yaml (wheel)"
 fi
 
 echo
@@ -227,6 +226,7 @@ echo
 docker run -itd \
     --name "$CONTAINER_NAME" \
     --restart=unless-stopped \
+    --sysctl net.ipv4.ip_forward=1 \
     --cap-add=SYS_ADMIN \
     --cap-add=NET_ADMIN \
     --security-opt seccomp=unconfined \

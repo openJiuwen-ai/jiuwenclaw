@@ -204,6 +204,7 @@ function devWsTrafficLogger(): Plugin {
 function devFileContentApi(): Plugin {
   const projectRootDir = resolveProjectRootDir()
   const workspaceRootDir = path.resolve(projectRootDir, 'agent')
+  const sessionsRootDir = path.resolve(workspaceRootDir, 'sessions')
   const agentTeamsRootDir = path.resolve(projectRootDir, '.agent_teams')
   const webLogsRootDir = path.resolve(workspaceRootDir, '.logs')
   const autoHarnessDir = path.resolve(projectRootDir, 'auto-harness')
@@ -229,6 +230,81 @@ function devFileContentApi(): Plugin {
   return {
     name: 'dev-file-content-api',
     configureServer(server) {
+      server.middlewares.use('/share-api/snapshot', (req, res) => {
+        const writeJson = (statusCode: number, payload: unknown) => {
+          res.statusCode = statusCode
+          res.setHeader('content-type', 'application/json; charset=utf-8')
+          res.end(JSON.stringify(payload))
+        }
+
+        if (req.method !== 'GET' && req.method !== 'HEAD') {
+          writeJson(405, { error: 'method_not_allowed' })
+          return
+        }
+        const url = new URL(req.url || '/share-api/snapshot', 'http://localhost')
+        const sessionId = (url.searchParams.get('session_id') || '').trim()
+        if (!sessionId) {
+          writeJson(400, { error: 'missing_session_id' })
+          return
+        }
+
+        const sessionDir = path.resolve(sessionsRootDir, sessionId)
+        const relativeSessionPath = path.relative(sessionsRootDir, sessionDir)
+        if (relativeSessionPath.startsWith('..') || path.isAbsolute(relativeSessionPath)) {
+          writeJson(404, { error: 'history_not_found' })
+          return
+        }
+
+        const historyPath = path.resolve(sessionDir, 'history.json')
+        if (!fs.existsSync(sessionDir) || !fs.existsSync(historyPath)) {
+          writeJson(404, { error: 'history_not_found' })
+          return
+        }
+
+        try {
+          const historyRaw = JSON.parse(fs.readFileSync(historyPath, 'utf-8')) as unknown
+          if (!Array.isArray(historyRaw)) {
+            writeJson(400, { error: 'invalid_history_shape' })
+            return
+          }
+
+          let title = path.basename(sessionDir)
+          const metadataPath = path.resolve(sessionDir, 'metadata.json')
+          if (fs.existsSync(metadataPath)) {
+            const metadata = JSON.parse(fs.readFileSync(metadataPath, 'utf-8')) as { title?: unknown }
+            if (typeof metadata.title === 'string' && metadata.title.trim()) {
+              title = metadata.title.trim()
+            }
+          }
+          if (title === path.basename(sessionDir)) {
+            for (const record of historyRaw) {
+              if (!record || typeof record !== 'object') continue
+              const item = record as { role?: unknown; content?: unknown }
+              if (item.role === 'user' && typeof item.content === 'string' && item.content.trim()) {
+                title = item.content.trim().replace(/\n/g, ' ').slice(0, 80)
+                break
+              }
+            }
+          }
+
+          const now = new Date()
+          const filename = `jiuwenswarm-share-${now.toISOString().replace(/[-:]/g, '').replace(/\..+$/, '').replace('T', '-')}.png`
+          const snapshot = {
+            session_id: sessionId,
+            metadata: {
+              title,
+              exported_at: now.toISOString(),
+              filename,
+            },
+            records: historyRaw,
+          }
+
+          writeJson(200, { filename, snapshot })
+        } catch (error) {
+          writeJson(500, { error: 'snapshot_failed', detail: (error as Error).message })
+        }
+      })
+
       server.middlewares.use('/file-api/ws-debug-config', (req, res) => {
         if (req.method === 'GET') {
           res.statusCode = 200

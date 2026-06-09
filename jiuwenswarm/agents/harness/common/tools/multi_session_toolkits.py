@@ -58,12 +58,24 @@ class SessionTask(BaseModel):
 class MultiSessionToolkit:
     """Toolkit for multi-session agent task tracking. Supports parallel sub-agent execution."""
 
-    def __init__(self, session_id: str, channel_id: str, request_id: str, sub_agent_config: ReActAgentConfig) -> None:
+    def __init__(
+        self,
+        session_id: str,
+        channel_id: str,
+        request_id: str,
+        sub_agent_config: ReActAgentConfig,
+        max_concurrent_tasks: int = 10,
+        task_timeout: float = 300.0,
+    ) -> None:
         """Initialize MultiSessionToolkit for a session.
 
         Args:
             session_id: Parent session/conversation identifier.
             channel_id: Channel ID for routing notify messages back to parent.
+            request_id: Request ID for message routing.
+            sub_agent_config: Configuration for sub-agents.
+            max_concurrent_tasks: Maximum number of concurrent tasks (default: 10).
+            task_timeout: Timeout for each task in seconds (default: 300.0).
         """
         self.session_id = session_id
         self.channel_id = channel_id
@@ -71,12 +83,26 @@ class MultiSessionToolkit:
         self.sessions: List[SessionTask] = []
         self._tasks: Dict[str, asyncio.Task] = {}
         self._sub_agent_config: ReActAgentConfig = sub_agent_config
+        self._max_concurrent_tasks = max_concurrent_tasks
+        self._task_timeout = task_timeout
+        self._semaphore = asyncio.Semaphore(max_concurrent_tasks)
         logger.info(
-            "[MultiSessionToolkit] 初始化 parent_session_id=%s channel_id=%s request_id=%s",
+            "[MultiSessionToolkit] 初始化 parent_session_id=%s channel_id=%s request_id=%s "
+            "max_concurrent=%d timeout=%.1fs",
             session_id,
             channel_id,
             request_id,
+            max_concurrent_tasks,
+            task_timeout,
         )
+        # 检查 MessageHandler 是否可用
+        try:
+            MessageHandler.get_instance()
+        except RuntimeError as e:
+            logger.error(
+                "[MultiSessionToolkit] MessageHandler 未初始化，通知功能不可用: %s", e
+            )
+            raise RuntimeError(f"MultiSessionToolkit 需要 MessageHandler 初始化: {e}") from e
 
     async def get_sub_agent(self) -> ReActAgent:
         """Create and return a sub-agent instance. Override in subclass."""
@@ -100,7 +126,7 @@ class MultiSessionToolkit:
             agent: ReActAgent,
             inputs: dict,
     ) -> None:
-        """Run agent and call notify on completion (success/cancel/error)."""
+        """Run agent and call notify on completion (success/cancel/error/timeout)."""
         logger.debug(
             "[MultiSessionToolkit] _run_and_notify 开始 session_id=%s description=%s",
             session_id,
@@ -114,37 +140,53 @@ class MultiSessionToolkit:
         )
         self.sessions.append(task)
 
-        try:
-            result = await Runner.run_agent(agent, inputs)
-            result_str = result.get("output", "") if isinstance(result, dict) else str(result)
-            logger.info(
-                "[MultiSessionToolkit] 协程完成 session_id=%s status=completed result_len=%d",
-                session_id,
-                len(result_str),
-            )
-            self._update_session(session_id, Status.COMPLETED, result_str)
-            await self.notify(session_id, Status.COMPLETED, result=result_str)
-        except asyncio.CancelledError:
-            logger.info("[MultiSessionToolkit] 协程已取消 session_id=%s", session_id)
-            self._update_session(session_id, Status.CANCELLED, "任务已取消")
-            await self.notify(session_id, Status.CANCELLED)
-            raise
-        except Exception as e:
-            err_str = str(e)
-            logger.exception(
-                "[MultiSessionToolkit] 协程异常 session_id=%s error=%s",
-                session_id,
-                err_str,
-            )
-            self._update_session(session_id, Status.ERROR, err_str)
-            await self.notify(session_id, Status.ERROR, error=err_str)
-            raise
-        finally:
-            self._tasks.pop(session_id, None)
-            logger.debug(
-                "[MultiSessionToolkit] _run_and_notify 结束 session_id=%s 剩余协程数=%d",
-                session_id, len(self._tasks)
-            )
+        # 发送初始 running 状态通知
+        await self._send_task_notification(session_id, Status.RUNNING)
+
+        async with self._semaphore:  # 限制并发数
+            try:
+                result = await asyncio.wait_for(
+                    Runner.run_agent(agent, inputs),
+                    timeout=self._task_timeout
+                )
+                result_str = result.get("output", "") if isinstance(result, dict) else str(result)
+                logger.info(
+                    "[MultiSessionToolkit] 协程完成 session_id=%s status=completed result_len=%d",
+                    session_id,
+                    len(result_str),
+                )
+                self._update_session(session_id, Status.COMPLETED, result_str)
+                await self.notify(session_id, Status.COMPLETED, result=result_str)
+            except asyncio.TimeoutError:
+                timeout_msg = f"任务超时（超过 {self._task_timeout:.0f} 秒）"
+                logger.warning(
+                    "[MultiSessionToolkit] 协程超时 session_id=%s timeout=%.1fs",
+                    session_id,
+                    self._task_timeout,
+                )
+                self._update_session(session_id, Status.ERROR, timeout_msg)
+                await self.notify(session_id, Status.ERROR, error=timeout_msg)
+            except asyncio.CancelledError:
+                logger.info("[MultiSessionToolkit] 协程已取消 session_id=%s", session_id)
+                self._update_session(session_id, Status.CANCELLED, "任务已取消")
+                await self.notify(session_id, Status.CANCELLED)
+                raise
+            except Exception as e:
+                err_str = str(e)
+                logger.exception(
+                    "[MultiSessionToolkit] 协程异常 session_id=%s error=%s",
+                    session_id,
+                    err_str,
+                )
+                self._update_session(session_id, Status.ERROR, err_str)
+                await self.notify(session_id, Status.ERROR, error=err_str)
+                raise
+            finally:
+                self._tasks.pop(session_id, None)
+                logger.debug(
+                    "[MultiSessionToolkit] _run_and_notify 结束 session_id=%s 剩余协程数=%d",
+                    session_id, len(self._tasks)
+                )
 
     def _update_session(self, session_id: str, status: Status, result: str = "") -> None:
         """Update session task status in self.sessions."""
@@ -159,36 +201,33 @@ class MultiSessionToolkit:
                 )
                 break
 
-    async def notify(
+    async def _send_task_notification(
             self,
             session_id: str,
             status: Status,
             result: str = "",
             error: str = "",
     ) -> None:
-        """Send subtask update to MessageHandler. Called on completion (success/cancel/error)."""
-        try:
-            mh = MessageHandler.get_instance()
-        except RuntimeError as e:
-            logger.warning(
-                "[MultiSessionToolkit] MessageHandler 未初始化，跳过 notify: session_id=%s %s",
-                session_id,
-                e,
-            )
-            return
-
+        """发送任务状态通知到前端（不包含最终汇总逻辑）。"""
         st = next((s for s in self.sessions if s.session_id == session_id), None)
         description = st.description if st else ""
         index = next((i for i, s in enumerate(self.sessions) if s.session_id == session_id), 0)
         total = len(self.sessions)
 
-        # 前端 SubtaskStatus: 'completed' | 'error'，cancelled 映射为 error
-        if status == Status.COMPLETED:
+        # 前端 SubtaskStatus: 'running' | 'completed' | 'error'
+        if status == Status.RUNNING:
+            payload_status = "running"
+            message = ""
+        elif status == Status.COMPLETED:
             payload_status = "completed"
             message = result or ""
-        else:
+        else:  # ERROR, CANCELLED
             payload_status = "error"
-            message = error or "任务已取消" if status == Status.CANCELLED else error
+            if status == Status.CANCELLED:
+                message = error or "任务已取消"
+            else:
+                message = error or "任务执行失败"
+
         payload = {
             "event_type": "chat.session_result",
             "session_id": session_id,
@@ -207,7 +246,7 @@ class MultiSessionToolkit:
             "is_complete": False,
         }
         logger.debug(
-            "[MultiSessionToolkit] notify 发送 subtask_update session_id=%s status=%s index=%d/%d",
+            "[MultiSessionToolkit] _send_task_notification session_id=%s status=%s index=%d/%d",
             session_id,
             payload_status,
             index + 1,
@@ -217,7 +256,22 @@ class MultiSessionToolkit:
         server = AgentWebSocketServer.get_instance()
         await server.send_push(msg)
 
+    async def notify(
+            self,
+            session_id: str,
+            status: Status,
+            result: str = "",
+            error: str = "",
+    ) -> None:
+        """Send subtask update to MessageHandler. Called on completion (success/cancel/error/timeout)."""
+        # 发送单个任务的状态更新
+        await self._send_task_notification(session_id, status, result, error)
+
+        # 检查是否所有任务都已完成，如果是则发送最终汇总
         if self.all_tasks_done():
+            from jiuwenswarm.server.agent_ws_server import AgentWebSocketServer
+            server = AgentWebSocketServer.get_instance()
+
             session_result_summary = "后台会话任务均已完成：\n"
             for st in self.sessions:
                 session_result_summary += (f"\nsession_id: {st.session_id}\n"
@@ -282,6 +336,8 @@ class MultiSessionToolkit:
             len(task_descriptions),
         )
         created = []
+        failed = []
+
         for i, task_description in enumerate(task_descriptions):
             session_id = f"spawn_{time.monotonic_ns()}_{secrets.token_hex(4)}"
             logger.debug(
@@ -291,21 +347,39 @@ class MultiSessionToolkit:
                 session_id,
                 task_description[:60] + "..." if len(task_description) > 60 else task_description,
             )
-            agent = await self.get_sub_agent()
-            inputs = {
-                "conversation_id": session_id,
-                "query": task_description,
-            }
-            coro = self._run_and_notify(session_id, task_description, agent, inputs)
-            task = asyncio.create_task(coro)
-            self._tasks[session_id] = task
-            created.append(session_id)
+            try:
+                agent = await self.get_sub_agent()
+                inputs = {
+                    "conversation_id": session_id,
+                    "query": task_description,
+                }
+                coro = self._run_and_notify(session_id, task_description, agent, inputs)
+                task = asyncio.create_task(coro)
+                self._tasks[session_id] = task
+                created.append(session_id)
+            except Exception as e:
+                error_msg = f"创建任务失败: {str(e)}"
+                logger.error(
+                    "[MultiSessionToolkit] 创建协程失败 [%d/%d] description=%s error=%s",
+                    i + 1,
+                    len(task_descriptions),
+                    task_description[:60] + "...",
+                    str(e),
+                )
+                failed.append(f"{task_description[:40]}... - {error_msg}")
+
+        result_msg = f"已创建 {len(created)} 个协程"
+        if created:
+            result_msg += f": {', '.join(created)}"
+        if failed:
+            result_msg += f"\n创建失败 {len(failed)} 个: " + "; ".join(failed)
+
         logger.info(
-            "[MultiSessionToolkit] create_new_sessions 完成 已创建 %d 个协程: %s",
+            "[MultiSessionToolkit] create_new_sessions 完成 成功=%d 失败=%d",
             len(created),
-            ", ".join(created),
+            len(failed),
         )
-        return f"已创建 {len(created)} 个协程: {', '.join(created)}"
+        return result_msg
 
     async def cancel_session(self, session_id: str) -> str:
         """Cancel a running session by session_id."""
@@ -408,5 +482,5 @@ class MultiSessionToolkit:
         ]
 
     def all_tasks_done(self) -> bool:
-        """判断是否所有任务都已结束。"""
-        return all([s.status in [Status.COMPLETED, Status.ERROR] for s in self.sessions])
+        """判断是否所有任务都已结束（包括 COMPLETED、ERROR、CANCELLED）。"""
+        return all([s.status in [Status.COMPLETED, Status.ERROR, Status.CANCELLED] for s in self.sessions])

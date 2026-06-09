@@ -16,6 +16,10 @@ import yaml
 
 from openjiuwen.core.single_agent.rail.base import AgentCallbackContext
 from openjiuwen.harness.prompts import PromptSection
+from openjiuwen.harness.prompts.prompt_attachment_manager import (
+    PromptAttachmentKind,
+    PromptAttachmentScope,
+)
 from openjiuwen.harness.rails.base import DeepAgentRail
 from jiuwenswarm.agents.harness.common.prompt.shell_environment import build_shell_environment_prompt
 from jiuwenswarm.common.utils import get_config_dir, logger
@@ -38,6 +42,7 @@ class RuntimePromptRail(DeepAgentRail):
     ) -> None:
         super().__init__()
         self.system_prompt_builder = None
+        self.attachment_manager = None
         self._language = language
         self._channel = channel
         self._trusted_dirs: list[str] | None = None
@@ -50,6 +55,7 @@ class RuntimePromptRail(DeepAgentRail):
     def init(self, agent) -> None:
         """从 agent 获取 system_prompt_builder 引用。"""
         self.system_prompt_builder = getattr(agent, "system_prompt_builder", None)
+        self.attachment_manager = getattr(agent, "prompt_attachment_manager", None)
 
     def uninit(self, agent) -> None:
         """清理注入的 section 并释放引用。"""
@@ -62,6 +68,7 @@ class RuntimePromptRail(DeepAgentRail):
             self.system_prompt_builder.remove_section("browser_tool_policy")
             self.system_prompt_builder.remove_section("trusted_dirs_policy")
         self.system_prompt_builder = None
+        self.attachment_manager = None
 
     def set_language(self, language: str) -> None:
         """per-request 更新语言。"""
@@ -127,6 +134,9 @@ class RuntimePromptRail(DeepAgentRail):
         if not self.system_prompt_builder:
             return
 
+        for name in ("runtime", "language_output", "env", "git_status", "trusted_dirs_policy"):
+            self.system_prompt_builder.remove_section(name)
+
         if not self._force_english and self._language == "cn":
             time_content = (
                 f"# 时间说明\n\n"
@@ -157,7 +167,11 @@ class RuntimePromptRail(DeepAgentRail):
 
         model = (runtime_state.get("model") or self._model_name or "unknown").strip()
         mode = (runtime_state.get("mode") or self._mode or "unknown").strip()
-        language_val = (runtime_state.get("language") or self._language or "unknown").strip()
+        language_val = (
+            "en"
+            if self._force_english
+            else self._language or runtime_state.get("language") or "unknown"
+        ).strip()
         channel = (runtime_state.get("channel") or self._channel or "unknown").strip()
 
         if not self._force_english and self._language == "cn":
@@ -182,14 +196,17 @@ class RuntimePromptRail(DeepAgentRail):
                 "do NOT introduce yourself or list capabilities."
             )
 
-        self.system_prompt_builder.add_section(PromptSection(
-            name="runtime",
-            content={"cn": runtime_content, "en": runtime_content},
+        await self._upsert_prompt_attachment(
+            ctx,
+            section="runtime",
+            content=runtime_content,
+            scope=PromptAttachmentScope.TURN,
+            kind=PromptAttachmentKind.RUNTIME,
+            source="jiuwenswarm.runtime_prompt.runtime",
             priority=95,
-        ))
+        )
 
         # ── Language output constraint (injected near end, like Claude Code) ──
-        self.system_prompt_builder.remove_section("language_output")
         language_name = _LANGUAGE_NAMES.get(language_val, language_val)
         language_output_content = (
             "# Language\n\n"
@@ -199,11 +216,15 @@ class RuntimePromptRail(DeepAgentRail):
             f"Technical terms and code identifiers should remain "
             f"in their original form."
         )
-        self.system_prompt_builder.add_section(PromptSection(
-            name="language_output",
-            content={"cn": language_output_content, "en": language_output_content},
+        await self._upsert_prompt_attachment(
+            ctx,
+            section="language_output",
+            content=language_output_content,
+            scope=PromptAttachmentScope.TURN,
+            kind=PromptAttachmentKind.RUNTIME,
+            source="jiuwenswarm.runtime_prompt.language_output",
             priority=93,
-        ))
+        )
 
         # ── Platform / OS environment section ──
         os_type = sys.platform
@@ -277,7 +298,6 @@ class RuntimePromptRail(DeepAgentRail):
         ))
 
         # ── Git status section ──
-        self.system_prompt_builder.remove_section("git_status")
         git_branch = str(runtime_state.get("git_branch") or "").strip()
         if git_branch and git_branch != "N/A":
             git_main_branch = str(runtime_state.get("git_main_branch") or "").strip()
@@ -301,11 +321,21 @@ class RuntimePromptRail(DeepAgentRail):
 
             git_content = "\n\n".join(git_lines)
 
-            self.system_prompt_builder.add_section(PromptSection(
-                name="git_status",
-                content={"cn": git_content, "en": git_content},
+            await self._upsert_prompt_attachment(
+                ctx,
+                section="git_status",
+                content=git_content,
+                scope=PromptAttachmentScope.SESSION,
+                kind=PromptAttachmentKind.WORKSPACE_DELTA,
+                source="jiuwenswarm.runtime_prompt.git_status",
                 priority=87,
-            ))
+            )
+        else:
+            await self._clear_prompt_attachment(
+                ctx,
+                section="git_status",
+                scope=PromptAttachmentScope.SESSION,
+            )
 
         self.system_prompt_builder.remove_section("browser_tool_policy")
         if self._channel == "web":
@@ -320,13 +350,22 @@ class RuntimePromptRail(DeepAgentRail):
                 "- If `spawn_sub_agent` or `browser_agent` is unavailable, say that the browser "
                 "subagent is unavailable before trying to start a browser through commands."
             )
-            self.system_prompt_builder.add_section(PromptSection(
-                name="browser_tool_policy",
-                content={"cn": browser_tool_policy, "en": browser_tool_policy},
+            await self._upsert_prompt_attachment(
+                ctx,
+                section="browser_tool_policy",
+                content=browser_tool_policy,
+                scope=PromptAttachmentScope.TURN,
+                kind=PromptAttachmentKind.RUNTIME,
+                source="jiuwenswarm.runtime_prompt.browser_tool_policy",
                 priority=98,
-            ))
+            )
+        else:
+            await self._clear_prompt_attachment(
+                ctx,
+                section="browser_tool_policy",
+                scope=PromptAttachmentScope.TURN,
+            )
 
-        self.system_prompt_builder.remove_section("trusted_dirs_policy")
         if self._channel == "tui":
             # Trusted directories policy for TUI mode
             trusted_dirs = self._existing_dirs(self._trusted_dirs)
@@ -384,10 +423,62 @@ class RuntimePromptRail(DeepAgentRail):
                         "- When confirming, clearly state: the full path, operation type (read/edit/execute), "
                         "potential risks\n"
                     )
-                self.system_prompt_builder.add_section(PromptSection(
-                    name="trusted_dirs_policy",
-                    content={"cn": trusted_dirs_content, "en": trusted_dirs_content},
+                await self._upsert_prompt_attachment(
+                    ctx,
+                    section="trusted_dirs",
+                    content=trusted_dirs_content,
+                    scope=PromptAttachmentScope.TURN,
+                    kind=PromptAttachmentKind.WORKSPACE_DELTA,
+                    source="jiuwenswarm.runtime_prompt.trusted_dirs",
                     priority=90,
-                ))
+                )
             else:
                 self.system_prompt_builder.remove_section("trusted_dirs_policy")
+
+    async def _upsert_prompt_attachment(
+        self,
+        ctx: AgentCallbackContext,
+        *,
+        section: str,
+        content: str,
+        scope: PromptAttachmentScope,
+        kind: PromptAttachmentKind,
+        source: str,
+        priority: int,
+    ) -> None:
+        if self.attachment_manager is None:
+            logger.warning(
+                "[RuntimePromptRail] prompt attachment manager unavailable; skip dynamic section=%s",
+                section,
+            )
+            return
+        try:
+            writer = self.attachment_manager.for_context(ctx)
+            await writer.upsert_section(
+                section=section,
+                content=content,
+                scope=scope,
+                kind=kind,
+                source=source,
+                priority=priority,
+                content_kind="text/markdown",
+            )
+        except ValueError as exc:
+            logger.warning("[RuntimePromptRail] skip prompt attachment section=%s: %s", section, exc)
+
+    async def _clear_prompt_attachment(
+        self,
+        ctx: AgentCallbackContext,
+        *,
+        section: str,
+        scope: PromptAttachmentScope,
+    ) -> None:
+        if self.attachment_manager is None:
+            return
+        try:
+            await self.attachment_manager.for_context(ctx).clear_section(
+                section=section,
+                scope=scope,
+            )
+        except ValueError as exc:
+            logger.warning("[RuntimePromptRail] skip clearing prompt attachment section=%s: %s", section, exc)

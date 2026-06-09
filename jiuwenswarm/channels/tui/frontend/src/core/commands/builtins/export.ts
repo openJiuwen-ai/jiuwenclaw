@@ -1,5 +1,5 @@
 import { writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { resolve } from "node:path";
 import { copyToClipboard } from "../clipboard.js";
 import { addError, addInfo } from "../helpers.js";
 import { CommandKind, type SlashCommand } from "../types.js";
@@ -126,7 +126,7 @@ export function createExportCommand(): SlashCommand {
     usage: "/export [filename]",
     example: "/export my-chat.txt",
     kind: CommandKind.BUILT_IN,
-    hidden: true,
+    hidden: false,
     takesArgs: true,
     action: async (ctx, args) => {
       const content = renderEntriesToPlainText(ctx.entries);
@@ -136,7 +136,7 @@ export function createExportCommand(): SlashCommand {
       if (arg) {
         const filename = arg.endsWith(".txt") ? arg : arg.replace(/\.[^.]+$/, "") + ".txt";
         const workspaceDir = ctx.getWorkspaceDir() || process.cwd();
-        const filepath = join(workspaceDir, filename);
+        const filepath = resolve(workspaceDir, filename);
 
         try {
           writeFileSync(filepath, content, { encoding: "utf-8" });
@@ -156,7 +156,7 @@ export function createExportCommand(): SlashCommand {
         ? `${timestamp}-${sanitized}.txt`
         : `conversation-${timestamp}.txt`;
       const workspaceDir = ctx.getWorkspaceDir() || process.cwd();
-      const defaultFilepath = join(workspaceDir, defaultFilename);
+      const defaultFilepath = resolve(workspaceDir, defaultFilename);
 
       // Step 1: select export method
       try {
@@ -187,7 +187,8 @@ export function createExportCommand(): SlashCommand {
         }
 
         if (method === "Copy to clipboard") {
-          if (!copyToClipboard(content)) {
+          const ok = await copyToClipboard(content);
+          if (!ok) {
             ctx.addItem(
               addError(ctx.sessionId, "Clipboard unavailable — try saving to file instead"),
             );
@@ -233,7 +234,7 @@ export function createExportCommand(): SlashCommand {
         chosenFilename = chosenFilename.endsWith(".txt")
           ? chosenFilename
           : chosenFilename.replace(/\.[^.]+$/, "") + ".txt";
-        const chosenFilepath = join(workspaceDir, chosenFilename);
+        const chosenFilepath = resolve(workspaceDir, chosenFilename);
 
         try {
           writeFileSync(chosenFilepath, content, { encoding: "utf-8" });

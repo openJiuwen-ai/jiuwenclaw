@@ -4,8 +4,36 @@
 from __future__ import annotations
 
 import enum
+import re
+import uuid
 from datetime import datetime
+
 from pydantic import BaseModel, Field
+
+SANDBOX_ID_MIN_LEN = 4
+SANDBOX_ID_MAX_LEN = 16
+CUSTOM_SANDBOX_ID_RE = re.compile(r"^[0-9a-z_-]{4,16}$")
+
+SANDBOX_ID_FORMAT_MESSAGE = (
+    "sandbox_id must be 4-16 characters and contain only lowercase letters, "
+    "digits, hyphens, and underscores (e.g. my-sb_01)"
+)
+
+
+class InvalidSandboxIdError(Exception):
+    """Raised when a user-supplied sandbox_id fails format validation."""
+
+
+def generate_sandbox_id() -> str:
+    """Generate a sandbox id using the existing uuid4[:12] scheme."""
+    return str(uuid.uuid4())[:12]
+
+
+def validate_custom_sandbox_id(value: str) -> str:
+    """Validate a user-supplied sandbox_id; return it unchanged on success."""
+    if not CUSTOM_SANDBOX_ID_RE.fullmatch(value):
+        raise InvalidSandboxIdError(SANDBOX_ID_FORMAT_MESSAGE)
+    return value
 
 
 class SandboxPhase(str, enum.Enum):
@@ -25,6 +53,7 @@ class SandboxSpec(BaseModel):
     """Specification for creating a sandbox."""
 
     env: dict[str, str] = Field(default_factory=dict)
+    sandbox_id: str | None = None
 
 
 class SandboxRef(BaseModel):

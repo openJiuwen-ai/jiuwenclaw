@@ -31,7 +31,9 @@ Executed locally in the terminal UI, not through Gateway control pipeline.
 | `/evolve_list` | Show one skill's evolution records (see below) |
 | `/evolve_simplify` | Simplify and consolidate one skill's evolution records (see below) |
 | `/evolve_rebuild` | Rebuild `SKILL.md` from archives and evolution records (see below) |
+| `/hooks` | Browse configured hooks (read-only, see below) |
 | `/sandbox` | Set sandbox mode (see below) |
+| `/agents` | Manage Agent configs (list, get, create, update, enable, disable, delete, see below) |
 | `/auto-harness` | Auto-Harness task management (`run`/`schedule`, see below) |
 
 > Note: `/mode` controlled switching logic is primarily on Gateway side, see "`/mode` and `/switch`" below. The TUI local command additionally supports `/mode plan` and `/mode team.normal`; see the TUI guide for details.
@@ -505,6 +507,200 @@ Enter / leave jiuwenbox sandbox mode and tune its runtime policy. Calls `command
 - `/sandbox status` — see runtime + effective files
 - `/sandbox files allow ./tmp/ 0777` — let the sandbox write into `./tmp/` with mode 0777
 - `/sandbox exclude add "git *"` — let `git` run on the host instead of inside the sandbox
+
+### `/hooks` (Browse Hooks Configuration)
+
+View a summary of all hooks configured in `config.yaml` (read-only).
+
+#### Usage
+
+- `/hooks` (no parameters, no subcommands)
+
+#### Data Source
+
+The TUI requests the Gateway via the `hooks.list` RPC, which loads the `hooks` section from `config.yaml` and returns a summary.
+
+#### Display Contents
+
+`/hooks` displays hooks configuration in three levels:
+
+1. **Event List (Level 1)**: All events sorted by hook count in descending order. Each row shows event name and hook count; the description column shows hook count distribution per matcher.
+2. **Status Panel**:
+   - `Source` — Configuration source (`config.yaml`)
+   - `Global Status` — Global toggle state (`enabled` / `DISABLED`)
+   - `Total Hooks` — Total hook count across all events
+   - `Active Events` — Events with at least 1 hook / total events (out of 17)
+3. **Hook Detail Cards (Level 2)**: Grouped by `Event > Matcher`, each hook shows:
+   - `Type` — `command` (shell command) or `prompt` (LLM review)
+   - `Command` / `Prompt` — The hook content
+   - `Timeout` — Timeout in seconds
+   - `Shell` — Execution shell (command hooks only)
+   - `Status` — Status message
+
+#### When No Hooks Are Configured
+
+If `config.yaml` has no hooks configured, displays `No hooks configured.` with a hint to use `/config edit` to configure them.
+
+#### Hooks Concept Overview
+
+Hooks are extension logic that executes automatically when specific events fire. 17 events are supported:
+
+| Event | Execution Layer | Trigger |
+|---|---|---|
+| `PreToolUse` | Agent Rail | Before a tool call |
+| `PostToolUse` | Agent Rail | After a successful tool call |
+| `PostToolUseFailure` | Agent Rail | After a failed tool call |
+| `Stop` | Agent Rail | After agent response completes |
+| `PermissionRequest` | Agent Rail | On permission request |
+| `PermissionDenied` | Agent Rail | On permission denied |
+| `SubagentStart` | Agent Rail | When a sub-agent starts |
+| `SubagentStop` | Agent Rail | When a sub-agent stops |
+| `BeforeModelCall` | Agent Rail | Before a model call |
+| `AfterModelCall` | Agent Rail | After a model call |
+| `UserPromptSubmit` | Gateway | User submits a message |
+| `SessionStart` | Gateway | Session starts |
+| `SessionEnd` | Gateway | Session ends |
+| `Notification` | Gateway | Notification is sent |
+| `ConfigChange` | Gateway | Configuration changes |
+| `InstructionsLoaded` | Gateway | Instructions are loaded |
+| `Setup` | Gateway | Initialization |
+
+Two hook types are supported:
+
+| Type | Description | Key Parameters |
+|---|---|---|
+| `command` | Executes a shell command (subprocess). Receives JSON context via `$ARGUMENTS` env var. Exit code 0 = success, 2 = block. | `command`, `timeout` (default 30s), `shell` (default bash) |
+| `prompt` | Invokes LLM review. `$ARGUMENTS` in the template is replaced with JSON context, `$TOOL_NAME` with the tool name. LLM response JSON with `decision: "block"` blocks the operation. | `prompt`, `timeout` (default 15s), `model` |
+
+- **Blocking**: Exit code 2 (command) or `decision: "block"` (prompt) blocks the current operation (e.g., skip tool call) and feeds the reason back to the model.
+- **Input Modification**: PreToolUse hooks can modify tool input parameters via `modifiedInput` in stdout JSON.
+- **Additional Context**: Extra information can be injected into tool results or model context via `additionalContext` in stdout JSON.
+- **Global Toggle**: `hooks.disable_all_hooks: true` in `config.yaml` disables all hooks.
+
+#### Configuration Example
+
+```yaml
+hooks:
+  PreToolUse:
+    - matcher: "write_file"
+      hooks:
+        - type: command
+          command: "echo 'write_file about to execute' >> /tmp/hooks.log"
+          timeout: 10
+    - matcher: "bash|run_command"
+      hooks:
+        - type: prompt
+          prompt: "Review if this command is safe: $ARGUMENTS"
+          timeout: 20
+  SessionStart:
+    - matcher: "*"
+      hooks:
+        - type: command
+          command: "echo 'Session started: $ARGUMENTS' >> /tmp/hooks.log"
+```
+
+#### Example
+
+- `/hooks` — Browse all current hooks configuration
+
+### `/agents` (Agent Management)
+
+Manage custom agents (subagents) throughout their full lifecycle: view, create, update, enable/disable, and delete. Agent definitions are stored as Markdown files and support four-level source priority merging.
+
+- **Parsing location**: TUI local parsing, calling backend `agents.*` endpoints via RPC.
+- **Applicable modes**: All.
+- **Note**: This command is registered as hidden (`hidden: true`) and does not appear in `/help` listings but can be used directly.
+
+#### Subcommands
+
+| Command | Description |
+|---|---|
+| `/agents` or `/agents list` | List all agents (name, source, enabled status, description summary) |
+| `/agents get <name>` | View full details of a specific agent (including System Prompt) |
+| `/agents create [--project\|--local] <name> <description>` | Create a custom agent; LLM auto-generates the prompt |
+| `/agents update <name> [--generate] <new description>` | Update agent description; add `--generate` to have LLM rewrite the prompt |
+| `/agents enable <name>` | Enable a custom agent (cannot operate on builtin agents) |
+| `/agents disable <name>` | Disable a custom agent (cannot operate on builtin agents) |
+| `/agents delete <name>` | Delete a custom agent (cannot operate on builtin agents) |
+
+#### Agent Sources & Storage
+
+| Source | Storage Location | Priority | Manageable |
+|--------|-----------------|----------|------------|
+| `builtin` | In-code builtins | Lowest | Cannot enable/disable/delete |
+| `local` | `<workspace>/.jiuwenswarm/agents-local/` | Local | Full lifecycle management |
+| `user` | `~/.jiuwenswarm/agents/` | User | Full lifecycle management (default `create` location) |
+| `project` | `<workspace>/.jiuwenswarm/agents/` | Highest | Full lifecycle management |
+
+Agents with the same name are resolved by `project > user > local > builtin` priority; shadowed agents are marked with `shadowed_by`.
+
+#### Agent Definition Fields
+
+| Field | Description |
+|------|------|
+| `name` | Agent name (unique identifier) |
+| `description` | Brief description |
+| `prompt` | System Prompt text |
+| `source` | Origin (`builtin` / `user` / `project` / `local`) |
+| `file_path` | Agent definition file path |
+| `model` | Specified model (`null` = use default) |
+| `tools` | Available tool list |
+| `disallowed_tools` | Disallowed tool list |
+| `color` | Display color |
+| `permission_mode` | Permission mode |
+| `memory_scope` | Memory scope |
+| `when_to_use` | When-to-use description |
+| `max_iterations` | Max iterations (default 200) |
+| `skills` | Associated skill list |
+| `enabled` | Enabled status (`true` / `false` / `null`) |
+| `shadowed_by` | Which source shadows this agent (`null` = active) |
+
+#### `/agents create` Behavior
+
+- **Argument parsing**: `--project` / `--local` are positional flags and must precede the name (e.g., `/agents create --project my-agent description`).
+- **LLM generation**: By default, the current model auto-generates `when_to_use` and `system_prompt`; falls back to a built-in template on failure.
+- **Auto-enable**: After creation, automatically writes `react.subagents.<name>.enabled = true` to `config.yaml` and hot-reloads the configuration.
+- **Timeout**: 60 seconds.
+- **Output**: Displays LLM generation marker, storage location, and file path.
+
+#### `/agents update` Behavior
+
+- **No description**: When no description is provided, shows current agent details (same as `get`) and prints usage.
+- **`--generate`**: Explicitly triggers LLM prompt rewriting; without this flag, the request's template values are used.
+- **Auto hot-reload**: Configuration is automatically reloaded after update.
+
+#### `/agents enable` / `disable` Constraints
+
+- Builtin agents (`source == "builtin"`) cannot be enabled/disabled; the backend returns an error.
+- The operation writes to `config.yaml`'s `react.subagents.<name>.enabled` and hot-reloads.
+
+#### `/agents delete` Constraints
+
+- Builtin agents cannot be deleted.
+- After deletion, the entry is automatically removed from `config.yaml`'s `react.subagents` and hot-reloaded.
+
+#### `/agents get` Display
+
+Displays all agent definition fields as key-value pairs, with the full System Prompt text appended at the end.
+
+#### Tab Completion
+
+The `get`, `update`, `enable`, `disable`, and `delete` subcommands support Tab completion on agent names (fetched via the `agents.list` RPC).
+
+#### Examples
+
+```bash
+/agents                            # List all agents
+/agents list                       # Same as above
+/agents get Explore                # View Explore agent details
+/agents create bug-hunter Root cause analysis expert     # Create user-level agent
+/agents create --project proj-agent Project-level        # Create project-level agent
+/agents create --local local-agent Local use only        # Create local agent
+/agents update bug-hunter --generate Better description  # Update with LLM prompt rewrite
+/agents enable bug-hunter           # Enable agent
+/agents disable bug-hunter          # Disable agent
+/agents delete my-agent             # Delete agent
+```
 
 ### `/status` (Show Status)
 

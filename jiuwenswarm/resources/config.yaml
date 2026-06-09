@@ -1,6 +1,13 @@
 # 前端显示语言：zh（中文）/ en（英文），与 Web 界面语言切换同步
 preferred_language: zh
 
+a2ui:
+  enabled: true
+  protocol_version: "0.8"
+  stream_validation_enabled: true
+  non_web_fallback_enabled: false
+  dev_smoke_tools_enabled: false
+
 # 日志目录：~/.jiuwenswarm/agent/.logs/
 # gateway.log / channel.log / agent_server.log 按源码路径分流；full.log 为汇总。
 # level：未单独指定时的默认级别。console_level：控制台；可省略则用 level。
@@ -879,6 +886,7 @@ modes:
       lifecycle: persistent
       teammate_mode: build_mode
       spawn_mode: inprocess
+      enable_swarmflow: true
 
       leader:
         member_name: team-leader

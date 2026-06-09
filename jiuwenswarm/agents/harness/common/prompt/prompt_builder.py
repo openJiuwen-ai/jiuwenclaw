@@ -27,8 +27,15 @@ class PromptPriority(IntEnum):
     SKILLS = 40
     MEMORY = 55
     RESPONSE = 60
+    A2UI = 61
     WORKSPACE = 70
     TODO = 85
+
+
+class LocalSectionName:
+    """Local section names for optional JiuwenSwarm prompt sections."""
+
+    A2UI = "a2ui"
 
 
 # ─── response section (shared by both modes via ResponsePromptRail) ───
@@ -66,6 +73,13 @@ def _response_prompt(language: str) -> PromptSection:
 - **heartbeat**：心跳任务，如「检查待办」「同步状态」。
 
 系统任务完成后，以回复形式通知用户。
+
+## 最终回复
+
+- 用户最终看到的，只有你**最后一条不带任何工具调用的消息**；带工具调用的那一轮里写的正文不会作为最终结果呈现给用户。
+- 因此，**完整的交付物（如完整方案、完整文档、完整结果）必须放在最后一条不带工具调用的消息里**。
+- 不要把交付物正文和工具调用（包括 `todo` 状态更新等）写在同一条消息里——如果这样做，正文会丢失。正确做法是：先用一条消息完成必要的工具调用，再用最后一条不带工具调用的消息输出完整交付物。
+- 不要只用“已完成”“全部完成”“以上方案已完成”“详见上文”等状态确认或指代来代替最终交付物；即使相关内容此前已经产出过，**也要在这最后一条消息里完整重述用户需要看到的内容**。
 """
     else:
         content = """# Message Format
@@ -98,6 +112,13 @@ You receive user messages and system messages; handle each by source and type.
 - **heartbeat**: Heartbeat tasks, e.g. "check todos", "sync status".
 
 After completing a system task, notify the user via a reply.
+
+## Final Response
+
+- The only thing the user actually sees is your **last message that contains no tool calls**; any body text written in a turn that also makes tool calls is NOT presented to the user as the final result.
+- Therefore, **the complete deliverable (full plan, full document, full result) MUST be placed in your last message that has no tool calls**.
+- Do not put the deliverable body and a tool call (including `todo` status updates) in the same message — if you do, that body is lost. The correct pattern is: first make the necessary tool calls in one message, then output the complete deliverable in a final message with no tool calls.
+- Do not replace the final deliverable with a status confirmation or reference such as "done", "all completed", "the above plan is complete", or "see above"; even if the content was already produced earlier, **restate everything the user needs to see, in full, in this last message**.
 """
     return PromptSection(
         name="response",

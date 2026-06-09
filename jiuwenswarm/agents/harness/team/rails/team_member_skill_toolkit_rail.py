@@ -7,8 +7,7 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING, Any, Callable
 
-from openjiuwen.core.foundation.tool import LocalFunction, Tool, ToolCard
-from openjiuwen.core.runner import Runner
+from openjiuwen.core.foundation.tool import LocalFunction, Tool
 from openjiuwen.harness.rails.base import DeepAgentRail
 
 from jiuwenswarm.server.runtime.skill.skill_manager import SkillManager
@@ -43,30 +42,24 @@ class MemberSkillToolkitRail(DeepAgentRail):
         if self._tools is not None:
             return
 
-        agent_id = str(agent.card.id or agent.card.name)
         if self._manager is None:
             self._manager = SkillManager(workspace_dir=self._workspace_dir)
         toolkit = SkillToolkit(manager=self._manager)
         tools = self._wrap_skill_tools(toolkit.get_tools())
 
+        # ``add_ability`` qualifies the (stateful) skill-tool id with the owner
+        # agent id and registers with refresh=True, so this rail's registration
+        # deterministically wins over the declarative skill-toolkit tool element
+        # carrying the same name.
         for tool in tools:
-            tool.card.id = self._qualify_tool_id(tool.card.id, agent_id)
-
-        for tool in tools:
-            existing = agent.ability_manager.get(tool.card.name)
-            if isinstance(existing, ToolCard):
-                agent.ability_manager.remove(tool.card.name)
-
-        Runner.resource_mgr.add_tool(list(tools))
-        for tool in tools:
-            agent.ability_manager.add(tool.card)
+            agent.ability_manager.add_ability(tool.card, tool)
 
         self._tools = tools
         logger.info(
             "[MemberSkillToolkitRail] Registered %d skill tools for workspace=%s agent_id=%s",
             len(tools),
             self._workspace_dir,
-            agent_id,
+            str(agent.card.id or agent.card.name),
         )
 
     def uninit(self, agent: "DeepAgent") -> None:
@@ -75,8 +68,7 @@ class MemberSkillToolkitRail(DeepAgentRail):
             return
 
         for tool in self._tools:
-            agent.ability_manager.remove(tool.card.name)
-            Runner.resource_mgr.remove_tool(tool.card.id)
+            agent.ability_manager.remove_ability(tool.card.name)
 
         logger.info(
             "[MemberSkillToolkitRail] Unregistered %d skill tools for workspace=%s",
@@ -84,10 +76,6 @@ class MemberSkillToolkitRail(DeepAgentRail):
             self._workspace_dir,
         )
         self._tools = None
-
-    @staticmethod
-    def _qualify_tool_id(tool_id: str, agent_id: str) -> str:
-        return f"{tool_id}_{agent_id}"
 
     def _wrap_skill_tools(self, tools: list[Tool]) -> list[Tool]:
         """Refresh linked skill views after mutating skill operations."""

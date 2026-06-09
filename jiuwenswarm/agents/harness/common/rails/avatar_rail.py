@@ -3,35 +3,43 @@
 """AvatarPromptRail - 数字分身 Rail.
 
 处理所有 per-request 的 avatar 逻辑：
-1. before_model_call: 根据 ContextVar 动态注入/移除 avatar 相关 PromptSection
+1. before_model_call: 根据 ContextVar 动态写入/清理 TURN prompt attachment
 2. before_tool_call: 拦截群聊记忆禁写 + enable_memory=False 场景
 """
 
 from __future__ import annotations
 
-from typing import Any, Optional, Set
-
 from openjiuwen.core.foundation.llm import ToolMessage
 from openjiuwen.core.single_agent.rail.base import AgentCallbackContext
 from openjiuwen.harness.prompts import PromptSection
+from openjiuwen.harness.prompts.prompt_attachment_manager import (
+    PromptAttachmentKind,
+    PromptAttachmentScope,
+)
 from openjiuwen.harness.rails.base import DeepAgentRail
 
 from jiuwenswarm.agents.harness.common.rails.permissions.owner_scopes import (
     TOOL_PERMISSION_CONTEXT,
-    PermissionContext,
 )
 from jiuwenswarm.common.utils import logger
 
 _MEMORY_WRITE_TOOLS = frozenset({"write_memory", "edit_memory"})
 
 _AVATAR_PROMPT_PRIORITY = 110
+_AVATAR_SECTION_PRIORITIES = {
+    "avatar_identity": _AVATAR_PROMPT_PRIORITY,
+    "group_chat_memory_notice": _AVATAR_PROMPT_PRIORITY + 1,
+    "memory_fully_disabled": _AVATAR_PROMPT_PRIORITY + 2,
+    "forbidden_memory": _AVATAR_PROMPT_PRIORITY + 3,
+    "interaction_guidance": _AVATAR_PROMPT_PRIORITY + 4,
+}
 
 
 class AvatarPromptRail(DeepAgentRail):
     """数字分身 Rail — 处理所有 per-request 的 avatar 逻辑。
 
     职责:
-    1. before_model_call: 根据 ContextVar 动态注入/移除 avatar 相关 PromptSection
+    1. before_model_call: 根据 ContextVar 动态写入/清理 TURN prompt attachment
     2. before_tool_call: 拦截群聊记忆禁写 + enable_memory=False 场景
     """
 
@@ -39,7 +47,14 @@ class AvatarPromptRail(DeepAgentRail):
 
     def __init__(self) -> None:
         super().__init__()
-        self._injected_sections: set[str] = set()
+        self.attachment_manager = None
+
+    def init(self, agent) -> None:
+        self.attachment_manager = getattr(agent, "prompt_attachment_manager", None)
+
+    def uninit(self, agent) -> None:
+        del agent
+        self.attachment_manager = None
 
     async def before_model_call(self, ctx: AgentCallbackContext) -> None:
         builder = getattr(
@@ -47,44 +62,35 @@ class AvatarPromptRail(DeepAgentRail):
             "system_prompt_builder",
             None,
         )
-        if builder is None:
-            return
-
-        for name in list(self._injected_sections):
-            builder.remove_section(name)
-        self._injected_sections.clear()
-
-        language = getattr(builder, "language", "cn") or "cn"
+        language = getattr(builder, "language", "cn") if builder is not None else "cn"
+        language = language or "cn"
+        sections: list[PromptSection] = []
 
         try:
             from jiuwenswarm.agents.harness.common.memory.forbidden import get_forbidden_memory_prompt
             forbidden = get_forbidden_memory_prompt(language)
             if forbidden:
-                section = PromptSection(
+                sections.append(PromptSection(
                     name="forbidden_memory",
                     content={language: forbidden},
-                    priority=_AVATAR_PROMPT_PRIORITY + 3,
-                )
-                builder.add_section(section)
-                self._injected_sections.add("forbidden_memory")
+                    priority=_AVATAR_SECTION_PRIORITIES["forbidden_memory"],
+                ))
         except Exception as e:
             logger.debug("[AvatarRail] 加载 forbidden_memory 失败: %s", e)
 
         perm_ctx = TOOL_PERMISSION_CONTEXT.get()
         if perm_ctx is None:
+            await self._sync_avatar_sections(ctx, sections, language=language)
             return
 
         # 数字分身身份提示词（仅群聊数字分身模式）
         if perm_ctx.group_digital_avatar and perm_ctx.avatar_mode:
             display_name = perm_ctx.avatar_principal_name or perm_ctx.principal_user_id
-            avatar_content = _build_avatar_prompt(display_name, language)
-            section = PromptSection(
+            sections.append(PromptSection(
                 name="avatar_identity",
-                content={language: avatar_content},
-                priority=_AVATAR_PROMPT_PRIORITY,
-            )
-            builder.add_section(section)
-            self._injected_sections.add("avatar_identity")
+                content={language: _build_avatar_prompt(display_name, language)},
+                priority=_AVATAR_SECTION_PRIORITIES["avatar_identity"],
+            ))
 
         # 判断是否为群聊数字分身模式（三个条件同时满足）
         is_group_digital_avatar = (
@@ -99,13 +105,11 @@ class AvatarPromptRail(DeepAgentRail):
                 if language == "cn"
                 else "\n[Group chat mode: write_memory/edit_memory calls are prohibited]\n"
             )
-            section = PromptSection(
+            sections.append(PromptSection(
                 name="group_chat_memory_notice",
                 content={language: notice},
-                priority=_AVATAR_PROMPT_PRIORITY + 1,
-            )
-            builder.add_section(section)
-            self._injected_sections.add("group_chat_memory_notice")
+                priority=_AVATAR_SECTION_PRIORITIES["group_chat_memory_notice"],
+            ))
 
         # 记忆完全禁用（三个条件同时满足：enable_memory=False + group_digital_avatar=True + 群聊消息）
         should_disable_memory = (
@@ -114,24 +118,20 @@ class AvatarPromptRail(DeepAgentRail):
             and perm_ctx.avatar_mode
         )
         if should_disable_memory:
-            disabled_content = _build_memory_fully_disabled_prompt(language)
-            section = PromptSection(
+            sections.append(PromptSection(
                 name="memory_fully_disabled",
-                content={language: disabled_content},
-                priority=_AVATAR_PROMPT_PRIORITY + 2,
-            )
-            builder.add_section(section)
-            self._injected_sections.add("memory_fully_disabled")
+                content={language: _build_memory_fully_disabled_prompt(language)},
+                priority=_AVATAR_SECTION_PRIORITIES["memory_fully_disabled"],
+            ))
 
         if is_group_digital_avatar:
-            interaction_content = _build_interaction_prompt(language)
-            section = PromptSection(
+            sections.append(PromptSection(
                 name="interaction_guidance",
-                content={language: interaction_content},
-                priority=_AVATAR_PROMPT_PRIORITY + 4,
-            )
-            builder.add_section(section)
-            self._injected_sections.add("interaction_guidance")
+                content={language: _build_interaction_prompt(language)},
+                priority=_AVATAR_SECTION_PRIORITIES["interaction_guidance"],
+            ))
+
+        await self._sync_avatar_sections(ctx, sections, language=language)
 
     async def before_tool_call(self, ctx: AgentCallbackContext) -> None:
         """拦截记忆工具调用。
@@ -183,6 +183,37 @@ class AvatarPromptRail(DeepAgentRail):
         ctx.extra["_skip_tool"] = True
         ctx.inputs.tool_result = message
         ctx.inputs.tool_msg = ToolMessage(content=message, tool_call_id=tool_call_id)
+
+    async def _sync_avatar_sections(
+        self,
+        ctx: AgentCallbackContext,
+        sections: list[PromptSection],
+        *,
+        language: str,
+    ) -> None:
+        if self.attachment_manager is None:
+            logger.warning("[AvatarRail] skip avatar context: prompt attachment manager unavailable")
+            return
+        try:
+            writer = self.attachment_manager.for_context(ctx)
+            for section in _AVATAR_SECTION_PRIORITIES:
+                await writer.clear_section(
+                    section=section,
+                    scope=PromptAttachmentScope.TURN,
+                )
+            for section in sections:
+                await writer.upsert_from_section(
+                    section=section,
+                    scope=PromptAttachmentScope.TURN,
+                    kind=PromptAttachmentKind.RUNTIME,
+                    source=f"jiuwenswarm.avatar.{section.name}",
+                    language=language,
+                    content_kind="text/markdown",
+                )
+        except ValueError as exc:
+            logger.warning("[AvatarRail] skip avatar context prompt attachment: %s", exc)
+
+
 
 
 def _build_avatar_prompt(principal_user_id: str | None, language: str) -> str:

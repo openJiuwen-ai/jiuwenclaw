@@ -193,9 +193,9 @@ async function listMemory(ctx: import("../types.js").CommandContext): Promise<vo
     }
 
     const items = files.map((f) => ({
-      label: f.relative_path,
+      label: f.path,
       value: f.kind,
-      description: `${formatSize(f.size)} · ${f.lines} lines · ${formatTime(f.mtime)}`,
+      description: `${f.relative_path !== f.path ? f.relative_path + " · " : ""}${formatSize(f.size)} · ${f.lines} lines · ${formatTime(f.mtime)}`,
     }));
 
     ctx.addItem(
@@ -289,6 +289,7 @@ async function editMemoryInteractive(
     const options = allFiles.map((f) => ({
       label: f.relative_path,
       description: `${f.kind} · ${f.lines} lines${f.exists ? "" : " (new)"}`,
+      details: f.relative_path !== f.path ? [f.path] : undefined,
     }));
 
     let selectedLabel: string | undefined;

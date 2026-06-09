@@ -251,6 +251,7 @@ interface UseWebSocketReturn {
     options?: WebRequestOptions
   ) => Promise<T>;
   sendMessage: (content: string, sessionId: string) => Promise<void>;
+  sendStructuredChatContent: (content: unknown, sessionId: string) => Promise<void>;
   interrupt: (
     sessionId: string,
     intent: InterruptIntent,
@@ -765,6 +766,48 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
     ]
   );
 
+  const sendStructuredChatContent = useCallback(
+    async (content: unknown, sessionId: string) => {
+      resetContextCompressionTurn();
+      userInputVersionRef.current += 1;
+      stopAllTts();
+
+      setProcessing(true);
+      setThinking(true);
+
+      const currentMode = useSessionStore.getState().mode;
+      const selectedModel = useSessionStore.getState().selectedModelName;
+      if (currentMode === 'auto_harness') {
+        useHarnessStore.getState().reset();
+      }
+      if (currentMode === 'team') {
+        setPaused(false);
+      }
+      try {
+        await request('chat.send', {
+          session_id: sessionId,
+          content,
+          mode: currentMode,
+          ...(selectedModel ? { model_name: selectedModel } : {}),
+        });
+      } catch (error) {
+        const webError = error as WebError;
+        setConnectionStats({ lastError: webError.message });
+        setProcessing(false);
+        setThinking(false);
+        const errorMsg = webError.message || t('network.sendMessageFailed');
+        onErrorRef.current?.(errorMsg);
+        addMessage({
+          id: `error-${Date.now()}`,
+          role: 'system',
+          content: t('network.errorPrefix', { message: errorMsg }),
+          timestamp: new Date().toISOString(),
+        });
+      }
+    },
+    [addMessage, request, resetContextCompressionTurn, setProcessing, setThinking, t]
+  );
+
   // 存储sendMessage函数到ref
   useEffect(() => {
     sendMessageRef.current = sendMessage;
@@ -928,7 +971,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
             ? { evolution_meta: evolutionMeta }
             : {};
         // 如果是需要走 interrupt/interact 的确认，发送 chat.send
-        if (source === 'permission_interrupt') {
+        if (source === 'permission_interrupt' || source === 'confirm_interrupt') {
           await request('chat.send', {
             session_id: sessionId,
             query: '',
@@ -2339,6 +2382,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
     connectionState,
     request,
     sendMessage,
+    sendStructuredChatContent,
     interrupt,
     pause,
     cancel,

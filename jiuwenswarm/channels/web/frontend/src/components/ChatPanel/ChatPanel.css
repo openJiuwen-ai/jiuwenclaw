@@ -616,6 +616,57 @@
   height: 16px;
 }
 
+.share-export-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 32px;
+  height: 32px;
+  gap: 6px;
+  border: 0;
+  border-radius: var(--radius-full);
+  background: transparent;
+  padding: 0 8px;
+  color: var(--muted-strong);
+  cursor: pointer;
+  transition:
+    background var(--duration-fast) ease,
+    color var(--duration-fast) ease;
+}
+
+.share-export-btn:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--accent) 10%, transparent);
+  color: var(--text);
+}
+
+.share-export-btn:focus-visible {
+  outline: none;
+  box-shadow: var(--chat-control-focus-ring);
+}
+
+.share-export-btn:disabled {
+  color: var(--placeholder);
+  cursor: not-allowed;
+  opacity: 0.68;
+}
+
+.share-export-btn--loading {
+  padding: 0 10px;
+  color: var(--accent);
+  opacity: 1;
+}
+
+.share-export-btn__spinner {
+  animation: harness-spin 1s linear infinite;
+}
+
+.share-export-btn__label {
+  font-size: var(--font-size-xs);
+  font-weight: 500;
+  line-height: 1;
+  white-space: nowrap;
+}
+
 .chat-input-btn-icon--image {
   width: 32px;
   height: 32px;
@@ -1106,4 +1157,67 @@
 .harness-metric-value {
   color: var(--text);
   font-weight: 500;
+}
+
+.a2ui-message-content {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  min-width: 0;
+}
+
+.a2ui-message-content__surfaces {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  min-width: 0;
+}
+
+.a2ui-message-content .a2ui-surface {
+  max-width: 100%;
+  color: var(--text);
+}
+
+.a2ui-message-content .a2ui-card > section {
+  border: 1px solid rgba(148, 163, 184, 0.26);
+  border-radius: 12px;
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.08), rgba(255, 255, 255, 0.03));
+  box-shadow: 0 12px 28px rgba(15, 23, 42, 0.16);
+  overflow: hidden;
+}
+
+:root.a2ui-material-symbols-unavailable .a2ui-message-content .a2ui-icon {
+  display: none;
+}
+
+:root.a2ui-material-symbols-unavailable .a2ui-message-content .a2ui-icon .g-icon {
+  font-size: 0;
+}
+
+:root[data-theme="light"] .a2ui-message-content .a2ui-card > section {
+  border-color: rgba(15, 23, 42, 0.12);
+  background: #fff;
+  box-shadow: 0 10px 24px rgba(15, 23, 42, 0.08);
+}
+
+.a2ui-message-content .a2ui-image {
+  width: 100%;
+  overflow: hidden;
+  border-radius: var(--radius-md);
+  background: rgba(148, 163, 184, 0.16);
+}
+
+.a2ui-message-content .a2ui-image > section {
+  display: block;
+  width: 100%;
+  height: auto;
+  min-height: 160px;
+  aspect-ratio: 16 / 9;
+}
+
+.a2ui-message-content .a2ui-image img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: var(--object-fit, cover);
 }

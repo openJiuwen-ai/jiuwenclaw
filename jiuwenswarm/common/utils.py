@@ -1294,6 +1294,12 @@ def get_agent_workspace_dir() -> Path:
     return get_agent_root_dir() / "workspace"
 
 
+def get_prompt_attachment_dir() -> Path:
+    """Get the jiuwenswarm prompt attachment directory path."""
+
+    return get_agent_workspace_dir() / "prompt_attachment"
+
+
 def get_agent_root_dir() -> Path:
     return get_user_workspace_dir() / "agent"
 

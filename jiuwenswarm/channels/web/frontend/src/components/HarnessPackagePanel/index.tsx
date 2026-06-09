@@ -108,6 +108,15 @@ export function HarnessPackagePanel({ sessionId }: HarnessPackagePanelProps) {
     fetchPackages();
   }, [fetchPackages]);
 
+  // Refresh packages when user switches back to this tab
+  useEffect(() => {
+    const handler = () => {
+      if (!document.hidden) fetchPackages();
+    };
+    document.addEventListener('visibilitychange', handler);
+    return () => document.removeEventListener('visibilitychange', handler);
+  }, [fetchPackages]);
+
   // Get selected package info
   const getSelectedPackage = useCallback((): PackageInfo | null => {
     if (!selectedPackageId || selectedPackageId === 'native') return null;
