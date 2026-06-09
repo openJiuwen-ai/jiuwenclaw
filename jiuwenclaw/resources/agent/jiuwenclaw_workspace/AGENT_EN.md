@@ -21,7 +21,8 @@ Skills provide your specialized capabilities. When you need one, check its `SKIL
 
 ### Code Compatibility
 On Windows, Emoji and special symbols cannot be encoded in GBK. You should avoid using these characters in your code.
-If you must use them, prefer using the code tool instead of bash.
+If you must use them, prefer using the code tool instead of bash (only for executing code snippets with special characters).
+Note: For file read/write operations, use read_file / write_file / edit_file tools. Do NOT use the code tool for file I/O.
 
 ## Task Management
 Track your tasks in `todo/`. Keep it organized and actionable.
