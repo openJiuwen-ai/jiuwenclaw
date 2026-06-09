@@ -291,7 +291,7 @@ class RuntimeManagementAgentClient(AgentServerClient):
 
     def __init__(self) -> None:
         """初始化 Runtime Management 客户端。"""
-        self._gateway_id = uuid_mod.uuid4().hex[:8]
+        self.gateway_id = uuid_mod.uuid4().hex[:8]
 
         agent_image = os.getenv("AGENT_SERVER_IMAGE")
         agent_runtime = os.getenv("AGENT_RUNTIME")
@@ -428,6 +428,8 @@ class RuntimeManagementAgentClient(AgentServerClient):
                 base["LOG_ROOT_PATH"] = "/home/app/.logs"
             return base
 
+        _client = self  # 捕获外层 RuntimeManagementAgentClient 实例，供内部类使用
+
         class \
                 _Factory(IServiceInstanceFactory):
             async def new_service(
@@ -534,7 +536,7 @@ class RuntimeManagementAgentClient(AgentServerClient):
                         pod_name=cfg["pod_name"] if "pod_name" in cfg else container_name,
                         extra_labels={
                             **RuntimeManagementAgentClient.POD_LABEL,
-                            RuntimeManagementAgentClient.GATEWAY_ID_LABEL_KEY: self._gateway_id,
+                            RuntimeManagementAgentClient.GATEWAY_ID_LABEL_KEY: _client.gateway_id,
                         },
                         kubeconfig=kubeconfig,
                         readiness_initial_delay=(int(cfg["readiness_initial_delay"])
@@ -698,11 +700,11 @@ class RuntimeManagementAgentClient(AgentServerClient):
         try:
             label_selector = (
                 f"{self.POD_LABEL_KEY}={self.POD_LABEL_VALUE}"
-                f",{self.GATEWAY_ID_LABEL_KEY}!={self._gateway_id}"
+                f",{self.GATEWAY_ID_LABEL_KEY}!={self.gateway_id}"
             )
             logger.info(
                 "[RuntimeManagementAgentClient] cleanup_all_pods: gateway_id=%s selector=%s",
-                self._gateway_id, label_selector,
+                self.gateway_id, label_selector,
             )
             await self._access.cleanup_all_pods(
                 namespace=self._namespace,
