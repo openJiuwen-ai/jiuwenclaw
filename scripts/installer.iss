@@ -2,7 +2,7 @@
 ; 用法: "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" scripts\installer.iss
 
 #define MyAppName "JiuwenSwarm"
-#define MyAppVersion "0.2.1"
+#define MyAppVersion "0.2.2.beta2"
 #define MyAppPublisher "openJiuwen"
 #define MyAppExeName "jiuwenswarm.exe"
 #define MyAppURL "https://openjiuwen.com"
