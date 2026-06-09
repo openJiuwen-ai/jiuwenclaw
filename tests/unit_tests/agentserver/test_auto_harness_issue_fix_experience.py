@@ -139,6 +139,25 @@ def test_process_issues_once_starts_medium_or_lower_issue(tmp_path: Path):
     assert service.optimization_tasks[0].issue_ref == "#1266"
 
 
+def test_issue_fix_query_includes_repository_code_rules():
+    issue = _issue(
+        1277,
+        "修复一个明确的小问题",
+        "复现步骤明确，修改范围限定在一个函数和一个单测。",
+        ("bug",),
+    )
+
+    query = GitCodeIssueRunner.build_issue_fix_query(
+        issue,
+        owner="openJiuwen",
+        repo="jiuwenswarm",
+    )
+
+    assert "编程规范约束（必须遵守仓库 code_rule.txt）" in query
+    assert "G.ERR.07 避免抑制或忽略异常" in query
+    assert "G.EDV.04 禁止使用subprocess模块中的shell=True选项" in query
+
+
 def test_task_progress_extracts_pr_and_failure_code(tmp_path: Path):
     logs = [
         {

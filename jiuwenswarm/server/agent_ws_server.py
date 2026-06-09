@@ -994,6 +994,12 @@ class AgentWebSocketServer:
             if request.req_method == ReqMethod.SCHEDULE_DELETE:
                 await self._handle_schedule_request(ws, request, send_lock, "delete")
                 return
+            if request.req_method == ReqMethod.ISSUE_WATCH_ONCE:
+                await self._handle_schedule_request(ws, request, send_lock, "issue_watch_once")
+                return
+            if request.req_method == ReqMethod.ISSUE_STATE_LIST:
+                await self._handle_schedule_request(ws, request, send_lock, "issue_state_list")
+                return
             if request.req_method == ReqMethod.AGENTS_LIST:
                 await self._handle_agents_list(ws, request, send_lock)
                 return
@@ -5102,7 +5108,7 @@ class AgentWebSocketServer:
             payload: dict[str, Any] = {}
 
             # For actions that need agent: get agent and set on service (similar to _handle_command_compact)
-            needs_agent = action in ("create", "run", "cancel", "delete")
+            needs_agent = action in ("create", "run", "cancel", "delete", "issue_watch_once")
             if needs_agent:
                 mode, sub_mode = _apply_resolved_mode_to_request(request)
                 agent_mode = "agent" if mode == "auto_harness" else mode
@@ -5172,6 +5178,14 @@ class AgentWebSocketServer:
             elif action == "delete":
                 task_id = params.get("task_id", "")
                 payload = await self._scheduler_service.delete_scheduled_task(task_id)
+
+            elif action == "issue_watch_once":
+                model_name = params.get("model_name")
+                model = self._resolve_model(model_name)
+                payload = await self._scheduler_service.watch_gitcode_issues_once(params, model)
+
+            elif action == "issue_state_list":
+                payload = await self._scheduler_service.list_gitcode_issue_states()
 
             else:
                 payload = {"error": f"未知的调度操作: {action}"}

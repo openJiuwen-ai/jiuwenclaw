@@ -14,6 +14,7 @@ from typing import Any, Optional, Protocol
 
 from openjiuwen.auto_harness.pipelines import META_EVOLVE_PIPELINE
 
+from .code_rules import format_code_rules_prompt
 from .gitcode_issue_client import GitCodeIssue, GitCodeIssueClient
 from .issue_state_store import IssueStateStore
 from .task_factory import build_issue_fix_task
@@ -74,6 +75,7 @@ class GitCodeIssueRunner:
     def build_issue_fix_query(issue: GitCodeIssue, *, owner: str, repo: str) -> str:
         issue_url = issue.html_url or f"https://gitcode.com/{owner}/{repo}/issues/{issue.number}"
         labels = ", ".join(issue.labels) if issue.labels else "(none)"
+        code_rules = format_code_rules_prompt()
         return (
             f"请自动修复 GitCode Issue #{issue.number}。\n\n"
             f"仓库: {owner}/{repo}\n"
@@ -96,7 +98,8 @@ class GitCodeIssueRunner:
             "本 PR 仍必须只包含当前 issue 的产品代码和测试修复。\n"
             "9. 修复前必须提取 issue 中点名的文件、函数或方法；最终 diff 必须命中这些目标。"
             "如果已有分支/提交修复的是相似但非同一目标，禁止复用。\n"
-            "10. PR 文案必须基于最终 diff 撰写，函数名、文件名和验证结论不能写成中间尝试内容。"
+            "10. PR 文案必须基于最终 diff 撰写，函数名、文件名和验证结论不能写成中间尝试内容。\n\n"
+            f"{code_rules}"
         )
 
     @staticmethod
