@@ -21,7 +21,7 @@ _WEB_CONFIG_KEY_MAP: dict[str, str] = {
 }
 
 _A2UI_CONFIG_DEFAULT_PAYLOAD: dict[str, str] = {
-    "a2ui_enabled": "true",
+    "a2ui_enabled": "false",
 }
 
 _A2UI_CHANNEL_ID = "web"

@@ -25,6 +25,13 @@ def test_a2ui_prompt_is_autonomous_not_forced():
     assert "Do not promise to show the result with A2UI and then output only Markdown" in instruction
 
 
+def test_a2ui_prompt_discourages_nested_templates():
+    instruction = build_a2ui_autonomy_instruction("en")
+
+    assert "Do not nest templates" in instruction
+    assert "flatten repeated item details" in instruction
+
+
 def test_a2ui_zh_prompt_section_is_readable():
     prompt = build_a2ui_prompt_section("zh")
 

@@ -147,6 +147,10 @@ def _iter_binding_paths(value: Any) -> list[str]:
     return paths
 
 
+def _component_has_template(value: Any) -> bool:
+    return bool(_iter_templates(value))
+
+
 def _is_valid_template_item_path(path: str) -> bool:
     if not path.startswith("/"):
         return True
@@ -233,6 +237,13 @@ def _validate_template_runtime_semantics(messages: list[dict[str, Any]]) -> None
                 binding_path = _normalize_data_path(data_binding)
                 paths: list[str] = []
                 for component_id in _component_subtree_ids(template_component_id, components_by_id):
+                    if _component_has_template(components_by_id[component_id]):
+                        raise ValueError(
+                            "A2UI v0.8 nested templates are not supported by the Web renderer; "
+                            f"found a template inside template {template_component_id!r}. "
+                            "Flatten repeated item content into fields on the outer item, or use "
+                            "explicit child components inside the template."
+                        )
                     component_paths = _iter_binding_paths(components_by_id[component_id])
                     for path in component_paths:
                         if not _is_valid_template_item_path(path):

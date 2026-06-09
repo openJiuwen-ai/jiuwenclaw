@@ -2,7 +2,7 @@
 preferred_language: zh
 
 a2ui:
-  enabled: true
+  enabled: false
   protocol_version: "0.8"
   stream_validation_enabled: true
   non_web_fallback_enabled: false
