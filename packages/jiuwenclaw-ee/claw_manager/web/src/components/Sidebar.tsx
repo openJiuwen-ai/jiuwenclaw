@@ -1,5 +1,5 @@
 import { useTranslation } from 'react-i18next';
-import { matchRoute, useRouter } from '../router';
+import { useRouter } from '../router';
 import { useAsync } from '../hooks/useAsync';
 import { InstanceApi } from '../services/api';
 
@@ -19,14 +19,6 @@ export function Sidebar() {
   const { path, navigate } = useRouter();
 
   const { data: instancesPage } = useAsync(() => InstanceApi.list({ page: 1, page_size: 50 }), []);
-  const firstInstanceId = instancesPage?.items?.[0]?.jiuwenclaw_id;
-  const currentInstanceId =
-    matchRoute('/instances/:id/policies', path)?.id ?? matchRoute('/instances/:id', path)?.id;
-  const policiesTarget = currentInstanceId
-    ? `/instances/${currentInstanceId}/policies`
-    : firstInstanceId
-      ? `/instances/${firstInstanceId}/policies`
-      : null;
 
   const platformItems: NavItem[] = [
     {
@@ -41,31 +33,16 @@ export function Sidebar() {
       ),
     },
     {
-      key: 'topology',
-      pathPrefix: '/topology',
-      href: '/topology',
-      label: t('nav.topology'),
+      key: 'instances',
+      pathPrefix: '/instances',
+      href: '/instances',
+      label: t('nav.instances'),
       icon: (
         <svg className="w-4 h-4 nav-item__icon" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={1.5}>
           <circle cx="6" cy="6" r="2" />
           <circle cx="18" cy="6" r="2" />
           <circle cx="12" cy="18" r="2" />
           <path strokeLinecap="round" strokeLinejoin="round" d="M6 8v3a2 2 0 002 2h8a2 2 0 002-2V8M12 13v3" />
-        </svg>
-      ),
-    },
-    {
-      key: 'instances',
-      pathPrefix: '/instances/',
-      href: policiesTarget ?? '/topology',
-      disabled: !policiesTarget,
-      title: !policiesTarget ? t('policies.noInstanceHint') : undefined,
-      isActive: (p) => p.endsWith('/policies'),
-      label: t('nav.policies'),
-      icon: (
-        <svg className="w-4 h-4 nav-item__icon" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={1.5}>
-          <path strokeLinecap="round" strokeLinejoin="round" d="M9.594 3.94c.09-.542.56-.94 1.11-.94h2.593c.55 0 1.02.398 1.11.94l.213 1.281c.063.374.313.686.645.87.074.04.147.083.22.127.325.196.72.257 1.075.124l1.217-.456a1.125 1.125 0 011.37.49l1.296 2.247a1.125 1.125 0 01-.26 1.431l-1.003.827c-.293.241-.438.613-.43.992a7.723 7.723 0 010 .255c-.008.378.137.75.43.991l1.004.827c.424.35.534.955.26 1.43l-1.298 2.247a1.125 1.125 0 01-1.369.491l-1.217-.456c-.355-.133-.75-.072-1.076.124a6.47 6.47 0 01-.22.128c-.331.183-.581.495-.644.869l-.213 1.281c-.09.543-.56.941-1.11.941h-2.594c-.55 0-1.019-.398-1.11-.94l-.213-1.281c-.062-.374-.312-.686-.644-.87a6.52 6.52 0 01-.22-.127c-.325-.196-.72-.257-1.076-.124l-1.217.456a1.125 1.125 0 01-1.369-.49l-1.297-2.247a1.125 1.125 0 01.26-1.431l1.004-.827c.292-.24.437-.613.43-.991a6.932 6.932 0 010-.255c.007-.38-.138-.751-.43-.992l-1.004-.827a1.125 1.125 0 01-.26-1.43l1.297-2.247a1.125 1.125 0 011.37-.491l1.216.456c.356.133.751.072 1.076-.124.072-.044.146-.086.22-.128.332-.183.582-.495.644-.869l.214-1.28z" />
-          <path strokeLinecap="round" strokeLinejoin="round" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
         </svg>
       ),
     },
@@ -92,6 +69,28 @@ export function Sidebar() {
         <svg className="w-4 h-4 nav-item__icon" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={1.5}>
           <path strokeLinecap="round" strokeLinejoin="round" d="M14 4l6 6m0 0l-6 6m6-6H4" />
           <path strokeLinecap="round" strokeLinejoin="round" d="M4 20h7" />
+        </svg>
+      ),
+    },
+    {
+      key: 'skill-whitelist-templates',
+      pathPrefix: '/skill-whitelist-templates',
+      href: '/skill-whitelist-templates',
+      label: t('nav.skillWhitelistTemplates'),
+      icon: (
+        <svg className="w-4 h-4 nav-item__icon" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={1.5}>
+          <path strokeLinecap="round" strokeLinejoin="round" d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z" />
+        </svg>
+      ),
+    },
+    {
+      key: 'service-config-templates',
+      pathPrefix: '/service-config-templates',
+      href: '/service-config-templates',
+      label: t('nav.serviceConfigTemplates'),
+      icon: (
+        <svg className="w-4 h-4 nav-item__icon" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={1.5}>
+          <path strokeLinecap="round" strokeLinejoin="round" d="M5 12h14M5 12a2 2 0 01-2-2V6a2 2 0 012-2h14a2 2 0 012 2v4a2 2 0 01-2 2M5 12a2 2 0 00-2 2v4a2 2 0 002 2h14a2 2 0 002-2v-4a2 2 0 00-2-2m-2-4h.01M17 16h.01" />
         </svg>
       ),
     },

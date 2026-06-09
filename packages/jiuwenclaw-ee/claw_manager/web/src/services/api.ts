@@ -22,8 +22,20 @@ import type {
   ModelTemplateCreateBody,
   ModelTemplateUpdateBody,
   PageResult,
+  SkillWhitelistTemplate,
+  SkillWhitelistTemplateCreateBody,
+  SkillWhitelistTemplateUpdateBody,
+  ServiceConfigTemplate,
+  ServiceConfigTemplateCreateBody,
+  ServiceConfigTemplateUpdateBody,
   ProvisionLocalInstanceBody,
   ResponseModel,
+  ChannelConfig,
+  ChannelRegisterBody,
+  LogMaskingRule,
+  LogMaskingRuleCreateBody,
+  LogMaskingRuleUpdateBody,
+  ListItemsResult,
 } from '../types';
 
 const API_BASE = (import.meta.env.VITE_API_BASE ?? '/api').replace(/\/$/, '');
@@ -166,6 +178,53 @@ export const ExtensionTemplateApi = {
     ),
 };
 
+export const SkillWhitelistTemplateApi = {
+  list: (params?: {
+    page?: number;
+    page_size?: number;
+    enabled?: boolean;
+    skill_id?: string;
+    skill_source?: string;
+  }) => http<PageResult<SkillWhitelistTemplate>>('/v1/skill-whitelist-templates', { query: params }),
+  get: (id: string) =>
+    http<SkillWhitelistTemplate>(`/v1/skill-whitelist-templates/${encodeURIComponent(id)}`),
+  create: (body: SkillWhitelistTemplateCreateBody) =>
+    http<SkillWhitelistTemplate>('/v1/skill-whitelist-templates', { method: 'POST', body }),
+  update: (id: string, body: SkillWhitelistTemplateUpdateBody) =>
+    http<SkillWhitelistTemplate>(`/v1/skill-whitelist-templates/${encodeURIComponent(id)}`, {
+      method: 'PUT',
+      body,
+    }),
+  remove: (id: string) =>
+    http<{ deleted: boolean; template_id: string }>(
+      `/v1/skill-whitelist-templates/${encodeURIComponent(id)}`,
+      { method: 'DELETE' }
+    ),
+};
+
+export const ServiceConfigTemplateApi = {
+  list: (params?: {
+    page?: number;
+    page_size?: number;
+    enabled?: boolean;
+    namespace?: string;
+  }) => http<PageResult<ServiceConfigTemplate>>('/v1/service-config-templates', { query: params }),
+  get: (id: string) =>
+    http<ServiceConfigTemplate>(`/v1/service-config-templates/${encodeURIComponent(id)}`),
+  create: (body: ServiceConfigTemplateCreateBody) =>
+    http<ServiceConfigTemplate>('/v1/service-config-templates', { method: 'POST', body }),
+  update: (id: string, body: ServiceConfigTemplateUpdateBody) =>
+    http<ServiceConfigTemplate>(`/v1/service-config-templates/${encodeURIComponent(id)}`, {
+      method: 'PUT',
+      body,
+    }),
+  remove: (id: string) =>
+    http<{ deleted: boolean; template_id: string }>(
+      `/v1/service-config-templates/${encodeURIComponent(id)}`,
+      { method: 'DELETE' }
+    ),
+};
+
 // ---------- Policies (per-instance) ----------
 
 function policyBase(instanceId: string) {
@@ -282,4 +341,56 @@ export const AgentPolicyApi = {
       `${policyBase(instanceId)}/config-effective/agent-policies/${policyId}`,
       { method: 'DELETE' }
     ),
+};
+
+// ---------- Application Config (per-instance) ----------
+
+function instanceBase(instanceId: string) {
+  return `/v1/instances/${encodeURIComponent(instanceId)}`;
+}
+
+export const ChannelApi = {
+  list: (
+    instanceId: string,
+    params?: { channel_type?: string; status?: string }
+  ) =>
+    http<ListItemsResult<ChannelConfig>>(`${instanceBase(instanceId)}/channels`, { query: params }),
+  register: (instanceId: string, body: ChannelRegisterBody) =>
+    http<{ channel_id: string }>(`${instanceBase(instanceId)}/channels`, { method: 'POST', body }),
+  activate: (instanceId: string, channelId: string) =>
+    http<{ channel_id: string; status: string }>(
+      `${instanceBase(instanceId)}/channels/${encodeURIComponent(channelId)}/activate`,
+      { method: 'POST' }
+    ),
+  deactivate: (instanceId: string, channelId: string, body?: { graceful?: boolean; timeout?: number }) =>
+    http<{ channel_id: string; status: string }>(
+      `${instanceBase(instanceId)}/channels/${encodeURIComponent(channelId)}/deactivate`,
+      { method: 'POST', body: body ?? { graceful: true, timeout: 30 } }
+    ),
+  remove: (instanceId: string, channelId: string) =>
+    http<void>(`${instanceBase(instanceId)}/channels/${encodeURIComponent(channelId)}`, {
+      method: 'DELETE',
+    }),
+};
+
+export const LogMaskingRuleApi = {
+  list: (instanceId: string, params?: { enabled?: boolean }) =>
+    http<ListItemsResult<LogMaskingRule>>(`${instanceBase(instanceId)}/log-masking-rules`, {
+      query: params,
+    }),
+  get: (instanceId: string, ruleId: string) =>
+    http<LogMaskingRule>(
+      `${instanceBase(instanceId)}/log-masking-rules/${encodeURIComponent(ruleId)}`
+    ),
+  create: (instanceId: string, body: LogMaskingRuleCreateBody) =>
+    http<LogMaskingRule>(`${instanceBase(instanceId)}/log-masking-rules`, { method: 'POST', body }),
+  update: (instanceId: string, ruleId: string, body: LogMaskingRuleUpdateBody) =>
+    http<LogMaskingRule>(
+      `${instanceBase(instanceId)}/log-masking-rules/${encodeURIComponent(ruleId)}`,
+      { method: 'PATCH', body }
+    ),
+  remove: (instanceId: string, ruleId: string) =>
+    http<void>(`${instanceBase(instanceId)}/log-masking-rules/${encodeURIComponent(ruleId)}`, {
+      method: 'DELETE',
+    }),
 };

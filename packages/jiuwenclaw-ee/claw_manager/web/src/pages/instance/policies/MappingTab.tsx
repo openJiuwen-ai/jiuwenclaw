@@ -1,18 +1,18 @@
 import { useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { ApiError, MappingApi } from '../../services/api';
-import { useAsync } from '../../hooks/useAsync';
+import { ApiError, MappingApi } from '../../../services/api';
+import { useAsync } from '../../../hooks/useAsync';
 import type {
   ConfigDefaultTemplateMapping,
   ConfigDefaultTemplateMappingCreateBody,
-} from '../../types';
-import { Empty } from '../../components/Empty';
-import { Pagination } from '../../components/Pagination';
-import { ConfirmDialog } from '../../components/ConfirmDialog';
-import { Modal } from '../../components/Modal';
-import { JsonField, tryParseJson, useInvalidJsonChecker } from '../../components/JsonField';
-import { toast } from '../../stores/uiStore';
-import { formatTime, safeStringify } from '../../utils/format';
+} from '../../../types';
+import { Empty } from '../../../components/Empty';
+import { Pagination } from '../../../components/Pagination';
+import { ConfirmDialog } from '../../../components/ConfirmDialog';
+import { Modal } from '../../../components/Modal';
+import { JsonField, tryParseJson, useInvalidJsonChecker } from '../../../components/JsonField';
+import { toast } from '../../../stores/uiStore';
+import { formatTime, safeStringify } from '../../../utils/format';
 
 const TEMPLATE_TYPES = [
   'default_model',

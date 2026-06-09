@@ -1,8 +1,8 @@
 import { useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { Modal } from '../../components/Modal';
-import { InstanceApi, ApiError } from '../../services/api';
-import { toast } from '../../stores/uiStore';
+import { Modal } from '../../../components/Modal';
+import { InstanceApi, ApiError } from '../../../services/api';
+import { toast } from '../../../stores/uiStore';
 
 interface Props {
   open: boolean;
