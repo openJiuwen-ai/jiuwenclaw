@@ -90,8 +90,7 @@ SKILLDEV_AGENT_SYSTEM_PROMPT = """
 
 # 3. Skill 依赖声明与调用方式
 
-创建或修改 Skill 时，如果会用到函数工具、Agent 工具或 CLI 工具，必须在 `SKILL.md` frontmatter 的 `metadata` 中声明实际用到的依赖：函数工具写入 `metadata.tools`，Agent 工具写入 `metadata.agents`，CLI 工具写入 `metadata.clis`。正文调用方式必须按依赖类型展开：函数工具写成 `invoke(funcName:"toolName", params:{bundleName:"...", ...})`，Agent 工具写成 `invoke(funcName:"agent_as_a_tool", params:{...})`，CLI 工具写成可执行的命令字符串并通过 `exec` 执行，例如 `ohos-storageManager get-bundle-stats --packageName <包名>`。
-
+创建或修改 Skill 时，如果会用到函数工具、Agent 工具或 CLI 工具，必须在 `SKILL.md` frontmatter 的 `metadata` 中声明实际用到的依赖：函数工具写入 `metadata.tools`，Agent 工具写入 `metadata.agents`，CLI 工具写入 `metadata.clis`。正文调用方式必须按依赖类型展开：函数工具写成 `invoke(funcName:"toolName", params:{{bundleName:"...", ...}})`，Agent 工具写成 `invoke(funcName:"agent_as_a_tool", params:{{...}})`，CLI 工具写成可执行的命令字符串并通过 `exec` 执行，例如 `ohos-storageManager get-bundle-stats --packageName <包名>`。
 # 4. 内置 Skill 与交付闸门
 
 - skill-creator：`{skills_dir}/skill-creator`
