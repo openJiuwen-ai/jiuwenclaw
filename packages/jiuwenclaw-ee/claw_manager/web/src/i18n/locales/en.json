@@ -28,10 +28,12 @@
   "nav": {
     "platform": "Platform",
     "overview": "Overview",
-    "topology": "Topology",
+    "instances": "Instance Management",
     "config": "Global Config",
     "modelTemplates": "Model Templates",
     "extensionTemplates": "Extension Templates",
+    "skillWhitelistTemplates": "Skill Whitelist Templates",
+    "serviceConfigTemplates": "Service Config Templates",
     "policies": "Instance Policies"
   },
   "connection": {
@@ -41,7 +43,7 @@
   },
   "overview": {
     "title": "Overview",
-    "subtitle": "Health and topology summary of the management plane",
+    "subtitle": "Management plane health and instance summary",
     "managerHealth": "Manager Health",
     "managerWs": "Manager WebSocket",
     "totalInstances": "Total Instances",
@@ -49,11 +51,11 @@
     "registeredOnWs": "Instances on WS",
     "wsListening": "Listening at",
     "wsPid": "Manager PID",
-    "noInstances": "No instance yet. Create one in Topology."
+    "noInstances": "No instance yet. Create one in Instance Management."
   },
   "topology": {
-    "title": "Service Topology",
-    "subtitle": "View each Gateway group and the AgentServers it manages",
+    "title": "Instance Management",
+    "subtitle": "Manage JiuwenClaw instances",
     "createInstance": "Create Instance",
     "provisionLocal": "Provision Locally",
     "instanceStatus": "Status",
@@ -92,7 +94,43 @@
     "services": "Managed Services",
     "extraData": "Extra Data (instance_info.data)",
     "editData": "Edit extra data",
-    "back": "Back to Topology"
+    "back": "Back to Instance List",
+    "tabs": {
+      "detail": "Detail",
+      "policies": "Policies",
+      "config": "Config"
+    }
+  },
+  "instanceConfig": {
+    "tabs": {
+      "channel": "Channel",
+      "logMasking": "Log Masking"
+    },
+    "channel": {
+      "register": "Register Channel",
+      "channelId": "Channel ID",
+      "channelName": "Channel Name",
+      "channelType": "Channel Type",
+      "config": "Config (JSON)",
+      "filterType": "Filter by type",
+      "initialStatus": "Initial Status",
+      "statusActive": "active",
+      "statusInactive": "inactive",
+      "activate": "Activate",
+      "deactivate": "Deactivate",
+      "deleteConfirm": "Delete this channel? Gateway will be notified."
+    },
+    "logMasking": {
+      "new": "New Rule",
+      "edit": "Edit Rule",
+      "ruleName": "Rule Name",
+      "pattern": "Pattern (regex)",
+      "replacement": "Replacement",
+      "priority": "Priority",
+      "source": "Source",
+      "data": "Extra Data (JSON, optional)",
+      "deleteConfirm": "Delete this log masking rule? Gateway will be notified."
+    }
   },
   "modelTemplate": {
     "title": "Model Templates",
@@ -130,11 +168,75 @@
     "customConfig": "Custom Config (JSON, optional)",
     "deleteConfirm": "Delete this extension template?"
   },
+  "skillWhitelistTemplate": {
+    "title": "Skill Whitelist Templates",
+    "subtitle": "Reusable skill whitelist templates referenced by instance policies",
+    "new": "New Template",
+    "edit": "Edit Template",
+    "templateName": "Template Name",
+    "skillId": "Skill ID",
+    "skillIdHint": "e.g. search/weather, crm/lead_lookup",
+    "skillVersion": "Skill Version",
+    "skillSource": "Skill Source",
+    "data": "Extra Data (JSON, optional)",
+    "filterSkillId": "Filter by Skill ID",
+    "filterSkillSource": "Filter by source",
+    "deleteConfirm": "Delete this skill whitelist template? It may be referenced by instance policies."
+  },
+  "serviceConfigTemplate": {
+    "title": "Service Config Templates",
+    "subtitle": "AgentServer pool and container runtime settings for Gateway Runtime",
+    "new": "New Template",
+    "edit": "Edit Template",
+    "templateName": "Template Name",
+    "agentImage": "Agent Image",
+    "namespace": "Namespace",
+    "podName": "Pod Name (optional)",
+    "containerName": "Container Name",
+    "containerPort": "Container Port",
+    "portName": "Port Name",
+    "imagePullPolicy": "Image Pull Policy",
+    "replicas": "Replicas",
+    "kubeconfig": "Kubeconfig Path (optional)",
+    "agentRuntime": "Agent Runtime (optional)",
+    "readinessInitialDelay": "Readiness Initial Delay (s)",
+    "readinessPeriod": "Readiness Period (s)",
+    "readyTimeout": "Ready Timeout (s)",
+    "readyPollInterval": "Ready Poll Interval (s)",
+    "nfsServer": "NFS Server (optional)",
+    "nfsPath": "NFS Path",
+    "nfsMountPath": "NFS Mount Path (optional)",
+    "agentCpuRequest": "Agent CPU Request",
+    "agentMemoryRequest": "Agent Memory Request",
+    "agentCpuLimit": "Agent CPU Limit",
+    "agentMemoryLimit": "Agent Memory Limit",
+    "jiuwenboxCpuRequest": "JiuwenBox CPU Request",
+    "jiuwenboxMemoryRequest": "JiuwenBox Memory Request",
+    "jiuwenboxCpuLimit": "JiuwenBox CPU Limit",
+    "jiuwenboxMemoryLimit": "JiuwenBox Memory Limit",
+    "minIdleServices": "Min Idle Services",
+    "maxServices": "Max Services",
+    "serviceConcurrency": "Service Concurrency",
+    "serviceTtl": "Service TTL (s)",
+    "autoscaleInterval": "Autoscale Interval (s)",
+    "messageTimeout": "Message Timeout (s)",
+    "sessionConcurrency": "Session Concurrency",
+    "sessionTtl": "Session TTL (s)",
+    "data": "Extra Data (JSON, optional)",
+    "poolRange": "Idle / Max",
+    "filterNamespace": "Filter by namespace",
+    "sectionContainer": "Container & K8s",
+    "sectionReadiness": "Readiness Probe",
+    "sectionNfs": "NFS Storage",
+    "sectionResources": "Resource Quotas",
+    "sectionPool": "Pool & Timeouts",
+    "sectionExtra": "Other",
+    "deleteConfirm": "Delete this service config template? It may be referenced by instance policies."
+  },
   "policies": {
     "title": "Instance Policies",
-    "subtitle": "Per-instance Default Mapping / Global / Service / Agent policies",
     "selectInstance": "Select instance",
-    "noInstanceHint": "No instance yet — create one under \"Topology\" first",
+    "noInstanceHint": "No instance yet — create one in Instance Management first",
     "tabs": {
       "mapping": "Default Mapping",
       "global": "Global",

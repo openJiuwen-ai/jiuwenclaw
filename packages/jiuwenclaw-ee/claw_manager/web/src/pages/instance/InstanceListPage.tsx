@@ -10,8 +10,8 @@ import { Empty } from '../../components/Empty';
 import { relativeTime } from '../../utils/format';
 import { toast } from '../../stores/uiStore';
 import { ApiError } from '../../services/api';
-import { CreateInstanceModal } from './CreateInstanceModal';
-import { ProvisionLocalModal } from './ProvisionLocalModal';
+import { CreateInstanceModal } from './modal/CreateInstanceModal';
+import { ProvisionLocalModal } from './modal/ProvisionLocalModal';
 
 function InstanceTopoCard({
   instance,
@@ -51,12 +51,6 @@ function InstanceTopoCard({
           <div className="flex items-center gap-1">
             <button className="btn sm" onClick={() => navigate(`/instances/${instance.jiuwenclaw_id}`)}>
               {t('topology.viewDetail')}
-            </button>
-            <button
-              className="btn sm"
-              onClick={() => navigate(`/instances/${instance.jiuwenclaw_id}/policies`)}
-            >
-              {t('topology.managePolicies')}
             </button>
             <button className="btn sm danger" onClick={() => setConfirmDel(true)}>
               {t('common.delete')}
@@ -99,7 +93,7 @@ function InstanceTopoCard({
   );
 }
 
-export function TopologyPage() {
+export function InstanceListPage() {
   const { t } = useTranslation();
   const [statusFilter, setStatusFilter] = useState<string>('');
   const [createOpen, setCreateOpen] = useState(false);

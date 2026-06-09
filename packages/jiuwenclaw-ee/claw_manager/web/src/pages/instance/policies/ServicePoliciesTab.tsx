@@ -1,15 +1,15 @@
 import { useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { ApiError, ServicePolicyApi } from '../../services/api';
-import { useAsync } from '../../hooks/useAsync';
-import type { ConfigEffectiveServicePolicy } from '../../types';
-import { Empty } from '../../components/Empty';
-import { Pagination } from '../../components/Pagination';
-import { ConfirmDialog } from '../../components/ConfirmDialog';
-import { Modal } from '../../components/Modal';
-import { JsonField, tryParseJson, useInvalidJsonChecker } from '../../components/JsonField';
-import { toast } from '../../stores/uiStore';
-import { safeStringify, truncate } from '../../utils/format';
+import { ApiError, ServicePolicyApi } from '../../../services/api';
+import { useAsync } from '../../../hooks/useAsync';
+import type { ConfigEffectiveServicePolicy } from '../../../types';
+import { Empty } from '../../../components/Empty';
+import { Pagination } from '../../../components/Pagination';
+import { ConfirmDialog } from '../../../components/ConfirmDialog';
+import { Modal } from '../../../components/Modal';
+import { JsonField, tryParseJson, useInvalidJsonChecker } from '../../../components/JsonField';
+import { toast } from '../../../stores/uiStore';
+import { safeStringify, truncate } from '../../../utils/format';
 
 interface FormState {
   service_id: string;

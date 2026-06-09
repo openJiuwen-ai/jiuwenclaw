@@ -102,7 +102,7 @@ export function OverviewPage() {
 
         <button
           className="card kpi-card text-left"
-          onClick={() => navigate('/topology')}
+          onClick={() => navigate('/instances')}
           aria-label={t('overview.totalInstances')}
         >
           <div className="kpi-card__head">
@@ -152,10 +152,10 @@ export function OverviewPage() {
         <div className="card-header" style={{ padding: '16px 18px 8px' }}>
           <div className="section-title">
             <span className="section-title__bar" />
-            {t('nav.topology')}
+            {t('nav.instances')}
             <span className="section-title__count">{instances.data?.items?.length ?? 0}</span>
           </div>
-          <button className="btn ghost sm" onClick={() => navigate('/topology')}>
+          <button className="btn ghost sm" onClick={() => navigate('/instances')}>
             {t('common.view')} →
           </button>
         </div>
