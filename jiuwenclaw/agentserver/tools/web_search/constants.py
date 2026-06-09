@@ -2,9 +2,10 @@
 
 DEFAULT_TIMEOUT_SECONDS = 30
 DEFAULT_MAX_RESULTS = 8
-DEFAULT_PAID_PROVIDER_ORDER = ("petal", "perplexity", "bocha", "serper", "jina")
+DEFAULT_PAID_PROVIDER_ORDER = ("petal", "tavily", "perplexity", "bocha", "serper", "jina")
 
 PAID_API_KEYS = {
+    "tavily": "TAVILY_API_KEY",
     "bocha": "BOCHA_API_KEY",
     "perplexity": "PERPLEXITY_API_KEY",
     "serper": "SERPER_API_KEY",

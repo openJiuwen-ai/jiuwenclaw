@@ -1,6 +1,6 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 
-"""Paid search providers (petal, perplexity, serper, jina, bocha)."""
+"""Paid search providers (petal, tavily, perplexity, serper, jina, bocha)."""
 
 from __future__ import annotations
 
@@ -15,6 +15,8 @@ from jiuwenclaw.config import get_config
 _PETAL_MAX_TITLE_LEN = 2000
 _PETAL_MAX_URL_LEN = 2048
 _PETAL_MAX_SUMMARY_LEN = 4000
+_TAVILY_DEFAULT_API_URL = "https://api.tavily.com"
+_TAVILY_MAX_CONTENT_LEN = 4000
 
 
 def _resolve_petal_search_url() -> str:
@@ -289,3 +291,86 @@ def bocha_search_sync(
             break
 
     return {"provider": "bocha", "answer": answer, "urls": urls[:max_results]}
+
+
+def _resolve_tavily_api_key() -> str:
+    return os.environ.get("TAVILY_API_KEY", "").strip()
+
+
+def _resolve_tavily_api_url() -> str:
+    raw = (
+        os.environ.get("TAVILY_API_URL", "").strip()
+        or _TAVILY_DEFAULT_API_URL
+    )
+    return raw.rstrip("/")
+
+
+def _tavily_format_answer_from_results(
+    results: list[dict[str, Any]], summary_answer: str
+) -> str:
+    lines: list[str] = []
+    summary = (summary_answer or "").strip()
+    if summary:
+        lines.append("Summary:")
+        lines.append(summary)
+        lines.append("")
+    n = 0
+    for item in results:
+        if not isinstance(item, dict):
+            continue
+        title = str(item.get("title") or "").strip()
+        url = str(item.get("url") or "").strip()
+        content = str(item.get("content") or "").strip()[:_TAVILY_MAX_CONTENT_LEN]
+        if not title and not url and not content:
+            continue
+        n += 1
+        display_title = title if title else "(无标题)"
+        lines.append(f"{n}. {display_title}")
+        if url:
+            lines.append(f"   URL: {url}")
+        if content:
+            lines.append(f"   Content: {content}")
+    return "\n".join(lines).strip()
+
+
+def tavily_search_sync(
+    query: str, max_results: int, timeout_seconds: int
+) -> dict[str, Any]:
+    api_key = _resolve_tavily_api_key()
+    if not api_key:
+        raise ValueError("TAVILY_API_KEY is not set")
+
+    payload = {
+        "api_key": api_key,
+        "query": query,
+        "max_results": max_results,
+        "search_depth": "advanced",
+        "include_answer": True,
+    }
+    response = http_request(
+        "POST",
+        f"{_resolve_tavily_api_url()}/search",
+        headers={"Content-Type": "application/json"},
+        json=payload,
+        timeout=timeout_seconds,
+    )
+    payload.pop("api_key", None)
+    response.raise_for_status()
+    data = response.json()
+
+    results_raw = data.get("results", [])
+    results: list[dict[str, Any]] = []
+    if isinstance(results_raw, list):
+        for item in results_raw[:max_results]:
+            if isinstance(item, dict):
+                results.append(item)
+
+    summary_answer = (data.get("answer") or "").strip()
+
+    answer = _tavily_format_answer_from_results(results, summary_answer)
+    urls: list[str] = []
+    for item in results:
+        maybe_url = item.get("url")
+        if maybe_url:
+            urls.append(str(maybe_url))
+    return {"provider": "tavily", "answer": answer, "urls": urls[:max_results]}

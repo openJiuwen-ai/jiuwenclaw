@@ -927,6 +927,7 @@ web_search:
   max_results: 8
   paid_provider_order:
     - petal
+    - tavily
     - perplexity
     - bocha
     - serper

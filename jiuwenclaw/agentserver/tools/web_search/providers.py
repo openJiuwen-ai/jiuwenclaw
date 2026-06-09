@@ -24,6 +24,7 @@ from jiuwenclaw.agentserver.tools.web_search.paid import (
     perplexity_search_sync,
     petal_search_sync,
     serper_search_sync,
+    tavily_search_sync,
 )
 from jiuwenclaw.agentserver.tools.web_search.constants import PAID_API_KEYS
 from jiuwenclaw.agentserver.tools.web_search.quality import evaluate_search_quality
@@ -116,6 +117,10 @@ async def invoke_paid_provider(
         if name == "petal":
             payload = await asyncio.to_thread(
                 petal_search_sync, query, max_results, timeout_seconds
+            )
+        elif name == "tavily":
+            payload = await asyncio.to_thread(
+                tavily_search_sync, query, max_results, timeout_seconds
             )
         elif name == "bocha":
             payload = await asyncio.to_thread(
