@@ -164,3 +164,41 @@ async def test_list_sessions_returns_only_local_view(shared_redis: InMemoryFakeR
 
     assert len(await store1.list_sessions()) == 2
     assert await store2.list_sessions() == []
+
+
+@pytest.mark.asyncio
+async def test_export_and_file_ready_obs_urls_replicated_via_dcs(
+    shared_redis: InMemoryFakeRedis,
+) -> None:
+    store1 = VibeSkillSessionStore(dcs_store=_make_dcs(shared_redis))
+    store2 = VibeSkillSessionStore(dcs_store=_make_dcs(shared_redis))
+
+    session = await store1.get_or_create(session_id=None, mode="SkillCreate")
+    sid = session.session_id
+    await store1.set_last_export_obs_url(sid, "https://obs/export-v1.zip")
+    await store1.append_file_ready_obs_url(sid, "https://obs/file-a.png")
+    await store1.append_file_ready_obs_url(sid, "https://obs/file-b.png")
+
+    loaded = await store2.get_session(sid)
+    assert loaded is not None
+    assert loaded.last_export_obs_url == "https://obs/export-v1.zip"
+    assert loaded.file_ready_obs_urls == [
+        "https://obs/file-a.png",
+        "https://obs/file-b.png",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_set_last_export_obs_url_returns_previous(shared_redis: InMemoryFakeRedis) -> None:
+    store = VibeSkillSessionStore(dcs_store=_make_dcs(shared_redis))
+    session = await store.get_or_create(session_id=None, mode="SkillCreate")
+    sid = session.session_id
+
+    assert await store.set_last_export_obs_url(sid, "https://obs/export-v1.zip") == ""
+    assert await store.set_last_export_obs_url(sid, "https://obs/export-v2.zip") == (
+        "https://obs/export-v1.zip"
+    )
+
+    loaded = await store.get_session(sid)
+    assert loaded is not None
+    assert loaded.last_export_obs_url == "https://obs/export-v2.zip"

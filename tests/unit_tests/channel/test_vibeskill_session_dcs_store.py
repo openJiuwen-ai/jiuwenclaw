@@ -156,6 +156,29 @@ async def test_load_session_missing_exportable_defaults_false() -> None:
     loaded = await store.load_session("vibeskill_a")
     assert loaded is not None
     assert loaded.exportable is False
+    assert loaded.last_export_obs_url == ""
+    assert loaded.file_ready_obs_urls == []
+
+
+@pytest.mark.asyncio
+async def test_load_session_obs_urls_roundtrip() -> None:
+    store, _ = _make_store()
+    saved = _make_session(session_id="vibeskill_a")
+    saved.last_export_obs_url = "https://obs/export.zip"
+    saved.file_ready_obs_urls = [
+        "https://obs/file-a.png",
+        "https://obs/file-b.png",
+    ]
+
+    await store.save_session(saved)
+    loaded = await store.load_session("vibeskill_a")
+
+    assert loaded is not None
+    assert loaded.last_export_obs_url == "https://obs/export.zip"
+    assert loaded.file_ready_obs_urls == [
+        "https://obs/file-a.png",
+        "https://obs/file-b.png",
+    ]
 
 
 @pytest.mark.asyncio

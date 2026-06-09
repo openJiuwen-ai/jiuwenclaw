@@ -33,6 +33,8 @@ class VibeSkillSession:
     session_id: str = ""
     state: VibeSkillSessionState = VibeSkillSessionState.IDLE
     exportable: bool = False
+    last_export_obs_url: str = ""
+    file_ready_obs_urls: list[str] = field(default_factory=list)
     created_at: float = field(default_factory=time.time)
     updated_at: float = field(default_factory=time.time)
     metadata: dict[str, Any] = field(default_factory=dict)
@@ -151,6 +153,59 @@ class VibeSkillSessionStore:
                 except Exception:
                     logger.exception(
                         "[VibeSkillSessionStore] DCS save_session failed in set_state, session_id=%s",
+                        session_id,
+                    )
+                    raise
+
+    async def set_last_export_obs_url(self, session_id: str, url: str) -> str:
+        """更新最近一次 skill 打包的 OBS URL，返回替换前的 URL（可能为空）。"""
+        session = self._sessions.get(session_id)
+        if session is None:
+            session = await self._load_from_dcs(session_id)
+            if session is None:
+                return ""
+        async with self._lock:
+            current = self._sessions.get(session_id)
+            if current is None:
+                return ""
+            old_url = str(current.last_export_obs_url or "").strip()
+            current.last_export_obs_url = str(url or "").strip()
+            current.updated_at = time.time()
+            if self._dcs is not None:
+                try:
+                    await self._dcs.save_session(current)
+                except Exception:
+                    logger.exception(
+                        "[VibeSkillSessionStore] DCS save_session failed in "
+                        "set_last_export_obs_url, session_id=%s",
+                        session_id,
+                    )
+                    raise
+            return old_url
+
+    async def append_file_ready_obs_url(self, session_id: str, url: str) -> None:
+        """追加 file.ready 事件返回的文件 OBS URL。"""
+        obs_url = str(url or "").strip()
+        if not obs_url:
+            return
+        session = self._sessions.get(session_id)
+        if session is None:
+            session = await self._load_from_dcs(session_id)
+            if session is None:
+                return
+        async with self._lock:
+            current = self._sessions.get(session_id)
+            if current is None:
+                return
+            current.file_ready_obs_urls.append(obs_url)
+            current.updated_at = time.time()
+            if self._dcs is not None:
+                try:
+                    await self._dcs.save_session(current)
+                except Exception:
+                    logger.exception(
+                        "[VibeSkillSessionStore] DCS save_session failed in "
+                        "append_file_ready_obs_url, session_id=%s",
                         session_id,
                     )
                     raise

@@ -39,6 +39,49 @@ from jiuwenclaw.utils import SafeRotatingFileHandler, SensitiveDataFilter
 logger = logging.getLogger(__name__)
 interface_logger = logging.getLogger(f"{__name__}.interface")
 
+
+def _create_query_url_obs() -> Any:
+    from jiuwenclaw.gateway.query_url_obs import QueryUrlOSMS
+
+    return QueryUrlOSMS()
+
+
+async def _delete_obs_url(
+    url: str,
+    *,
+    session_id: str,
+    reason: str,
+) -> bool:
+    """Delete an OBS object via OSMS. Failures are logged; caller decides whether to continue."""
+    obs_url = str(url or "").strip()
+    if not obs_url:
+        return False
+    try:
+        deleted = bool(await _create_query_url_obs().invoking_osms_delete(obs_url))
+    except Exception:
+        logger.exception(
+            "[VibeSkillChannel] Failed to delete OBS object: session_id=%s reason=%s url=%s",
+            session_id,
+            reason,
+            obs_url,
+        )
+        return False
+    if deleted:
+        logger.info(
+            "[VibeSkillChannel] Deleted OBS object: session_id=%s reason=%s url=%s",
+            session_id,
+            reason,
+            obs_url,
+        )
+    else:
+        logger.warning(
+            "[VibeSkillChannel] OSMS delete returned false: session_id=%s reason=%s url=%s",
+            session_id,
+            reason,
+            obs_url,
+        )
+    return deleted
+
 _INTERFACE_LOG_HANDLER_ATTR = "_jiuwenclaw_interface_log_file_handler"
 _INTERFACE_LOG_HANDLER_PATH_ATTR = "_jiuwenclaw_interface_log_file_path"
 _INTERFACE_LOG_MAX_BYTES = 20 * 1024 * 1024
@@ -2146,6 +2189,14 @@ class VibeSkillChannel(BaseChannel):
         ctx["_skilldev_stream_last_kind"] = "file"
         ctx["_skilldev_active_reasoning_part"] = None
         ctx["_skilldev_active_output_part"] = None
+        try:
+            await self._store.append_file_ready_obs_url(session_id, url)
+        except Exception:
+            logger.exception(
+                "[VibeSkillChannel] append_file_ready_obs_url failed, session_id=%s url=%s",
+                session_id,
+                url,
+            )
         responses = [{
             "type": "message.part.updated",
             "properties": self._serialize_part(part, external_sid),
@@ -2734,6 +2785,20 @@ class VibeSkillChannel(BaseChannel):
         await self._cancel_session_via_message_handler(sid, source=source, mode=mode)
         self._clear_pending_confirms_for_session(sid)
         websocket_closed = await self._close_northbound_ws_for_session(sid)
+
+        export_obs_url = str(session_obj.last_export_obs_url or "").strip()
+        file_ready_obs_urls = [
+            str(url).strip()
+            for url in (session_obj.file_ready_obs_urls or [])
+            if str(url).strip()
+        ]
+        for obs_url in [export_obs_url, *file_ready_obs_urls]:
+            if obs_url:
+                await _delete_obs_url(
+                    obs_url,
+                    session_id=sid,
+                    reason="session_delete",
+                )
 
         workspace_purged = False
         workspace_obs_delete_attempted = False
@@ -4521,4 +4586,16 @@ class VibeSkillChannel(BaseChannel):
         }
         if not result["exportId"] or not result["url"] or not result["mimeType"]:
             return self._json_response(502, {"error": "Invalid response from skilldev.download"})
+
+        new_export_url = str(result["url"] or "").strip()
+        current = await self._store.get_session(session_id)
+        old_export_url = str((current.last_export_obs_url if current else "") or "").strip()
+        if old_export_url and old_export_url != new_export_url:
+            await _delete_obs_url(
+                old_export_url,
+                session_id=session_id,
+                reason="export_replace",
+            )
+        await self._store.set_last_export_obs_url(session_id, new_export_url)
+
         return self._json_response(200, result)

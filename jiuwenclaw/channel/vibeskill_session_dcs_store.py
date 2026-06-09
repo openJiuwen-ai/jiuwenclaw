@@ -57,6 +57,12 @@ class VibeSkillSessionDcsStore:
             "session_id": session.session_id,
             "state": state_value,
             "exportable": bool(session.exportable),
+            "last_export_obs_url": str(session.last_export_obs_url or "").strip(),
+            "file_ready_obs_urls": [
+                str(url).strip()
+                for url in (session.file_ready_obs_urls or [])
+                if str(url).strip()
+            ],
             "mode": session.mode,
             "created_at": session.created_at,
             "updated_at": session.updated_at,
@@ -94,10 +100,19 @@ class VibeSkillSessionDcsStore:
         except (TypeError, ValueError):
             updated_at = 0.0
         exportable = bool(data.get("exportable", False))
+        last_export_obs_url = str(data.get("last_export_obs_url") or "").strip()
+        raw_file_urls = data.get("file_ready_obs_urls")
+        file_ready_obs_urls: list[str] = []
+        if isinstance(raw_file_urls, list):
+            file_ready_obs_urls = [
+                str(url).strip() for url in raw_file_urls if str(url).strip()
+            ]
         return VibeSkillSession(
             session_id=session_id,
             state=state,
             exportable=exportable,
+            last_export_obs_url=last_export_obs_url,
+            file_ready_obs_urls=file_ready_obs_urls,
             created_at=created_at,
             updated_at=updated_at,
             metadata=metadata,
