@@ -164,7 +164,8 @@
     "agent": {
       "new": "新建 Agent 策略",
       "agentId": "Agent ID",
-      "servicePolicyId": "关联服务策略 ID"
+      "servicePolicyId": "关联服务策略 ID",
+      "sendFileAllowed": "允许发送文件"
     },
     "deleteConfirm": "确认删除该策略？删除后将立即影响 Gateway 的配置生效。"
   },

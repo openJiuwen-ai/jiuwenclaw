@@ -22,7 +22,7 @@ export function OverviewPage() {
   const instances = useAsync(() => InstanceApi.list({ page: 1, page_size: 200 }), []);
 
   const instanceTotal = instances.data?.total ?? 0;
-  const wsRegistered = wsStatus.data?.registered_instances.length ?? 0;
+  const wsRegistered = wsStatus.data?.registered_jiuwenclaw_ids?.length ?? 0;
 
   const statusDist = useMemo(() => {
     const items = instances.data?.items ?? [];
@@ -153,7 +153,7 @@ export function OverviewPage() {
           <div className="section-title">
             <span className="section-title__bar" />
             {t('nav.topology')}
-            <span className="section-title__count">{instances.data?.items.length ?? 0}</span>
+            <span className="section-title__count">{instances.data?.items?.length ?? 0}</span>
           </div>
           <button className="btn ghost sm" onClick={() => navigate('/topology')}>
             {t('common.view')} →

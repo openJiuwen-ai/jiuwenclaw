@@ -151,6 +151,7 @@ async def apply_config_effective_agent_policy(
             "priority": int(policy.get("priority", 0)),
             "match_expr": policy.get("match_expr"),
             "template_ref": normalize_template_ref(policy.get("template_ref")),
+            "send_file_allowed": bool(policy.get("send_file_allowed", False)),
             "enabled": bool(policy.get("enabled", True)),
             "data": policy.get("data"),
             "created_at": _parse_iso_datetime(policy.get("created_at")) or now,

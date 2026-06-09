@@ -586,6 +586,7 @@ async def test_load_service_config_returns_resolved_service_and_agent_id(
                     "jiuwenclaw_id": jid,
                     "agent_id": "${user_id}",
                     "match_expr": "user_id == 'alice'",
+                    "send_file_allowed": True,
                     "template_ref": {},
                 }
             ]
@@ -631,6 +632,7 @@ async def test_load_service_config_returns_resolved_service_and_agent_id(
     assert alice_loaded is not None
     assert alice_loaded.service_id == "g_demo_sales::bot_main"
     assert alice_loaded.agent_id == "alice"
+    assert alice_loaded.send_file_allowed is True
 
     bob_request = AgentRequest(
         request_id="req-bob",
@@ -647,3 +649,4 @@ async def test_load_service_config_returns_resolved_service_and_agent_id(
     assert bob_loaded is not None
     assert bob_loaded.service_id == "g_demo_sales::bot_main"
     assert bob_loaded.agent_id is None
+    assert bob_loaded.send_file_allowed is False

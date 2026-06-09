@@ -76,6 +76,7 @@ export interface ConfigEffectiveAgentPolicy {
   priority: number;
   match_expr?: string | null;
   template_ref: Record<string, string>;
+  send_file_allowed: boolean;
   enabled: boolean;
   data?: Record<string, unknown> | null;
   created_at?: string | null;
@@ -88,6 +89,7 @@ export interface ConfigEffectiveAgentPolicyCreateBody {
   priority?: number;
   match_expr?: string;
   template_ref: Record<string, string>;
+  send_file_allowed?: boolean;
   enabled?: boolean;
   data?: Record<string, unknown>;
 }

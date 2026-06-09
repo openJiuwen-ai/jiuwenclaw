@@ -164,7 +164,8 @@
     "agent": {
       "new": "New Agent Policy",
       "agentId": "Agent ID",
-      "servicePolicyId": "Service Policy ID"
+      "servicePolicyId": "Service Policy ID",
+      "sendFileAllowed": "Allow Send File"
     },
     "deleteConfirm": "Delete this policy? Effective for Gateway immediately."
   },

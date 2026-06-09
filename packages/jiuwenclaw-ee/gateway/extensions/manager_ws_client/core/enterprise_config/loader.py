@@ -241,16 +241,11 @@ async def load_effective_enterprise_config(
             "agent_id",
             ctx,
         )
-
-    # 从 Agent Policy 中读取 send_file_allowed 字段
-    send_file_allowed = True
-    if match.matched_agent is not None:
-        send_file_allowed = bool(match.matched_agent.get("send_file_allowed", True))
+    send_file_allowed = bool((match.matched_agent or {}).get("send_file_allowed", False))
 
     result = EffectiveEnterpriseConfig(
         routing=ctx,
         template_ref=slot_template_id_map,
-        send_file_allowed=send_file_allowed,
         service_policy_id=(
             int(match.matched_service["id"]) if match.matched_service else None
         ),
@@ -262,6 +257,7 @@ async def load_effective_enterprise_config(
         ),
         service_id=resolved_service_id,
         agent_id=resolved_agent_id,
+        send_file_allowed=send_file_allowed,
         service_policy=match.matched_service,
         agent_policy=match.matched_agent,
         global_policy=match.matched_global,

@@ -29,6 +29,7 @@ class ConfigEffectiveAgentPolicyCreateBody(BaseModel):
         default_factory=dict,
         description="槽位名 -> template_id 数组；元素可为 UUID 或 ${user::…}/${group::…} or <template_id>",
     )
+    send_file_allowed: bool = False
     enabled: bool = True
     data: dict[str, Any] | None = None
 
@@ -39,6 +40,7 @@ class ConfigEffectiveAgentPolicyUpdateBody(BaseModel):
     priority: int | None = None
     match_expr: str | None = None
     template_ref: OptionalTemplateRefField = None
+    send_file_allowed: bool | None = None
     enabled: bool | None = None
     data: dict[str, Any] | None = None
 
@@ -51,6 +53,7 @@ class ConfigEffectiveAgentPolicyOut(BaseModel):
     priority: int
     match_expr: str | None
     template_ref: dict[str, list[str]]
+    send_file_allowed: bool
     enabled: bool
     data: dict[str, Any] | None
     created_at: str | None

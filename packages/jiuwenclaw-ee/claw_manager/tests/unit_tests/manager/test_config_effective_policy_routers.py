@@ -81,6 +81,7 @@ async def test_agent_policy_crud(manager_api: ManagerApiHarness):
         },
     )
     policy_id = int(created["id"])
+    assert created["send_file_allowed"] is False
 
     listed = await h.get_json(
         "/config-effective/agent-policies",
@@ -90,7 +91,7 @@ async def test_agent_policy_crud(manager_api: ManagerApiHarness):
 
     await h.patch_json(
         f"/config-effective/agent-policies/{policy_id}",
-        {"match_expr": "user_id == 'bob'"},
+        {"match_expr": "user_id == 'bob'", "send_file_allowed": True},
     )
 
     await h.delete_ok(f"/config-effective/agent-policies/{policy_id}")

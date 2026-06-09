@@ -17,6 +17,7 @@ interface FormState {
   priority: number;
   match_expr: string;
   template_ref: string;
+  send_file_allowed: boolean;
   enabled: boolean;
   data: string;
 }
@@ -27,6 +28,7 @@ const emptyForm: FormState = {
   priority: 0,
   match_expr: '',
   template_ref: '{}',
+  send_file_allowed: false,
   enabled: true,
   data: '',
 };
@@ -62,6 +64,7 @@ export function AgentPoliciesTab({ instanceId }: { instanceId: string }) {
         priority: editing.priority,
         match_expr: editing.match_expr ?? '',
         template_ref: safeStringify(editing.template_ref ?? {}, 2),
+        send_file_allowed: editing.send_file_allowed ?? false,
         enabled: editing.enabled,
         data: safeStringify(editing.data ?? {}, 2),
       });
@@ -86,6 +89,7 @@ export function AgentPoliciesTab({ instanceId }: { instanceId: string }) {
       priority: form.priority,
       match_expr: form.match_expr.trim() || undefined,
       template_ref: tryParseJson(form.template_ref, {}) as Record<string, string>,
+      send_file_allowed: form.send_file_allowed,
       enabled: form.enabled,
       data: form.data.trim() ? (tryParseJson(form.data, {}) as Record<string, unknown>) : undefined,
     };
@@ -142,6 +146,7 @@ export function AgentPoliciesTab({ instanceId }: { instanceId: string }) {
                 <th>{t('policies.agent.servicePolicyId')}</th>
                 <th>{t('policies.global.priority')}</th>
                 <th>{t('policies.service.matchExpr')}</th>
+                <th>{t('policies.agent.sendFileAllowed')}</th>
                 <th>{t('common.enabled')}</th>
                 <th>updated</th>
                 <th>{t('common.actions')}</th>
@@ -155,6 +160,11 @@ export function AgentPoliciesTab({ instanceId }: { instanceId: string }) {
                   <td className="mono text-xs">{row.service_policy_id}</td>
                   <td className="mono text-xs">{row.priority}</td>
                   <td className="mono text-[11px] text-muted">{truncate(row.match_expr ?? '-', 30)}</td>
+                  <td>
+                    <span className={`pill ${row.send_file_allowed ? 'ok' : 'muted'} !text-[11px]`}>
+                      {row.send_file_allowed ? t('common.yes') : t('common.no')}
+                    </span>
+                  </td>
                   <td>
                     <span className={`pill ${row.enabled ? 'ok' : 'muted'} !text-[11px]`}>
                       {row.enabled ? t('common.enabled') : t('common.disabled')}
@@ -216,6 +226,12 @@ export function AgentPoliciesTab({ instanceId }: { instanceId: string }) {
               value={form.priority}
               onChange={(e) => update('priority', Number(e.target.value))}
             />
+          </div>
+          <div>
+            <label className="flex items-center gap-2 cursor-pointer border border-border rounded-md px-3 py-2 mt-5 w-fit hover:bg-bg-hover">
+              <input type="checkbox" checked={form.send_file_allowed} onChange={(e) => update('send_file_allowed', e.target.checked)} />
+              <span>{t('policies.agent.sendFileAllowed')}</span>
+            </label>
           </div>
           <div>
             <label className="flex items-center gap-2 cursor-pointer border border-border rounded-md px-3 py-2 mt-5 w-fit hover:bg-bg-hover">
