@@ -142,6 +142,10 @@ export function mergeWorkflowRun(
 ): WorkflowRun {
   const existingPhases = existing?.phases ?? [];
   const mergedPhases = [...existingPhases];
+  const incomingHasPhases = Object.prototype.hasOwnProperty.call(incoming, "phases");
+  const incomingLogs = Array.isArray(incoming.logs)
+    ? incoming.logs.filter((log): log is string => typeof log === "string")
+    : undefined;
 
   for (const incomingPhase of incoming.phases ?? []) {
     const index = mergedPhases.findIndex((phase) => phase.id === incomingPhase.id);
@@ -156,11 +160,18 @@ export function mergeWorkflowRun(
     }
   }
 
-  return {
+  const merged: WorkflowRun = {
     ...existing,
     ...incoming,
     phases: mergedPhases,
   };
+  if (incomingLogs) {
+    merged.logs =
+      existing && !incomingHasPhases ? [...(existing.logs ?? []), ...incomingLogs] : incomingLogs;
+  } else if (existing?.logs && !Object.prototype.hasOwnProperty.call(incoming, "logs")) {
+    merged.logs = existing.logs;
+  }
+  return merged;
 }
 
 export function applyWorkflowUpdate(

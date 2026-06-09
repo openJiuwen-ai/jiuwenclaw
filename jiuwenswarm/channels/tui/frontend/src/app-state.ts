@@ -675,6 +675,7 @@ export class CliPiAppState {
       teamMessageEvents: [...this.teamMessageEvents],
       workflowRuns: this.workflowRuns.map((workflow) => ({
         ...workflow,
+        logs: workflow.logs ? [...workflow.logs] : undefined,
         phases: workflow.phases.map((phase) => ({
           ...phase,
           agents: phase.agents.map((agent) => ({

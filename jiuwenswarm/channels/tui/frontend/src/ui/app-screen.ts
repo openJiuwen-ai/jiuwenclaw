@@ -80,6 +80,8 @@ const TRANSCRIPT_WHEEL_SCROLL_LINES = 3;
 const SWARM_WORKFLOW_AGENT_PREVIEW_LIMIT = 8;
 // 不可中断的命令列表（ESC 按下时显示提示）
 const UNINTERRUPTIBLE_COMMANDS = ["compact"];
+const SWARM_WORKFLOW_LOG_PREVIEW_ROWS = 8;
+const SWARM_WORKFLOW_AGENT_TEXT_PREVIEW_ROWS = 6;
 const PERMISSION_TOOL_RE = /工具\s+`([^`]+)`\s+需要授权/;
 const CONFIRM_TOOL_RE = /(?:Tool|工具)\s*:\s*`([^`]+)`/i;
 const CONFIRM_ACTION_RE = /\*\*(?:Agent wants to|Tool `[^`]+` requires your approval)([^*]*)\*\*/i;
@@ -598,6 +600,22 @@ function formatWorkflowElapsed(startedAt: number): string {
   const minutes = Math.floor(totalSeconds / 60);
   const seconds = totalSeconds % 60;
   return minutes > 0 ? `${minutes}m ${seconds}s` : `${seconds}s`;
+}
+
+function formatWorkflowDuration(durationMs?: number | null): string | null {
+  if (typeof durationMs !== "number" || !Number.isFinite(durationMs) || durationMs < 0) {
+    return null;
+  }
+  if (durationMs < 1000) {
+    return `${Math.round(durationMs)}ms`;
+  }
+  const totalSeconds = Math.floor(durationMs / 1000);
+  if (totalSeconds >= 60) {
+    const minutes = Math.floor(totalSeconds / 60);
+    const seconds = totalSeconds % 60;
+    return `${minutes}m ${seconds}s`;
+  }
+  return `${(durationMs / 1000).toFixed(1)}s`;
 }
 
 function formatRelativeTime(timestamp: number | undefined): string {
@@ -2912,11 +2930,15 @@ export class AppScreen implements Component, Focusable {
       this.tui.requestRender();
     };
 
-    const agentItems: SelectItem[] = (selectedPhase?.agents ?? []).map((agent) => ({
-      value: agent.id,
-      label: `${formatWorkflowStatus(agent.status)} ${agent.name}`,
-      description: agent.model ?? "",
-    }));
+    const agentItems: SelectItem[] = (selectedPhase?.agents ?? []).map((agent) => {
+      const duration = formatWorkflowDuration(agent.duration_ms);
+      const description = [agent.model, duration].filter((item): item is string => Boolean(item));
+      return {
+        value: agent.id,
+        label: `${formatWorkflowStatus(agent.status)} ${agent.name}`,
+        description: description.join(" - "),
+      };
+    });
     const agentList = new SelectList(
       agentItems,
       Math.min(Math.max(agentItems.length, 1), 10),
@@ -3006,6 +3028,24 @@ export class AppScreen implements Component, Focusable {
       this.tui.requestRender();
       return;
     }
+    if (state.phase === "workflow" && matchesKey(data, "l")) {
+      this.openSwarmWorkflowLogs(state.workflowId);
+      return;
+    }
+    if (state.phase === "agent") {
+      if (matchesKey(data, "p")) {
+        this.openSwarmWorkflowAgentText(state.workflowId, state.agentId, "prompt");
+        return;
+      }
+      if (matchesKey(data, "o")) {
+        this.openSwarmWorkflowAgentText(state.workflowId, state.agentId, "outcome");
+        return;
+      }
+      if (matchesKey(data, "e")) {
+        this.openSwarmWorkflowAgentText(state.workflowId, state.agentId, "error");
+        return;
+      }
+    }
     if (matchesKey(data, "r")) {
       void this.openSwarmWorkflowsView();
       this.tui.requestRender();
@@ -3021,6 +3061,32 @@ export class AppScreen implements Component, Focusable {
       activeList.handleInput(data);
       this.tui.requestRender();
     }
+  }
+
+  private openSwarmWorkflowLogs(workflowId: string): void {
+    const workflow = this.state
+      .getSnapshot()
+      .workflowRuns.find((item) => item.id === workflowId);
+    if (!workflow) return;
+    const logs = (workflow.logs ?? []).filter((log) => log.trim().length > 0);
+    this.enterFileViewer(
+      logs.length > 0 ? logs.join("\n") : "No logs",
+      `Workflow logs - ${workflow.name}`,
+      workflow.id,
+    );
+  }
+
+  private openSwarmWorkflowAgentText(
+    workflowId: string,
+    agentId: string,
+    field: "prompt" | "outcome" | "error",
+  ): void {
+    const lookup = findWorkflowAgent(this.state.getSnapshot().workflowRuns, workflowId, agentId);
+    if (!lookup) return;
+    const value = lookup.agent[field];
+    if (!value) return;
+    const label = field.charAt(0).toUpperCase() + field.slice(1);
+    this.enterFileViewer(value, `${label} - ${lookup.agent.name}`, lookup.workflow.name);
   }
 
   private buildSwarmWorkflowsLines(width: number): string[] {
@@ -3089,6 +3155,7 @@ export class AppScreen implements Component, Focusable {
     if (!workflow) return [padToWidth(palette.status.error("Workflow not found"), width)];
     const total = workflow.agent_count ?? countWorkflowAgents(workflow);
     const completed = workflow.completed_agent_count ?? countCompletedWorkflowAgents(workflow);
+    const duration = formatWorkflowDuration(workflow.duration_ms);
     const selectedPhase =
       workflow.phases.find((phase) => phase.id === state.selectedPhaseId) ?? workflow.phases[0];
     const lines: string[] = [
@@ -3100,6 +3167,12 @@ export class AppScreen implements Component, Focusable {
         `${formatWorkflowStatus(workflow.status)} ${palette.text.dim(`· ${completed}/${total} agents`)}`,
         width,
       ),
+      ...(duration
+        ? [padToWidth(palette.text.dim(`duration ${duration}`), width)]
+        : []),
+      "",
+      padToWidth(palette.text.secondary("Logs"), width),
+      ...this.renderSwarmWorkflowLogRows(workflow, width),
       "",
       padToWidth(
         state.focus === "phases" ? palette.text.accent("Phases") : palette.text.secondary("Phases"),
@@ -3134,6 +3207,7 @@ export class AppScreen implements Component, Focusable {
     } else {
       lines.push(padToWidth(palette.text.dim("No agents"), width));
     }
+    lines.push(padToWidth(palette.text.dim("press l to see full logs"), width));
     lines.push(
       padToWidth(
         palette.text.dim(
@@ -3145,6 +3219,23 @@ export class AppScreen implements Component, Focusable {
       ),
     );
     return lines;
+  }
+
+  private renderSwarmWorkflowLogRows(workflow: WorkflowRun, width: number): string[] {
+    const logs = (workflow.logs ?? []).filter((log) => log.trim().length > 0);
+    if (logs.length === 0) return [padToWidth(palette.text.dim("No logs"), width)];
+    const rows = logs.flatMap((log) =>
+      wrapPlainText(`  ${log}`, width).map((line) => padToWidth(palette.text.dim(line), width)),
+    );
+    if (rows.length <= SWARM_WORKFLOW_LOG_PREVIEW_ROWS) return rows;
+    const visibleRows = rows.slice(-(SWARM_WORKFLOW_LOG_PREVIEW_ROWS - 1));
+    return [
+      padToWidth(
+        palette.text.dim(`  ... ${rows.length - visibleRows.length} earlier log lines`),
+        width,
+      ),
+      ...visibleRows,
+    ];
   }
 
   private renderSwarmWorkflowPhaseRows(
@@ -3202,6 +3293,7 @@ export class AppScreen implements Component, Focusable {
     );
     if (!lookup) return [padToWidth(palette.status.error("Agent not found"), width)];
     const { workflow, phase, agent } = lookup;
+    const duration = formatWorkflowDuration(agent.duration_ms);
     const lines: string[] = [
       padToWidth(palette.text.accent(agent.name), width),
       padToWidth(palette.text.dim(`${workflow.name} · ${phase.name}`), width),
@@ -3211,7 +3303,10 @@ export class AppScreen implements Component, Focusable {
       ),
       "",
     ];
-    this.appendLabeledWrappedLines(lines, width, "Prompt", agent.prompt);
+    if (duration) {
+      lines.splice(3, 0, padToWidth(palette.text.dim(`duration ${duration}`), width));
+    }
+    this.appendLabeledWrappedPreview(lines, width, "Prompt", agent.prompt, "p");
     if (agent.activity?.length) {
       lines.push(padToWidth(palette.text.secondary("Activity"), width));
       for (const item of agent.activity) {
@@ -3224,17 +3319,21 @@ export class AppScreen implements Component, Focusable {
       }
       lines.push("");
     }
-    this.appendLabeledWrappedLines(lines, width, "Outcome", agent.outcome);
-    this.appendLabeledWrappedLines(lines, width, "Error", agent.error, true);
+    this.appendLabeledWrappedPreview(lines, width, "Outcome", agent.outcome, "o");
+    this.appendLabeledWrappedPreview(lines, width, "Error", agent.error, "e", true);
+    lines.push(
+      padToWidth(palette.text.dim("press p to see full prompt - o outcome - e error"), width),
+    );
     lines.push(padToWidth(palette.text.dim("Esc/← back"), width));
     return lines;
   }
 
-  private appendLabeledWrappedLines(
+  private appendLabeledWrappedPreview(
     lines: string[],
     width: number,
     label: string,
     value?: string,
+    fullViewKey?: string,
     error = false,
   ): void {
     if (!value) return;
@@ -3242,7 +3341,20 @@ export class AppScreen implements Component, Focusable {
       padToWidth(error ? palette.status.error(label) : palette.text.secondary(label), width),
     );
     const color = error ? palette.status.error : palette.text.dim;
-    lines.push(...wrapPlainText(value, width).map((line) => padToWidth(color(line), width)));
+    const wrapped = wrapPlainText(value, width);
+    const visible = wrapped.slice(0, SWARM_WORKFLOW_AGENT_TEXT_PREVIEW_ROWS);
+    lines.push(...visible.map((line) => padToWidth(color(line), width)));
+    if (wrapped.length > visible.length) {
+      const keyHint = fullViewKey
+        ? ` - press ${fullViewKey} to see full ${label.toLowerCase()}`
+        : "";
+      lines.push(
+        padToWidth(
+          palette.text.dim(`... ${wrapped.length - visible.length} more lines${keyHint}`),
+          width,
+        ),
+      );
+    }
     lines.push("");
   }
 
