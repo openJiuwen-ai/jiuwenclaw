@@ -20,6 +20,7 @@ from .run_log_status import (
     SkippedStageInferer,
     determine_pipeline_status_from_log,
     has_terminal_session_event,
+    resolve_latest_task_log_path,
     summarize_progress_from_logs,
 )
 
@@ -130,35 +131,6 @@ class TaskStore:
         if progress_enricher is not None and progress_enricher not in self._progress_enrichers:
             self._progress_enrichers.append(progress_enricher)
 
-    def _latest_log_path_for_task(self, task: dict[str, Any]) -> Optional[Path]:
-        """Return the best log file to summarize task progress."""
-        task_id = str(task.get("task_id") or "")
-        current_execution_id = str(task.get("current_execution_id") or "")
-        if task_id and current_execution_id:
-            current = self._runs_dir / task_id / current_execution_id / "log.json"
-            if current.exists():
-                return current
-
-        history = task.get("execution_history") or []
-        if history:
-            sorted_history = sorted(
-                history,
-                key=lambda r: r.get("completed_at") or r.get("started_at") or "",
-                reverse=True,
-            )
-            for record in sorted_history:
-                log_path_str = str(record.get("log_path") or "")
-                candidates = []
-                if log_path_str:
-                    candidates.append(Path(log_path_str))
-                execution_id = str(record.get("execution_id") or "")
-                if task_id and execution_id:
-                    candidates.append(self._runs_dir / task_id / execution_id / "log.json")
-                for candidate in candidates:
-                    if candidate.exists():
-                        return candidate
-        return None
-
     def summarize_progress_from_logs(self, logs: Optional[list[dict[str, Any]]] = None) -> dict[str, Any]:
         """Summarize stage progress from structured harness logs."""
         if logs is None:
@@ -178,7 +150,7 @@ class TaskStore:
 
     async def summarize_task_progress(self, task: dict[str, Any]) -> dict[str, Any]:
         """Read the latest task log and return a compact progress summary."""
-        log_path = self._latest_log_path_for_task(task)
+        log_path = resolve_latest_task_log_path(task, self._runs_dir)
         if not log_path:
             return {
                 "summary": "暂无执行日志",
@@ -469,17 +441,7 @@ class TaskStore:
             history = task.get("execution_history", [])
             latest = history[-1] if history else None
             current_execution_id = str(task.get("current_execution_id") or "")
-            log_path = None
-            if current_execution_id:
-                candidate = self._runs_dir / str(task_id) / current_execution_id / "log.json"
-                if candidate.exists():
-                    log_path = candidate
-            if log_path is None and latest:
-                log_path_str = latest.get("log_path", "")
-                if log_path_str:
-                    candidate = Path(log_path_str)
-                    if candidate.exists():
-                        log_path = candidate
+            log_path = resolve_latest_task_log_path(task, self._runs_dir)
             if log_path is None:
                 continue
 

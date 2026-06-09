@@ -68,6 +68,35 @@ def classify_failure(error: str, last_message: str = "") -> str:
     return "unknown_failure"
 
 
+def resolve_latest_task_log_path(task: dict[str, Any], runs_dir: Path) -> Path | None:
+    """Resolve the latest existing run log for a scheduled task record."""
+    task_id = str(task.get("task_id") or "")
+    current_execution_id = str(task.get("current_execution_id") or "")
+    if task_id and current_execution_id:
+        current = runs_dir / task_id / current_execution_id / "log.json"
+        if current.exists():
+            return current
+
+    history = task.get("execution_history") or []
+    sorted_history = sorted(
+        history,
+        key=lambda r: r.get("completed_at") or r.get("started_at") or "",
+        reverse=True,
+    )
+    for record in sorted_history:
+        candidates: list[Path] = []
+        log_path_str = str(record.get("log_path") or "")
+        if log_path_str:
+            candidates.append(Path(log_path_str))
+        execution_id = str(record.get("execution_id") or "")
+        if task_id and execution_id:
+            candidates.append(runs_dir / task_id / execution_id / "log.json")
+        for candidate in candidates:
+            if candidate.exists():
+                return candidate
+    return None
+
+
 def format_progress_summary(progress: dict[str, Any]) -> str:
     failed_stage = progress.get("failed_stage")
     current_stage = progress.get("current_stage")
