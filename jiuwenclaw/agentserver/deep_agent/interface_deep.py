@@ -3112,6 +3112,18 @@ class JiuWenClawDeepAdapter:
         config_base = get_config()
         channel = str(channel_id or self._resolve_prompt_channel(session_id) or "web").strip() or "web"
         send_file_enabled = config_base.get("channels", {}).get(channel, {}).get("send_file_allowed", False)
+        
+        # 如果 AGENT_RUNTIME 环境变量存在（非空），则优先使用企业配置中的 send_file_allowed
+        agent_runtime_env = os.getenv("AGENT_RUNTIME", "").strip()
+        if agent_runtime_env:
+            logger.info(
+                "[JiuWenClawDeepAdapter] AGENT_RUNTIME detected: %s, using enterprise send_file config",
+                agent_runtime_env,
+            )
+            send_file_enabled = True
+            if self._enterprise_config is not None:
+                send_file_enabled = bool(self._enterprise_config.send_file_allowed)
+        
         send_file_channel_allowed = send_file_enabled or channel == "officeclaw"
         has_send_file_request_context = bool(request_id and session_id)
         if send_file_channel_allowed and has_send_file_request_context:

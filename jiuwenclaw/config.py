@@ -1,6 +1,7 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 
 import json
+import logging
 import os
 import re
 import sys
@@ -14,6 +15,8 @@ from ruamel.yaml import YAML
 
 from jiuwenclaw.utils import USER_WORKSPACE_DIR, get_config_file
 from jiuwenclaw.local_env_config import get_local_config
+
+logger = logging.getLogger(__name__)
 
 _CONFIG_MODULE_DIR = Path(__file__).parent
 _CONFIG_YAML_PATH = get_config_file()
@@ -912,6 +915,13 @@ def get_file_transfer_config() -> FileTransferConfig:
     config = get_config()
     ft_config = config.get("file_transfer", {}) if isinstance(config, dict) else {}
     _file_transfer_config = FileTransferConfig.from_dict(ft_config)
+    
+    # 如果 AGENT_RUNTIME 环境变量存在（非空），则强制启用分布式模式
+    agent_runtime_env = os.getenv("AGENT_RUNTIME", "").strip()
+    logger.debug("AGENT_RUNTIME env var: '%s'", agent_runtime_env)
+    if agent_runtime_env:
+        _file_transfer_config.enabled = True
+    
     return _file_transfer_config
 
 

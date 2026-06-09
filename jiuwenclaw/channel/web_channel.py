@@ -363,8 +363,8 @@ class WebChannel(BaseChannel):
                     "chat.subtask_update",
                     "history.message",
                     "chat.session_result", "chat.usage_metadata",
-                    "chat.usage_summary") or event_name.startswith("skilldev.") or event_name.startswith("team."):
-                # 传递完整 payload，保留所有字段
+                    "chat.usage_summary", "chat.file",
+                ) or event_name.startswith("skilldev.") or event_name.startswith("team."):
                 payload = {**msg.payload}
                 # 确保包含 session_id
                 if "session_id" not in payload and msg.session_id:

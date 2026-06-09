@@ -73,6 +73,7 @@ class ConfigEffectiveAgentPolicyUpdateRequest(BaseModel):
     match_expr: str | None = None
     template_ref: OptionalTemplateRefField = None
     enabled: bool | None = None
+    send_file_allowed: bool | None = None
     data: dict[str, Any] | None = None
 
 
@@ -87,6 +88,7 @@ class ConfigEffectiveAgentPolicyCreateRequest(BaseModel):
     match_expr: str | None = None
     template_ref: TemplateRefField = Field(default_factory=dict)
     enabled: bool = True
+    send_file_allowed: bool = False
     data: dict[str, Any] | None = None
 
 

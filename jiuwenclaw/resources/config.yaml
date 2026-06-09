@@ -401,6 +401,8 @@ heartbeat:
     end: 22:00
 
 channels:
+  web:
+    send_file_allowed: true
   feishu:
     # 飞书应用配置
     app_id:

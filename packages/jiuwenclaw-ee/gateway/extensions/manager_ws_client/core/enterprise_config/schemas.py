@@ -69,6 +69,7 @@ class EffectiveEnterpriseConfig:
     routing: RoutingContext
     template_ref: dict[str, list[str]] = field(default_factory=dict)
     models: dict[str, list[dict[str, Any]]] = field(default_factory=dict)
+    send_file_allowed: bool = False
     skill_whitelist: list[dict[str, Any]] | None = None
     extension_config: list[dict[str, Any]] | None = None
     service_config: list[dict[str, Any]] | None = None
@@ -86,6 +87,7 @@ class EffectiveEnterpriseConfig:
             "routing": self.routing.as_dict(),
             "template_ref": dict(self.template_ref),
             "models": dict(self.models),
+            "send_file_allowed": self.send_file_allowed,
             "skill_whitelist": self.skill_whitelist,
             "extension_config": self.extension_config,
             "service_config": self.service_config,

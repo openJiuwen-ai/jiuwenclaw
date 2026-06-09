@@ -486,21 +486,21 @@ class RuntimeManagementAgentClient(AgentServerClient):
                         )
 
                     agent_server_container = ContainerSpec(
-                        name=cfg["container_name"] if "container_name" in cfg else container_name,
-                        image=cfg["agent_image"] if "agent_image" in cfg else agent_image,
-                        port_name=cfg["port_name"] if "port_name" in cfg else port_name,
-                        port=int(cfg["container_port"]) if "container_port" in cfg else container_port,
-                        image_pull_policy=cfg["image_pull_policy"] if "image_pull_policy" in cfg else image_pull_policy,
+                        name=cfg.get("container_name") or container_name,
+                        image=cfg.get("agent_image") or agent_image,
+                        port_name=cfg.get("port_name") or port_name,
+                        port=int(cfg["container_port"]) if cfg.get("container_port") is not None else container_port,
+                        image_pull_policy=cfg.get("image_pull_policy") or image_pull_policy,
                         env_vars=agent_container_env,
                         host_path_mounts=agentserver_host_mounts,
                         allow_privilege_escalation=True if mode == "dev" else None,
                         run_as_non_root=False if mode == "dev" else None,
                         run_as_user=0 if mode == "dev" else None,
                         run_as_group=0 if mode == "dev" else None,
-                        cpu_request=agent_cpu_request,
-                        memory_request=agent_memory_request,
-                        cpu_limit=agent_cpu_limit,
-                        memory_limit=agent_memory_limit,
+                        cpu_request=cfg.get("cpu_request") or agent_cpu_request,
+                        memory_request=cfg.get("memory_request") or agent_memory_request,
+                        cpu_limit=cfg.get("cpu_limit") or agent_cpu_limit,
+                        memory_limit=cfg.get("memory_limit") or agent_memory_limit,
                     )
                     target_container = agent_server_container.name
                     containers = [agent_server_container]
@@ -509,9 +509,7 @@ class RuntimeManagementAgentClient(AgentServerClient):
                             name=jiuwenbox_container_name,
                             image=jiuwenbox_image,
                             port=jiuwenbox_port,
-                            image_pull_policy=cfg["image_pull_policy"]
-                            if "image_pull_policy" in cfg
-                            else image_pull_policy,
+                            image_pull_policy=cfg.get("image_pull_policy") or image_pull_policy,
                             env_vars={
                                 "JIUWENBOX_LISTEN": jiuwenbox_listen,
                                 "JIUWENBOX_POLICY_PATH": jiuwenbox_policy_path,
@@ -528,32 +526,39 @@ class RuntimeManagementAgentClient(AgentServerClient):
                             memory_limit=jiuwenbox_memory_limit,
                         )
                         containers.append(jiuwenbox_container)
-                    target_port = int(cfg["container_port"]) if "container_port" in cfg else container_port
+                    target_port = (
+                        int(cfg["container_port"])
+                        if cfg.get("container_port") is not None
+                        else container_port
+                    )
                     k8s = K8sServiceHandler(
                         containers=containers,
                         name_prefix="jiuwenclaw",
                         namespace=namespace,
-                        pod_name=cfg["pod_name"] if "pod_name" in cfg else container_name,
+                        pod_name=cfg.get("pod_name") or container_name,
                         extra_labels={
                             **RuntimeManagementAgentClient.POD_LABEL,
                             RuntimeManagementAgentClient.GATEWAY_ID_LABEL_KEY: _client.gateway_id,
                         },
-                        kubeconfig=kubeconfig,
-                        readiness_initial_delay=(int(cfg["readiness_initial_delay"])
-                                                 if "readiness_initial_delay" in cfg else readiness_initial_delay),
+                        kubeconfig=cfg.get("kubeconfig") or kubeconfig,
+                        readiness_initial_delay=(
+                            int(cfg["readiness_initial_delay"])
+                            if cfg.get("readiness_initial_delay") is not None
+                            else readiness_initial_delay
+                        ),
                         readiness_period=(int(cfg["readiness_period"])
-                                          if "readiness_period" in cfg else readiness_period),
+                                          if cfg.get("readiness_period") is not None else readiness_period),
                         ready_timeout=(int(cfg["ready_timeout"])
-                                       if "ready_timeout" in cfg else ready_timeout),
+                                       if cfg.get("ready_timeout") is not None else ready_timeout),
                         ready_poll_interval=(int(cfg["ready_poll_interval"])
-                                             if "ready_poll_interval" in cfg else ready_poll_interval),
-                        nfs_server=cfg.get("nfs_server") if "nfs_server" in cfg else nfs_server,
-                        nfs_path=cfg.get("nfs_path") if "nfs_path" in cfg else nfs_path,
-                        nfs_mount_path=cfg.get("nfs_mount_path") if "nfs_mount_path" in cfg else nfs_mount_path,
-                        host_path=cfg.get("host_path") if "host_path" in cfg else host_path,
-                        host_mount_path=cfg.get("host_mount_path") if "host_mount_path" in cfg else host_mount_path,
-                        mode=cfg.get("mode") if "mode" in cfg else mode,
-                        node_name=cfg.get("node_name") if "node_name" in cfg else node_name,
+                                             if cfg.get("ready_poll_interval") is not None else ready_poll_interval),
+                        nfs_server=cfg.get("nfs_server") or nfs_server,
+                        nfs_path=cfg.get("nfs_path") or nfs_path,
+                        nfs_mount_path=cfg.get("nfs_mount_path") or nfs_mount_path,
+                        host_path=cfg.get("host_path") or host_path,
+                        host_mount_path=cfg.get("host_mount_path") or host_mount_path,
+                        mode=cfg.get("mode") or mode,
+                        node_name=cfg.get("node_name") or node_name,
                     )
                     deploy_controller = K8sDeployController(k8s)
 
@@ -569,7 +574,11 @@ class RuntimeManagementAgentClient(AgentServerClient):
 
                 return ServiceHandler(
                     service_id=handler_service_id,
-                    total_concurrency=int(cfg["service_concurrency"]) if "service_concurrency" in cfg else service_concurrency,
+                    total_concurrency=(
+                        int(cfg["service_concurrency"])
+                        if cfg.get("service_concurrency") is not None
+                        else service_concurrency
+                    ),
                     message_channel=ch,
                     response_parser=response_parser,
                     deploy_controller=deploy_controller,

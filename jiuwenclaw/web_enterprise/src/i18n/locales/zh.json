@@ -826,6 +826,7 @@
     "copyMessage": "复制消息",
     "stopReading": "停止朗读",
     "readMessage": "朗读消息",
+    "fileExpired": "已过期",
     "parallelProgress": "并行任务执行中 ({{completedCount}}/{{total}} 完成)",
     "subtask": {
       "starting": "启动中...",
