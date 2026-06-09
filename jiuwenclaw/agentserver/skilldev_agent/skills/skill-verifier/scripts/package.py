@@ -155,7 +155,7 @@ def copy_dependency_references(skill_path: Path) -> bool:
                     "Source not in workspace but already in skill: %s", rel_dest
                 )
             else:
-                truly_missing.append(source)
+                truly_missing.append(rel_dest)
             continue
         dest.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(source, dest)
