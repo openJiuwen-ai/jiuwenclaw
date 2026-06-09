@@ -1,0 +1,190 @@
+"""Executable SwarmFlow workflow for <swarmskill-name>.
+
+Standalone Python workflow module: META + JSON Schema literals +
+explicit swarmflow primitive imports + async def run(args).
+"""
+import json
+
+from swarmflow import agent, compact, map_parallel, parallel, phase
+
+META = {
+    "name": "<swarmskill-name>",
+    "description": "<One-line description of the executable workflow>",
+    "whenToUse": "<When an Agent should REUSE this workflow directly>",
+    "phases": [
+        {"title": "<Phase 1>", "detail": "<What this phase accomplishes>"},
+        {"title": "<Phase 2>", "detail": "<What this phase accomplishes>"},
+    ],
+}
+
+# ---------------------------------------------------------------------------
+# JSON Schema for structured agent outputs.
+# agent() validates LLM response against this schema; if validation fails
+# the return may be None or a raw string — always wrap with extract_json().
+# ---------------------------------------------------------------------------
+ROLE_RESULT_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "result": {"type": "string"},
+        "verdict": {"type": "string"},
+    },
+}
+
+
+# ---------------------------------------------------------------------------
+# Resilient helpers — every workflow gets these for free
+# ---------------------------------------------------------------------------
+
+def extract_json(text, fallback=None):
+    """Extract the first JSON object from text (LLM output may have prose).
+
+    Handles three cases:
+    1. Already a dict — return as-is (agent() schema validation succeeded).
+    2. Pure JSON string — parse directly.
+    3. JSON embedded in prose — scan for outermost {…} and parse.
+    Falls back to *fallback* (default {}) if nothing parses.
+    """
+    if isinstance(text, dict):
+        return text
+    if not isinstance(text, str):
+        return fallback or {}
+    text = text.strip()
+    # Direct parse
+    try:
+        return json.loads(text)
+    except (json.JSONDecodeError, ValueError):
+        pass
+    # Scan for outermost { ... }
+    depth = 0
+    start = None
+    for i, ch in enumerate(text):
+        if ch == '{':
+            if depth == 0:
+                start = i
+            depth += 1
+        elif ch == '}':
+            depth -= 1
+            if depth == 0 and start is not None:
+                try:
+                    return json.loads(text[start:i + 1])
+                except (json.JSONDecodeError, ValueError):
+                    start = None
+    return fallback or {}
+
+
+def safe_get(obj, key, default=""):
+    """Safely get a key from an agent result, handling None/non-dict."""
+    if obj is None:
+        return default
+    if isinstance(obj, dict):
+        return obj.get(key, default)
+    return default
+
+
+def parse_args(args):
+    """Normalize args to dict. Swarmflow may pass JSON string or dict."""
+    if isinstance(args, dict):
+        return args
+    if isinstance(args, str):
+        try:
+            return json.loads(args) if args.strip() else {}
+        except json.JSONDecodeError:
+            return {}
+    return {}
+
+
+# ---------------------------------------------------------------------------
+# Prompt builders — keep prompts inside this script
+# ---------------------------------------------------------------------------
+
+def build_inline_prompt(role_id, payload):
+    """Build an inline prompt requesting JSON output."""
+    return f"""You are {role_id}.
+
+Task input:
+{json.dumps(payload, ensure_ascii=False) if isinstance(payload, (dict, list)) else payload}
+
+IMPORTANT: Return ONLY a valid JSON object. No markdown fences, no explanation, just JSON.
+Fields expected: "result" (string), "verdict" (string).
+You may include additional fields if they add value.
+"""
+
+
+# ---------------------------------------------------------------------------
+# Workflow entrypoint
+# ---------------------------------------------------------------------------
+
+async def run(args):
+    """Execute the workflow and return a JSON-serializable result."""
+    args = parse_args(args)
+
+    phase("<Phase 1>")
+    raw_results = await parallel(
+        [
+            lambda: agent(
+                build_inline_prompt("<role-id-1>", args),
+                label="<role-id-1>",
+                phase="<Phase 1>",
+                schema=ROLE_RESULT_SCHEMA,
+            ),
+            lambda: agent(
+                build_inline_prompt("<role-id-2>", args),
+                label="<role-id-2>",
+                phase="<Phase 1>",
+                schema=ROLE_RESULT_SCHEMA,
+            ),
+        ]
+    )
+    # Resilient extraction: schema validation may return None or raw string
+    role_results = compact([
+        extract_json(r, fallback={"result": "extraction_failed", "verdict": "unknown"})
+        for r in raw_results
+    ])
+
+    phase("<Phase 2>")
+    final_raw = await agent(
+        build_inline_prompt(
+            "<integrator-role-id>",
+            {"role_results": role_results, "original_args": args},
+        ),
+        label="integrate",
+        phase="<Phase 2>",
+        schema=ROLE_RESULT_SCHEMA,
+    )
+    final = extract_json(final_raw, fallback={"result": "integration_failed", "verdict": "unknown"})
+
+    return {
+        "status": "complete" if safe_get(final, "verdict") != "unknown" else "degraded",
+        "role_results": role_results,
+        "final": final,
+    }
+
+# TEMPLATE NOTES (delete before publishing):
+# - Keep META a pure literal; do not use calls, names, f-strings, or concatenation.
+# - Keep a top-level async def run(args) entrypoint.
+# - Keep all prompts in this file as constants or prompt-builder functions.
+# - Use explicit `from swarmflow import ...` imports.
+# - Use JSON Schema literals for structured agent outputs. Keep schema but
+#   REMOVE "additionalProperties": False — it is too strict for LLM outputs and
+#   causes agent() to silently return None when the LLM adds extra fields.
+# - ALWAYS wrap agent() return values with extract_json(..., fallback={...}).
+#   agent() may return None (schema validation failed) or a raw string (no
+#   schema match); extract_json handles both gracefully.
+# - ALWAYS call parse_args(args) at the top of run(). Swarmflow may pass args
+#   as a JSON string instead of a dict.
+# - Use safe_get(obj, key, default) instead of obj["key"] or obj.get("key")
+#   to handle None results and missing keys uniformly.
+# - If an agent(...) call passes phase="...", it must match the nearest active
+#   phase("...") event for that block. Runtime statistics group by this value.
+# - Fixed heterogeneous roles: parallel([lambda: agent(...), ...]).
+# - Homogeneous dynamic item fan-out: map_parallel(items, fn).
+# - Per-item ordered multi-stage processing: pipeline(items, stage1, stage2).
+# - A single agent() or consecutive awaited agent() calls are sequential.
+# - Encode actual parallel/pipeline/gate/retry/degraded behavior here. workflow.md
+#   explains this script but must not define a different topology.
+# - For custom parallel thunks, bind loop variables in lambda defaults to avoid
+#   late-binding bugs.
+# - Cache validation: when loading cached results from incremental runs, verify
+#   key fields are non-empty (not just that the cache file exists). An empty
+#   scores list or null signal indicates a failed prior run and should be
+#   treated as a cache miss, not a valid result to skip.

@@ -14,6 +14,8 @@ Requires: PyYAML  (pip install pyyaml)
 
 What this script catches (deterministic):
     - 5-file structure (SKILL.md, roles/, workflow.md, bind.md, dependencies.yaml)
+    - Script-only SwarmFlow structure (SKILL.md + scripts/workflow.py only;
+      prompts must be inline in the script)
     - Frontmatter required fields + types
     - `name` field equals directory name
     - roles/<id>.md exists for every roles[].id; no orphan role files
@@ -27,6 +29,9 @@ What this script catches (deterministic):
     - bind.md has ## Resource Constraints / ## Behavioral Constraints / ## Failure Handling
     - dependencies.yaml has both `skills:` and `tools:` keys (even if empty)
     - Every roles[].skills / roles[].tools in SKILL.md appears in dependencies.yaml
+    - scripts/workflow.py, when present, is legal Python with literal META and
+      async def run(args), explicit swarmflow primitive imports, inline prompts,
+      no template placeholders, and no obvious dangerous calls or local absolute paths
 
 What this script does NOT catch (judgment calls — see reference/compliance-checklist.md):
     - Whether mottos are mutually antagonistic (anti-convergence quality)
@@ -37,9 +42,10 @@ What this script does NOT catch (judgment calls — see reference/compliance-che
 
 from __future__ import annotations
 
-import logging
+import ast
 import sys
 import re
+import logging
 from pathlib import Path
 from typing import Any
 
@@ -89,6 +95,7 @@ class Report:
                 len(self.errors),
                 len(self.warnings),
             )
+
 
 # ---------------------------------------------------------------------------
 # Frontmatter + section parsing helpers
@@ -141,10 +148,10 @@ def section_body(body: str, header: str) -> str | None:
 # Per-file validators
 # ---------------------------------------------------------------------------
 
-def validate_skill_md(path: Path, report: Report) -> tuple[dict | None, list[str]]:
+def validate_skill_md(path: Path, report: Report, script_only: bool = False) -> tuple[dict | None, list[str]]:
     """Validate <root>/SKILL.md. Returns (frontmatter, role_ids_declared)."""
     if not path.exists():
-        report.err("SKILL.md", "missing — required by the 5-file structure")
+        report.err("SKILL.md", "missing — required for every Swarm Skill")
         return None, []
 
     text = path.read_text(encoding="utf-8")
@@ -159,8 +166,12 @@ def validate_skill_md(path: Path, report: Report) -> tuple[dict | None, list[str
         report.err("SKILL.md", "missing YAML frontmatter (--- ... ---)")
         return None, []
 
-    # Required frontmatter fields
-    for field in ("name", "description", "version", "kind", "roles"):
+    # Required frontmatter fields. Script-only SwarmFlow skills do not need
+    # roles[] because the script is the execution definition.
+    required_fields = ("name", "description", "version", "kind")
+    if not script_only:
+        required_fields += ("roles",)
+    for field in required_fields:
         if field not in fm:
             report.err("SKILL.md", f"frontmatter missing required field `{field}`")
 
@@ -200,7 +211,11 @@ def validate_skill_md(path: Path, report: Report) -> tuple[dict | None, list[str
     # roles[] structure
     role_ids: list[str] = []
     roles = fm.get("roles", [])
-    if not isinstance(roles, list) or not roles:
+    if script_only:
+        if "roles" in fm and roles not in (None, []):
+            report.err("SKILL.md", "script-only SwarmFlow skills must omit `roles` or set `roles: []`")
+        roles = []
+    elif not isinstance(roles, list) or (not roles and not script_only):
         report.err("SKILL.md", "frontmatter `roles` must be a non-empty list")
     else:
         for i, role in enumerate(roles):
@@ -217,7 +232,7 @@ def validate_skill_md(path: Path, report: Report) -> tuple[dict | None, list[str
                 report.err(
                     "SKILL.md",
                     f"roles[{i}] (id={role.get('id')!r}) `kind` must be "
-                    f"`ai_agent` or `human_agent` (got: {role['kind']!r})"
+                    f"`ai_agent` or `human_agent` (got: {role['kind']!r})",
                 )
             if "purpose" not in role:
                 report.err("SKILL.md", f"roles[{i}] (id={role.get('id')!r}) missing required field `purpose`")
@@ -249,7 +264,8 @@ def validate_skill_md(path: Path, report: Report) -> tuple[dict | None, list[str
 
     # Body required sections
     sections = find_h2_sections(body)
-    for required in ("Workflow", "Roles", "Files"):
+    required_body_sections = ("Workflow", "Files") if script_only else ("Workflow", "Roles", "Files")
+    for required in required_body_sections:
         if required not in sections:
             report.err("SKILL.md", f"body missing required section `## {required}`")
 
@@ -262,12 +278,13 @@ def validate_skill_md(path: Path, report: Report) -> tuple[dict | None, list[str
                 "or `workflow.md` — remove to avoid duplication",
             )
 
-    # Anti-pattern: mermaid in SKILL.md body (redundant with workflow.md)
-    if re.search(r"```mermaid", body):
+    # Anti-pattern: mermaid in SKILL.md body (redundant with workflow.md).
+    # Script-only skills have no workflow.md, so this warning does not apply.
+    if not script_only and re.search(r"```mermaid", body):
         report.warn(
             "SKILL.md",
-            "body contains a ```mermaid``` block — keep mermaid only in workflow.md to "
-            "avoid duplication",
+            "body contains a ```mermaid``` block — keep mermaid only in workflow.md "
+            "to avoid duplication",
         )
 
     return fm, role_ids
@@ -281,10 +298,7 @@ def validate_role_file(path: Path, role_id: str, report: Report) -> dict[str, li
     """
     file_label = f"roles/{role_id}.md"
     if not path.exists():
-        report.err(
-            file_label,
-            f"missing — required because SKILL.md frontmatter declares roles[].id = {role_id!r}",
-        )
+        report.err(file_label, f"missing — required because SKILL.md frontmatter declares roles[].id = {role_id!r}")
         return {}
 
     text = path.read_text(encoding="utf-8")
@@ -331,7 +345,8 @@ def validate_role_file(path: Path, role_id: str, report: Report) -> dict[str, li
     if persona_body is not None and len(persona_body.strip()) < 100:
         report.warn(
             file_label,
-            f"## Inline Persona for Teammate is suspiciously short ({len(persona_body.strip())} chars). "
+            f"## Inline Persona for Teammate is suspiciously short "
+            f"({len(persona_body.strip())} chars). "
             "It must be a self-contained pasteable prompt — see reference/role-design.md.",
         )
 
@@ -371,7 +386,8 @@ def validate_workflow_md(path: Path, report: Report) -> None:
     if not re.search(r"```mermaid", text):
         report.err(
             "workflow.md",
-            "missing ```mermaid``` block — workflow.md must contain at least one mermaid diagram",
+            "missing ```mermaid``` block — workflow.md must contain at least one "
+            "mermaid diagram",
         )
 
 
@@ -404,8 +420,8 @@ def validate_dependencies_yaml(path: Path, report: Report) -> dict[str, list[str
     if not path.exists():
         report.err(
             "dependencies.yaml",
-            "missing — required by the 5-file structure (write `skills: []` / `tools: []` "
-            "if no deps)",
+            "missing — required by the 5-file structure (write `skills: []` / "
+            "`tools: []` if no deps)",
         )
         return {"skills": [], "tools": []}
 
@@ -448,13 +464,208 @@ def validate_dependencies_yaml(path: Path, report: Report) -> dict[str, list[str
                 if field not in entry:
                     report.err(
                         "dependencies.yaml",
-                        f"{segment}[{i}] (name={entry.get('name')!r}) missing required field "
-                        f"`{field}`",
+                        f"{segment}[{i}] (name={entry.get('name')!r}) missing required "
+                        f"field `{field}`",
                     )
             if segment in declared and "name" in entry:
                 declared[segment].append(entry["name"])
 
     return declared
+
+
+# ---------------------------------------------------------------------------
+# SwarmFlow script validator
+# ---------------------------------------------------------------------------
+
+def _is_literal(node: ast.AST) -> bool:
+    try:
+        ast.literal_eval(node)
+        return True
+    except (ValueError, TypeError):
+        return False
+
+
+def _string_literal(node: ast.AST) -> str | None:
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return node.value
+    return None
+
+
+class _AgentCallCollector(ast.NodeVisitor):
+    def __init__(self) -> None:
+        self.calls: list[ast.Call] = []
+
+    def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
+        return
+
+    def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:
+        return
+
+    def visit_ClassDef(self, node: ast.ClassDef) -> None:
+        return
+
+    def visit_Call(self, node: ast.Call) -> None:
+        if isinstance(node.func, ast.Name) and node.func.id == "agent":
+            self.calls.append(node)
+        self.generic_visit(node)
+
+
+def _phase_call_value(stmt: ast.stmt) -> str | None:
+    if not isinstance(stmt, ast.Expr) or not isinstance(stmt.value, ast.Call):
+        return None
+    call = stmt.value
+    if not isinstance(call.func, ast.Name) or call.func.id != "phase" or not call.args:
+        return None
+    return _string_literal(call.args[0])
+
+
+def _agent_phase_mismatches(run_node: ast.AsyncFunctionDef) -> list[str]:
+    mismatches: list[str] = []
+    current_phase: str | None = None
+
+    for stmt in run_node.body:
+        if isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            continue
+
+        phase_value = _phase_call_value(stmt)
+        if phase_value is not None:
+            current_phase = phase_value
+
+        collector = _AgentCallCollector()
+        collector.visit(stmt)
+        for call in collector.calls:
+            phase_kw = next((kw for kw in call.keywords if kw.arg == "phase"), None)
+            if phase_kw is None or current_phase is None:
+                continue
+
+            agent_phase = _string_literal(phase_kw.value)
+            line = getattr(call, "lineno", "?")
+            if agent_phase is None:
+                mismatches.append(
+                    f"line {line}: agent phase must be the literal current phase {current_phase!r}"
+                )
+            elif agent_phase != current_phase:
+                mismatches.append(
+                    f"line {line}: agent phase {agent_phase!r} does not match active phase {current_phase!r}"
+                )
+
+    return mismatches
+
+
+def validate_swarmflow_script(path: Path, skill_name: str, report: Report) -> None:
+    file_label = "scripts/workflow.py"
+    if not path.exists():
+        report.err(file_label, "missing — required for SwarmFlow script or script-only mode")
+        return
+
+    text = path.read_text(encoding="utf-8")
+
+    if "TEMPLATE NOTES" in text:
+        report.err(file_label, "contains template notes — delete before publishing")
+    if re.search(r"<[^>\n]+>", text):
+        report.err(file_label, "contains unresolved template placeholder(s) like `<...>`")
+    if re.search(r"([A-Za-z]:\\|/Users/|/home/)", text):
+        report.err(file_label, "contains an obvious local absolute path")
+
+    try:
+        tree = ast.parse(text, filename=str(path))
+    except SyntaxError as e:
+        report.err(file_label, f"Python syntax error: {e.msg} at line {e.lineno}")
+        return
+
+    meta_node: ast.AST | None = None
+    run_node: ast.AsyncFunctionDef | None = None
+    has_swarmflow_import = False
+    dangerous_imports: list[str] = []
+    blocked_imports: list[str] = []
+    dangerous_calls: list[str] = []
+    non_inline_prompt_calls: list[int] = []
+
+    for node in tree.body:
+        if isinstance(node, ast.Assign):
+            for target in node.targets:
+                if isinstance(target, ast.Name) and target.id == "META":
+                    meta_node = node.value
+        elif (
+            isinstance(node, ast.AnnAssign)
+            and isinstance(node.target, ast.Name)
+            and node.target.id == "META"
+        ):
+            meta_node = node.value
+        elif isinstance(node, ast.AsyncFunctionDef) and node.name == "run":
+            run_node = node
+
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.name.split(".", 1)[0] in {"os", "subprocess"}:
+                    dangerous_imports.append(alias.name)
+                if alias.name.split(".", 1)[0] == "skill_context":
+                    blocked_imports.append(alias.name)
+        elif isinstance(node, ast.ImportFrom):
+            module = node.module or ""
+            if module == "swarmflow" or module.startswith("swarmflow."):
+                has_swarmflow_import = True
+            if module.split(".", 1)[0] in {"os", "subprocess"}:
+                dangerous_imports.append(module)
+            if module.split(".", 1)[0] == "skill_context":
+                blocked_imports.append(module)
+        elif isinstance(node, ast.Call):
+            if isinstance(node.func, ast.Name) and node.func.id in {"eval", "exec"}:
+                dangerous_calls.append(node.func.id)
+            elif isinstance(node.func, ast.Attribute):
+                base = node.func.value
+                if isinstance(base, ast.Name) and base.id in {"os", "subprocess"}:
+                    dangerous_calls.append(f"{base.id}.{node.func.attr}")
+                if node.func.attr == "build_prompt":
+                    non_inline_prompt_calls.append(getattr(node, "lineno", 0))
+
+    if meta_node is None:
+        report.err(file_label, "missing top-level `META` assignment")
+    elif not isinstance(meta_node, ast.Dict) or not _is_literal(meta_node):
+        report.err(file_label, "`META` must be a pure literal dict")
+    else:
+        meta = ast.literal_eval(meta_node)
+        if meta.get("name") != skill_name:
+            report.warn(
+                file_label,
+                f"META.name ({meta.get('name')!r}) does not match "
+                f"directory name ({skill_name!r})",
+            )
+
+    if run_node is None:
+        report.err(file_label, "missing top-level `async def run(args)`")
+    else:
+        args = run_node.args.args
+        arg_names = [arg.arg for arg in args]
+        if arg_names != ["args"] or run_node.args.defaults:
+            report.err(file_label, f"`run` parameters must be exactly `(args)` (got: {arg_names})")
+        phase_mismatches = _agent_phase_mismatches(run_node)
+        for mismatch in phase_mismatches:
+            report.err(file_label, mismatch)
+
+    if not has_swarmflow_import:
+        report.err(file_label, "missing explicit `from swarmflow import ...` primitive import")
+    if dangerous_imports:
+        report.err(
+            file_label,
+            f"imports blocked module(s): {', '.join(sorted(set(dangerous_imports)))}",
+        )
+    if blocked_imports:
+        report.err(
+            file_label,
+            "uses a non-standard SwarmFlow context import; "
+            "use the standalone workflow format",
+        )
+    if dangerous_calls:
+        report.err(file_label, f"uses blocked call(s): {', '.join(sorted(set(dangerous_calls)))}")
+    if non_inline_prompt_calls:
+        lines = ", ".join(str(line) for line in sorted(set(non_inline_prompt_calls)) if line)
+        report.err(
+            file_label,
+            "SwarmFlow scripts must keep agent prompts inline in scripts/workflow.py "
+            f"(non-inline prompt call at line(s): {lines})",
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -483,7 +694,46 @@ def check_orphan_role_files(roles_dir: Path, declared_role_ids: list[str], repor
     for f in roles_dir.glob("*.md"):
         role_id = f.stem
         if role_id not in declared_role_ids:
-            report.warn("roles/", f"orphan file `roles/{f.name}` — not declared in SKILL.md frontmatter `roles[]`")
+            report.warn(
+                "roles/",
+                f"orphan file `roles/{f.name}` — not declared in SKILL.md "
+                "frontmatter `roles[]`",
+            )
+
+
+def detect_structure(root: Path, report: Report) -> tuple[bool, bool]:
+    """Return (has_swarmflow_script, is_script_only)."""
+    script_path = root / "scripts" / "workflow.py"
+    has_script = script_path.exists()
+    prompts_dir = root / "prompts"
+    markdown_paths = [
+        root / "roles",
+        root / "workflow.md",
+        root / "bind.md",
+        root / "dependencies.yaml",
+    ]
+    present = [p for p in markdown_paths if p.exists()]
+    has_partial_spec = 0 < len(present) < len(markdown_paths)
+
+    if has_script and not present:
+        if prompts_dir.exists():
+            report.err(
+                "prompts/",
+                "script-only SwarmFlow skills must keep prompts inline in "
+                "scripts/workflow.py; do not create prompts/",
+            )
+        return True, True
+
+    if has_script and has_partial_spec:
+        missing = [p.name for p in markdown_paths if not p.exists()]
+        report.err(
+            "structure",
+            "partial Markdown spec with SwarmFlow script — either provide the full "
+            "5-file spec or use script-only mode with only SKILL.md + "
+            f"scripts/workflow.py. Missing: {', '.join(missing)}",
+        )
+
+    return has_script, False
 
 
 # ---------------------------------------------------------------------------
@@ -495,12 +745,22 @@ def validate(root: Path) -> int:
         logger.info("[USAGE ERROR] %s is not a directory", root)
         return 2
 
-    logger.info("Validating Swarmskill: %s\n", root.resolve())
+    logger.info("Validating Swarm Skill: %s\n", root.resolve())
 
     report = Report()
 
+    # 0. Structure shape
+    has_swarmflow_script, is_script_only = detect_structure(root, report)
+
     # 1. SKILL.md
-    skill_fm, role_ids = validate_skill_md(root / "SKILL.md", report)
+    skill_fm, role_ids = validate_skill_md(root / "SKILL.md", report, script_only=is_script_only)
+
+    if has_swarmflow_script:
+        validate_swarmflow_script(root / "scripts" / "workflow.py", root.name, report)
+
+    if is_script_only:
+        report.emit()
+        return 0 if report.passed() else 1
 
     # 2. roles/<id>.md
     roles_dir = root / "roles"
