@@ -1727,6 +1727,16 @@ async def _run(
     except Exception:  # noqa: BLE001
         logger.warning("[App] log_masking_rule cold load skipped", exc_info=True)
 
+
+    if os.getenv("AGENT_RUNTIME", "").strip():
+        try:
+            from jiuwenclaw.utils import reload_logging_levels_from_gateway_db
+
+            await reload_logging_levels_from_gateway_db()
+            logger.info("[App] logging levels loaded from Gateway DB (if any)")
+        except Exception:  # noqa: BLE001
+            logger.warning("[App] logging_config cold load skipped", exc_info=True)
+
     # ---------- LeaderElection 初始化 ----------
     leader_election = None
     config = get_config()

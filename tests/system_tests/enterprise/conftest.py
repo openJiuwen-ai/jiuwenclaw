@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import sys
 from datetime import datetime
 from pathlib import Path
 from typing import Generator
@@ -12,6 +13,8 @@ import pytest
 from dotenv import load_dotenv
 
 ENTERPRISE_DIR = Path(__file__).resolve().parent
+if str(ENTERPRISE_DIR) not in sys.path:
+    sys.path.insert(0, str(ENTERPRISE_DIR))
 REPO_ROOT = ENTERPRISE_DIR.parents[2]
 ENV_FILE = ENTERPRISE_DIR / ".env"
 ENV_EXAMPLE_FILE = ENTERPRISE_DIR / ".env.example"

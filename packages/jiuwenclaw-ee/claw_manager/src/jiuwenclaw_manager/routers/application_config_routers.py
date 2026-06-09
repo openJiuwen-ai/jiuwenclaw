@@ -1,4 +1,4 @@
-"""应用配置 API：channel 注册与管理（针对特定 Gateway 实例的配置）。"""
+"""应用配置 API：channel 注册与管理、logging 配置（针对特定 Gateway 实例的配置）。"""
 
 from __future__ import annotations
 
@@ -9,6 +9,7 @@ from openjiuwen_runtime.foundation.db.handler import DBHandler
 from pydantic import BaseModel, Field
 
 from jiuwenclaw_manager.core.application_config.channel_config import ChannelConfigService
+
 from jiuwenclaw_manager.core.application_config.log_masking_rule import (
     LogMaskingRuleService,
 )
@@ -16,6 +17,9 @@ from jiuwenclaw_manager.schemas.application_config_schemas import (
     LogMaskingRuleCreateBody,
     LogMaskingRuleUpdateBody,
 )
+
+from jiuwenclaw_manager.core.application_config.logging_config import LoggingConfigService
+
 from jiuwenclaw_manager.infrastructure.db import get_db_handler
 from jiuwenclaw_manager.schemas.common_schemas import ResponseModel
 
@@ -28,6 +32,10 @@ def _channel_config_svc(handler: DBHandler) -> ChannelConfigService:
 
 def _log_masking_rule_svc(handler: DBHandler) -> LogMaskingRuleService:
     return LogMaskingRuleService(handler)
+
+
+def _logging_config_svc(handler: DBHandler) -> LoggingConfigService:
+    return LoggingConfigService(handler)
 
 
 class ChannelRegisterRequest(BaseModel):
@@ -241,3 +249,68 @@ async def delete_log_masking_rule(
             raise HTTPException(status_code=404, detail=str(exc)) from exc
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return ResponseModel(code=200, message="success")
+
+
+class LoggingConfigUpsertRequest(BaseModel):
+    level: str = Field(default="INFO", max_length=16)
+    console_level: str | None = Field(default=None, max_length=16)
+    gateway: str | None = Field(default=None, max_length=16)
+    channel: str | None = Field(default=None, max_length=16)
+    agent_server: str | None = Field(default=None, max_length=16)
+    full: str | None = Field(default=None, max_length=16)
+
+
+@application_config_router.put(
+    "/{jiuwenclaw_id}/logging", response_model=ResponseModel
+)
+async def upsert_logging_config(
+    jiuwenclaw_id: str,
+    body: LoggingConfigUpsertRequest,
+    handler: Annotated[DBHandler, Depends(get_db_handler)],
+):
+    svc = _logging_config_svc(handler)
+    try:
+        data = await svc.upsert(
+            jiuwenclaw_id=jiuwenclaw_id,
+            level=body.level,
+            console_level=body.console_level,
+            gateway=body.gateway,
+            channel=body.channel,
+            agent_server=body.agent_server,
+            full=body.full,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return ResponseModel(code=200, message="success", data=data)
+
+
+@application_config_router.get(
+    "/{jiuwenclaw_id}/logging", response_model=ResponseModel
+)
+async def get_logging_config(
+    jiuwenclaw_id: str,
+    handler: Annotated[DBHandler, Depends(get_db_handler)],
+):
+    svc = _logging_config_svc(handler)
+    data = await svc.get(jiuwenclaw_id=jiuwenclaw_id)
+    if data is None:
+        raise HTTPException(status_code=404, detail="logging config not found")
+    return ResponseModel(code=200, message="success", data=data)
+
+
+@application_config_router.delete(
+    "/{jiuwenclaw_id}/logging", response_model=ResponseModel
+)
+async def delete_logging_config(
+    jiuwenclaw_id: str,
+    handler: Annotated[DBHandler, Depends(get_db_handler)],
+):
+    svc = _logging_config_svc(handler)
+    try:
+        await svc.delete(jiuwenclaw_id=jiuwenclaw_id)
+    except ValueError as exc:
+        if "not found" in str(exc):
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return ResponseModel(code=200, message="success")
+

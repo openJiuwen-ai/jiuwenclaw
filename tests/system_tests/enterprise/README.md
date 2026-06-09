@@ -39,7 +39,10 @@ enterprise/
 ├── README.md                      # 本文档
 ├── .env                           # 仅 Gateway 进程使用的环境变量模板
 ├── conftest.py                    # pytest fixture：创建 .runs/<timestamp>/ 运行目录
-├── test_gateway_runtime_e2e.py    # 主 E2E 用例
+├── test_gateway_runtime_e2e.py    # Gateway + AgentServer 运行时 E2E
+├── test_logging_config_process_e2e.py  # logging_config 真实进程 E2E（Manager + Gateway + AgentServer）
+├── test_logging_config.md  # 上述用例五阶段调用链文档
+├── e2e_helpers.py                 # 进程 E2E 公共 helper
 ├── mock_llm_server.py             # 本地 Mock LLM（OpenAI SSE 流式）
 ├── agentserver_launcher.py        # AgentServer 启动入口（注入测试 stub 依赖）
 └── .runs/                         # 每次运行的产物（已加入 .gitignore）
@@ -113,6 +116,24 @@ Gateway 与 AgentServer 读写同一 DB 文件，用于企业配置（`GatewayDb
 | `jiuwenswarm.db` 存在 | 共享 SQLite 已创建 |
 | server workspace `.env` 不含 mock 端口 | Agent 未误读 enterprise 测试配置 |
 
+## logging_config 进程 E2E
+
+`test_logging_config_process_e2e.py::test_logging_config_process_hot_reload_gdb_and_cold_start`
+
+详细五阶段调用链见：[test_logging_config_process_hot_reload_gdb_and_cold_start.md](./test_logging_config_process_hot_reload_gdb_and_cold_start.md)
+
+在真实进程栈（Mock LLM + Claw Manager + Gateway + Process deploy AgentServer）上验证：
+
+1. Manager REST `PUT /logging` → Manager WS `config.push` → Gateway `manager_ws_client` 热更新
+2. Gateway DB（由仓库 `.env` 的 `GATEWAY_DB_*` 决定）持久化 `logging_config`
+3. WebChannel `chat.send` 拉起 AgentServer 后，Agent 冷启动从 GDB 加载日志级别
+4. Gateway 重启后从 GDB 冷加载日志级别
+5. `DELETE /logging` 后 GDB 行清除且 Gateway 恢复默认级别
+
+```bash
+python -m pytest tests/system_tests/enterprise/test_logging_config_process_e2e.py -v -s -o addopts=""
+```
+
 ## 如何运行
 
 在 `jiuwenclaw` 仓库根目录：
@@ -127,6 +148,7 @@ python -m pytest tests/system_tests/enterprise/test_gateway_runtime_e2e.py -v -s
 - 本仓库 `jiuwenclaw` 及 monorepo 中的 `agent-runtime`（foundation + management）
 - EE 扩展：`packages/jiuwenclaw-ee/gateway/extensions`
 - Python 包：`pytest`、`pytest-asyncio`、`websockets`、`python-dotenv` 等（见根目录 `pyproject.toml`）
+- logging_config 用例另需单独安装 Claw Manager，见 [test_logging_config.md](./test_logging_config.md#运行前准备)
 
 ## 调试
 

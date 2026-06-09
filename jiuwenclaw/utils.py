@@ -37,7 +37,7 @@ import asyncio
 import shutil
 import mimetypes
 from pathlib import Path
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, Literal, Optional
 from collections import OrderedDict
 import logging
@@ -1536,6 +1536,119 @@ def setup_logger(log_level: Optional[str] = None) -> logging.Logger:
     stream_handler.addFilter(privacy_filter)
     root.addHandler(stream_handler)
     return root
+
+
+_FILE_HANDLER_LEVEL_MAP: dict[str, str] = {
+    "gateway.log": "gateway",
+    "channel.log": "channel",
+    "agent_server.log": "agent_server",
+    "full.log": "full",
+    "permissions.log": "agent_server",
+}
+
+
+def update_log_levels(
+    log_level: Optional[str] = None,
+    *,
+    console_level: Optional[str] = None,
+    gateway: Optional[str] = None,
+    channel: Optional[str] = None,
+    agent_server: Optional[str] = None,
+    full: Optional[str] = None,
+) -> logging.Logger:
+    """运行时动态更新 ``jiuwenclaw`` 根日志及各 handler 的级别，无需重建 handler。
+
+    参数与 :func:`setup_logger` 一致：传入 ``log_level`` 则统一覆盖所有级别；
+    为 ``None`` 时恢复代码内默认级别（INFO）及环境变量 ``LOG_LEVEL``（仅控制台）。
+
+    可通过关键字参数单独覆盖各组件级别，优先级高于 ``log_level``。
+    """
+    levels = _resolve_logging_levels(log_level)
+
+    if console_level is not None:
+        levels = replace(levels, console=_parse_log_level(console_level, levels.console))
+    if gateway is not None:
+        levels = replace(levels, gateway=_parse_log_level(gateway, levels.gateway))
+    if channel is not None:
+        levels = replace(levels, channel=_parse_log_level(channel, levels.channel))
+    if agent_server is not None:
+        levels = replace(levels, agent_server=_parse_log_level(agent_server, levels.agent_server))
+    if full is not None:
+        levels = replace(levels, full=_parse_log_level(full, levels.full))
+
+    logger_level = min(levels.gateway, levels.channel, levels.agent_server, levels.full)
+    levels = replace(levels, logger=logger_level)
+
+    root = logging.getLogger("jiuwenclaw")
+    root.setLevel(levels.logger)
+
+    for h in root.handlers:
+        if isinstance(h, SafeRotatingFileHandler):
+            fname = Path(h.baseFilename).name
+            attr = _FILE_HANDLER_LEVEL_MAP.get(fname)
+            if attr is not None:
+                h.setLevel(getattr(levels, attr))
+        elif isinstance(h, logging.StreamHandler):
+            h.setLevel(levels.console)
+
+    return root
+
+
+_LOGGING_CONFIG_TABLE = "logging_config"
+
+
+def _logging_config_row_to_dict(obj: Any) -> dict[str, Any]:
+    return {
+        "level": getattr(obj, "level", "INFO"),
+        "console_level": getattr(obj, "console_level", None),
+        "gateway": getattr(obj, "gateway", None),
+        "channel": getattr(obj, "channel", None),
+        "agent_server": getattr(obj, "agent_server", None),
+        "full": getattr(obj, "full", None),
+    }
+
+
+def apply_logging_config_payload(payload: dict[str, Any] | None) -> None:
+    """将 DB 行 / WS payload 转为 :func:`update_log_levels` 调用。"""
+    if not payload or payload.get("op") == "delete":
+        update_log_levels()
+        return
+
+    kwargs: dict[str, Any] = {}
+    if payload.get("level") is not None:
+        kwargs["log_level"] = str(payload["level"])
+    for key in ("console_level", "gateway", "channel", "agent_server", "full"):
+        if payload.get(key) is not None:
+            kwargs[key] = str(payload[key])
+    update_log_levels(**kwargs)
+
+
+async def reload_logging_levels_from_gateway_db() -> None:
+    """从 Gateway 库加载 ``logging_config`` 并刷新**本进程**日志级别。"""
+    try:
+        from jiuwenclaw.infrastructure.module_importer import (
+            import_manager_ws_client_module,
+        )
+
+        db_mod = import_manager_ws_client_module("infrastructure.db")
+        handler = await db_mod.ensure_db_handler(log_prefix="logging_config")
+
+        jid = (os.getenv("JIUWENCLAW_ID") or "").strip()
+        if not jid:
+            update_log_levels()
+            return
+
+        row = await handler.get(_LOGGING_CONFIG_TABLE, {"jiuwenclaw_id": jid})
+        apply_logging_config_payload(
+            _logging_config_row_to_dict(row) if row is not None else None,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "[logging_config_db] logging_config read failed: %s",
+            exc,
+            exc_info=True,
+        )
+        update_log_levels()
 
 
 class AsyncLRUCache:

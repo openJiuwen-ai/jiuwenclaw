@@ -130,6 +130,15 @@ async def _run(host: str, port: int) -> None:
     except Exception:  # noqa: BLE001
         logger.warning("[AgentServer] log_masking_rule cold load skipped", exc_info=True)
 
+    if os.getenv("AGENT_RUNTIME", "").strip():
+        try:
+            from jiuwenclaw.utils import reload_logging_levels_from_gateway_db
+
+            await reload_logging_levels_from_gateway_db()
+            logger.info("[AgentServer] logging levels loaded from Gateway DB (if any)")
+        except Exception:  # noqa: BLE001
+            logger.warning("[AgentServer] logging_config cold load skipped", exc_info=True)
+
     # ---------- Telemetry 初始化 ----------
     init_telemetry()
 

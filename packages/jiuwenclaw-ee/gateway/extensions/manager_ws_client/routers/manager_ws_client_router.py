@@ -8,6 +8,7 @@ from typing import Any
 
 from ..core.application_config.channel_config import apply_channel_config
 from ..core.application_config.log_masking_rule import apply_log_masking_rule
+from ..core.application_config.logging_config import apply_logging_config
 from ..infrastructure.utils import assert_jiuwenclaw_id_matches
 from ..core.config_effective_policy.config_default_template_mapping import (
     apply_config_default_template_mapping,
@@ -30,10 +31,14 @@ from ..core.template.skill_whitelist_template import apply_skill_whitelist_templ
 
 logger = logging.getLogger(__name__)
 
-_RUNTIME_MUTATING_OPS = frozenset({"create", "update", "delete"})
+_RUNTIME_MUTATING_OPS = frozenset({"create", "update", "delete", "upsert"})
 
 
 def _trigger_runtime_management_config_update(op: str) -> None:
+    logger.info(
+        "[ManagerWsClient] trigger runtime management config update op=%s",
+        op,
+    )
     try:
         from jiuwenclaw.extensions.registry import ExtensionRegistry
 
@@ -74,6 +79,7 @@ async def apply_config_push(
 
     channel_config = config.get("channel_config")
     log_masking_rule = config.get("log_masking_rule")
+    logging_config = config.get("logging_config")
     extension_config_templates = config.get("extension_config_templates")
     skill_whitelist_templates = config.get("skill_whitelist_templates")
     service_config_templates = config.get("service_config_templates")
@@ -91,6 +97,10 @@ async def apply_config_push(
     elif isinstance(log_masking_rule, dict) and log_masking_rule.get("op"):
         matched_payload = log_masking_rule
         result = await apply_log_masking_rule(log_masking_rule)
+
+    elif isinstance(logging_config, dict) and logging_config.get("op"):
+        matched_payload = logging_config
+        result = await apply_logging_config(logging_config)
 
     elif isinstance(extension_config_templates, dict) and extension_config_templates.get("op"):
         matched_payload = extension_config_templates

@@ -70,3 +70,28 @@ LOG_MASKING_RULE_TABLE_DEF = TableDefinition(
         IndexDefinition(["priority"], unique=False),
     ],
 )
+
+LOGGING_CONFIG_TABLE_DEF = TableDefinition(
+    table_name="logging_config",
+    columns=[
+        ColumnDefinition(
+            "id",
+            "integer",
+            primary_key=True,
+            autoincrement=True,
+            nullable=False,
+        ),
+        ColumnDefinition("jiuwenclaw_id", "string", length=64, nullable=False),
+        ColumnDefinition("level", "string", length=16, nullable=False, default="INFO"),
+        ColumnDefinition("console_level", "string", length=16, nullable=True),
+        ColumnDefinition("gateway", "string", length=16, nullable=True),
+        ColumnDefinition("channel", "string", length=16, nullable=True),
+        ColumnDefinition("agent_server", "string", length=16, nullable=True),
+        ColumnDefinition("full", "string", length=16, nullable=True),
+        ColumnDefinition("created_at", "datetime", nullable=False),
+        ColumnDefinition("updated_at", "datetime", nullable=False),
+    ],
+    indexes=[
+        IndexDefinition(["jiuwenclaw_id"], unique=True),
+    ],
+)
