@@ -4,58 +4,57 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "jiuwenclaw"
-version = "0.1.10"
+version = "0.1.10.post8"
 description = "JiuwenClaw"
-requires-python = ">=3.11,<3.14"
+requires-python = ">=3.9,<3.14"
 license = { text = "Apache-2.0" }
 classifiers = [
     "License :: OSI Approved :: Apache Software License",
 ]
 dependencies = [
-    "chromadb>=1.5.0",
-    "ruamel.yaml>=0.18.0",
-    "lark-oapi>=1.5.3",
-    "loguru>=0.7.3",
+    "chromadb==1.5.9",
+    "ruamel.yaml==0.19.1",
+    "lark-oapi==1.6.7",
+    "loguru==0.7.3",
     "openjiuwen==0.1.10.post4",
     "pip==26.0.1",
-    "pgvector>=0.4.2",
-    "websockets>=12.0",
-    "aiohttp>=3.9.0",
+    "pgvector==0.4.2",
+    "websockets==15.0.1",
+    "aiohttp==3.14.1",
     "redis==7.4.0",
-    "psutil>=7.2.2",
-    "aiosqlite>=0.22.1",
-    "croniter>=2.0.0",
-    "python-telegram-bot>=20.0",
-    "discord.py>=2.4.0",
-    "dingtalk-stream>=0.24.3",
-    "wecom-aibot-sdk>=1.0.5",
-    "python-socks>=2.8.1",
-    "greenlet>=3.3.2",
+    "psutil==7.2.2",
+    "aiosqlite==0.22.1",
+    "croniter==6.2.2",
+    "python-telegram-bot==22.7",
+    "discord.py==2.7.1",
+    "dingtalk-stream==0.24.3",
+    "wecom-aibot-sdk==1.0.7",
+    "python-socks==2.8.1",
+    "greenlet==3.5.1",
     "skillnet-ai==0.0.16",
-    "mutagen>=1.47.0",
-    "google-genai>=1.68.0",
-    "opentelemetry-api>=1.25.0",
-    "opentelemetry-sdk>=1.25.0",
-    "opentelemetry-exporter-otlp-proto-grpc>=1.25.0",
-    "opentelemetry-exporter-otlp-proto-http>=1.25.0",
-    "json-repair>=0.58.0",
-    "trafilatura>=1.6.0",
+    "mutagen==1.47.0",
+    "google-genai==2.7.0",
+    "opentelemetry-api==1.42.1",
+    "opentelemetry-sdk==1.42.1",
+    "opentelemetry-exporter-otlp-proto-grpc==1.42.1",
+    "opentelemetry-exporter-otlp-proto-http==1.42.1",
+    "json-repair==0.58.0",
+    "trafilatura==2.0.0",
     # lxml 5.2+ 将 html.clean 拆出；trafilatura/justext 仍依赖 lxml.html.clean
-    "lxml_html_clean>=0.4.0",
-    "tree-sitter>=0.25.0,<0.26.0",
-    "tree-sitter-bash>=0.25.0,<0.26.0",
+    "lxml_html_clean==0.4.5",
+    "tree-sitter==0.25.2",
+    "tree-sitter-bash==0.25.1",
     # 缺乏这些包TestTenantAgentPool无法执行
     "sqlite-vec==0.1.6",
     "pytest==9.0.2",
     "pytest-asyncio==1.3.0",
     "pytest-mock==3.15.1",
     "pytest-cov==7.1.0",
-    "sqlite-vec==0.1.6",
-    "openjiuwen_deepsearch>=0.1.4",
-    "pypandoc",
-    "markdown",
-    "httpx>=0.28.1",
-    "PyJWT>=2.12.1",
+    "openjiuwen_deepsearch==0.1.4.post1",
+    "pypandoc==1.17",
+    "markdown==3.10.2",
+    "httpx==0.28.1",
+    "PyJWT==2.13.0",
 ]
 
 [project.optional-dependencies]
@@ -90,7 +89,7 @@ include-package-data = true
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["jiuwenclaw*"]
+include = ["jiuwenclaw*", "dispatch*"]
 exclude = ["jiuwenclaw.cli*", "jiuwenclaw.web*"]
 namespaces = false
 
@@ -106,6 +105,10 @@ jiuwenclaw = [
     "resources/**/*",
     "resources/*",
     "resources/.env.template",
+]
+dispatch = [
+    "**/*.yaml",
+    "**/*.yml",
 ]
 
 [tool.setuptools.exclude-package-data]
