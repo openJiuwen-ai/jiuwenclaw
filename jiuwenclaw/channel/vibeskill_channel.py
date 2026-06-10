@@ -4375,9 +4375,17 @@ class VibeSkillChannel(BaseChannel):
             return self._json_response(400, {"error": str(payload.get("error") or "skilldev.error")})
         if not payload.get("ok", True):
             return self._json_response(400, {"error": str(payload.get("error") or "failed")})
+        editable = payload.get("editable")
+        if isinstance(editable, bool):
+            editable_str = "true" if editable else "false"
+        elif isinstance(editable, str) and editable.lower() in ("true", "false"):
+            editable_str = editable.lower()
+        else:
+            editable_str = "true"
         out = {
             "type": "text",
             "content": str(payload.get("content") or ""),
+            "editable": editable_str,
             "encoding": "utf-8",
             "mimeType": "text/plain",
         }
