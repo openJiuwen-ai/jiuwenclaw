@@ -798,6 +798,31 @@ async def _build_postgresql_async_engine():
             "[JiuWenClawDeepAdapter] checkpoint PostgreSQL engine created: %s:%s/%s",
             db_host, db_port, db_name,
         )
+
+        # 确保 kv_store.value 列为 TEXT，避免 checkpoint 序列化数据被截断
+        async with engine.begin() as conn:
+            result = await conn.execute(text(
+                "SELECT data_type FROM information_schema.columns "
+                "WHERE table_catalog = :db AND table_name = 'kv_store' AND column_name = 'value'"
+            ), {"db": db_name})
+            row = result.fetchone()
+            if row is None:
+                await conn.execute(text(
+                    "CREATE TABLE IF NOT EXISTS kv_store ("
+                    "key VARCHAR(512) PRIMARY KEY,"
+                    "value TEXT NOT NULL"
+                    ")"
+                ))
+                logger.info(
+                    "[JiuWenClawDeepAdapter] kv_store table created with value TEXT"
+                )
+            elif row[0].lower() != "text":
+                await conn.execute(text(
+                    "ALTER TABLE kv_store ALTER COLUMN value TYPE TEXT"
+                ))
+                logger.info(
+                    "[JiuWenClawDeepAdapter] kv_store.value altered to TEXT"
+                )
         return engine
     except Exception as exc:
         logger.error(
