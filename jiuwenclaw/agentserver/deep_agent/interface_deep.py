@@ -35,6 +35,15 @@ from openjiuwen.core.foundation.llm import ModelRequestConfig, ModelClientConfig
 from openjiuwen.core.foundation.store.base_embedding import EmbeddingConfig
 from openjiuwen.core.foundation.tool import ToolCard
 from openjiuwen.core.runner import Runner
+
+try:
+    from openjiuwen.core.runner import set_request_id, reset_request_id
+except ImportError:
+    def set_request_id(rid: str) -> None:
+        return None
+
+    def reset_request_id(token: None) -> None:
+        pass
 from openjiuwen.core.session.checkpointer import CheckpointerFactory
 from openjiuwen.core.session.checkpointer.checkpointer import CheckpointerConfig
 from openjiuwen.core.session.checkpointer.persistence import PersistenceCheckpointerProvider
@@ -4379,6 +4388,7 @@ class JiuWenClawDeepAdapter:
 
         token_trace_sid = _LLM_TRACE_SESSION_ID.set(session_id)
         token_trace_rid = _LLM_TRACE_REQUEST_ID.set(request.request_id or "")
+        token_request_id = set_request_id(request.request_id or "")
         token_trace_iter = _LLM_TRACE_ITERATION.set(0)
         token_trace_model = _LLM_TRACE_MODEL_NAME.set(
             getattr(self._model, "model_config", None) and getattr(self._model.model_config, "model_name", "") or ""
@@ -4392,6 +4402,7 @@ class JiuWenClawDeepAdapter:
             else:
                 content = slash_result.get("output", str(slash_result))
                 payload = {"content": content}
+            reset_request_id(token_request_id)
             _reset_llm_trace_tokens(token_trace_sid, token_trace_rid, token_trace_iter, token_trace_model)
             return AgentResponse(
                 request_id=request.request_id,
@@ -4438,6 +4449,7 @@ class JiuWenClawDeepAdapter:
             TOOL_PERMISSION_CHANNEL_ID.reset(token_cid)
             cleanup_permission_context(token_perm)
             self._reset_runtime_cron_context(cron_context_tokens)
+            reset_request_id(token_request_id)
             _reset_llm_trace_tokens(token_trace_sid, token_trace_rid, token_trace_iter, token_trace_model)
             if request.request_id:
                 self._untrack_session_toolkit(request.request_id)
@@ -4485,6 +4497,7 @@ class JiuWenClawDeepAdapter:
         interactive_ask = bool(raw_interactive) if raw_interactive is not None else False
         token_trace_sid = _LLM_TRACE_SESSION_ID.set(session_id)
         token_trace_rid = _LLM_TRACE_REQUEST_ID.set(rid or "")
+        token_request_id = set_request_id(rid or "")
         token_trace_iter = _LLM_TRACE_ITERATION.set(0)
         token_trace_model = _LLM_TRACE_MODEL_NAME.set(
             getattr(self._model, "model_config", None) and getattr(self._model.model_config, "model_name", "") or ""
@@ -4496,6 +4509,7 @@ class JiuWenClawDeepAdapter:
 
             async for chunk in process_team_message_stream(request, inputs, self._instance):
                 yield chunk
+            reset_request_id(token_request_id)
             _reset_llm_trace_tokens(token_trace_sid, token_trace_rid, token_trace_iter, token_trace_model)
             return
 
@@ -4531,6 +4545,7 @@ class JiuWenClawDeepAdapter:
                     payload={"event_type": "chat.final", "content": content},
                     is_complete=True,
                 )
+            reset_request_id(token_request_id)
             _reset_llm_trace_tokens(token_trace_sid, token_trace_rid, token_trace_iter, token_trace_model)
             return
 
@@ -4963,6 +4978,7 @@ class JiuWenClawDeepAdapter:
             TOOL_PERMISSION_CHANNEL_ID.reset(token_cid)
             cleanup_permission_context(token_perm)
             self._reset_runtime_cron_context(cron_context_tokens)
+            reset_request_id(token_request_id)
             _reset_llm_trace_tokens(token_trace_sid, token_trace_rid, token_trace_iter, token_trace_model)
             if rid:
                 self._untrack_session_toolkit(rid)

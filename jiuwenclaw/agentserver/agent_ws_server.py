@@ -13,7 +13,10 @@ import re
 from pathlib import Path
 from typing import Any, ClassVar
 
-from jiuwenclaw.agentserver.session_history import enrich_history_messages_session_id
+from jiuwenclaw.agentserver.session_history import (
+    enrich_history_messages_session_id,
+    read_history_records_for_frontend,
+)
 from jiuwenclaw.agentserver.gateway_push.wire import build_server_push_wire
 from jiuwenclaw.agentserver.tools.acp_output_tools import get_acp_output_manager
 from jiuwenclaw.agentserver.agent_manager import AgentManager
@@ -1913,9 +1916,9 @@ class AgentWebSocketServer:
         if not history_path.exists():
             return None
         try:
-            from jiuwenclaw.agentserver.session_history import read_history_records
-            raw = read_history_records(history_path)
-        except Exception:
+            raw = read_history_records_for_frontend(history_path)
+        except Exception as e:
+            logger.warning("Failed to read history for session %s: %s", session_id, e)
             return None
         if not isinstance(raw, list):
             return None

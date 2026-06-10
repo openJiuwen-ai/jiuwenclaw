@@ -70,6 +70,39 @@ def read_history_records(path: Path) -> list[dict[str, Any]]:
     return parsed
 
 
+def read_history_records_for_frontend(path: Path) -> list[dict[str, Any]]:
+    """读取并过滤被撤回的 delta/reasoning（用于前端历史恢复）。
+    
+    过滤规则：
+    - 找出所有 chat.retract 的 request_id
+    - 过滤掉相同 request_id 的 chat.delta、chat.reasoning、chat.tool_call、chat.tool_result
+    - 保留其他所有事件（包括 chat.retract 本身）
+    """
+    records = read_history_records(path)
+    
+    revoked_rids = {
+        r.get("request_id")
+        for r in records
+        if r.get("event_type") == "chat.retract" and r.get("request_id") is not None
+    }
+    
+    filtered_event_types = (
+        "chat.delta",
+        "chat.reasoning",
+        "chat.tool_call",
+        "chat.tool_result",
+    )
+    result: list[dict[str, Any]] = []
+    for r in records:
+        rid = r.get("request_id")
+        event_type = r.get("event_type")
+        if rid not in revoked_rids:
+            result.append(r)
+        elif event_type not in filtered_event_types:
+            result.append(r)
+    return result
+
+
 def enrich_history_messages_session_id(
     messages: Iterable[dict[str, Any]],
     resolved_session_id: str,
