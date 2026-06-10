@@ -1037,7 +1037,14 @@ class SkillDevDeepAdapter:
         bm_json = target_dir / "benchmark.json"
         if bm_json.is_file():
             benchmark = json.loads(bm_json.read_text(encoding="utf-8"))
-            if benchmark.get("reviewed"):
+            try:
+                benchmark["run_summary"]["with_skill"]["pass_rate"]["mean"]
+                benchmark["run_summary"]["without_skill"]["pass_rate"]["mean"]
+                benchmark["run_summary"]["delta"]["pass_rate"]
+                has_required_summary = True
+            except (KeyError, TypeError):
+                has_required_summary = False
+            if not has_required_summary or benchmark.get("reviewed"):
                 return None, None, -1
             updated = {**benchmark, "reviewed": True}
             bm_json.write_text(

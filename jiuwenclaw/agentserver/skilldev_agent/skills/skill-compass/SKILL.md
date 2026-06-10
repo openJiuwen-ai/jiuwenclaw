@@ -96,9 +96,10 @@ Skill Compass requires Node.js. Before running the evaluation, verify that a usa
 15. Save both outputs:
     - JSON: `<workspace>/evals/static/static_report.json`
     - Markdown summary: `<workspace>/evals/static/static_report.md`
-    Create `<workspace>/evals/static/` if needed and overwrite the two report files on every run. Do not read existing reports to create before/after comparisons.
+    Create `<workspace>/evals/static/` if needed and overwrite the two report files on every run. If `static_report.json` or `static_report.md` already exists, do not open, read, parse, or reuse its content; delete all original file content first, then write only the new complete report data from the current run. Do not append, merge, patch, preserve previous fields or sections, or read existing reports to create before/after comparisons.
     Treat every run as a fresh snapshot, including runs after the target skill was optimized from a previous static report.
-16. After saving `static_report.json`, immediately validate that the file is parseable JSON. If parsing fails for any reason, discard the invalid JSON draft, regenerate `static_report.json` from the schema and final scores, overwrite the file, and validate it again before continuing. Do not present or use an invalid JSON file.
+    Step 15 is not complete until Step 16 has been executed. After writing the report files, immediately continue to Step 16; do not stop, present results, or hand off before Step 16 validation succeeds.
+16. After saving `static_report.json`, immediately validate that the file is parseable JSON and contains no `reviewed` field anywhere. If parsing fails for any reason, discard the invalid JSON draft, regenerate `static_report.json` from the schema and final scores, overwrite the file, and validate it again before continuing. If a `reviewed` field is present, remove it, overwrite `static_report.json`, and validate the cleaned file before continuing. Do not present or use an invalid JSON file.
 
 ## JSON Output
 

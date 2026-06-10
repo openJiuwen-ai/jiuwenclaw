@@ -163,6 +163,8 @@ Self-check before ending the conversation: did you run the gate and report its r
 
 Evaluations are off by default. Trigger static and/or dynamic evaluation only when the original user request explicitly contains one of these intents:
 
+若 `用户原始请求` 只表达评估意图，但未明确要求静态评估、动态评估或全面评估，或当前语义不足以稳定映射到其中一种评估范围，则暂停评估流程，不要默认选择任一评估；必须先向用户确认评估范围（三选一：静态评估、动态评估、全面评估），并在用户明确选择后再继续执行对应流程。
+
 | User intent | Evaluation scope |
 |-------------|------------------|
 | "帮我做静态评估" / "检查 skill 质量" / "分析可触发性" | Static only |
