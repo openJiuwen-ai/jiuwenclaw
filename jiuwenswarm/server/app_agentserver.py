@@ -237,6 +237,9 @@ def main() -> None:
         else:
             port = 18092
 
+    from jiuwenswarm.telemetry import init_telemetry
+    init_telemetry()
+
     asyncio.run(_run(host=host, port=port))
 
 

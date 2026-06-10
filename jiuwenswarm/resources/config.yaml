@@ -234,7 +234,7 @@ agents:
     completion_timeout: 600.0
 
 telemetry:
-  enabled: false                    # 总开关（环境变量 OTEL_ENABLED 优先）
+  enabled: true                     # 总开关（环境变量 OTEL_ENABLED 优先）
   exporter: otlp                    # otlp / console / none
   endpoint: http://localhost:4317   # OTLP endpoint
   protocol: grpc                    # grpc / http
@@ -242,8 +242,9 @@ telemetry:
   log_messages: true                # 是否在 span event 中记录完整消息内容
   service_name: jiuwenswarm
   provider_factory:                 # 自定义 provider factory，格式：module:function
+  sqlite_db_path: "traces.db"        # SQLite span exporter 数据库路径（环境变量 OTEL_SQLITE_DB_PATH 优先）
   traces:
-    exporter:                       # trace exporter，默认回退到 telemetry.exporter
+    exporter: sqlite                   # trace exporter，默认回退到 telemetry.exporter
     endpoint:                       # trace endpoint，默认回退到 telemetry.endpoint
     protocol:                       # trace protocol，默认回退到 telemetry.protocol
     headers: {}                     # trace headers，默认回退到 telemetry.headers
