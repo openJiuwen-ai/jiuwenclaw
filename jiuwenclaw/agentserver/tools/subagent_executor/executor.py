@@ -58,8 +58,14 @@ from jiuwenclaw.agentserver.tools.subagent_executor.skill_use_rail_subagent impo
 from jiuwenclaw.agentserver.utils import DEFAULT_ENABLE_READ_IMAGE_MULTIMODAL
 
 # Default timeout for subagent execution
-_DEFAULT_TIMEOUT_SECONDS = 600.0
+_DEFAULT_TIMEOUT_SECONDS = 3000.0  # 硬超时：绝对上限，最终兜底
+_DEFAULT_SOFT_TIMEOUT_SECONDS = 600.0  # 软超时：无任何响应时超时，有响应则重置
 _SUBAGENT_ABORT_TIMEOUT_SECONDS = 30.0
+
+
+class SoftTimeoutError(asyncio.TimeoutError):
+    """软超时：子 agent 长时间无任何流式响应时触发。"""
+    pass
 
 # Default excluded tools for spawn/fork agents
 EXCLUDED_TOOLS_SPAWN = {
@@ -174,11 +180,20 @@ class ForkAgentExecutor:
         agent: DeepAgent,
         inputs: dict[str, Any],
         session_proxy: SubagentSessionProxy | None,
+        soft_timeout: float = _DEFAULT_SOFT_TIMEOUT_SECONDS,
     ) -> tuple[str, Any]:
         """Run a subagent with SDK streaming while collecting its final result.
 
         The parent agent already knows how to render SDK model stream events, so this
         forwards only model-facing chunks and leaves tool events to SubagentContextRail.
+
+        Args:
+            agent: DeepAgent instance to run.
+            inputs: Input dict for the agent.
+            session_proxy: Optional proxy for forwarding stream events.
+            soft_timeout: 软超时秒数。每次收到流式事件时重置计时器，
+                          若超过此时间无任何响应则抛出 asyncio.TimeoutError。
+                          外层 asyncio.wait_for 提供硬超时兜底。
         """
         streamed_parts: list[str] = []
         final_text = ""
@@ -188,6 +203,7 @@ class ForkAgentExecutor:
         pending_parts: list[str] = []
         pending_since = time.monotonic()
         emitted_first_model_chunk = False
+        last_activity_time = time.monotonic()
 
         async def write_model_stream(event_type: str, content: str) -> None:
             if session_proxy is None or not content:
@@ -231,11 +247,25 @@ class ForkAgentExecutor:
                 await flush_pending_model_stream()
 
         async for chunk in Runner.run_agent_streaming(agent=agent, inputs=inputs):
+            # 软超时检查：每次收到 chunk 时检查距上次有效活动的时间
+            now = time.monotonic()
+            if now - last_activity_time > soft_timeout:
+                logger.warning(
+                    "[Subagent] Soft timeout: no activity for %.1f seconds (soft_timeout=%.1f), aborting",
+                    now - last_activity_time, soft_timeout,
+                )
+                raise SoftTimeoutError(
+                    f"Soft timeout: no streaming activity for {soft_timeout:.0f} seconds"
+                )
+
             parsed = parse_stream_chunk(chunk, _has_streamed_content=has_streamed_content)
             if not isinstance(parsed, dict):
                 continue
 
             event_type = parsed.get("event_type")
+
+            # 收到有效事件，重置软超时计时器
+            last_activity_time = time.monotonic()
             if session_proxy is not None and event_type in self._FORWARDED_MODEL_EVENTS:
                 if event_type in ("chat.delta", "chat.reasoning"):
                     await buffer_model_stream(event_type, str(parsed.get("content", "") or ""))
@@ -596,11 +626,17 @@ Approach each task methodically and deliver high-quality results.
             session_id = task.task_id
             invoke_inputs = {"query": full_prompt, "conversation_id": session_id}
 
+            timeout_seconds = task.timeout if task.timeout is not None else _DEFAULT_TIMEOUT_SECONDS
+
             try:
-                result_text, fork_usage = await self._run_agent_streaming_for_result(
-                    agent=fork_agent,
-                    inputs=invoke_inputs,
-                    session_proxy=session_proxy,
+                result_text, fork_usage = await asyncio.wait_for(
+                    self._run_agent_streaming_for_result(
+                        agent=fork_agent,
+                        inputs=invoke_inputs,
+                        session_proxy=session_proxy,
+                        soft_timeout=_DEFAULT_SOFT_TIMEOUT_SECONDS,
+                    ),
+                    timeout=timeout_seconds,
                 )
             finally:
                 self._active_fork_agents.pop(task.task_id, None)
@@ -621,15 +657,33 @@ Approach each task methodically and deliver high-quality results.
                 usage=fork_usage,
             )
 
-        except asyncio.TimeoutError:
+        except SoftTimeoutError:
+            timeout_seconds = task.timeout if task.timeout is not None else _DEFAULT_TIMEOUT_SECONDS
             logger.warning(
-                f"[ForkAgent] Timeout after {_DEFAULT_TIMEOUT_SECONDS} seconds, task_id={task.task_id}"
+                "[ForkAgent] soft timeout (soft=%ss, hard=%ss), task_id=%s",
+                _DEFAULT_SOFT_TIMEOUT_SECONDS,
+                timeout_seconds,
+                task.task_id,
             )
             return ForkAgentResult(
                 success=False,
                 task_id=task.task_id,
                 role_id=task.role_id,
-                error=f"Timeout after {_DEFAULT_TIMEOUT_SECONDS} seconds",
+                error=f"Soft timeout: no activity for {_DEFAULT_SOFT_TIMEOUT_SECONDS}s",
+            )
+        except asyncio.TimeoutError:
+            timeout_seconds = task.timeout if task.timeout is not None else _DEFAULT_TIMEOUT_SECONDS
+            logger.warning(
+                "[ForkAgent] hard timeout (soft=%ss, hard=%ss), task_id=%s",
+                _DEFAULT_SOFT_TIMEOUT_SECONDS,
+                timeout_seconds,
+                task.task_id,
+            )
+            return ForkAgentResult(
+                success=False,
+                task_id=task.task_id,
+                role_id=task.role_id,
+                error=f"Hard timeout after {timeout_seconds} seconds",
             )
         except Exception as e:
             logger.exception(f"[ForkAgent] Execution failed: {e}")
@@ -709,11 +763,17 @@ Approach each task methodically and deliver high-quality results.
             session_id = task.task_id
             invoke_inputs = {"query": full_prompt, "conversation_id": session_id}
 
+            timeout_seconds = task.timeout if task.timeout is not None else _DEFAULT_TIMEOUT_SECONDS
+
             try:
-                result_text, spawn_usage = await self._run_agent_streaming_for_result(
-                    agent=spawn_agent,
-                    inputs=invoke_inputs,
-                    session_proxy=session_proxy,
+                result_text, spawn_usage = await asyncio.wait_for(
+                    self._run_agent_streaming_for_result(
+                        agent=spawn_agent,
+                        inputs=invoke_inputs,
+                        session_proxy=session_proxy,
+                        soft_timeout=_DEFAULT_SOFT_TIMEOUT_SECONDS,
+                    ),
+                    timeout=timeout_seconds,
                 )
             finally:
                 self._active_fork_agents.pop(task.task_id, None)
@@ -734,15 +794,33 @@ Approach each task methodically and deliver high-quality results.
                 usage=spawn_usage,
             )
 
-        except asyncio.TimeoutError:
+        except SoftTimeoutError:
+            timeout_seconds = task.timeout if task.timeout is not None else _DEFAULT_TIMEOUT_SECONDS
             logger.warning(
-                f"[SpawnAgent] Timeout after {_DEFAULT_TIMEOUT_SECONDS} seconds, task_id={task.task_id}"
+                "[SpawnAgent] soft timeout (soft=%ss, hard=%ss), task_id=%s",
+                _DEFAULT_SOFT_TIMEOUT_SECONDS,
+                timeout_seconds,
+                task.task_id,
             )
             return SubagentResult(
                 success=False,
                 task_id=task.task_id,
                 role_id=task.role_id,
-                error=f"Timeout after {_DEFAULT_TIMEOUT_SECONDS} seconds",
+                error=f"Soft timeout: no activity for {_DEFAULT_SOFT_TIMEOUT_SECONDS}s",
+            )
+        except asyncio.TimeoutError:
+            timeout_seconds = task.timeout if task.timeout is not None else _DEFAULT_TIMEOUT_SECONDS
+            logger.warning(
+                "[SpawnAgent] hard timeout (soft=%ss, hard=%ss), task_id=%s",
+                _DEFAULT_SOFT_TIMEOUT_SECONDS,
+                timeout_seconds,
+                task.task_id,
+            )
+            return SubagentResult(
+                success=False,
+                task_id=task.task_id,
+                role_id=task.role_id,
+                error=f"Hard timeout after {timeout_seconds} seconds",
             )
         except Exception as e:
             logger.exception(f"[SpawnAgent] Execution failed: {e}")
@@ -962,7 +1040,8 @@ Approach each task methodically and deliver high-quality results.
 # Fork Subagent Role
 
 You are a fork subagent of an AI assistant, with role `{task.role_id}`.
-You inherit parent agent's message history (context), including previous conversations, document understanding, and tool call results.
+You inherit parent agent's message history (context), including previous
+conversations, document understanding, and tool call results.
 Execute the given task using inherited context and available tools.
 """
 
