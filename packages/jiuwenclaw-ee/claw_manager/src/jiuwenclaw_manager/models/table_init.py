@@ -15,6 +15,7 @@ from jiuwenclaw_manager.models.application_config_models import (
     LOG_MASKING_RULE_TABLE_DEF,
     _CHANNEL_CONFIG_TABLE_DEF,
     LOGGING_CONFIG_TABLE_DEF,
+    _EMBED_CONFIG_TABLE_DEF,
 )
 from jiuwenclaw_manager.models.template_models import (
     EXTENSION_CONFIG_TEMPLATE_TABLE_DEF,
@@ -26,6 +27,7 @@ from jiuwenclaw_manager.models.template_models import (
 ALL_TABLE_DEFINITIONS = (
     INSTANCE_INFO_TABLE_DEF,
     _CHANNEL_CONFIG_TABLE_DEF,
+    _EMBED_CONFIG_TABLE_DEF,
     LOG_MASKING_RULE_TABLE_DEF,
     LOGGING_CONFIG_TABLE_DEF,
     MODEL_TEMPLATE_TABLE_DEF,

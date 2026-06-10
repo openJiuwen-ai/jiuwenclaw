@@ -1,4 +1,4 @@
-"""应用配置表定义：channel_config、logging_config。"""
+"""应用配置表定义：channel_config、logging_config、embed_config。"""
 
 from __future__ import annotations
 
@@ -71,6 +71,22 @@ LOGGING_CONFIG_TABLE_DEF = TableDefinition(
         ColumnDefinition("channel", "string", length=16, nullable=True),
         ColumnDefinition("agent_server", "string", length=16, nullable=True),
         ColumnDefinition("full", "string", length=16, nullable=True),
+        ColumnDefinition("created_at", "datetime", nullable=False),
+        ColumnDefinition("updated_at", "datetime", nullable=False),
+    ],
+    indexes=[
+        IndexDefinition(["jiuwenclaw_id"], unique=True),
+    ],
+)
+
+_EMBED_CONFIG_TABLE_DEF = TableDefinition(
+    table_name="embed_config",
+    columns=[
+        ColumnDefinition("id", "integer", primary_key=True, autoincrement=True, nullable=False),
+        ColumnDefinition("jiuwenclaw_id", "string", length=64, nullable=False),
+        ColumnDefinition("embed_api_key", "string", length=512, nullable=True),
+        ColumnDefinition("embed_base_url", "string", length=1024, nullable=True),
+        ColumnDefinition("embed_model", "string", length=128, nullable=True),
         ColumnDefinition("created_at", "datetime", nullable=False),
         ColumnDefinition("updated_at", "datetime", nullable=False),
     ],

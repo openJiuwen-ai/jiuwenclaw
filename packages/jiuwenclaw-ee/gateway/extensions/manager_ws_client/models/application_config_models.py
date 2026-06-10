@@ -95,3 +95,24 @@ LOGGING_CONFIG_TABLE_DEF = TableDefinition(
         IndexDefinition(["jiuwenclaw_id"], unique=True),
     ],
 )
+EMBED_CONFIG_TABLE_DEF = TableDefinition(
+    table_name="embed_config",
+    columns=[
+        ColumnDefinition(
+            "id",
+            "integer",
+            primary_key=True,
+            autoincrement=True,
+            nullable=False,
+        ),
+        ColumnDefinition("jiuwenclaw_id", "string", length=64, nullable=False),
+        ColumnDefinition("embed_api_key", "string", length=512, nullable=True),
+        ColumnDefinition("embed_base_url", "string", length=1024, nullable=True),
+        ColumnDefinition("embed_model", "string", length=128, nullable=True),
+        ColumnDefinition("created_at", "datetime", nullable=False),
+        ColumnDefinition("updated_at", "datetime", nullable=False),
+    ],
+    indexes=[
+        IndexDefinition(["jiuwenclaw_id"], unique=False),
+    ],
+)

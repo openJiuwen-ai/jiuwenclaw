@@ -111,7 +111,7 @@ from jiuwenclaw.agentserver.deep_agent.permissions.owner_scopes import (
 from jiuwenclaw.agentserver.permissions.core import init_permission_engine
 from jiuwenclaw.agentserver.memory import clear_memory_manager_cache
 from jiuwenclaw.agentserver.memory.config import (clear_config_cache, get_memory_mode, is_memory_enabled,
-                                                  is_proactive_memory)
+                                                  is_proactive_memory, clear_embed_config_db_cache)
 from jiuwenclaw.agentserver.permissions.checker import TOOL_PERMISSION_CHANNEL_ID
 from jiuwenclaw.agentserver.cron_config import should_register_cron_tools
 from jiuwenclaw.agentserver.skill_manager import SkillManager
@@ -1841,19 +1841,20 @@ class JiuWenClawDeepAdapter:
 
     def _build_memory_rail(self, mode: str) -> MemoryRail | None:
         try:
+            from jiuwenclaw.agentserver.memory.config import get_embed_config
             config = get_config()
-            embed_config = config.get("embed") if isinstance(config, dict) else None
-            has_api_key = embed_config.get("embed_api_key") if isinstance(embed_config, dict) else None
-            has_base_url = embed_config.get("embed_base_url") if isinstance(embed_config, dict) else None
-            has_model = embed_config.get("embed_model") if isinstance(embed_config, dict) else None
+            embed_config = get_embed_config()
+            has_api_key = embed_config.get("api_key") if isinstance(embed_config, dict) else None
+            has_base_url = embed_config.get("base_url") if isinstance(embed_config, dict) else None
+            has_model = embed_config.get("model") if isinstance(embed_config, dict) else None
             if not all([has_api_key, has_base_url, has_model]):
                 logger.warning("[JiuWenClawDeepAdapter] MemoryRail create failed: No available embedding config")
             self._is_proactive_memory = is_proactive_memory(mode, config)
             memory_rail = MemoryRail(
                 embedding_config=EmbeddingConfig(
-                    model_name=embed_config.get("embed_model"),
-                    base_url=embed_config.get("embed_base_url"),
-                    api_key=embed_config.get("embed_api_key")
+                    model_name=embed_config.get("model"),
+                    base_url=embed_config.get("base_url"),
+                    api_key=embed_config.get("api_key")
                 ),
                 is_proactive=self._is_proactive_memory
             )
@@ -1870,13 +1871,14 @@ class JiuWenClawDeepAdapter:
             CodingMemoryRail 实例，失败返回 None
         """
         try:
+            from jiuwenclaw.agentserver.memory.config import get_embed_config
             config = get_config()
-            embed_config = config.get("embed") if isinstance(config, dict) else None
+            embed_config = get_embed_config()
 
             # 检查 embedding 配置
-            has_api_key = embed_config.get("embed_api_key") if isinstance(embed_config, dict) else None
-            has_base_url = embed_config.get("embed_base_url") if isinstance(embed_config, dict) else None
-            has_model = embed_config.get("embed_model") if isinstance(embed_config, dict) else None
+            has_api_key = embed_config.get("api_key") if isinstance(embed_config, dict) else None
+            has_base_url = embed_config.get("base_url") if isinstance(embed_config, dict) else None
+            has_model = embed_config.get("model") if isinstance(embed_config, dict) else None
             if not all([has_api_key, has_base_url, has_model]):
                 logger.warning("[JiuWenClawDeepAdapter] CodingMemoryRail: no embedding config, skipping")
                 return None
@@ -1892,9 +1894,9 @@ class JiuWenClawDeepAdapter:
             coding_memory_rail = CodingMemoryRail(
                 coding_memory_dir=coding_memory_dir,
                 embedding_config=EmbeddingConfig(
-                    model_name=embed_config.get("embed_model"),
-                    base_url=embed_config.get("embed_base_url"),
-                    api_key=embed_config.get("embed_api_key"),
+                    model_name=embed_config.get("model"),
+                    base_url=embed_config.get("base_url"),
+                    api_key=embed_config.get("api_key"),
                 ),
                 language="cn" if language == "zh" else "en",
             )
@@ -2622,6 +2624,9 @@ class JiuWenClawDeepAdapter:
 
         self._instance_overrides = dict(config) if isinstance(config, dict) else {}
         config_base = get_config()
+        from jiuwenclaw.agentserver.memory.config import get_embed_config
+        embed_config = get_embed_config()
+        logger.info("====embed_config: %s", embed_config)
         bootstrap_request = self._instance_overrides.pop("request", None)
         if bootstrap_request is not None:
             await self._load_enterprise_config(bootstrap_request)
@@ -2828,6 +2833,7 @@ class JiuWenClawDeepAdapter:
         if self._instance is None:
             raise RuntimeError("JiuWenClawDeepAdapter 未初始化，请先调用 create_instance()")
         clear_config_cache()
+        clear_embed_config_db_cache()
         clear_memory_manager_cache()
 
         if env_overrides is not None:

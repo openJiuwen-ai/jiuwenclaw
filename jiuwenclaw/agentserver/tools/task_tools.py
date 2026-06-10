@@ -48,11 +48,12 @@ def _apply_ce_defaults() -> None:
     """Seed the context_evolver config from the UI config (config.yaml), falling back to env vars."""
     try:
         from jiuwenclaw.config import get_config
+        from jiuwenclaw.agentserver.memory.config import get_embed_config
 
         cfg = get_config()
         react_cfg = cfg.get("react", {})
         model_client = react_cfg.get("model_client_config", {})
-        embed_cfg = cfg.get("embed", {})
+        embed_cfg = get_embed_config()
         models_default = cfg.get("models", {}).get("default", {}).get("model_client_config", {})
 
         # Resolve each value: UI config → env var → empty (no hardcoded fallback)
@@ -60,13 +61,13 @@ def _apply_ce_defaults() -> None:
             "API_KEY": (
                 model_client.get("api_key")
                 or models_default.get("api_key")
-                or embed_cfg.get("embed_api_key")
+                or embed_cfg.get("api_key")
                 or os.getenv("API_KEY", "")
             ),
             "API_BASE": (
                 model_client.get("api_base")
                 or models_default.get("api_base")
-                or embed_cfg.get("embed_base_url")
+                or embed_cfg.get("base_url")
                 or os.getenv("API_BASE", "")
             ),
             "MODEL_NAME": (
@@ -79,7 +80,7 @@ def _apply_ce_defaults() -> None:
                 or os.getenv("MODEL_PROVIDER", "")
             ),
             "EMBEDDING_MODEL": (
-                embed_cfg.get("embed_model")
+                embed_cfg.get("model")
                 or os.getenv("EMBEDDING_MODEL")
                 or os.getenv("EMBED_MODEL")
                 or cfg.get("task_memory", {}).get("embedding_model", "text-embedding-3-small")
@@ -116,7 +117,8 @@ def _get_service():
     from jiuwenclaw.config import get_config
     cfg = get_config()
     task_memory_cfg = cfg.get("task_memory", {})
-    embed_cfg = cfg.get("embed", {})
+    from jiuwenclaw.agentserver.memory.config import get_embed_config
+    embed_cfg = get_embed_config()
 
     llm_model = (
         task_memory_cfg.get("llm_model")
@@ -126,21 +128,21 @@ def _get_service():
     embedding_model = (
         task_memory_cfg.get("embedding_model")
         or os.getenv("TASK_MEMORY_EMBED_MODEL")
-        or embed_cfg.get("embed_model")
+        or embed_cfg.get("model")
         or os.getenv("EMBED_MODEL")
         or os.getenv("EMBEDDING_MODEL")
     )
     api_key = (
         task_memory_cfg.get("api_key")
         or os.getenv("TASK_MEMORY_API_KEY")
-        or embed_cfg.get("embed_api_key")
+        or embed_cfg.get("api_key")
         or os.getenv("EMBED_API_KEY")
         or os.getenv("API_KEY")
     )
     api_base = (
         task_memory_cfg.get("api_base")
         or os.getenv("TASK_MEMORY_API_BASE")
-        or embed_cfg.get("embed_base_url")
+        or embed_cfg.get("base_url")
         or os.getenv("EMBED_API_BASE")
         or os.getenv("API_BASE")
     )

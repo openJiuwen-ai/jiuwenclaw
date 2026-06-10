@@ -7,6 +7,7 @@ import logging
 from typing import Any
 
 from ..core.application_config.channel_config import apply_channel_config
+from ..core.application_config.embed_config import apply_embed_config
 from ..core.application_config.log_masking_rule import apply_log_masking_rule
 from ..core.application_config.logging_config import apply_logging_config
 from ..infrastructure.utils import assert_jiuwenclaw_id_matches
@@ -80,6 +81,7 @@ async def apply_config_push(
     channel_config = config.get("channel_config")
     log_masking_rule = config.get("log_masking_rule")
     logging_config = config.get("logging_config")
+    embed_config = config.get("embed_config")
     extension_config_templates = config.get("extension_config_templates")
     skill_whitelist_templates = config.get("skill_whitelist_templates")
     service_config_templates = config.get("service_config_templates")
@@ -101,6 +103,10 @@ async def apply_config_push(
     elif isinstance(logging_config, dict) and logging_config.get("op"):
         matched_payload = logging_config
         result = await apply_logging_config(logging_config)
+
+    elif isinstance(embed_config, dict) and embed_config.get("op"):
+        matched_payload = embed_config
+        result = await apply_embed_config(embed_config)
 
     elif isinstance(extension_config_templates, dict) and extension_config_templates.get("op"):
         matched_payload = extension_config_templates
