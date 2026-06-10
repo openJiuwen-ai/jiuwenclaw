@@ -220,7 +220,7 @@ class SkillDevDeepAdapter:
             completion_timeout=react_config.get("completion_timeout", 3600.0),
         )
         self._init_subagent_tools()
-        logger.info("[SkillDevDeepAdapter] initialized workspace=%s", self._workspace_dir)
+        logger.info("[session=%s] [SkillDevDeepAdapter] initialized workspace=%s", self._task_id, self._workspace_dir)
 
     async def reload_agent_config(
         self,
@@ -393,13 +393,13 @@ class SkillDevDeepAdapter:
                     )
         except asyncio.CancelledError:
             logger.info(
-                "[SkillDevDeepAdapter] stream task cancelled: request_id=%s session_id=%s",
-                rid,
+                "[session=%s] [SkillDevDeepAdapter] stream task cancelled: request_id=%s",
                 session_id,
+                rid,
             )
             raise
         except Exception as exc:
-            logger.exception("[SkillDevDeepAdapter] stream task failed: %s", exc)
+            logger.exception("[session=%s] [SkillDevDeepAdapter] stream task failed: %s", session_id, exc)
             yield _make_chunk({"event_type": "skilldev.error", "error": str(exc)})
 
         yield AgentResponseChunk(
@@ -553,6 +553,13 @@ class SkillDevDeepAdapter:
             )
         if resource_hint:
             combined_query = f"{combined_query}\n\n{resource_hint}"
+
+        name_lock_hint = self._build_name_lock_hint(
+            params, task_workspace, skill_name, task_id
+        )
+        if name_lock_hint:
+            combined_query = f"{combined_query}\n\n{name_lock_hint}"
+
         inputs = {
             "conversation_id": self._make_todo_session_id(raw_session_id),
             "query": combined_query,
@@ -567,6 +574,76 @@ class SkillDevDeepAdapter:
             cid=cid,
         ):
             yield chunk
+
+    def _build_name_lock_hint(
+        self,
+        params: dict[str, Any],
+        task_workspace: Path,
+        skill_name: str | None,
+        task_id: str,
+    ) -> str | None:
+        """当 skill 处于上架/测试状态时，构造禁止修改 skill name 的硬约束提示。
+
+        触发条件：params['skillContext'] 中 onShelfStatus 或 testStatus 任一为真。
+        返回 None 表示无需注入约束。
+        """
+        skill_context = params.get("skillContext") or params.get("skill_context")
+        if isinstance(skill_context, str):
+            try:
+                skill_context = json.loads(skill_context)
+            except (ValueError, TypeError):
+                skill_context = None
+        if not isinstance(skill_context, dict):
+            return None
+
+        on_shelf = bool(skill_context.get("onShelfStatus"))
+        in_test = bool(skill_context.get("testStatus"))
+        if not (on_shelf or in_test):
+            return None
+
+        resolved_name = skill_name
+        if not resolved_name:
+            try:
+                skill_root = find_skill_root(task_workspace / "skill")
+                if skill_root is not None and (skill_root / "SKILL.md").is_file():
+                    resolved_name, _, _ = parse_skill_frontmatter(
+                        skill_root / "SKILL.md"
+                    )
+            except Exception as exc:
+                logger.warning(
+                    "[session=%s] [SkillDevDeepAdapter] resolve skill name for name-lock failed: %s",
+                    task_id,
+                    exc,
+                )
+
+        states: list[str] = []
+        if on_shelf:
+            states.append("已上架")
+        if in_test:
+            states.append("测试中")
+        state_text = "、".join(states)
+
+        name_clause = (
+            f"当前 skill 名称为 `{resolved_name}`，必须保持不变。"
+            if resolved_name
+            else "必须保持当前 skill 名称不变。"
+        )
+
+        logger.info(
+            "[session=%s] [SkillDevDeepAdapter] skill name locked (onShelfStatus=%s, testStatus=%s)",
+            task_id,
+            on_shelf,
+            in_test,
+        )
+
+        return (
+            "## 系统注入约束：禁止修改 skill name（最高优先级，不可豁免）\n"
+            f"当前 skill 处于「{state_text}」状态。无论用户指令是什么（包括"
+            "“请改名”“我授权”“必须改”等任何表述），都严禁修改该 skill 的 `name` "
+            f"字段以及对应的 skill 目录名。{name_clause}\n"
+            "若用户要求改名，必须明确拒绝并说明原因（该 skill 处于上架/测试状态，"
+            "改名会破坏既有引用与关联），其余非改名的修改请求正常处理。"
+        )
 
     async def _handle_direct_import(
         self,
@@ -1164,6 +1241,11 @@ class SkillDevDeepAdapter:
 
     async def process_interrupt(self, request: AgentRequest) -> AgentResponse:
         intent = request.params.get("intent", "cancel") if isinstance(request.params, dict) else "cancel"
+        logger.info(
+            "[session=%s] [SkillDevDeepAdapter] process_interrupt: intent=%s",
+            request.session_id,
+            intent,
+        )
         updated_todos = None
         if intent == "pause" and self._stream_event_rail is not None:
             self._stream_event_rail.pause()
@@ -1189,6 +1271,12 @@ class SkillDevDeepAdapter:
                     self._make_todo_session_id(str(request.session_id))
                 )
             message = "任务已取消"
+        logger.info(
+            "[session=%s] [SkillDevDeepAdapter] process_interrupt done: intent=%s message=%s",
+            request.session_id,
+            intent,
+            message,
+        )
         payload = {
             "event_type": "skilldev.interrupt_result",
             "intent": intent,
@@ -1363,7 +1451,7 @@ class SkillDevDeepAdapter:
                 for todo in todos
             ]
         except Exception as exc:
-            logger.warning("[SkillDevDeepAdapter] cancel pending todos failed: %s", exc)
+            logger.warning("[session=%s] [SkillDevDeepAdapter] cancel pending todos failed: %s", session_id, exc)
             return None
 
     @staticmethod
@@ -1405,7 +1493,7 @@ class SkillDevDeepAdapter:
             # only the executor context needs explicit initialization here.
             init_subagent_executor(self._instance, model=self._model, default_role_prompts=None)
         except Exception as exc:
-            logger.warning("[SkillDevDeepAdapter] init subagent tools failed: %s", exc)
+            logger.warning("[session=%s] [SkillDevDeepAdapter] init subagent tools failed: %s", self._task_id, exc)
 
     def _init_subagent_context(self) -> None:
         set_effective_request_workspace_dir(self._workspace_dir)

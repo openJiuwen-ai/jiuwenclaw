@@ -676,29 +676,46 @@ class JiuWenClaw:
         Returns:
             AgentResponse 包含 interrupt_result 事件数据
         """
+        intent = request.params.get("intent", "cancel")
         is_skilldev = request.req_method == ReqMethod.SKILLDEV_CANCEL
+        logger.info(
+            "[session=%s] [interrupt] received: intent=%s is_skilldev=%s",
+            request.session_id,
+            intent,
+            is_skilldev,
+        )
         if is_skilldev:
             adapter = await self._ensure_skilldev_adapter()
         else:
             adapter = await self._ensure_adapter()
         response = await adapter.process_interrupt(request)
-        intent = request.params.get("intent", "cancel")
 
         if intent == "pause":
             # 暂停：不取消任务，只暂停 ReAct 循环
+            logger.info("[session=%s] [interrupt] paused ReAct loop", request.session_id)
             return response
 
         if intent == "resume":
             # 恢复：恢复 ReAct 循环
+            logger.info("[session=%s] [interrupt] resumed ReAct loop", request.session_id)
             return response
 
         if intent == "supplement":
             # 取消当前 session 的任务
             session_id = self._session_manager.get_session_id(request.session_id)
+            logger.info(
+                "[session=%s] [interrupt] supplement: cancelling current session task",
+                request.session_id,
+            )
             await self._session_manager.cancel_session_task(session_id, "interrupt(supplement): ")
             return response
 
         # cancel: 取消所有 session 的任务
+        logger.info(
+            "[session=%s] [interrupt] cancel: cancelling all session tasks (intent=%s)",
+            request.session_id,
+            intent,
+        )
         await self._session_manager.cancel_all_session_tasks(f"interrupt(intent={intent}): ")
         return response
 

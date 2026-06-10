@@ -182,6 +182,7 @@ def write_tool_spec_file(dest_dir: Path, tool_def: dict[str, Any]) -> Path:
         raise ValueError("工具定义缺少 pluginId/bundleName 与 toolName")
     dest_dir.mkdir(parents=True, exist_ok=True)
     out_path = dest_dir / tool_spec_filename(plugin_id, tool_name)
+    tool_def["schemaVersion"] = "1.0"
     out_path.write_text(
         json.dumps(tool_spec_payload(tool_def), ensure_ascii=False, indent=2),
         encoding="utf-8",
