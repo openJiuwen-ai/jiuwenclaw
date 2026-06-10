@@ -1467,6 +1467,9 @@ class VibeSkillChannel(BaseChannel):
 
         params["import_type"] = _resolve_message_send_import_type(data)
 
+        if "skillContext" in data:
+            params["skill_context"] = data["skillContext"]
+
         # 可选字段
         inbound_agent_id = str(data.get("agent_id") or data.get("agentId") or "").strip()
         if inbound_agent_id:
