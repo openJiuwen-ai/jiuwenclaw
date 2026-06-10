@@ -23,6 +23,7 @@
 | `jiuwen:sandboxToOA:{sandbox_id}` | `{ip}:{port}` | **沙箱平台 / 沙箱内 OpenAbility**（本仓库外） | ✓ 建链轮询 | ✓ 删除 / 续 TTL | 同上 | ✓ |
 | `jiuwen:sandboxRouting:{routing_key}` | routing JSON | Gateway（`SandboxRouter`，需 `SANDBOX_ADOPT_EXISTING`） | ✓ adopt | ✓ NX 创建 / 删除 / 续 TTL + 更新 `updated_at` | 同上 | ✓（`adopt` 开启时） |
 | `jiuwen:workspace:{session_id}` | workspace JSON | Gateway（`SandboxRouter` 销毁前备份） | ✓ 恢复 | ✓ 备份写入 | `SESSION_DCS_TTL_SECONDS`（`0`） | ✗（生命周期独立于沙箱） |
+| `jiuwen:sandboxLog:{sandbox_id}` | sandbox log JSON | Gateway（`SandboxRouter` 销毁前备份） | ✓ | ✓ 备份写入 | `SESSION_DCS_TTL_SECONDS`（`0`） | ✗ |
 
 `routing_key` 规则：`vibeskill:user:{user_id}`（优先）或 `vibeskill:session:{session_id}`。
 
@@ -126,6 +127,23 @@ adopt 时若 routing 存在但本 Key 缺失，Gateway 视为 stale mapping 并�
 | **删** | Store 提供 `delete_workspace`；**当前 Router 未调用**（靠 TTL 自然过期） |
 | **续 TTL** | **不随沙箱续期**；工作区快照生命周期与 session 绑定，独立于 sandbox runtime |
 
+---
+
+### `jiuwen:sandboxLog:{sandbox_id}`
+
+| 字段 | 说明 |
+|------|------|
+| 值 | JSON：`url`、`name`、`uploaded_at`、`sandbox_id` |
+| Store | `SandboxLogDcsStore`（`sandbox/sandbox_log_dcs_store.py`） |
+| Gateway 组件 | `SandboxRouterAgentClient` |
+
+| 操作 | 触发场景 |
+|------|----------|
+| **写** | `_backup_workspaces` 收到 `batch_upload` 的 `log_result`（`status=success`）→ 删旧 OBS 日志 → `put_sandbox_log` |
+| **读** | 覆盖写入前 `get_sandbox_log` 取旧 URL |
+| **删** | Store 提供 `delete_sandbox_log`；**当前 Router 未调用** |
+| **续 TTL** | **不随沙箱续期**；TTL 固定为 `SESSION_DCS_TTL_SECONDS`（默认 `0`） |
+
 ## Gateway 组件 → Store 映射
 
 ```text
@@ -136,7 +154,8 @@ VibeSkillChannel
 SandboxRouterAgentClient  (SANDBOX_ENABLE=true)
   ├─ SandboxDcsStore                    → jiuwen:sandboxApiKey:* , jiuwen:sandboxToOA:*
   ├─ SandboxRoutingDcsStore             → jiuwen:sandboxRouting:*
-  └─ WorkspaceDcsStore                  → jiuwen:workspace:*
+  ├─ WorkspaceDcsStore                  → jiuwen:workspace:*
+  └─ SandboxLogDcsStore                 → jiuwen:sandboxLog:*
 ```
 
 ## 沙箱续期与 DCS TTL

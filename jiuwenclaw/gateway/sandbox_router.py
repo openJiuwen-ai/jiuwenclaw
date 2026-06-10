@@ -20,6 +20,7 @@ from jiuwenclaw.sandbox.sandbox_routing_dcs_store import (
     get_gateway_instance_id,
     sandbox_adopt_existing_enabled,
 )
+from jiuwenclaw.sandbox.sandbox_log_dcs_store import SandboxLogDcsStore
 from jiuwenclaw.sandbox.workspace_dcs_store import WorkspaceDcsStore, WorkspaceRecord
 from jiuwenclaw.e2a.gateway_normalize import e2a_from_agent_fields
 from jiuwenclaw.e2a.models import E2AEnvelope
@@ -127,12 +128,14 @@ class SandboxRouterAgentClient(AgentServerClient):
         adopt_existing: bool | None = None,
         gateway_instance_id: str | None = None,
         workspace_dcs_store: WorkspaceDcsStore | None = None,
+        sandbox_log_dcs_store: SandboxLogDcsStore | None = None,
     ) -> None:
         settings = SandboxRoutingSettings.from_env()
         self._sandbox_client: SandboxClient | None = None
         self._dcs_store: SandboxDcsStore | None = None
         self._routing_dcs_store: SandboxRoutingDcsStore | None = None
         self._workspace_dcs_store = workspace_dcs_store
+        self._sandbox_log_dcs_store = sandbox_log_dcs_store
         self._open_ability_config: OpenAbilityConfig | None = None
         self._max_sandboxes = max(
             1,
@@ -248,6 +251,8 @@ class SandboxRouterAgentClient(AgentServerClient):
             await self._routing_dcs_store.close()
         if self._workspace_dcs_store is not None:
             await self._workspace_dcs_store.close()
+        if self._sandbox_log_dcs_store is not None:
+            await self._sandbox_log_dcs_store.close()
 
     def set_or_update_server_config(
         self,
@@ -1054,6 +1059,11 @@ class SandboxRouterAgentClient(AgentServerClient):
             self._workspace_dcs_store = WorkspaceDcsStore.from_env()
         return self._workspace_dcs_store
 
+    def _get_sandbox_log_dcs_store(self) -> SandboxLogDcsStore:
+        if self._sandbox_log_dcs_store is None:
+            self._sandbox_log_dcs_store = SandboxLogDcsStore.from_env()
+        return self._sandbox_log_dcs_store
+
     @staticmethod
     def _user_id_from_routing_key(routing_key: str) -> str | None:
         prefix = "vibeskill:user:"
@@ -1551,7 +1561,82 @@ class SandboxRouterAgentClient(AgentServerClient):
                     entry["session_id"],
                     sandbox_id,
                 )
+
+        log_result = payload.get("log_result")
+        if log_result is not None:
+            await self._persist_sandbox_log_result(
+                sandbox_id,
+                log_result,
+                query_url_obs=query_url_obs,
+            )
+
         return persisted_session_ids
+
+    async def _persist_sandbox_log_result(
+        self,
+        sandbox_id: str,
+        log_result: Any,
+        *,
+        query_url_obs: Any | None = None,
+    ) -> None:
+        if not isinstance(log_result, dict):
+            return
+        status = str(log_result.get("status") or "").strip().lower()
+        new_url = str(log_result.get("url") or "").strip()
+        if status != "success" or not new_url:
+            logger.warning(
+                "Sandbox log backup skipped DCS persist: sandbox_id=%s status=%s",
+                sandbox_id,
+                status or "unknown",
+            )
+            return
+
+        store = self._get_sandbox_log_dcs_store()
+        try:
+            try:
+                old_record = await store.get_sandbox_log(sandbox_id)
+            except Exception:  # noqa: BLE001
+                old_record = None
+                logger.exception(
+                    "Failed to read old sandbox log snapshot from DCS before overwrite: "
+                    "sandbox_id=%s",
+                    sandbox_id,
+                )
+            old_url = str(getattr(old_record, "url", "") or "").strip()
+            if old_url and old_url != new_url:
+                if query_url_obs is None:
+                    query_url_obs = _create_query_url_obs()
+                try:
+                    deleted = await query_url_obs.invoking_osms_delete(old_url)
+                except Exception:  # noqa: BLE001
+                    logger.exception(
+                        "Failed to delete old sandbox log OBS object before DCS overwrite: "
+                        "sandbox_id=%s",
+                        sandbox_id,
+                    )
+                else:
+                    if not deleted:
+                        logger.warning(
+                            "OSMS delete old sandbox log OBS object returned false: "
+                            "sandbox_id=%s",
+                            sandbox_id,
+                        )
+                    else:
+                        logger.info(
+                            "Deleted old sandbox log OBS object before DCS overwrite: "
+                            "sandbox_id=%s",
+                            sandbox_id,
+                        )
+            await store.put_sandbox_log(
+                sandbox_id,
+                url=new_url,
+                name=str(log_result.get("name") or "").strip(),
+            )
+        except Exception:  # noqa: BLE001
+            logger.exception(
+                "Failed to persist sandbox log snapshot to DCS: sandbox_id=%s",
+                sandbox_id,
+            )
 
     def _new_open_ability_ws_client(
         self,

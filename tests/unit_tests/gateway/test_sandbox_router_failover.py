@@ -51,18 +51,27 @@ class FakeAgentClient:
 
 
 class BackupAgentClient(FakeAgentClient):
-    def __init__(self, results: list[dict[str, Any]]) -> None:
+    def __init__(
+        self,
+        results: list[dict[str, Any]],
+        *,
+        log_result: dict[str, Any] | None = None,
+    ) -> None:
         super().__init__()
         self.envelopes: list[E2AEnvelope] = []
         self._results = results
+        self._log_result = log_result
 
     async def send_request(self, envelope: E2AEnvelope) -> Any:
         self.envelopes.append(envelope)
+        payload: dict[str, Any] = {"results": self._results}
+        if self._log_result is not None:
+            payload["log_result"] = self._log_result
         return MagicMock(
             ok=True,
             request_id=envelope.request_id,
             channel_id=envelope.channel or "",
-            payload={"results": self._results},
+            payload=payload,
         )
 
 
@@ -112,6 +121,37 @@ class FakeWorkspaceDcsStore:
     async def delete_workspace(self, session_id: str) -> None:
         self.events.append(("delete_workspace", session_id))
         self.records.pop(session_id, None)
+
+
+class FakeSandboxLogDcsStore:
+    def __init__(
+        self,
+        *,
+        initial_records: dict[str, dict[str, str]] | None = None,
+        events: list[tuple[str, str]] | None = None,
+    ) -> None:
+        self.records: dict[str, dict[str, str]] = dict(initial_records or {})
+        self.events = events if events is not None else []
+
+    async def get_sandbox_log(self, sandbox_id: str) -> Any:
+        self.events.append(("log_get", sandbox_id))
+        record = self.records.get(sandbox_id)
+        if not record:
+            return None
+        return types.SimpleNamespace(
+            url=record.get("url", ""),
+            name=record.get("name", ""),
+        )
+
+    async def put_sandbox_log(
+        self,
+        sandbox_id: str,
+        *,
+        url: str,
+        name: str = "",
+    ) -> None:
+        self.events.append(("log_put", sandbox_id))
+        self.records[sandbox_id] = {"url": url, "name": name}
 
 
 class FakeQueryUrlObs:
@@ -1059,3 +1099,94 @@ async def test_backup_does_not_delete_when_old_url_matches_new_url(
         ("put", "sess-a"),
     ]
     assert fake_query.deleted_urls == []
+
+
+@pytest.mark.asyncio
+async def test_backup_persists_sandbox_log_and_deletes_old_obs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    router = SandboxRouterAgentClient(adopt_existing=False)
+    router._backup_enabled = False
+    agent_client = BackupAgentClient(
+        [
+            {
+                "sessionID": "sess-a",
+                "url": "https://obs/new-sess-a.zip",
+                "name": "new-a.zip",
+                "status": "success",
+            },
+        ],
+        log_result={
+            "url": "https://obs/new-run-logs.zip",
+            "name": "run_logs.zip",
+            "status": "success",
+        },
+    )
+    events: list[tuple[str, str]] = []
+    fake_query = FakeQueryUrlObs(events)
+    monkeypatch.setattr(_sandbox_router_mod, "_create_query_url_obs", lambda: fake_query)
+    router._workspace_dcs_store = FakeWorkspaceDcsStore(events=events)  # type: ignore[assignment]
+    router._sandbox_log_dcs_store = FakeSandboxLogDcsStore(
+        initial_records={
+            "sandbox-1": {
+                "url": "https://obs/old-run-logs.zip",
+                "name": "run_logs.zip",
+            }
+        },
+        events=events,
+    )  # type: ignore[assignment]
+    runtime = _backup_runtime(agent_client)
+    runtime.sandbox_id = "sandbox-1"
+    runtime.metadata["session_ids"] = {"sess-a"}
+
+    await router._backup_workspaces_before_terminate(runtime)
+
+    assert ("log_get", "sandbox-1") in events
+    assert ("log_put", "sandbox-1") in events
+    assert "https://obs/old-run-logs.zip" in fake_query.deleted_urls
+    assert router._sandbox_log_dcs_store.records["sandbox-1"]["url"] == (  # type: ignore[union-attr]
+        "https://obs/new-run-logs.zip"
+    )
+
+
+@pytest.mark.asyncio
+async def test_backup_skips_sandbox_log_dcs_when_log_result_failed() -> None:
+    router = SandboxRouterAgentClient(adopt_existing=False)
+    router._backup_enabled = False
+    agent_client = BackupAgentClient(
+        [
+            {
+                "sessionID": "sess-a",
+                "url": "https://obs/new-sess-a.zip",
+                "name": "new-a.zip",
+                "status": "success",
+            },
+        ],
+        log_result={
+            "url": "",
+            "name": "run_logs.zip",
+            "status": "error",
+            "error": "upload failed",
+        },
+    )
+    events: list[tuple[str, str]] = []
+    router._workspace_dcs_store = FakeWorkspaceDcsStore(events=events)  # type: ignore[assignment]
+    router._sandbox_log_dcs_store = FakeSandboxLogDcsStore(
+        initial_records={
+            "sandbox-1": {
+                "url": "https://obs/old-run-logs.zip",
+                "name": "run_logs.zip",
+            }
+        },
+        events=events,
+    )  # type: ignore[assignment]
+    runtime = _backup_runtime(agent_client)
+    runtime.sandbox_id = "sandbox-1"
+    runtime.metadata["session_ids"] = {"sess-a"}
+
+    await router._backup_workspaces_before_terminate(runtime)
+
+    assert events == [("get", "sess-a"), ("put", "sess-a")]
+    assert router._sandbox_log_dcs_store.records["sandbox-1"]["url"] == (  # type: ignore[union-attr]
+        "https://obs/old-run-logs.zip"
+    )
