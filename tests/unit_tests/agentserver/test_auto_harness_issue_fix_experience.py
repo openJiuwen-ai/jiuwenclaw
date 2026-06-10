@@ -156,6 +156,8 @@ def test_issue_fix_query_includes_repository_code_rules():
     assert "编程规范约束（必须遵守仓库 code_rule.txt）" in query
     assert "G.ERR.07 避免抑制或忽略异常" in query
     assert "G.EDV.04 禁止使用subprocess模块中的shell=True选项" in query
+    assert "测试代码不得直接访问以单下划线开头的受保护或私有成员" in query
+    assert "必须通过公开 API、用户可观察行为或模块级公共函数间接验证" in query
 
 
 def test_task_progress_extracts_pr_and_failure_code(tmp_path: Path):
