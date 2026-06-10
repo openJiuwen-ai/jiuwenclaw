@@ -86,11 +86,3 @@ class DcsClusterClient:
             return 0
         client = await self.ensure_connected()
         return await client.delete(*keys)
-
-    async def count_keys(self, pattern: str, *, scan_count: int = 500) -> int:
-        """Count keys matching ``pattern`` via SCAN (cluster-safe)."""
-        client = await self.ensure_connected()
-        total = 0
-        async for _ in client.scan_iter(match=pattern, count=scan_count):
-            total += 1
-        return total

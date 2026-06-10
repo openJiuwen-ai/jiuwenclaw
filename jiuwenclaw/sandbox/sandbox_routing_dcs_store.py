@@ -73,10 +73,6 @@ class SandboxRoutingDcsStore:
     def _routing_key(routing_key: str) -> str:
         return f"{SANDBOX_ROUTING_REDIS_PREFIX}{routing_key}"
 
-    async def count_routing_entries(self) -> int:
-        """Count active ``jiuwen:sandboxRouting:*`` entries in DCS."""
-        return await self._dcs.count_keys(f"{SANDBOX_ROUTING_REDIS_PREFIX}*")
-
     @staticmethod
     def _serialize(record: SandboxRoutingRecord) -> str:
         return json.dumps(

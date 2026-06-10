@@ -245,7 +245,6 @@ def mock_routing_store(router: SandboxRouterAgentClient):
     store = MagicMock()
     store.get_routing = AsyncMock(return_value=None)
     store.set_routing_nx = AsyncMock(return_value=True)
-    store.count_routing_entries = AsyncMock(return_value=0)
     store.delete_routing = AsyncMock()
     store.close = AsyncMock()
     router._routing_dcs_store = store
@@ -354,88 +353,6 @@ async def test_stale_routing_without_endpoint_creates_new(
     assert runtime.sandbox_id == "sb-new"
     mock_routing_store.delete_routing.assert_called_with("vibeskill:user:user-a")
     mock_sandbox_client.create_sandbox.assert_called_once()
-
-
-@pytest.mark.asyncio
-async def test_create_rejected_when_dcs_total_capacity_reached(
-    router: SandboxRouterAgentClient,
-    mock_sandbox_client,
-    mock_routing_store,
-) -> None:
-    router._max_total_sandboxes = 2
-    mock_routing_store.count_routing_entries = AsyncMock(return_value=2)
-
-    with pytest.raises(RuntimeError, match="服务端繁忙，请稍后再试"):
-        await router._create_and_bind_sandbox(
-            "vibeskill:user:user-a",
-            user_id="user-a",
-            session_id="sess-a",
-        )
-
-    mock_sandbox_client.create_sandbox.assert_not_called()
-
-
-@pytest.mark.asyncio
-async def test_create_allowed_when_dcs_total_capacity_below_limit(
-    router: SandboxRouterAgentClient,
-    mock_sandbox_client,
-    mock_dcs_store,
-    mock_routing_store,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    router._max_total_sandboxes = 2
-    mock_routing_store.count_routing_entries = AsyncMock(return_value=1)
-    fake_client = FakeAgentClient()
-    monkeypatch.setattr(
-        router,
-        "_connect_open_ability_client",
-        AsyncMock(return_value=fake_client),
-    )
-    monkeypatch.setattr(
-        router,
-        "_register_sandbox_record",
-        AsyncMock(return_value={"sandbox_id": "sb-new", "api_key": "k", "api_key_sha256": "h"}),
-    )
-
-    runtime = await router._create_and_bind_sandbox(
-        "vibeskill:user:user-a",
-        user_id="user-a",
-        session_id="sess-a",
-    )
-
-    assert runtime.sandbox_id == "sb-new"
-    mock_sandbox_client.create_sandbox.assert_called_once()
-
-
-@pytest.mark.asyncio
-async def test_adopt_skips_dcs_total_capacity_check(
-    router: SandboxRouterAgentClient,
-    mock_sandbox_client,
-    mock_dcs_store,
-    mock_routing_store,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    router._max_total_sandboxes = 1
-    mock_routing_store.count_routing_entries = AsyncMock(return_value=99)
-    mock_routing_store.get_routing.return_value = SandboxRoutingRecord(
-        routing_key="vibeskill:user:user-a",
-        sandbox_id="sb-existing",
-        gateway_id="gw-1",
-        updated_at=1.0,
-    )
-    fake_client = FakeAgentClient()
-    monkeypatch.setattr(
-        router,
-        "_connect_open_ability_client",
-        AsyncMock(return_value=fake_client),
-    )
-    monkeypatch.setattr(router, "_register_sandbox_record", AsyncMock())
-
-    runtime = await router._acquire_runtime(_envelope())
-
-    assert runtime.sandbox_id == "sb-existing"
-    mock_routing_store.count_routing_entries.assert_not_called()
-    mock_sandbox_client.create_sandbox.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -784,6 +701,30 @@ async def test_adopted_runtime_restores_workspace_from_different_sandbox(
         ]
     }
     assert runtime.metadata["restored_session_ids"] == {"sess-a"}
+
+
+@pytest.mark.asyncio
+async def test_workspace_restore_queries_dcs_once_when_snapshot_missing() -> None:
+    router = SandboxRouterAgentClient(adopt_existing=False)
+    events: list[tuple[str, str]] = []
+    router._workspace_dcs_store = FakeWorkspaceDcsStore(events=events)  # type: ignore[assignment]
+    runtime = SandboxRuntime(
+        routing_key="vibeskill:user:user-a",
+        sandbox_id="sb-live",
+        agent_client=BackupAgentClient([]),
+        status=SandboxStatus.IDLE,
+        task_count=0,
+        metadata={
+            "routing_key": "vibeskill:user:user-a",
+            "user_id": "user-a",
+        },
+    )
+
+    await router._ensure_workspace_restored(runtime, _envelope(session_id="sess-new"))
+    await router._ensure_workspace_restored(runtime, _envelope(session_id="sess-new"))
+
+    assert events == [("get", "sess-new")]
+    assert runtime.metadata["restored_session_ids"] == {"sess-new"}
 
 
 @pytest.mark.asyncio

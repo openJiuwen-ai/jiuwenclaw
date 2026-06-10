@@ -108,15 +108,6 @@ async def test_routing_ttl_from_sandbox_dcs_ttl_env(
 
 
 @pytest.mark.asyncio
-async def test_count_routing_entries_scans_prefix() -> None:
-    store, fake = _make_store()
-    fake._data["jiuwen:sandboxRouting:vibeskill:user:u1"] = "{}"
-    fake._data["jiuwen:sandboxRouting:vibeskill:user:u2"] = "{}"
-    fake._data["jiuwen:sandboxApiKey:sb-1"] = "hash"
-    assert await store.count_routing_entries() == 2
-
-
-@pytest.mark.asyncio
 async def test_delete_routing_removes_mapping() -> None:
     store, fake = _make_store()
     key = "vibeskill:user:u1"

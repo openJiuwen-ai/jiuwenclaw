@@ -6,8 +6,6 @@ from dataclasses import dataclass
 _QUEUE_TIMEOUT_SECONDS = 60.0
 _IDLE_CHECK_INTERVAL_SECONDS = 30.0
 _DEFAULT_IDLE_TIMEOUT_SECONDS = 600.0
-_DEFAULT_MAX_SANDBOXES = 10
-_DEFAULT_MAX_TOTAL_SANDBOXES = 20
 _DEFAULT_QUEUE_MAX_SIZE = 100
 _DEFAULT_LINK_HEARTBEAT_TIMEOUT_SECONDS = 15.0
 _DEFAULT_LINK_HEARTBEAT_CHECK_INTERVAL_SECONDS = 5.0
@@ -20,7 +18,6 @@ def sandbox_routing_enabled() -> bool:
 @dataclass(frozen=True)
 class SandboxRoutingSettings:
     max_sandboxes: int
-    max_total_sandboxes: int
     queue_max_size: int
     queue_timeout_seconds: float = _QUEUE_TIMEOUT_SECONDS
     idle_timeout_seconds: float = _DEFAULT_IDLE_TIMEOUT_SECONDS
@@ -31,11 +28,7 @@ class SandboxRoutingSettings:
 
     @classmethod
     def from_env(cls) -> SandboxRoutingSettings:
-        max_sandboxes = _env_int("SANDBOX_MAX_NUM", default=_DEFAULT_MAX_SANDBOXES)
-        max_total_sandboxes = _env_int(
-            "SANDBOX_MAX_TOTAL_NUM",
-            default=_DEFAULT_MAX_TOTAL_SANDBOXES,
-        )
+        max_sandboxes = _env_optional_positive_int("SANDBOX_MAX_NUM")
         queue_max_size = _env_int("SANDBOX_MAX_QUEUE_SIZE", default=_DEFAULT_QUEUE_MAX_SIZE)
         idle_timeout_seconds = _env_float(
             "SANDBOX_IDLE_TIMEOUT_SECONDS",
@@ -50,8 +43,7 @@ class SandboxRoutingSettings:
             default=_DEFAULT_LINK_HEARTBEAT_CHECK_INTERVAL_SECONDS,
         )
         return cls(
-            max_sandboxes=max(1, max_sandboxes),
-            max_total_sandboxes=max(0, max_total_sandboxes),
+            max_sandboxes=max_sandboxes,
             queue_max_size=max(1, queue_max_size),
             queue_timeout_seconds=_QUEUE_TIMEOUT_SECONDS,
             idle_timeout_seconds=max(0.0, idle_timeout_seconds),
@@ -77,6 +69,17 @@ def _env_int(name: str, *, default: int) -> int:
     if raw is None or not str(raw).strip():
         return default
     return int(str(raw).strip())
+
+
+def _env_optional_positive_int(name: str) -> int:
+    """Return 0 when unset (unlimited). Raise if explicitly set to a non-positive value."""
+    raw = os.environ.get(name)
+    if raw is None or not str(raw).strip():
+        return 0
+    value = int(str(raw).strip())
+    if value <= 0:
+        raise ValueError(f"{name} must be greater than 0 when set, got {value}")
+    return value
 
 
 def _env_float(name: str, *, default: float) -> float:
