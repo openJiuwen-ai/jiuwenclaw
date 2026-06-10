@@ -4,7 +4,7 @@ import os
 import re
 import asyncio
 import logging
-from typing import Any, AsyncIterator, Optional
+from typing import TYPE_CHECKING, Any, AsyncIterator, Optional
 from contextvars import ContextVar
 from dataclasses import dataclass
 
@@ -17,12 +17,19 @@ from openjiuwen.core.foundation.llm.schema.config import ModelClientConfig
 from openjiuwen.core.foundation.llm.model_clients.openai_model_client import \
     AssistantMessageChunk, OpenAIModelClient, ToolCall, UsageMetadata
 from openjiuwen.core.foundation.llm.schema import ImageGenerationResponse
-from openjiuwen.core.foundation.llm.schema.message import UserMessage
-
+from openjiuwen.core.foundation.llm.schema.message import AssistantMessage, ToolMessage, UserMessage
 from openjiuwen.core.foundation.llm.model_clients.siliconflow_model_client import (
     SiliconFlowModelClient,
 )
 from openjiuwen.core.session.stream import OutputSchema
+from jiuwenclaw.tool_arguments_validator import (
+    tool_arguments_failure_message,
+    tool_arguments_failure_payload,
+    validate_tool_arguments,
+)
+
+if TYPE_CHECKING:
+    import openai
 
 llm_logger = logging.getLogger("jiuwenclaw.app")
 
@@ -45,6 +52,7 @@ _retry_session: ContextVar[Optional[Any]] = ContextVar("retry_session", default=
 
 
 _ORIGINAL_BUILD_REQUEST_PARAMS = None
+_ORIGINAL_PARSE_RESPONSE = None
 _ORIGINAL_GENERATE_IMAGE = None
 
 _HUAWEI_MAAS_API_MARKERS = (
@@ -431,15 +439,47 @@ class RetryMixin:
             raise last_error
 
 
+def _sanitize_wire_tool_arguments(params: dict[str, Any]) -> None:
+    messages = params.get("messages")
+    if not isinstance(messages, list):
+        return
+
+    for message in messages:
+        if not isinstance(message, dict) or message.get("role") != "assistant":
+            continue
+        tool_calls = message.get("tool_calls")
+        if not isinstance(tool_calls, list):
+            continue
+        finish_reason = message.get("finish_reason")
+        for tool_call in tool_calls:
+            if not isinstance(tool_call, dict):
+                continue
+            function = tool_call.get("function")
+            if not isinstance(function, dict):
+                continue
+            validation = validate_tool_arguments(
+                function.get("arguments", "{}"),
+                finish_reason=finish_reason,
+            )
+            if validation.ok:
+                function["arguments"] = validation.normalized
+                continue
+            function["arguments"] = "{}"
+            session_id = ""
+            llm_logger.warning(
+                "[tool_args_validation] action=wire_sanitize tool=%s tool_call_id=%s "
+                "kind=%s length=%s reason=%s session_id=%s",
+                function.get("name", ""),
+                tool_call.get("id", ""),
+                validation.kind,
+                validation.length,
+                validation.reason,
+                session_id,
+            )
+
+
 def _patched_build_request_params(self, *, stream: bool, **kwargs) -> dict:
-    """Patched version: ensure streaming requests carry ``stream_options={"include_usage": true}``.
-
-    Required for OpenAI-compatible streaming APIs to return the usage payload in
-    the final chunk; without it ``chunk.usage`` is always ``None`` and the
-    ``gen_ai.client.token.usage`` metric never gets recorded.
-
-    Respects a user-provided ``stream_options`` override.
-    """
+    """Patched version: ensure usage chunks and sanitize tool arguments before provider calls."""
     params = _ORIGINAL_BUILD_REQUEST_PARAMS(self, stream=stream, **kwargs)
     if stream:
         existing = params.get("stream_options")
@@ -447,6 +487,7 @@ def _patched_build_request_params(self, *, stream: bool, **kwargs) -> dict:
             params["stream_options"] = {"include_usage": True}
         elif isinstance(existing, dict) and "include_usage" not in existing:
             existing["include_usage"] = True
+    _sanitize_wire_tool_arguments(params)
     # Fallback max_tokens to environment variable if not configured
     if params.get("max_tokens") is None:
         env_max_tokens = os.environ.get("LLM_MAX_TOKENS")
@@ -454,7 +495,7 @@ def _patched_build_request_params(self, *, stream: bool, **kwargs) -> dict:
             try:
                 params["max_tokens"] = int(env_max_tokens)
             except ValueError:
-                logger.warning(
+                llm_logger.warning(
                     f"Invalid LLM_MAX_TOKENS env value: '{env_max_tokens}' (not an integer), ignoring"
                 )
     return params
@@ -522,6 +563,18 @@ class PatchOpenAIModelClient(RetryMixin, OpenAIModelClient):
             default_headers=client_default_headers
         )
 
+    async def _parse_response(self, response: Any, parser: Any = None) -> AssistantMessage:
+        assistant_message = await _ORIGINAL_PARSE_RESPONSE(self, response, parser)
+        choices = getattr(response, 'choices', None) or []
+        choice = choices[0] if choices else None
+        raw_finish_reason = getattr(choice, 'finish_reason', None)
+        metadata = dict(getattr(assistant_message, 'metadata', None) or {})
+        metadata['raw_finish_reason'] = raw_finish_reason
+        return assistant_message.model_copy(update={
+            'finish_reason': raw_finish_reason or "null",
+            'metadata': metadata,
+        })
+
     def _parse_stream_chunk(self, chunk: Any) -> Optional[AssistantMessageChunk]:
         """Parse OpenAI streaming response chunk
 
@@ -555,26 +608,6 @@ class PatchOpenAIModelClient(RetryMixin, OpenAIModelClient):
         )
         _is_glm51 = _model_name.lower() in ("glm-5.1", "glm5.1")
         _is_huawei_maas = _is_maas_endpoint and _is_glm51
-
-        # Check for usage-only chunk (empty choices with usage data - final chunk with stream_options)
-        _has_usage = hasattr(chunk, 'usage') and chunk.usage
-        _has_choices = bool(chunk.choices) if hasattr(chunk, 'choices') else False
-        if _has_usage and not _has_choices:
-            # This is the final usage chunk - parse it even if choices is empty
-            usage_metadata = UsageMetadata(
-                model_name=self.model_config.model_name,
-                input_tokens=getattr(chunk.usage, 'prompt_tokens', 0) or 0,
-                output_tokens=getattr(chunk.usage, 'completion_tokens', 0) or 0,
-                total_tokens=getattr(chunk.usage, 'total_tokens', 0) or 0,
-            )
-            # Return a chunk with only usage metadata (no content)
-            return AssistantMessageChunk(
-                content="",
-                reasoning_content=None,
-                tool_calls=None,
-                usage_metadata=usage_metadata,
-                finish_reason="stop",  # Usage chunk always indicates completion
-            )
 
         # When stream_options={"include_usage": true}, OpenAI sends a final
         # usage-only chunk with ``choices=[]`` and ``usage`` populated. Emit a
@@ -904,14 +937,17 @@ def apply_siliconflow_model_client_patch() -> None:
 
 def apply_openai_model_client_patch() -> None:
     """Monkey-patch upstream OpenAIModelClient with JiuwenClaw SSL/headers/stream behavior."""
-    global _ORIGINAL_BUILD_REQUEST_PARAMS, _ORIGINAL_GENERATE_IMAGE
+    global _ORIGINAL_BUILD_REQUEST_PARAMS, _ORIGINAL_PARSE_RESPONSE, _ORIGINAL_GENERATE_IMAGE
     if _ORIGINAL_BUILD_REQUEST_PARAMS is None:
         _ORIGINAL_BUILD_REQUEST_PARAMS = OpenAIModelClient._build_request_params
+    if _ORIGINAL_PARSE_RESPONSE is None:
+        _ORIGINAL_PARSE_RESPONSE = getattr(OpenAIModelClient, "_parse_response")
     if _ORIGINAL_GENERATE_IMAGE is None:
         _ORIGINAL_GENERATE_IMAGE = OpenAIModelClient.generate_image
 
     _impl = PatchOpenAIModelClient.__dict__
     setattr(OpenAIModelClient, "_create_async_openai_client", _impl["_create_async_openai_client"])
+    setattr(OpenAIModelClient, "_parse_response", _impl["_parse_response"])
     setattr(OpenAIModelClient, "_parse_stream_chunk", _impl["_parse_stream_chunk"])
     setattr(OpenAIModelClient, "_build_request_params", _patched_build_request_params)
 
@@ -956,9 +992,49 @@ def apply_tool_invoke_interface_log() -> None:
 
     async def _patched_execute(self, tool_call, session, tag=None):
         tool_name = str(getattr(tool_call, "name", "") or "unknown")
+        tool_call_id = str(getattr(tool_call, "id", "") or "")
         sid = session_id_from_context(session) or None
-        async with track_tool_resp(tool_name, session_id=sid):
-            return await _orig_execute(self, tool_call, session, tag=tag)
+        original_arguments = getattr(tool_call, "arguments", None)
+        validation = validate_tool_arguments(original_arguments)
+        if validation.ok:
+            if hasattr(tool_call, "arguments"):
+                tool_call.arguments = validation.normalized
+            if validation.normalized != original_arguments:
+                llm_logger.debug(
+                    "[tool_args_validation] action=normalize tool=%s tool_call_id=%s "
+                    "kind=%s length=%s session_id=%s",
+                    tool_name,
+                    tool_call_id,
+                    validation.kind,
+                    validation.length,
+                    sid,
+                )
+            async with track_tool_resp(tool_name, session_id=sid):
+                return await _orig_execute(self, tool_call, session, tag=tag)
+
+        result = tool_arguments_failure_payload(
+            tool_name=tool_name,
+            validation=validation,
+        )
+        message = tool_arguments_failure_message(
+            tool_name=tool_name,
+            validation=validation,
+        )
+        llm_logger.warning(
+            "[tool_args_validation] action=skip tool=%s tool_call_id=%s kind=%s "
+            "length=%s reason=%s session_id=%s",
+            tool_name,
+            tool_call_id,
+            validation.kind,
+            validation.length,
+            validation.reason,
+            sid,
+        )
+        return result, ToolMessage(
+            content=message,
+            tool_call_id=tool_call_id,
+            metadata=result,
+        )
 
     _patched_execute._jiuwen_interface_log_patched = True  # type: ignore[attr-defined]  # pylint: disable=protected-access
     AbilityManager._execute_single_tool_call = _patched_execute  # pylint: disable=protected-access
