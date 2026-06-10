@@ -668,15 +668,17 @@ class SkillDevService:
         if not full_path.exists() or not full_path.is_file():
             return self._error_chunk(request_id, channel_id, f"文件不存在: {file_path}")
 
+        editable = True
         try:
             content = full_path.read_text(encoding="utf-8")
         except UnicodeDecodeError:
             content = f"[二进制文件，大小 {full_path.stat().st_size} bytes]"
+            editable = False
 
         return AgentResponseChunk(
             request_id=request_id,
             channel_id=channel_id,
-            payload={"ok": True, "path": file_path, "content": content},
+            payload={"ok": True, "path": file_path, "content": content, "editable": editable},
             is_complete=True,
         )
 

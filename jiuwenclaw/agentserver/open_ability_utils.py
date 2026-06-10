@@ -13,9 +13,6 @@ logger = logging.getLogger(__name__)
 _SANDBOX_ID = None
 _API_KEY = None
 
-# Debug模式：保留初始化文件用于调试（默认False，生产环境应删除文件）
-_SANDBOX_INIT_DATA_DEBUG = os.getenv("SANDBOX_INIT_DATA_DEBUG", "").lower() in ("1", "true", "yes")
-
 
 async def oa_wait_connection_ack(ws: Any, timeout: float = 10.0) -> bool:
     """等待 OA 返回第一条建连成功消息。
@@ -44,10 +41,6 @@ async def oa_wait_connection_ack(ws: Any, timeout: float = 10.0) -> bool:
 def get_sandbox_init_data():
     """
     获取沙箱创建时 gw 持久化的 apikey 和 sandboxId
-
-    安全说明：
-    - 读取成功后默认会删除初始化文件，避免 apikey 长期存储在文件系统中
-    - 可通过设置环境变量 SANDBOX_INIT_DATA_DEBUG=1 保留文件用于调试
     """
     global _SANDBOX_ID, _API_KEY
     if _SANDBOX_ID and _API_KEY:
@@ -61,20 +54,8 @@ def get_sandbox_init_data():
             init_data = json.load(file)
             _SANDBOX_ID = init_data.get("sandboxId")
             _API_KEY = init_data.get("apiKey")
-        logger.info("[SandboxInitData] 成功读取初始化数据: sandboxId=%s", _SANDBOX_ID)
     except Exception as e:
         logger.error("[SandboxInitData] 初始化数据获取失败：%s", e)
-        return
-
-    # 安全清理：非 debug 模式下删除初始化文件
-    if not _SANDBOX_INIT_DATA_DEBUG:
-        try:
-            os.remove(init_path)
-            logger.info("[SandboxInitData] 已安全删除初始化文件: %s", init_path)
-        except Exception as e:
-            logger.warning("[SandboxInitData] 删除初始化文件失败: %s, 请手动检查文件权限", e)
-    else:
-        logger.warning("[SandboxInitData] Debug模式已开启，保留初始化文件: %s", init_path)
 
 
 def get_api_key():
