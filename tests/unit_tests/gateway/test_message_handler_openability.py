@@ -77,4 +77,6 @@ async def test_openability_reconnected_sends_skilldev_cancel_without_cancel_fina
     assert cancel_env.user_id == "user-a"
     assert cancel_env.params["intent"] == "cancel"
     assert cancel_env.params["task_id"] == "sid-a"
+    assert cancel_env.params["service_id"] == "sid-a"
+    assert cancel_env.service_id == "sid-a"
     assert await handler.consume_robot_messages(timeout=0) is None

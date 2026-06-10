@@ -292,7 +292,12 @@ class MessageHandler(ABC):
             type="req",
             channel_id=_VIBESKILL_CHANNEL_ID,
             session_id=sid,
-            params={"task_id": sid, "session_id": sid, "intent": "cancel"},
+            params={
+                "task_id": sid,
+                "session_id": sid,
+                "service_id": sid,
+                "intent": "cancel",
+            },
             timestamp=time.time(),
             ok=True,
             req_method=ReqMethod.SKILLDEV_CANCEL,
@@ -557,6 +562,7 @@ class MessageHandler(ABC):
             task_id = (msg.params or {}).get("task_id") or sid_for_agent
             if isinstance(task_id, str) and task_id.strip():
                 cancel_params["task_id"] = task_id.strip()
+            cancel_params["service_id"] = sid_for_agent
 
         cancel_req = Message(
             id=f"interrupt_{int(time.time() * 1000):x}_{secrets.token_hex(3)}",
