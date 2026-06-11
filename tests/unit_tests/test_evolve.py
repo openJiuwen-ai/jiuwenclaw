@@ -940,10 +940,9 @@ class TestEndToEnd:
 
     def test_evolve_disabled_by_default(self):
         """12.4: evolve.enabled=false means no scheduler."""
-        from jiuwenswarm.common.config import get_config
+        from jiuwenswarm.evolve import get_evolve_config
 
-        config = get_config()
-        evolve_cfg = config.get("evolve", {})
+        evolve_cfg = get_evolve_config()
         # Default is false
         assert evolve_cfg.get("enabled", False) is False
 

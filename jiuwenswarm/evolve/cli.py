@@ -38,9 +38,10 @@ def _build_pipeline_from_config(config: dict) -> object:
         decision_policies,
         apply_writers,
     )
+    from jiuwenswarm.evolve import get_evolve_config
     from jiuwenswarm.evolve.storage import create_evolution_store
 
-    evolve_cfg = config.get("evolve", {})
+    evolve_cfg = get_evolve_config()
     pipeline_cfg = evolve_cfg.get("pipeline", {})
 
     # Build store

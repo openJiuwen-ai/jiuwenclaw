@@ -183,10 +183,9 @@ async def _run(host: str, port: int) -> None:
     # ---- Evolution Scheduler (offline self-evolution) ----
     # Starts only when evolve.enabled and evolve.trigger.periodic.enabled are both true.
     try:
-        from jiuwenswarm.common.config import get_config
+        from jiuwenswarm.evolve import get_evolve_config
 
-        _config = get_config()
-        _evolve_cfg = _config.get("evolve", {})
+        _evolve_cfg = get_evolve_config()
         if _evolve_cfg.get("enabled") and _evolve_cfg.get("trigger", {}).get(
             "periodic", {}
         ).get("enabled"):
@@ -196,8 +195,12 @@ async def _run(host: str, port: int) -> None:
                 run_evolution_scheduler,
             )
 
+            from jiuwenswarm.common.config import get_config
+
+            _main_config = get_config()
+
             # Build pipeline from config
-            _store = create_evolution_store(_config)
+            _store = create_evolution_store(_main_config)
             _periodic_cfg = _evolve_cfg["trigger"]["periodic"]
             _limits = _evolve_cfg.get("pipeline", {}).get("limits", {})
             _max_traces = _limits.get("max_traces_per_batch", 10)

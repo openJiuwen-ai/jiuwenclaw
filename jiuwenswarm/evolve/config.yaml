@@ -1,0 +1,50 @@
+# ============================================================
+# 自演进（离线）配置
+# ============================================================
+# 基于 OTEL trace 的组件/模型双轨自演进。
+# 此文件由 jiuwenswarm/evolve/config.py 加载，可与主 config.yaml
+# 的 evolve: 段合并（主 config 中的 evolve 键优先级更高）。
+# ============================================================
+
+evolve:
+  enabled: false                    # 总开关，默认关闭
+
+  pipeline:
+    # Proposal 生成器列表（按列表顺序执行）
+    proposal_generators:
+      - rule_proposer               # Rule-based（无需 LLM，快速验证）
+      # - llm_proposer              # LLM-based（需要配置 evolve.llm）
+
+    # 决策策略列表（按列表顺序执行）
+    decision_policies:
+      - rule_policy                 # 规则验证（字段完整性、去重）
+      - eval_policy                 # 启发式评估（证据强度、根因质量）
+
+    # Apply 写回器列表
+    apply_writers:
+      - skill_writer                # 写入 Skill Store（evolutions.json）
+      - memory_writer               # 写入 Memory Policy Store
+      - training_writer             # 写入 training_candidates 表
+
+    # 数量限制
+    limits:
+      max_proposals_per_batch: 3    # 每批最多 Proposal 数（含 Behavior + Data）
+      max_behavior_proposals: 2     # 每批最多 Behavior Proposal（Skill/Memory）
+      max_traces_per_batch: 10      # 每批最多 trace 数
+
+  # 触发与采样
+  trigger:
+    periodic:
+      interval_seconds: 3600        # 周期性触发间隔（秒）
+      enabled: false                # 周期性触发开关
+    sampler:
+      strategy: latest_n            # latest_n | time_window
+
+  # 存储
+  storage:
+    sqlite_path: "evolution.db"     # SQLite 路径（相对于 data_dir）
+    file_path: "evolution"          # 文件系统路径（相对于 workspace）
+
+  # 演进专用 LLM
+  llm:
+    model_name: "gpt-4"             # 如不配置，回退到 agents.default_model
