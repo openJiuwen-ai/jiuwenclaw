@@ -1828,6 +1828,9 @@ def main() -> None:
     web_port = args.port or int(os.getenv("WEB_PORT", "19000"))
     web_path = args.web_path or os.getenv("WEB_PATH", "/ws")
 
+    from jiuwenswarm.telemetry import init_telemetry
+    init_telemetry()
+
     asyncio.run(
         _run(
             agent_server_url=agent_server_url,

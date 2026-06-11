@@ -2293,6 +2293,18 @@ class JiuWenClawDeepAdapter:
         return stream_event_rail
 
     @staticmethod
+    def _build_telemetry_rail() -> Any | None:
+        """Build TelemetryRail for OpenTelemetry instrumentation."""
+        try:
+            from jiuwenswarm.telemetry.instrumentors.telemetry_rail import TelemetryRail
+            rail = TelemetryRail()
+            logger.info("[JiuWenClawDeepAdapter] TelemetryRail create success")
+        except Exception as exc:
+            logger.warning("[JiuWenClawDeepAdapter] TelemetryRail create failed: %s", exc)
+            rail = None
+        return rail
+
+    @staticmethod
     def _build_task_planning_rail() -> TaskPlanningRail | None:
         """Build TaskPlanningRail."""
         try:
@@ -2437,6 +2449,8 @@ class JiuWenClawDeepAdapter:
                 self.params = self.params or {}
 
         rail_infos = [
+            # TelemetryRail - lowest priority, runs first for full coverage
+            _RailBuildInfo("_telemetry_rail", self._build_telemetry_rail),
             _RailBuildInfo("_runtime_prompt_rail", self._build_runtime_prompt_rail),
             _RailBuildInfo("_response_prompt_rail", self._build_response_prompt_rail),
             _RailBuildInfo("_stream_event_rail", self._build_stream_event_rail),
