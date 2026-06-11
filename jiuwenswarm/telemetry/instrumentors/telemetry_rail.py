@@ -150,7 +150,7 @@ def _hook_safe(method):
             return None
         try:
             return await method(self, *args, **kwargs)
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc: 
             self._failure_count = getattr(self, "_failure_count", 0) + 1
             logger.warning(
                 "[TelemetryRail] hook %s failed (%d/%d): %s",
