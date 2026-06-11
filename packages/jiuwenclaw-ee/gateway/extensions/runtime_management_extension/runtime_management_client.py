@@ -292,6 +292,8 @@ class RuntimeManagementAgentClient(AgentServerClient):
     def __init__(self) -> None:
         """初始化 Runtime Management 客户端。"""
         self.gateway_id = uuid_mod.uuid4().hex[:8]
+        self.namespace = os.getenv("NAMESPACE")
+        self.kubeconfig = os.getenv("AGENT_SERVER_KUBECONFIG") or None
 
         agent_image = os.getenv("AGENT_SERVER_IMAGE")
         agent_runtime = os.getenv("AGENT_RUNTIME")
@@ -299,9 +301,9 @@ class RuntimeManagementAgentClient(AgentServerClient):
         agent_memory_request = os.getenv("AGENT_SERVER_MEMORY_REQUEST")
         agent_cpu_limit = os.getenv("AGENT_SERVER_CPU_LIMIT")
         agent_memory_limit = os.getenv("AGENT_SERVER_MEMORY_LIMIT")
+        agent_readiness_initial_delay = int(os.getenv("AGENT_SERVER_READINESS_INITIAL_DELAY", "10"))
+        agent_readiness_period = int(os.getenv("AGENT_SERVER_READINESS_PERIOD", "5"))
 
-        namespace = os.getenv("AGENT_SERVER_NAMESPACE")
-        self._namespace = os.getenv("AGENT_SERVER_NAMESPACE")
         container_name = os.getenv("AGENT_SERVER_CONTAINER_NAME", "agentserver")
         container_port = int(os.getenv("AGENT_SERVER_PORT", "8080"))
         port_name = os.getenv("AGENT_SERVER_PORT_NAME", "http")
@@ -317,10 +319,10 @@ class RuntimeManagementAgentClient(AgentServerClient):
         host_path = os.getenv("AGENT_SERVER_HOST_PATH")
         host_mount_path = os.getenv("AGENT_SERVER_HOST_MOUNT_PATH")
 
-        agentserver_host_mounts: list[HostPathMount] = []
+        agent_host_mounts: list[HostPathMount] = []
         # 只有当 host_path 和 host_mount_path 都配置时，才添加挂载
         if host_path and host_mount_path:
-            agentserver_host_mounts.append(
+            agent_host_mounts.append(
                 HostPathMount(
                     host_path=host_path,
                     mount_path=host_mount_path,
@@ -331,10 +333,6 @@ class RuntimeManagementAgentClient(AgentServerClient):
 
         mode = os.getenv("MODE")
         node_name = os.getenv("NODE_NAME")
-        kubeconfig = os.getenv("AGENT_SERVER_KUBECONFIG") or None
-        self._kubeconfig = os.getenv("AGENT_SERVER_KUBECONFIG") or None
-        readiness_initial_delay = int(os.getenv("AGENT_SERVER_READINESS_INITIAL_DELAY", "10"))
-        readiness_period = int(os.getenv("AGENT_SERVER_READINESS_PERIOD", "5"))
         ready_timeout = int(os.getenv("AGENT_SERVER_READY_TIMEOUT", "300"))
         ready_poll_interval = int(os.getenv("AGENT_SERVER_READY_POLL_INTERVAL", "5"))
 
@@ -361,14 +359,10 @@ class RuntimeManagementAgentClient(AgentServerClient):
         jiuwenbox_memory_request = os.getenv("JIUWENBOX_MEMORY_REQUEST")
         jiuwenbox_cpu_limit = os.getenv("JIUWENBOX_CPU_LIMIT")
         jiuwenbox_memory_limit = os.getenv("JIUWENBOX_MEMORY_LIMIT")
-
-        jiuwenbox_container_name = os.getenv(
-            "JIUWENBOX_CONTAINER_NAME", "jiuwenbox"
-        )
-        jiuwenbox_url = os.getenv(
-            "JIUWENBOX_URL",
-            f"http://127.0.0.1:{jiuwenbox_port}",
-        )
+        jiuwenbox_container_name = os.getenv("JIUWENBOX_CONTAINER_NAME", "jiuwenbox" )
+        jiuwenbox_url = os.getenv("JIUWENBOX_URL",f"http://127.0.0.1:{jiuwenbox_port}")
+        jiuwenbox_readiness_initial_delay = int(os.getenv("JIUWENBOX_READINESS_INITIAL_DELAY", "10"))
+        jiuwenbox_readiness_period = int(os.getenv("JIUWENBOX_READINESS_PERIOD", "5"))
         jiuwenbox_excluded_commands = os.getenv("JIUWENBOX_EXCLUDED_COMMANDS", "")
         jiuwenbox_idle_ttl_seconds = os.getenv("JIUWENBOX_IDLE_TTL_SECONDS", "")
         jiuwenbox_idle_check_interval = os.getenv("JIUWENBOX_IDLE_CHECK_INTERVAL", "")
@@ -493,7 +487,7 @@ class RuntimeManagementAgentClient(AgentServerClient):
                         port=int(cfg["container_port"]) if cfg.get("container_port") is not None else container_port,
                         image_pull_policy=cfg.get("image_pull_policy") or image_pull_policy,
                         env_vars=agent_container_env,
-                        host_path_mounts=agentserver_host_mounts,
+                        host_path_mounts=agent_host_mounts,
                         allow_privilege_escalation=True if mode == "dev" else None,
                         run_as_non_root=False if mode == "dev" else None,
                         run_as_user=0 if mode == "dev" else None,
@@ -502,6 +496,9 @@ class RuntimeManagementAgentClient(AgentServerClient):
                         memory_request=cfg.get("memory_request") or agent_memory_request,
                         cpu_limit=cfg.get("cpu_limit") or agent_cpu_limit,
                         memory_limit=cfg.get("memory_limit") or agent_memory_limit,
+                        readiness_probe_type="websockets",
+                        readiness_initial_delay=agent_readiness_initial_delay,
+                        readiness_period=agent_readiness_period,
                     )
                     target_container = agent_server_container.name
                     containers = [agent_server_container]
@@ -525,6 +522,9 @@ class RuntimeManagementAgentClient(AgentServerClient):
                             memory_request=jiuwenbox_memory_request,
                             cpu_limit=jiuwenbox_cpu_limit,
                             memory_limit=jiuwenbox_memory_limit,
+                            readiness_probe_type="tcp",
+                            readiness_initial_delay=jiuwenbox_readiness_initial_delay,
+                            readiness_period=jiuwenbox_readiness_period,
                         )
                         containers.append(jiuwenbox_container)
                     target_port = (
@@ -535,20 +535,13 @@ class RuntimeManagementAgentClient(AgentServerClient):
                     k8s = K8sServiceHandler(
                         containers=containers,
                         name_prefix="jiuwenclaw",
-                        namespace=namespace,
+                        namespace=_client.namespace,
                         pod_name=cfg.get("pod_name") or container_name,
                         extra_labels={
                             **RuntimeManagementAgentClient.POD_LABEL,
                             RuntimeManagementAgentClient.GATEWAY_ID_LABEL_KEY: _client.gateway_id,
                         },
-                        kubeconfig=cfg.get("kubeconfig") or kubeconfig,
-                        readiness_initial_delay=(
-                            int(cfg["readiness_initial_delay"])
-                            if cfg.get("readiness_initial_delay") is not None
-                            else readiness_initial_delay
-                        ),
-                        readiness_period=(int(cfg["readiness_period"])
-                                          if cfg.get("readiness_period") is not None else readiness_period),
+                        kubeconfig=cfg.get("kubeconfig") or _client.kubeconfig,
                         ready_timeout=(int(cfg["ready_timeout"])
                                        if cfg.get("ready_timeout") is not None else ready_timeout),
                         ready_poll_interval=(int(cfg["ready_poll_interval"])
@@ -779,8 +772,8 @@ class RuntimeManagementAgentClient(AgentServerClient):
                 self.gateway_id, label_selector,
             )
             await self._access.cleanup_all_pods(
-                namespace=self._namespace,
-                kubeconfig=self._kubeconfig,
+                namespace=self.namespace,
+                kubeconfig=self.kubeconfig,
                 label_selector=label_selector,
             )
         except Exception as exc:

@@ -66,6 +66,9 @@ from jiuwenclaw.security.ws_origin import (
 
 logger = logging.getLogger(__name__)
 
+# 将 websockets.server 日志级别设为 WARNING，屏蔽 K8s 健康检查产生的大量日志
+logging.getLogger("websockets.server").setLevel(logging.WARNING)
+
 # 流式处理心跳间隔：当 Agent 处理时间超过此阈值时，发送心跳 chunk 保持 WebSocket 连接活跃
 # 避免 ping_timeout 导致连接关闭。默认 10 秒，小于服务端 ping_timeout=20s。
 _STREAM_HEARTBEAT_INTERVAL_SECONDS = 10.0
@@ -214,8 +217,6 @@ class AgentWebSocketServer:
     def port(self) -> int:
         return self._port
 
-    # ---------- 生命周期 ----------
-
     async def start(self) -> None:
         """启动 WebSocket 服务端，开始监听连接。优先使用 legacy.server.serve 以与 Gateway 的 legacy client 握手兼容."""
         await self._trigger_before_ws_server_start_hook()
@@ -262,14 +263,17 @@ class AgentWebSocketServer:
         """在握手阶段执行 Origin 校验，兼容 legacy/new websockets APIs。"""
         path, request_headers = extract_handshake_request(args)
         origin = get_header_value(request_headers, "Origin")
-
         allowed = is_allowed_browser_origin(origin)
-        logger.info(
-            "[AgentWebSocketServer] 握手检查 path=%s origin=%s allowed=%s",
-            path,
-            origin,
-            allowed,
-        )
+
+        # 避免k8s派来的探针产生大量日志
+        is_probe = bool(path and "K8s-Readiness-Probe" in path)
+        if not is_probe:
+            logger.info(
+                "[AgentWebSocketServer] 握手检查 path=%s origin=%s allowed=%s",
+                path,
+                origin,
+                allowed,
+            )
         if allowed:
             return None
 
@@ -299,6 +303,23 @@ class AgentWebSocketServer:
     async def _connection_handler(self, ws: Any) -> None:
         """处理单个 Gateway WebSocket 连接，同一连接可并发处理多个请求."""
         import websockets
+
+        # 如果是探针，走独立静音通道，避免干扰推送, 直接给它发个响应，证明握手和状态机是完全健康的
+        path = getattr(ws, "path", "")
+        is_probe = bool(path and "K8s-Readiness-Probe" in path)
+        if is_probe:
+            try:
+                # 发送 connection.ack 给探针脚本
+                ack_frame = {
+                    "type": "event",
+                    "event": "connection.ack",
+                    "payload": {"status": "ready"},
+                }
+                await ws.send(json.dumps(ack_frame, ensure_ascii=False))
+            except Exception:
+                pass
+            return
+
         # 和客户端连接成功后, 触发agentserver启动成功的回调事件
         await self._trigger_agent_server_started_hook()
 

@@ -30,7 +30,7 @@ spec:
             - name: NFS_DISABLE_VERSION_3
               value: "1"
             - name: NFS_EXPORT_0
-              value: "/exports *(rw,sync,no_subtree_check,no_root_squash,fsid=0)"
+              value: "/exports *(rw,sync,no_subtree_check,no_root_squash,fsid=0,insecure)"
           ports:
             - containerPort: 2049
               name: nfs

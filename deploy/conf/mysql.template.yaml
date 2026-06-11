@@ -46,6 +46,10 @@ spec:
       containers:
         - name: <<MYSQL_NAME>>
           image: <<MYSQL_IMAGE>>
+          imagePullPolicy: IfNotPresent
+          args:
+            - --innodb_use_native_aio=0
+            - --innodb_flush_method=O_DIRECT_NO_FSYNC
           env:
             - name: MYSQL_ROOT_PASSWORD
               value: "<<MYSQL_ROOT_PASSWORD>>"  # 生产环境请务必修改！

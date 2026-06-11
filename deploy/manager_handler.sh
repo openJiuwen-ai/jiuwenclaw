@@ -20,6 +20,6 @@ uninstall_manager() {
     local manager_name="${DEPLOY_VARS["MANAGER_NAME"]}"
     local file="${CONFIG["MANAGER_FILE"]}"
 
-    exec_cmd kubectl delete -f ${file}
+    exec_cmd kubectl delete -f ${file} --ignore-not-found=true
     wait_pod_terminated "${manager_name}" "${namespace}"
 }

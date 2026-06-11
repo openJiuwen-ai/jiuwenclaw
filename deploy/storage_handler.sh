@@ -18,8 +18,8 @@ uninstall_pv_pvc() {
     local pv_file="${CONFIG["PV_FILE"]}"
     local pvc_file="${CONFIG["PVC_FILE"]}"
 
-    exec_cmd kubectl delete -f ${pvc_file} false
-    exec_cmd kubectl delete -f ${pv_file} false
+    exec_cmd kubectl delete -f ${pvc_file} --ignore-not-found=true
+    exec_cmd kubectl delete -f ${pv_file} --ignore-not-found=true
 }
 
 

@@ -17,6 +17,6 @@ uninstall_postgresql() {
     local pg_name="${DEPLOY_VARS["POSTGRES_NAME"]}"
     local file="${CONFIG["POSTGRES_FILE"]}"
 
-    exec_cmd kubectl delete -f ${file}
+    exec_cmd kubectl delete -f ${file} --ignore-not-found=true
     wait_pod_terminated "${pg_name}"
 }

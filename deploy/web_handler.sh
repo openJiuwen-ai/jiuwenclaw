@@ -19,6 +19,6 @@ uninstall_web() {
     local web_name="${DEPLOY_VARS["WEB_NAME"]}"
     local file="${CONFIG["WEB_FILE"]}"
 
-    exec_cmd kubectl delete -f ${file}
+    exec_cmd kubectl delete -f ${file} --ignore-not-found=true
     wait_pod_terminated "${web_name}" "${namespace}"
 }

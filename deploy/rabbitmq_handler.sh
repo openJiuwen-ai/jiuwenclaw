@@ -24,7 +24,7 @@ uninstall_rabbitmq() {
     local rabbitmq_name="${DEPLOY_VARS["RABBITMQ_NAME"]}"
     local file="${CONFIG["RABBITMQ_FILE"]}"
 
-    exec_cmd kubectl delete -f ${file}
+    exec_cmd kubectl delete -f ${file} --ignore-not-found=true
     wait_pod_terminated "${rabbitmq_name}"
 }
 

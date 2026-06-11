@@ -16,6 +16,6 @@ uninstall_redis() {
     local redis_name="${DEPLOY_VARS["REDIS_NAME"]}"
     local file="${CONFIG["REDIS_FILE"]}"
 
-    exec_cmd kubectl delete -f "${file}"
+    exec_cmd kubectl delete -f "${file}" --ignore-not-found=true
     wait_pod_terminated "${redis_name}" "default"
 }

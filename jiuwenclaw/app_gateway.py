@@ -83,6 +83,9 @@ load_dotenv(dotenv_path=get_env_file())
 
 logger = logging.getLogger(__name__)
 
+# 将 websockets.client 日志级别设为 WARNING，屏蔽大量 websockets 打印日志
+logging.getLogger("websockets.client").setLevel(logging.WARNING)
+
 # Keep gateway idle-finalize fallback aligned with ACP channel default.
 _PROMPT_IDLE_FINALIZE_SECONDS = 3.0
 
