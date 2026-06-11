@@ -351,6 +351,33 @@ team_observability:
 tokenjuice:
   enabled: true                     # 总开关，设为 false 关闭压缩
   max_inline_chars: 1200            # 压缩后最大字符数
+# 自演进（离线）— 基于 OTEL trace 的组件/模型双轨自演进
+# ============================================================
+evolve:
+  enabled: false                    # 总开关，默认关闭
+  pipeline:
+    proposal_generators:
+      - rule_proposer               # Rule-based（无需 LLM，快速验证）
+      # - llm_proposer              # LLM-based（需要配置 evolve.llm）
+    decision_policies:
+      - rule_policy
+      - eval_policy
+    apply_writers:
+      - skill_writer
+      - memory_writer
+      - training_writer
+  trigger:
+    periodic:
+      interval_seconds: 3600        # 周期性触发间隔（秒）
+      enabled: false                # 周期性触发开关（需同时 evolve.enabled: true）
+    sampler:
+      strategy: latest_n            # latest_n | time_window
+      max_traces_per_batch: 20      # 每批最多 trace 数
+  storage:
+    sqlite_path: "evolution.db"     # SQLite 路径（相对于 data_dir）
+    file_path: "evolution"          # 文件系统路径（相对于 workspace）
+  llm:
+    model_name: "gpt-4"             # 演进专用 LLM（如不配置，回退到 agents.default_model）
 
 react:
   agent_name: main_agent
