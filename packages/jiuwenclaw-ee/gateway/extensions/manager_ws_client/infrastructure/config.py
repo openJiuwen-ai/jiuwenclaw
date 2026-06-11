@@ -84,6 +84,11 @@ class Settings(BaseSettings):
         validation_alias="GATEWAY_MANAGER_WS_HEARTBEAT_INTERVAL_SECONDS",
         description="Interval for Gateway → Manager WebSocket heartbeats (seconds)",
     )
+    gateway_manager_ws_pod_status_interval_seconds: int = Field(
+        default=30,
+        validation_alias="GATEWAY_MANAGER_WS_POD_STATUS_INTERVAL_SECONDS",
+        description="Interval for Gateway -> Manager AgentServer Pod status reports (seconds)",
+    )
 
     # ========== 配置下发字段级解密（信封解密，私钥本机自持） ==========
     gateway_config_dec_enabled: bool = Field(

@@ -11,6 +11,7 @@ FRAME_TYPE_HEARTBEAT = "heartbeat"
 FRAME_TYPE_HEARTBEAT_ACK = "heartbeat.ack"
 FRAME_TYPE_CONFIG_PUSH = "config.push"
 FRAME_TYPE_CONFIG_ACK = "config.ack"
+FRAME_TYPE_POD_STATUS_REPORT = "pod_status.report"
 FRAME_TYPE_ERROR = "error"
 
 EVENT_CONNECTION_ACK = "connection.ack"
@@ -69,6 +70,25 @@ def build_heartbeat(
     if seq is not None:
         payload["seq"] = seq
     return {"type": FRAME_TYPE_HEARTBEAT, "payload": payload}
+
+
+def build_pod_status_report(
+    *,
+    jiuwenclaw_id: str,
+    service_type: str = "gateway",
+    snapshot_time: str,
+    data: dict[str, Any],
+) -> dict[str, Any]:
+    """构建 Pod 状态上报帧（Gateway -> Manager）。"""
+    return {
+        "type": FRAME_TYPE_POD_STATUS_REPORT,
+        "payload": {
+            "jiuwenclaw_id": str(jiuwenclaw_id or "").strip(),
+            "service_type": service_type,
+            "snapshot_time": snapshot_time,
+            "data": data,
+        },
+    }
 
 
 def build_heartbeat_ack(

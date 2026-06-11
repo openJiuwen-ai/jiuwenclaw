@@ -46,12 +46,16 @@ from jiuwenclaw_manager.core.instance.instance_service import (
 from jiuwenclaw_manager.manager_ws_server.protocol import (
     FRAME_TYPE_CONFIG_ACK,
     FRAME_TYPE_HEARTBEAT,
+    FRAME_TYPE_POD_STATUS_REPORT,
     FRAME_TYPE_REGISTER,
     build_config_push,
     build_connection_ack,
     build_error,
     build_heartbeat_ack,
     build_register_ack,
+)
+from jiuwenclaw_manager.manager_ws_server.pod_status_cache import (
+    update_pod_status_snapshot,
 )
 
 logger = get_logger(__name__)
@@ -470,6 +474,9 @@ class ManagerWsServer:
         if frame_type == FRAME_TYPE_HEARTBEAT:
             await self._handle_heartbeat(ws, key, data)
             return
+        if frame_type == FRAME_TYPE_POD_STATUS_REPORT:
+            await self._handle_pod_status_report(key, data)
+            return
 
         err = build_error(f"unsupported frame type: {frame_type!r}")
         await ws.send(json.dumps(err, ensure_ascii=False))
@@ -541,6 +548,43 @@ class ManagerWsServer:
                 jid,
                 exc,
             )
+
+    async def _handle_pod_status_report(self, key: int, data: dict[str, Any]) -> None:
+        payload = data.get("payload")
+        if not isinstance(payload, dict):
+            return
+        async with self._clients_lock:
+            client = self._clients.get(key)
+            if client is None:
+                return
+            if self._jiuwenclaw_id_ws_id_map.get(client.jiuwenclaw_id) != key:
+                return
+        jid = str(payload.get("jiuwenclaw_id") or "").strip()
+        if jid != client.jiuwenclaw_id:
+            logger.warning(
+                "[ManagerWsServer] pod_status.report jiuwenclaw_id mismatch: %s != %s",
+                jid,
+                client.jiuwenclaw_id,
+            )
+            return
+        status_data = payload.get("data")
+        if not isinstance(status_data, dict):
+            logger.warning(
+                "[ManagerWsServer] pod_status.report data must be object jiuwenclaw_id=%s",
+                jid,
+            )
+            return
+        snapshot_time = payload.get("snapshot_time")
+        update_pod_status_snapshot(
+            jid,
+            snapshot_time=str(snapshot_time) if snapshot_time else None,
+            data=status_data,
+        )
+        logger.debug(
+            "[ManagerWsServer] pod_status.report cached jiuwenclaw_id=%s total=%s",
+            jid,
+            status_data.get("total"),
+        )
 
     async def _handle_register(self, ws: Any, key: int, data: dict[str, Any]) -> None:
         payload = data.get("payload")

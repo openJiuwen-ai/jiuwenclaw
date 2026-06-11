@@ -351,6 +351,7 @@ class RuntimeManagementAgentClient(AgentServerClient):
         gateway_db_name = os.getenv("GATEWAY_DB_NAME")
 
         deploy_mode = (os.getenv("AGENT_SERVER_DEPLOY_MODE") or "k8s").strip().lower()
+        self._deploy_mode = deploy_mode
 
         # jiuwenbox sidecar: agentserver 与 jiuwenbox 同 Pod，使用 127.0.0.1 访问。
         jiuwenbox_enabled = _env_bool("JIUWENBOX_ENABLED", False)
@@ -600,6 +601,8 @@ class RuntimeManagementAgentClient(AgentServerClient):
                 autoscale_interval=autoscale_interval,
                 service_idle_ttl=service_ttl,
                 service_templates=service_templates,
+                namespace=namespace or "default",
+                kubeconfig=kubeconfig,
             )
 
         self._create_service_manager = create_service_manager
@@ -610,6 +613,66 @@ class RuntimeManagementAgentClient(AgentServerClient):
     def server_ready(self) -> bool:
         """WebChannel on_connect 依赖此标志发送 connection.ack。"""
         return self._connected
+
+    async def collect_pod_status(self, include_metrics: bool = False) -> dict[str, Any]:
+        """采集当前 Gateway 创建的 AgentServer Pod 状态。"""
+        namespace = self._namespace or "default"
+        label_selector = (
+            f"{self.POD_LABEL_SELECTOR},"
+            f"{self.GATEWAY_ID_LABEL_KEY}={self.gateway_id}"
+        )
+        if self._deploy_mode != "k8s":
+            return {
+                "runtime_gateway_id": self.gateway_id,
+                "namespace": namespace,
+                "label_selector": label_selector,
+                "deploy_mode": self._deploy_mode,
+                "total": 0,
+                "running": 0,
+                "failed": 0,
+                "pods": [],
+            }
+        pods = await K8sServiceHandler.monitor_pods_status(
+            namespace=namespace,
+            label_selector=label_selector,
+            kubeconfig=self._kubeconfig,
+            include_metrics=include_metrics,
+        )
+        failed_statuses = {
+            "Terminating",
+            "Failed",
+            "Error",
+            "Terminated",
+            "CrashLoopBackOff",
+            "ImagePullBackOff",
+            "ErrImagePull",
+        }
+        return {
+            "runtime_gateway_id": self.gateway_id,
+            "namespace": namespace,
+            "label_selector": label_selector,
+            "total": len(pods),
+            "running": sum(1 for pod in pods if pod.status == "Running"),
+            "failed": sum(1 for p in pods if p.status in failed_statuses),
+            "pods": [
+                {
+                    "pod_name": pod.pod_name,
+                    "namespace": pod.namespace,
+                    "status": pod.status,
+                    "phase": pod.phase,
+                    "pod_ip": pod.pod_ip,
+                    "host_ip": pod.host_ip,
+                    "node_name": pod.node_name,
+                    "reason": pod.reason,
+                    "message": pod.message,
+                    "restart_count": pod.restart_count,
+                    "deletion_timestamp": pod.deletion_timestamp,
+                    "cpu_usage_cores": pod.cpu_usage_cores,
+                    "memory_usage_bytes": pod.memory_usage_bytes,
+                }
+                for pod in pods
+            ],
+        }
 
     def set_or_update_server_config(
         self,

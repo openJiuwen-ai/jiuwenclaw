@@ -7,6 +7,7 @@ import asyncio
 import json
 import logging
 from collections.abc import Awaitable, Callable
+from datetime import datetime, timezone
 from typing import Any
 from urllib.parse import urlsplit
 
@@ -34,6 +35,7 @@ from .protocol import (
     FRAME_TYPE_HEARTBEAT_ACK,
     build_config_ack,
     build_heartbeat,
+    build_pod_status_report,
     build_register,
 )
 
@@ -101,6 +103,11 @@ class ManagerWsClient:
         self._replay_guard = ReplayGuard(
             ttl_seconds=max(60.0, float(cfg.gateway_config_sign_skew_seconds) * 2)
         )
+
+        self._pod_status_interval_seconds = max(
+            1.0, float(cfg.gateway_manager_ws_pod_status_interval_seconds)
+        )
+        self._send_lock = asyncio.Lock()
 
     @property
     def jiuwenclaw_id(self) -> str | None:
@@ -354,6 +361,10 @@ class ManagerWsClient:
             self._heartbeat_loop(ws),
             name="manager-ws-heartbeat",
         )
+        pod_status_task = asyncio.create_task(
+            self._pod_status_report_loop(ws),
+            name="manager-ws-pod-status-report",
+        )
         try:
             async for raw in ws:
                 try:
@@ -364,8 +375,13 @@ class ManagerWsClient:
                 await self._dispatch(ws, data)
         finally:
             heartbeat_task.cancel()
+            pod_status_task.cancel()
             try:
                 await heartbeat_task
+            except asyncio.CancelledError:
+                pass
+            try:
+                await pod_status_task
             except asyncio.CancelledError:
                 pass
             self._heartbeat_ack_event = None
@@ -387,7 +403,8 @@ class ManagerWsClient:
                 seq=seq,
             )
             try:
-                await ws.send(json.dumps(frame, ensure_ascii=False))
+                async with self._send_lock:
+                    await ws.send(json.dumps(frame, ensure_ascii=False))
             except Exception as exc:  # noqa: BLE001
                 logger.debug("[ManagerWsClient] heartbeat send failed: %s", exc)
                 return
@@ -409,6 +426,41 @@ class ManagerWsClient:
                 except Exception:  # noqa: BLE001
                     pass
                 return
+
+    async def _pod_status_report_loop(self, ws: Any) -> None:
+        """周期性上报当前 Gateway 创建的 AgentServer Pod 状态。"""
+        while True:
+            await asyncio.sleep(self._pod_status_interval_seconds)
+            jid = get_jiuwenclaw_id()
+            if not jid:
+                continue
+            try:
+                from jiuwenclaw.extensions.registry import ExtensionRegistry
+
+                registry = ExtensionRegistry.get_instance()
+                ext = registry.get_agent_server_client_extension()
+                if ext is None or not hasattr(ext, "get_client"):
+                    continue
+                client = ext.get_client()
+                if client is None or not hasattr(client, "collect_pod_status"):
+                    continue
+                status_data = await client.collect_pod_status()
+                snapshot_time = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+                frame = build_pod_status_report(
+                    jiuwenclaw_id=jid,
+                    service_type=self._service_type,
+                    snapshot_time=snapshot_time,
+                    data=status_data,
+                )
+                async with self._send_lock:
+                    await ws.send(json.dumps(frame, ensure_ascii=False))
+                logger.debug(
+                    "[ManagerWsClient] pod_status.report sent jiuwenclaw_id=%s total=%s",
+                    jid,
+                    status_data.get("total"),
+                )
+            except Exception as exc:
+                logger.warning("[ManagerWsClient] pod_status.report failed: %s", exc)
 
     def _notify_heartbeat_ack(self, data: dict[str, Any]) -> None:
         ack_event = self._heartbeat_ack_event
@@ -524,7 +576,7 @@ class ManagerWsClient:
                     jiuwenclaw_id,
                     config,
                 )
-            except Exception as exc:  # noqa: BLE001
+            except Exception as exc:
                 success_flag = False
                 err_msg = str(exc)
                 logger.exception("[ManagerWsClient] on_config_push failed: %s", exc)
@@ -535,7 +587,8 @@ class ManagerWsClient:
             error_message=err_msg,
             result=sync_result,
         )
-        await ws.send(json.dumps(ack, ensure_ascii=False))
+        async with self._send_lock:
+            await ws.send(json.dumps(ack, ensure_ascii=False))
         logger.info(
             "[ManagerWsClient] config.ack revision=%s success_flag=%s",
             revision,

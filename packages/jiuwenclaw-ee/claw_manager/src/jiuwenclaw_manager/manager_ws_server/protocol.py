@@ -10,6 +10,7 @@ FRAME_TYPE_HEARTBEAT = "heartbeat"
 FRAME_TYPE_HEARTBEAT_ACK = "heartbeat.ack"
 FRAME_TYPE_CONFIG_PUSH = "config.push"
 FRAME_TYPE_CONFIG_ACK = "config.ack"
+FRAME_TYPE_POD_STATUS_REPORT = "pod_status.report"
 FRAME_TYPE_ERROR = "error"
 
 EVENT_CONNECTION_ACK = "connection.ack"
