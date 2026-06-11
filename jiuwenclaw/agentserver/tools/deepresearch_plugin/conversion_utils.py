@@ -21,7 +21,19 @@ NUMBERED_HEADING_RE = re.compile(
     r"^(?P<indent>\s{0,3})(?P<number>\d+(?:\.\d+)*)(?:\.\s+|\s+)(?P<title>.+?)\s*$"
 )
 LIST_ITEM_RE = re.compile(r"^\s{0,3}(?:[-*+]\s+|\d+\.\s+)")
+LIST_ITEM_WITH_INDENT_RE = re.compile(
+    r"^(?P<indent>[ \t]*)(?P<marker>(?:[-*+]\s+|\d+\.\s+).*)$"
+)
 INDENTED_LIST_ITEM_RE = re.compile(r"^(?P<indent>[ \t]{4,})(?P<marker>(?:[-*+]\s+|\d+\.\s+).*)$")
+MARKDOWN_IMAGE_LINE_RE = re.compile(r"^[ \t]*!\[[^\]]*\]\([^)]+\)[ \t]*$")
+LEGACY_FONT_CAPTION_PREFIX_RE = re.compile(
+    r'^[ \t]*<font\b[^>]*\bsize\s*=\s*["\']?2["\']?[^>]*>',
+    flags=re.IGNORECASE,
+)
+INDENTED_HTML_BLOCK_END_RE = re.compile(
+    r"^[ \t]+</(?:div|section|article|main)>[ \t]*$",
+    flags=re.IGNORECASE,
+)
 SENTENCE_END_RE = re.compile(r"[。！？?!…]$")
 
 CITATION_RE = re.compile(r"\[\[(\d+)\]\]\((https?://[^\s)]+(?:\([^\s)]+\)[^\s)]*)*)\)")
@@ -35,7 +47,7 @@ CENTER_CAPTION_RE = re.compile(
     flags=re.IGNORECASE,
 )
 LEGACY_FONT_CAPTION_LINE_RE = re.compile(
-    r'^[ \t]*<font\b[^>]*\bsize\s*=\s*["\']?2["\']?[^>]*>(?P<body>.*?)</font>'
+    r'^(?P<indent>[ \t]*)<font\b[^>]*\bsize\s*=\s*["\']?2["\']?[^>]*>(?P<body>.*?)</font>'
     r'(?P<citations>(?:<sup class="citation">.*?</sup>)*)[ \t]*$',
     flags=re.IGNORECASE | re.MULTILINE,
 )
@@ -353,12 +365,67 @@ def normalize_legacy_font_caption_blocks(text: str) -> str:
     """Rewrite legacy font-based captions into block-level caption containers."""
 
     def _replace(match: re.Match[str]) -> str:
+        indent = match.group("indent")
         body = match.group("body").strip()
         citations = match.group("citations").strip()
         caption_content = f"{body}{citations}"
-        return f'\n<div class="figure-caption" markdown="1">\n{caption_content}\n</div>\n'
+        return (
+            f'\n{indent}<div class="figure-caption" markdown="1">\n'
+            f"{indent}{caption_content}\n"
+            f"{indent}</div>\n"
+        )
 
     return LEGACY_FONT_CAPTION_LINE_RE.sub(_replace, text)
+
+
+def normalize_interrupted_nested_list_blocks(text: str) -> str:
+    """Keep image and caption blocks inside the list items they interrupt."""
+    lines = text.split("\n")
+
+    def _indent_width(indent: str) -> int:
+        return len(indent.expandtabs(4))
+
+    for index, line in enumerate(lines):
+        current_item = LIST_ITEM_WITH_INDENT_RE.match(line)
+        if current_item is None:
+            continue
+
+        list_indent = _indent_width(current_item.group("indent"))
+        block_indexes: list[int] = []
+        saw_image = False
+        saw_font_caption = False
+
+        for cursor in range(index + 1, len(lines)):
+            candidate = lines[cursor]
+            if not candidate.strip():
+                block_indexes.append(cursor)
+                continue
+
+            if MARKDOWN_IMAGE_LINE_RE.match(candidate):
+                saw_image = True
+                block_indexes.append(cursor)
+                continue
+
+            if LEGACY_FONT_CAPTION_PREFIX_RE.match(candidate):
+                saw_font_caption = True
+                block_indexes.append(cursor)
+                continue
+
+            next_item = LIST_ITEM_WITH_INDENT_RE.match(candidate)
+            next_indent = _indent_width(next_item.group("indent")) if next_item else -1
+            is_matching_sibling = saw_image and next_item is not None and next_indent == list_indent
+            is_nested_after_caption = (
+                saw_font_caption and next_item is not None and next_indent > list_indent
+            )
+            if is_matching_sibling or is_nested_after_caption:
+                content_indent_width = next_indent if is_nested_after_caption else list_indent + 4
+                content_indent = " " * content_indent_width
+                for block_index in block_indexes:
+                    if lines[block_index].strip():
+                        lines[block_index] = content_indent + lines[block_index].lstrip()
+            break
+
+    return "\n".join(lines)
 
 
 def normalize_list_boundaries(text: str) -> str:
@@ -403,6 +470,10 @@ def normalize_orphan_indented_list_items(text: str) -> str:
     def _indent_width(indent: str) -> int:
         return len(indent.expandtabs(4))
 
+    def _line_indent_width(line: str) -> int:
+        indent = re.match(r"^[ \t]*", line).group(0)
+        return _indent_width(indent)
+
     for line in lines:
         if line.lstrip().startswith("```"):
             in_fenced_code = not in_fenced_code
@@ -418,7 +489,19 @@ def normalize_orphan_indented_list_items(text: str) -> str:
                 continue
 
             previous = _previous_nonempty_line()
-            if not LIST_ITEM_RE.match(previous) and not INDENTED_LIST_ITEM_RE.match(previous):
+            previous_indent_width = _line_indent_width(previous)
+            follows_nested_content = (
+                previous_indent_width > indent_width
+                or (
+                    previous_indent_width == indent_width
+                    and INDENTED_HTML_BLOCK_END_RE.match(previous)
+                )
+            )
+            if (
+                not follows_nested_content
+                and not LIST_ITEM_RE.match(previous)
+                and not INDENTED_LIST_ITEM_RE.match(previous)
+            ):
                 orphan_list_indent = indent_width
                 normalized.append(match.group("marker"))
                 continue
@@ -461,6 +544,7 @@ def preprocess_markdown_text(text: str) -> str:
         → reference line normalization → center caption block fixing.
     """
     text = normalize_whitespace(text)
+    text = normalize_interrupted_nested_list_blocks(text)
     text = strip_internal_citation_markers(text)
     text = replace_citations(text)
     text = normalize_pipe_tables(text)
@@ -510,8 +594,9 @@ def _filter_remote_urls_for_ssrf(text: str) -> str:
 
 def preprocess_markdown_text_for_docx(text: str) -> str:
     text = normalize_whitespace(text)
+    text = normalize_interrupted_nested_list_blocks(text)
     text = strip_internal_citation_markers(text)
-    text = replace_citations_with_markdown_links(text)
+    text = replace_citations(text)
     text = normalize_pipe_tables(text)
     text = normalize_reference_lines(text)
     text = _filter_remote_urls_for_ssrf(text)

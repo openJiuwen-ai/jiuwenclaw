@@ -19,6 +19,8 @@ MAX_HTML_BLOCK_DEPTH = 100
 HEADING_TAGS = frozenset(f"h{i}" for i in range(1, 10))
 REMOTE_IMAGE_SCHEMES = frozenset({"http", "https"})
 HTML_FORMATTING_WHITESPACE_RE = re.compile(r"[ \t]*\n[ \t]*")
+DOCX_LIST_LEVELS = 9
+DOCX_BULLET_SYMBOLS = ("•", "○", "▪")
 HEADING_STYLE_SIZES = {
     "Heading 1": 22,
     "Heading 2": 18,
@@ -41,6 +43,81 @@ class HtmlToDocContext:
     style_r_fonts: object | None = None
     current_run: object | None = None
     superscript: bool = False
+
+
+@dataclass(frozen=True)
+class HtmlBlockState:
+    depth: int = 0
+    list_depth: int = 0
+    list_num_id: int | None = None
+    list_tag: str | None = None
+
+
+def _docx_paragraph_p(paragraph):
+    return paragraph._p  # pylint: disable=protected-access
+
+
+def _append_word_list_level(abstract_num, level: int, *, ordered: bool) -> None:
+    lvl = OxmlElement("w:lvl")
+    lvl.set(qn("w:ilvl"), str(level))
+
+    start = OxmlElement("w:start")
+    start.set(qn("w:val"), "1")
+    lvl.append(start)
+
+    num_fmt = OxmlElement("w:numFmt")
+    num_fmt.set(qn("w:val"), "decimal" if ordered else "bullet")
+    lvl.append(num_fmt)
+
+    lvl_text = OxmlElement("w:lvlText")
+    lvl_text.set(
+        qn("w:val"),
+        f"%{level + 1}." if ordered else DOCX_BULLET_SYMBOLS[level % len(DOCX_BULLET_SYMBOLS)],
+    )
+    lvl.append(lvl_text)
+
+    lvl_jc = OxmlElement("w:lvlJc")
+    lvl_jc.set(qn("w:val"), "left")
+    lvl.append(lvl_jc)
+
+    p_pr = OxmlElement("w:pPr")
+    indent = OxmlElement("w:ind")
+    indent.set(qn("w:left"), str(360 * (level + 1)))
+    indent.set(qn("w:hanging"), "180")
+    p_pr.append(indent)
+    lvl.append(p_pr)
+    abstract_num.append(lvl)
+
+
+def _create_word_list_numbering(doc, *, ordered: bool) -> int:
+    numbering = doc.part.numbering_part.element
+    abstract_ids = [
+        int(element.get(qn("w:abstractNumId")))
+        for element in numbering.findall(qn("w:abstractNum"))
+    ]
+    abstract_num_id = max(abstract_ids, default=-1) + 1
+
+    abstract_num = OxmlElement("w:abstractNum")
+    abstract_num.set(qn("w:abstractNumId"), str(abstract_num_id))
+    multi_level_type = OxmlElement("w:multiLevelType")
+    multi_level_type.set(qn("w:val"), "multilevel")
+    abstract_num.append(multi_level_type)
+    for level in range(DOCX_LIST_LEVELS):
+        _append_word_list_level(abstract_num, level, ordered=ordered)
+    numbering.insert(len(abstract_ids), abstract_num)
+
+    num = numbering.add_num(abstract_num_id)
+    return int(num.get(qn("w:numId")))
+
+
+def _apply_word_list_numbering(paragraph, num_id: int, level: int) -> None:
+    num_pr = _docx_paragraph_p(paragraph).get_or_add_pPr().get_or_add_numPr()
+    ilvl = OxmlElement("w:ilvl")
+    ilvl.set(qn("w:val"), str(min(level, DOCX_LIST_LEVELS - 1)))
+    num_id_element = OxmlElement("w:numId")
+    num_id_element.set(qn("w:val"), str(num_id))
+    num_pr.append(ilvl)
+    num_pr.append(num_id_element)
 
 
 def _get_style_by_tag(tag_name: str, style_dict: dict[str, str], doc):
@@ -288,21 +365,35 @@ def _add_text_paragraph(doc, text: str, context: HtmlToDocContext) -> None:
         doc.add_paragraph(text.strip(), style=paragraph_style)
 
 
-def _add_list_item(doc, li_element, context: HtmlToDocContext, *, ordered: bool) -> None:
-    style_name = "List Number" if ordered else "List Bullet"
-    try:
-        style = doc.styles[style_name]
-    except KeyError:
-        style = _get_style_by_tag("p", context.style_dict, doc)
-
+def _add_list_item(
+    doc,
+    li_element,
+    context: HtmlToDocContext,
+    state: HtmlBlockState,
+    *,
+    list_num_id: int,
+    list_tag: str,
+) -> None:
+    style = _get_style_by_tag("p", context.style_dict, doc)
     paragraph = doc.add_paragraph(style=style)
-    paragraph_style = _get_style_by_tag("p", context.style_dict, doc)
-    style_r_fonts = paragraph_style.element.get_or_add_rPr().find(qn("w:rFonts"))
+    _apply_word_list_numbering(paragraph, list_num_id, state.list_depth)
+    style_r_fonts = style.element.get_or_add_rPr().find(qn("w:rFonts"))
     child_context = replace(context, style_r_fonts=style_r_fonts)
 
     for child in li_element.contents:
         if getattr(child, "name", None) in ("ul", "ol"):
-            _process_block_element(doc, child, context)
+            _process_block_element(
+                doc,
+                child,
+                context,
+                replace(
+                    state,
+                    depth=state.depth + 1,
+                    list_depth=state.list_depth + 1,
+                    list_num_id=list_num_id,
+                    list_tag=list_tag,
+                ),
+            )
         else:
             _process_inline(paragraph, child, child_context)
 
@@ -342,13 +433,18 @@ def _process_pre_block(doc, element, context: HtmlToDocContext) -> None:
     run.font.name = "Consolas"
 
 
-def _process_block_element(doc, element, context: HtmlToDocContext, depth: int = 0) -> None:
+def _process_block_element(
+    doc,
+    element,
+    context: HtmlToDocContext,
+    state: HtmlBlockState = HtmlBlockState(),
+) -> None:
     if isinstance(element, NavigableString):
         _add_text_paragraph(doc, str(element), context)
         return
     if element.name is None:
         return
-    if depth >= context.max_depth:
+    if state.depth >= context.max_depth:
         _add_text_paragraph(doc, element.get_text(strip=True), context)
         return
 
@@ -365,9 +461,20 @@ def _process_block_element(doc, element, context: HtmlToDocContext, depth: int =
         return
 
     if element.name in ("ul", "ol"):
-        ordered = element.name == "ol"
+        current_list_num_id = (
+            state.list_num_id
+            if state.list_num_id is not None and state.list_tag == element.name
+            else _create_word_list_numbering(doc, ordered=element.name == "ol")
+        )
         for li_element in element.find_all("li", recursive=False):
-            _add_list_item(doc, li_element, context, ordered=ordered)
+            _add_list_item(
+                doc,
+                li_element,
+                context,
+                state,
+                list_num_id=current_list_num_id,
+                list_tag=element.name,
+            )
         return
 
     if element.name == "hr":
@@ -376,7 +483,17 @@ def _process_block_element(doc, element, context: HtmlToDocContext, depth: int =
 
     if element.name in ("div", "section", "article", "body", "html"):
         for child in element.children:
-            _process_block_element(doc, child, context, depth + 1)
+            _process_block_element(
+                doc,
+                child,
+                context,
+                replace(
+                    state,
+                    depth=state.depth + 1,
+                    list_num_id=None,
+                    list_tag=None,
+                ),
+            )
         return
 
     _add_para_and_apply_style(doc, element, context)
