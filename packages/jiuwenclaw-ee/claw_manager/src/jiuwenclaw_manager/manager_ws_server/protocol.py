@@ -16,12 +16,25 @@ EVENT_CONNECTION_ACK = "connection.ack"
 EVENT_REGISTER_ACK = "register.ack"
 
 
-def build_register_ack(*, jiuwenclaw_id: str) -> dict[str, Any]:
+def build_register_ack(
+    *,
+    jiuwenclaw_id: str,
+    sign_pubkey: str | None = None,
+    sign_alg: str | None = None,
+    key_version: str | None = None,
+    sign_pubkey_fp: str | None = None,
+) -> dict[str, Any]:
     jid = str(jiuwenclaw_id or "").strip()
+    payload: dict[str, Any] = {"status": "ok", "jiuwenclaw_id": jid}
+    if sign_pubkey:
+        payload["sign_pubkey"] = sign_pubkey
+        payload["sign_alg"] = sign_alg or "Ed25519"
+        payload["key_version"] = key_version or "v1"
+        payload["sign_pubkey_fp"] = sign_pubkey_fp or ""
     return {
         "type": FRAME_TYPE_EVENT,
         "event": EVENT_REGISTER_ACK,
-        "payload": {"status": "ok", "jiuwenclaw_id": jid},
+        "payload": payload,
     }
 
 
@@ -52,14 +65,18 @@ def build_config_push(
     revision: str,
     jiuwenclaw_id: str,
     config: dict[str, Any],
+    enc: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "revision": revision,
+        "jiuwenclaw_id": jiuwenclaw_id,
+        "config": config,
+    }
+    if enc:
+        payload["enc"] = enc
     return {
         "type": FRAME_TYPE_CONFIG_PUSH,
-        "payload": {
-            "revision": revision,
-            "jiuwenclaw_id": jiuwenclaw_id,
-            "config": config,
-        },
+        "payload": payload,
     }
 
 

@@ -85,6 +85,30 @@ class Settings(BaseSettings):
         description="Interval for Gateway → Manager WebSocket heartbeats (seconds)",
     )
 
+    # ========== 配置下发字段级解密（信封解密，私钥本机自持） ==========
+    gateway_config_dec_enabled: bool = Field(
+        default=True,
+        validation_alias="GATEWAY_CONFIG_DEC_ENABLED",
+        description="是否对 config.push 中的 ENC 信封字段执行解密",
+    )
+
+    # ========== 配置下发验签与防重放（Ed25519，公钥握手分发） ==========
+    gateway_config_verify_enabled: bool = Field(
+        default=True,
+        validation_alias="GATEWAY_CONFIG_VERIFY_ENABLED",
+        description="是否对 config.push 执行验签",
+    )
+    gateway_config_verify_required: bool = Field(
+        default=False,
+        validation_alias="GATEWAY_CONFIG_VERIFY_REQUIRED",
+        description="强制态：无签名或验签失败一律拒绝（fail-closed）",
+    )
+    gateway_config_sign_skew_seconds: int = Field(
+        default=300,
+        validation_alias="GATEWAY_CONFIG_SIGN_SKEW_SECONDS",
+        description="验签允许的时间窗（秒），用于防重放与容忍时钟漂移",
+    )
+
     # 在验证之前就把空字符串变成 None
     @model_validator(mode="before")
     @classmethod

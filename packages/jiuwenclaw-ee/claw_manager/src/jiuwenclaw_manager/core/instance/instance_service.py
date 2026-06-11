@@ -221,6 +221,10 @@ async def list_instance_rows(
 
 async def delete_instance_row(handler: DBHandler, jiuwenclaw_id: str) -> None:
     await handler.delete(_INSTANCE_TABLE, {"jiuwenclaw_id": jiuwenclaw_id})
+    # 解绑销毁：一并删除该实例的 Gateway 加密公钥（心跳超时下线不走此路径）。
+    from jiuwenclaw_manager.security.keys import delete_instance_enc_pubkey
+
+    await delete_instance_enc_pubkey(handler, jiuwenclaw_id)
 
 
 async def merge_instance_data(

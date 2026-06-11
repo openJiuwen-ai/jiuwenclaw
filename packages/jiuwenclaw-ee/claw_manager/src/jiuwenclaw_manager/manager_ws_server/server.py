@@ -9,8 +9,34 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, ClassVar
 
+from sqlalchemy.exc import SQLAlchemyError
+
+from jiuwenclaw_manager.infrastructure.config import settings
 from jiuwenclaw_manager.infrastructure.db import get_db_handler
 from jiuwenclaw_manager.infrastructure.logger import get_logger
+
+# 密钥落库的预期失败类型：DB 未就绪/连接/语句错误、表未初始化、格式问题。
+# 收敛后真正的代码 bug（如 TypeError）不再被吞掉，会照常抛出。
+_KEY_STORE_ERRORS = (RuntimeError, OSError, ValueError, SQLAlchemyError)
+from jiuwenclaw_manager.security.field_crypto import (
+    DEK_ALG,
+    ENC_SCHEME,
+    ENC_VERSION,
+    encrypt_sensitive_fields,
+    has_sensitive,
+    new_dek,
+    wrap_dek_for_gateway,
+)
+from jiuwenclaw_manager.security.crypto_primitives import b64e as _b64
+from jiuwenclaw_manager.security.frame_signer import attach_signature
+from jiuwenclaw_manager.security.sign_provider import (
+    get_config_signature_provider,
+    get_manager_signing_key,
+)
+from jiuwenclaw_manager.security.keys import (
+    load_instance_enc_pubkey,
+    store_instance_enc_pubkey,
+)
 from jiuwenclaw_manager.core.instance.instance_service import (
     bootstrap_gateway_log_masking,
     apply_gateway_ws_heartbeat,
@@ -203,6 +229,67 @@ class ManagerWsServer:
         """生成 config.push 使用的 UTC revision 字符串。"""
         return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
+    @staticmethod
+    async def _encrypt_config_section(
+        jiuwenclaw_id: str,
+        section: str,
+        section_body: dict[str, Any],
+    ) -> tuple[dict[str, Any], dict[str, Any] | None]:
+        """对单 section 配置做信封加密，返回（下发用 config, enc 元数据）。
+
+        - 未开启或无该实例 Gateway 加密公钥：原样返回；若 ``config_enc_required``
+          且含敏感字段则拒绝下发（fail-closed）。
+        - 已开启：生成一次性 DEK 加密敏感字段，再用 Gateway 公钥包裹 DEK。
+        """
+        gw_pub = None
+        if settings.config_enc_enabled:
+            gw_pub = await load_instance_enc_pubkey(get_db_handler(), jiuwenclaw_id)
+        if gw_pub is None:
+            if settings.config_enc_required and has_sensitive(section, section_body):
+                raise ValueError(
+                    "config encryption required but no gateway enc pubkey for "
+                    f"jiuwenclaw_id={jiuwenclaw_id!r}"
+                )
+            return {section: section_body}, None
+
+        dek = new_dek()
+        enc_body, enc_fields = encrypt_sensitive_fields(section, section_body, dek)
+        if not enc_fields:
+            return {section: enc_body}, None
+        epk_b64, wrapped_dek_b64 = wrap_dek_for_gateway(gw_pub.public_raw, dek)
+        enc_meta = {
+            "scheme": ENC_SCHEME,
+            "version": ENC_VERSION,
+            "dek_alg": DEK_ALG,
+            "gw_key_fp": gw_pub.fingerprint,
+            "epk": epk_b64,
+            "wrapped_dek": wrapped_dek_b64,
+            "fields": enc_fields,
+        }
+        logger.info(
+            "[ManagerWsServer] encrypted config fields jiuwenclaw_id=%s section=%s fields=%s",
+            jiuwenclaw_id,
+            section,
+            enc_fields,
+        )
+        return {section: enc_body}, enc_meta
+
+    @staticmethod
+    def _sign_frame(frame: dict[str, Any]) -> dict[str, Any]:
+        """按 settings 为 config.push 帧加签；未开启或无密钥时原样返回。
+
+        在字段级加密之后执行（Encrypt-then-Sign），签名覆盖密文，
+        Gateway 侧先验签后解密。
+        """
+        if not settings.config_sign_enabled:
+            return frame
+        signer = get_config_signature_provider()
+        if signer is None:
+            raise ValueError(
+                "config signing enabled but manager signing key not loaded"
+            )
+        return attach_signature(frame, signer, signer.key_version)
+
     async def push_config_op(
         self,
         jiuwenclaw_id: str,
@@ -229,11 +316,17 @@ class ManagerWsServer:
             raise ValueError(f"config[{section!r}] must be an object")
         rev = revision or self.revision_now()
 
+        config, enc_meta = await self._encrypt_config_section(
+            jiuwenclaw_id, section, section_body
+        )
+
         frame = build_config_push(
             revision=rev,
             jiuwenclaw_id=jiuwenclaw_id,
             config=config,
+            enc=enc_meta,
         )
+        frame = self._sign_frame(frame)
         raw = json.dumps(frame, ensure_ascii=False)
         st_filter = (service_type or "").strip().lower() or None
 
@@ -490,8 +583,37 @@ class ManagerWsServer:
         )
         async with self._clients_lock:
             self._link_client_locked(key, client)
+
+        # 握手期密钥交换：① 落库 Gateway 上交的加密公钥；② 回传 Manager 签名公钥。
+        enc_pubkey = str(payload.get("enc_pubkey") or "").strip()
+        if enc_pubkey:
+            try:
+                await store_instance_enc_pubkey(
+                    get_db_handler(),
+                    jiuwenclaw_id,
+                    enc_pubkey,
+                    enc_alg=str(payload.get("enc_alg") or "X25519"),
+                    fingerprint=str(payload.get("enc_pubkey_fp") or "") or None,
+                )
+            except _KEY_STORE_ERRORS as exc:
+                # 公钥落库为握手附带步骤，失败不阻断注册（仅该实例后续无法加密）。
+                logger.warning(
+                    "[ManagerWsServer] store gateway enc pubkey failed jiuwenclaw_id=%s: %s",
+                    jiuwenclaw_id,
+                    exc,
+                )
+        signing_key = get_manager_signing_key()
         try:
-            ack = build_register_ack(jiuwenclaw_id=jiuwenclaw_id)
+            if signing_key is not None:
+                ack = build_register_ack(
+                    jiuwenclaw_id=jiuwenclaw_id,
+                    sign_pubkey=_b64(signing_key.public_raw),
+                    sign_alg="Ed25519",
+                    key_version=signing_key.key_version,
+                    sign_pubkey_fp=signing_key.fingerprint,
+                )
+            else:
+                ack = build_register_ack(jiuwenclaw_id=jiuwenclaw_id)
             await ws.send(json.dumps(ack, ensure_ascii=False))
         except Exception as exc:  # noqa: BLE001
             logger.warning("[ManagerWsServer] register.ack failed: %s", exc)

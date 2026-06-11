@@ -21,12 +21,17 @@ def build_register(
     *,
     service_type: str = "gateway",
     jiuwenclaw_id: str | None = None,
+    enc_pubkey: str | None = None,
+    enc_alg: str | None = None,
+    enc_pubkey_fp: str | None = None,
 ) -> dict[str, Any]:
     """构建 register 帧。
 
     若环境或参数带有 ``jiuwenclaw_id``（如 ``provision-local`` 注入的
     ``JIUWENCLAW_ID``），则上报给 Manager 复用已有 ``instance_info``；
     否则由 Manager 分配新 id，并在 ack 中回传。
+
+    握手期同时上交 Gateway 的加密公钥（``enc_pubkey``），供 Manager 包裹 DEK。
     """
     from ..infrastructure.utils import get_jiuwenclaw_id
 
@@ -34,6 +39,10 @@ def build_register(
     jid = str(jiuwenclaw_id or "").strip() or get_jiuwenclaw_id()
     if jid:
         payload["jiuwenclaw_id"] = jid
+    if enc_pubkey:
+        payload["enc_pubkey"] = enc_pubkey
+        payload["enc_alg"] = enc_alg or "X25519"
+        payload["enc_pubkey_fp"] = enc_pubkey_fp or ""
     return {
         "type": FRAME_TYPE_REGISTER,
         "payload": payload,

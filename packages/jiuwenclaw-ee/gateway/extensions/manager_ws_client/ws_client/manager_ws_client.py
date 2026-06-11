@@ -10,9 +10,21 @@ from collections.abc import Awaitable, Callable
 from typing import Any
 from urllib.parse import urlsplit
 
+from base64 import b64encode
+
+from sqlalchemy.exc import SQLAlchemyError
+
 from ..core.enterprise_config.gateway_db import GatewayDb
 from ..infrastructure.config import get_settings
 from ..infrastructure.utils import get_jiuwenclaw_id, set_jiuwenclaw_id
+from ..security.field_crypto import DecryptError, decrypt_config, unwrap_dek
+from ..security.frame_verifier import Ed25519Verifier, ReplayGuard, verify_frame
+from ..security.keys import (
+    get_or_create_gateway_enc_keypair,
+    load_gateway_enc_privkey_by_fp,
+    load_manager_sign_pubkey,
+    store_manager_sign_pubkey,
+)
 from .protocol import (
     EVENT_CONNECTION_ACK,
     EVENT_REGISTER_ACK,
@@ -26,6 +38,10 @@ from .protocol import (
 )
 
 logger = logging.getLogger(__name__)
+
+# 密钥准备/落库的预期失败类型：DB 未就绪/连接/语句错误、表未初始化、格式问题。
+# 收敛后真正的代码 bug 不再被吞掉。
+_KEY_STORE_ERRORS = (RuntimeError, OSError, ValueError, SQLAlchemyError)
 
 ManagerWsConfigPushHandler = Callable[[str, dict[str, Any]], Awaitable[None]]
 
@@ -80,6 +96,10 @@ class ManagerWsClient:
         self._heartbeat_ack_timeout_seconds = max(
             3.0,
             min(self._heartbeat_interval_seconds * 0.8, self._heartbeat_interval_seconds - 1.0),
+        )
+        # 防重放状态：nonce 去重 TTL 取时间窗 2 倍余量。
+        self._replay_guard = ReplayGuard(
+            ttl_seconds=max(60.0, float(cfg.gateway_config_sign_skew_seconds) * 2)
         )
 
     @property
@@ -265,7 +285,21 @@ class ManagerWsClient:
         else:
             logger.warning("[ManagerWsClient] unexpected first frame: %s", data.get("type"))
 
-        reg = build_register(service_type=self._service_type)
+        # 握手期上交本机加密公钥（首启自动生成密钥对，私钥永不外发）。
+        enc_pubkey = enc_pubkey_fp = None
+        try:
+            keypair = await get_or_create_gateway_enc_keypair()
+            enc_pubkey = b64encode(keypair.public_raw).decode("ascii")
+            enc_pubkey_fp = keypair.fingerprint
+        except _KEY_STORE_ERRORS as exc:
+            # 准备加密公钥为握手附带步骤，失败不阻断注册（仅后续无法解密）。
+            logger.warning("[ManagerWsClient] prepare enc keypair failed: %s", exc)
+
+        reg = build_register(
+            service_type=self._service_type,
+            enc_pubkey=enc_pubkey,
+            enc_pubkey_fp=enc_pubkey_fp,
+        )
         await ws.send(json.dumps(reg, ensure_ascii=False))
 
         raw_reg = await asyncio.wait_for(ws.recv(), timeout=10.0)
@@ -287,6 +321,24 @@ class ManagerWsClient:
             raise RuntimeError("manager ws register.ack missing jiuwenclaw_id")
         set_jiuwenclaw_id(ack_jiuwenclaw_id)
         GatewayDb.bind(ack_jiuwenclaw_id)
+
+        # 确认配对：落库 Manager 签名公钥（按版本+指纹），供后续验签。
+        sign_pubkey = str(ack_payload.get("sign_pubkey") or "").strip()
+        if sign_pubkey:
+            try:
+                await store_manager_sign_pubkey(
+                    ack_jiuwenclaw_id,
+                    sign_pubkey,
+                    key_version=str(ack_payload.get("key_version") or "v1"),
+                    manager_id=str(ack_payload.get("manager_id") or "default"),
+                    sign_alg=str(ack_payload.get("sign_alg") or "Ed25519"),
+                    fingerprint=str(ack_payload.get("sign_pubkey_fp") or "") or None,
+                )
+            except _KEY_STORE_ERRORS as exc:
+                # 落库签名公钥为握手附带步骤，失败不阻断注册（仅后续无法验签）。
+                logger.warning(
+                    "[ManagerWsClient] store manager sign pubkey failed: %s", exc
+                )
 
         self._ready = True
         logger.info(
@@ -401,6 +453,66 @@ class ManagerWsClient:
         config = payload.get("config")
         if not isinstance(config, dict):
             config = {}
+
+        cfg = get_settings()
+
+        # 1) 验签 + 防重放：未经验证的配置永不进入业务层（fail-closed）。
+        #    先验签后解密——签名覆盖的是收到的密文帧，先确认未被篡改/重放再解密。
+        if cfg.gateway_config_verify_enabled:
+            sig = payload.get("sig") if isinstance(payload.get("sig"), dict) else None
+            verifier = None
+            if isinstance(sig, dict):
+                pub = await load_manager_sign_pubkey(
+                    jiuwenclaw_id, key_version=str(sig.get("key_id") or "") or None
+                )
+                if pub is not None:
+                    verifier = Ed25519Verifier(pub.public_raw)
+            ok, err = verify_frame(
+                payload,
+                sig,
+                verifier,
+                self._replay_guard,
+                skew_seconds=float(cfg.gateway_config_sign_skew_seconds),
+                required=cfg.gateway_config_verify_required,
+            )
+            if not ok:
+                logger.warning(
+                    "[ManagerWsClient] reject config.push revision=%s: %s",
+                    revision,
+                    err,
+                )
+                ack = build_config_ack(
+                    revision=revision,
+                    success_flag=False,
+                    error_message=f"signature verify failed: {err}",
+                )
+                await ws.send(json.dumps(ack, ensure_ascii=False))
+                return
+
+        # 2) 信封解密：用本机私钥解出 DEK，再还原 ENC 信封字段（fail-closed）。
+        enc = payload.get("enc") if isinstance(payload.get("enc"), dict) else None
+        if cfg.gateway_config_dec_enabled:
+            try:
+                dek = None
+                if enc and enc.get("scheme") == "hybrid":
+                    priv = await load_gateway_enc_privkey_by_fp(enc.get("gw_key_fp"))
+                    if priv is None:
+                        raise DecryptError("no matching gateway enc privkey for gw_key_fp")
+                    dek = unwrap_dek(priv, str(enc.get("epk") or ""), str(enc.get("wrapped_dek") or ""))
+                config = decrypt_config(config, dek)
+            except ValueError as exc:
+                logger.warning(
+                    "[ManagerWsClient] config decrypt failed revision=%s: %s",
+                    revision,
+                    exc,
+                )
+                ack = build_config_ack(
+                    revision=revision,
+                    success_flag=False,
+                    error_message=f"config decrypt failed: {exc}",
+                )
+                await ws.send(json.dumps(ack, ensure_ascii=False))
+                return
 
         success_flag = True
         err_msg: str | None = None

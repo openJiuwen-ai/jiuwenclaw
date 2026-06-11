@@ -64,6 +64,22 @@ class Settings(BaseSettings):
         default=None, validation_alias="CLAWMANAGER_INSTANCE_CONFIG_TEMPLATE"
     )
 
+    # ========== 配置下发字段级加密（信封加密，密钥握手分发） ==========
+    config_enc_enabled: bool = Field(
+        default=False, validation_alias="CLAWMANAGER_CONFIG_ENC_ENABLED"
+    )
+    config_enc_required: bool = Field(
+        default=False, validation_alias="CLAWMANAGER_CONFIG_ENC_REQUIRED"
+    )
+
+    # ========== 配置下发加签（Ed25519，公钥握手分发） ==========
+    config_sign_enabled: bool = Field(
+        default=False, validation_alias="CLAWMANAGER_CONFIG_SIGN_ENABLED"
+    )
+    config_sign_alg: str = Field(
+        default="Ed25519", validation_alias="CLAWMANAGER_CONFIG_SIGN_ALG"
+    )
+
     manager_ws_enabled: bool = Field(
         default=True, validation_alias="MANAGER_WS_ENABLED"
     )

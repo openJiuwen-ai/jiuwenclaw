@@ -29,6 +29,11 @@ async def lifespan(application: FastAPI):
     await db_handler.init_database()
     await db_handler.connect()
     await init_all_tables(db_handler)
+    # 加载/生成 Manager 签名密钥对（Ed25519），供握手下发公钥与下发加签使用。
+    from jiuwenclaw_manager.security.keys import get_or_create_manager_signing_key
+    from jiuwenclaw_manager.security.sign_provider import set_manager_signing_key
+
+    set_manager_signing_key(await get_or_create_manager_signing_key(db_handler))
     stop = asyncio.Event()
     scan_task = asyncio.create_task(run_heartbeat_scan_loop(stop, db_handler))
     if settings.manager_ws_enabled:

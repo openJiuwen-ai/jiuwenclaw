@@ -11,6 +11,10 @@ from jiuwenclaw_manager.models.config_effective_policy_models import (
     CONFIG_EFFECTIVE_SERVICE_POLICY_TABLE_DEF,
 )
 from jiuwenclaw_manager.models.instance_models import INSTANCE_INFO_TABLE_DEF
+from jiuwenclaw_manager.models.key_models import (
+    INSTANCE_ENC_PUBKEY_TABLE_DEF,
+    MANAGER_IDENTITY_TABLE_DEF,
+)
 from jiuwenclaw_manager.models.application_config_models import (
     LOG_MASKING_RULE_TABLE_DEF,
     _CHANNEL_CONFIG_TABLE_DEF,
@@ -26,6 +30,8 @@ from jiuwenclaw_manager.models.template_models import (
 
 ALL_TABLE_DEFINITIONS = (
     INSTANCE_INFO_TABLE_DEF,
+    MANAGER_IDENTITY_TABLE_DEF,
+    INSTANCE_ENC_PUBKEY_TABLE_DEF,
     _CHANNEL_CONFIG_TABLE_DEF,
     _EMBED_CONFIG_TABLE_DEF,
     LOG_MASKING_RULE_TABLE_DEF,
