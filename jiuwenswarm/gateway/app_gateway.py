@@ -1110,13 +1110,13 @@ async def _run(
             ).strip()
                                or "/agent/authenticatedExtendedCard",
             app_name=str(
-                os.getenv("A2A_SERVER_APP_NAME", "JiuwenClaw Gateway A2A Server")
+                os.getenv("A2A_SERVER_APP_NAME", "JiuwenSwarm Gateway A2A Server")
             ).strip()
-                     or "JiuwenClaw Gateway A2A Server",
+                     or "JiuwenSwarm Gateway A2A Server",
             app_description=str(
-                os.getenv("A2A_SERVER_APP_DESCRIPTION", "A2A ingress for JiuwenClaw Gateway")
+                os.getenv("A2A_SERVER_APP_DESCRIPTION", "A2A ingress for JiuwenSwarm Gateway")
             ).strip()
-                            or "A2A ingress for JiuwenClaw Gateway",
+                            or "A2A ingress for JiuwenSwarm Gateway",
             app_version=str(
                 os.getenv("A2A_SERVER_APP_VERSION", "0.1.0")
             ).strip()
@@ -1767,7 +1767,7 @@ def main() -> None:
 
     parser = argparse.ArgumentParser(
         prog="jiuwenswarm-gateway",
-        description="Start JiuwenClaw Gateway + Channels (split deployment; connects to jiuwenswarm-agentserver).",
+        description="Start JiuwenSwarm Gateway + Channels (split deployment; connects to jiuwenswarm-agentserver).",
     )
     parser.add_argument(
         "--agent-server-url",

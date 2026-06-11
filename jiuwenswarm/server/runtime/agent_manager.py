@@ -14,7 +14,7 @@ from jiuwenswarm.agents.harness.team import get_team_manager
 from jiuwenswarm.common.config import get_config
 
 if TYPE_CHECKING:
-    from jiuwenswarm.server.runtime.agent_adapter.interface import JiuWenClaw
+    from jiuwenswarm.server.runtime.agent_adapter.interface import JiuWenSwarm
 
 
 logger = logging.getLogger(__name__)
@@ -80,7 +80,7 @@ class AgentManager:
     """
 
     def __init__(self) -> None:
-        self.agents: dict[str, dict[str, "JiuWenClaw"]] = {}
+        self.agents: dict[str, dict[str, "JiuWenSwarm"]] = {}
         # 记录每个 (channel_id, mode) 的创建参数, 便于 recreate_agent 立刻重建
         self._agent_create_params: dict[str, dict[str, dict[str, Any]]] = {}
         self._client_capabilities_by_channel: dict[str, dict[str, Any]] = {}
@@ -93,7 +93,7 @@ class AgentManager:
         config: dict[str, Any] | None = None,
         sub_mode: str = None,
         cache_key: str | None = None,
-    ) -> "JiuWenClaw":
+    ) -> "JiuWenSwarm":
         """创建 Agent 实例.
 
         Args:
@@ -101,9 +101,9 @@ class AgentManager:
             config: 可选配置
             sub_mode: 子模式
         Returns:
-            JiuWenClaw 实例
+            JiuWenSwarm 实例
         """
-        from jiuwenswarm.server.runtime.agent_adapter.interface import JiuWenClaw
+        from jiuwenswarm.server.runtime.agent_adapter.interface import JiuWenSwarm
 
         for env_key, env_value in self._latest_env_overrides.items():
             key = str(env_key)
@@ -126,7 +126,7 @@ class AgentManager:
             sub_mode_key or None,
             project_dir or None,
         )
-        agent = JiuWenClaw()
+        agent = JiuWenSwarm()
         await agent.create_instance(config, mode=mode_key, sub_mode=sub_mode_key or None)
         setattr(agent, "_jiuwenswarm_agent_cache_key", agent_cache_key)
         setattr(agent, "_jiuwenswarm_agent_mode", mode_key)
@@ -221,7 +221,7 @@ class AgentManager:
             mode: str = "agent",
             project_dir: str = None,
             sub_mode: str = None
-    ) -> "JiuWenClaw | None":
+    ) -> "JiuWenSwarm | None":
         """获取 Agent 实例（自动创建）.
 
         如果 agent 不存在，会自动创建（仅用于非 ACP 场景）。
@@ -233,7 +233,7 @@ class AgentManager:
             sub_mode: 子模式
 
         Returns:
-            JiuWenClaw | None: Agent 实例
+            JiuWenSwarm | None: Agent 实例
         """
         channel_key = _normalize_channel_id(channel_id)
         mode_key = _normalize_mode(mode)
@@ -266,14 +266,14 @@ class AgentManager:
         mode: str | None = None,
         project_dir: str | None = None,
         sub_mode: str | None = None,
-    ) -> "JiuWenClaw | None":
+    ) -> "JiuWenSwarm | None":
         """获取 Agent 实例（同步，不自动创建）.
 
         Args:
             channel_id: 通道 ID
 
         Returns:
-            JiuWenClaw | None: Agent 实例，如果不存在则返回 None
+            JiuWenSwarm | None: Agent 实例，如果不存在则返回 None
         """
         channel_key = _normalize_channel_id(channel_id)
         channel_agents = self.agents.get(channel_key, {})

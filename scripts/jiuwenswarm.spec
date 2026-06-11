@@ -1,5 +1,5 @@
 # -*- mode: python ; coding: utf-8 -*-
-r"""JiuwenClaw PyInstaller 打包配置。
+r"""JiuwenSwarm PyInstaller 打包配置。
 
 构建前请先：
 1. 安装依赖: uv sync --extra dev

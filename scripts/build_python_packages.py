@@ -112,7 +112,7 @@ def resolve_requested_targets(raw: str) -> list[str]:
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Build JiuwenClaw Python distributions (main package and optional TUI sidecar).",
+        description="Build JiuwenSwarm Python distributions (main package and optional TUI sidecar).",
     )
     parser.add_argument(
         "--target",

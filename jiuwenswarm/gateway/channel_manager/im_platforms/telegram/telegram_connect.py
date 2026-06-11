@@ -247,7 +247,7 @@ class TelegramChannel(BaseChannel):
             return
 
         welcome_msg = (
-            "欢迎使用 JiuWenClaw 机器人! 🤖\n\n"
+            "欢迎使用 JiuWenSwarm 机器人! 🤖\n\n"
             "您可以直接发送消息与我对话。\n"
             "使用 /help 查看帮助信息。"
         )
@@ -259,7 +259,7 @@ class TelegramChannel(BaseChannel):
     ) -> None:
         """处理 /help 命令."""
         help_msg = (
-            "JiuWenClaw 机器人帮助 📚\n\n"
+            "JiuWenSwarm 机器人帮助 📚\n\n"
             "命令:\n"
             "/start - 开始对话\n"
             "/help - 显示帮助\n\n"

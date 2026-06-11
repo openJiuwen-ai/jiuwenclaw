@@ -28,7 +28,7 @@ from openjiuwen.harness.rails.context_engineer import ContextProcessorRail
 from jiuwenswarm.agents.harness.common.rails.avatar_rail import AvatarPromptRail
 from jiuwenswarm.agents.harness.common.rails.response_prompt_rail import ResponsePromptRail
 from jiuwenswarm.agents.harness.common.rails.runtime_prompt_rail import RuntimePromptRail
-from jiuwenswarm.agents.harness.common.rails.stream_event_rail import JiuClawStreamEventRail
+from jiuwenswarm.agents.harness.common.rails.stream_event_rail import JiuSwarmStreamEventRail
 from jiuwenswarm.agents.harness.team.rails.team_workspace_report_path_rail import TeamWorkspaceReportPathRail
 from jiuwenswarm.common.config import get_config
 from jiuwenswarm.common.reasoning_injector import build_reasoning_model_request_kwargs
@@ -65,7 +65,7 @@ class TeamWorkspaceInfo:
 RAIL_WHITELIST = frozenset({
     "RuntimePromptRail",
     "ResponsePromptRail",
-    "JiuClawStreamEventRail",
+    "JiuSwarmStreamEventRail",
     "TaskPlanningRail",
     "SecurityRail",
     "HeartbeatRail",
@@ -95,6 +95,8 @@ TOOL_WHITELIST = frozenset({
     "search_skill",
     "install_skill",
     "uninstall_skill",
+    "skill_index_build",
+    "skill_retrieve",
     "user_todos",
     "get_user_location",
     "create_note",
@@ -185,14 +187,14 @@ def build_member_rails(
         logger.warning("[TeamRuntime] FileSystemRail failed: %s", exc)
 
     try:
-        rail = JiuClawStreamEventRail(
+        rail = JiuSwarmStreamEventRail(
             member_name=member_info.agent_name,
             role=member_info.role,
         )
         rails_list.append(rail)
-        logger.info("[TeamRuntime] JiuClawStreamEventRail created")
+        logger.info("[TeamRuntime] JiuSwarmStreamEventRail created")
     except Exception as exc:
-        logger.warning("[TeamRuntime] JiuClawStreamEventRail failed: %s", exc)
+        logger.warning("[TeamRuntime] JiuSwarmStreamEventRail failed: %s", exc)
 
     try:
         rail = TaskPlanningRail()

@@ -20,6 +20,7 @@ export function createCompactCommand(): SlashCommand {
     kind: CommandKind.BUILT_IN,
     takesArgs: false,
     action: async (ctx) => {
+      ctx.setRunningCommand?.("compact");  // 标记当前命令开始
       try {
         const payload = await ctx.request<CompactResponse>(
           "command.compact",
@@ -66,6 +67,8 @@ export function createCompactCommand(): SlashCommand {
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         ctx.addItem(addError(ctx.sessionId, `compact failed: ${message}`));
+      } finally {
+        ctx.setRunningCommand?.(null);  // 清除标记（finally 确保无论成功/失败/异常都会清除）
       }
     },
   };

@@ -1441,7 +1441,7 @@ class TeamManager:
     async def delete_session_runtime(self, session_id: str, reason: str = "") -> bool:
         """Delete a team-mode session and its session-scoped team data.
 
-        Jiuwenclaw scopes team names by session id, so deleting a
+        Jiuwenswarm scopes team names by session id, so deleting a
         team-mode session should delete the corresponding Agent Team
         before the caller removes the local session directory. If the
         team name cannot be resolved from session metadata, fall back to

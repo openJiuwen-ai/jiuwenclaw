@@ -2,7 +2,7 @@
 """Standalone AgentServer entrypoint.
 
 This process only starts:
-- JiuWenClaw (agent runtime)
+- JiuWenSwarm (agent runtime)
 - AgentWebSocketServer (ws server for Gateway)
 
 Gateway should be started separately and connect to this ws server.
@@ -198,7 +198,7 @@ def main() -> None:
 
     parser = argparse.ArgumentParser(
         prog="jiuwenswarm-agentserver",
-        description="Start JiuwenClaw AgentServer (standalone process for Gateway to connect).",
+        description="Start JiuwenSwarm AgentServer (standalone process for Gateway to connect).",
     )
     parser.add_argument(
         "--port",

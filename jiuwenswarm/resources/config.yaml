@@ -1,12 +1,73 @@
 # 前端显示语言：zh（中文）/ en（英文），与 Web 界面语言切换同步
 preferred_language: zh
 
-a2ui:
+# auto-recap：用户空闲5分钟后自动生成会话摘要（TUI 端）
+auto_recap:
   enabled: true
+
+a2ui:
+  enabled: false
   protocol_version: "0.8"
   stream_validation_enabled: true
   non_web_fallback_enabled: false
   dev_smoke_tools_enabled: false
+
+symphony:
+  enabled: false
+  paths:
+    skills_root: ""
+    score_dir: ""
+
+  fingerprint:
+    scan:
+      max_depth:
+    extraction:
+      workers: 4
+      batch_size: 2
+      body_limit:
+    normalization:
+      workers: 4
+      batch_size: 2
+      duplicate_name_similarity_threshold: 0.8
+      max_vocab_size:
+
+  build:
+    workers: 4
+    batch_size: 16
+    require_consensus: true
+    min_edge_confidence: 0.1
+
+  orchestration:
+    mode: fast
+    top_k: 3
+    max_depth: 4
+    min_edge_confidence: 0.3
+
+  skill_retrieval:
+    enabled: false
+    artifact_root: ${SYMPHONY_SKILL_RETRIEVAL_ROOT:-}
+    build:
+      branching_factor: 128
+      max_depth: 6
+      root_categories: ""
+      max_workers: 2
+      max_retries: 2
+      request_timeout_seconds: 420
+      classification_batch_limit: 32
+      discovery_seed: 42
+      postprocess_enabled: true
+      postprocess_max_passes: 1
+      postprocess_min_skills: 6
+      equivalence_enabled: true
+    retrieve:
+      top_k: 10
+      compact_codes_enabled: false
+      flatten_tree: false
+      max_exposure_depth: 99
+      max_branch_choices: 2
+      max_parallel_branches: 2
+      max_tokens: 96
+      request_timeout_seconds: 120
 
 # 日志目录：~/.jiuwenswarm/agent/.logs/
 # gateway.log / channel.log / agent_server.log 按源码路径分流；full.log 为汇总。
@@ -858,7 +919,7 @@ modes:
   code:
     # 动态 Rails — 列表中出现的 = 启用；不出现的 = 不启用
     # 固定 Rails（以下 Rails 已在代码中固定挂载，无需在此配置）：
-    #   RuntimePromptRail, ResponsePromptRail, JiuClawStreamEventRail, SecurityRail,
+    #   RuntimePromptRail, ResponsePromptRail, JiuSwarmStreamEventRail, SecurityRail,
     #   PermissionInterruptRail, SysOperationRail(FileSystemRail), LspRail,
     #   ProjectMemoryRail, CodingMemoryRail, AgentModeRail, StructuredAskUserRail,
     #   ConfirmInterruptRail, ContextProcessorRail
@@ -875,6 +936,7 @@ modes:
       - web_paid_search
       - user_todos
       - skill_toolkit
+      - skill_retrieval
 
     embedding_config:
       model_name: null

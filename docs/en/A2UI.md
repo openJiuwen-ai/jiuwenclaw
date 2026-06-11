@@ -38,7 +38,7 @@ Default configuration lives in `jiuwenswarm/resources/config.yaml`:
 
 ```yaml
 a2ui:
-  enabled: true
+  enabled: false
   protocol_version: "0.8"
   stream_validation_enabled: true
   non_web_fallback_enabled: false
@@ -49,6 +49,8 @@ A2UI can be controlled through:
 - Web config panel: the `A2UI` top-level toggle.
 - User workspace config: `a2ui.enabled` in `config.yaml`.
 - Environment variable: `JIUWENSWARM_A2UI_ENABLED=false` or `true`.
+
+A2UI is disabled by default. It must be explicitly enabled before the Web channel injects the A2UI prompt and runs response finalization.
 
 `non_web_fallback_enabled` is kept only for compatibility with older configs. A2UI is currently Web-only, so non-Web channels always bypass A2UI.
 

@@ -451,7 +451,13 @@ class SkillManager:
             if md is None:
                 continue
             meta = self._parse_skill_md(md)
-            if meta and meta.get("name") == name:
+            if meta is None:
+                continue
+            # 与 _scan_local_skills 保持一致：无 frontmatter 时 name 退化为文件名(SKILL)，
+            # 此处用目录名修正，否则前端列表(目录名)与详情(文件名)对不上导致“未找到 skill”
+            if meta.get("name") == md.stem:
+                meta["name"] = child.name
+            if meta.get("name") == name:
                 # 字段转换以符合前端期望
                 meta["content"] = meta.pop("body", "")
                 meta["file_path"] = meta.pop("path", "")
@@ -479,7 +485,11 @@ class SkillManager:
                     if md is None:
                         continue
                     meta = self._parse_skill_md(md)
-                    if meta and meta.get("name") == name:
+                    if meta is None:
+                        continue
+                    if meta.get("name") == md.stem:
+                        meta["name"] = plugin_dir.name
+                    if meta.get("name") == name:
                         # 字段转换以符合前端期望
                         meta["content"] = meta.pop("body", "")
                         meta["file_path"] = meta.pop("path", "")
@@ -516,6 +526,31 @@ class SkillManager:
             "config": {"enabled": enabled},
             "detail": "配置已更新；下次 reload / rebuild / 新会话后执行面生效。",
         }
+
+    async def handle_skills_retrieval_status(self, params: dict) -> dict:
+        """返回本地 skill retrieval 索引状态."""
+        from jiuwenswarm.symphony.skill_retrieval import get_skill_retrieval_status
+
+        return await asyncio.to_thread(get_skill_retrieval_status, self)
+
+    async def handle_skills_retrieval_index_build(self, params: dict) -> dict:
+        """构建或复用本地 skill retrieval 索引."""
+        from jiuwenswarm.symphony.skill_retrieval import build_skill_index
+
+        return await asyncio.to_thread(build_skill_index, self)
+
+    async def handle_skills_retrieval_search(self, params: dict) -> dict:
+        """基于本地索引检索已安装 skills."""
+        from jiuwenswarm.symphony.skill_retrieval import retrieve_skills
+
+        query = str((params or {}).get("query") or "").strip()
+        return await asyncio.to_thread(retrieve_skills, query, self)
+
+    async def handle_skills_retrieval_tree(self, params: dict) -> dict:
+        """返回本地 skill retrieval 树索引概览."""
+        from jiuwenswarm.symphony.skill_retrieval import get_skill_retrieval_tree
+
+        return await asyncio.to_thread(get_skill_retrieval_tree, self)
 
     async def handle_skills_evolution_status(self, params: dict) -> dict:
         """检查某个 skill 是否存在 evolutions.json."""

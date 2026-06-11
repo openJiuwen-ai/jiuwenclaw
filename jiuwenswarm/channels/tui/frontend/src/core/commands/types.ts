@@ -60,6 +60,8 @@ export interface CommandContext {
   isInterruptRequested: () => boolean;
   /** Clear local interrupt flag (for long-running commands to reset after handling interrupt) */
   clearInterruptRequested: () => void;
+  /** Set the currently running command name (for tracking uninterruptible commands) */
+  setRunningCommand?: (name: string | null) => void;
   connectionStatus: ConnectionStatus;
   mode: ClientMode;
   setMode: (mode: ClientMode) => void;

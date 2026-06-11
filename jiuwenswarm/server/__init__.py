@@ -7,17 +7,17 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
-    from jiuwenswarm.server.runtime.agent_adapter.interface import JiuWenClaw
+    from jiuwenswarm.server.runtime.agent_adapter.interface import JiuWenSwarm
     from jiuwenswarm.server.runtime.skill.skill_manager import SkillManager
 
-__all__ = ["JiuWenClaw", "SkillManager"]
+__all__ = ["JiuWenSwarm", "SkillManager"]
 
 
 def __getattr__(name: str) -> Any:
-    if name == "JiuWenClaw":
-        from jiuwenswarm.server.runtime.agent_adapter.interface import JiuWenClaw
+    if name == "JiuWenSwarm":
+        from jiuwenswarm.server.runtime.agent_adapter.interface import JiuWenSwarm
 
-        return JiuWenClaw
+        return JiuWenSwarm
     if name == "SkillManager":
         from jiuwenswarm.server.runtime.skill.skill_manager import SkillManager
 

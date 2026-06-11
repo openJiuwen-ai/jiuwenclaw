@@ -128,7 +128,7 @@ class AgentWebSocketServerHarness(agent_ws_server_module.AgentWebSocketServer):
         return await super()._find_team_session_ids(team_name)
 
 
-class DeepAdapterHarness(interface_deep_module.JiuWenClawDeepAdapter):
+class DeepAdapterHarness(interface_deep_module.JiuWenSwarmDeepAdapter):
     def build_context_assemble_rail_for_test(self):
         return _build_context_assemble_rail()
 
@@ -178,6 +178,103 @@ def test_interface_deep_parse_stream_chunk_preserves_tool_update():
         "event_type": "chat.tool_update",
         "tool_call_id": "call-1",
         "tool_name": "read_file",
+        "status": "in_progress",
+    }
+
+
+def test_interface_deep_parse_stream_chunk_preserves_tool_result_status():
+    raw_output = {
+        "success": False,
+        "direct_display": True,
+        "display_format": "markdown",
+        "mermaid": "flowchart LR\n  A --> B",
+        "score_status": {"success": True, "exists": False},
+        "score_build": {"success": False, "detail": "failed"},
+    }
+    parsed = parse_stream_chunk(
+        types.SimpleNamespace(
+            type="tool_result",
+            payload={
+                "tool_result": {
+                    "tool_call_id": "call-1",
+                    "tool_name": "symphony_compose_score",
+                    "result": "failed",
+                    "status": "error",
+                    "success": False,
+                    "is_error": True,
+                    "raw_output": raw_output,
+                    "direct_display": True,
+                    "display_format": "markdown",
+                    "mermaid": raw_output["mermaid"],
+                    "score_status": raw_output["score_status"],
+                    "score_build": raw_output["score_build"],
+                }
+            },
+        )
+    )
+
+    assert parsed == {
+        "event_type": "chat.tool_result",
+        "result": "failed",
+        "tool_name": "symphony_compose_score",
+        "tool_call_id": "call-1",
+        "status": "error",
+        "success": False,
+        "is_error": True,
+        "raw_output": raw_output,
+        "direct_display": True,
+        "display_format": "markdown",
+        "mermaid": raw_output["mermaid"],
+        "score_status": raw_output["score_status"],
+        "score_build": raw_output["score_build"],
+    }
+
+
+def test_parse_stream_chunk_preserves_symphony_status_payload():
+    parsed = parse_stream_chunk(
+        types.SimpleNamespace(
+            type="chat.symphony_status",
+            payload={
+                "source": "symphony_compose_score",
+                "operation_id": "call-1",
+                "phase": "checking_score",
+                "content": "正在读取 Symphony 总谱...",
+                "status": "in_progress",
+            },
+        )
+    )
+
+    assert parsed == {
+        "event_type": "chat.symphony_status",
+        "source": "symphony_compose_score",
+        "operation_id": "call-1",
+        "phase": "checking_score",
+        "content": "正在读取 Symphony 总谱...",
+        "status": "in_progress",
+    }
+
+
+def test_interface_deep_parse_stream_chunk_preserves_symphony_status_payload():
+    parse_chunk = getattr(interface_deep_module.JiuWenSwarmDeepAdapter, "_parse_stream_chunk")
+    parsed = parse_chunk(
+        types.SimpleNamespace(
+            type="chat.symphony_status",
+            payload={
+                "source": "symphony_compose_score",
+                "operation_id": "call-1",
+                "phase": "planning",
+                "content": "正在编排技能执行乐谱...",
+                "status": "in_progress",
+            },
+        )
+    )
+
+    assert parsed == {
+        "event_type": "chat.symphony_status",
+        "source": "symphony_compose_score",
+        "operation_id": "call-1",
+        "phase": "planning",
+        "content": "正在编排技能执行乐谱...",
         "status": "in_progress",
     }
 

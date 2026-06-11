@@ -2,7 +2,7 @@ from types import SimpleNamespace
 
 import pytest
 from jiuwenswarm.agents.harness.common.rails.stream_event_rail import (
-    JiuClawStreamEventRail,
+    JiuSwarmStreamEventRail,
 )
 
 
@@ -20,7 +20,7 @@ class _FakeSession:
         self.outputs.append(output)
 
 
-class _TestRail(JiuClawStreamEventRail):
+class _TestRail(JiuSwarmStreamEventRail):
     def install_todo_tool(self, tool):
         self._main_todo_tool = tool
 

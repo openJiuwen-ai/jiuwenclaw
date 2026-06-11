@@ -13,13 +13,13 @@ from openjiuwen.harness.prompts.prompt_attachment_manager import (
 )
 from openjiuwen.harness.prompts import PromptSection, SystemPromptBuilder
 
-from jiuwenswarm.server.runtime.agent_adapter.interface_deep import JiuWenClawDeepAdapter
+from jiuwenswarm.server.runtime.agent_adapter.interface_deep import JiuWenSwarmDeepAdapter
 from jiuwenswarm.agents.harness.common.prompt.prompt_builder import build_agent_identity_prompt
 from jiuwenswarm.agents.harness.common.rails import runtime_prompt_rail as _runtime_mod
 from jiuwenswarm.agents.harness.common.rails.runtime_prompt_rail import RuntimePromptRail
 
 
-class _TestableJiuWenClawDeepAdapter(JiuWenClawDeepAdapter):
+class _TestableJiuWenSwarmDeepAdapter(JiuWenSwarmDeepAdapter):
     def set_workspace_dir(self, workspace_dir: str) -> None:
         self._workspace_dir = workspace_dir
 
@@ -43,11 +43,30 @@ class _FakeAgent:
         self.prompt_attachment_manager = PromptAttachmentManager()
 
 
-def test_build_agent_identity_prompt_contains_identity_section_only():
+def test_build_agent_identity_prompt_contains_identity_section_only(monkeypatch):
+    monkeypatch.setattr(
+        "jiuwenswarm.symphony.config.load_symphony_config",
+        lambda: SimpleNamespace(enabled=True),
+    )
     prompt = build_agent_identity_prompt(language="zh")
 
     assert "# 你的家" in prompt
+    assert "## Symphony Routing" in prompt
+    assert "`symphony_compose_score`" in prompt
+    assert "present its returned `content` or" in prompt
     assert "# 消息说明" not in prompt
+
+
+def test_build_agent_identity_prompt_omits_symphony_when_disabled(monkeypatch):
+    monkeypatch.setattr(
+        "jiuwenswarm.symphony.config.load_symphony_config",
+        lambda: SimpleNamespace(enabled=False),
+    )
+
+    prompt = build_agent_identity_prompt(language="zh")
+
+    assert "## Symphony Routing" not in prompt
+    assert "`symphony_compose_score`" not in prompt
 
 
 @pytest.mark.asyncio
@@ -156,7 +175,7 @@ async def test_runtime_git_status_attachment_clears_when_git_context_disappears(
 async def test_deep_adapter_clears_all_current_turn_prompt_attachments():
     builder = SystemPromptBuilder(language="en")
     agent = _FakeAgent(builder)
-    adapter = JiuWenClawDeepAdapter.__new__(JiuWenClawDeepAdapter)
+    adapter = JiuWenSwarmDeepAdapter.__new__(JiuWenSwarmDeepAdapter)
     adapter._instance = agent
     adapter._prompt_attachment_loader = None
 
@@ -278,22 +297,22 @@ async def test_runtime_prompt_language_output_prefers_rail_language_over_runtime
 
 
 def test_resolve_skill_mode_accepts_all_and_auto_list():
-    assert JiuWenClawDeepAdapter._resolve_skill_mode({"skill_mode": "all"}) == "all"
-    assert JiuWenClawDeepAdapter._resolve_skill_mode({"skill_mode": "auto_list"}) == "auto_list"
-    assert JiuWenClawDeepAdapter._resolve_skill_mode({"skill_mode": "invalid"}) == "all"
+    assert JiuWenSwarmDeepAdapter._resolve_skill_mode({"skill_mode": "all"}) == "all"
+    assert JiuWenSwarmDeepAdapter._resolve_skill_mode({"skill_mode": "auto_list"}) == "auto_list"
+    assert JiuWenSwarmDeepAdapter._resolve_skill_mode({"skill_mode": "invalid"}) == "all"
 
 
 def test_resolve_enable_task_loop_can_be_called_on_class(monkeypatch):
     monkeypatch.delenv("SKILL_CREATE", raising=False)
     assert (
-        JiuWenClawDeepAdapter._resolve_enable_task_loop(
+        JiuWenSwarmDeepAdapter._resolve_enable_task_loop(
             {"enable_task_loop": False},
             {"evolution": {"skill_create": True}},
         )
         is True
     )
     assert (
-        JiuWenClawDeepAdapter._resolve_enable_task_loop(
+        JiuWenSwarmDeepAdapter._resolve_enable_task_loop(
             {"enable_task_loop": False},
             {"evolution": {"skill_create": False}},
         )
@@ -305,7 +324,7 @@ def test_resolve_enable_task_loop_can_be_called_on_class(monkeypatch):
 # code_agent / explore_agent belong to CodeAdapter.
 
 def test_deep_adapter_subagents_includes_optional_browser_and_configured_research():
-    adapter = _TestableJiuWenClawDeepAdapter()
+    adapter = _TestableJiuWenSwarmDeepAdapter()
     adapter.set_workspace_dir("/tmp/jiuwenswarm-workspace")
     model = object()
     config = {
@@ -346,7 +365,7 @@ def test_deep_adapter_subagents_includes_optional_browser_and_configured_researc
 
 
 def test_deep_adapter_subagents_omits_research_without_explicit_enable():
-    adapter = _TestableJiuWenClawDeepAdapter()
+    adapter = _TestableJiuWenSwarmDeepAdapter()
     adapter.set_workspace_dir("/tmp/jiuwenswarm-workspace")
     model = object()
     config = {"max_iterations": 9}

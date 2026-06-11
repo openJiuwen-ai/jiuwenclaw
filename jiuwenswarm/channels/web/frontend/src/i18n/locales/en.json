@@ -211,8 +211,8 @@
     "placeholderTeamMode": "Team mode, new input will run in parallel...",
     "placeholderTeamModeProcessing": "Team mode processing, new input will run in parallel...",
     "placeholderVoice": "Listening...",
-    "welcomeLogoAlt": "JiuwenClaw logo",
-    "welcomeHeading": "Hi, I'm JiuwenClaw. Nice to meet you!",
+    "welcomeLogoAlt": "JiuwenSwarm logo",
+    "welcomeHeading": "Hi, I'm JiuwenSwarm. Nice to meet you!",
     "welcomeSubtext": "I can answer questions, clear up confusion, and help you complete tasks.",
     "welcomeSuggestions": {
       "journey": "Let's begin a brand-new journey!",
@@ -670,6 +670,7 @@
       "memoryForbiddenEnabled": "Enable",
       "memoryForbiddenDescription": "Forbidden memory content description",
       "memoryForbiddenDescriptionPlaceholder": "e.g. passwords, API keys, secrets, tokens, credit card numbers, ID numbers, phone numbers",
+      "skillRetrievalBuildRootCategoriesPlaceholder": "Leave empty for built-in defaults, or enter a JSON/YAML file path",
       "agentSkillsPlaceholder": "Click to select skills",
       "agentSkillsEmpty": "No installed skills",
       "agentName": "Name",
@@ -688,10 +689,24 @@
       "teamMemberRoleType": "Role Type",
       "teamMemberPersona": "Persona",
       "teamMemberPromptHint": "Prompt Hint",
-      "teamMemberAgentKey": "Agent Key"
+      "teamMemberAgentKey": "Agent Key",
+      "skillRetrievalEnabled": "Enable skill retrieval",
+      "skillRetrievalBuildBranchingFactor": "Tree branching factor",
+      "skillRetrievalBuildMaxDepth": "Max tree depth",
+      "skillRetrievalBuildRootCategories": "Root taxonomy config",
+      "skillRetrievalBuildMaxWorkers": "Build workers",
+      "skillRetrievalBuildTimeout": "Build request timeout (s)",
+      "skillRetrievalTopK": "Retrieved skill count",
+      "skillRetrievalCompactCodes": "Compact retrieval",
+      "skillRetrievalFlattenTree": "Flat tree retrieval",
+      "skillRetrievalMaxExposureDepth": "Max exposure depth",
+      "skillRetrievalMaxBranchChoices": "Branch choices per step",
+      "skillRetrievalMaxParallelBranches": "Parallel branches",
+      "skillRetrievalRetrieveTimeout": "Retrieve request timeout (s)"
     },
     "keyHelp": {
-      "skillCreate": "Install `skill-creator` and `teamskill-creator` before enabling"
+      "skillCreate": "Install `skill-creator` and `teamskill-creator` before enabling",
+      "skillRetrievalBuildRootCategories": "Optional. Leave empty to use the built-in root taxonomy; when set, use a JSON/YAML file containing tree_root_categories or root_categories."
     },
     "hideValue": "Hide value",
     "showValue": "Show value",
@@ -779,6 +794,7 @@
       "contextEngine": { "label": "Context Compression", "hint": "Enable or disable dialogue context compression" },
       "permissions": { "label": "Tool Safety Guardrail", "hint": "Enable or disable permission checks for tool calls" },
       "a2ui": { "label": "A2UI", "hint": "Enable or disable generated UI rendering and A2UI runtime prompts." },
+      "skillRetrieval": { "label": "Agentic Skill Retrieval", "hint": "Agentic skill retrieval for larger sets of installed skills" },
       "memory": { "label": "Memory Sensitive Info Filter", "hint": "Configure sensitive content types forbidden from memory" },
       "email": { "label": "Email Settings", "hint": "Email account and token settings" },
       "other": { "label": "Other Settings", "hint": "Unclassified extended parameters" }
@@ -789,7 +805,9 @@
       "freeSearchDdg": "Enable DuckDuckGo (including DDG via Jina)",
       "freeSearchBing": "Enable Bing",
       "enabled": "Enable",
-      "kvCacheAffinity": "Compute affinity (KV cache release)"
+      "kvCacheAffinity": "Compute affinity (KV cache release)",
+      "skillRetrievalCompact": "Enable compact code",
+      "skillRetrievalFlat": "Enable flat tree"
     },
     "permissionsTools": {
       "title": "Tool Guardrail (permissions.tools)",
@@ -957,7 +975,8 @@
     "subtitle": "Manage and install skills available to the agent.",
     "tabs": {
       "mySkills": "My Skills",
-      "marketplace": "Marketplace"
+      "marketplace": "Marketplace",
+      "skillIndex": "Skill Index"
     },
     "mySkillsTabs": {
       "all": "All",
@@ -1022,6 +1041,37 @@
     },
     "detailLoading": "Loading details...",
     "detailError": "Failed to load details",
+    "retrieval": {
+      "title": "Local Skill Retrieval",
+      "disabled": "Retrieval disabled",
+      "ready": "Index ready",
+      "stale": "Index needs update",
+      "missing": "Index not built",
+      "indexedCount": "{{count}} indexed",
+      "enabledCount": "{{count}} enabled",
+      "build": "Build Index",
+      "building": "Building...",
+      "search": "Retrieve",
+      "searching": "Retrieving...",
+      "queryPlaceholder": "Enter a task to retrieve installed skills",
+      "treeTitle": "Index Tree",
+      "treeCount": "{{branches}} branches · {{skills}} skills",
+      "noTree": "No index tree",
+      "nodeDetails": "Node Details",
+      "selectNodeHint": "Select a node in the tree to view its description.",
+      "nodeDescription": "Description",
+      "nodeSelectWhen": "Select When",
+      "nodeDontSelectWhen": "Do Not Select When",
+      "nodeSourceDescription": "Source Description",
+      "nodeWorkerId": "Skill ID",
+      "nodeCategory": "Category",
+      "nodeKeywords": "Keywords",
+      "nodeExamples": "Examples",
+      "nodeTypes": {
+        "branch": "Branch",
+        "skill": "Skill"
+      }
+    },
     "evolution": {
       "closeAria": "Close skill experience dialog",
       "title": "Skill Experience: {{name}}",

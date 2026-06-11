@@ -17,8 +17,8 @@ import pytest
 
 from openjiuwen.harness.prompts.prompt_attachment_manager import PromptAttachmentManager
 
-from jiuwenswarm.server.runtime.agent_adapter.interface_code import JiuwenClawCodeAdapter
-from jiuwenswarm.server.runtime.agent_adapter.interface_deep import JiuWenClawDeepAdapter
+from jiuwenswarm.server.runtime.agent_adapter.interface_code import JiuwenSwarmCodeAdapter
+from jiuwenswarm.server.runtime.agent_adapter.interface_deep import JiuWenSwarmDeepAdapter
 from jiuwenswarm.agents.harness.common.rails.project_memory import (
     clear_project_memory_cache,
     discover_and_load_memory_files,
@@ -312,7 +312,7 @@ class TestCodeModeIntegration:
 
     def test_build_project_memory_rail_creates_rail(self):
         with tempfile.TemporaryDirectory() as td:
-            adapter = JiuwenClawCodeAdapter()
+            adapter = JiuwenSwarmCodeAdapter()
             adapter._workspace_dir = td
             adapter._project_dir = td
             adapter._instance_overrides = {}
@@ -335,7 +335,7 @@ class TestCodeModeIntegration:
                 str(extra1) + os.pathsep + str(extra2),
             )
 
-            adapter = JiuwenClawCodeAdapter()
+            adapter = JiuwenSwarmCodeAdapter()
             adapter._workspace_dir = td
             adapter._project_dir = td
             adapter._instance_overrides = {}
@@ -349,13 +349,13 @@ class TestCodeModeIntegration:
     @staticmethod
     def test_is_subagent_default_enabled_logic():
         # None → default enabled (no config means enabled)
-        assert JiuWenClawDeepAdapter._is_subagent_default_enabled(None) is True
+        assert JiuWenSwarmDeepAdapter._is_subagent_default_enabled(None) is True
         # dict without "enabled" → default enabled
-        assert JiuWenClawDeepAdapter._is_subagent_default_enabled({"max_iterations": 5}) is True
+        assert JiuWenSwarmDeepAdapter._is_subagent_default_enabled({"max_iterations": 5}) is True
         # dict with enabled=True → still enabled
-        assert JiuWenClawDeepAdapter._is_subagent_default_enabled({"enabled": True}) is True
+        assert JiuWenSwarmDeepAdapter._is_subagent_default_enabled({"enabled": True}) is True
         # dict with enabled=False → explicitly disabled
-        assert JiuWenClawDeepAdapter._is_subagent_default_enabled({"enabled": False}) is False
+        assert JiuWenSwarmDeepAdapter._is_subagent_default_enabled({"enabled": False}) is False
 
     def test_git_worktree_info_is_public_dataclass(self):
         info = GitWorktreeInfo(
@@ -389,11 +389,11 @@ class TestExploreAgentSubagentIntegration:
             ModelRequestConfig,
         )
 
-        adapter = JiuwenClawCodeAdapter()
+        adapter = JiuwenSwarmCodeAdapter()
         adapter._workspace_dir = "/tmp/test-workspace"
         adapter._project_dir = "/tmp/test-workspace"
         monkeypatch.setattr(
-            JiuwenClawCodeAdapter,
+            JiuwenSwarmCodeAdapter,
             "_browser_runtime_enabled",
             staticmethod(lambda: False),
         )
@@ -422,11 +422,11 @@ class TestExploreAgentSubagentIntegration:
             ModelRequestConfig,
         )
 
-        adapter = JiuwenClawCodeAdapter()
+        adapter = JiuwenSwarmCodeAdapter()
         adapter._workspace_dir = "/tmp/test-workspace"
         adapter._project_dir = "/tmp/test-workspace"
         monkeypatch.setattr(
-            JiuwenClawCodeAdapter,
+            JiuwenSwarmCodeAdapter,
             "_browser_runtime_enabled",
             staticmethod(lambda: False),
         )
@@ -458,11 +458,11 @@ class TestExploreAgentSubagentIntegration:
             ModelRequestConfig,
         )
 
-        adapter = JiuwenClawCodeAdapter()
+        adapter = JiuwenSwarmCodeAdapter()
         adapter._workspace_dir = "/tmp/test-workspace"
         adapter._project_dir = "/tmp/test-workspace"
         monkeypatch.setattr(
-            JiuwenClawCodeAdapter,
+            JiuwenSwarmCodeAdapter,
             "_browser_runtime_enabled",
             staticmethod(lambda: False),
         )
@@ -578,7 +578,7 @@ class TestProjectMemoryRailModeSwitching:
 
     def test_rail_built_for_code_mode(self):
         with tempfile.TemporaryDirectory() as td:
-            adapter = JiuwenClawCodeAdapter()
+            adapter = JiuwenSwarmCodeAdapter()
             adapter._workspace_dir = td
             adapter._project_dir = td
             adapter._instance_overrides = {}
@@ -601,7 +601,7 @@ class TestProjectMemoryRailModeSwitching:
         # CodeAdapter always builds and registers ProjectMemoryRail
         # regardless of mode variant (code, code.normal, code.plan)
         for _ in ("code", "code.normal", "code.plan"):
-            # All code variants use JiuwenClawCodeAdapter, which always mounts the rail
+            # All code variants use JiuwenSwarmCodeAdapter, which always mounts the rail
             assert True
 
 

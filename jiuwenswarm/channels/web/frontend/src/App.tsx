@@ -1413,7 +1413,7 @@ for (let i = payload.team.length; i < 10; i++) {
               {configError}. {t('app.configErrorHint')}
               <span className="mono"> python -m tests.web_gateway_jiuwenclaw_integration </span>
               {t('app.configErrorDefault')}
-              <span className="mono"> jiuwenclaw/channels/web/frontend/.env.local </span>
+              <span className="mono"> jiuwenswarm/channels/web/frontend/.env.local </span>
               {t('app.configErrorEnv')} <span className="mono">VITE_API_BASE</span> {t('common.and')} <span className="mono">VITE_WS_BASE</span>.
             </div>
           </div>

@@ -7,7 +7,7 @@ from __future__ import annotations
 import pytest
 
 from jiuwenswarm.common.schema.agent import AgentRequest, AgentResponseChunk
-from jiuwenswarm.server.runtime.agent_adapter.interface_deep import JiuWenClawDeepAdapter
+from jiuwenswarm.server.runtime.agent_adapter.interface_deep import JiuWenSwarmDeepAdapter
 
 
 class _FakeAutoHarnessService:
@@ -40,7 +40,7 @@ class _FakeAutoHarnessService:
 @pytest.mark.asyncio
 async def test_auto_harness_syncs_tui_channel_before_service(monkeypatch):
     """AutoHarness must preserve the TUI channel before downstream model rails run."""
-    adapter = object.__new__(JiuWenClawDeepAdapter)
+    adapter = object.__new__(JiuWenSwarmDeepAdapter)
     adapter._instance = object()
     adapter._auto_harness_service = _FakeAutoHarnessService()
     adapter._stream_event_rail = None
@@ -53,16 +53,16 @@ async def test_auto_harness_syncs_tui_channel_before_service(monkeypatch):
         captured["session_id"] = runtime_config.session_id
 
     monkeypatch.setattr(
-        JiuWenClawDeepAdapter,
+        JiuWenSwarmDeepAdapter,
         "_has_valid_model_config",
         lambda self, model: True,
     )
     monkeypatch.setattr(
-        JiuWenClawDeepAdapter,
+        JiuWenSwarmDeepAdapter,
         "_resolve_model_for_request",
         lambda self, request: None,
     )
-    monkeypatch.setattr(JiuWenClawDeepAdapter, "_update_runtime_config", capture_runtime_config)
+    monkeypatch.setattr(JiuWenSwarmDeepAdapter, "_update_runtime_config", capture_runtime_config)
 
     request = AgentRequest(
         request_id="req-auto-harness-tui",
@@ -88,13 +88,13 @@ async def test_auto_harness_syncs_tui_channel_before_service(monkeypatch):
 
 def test_prompt_channel_resolver_keeps_tui_prefix_non_web():
     """Session-prefix fallback should recognize TUI as a non-Web channel."""
-    assert JiuWenClawDeepAdapter._resolve_prompt_channel("tui_session_1") == "tui"
+    assert JiuWenSwarmDeepAdapter._resolve_prompt_channel("tui_session_1") == "tui"
 
 
 @pytest.mark.asyncio
 async def test_runtime_config_syncs_channel_to_response_prompt_rail(monkeypatch):
     """Inner ReAct model-call rails need the adapter-resolved channel."""
-    adapter = object.__new__(JiuWenClawDeepAdapter)
+    adapter = object.__new__(JiuWenSwarmDeepAdapter)
     adapter._instance = object()
     adapter._project_dir = None
     adapter._workspace_dir = "/tmp"
@@ -113,25 +113,29 @@ async def test_runtime_config_syncs_channel_to_response_prompt_rail(monkeypatch)
 
     adapter._response_prompt_rail = _ResponseRail()
 
-    monkeypatch.setattr(JiuWenClawDeepAdapter, "_seed_runtime_cwd", lambda self, cwd=None: None)
-    monkeypatch.setattr(JiuWenClawDeepAdapter, "_resolve_runtime_language", lambda self: "cn")
-    monkeypatch.setattr(JiuWenClawDeepAdapter, "_write_runtime_state", lambda self, **kwargs: None)
-    monkeypatch.setattr(JiuWenClawDeepAdapter, "_update_rails_for_mode", async_noop)
-    monkeypatch.setattr(JiuWenClawDeepAdapter, "_update_tools_for_mode", async_noop)
-    monkeypatch.setattr(JiuWenClawDeepAdapter, "_update_session_tools", async_noop)
     monkeypatch.setattr(
-        JiuWenClawDeepAdapter,
+        JiuWenSwarmDeepAdapter,
+        "_seed_runtime_cwd",
+        lambda self, cwd=None, workspace=None: None,
+    )
+    monkeypatch.setattr(JiuWenSwarmDeepAdapter, "_resolve_runtime_language", lambda self: "cn")
+    monkeypatch.setattr(JiuWenSwarmDeepAdapter, "_write_runtime_state", lambda self, **kwargs: None)
+    monkeypatch.setattr(JiuWenSwarmDeepAdapter, "_update_rails_for_mode", async_noop)
+    monkeypatch.setattr(JiuWenSwarmDeepAdapter, "_update_tools_for_mode", async_noop)
+    monkeypatch.setattr(JiuWenSwarmDeepAdapter, "_update_session_tools", async_noop)
+    monkeypatch.setattr(
+        JiuWenSwarmDeepAdapter,
         "_refresh_acp_runtime_tools",
         lambda self, *args: None,
     )
     monkeypatch.setattr(
-        JiuWenClawDeepAdapter,
+        JiuWenSwarmDeepAdapter,
         "_update_prompt_for_mode",
         lambda self, *args: None,
     )
 
     await adapter._update_runtime_config(
-        JiuWenClawDeepAdapter._RuntimeConfig(
+        JiuWenSwarmDeepAdapter._RuntimeConfig(
             session_id="sess_123",
             mode="agent.fast",
             channel_id="web",

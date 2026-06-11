@@ -232,7 +232,7 @@ def create_instances_yaml_template() -> Path:
     if path.exists():
         return path
 
-    template = """# JiuWenClaw instances configuration
+    template = """# JiuWenSwarm instances configuration
 # Each instance has its own workspace, ports, and processes
 #
 # Example:

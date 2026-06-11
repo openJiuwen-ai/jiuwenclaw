@@ -1,6 +1,6 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 
-"""Memory system for JiuWenClaw."""
+"""Memory system for JiuWenSwarm."""
 
 from .types import (
     MemorySearchResult,

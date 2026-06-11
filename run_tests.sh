@@ -1,5 +1,5 @@
 #!/bin/bash
-# Test runner script for JiuwenClaw
+# Test runner script for JiuwenSwarm
 
 set -e  # Exit on error
 

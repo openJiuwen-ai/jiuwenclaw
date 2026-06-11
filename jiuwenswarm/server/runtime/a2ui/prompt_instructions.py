@@ -13,7 +13,10 @@ def build_a2ui_autonomy_instruction(language: str = "en") -> str:
         "each item contains its own nested valueMap fields. Inside template "
         "components, use item-relative paths like 'name', 'price', or "
         "'/item/name' for Text, Image, and Button.action.context values; do not "
-        "use collection-absolute paths such as '/phones/name' inside templates."
+        "use collection-absolute paths such as '/phones/name' inside templates. "
+        "Do not nest templates inside template-rendered components in A2UI 0.8; "
+        "flatten repeated item details into fields on the outer item, or use "
+        "explicit child components that bind to those fields."
     )
     image_url_rule_en = (
         " Do not invent image URLs. If external facts or images are needed, use "
@@ -62,7 +65,9 @@ def build_a2ui_autonomy_instruction(language: str = "en") -> str:
         "请把数组编码为一个集合 key，并在 valueMap 中使用 \"0\"、\"1\" 这类索引项；"
         "每个 item 包含自己的嵌套 valueMap 字段。模板组件和 Button.action.context "
         "内使用 item-relative path，例如 name、price 或 /item/name；"
-        "不要在模板内使用 /phones/name 这类集合绝对路径。"
+        "不要在模板内使用 /phones/name 这类集合绝对路径。A2UI 0.8 不要在模板渲染出的"
+        "组件内部再嵌套 template；请把重复 item 的明细拍平成外层 item 字段，或使用显式"
+        "子组件绑定这些字段。"
     )
     image_url_rule_zh = (
         " 不要编造图片 URL。如果需要外部事实或图片，可以短暂使用可用工具，"

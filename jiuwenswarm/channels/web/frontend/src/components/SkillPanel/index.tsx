@@ -3,8 +3,9 @@
  *
  * Skills 管理面板
  */
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { useTranslation } from 'react-i18next';
+import { ChevronRight } from 'lucide-react';
 import { webRequest } from "../../services/webClient";
 import { SourceManagerModal } from "../../features/SourceManagerModal";
 import { SkillNetSearchModal } from "../../features/SkillNetSearchModal";
@@ -12,6 +13,7 @@ import { ClawHubSearchModal } from "../../features/ClawHubSearchModal";
 import { TeamSkillsHubModal } from "../../features/TeamSkillsHubModal";
 import { SkillEvolutionModal } from "../../features/SkillEvolutionModal";
 import { normalizeSkillNetUrl } from "../../utils/skillNetUrl";
+import { SkillGraphPanel } from "../SkillGraphPanel";
 import { Switch } from "../Switch";
 
 /** 刷新会 git pull marketplace，略放宽；普通进页单次 RPC 一般很快。 */
@@ -63,6 +65,44 @@ type SkillDetail = SkillItem & {
 
 type LoadState = "idle" | "loading" | "success" | "error";
 
+type SkillRetrievalStatus = {
+  enabled?: boolean;
+  index_exists?: boolean;
+  fresh?: boolean;
+  installed_enabled_count?: number;
+  indexed_count?: number;
+  built_at?: string;
+  index_dir?: string;
+};
+
+type SkillRetrievalTreeResponse = {
+  success?: boolean;
+  result?: string;
+  nodes?: SkillIndexNode[];
+  branch_count?: number;
+  leaf_count?: number;
+  index_dir?: string;
+};
+
+type SkillIndexNode = {
+  cid: string;
+  parent_cid?: string;
+  type?: "branch" | "leaf" | string;
+  label?: string;
+  description?: string;
+  select_when?: string;
+  dont_select_when?: string;
+  source_description?: string;
+  worker_id?: string;
+  category?: string;
+  keywords?: string[];
+  examples?: string[];
+};
+
+type SkillIndexTreeNode = SkillIndexNode & {
+  children: SkillIndexTreeNode[];
+};
+
 interface SkillPanelProps {
   sessionId: string;
   onNavigateToConfig?: () => void;
@@ -100,9 +140,154 @@ function normalizeSkillItem<T extends SkillItem>(raw: T): T {
   };
 }
 
+function buildSkillIndexTree(nodes: SkillIndexNode[]): SkillIndexTreeNode[] {
+  const map = new Map<string, SkillIndexTreeNode>();
+  nodes.forEach((node) => {
+    const cid = String(node.cid || "").trim();
+    if (!cid) return;
+    map.set(cid, { ...node, cid, children: [] });
+  });
+
+  const roots: SkillIndexTreeNode[] = [];
+  map.forEach((node) => {
+    const parentCid = String(node.parent_cid || "").trim();
+    const parent = parentCid ? map.get(parentCid) : undefined;
+    if (parent) {
+      parent.children.push(node);
+    } else {
+      roots.push(node);
+    }
+  });
+
+  const sortNodes = (items: SkillIndexTreeNode[]) => {
+    items.sort((a, b) => {
+      const aType = a.type === "leaf" ? 1 : 0;
+      const bType = b.type === "leaf" ? 1 : 0;
+      if (aType !== bType) return aType - bType;
+      return getSkillIndexNodeLabel(a).localeCompare(getSkillIndexNodeLabel(b));
+    });
+    items.forEach((item) => sortNodes(item.children));
+  };
+  sortNodes(roots);
+  return roots;
+}
+
+function getSkillIndexNodeLabel(node: SkillIndexNode): string {
+  return String(node.label || node.worker_id || node.cid || "").trim() || "node";
+}
+
+function findSkillIndexNode(nodes: SkillIndexNode[], cid: string | null): SkillIndexNode | null {
+  if (!cid) return null;
+  return nodes.find((node) => node.cid === cid) || null;
+}
+
+function SkillIndexTreeView({
+  roots,
+  selectedCid,
+  onSelect,
+  emptyText,
+  branchLabel,
+  skillLabel,
+}: {
+  roots: SkillIndexTreeNode[];
+  selectedCid: string | null;
+  onSelect: (cid: string) => void;
+  emptyText: string;
+  branchLabel: string;
+  skillLabel: string;
+}) {
+  const [expanded, setExpanded] = useState<Record<string, boolean>>({});
+
+  useEffect(() => {
+    const next: Record<string, boolean> = {};
+    const walk = (items: SkillIndexTreeNode[], depth: number) => {
+      items.forEach((item) => {
+        if (item.children.length > 0 && depth < 2) {
+          next[item.cid] = true;
+        }
+        walk(item.children, depth + 1);
+      });
+    };
+    walk(roots, 0);
+    setExpanded(next);
+  }, [roots]);
+
+  const renderNode = (node: SkillIndexTreeNode, depth: number): ReactNode => {
+    const hasChildren = node.children.length > 0;
+    const isExpanded = expanded[node.cid] ?? false;
+    const selected = selectedCid === node.cid;
+    const isLeaf = node.type === "leaf";
+    return (
+      <div key={node.cid}>
+        <div
+          role="treeitem"
+          aria-selected={selected}
+          aria-expanded={hasChildren ? isExpanded : undefined}
+          className={`flex items-center gap-1 rounded-md border text-xs transition-colors ${
+            selected
+              ? "border-accent/40 bg-accent/10 text-accent"
+              : "border-transparent text-text hover:bg-secondary/60"
+          }`}
+          style={{ paddingLeft: `${8 + depth * 14}px` }}
+        >
+          <button
+            type="button"
+            onClick={() => {
+              if (hasChildren) {
+                setExpanded((prev) => ({ ...prev, [node.cid]: !isExpanded }));
+              }
+            }}
+            className={`h-7 w-5 shrink-0 flex items-center justify-center rounded ${
+              hasChildren ? "text-text-muted hover:text-text" : "text-text-muted/50 cursor-default"
+            }`}
+            aria-label={hasChildren ? (isExpanded ? "Collapse" : "Expand") : undefined}
+          >
+            {hasChildren ? (
+              <ChevronRight
+                className={`h-3 w-3 transition-transform ${isExpanded ? "rotate-90" : ""}`}
+                strokeWidth={2}
+              />
+            ) : (
+              <span className="h-1.5 w-1.5 rounded-full bg-current opacity-50" />
+            )}
+          </button>
+          <button
+            type="button"
+            onClick={() => onSelect(node.cid)}
+            className="min-w-0 flex-1 h-7 flex items-center gap-2 text-left"
+            title={getSkillIndexNodeLabel(node)}
+          >
+            <span
+              className={`shrink-0 rounded border px-1.5 py-0.5 text-[10px] leading-none ${
+                isLeaf
+                  ? "border-emerald-500/25 bg-emerald-500/10 text-emerald-600"
+                  : "border-sky-500/25 bg-sky-500/10 text-sky-600"
+              }`}
+            >
+              {isLeaf ? skillLabel : branchLabel}
+            </span>
+            <span className="truncate">{getSkillIndexNodeLabel(node)}</span>
+          </button>
+        </div>
+        {hasChildren && isExpanded ? (
+          <div className="mt-1 space-y-1">
+            {node.children.map((child) => renderNode(child, depth + 1))}
+          </div>
+        ) : null}
+      </div>
+    );
+  };
+
+  if (roots.length === 0) {
+    return <div className="text-sm text-text-muted">{emptyText}</div>;
+  }
+
+  return <div className="space-y-1" role="tree">{roots.map((node) => renderNode(node, 0))}</div>;
+}
+
 export function SkillPanel({ sessionId, onNavigateToConfig }: SkillPanelProps) {
   const { t } = useTranslation();
-  const [activeTab, setActiveTab] = useState<"my" | "marketplace">("my");
+  const [activeTab, setActiveTab] = useState<"my" | "marketplace" | "index" | "graph">("my");
   const [mySkillsSubTab, setMySkillsSubTab] = useState<"all" | "enabled" | "disabled">("all");
   const [marketplaceSubTab, setMarketplaceSubTab] = useState<"builtin" | "swarmskills" | "online">("builtin");
   const [onlineSource, setOnlineSource] = useState<"skillnet" | "clawhub">("skillnet");
@@ -121,6 +306,14 @@ export function SkillPanel({ sessionId, onNavigateToConfig }: SkillPanelProps) {
   const [messageType, setMessageType] = useState<"success" | "error" | "loading" | null>(null);
   const messageTimerRef = useRef<number | null>(null);
   const [viewMode, setViewMode] = useState<"list" | "grid">("list");
+  const [retrievalStatus, setRetrievalStatus] = useState<SkillRetrievalStatus | null>(null);
+  const [retrievalQuery, setRetrievalQuery] = useState("");
+  const [retrievalResult, setRetrievalResult] = useState("");
+  const [retrievalTree, setRetrievalTree] = useState("");
+  const [retrievalTreeNodes, setRetrievalTreeNodes] = useState<SkillIndexNode[]>([]);
+  const [retrievalTreeCounts, setRetrievalTreeCounts] = useState({ branches: 0, skills: 0 });
+  const [selectedTreeNodeCid, setSelectedTreeNodeCid] = useState<string | null>(null);
+  const [retrievalLoading, setRetrievalLoading] = useState<"idle" | "status" | "tree" | "build" | "search">("idle");
 
   useEffect(() => {
     return () => {
@@ -316,9 +509,110 @@ export function SkillPanel({ sessionId, onNavigateToConfig }: SkillPanelProps) {
     [withSession]
   );
 
+  const fetchRetrievalStatus = useCallback(async () => {
+    setRetrievalLoading((current) => (current === "idle" ? "status" : current));
+    try {
+      const data = await webRequest<SkillRetrievalStatus>(
+        "skills.retrieval.status",
+        withSession()
+      );
+      setRetrievalStatus(data);
+    } catch (error) {
+      console.error('Failed to load skill retrieval status:', error);
+    } finally {
+      setRetrievalLoading((current) => (current === "status" ? "idle" : current));
+    }
+  }, [withSession]);
+
+  const fetchRetrievalTree = useCallback(async () => {
+    setRetrievalLoading((current) => (current === "idle" ? "tree" : current));
+    try {
+      const data = await webRequest<SkillRetrievalTreeResponse>(
+        "skills.retrieval.tree",
+        withSession()
+      );
+      const nodes = Array.isArray(data.nodes) ? data.nodes : [];
+      setRetrievalTree(data.result || "");
+      setRetrievalTreeNodes(nodes);
+      setRetrievalTreeCounts({
+        branches: typeof data.branch_count === "number"
+          ? data.branch_count
+          : nodes.filter((node) => node.type !== "leaf").length,
+        skills: typeof data.leaf_count === "number"
+          ? data.leaf_count
+          : nodes.filter((node) => node.type === "leaf").length,
+      });
+      setSelectedTreeNodeCid((current) => {
+        if (current && nodes.some((node) => node.cid === current)) {
+          return current;
+        }
+        return nodes[0]?.cid || null;
+      });
+    } catch (error) {
+      console.error('Failed to load skill retrieval tree:', error);
+      setRetrievalTree(error instanceof Error ? error.message : String(error));
+      setRetrievalTreeNodes([]);
+      setRetrievalTreeCounts({ branches: 0, skills: 0 });
+      setSelectedTreeNodeCid(null);
+    } finally {
+      setRetrievalLoading((current) => (current === "tree" ? "idle" : current));
+    }
+  }, [withSession]);
+
   useEffect(() => {
     fetchSkills();
   }, [fetchSkills]);
+
+  useEffect(() => {
+    fetchRetrievalStatus();
+  }, [fetchRetrievalStatus]);
+
+  useEffect(() => {
+    if (activeTab !== "index") return;
+    void fetchRetrievalStatus();
+    void fetchRetrievalTree();
+  }, [activeTab, fetchRetrievalStatus, fetchRetrievalTree]);
+
+  const handleBuildRetrievalIndex = useCallback(async () => {
+    setRetrievalLoading("build");
+    setRetrievalResult("");
+    try {
+      const data = await webRequest<{ success: boolean; result?: string }>(
+        "skills.retrieval.index_build",
+        withSession(),
+        { timeoutMs: 10 * 60_000 }
+      );
+      setRetrievalResult(data.result || "");
+      await fetchRetrievalStatus();
+      await fetchRetrievalTree();
+    } catch (error) {
+      console.error(error);
+      setRetrievalResult(error instanceof Error ? error.message : String(error));
+    } finally {
+      setRetrievalLoading("idle");
+    }
+  }, [fetchRetrievalStatus, fetchRetrievalTree, withSession]);
+
+  const handleSkillRetrieve = useCallback(async () => {
+    const query = retrievalQuery.trim();
+    if (!query) return;
+    setRetrievalLoading("search");
+    setRetrievalResult("");
+    try {
+      const data = await webRequest<{ success: boolean; result?: string }>(
+        "skills.retrieval.search",
+        withSession({ query }),
+        { timeoutMs: 120_000 }
+      );
+      setRetrievalResult(data.result || "");
+      await fetchRetrievalStatus();
+    } catch (error) {
+      console.error(error);
+      setRetrievalResult(error instanceof Error ? error.message : String(error));
+    } finally {
+      setRetrievalLoading("idle");
+    }
+  }, [fetchRetrievalStatus, retrievalQuery, withSession]);
 
   const handleOpenSkill = useCallback(
     (skillName: string) => {
@@ -728,6 +1022,23 @@ export function SkillPanel({ sessionId, onNavigateToConfig }: SkillPanelProps) {
   };
 
   const cleanMessage = message?.replace("√", "") || "";
+  const retrievalTreeRoots = useMemo(
+    () => buildSkillIndexTree(retrievalTreeNodes),
+    [retrievalTreeNodes]
+  );
+  const selectedTreeNode = useMemo(
+    () => findSkillIndexNode(retrievalTreeNodes, selectedTreeNodeCid),
+    [retrievalTreeNodes, selectedTreeNodeCid]
+  );
+  const retrievalStatusText = retrievalStatus
+    ? retrievalStatus.enabled === false
+      ? t('skills.retrieval.disabled')
+      : retrievalStatus.index_exists
+      ? retrievalStatus.fresh
+        ? t('skills.retrieval.ready')
+        : t('skills.retrieval.stale')
+      : t('skills.retrieval.missing')
+    : t('common.loading');
   return (
     <>
       {message && messageType === "success" && (
@@ -772,7 +1083,10 @@ export function SkillPanel({ sessionId, onNavigateToConfig }: SkillPanelProps) {
             </button>
             <button
               onClick={() => {
-                if (activeTab === "my" || (activeTab === "marketplace" && marketplaceSubTab === "builtin")) {
+                if (activeTab === "index") {
+                  void fetchRetrievalStatus();
+                  void fetchRetrievalTree();
+                } else if (activeTab === "my" || (activeTab === "marketplace" && marketplaceSubTab === "builtin")) {
                   setSearch("");
                   fetchSkills(true);
                 } else {
@@ -826,36 +1140,272 @@ export function SkillPanel({ sessionId, onNavigateToConfig }: SkillPanelProps) {
             >
               {t('skills.tabs.marketplace')}
             </button>
-          </div>
-          <div className="flex items-center gap-1 border border-border rounded-lg p-1">
             <button
-              onClick={() => setViewMode("list")}
-              className={`p-1.5 rounded-md transition-colors ${
-                viewMode === "list"
-                  ? "bg-secondary text-text"
+              onClick={() => setActiveTab("graph")}
+              className={`px-4 text-sm font-medium transition-colors ${
+                activeTab === "graph"
+                  ? "rounded-[8px] bg-secondary h-8 text-text"
                   : "text-text-muted hover:text-text"
               }`}
-              title={t('skills.viewMode.list')}
             >
-              <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={1.5}>
-                <path strokeLinecap="round" strokeLinejoin="round" d="M3.75 6.75h16.5M3.75 12h16.5m-16.5 5.25h16.5" />
-              </svg>
+              技能总谱
             </button>
             <button
-              onClick={() => setViewMode("grid")}
-              className={`p-1.5 rounded-md transition-colors ${
-                viewMode === "grid"
-                  ? "bg-secondary text-text"
+              onClick={() => setActiveTab("index")}
+              className={`px-4 text-sm font-medium transition-colors ${
+                activeTab === "index"
+                  ? "rounded-[8px] bg-secondary h-8 text-text"
                   : "text-text-muted hover:text-text"
               }`}
-              title={t('skills.viewMode.grid')}
             >
-              <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={1.5}>
-                <path strokeLinecap="round" strokeLinejoin="round" d="M3.75 6A2.25 2.25 0 0 1 6 3.75h2.25A2.25 2.25 0 0 1 10.5 6v2.25a2.25 2.25 0 0 1-2.25 2.25H6a2.25 2.25 0 0 1-2.25-2.25V6ZM3.75 15.75A2.25 2.25 0 0 1 6 13.5h2.25a2.25 2.25 0 0 1 2.25 2.25V18a2.25 2.25 0 0 1-2.25 2.25H6A2.25 2.25 0 0 1 3.75 18v-2.25ZM13.5 6a2.25 2.25 0 0 1 2.25-2.25H18A2.25 2.25 0 0 1 20.25 6v2.25A2.25 2.25 0 0 1 18 10.5h-2.25a2.25 2.25 0 0 1-2.25-2.25V6ZM13.5 15.75a2.25 2.25 0 0 1 2.25-2.25H18a2.25 2.25 0 0 1 2.25 2.25V18A2.25 2.25 0 0 1 18 20.25h-2.25A2.25 2.25 0 0 1 13.5 18v-2.25Z" />
-              </svg>
+              {t('skills.tabs.skillIndex')}
             </button>
           </div>
+          {activeTab !== "index" && activeTab !== "graph" ? (
+            <div className="flex items-center gap-1 border border-border rounded-lg p-1">
+              <button
+                onClick={() => setViewMode("list")}
+                className={`p-1.5 rounded-md transition-colors ${
+                  viewMode === "list"
+                    ? "bg-secondary text-text"
+                    : "text-text-muted hover:text-text"
+                }`}
+                title={t('skills.viewMode.list')}
+              >
+                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={1.5}>
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M3.75 6.75h16.5M3.75 12h16.5m-16.5 5.25h16.5" />
+                </svg>
+              </button>
+              <button
+                onClick={() => setViewMode("grid")}
+                className={`p-1.5 rounded-md transition-colors ${
+                  viewMode === "grid"
+                    ? "bg-secondary text-text"
+                    : "text-text-muted hover:text-text"
+                }`}
+                title={t('skills.viewMode.grid')}
+              >
+                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={1.5}>
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M3.75 6A2.25 2.25 0 0 1 6 3.75h2.25A2.25 2.25 0 0 1 10.5 6v2.25a2.25 2.25 0 0 1-2.25 2.25H6a2.25 2.25 0 0 1-2.25-2.25V6ZM3.75 15.75A2.25 2.25 0 0 1 6 13.5h2.25a2.25 2.25 0 0 1 2.25 2.25V18a2.25 2.25 0 0 1-2.25 2.25H6A2.25 2.25 0 0 1 3.75 18v-2.25ZM13.5 6a2.25 2.25 0 0 1 2.25-2.25H18A2.25 2.25 0 0 1 20.25 6v2.25A2.25 2.25 0 0 1 18 10.5h-2.25a2.25 2.25 0 0 1-2.25-2.25V6ZM13.5 15.75a2.25 2.25 0 0 1 2.25-2.25H18a2.25 2.25 0 0 1 2.25 2.25V18A2.25 2.25 0 0 1 18 20.25h-2.25A2.25 2.25 0 0 1 13.5 18v-2.25Z" />
+                </svg>
+              </button>
+            </div>
+          ) : null}
         </div>
+
+        {activeTab === "index" ? (
+          <div className="mt-4 flex flex-col flex-1 min-h-0 gap-4">
+            <div className="rounded-lg border border-border bg-panel p-4">
+              <div className="flex flex-wrap items-center justify-between gap-3">
+                <div className="min-w-[220px]">
+                  <div className="text-sm font-medium text-text-strong">
+                    {t('skills.retrieval.title')}
+                  </div>
+                  <div className="text-xs text-text-muted mt-1">
+                    {retrievalStatusText}
+                    {retrievalStatus?.indexed_count != null
+                      ? ` · ${t('skills.retrieval.indexedCount', { count: retrievalStatus.indexed_count })}`
+                      : ""}
+                    {retrievalStatus?.installed_enabled_count != null
+                      ? ` · ${t('skills.retrieval.enabledCount', { count: retrievalStatus.installed_enabled_count })}`
+                      : ""}
+                  </div>
+                </div>
+                <div className="flex items-center gap-2">
+                  <button
+                    onClick={handleBuildRetrievalIndex}
+                    className="px-3 py-1.5 rounded-lg text-sm border border-border hover:bg-secondary transition-colors disabled:opacity-60"
+                    disabled={retrievalLoading === "build" || retrievalStatus?.enabled === false}
+                  >
+                    {retrievalLoading === "build"
+                      ? t('skills.retrieval.building')
+                      : t('skills.retrieval.build')}
+                  </button>
+                  <button
+                    onClick={() => {
+                      void fetchRetrievalStatus();
+                      void fetchRetrievalTree();
+                    }}
+                    className="px-3 py-1.5 rounded-lg text-sm border border-border hover:bg-secondary transition-colors disabled:opacity-60"
+                    disabled={retrievalLoading === "tree" || retrievalLoading === "status"}
+                  >
+                    {retrievalLoading === "tree" || retrievalLoading === "status"
+                      ? t('common.refreshing')
+                      : t('common.refresh')}
+                  </button>
+                </div>
+              </div>
+              <div className="mt-4 flex items-center gap-2">
+                <input
+                  type="text"
+                  value={retrievalQuery}
+                  onChange={(event) => setRetrievalQuery(event.target.value)}
+                  onKeyDown={(event) => {
+                    if (event.key === "Enter") {
+                      handleSkillRetrieve();
+                    }
+                  }}
+                  placeholder={t('skills.retrieval.queryPlaceholder')}
+                  className="w-full px-3 py-1.5 rounded-lg text-sm bg-secondary border border-border text-text placeholder:text-text-muted"
+                />
+                <button
+                  onClick={handleSkillRetrieve}
+                  className="px-3 py-1.5 rounded-lg text-sm border border-border hover:bg-secondary transition-colors disabled:opacity-60"
+                  disabled={retrievalLoading === "search" || !retrievalQuery.trim() || retrievalStatus?.enabled === false}
+                >
+                  {retrievalLoading === "search"
+                    ? t('skills.retrieval.searching')
+                    : t('skills.retrieval.search')}
+                </button>
+              </div>
+              {retrievalResult && (
+                <pre className="mt-3 max-h-64 overflow-auto whitespace-pre-wrap rounded-md bg-secondary p-3 text-xs text-text">
+                  {retrievalResult}
+                </pre>
+              )}
+            </div>
+            <div className="grid flex-1 min-h-0 grid-cols-1 gap-4 lg:grid-cols-[minmax(320px,1fr)_minmax(320px,0.9fr)]">
+              <div className="rounded-lg border border-border bg-panel p-4 min-h-0 flex flex-col">
+                <div className="mb-3 flex items-center justify-between gap-2">
+                  <div>
+                    <div className="text-sm font-medium text-text-strong">
+                      {t('skills.retrieval.treeTitle')}
+                    </div>
+                    <div className="text-xs text-text-muted mt-1">
+                      {retrievalTreeNodes.length > 0
+                        ? t('skills.retrieval.treeCount', {
+                            branches: retrievalTreeCounts.branches,
+                            skills: retrievalTreeCounts.skills,
+                          })
+                        : retrievalLoading === "tree"
+                        ? t('common.loading')
+                        : t('skills.retrieval.noTree')}
+                    </div>
+                  </div>
+                </div>
+                <div className="flex-1 min-h-[320px] overflow-auto rounded-md border border-border bg-secondary/40 p-2">
+                  {retrievalTreeNodes.length > 0 ? (
+                    <SkillIndexTreeView
+                      roots={retrievalTreeRoots}
+                      selectedCid={selectedTreeNodeCid}
+                      onSelect={setSelectedTreeNodeCid}
+                      emptyText={t('skills.retrieval.noTree')}
+                      branchLabel={t('skills.retrieval.nodeTypes.branch')}
+                      skillLabel={t('skills.retrieval.nodeTypes.skill')}
+                    />
+                  ) : (
+                    <div className="whitespace-pre-wrap text-xs text-text-muted">
+                      {retrievalTree || (retrievalLoading === "tree" ? t('common.loading') : t('skills.retrieval.noTree'))}
+                    </div>
+                  )}
+                </div>
+              </div>
+              <div className="rounded-lg border border-border bg-panel p-4 min-h-0 flex flex-col">
+                <div className="text-sm font-medium text-text-strong mb-3">
+                  {t('skills.retrieval.nodeDetails')}
+                </div>
+                {selectedTreeNode ? (
+                  <div className="flex-1 min-h-0 overflow-auto">
+                    <div className="flex items-start justify-between gap-3">
+                      <div className="min-w-0">
+                        <div className="text-base font-semibold text-text-strong break-words">
+                          {getSkillIndexNodeLabel(selectedTreeNode)}
+                        </div>
+                        <div className="mt-1 text-xs text-text-muted break-all">
+                          {selectedTreeNode.cid}
+                        </div>
+                      </div>
+                      <span
+                        className={`shrink-0 rounded border px-2 py-1 text-xs ${
+                          selectedTreeNode.type === "leaf"
+                            ? "border-emerald-500/25 bg-emerald-500/10 text-emerald-600"
+                            : "border-sky-500/25 bg-sky-500/10 text-sky-600"
+                        }`}
+                      >
+                        {selectedTreeNode.type === "leaf"
+                          ? t('skills.retrieval.nodeTypes.skill')
+                          : t('skills.retrieval.nodeTypes.branch')}
+                      </span>
+                    </div>
+
+                    <dl className="mt-4 space-y-3 text-sm">
+                      <div>
+                        <dt className="text-xs text-text-muted">{t('skills.retrieval.nodeDescription')}</dt>
+                        <dd className="mt-1 whitespace-pre-wrap text-text">
+                          {selectedTreeNode.description || t('skills.noDescription')}
+                        </dd>
+                      </div>
+                      {selectedTreeNode.select_when ? (
+                        <div>
+                          <dt className="text-xs text-text-muted">{t('skills.retrieval.nodeSelectWhen')}</dt>
+                          <dd className="mt-1 whitespace-pre-wrap text-text">{selectedTreeNode.select_when}</dd>
+                        </div>
+                      ) : null}
+                      {selectedTreeNode.dont_select_when ? (
+                        <div>
+                          <dt className="text-xs text-text-muted">{t('skills.retrieval.nodeDontSelectWhen')}</dt>
+                          <dd className="mt-1 whitespace-pre-wrap text-text">{selectedTreeNode.dont_select_when}</dd>
+                        </div>
+                      ) : null}
+                      {selectedTreeNode.source_description ? (
+                        <div>
+                          <dt className="text-xs text-text-muted">{t('skills.retrieval.nodeSourceDescription')}</dt>
+                          <dd className="mt-1 whitespace-pre-wrap text-text">{selectedTreeNode.source_description}</dd>
+                        </div>
+                      ) : null}
+                      {selectedTreeNode.worker_id ? (
+                        <div>
+                          <dt className="text-xs text-text-muted">{t('skills.retrieval.nodeWorkerId')}</dt>
+                          <dd className="mt-1 break-all font-mono text-xs text-text">{selectedTreeNode.worker_id}</dd>
+                        </div>
+                      ) : null}
+                      {selectedTreeNode.category ? (
+                        <div>
+                          <dt className="text-xs text-text-muted">{t('skills.retrieval.nodeCategory')}</dt>
+                          <dd className="mt-1 whitespace-pre-wrap text-text">{selectedTreeNode.category}</dd>
+                        </div>
+                      ) : null}
+                      {selectedTreeNode.keywords?.length ? (
+                        <div>
+                          <dt className="text-xs text-text-muted">{t('skills.retrieval.nodeKeywords')}</dt>
+                          <dd className="mt-2 flex flex-wrap gap-1.5">
+                            {selectedTreeNode.keywords.slice(0, 24).map((keyword) => (
+                              <span key={keyword} className="rounded border border-border bg-secondary px-2 py-0.5 text-xs text-text-muted">
+                                {keyword}
+                              </span>
+                            ))}
+                          </dd>
+                        </div>
+                      ) : null}
+                      {selectedTreeNode.examples?.length ? (
+                        <div>
+                          <dt className="text-xs text-text-muted">{t('skills.retrieval.nodeExamples')}</dt>
+                          <dd className="mt-1 space-y-1">
+                            {selectedTreeNode.examples.slice(0, 5).map((example) => (
+                              <div key={example} className="whitespace-pre-wrap rounded border border-border bg-secondary px-2 py-1 text-xs text-text">
+                                {example}
+                              </div>
+                            ))}
+                          </dd>
+                        </div>
+                      ) : null}
+                    </dl>
+                  </div>
+                ) : (
+                  <div className="flex-1 min-h-[220px] rounded-md border border-dashed border-border bg-secondary/30 p-4 text-sm text-text-muted">
+                    {t('skills.retrieval.selectNodeHint')}
+                  </div>
+                )}
+              </div>
+            </div>
+          </div>
+          ) : null}
+
+        {activeTab === "graph" ? (
+          <div className="mt-4 flex-1 min-h-0">
+            <SkillGraphPanel />
+          </div>
+        ) : null}
 
         {activeTab === "marketplace" ? (
           <>

@@ -2,10 +2,10 @@
 
 """SkillDevDeps — SkillDevService 的最小外部依赖定义.
 
-设计原则：SkillDevService 不依赖 JiuWenClaw 实例，
-只接收以下最小依赖集，由 JiuWenClaw 在初始化时注入。
+设计原则：SkillDevService 不依赖 JiuWenSwarm 实例，
+只接收以下最小依赖集，由 JiuWenSwarm 在初始化时注入。
 
-JiuWenClaw 内部的 SkillManager、EvolutionService、对话历史等
+JiuWenSwarm 内部的 SkillManager、EvolutionService、对话历史等
 对 SkillDev 完全不可见，确保模块边界清晰。
 """
 
@@ -20,7 +20,7 @@ from jiuwenswarm.server.runtime.skill.skilldev.workspace import WorkspaceProvide
 
 @dataclass
 class SkillDevDeps:
-    """SkillDevService 的全部外部依赖（由 JiuWenClaw 构造并注入）."""
+    """SkillDevService 的全部外部依赖（由 JiuWenSwarm 构造并注入）."""
 
     # 模型配置：为每个阶段创建独立 ReActAgent 的基础
     model_name: str

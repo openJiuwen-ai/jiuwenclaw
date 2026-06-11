@@ -61,6 +61,7 @@ from jiuwenswarm.server.runtime.agent_adapter.evolution_helpers import (
     terminal_stage,
     validate_evolution_log_writable,
     validate_evolution_skill,
+    validate_team_evolution_skill,
     visible_evolution_progress_from_events,
 )
 
@@ -506,7 +507,7 @@ async def _resolve_team_rebuild_followup(
     if not skill_name:
         return None, "请指定 Skill 名称：`/evolve_rebuild <skill_name> [user_intent]`"
 
-    validation_error = validate_evolution_skill(store, skill_name, require_skill_md=False)
+    validation_error = validate_team_evolution_skill(store, skill_name, require_skill_md=False)
     if validation_error is not None:
         return None, validation_error
 
@@ -631,7 +632,7 @@ async def _handle_team_slash_command(
                 "result_type": "error",
             }
 
-        validation_error = validate_evolution_skill(store, skill_name, require_skill_md=True)
+        validation_error = validate_team_evolution_skill(store, skill_name, require_skill_md=True)
         if validation_error is not None:
             return {"output": validation_error, "result_type": "error"}
 
@@ -676,7 +677,7 @@ async def _handle_team_slash_command(
             "result_type": "error",
         }
 
-    validation_error = validate_evolution_skill(store, skill_name, require_skill_md=True)
+    validation_error = validate_team_evolution_skill(store, skill_name, require_skill_md=True)
     if validation_error is not None:
         return {"output": validation_error, "result_type": "error"}
 

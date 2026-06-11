@@ -29,7 +29,7 @@
   background: #f5f7f9;
   color: var(--text);
   padding: 26px 18px 28px;
-  font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-family: var(--font-body);
 }
 
 .share-image-document *,

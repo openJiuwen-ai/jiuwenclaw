@@ -3856,7 +3856,7 @@ class AgentWebSocketServer:
 
         Returns ``False`` on any failure path (no agent, no adapter, attr
         absent) — that matches the base class default and keeps the dry-run
-        / display strictly aligned with what :class:`JiuWenClawDeepAdapter`
+        / display strictly aligned with what :class:`JiuWenSwarmDeepAdapter`
         emits when ``_is_code_agent`` was never set.
         """
         try:
@@ -5120,7 +5120,7 @@ class AgentWebSocketServer:
             await copy_session_state(
                 source_session_id=source,
                 target_session_id=target,
-                card=deep_agent.card if deep_agent is not None else AgentCard(id="jiuwenclaw", name="jiuwenclaw"),
+                card=deep_agent.card if deep_agent is not None else AgentCard(id="jiuwenswarm", name="jiuwenswarm"),
                 deep_agent=deep_agent,
             )
 
@@ -5512,12 +5512,12 @@ class AgentWebSocketServer:
 
     def _build_model_cache(self) -> None:
         """Build model cache from jiuwenswarm config.yaml (reuse interface_deep logic)."""
-        from jiuwenswarm.server.runtime.agent_adapter.interface_deep import JiuWenClawDeepAdapter
+        from jiuwenswarm.server.runtime.agent_adapter.interface_deep import JiuWenSwarmDeepAdapter
 
         config = get_config()
 
         # Use the same model building method as interface_deep
-        build_model_from_entry = JiuWenClawDeepAdapter._build_model_from_entry
+        build_model_from_entry = getattr(JiuWenSwarmDeepAdapter, '_build_model_from_entry')
 
         # Build from models.defaults list
         for entry in get_default_models(config):

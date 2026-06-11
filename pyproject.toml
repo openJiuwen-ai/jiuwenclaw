@@ -102,6 +102,10 @@ jiuwenswarm = [
     "resources/**/*",
     "resources/*",
     "resources/.env.template",
+    "symphony/**/*.yaml",
+    "symphony/**/*.yml",
+    "symphony/**/*.json",
+    "symphony/**/*.md",
 ]
 jiuwenbox = [
     "configs/**/*",

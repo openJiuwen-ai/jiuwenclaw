@@ -95,6 +95,8 @@ _COMMON_TOOL_NAMES: frozenset[str] = frozenset(
         registry.AUDIO,
         # SKILL_TOOLKIT is no longer declared as a tool; the
         # MEMBER_SKILL_TOOLKIT rail is the sole registrar of skill tools.
+        # Skill retrieval is a separate self-gated tool provider.
+        registry.SKILL_RETRIEVAL,
         registry.USER_TODOS,
         registry.VIDEO,
         registry.IMAGE_GEN,
@@ -748,6 +750,7 @@ def test_code_capability_specs_rail_and_tool_names(mode: str) -> None:
         registry.VISION,
         registry.AUDIO,
         # SKILL_TOOLKIT moved to the MEMBER_SKILL_TOOLKIT rail (see common set).
+        registry.SKILL_RETRIEVAL,
         registry.USER_TODOS,
         registry.VIDEO,
         registry.IMAGE_GEN,

@@ -1,6 +1,6 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 
-"""Browser MCP integration helpers for JiuWenClaw."""
+"""Browser MCP integration helpers for JiuWenSwarm."""
 
 from __future__ import annotations
 

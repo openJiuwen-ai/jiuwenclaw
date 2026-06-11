@@ -22,37 +22,37 @@ def test_configure_code_team_member_uses_agent_workspace_coding_memory_path(monk
     monkeypatch.setattr(interface_code, "get_config", lambda: {"react": {}})
     monkeypatch.setattr(interface_code, "get_agent_workspace_dir", lambda: global_workspace)
     monkeypatch.setattr(
-        interface_code.JiuwenClawCodeAdapter,
+        interface_code.JiuwenSwarmCodeAdapter,
         "_refresh_multimodal_configs",
         lambda self, config: None,
     )
     monkeypatch.setattr(
-        interface_code.JiuwenClawCodeAdapter,
+        interface_code.JiuwenSwarmCodeAdapter,
         "_create_model",
         lambda self, config: object(),
     )
     monkeypatch.setattr(
-        interface_code.JiuwenClawCodeAdapter,
+        interface_code.JiuwenSwarmCodeAdapter,
         "_create_sys_operation",
         lambda self: object(),
     )
     monkeypatch.setattr(
-        interface_code.JiuwenClawCodeAdapter,
+        interface_code.JiuwenSwarmCodeAdapter,
         "build_code_tool_cards",
         lambda self, agent_id: [],
     )
     monkeypatch.setattr(
-        interface_code.JiuwenClawCodeAdapter,
+        interface_code.JiuwenSwarmCodeAdapter,
         "_build_agent_rails",
         lambda self, react_config, config_base, mode: [],
     )
     monkeypatch.setattr(
-        interface_code.JiuwenClawCodeAdapter,
+        interface_code.JiuwenSwarmCodeAdapter,
         "_build_configured_subagents",
         lambda self, model, react_config, config_base: ([], False),
     )
     monkeypatch.setattr(
-        interface_code.JiuwenClawCodeAdapter,
+        interface_code.JiuwenSwarmCodeAdapter,
         "_extract_enabled_mcp_server_entries",
         lambda self, config_base: [],
     )

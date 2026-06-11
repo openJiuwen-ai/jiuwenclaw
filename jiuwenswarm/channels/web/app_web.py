@@ -1033,7 +1033,7 @@ def main() -> None:
     web_port = os.getenv("WEB_PORT", "19000")  # WebChannel websocket port (proxy target)
     default_proxy = os.getenv("GATEWAY_URL", f"http://127.0.0.1:{web_port}")
 
-    parser = argparse.ArgumentParser(description="Serve JiuwenClaw frontend static files.")
+    parser = argparse.ArgumentParser(description="Serve JiuwenSwarm frontend static files.")
     parser.add_argument("--host", default=default_host, help="Host to bind.")
     parser.add_argument("--port", type=int, default=default_port, help="Port to bind.")
     parser.add_argument(

@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from jiuwenswarm.server.runtime.agent_adapter import interface_deep as interface_module
-from jiuwenswarm.server.runtime.agent_adapter.interface_deep import JiuWenClawDeepAdapter
+from jiuwenswarm.server.runtime.agent_adapter.interface_deep import JiuWenSwarmDeepAdapter
 from jiuwenswarm.server.runtime.agent_adapter.interface import build_user_prompt
 from jiuwenswarm.common.schema.agent import AgentRequest
 from jiuwenswarm.common.schema.message import ReqMethod
@@ -122,15 +122,15 @@ async def _create_adapter_and_run_chat(config_base: dict) -> AsyncMock:
     request, inputs = _make_request()
 
     with (
-        patch.object(interface_module.JiuWenClawDeepAdapter, "set_checkpoint", AsyncMock()),
-        patch.object(interface_module.JiuWenClawDeepAdapter, "_refresh_multimodal_configs", return_value=None),
-        patch.object(interface_module.JiuWenClawDeepAdapter, "_create_model", return_value=object()),
-        patch.object(interface_module.JiuWenClawDeepAdapter, "_get_tool_cards", AsyncMock(return_value=[])),
-        patch.object(interface_module.JiuWenClawDeepAdapter, "_build_agent_rails", return_value=[]),
-        patch.object(interface_module.JiuWenClawDeepAdapter, "_create_sys_operation", return_value=MagicMock()),
-        patch.object(interface_module.JiuWenClawDeepAdapter, "_build_configured_subagents", return_value=(None, False)),
-        patch.object(interface_module.JiuWenClawDeepAdapter, "_update_runtime_config", AsyncMock()),
-        patch.object(interface_module.JiuWenClawDeepAdapter, "load_user_rails", AsyncMock()),
+        patch.object(interface_module.JiuWenSwarmDeepAdapter, "set_checkpoint", AsyncMock()),
+        patch.object(interface_module.JiuWenSwarmDeepAdapter, "_refresh_multimodal_configs", return_value=None),
+        patch.object(interface_module.JiuWenSwarmDeepAdapter, "_create_model", return_value=object()),
+        patch.object(interface_module.JiuWenSwarmDeepAdapter, "_get_tool_cards", AsyncMock(return_value=[])),
+        patch.object(interface_module.JiuWenSwarmDeepAdapter, "_build_agent_rails", return_value=[]),
+        patch.object(interface_module.JiuWenSwarmDeepAdapter, "_create_sys_operation", return_value=MagicMock()),
+        patch.object(interface_module.JiuWenSwarmDeepAdapter, "_build_configured_subagents", return_value=(None, False)),
+        patch.object(interface_module.JiuWenSwarmDeepAdapter, "_update_runtime_config", AsyncMock()),
+        patch.object(interface_module.JiuWenSwarmDeepAdapter, "load_user_rails", AsyncMock()),
         patch.object(interface_module, "get_config", return_value=config_base),
         patch.object(interface_module, "init_permission_engine", return_value=None),
         patch.object(interface_module, "create_deep_agent", return_value=created_agent),
@@ -141,7 +141,7 @@ async def _create_adapter_and_run_chat(config_base: dict) -> AsyncMock:
             AsyncMock(return_value={"output": "PONG"}),
         ) as run_agent_mock,
     ):
-        adapter = JiuWenClawDeepAdapter()
+        adapter = JiuWenSwarmDeepAdapter()
         await adapter.create_instance()
         response = await adapter.process_message_impl(request, inputs)
 

@@ -24,6 +24,67 @@ interface CronJobListPayload {
 const TARGET_CHANNELS = ["tui", "web", "feishu", "whatsapp", "wecom", "xiaoyi", "wechat", "dingtalk"];
 const MODES = ["agent", "plan"];
 
+// ── field validation constants ──
+
+// Keys auto-managed by backend — never accepted in add/update input
+// These exist in cron_jobs.json but are always set by the system.
+const READ_ONLY_KEYS = new Set(["id", "created_at", "updated_at"]);
+
+// Keys that exist in the backend schema but should NOT be set manually by the user.
+// session_id / chat_type are derived from the channel context at runtime.
+// enabled is toggled via /cron toggle; expired is auto-managed by the scheduler.
+const ADD_RESTRICTED_KEYS: Record<string, string> = {
+  session_id: "由系统根据投递渠道自动生成，不可手动设置",
+  chat_type: "由系统根据对话上下文自动生成，不可手动设置",
+  enabled: "请使用 /cron toggle <id> on|off 来开关，不可在 add 中设置",
+  expired: "由调度器自动管理，不可手动设置",
+};
+
+const UPDATE_RESTRICTED_KEYS: Record<string, string> = {
+  session_id: "由系统根据投递渠道自动生成，不可手动修改",
+  chat_type: "由系统根据对话上下文自动生成，不可手动修改",
+};
+
+// Keys allowed for /cron add (user-writable fields that make sense on creation)
+const ADD_ALLOWED_KEYS = new Set(["name", "cron_expr", "description", "targets", "timezone", "mode", "wake_offset_seconds", "delete_after_run"]);
+
+// Keys allowed for /cron update (user-writable fields; includes enabled/expired for power-users)
+const UPDATE_ALLOWED_KEYS = new Set([
+  "name", "cron_expr", "description", "targets", "timezone", "mode",
+  "wake_offset_seconds", "delete_after_run", "enabled", "expired",
+]);
+
+/**
+ * Validate user-supplied keys against allowed / read-only / restricted lists.
+ * Returns an error message string if any key is invalid, or null if all keys are fine.
+ * The `restrictedMap` differs between add and update (some keys are restricted only on add).
+ */
+function validateKeys(keys: string[], allowed: Set<string>, restrictedMap: Record<string, string>): string | null {
+  // 1) Read-only keys (id, created_at, updated_at)
+  const readOnlyHits = keys.filter((k) => READ_ONLY_KEYS.has(k));
+  if (readOnlyHits.length > 0) {
+    return `以下字段为系统自动管理，不可设置: ${readOnlyHits.join(", ")}（只读字段: ${[...READ_ONLY_KEYS].join(", ")}）`;
+  }
+
+  // 2) Restricted keys (exist in schema but not user-settable)
+  const restrictedHits = keys.filter((k) => k in restrictedMap);
+  if (restrictedHits.length > 0) {
+    const hints = restrictedHits.map((k) => `${k} — ${restrictedMap[k]}`);
+    return `以下字段不可手动设置:\n  ${hints.join("\n  ")}`;
+  }
+
+  // 3) Completely unknown keys (not in any known list)
+  const allKnown = new Set([...READ_ONLY_KEYS, ...Object.keys(restrictedMap), ...allowed]);
+  const unknownHits = keys.filter((k) => !allKnown.has(k));
+  if (unknownHits.length > 0) {
+    return `未知字段: ${unknownHits.join(", ")}。可用字段: ${[...allowed].join(", ")}`;
+  }
+
+  return null;
+}
+
+// ── end field validation constants ──
+
 // ── cron expression syntax validation ──
 
 interface CronFieldRange {
@@ -358,6 +419,14 @@ async function _handleAdd(ctx: CommandContext, raw: string): Promise<void> {
     }
   }
 
+  // ── key validity check ──
+  const keyError = validateKeys(Object.keys(kvPairs), ADD_ALLOWED_KEYS, ADD_RESTRICTED_KEYS);
+  if (keyError) {
+    ctx.addItem(addError(ctx.sessionId, keyError));
+    return;
+  }
+  // ── end key validity check ──
+
   const requiredFields = ["name", "cron_expr", "description"];
   const missing = requiredFields.filter((f) => !kvPairs[f] || kvPairs[f].trim() === "");
   if (missing.length > 0) {
@@ -508,6 +577,14 @@ async function _handleUpdate(ctx: CommandContext, raw: string, parts: string[]):
     return;
   }
 
+  // ── key validity check ──
+  const keyError = validateKeys(Object.keys(patch), UPDATE_ALLOWED_KEYS, UPDATE_RESTRICTED_KEYS);
+  if (keyError) {
+    ctx.addItem(addError(ctx.sessionId, keyError));
+    return;
+  }
+  // ── end key validity check ──
+
   // Validate each field in the patch
   if ("name" in patch && !String(patch.name).trim()) {
     ctx.addItem(addError(ctx.sessionId, "name 不能为空"));
@@ -537,6 +614,22 @@ async function _handleUpdate(ctx: CommandContext, raw: string, parts: string[]):
       ctx.addItem(addError(ctx.sessionId, `Invalid mode: "${patch.mode}". Valid: ${MODES.join(", ")}`));
       return;
     }
+  }
+  if ("enabled" in patch) {
+    const raw = String(patch.enabled).trim().toLowerCase();
+    if (raw !== "true" && raw !== "false" && raw !== "on" && raw !== "off") {
+      ctx.addItem(addError(ctx.sessionId, `Invalid enabled: "${patch.enabled}". Valid: "true", "false", "on", "off"`));
+      return;
+    }
+    patch.enabled = raw === "true" || raw === "on";
+  }
+  if ("expired" in patch) {
+    const raw = String(patch.expired).trim().toLowerCase();
+    if (raw !== "true" && raw !== "false") {
+      ctx.addItem(addError(ctx.sessionId, `Invalid expired: "${patch.expired}". Valid: "true" or "false"`));
+      return;
+    }
+    patch.expired = raw === "true";
   }
   if ("delete_after_run" in patch) {
     const raw = String(patch.delete_after_run).toLowerCase();

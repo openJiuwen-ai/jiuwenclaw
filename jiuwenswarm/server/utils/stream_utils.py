@@ -274,7 +274,17 @@ def _parse_typed_chunk(chunk: Any, _has_streamed_content: bool) -> dict[str, Any
                     raw_output = result_info.get("rawOutput")
                 if raw_output is not None:
                     result_payload["raw_output"] = raw_output
-                for key in ("success", "status", "is_error", "summary"):
+                for key in (
+                    "success",
+                    "status",
+                    "is_error",
+                    "summary",
+                    "score_status",
+                    "score_build",
+                    "direct_display",
+                    "display_format",
+                    "mermaid",
+                ):
                     if key in result_info:
                         result_payload[key] = result_info.get(key)
         else:

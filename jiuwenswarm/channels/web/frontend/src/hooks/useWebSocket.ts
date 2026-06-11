@@ -301,6 +301,19 @@ function normalizeAgentMode(rawMode: unknown): AgentMode {
   return 'agent.plan';
 }
 
+function unsupportedEvolutionModeMessage(content: string, mode: AgentMode): string | null {
+  const trimmed = content.trim();
+  const isEvolutionCommand =
+    trimmed === '/evolve' ||
+    trimmed.startsWith('/evolve ') ||
+    trimmed === '/evolve_simplify' ||
+    trimmed.startsWith('/evolve_simplify ');
+  if (!isEvolutionCommand || mode === 'agent.plan' || mode === 'team') {
+    return null;
+  }
+  return `${mode} 模式下演进功能不可用。`;
+}
+
 const EVENT_DEDUP_WINDOW_MS = 1500;
 const CONTEXT_COMPRESSION_START_DELAY_MS = 300;
 
@@ -423,6 +436,9 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
   const clearedTeamPanelSessionRef = useRef<string | null>(null);
   const teamMemberOutputEventRef = useRef<Map<string, string>>(new Map());
   const eventDedupDroppedRef = useRef<Record<string, number>>({});
+  const symphonyStatusTargetRef = useRef<Map<string, { messageId: string; baseContent: string }>>(
+    new Map()
+  );
   const contextCompressionSummaryRef = useRef<ContextCompressionSummary>({
     count: 0,
     summaries: [],
@@ -689,6 +705,18 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
     async (content: string, sessionId: string) => {
       if (!content.trim()) return;
 
+      const currentMode = useSessionStore.getState().mode;
+      const unsupportedEvolutionMode = unsupportedEvolutionModeMessage(content, currentMode);
+      if (unsupportedEvolutionMode) {
+        addMessage({
+          id: `error-${Date.now()}`,
+          role: 'system',
+          content: unsupportedEvolutionMode,
+          timestamp: new Date().toISOString(),
+        });
+        return;
+      }
+
       const isInitialUserMessage = !useChatStore
         .getState()
         .messages.some((message) => message.role === 'user');
@@ -722,7 +750,6 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
       setThinking(true);
 
       // 正常调用接口
-      const currentMode = useSessionStore.getState().mode;
       const selectedModel = useSessionStore.getState().selectedModelName;
       if (currentMode === 'auto_harness') {
         useHarnessStore.getState().reset();
@@ -1695,6 +1722,60 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
             }
           }
         }
+      }),
+      webClient.on('chat.symphony_status', ({ payload }) => {
+        if (!shouldHandleSessionEvent(payload)) return;
+        const content = typeof payload.content === 'string' ? payload.content.trim() : '';
+        if (!content) return;
+        const operationId =
+          typeof payload.operation_id === 'string' && payload.operation_id.trim()
+            ? payload.operation_id.trim()
+            : typeof payload.request_id === 'string' && payload.request_id.trim()
+              ? payload.request_id.trim()
+              : `${Date.now()}`;
+        const messageId = `symphony-status-${operationId}`;
+        const status = typeof payload.status === 'string' ? payload.status : '';
+        const detail = typeof payload.detail === 'string' ? payload.detail.trim() : '';
+        const displayContent =
+          status === 'failed' && detail && !content.includes(detail)
+            ? `${content}\n${detail}`
+            : content;
+        const chatState = useChatStore.getState();
+        const cachedTarget = symphonyStatusTargetRef.current.get(operationId);
+        const targetMessage = cachedTarget
+          ? chatState.messages.find((message) => message.id === cachedTarget.messageId)
+          : [...chatState.messages].reverse().find(
+            (message) =>
+              message.role === 'assistant' ||
+              (message.role === 'system' && message.id?.startsWith('team-leader-'))
+          );
+        if (targetMessage) {
+          const target = cachedTarget || {
+            messageId: targetMessage.id,
+            baseContent: targetMessage.content || '',
+          };
+          symphonyStatusTargetRef.current.set(operationId, target);
+          const baseContent = target.baseContent.trimEnd();
+          chatState.updateMessage(target.messageId, {
+            content: baseContent ? `${baseContent}\n\n${displayContent}` : displayContent,
+            timestamp: new Date().toISOString(),
+          });
+          return;
+        }
+        const existing = chatState.messages.find((message) => message.id === messageId);
+        if (existing) {
+          chatState.updateMessage(messageId, {
+            content: displayContent,
+            timestamp: new Date().toISOString(),
+          });
+          return;
+        }
+        chatState.addMessage({
+          id: messageId,
+          role: 'system',
+          content: displayContent,
+          timestamp: new Date().toISOString(),
+        });
       }),
       webClient.on('chat.evolution_status', ({ payload }) => {
         if (!shouldHandleSessionEvent(payload)) return;

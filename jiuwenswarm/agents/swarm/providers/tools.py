@@ -7,6 +7,7 @@ elements, each self-gated by the config source and filtered against the swarm
 ``TOOL_WHITELIST``:
 
 * ``swarm.skill_toolkit`` — skill discovery / install / uninstall tools.
+* ``swarm.skill_retrieval`` — dispatch-backed installed skill retrieval tools.
 * ``swarm.user_todos`` — the personal todo tool.
 * ``swarm.video`` — the video-understanding tool (``models.video`` gated).
 * ``swarm.image_gen`` — the image-generation tool (``IMAGE_GEN_API_KEY`` gated).
@@ -43,6 +44,10 @@ from jiuwenswarm.agents.harness.common.tools.multimodal_config import (
     apply_vision_model_config_from_yaml,
     dedicated_multimodal_model_configured,
     complete_multimodal_model_configured,
+)
+from jiuwenswarm.agents.harness.common.tools.skill_retrieval_toolkits import (
+    SkillRetrievalToolkit,
+    is_skill_retrieval_enabled,
 )
 from jiuwenswarm.agents.harness.common.tools.skill_toolkits import SkillToolkit
 from jiuwenswarm.agents.harness.common.tools.user_todo_tool import get_decorated_tools
@@ -84,6 +89,7 @@ logger = logging.getLogger(__name__)
 
 # Provider name constants; namespaced under the shared "swarm." prefix.
 SKILL_TOOLKIT = "swarm.skill_toolkit"
+SKILL_RETRIEVAL = "swarm.skill_retrieval"
 USER_TODOS = "swarm.user_todos"
 VIDEO = "swarm.video"
 IMAGE_GEN = "swarm.image_gen"
@@ -254,6 +260,20 @@ def _build_skill_toolkit_tools(workspace_root: str | None) -> list[Any]:
         return []
 
 
+def _build_skill_retrieval_tools(workspace_root: str | None) -> list[Any]:
+    """Build the installed-skill retrieval tools bound to the member workspace."""
+    if not is_skill_retrieval_enabled():
+        logger.info("[swarm.skill_retrieval] skipped: disabled")
+        return []
+    try:
+        manager = SkillManager(workspace_dir=workspace_root)
+        toolkit = SkillRetrievalToolkit(manager=manager)
+        return list(toolkit.get_tools())
+    except Exception as exc:
+        logger.warning("[swarm.skill_retrieval] construction failed: %s", exc)
+        return []
+
+
 def _build_user_todo_tools() -> list[Any]:
     """Build the user's personal todo tool."""
     try:
@@ -315,6 +335,18 @@ def build_skill_toolkit(params: dict[str, Any], ctx: SwarmBuildContext) -> list[
     """Build the whitelist-filtered skill toolkit tools."""
     inp = SkillToolkitInput.resolve(params, ctx)
     return _filter_whitelist(_build_skill_toolkit_tools(inp.workspace_root))
+
+
+@harness_element(
+    kind=ElementKind.TOOL,
+    name=SKILL_RETRIEVAL,
+    description="Dispatch-backed installed skill retrieval tools bound to the member workspace.",
+    input_model=SkillToolkitInput,
+)
+def build_skill_retrieval(params: dict[str, Any], ctx: SwarmBuildContext) -> list[Any]:
+    """Build the whitelist-filtered installed-skill retrieval tools."""
+    inp = SkillToolkitInput.resolve(params, ctx)
+    return _filter_whitelist(_build_skill_retrieval_tools(inp.workspace_root))
 
 
 @harness_element(
@@ -388,6 +420,7 @@ def build_code_extra_tools(params: dict[str, Any], ctx: SwarmBuildContext) -> li
 
 __all__ = [
     "SKILL_TOOLKIT",
+    "SKILL_RETRIEVAL",
     "USER_TODOS",
     "VIDEO",
     "IMAGE_GEN",

@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from jiuwenswarm.server.runtime.agent_adapter.interface_deep import JiuWenClawDeepAdapter
+from jiuwenswarm.server.runtime.agent_adapter.interface_deep import JiuWenSwarmDeepAdapter
 from jiuwenswarm.server.runtime.agent_adapter import interface_deep as interface_module
 from jiuwenswarm.agents.harness.team.a2x.a2x_registry_runtime import (
     clear_blank_registration_cache_for_tests,
@@ -178,7 +178,7 @@ async def test_create_instance_registers_blank_agent_for_teammate(monkeypatch: p
     fake_module = ModuleType("jiuwenswarm.agents.harness.team.a2x.client")
     fake_module.AsyncA2XRegistryClient = _FakeAsyncA2XRegistryClient
 
-    adapter = JiuWenClawDeepAdapter()
+    adapter = JiuWenSwarmDeepAdapter()
     config_base = _make_config(
         "teammate",
         dataset="team_dataset",
@@ -189,15 +189,15 @@ async def test_create_instance_registers_blank_agent_for_teammate(monkeypatch: p
     monkeypatch.setattr(interface_module, "get_config", lambda: config_base)
 
     with (
-        patch.object(interface_module.JiuWenClawDeepAdapter, "set_checkpoint", AsyncMock()),
-        patch.object(interface_module.JiuWenClawDeepAdapter, "_refresh_multimodal_configs", return_value=None),
-        patch.object(interface_module.JiuWenClawDeepAdapter, "_create_model", return_value=object()),
-        patch.object(interface_module.JiuWenClawDeepAdapter, "_get_tool_cards", AsyncMock(return_value=[])),
-        patch.object(interface_module.JiuWenClawDeepAdapter, "_build_agent_rails", return_value=[]),
-        patch.object(interface_module.JiuWenClawDeepAdapter, "_create_sys_operation", return_value=MagicMock()),
-        patch.object(interface_module.JiuWenClawDeepAdapter, "_build_configured_subagents",
+        patch.object(interface_module.JiuWenSwarmDeepAdapter, "set_checkpoint", AsyncMock()),
+        patch.object(interface_module.JiuWenSwarmDeepAdapter, "_refresh_multimodal_configs", return_value=None),
+        patch.object(interface_module.JiuWenSwarmDeepAdapter, "_create_model", return_value=object()),
+        patch.object(interface_module.JiuWenSwarmDeepAdapter, "_get_tool_cards", AsyncMock(return_value=[])),
+        patch.object(interface_module.JiuWenSwarmDeepAdapter, "_build_agent_rails", return_value=[]),
+        patch.object(interface_module.JiuWenSwarmDeepAdapter, "_create_sys_operation", return_value=MagicMock()),
+        patch.object(interface_module.JiuWenSwarmDeepAdapter, "_build_configured_subagents",
                      return_value=(None, False)),
-        patch.object(interface_module.JiuWenClawDeepAdapter, "load_user_rails", AsyncMock()),
+        patch.object(interface_module.JiuWenSwarmDeepAdapter, "load_user_rails", AsyncMock()),
         patch.object(interface_module, "init_permission_engine", return_value=None),
         patch.object(interface_module, "create_deep_agent", return_value=MagicMock(name="deep_agent", ensure_initialized=AsyncMock())),
     ):
@@ -355,7 +355,7 @@ async def test_create_instance_continues_when_a2x_client_init_fails(monkeypatch:
     fake_module = ModuleType("jiuwenswarm.agents.harness.team.a2x.client")
     fake_module.AsyncA2XRegistryClient = _FailingAsyncA2XRegistryClient
 
-    adapter = JiuWenClawDeepAdapter()
+    adapter = JiuWenSwarmDeepAdapter()
     config_base = _make_config("teamleader")
 
     monkeypatch.setitem(sys.modules, "jiuwenswarm.agents.harness.team.a2x.client", fake_module)
@@ -364,15 +364,15 @@ async def test_create_instance_continues_when_a2x_client_init_fails(monkeypatch:
     created_instance = MagicMock(name="deep_agent", ensure_initialized=AsyncMock())
 
     with (
-        patch.object(interface_module.JiuWenClawDeepAdapter, "set_checkpoint", AsyncMock()),
-        patch.object(interface_module.JiuWenClawDeepAdapter, "_refresh_multimodal_configs", return_value=None),
-        patch.object(interface_module.JiuWenClawDeepAdapter, "_create_model", return_value=object()),
-        patch.object(interface_module.JiuWenClawDeepAdapter, "_get_tool_cards", AsyncMock(return_value=[])),
-        patch.object(interface_module.JiuWenClawDeepAdapter, "_build_agent_rails", return_value=[]),
-        patch.object(interface_module.JiuWenClawDeepAdapter, "_create_sys_operation", return_value=MagicMock()),
-        patch.object(interface_module.JiuWenClawDeepAdapter, "_build_configured_subagents",
+        patch.object(interface_module.JiuWenSwarmDeepAdapter, "set_checkpoint", AsyncMock()),
+        patch.object(interface_module.JiuWenSwarmDeepAdapter, "_refresh_multimodal_configs", return_value=None),
+        patch.object(interface_module.JiuWenSwarmDeepAdapter, "_create_model", return_value=object()),
+        patch.object(interface_module.JiuWenSwarmDeepAdapter, "_get_tool_cards", AsyncMock(return_value=[])),
+        patch.object(interface_module.JiuWenSwarmDeepAdapter, "_build_agent_rails", return_value=[]),
+        patch.object(interface_module.JiuWenSwarmDeepAdapter, "_create_sys_operation", return_value=MagicMock()),
+        patch.object(interface_module.JiuWenSwarmDeepAdapter, "_build_configured_subagents",
                      return_value=(None, False)),
-        patch.object(interface_module.JiuWenClawDeepAdapter, "load_user_rails", AsyncMock()),
+        patch.object(interface_module.JiuWenSwarmDeepAdapter, "load_user_rails", AsyncMock()),
         patch.object(interface_module, "init_permission_engine", return_value=None),
         patch.object(interface_module, "create_deep_agent", return_value=created_instance) as create_agent_mock,
     ):
@@ -389,7 +389,7 @@ async def test_create_instance_keeps_workspace_root_separate_from_project_dir(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path,
 ) -> None:
-    adapter = JiuWenClawDeepAdapter()
+    adapter = JiuWenSwarmDeepAdapter()
     workspace_dir = tmp_path / "workspace"
     project_dir = tmp_path / "project"
     workspace_dir.mkdir()
@@ -401,16 +401,16 @@ async def test_create_instance_keeps_workspace_root_separate_from_project_dir(
     created_instance = MagicMock(name="deep_agent", ensure_initialized=AsyncMock())
 
     with (
-        patch.object(interface_module.JiuWenClawDeepAdapter, "set_checkpoint", AsyncMock()),
-        patch.object(interface_module.JiuWenClawDeepAdapter, "_refresh_multimodal_configs", return_value=None),
-        patch.object(interface_module.JiuWenClawDeepAdapter, "_create_model", return_value=object()),
-        patch.object(interface_module.JiuWenClawDeepAdapter, "_try_init_a2x_client", AsyncMock()),
-        patch.object(interface_module.JiuWenClawDeepAdapter, "_get_tool_cards", AsyncMock(return_value=[])),
-        patch.object(interface_module.JiuWenClawDeepAdapter, "_build_agent_rails", return_value=[]),
-        patch.object(interface_module.JiuWenClawDeepAdapter, "_create_sys_operation", return_value=MagicMock()),
-        patch.object(interface_module.JiuWenClawDeepAdapter, "_build_configured_subagents",
+        patch.object(interface_module.JiuWenSwarmDeepAdapter, "set_checkpoint", AsyncMock()),
+        patch.object(interface_module.JiuWenSwarmDeepAdapter, "_refresh_multimodal_configs", return_value=None),
+        patch.object(interface_module.JiuWenSwarmDeepAdapter, "_create_model", return_value=object()),
+        patch.object(interface_module.JiuWenSwarmDeepAdapter, "_try_init_a2x_client", AsyncMock()),
+        patch.object(interface_module.JiuWenSwarmDeepAdapter, "_get_tool_cards", AsyncMock(return_value=[])),
+        patch.object(interface_module.JiuWenSwarmDeepAdapter, "_build_agent_rails", return_value=[]),
+        patch.object(interface_module.JiuWenSwarmDeepAdapter, "_create_sys_operation", return_value=MagicMock()),
+        patch.object(interface_module.JiuWenSwarmDeepAdapter, "_build_configured_subagents",
                      return_value=(None, False)),
-        patch.object(interface_module.JiuWenClawDeepAdapter, "load_user_rails", AsyncMock()),
+        patch.object(interface_module.JiuWenSwarmDeepAdapter, "load_user_rails", AsyncMock()),
         patch.object(interface_module, "create_deep_agent", return_value=created_instance) as create_agent_mock,
     ):
         await adapter.create_instance({"project_dir": str(project_dir)})

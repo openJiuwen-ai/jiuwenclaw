@@ -98,9 +98,18 @@ class ReqMethod(Enum):
     SKILLS_TEAMSKILLS_HUB_INSTALL = "skills.teamskillshub.install"
     SKILLS_TEAMSKILLS_HUB_PUBLISH = "skills.teamskillshub.publish"
     SKILLS_TEAMSKILLS_HUB_DELETE = "skills.teamskillshub.delete"
+    SKILLS_RETRIEVAL_STATUS = "skills.retrieval.status"
+    SKILLS_RETRIEVAL_INDEX_BUILD = "skills.retrieval.index_build"
+    SKILLS_RETRIEVAL_SEARCH = "skills.retrieval.search"
+    SKILLS_RETRIEVAL_TREE = "skills.retrieval.tree"
     SKILLS_EVOLUTION_STATUS = "skills.evolution.status"
     SKILLS_EVOLUTION_GET = "skills.evolution.get"
     SKILLS_EVOLUTION_SAVE = "skills.evolution.save"
+
+    SYMPHONY_BUILD_SCORE = "symphony.build_score"
+    SYMPHONY_SCORE_STATUS = "symphony.score_status"
+    SYMPHONY_GRAPH = "symphony.graph"
+    SYMPHONY_PLAN = "symphony.plan"
 
     # Plugin management (reuses skills marketplace infrastructure)
     PLUGINS_LIST = "plugins.list"
@@ -194,6 +203,7 @@ class EventType(Enum):
     CHAT_TOOL_CALL = "chat.tool_call"
     CHAT_TOOL_UPDATE = "chat.tool_update"
     CHAT_TOOL_RESULT = "chat.tool_result"
+    CHAT_SYMPHONY_STATUS = "chat.symphony_status"
     CONTEXT_USAGE = "context.usage"
     TODO_UPDATED = "todo.updated"
     CHAT_PROCESSING_STATUS = "chat.processing_status"

@@ -1,6 +1,6 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 
-"""JiuWenClaw Deep Adapter - 基于 openjiuwen DeepAgent 的适配器实现.
+"""JiuWenSwarm Deep Adapter - 基于 openjiuwen DeepAgent 的适配器实现.
 
 此模块实现 AgentAdapter 协议，封装 Deep SDK 的所有专属逻辑。
 公共编排逻辑（session 队列、Skills 路由、heartbeat 等）由 Facade 层处理。
@@ -117,7 +117,7 @@ from jiuwenswarm.agents.harness.common.tools.todo_compat import (
 )
 from jiuwenswarm.agents.harness.common.prompt.prompt_builder import build_agent_identity_prompt
 from jiuwenswarm.agents.harness.common.rails import (
-    JiuClawStreamEventRail,
+    JiuSwarmStreamEventRail,
     ResponsePromptRail,
     RuntimePromptRail,
 )
@@ -187,7 +187,13 @@ from jiuwenswarm.agents.harness.common.tools.multimodal_config import (
 from jiuwenswarm.agents.harness.common.tools.video_tools import video_understanding
 from jiuwenswarm.agents.harness.common.tools.image_tools import generate_image
 
-from jiuwenswarm.agents.harness.common.tools import SendFileToolkit, SkillToolkit
+from jiuwenswarm.agents.harness.common.tools import (
+    SendFileToolkit,
+    SkillRetrievalToolkit,
+    SkillToolkit,
+    is_skill_retrieval_enabled,
+    SymphonyToolkit,
+)
 from jiuwenswarm.agents.harness.common.tools.wiki_tools import wiki_ingest, wiki_query, wiki_lint
 from jiuwenswarm.agents.harness.common.tools.acp_output_tools import get_tools as get_acp_output_tools
 from jiuwenswarm.agents.harness.common.tools.multi_session_toolkits import MultiSessionToolkit
@@ -370,9 +376,9 @@ def _build_context_assemble_rail() -> ContextAssembleRail | None:
     """Build ContextAssembleRail."""
     try:
         context_assemble_rail = ContextAssembleRail()
-        logger.info("[JiuWenClawDeepAdapter] ContextAssembleRail create success")
+        logger.info("[JiuWenSwarmDeepAdapter] ContextAssembleRail create success")
     except Exception as exc:
-        logger.warning("[JiuWenClawDeepAdapter] ContextAssembleRail create failed: %s", exc)
+        logger.warning("[JiuWenSwarmDeepAdapter] ContextAssembleRail create failed: %s", exc)
         context_assemble_rail = None
     return context_assemble_rail
 
@@ -425,14 +431,14 @@ def _build_context_processor_rail(config: dict[str, Any]) -> ContextProcessorRai
             session_memory=session_memory_cfg,
         )
         logger.info(
-            "[JiuWenClawDeepAdapter] ContextProcessorRail create success for agent.plan mode, "
+            "[JiuWenSwarmDeepAdapter] ContextProcessorRail create success for agent.plan mode, "
             "user_processors=%s session_memory=%s",
             [p[0] for p in user_processors] if user_processors else "none",
             "enabled" if isinstance(session_memory_cfg, dict) else "disabled",
         )
         return context_rail
     except Exception as exc:
-        logger.warning("[JiuWenClawDeepAdapter] ContextProcessorRail create failed: %s", exc)
+        logger.warning("[JiuWenSwarmDeepAdapter] ContextProcessorRail create failed: %s", exc)
         return None
 
 
@@ -459,12 +465,12 @@ async def ensure_persistent_checkpointer() -> None:
             CheckpointerFactory.set_default_checkpointer(checkpointer)
             _PERSISTENT_CHECKPOINTER_READY = True
             logger.info(
-                "[JiuWenClawDeepAdapter] persistent checkpointer ready: %s",
+                "[JiuWenSwarmDeepAdapter] persistent checkpointer ready: %s",
                 checkpoint_path / "checkpoint",
             )
         except Exception as exc:
             logger.error(
-                "[JiuWenClawDeepAdapter] fail to setup checkpoint due to: %s",
+                "[JiuWenSwarmDeepAdapter] fail to setup checkpoint due to: %s",
                 exc,
             )
             raise RuntimeError("persistent checkpointer initialization failed") from exc
@@ -504,7 +510,7 @@ class _RuntimeCronToolContext:
         return self._tool_scope
 
 
-class JiuWenClawDeepAdapter:
+class JiuWenSwarmDeepAdapter:
     """Deep SDK 适配器，实现 AgentAdapter 协议.
 
     封装所有 Deep SDK 专属逻辑：
@@ -521,7 +527,7 @@ class JiuWenClawDeepAdapter:
         self._workspace_dir: str = str(get_agent_workspace_dir())
         self._agent_name: str = "main_agent"
         # 是否是 code-agent 形态. 基类 (deep adapter) 默认 False, 由子类
-        # JiuwenClawCodeAdapter 在 __init__ 里改成 True. 该字段透传给
+        # JiuwenSwarmCodeAdapter 在 __init__ 里改成 True. 该字段透传给
         # sysop_builder 的 ``build_filesystem_policy`` / ``create_sandbox_
         # sysop_card``, 决定沙箱挂的"主写入根"是用户工程目录 (project_dir,
         # code-agent 场景) 还是 agent 自己的 workspace 目录 (deep agent
@@ -538,7 +544,7 @@ class JiuWenClawDeepAdapter:
         self._config_cache: dict[str, Any] = {}
         self._filesystem_rail: SysOperationRail | None = None
         self._skill_rail: SkillUseRail | None = None
-        self._stream_event_rail: JiuClawStreamEventRail | None = None
+        self._stream_event_rail: JiuSwarmStreamEventRail | None = None
         # Track session IDs currently executing on this adapter instance.
         # Used by process_interrupt to avoid aborting sessions that are not
         # the target of the interrupt request (cross-session contamination).
@@ -643,7 +649,7 @@ class JiuWenClawDeepAdapter:
                     self._stream_event_rail.cleanup_session(sid)
                 except Exception as exc:
                     logger.warning(
-                        "[JiuWenClawDeepAdapter] cleanup_session(%s) failed: %s",
+                        "[JiuWenSwarmDeepAdapter] cleanup_session(%s) failed: %s",
                         sid, exc,
                     )
         else:
@@ -749,19 +755,19 @@ class JiuWenClawDeepAdapter:
                 # runs to completion even if the outer task is re-cancelled.
                 await asyncio.shield(self._instance.abort())
                 logger.info(
-                    "[JiuWenClawDeepAdapter] interrupt(%s): 已终止 DeepAgent 任务循环",
+                    "[JiuWenSwarmDeepAdapter] interrupt(%s): 已终止 DeepAgent 任务循环",
                     reason,
                 )
             except asyncio.CancelledError:
                 # shield() absorbed the re-cancellation; abort() completed.
                 logger.info(
-                    "[JiuWenClawDeepAdapter] interrupt(%s): instance.abort 在 shield 下完成"
+                    "[JiuWenSwarmDeepAdapter] interrupt(%s): instance.abort 在 shield 下完成"
                     "（外层 task 被二次 cancel）",
                     reason,
                 )
             except Exception as exc:
                 logger.warning(
-                    "[JiuWenClawDeepAdapter] interrupt(%s): instance.abort 失败: %s",
+                    "[JiuWenSwarmDeepAdapter] interrupt(%s): instance.abort 失败: %s",
                     reason,
                     exc,
                 )
@@ -804,7 +810,7 @@ class JiuWenClawDeepAdapter:
                 cancelled += 1
         if cancelled:
             logger.info(
-                "[JiuWenClawDeepAdapter] interrupt: cancelled %d agent asyncio task(s) session=%s",
+                "[JiuWenSwarmDeepAdapter] interrupt: cancelled %d agent asyncio task(s) session=%s",
                 cancelled,
                 sid,
             )
@@ -848,15 +854,15 @@ class JiuWenClawDeepAdapter:
             close_timeout = 5.0
         try:
             await asyncio.wait_for(client.aclose(), timeout=close_timeout)
-            logger.info("[JiuWenClawDeepAdapter] A2X Client closed")
+            logger.info("[JiuWenSwarmDeepAdapter] A2X Client closed")
         except TimeoutError:
             logger.warning(
-                "[JiuWenClawDeepAdapter] A2X Client close timed out after %.1fs",
+                "[JiuWenSwarmDeepAdapter] A2X Client close timed out after %.1fs",
                 close_timeout,
             )
         except Exception as exc:
             logger.warning(
-                "[JiuWenClawDeepAdapter] A2X Client close failed: %s",
+                "[JiuWenSwarmDeepAdapter] A2X Client close failed: %s",
                 exc,
                 exc_info=True,
             )
@@ -887,7 +893,7 @@ class JiuWenClawDeepAdapter:
                 self._a2x_blank_dataset = str(registration.get("dataset") or "").strip()
             self._sync_a2x_runtime_state()
             logger.info(
-                "[JiuWenClawDeepAdapter] A2X Client %s: role=%s base_url=%s",
+                "[JiuWenSwarmDeepAdapter] A2X Client %s: role=%s base_url=%s",
                 "reinitialized on reload" if reload else "initialized successfully",
                 self._a2x_config.get("role", "teammate"),
                 self._a2x_config.get("base_url", ""),
@@ -899,7 +905,7 @@ class JiuWenClawDeepAdapter:
             self._a2x_blank_dataset = ""
             self._clear_a2x_runtime_state()
             logger.warning(
-                "[JiuWenClawDeepAdapter] A2X Client %s failed, agent will continue to %s: %s",
+                "[JiuWenSwarmDeepAdapter] A2X Client %s failed, agent will continue to %s: %s",
                 "reload initialization" if reload else "initialize",
                 "run" if reload else "start",
                 exc,
@@ -1019,7 +1025,7 @@ class JiuWenClawDeepAdapter:
             with open(path, "w", encoding="utf-8") as f:
                 yaml.safe_dump(state, f, allow_unicode=True, sort_keys=False)
         except Exception as exc:
-            logger.debug("[JiuWenClawDeepAdapter] write runtime_state failed: %s", exc)
+            logger.debug("[JiuWenSwarmDeepAdapter] write runtime_state failed: %s", exc)
 
     @staticmethod
     def _browser_runtime_enabled() -> bool:
@@ -1118,7 +1124,7 @@ class JiuWenClawDeepAdapter:
             if not str(os.getenv("BROWSER_DRIVER") or "").strip():
                 os.environ["BROWSER_DRIVER"] = "managed"
                 logger.info(
-                    "[JiuWenClawDeepAdapter] browser subagent enabled without BROWSER_DRIVER; "
+                    "[JiuWenSwarmDeepAdapter] browser subagent enabled without BROWSER_DRIVER; "
                     "defaulting to managed mode"
                 )
             if not str(os.getenv("BROWSER_MANAGED_BINARY") or "").strip():
@@ -1126,7 +1132,7 @@ class JiuWenClawDeepAdapter:
                 if chrome_path:
                     os.environ["BROWSER_MANAGED_BINARY"] = chrome_path
                     logger.info(
-                        "[JiuWenClawDeepAdapter] using browser.chrome_path for managed browser: %s",
+                        "[JiuWenSwarmDeepAdapter] using browser.chrome_path for managed browser: %s",
                         chrome_path,
                     )
             subagents.append(
@@ -1150,7 +1156,7 @@ class JiuWenClawDeepAdapter:
             and browser_agent_cfg
         ):
             logger.info(
-                "[JiuWenClawDeepAdapter] browser_agent config detected but browser runtime is not enabled; "
+                "[JiuWenSwarmDeepAdapter] browser_agent config detected but browser runtime is not enabled; "
                 "skipping browser subagent registration"
             )
 
@@ -1164,7 +1170,7 @@ class JiuWenClawDeepAdapter:
             )
         except Exception:
             logger.warning(
-                "[JiuWenClawDeepAdapter] failed to load custom agents",
+                "[JiuWenSwarmDeepAdapter] failed to load custom agents",
                 exc_info=True,
             )
 
@@ -1252,7 +1258,7 @@ class JiuWenClawDeepAdapter:
                 server_id = str(getattr(cfg, "server_id", "") or "").strip()
                 if not server_id:
                     logger.warning(
-                        "[JiuWenClawDeepAdapter] MCP server_id missing after registration: %s", cfg
+                        "[JiuWenSwarmDeepAdapter] MCP server_id missing after registration: %s", cfg
                     )
                     return False
                 self._instance.ability_manager.add(cfg)
@@ -1260,11 +1266,11 @@ class JiuWenClawDeepAdapter:
                 self._registered_mcp_servers[server_id] = cfg
                 return True
             logger.warning(
-                "[JiuWenClawDeepAdapter] MCP server register failed: %s", cfg.server_name
+                "[JiuWenSwarmDeepAdapter] MCP server register failed: %s", cfg.server_name
             )
             return False
         except Exception as exc:
-            logger.warning("[JiuWenClawDeepAdapter] MCP server register failed: %s", exc)
+            logger.warning("[JiuWenSwarmDeepAdapter] MCP server register failed: %s", exc)
             return False
 
     async def _unregister_mcp_server(self, server_id: str) -> None:
@@ -1275,12 +1281,12 @@ class JiuWenClawDeepAdapter:
         try:
             await Runner.resource_mgr.remove_mcp_server(server_id)
         except Exception as exc:
-            logger.warning("[JiuWenClawDeepAdapter] MCP server remove failed: %s", exc)
+            logger.warning("[JiuWenSwarmDeepAdapter] MCP server remove failed: %s", exc)
         if server_name:
             try:
                 self._instance.ability_manager.remove(server_name)
             except Exception as exc:
-                logger.warning("[JiuWenClawDeepAdapter] MCP ability remove failed: %s", exc)
+                logger.warning("[JiuWenSwarmDeepAdapter] MCP ability remove failed: %s", exc)
         self._registered_mcp_server_ids.discard(server_id)
         self._registered_mcp_servers.pop(server_id, None)
 
@@ -1292,7 +1298,7 @@ class JiuWenClawDeepAdapter:
             cfg = self._build_mcp_server_config(entry)
             if cfg is None:
                 logger.warning(
-                    "[JiuWenClawDeepAdapter] skip invalid mcp server entry: %s",
+                    "[JiuWenSwarmDeepAdapter] skip invalid mcp server entry: %s",
                     entry.get("name", "<unknown>"),
                 )
                 continue
@@ -1309,14 +1315,14 @@ class JiuWenClawDeepAdapter:
             cfg = self._build_mcp_server_config(entry)
             if cfg is None:
                 logger.warning(
-                    "[JiuWenClawDeepAdapter] skip invalid mcp server entry: %s",
+                    "[JiuWenSwarmDeepAdapter] skip invalid mcp server entry: %s",
                     entry.get("name", "<unknown>"),
                 )
                 continue
             server_name = str(getattr(cfg, "server_name", "") or "").strip()
             if not server_name:
                 logger.warning(
-                    "[JiuWenClawDeepAdapter] skip mcp server without server_name: %s",
+                    "[JiuWenSwarmDeepAdapter] skip mcp server without server_name: %s",
                     entry.get("name", "<unknown>"),
                 )
                 continue
@@ -1375,7 +1381,7 @@ class JiuWenClawDeepAdapter:
         """Build DeepAgent vision config from service config/env mapping."""
         if not dedicated_multimodal_model_configured(config_base, "vision"):
             logger.info(
-                "[JiuWenClawDeepAdapter] vision tools skipped: models.vision has no dedicated "
+                "[JiuWenSwarmDeepAdapter] vision tools skipped: models.vision has no dedicated "
                 "api_key in config.yaml"
             )
             return None
@@ -1384,7 +1390,7 @@ class JiuWenClawDeepAdapter:
         base_url = str(os.getenv("VISION_BASE_URL") or os.getenv("VISION_API_BASE") or "").strip()
         model_name = str(os.getenv("VISION_MODEL") or os.getenv("VISION_MODEL_NAME") or "").strip()
         if not api_key or not base_url or not model_name:
-            logger.info("[JiuWenClawDeepAdapter] vision tools skipped: incomplete config")
+            logger.info("[JiuWenSwarmDeepAdapter] vision tools skipped: incomplete config")
             return None
         return VisionModelConfig(
             api_key=api_key,
@@ -1408,7 +1414,7 @@ class JiuWenClawDeepAdapter:
         api_key = str(os.getenv("AUDIO_API_KEY", "")).strip()
         base_url = str(os.getenv("AUDIO_BASE_URL") or os.getenv("AUDIO_API_BASE") or "").strip()
         if not api_key or not base_url:
-            logger.info("[JiuWenClawDeepAdapter] audio tools skipped: incomplete config")
+            logger.info("[JiuWenSwarmDeepAdapter] audio tools skipped: incomplete config")
             return None
         transcription_model = str(
             os.getenv("AUDIO_TRANSCRIPTION_MODEL") or os.getenv("AUDIO_MODEL_NAME") or ""
@@ -1468,7 +1474,7 @@ class JiuWenClawDeepAdapter:
         """Build DeepAgent image generation config from service config/env mapping."""
         apply_image_gen_model_config_from_yaml(config_base)
         if not os.getenv("IMAGE_GEN_API_KEY"):
-            logger.info("[JiuWenClawDeepAdapter] image_gen tool skipped: incomplete config")
+            logger.info("[JiuWenSwarmDeepAdapter] image_gen tool skipped: incomplete config")
             return False
         return True
 
@@ -1530,7 +1536,7 @@ class JiuWenClawDeepAdapter:
                         self._instance.ability_manager.add(tool.card)
                 return new_tools, bool(new_tools)
             except Exception as exc:
-                logger.warning("[JiuWenClawDeepAdapter] %s reload failed: %s", warn_label, exc)
+                logger.warning("[JiuWenSwarmDeepAdapter] %s reload failed: %s", warn_label, exc)
                 return [], False
         return current_tools, registered
 
@@ -1543,7 +1549,7 @@ class JiuWenClawDeepAdapter:
                 Runner.resource_mgr.remove_tool(tool.card.id)
             except Exception as exc:
                 logger.warning(
-                    "[JiuWenClawDeepAdapter] remove tool failed: %s",
+                    "[JiuWenSwarmDeepAdapter] remove tool failed: %s",
                     exc,
                 )
             if self._instance is not None and hasattr(
@@ -1554,7 +1560,7 @@ class JiuWenClawDeepAdapter:
                     self._instance.ability_manager.remove(tool.card.name)
                 except Exception:
                     logger.debug(
-                        "[JiuWenClawDeepAdapter] ability remove skipped for %s",
+                        "[JiuWenSwarmDeepAdapter] ability remove skipped for %s",
                         tool.card.name,
                         exc_info=True,
                     )
@@ -1712,7 +1718,7 @@ class JiuWenClawDeepAdapter:
                 )
             except Exception as exc:
                 logger.warning(
-                    "[JiuWenClawDeepAdapter] 跳过无效模型条目 %s: %s",
+                    "[JiuWenSwarmDeepAdapter] 跳过无效模型条目 %s: %s",
                     model_name, exc,
                 )
                 continue
@@ -1751,7 +1757,7 @@ class JiuWenClawDeepAdapter:
             self._model_cache[model_name] = self._build_model_from_entry(mcc, mco)
         except Exception as exc:
             logger.warning(
-                "[JiuWenClawDeepAdapter] 跳过无效模型条目(legacy) %s: %s",
+                "[JiuWenSwarmDeepAdapter] 跳过无效模型条目(legacy) %s: %s",
                 model_name, exc,
             )
 
@@ -1844,7 +1850,7 @@ class JiuWenClawDeepAdapter:
             return raw_skill_mode
 
         logger.warning(
-            "[JiuWenClawDeepAdapter] invalid skill_mode=%r, fallback to %s",
+            "[JiuWenSwarmDeepAdapter] invalid skill_mode=%r, fallback to %s",
             raw_skill_mode,
             SkillUseRail.SKILL_MODE_ALL,
         )
@@ -1855,9 +1861,9 @@ class JiuWenClawDeepAdapter:
         """Build ResponsePromptRail so message rules keep priority ordering."""
         try:
             rail = ResponsePromptRail()
-            logger.info("[JiuWenClawDeepAdapter] ResponsePromptRail create success")
+            logger.info("[JiuWenSwarmDeepAdapter] ResponsePromptRail create success")
         except Exception as exc:
-            logger.warning("[JiuWenClawDeepAdapter] ResponsePromptRail create failed: %s", exc)
+            logger.warning("[JiuWenSwarmDeepAdapter] ResponsePromptRail create failed: %s", exc)
             rail = None
         return rail
 
@@ -1876,9 +1882,9 @@ class JiuWenClawDeepAdapter:
 
         历史上这是 ``@staticmethod``——但 sysop_builder 现在需要知道适配器形态
         (``is_code_agent`` 决定是否把 ``project_dir`` 挂为 rw bind), 这个信号是
-        instance state (``self._is_code_agent``, 基类默认 False, ``JiuwenClaw
+        instance state (``self._is_code_agent``, 基类默认 False, ``JiuwenSwarm
         CodeAdapter`` 子类 override 成 True), staticmethod 拿不到。 因此必须降
-        成 instance method 才能透传; 调用方相应把 ``JiuWenClawDeepAdapter
+        成 instance method 才能透传; 调用方相应把 ``JiuWenSwarmDeepAdapter
         ._create_sandbox_sys_operation(...)`` 改成 ``self._create_sandbox_
         sys_operation(...)``, 走类 MRO 让 Code 子类覆写时也能命中。
 
@@ -1933,7 +1939,7 @@ class JiuWenClawDeepAdapter:
             return sys_operation.isolation_key_template
         except Exception as exc:
             logger.debug(
-                "[JiuWenClawDeepAdapter] failed to resolve sys_operation isolation key: %s",
+                "[JiuWenSwarmDeepAdapter] failed to resolve sys_operation isolation key: %s",
                 exc,
             )
             return None
@@ -1957,7 +1963,7 @@ class JiuWenClawDeepAdapter:
             return Runner.resource_mgr.get_sys_operation(existing_op_id)
         except Exception as exc:
             logger.debug(
-                "[JiuWenClawDeepAdapter] failed to get registered sys_operation: %s",
+                "[JiuWenSwarmDeepAdapter] failed to get registered sys_operation: %s",
                 exc,
             )
             return None
@@ -1985,7 +1991,7 @@ class JiuWenClawDeepAdapter:
             runtime = get_sandbox_runtime()
             sysop_card: SysOperationCard | None
             if runtime.get("enabled") and sandbox_url and sandbox_type:
-                # 走 ``self.`` 而不是 ``JiuWenClawDeepAdapter.``——_create_sandbox_
+                # 走 ``self.`` 而不是 ``JiuWenSwarmDeepAdapter.``——_create_sandbox_
                 # sys_operation 已从 staticmethod 改成 instance method (要透传
                 # ``self._is_code_agent``), 用类名直接调会绕过 MRO 把 Code 子类
                 # 的 override (如果将来需要的话) 静默吃掉, 且 staticmethod 时代
@@ -1999,18 +2005,18 @@ class JiuWenClawDeepAdapter:
             else:
                 sysop_card = create_local_sysop_card()
             if sysop_card is None:
-                logger.warning("[JiuWenClawDeepAdapter] add sys_operation failed: sysop_card is None")
+                logger.warning("[JiuWenSwarmDeepAdapter] add sys_operation failed: sysop_card is None")
                 return None
             self._sys_operation_card = sysop_card
-            isolation_key_template = JiuWenClawDeepAdapter._sys_operation_isolation_key(sysop_card)
+            isolation_key_template = JiuWenSwarmDeepAdapter._sys_operation_isolation_key(sysop_card)
             registered_sys_operation = (
-                JiuWenClawDeepAdapter._get_registered_sys_operation_by_isolation_key(
+                JiuWenSwarmDeepAdapter._get_registered_sys_operation_by_isolation_key(
                     isolation_key_template
                 )
             )
             if registered_sys_operation is not None:
                 logger.info(
-                    "[JiuWenClawDeepAdapter] reuse registered sys_operation: %s",
+                    "[JiuWenSwarmDeepAdapter] reuse registered sys_operation: %s",
                     registered_sys_operation.id,
                 )
                 return registered_sys_operation
@@ -2018,21 +2024,21 @@ class JiuWenClawDeepAdapter:
             result = Runner.resource_mgr.add_sys_operation(sysop_card)
             if result.is_err():
                 registered_sys_operation = (
-                    JiuWenClawDeepAdapter._get_registered_sys_operation_by_isolation_key(
+                    JiuWenSwarmDeepAdapter._get_registered_sys_operation_by_isolation_key(
                         isolation_key_template
                     )
                 )
                 if registered_sys_operation is not None:
                     logger.info(
-                        "[JiuWenClawDeepAdapter] reuse registered sys_operation after add failure: %s",
+                        "[JiuWenSwarmDeepAdapter] reuse registered sys_operation after add failure: %s",
                         registered_sys_operation.id,
                     )
                     return registered_sys_operation
-                logger.warning("[JiuWenClawDeepAdapter] add sys_operation failed: %s", result.msg())
+                logger.warning("[JiuWenSwarmDeepAdapter] add sys_operation failed: %s", result.msg())
                 return None
             return Runner.resource_mgr.get_sys_operation(sysop_card.id)
         except Exception as exc:
-            logger.warning("[JiuWenClawDeepAdapter] add sys_operation failed: %s", exc)
+            logger.warning("[JiuWenSwarmDeepAdapter] add sys_operation failed: %s", exc)
             return None
 
     async def apply_sandbox_runtime_patch(
@@ -2123,9 +2129,9 @@ class JiuWenClawDeepAdapter:
         """Build SysOperationRail."""
         try:
             fs_rail = SysOperationRail()
-            logger.info("[JiuWenClawDeepAdapter] SysOperationRail create success")
+            logger.info("[JiuWenSwarmDeepAdapter] SysOperationRail create success")
         except Exception as exc:
-            logger.warning("[JiuWenClawDeepAdapter] SysOperationRail create failed: %s", exc)
+            logger.warning("[JiuWenSwarmDeepAdapter] SysOperationRail create failed: %s", exc)
             fs_rail = None
         return fs_rail
 
@@ -2159,13 +2165,13 @@ class JiuWenClawDeepAdapter:
                 if config_file.exists():
                     config_paths.append(str(config_file))
                     logger.info(
-                        "[JiuWenClawDeepAdapter] Found active package config: %s (package=%s)",
+                        "[JiuWenSwarmDeepAdapter] Found active package config: %s (package=%s)",
                         config_path,
                         pkg_id,
                     )
         except Exception as exc:
             logger.warning(
-                "[JiuWenClawDeepAdapter] Failed to read active packages config paths: %s",
+                "[JiuWenSwarmDeepAdapter] Failed to read active packages config paths: %s",
                 exc,
             )
 
@@ -2194,13 +2200,13 @@ class JiuWenClawDeepAdapter:
                 if resources:
                     loaded.extend(resources)
                     logger.info(
-                        "[JiuWenClawDeepAdapter] Loaded active package from %s: %s",
+                        "[JiuWenSwarmDeepAdapter] Loaded active package from %s: %s",
                         config_path,
                         resources,
                     )
             except Exception as exc:
                 logger.warning(
-                    "[JiuWenClawDeepAdapter] Failed to load active package %s: %s",
+                    "[JiuWenSwarmDeepAdapter] Failed to load active package %s: %s",
                     config_path,
                     exc,
                 )
@@ -2213,16 +2219,16 @@ class JiuWenClawDeepAdapter:
         """Build SkillUseRail."""
         try:
             skill_mode = self._resolve_skill_mode(config)
-            logger.info("[JiuWenClawDeepAdapter] current skill_mode: %s", skill_mode)
+            logger.info("[JiuWenSwarmDeepAdapter] current skill_mode: %s", skill_mode)
             skill_rail = SkillUseRail(
                 skills_dir=str(get_agent_skills_dir()),
                 skill_mode=skill_mode,
                 include_tools=include_tools,
                 disabled_skills=self._skill_manager.list_execution_disabled_skills(),
             )
-            logger.info("[JiuWenClawDeepAdapter] SkillUseRail create success")
+            logger.info("[JiuWenSwarmDeepAdapter] SkillUseRail create success")
         except Exception as exc:
-            logger.warning("[JiuWenClawDeepAdapter] SkillUseRail create failed: %s", exc)
+            logger.warning("[JiuWenSwarmDeepAdapter] SkillUseRail create failed: %s", exc)
             skill_rail = None
         return skill_rail
 
@@ -2244,9 +2250,9 @@ class JiuWenClawDeepAdapter:
                 disabled_skills=self._skill_manager.list_execution_disabled_skills(),
             )
             self._skill_evolution_rail = skill_evolution_rail
-            logger.info("[JiuWenClaw] SkillEvolutionRail create success")
+            logger.info("[JiuWenSwarmDeepAdapter] SkillEvolutionRail create success")
         except Exception as exc:
-            logger.warning("[JiuWenClaw] SkillEvolutionRail create failed: %s", exc)
+            logger.warning("[JiuWenSwarmDeepAdapter] SkillEvolutionRail create failed: %s", exc)
             skill_evolution_rail = None
         return skill_evolution_rail
 
@@ -2262,7 +2268,7 @@ class JiuWenClawDeepAdapter:
             skill_create_enabled = _get_skill_create_enabled(config)
             # Check if skill_create is explicitly enabled
             if not skill_create_enabled:
-                logger.debug("[JiuWenClaw] SkillCreateRail disabled by config")
+                logger.debug("[JiuWenSwarmDeepAdapter] SkillCreateRail disabled by config")
                 return None
 
             language = config.get("language", "cn")
@@ -2272,20 +2278,20 @@ class JiuWenClawDeepAdapter:
                 language=language,
             )
             self._skill_create_rail = rail
-            logger.info("[JiuWenClaw] SkillCreateRail created with auto_trigger=True")
+            logger.info("[JiuWenSwarmDeepAdapter] SkillCreateRail created with auto_trigger=True")
         except Exception as exc:
-            logger.warning("[JiuWenClaw] SkillCreateRail create failed: %s", exc)
+            logger.warning("[JiuWenSwarmDeepAdapter] SkillCreateRail create failed: %s", exc)
             rail = None
         return rail
 
     @staticmethod
-    def _build_stream_event_rail() -> JiuClawStreamEventRail | None:
-        """Build JiuClawStreamEventRail."""
+    def _build_stream_event_rail() -> JiuSwarmStreamEventRail | None:
+        """Build JiuSwarmStreamEventRail."""
         try:
-            stream_event_rail = JiuClawStreamEventRail()
-            logger.info("[JiuWenClawDeepAdapter] JiuClawStreamEventRail create success")
+            stream_event_rail = JiuSwarmStreamEventRail()
+            logger.info("[JiuWenSwarmDeepAdapter] JiuSwarmStreamEventRail create success")
         except Exception as exc:
-            logger.warning("[JiuWenClawDeepAdapter] JiuClawStreamEventRail create failed: %s", exc)
+            logger.warning("[JiuWenSwarmDeepAdapter] JiuSwarmStreamEventRail create failed: %s", exc)
             stream_event_rail = None
         return stream_event_rail
 
@@ -2294,9 +2300,9 @@ class JiuWenClawDeepAdapter:
         """Build TaskPlanningRail."""
         try:
             task_planning_rail = TaskPlanningRail()
-            logger.info("[JiuWenClawDeepAdapter] TaskPlanningRail create success")
+            logger.info("[JiuWenSwarmDeepAdapter] TaskPlanningRail create success")
         except Exception as exc:
-            logger.warning("[JiuWenClawDeepAdapter] TaskPlanningRail create failed: %s", exc)
+            logger.warning("[JiuWenSwarmDeepAdapter] TaskPlanningRail create failed: %s", exc)
             task_planning_rail = None
         return task_planning_rail
 
@@ -2305,9 +2311,9 @@ class JiuWenClawDeepAdapter:
         """Build SubagentRail for subagent delegation."""
         try:
             subagent_rail = SubagentRail()
-            logger.info("[JiuWenClawDeepAdapter] SubagentRail create success")
+            logger.info("[JiuWenSwarmDeepAdapter] SubagentRail create success")
         except Exception as exc:
-            logger.warning("[JiuWenClawDeepAdapter] SubagentRail create failed: %s", exc)
+            logger.warning("[JiuWenSwarmDeepAdapter] SubagentRail create failed: %s", exc)
             subagent_rail = None
         return subagent_rail
 
@@ -2316,9 +2322,9 @@ class JiuWenClawDeepAdapter:
         """Build SecurityPromptRail."""
         try:
             security_prompt_rail = SecurityRail()
-            logger.info("[JiuWenClawDeepAdapter] SecurityPromptRail create success")
+            logger.info("[JiuWenSwarmDeepAdapter] SecurityPromptRail create success")
         except Exception as exc:
-            logger.warning("[JiuWenClawDeepAdapter] SecurityPromptRail create failed: %s", exc)
+            logger.warning("[JiuWenSwarmDeepAdapter] SecurityPromptRail create failed: %s", exc)
             security_prompt_rail = None
         return security_prompt_rail
 
@@ -2335,7 +2341,7 @@ class JiuWenClawDeepAdapter:
             has_model = embed_config.get("embed_model") if isinstance(embed_config, dict) else None
             if not all([has_api_key, has_base_url, has_model]):
                 logger.warning(
-                    "[JiuWenClawDeepAdapter] MemoryRail create failed: No available embedding config"
+                    "[JiuWenSwarmDeepAdapter] MemoryRail create failed: No available embedding config"
                 )
             self._is_proactive_memory = is_proactive_memory(mode, config)
             memory_rail = MemoryRail(
@@ -2346,9 +2352,9 @@ class JiuWenClawDeepAdapter:
                 ),
                 is_proactive=self._is_proactive_memory,
             )
-            logger.info("[JiuWenClawDeepAdapter] MemoryRail create success")
+            logger.info("[JiuWenSwarmDeepAdapter] MemoryRail create success")
         except Exception as exc:
-            logger.warning("[JiuWenClawDeepAdapter] MemoryRail create failed: %s", exc)
+            logger.warning("[JiuWenSwarmDeepAdapter] MemoryRail create failed: %s", exc)
             memory_rail = None
         return memory_rail
 
@@ -2357,9 +2363,9 @@ class JiuWenClawDeepAdapter:
         """Build HeartbeatRail."""
         try:
             heartbeat_rail = HeartbeatRail()
-            logger.info("[JiuWenClawDeepAdapter] HeartbeatRail create success")
+            logger.info("[JiuWenSwarmDeepAdapter] HeartbeatRail create success")
         except Exception as exc:
-            logger.warning("[JiuWenClawDeepAdapter] HeartbeatRail create failed: %s", exc)
+            logger.warning("[JiuWenSwarmDeepAdapter] HeartbeatRail create failed: %s", exc)
             heartbeat_rail = None
         return heartbeat_rail
 
@@ -2370,10 +2376,10 @@ class JiuWenClawDeepAdapter:
             from jiuwenswarm.agents.harness.common.rails.avatar_rail import AvatarPromptRail
 
             rail = AvatarPromptRail()
-            logger.info("[JiuWenClawDeepAdapter] AvatarPromptRail create success")
+            logger.info("[JiuWenSwarmDeepAdapter] AvatarPromptRail create success")
             return rail
         except Exception as exc:
-            logger.warning("[JiuWenClawDeepAdapter] AvatarPromptRail create failed: %s", exc)
+            logger.warning("[JiuWenSwarmDeepAdapter] AvatarPromptRail create failed: %s", exc)
             return None
 
     def _build_circuit_breaker_rail(self) -> CircuitBreakerRail | None:
@@ -2381,7 +2387,7 @@ class JiuWenClawDeepAdapter:
             guard_cfg = (get_config() or {}).get("execution_guard") or {}
             cb_cfg = guard_cfg.get("circuit_breaker") or {}
             if cb_cfg.get("enabled", False) is not True:
-                logger.info("[JiuWenClawDeepAdapter] CircuitBreakerRail disabled by config")
+                logger.info("[JiuWenSwarmDeepAdapter] CircuitBreakerRail disabled by config")
                 return None
             defaults = CircuitBreakerConfig()
             config = CircuitBreakerConfig(
@@ -2395,10 +2401,10 @@ class JiuWenClawDeepAdapter:
                 ),
             )
             rail = CircuitBreakerRail(config, language=self._resolve_runtime_language())
-            logger.info("[JiuWenClawDeepAdapter] CircuitBreakerRail create success")
+            logger.info("[JiuWenSwarmDeepAdapter] CircuitBreakerRail create success")
             return rail
         except Exception as exc:
-            logger.warning("[JiuWenClawDeepAdapter] CircuitBreakerRail create failed: %s", exc)
+            logger.warning("[JiuWenSwarmDeepAdapter] CircuitBreakerRail create failed: %s", exc)
             return None
 
     def _build_runtime_prompt_rail(self) -> RuntimePromptRail | None:
@@ -2413,9 +2419,9 @@ class JiuWenClawDeepAdapter:
                 language=self._resolve_runtime_language(),
                 channel=default_channel,
             )
-            logger.info("[JiuWenClawDeepAdapter] RuntimePromptRail create success")
+            logger.info("[JiuWenSwarmDeepAdapter] RuntimePromptRail create success")
         except Exception as exc:
-            logger.warning("[JiuWenClawDeepAdapter] RuntimePromptRail create failed: %s", exc)
+            logger.warning("[JiuWenSwarmDeepAdapter] RuntimePromptRail create failed: %s", exc)
             rail = None
         return rail
 
@@ -2483,7 +2489,7 @@ class JiuWenClawDeepAdapter:
         rails_list = []
         for info in rail_infos:
             logger.info(
-                "[JiuWenClawDeepAdapter] Building rail: %s with params: %s",
+                "[JiuWenSwarmDeepAdapter] Building rail: %s with params: %s",
                 info.attr_name,
                 info.params,
             )
@@ -2492,15 +2498,15 @@ class JiuWenClawDeepAdapter:
                 setattr(self, info.attr_name, rail_instance)
                 rails_list.append(rail_instance)
                 logger.info(
-                    "[JiuWenClawDeepAdapter] Rail %s built successfully and added to rails_list",
+                    "[JiuWenSwarmDeepAdapter] Rail %s built successfully and added to rails_list",
                     info.attr_name,
                 )
             else:
                 logger.warning(
-                    "[JiuWenClawDeepAdapter] Rail %s build returned None", info.attr_name
+                    "[JiuWenSwarmDeepAdapter] Rail %s build returned None", info.attr_name
                 )
         logger.info(
-            "[JiuWenClawDeepAdapter] Total rails built: %d, rail names: %s",
+            "[JiuWenSwarmDeepAdapter] Total rails built: %d, rail names: %s",
             len(rails_list),
             [type(r).__name__ for r in rails_list],
         )
@@ -2511,11 +2517,11 @@ class JiuWenClawDeepAdapter:
                 user_hook_rail = UserHookRail(hooks_config)
                 rails_list.append(user_hook_rail)
                 logger.info(
-                    "[JiuWenClawDeepAdapter] UserHookRail loaded with %d event types",
+                    "[JiuWenSwarmDeepAdapter] UserHookRail loaded with %d event types",
                     len(hooks_config.events),
                 )
         except Exception as e:
-            logger.warning("[JiuWenClawDeepAdapter] Failed to load UserHookRail: %s", e)
+            logger.warning("[JiuWenSwarmDeepAdapter] Failed to load UserHookRail: %s", e)
         return rails_list
 
     @staticmethod
@@ -2542,7 +2548,7 @@ class JiuWenClawDeepAdapter:
         if skill_create_enabled:
             if not configured_value:
                 logger.warning(
-                    "[JiuWenClawDeepAdapter] skill_create=True requires enable_task_loop=True; "
+                    "[JiuWenSwarmDeepAdapter] skill_create=True requires enable_task_loop=True; "
                     "overriding user config (enable_task_loop=%s -> True)",
                     configured_value,
                 )
@@ -2595,7 +2601,7 @@ class JiuWenClawDeepAdapter:
         permission_config = config_base.get("permissions", {}) if config_base else {}
         if self._permission_rail is not None:
             self._permission_rail.update_config(permission_config)
-            logger.info("[JiuWenClawDeepAdapter] _permission_rail config hot-updated")
+            logger.info("[JiuWenSwarmDeepAdapter] _permission_rail config hot-updated")
         elif permission_config.get("enabled", False):
             self._permission_rail = build_permission_rail(
                 config=config_base,
@@ -2606,7 +2612,7 @@ class JiuWenClawDeepAdapter:
                 .get("model_name", "gpt-4"),
             )
             if self._permission_rail is not None:
-                logger.info("[JiuWenClawDeepAdapter] _permission_rail newly created on hot-reload")
+                logger.info("[JiuWenSwarmDeepAdapter] _permission_rail newly created on hot-reload")
 
     def _get_current_agent_rails(
         self, config: dict[str, Any], config_base: dict[str, Any] | None = None
@@ -2710,7 +2716,7 @@ class JiuWenClawDeepAdapter:
             except Exception as exc:
                 self._vision_tools = []
                 logger.warning(
-                    "[JiuWenClawDeepAdapter] vision tools registration failed: %s",
+                    "[JiuWenSwarmDeepAdapter] vision tools registration failed: %s",
                     exc,
                 )
 
@@ -2725,7 +2731,7 @@ class JiuWenClawDeepAdapter:
         except Exception as exc:
             self._audio_tools = []
             logger.warning(
-                "[JiuWenClawDeepAdapter] audio tools registration failed: %s",
+                "[JiuWenSwarmDeepAdapter] audio tools registration failed: %s",
                 exc,
             )
 
@@ -2737,7 +2743,7 @@ class JiuWenClawDeepAdapter:
                 self._video_tool_registered = True
             except Exception as exc:
                 logger.warning(
-                    "[JiuWenClawDeepAdapter] video tool registration failed: %s",
+                    "[JiuWenSwarmDeepAdapter] video tool registration failed: %s",
                     exc,
                 )
 
@@ -2750,7 +2756,7 @@ class JiuWenClawDeepAdapter:
                 self._image_gen_tool_registered = True
             except Exception as exc:
                 logger.warning(
-                    "[JiuWenClawDeepAdapter] generate_image tool registration failed: %s",
+                    "[JiuWenSwarmDeepAdapter] generate_image tool registration failed: %s",
                     exc,
                 )
 
@@ -2795,11 +2801,11 @@ class JiuWenClawDeepAdapter:
                     tool_cards.append(xt.card)
                 self._xiaoyi_phone_tools_registered = True
                 logger.info(
-                    "[JiuWenClawDeepAdapter] %d xiaoyi phone tools registered", len(_xiaoyi_tools)
+                    "[JiuWenSwarmDeepAdapter] %d xiaoyi phone tools registered", len(_xiaoyi_tools)
                 )
             except Exception as exc:
                 logger.warning(
-                    "[JiuWenClawDeepAdapter] xiaoyi phone tools registration failed: %s", exc
+                    "[JiuWenSwarmDeepAdapter] xiaoyi phone tools registration failed: %s", exc
                 )
 
         try:
@@ -2811,11 +2817,47 @@ class JiuWenClawDeepAdapter:
                 tool_cards.append(tool.card)
                 skill_tool_names.append(tool.card.name)
             logger.info(
-                "[JiuWenClawDeepAdapter] SkillToolkit registered: tools=%s",
+                "[JiuWenSwarmDeepAdapter] SkillToolkit registered: tools=%s",
                 skill_tool_names,
             )
         except Exception as exc:
-            logger.warning("[JiuWenClawDeepAdapter] skill tools registration failed: %s", exc)
+            logger.warning("[JiuWenSwarmDeepAdapter] skill tools registration failed: %s", exc)
+
+        if is_skill_retrieval_enabled():
+            try:
+                skill_retrieval_toolkit = SkillRetrievalToolkit(manager=self._skill_manager)
+                skill_retrieval_tool_names: list[str] = []
+                for tool in skill_retrieval_toolkit.get_tools():
+                    if not Runner.resource_mgr.get_tool(tool.card.id):
+                        Runner.resource_mgr.add_tool(tool)
+                    tool_cards.append(tool.card)
+                    skill_retrieval_tool_names.append(tool.card.name)
+                logger.info(
+                    "[JiuWenSwarmDeepAdapter] SkillRetrievalToolkit registered: tools=%s",
+                    skill_retrieval_tool_names,
+                )
+            except Exception as exc:
+                logger.warning("[JiuWenSwarmDeepAdapter] skill retrieval tools registration failed: %s", exc)
+        else:
+            logger.info("[JiuWenSwarmDeepAdapter] SkillRetrievalToolkit skipped: disabled")
+
+        try:
+            symphony_toolkit = SymphonyToolkit()
+            symphony_tool_names: list[str] = []
+            for tool in symphony_toolkit.get_tools():
+                if not Runner.resource_mgr.get_tool(tool.card.id):
+                    Runner.resource_mgr.add_tool(tool)
+                tool_cards.append(tool.card)
+                symphony_tool_names.append(tool.card.name)
+            logger.info(
+                "[JiuWenSwarmDeepAdapter] SymphonyToolkit registered: tools=%s",
+                symphony_tool_names,
+            )
+        except Exception as exc:
+            logger.warning(
+                "[JiuWenSwarmDeepAdapter] orchestration tools registration failed: %s",
+                exc,
+            )
 
         # acp_chat: forward prompts to external stdio ACP agents (see acp_agents in config.yaml)
         try:
@@ -2824,9 +2866,9 @@ class JiuWenClawDeepAdapter:
                 if not Runner.resource_mgr.get_tool(acp_chat.card.id):
                     Runner.resource_mgr.add_tool(acp_chat)
                 tool_cards.append(acp_chat.card)
-                logger.info("[JiuWenClawDeepAdapter] acp_chat tool registered")
+                logger.info("[JiuWenSwarmDeepAdapter] acp_chat tool registered")
         except Exception as exc:
-            logger.warning("[JiuWenClawDeepAdapter] acp_chat registration failed: %s", exc)
+            logger.warning("[JiuWenSwarmDeepAdapter] acp_chat registration failed: %s", exc)
 
         return tool_cards
 
@@ -2934,7 +2976,7 @@ class JiuWenClawDeepAdapter:
         self._registered_mcp_servers.clear()
         await self._register_mcp_servers_from_config(config_base, tag=f"agent.{mode}")
         logger.info(
-            "[JiuWenClawDeepAdapter] 初始化完成: agent_name=%s, mode=%s, sub_mode=%s", self._agent_name, mode, sub_mode
+            "[JiuWenSwarmDeepAdapter] 初始化完成: agent_name=%s, mode=%s, sub_mode=%s", self._agent_name, mode, sub_mode
         )
 
         # 加载已激活的 packages（skills, rails, tools）
@@ -2962,7 +3004,7 @@ class JiuWenClawDeepAdapter:
                 invoke_turn_id=invoke_turn_id,
             )
         except Exception as exc:
-            logger.warning("[JiuWenClawDeepAdapter] prompt attachment sync skipped: %s", exc)
+            logger.warning("[JiuWenSwarmDeepAdapter] prompt attachment sync skipped: %s", exc)
 
     async def _clear_prompt_attachments_for_request(self, session_id: str, invoke_turn_id: str) -> None:
         """Clear all turn-scope prompt attachments for one completed request."""
@@ -2979,7 +3021,7 @@ class JiuWenClawDeepAdapter:
                 scope=PromptAttachmentScope.TURN,
             )
         except Exception as exc:
-            logger.warning("[JiuWenClawDeepAdapter] prompt attachment turn cleanup skipped: %s", exc)
+            logger.warning("[JiuWenSwarmDeepAdapter] prompt attachment turn cleanup skipped: %s", exc)
 
     def _prompt_attachment_root(self) -> Path:
         if self._workspace_dir == str(get_agent_workspace_dir()):
@@ -3003,12 +3045,12 @@ class JiuWenClawDeepAdapter:
                         await manager.hot_reload_rail(ext["name"], True)
                     except Exception as e:
                         logger.error(
-                            "[JiuWenClawDeepAdapter] 用户 Rail 扩展加载失败: %s, 错误: %s",
+                            "[JiuWenSwarmDeepAdapter] 用户 Rail 扩展加载失败: %s, 错误: %s",
                             ext["name"],
                             e,
                         )
         except Exception as e:
-            logger.error("[JiuWenClawDeepAdapter] 加载用户 Rail 扩展时发生错误: %s", e)
+            logger.error("[JiuWenSwarmDeepAdapter] 加载用户 Rail 扩展时发生错误: %s", e)
 
     async def reload_agent_config(
         self,
@@ -3025,7 +3067,7 @@ class JiuWenClawDeepAdapter:
             env_overrides: 可选的环境变量增量；仅覆盖请求中出现的 key。
         """
         if self._instance is None:
-            raise RuntimeError("JiuWenClawDeepAdapter 未初始化，请先调用 create_instance()")
+            raise RuntimeError("JiuWenSwarmDeepAdapter 未初始化，请先调用 create_instance()")
         clear_config_cache()
         clear_memory_manager_cache()
 
@@ -3062,7 +3104,7 @@ class JiuWenClawDeepAdapter:
                 await self._instance.unregister_rail(self._filesystem_rail)
             except Exception as exc:
                 logger.warning(
-                    "[JiuWenClawDeepAdapter] ACP filesystem rail unregister failed: %s", exc
+                    "[JiuWenSwarmDeepAdapter] ACP filesystem rail unregister failed: %s", exc
                 )
             self._filesystem_rail = None
 
@@ -3081,7 +3123,7 @@ class JiuWenClawDeepAdapter:
         self._instance.configure(deep_cfg)
         await self._sync_mcp_servers_for_runtime(config_base, tag="agent.reload")
 
-        logger.info("[JiuWenClawDeepAdapter] 配置已热更新（configure），未重启进程")
+        logger.info("[JiuWenSwarmDeepAdapter] 配置已热更新（configure），未重启进程")
 
     @staticmethod
     def _bind_runtime_cron_context(
@@ -3141,7 +3183,7 @@ class JiuWenClawDeepAdapter:
             self._task_planning_rail = self._build_task_planning_rail()
             if self._task_planning_rail is not None:
                 await self._instance.register_rail(self._task_planning_rail)
-                logger.info("[JiuWenClawDeepAdapter] TaskPlanningRail registered for plan mode")
+                logger.info("[JiuWenSwarmDeepAdapter] TaskPlanningRail registered for plan mode")
         # 卸载 multi-session 工具
         for existing in list(self._instance.ability_manager.list() or []):
             if getattr(existing, "name", "").startswith(
@@ -3163,7 +3205,7 @@ class JiuWenClawDeepAdapter:
             self._context_assemble_mode = "agent.plan"
             await self._instance.register_rail(self._context_assemble_rail)
             logger.info(
-                "[JiuWenClawDeepAdapter] %s registered for plan mode", "ContextAssembleRail"
+                "[JiuWenSwarmDeepAdapter] %s registered for plan mode", "ContextAssembleRail"
             )
 
         # ContextProcessorRail
@@ -3173,14 +3215,14 @@ class JiuWenClawDeepAdapter:
                 if self._context_processor_rail is not None:
                     await self._instance.register_rail(self._context_processor_rail)
                     logger.info(
-                        "[JiuWenClawDeepAdapter] ContextProcessorRail registered for plan mode"
+                        "[JiuWenSwarmDeepAdapter] ContextProcessorRail registered for plan mode"
                     )
         else:
             if self._context_processor_rail is not None:
                 await self._instance.unregister_rail(self._context_processor_rail)
                 self._context_processor_rail = None
                 logger.info(
-                    "[JiuWenClawDeepAdapter] ContextProcessorRail unregistered for plan mode (disabled)"
+                    "[JiuWenSwarmDeepAdapter] ContextProcessorRail unregistered for plan mode (disabled)"
                 )
 
         # SkillEvolutionRail
@@ -3190,13 +3232,13 @@ class JiuWenClawDeepAdapter:
                 self._skill_evolution_rail = self._build_skill_evolution_rail(self._config_cache)
             if self._skill_evolution_rail is not None:
                 await self._instance.register_rail(self._skill_evolution_rail)
-                logger.info("[JiuWenClawDeepAdapter] SkillEvolutionRail registered for plan mode")
+                logger.info("[JiuWenSwarmDeepAdapter] SkillEvolutionRail registered for plan mode")
         else:
             # evolution disabled: unregister if exists
             if self._skill_evolution_rail is not None:
                 await self._instance.unregister_rail(self._skill_evolution_rail)
                 self._skill_evolution_rail = None
-                logger.info("[JiuWenClawDeepAdapter] SkillEvolutionRail unregistered (evolution.enabled=false)")
+                logger.info("[JiuWenSwarmDeepAdapter] SkillEvolutionRail unregistered (evolution.enabled=false)")
 
         # SkillCreateRail
         skill_create_enabled = _get_skill_create_enabled(self._config_cache)
@@ -3206,27 +3248,27 @@ class JiuWenClawDeepAdapter:
             if deep_config is not None:
                 if not deep_config.enable_task_loop:
                     logger.warning(
-                        "[JiuWenClawDeepAdapter] skill_create=true requires task_loop mode, "
+                        "[JiuWenSwarmDeepAdapter] skill_create=true requires task_loop mode, "
                         "but enable_task_loop=False. SkillCreateRail may not function properly."
                     )
             if self._skill_create_rail is None:
                 self._skill_create_rail = self._build_skill_create_rail(self._config_cache)
             if self._skill_create_rail is not None:
                 await self._instance.register_rail(self._skill_create_rail)
-                logger.info("[JiuWenClawDeepAdapter] SkillCreateRail registered for plan mode")
+                logger.info("[JiuWenSwarmDeepAdapter] SkillCreateRail registered for plan mode")
         else:
             # skill_create disabled: unregister if exists
             if self._skill_create_rail is not None:
                 await self._instance.unregister_rail(self._skill_create_rail)
                 self._skill_create_rail = None
-                logger.info("[JiuWenClawDeepAdapter] SkillCreateRail unregistered (skill_create=false)")
+                logger.info("[JiuWenSwarmDeepAdapter] SkillCreateRail unregistered (skill_create=false)")
 
         # 注册 subagent rail（plan 模式下启用）
         if self._subagent_rail is None:
             self._subagent_rail = self._build_subagent_rail()
             if self._subagent_rail is not None:
                 await self._instance.register_rail(self._subagent_rail)
-                logger.info("[JiuWenClawDeepAdapter] SubagentRail registered for plan mode")
+                logger.info("[JiuWenSwarmDeepAdapter] SubagentRail registered for plan mode")
 
     async def _update_agent_mode_rails(self, mode: str | None = None) -> None:
         """agent 模式：卸载 plan 专属 rails，按需注册 agent 专属 rails。"""
@@ -3244,7 +3286,7 @@ class JiuWenClawDeepAdapter:
                 await self._instance.unregister_rail(rail)
                 setattr(self, attr, None)
                 logger.info(
-                    "[JiuWenClawDeepAdapter] %s unregistered for %s mode",
+                    "[JiuWenSwarmDeepAdapter] %s unregistered for %s mode",
                     label,
                     mode or "agent",
                 )
@@ -3267,7 +3309,7 @@ class JiuWenClawDeepAdapter:
             if self._context_processor_rail is not None:
                 await self._instance.register_rail(self._context_processor_rail)
                 logger.info(
-                    "[JiuWenClawDeepAdapter] ContextProcessorRail registered for %s mode",
+                    "[JiuWenSwarmDeepAdapter] ContextProcessorRail registered for %s mode",
                     mode or "agent.fast",
                 )
 
@@ -3338,9 +3380,9 @@ class JiuWenClawDeepAdapter:
             for ms_tool in multi_session_toolkit.get_tools():
                 Runner.resource_mgr.add_tool(ms_tool)
                 self._instance.ability_manager.add(ms_tool.card)
-            logger.info("[JiuWenClawDeepAdapter] MultiSessionToolkit registered for agent mode")
+            logger.info("[JiuWenSwarmDeepAdapter] MultiSessionToolkit registered for agent mode")
         except Exception as exc:
-            logger.error("[JiuWenClawDeepAdapter] MultiSessionToolkit 注册失败: %s", exc)
+            logger.error("[JiuWenSwarmDeepAdapter] MultiSessionToolkit 注册失败: %s", exc)
 
     async def _update_session_tools(
         self,
@@ -3355,15 +3397,15 @@ class JiuWenClawDeepAdapter:
                 cron_tools = self._build_cron_tools()
                 if cron_tools:
                     logger.info(
-                        "[JiuWenClawDeepAdapter] Registering %d cron tools", len(cron_tools)
+                        "[JiuWenSwarmDeepAdapter] Registering %d cron tools", len(cron_tools)
                     )
                     for cron_tool in cron_tools:
                         if not Runner.resource_mgr.get_tool(cron_tool.card.id):
                             Runner.resource_mgr.add_tool(cron_tool)
                         self._instance.ability_manager.add(cron_tool.card)
-                    logger.info("[JiuWenClawDeepAdapter] Cron tools registered successfully")
+                    logger.info("[JiuWenSwarmDeepAdapter] Cron tools registered successfully")
             except Exception as exc:
-                logger.error("[JiuWenClawDeepAdapter] 定时工具注册失败: %s", exc)
+                logger.error("[JiuWenSwarmDeepAdapter] 定时工具注册失败: %s", exc)
 
         # send_file 工具：由 channels.<channel>.send_file_allowed 控制，每次请求重新注册
         # channel_id/metadata 由调用前的 _bind_runtime_cron_context 已写入 contextvar
@@ -3477,9 +3519,20 @@ class JiuWenClawDeepAdapter:
         if self._instance.deep_config is not None:
             self._instance.deep_config.language = resolved_language
 
-    def _seed_runtime_cwd(self, cwd: str | None = None) -> None:
-        """Seed Core's CwdState holder from the request/runtime cwd."""
-        workspace_root = str(self._workspace_dir or self._project_dir or os.getcwd())
+    def _seed_runtime_cwd(
+        self, cwd: str | None = None, workspace: str | None = None
+    ) -> None:
+        """Seed Core's CwdState holder from the request/runtime cwd.
+
+        ``workspace``: optional per-request workspace override. When set,
+        becomes the workspace anchor for tools that read ``get_workspace()``
+        (notably ``fs_operation``'s sandbox enforcement, which gates
+        absolute-path writes by membership in the workspace tree). When
+        unset, falls back to the agent's instance-level workspace.
+        """
+        workspace_root = str(
+            workspace or self._workspace_dir or self._project_dir or os.getcwd()
+        )
         runtime_cwd = str(cwd or "").strip()
         if not runtime_cwd or not os.path.isdir(runtime_cwd):
             runtime_cwd = str(self._project_dir or "").strip()
@@ -3498,18 +3551,20 @@ class JiuWenClawDeepAdapter:
         request_metadata: dict[str, Any] | None = None
         trusted_dirs: list[str] | None = None
         cwd: str | None = None
+        workspace: str | None = None
         project_dir: str | None = None
 
     async def _update_runtime_config(self, runtime_config: "_RuntimeConfig") -> None:
         """Register per-request tools for current agent execution."""
         if self._instance is None:
-            raise RuntimeError("JiuWenClawDeepAdapter 未初始化，请先调用 create_instance()")
+            raise RuntimeError("JiuWenSwarmDeepAdapter 未初始化，请先调用 create_instance()")
 
         self._seed_runtime_cwd(
             runtime_config.cwd
             or runtime_config.project_dir
             or self._project_dir
-            or self._workspace_dir
+            or self._workspace_dir,
+            workspace=runtime_config.workspace,
         )
         resolved_language = self._resolve_runtime_language()
         resolved_channel = (
@@ -3589,7 +3644,7 @@ class JiuWenClawDeepAdapter:
                 for tool_name in _all_memory_tools:
                     try:
                         self._instance.ability_manager.remove(tool_name)
-                        logger.info("[JiuWenClawDeepAdapter] 记忆系统已禁用，移除 %s", tool_name)
+                        logger.info("[JiuWenSwarmDeepAdapter] 记忆系统已禁用，移除 %s", tool_name)
                     except Exception:
                         pass
             # 场景1：群聊数字分身模式 - 只移除写入工具
@@ -3598,7 +3653,7 @@ class JiuWenClawDeepAdapter:
                     try:
                         self._instance.ability_manager.remove(tool_name)
                         logger.info(
-                            "[JiuWenClawDeepAdapter] 群聊模式下禁止写入记忆，移除 %s", tool_name
+                            "[JiuWenSwarmDeepAdapter] 群聊模式下禁止写入记忆，移除 %s", tool_name
                         )
                     except Exception:
                         pass
@@ -3684,20 +3739,20 @@ class JiuWenClawDeepAdapter:
             killed = kill_shell_processes_for_session_tree(sid)
             if killed:
                 logger.info(
-                    "[JiuWenClawDeepAdapter] interrupt(%s): killed %d shell process(es) session=%s",
+                    "[JiuWenSwarmDeepAdapter] interrupt(%s): killed %d shell process(es) session=%s",
                     intent,
                     killed,
                     sid,
                 )
         except Exception:
             logger.debug(
-                "[JiuWenClawDeepAdapter] interrupt(%s): kill_shell_processes failed",
+                "[JiuWenSwarmDeepAdapter] interrupt(%s): kill_shell_processes failed",
                 intent,
                 exc_info=True,
             )
         if cancelled_tasks:
             logger.info(
-                "[JiuWenClawDeepAdapter] interrupt(%s): cancelled %d agent task(s) session=%s",
+                "[JiuWenSwarmDeepAdapter] interrupt(%s): cancelled %d agent task(s) session=%s",
                 intent,
                 cancelled_tasks,
                 sid,
@@ -3716,7 +3771,7 @@ class JiuWenClawDeepAdapter:
             # _cancel_session_agent_tasks, shell process kill) is sufficient to
             # stop the target session's work without collateral damage.
             logger.info(
-                "[JiuWenClawDeepAdapter] interrupt(%s): 跳过 instance.abort/scheduler cancel，"
+                "[JiuWenSwarmDeepAdapter] interrupt(%s): 跳过 instance.abort/scheduler cancel，"
                 "其他 session 仍活跃 (count=%d, active=%s)",
                 intent,
                 other_count,
@@ -3755,7 +3810,7 @@ class JiuWenClawDeepAdapter:
         _session_is_active = self._is_session_active(_normalized_sid)
         if not _session_is_active and intent in ("pause", "resume"):
             logger.info(
-                "[JiuWenClawDeepAdapter] interrupt(%s): session=%s not active on this adapter, "
+                "[JiuWenSwarmDeepAdapter] interrupt(%s): session=%s not active on this adapter, "
                 "skipping pause/resume (active_sessions=%s)",
                 intent,
                 request.session_id,
@@ -3763,7 +3818,7 @@ class JiuWenClawDeepAdapter:
             )
         elif not _session_is_active and intent in ("cancel", "supplement"):
             logger.info(
-                "[JiuWenClawDeepAdapter] interrupt(%s): session=%s not in active counter "
+                "[JiuWenSwarmDeepAdapter] interrupt(%s): session=%s not in active counter "
                 "(stream may have unwound); still running per-session teardown "
                 "(active_sessions=%s)",
                 intent,
@@ -3780,7 +3835,7 @@ class JiuWenClawDeepAdapter:
             if _session_is_active and self._stream_event_rail is not None:
                 self._stream_event_rail.pause(request.session_id)
                 logger.info(
-                    "[JiuWenClawDeepAdapter] interrupt: 已暂停执行 request_id=%s",
+                    "[JiuWenSwarmDeepAdapter] interrupt: 已暂停执行 request_id=%s",
                     request.request_id,
                 )
             message = "任务已暂停"
@@ -3790,7 +3845,7 @@ class JiuWenClawDeepAdapter:
             if _session_is_active and self._stream_event_rail is not None:
                 self._stream_event_rail.resume(request.session_id)
                 logger.info(
-                    "[JiuWenClawDeepAdapter] interrupt: 已恢复执行 request_id=%s",
+                    "[JiuWenSwarmDeepAdapter] interrupt: 已恢复执行 request_id=%s",
                     request.request_id,
                 )
             message = "任务已恢复"
@@ -3808,7 +3863,7 @@ class JiuWenClawDeepAdapter:
                 await self._abort_shared_agent_if_safe(_normalized_sid, "supplement")
             # 不清理 todo — 保留给新任务继续
             logger.info(
-                "[JiuWenClawDeepAdapter] interrupt(supplement): 已停止执行 request_id=%s",
+                "[JiuWenSwarmDeepAdapter] interrupt(supplement): 已停止执行 request_id=%s",
                 request.request_id,
             )
             message = "任务已切换"
@@ -3830,7 +3885,7 @@ class JiuWenClawDeepAdapter:
                 # the shared DeepAgent would kill it as collateral damage.
                 await self._abort_shared_agent_if_safe(_normalized_sid, "cancel")
             logger.info(
-                "[JiuWenClawDeepAdapter] interrupt(cancel): 已设置 abort 并解除 pause 阻塞"
+                "[JiuWenSwarmDeepAdapter] interrupt(cancel): 已设置 abort 并解除 pause 阻塞"
             )
 
             updated_todos = None
@@ -3838,7 +3893,7 @@ class JiuWenClawDeepAdapter:
                 try:
                     updated_todos = await self._cancel_pending_todos(request.session_id)
                 except Exception as exc:
-                    logger.warning("[JiuWenClawDeepAdapter] 标记 todo cancelled 失败: %s", exc)
+                    logger.warning("[JiuWenSwarmDeepAdapter] 标记 todo cancelled 失败: %s", exc)
 
                 # Cancel auto_harness active run if exists
                 try:
@@ -3846,17 +3901,17 @@ class JiuWenClawDeepAdapter:
                         and self._auto_harness_service.has_active_run(request.session_id):
                         self._auto_harness_service.cancel_session_run(request.session_id)
                         logger.info(
-                            "[JiuWenClawDeepAdapter] interrupt(cancel): cancelled auto_harness run for session=%s",
+                            "[JiuWenSwarmDeepAdapter] interrupt(cancel): cancelled auto_harness run for session=%s",
                             request.session_id,
                         )
                 except Exception as exc:
                     logger.warning(
-                        "[JiuWenClawDeepAdapter] Failed to cancel auto_harness run: %s",
+                        "[JiuWenSwarmDeepAdapter] Failed to cancel auto_harness run: %s",
                         exc,
                     )
 
             logger.info(
-                "[JiuWenClawDeepAdapter] interrupt(cancel): 已停止执行 request_id=%s",
+                "[JiuWenSwarmDeepAdapter] interrupt(cancel): 已停止执行 request_id=%s",
                 request.request_id,
             )
             if new_input:
@@ -3934,12 +3989,12 @@ class JiuWenClawDeepAdapter:
                     cancelled_count += 1
             if cancelled_count > 0:
                 logger.info(
-                    "[JiuWenClawDeepAdapter] interrupt: 已取消 %d 个 TaskScheduler 运行中的任务",
+                    "[JiuWenSwarmDeepAdapter] interrupt: 已取消 %d 个 TaskScheduler 运行中的任务",
                     cancelled_count,
                 )
         except Exception as exc:
             logger.warning(
-                "[JiuWenClawDeepAdapter] _cancel_scheduler_running_tasks 失败: %s",
+                "[JiuWenSwarmDeepAdapter] _cancel_scheduler_running_tasks 失败: %s",
                 exc,
             )
 
@@ -3965,7 +4020,7 @@ class JiuWenClawDeepAdapter:
                 await self._instance.abort()
             except Exception as exc:
                 logger.warning(
-                    "[JiuWenClawDeepAdapter] abort_on_gateway_disconnect instance.abort failed: %s",
+                    "[JiuWenSwarmDeepAdapter] abort_on_gateway_disconnect instance.abort failed: %s",
                     exc,
                 )
         # instance.abort() is cooperative — it cannot interrupt in-flight LLM HTTP
@@ -4007,7 +4062,7 @@ class JiuWenClawDeepAdapter:
             if isinstance(mcc, dict) and _mcc_looks_usable(mcc):
                 return True
         except Exception as e:
-            logger.warning("[JiuWenClawDeepAdapter] _has_valid_model_config config read failed: %s", e)
+            logger.warning("[JiuWenSwarmDeepAdapter] _has_valid_model_config config read failed: %s", e)
 
         return False
 
@@ -4067,11 +4122,11 @@ class JiuWenClawDeepAdapter:
                 if read_res.code == 0:
                     content = _clean_heartbeat_content(read_res.data.content)
                 else:
-                    logger.warning("[JiuWenClawDeepAdapter] heartbeat failed to read HEARTBEAT.md")
+                    logger.warning("[JiuWenSwarmDeepAdapter] heartbeat failed to read HEARTBEAT.md")
             else:
-                logger.warning("[JiuWenClawDeepAdapter] heartbeat workspace/sys_operation not available")
+                logger.warning("[JiuWenSwarmDeepAdapter] heartbeat workspace/sys_operation not available")
         except Exception as exc:
-            logger.warning("[JiuWenClawDeepAdapter] heartbeat failed to prepare HEARTBEAT.md content: %s", exc)
+            logger.warning("[JiuWenSwarmDeepAdapter] heartbeat failed to prepare HEARTBEAT.md content: %s", exc)
 
         request.params["query"] = (
             "这是一次心跳请求任务，请根据 <heartbeat_user_task> 标签中的内容进行回复。\n"
@@ -4080,7 +4135,7 @@ class JiuWenClawDeepAdapter:
             "</heartbeat_user_task>"
         )
         logger.info(
-            "[JiuWenClawDeepAdapter] heartbeat query injected:" " request_id=%s session_id=%s",
+            "[JiuWenSwarmDeepAdapter] heartbeat query injected:" " request_id=%s session_id=%s",
             request.request_id,
             request.session_id,
         )
@@ -4094,7 +4149,7 @@ class JiuWenClawDeepAdapter:
         """
         rail = self._skill_evolution_rail
         if rail is None:
-            logger.warning("[JiuWenClaw] evolution approval failed: no SkillEvolutionRail")
+            logger.warning("[JiuWenSwarmDeepAdapter] evolution approval failed: no SkillEvolutionRail")
             return False
 
         record_ids_by_index = record_ids_from_pending_approval(rail, request_id)
@@ -4111,14 +4166,14 @@ class JiuWenClawDeepAdapter:
                 approved_record_ids,
                 legacy_fallback=True,
             )
-            logger.info("[JiuWenClaw] evolution approval accepted: request_id=%s", request_id)
+            logger.info("[JiuWenSwarmDeepAdapter] evolution approval accepted: request_id=%s", request_id)
         else:
             await reject_evolution_records(
                 rail,
                 request_id,
                 legacy_fallback=True,
             )
-            logger.info("[JiuWenClaw] evolution approval rejected: request_id=%s", request_id)
+            logger.info("[JiuWenSwarmDeepAdapter] evolution approval rejected: request_id=%s", request_id)
 
         return True
 
@@ -4150,7 +4205,7 @@ class JiuWenClawDeepAdapter:
     ) -> bool:
         rail = self.find_team_skill_rail(request_id, channel_id)
         if rail is None:
-            logger.warning("[JiuWenClaw] team skill evolve approval failed: no TeamSkillEvolutionRail")
+            logger.warning("[JiuWenSwarmDeepAdapter] team skill evolve approval failed: no TeamSkillEvolutionRail")
             return False
 
         record_ids_by_index = record_ids_from_pending_approval(rail, request_id)
@@ -4161,7 +4216,7 @@ class JiuWenClawDeepAdapter:
         )
 
         logger.info(
-            "[JiuWenClaw] team skill evolve approval: request_id=%s, answers=%s, accepted=%s",
+            "[JiuWenSwarmDeepAdapter] team skill evolve approval: request_id=%s, answers=%s, accepted=%s",
             request_id, answers, accepted,
         )
 
@@ -4173,11 +4228,11 @@ class JiuWenClawDeepAdapter:
 
                 refresh_team_shared_skill_links_across_managers(session_id)
             except Exception as exc:
-                logger.warning("[JiuWenClaw] team shared skill link refresh after approval failed: %s", exc)
-            logger.info("[JiuWenClaw] team skill evolve accepted: request_id=%s", request_id)
+                logger.warning("[JiuWenSwarmDeepAdapter] team shared skill link refresh after approval failed: %s", exc)
+            logger.info("[JiuWenSwarmDeepAdapter] team skill evolve accepted: request_id=%s", request_id)
         else:
             await reject_evolution_records(rail, request_id)
-            logger.info("[JiuWenClaw] team skill evolve rejected: request_id=%s", request_id)
+            logger.info("[JiuWenSwarmDeepAdapter] team skill evolve rejected: request_id=%s", request_id)
 
         await self._push_team_skill_evolve_resolution_status(
             request_id,
@@ -4196,7 +4251,7 @@ class JiuWenClawDeepAdapter:
     ) -> bool:
         rail = self.find_team_skill_rail(request_id, channel_id)
         if rail is None:
-            logger.warning("[JiuWenClaw] team simplify approval failed: no TeamSkillEvolutionRail")
+            logger.warning("[JiuWenSwarmDeepAdapter] team simplify approval failed: no TeamSkillEvolutionRail")
             return False
 
         accepted = answers_select_option(answers, EVOLUTION_EXECUTE_LABELS)
@@ -4208,11 +4263,11 @@ class JiuWenClawDeepAdapter:
                 if session_id:
                     refresh_team_shared_skill_links_across_managers(session_id)
             except Exception as exc:
-                logger.warning("[JiuWenClaw] team shared skill link refresh after simplify failed: %s", exc)
-            logger.info("[JiuWenClaw] team simplify accepted: request_id=%s", request_id)
+                logger.warning("[JiuWenSwarmDeepAdapter] team shared skill link refresh after simplify failed: %s", exc)
+            logger.info("[JiuWenSwarmDeepAdapter] team simplify accepted: request_id=%s", request_id)
         else:
             await rail.on_reject_simplify(request_id)
-            logger.info("[JiuWenClaw] team simplify rejected: request_id=%s", request_id)
+            logger.info("[JiuWenSwarmDeepAdapter] team simplify rejected: request_id=%s", request_id)
 
         return True
 
@@ -4280,7 +4335,7 @@ class JiuWenClawDeepAdapter:
             )
         except Exception as exc:
             logger.warning(
-                "[JiuWenClaw] team skill evolve status push failed: request_id=%s error=%s",
+                "[JiuWenSwarmDeepAdapter] team skill evolve status push failed: request_id=%s error=%s",
                 request_id,
                 exc,
             )
@@ -4380,7 +4435,7 @@ class JiuWenClawDeepAdapter:
                 auto_approve=False,
             )
         except Exception as exc:
-            logger.warning("[JiuWenClaw] evolve generate failed (skill=%s): %s", skill_name, exc)
+            logger.warning("[JiuWenSwarmDeepAdapter] evolve generate failed (skill=%s): %s", skill_name, exc)
             return {
                 "output": f"演进经验生成失败：{exc}",
                 "result_type": "error",
@@ -4440,7 +4495,7 @@ class JiuWenClawDeepAdapter:
 
     @staticmethod
     def _approval_chunk_from_event(event: Any) -> dict[str, Any] | None:
-        parsed = JiuWenClawDeepAdapter._parse_stream_chunk(event)
+        parsed = JiuWenSwarmDeepAdapter._parse_stream_chunk(event)
         if not isinstance(parsed, dict) or parsed.get("event_type") != "chat.ask_user_question":
             return None
         request_id = parsed.get("request_id")
@@ -4532,7 +4587,7 @@ class JiuWenClawDeepAdapter:
         try:
             raw_messages = list(context.get_messages())
         except Exception as exc:
-            logger.debug("[JiuWenClaw] _collect_messages_for_evolve failed: %s", exc)
+            logger.debug("[JiuWenSwarmDeepAdapter] _collect_messages_for_evolve failed: %s", exc)
             return []
 
         return SkillEvolutionRail._parse_messages(raw_messages)
@@ -4621,7 +4676,7 @@ class JiuWenClawDeepAdapter:
         try:
             simplify_result = await rail.request_simplify(skill_name, user_intent)
         except Exception as exc:
-            logger.warning("[JiuWenClaw] evolve_simplify failed: %s", exc)
+            logger.warning("[JiuWenSwarmDeepAdapter] evolve_simplify failed: %s", exc)
             return {"output": f"智能整理分析失败：{exc}", "result_type": "error"}
 
         return self._approval_response_from_simplify_result(
@@ -4652,7 +4707,7 @@ class JiuWenClawDeepAdapter:
         try:
             followup_prompt = await rail.request_rebuild(skill_name, user_intent)
         except Exception as exc:
-            logger.warning("[JiuWenClaw] evolve_rebuild failed: %s", exc)
+            logger.warning("[JiuWenSwarmDeepAdapter] evolve_rebuild failed: %s", exc)
             return {"output": f"重建分析失败：{exc}", "result_type": "error"}
 
         if not followup_prompt:
@@ -4734,7 +4789,7 @@ class JiuWenClawDeepAdapter:
         try:
             success = await rail.rollback_skill(skill_name, version)
         except Exception as exc:
-            logger.warning("[JiuWenClaw] evolve_rollback failed: %s", exc)
+            logger.warning("[JiuWenSwarmDeepAdapter] evolve_rollback failed: %s", exc)
             return {"output": f"回滚失败：{exc}", "result_type": "error"}
 
         if success:
@@ -4756,7 +4811,7 @@ class JiuWenClawDeepAdapter:
         """Unified handler for simplify governance approvals."""
         rail = self._skill_evolution_rail
         if rail is None:
-            logger.warning("[JiuWenClaw] governance approval failed: no SkillEvolutionRail")
+            logger.warning("[JiuWenSwarmDeepAdapter] governance approval failed: no SkillEvolutionRail")
             return False
 
         accept_labels = {"执行"} if kind == "simplify" else set()
@@ -4773,7 +4828,7 @@ class JiuWenClawDeepAdapter:
                 await rail.on_reject_simplify(request_id)
 
         logger.info(
-            "[JiuWenClaw] governance %s %s: request_id=%s",
+            "[JiuWenSwarmDeepAdapter] governance %s %s: request_id=%s",
             kind, "accepted" if accepted else "rejected", request_id,
         )
         return True
@@ -4797,7 +4852,8 @@ class JiuWenClawDeepAdapter:
         Returns None when the rail is (or becomes) available, or an error message string.
         """
         if mode != "agent.plan":
-            return "agent 模式下演进功能不可用。"
+            display_mode = str(mode or "当前").strip() or "当前"
+            return f"{display_mode} 模式下演进功能不可用。"
         if not self._config_cache.get("evolution", {}).get("enabled", False):
             return "演进功能未启用。"
         if self._skill_evolution_rail is None:
@@ -4935,7 +4991,7 @@ class JiuWenClawDeepAdapter:
             if ids_to_cancel:
                 await modify_tool._cancel_todos(ids_to_cancel, todos)
                 logger.info(
-                    "[JiuWenClawDeepAdapter] 已将 session %s 的未完成任务标记为 cancelled",
+                    "[JiuWenSwarmDeepAdapter] 已将 session %s 的未完成任务标记为 cancelled",
                     session_id,
                 )
 
@@ -4945,7 +5001,7 @@ class JiuWenClawDeepAdapter:
                 return self._stream_event_rail._format_todos_for_frontend(updated_todos)
             return None
         except Exception as exc:
-            logger.warning("[JiuWenClawDeepAdapter] 标记 todo cancelled 失败: %s", exc)
+            logger.warning("[JiuWenSwarmDeepAdapter] 标记 todo cancelled 失败: %s", exc)
             return None
 
     async def process_message_impl(
@@ -4961,7 +5017,7 @@ class JiuWenClawDeepAdapter:
             AgentResponse 包含执行结果
         """
         if self._instance is None:
-            raise RuntimeError("JiuWenClawDeepAdapter 未初始化，请先调用 create_instance()")
+            raise RuntimeError("JiuWenSwarmDeepAdapter 未初始化，请先调用 create_instance()")
 
         _req_model = (request.params.get("model_name") or "") if isinstance(request.params, dict) else ""
         if not self._has_valid_model_config(_req_model):
@@ -5029,6 +5085,7 @@ class JiuWenClawDeepAdapter:
                     request_metadata=request.metadata,
                     trusted_dirs=inputs.get("trusted_dirs"),
                     cwd=inputs.get("cwd"),
+                    workspace=inputs.get("workspace_dir"),
                     project_dir=inputs.get("project_dir"),
                 )
             )
@@ -5038,13 +5095,13 @@ class JiuWenClawDeepAdapter:
             result = await Runner.run_agent(agent=self._instance, inputs=inputs)
         except asyncio.CancelledError:
             logger.info(
-                "[JiuWenClawDeepAdapter] Agent 任务被取消: request_id=%s session_id=%s",
+                "[JiuWenSwarmDeepAdapter] Agent 任务被取消: request_id=%s session_id=%s",
                 request.request_id,
                 session_id,
             )
             raise
         except Exception as e:
-            logger.error("[JiuWenClawDeepAdapter] Agent 任务执行异常: %s", e)
+            logger.error("[JiuWenSwarmDeepAdapter] Agent 任务执行异常: %s", e)
             raise
         finally:
             await self._clear_prompt_attachments_for_request(session_id, request.request_id)
@@ -5077,7 +5134,7 @@ class JiuWenClawDeepAdapter:
             AgentResponseChunk 流式响应块
         """
         if self._instance is None:
-            raise RuntimeError("JiuWenClawDeepAdapter 未初始化，请先调用 create_instance()")
+            raise RuntimeError("JiuWenSwarmDeepAdapter 未初始化，请先调用 create_instance()")
 
         _req_model = (request.params.get("model_name") or "") if isinstance(request.params, dict) else ""
         if not self._has_valid_model_config(_req_model):
@@ -5256,6 +5313,7 @@ class JiuWenClawDeepAdapter:
                     request_metadata=request.metadata,
                     trusted_dirs=inputs.get("trusted_dirs"),
                     cwd=inputs.get("cwd"),
+                    workspace=inputs.get("workspace_dir"),
                     project_dir=inputs.get("project_dir"),
                 )
             )
@@ -5300,7 +5358,7 @@ class JiuWenClawDeepAdapter:
                 chunk_type = chunk.type
 
                 if chunk_type == "llm_usage":
-                    logger.info(f"[JiuWenClawDeepAdapter] llm_usage chunk: {chunk}")
+                    logger.info(f"[JiuWenSwarmDeepAdapter] llm_usage chunk: {chunk}")
                     usage_meta = (
                         chunk.payload.get("usage_metadata", {})
                         if isinstance(chunk.payload, dict)
@@ -5462,7 +5520,7 @@ class JiuWenClawDeepAdapter:
         except asyncio.CancelledError:
             stream_consumer_cancelled = True
             logger.info(
-                "[JiuWenClawDeepAdapter] 流式任务被取消: request_id=%s session_id=%s",
+                "[JiuWenSwarmDeepAdapter] 流式任务被取消: request_id=%s session_id=%s",
                 rid,
                 session_id,
             )
@@ -5475,11 +5533,15 @@ class JiuWenClawDeepAdapter:
             )
             raise
         except Exception as exc:
-            logger.exception("[JiuWenClawDeepAdapter] 流式任务异常: %s", exc)
+            logger.exception("[JiuWenSwarmDeepAdapter] 流式任务异常: %s", exc)
             yield AgentResponseChunk(
                 request_id=rid,
                 channel_id=cid,
-                payload={"event_type": "chat.error", "error": str(exc)},
+                payload={
+                    "event_type": "chat.error",
+                    "error": str(exc),
+                    "error_type": type(exc).__name__,
+                },
                 is_complete=False,
             )
         finally:
@@ -5511,7 +5573,7 @@ class JiuWenClawDeepAdapter:
             summary["total_cost"] = round(usage_accumulator["total_cost"], 6)
 
         logger.info(
-            "[JiuWenClawDeepAdapter] llm_usage summary: request_id=%s session_id=%s usage=%s",
+            "[JiuWenSwarmDeepAdapter] llm_usage summary: request_id=%s session_id=%s usage=%s",
             rid,
             session_id,
             summary,
@@ -5531,7 +5593,7 @@ class JiuWenClawDeepAdapter:
                     if raw_cw is not None:
                         context_window_tokens = int(raw_cw)
         except Exception:
-            logger.debug("[JiuWenClaw] DeepAgent.get_context_usage in usage_summary failed", exc_info=True)
+            logger.debug("[JiuWenSwarmDeepAdapter] DeepAgent.get_context_usage in usage_summary failed", exc_info=True)
 
         # 回退：DeepAgent 未返回 context_window_tokens 时，用 ContextUtils 解析模型上下文窗口上限
         if context_window_tokens is None:
@@ -5545,7 +5607,7 @@ class JiuWenClawDeepAdapter:
                 if cw_fallback > 0:
                     context_window_tokens = cw_fallback
             except Exception:
-                logger.debug("[JiuWenClaw] ContextUtils.resolve_context_max fallback failed", exc_info=True)
+                logger.debug("[JiuWenSwarmDeepAdapter] ContextUtils.resolve_context_max fallback failed", exc_info=True)
 
         if usage_accumulator["total_tokens"] > 0:
             payload: dict[str, Any] = {
@@ -5703,6 +5765,20 @@ class JiuWenClawDeepAdapter:
                                 raw_output = result_info.get("rawOutput")
                             if raw_output is not None:
                                 result_payload["raw_output"] = raw_output
+                            for key in (
+                                "status",
+                                "success",
+                                "is_error",
+                                "error",
+                                "summary",
+                                "score_status",
+                                "score_build",
+                                "direct_display",
+                                "display_format",
+                                "mermaid",
+                            ):
+                                if key in result_info:
+                                    result_payload[key] = result_info[key]
                     else:
                         result_payload = {"result": str(payload)}
                     return {
@@ -5774,6 +5850,14 @@ class JiuWenClawDeepAdapter:
 
                 if chunk_type == "chat.ask_user_question":
                     return parse_ask_user_question_payload(payload)
+
+                if chunk_type == "chat.symphony_status":
+                    if isinstance(payload, dict):
+                        return {
+                            "event_type": "chat.symphony_status",
+                            **payload,
+                        }
+                    return None
 
                 if chunk_type == "__interaction__":
                     if isinstance(payload, dict) and payload.get("interaction_type") == "activate_confirm":
@@ -5926,11 +6010,11 @@ class JiuWenClawDeepAdapter:
                     self._memory_rail = self._build_memory_rail(mode)
                 if self._memory_rail is not None:
                     await self._instance.register_rail(self._memory_rail)
-                    logger.info(f"[JiuWenClawDeepAdapter] MemoryRail registered for {mode} mode")
+                    logger.info(f"[JiuWenSwarmDeepAdapter] MemoryRail registered for {mode} mode")
             elif not builtin_on and self._memory_rail is not None:
                 await self._instance.unregister_rail(self._memory_rail)
                 self._memory_rail = None
-                logger.info(f"[JiuWenClawDeepAdapter] MemoryRail unregistered for {mode} mode")
+                logger.info(f"[JiuWenSwarmDeepAdapter] MemoryRail unregistered for {mode} mode")
 
     def _build_external_memory_rail(self):
         from jiuwenswarm.agents.harness.common.memory.external_memory_builder import (
@@ -5966,9 +6050,9 @@ class JiuWenClawDeepAdapter:
             try:
                 await self._instance.register_rail(self._external_memory_rail)
                 self._external_memory_rail_registered = True
-                logger.info("[JiuWenClawDeepAdapter] ExternalMemoryRail registered")
+                logger.info("[JiuWenSwarmDeepAdapter] ExternalMemoryRail registered")
             except Exception as exc:
-                logger.error("[JiuWenClawDeepAdapter] ExternalMemoryRail register failed: %s", exc)
+                logger.error("[JiuWenSwarmDeepAdapter] ExternalMemoryRail register failed: %s", exc)
                 self._external_memory_rail = None
         elif self._external_memory_rail is not None and self._external_memory_rail_registered:
             # Call on_session_end BEFORE unregister_rail: unregister -> uninit()
@@ -5979,13 +6063,13 @@ class JiuWenClawDeepAdapter:
                 try:
                     await provider.on_session_end()
                 except Exception as exc:
-                    logger.debug("[JiuWenClawDeepAdapter] on_session_end failed: %s", exc)
+                    logger.debug("[JiuWenSwarmDeepAdapter] on_session_end failed: %s", exc)
             try:
                 await self._instance.unregister_rail(self._external_memory_rail)
-                logger.info("[JiuWenClawDeepAdapter] ExternalMemoryRail unregistered")
+                logger.info("[JiuWenSwarmDeepAdapter] ExternalMemoryRail unregistered")
             except Exception as exc:
                 logger.warning(
-                    "[JiuWenClawDeepAdapter] ExternalMemoryRail unregister failed: %s", exc
+                    "[JiuWenSwarmDeepAdapter] ExternalMemoryRail unregister failed: %s", exc
                 )
             self._external_memory_rail = None
             self._external_memory_rail_registered = False
@@ -6159,7 +6243,7 @@ class JiuWenClawDeepAdapter:
             context_window_limit = usage.get("context_window_tokens", 0)
             occupancy_rate = usage.get("usage_percent", 0)
         except Exception as exc:
-            logger.debug("[JiuWenClaw] DeepAgent.get_context_usage failed: %s", exc)
+            logger.debug("[JiuWenSwarmDeepAdapter] DeepAgent.get_context_usage failed: %s", exc)
             from openjiuwen.core.context_engine.context.context_utils import ContextUtils
             model_name = (
                 getattr(self._model_request_config, "model_name", "") or ""
@@ -6219,7 +6303,7 @@ class JiuWenClawDeepAdapter:
                     if all_messages:
                         return all_messages[-window:]
                 except Exception as exc:
-                    logger.debug("[JiuWenClaw] _get_recent_messages from context_engine failed: %s", exc)
+                    logger.debug("[JiuWenSwarmDeepAdapter] _get_recent_messages from context_engine failed: %s", exc)
 
         # --- 回退路径：从磁盘读取 history.json ---
         # 典型场景：/resume 之后，context_engine 还未加载新 session 的上下文，
@@ -6234,7 +6318,7 @@ class JiuWenClawDeepAdapter:
             records = _read_history(history_path)
             if not records:
                 logger.debug(
-                    "[JiuWenClaw] _get_recent_messages: no history records on disk for session %s",
+                    "[JiuWenSwarmDeepAdapter] _get_recent_messages: no history records on disk for session %s",
                     session_id,
                 )
                 return []
@@ -6260,20 +6344,20 @@ class JiuWenClawDeepAdapter:
 
             if not recapworthy:
                 logger.debug(
-                    "[JiuWenClaw] _get_recent_messages: no recap-worthy records on disk for session %s",
+                    "[JiuWenSwarmDeepAdapter] _get_recent_messages: no recap-worthy records on disk for session %s",
                     session_id,
                 )
                 return []
 
             logger.info(
-                "[JiuWenClaw] _get_recent_messages: loaded %d records from disk for session %s "
+                "[JiuWenSwarmDeepAdapter] _get_recent_messages: loaded %d records from disk for session %s "
                 "(context_engine fallback)",
                 len(recapworthy),
                 session_id,
             )
             return recapworthy[-window:]
         except Exception as exc:
-            logger.debug("[JiuWenClaw] _get_recent_messages disk fallback failed: %s", exc)
+            logger.debug("[JiuWenSwarmDeepAdapter] _get_recent_messages disk fallback failed: %s", exc)
             return []
 
     async def _call_model_for_recap(
@@ -6332,7 +6416,7 @@ class JiuWenClawDeepAdapter:
     async def repair_model_response(self, prompt: str) -> str | None:
         """Run a focused repair prompt using the currently selected chat model."""
         if self._model is None:
-            logger.warning("[JiuWenClawDeepAdapter] repair skipped: no model instance available")
+            logger.warning("[JiuWenSwarmDeepAdapter] repair skipped: no model instance available")
             return None
         from openjiuwen.core.foundation.llm.schema.message import UserMessage
 
@@ -6441,7 +6525,7 @@ class JiuWenClawDeepAdapter:
                 await self._skill_evolution_rail.cleanup_background_tasks()
             except Exception as exc:
                 logger.warning(
-                    "[JiuWenClawDeepAdapter] evolution cleanup failed: request_id=%s "
+                    "[JiuWenSwarmDeepAdapter] evolution cleanup failed: request_id=%s "
                     "session_id=%s error=%s",
                     rid,
                     session_id,
@@ -6475,7 +6559,7 @@ class JiuWenClawDeepAdapter:
                     idle_for = time.monotonic() - last_event_at
                     if idle_for >= event_timeout_sec:
                         logger.warning(
-                            "[JiuWenClawDeepAdapter] evolution watcher timed out: "
+                            "[JiuWenSwarmDeepAdapter] evolution watcher timed out: "
                             "request_id=%s session_id=%s idle_for=%.1fs",
                             rid,
                             session_id,
@@ -6591,7 +6675,7 @@ class JiuWenClawDeepAdapter:
             finally:
                 raise
         except Exception as exc:
-            logger.warning("[JiuWenClawDeepAdapter] evolution watcher failed: %s", exc)
+            logger.warning("[JiuWenSwarmDeepAdapter] evolution watcher failed: %s", exc)
             try:
                 await _push_status("end", "hidden", "")
             except Exception:
@@ -6606,7 +6690,7 @@ class JiuWenClawDeepAdapter:
         try:
             task.result()
         except Exception as exc:
-            logger.warning("[JiuWenClawDeepAdapter] evolution watcher task exception: %s", exc)
+            logger.warning("[JiuWenSwarmDeepAdapter] evolution watcher task exception: %s", exc)
 
     @staticmethod
     def _is_approval_event(evt) -> bool:
@@ -6637,7 +6721,7 @@ class JiuWenClawDeepAdapter:
             )
             self._dreaming_started = orch is not None
         except Exception as exc:
-            logger.warning("[JiuWenClawDeepAdapter] start_dreaming failed: %s", exc)
+            logger.warning("[JiuWenSwarmDeepAdapter] start_dreaming failed: %s", exc)
 
     async def try_stop_dreaming(self) -> None:
         if not self._dreaming_started:
@@ -6648,7 +6732,7 @@ class JiuWenClawDeepAdapter:
             await stop_dreaming(mode=mode)
             self._dreaming_started = False
         except Exception as exc:
-            logger.warning("[JiuWenClawDeepAdapter] stop_dreaming failed: %s", exc)
+            logger.warning("[JiuWenSwarmDeepAdapter] stop_dreaming failed: %s", exc)
 
 
 def _agent_def_to_subagent_config(
@@ -6703,7 +6787,7 @@ def _load_custom_subagents(
 ) -> list[Any]:
     """从 AgentConfigService 加载自定义 agent 并转换为 SubAgentConfig 列表。
 
-    通用逻辑，同时被 JiuWenClawDeepAdapter 和 JiuWenClawCodeAdapter 使用。
+    通用逻辑，同时被 JiuWenSwarmDeepAdapter 和 JiuWenSwarmCodeAdapter 使用。
 
     Args:
         workspace_dir: 工作空间目录路径

@@ -1,6 +1,6 @@
 # OpenJiuwen Web 前端
 
-基于 React + TypeScript + Tailwind CSS 构建的 AI 编程助手 Web 界面，设计风格参考 JiuwenClaw。
+基于 React + TypeScript + Tailwind CSS 构建的 AI 编程助手 Web 界面，设计风格参考 JiuwenSwarm。
 
 ## 功能特性
 

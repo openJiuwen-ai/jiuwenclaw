@@ -777,11 +777,39 @@ def _parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def _setup_tui_path() -> None:
+    """Auto-add jiuwenswarm-tui to PATH via ~/.zshrc on macOS."""
+    if sys.platform != "darwin" or not getattr(sys, "frozen", False):
+        return
+    tui_binary = Path(sys.executable).parent / "jiuwenswarm-tui"
+    if not tui_binary.is_file():
+        return
+    # Prefer /Applications path over /Volumes (DMG mount) path
+    tui_dir = str(tui_binary.parent)
+    apps_dir = "/Applications/JiuwenSwarm.app/Contents/MacOS"
+    if Path(apps_dir).is_dir():
+        tui_dir = apps_dir
+    marker = "JiuwenSwarm.app/Contents/MacOS"
+    zshrc = Path.home() / ".zshrc"
+    try:
+        existing = zshrc.read_text(encoding="utf-8") if zshrc.exists() else ""
+        if marker in existing:
+            return
+        with open(zshrc, "a", encoding="utf-8") as f:
+            f.write(f"\n# Added by JiuwenSwarm - jiuwenswarm-tui CLI\n")
+            f.write(f'export PATH="{tui_dir}:$PATH"\n')
+        logger.info("[desktop] added TUI to PATH in ~/.zshrc")
+    except OSError as exc:
+        logger.warning("[desktop] failed to update ~/.zshrc: %s", exc)
+
+
 def main() -> None:
     args = _parse_args()
     if getattr(args, "desktop_install_update", False):
         _launch_windows_installer_helper(args.installer_path, args.app_executable, args.parent_pid)
         return
+
+    _setup_tui_path()
 
     runtime = DesktopRuntime(
         frontend_host=FRONTEND_HOST,

@@ -1,4 +1,4 @@
-// jiuwenclaw/cli/src/core/commands/builtins/auto-harness.ts
+// jiuwenswarm/cli/src/core/commands/builtins/auto-harness.ts
 
 import { addError, addInfo, parseArgs } from "../helpers.js";
 import { CommandKind, type SlashCommand, type CommandContext } from "../types.js";
@@ -584,8 +584,8 @@ const scheduleLogsCommand: SlashCommand = {
       return ["--history"].filter((f) => f.startsWith(lastPart)).map((f) => buildCompletion(f));
     }
 
-    // Step 4: If we have a task_id already, suggest --history flag (preserve task_id)
-    if (existingTaskId && !parts.includes("--history")) {
+    // Step 4: If task_id is complete, suggest --history flag
+    if (existingTaskId && hasTrailingSpace && !parts.includes("--history")) {
       return [`${existingTaskId} --history`];
     }
 
@@ -1378,7 +1378,15 @@ function formatLogSection(section: ParsedLogSection, detailed: boolean = false):
       return `${ANSI.blue}▶ ${section.content}${ANSI.reset}`;
 
     case "error":
-      return `${ANSI.red}${ANSI.bold}🔥 错误: ${section.content}${ANSI.reset}`;
+      const wrappedError = wrapText(section.content, 100);
+      const errorLines = wrappedError.split("\n");
+      const formattedErrorLines = errorLines.map((line, index) => {
+        if (index === 0) {
+          return `${ANSI.red}${ANSI.bold}🔥 错误: ${line}${ANSI.reset}`;
+        }
+        return `${ANSI.red}${ANSI.bold}        ${line}${ANSI.reset}`; // 8 spaces indent to align with "🔥 错误:"
+      });
+      return formattedErrorLines.join("\n");
 
     case "info":
       return `${ANSI.gray}  · ${section.content}${ANSI.reset}`;

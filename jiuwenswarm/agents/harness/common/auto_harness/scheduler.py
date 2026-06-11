@@ -122,12 +122,12 @@ class Scheduler:
         """Build model cache from jiuwenswarm config.yaml (reuse interface_deep logic)."""
         try:
             from jiuwenswarm.common.config import get_config, get_default_models
-            from jiuwenswarm.server.runtime.agent_adapter.interface_deep import JiuWenClawDeepAdapter
+            from jiuwenswarm.server.runtime.agent_adapter.interface_deep import JiuWenSwarmDeepAdapter
 
             config = get_config()
 
             # Use the same model building method as interface_deep
-            build_model_from_entry = JiuWenClawDeepAdapter._build_model_from_entry
+            build_model_from_entry = getattr(JiuWenSwarmDeepAdapter, '_build_model_from_entry')
 
             # Build from models.defaults list
             for entry in get_default_models(config):

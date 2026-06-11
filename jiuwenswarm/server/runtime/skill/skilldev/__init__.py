@@ -9,7 +9,7 @@
 
 核心组件：
     schema.py       — 数据模型（阶段、状态、事件、挂起点）
-    deps.py         — 最小外部依赖定义（由 JiuWenClaw 注入）
+    deps.py         — 最小外部依赖定义（由 JiuWenSwarm 注入）
     store.py        — 状态持久化（StateStore）
     workspace.py    — 工作区管理（WorkspaceProvider）
     context.py      — 阶段执行上下文（SkillDevContext）

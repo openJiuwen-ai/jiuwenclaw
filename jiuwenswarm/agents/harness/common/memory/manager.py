@@ -1,6 +1,6 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 
-"""Memory Index Manager - Core memory management for JiuWenClaw."""
+"""Memory Index Manager - Core memory management for JiuWenSwarm."""
 
 import logging
 import os

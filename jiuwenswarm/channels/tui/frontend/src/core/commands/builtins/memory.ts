@@ -195,7 +195,7 @@ async function listMemory(ctx: import("../types.js").CommandContext): Promise<vo
     const items = files.map((f) => ({
       label: f.path,
       value: f.kind,
-      description: `${f.relative_path !== f.path ? f.relative_path + " · " : ""}${formatSize(f.size)} · ${f.lines} lines · ${formatTime(f.mtime)}`,
+      description: `${f.relative_path !== f.path ? f.relative_path + " · " : ""}${formatSize(f.size)} · ${f.lines} line${f.lines <= 1 ? "" : "s"} · ${formatTime(f.mtime)}`,
     }));
 
     ctx.addItem(
@@ -288,7 +288,7 @@ async function editMemoryInteractive(
 
     const options = allFiles.map((f) => ({
       label: f.relative_path,
-      description: `${f.kind} · ${f.lines} lines${f.exists ? "" : " (new)"}`,
+      description: `${f.kind} · ${f.lines} line${f.lines <= 1 ? "" : "s"}${f.exists ? "" : " (new)"}`,
       details: f.relative_path !== f.path ? [f.path] : undefined,
     }));
 

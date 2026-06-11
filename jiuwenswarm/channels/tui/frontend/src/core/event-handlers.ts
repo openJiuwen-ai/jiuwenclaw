@@ -1104,6 +1104,30 @@ export function handleIncomingFrame(delegate: AppEventDelegate, frame: EventFram
       _handleWorktreeToolResult(delegate, payload);
       return true;
 
+    case "chat.symphony_status": {
+      const content = typeof payload.content === "string" ? payload.content.trim() : "";
+      if (!content) return true;
+      if (payload.status === "failed") {
+        appendEntry(delegate, {
+          kind: "error",
+          id: createId("symphony-status"),
+          sessionId: activeSessionId,
+          content,
+          at: new Date().toISOString(),
+        });
+      } else {
+        appendEntry(delegate, {
+          kind: "info",
+          id: createId("symphony-status"),
+          sessionId: activeSessionId,
+          content,
+          icon: "i",
+          at: new Date().toISOString(),
+        });
+      }
+      return true;
+    }
+
     case "chat.processing_status":
       delegate.setStreamingState(
         payload.is_processing === true ? StreamingState.Responding : StreamingState.Idle,

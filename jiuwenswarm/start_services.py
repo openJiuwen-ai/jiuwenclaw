@@ -1,6 +1,6 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 
-"""Launch JiuWenClaw frontend/backend services with one command.
+"""Launch JiuWenSwarm frontend/backend services with one command.
 
 Supports ``--dotenv <path>`` for multi-instance isolation.
 
@@ -554,7 +554,7 @@ def _start_named_instance(name: str, mode: str) -> int:
 def _parse_args() -> argparse.Namespace:
     """Parse CLI arguments."""
     parser = argparse.ArgumentParser(
-        description="Launch JiuWenClaw services (frontend/backend).",
+        description="Launch JiuWenSwarm services (frontend/backend).",
     )
 
     # Basic start parameter: mode (optional, default all)

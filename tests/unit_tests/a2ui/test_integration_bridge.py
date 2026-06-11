@@ -112,7 +112,7 @@ def test_get_a2ui_config_payload_defaults():
     """Config payloads should expose only user-facing A2UI Web keys."""
     payload = get_a2ui_config_payload({"a2ui": {}})
 
-    assert payload == {"a2ui_enabled": "true"}
+    assert payload == {"a2ui_enabled": "false"}
 
 
 def test_validate_a2ui_config_update_rejects_internal_keys():

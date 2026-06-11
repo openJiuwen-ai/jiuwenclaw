@@ -1,8 +1,8 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 
-"""JiuWenClaw Code Adapter — code 模式配置驱动适配器.
+"""JiuWenSwarm Code Adapter — code 模式配置驱动适配器.
 
-继承 JiuWenClawDeepAdapter，重写 create_instance() 和 rails/tools 注册方法。
+继承 JiuWenSwarmDeepAdapter，重写 create_instance() 和 rails/tools 注册方法。
 从 config.yaml::modes.code.rails/tools 读取配置列表，
 通过名字映射查找构建方法来注册。
 统一使用 create_deep_agent()，不再使用 create_code_agent()。
@@ -44,7 +44,7 @@ from openjiuwen.harness.tools.worktree import WorktreeConfig, WorktreeRail
 from openjiuwen.harness.workspace.workspace import Workspace
 
 from jiuwenswarm.server.runtime.agent_adapter.interface_deep import (
-    JiuWenClawDeepAdapter,
+    JiuWenSwarmDeepAdapter,
     _CRON_TOOL_CHANNEL_ID,
     _agent_def_to_subagent_config,
     parse_int,
@@ -62,7 +62,11 @@ from jiuwenswarm.agents.harness.common.rails import (
     StructuredAskUserRail,
 )
 from jiuwenswarm.agents.harness.common.memory.config import get_memory_mode
-from jiuwenswarm.agents.harness.common.tools import SkillToolkit
+from jiuwenswarm.agents.harness.common.tools import (
+    SkillRetrievalToolkit,
+    SkillToolkit,
+    is_skill_retrieval_enabled,
+)
 from jiuwenswarm.agents.harness.common.tools.acp_chat import acp_chat
 from jiuwenswarm.common.config import get_config
 from jiuwenswarm.common.coding_memory_paths import resolve_project_coding_memory_dir
@@ -200,6 +204,7 @@ _TOOL_BUILD_NAMES: dict[str, str] = {
     "web_paid_search": "_build_paid_search_tool",
     "user_todos": "_build_user_todos_tool",
     "skill_toolkit": "_build_skill_toolkit",
+    "skill_retrieval": "_build_skill_retrieval_toolkit",
     "acp_chat": "_build_acp_chat_tool",
 }
 
@@ -293,7 +298,7 @@ def create_coding_memory_rail(
     if not embedding_config_complete:
         embed_api_key = None
         logger.warning(
-            "[JiuwenClawCodeAdapter] CodingMemoryRail: incomplete embedding config; "
+            "[JiuwenSwarmCodeAdapter] CodingMemoryRail: incomplete embedding config; "
             "registering tools with memory fallback provider"
         )
 
@@ -332,10 +337,10 @@ _CODE_PLAN_ALLOWED_TOOLS: list[str] = [
 ]
 
 
-class JiuwenClawCodeAdapter(JiuWenClawDeepAdapter):
+class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
     """Code 模式适配器 — 配置驱动注册 rails/tools.
 
-    继承 JiuWenClawDeepAdapter，只重写：
+    继承 JiuWenSwarmDeepAdapter，只重写：
     - create_instance(): 统一使用 create_deep_agent()，不传多模态/上下文引擎参数
     - _build_agent_rails(): 固定 Rails (含 LspRail/ProjectMemoryRail/CodingMemoryRail) + 从 config.yaml 读取动态 Rails
     - _get_tool_cards(): 从 config.yaml 读取动态 Tools
@@ -347,7 +352,7 @@ class JiuwenClawCodeAdapter(JiuWenClawDeepAdapter):
     # 固定 Rails 名字集合 — 用于动态 Rails 去重
     _FIXED_RAIL_NAMES = frozenset({
         "RuntimePromptRail", "ResponsePromptRail",
-        "JiuClawStreamEventRail", "SecurityRail",
+        "JiuSwarmStreamEventRail", "SecurityRail",
         "LspRail", "ProjectMemoryRail", "PermissionInterruptRail",
         "ContextProcessorRail",
         "SysOperationRail", "CodingMemoryRail",
@@ -505,7 +510,7 @@ class JiuwenClawCodeAdapter(JiuWenClawDeepAdapter):
         self._registered_mcp_server_ids.clear()
         self._registered_mcp_servers.clear()
         await self._register_mcp_servers_from_config(config_base, tag="code")
-        logger.info("[JiuwenClawCodeAdapter] 初始化完成: agent_name=%s", self._agent_name)
+        logger.info("[JiuwenSwarmCodeAdapter] 初始化完成: agent_name=%s", self._agent_name)
 
         await self.load_user_rails()
 
@@ -564,7 +569,7 @@ class JiuwenClawCodeAdapter(JiuWenClawDeepAdapter):
         for rail_name in configured_rails:
             if rail_name in self._FIXED_RAIL_NAMES:
                 logger.info(
-                    "[JiuwenClawCodeAdapter] Rail %s already in fixed set, skipping dynamic registration",
+                    "[JiuwenSwarmCodeAdapter] Rail %s already in fixed set, skipping dynamic registration",
                     rail_name,
                 )
                 continue
@@ -572,26 +577,26 @@ class JiuwenClawCodeAdapter(JiuWenClawDeepAdapter):
             if method_name is None:
                 if rail_name == "MemoryRail":
                     logger.warning(
-                        "[JiuwenClawCodeAdapter] MemoryRail is not supported in code mode; "
+                        "[JiuwenSwarmCodeAdapter] MemoryRail is not supported in code mode; "
                         "use CodingMemoryRail instead. Skipping",
                     )
                 else:
                     logger.warning(
-                        "[JiuwenClawCodeAdapter] Unknown rail name in config: %s, skipping",
+                        "[JiuwenSwarmCodeAdapter] Unknown rail name in config: %s, skipping",
                         rail_name,
                     )
                 continue
             method = getattr(self, method_name, None)
             if method is None:
                 logger.warning(
-                    "[JiuwenClawCodeAdapter] Build method %s not found, skipping",
+                    "[JiuwenSwarmCodeAdapter] Build method %s not found, skipping",
                     method_name,
                 )
                 continue
             attr_name = f"_dynamic_{rail_name}"
             rail_infos.append(_RailBuildInfo(attr_name, method))
             logger.info(
-                "[JiuwenClawCodeAdapter] Dynamic rail %s queued from config",
+                "[JiuwenSwarmCodeAdapter] Dynamic rail %s queued from config",
                 rail_name,
             )
 
@@ -599,7 +604,7 @@ class JiuwenClawCodeAdapter(JiuWenClawDeepAdapter):
         rails_list = []
         for info in rail_infos:
             logger.info(
-                "[JiuwenClawCodeAdapter] Building rail: %s with params: %s",
+                "[JiuwenSwarmCodeAdapter] Building rail: %s with params: %s",
                 info.attr_name, info.params,
             )
             rail_instance = info.build_func(**info.params)
@@ -607,16 +612,16 @@ class JiuwenClawCodeAdapter(JiuWenClawDeepAdapter):
                 setattr(self, info.attr_name, rail_instance)
                 rails_list.append(rail_instance)
                 logger.info(
-                    "[JiuwenClawCodeAdapter] Rail %s built successfully",
+                    "[JiuwenSwarmCodeAdapter] Rail %s built successfully",
                     info.attr_name,
                 )
             else:
                 logger.warning(
-                    "[JiuwenClawCodeAdapter] Rail %s build returned None",
+                    "[JiuwenSwarmCodeAdapter] Rail %s build returned None",
                     info.attr_name,
                 )
         logger.info(
-            "[JiuwenClawCodeAdapter] Total rails built: %d, rail names: %s",
+            "[JiuwenSwarmCodeAdapter] Total rails built: %d, rail names: %s",
             len(rails_list),
             [type(r).__name__ for r in rails_list],
         )
@@ -627,11 +632,11 @@ class JiuwenClawCodeAdapter(JiuWenClawDeepAdapter):
                 user_hook_rail = UserHookRail(hooks_config)
                 rails_list.append(user_hook_rail)
                 logger.info(
-                    "[JiuwenClawCodeAdapter] UserHookRail loaded with %d event types",
+                    "[JiuwenSwarmCodeAdapter] UserHookRail loaded with %d event types",
                     len(hooks_config.events),
                 )
         except Exception as e:
-            logger.warning("[JiuwenClawCodeAdapter] Failed to load UserHookRail: %s", e)
+            logger.warning("[JiuwenSwarmCodeAdapter] Failed to load UserHookRail: %s", e)
         return rails_list
 
     # ─── Code 专属 Rail 构建 ────────────────
@@ -640,10 +645,10 @@ class JiuwenClawCodeAdapter(JiuWenClawDeepAdapter):
         """构建 SysOperationRail（FileSystemRail）."""
         try:
             fs_rail = SysOperationRail()
-            logger.info("[JiuwenClawCodeAdapter] SysOperationRail create success")
+            logger.info("[JiuwenSwarmCodeAdapter] SysOperationRail create success")
             return fs_rail
         except Exception as exc:
-            logger.warning("[JiuwenClawCodeAdapter] SysOperationRail create failed: %s", exc)
+            logger.warning("[JiuwenSwarmCodeAdapter] SysOperationRail create failed: %s", exc)
             return None
 
     def _build_agent_mode_rail(self) -> AgentModeRail | None:
@@ -657,7 +662,7 @@ class JiuwenClawCodeAdapter(JiuWenClawDeepAdapter):
                 allowed_tools=_CODE_PLAN_ALLOWED_TOOLS,
             )
         except Exception as exc:
-            logger.warning("[JiuwenClawCodeAdapter] CodeAgentModeRail create failed: %s", exc)
+            logger.warning("[JiuwenSwarmCodeAdapter] CodeAgentModeRail create failed: %s", exc)
             return None
 
     @staticmethod
@@ -666,7 +671,7 @@ class JiuwenClawCodeAdapter(JiuWenClawDeepAdapter):
         try:
             return CodeTaskPlanningRail()
         except Exception as exc:
-            logger.warning("[JiuwenClawCodeAdapter] CodeTaskPlanningRail create failed: %s", exc)
+            logger.warning("[JiuwenSwarmCodeAdapter] CodeTaskPlanningRail create failed: %s", exc)
             return None
 
     def _build_structured_ask_user_rail(self) -> StructuredAskUserRail | None:
@@ -674,7 +679,7 @@ class JiuwenClawCodeAdapter(JiuWenClawDeepAdapter):
         try:
             return StructuredAskUserRail(language=self._resolve_runtime_language())
         except Exception as exc:
-            logger.warning("[JiuwenClawCodeAdapter] StructuredAskUserRail create failed: %s", exc)
+            logger.warning("[JiuwenSwarmCodeAdapter] StructuredAskUserRail create failed: %s", exc)
             return None
 
     def _build_confirm_interrupt_rail(self, tool_names: list[str] | None = None) -> Any | None:
@@ -688,13 +693,13 @@ class JiuwenClawCodeAdapter(JiuWenClawDeepAdapter):
             filtered = [name for name in (tool_names or []) if name != "exit_plan_mode"]
             return CodeConfirmInterruptRail(tool_names=filtered or ["switch_mode"])
         except Exception as exc:
-            logger.warning("[JiuwenClawCodeAdapter] CodeConfirmInterruptRail create failed: %s", exc)
+            logger.warning("[JiuwenSwarmCodeAdapter] CodeConfirmInterruptRail create failed: %s", exc)
             return None
 
     def _build_lsp_rail_via_config(self) -> Any:
         """构建 LspRail（带 project_dir 参数）."""
         logger.info(
-            "[JiuwenClawCodeAdapter] Building LspRail with project_dir=%s",
+            "[JiuwenSwarmCodeAdapter] Building LspRail with project_dir=%s",
             self._project_dir,
         )
         return self._build_lsp_rail(workspace_dir=self._project_dir)
@@ -703,18 +708,18 @@ class JiuwenClawCodeAdapter(JiuWenClawDeepAdapter):
         """Build LspRail（code 模式专属）."""
         try:
             lsp_rail = LspRail(InitializeOptions(cwd=workspace_dir))
-            logger.info("[JiuwenClawCodeAdapter] LspRail create success")
+            logger.info("[JiuwenSwarmCodeAdapter] LspRail create success")
         except ImportError as exc:
-            logger.warning("[JiuwenClawCodeAdapter] LspRail create failed: [config_error] %s", exc)
+            logger.warning("[JiuwenSwarmCodeAdapter] LspRail create failed: [config_error] %s", exc)
             lsp_rail = None
         except FileNotFoundError as exc:
-            logger.warning("[JiuwenClawCodeAdapter] LspRail create failed: [server_start_failed] %s", exc)
+            logger.warning("[JiuwenSwarmCodeAdapter] LspRail create failed: [server_start_failed] %s", exc)
             lsp_rail = None
         except OSError as exc:
-            logger.warning("[JiuwenClawCodeAdapter] LspRail create failed: [server_start_failed] %s", exc)
+            logger.warning("[JiuwenSwarmCodeAdapter] LspRail create failed: [server_start_failed] %s", exc)
             lsp_rail = None
         except Exception as exc:
-            logger.warning("[JiuwenClawCodeAdapter] LspRail create failed: [unknown] %s", exc)
+            logger.warning("[JiuwenSwarmCodeAdapter] LspRail create failed: [unknown] %s", exc)
             lsp_rail = None
         return lsp_rail
 
@@ -725,7 +730,7 @@ class JiuwenClawCodeAdapter(JiuWenClawDeepAdapter):
         """
         # 单例保护：如果已构建，直接返回缓存实例
         if self._coding_memory_rail is not None:
-            logger.info("[JiuwenClawCodeAdapter] CodingMemoryRail reuse cached instance")
+            logger.info("[JiuwenSwarmCodeAdapter] CodingMemoryRail reuse cached instance")
             return self._coding_memory_rail
 
         try:
@@ -736,11 +741,11 @@ class JiuwenClawCodeAdapter(JiuWenClawDeepAdapter):
             )
             # 缓存实例，供 code_agent 复用
             self._coding_memory_rail = coding_memory_rail
-            logger.info("[JiuwenClawCodeAdapter] CodingMemoryRail create success")
+            logger.info("[JiuwenSwarmCodeAdapter] CodingMemoryRail create success")
             return coding_memory_rail
 
         except Exception as exc:
-            logger.warning("[JiuwenClawCodeAdapter] CodingMemoryRail create failed: %s", exc)
+            logger.warning("[JiuwenSwarmCodeAdapter] CodingMemoryRail create failed: %s", exc)
             return None
 
     def _build_project_memory_rail(self) -> ProjectMemoryRail | None:
@@ -780,7 +785,7 @@ class JiuwenClawCodeAdapter(JiuWenClawDeepAdapter):
                 additional_directories=tuple(additional_dirs),
             )
             logger.info(
-                "[JiuwenClawCodeAdapter] ProjectMemoryRail create success "
+                "[JiuwenSwarmCodeAdapter] ProjectMemoryRail create success "
                 "(workspace=%s, language=%s, additional_dirs=%d)",
                 workspace,
                 language,
@@ -789,7 +794,7 @@ class JiuwenClawCodeAdapter(JiuWenClawDeepAdapter):
             return rail
         except Exception as exc:  # noqa: BLE001
             logger.warning(
-                "[JiuwenClawCodeAdapter] ProjectMemoryRail create failed: %s", exc,
+                "[JiuwenSwarmCodeAdapter] ProjectMemoryRail create failed: %s", exc,
             )
             return None
 
@@ -806,18 +811,18 @@ class JiuwenClawCodeAdapter(JiuWenClawDeepAdapter):
         cached because mode switches do not unregister this rail.
         """
         if self._worktree_rail is not None:
-            logger.info("[JiuwenClawCodeAdapter] WorktreeRail reuse cached instance")
+            logger.info("[JiuwenSwarmCodeAdapter] WorktreeRail reuse cached instance")
             return self._worktree_rail
         try:
             rail = WorktreeRail(config=WorktreeConfig(enabled=True))
             self._worktree_rail = rail
             logger.info(
-                "[JiuwenClawCodeAdapter] WorktreeRail create success (project_dir=%s)",
+                "[JiuwenSwarmCodeAdapter] WorktreeRail create success (project_dir=%s)",
                 self._project_dir,
             )
             return rail
         except Exception as exc:  # noqa: BLE001
-            logger.warning("[JiuwenClawCodeAdapter] WorktreeRail create failed: %s", exc)
+            logger.warning("[JiuwenSwarmCodeAdapter] WorktreeRail create failed: %s", exc)
             return None
 
     # ─── 配置驱动的 Rail/Tool 构建代理 ──────────
@@ -937,7 +942,7 @@ class JiuwenClawCodeAdapter(JiuWenClawDeepAdapter):
                 if not str(os.getenv("BROWSER_DRIVER") or "").strip():
                     os.environ["BROWSER_DRIVER"] = "managed"
                     logger.info(
-                        "[JiuwenClawCodeAdapter] browser subagent enabled without BROWSER_DRIVER; "
+                        "[JiuwenSwarmCodeAdapter] browser subagent enabled without BROWSER_DRIVER; "
                         "defaulting to managed mode"
                     )
                 if not str(os.getenv("BROWSER_MANAGED_BINARY") or "").strip():
@@ -945,7 +950,7 @@ class JiuwenClawCodeAdapter(JiuWenClawDeepAdapter):
                     if chrome_path:
                         os.environ["BROWSER_MANAGED_BINARY"] = chrome_path
                         logger.info(
-                            "[JiuwenClawCodeAdapter] using browser.chrome_path for managed browser: %s",
+                            "[JiuwenSwarmCodeAdapter] using browser.chrome_path for managed browser: %s",
                             chrome_path,
                         )
                 browser_spec = build_browser_agent_config(
@@ -990,7 +995,7 @@ class JiuwenClawCodeAdapter(JiuWenClawDeepAdapter):
                 await self._instance.unregister_rail(rail)
                 setattr(self, attr, None)
                 logger.info(
-                    "[JiuwenClawCodeAdapter] %s unregistered for %s mode",
+                    "[JiuwenSwarmCodeAdapter] %s unregistered for %s mode",
                     label, mode,
                 )
 
@@ -1000,7 +1005,7 @@ class JiuwenClawCodeAdapter(JiuWenClawDeepAdapter):
             if self._subagent_rail is not None:
                 await self._instance.register_rail(self._subagent_rail)
                 logger.info(
-                    "[JiuwenClawCodeAdapter] SubagentRail (re)registered for %s",
+                    "[JiuwenSwarmCodeAdapter] SubagentRail (re)registered for %s",
                     mode,
                 )
 
@@ -1010,7 +1015,7 @@ class JiuwenClawCodeAdapter(JiuWenClawDeepAdapter):
             if self._project_memory_rail is not None:
                 await self._instance.register_rail(self._project_memory_rail)
                 logger.info(
-                    "[JiuwenClawCodeAdapter] ProjectMemoryRail (re)registered for %s",
+                    "[JiuwenSwarmCodeAdapter] ProjectMemoryRail (re)registered for %s",
                     mode,
                 )
 
@@ -1021,7 +1026,7 @@ class JiuwenClawCodeAdapter(JiuWenClawDeepAdapter):
                 # _build_coding_memory_rail 已缓存到 self._coding_memory_rail
                 await self._instance.register_rail(coding_memory_rail)
                 logger.info(
-                    "[JiuwenClawCodeAdapter] CodingMemoryRail (re)registered for %s",
+                    "[JiuwenSwarmCodeAdapter] CodingMemoryRail (re)registered for %s",
                     mode,
                 )
 
@@ -1029,20 +1034,20 @@ class JiuwenClawCodeAdapter(JiuWenClawDeepAdapter):
         """构建 CodeAgentRail，管理 /agents 创建的自定义 agent。"""
         try:
             rail = CodeAgentRail(workspace_dir=self._workspace_dir)
-            logger.info("[JiuwenClawCodeAdapter] CodeAgentRail created")
+            logger.info("[JiuwenSwarmCodeAdapter] CodeAgentRail created")
             return rail
         except Exception as exc:
-            logger.warning("[JiuwenClawCodeAdapter] CodeAgentRail create failed: %s", exc)
+            logger.warning("[JiuwenSwarmCodeAdapter] CodeAgentRail create failed: %s", exc)
             return None
 
     def _build_plan_approval_rail(self) -> PlanApprovalRail | None:
         """构建 PlanApprovalRail，管理 plan 审批生命周期。"""
         try:
             rail = PlanApprovalRail()
-            logger.info("[JiuwenClawCodeAdapter] PlanApprovalRail created")
+            logger.info("[JiuwenSwarmCodeAdapter] PlanApprovalRail created")
             return rail
         except Exception as exc:
-            logger.warning("[JiuwenClawCodeAdapter] PlanApprovalRail create failed: %s", exc)
+            logger.warning("[JiuwenSwarmCodeAdapter] PlanApprovalRail create failed: %s", exc)
             return None
 
     def _get_current_agent_rails(
@@ -1063,10 +1068,10 @@ class JiuwenClawCodeAdapter(JiuWenClawDeepAdapter):
 
     # ─── Runtime config ──────────────────────────
 
-    async def _update_runtime_config(self, runtime_config: "JiuWenClawDeepAdapter._RuntimeConfig") -> None:
+    async def _update_runtime_config(self, runtime_config: "JiuWenSwarmDeepAdapter._RuntimeConfig") -> None:
         """Code 模式 runtime config: ProjectMemoryRail 语言同步 + rail 模式切换."""
         if self._instance is None:
-            raise RuntimeError("JiuwenClawCodeAdapter 未初始化，请先调用 create_instance()")
+            raise RuntimeError("JiuwenSwarmCodeAdapter 未初始化，请先调用 create_instance()")
 
         self._seed_runtime_cwd(
             runtime_config.cwd
@@ -1158,7 +1163,7 @@ class JiuwenClawCodeAdapter(JiuWenClawDeepAdapter):
             result = self._get_tool_build_func(tool_name, agent_id)
             if result is None:
                 logger.warning(
-                    "[JiuwenClawCodeAdapter] Unknown or failed tool: %s, skipped",
+                    "[JiuwenSwarmCodeAdapter] Unknown or failed tool: %s, skipped",
                     tool_name,
                 )
                 continue
@@ -1172,7 +1177,7 @@ class JiuwenClawCodeAdapter(JiuWenClawDeepAdapter):
                     Runner.resource_mgr.add_tool(result)
                 tool_cards.append(result.card)
             logger.info(
-                "[JiuwenClawCodeAdapter] Tool %s registered from config",
+                "[JiuwenSwarmCodeAdapter] Tool %s registered from config",
                 tool_name,
             )
 
@@ -1183,7 +1188,7 @@ class JiuwenClawCodeAdapter(JiuWenClawDeepAdapter):
         method_name = _TOOL_BUILD_NAMES.get(tool_name)
         if method_name is None:
             logger.warning(
-                "[JiuwenClawCodeAdapter] Unknown tool name in config: %s, skipping",
+                "[JiuwenSwarmCodeAdapter] Unknown tool name in config: %s, skipping",
                 tool_name,
             )
             return None
@@ -1210,7 +1215,7 @@ class JiuwenClawCodeAdapter(JiuWenClawDeepAdapter):
             os.environ.get(key)
             for key in ("BOCHA_API_KEY", "PERPLEXITY_API_KEY", "SERPER_API_KEY", "JINA_API_KEY")
         ):
-            logger.info("[JiuwenClawCodeAdapter] web_paid_search skipped: no paid search API key")
+            logger.info("[JiuwenSwarmCodeAdapter] web_paid_search skipped: no paid search API key")
             return None
         tool = WebPaidSearchTool(
             language=self._resolve_runtime_language(), agent_id=agent_id
@@ -1232,7 +1237,7 @@ class JiuwenClawCodeAdapter(JiuWenClawDeepAdapter):
             tools = _get_user_todo_tools()
             return tools
         except ImportError:
-            logger.info("[JiuwenClawCodeAdapter] user_todos skipped: module not importable")
+            logger.info("[JiuwenSwarmCodeAdapter] user_todos skipped: module not importable")
             return None
 
     def _build_skill_toolkit(self, agent_id: str) -> list[Any] | None:
@@ -1240,19 +1245,35 @@ class JiuwenClawCodeAdapter(JiuWenClawDeepAdapter):
         try:
             skill_toolkit = SkillToolkit(manager=self._skill_manager)
             logger.info(
-                "[JiuwenClawCodeAdapter] SkillToolkit built: tools=%s",
+                "[JiuwenSwarmCodeAdapter] SkillToolkit built: tools=%s",
                 [t.card.name for t in skill_toolkit.get_tools()],
             )
             return skill_toolkit.get_tools()
         except Exception as exc:
-            logger.warning("[JiuwenClawCodeAdapter] skill_toolkit build failed: %s", exc)
+            logger.warning("[JiuwenSwarmCodeAdapter] skill_toolkit build failed: %s", exc)
+            return None
+
+    def _build_skill_retrieval_toolkit(self, agent_id: str) -> list[Any] | None:
+        """构建 SkillRetrievalToolkit 工具（不注册到 Runner，由 _get_tool_cards 统一注册）."""
+        if not is_skill_retrieval_enabled():
+            logger.info("[JiuwenClawCodeAdapter] SkillRetrievalToolkit skipped: disabled")
+            return None
+        try:
+            skill_retrieval_toolkit = SkillRetrievalToolkit(manager=self._skill_manager)
+            logger.info(
+                "[JiuwenClawCodeAdapter] SkillRetrievalToolkit built: tools=%s",
+                [t.card.name for t in skill_retrieval_toolkit.get_tools()],
+            )
+            return skill_retrieval_toolkit.get_tools()
+        except Exception as exc:
+            logger.warning("[JiuwenClawCodeAdapter] skill_retrieval build failed: %s", exc)
             return None
 
     def _build_acp_chat_tool(self, agent_id: str) -> Any | None:
         """Register acp_chat when at least one external ACP profile is configured."""
         acp_cfg = get_config().get("acp_agents")
         if not isinstance(acp_cfg, dict) or not acp_cfg:
-            logger.info("[JiuwenClawCodeAdapter] acp_chat skipped: no acp_agents configured")
+            logger.info("[JiuwenSwarmCodeAdapter] acp_chat skipped: no acp_agents configured")
             return None
         return acp_chat
 
@@ -1272,7 +1293,7 @@ class JiuwenClawCodeAdapter(JiuWenClawDeepAdapter):
             cfg = self._build_mcp_server_config(entry)
             if cfg is None:
                 logger.warning(
-                    "[JiuwenClawCodeAdapter] skip invalid member mcp server entry: %s",
+                    "[JiuwenSwarmCodeAdapter] skip invalid member mcp server entry: %s",
                     entry.get("name", "<unknown>"),
                 )
                 continue
@@ -1377,7 +1398,7 @@ class JiuwenClawCodeAdapter(JiuWenClawDeepAdapter):
         setattr(agent, "_jiuwenswarm_code_team_member", True)
 
         logger.info(
-            "[JiuwenClawCodeAdapter] configured team member as code profile: "
+            "[JiuwenSwarmCodeAdapter] configured team member as code profile: "
             "member=%s role=%s session=%s channel=%s tools=%d rails=%d subagents=%d mcps=%d project_dir=%s",
             member_name,
             role,
@@ -1520,9 +1541,9 @@ def configure_code_team_member_agent(
     runtime_language: str | None = None,
     force_english_runtime_prompt: bool = True,
 ) -> None:
-    """Apply JiuwenClawCodeAdapter's runtime profile to a team member DeepAgent."""
+    """Apply JiuwenSwarmCodeAdapter's runtime profile to a team member DeepAgent."""
 
-    adapter = JiuwenClawCodeAdapter()
+    adapter = JiuwenSwarmCodeAdapter()
     adapter.configure_team_member_agent(
         agent,
         parent_agent=parent_agent,

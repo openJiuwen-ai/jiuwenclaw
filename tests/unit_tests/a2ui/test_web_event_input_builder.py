@@ -33,7 +33,7 @@ def test_agent_input_builder_reads_a2ui_client_event_from_content(monkeypatch):
         params={"content": content, "mode": "agent"},
     )
 
-    inputs, _, raw_query = interface_module.JiuWenClaw().build_inputs(request)
+    inputs, _, raw_query = interface_module.JiuWenSwarm().build_inputs(request)
 
     assert raw_query == content
     assert "submit_form" in inputs["query"]
@@ -66,7 +66,7 @@ def test_agent_input_builder_uses_request_channel_id_for_a2ui(monkeypatch):
         },
     )
 
-    inputs, _, _ = interface_module.JiuWenClaw().build_inputs(request)
+    inputs, _, _ = interface_module.JiuWenSwarm().build_inputs(request)
 
     assert inputs["channel"] == "web"
     assert "submit_form" in inputs["query"]
@@ -74,9 +74,9 @@ def test_agent_input_builder_uses_request_channel_id_for_a2ui(monkeypatch):
 
 async def test_deep_adapter_slash_command_ignores_structured_query():
     """A stale client sending dict-valued query should not crash slash routing."""
-    from jiuwenswarm.server.runtime.agent_adapter.interface_deep import JiuWenClawDeepAdapter
+    from jiuwenswarm.server.runtime.agent_adapter.interface_deep import JiuWenSwarmDeepAdapter
 
-    class SlashCommandProbe(JiuWenClawDeepAdapter):
+    class SlashCommandProbe(JiuWenSwarmDeepAdapter):
         async def handle_query(self, query):
             return await self._handle_slash_command(query)
 

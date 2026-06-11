@@ -805,7 +805,7 @@ def cleanup_team_files(workspace_dir: Path) -> None:
     - Old: {workspace_dir}/agent/team.db-shm (旧版本 team SHM 文件)
 
     Args:
-        workspace_dir: JiuWenClaw 用户工作空间根目录 (~/.jiuwenswarm)
+        workspace_dir: JiuWenSwarm 用户工作空间根目录 (~/.jiuwenswarm)
     """
     agent_dir = workspace_dir / "agent"
 
@@ -1154,7 +1154,7 @@ def init_user_workspace(
     - ~/.jiuwenswarm/agent/...
 
     注意：PRINCIPLE.md、TONE.md、HEARTBEAT.md 已被 SOUL.md 和新的心跳机制替代，
-    不再由 JiuwenClaw 复制到用户工作区。
+    不再由 JiuwenSwarm 复制到用户工作区。
 
     交互式 init 会先询问语言；首次启动 app 时非交互 prepare_workspace 则沿用模板 config 中的语言。
 

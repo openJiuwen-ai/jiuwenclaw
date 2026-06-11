@@ -1,34 +1,9 @@
-@import url("https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500&display=swap");
-
-/* HarmonyOS Sans SC - 鸿蒙字体，中英文兼顾 */
-@font-face {
-  font-family: 'HarmonyOS Sans SC';
-  font-style: normal;
-  font-weight: 400;
-  font-display: swap;
-  src: url('https://cdn.jsdelivr.net/npm/@ayahub/webfont-harmony-sans-sc@1.0.0/fonts/HarmonyOS_Sans_SC_Regular.woff2') format('woff2');
-}
-@font-face {
-  font-family: 'HarmonyOS Sans SC';
-  font-style: normal;
-  font-weight: 500;
-  font-display: swap;
-  src: url('https://cdn.jsdelivr.net/npm/@ayahub/webfont-harmony-sans-sc@1.0.0/fonts/HarmonyOS_Sans_SC_Medium.woff2') format('woff2');
-}
-@font-face {
-  font-family: 'HarmonyOS Sans SC';
-  font-style: normal;
-  font-weight: 700;
-  font-display: swap;
-  src: url('https://cdn.jsdelivr.net/npm/@ayahub/webfont-harmony-sans-sc@1.0.0/fonts/HarmonyOS_Sans_SC_Bold.woff2') format('woff2');
-}
-
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
 
 /* ===========================================
-   CSS Variables - JiuwenClaw Design System
+   CSS Variables - JiuwenSwarm Design System
    =========================================== */
 
 :root {
@@ -112,10 +87,10 @@
   /* Grid */
   --grid-line: rgba(255, 255, 255, 0.04);
 
-  /* Typography - HarmonyOS Sans SC 鸿蒙字体，JetBrains Mono 等宽 */
-  --mono: "JetBrains Mono", ui-monospace, SFMono-Regular, "SF Mono", Menlo, Monaco, Consolas, monospace;
-  --font-body: "HarmonyOS Sans SC", -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
-  --font-display: "HarmonyOS Sans SC", -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+  /* Typography */
+  --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Monaco, Consolas, monospace;
+  --font-body: "Microsoft YaHei", "PingFang SC", "Segoe UI", sans-serif;
+  --font-display: "Microsoft YaHei", "PingFang SC", "Segoe UI", sans-serif;
 
   /* Shadows - Richer with subtle color */
   --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.2);
@@ -797,10 +772,6 @@ select {
   .chat-bubble.assistant {
     border-color: transparent;
     background: var(--bg-muted);
-  }
-
-  .chat-bubble.assistant.markdown {
-    padding: 0 14px;
   }
 
   :root[data-theme="light"] .chat-bubble.assistant {

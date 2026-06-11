@@ -35,7 +35,7 @@ except ImportError:
 
 # ===========================================================================
 # Inline copy of the unit under test (pure functions only)
-# Avoid importing jiuwenclaw to dodge import-time side effects
+# Avoid importing jiuwenswarm to dodge import-time side effects
 # ===========================================================================
 
 _MIN_SESSION_ROUNDS = 4

@@ -211,8 +211,8 @@
     "placeholderTeamMode": "集群模式，输入新指令会并行执行...",
     "placeholderTeamModeProcessing": "集群模式处理中，输入新指令会并行执行...",
     "placeholderVoice": "正在听取语音...",
-    "welcomeLogoAlt": "JiuwenClaw 标志",
-    "welcomeHeading": "你好，我是JiuwenClaw，很高兴认识你！",
+    "welcomeLogoAlt": "JiuwenSwarm 标志",
+    "welcomeHeading": "你好，我是JiuwenSwarm，很高兴认识你！",
     "welcomeSubtext": "我可以帮你回答问题，解决疑惑，还可以帮你完成一些任务。",
     "welcomeSuggestions": {
       "journey": "让我们开启一段新的旅程吧！",
@@ -669,6 +669,7 @@
       "memoryForbiddenEnabled": "启用",
       "memoryForbiddenDescription": "禁止记忆内容描述",
       "memoryForbiddenDescriptionPlaceholder": "例如：密码、API密钥、Secret、Token、信用卡号、身份证号、手机号等敏感信息",
+      "skillRetrievalBuildRootCategoriesPlaceholder": "留空使用内置默认分层，或填写 JSON/YAML 文件路径",
       "agentSkillsPlaceholder": "点击选择技能",
       "agentSkillsEmpty": "暂无已安装技能",
       "agentName": "名称",
@@ -687,10 +688,24 @@
       "teamMemberRoleType": "角色类型",
       "teamMemberPersona": "人设",
       "teamMemberPromptHint": "提示词",
-      "teamMemberAgentKey": "Agent Key"
+      "teamMemberAgentKey": "Agent Key",
+      "skillRetrievalEnabled": "启用技能检索",
+      "skillRetrievalBuildBranchingFactor": "树分支数",
+      "skillRetrievalBuildMaxDepth": "最大树深",
+      "skillRetrievalBuildRootCategories": "树根分层配置",
+      "skillRetrievalBuildMaxWorkers": "构建并发数",
+      "skillRetrievalBuildTimeout": "构建请求超时（秒）",
+      "skillRetrievalTopK": "检索返回数量",
+      "skillRetrievalCompactCodes": "Compact 检索",
+      "skillRetrievalFlattenTree": "扁平树检索",
+      "skillRetrievalMaxExposureDepth": "最大暴露深度",
+      "skillRetrievalMaxBranchChoices": "每层分支选择数",
+      "skillRetrievalMaxParallelBranches": "并行分支数",
+      "skillRetrievalRetrieveTimeout": "检索请求超时（秒）"
     },
     "keyHelp": {
-      "skillCreate": "建议先安装 `skill-creator` 和 `teamskill-creator`，再开启"
+      "skillCreate": "建议先安装 `skill-creator` 和 `teamskill-creator`，再开启",
+      "skillRetrievalBuildRootCategories": "可选。留空使用内置默认树分层；填写时应为包含 tree_root_categories 或 root_categories 的 JSON/YAML 文件路径。"
     },
     "hideValue": "隐藏明文",
     "showValue": "显示明文",
@@ -778,6 +793,7 @@
       "contextEngine": { "label": "上下文压缩", "hint": "控制对话上下文是否启用压缩" },
       "permissions": { "label": "工具安全护栏", "hint": "控制工具调用时的权限检查" },
       "a2ui": { "label": "A2UI", "hint": "开启或关闭生成式界面渲染与 A2UI 运行时提示词" },
+      "skillRetrieval": { "label": "Agentic技能检索", "hint": "适用于较大规模已安装技能场景下的 Agentic 技能检索" },
       "memory": { "label": "记忆系统敏感信息过滤", "hint": "配置禁止写入记忆的敏感信息类型" },
       "email": { "label": "邮箱配置", "hint": "邮件账号与令牌参数" },
       "other": { "label": "其他配置", "hint": "未归类的扩展参数" }
@@ -788,7 +804,9 @@
       "freeSearchDdg": "启用 DuckDuckGo（含 DDG via Jina）",
       "freeSearchBing": "启用 Bing",
       "enabled": "启用",
-      "kvCacheAffinity": "算力亲和（KV 释放）"
+      "kvCacheAffinity": "算力亲和（KV 释放）",
+      "skillRetrievalCompact": "启用 compact code",
+      "skillRetrievalFlat": "启用 flat tree"
     },
     "permissionsTools": {
       "title": "工具防护（permissions.tools）",
@@ -956,7 +974,8 @@
     "subtitle": "管理并安装智能体可用的技能。",
     "tabs": {
       "mySkills": "我的技能",
-      "marketplace": "技能广场"
+      "marketplace": "技能广场",
+      "skillIndex": "技能索引"
     },
     "mySkillsTabs": {
       "all": "全部",
@@ -1021,6 +1040,37 @@
     },
     "detailLoading": "加载详情中...",
     "detailError": "加载详情失败",
+    "retrieval": {
+      "title": "本地技能检索",
+      "disabled": "检索已关闭",
+      "ready": "索引就绪",
+      "stale": "索引需要更新",
+      "missing": "索引未构建",
+      "indexedCount": "已索引 {{count}} 个",
+      "enabledCount": "启用 {{count}} 个",
+      "build": "构建索引",
+      "building": "构建中...",
+      "search": "检索",
+      "searching": "检索中...",
+      "queryPlaceholder": "输入任务需求，检索已安装技能",
+      "treeTitle": "索引树",
+      "treeCount": "{{branches}} 个分支 · {{skills}} 个技能",
+      "noTree": "暂无索引树",
+      "nodeDetails": "节点详情",
+      "selectNodeHint": "请选择左侧树节点查看描述。",
+      "nodeDescription": "描述",
+      "nodeSelectWhen": "选择条件",
+      "nodeDontSelectWhen": "排除条件",
+      "nodeSourceDescription": "来源描述",
+      "nodeWorkerId": "Skill ID",
+      "nodeCategory": "分类",
+      "nodeKeywords": "关键词",
+      "nodeExamples": "示例",
+      "nodeTypes": {
+        "branch": "分支",
+        "skill": "技能"
+      }
+    },
     "evolution": {
       "closeAria": "关闭技能经验弹窗",
       "title": "技能经验：{{name}}",

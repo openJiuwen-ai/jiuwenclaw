@@ -3,26 +3,26 @@
 from __future__ import annotations
 
 
-def test_a2ui_config_defaults_enabled():
+def test_a2ui_config_defaults_disabled():
     from jiuwenswarm.server.runtime.a2ui.config import get_a2ui_config
 
     cfg = get_a2ui_config({})
 
-    assert cfg.enabled is True
+    assert cfg.enabled is False
     assert cfg.protocol_version == "0.8"
     assert cfg.stream_validation_enabled is True
     assert cfg.non_web_fallback_enabled is False
     assert cfg.dev_smoke_tools_enabled is False
 
 
-def test_a2ui_config_env_can_disable_feature(monkeypatch):
+def test_a2ui_config_env_can_enable_feature(monkeypatch):
     from jiuwenswarm.server.runtime.a2ui.config import get_a2ui_config
 
-    monkeypatch.setenv("JIUWENSWARM_A2UI_ENABLED", "false")
+    monkeypatch.setenv("JIUWENSWARM_A2UI_ENABLED", "true")
 
-    cfg = get_a2ui_config({"a2ui": {"enabled": True}})
+    cfg = get_a2ui_config({"a2ui": {"enabled": False}})
 
-    assert cfg.enabled is False
+    assert cfg.enabled is True
 
 
 def test_legacy_jiuwenclaw_env_alias_no_longer_overrides_config(monkeypatch):

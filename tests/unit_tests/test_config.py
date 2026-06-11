@@ -8,7 +8,12 @@ from pathlib import Path
 import pytest
 import yaml
 
-from jiuwenswarm.common.config import get_config_raw, replace_teams_in_config, resolve_env_vars
+from jiuwenswarm.common.config import (
+    get_config_raw,
+    migrate_config_from_template,
+    replace_teams_in_config,
+    resolve_env_vars,
+)
 
 
 class TestResolveEnvVars:
@@ -118,6 +123,51 @@ class TestConfigFunctions:
         expected_keys = {"model", "channels", "evolution", "heartbeat"}
         actual_keys = set(config.keys())
         assert len(actual_keys & expected_keys) > 0, "Config should have at least some expected keys"
+
+    @staticmethod
+    def test_migrate_config_from_template_deep_merges_symphony(
+        tmp_path: Path,
+    ):
+        template_path = tmp_path / "template.yaml"
+        user_config_path = tmp_path / "config.yaml"
+        template_path.write_text(
+            """
+preferred_language: zh
+symphony:
+  fingerprint:
+    scan:
+      max_depth:
+    extraction:
+      workers: 1
+      batch_size: 1
+      body_limit:
+    normalization:
+      workers: 1
+      batch_size: 1
+      duplicate_name_similarity_threshold: 0.86
+      max_vocab_size:
+""",
+            encoding="utf-8",
+        )
+        user_config_path.write_text(
+            """
+preferred_language: en
+symphony:
+  fingerprint:
+    extraction:
+      workers: 3
+""",
+            encoding="utf-8",
+        )
+
+        assert migrate_config_from_template(template_path, user_config_path) is True
+
+        migrated = yaml.safe_load(user_config_path.read_text(encoding="utf-8"))
+        assert migrated["preferred_language"] == "en"
+        assert migrated["symphony"]["fingerprint"]["scan"]["max_depth"] is None
+        assert migrated["symphony"]["fingerprint"]["extraction"]["workers"] == 3
+        assert migrated["symphony"]["fingerprint"]["extraction"]["batch_size"] == 1
+        assert migrated["symphony"]["fingerprint"]["normalization"]["workers"] == 1
 
 
 class TestTeamModesConfig:

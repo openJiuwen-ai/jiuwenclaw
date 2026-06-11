@@ -1,8 +1,8 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 
-"""JiuClawStreamEventRail — Stream event emission, pause checks, context fix.
+"""JiuSwarmStreamEventRail — Stream event emission, pause checks, context fix.
 
-Migrated from JiuClawReActAgent:
+Migrated from JiuSwarmReActAgent:
   - _emit_tool_call / _emit_tool_result / _emit_todo_updated / _emit_context_usage
   - _fix_incomplete_tool_context
   - Pause checkpoint logic
@@ -35,6 +35,10 @@ from openjiuwen.harness.workspace.workspace import WorkspaceNode
 from jiuwenswarm.agents.harness.common.rails.interrupt.interrupt_helpers import (
     convert_interactions_to_ask_user_question,
 )
+from jiuwenswarm.agents.harness.common.tools.symphony_status_events import (
+    begin_symphony_status_events,
+    reset_symphony_status_events,
+)
 from jiuwenswarm.common.utils import logger
 
 _TODO_TOOL_NAMES = frozenset(["todo_create", "todo_get", "todo_list", "todo_modify"])
@@ -44,6 +48,41 @@ def _structured_tool_result_payload(result: Any) -> Any | None:
     if isinstance(result, (dict, list)):
         return result
     return None
+
+
+def _symphony_direct_display_content(result: Any) -> str:
+    if not isinstance(result, dict):
+        return ""
+    if not bool(result.get("direct_display", False)):
+        return ""
+    presentation = result.get("presentation")
+    presentation_markdown = (
+        presentation.get("markdown") if isinstance(presentation, dict) else None
+    )
+    rendered = (
+        result.get("content")
+        or result.get("markdown")
+        or presentation_markdown
+    )
+    return rendered.strip() if isinstance(rendered, str) else ""
+
+
+def _copy_symphony_result_fields(
+    payload: dict[str, Any],
+    raw_output: Any,
+) -> None:
+    if not isinstance(raw_output, dict):
+        return
+    for key in (
+        "score_status",
+        "score_build",
+        "direct_display",
+        "display_format",
+        "mermaid",
+        "summary",
+    ):
+        if key in raw_output:
+            payload[key] = raw_output[key]
 
 
 def _parse_tool_call_arguments(tool_call: Any) -> dict[str, Any]:
@@ -204,7 +243,7 @@ def _infer_tool_result_error(value: Any) -> bool | None:
     return None
 
 
-class JiuClawStreamEventRail(DeepAgentRail):
+class JiuSwarmStreamEventRail(DeepAgentRail):
     """Emit frontend stream events and enforce pause/abort checkpoints.
 
     Pause/abort state is owned by this Rail (not DeepAgent) so that
@@ -241,6 +280,7 @@ class JiuClawStreamEventRail(DeepAgentRail):
         # Store cancelled tool info for interrupt response (per-session to avoid
         # cross-session leakage in concurrent collect→get→clear sequences).
         self._cancelled_tool_results: dict[str, list[dict[str, Any]]] = {}
+        self._symphony_status_tokens: dict[str, Any] = {}
 
     def init(self, agent: Any) -> None:
         self._deep_agent = agent
@@ -483,6 +523,14 @@ class JiuClawStreamEventRail(DeepAgentRail):
             tc = ctx.inputs.tool_call
             await self._emit_tool_call(session, tc)
             await self._emit_tool_update(session, tc, status="in_progress")
+            tool_name = str(getattr(tc, "name", "") or "").strip()
+            if tool_name == "symphony_compose_score":
+                token = begin_symphony_status_events(
+                    session,
+                    str(getattr(tc, "id", "") or ""),
+                )
+                if token is not None:
+                    self._symphony_status_tokens[str(getattr(tc, "id", ""))] = token
             # Track in-flight tool call for cancellation
             tc_id = getattr(tc, "id", "")
             if tc_id:
@@ -508,6 +556,11 @@ class JiuClawStreamEventRail(DeepAgentRail):
             self._inflight_tool_calls.pop(tc_id, None)
 
         await self._emit_tool_result(session, tc, ctx.inputs.tool_result)
+        await self._emit_symphony_direct_display(session, tc, ctx.inputs.tool_result)
+        if tc_id:
+            reset_symphony_status_events(
+                self._symphony_status_tokens.pop(tc_id, None)
+            )
         await self._emit_ask_user_question_if_interrupted(
             session,
             tc,
@@ -538,7 +591,7 @@ class JiuClawStreamEventRail(DeepAgentRail):
             await self._fix_incomplete_tool_context(ctx)
 
     # ------------------------------------------------------------------
-    # Private helpers (migrated from JiuClawReActAgent)
+    # Private helpers (migrated from JiuSwarmReActAgent)
     # ------------------------------------------------------------------
 
     @staticmethod
@@ -571,6 +624,7 @@ class JiuClawStreamEventRail(DeepAgentRail):
             }
             if raw_output is not None:
                 tool_result_payload["raw_output"] = raw_output
+                _copy_symphony_result_fields(tool_result_payload, raw_output)
             error_state = _infer_tool_result_error(raw_output if raw_output is not None else result)
             if error_state is not None:
                 tool_result_payload["success"] = not error_state
@@ -588,6 +642,38 @@ class JiuClawStreamEventRail(DeepAgentRail):
             )
         except Exception:
             logger.debug("tool_result emit failed", exc_info=True)
+
+    @staticmethod
+    async def _emit_symphony_direct_display(
+        session: Session,
+        tool_call: Any,
+        result: Any,
+    ) -> None:
+        tool_name = str(getattr(tool_call, "name", "") if tool_call else "").strip()
+        if tool_name != "symphony_compose_score":
+            return
+        content = _symphony_direct_display_content(result)
+        if not content:
+            return
+        payload: dict[str, Any] = {
+            "content": content,
+            "source": "symphony_compose_score",
+            "direct_display": True,
+        }
+        if isinstance(result, dict):
+            for key in ("display_format", "mermaid", "score_status", "score_build"):
+                if key in result:
+                    payload[key] = result[key]
+        try:
+            await session.write_stream(
+                OutputSchema(
+                    type="chat.final",
+                    index=0,
+                    payload=payload,
+                )
+            )
+        except Exception:
+            logger.debug("symphony direct display emit failed", exc_info=True)
 
     @staticmethod
     async def _emit_ask_user_question_if_interrupted(

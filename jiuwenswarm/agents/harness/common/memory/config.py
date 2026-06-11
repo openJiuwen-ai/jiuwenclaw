@@ -1,6 +1,6 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 
-"""Memory configuration for JiuWenClaw.
+"""Memory configuration for JiuWenSwarm.
 
 Configuration is loaded from config/config.yaml.
 Embedding API settings are in the 'embed' section.

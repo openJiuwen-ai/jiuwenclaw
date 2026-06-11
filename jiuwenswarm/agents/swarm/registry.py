@@ -61,6 +61,7 @@ from jiuwenswarm.common.config import get_config
 # Re-exported provider name constants for config_specs to reference by symbol.
 # Swarm-owned tools (each self-gated by config + whitelist-filtered).
 SKILL_TOOLKIT = _tools.SKILL_TOOLKIT
+SKILL_RETRIEVAL = _tools.SKILL_RETRIEVAL
 USER_TODOS = _tools.USER_TODOS
 VIDEO = _tools.VIDEO
 IMAGE_GEN = _tools.IMAGE_GEN
@@ -178,6 +179,7 @@ def register_swarm_providers() -> None:
 __all__ = [
     "register_swarm_providers",
     "SKILL_TOOLKIT",
+    "SKILL_RETRIEVAL",
     "USER_TODOS",
     "VIDEO",
     "IMAGE_GEN",

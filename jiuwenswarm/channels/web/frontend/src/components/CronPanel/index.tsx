@@ -619,7 +619,7 @@ export default function CronPanel({ sessionId }: CronPanelProps) {
                           >
                             <svg width="16" height="16" viewBox="0 0 40 40" xmlns="http://www.w3.org/2000/svg">
                               <circle cx="20" cy="20" r="18" fill="transparent" stroke="currentColor" strokeWidth="2" />
-                              <text x="20" y="22" fontFamily="Arial, sans-serif" fontSize="24" fill="currentColor" textAnchor="middle" dominantBaseline="middle">?</text>
+                              <text x="20" y="22" fontSize="24" fill="currentColor" textAnchor="middle" dominantBaseline="middle">?</text>
                             </svg>
                           </span>
                         </div>
@@ -766,7 +766,7 @@ export default function CronPanel({ sessionId }: CronPanelProps) {
                               >
                                 <svg width="16" height="16" viewBox="0 0 40 40" xmlns="http://www.w3.org/2000/svg">
                                   <circle cx="20" cy="20" r="18" fill="transparent" stroke="currentColor" strokeWidth="2" />
-                                  <text x="20" y="22" fontFamily="Arial, sans-serif" fontSize="24" fill="currentColor" textAnchor="middle" dominantBaseline="middle">?</text>
+                                  <text x="20" y="22" fontSize="24" fill="currentColor" textAnchor="middle" dominantBaseline="middle">?</text>
                                 </svg>
                               </span>
                             </div>

@@ -1,4 +1,4 @@
-/** 内置 slash 与 Gateway 受控指令对齐时参见仓库 `jiuwenclaw/gateway/slash_command.py`（SSOT）与 `docs/zh/CLI_COMMANDS.md`。 */
+/** 内置 slash 与 Gateway 受控指令对齐时参见仓库 `jiuwenswarm/gateway/slash_command.py`（SSOT）与 `docs/zh/CLI_COMMANDS.md`。 */
 import type { SlashCommand } from "./types.js";
 import { createBranchCommand } from "./builtins/branch.js";
 import { createClearCommand } from "./builtins/clear.js";
@@ -25,6 +25,7 @@ import { createModelCommand } from "./builtins/model.js";
 import { createMcpCommand } from "./builtins/mcp.js";
 import { createMemoryCommand } from "./builtins/memory.js";
 import { createPluginCommand } from "./builtins/plugin.js";
+import { createSymphonyCommand } from "./builtins/symphony.js";
 import { createReloadPluginsCommand } from "./builtins/reload-plugins.js";
 import { createModeCommand } from "./builtins/mode.js";
 import { createPermissionsCommand } from "./builtins/permissions.js";
@@ -88,6 +89,7 @@ export function createBuiltinCommands(): SlashCommand[] {
     createUsageCommand(),
     createMemoryCommand(),
     createPluginCommand(),
+    createSymphonyCommand(),
     createReloadPluginsCommand(),
   ];
 

@@ -133,7 +133,7 @@
 }
 
 .harness-package-panel__info-value--mono {
-  font-family: monospace;
+  font-family: var(--mono);
   font-size: 12px;
 }
 

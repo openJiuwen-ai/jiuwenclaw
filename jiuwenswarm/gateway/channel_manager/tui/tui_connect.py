@@ -213,6 +213,10 @@ CLI_FORWARD_REQ_METHODS = frozenset(
         "skills.evolution.status",
         "skills.evolution.get",
         "skills.evolution.save",
+        "symphony.build_score",
+        "symphony.score_status",
+        "symphony.graph",
+        "symphony.plan",
         "plugins.list",
         "plugins.install",
         "plugins.uninstall",
@@ -296,6 +300,10 @@ CLI_FORWARD_NO_LOCAL_HANDLER_METHODS = frozenset(
         "skills.evolution.status",
         "skills.evolution.get",
         "skills.evolution.save",
+        "symphony.build_score",
+        "symphony.score_status",
+        "symphony.graph",
+        "symphony.plan",
         "plugins.list",
         "plugins.install",
         "plugins.uninstall",
@@ -2260,8 +2268,15 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
         try:
             job = await cc.update_job(job_id, patch)
             await channel.send_response(ws, req_id, ok=True, payload={"job": job})
-        except KeyError:
-            await channel.send_response(ws, req_id, ok=False, error="job not found", code="NOT_FOUND")
+        except KeyError as exc:
+            # ZoneInfoNotFoundError is a subclass of KeyError; only treat
+            # bare "job not found" KeyError as NOT_FOUND, otherwise surface
+            # the real error message.
+            if "job not found" in str(exc):
+                await channel.send_response(ws, req_id, ok=False, error="job not found", code="NOT_FOUND")
+            else:
+                logger.warning("[cron.job.update] %s", exc)
+                await channel.send_response(ws, req_id, ok=False, error=str(exc), code="BAD_REQUEST")
         except Exception as exc:
             logger.warning("[cron.job.update] %s", exc)
             await channel.send_response(ws, req_id, ok=False, error=str(exc), code="BAD_REQUEST")

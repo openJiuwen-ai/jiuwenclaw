@@ -506,7 +506,7 @@ class DingTalkChannel(BaseChannel):
             "msgKey": "sampleMarkdown",
             "msgParam": json.dumps({
                 "text": content,
-                "title": "JiuClaw Reply",
+                "title": "JiuSwarm Reply",
             }),
         }
 
@@ -518,7 +518,7 @@ class DingTalkChannel(BaseChannel):
             "msgKey": "sampleMarkdown",
             "msgParam": json.dumps({
                 "text": content,
-                "title": "JiuClaw Reply",
+                "title": "JiuSwarm Reply",
             }),
         }
 

@@ -38,7 +38,7 @@ def _make_tool_card(name: str) -> ToolCard:
     )
 
 
-def test_filter_inheritable_ability_cards_includes_extended_claw_tools():
+def test_filter_inheritable_ability_cards_includes_extended_swarm_tools():
     main_agent = SimpleNamespace(
         ability_manager=_FakeAbilityManager(
             [

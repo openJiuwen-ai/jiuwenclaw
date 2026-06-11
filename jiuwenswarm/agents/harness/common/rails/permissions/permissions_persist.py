@@ -1,7 +1,7 @@
 """权限配置落盘（宿主侧）。
 
 openjiuwen 的 PermissionInterruptRail 在「总是允许」时会通过 ToolPermissionHost.persist_allow_rule
-把合并后的整份 permissions 配置交给宿主写盘。与此同时，JiuWenClaw 仍有 CLI/WS 的一些入口需要
+把合并后的整份 permissions 配置交给宿主写盘。与此同时，JiuWenSwarm 仍有 CLI/WS 的一些入口需要
 “记住目录/外部路径”等能力。
 
 这里集中提供这些“落盘 helper”，避免继续依赖 legacy 的 permissions 引擎实现。

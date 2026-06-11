@@ -607,7 +607,7 @@ class XiaoyiChannel(BaseChannel):
             await asyncio.sleep(20)
 
     async def _handle_raw_message(self, raw: str | bytes) -> None:
-        """处理接收到的原始消息，转换为 JiuwenClaw 内部格式."""
+        """处理接收到的原始消息，转换为 JiuwenSwarm 内部格式."""
         try:
             if isinstance(raw, bytes):
                 raw = raw.decode("utf-8")
@@ -668,7 +668,7 @@ class XiaoyiChannel(BaseChannel):
             logger.warning(f"XiaoyiChannel 未知方法: {method}")
 
     async def _handle_message_stream(self, message: dict[str, Any]) -> None:
-        """处理 message/stream 消息，转换为 JiuwenClaw Message."""
+        """处理 message/stream 消息，转换为 JiuwenSwarm Message."""
         session_id = message.get("sessionId") or message.get("params", {}).get("sessionId", "")
         task_id = message.get("params", {}).get("id", ) or ""
         user_message = message.get("params", {}).get("message", {})

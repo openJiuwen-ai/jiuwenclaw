@@ -9,7 +9,7 @@ import pytest
 
 from jiuwenswarm.server.runtime.agent_adapter import evolution_helpers
 from jiuwenswarm.server.runtime.agent_adapter import interface_deep as interface_deep_module
-from jiuwenswarm.server.runtime.agent_adapter.interface_deep import JiuWenClawDeepAdapter
+from jiuwenswarm.server.runtime.agent_adapter.interface_deep import JiuWenSwarmDeepAdapter
 
 
 class _FakeTransport:
@@ -120,7 +120,7 @@ class _FakeApprovalRail:
         self.rejected.append(request_id)
 
 
-class _TestAdapter(JiuWenClawDeepAdapter):
+class _TestAdapter(JiuWenSwarmDeepAdapter):
     @classmethod
     def build_with_rail(cls, rail: _FakeEvolutionRail) -> "_TestAdapter":
         adapter = object.__new__(cls)
@@ -457,9 +457,9 @@ async def test_normal_evolution_watcher_hides_timed_out_terminal_progress(monkey
 @pytest.mark.asyncio
 async def test_team_skill_evolve_approval_keeps_legacy_whole_request_without_record_ids(monkeypatch):
     rail = _FakeApprovalRail()
-    adapter = object.__new__(JiuWenClawDeepAdapter)
+    adapter = object.__new__(JiuWenSwarmDeepAdapter)
     monkeypatch.setattr(
-        JiuWenClawDeepAdapter,
+        JiuWenSwarmDeepAdapter,
         "find_team_skill_rail",
         staticmethod(lambda request_id, channel_id=None: rail),
     )
@@ -481,9 +481,9 @@ async def test_team_skill_evolve_approval_passes_selected_record_ids(monkeypatch
         request_id="team_skill_evolve_req1",
         record_ids=["team-rec-1", "team-rec-2", "team-rec-3"],
     )
-    adapter = object.__new__(JiuWenClawDeepAdapter)
+    adapter = object.__new__(JiuWenSwarmDeepAdapter)
     monkeypatch.setattr(
-        JiuWenClawDeepAdapter,
+        JiuWenSwarmDeepAdapter,
         "find_team_skill_rail",
         staticmethod(lambda request_id, channel_id=None: rail),
     )
@@ -511,9 +511,9 @@ async def test_team_skill_evolve_approval_passes_selected_record_ids(monkeypatch
 @pytest.mark.asyncio
 async def test_team_skill_evolve_approval_pushes_terminal_status(monkeypatch):
     _FakeTransport.pushes = []
-    adapter = object.__new__(JiuWenClawDeepAdapter)
+    adapter = object.__new__(JiuWenSwarmDeepAdapter)
     monkeypatch.setattr(
-        JiuWenClawDeepAdapter,
+        JiuWenSwarmDeepAdapter,
         "find_team_skill_rail",
         staticmethod(lambda request_id, channel_id=None: _FakeApprovalRail()),
     )

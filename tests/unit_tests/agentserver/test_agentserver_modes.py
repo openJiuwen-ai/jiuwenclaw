@@ -248,7 +248,7 @@ def test_build_inputs_keeps_stable_project_dir_and_dynamic_cwd(monkeypatch):
         },
     )
 
-    asyncio.run(interface_module.JiuWenClaw().process_message(request))
+    asyncio.run(interface_module.JiuWenSwarm().process_message(request))
 
     inputs = fake_adapter.seen_inputs
     assert inputs["project_dir"] == "/tmp/project"
@@ -276,20 +276,20 @@ def test_build_inputs_does_not_map_team_plan_approval_answers_to_interactive_inp
         },
     )
 
-    inputs, _, _ = interface_module.JiuWenClaw().build_inputs(request)
+    inputs, _, _ = interface_module.JiuWenSwarm().build_inputs(request)
 
     assert not isinstance(inputs["query"], InteractiveInput)
 
 
 def test_deep_adapter_handle_user_answer_ignores_team_plan_approval_compat(monkeypatch):
-    from jiuwenswarm.server.runtime.agent_adapter.interface_deep import JiuWenClawDeepAdapter
+    from jiuwenswarm.server.runtime.agent_adapter.interface_deep import JiuWenSwarmDeepAdapter
 
     monkeypatch.setattr(
         "jiuwenswarm.agents.harness.team.get_team_manager",
         lambda _channel_id: pytest.fail("team_plan_approval should not route via interact"),
     )
 
-    adapter = JiuWenClawDeepAdapter()
+    adapter = JiuWenSwarmDeepAdapter()
     request = AgentRequest(
         request_id="req-answer",
         channel_id="tui",
@@ -307,7 +307,7 @@ def test_deep_adapter_handle_user_answer_ignores_team_plan_approval_compat(monke
 
 
 def test_deep_adapter_routes_team_simplify_answer_by_evolution_meta(monkeypatch):
-    from jiuwenswarm.server.runtime.agent_adapter.interface_deep import JiuWenClawDeepAdapter
+    from jiuwenswarm.server.runtime.agent_adapter.interface_deep import JiuWenSwarmDeepAdapter
 
     calls: list[tuple[str, str]] = []
 
@@ -326,10 +326,10 @@ def test_deep_adapter_routes_team_simplify_answer_by_evolution_meta(monkeypatch)
         async def on_reject_simplify(self, request_id: str) -> None:
             pytest.fail("team simplify approval must not use regular SkillEvolutionRail")
 
-    adapter = JiuWenClawDeepAdapter()
+    adapter = JiuWenSwarmDeepAdapter()
     adapter._skill_evolution_rail = FailingRegularRail()  # pylint: disable=protected-access
     monkeypatch.setattr(
-        JiuWenClawDeepAdapter,
+        JiuWenSwarmDeepAdapter,
         "find_team_skill_rail",
         staticmethod(lambda request_id, channel_id=None: FakeTeamRail()),
     )
@@ -353,6 +353,152 @@ def test_deep_adapter_routes_team_simplify_answer_by_evolution_meta(monkeypatch)
 
     assert response.payload["resolved"] is True
     assert calls == [("approve_simplify", "evolve_simplify_team123")]
+
+
+def test_build_inputs_threads_workspace_dir_into_cwd(monkeypatch, tmp_path):
+    """``params.workspace_dir`` scopes a single prompt's cwd AND workspace to
+    the supplied directory and creates it on demand. Threaded into BOTH
+    ``inputs["cwd"]`` (so tools that read ``get_cwd()`` resolve relative paths
+    against it) and ``inputs["workspace_dir"]`` (so the deep adapter forwards
+    it as the workspace override on ``init_cwd``, which controls
+    ``fs_operation``'s sandbox enforcement for absolute-path writes). Used by
+    external drivers (IDE plugins, headless evaluators) that allocate a
+    per-invocation scratch dir.
+    """
+    from jiuwenswarm.server.runtime.agent_adapter import interface as interface_module
+
+    class FakeSkillManager:
+        def __init__(self, workspace_dir=None):
+            self.workspace_dir = workspace_dir
+            self.hook = None
+
+        def set_skillnet_install_complete_hook(self, hook):
+            self.hook = hook
+
+    class FakeSessionManager:
+        @staticmethod
+        def get_session_id(session_id):
+            return session_id or "default"
+
+        async def submit_and_wait(self, _session_id, task_func):
+            return await task_func()
+
+    class FakeAdapter:
+        def __init__(self):
+            self.seen_inputs = None
+            self.skill_manager = None
+
+        def set_skill_manager(self, skill_manager):
+            self.skill_manager = skill_manager
+
+        async def handle_heartbeat(self, _request):
+            return None
+
+        async def process_message_impl(self, request, inputs):
+            self.seen_inputs = inputs
+            return AgentResponse(
+                request_id=request.request_id,
+                channel_id=request.channel_id,
+                payload={"content": "ok"},
+            )
+
+    fake_adapter = FakeAdapter()
+
+    monkeypatch.setattr(interface_module, "get_config", lambda: {"preferred_language": "zh"})
+    monkeypatch.setattr(interface_module, "get_memory_mode", lambda _config: "disabled")
+    monkeypatch.setattr(interface_module, "SkillManager", FakeSkillManager)
+    monkeypatch.setattr(interface_module, "SessionManager", FakeSessionManager)
+    monkeypatch.setattr(interface_module, "append_history_record", lambda **_kwargs: None)
+    monkeypatch.setattr(interface_module, "resolve_sdk_choice", lambda: "harness")
+    monkeypatch.setattr(interface_module, "create_adapter", lambda _sdk, mode="agent": fake_adapter)
+
+    scratch = tmp_path / "scoped-run-001"  # does NOT exist yet
+    assert not scratch.exists()
+
+    request = AgentRequest(
+        request_id="req-ws",
+        channel_id="acp",
+        session_id="acp_session",
+        params={"query": "hello", "workspace_dir": str(scratch)},
+    )
+
+    asyncio.run(interface_module.JiuWenSwarm().process_message(request))
+
+    inputs = fake_adapter.seen_inputs
+    # Path is resolved (symlinks followed, absolute form) before threading.
+    resolved = str(scratch.resolve())
+    assert inputs["cwd"] == resolved, "workspace_dir must thread into inputs.cwd"
+    assert inputs["workspace_dir"] == resolved, (
+        "workspace_dir must also thread into inputs.workspace_dir so the deep "
+        "adapter forwards it as the workspace override on init_cwd"
+    )
+    assert scratch.is_dir(), "_build_inputs must mkdir the scratch dir"
+
+
+def test_build_inputs_omits_cwd_when_workspace_dir_unset(monkeypatch):
+    """When ``params.workspace_dir`` is absent or empty, ``_build_inputs``
+    does not overwrite ``inputs.cwd`` -- letting the explicit ``params.cwd``
+    (or the downstream default) win.
+    """
+    from jiuwenswarm.server.runtime.agent_adapter import interface as interface_module
+
+    class FakeSkillManager:
+        def __init__(self, workspace_dir=None):
+            self.workspace_dir = workspace_dir
+            self.hook = None
+
+        def set_skillnet_install_complete_hook(self, hook):
+            self.hook = hook
+
+    class FakeSessionManager:
+        @staticmethod
+        def get_session_id(session_id):
+            return session_id or "default"
+
+        async def submit_and_wait(self, _session_id, task_func):
+            return await task_func()
+
+    class FakeAdapter:
+        def __init__(self):
+            self.seen_inputs = None
+            self.skill_manager = None
+
+        def set_skill_manager(self, skill_manager):
+            self.skill_manager = skill_manager
+
+        async def handle_heartbeat(self, _request):
+            return None
+
+        async def process_message_impl(self, request, inputs):
+            self.seen_inputs = inputs
+            return AgentResponse(
+                request_id=request.request_id,
+                channel_id=request.channel_id,
+                payload={"content": "ok"},
+            )
+
+    fake_adapter = FakeAdapter()
+
+    monkeypatch.setattr(interface_module, "get_config", lambda: {"preferred_language": "zh"})
+    monkeypatch.setattr(interface_module, "get_memory_mode", lambda _config: "disabled")
+    monkeypatch.setattr(interface_module, "SkillManager", FakeSkillManager)
+    monkeypatch.setattr(interface_module, "SessionManager", FakeSessionManager)
+    monkeypatch.setattr(interface_module, "append_history_record", lambda **_kwargs: None)
+    monkeypatch.setattr(interface_module, "resolve_sdk_choice", lambda: "harness")
+    monkeypatch.setattr(interface_module, "create_adapter", lambda _sdk, mode="agent": fake_adapter)
+
+    request = AgentRequest(
+        request_id="req-nows",
+        channel_id="acp",
+        session_id="acp_session",
+        params={"query": "hello", "cwd": "/tmp/explicit-cwd"},  # no workspace_dir
+    )
+
+    asyncio.run(interface_module.JiuWenSwarm().process_message(request))
+
+    inputs = fake_adapter.seen_inputs
+    # params.cwd is preserved untouched
+    assert inputs["cwd"] == "/tmp/explicit-cwd"
 
 
 def test_handle_stream_accepts_team_mode_without_sub_mode(monkeypatch):

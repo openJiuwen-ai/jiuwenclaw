@@ -77,15 +77,15 @@ class SkillDevContext:
         Returns:
             配置完毕的 ReActAgent 实例（尚未执行）
 
-        待实现: 接入 openjiuwen ReActAgent 的实际构造逻辑，参考 JiuWenClaw.create_instance()
+        待实现: 接入 openjiuwen ReActAgent 的实际构造逻辑，参考 JiuWenSwarm.create_instance()
         """
         # 待实现: 实际实现
         # from openjiuwen.core.single_agent import AgentCard, ReActAgentConfig
         # from openjiuwen.core.runner import Runner
-        # from jiuwenswarm.agentserver.react_agent import JiuClawReActAgent
+        # from jiuwenswarm.agentserver.react_agent import JiuSwarmReActAgent
         #
         # agent_card = AgentCard(name=f"skilldev_{self.task_id}_{stage_name}")
-        # agent = JiuClawReActAgent(agent_card)
+        # agent = JiuSwarmReActAgent(agent_card)
         # config = ReActAgentConfig(
         #     model_name=self.deps.model_name,
         #     model_client_config=self.deps.model_client_config,

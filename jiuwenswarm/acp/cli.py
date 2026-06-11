@@ -72,7 +72,7 @@ async def _main_async() -> int:
 
 def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(message)s", stream=sys.stdout)
-    if os.environ.get("JIUWENCLAW_SKIP_DOTENV", "").strip() != "1":
+    if os.environ.get("JIUWENSWARM_SKIP_DOTENV", "").strip() != "1":
         try:
             from dotenv import load_dotenv
             from jiuwenswarm.common.utils import get_env_file

@@ -20,6 +20,28 @@ def _get_config_dir() -> "Path":
     return get_user_workspace_dir() / "config"
 
 
+def _symphony_routing_prompt() -> str:
+    try:
+        from jiuwenswarm.symphony.config import load_symphony_config
+
+        if not load_symphony_config().enabled:
+            return ""
+    except Exception:
+        return ""
+    return """
+## Symphony Routing
+
+When the user says to use skill(s) or 技能 to complete a task, you MUST call
+`symphony_compose_score` with the original user task as `query` before answering.
+Do not manually list skill names, inspect skill folders, choose a skill chain,
+or recommend skills before calling `symphony_compose_score`. After it returns, present its returned `content` or `markdown` directly to the user. If Symphony reports
+missing inputs, ask for those inputs.
+
+For ordinary tasks that do not ask to use installed skills, continue normally
+without Symphony.
+"""
+
+
 class PromptPriority(IntEnum):
     """Named prompt section priorities for general agent builder."""
 
@@ -138,6 +160,7 @@ def _identity_prompt(language: str) -> PromptSection:
     todo_dir = get_deepagent_todo_dir()
     os_type = sys.platform
     shell_env_prompt = build_shell_environment_prompt(language, os_type)
+    symphony_routing_prompt = _symphony_routing_prompt()
 
     if language == "cn":
         content = f"""你是一个私人智能体，由 JiuwenSwarm 创建。像一个有温度的人类助手一样与用户互动。
@@ -155,6 +178,7 @@ def _identity_prompt(language: str) -> PromptSection:
 | `{memory_dir}` | 持久化记忆 | 将其视为你记忆的一部分，随时查阅 |
 | `{skills_dir}` | 技能库 | 可随时翻阅、调用，不可修改 |
 | `{todo_dir}` | 待办事项 | 记录用户请求的任务，每次请求后会更新 |
+{symphony_routing_prompt}
 
 ## 配置信息
 
@@ -217,6 +241,7 @@ Everything starts from the `.jiuwenswarm` directory.
 | `{memory_dir}` | Persistent memory | Treat it as part of your memory; consult it anytime |
 | `{skills_dir}` | Skill library | Read and invoke freely; do not modify |
 | `{todo_dir}` | Todo list | Records tasks from user requests; updated after each request |
+{symphony_routing_prompt}
 
 ## Configuration
 

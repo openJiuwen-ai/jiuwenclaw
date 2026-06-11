@@ -1,6 +1,6 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 
-"""JiuWenClaw Rails for DeepAgent integration.
+"""JiuWenSwarm Rails for DeepAgent integration.
 
 注意：工具权限护栏已切换为 openjiuwen 实现；此处保留同名导出以维持兼容。
 """
@@ -14,10 +14,10 @@ from jiuwenswarm.agents.harness.team.rails.team_member_skill_toolkit_rail import
     MemberSkillToolkitRail,
 )
 from jiuwenswarm.agents.harness.common.rails.ask_user_rail import StructuredAskUserRail
-from jiuwenswarm.agents.harness.common.rails.stream_event_rail import JiuClawStreamEventRail
+from jiuwenswarm.agents.harness.common.rails.stream_event_rail import JiuSwarmStreamEventRail
 
 __all__ = [
-    "JiuClawStreamEventRail",
+    "JiuSwarmStreamEventRail",
     "PermissionInterruptRail",
     "AvatarPromptRail",
     "ProjectMemoryRail",

@@ -26,7 +26,7 @@ from jiuwenswarm.agents.harness.common.rails.response_prompt_rail import (
     ResponsePromptRail,
 )
 from jiuwenswarm.agents.harness.common.rails.stream_event_rail import (
-    JiuClawStreamEventRail,
+    JiuSwarmStreamEventRail,
 )
 
 # No-parameter swarm-owned rail type names; namespaced under "swarm.".
@@ -43,8 +43,8 @@ harness_element(
 harness_element(
     kind=ElementKind.RAIL,
     name=STREAM_EVENT,
-    description="Emits JiuClaw streaming events across the member's lifecycle.",
-    builder=JiuClawStreamEventRail,
+    description="Emits JiuSwarm streaming events across the member's lifecycle.",
+    builder=JiuSwarmStreamEventRail,
 )
 harness_element(
     kind=ElementKind.RAIL,

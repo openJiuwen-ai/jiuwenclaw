@@ -131,6 +131,8 @@ export interface AppSnapshot {
     threshold: number;
     message: string;
   }[];
+  /** 当前正在执行的命令名称，用于追踪不可中断命令。 */
+  runningCommand: string | null;
 }
 
 function formatElapsed(ms: number): string {
@@ -161,6 +163,7 @@ const DEFERRED_TRANSCRIPT_EVENTS = new Set([
   "chat.error",
   "chat.tool_call",
   "chat.tool_result",
+  "chat.symphony_status",
   "chat.interrupt_result",
   "chat.ask_user_question",
   "chat.media",
@@ -270,6 +273,8 @@ export class CliPiAppState {
   private interruptRequested = false;
   /** 当前正在执行的斜杠命令 WS 请求 ID，用于 Ctrl+C 时立即取消。 */
   private activeCommandRequestId: string | null = null;
+  /** 当前正在执行的命令名称，用于追踪不可中断命令。 */
+  private runningCommand: string | null = null;
   private lastVisibleUserRequest: VisibleUserRequest | null = null;
   /** 保存 askQuestions 之前的 streamingState，用于在对话框关闭后恢复。 */
   private streamingStateBeforeQuestion: StreamingState | null = null;
@@ -671,6 +676,7 @@ export class CliPiAppState {
       teamMessageEvents: [...this.teamMessageEvents],
       workflowRuns: this.workflowRuns.map((workflow) => ({
         ...workflow,
+        logs: workflow.logs ? [...workflow.logs] : undefined,
         phases: workflow.phases.map((phase) => ({
           ...phase,
           agents: phase.agents.map((agent) => ({
@@ -688,6 +694,7 @@ export class CliPiAppState {
       sessionTitle: this.sessionTitle,
       statusLineText: this.statusLineText,
       memoryWarnings: [...this.memoryWarnings],
+      runningCommand: this.runningCommand,
     };
   }
 
@@ -716,6 +723,12 @@ export class CliPiAppState {
   /** Clear local interrupt flag (called after handling interrupt) */
   clearInterruptRequested(): void {
     this.interruptRequested = false;
+  }
+
+  /** Set the currently running command name (for tracking uninterruptible commands) */
+  setRunningCommand(name: string | null): void {
+    this.runningCommand = name;
+    this.emitChange();
   }
 
   /** Check if there's a server task running (for deciding whether to send chat.interrupt) */
@@ -792,6 +805,7 @@ export class CliPiAppState {
         // Use cancellableWork which covers all stages: processing, running tools, subtasks, team working
         return snapshot.cancellableWork;
       },
+      setRunningCommand: (name: string | null) => this.setRunningCommand(name),
     };
   }
 
