@@ -86,11 +86,18 @@ def _build_pipeline_from_config(config: dict) -> object:
             else:
                 writers.append(cls())
 
+    # Limits from config
+    limits = pipeline_cfg.get("limits", {})
+    max_proposals = limits.get("max_proposals_per_batch", 3)
+    max_behavior = limits.get("max_behavior_proposals", 2)
+
     return EvolutionPipeline(
         generators=generators,
         policies=policies,
         writers=writers,
         store=store,
+        max_proposals=max_proposals,
+        max_behavior_proposals=max_behavior,
     )
 
 

@@ -22,7 +22,10 @@ from jiuwenswarm.evolve.models import (
 
 logger = logging.getLogger(__name__)
 
-MAX_BEHAVIOR_PROPOSALS = 3  # Per batch limit for Skill/Memory proposals
+# Default limits (overridable via config evolve.pipeline.limits)
+DEFAULT_MAX_PROPOSALS = 3
+DEFAULT_MAX_BEHAVIOR_PROPOSALS = 2
+DEFAULT_MAX_TRACES = 10
 
 
 @dataclass
@@ -65,11 +68,17 @@ class EvolutionPipeline:
         policies: list[object],
         writers: list[object],
         store: object | None = None,
+        max_proposals: int = DEFAULT_MAX_PROPOSALS,
+        max_behavior_proposals: int = DEFAULT_MAX_BEHAVIOR_PROPOSALS,
+        max_traces: int = DEFAULT_MAX_TRACES,
     ) -> None:
         self._generators = generators
         self._policies = policies
         self._writers = writers
         self._store = store
+        self._max_proposals = max_proposals
+        self._max_behavior = max_behavior_proposals
+        self._max_traces = max_traces
 
     # ------------------------------------------------------------------
     # Public API
@@ -224,25 +233,48 @@ class EvolutionPipeline:
             if any(s.value == "active" for s in suggestions):
                 prop.state = ProposalState.ACTIVE
 
-    @staticmethod
-    def _enforce_limit(proposals: list[Proposal]) -> list[Proposal]:
+    def _enforce_limit(self, proposals: list[Proposal]) -> list[Proposal]:
         """Enforce max Behavior Proposals per batch.
 
-        Behavior Proposals = Skill or Memory type.
-        Keeps the highest-scored ones (assuming scores were set in metadata).
+        Behavior Proposals = Skill or Memory type (affect next execution).
+        Data Proposals = Training type (do NOT affect next execution).
+
+        Behavior proposals beyond ``_max_behavior`` are deferred to
+        CANDIDATE state. Total proposals beyond ``_max_proposals`` are
+        also deferred. Training proposals are NOT counted against the
+        behavior limit.
         """
         behavior = [p for p in proposals if p.target_type.value in ("skill", "memory")]
-        if len(behavior) <= MAX_BEHAVIOR_PROPOSALS:
-            return proposals
+        # Total cap: keep highest-priority proposals
+        if len(proposals) > self._max_proposals:
+            # Sort: active first, then by score
+            proposals.sort(
+                key=lambda p: (
+                    0 if p.state == ProposalState.ACTIVE else 1,
+                    -float(p.metadata.get("max_score", 0)),
+                )
+            )
+            for p in proposals[self._max_proposals:]:
+                p.state = ProposalState.CANDIDATE
+                logger.info(
+                    "Total limit (%d): %s deferred to CANDIDATE",
+                    self._max_proposals, p.proposal_id,
+                )
 
-        # Sort by some priority — active first, then candidate
-        behavior.sort(
-            key=lambda p: 0 if p.state == ProposalState.ACTIVE else 1
-        )
-        to_reject = behavior[MAX_BEHAVIOR_PROPOSALS:]
-        for p in to_reject:
-            p.state = ProposalState.CANDIDATE  # Remains as candidate for future
-            logger.info("Behavior limit: %s deferred to CANDIDATE", p.proposal_id)
+        # Behavior-specific cap
+        if len(behavior) > self._max_behavior:
+            behavior.sort(
+                key=lambda p: (
+                    0 if p.state == ProposalState.ACTIVE else 1,
+                    -float(p.metadata.get("max_score", 0)),
+                )
+            )
+            for p in behavior[self._max_behavior:]:
+                p.state = ProposalState.CANDIDATE
+                logger.info(
+                    "Behavior limit (%d): %s deferred to CANDIDATE",
+                    self._max_behavior, p.proposal_id,
+                )
 
         return proposals
 

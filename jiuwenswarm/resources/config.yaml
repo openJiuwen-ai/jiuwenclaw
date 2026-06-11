@@ -366,13 +366,16 @@ evolve:
       - skill_writer
       - memory_writer
       - training_writer
+    limits:
+      max_proposals_per_batch: 3        # 每批最多 Proposal 数（含 Behavior + Data）
+      max_behavior_proposals: 2         # 每批最多 Behavior Proposal（Skill/Memory，影响下一轮执行）
+      max_traces_per_batch: 10          # 每批最多 trace 数
   trigger:
     periodic:
       interval_seconds: 3600        # 周期性触发间隔（秒）
       enabled: false                # 周期性触发开关（需同时 evolve.enabled: true）
     sampler:
       strategy: latest_n            # latest_n | time_window
-      max_traces_per_batch: 20      # 每批最多 trace 数
   storage:
     sqlite_path: "evolution.db"     # SQLite 路径（相对于 data_dir）
     file_path: "evolution"          # 文件系统路径（相对于 workspace）

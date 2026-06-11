@@ -199,8 +199,8 @@ async def _run(host: str, port: int) -> None:
             # Build pipeline from config
             _store = create_evolution_store(_config)
             _periodic_cfg = _evolve_cfg["trigger"]["periodic"]
-            _sampler_cfg = _evolve_cfg.get("trigger", {}).get("sampler", {})
-            _max_traces = _sampler_cfg.get("max_traces_per_batch", 20)
+            _limits = _evolve_cfg.get("pipeline", {}).get("limits", {})
+            _max_traces = _limits.get("max_traces_per_batch", 10)
 
             _sampler = LatestNSampler(
                 trace_reader=_store._sqlite,
