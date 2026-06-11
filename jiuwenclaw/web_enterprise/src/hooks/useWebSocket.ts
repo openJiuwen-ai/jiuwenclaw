@@ -714,6 +714,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
         if (!shouldHandleSessionEvent(payload)) return;
         const files = (payload.files ?? []) as FileDownloadItem[];
         if (!files.length) return;
+        console.log('[ws][chat.file] received files:', files.map(f => ({ name: f.name, size: f.size, mime_type: f.mime_type })));
         addFileItems(files);
       }),
       webClient.on('chat.tool_call', ({ payload }) => {

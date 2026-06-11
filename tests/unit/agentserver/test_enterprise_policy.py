@@ -649,4 +649,4 @@ async def test_load_service_config_returns_resolved_service_and_agent_id(
     assert bob_loaded is not None
     assert bob_loaded.service_id == "g_demo_sales::bot_main"
     assert bob_loaded.agent_id is None
-    assert bob_loaded.send_file_allowed is False
+    assert bob_loaded.send_file_allowed is True

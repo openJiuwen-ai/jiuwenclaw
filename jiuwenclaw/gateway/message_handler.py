@@ -2658,59 +2658,13 @@ class MessageHandler(ABC):
         """
         import aiohttp
 
-        # 获取 Web Server URL，优先级：
-        # 1. K8s 环境变量 JIUWENCLAW_WEB_NODEPORT_SERVICE_HOST/PORT (自动发现，推荐)
-        # 2. 环境变量 JIUWENCLAW_WEB_SERVER_URL (显式指定)
-        # 3. 配置文件 web_server 段
-        # 4. 默认值 http://localhost:5173
-        
-        web_server_url = ""
-        
-        # 优先尝试从 K8s 环境变量自动构造
-        k8s_web_host = os.getenv("JIUWENCLAW_WEB_NODEPORT_SERVICE_HOST", "")
-        k8s_web_port = os.getenv("JIUWENCLAW_WEB_NODEPORT_SERVICE_PORT", "")
-        
-        if k8s_web_host and k8s_web_port:
-            web_server_url = f"http://{k8s_web_host}:{k8s_web_port}"
-            logger.debug(
-                "[MessageHandler] 从 K8s 环境变量获取 Web Server URL: %s",
-                web_server_url,
-            )
-        
-        if not web_server_url:
-            # 其次尝试显式指定的环境变量
-            web_server_url = os.getenv("JIUWENCLAW_WEB_SERVER_URL", "")
-            if web_server_url:
-                logger.debug(
-                    "[MessageHandler] 从环境变量 JIUWENCLAW_WEB_SERVER_URL 获取 Web Server URL: %s",
-                    web_server_url,
-                )
-        
-        if not web_server_url:
-            # 尝试从配置文件读取
-            try:
-                from jiuwenclaw.config import get_config_raw
-                cfg = get_config_raw()
-                web_cfg = cfg.get("web_server", {})
-                if web_cfg.get("enabled", False):
-                    host = web_cfg.get("host", "localhost")
-                    port = web_cfg.get("port", 5173)
-                    protocol = web_cfg.get("protocol", "http")
-                    web_server_url = f"{protocol}://{host}:{port}"
-                    logger.debug(
-                        "[MessageHandler] 从配置文件获取 Web Server URL: %s",
-                        web_server_url,
-                    )
-            except Exception as e:
-                logger.debug("[MessageHandler] 读取 web_server 配置失败: %s", e)
-        
-        # 如果仍然没有配置，使用默认值
-        if not web_server_url:
-            web_server_url = "http://localhost:5173"
-            logger.warning(
-                "[MessageHandler] 未配置 Web Server URL，使用默认值: %s",
-                web_server_url,
-            )
+        # 在 K8s 同一集群中，Service 名称可直接通过 DNS 解析
+        # 格式：<service-name>（同 namespace）
+        web_server_url = "http://jiuwenclaw-web-nodeport:5173"
+        logger.warning(
+            "[MessageHandler] 使用默认 K8s Service URL: %s",
+            web_server_url,
+        )
         
         push_endpoint = f"{web_server_url}/file-api/push"
         

@@ -241,7 +241,7 @@ async def load_effective_enterprise_config(
             "agent_id",
             ctx,
         )
-    send_file_allowed = bool((match.matched_agent or {}).get("send_file_allowed", False))
+    send_file_allowed = bool((match.matched_agent or {}).get("send_file_allowed", True))
 
     result = EffectiveEnterpriseConfig(
         routing=ctx,
