@@ -182,6 +182,7 @@ from jiuwenswarm.agents.harness.common.tools.multimodal_config import (
     apply_video_model_config_from_yaml,
     apply_vision_model_config_from_yaml,
     dedicated_multimodal_model_configured,
+    complete_multimodal_model_configured,
 )
 from jiuwenswarm.agents.harness.common.tools.video_tools import video_understanding
 from jiuwenswarm.agents.harness.common.tools.image_tools import generate_image
@@ -1397,10 +1398,10 @@ class JiuWenClawDeepAdapter:
         config_base: dict[str, Any],
     ) -> AudioModelConfig | None:
         """Build DeepAgent audio config from service config/env mapping."""
-        if not dedicated_multimodal_model_configured(config_base, "audio"):
+        if not complete_multimodal_model_configured(config_base, "audio"):
             logger.info(
-                "[JiuWenClawDeepAdapter] skip full audio LLM config: models.audio has no "
-                "dedicated api_key in config.yaml"
+                "[JiuWenClawDeepAdapter] audio tools skipped: models.audio requires "
+                "api_key, api_base, and model_name in config.yaml"
             )
             return None
         apply_audio_model_config_from_yaml(config_base)
@@ -1446,13 +1447,16 @@ class JiuWenClawDeepAdapter:
     ) -> bool:
         """Build DeepAgent video config from service config/env mapping."""
         apply_video_model_config_from_yaml(config_base)
-        if not dedicated_multimodal_model_configured(config_base, "video"):
+        if not complete_multimodal_model_configured(config_base, "video"):
             logger.info(
-                "[JiuWenClawDeepAdapter] skip video_understanding: models.video has no "
-                "dedicated api_key in config.yaml"
+                "[JiuWenClawDeepAdapter] skip video_understanding: models.video requires "
+                "api_key, api_base, and model_name in config.yaml"
             )
             return False
-        if not os.getenv("VIDEO_API_KEY"):
+        video_api_key = str(os.getenv("VIDEO_API_KEY", "")).strip()
+        video_api_base = str(os.getenv("VIDEO_API_BASE", "")).strip()
+        video_model_name = str(os.getenv("VIDEO_MODEL_NAME", "")).strip()
+        if not video_api_key or not video_api_base or not video_model_name:
             logger.info("[JiuWenClawDeepAdapter] video tools skipped: incomplete config")
             return False
         return True
@@ -1469,37 +1473,18 @@ class JiuWenClawDeepAdapter:
         return True
 
     def _iter_runtime_audio_tools(self, agent_id: str | None) -> list[Any]:
-        """可注册的音频工具：须先在 config 中为 ``models.audio`` 配置独立 ``api_key``。
-
-        与 vision / video 一致，无该 key 时不挂载任何音频工具（含 ``audio_metadata``）。
-        已配置 key 且 ``_audio_model_config`` 完整时注册全部 harness 音频工具；否则仅保留
-        ``audio_metadata``（ACRCloud，仍依赖 ``ACR_*`` 环境变量在运行时识别曲库）。
-        """
-        config_base = get_config()
-        if not dedicated_multimodal_model_configured(config_base, "audio"):
-            logger.info(
-                "[JiuWenClawDeepAdapter] skip all audio tools (incl. audio_metadata): "
-                "models.audio 未配置独立 api_key"
-            )
-            return []
-        lang = self._resolve_runtime_language()
-        cfg = self._audio_model_config if self._audio_model_config else None
+        """Return metadata-only audio tools unless a complete audio model is configured."""
+        cfg = self._audio_model_config or AudioModelConfig()
         tools = list(
             create_audio_tools(
-                language=lang,
+                language=self._resolve_runtime_language(),
                 audio_model_config=cfg,
                 agent_id=agent_id,
             )
         )
-        if self._audio_model_config:
+        if self._audio_model_config is not None:
             return tools
-        filtered = [t for t in tools if t.card.name == "audio_metadata"]
-        if len(tools) > len(filtered):
-            logger.info(
-                "[JiuWenClawDeepAdapter] skip audio_transcription & audio_question_answering: "
-                "incomplete audio LLM config (metadata only)"
-            )
-        return filtered
+        return [tool for tool in tools if tool.card.name == "audio_metadata"]
 
     def _refresh_multimodal_configs(
         self,
@@ -1514,7 +1499,7 @@ class JiuWenClawDeepAdapter:
         for tool in self._vision_tools:
             tool.vision_model_config = self._vision_model_config
         for tool in self._audio_tools:
-            tool.audio_model_config = self._audio_model_config
+            tool.audio_model_config = self._audio_model_config or AudioModelConfig()
 
     def _sync_tool_group(
         self,
@@ -1635,11 +1620,19 @@ class JiuWenClawDeepAdapter:
             warn_label="vision tools",
         )
 
+        desired_audio_tools = self._iter_runtime_audio_tools(agent_id)
+        if self._audio_tools_registered:
+            current_names = {tool.card.name for tool in self._audio_tools}
+            desired_names = {tool.card.name for tool in desired_audio_tools}
+            if current_names != desired_names:
+                self._remove_registered_tools(self._audio_tools)
+                self._audio_tools = []
+                self._audio_tools_registered = False
         self._audio_tools, self._audio_tools_registered = self._sync_tool_group(
             current_tools=self._audio_tools,
             registered=self._audio_tools_registered,
-            enabled=True,
-            create_fn=lambda: self._iter_runtime_audio_tools(agent_id),
+            enabled=bool(desired_audio_tools),
+            create_fn=lambda: desired_audio_tools,
             warn_label="audio tools",
         )
 

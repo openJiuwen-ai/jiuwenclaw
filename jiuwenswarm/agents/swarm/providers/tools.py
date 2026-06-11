@@ -42,6 +42,7 @@ from jiuwenswarm.agents.harness.common.tools.multimodal_config import (
     apply_video_model_config_from_yaml,
     apply_vision_model_config_from_yaml,
     dedicated_multimodal_model_configured,
+    complete_multimodal_model_configured,
 )
 from jiuwenswarm.agents.harness.common.tools.skill_toolkits import SkillToolkit
 from jiuwenswarm.agents.harness.common.tools.user_todo_tool import get_decorated_tools
@@ -189,17 +190,13 @@ def vision_model_config_params(config: dict[str, Any]) -> dict[str, Any]:
 
 
 def audio_dedicated_configured(config: dict[str, Any]) -> bool:
-    """Return whether a dedicated audio model is configured."""
-    return dedicated_multimodal_model_configured(config, "audio")
+    """Return whether a complete dedicated audio model is configured."""
+    return complete_multimodal_model_configured(config, "audio")
 
 
 def audio_model_config_params(config: dict[str, Any]) -> dict[str, Any]:
-    """Return ``AudioModelConfig`` constructor kwargs, or {} when incomplete.
-
-    Empty result with a dedicated key present means the core ``audio`` element
-    keeps only ``audio_metadata`` (the degraded fallback).
-    """
-    if not dedicated_multimodal_model_configured(config, "audio"):
+    """Return ``AudioModelConfig`` constructor kwargs, or {} when incomplete."""
+    if not complete_multimodal_model_configured(config, "audio"):
         return {}
     apply_audio_model_config_from_yaml(config)
     api_key = str(os.getenv("AUDIO_API_KEY", "")).strip()
@@ -267,12 +264,15 @@ def _build_user_todo_tools() -> list[Any]:
 
 
 def _build_video_tools(ctx: SwarmBuildContext) -> list[Any]:
-    """Build the video understanding tool when ``models.video`` is configured."""
+    """Build the video understanding tool when ``models.video`` is complete."""
     config = ctx.config or {}
     apply_video_model_config_from_yaml(config)
-    if not dedicated_multimodal_model_configured(config, "video"):
+    if not complete_multimodal_model_configured(config, "video"):
         return []
-    if not os.getenv("VIDEO_API_KEY"):
+    video_api_key = str(os.getenv("VIDEO_API_KEY", "")).strip()
+    video_api_base = str(os.getenv("VIDEO_API_BASE", "")).strip()
+    video_model_name = str(os.getenv("VIDEO_MODEL_NAME", "")).strip()
+    if not video_api_key or not video_api_base or not video_model_name:
         return []
     return _mark_stateless([video_understanding])
 

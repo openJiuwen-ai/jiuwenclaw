@@ -571,12 +571,14 @@ def test_video_tool_gated_by_config(monkeypatch: pytest.MonkeyPatch) -> None:
     # Gate closed: empty config has no dedicated video model.
     assert tools._build_video_tools(ctx) == []
 
-    # Gate open: dedicated key reported + VIDEO_API_KEY present.
+    # Gate open: complete config reported + VIDEO_API_KEY present.
     monkeypatch.setattr(tools, "apply_video_model_config_from_yaml", lambda cfg: None)
     monkeypatch.setattr(
-        tools, "dedicated_multimodal_model_configured", lambda cfg, kind: True
+        tools, "complete_multimodal_model_configured", lambda cfg, kind: True
     )
     monkeypatch.setenv("VIDEO_API_KEY", "k")
+    monkeypatch.setenv("VIDEO_API_BASE", "https://video.example/v1")
+    monkeypatch.setenv("VIDEO_MODEL_NAME", "video-model")
     built = tools._build_video_tools(ctx)
     assert [tool.card.name for tool in built] == ["video_understanding"]
 

@@ -88,6 +88,21 @@ def dedicated_multimodal_model_configured(
     return bool(api_key)
 
 
+def complete_multimodal_model_configured(
+    config_base: dict[str, Any] | None, model_type: str
+) -> bool:
+    """Whether `models.{model_type}` has api key, base URL, and model name."""
+    if model_type not in ("audio", "vision", "video"):
+        return False
+    if not isinstance(config_base, dict):
+        return False
+    mc = _get_model_config(config_base, model_type)
+    api_key = str(mc.get("api_key") or "").strip()
+    api_base = str(mc.get("api_base") or mc.get("base_url") or "").strip()
+    model_name = str(mc.get("model_name") or mc.get("model") or "").strip()
+    return bool(api_key and api_base and model_name)
+
+
 def _get_embed_model_name(embed_cfg: dict[str, Any], model_type: str) -> str:
     """
     从 embed 配置中获取指定类型的模型名称
