@@ -116,3 +116,28 @@ EMBED_CONFIG_TABLE_DEF = TableDefinition(
         IndexDefinition(["jiuwenclaw_id"], unique=False),
     ],
 )
+TASK_MEMORY_CONFIG_TABLE_DEF = TableDefinition(
+    table_name="task_memory_config",
+    columns=[
+        ColumnDefinition(
+            "id",
+            "integer",
+            primary_key=True,
+            autoincrement=True,
+            nullable=False,
+        ),
+        ColumnDefinition("jiuwenclaw_id", "string", length=64, nullable=False),
+        ColumnDefinition("enabled", "boolean", nullable=False, default=False),
+        ColumnDefinition("llm_model", "string", length=256, nullable=True),
+        ColumnDefinition("embedding_model", "string", length=256, nullable=True),
+        ColumnDefinition("api_key", "string", length=512, nullable=True),
+        ColumnDefinition("api_base", "string", length=1024, nullable=True),
+        ColumnDefinition("retrieval_algo", "string", length=64, nullable=True),
+        ColumnDefinition("summary_algo", "string", length=64, nullable=True),
+        ColumnDefinition("created_at", "datetime", nullable=False),
+        ColumnDefinition("updated_at", "datetime", nullable=False),
+    ],
+    indexes=[
+        IndexDefinition(["jiuwenclaw_id"], unique=False),
+    ],
+)

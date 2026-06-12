@@ -2624,9 +2624,6 @@ class JiuWenClawDeepAdapter:
 
         self._instance_overrides = dict(config) if isinstance(config, dict) else {}
         config_base = get_config()
-        from jiuwenclaw.agentserver.memory.config import get_embed_config
-        embed_config = get_embed_config()
-        logger.info("====embed_config: %s", embed_config)
         bootstrap_request = self._instance_overrides.pop("request", None)
         if bootstrap_request is not None:
             await self._load_enterprise_config(bootstrap_request)

@@ -10,6 +10,7 @@ from ..core.application_config.channel_config import apply_channel_config
 from ..core.application_config.embed_config import apply_embed_config
 from ..core.application_config.log_masking_rule import apply_log_masking_rule
 from ..core.application_config.logging_config import apply_logging_config
+from ..core.application_config.task_memory_config import apply_task_memory_config
 from ..infrastructure.utils import assert_jiuwenclaw_id_matches
 from ..core.config_effective_policy.config_default_template_mapping import (
     apply_config_default_template_mapping,
@@ -82,6 +83,7 @@ async def apply_config_push(
     log_masking_rule = config.get("log_masking_rule")
     logging_config = config.get("logging_config")
     embed_config = config.get("embed_config")
+    task_memory_config = config.get("task_memory_config")
     extension_config_templates = config.get("extension_config_templates")
     skill_whitelist_templates = config.get("skill_whitelist_templates")
     service_config_templates = config.get("service_config_templates")
@@ -107,6 +109,10 @@ async def apply_config_push(
     elif isinstance(embed_config, dict) and embed_config.get("op"):
         matched_payload = embed_config
         result = await apply_embed_config(embed_config)
+
+    elif isinstance(task_memory_config, dict) and task_memory_config.get("op"):
+        matched_payload = task_memory_config
+        result = await apply_task_memory_config(task_memory_config)
 
     elif isinstance(extension_config_templates, dict) and extension_config_templates.get("op"):
         matched_payload = extension_config_templates

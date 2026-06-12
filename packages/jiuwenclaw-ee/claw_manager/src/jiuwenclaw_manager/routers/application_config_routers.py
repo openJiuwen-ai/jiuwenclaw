@@ -10,6 +10,8 @@ from pydantic import BaseModel, Field
 
 from jiuwenclaw_manager.core.application_config.channel_config import ChannelConfigService
 from jiuwenclaw_manager.core.application_config.embed_config import EmbedConfigService
+from jiuwenclaw_manager.core.application_config.task_memory_config import (TaskMemoryConfigService,
+                                                                           TaskMemoryUpsertParams)
 
 from jiuwenclaw_manager.core.application_config.log_masking_rule import (
     LogMaskingRuleService,
@@ -33,6 +35,10 @@ def _channel_config_svc(handler: DBHandler) -> ChannelConfigService:
 
 def _embed_config_svc(handler: DBHandler) -> EmbedConfigService:
     return EmbedConfigService(handler)
+
+
+def _task_memory_config_svc(handler: DBHandler) -> TaskMemoryConfigService:
+    return TaskMemoryConfigService(handler)
 
 
 def _log_masking_rule_svc(handler: DBHandler) -> LogMaskingRuleService:
@@ -372,6 +378,77 @@ async def delete_embed(
     handler: Annotated[DBHandler, Depends(get_db_handler)],
 ):
     svc = _embed_config_svc(handler)
+    try:
+        await svc.delete(jiuwenclaw_id=jiuwenclaw_id)
+    except ValueError as exc:
+        if "not found" in str(exc):
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return ResponseModel(code=200, message="success")
+
+
+class TaskMemoryUpsertRequest(BaseModel):
+    enabled: bool = Field(default=False)
+    llm_model: str = Field(default="", max_length=256)
+    embedding_model: str = Field(default="", max_length=256)
+    api_key: str = Field(default="", max_length=512)
+    api_base: str = Field(default="", max_length=1024)
+    retrieval_algo: str | None = Field(default=None, max_length=64)
+    summary_algo: str | None = Field(default=None, max_length=64)
+
+
+@application_config_router.put(
+    "/{jiuwenclaw_id}/task-memory", response_model=ResponseModel
+)
+async def upsert_task_memory(
+    jiuwenclaw_id: str,
+    body: TaskMemoryUpsertRequest,
+    handler: Annotated[DBHandler, Depends(get_db_handler)],
+):
+    svc = _task_memory_config_svc(handler)
+    try:
+        data = await svc.upsert(
+            jiuwenclaw_id=jiuwenclaw_id,
+            params=TaskMemoryUpsertParams(
+                enabled=body.enabled,
+                llm_model=body.llm_model,
+                embedding_model=body.embedding_model,
+                api_key=body.api_key,
+                api_base=body.api_base,
+                retrieval_algo=body.retrieval_algo,
+                summary_algo=body.summary_algo,
+            ),
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return ResponseModel(code=200, message="success", data=data)
+
+
+@application_config_router.get(
+    "/{jiuwenclaw_id}/task-memory", response_model=ResponseModel
+)
+async def get_task_memory(
+    jiuwenclaw_id: str,
+    handler: Annotated[DBHandler, Depends(get_db_handler)],
+):
+    svc = _task_memory_config_svc(handler)
+    try:
+        data = await svc.get(jiuwenclaw_id=jiuwenclaw_id)
+    except ValueError as exc:
+        if "not found" in str(exc):
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return ResponseModel(code=200, message="success", data=data)
+
+
+@application_config_router.delete(
+    "/{jiuwenclaw_id}/task-memory", response_model=ResponseModel
+)
+async def delete_task_memory(
+    jiuwenclaw_id: str,
+    handler: Annotated[DBHandler, Depends(get_db_handler)],
+):
+    svc = _task_memory_config_svc(handler)
     try:
         await svc.delete(jiuwenclaw_id=jiuwenclaw_id)
     except ValueError as exc:
