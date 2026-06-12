@@ -26,6 +26,7 @@ from jiuwenclaw_manager.schemas.template_schemas import (
     ExtensionConfigTemplateListQuery,
     ExtensionConfigTemplateUpdateBody,
     ModelTemplateCreateBody,
+    ModelTemplateListQuery,
     ModelTemplateUpdateBody,
     ServiceConfigTemplateCreateBody,
     ServiceConfigTemplateListQuery,
@@ -73,21 +74,17 @@ async def create_model_template(
 @templates_router.get("/model-templates", response_model=ResponseModel)
 async def list_model_templates(
     handler: Annotated[DBHandler, Depends(get_db_handler)],
-    page: int = Query(1, ge=1),
-    page_size: int = Query(20, ge=1, le=200),
-    enabled: bool | None = None,
-    model_type: str | None = Query(
-        default=None,
-        description="按模型类型筛选，如 default / video / audio / vision",
-    ),
+    query: Annotated[ModelTemplateListQuery, Query()],
 ):
     svc = _model_template_svc(handler)
     try:
         data = await svc.list_templates(
-            page=page,
-            page_size=page_size,
-            enabled=enabled,
-            model_type=model_type,
+            page=query.page,
+            page_size=query.page_size,
+            enabled=query.enabled,
+            model_type=query.model_type,
+            model_provider=query.model_provider,
+            search=query.search,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -171,6 +168,7 @@ async def list_extension_config_templates(
             enabled=query.enabled,
             component=query.component,
             hook_type=query.hook_type,
+            search=query.search,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -260,6 +258,7 @@ async def list_skill_whitelist_templates(
             enabled=query.enabled,
             skill_id=query.skill_id,
             skill_source=query.skill_source,
+            search=query.search,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -348,6 +347,7 @@ async def list_service_config_templates(
             page_size=query.page_size,
             enabled=query.enabled,
             namespace=query.namespace,
+            search=query.search,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc

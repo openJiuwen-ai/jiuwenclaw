@@ -18,6 +18,7 @@ from jiuwenclaw_manager.schemas.template_schemas import (
 
 _TABLE = SKILL_WHITELIST_TEMPLATE_TABLE_DEF.table_name
 _CONFIG_SECTION = "skill_whitelist_templates"
+_LIST_ALL_CAP = 10_000
 
 
 async def push_skill_whitelist_templates_to_all_gateways(
@@ -67,6 +68,21 @@ def _normalize_skill_version(value: str) -> str:
     if len(normalized) > 64:
         raise ValueError("skill_version must be at most 64 characters")
     return normalized
+
+
+def _matches_search(row: Any, query: str) -> bool:
+    needle = query.strip().lower()
+    if not needle:
+        return True
+    fields = [
+        str(getattr(row, "template_id", "") or ""),
+        str(getattr(row, "template_name", "") or ""),
+        str(getattr(row, "description", "") or ""),
+        str(getattr(row, "skill_source", "") or ""),
+        str(getattr(row, "skill_id", "") or ""),
+        str(getattr(row, "skill_version", "") or ""),
+    ]
+    return any(needle in field.lower() for field in fields)
 
 
 def _normalize_skill_source(value: str) -> str:
@@ -188,12 +204,34 @@ class SkillWhitelistTemplateService:
         enabled: bool | None,
         skill_id: str | None,
         skill_source: str | None,
+        search: str | None = None,
     ) -> dict[str, Any]:
         page = max(page, 1)
         page_size = min(max(page_size, 1), 200)
         filters: dict[str, Any] = {}
         if enabled is not None:
             filters["enabled"] = enabled
+
+        search_query = (search or "").strip()
+        if search_query:
+            rows = await self._handler.list_records(
+                _TABLE, filters, limit=_LIST_ALL_CAP, offset=0
+            )
+            items = [
+                _row_to_out(r).model_dump(mode="json")
+                for r in rows
+                if _matches_search(r, search_query)
+            ]
+            total = len(items)
+            offset = (page - 1) * page_size
+            page_items = items[offset:offset + page_size]
+            return {
+                "items": page_items,
+                "total": total,
+                "page": page,
+                "page_size": page_size,
+            }
+
         if skill_id is not None:
             filters["skill_id"] = _normalize_skill_id(skill_id)
         if skill_source is not None:

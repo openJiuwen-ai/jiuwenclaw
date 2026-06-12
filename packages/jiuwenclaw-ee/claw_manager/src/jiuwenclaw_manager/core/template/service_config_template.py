@@ -18,6 +18,7 @@ from jiuwenclaw_manager.schemas.template_schemas import (
 
 _TABLE = SERVICE_CONFIG_TEMPLATE_TABLE_DEF.table_name
 _CONFIG_SECTION = "service_config_templates"
+_LIST_ALL_CAP = 10_000
 _ALLOWED_IMAGE_PULL_POLICIES = frozenset({"Always", "IfNotPresent", "Never"})
 
 
@@ -70,6 +71,19 @@ def _autoscale_interval_from_db(value: Any) -> float:
     if value is None:
         return 0.2
     return float(value)
+
+
+def _matches_search(row: Any, query: str) -> bool:
+    needle = query.strip().lower()
+    if not needle:
+        return True
+    fields = [
+        str(getattr(row, "template_id", "") or ""),
+        str(getattr(row, "template_name", "") or ""),
+        str(getattr(row, "description", "") or ""),
+        str(getattr(row, "agent_image", "") or ""),
+    ]
+    return any(needle in field.lower() for field in fields)
 
 
 def _row_to_out(row: Any) -> ServiceConfigTemplateOut:
@@ -152,10 +166,10 @@ class ServiceConfigTemplateService:
             "replicas": int(row.get("replicas", 1)),
             "kubeconfig": row.get("kubeconfig"),
             "agent_runtime": row.get("agent_runtime"),
-            "readiness_initial_delay": int(row.get("readiness_initial_delay", 5)),
-            "readiness_period": int(row.get("readiness_period", 10)),
+            "readiness_initial_delay": int(row.get("readiness_initial_delay", 10)),
+            "readiness_period": int(row.get("readiness_period", 5)),
             "ready_timeout": int(row.get("ready_timeout", 300)),
-            "ready_poll_interval": int(row.get("ready_poll_interval", 2)),
+            "ready_poll_interval": int(row.get("ready_poll_interval", 5)),
             "nfs_server": row.get("nfs_server"),
             "nfs_path": row.get("nfs_path", "/"),
             "nfs_mount_path": row.get("nfs_mount_path"),
@@ -168,15 +182,15 @@ class ServiceConfigTemplateService:
             "jiuwenbox_cpu_limit": row.get("jiuwenbox_cpu_limit", ""),
             "jiuwenbox_memory_limit": row.get("jiuwenbox_memory_limit", ""),
             "min_idle_services": int(row.get("min_idle_services", 1)),
-            "max_services": int(row.get("max_services", 10)),
-            "service_concurrency": int(row.get("service_concurrency", 10)),
-            "service_ttl": int(row.get("service_ttl", 30)),
+            "max_services": int(row.get("max_services", 20)),
+            "service_concurrency": int(row.get("service_concurrency", 30)),
+            "service_ttl": int(row.get("service_ttl", 180)),
             "autoscale_interval": _autoscale_interval_from_db(
-                row.get("autoscale_interval", "0.2")
+                row.get("autoscale_interval", "5")
             ),
-            "message_timeout": int(row.get("message_timeout", 300)),
-            "session_concurrency": int(row.get("session_concurrency", 10)),
-            "session_ttl": int(row.get("session_ttl", 20)),
+            "message_timeout": int(row.get("message_timeout", 60)),
+            "session_concurrency": int(row.get("session_concurrency", 3)),
+            "session_ttl": int(row.get("session_ttl", 60)),
             "enabled": row.get("enabled", True),
             "data": row.get("data"),
             "created_at": iso_datetime(row.get("created_at") or now),
@@ -301,6 +315,7 @@ class ServiceConfigTemplateService:
         page_size: int,
         enabled: bool | None,
         namespace: str | None,
+        search: str | None = None,
     ) -> dict[str, Any]:
         page = max(page, 1)
         page_size = min(max(page_size, 1), 200)
@@ -309,6 +324,26 @@ class ServiceConfigTemplateService:
             filters["enabled"] = enabled
         if namespace is not None:
             filters["namespace"] = namespace.strip()
+
+        search_query = (search or "").strip()
+        if search_query:
+            rows = await self._handler.list_records(
+                _TABLE, filters, limit=_LIST_ALL_CAP, offset=0
+            )
+            items = [
+                _row_to_out(r).model_dump(mode="json")
+                for r in rows
+                if _matches_search(r, search_query)
+            ]
+            total = len(items)
+            offset = (page - 1) * page_size
+            page_items = items[offset:offset + page_size]
+            return {
+                "items": page_items,
+                "total": total,
+                "page": page,
+                "page_size": page_size,
+            }
 
         offset = (page - 1) * page_size
         rows = await self._handler.list_records(

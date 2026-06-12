@@ -153,10 +153,10 @@ def _build_row_from_template(template: dict[str, Any], *, now: datetime) -> dict
             if template.get("agent_runtime")
             else None
         ),
-        "readiness_initial_delay": int(template.get("readiness_initial_delay", 5)),
-        "readiness_period": int(template.get("readiness_period", 10)),
+        "readiness_initial_delay": int(template.get("readiness_initial_delay", 10)),
+        "readiness_period": int(template.get("readiness_period", 5)),
         "ready_timeout": int(template.get("ready_timeout", 300)),
-        "ready_poll_interval": int(template.get("ready_poll_interval", 2)),
+        "ready_poll_interval": int(template.get("ready_poll_interval", 5)),
         "nfs_server": (
             str(template["nfs_server"]).strip() if template.get("nfs_server") else None
         ),
@@ -175,15 +175,15 @@ def _build_row_from_template(template: dict[str, Any], *, now: datetime) -> dict
         "jiuwenbox_cpu_limit": str(template.get("jiuwenbox_cpu_limit", "")).strip(),
         "jiuwenbox_memory_limit": str(template.get("jiuwenbox_memory_limit", "")).strip(),
         "min_idle_services": int(template.get("min_idle_services", 1)),
-        "max_services": int(template.get("max_services", 10)),
-        "service_concurrency": int(template.get("service_concurrency", 10)),
-        "service_ttl": int(template.get("service_ttl", 30)),
+        "max_services": int(template.get("max_services", 20)),
+        "service_concurrency": int(template.get("service_concurrency", 30)),
+        "service_ttl": int(template.get("service_ttl", 180)),
         "autoscale_interval": _autoscale_interval_to_db(
-            _autoscale_interval_from_db(template.get("autoscale_interval", "0.2"))
+            _autoscale_interval_from_db(template.get("autoscale_interval", "5"))
         ),
-        "message_timeout": int(template.get("message_timeout", 300)),
-        "session_concurrency": int(template.get("session_concurrency", 10)),
-        "session_ttl": int(template.get("session_ttl", 20)),
+        "message_timeout": int(template.get("message_timeout", 60)),
+        "session_concurrency": int(template.get("session_concurrency", 3)),
+        "session_ttl": int(template.get("session_ttl", 60)),
         "enabled": bool(template.get("enabled", True)),
         "data": template.get("data"),
         "created_at": _parse_iso_datetime(template.get("created_at")) or now,

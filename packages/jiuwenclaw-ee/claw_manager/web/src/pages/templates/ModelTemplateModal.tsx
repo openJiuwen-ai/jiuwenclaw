@@ -1,7 +1,8 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState, type ReactNode } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Modal } from '../../components/Modal';
 import { JsonField, tryParseJson, useInvalidJsonChecker } from '../../components/JsonField';
+import { LimitedTextInput } from '../../components/LimitedTextInput';
 import { ModelTemplateApi, ApiError } from '../../services/api';
 import { toast } from '../../stores/uiStore';
 import { fromCommaList, safeStringify, toCommaList } from '../../utils/format';
@@ -18,10 +19,62 @@ interface Props {
   onSaved: () => void;
 }
 
+const MODEL_TYPE_OPTIONS = ['default', 'video', 'audio', 'vision'] as const;
+
+/** 与 model_template 表 ColumnDefinition length 一致 */
+const FIELD_MAX_LENGTH = {
+  template_name: 128,
+  description: 512,
+  api_base: 512,
+  api_key: 4096,
+  model_id: 128,
+  model_provider: 64,
+} as const;
+
+function clipField(value: string, max: number): string {
+  return value.slice(0, max);
+}
+
+/** 与 openjiuwen ProviderType / 运行时校验一致 */
+const MODEL_PROVIDER_OPTIONS = [
+  'OpenAI',
+  'OpenRouter',
+  'DashScope',
+  'SiliconFlow',
+  'InferenceAffinity',
+] as const;
+
+function normalizeModelProvider(value: string): string {
+  const trimmed = value.trim();
+  if (!trimmed) return 'OpenAI';
+  const lookup = Object.fromEntries(
+    MODEL_PROVIDER_OPTIONS.map((p) => [p.toLowerCase(), p]),
+  ) as Record<string, string>;
+  return lookup[trimmed.toLowerCase()] ?? trimmed;
+}
+
+function providerSelectOptions(current: string): string[] {
+  const normalized = normalizeModelProvider(current);
+  const known = new Set<string>(MODEL_PROVIDER_OPTIONS);
+  if (normalized && !known.has(normalized)) {
+    return [normalized, ...MODEL_PROVIDER_OPTIONS];
+  }
+  return [...MODEL_PROVIDER_OPTIONS];
+}
+
+function FieldLabel({ children, required }: { children: ReactNode; required?: boolean }) {
+  return (
+    <label className="label">
+      {children}
+      {required && <span className="text-danger ml-0.5" aria-hidden="true">*</span>}
+    </label>
+  );
+}
+
 interface FormState {
   template_name: string;
   description: string;
-  model_type: string;
+  model_type: string[];
   model_tags: string;
   api_base: string;
   api_key: string;
@@ -33,25 +86,23 @@ interface FormState {
   enable_streaming: boolean;
   enable_function_calling: boolean;
   verify_ssl: boolean;
-  enabled: boolean;
 }
 
 const empty: FormState = {
   template_name: '',
   description: '',
-  model_type: 'default',
+  model_type: ['default'],
   model_tags: '',
   api_base: '',
   api_key: '',
   model_id: '',
-  model_provider: 'openai',
+  model_provider: 'OpenAI',
   parameters: '',
   timeout: 60,
   retry_count: 3,
   enable_streaming: true,
   enable_function_calling: true,
-  verify_ssl: true,
-  enabled: true,
+  verify_ssl: false,
 };
 
 export function ModelTemplateModal({ open, template, onClose, onSaved }: Props) {
@@ -59,38 +110,85 @@ export function ModelTemplateModal({ open, template, onClose, onSaved }: Props) 
   const checkJson = useInvalidJsonChecker();
   const [form, setForm] = useState<FormState>(empty);
   const [saving, setSaving] = useState(false);
+  const [typeOpen, setTypeOpen] = useState(false);
+  const typeRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     if (!open) return;
     if (template) {
+      const types = Array.isArray(template.model_type)
+        ? template.model_type
+        : template.model_type
+          ? [template.model_type]
+          : ['default'];
       setForm({
-        template_name: template.template_name,
-        description: template.description ?? '',
-        model_type: Array.isArray(template.model_type) ? template.model_type.join(',') : template.model_type,
+        template_name: clipField(template.template_name, FIELD_MAX_LENGTH.template_name),
+        description: clipField(template.description ?? '', FIELD_MAX_LENGTH.description),
+        model_type: types,
         model_tags: toCommaList(template.model_tags),
-        api_base: template.api_base,
-        api_key: template.api_key,
-        model_id: template.model_id,
-        model_provider: template.model_provider,
+        api_base: clipField(template.api_base, FIELD_MAX_LENGTH.api_base),
+        api_key: clipField(template.api_key, FIELD_MAX_LENGTH.api_key),
+        model_id: clipField(template.model_id, FIELD_MAX_LENGTH.model_id),
+        model_provider: clipField(
+          normalizeModelProvider(template.model_provider),
+          FIELD_MAX_LENGTH.model_provider,
+        ),
         parameters: safeStringify(template.parameters ?? {}, 2),
         timeout: template.timeout,
         retry_count: template.retry_count,
         enable_streaming: template.enable_streaming,
         enable_function_calling: template.enable_function_calling,
         verify_ssl: template.verify_ssl,
-        enabled: template.enabled,
       });
     } else {
       setForm(empty);
     }
+    setTypeOpen(false);
   }, [open, template]);
+
+  useEffect(() => {
+    if (!typeOpen) return;
+    const onClick = (e: MouseEvent) => {
+      if (typeRef.current && !typeRef.current.contains(e.target as Node)) {
+        setTypeOpen(false);
+      }
+    };
+    document.addEventListener('mousedown', onClick);
+    return () => document.removeEventListener('mousedown', onClick);
+  }, [typeOpen]);
 
   const update = <K extends keyof FormState>(k: K, v: FormState[K]) =>
     setForm((s) => ({ ...s, [k]: v }));
 
+  const toggleModelType = (type: string) => {
+    setForm((s) => ({
+      ...s,
+      model_type: s.model_type.includes(type)
+        ? s.model_type.filter((x) => x !== type)
+        : [...s.model_type, type],
+    }));
+  };
+
   const submit = async () => {
-    if (!form.template_name.trim()) {
-      toast('warn', t('modelTemplate.templateName'));
+    const requiredChecks: { label: string; invalid: boolean }[] = [
+      { label: t('modelTemplate.templateName'), invalid: !form.template_name.trim() },
+      { label: t('modelTemplate.modelProvider'), invalid: !form.model_provider.trim() },
+      { label: t('modelTemplate.modelId'), invalid: !form.model_id.trim() },
+      { label: t('modelTemplate.modelType'), invalid: form.model_type.filter(Boolean).length === 0 },
+      { label: t('modelTemplate.apiBase'), invalid: !form.api_base.trim() },
+      { label: t('modelTemplate.apiKey'), invalid: !form.api_key.trim() },
+    ];
+    const missing = requiredChecks.find((item) => item.invalid);
+    if (missing) {
+      toast('warn', t('modelTemplate.fieldRequired', { field: missing.label }));
+      return;
+    }
+    if (!Number.isFinite(form.timeout) || form.timeout < 1) {
+      toast('warn', t('modelTemplate.timeoutMin'));
+      return;
+    }
+    if (!Number.isFinite(form.retry_count) || form.retry_count < 0) {
+      toast('warn', t('modelTemplate.retryCountMin'));
       return;
     }
     const paramErr = checkJson(form.parameters);
@@ -99,10 +197,7 @@ export function ModelTemplateModal({ open, template, onClose, onSaved }: Props) 
       return;
     }
 
-    const modelTypeList = form.model_type
-      .split(',')
-      .map((x) => x.trim())
-      .filter(Boolean);
+    const modelTypeList = form.model_type.filter(Boolean);
 
     const body: ModelTemplateCreateBody | ModelTemplateUpdateBody = {
       template_name: form.template_name.trim(),
@@ -119,7 +214,6 @@ export function ModelTemplateModal({ open, template, onClose, onSaved }: Props) 
       enable_streaming: form.enable_streaming,
       enable_function_calling: form.enable_function_calling,
       verify_ssl: form.verify_ssl,
-      enabled: form.enabled,
     };
 
     setSaving(true);
@@ -127,7 +221,7 @@ export function ModelTemplateModal({ open, template, onClose, onSaved }: Props) 
       if (template) {
         await ModelTemplateApi.update(template.template_id, body);
       } else {
-        await ModelTemplateApi.create(body as ModelTemplateCreateBody);
+        await ModelTemplateApi.create({ ...body, enabled: true } as ModelTemplateCreateBody);
       }
       toast('success', t('success.saved'));
       onSaved();
@@ -156,41 +250,97 @@ export function ModelTemplateModal({ open, template, onClose, onSaved }: Props) 
       }
     >
       <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-        <div className="md:col-span-2">
-          <label className="label">{t('modelTemplate.templateName')}</label>
-          <input
-            className="input"
+        <div>
+          <FieldLabel required>{t('modelTemplate.templateName')}</FieldLabel>
+          <LimitedTextInput
             value={form.template_name}
-            onChange={(e) => update('template_name', e.target.value)}
+            maxLength={FIELD_MAX_LENGTH.template_name}
+            onChange={(v) => update('template_name', v)}
           />
         </div>
-        <div className="md:col-span-2">
-          <label className="label">{t('common.detail')}</label>
-          <input className="input" value={form.description} onChange={(e) => update('description', e.target.value)} />
-        </div>
         <div>
-          <label className="label">{t('modelTemplate.modelProvider')}</label>
-          <input
-            className="input"
+          <FieldLabel required>{t('modelTemplate.modelProvider')}</FieldLabel>
+          <select
+            className="select"
             value={form.model_provider}
             onChange={(e) => update('model_provider', e.target.value)}
+          >
+            {providerSelectOptions(form.model_provider).map((provider) => (
+              <option key={provider} value={provider}>
+                {provider}
+              </option>
+            ))}
+          </select>
+        </div>
+        <div className="md:col-span-2">
+          <FieldLabel required>{t('modelTemplate.apiBase')}</FieldLabel>
+          <LimitedTextInput
+            value={form.api_base}
+            maxLength={FIELD_MAX_LENGTH.api_base}
+            onChange={(v) => update('api_base', v)}
           />
         </div>
         <div>
-          <label className="label">{t('modelTemplate.modelId')}</label>
-          <input className="input" value={form.model_id} onChange={(e) => update('model_id', e.target.value)} />
-        </div>
-        <div>
-          <label className="label">{t('modelTemplate.modelType')}</label>
-          <input
-            className="input"
-            placeholder={t('modelTemplate.modelTypeHint')}
-            value={form.model_type}
-            onChange={(e) => update('model_type', e.target.value)}
+          <FieldLabel required>{t('modelTemplate.apiKey')}</FieldLabel>
+          <LimitedTextInput
+            type="password"
+            value={form.api_key}
+            maxLength={FIELD_MAX_LENGTH.api_key}
+            onChange={(v) => update('api_key', v)}
           />
         </div>
         <div>
-          <label className="label">{t('modelTemplate.modelTags')}</label>
+          <FieldLabel required>{t('modelTemplate.modelId')}</FieldLabel>
+          <LimitedTextInput
+            value={form.model_id}
+            maxLength={FIELD_MAX_LENGTH.model_id}
+            onChange={(v) => update('model_id', v)}
+          />
+        </div>
+        <div className="md:col-span-2">
+          <FieldLabel>{t('modelTemplate.templateDescription')}</FieldLabel>
+          <LimitedTextInput
+            value={form.description}
+            maxLength={FIELD_MAX_LENGTH.description}
+            onChange={(v) => update('description', v)}
+          />
+        </div>
+        <div>
+          <FieldLabel required>{t('modelTemplate.modelType')}</FieldLabel>
+          <div className="relative" ref={typeRef}>
+            <button
+              type="button"
+              className="select w-full text-left flex items-center justify-between gap-2"
+              onClick={() => setTypeOpen((o) => !o)}
+            >
+              <span className={form.model_type.length ? 'truncate' : 'text-muted'}>
+                {form.model_type.length
+                  ? form.model_type.join(', ')
+                  : t('modelTemplate.modelTypePlaceholder')}
+              </span>
+              <span className="text-muted text-xs shrink-0">{typeOpen ? '▲' : '▼'}</span>
+            </button>
+            {typeOpen && (
+              <div className="absolute z-20 mt-1 w-full rounded-md border border-border bg-bg shadow-lg py-1">
+                {MODEL_TYPE_OPTIONS.map((type) => (
+                  <label
+                    key={type}
+                    className="flex items-center gap-2 px-3 py-2 hover:bg-bg-hover cursor-pointer text-sm"
+                  >
+                    <input
+                      type="checkbox"
+                      checked={form.model_type.includes(type)}
+                      onChange={() => toggleModelType(type)}
+                    />
+                    <span>{type}</span>
+                  </label>
+                ))}
+              </div>
+            )}
+          </div>
+        </div>
+        <div>
+          <FieldLabel>{t('modelTemplate.modelTags')}</FieldLabel>
           <input
             className="input"
             placeholder={t('modelTemplate.modelTagsHint')}
@@ -198,21 +348,8 @@ export function ModelTemplateModal({ open, template, onClose, onSaved }: Props) 
             onChange={(e) => update('model_tags', e.target.value)}
           />
         </div>
-        <div className="md:col-span-2">
-          <label className="label">{t('modelTemplate.apiBase')}</label>
-          <input className="input" value={form.api_base} onChange={(e) => update('api_base', e.target.value)} />
-        </div>
-        <div className="md:col-span-2">
-          <label className="label">{t('modelTemplate.apiKey')}</label>
-          <input
-            className="input"
-            type="password"
-            value={form.api_key}
-            onChange={(e) => update('api_key', e.target.value)}
-          />
-        </div>
         <div>
-          <label className="label">{t('modelTemplate.timeout')}</label>
+          <FieldLabel required>{t('modelTemplate.timeout')}</FieldLabel>
           <input
             className="input"
             type="number"
@@ -222,7 +359,7 @@ export function ModelTemplateModal({ open, template, onClose, onSaved }: Props) 
           />
         </div>
         <div>
-          <label className="label">{t('modelTemplate.retryCount')}</label>
+          <FieldLabel required>{t('modelTemplate.retryCount')}</FieldLabel>
           <input
             className="input"
             type="number"
@@ -231,12 +368,11 @@ export function ModelTemplateModal({ open, template, onClose, onSaved }: Props) 
             onChange={(e) => update('retry_count', Number(e.target.value))}
           />
         </div>
-        <div className="md:col-span-2 grid grid-cols-2 md:grid-cols-4 gap-2 text-xs">
+        <div className="md:col-span-2 grid grid-cols-2 md:grid-cols-3 gap-2 text-xs">
           {[
             ['enable_streaming', t('modelTemplate.enableStreaming')],
             ['enable_function_calling', t('modelTemplate.enableFunctionCalling')],
             ['verify_ssl', t('modelTemplate.verifySsl')],
-            ['enabled', t('common.enabled')],
           ].map(([k, label]) => (
             <label
               key={k}

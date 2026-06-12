@@ -68,6 +68,31 @@ class ModelTemplateOut(BaseModel):
     updated_at: str | None
 
 
+class ModelTemplateListQuery(BaseModel):
+    """模型模板列表查询参数。"""
+
+    page: int = Field(1, ge=1)
+    page_size: int = Field(20, ge=1, le=200)
+    enabled: bool | None = None
+    model_type: str | None = Field(
+        default=None,
+        description="按模型类型筛选，如 default / video / audio / vision",
+    )
+    model_provider: str | None = Field(
+        default=None,
+        max_length=64,
+        description="按 provider 筛选，大小写不敏感",
+    )
+    search: str | None = Field(
+        default=None,
+        max_length=256,
+        description=(
+            "按 template_id、template_name、description、provider、"
+            "模型 ID、模型类型、API base 模糊搜索"
+        ),
+    )
+
+
 class ExtensionConfigTemplateCreateBody(BaseModel):
     template_name: str = Field(..., max_length=128)
     description: str | None = Field(default=None, max_length=512)
@@ -103,6 +128,10 @@ class ExtensionConfigTemplateListQuery(BaseModel):
     hook_type: str | None = Field(
         default=None,
         description="钩子类型：pre_request / post_request / error / schedule",
+    )
+    search: str | None = Field(
+        default=None,
+        description="按 template_id、template_name、description、component、hook_type 模糊搜索",
     )
 
 
@@ -147,6 +176,10 @@ class SkillWhitelistTemplateListQuery(BaseModel):
     enabled: bool | None = None
     skill_id: str | None = Field(default=None, max_length=512)
     skill_source: str | None = Field(default=None, max_length=2048)
+    search: str | None = Field(
+        default=None,
+        description="按 template_id、template_name、description、skill_source、skill_id、skill_version 模糊搜索",
+    )
 
 
 class SkillWhitelistTemplateOut(BaseModel):
@@ -176,10 +209,10 @@ class ServiceConfigTemplateCreateBody(BaseModel):
     replicas: int = Field(default=1, ge=1)
     kubeconfig: str | None = Field(default=None, max_length=512)
     agent_runtime: str | None = Field(default=None, max_length=128)
-    readiness_initial_delay: int = Field(default=5, ge=0)
-    readiness_period: int = Field(default=10, ge=1)
+    readiness_initial_delay: int = Field(default=10, ge=0)
+    readiness_period: int = Field(default=5, ge=1)
     ready_timeout: int = Field(default=300, ge=1)
-    ready_poll_interval: int = Field(default=2, ge=1)
+    ready_poll_interval: int = Field(default=5, ge=1)
     nfs_server: str | None = Field(default=None, max_length=256)
     nfs_path: str = Field(default="/", max_length=512)
     nfs_mount_path: str | None = Field(default=None, max_length=512)
@@ -192,13 +225,13 @@ class ServiceConfigTemplateCreateBody(BaseModel):
     jiuwenbox_cpu_limit: str | None = Field(default=None, max_length=32)
     jiuwenbox_memory_limit: str | None = Field(default=None, max_length=32)
     min_idle_services: int = Field(default=1, ge=0)
-    max_services: int = Field(default=10, ge=1)
-    service_concurrency: int = Field(default=10, ge=1)
-    service_ttl: int = Field(default=30, ge=1)
-    autoscale_interval: float = Field(default=0.2, gt=0)
-    message_timeout: int = Field(default=300, ge=1)
-    session_concurrency: int = Field(default=10, ge=1)
-    session_ttl: int = Field(default=20, ge=1)
+    max_services: int = Field(default=20, ge=1)
+    service_concurrency: int = Field(default=30, ge=1)
+    service_ttl: int = Field(default=180, ge=1)
+    autoscale_interval: float = Field(default=5, gt=0)
+    message_timeout: int = Field(default=60, ge=1)
+    session_concurrency: int = Field(default=3, ge=1)
+    session_ttl: int = Field(default=60, ge=1)
     enabled: bool = True
     data: dict[str, Any] | None = None
 
@@ -248,6 +281,7 @@ class ServiceConfigTemplateListQuery(BaseModel):
     page_size: int = Field(20, ge=1, le=200)
     enabled: bool | None = None
     namespace: str | None = Field(default=None, max_length=128)
+    search: str | None = Field(default=None, max_length=256)
 
 
 class ServiceConfigTemplateOut(BaseModel):

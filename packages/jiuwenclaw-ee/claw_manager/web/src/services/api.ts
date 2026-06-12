@@ -130,7 +130,7 @@ export const InstanceApi = {
   provisionLocal: (body: ProvisionLocalInstanceBody) =>
     http<Record<string, unknown>>('/v1/instances/provision-local', { method: 'POST', body }),
   update: (id: string, body: { data?: Record<string, unknown> }) =>
-    http<InstanceDetail>(`/v1/instances/${encodeURIComponent(id)}`, { method: 'PUT', body }),
+    http<InstanceDetail>(`/v1/instances/${encodeURIComponent(id)}`, { method: 'PATCH', body }),
   remove: (id: string, force = false) =>
     http<{ deleted: boolean }>(`/v1/instances/${encodeURIComponent(id)}`, {
       method: 'DELETE',
@@ -141,13 +141,20 @@ export const InstanceApi = {
 // ---------- Templates ----------
 
 export const ModelTemplateApi = {
-  list: (params?: { page?: number; page_size?: number; enabled?: boolean; model_type?: string }) =>
+  list: (params?: {
+    page?: number;
+    page_size?: number;
+    enabled?: boolean;
+    model_type?: string;
+    model_provider?: string;
+    search?: string;
+  }) =>
     http<PageResult<ModelTemplate>>('/v1/model-templates', { query: params }),
   get: (id: string) => http<ModelTemplate>(`/v1/model-templates/${encodeURIComponent(id)}`),
   create: (body: ModelTemplateCreateBody) =>
     http<ModelTemplate>('/v1/model-templates', { method: 'POST', body }),
   update: (id: string, body: ModelTemplateUpdateBody) =>
-    http<ModelTemplate>(`/v1/model-templates/${encodeURIComponent(id)}`, { method: 'PUT', body }),
+    http<ModelTemplate>(`/v1/model-templates/${encodeURIComponent(id)}`, { method: 'PATCH', body }),
   remove: (id: string) =>
     http<{ deleted: boolean; template_id: string }>(`/v1/model-templates/${encodeURIComponent(id)}`, {
       method: 'DELETE',
@@ -161,6 +168,7 @@ export const ExtensionTemplateApi = {
     enabled?: boolean;
     component?: string;
     hook_type?: string;
+    search?: string;
   }) => http<PageResult<ExtensionConfigTemplate>>('/v1/extension-config-templates', { query: params }),
   get: (id: string) =>
     http<ExtensionConfigTemplate>(`/v1/extension-config-templates/${encodeURIComponent(id)}`),
@@ -168,7 +176,7 @@ export const ExtensionTemplateApi = {
     http<ExtensionConfigTemplate>('/v1/extension-config-templates', { method: 'POST', body }),
   update: (id: string, body: ExtensionConfigTemplateUpdateBody) =>
     http<ExtensionConfigTemplate>(`/v1/extension-config-templates/${encodeURIComponent(id)}`, {
-      method: 'PUT',
+      method: 'PATCH',
       body,
     }),
   remove: (id: string) =>
@@ -185,6 +193,7 @@ export const SkillWhitelistTemplateApi = {
     enabled?: boolean;
     skill_id?: string;
     skill_source?: string;
+    search?: string;
   }) => http<PageResult<SkillWhitelistTemplate>>('/v1/skill-whitelist-templates', { query: params }),
   get: (id: string) =>
     http<SkillWhitelistTemplate>(`/v1/skill-whitelist-templates/${encodeURIComponent(id)}`),
@@ -192,7 +201,7 @@ export const SkillWhitelistTemplateApi = {
     http<SkillWhitelistTemplate>('/v1/skill-whitelist-templates', { method: 'POST', body }),
   update: (id: string, body: SkillWhitelistTemplateUpdateBody) =>
     http<SkillWhitelistTemplate>(`/v1/skill-whitelist-templates/${encodeURIComponent(id)}`, {
-      method: 'PUT',
+      method: 'PATCH',
       body,
     }),
   remove: (id: string) =>
@@ -208,6 +217,7 @@ export const ServiceConfigTemplateApi = {
     page_size?: number;
     enabled?: boolean;
     namespace?: string;
+    search?: string;
   }) => http<PageResult<ServiceConfigTemplate>>('/v1/service-config-templates', { query: params }),
   get: (id: string) =>
     http<ServiceConfigTemplate>(`/v1/service-config-templates/${encodeURIComponent(id)}`),
@@ -215,7 +225,7 @@ export const ServiceConfigTemplateApi = {
     http<ServiceConfigTemplate>('/v1/service-config-templates', { method: 'POST', body }),
   update: (id: string, body: ServiceConfigTemplateUpdateBody) =>
     http<ServiceConfigTemplate>(`/v1/service-config-templates/${encodeURIComponent(id)}`, {
-      method: 'PUT',
+      method: 'PATCH',
       body,
     }),
   remove: (id: string) =>
@@ -256,7 +266,7 @@ export const MappingApi = {
   update: (instanceId: string, mappingId: number, body: ConfigDefaultTemplateMappingUpdateBody) =>
     http<ConfigDefaultTemplateMapping>(
       `${policyBase(instanceId)}/config-default-template-mappings/${mappingId}`,
-      { method: 'PUT', body }
+      { method: 'PATCH', body }
     ),
   remove: (instanceId: string, mappingId: number) =>
     http<{ deleted: boolean; id: number }>(
@@ -282,7 +292,7 @@ export const GlobalPolicyApi = {
   update: (instanceId: string, policyId: number, body: ConfigEffectiveGlobalPolicyUpdateBody) =>
     http<ConfigEffectiveGlobalPolicy>(
       `${policyBase(instanceId)}/config-effective/global-policies/${policyId}`,
-      { method: 'PUT', body }
+      { method: 'PATCH', body }
     ),
   remove: (instanceId: string, policyId: number) =>
     http<{ deleted: boolean; id: number }>(
@@ -308,7 +318,7 @@ export const ServicePolicyApi = {
   update: (instanceId: string, policyId: number, body: ConfigEffectiveServicePolicyUpdateBody) =>
     http<ConfigEffectiveServicePolicy>(
       `${policyBase(instanceId)}/config-effective/service-policies/${policyId}`,
-      { method: 'PUT', body }
+      { method: 'PATCH', body }
     ),
   remove: (instanceId: string, policyId: number) =>
     http<{ deleted: boolean; id: number }>(
@@ -334,7 +344,7 @@ export const AgentPolicyApi = {
   update: (instanceId: string, policyId: number, body: ConfigEffectiveAgentPolicyUpdateBody) =>
     http<ConfigEffectiveAgentPolicy>(
       `${policyBase(instanceId)}/config-effective/agent-policies/${policyId}`,
-      { method: 'PUT', body }
+      { method: 'PATCH', body }
     ),
   remove: (instanceId: string, policyId: number) =>
     http<{ deleted: boolean; id: number }>(

@@ -80,6 +80,31 @@ def _matches_model_type(row_model_type: Any, filter_type: str) -> bool:
     return str(row_model_type) == filter_type
 
 
+def _matches_model_provider(row: Any, filter_provider: str) -> bool:
+    provider = str(getattr(row, "model_provider", "") or "").strip().lower()
+    return provider == filter_provider.strip().lower()
+
+
+def _matches_search(row: Any, query: str) -> bool:
+    needle = query.strip().lower()
+    if not needle:
+        return True
+    fields = [
+        str(getattr(row, "template_id", "") or ""),
+        str(getattr(row, "template_name", "") or ""),
+        str(getattr(row, "description", "") or ""),
+        str(getattr(row, "model_provider", "") or ""),
+        str(getattr(row, "model_id", "") or ""),
+        str(getattr(row, "api_base", "") or ""),
+    ]
+    model_type = getattr(row, "model_type", None)
+    if isinstance(model_type, list):
+        fields.extend(str(item) for item in model_type)
+    elif model_type is not None:
+        fields.append(str(model_type))
+    return any(needle in field.lower() for field in fields)
+
+
 def _row_to_out(row: Any) -> ModelTemplateOut:
     model_type = row.model_type
     if not isinstance(model_type, (str, list)):
@@ -212,6 +237,8 @@ class ModelTemplateService:
         page_size: int,
         enabled: bool | None,
         model_type: str | None,
+        model_provider: str | None = None,
+        search: str | None = None,
     ) -> dict[str, Any]:
         page = max(page, 1)
         page_size = min(max(page_size, 1), 200)
@@ -219,18 +246,26 @@ class ModelTemplateService:
         if enabled is not None:
             filters["enabled"] = enabled
 
-        if model_type:
+        search_query = (search or "").strip()
+        provider_query = (model_provider or "").strip()
+        if model_type or provider_query or search_query:
             rows = await self._handler.list_records(
                 _MODEL_TEMPLATE_TABLE, filters, limit=_LIST_ALL_CAP, offset=0
             )
-            items = [
-                _row_to_out(r).model_dump(mode="json")
-                for r in rows
-                if _matches_model_type(getattr(r, "model_type", None), model_type)
-            ]
+            items = []
+            for row in rows:
+                if model_type and not _matches_model_type(
+                    getattr(row, "model_type", None), model_type
+                ):
+                    continue
+                if provider_query and not _matches_model_provider(row, provider_query):
+                    continue
+                if search_query and not _matches_search(row, search_query):
+                    continue
+                items.append(_row_to_out(row).model_dump(mode="json"))
             total = len(items)
             offset = (page - 1) * page_size
-            page_items = items[offset : offset + page_size]
+            page_items = items[offset:offset + page_size]
             return {
                 "items": page_items,
                 "total": total,

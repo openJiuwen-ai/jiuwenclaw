@@ -1,10 +1,9 @@
 import { useEffect, useState, type ReactNode } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Modal } from '../../components/Modal';
-import { JsonField, tryParseJson, useInvalidJsonChecker } from '../../components/JsonField';
+import { LimitedTextInput } from '../../components/LimitedTextInput';
 import { ServiceConfigTemplateApi, ApiError } from '../../services/api';
 import { toast } from '../../stores/uiStore';
-import { safeStringify } from '../../utils/format';
 import type {
   ServiceConfigTemplate,
   ServiceConfigTemplateCreateBody,
@@ -54,9 +53,28 @@ interface FormState {
   message_timeout: number;
   session_concurrency: number;
   session_ttl: number;
-  data: string;
-  enabled: boolean;
 }
+
+const FIELD_MAX_LENGTH = {
+  template_name: 128,
+  description: 512,
+  agent_image: 512,
+  pod_name: 128,
+  container_name: 128,
+  port_name: 64,
+  kubeconfig: 512,
+  nfs_server: 256,
+  nfs_path: 512,
+  nfs_mount_path: 512,
+  agent_cpu_request: 32,
+  agent_memory_request: 32,
+  agent_cpu_limit: 32,
+  agent_memory_limit: 32,
+  jiuwenbox_cpu_request: 32,
+  jiuwenbox_memory_request: 32,
+  jiuwenbox_cpu_limit: 32,
+  jiuwenbox_memory_limit: 32,
+} as const;
 
 const empty: FormState = {
   template_name: '',
@@ -64,17 +82,17 @@ const empty: FormState = {
   agent_image: '',
   namespace: 'jiuwenclaw',
   pod_name: '',
-  container_name: 'agent-server',
+  container_name: 'agentserver',
   container_port: 8080,
   port_name: 'http',
   image_pull_policy: 'IfNotPresent',
   replicas: 1,
   kubeconfig: '',
   agent_runtime: '',
-  readiness_initial_delay: 5,
-  readiness_period: 10,
+  readiness_initial_delay: 10,
+  readiness_period: 5,
   ready_timeout: 300,
-  ready_poll_interval: 2,
+  ready_poll_interval: 5,
   nfs_server: '',
   nfs_path: '/',
   nfs_mount_path: '',
@@ -87,19 +105,26 @@ const empty: FormState = {
   jiuwenbox_cpu_limit: '',
   jiuwenbox_memory_limit: '',
   min_idle_services: 1,
-  max_services: 10,
-  service_concurrency: 10,
-  service_ttl: 30,
-  autoscale_interval: 0.2,
-  message_timeout: 300,
-  session_concurrency: 10,
-  session_ttl: 20,
-  data: '',
-  enabled: true,
+  max_services: 20,
+  service_concurrency: 30,
+  service_ttl: 180,
+  autoscale_interval: 5,
+  message_timeout: 60,
+  session_concurrency: 3,
+  session_ttl: 60,
 };
 
 function opt(v: string) {
   return v.trim() || undefined;
+}
+
+function FieldLabel({ children, required }: { children: ReactNode; required?: boolean }) {
+  return (
+    <label className="label">
+      {children}
+      {required && <span className="text-danger ml-0.5" aria-hidden="true">*</span>}
+    </label>
+  );
 }
 
 function SectionTitle({ children }: { children: ReactNode }) {
@@ -112,7 +137,6 @@ function SectionTitle({ children }: { children: ReactNode }) {
 
 export function ServiceConfigTemplateModal({ open, template, onClose, onSaved }: Props) {
   const { t } = useTranslation();
-  const checkJson = useInvalidJsonChecker();
   const [form, setForm] = useState<FormState>(empty);
   const [saving, setSaving] = useState(false);
 
@@ -155,8 +179,6 @@ export function ServiceConfigTemplateModal({ open, template, onClose, onSaved }:
         message_timeout: template.message_timeout,
         session_concurrency: template.session_concurrency,
         session_ttl: template.session_ttl,
-        data: safeStringify(template.data ?? {}, 2),
-        enabled: template.enabled,
       });
     } else {
       setForm(empty);
@@ -167,25 +189,14 @@ export function ServiceConfigTemplateModal({ open, template, onClose, onSaved }:
     setForm((s) => ({ ...s, [k]: v }));
 
   const submit = async () => {
-    if (!form.template_name.trim()) {
-      toast('warn', t('serviceConfigTemplate.templateName'));
-      return;
-    }
-    if (!form.agent_image.trim()) {
-      toast('warn', t('serviceConfigTemplate.agentImage'));
-      return;
-    }
-    if (!form.namespace.trim()) {
-      toast('warn', t('serviceConfigTemplate.namespace'));
-      return;
-    }
-    if (!form.container_name.trim()) {
-      toast('warn', t('serviceConfigTemplate.containerName'));
-      return;
-    }
-    const dataErr = checkJson(form.data);
-    if (dataErr) {
-      toast('danger', dataErr);
+    const required: { ok: boolean; label: string }[] = [
+      { ok: !!form.template_name.trim(), label: t('serviceConfigTemplate.templateName') },
+      { ok: !!form.agent_image.trim(), label: t('serviceConfigTemplate.agentImage') },
+      { ok: !!form.container_name.trim(), label: t('serviceConfigTemplate.containerName') },
+    ];
+    const missing = required.find((r) => !r.ok);
+    if (missing) {
+      toast('warn', t('serviceConfigTemplate.fieldRequired', { field: missing.label }));
       return;
     }
 
@@ -225,8 +236,6 @@ export function ServiceConfigTemplateModal({ open, template, onClose, onSaved }:
       message_timeout: form.message_timeout,
       session_concurrency: form.session_concurrency,
       session_ttl: form.session_ttl,
-      data: form.data.trim() ? (tryParseJson(form.data, {}) as Record<string, unknown>) : undefined,
-      enabled: form.enabled,
     };
 
     setSaving(true);
@@ -234,7 +243,7 @@ export function ServiceConfigTemplateModal({ open, template, onClose, onSaved }:
       if (template) {
         await ServiceConfigTemplateApi.update(template.template_id, body);
       } else {
-        await ServiceConfigTemplateApi.create(body as ServiceConfigTemplateCreateBody);
+        await ServiceConfigTemplateApi.create({ ...body, enabled: true } as ServiceConfigTemplateCreateBody);
       }
       toast('success', t('success.saved'));
       onSaved();
@@ -259,15 +268,28 @@ export function ServiceConfigTemplateModal({ open, template, onClose, onSaved }:
     </div>
   );
 
-  const textField = (key: keyof FormState, label: string, placeholder?: string) => (
+  const textField = (
+    key: keyof FormState,
+    label: string,
+    options: { maxLength: number; required?: boolean; placeholder?: string },
+  ) => (
     <div>
-      <label className="label">{label}</label>
-      <input
-        className="input"
-        placeholder={placeholder}
-        value={form[key] as string}
-        onChange={(e) => update(key, e.target.value as FormState[typeof key])}
-      />
+      <FieldLabel required={options.required}>{label}</FieldLabel>
+      {options.placeholder ? (
+        <input
+          className="input"
+          placeholder={options.placeholder}
+          value={form[key] as string}
+          maxLength={options.maxLength}
+          onChange={(e) => update(key, e.target.value.slice(0, options.maxLength) as FormState[typeof key])}
+        />
+      ) : (
+        <LimitedTextInput
+          value={form[key] as string}
+          maxLength={options.maxLength}
+          onChange={(v) => update(key, v as FormState[typeof key])}
+        />
+      )}
     </div>
   );
 
@@ -290,25 +312,40 @@ export function ServiceConfigTemplateModal({ open, template, onClose, onSaved }:
     >
       <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
         <div className="md:col-span-2">
-          <label className="label">{t('serviceConfigTemplate.templateName')}</label>
-          <input
-            className="input"
+          <FieldLabel required>{t('serviceConfigTemplate.templateName')}</FieldLabel>
+          <LimitedTextInput
             value={form.template_name}
-            onChange={(e) => update('template_name', e.target.value)}
+            maxLength={FIELD_MAX_LENGTH.template_name}
+            onChange={(v) => update('template_name', v)}
           />
         </div>
         <div className="md:col-span-2">
-          <label className="label">{t('common.detail')}</label>
-          <input className="input" value={form.description} onChange={(e) => update('description', e.target.value)} />
+          <FieldLabel>{t('serviceConfigTemplate.templateDescription')}</FieldLabel>
+          <LimitedTextInput
+            value={form.description}
+            maxLength={FIELD_MAX_LENGTH.description}
+            onChange={(v) => update('description', v)}
+          />
         </div>
 
         <SectionTitle>{t('serviceConfigTemplate.sectionContainer')}</SectionTitle>
-        {textField('agent_image', t('serviceConfigTemplate.agentImage'))}
-        {textField('namespace', t('serviceConfigTemplate.namespace'))}
-        {textField('pod_name', t('serviceConfigTemplate.podName'))}
-        {textField('container_name', t('serviceConfigTemplate.containerName'))}
+        <div className="md:col-span-2">
+          {textField('agent_image', t('serviceConfigTemplate.agentImage'), {
+            maxLength: FIELD_MAX_LENGTH.agent_image,
+            required: true,
+          })}
+        </div>
+        {textField('container_name', t('serviceConfigTemplate.containerName'), {
+          maxLength: FIELD_MAX_LENGTH.container_name,
+          required: true,
+        })}
+        {textField('pod_name', t('serviceConfigTemplate.podName'), {
+          maxLength: FIELD_MAX_LENGTH.pod_name,
+        })}
         {numField('container_port', t('serviceConfigTemplate.containerPort'), 1)}
-        {textField('port_name', t('serviceConfigTemplate.portName'))}
+        {textField('port_name', t('serviceConfigTemplate.portName'), {
+          maxLength: FIELD_MAX_LENGTH.port_name,
+        })}
         <div>
           <label className="label">{t('serviceConfigTemplate.imagePullPolicy')}</label>
           <select
@@ -321,9 +358,9 @@ export function ServiceConfigTemplateModal({ open, template, onClose, onSaved }:
             <option value="Never">Never</option>
           </select>
         </div>
-        {numField('replicas', t('serviceConfigTemplate.replicas'), 1)}
-        {textField('kubeconfig', t('serviceConfigTemplate.kubeconfig'))}
-        {textField('agent_runtime', t('serviceConfigTemplate.agentRuntime'))}
+        {textField('kubeconfig', t('serviceConfigTemplate.kubeconfig'), {
+          maxLength: FIELD_MAX_LENGTH.kubeconfig,
+        })}
 
         <SectionTitle>{t('serviceConfigTemplate.sectionReadiness')}</SectionTitle>
         {numField('readiness_initial_delay', t('serviceConfigTemplate.readinessInitialDelay'))}
@@ -332,21 +369,51 @@ export function ServiceConfigTemplateModal({ open, template, onClose, onSaved }:
         {numField('ready_poll_interval', t('serviceConfigTemplate.readyPollInterval'), 1)}
 
         <SectionTitle>{t('serviceConfigTemplate.sectionNfs')}</SectionTitle>
-        {textField('nfs_server', t('serviceConfigTemplate.nfsServer'))}
-        {textField('nfs_path', t('serviceConfigTemplate.nfsPath'))}
         <div className="md:col-span-2">
-          {textField('nfs_mount_path', t('serviceConfigTemplate.nfsMountPath'))}
+          {textField('nfs_server', t('serviceConfigTemplate.nfsServer'), {
+            maxLength: FIELD_MAX_LENGTH.nfs_server,
+          })}
         </div>
+        {textField('nfs_path', t('serviceConfigTemplate.nfsPath'), {
+          maxLength: FIELD_MAX_LENGTH.nfs_path,
+        })}
+        {textField('nfs_mount_path', t('serviceConfigTemplate.nfsMountPath'), {
+          maxLength: FIELD_MAX_LENGTH.nfs_mount_path,
+        })}
 
         <SectionTitle>{t('serviceConfigTemplate.sectionResources')}</SectionTitle>
-        {textField('agent_cpu_request', t('serviceConfigTemplate.agentCpuRequest'), '500m')}
-        {textField('agent_memory_request', t('serviceConfigTemplate.agentMemoryRequest'), '512Mi')}
-        {textField('agent_cpu_limit', t('serviceConfigTemplate.agentCpuLimit'), '2')}
-        {textField('agent_memory_limit', t('serviceConfigTemplate.agentMemoryLimit'), '2Gi')}
-        {textField('jiuwenbox_cpu_request', t('serviceConfigTemplate.jiuwenboxCpuRequest'), '250m')}
-        {textField('jiuwenbox_memory_request', t('serviceConfigTemplate.jiuwenboxMemoryRequest'), '256Mi')}
-        {textField('jiuwenbox_cpu_limit', t('serviceConfigTemplate.jiuwenboxCpuLimit'), '1')}
-        {textField('jiuwenbox_memory_limit', t('serviceConfigTemplate.jiuwenboxMemoryLimit'), '1Gi')}
+        {textField('agent_cpu_request', t('serviceConfigTemplate.agentCpuRequest'), {
+          maxLength: FIELD_MAX_LENGTH.agent_cpu_request,
+          placeholder: '500m',
+        })}
+        {textField('agent_memory_request', t('serviceConfigTemplate.agentMemoryRequest'), {
+          maxLength: FIELD_MAX_LENGTH.agent_memory_request,
+          placeholder: '512Mi',
+        })}
+        {textField('agent_cpu_limit', t('serviceConfigTemplate.agentCpuLimit'), {
+          maxLength: FIELD_MAX_LENGTH.agent_cpu_limit,
+          placeholder: '2',
+        })}
+        {textField('agent_memory_limit', t('serviceConfigTemplate.agentMemoryLimit'), {
+          maxLength: FIELD_MAX_LENGTH.agent_memory_limit,
+          placeholder: '2Gi',
+        })}
+        {textField('jiuwenbox_cpu_request', t('serviceConfigTemplate.jiuwenboxCpuRequest'), {
+          maxLength: FIELD_MAX_LENGTH.jiuwenbox_cpu_request,
+          placeholder: '250m',
+        })}
+        {textField('jiuwenbox_memory_request', t('serviceConfigTemplate.jiuwenboxMemoryRequest'), {
+          maxLength: FIELD_MAX_LENGTH.jiuwenbox_memory_request,
+          placeholder: '256Mi',
+        })}
+        {textField('jiuwenbox_cpu_limit', t('serviceConfigTemplate.jiuwenboxCpuLimit'), {
+          maxLength: FIELD_MAX_LENGTH.jiuwenbox_cpu_limit,
+          placeholder: '1',
+        })}
+        {textField('jiuwenbox_memory_limit', t('serviceConfigTemplate.jiuwenboxMemoryLimit'), {
+          maxLength: FIELD_MAX_LENGTH.jiuwenbox_memory_limit,
+          placeholder: '1Gi',
+        })}
 
         <SectionTitle>{t('serviceConfigTemplate.sectionPool')}</SectionTitle>
         {numField('min_idle_services', t('serviceConfigTemplate.minIdleServices'))}
@@ -357,26 +424,6 @@ export function ServiceConfigTemplateModal({ open, template, onClose, onSaved }:
         {numField('message_timeout', t('serviceConfigTemplate.messageTimeout'), 1)}
         {numField('session_concurrency', t('serviceConfigTemplate.sessionConcurrency'), 1)}
         {numField('session_ttl', t('serviceConfigTemplate.sessionTtl'), 1)}
-
-        <SectionTitle>{t('serviceConfigTemplate.sectionExtra')}</SectionTitle>
-        <div className="md:col-span-2">
-          <JsonField
-            label={t('serviceConfigTemplate.data')}
-            value={form.data}
-            onChange={(v) => update('data', v)}
-            rows={4}
-          />
-        </div>
-        <div className="md:col-span-2">
-          <label className="flex items-center gap-2 cursor-pointer border border-border rounded-md px-3 py-2 w-fit hover:bg-bg-hover">
-            <input
-              type="checkbox"
-              checked={form.enabled}
-              onChange={(e) => update('enabled', e.target.checked)}
-            />
-            <span>{t('common.enabled')}</span>
-          </label>
-        </div>
       </div>
     </Modal>
   );

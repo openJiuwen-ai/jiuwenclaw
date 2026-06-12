@@ -81,6 +81,19 @@
   --danger-subtle: rgba(239, 68, 68, 0.12);
   --info: #3b82f6;
 
+  --toast-success-bg: #14532d;
+  --toast-success-fg: #ecfdf5;
+  --toast-success-border: #4ade80;
+  --toast-warn-bg: #713f12;
+  --toast-warn-fg: #fffbeb;
+  --toast-warn-border: #fbbf24;
+  --toast-danger-bg: #7f1d1d;
+  --toast-danger-fg: #fef2f2;
+  --toast-danger-border: #f87171;
+  --toast-info-bg: #1e3a8a;
+  --toast-info-fg: #eff6ff;
+  --toast-info-border: #60a5fa;
+
   --focus: rgba(96, 165, 250, 0.25);
   --focus-ring: 0 0 0 2px var(--bg), 0 0 0 4px var(--ring);
 
@@ -170,6 +183,19 @@
   --danger: #dc2626;
   --danger-subtle: rgba(220, 38, 38, 0.1);
   --info: #2563eb;
+
+  --toast-success-bg: #dcfce7;
+  --toast-success-fg: #14532d;
+  --toast-success-border: #16a34a;
+  --toast-warn-bg: #fef9c3;
+  --toast-warn-fg: #854d0e;
+  --toast-warn-border: #eab308;
+  --toast-danger-bg: #fee2e2;
+  --toast-danger-fg: #7f1d1d;
+  --toast-danger-border: #dc2626;
+  --toast-info-bg: #dbeafe;
+  --toast-info-fg: #1e3a8a;
+  --toast-info-border: #2563eb;
 
   --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.06);
   --shadow-md: 0 4px 12px rgba(0, 0, 0, 0.08), 0 0 0 1px rgba(0, 0, 0, 0.04);
@@ -514,6 +540,32 @@ button, input, textarea, select { font: inherit; color: inherit; }
   .pill.subtle { background: transparent; }
   .pill.sm { padding: 2px 8px; font-size: var(--font-size-2xs); }
 
+  .toast-item {
+    border: 1px solid;
+    box-shadow: var(--shadow-lg);
+    font-weight: 500;
+  }
+  .toast-item--success {
+    background: var(--toast-success-bg);
+    color: var(--toast-success-fg);
+    border-color: var(--toast-success-border);
+  }
+  .toast-item--warn {
+    background: var(--toast-warn-bg);
+    color: var(--toast-warn-fg);
+    border-color: var(--toast-warn-border);
+  }
+  .toast-item--danger {
+    background: var(--toast-danger-bg);
+    color: var(--toast-danger-fg);
+    border-color: var(--toast-danger-border);
+  }
+  .toast-item--info {
+    background: var(--toast-info-bg);
+    color: var(--toast-info-fg);
+    border-color: var(--toast-info-border);
+  }
+
   /* 用 provider / hook 等场景的小色 chip */
   .tag {
     display: inline-flex; align-items: center; gap: 4px;
@@ -530,11 +582,21 @@ button, input, textarea, select { font: inherit; color: inherit; }
     border-radius: var(--radius-full);
     background: var(--accent);
   }
+  /* model provider */
   .tag.openai::before { background: #10a37f; }
+  .tag.openrouter::before { background: #6366f1; }
+  .tag.dashscope::before { background: #ff6a00; }
+  .tag.siliconflow::before { background: #7c3aed; }
+  .tag.inferenceaffinity::before { background: #06b6d4; }
   .tag.deepseek::before { background: #4a8df6; }
   .tag.anthropic::before { background: #d97757; }
   .tag.qwen::before { background: #615ced; }
   .tag.zhipu::before { background: #3b82f6; }
+  /* model type */
+  .tag.default::before { background: #60a5fa; }
+  .tag.video::before { background: #ec4899; }
+  .tag.audio::before { background: #8b5cf6; }
+  .tag.vision::before { background: #14b8a6; }
   .tag.gateway::before { background: var(--accent); }
   .tag.agent_server::before { background: var(--accent-2); }
   .tag.worker::before { background: #a855f7; }
@@ -640,6 +702,78 @@ button, input, textarea, select { font: inherit; color: inherit; }
   .table tbody tr.row-clickable { cursor: pointer; }
   .table tbody tr.row-clickable:hover td { background: var(--accent-subtle); }
   .table td.num { font-variant-numeric: tabular-nums; }
+
+  .th-filter {
+    position: relative;
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    max-width: 100%;
+  }
+  .th-filter__label {
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .th-filter__btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 22px;
+    height: 22px;
+    flex-shrink: 0;
+    border: 0;
+    border-radius: var(--radius-sm);
+    background: transparent;
+    color: var(--muted);
+    cursor: pointer;
+    transition: color var(--duration-fast) ease, background var(--duration-fast) ease;
+  }
+  .th-filter__btn:hover,
+  .th-filter__btn.open {
+    color: var(--text);
+    background: var(--bg-hover);
+  }
+  .th-filter__btn.active {
+    color: var(--accent);
+  }
+  .th-filter__icon {
+    width: 14px;
+    height: 14px;
+  }
+  .th-filter__menu {
+    position: absolute;
+    top: calc(100% + 6px);
+    left: 0;
+    z-index: 20;
+    min-width: 148px;
+    padding: 4px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-md);
+    background: var(--card);
+    box-shadow: var(--shadow-md);
+  }
+  .th-filter__item {
+    display: block;
+    width: 100%;
+    padding: 7px 10px;
+    border: 0;
+    border-radius: var(--radius-sm);
+    background: transparent;
+    color: var(--text);
+    font-size: var(--font-size-sm);
+    text-align: left;
+    cursor: pointer;
+    transition: background var(--duration-fast) ease, color var(--duration-fast) ease;
+  }
+  .th-filter__item:hover {
+    background: var(--bg-hover);
+  }
+  .th-filter__item.selected {
+    color: var(--accent);
+    background: var(--accent-subtle);
+    font-weight: 500;
+  }
 
   /* Topology */
   .topo-group {

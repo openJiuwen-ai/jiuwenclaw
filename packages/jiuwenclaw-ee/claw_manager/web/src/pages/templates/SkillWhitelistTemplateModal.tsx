@@ -1,10 +1,9 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useState, type ReactNode } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Modal } from '../../components/Modal';
-import { JsonField, tryParseJson, useInvalidJsonChecker } from '../../components/JsonField';
+import { LimitedTextInput } from '../../components/LimitedTextInput';
 import { SkillWhitelistTemplateApi, ApiError } from '../../services/api';
 import { toast } from '../../stores/uiStore';
-import { safeStringify } from '../../utils/format';
 import type {
   SkillWhitelistTemplate,
   SkillWhitelistTemplateCreateBody,
@@ -18,14 +17,34 @@ interface Props {
   onSaved: () => void;
 }
 
+/** 与 skill_whitelist_template 表 ColumnDefinition length 一致 */
+const FIELD_MAX_LENGTH = {
+  template_name: 128,
+  description: 512,
+  skill_id: 512,
+  skill_version: 64,
+  skill_source: 2048,
+} as const;
+
+function clipField(value: string, max: number): string {
+  return value.slice(0, max);
+}
+
+function FieldLabel({ children, required }: { children: ReactNode; required?: boolean }) {
+  return (
+    <label className="label">
+      {children}
+      {required && <span className="text-danger ml-0.5" aria-hidden="true">*</span>}
+    </label>
+  );
+}
+
 interface FormState {
   template_name: string;
   description: string;
   skill_id: string;
   skill_version: string;
   skill_source: string;
-  data: string;
-  enabled: boolean;
 }
 
 const empty: FormState = {
@@ -34,13 +53,10 @@ const empty: FormState = {
   skill_id: '',
   skill_version: '',
   skill_source: '',
-  data: '',
-  enabled: true,
 };
 
 export function SkillWhitelistTemplateModal({ open, template, onClose, onSaved }: Props) {
   const { t } = useTranslation();
-  const checkJson = useInvalidJsonChecker();
   const [form, setForm] = useState<FormState>(empty);
   const [saving, setSaving] = useState(false);
 
@@ -48,13 +64,11 @@ export function SkillWhitelistTemplateModal({ open, template, onClose, onSaved }
     if (!open) return;
     if (template) {
       setForm({
-        template_name: template.template_name,
-        description: template.description ?? '',
-        skill_id: template.skill_id,
-        skill_version: template.skill_version,
-        skill_source: template.skill_source,
-        data: safeStringify(template.data ?? {}, 2),
-        enabled: template.enabled,
+        template_name: clipField(template.template_name, FIELD_MAX_LENGTH.template_name),
+        description: clipField(template.description ?? '', FIELD_MAX_LENGTH.description),
+        skill_id: clipField(template.skill_id, FIELD_MAX_LENGTH.skill_id),
+        skill_version: clipField(template.skill_version, FIELD_MAX_LENGTH.skill_version),
+        skill_source: clipField(template.skill_source, FIELD_MAX_LENGTH.skill_source),
       });
     } else {
       setForm(empty);
@@ -65,25 +79,15 @@ export function SkillWhitelistTemplateModal({ open, template, onClose, onSaved }
     setForm((s) => ({ ...s, [k]: v }));
 
   const submit = async () => {
-    if (!form.template_name.trim()) {
-      toast('warn', t('skillWhitelistTemplate.templateName'));
-      return;
-    }
-    if (!form.skill_id.trim()) {
-      toast('warn', t('skillWhitelistTemplate.skillId'));
-      return;
-    }
-    if (!form.skill_version.trim()) {
-      toast('warn', t('skillWhitelistTemplate.skillVersion'));
-      return;
-    }
-    if (!form.skill_source.trim()) {
-      toast('warn', t('skillWhitelistTemplate.skillSource'));
-      return;
-    }
-    const dataErr = checkJson(form.data);
-    if (dataErr) {
-      toast('danger', dataErr);
+    const requiredChecks: { label: string; invalid: boolean }[] = [
+      { label: t('skillWhitelistTemplate.templateName'), invalid: !form.template_name.trim() },
+      { label: t('skillWhitelistTemplate.skillSource'), invalid: !form.skill_source.trim() },
+      { label: t('skillWhitelistTemplate.skillId'), invalid: !form.skill_id.trim() },
+      { label: t('skillWhitelistTemplate.skillVersion'), invalid: !form.skill_version.trim() },
+    ];
+    const missing = requiredChecks.find((item) => item.invalid);
+    if (missing) {
+      toast('warn', t('skillWhitelistTemplate.fieldRequired', { field: missing.label }));
       return;
     }
 
@@ -93,8 +97,6 @@ export function SkillWhitelistTemplateModal({ open, template, onClose, onSaved }
       skill_id: form.skill_id.trim(),
       skill_version: form.skill_version.trim(),
       skill_source: form.skill_source.trim(),
-      data: form.data.trim() ? (tryParseJson(form.data, {}) as Record<string, unknown>) : undefined,
-      enabled: form.enabled,
     };
 
     setSaving(true);
@@ -102,7 +104,7 @@ export function SkillWhitelistTemplateModal({ open, template, onClose, onSaved }
       if (template) {
         await SkillWhitelistTemplateApi.update(template.template_id, body);
       } else {
-        await SkillWhitelistTemplateApi.create(body as SkillWhitelistTemplateCreateBody);
+        await SkillWhitelistTemplateApi.create({ ...body, enabled: true } as SkillWhitelistTemplateCreateBody);
       }
       toast('success', t('success.saved'));
       onSaved();
@@ -132,61 +134,44 @@ export function SkillWhitelistTemplateModal({ open, template, onClose, onSaved }
     >
       <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
         <div className="md:col-span-2">
-          <label className="label">{t('skillWhitelistTemplate.templateName')}</label>
-          <input
-            className="input"
+          <FieldLabel required>{t('skillWhitelistTemplate.templateName')}</FieldLabel>
+          <LimitedTextInput
             value={form.template_name}
-            onChange={(e) => update('template_name', e.target.value)}
+            maxLength={FIELD_MAX_LENGTH.template_name}
+            onChange={(v) => update('template_name', v)}
           />
         </div>
         <div className="md:col-span-2">
-          <label className="label">{t('common.detail')}</label>
-          <input className="input" value={form.description} onChange={(e) => update('description', e.target.value)} />
-        </div>
-        <div>
-          <label className="label">{t('skillWhitelistTemplate.skillId')}</label>
-          <input
-            className="input"
-            placeholder={t('skillWhitelistTemplate.skillIdHint')}
-            value={form.skill_id}
-            onChange={(e) => update('skill_id', e.target.value)}
-          />
-        </div>
-        <div>
-          <label className="label">{t('skillWhitelistTemplate.skillVersion')}</label>
-          <input
-            className="input"
-            placeholder="1.0.0"
-            value={form.skill_version}
-            onChange={(e) => update('skill_version', e.target.value)}
+          <FieldLabel>{t('skillWhitelistTemplate.templateDescription')}</FieldLabel>
+          <LimitedTextInput
+            value={form.description}
+            maxLength={FIELD_MAX_LENGTH.description}
+            onChange={(v) => update('description', v)}
           />
         </div>
         <div className="md:col-span-2">
-          <label className="label">{t('skillWhitelistTemplate.skillSource')}</label>
-          <input
-            className="input"
-            placeholder="https://skillhub.example.com/"
+          <FieldLabel required>{t('skillWhitelistTemplate.skillSource')}</FieldLabel>
+          <LimitedTextInput
             value={form.skill_source}
-            onChange={(e) => update('skill_source', e.target.value)}
+            maxLength={FIELD_MAX_LENGTH.skill_source}
+            onChange={(v) => update('skill_source', v)}
           />
         </div>
-        <div className="md:col-span-2">
-          <JsonField
-            label={t('skillWhitelistTemplate.data')}
-            value={form.data}
-            onChange={(v) => update('data', v)}
-            rows={5}
+        <div>
+          <FieldLabel required>{t('skillWhitelistTemplate.skillId')}</FieldLabel>
+          <LimitedTextInput
+            value={form.skill_id}
+            maxLength={FIELD_MAX_LENGTH.skill_id}
+            onChange={(v) => update('skill_id', v)}
           />
         </div>
-        <div className="md:col-span-2">
-          <label className="flex items-center gap-2 cursor-pointer border border-border rounded-md px-3 py-2 w-fit hover:bg-bg-hover">
-            <input
-              type="checkbox"
-              checked={form.enabled}
-              onChange={(e) => update('enabled', e.target.checked)}
-            />
-            <span>{t('common.enabled')}</span>
-          </label>
+        <div>
+          <FieldLabel required>{t('skillWhitelistTemplate.skillVersion')}</FieldLabel>
+          <LimitedTextInput
+            value={form.skill_version}
+            maxLength={FIELD_MAX_LENGTH.skill_version}
+            onChange={(v) => update('skill_version', v)}
+          />
         </div>
       </div>
     </Modal>

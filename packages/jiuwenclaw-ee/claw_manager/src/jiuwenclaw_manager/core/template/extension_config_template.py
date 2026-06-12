@@ -20,6 +20,7 @@ _ALLOWED_COMPONENTS = frozenset({"gateway", "agent_server"})
 _ALLOWED_HOOK_TYPES = frozenset({"pre_request", "post_request", "error", "schedule"})
 _TABLE = EXTENSION_CONFIG_TEMPLATE_TABLE_DEF.table_name
 _CONFIG_SECTION = "extension_config_templates"
+_LIST_ALL_CAP = 10_000
 
 
 async def push_extension_config_templates_to_all_gateways(
@@ -69,6 +70,20 @@ def _validate_hook_type(value: str) -> str:
             f"hook_type must be one of {sorted(_ALLOWED_HOOK_TYPES)}, got {value!r}"
         )
     return normalized
+
+
+def _matches_search(row: Any, query: str) -> bool:
+    needle = query.strip().lower()
+    if not needle:
+        return True
+    fields = [
+        str(getattr(row, "template_id", "") or ""),
+        str(getattr(row, "template_name", "") or ""),
+        str(getattr(row, "description", "") or ""),
+        str(getattr(row, "component", "") or ""),
+        str(getattr(row, "hook_type", "") or ""),
+    ]
+    return any(needle in field.lower() for field in fields)
 
 
 def _validate_hook_config(hook_config: dict[str, Any], *, hook_type: str) -> dict[str, Any]:
@@ -210,6 +225,7 @@ class ExtensionConfigTemplateService:
         enabled: bool | None,
         component: str | None,
         hook_type: str | None,
+        search: str | None = None,
     ) -> dict[str, Any]:
         page = max(page, 1)
         page_size = min(max(page_size, 1), 200)
@@ -220,6 +236,26 @@ class ExtensionConfigTemplateService:
             filters["component"] = _validate_component(component)
         if hook_type is not None:
             filters["hook_type"] = _validate_hook_type(hook_type)
+
+        search_query = (search or "").strip()
+        if search_query:
+            rows = await self._handler.list_records(
+                _TABLE, filters, limit=_LIST_ALL_CAP, offset=0
+            )
+            items = [
+                _row_to_out(r).model_dump(mode="json")
+                for r in rows
+                if _matches_search(r, search_query)
+            ]
+            total = len(items)
+            offset = (page - 1) * page_size
+            page_items = items[offset:offset + page_size]
+            return {
+                "items": page_items,
+                "total": total,
+                "page": page,
+                "page_size": page_size,
+            }
 
         offset = (page - 1) * page_size
         rows = await self._handler.list_records(

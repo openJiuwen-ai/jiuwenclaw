@@ -1,11 +1,14 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useAsync } from '../../hooks/useAsync';
+import { useDebouncedValue } from '../../hooks/useDebouncedValue';
 import { ServiceConfigTemplateApi, ApiError } from '../../services/api';
 import type { ServiceConfigTemplate } from '../../types';
 import { Empty } from '../../components/Empty';
 import { Pagination } from '../../components/Pagination';
 import { ConfirmDialog } from '../../components/ConfirmDialog';
+import { Switch } from '../../components/Switch';
+import { TableColumnFilter } from '../../components/TableColumnFilter';
 import { ServiceConfigTemplateModal } from './ServiceConfigTemplateModal';
 import { toast } from '../../stores/uiStore';
 import { formatTime, truncate } from '../../utils/format';
@@ -14,23 +17,59 @@ export function ServiceConfigTemplatesPage() {
   const { t } = useTranslation();
   const [page, setPage] = useState(1);
   const [pageSize] = useState(20);
-  const [namespace, setNamespace] = useState('');
+  const [searchInput, setSearchInput] = useState('');
+  const debouncedSearch = useDebouncedValue(searchInput, 700);
   const [enabledFilter, setEnabledFilter] = useState<string>('');
+
+  useEffect(() => {
+    setPage(1);
+  }, [debouncedSearch]);
 
   const { data, loading, error, reload } = useAsync(
     () =>
       ServiceConfigTemplateApi.list({
         page,
         page_size: pageSize,
-        namespace: namespace || undefined,
+        search: debouncedSearch.trim() || undefined,
         enabled: enabledFilter === '' ? undefined : enabledFilter === 'true',
       }),
-    [page, pageSize, namespace, enabledFilter]
+    [page, pageSize, debouncedSearch, enabledFilter]
   );
 
+  const [items, setItems] = useState<ServiceConfigTemplate[]>([]);
   const [modalOpen, setModalOpen] = useState(false);
   const [editing, setEditing] = useState<ServiceConfigTemplate | null>(null);
   const [delTarget, setDelTarget] = useState<ServiceConfigTemplate | null>(null);
+  const [togglingId, setTogglingId] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (data?.items) {
+      setItems(data.items);
+    }
+  }, [data]);
+
+  const toggleEnabled = async (row: ServiceConfigTemplate, enabled: boolean) => {
+    if (togglingId) return;
+    const previous = row.enabled;
+    setItems((list) =>
+      list.map((item) => (item.template_id === row.template_id ? { ...item, enabled } : item)),
+    );
+    setTogglingId(row.template_id);
+    try {
+      await ServiceConfigTemplateApi.update(row.template_id, { enabled });
+      if (enabledFilter !== '' && enabled !== (enabledFilter === 'true')) {
+        setItems((list) => list.filter((item) => item.template_id !== row.template_id));
+      }
+      toast('success', t('success.saved'));
+    } catch (e) {
+      setItems((list) =>
+        list.map((item) => (item.template_id === row.template_id ? { ...item, enabled: previous } : item)),
+      );
+      toast('danger', t('errors.saveFailed', { detail: e instanceof ApiError ? e.detail : (e as Error).message }));
+    } finally {
+      setTogglingId(null);
+    }
+  };
 
   return (
     <div className="flex flex-col gap-4">
@@ -41,26 +80,11 @@ export function ServiceConfigTemplatesPage() {
         </div>
         <div className="flex items-center gap-2">
           <input
-            className="input !w-40"
-            placeholder={t('serviceConfigTemplate.filterNamespace')}
-            value={namespace}
-            onChange={(e) => {
-              setNamespace(e.target.value);
-              setPage(1);
-            }}
+            className="input !w-[38rem]"
+            placeholder={t('serviceConfigTemplate.searchPlaceholder')}
+            value={searchInput}
+            onChange={(e) => setSearchInput(e.target.value)}
           />
-          <select
-            className="select !w-32"
-            value={enabledFilter}
-            onChange={(e) => {
-              setEnabledFilter(e.target.value);
-              setPage(1);
-            }}
-          >
-            <option value="">{t('common.all')}</option>
-            <option value="true">{t('common.enabled')}</option>
-            <option value="false">{t('common.disabled')}</option>
-          </select>
           <button className="btn sm" onClick={() => void reload()}>
             {t('common.refresh')}
           </button>
@@ -81,43 +105,58 @@ export function ServiceConfigTemplatesPage() {
           <div className="p-4 text-sm text-muted">{t('common.loading')}</div>
         ) : error ? (
           <div className="p-4 text-sm text-danger">{t('errors.loadFailed', { detail: error })}</div>
-        ) : !data || data.items.length === 0 ? (
-          <Empty text={t('common.empty')} />
         ) : (
           <table className="table">
             <thead>
               <tr>
                 <th>{t('serviceConfigTemplate.templateName')}</th>
+                <th>{t('serviceConfigTemplate.templateDescription')}</th>
                 <th>{t('serviceConfigTemplate.agentImage')}</th>
-                <th>{t('serviceConfigTemplate.namespace')}</th>
-                <th>{t('serviceConfigTemplate.poolRange')}</th>
-                <th>{t('common.enabled')}</th>
-                <th>updated</th>
+                <th>
+                  <TableColumnFilter
+                    label={t('common.enabled')}
+                    value={enabledFilter}
+                    options={[
+                      { value: '', label: t('common.all') },
+                      { value: 'true', label: t('common.enabled') },
+                      { value: 'false', label: t('common.disabled') },
+                    ]}
+                    onChange={(value) => {
+                      setEnabledFilter(value);
+                      setPage(1);
+                    }}
+                  />
+                </th>
+                <th>{t('serviceConfigTemplate.updatedAt')}</th>
                 <th>{t('common.actions')}</th>
               </tr>
             </thead>
             <tbody>
-              {data.items.map((row) => (
+              {items.length === 0 ? (
+                <tr>
+                  <td colSpan={6}>
+                    <Empty text={t('common.empty')} />
+                  </td>
+                </tr>
+              ) : items.map((row) => (
                 <tr key={row.template_id}>
                   <td>
                     <div className="text-text-strong font-medium">{row.template_name}</div>
-                    {row.description && (
-                      <div className="text-[11px] text-muted">{row.description}</div>
-                    )}
                     <div className="text-[11px] text-muted mono">{row.template_id}</div>
+                  </td>
+                  <td className="text-[11px] text-muted" title={row.description ?? undefined}>
+                    {row.description ? truncate(row.description, 48) : '—'}
                   </td>
                   <td className="mono text-[11px] text-muted" title={row.agent_image}>
                     {truncate(row.agent_image, 32)}
                   </td>
-                  <td><span className="tag">{row.namespace}</span></td>
-                  <td className="mono text-xs">
-                    {row.min_idle_services} / {row.max_services}
-                  </td>
                   <td>
-                    <span className={`pill sm ${row.enabled ? 'ok' : 'muted'}`}>
-                      <span className={`statusDot ${row.enabled ? 'ok' : 'muted'}`} />
-                      {row.enabled ? t('common.enabled') : t('common.disabled')}
-                    </span>
+                    <Switch
+                      checked={row.enabled}
+                      disabled={togglingId === row.template_id}
+                      aria-label={row.enabled ? t('common.enabled') : t('common.disabled')}
+                      onChange={(enabled) => void toggleEnabled(row, enabled)}
+                    />
                   </td>
                   <td className="mono text-[11px] text-muted">{formatTime(row.updated_at)}</td>
                   <td>

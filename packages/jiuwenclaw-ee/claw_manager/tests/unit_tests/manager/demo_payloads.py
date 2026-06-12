@@ -16,15 +16,15 @@ def demo_agent_server_base() -> dict[str, Any]:
         "container_port": 8080,
         "port_name": "http1",
         "image_pull_policy": "IfNotPresent",
-        "readiness_initial_delay": 5,
-        "readiness_period": 10,
+        "readiness_initial_delay": 10,
+        "readiness_period": 5,
         "ready_timeout": 300,
-        "ready_poll_interval": 2,
-        "service_ttl": 30,
-        "autoscale_interval": 0.2,
-        "message_timeout": 300,
-        "session_concurrency": 10,
-        "session_ttl": 20,
+        "ready_poll_interval": 5,
+        "service_ttl": 180,
+        "autoscale_interval": 5,
+        "message_timeout": 60,
+        "session_concurrency": 3,
+        "session_ttl": 60,
     }
 
 
