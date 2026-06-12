@@ -3,6 +3,7 @@
 from jiuwenbox.models.sandbox import (
     BackgroundExecResult,
     ExecResult,
+    InvalidSandboxIdError,
     SandboxPhase,
     SandboxRef,
     SandboxSpec,
@@ -31,6 +32,7 @@ from jiuwenbox.models.common import (
 __all__ = [
     "BackgroundExecResult",
     "ExecResult",
+    "InvalidSandboxIdError",
     "SandboxPhase",
     "SandboxRef",
     "SandboxSpec",
