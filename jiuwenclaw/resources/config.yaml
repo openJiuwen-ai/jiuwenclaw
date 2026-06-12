@@ -484,6 +484,7 @@ react:
     enabled: false             # true = 启用在线 Skills 自演进
     auto_scan: false           # true = 每轮对话后自动扫描（建议先用手动 /evolve）
     skill_base_dir: "agent/skills"  # Skill 根目录
+    trajectory_dir: "agent/evolution_trajectories"  # 执行轨迹 JSONL 落盘目录（可选，默认即此路径）
   # LLM 调用重试配置（应用层；OpenAI SDK 重试见 models.*.model_client_config.max_retries）
   llm_retry:
     enabled: true              # 重试开关

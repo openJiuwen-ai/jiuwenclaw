@@ -1644,6 +1644,15 @@ def get_agent_sessions_dir() -> Path:
     return get_multi_tenant_user_workspace_dir("default", "default") / "agent" / "sessions"
 
 
+def get_agent_evolution_trajectories_dir() -> Path:
+    """Get the default evolution execution trajectories directory.
+
+    返回默认多租户路径（单租户作为多租户的默认特例）：
+    ~/.jiuwenclaw/service_default/agent_default/agent/evolution_trajectories
+    """
+    return get_agent_root_dir() / "evolution_trajectories"
+
+
 _legacy_migration_done: bool = False
 
 

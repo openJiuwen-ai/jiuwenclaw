@@ -16,6 +16,7 @@ import os
 from contextvars import ContextVar, Token
 from dataclasses import dataclass
 
+from pathlib import Path
 from typing import Any, AsyncIterator, Callable, List, Self, Tuple
 
 from dotenv import load_dotenv
@@ -78,6 +79,7 @@ from openjiuwen.harness.rails.context_engineering_rail import ContextEngineering
 from openjiuwen.harness.rails.filesystem_rail import FileSystemRail
 from openjiuwen.harness.rails.heartbeat_rail import HeartbeatRail
 from openjiuwen.agent_evolving.signal import SignalDetector
+from openjiuwen.agent_evolving.trajectory import FileTrajectoryStore
 from openjiuwen.harness.rails.memory_rail import MemoryRail
 from openjiuwen.harness.rails.coding_memory_rail import CodingMemoryRail
 from openjiuwen.harness.subagents.browser_agent import build_browser_agent_config
@@ -220,11 +222,13 @@ from jiuwenclaw.agentserver.team import get_team_manager
 from jiuwenclaw.schema.agent import AgentRequest, AgentResponse, AgentResponseChunk
 from jiuwenclaw.utils import (
     deep_merge_dicts,
+    get_agent_evolution_trajectories_dir,
     get_agent_registered_skill_dirs,
     get_agent_workspace_dir,
     get_checkpoint_dir,
     get_env_file,
     get_agent_root_dir,
+    get_multi_tenant_user_workspace_dir,
 )
 from jiuwenclaw.local_env_config import set_local_config
 
@@ -1742,6 +1746,25 @@ class JiuWenClawDeepAdapter:
             skill_rail = None
         return skill_rail
 
+    @staticmethod
+    def _resolve_evolution_trajectory_dir(config: dict[str, Any]) -> Path:
+        """Resolve directory for FileTrajectoryStore (env > config > default)."""
+        env_dir = (os.getenv("EVOLUTION_TRAJECTORY_DIR") or "").strip()
+        if env_dir:
+            return Path(env_dir).expanduser().resolve()
+
+        configured = config.get("evolution", {}).get("trajectory_dir")
+        if configured:
+            path = Path(str(configured).strip())
+            if path.is_absolute():
+                return path
+            workspace = get_multi_tenant_user_workspace_dir("default", "default")
+            if workspace is not None:
+                return (workspace / path).resolve()
+            return (get_agent_root_dir().parent / path).resolve()
+
+        return get_agent_evolution_trajectories_dir()
+
     def _build_skill_evolution_rail(self, config: dict[str, Any]) -> SkillEvolutionRail | None:
         """Build SkillEvolutionRail."""
         try:
@@ -1750,16 +1773,21 @@ class JiuWenClawDeepAdapter:
                 evolution_auto_scan: bool = _env_auto_scan.lower() in ("true", "1", "yes")
             else:
                 evolution_auto_scan = config.get("evolution", {}).get("auto_scan", False)
+            trajectory_dir = self._resolve_evolution_trajectory_dir(config)
             skill_evolution_rail = SkillEvolutionRail(
                 skills_dir=[str(p) for p in get_agent_registered_skill_dirs()],
                 llm=self._model,
                 model=config.get("model_name", "gpt-4"),
                 auto_scan=evolution_auto_scan,
-                auto_save=False
+                auto_save=False,
+                trajectory_store=FileTrajectoryStore(trajectory_dir),
             )
             self._skill_evolution_rail = skill_evolution_rail
-            logger.info("[JiuWenClaw] SkillEvolutionRail create success",
-                       extra={'user_visible': 'progress'})
+            logger.info(
+                "[JiuWenClaw] SkillEvolutionRail create success, trajectory_dir=%s",
+                trajectory_dir,
+                extra={'user_visible': 'progress'},
+            )
         except Exception as exc:
             logger.warning("[JiuWenClaw] SkillEvolutionRail create failed: %s", exc,
                           extra={'user_visible': 'progress'})
