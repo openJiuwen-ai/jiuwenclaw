@@ -36,46 +36,35 @@ def _resolve_skill_name(proposal: Proposal) -> str:
 
     Priority:
     1. ``proposal.target_id`` (if set)
-    2. ``proposal.targeted_fix["tool"]``
-    3. ``"general"``
+    2. ``"general"`` (fallback)
     """
     if proposal.target_id:
         return proposal.target_id
-    fix = proposal.targeted_fix
-    if isinstance(fix, dict):
-        tool = fix.get("tool", "")
-        if tool:
-            return tool
     return "general"
 
 
 def _build_content(proposal: Proposal) -> str:
-    """Build a textual experience content block from the Proposal."""
-    root = proposal.root_cause.strip()
-    impact = proposal.predicted_impact.strip()
-    risk = (proposal.risk or "").strip()
+    """Build a textual experience content block from the Proposal.
 
-    parts = [f"**Problem**: {root}"]
-    if impact:
-        parts.append(f"**Expected improvement**: {impact}")
-    if risk:
-        parts.append(f"**Risk**: {risk}")
-
-    # Include specific fix details if available
+    The output is injected into the agent's context, so it should contain
+    ACTIONABLE KNOWLEDGE, not diagnostic reports.
+    """
     fix = proposal.targeted_fix
     if isinstance(fix, dict):
-        action = fix.get("action", "")
         suggestion = fix.get("suggestion", "")
-        if action:
-            parts.append(f"**Fix action**: {action}")
         if suggestion:
-            parts.append(f"**Suggestion**: {suggestion}")
-        # Flatten remaining keys
-        for k, v in fix.items():
-            if k not in ("action", "suggestion", "tool"):
-                parts.append(f"**{k}**: {v}")
+            # The suggestion IS the knowledge — use it directly
+            return suggestion
 
-    return "\n\n".join(parts)
+    # Fallback: use root_cause + predicted_impact
+    root = proposal.root_cause.strip()
+    impact = proposal.predicted_impact.strip()
+    parts = []
+    if root:
+        parts.append(root)
+    if impact:
+        parts.append(impact)
+    return "\n\n".join(parts) if parts else "No experience content"
 
 
 @apply_writers.register("skill_writer")
@@ -236,13 +225,17 @@ class SkillExperienceWriter(ApplyWriter):
         score = float(proposal.metadata.get("max_score", 0.6))
         summary = proposal.predicted_impact.strip() or None
 
+        context_parts = [
+            f"Auto-generated from trace analysis.",
+            f"Proposal: {proposal.proposal_id}.",
+            f"Type: {proposal.proposal_type}.",
+        ]
+        if proposal.target_id:
+            context_parts.append(f"Target skill: {proposal.target_id}.")
+
         return EvolutionRecord.make(
             source="evolution_pipeline",
-            context=(
-                f"Auto-generated from trace analysis. "
-                f"Proposal: {proposal.proposal_id}. "
-                f"Type: {proposal.proposal_type}."
-            ),
+            context=" ".join(context_parts),
             change=patch,
             score=score,
             summary=summary,

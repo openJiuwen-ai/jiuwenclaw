@@ -12,8 +12,8 @@ evolve:
   pipeline:
     # Proposal 生成器列表（按列表顺序执行）
     proposal_generators:
-      - rule_proposer               # Rule-based（无需 LLM，快速验证）
-      # - llm_proposer              # LLM-based（需要配置 evolve.llm）
+      # - rule_proposer             # Rule-based（已禁用，误报多且 target 解析不准）
+      - llm_proposer                # LLM-based（使用默认 LLM 分析 trace）
 
     # 决策策略列表（按列表顺序执行）
     decision_policies:

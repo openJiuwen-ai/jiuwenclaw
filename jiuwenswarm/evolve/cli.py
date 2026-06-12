@@ -13,14 +13,16 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import logging
 import sys
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 
 def _build_pipeline_from_config(config: dict) -> object:
     """Build an EvolutionPipeline from config."""
     from jiuwenswarm.evolve.pipeline import EvolutionPipeline
-    from jiuwenswarm.evolve.proposal_generators.rule_proposer import RuleProposer
     from jiuwenswarm.evolve.proposal_generators.llm_proposer import LLMProposer
     from jiuwenswarm.evolve.decision_policies.rule_policy import RulePolicy
     from jiuwenswarm.evolve.decision_policies.eval_policy import EvalPolicy
@@ -50,22 +52,15 @@ def _build_pipeline_from_config(config: dict) -> object:
     # Trace reader for generators
     trace_reader = store._sqlite
 
-    # Build generators from config, or use defaults
-    generator_names = pipeline_cfg.get("proposal_generators", ["rule_proposer"])
+    # Build generators from config (only llm_proposer supported)
+    generator_names = pipeline_cfg.get("proposal_generators", ["llm_proposer"])
     generators: list = []
     for name in generator_names:
-        if name in proposal_generators:
+        if name == "llm_proposer" and name in proposal_generators:
             cls = proposal_generators.get(name)
-            if name == "rule_proposer":
-                generators.append(cls(trace_reader=trace_reader))
-            elif name == "llm_proposer":
-                llm_cfg = evolve_cfg.get("llm", {})
-                generators.append(
-                    cls(
-                        trace_reader=trace_reader,
-                        model_name=llm_cfg.get("model_name", "gpt-4"),
-                    )
-                )
+            generators.append(cls(trace_reader=trace_reader))
+        elif name == "rule_proposer":
+            logger.info("rule_proposer is disabled, skipping")
 
     # Build policies from config, or use defaults
     policy_names = pipeline_cfg.get("decision_policies", ["rule_policy", "eval_policy"])
