@@ -38,6 +38,7 @@ from jiuwenclaw.utils import (
     get_env_file,
     prepare_workspace,
     get_multi_tenant_user_workspace_dir,
+    shutdown_logging,
 )
 from jiuwenclaw.extensions.extension_config_sync import decrypt_extensions_sensitive_for_agent
 from jiuwenclaw.local_env_config import decrypt
@@ -1788,6 +1789,7 @@ async def _run(
         await message_handler.stop_forwarding()
         await client.disconnect()
         logger.info("[App] Gateway stopped")
+        shutdown_logging()
 
 
 def main() -> None:

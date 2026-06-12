@@ -77,38 +77,66 @@ class TestLoggerSetup:
     def test_setup_logger_default():
         """Test logger setup with default level from explicit override."""
         logger = utils.setup_logger("INFO")
-        assert logger.name == "jiuwenclaw"
-        assert logger.level == 20  # INFO level
+        try:
+            assert logger.name == "jiuwenclaw"
+            assert logger.level == 20  # INFO level
+        finally:
+            utils.shutdown_logging()
 
     @staticmethod
     def test_setup_logger_debug():
         """Test logger setup with DEBUG level."""
         logger = utils.setup_logger("DEBUG")
-        assert logger.level == 10  # DEBUG level
+        try:
+            assert logger.level == 10  # DEBUG level
+        finally:
+            utils.shutdown_logging()
 
     @staticmethod
     def test_setup_logger_error():
         """Test logger setup with ERROR level."""
         logger = utils.setup_logger("ERROR")
-        assert logger.level == 40  # ERROR level
+        try:
+            assert logger.level == 40  # ERROR level
+        finally:
+            utils.shutdown_logging()
 
     @staticmethod
-    def test_logger_handlers():
-        """Test that logger has console and five rotating log files."""
+    def test_logger_handlers_sync_mode(monkeypatch):
+        """LOG_ASYNC=0 attaches file/console handlers directly to root."""
+        monkeypatch.setenv("LOG_ASYNC", "0")
         logger = utils.setup_logger("INFO")
-        handler_types = [type(h).__name__ for h in logger.handlers]
-        assert "StreamHandler" in handler_types
-        assert handler_types.count("SafeRotatingFileHandler") == 5
+        try:
+            handler_types = [type(h).__name__ for h in logger.handlers]
+            assert "StreamHandler" in handler_types
+            assert handler_types.count("SafeRotatingFileHandler") == 4
+        finally:
+            utils.shutdown_logging()
+
+    @staticmethod
+    def test_logger_handlers_async_mode(monkeypatch):
+        """LOG_ASYNC=1 uses a single QueueHandler on root."""
+        monkeypatch.setenv("LOG_ASYNC", "1")
+        logger = utils.setup_logger("INFO")
+        try:
+            handler_types = [type(h).__name__ for h in logger.handlers]
+            assert handler_types == ["QueueHandler"]
+            assert utils.async_logging_enabled()
+        finally:
+            utils.shutdown_logging()
 
     @staticmethod
     def test_log_level_env_overrides_file_handlers(monkeypatch):
         """LOG_LEVEL should control console and file handler levels."""
+        monkeypatch.setenv("LOG_ASYNC", "0")
         monkeypatch.setenv("LOG_LEVEL", "ERROR")
         logger = utils.setup_logger()
-
-        assert logger.level == logging.ERROR
-        for handler in logger.handlers:
-            assert handler.level == logging.ERROR
+        try:
+            assert logger.level == logging.ERROR
+            for handler in logger.handlers:
+                assert handler.level == logging.ERROR
+        finally:
+            utils.shutdown_logging()
 
 
 class TestUserWorkspace:

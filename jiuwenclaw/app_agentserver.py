@@ -33,6 +33,7 @@ from jiuwenclaw.utils import (
     logger,
     update_config,
     get_multi_tenant_user_workspace_dir,
+    shutdown_logging,
 )
 
 apply_openai_model_client_patch()
@@ -151,6 +152,7 @@ async def _run(host: str, port: int) -> None:
         logger.info("[AgentServer] stopping…")
         await server.stop()
         logger.info("[AgentServer] stopped")
+        shutdown_logging()
 
 
 def main() -> None:

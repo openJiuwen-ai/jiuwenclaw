@@ -31,9 +31,7 @@ import json
 import os
 import re
 import sys
-import threading
 import time
-import datetime
 import asyncio
 import shutil
 import mimetypes
@@ -42,22 +40,8 @@ from dataclasses import dataclass, field
 from typing import Any, Literal, Optional
 from collections import OrderedDict
 import logging
-from logging.handlers import BaseRotatingHandler
 from ruamel.yaml import YAML
 from ruamel.yaml.comments import CommentedMap
-
-_LOG_FILE_MAX_BYTES = 20 * 1024 * 1024
-_LOG_FILE_BACKUP_COUNT = 20
-
-
-@dataclass
-class LoggingLevels:
-    """Container for logging level configuration."""
-    logger: int
-    console: int
-    gateway: int
-    channel: int
-    agent_server: int
 
 
 @dataclass
@@ -74,184 +58,6 @@ class FileTransferStartParams:
     session_id: str = ""
     channel_id: str = ""
     user_id: str = ""
-
-
-class SafeRotatingFileHandler(BaseRotatingHandler):
-    """Safe rotating file handler"""
-
-    def __init__(self, filename, maxBytes=0, backupCount=0, encoding=None,
-                 delay=False, errors=None):
-        """Initialize the handler."""
-        super().__init__(filename, 'a', encoding, errors)
-        self.max_bytes = maxBytes
-        self.backup_count = backupCount
-        self._current_filename = filename
-
-        if delay:
-            self.stream = None
-
-    def shouldRollover(self, record):
-        """
-        Determine if rollover should occur.
-
-        Returns True if the log file size exceeds maxBytes.
-        """
-        if self.stream is None:
-            return False
-        if self.max_bytes > 0:
-            msg = "%s\n" % self.format(record)
-            self.stream.seek(0, 2)  # Seek to end of file
-            if self.stream.tell() + len(msg) >= self.max_bytes:
-                return True
-        return False
-
-    def doRollover(self):
-        """
-        Perform log rotation to keep app.log as the active log file.
-        """
-        base_path = Path(self.baseFilename)
-
-        timestamp = datetime.datetime.now(tz=datetime.timezone.utc).strftime("%Y%m%d_%H%M%S")
-        backup_filename = base_path.parent / f"{base_path.stem}_{timestamp}{base_path.suffix}"
-
-        try:
-            if base_path.exists():
-                shutil.copy2(base_path, backup_filename)
-        except OSError as e:
-            print(f"WARNING: Could not copy log file to backup: {e}", file=sys.stderr)
-
-        # Clean up old backup files
-        self._cleanup_old_backups()
-
-        try:
-            if self.stream:
-                self.stream.seek(0)  # Seek to beginning
-                self.stream.truncate(0)  # Truncate to 0 bytes
-        except OSError as e:
-            print(f"WARNING: Could not truncate log file: {e}", file=sys.stderr)
-
-    def _cleanup_old_backups(self):
-        """
-        Remove old backup files if they exceed backupCount.
-
-        Backup files are sorted by modification time (oldest first).
-        """
-        if self.backup_count <= 0:
-            return
-
-        try:
-            base_path = Path(self.baseFilename)
-            log_dir = base_path.parent
-
-            backup_files = []
-            for f in log_dir.glob(f"{base_path.stem}_*{base_path.suffix}"):
-                if f.is_file() and f != base_path:
-                    backup_files.append(f)
-
-            # Sort by modification time (oldest first)
-            backup_files.sort(key=lambda x: x.stat().st_mtime)
-
-            # Remove excess files
-            files_to_delete = len(backup_files) - self.backup_count
-            if files_to_delete > 0:
-                for f in backup_files[:files_to_delete]:
-                    try:
-                        f.unlink()
-                    except OSError as e:
-                        print(f"WARNING: Could not delete old log file {f}: {e}", file=sys.stderr)
-        except Exception as e:
-            print(f"WARNING: Error during backup cleanup: {e}", file=sys.stderr)
-
-
-def _parse_log_level(name: str, default: int = logging.INFO) -> int:
-    """Parse level name to logging module constant."""
-    if not name or not isinstance(name, str):
-        return default
-    return getattr(logging, name.strip().upper(), default)
-
-
-def _log_component_from_logger_name(name: str) -> str:
-    """按 ``logging.getLogger(__name__)`` 的 logger 名划分 gateway / channel / agent_server / permissions。"""
-    if name.startswith("jiuwenclaw.channel"):
-        return "channel"
-    if name.startswith("jiuwenclaw.agentserver.permissions.checker"):
-        return "permissions"
-    if name.startswith("jiuwenclaw.agentserver"):
-        return "agent_server"
-    return "gateway"
-
-
-class _ComponentNameFilter(logging.Filter):
-    """仅放行指定组件（由 logger 名判定）的日志记录。"""
-
-    def __init__(self, component: str) -> None:
-        super().__init__()
-        self.component = component
-
-    def filter(self, record: logging.LogRecord) -> bool:
-        # 优先使用 extra 中的 component 标记，允许精确控制特定日志行
-        if hasattr(record, 'component'):
-            return record.component == self.component
-        return _log_component_from_logger_name(record.name) == self.component
-
-
-class _CompositeFilter(logging.Filter):
-    """组合多个过滤器，任一通过即放行"""
-
-    def __init__(self, filters: list[logging.Filter]) -> None:
-        super().__init__()
-        self.filters = filters
-
-    def filter(self, record: logging.LogRecord) -> bool:
-        return any(f.filter(record) for f in self.filters)
-
-
-def _load_logging_config_from_yaml() -> dict[str, Any]:
-    """读取 ~/.jiuwenclaw/config/config.yaml 中的 logging 段（无则空）。"""
-    try:
-        cf = get_config_file()
-        if not cf.exists():
-            return {}
-        rt = YAML()
-        with open(cf, "r", encoding="utf-8") as f:
-            data = rt.load(f) or {}
-        raw = data.get("logging")
-        if isinstance(raw, dict):
-            return raw
-    except Exception as e:
-        logger.error(f"load logging config failed, caused by={e}")
-    return {}
-
-
-def _resolve_logging_levels(
-    log_level_override: Optional[str],
-) -> LoggingLevels:
-    """返回日志级别配置。"""
-    cfg = _load_logging_config_from_yaml()
-    base = _parse_log_level(str(cfg.get("level", "INFO")))
-
-    def _coerce(key: str) -> int:
-        if key in cfg and cfg[key] is not None:
-            return _parse_log_level(str(cfg[key]), base)
-        return base
-
-    console = _coerce("console_level")
-    gateway = _coerce("gateway")
-    channel = _coerce("channel")
-    agent_server = _coerce("agent_server")
-
-    if log_level_override is not None:
-        v = _parse_log_level(log_level_override)
-        console = gateway = channel = agent_server = v
-        logger_level = v
-    else:
-        env_level = os.getenv("LOG_LEVEL")
-        if env_level:
-            v = _parse_log_level(env_level, base)
-            console = gateway = channel = agent_server = v
-        logger_level = min(gateway, channel, agent_server)
-
-    return LoggingLevels(logger_level, console, gateway, channel, agent_server)
 
 
 # 用户数据根（config、agent、.logs 等）。供 config 模块在 import 时读取；仅依赖 os/path，不引用本包其它模块。
@@ -1398,346 +1204,22 @@ def is_package_installation() -> bool:
     return _detect_installation_mode()
 
 
-# 统一敏感信息掩码值。
-_SENSITIVE_MASK = "******"
-# 匹配常见敏感字段键值对（不要求值必须带引号），用于覆盖:
-# - token=abc
-# - api_key: sk-xxx
-# - authorization = Bearer ...
-# 分组说明：
-# 1) 敏感键名；2) 分隔符及两侧空白（: 或 =）；3/4) 可选引号（当前替换逻辑未直接使用）
-_KV_SENSITIVE_PATTERN = re.compile(
-    r"(?i)(?<![A-Za-z0-9])"
-    r"(password|passwd|pwd|secret|token|api[_-]?key|access[_-]?token|"
-    r"refresh[_-]?token|authorization|user[_-]?id|userid)"
-    r"(?![A-Za-z0-9])(\s*[:=]\s*)([\"']?)[^,\s\"'\]\}]+([\"']?)"
+from jiuwenclaw.log import (  # noqa: E402
+    JsonOnlyFormatter,
+    LoggingLevels,
+    RuntimeLogFormatter,
+    SafeRotatingFileHandler,
+    SensitiveDataFilter,
+    async_logging_enabled,
+    configure_asyncio_event_loop_logging,
+    format_session_log,
+    install_global_exception_logging,
+    setup_logger,
+    shutdown_logging,
 )
-# 匹配“键名包含敏感关键词”且“值被引号包裹”的场景，覆盖:
-# - 'CAT_CAFE_CALLBACK_TOKEN': 'xxxx'
-# - 'CAT_CAFE_USER_ID': 'CSDN-weixin'
-# - "my_private_key"="xxxx"
-# 分组说明：
-# 1) 完整的 key + 分隔符（含可选引号）
-# 2) 值的起始引号（' 或 "）
-# 3) 值内容（非贪婪）
-# 4) 结束引号（通过 (\2) 强制与起始引号一致）
-_NAMED_SENSITIVE_KV_PATTERN = re.compile(
-    r"(?i)([\"']?[A-Za-z0-9_.-]*"
-    r"(?:token|secret|password|passwd|pwd|api[_-]?key|authorization|"
-    r"credential|private[_-]?key|user[_-]?id|userid)"
-    r"[A-Za-z0-9_.-]*[\"']?\s*[:=]\s*)([\"'])(.*?)(\2)"
-)
-# 匹配 Authorization Bearer 令牌，保留 "Bearer " 前缀，仅掩码后面的令牌值。
-_BEARER_SENSITIVE_PATTERN = re.compile(r"(?i)\b(Bearer\s+)[A-Za-z0-9\-._~+/]+=*")
-_SENSITIVE_PATTERNS: list[re.Pattern[str]] = [
-    # 匹配 JWT（header.payload.signature 三段式，常见以 eyJ 开头）。
-    re.compile(r"\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b"),
-    # 匹配 OpenAI 风格 key（sk- 前缀）。
-    re.compile(r"\bsk-[A-Za-z0-9]{8,}\b"),
-    # 匹配 GitHub Personal Access Token（ghp_ 前缀）。
-    re.compile(r"\bghp_[A-Za-z0-9]{20,}\b"),
-    # 匹配 GitLab Personal Access Token（glpat- 前缀）。
-    re.compile(r"\bglpat-[A-Za-z0-9_-]{20,}\b"),
-    # 匹配邮箱地址（避免日志中泄露个人身份信息）。
-    re.compile(r"\b[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[A-Za-z]{2,}\b"),
-    # 匹配中国大陆手机号（可带 +86 或 86 前缀，支持空格/短横线分隔）。
-    re.compile(r"(?<!\d)(?:\+?86[-\s]?)?1[3-9]\d{9}(?!\d)"),
-    # 匹配中国身份证号（18 位，最后一位可为 X/x）。
-    re.compile(r"(?<!\d)\d{17}[\dXx](?!\d)"),
-]
 
-
-def _sanitize_log_text(text: str) -> str:
-    if not text:
-        return text
-
-    masked = text
-    masked = _KV_SENSITIVE_PATTERN.sub(r"\1\2" f"{_SENSITIVE_MASK}", masked)
-    masked = _NAMED_SENSITIVE_KV_PATTERN.sub(r"\1\2" f"{_SENSITIVE_MASK}" r"\2", masked)
-    masked = _BEARER_SENSITIVE_PATTERN.sub(r"\1" f"{_SENSITIVE_MASK}", masked)
-    for pattern in _SENSITIVE_PATTERNS:
-        masked = pattern.sub(_SENSITIVE_MASK, masked)
-    return masked
-
-
-class SensitiveDataFilter(logging.Filter):
-    """Mask sensitive data in all log messages."""
-
-    def filter(self, record: logging.LogRecord) -> bool:
-        try:
-            message = record.getMessage()
-            record.msg = _sanitize_log_text(message)
-            record.args = ()
-        except Exception:
-            # Never block logging because of desensitization failure.
-            pass
-        return True
-
-
-class JsonOnlyFormatter(logging.Formatter):
-    """只输出message内容，不添加任何前缀（时间戳、级别、logger名）"""
-
-    def format(self, record: logging.LogRecord) -> str:
-        return record.getMessage()
-
-
-_RUNTIME_LOG_SEVERITY_MAP = {
-    "CRITICAL": "FATAL",
-    "WARNING": "WARN",
-}
-_RUNTIME_LOG_FIELD_SEPARATOR = "|"
-_RUNTIME_LOG_VALUE_PATTERN = r"(?P<value>[^,\s\]\)\}]+)"
-_RUNTIME_LOG_SESSION_PATTERNS: list[re.Pattern[str]] = [
-    re.compile(r"\[session=(?P<value>[^\]\s]+)\]"),
-    re.compile(r"(?i)(?<![A-Za-z0-9_])session[_-]?id\s*[:=]\s*" + _RUNTIME_LOG_VALUE_PATTERN),
-    re.compile(r"(?i)(?<![A-Za-z0-9_])session\s*[:=]\s*" + _RUNTIME_LOG_VALUE_PATTERN),
-]
-_RUNTIME_LOG_SANDBOX_PATTERNS: list[re.Pattern[str]] = [
-    re.compile(r"(?i)(?<![A-Za-z0-9_])sandbox[_-]?id\s*[:=]\s*" + _RUNTIME_LOG_VALUE_PATTERN),
-    re.compile(r"(?i)(?<![A-Za-z0-9_])sandbox\s*[:=]\s*" + _RUNTIME_LOG_VALUE_PATTERN),
-]
-_RUNTIME_LOG_LEGACY_PREFIX_PATTERN = re.compile(
-    r"^\s*"
-    r"\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}(?:\.\d{3,6})?"
-    r"(?:[+-]\d{2}:?\d{2})?(?:\s+DST)?\s+"
-    r"(?:\[\d+\]\s+)?"
-    r"(?:FATAL|CRITICAL|ERROR|WARN|WARNING|INFO|DEBUG)\s+"
-    r"(?:(?:[A-Za-z_][\w.]*)(?:\s+|-+\s+))?"
-    r"(?:(?:[\w.-]+\.py):\d+:\s*)?"
-)
-_RUNTIME_LOG_EMPTY_BRACKETS_PATTERN = re.compile(r"\(\s*\)|\[\s*\]|\{\s*\}")
-
-
-def _clean_runtime_log_field(value: Any) -> str:
-    if value is None:
-        return ""
-    text = str(value)
-    return (
-        text.replace(_RUNTIME_LOG_FIELD_SEPARATOR, " ")
-        .replace("\r", " ")
-        .replace("\n", " ")
-        .replace("\t", " ")
-    )
-
-
-def _record_string_attr(record: logging.LogRecord, names: tuple[str, ...]) -> str:
-    for name in names:
-        value = getattr(record, name, None)
-        if value is not None:
-            text = str(value).strip()
-            if text:
-                return text
-    return ""
-
-
-def _extract_first_runtime_log_value(text: str, patterns: list[re.Pattern[str]]) -> str:
-    for pattern in patterns:
-        match = pattern.search(text)
-        if match:
-            return str(match.group("value") or "").strip()
-    return ""
-
-
-def _remove_runtime_log_value_tokens(
-    text: str,
-    value: str,
-    patterns: list[re.Pattern[str]],
-) -> str:
-    if not value:
-        return text
-
-    def _replace(match: re.Match[str]) -> str:
-        matched_value = str(match.group("value") or "").strip()
-        return "" if matched_value == value else match.group(0)
-
-    for pattern in patterns:
-        text = pattern.sub(_replace, text)
-    return text
-
-
-def _compact_runtime_log_message(text: str) -> str:
-    text = _RUNTIME_LOG_LEGACY_PREFIX_PATTERN.sub("", text)
-    text = _RUNTIME_LOG_EMPTY_BRACKETS_PATTERN.sub("", text)
-    text = re.sub(r"\s+,", ",", text)
-    text = re.sub(r",\s*,+", ",", text)
-    text = re.sub(r"(^|\s),\s*", r"\1", text)
-    text = re.sub(r"\s{2,}", " ", text)
-    return text.strip(" ,")
-
-
-class RuntimeLogFormatter(logging.Formatter):
-    """Format runtime logs as Time|Severity|SessionID|SandboxID|Position|msg."""
-
-    def format(self, record: logging.LogRecord) -> str:
-        raw_message = record.getMessage()
-        session_id = _record_string_attr(record, ("session_id", "sessionID"))
-        if not session_id:
-            session_id = _extract_first_runtime_log_value(raw_message, _RUNTIME_LOG_SESSION_PATTERNS)
-
-        sandbox_id = _record_string_attr(record, ("sandbox_id", "sandboxID"))
-        if not sandbox_id:
-            sandbox_id = _extract_first_runtime_log_value(raw_message, _RUNTIME_LOG_SANDBOX_PATTERNS)
-
-        message = _remove_runtime_log_value_tokens(
-            raw_message,
-            session_id,
-            _RUNTIME_LOG_SESSION_PATTERNS,
-        )
-        message = _remove_runtime_log_value_tokens(
-            message,
-            sandbox_id,
-            _RUNTIME_LOG_SANDBOX_PATTERNS,
-        )
-        message = _compact_runtime_log_message(message)
-        if record.exc_info:
-            message = f"{message} {self.formatException(record.exc_info)}".strip()
-        if record.stack_info:
-            message = f"{message} {self.formatStack(record.stack_info)}".strip()
-
-        timestamp = datetime.datetime.fromtimestamp(record.created).astimezone()
-        timestamp_text = (
-            f"{timestamp:%Y-%m-%d %H:%M:%S}."
-            f"{timestamp.microsecond // 1000:03d}"
-            f"{timestamp:%z}"
-        )
-        if len(timestamp_text) >= 5:
-            timestamp_text = f"{timestamp_text[:-2]}:{timestamp_text[-2:]}"
-
-        severity = _RUNTIME_LOG_SEVERITY_MAP.get(record.levelname, record.levelname)
-        position = f"{record.name} {record.filename}:{record.lineno}:"
-        row = [timestamp_text, severity, session_id, sandbox_id, position, message]
-        return _RUNTIME_LOG_FIELD_SEPARATOR.join(_clean_runtime_log_field(item) for item in row)
-
-def format_session_log(session_id: str | None, content: str) -> str:
-    """格式化带 session_id 的日志前缀；缺失 session_id 时保持原文。"""
-    sid = str(session_id or "").strip()
-    if not sid:
-        return content
-    return f"[session={sid}] {content}"
-
-
-_EXCEPTION_LOGGING_INSTALLED = False
-
-
-def asyncio_exception_handler(loop: asyncio.AbstractEventLoop, context: dict[str, Any]) -> None:
-    """Log asyncio loop/task failures with stack traces on the jiuwenclaw logger."""
-    exc = context.get("exception")
-    message = context.get("message") or "asyncio event loop error"
-    task = context.get("task") or context.get("future")
-    task_name = getattr(task, "get_name", lambda: "")() if task is not None else ""
-    log = logging.getLogger("jiuwenclaw.asyncio")
-    if exc is not None:
-        log.error(
-            "%s (task=%s)",
-            message,
-            task_name or task,
-            exc_info=exc,
-        )
-        return
-    log.error("%s context=%r", message, context)
-
-
-def configure_asyncio_event_loop_logging(loop: asyncio.AbstractEventLoop | None = None) -> None:
-    """Attach :func:`asyncio_exception_handler` to the running (or given) event loop."""
-    target = loop or asyncio.get_running_loop()
-    target.set_exception_handler(asyncio_exception_handler)
-
-
-def install_global_exception_logging() -> None:
-    """Route uncaught main-thread / thread exceptions to jiuwenclaw logger with tracebacks."""
-    global _EXCEPTION_LOGGING_INSTALLED
-    if _EXCEPTION_LOGGING_INSTALLED:
-        return
-    _EXCEPTION_LOGGING_INSTALLED = True
-
-    log = logging.getLogger("jiuwenclaw")
-    original_sys_excepthook = sys.excepthook
-
-    def _sys_excepthook(exc_type, exc_value, exc_tb) -> None:
-        if issubclass(exc_type, KeyboardInterrupt):
-            original_sys_excepthook(exc_type, exc_value, exc_tb)
-            return
-        log.critical("Uncaught exception", exc_info=(exc_type, exc_value, exc_tb))
-        original_sys_excepthook(exc_type, exc_value, exc_tb)
-
-    sys.excepthook = _sys_excepthook
-
-    if hasattr(threading, "excepthook"):
-        original_thread_excepthook = threading.excepthook
-
-        def _thread_excepthook(args: threading.ExceptHookArgs) -> None:
-            log.critical(
-                "Uncaught exception in thread %s",
-                args.thread,
-                exc_info=(args.exc_type, args.exc_value, args.exc_traceback),
-            )
-            original_thread_excepthook(args)
-
-        threading.excepthook = _thread_excepthook
-
-
-def setup_logger(log_level: Optional[str] = None) -> logging.Logger:
-    """配置 ``jiuwenclaw`` 根日志：控制台 + 分组件文件。
-
-    各模块应使用 ``logging.getLogger(__name__)``，分文件规则：
-    - ``jiuwenclaw.channel.*`` → channel.log
-    - ``jiuwenclaw.agentserver.*`` → agent_server.log
-    - 其余 ``jiuwenclaw.*``（含 ``jiuwenclaw.app``、gateway、evolution、utils 等）→ gateway.log
-
-    输出目录：``~/.jiuwenclaw/agent/.logs/``。
-
-    级别由 ``config.yaml`` 的 ``logging`` 段控制；环境变量 ``LOG_LEVEL`` 覆盖控制台与各日志文件级别
-    （``log_level`` 参数为 ``None`` 时）。若传入 ``log_level``（如单测），则控制台与各文件级别均为该值。
-    """
-    log_root_path = os.getenv("LOG_ROOT_PATH", "").strip()
-    logs_root = Path(log_root_path).expanduser().resolve() if log_root_path else get_logs_dir()
-    logs_root.mkdir(parents=True, exist_ok=True)
-
-    levels = _resolve_logging_levels(log_level)
-
-    root = logging.getLogger("jiuwenclaw")
-    root.setLevel(levels.logger)
-    root.propagate = False
-    for handler in root.handlers[:]:
-        handler.close()
-        root.removeHandler(handler)
-
-    formatter = RuntimeLogFormatter()
-    privacy_filter = SensitiveDataFilter()
-
-    def _add_rotating(
-        filename: str,
-        level: int,
-        name_filter: Optional[_ComponentNameFilter] = None,
-        custom_formatter: Optional[logging.Formatter] = None,
-    ) -> None:
-        h = SafeRotatingFileHandler(
-            filename=logs_root / filename,
-            maxBytes=_LOG_FILE_MAX_BYTES,
-            backupCount=_LOG_FILE_BACKUP_COUNT,
-            encoding="utf-8",
-        )
-        h.setLevel(level)
-        h.setFormatter(custom_formatter if custom_formatter is not None else formatter)
-        h.addFilter(privacy_filter)
-        if name_filter is not None:
-            h.addFilter(name_filter)
-        root.addHandler(h)
-
-    _add_rotating("gateway.log", levels.gateway, _ComponentNameFilter("gateway"))
-    _add_rotating("channel.log", levels.channel, _ComponentNameFilter("channel"))
-    _add_rotating("agent_server.log", levels.agent_server,
-        _CompositeFilter([_ComponentNameFilter("agent_server"), _ComponentNameFilter("permissions")]))
-    json_formatter = JsonOnlyFormatter()
-    _add_rotating("permissions.log", levels.agent_server, _ComponentNameFilter("permissions"), json_formatter)
-
-    stream_handler = logging.StreamHandler()
-    stream_handler.setLevel(levels.console)
-    stream_handler.setFormatter(formatter)
-    stream_handler.addFilter(privacy_filter)
-    root.addHandler(stream_handler)
-    install_global_exception_logging()
-    return root
+setup_logger()
+logger = logging.getLogger(__name__)
 
 
 class AsyncLRUCache:
@@ -1760,7 +1242,6 @@ class AsyncLRUCache:
                 self._cache.pop(key, None)
                 return None
 
-            # 移动到末尾（最近使用）
             self._cache.move_to_end(key)
             return value
 
@@ -1770,7 +1251,6 @@ class AsyncLRUCache:
             if key in self._cache:
                 self._cache.pop(key)
             elif len(self._cache) >= self._max_size:
-                # 淘汰最久未使用的（头部）
                 self._cache.popitem(last=False)
 
             self._cache[key] = (value, time.time())
@@ -1799,8 +1279,6 @@ class AsyncLRUCache:
                 del self._cache[key]
             return list(self._cache.keys())
 
-setup_logger()
-logger = logging.getLogger(__name__)
 
 _TOOL_ARGS_LOG_MAX_DEFAULT = 480
 

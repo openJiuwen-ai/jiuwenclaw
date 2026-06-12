@@ -4,7 +4,7 @@ import logging
 import re
 from pathlib import Path
 
-from jiuwenclaw.utils import RuntimeLogFormatter, setup_logger
+from jiuwenclaw.utils import RuntimeLogFormatter, setup_logger, shutdown_logging
 
 
 def _format_record(
@@ -106,6 +106,7 @@ def test_setup_logger_uses_runtime_format_and_keeps_permissions_json(
     monkeypatch,
 ) -> None:
     monkeypatch.setenv("LOG_ROOT_PATH", str(tmp_path))
+    monkeypatch.setenv("LOG_ASYNC", "1")
     root = setup_logger("INFO")
     try:
         logging.getLogger("jiuwenclaw.gateway.demo").info(
@@ -120,8 +121,7 @@ def test_setup_logger_uses_runtime_format_and_keeps_permissions_json(
         logging.getLogger("jiuwenclaw.agentserver.permissions.checker").info(
             '{"ok": true, "session_id": "sid-perm"}'
         )
-        for handler in root.handlers:
-            handler.flush()
+        shutdown_logging()
 
         gateway = (tmp_path / "gateway.log").read_text(encoding="utf-8").splitlines()
         channel = (tmp_path / "channel.log").read_text(encoding="utf-8").splitlines()
@@ -143,6 +143,4 @@ def test_setup_logger_uses_runtime_format_and_keeps_permissions_json(
         assert agent_row[5] == "agent ready"
         assert permissions[-1] == '{"ok": true, "session_id": "sid-perm"}'
     finally:
-        for handler in root.handlers[:]:
-            handler.close()
-            root.removeHandler(handler)
+        shutdown_logging()
