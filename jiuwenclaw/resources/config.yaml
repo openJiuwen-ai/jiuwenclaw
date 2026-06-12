@@ -359,7 +359,8 @@ react:
       tokens_threshold: 15000        # 单 round tool 结果总 token 阈值；relay-claw 实测峰值 ~58k、典型一轮 4 个 fetch_webpage ≈ 16k 即触发；200k 窗口默认 50000，128k 模型建议 25000~30000
       large_message_threshold: 5000  # 单条 ToolMessage 算"大"的门槛（候选）；< tokens_threshold；源码默认 10000，5000 让 5k+ 的 webpage 优先被 offload
       # trim_size: 3000                      # offload 后 preview 字符数；应 << 原文长度
-      # tool_name_allowlist: null            # 仅这些工具的结果才考虑 offload；null/空 = 全部允许
+      tool_name_allowlist:           # 保护名单：下列工具结果永不 offload；null/空 = 全部允许
+        - read_file
       # offload_message_type: ["tool"]       # 当前仅支持 tool
       # messages_threshold: null             # 备用消息计数阈值；当前主走 tokens 路径
       # messages_to_keep: null               # 备用：保留尾部 N 条不动
