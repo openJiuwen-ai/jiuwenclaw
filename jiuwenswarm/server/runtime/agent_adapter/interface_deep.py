@@ -2738,13 +2738,17 @@ class JiuWenSwarmDeepAdapter:
     ) -> SkillUseRail | None:
         """Build SkillUseRail."""
         try:
+            from openjiuwen.agent_evolving.checkpointing import EvolutionStore
+
             skill_mode = self._resolve_skill_mode(config)
             logger.info("[JiuWenSwarmDeepAdapter] current skill_mode: %s", skill_mode)
+            skills_dir = str(get_agent_skills_dir())
             skill_rail = SkillUseRail(
-                skills_dir=str(get_agent_skills_dir()),
+                skills_dir=skills_dir,
                 skill_mode=skill_mode,
                 include_tools=include_tools,
                 disabled_skills=self._skill_manager.list_execution_disabled_skills(),
+                evolution_store=EvolutionStore(skills_dir),
             )
             logger.info("[JiuWenSwarmDeepAdapter] SkillUseRail create success")
         except Exception as exc:
