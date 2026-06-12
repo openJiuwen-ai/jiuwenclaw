@@ -594,8 +594,8 @@ class RuntimeManagementAgentClient(AgentServerClient):
                 autoscale_interval=autoscale_interval,
                 service_idle_ttl=service_ttl,
                 service_templates=service_templates,
-                namespace=namespace or "default",
-                kubeconfig=kubeconfig,
+                namespace=_client.namespace or "default",
+                kubeconfig=_client.kubeconfig,
             )
 
         self._create_service_manager = create_service_manager
@@ -609,7 +609,7 @@ class RuntimeManagementAgentClient(AgentServerClient):
 
     async def collect_pod_status(self, include_metrics: bool = False) -> dict[str, Any]:
         """采集当前 Gateway 创建的 AgentServer Pod 状态。"""
-        namespace = self._namespace or "default"
+        namespace = self.namespace or "default"
         label_selector = (
             f"{self.POD_LABEL_SELECTOR},"
             f"{self.GATEWAY_ID_LABEL_KEY}={self.gateway_id}"
@@ -628,7 +628,7 @@ class RuntimeManagementAgentClient(AgentServerClient):
         pods = await K8sServiceHandler.monitor_pods_status(
             namespace=namespace,
             label_selector=label_selector,
-            kubeconfig=self._kubeconfig,
+            kubeconfig=self.kubeconfig,
             include_metrics=include_metrics,
         )
         failed_statuses = {
