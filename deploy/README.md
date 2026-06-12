@@ -88,7 +88,8 @@ FEISHU_BOTS="
 ./deploy.sh up mysql        # 部署 MySQL 存储模块（基础依赖，只需也只能一次）
 ./deploy.sh up redis        # 部署 Redis（Gateway active-standby 模式时需要，只需也只能一次）
 ./deploy.sh up postgresql   # 部署 PostgreSQL 存储模块（基础依赖，只需也只能一次）
-./deploy.sh up              # 部署核心服务模块
+./deploy.sh up minio        # 部署 Minio 存储模块（基础依赖，只需也只能一次）
+./deploy.sh up              # 部署 核心服务模块
 ./deploy.sh up web          # 部署 Web 前端模块（可选部署）
 ./deploy.sh up manager      # 部署 CLAW-Manager 管理模块（可选部署）
 ```
@@ -98,23 +99,25 @@ FEISHU_BOTS="
 ```
 ./deploy.sh down manager    # 卸载 CLAW-Manager 管理模块（按需卸载）
 ./deploy.sh down web        # 卸载 Web 前端模块（按需卸载）
-./deploy.sh down            # 卸载核心服务模块
+./deploy.sh down            # 卸载 核心服务模块
 ./deploy.sh down rabbitmq   # 卸载 RabbitMQ 存储模块（非必要不卸载）
 ./deploy.sh down mysql      # 卸载 MySQL 存储模块（非必要不卸载）
 ./deploy.sh down redis      # 卸载 Redis 存储模块（非必要不卸载）
 ./deploy.sh down postgresql # 卸载 PostgreSQL 存储模块（非必要不卸载）
+./deploy.sh down minio      # 卸载 Minio 存储模块（非必要不卸载）
 ./deploy.sh down nfs        # 卸载 NFS 存储模块（非必要不卸载）
 ```
 - 一键重启
 
 ```
-./deploy.sh restart             # 重启核心服务模块（按需重启）
+./deploy.sh restart             # 重启 核心服务模块（按需重启）
 ./deploy.sh restart web         # 重启 Web 前端模块（按需重启）
 ./deploy.sh restart manager     # 重启 CLAW-Manager 管理模块（按需重启）
 ./deploy.sh restart rabbitmq    # 重启 RabbitMQ 存储模块（按需重启）
 ./deploy.sh restart mysql       # 重启 MySQL 存储模块（按需重启）
 ./deploy.sh restart redis       # 重启 Redis 存储模块（按需重启）
 ./deploy.sh restart postgresql  # 重启 PostgreSQL 存储模块（按需重启）
+./deploy.sh restart minio       # 重启 Minio 存储模块（按需重启）
 ./deploy.sh restart nfs         # 重启 NFS 存储模块（按需重启）
 ```
 
@@ -146,6 +149,7 @@ FEISHU_BOTS="
 - `mysql`：MySQL 存储服务模块（MySQL 模块只能部署一次，且固定部署在 default 默认命名空间，自动忽略-n命名空间配置参数）
 - `redis`：Redis 服务模块（Redis 模块只能部署一次，且固定部署在 default 默认命名空间，自动忽略-n命名空间配置参数；Gateway `DEPLOYMENT_MODE=active-standby` 时使用）
 - `postgresql`：PostgreSQL 存储服务模块（PostgreSQL 模块只能部署一次，且固定部署在 default 默认命名空间，自动忽略-n命名空间配置参数）
+- `minio`：Minio 存储服务模块（Minio 模块只能部署一次，且固定部署在 default 默认命名空间，自动忽略-n命名空间配置参数）
 - `gateway`：Gateway 模块
 - `web`：Web 前端页面服务模块
 - `manager`：CLAW-Manager 管理模块

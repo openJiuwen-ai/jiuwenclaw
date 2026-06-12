@@ -17,6 +17,7 @@ source "rabbitmq_handler.sh"
 source "mysql_handler.sh"
 source "redis_handler.sh"
 source "postgresql_handler.sh"
+source "minio_handler.sh"
 source "manager_handler.sh"
 source "ports_handler.sh"
 

@@ -32,6 +32,9 @@ declare -A CONFIG=(
     ["POSTGRES_TEMPLATE_FILE"]="${SCRIPT_DIR}/conf/postgresql.template.yaml"
     ["POSTGRES_FILE"]="${SCRIPT_DIR}/conf/postgresql.yaml"
 
+    ["MINIO_TEMPLATE_FILE"]="${SCRIPT_DIR}/conf/minio.template.yaml"
+    ["MINIO_FILE"]="${SCRIPT_DIR}/conf/minio.yaml"
+
     ["WEB_TEMPLATE_FILE"]="${SCRIPT_DIR}/conf/web.template.yaml"
     ["WEB_FILE"]="${SCRIPT_DIR}/conf/web.yaml"
 
@@ -60,7 +63,7 @@ declare -A ARGS=(
 
 # ==== All available modules ====
 #declare -ga ALL_MODULES=("NFS" "RABBITMQ" "YR_CLAW" "GATEWAY" "WEB" "MANAGER")
-declare -ga ALL_MODULES=("NFS" "RABBITMQ" "MYSQL" "REDIS" "POSTGRESQL" "GATEWAY" "WEB" "MANAGER")
+declare -ga ALL_MODULES=("NFS" "RABBITMQ" "MYSQL" "REDIS" "POSTGRESQL" "MINIO" "GATEWAY" "WEB" "MANAGER")
 
 declare -ga MODULES=()
 
@@ -118,9 +121,15 @@ declare -A DEPLOY_VARS=(
     ["REDIS_PASSWORD"]=""
     ["REDIS_DB"]="0"
     ["REDIS_KEY_PREFIX"]="jiuwenclaw:"
+    ["REDIS_HOST"]=""
     ["DEPLOYMENT_MODE"]="standalone"
     ["GATEWAY_INSTANCE_ID"]=""
-    ["REDIS_HOST"]=""
+    ["MINIO_NAME"]="minio"
+    ["MINIO_IMAGE"]="minio/minio-arm64:RELEASE.2024-12-18T13-15-44Z"
+    ["MINIO_ROOT_USER"]="minioadmin"
+    ["MINIO_ROOT_PASSWORD"]="Minio@123456"
+    ["MINIO_STORAGE_SIZE"]="4Gi"
+    ["MINIO_PATH"]="/exports/minio"
     ["MANAGER_NAME"]="jiuwenclaw-manager"
     ["MANAGER_REST_PORT"]="8765"
     ["MANAGER_WS_PORT"]="8766"

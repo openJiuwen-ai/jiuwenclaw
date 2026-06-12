@@ -332,6 +332,22 @@ check_postgresql_up_dependency(){
     fi
 }
 
+check_minio_up_dependency(){
+    local minio_path=${DEPLOY_VARS["MINIO_PATH"]}
+    local nfs_dname=${DEPLOY_VARS["NFS_NAME"]}
+
+    check_if_nfs_up
+
+    if [ "${DEPLOY_VARS["ENABLE_EXTERNAL_NFS"]}" == "false" ]; then
+        info "Preparing Minio data directory: ${minio_path}"
+        local nfs_pod=$(kubectl get pods -n default -l app=${nfs_dname} -o jsonpath='{.items[0].metadata.name}')
+
+        info "Executing: kubectl exec ${nfs_pod} -- sh -c \"mkdir -p ${minio_path}\""
+        kubectl exec ${nfs_pod} -- sh -c "mkdir -p ${minio_path}"
+        success "Minio directory created successfully in NFS Pod!"
+    fi
+}
+
 check_manager_up_dependency(){
     check_if_rabbitmq_up
     check_if_db_up
