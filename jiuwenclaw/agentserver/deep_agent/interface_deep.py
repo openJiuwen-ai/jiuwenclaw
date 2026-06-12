@@ -1627,7 +1627,34 @@ class JiuWenClawDeepAdapter:
                 return None
             result = Runner.resource_mgr.add_sys_operation(sysop_card)
             if result.is_err():
-                logger.warning("[JiuWenClawDeepAdapter] add sys_operation failed: %s", result.msg())
+                error_msg = result.msg()
+                logger.warning("[JiuWenClawDeepAdapter] add sys_operation failed: %s", error_msg)
+                
+                # 防护机制：如果错误是因为隔离键已存在，尝试复用现有的 sys_operation
+                if "already registered" in str(error_msg) and "operation '" in str(error_msg):
+                    import re
+                    # 从错误信息中提取已存在的 operation ID
+                    match = re.search(r"by operation '([a-f0-9]+)'", str(error_msg))
+                    if match:
+                        existing_op_id = match.group(1)
+                        logger.info(
+                            "[JiuWenClawDeepAdapter] 检测到隔离键冲突，尝试复用现有 sys_operation: id=%s",
+                            existing_op_id
+                        )
+                        # 尝试获取已存在的 sys_operation
+                        existing_op = Runner.resource_mgr.get_sys_operation(existing_op_id)
+                        if existing_op is not None:
+                            logger.info(
+                                "[JiuWenClawDeepAdapter] 成功复用现有 sys_operation: id=%s",
+                                existing_op_id
+                            )
+                            return existing_op
+                        else:
+                            logger.warning(
+                                "[JiuWenClawDeepAdapter] 无法获取已存在的 sys_operation: id=%s",
+                                existing_op_id
+                            )
+                
                 return None
             return Runner.resource_mgr.get_sys_operation(sysop_card.id)
         except Exception as exc:
