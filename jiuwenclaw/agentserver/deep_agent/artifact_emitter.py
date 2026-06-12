@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import time
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 from openjiuwen.core.session.agent import Session
@@ -29,6 +30,7 @@ ARTIFACT_DETECTION_ALLOWED_TOOLS = frozenset({
     "write_file",
     "edit_file",
     "write",
+    "text_to_image",
 })
 
 _SESSION_EMITTED_ARTIFACTS: dict[str, set[str]] = {}
@@ -163,6 +165,99 @@ class ArtifactEmitContext:
     log_prefix: str = "[ArtifactEmitter]"
 
 
+def _refresh_artifact_sizes(
+    artifacts: list[dict[str, Any]],
+    log_prefix: str = "[ArtifactEmitter]",
+) -> None:
+    """Re-read file sizes after extension post-processing may have rewritten files."""
+    for artifact in artifacts:
+        path = str(artifact.get("path") or "").strip()
+        if not path:
+            logger.warning(
+                "%s refresh artifact size skipped: empty path artifact=%s",
+                log_prefix,
+                artifact,
+            )
+            continue
+        try:
+            artifact["size"] = Path(path).stat().st_size
+        except OSError as exc:
+            logger.warning(
+                "%s refresh artifact size failed path=%s error=%s",
+                log_prefix,
+                path,
+                exc,
+            )
+
+
+async def _trigger_artifact_post_process_hook(
+    *,
+    session_id: str,
+    tool_name: str,
+    task_id: str | None,
+    subagent_id: str | None,
+    artifacts: list[dict[str, Any]],
+    log_prefix: str,
+) -> None:
+    """Invoke ``ARTIFACT_POST_PROCESS`` extension hooks before ``artifact.generated``."""
+    if not artifacts:
+        return
+
+    try:
+        from jiuwenclaw.extensions.registry import ExtensionRegistry
+        from jiuwenclaw.schema import AgentServerHookEvents
+        from jiuwenclaw.schema.hooks_context import ArtifactPostProcessHookContext
+    except ImportError as exc:
+        logger.warning(
+            "%s Skip artifact post-process hook import failed: %s",
+            log_prefix,
+            exc,
+        )
+        return
+
+    artifact_paths = [
+        str(item.get("path") or "").strip()
+        for item in artifacts
+        if str(item.get("path") or "").strip()
+    ]
+    hook_ctx = ArtifactPostProcessHookContext(
+        session_id=session_id,
+        tool_name=tool_name,
+        task_id=task_id,
+        subagent_id=subagent_id,
+        artifact_paths=artifact_paths,
+    )
+    try:
+        await ExtensionRegistry.get_instance().trigger(
+            AgentServerHookEvents.ARTIFACT_POST_PROCESS,
+            hook_ctx,
+        )
+    except RuntimeError:
+        logger.warning(
+            "%s Skip artifact post-process hook: ExtensionRegistry not initialized",
+            log_prefix,
+        )
+        return
+    except Exception as exc:
+        logger.warning(
+            "%s artifact post-process hook failed session_id=%s tool=%s error=%s",
+            log_prefix,
+            session_id,
+            tool_name,
+            exc,
+        )
+        return
+
+    _refresh_artifact_sizes(artifacts, log_prefix=log_prefix)
+    logger.info(
+        "%s artifact post-process hook done session_id=%s tool=%s count=%d",
+        log_prefix,
+        session_id,
+        tool_name,
+        len(artifacts),
+    )
+
+
 async def emit_artifact_generated(ctx: ArtifactEmitContext) -> bool:
     """Extract artifacts from tool result and emit artifact.generated event.
     
@@ -170,7 +265,8 @@ async def emit_artifact_generated(ctx: ArtifactEmitContext) -> bool:
     1. Extract paths from tool result (structured fields + regex patterns)
     2. Filter by timestamp (files modified after tool_start_time)
     3. Deduplicate by recent send cache
-    4. Build payload and emit artifact.generated event
+    4. Trigger ARTIFACT_POST_PROCESS extension hooks (in-place file post-processing)
+    5. Build payload and emit artifact.generated event
     
     Args:
         ctx: ArtifactEmitContext containing all emission parameters
@@ -276,8 +372,17 @@ async def emit_artifact_generated(ctx: ArtifactEmitContext) -> bool:
             ctx.log_prefix, session_id, ", ".join(skipped_paths)
         )
         return False
+
+    await _trigger_artifact_post_process_hook(
+        session_id=session_id,
+        tool_name=tool_name,
+        task_id=ctx.task_id,
+        subagent_id=ctx.subagent_id,
+        artifacts=new_artifacts,
+        log_prefix=ctx.log_prefix,
+    )
     
-    # Step 4: Build payload
+    # Step 5: Build payload
     artifacts_payload = [
         {
             "path": a.get("path", ""),
@@ -289,7 +394,7 @@ async def emit_artifact_generated(ctx: ArtifactEmitContext) -> bool:
         for a in new_artifacts
     ]
     
-    # Step 5: Emit event
+    # Step 6: Emit event
     payload = {
         "artifacts": artifacts_payload,
         "tool_name": ctx.tool_name,
