@@ -1782,7 +1782,7 @@ async def _run(
                     await client.reinit_access()
                 else:
                     logger.info("[App] 角色切换为 STANDBY")
-            leader_election.register_callback(_session_on_role_change)
+            #leader_election.register_callback(_session_on_role_change)
 
         # 选主感知：ManagerWsClient 仅在 PRIMARY 节点连接 Claw Manager；
         # STANDBY 不连，避免与 Manager 建立无意义的会话（共享 MySQL 已保证配置一致）。
