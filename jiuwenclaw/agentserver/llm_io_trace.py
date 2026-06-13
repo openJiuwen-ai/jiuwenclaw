@@ -19,9 +19,171 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
+from contextvars import ContextVar, Token
 from typing import Any, Mapping
 
 from jiuwenclaw.utils import logger
+
+
+# ---------------------------------------------------------------------------
+# Usage accumulation across all LLM calls within a request scope.
+#
+# Why this exists:
+#   The previous summary in interface_deep.py only counted ``llm_usage`` chunks
+#   bubbled up to the main Runner stream. Subagents (spawn/fork) run in their
+#   own ``Runner.run_agent`` and their llm_usage chunks never reach the parent
+#   stream, so their token consumption was excluded from the summary.
+#
+# Where this is used:
+#   The main adapter calls ``begin_usage_accumulation`` at the start of a
+#   request scope to attach a fresh dict to ``_LLM_USAGE_ACCUMULATOR``. Every
+#   ``Model.invoke`` / ``Model.stream`` call (patched in ``interface_deep.py``)
+#   funnels its ``usage_metadata`` through ``add_llm_usage`` which mutates the
+#   same dict in-place. Because subagents inherit the parent ContextVar value,
+#   they all accumulate into the same dict. ``reset_usage_accumulation`` clears
+#   the ContextVar via the saved Token in the request's ``finally`` block.
+# ---------------------------------------------------------------------------
+
+_LLM_USAGE_ACCUMULATOR: ContextVar[dict[str, Any] | None] = ContextVar(
+    "_llm_usage_accumulator", default=None
+)
+
+_USAGE_TOKEN_KEYS: tuple[str, ...] = (
+    "input_tokens",
+    "output_tokens",
+    "total_tokens",
+    "cache_tokens",
+)
+_USAGE_COST_KEYS: tuple[str, ...] = ("input_cost", "output_cost", "total_cost")
+
+
+def _make_empty_accumulator() -> dict[str, Any]:
+    acc: dict[str, Any] = {k: 0 for k in _USAGE_TOKEN_KEYS}
+    acc.update({k: 0.0 for k in _USAGE_COST_KEYS})
+    return acc
+
+
+def begin_usage_accumulation() -> tuple[dict[str, Any], Token]:
+    """Start a new usage accumulator for the current ContextVar scope.
+
+    Returns:
+        (accumulator, token) — pass ``token`` to ``reset_usage_accumulation``
+        in a ``finally`` block to restore the previous value.
+    """
+    acc = _make_empty_accumulator()
+    token = _LLM_USAGE_ACCUMULATOR.set(acc)
+    return acc, token
+
+
+def reset_usage_accumulation(token: Token) -> None:
+    """Reset the accumulator ContextVar using the token from ``begin_usage_accumulation``."""
+    try:
+        _LLM_USAGE_ACCUMULATOR.reset(token)
+    except (ValueError, LookupError, RuntimeError):
+        # Already reset / different context — safe to ignore.
+        pass
+
+
+_USAGE_KV_PATTERN = re.compile(r"(\w+)=([\-\d\.]+)")
+
+
+def _coerce_usage_metadata(usage: Any) -> dict[str, Any]:
+    """Normalize a usage_metadata value into a flat dict of numeric fields.
+
+    Accepts:
+      * pydantic / dataclass-like objects with attributes such as ``input_tokens``
+      * dicts already keyed by ``input_tokens`` / ``output_tokens`` / ``total_tokens``
+      * strings produced by ``repr``-like serializers, e.g.
+        ``"code=0 ... input_tokens=53585 output_tokens=5473 total_tokens=59058 ..."``
+    """
+    if usage is None:
+        return {}
+
+    out: dict[str, Any] = {}
+
+    if isinstance(usage, str):
+        for k, v in _USAGE_KV_PATTERN.findall(usage):
+            if k in _USAGE_TOKEN_KEYS:
+                try:
+                    out[k] = int(float(v))
+                except ValueError:
+                    continue
+            elif k in _USAGE_COST_KEYS:
+                try:
+                    out[k] = float(v)
+                except ValueError:
+                    continue
+        return out
+
+    if isinstance(usage, Mapping):
+        for k in _USAGE_TOKEN_KEYS:
+            if k in usage and usage[k] is not None:
+                try:
+                    out[k] = int(usage[k])
+                except (TypeError, ValueError):
+                    continue
+        for k in _USAGE_COST_KEYS:
+            if k in usage and usage[k] is not None:
+                try:
+                    out[k] = float(usage[k])
+                except (TypeError, ValueError):
+                    continue
+        return out
+
+    # Object with attributes (e.g. pydantic model).
+    for k in _USAGE_TOKEN_KEYS:
+        v = getattr(usage, k, None)
+        if v is None:
+            continue
+        try:
+            out[k] = int(v)
+        except (TypeError, ValueError):
+            continue
+    for k in _USAGE_COST_KEYS:
+        v = getattr(usage, k, None)
+        if v is None:
+            continue
+        try:
+            out[k] = float(v)
+        except (TypeError, ValueError):
+            continue
+    return out
+
+
+def add_llm_usage(usage: Any) -> None:
+    """Add a single LLM call's usage_metadata to the current scope's accumulator.
+
+    No-op when there is no active accumulator (i.e. outside a request scope).
+    """
+    acc = _LLM_USAGE_ACCUMULATOR.get()
+    if acc is None:
+        return
+    parsed = _coerce_usage_metadata(usage)
+    if not parsed:
+        return
+    for k in _USAGE_TOKEN_KEYS:
+        v = parsed.get(k)
+        if v:
+            acc[k] = (acc.get(k) or 0) + int(v)
+    for k in _USAGE_COST_KEYS:
+        v = parsed.get(k)
+        if v:
+            acc[k] = (acc.get(k) or 0.0) + float(v)
+
+
+def add_llm_usage_from_assistant(assistant_msg: Any) -> None:
+    """Convenience helper that pulls ``usage_metadata`` from an assistant-shaped object."""
+    if assistant_msg is None:
+        return
+    usage = (
+        assistant_msg.get("usage_metadata")
+        if isinstance(assistant_msg, Mapping)
+        else getattr(assistant_msg, "usage_metadata", None)
+    )
+    if usage is None:
+        return
+    add_llm_usage(usage)
 
 
 def _env_int(name: str, default: int) -> int:

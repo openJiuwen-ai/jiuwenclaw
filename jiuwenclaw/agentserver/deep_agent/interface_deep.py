@@ -85,12 +85,15 @@ from jiuwenclaw.agentserver.deep_agent.ask_user_question_registry import (
     ask_user_question_request_scope,
 )
 from jiuwenclaw.agentserver.llm_io_trace import (
+    add_llm_usage_from_assistant,
+    begin_usage_accumulation,
     log_chat_final,
     log_invoke_input,
     log_invoke_output,
     log_reasoning_delta,
     log_stream_input,
     log_stream_output,
+    reset_usage_accumulation,
 )
 from jiuwenclaw.agentserver.deep_agent.interrupt.interrupt_helpers import (
     build_permission_rail,
@@ -359,6 +362,11 @@ def _apply_llm_io_trace_patch() -> None:
                 model_name=model_name,
                 assistant_msg=result,
             )
+            # Accumulate usage at the patch boundary so that subagent (spawn/fork)
+            # LLM calls — which run in their own Runner and do not bubble llm_usage
+            # chunks up to the main adapter stream — are still counted in the
+            # request-scope usage summary.
+            add_llm_usage_from_assistant(result)
             return result
 
         async def _traced_stream(
@@ -450,6 +458,9 @@ def _apply_llm_io_trace_patch() -> None:
                         model_name=model_name,
                         assistant_msg=accumulated,
                     )
+                    # See _traced_invoke for rationale; mirror the same accumulation
+                    # for streaming calls.
+                    add_llm_usage_from_assistant(accumulated)
             except Exception:
                 emit_reasoning_trace_batch()
                 raise
@@ -3793,14 +3804,11 @@ class JiuWenClawDeepAdapter:
         accumulated_reasoning = ""
         evolution_status_started = False
         evolution_status_ended = False
-        usage_accumulator = {
-            "input_tokens": 0,
-            "output_tokens": 0,
-            "total_tokens": 0,
-            "input_cost": 0.0,
-            "output_cost": 0.0,
-            "total_cost": 0.0,
-        }
+        # Token usage is accumulated at the Model.invoke/stream patch boundary
+        # (see _apply_llm_io_trace_patch) so that subagent (spawn/fork) LLM
+        # calls are also counted, not only the llm_usage chunks bubbled up
+        # through the main Runner stream.
+        usage_accumulator, usage_accumulator_token = begin_usage_accumulation()
         hitl_pending_stream = False
 
         cron_context_tokens = self._bind_runtime_cron_context(
@@ -3884,12 +3892,9 @@ class JiuWenClawDeepAdapter:
 
                     if chunk_type == "llm_usage":
                         logger.info(f"[JiuWenClawDeepAdapter] llm_usage chunk: {chunk}")
-                        usage_meta = chunk.payload.get("usage_metadata", {}) if isinstance(chunk.payload, dict) else {}
-                        if isinstance(usage_meta, dict):
-                            for token in ("input_tokens", "output_tokens", "total_tokens"):
-                                usage_accumulator[token] += usage_meta.get(token, 0) or 0
-                            for cost in ("input_cost", "output_cost", "total_cost"):
-                                usage_accumulator[cost] += usage_meta.get(cost, 0.0) or 0.0
+                        # Note: do NOT accumulate here — usage is accumulated at the
+                        # Model.invoke/stream patch boundary so spawn/fork subagent
+                        # calls (which never bubble llm_usage chunks up) are included.
                         yield AgentResponseChunk(
                             request_id=rid,
                             channel_id=cid,
@@ -4129,25 +4134,28 @@ class JiuWenClawDeepAdapter:
             _LLM_TRACE_REQUEST_ID.reset(token_trace_rid)
             _LLM_TRACE_ITERATION.reset(token_trace_iter)
             _LLM_TRACE_MODEL_NAME.reset(token_trace_model)
+            reset_usage_accumulation(usage_accumulator_token)
             if rid:
                 self._untrack_session_toolkit(rid)
 
         summary = {
-            "input_tokens": usage_accumulator["input_tokens"],
-            "output_tokens": usage_accumulator["output_tokens"],
-            "total_tokens": usage_accumulator["total_tokens"],
+            "input_tokens": usage_accumulator.get("input_tokens", 0),
+            "output_tokens": usage_accumulator.get("output_tokens", 0),
+            "total_tokens": usage_accumulator.get("total_tokens", 0),
         }
-        if usage_accumulator["input_cost"] > 0:
+        if usage_accumulator.get("cache_tokens", 0):
+            summary["cache_tokens"] = usage_accumulator["cache_tokens"]
+        if usage_accumulator.get("input_cost", 0) > 0:
             summary["input_cost"] = round(usage_accumulator["input_cost"], 6)
-        if usage_accumulator["output_cost"] > 0:
+        if usage_accumulator.get("output_cost", 0) > 0:
             summary["output_cost"] = round(usage_accumulator["output_cost"], 6)
-        if usage_accumulator["total_cost"] > 0:
+        if usage_accumulator.get("total_cost", 0) > 0:
             summary["total_cost"] = round(usage_accumulator["total_cost"], 6)
 
         logger.info("[JiuWenClawDeepAdapter] llm_usage summary: request_id=%s session_id=%s usage=%s",
                     rid, session_id, summary)
 
-        if usage_accumulator["total_tokens"] > 0:
+        if usage_accumulator.get("total_tokens", 0) > 0:
             yield AgentResponseChunk(
                 request_id=rid,
                 channel_id=cid,
