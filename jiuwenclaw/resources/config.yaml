@@ -277,6 +277,14 @@ react:
   skill_mode: all
   # 禁用的工具列表，添加 fork_agent 可避免并行调用触发 API 限流
   # 禁用后用户需使用 spawn_subagent 替代
+  # plan 模式 Todo 进度提醒：每 N 次工具调用后，在下一次 model 调用前注入当前 todo 快照
+  # 支持两种配置方式（二选一）：
+  #   1) YAML：enable_progress_repeat: false
+  #   2) 环境变量：enable_progress_repeat: ${TODO_PROGRESS_REPEAT:-true}
+  #      在 .env 中设置 TODO_PROGRESS_REPEAT=false 可关闭
+  task_planning:
+    enable_progress_repeat: ${TODO_PROGRESS_REPEAT:-true}
+    list_tool_call_interval: 20
   # 支持两种配置方式（同一字段，二选一）：
   #   1) YAML 列表：disabled_tools: ["bash", "fork_agent"]
   #   2) 环境变量：disabled_tools: ${DISABLED_TOOLS:-}
@@ -403,7 +411,8 @@ react:
       # compression_call_max_tokens: 200000   # 压缩调 LLM 时的最大上下文预算
       # messages_to_keep: 10                  # 保留最近 N 条；buffer < 此值时不会"删历史"，只新增 summary
       # keep_tool_message_pairs: true         # 保留区里成对的 (tool_call ↔ tool_result) 不被截断
-      # state_snapshot_max_chars: 4000        # state 快照（plan/task/skills）正文最大字符
+      # state_snapshot_max_chars: 4000        # state 快照（plan/task/skills/todos）正文最大字符
+      # reinject_todos: true                  # 压缩后在 summary 后 reinject 活跃 todo 关键字段
       # reinject_recent_skills: 3             # summary 后重注最近 N 个 skill
       # reinject_file_tool_names:             # 在 summary 末尾重注这些工具的最近调用（默认列表）
       #   ["read_file","write_file","edit_file","glob","grep"]

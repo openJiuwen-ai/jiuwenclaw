@@ -293,26 +293,26 @@ def pause_todo_items(todos: list[TodoItem]) -> bool:
     return changed
 
 
-async def pause_pending_todos_on_tool(modify_tool: Any) -> bool:
+async def pause_pending_todos_on_tool(modify_tool: Any, session_id: str) -> bool:
     """Persist in_progress -> pending on the session todo file."""
-    todos = await modify_tool.load_todos()
+    file_path = modify_tool.file_path_for_session(session_id)
+    todos = await modify_tool.load_todos(file_path)
     if not todos:
         return False
     if not pause_todo_items(todos):
         return False
-    await modify_tool.save_todos(todos)
+    await modify_tool.save_todos(todos, file_path)
     return True
 
 
-async def snapshot_and_isolate_unfinished_todos(
-    modify_tool: Any,
-) -> dict[str, Any] | None:
+async def snapshot_and_isolate_unfinished_todos(modify_tool: Any, session_id: str) -> dict[str, Any] | None:
     """Snapshot cancel state, then remove unfinished todos from file (keep completed only).
 
     Prevents todo_list from exposing runnable pending items on the next turn, so a
     clearly new user message cannot parallelize with old plan steps via todo_start.
     """
-    todos = await modify_tool.load_todos()
+    file_path = modify_tool.file_path_for_session(session_id)
+    todos = await modify_tool.load_todos(file_path)
     if not todos:
         return None
 
@@ -332,28 +332,29 @@ async def snapshot_and_isolate_unfinished_todos(
             ids_to_delete.append(todo.id)
 
     if ids_to_delete:
-        await delete_todos_via_modify_tool(modify_tool, ids_to_delete)
+        await delete_todos_via_modify_tool(modify_tool, ids_to_delete, session_id=session_id)
 
     return snapshot
 
 
-async def delete_todos_via_modify_tool(modify_tool: Any, ids: list[str]) -> None:
+async def delete_todos_via_modify_tool(modify_tool: Any, ids: list[str], *, session_id: str) -> None:
     """Delete todos through TodoModifyTool public invoke API."""
     if not ids:
         return
-    await modify_tool.invoke({"action": "delete", "ids": ids})
+    await modify_tool.invoke({"action": "delete", "ids": ids}, session_id=session_id)
 
 
-async def cancel_todos_via_modify_tool(modify_tool: Any, ids: list[str]) -> None:
+async def cancel_todos_via_modify_tool(modify_tool: Any, ids: list[str], *, session_id: str) -> None:
     """Cancel todos through TodoModifyTool public invoke API."""
     if not ids:
         return
-    await modify_tool.invoke({"action": "cancel", "ids": ids})
+    await modify_tool.invoke({"action": "cancel", "ids": ids}, session_id=session_id)
 
 
-async def cancel_pending_todos_on_tool(modify_tool: Any) -> bool:
+async def cancel_pending_todos_on_tool(modify_tool: Any, session_id: str) -> bool:
     """Mark all non-completed todos cancelled (isolate old plan for a new-task turn)."""
-    todos = await modify_tool.load_todos()
+    file_path = modify_tool.file_path_for_session(session_id)
+    todos = await modify_tool.load_todos(file_path)
     if not todos:
         return False
 
@@ -365,7 +366,7 @@ async def cancel_pending_todos_on_tool(modify_tool: Any) -> bool:
     if not ids_to_cancel:
         return False
 
-    await cancel_todos_via_modify_tool(modify_tool, ids_to_cancel)
+    await cancel_todos_via_modify_tool(modify_tool, ids_to_cancel, session_id=session_id)
     return True
 
 

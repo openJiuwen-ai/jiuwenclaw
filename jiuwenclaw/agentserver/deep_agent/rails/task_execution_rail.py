@@ -451,10 +451,9 @@ class TaskExecutionRail(DeepAgentRail):
         self._active_tasks: dict[str, TaskExecutionContext] = {}
         self._todo_started: set[str] = set()
         self._deep_agent: Any | None = None
-        self._current_task_id: str | None = None
 
     def get_current_task_id(self) -> str | None:
-        return self._current_task_id
+        return _ACTIVE_TASK_ID.get()
 
     def init(self, agent: Any) -> None:
         self._deep_agent = agent
@@ -464,7 +463,6 @@ class TaskExecutionRail(DeepAgentRail):
         self._todo_map_before_tool = {}
         self._active_tasks = {}
         self._todo_started = set()
-        self._current_task_id = None
         _ACTIVE_TASK_ID.set(None)
         if isinstance(ctx.inputs, InvokeInputs):
             await self._init_task_tracking(ctx.session)
@@ -638,7 +636,8 @@ class TaskExecutionRail(DeepAgentRail):
             todo_items = self._load_todo_from_json(session_id)
             if todo_items:
                 self._todo_map = self._build_map_from_todo_items(todo_items)
-                logger.info("[TaskExecutionRail] Loaded todo.json: %d tasks", len(todo_items))
+                logger.info("[TaskExecutionRail] Loaded todo.json session_id=%s tasks=%d",
+                            session_id, len(todo_items))
         except Exception as exc:
             logger.debug("[TaskExecutionRail] Failed to load todo.json: %s", exc)
 
@@ -710,13 +709,17 @@ class TaskExecutionRail(DeepAgentRail):
             if curr_status == "in_progress" and prev_status not in ("in_progress", "completed"):
                 if task_id not in self._todo_started:
                     await self._emit_task_start_event(
-                        ctx.session, task_id, current, parent_request_id, source="todo"
+                        ctx.session,
+                        task_id,
+                        current,
+                        parent_request_id,
+                        source="todo",
                     )
                     self._todo_started.add(task_id)
             elif curr_status == "completed" and prev_status != "completed":
                 completed_in_batch.append(task_id)
-                if prev_status == "in_progress":
-                    await self._emit_task_complete_event(ctx.session, task_id, current, status="succeeded")
+                await self._emit_task_complete_event(
+                    ctx.session, task_id, current, status="succeeded")
 
         self._todo_map = current_map
         self._todo_map_before_tool = {}
@@ -737,7 +740,6 @@ class TaskExecutionRail(DeepAgentRail):
 
         if full_task_id in self._active_tasks:
             _ACTIVE_TASK_ID.set(full_task_id)
-            self._current_task_id = full_task_id
             return
 
         context = TaskExecutionContext(
@@ -751,7 +753,6 @@ class TaskExecutionRail(DeepAgentRail):
         )
         self._active_tasks[full_task_id] = context
         _ACTIVE_TASK_ID.set(full_task_id)
-        self._current_task_id = full_task_id
 
         logger.info("[TaskExecutionRail] task.start: %s - %s", full_task_id, context.task_content)
 
@@ -780,20 +781,24 @@ class TaskExecutionRail(DeepAgentRail):
         status: Literal["succeeded", "failed", "skipped"],
         error: str | None = None,
     ) -> None:
-        for source in ["todo"]:
-            full_task_id = f"{source}:{task_id}"
-            context = self._active_tasks.get(full_task_id)
-            if context:
-                break
-        else:
-            return
-
+        full_task_id = f"todo:{task_id}"
+        context = self._active_tasks.get(full_task_id)
         timestamp = time.time()
-        duration_ms = int((timestamp - context.start_time) * 1000)
+
+        if context:
+            duration_ms = int((timestamp - context.start_time) * 1000)
+            payload_task_id = context.task_id
+            task_content = context.task_content
+            source = context.source
+            self._active_tasks.pop(full_task_id, None)
+        else:
+            duration_ms = 0
+            payload_task_id = full_task_id
+            task_content = str(task.get("content", ""))
+            source = "todo"
 
         if get_current_task_id() == full_task_id:
             _ACTIVE_TASK_ID.set(None)
-            self._current_task_id = None
 
         logger.info("[TaskExecutionRail] task.complete: %s - %s (%dms)", full_task_id, status, duration_ms)
 
@@ -802,17 +807,16 @@ class TaskExecutionRail(DeepAgentRail):
                 type="task.complete",
                 index=0,
                 payload={
-                    "task_id": context.task_id,
-                    "task_content": context.task_content,
+                    "task_id": payload_task_id,
+                    "task_content": task_content,
                     "status": status,
                     "duration_ms": duration_ms,
                     "error": error,
                     "timestamp": timestamp,
-                    "source": context.source,
+                    "source": source,
                 },
             )
         )
-        self._active_tasks.pop(full_task_id, None)
 
     async def _emit_task_update_event(
         self,
@@ -911,7 +915,10 @@ class TaskExecutionRail(DeepAgentRail):
 
         return formatted
 
-    def _task_candidates_by_status(self, allowed: frozenset[str]) -> list[tuple[int, str]]:
+    def _task_candidates_by_status(
+        self,
+        allowed: frozenset[str],
+    ) -> list[tuple[int, str]]:
         candidates: list[tuple[int, str]] = []
         for task_id, task in self._todo_map.items():
             if str(task.get("status", "")).lower() in allowed:
@@ -948,11 +955,9 @@ class TaskExecutionRail(DeepAgentRail):
         if raw_task_id:
             full_task_id = f"todo:{raw_task_id}"
             _ACTIVE_TASK_ID.set(full_task_id)
-            self._current_task_id = full_task_id
             logger.debug("[TaskExecutionRail] task_id binding: %s", full_task_id)
             return
         _ACTIVE_TASK_ID.set(None)
-        self._current_task_id = None
 
     def _bind_context_after_todo_sync(
         self,

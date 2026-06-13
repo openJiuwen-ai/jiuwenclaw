@@ -1833,10 +1833,16 @@ class JiuWenClawDeepAdapter:
             rail = None
         return rail
 
-    def _build_task_planning_rail(self) -> TaskPlanningRail | None:
+    def _build_task_planning_rail(self, config: dict[str, Any] | None = None) -> TaskPlanningRail | None:
         """Build TaskPlanningRail."""
         try:
-            task_planning_rail = TaskPlanningRail()
+            from openjiuwen.harness.rails.task_planning_rail import (
+                resolve_task_planning_rail_kwargs,
+            )
+            cfg = config if config is not None else self._config_cache
+            react_cfg = (cfg or {}).get("react") or {}
+            rail_kwargs = resolve_task_planning_rail_kwargs(react_cfg)
+            task_planning_rail = TaskPlanningRail(**rail_kwargs)
             logger.info("[JiuWenClawDeepAdapter] TaskPlanningRail create success",
                        extra={'user_visible': 'progress'})
         except Exception as exc:
@@ -2151,7 +2157,7 @@ class JiuWenClawDeepAdapter:
             _RailBuildInfo("_response_prompt_rail", self._build_response_prompt_rail),
             _RailBuildInfo("_task_execution_rail", self._build_task_execution_rail),
             _RailBuildInfo("_stream_event_rail", self._build_stream_event_rail),
-            _RailBuildInfo("_task_planning_rail", self._build_task_planning_rail),
+            _RailBuildInfo("_task_planning_rail", self._build_task_planning_rail, {"config": config_base}),
             _RailBuildInfo("_security_rail", self._build_security_rail),
             _RailBuildInfo("_heartbeat_rail", self._build_heartbeat_rail),
             _RailBuildInfo("_avatar_rail", self._build_avatar_rail),
@@ -4247,7 +4253,6 @@ class JiuWenClawDeepAdapter:
                 language=self._resolve_runtime_language(),
             )
 
-        modify_tool.set_file(session_id)
         return modify_tool
 
     async def _finalize_plan_pause_after_cancel(self, session_id: str) -> list[dict] | None:
@@ -4261,7 +4266,7 @@ class JiuWenClawDeepAdapter:
         try:
             snapshot: dict[str, Any] | None = None
             if modify_tool is not None:
-                snapshot = await snapshot_and_isolate_unfinished_todos(modify_tool)
+                snapshot = await snapshot_and_isolate_unfinished_todos(modify_tool, session_id)
 
             state = self._instance.load_state(session)
             repair_task_plan_after_pause(state)
@@ -4276,7 +4281,8 @@ class JiuWenClawDeepAdapter:
 
             if modify_tool is None:
                 return None
-            updated_todos = await modify_tool.load_todos()
+            file_path = modify_tool.file_path_for_session(session_id)
+            updated_todos = await modify_tool.load_todos(file_path)
             if updated_todos and self._stream_event_rail is not None:
                 return self._stream_event_rail.format_todos_for_frontend(updated_todos)
             return None
@@ -4349,8 +4355,9 @@ class JiuWenClawDeepAdapter:
         if modify_tool is None:
             return None
 
+        file_path = modify_tool.file_path_for_session(session_id)
         try:
-            todos = await modify_tool.load_todos()
+            todos = await modify_tool.load_todos(file_path)
             if not todos:
                 return None
 
@@ -4365,14 +4372,13 @@ class JiuWenClawDeepAdapter:
                     ids_to_cancel.append(todo.id)
 
             if ids_to_cancel:
-                await cancel_todos_via_modify_tool(modify_tool, ids_to_cancel)
+                await cancel_todos_via_modify_tool(modify_tool, ids_to_cancel, session_id=session_id)
                 logger.info(
                     "[JiuWenClawDeepAdapter] 已将 session %s 的未完成任务标记为 cancelled",
                     session_id,
                 )
 
-            # 重新加载并返回前端格式的 todo 列表
-            updated_todos = await modify_tool.load_todos()
+            updated_todos = await modify_tool.load_todos(file_path)
             if updated_todos and self._stream_event_rail is not None:
                 return self._stream_event_rail.format_todos_for_frontend(updated_todos)
             return None
