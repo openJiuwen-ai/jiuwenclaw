@@ -15,6 +15,7 @@ import shutil
 import ssl
 import tarfile
 import tempfile
+import threading
 import uuid
 from contextlib import contextmanager
 import zipfile
@@ -107,6 +108,9 @@ _OPENJIUWEN_MARKET_BASE_URL_DEFAULT = "https://teamskills.openjiuwen.com"
 _OPENJIUWEN_DEFAULT_ALLOWED_DOWNLOAD_HOSTS: tuple[str, ...] = ("openjiuwen-market.obs.*.myhuaweicloud.com",)
 _IMPORT_LOCAL_REMOTE_TIMEOUT: float = float(os.environ.get("IMPORT_LOCAL_REMOTE_TIMEOUT", "60"))
 _IMPORT_LOCAL_DEFAULT_ALLOWED_DOWNLOAD_HOSTS: tuple[str, ...] = ("*.obs.*.myhuaweicloud.com",)
+_SKILLNET_INSTALL_JOBS_MAX_AGE_SECONDS: int = int(os.environ.get("SKILLNET_INSTALL_JOBS_MAX_AGE_SECONDS", "3600"))
+_SKILLNET_INSTALL_JOBS_MAX_COUNT: int = int(os.environ.get("SKILLNET_INSTALL_JOBS_MAX_COUNT", "100"))
+_EVOLUTION_ENTRY_ID_PATTERN = re.compile(r"^[a-zA-Z0-9_\-:.]+$")
 
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
@@ -263,7 +267,6 @@ def _log_rejected_name(operation: str, label: str, value: Any, exc: ValueError) 
 
 
 def _safe_rmtree(path: Path) -> bool:
-    """安全地删除目录树，处理 Windows 上的 git 文件锁定问题."""
     if not path.exists():
         return True
 
@@ -275,49 +278,37 @@ def _safe_rmtree(path: Path) -> bool:
 
     for attempt in range(max_retries):
         try:
+            if os.name == "nt":
+                for root, dirs, files in os.walk(path):
+                    for name in files:
+                        filepath = Path(root) / name
+                        try:
+                            os.chmod(filepath, stat.S_IWRITE)
+                        except OSError:
+                            pass
             shutil.rmtree(path)
             return True
         except OSError as exc:
             logger.debug("删除目录失败（尝试 %d/%d）: %s", attempt + 1, max_retries, exc)
 
-            # 最后一次尝试失败，直接返回 False
             if attempt == max_retries - 1:
                 logger.warning("删除目录失败（已重试 %d 次）: %s", max_retries, path)
                 return False
 
-            # 检查是否是 Windows 上的权限问题
-            # 尝试修改文件权限
             if os.name == "nt":
                 try:
-                    # 尝试递归修改权限
-                    for root, dirs, files in os.walk(path):
-                        for name in files + dirs:
-                            filepath = Path(root) / name
-                            try:
-                                # 移除只读属性
-                                if os.name == "nt":
-                                    os.chmod(filepath, stat.S_IWRITE)
-                                elif os.name == "posix":
-                                    os.chmod(filepath, 0o777)
-                                # 对目录，尝试删除其中的文件
-                                if filepath.is_dir():
-                                    try:
-                                        shutil.rmtree(filepath)
-                                    except OSError:
-                                        pass  # 忽略子目录删除失败，外层会重试
-                                elif filepath.is_file():
-                                    try:
-                                        os.unlink(filepath)
-                                    except PermissionError:
-                                        pass  # 忽略文件删除失败
-                                # 小延迟
-                                time.sleep(0.01)
-                            except OSError:
-                                pass  # 忽略权限修改失败
-                except Exception:
-                    pass  # 忽略其他异常
+                    def _remove_readonly_and_retry(func, path_, exc_val):
+                        try:
+                            os.chmod(path_, stat.S_IWRITE)
+                            func(path_)
+                        except OSError:
+                            pass
 
-            # 等待后重试
+                    shutil.rmtree(path, onerror=_remove_readonly_and_retry)
+                    return True
+                except OSError:
+                    pass
+
             time.sleep(retry_delay)
             retry_delay *= 2
 
@@ -332,8 +323,6 @@ class SkillManager:
     """Skill 管理器，对应 skills.* 请求方法."""
 
     def __init__(self, workspace_dir: str | None = None) -> None:
-        # 若传入 workspace_dir（harness adapter 使用），优先通过 Workspace/WorkspaceNode
-        # 解析 skills 路径；否则使用全局默认路径（react adapter 或无参数时）。
         if workspace_dir is not None:
             try:
                 from openjiuwen.harness.workspace.workspace import Workspace, WorkspaceNode
@@ -355,13 +344,43 @@ class SkillManager:
             self._state_file = _get_state_file()
         self._skills_dir.mkdir(parents=True, exist_ok=True)
         self._state: dict[str, Any] = self._load_state()
-        # SkillNet 异步安装：install 立即返回 install_id，后台下载；完成后调用 hook 重载 Agent
         self._skillnet_install_jobs: dict[str, dict[str, Any]] = {}
         self._skillnet_install_complete_hook: Callable[[], Awaitable[None]] | None = None
+        self._state_lock = threading.Lock()
+        self._install_jobs_lock = threading.Lock()
 
     def set_skillnet_install_complete_hook(self, hook: Callable[[], Awaitable[None]] | None) -> None:
-        """安装成功落盘后回调（通常为重载 Agent 实例）."""
         self._skillnet_install_complete_hook = hook
+
+    def _cleanup_skillnet_install_jobs(self) -> None:
+        now = datetime.now(timezone.utc)
+        expired_ids: list[str] = []
+        with self._install_jobs_lock:
+            if len(self._skillnet_install_jobs) > _SKILLNET_INSTALL_JOBS_MAX_COUNT:
+                terminal = [
+                    (k, v) for k, v in self._skillnet_install_jobs.items()
+                    if v.get("status") in ("done", "failed")
+                ]
+                terminal.sort(key=lambda x: x[1].get("created_at", ""))
+                excess = len(self._skillnet_install_jobs) - _SKILLNET_INSTALL_JOBS_MAX_COUNT
+                for k, _ in terminal[:excess]:
+                    expired_ids.append(k)
+
+            for install_id, job in list(self._skillnet_install_jobs.items()):
+                if install_id in expired_ids:
+                    continue
+                if job.get("status") in ("done", "failed"):
+                    created_at_str = job.get("created_at", "")
+                    if created_at_str:
+                        try:
+                            created_at = datetime.fromisoformat(created_at_str)
+                            if (now - created_at).total_seconds() > _SKILLNET_INSTALL_JOBS_MAX_AGE_SECONDS:
+                                expired_ids.append(install_id)
+                        except (ValueError, TypeError):
+                            expired_ids.append(install_id)
+
+            for install_id in expired_ids:
+                del self._skillnet_install_jobs[install_id]
 
     # -----------------------------------------------------------------------
     # 公开 handler
@@ -416,13 +435,13 @@ class SkillManager:
         return {"plugins": plugins}
 
     async def handle_skills_get(self, params: dict) -> dict:
-        """获取单个 skill 详情（name 必填）.
-
-        返回字段转换：body -> content, path -> file_path
-        """
         name = params.get("name")
         if not name:
             raise ValueError("缺少参数: name")
+        try:
+            name = _safe_path_name(str(name), "skill")
+        except ValueError as exc:
+            raise ValueError(f"无效的 skill name: {name}") from exc
 
         # 先在本地 skills 目录中查找
         for child in self._skills_dir.iterdir():
@@ -560,6 +579,8 @@ class SkillManager:
             content = item.get("change", {}).get("content") if isinstance(item.get("change"), dict) else None
             if not entry_id:
                 raise ValueError(f"entries[{idx}].id 不能为空")
+            if not _EVOLUTION_ENTRY_ID_PATTERN.match(entry_id):
+                raise ValueError(f"entries[{idx}].id 包含非法字符，仅允许字母数字和 _-:.")
             if not isinstance(content, str):
                 raise ValueError(f"entries[{idx}].change.content 必须是字符串")
             normalized_entries.append(EvolutionEntry.from_dict(item))
@@ -696,9 +717,6 @@ class SkillManager:
             await _async_safe_rmtree(dest)
         await asyncio.to_thread(shutil.copytree, plugin_src, dest)
 
-        # 解析元数据并记录（添加 installed_at 时间戳）
-        from datetime import datetime, timezone
-
         meta = self._parse_skill_md(self._try_find_skill_file(dest)) or {}
         commit_hash = await self._git_get_commit(repo_dir)
         self._add_installed_plugin(
@@ -720,12 +738,8 @@ class SkillManager:
         return {"success": True}
 
     async def handle_skills_install_builtin(self, params: dict) -> dict:
-        """安装内置技能.
-
-        params:
-            name: skill 名称
-        """
         name = params.get("name", "")
+        force = bool(params.get("force", False))
         logger.info(
             f"[SkillManager] Skill内置安装开始: name={name}",
             extra={'user_visible': 'critical'}
@@ -754,23 +768,22 @@ class SkillManager:
         if not src.exists() or not src.is_dir():
             return {"success": False, "detail": f"未找到内置技能: {name}"}
 
-        # 检查是否已经安装
         dest = _safe_child_path(self._skills_dir, name, "skill")
         if dest.exists() and dest.is_dir():
-            logger.error(
-                f"[SkillManager] Skill内置安装失败: name={name} error=技能已经安装",
-                extra={'user_visible': 'critical'}
-            )
-            return {"success": False, "detail": f"技能 {name} 已经安装"}
+            if not force:
+                logger.error(
+                    f"[SkillManager] Skill内置安装失败: name={name} error=技能已经安装",
+                    extra={'user_visible': 'critical'}
+                )
+                return {"success": False, "detail": f"技能 {name} 已经安装"}
+            await _async_safe_rmtree(dest)
 
-        # 复制技能到用户目录
         try:
             await asyncio.to_thread(shutil.copytree, src, dest)
         except Exception as exc:
             logger.error("安装内置技能失败: %s", exc)
             return {"success": False, "detail": f"安装失败: {exc}"}
 
-        # 记录安装信息到状态文件
         meta = self._parse_skill_md(self._try_find_skill_file(dest)) or {}
         self._add_installed_plugin(
             {
@@ -783,7 +796,6 @@ class SkillManager:
             }
         )
 
-        # 刷新索引
         self._refresh_agent_data_indexes()
 
         logger.info(
@@ -904,11 +916,17 @@ class SkillManager:
                 mirror_url = ms
 
         install_id = uuid.uuid4().hex
-        self._skillnet_install_jobs[install_id] = {"status": "pending"}
-        asyncio.create_task(
+        self._cleanup_skillnet_install_jobs()
+        with self._install_jobs_lock:
+            self._skillnet_install_jobs[install_id] = {
+                "status": "pending",
+                "created_at": datetime.now(timezone.utc).isoformat(),
+            }
+        task = asyncio.create_task(
             self._skillnet_install_background(install_id, skill_url, force, mirror_url),
             name=f"skillnet_install_{install_id[:8]}",
         )
+        task.add_done_callback(lambda t: t.exception() if not t.cancelled() and t.exception() else None)
 
         logger.info(
             f"[SkillManager] SkillNet安装成功: url={skill_url} install_id={install_id}",
@@ -921,37 +939,37 @@ class SkillManager:
         }
 
     async def handle_skills_skillnet_install_status(self, params: dict) -> dict:
-        """查询 SkillNet 异步安装状态."""
         install_id = str(params.get("install_id", "")).strip()
         if not install_id:
             return {"success": False, "detail": "缺少参数: install_id"}
-        job = self._skillnet_install_jobs.get(install_id)
-        if job is None:
-            return {
-                "success": False,
-                "detail": "安装会话已过期，请重新点击安装。",
-                "detail_key": "skills.skillNet.errors.sessionExpired",
-            }
+        with self._install_jobs_lock:
+            job = self._skillnet_install_jobs.get(install_id)
+            if job is None:
+                return {
+                    "success": False,
+                    "detail": "安装会话已过期，请重新点击安装。",
+                    "detail_key": "skills.skillNet.errors.sessionExpired",
+                }
+            job_copy = dict(job)
 
-        status = job.get("status", "pending")
+        status = job_copy.get("status", "pending")
         if status == "pending":
             return {"success": True, "status": "pending"}
         if status == "failed":
             out: dict[str, Any] = {
                 "success": False,
                 "status": "failed",
-                "detail": job.get("detail", "安装失败"),
+                "detail": job_copy.get("detail", "安装失败"),
             }
-            if "detail_key" in job:
-                out["detail_key"] = job["detail_key"]
-            if "detail_params" in job:
-                out["detail_params"] = job["detail_params"]
+            if "detail_key" in job_copy:
+                out["detail_key"] = job_copy["detail_key"]
+            if "detail_params" in job_copy:
+                out["detail_params"] = job_copy["detail_params"]
             return out
-        # done
         return {
             "success": True,
             "status": "done",
-            "skill": job.get("skill"),
+            "skill": job_copy.get("skill"),
         }
 
     async def handle_skills_skillnet_evaluate(self, params: dict) -> dict:
@@ -1161,10 +1179,10 @@ class SkillManager:
                 with tempfile.TemporaryDirectory(prefix="jiuwenclari_clawhub_") as tmpdir:
                     tmp_path = Path(tmpdir)
 
-                    # 保存 zip 文件
                     zip_content = io.BytesIO(response.content)
-                    with zipfile.ZipFile(zip_content, "r") as zip_ref:
-                        zip_ref.extractall(tmp_path)
+                    zip_path = tmp_path / "download.zip"
+                    zip_path.write_bytes(response.content)
+                    self._safe_extract_zip_to_dir(zip_path, tmp_path)
 
                     # 查找 skill 目录
                     skill_dir = self._locate_skill_dir(tmp_path)
@@ -1227,7 +1245,6 @@ class SkillManager:
                         }
                     )
                     self._refresh_agent_data_indexes()
-                    await _async_safe_rmtree(skill_dir)
 
                     logger.info(
                         f"[SkillManager] ClawHub下载成功: slug={slug} name={skill_name}",
@@ -1428,17 +1445,18 @@ class SkillManager:
         except Exception as exc:
             logger.error("SkillNet 后台安装异常: %s", exc)
             raw = str(exc).strip()
-            self._skillnet_install_jobs[install_id] = {
-                "status": "failed",
-                "detail": raw or "安装失败，请重试。",
-                **(
-                    {}
-                    if raw
-                    else {
-                        "detail_key": "skills.skillNet.errors.installFailedFallback",
-                    }
-                ),
-            }
+            with self._install_jobs_lock:
+                self._skillnet_install_jobs[install_id] = {
+                    "status": "failed",
+                    "detail": raw or "安装失败，请重试。",
+                    **(
+                        {}
+                        if raw
+                        else {
+                            "detail_key": "skills.skillNet.errors.installFailedFallback",
+                        }
+                    ),
+                }
             return
 
         if not result.get("ok"):
@@ -1450,7 +1468,8 @@ class SkillManager:
                 job_entry["detail_key"] = result["detail_key"]
             if result.get("detail_params") is not None:
                 job_entry["detail_params"] = result["detail_params"]
-            self._skillnet_install_jobs[install_id] = job_entry
+            with self._install_jobs_lock:
+                self._skillnet_install_jobs[install_id] = job_entry
             return
 
         skill_name = result["skill_name"]
@@ -1478,11 +1497,12 @@ class SkillManager:
             self._refresh_agent_data_indexes()
         except Exception as exc:
             logger.error("SkillNet 写入状态失败: %s", exc)
-            self._skillnet_install_jobs[install_id] = {
-                "status": "failed",
-                "detail": "安装完成但保存配置失败，请刷新页面重试。",
-                "detail_key": "skills.skillNet.errors.saveConfigFailed",
-            }
+            with self._install_jobs_lock:
+                self._skillnet_install_jobs[install_id] = {
+                    "status": "failed",
+                    "detail": "安装完成但保存配置失败，请刷新页面重试。",
+                    "detail_key": "skills.skillNet.errors.saveConfigFailed",
+                }
             return
 
         hook = self._skillnet_install_complete_hook
@@ -1491,17 +1511,19 @@ class SkillManager:
                 await hook()
             except Exception as exc:
                 logger.error("SkillNet 安装完成后 hook 失败: %s", exc)
-                self._skillnet_install_jobs[install_id] = {
-                    "status": "failed",
-                    "detail": "技能已安装，请手动刷新页面生效。",
-                    "detail_key": "skills.skillNet.errors.reloadRequired",
-                }
+                with self._install_jobs_lock:
+                    self._skillnet_install_jobs[install_id] = {
+                        "status": "failed",
+                        "detail": "技能已安装，请手动刷新页面生效。",
+                        "detail_key": "skills.skillNet.errors.reloadRequired",
+                    }
                 return
 
-        self._skillnet_install_jobs[install_id] = {
-            "status": "done",
-            "skill": {"name": skill_name, "source": "skillnet"},
-        }
+        with self._install_jobs_lock:
+            self._skillnet_install_jobs[install_id] = {
+                "status": "done",
+                "skill": {"name": skill_name, "source": "skillnet"},
+            }
 
     def _skillnet_install_files_sync(
         self, skill_url: str, force: bool, mirror_url: str | None = None
@@ -1776,7 +1798,7 @@ class SkillManager:
                     download_url.strip(),
                     timeout=timeout,
                     stream=True,
-                    allow_redirects=False,
+                    allow_redirects=True,
                     verify=False,
                 ) as response:
                     response.raise_for_status()
@@ -2504,7 +2526,7 @@ class SkillManager:
         rel_path = path if path.startswith("/") else f"/{path}"
         req_url = f"{base_url}{rel_path}"
         try:
-            async with httpx.AsyncClient(timeout=timeout, follow_redirects=False) as client:
+            async with httpx.AsyncClient(timeout=timeout, follow_redirects=True, max_redirects=5) as client:
                 resp = await client.get(req_url, params=params)
         except Exception as exc:
             raise RuntimeError(f"无法连接 OpenJiuwen marketplace: {exc}") from exc
@@ -2635,7 +2657,7 @@ class SkillManager:
         timeout: float | None = None,
     ) -> bytes:
         timeout = max(30.0, timeout or _IMPORT_LOCAL_REMOTE_TIMEOUT)
-        async with httpx.AsyncClient(timeout=timeout, follow_redirects=False) as client:
+        async with httpx.AsyncClient(timeout=timeout, follow_redirects=True, max_redirects=5) as client:
             resp = await client.get(download_url)
             resp.raise_for_status()
             body = resp.content or b""
@@ -2675,7 +2697,7 @@ class SkillManager:
         timeout: float | None = None,
     ) -> bytes:
         timeout = max(30.0, timeout or _OPENJIUWEN_MARKET_TIMEOUT)
-        async with httpx.AsyncClient(timeout=timeout, follow_redirects=False) as client:
+        async with httpx.AsyncClient(timeout=timeout, follow_redirects=True, max_redirects=5) as client:
             resp = await client.get(download_url)
             resp.raise_for_status()
             body = resp.content or b""
@@ -2994,15 +3016,21 @@ class SkillManager:
         return default_state
 
     def _save_state(self) -> None:
-        """持久化状态到 skills_state.json."""
-        try:
-            self._state_file.parent.mkdir(parents=True, exist_ok=True)
-            self._state_file.write_text(
-                json.dumps(self._state, ensure_ascii=False, indent=2),
-                encoding="utf-8",
-            )
-        except Exception:
-            logger.error("保存 skills_state.json 失败")
+        with self._state_lock:
+            try:
+                self._state_file.parent.mkdir(parents=True, exist_ok=True)
+                tmp_path = self._state_file.with_suffix(".tmp")
+                tmp_path.write_text(
+                    json.dumps(self._state, ensure_ascii=False, indent=2),
+                    encoding="utf-8",
+                )
+                tmp_path.replace(self._state_file)
+            except Exception:
+                logger.error("保存 skills_state.json 失败")
+                try:
+                    tmp_path.unlink(missing_ok=True)
+                except OSError:
+                    pass
 
     def _get_marketplaces(self) -> list[dict]:
         marketplaces = self._state.get("marketplaces", [])
@@ -3041,8 +3069,6 @@ class SkillManager:
         return updated
 
     def _set_marketplace_last_updated(self, name: str) -> bool:
-        from datetime import datetime, timezone
-
         marketplaces = self.normalize_marketplaces(self._state.get("marketplaces", []))
         updated = False
         for marketplace in marketplaces:
