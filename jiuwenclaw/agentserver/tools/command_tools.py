@@ -16,6 +16,12 @@ from typing import Sequence
 
 from openjiuwen.core.foundation.tool import tool
 
+from jiuwenclaw.runtime.pip_env import (
+    check_command_install_warnings,
+    get_runtime_venv_dir,
+    rewrite_shell_command,
+    runtime_subprocess_env,
+)
 from jiuwenclaw.utils import get_agent_workspace_dir
 
 
@@ -177,6 +183,7 @@ def _run_command_sync(
         errors='replace',
         capture_output=True,
         timeout=timeout_seconds,
+        env=runtime_subprocess_env(),
     )
     return result, resolved_shell
 
@@ -199,6 +206,7 @@ def _run_command_background(
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
         text=True,
+        env=runtime_subprocess_env(),
     )
     try:
         exit_code = proc.wait(timeout=grace_seconds)
@@ -261,6 +269,10 @@ async def mcp_exec_command(
         max_output_chars = 0
     normalized_shell_type = _normalize_shell_type(shell_type)
 
+    install_warnings = check_command_install_warnings(command)
+    command = rewrite_shell_command(command)
+    runtime_venv = str(get_runtime_venv_dir())
+
     if background:
         try:
             pid, resolved_shell, err = await asyncio.to_thread(
@@ -282,6 +294,10 @@ async def mcp_exec_command(
             "pid": pid,
             "status": "started",
         }
+        if runtime_venv:
+            payload["runtime_venv"] = runtime_venv
+        if install_warnings:
+            payload["warnings"] = install_warnings
         return json.dumps(payload, ensure_ascii=False, indent=2)
 
     try:
@@ -306,4 +322,8 @@ async def mcp_exec_command(
         "stdout": _clip_text(result.stdout or "", max_output_chars),
         "stderr": _clip_text(result.stderr or "", max_output_chars),
     }
+    if runtime_venv:
+        payload["runtime_venv"] = runtime_venv
+    if install_warnings:
+        payload["warnings"] = install_warnings
     return json.dumps(payload, ensure_ascii=False, indent=2)

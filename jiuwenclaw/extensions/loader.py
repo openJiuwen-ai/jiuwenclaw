@@ -91,7 +91,13 @@ class ExtensionLoader:
 
         import shutil
         import subprocess
-        import sys
+
+        from jiuwenclaw.runtime.pip_env import (
+            get_runtime_python,
+            install_packages,
+            package_installed,
+            runtime_subprocess_env,
+        )
 
         uv_path = shutil.which("uv")
         use_uv = uv_path is not None
@@ -101,37 +107,45 @@ class ExtensionLoader:
 
         for package, version_spec in dependencies.items():
             package_name = f"{package}{version_spec}" if version_spec else package
-            try:
-                importlib.metadata.version(package)
+            if package_installed(package):
                 logger.info(f"[ExtensionLoader] 扩展 {root.name} 依赖 {package} 已安装")
                 continue
-            except importlib.metadata.PackageNotFoundError:
-                pass
 
             logger.info(f"[ExtensionLoader] 正在安装扩展 {root.name} 的依赖: {package_name}")
             try:
                 if use_uv:
                     subprocess.check_call(
-                        [uv_path, "pip", "install", package_name] + extra_args,
+                        [uv_path, "pip", "install", "--python", str(get_runtime_python()), package_name]
+                        + extra_args,
                         stdout=subprocess.DEVNULL,
                         stderr=None,
                         timeout=600,
+                        env=runtime_subprocess_env(),
                     )
                 else:
-                    subprocess.check_call(
-                        [sys.executable, "-m", "pip", "install", package_name] + extra_args,
-                        stdout=subprocess.DEVNULL,
-                        stderr=None,
-                        timeout=600,
-                    )
+                    result = install_packages([package_name], extra_args=extra_args)
+                    for warning in result.warnings:
+                        logger.warning("[ExtensionLoader] %s", warning)
+                    if result.returncode != 0:
+                        raise subprocess.CalledProcessError(
+                            result.returncode,
+                            "pip install",
+                            output=result.stdout,
+                            stderr=result.stderr,
+                        )
                 logger.info(f"[ExtensionLoader] 扩展 {root.name} 依赖 {package} 安装成功")
             except subprocess.TimeoutExpired:
                 logger.error(f"[ExtensionLoader] 扩展 {root.name} 依赖 {package} 安装超时 (120秒)")
             except subprocess.CalledProcessError as e:
                 logger.error(f"[ExtensionLoader] 扩展 {root.name} 依赖 {package} 安装失败: {e}")
+            except Exception as e:
+                logger.error(f"[ExtensionLoader] 扩展 {root.name} 依赖 {package} 安装失败: {e}")
 
     @staticmethod
     def _import_module(root: Path) -> Any:
+        from jiuwenclaw.runtime.pip_env import ensure_runtime_import_path
+
+        ensure_runtime_import_path()
         entry = _find_entry_script(root)
         if entry is None:
             raise FileNotFoundError(

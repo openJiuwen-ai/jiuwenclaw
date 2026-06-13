@@ -7,6 +7,7 @@ import sys
 
 from openjiuwen.harness.prompts import SystemPromptBuilder, PromptSection, resolve_language
 from jiuwenclaw.agentserver.cron_config import should_register_cron_tools
+from jiuwenclaw.runtime.pip_env import get_runtime_python, get_runtime_venv_dir
 from jiuwenclaw.utils import logger, get_agent_root_dir
 
 
@@ -18,6 +19,7 @@ class PromptPriority(IntEnum):
     """Named prompt section priorities for local builder sections."""
 
     IDENTITY = 10
+    PIP_ISOLATION = 12
     SAFETY = 20
     TOOLS = 30
     SKILLS = 40
@@ -111,6 +113,37 @@ After completing a system task, notify the user via a reply.
     )
 
 
+def pip_isolation_system_prompt(language: str) -> str:
+    """System-prompt text: pip installs use the workspace isolation venv."""
+    isolation_venv = get_runtime_venv_dir()
+    isolation_python = get_runtime_python(ensure=False)
+    if language in {"cn", "zh"}:
+        return (
+            f"安装或运行 Python 包/脚本时，优先使用隔离环境中的 Python 与 pip"
+            f"（`{isolation_python}` 或 `{isolation_python} -m pip`），"
+            f"不要安装到系统 Python。依赖会安装到隔离目录 `{isolation_venv}`。"
+            f"安装成功后，请向用户说明已安装的包，并告知该隔离目录路径。"
+        )
+    return (
+        f"When installing or running Python packages/scripts, prefer the isolated "
+        f"environment's Python and pip (`{isolation_python}` or `{isolation_python} -m pip`); "
+        f"do not install into system Python. Dependencies are installed to "
+        f"the isolated directory `{isolation_venv}`. After a successful install, "
+        f"tell the user which package was installed and provide this isolation directory path."
+    )
+
+
+def _pip_isolation_prompt_section(language: str) -> PromptSection:
+    return PromptSection(
+        name="pip_isolation",
+        content={
+            "cn": pip_isolation_system_prompt("cn"),
+            "en": pip_isolation_system_prompt("en"),
+        },
+        priority=PromptPriority.PIP_ISOLATION,
+    )
+
+
 def _runtime_environment_prompt(language: str) -> str:
     """OS / shell command hints shared by main agent identity and subagent / fork / spawn base prompts."""
     os_type = sys.platform
@@ -187,6 +220,7 @@ def build_identity_prompt(mode: str, language: str, channel: str) -> str:
     builder = SystemPromptBuilder(language=resolved_language)
 
     builder.add_section(_identity_prompt(resolved_language))
+    builder.add_section(_pip_isolation_prompt_section(resolved_language))
 
     return builder.build()
 

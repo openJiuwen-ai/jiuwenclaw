@@ -6,7 +6,7 @@ from __future__ import annotations
 
 from typing import Any
 
-SHELL_PERMISSION_TOOLS = frozenset({"bash", "mcp_exec_command", "create_terminal"})
+SHELL_PERMISSION_TOOLS = frozenset({"bash", "shell", "mcp_exec_command", "create_terminal", "exec_command"})
 SHELL_COMMAND_ARG_KEYS = ("command", "cmd")
 
 
