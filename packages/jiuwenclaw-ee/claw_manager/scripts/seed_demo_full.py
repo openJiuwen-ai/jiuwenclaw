@@ -433,8 +433,8 @@ def phase_templates(instance_ids: list[str]) -> None:
             "data": {"note": "销售组主策略"},
         },
     )
-    sales_policy_id = int(sales_policy["id"])
-    print(f"  + service-policy[sales] id={sales_policy_id}")
+    sales_policy_id = sales_policy["policy_id"]
+    print(f"  + service-policy[sales] id={int(sales_policy['id'])} policy_id={sales_policy_id}")
 
     fallback_policy = post(
         f"/api/v1/instances/{full}/config-effective/service-policies",
@@ -511,7 +511,7 @@ def phase_templates(instance_ids: list[str]) -> None:
         f"/api/v1/instances/{full}/config-default-template-mappings",
         {
             "group_id": "g_demo_sales",
-            "priority": 0,
+            "priority": 1,
             "template_id": t_qwen,
             "template_type": "default_model",
             "enabled": True,

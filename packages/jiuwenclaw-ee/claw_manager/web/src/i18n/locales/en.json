@@ -18,6 +18,10 @@
     "view": "View",
     "actions": "Actions",
     "all": "All",
+    "sortAsc": "Ascending",
+    "sortDesc": "Descending",
+    "sortDefault": "Default",
+    "filter": "Filter",
     "confirm": "Confirm",
     "submit": "Submit"
   },
@@ -270,9 +274,13 @@
     },
     "mapping": {
       "new": "New Mapping",
+      "searchPlaceholder": "Search policy ID, name, description, User ID, Group ID, slot, template ID, or priority",
       "templateType": "Template Type",
       "templateTypeHint": "default_model / video_model / audio_model / vision_model / skill_whitelist / channel / service_resource",
       "templateId": "Template ID",
+      "template": "Template",
+      "templateUnavailable": "Template unavailable",
+      "slotUnavailable": "Slot unavailable",
       "userId": "User ID",
       "groupId": "Group ID",
       "priority": "Priority"
@@ -280,21 +288,88 @@
     "global": {
       "new": "New Global Policy",
       "priority": "Priority",
-      "templateRef": "Template Ref (JSON)",
-      "templateRefHint": "slot → template_id or ${user::…}/${group::…} or <template_id>"
+      "templateRef": "Template References",
+      "updatedAt": "Updated",
+      "searchPlaceholder": "Search policy ID, name, description, or priority"
+    },
+    "fieldRequired": "Please fill in {{field}}",
+    "templateRef": {
+      "title": "Template References",
+      "slot": "Slot",
+      "addSlot": "Add Slot",
+      "addRef": "Add Reference",
+      "removeSlot": "Remove Slot",
+      "removeRef": "Remove",
+      "empty": "No template references yet. Add a slot below.",
+      "loadingTemplates": "Loading templates…",
+      "pickTemplate": "Select a template",
+      "modeTemplate": "Template",
+      "modeUser": "User Mapping",
+      "modeGroup": "Group Mapping",
+      "userIdPlaceholder": "User ID, e.g. alice",
+      "groupIdPlaceholder": "Group ID, e.g. g_demo_sales",
+      "customPlaceholder": "Custom reference expression",
+      "slots": {
+        "default_model": "Default model (default_model)",
+        "video_model": "Video model (video_model)",
+        "audio_model": "Audio model (audio_model)",
+        "vision_model": "Vision model (vision_model)",
+        "skill_whitelist": "Skill whitelist (skill_whitelist)",
+        "extension_config": "Extension config (extension_config)",
+        "service_config": "Service config (service_config)"
+      }
     },
     "service": {
       "new": "New Service Policy",
       "serviceId": "Service ID",
-      "matchExpr": "Match Expression"
+      "serviceIdHint": "Routes requests to AgentServer. Use a fixed service ID (e.g. sales_pool_v1), or concatenate placeholders ${user_id}/${group_id}/${bot_id} (e.g. ${group_id}::${bot_id}).",
+      "serviceIdInvalid": "When $ is present, only ${user_id}, ${group_id}, and ${bot_id} placeholders are allowed",
+      "matchExpr": "Match Expression",
+      "searchPlaceholder": "Search policy ID, name, description, service ID, priority, or match expression",
+      "deleteBlockedByAgentPolicies": "This service policy still has {{count}} linked agent policies. Delete them first.",
+      "deleteBlockedByAgentPoliciesGeneric": "This service policy still has linked agent policies. Delete them first."
+    },
+    "matchExpr": {
+      "modeAll": "Match all",
+      "modeCustom": "Conditional",
+      "allHint": "Empty means match any user_id / group_id / bot_id.",
+      "combineOp": "Combine with",
+      "rootCombineHint": "How sibling conditions connect",
+      "nestedGroup": "Nested group",
+      "parenHint": "(parentheses)",
+      "condition": "Condition",
+      "orLabel": "OR",
+      "andLabel": "AND",
+      "addCondition": "Add condition",
+      "addSubgroupHint": "Add parenthesized subgroup",
+      "removeGroup": "Remove subgroup",
+      "removeCondition": "Remove condition",
+      "valuePlaceholder": "Value, e.g. g_demo_sales",
+      "preview": "Expression preview",
+      "rawHint": "This expression cannot be parsed visually. Edit the raw text or reset to visual mode.",
+      "resetToVisual": "Reset to visual editor",
+      "invalid": "Fill in at least one condition value",
+      "fields": {
+        "group_id": "group_id",
+        "user_id": "user_id",
+        "bot_id": "bot_id"
+      }
     },
     "agent": {
       "new": "New Agent Policy",
+      "searchPlaceholder": "Search policy ID, name, description, Agent ID, linked service policy, priority, or match expression",
       "agentId": "Agent ID",
-      "servicePolicyId": "Service Policy ID",
+      "agentIdHint": "Routes requests to an Agent instance. Use a fixed Agent ID (e.g. default_agent_id), or concatenate placeholders ${user_id}/${group_id}/${bot_id} (e.g. agent_${user_id}).",
+      "servicePolicyId": "Service Policy",
+      "pickServicePolicy": "Select a service policy",
+      "loadingServicePolicies": "Loading service policies…",
+      "servicePolicyUnavailable": "Current policy unavailable",
       "sendFileAllowed": "Allow Send File"
     },
-    "deleteConfirm": "Delete this policy? Effective for Gateway immediately."
+    "deleteConfirm": "Delete this policy? Effective for Gateway immediately.",
+    "policyId": "Policy ID",
+    "policyName": "Policy Name",
+    "policyDesc": "Description"
   },
   "errors": {
     "loadFailed": "Load failed: {{detail}}",

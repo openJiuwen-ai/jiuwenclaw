@@ -1,7 +1,7 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useAsync } from '../../hooks/useAsync';
-import { useDebouncedValue } from '../../hooks/useDebouncedValue';
+import { useListSearch } from '../../hooks/useListSearch';
 import { ModelTemplateApi, ApiError } from '../../services/api';
 import type { ModelTemplate } from '../../types';
 import { Empty } from '../../components/Empty';
@@ -9,6 +9,11 @@ import { Pagination } from '../../components/Pagination';
 import { ConfirmDialog } from '../../components/ConfirmDialog';
 import { Switch } from '../../components/Switch';
 import { TableColumnFilter } from '../../components/TableColumnFilter';
+import {
+  TableColumnSort,
+  type ColumnSortValue,
+} from '../../components/TableColumnSort';
+import { ListSearchInput } from '../../components/ListSearchInput';
 import { ModelTemplateModal } from './ModelTemplateModal';
 import { toast } from '../../stores/uiStore';
 import { formatTime, truncate } from '../../utils/format';
@@ -22,31 +27,63 @@ const MODEL_PROVIDER_OPTIONS = [
   'InferenceAffinity',
 ] as const;
 
+type ModelTemplateSortField =
+  | 'template_name'
+  | 'description'
+  | 'model_provider'
+  | 'model_id'
+  | 'model_type'
+  | 'api_base'
+  | 'updated_at';
+
 export function ModelTemplatesPage() {
   const { t } = useTranslation();
   const [page, setPage] = useState(1);
   const [pageSize] = useState(20);
-  const [searchInput, setSearchInput] = useState('');
-  const debouncedSearch = useDebouncedValue(searchInput, 700);
+  const { searchInput, setSearchInput, searchQuery } = useListSearch();
   const [providerFilter, setProviderFilter] = useState('');
   const [modelTypeFilter, setModelTypeFilter] = useState('');
   const [enabledFilter, setEnabledFilter] = useState<string>('');
+  const [sortBy, setSortBy] = useState<ModelTemplateSortField | ''>('');
+  const [sortOrder, setSortOrder] = useState<'asc' | 'desc'>('asc');
+
+  const sortOptions = useMemo(
+    () => [
+      { value: 'asc' as const, label: t('common.sortAsc') },
+      { value: 'desc' as const, label: t('common.sortDesc') },
+      { value: '' as const, label: t('common.sortDefault') },
+    ],
+    [t],
+  );
+
+  const handleSortChange = (field: ModelTemplateSortField, value: ColumnSortValue) => {
+    if (value === '') {
+      setSortBy('');
+      setSortOrder('asc');
+    } else {
+      setSortBy(field);
+      setSortOrder(value);
+    }
+    setPage(1);
+  };
 
   useEffect(() => {
     setPage(1);
-  }, [debouncedSearch]);
+  }, [searchQuery]);
 
   const { data, loading, error, reload } = useAsync(
     () =>
       ModelTemplateApi.list({
         page,
         page_size: pageSize,
-        search: debouncedSearch.trim() || undefined,
+        search: searchQuery,
         model_provider: providerFilter || undefined,
         model_type: modelTypeFilter || undefined,
         enabled: enabledFilter === '' ? undefined : enabledFilter === 'true',
+        sort_by: sortBy || undefined,
+        sort_order: sortBy ? sortOrder : undefined,
       }),
-    [page, pageSize, debouncedSearch, providerFilter, modelTypeFilter, enabledFilter]
+    [page, pageSize, searchQuery, providerFilter, modelTypeFilter, enabledFilter, sortBy, sortOrder]
   );
 
   const [items, setItems] = useState<ModelTemplate[]>([]);
@@ -92,11 +129,10 @@ export function ModelTemplatesPage() {
           <div className="page-subtitle">{t('modelTemplate.subtitle')}</div>
         </div>
         <div className="flex items-center gap-2">
-          <input
-            className="input !w-[38rem]"
-            placeholder={t('modelTemplate.searchPlaceholder')}
+          <ListSearchInput
             value={searchInput}
-            onChange={(e) => setSearchInput(e.target.value)}
+            onChange={setSearchInput}
+            placeholder={t('modelTemplate.searchPlaceholder')}
           />
           <button className="btn sm" onClick={() => void reload()}>
             {t('common.refresh')}
@@ -122,44 +158,94 @@ export function ModelTemplatesPage() {
           <table className="table">
             <thead>
               <tr>
-                <th>{t('modelTemplate.templateName')}</th>
-                <th>{t('modelTemplate.templateDescription')}</th>
                 <th>
-                  <TableColumnFilter
-                    label={t('modelTemplate.modelProvider')}
-                    value={providerFilter}
-                    options={[
-                      { value: '', label: t('common.all') },
-                      ...MODEL_PROVIDER_OPTIONS.map((provider) => ({
-                        value: provider,
-                        label: provider,
-                      })),
-                    ]}
-                    onChange={(value) => {
-                      setProviderFilter(value);
-                      setPage(1);
-                    }}
+                  <TableColumnSort
+                    label={t('modelTemplate.templateName')}
+                    value={sortBy === 'template_name' ? sortOrder : ''}
+                    options={sortOptions}
+                    onChange={(value) => handleSortChange('template_name', value)}
                   />
                 </th>
-                <th>{t('modelTemplate.modelId')}</th>
                 <th>
-                  <TableColumnFilter
-                    label={t('modelTemplate.modelType')}
-                    value={modelTypeFilter}
-                    options={[
-                      { value: '', label: t('common.all') },
-                      ...MODEL_TYPE_OPTIONS.map((type) => ({
-                        value: type,
-                        label: type,
-                      })),
-                    ]}
-                    onChange={(value) => {
-                      setModelTypeFilter(value);
-                      setPage(1);
-                    }}
+                  <TableColumnSort
+                    label={t('modelTemplate.templateDescription')}
+                    value={sortBy === 'description' ? sortOrder : ''}
+                    options={sortOptions}
+                    onChange={(value) => handleSortChange('description', value)}
                   />
                 </th>
-                <th>{t('modelTemplate.apiBase')}</th>
+                <th>
+                  <div className="th-filter">
+                    <span className="th-filter__label">{t('modelTemplate.modelProvider')}</span>
+                    <TableColumnSort
+                      iconOnly
+                      label={t('modelTemplate.modelProvider')}
+                      value={sortBy === 'model_provider' ? sortOrder : ''}
+                      options={sortOptions}
+                      onChange={(value) => handleSortChange('model_provider', value)}
+                    />
+                    <TableColumnFilter
+                      iconOnly
+                      label={t('modelTemplate.modelProvider')}
+                      value={providerFilter}
+                      options={[
+                        { value: '', label: t('common.all') },
+                        ...MODEL_PROVIDER_OPTIONS.map((provider) => ({
+                          value: provider,
+                          label: provider,
+                        })),
+                      ]}
+                      onChange={(value) => {
+                        setProviderFilter(value);
+                        setPage(1);
+                      }}
+                    />
+                  </div>
+                </th>
+                <th>
+                  <TableColumnSort
+                    label={t('modelTemplate.modelId')}
+                    value={sortBy === 'model_id' ? sortOrder : ''}
+                    options={sortOptions}
+                    onChange={(value) => handleSortChange('model_id', value)}
+                  />
+                </th>
+                <th>
+                  <div className="th-filter">
+                    <span className="th-filter__label">{t('modelTemplate.modelType')}</span>
+                    <TableColumnSort
+                      iconOnly
+                      label={t('modelTemplate.modelType')}
+                      value={sortBy === 'model_type' ? sortOrder : ''}
+                      options={sortOptions}
+                      onChange={(value) => handleSortChange('model_type', value)}
+                    />
+                    <TableColumnFilter
+                      iconOnly
+                      label={t('modelTemplate.modelType')}
+                      value={modelTypeFilter}
+                      options={[
+                        { value: '', label: t('common.all') },
+                        ...MODEL_TYPE_OPTIONS.map((type) => ({
+                          value: type,
+                          label: type,
+                        })),
+                      ]}
+                      onChange={(value) => {
+                        setModelTypeFilter(value);
+                        setPage(1);
+                      }}
+                    />
+                  </div>
+                </th>
+                <th>
+                  <TableColumnSort
+                    label={t('modelTemplate.apiBase')}
+                    value={sortBy === 'api_base' ? sortOrder : ''}
+                    options={sortOptions}
+                    onChange={(value) => handleSortChange('api_base', value)}
+                  />
+                </th>
                 <th>
                   <TableColumnFilter
                     label={t('common.enabled')}
@@ -175,7 +261,14 @@ export function ModelTemplatesPage() {
                     }}
                   />
                 </th>
-                <th>{t('modelTemplate.updatedAt')}</th>
+                <th>
+                  <TableColumnSort
+                    label={t('modelTemplate.updatedAt')}
+                    value={sortBy === 'updated_at' ? sortOrder : ''}
+                    options={sortOptions}
+                    onChange={(value) => handleSortChange('updated_at', value)}
+                  />
+                </th>
                 <th>{t('common.actions')}</th>
               </tr>
             </thead>

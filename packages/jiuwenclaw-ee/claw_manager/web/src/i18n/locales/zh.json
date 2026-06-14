@@ -18,6 +18,10 @@
     "view": "查看",
     "actions": "操作",
     "all": "全部",
+    "sortAsc": "升序",
+    "sortDesc": "降序",
+    "sortDefault": "默认",
+    "filter": "筛选",
     "confirm": "确认",
     "submit": "提交"
   },
@@ -270,9 +274,13 @@
     },
     "mapping": {
       "new": "新建映射",
+      "searchPlaceholder": "搜索策略 ID、策略名称、策略描述、User ID、Group ID、槽位、模板 ID 或优先级",
       "templateType": "模板类型",
       "templateTypeHint": "default_model / video_model / audio_model / vision_model / skill_whitelist / channel / service_resource",
       "templateId": "Template ID",
+      "template": "模板",
+      "templateUnavailable": "当前模板不可用",
+      "slotUnavailable": "当前槽位不可用",
       "userId": "User ID",
       "groupId": "Group ID",
       "priority": "优先级"
@@ -280,21 +288,88 @@
     "global": {
       "new": "新建全局策略",
       "priority": "优先级",
-      "templateRef": "模板引用 (JSON)",
-      "templateRefHint": "槽位名 → template_id 或 ${user::…}/${group::…} 或 <template_id>"
+      "templateRef": "模板引用",
+      "updatedAt": "修改时间",
+      "searchPlaceholder": "搜索策略 ID、策略名称、策略描述或优先级"
+    },
+    "fieldRequired": "请填写{{field}}",
+    "templateRef": {
+      "title": "模板引用",
+      "slot": "槽位",
+      "addSlot": "添加槽位",
+      "addRef": "添加引用",
+      "removeSlot": "删除槽位",
+      "removeRef": "删除引用",
+      "empty": "尚未配置模板引用，点击下方添加槽位。",
+      "loadingTemplates": "正在加载模板列表…",
+      "pickTemplate": "请选择模板",
+      "modeTemplate": "模板",
+      "modeUser": "用户映射",
+      "modeGroup": "群组映射",
+      "userIdPlaceholder": "用户 ID，如 alice",
+      "groupIdPlaceholder": "群组 ID，如 g_demo_sales",
+      "customPlaceholder": "自定义引用表达式",
+      "slots": {
+        "default_model": "默认模型 (default_model)",
+        "video_model": "视频模型 (video_model)",
+        "audio_model": "音频模型 (audio_model)",
+        "vision_model": "视觉模型 (vision_model)",
+        "skill_whitelist": "Skill 白名单 (skill_whitelist)",
+        "extension_config": "扩展配置 (extension_config)",
+        "service_config": "服务配置 (service_config)"
+      }
     },
     "service": {
       "new": "新建服务策略",
       "serviceId": "服务 ID",
-      "matchExpr": "匹配表达式"
+      "serviceIdHint": "用于路由到 AgentServer。可填固定服务ID（如 sales_pool_v1），或使用占位符 ${user_id}/${group_id}/${bot_id}拼接（如 ${group_id}::${bot_id}）。",
+      "serviceIdInvalid": "服务 ID 含 $ 时仅允许 ${user_id}、${group_id}、${bot_id} 占位符",
+      "matchExpr": "匹配表达式",
+      "searchPlaceholder": "搜索策略 ID、策略名称、策略描述、服务 ID、优先级或匹配表达式",
+      "deleteBlockedByAgentPolicies": "该服务策略下仍有 {{count}} 条关联的 Agent 策略，请先删除这些 Agent 策略后再删除服务策略。",
+      "deleteBlockedByAgentPoliciesGeneric": "该服务策略下仍有关联的 Agent 策略，请先删除这些 Agent 策略后再删除服务策略。"
+    },
+    "matchExpr": {
+      "modeAll": "全部匹配",
+      "modeCustom": "条件匹配",
+      "allHint": "留空表示任意 user_id / group_id / bot_id 均命中。",
+      "combineOp": "连接方式",
+      "rootCombineHint": "同级条件之间的默认连接方式",
+      "nestedGroup": "子条件组",
+      "parenHint": "（括号内）",
+      "condition": "条件",
+      "orLabel": "OR",
+      "andLabel": "AND",
+      "addCondition": "添加条件",
+      "addSubgroupHint": "添加括号子组",
+      "removeGroup": "删除子组",
+      "removeCondition": "删除条件",
+      "valuePlaceholder": "值，如 g_demo_sales",
+      "preview": "表达式预览",
+      "rawHint": "当前表达式无法解析为可视化条件，可继续编辑原文或重置为可视化编辑。",
+      "resetToVisual": "重置为可视化编辑",
+      "invalid": "请至少填写一条匹配条件的值",
+      "fields": {
+        "group_id": "group_id",
+        "user_id": "user_id",
+        "bot_id": "bot_id"
+      }
     },
     "agent": {
       "new": "新建 Agent 策略",
+      "searchPlaceholder": "搜索策略 ID、策略名称、策略描述、Agent ID、关联服务策略、优先级或匹配表达式",
       "agentId": "Agent ID",
-      "servicePolicyId": "关联服务策略 ID",
+      "agentIdHint": "用于路由到 Agent 实例。可填固定 Agent ID（如 default_agent_id），或使用占位符 ${user_id}/${group_id}/${bot_id}拼接（如 agent_${user_id}）。",
+      "servicePolicyId": "关联服务策略",
+      "pickServicePolicy": "请选择服务策略",
+      "loadingServicePolicies": "正在加载服务策略…",
+      "servicePolicyUnavailable": "当前策略不可用",
       "sendFileAllowed": "允许发送文件"
     },
-    "deleteConfirm": "确认删除该策略？删除后将立即影响 Gateway 的配置生效。"
+    "deleteConfirm": "确认删除该策略？删除后将立即影响 Gateway 的配置生效。",
+    "policyId": "策略 ID",
+    "policyName": "策略名称",
+    "policyDesc": "策略描述"
   },
   "errors": {
     "loadFailed": "加载失败：{{detail}}",

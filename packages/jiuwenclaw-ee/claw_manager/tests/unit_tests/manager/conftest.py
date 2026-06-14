@@ -46,7 +46,7 @@ class _GatewayAckSimulator:
             if payload.get("op") == "create":
                 self._service_policy_id += 1
                 return {
-                    "result": {"policy_id": self._service_policy_id},
+                    "result": {"id": self._service_policy_id},
                     "revision": "rev-ut",
                     "success_flag": True,
                 }
@@ -55,7 +55,7 @@ class _GatewayAckSimulator:
             if payload.get("op") == "create":
                 self._agent_policy_id += 1
                 return {
-                    "result": {"policy_id": self._agent_policy_id},
+                    "result": {"id": self._agent_policy_id},
                     "revision": "rev-ut",
                     "success_flag": True,
                 }
@@ -64,7 +64,7 @@ class _GatewayAckSimulator:
             if payload.get("op") == "create":
                 self._global_policy_id += 1
                 return {
-                    "result": {"policy_id": self._global_policy_id},
+                    "result": {"id": self._global_policy_id},
                     "revision": "rev-ut",
                     "success_flag": True,
                 }
@@ -73,7 +73,7 @@ class _GatewayAckSimulator:
             if payload.get("op") == "create":
                 self._mapping_id += 1
                 return {
-                    "result": {"mapping_id": self._mapping_id},
+                    "result": {"id": self._mapping_id},
                     "revision": "rev-ut",
                     "success_flag": True,
                 }

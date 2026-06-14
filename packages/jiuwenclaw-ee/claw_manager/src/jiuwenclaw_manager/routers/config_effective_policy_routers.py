@@ -15,8 +15,10 @@ from jiuwenclaw_manager.schemas.config_effective_policy_schemas import (
     ConfigEffectiveAgentPolicyCreateBody,
     ConfigEffectiveAgentPolicyUpdateBody,
     ConfigEffectiveGlobalPolicyCreateBody,
+    ConfigEffectiveGlobalPolicyListQuery,
     ConfigEffectiveGlobalPolicyUpdateBody,
     ConfigEffectiveServicePolicyCreateBody,
+    ConfigEffectiveServicePolicyListQuery,
     ConfigEffectiveServicePolicyUpdateBody,
 )
 from jiuwenclaw_manager.core.config_effective_policy import (
@@ -68,6 +70,18 @@ async def list_template_mappings(
     ),
     template_id: str | None = Query(default=None, description="按 template_id 精确筛选"),
     enabled: bool | None = None,
+    search: str | None = Query(
+        default=None,
+        description="搜索策略 ID、名称、描述、User ID、Group ID、槽位、模板 ID 或优先级",
+    ),
+    sort_by: str | None = Query(
+        default=None,
+        description=(
+            "排序字段：policy_name、policy_desc、priority、user_id、group_id、"
+            "template_type、template_id、updated_at"
+        ),
+    ),
+    sort_order: str | None = Query(default=None, description="排序方向：asc、desc"),
 ):
     svc = _mapping_svc(handler)
     try:
@@ -80,6 +94,9 @@ async def list_template_mappings(
             template_type=template_type,
             template_id=template_id,
             enabled=enabled,
+            search=search,
+            sort_by=sort_by,
+            sort_order=sort_order,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -163,17 +180,18 @@ async def create_global_policy(
 async def list_global_policies(
     jiuwenclaw_id: str,
     handler: Annotated[DBHandler, Depends(get_db_handler)],
-    page: int = Query(1, ge=1),
-    page_size: int = Query(20, ge=1, le=200),
-    enabled: bool | None = None,
+    query: Annotated[ConfigEffectiveGlobalPolicyListQuery, Query()],
 ):
     svc = _global_svc(handler)
     try:
         data = await svc.list_policies(
             jiuwenclaw_id,
-            page=page,
-            page_size=page_size,
-            enabled=enabled,
+            page=query.page,
+            page_size=query.page_size,
+            enabled=query.enabled,
+            search=query.search,
+            sort_by=query.sort_by,
+            sort_order=query.sort_order,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -257,17 +275,18 @@ async def create_service_policy(
 async def list_service_policies(
     jiuwenclaw_id: str,
     handler: Annotated[DBHandler, Depends(get_db_handler)],
-    page: int = Query(1, ge=1),
-    page_size: int = Query(20, ge=1, le=200),
-    enabled: bool | None = None,
+    query: Annotated[ConfigEffectiveServicePolicyListQuery, Query()],
 ):
     svc = _service_svc(handler)
     try:
         data = await svc.list_policies(
             jiuwenclaw_id,
-            page=page,
-            page_size=page_size,
-            enabled=enabled,
+            page=query.page,
+            page_size=query.page_size,
+            enabled=query.enabled,
+            search=query.search,
+            sort_by=query.sort_by,
+            sort_order=query.sort_order,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -354,8 +373,18 @@ async def list_agent_policies(
     handler: Annotated[DBHandler, Depends(get_db_handler)],
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=200),
-    service_policy_id: int | None = Query(default=None, description="按服务级策略 ID 筛选"),
+    service_policy_id: str | None = Query(default=None, description="按服务级策略 policy_id 筛选"),
     enabled: bool | None = None,
+    send_file_allowed: bool | None = None,
+    search: str | None = Query(
+        default=None,
+        description="搜索策略 ID、名称、描述、Agent ID、关联服务策略、优先级或匹配表达式",
+    ),
+    sort_by: str | None = Query(
+        default=None,
+        description="排序字段：policy_name、policy_desc、service_policy_id、priority、match_expr、agent_id、updated_at",
+    ),
+    sort_order: str | None = Query(default=None, description="排序方向：asc、desc"),
 ):
     svc = _agent_svc(handler)
     try:
@@ -365,6 +394,10 @@ async def list_agent_policies(
             page_size=page_size,
             service_policy_id=service_policy_id,
             enabled=enabled,
+            send_file_allowed=send_file_allowed,
+            search=search,
+            sort_by=sort_by,
+            sort_order=sort_order,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc

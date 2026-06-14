@@ -8,7 +8,7 @@ from typing import Any
 from openjiuwen_runtime.foundation.db.handler import DBHandler
 
 from jiuwenclaw_manager.core.instance.instance_service import get_instance_row
-from jiuwenclaw_manager.infrastructure.utils import iso_datetime, utc_now
+from jiuwenclaw_manager.infrastructure.utils import iso_datetime, new_uuid4, utc_now
 from jiuwenclaw_manager.manager_ws_server.server import push_config_op
 from jiuwenclaw_manager.models.config_effective_policy_models import (
     CONFIG_DEFAULT_TEMPLATE_MAPPING_TABLE_DEF,
@@ -20,6 +20,19 @@ from jiuwenclaw_manager.schemas.config_effective_policy_schemas import (
 )
 
 _TEMPLATE_MAPPING_TABLE = CONFIG_DEFAULT_TEMPLATE_MAPPING_TABLE_DEF.table_name
+_LIST_ALL_CAP = 10_000
+# order_by 元组第二项为 is_desc（True=降序），与 SQLAlchemyHandler.list_records 一致。
+_DEFAULT_ORDER_BY: list[tuple[str, bool]] = [("priority", False), ("updated_at", False)]
+_ALLOWED_SORT_FIELDS = frozenset({
+    "policy_name",
+    "policy_desc",
+    "priority",
+    "user_id",
+    "group_id",
+    "template_type",
+    "template_id",
+    "updated_at",
+})
 
 _ALLOWED_TEMPLATE_TYPES = frozenset({
     "default_model",
@@ -31,20 +44,53 @@ _ALLOWED_TEMPLATE_TYPES = frozenset({
 })
 
 
+def _matches_search(row: Any, query: str) -> bool:
+    needle = query.strip().lower()
+    if not needle:
+        return True
+    fields = [
+        str(getattr(row, "policy_id", "") or ""),
+        str(getattr(row, "policy_name", "") or ""),
+        str(getattr(row, "policy_desc", "") or ""),
+        str(getattr(row, "user_id", "") or ""),
+        str(getattr(row, "group_id", "") or ""),
+        str(getattr(row, "template_type", "") or ""),
+        str(getattr(row, "template_id", "") or ""),
+        str(getattr(row, "priority", "") or ""),
+    ]
+    return any(needle in field.lower() for field in fields)
+
+
+def _resolve_order_by(
+    sort_by: str | None,
+    sort_order: str | None,
+) -> list[tuple[str, bool]]:
+    field = (sort_by or "").strip()
+    order = (sort_order or "").strip().lower()
+    if not field or not order:
+        return list(_DEFAULT_ORDER_BY)
+    if field not in _ALLOWED_SORT_FIELDS or order not in {"asc", "desc"}:
+        return list(_DEFAULT_ORDER_BY)
+    is_desc = order == "desc"
+    if field == "priority":
+        return [(field, is_desc), ("updated_at", is_desc)]
+    return [(field, is_desc), ("id", is_desc)]
+
+
 async def push_config_default_template_mapping_op(
     jiuwenclaw_id: str,
     op: str,
     *,
     mapping: dict[str, Any] | None = None,
-    mapping_id: int | None = None,
+    row_id: int | None = None,
     updates: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """推送默认模板映射变更（``config.config_default_template_mappings``），返回 config.ack payload。"""
     payload: dict[str, Any] = {"op": op}
     if mapping is not None:
         payload["mapping"] = mapping
-    if mapping_id is not None:
-        payload["mapping_id"] = mapping_id
+    if row_id is not None:
+        payload["id"] = row_id
     if updates is not None:
         payload["updates"] = updates
     return await push_config_op(
@@ -87,6 +133,9 @@ def _row_to_out(row: Any) -> ConfigDefaultTemplateMappingOut:
     return ConfigDefaultTemplateMappingOut(
         id=row.id,
         jiuwenclaw_id=row.jiuwenclaw_id,
+        policy_id=row.policy_id,
+        policy_name=row.policy_name,
+        policy_desc=row.policy_desc,
         user_id=row.user_id,
         group_id=row.group_id,
         priority=row.priority,
@@ -118,6 +167,9 @@ class ConfigDefaultTemplateMappingService:
         """构建经 WebSocket 下发给 Gateway 的 mapping 对象（不含 id，由 Gateway 自增）。"""
         return {
             "jiuwenclaw_id": row["jiuwenclaw_id"],
+            "policy_id": row["policy_id"],
+            "policy_name": row.get("policy_name"),
+            "policy_desc": row.get("policy_desc"),
             "user_id": row.get("user_id"),
             "group_id": row.get("group_id"),
             "priority": row["priority"],
@@ -144,6 +196,9 @@ class ConfigDefaultTemplateMappingService:
         now = utc_now()
         row = {
             "jiuwenclaw_id": normalized,
+            "policy_id": new_uuid4(),
+            "policy_name": body.policy_name,
+            "policy_desc": body.policy_desc,
             "user_id": user_id,
             "group_id": group_id,
             "priority": body.priority,
@@ -162,12 +217,12 @@ class ConfigDefaultTemplateMappingService:
         ack_result = ack.get("result") if isinstance(ack, dict) else None
         mapping_id: int | None = None
         if isinstance(ack_result, dict):
-            raw_id = ack_result.get("mapping_id")
+            raw_id = ack_result.get("id")
             if raw_id is not None:
                 mapping_id = int(raw_id)
         if mapping_id is None or mapping_id < 1:
             raise ValueError(
-                "gateway config_default_template_mappings.create returned no mapping_id"
+                "gateway config_default_template_mappings.create returned no id"
             )
 
         payload = {**row, "id": mapping_id}
@@ -196,6 +251,9 @@ class ConfigDefaultTemplateMappingService:
         template_type: str | None,
         template_id: str | None,
         enabled: bool | None,
+        search: str | None = None,
+        sort_by: str | None = None,
+        sort_order: str | None = None,
     ) -> dict[str, Any]:
         normalized = await self._validate_jiuwenclaw_id(jiuwenclaw_id)
         if template_type:
@@ -215,9 +273,38 @@ class ConfigDefaultTemplateMappingService:
         if enabled is not None:
             filters["enabled"] = enabled
 
+        order_by = _resolve_order_by(sort_by, sort_order)
+        search_query = (search or "").strip()
+        if search_query:
+            rows = await self._handler.list_records(
+                _TEMPLATE_MAPPING_TABLE,
+                filters,
+                limit=_LIST_ALL_CAP,
+                offset=0,
+                order_by=order_by,
+            )
+            items = [
+                _row_to_out(row).model_dump(mode="json")
+                for row in rows
+                if _matches_search(row, search_query)
+            ]
+            total = len(items)
+            offset = (page - 1) * page_size
+            page_items = items[offset:offset + page_size]
+            return {
+                "items": page_items,
+                "total": total,
+                "page": page,
+                "page_size": page_size,
+            }
+
         offset = (page - 1) * page_size
         rows = await self._handler.list_records(
-            _TEMPLATE_MAPPING_TABLE, filters, limit=page_size, offset=offset
+            _TEMPLATE_MAPPING_TABLE,
+            filters,
+            limit=page_size,
+            offset=offset,
+            order_by=order_by,
         )
         total = await self._handler.count_records(_TEMPLATE_MAPPING_TABLE, filters)
         items = [_row_to_out(r).model_dump(mode="json") for r in rows]
@@ -264,7 +351,7 @@ class ConfigDefaultTemplateMappingService:
         await push_config_default_template_mapping_op(
             normalized,
             "update",
-            mapping_id=mapping_id,
+            row_id=mapping_id,
             updates=updates,
         )
         payload = dict(updates)
@@ -292,7 +379,7 @@ class ConfigDefaultTemplateMappingService:
         await push_config_default_template_mapping_op(
             normalized,
             "delete",
-            mapping_id=mapping_id,
+            row_id=mapping_id,
         )
         return await self._handler.delete(
             _TEMPLATE_MAPPING_TABLE, _mapping_pk(normalized, mapping_id)

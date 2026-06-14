@@ -91,6 +91,14 @@ class ModelTemplateListQuery(BaseModel):
             "模型 ID、模型类型、API base 模糊搜索"
         ),
     )
+    sort_by: str | None = Field(
+        default=None,
+        description=(
+            "排序字段：template_name、description、model_provider、model_id、"
+            "model_type、api_base、updated_at"
+        ),
+    )
+    sort_order: str | None = Field(default=None, description="排序方向：asc、desc")
 
 
 class ExtensionConfigTemplateCreateBody(BaseModel):
@@ -133,6 +141,11 @@ class ExtensionConfigTemplateListQuery(BaseModel):
         default=None,
         description="按 template_id、template_name、description、component、hook_type 模糊搜索",
     )
+    sort_by: str | None = Field(
+        default=None,
+        description="排序字段：template_name、description、component、hook_type、updated_at",
+    )
+    sort_order: str | None = Field(default=None, description="排序方向：asc、desc")
 
 
 class ExtensionConfigTemplateOut(BaseModel):
@@ -180,6 +193,11 @@ class SkillWhitelistTemplateListQuery(BaseModel):
         default=None,
         description="按 template_id、template_name、description、skill_source、skill_id、skill_version 模糊搜索",
     )
+    sort_by: str | None = Field(
+        default=None,
+        description="排序字段：template_name、description、skill_source、skill_id、skill_version、updated_at",
+    )
+    sort_order: str | None = Field(default=None, description="排序方向：asc、desc")
 
 
 class SkillWhitelistTemplateOut(BaseModel):
@@ -282,6 +300,11 @@ class ServiceConfigTemplateListQuery(BaseModel):
     enabled: bool | None = None
     namespace: str | None = Field(default=None, max_length=128)
     search: str | None = Field(default=None, max_length=256)
+    sort_by: str | None = Field(
+        default=None,
+        description="排序字段：template_name、description、agent_image、updated_at",
+    )
+    sort_order: str | None = Field(default=None, description="排序方向：asc、desc")
 
 
 class ServiceConfigTemplateOut(BaseModel):

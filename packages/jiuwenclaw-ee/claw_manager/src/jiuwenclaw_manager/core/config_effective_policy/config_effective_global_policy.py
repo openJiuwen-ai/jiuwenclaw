@@ -8,7 +8,7 @@ from typing import Any
 from openjiuwen_runtime.foundation.db.handler import DBHandler
 
 from jiuwenclaw_manager.core.instance.instance_service import get_instance_row
-from jiuwenclaw_manager.infrastructure.utils import iso_datetime, utc_now
+from jiuwenclaw_manager.infrastructure.utils import iso_datetime, new_uuid4, utc_now
 from jiuwenclaw_manager.manager_ws_server.server import push_config_op
 from jiuwenclaw_manager.models.config_effective_policy_models import (
     CONFIG_EFFECTIVE_GLOBAL_POLICY_TABLE_DEF,
@@ -25,6 +25,39 @@ from jiuwenclaw_manager.schemas.config_effective_policy_schemas import (
 )
 
 _GLOBAL_POLICY_TABLE = CONFIG_EFFECTIVE_GLOBAL_POLICY_TABLE_DEF.table_name
+_LIST_ALL_CAP = 10_000
+# order_by 元组第二项为 is_desc（True=降序），与 SQLAlchemyHandler.list_records 一致。
+_DEFAULT_ORDER_BY: list[tuple[str, bool]] = [("priority", False), ("updated_at", False)]
+_ALLOWED_SORT_FIELDS = frozenset({"policy_name", "policy_desc", "priority", "updated_at"})
+
+
+def _resolve_order_by(
+    sort_by: str | None,
+    sort_order: str | None,
+) -> list[tuple[str, bool]]:
+    field = (sort_by or "").strip()
+    order = (sort_order or "").strip().lower()
+    if not field or not order:
+        return list(_DEFAULT_ORDER_BY)
+    if field not in _ALLOWED_SORT_FIELDS or order not in {"asc", "desc"}:
+        return list(_DEFAULT_ORDER_BY)
+    is_desc = order == "desc"
+    if field == "priority":
+        return [(field, is_desc), ("updated_at", is_desc)]
+    return [(field, is_desc), ("id", is_desc)]
+
+
+def _matches_search(row: Any, query: str) -> bool:
+    needle = query.strip().lower()
+    if not needle:
+        return True
+    fields = [
+        str(getattr(row, "policy_id", "") or ""),
+        str(getattr(row, "policy_name", "") or ""),
+        str(getattr(row, "policy_desc", "") or ""),
+        str(getattr(row, "priority", "") or ""),
+    ]
+    return any(needle in field.lower() for field in fields)
 
 
 async def push_config_effective_global_policy_op(
@@ -32,15 +65,15 @@ async def push_config_effective_global_policy_op(
     op: str,
     *,
     policy: dict[str, Any] | None = None,
-    policy_id: int | None = None,
+    row_id: int | None = None,
     updates: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """推送全局兜底配置生效策略变更（``config.config_effective_global_policies``），返回 config.ack payload。"""
     payload: dict[str, Any] = {"op": op}
     if policy is not None:
         payload["policy"] = policy
-    if policy_id is not None:
-        payload["policy_id"] = policy_id
+    if row_id is not None:
+        payload["id"] = row_id
     if updates is not None:
         payload["updates"] = updates
     return await push_config_op(
@@ -57,6 +90,9 @@ def _row_to_out(row: Any) -> ConfigEffectiveGlobalPolicyOut:
     return ConfigEffectiveGlobalPolicyOut(
         id=row.id,
         jiuwenclaw_id=row.jiuwenclaw_id,
+        policy_id=row.policy_id,
+        policy_name=row.policy_name,
+        policy_desc=row.policy_desc,
         priority=row.priority,
         template_ref=read_template_ref_from_row(row),
         enabled=row.enabled,
@@ -79,31 +115,13 @@ class ConfigEffectiveGlobalPolicyService:
             raise ValueError(f"unknown jiuwenclaw_id={normalized!r}")
         return normalized
 
-    async def _get_by_jiuwenclaw_id(self, jiuwenclaw_id: str) -> Any | None:
-        rows = await self._handler.list_records(
-            _GLOBAL_POLICY_TABLE,
-            {"jiuwenclaw_id": jiuwenclaw_id},
-            limit=1,
-            offset=0,
-        )
-        return rows[0] if rows else None
-
-    async def _ensure_unique_jiuwenclaw_id(
-        self, jiuwenclaw_id: str, *, exclude_policy_id: int | None = None
-    ) -> None:
-        existing = await self._get_by_jiuwenclaw_id(jiuwenclaw_id)
-        if existing is None:
-            return
-        if exclude_policy_id is not None and existing.id == exclude_policy_id:
-            return
-        raise ValueError(
-            f"global policy for jiuwenclaw_id={jiuwenclaw_id!r} already exists (id={existing.id})"
-        )
-
     def _policy_dict_for_push(self, row: dict[str, Any], *, now: datetime) -> dict[str, Any]:
         """构建经 WebSocket 下发给 Gateway 的 policy 对象（不含 id，由 Gateway 自增）。"""
         return {
             "jiuwenclaw_id": row["jiuwenclaw_id"],
+            "policy_id": row["policy_id"],
+            "policy_name": row.get("policy_name"),
+            "policy_desc": row.get("policy_desc"),
             "priority": row["priority"],
             "template_ref": normalize_template_ref(row.get("template_ref")),
             "enabled": row.get("enabled", True),
@@ -118,11 +136,13 @@ class ConfigEffectiveGlobalPolicyService:
         body: ConfigEffectiveGlobalPolicyCreateBody,
     ) -> ConfigEffectiveGlobalPolicyOut:
         normalized = await self._validate_jiuwenclaw_id(jiuwenclaw_id)
-        await self._ensure_unique_jiuwenclaw_id(normalized)
 
         now = utc_now()
         row = {
             "jiuwenclaw_id": normalized,
+            "policy_id": new_uuid4(),
+            "policy_name": body.policy_name,
+            "policy_desc": body.policy_desc,
             "priority": body.priority,
             "template_ref": normalize_template_ref(body.template_ref),
             "enabled": body.enabled,
@@ -136,17 +156,17 @@ class ConfigEffectiveGlobalPolicyService:
             policy=self._policy_dict_for_push(row, now=now),
         )
         ack_result = ack.get("result") if isinstance(ack, dict) else None
-        policy_id: int | None = None
+        row_id: int | None = None
         if isinstance(ack_result, dict):
-            raw_id = ack_result.get("policy_id")
+            raw_id = ack_result.get("id")
             if raw_id is not None:
-                policy_id = int(raw_id)
-        if policy_id is None or policy_id < 1:
+                row_id = int(raw_id)
+        if row_id is None or row_id < 1:
             raise ValueError(
-                "gateway config_effective_global_policies.create returned no policy_id"
+                "gateway config_effective_global_policies.create returned no id"
             )
 
-        payload = {**row, "id": policy_id}
+        payload = {**row, "id": row_id}
         created = await self._handler.create(_GLOBAL_POLICY_TABLE, payload)
         return _row_to_out(created)
 
@@ -168,6 +188,9 @@ class ConfigEffectiveGlobalPolicyService:
         page: int,
         page_size: int,
         enabled: bool | None,
+        search: str | None = None,
+        sort_by: str | None = None,
+        sort_order: str | None = None,
     ) -> dict[str, Any]:
         normalized = await self._validate_jiuwenclaw_id(jiuwenclaw_id)
         page = max(page, 1)
@@ -175,10 +198,36 @@ class ConfigEffectiveGlobalPolicyService:
         filters: dict[str, Any] = {"jiuwenclaw_id": normalized}
         if enabled is not None:
             filters["enabled"] = enabled
+        order_by = _resolve_order_by(sort_by, sort_order)
+
+        search_query = (search or "").strip()
+        if search_query:
+            rows = await self._handler.list_records(
+                _GLOBAL_POLICY_TABLE,
+                filters,
+                limit=_LIST_ALL_CAP,
+                offset=0,
+                order_by=order_by,
+            )
+            rows = [row for row in rows if _matches_search(row, search_query)]
+            total = len(rows)
+            offset = (page - 1) * page_size
+            page_rows = rows[offset:offset + page_size]
+            items = [_row_to_out(row).model_dump(mode="json") for row in page_rows]
+            return {
+                "items": items,
+                "total": total,
+                "page": page,
+                "page_size": page_size,
+            }
 
         offset = (page - 1) * page_size
         rows = await self._handler.list_records(
-            _GLOBAL_POLICY_TABLE, filters, limit=page_size, offset=offset
+            _GLOBAL_POLICY_TABLE,
+            filters,
+            limit=page_size,
+            offset=offset,
+            order_by=order_by,
         )
         total = await self._handler.count_records(_GLOBAL_POLICY_TABLE, filters)
         items = [_row_to_out(r).model_dump(mode="json") for r in rows]
@@ -213,7 +262,7 @@ class ConfigEffectiveGlobalPolicyService:
         await push_config_effective_global_policy_op(
             normalized,
             "update",
-            policy_id=policy_id,
+            row_id=policy_id,
             updates=updates,
         )
         payload = dict(updates)
@@ -241,7 +290,7 @@ class ConfigEffectiveGlobalPolicyService:
         await push_config_effective_global_policy_op(
             normalized,
             "delete",
-            policy_id=policy_id,
+            row_id=policy_id,
         )
         return await self._handler.delete(
             _GLOBAL_POLICY_TABLE, _global_policy_pk(normalized, policy_id)

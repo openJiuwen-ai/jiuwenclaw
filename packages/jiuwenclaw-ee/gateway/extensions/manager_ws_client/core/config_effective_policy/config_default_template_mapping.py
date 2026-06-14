@@ -5,13 +5,12 @@
 from __future__ import annotations
 
 import logging
-from datetime import datetime
 from typing import Any
 
 from openjiuwen_runtime.foundation.db.handler import DBHandler
 
 from ...infrastructure.db import ensure_db_handler
-from ...infrastructure.utils import get_jiuwenclaw_id, utc_now
+from ...infrastructure.utils import get_jiuwenclaw_id, parse_iso_datetime, utc_now
 from ...models.config_effective_policy_models import (
     CONFIG_DEFAULT_TEMPLATE_MAPPING_TABLE_DEF,
 )
@@ -118,15 +117,6 @@ async def delete_config_default_template_mapping_record(
     return await handler.delete(_TABLE, {"id": mapping_id})
 
 
-def _parse_iso_datetime(value: Any) -> Any:
-    if value is None or isinstance(value, datetime):
-        return value
-    if isinstance(value, str) and value.strip():
-        text = value.strip().replace("Z", "+00:00")
-        return datetime.fromisoformat(text)
-    return value
-
-
 async def apply_config_default_template_mapping(
     payload: dict[str, Any],
 ) -> dict[str, Any] | None:
@@ -146,6 +136,9 @@ async def apply_config_default_template_mapping(
             raise ValueError(
                 "config_default_template_mappings.create requires mapping object"
             )
+        policy_name = str(mapping.get("policy_name") or "").strip()
+        if not policy_name:
+            raise ValueError("policy_name is required")
         user_id, group_id = _validate_dimension_keys(
             mapping.get("user_id"), mapping.get("group_id")
         )
@@ -154,18 +147,23 @@ async def apply_config_default_template_mapping(
         if not template_id:
             raise ValueError("template_id is required")
 
+        priority = int(mapping.get("priority", 0))
+
         now = utc_now()
         row_data: dict[str, Any] = {
             "jiuwenclaw_id": jiuwenclaw_id,
+            "policy_id": mapping["policy_id"],
+            "policy_name": policy_name,
+            "policy_desc": mapping.get("policy_desc"),
             "user_id": user_id,
             "group_id": group_id,
-            "priority": int(mapping.get("priority", 0)),
+            "priority": priority,
             "template_id": template_id,
             "template_type": template_type,
             "enabled": bool(mapping.get("enabled", True)),
             "data": mapping.get("data"),
-            "created_at": _parse_iso_datetime(mapping.get("created_at")) or now,
-            "updated_at": _parse_iso_datetime(mapping.get("updated_at")) or now,
+            "created_at": parse_iso_datetime(mapping.get("created_at")) or now,
+            "updated_at": parse_iso_datetime(mapping.get("updated_at")) or now,
         }
         created = await handler.create(_TABLE, row_data)
         new_id = int(getattr(created, "id", 0) or 0)
@@ -173,14 +171,14 @@ async def apply_config_default_template_mapping(
             raise ValueError(
                 "config_default_template_mappings.create: database did not return mapping id"
             )
-        result: dict[str, Any] | None = {"mapping_id": new_id}
+        result: dict[str, Any] | None = {"id": new_id}
 
     elif op == "update":
-        mapping_id = payload.get("mapping_id")
+        row_id = payload.get("id")
         updates = payload.get("updates")
-        if mapping_id is None:
+        if row_id is None:
             raise ValueError(
-                "config_default_template_mappings.update requires mapping_id"
+                "config_default_template_mappings.update requires id"
             )
         if not isinstance(updates, dict) or not updates:
             raise ValueError(
@@ -188,33 +186,33 @@ async def apply_config_default_template_mapping(
             )
         req = ConfigDefaultTemplateMappingUpdateRequest.model_validate(updates)
         row = await update_config_default_template_mapping_record(
-            handler, int(mapping_id), req
+            handler, int(row_id), req
         )
         if row is None:
-            raise ValueError(f"config default template mapping id={mapping_id} not found")
+            raise ValueError(f"config default template mapping id={row_id} not found")
         result = None
 
     elif op == "delete":
-        mapping_id = payload.get("mapping_id")
-        if mapping_id is None:
+        row_id = payload.get("id")
+        if row_id is None:
             raise ValueError(
-                "config_default_template_mappings.delete requires mapping_id"
+                "config_default_template_mappings.delete requires id"
             )
         deleted = await delete_config_default_template_mapping_record(
-            handler, int(mapping_id)
+            handler, int(row_id)
         )
         if not deleted:
-            raise ValueError(f"config default template mapping id={mapping_id} not found")
+            raise ValueError(f"config default template mapping id={row_id} not found")
         result = None
 
     else:
         raise ValueError(f"unsupported config_default_template_mappings.op: {op!r}")
 
     logger.info(
-        "[ManagerWsClient] config_default_template_mappings sync op=%s mapping_id=%s",
+        "[ManagerWsClient] config_default_template_mappings sync op=%s id=%s",
         op,
-        (result or {}).get("mapping_id")
-        or payload.get("mapping_id")
+        (result or {}).get("id")
+        or payload.get("id")
         or (payload.get("mapping") or {}).get("id"),
     )
     return result

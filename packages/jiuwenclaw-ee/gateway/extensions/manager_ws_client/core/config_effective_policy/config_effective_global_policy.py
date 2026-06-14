@@ -5,47 +5,28 @@
 from __future__ import annotations
 
 import logging
-from datetime import datetime
 from typing import Any
 
 from openjiuwen_runtime.foundation.db.handler import DBHandler
 
 from ...infrastructure.db import ensure_db_handler
-from ...infrastructure.utils import get_jiuwenclaw_id, utc_now
+from ...infrastructure.utils import (
+    apply_template_ref_to_updates,
+    get_jiuwenclaw_id,
+    normalize_template_ref,
+    parse_iso_datetime,
+    utc_now,
+)
 from ...models.config_effective_policy_models import (
     CONFIG_EFFECTIVE_GLOBAL_POLICY_TABLE_DEF,
 )
 from ...schemas.config_effective_policy_schemas import (
+    ConfigEffectiveGlobalPolicyCreateRequest,
     ConfigEffectiveGlobalPolicyUpdateRequest,
-)
-from ...infrastructure.utils import (
-    apply_template_ref_to_updates,
-    normalize_template_ref,
 )
 
 _TABLE = CONFIG_EFFECTIVE_GLOBAL_POLICY_TABLE_DEF.table_name
 logger = logging.getLogger(__name__)
-
-
-async def _ensure_unique_jiuwenclaw_id(
-    handler: DBHandler,
-    jiuwenclaw_id: str,
-    *,
-    exclude_policy_id: int | None = None,
-) -> None:
-    rows = await handler.list_records(
-        _TABLE,
-        {"jiuwenclaw_id": jiuwenclaw_id},
-        limit=2,
-        offset=0,
-    )
-    for row in rows:
-        row_id = getattr(row, "id", None)
-        if exclude_policy_id is not None and row_id == exclude_policy_id:
-            continue
-        raise ValueError(
-            f"global policy for jiuwenclaw_id={jiuwenclaw_id!r} already exists (id={row_id})"
-        )
 
 
 async def _get_row_for_instance(
@@ -95,15 +76,6 @@ async def delete_config_effective_global_policy_record(
     return await handler.delete(_TABLE, {"id": policy_id})
 
 
-def _parse_iso_datetime(value: Any) -> Any:
-    if value is None or isinstance(value, datetime):
-        return value
-    if isinstance(value, str) and value.strip():
-        text = value.strip().replace("Z", "+00:00")
-        return datetime.fromisoformat(text)
-    return value
-
-
 async def apply_config_effective_global_policy(
     payload: dict[str, Any],
 ) -> dict[str, Any] | None:
@@ -123,17 +95,19 @@ async def apply_config_effective_global_policy(
             raise ValueError(
                 "config_effective_global_policies.create requires policy object"
             )
-        await _ensure_unique_jiuwenclaw_id(handler, jiuwenclaw_id)
-
+        req = ConfigEffectiveGlobalPolicyCreateRequest.model_validate(policy)
         now = utc_now()
         row_data: dict[str, Any] = {
             "jiuwenclaw_id": jiuwenclaw_id,
-            "priority": int(policy.get("priority", 0)),
-            "template_ref": normalize_template_ref(policy.get("template_ref")),
-            "enabled": bool(policy.get("enabled", True)),
-            "data": policy.get("data"),
-            "created_at": _parse_iso_datetime(policy.get("created_at")) or now,
-            "updated_at": _parse_iso_datetime(policy.get("updated_at")) or now,
+            "policy_id": req.policy_id,
+            "policy_name": req.policy_name,
+            "policy_desc": req.policy_desc,
+            "priority": req.priority,
+            "template_ref": normalize_template_ref(req.template_ref),
+            "enabled": req.enabled,
+            "data": req.data,
+            "created_at": parse_iso_datetime(policy.get("created_at")) or now,
+            "updated_at": parse_iso_datetime(policy.get("updated_at")) or now,
         }
         created = await handler.create(_TABLE, row_data)
         new_id = int(getattr(created, "id", 0) or 0)
@@ -141,14 +115,14 @@ async def apply_config_effective_global_policy(
             raise ValueError(
                 "config_effective_global_policies.create: database did not return policy id"
             )
-        result: dict[str, Any] | None = {"policy_id": new_id}
+        result: dict[str, Any] | None = {"id": new_id}
 
     elif op == "update":
-        policy_id = payload.get("policy_id")
+        row_id = payload.get("id")
         updates = payload.get("updates")
-        if policy_id is None:
+        if row_id is None:
             raise ValueError(
-                "config_effective_global_policies.update requires policy_id"
+                "config_effective_global_policies.update requires id"
             )
         if not isinstance(updates, dict) or not updates:
             raise ValueError(
@@ -156,33 +130,33 @@ async def apply_config_effective_global_policy(
             )
         req = ConfigEffectiveGlobalPolicyUpdateRequest.model_validate(updates)
         row = await update_config_effective_global_policy_record(
-            handler, int(policy_id), req
+            handler, int(row_id), req
         )
         if row is None:
-            raise ValueError(f"config effective global policy id={policy_id} not found")
+            raise ValueError(f"config effective global policy id={row_id} not found")
         result = None
 
     elif op == "delete":
-        policy_id = payload.get("policy_id")
-        if policy_id is None:
+        row_id = payload.get("id")
+        if row_id is None:
             raise ValueError(
-                "config_effective_global_policies.delete requires policy_id"
+                "config_effective_global_policies.delete requires id"
             )
         deleted = await delete_config_effective_global_policy_record(
-            handler, int(policy_id)
+            handler, int(row_id)
         )
         if not deleted:
-            raise ValueError(f"config effective global policy id={policy_id} not found")
+            raise ValueError(f"config effective global policy id={row_id} not found")
         result = None
 
     else:
         raise ValueError(f"unsupported config_effective_global_policies.op: {op!r}")
 
     logger.info(
-        "[ManagerWsClient] config_effective_global_policies sync op=%s policy_id=%s",
+        "[ManagerWsClient] config_effective_global_policies sync op=%s id=%s",
         op,
-        (result or {}).get("policy_id")
-        or payload.get("policy_id")
+        (result or {}).get("id")
+        or payload.get("id")
         or (payload.get("policy") or {}).get("id"),
     )
     return result

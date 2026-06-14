@@ -71,6 +71,16 @@ def format_ts(val: Any) -> str:
     return str(val)
 
 
+def parse_iso_datetime(value: Any) -> Any:
+    """将 ISO 8601 字符串解析为 ``datetime``；已是 ``datetime`` 或空值则原样返回。"""
+    if value is None or isinstance(value, datetime):
+        return value
+    if isinstance(value, str) and value.strip():
+        text = value.strip().replace("Z", "+00:00")
+        return datetime.fromisoformat(text)
+    return value
+
+
 def normalize_template_ref(value: Any) -> dict[str, list[str]]:
     """将 ``template_ref`` 规范为 ``{slot: [ref_string, ...]}``；空值键省略。"""
     if value is None:

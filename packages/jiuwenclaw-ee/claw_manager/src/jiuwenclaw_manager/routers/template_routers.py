@@ -85,6 +85,8 @@ async def list_model_templates(
             model_type=query.model_type,
             model_provider=query.model_provider,
             search=query.search,
+            sort_by=query.sort_by,
+            sort_order=query.sort_order,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -169,6 +171,8 @@ async def list_extension_config_templates(
             component=query.component,
             hook_type=query.hook_type,
             search=query.search,
+            sort_by=query.sort_by,
+            sort_order=query.sort_order,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -259,6 +263,8 @@ async def list_skill_whitelist_templates(
             skill_id=query.skill_id,
             skill_source=query.skill_source,
             search=query.search,
+            sort_by=query.sort_by,
+            sort_order=query.sort_order,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -348,6 +354,8 @@ async def list_service_config_templates(
             enabled=query.enabled,
             namespace=query.namespace,
             search=query.search,
+            sort_by=query.sort_by,
+            sort_order=query.sort_order,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc

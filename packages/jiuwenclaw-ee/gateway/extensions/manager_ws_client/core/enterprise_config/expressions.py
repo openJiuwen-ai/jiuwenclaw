@@ -29,7 +29,7 @@ async def _lookup_mapping_by_part(
     """将 ``${user::…}`` / ``${group::…}`` 片段解析为映射表中的 ``template_id``。
 
     按 ``template_type``（槽位键）与 ``user_id`` / ``group_id`` 查询
-    ``config_default_template_mapping``，命中则返回优先级最高的一条。
+    ``config_default_template_mapping``，命中则返回 **priority 最高、同 priority 时 updated_at 最新** 的一条。
 
     入参举例::
 
@@ -62,7 +62,7 @@ async def _lookup_mapping_by_part(
     rows = await _list_records(
         "config_default_template_mapping",
         filters=base_filters,
-        order_by="priority DESC",
+        order_by=[("priority", True), ("updated_at", True)],
     )
     if not rows:
         return None

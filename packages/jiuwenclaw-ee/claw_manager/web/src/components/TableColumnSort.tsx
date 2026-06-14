@@ -1,26 +1,28 @@
 import { useEffect, useRef, useState } from 'react';
 
-export type ColumnFilterOption = {
-  value: string;
+export type ColumnSortValue = '' | 'asc' | 'desc';
+
+export type ColumnSortOption = {
+  value: ColumnSortValue;
   label: string;
 };
 
-type TableColumnFilterProps = {
+type TableColumnSortProps = {
   label: string;
-  value: string;
-  options: ColumnFilterOption[];
-  onChange: (value: string) => void;
-  /** 仅展示筛选图标，不展示 label 文本（仍用于 aria-label） */
+  value: ColumnSortValue;
+  options: ColumnSortOption[];
+  onChange: (value: ColumnSortValue) => void;
+  /** 仅展示排序图标，不展示 label 文本（仍用于 aria-label） */
   iconOnly?: boolean;
 };
 
-export function TableColumnFilter({
+export function TableColumnSort({
   label,
   value,
   options,
   onChange,
   iconOnly = false,
-}: TableColumnFilterProps) {
+}: TableColumnSortProps) {
   const [open, setOpen] = useState(false);
   const rootRef = useRef<HTMLDivElement>(null);
   const active = value !== '';
@@ -47,18 +49,18 @@ export function TableColumnFilter({
         onClick={() => setOpen((prev) => !prev)}
       >
         <svg className="th-filter__icon" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2}>
-          <path
-            strokeLinecap="round"
-            strokeLinejoin="round"
-            d="M3 4.5h18M7 9.75h10M10.5 15h3"
-          />
+          {value === 'desc' ? (
+            <path strokeLinecap="round" strokeLinejoin="round" d="M19 9l-7 7-7-7" />
+          ) : (
+            <path strokeLinecap="round" strokeLinejoin="round" d="M5 15l7-7 7 7" />
+          )}
         </svg>
       </button>
       {open && (
         <div className="th-filter__menu" role="menu">
           {options.map((opt) => (
             <button
-              key={opt.value || '__all__'}
+              key={opt.value || '__default__'}
               type="button"
               role="menuitemradio"
               aria-checked={value === opt.value}
