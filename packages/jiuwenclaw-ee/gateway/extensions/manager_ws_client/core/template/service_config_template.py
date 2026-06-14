@@ -177,14 +177,46 @@ def _build_row_from_template(
             if template.get("nfs_mount_path")
             else None
         ),
-        "agent_cpu_request": str(template.get("agent_cpu_request", "")).strip(),
-        "agent_memory_request": str(template.get("agent_memory_request", "")).strip(),
-        "agent_cpu_limit": str(template.get("agent_cpu_limit", "")).strip(),
-        "agent_memory_limit": str(template.get("agent_memory_limit", "")).strip(),
-        "jiuwenbox_cpu_request": str(template.get("jiuwenbox_cpu_request", "")).strip(),
-        "jiuwenbox_memory_request": str(template.get("jiuwenbox_memory_request", "")).strip(),
-        "jiuwenbox_cpu_limit": str(template.get("jiuwenbox_cpu_limit", "")).strip(),
-        "jiuwenbox_memory_limit": str(template.get("jiuwenbox_memory_limit", "")).strip(),
+        "agent_cpu_request": (
+            str(template["agent_cpu_request"]).strip()
+            if template.get("agent_cpu_request")
+            else None
+        ),
+        "agent_memory_request": (
+            str(template["agent_memory_request"]).strip()
+            if template.get("agent_memory_request")
+            else None
+        ),
+        "agent_cpu_limit": (
+            str(template["agent_cpu_limit"]).strip()
+            if template.get("agent_cpu_limit")
+            else None
+        ),
+        "agent_memory_limit": (
+            str(template["agent_memory_limit"]).strip()
+            if template.get("agent_memory_limit")
+            else None
+        ),
+        "jiuwenbox_cpu_request": (
+            str(template["jiuwenbox_cpu_request"]).strip()
+            if template.get("jiuwenbox_cpu_request")
+            else None
+        ),
+        "jiuwenbox_memory_request": (
+            str(template["jiuwenbox_memory_request"]).strip()
+            if template.get("jiuwenbox_memory_request")
+            else None
+        ),
+        "jiuwenbox_cpu_limit": (
+            str(template["jiuwenbox_cpu_limit"]).strip()
+            if template.get("jiuwenbox_cpu_limit")
+            else None
+        ),
+        "jiuwenbox_memory_limit": (
+            str(template["jiuwenbox_memory_limit"]).strip()
+            if template.get("jiuwenbox_memory_limit")
+            else None
+        ),
         "min_idle_services": int(template.get("min_idle_services", 1)),
         "max_services": int(template.get("max_services", 20)),
         "service_concurrency": int(template.get("service_concurrency", 30)),
