@@ -130,6 +130,7 @@ declare -A DEPLOY_VARS=(
     ["MINIO_ROOT_PASSWORD"]="Minio@123456"
     ["MINIO_STORAGE_SIZE"]="4Gi"
     ["MINIO_PATH"]="/exports/minio"
+    ["MINIO_NFS_PATH"]="/minio"
     ["MANAGER_NAME"]="jiuwenclaw-manager"
     ["MANAGER_REST_PORT"]="8765"
     ["MANAGER_WS_PORT"]="8766"

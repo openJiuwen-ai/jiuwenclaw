@@ -14,9 +14,9 @@ check_yq() {
 
     check_cmd "yq"
     if echo "$YQ_VERSION" | grep -q "mikefarah" && echo "$YQ_VERSION" | grep -qE "version v4\.|version v[5-9]\."; then
-        success "✅ yq 检查通过: $YQ_VERSION"
+        success "yq is OK: $YQ_VERSION"
     else
-        error "检测到的 yq 不是 mikefarah/yq v4+ 版本, 当前版本信息: $YQ_VERSION"
+        error "The detected yq is not mikefarah/yq v4+. Current version info: $YQ_VERSION"
     fi
 }
 
