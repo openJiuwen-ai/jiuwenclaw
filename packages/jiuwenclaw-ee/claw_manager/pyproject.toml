@@ -34,6 +34,8 @@ dev = [
 
 [project.scripts]
 jiuwenclaw-manager = "jiuwenclaw_manager.main:main"
+jiuwenclaw-manager-start = "jiuwenclaw_manager.start_services:main"
+jiuwenclaw-manager-web = "jiuwenclaw_manager.manager_web:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
