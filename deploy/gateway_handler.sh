@@ -133,14 +133,13 @@ deploy_gateway() {
     create_gateway_env_configmap
 
     # start gateway
-    ensure_available_port "GATEWAY_NODE_PORT"
     if [ "${DEPLOY_VARS["DEPLOYMENT_MODE"]}" == "active-standby" ]; then
         DEPLOY_VARS["GATEWAY_REPLICAS"]="2"
     fi
     gen_gateway_file
     exec_cmd kubectl apply -f ${gateway_file}
     wait_k8s_resource_ready "deployment" "${name}" "${namespace}"
-    success "GATEWAY_NODE_PORT: ${DEPLOY_VARS["GATEWAY_NODE_PORT"]}"
+    success "Gateway deployed (no NodePort; browser WS on Web Pod)"
 }
 
 uninstall_gateway() {

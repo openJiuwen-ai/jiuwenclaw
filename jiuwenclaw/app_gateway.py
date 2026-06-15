@@ -1050,7 +1050,35 @@ async def _run(
         logger.info("[App] Sync config to AgentServer on startup disabled by config")
     web_channel = None
     web_config = WebChannelConfig(enabled=True, host=web_host, port=web_port, path=web_path)
-    web_channel = WebChannel(web_config, _DummyBus())
+    _use_enterprise_web = os.getenv("ENTERPRISE_WEB_ENABLED", "").lower() in (
+        "1",
+        "true",
+        "yes",
+    )
+    if _use_enterprise_web:
+        from jiuwenclaw.channel.enterprise_web_channel import (
+            EnterpriseWebChannel,
+            EnterpriseWebChannelConfig,
+        )
+
+        _enterprise_web_url = (
+            os.getenv("ENTERPRISE_WEB_GATEWAY_URL", "").strip()
+            or f"ws://{web_host}:{web_port}{os.getenv('ENTERPRISE_WEB_GATEWAY_PATH', '/gateway')}"
+        )
+        ent_config = EnterpriseWebChannelConfig(
+            enabled=True,
+            gateway_url=_enterprise_web_url,
+            gateway_path=os.getenv("ENTERPRISE_WEB_GATEWAY_PATH", "/gateway"),
+            host=web_host,
+            port=web_port,
+        )
+        web_channel = EnterpriseWebChannel(ent_config, _DummyBus())
+        logger.info(
+            "[App] EnterpriseWebChannel enabled, uplink=%s (browser WS on app_enterprise_web)",
+            _enterprise_web_url,
+        )
+    else:
+        web_channel = WebChannel(web_config, _DummyBus())
 
     # 触发 WebChannel 创建完成扩展点
     web_channel_ctx = WebChannelCreatedHookContext(
@@ -1071,6 +1099,8 @@ async def _run(
             heartbeat_service=heartbeat_service if heartbeat_enabled else None,
             cron_controller=cron_controller,
             updater_service=updater_service,
+            emit_connection_ack_on_connect=not _use_enterprise_web,
+            enable_web_connection_ack_method=_use_enterprise_web,
         )
     )
 
@@ -1108,9 +1138,17 @@ async def _run(
             "session.list 由 MessageHandler 读网关索引",
         )
 
+    _web_no_local = _FORWARD_NO_LOCAL_HANDLER_METHODS | get_extra_no_local_methods()
+    if _use_enterprise_web:
+        _web_no_local = _web_no_local | frozenset({
+            "chat.send",
+            "chat.resume",
+            "chat.interrupt",
+            "chat.user_answer",
+        })
     web_norm_and_forward = _make_norm_and_forward(
         _FORWARD_REQ_METHODS | get_extra_forward_methods(),
-        _FORWARD_NO_LOCAL_HANDLER_METHODS | get_extra_no_local_methods(),
+        _web_no_local,
         "Web",
     )
     channel_manager.register_channel_with_inbound(web_channel, web_norm_and_forward)
@@ -1852,13 +1890,21 @@ async def _run(
         else None
     )
     if web_channel is not None:
-        logger.info(
-            "[App] started: Web ws://%s:%s%s  AgentServer: %s  Press Ctrl+C to exit.",
-            web_host,
-            web_port,
-            web_path,
-            agent_server_url,
-        )
+        if _use_enterprise_web:
+            logger.info(
+                "[App] started: EnterpriseWeb uplink (target %s)  AgentServer: %s",
+                os.getenv("ENTERPRISE_WEB_GATEWAY_URL", "").strip()
+                or f"ws://{web_host}:{web_port}{os.getenv('ENTERPRISE_WEB_GATEWAY_PATH', '/gateway')}",
+                agent_server_url,
+            )
+        else:
+            logger.info(
+                "[App] started: Web ws://%s:%s%s  AgentServer: %s  Press Ctrl+C to exit.",
+                web_host,
+                web_port,
+                web_path,
+                agent_server_url,
+            )
 
     shutdown_requested: asyncio.Event | None = None
     _setup_signals = getattr(agent_server_ext, "setup_gateway_shutdown_signals", None)

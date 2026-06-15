@@ -315,6 +315,8 @@ def build_gateway_env(
     jiuwenclaw_id: str = DEFAULT_JIUWENCLAW_ID,
     manager_ws_url: str | None = None,
     manager_ws_client_enabled: bool = False,
+    enterprise_web_enabled: bool = False,
+    enterprise_web_gateway_url: str | None = None,
 ) -> dict[str, str]:
     load_gateway_dotenv()
     env = os.environ.copy()
@@ -341,6 +343,11 @@ def build_gateway_env(
     )
     if manager_ws_url is not None:
         env["GATEWAY_MANAGER_WS_URL"] = manager_ws_url
+    if enterprise_web_enabled:
+        env["ENTERPRISE_WEB_ENABLED"] = "true"
+        env["ENTERPRISE_WEB_GATEWAY_URL"] = (
+            enterprise_web_gateway_url or f"ws://127.0.0.1:{web_port}/gateway"
+        )
     ut_log(
         "env.gateway.ready",
         gateway_home=gateway_home,

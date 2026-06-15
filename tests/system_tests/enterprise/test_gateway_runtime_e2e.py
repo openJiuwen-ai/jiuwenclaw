@@ -25,6 +25,7 @@ from e2e_helpers import (
     start_process,
     stop_gateway_gracefully,
     stop_process,
+    subprocess_bootstrap_env,
     ut_log,
     wait_for_http,
     wait_for_log,
@@ -69,13 +70,25 @@ async def test_gateway_runtime_process_deploy_and_chat(
     set_user_home(gateway_home)
 
     gateway_env = build_gateway_env(
-        run_home, gateway_home, server_home, mock_llm_port, web_port, gateway_port
+        run_home,
+        gateway_home,
+        server_home,
+        mock_llm_port,
+        web_port,
+        gateway_port,
+        enterprise_web_enabled=True,
+        enterprise_web_gateway_url=f"ws://127.0.0.1:{web_port}/gateway",
     )
     mock_llm_env = build_mock_llm_env()
 
     mock_log = run_home / "mock_llm.log"
     gateway_log = gateway_home / "gateway.log"
     agentserver_log = server_home / "agentserver.log"
+    enterprise_web_log = run_home / "enterprise_web.log"
+    web_dist = run_home / "web_dist"
+    web_dist.mkdir(parents=True, exist_ok=True)
+    (web_dist / "index.html").write_text("<!DOCTYPE html><html></html>", encoding="utf-8")
+    http_port = pick_free_port()
 
     mock_proc = start_process(
         [
@@ -92,9 +105,38 @@ async def test_gateway_runtime_process_deploy_and_chat(
         log_path=mock_log,
     )
     gateway_proc = None
+    enterprise_web_proc = None
     try:
         await wait_for_http(f"http://127.0.0.1:{mock_llm_port}/health", timeout=30)
         ut_log("mock_llm.ready", port=mock_llm_port, log_path=mock_log)
+
+        enterprise_web_proc = start_process(
+            [
+                sys.executable,
+                "-m",
+                "jiuwenclaw.app_enterprise_web",
+                "--dist",
+                str(web_dist),
+                "--port",
+                str(http_port),
+                "--relay-port",
+                str(web_port),
+            ],
+            env=subprocess_bootstrap_env(),
+            log_path=enterprise_web_log,
+        )
+        await wait_for_log(
+            enterprise_web_log,
+            "[jiuwenclaw-enterprise-web] WS 已启动",
+            timeout=60,
+        )
+        ut_log(
+            "enterprise_web.ready",
+            web_port=web_port,
+            http_port=http_port,
+            log_path=enterprise_web_log,
+        )
+
         print(f"gateway_env: {gateway_env}")
         gateway_proc = start_process(
             [sys.executable, "-m", "jiuwenclaw.app_gateway", "--port", str(web_port)],
@@ -110,7 +152,7 @@ async def test_gateway_runtime_process_deploy_and_chat(
         )
 
         await wait_for_log(gateway_log, "using extension AgentServerClient", timeout=180)
-        await wait_for_log(gateway_log, "WebChannel 已启动", timeout=180)
+        await wait_for_log(gateway_log, "EnterpriseWebChannel uplink 已连接", timeout=180)
         ut_log("gateway.ready", gateway_log=gateway_log)
 
         web_ws_url = web_channel_ws_url(web_port)
@@ -166,6 +208,7 @@ async def test_gateway_runtime_process_deploy_and_chat(
             gateway_log=gateway_log,
             runtime_log=runtime_log,
         )
+        stop_process(enterprise_web_proc)
         stop_process(mock_proc)
         ut_log(
             "teardown.keep",
@@ -174,5 +217,6 @@ async def test_gateway_runtime_process_deploy_and_chat(
             server_home=server_home,
             mock_log=mock_log,
             gateway_log=gateway_log,
+            enterprise_web_log=enterprise_web_log,
             agentserver_log=agentserver_log,
         )
