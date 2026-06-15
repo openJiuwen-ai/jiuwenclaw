@@ -148,6 +148,15 @@ export const ModelTemplateApi = {
     model_type?: string;
     model_provider?: string;
     search?: string;
+    sort_by?:
+      | 'template_name'
+      | 'description'
+      | 'model_provider'
+      | 'model_id'
+      | 'model_type'
+      | 'api_base'
+      | 'updated_at';
+    sort_order?: 'asc' | 'desc';
   }) =>
     http<PageResult<ModelTemplate>>('/v1/model-templates', { query: params }),
   get: (id: string) => http<ModelTemplate>(`/v1/model-templates/${encodeURIComponent(id)}`),
@@ -169,6 +178,8 @@ export const ExtensionTemplateApi = {
     component?: string;
     hook_type?: string;
     search?: string;
+    sort_by?: 'template_name' | 'description' | 'component' | 'hook_type' | 'updated_at';
+    sort_order?: 'asc' | 'desc';
   }) => http<PageResult<ExtensionConfigTemplate>>('/v1/extension-config-templates', { query: params }),
   get: (id: string) =>
     http<ExtensionConfigTemplate>(`/v1/extension-config-templates/${encodeURIComponent(id)}`),
@@ -194,6 +205,14 @@ export const SkillWhitelistTemplateApi = {
     skill_id?: string;
     skill_source?: string;
     search?: string;
+    sort_by?:
+      | 'template_name'
+      | 'description'
+      | 'skill_source'
+      | 'skill_id'
+      | 'skill_version'
+      | 'updated_at';
+    sort_order?: 'asc' | 'desc';
   }) => http<PageResult<SkillWhitelistTemplate>>('/v1/skill-whitelist-templates', { query: params }),
   get: (id: string) =>
     http<SkillWhitelistTemplate>(`/v1/skill-whitelist-templates/${encodeURIComponent(id)}`),
@@ -218,6 +237,8 @@ export const ServiceConfigTemplateApi = {
     enabled?: boolean;
     namespace?: string;
     search?: string;
+    sort_by?: 'template_name' | 'description' | 'agent_image' | 'updated_at';
+    sort_order?: 'asc' | 'desc';
   }) => http<PageResult<ServiceConfigTemplate>>('/v1/service-config-templates', { query: params }),
   get: (id: string) =>
     http<ServiceConfigTemplate>(`/v1/service-config-templates/${encodeURIComponent(id)}`),
@@ -252,6 +273,17 @@ export const MappingApi = {
       template_type?: string;
       template_id?: string;
       enabled?: boolean;
+      search?: string;
+      sort_by?:
+        | 'policy_name'
+        | 'policy_desc'
+        | 'priority'
+        | 'user_id'
+        | 'group_id'
+        | 'template_type'
+        | 'template_id'
+        | 'updated_at';
+      sort_order?: 'asc' | 'desc';
     }
   ) =>
     http<PageResult<ConfigDefaultTemplateMapping>>(
@@ -278,7 +310,14 @@ export const MappingApi = {
 export const GlobalPolicyApi = {
   list: (
     instanceId: string,
-    params?: { page?: number; page_size?: number; enabled?: boolean }
+    params?: {
+      page?: number;
+      page_size?: number;
+      enabled?: boolean;
+      search?: string;
+      sort_by?: 'policy_name' | 'policy_desc' | 'priority' | 'updated_at';
+      sort_order?: 'asc' | 'desc';
+    }
   ) =>
     http<PageResult<ConfigEffectiveGlobalPolicy>>(
       `${policyBase(instanceId)}/config-effective/global-policies`,
@@ -304,7 +343,14 @@ export const GlobalPolicyApi = {
 export const ServicePolicyApi = {
   list: (
     instanceId: string,
-    params?: { page?: number; page_size?: number; enabled?: boolean }
+    params?: {
+      page?: number;
+      page_size?: number;
+      enabled?: boolean;
+      search?: string;
+      sort_by?: 'policy_name' | 'policy_desc' | 'priority' | 'match_expr' | 'service_id' | 'updated_at';
+      sort_order?: 'asc' | 'desc';
+    }
   ) =>
     http<PageResult<ConfigEffectiveServicePolicy>>(
       `${policyBase(instanceId)}/config-effective/service-policies`,
@@ -330,7 +376,23 @@ export const ServicePolicyApi = {
 export const AgentPolicyApi = {
   list: (
     instanceId: string,
-    params?: { page?: number; page_size?: number; service_policy_id?: number; enabled?: boolean }
+    params?: {
+      page?: number;
+      page_size?: number;
+      service_policy_id?: string;
+      enabled?: boolean;
+      send_file_allowed?: boolean;
+      search?: string;
+      sort_by?:
+        | 'policy_name'
+        | 'policy_desc'
+        | 'service_policy_id'
+        | 'priority'
+        | 'match_expr'
+        | 'agent_id'
+        | 'updated_at';
+      sort_order?: 'asc' | 'desc';
+    }
   ) =>
     http<PageResult<ConfigEffectiveAgentPolicy>>(
       `${policyBase(instanceId)}/config-effective/agent-policies`,

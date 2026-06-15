@@ -1,7 +1,7 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useAsync } from '../../hooks/useAsync';
-import { useDebouncedValue } from '../../hooks/useDebouncedValue';
+import { useListSearch } from '../../hooks/useListSearch';
 import { ExtensionTemplateApi, ApiError } from '../../services/api';
 import type { ExtensionConfigTemplate } from '../../types';
 import { Empty } from '../../components/Empty';
@@ -9,35 +9,70 @@ import { Pagination } from '../../components/Pagination';
 import { ConfirmDialog } from '../../components/ConfirmDialog';
 import { Switch } from '../../components/Switch';
 import { TableColumnFilter } from '../../components/TableColumnFilter';
+import {
+  TableColumnSort,
+  type ColumnSortValue,
+} from '../../components/TableColumnSort';
+import { ListSearchInput } from '../../components/ListSearchInput';
 import { ExtensionTemplateModal } from './ExtensionTemplateModal';
 import { toast } from '../../stores/uiStore';
 import { formatTime, truncate } from '../../utils/format';
+
+type ExtensionTemplateSortField =
+  | 'template_name'
+  | 'description'
+  | 'component'
+  | 'hook_type'
+  | 'updated_at';
 
 export function ExtensionTemplatesPage() {
   const { t } = useTranslation();
   const [page, setPage] = useState(1);
   const [pageSize] = useState(20);
-  const [searchInput, setSearchInput] = useState('');
-  const debouncedSearch = useDebouncedValue(searchInput, 700);
+  const { searchInput, setSearchInput, searchQuery } = useListSearch();
   const [component, setComponent] = useState('');
   const [hookType, setHookType] = useState('');
   const [enabledFilter, setEnabledFilter] = useState<string>('');
+  const [sortBy, setSortBy] = useState<ExtensionTemplateSortField | ''>('');
+  const [sortOrder, setSortOrder] = useState<'asc' | 'desc'>('asc');
+
+  const sortOptions = useMemo(
+    () => [
+      { value: 'asc' as const, label: t('common.sortAsc') },
+      { value: 'desc' as const, label: t('common.sortDesc') },
+      { value: '' as const, label: t('common.sortDefault') },
+    ],
+    [t],
+  );
+
+  const handleSortChange = (field: ExtensionTemplateSortField, value: ColumnSortValue) => {
+    if (value === '') {
+      setSortBy('');
+      setSortOrder('asc');
+    } else {
+      setSortBy(field);
+      setSortOrder(value);
+    }
+    setPage(1);
+  };
 
   useEffect(() => {
     setPage(1);
-  }, [debouncedSearch]);
+  }, [searchQuery]);
 
   const { data, loading, error, reload } = useAsync(
     () =>
       ExtensionTemplateApi.list({
         page,
         page_size: pageSize,
-        search: debouncedSearch.trim() || undefined,
+        search: searchQuery,
         component: component || undefined,
         hook_type: hookType || undefined,
         enabled: enabledFilter === '' ? undefined : enabledFilter === 'true',
+        sort_by: sortBy || undefined,
+        sort_order: sortBy ? sortOrder : undefined,
       }),
-    [page, pageSize, debouncedSearch, component, hookType, enabledFilter]
+    [page, pageSize, searchQuery, component, hookType, enabledFilter, sortBy, sortOrder]
   );
 
   const [items, setItems] = useState<ExtensionConfigTemplate[]>([]);
@@ -83,11 +118,10 @@ export function ExtensionTemplatesPage() {
           <div className="page-subtitle">{t('extensionTemplate.subtitle')}</div>
         </div>
         <div className="flex items-center gap-2">
-          <input
-            className="input !w-[38rem]"
-            placeholder={t('extensionTemplate.searchPlaceholder')}
+          <ListSearchInput
             value={searchInput}
-            onChange={(e) => setSearchInput(e.target.value)}
+            onChange={setSearchInput}
+            placeholder={t('extensionTemplate.searchPlaceholder')}
           />
           <button className="btn sm" onClick={() => void reload()}>
             {t('common.refresh')}
@@ -113,39 +147,75 @@ export function ExtensionTemplatesPage() {
           <table className="table">
             <thead>
               <tr>
-                <th>{t('extensionTemplate.templateName')}</th>
-                <th>{t('extensionTemplate.templateDescription')}</th>
                 <th>
-                  <TableColumnFilter
-                    label={t('extensionTemplate.component')}
-                    value={component}
-                    options={[
-                      { value: '', label: t('common.all') },
-                      { value: 'gateway', label: 'gateway' },
-                      { value: 'agent_server', label: 'agent_server' },
-                    ]}
-                    onChange={(value) => {
-                      setComponent(value);
-                      setPage(1);
-                    }}
+                  <TableColumnSort
+                    label={t('extensionTemplate.templateName')}
+                    value={sortBy === 'template_name' ? sortOrder : ''}
+                    options={sortOptions}
+                    onChange={(value) => handleSortChange('template_name', value)}
                   />
                 </th>
                 <th>
-                  <TableColumnFilter
-                    label={t('extensionTemplate.hookType')}
-                    value={hookType}
-                    options={[
-                      { value: '', label: t('common.all') },
-                      { value: 'pre_request', label: 'pre_request' },
-                      { value: 'post_request', label: 'post_request' },
-                      { value: 'error', label: 'error' },
-                      { value: 'schedule', label: 'schedule' },
-                    ]}
-                    onChange={(value) => {
-                      setHookType(value);
-                      setPage(1);
-                    }}
+                  <TableColumnSort
+                    label={t('extensionTemplate.templateDescription')}
+                    value={sortBy === 'description' ? sortOrder : ''}
+                    options={sortOptions}
+                    onChange={(value) => handleSortChange('description', value)}
                   />
+                </th>
+                <th>
+                  <div className="th-filter">
+                    <span className="th-filter__label">{t('extensionTemplate.component')}</span>
+                    <TableColumnSort
+                      iconOnly
+                      label={t('extensionTemplate.component')}
+                      value={sortBy === 'component' ? sortOrder : ''}
+                      options={sortOptions}
+                      onChange={(value) => handleSortChange('component', value)}
+                    />
+                    <TableColumnFilter
+                      iconOnly
+                      label={t('extensionTemplate.component')}
+                      value={component}
+                      options={[
+                        { value: '', label: t('common.all') },
+                        { value: 'gateway', label: 'gateway' },
+                        { value: 'agent_server', label: 'agent_server' },
+                      ]}
+                      onChange={(value) => {
+                        setComponent(value);
+                        setPage(1);
+                      }}
+                    />
+                  </div>
+                </th>
+                <th>
+                  <div className="th-filter">
+                    <span className="th-filter__label">{t('extensionTemplate.hookType')}</span>
+                    <TableColumnSort
+                      iconOnly
+                      label={t('extensionTemplate.hookType')}
+                      value={sortBy === 'hook_type' ? sortOrder : ''}
+                      options={sortOptions}
+                      onChange={(value) => handleSortChange('hook_type', value)}
+                    />
+                    <TableColumnFilter
+                      iconOnly
+                      label={t('extensionTemplate.hookType')}
+                      value={hookType}
+                      options={[
+                        { value: '', label: t('common.all') },
+                        { value: 'pre_request', label: 'pre_request' },
+                        { value: 'post_request', label: 'post_request' },
+                        { value: 'error', label: 'error' },
+                        { value: 'schedule', label: 'schedule' },
+                      ]}
+                      onChange={(value) => {
+                        setHookType(value);
+                        setPage(1);
+                      }}
+                    />
+                  </div>
                 </th>
                 <th>
                   <TableColumnFilter
@@ -162,7 +232,14 @@ export function ExtensionTemplatesPage() {
                     }}
                   />
                 </th>
-                <th>{t('extensionTemplate.updatedAt')}</th>
+                <th>
+                  <TableColumnSort
+                    label={t('extensionTemplate.updatedAt')}
+                    value={sortBy === 'updated_at' ? sortOrder : ''}
+                    options={sortOptions}
+                    onChange={(value) => handleSortChange('updated_at', value)}
+                  />
+                </th>
                 <th>{t('common.actions')}</th>
               </tr>
             </thead>

@@ -26,13 +26,20 @@ from .schemas import (
 
 logger = get_logger(__name__)
 
+# 策略/映射选路排序：priority 降序；同 priority 时 updated_at 越新越优先。
+# SQLAlchemyHandler.list_records 的 str 形式 order_by 仅支持单列；多列须用 list[tuple[field, is_desc]]。
+POLICY_MATCH_ORDER_BY: list[tuple[str, bool]] = [
+    ("priority", True),
+    ("updated_at", True),
+]
+
 
 async def _fetch_global_policy_refs() -> tuple[dict[str, Any] | None, dict[str, list[str]]]:
     filters: dict[str, Any] = {"enabled": True}
     global_rows = await GatewayDb.current().list_records(
         "config_effective_global_policy",
         filters=filters,
-        order_by="priority DESC",
+        order_by=POLICY_MATCH_ORDER_BY,
     )
     if not global_rows:
         return None, {}
@@ -52,7 +59,7 @@ async def _resolve_policy_match(ctx: RoutingContext) -> _PolicyMatchResult:
     service_rules = await GatewayDb.current().list_records(
         "config_effective_service_policy",
         filters={"enabled": True},
-        order_by="priority DESC",
+        order_by=POLICY_MATCH_ORDER_BY,
     )
 
     matched_service: dict[str, Any] | None = None
@@ -67,11 +74,11 @@ async def _resolve_policy_match(ctx: RoutingContext) -> _PolicyMatchResult:
             break
 
     if matched_service is not None:
-        sp_id = int(matched_service["id"])
+        sp_policy_id = str(matched_service["policy_id"])
         agent_rules = await GatewayDb.current().list_records(
             "config_effective_agent_policy",
-            filters={"enabled": True, "service_policy_id": sp_id},
-            order_by="priority DESC",
+            filters={"enabled": True, "service_policy_id": sp_policy_id},
+            order_by=POLICY_MATCH_ORDER_BY,
         )
         for rule in agent_rules:
             if expressions.evaluate_match_expr(rule.get("match_expr"), ctx):
@@ -171,7 +178,7 @@ async def _fetch_slot_entities(
     return entities
 
 
-def _resolve_policy_field(
+def resolve_policy_field(
     policy: dict[str, Any] | None,
     field: str,
     ctx: RoutingContext,
@@ -183,7 +190,7 @@ def _resolve_policy_field(
         return None
     if "${" in raw:
         resolved = expressions.substitute_template(raw, ctx)
-        return resolved or None
+        return resolved if resolved else raw
     return raw
 
 
@@ -231,23 +238,23 @@ async def load_effective_enterprise_config(
     resolved_service_id: str | None = None
     resolved_agent_id: str | None = None
     if TemplateRefSlot.SERVICE_CONFIG in load_slots:
-        resolved_service_id = _resolve_policy_field(
+        resolved_service_id = resolve_policy_field(
             match.matched_service,
             "service_id",
             ctx,
         )
-        resolved_agent_id = _resolve_policy_field(
+        resolved_agent_id = resolve_policy_field(
             match.matched_agent,
             "agent_id",
             ctx,
         )
-    send_file_allowed = bool((match.matched_agent or {}).get("send_file_allowed", True))
+    send_file_allowed = bool((match.matched_agent or {}).get("send_file_allowed", False))
 
     result = EffectiveEnterpriseConfig(
         routing=ctx,
         template_ref=slot_template_id_map,
         service_policy_id=(
-            int(match.matched_service["id"]) if match.matched_service else None
+            str(match.matched_service["policy_id"]) if match.matched_service else None
         ),
         agent_policy_id=(
             int(match.matched_agent["id"]) if match.matched_agent else None
@@ -287,6 +294,7 @@ async def load_effective_enterprise_config(
 
 
 __all__ = (
+    "POLICY_MATCH_ORDER_BY",
     "load_effective_enterprise_config",
     "routing_context_from_request",
 )

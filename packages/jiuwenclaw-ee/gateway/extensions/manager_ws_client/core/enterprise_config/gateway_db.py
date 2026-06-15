@@ -24,6 +24,10 @@ _INSTANCE_SCOPED_TABLES = frozenset({
     "config_effective_global_policy",
     "config_default_template_mapping",
     "log_masking_rule",
+    "model_template",
+    "extension_config_template",
+    "skill_whitelist_template",
+    "service_config_template",
 })
 
 _DEFAULT_RELATIVE_ROOT = Path(__file__).resolve().parents[2]
@@ -99,7 +103,7 @@ class GatewayDb(Database):
         table: str,
         *,
         filters: dict[str, Any] | None = None,
-        order_by: str = "",
+        order_by: str | list[tuple[str, bool]] = "",
     ) -> list[dict[str, Any]]:
         """列表查询；策略/映射表自动按构造时的 ``jiuwenclaw_id`` 隔离。"""
         query = self.apply_instance_scope(table, dict(filters or {}))

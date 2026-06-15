@@ -1,6 +1,9 @@
 export interface ConfigDefaultTemplateMapping {
   id: number;
   jiuwenclaw_id: string;
+  policy_id: string;
+  policy_name: string;
+  policy_desc?: string | null;
   user_id?: string | null;
   group_id?: string | null;
   priority: number;
@@ -13,6 +16,8 @@ export interface ConfigDefaultTemplateMapping {
 }
 
 export interface ConfigDefaultTemplateMappingCreateBody {
+  policy_name: string;
+  policy_desc?: string;
   user_id?: string;
   group_id?: string;
   priority?: number;
@@ -27,8 +32,11 @@ export type ConfigDefaultTemplateMappingUpdateBody = Partial<ConfigDefaultTempla
 export interface ConfigEffectiveGlobalPolicy {
   id: number;
   jiuwenclaw_id: string;
+  policy_id: string;
+  policy_name: string;
+  policy_desc?: string | null;
   priority: number;
-  template_ref: Record<string, string>;
+  template_ref: Record<string, string[]>;
   enabled: boolean;
   data?: Record<string, unknown> | null;
   created_at?: string | null;
@@ -36,8 +44,10 @@ export interface ConfigEffectiveGlobalPolicy {
 }
 
 export interface ConfigEffectiveGlobalPolicyCreateBody {
+  policy_name: string;
+  policy_desc?: string;
   priority?: number;
-  template_ref: Record<string, string>;
+  template_ref: Record<string, string[]>;
   enabled?: boolean;
   data?: Record<string, unknown>;
 }
@@ -47,10 +57,13 @@ export type ConfigEffectiveGlobalPolicyUpdateBody = Partial<ConfigEffectiveGloba
 export interface ConfigEffectiveServicePolicy {
   id: number;
   jiuwenclaw_id: string;
+  policy_id: string;
+  policy_name: string;
+  policy_desc?: string | null;
   service_id: string;
   priority: number;
   match_expr?: string | null;
-  template_ref: Record<string, string>;
+  template_ref: Record<string, string[]>;
   enabled: boolean;
   data?: Record<string, unknown> | null;
   created_at?: string | null;
@@ -58,10 +71,12 @@ export interface ConfigEffectiveServicePolicy {
 }
 
 export interface ConfigEffectiveServicePolicyCreateBody {
+  policy_name: string;
+  policy_desc?: string;
   service_id: string;
   priority: number;
   match_expr?: string;
-  template_ref: Record<string, string>;
+  template_ref: Record<string, string[]>;
   enabled?: boolean;
   data?: Record<string, unknown>;
 }
@@ -71,11 +86,14 @@ export type ConfigEffectiveServicePolicyUpdateBody = Partial<ConfigEffectiveServ
 export interface ConfigEffectiveAgentPolicy {
   id: number;
   jiuwenclaw_id: string;
+  policy_id: string;
+  policy_name: string;
+  policy_desc?: string | null;
   agent_id: string;
-  service_policy_id: number;
+  service_policy_id: string;
   priority: number;
   match_expr?: string | null;
-  template_ref: Record<string, string>;
+  template_ref: Record<string, string[]>;
   send_file_allowed: boolean;
   enabled: boolean;
   data?: Record<string, unknown> | null;
@@ -84,11 +102,13 @@ export interface ConfigEffectiveAgentPolicy {
 }
 
 export interface ConfigEffectiveAgentPolicyCreateBody {
+  policy_name: string;
+  policy_desc?: string;
   agent_id: string;
-  service_policy_id: number;
+  service_policy_id: string;
   priority?: number;
   match_expr?: string;
-  template_ref: Record<string, string>;
+  template_ref: Record<string, string[]>;
   send_file_allowed?: boolean;
   enabled?: boolean;
   data?: Record<string, unknown>;

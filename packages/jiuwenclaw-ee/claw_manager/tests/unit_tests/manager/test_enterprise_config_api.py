@@ -72,7 +72,7 @@ async def _seed_enterprise_demo(manager_api: ManagerApiHarness) -> dict[str, Any
             "data": {},
         },
     )
-    sales_id = int(sales["id"])
+    sales_policy_id = sales["policy_id"]
 
     fallback = await h.post_json(
         "/config-effective/service-policies",
@@ -91,7 +91,7 @@ async def _seed_enterprise_demo(manager_api: ManagerApiHarness) -> dict[str, Any
         "/config-effective/agent-policies",
         {
             "agent_id": "${user_id}",
-            "service_policy_id": sales_id,
+            "service_policy_id": sales_policy_id,
             "priority": 100,
             "match_expr": "user_id == 'alice'",
             "template_ref": {
@@ -116,7 +116,7 @@ async def _seed_enterprise_demo(manager_api: ManagerApiHarness) -> dict[str, Any
         "/config-effective/agent-policies",
         {
             "agent_id": "default_agent_id_1",
-            "service_policy_id": sales_id,
+            "service_policy_id": sales_policy_id,
             "priority": 0,
             "match_expr": "",
             "template_ref": {"default_model": [group_map_default_model]},
@@ -264,30 +264,31 @@ async def test_patch_model_template_m3_model_id(manager_api: ManagerApiHarness):
 
 
 @pytest.mark.asyncio
-async def test_global_policy_unique_per_instance(manager_api: ManagerApiHarness):
-    """§2.7：每实例仅允许一条 global policy。"""
+async def test_global_policy_allows_multiple_per_instance(manager_api: ManagerApiHarness):
+    """§2.7：同一实例可创建多条 global policy。"""
     await manager_api.create_instance()
     h = manager_api
 
-    await h.post_json(
+    first = await h.post_json(
         "/config-effective/global-policies",
         {
+            "policy_name": "global-a",
             "priority": 0,
             "template_ref": {"default_model": []},
             "enabled": True,
         },
     )
-
-    resp = await h.http.post(
-        h.scoped_url("/config-effective/global-policies"),
-        json={
-            "priority": 1,
+    second = await h.post_json(
+        "/config-effective/global-policies",
+        {
+            "policy_name": "global-b",
+            "priority": 10,
             "template_ref": {"default_model": []},
             "enabled": True,
         },
     )
-    assert resp.status_code == 400
-    assert "already exists" in resp.json()["detail"].lower()
+    assert first["id"] != second["id"]
+    assert first["policy_id"] != second["policy_id"]
 
 
 @pytest.mark.asyncio

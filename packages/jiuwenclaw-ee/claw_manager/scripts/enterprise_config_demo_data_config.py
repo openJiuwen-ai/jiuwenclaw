@@ -14,8 +14,8 @@
 3. §2.3 三条 ``skill-whitelist-templates``（W1–W3；2.3.1–2.3.3）
 4. §2.4 两条 ``service-config-templates``（S1–S2；2.4.1–2.4.2）
 5. §2.5 两条 ``config-effective/service-policies``（2.5.1–2.5.2）
-6. §2.6 两条 ``config-effective/agent-policies``（2.6.1–2.6.2；依赖 2.5.1 的 id）
-7. §2.7 ``config-effective/global-policies``（每实例唯一；已存在则 PUT 更新）
+6. §2.6 两条 ``config-effective/agent-policies``（2.6.1–2.6.2；依赖 2.5.1 的 ``policy_id`` UUID）
+7. §2.7 ``config-effective/global-policies``（2.7；可多条，运行时取 enabled 且 priority 最高者）
 8. §2.8 两条 ``config-default-template-mappings``（2.8.1–2.8.2）
 
 典型用法（PowerShell，项目根目录）::
@@ -193,6 +193,13 @@ def _require_template_id(data: dict[str, Any], label: str) -> str:
     raw = data.get("template_id")
     if raw is None or not str(raw).strip():
         raise ManagerApiError("POST", label, 200, f"响应缺少 template_id: {data!r}")
+    return str(raw).strip()
+
+
+def _require_policy_id(data: dict[str, Any], label: str) -> str:
+    raw = data.get("policy_id")
+    if raw is None or not str(raw).strip():
+        raise ManagerApiError("POST", label, 200, f"响应缺少 policy_id: {data!r}")
     return str(raw).strip()
 
 
@@ -413,22 +420,6 @@ def _service_config_templates() -> list[tuple[str, dict[str, Any]]]:
     ]
 
 
-def _upsert_global_policy(client: ManagerClient, body: dict[str, Any]) -> dict[str, Any]:
-    try:
-        return client.post("/config-effective/global-policies", body)
-    except ManagerApiError as exc:
-        if exc.status != 400 or "already exists" not in exc.detail.lower():
-            raise
-    rows = client.list_items("/config-effective/global-policies", page_size=5)
-    if not rows:
-        raise SeedDemoConfigError(
-            "全局策略创建失败且列表为空，请检查 Manager / Gateway 日志。"
-        )
-    policy_id = int(rows[0]["id"])
-    logger.info("  [global] 已存在，PUT 更新 id=%s", policy_id)
-    return client.put(f"/config-effective/global-policies/{policy_id}", body)
-
-
 def seed_demo_config(client: ManagerClient) -> dict[str, Any]:
     result: dict[str, Any] = {
         "jiuwenclaw_id": client.jiuwenclaw_id,
@@ -506,6 +497,8 @@ def seed_demo_config(client: ManagerClient) -> dict[str, Any]:
     sales = client.post(
         "/config-effective/service-policies",
         {
+            "policy_name": "销售通道高优先级",
+            "policy_desc": "命中 g_demo_sales 时的主服务策略",
             "service_id": "${group_id}::${bot_id}",
             "priority": 100,
             "match_expr": "group_id == 'g_demo_sales'",
@@ -522,10 +515,13 @@ def seed_demo_config(client: ManagerClient) -> dict[str, Any]:
         },
     )
     sales_id = _require_id(sales, "service-policies/sales")
+    sales_policy_id = _require_policy_id(sales, "service-policies/sales")
     result["service_policy_sales_id"] = sales_id
+    result["service_policy_sales_policy_id"] = sales_policy_id
     logger.info(
-        "  [2.5.1] 销售通道 priority=100 -> id=%s (default_model=%s, skills=%s,%s, ext=%s,%s)",
+        "  [2.5.1] 销售通道 priority=100 -> id=%s policy_id=%s (default_model=%s, skills=%s,%s, ext=%s,%s)",
         sales_id,
+        sales_policy_id,
         m2,
         w1,
         w2,
@@ -536,6 +532,7 @@ def seed_demo_config(client: ManagerClient) -> dict[str, Any]:
     fallback = client.post(
         "/config-effective/service-policies",
         {
+            "policy_name": "销售组低优先级兜底",
             "service_id": "${group_id}::${bot_id}",
             "priority": 10,
             "match_expr": "group_id == 'g_demo_sales'",
@@ -545,15 +542,24 @@ def seed_demo_config(client: ManagerClient) -> dict[str, Any]:
         },
     )
     fallback_id = _require_id(fallback, "service-policies/fallback")
+    fallback_policy_id = _require_policy_id(fallback, "service-policies/fallback")
     result["service_policy_fallback_id"] = fallback_id
-    logger.info("  [2.5.2] 低优先级兜底 -> id=%s (default_model=%s)", fallback_id, m1)
+    result["service_policy_fallback_policy_id"] = fallback_policy_id
+    logger.info(
+        "  [2.5.2] 低优先级兜底 -> id=%s policy_id=%s (default_model=%s)",
+        fallback_id,
+        fallback_policy_id,
+        m1,
+    )
 
     logger.info("[6/8] 创建 agent-policies")
     vip = client.post(
         "/config-effective/agent-policies",
         {
+            "policy_name": "VIP alice",
+            "policy_desc": "alice 覆盖为 M3",
             "agent_id": "${user_id}",
-            "service_policy_id": sales_id,
+            "service_policy_id": sales_policy_id,
             "priority": 100,
             "match_expr": "user_id == 'alice'",
             "template_ref": {
@@ -573,10 +579,13 @@ def seed_demo_config(client: ManagerClient) -> dict[str, Any]:
         },
     )
     vip_id = _require_id(vip, "agent-policies/vip")
+    vip_policy_id = _require_policy_id(vip, "agent-policies/vip")
     result["agent_policy_vip_id"] = vip_id
+    result["agent_policy_vip_policy_id"] = vip_policy_id
     logger.info(
-        "  [2.6.1] VIP alice -> id=%s (default_model=%s, skill=%s, ext=%s)",
+        "  [2.6.1] VIP alice -> id=%s policy_id=%s (default_model=%s, skill=%s, ext=%s)",
         vip_id,
+        vip_policy_id,
         m3,
         w1,
         e3,
@@ -585,8 +594,9 @@ def seed_demo_config(client: ManagerClient) -> dict[str, Any]:
     mapping_rule = client.post(
         "/config-effective/agent-policies",
         {
+            "policy_name": "组映射 default_model",
             "agent_id": "default_agent_id_1",
-            "service_policy_id": sales_id,
+            "service_policy_id": sales_policy_id,
             "priority": 0,
             "match_expr": "",
             "template_ref": {"default_model": [group_map_default_model]},
@@ -597,17 +607,22 @@ def seed_demo_config(client: ManagerClient) -> dict[str, Any]:
         },
     )
     mapping_id = _require_id(mapping_rule, "agent-policies/mapping")
+    mapping_policy_id = _require_policy_id(mapping_rule, "agent-policies/mapping")
     result["agent_policy_mapping_id"] = mapping_id
+    result["agent_policy_mapping_policy_id"] = mapping_policy_id
     logger.info(
-        "  [2.6.2] 组映射表达式 -> id=%s (default_model=%s)",
+        "  [2.6.2] 组映射表达式 -> id=%s policy_id=%s (default_model=%s)",
         mapping_id,
+        mapping_policy_id,
         group_map_default_model,
     )
 
-    logger.info("[7/8] 创建 / 更新 global-policies")
-    global_row = _upsert_global_policy(
-        client,
+    logger.info("[7/8] 创建 global-policies")
+    global_row = client.post(
+        "/config-effective/global-policies",
         {
+            "policy_name": "全局兜底",
+            "policy_desc": "未命中服务/Agent 策略时使用",
             "priority": 0,
             "template_ref": {
                 "default_model": [m1],
@@ -622,10 +637,13 @@ def seed_demo_config(client: ManagerClient) -> dict[str, Any]:
         },
     )
     global_id = _require_id(global_row, "global-policies")
+    global_policy_uuid = _require_policy_id(global_row, "global-policies")
     result["global_policy_id"] = global_id
+    result["global_policy_uuid"] = global_policy_uuid
     logger.info(
-        "  [2.7] 全局兜底 -> id=%s (四槽位=%s, skill=%s, ext=%s)",
+        "  [2.7] 全局兜底 -> id=%s policy_id=%s (四槽位=%s, skill=%s, ext=%s)",
         global_id,
+        global_policy_uuid,
         m1,
         w3,
         e4,
@@ -635,6 +653,7 @@ def seed_demo_config(client: ManagerClient) -> dict[str, Any]:
     carol_map = client.post(
         "/config-default-template-mappings",
         {
+            "policy_name": "carol 默认 default_model",
             "user_id": "carol",
             "group_id": None,
             "priority": 0,
@@ -645,15 +664,23 @@ def seed_demo_config(client: ManagerClient) -> dict[str, Any]:
         },
     )
     carol_map_id = _require_id(carol_map, "mapping/carol")
+    carol_map_policy_id = _require_policy_id(carol_map, "mapping/carol")
     result["mapping_carol_id"] = carol_map_id
-    logger.info("  [2.8.1] user carol -> template_id=%s (id=%s)", m4, carol_map_id)
+    result["mapping_carol_policy_id"] = carol_map_policy_id
+    logger.info(
+        "  [2.8.1] user carol -> template_id=%s (id=%s policy_id=%s)",
+        m4,
+        carol_map_id,
+        carol_map_policy_id,
+    )
 
     group_map = client.post(
         "/config-default-template-mappings",
         {
+            "policy_name": "销售组 default_model 映射",
             "user_id": None,
             "group_id": "g_demo_sales",
-            "priority": 0,
+            "priority": 1,
             "template_id": m5,
             "template_type": "default_model",
             "enabled": True,
@@ -661,8 +688,15 @@ def seed_demo_config(client: ManagerClient) -> dict[str, Any]:
         },
     )
     group_map_id = _require_id(group_map, "mapping/group")
+    group_map_policy_id = _require_policy_id(group_map, "mapping/group")
     result["mapping_group_id"] = group_map_id
-    logger.info("  [2.8.2] group g_demo_sales -> template_id=%s (id=%s)", m5, group_map_id)
+    result["mapping_group_policy_id"] = group_map_policy_id
+    logger.info(
+        "  [2.8.2] group g_demo_sales -> template_id=%s (id=%s policy_id=%s)",
+        m5,
+        group_map_id,
+        group_map_policy_id,
+    )
 
     result["template_id_literals"] = {"m1": m1, "m2": m2, "m3": m3, "m4": m4, "m5": m5}
     return result

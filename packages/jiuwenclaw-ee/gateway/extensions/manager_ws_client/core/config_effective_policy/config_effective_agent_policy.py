@@ -5,23 +5,25 @@
 from __future__ import annotations
 
 import logging
-from datetime import datetime
 from typing import Any
 
 from openjiuwen_runtime.foundation.db.handler import DBHandler
 
 from ...infrastructure.db import ensure_db_handler
-from ...infrastructure.utils import get_jiuwenclaw_id, utc_now
+from ...infrastructure.utils import (
+    apply_template_ref_to_updates,
+    get_jiuwenclaw_id,
+    normalize_template_ref,
+    parse_iso_datetime,
+    utc_now,
+)
 from ...models.config_effective_policy_models import (
     CONFIG_EFFECTIVE_AGENT_POLICY_TABLE_DEF,
     CONFIG_EFFECTIVE_SERVICE_POLICY_TABLE_DEF,
 )
 from ...schemas.config_effective_policy_schemas import (
+    ConfigEffectiveAgentPolicyCreateRequest,
     ConfigEffectiveAgentPolicyUpdateRequest,
-)
-from ...infrastructure.utils import (
-    apply_template_ref_to_updates,
-    normalize_template_ref,
 )
 
 _AGENT_TABLE = CONFIG_EFFECTIVE_AGENT_POLICY_TABLE_DEF.table_name
@@ -33,15 +35,19 @@ async def _validate_service_policy_ref(
     handler: DBHandler,
     *,
     jiuwenclaw_id: str,
-    service_policy_id: int,
+    service_policy_id: str,
 ) -> None:
-    row = await handler.get(_SERVICE_TABLE, {"id": service_policy_id})
-    if row is None:
-        raise ValueError(f"unknown service_policy_id={service_policy_id}")
-    if getattr(row, "jiuwenclaw_id", None) != jiuwenclaw_id:
-        raise ValueError(
-            "service_policy_id does not belong to the current jiuwenclaw instance"
-        )
+    normalized_id = str(service_policy_id).strip()
+    if not normalized_id:
+        raise ValueError("service_policy_id is required")
+    rows = await handler.list_records(
+        _SERVICE_TABLE,
+        {"jiuwenclaw_id": jiuwenclaw_id, "policy_id": normalized_id},
+        limit=1,
+        offset=0,
+    )
+    if not rows:
+        raise ValueError(f"unknown service_policy_id={normalized_id!r}")
 
 
 async def _get_row_for_instance(
@@ -72,6 +78,11 @@ async def update_config_effective_agent_policy_record(
         updates["agent_id"] = updates["agent_id"].strip()
         if not updates["agent_id"]:
             raise ValueError("agent_id cannot be empty")
+
+    if "service_policy_id" in updates and updates["service_policy_id"] is not None:
+        updates["service_policy_id"] = str(updates["service_policy_id"]).strip()
+        if not updates["service_policy_id"]:
+            raise ValueError("service_policy_id cannot be empty")
 
     next_service_policy_id = updates.get(
         "service_policy_id", getattr(existing, "service_policy_id")
@@ -105,15 +116,6 @@ async def delete_config_effective_agent_policy_record(
     return await handler.delete(_AGENT_TABLE, {"id": policy_id})
 
 
-def _parse_iso_datetime(value: Any) -> Any:
-    if value is None or isinstance(value, datetime):
-        return value
-    if isinstance(value, str) and value.strip():
-        text = value.strip().replace("Z", "+00:00")
-        return datetime.fromisoformat(text)
-    return value
-
-
 async def apply_config_effective_agent_policy(
     payload: dict[str, Any],
 ) -> dict[str, Any] | None:
@@ -133,29 +135,29 @@ async def apply_config_effective_agent_policy(
             raise ValueError(
                 "config_effective_agent_policies.create requires policy object"
             )
-        agent_id = str(policy["agent_id"]).strip()
-        if not agent_id:
-            raise ValueError("agent_id is required")
-        service_policy_id = int(policy["service_policy_id"])
+        req = ConfigEffectiveAgentPolicyCreateRequest.model_validate(policy)
         await _validate_service_policy_ref(
             handler,
             jiuwenclaw_id=jiuwenclaw_id,
-            service_policy_id=service_policy_id,
+            service_policy_id=req.service_policy_id,
         )
 
         now = utc_now()
         row_data: dict[str, Any] = {
-            "agent_id": agent_id,
             "jiuwenclaw_id": jiuwenclaw_id,
-            "service_policy_id": service_policy_id,
-            "priority": int(policy.get("priority", 0)),
-            "match_expr": policy.get("match_expr"),
-            "template_ref": normalize_template_ref(policy.get("template_ref")),
-            "send_file_allowed": bool(policy.get("send_file_allowed", True)),
-            "enabled": bool(policy.get("enabled", True)),
-            "data": policy.get("data"),
-            "created_at": _parse_iso_datetime(policy.get("created_at")) or now,
-            "updated_at": _parse_iso_datetime(policy.get("updated_at")) or now,
+            "policy_id": req.policy_id,
+            "policy_name": req.policy_name,
+            "policy_desc": req.policy_desc,
+            "agent_id": req.agent_id,
+            "service_policy_id": req.service_policy_id,
+            "priority": req.priority,
+            "match_expr": req.match_expr,
+            "template_ref": normalize_template_ref(req.template_ref),
+            "send_file_allowed": req.send_file_allowed,
+            "enabled": req.enabled,
+            "data": req.data,
+            "created_at": parse_iso_datetime(policy.get("created_at")) or now,
+            "updated_at": parse_iso_datetime(policy.get("updated_at")) or now,
         }
         created = await handler.create(_AGENT_TABLE, row_data)
         new_id = int(getattr(created, "id", 0) or 0)
@@ -163,14 +165,14 @@ async def apply_config_effective_agent_policy(
             raise ValueError(
                 "config_effective_agent_policies.create: database did not return policy id"
             )
-        result: dict[str, Any] | None = {"policy_id": new_id}
+        result: dict[str, Any] | None = {"id": new_id}
 
     elif op == "update":
-        policy_id = payload.get("policy_id")
+        row_id = payload.get("id")
         updates = payload.get("updates")
-        if policy_id is None:
+        if row_id is None:
             raise ValueError(
-                "config_effective_agent_policies.update requires policy_id"
+                "config_effective_agent_policies.update requires id"
             )
         if not isinstance(updates, dict) or not updates:
             raise ValueError(
@@ -178,33 +180,33 @@ async def apply_config_effective_agent_policy(
             )
         req = ConfigEffectiveAgentPolicyUpdateRequest.model_validate(updates)
         row = await update_config_effective_agent_policy_record(
-            handler, int(policy_id), req
+            handler, int(row_id), req
         )
         if row is None:
-            raise ValueError(f"config effective agent policy id={policy_id} not found")
+            raise ValueError(f"config effective agent policy id={row_id} not found")
         result = None
 
     elif op == "delete":
-        policy_id = payload.get("policy_id")
-        if policy_id is None:
+        row_id = payload.get("id")
+        if row_id is None:
             raise ValueError(
-                "config_effective_agent_policies.delete requires policy_id"
+                "config_effective_agent_policies.delete requires id"
             )
         deleted = await delete_config_effective_agent_policy_record(
-            handler, int(policy_id)
+            handler, int(row_id)
         )
         if not deleted:
-            raise ValueError(f"config effective agent policy id={policy_id} not found")
+            raise ValueError(f"config effective agent policy id={row_id} not found")
         result = None
 
     else:
         raise ValueError(f"unsupported config_effective_agent_policies.op: {op!r}")
 
     logger.info(
-        "[ManagerWsClient] config_effective_agent_policies sync op=%s policy_id=%s",
+        "[ManagerWsClient] config_effective_agent_policies sync op=%s id=%s",
         op,
-        (result or {}).get("policy_id")
-        or payload.get("policy_id")
+        (result or {}).get("id")
+        or payload.get("id")
         or (payload.get("policy") or {}).get("id"),
     )
     return result

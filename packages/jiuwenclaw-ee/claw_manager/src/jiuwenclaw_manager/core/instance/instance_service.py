@@ -110,6 +110,49 @@ async def bootstrap_gateway_log_masking(
         )
 
 
+async def bootstrap_gateway_templates(
+    handler: DBHandler,
+    jiuwenclaw_id: str,
+) -> None:
+    """Gateway WS 注册：将 MDB 全局模板 bulk push 到 GDB（``op=sync``）。"""
+    jid = str(jiuwenclaw_id or "").strip()
+    if not jid:
+        return
+    try:
+        from jiuwenclaw_manager.core.template.extension_config_template import (
+            push_extension_config_templates_sync_to_gateway,
+        )
+        from jiuwenclaw_manager.core.template.model_template import (
+            push_model_templates_sync_to_gateway,
+        )
+        from jiuwenclaw_manager.core.template.service_config_template import (
+            push_service_config_templates_sync_to_gateway,
+        )
+        from jiuwenclaw_manager.core.template.skill_whitelist_template import (
+            push_skill_whitelist_templates_sync_to_gateway,
+        )
+
+        for name, sync_fn in (
+            ("model_templates", push_model_templates_sync_to_gateway),
+            ("extension_config_templates", push_extension_config_templates_sync_to_gateway),
+            ("skill_whitelist_templates", push_skill_whitelist_templates_sync_to_gateway),
+            ("service_config_templates", push_service_config_templates_sync_to_gateway),
+        ):
+            ack = await sync_fn(handler, jid)
+            logger.info(
+                "[Instance] %s sync on gateway register jiuwenclaw_id=%s revision=%s",
+                name,
+                jid,
+                ack.get("revision"),
+            )
+    except Exception:
+        logger.warning(
+            "[Instance] template bootstrap failed for %s",
+            jid,
+            exc_info=True,
+        )
+
+
 async def register_gateway_via_ws(
     handler: DBHandler,
     payload: dict[str, Any],

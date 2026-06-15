@@ -39,6 +39,7 @@ from jiuwenclaw_manager.security.keys import (
 )
 from jiuwenclaw_manager.core.instance.instance_service import (
     bootstrap_gateway_log_masking,
+    bootstrap_gateway_templates,
     apply_gateway_ws_heartbeat,
     mark_instance_offline,
     register_gateway_via_ws,
@@ -387,11 +388,11 @@ class ManagerWsServer:
         """向所有已注册 Gateway 下发配置变更（逐实例独立 revision 等待 ack）。"""
         jiuwenclaw_ids = await self.list_registered_jiuwenclaw_ids()
         if not jiuwenclaw_ids:
-            raise ValueError(
-                "no gateway websocket connected; registered_jiuwenclaw_ids=[]; "
-                "ensure each gateway manager_ws_client is connected "
-                "(restart gateway after claw-manager restart)"
-            )
+            return {
+                "pushed_jiuwenclaw_ids": [],
+                "pushed_count": 0,
+                "last_ack": None,
+            }
 
         base_rev = self.revision_now()
         last_ack: dict[str, Any] | None = None
@@ -687,6 +688,10 @@ class ManagerWsServer:
         asyncio.create_task(
             bootstrap_gateway_log_masking(get_db_handler(), jiuwenclaw_id),
             name=f"log_masking_bootstrap:{jiuwenclaw_id}",
+        )
+        asyncio.create_task(
+            bootstrap_gateway_templates(get_db_handler(), jiuwenclaw_id),
+            name=f"template_bootstrap:{jiuwenclaw_id}",
         )
 
 

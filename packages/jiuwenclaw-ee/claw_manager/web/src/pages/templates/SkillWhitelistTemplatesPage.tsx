@@ -1,7 +1,7 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useAsync } from '../../hooks/useAsync';
-import { useDebouncedValue } from '../../hooks/useDebouncedValue';
+import { useListSearch } from '../../hooks/useListSearch';
 import { SkillWhitelistTemplateApi, ApiError } from '../../services/api';
 import type { SkillWhitelistTemplate } from '../../types';
 import { Empty } from '../../components/Empty';
@@ -9,31 +9,67 @@ import { Pagination } from '../../components/Pagination';
 import { ConfirmDialog } from '../../components/ConfirmDialog';
 import { Switch } from '../../components/Switch';
 import { TableColumnFilter } from '../../components/TableColumnFilter';
+import {
+  TableColumnSort,
+  type ColumnSortValue,
+} from '../../components/TableColumnSort';
+import { ListSearchInput } from '../../components/ListSearchInput';
 import { SkillWhitelistTemplateModal } from './SkillWhitelistTemplateModal';
 import { toast } from '../../stores/uiStore';
 import { formatTime, truncate } from '../../utils/format';
+
+type SkillWhitelistTemplateSortField =
+  | 'template_name'
+  | 'description'
+  | 'skill_source'
+  | 'skill_id'
+  | 'skill_version'
+  | 'updated_at';
 
 export function SkillWhitelistTemplatesPage() {
   const { t } = useTranslation();
   const [page, setPage] = useState(1);
   const [pageSize] = useState(20);
-  const [searchInput, setSearchInput] = useState('');
-  const debouncedSearch = useDebouncedValue(searchInput, 700);
+  const { searchInput, setSearchInput, searchQuery } = useListSearch();
   const [enabledFilter, setEnabledFilter] = useState<string>('');
+  const [sortBy, setSortBy] = useState<SkillWhitelistTemplateSortField | ''>('');
+  const [sortOrder, setSortOrder] = useState<'asc' | 'desc'>('asc');
+
+  const sortOptions = useMemo(
+    () => [
+      { value: 'asc' as const, label: t('common.sortAsc') },
+      { value: 'desc' as const, label: t('common.sortDesc') },
+      { value: '' as const, label: t('common.sortDefault') },
+    ],
+    [t],
+  );
+
+  const handleSortChange = (field: SkillWhitelistTemplateSortField, value: ColumnSortValue) => {
+    if (value === '') {
+      setSortBy('');
+      setSortOrder('asc');
+    } else {
+      setSortBy(field);
+      setSortOrder(value);
+    }
+    setPage(1);
+  };
 
   useEffect(() => {
     setPage(1);
-  }, [debouncedSearch]);
+  }, [searchQuery]);
 
   const { data, loading, error, reload } = useAsync(
     () =>
       SkillWhitelistTemplateApi.list({
         page,
         page_size: pageSize,
-        search: debouncedSearch.trim() || undefined,
+        search: searchQuery,
         enabled: enabledFilter === '' ? undefined : enabledFilter === 'true',
+        sort_by: sortBy || undefined,
+        sort_order: sortBy ? sortOrder : undefined,
       }),
-    [page, pageSize, debouncedSearch, enabledFilter]
+    [page, pageSize, searchQuery, enabledFilter, sortBy, sortOrder]
   );
 
   const [items, setItems] = useState<SkillWhitelistTemplate[]>([]);
@@ -79,11 +115,10 @@ export function SkillWhitelistTemplatesPage() {
           <div className="page-subtitle">{t('skillWhitelistTemplate.subtitle')}</div>
         </div>
         <div className="flex items-center gap-2">
-          <input
-            className="input !w-[38rem]"
-            placeholder={t('skillWhitelistTemplate.searchPlaceholder')}
+          <ListSearchInput
             value={searchInput}
-            onChange={(e) => setSearchInput(e.target.value)}
+            onChange={setSearchInput}
+            placeholder={t('skillWhitelistTemplate.searchPlaceholder')}
           />
           <button className="btn sm" onClick={() => void reload()}>
             {t('common.refresh')}
@@ -109,11 +144,46 @@ export function SkillWhitelistTemplatesPage() {
           <table className="table">
             <thead>
               <tr>
-                <th>{t('skillWhitelistTemplate.templateName')}</th>
-                <th>{t('skillWhitelistTemplate.templateDescription')}</th>
-                <th>{t('skillWhitelistTemplate.skillSource')}</th>
-                <th>{t('skillWhitelistTemplate.skillId')}</th>
-                <th>{t('skillWhitelistTemplate.skillVersion')}</th>
+                <th>
+                  <TableColumnSort
+                    label={t('skillWhitelistTemplate.templateName')}
+                    value={sortBy === 'template_name' ? sortOrder : ''}
+                    options={sortOptions}
+                    onChange={(value) => handleSortChange('template_name', value)}
+                  />
+                </th>
+                <th>
+                  <TableColumnSort
+                    label={t('skillWhitelistTemplate.templateDescription')}
+                    value={sortBy === 'description' ? sortOrder : ''}
+                    options={sortOptions}
+                    onChange={(value) => handleSortChange('description', value)}
+                  />
+                </th>
+                <th>
+                  <TableColumnSort
+                    label={t('skillWhitelistTemplate.skillSource')}
+                    value={sortBy === 'skill_source' ? sortOrder : ''}
+                    options={sortOptions}
+                    onChange={(value) => handleSortChange('skill_source', value)}
+                  />
+                </th>
+                <th>
+                  <TableColumnSort
+                    label={t('skillWhitelistTemplate.skillId')}
+                    value={sortBy === 'skill_id' ? sortOrder : ''}
+                    options={sortOptions}
+                    onChange={(value) => handleSortChange('skill_id', value)}
+                  />
+                </th>
+                <th>
+                  <TableColumnSort
+                    label={t('skillWhitelistTemplate.skillVersion')}
+                    value={sortBy === 'skill_version' ? sortOrder : ''}
+                    options={sortOptions}
+                    onChange={(value) => handleSortChange('skill_version', value)}
+                  />
+                </th>
                 <th>
                   <TableColumnFilter
                     label={t('common.enabled')}
@@ -129,7 +199,14 @@ export function SkillWhitelistTemplatesPage() {
                     }}
                   />
                 </th>
-                <th>{t('skillWhitelistTemplate.updatedAt')}</th>
+                <th>
+                  <TableColumnSort
+                    label={t('skillWhitelistTemplate.updatedAt')}
+                    value={sortBy === 'updated_at' ? sortOrder : ''}
+                    options={sortOptions}
+                    onChange={(value) => handleSortChange('updated_at', value)}
+                  />
+                </th>
                 <th>{t('common.actions')}</th>
               </tr>
             </thead>

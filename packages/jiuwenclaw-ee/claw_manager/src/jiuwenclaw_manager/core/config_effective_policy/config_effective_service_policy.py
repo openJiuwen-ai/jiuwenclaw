@@ -8,9 +8,10 @@ from typing import Any
 from openjiuwen_runtime.foundation.db.handler import DBHandler
 
 from jiuwenclaw_manager.core.instance.instance_service import get_instance_row
-from jiuwenclaw_manager.infrastructure.utils import iso_datetime, utc_now
+from jiuwenclaw_manager.infrastructure.utils import iso_datetime, new_uuid4, utc_now
 from jiuwenclaw_manager.manager_ws_server.server import push_config_op
 from jiuwenclaw_manager.models.config_effective_policy_models import (
+    CONFIG_EFFECTIVE_AGENT_POLICY_TABLE_DEF,
     CONFIG_EFFECTIVE_SERVICE_POLICY_TABLE_DEF,
 )
 from jiuwenclaw_manager.core.config_effective_policy.template_ref import (
@@ -25,6 +26,49 @@ from jiuwenclaw_manager.schemas.config_effective_policy_schemas import (
 )
 
 _SERVICE_POLICY_TABLE = CONFIG_EFFECTIVE_SERVICE_POLICY_TABLE_DEF.table_name
+_AGENT_POLICY_TABLE = CONFIG_EFFECTIVE_AGENT_POLICY_TABLE_DEF.table_name
+_LIST_ALL_CAP = 10_000
+# order_by 元组第二项为 is_desc（True=降序），与 SQLAlchemyHandler.list_records 一致。
+_DEFAULT_ORDER_BY: list[tuple[str, bool]] = [("priority", False), ("updated_at", False)]
+_ALLOWED_SORT_FIELDS = frozenset({
+    "policy_name",
+    "policy_desc",
+    "priority",
+    "match_expr",
+    "service_id",
+    "updated_at",
+})
+
+
+def _resolve_order_by(
+    sort_by: str | None,
+    sort_order: str | None,
+) -> list[tuple[str, bool]]:
+    field = (sort_by or "").strip()
+    order = (sort_order or "").strip().lower()
+    if not field or not order:
+        return list(_DEFAULT_ORDER_BY)
+    if field not in _ALLOWED_SORT_FIELDS or order not in {"asc", "desc"}:
+        return list(_DEFAULT_ORDER_BY)
+    is_desc = order == "desc"
+    if field == "priority":
+        return [(field, is_desc), ("updated_at", is_desc)]
+    return [(field, is_desc), ("id", is_desc)]
+
+
+def _matches_search(row: Any, query: str) -> bool:
+    needle = query.strip().lower()
+    if not needle:
+        return True
+    fields = [
+        str(getattr(row, "policy_id", "") or ""),
+        str(getattr(row, "policy_name", "") or ""),
+        str(getattr(row, "policy_desc", "") or ""),
+        str(getattr(row, "service_id", "") or ""),
+        str(getattr(row, "priority", "") or ""),
+        str(getattr(row, "match_expr", "") or ""),
+    ]
+    return any(needle in field.lower() for field in fields)
 
 
 async def push_config_effective_service_policy_op(
@@ -32,15 +76,15 @@ async def push_config_effective_service_policy_op(
     op: str,
     *,
     policy: dict[str, Any] | None = None,
-    policy_id: int | None = None,
+    row_id: int | None = None,
     updates: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """推送 Service 层级配置生效策略变更（``config.config_effective_service_policies``），返回 config.ack payload。"""
     payload: dict[str, Any] = {"op": op}
     if policy is not None:
         payload["policy"] = policy
-    if policy_id is not None:
-        payload["policy_id"] = policy_id
+    if row_id is not None:
+        payload["id"] = row_id
     if updates is not None:
         payload["updates"] = updates
     return await push_config_op(
@@ -56,8 +100,11 @@ def _service_policy_pk(jiuwenclaw_id: str, policy_id: int) -> dict[str, Any]:
 def _row_to_out(row: Any) -> ConfigEffectiveServicePolicyOut:
     return ConfigEffectiveServicePolicyOut(
         id=row.id,
-        service_id=row.service_id,
         jiuwenclaw_id=row.jiuwenclaw_id,
+        policy_id=row.policy_id,
+        policy_name=row.policy_name,
+        policy_desc=row.policy_desc,
+        service_id=row.service_id,
         priority=row.priority,
         match_expr=row.match_expr,
         template_ref=read_template_ref_from_row(row),
@@ -85,6 +132,9 @@ class ConfigEffectiveServicePolicyService:
         """构建经 WebSocket 下发给 Gateway 的 policy 对象（不含 id，由 Gateway 自增）。"""
         return {
             "jiuwenclaw_id": row["jiuwenclaw_id"],
+            "policy_id": row["policy_id"],
+            "policy_name": row.get("policy_name"),
+            "policy_desc": row.get("policy_desc"),
             "service_id": row["service_id"],
             "priority": row["priority"],
             "match_expr": row.get("match_expr"),
@@ -104,8 +154,11 @@ class ConfigEffectiveServicePolicyService:
 
         now = utc_now()
         row = {
-            "service_id": body.service_id.strip(),
             "jiuwenclaw_id": normalized,
+            "policy_id": new_uuid4(),
+            "policy_name": body.policy_name,
+            "policy_desc": body.policy_desc,
+            "service_id": body.service_id.strip(),
             "priority": body.priority,
             "match_expr": body.match_expr,
             "template_ref": normalize_template_ref(body.template_ref),
@@ -120,17 +173,17 @@ class ConfigEffectiveServicePolicyService:
             policy=self._policy_dict_for_push(row, now=now),
         )
         ack_result = ack.get("result") if isinstance(ack, dict) else None
-        policy_id: int | None = None
+        row_id: int | None = None
         if isinstance(ack_result, dict):
-            raw_id = ack_result.get("policy_id")
+            raw_id = ack_result.get("id")
             if raw_id is not None:
-                policy_id = int(raw_id)
-        if policy_id is None or policy_id < 1:
+                row_id = int(raw_id)
+        if row_id is None or row_id < 1:
             raise ValueError(
-                "gateway config_effective_service_policies.create returned no policy_id"
+                "gateway config_effective_service_policies.create returned no id"
             )
 
-        payload = {**row, "id": policy_id}
+        payload = {**row, "id": row_id}
         created = await self._handler.create(_SERVICE_POLICY_TABLE, payload)
         return _row_to_out(created)
 
@@ -152,6 +205,9 @@ class ConfigEffectiveServicePolicyService:
         page: int,
         page_size: int,
         enabled: bool | None,
+        search: str | None = None,
+        sort_by: str | None = None,
+        sort_order: str | None = None,
     ) -> dict[str, Any]:
         normalized = await self._validate_jiuwenclaw_id(jiuwenclaw_id)
         page = max(page, 1)
@@ -159,10 +215,36 @@ class ConfigEffectiveServicePolicyService:
         filters: dict[str, Any] = {"jiuwenclaw_id": normalized}
         if enabled is not None:
             filters["enabled"] = enabled
+        order_by = _resolve_order_by(sort_by, sort_order)
+
+        search_query = (search or "").strip()
+        if search_query:
+            rows = await self._handler.list_records(
+                _SERVICE_POLICY_TABLE,
+                filters,
+                limit=_LIST_ALL_CAP,
+                offset=0,
+                order_by=order_by,
+            )
+            rows = [row for row in rows if _matches_search(row, search_query)]
+            total = len(rows)
+            offset = (page - 1) * page_size
+            page_rows = rows[offset:offset + page_size]
+            items = [_row_to_out(row).model_dump(mode="json") for row in page_rows]
+            return {
+                "items": items,
+                "total": total,
+                "page": page,
+                "page_size": page_size,
+            }
 
         offset = (page - 1) * page_size
         rows = await self._handler.list_records(
-            _SERVICE_POLICY_TABLE, filters, limit=page_size, offset=offset
+            _SERVICE_POLICY_TABLE,
+            filters,
+            limit=page_size,
+            offset=offset,
+            order_by=order_by,
         )
         total = await self._handler.count_records(_SERVICE_POLICY_TABLE, filters)
         items = [_row_to_out(r).model_dump(mode="json") for r in rows]
@@ -201,7 +283,7 @@ class ConfigEffectiveServicePolicyService:
         await push_config_effective_service_policy_op(
             normalized,
             "update",
-            policy_id=policy_id,
+            row_id=policy_id,
             updates=updates,
         )
         payload = dict(updates)
@@ -226,10 +308,18 @@ class ConfigEffectiveServicePolicyService:
         )
         if row is None:
             return False
+        linked_count = await self._handler.count_records(
+            _AGENT_POLICY_TABLE,
+            {"jiuwenclaw_id": normalized, "service_policy_id": row.policy_id},
+        )
+        if linked_count > 0:
+            raise ValueError(
+                f"cannot delete service policy: {linked_count} linked agent policies exist"
+            )
         await push_config_effective_service_policy_op(
             normalized,
             "delete",
-            policy_id=policy_id,
+            row_id=policy_id,
         )
         return await self._handler.delete(
             _SERVICE_POLICY_TABLE, _service_policy_pk(normalized, policy_id)

@@ -29,6 +29,9 @@ _utils = _load_manager_ws_utils()
 _gateway_db_mod = import_manager_ws_client_module("core.enterprise_config.gateway_db")
 GatewayDb = _gateway_db_mod.GatewayDb
 expressions = import_manager_ws_client_module("core.enterprise_config.expressions")
+routing_id = import_manager_ws_client_module("core.enterprise_config.routing_id")
+loader = import_manager_ws_client_module("core.enterprise_config.loader")
+resolve_policy_field = loader.resolve_policy_field
 
 
 def _bind_gateway_db(monkeypatch: pytest.MonkeyPatch, jiuwenclaw_id: str) -> GatewayDb:
@@ -392,6 +395,7 @@ async def test_load_effective_config_fills_missing_slots_from_global(
                 {
                     "id": 1,
                     "jiuwenclaw_id": jid,
+                    "policy_id": "sp-demo-sales-policy-id",
                     "match_expr": "group_id == 'g_demo_sales'",
                     "template_ref": {
                         "default_model": [m2],
@@ -408,6 +412,7 @@ async def test_load_effective_config_fills_missing_slots_from_global(
                 {
                     "id": 10,
                     "jiuwenclaw_id": jid,
+                    "service_policy_id": "sp-demo-sales-policy-id",
                     "agent_id": "${user_id}",
                     "match_expr": "",
                     "template_ref": {
@@ -572,6 +577,7 @@ async def test_load_service_config_returns_resolved_service_and_agent_id(
                 {
                     "id": 1,
                     "jiuwenclaw_id": jid,
+                    "policy_id": "sp-demo-sales-policy-id",
                     "service_id": "${group_id}::${bot_id}",
                     "match_expr": "group_id == 'g_demo_sales'",
                     "template_ref": {"service_config": [s1]},
@@ -584,6 +590,7 @@ async def test_load_service_config_returns_resolved_service_and_agent_id(
                 {
                     "id": 10,
                     "jiuwenclaw_id": jid,
+                    "service_policy_id": "sp-demo-sales-policy-id",
                     "agent_id": "${user_id}",
                     "match_expr": "user_id == 'alice'",
                     "send_file_allowed": True,
@@ -649,4 +656,118 @@ async def test_load_service_config_returns_resolved_service_and_agent_id(
     assert bob_loaded is not None
     assert bob_loaded.service_id == "g_demo_sales::bot_main"
     assert bob_loaded.agent_id is None
-    assert bob_loaded.send_file_allowed is True
+    assert bob_loaded.send_file_allowed is False
+
+
+def test_policy_match_order_by_uses_priority_then_updated_at() -> None:
+    assert loader.POLICY_MATCH_ORDER_BY == [
+        ("priority", True),
+        ("updated_at", True),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_load_effective_config_prefers_newer_rule_at_same_priority(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """同 priority 时 updated_at 更新的 service 规则优先匹配。"""
+    jid = "order-demo"
+    db = _bind_gateway_db(monkeypatch, jid)
+    captured: list[str] = []
+
+    async def _list_records(
+        table: str,
+        *,
+        filters: dict | None = None,
+        order_by: str = "",
+    ) -> list[dict]:
+        if table == "config_effective_service_policy":
+            captured.append(order_by)
+            return [
+                {
+                    "id": 2,
+                    "jiuwenclaw_id": jid,
+                    "policy_id": "sp-new",
+                    "priority": 50,
+                    "updated_at": "2026-06-01T00:00:00",
+                    "match_expr": "group_id == 'g_demo_sales'",
+                    "template_ref": {"default_model": ["new-model"]},
+                },
+                {
+                    "id": 1,
+                    "jiuwenclaw_id": jid,
+                    "policy_id": "sp-old",
+                    "priority": 50,
+                    "updated_at": "2026-01-01T00:00:00",
+                    "match_expr": "group_id == 'g_demo_sales'",
+                    "template_ref": {"default_model": ["old-model"]},
+                },
+            ]
+        if table == "config_effective_global_policy":
+            return []
+        return []
+
+    async def _fetch_template(_slot: str, template_id: str) -> dict | None:
+        return {"template_id": template_id, "model_id": template_id}
+
+    _patch_gateway_queries(
+        monkeypatch,
+        db,
+        list_records=_list_records,
+        fetch_template_by_slot=_fetch_template,
+    )
+
+    request = AgentRequest(
+        request_id="req-order",
+        params={
+            "group_id": "g_demo_sales",
+            "bot_id": "bot_main",
+            "user_id": "alice",
+        },
+    )
+    loaded = await load_effective_enterprise_config(
+        request,
+        [TemplateRefSlot.DEFAULT_MODEL],
+    )
+    assert captured == [[("priority", True), ("updated_at", True)]]
+    assert loaded is not None
+    assert loaded.service_policy_id == "sp-new"
+    assert loaded.models["default_model"][0]["model_id"] == "new-model"
+
+
+def test_validate_routing_id_accepts_fixed_and_placeholders() -> None:
+    assert routing_id.validate_routing_id("sales_pool_v1") == "sales_pool_v1"
+    assert routing_id.validate_routing_id("${user_id}") == "${user_id}"
+    assert (
+        routing_id.validate_routing_id("${group_id}::${bot_id}")
+        == "${group_id}::${bot_id}"
+    )
+
+
+@pytest.mark.parametrize(
+    "value",
+    ["$(user_)", "${user_}", "${service_id}", "$user_id", "a${unknown}b"],
+)
+def test_validate_routing_id_rejects_invalid_dollar(value: str) -> None:
+    with pytest.raises(ValueError, match="invalid routing id placeholder"):
+        routing_id.validate_routing_id(value)
+
+
+def test_resolve_policy_field_fallback_to_raw_when_substitution_empty(
+    sales_ctx: RoutingContext,
+) -> None:
+    policy = {"service_id": "${user_}"}
+    assert (
+        resolve_policy_field(policy, "service_id", sales_ctx) == "${user_}"
+    )
+
+
+def test_resolve_policy_field_substitutes_known_placeholder(
+    sales_ctx: RoutingContext,
+) -> None:
+    policy = {"service_id": "${group_id}::${bot_id}"}
+    assert (
+        resolve_policy_field(policy, "service_id", sales_ctx)
+        == "g_demo_sales::bot_main"
+    )
+

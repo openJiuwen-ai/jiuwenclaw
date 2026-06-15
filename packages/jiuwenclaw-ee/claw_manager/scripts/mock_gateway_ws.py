@@ -56,12 +56,10 @@ def _fetch_instance_ids() -> list[str]:
     return [str(it["jiuwenclaw_id"]) for it in items if it.get("jiuwenclaw_id")]
 
 
-_SECTIONS_RETURNING_POLICY_ID = {
+_SECTIONS_RETURNING_ROW_ID = {
     "config_effective_service_policies",
     "config_effective_global_policies",
     "config_effective_agent_policies",
-}
-_SECTIONS_RETURNING_MAPPING_ID = {
     "config_default_template_mappings",
 }
 
@@ -75,12 +73,9 @@ def _build_ack_result(config: dict[str, Any], counters: dict[str, int]) -> dict[
         op = body.get("op")
         if op != "create":
             continue
-        if section in _SECTIONS_RETURNING_POLICY_ID:
+        if section in _SECTIONS_RETURNING_ROW_ID:
             counters[section] = counters.get(section, 0) + 1
-            result["policy_id"] = counters[section]
-        elif section in _SECTIONS_RETURNING_MAPPING_ID:
-            counters[section] = counters.get(section, 0) + 1
-            result["mapping_id"] = counters[section]
+            result["id"] = counters[section]
     return result
 
 
