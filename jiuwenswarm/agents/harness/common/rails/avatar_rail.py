@@ -12,7 +12,7 @@ from __future__ import annotations
 from openjiuwen.core.foundation.llm import ToolMessage
 from openjiuwen.core.single_agent.rail.base import AgentCallbackContext
 from openjiuwen.harness.prompts import PromptSection
-from openjiuwen.harness.prompts.prompt_attachment_manager import (
+from jiuwenswarm.agents.harness.common.prompt_attachment_compat import (
     PromptAttachmentKind,
     PromptAttachmentScope,
 )

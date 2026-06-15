@@ -51,7 +51,7 @@ from openjiuwen.harness import (
 )
 from openjiuwen.harness.factory import create_deep_agent
 from openjiuwen.harness.prompts import resolve_language
-from openjiuwen.harness.prompts.prompt_attachment_manager import PromptAttachmentScope
+from jiuwenswarm.agents.harness.common.prompt_attachment_compat import PromptAttachmentScope
 from openjiuwen.harness.rails import (
     SkillUseRail,
     TaskPlanningRail,

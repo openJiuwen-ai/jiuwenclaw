@@ -15,9 +15,11 @@ from typing import Any, Iterable
 
 from openjiuwen.harness.prompts.prompt_attachment_manager import (
     PromptAttachment,
+    PromptAttachmentUpdate,
+)
+from jiuwenswarm.agents.harness.common.prompt_attachment_compat import (
     PromptAttachmentKind,
     PromptAttachmentScope,
-    PromptAttachmentUpdate,
 )
 
 
