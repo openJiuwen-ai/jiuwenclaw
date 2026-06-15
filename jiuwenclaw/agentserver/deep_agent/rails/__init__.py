@@ -13,11 +13,13 @@ from jiuwenclaw.agentserver.deep_agent.rails.team_member_skill_toolkit_rail impo
     MemberSkillToolkitRail,
 )
 from jiuwenclaw.agentserver.deep_agent.rails.stream_event_rail import JiuClawStreamEventRail
+from jiuwenclaw.agentserver.deep_agent.rails.context_overflow_recovery_rail import ContextOverflowRecoveryRail
 from jiuwenclaw.agentserver.deep_agent.rails.task_execution_rail import TaskExecutionRail
 
 __all__ = [
     "JiuClawContextEngineeringRail",
     "JiuClawStreamEventRail",
+    "ContextOverflowRecoveryRail",
     "TaskExecutionRail",
     "PermissionInterruptRail",
     "AvatarPromptRail",

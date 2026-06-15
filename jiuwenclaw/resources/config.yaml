@@ -383,6 +383,17 @@ react:
       # offload_message_type: ["tool"]       # 当前仅支持 tool
       # messages_threshold: null             # 备用消息计数阈值；当前主走 tokens 路径
       # messages_to_keep: null               # 备用：保留尾部 N 条不动
+      adaptive_per_tool_budget: true         # S5: 启用按工具信息密度自适应预算；效果1—按密度分配每工具token预算，效果2—排序时低密度工具优先 offload
+      density_profiles:                      # S5: Budget 专用密度配置（tools 分类须与 micro_compact 一致）
+        high:                                # 高密度：预算权重放大，分得更多token份额
+          tools: [web_search, grep, glob, list_files, list_directory, free_search, mcp_free_search]
+          budget_multiplier: 2.0
+        medium:                              # 中密度：基准
+          tools: [read_file, fetch_webpage, mcp_fetch_webpage]
+          budget_multiplier: 1.0
+        low:                                 # 低密度：预算权重缩小，优先被offload
+          tools: [bash, shell, exec, mcp_exec_command, spawn_subagent]
+          budget_multiplier: 0.4
 
     micro_compact_processor_config:
       # 同一工具调用次数 > trigger_threshold + keep_recent_per_tool 时，
@@ -395,14 +406,45 @@ react:
       # 提醒：bash 输出常含执行证据（错误堆栈、产物路径），spawn_subagent 是已消耗 token 的成果，
       # 折叠后无法回溯。本配置纳入是基于 relay-claw 实测 bash/spawn_subagent 多用于查询性命令、
       # 单条体积大且压缩收益高；如果你的场景里 bash 主要做有副作用的执行，请把它移出白名单。
-      # 源码默认 ["grep","glob","read_file","web_search","web_fetch"] 是 Claude Code 命名空间，
-      # relay-claw / jiuwenclaw 不使用这些名字，故白名单只列本 harness 实际命名空间下的工具。
       compactable_tool_names:
         - fetch_webpage
         - mcp_fetch_webpage
         - web_search
         - bash
+        - shell
+        - exec
+        - mcp_exec_command
         - spawn_subagent
+        - grep
+        - glob
+        - list_files
+        - list_directory
+        - free_search
+        - mcp_free_search
+        - read_file
+      adaptive_per_tool_budget: true         # S5: 启用按工具信息密度自适应 keep 条数
+      density_profiles:                      # S5: MicroCompact 专用密度配置（tools 分类须与 tool_result_budget 一致）
+        high:                                # 高密度：输出紧凑、信息丰富（搜索结果、文件列表），多保留
+          tools: [web_search, grep, glob, list_files, list_directory, free_search, mcp_free_search]
+          keep_recent_per_tool: 15
+        medium:                              # 中密度：代码/网页内容，信息密度中等
+          tools: [read_file, fetch_webpage, mcp_fetch_webpage]
+          keep_recent_per_tool: 10
+        low:                                 # 低密度：冗长输出（命令日志、子agent），优先压缩
+          tools: [bash, shell, exec, mcp_exec_command, spawn_subagent]
+          keep_recent_per_tool: 5            # S3实现后可降至2~3
+
+    tool_result_dedup_processor_config:
+      # S8: 工具结果语义去重与错误折叠
+      # 当同一工具的多次调用产生重复结果时，自动折叠/去重以节省上下文 token
+      error_folding: true                    # S8a: 启用错误结果折叠（连续失败→旧错误折叠为标记，最新完整保留）
+      error_fold_min_consecutive: 2          # 同一工具连续≥N次错误才触发折叠
+      # error_pattern_max_length: 100        # 错误模式摘要最大字符数
+      success_dedup: true                    # S8b: 启用成功结果语义去重（完全相同→引用标记，高重叠→差异提取）
+      # dedup_similarity_threshold: 0.85     # 行级Jaccard相似度阈值，≥此值视为高重叠
+      # dedup_window_per_tool: 20            # 每工具去重窗口：只在最近N条结果中查找重复
+      # dedup_max_content_length: 50000      # 超过此长度的结果不做去重比较（避免性能开销）
+      # dedup_max_diff_chars: 500            # 高重叠时差异部分最大字符数
 
     full_compact_processor_config:
       # 整窗口 token 超阈值时，调一次 LLM 把历史压成

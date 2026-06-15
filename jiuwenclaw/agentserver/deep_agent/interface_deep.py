@@ -128,6 +128,7 @@ from jiuwenclaw.agentserver.deep_agent.prompt_builder import build_identity_prom
 from jiuwenclaw.agentserver.deep_agent.rails import (
     JiuClawContextEngineeringRail,
     JiuClawStreamEventRail,
+    ContextOverflowRecoveryRail,
     ResponsePromptRail,
     RuntimePromptRail,
     SkillComplianceRail,
@@ -737,6 +738,7 @@ def _deep_agent_context_engine_config(react_cfg: dict[str, Any] | None) -> Conte
 _CHAIN_B_OPTIONAL_PROCESSORS: Tuple[Tuple[str, str], ...] = (
     ("tool_result_budget_processor_config", "ToolResultBudgetProcessor"),
     ("micro_compact_processor_config", "MicroCompactProcessor"),
+    ("tool_result_dedup_processor_config", "ToolResultDedupProcessor"),
     ("full_compact_processor_config", "FullCompactProcessor"),
 )
 
@@ -903,6 +905,7 @@ class JiuWenClawDeepAdapter:
         self._filesystem_rail: FileSystemRail | None = None
         self._skill_rail: SkillUseRail | None = None
         self._stream_event_rail: JiuClawStreamEventRail | None = None
+        self._context_overflow_recovery_rail: ContextOverflowRecoveryRail | None = None
         self._task_execution_rail: TaskExecutionRail | None = None
         self._task_planning_rail: TaskPlanningRail | None = None
         self._context_engineering_rail: ContextEngineeringRail | None = None
@@ -1808,6 +1811,17 @@ class JiuWenClawDeepAdapter:
         return stream_event_rail
 
     @staticmethod
+    def _build_context_overflow_recovery_rail() -> ContextOverflowRecoveryRail | None:
+        """Build ContextOverflowRecoveryRail."""
+        try:
+            recovery_rail = ContextOverflowRecoveryRail(max_recovery_attempts=3)
+            logger.info("[JiuWenClawDeepAdapter] ContextOverflowRecoveryRail create success")
+        except Exception as exc:
+            logger.warning("[JiuWenClawDeepAdapter] ContextOverflowRecoveryRail create failed: %s", exc)
+            recovery_rail = None
+        return recovery_rail
+
+    @staticmethod
     def _build_task_execution_rail() -> TaskExecutionRail | None:
         """Build TaskExecutionRail."""
         try:
@@ -2165,6 +2179,7 @@ class JiuWenClawDeepAdapter:
             _RailBuildInfo("_runtime_prompt_rail", self._build_runtime_prompt_rail),
             _RailBuildInfo("_response_prompt_rail", self._build_response_prompt_rail),
             _RailBuildInfo("_task_execution_rail", self._build_task_execution_rail),
+            _RailBuildInfo("_context_overflow_recovery_rail", self._build_context_overflow_recovery_rail),
             _RailBuildInfo("_stream_event_rail", self._build_stream_event_rail),
             _RailBuildInfo("_task_planning_rail", self._build_task_planning_rail, {"config": config_base}),
             _RailBuildInfo("_security_rail", self._build_security_rail),
