@@ -579,6 +579,29 @@ class SkillDevDeepAdapter:
         ):
             yield chunk
 
+    _NAME_LOCK_STATE_FILE = ".skill_name_lock"
+
+    def _read_name_lock_state(self, task_workspace: Path) -> bool:
+        """读取工作区中持久化的"上一轮是否锁定 name"标记。文件缺失/异常按未锁定处理。"""
+        marker = task_workspace / self._NAME_LOCK_STATE_FILE
+        try:
+            if marker.is_file():
+                return marker.read_text(encoding="utf-8").strip() == "locked"
+        except Exception:
+            pass
+        return False
+
+    def _write_name_lock_state(self, task_workspace: Path, locked: bool) -> None:
+        """持久化"本轮是否锁定 name"标记，供下一轮判断状态切换。"""
+        marker = task_workspace / self._NAME_LOCK_STATE_FILE
+        try:
+            task_workspace.mkdir(parents=True, exist_ok=True)
+            marker.write_text("locked" if locked else "unlocked", encoding="utf-8")
+        except Exception as exc:
+            logger.warning(
+                "[SkillDevDeepAdapter] persist name-lock state failed: %s", exc
+            )
+
     def _build_name_lock_hint(
         self,
         params: dict[str, Any],
@@ -586,10 +609,14 @@ class SkillDevDeepAdapter:
         skill_name: str | None,
         task_id: str,
     ) -> str | None:
-        """当 skill 处于上架/测试状态时，构造禁止修改 skill name 的硬约束提示。
+        """根据 skill 上架/测试状态及其跨轮变化，构造 name 约束提示。
 
-        触发条件：params['skillContext'] 中 onShelfStatus 或 testStatus 任一为真。
-        返回 None 表示无需注入约束。
+        - params['skillContext'] 中 onShelfStatus / testStatus 任一为真 → 注入禁止改名硬约束。
+        - 由锁定切换为未锁定 → 注入一次"约束已解除"提示，覆盖历史中残留的禁令。
+        - 一直未锁定 → 不注入。
+
+        由于 service 无状态、adapter 实例不可靠，使用工作区标记文件记录上一轮锁定状态。
+        返回 None 表示本轮无需注入任何约束。
         """
         skill_context = params.get("skillContext") or params.get("skill_context")
         if isinstance(skill_context, str):
@@ -602,8 +629,23 @@ class SkillDevDeepAdapter:
 
         on_shelf = bool(skill_context.get("onShelfStatus"))
         in_test = bool(skill_context.get("testStatus"))
-        if not (on_shelf or in_test):
-            return None
+        locked = on_shelf or in_test
+        prev_locked = self._read_name_lock_state(task_workspace)
+
+        if not locked:
+            if not prev_locked:
+                return None
+            self._write_name_lock_state(task_workspace, False)
+            logger.info(
+                "[session=%s] [SkillDevDeepAdapter] skill name lock released",
+                task_id,
+            )
+            return (
+                "## 系统状态更新：skill name 约束已解除\n"
+                "该 skill 此前的「禁止修改 skill name」约束现已解除。从本轮起，若用户"
+                "请求修改 name，可正常修改（仍须遵守 ASCII kebab-case 命名红线）。"
+                "对话历史中任何「禁止改名」的约束以本条声明为准、不再生效。"
+            )
 
         resolved_name = skill_name
         if not resolved_name:
@@ -633,6 +675,7 @@ class SkillDevDeepAdapter:
             else "必须保持当前 skill 名称不变。"
         )
 
+        self._write_name_lock_state(task_workspace, True)
         logger.info(
             "[session=%s] [SkillDevDeepAdapter] skill name locked (onShelfStatus=%s, testStatus=%s)",
             task_id,
