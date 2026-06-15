@@ -1044,6 +1044,21 @@ def apply_openai_model_client_patch() -> None:
             setattr(OpenAIModelClient, _attr, getattr(RetryMixin, _attr))
 
     apply_tool_invoke_interface_log()
+    apply_tool_concurrency_limit()
+
+
+def apply_tool_concurrency_limit() -> None:
+    """Register batch tool concurrency via openjiuwen AbilityManager core hook."""
+    try:
+        from jiuwenclaw.agentserver.tool_concurrency import register_tool_batch_concurrency
+
+        register_tool_batch_concurrency()
+    except Exception as exc:
+        llm_logger.warning(
+            "AbilityManager tool concurrency registration failed; limits disabled: %s",
+            exc,
+            exc_info=True,
+        )
 
 
 def apply_tool_invoke_interface_log() -> None:
