@@ -344,6 +344,13 @@ react:
     # 都保留 [ACTIVE SKILL BODY]；为 1 时再 load 会驱逐前一个（trace 里 [ACTIVE SKILL EVICTED]）。
     # max_active_skill_bodies: 1
 
+    # 同轮多个受控 tool 的批次内并发
+    concurrency:
+      enabled: true
+      tool_limits:
+        spawn_subagent: 5
+        web_search: 10
+
     # ============ 一键切链（链 B 默认 / 链 A 备选）============
     # 当前：链 B = SessionMemory + ToolResultBudget + MicroCompact + FullCompact
     # 切链 A = MessageSummaryOffloader + DialogueCompressor + CurrentRoundCompressor + RoundLevelCompressor
