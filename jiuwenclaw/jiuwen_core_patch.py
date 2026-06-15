@@ -20,8 +20,7 @@ from openjiuwen.core.foundation.llm.model_clients.siliconflow_model_client impor
     SiliconFlowModelClient,
 )
 from openjiuwen.core.session.stream import OutputSchema
-llm_logger = logging.getLogger("jiuwenclaw.app")
-
+llm_logger = logging.getLogger("jiuwenclaw.agentserver")
 # Session context for retry notifications.
 # Set by react_agent._call_llm_stream before calling llm.stream/invoke.
 _retry_session: ContextVar[Optional[Any]] = ContextVar("retry_session", default=None)
