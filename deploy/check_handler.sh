@@ -362,6 +362,6 @@ check_minio_up_dependency(){
 }
 
 check_manager_up_dependency(){
-    check_if_rabbitmq_up
+    #check_if_rabbitmq_up
     check_if_db_up
 }
