@@ -14,6 +14,9 @@ spec:
     - name: websocket
       port: <<MANAGER_WS_PORT>>
       targetPort: <<MANAGER_WS_PORT>>
+    - name: web
+      port: <<MANAGER_WEB_PORT>>
+      targetPort: <<MANAGER_WEB_PORT>>
   type: ClusterIP                             # 集群内部访问，不需要外网
 
 ---
@@ -30,6 +33,10 @@ spec:
       port: <<MANAGER_REST_PORT>>       # 集群内部端口
       targetPort: <<MANAGER_REST_PORT>> # 容器端口
       nodePort: <<MANAGER_NODE_PORT>>   # 外部访问端口（30000-32767）
+    - name: web
+      port: <<MANAGER_WEB_PORT>>        # 集群内部端口
+      targetPort: <<MANAGER_WEB_PORT>>  # 容器端口
+      nodePort: <<MANAGER_WEB_NODE_PORT>> # 外部访问端口（30000-32767）
   selector:
     app: <<MANAGER_NAME>>
 
@@ -57,9 +64,13 @@ spec:
           containerPort: <<MANAGER_REST_PORT>>
         - name: websocket
           containerPort: <<MANAGER_WS_PORT>>
+        - name: web
+          containerPort: <<MANAGER_WEB_PORT>>
         env:
         - name: MANAGER_RABBITMQ_URL
           value: "<<MANAGER_RABBITMQ_URL>>"
+        - name: MANAGER_REST_HOST
+          value: "0.0.0.0"
         - name: MANAGER_REST_PORT
           value: "<<MANAGER_REST_PORT>>"
         - name: MANAGER_DB_TYPE
@@ -82,3 +93,9 @@ spec:
           value: "0.0.0.0"
         - name: MANAGER_WS_PORT
           value: "<<MANAGER_WS_PORT>>"
+        - name: MANAGER_WEB_HOST
+          value: "0.0.0.0"
+        - name: MANAGER_WEB_PORT
+          value: "<<MANAGER_WEB_PORT>>"
+        - name: MANAGER_WEB_PROXY_TARGET
+          value: "http://127.0.0.1:<<MANAGER_REST_PORT>>"

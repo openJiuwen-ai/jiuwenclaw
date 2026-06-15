@@ -25,6 +25,10 @@ parse_args() {
                 DEPLOY_VARS["WEB_NODE_PORT"]="${args[$((i+1))]}"
                 i=$((i+2))
                 ;;
+            --manager-web-port)
+                DEPLOY_VARS["MANAGER_WEB_NODE_PORT"]="${args[$((i+1))]}"
+                i=$((i+2))
+                ;;
             -h|--help)
                 print_help
                 ;;
@@ -79,9 +83,10 @@ Modules (Optional):
   manager   CLAW Manager module
 
 Options:
-  -n NAMESPACE       Specify Kubernetes namespace (defaults to default if unspecified)
-  --web-port PORT    Set host port for web service (default: 8080)
-  -h, --help         Display this help message and exit
+  -n NAMESPACE              Specify Kubernetes namespace (defaults to default if unspecified)
+  --web-port PORT           Set host port for web service (default: 8080)
+  --manager-web-port PORT   Set host port for manager web UI (5273 in container)
+  -h, --help                Display this help message and exit
 
 Examples:
   ./$(basename "$0") up                                # Deploy default modules in default namespace

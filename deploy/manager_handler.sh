@@ -7,12 +7,13 @@ deploy_manager() {
     local template_file="${CONFIG["MANAGER_TEMPLATE_FILE"]}"
     local file="${CONFIG["MANAGER_FILE"]}"
 
-    ensure_available_port "MANAGER_NODE_PORT"
+    ensure_available_port "MANAGER_NODE_PORT" "MANAGER_WEB_NODE_PORT"
     render_config_template "${template_file}" "${file}" "DEPLOY_VARS"
     enable_dev_mode_if_needed ${file}
     exec_cmd kubectl apply -f ${file}
     wait_k8s_resource_ready "deployment" "${manager_name}" "${namespace}"
     success "MANAGER_NODE_PORT: ${DEPLOY_VARS["MANAGER_NODE_PORT"]}"
+    success "MANAGER_WEB_NODE_PORT: ${DEPLOY_VARS["MANAGER_WEB_NODE_PORT"]}"
 }
 
 uninstall_manager() {

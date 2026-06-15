@@ -134,6 +134,7 @@ declare -A DEPLOY_VARS=(
     ["MANAGER_NAME"]="jiuwenclaw-manager"
     ["MANAGER_REST_PORT"]="8765"
     ["MANAGER_WS_PORT"]="8766"
+    ["MANAGER_WEB_PORT"]="5273"
     ["DB_TYPE"]="sqlite"
     ["MANAGER_DB_NAME"]="manager"
     ["GATEWAY_DB_NAME"]="gateway"
