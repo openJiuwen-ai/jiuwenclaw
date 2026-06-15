@@ -2,6 +2,7 @@
 
 - [快速开始](Quickstart.md)
 - [E2A 协议（Gateway↔Agent）](E2A-protocol.md)
+- [架构概述](架构概述.md)
 - [配置说明](配置信息.md)
 - [使用指南](README.md)
   - [频道](频道.md)
@@ -18,7 +19,9 @@
   - [Skill 自演进](Skill自演进.md)
   - [智能体与工作区](智能体.md)
   - [浏览器工具](浏览器.md)
+  - [扩展系统](扩展系统.md)
   - [打包 exe 指南](打包exe指南.md)
+- [贡献指南](贡献指南.md)
 - [开发实践](开发实践/README.md)
   - [日报生成器开发实践](开发实践/JiuwenClaw日报生成器开发实践.md)
   - [代码审查助手开发实践](开发实践/JiuwenClaw代码审查助手开发实践.md)

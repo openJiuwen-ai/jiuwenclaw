@@ -1,0 +1,47 @@
+
+[
+  {
+    "id": "architecture",
+    "content": "架构概述文档",
+    "activeForm": "编写架构概述文档",
+    "description": "系统整体架构、部署模式、组件交互、数据流等",
+    "status": "completed",
+    "depends_on": [],
+    "result_summary": null,
+    "meta_data": null,
+    "selected_model_id": null
+  },
+  {
+    "id": "contribute",
+    "content": "贡献指南",
+    "activeForm": "编写贡献指南",
+    "description": "开发者如何参与贡献、PR流程、开发环境搭建等",
+    "status": "completed",
+    "depends_on": [],
+    "result_summary": null,
+    "meta_data": null,
+    "selected_model_id": null
+  },
+  {
+    "id": "extension",
+    "content": "扩展系统文档",
+    "activeForm": "编写扩展系统文档",
+    "description": "Extension/Plugin 插件系统的设计与使用",
+    "status": "completed",
+    "depends_on": [],
+    "result_summary": null,
+    "meta_data": null,
+    "selected_model_id": null
+  },
+  {
+    "id": "verify",
+    "content": "验证文档完整性",
+    "activeForm": "验证文档完整性",
+    "description": "确保文档链接正确、目录更新",
+    "status": "completed",
+    "depends_on": [],
+    "result_summary": null,
+    "meta_data": null,
+    "selected_model_id": null
+  }
+]
