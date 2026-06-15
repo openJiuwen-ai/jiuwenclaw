@@ -133,6 +133,7 @@ from jiuwenclaw.agentserver.deep_agent.rails.jiuwen_progressive_tool_rail import
     JiuWenProgressiveToolRail,
 )
 from jiuwenclaw.agentserver.deep_agent.rails.permission_rail import clear_session_interrupt_state
+from jiuwenclaw.agentserver.deep_agent.rails.pip_isolation_rail import PipIsolationRail
 from jiuwenclaw.agentserver.deep_agent.rails.task_execution_rail import get_current_task_id
 from jiuwenclaw.agentserver.deep_agent.permissions.owner_scopes import (
     TOOL_PERMISSION_CONTEXT,
@@ -2074,6 +2075,14 @@ class JiuWenClawDeepAdapter:
             )
             return None
 
+    @staticmethod
+    def _build_pip_isolation_rail() -> PipIsolationRail | None:
+        try:
+            return PipIsolationRail()
+        except Exception as exc:
+            logger.warning("[JiuWenClawDeepAdapter] PipIsolationRail create failed: %s", exc)
+            return None
+
     def _build_agent_rails(self, config: dict[str, Any], config_base: dict[str, Any], *,
                            mode: str = "agent.plan",
                            extra_skill_dir: str | None = None) -> list[Any]:
@@ -2107,6 +2116,7 @@ class JiuWenClawDeepAdapter:
             _RailBuildInfo("_heartbeat_rail", self._build_heartbeat_rail),
             _RailBuildInfo("_avatar_rail", self._build_avatar_rail),
             _RailBuildInfo("_subagent_rail", self._build_subagent_rail),
+            _RailBuildInfo("_pip_isolation_rail", self._build_pip_isolation_rail),
             _RailBuildInfo("_permission_rail", build_permission_rail, {"config": config_base, "llm": self._model,
                                                                        "model_name": config_base.get("models", {}).get(
                                                                            "default", {}).get("model_client_config",
@@ -2330,6 +2340,8 @@ class JiuWenClawDeepAdapter:
             rails_list.append(self._lsp_rail)
         if self._avatar_rail is not None:
             rails_list.append(self._avatar_rail)
+        if getattr(self, "_pip_isolation_rail", None) is not None:
+            rails_list.append(self._pip_isolation_rail)
         if self._permission_rail is not None:
             rails_list.append(self._permission_rail)
         if progressive_tool_rail is not None:

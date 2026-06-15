@@ -360,7 +360,7 @@ def _collect_static_command_risk_reasons(cmd: str) -> list[tuple[str, str]]:
         (
             "中",
             r"(?i)\b(pip\s+install|npm\s+install|pnpm\s+install|yarn\s+add)\b",
-            "该命令包含软件安装操作，会修改当前环境依赖",
+            "该命令包含软件安装操作，会安装到 isolation_venv，不影响系统/内置 Python 环境",
         ),
         (
             "中",

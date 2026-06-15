@@ -24,6 +24,7 @@ from jiuwenclaw.jiuwen_core_patch import (
     apply_openai_model_client_patch,
     configure_openjiuwen_logging_under_jiuwenclaw,
 )
+from jiuwenclaw.runtime.shell_pip_patch import apply_shell_pip_isolation_patch
 from jiuwenclaw.utils import (
     get_env_file,
     ensure_workspace_initialized,
@@ -32,6 +33,7 @@ from jiuwenclaw.utils import (
 )
 
 apply_openai_model_client_patch()
+apply_shell_pip_isolation_patch()
 migrate_legacy_user_config_if_needed()
 
 try:
