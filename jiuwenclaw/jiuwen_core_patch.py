@@ -4,6 +4,7 @@ import os
 import re
 import asyncio
 import logging
+import uuid
 from typing import Any, AsyncIterator, Optional
 from contextvars import ContextVar
 from dataclasses import dataclass
@@ -50,6 +51,8 @@ _ORIGINAL_GENERATE_IMAGE = None
 _HUAWEI_MAAS_API_MARKERS = (
     "modelarts-maas.com",
     "modelarts-maas.cn",
+    "huaweiapaas.com",
+    "agentarts",
 )
 _HUAWEI_MAAS_SESSION_API_KEY = "huawei-maas-session"
 
@@ -60,6 +63,39 @@ def _is_huawei_maas_api_base(api_base: str) -> bool:
     if any(marker in base for marker in _HUAWEI_MAAS_API_MARKERS):
         return True
     return "modelarts" in base and "maas" in base
+
+
+def _maybe_make_maas_span_id(client: Any) -> str:
+    """MaaS 请求生成新 x-span-id（uuid4 hex），非 MaaS 返回空串。"""
+    mcc = getattr(client, "model_client_config", None)
+    api_base = getattr(mcc, "api_base", "") if mcc is not None else ""
+    return uuid.uuid4().hex if _is_huawei_maas_api_base(api_base) else ""
+
+
+def _inject_span_id_kwargs(kwargs: dict, span_id: str) -> dict:
+    """把 x-span-id 合并到底层 client 的 ``custom_headers`` 中（不修改原 kwargs）。"""
+    if not span_id:
+        return kwargs
+    out = dict(kwargs)
+    headers = dict(out.get("custom_headers") or {})
+    headers["x-span-id"] = span_id
+    out["custom_headers"] = headers
+    return out
+
+
+def _llm_log_ctx() -> str:
+    """日志上下文前缀：当前 session_id / request_id（缺省以 '-' 占位）。"""
+    sid = "-"
+    session = _retry_session.get()
+    if session is not None and callable(getattr(session, "get_session_id", None)):
+        sid = str(session.get_session_id() or "-") or "-"
+    rid = "-"
+    try:
+        from jiuwenclaw.agentserver.deep_agent.interface_deep import _LLM_TRACE_REQUEST_ID
+        rid = str(_LLM_TRACE_REQUEST_ID.get() or "-") or "-"
+    except Exception:
+        pass
+    return f"[session_id={sid}] [request_id={rid}]"
 
 
 def _strip_b64_data_uri_prefix(value: str) -> str:
@@ -351,84 +387,95 @@ class RetryMixin:
     async def _invoke_with_retry(self, invoke_func, *args, **kwargs):
         """带重试的 invoke 包装器。
         max_attempts 表示纯重试次数，不包含首次正常调用。
+        每次实际 LLM 调用单独记一条接口日志，并为 MaaS 请求生成独立的 x-span-id。
         """
         from jiuwenclaw.interface_resp import track_llm_resp
 
-        async with track_llm_resp(self, streaming=False):
-            cfg = self._get_retry_config()
-            if not cfg.enabled:
-                llm_logger.info("LLM invoke 未启用重试，直接返回结果")
-                return await invoke_func(*args, **kwargs)
+        cfg = self._get_retry_config()
+        if not cfg.enabled:
+            span_id = _maybe_make_maas_span_id(self)
+            llm_logger.info(f"LLM invoke 未启用重试，直接返回结果 {_llm_log_ctx()} [span_id={span_id}]")
+            async with track_llm_resp(self, streaming=False, span_id=span_id):
+                return await invoke_func(*args, **_inject_span_id_kwargs(kwargs, span_id))
 
-            last_error = None
-            for attempt in range(cfg.max_attempts + 1):
-                try:
-                    return await invoke_func(*args, **kwargs)
-                except Exception as e:
-                    last_error = e
-                    if not self._is_retryable_error(e, cfg):
-                        reason = self._classify_error(e, cfg)
-                        details = self._extract_error_details(e)
-                        llm_logger.error(f"LLM invoke 不可重试 [{reason}] [{details}], details: {e}")
-                        raise
+        last_error = None
+        for attempt in range(cfg.max_attempts + 1):
+            span_id = _maybe_make_maas_span_id(self)
+            try:
+                async with track_llm_resp(self, streaming=False, span_id=span_id):
+                    result = await invoke_func(*args, **_inject_span_id_kwargs(kwargs, span_id))
+                llm_logger.info(f"LLM invoke 成功 {_llm_log_ctx()} [span_id={span_id}] (第 {attempt + 1}/{cfg.max_attempts + 1} 次)")
+                return result
+            except Exception as e:
+                last_error = e
+                if not self._is_retryable_error(e, cfg):
                     reason = self._classify_error(e, cfg)
                     details = self._extract_error_details(e)
-                    backoff = self._calculate_backoff(attempt, e, cfg)
-                    if attempt >= cfg.max_attempts:
-                        break
-                    llm_logger.warning(f"LLM invoke 失败 [{reason}] [{details}]，将在 {backoff:.1f}s 后重试, "
-                        f"(第 {attempt + 1} 次重试 / 共 {cfg.max_attempts} 次): {e}")
-                    await self._notify_retry_start(reason, attempt + 1, cfg.max_attempts, backoff)
-                    await asyncio.sleep(backoff)
+                    llm_logger.error(f"LLM invoke 不可重试 {_llm_log_ctx()} [span_id={span_id}] [{reason}] [{details}], details: {e}")
+                    raise
+                reason = self._classify_error(e, cfg)
+                details = self._extract_error_details(e)
+                backoff = self._calculate_backoff(attempt, e, cfg)
+                if attempt >= cfg.max_attempts:
+                    break
+                llm_logger.warning(f"LLM invoke 失败 {_llm_log_ctx()} [span_id={span_id}] [{reason}] [{details}]，将在 {backoff:.1f}s 后重试, "
+                    f"(第 {attempt + 1} 次重试 / 共 {cfg.max_attempts} 次): {e}")
+                await self._notify_retry_start(reason, attempt + 1, cfg.max_attempts, backoff)
+                await asyncio.sleep(backoff)
 
-            reason = self._classify_error(last_error, cfg)
-            details = self._extract_error_details(last_error)
-            llm_logger.error(f"LLM invoke 重试次数耗尽 [{reason}] [{details}]，已执行 {cfg.max_attempts} 次重试）: {last_error}")
-            await self._notify_retry_end()
-            raise last_error
+        reason = self._classify_error(last_error, cfg)
+        details = self._extract_error_details(last_error)
+        llm_logger.error(f"LLM invoke 重试次数耗尽 {_llm_log_ctx()} [{reason}] [{details}]，已执行 {cfg.max_attempts} 次重试）: {last_error}")
+        await self._notify_retry_end()
+        raise last_error
 
     async def _stream_with_retry(self, stream_func, *args, **kwargs):
         """带重试的 stream 包装器。
-        max_attempts 表示纯重试次数，不包含首次正常调用。。
+        max_attempts 表示纯重试次数，不包含首次正常调用。
+        每次实际 LLM 调用单独记一条接口日志，并为 MaaS 请求生成独立的 x-span-id。
         """
         from jiuwenclaw.interface_resp import track_llm_resp
 
-        async with track_llm_resp(self, streaming=True):
-            cfg = self._get_retry_config()
-            if not cfg.enabled:
-                llm_logger.info("LLM stream 未启用重试机制")
-                async for chunk in stream_func(*args, **kwargs):
+        cfg = self._get_retry_config()
+        if not cfg.enabled:
+            span_id = _maybe_make_maas_span_id(self)
+            llm_logger.info(f"LLM stream 未启用重试机制 {_llm_log_ctx()} [span_id={span_id}]")
+            async with track_llm_resp(self, streaming=True, span_id=span_id):
+                async for chunk in stream_func(*args, **_inject_span_id_kwargs(kwargs, span_id)):
                     yield chunk
-                return
+            return
 
-            last_error = None
-            for attempt in range(cfg.max_attempts + 1):
-                try:
-                    async for chunk in stream_func(*args, **kwargs):
+        last_error = None
+        for attempt in range(cfg.max_attempts + 1):
+            span_id = _maybe_make_maas_span_id(self)
+            try:
+                async with track_llm_resp(self, streaming=True, span_id=span_id):
+                    async for chunk in stream_func(*args, **_inject_span_id_kwargs(kwargs, span_id)):
                         yield chunk
-                    return  # 流式成功完成
-                except Exception as e:
-                    last_error = e
-                    if not self._is_retryable_error(e, cfg):
-                        reason = self._classify_error(e, cfg)
-                        details = self._extract_error_details(e)
-                        llm_logger.info(f"LLM stream 不可重试 [{reason}] [{details}], details: {e}")
-                        raise
+                llm_logger.info(f"LLM stream 成功 {_llm_log_ctx()} [x_span_id={span_id}] (第 {attempt + 1}/{cfg.max_attempts + 1} 次)")
+                return  # 流式成功完成
+            except Exception as e:
+                last_error = e
+                if not self._is_retryable_error(e, cfg):
                     reason = self._classify_error(e, cfg)
                     details = self._extract_error_details(e)
-                    backoff = self._calculate_backoff(attempt, e, cfg)
-                    if attempt >= cfg.max_attempts:
-                        break
-                    llm_logger.warning(f"LLM stream 失败 [{reason}] [{details}]，将在 {backoff:.1f}s 后重试 "
-                        f"(第 {attempt + 1} 次重试 / 共 {cfg.max_attempts} 次): {e}")
-                    await self._notify_retry_start(reason, attempt + 1, cfg.max_attempts, backoff)
-                    await asyncio.sleep(backoff)
+                    llm_logger.info(f"LLM stream 不可重试 {_llm_log_ctx()} [x_span_id={span_id}] [{reason}] [{details}], details: {e}")
+                    raise
+                reason = self._classify_error(e, cfg)
+                details = self._extract_error_details(e)
+                backoff = self._calculate_backoff(attempt, e, cfg)
+                if attempt >= cfg.max_attempts:
+                    break
+                llm_logger.warning(f"LLM stream 失败 {_llm_log_ctx()} [x_span_id={span_id}] [{reason}] [{details}]，将在 {backoff:.1f}s 后重试 "
+                    f"(第 {attempt + 1} 次重试 / 共 {cfg.max_attempts} 次): {e}")
+                await self._notify_retry_start(reason, attempt + 1, cfg.max_attempts, backoff)
+                await asyncio.sleep(backoff)
 
-            reason = self._classify_error(last_error, cfg)
-            details = self._extract_error_details(last_error)
-            llm_logger.error(f"LLM stream 重试次数耗尽 [{reason}] [{details}]，已尝试{cfg.max_attempts} 次重试）: {last_error}")
-            await self._notify_retry_end()
-            raise last_error
+        reason = self._classify_error(last_error, cfg)
+        details = self._extract_error_details(last_error)
+        llm_logger.error(f"LLM stream 重试次数耗尽 {_llm_log_ctx()} [{reason}] [{details}]，已尝试{cfg.max_attempts} 次重试）: {last_error}")
+        await self._notify_retry_end()
+        raise last_error
 
 
 def _patched_build_request_params(self, *, stream: bool, **kwargs) -> dict:
