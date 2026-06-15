@@ -29,6 +29,7 @@ _SKILL_NAME_SYSTEM_PROMPT = """你是命名助手。请基于用户需求生成�
 2) 使用 kebab-case，仅允许小写字母、数字、短横线。
 3) 语义清晰，长度建议 2-4 个词，总长度不超过30字符。
 4) skill 名称中不要出现`skill`字样，只输出技能名称本身。
+5) 若用户已在需求中给出合法的 kebab-case 标识符（如「名字叫 xxx」等形式），必须原样采用该标识符，不得改写、翻译或按语义重新命名。
 """
 
 
@@ -95,7 +96,8 @@ def _build_skill_name_user_query(*, user_query: str, attempt: int = 1) -> str:
     parts = [
         "请生成一个准确的 skill_name。",
         f"用户需求：{user_query}",
-        "请直接根据用户需求生成 skill name。",
+        "若用户已在需求中给出合法的 kebab-case 标识符，必须原样使用，不得改写。",
+        "否则请根据用户需求语义生成 skill name。",
     ]
     if attempt > 1:
         parts.append(
