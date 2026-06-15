@@ -12,7 +12,8 @@ parse_args() {
                 CMD="${args[$i]}"
                 i=$((i+1))
                 ;;
-            nfs|yr_claw|gateway|web)
+            #nfs|rabbitmq|yr_claw|gateway|web|manager)
+            nfs|rabbitmq|mysql|redis|postgresql|minio|gateway|web|manager)
                 MODULES+=("${args[$i]^^}")
                 i=$((i+1))
                 ;;
@@ -21,7 +22,7 @@ parse_args() {
                 i=$((i+2))
                 ;;
             --web-port)
-                DEPLOY_VARS["WEB_HOST_PORT"]="${args[$((i+1))]}"
+                DEPLOY_VARS["WEB_NODE_PORT"]="${args[$((i+1))]}"
                 i=$((i+2))
                 ;;
             -h|--help)
@@ -35,7 +36,7 @@ parse_args() {
 
     # Verify that the command must exist
     if [ -z "${CMD:-}" ]; then
-        error "Command not specified! Use 'up' or 'down'"
+        error "Command not specified! Use 'up', 'down' or 'restart'"
         exit 1
     fi
 
@@ -58,7 +59,6 @@ process_modules() {
 }
 
 # Print help info and exit
-# Print help info and exit
 print_help() {
     cat << EOF
 Usage: ./$(basename "$0") [COMMAND] [MODULES...] [OPTIONS]
@@ -70,9 +70,13 @@ Commands (Required):
 
 Modules (Optional):
   nfs       NFS service module (deploys to default namespace, ignores -n parameter)
-  yr_claw   OpenYuanRong CLAW module
+  rabbitmq  RabbitMQ module (deploys to default namespace, ignores -n parameter)
+  mysql     MySQL module (deploys to default namespace, ignores -n parameter)
+  redis     Redis module (deploys to default namespace, ignores -n parameter)
+  minio     Minio module (deploys to default namespace, ignores -n parameter)
   gateway   Gateway service module
   web       Web frontend module
+  manager   CLAW Manager module
 
 Options:
   -n NAMESPACE       Specify Kubernetes namespace (defaults to default if unspecified)
@@ -90,14 +94,10 @@ EOF
     exit 0
 }
 
-process_namespace() {
-    local namespace=${DEPLOY_VARS["NAMESPACE"]}
-    local client_type="${DEPLOY_VARS["AGENT_RUNTIME"]}"
+process_vars() {
+    local mode="${DEPLOY_VARS["MODE"]}"
 
-    if [ "${client_type}" == "yuanrong" ]; then
-        # Cluster-scoped resources cannot be isolated by namespace;
-        # use name suffixing to achieve resource isolation
-        DEPLOY_VARS["PV_NAME"]="${DEPLOY_VARS["PV_NAME"]}-${namespace}"
-        DEPLOY_VARS["POOL_ID"]="${DEPLOY_VARS["POOL_ID"]}-${namespace}"
+    if [ "${mode}" == "dev" ]; then
+        DEPLOY_VARS["POD_CODE_PATH"]="/app/jiuwenclaw"
     fi
 }

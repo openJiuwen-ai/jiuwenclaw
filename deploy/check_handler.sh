@@ -14,7 +14,7 @@ check_cmds() {
         check_cmd helm
     fi
 
-    for cmd in docker python3 jq yq mount.nfs
+    for cmd in docker python3 jq yq mount.nfs base64
     do
         check_cmd ${cmd}
     done
@@ -109,9 +109,10 @@ check_if_yr_claw_up() {
 }
 
 check_if_nfs_up() {
-    # No external NFS server
+    # Check if external NFS server
     if [ -n "${DEPLOY_VARS["NFS_SERVER_ADDR"]:-}" ]; then
         info "Use external NFS server"
+        DEPLOY_VARS["ENABLE_EXTERNAL_NFS"]="true"
         return
     fi
 
@@ -124,12 +125,110 @@ check_if_nfs_up() {
     DEPLOY_VARS["NFS_SERVER_ADDR"]=${DEPLOY_VARS["MASTER_NODE_IP"]}
 }
 
-check_vars() {
-    local client_type="${DEPLOY_VARS["AGENT_RUNTIME"]}"
+check_if_rabbitmq_up() {
+    local name="${DEPLOY_VARS["RABBITMQ_NAME"]}"
+    local user=${DEPLOY_VARS["RABBITMQ_USER"]}
+    local password=${DEPLOY_VARS["RABBITMQ_PASSWORD"]}
+    local url=""
+    local encoded_password=$(urlencode "$password")
 
-    if [[ "${client_type}" != "jiuwen" && "${client_type}" != "yuanrong" ]]; then
-        error "Unsupported AGENT_RUNTIME: ${client_type}"
+    # Check if external RABBITMQ server
+    if [ -n "${DEPLOY_VARS["RABBITMQ_URL"]:-}" ]; then
+        info "Use external RABBITMQ server"
+        url="${DEPLOY_VARS["RABBITMQ_URL"]}"
+        DEPLOY_VARS["MANAGER_RABBITMQ_URL"]="amqp://${user}:${encoded_password}@${url}"
+        DEPLOY_VARS["ENABLE_EXTERNAL_RABBITMQ"]="true"
+        return
     fi
+
+    # No Build-In RABBITMQ server
+    if ! check_k8s_resource_exists "statefulset" "${name}"; then
+        error "RABBITMQ is not deployed. Please deploy it first with: ./$(basename "$0") up rabbitmq"
+    fi
+
+    info "Use built-in RABBITMQ server"
+    url="${name}-headless.default:5672"
+    DEPLOY_VARS["MANAGER_RABBITMQ_URL"]="amqp://${user}:${encoded_password}@${url}"
+}
+
+
+check_if_mysql_up() {
+    local name="${DEPLOY_VARS["MYSQL_NAME"]}"
+
+    # Check if external MySQL server
+    if [ -n "${DEPLOY_VARS["MYSQL_HOST"]:-}" ]; then
+        info "Use external MySQL server"
+        DEPLOY_VARS["DB_HOST"]=${DEPLOY_VARS["MYSQL_HOST"]}
+        DEPLOY_VARS["DB_PORT"]=${DEPLOY_VARS["MYSQL_PORT"]}
+        DEPLOY_VARS["DB_USER"]="root"
+        DEPLOY_VARS["DB_PASSWORD"]=${DEPLOY_VARS["MYSQL_ROOT_PASSWORD"]}
+        DEPLOY_VARS["ENABLE_EXTERNAL_MYSQL"]="true"
+        return
+    fi
+
+    info "Use built-in MySQL server"
+    DEPLOY_VARS["DB_HOST"]="${name}-headless.default"
+    DEPLOY_VARS["DB_PORT"]="3306"
+    DEPLOY_VARS["DB_USER"]="root"
+    DEPLOY_VARS["DB_PASSWORD"]=${DEPLOY_VARS["MYSQL_ROOT_PASSWORD"]}
+}
+
+check_if_postgresql_up() {
+    local name="${DEPLOY_VARS["POSTGRES_NAME"]}"
+
+    # Check if external PostgreSQL server
+    if [ -n "${DEPLOY_VARS["POSTGRES_HOST"]:-}" ]; then
+        info "Use external PostgreSQL server"
+        DEPLOY_VARS["DB_HOST"]=${DEPLOY_VARS["POSTGRES_HOST"]}
+        DEPLOY_VARS["DB_PORT"]=${DEPLOY_VARS["POSTGRES_PORT"]}
+        DEPLOY_VARS["DB_USER"]="postgres"
+        DEPLOY_VARS["DB_PASSWORD"]=${DEPLOY_VARS["POSTGRES_PASSWORD"]}
+        DEPLOY_VARS["ENABLE_EXTERNAL_POSTGRES"]="true"
+        return
+    fi
+
+    info "Use built-in PostgreSQL server"
+    DEPLOY_VARS["DB_HOST"]="${name}-headless.default"
+    DEPLOY_VARS["DB_PORT"]="5432"
+    DEPLOY_VARS["DB_USER"]="postgres"
+    DEPLOY_VARS["DB_PASSWORD"]=${DEPLOY_VARS["POSTGRES_PASSWORD"]}
+}
+
+
+check_if_db_up() {
+    local db_type="${DEPLOY_VARS["DB_TYPE"]}"
+
+    info "DB_TYPE: ${db_type}"
+    if [[ "${db_type}" == "sqlite" ]]; then
+        return
+    fi 
+    check_if_${db_type}_up
+}
+
+
+check_if_redis_up() {
+    local mode="${DEPLOY_VARS["DEPLOYMENT_MODE"]:-standalone}"
+    local name="${DEPLOY_VARS["REDIS_NAME"]}"
+
+    if [[ "${mode}" != "active-standby" ]]; then
+        info "DEPLOYMENT_MODE=${mode}, skip Redis check"
+        return
+    fi
+
+    if [ -n "${DEPLOY_VARS["REDIS_HOST"]:-}" ]; then
+        info "Use configured Redis: ${DEPLOY_VARS["REDIS_HOST"]}"
+        DEPLOY_VARS["ENABLE_EXTERNAL_REDIS"]="true"
+        return
+    fi
+
+    if check_k8s_resource_exists "deployment" "${name}" "default"; then
+        DEPLOY_VARS["REDIS_HOST"]="${name}.default.svc.cluster.local"
+        DEPLOY_VARS["REDIS_PORT"]="6379"
+        info "Use built-in Redis: ${DEPLOY_VARS["REDIS_HOST"]}"
+        return
+    fi
+
+    error "DEPLOYMENT_MODE=active-standby but Redis is not ready. Deploy with: ./deploy.sh up redis"
 }
 
 check_dependency(){
@@ -139,7 +238,6 @@ check_dependency(){
     check_if_root
     #check_ssh_connectivity
     check_cluster_has_enough_nodes
-    check_vars
 }
 
 check_nfs_up_dependency(){
@@ -159,11 +257,98 @@ check_yr_claw_up_dependency(){
 }
 
 check_gateway_up_dependency(){
+    local jiuwenclaw_path=${DEPLOY_VARS["JIUWENCLAW_PATH"]}
+    local nfs_dname=${DEPLOY_VARS["NFS_NAME"]}
+
     check_if_nfs_up
+
+    if [ "${DEPLOY_VARS["ENABLE_EXTERNAL_NFS"]}" == "false" ]; then
+        info "Preparing JiuwenClaw data directory: ${jiuwenclaw_path}"
+        local nfs_pod=$(kubectl get pods -n default -l app=${nfs_dname} -o jsonpath='{.items[0].metadata.name}')
+        info "Executing: kubectl exec ${nfs_pod} -- sh -c \"mkdir -p ${jiuwenclaw_path} && chown 1000:1000 ${jiuwenclaw_path} && chmod 777 ${jiuwenclaw_path}\""
+        kubectl exec ${nfs_pod} -- sh -c "mkdir -p ${jiuwenclaw_path} && chown 1000:1000 ${jiuwenclaw_path} && chmod 777 ${jiuwenclaw_path}"
+        success "JiuwenClaw directory created successfully in NFS Pod!"
+    fi
+
+    check_if_db_up
+    check_if_redis_up
+}
+
+check_redis_up_dependency() {
+    info "Redis module has no extra prerequisites (deploys to default namespace)"
 }
 
 check_web_up_dependency(){
     if ! check_k8s_resource_exists "deployment" "${DEPLOY_VARS["GATEWAY_NAME"]}" "${DEPLOY_VARS["NAMESPACE"]}"; then
         error "GATEWAY is not deployed. Please deploy it first with: ./$(basename "$0") up gateway"
     fi
+}
+
+check_rabbitmq_up_dependency(){
+    local rabbit_path=${DEPLOY_VARS["RABBITMQ_PATH"]}
+    local nfs_dname=${DEPLOY_VARS["NFS_NAME"]}
+
+    check_if_nfs_up
+
+    if [ "${DEPLOY_VARS["ENABLE_EXTERNAL_NFS"]}" == "false" ]; then
+        info "Preparing RabbitMQ data directory: ${rabbit_path}"
+        local nfs_pod=$(kubectl get pods -n default -l app=${nfs_dname} -o jsonpath='{.items[0].metadata.name}')
+
+        info "Executing: kubectl exec ${nfs_pod} -- sh -c \"mkdir -p ${rabbit_path}\""
+        kubectl exec ${nfs_pod} -- sh -c "mkdir -p ${rabbit_path}"
+        success "RabbitMQ directory created successfully in NFS Pod!"
+    fi
+}
+
+check_mysql_up_dependency(){
+    local mysql_path=${DEPLOY_VARS["MYSQL_PATH"]}
+    local nfs_dname=${DEPLOY_VARS["NFS_NAME"]}
+
+    check_if_nfs_up
+
+    if [ "${DEPLOY_VARS["ENABLE_EXTERNAL_NFS"]}" == "false" ]; then
+        info "Preparing MySQL data directory: ${mysql_path}"
+        local nfs_pod=$(kubectl get pods -n default -l app=${nfs_dname} -o jsonpath='{.items[0].metadata.name}')
+
+        info "Executing: kubectl exec ${nfs_pod} -- sh -c \"mkdir -p ${mysql_path}\""
+        kubectl exec ${nfs_pod} -- sh -c "mkdir -p ${mysql_path}"
+        success "MySQL directory created successfully in NFS Pod!"
+    fi
+}
+
+check_postgresql_up_dependency(){
+    local pg_path=${DEPLOY_VARS["POSTGRES_PATH"]}
+    local nfs_dname=${DEPLOY_VARS["NFS_NAME"]}
+
+    check_if_nfs_up
+
+    if [ "${DEPLOY_VARS["ENABLE_EXTERNAL_NFS"]}" == "false" ]; then
+        info "Preparing PostgreSQL data directory: ${pg_path}"
+        local nfs_pod=$(kubectl get pods -n default -l app=${nfs_dname} -o jsonpath='{.items[0].metadata.name}')
+
+        info "Executing: kubectl exec ${nfs_pod} -- sh -c \"mkdir -p ${pg_path}\""
+        kubectl exec ${nfs_pod} -- sh -c "mkdir -p ${pg_path}"
+        success "PostgreSQL directory created successfully in NFS Pod!"
+    fi
+}
+
+check_minio_up_dependency(){
+    local minio_path=${DEPLOY_VARS["MINIO_PATH"]}
+    local nfs_dname=${DEPLOY_VARS["NFS_NAME"]}
+
+    check_if_nfs_up
+
+    if [ "${DEPLOY_VARS["ENABLE_EXTERNAL_NFS"]}" == "false" ]; then
+        info "Preparing Minio data directory: ${minio_path}"
+        local nfs_pod=$(kubectl get pods -n default -l app=${nfs_dname} -o jsonpath='{.items[0].metadata.name}')
+
+        info "Executing: kubectl exec ${nfs_pod} -- sh -c \"mkdir -p ${minio_path}\""
+        kubectl exec ${nfs_pod} -- sh -c "mkdir -p ${minio_path}"
+        success "Minio directory created successfully in NFS Pod!"
+    fi
+}
+
+check_manager_up_dependency(){
+    check_if_rabbitmq_up
+    check_if_db_up
 }

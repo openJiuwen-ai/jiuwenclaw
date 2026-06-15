@@ -1,6 +1,18 @@
 #!/usr/bin/env bash
 set -euo >/dev/null 2>&1
 
+OYL_REPO_NAME="charts_dev"
+OYL_REPO_URL="http://openyuanrong.obs.cn-southwest-2.myhuaweicloud.com/charts_dev"
+OYL_CHART_NAME="openyuanrong"
+OYL_CHART_VERSION="1.0.202603301703"
+OYL_REPO_DIR="${SCRIPT_DIR}/${OYL_CHART_NAME}"
+META_PORT=""
+REG_FUNC_FILE="${SCRIPT_DIR}/func/clawee.py"
+POOL_TEMPLATE_FILE="${SCRIPT_DIR}/conf/pool.template.json"
+POOL_FILE="${SCRIPT_DIR}/conf/pool.json"
+CLAW_META_TEMPLATE_FILE="${SCRIPT_DIR}/conf/claw_meta.template.json"
+CLAW_META_FILE="${SCRIPT_DIR}/conf/claw_meta.json"
+
 config_value_file() {
     local oyr_values_file="${OYL_REPO_DIR}/values.yaml"
     if [ ! -f "${oyr_values_file}" ]; then
@@ -198,7 +210,7 @@ register_oyr_func() {
     success "Serverless function created successfully! function_id: ${DEPLOY_VARS["FUNCTION_ID"]}"
 }
 
-deploy_oyr() {
+deploy_yr_claw() {
     install_pv_pvc
     install_oyr
     create_func_pool
@@ -215,7 +227,7 @@ wait_oyr_terminated() {
     done
 }
 
-uninstall_oyr() {
+uninstall_yr_claw() {
     local namespace="${DEPLOY_VARS["NAMESPACE"]}"
 
     info "Starting to uninstall openyuanrong..."

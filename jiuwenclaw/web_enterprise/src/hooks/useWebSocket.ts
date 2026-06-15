@@ -22,8 +22,16 @@ import {
   ToolResult,
  	ToolCall,
   UsageSummary,
+  FileDownloadItem,
 } from '../types';
-import { useChatStore, useTodoStore, useSessionStore } from '../stores';
+import {
+  useChatStore,
+  useTodoStore,
+  useSessionStore,
+  useExtSettingsStore,
+  extSettingsToQueryFields,
+  extSettingsToRoutingParams,
+} from '../stores';
 import { webClient } from '../services/webClient';
 import i18n from '../i18n';
 import {
@@ -157,6 +165,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
     clearMessages,
     setPendingQuestion,
     removeFromTaskQueue,
+    addFileItems,
   } = useChatStore();
   const { setTodos, clearTodos } = useTodoStore();
   const {
@@ -281,11 +290,14 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
       const currentMode = useSessionStore.getState().mode;
       const selectedModel = useSessionStore.getState().selectedModelName;
       try {
+        const ext = useExtSettingsStore.getState();
         await request('chat.send', {
           session_id: sessionId,
           content,
+          query: content,
           mode: currentMode,
           ...(selectedModel ? { model_name: selectedModel } : {}),
+          ...extSettingsToRoutingParams(ext),
         });
       } catch (error) {
         const webError = error as WebError;
@@ -432,6 +444,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
             query: '',
             request_id: requestId,
             answers: answers,
+            ...extSettingsToRoutingParams(useExtSettingsStore.getState()),
           });
         } else {
           // 否则发送 chat.user_answer（自进化确认）
@@ -697,7 +710,14 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
           handleTtsPlayback(targetId, mediaPayload.content);
         }
       }),
-webClient.on('chat.tool_call', ({ payload }) => {
+webClient.on('chat.file', ({ payload }) => {
+        if (!shouldHandleSessionEvent(payload)) return;
+        const files = (payload.files ?? []) as FileDownloadItem[];
+        if (!files.length) return;
+        console.log('[ws][chat.file] received files:', files.map(f => ({ name: f.name, size: f.size, mime_type: f.mime_type })));
+        addFileItems(files);
+      }),
+      webClient.on('chat.tool_call', ({ payload }) => {
         if (!shouldHandleSessionEvent(payload)) return;
         if (shouldDropDuplicatedEvent('chat.tool_call', payload)) return;
         // 页面刷新后，如果收到活跃事件但 isProcessing=false，自动恢复执行状态
@@ -1391,12 +1411,19 @@ webClient.on('harness.session_finished', ({ payload }) => {
   ]);
 
   useEffect(() => {
+    const ext = useExtSettingsStore.getState();
+    const extQuery = extSettingsToQueryFields(ext);
+    const { user_id: _uid, group_id: _gid, bot_id: _bid, ...extraFields } = extQuery;
     const connectOptions: WebConnectOptions = {
       provider,
       apiKey,
       apiBase,
       model,
       projectPath,
+      userId: ext.userId || undefined,
+      groupId: ext.groupId || undefined,
+      botId: ext.botId || undefined,
+      extraFields: Object.keys(extraFields).length > 0 ? extraFields : undefined,
     };
     void webClient.connect(connectOptions).catch((error) => {
       const webError = error as WebError;
@@ -1431,15 +1458,23 @@ webClient.on('harness.session_finished', ({ payload }) => {
   ]);
 
   useEffect(() => {
-    const connectOptions: WebConnectOptions = {
-      provider,
-      apiKey,
-      apiBase,
-      model,
-      projectPath,
-    };
     const reconnectByDebugToggle = () => {
-      void webClient.disconnect('debug mode toggled').then(() => {
+      // 重连时从 store 拉最新 ext 设置（保存按钮也会派发本事件触发）。
+      const ext = useExtSettingsStore.getState();
+      const extQuery = extSettingsToQueryFields(ext);
+      const { user_id: _uid, group_id: _gid, bot_id: _bid, ...extraFields } = extQuery;
+      const connectOptions: WebConnectOptions = {
+        provider,
+        apiKey,
+        apiBase,
+        model,
+        projectPath,
+        userId: ext.userId || undefined,
+        groupId: ext.groupId || undefined,
+        botId: ext.botId || undefined,
+        extraFields: Object.keys(extraFields).length > 0 ? extraFields : undefined,
+      };
+      void webClient.disconnect('ext settings or debug mode changed').then(() => {
         void webClient.connect(connectOptions).catch((error) => {
           const webError = error as WebError;
           setConnectionStats({ lastError: webError.message });

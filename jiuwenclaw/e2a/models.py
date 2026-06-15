@@ -224,6 +224,25 @@ def _enum_value(obj: Any) -> Any:
     return obj
 
 
+def _to_jsonable(obj: Any) -> Any:
+    """Recursively convert object to JSON-serializable form."""
+    if obj is None:
+        return None
+    if isinstance(obj, Enum):
+        return obj.value
+    if isinstance(obj, (str, int, float, bool)):
+        return obj
+    if hasattr(obj, "__dataclass_fields__"):
+        return _dataclass_to_json_dict(obj)
+    if hasattr(obj, "to_dict") and callable(getattr(obj, "to_dict")):
+        return obj.to_dict()
+    if isinstance(obj, dict):
+        return {k: _to_jsonable(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_to_jsonable(x) for x in obj]
+    return obj
+
+
 def _dataclass_to_json_dict(obj: Any) -> dict[str, Any]:
     if hasattr(obj, "__dataclass_fields__"):
         out: dict[str, Any] = {}
@@ -232,26 +251,7 @@ def _dataclass_to_json_dict(obj: Any) -> dict[str, Any]:
             if v is None and f.name.startswith("_"):
                 continue
             key = f.name
-            if isinstance(v, Enum):
-                out[key] = v.value
-            elif hasattr(v, "__dataclass_fields__"):
-                out[key] = _dataclass_to_json_dict(v)
-            elif isinstance(v, list):
-                out[key] = [
-                    _dataclass_to_json_dict(x)
-                    if hasattr(x, "__dataclass_fields__")
-                    else _enum_value(x)
-                    for x in v
-                ]
-            elif isinstance(v, dict):
-                out[key] = {
-                    k: _dataclass_to_json_dict(x)
-                    if hasattr(x, "__dataclass_fields__")
-                    else x
-                    for k, x in v.items()
-                }
-            else:
-                out[key] = v
+            out[key] = _to_jsonable(v)
         return out
     return obj
 

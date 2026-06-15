@@ -104,6 +104,7 @@ class ExtensionLoader:
 
         pip_extra_args = os.environ.get("PIP_EXTRA_ARGS", "").strip().strip('\'"')
         extra_args = pip_extra_args.split() if pip_extra_args else []
+        force_args = ["--force-reinstall"]
 
         for package, version_spec in dependencies.items():
             package_name = f"{package}{version_spec}" if version_spec else package
@@ -123,7 +124,7 @@ class ExtensionLoader:
                         env=runtime_subprocess_env(),
                     )
                 else:
-                    result = install_packages([package_name], extra_args=extra_args)
+                    result = install_packages([package_name], extra_args=extra_args + force_args)
                     for warning in result.warnings:
                         logger.warning("[ExtensionLoader] %s", warning)
                     if result.returncode != 0:

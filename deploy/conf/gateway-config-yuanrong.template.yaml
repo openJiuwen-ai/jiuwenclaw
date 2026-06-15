@@ -194,6 +194,17 @@ task_memory:
   retrieval_algo: ACE
   summary_algo: ACE
 
+redis:
+  host: ${REDIS_HOST:-localhost}
+  port: ${REDIS_PORT:-6379}
+  password: ${REDIS_PASSWORD:-}
+  db: ${REDIS_DB:-0}
+  key_prefix: ${REDIS_KEY_PREFIX:-jiuwenclaw:}
+  pool_size: ${REDIS_POOL_SIZE:-10}
+  connect_timeout: ${REDIS_CONNECT_TIMEOUT:-5}
+  operation_timeout: ${REDIS_OPERATION_TIMEOUT:-10}
+  health_check_interval: ${REDIS_HEALTH_CHECK_INTERVAL:-30}
+
 gateway:
   # AgentServer client mode.
   # websocket: default ws client
@@ -208,6 +219,9 @@ gateway:
   # SessionMap 仅用于企业claw场景，如 feishu_enterprise 等通道：将平台身份映射为 Agent 的 session_id。
   # 取值：per_chat_bot（默认，同 chat+bot 共享会话）, per_chat_bot_user（按 user 分会话）
   session_map_scope: <<GATEWAY_SESSION_MAP_SCOPE>>
+
+  deployment_mode: ${DEPLOYMENT_MODE:-standalone}
+  instance_id: ${GATEWAY_INSTANCE_ID:-}
 
 heartbeat:
   # 心跳间隔（秒），默认 60
@@ -482,7 +496,7 @@ updater:
 extensions:
    # 扩展包搜索目录（字符串），用 ';' 分割多个目录：
    # EXTENSION_DIRS="E:/a;D:/b"; 默认会加载仓库根目录 extensions
-   extension_dirs: "/app/jiuwenclaw/docker/yr_extensions"
+   extension_dirs: "/app/jiuwenclaw/packages/jiuwenclaw-ee/gateway/yr_extensions"
 
 team:
   team_name: jiuwen_team

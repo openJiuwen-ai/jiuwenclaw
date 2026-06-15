@@ -409,6 +409,16 @@ class _WindowApi:
     def install_update(self, installer_path: str) -> bool:
         return self._runtime.install_update(installer_path)
 
+    def download_file(self, url: str, filename: str) -> bool:
+        """通过 webview 下载文件，解决 exe 中无法使用 <a> 标签下载的问题。"""
+        # 如果是相对路径，拼接完整的 URL（使用前端 web server 端口）
+        if url.startswith("/"):
+            full_url = f"http://{self._runtime.frontend_host}:{self._runtime.frontend_port}{url}"
+        else:
+            full_url = url
+        logger.info("[desktop] download_file called: url=%s, filename=%s", full_url, filename)
+        return self._runtime.download_file(full_url, filename)
+
 
 class DesktopRuntime:
     def __init__(
@@ -480,6 +490,79 @@ class DesktopRuntime:
             return False
         self.window.destroy()
         return True
+
+    def download_file(self, url: str, filename: str) -> bool:
+        """下载文件到用户下载目录（异步执行，避免阻塞 UI）。"""
+        def _download() -> None:
+            try:
+                import urllib.request
+
+                # 获取下载目录
+                download_dir = Path.home() / "Downloads"
+                if not download_dir.exists():
+                    download_dir.mkdir(parents=True, exist_ok=True)
+
+                # 处理文件名冲突
+                target_path = download_dir / filename
+                if target_path.exists():
+                    base, ext = Path(filename).stem, Path(filename).suffix
+                    counter = 1
+                    while target_path.exists():
+                        target_path = download_dir / f"{base} ({counter}){ext}"
+                        counter += 1
+
+                # 下载文件
+                urllib.request.urlretrieve(url, target_path)
+                logger.info("[desktop] file downloaded to: %s", target_path)
+
+                # 下载完成后提醒用户并打开文件
+                self._show_download_complete(str(target_path))
+            except Exception as exc:  # noqa: BLE001
+                logger.error("[desktop] download failed: %s", exc)
+
+        threading.Thread(target=_download, daemon=True).start()
+        return True
+
+    @staticmethod
+    def _show_download_complete(file_path: str) -> None:
+        """下载完成后提醒用户并打开文件所在文件夹。"""
+        try:
+            if os.name == "nt":
+                import ctypes
+                # Windows: 弹窗询问是否打开文件夹
+                result = ctypes.windll.user32.MessageBoxW(
+                    0,
+                    f"文件已下载到:\n{file_path}\n\n是否打开所在文件夹？",
+                    "下载完成",
+                    0x44  # MB_YESNO + MB_ICONINFORMATION
+                )
+                if result == 6:  # IDYES
+                    # 打开文件夹并选中文件
+                    explorer_path = os.path.join(os.environ.get("WINDIR", r"C:\Windows"), "explorer.exe")
+                    subprocess.Popen(
+                        [explorer_path, "/select,", file_path],
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                        creationflags=_creationflags(),
+                    )
+            elif sys.platform == "darwin":
+                # macOS: 弹窗询问
+                result = subprocess.run(
+                    ["/usr/bin/osascript", "-e", f'''
+                    display alert "下载完成" message "文件已下载到:\\n{file_path}\\n\\n是否打开所在文件夹？" buttons {"取消", "打开文件夹"} default button "打开文件夹" as informational
+                    '''],
+                    capture_output=True,
+                    text=True,
+                )
+                if "打开文件夹" in result.stdout:
+                    # 打开文件夹并选中文件
+                    subprocess.Popen(
+                        ["/usr/bin/open", "-R", file_path],
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                    )
+        except Exception as exc:  # noqa: BLE001
+            logger.error("[desktop] failed to show download complete: %s", exc)
 
     def install_update(self, installer_path: str) -> bool:
         if os.name != "nt":
@@ -571,6 +654,115 @@ class DesktopRuntime:
             private_mode=False,
             storage_path=str(storage_path),
         )
+
+    @staticmethod
+    def _build_loading_html() -> str:
+        logo_svg = ""
+        pkg_dir = Path(__file__).resolve().parent
+        logo_path = pkg_dir.parent / "web" / "frontend" / "dist" / "logo.svg"
+        if not logo_path.is_file():
+            logo_path = pkg_dir.parent / "web" / "frontend" / "public" / "logo.svg"
+        if logo_path.is_file():
+            try:
+                logo_svg = logo_path.read_text(encoding="utf-8")
+            except Exception:  # noqa: BLE001
+                pass
+
+        return r"""<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+html,body{width:100%;height:100%;overflow:hidden;background:#0f172a;
+font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;
+color:#e2e8f0;display:flex;align-items:center;justify-content:center}
+.root{display:flex;flex-direction:column;align-items:center;gap:32px;padding:40px}
+
+/* Logo */
+.logo{width:64px;height:64px;border-radius:16px;
+background:linear-gradient(135deg,#3b82f6,#8b5cf6);
+display:flex;align-items:center;justify-content:center;
+box-shadow:0 8px 24px rgba(59,130,246,.25)}
+.logo svg{width:64px;height:64px;border-radius:16px}
+
+/* App name */
+.app-name{font-size:22px;font-weight:700;letter-spacing:-.3px;color:#f1f5f9}
+
+/* Spinner */
+.spinner{width:32px;height:32px;border:3px solid rgba(148,163,184,.2);
+border-top-color:#60a5fa;border-radius:50%;animation:spin 1.5s linear infinite}
+@keyframes spin{to{transform:rotate(360deg)}}
+
+/* Tip area */
+.tip-area{margin-top:8px;text-align:center;min-height:60px;
+display:flex;flex-direction:column;align-items:center;gap:8px}
+.tip-label{font-size:11px;text-transform:uppercase;letter-spacing:1.5px;color:#475569}
+.tip-text{font-size:13px;color:#94a3b8;max-width:320px;line-height:1.5;
+transition:opacity .4s ease,transform .4s ease}
+.tip-text.fade-out{opacity:0;transform:translateY(-8px)}
+.tip-text.fade-in{opacity:1;transform:translateY(0)}
+
+/* Dots */
+.dots{display:flex;gap:4px;justify-content:center}
+.dot{width:4px;height:4px;border-radius:50%;background:#475569}
+.dot.active{background:#60a5fa;animation:pulse 1.2s ease infinite}
+@keyframes pulse{0%,100%{opacity:.4}50%{opacity:1}}
+</style>
+</head>
+<body>
+<div class="root">
+<div class="logo">__LOGO_SVG__</div>
+<div class="app-name">JiuwenSwarm</div>
+<div class="spinner"></div>
+<div class="tip-area">
+    <div class="tip-label">专属智能AI Agent助理</div>
+    <div class="tip-text" id="tip"></div>
+</div>
+<div class="dots" id="dots"></div>
+<div class="tip-label" style="margin-top:16px">服务启动加载中</div>
+</div>
+<script>
+const tips=[
+"多智能体协作 —— 编排多个专业 Agent 协同工作，群体智能涌现",
+"多端接入 —— 支持 Web、飞书、微信、钉钉、Telegram 等多种交互方式",
+"贴身任务管家 —— 精准理解复杂指令，智能排期，有条不紊完成任务",
+"自主演进 —— 根据你的反馈自动调整技能，持续进化，越用越懂你"
+];
+let idx=0;
+const el=document.getElementById('tip');
+const dotsEl=document.getElementById('dots');
+
+tips.forEach((_,i)=>{
+const d=document.createElement('div');
+d.className='dot'+(i===0?' active':'');
+dotsEl.appendChild(d);
+});
+
+function showTip(){
+const dots=dotsEl.children;
+for(let i=0;i<dots.length;i++) dots[i].className='dot'+(i===idx?' active':'');
+el.className='tip-text fade-out';
+setTimeout(()=>{
+    el.textContent=tips[idx];
+    el.className='tip-text fade-in';
+},400);
+idx=(idx+1)%tips.length;
+}
+showTip();
+setInterval(showTip,3500);
+</script>
+</body>
+</html>""".replace("__LOGO_SVG__", logo_svg)
+
+    def _on_loaded_first(self) -> None:
+        if self.window is not None:
+            # 窗口首次加载后最大化（全屏会影响用户体验）
+            if hasattr(self.window, "maximize"):
+                self.window.maximize()
+            self.window.events.loaded -= self._on_loaded_first
+            self.window.events.loaded += self._on_loaded
 
     def _on_loaded(self) -> None:
         if self.window is None:

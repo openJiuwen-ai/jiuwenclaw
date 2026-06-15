@@ -43,6 +43,7 @@ class ReqMethod(Enum):
 
     CONFIG_CACHE_CLEAR = "config.cache_clear"
     AGENT_RELOAD_CONFIG = "agent.reload_config"
+    LOGGING_SET = "logging.set"
 
     MEMORY_COMPUTE = "memory.compute"
 

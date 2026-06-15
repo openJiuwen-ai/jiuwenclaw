@@ -32,11 +32,6 @@ import copy
 import datetime
 import json
 import logging
-import asyncio
-import copy
-import datetime
-import json
-import logging
 import mimetypes
 import os
 import re
@@ -45,7 +40,7 @@ import sys
 import time
 import contextlib
 from collections import OrderedDict
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from logging.handlers import BaseRotatingHandler
 from pathlib import Path
 from datetime import datetime, timezone
@@ -121,6 +116,67 @@ def resolve_env_vars(value: Any) -> Any:
     return value
 
 
+# 统一敏感信息掩码值
+_SENSITIVE_MASK = "******"
+
+# 匹配常见敏感字段键值对（不要求值必须带引号），用于覆盖:
+# - token=abc
+# - authorization = Bearer ...
+# 分组说明：1) 敏感键名；2) 分隔符及两侧空白（: 或 =）；3/4) 可选引号（当前替换逻辑未直接使用）
+_KV_SENSITIVE_PATTERN = re.compile(
+    r"(?i)(?<![A-Za-z0-9])"
+    r"(password|passwd|pwd|secret|token|api[_-]?key|access[_-]?token|"
+    r"authorization|private[_-]?key|client[_-]?secret)"
+    r"(\s*[:=]\s*)"
+)
+
+# 匹配带引号的敏感键值对，保留引号一致性
+# 分组说明：
+# 1) 键名和分隔符（包含起始引号前的部分）
+# 2) 值的起始引号（' 或 "）
+# 3) 值内容（非贪婪）
+# 4) 结束引号（通过 (\2) 强制与起始引号一致）
+_NAMED_SENSITIVE_KV_PATTERN = re.compile(
+    r"(?i)([\"']?[A-Za-z0-9_.-]*"
+    r"(?:token|secret|password|passwd|pwd|api[_-]?key|authorization|"
+    r"private[_-]?key|client[_-]?secret)[A-Za-z0-9_.-]*[\"']?\s*[:=]\s*)([\"'])(.*?)(\2)"
+)
+
+# 匹配 Authorization Bearer 令牌，保留 "Bearer " 前缀，仅掩码后面的令牌值
+_BEARER_SENSITIVE_PATTERN = re.compile(r"(?i)\b(Bearer\s+)[A-Za-z0-9\-._~+/]+=*")
+
+# 其他敏感模式列表
+_SENSITIVE_PATTERNS: list[re.Pattern[str]] = [
+    # 匹配 JWT（header.payload.signature 三段式，常见以 eyJ 开头）
+    re.compile(r"\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b"),
+    # 匹配 OpenAI 风格 key（sk- 前缀）
+    re.compile(r"\bsk-[A-Za-z0-9]{8,}\b"),
+    # 匹配 AWS Access Key ID
+    re.compile(r"\bAKIA[0-9A-Z]{16}\b"),
+]
+
+
+def _sanitize_log_text(text: str) -> str:
+    """对日志文本中的敏感信息进行脱敏处理
+    
+    Args:
+        text: 原始日志文本
+        
+    Returns:
+        str: 脱敏后的文本
+    """
+    if not text:
+        return text
+
+    masked = text
+    masked = _KV_SENSITIVE_PATTERN.sub(r"\1\2" f"{_SENSITIVE_MASK}", masked)
+    masked = _NAMED_SENSITIVE_KV_PATTERN.sub(r"\1\2" f"{_SENSITIVE_MASK}" r"\2", masked)
+    masked = _BEARER_SENSITIVE_PATTERN.sub(r"\1" f"{_SENSITIVE_MASK}", masked)
+    for pattern in _SENSITIVE_PATTERNS:
+        masked = pattern.sub(_SENSITIVE_MASK, masked)
+    return masked
+
+
 _LOG_FILE_MAX_BYTES = 20 * 1024 * 1024
 _LOG_FILE_BACKUP_COUNT = 20
 
@@ -134,21 +190,6 @@ class LoggingLevels:
     channel: int
     agent_server: int
     full: int
-
-
-@dataclass
-class FileTransferStartParams:
-    """文件传输开始参数（用于封装多参数方法调用）."""
-
-    transfer_id: str
-    filename: str
-    file_size: int
-    sha256: str
-    total_chunks: int
-    chunk_size: int
-    mime_type: str = ""
-    session_id: str = ""
-    channel_id: str = ""
 
 
 @contextlib.contextmanager
@@ -400,7 +441,7 @@ def _log_component_from_logger_name(name: str) -> str:
         return "permissions"
     if name.startswith("jiuwenclaw.agentserver"):
         return "agent_server"
-    if name.startswith("jiuwenclaw.utils"): 
+    if name.startswith("jiuwenclaw.utils"):
         return "agent_server"
     return name
 
@@ -1465,16 +1506,36 @@ def get_agent_sessions_relative_dir() -> Path:
     return get_agent_root_relative_dir() / "sessions"
 
 
+def _normalize_tenant_id(value: str | None) -> str:
+    return str(value or "").strip()
+
+
+def _require_tenant_ids(service_id: str | None, agent_id: str | None) -> tuple[str, str]:
+    """白名单 / 租户工作区要求 ``service_id`` 与 ``agent_id`` 均非空."""
+    sid = _normalize_tenant_id(service_id)
+    aid = _normalize_tenant_id(agent_id)
+    if not sid or not aid:
+        raise ValueError(
+            f"tenant id required: agent_id={agent_id!r}, service_id={service_id!r}"
+        )
+    return sid, aid
+
+
 def get_multi_tenant_user_workspace_dir(service_id: str | None, agent_id: str | None) -> Path | None:
     """Get multi-tenant user workspace directory path.
 
     Path format: ~/.jiuwenclaw/service_{service_id}/agent_{agent_id}
+
+    二者皆空时返回 ``None``（供单租户分支判断）。仅一侧有值时返回 ``service/.../agents`` 等
+    不完整路径，**不要**用于 Skill 白名单；租户工作区请用 ``get_tenant_agent_*`` 系列（要求双 ID）。
     """
-    if not service_id and not agent_id:
+    sid = _normalize_tenant_id(service_id)
+    aid = _normalize_tenant_id(agent_id)
+    if not sid and not aid:
         return None
     workspace_dir = get_user_workspace_dir()
-    workspace_dir = workspace_dir / f"service_{service_id}" if service_id else workspace_dir / "service"
-    workspace_dir = workspace_dir / f"agent_{agent_id}" if agent_id else workspace_dir / "agents"
+    workspace_dir = workspace_dir / f"service_{sid}" if sid else workspace_dir / "service"
+    workspace_dir = workspace_dir / f"agent_{aid}" if aid else workspace_dir / "agents"
     return workspace_dir
 
 
@@ -1504,19 +1565,46 @@ def get_agent_skills_dir() -> Path:
     return get_agent_workspace_dir() / "skills"
 
 
+def get_tenant_agent_jiuwenclaw_workspace_dir(
+    service_id: str | None, agent_id: str | None,
+) -> Path:
+    """多租户 DeepAgent 工作区：``<tenant>/agent/jiuwenclaw_workspace``.
+
+    ``service_id`` / ``agent_id`` 任一缺失时抛 ``ValueError``（不返回 ``None``）。
+    """
+    sid, aid = _require_tenant_ids(service_id, agent_id)
+    base = get_multi_tenant_user_workspace_dir(sid, aid)
+    if base is None:
+        raise ValueError(
+            f"get_multi_tenant_user_workspace_dir returned None for service_id={sid!r}, agent_id={aid!r}"
+        )
+    return base / get_agent_root_relative_dir() / "jiuwenclaw_workspace"
+
+
+def get_tenant_agent_skills_dirs(
+    service_id: str | None, agent_id: str | None,
+) -> list[Path]:
+    """多租户 skills 目录（与 ``JiuWenClaw`` / ``SkillManager`` 落盘路径一致）.
+
+    要求 ``service_id`` 与 ``agent_id`` 至少一个非空；二者皆空时抛 ``ValueError``（避免
+    静默落到 default 租户目录导致跨租户误读 skill）。单租户请用 ``get_multi_tenant_skill_dirs``
+    或 ``get_agent_skills_dir()``。
+    """
+    workspace = get_tenant_agent_jiuwenclaw_workspace_dir(service_id, agent_id)
+    return [workspace / "skills"]
+
+
 def get_multi_tenant_skill_dirs(
     service_id: str | None, agent_id: str | None,
 ) -> list[Path]:
     """Resolve the skills directory list for multi-tenant / single-tenant mode.
 
     - Multi-tenant (any of ``service_id`` / ``agent_id`` provided): returns
-      ``[<multi-tenant user workspace>/skills]``.
+      ``[<tenant>/agent/jiuwenclaw_workspace/skills]``.
     - Single-tenant (both ``None``): returns ``[get_agent_skills_dir()]``.
     """
     if service_id or agent_id:
-        workspace = get_multi_tenant_user_workspace_dir(service_id, agent_id)
-        if workspace is not None:
-            return [workspace / "skills"]
+        return get_tenant_agent_skills_dirs(service_id, agent_id)
     return [get_agent_skills_dir()]
 
 
@@ -1759,82 +1847,6 @@ def get_config_file() -> Path:
 def is_package_installation() -> bool:
     """Check if running from package installation."""
     return _detect_installation_mode()
-
-
-# 统一敏感信息掩码值。
-_SENSITIVE_MASK = "******"
-# 匹配常见敏感字段键值对（不要求值必须带引号），用于覆盖:
-# - token=abc
-# - api_key: sk-xxx
-# - authorization = Bearer ...
-# 分组说明：
-# 1) 敏感键名；2) 分隔符及两侧空白（: 或 =）；3/4) 可选引号（当前替换逻辑未直接使用）
-_KV_SENSITIVE_PATTERN = re.compile(
-    r"(?i)(?<![A-Za-z0-9])"
-    r"(password|passwd|pwd|secret|token|api[_-]?key|access[_-]?token|"
-    r"refresh[_-]?token|authorization|user[_-]?id|userid)"
-    r"(?![A-Za-z0-9])(\s*[:=]\s*)([\"']?)[^,\s\"'\]\}]+([\"']?)"
-)
-# 匹配“键名包含敏感关键词”且“值被引号包裹”的场景，覆盖:
-# - 'CAT_CAFE_CALLBACK_TOKEN': 'xxxx'
-# - 'CAT_CAFE_USER_ID': 'CSDN-weixin'
-# - "my_private_key"="xxxx"
-# 分组说明：
-# 1) 完整的 key + 分隔符（含可选引号）
-# 2) 值的起始引号（' 或 "）
-# 3) 值内容（非贪婪）
-# 4) 结束引号（通过 (\2) 强制与起始引号一致）
-_NAMED_SENSITIVE_KV_PATTERN = re.compile(
-    r"(?i)([\"']?[A-Za-z0-9_.-]*"
-    r"(?:token|secret|password|passwd|pwd|api[_-]?key|authorization|"
-    r"credential|private[_-]?key|user[_-]?id|userid)"
-    r"[A-Za-z0-9_.-]*[\"']?\s*[:=]\s*)([\"'])(.*?)(\2)"
-)
-# 匹配 Authorization Bearer 令牌，保留 "Bearer " 前缀，仅掩码后面的令牌值。
-_BEARER_SENSITIVE_PATTERN = re.compile(r"(?i)\b(Bearer\s+)[A-Za-z0-9\-._~+/]+=*")
-_SENSITIVE_PATTERNS: list[re.Pattern[str]] = [
-    # 匹配 JWT（header.payload.signature 三段式，常见以 eyJ 开头）。
-    re.compile(r"\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b"),
-    # 匹配 OpenAI 风格 key（sk- 前缀）。
-    re.compile(r"\bsk-[A-Za-z0-9]{8,}\b"),
-    # 匹配 GitHub Personal Access Token（ghp_ 前缀）。
-    re.compile(r"\bghp_[A-Za-z0-9]{20,}\b"),
-    # 匹配 GitLab Personal Access Token（glpat- 前缀）。
-    re.compile(r"\bglpat-[A-Za-z0-9_-]{20,}\b"),
-    # 匹配邮箱地址（避免日志中泄露个人身份信息）。
-    re.compile(r"\b[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[A-Za-z]{2,}\b"),
-    # 匹配中国大陆手机号（可带 +86 或 86 前缀，支持空格/短横线分隔）。
-    re.compile(r"(?<!\d)(?:\+?86[-\s]?)?1[3-9]\d{9}(?!\d)"),
-    # 匹配中国身份证号（18 位，最后一位可为 X/x）。
-    re.compile(r"(?<!\d)\d{17}[\dXx](?!\d)"),
-]
-
-
-def _sanitize_log_text(text: str) -> str:
-    if not text:
-        return text
-
-    masked = text
-    masked = _KV_SENSITIVE_PATTERN.sub(r"\1\2" f"{_SENSITIVE_MASK}", masked)
-    masked = _NAMED_SENSITIVE_KV_PATTERN.sub(r"\1\2" f"{_SENSITIVE_MASK}" r"\2", masked)
-    masked = _BEARER_SENSITIVE_PATTERN.sub(r"\1" f"{_SENSITIVE_MASK}", masked)
-    for pattern in _SENSITIVE_PATTERNS:
-        masked = pattern.sub(_SENSITIVE_MASK, masked)
-    return masked
-
-
-class SensitiveDataFilter(logging.Filter):
-    """Mask sensitive data in all log messages."""
-
-    def filter(self, record: logging.LogRecord) -> bool:
-        try:
-            message = record.getMessage()
-            record.msg = _sanitize_log_text(message)
-            record.args = ()
-        except Exception:
-            # Never block logging because of desensitization failure.
-            pass
-        return True
 
 
 class JsonOnlyFormatter(logging.Formatter):
@@ -2508,6 +2520,8 @@ def setup_logger(log_level: Optional[str] = None) -> logging.Logger:
     - JSON 格式化：使用 JsonUserVisibleFormatter
     - user_visible Tag：使用 UserVisibleTagFilter（仅文本格式）
     """
+    from jiuwenclaw.infrastructure.log_masking import SensitiveDataFilter
+
     log_root_path = os.getenv("LOG_ROOT_PATH", "").strip()
     logs_root = Path(log_root_path).expanduser().resolve() if log_root_path else get_logs_dir()
     logs_root.mkdir(parents=True, exist_ok=True)
@@ -2622,7 +2636,7 @@ def setup_logger(log_level: Optional[str] = None) -> logging.Logger:
             _CompositeFilter([_ComponentNameFilter("agent_server"), _ComponentNameFilter("permissions")]))
         _add_rotating("full.log", levels.full, None)
         permissions_formatter = JsonOnlyFormatter()
-        _add_rotating("permissions.log", levels.agent_server, 
+        _add_rotating("permissions.log", levels.agent_server,
                       _ComponentNameFilter("permissions"), permissions_formatter)
 
     elif log_format == 'json':
@@ -2630,12 +2644,12 @@ def setup_logger(log_level: Optional[str] = None) -> logging.Logger:
         _add_rotating("gateway.json", levels.gateway, _ComponentNameFilter("gateway"), use_json=True)
         _add_rotating("channel.json", levels.channel, _ComponentNameFilter("channel"), use_json=True)
         _add_rotating("agent_server.json", levels.agent_server,
-            _CompositeFilter([_ComponentNameFilter("agent_server"), 
+            _CompositeFilter([_ComponentNameFilter("agent_server"),
                               _ComponentNameFilter("permissions")]), use_json=True)
         _add_rotating("full.json", levels.full, None, use_json=True)
         # permissions.log 保持特殊处理（使用JsonOnlyFormatter）
         permissions_formatter = JsonOnlyFormatter()
-        _add_rotating("permissions.log", levels.agent_server, 
+        _add_rotating("permissions.log", levels.agent_server,
                       _ComponentNameFilter("permissions"), permissions_formatter)
 
     elif log_format == 'dual':
@@ -2647,14 +2661,14 @@ def setup_logger(log_level: Optional[str] = None) -> logging.Logger:
             _CompositeFilter([_ComponentNameFilter("agent_server"), _ComponentNameFilter("permissions")]))
         _add_rotating("full.log", levels.full, None)
         permissions_formatter = JsonOnlyFormatter()
-        _add_rotating("permissions.log", levels.agent_server, 
+        _add_rotating("permissions.log", levels.agent_server,
                       _ComponentNameFilter("permissions"), permissions_formatter)
 
         # .json文件（JSON格式）
         _add_rotating("gateway.json", levels.gateway, _ComponentNameFilter("gateway"), use_json=True)
         _add_rotating("channel.json", levels.channel, _ComponentNameFilter("channel"), use_json=True)
         _add_rotating("agent_server.json", levels.agent_server,
-            _CompositeFilter([_ComponentNameFilter("agent_server"), 
+            _CompositeFilter([_ComponentNameFilter("agent_server"),
                               _ComponentNameFilter("permissions")]), use_json=True)
         _add_rotating("full.json", levels.full, None, use_json=True)
 
@@ -2685,6 +2699,119 @@ def setup_logger(log_level: Optional[str] = None) -> logging.Logger:
         logger.debug("interface.log handler setup skipped", exc_info=True)
 
     return root
+
+
+_FILE_HANDLER_LEVEL_MAP: dict[str, str] = {
+    "gateway.log": "gateway",
+    "channel.log": "channel",
+    "agent_server.log": "agent_server",
+    "full.log": "full",
+    "permissions.log": "agent_server",
+}
+
+
+def update_log_levels(
+    log_level: Optional[str] = None,
+    *,
+    console_level: Optional[str] = None,
+    gateway: Optional[str] = None,
+    channel: Optional[str] = None,
+    agent_server: Optional[str] = None,
+    full: Optional[str] = None,
+) -> logging.Logger:
+    """运行时动态更新 ``jiuwenclaw`` 根日志及各 handler 的级别，无需重建 handler。
+
+    参数与 :func:`setup_logger` 一致：传入 ``log_level`` 则统一覆盖所有级别；
+    为 ``None`` 时恢复代码内默认级别（INFO）及环境变量 ``LOG_LEVEL``（仅控制台）。
+
+    可通过关键字参数单独覆盖各组件级别，优先级高于 ``log_level``。
+    """
+    levels = _resolve_logging_levels(log_level)
+
+    if console_level is not None:
+        levels = replace(levels, console=_parse_log_level(console_level, levels.console))
+    if gateway is not None:
+        levels = replace(levels, gateway=_parse_log_level(gateway, levels.gateway))
+    if channel is not None:
+        levels = replace(levels, channel=_parse_log_level(channel, levels.channel))
+    if agent_server is not None:
+        levels = replace(levels, agent_server=_parse_log_level(agent_server, levels.agent_server))
+    if full is not None:
+        levels = replace(levels, full=_parse_log_level(full, levels.full))
+
+    logger_level = min(levels.gateway, levels.channel, levels.agent_server, levels.full)
+    levels = replace(levels, logger=logger_level)
+
+    root = logging.getLogger("jiuwenclaw")
+    root.setLevel(levels.logger)
+
+    for h in root.handlers:
+        if isinstance(h, SafeRotatingFileHandler):
+            fname = Path(h.baseFilename).name
+            attr = _FILE_HANDLER_LEVEL_MAP.get(fname)
+            if attr is not None:
+                h.setLevel(getattr(levels, attr))
+        elif isinstance(h, logging.StreamHandler):
+            h.setLevel(levels.console)
+
+    return root
+
+
+_LOGGING_CONFIG_TABLE = "logging_config"
+
+
+def _logging_config_row_to_dict(obj: Any) -> dict[str, Any]:
+    return {
+        "level": getattr(obj, "level", "INFO"),
+        "console_level": getattr(obj, "console_level", None),
+        "gateway": getattr(obj, "gateway", None),
+        "channel": getattr(obj, "channel", None),
+        "agent_server": getattr(obj, "agent_server", None),
+        "full": getattr(obj, "full", None),
+    }
+
+
+def apply_logging_config_payload(payload: dict[str, Any] | None) -> None:
+    """将 DB 行 / WS payload 转为 :func:`update_log_levels` 调用。"""
+    if not payload or payload.get("op") == "delete":
+        update_log_levels()
+        return
+
+    kwargs: dict[str, Any] = {}
+    if payload.get("level") is not None:
+        kwargs["log_level"] = str(payload["level"])
+    for key in ("console_level", "gateway", "channel", "agent_server", "full"):
+        if payload.get(key) is not None:
+            kwargs[key] = str(payload[key])
+    update_log_levels(**kwargs)
+
+
+async def reload_logging_levels_from_gateway_db() -> None:
+    """从 Gateway 库加载 ``logging_config`` 并刷新**本进程**日志级别。"""
+    try:
+        from jiuwenclaw.infrastructure.module_importer import (
+            import_manager_ws_client_module,
+        )
+
+        db_mod = import_manager_ws_client_module("infrastructure.db")
+        handler = await db_mod.ensure_db_handler(log_prefix="logging_config")
+
+        jid = (os.getenv("JIUWENCLAW_ID") or "").strip()
+        if not jid:
+            update_log_levels()
+            return
+
+        row = await handler.get(_LOGGING_CONFIG_TABLE, {"jiuwenclaw_id": jid})
+        apply_logging_config_payload(
+            _logging_config_row_to_dict(row) if row is not None else None,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "[logging_config_db] logging_config read failed: %s",
+            exc,
+            exc_info=True,
+        )
+        update_log_levels()
 
 
 class AsyncLRUCache:
@@ -2935,6 +3062,7 @@ def fix_json_arguments(arguments: str | dict) -> str | dict:
 @dataclass
 class FileTransferStartParams:
     """文件传输开始参数（用于封装多参数方法调用）."""
+
     transfer_id: str
     filename: str
     file_size: int
@@ -2944,6 +3072,8 @@ class FileTransferStartParams:
     mime_type: str = ""
     session_id: str = ""
     channel_id: str = ""
+    service_id: str = ""
+    agent_id: str = ""
 
 
 @dataclass

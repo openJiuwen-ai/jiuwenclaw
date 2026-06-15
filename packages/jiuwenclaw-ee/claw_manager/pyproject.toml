@@ -1,0 +1,44 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "jiuwenclaw-manager"
+version = "0.1.0"
+description = "JiuwenClaw EE management plane (Claw Manager)"
+requires-python = ">=3.11.4,<3.14"
+license = { text = "Apache-2.0" }
+classifiers = [
+    "License :: OSI Approved :: Apache Software License",
+]
+dependencies = [
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.30",
+    "pydantic>=2.0",
+    "pydantic-settings>=2.0",
+    "httpx>=0.27",
+    "structlog>=24.0",
+    "pyyaml>=6.0",
+    "openjiuwen_runtime_foundation @ git+https://gitcode.com/openJiuwen/agent-runtime.git@develop#subdirectory=foundation",
+    "websockets>=12.0,<16",
+    "asyncpg>=0.29",
+    "cryptography>=42.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=9.0.2",
+    "pytest-asyncio>=1.3.0",
+    "ruff>=0.6",
+]
+
+[project.scripts]
+jiuwenclaw-manager = "jiuwenclaw_manager.main:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["jiuwenclaw_manager*"]
+
+[tool.ruff]
+src = ["src"]
+line-length = 100

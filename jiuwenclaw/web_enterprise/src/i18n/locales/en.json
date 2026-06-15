@@ -11,7 +11,25 @@
     "error": "Error",
     "ok": "OK",
     "and": "and",
-    "modify": "Modify"
+    "modify": "Modify",
+    "delete": "Delete"
+  },
+  "extSettings": {
+    "title": "Request Extension Fields",
+    "subtitle": "User identity and custom fields forwarded with each session",
+    "userIdLabel": "User ID",
+    "userIdPlaceholder": "Optional",
+    "groupIdLabel": "Group ID",
+    "groupIdPlaceholder": "Optional",
+    "botIdLabel": "Bot ID",
+    "botIdPlaceholder": "Optional, e.g. bot_main",
+    "customKvLabel": "Custom Key-Value Pairs",
+    "customKvHint": "Key limited to whitelist",
+    "customKvEmpty": "No custom key-value pairs yet",
+    "customKvValuePlaceholder": "Enter value",
+    "addRow": "Add",
+    "saveHint": "Reconnects automatically after saving",
+    "save": "Save & Apply"
   },
   "nav": {
     "chat": "Chat",
@@ -809,6 +827,7 @@
     "copyMessage": "Copy message",
     "stopReading": "Stop reading",
     "readMessage": "Read message",
+    "fileExpired": "Expired",
     "parallelProgress": "Parallel tasks running ({{completedCount}}/{{total}} complete)",
     "subtask": {
       "starting": "Starting...",

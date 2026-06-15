@@ -12,7 +12,9 @@ import ast
 import asyncio
 import json
 import logging
+import importlib
 import os
+from urllib.parse import quote_plus
 from contextvars import ContextVar, Token
 from dataclasses import dataclass
 
@@ -52,15 +54,6 @@ from openjiuwen.core.session.interaction.interactive_input import InteractiveInp
 from openjiuwen.core.single_agent import AgentCard, ReActAgentConfig, create_agent_session
 from openjiuwen.core.sys_operation import (
     SysOperation,
-    SysOperationCard,
-    OperationMode,
-    LocalWorkConfig,
-    SandboxGatewayConfig,
-)
-from openjiuwen.core.sys_operation.config import (
-    SandboxIsolationConfig,
-    PreDeployLauncherConfig,
-    ContainerScope
 )
 from openjiuwen.harness import (
     AudioModelConfig,
@@ -154,7 +147,7 @@ from jiuwenclaw.agentserver.deep_agent.permissions.owner_scopes import (
 from jiuwenclaw.agentserver.permissions.core import init_permission_engine, get_permission_engine
 from jiuwenclaw.agentserver.memory import clear_memory_manager_cache
 from jiuwenclaw.agentserver.memory.config import (clear_config_cache, get_memory_mode, is_memory_enabled,
-                                                  is_proactive_memory)
+                                                  is_proactive_memory, clear_embed_config_db_cache)
 from jiuwenclaw.agentserver.permissions.checker import TOOL_PERMISSION_CHANNEL_ID
 from jiuwenclaw.agentserver.cron_config import should_register_cron_tools
 from jiuwenclaw.agentserver.skill_manager import (
@@ -215,13 +208,25 @@ from jiuwenclaw.agentserver.tools.xiaoyi_phone_tools import (
     xiaoyi_gui_agent,
     image_reading,
 )
-from jiuwenclaw.config import get_config, get_default_models, resolve_env_vars
+from jiuwenclaw.config import (
+    get_config,
+    get_default_models,
+    get_sandbox_endpoint,
+    get_sandbox_runtime,
+    resolve_env_vars,
+)
+from jiuwenclaw.agentserver.deep_agent.sysop_builder import (
+    create_local_sysop_card,
+    create_sandbox_sysop_card,
+)
 from jiuwenclaw.agentserver.stream_content_sanitize import strip_inline_tool_protocol
 from jiuwenclaw.agentserver.stream_utils import propagate_stream_source_id, tool_calls_payload_to_json_list
 from jiuwenclaw.agentserver.extensions import get_rail_manager
 from jiuwenclaw.gateway.cron import CronTargetChannel
 from jiuwenclaw.agentserver.team import get_team_manager
 from jiuwenclaw.schema.agent import AgentRequest, AgentResponse, AgentResponseChunk
+from jiuwenclaw.agentserver.skill_whitelist import (is_skill_whitelist_tenant, parse_agent_skill_whitelist,
+                                                    SkillWhitelistSynchronizer)
 from jiuwenclaw.utils import (
     deep_merge_dicts,
     get_agent_evolution_trajectories_dir,
@@ -230,6 +235,7 @@ from jiuwenclaw.utils import (
     get_checkpoint_dir,
     get_env_file,
     get_agent_root_dir,
+    get_tenant_agent_skills_dirs,
     get_multi_tenant_user_workspace_dir,
 )
 from jiuwenclaw.local_env_config import set_local_config
@@ -237,7 +243,6 @@ from jiuwenclaw.local_env_config import set_local_config
 load_dotenv(dotenv_path=get_env_file())
 
 _react_config = get_config().get("react", {})
-_sandbox_config = get_config().get("sandbox", {})
 
 _CRON_TOOL_CHANNEL_ID: ContextVar[str] = ContextVar(
     "cron_tool_channel_id",
@@ -844,6 +849,232 @@ def _build_context_engineering_rail(config: dict[str, Any],
         return None
 
 
+def _patch_compiler_for_on_conflict():
+    """使 MySQL 和 PostgreSQL SQLAlchemy 编译器支持 SQLite 的 ON CONFLICT DO UPDATE.
+
+    openjiuwen SDK 的 DbBasedKVStore 硬编码了 SQLite upsert 语法.
+    此 patch 在 SQL 编译阶段将 ON CONFLICT ... DO UPDATE 翻译为对应数据库的语法,
+    使 checkpoint 可以正常写入 MySQL/PostgreSQL.
+    """
+    try:
+        from sqlalchemy.ext.compiler import compiles
+        from sqlalchemy.dialects.sqlite.dml import OnConflictDoUpdate
+
+        @compiles(OnConflictDoUpdate, "mysql")
+        def _mysql_on_conflict_do_update(element, compiler, **kw):
+            values = getattr(element, "_update_values", None)
+            set_pairs = []
+            if isinstance(values, dict):
+                for col_key in values:
+                    col_name = compiler.preparer.format_column(col_key)
+                    set_pairs.append(f"{col_name} = VALUES({col_name})")
+            if not set_pairs:
+                set_pairs.append("value = VALUES(value)")
+            return f"\nON DUPLICATE KEY UPDATE {', '.join(set_pairs)}"
+
+        @compiles(OnConflictDoUpdate, "postgresql")
+        def _postgresql_on_conflict_do_update(element, compiler, **kw):
+            values = getattr(element, "_update_values", None)
+            set_pairs = []
+            if isinstance(values, dict):
+                for col_key in values:
+                    col_name = compiler.preparer.format_column(col_key)
+                    set_pairs.append(f"{col_name} = EXCLUDED.{col_name}")
+            if not set_pairs:
+                set_pairs.append("value = EXCLUDED.value")
+            return f" ON CONFLICT (key) DO UPDATE SET {', '.join(set_pairs)}"
+    except Exception:
+        pass
+
+
+_patch_compiler_for_on_conflict()
+
+
+async def _build_mysql_async_engine():
+    """构建 checkpoint MySQL AsyncEngine。
+
+    连接参数从 DB_HOST/PORT/USER/PASSWORD/NAME 环境变量读取，
+    与 runtime 共用同一 MySQL 实例。
+    未配置 DB_HOST 时返回 None，checkpoint 回退到 SQLite。
+    如果目标库不存在，会自动创建。
+    """
+    db_host = os.getenv("GATEWAY_DB_HOST", "").strip()
+    if not db_host:
+        return None
+    try:
+        from sqlalchemy import text
+        from sqlalchemy.ext.asyncio import create_async_engine
+
+        db_port = os.getenv("GATEWAY_DB_PORT", "3306").strip()
+        db_user = os.getenv("GATEWAY_DB_USER", "root").strip()
+        db_password = os.getenv("GATEWAY_DB_PASSWORD", "").strip()
+        db_name = os.getenv("GATEWAY_DB_NAME", "openjiuwen_gateway").strip()
+        # URL-encode 用户名/密码，避免特殊字符（如 @ : / # %）破坏连接串解析
+        _encoded_user = quote_plus(db_user)
+        _encoded_password = quote_plus(db_password)
+        # 先连接不指定库，自动建库
+        server_url = (
+            f"mysql+aiomysql://{_encoded_user}:{_encoded_password}"
+            f"@{db_host}:{db_port}?charset=utf8mb4"
+        )
+        temp_engine = create_async_engine(server_url, echo=False)
+        async with temp_engine.begin() as conn:
+            await conn.execute(text(
+                f"CREATE DATABASE IF NOT EXISTS `{db_name}` "
+                f"DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci"
+            ))
+        await temp_engine.dispose()
+
+        # 再连接目标库
+        db_url = (
+            f"mysql+aiomysql://{_encoded_user}:{_encoded_password}"
+            f"@{db_host}:{db_port}/{db_name}?charset=utf8mb4"
+        )
+        engine = create_async_engine(
+            db_url,
+            pool_size=5,
+            max_overflow=10,
+            pool_recycle=3600,
+            pool_pre_ping=True,
+        )
+        logger.info(
+            "[JiuWenClawDeepAdapter] checkpoint MySQL engine created: %s:%s/%s",
+            db_host, db_port, db_name,
+        )
+
+        # 确保 kv_store.value 列为 LONGTEXT，避免 checkpoint 序列化数据被截断
+        async with engine.begin() as conn:
+            result = await conn.execute(text(
+                "SELECT COLUMN_TYPE FROM INFORMATION_SCHEMA.COLUMNS "
+                "WHERE TABLE_SCHEMA = :db AND TABLE_NAME = 'kv_store' AND COLUMN_NAME = 'value'"
+            ), {"db": db_name})
+            row = result.fetchone()
+            if row is None:
+                await conn.execute(text(
+                    "CREATE TABLE IF NOT EXISTS kv_store ("
+                    "`key` VARCHAR(512) PRIMARY KEY,"
+                    "`value` LONGTEXT NOT NULL"
+                    ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4"
+                ))
+                logger.info(
+                    "[JiuWenClawDeepAdapter] kv_store table created with value LONGTEXT"
+                )
+            elif row[0].upper() != "LONGTEXT":
+                await conn.execute(text(
+                    "ALTER TABLE kv_store MODIFY COLUMN `value` LONGTEXT NOT NULL"
+                ))
+                logger.info(
+                    "[JiuWenClawDeepAdapter] kv_store.value altered to LONGTEXT"
+                )
+
+        return engine
+    except Exception as exc:
+        logger.error(
+            "[JiuWenClawDeepAdapter] failed to create checkpoint MySQL engine: %s",
+            exc,
+        )
+        return None
+
+
+async def _build_postgresql_async_engine():
+    """构建 checkpoint PostgreSQL AsyncEngine.
+
+    连接参数从 DB_HOST/PORT/USER/PASSWORD/NAME 环境变量读取，
+    与 runtime 共用同一 PostgreSQL 实例。
+    未配置 DB_HOST 时返回 None，checkpoint 回退到 SQLite。
+    如果目标库不存在，会自动创建。
+    """
+    db_host = os.getenv("GATEWAY_DB_HOST", "").strip()
+    if not db_host:
+        return None
+    try:
+        from sqlalchemy import text
+        from sqlalchemy.ext.asyncio import create_async_engine
+
+        db_port = os.getenv("GATEWAY_DB_PORT", "5432").strip()
+        db_user = os.getenv("GATEWAY_DB_USER", "postgres").strip()
+        db_password = os.getenv("GATEWAY_DB_PASSWORD", "").strip()
+        db_name = os.getenv("GATEWAY_DB_NAME", "openjiuwen_gateway").strip()
+        _encoded_user = quote_plus(db_user)
+        _encoded_password = quote_plus(db_password)
+        server_url = (
+            f"postgresql+asyncpg://{_encoded_user}:{_encoded_password}"
+            f"@{db_host}:{db_port}/postgres"
+        )
+        temp_engine = create_async_engine(
+            server_url,
+            echo=False,
+            isolation_level="AUTOCOMMIT",
+        )
+
+        async with temp_engine.connect() as conn:
+            result = await conn.execute(
+                text("SELECT 1 FROM pg_database WHERE datname = :name"),
+                {"name": db_name},
+            )
+            if result.scalar() is None:
+                quoted = db_name.replace('"', '""')
+                await conn.execute(text(f'CREATE DATABASE "{quoted}"'))
+                logger.info(
+                    "[JiuWenClawDeepAdapter] PostgreSQL database created: %s",
+                    db_name,
+                )
+            else:
+                logger.debug(
+                    "[JiuWenClawDeepAdapter] PostgreSQL database already exists: %s",
+                    db_name,
+                )
+        await temp_engine.dispose()
+
+        db_url = (
+            f"postgresql+asyncpg://{_encoded_user}:{_encoded_password}"
+            f"@{db_host}:{db_port}/{db_name}"
+        )
+        engine = create_async_engine(
+            db_url,
+            pool_size=5,
+            max_overflow=10,
+            pool_recycle=3600,
+            pool_pre_ping=True,
+        )
+        logger.info(
+            "[JiuWenClawDeepAdapter] checkpoint PostgreSQL engine created: %s:%s/%s",
+            db_host, db_port, db_name,
+        )
+
+        # 确保 kv_store.value 列为 TEXT，避免 checkpoint 序列化数据被截断
+        async with engine.begin() as conn:
+            result = await conn.execute(text(
+                "SELECT data_type FROM information_schema.columns "
+                "WHERE table_catalog = :db AND table_name = 'kv_store' AND column_name = 'value'"
+            ), {"db": db_name})
+            row = result.fetchone()
+            if row is None:
+                await conn.execute(text(
+                    "CREATE TABLE IF NOT EXISTS kv_store ("
+                    "key VARCHAR(512) PRIMARY KEY,"
+                    "value TEXT NOT NULL"
+                    ")"
+                ))
+                logger.info(
+                    "[JiuWenClawDeepAdapter] kv_store table created with value TEXT"
+                )
+            elif row[0].lower() != "text":
+                await conn.execute(text(
+                    "ALTER TABLE kv_store ALTER COLUMN value TYPE TEXT"
+                ))
+                logger.info(
+                    "[JiuWenClawDeepAdapter] kv_store.value altered to TEXT"
+                )
+        return engine
+    except Exception as exc:
+        logger.error(
+            "[JiuWenClawDeepAdapter] failed to create checkpoint PostgreSQL engine: %s",
+            exc,
+        )
+        return None
+
+
 class _RuntimeCronToolContext:
     """Stable cron tool context proxy backed by per-task contextvars."""
 
@@ -944,15 +1175,28 @@ class JiuWenClawDeepAdapter:
         self._is_proactive_memory: bool | None = None
         self._model_cache: dict[str, Model] = {}
         self._default_model_name: str = ""
+        self._model_config_source: str = "config.yaml"
+        self._enterprise_config: Any = None
+        self._startup_config_base: dict[str, Any] | None = None
         self._multi_session_toolkit: MultiSessionToolkit | None = None
         self._fork_agent_executor: Any = None
         # request_id -> toolkit；session_id -> 关联的 request_id 集合（interrupt 时按会话精确取消）
         self._request_session_toolkits: dict[str, MultiSessionToolkit] = {}
         self._session_toolkit_requests: dict[str, set[str]] = {}
+        self._enabled_skills: list[str] | None = None
 
     def set_skill_manager(self, skill_manager: SkillManager) -> None:
         """Inject shared SkillManager from facade for tool reuse."""
         self._skill_manager = skill_manager
+
+    def _resolve_skill_dirs(self, extra_skill_dir: str | None = None) -> list[str]:
+        if is_skill_whitelist_tenant(self._agent_id, self._service_id):
+            skills_dirs = [str(p) for p in get_tenant_agent_skills_dirs(self._service_id, self._agent_id)]
+        else:
+            skills_dirs = [str(p) for p in get_agent_registered_skill_dirs()]
+        if extra_skill_dir:
+            skills_dirs.append(extra_skill_dir)
+        return skills_dirs
 
     @staticmethod
     def _is_acp_tool_profile(config: dict[str, Any] | None = None) -> bool:
@@ -1457,15 +1701,25 @@ class JiuWenClawDeepAdapter:
         try:
             PersistenceCheckpointerProvider()
             checkpoint_path = get_checkpoint_dir()
+            conf = {"db_type": "sqlite", "db_path": f"{checkpoint_path}/checkpoint"}
+
+            db_type = os.getenv("GATEWAY_DB_TYPE", "").strip().lower()
+            if db_type == "mysql":
+                mysql_engine = await _build_mysql_async_engine()
+                if mysql_engine is not None:
+                    conf["db_client"] = mysql_engine
+                    logger.info("[JiuWenClawDeepAdapter] use mysql db_client")
+            elif db_type == "postgresql":
+                postgresql_engine = await _build_postgresql_async_engine()
+                if postgresql_engine is not None:
+                    conf["db_client"] = postgresql_engine
+                    logger.info("[JiuWenClawDeepAdapter] use postgresql db_client")
             checkpointer = await CheckpointerFactory.create(
-                CheckpointerConfig(
-                    type="persistence",
-                    conf={"db_type": "sqlite", "db_path": f"{checkpoint_path}/checkpoint"},
-                )
+                CheckpointerConfig(type="persistence", conf=conf)
             )
             CheckpointerFactory.set_default_checkpointer(checkpointer)
         except Exception as e:
-            logger.error("[JiuWenClawDeepAdapter] fail to setup checkpoint due to: %s", e, 
+            logger.error("[JiuWenClawDeepAdapter] fail to setup checkpoint due to: %s", e,
                          extra={'user_visible': 'critical'})
 
 
@@ -1551,21 +1805,6 @@ class JiuWenClawDeepAdapter:
         self._model_request_config = self._model.model_config
         return self._model
 
-    def _resolve_model_for_request(self, request: AgentRequest) -> Model:
-        """根据请求中的 model_name 参数查找对应模型，未匹配则回退默认模型。"""
-        requested = (request.params.get("model_name") or "").strip()
-        if requested and requested in self._model_cache:
-            logger.info(
-                f"[JiuWenClawDeepAdapter] 模型配置解析: requested={requested} -> found_in_cache",
-                extra={'user_visible': 'progress'}
-            )
-            return self._model_cache[requested]
-        logger.info(
-            f"[JiuWenClawDeepAdapter] 模型配置解析: using_default_model",
-            extra={'user_visible': 'progress'}
-        )
-        return self._model
-
     def _get_task_id(self) -> str | None:
         if self._task_execution_rail is not None:
             return self._task_execution_rail.get_current_task_id()
@@ -1644,29 +1883,55 @@ class JiuWenClawDeepAdapter:
     def _create_sys_operation(self) -> SysOperation | None:
         """Create a sys operation with workspace as working directory."""
         try:
-            sandbox_url = _sandbox_config.get("url", None)
-            sandbox_type = _sandbox_config.get("type", None)
+            endpoint = get_sandbox_endpoint()
+            runtime = get_sandbox_runtime()
             work_dir = self._workspace_dir or str(get_agent_root_dir())
-            if sandbox_url and sandbox_type:
-                gateway_config = SandboxGatewayConfig(
-                    isolation=SandboxIsolationConfig(container_scope=ContainerScope.SYSTEM),
-                    launcher_config=PreDeployLauncherConfig(
-                        base_url=sandbox_url,
-                        sandbox_type=sandbox_type,
-                        idle_ttl_seconds=600,
-                    ),
-                    timeout_seconds=30,
+            sandbox_url = endpoint.get("url") or ""
+            sandbox_type = endpoint.get("type") or ""
+            sandbox_enabled = bool(runtime.get("enabled"))
+            if sandbox_enabled and sandbox_url and sandbox_type:
+                logger.info(
+                    "[JiuWenClawDeepAdapter] sandbox mode: url=%s type=%s "
+                    "startup_mode=%s idle_ttl_seconds=%s idle_check_interval=%s",
+                    sandbox_url,
+                    sandbox_type,
+                    endpoint.get("startup_mode"),
+                    runtime.get("idle_ttl_seconds"),
+                    runtime.get("idle_check_interval"),
                 )
-                sysop_card = SysOperationCard(
-                    mode=OperationMode.SANDBOX,
-                    work_config=LocalWorkConfig(work_dir=work_dir, shell_allowlist=None),
-                    gateway_config=gateway_config,
+                sysop_card = create_sandbox_sysop_card(
+                    sandbox_url,
+                    sandbox_type,
+                    self._agent_id,
+                    workspace_dir=self._workspace_dir,
+                    files_runtime=runtime.get("files"),
+                    excluded_commands=runtime.get("excluded_commands"),
+                    idle_ttl_seconds=runtime.get("idle_ttl_seconds"),
+                    idle_check_interval=runtime.get("idle_check_interval"),
                 )
             else:
-                sysop_card = SysOperationCard(
-                    mode=OperationMode.LOCAL,
-                    work_config=LocalWorkConfig(work_dir=work_dir, shell_allowlist=None),
-                )
+                if sandbox_enabled and not (sandbox_url and sandbox_type):
+                    missing = []
+                    if not sandbox_url:
+                        missing.append("JIUWENCLAW_SANDBOX_URL")
+                    if not sandbox_type:
+                        # TYPE 已有默认值, 真触发说明用户显式设了空串, 罕见
+                        missing.append("JIUWENCLAW_SANDBOX_TYPE")
+                    logger.warning(
+                        "[JiuWenClawDeepAdapter] sandbox enabled but missing %s; "
+                        "falling back to local sys_operation. set the env var(s) "
+                        "and restart agent-server to actually use jiuwenbox.",
+                        ", ".join(missing),
+                    )
+                else:
+                    logger.info(
+                        "[JiuWenClawDeepAdapter] local mode (sandbox %s)",
+                        "disabled" if not sandbox_enabled else "url/type empty",
+                    )
+                sysop_card = create_local_sysop_card(work_dir=work_dir)
+            if sysop_card is None:
+                logger.warning("[JiuWenClawDeepAdapter] add sys_operation failed: sysop_card is None")
+                return None
             result = Runner.resource_mgr.add_sys_operation(sysop_card)
             if result.is_err():
                 logger.warning("[JiuWenClawDeepAdapter] add sys_operation failed: %s", result.msg())
@@ -1718,18 +1983,21 @@ class JiuWenClawDeepAdapter:
                 except (TypeError, ValueError):
                     max_bodies = DEFAULT_MAX_ACTIVE_SKILL_BODIES
             
-            # 合并技能目录：基础目录 + 扩展传入的额外目录
-            skills_dirs = [str(p) for p in get_agent_registered_skill_dirs()]
+            skills_dirs = self._resolve_skill_dirs(extra_skill_dir)
             if extra_skill_dir:
-                skills_dirs.append(extra_skill_dir)
-                logger.info("[JiuWenClawDeepAdapter] extra_skill_dir added: %s", extra_skill_dir,
-                       extra={'user_visible': 'progress'})
-            
+                logger.info("[JiuWenClawDeepAdapter] extra_skill_dir added: %s", extra_skill_dir)
+
+            enabled_skills = self._enabled_skills
+            if is_skill_whitelist_tenant(self._agent_id, self._service_id) and enabled_skills is None:
+                enabled_skills = []
+
             skill_rail_kwargs: dict[str, Any] = dict(
                 skills_dir=skills_dirs,
                 skill_mode=skill_mode,
                 include_tools=include_tools,
             )
+            if enabled_skills is not None:
+                skill_rail_kwargs["enabled_skills"] = enabled_skills
             if _UPSTREAM_HAS_ACTIVE_SKILL_BODIES:
                 skill_rail_kwargs["include_skill_body_tools"] = include_skill_body_tools
                 skill_rail_kwargs["max_active_skill_bodies"] = max_bodies
@@ -1779,7 +2047,7 @@ class JiuWenClawDeepAdapter:
                 evolution_auto_scan = config.get("evolution", {}).get("auto_scan", False)
             trajectory_dir = self._resolve_evolution_trajectory_dir(config)
             skill_evolution_rail = SkillEvolutionRail(
-                skills_dir=[str(p) for p in get_agent_registered_skill_dirs()],
+                skills_dir=self._resolve_skill_dirs(),
                 llm=self._model,
                 model=config.get("model_name", "gpt-4"),
                 auto_scan=evolution_auto_scan,
@@ -1848,6 +2116,61 @@ class JiuWenClawDeepAdapter:
             rail = None
         return rail
 
+    @staticmethod
+    def _build_extension_config_debug_rail() -> Any | None:
+        """Build ExtensionConfigDebugRail for extension config end-to-end debugging."""
+        try:
+            from jiuwenclaw.agentserver.deep_agent.rails.extension_config_debug_rail import (
+                ExtensionConfigDebugRail,
+            )
+            rail = ExtensionConfigDebugRail()
+            logger.info("[JiuWenClawDeepAdapter] ExtensionConfigDebugRail create success")
+        except Exception as exc:
+            logger.warning("[JiuWenClawDeepAdapter] ExtensionConfigDebugRail create failed: %s", exc)
+            rail = None
+        return rail
+
+    @staticmethod
+    def _load_extra_rails_from_env() -> list[Any]:
+        """Load extra DeepAgentRails from AGENT_EXTRA_RAILS env var.
+
+        Env format (semicolon-separated module paths):
+            AGENT_EXTRA_RAILS=path.to.module1;path.to.module2
+
+        Each module must expose a ``register_rails()`` function that returns
+        a list of DeepAgentRail instances.
+        """
+        env_value = os.getenv("AGENT_EXTRA_RAILS", "").strip()
+        if not env_value:
+            return []
+
+        extra_rails: list[Any] = []
+        for module_path in [p.strip() for p in env_value.split(";") if p.strip()]:
+            try:
+                mod = importlib.import_module(module_path)
+                register_fn = getattr(mod, "register_rails", None)
+                if register_fn is None:
+                    logger.warning(
+                        "[JiuWenClawDeepAdapter] Extra rail module '%s' has no register_rails(), skipping",
+                        module_path,
+                    )
+                    continue
+                rails = register_fn()
+                if rails:
+                    if not isinstance(rails, list):
+                        rails = [rails]
+                    extra_rails.extend(rails)
+                    logger.info(
+                        "[JiuWenClawDeepAdapter] Loaded %d rail(s) from '%s'",
+                        len(rails), module_path,
+                    )
+            except Exception as exc:
+                logger.warning(
+                    "[JiuWenClawDeepAdapter] Failed to load extra rails from '%s': %s",
+                    module_path, exc,
+                )
+        return extra_rails
+
     def _build_task_planning_rail(self, config: dict[str, Any] | None = None) -> TaskPlanningRail | None:
         """Build TaskPlanningRail."""
         try:
@@ -1893,11 +2216,12 @@ class JiuWenClawDeepAdapter:
 
     def _build_memory_rail(self, mode: str) -> MemoryRail | None:
         try:
+            from jiuwenclaw.agentserver.memory.config import get_embed_config
             config = get_config()
-            embed_config = config.get("embed") if isinstance(config, dict) else None
-            has_api_key = embed_config.get("embed_api_key") if isinstance(embed_config, dict) else None
-            has_base_url = embed_config.get("embed_base_url") if isinstance(embed_config, dict) else None
-            has_model = embed_config.get("embed_model") if isinstance(embed_config, dict) else None
+            embed_config = get_embed_config()
+            has_api_key = embed_config.get("api_key") if isinstance(embed_config, dict) else None
+            has_base_url = embed_config.get("base_url") if isinstance(embed_config, dict) else None
+            has_model = embed_config.get("model") if isinstance(embed_config, dict) else None
             if not all([has_api_key, has_base_url, has_model]):
                 logger.warning("[JiuWenClawDeepAdapter] MemoryRail create failed: No available embedding config",
                           extra={'user_visible': 'progress'})
@@ -1905,9 +2229,9 @@ class JiuWenClawDeepAdapter:
             self._is_proactive_memory = is_proactive_memory(mode, config)
             memory_rail = MemoryRail(
                 embedding_config=EmbeddingConfig(
-                    model_name=embed_config.get("embed_model"),
-                    base_url=embed_config.get("embed_base_url"),
-                    api_key=embed_config.get("embed_api_key")
+                    model_name=embed_config.get("model"),
+                    base_url=embed_config.get("base_url"),
+                    api_key=embed_config.get("api_key")
                 ),
                 is_proactive=self._is_proactive_memory
             )
@@ -1926,13 +2250,14 @@ class JiuWenClawDeepAdapter:
             CodingMemoryRail 实例，失败返回 None
         """
         try:
+            from jiuwenclaw.agentserver.memory.config import get_embed_config
             config = get_config()
-            embed_config = config.get("embed") if isinstance(config, dict) else None
+            embed_config = get_embed_config()
 
             # 检查 embedding 配置
-            has_api_key = embed_config.get("embed_api_key") if isinstance(embed_config, dict) else None
-            has_base_url = embed_config.get("embed_base_url") if isinstance(embed_config, dict) else None
-            has_model = embed_config.get("embed_model") if isinstance(embed_config, dict) else None
+            has_api_key = embed_config.get("api_key") if isinstance(embed_config, dict) else None
+            has_base_url = embed_config.get("base_url") if isinstance(embed_config, dict) else None
+            has_model = embed_config.get("model") if isinstance(embed_config, dict) else None
             if not all([has_api_key, has_base_url, has_model]):
                 logger.warning("[JiuWenClawDeepAdapter] CodingMemoryRail: no embedding config, skipping",
                           extra={'user_visible': 'progress'})
@@ -1949,9 +2274,9 @@ class JiuWenClawDeepAdapter:
             coding_memory_rail = CodingMemoryRail(
                 coding_memory_dir=coding_memory_dir,
                 embedding_config=EmbeddingConfig(
-                    model_name=embed_config.get("embed_model"),
-                    base_url=embed_config.get("embed_base_url"),
-                    api_key=embed_config.get("embed_api_key"),
+                    model_name=embed_config.get("model"),
+                    base_url=embed_config.get("base_url"),
+                    api_key=embed_config.get("api_key"),
                 ),
                 language="cn" if language == "zh" else "en",
             )
@@ -2177,6 +2502,8 @@ class JiuWenClawDeepAdapter:
             # TelemetryRail - lowest priority, runs first for full coverage
             _RailBuildInfo("_telemetry_rail", self._build_telemetry_rail),
             _RailBuildInfo("_runtime_prompt_rail", self._build_runtime_prompt_rail),
+            # an example to use extension rail
+            # _RailBuildInfo("_extension_config_debug_rail", self._build_extension_config_debug_rail),
             _RailBuildInfo("_response_prompt_rail", self._build_response_prompt_rail),
             _RailBuildInfo("_task_execution_rail", self._build_task_execution_rail),
             _RailBuildInfo("_context_overflow_recovery_rail", self._build_context_overflow_recovery_rail),
@@ -2251,6 +2578,14 @@ class JiuWenClawDeepAdapter:
                 logger.warning("[JiuWenClawDeepAdapter] Rail %s build returned None", info.attr_name)
         logger.info("[JiuWenClawDeepAdapter] Total rails built: %d, rail names: %s", len(rails_list),
                     [type(r).__name__ for r in rails_list])
+
+        # 从环境变量加载额外 Rails（非侵入式扩展）
+        extra_rails = self._load_extra_rails_from_env()
+        if extra_rails:
+            rails_list.extend(extra_rails)
+            logger.info("[JiuWenClawDeepAdapter] Extra rails loaded from env: %s",
+                        [type(r).__name__ for r in extra_rails])
+
         if self._task_execution_rail is None:
             logger.warning("[JiuWenClawDeepAdapter] TaskExecutionRail missing after _build_agent_rails")
         else:
@@ -2423,18 +2758,18 @@ class JiuWenClawDeepAdapter:
         # 如果你要更新rail，就传一个新的对象；如果不要更新，就不传；如果需要仅卸载，就传原来的rail对象。
         if disabled_tools_rail_newly_created and self._disabled_tools_rail is not None:
             rails_list.append(self._disabled_tools_rail)
- 
-        #  诊断日志：观察 rails_list 包含哪些 Rails 
-        logger.info( 
+
+        #  诊断日志：观察 rails_list 包含哪些 Rails
+        logger.info(
             "[JiuWenClawDeepAdapter]  DIAGNOSTIC: rails_list 构建完成 " 
             "| rails_count=%d " 
             "| rails_names=[%s] " 
-            "| has_runtime_prompt_rail=%s", 
-            len(rails_list), 
-            ", ".join(type(r).__name__ for r in rails_list), 
-            any(type(r).__name__ == "RuntimePromptRail" for r in rails_list), 
+            "| has_runtime_prompt_rail=%s",
+            len(rails_list),
+            ", ".join(type(r).__name__ for r in rails_list),
+            any(type(r).__name__ == "RuntimePromptRail" for r in rails_list),
         )
-        
+
         return rails_list
 
     async def _get_tool_cards(self, agent_id: str, *, mode: str = "agent.plan"):
@@ -2650,6 +2985,142 @@ class JiuWenClawDeepAdapter:
                 completion_timeout=ctx.config.get("completion_timeout", 21600.0),
             )
 
+    @staticmethod
+    def _mask_model_secret(value: Any) -> str:
+        text = str(value or "").strip()
+        if not text:
+            return "(empty)"
+        if len(text) <= 8:
+            return "***"
+        return f"{text[:4]}***{text[-2:]}"
+
+    def _log_active_model_on_startup(self, *, phase: str = "create_instance") -> None:
+        """记录四类模型槽位的 source / template_name / template_id / model_name（启动日志）。"""
+        from jiuwenclaw.agentserver.enterprise_config.apply_models import (
+            SLOT_TO_CONFIG_KEY,
+        )
+        from jiuwenclaw.agentserver.enterprise_config.loader import TemplateRefSlot
+
+        empty = "(empty)"
+        config = self._startup_config_base if isinstance(self._startup_config_base, dict) else {}
+        models_section = config.get("models") if isinstance(config.get("models"), dict) else {}
+        enterprise_models: dict[str, Any] = {}
+        if self._enterprise_config is not None:
+            enterprise_models = getattr(self._enterprise_config, "models", None) or {}
+
+        default_entry: dict[str, Any] = {}
+        entries = get_default_models(config) if config else []
+        if entries and isinstance(entries[0], dict):
+            default_entry = entries[0]
+
+        parts = [f"source={self._model_config_source or empty}"]
+        for slot in (
+            TemplateRefSlot.DEFAULT_MODEL,
+            TemplateRefSlot.VISION_MODEL,
+            TemplateRefSlot.AUDIO_MODEL,
+            TemplateRefSlot.VIDEO_MODEL,
+        ):
+            config_key = SLOT_TO_CONFIG_KEY[slot]
+            template_name = ""
+            template_id = ""
+            model_name = ""
+
+            slot_entities = enterprise_models.get(slot.value)
+            entity: dict[str, Any] | None = None
+            if isinstance(slot_entities, list) and slot_entities:
+                first = slot_entities[0]
+                entity = first if isinstance(first, dict) else None
+            elif isinstance(slot_entities, dict):
+                entity = slot_entities
+            if isinstance(entity, dict):
+                template_name = str(entity.get("template_name") or "").strip()
+                template_id = str(entity.get("template_id") or "").strip()
+                model_name = str(entity.get("model_id") or "").strip()
+
+            if config_key == "default":
+                template_name = template_name or str(default_entry.get("template_name") or "").strip()
+                template_id = template_id or str(default_entry.get("template_id") or "").strip()
+                default_mcc = default_entry.get("model_client_config")
+                if isinstance(default_mcc, dict):
+                    model_name = model_name or str(default_mcc.get("model_name") or "").strip()
+
+            section = models_section.get(config_key)
+            if isinstance(section, dict):
+                template_name = template_name or str(section.get("template_name") or "").strip()
+                template_id = template_id or str(section.get("template_id") or "").strip()
+                section_mcc = section.get("model_client_config")
+                if isinstance(section_mcc, dict):
+                    model_name = (
+                        str(section_mcc.get("model_name") or "").strip() or model_name
+                    )
+
+            parts.append(
+                f"{config_key}(template_name={template_name or empty}, "
+                f"template_id={template_id or empty}, "
+                f"model_name={model_name or empty})"
+            )
+
+        logger.info(
+            "[JiuWenClawDeepAdapter] Agent 已启动(%s)，当前使用模型: %s",
+            phase,
+            "; ".join(parts),
+        )
+
+    def _merge_enterprise_models_into_config(
+        self, config_base: dict[str, Any]
+    ) -> dict[str, Any]:
+        """若已加载 ``_enterprise_config``，将其模型槽位覆盖到 config 快照上。"""
+        if self._enterprise_config is None:
+            return config_base
+        from jiuwenclaw.agentserver.enterprise_config.apply_models import (
+            apply_enterprise_models_to_config,
+        )
+
+        merged, applied = apply_enterprise_models_to_config(
+            config_base, self._enterprise_config
+        )
+        if applied:
+            self._model_config_source = "enterprise_policy"
+            logger.info(
+                "[JiuWenClawDeepAdapter] using enterprise model config: slots=%s",
+                list(self._enterprise_config.models),
+            )
+        return merged
+
+    async def _load_enterprise_config(self, request: AgentRequest) -> None:
+        """按当前请求的 ``params`` 从 Gateway DB 加载生效企业策略到 ``self._enterprise_config``。"""
+        self._enterprise_config = None
+        try:
+            from jiuwenclaw.agentserver.enterprise_config import (
+                DEFAULT_AGENT_LOAD_SLOTS,
+                load_effective_enterprise_config,
+            )
+        except ImportError as exc:
+            logger.error("[JiuWenClawDeepAdapter] enterprise_config unavailable: %s", exc)
+            return
+
+        loaded = await load_effective_enterprise_config(
+            request,
+            DEFAULT_AGENT_LOAD_SLOTS,
+        )
+        self._enterprise_config = loaded
+        if loaded is None:
+            p = request.params
+            logger.warning(
+                "[JiuWenClawDeepAdapter] no effective enterprise config loaded "
+                "(group_id=%s bot_id=%s user_id=%s)",
+                p.get("group_id"),
+                p.get("bot_id"),
+                p.get("user_id"),
+            )
+            return
+
+        logger.info(
+            "[JiuWenClawDeepAdapter] enterprise config loaded: template_ref=%s models=%s",
+            loaded.template_ref,
+            list(loaded.models),
+        )
+
     async def create_instance(self, config: dict[str, Any] | None = None, *, mode: str = "agent.plan") -> None:
         """初始化 DeepAgent 实例.
 
@@ -2657,25 +3128,59 @@ class JiuWenClawDeepAdapter:
             config: 可选配置，支持以下字段：
                 - agent_name: Agent 名称，默认 "main_agent"。
                 - workspace_dir: 工作区目录，默认 "workspace/agent"。
+                - enterprise_routing: 企业策略路由上下文（group_id/bot_id/user_id 等）。
+                - enabled_skills: Skill 白名单目录名
+                - request: 可选 AgentRequest（创建时按 ``params`` 加载企业配置并合并模型）。
                 - 其余字段透传给 DeepAgentConfig。
             mode: 实例化模式，支持 "claw"（默认，使用 create_deep_agent）和 "code"（使用 create_code_agent）。
         """
         await self.set_checkpoint()
 
-        self._instance_overrides = dict(config or {}) if isinstance(config, dict) else {}
+        self._instance_overrides = dict(config) if isinstance(config, dict) else {}
         loop = asyncio.get_running_loop()
         config_base = await loop.run_in_executor(None, get_config)
+        bootstrap_request = self._instance_overrides.pop("request", None)
+        if bootstrap_request is not None:
+            await self._load_enterprise_config(bootstrap_request)
+        config_base = self._merge_enterprise_models_into_config(config_base)
         self._refresh_multimodal_configs(config_base)
+        self._startup_config_base = config_base
+        self._log_active_model_on_startup(phase=f"create_instance:{mode}")
         config = config_base.get('react', {}).copy()
         self._config_cache = config.copy()
         self._agent_name = self._instance_overrides.get("agent_name", config.get("agent_name", "main_agent"))
+
+        if is_skill_whitelist_tenant(self._agent_id, self._service_id):
+            enterprise_skills: list[dict[str, Any]] = []
+            if self._enterprise_config is not None:
+                enterprise_skills = getattr(self._enterprise_config, "skill_whitelist", None)
+            skill_config = parse_agent_skill_whitelist(self._agent_id, self._service_id, enterprise_skills)
+            sync_result = await SkillWhitelistSynchronizer(self._service_id, self._agent_id).sync(skill_config)
+            if sync_result.errors:
+                logger.warning(
+                    "[SkillWhitelist] sync partial errors: agent_id=%s service_id=%s errors=%s",
+                    self._agent_id,
+                    self._service_id,
+                    sync_result.errors,
+                )
+            if sync_result.enabled_skill_dirs is not None:
+                self._enabled_skills = [str(name) for name in sync_result.enabled_skill_dirs if str(name).strip()]
+
         # Keep constructor-injected tenant workspace by default.
         # Only override when request explicitly provides workspace_dir.
         configured_workspace = self._instance_overrides.get("workspace_dir")
         if configured_workspace is not None:
             self._workspace_dir = configured_workspace
 
-        model = self._create_model(config_base)
+        try:
+            model = self._create_model(config_base)
+        except Exception as exc:
+            logger.error(
+                "[JiuWenClawDeepAdapter] create_instance 模型初始化失败(%s): %s",
+                mode,
+                exc,
+            )
+            raise
         agent_card = AgentCard(name=self._agent_name, id='jiuwenclaw')
 
         tool_cards = await self._get_tool_cards(agent_card.id, mode=mode)
@@ -2819,6 +3324,7 @@ class JiuWenClawDeepAdapter:
         if self._instance is None:
             raise RuntimeError("JiuWenClawDeepAdapter 未初始化，请先调用 create_instance()")
         clear_config_cache()
+        clear_embed_config_db_cache()
         clear_memory_manager_cache()
 
         if env_overrides is not None:
@@ -2848,7 +3354,9 @@ class JiuWenClawDeepAdapter:
         except Exception as exc:
             logger.warning("[JiuWenClaw] ExtensionRegistry update failed: %s", exc)
 
+        config_base = self._merge_enterprise_models_into_config(config_base)
         self._refresh_multimodal_configs(config_base)
+
         config = config_base.get('react', {}).copy()
         self._config_cache = config.copy()
 
@@ -2884,15 +3392,15 @@ class JiuWenClawDeepAdapter:
             rails=rails_list,
         )
 
-        #  诊断日志：观察 Agent.configure() 收到的 rails_list 
-        logger.info( 
+        #  诊断日志：观察 Agent.configure() 收到的 rails_list
+        logger.info(
             "[JiuWenClawDeepAdapter]  DIAGNOSTIC: 准备调用 Agent.configure() " 
             "| rails_count=%d " 
             "| rails_names=[%s] " 
-            "| deep_cfg.rails 配置完成", 
-            len(rails_list), 
-            ", ".join(type(r).__name__ for r in rails_list), 
-        ) 
+            "| deep_cfg.rails 配置完成",
+            len(rails_list),
+            ", ".join(type(r).__name__ for r in rails_list),
+        )
 
         self._instance.configure(deep_cfg)
 
@@ -3152,6 +3660,18 @@ class JiuWenClawDeepAdapter:
         config_base = get_config()
         channel = str(channel_id or self._resolve_prompt_channel(session_id) or "web").strip() or "web"
         send_file_enabled = config_base.get("channels", {}).get(channel, {}).get("send_file_allowed", False)
+
+        # 如果 AGENT_RUNTIME 环境变量存在（非空），则优先使用企业配置中的 send_file_allowed
+        agent_runtime_env = os.getenv("AGENT_RUNTIME", "").strip()
+        if agent_runtime_env:
+            logger.info(
+                "[JiuWenClawDeepAdapter] AGENT_RUNTIME detected: %s, using enterprise send_file config",
+                agent_runtime_env,
+            )
+            send_file_enabled = True
+            if self._enterprise_config is not None:
+                send_file_enabled = bool(self._enterprise_config.send_file_allowed)
+
         send_file_channel_allowed = send_file_enabled or channel == "officeclaw"
         has_send_file_request_context = bool(request_id and session_id)
         if send_file_channel_allowed and has_send_file_request_context:
@@ -3274,86 +3794,86 @@ class JiuWenClawDeepAdapter:
             set_cwd(resolved_workspace_dir)
         except Exception as exc:
             logger.warning("[JiuWenClawDeepAdapter] set_cwd(%s) failed: %s", resolved_workspace_dir, exc)
-    
-        # 设置 output_dir ContextVar（新增） 
-        # Agent 可在 effective_project_dir 工作但将输出文件保存至 output_dir 
-        from jiuwenclaw.agentserver.tools.subagent_executor.context_vars import ( 
-            set_effective_request_output_dir, 
-            get_effective_request_output_dir, 
-        ) 
- 
-        output_dir = md.get("output_dir") 
-        if isinstance(output_dir, str) and output_dir.strip(): 
-            set_effective_request_output_dir(output_dir.strip()) 
-            logger.info( 
+
+        # 设置 output_dir ContextVar（新增）
+        # Agent 可在 effective_project_dir 工作但将输出文件保存至 output_dir
+        from jiuwenclaw.agentserver.tools.subagent_executor.context_vars import (
+            set_effective_request_output_dir,
+            get_effective_request_output_dir,
+        )
+
+        output_dir = md.get("output_dir")
+        if isinstance(output_dir, str) and output_dir.strip():
+            set_effective_request_output_dir(output_dir.strip())
+            logger.info(
                 "[JiuWenClawDeepAdapter] output_dir 设置完成: output_dir=%s " 
-                "(effective_project_dir=%s)", 
-                output_dir.strip(), 
-                resolved_workspace_dir 
-            ) 
+                "(effective_project_dir=%s)",
+                output_dir.strip(),
+                resolved_workspace_dir
+            )
 
 
-            #  方案A：动态更新write_file工具描述，注入output_dir路径 
-            # 让Agent在工具选择阶段就能看到推荐的保存位置 
-            # 正确模式：ability_manager用tool_name，resource_mgr用tool_card.id 
-            try: 
-                # Step 1: 从 ability_manager 获取 ToolCard（使用工具名称） 
-                tool_card = self._instance.ability_manager.get("write_file") 
-                if not tool_card: 
-                    logger.warning("[JiuWenClawDeepAdapter] write_file 工具卡片未在 ability_manager 中注册") 
-                else: 
-                    # Step 2: 使用 tool_card.id 获取 Tool 对象 
-                    write_file_tool = Runner.resource_mgr.get_tool(tool_card.id) 
-                    if write_file_tool and hasattr(write_file_tool, 'card'): 
-                        # 更新工具描述，在参数说明中注入output_dir推荐路径 
-                        original_description = write_file_tool.card.description or "" 
-                        output_dir_hint = ( 
+            #  方案A：动态更新write_file工具描述，注入output_dir路径
+            # 让Agent在工具选择阶段就能看到推荐的保存位置
+            # 正确模式：ability_manager用tool_name，resource_mgr用tool_card.id
+            try:
+                # Step 1: 从 ability_manager 获取 ToolCard（使用工具名称）
+                tool_card = self._instance.ability_manager.get("write_file")
+                if not tool_card:
+                    logger.warning("[JiuWenClawDeepAdapter] write_file 工具卡片未在 ability_manager 中注册")
+                else:
+                    # Step 2: 使用 tool_card.id 获取 Tool 对象
+                    write_file_tool = Runner.resource_mgr.get_tool(tool_card.id)
+                    if write_file_tool and hasattr(write_file_tool, 'card'):
+                        # 更新工具描述，在参数说明中注入output_dir推荐路径
+                        original_description = write_file_tool.card.description or ""
+                        output_dir_hint = (
                             f"\n\n推荐保存路径：{output_dir.strip()}\n\n" 
-                            f"参数 file_path 推荐使用：{output_dir.strip()}/filename.ext" 
-                        ) 
+                            f"参数 file_path 推荐使用：{output_dir.strip()}/filename.ext"
+                        )
 
 
-                        # 创建新的描述（保留原描述 + 添加output_dir提示） 
-                        enhanced_description = original_description + output_dir_hint 
+                        # 创建新的描述（保留原描述 + 添加output_dir提示）
+                        enhanced_description = original_description + output_dir_hint
 
 
-                        # 更新工具卡片描述 
-                        write_file_tool.card.description = enhanced_description 
+                        # 更新工具卡片描述
+                        write_file_tool.card.description = enhanced_description
 
 
-                        logger.info( 
-                            "[JiuWenClawDeepAdapter] ✅ write_file工具描述已更新，注入output_dir路径: %s (tool_id=%s)", 
-                            output_dir.strip(), 
-                            tool_card.id 
-                        ) 
-                    else: 
-                        logger.warning( 
-                            "[JiuWenClawDeepAdapter] write_file Tool对象未找到 (tool_id=%s)", 
-                            tool_card.id 
-                        ) 
-            except Exception as exc: 
-                logger.warning( 
-                    "[JiuWenClawDeepAdapter] write_file工具描述更新失败: %s", 
-                    exc, 
-                    exc_info=True  # 打印完整堆栈 
-                ) 
-        else: 
-            set_effective_request_output_dir(None) 
+                        logger.info(
+                            "[JiuWenClawDeepAdapter] ✅ write_file工具描述已更新，注入output_dir路径: %s (tool_id=%s)",
+                            output_dir.strip(),
+                            tool_card.id
+                        )
+                    else:
+                        logger.warning(
+                            "[JiuWenClawDeepAdapter] write_file Tool对象未找到 (tool_id=%s)",
+                            tool_card.id
+                        )
+            except Exception as exc:
+                logger.warning(
+                    "[JiuWenClawDeepAdapter] write_file工具描述更新失败: %s",
+                    exc,
+                    exc_info=True  # 打印完整堆栈
+                )
+        else:
+            set_effective_request_output_dir(None)
 
 
-        #  诊断日志：观察 RuntimePromptRail 实例状态 
-        logger.info( 
+        #  诊断日志：观察 RuntimePromptRail 实例状态
+        logger.info(
             "[JiuWenClawDeepAdapter]  DIAGNOSTIC: RuntimePromptRail 状态检查 " 
             "| request_id=%s " 
             "| _runtime_prompt_rail is %s " 
             "| output_dir ContextVar=%s " 
-            "| workspace_dir=%s", 
-            params.request_id, 
-            "None (未创建)" if self._runtime_prompt_rail is None else "已创建", 
-            get_effective_request_output_dir(), 
-            resolved_workspace_dir, 
-        ) 
- 
+            "| workspace_dir=%s",
+            params.request_id,
+            "None (未创建)" if self._runtime_prompt_rail is None else "已创建",
+            get_effective_request_output_dir(),
+            resolved_workspace_dir,
+        )
+
         if self._runtime_prompt_rail:
             self._runtime_prompt_rail.set_language(resolved_language)
             resolved_channel = (
@@ -3773,31 +4293,61 @@ class JiuWenClawDeepAdapter:
             finally:
                 self._untrack_session_toolkit(rid)
 
+    @staticmethod
+    def _is_filled_model_credential(value: Any) -> bool:
+        if value is None:
+            return False
+        text = str(value).strip()
+        if not text:
+            return False
+        if text.startswith("${") and text.endswith("}"):
+            return False
+        return True
+
+    @classmethod
+    def _model_client_config_has_api_key(cls, mcc: Any) -> bool:
+        if mcc is None:
+            return False
+        if isinstance(mcc, dict):
+            return cls._is_filled_model_credential(mcc.get("api_key"))
+        return cls._is_filled_model_credential(getattr(mcc, "api_key", None))
+
     def _has_valid_model_config(self) -> bool:
-        """检查是否有有效的模型配置."""
-        # 检查环境变量中是否有 API_KEY
-        if os.getenv("API_KEY"):
+        """检查是否有有效的模型配置（.env、运行时 Model 或 config.yaml defaults）。"""
+        if self._is_filled_model_credential(os.getenv("API_KEY")):
             return True
 
-        # 检查初始化时设置的 model_client_config（优先）
-        if self._model_client_config is not None:
-            api_key = getattr(self._model_client_config, "api_key", "")
-            if api_key and api_key != "placeholder-api-key":
+        if self._model_client_config_has_api_key(self._model_client_config):
+            return True
+
+        if self._model is not None and self._model_client_config_has_api_key(
+            getattr(self._model, "model_client_config", None),
+        ):
+            return True
+
+        for cached in self._model_cache.values():
+            if self._model_client_config_has_api_key(getattr(cached, "model_client_config", None)):
                 return True
 
-        # 检查实例的配置（作为后备）
+        react_agent = None
         if self._instance is not None:
-            react_agent = getattr(self._instance, "_react_agent", None) or getattr(self._instance, "react_agent", None)
-            if react_agent is not None:
-                config = getattr(react_agent, "_config", None)
-                if config is not None and hasattr(config, "model_client_config"):
-                    mcc = config.model_client_config
-                    if isinstance(mcc, dict):
-                        api_key = mcc.get("api_key", "")
-                    else:
-                        api_key = getattr(mcc, "api_key", "")
-                    if api_key and api_key != "placeholder-api-key":
-                        return True
+            react_agent = getattr(self._instance, "_react_agent", None) or getattr(
+                self._instance, "react_agent", None,
+            )
+        if react_agent is not None:
+            agent_config = getattr(react_agent, "_config", None)
+            if agent_config is not None and self._model_client_config_has_api_key(
+                getattr(agent_config, "model_client_config", None),
+            ):
+                return True
+
+        try:
+            for entry in get_default_models():
+                mcc = entry.get("model_client_config") or {}
+                if self._model_client_config_has_api_key(mcc):
+                    return True
+        except Exception:  # noqa: BLE001
+            pass
 
         return False
 
@@ -4492,9 +5042,6 @@ class JiuWenClawDeepAdapter:
                 metadata=request.metadata,
             )
 
-        # 按请求选择模型
-        resolved_model = self._resolve_model_for_request(request)
-        self._apply_model_to_react_agent(resolved_model)
         try:
             await self._update_runtime_config(_RuntimeConfigParams.from_agent_request(request, mode))
 
@@ -4651,13 +5198,6 @@ class JiuWenClawDeepAdapter:
             )
         token_cid = TOOL_PERMISSION_CHANNEL_ID.set((request.channel_id or "").strip())
         token_perm = setup_permission_context(request)
-        # 按请求选择模型
-        resolved_model = self._resolve_model_for_request(request)
-        self._apply_model_to_react_agent(resolved_model)
-        logger.info(
-            f"[JiuWenClawDeepAdapter] 模型应用成功: model={resolved_model}",
-            extra={'user_visible': 'progress'}
-        )
         try:
             await self._update_runtime_config(_RuntimeConfigParams.from_agent_request(request, mode))
 

@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import asyncio
 import os
@@ -50,7 +51,6 @@ _KNOWN_JIUWENCLAW_SESSION_PREFIXES = (
 )
 
 
-
 class ChannelMode(str, Enum):
     AGENT_PLAN = "agent.plan"
     AGENT_FAST = "agent.fast"
@@ -88,7 +88,6 @@ class ModeChangeCancelParams:
     reply_session_id: str | None
     old_sid: str | None
     new_mode_label: str
-
 
 if TYPE_CHECKING:
     from jiuwenclaw.e2a.models import E2AEnvelope
@@ -183,6 +182,10 @@ class MessageHandler(ABC):
 
     def set_outbound_pipeline(self, pipeline: Any) -> None:
         self._outbound_pipeline = pipeline
+
+    def reload_session_map(self) -> None:
+        """Reload Redis-backed SessionMap cache after leader switchover (active-standby)."""
+        self._session_map.reload()
 
     @classmethod
     def get_instance(cls, agent_client: "AgentServerClient | None" = None) -> "MessageHandler":
@@ -806,7 +809,6 @@ class MessageHandler(ABC):
             return True
 
         return False
-
 
     async def _skills_slash_notice(
         self,
@@ -1483,7 +1485,6 @@ class MessageHandler(ABC):
         from jiuwenclaw.e2a.gateway_normalize import message_to_e2a_or_fallback
 
         return message_to_e2a_or_fallback(msg)
-
 
     @staticmethod
     def _merge_agent_metadata(
@@ -2603,21 +2604,59 @@ class MessageHandler(ABC):
                 )
 
                 if result.get("success"):
-                    # 文件接收成功，发送 chat.file 事件到 Channel
+                    # 文件接收成功
                     file_path = result.get("file_path", "")
+                    filename = Path(file_path).name
                     logger.info(
                         "[MessageHandler] 文件下载完成: transfer_id=%s path=%s",
                         payload.get("transfer_id"),
                         file_path,
                     )
 
-                    # 发送 chat.file 事件到 Channel
+                    # 检查 AGENT_RUNTIME 环境变量，决定是否推送到 Web Server
+                    agent_runtime = os.getenv("AGENT_RUNTIME", "").strip()
+                    should_push_to_web = agent_runtime != ""
+
+                    if should_push_to_web:
+                        # 推送文件到 Web Server 并获取 Web Server 的下载信息
+                        download_info = await self._push_file_to_web_and_get_token(
+                            file_path, filename, session_id or ""
+                        )
+                        if not download_info:
+                            logger.error(
+                                "[MessageHandler] AGENT_RUNTIME=%s，推送文件到 Web Server 失败，跳过发送 chat.file 事件: %s",
+                                agent_runtime,
+                                filename,
+                            )
+                            return
+                        logger.info(
+                            "[MessageHandler] AGENT_RUNTIME=%s，已推送文件到 Web Server 并获取 Token: %s",
+                            agent_runtime,
+                            filename,
+                        )
+                    else:
+                        # 未设置 AGENT_RUNTIME，使用 Gateway 本地的 Token
+                        from jiuwenclaw.agentserver.tools.web_file_download import build_file_download_info
+                        download_info = build_file_download_info(
+                            file_path=file_path,
+                            file_name=filename,
+                            session_id=session_id or "",
+                        )
+
+                    # 发送 chat.file 事件到 Channel（使用 Web Server 或 Gateway 的 Token）
                     from jiuwenclaw.schema.message import Message, EventType
 
-                    files_payload = [{
-                        "path": file_path,
-                        "name": Path(file_path).name,
-                    }]
+                    files_payload = [
+                        {
+                            "path": file_path,
+                            "name": download_info["name"],
+                            "size": download_info["size"],
+                            "mime_type": download_info["mime_type"],
+                            "download_url": download_info["download_url"],
+                            "download_token": download_info["download_token"],
+                            "expires_at": download_info.get("expires_at"),
+                        }
+                    ]
 
                     file_msg = Message(
                         id=f"file_{payload.get('transfer_id', '')}",
@@ -2636,9 +2675,10 @@ class MessageHandler(ABC):
                     )
                     await self.publish_robot_messages(file_msg)
                     logger.info(
-                        "[MessageHandler] 已发送 chat.file 事件: channel_id=%s file=%s",
+                        "[MessageHandler] 已发送 chat.file 事件: channel_id=%s file=%s download_url=%s",
                         channel_id,
                         file_path,
+                        download_info["download_url"],
                     )
                 else:
                     logger.warning(
@@ -2653,6 +2693,97 @@ class MessageHandler(ABC):
                 event_type,
                 e,
             )
+
+    async def _push_file_to_web_and_get_token(
+        self,
+        file_path: str,
+        filename: str,
+        session_id: str,
+    ) -> dict[str, Any] | None:
+        """将文件推送到 Web Server 并获取 Web Server 的下载 Token.
+
+        Args:
+            file_path: Gateway 本地文件路径
+            filename: 文件名
+            session_id: 会话ID
+
+        Returns:
+            Web Server 返回的下载信息，包含 download_url、download_token 等
+            如果推送失败，返回 None
+        """
+        import aiohttp
+
+        # 在 K8s 同一集群中，Service 名称可直接通过 DNS 解析
+        # 格式：<service-name>（同 namespace）
+        web_server_url = "http://jiuwenclaw-web-nodeport:5173"
+        logger.warning(
+            "[MessageHandler] 使用默认 K8s Service URL: %s",
+            web_server_url,
+        )
+        
+        push_endpoint = f"{web_server_url}/file-api/push"
+        
+        try:
+            # 读取文件内容
+            file_size = os.path.getsize(file_path)
+            with open(file_path, "rb") as f:
+                file_content = f.read()
+
+            # 构建 multipart 表单数据
+            form_data = aiohttp.FormData()
+            form_data.add_field(
+                "file",
+                file_content,
+                filename=filename,
+                content_type="application/octet-stream"
+            )
+            form_data.add_field("session_id", session_id)
+            form_data.add_field("filename", filename)
+            form_data.add_field("file_size", str(file_size))
+
+            # 发送 HTTP POST 请求
+            timeout = aiohttp.ClientTimeout(total=300)  # 5分钟超时
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                async with session.post(push_endpoint, data=form_data) as response:
+                    if response.status == 200:
+                        result = await response.json()
+                        if result.get("success"):
+                            logger.info(
+                                "[MessageHandler] 成功推送文件到 Web Server 并获取 Token: %s, download_url=%s",
+                                filename,
+                                result.get("download_url"),
+                            )
+                            return {
+                                "name": filename,
+                                "size": file_size,
+                                "mime_type": "application/octet-stream",
+                                "download_url": result.get("download_url"),
+                                "download_token": result.get("download_token"),
+                                "expires_at": result.get("expires_at"),
+                            }
+                        else:
+                            logger.error(
+                                "[MessageHandler] Web Server 返回错误: %s",
+                                result.get("error"),
+                            )
+                            return None
+                    else:
+                        error_text = await response.text()
+                        logger.error(
+                            "[MessageHandler] 推送文件到 Web Server 失败: %s, status=%d, error=%s",
+                            filename,
+                            response.status,
+                            error_text,
+                        )
+                        return None
+        except Exception as e:
+            logger.error(
+                "[MessageHandler] 推送文件到 Web Server 异常: %s, error: %s",
+                filename,
+                e,
+                exc_info=True,
+            )
+            return None
 
     def _should_transfer_files(self, env: "E2AEnvelope") -> bool:
         """判断是否需要进行分布式文件传输.

@@ -267,6 +267,23 @@ function isRequiredModelField(key: string): boolean {
   return REQUIRED_MODEL_FIELD_SET.has(key);
 }
 
+/** 未填或仍为 config/env 占位符（如 ${API_BASE}）时视为未配置 */
+function isConfigValueFilled(value: string): boolean {
+  const trimmed = value.trim();
+  if (!trimmed) return false;
+  if (/^\$\{[A-Z0-9_]+(?::-[^}]*)?\}$/.test(trimmed)) return false;
+  return true;
+}
+
+function isModelEntryComplete(model: ModelEntry): boolean {
+  return (
+    isConfigValueFilled(model.model_name) &&
+    isConfigValueFilled(model.api_base) &&
+    isConfigValueFilled(model.api_key) &&
+    isConfigValueFilled(model.model_provider)
+  );
+}
+
 function isProviderKey(key: string): boolean {
   return key.endsWith("_provider");
 }
@@ -946,10 +963,13 @@ export function ConfigPanel({
     });
   }, [draftModels, availableModels]);
   const hasChanges = hasConfigChanges || hasModelChanges;
-  const missingRequiredModelFields = useMemo(
-    () => REQUIRED_MODEL_FIELDS.filter((key) => !(draftValues[key] ?? "").trim()),
-    [draftValues],
-  );
+  const missingRequiredModelFields = useMemo(() => {
+    const defaultModel = draftModels[0];
+    if (defaultModel && isModelEntryComplete(defaultModel)) {
+      return [];
+    }
+    return REQUIRED_MODEL_FIELDS.filter((key) => !isConfigValueFilled(draftValues[key] ?? ""));
+  }, [draftValues, draftModels]);
   const hasMissingRequiredModelFields = missingRequiredModelFields.length > 0;
 
   const handleFieldChange = (key: string, value: string) => {

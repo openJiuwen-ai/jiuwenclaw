@@ -13,6 +13,7 @@ import {
   SubtaskUpdatePayload,
   AskUserQuestionPayload,
   UsageSummary,
+  FileDownloadItem,
 } from '../types';
 import { useTodoStore } from './todoStore';
 
@@ -103,6 +104,8 @@ interface ChatState {
   setInputValue: (value: string) => void;
   // Usage summary
   setUsageSummary: (messageId: string, usage: UsageSummary) => void;
+  // File download items
+  addFileItems: (files: FileDownloadItem[]) => void;
 }
 
 export const useChatStore = create<ChatState>((set, get) => ({
@@ -582,6 +585,36 @@ export const useChatStore = create<ChatState>((set, get) => ({
     set((state) => ({
       messages: state.messages.map((msg) =>
         msg.id === messageId ? { ...msg, usageSummary: usage } : msg
+      ),
+    }));
+  },
+
+  addFileItems: (files) => {
+    const { currentStreamId, messages } = get();
+    let targetId =
+      currentStreamId ??
+      [...messages].reverse().find((msg) => msg.role === 'assistant')?.id;
+    if (!targetId) {
+      const msgId = `file-${Date.now()}`;
+      set((state) => ({
+        messages: [
+          ...state.messages,
+          {
+            id: msgId,
+            role: 'assistant',
+            content: '',
+            timestamp: new Date().toISOString(),
+            fileItems: files,
+          },
+        ],
+      }));
+      return;
+    }
+    set((state) => ({
+      messages: state.messages.map((msg) =>
+        msg.id === targetId
+          ? { ...msg, fileItems: [...(msg.fileItems || []), ...files] }
+          : msg
       ),
     }));
   },

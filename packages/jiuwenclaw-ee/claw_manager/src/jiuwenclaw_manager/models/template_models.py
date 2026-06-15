@@ -1,0 +1,175 @@
+"""模板表定义：model_template、extension_config_template、skill_whitelist_template、
+service_config_template（id 自增主键；对外引用 template_id UUID）。
+"""
+
+from __future__ import annotations
+
+from openjiuwen_runtime.foundation.db.table_def import (
+    ColumnDefinition,
+    IndexDefinition,
+    TableDefinition,
+)
+
+MODEL_TEMPLATE_TABLE_DEF = TableDefinition(
+    table_name="model_template",
+    columns=[
+        ColumnDefinition(
+            "id",
+            "integer",
+            primary_key=True,
+            autoincrement=True,
+            nullable=False,
+        ),
+        ColumnDefinition("template_id", "string", length=100, nullable=False),
+        ColumnDefinition("template_name", "string", length=128, nullable=False),
+        ColumnDefinition("description", "string", length=512, nullable=True),
+        ColumnDefinition("model_type", "json", nullable=False),
+        ColumnDefinition("model_tags", "json", nullable=True),
+        ColumnDefinition("api_base", "string", length=512, nullable=False),
+        ColumnDefinition("api_key", "string", length=4096, nullable=False),
+        ColumnDefinition("model_id", "string", length=128, nullable=False),
+        ColumnDefinition("model_provider", "string", length=64, nullable=False),
+        ColumnDefinition("parameters", "json", nullable=True),
+        ColumnDefinition("timeout", "integer", nullable=False, default=60),
+        ColumnDefinition("retry_count", "integer", nullable=False, default=3),
+        ColumnDefinition("enable_streaming", "boolean", nullable=False, default=True),
+        ColumnDefinition("enable_function_calling", "boolean", nullable=False, default=True),
+        ColumnDefinition("verify_ssl", "boolean", nullable=False, default=False),
+        ColumnDefinition("enabled", "boolean", nullable=False, default=True),
+        ColumnDefinition("data", "json", nullable=True),
+        ColumnDefinition("created_at", "datetime", nullable=False),
+        ColumnDefinition("updated_at", "datetime", nullable=False),
+    ],
+    indexes=[
+        IndexDefinition(["template_id"], unique=True),
+        IndexDefinition(["enabled"], unique=False),
+    ],
+)
+
+EXTENSION_CONFIG_TEMPLATE_TABLE_DEF = TableDefinition(
+    table_name="extension_config_template",
+    columns=[
+        ColumnDefinition(
+            "id",
+            "integer",
+            primary_key=True,
+            autoincrement=True,
+            nullable=False,
+        ),
+        ColumnDefinition("template_id", "string", length=100, nullable=False),
+        ColumnDefinition("template_name", "string", length=128, nullable=False),
+        ColumnDefinition("description", "string", length=512, nullable=True),
+        ColumnDefinition("component", "string", length=32, nullable=False),
+        ColumnDefinition("hook_type", "string", length=32, nullable=False),
+        ColumnDefinition("hook_config", "json", nullable=False),
+        ColumnDefinition("custom_config", "json", nullable=True),
+        ColumnDefinition("enabled", "boolean", nullable=False, default=True),
+        ColumnDefinition("data", "json", nullable=True),
+        ColumnDefinition("created_at", "datetime", nullable=False),
+        ColumnDefinition("updated_at", "datetime", nullable=False),
+    ],
+    indexes=[
+        IndexDefinition(["template_id"], unique=True),
+        IndexDefinition(["enabled"], unique=False),
+        IndexDefinition(["component"], unique=False),
+        IndexDefinition(["hook_type"], unique=False),
+    ],
+)
+
+SKILL_WHITELIST_TEMPLATE_TABLE_DEF = TableDefinition(
+    table_name="skill_whitelist_template",
+    columns=[
+        ColumnDefinition(
+            "id",
+            "integer",
+            primary_key=True,
+            autoincrement=True,
+            nullable=False,
+        ),
+        ColumnDefinition("template_id", "string", length=100, nullable=False),
+        ColumnDefinition("template_name", "string", length=128, nullable=False),
+        ColumnDefinition("description", "string", length=512, nullable=True),
+        ColumnDefinition("skill_id", "string", length=512, nullable=False),
+        ColumnDefinition("skill_version", "string", length=64, nullable=False),
+        ColumnDefinition("skill_source", "string", length=2048, nullable=False),
+        ColumnDefinition("enabled", "boolean", nullable=False, default=True),
+        ColumnDefinition("data", "json", nullable=True),
+        ColumnDefinition("created_at", "datetime", nullable=False),
+        ColumnDefinition("updated_at", "datetime", nullable=False),
+    ],
+    indexes=[
+        IndexDefinition(["template_id"], unique=True),
+        IndexDefinition(["enabled"], unique=False),
+        IndexDefinition(["skill_id"], unique=False),
+    ],
+)
+
+SERVICE_CONFIG_TEMPLATE_TABLE_DEF = TableDefinition(
+    table_name="service_config_template",
+    columns=[
+        ColumnDefinition(
+            "id",
+            "integer",
+            primary_key=True,
+            autoincrement=True,
+            nullable=False,
+        ),
+        ColumnDefinition("template_id", "string", length=100, nullable=False),
+        ColumnDefinition("template_name", "string", length=128, nullable=False),
+        ColumnDefinition("description", "string", length=512, nullable=True),
+        ColumnDefinition("agent_image", "string", length=512, nullable=False),
+        ColumnDefinition("namespace", "string", length=128, nullable=False),
+        ColumnDefinition("pod_name", "string", length=128, nullable=True),
+        ColumnDefinition("container_name", "string", length=128, nullable=False),
+        ColumnDefinition("container_port", "integer", nullable=False),
+        ColumnDefinition("port_name", "string", length=64, nullable=False, default="http"),
+        ColumnDefinition(
+            "image_pull_policy",
+            "string",
+            length=32,
+            nullable=False,
+            default="IfNotPresent",
+        ),
+        ColumnDefinition("replicas", "integer", nullable=False, default=1),
+        ColumnDefinition("kubeconfig", "string", length=512, nullable=True),
+        ColumnDefinition("agent_runtime", "string", length=128, nullable=True),
+        ColumnDefinition("readiness_initial_delay", "integer", nullable=False, default=10),
+        ColumnDefinition("readiness_period", "integer", nullable=False, default=5),
+        ColumnDefinition("ready_timeout", "integer", nullable=False, default=300),
+        ColumnDefinition("ready_poll_interval", "integer", nullable=False, default=5),
+        ColumnDefinition("nfs_server", "string", length=256, nullable=True),
+        ColumnDefinition("nfs_path", "string", length=512, nullable=False, default="/"),
+        ColumnDefinition("nfs_mount_path", "string", length=512, nullable=True),
+        ColumnDefinition("agent_cpu_request", "string", length=32, nullable=True),
+        ColumnDefinition("agent_memory_request", "string", length=32, nullable=True),
+        ColumnDefinition("agent_cpu_limit", "string", length=32, nullable=True),
+        ColumnDefinition("agent_memory_limit", "string", length=32, nullable=True),
+        ColumnDefinition("jiuwenbox_cpu_request", "string", length=32, nullable=True),
+        ColumnDefinition("jiuwenbox_memory_request", "string", length=32, nullable=True),
+        ColumnDefinition("jiuwenbox_cpu_limit", "string", length=32, nullable=True),
+        ColumnDefinition("jiuwenbox_memory_limit", "string", length=32, nullable=True),
+        ColumnDefinition("min_idle_services", "integer", nullable=False, default=1),
+        ColumnDefinition("max_services", "integer", nullable=False, default=20),
+        ColumnDefinition("service_concurrency", "integer", nullable=False, default=30),
+        ColumnDefinition("service_ttl", "integer", nullable=False, default=180),
+        ColumnDefinition(
+            "autoscale_interval",
+            "string",
+            length=32,
+            nullable=False,
+            default="5",
+        ),
+        ColumnDefinition("message_timeout", "integer", nullable=False, default=60),
+        ColumnDefinition("session_concurrency", "integer", nullable=False, default=3),
+        ColumnDefinition("session_ttl", "integer", nullable=False, default=60),
+        ColumnDefinition("enabled", "boolean", nullable=False, default=True),
+        ColumnDefinition("data", "json", nullable=True),
+        ColumnDefinition("created_at", "datetime", nullable=False),
+        ColumnDefinition("updated_at", "datetime", nullable=False),
+    ],
+    indexes=[
+        IndexDefinition(["template_id"], unique=True),
+        IndexDefinition(["enabled"], unique=False),
+        IndexDefinition(["namespace"], unique=False),
+    ],
+)

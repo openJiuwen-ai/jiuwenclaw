@@ -56,6 +56,14 @@ class FileTransferManager:
         # 后台清理任务
         self._cleanup_task: asyncio.Task | None = None
         self._running = False
+        
+        # 打印文件传输模式状态
+        logger.info(
+            "[FileTransferManager] 文件传输模式初始化: enabled=%s, "
+            "received_files_dir=%s",
+            self._config.enabled,
+            self._config.received_files_dir,
+        )
 
     async def start_cleanup_task(self) -> None:
         """启动后台清理任务."""

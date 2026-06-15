@@ -260,9 +260,17 @@ class TenantAgentPool:
             try:
                 # 设置工作目录隔离
                 agent_dir_path = get_multi_tenant_user_workspace_dir(service_id, agent_id)
+                if agent_dir_path is None:
+                    raise ValueError(
+                        f"invalid tenant workspace: agent_id={agent_id!r}, service_id={service_id!r}"
+                    )
+
+                import os
+                agent_runtime = os.getenv("AGENT_RUNTIME", "").strip()
+                if agent_runtime:
+                    agent_id = cache_key
 
                 from jiuwenclaw.agentserver.agent_manager import AgentManager
-
                 # 创建新的 AgentManager 实例，传入保存的配置
                 agent_manager = AgentManager(
                     agent_id=agent_id,

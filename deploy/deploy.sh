@@ -13,6 +13,13 @@ source "storage_handler.sh"
 source "oyr_handler.sh"
 source "gateway_handler.sh"
 source "web_handler.sh"
+source "rabbitmq_handler.sh"
+source "mysql_handler.sh"
+source "redis_handler.sh"
+source "postgresql_handler.sh"
+source "minio_handler.sh"
+source "manager_handler.sh"
+source "ports_handler.sh"
 
 process_up() {
     # MODULES是ALL_MODULES的子集，启动顺序正着来
@@ -31,24 +38,9 @@ process_up() {
     collect_k8s_cluster_info
 
     for module in "${sorted_modules[@]}"; do
-        case "${module}" in
-            NFS)
-                check_nfs_up_dependency      
-                deploy_nfs
-                ;;
-            YR_CLAW)
-                check_yr_claw_up_dependency
-                deploy_oyr
-                ;;
-            GATEWAY)
-                check_gateway_up_dependency
-                deploy_gateway
-                ;;
-            WEB)
-                check_web_up_dependency
-                deploy_web
-                ;;
-        esac
+        local lmodule=${module,,}
+        check_${lmodule}_up_dependency
+        deploy_${lmodule}
     done
 }
 
@@ -68,20 +60,8 @@ process_down() {
     info "reversed_modules=${reversed_modules[@]}"
 
     for module in "${reversed_modules[@]}"; do
-        case "${module}" in
-            NFS)
-                uninstall_nfs
-                ;;
-            YR_CLAW)
-                uninstall_oyr
-                ;;
-            GATEWAY)
-                uninstall_gateway
-                ;;
-            WEB)
-                uninstall_web
-                ;;
-        esac
+        local lmodule=${module,,}
+        uninstall_${lmodule}
     done
 }
 
@@ -94,7 +74,7 @@ process_restart() {
 main() {
     read_env_from_file "${CUSTOM_ENV_FILE}" "DEPLOY_VARS"
     parse_args "$@"
-    process_namespace
+    process_vars
     check_dependency
     process_${CMD}
 }

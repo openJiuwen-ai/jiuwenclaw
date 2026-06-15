@@ -101,6 +101,41 @@ async def _run(host: str, port: int) -> None:
     await extension_manager.load_all_extensions()
     logger.info("[AgentServer] 扩展加载完成，共 %d 个", len(extension_manager.list_extensions()))
 
+    try:
+        from jiuwenclaw.infrastructure.log_masking.engine import LogMaskingEngine
+
+        await LogMaskingEngine.reload_log_masking_from_gateway_db()
+        logger.info("[AgentServer] log masking rules loaded from Gateway DB (if any)")
+    except Exception:  # noqa: BLE001
+        logger.warning("[AgentServer] log_masking_rule cold load skipped", exc_info=True)
+
+    if os.getenv("AGENT_RUNTIME", "").strip():
+        try:
+            from jiuwenclaw.agentserver.memory.config import reload_embed_config_from_gateway_db
+
+            await reload_embed_config_from_gateway_db()
+            logger.info("[AgentServer] embed_config loaded from Gateway DB (if any)")
+        except Exception:  # noqa: BLE001
+            logger.warning("[AgentServer] embed_config cold load skipped", exc_info=True)
+
+    if os.getenv("AGENT_RUNTIME", "").strip():
+        try:
+            from jiuwenclaw.agentserver.memory.config import reload_task_memory_config_from_gateway_db
+
+            await reload_task_memory_config_from_gateway_db()
+            logger.info("[AgentServer] task_memory_config loaded from Gateway DB (if any)")
+        except Exception:  # noqa: BLE001
+            logger.warning("[AgentServer] task_memory_config cold load skipped", exc_info=True)
+
+    if os.getenv("AGENT_RUNTIME", "").strip():
+        try:
+            from jiuwenclaw.utils import reload_logging_levels_from_gateway_db
+
+            await reload_logging_levels_from_gateway_db()
+            logger.info("[AgentServer] logging levels loaded from Gateway DB (if any)")
+        except Exception:  # noqa: BLE001
+            logger.warning("[AgentServer] logging_config cold load skipped", exc_info=True)
+
     # ---------- Telemetry 初始化 ----------
     init_telemetry()
 
@@ -134,7 +169,23 @@ async def _run(host: str, port: int) -> None:
         pass
     finally:
         logger.info("[AgentServer] stopping…")
+        await extension_manager.shutdown_all_extensions()
         await server.stop()
+        # jiuwenbox 服务端没有 idle TTL, 本进程退出后已创建的 sandbox 会在 jiuwenbox
+        # 一侧持续占用直到 jiuwenbox 自己重启。在此处主动 DELETE 掉本进程缓存里的
+        # sandbox 列表; 走线程是因为底层 httpx 是同步 API, 不能直接堵 event loop。
+        # cleanup 自身已经吞了所有异常并永不抛, 外层 try/except 只是再加一道防线,
+        # 兜住 import 阶段 (例如 venv 损坏) 这种极端情况。
+        try:
+            from jiuwenclaw.agentserver.sandbox_lifecycle import (
+                shutdown_jiuwenbox_sandboxes,
+            )
+
+            await asyncio.to_thread(shutdown_jiuwenbox_sandboxes)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "[AgentServer] jiuwenbox sandbox cleanup failed: %s", exc,
+            )
         logger.info("[AgentServer] stopped")
 
 

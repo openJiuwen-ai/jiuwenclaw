@@ -28,6 +28,7 @@ const LEGACY_EVENT_MAP: Record<string, string> = {
   content_chunk: 'chat.delta',
   content: 'chat.final',
   media_content: 'chat.media',
+  file_content: 'chat.file',
   tool_call: 'chat.tool_call',
   tool_result: 'chat.tool_result',
   error: 'chat.error',
@@ -473,6 +474,15 @@ class WebClient {
     if (options.apiBase) params.set('api_base', options.apiBase);
     if (options.model) params.set('model', options.model);
     if (options.projectPath) params.set('project_path', options.projectPath);
+    // 请求扩展字段：user_id / group_id / 自定义键。
+    if (options.userId) params.set('user_id', options.userId);
+    if (options.groupId) params.set('group_id', options.groupId);
+    if (options.botId) params.set('bot_id', options.botId);
+    if (options.extraFields) {
+      for (const [k, v] of Object.entries(options.extraFields)) {
+        if (k && v) params.set(k, v);
+      }
+    }
     const query = params.toString();
     const target = `${base}${path}`;
     return query ? `${target}?${query}` : target;

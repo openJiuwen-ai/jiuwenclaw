@@ -7,11 +7,12 @@ WORKDIR /app/jiuwenclaw
 COPY . /app/jiuwenclaw/
 RUN chown -R app:app /app/jiuwenclaw
 
-USER app
-ENV PATH=$PATH:/home/app/.local/bin
-
 RUN pip install -e ".[all]" --no-cache-dir -i https://pypi.tuna.tsinghua.edu.cn/simple
 RUN mkdir -p /home/app/.jiuwenclaw && printf 'yes\nzh\n' | jiuwenclaw-init
+RUN chown -R app:app /home/app/.jiuwenclaw
+
+USER app
+ENV PATH=$PATH:/home/app/.local/bin
 
 EXPOSE 5173
 CMD ["jiuwenclaw-agentserver"]

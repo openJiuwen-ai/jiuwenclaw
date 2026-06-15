@@ -19,7 +19,7 @@ from pathlib import Path
 from collections import OrderedDict
 from pathlib import Path
 from typing import Any, AsyncIterator, Tuple
-
+from contextvars import ContextVar
 from dotenv import load_dotenv
 
 from jiuwenclaw.agentserver.agent_adapters import (
@@ -75,6 +75,7 @@ from jiuwenclaw.utils import (
     get_env_file,
     get_user_workspace_dir,
 )
+
 
 load_dotenv(dotenv_path=get_env_file())
 
@@ -854,6 +855,27 @@ class JiuWenClaw:
         # 传递 files 参数（直接传递，供 Agent 直接访问）
         inputs["files"] = request.params.get("files", [])
 
+        # 传递 extension_config（供 Rails 消费）
+        # 优先从 metadata 读取，fallback 到 params（Gateway WebSocket 请求中放在 params）
+        ext_config = None
+        if request.metadata and "extension_config" in request.metadata:
+            ext_config = request.metadata["extension_config"]
+        elif "extension_config" in request.params:
+            ext_config = request.params["extension_config"]
+        if ext_config is not None:
+            inputs["extension_config"] = ext_config
+            logger.info("[JiuWenClaw] extension_config added to inputs: %s", ext_config)
+
+        # 将 extension_config 放入 run_context.extra 中，供 Rails 消费
+        # 注意：openjiuwen 框架从 inputs["run"]["context"] 解析 RunContext
+        # _normalize_inputs 会用 RunContext(**context_data) 构造，因此传 dict
+        if ext_config is not None:
+            run_context_dict = {"extra": {"extension_config": ext_config}}
+            if "run" not in inputs or not isinstance(inputs["run"], dict):
+                inputs["run"] = {}
+            inputs["run"]["context"] = run_context_dict
+            logger.info("[JiuWenClaw] run_context added to inputs[run][context]: %s", run_context_dict)
+
         run = request.params.get("run")
         if run:
             inputs["run"] = run
@@ -865,6 +887,7 @@ class JiuWenClaw:
 
         # 返回原始 query（未经 build_user_prompt 包装）
         # Team 模式需要使用原始 query，而不是 JSON 包装后的 prompt
+        logger.info("[JiuWenClaw] _build_inputs returning inputs keys=%s", list(inputs.keys()))
         return inputs, memory_mode, query
 
     def _build_interactive_input_from_answers(
@@ -1341,7 +1364,7 @@ class JiuWenClaw:
                 async for chunk in adapter.process_message_stream_impl(request, inputs):
                     await stream_queue.put(("chunk", chunk))
             except asyncio.CancelledError:
-                logger.info("[JiuWenClaw] 流式任务被取消: request_id=%s session_id=%s", rid, session_id, 
+                logger.info("[JiuWenClaw] 流式任务被取消: request_id=%s session_id=%s", rid, session_id,
                             extra={'user_visible': 'progress'})
                 await stream_queue.put(("error", asyncio.CancelledError()))
             except Exception as exc:

@@ -4,11 +4,27 @@
 
 from __future__ import annotations
 
+import importlib
 import json
+import sys
+from pathlib import Path
 
 import pytest
 
-from jiuwenclaw.extensions.yuanrong_frontend_client import YuanrongFrontendAgentClient
+_YR_AGENT_CLIENT_DIR = (
+    Path(__file__).resolve().parents[3]
+    / "packages"
+    / "jiuwenclaw-ee"
+    / "gateway"
+    / "yr_extensions"
+    / "agent_client"
+)
+_yr_path = str(_YR_AGENT_CLIENT_DIR)
+if _yr_path not in sys.path:
+    sys.path.append(_yr_path)
+
+_yuanrong_mod = importlib.import_module("yuanrong_frontend_client")
+YuanrongFrontendAgentClient = _yuanrong_mod.YuanrongFrontendAgentClient
 from jiuwenclaw.gateway.session_map import (
     SessionMap,
     SessionMapScope,
@@ -21,7 +37,10 @@ from jiuwenclaw.schema.agent import AgentRequest
 
 @pytest.fixture
 def checkpoint_tmp(monkeypatch, tmp_path):
-    monkeypatch.setattr("jiuwenclaw.gateway.session_map.get_checkpoint_dir", lambda: tmp_path)
+    monkeypatch.setattr(
+        "jiuwenclaw.gateway.session_storage.get_checkpoint_dir",
+        lambda: tmp_path,
+    )
     return tmp_path
 
 
@@ -65,8 +84,7 @@ def test_session_map_dict_record_json(checkpoint_tmp) -> None:
     svc = invoke_service_id("chatA", "botB")
     path = checkpoint_tmp / "session_map.json"
     path.write_text(
-        json.dumps(
-            {key: {"session_id": legacy_sid, "service_id": svc, "agent_id": None}},
+        json.dumps({key: {"session_id": legacy_sid, "service_id": svc, "agent_id": None}},
             ensure_ascii=False,
         ),
         encoding="utf-8",

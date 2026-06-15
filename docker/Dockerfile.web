@@ -1,25 +1,27 @@
 ARG BASE_IMAGE
 FROM ${BASE_IMAGE}
 
-# Create app user and set up working directory
+# 创建 app 用户
 RUN useradd --create-home --shell /bin/bash app
 RUN mkdir -p /app
 
-# Copy project files
+# 拷贝代码（所有权直接给 app）
 COPY --chown=app:app . /app/jiuwenclaw/
 
-USER app
+# 先用 ROOT 全局安装 Python 包
+WORKDIR /app/jiuwenclaw
+RUN pip install -i https://pypi.tuna.tsinghua.edu.cn/simple -e ".[all]" --no-cache-dir
 
-# Build enterprise web
+# 切换成 app 用户，再执行 npm 构建
+USER app
 WORKDIR /app/jiuwenclaw/jiuwenclaw/web_enterprise
 RUN npm install
 RUN npm run build
 
-# Install server dependencies
+# 配置环境变量
 WORKDIR /app/jiuwenclaw
 ENV PATH=$PATH:/home/app/.local/bin
-RUN pip install -i https://pypi.tuna.tsinghua.edu.cn/simple -e ".[all]" --no-cache-dir
 
-# Start enterprise web (served by app_web from web_enterprise/dist)
+# 暴露端口 + 启动
 EXPOSE 5173
 CMD ["jiuwenclaw-start", "web-enterprise"]

@@ -1417,19 +1417,10 @@ class FeishuChannel(BaseChannel):
             ):
                 content_str = str(payload.get("heartbeat"))
 
-            if not content_str.strip():
-                logger.warning("飞书发送：消息内容为空，跳过发送")
-                return
-
-            request_id = str(msg.id or "").strip()
-            if request_id and msg.event_type != EventType.HEARTBEAT_RELAY:
-                self._clear_group_progress_state(request_id)
-
-            # 过滤群聊消息中的用户敏感信息
-            content_str = self._filter_user_info_for_group(content_str, meta)
-
             # 兜底：chat.final 中提到了 workspace 文件但 LLM 未调用 send_file_to_user 时，
             # 自动提取文件路径并发送，避免用户收不到文件。
+            # 提前执行此逻辑，确保即使后续文本内容为空，也能尝试发送检测到的文件
+            files_sent_in_fallback = False
             if (
                 event_name == "chat.final"
                 and self.config.enable_file_upload
@@ -1443,6 +1434,7 @@ class FeishuChannel(BaseChannel):
                     if os.path.abspath(fp) not in already_sent
                 ]
                 if detected_files:
+                    files_sent_in_fallback = True
                     logger.info(
                         "飞书兜底文件发送：从 chat.final 中检测到 %d 个未发送文件: %s",
                         len(detected_files),
@@ -1460,6 +1452,20 @@ class FeishuChannel(BaseChannel):
                                 await self._send_file_card(receive_id, id_type, fp, os.path.basename(fp))
                         except Exception as file_err:
                             logger.error("飞书兜底文件发送失败: %s %s", fp, file_err)
+
+            if not content_str.strip():
+                if files_sent_in_fallback:
+                    # 已通过兜底逻辑发送文件，且无文本内容，直接返回
+                    return
+                logger.warning("飞书发送：消息内容为空，跳过发送")
+                return
+
+            request_id = str(msg.id or "").strip()
+            if request_id and msg.event_type != EventType.HEARTBEAT_RELAY:
+                self._clear_group_progress_state(request_id)
+
+            # 过滤群聊消息中的用户敏感信息
+            content_str = self._filter_user_info_for_group(content_str, meta)
             
             # 群聊数字分身回复到群聊时，@发送人
             if msg.group_digital_avatar and id_type == "chat_id":

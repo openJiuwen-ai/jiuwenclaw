@@ -248,6 +248,7 @@ class AgentManager:
             mode: str = "agent",
             workspace_dir: str = None,
             session_id: str | None = None,
+            request: Any | None = None,
     ) -> "JiuWenClaw | None":
         """获取 Agent 实例（自动创建）.
 
@@ -278,6 +279,8 @@ class AgentManager:
                 **config,
                 **_build_acp_agent_config()
             }
+        if request is not None:
+            config = {**config, "request": request}
         logger.info(
             f"[AgentManager] 创建新的Agent: channel={channel_id} mode={mode} session={effective_session_id}",
             extra={'user_visible': 'critical'}
@@ -369,6 +372,7 @@ class AgentManager:
             mode=mode,
             workspace_dir=workspace_dir,
             session_id=session_id,
+            request=request,
         )
         if agent is None:
             raise RuntimeError(f"[AgentManager] No agent available for channel {channel_id}")
@@ -431,6 +435,7 @@ class AgentManager:
             mode=mode,
             workspace_dir=workspace_dir,
             session_id=session_id,
+            request=request,
         )
         if agent is None:
             raise RuntimeError(f"[AgentManager] No agent available for channel {channel_id}")

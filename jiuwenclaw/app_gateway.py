@@ -17,6 +17,7 @@ import asyncio
 import json
 import logging
 import os
+import sys
 import inspect
 import time
 import uuid as uuid_module
@@ -48,6 +49,15 @@ from jiuwenclaw.gateway.route_binding import GatewayRouteBinding
 from jiuwenclaw.extensions.extension_config_sync import decrypt_extensions_sensitive_for_agent
 from jiuwenclaw.local_env_config import decrypt
 
+apply_openai_model_client_patch()
+
+for _stream in (sys.stdout, sys.stderr):
+    if hasattr(_stream, "reconfigure"):
+        try:
+            _stream.reconfigure(encoding="utf-8", errors="replace")
+        except Exception:  # noqa: BLE001
+            logging.getLogger(__name__).debug("Failed to reconfigure stream encoding")
+
 # 确保工作区已初始化（使用跨进程锁保护并发访问）
 ensure_workspace_initialized(component_name="Gateway")
 
@@ -59,6 +69,9 @@ for _lg in LogManager.get_all_loggers().values():
 load_dotenv(dotenv_path=get_env_file())
 
 logger = logging.getLogger(__name__)
+
+# 将 websockets.client 日志级别设为 WARNING，屏蔽大量 websockets 打印日志
+logging.getLogger("websockets.client").setLevel(logging.WARNING)
 
 # Keep gateway idle-finalize fallback aligned with ACP channel default.
 _PROMPT_IDLE_FINALIZE_SECONDS = 3.0
@@ -842,6 +855,7 @@ async def _run(
     from jiuwenclaw.gateway.cron import CronController, CronJobStore, CronSchedulerService
     from jiuwenclaw.gateway.heartbeat import GatewayHeartbeatService, HeartbeatConfig
     from jiuwenclaw.gateway.message_handler import MessageHandler
+    from jiuwenclaw.extensions.redis import init_gateway_redis_from_config, shutdown_gateway_redis
     from jiuwenclaw.app_web_handlers import (
         WebHandlersBindParams,
         _DummyBus,
@@ -906,15 +920,6 @@ async def _run(
     message_handler.set_inbound_pipeline(im_inbound)
     message_handler.set_outbound_pipeline(im_outbound)
 
-    cron_store = CronJobStore(path=get_user_workspace_dir() / "gateway" / "cron_jobs.json")
-    cron_scheduler = CronSchedulerService(
-        store=cron_store,
-        agent_client=client,
-        message_handler=message_handler,
-    )
-    cron_controller = CronController.get_instance(store=cron_store, scheduler=cron_scheduler)
-    message_handler.set_cron_controller(cron_controller)
-
     full_cfg: dict[str, Any] = {}
     heartbeat_cfg: dict | None = None
     channels_cfg: dict | None = None
@@ -929,6 +934,19 @@ async def _run(
         heartbeat_cfg = None
         channels_cfg = None
         sync_config_cfg = None
+
+    await init_gateway_redis_from_config(dict(full_cfg or {}))
+
+    from jiuwenclaw.gateway.cron.factory import create_gateway_cron_store
+
+    cron_store = await create_gateway_cron_store()
+    cron_scheduler = CronSchedulerService(
+        store=cron_store,
+        agent_client=client,
+        message_handler=message_handler,
+    )
+    cron_controller = CronController.get_instance(store=cron_store, scheduler=cron_scheduler)
+    message_handler.set_cron_controller(cron_controller)
 
     # 配置解密后存储在内存中
     env_dict = {}
@@ -979,7 +997,14 @@ async def _run(
         logger.info("[App] Heartbeat service disabled by config")
 
     initial_channels_conf: dict = channels_cfg if isinstance(channels_cfg, dict) else {}
-    channel_manager = ChannelManager(message_handler, config=initial_channels_conf)
+    from jiuwenclaw.gateway.channel_config_overlay import channel_config_overlay_enabled
+
+    _channel_db_overlay = channel_config_overlay_enabled()
+    # active-standby：channel_config DB；standalone：yaml 直传。
+    if _channel_db_overlay:
+        channel_manager = ChannelManager(message_handler, config={})
+    else:
+        channel_manager = ChannelManager(message_handler, config=initial_channels_conf)
     updater_service = WindowsUpdaterService()
 
     async def _on_config_saved(
@@ -1146,8 +1171,14 @@ async def _run(
     await vibeskill_inbound_server.start()
 
     # VibeSkill 有自己的 HTTP Server 和 WebSocket Server，不再走 GatewayServer
+    vibeskill_enabled = os.getenv("VIBESKILL_ENABLED", "true").lower() not in ("0", "false", "no")
     vibeskill_channel = VibeSkillChannel(
-        config=VibeSkillConfig(channel_id="vibeskill"),
+        config=VibeSkillConfig(
+            channel_id="vibeskill",
+            enabled=vibeskill_enabled,
+            http_port=int(os.getenv("VIBESKILL_HTTP_PORT", "19002")),
+            ws_port=int(os.getenv("VIBESKILL_WS_PORT", "19003")),
+        ),
         router=channel_manager,
         agent_client=client,
     )
@@ -1187,7 +1218,10 @@ async def _run(
     gateway_server.on_message(acp_inbound_server.handle_message)
 
     channel_manager.register_channel(vibeskill_channel)
-    await vibeskill_channel.start()
+    if vibeskill_enabled:
+        await vibeskill_channel.start()
+    else:
+        logger.info("[App] VibeSkill channel disabled by config")
 
     feishu_channel = None
     feishu_task = None
@@ -1693,10 +1727,157 @@ async def _run(
                 logger.info("[App] channels.wechat missing or invalid, WechatChannel disabled")
 
     channel_manager.set_config_callback(_apply_channel_config)
-    await channel_manager.set_config(initial_channels_conf)
+    if _channel_db_overlay:
+        from jiuwenclaw.gateway.channel_config_overlay import (
+            ChannelConfigChange,
+            apply_channel_change_to_runtime,
+            apply_channel_config_db_overlay,
+            register_channel_config_reload,
+        )
+
+        async def _reload_channels_from_db(
+            change: ChannelConfigChange | None = None,
+        ) -> None:
+            """REST 写库后：优先用变更增量 patch；无变更信息时回退全量读 DB。"""
+            try:
+                if change is not None:
+                    current = channel_manager.get_channels_config()
+                    channels = apply_channel_change_to_runtime(current, change)
+                    logger.info(
+                        "[App] channels patched incrementally op=%s channel_id=%s",
+                        change.op,
+                        change.row.get("channel_id"),
+                    )
+                else:
+                    channels, _ = await apply_channel_config_db_overlay()
+                    logger.info("[App] channels reloaded from channel_config DB (full)")
+                await channel_manager.set_config(channels)
+            except Exception:  # noqa: BLE001
+                logger.exception("[App] channel_config reload failed")
+
+        await register_channel_config_reload(_reload_channels_from_db)
+        channels_for_runtime, applied = await apply_channel_config_db_overlay()
+        if applied:
+            logger.info("[App] initial channels loaded from channel_config DB (db-only)")
+        await channel_manager.set_config(channels_for_runtime)
+    else:
+        await channel_manager.set_config(initial_channels_conf)
 
     await channel_manager.start_dispatch()
     await cron_scheduler.start()
+
+    try:
+        from jiuwenclaw.infrastructure.log_masking.engine import LogMaskingEngine
+
+        await LogMaskingEngine.reload_log_masking_from_gateway_db()
+        logger.info("[App] log masking rules loaded from Gateway DB (if any)")
+    except Exception:  # noqa: BLE001
+        logger.warning("[App] log_masking_rule cold load skipped", exc_info=True)
+
+
+    if os.getenv("AGENT_RUNTIME", "").strip():
+        try:
+            from jiuwenclaw.utils import reload_logging_levels_from_gateway_db
+
+            await reload_logging_levels_from_gateway_db()
+            logger.info("[App] logging levels loaded from Gateway DB (if any)")
+        except Exception:  # noqa: BLE001
+            logger.warning("[App] logging_config cold load skipped", exc_info=True)
+
+    # ---------- LeaderElection 初始化 ----------
+    leader_election = None
+    config = get_config()
+    deployment_mode = str((config.get("gateway") or {}).get("deployment_mode", "standalone")).strip().lower()
+    if deployment_mode == "active-standby":
+        from jiuwenclaw.gateway.leader_election import LeaderElection, Role
+
+        leader_election = LeaderElection.get_instance()
+
+        async def _reload_session_map_on_leader_change(role: Role) -> None:
+            if role == Role.PRIMARY:
+                logger.info("[App] PRIMARY elected, reloading session map from Redis")
+                message_handler.reload_session_map()
+
+        leader_election.register_callback(_reload_session_map_on_leader_change)
+
+        # 选主结果未知前先把 cron 设为 STANDBY，避免短暂窗口内非 PRIMARY 进程触发任务；
+        # cron_scheduler.start() 已在前面跑过，loop 已存活，set_active(False) 仅让它跳过事件处理。
+        cron_scheduler.set_active(False)
+
+        async def _cron_on_role_change(role: Role) -> None:
+            if role == Role.PRIMARY:
+                # 顺序：先 reload 重建事件队列，再激活，避免 loop 抢先消费旧事件。
+                try:
+                    await cron_scheduler.reload()
+                except Exception:
+                    logger.exception("[App] cron reload on promotion failed")
+                cron_scheduler.set_active(True)
+            else:
+                cron_scheduler.set_active(False)
+
+        leader_election.register_callback(_cron_on_role_change)
+
+        # 主备切换回调：升为 PRIMARY 时清理旧主遗留的所有 Pod，再由 autoscale 自动重建
+        if hasattr(client, "cleanup_all_pods"):
+            async def _session_on_role_change(role: Role) -> None:
+                if role == Role.PRIMARY:
+                    logger.info("[App] 角色切换为 PRIMARY，清理旧主遗留 Pod 并重新初始化 Access")
+                    await client.cleanup_all_pods()
+                    await client.reinit_access()
+                else:
+                    logger.info("[App] 角色切换为 STANDBY")
+            #leader_election.register_callback(_session_on_role_change)
+
+        # 选主感知：ManagerWsClient 仅在 PRIMARY 节点连接 Claw Manager；
+        # STANDBY 不连，避免与 Manager 建立无意义的会话（共享 MySQL 已保证配置一致）。
+        # EE 扩展缺失（OSS 部署）时静默忽略。
+        import importlib
+
+        async def _manager_ws_on_role_change(role: Role) -> None:
+            try:
+                mod = importlib.import_module(
+                    "jiuwenclaw.loaded_extension.manager_ws_client.extension"
+                )
+            except Exception:  # noqa: BLE001
+                return
+            fn_name = (
+                "start_manager_ws_connect"
+                if role == Role.PRIMARY
+                else "stop_manager_ws_connect"
+            )
+            fn = getattr(mod, fn_name, None)
+            if not callable(fn):
+                return
+            try:
+                ret = fn()
+                if asyncio.iscoroutine(ret):
+                    await ret
+            except Exception:  # noqa: BLE001
+                logger.exception("[App] manager_ws_client.%s failed", fn_name)
+
+        leader_election.register_callback(_manager_ws_on_role_change)
+
+        # 选主感知：升为 PRIMARY 时主动从 channel_config DB 重新加载 channels。
+        # STANDBY 期间 ManagerWsClient 未连接 Manager，可能错过 config.push；
+        # 升主时主动 reload 一次，补齐 STANDBY 窗口内的配置变更。
+        # _apply_channel_config 内置基于 dict diff 的幂等保护（_should_restart_channel），
+        # 配置未变化的 channel 不会被重启，因此重复调用安全。
+        # 仅在 channel_config DB overlay 启用时生效（_reload_channels_from_db 此时才存在于闭包）。
+        if _channel_db_overlay:
+            async def _channels_on_role_change(role: Role) -> None:
+                if role == Role.PRIMARY:
+                    logger.info("[App] PRIMARY elected, reload channels from channel_config DB")
+                    try:
+                        await _reload_channels_from_db(None)
+                    except Exception:  # noqa: BLE001
+                        logger.exception("[App] reload channels on promotion failed")
+
+            leader_election.register_callback(_channels_on_role_change)
+
+        await leader_election.start()
+    else:
+        logger.info("[App] standalone mode, skip LeaderElection")
+
     # 先同步完成监听绑定，避免 IDE/ACP 子进程在端口尚未就绪时连接导致多次重试。
     logger.info("[App] about to call gateway_server.start()")
     try:
@@ -1843,6 +2024,10 @@ async def _run(
         if heartbeat_enabled:
             await heartbeat_service.stop()
         await message_handler.stop_forwarding()
+        if leader_election is not None:
+            await leader_election.stop()
+        await extension_manager.shutdown_all_extensions()
+        await shutdown_gateway_redis()
         await client.disconnect()
         logger.info("[App] Gateway stopped")
 

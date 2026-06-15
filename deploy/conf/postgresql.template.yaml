@@ -1,0 +1,120 @@
+# 1. Headless Service：给 StatefulSet 提供稳定 DNS 域名
+apiVersion: v1
+kind: Service
+metadata:
+  name: <<POSTGRES_NAME>>-headless
+spec:
+  ports:
+    - port: 5432
+      targetPort: 5432
+  clusterIP: None
+  selector:
+    app: <<POSTGRES_NAME>>
+
+---
+# 2. NodePort Service：供外部工具连接 PostgreSQL
+apiVersion: v1
+kind: Service
+metadata:
+  name: <<POSTGRES_NAME>>-nodeport
+spec:
+  type: NodePort
+  ports:
+    - port: 5432
+      targetPort: 5432
+      nodePort: <<POSTGRES_NODE_PORT>>
+  selector:
+    app: <<POSTGRES_NAME>>
+
+---
+# 3. StatefulSet：PostgreSQL 有状态应用
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: <<POSTGRES_NAME>>
+spec:
+  serviceName: <<POSTGRES_NAME>>-headless
+  replicas: 1
+  selector:
+    matchLabels:
+      app: <<POSTGRES_NAME>>
+  template:
+    metadata:
+      labels:
+        app: <<POSTGRES_NAME>>
+    spec:
+      containers:
+        - name: <<POSTGRES_NAME>>
+          image: <<POSTGRES_IMAGE>>
+          env:
+            - name: POSTGRES_PASSWORD
+              value: "<<POSTGRES_PASSWORD>>"
+            - name: POSTGRES_HOST_AUTH_METHOD
+              value: "scram-sha-256"
+            - name: TZ
+              value: "Asia/Shanghai"
+            - name: PGDATA
+              value: "/var/lib/postgresql/data/pgdata"
+          ports:
+            - containerPort: 5432
+              name: <<POSTGRES_NAME>>
+          volumeMounts:
+            - name: <<POSTGRES_NAME>>-data
+              mountPath: /var/lib/postgresql/data
+          livenessProbe:
+            exec:
+              command: ["pg_isready", "-U", "postgres"]
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            timeoutSeconds: 5
+          readinessProbe:
+            exec:
+              command: ["pg_isready", "-U", "postgres"]
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            timeoutSeconds: 2
+      volumes:
+        - name: <<POSTGRES_NAME>>-data
+          persistentVolumeClaim:
+            claimName: <<POSTGRES_NAME>>-pvc
+
+---
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: <<POSTGRES_NAME>>-pv
+  labels:
+    app: <<POSTGRES_NAME>>
+spec:
+  capacity:
+    storage: <<POSTGRES_STORAGE_SIZE>>
+  accessModes:
+    - ReadWriteOnce
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: ""
+  nfs:
+    server: <<NFS_SERVER_ADDR>>
+    path: <<POSTGRES_NFS_PATH>>
+    readOnly: false
+  mountOptions:
+    - nfsvers=4
+    - soft        # 改成 soft！防止节点卡死
+    - timeo=600   # 超时时间：60秒
+    - retrans=2   # 重试2次
+    - noatime
+
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: <<POSTGRES_NAME>>-pvc
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: <<POSTGRES_STORAGE_SIZE>>
+  storageClassName: ""
+  selector:
+    matchLabels:
+      app: <<POSTGRES_NAME>>

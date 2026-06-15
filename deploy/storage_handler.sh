@@ -2,28 +2,39 @@
 set -euo >/dev/null 2>&1
 
 install_pv_pvc() {
-    render_config_template ${PV_TEMPLATE_FILE} ${PV_FILE} "DEPLOY_VARS"
-    exec_cmd kubectl apply -f ${PV_FILE}
+    local pv_template_file="${CONFIG["PV_TEMPLATE_FILE"]}"
+    local pv_file="${CONFIG["PV_FILE"]}"
+    local pvc_template_file="${CONFIG["PVC_TEMPLATE_FILE"]}"
+    local pvc_file="${CONFIG["PVC_FILE"]}"
 
-    render_config_template ${PVC_TEMPLATE_FILE} ${PVC_FILE} "DEPLOY_VARS"
-    exec_cmd kubectl apply -f ${PVC_FILE}
+    render_config_template ${pv_template_file} ${pv_file} "DEPLOY_VARS"
+    exec_cmd kubectl apply -f ${pv_file}
+
+    render_config_template ${pvc_template_file} ${pvc_file} "DEPLOY_VARS"
+    exec_cmd kubectl apply -f ${pvc_file}
 }
 
 uninstall_pv_pvc() {
-    exec_cmd kubectl delete -f ${PVC_FILE} false
-    exec_cmd kubectl delete -f ${PV_FILE} false
+    local pv_file="${CONFIG["PV_FILE"]}"
+    local pvc_file="${CONFIG["PVC_FILE"]}"
+
+    exec_cmd kubectl delete -f ${pvc_file} --ignore-not-found=true
+    exec_cmd kubectl delete -f ${pv_file} --ignore-not-found=true
 }
 
 
 # NFS is on default namespace
 deploy_nfs() {
     local nfs_path=${DEPLOY_VARS["NFS_HOST_PATH"]}
+    local nfs_dname=${DEPLOY_VARS["NFS_NAME"]}
+    local template_file=${CONFIG["NFS_TEMPLATE_FILE"]}
+    local file=${CONFIG["NFS_FILE"]}
 
-    render_config_template ${NFS_SERVER_TEMPLATE_FILE} ${NFS_SERVER_FILE} "DEPLOY_VARS"
+    render_config_template ${template_file} ${file} "DEPLOY_VARS"
     exec_cmd mkdir -p ${nfs_path}
     exec_cmd chmod -R 777 ${nfs_path}
-    exec_cmd kubectl apply -f ${NFS_SERVER_FILE}
-    wait_k8s_resource_ready "deployment" "${DEPLOY_VARS["NFS_NAME"]}"
+    exec_cmd kubectl apply -f ${file}
+    wait_k8s_resource_ready "deployment" "${nfs_dname}"
 }
 
 uninstall_nfs() {

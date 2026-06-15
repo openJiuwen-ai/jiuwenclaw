@@ -1,0 +1,18 @@
+ARG BASE_IMAGE
+FROM ${BASE_IMAGE}
+
+RUN useradd --create-home --shell /bin/bash app
+
+WORKDIR /app/jiuwenclaw
+COPY . /app/jiuwenclaw/
+RUN chown -R app:app /app/jiuwenclaw
+
+# 把 pip install 放在 USER app 之前
+# 用 root 执行 pip install → 安装到系统全局
+RUN pip install -e "./packages/jiuwenclaw-ee/claw_manager" -i https://pypi.tuna.tsinghua.edu.cn/simple
+
+USER app
+ENV PATH=$PATH:/home/app/.local/bin
+
+EXPOSE 8765
+CMD ["jiuwenclaw-manager"]

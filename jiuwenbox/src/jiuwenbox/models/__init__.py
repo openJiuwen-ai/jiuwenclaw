@@ -1,12 +1,18 @@
+# Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
+
 from jiuwenbox.models.sandbox import (
+    BackgroundExecResult,
     ExecResult,
+    InvalidSandboxIdError,
     SandboxPhase,
     SandboxRef,
     SandboxSpec,
 )
 from jiuwenbox.models.policy import (
+    ArchitectureSyscallPolicy,
     BindMount,
     DirectoryMount,
+    FileMount,
     FilesystemPolicy,
     CapabilityPolicy,
     LandlockPolicy,
@@ -24,12 +30,16 @@ from jiuwenbox.models.common import (
 )
 
 __all__ = [
+    "BackgroundExecResult",
     "ExecResult",
+    "InvalidSandboxIdError",
     "SandboxPhase",
     "SandboxRef",
     "SandboxSpec",
     "BindMount",
+    "ArchitectureSyscallPolicy",
     "DirectoryMount",
+    "FileMount",
     "FilesystemPolicy",
     "CapabilityPolicy",
     "LandlockPolicy",

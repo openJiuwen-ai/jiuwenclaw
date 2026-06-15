@@ -1,0 +1,112 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: jiuwenclaw-gateway-sa
+  namespace: <<NAMESPACE>>
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: jiuwenclaw-agentserver-creator
+  namespace: <<NAMESPACE>>
+rules:
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch", "create", "delete"]
+  - apiGroups: [""]
+    resources: ["pods/log"]
+    verbs: ["get"]
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    verbs: ["get", "list", "watch"]
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: jiuwenclaw-gateway-agentserver-binding
+  namespace: <<NAMESPACE>>
+subjects:
+  - kind: ServiceAccount
+    name: <<GATEWAY_SERVICE_ACCOUNT>>
+    namespace: <<NAMESPACE>>
+roleRef:
+  kind: Role
+  name: jiuwenclaw-agentserver-creator
+  apiGroup: rbac.authorization.k8s.io
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: <<GATEWAY_NAME>>
+  namespace: <<NAMESPACE>>
+  labels:
+    app: <<GATEWAY_NAME>>
+spec:
+  replicas: <<GATEWAY_REPLICAS>>
+  selector:
+    matchLabels:
+      app: <<GATEWAY_NAME>>
+  template:
+    metadata:
+      labels:
+        app: <<GATEWAY_NAME>>
+    spec:
+      containers:
+        - name: gateway
+          image: <<GATEWAY_IMAGE>>
+          imagePullPolicy: IfNotPresent
+          # 用于调试模式：启用后容器将保持运行，可进入 Pod 手动调试程序
+          # command: ["/bin/sh"]
+          # args: ["-c", "sleep infinity"]
+          ports:
+            - name: websocket
+              containerPort: <<GATEWAY_WEBSOCKET_PORT>>
+              protocol: TCP
+          envFrom: []
+          volumeMounts:
+            - name: gateway-config
+              mountPath: /root/.jiuwenclaw/config/config.yaml
+              subPath: config.yaml
+              readOnly: true
+      volumes:
+        - name: gateway-config
+          configMap:
+            name: <<GATEWAY_CONFIG_MAP_NAME>>
+            items:
+              - key: config.yaml
+                path: config.yaml
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: <<GATEWAY_NAME>>
+  namespace: <<NAMESPACE>>
+spec:
+  selector:
+    app: <<GATEWAY_NAME>>                     # 必须匹配你的 gateway pod 的标签
+  ports:
+    - name: websocket
+      port: <<GATEWAY_WEBSOCKET_PORT>>         # Service 端口
+      targetPort: <<GATEWAY_WEBSOCKET_PORT>>   # 容器端口
+  type: ClusterIP                             # 集群内部访问，不需要外网
+
+---
+# NodePort Service：供集群外部连接
+apiVersion: v1
+kind: Service
+metadata:
+  name: <<GATEWAY_NAME>>-nodeport
+  namespace: <<NAMESPACE>>
+spec:
+  type: NodePort
+  ports:
+    - name: websocket
+      port: <<GATEWAY_WEBSOCKET_PORT>>        # 集群内部端口
+      targetPort: <<GATEWAY_WEBSOCKET_PORT>>  # 容器端口
+      nodePort: <<GATEWAY_NODE_PORT>>         # 外部访问端口（30000-32767）
+  selector:
+    app: <<GATEWAY_NAME>>
