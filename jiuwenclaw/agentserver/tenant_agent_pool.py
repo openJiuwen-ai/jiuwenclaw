@@ -292,6 +292,9 @@ class TenantAgentPool:
     async def process_message(self, request: AgentRequest) -> AgentResponse:
         """处理非流式请求."""
         agent_id, service_id = self.extract_ids(request)
+        from jiuwenclaw.agentserver.checkpoint_setup import ensure_persistent_checkpointer
+
+        await ensure_persistent_checkpointer(service_id, agent_id)
         agent_manager = await self._ensure_agent_manager(agent_id, service_id)
         return await agent_manager.process_message(request)
 
@@ -300,6 +303,9 @@ class TenantAgentPool:
     ):
         """处理流式请求."""
         agent_id, service_id = self.extract_ids(request)
+        from jiuwenclaw.agentserver.checkpoint_setup import ensure_persistent_checkpointer
+
+        await ensure_persistent_checkpointer(service_id, agent_id)
         agent_manager = await self._ensure_agent_manager(agent_id, service_id)
         async for chunk in agent_manager.process_message_stream(request):
             yield chunk

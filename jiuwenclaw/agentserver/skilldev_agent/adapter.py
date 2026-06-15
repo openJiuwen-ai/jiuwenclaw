@@ -151,6 +151,10 @@ class SkillDevDeepAdapter:
 
     async def create_instance(self, config: dict[str, Any] | None = None, *, mode: str = "claw") -> None:
         """Create the dedicated SkillDev DeepAgent."""
+        from jiuwenclaw.agentserver.checkpoint_setup import ensure_persistent_checkpointer
+
+        await ensure_persistent_checkpointer(self._service_id, self._agent_id)
+
         if self._instance is not None:
             old_card_id = getattr(getattr(self._instance, 'card', None), 'id', None)
             if old_card_id:
@@ -282,7 +286,7 @@ class SkillDevDeepAdapter:
                     "file": {
                         "url": url,
                         "name": raw.get("name"),
-                        "size_bytes": raw.get("size_bytes"),
+                        "size_bytes": raw.get("sizeBytes"),
                         "mime": raw.get("mime"),
                     },
                 }

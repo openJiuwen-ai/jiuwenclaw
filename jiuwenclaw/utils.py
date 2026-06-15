@@ -1159,17 +1159,22 @@ def _migrate_legacy_checkpoint_and_logs() -> None:
                     shutil.move(str(f), str(logs_target / f.name))
 
 
-def get_checkpoint_dir() -> Path:
+def get_checkpoint_dir(
+    service_id: str | None = None,
+    agent_id: str | None = None,
+) -> Path:
     """Get the checkpoint directory path (agent_id level).
 
     多租户架构下，checkpoint 存放在 agent_id 级别。
-    Path: ~/.jiuwenclaw/service_default/agent_default/.checkpoint
+    默认路径: ~/.jiuwenclaw/service_default/agent_default/.checkpoint
+    租户路径: ~/.jiuwenclaw/service_{service_id}/agent_{agent_id}/.checkpoint
     """
     _migrate_legacy_checkpoint_and_logs()
-    workspace = get_multi_tenant_user_workspace_dir("default", "default")
+    sid = service_id or "default"
+    aid = agent_id or "default"
+    workspace = get_multi_tenant_user_workspace_dir(sid, aid)
     if workspace:
         return workspace / ".checkpoint"
-    # Fallback
     return get_agent_root_dir() / ".checkpoint"
 
 

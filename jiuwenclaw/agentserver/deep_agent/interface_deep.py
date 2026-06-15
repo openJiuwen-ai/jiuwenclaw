@@ -33,9 +33,6 @@ from openjiuwen.core.foundation.llm import ModelRequestConfig, ModelClientConfig
 from openjiuwen.core.foundation.store.base_embedding import EmbeddingConfig
 from openjiuwen.core.foundation.tool import ToolCard
 from openjiuwen.core.runner import Runner
-from openjiuwen.core.session.checkpointer import CheckpointerFactory
-from openjiuwen.core.session.checkpointer.checkpointer import CheckpointerConfig
-from openjiuwen.core.session.checkpointer.persistence import PersistenceCheckpointerProvider
 from openjiuwen.core.single_agent import AgentCard, ReActAgentConfig
 from openjiuwen.core.sys_operation import (
     SysOperation,
@@ -177,7 +174,6 @@ from jiuwenclaw.schema.agent import AgentRequest, AgentResponse, AgentResponseCh
 from jiuwenclaw.utils import (
     get_agent_registered_skill_dirs,
     get_agent_workspace_dir,
-    get_checkpoint_dir,
     get_env_file,
     get_agent_root_dir,
 )
@@ -1185,20 +1181,10 @@ class JiuWenClawDeepAdapter:
             warn_label="petal search tool",
         )
 
-    @staticmethod
-    async def set_checkpoint():
-        try:
-            PersistenceCheckpointerProvider()
-            checkpoint_path = get_checkpoint_dir()
-            checkpointer = await CheckpointerFactory.create(
-                CheckpointerConfig(
-                    type="persistence",
-                    conf={"db_type": "sqlite", "db_path": f"{checkpoint_path}/checkpoint"},
-                )
-            )
-            CheckpointerFactory.set_default_checkpointer(checkpointer)
-        except Exception as e:
-            logger.error("[JiuWenClawDeepAdapter] fail to setup checkpoint due to: %s", e)
+    async def set_checkpoint(self) -> None:
+        from jiuwenclaw.agentserver.checkpoint_setup import ensure_persistent_checkpointer
+
+        await ensure_persistent_checkpointer(self._service_id, self._agent_id)
 
 
     @staticmethod
