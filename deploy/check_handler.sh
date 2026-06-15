@@ -9,15 +9,28 @@ check_cmd() {
     fi
 }
 
+check_yq() {
+    local YQ_VERSION=$(yq --version 2>&1)
+
+    check_cmd "yq"
+    if echo "$YQ_VERSION" | grep -q "mikefarah" && echo "$YQ_VERSION" | grep -qE "version v4\.|version v[5-9]\."; then
+        success "✅ yq 检查通过: $YQ_VERSION"
+    else
+        error "检测到的 yq 不是 mikefarah/yq v4+ 版本, 当前版本信息: $YQ_VERSION"
+    fi
+}
+
 check_cmds() {
     if [ "${DEPLOY_VARS["AGENT_RUNTIME"]}" == "yuanrong" ]; then
         check_cmd helm
     fi
 
-    for cmd in docker python3 jq yq mount.nfs base64
+    for cmd in docker python3 jq mount.nfs base64
     do
         check_cmd ${cmd}
     done
+
+    check_yq
 
     local os_type=${DEPLOY_VARS["OS_TYPE"]}
     if [ "${os_type}" == "macos" ]; then
