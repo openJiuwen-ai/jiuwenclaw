@@ -14,6 +14,11 @@ LOADED_EXTENSION_PARENT_PKG = "jiuwenclaw.loaded_extension"
 MANAGER_WS_CLIENT_EXT_PKG = f"{LOADED_EXTENSION_PARENT_PKG}.manager_ws_client"
 
 
+def is_manager_ws_client_available() -> bool:
+    """``manager_ws_client`` 扩展目录是否可解析（不执行子模块 import）。"""
+    return resolve_manager_ws_client_root() is not None
+
+
 def resolve_manager_ws_client_root() -> Path | None:
     """解析 ``manager_ws_client`` 扩展根目录（``EXTENSION_DIRS`` 或仓库内置路径）。"""
     for entry in os.getenv("EXTENSION_DIRS", "").split(os.pathsep):
