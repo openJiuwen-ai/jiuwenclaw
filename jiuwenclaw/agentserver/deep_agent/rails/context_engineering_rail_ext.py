@@ -79,9 +79,13 @@ class JiuClawContextEngineeringRail(ContextEngineeringRail):
         "你的上下文在过长时会被自动压缩，"
         "并标记为[OFFLOAD: handle=<id>, type=<type>]。\n\n"
         "如果你认为需要读取隐藏的内容，"
-        "可随时调用reload_original_context_messages工具。\n\n"
+        "可随时调用 reload_original_context_messages 工具。\n\n"
+        "历史 QA 块：会话级目录见 [QA_BLOCK_CATALOG]；"
+        "展开某一 qa_id 块内的概览与逐 message 目录请用 load_qa_index(qa_id)；"
+        "目录或窗内 [[OFFLOAD: handle=…]] 句柄用 "
+        'reload_original_context_messages(handle, "filesystem") 取回原文。\n\n'
         "请勿猜测或编造缺失的内容。\n\n"
-        '存储类型："in_memory"（会话缓存）'
+        '存储类型："in_memory"（会话缓存）、"filesystem"（QA 块 offload 落盘）'
     )
 
     OFFLOAD_HINT_EN = (
@@ -90,8 +94,12 @@ class JiuClawContextEngineeringRail(ContextEngineeringRail):
         "and marked with [OFFLOAD: handle=<id>, type=<type>].\n\n"
         'Call reload_original_context_messages(offload_handle="<id>", '
         'offload_type="<type>"), using the exact values from the marker.\n\n'
+        "For historical QA blocks: see [QA_BLOCK_CATALOG] for session-level index; "
+        "call load_qa_index(qa_id) to expand a block's overview and per-message catalog; "
+        'use reload_original_context_messages(handle, "filesystem") for '
+        "[[OFFLOAD: handle=…]] in QA catalogs.\n\n"
         "Do not guess or fabricate missing content.\n\n"
-        'Storage types: "in_memory" (session cache)'
+        'Storage types: "in_memory" (session cache), "filesystem" (QA block offload)'
     )
 
     def __init__(

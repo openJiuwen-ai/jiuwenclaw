@@ -888,9 +888,12 @@ Approach each task methodically and deliver high-quality results.
         )
         # 复用主 Agent 路径：跟随 react.context_engine_config 解析链 A/B 与 yaml 调优值
         # （tool_result_budget / micro_compact / full_compact）；minimal=True 跳过 tools/context 注入。
-        from jiuwenclaw.agentserver.deep_agent.interface_deep import _build_context_engineering_rail
+        from jiuwenclaw.agentserver.deep_agent.interface_deep import (
+            _build_context_engineering_rail,
+            react_config_for_subagent,
+        )
 
-        react_config = (config_base or {}).get("react", {}) or {}
+        react_config = react_config_for_subagent((config_base or {}).get("react", {}) or {})
         context_engine_config = react_config.get("context_engine_config", {}) or {}
         ce_rail = None
         if context_engine_config.get("enabled", False):
@@ -1066,9 +1069,12 @@ Execute the given task using inherited context and available tools.
             kind="fork",
         )
         # 与 spawn 路径同样跟随 react.context_engine_config 解析链 A/B 与 yaml 调优值。
-        from jiuwenclaw.agentserver.deep_agent.interface_deep import _build_context_engineering_rail
+        from jiuwenclaw.agentserver.deep_agent.interface_deep import (
+            _build_context_engineering_rail,
+            react_config_for_subagent,
+        )
 
-        react_config = (config_base or {}).get("react", {}) or {}
+        react_config = react_config_for_subagent((config_base or {}).get("react", {}) or {})
         context_engine_config = react_config.get("context_engine_config", {}) or {}
         ce_rail = None
         if context_engine_config.get("enabled", False):

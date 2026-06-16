@@ -12,12 +12,18 @@ from jiuwenclaw.agentserver.deep_agent.rails.skill_prompt_rail import SkillProto
 from jiuwenclaw.agentserver.deep_agent.rails.team_member_skill_toolkit_rail import (
     MemberSkillToolkitRail,
 )
+from jiuwenclaw.agentserver.deep_agent.rails.qa_artifact_rail import JiuClawQAArtifactRail
+from jiuwenclaw.agentserver.deep_agent.rails.qa_block_assembly_rail import JiuClawQABlockAssemblyRail
+from jiuwenclaw.agentserver.deep_agent.rails.qa_block_freeze_rail import JiuClawQABlockFreezeRail
 from jiuwenclaw.agentserver.deep_agent.rails.stream_event_rail import JiuClawStreamEventRail
 from jiuwenclaw.agentserver.deep_agent.rails.context_overflow_recovery_rail import ContextOverflowRecoveryRail
 from jiuwenclaw.agentserver.deep_agent.rails.task_execution_rail import TaskExecutionRail
 
 __all__ = [
     "JiuClawContextEngineeringRail",
+    "JiuClawQAArtifactRail",
+    "JiuClawQABlockAssemblyRail",
+    "JiuClawQABlockFreezeRail",
     "JiuClawStreamEventRail",
     "ContextOverflowRecoveryRail",
     "TaskExecutionRail",

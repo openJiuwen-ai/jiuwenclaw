@@ -85,6 +85,15 @@ from openjiuwen.harness.tools import (
 )
 from openjiuwen.harness.tools.todo import TodoStatus, TodoModifyTool
 from openjiuwen.harness.workspace.workspace import Workspace, WorkspaceNode
+from openjiuwen.core.context_engine.processor.compressor.full_compact_processor import (
+    FullCompactProcessorConfig,
+)
+from openjiuwen.core.context_engine.qa_artifact.schema import IrreducibleContextError
+from openjiuwen.core.context_engine.qa_artifact.schema import (
+    QAArtifactConfig,
+    validate_qa_artifact_thresholds,
+)
+from openjiuwen.core.context_engine.qa_block.config import QABlockConfig
 
 from jiuwenclaw.agentserver.utils import DEFAULT_ENABLE_READ_IMAGE_MULTIMODAL
 from jiuwenclaw.agentserver.deep_agent.cron_runtime import CronRuntimeBridge
@@ -114,13 +123,18 @@ from jiuwenclaw.agentserver.deep_agent.plan_pause_helpers import (
     snapshot_and_isolate_unfinished_todos,
     persist_checkpoint_for_session,
     post_agent_execute_for_session,
+    resolve_context_engine,
     read_plan_pause_from_session,
     repair_task_plan_after_pause,
     write_plan_pause_to_session,
+    _resolve_session_for_checkpoint,
 )
 from jiuwenclaw.agentserver.deep_agent.prompt_builder import build_identity_prompt
 from jiuwenclaw.agentserver.deep_agent.rails import (
     JiuClawContextEngineeringRail,
+    JiuClawQAArtifactRail,
+    JiuClawQABlockAssemblyRail,
+    JiuClawQABlockFreezeRail,
     JiuClawStreamEventRail,
     ContextOverflowRecoveryRail,
     ResponsePromptRail,
@@ -423,6 +437,8 @@ _SUBAGENT_PROGRESSIVE_EAGER_EXCLUDE_BY_KIND: dict[str, frozenset[str]] = {
     "fork": frozenset({"fork_agent", "spawn_subagent"}),
 }
 
+_SUBAGENT_PROGRESSIVE_EAGER_EXCLUDE_COMMON = frozenset({"load_qa_index"})
+
 _PROGRESSIVE_META_TOOL_NAMES = frozenset({"tools_search", "invoke_tool"})
 
 
@@ -496,7 +512,10 @@ def build_jiuwen_progressive_tool_rail_from_react_config(
             )
 
         kind = (subagent_kind or "").strip().lower()
-        excluded = _SUBAGENT_PROGRESSIVE_EAGER_EXCLUDE_BY_KIND.get(kind)
+        excluded = set(_SUBAGENT_PROGRESSIVE_EAGER_EXCLUDE_COMMON)
+        kind_excluded = _SUBAGENT_PROGRESSIVE_EAGER_EXCLUDE_BY_KIND.get(kind)
+        if kind_excluded:
+            excluded.update(kind_excluded)
         if excluded:
             eager_tools = [name for name in eager_tools if name not in excluded]
             eager_tools = _ensure_progressive_meta_tools(eager_tools)
@@ -774,6 +793,114 @@ def _resolve_session_memory_for_context_rail(context_engine_cfg: dict[str, Any])
     return raw
 
 
+def _config_section(cfg: dict[str, Any], key: str) -> Any:
+    if key in cfg:
+        return cfg.get(key)
+    context_engine_cfg = cfg.get("context_engine_config")
+    if isinstance(context_engine_cfg, dict) and key in context_engine_cfg:
+        return context_engine_cfg.get(key)
+    return None
+
+
+def _validate_qa_artifact_thresholds_if_enabled(
+    react_cfg: dict[str, Any],
+    qa_artifact_cfg: QAArtifactConfig | None,
+    session_memory: SessionMemoryConfig | None,
+) -> None:
+    if qa_artifact_cfg is None or not qa_artifact_cfg.enabled:
+        return
+    context_engine_cfg = react_cfg.get("context_engine_config")
+    if not isinstance(context_engine_cfg, dict):
+        context_engine_cfg = react_cfg
+    session_memory_trigger = (
+        session_memory.trigger_tokens
+        if session_memory is not None
+        else SessionMemoryConfig().trigger_tokens
+    )
+    full_compact_raw = context_engine_cfg.get("full_compact_processor_config") or {}
+    full_compact_trigger = int(
+        full_compact_raw.get(
+            "trigger_total_tokens",
+            FullCompactProcessorConfig().trigger_total_tokens,
+        )
+    )
+    validate_qa_artifact_thresholds(
+        qa_artifact_cfg,
+        session_memory_trigger_tokens=session_memory_trigger,
+        full_compact_trigger_total_tokens=full_compact_trigger,
+    )
+
+
+def _resolve_qa_artifact_config(
+    react_cfg: dict[str, Any],
+    session_memory: SessionMemoryConfig | None,
+) -> QAArtifactConfig | None:
+    qa_block = _config_section(react_cfg, "qa_block")
+    if isinstance(qa_block, dict) and qa_block.get("enabled") is False:
+        return None
+    raw = _config_section(react_cfg, "qa_artifact")
+    if raw is False:
+        return None
+    if isinstance(raw, dict) and raw.get("enabled") is True and session_memory is None:
+        logger.warning(
+            "[JiuWenClawDeepAdapter] qa_artifact.enabled=true but session_memory is disabled "
+            "(chain A); qa_artifact will not activate. Enable chain B (session_memory) or set "
+            "qa_artifact.enabled: false."
+        )
+    if raw is None:
+        if session_memory is None:
+            return None
+        return QAArtifactConfig()
+    if isinstance(raw, dict):
+        if raw.get("enabled") is False:
+            return None
+        cfg = QAArtifactConfig.model_validate(raw)
+        _validate_qa_artifact_thresholds_if_enabled(react_cfg, cfg, session_memory)
+        return cfg
+    cfg = QAArtifactConfig()
+    _validate_qa_artifact_thresholds_if_enabled(react_cfg, cfg, session_memory)
+    return cfg
+
+
+def react_config_for_subagent(react_config: dict[str, Any] | None) -> dict[str, Any]:
+    """Disable QA block / qa_artifact for spawn/fork subagents (plan scope: main session only)."""
+    import copy
+
+    def _set_disabled(section: dict[str, Any], key: str) -> None:
+        raw = section.get(key)
+        if raw is False:
+            return
+        if isinstance(raw, dict):
+            section[key] = {**raw, "enabled": False}
+        else:
+            section[key] = {"enabled": False}
+
+    base = react_config if isinstance(react_config, dict) else {}
+    cfg = copy.deepcopy(base)
+    _set_disabled(cfg, "qa_block")
+    _set_disabled(cfg, "qa_artifact")
+    context_engine_cfg = cfg.get("context_engine_config")
+    if not isinstance(context_engine_cfg, dict):
+        context_engine_cfg = {}
+    _set_disabled(context_engine_cfg, "qa_block")
+    _set_disabled(context_engine_cfg, "qa_artifact")
+    cfg["context_engine_config"] = context_engine_cfg
+    return cfg
+
+
+def _resolve_qa_block_config(config: dict[str, Any]) -> QABlockConfig | None:
+    raw = _config_section(config, "qa_block")
+    if raw is False:
+        return None
+    if raw is None:
+        return QABlockConfig()
+    if isinstance(raw, dict):
+        if raw.get("enabled") is False:
+            return None
+        return QABlockConfig.model_validate(raw)
+    return QABlockConfig()
+
+
 def _build_context_engineering_rail(config: dict[str, Any],
                                     mode: str = "agent.fast",
                                     minimal: bool = False) -> ContextEngineeringRail | None:
@@ -816,10 +943,30 @@ def _build_context_engineering_rail(config: dict[str, Any],
                     user_processors.append(("RoundLevelCompressor", round_level_cfg))
             else:
                 # 预置链 B：三类处理器与用户 yaml 字段级合并（仅非空 dict 参与）
+                qa_artifact_cfg = _resolve_qa_artifact_config(config, session_memory)
                 for yaml_key, processor_name in _CHAIN_B_OPTIONAL_PROCESSORS:
-                    proc_cfg = context_engine_cfg.get(yaml_key, {})
-                    if isinstance(proc_cfg, dict) and proc_cfg:
+                    proc_cfg = dict(context_engine_cfg.get(yaml_key) or {})
+                    if (
+                        qa_artifact_cfg is not None
+                        and qa_artifact_cfg.enabled
+                        and processor_name == "FullCompactProcessor"
+                    ):
+                        proc_cfg["qa_artifact"] = qa_artifact_cfg.model_dump(mode="json")
+                    if proc_cfg:
                         user_processors.append((processor_name, proc_cfg))
+                if (
+                    qa_artifact_cfg is not None
+                    and qa_artifact_cfg.enabled
+                    and not any(name == "FullCompactProcessor" for name, _ in user_processors)
+                ):
+                    user_processors.append(
+                        ("FullCompactProcessor", {"qa_artifact": qa_artifact_cfg.model_dump(mode="json")})
+                    )
+                    logger.info(
+                        "[JiuWenClawDeepAdapter] qa_artifact enabled: auto-append FullCompactProcessor "
+                        "as compact safety net (full_compact_processor_config in yaml is optional)",
+                        extra={"user_visible": "progress"},
+                    )
 
             context_rail = JiuClawContextEngineeringRail(
                 processors=user_processors if user_processors else None,
@@ -1162,6 +1309,9 @@ class JiuWenClawDeepAdapter:
         self._subagent_rail: SubagentRail | None = None
         self._disabled_tools_rail: DisabledToolsRail | None = None
         self._progressive_tool_rail: JiuWenProgressiveToolRail | None = None
+        self._qa_block_freeze_rail: JiuClawQABlockFreezeRail | None = None
+        self._qa_block_assembly_rail: JiuClawQABlockAssemblyRail | None = None
+        self._qa_artifact_rail: JiuClawQAArtifactRail | None = None
         self._permission_rail: Any = None
         self._avatar_rail: Any = None
         self._tool_cards = None
@@ -2107,6 +2257,66 @@ class JiuWenClawDeepAdapter:
                           extra={'user_visible': 'progress'})
             skill_evolution_rail = None
         return skill_evolution_rail
+
+    @staticmethod
+    def _build_qa_block_freeze_rail(config: dict[str, Any]) -> JiuClawQABlockFreezeRail | None:
+        qa_block_cfg = _resolve_qa_block_config(config)
+        if qa_block_cfg is None:
+            return None
+        try:
+            rail = JiuClawQABlockFreezeRail(qa_block_cfg)
+            logger.info(
+                "[JiuWenClawDeepAdapter] JiuClawQABlockFreezeRail create success enabled=%s",
+                qa_block_cfg.enabled,
+            )
+            return rail
+        except Exception as exc:
+            logger.warning(
+                "[JiuWenClawDeepAdapter] JiuClawQABlockFreezeRail create failed: %s",
+                exc,
+            )
+            return None
+
+    @staticmethod
+    def _build_qa_block_assembly_rail(config: dict[str, Any]) -> JiuClawQABlockAssemblyRail | None:
+        qa_block_cfg = _resolve_qa_block_config(config)
+        if qa_block_cfg is None:
+            return None
+        try:
+            rail = JiuClawQABlockAssemblyRail(qa_block_cfg)
+            logger.info(
+                "[JiuWenClawDeepAdapter] JiuClawQABlockAssemblyRail create success enabled=%s",
+                qa_block_cfg.enabled,
+            )
+            return rail
+        except Exception as exc:
+            logger.warning(
+                "[JiuWenClawDeepAdapter] JiuClawQABlockAssemblyRail create failed: %s",
+                exc,
+            )
+            return None
+
+    @staticmethod
+    def _build_qa_artifact_rail(
+        react_cfg: dict[str, Any],
+        session_memory: SessionMemoryConfig | None,
+    ) -> JiuClawQAArtifactRail | None:
+        qa_artifact_cfg = _resolve_qa_artifact_config(react_cfg, session_memory)
+        if qa_artifact_cfg is None:
+            return None
+        try:
+            rail = JiuClawQAArtifactRail(qa_artifact_cfg, session_memory)
+            logger.info(
+                "[JiuWenClawDeepAdapter] JiuClawQAArtifactRail create success enabled=%s",
+                qa_artifact_cfg.enabled,
+            )
+            return rail
+        except Exception as exc:
+            logger.warning(
+                "[JiuWenClawDeepAdapter] JiuClawQAArtifactRail create failed: %s",
+                exc,
+            )
+            return None
 
     def _build_stream_event_rail(self) -> JiuClawStreamEventRail | None:
         """Build JiuClawStreamEventRail."""
@@ -3577,6 +3787,58 @@ class JiuWenClawDeepAdapter:
                 logger.info(
                     "[JiuWenClawDeepAdapter] SkillComplianceRail registered for plan mode"
                 )
+        await self._handle_qa_block_rails_for_plan()
+
+    async def _handle_qa_block_rails_for_plan(self) -> None:
+        react_cfg = self._config_cache if isinstance(self._config_cache, dict) else {}
+        context_engine_cfg = react_cfg.get("context_engine_config", {})
+        session_memory = _resolve_session_memory_for_context_rail(context_engine_cfg)
+
+        if _resolve_qa_block_config(react_cfg) is None:
+            if self._qa_block_freeze_rail is not None:
+                await self._instance.unregister_rail(self._qa_block_freeze_rail)
+                self._qa_block_freeze_rail = None
+                logger.info("[JiuWenClawDeepAdapter] QABlockFreezeRail unregistered (disabled)")
+            if self._qa_block_assembly_rail is not None:
+                await self._instance.unregister_rail(self._qa_block_assembly_rail)
+                self._qa_block_assembly_rail = None
+                logger.info("[JiuWenClawDeepAdapter] QABlockAssemblyRail unregistered (disabled)")
+            if self._qa_artifact_rail is not None:
+                await self._instance.unregister_rail(self._qa_artifact_rail)
+                self._qa_artifact_rail = None
+                logger.info("[JiuWenClawDeepAdapter] QAArtifactRail unregistered (disabled)")
+            self._wire_qa_artifact_to_freeze_rail()
+            return
+        if self._qa_block_freeze_rail is None:
+            self._qa_block_freeze_rail = self._build_qa_block_freeze_rail(react_cfg)
+            if self._qa_block_freeze_rail is not None:
+                await self._instance.register_rail(self._qa_block_freeze_rail)
+                logger.info("[JiuWenClawDeepAdapter] QABlockFreezeRail registered for plan mode")
+        if self._qa_block_assembly_rail is None:
+            self._qa_block_assembly_rail = self._build_qa_block_assembly_rail(react_cfg)
+            if self._qa_block_assembly_rail is not None:
+                await self._instance.register_rail(self._qa_block_assembly_rail)
+                logger.info("[JiuWenClawDeepAdapter] QABlockAssemblyRail registered for plan mode")
+        if self._qa_artifact_rail is None:
+            self._qa_artifact_rail = self._build_qa_artifact_rail(react_cfg, session_memory)
+            if self._qa_artifact_rail is not None:
+                await self._instance.register_rail(self._qa_artifact_rail)
+                logger.info("[JiuWenClawDeepAdapter] QAArtifactRail registered for plan mode")
+        self._wire_qa_artifact_to_freeze_rail()
+
+    def _wire_qa_artifact_to_freeze_rail(self) -> None:
+        freeze_rail = self._qa_block_freeze_rail
+        if freeze_rail is None:
+            return
+        mgr = (
+            self._qa_artifact_rail.qa_artifact_manager
+            if self._qa_artifact_rail is not None
+            else None
+        )
+        freeze_rail.attach_qa_artifact(mgr)
+
+    async def _handle_qa_block_freeze_rail_for_plan(self) -> None:
+        await self._handle_qa_block_rails_for_plan()
 
     async def _update_agent_mode_rails(self) -> None:
         """agent 模式：卸载 plan 专属 rails，按需注册 agent 专属 rails。"""
@@ -3592,6 +3854,18 @@ class JiuWenClawDeepAdapter:
                 await self._instance.unregister_rail(rail)
                 setattr(self, attr, None)
                 logger.info("[JiuWenClawDeepAdapter] %s unregistered for agent mode", label)
+        if self._qa_block_freeze_rail is not None:
+            await self._instance.unregister_rail(self._qa_block_freeze_rail)
+            self._qa_block_freeze_rail = None
+            logger.info("[JiuWenClawDeepAdapter] QABlockFreezeRail unregistered for agent mode")
+        if self._qa_block_assembly_rail is not None:
+            await self._instance.unregister_rail(self._qa_block_assembly_rail)
+            self._qa_block_assembly_rail = None
+            logger.info("[JiuWenClawDeepAdapter] QABlockAssemblyRail unregistered for agent mode")
+        if self._qa_artifact_rail is not None:
+            await self._instance.unregister_rail(self._qa_artifact_rail)
+            self._qa_artifact_rail = None
+            logger.info("[JiuWenClawDeepAdapter] QAArtifactRail unregistered for agent mode")
         # agent 模式，根据config选择是否注册或者卸载memory rail
         await self._handle_memory_rail_by_config("fast")
         # 外接记忆 rail（mode-independent，注册一次，跨 reload 持久）
@@ -4133,12 +4407,47 @@ class JiuWenClawDeepAdapter:
             session_id = str(request.session_id or "").strip()
             is_plan_mode = self._task_planning_rail is not None
 
-            # plan 模式：abort 前落盘，保留 cancel 前 tool/assistant 上下文
+            # plan 模式：abort 前 freeze + 落盘，保留 cancel 前 tool/assistant 上下文
+            freeze_session = None
+            freeze_owned = False
             if is_plan_mode and session_id and self._instance is not None:
+                if self._qa_block_freeze_rail is not None:
+                    try:
+                        freeze_session, freeze_owned = await _resolve_session_for_checkpoint(
+                            self._instance,
+                            session_id,
+                            card=self._instance.card,
+                        )
+                        if freeze_owned:
+                            await freeze_session.pre_run(inputs=None)
+                        await self._qa_block_freeze_rail.freeze_current_qa_sync(
+                            session_id,
+                            agent=self._instance,
+                            session=freeze_session,
+                            status="interrupted",
+                        )
+                        context_engine = resolve_context_engine(self._instance)
+                        if context_engine is not None and freeze_session is not None:
+                            actual_session = (
+                                getattr(freeze_session, "_parent", freeze_session) or freeze_session
+                            )
+                            await context_engine.save_contexts(actual_session)
+                            await post_agent_execute_for_session(freeze_session)
+                    except Exception as exc:
+                        logger.warning(
+                            "[JiuWenClawDeepAdapter] qa_block cancel freeze failed session_id=%s: %s",
+                            session_id,
+                            exc,
+                            exc_info=True,
+                        )
+                    finally:
+                        if freeze_owned and freeze_session is not None:
+                            await freeze_session.post_run()
                 await persist_checkpoint_for_session(
                     self._instance,
                     session_id,
                     card=self._instance.card,
+                    session=freeze_session if not freeze_owned else None,
                 )
 
             # 1. 通过 rail abort 在 checkpoint 抛 CancelledError，打断当前内层执行
@@ -5107,6 +5416,20 @@ class JiuWenClawDeepAdapter:
             logger.info("[JiuWenClawDeepAdapter] Agent 任务被取消: request_id=%s session_id=%s", request.request_id,
                         session_id)
             raise
+        except IrreducibleContextError as exc:
+            logger.error(
+                "[JiuWenClawDeepAdapter] 上下文不可再压缩: request_id=%s session_id=%s",
+                request.request_id,
+                session_id,
+                extra={"user_visible": "critical"},
+            )
+            return AgentResponse(
+                request_id=request.request_id,
+                channel_id=request.channel_id,
+                ok=False,
+                payload={"content": exc.user_message()},
+                metadata=request.metadata,
+            )
         except Exception as e:
             logger.error("[JiuWenClawDeepAdapter] Agent 任务执行异常: %s", e, extra={'user_visible': 'critical'})
             raise
@@ -5608,6 +5931,27 @@ class JiuWenClawDeepAdapter:
         except asyncio.CancelledError:
             logger.info("[JiuWenClawDeepAdapter] 流式任务被取消: request_id=%s session_id=%s", rid, session_id)
             raise
+        except IrreducibleContextError as exc:
+            logger.error(
+                "[JiuWenClawDeepAdapter] 上下文不可再压缩: request_id=%s session_id=%s",
+                request.request_id,
+                session_id,
+                extra={"user_visible": "critical"},
+            )
+            if evolution_status_started and not evolution_status_ended:
+                yield AgentResponseChunk(
+                    request_id=rid,
+                    channel_id=cid,
+                    payload={"event_type": "chat.evolution_status", "status": "end"},
+                    is_complete=False,
+                )
+                evolution_status_ended = True
+            yield AgentResponseChunk(
+                request_id=rid,
+                channel_id=cid,
+                payload={"event_type": "chat.error", "error": exc.user_message()},
+                is_complete=False,
+            )
         except Exception as exc:
             logger.error(
                 f"[JiuWenClawDeepAdapter] Agent执行失败: request_id={request.request_id} error={str(exc)}",
