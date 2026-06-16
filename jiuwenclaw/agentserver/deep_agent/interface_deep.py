@@ -224,6 +224,13 @@ from jiuwenclaw.local_env_config import set_local_config
 
 load_dotenv(dotenv_path=get_env_file())
 
+from jiuwenclaw.agentserver.deep_agent.agent_card_id import (
+    DEFAULT_SESSION_ID,
+    JIUWENCLAW_RESOURCE_AGENT_ID,
+    is_default_session,
+    resolve_agent_card_id as _resolve_agent_card_id_pure,
+)
+
 _react_config = get_config().get("react", {})
 _sandbox_config = get_config().get("sandbox", {})
 
@@ -906,6 +913,8 @@ class JiuWenClawDeepAdapter:
         self._vision_tools: list[Any] = []
         self._audio_tools: list[Any] = []
         self._instance_overrides: dict[str, Any] = {}
+        self._session_id: str | None = None
+        self._fallback_card_suffix: str | None = None
         self._xiaoyi_phone_tools_registered: bool = False
         self._paid_search_registered: bool = False
         self._paid_search_tool: WebPaidSearchTool | None = None
@@ -956,6 +965,35 @@ class JiuWenClawDeepAdapter:
     def _skill_include_skill_body_tools(self) -> bool:
         """Expose ``skill_tool`` / ``skill_complete`` unless the session is an ACP tool profile."""
         return not self._is_acp_tool_profile(self._instance_overrides)
+
+    def _resolve_agent_card_id(self, session_id: str | None = None) -> str:
+        """Return per-session AgentCard.id to isolate outer rail callback namespaces."""
+        had_suffix = self._fallback_card_suffix is not None
+        card_id, suffix = _resolve_agent_card_id_pure(
+            session_id,
+            cached_session_id=self._session_id,
+            fallback_card_suffix=self._fallback_card_suffix,
+        )
+        raw_session = (session_id or self._session_id or "").strip()
+        if suffix is not None and not had_suffix:
+            self._fallback_card_suffix = suffix
+            session_label = raw_session or "(empty)"
+            logger.info(
+                "[JiuWenClawDeepAdapter] AgentCard.id: allocated uuid suffix for "
+                "shared session_id=%r -> card_key=%s_%s",
+                session_label,
+                DEFAULT_SESSION_ID,
+                self._fallback_card_suffix,
+            )
+        if is_default_session(raw_session):
+            session_label = raw_session or "(empty)"
+            logger.debug(
+                "[JiuWenClawDeepAdapter] AgentCard.id resolved: session_id=%r "
+                "agent_card_id=%s (uuid-suffix isolation)",
+                session_label,
+                card_id,
+            )
+        return card_id
 
     @staticmethod
     def _resolve_prompt_channel(session_id: str | None = None) -> str:
@@ -1390,7 +1428,7 @@ class JiuWenClawDeepAdapter:
 
     def _sync_multimodal_tools_for_runtime(self) -> None:
         """Sync multimodal tool registration after config reload."""
-        agent_id = self._instance.card.id if self._instance else None
+        agent_id = JIUWENCLAW_RESOURCE_AGENT_ID
         self._vision_tools, self._vision_tools_registered = self._sync_tool_group(
             current_tools=self._vision_tools,
             registered=self._vision_tools_registered,
@@ -1429,7 +1467,7 @@ class JiuWenClawDeepAdapter:
 
     def _sync_paid_search_tool_for_runtime(self) -> None:
         """Sync paid-search tool registration after config reload."""
-        agent_id = self._instance.card.id if self._instance else None
+        agent_id = JIUWENCLAW_RESOURCE_AGENT_ID
         tools, self._paid_search_registered = self._sync_tool_group(
             current_tools=[self._paid_search_tool] if self._paid_search_tool else [],
             registered=self._paid_search_registered,
@@ -2545,8 +2583,10 @@ class JiuWenClawDeepAdapter:
         if not should_register_cron_tools():
             logger.info("[JiuWenClawDeepAdapter] skip cron tool build: disabled by env")
             return []
-        agent_id = self._instance.card.id if self._instance else None
-        return self._cron_runtime.build_tools(context=self._runtime_cron_tool_context, agent_id=agent_id)
+        return self._cron_runtime.build_tools(
+            context=self._runtime_cron_tool_context,
+            agent_id=JIUWENCLAW_RESOURCE_AGENT_ID,
+        )
 
     async def _proc_context_compaction(self) -> None:
         """Backward-compatible no-op hook for tests and legacy call sites."""
@@ -2605,7 +2645,13 @@ class JiuWenClawDeepAdapter:
                 completion_timeout=ctx.config.get("completion_timeout", 21600.0),
             )
 
-    async def create_instance(self, config: dict[str, Any] | None = None, *, mode: str = "agent.plan") -> None:
+    async def create_instance(
+        self,
+        config: dict[str, Any] | None = None,
+        *,
+        mode: str = "agent.plan",
+        session_id: str | None = None,
+    ) -> None:
         """初始化 DeepAgent 实例.
 
         Args:
@@ -2614,7 +2660,11 @@ class JiuWenClawDeepAdapter:
                 - workspace_dir: 工作区目录，默认 "workspace/agent"。
                 - 其余字段透传给 DeepAgentConfig。
             mode: 实例化模式，支持 "claw"（默认，使用 create_deep_agent）和 "code"（使用 create_code_agent）。
+            session_id: 会话 ID，用于生成唯一的 AgentCard.id，隔离 outer rail 回调命名空间。
         """
+        if session_id is not None:
+            self._session_id = session_id.strip() or None
+
         await self.set_checkpoint()
 
         self._instance_overrides = dict(config or {}) if isinstance(config, dict) else {}
@@ -2631,9 +2681,9 @@ class JiuWenClawDeepAdapter:
             self._workspace_dir = configured_workspace
 
         model = self._create_model(config_base)
-        agent_card = AgentCard(name=self._agent_name, id='jiuwenclaw')
-
-        tool_cards = await self._get_tool_cards(agent_card.id, mode=mode)
+        agent_card_id = self._resolve_agent_card_id(session_id)
+        agent_card = AgentCard(name=self._agent_name, id=agent_card_id)
+        tool_cards = await self._get_tool_cards(JIUWENCLAW_RESOURCE_AGENT_ID, mode=mode)
         self._tool_cards = tool_cards
 
         permissions_cfg = config_base.get("permissions", {})
@@ -2677,7 +2727,11 @@ class JiuWenClawDeepAdapter:
                 extra_skill_dir=extra_skill_dir,
             )),
         )
-        logger.info("[JiuWenClawDeepAdapter] 初始化完成: agent_name=%s", self._agent_name)
+        logger.info(
+            "[JiuWenClawDeepAdapter] 初始化完成: agent_name=%s agent_card_id=%s",
+            self._agent_name,
+            agent_card_id,
+        )
 
         # 动态加载用户自定义的 Rail 扩展
         await self.load_user_rails()
@@ -2820,7 +2874,8 @@ class JiuWenClawDeepAdapter:
 
         model = self._create_model(config_base)
         self._agent_name = self._instance_overrides.get("agent_name", config.get("agent_name", "main_agent"))
-        agent_card = AgentCard(name=self._agent_name, id='jiuwenclaw')
+        agent_card_id = self._resolve_agent_card_id()
+        agent_card = AgentCard(name=self._agent_name, id=agent_card_id)
         self._sync_multimodal_tools_for_runtime()
         self._sync_paid_search_tool_for_runtime()
         self._sync_petal_search_tool_for_runtime()

@@ -460,6 +460,21 @@ class TaskExecutionRail(DeepAgentRail):
         self._deep_agent = agent
 
     async def before_invoke(self, ctx: AgentCallbackContext) -> None:
+        session_id = ""
+        if ctx.session is not None:
+            try:
+                session_id = str(ctx.session.get_session_id() or "")
+            except Exception:
+                session_id = ""
+        prev_todo_map_size = len(self._todo_map)
+        prev_active_tasks = list(self._active_tasks.keys())
+        logger.info(
+            "[TaskExecutionRail] before_invoke reset tracking: session_id=%s "
+            "prev_todo_map_size=%d prev_active_tasks=%s",
+            session_id,
+            prev_todo_map_size,
+            prev_active_tasks,
+        )
         self._todo_map = {}
         self._todo_map_before_tool = {}
         self._active_tasks = {}
@@ -483,6 +498,23 @@ class TaskExecutionRail(DeepAgentRail):
         tool_name = ctx.inputs.tool_name
 
         if tool_name in self.TODO_TOOLS:
+            session_id = ""
+            if ctx.session is not None:
+                try:
+                    session_id = str(ctx.session.get_session_id() or "")
+                except Exception:
+                    session_id = ""
+            todo_map_size = len(self._todo_map)
+            active_tasks = list(self._active_tasks.keys())
+            map_summary = "(empty)" if todo_map_size == 0 else list(self._todo_map.keys())
+            logger.info(
+                "[TaskExecutionRail] todo snapshot before_tool: session=%s "
+                "todo_map_size=%d active_tasks=%s map=%s",
+                session_id,
+                todo_map_size,
+                active_tasks,
+                map_summary,
+            )
             self._todo_map_before_tool = dict(self._todo_map)
             return
 
@@ -717,6 +749,15 @@ class TaskExecutionRail(DeepAgentRail):
                 completed_in_batch.append(task_id)
                 if prev_status == "in_progress":
                     await self._emit_task_complete_event(ctx.session, task_id, current, status="succeeded")
+                else:
+                    logger.info(
+                        "[TaskExecutionRail] skip task.complete (gate1): %s "
+                        "prev_status=%r curr_status=%r session_id=%s",
+                        task_id,
+                        prev_status,
+                        curr_status,
+                        session_id,
+                    )
 
         self._todo_map = current_map
         self._todo_map_before_tool = {}

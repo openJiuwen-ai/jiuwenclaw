@@ -221,6 +221,7 @@ class JiuWenClaw:
         # Storage 服务：懒初始化，首次文件操作时构造
         self._storage = None
         self._tool_manager = None
+        self._session_id: str | None = None
 
     def _get_skilldev_service(self):
         """懒初始化并返回 SkillDevService 实例.
@@ -386,15 +387,28 @@ class JiuWenClaw:
         request.metadata = md
         inputs["effective_project_dir"] = effective
 
-    async def create_instance(self, config: dict[str, Any] | None = None, *, mode: str = "agent") -> None:
+    async def create_instance(
+        self,
+        config: dict[str, Any] | None = None,
+        *,
+        mode: str = "agent",
+        session_id: str | None = None,
+    ) -> None:
         """初始化 Agent 实例.
 
         Args:
             config: 可选配置，透传给底层 adapter.
             mode: 实例化模式，"claw"（默认）或 "code"，透传给底层 adapter.
+            session_id: 会话 ID，用于隔离各 session 的 outer rail 回调命名空间。
         """
+        if session_id is not None:
+            self._session_id = session_id.strip() or None
         adapter = await self._ensure_adapter()
-        await adapter.create_instance(config, mode=mode)
+        await adapter.create_instance(
+            config,
+            mode=mode,
+            session_id=session_id or getattr(self, "_session_id", None),
+        )
         logger.info("[JiuWenClaw] Agent instance created: sdk=%s", self._sdk_name)
 
         project_mcp_names: set[str] = set()
@@ -959,6 +973,9 @@ class JiuWenClaw:
             if handler_name == "handle_skills_skillnet_install" and payload.get("pending"):
                 _reload_after_skills = False
             if _reload_after_skills:
+                # Rebuild agent after skill changes; session_id is omitted here and
+                # create_instance() reuses cached self._session_id set at first init
+                # (AgentManager always passes session_id on the initial create_instance).
                 await self.create_instance()
         except Exception as exc:
             logger.error("[JiuWenClaw] skills 请求处理失败: %s", exc, extra={'user_visible': 'critical'})
