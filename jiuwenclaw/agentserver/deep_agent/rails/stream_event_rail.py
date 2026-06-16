@@ -36,7 +36,8 @@ from openjiuwen.harness.tools.todo import TodoStatus, TodoListTool
 from openjiuwen.harness.workspace.workspace import WorkspaceNode
 
 from jiuwenclaw.config import get_config
-from jiuwenclaw.utils import fix_json_arguments, logger
+from jiuwenclaw.tool_arguments_validator import validate_tool_arguments
+from jiuwenclaw.utils import logger
 
 # Import subagent context functions for fork_agent
 from jiuwenclaw.agentserver.tools.subagent_executor import (
@@ -181,7 +182,7 @@ class JiuClawStreamEventRail(DeepAgentRail):
 
         if not ctx.extra.get("_context_fixed") and ctx.context is not None:
             t_fix = time.perf_counter()
-            await self._fix_incomplete_tool_context(ctx.context)
+            await self._fix_incomplete_tool_context(ctx.context, session_id=session_id)
             ctx.extra["_context_fixed"] = True
             logger.debug(
                 "[StreamEventRail] before_model_call fix_incomplete_tool_context "
@@ -320,6 +321,11 @@ class JiuClawStreamEventRail(DeepAgentRail):
             return
         t_result = time.perf_counter()
         await self._emit_tool_result(session, ctx.inputs.tool_call, ctx.inputs.tool_result)
+        if (
+            isinstance(ctx.inputs.tool_result, dict)
+            and ctx.inputs.tool_result.get("skipped") is True
+        ):
+            await self._emit_tool_update(session, ctx.inputs.tool_call, status="failed")
         logger.debug(
             "[StreamEventRail] after_tool_call tool_result emitted session_id=%s tool=%s elapsed_ms=%.1f",
             session_id,
@@ -357,7 +363,7 @@ class JiuClawStreamEventRail(DeepAgentRail):
 
         if ctx.context is not None:
             logger.info("[StreamEventRail] Attempting context repair after model exception")
-            await self._fix_incomplete_tool_context(ctx.context)
+            await self._fix_incomplete_tool_context(ctx.context, session_id=_session_id_from_ctx(ctx))
 
     # ------------------------------------------------------------------
     # Private helpers (migrated from JiuClawReActAgent)
@@ -632,29 +638,41 @@ class JiuClawStreamEventRail(DeepAgentRail):
             logger.debug("context_usage emit failed", exc_info=True)
 
     @staticmethod
-    def _ensure_json_arguments(arguments: Any) -> str:
-        """Ensure tool call arguments are valid JSON string.
-
-        If arguments is a dict, convert to JSON string. If arguments is a string,
-        validate it can be parsed as JSON. If parsing fails, return empty JSON object.
-
-        Args:
-            arguments: The arguments value from tool_call.
-
-        Returns:
-            Valid JSON string (e.g., '{"key": "value"}').
-        """
-        if isinstance(arguments, dict):
-            return json.dumps(arguments)
-        if isinstance(arguments, str):
-            repaired = fix_json_arguments(arguments)
-            if isinstance(repaired, dict):
-                return json.dumps(repaired, ensure_ascii=False)
-            logger.warning("Illegal Tool call arguments after repair: %s", arguments)
-            return "{}"
+    def _ensure_json_arguments(
+        arguments: Any,
+        *,
+        finish_reason: str | None = None,
+        tool_name: str = "",
+        tool_call_id: str = "",
+        session_id: str = "",
+    ) -> str:
+        validation = validate_tool_arguments(arguments, finish_reason=finish_reason)
+        if validation.ok:
+            return validation.normalized
+        logger.warning(
+            "[tool_args_validation] action=context_sanitize tool=%s tool_call_id=%s "
+            "kind=%s length=%s reason=%s session_id=%s",
+            tool_name,
+            tool_call_id,
+            validation.kind,
+            validation.length,
+            validation.reason,
+            session_id,
+        )
         return "{}"
 
-    async def _fix_incomplete_tool_context(self, context: Any) -> None:
+    @staticmethod
+    def _placeholder_tool_message(tool_name: str, tool_call_id: str, reason: str | None = None) -> ToolMessage:
+        if reason:
+            content = (
+                f"[工具调用参数已修复] 工具 {tool_name} 的调用参数 JSON {reason}，"
+                "历史上下文已归一化为合法空 JSON object，并补充该 ToolMessage 以保持上下文有效。"
+            )
+        else:
+            content = f"[工具执行结果缺失] 工具 {tool_name} 缺少对应执行结果，已补充占位 ToolMessage 以保持上下文有效。"
+        return ToolMessage(content=content, tool_call_id=tool_call_id)
+
+    async def _fix_incomplete_tool_context(self, context: Any, *, session_id: str = "") -> None:
         """Fix incomplete context: ensure assistant messages with tool_calls have matching tool messages."""
         try:
             messages = context.get_messages()
@@ -670,15 +688,29 @@ class JiuClawStreamEventRail(DeepAgentRail):
                 if isinstance(messages[i], AssistantMessage):
                     if not tool_id_cache:
                         tool_calls = getattr(messages[i], "tool_calls", None)
+                        finish_reason = getattr(messages[i], "finish_reason", None)
                         if tool_calls:
                             for tc in tool_calls:
-                                arguments = getattr(tc, "arguments", '{}')
-                                arguments = self._ensure_json_arguments(arguments)
+                                raw_arguments = getattr(tc, "arguments", '{}')
+                                validation = validate_tool_arguments(raw_arguments, finish_reason=finish_reason)
+                                arguments = validation.normalized if validation.ok else "{}"
+                                if not validation.ok:
+                                    logger.warning(
+                                        "[tool_args_validation] action=context_sanitize tool=%s tool_call_id=%s "
+                                        "kind=%s length=%s reason=%s session_id=%s",
+                                        getattr(tc, "name", ""),
+                                        getattr(tc, "id", ""),
+                                        validation.kind,
+                                        validation.length,
+                                        validation.reason,
+                                        session_id,
+                                    )
                                 if hasattr(tc, "arguments"):
                                     tc.arguments = arguments
                                 tool_id_cache.append({
                                         "tool_call_id": getattr(tc, "id", ""),
                                         "tool_name": getattr(tc, "name", ""),
+                                        "invalid_reason": None if validation.ok else validation.reason,
                                 })
                         await context.add_messages(messages[i])
                     else:
@@ -689,21 +721,36 @@ class JiuClawStreamEventRail(DeepAgentRail):
                             if tool_call_id in tool_message_cache:
                                 await context.add_messages(tool_message_cache[tool_call_id])
                             else:
-                                await context.add_messages(ToolMessage(
-                                        content=f"[工具执行被中断] 工具 {tool_name} 执行过程中被用户打断，没有执行结果。",
-                                        tool_call_id=tool_call_id,
+                                await context.add_messages(self._placeholder_tool_message(
+                                    tool_name,
+                                    tool_call_id,
+                                    tc_info.get("invalid_reason"),
                                 ))
                         tool_id_cache = []
                         tool_calls = getattr(messages[i], "tool_calls", None)
+                        finish_reason = getattr(messages[i], "finish_reason", None)
                         if tool_calls:
                             for tc in tool_calls:
-                                arguments = getattr(tc, "arguments", {})
-                                arguments = self._ensure_json_arguments(arguments)
+                                raw_arguments = getattr(tc, "arguments", {})
+                                validation = validate_tool_arguments(raw_arguments, finish_reason=finish_reason)
+                                arguments = validation.normalized if validation.ok else "{}"
+                                if not validation.ok:
+                                    logger.warning(
+                                        "[tool_args_validation] action=context_sanitize tool=%s tool_call_id=%s "
+                                        "kind=%s length=%s reason=%s session_id=%s",
+                                        getattr(tc, "name", ""),
+                                        getattr(tc, "id", ""),
+                                        validation.kind,
+                                        validation.length,
+                                        validation.reason,
+                                        session_id,
+                                    )
                                 if hasattr(tc, "arguments"):
                                     tc.arguments = arguments
                                 tool_id_cache.append({
                                         "tool_call_id": getattr(tc, "id", ""),
                                         "tool_name": getattr(tc, "name", ""),
+                                        "invalid_reason": None if validation.ok else validation.reason,
                                 })
                         await context.add_messages(messages[i])
                 elif isinstance(messages[i], ToolMessage):
@@ -724,9 +771,10 @@ class JiuClawStreamEventRail(DeepAgentRail):
                         if tool_call_id in tool_message_cache:
                             await context.add_messages(tool_message_cache[tool_call_id])
                         else:
-                            await context.add_messages(ToolMessage(
-                                    content=f"[工具执行被中断] 工具 {tool_name} 执行过程中被用户打断，没有执行结果。",
-                                    tool_call_id=tool_call_id,
+                            await context.add_messages(self._placeholder_tool_message(
+                                tool_name,
+                                tool_call_id,
+                                tc_info.get("invalid_reason"),
                             ))
                     tool_id_cache = []
                     await context.add_messages(messages[i])
@@ -738,9 +786,10 @@ class JiuClawStreamEventRail(DeepAgentRail):
                     if tool_call_id in tool_message_cache:
                         await context.add_messages(tool_message_cache[tool_call_id])
                     else:
-                        await context.add_messages(ToolMessage(
-                                content=f"[工具执行被中断] 工具 {tool_name} 执行过程中被用户打断，没有执行结果。",
-                                tool_call_id=tool_call_id,
+                        await context.add_messages(self._placeholder_tool_message(
+                            tool_name,
+                            tool_call_id,
+                            tc_info.get("invalid_reason"),
                         ))
         except Exception as e:
             logger.warning("Failed to fix incomplete tool context: %s", e)
