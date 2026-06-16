@@ -1,0 +1,49 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: <<MANAGER_WEB_NAME>>
+  namespace: <<NAMESPACE>>
+  labels:
+    app: <<MANAGER_WEB_NAME>>
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: <<MANAGER_WEB_NAME>>
+  template:
+    metadata:
+      labels:
+        app: <<MANAGER_WEB_NAME>>
+    spec:
+      containers:
+        - name: manager-web
+          image: <<MANAGER_WEB_IMAGE>>
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: <<MANAGER_WEB_PORT>>
+              protocol: TCP
+          env:
+            - name: MANAGER_WEB_HOST
+              value: "0.0.0.0"
+            - name: MANAGER_WEB_PORT
+              value: "<<MANAGER_WEB_PORT>>"
+            - name: MANAGER_WEB_PROXY_TARGET
+              value: "http://<<MANAGER_NAME>>:<<MANAGER_REST_PORT>>"
+
+---
+# NodePort Service：供外连接 Manager Web UI
+apiVersion: v1
+kind: Service
+metadata:
+  name: <<MANAGER_WEB_NAME>>-nodeport
+  namespace: <<NAMESPACE>>
+spec:
+  type: NodePort
+  ports:
+    - name: http
+      port: <<MANAGER_WEB_PORT>>
+      targetPort: <<MANAGER_WEB_PORT>>
+      nodePort: <<MANAGER_WEB_NODE_PORT>>
+  selector:
+    app: <<MANAGER_WEB_NAME>>

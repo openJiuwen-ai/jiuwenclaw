@@ -39,7 +39,7 @@ def _mapping_svc(handler: DBHandler) -> ConfigDefaultTemplateMappingService:
     return ConfigDefaultTemplateMappingService(handler)
 
 
-@mapping_router.post("", response_model=ResponseModel)
+@mapping_router.post("/", response_model=ResponseModel)
 async def create_template_mapping(
     jiuwenclaw_id: str,
     body: ConfigDefaultTemplateMappingCreateBody,
@@ -53,7 +53,7 @@ async def create_template_mapping(
     return ResponseModel(code=200, message="success", data=data.model_dump())
 
 
-@mapping_router.get("", response_model=ResponseModel)
+@mapping_router.get("/", response_model=ResponseModel)
 async def list_template_mappings(
     jiuwenclaw_id: str,
     handler: Annotated[DBHandler, Depends(get_db_handler)],
@@ -162,7 +162,7 @@ def _global_svc(handler: DBHandler) -> ConfigEffectiveGlobalPolicyService:
     return ConfigEffectiveGlobalPolicyService(handler)
 
 
-@global_router.post("", response_model=ResponseModel)
+@global_router.post("/", response_model=ResponseModel)
 async def create_global_policy(
     jiuwenclaw_id: str,
     body: ConfigEffectiveGlobalPolicyCreateBody,
@@ -176,7 +176,7 @@ async def create_global_policy(
     return ResponseModel(code=200, message="success", data=data.model_dump())
 
 
-@global_router.get("", response_model=ResponseModel)
+@global_router.get("/", response_model=ResponseModel)
 async def list_global_policies(
     jiuwenclaw_id: str,
     handler: Annotated[DBHandler, Depends(get_db_handler)],
@@ -257,7 +257,7 @@ def _service_svc(handler: DBHandler) -> ConfigEffectiveServicePolicyService:
     return ConfigEffectiveServicePolicyService(handler)
 
 
-@service_router.post("", response_model=ResponseModel)
+@service_router.post("/", response_model=ResponseModel)
 async def create_service_policy(
     jiuwenclaw_id: str,
     body: ConfigEffectiveServicePolicyCreateBody,
@@ -271,7 +271,7 @@ async def create_service_policy(
     return ResponseModel(code=200, message="success", data=data.model_dump())
 
 
-@service_router.get("", response_model=ResponseModel)
+@service_router.get("/", response_model=ResponseModel)
 async def list_service_policies(
     jiuwenclaw_id: str,
     handler: Annotated[DBHandler, Depends(get_db_handler)],
@@ -353,7 +353,7 @@ def _agent_svc(handler: DBHandler) -> ConfigEffectiveAgentPolicyService:
     return ConfigEffectiveAgentPolicyService(handler)
 
 
-@agent_router.post("", response_model=ResponseModel)
+@agent_router.post("/", response_model=ResponseModel)
 async def create_agent_policy(
     jiuwenclaw_id: str,
     body: ConfigEffectiveAgentPolicyCreateBody,
@@ -367,7 +367,7 @@ async def create_agent_policy(
     return ResponseModel(code=200, message="success", data=data.model_dump())
 
 
-@agent_router.get("", response_model=ResponseModel)
+@agent_router.get("/", response_model=ResponseModel)
 async def list_agent_policies(
     jiuwenclaw_id: str,
     handler: Annotated[DBHandler, Depends(get_db_handler)],

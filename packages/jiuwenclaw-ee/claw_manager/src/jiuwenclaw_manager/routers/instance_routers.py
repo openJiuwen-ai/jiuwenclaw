@@ -49,7 +49,7 @@ async def provision_local_instance(
     return ResponseModel(code=200, message="success", data=data)
 
 
-@instance_router.post("", response_model=ResponseModel)
+@instance_router.post("/", response_model=ResponseModel)
 async def create_instance(
     body: CreateInstanceBody,
     handler: Annotated[DBHandler, Depends(get_db_handler)],
@@ -59,7 +59,7 @@ async def create_instance(
     return ResponseModel(code=200, message="success", data=data)
 
 
-@instance_router.get("", response_model=ResponseModel)
+@instance_router.get("/", response_model=ResponseModel)
 async def list_instances(
     handler: Annotated[DBHandler, Depends(get_db_handler)],
     page: int = Query(1, ge=1),
