@@ -38,11 +38,11 @@ declare -A CONFIG=(
     ["WEB_TEMPLATE_FILE"]="${SCRIPT_DIR}/conf/web.template.yaml"
     ["WEB_FILE"]="${SCRIPT_DIR}/conf/web.yaml"
 
-    ["MANAGER_SERVER_TEMPLATE_FILE"]="${SCRIPT_DIR}/conf/manager_server.template.yaml"
-    ["MANAGER_SERVER_FILE"]="${SCRIPT_DIR}/conf/manager_server.yaml"
+    ["MANAGER_SERVER_TEMPLATE_FILE"]="${SCRIPT_DIR}/conf/manager-server.template.yaml"
+    ["MANAGER_SERVER_FILE"]="${SCRIPT_DIR}/conf/manager-server.yaml"
 
-    ["MANAGER_WEB_TEMPLATE_FILE"]="${SCRIPT_DIR}/conf/manager_web.template.yaml"
-    ["MANAGER_WEB_FILE"]="${SCRIPT_DIR}/conf/manager_web.yaml"
+    ["MANAGER_WEB_TEMPLATE_FILE"]="${SCRIPT_DIR}/conf/manager-web.template.yaml"
+    ["MANAGER_WEB_FILE"]="${SCRIPT_DIR}/conf/manager-web.yaml"
 
     ["PV_TEMPLATE_FILE"]="${SCRIPT_DIR}/conf/pv-nfs.template.yaml"
     ["PV_FILE"]="${SCRIPT_DIR}/conf/pv-nfs.yaml"
