@@ -64,9 +64,15 @@ datas = webview_datas + [
 datas += copy_metadata("fastmcp", recursive=True)
 datas += copy_metadata("mcp", recursive=True)
 datas += copy_metadata("openjiuwen", recursive=True)
+datas += copy_metadata("virtualenv", recursive=True)
 
 # 部分包需要显式声明隐藏导入
 hiddenimports = webview_hiddenimports + [
+    "virtualenv",
+    "virtualenv.run",
+    "virtualenv.seed",
+    "virtualenv.discovery",
+    "virtualenv.create",
     "pandas",  # pymilvus 依赖
     "tiktoken_ext",  # tiktoken 编码插件（cl100k_base 等）
     "tiktoken_ext.openai_public",
