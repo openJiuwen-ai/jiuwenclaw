@@ -15,6 +15,7 @@ import logging
 import importlib
 import os
 from urllib.parse import quote_plus
+import uuid
 from contextvars import ContextVar, Token
 from dataclasses import dataclass
 
@@ -241,6 +242,12 @@ from jiuwenclaw.utils import (
 from jiuwenclaw.local_env_config import set_local_config
 
 load_dotenv(dotenv_path=get_env_file())
+
+# Shared resource tag for Runner.resource_mgr tool/MCP registration.
+# AgentCard.id uses a per-session suffix so outer rail callbacks stay isolated.
+JIUWENCLAW_RESOURCE_AGENT_ID = "jiuwenclaw"
+# AgentManager fallback when request.session_id is missing; needs per-instance uuid suffix.
+DEFAULT_SESSION_ID = "default"
 
 _react_config = get_config().get("react", {})
 
@@ -1166,6 +1173,8 @@ class JiuWenClawDeepAdapter:
         self._vision_tools: list[Any] = []
         self._audio_tools: list[Any] = []
         self._instance_overrides: dict[str, Any] = {}
+        self._session_id: str | None = None
+        self._fallback_card_suffix: str | None = None
         self._xiaoyi_phone_tools_registered: bool = False
         self._skill_manager: SkillManager | None = None
         self._cron_runtime = CronRuntimeBridge()
@@ -1225,6 +1234,39 @@ class JiuWenClawDeepAdapter:
     def _skill_include_skill_body_tools(self) -> bool:
         """Expose ``skill_tool`` / ``skill_complete`` unless the session is an ACP tool profile."""
         return not self._is_acp_tool_profile(self._instance_overrides)
+
+    def _ensure_fallback_card_suffix(self, *, raw_session: str) -> str:
+        """Allocate a stable per-adapter suffix for empty/default session_id."""
+        if self._fallback_card_suffix is None:
+            self._fallback_card_suffix = uuid.uuid4().hex[:12]
+            session_label = raw_session or "(empty)"
+            logger.info(
+                "[JiuWenClawDeepAdapter] AgentCard.id: allocated uuid suffix for "
+                "shared session_id=%r -> card_key=%s_%s",
+                session_label,
+                DEFAULT_SESSION_ID,
+                self._fallback_card_suffix,
+            )
+        return self._fallback_card_suffix
+
+    def _resolve_agent_card_id(self, session_id: str | None = None) -> str:
+        """Return per-session AgentCard.id to isolate outer rail callback namespaces."""
+        raw_session = (session_id or self._session_id or "").strip()
+
+        if raw_session and raw_session != DEFAULT_SESSION_ID:
+            return f"{JIUWENCLAW_RESOURCE_AGENT_ID}_{raw_session}"
+
+        suffix = self._ensure_fallback_card_suffix(raw_session=raw_session)
+        effective = f"{DEFAULT_SESSION_ID}_{suffix}"
+        card_id = f"{JIUWENCLAW_RESOURCE_AGENT_ID}_{effective}"
+        session_label = raw_session or "(empty)"
+        logger.debug(
+            "[JiuWenClawDeepAdapter] AgentCard.id resolved: session_id=%r "
+            "agent_card_id=%s (uuid-suffix isolation)",
+            session_label,
+            card_id,
+        )
+        return card_id
 
     @staticmethod
     def _resolve_prompt_channel(session_id: str | None = None) -> str:
@@ -3121,7 +3163,13 @@ class JiuWenClawDeepAdapter:
             list(loaded.models),
         )
 
-    async def create_instance(self, config: dict[str, Any] | None = None, *, mode: str = "agent.plan") -> None:
+    async def create_instance(
+        self,
+        config: dict[str, Any] | None = None,
+        *,
+        mode: str = "agent.plan",
+        session_id: str | None = None,
+    ) -> None:
         """初始化 DeepAgent 实例.
 
         Args:
@@ -3133,7 +3181,11 @@ class JiuWenClawDeepAdapter:
                 - request: 可选 AgentRequest（创建时按 ``params`` 加载企业配置并合并模型）。
                 - 其余字段透传给 DeepAgentConfig。
             mode: 实例化模式，支持 "claw"（默认，使用 create_deep_agent）和 "code"（使用 create_code_agent）。
+            session_id: 会话 ID，用于生成唯一的 AgentCard.id，隔离 outer rail 回调命名空间。
         """
+        if session_id is not None:
+            self._session_id = session_id.strip() or None
+
         await self.set_checkpoint()
 
         self._instance_overrides = dict(config) if isinstance(config, dict) else {}
@@ -3181,9 +3233,9 @@ class JiuWenClawDeepAdapter:
                 exc,
             )
             raise
-        agent_card = AgentCard(name=self._agent_name, id='jiuwenclaw')
-
-        tool_cards = await self._get_tool_cards(agent_card.id, mode=mode)
+        agent_card_id = self._resolve_agent_card_id(session_id)
+        agent_card = AgentCard(name=self._agent_name, id=agent_card_id)
+        tool_cards = await self._get_tool_cards(JIUWENCLAW_RESOURCE_AGENT_ID, mode=mode)
         self._tool_cards = tool_cards
 
         permissions_cfg = config_base.get("permissions", {})
@@ -3227,7 +3279,11 @@ class JiuWenClawDeepAdapter:
                 extra_skill_dir=extra_skill_dir,
             )),
         )
-        logger.info("[JiuWenClawDeepAdapter] 初始化完成: agent_name=%s", self._agent_name)
+        logger.info(
+            "[JiuWenClawDeepAdapter] 初始化完成: agent_name=%s agent_card_id=%s",
+            self._agent_name,
+            agent_card_id,
+        )
 
         # 动态加载用户自定义的 Rail 扩展
         await self.load_user_rails()
@@ -3362,7 +3418,8 @@ class JiuWenClawDeepAdapter:
 
         model = self._create_model(config_base)
         self._agent_name = self._instance_overrides.get("agent_name", config.get("agent_name", "main_agent"))
-        agent_card = AgentCard(name=self._agent_name, id='jiuwenclaw')
+        agent_card_id = self._resolve_agent_card_id()
+        agent_card = AgentCard(name=self._agent_name, id=agent_card_id)
         self._sync_multimodal_tools_for_runtime()
 
         if not self._filesystem_rail_enabled_for_profile() and self._filesystem_rail is not None:

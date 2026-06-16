@@ -131,7 +131,7 @@ class AgentManager:
             service_id=self.service_id,
         )
         agent._agent_name = f"agent_{self.agent_id}_{self.service_id}_{agent_key}_{session_id}"
-        await agent.create_instance(config, mode=mode)
+        await agent.create_instance(config, mode=mode, session_id=session_id)
         self.agents.setdefault(agent_key, {}).setdefault(mode, {})[session_id] = agent
 
         # 创建后如果有保存的配置，重放 reload_agent_config
