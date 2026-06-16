@@ -710,7 +710,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
           handleTtsPlayback(targetId, mediaPayload.content);
         }
       }),
-webClient.on('chat.file', ({ payload }) => {
+      webClient.on('chat.file', ({ payload }) => {
         if (!shouldHandleSessionEvent(payload)) return;
         const files = (payload.files ?? []) as FileDownloadItem[];
         if (!files.length) return;
@@ -720,45 +720,12 @@ webClient.on('chat.file', ({ payload }) => {
       webClient.on('chat.tool_call', ({ payload }) => {
         if (!shouldHandleSessionEvent(payload)) return;
         if (shouldDropDuplicatedEvent('chat.tool_call', payload)) return;
-        // 页面刷新后，如果收到活跃事件但 isProcessing=false，自动恢复执行状态
-        if (!useChatStore.getState().isProcessing && !useChatStore.getState().isLoadingHistory) {
-          setProcessing(true);
-        }
-        const currentMode = useSessionStore.getState().mode;
-        clearThinkingForVisibleOutput();
-        const toolCall = normalizeToolCallPayload(payload);
-        const shutdownMemberId = getShutdownMemberFromToolCall(toolCall);
-        if (shutdownMemberId) {
-          shutdownMemberToolCallRef.current.set(toolCall.id, shutdownMemberId);
-        }
-        if (isHiddenTeamTeammateMessagePayload(currentMode, payload)) {
-          if (currentMode === 'team' && !isTeamPanelClearedForPayload(payload)) {
-            applyTeamTaskToolCall(toolCall);
-          }
-          const memberId = getTeamPayloadMemberName(payload) || toolCall.memberName;
-          if (memberId) {
-            teamToolCallMemberRef.current.set(toolCall.id, memberId);
-            const timestamp = eventTimestampMs(payload);
-            useSessionStore.getState().addTeamMemberExecutionEvent({
-              id: stableEventId('tool-call', payload.session_id, memberId, toolCall.id, timestamp),
-              member_id: memberId,
-              kind: 'tool_call',
-              timestamp,
-              title: t('team.process.execution.toolCallTitle', { tool: toolCall.name }),
-              content: toolCall.description || toolCall.formatted_args || stringifyCompact(toolCall.arguments),
-              tool_name: toolCall.name,
-              tool_call_id: toolCall.id,
-            });
-          }
-          return;
-        }
-        const { currentStreamId, messages } = useChatStore.getState();
-        const currentStreamMessage =
-          currentMode === 'team'
-            ? findActiveTeamLeaderMessage()
-            : currentStreamId
-              ? messages.find((msg) => msg.id === currentStreamId)
-              : undefined;
+        setThinking(false);
+        const { currentStreamId, currentStreamContent } = useChatStore.getState();
+        if (currentStreamId && currentStreamContent) {
+          updateMessage(currentStreamId, { isStreaming: false });
+          stopStreaming();
+          handleTtsPlayback(currentStreamId, currentStreamContent);
         }
         const normalized = normalizeToolCallPayload(payload);
         addToolCall({
@@ -865,7 +832,7 @@ webClient.on('chat.file', ({ payload }) => {
         if (!isProcessingNow) {
           setThinking(false);
           clearSubtasks();
-          
+
           // 检查是否有等待的任务队列
           const currentMode = useSessionStore.getState().mode;
           const { taskQueue } = useChatStore.getState();
@@ -898,66 +865,6 @@ webClient.on('chat.file', ({ payload }) => {
           content: i18n.t('network.errorPrefix', { message: errorMsg }),
           timestamp: new Date().toISOString(),
         });
-      }),
-      webClient.on('security.alert', ({ payload }) => {
-        if (!shouldHandleSessionEvent(payload)) return;
-
-        const alertMsg =
-          typeof payload.message === 'string'
-            ? payload.message
-            : '安全警告';
-
-        window.dispatchEvent(new CustomEvent('security-alert', {
-          detail: {
-            message: alertMsg,
-            message_id: payload.message_id || '',
-            tool_call_id: payload.tool_call_id || '',
-            alert_type: payload.alert_type || 'security',
-            tool_name: payload.tool_name || '',
-          }
-        }));
-      }),
-      webClient.on('chat.retract', (event: WsEvent) => {
-        if (!shouldHandleSessionEvent(event.payload)) return;
-
-        const retractMsg =
-          typeof event.payload.message === 'string'
-            ? event.payload.message
-            : '内容已因安全原因撤回';
-
-        const { currentStreamId, messages } = useChatStore.getState();
-
-        // Replace current streaming message first
-        if (currentStreamId) {
-          updateMessage(currentStreamId, {
-            content: retractMsg,
-            isStreaming: false,
-          });
-          stopStreaming();
-        }
-
-        // Replace ALL assistant messages after the last user message
-        const lastUserIdx = messages.findLastIndex((m) => m.role === 'user');
-        if (lastUserIdx >= 0) {
-          for (let i = lastUserIdx + 1; i < messages.length; i++) {
-            if (messages[i].role === 'assistant') {
-              updateMessage(messages[i].id, { content: retractMsg });
-            }
-          }
-        } else {
-          for (const msg of messages) {
-            if (msg.role === 'assistant') {
-              updateMessage(msg.id, { content: retractMsg });
-            }
-          }
-        }
-
-        setProcessing(false);
-        setThinking(false);
-        activeRequestIdRef.current = null;
-
-        const retractRequestId = typeof event.request_id === 'string' ? event.request_id : undefined;
-        useChatStore.getState().clearCurrentTurnData(retractRequestId);
       }),
       webClient.on('chat.interrupt_result', ({ payload }) => {
         if (!shouldHandleSessionEvent(payload)) return;
@@ -1153,231 +1060,6 @@ webClient.on('chat.file', ({ payload }) => {
         if (targetId) {
           useChatStore.getState().setUsageSummary(targetId, usage);
         }
-      }),
-      webClient.on('security.alert', ({ payload }) => {
-        if (!shouldHandleSessionEvent(payload)) return;
-
-        const alertMsg =
-          typeof payload.message === 'string'
-            ? payload.message
-            : '安全警告';
-
-        window.dispatchEvent(new CustomEvent('security-alert', {
-          detail: {
-            message: alertMsg,
-            message_id: payload.message_id || '',
-            tool_call_id: payload.tool_call_id || '',
-            alert_type: payload.alert_type || 'security',
-            tool_name: payload.tool_name || '',
-          }
-        }));
-      }),
-      webClient.on('chat.retract', (event) => {
-        if (!shouldHandleSessionEvent(event.payload)) return;
-
-        const retractMsg =
-          typeof event.payload.message === 'string'
-            ? event.payload.message
-            : '内容已因安全原因撤回';
-
-        const { currentStreamId, messages } = useChatStore.getState();
-
-        if (currentStreamId) {
-          updateMessage(currentStreamId, {
-            content: retractMsg,
-            isStreaming: false,
-          });
-          stopStreaming();
-        }
-
-        let lastUserIdx = -1;
-        for (let i = messages.length - 1; i >= 0; i -= 1) {
-          if (messages[i].role === 'user') {
-            lastUserIdx = i;
-            break;
-          }
-        }
-        if (lastUserIdx >= 0) {
-          for (let i = lastUserIdx + 1; i < messages.length; i++) {
-            if (messages[i].role === 'assistant') {
-              updateMessage(messages[i].id, { content: retractMsg });
-            }
-          }
-        } else {
-          for (const msg of messages) {
-            if (msg.role === 'assistant') {
-              updateMessage(msg.id, { content: retractMsg });
-            }
-          }
-        }
-
-        setProcessing(false);
-        setThinking(false);
-        activeRequestIdRef.current = undefined;
-
-        const retractRequestId = typeof event.payload.request_id === 'string' ? event.payload.request_id : undefined;
-        useChatStore.getState().clearCurrentTurnData(retractRequestId);
-      }),
-      webClient.on('harness.message', ({ payload }) => {
-        if (!shouldHandleSessionEvent(payload)) return;
-        const content = typeof payload.content === 'string' ? payload.content : '';
-        const stage = typeof payload.stage === 'string' ? payload.stage : undefined;
-
-        const metadata = (payload as { metadata?: { is_security_alert?: boolean } }).metadata;
-        if (metadata?.is_security_alert) {
-          window.dispatchEvent(new CustomEvent('security-alert', {
-            detail: { message: content }
-          }));
-        }
-
-        useHarnessStore.getState().addHarnessMessage(content, stage);
-
-        // Pipeline start message contains stages array: { content, pipeline, stages: [{slot, display_name}] }
-        const rawStages = payload.stages;
-        if (Array.isArray(rawStages) && rawStages.length > 0) {
-          const stages: { slot: string; display_name: string }[] = [];
-          for (const s of rawStages) {
-            if (typeof s === 'object' && s !== null) {
-              const obj = s as Record<string, unknown>;
-              const slot = typeof obj.slot === 'string' ? obj.slot : '';
-              const displayName = typeof obj.display_name === 'string' ? obj.display_name : '';
-              if (slot) stages.push({ slot, display_name: displayName || slot });
-            }
-          }
-          if (stages.length > 0) useHarnessStore.getState().setStageDefinitions(stages);
-        }
-
-        // Mark stage as running (skip pipeline start message which has stages array)
-        if (stage && !rawStages) {
-          const existingStage = useHarnessStore.getState().stageResults.find(s => s.stage === stage);
-          if (existingStage?.status !== 'running') {
-            useHarnessStore.getState().updateStageResult({ stage, status: 'running', messages: [], metrics: {} });
-          }
-        }
-
-        addMessage({
-          id: `harness-msg-${Date.now()}`,
-          role: 'system',
-          content,
-          timestamp: new Date().toISOString(),
-          isHarnessMessage: true,
-        });
-      }),
-      webClient.on('harness.stage_result', ({ payload }) => {
-        if (!shouldHandleSessionEvent(payload)) return;
-        const stage = typeof payload.stage === 'string' ? payload.stage : '';
-        const status = typeof payload.status === 'string' ? payload.status : 'success';
-        const error = typeof payload.error === 'string' ? payload.error : undefined;
-        const messages = Array.isArray(payload.messages) ? payload.messages.filter((m) => typeof m === 'string') : [];
-        const metrics = typeof payload.metrics === 'object' && payload.metrics !== null && !Array.isArray(payload.metrics)
-          ? payload.metrics as Record<string, unknown>
-          : {};
-        const scope = typeof payload.scope === 'string' ? payload.scope : '';
-        const extensionName = typeof payload.extension_name === 'string' ? payload.extension_name : '';
-        const extensionStage = typeof payload.extension_stage === 'string' ? payload.extension_stage : '';
-        const parentStage = typeof payload.parent_stage === 'string' ? payload.parent_stage : '';
-        const taskId = typeof payload.task_id === 'string' ? payload.task_id : undefined;
-        if (scope === 'extension' && extensionName) {
-          useHarnessStore.getState().updateExtensionProgress({
-            extensionName,
-            taskId,
-            parentStage: parentStage || stage,
-            extensionStage,
-            status: status as 'running' | 'success' | 'failed' | 'timeout' | 'pending' | 'waiting' | 'skipped' | 'rejected',
-            error,
-            messages,
-          });
-        }
-        if (stage) {
-          useHarnessStore.getState().updateStageResult({
-            stage,
-            status: status as 'running' | 'success' | 'failed' | 'timeout' | 'pending',
-            error,
-            messages,
-            metrics,
-          });
-          if (status === 'failed' && error) {
-            addMessage({
-              id: `harness-error-${Date.now()}`,
-              role: 'system',
-              content: `Stage ${stage} failed: ${error}`,
-              timestamp: new Date().toISOString(),
-            });
-          }
-        } else {
-          console.warn('[harness.stage_result] No stage field in payload, skipping update');
-        }
-      }),
-      webClient.on('harness.extension_ready', ({ payload }) => {
-        if (!shouldHandleSessionEvent(payload)) return;
-        const extensionName = typeof payload.extension_name === 'string' ? payload.extension_name : '';
-        const runtimePath = typeof payload.runtime_path === 'string' ? payload.runtime_path : '';
-        const sessionRuntimePath = typeof payload.session_runtime_path === 'string' ? payload.session_runtime_path : runtimePath;
-        const extensionRuntimePath = typeof payload.extension_runtime_path === 'string' ? payload.extension_runtime_path : '';
-        const configPath = typeof payload.config_path === 'string' ? payload.config_path : '';
-        const runtimeExtensions = Array.isArray(payload.runtime_extensions)
-          ? payload.runtime_extensions
-              .filter((item) => typeof item === 'object' && item !== null)
-              .map((item) => {
-                const obj = item as Record<string, unknown>;
-                return {
-                  extensionName: typeof obj.extension_name === 'string' ? obj.extension_name : '',
-                  runtimePath: typeof obj.runtime_path === 'string' ? obj.runtime_path : '',
-                  configPath: typeof obj.config_path === 'string' ? obj.config_path : '',
-                };
-              })
-              .filter((item) => item.extensionName && item.runtimePath)
-          : [];
-        const verifyReport = typeof payload.verify_report === 'object' && payload.verify_report !== null && !Array.isArray(payload.verify_report)
-          ? payload.verify_report as Record<string, unknown>
-          : {};
-        const componentsSummary = typeof payload.components_summary === 'object' && payload.components_summary !== null && !Array.isArray(payload.components_summary)
-          ? payload.components_summary as Record<string, unknown>
-          : {};
-
-        useHarnessStore.getState().setExtensionReady({
-          extensionName,
-          runtimePath,
-          sessionRuntimePath,
-          extensionRuntimePath,
-          configPath,
-          runtimeExtensions,
-          verifyReport,
-          componentsSummary,
-        });
-      }),
-      webClient.on('harness.activate_interaction', ({ payload }) => {
-        if (!shouldHandleSessionEvent(payload)) return;
-        const interactionId = typeof payload.interaction_id === 'string' ? payload.interaction_id : '';
-        const extensionName = typeof payload.extension_name === 'string' ? payload.extension_name : '';
-        const runtimePath = typeof payload.runtime_path === 'string' ? payload.runtime_path : '';
-        const options: string[] = Array.isArray(payload.options) ? payload.options : ['accept', 'reject'];
-
-        useHarnessStore.getState().setActivateInteraction({
-          interactionId,
-          extensionName,
-          runtimePath,
-          options,
-          pending: true,
-        });
-        setPendingQuestion({
-          request_id: interactionId,
-          source: 'activate_confirm',
-          questions: [{
-            header: '扩展激活确认',
-            question: `是否激活扩展 **${extensionName}**？`,
-            options: options.map((opt: string) => ({
-              label: opt === 'accept' ? '激活' : opt === 'reject' ? '拒绝' : opt,
-              description: '',
-            })),
-          }],
-        });
-      }),
-webClient.on('harness.session_finished', ({ payload }) => {
-        if (!shouldHandleSessionEvent(payload)) return;
-        setProcessing(false);
-        setThinking(false);
-        useHarnessStore.getState().setHarnessRunning(false);
       }),
     ];
 
