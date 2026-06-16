@@ -3248,6 +3248,13 @@ class JiuWenClawDeepAdapter:
 
     def _log_active_model_on_startup(self, *, phase: str = "create_instance") -> None:
         """记录四类模型槽位的 source / template_name / template_id / model_name（启动日志）。"""
+        from jiuwenclaw.infrastructure.module_importer import (
+            is_manager_ws_client_available,
+        )
+
+        if not is_manager_ws_client_available():
+            return
+
         from jiuwenclaw.agentserver.enterprise_config.apply_models import (
             SLOT_TO_CONFIG_KEY,
         )
@@ -3342,13 +3349,26 @@ class JiuWenClawDeepAdapter:
     async def _load_enterprise_config(self, request: AgentRequest) -> None:
         """按当前请求的 ``params`` 从 Gateway DB 加载生效企业策略到 ``self._enterprise_config``。"""
         self._enterprise_config = None
+        from jiuwenclaw.infrastructure.module_importer import (
+            is_manager_ws_client_available,
+        )
+
+        if not is_manager_ws_client_available():
+            logger.warning(
+                "[JiuWenClawDeepAdapter] enterprise_config unavailable: "
+                "manager_ws_client extension not found"
+            )
+            return
+
         try:
             from jiuwenclaw.agentserver.enterprise_config import (
                 DEFAULT_AGENT_LOAD_SLOTS,
                 load_effective_enterprise_config,
             )
         except ImportError as exc:
-            logger.error("[JiuWenClawDeepAdapter] enterprise_config unavailable: %s", exc)
+            logger.warning(
+                "[JiuWenClawDeepAdapter] enterprise_config unavailable: %s", exc
+            )
             return
 
         loaded = await load_effective_enterprise_config(

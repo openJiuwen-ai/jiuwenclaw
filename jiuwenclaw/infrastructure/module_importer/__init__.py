@@ -6,6 +6,7 @@ from jiuwenclaw.infrastructure.module_importer.manager_ws_client_importer import
     MANAGER_WS_CLIENT_EXT_PKG,
     ensure_manager_ws_client_package,
     import_manager_ws_client_module,
+    is_manager_ws_client_available,
     resolve_manager_ws_client_root,
 )
 
@@ -14,5 +15,6 @@ __all__ = (
     "MANAGER_WS_CLIENT_EXT_PKG",
     "ensure_manager_ws_client_package",
     "import_manager_ws_client_module",
+    "is_manager_ws_client_available",
     "resolve_manager_ws_client_root",
 )
