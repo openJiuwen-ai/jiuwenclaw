@@ -30,7 +30,7 @@ Your job: analyze a conversation where an agent used a skill, and extract KNOWLE
 
 You will receive:
 - skill_name: which skill was invoked
-- conversation: user messages and agent responses
+- conversation: user messages, agent responses, and optionally the skill document content
 
 IMPORTANT: Your output will be directly injected into the agent's context as "evolution experience".
 So you must produce ACTIONABLE KNOWLEDGE, not diagnosis.
@@ -49,17 +49,26 @@ What to extract as knowledge:
 - Behavioral rules the user explicitly requested
 - Facts or domain knowledge the agent was missing
 
+SKILL DOCUMENT ERRORS: If you receive the skill document content, also check it for
+internal errors — wrong examples (e.g., "3⊕2 = 9+12+4 = 19" when 9+12+4=25),
+incorrect constants (e.g., "1 mile = 1.8 km" when 1 mile = 1.60934 km), or
+contradictory formulas. Even if the agent happened to produce the correct answer
+by ignoring or self-correcting the skill's error, YOU SHOULD STILL generate a
+proposal to fix the underlying skill error. The goal is to fix the knowledge
+source, not just evaluate the agent's performance.
+
 Do NOT report:
 - Infrastructure issues (status codes, tool bugs)
 - Things that can't be fixed by adding knowledge
 - Vague suggestions like "improve the skill"
-- Cases where the agent performed correctly
+- Cases where everything is correct (skill, agent output, and user satisfaction)
 - Cases where there's no clearly better alternative
 
-IMPORTANT: Only generate a proposal when you can observe a CLEAR DEFICIENCY in the
-conversation — the agent did something wrong, gave incorrect results, or the user
-explicitly corrected it. If the skill worked correctly or you're unsure whether there's
-a problem, return {"proposals": []}. Err on the side of NOT generating proposals.
+IMPORTANT: Only generate a proposal when you can observe a CLEAR DEFICIENCY —
+either the agent produced wrong results, the user explicitly corrected it, OR the
+skill document contains factual errors (wrong numbers, contradictory examples,
+incorrect formulas). If everything is correct, return {"proposals": []}.
+Err on the side of NOT generating proposals for ambiguous cases.
 A wrong or unnecessary proposal is worse than no proposal.
 
 Output (JSON):
@@ -116,21 +125,59 @@ class LLMProposer(ProposalGenerator):
         return False
 
     @staticmethod
+    def _extract_text_from_message(msg: dict) -> str:
+        """Extract text content from a message entry.
+
+        Handles two formats:
+        - parts format: {"role": "...", "parts": [{"type": "text", "content": "..."}]}
+        - direct format: {"role": "...", "content": "..."}
+        """
+        # Try parts format first
+        parts = msg.get("parts", [])
+        if parts:
+            text_parts = []
+            for p in parts:
+                if isinstance(p, dict) and p.get("type") == "text":
+                    content = p.get("content", "")
+                    if content:
+                        text_parts.append(content)
+            if text_parts:
+                return "\n".join(text_parts)
+
+        # Fallback: direct content field
+        content = msg.get("content", "")
+        if isinstance(content, str) and content:
+            return content
+
+        return ""
+
+    @staticmethod
     def _extract_conversation(trace_id: str, spans: list[dict]) -> dict | None:
         """Extract meaningful conversation data from spans for LLM analysis."""
         skill_name = None
-        conversation_rounds = []
+        skill_content = None
+        user_messages: list[str] = []
+        assistant_messages: list[str] = []
+        seen_user: set[str] = set()
+        seen_assistant: set[str] = set()
 
         for span in spans:
             name = span.get("name", "")
             attrs_raw = span.get("attributes") or ""
 
-            # Extract skill name from skill_tool span
+            # Extract skill name AND content from skill_tool span
             if "gen_ai.tool.execute: skill_tool" in name and attrs_raw:
                 try:
                     attrs = json.loads(attrs_raw) if isinstance(attrs_raw, str) else attrs_raw
                     args = json.loads(attrs.get("gen_ai.tool.arguments", "{}"))
                     skill_name = args.get("skill_name")
+
+                    # Extract skill content from tool result (keep concise)
+                    result_raw = attrs.get("gen_ai.tool.result", "")
+                    if result_raw:
+                        result_str = result_raw if isinstance(result_raw, str) else str(result_raw)
+                        if "skill_content" in result_str:
+                            skill_content = result_str[:1500] if len(result_str) > 1500 else result_str
                 except (json.JSONDecodeError, TypeError):
                     pass
 
@@ -138,34 +185,51 @@ class LLMProposer(ProposalGenerator):
             if name == "gen_ai.chat" and attrs_raw:
                 try:
                     attrs = json.loads(attrs_raw) if isinstance(attrs_raw, str) else attrs_raw
-                    messages_raw = attrs.get("gen_ai.input.messages", "")
-                    if not messages_raw:
-                        continue
-                    messages = json.loads(messages_raw) if isinstance(messages_raw, str) else messages_raw
 
-                    # Extract user and assistant messages (skip system)
-                    for msg in messages:
-                        role = msg.get("role", "")
-                        if role in ("user", "assistant"):
-                            parts = msg.get("parts", [])
-                            text_parts = []
-                            for p in parts:
-                                if isinstance(p, dict) and p.get("type") == "text":
-                                    content = p.get("content", "")
-                                    # Truncate long messages
-                                    if len(content) > 2000:
-                                        content = content[:2000] + "...[truncated]"
-                                    text_parts.append(content)
-                            if text_parts:
-                                conversation_rounds.append({
-                                    "role": role,
-                                    "content": "\n".join(text_parts),
-                                })
+                    # --- Extract user messages from input (deduplicated) ---
+                    messages_raw = attrs.get("gen_ai.input.messages", "")
+                    if messages_raw:
+                        messages = json.loads(messages_raw) if isinstance(messages_raw, str) else messages_raw
+                        for msg in messages:
+                            if msg.get("role") == "user":
+                                text = LLMProposer._extract_text_from_message(msg)
+                                if text:
+                                    key = text[:200]
+                                    if key not in seen_user:
+                                        seen_user.add(key)
+                                        user_messages.append(text[:2000] if len(text) > 2000 else text)
+
+                    # --- Extract assistant responses from output (deduplicated) ---
+                    output_raw = attrs.get("gen_ai.output.messages", "")
+                    if output_raw:
+                        output_msgs = json.loads(output_raw) if isinstance(output_raw, str) else output_raw
+                        if isinstance(output_msgs, list):
+                            for msg in output_msgs:
+                                if msg.get("role") == "assistant":
+                                    text = LLMProposer._extract_text_from_message(msg)
+                                    if text:
+                                        key = text[:200]
+                                        if key not in seen_assistant:
+                                            seen_assistant.add(key)
+                                            assistant_messages.append(text[:2000] if len(text) > 2000 else text)
+
                 except (json.JSONDecodeError, TypeError):
                     pass
 
         if not skill_name:
             return None
+
+        # Build conversation: skill content first (as context), then user/assistant
+        conversation_rounds = []
+        if skill_content:
+            conversation_rounds.append({
+                "role": "system",
+                "content": f"[Skill content for '{skill_name}']:\n{skill_content}",
+            })
+        for text in user_messages:
+            conversation_rounds.append({"role": "user", "content": text})
+        for text in assistant_messages:
+            conversation_rounds.append({"role": "assistant", "content": text})
 
         return {
             "trace_id": trace_id,
