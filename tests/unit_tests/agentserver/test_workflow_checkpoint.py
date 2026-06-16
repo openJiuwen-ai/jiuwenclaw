@@ -16,7 +16,12 @@ from jiuwenswarm.agents.harness.team.handlers.workflow_state import (
 from jiuwenswarm.agents.harness.team.handlers.workflow_monitor_handler import WorkflowMonitorHandler
 
 
+_DEFAULT_RUN_ID = "wf_testrun00001"
+
+
 def _make_progress(kind: str, **kwargs: Any) -> WorkflowProgress:
+    if "run_id" not in kwargs:
+        kwargs["run_id"] = _DEFAULT_RUN_ID
     return WorkflowProgress(kind=kind, **kwargs)
 
 
@@ -62,7 +67,6 @@ class TestWorkflowCheckpointRoundTrip:
     def test_model_dump_and_restore_preserves_state():
         state = WorkflowRunState()
         state.apply(_make_progress("workflow_started", workflow_name="test"))
-        state.apply(_make_progress("phase", phase="Phase 1"))
         state.apply(_make_progress("agent_started", phase="Phase 1", label="agent-a", prompt="prompt"))
 
         runs_data = {state.id: state.model_dump()}
@@ -108,7 +112,7 @@ class TestWorkflowMonitorHandlerInitialRuns:
         """Handler initialised with restored runs preserves them."""
         state = WorkflowRunState()
         state.apply(_make_progress("workflow_started", workflow_name="restored-flow"))
-        state.apply(_make_progress("phase", phase="Planning"))
+        state.apply(_make_progress("agent_started", phase="Planning", label="agent-a"))
 
         monitor = _FakeTeamMonitor()
         handler = WorkflowMonitorHandler(
@@ -133,6 +137,7 @@ class TestWorkflowMonitorHandlerInitialRuns:
         """Restored runs + new events from stream produce combined snapshot."""
         state = WorkflowRunState()
         state.apply(_make_progress("workflow_started", workflow_name="old-flow"))
+        state.apply(_make_progress("agent_started", phase="Planning", label="agent-a"))
 
         monitor = _FakeTeamMonitor()
         handler = WorkflowMonitorHandler(
@@ -141,13 +146,19 @@ class TestWorkflowMonitorHandlerInitialRuns:
         )
         await handler.start()
 
-        # Push a new event for the existing run
+        # Push a new agent_started event for the existing run (phase via agent event)
         from types import SimpleNamespace
+        new_progress = WorkflowProgress(
+            kind="agent_started",
+            run_id=state.id,
+            phase="NewPhase",
+            label="agent-b",
+        )
         monitor.put_event(SimpleNamespace(
             event_type=SimpleNamespace(value="workflow_progress"),
             sender_id="swarmflow",
-            payload=WorkflowProgress(kind="phase", phase="NewPhase"),
-            get_payload=lambda: WorkflowProgress(kind="phase", phase="NewPhase"),
+            payload=new_progress,
+            get_payload=lambda: new_progress,
         ))
         await monitor.drain()
         await monitor.stop()
@@ -155,6 +166,6 @@ class TestWorkflowMonitorHandlerInitialRuns:
 
         snapshot = handler.get_workflow_snapshot()
         assert len(snapshot) == 1
-        # The old run now has an additional phase
-        assert len(snapshot[0]["phases"]) == 1
-        assert snapshot[0]["phases"][0]["name"] == "NewPhase"
+        phase_names = {p["name"] for p in snapshot[0]["phases"]}
+        assert "Planning" in phase_names
+        assert "NewPhase" in phase_names

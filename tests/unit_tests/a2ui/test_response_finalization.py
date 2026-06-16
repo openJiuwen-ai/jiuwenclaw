@@ -104,3 +104,61 @@ async def test_finalize_a2ui_assistant_content_skips_when_disabled(monkeypatch):
     )
 
     assert result == INVALID_A2UI_RESPONSE
+
+
+@pytest.mark.asyncio
+async def test_finalize_a2ui_assistant_content_retries_without_a2ui_after_failed_repairs(monkeypatch):
+    from jiuwenswarm.server.runtime.a2ui.runtime.response_finalization import finalize_a2ui_assistant_content
+
+    monkeypatch.setenv("JIUWENSWARM_A2UI_ENABLED", "true")
+    repair_prompts = []
+    retry_queries = []
+
+    async def repair_call(prompt: str):
+        repair_prompts.append(prompt)
+        return SimpleNamespace(content=INVALID_A2UI_RESPONSE)
+
+    async def retry_without_a2ui_call(query: str):
+        retry_queries.append(query)
+        return "plain text result"
+
+    result = await finalize_a2ui_assistant_content(
+        INVALID_A2UI_RESPONSE,
+        user_query="generate a form",
+        request_id="req-retry-without-a2ui",
+        repair_call=repair_call,
+        a2ui_enabled=True,
+        retry_without_a2ui_call=retry_without_a2ui_call,
+    )
+
+    assert result == "plain text result"
+    assert len(repair_prompts) == 2
+    assert retry_queries == ["generate a form"]
+
+
+@pytest.mark.asyncio
+async def test_finalize_a2ui_assistant_content_returns_safe_text_when_retry_fails(monkeypatch):
+    from jiuwenswarm.server.runtime.a2ui.runtime.response_finalization import finalize_a2ui_assistant_content
+
+    monkeypatch.setenv("JIUWENSWARM_A2UI_ENABLED", "true")
+
+    async def repair_call(prompt: str):
+        return SimpleNamespace(content=INVALID_A2UI_RESPONSE)
+
+    async def retry_without_a2ui_call(query: str):
+        _ = query
+        return None
+
+    result = await finalize_a2ui_assistant_content(
+        INVALID_A2UI_RESPONSE,
+        user_query="generate a form",
+        request_id="req-retry-fails",
+        repair_call=repair_call,
+        a2ui_enabled=True,
+        retry_without_a2ui_call=retry_without_a2ui_call,
+    )
+
+    assert "<a2ui-json>" not in result
+    assert "[A2UI content could not be rendered]" not in result
+    assert "A2UI 界面生成失败" not in result
+    assert result == "Here is a form."

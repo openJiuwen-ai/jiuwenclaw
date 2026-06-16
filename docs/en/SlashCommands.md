@@ -34,7 +34,7 @@ Executed locally in the terminal UI, not through Gateway control pipeline.
 | `/hooks` | Browse configured hooks (read-only, see below) |
 | `/sandbox` | Set sandbox mode (see below) |
 | `/agents` | Manage Agent configs (list, get, create, update, enable, disable, delete, see below) |
-| `/auto-harness` | Auto-Harness task management (`run`/`schedule`, see below) |
+| `/auto-harness` | Auto-Harness task management (`run`/`schedule`/`issue`, see below) |
 
 > Note: `/mode` controlled switching logic is primarily on Gateway side, see "`/mode` and `/switch`" below. The TUI local command additionally supports `/mode plan` and `/mode team.normal`; see the TUI guide for details.
 
@@ -49,7 +49,7 @@ Identified by Gateway and forwarded to AgentServer and other backend capabilitie
 | `/new_session` | Create new session (IM only) |
 | `/mode` | Mode switching (supports first-level entry and direct syntax) |
 | `/switch` | Switch second-level mode within current mode family |
-| `/skills` | Skills management (list, install, uninstall, marketplace) (see below) |
+| `/skills` | Skills management (list, install, uninstall, marketplace, ClawHub, SkillNet) (see below) |
 | `/model` | Model view, add, switch (see below) |
 | `/mcp` | MCP server management (see below) |
 | `/diff` | View session changes by turn (see below) |
@@ -123,6 +123,28 @@ Manages directories AI can access for file read, edit, and execute operations.
 
 - `/resume list`: List historical sessions.
 - `/resume <conversation_id>`: Resume specified session.
+
+#### Interactive picker (TUI)
+
+Entering **`/resume`** or **`/continue`** with **no arguments** opens an interactive session picker (instead of a plain `session.list` dump).
+
+| Key | Action |
+| --- | --- |
+| `↑` / `↓` | Move focus between sessions |
+| `Enter` | Resume the focused session |
+| type chars | Live search (filter by session ID / title / project dir) |
+| `Backspace` | Delete a search character |
+| `Space` | Preview the focused session info card (title, ID, project dir, branch, message count, last active / created). In preview: `Enter` resumes, `Space`/`Esc` goes back |
+| `Ctrl+R` | Rename the focused session. In edit mode: `Enter` saves, `Esc` cancels, empty value clears the title |
+| `Ctrl+A` | Toggle scope between "all projects" and "current project only" |
+| `Ctrl+B` | Toggle git branch filter (only show sessions whose `git_branch` strictly equals the current project's branch) |
+| `Esc` | Clear search if any; otherwise close the picker |
+
+Behavior:
+
+- **Defaults to listing all projects** (press `Ctrl+A` to narrow to the current project). When the current project has no sessions, an (empty) picker still opens so you can press `Ctrl+A`.
+- **Branch recording & filtering (`Ctrl+B`)**: a session's git branch is recorded (per its `project_dir`) on the first message (`HEAD` for non-git/detached). When the filter is on, sessions are matched by branch **name** strictly; legacy sessions without a recorded branch and `HEAD` sessions are filtered out. Note the match is by name only and not repo-aware — with "all projects + branch filter" enabled, same-named branches in different directories are shown together.
+- **Restore scope**: resume only restores the **conversation context** (history, session ID, accent color, workflow snapshot, window title); it does **not** switch the workspace / current working directory.
 
 ### `/model` (View / Add / Switch Model)
 
@@ -355,30 +377,37 @@ Manage cron jobs via RPC calls to the backend `CronController`, sharing the same
 
 ### `/skills` (Skills Management)
 
-Manage skills lifecycle: listing, installing, uninstalling, and marketplace source management.
+Manage skills lifecycle: listing, installing, uninstalling, marketplace source management, ClawHub and SkillNet online skill registries.
 
 #### Subcommands
 
 | Command | Description |
 |---|---|
 | `/skills` or `/skills list` | List skills (grouped: Installed / Available to install) |
-| `/skills install <skill>` or `/skills install <skill@marketplace>` or `/skills install <path_or_url>` | Install a skill: builtin skills accept bare name, marketplace skills use `<name>@<marketplace>` format, local paths and remote URLs are auto-detected |
+| `/skills install <skill>` or `/skills install <slug@clawhub>` or `/skills install <name@skillnet>` or `/skills install <skill@marketplace>` or `/skills install <path_or_url>` | Install a skill: builtin accepts bare name, ClawHub uses `<slug>@clawhub`, SkillNet uses `<name>@skillnet` (auto-searches for URL), marketplace uses `<name>@<marketplace>`, local paths and URLs auto-detected |
 | `/skills uninstall <name>` | Uninstall a skill by name |
 | `/skills marketplace` or `/skills marketplace list` | List marketplace sources (name, URL, enabled status, last updated) |
 | `/skills marketplace add <name> <url>` | Add a new marketplace source |
 | `/skills marketplace remove <name>` | Remove a marketplace source (also clears its cache) |
 | `/skills marketplace toggle <name> <on or off>` | Enable or disable a marketplace source (`on`/`true`/`1` = enable, otherwise disable) |
+| `/skills marketplace clawhub` | View ClawHub token status (configured/not configured) |
+| `/skills marketplace clawhub token <value>` | Set ClawHub CLI token |
+| `/skills marketplace clawhub token` | View ClawHub token status |
+| `/skills skillnet` or `/skills skillnet search <query>` | Search SkillNet skill registry (shows name, description, author, stars, category, URL) |
+| `/skills skillnet install <skill_url>` | Install a skill from SkillNet by URL (async download, auto-polls progress) |
 | `/skills use <skill_name>, <query>` | Execute a query using a specific skill |
 
 #### Concepts
 
-- **Skill**: An extension capability that can be installed from marketplace sources, builtin directory, or local paths, providing additional functionality to the agent.
+- **Skill**: An extension capability that can be installed from marketplace sources, ClawHub, SkillNet, builtin directory, or local paths, providing additional functionality to the agent.
 - **Builtin skill**: A preset skill shipped with the software. Install using bare skill name (e.g., `/skills install advanced-daily-report`); no marketplace source needed.
-- **Marketplace source**: A remote repository (typically a Git URL) that hosts available skills. Each source has a name, URL, and enabled/disabled state.
-- **Spec**: The install identifier format `<skill>@<marketplace>` used when installing from a marketplace; for builtin skills, omit `@` and the system auto-detects as `@builtin`.
+- **ClawHub**: An online skill registry ([clawhub.ai](https://clawhub.ai)) hosting community-published skills. Install using `<slug>@clawhub` format, where slug is the skill's unique identifier (not its display name). Requires a ClawHub CLI token to be configured first.
+- **SkillNet**: An academic skill registry. Two install methods: `<name>@skillnet` (auto-searches to find URL then installs) and `/skills skillnet install <url>` (direct URL install).
+- **Marketplace source**: A remote Git repository that hosts available skills. Each source has a name, URL, and enabled/disabled state.
+- **Spec**: The install identifier format supporting: `<skill>@builtin` (builtin), `<slug>@clawhub` (ClawHub), `<skill>@<marketplace>` (Git marketplace); bare names without `@` are auto-detected as builtin if applicable.
 - **Local install**: Use `/skills install <path>` to install from a local directory (must contain `SKILL.md`) or remote archive URL; paths/URLs are auto-detected and routed to the local import flow.
 - **Install location**: The directory where a skill is stored after installation (`~/.jiuwenswarm/agent/jiuwenswarm_workspace/skills/`).
-- **Source tag**: Each skill in the list is tagged with its source: `[builtin]` = builtin, `[local]` = imported, `[project]` or marketplace name = other.
+- **Source tag**: Each skill in the list is tagged with its source: `[builtin]` = builtin, `[local]` = imported, `[clawhub]` = ClawHub, `[skillnet]` = SkillNet, `[project]` or marketplace name = other.
 
 #### Grouped List Display
 
@@ -402,7 +431,16 @@ For other subcommands (`/skills install`, `/skills uninstall`, `/skills marketpl
 
 - **Timeout**: `install`, `uninstall`, and `marketplace toggle` requests have a 120-second timeout on the TUI side; other subcommands have no explicit timeout.
 - **Builtin auto-detection**: When installing with `/skills install <skill>` (no `@`), the system checks if it matches a builtin skill and redirects to the builtin install flow; if not, a format hint is returned.
-- **Path/URL auto-detection**: When installing with `/skills install <path>` (local path like `/path/to/skill` or `C:\skill`, or remote URL `https://...`), the system automatically routes to the local import flow.
+- **Path/URL auto-detection**: When installing with `/skills install <path_or_url>` (local path like `/path/to/skill` or `C:\skill`, or remote URL `https://...`), the system automatically routes to the local import flow (`skills.import_local`). All URLs go through import_local; SkillNet is not auto-routed from URLs.
+- **`@skillnet` search-install**: When using `/skills install <name>@skillnet`, the frontend first calls `skills.skillnet.search`. **Only auto-installs if an exact match by skill_name is found**; with no exact match, it only displays search results (with URLs and names) without auto-installing the first result — the user must choose one and install via `/skills skillnet install <url>` or `/skills install <exact_name>@skillnet`. This is because SkillNet search is semantic: searching "code" may return "taskflow", "coding-agent" etc. whose names don't contain "code".
+- **ClawHub token required**: A ClawHub CLI token must be configured before installing from ClawHub (via `/skills marketplace clawhub token <value>`). Without a token, `@clawhub` installs will fail with a message explaining how to set the token. Obtain your token at [clawhub.ai](https://clawhub.ai).
+- **ClawHub slug vs. display name**: ClawHub skills are identified by their unique **slug** (e.g., `code-review-security`), not their display name (e.g., "Code Review Assistant"). When a direct slug install fails, the system automatically searches ClawHub and displays matching results (with real slugs and summaries) to help you find the correct skill.
+- **ClawHub overwrite confirmation**: When the target slug already exists (same name from any source counts as installed), TUI presents an interactive prompt: "Skill xxx is already installed. Do you want to force overwrite?". Choosing "Yes" re-installs with `force: true`, replacing the old skill; choosing "No" or exiting keeps the existing skill unchanged. The Web UI bypasses confirmation and uses `force: true` directly.
+- **SkillNet async install**: SkillNet installation is asynchronous — it initiates a download task and returns an `install_id`, then TUI automatically polls `install_status` every 800ms until completion or failure (max wait: 15 minutes). Progress is shown as `Downloading... (install_id: xxx)`.
+- **SkillNet overwrite confirmation**: Same as ClawHub — TUI prompts the user interactively when a skill already exists. Web UI uses `force: true` directly.
+- **SkillNet accessible in China**: SkillNet search API is hosted at `http://api-skillnet.openkg.cn` (OpenKG platform) and is directly accessible in China without VPN. However, the skill content itself is hosted on GitHub, which may require VPN.
+- **Same-name skills cannot coexist**: Skills are stored as directories at `skills/{name}/`, and the filesystem does not allow two directories with the same name. Installing a skill with the same name from a different source will overwrite the previous one (with user confirmation). `/skills use` only uses the skill name and cannot distinguish between sources.
+- **ClawHub network access**: ClawHub API is hosted at `https://clawhub.ai`. VPN may be required in regions with restricted access to this domain.
 - **Cache cleanup**: `marketplace remove` sends `{ name, remove_cache: true }` to also clear the local cache for that source.
 - **Auto-refresh**: `marketplace add`, `marketplace remove`, and `marketplace toggle` automatically re-list marketplace sources after a successful operation.
 - **Offline handling**: `/skills use` checks connection status; if offline, shows `offline: waiting for reconnect before sending /skills use request`.
@@ -413,15 +451,21 @@ For other subcommands (`/skills install`, `/skills uninstall`, `/skills marketpl
 - `/skills list` — List skills (explicit subcommand)
 - `/skills install advanced-daily-report` — Install a builtin skill (bare name auto-detect)
 - `/skills install advanced-daily-report@builtin` — Install a builtin skill (explicit format)
-- `/skills install my-skill@marketplace` — Install a skill from marketplace
+- `/skills install code-review@clawhub` — Install a skill from ClawHub (using slug)
+- `/skills install code-review@skillnet` — Install from SkillNet (auto-searches for URL)
+- `/skills skillnet search code-review` — Search SkillNet skill registry
+- `/skills skillnet install https://github.com/user/skill-repo` — Install via SkillNet subcommand (direct URL)
+- `/skills install my-skill@marketplace` — Install a skill from Git marketplace
 - `/skills install /path/to/my-skill` — Install a skill from local directory
-- `/skills install https://example.com/skill.zip` — Install a skill from remote URL
+- `/skills install https://example.com/skill.zip` — Install from remote URL (local import)
 - `/skills uninstall my-skill` — Uninstall a skill
 - `/skills marketplace list` — List marketplace sources
 - `/skills marketplace add community https://github.com/user/skills-repo` — Add a marketplace source named "community"
 - `/skills marketplace remove community` — Remove the "community" marketplace source
 - `/skills marketplace toggle community on` — Enable the "community" marketplace source
 - `/skills marketplace toggle community off` — Disable the "community" marketplace source
+- `/skills marketplace clawhub` — View ClawHub token status
+- `/skills marketplace clawhub token abc123xyz` — Set ClawHub CLI token
 - `/skills use my-skill, Code and execute a Hello World program.` — Use a skill to execute a query
 
 ### `/export` (Export Conversation)
@@ -480,14 +524,14 @@ Enter / leave jiuwenbox sandbox mode and tune its runtime policy. Calls `command
 
 | Command | Description |
 |---|---|
-| `/sandbox` or `/sandbox status` | Show current runtime (`enabled`, `excluded_commands`, `files.allow_write`, `files.deny_write`) |
+| `/sandbox` or `/sandbox status` | Show current runtime (`enabled`, `landlock`, `excluded_commands`, `files.allow_write`, `files.deny_write`) |
 | `/sandbox enable` | Enter sandbox mode (spawns jiuwenbox if needed, rebuilds agent) |
 | `/sandbox disable` | Leave sandbox mode (rebuilds agent; stops jiuwenbox only if jiuwenswarm started it) |
 | `/sandbox exclude add <pattern>` | Add a shell glob whose matches run locally instead of in the sandbox |
 | `/sandbox exclude remove <pattern>` | Remove a pattern |
 | `/sandbox exclude list` | List current `excluded_commands` |
-| `/sandbox files allow <path> [perm]` | Allow writing `<path>` inside the sandbox |
-| `/sandbox files deny <path>` | Deny writing `<path>` inside the sandbox |
+| `/sandbox files allow <path>` | Allow write access to `<path>` inside the sandbox (shown as rw) |
+| `/sandbox files deny <path>` | Deny write access to `<path>` inside the sandbox (read still allowed, shown as ro) |
 | `/sandbox files remove <path>` | Remove `<path>` from the user-configured allow & deny sets |
 | `/sandbox files list` | List effective `allow_write` / `deny_write` |
 | `/sandbox help` | Print usage |
@@ -495,7 +539,9 @@ Enter / leave jiuwenbox sandbox mode and tune its runtime policy. Calls `command
 #### Concepts
 
 - **Platform support**: `/sandbox` is Linux-only (jiuwenbox depends on Linux kernel features such as bwrap, Landlock, and Linux namespaces). On a Windows or macOS agent-server, every `/sandbox` sub-command returns a `SANDBOX_BAD_REQUEST` error. If the TUI runs on Windows/macOS but the agent-server is on a Linux host, the command works — what matters is the agent-server's platform.
-- **Effective write policy**: `files.allow_write` / `files.deny_write` in the status panel show the merged view of auto-managed and user-configured entries. Auto-managed entries are server-injected (intrinsic files such as `AGENT.md`, `HEARTBEAT.md`, `IDENTITY.md`, `SOUL.md`, `USER.md`, the `memory/daily_memory/` directory, and depending on the mode, `project_dir` and `config/config.yaml`) and cannot be removed via `/sandbox files remove`.
+- **Write policy semantics**: `allow` / `deny` control **write access** (rw/ro) inside the sandbox, not Unix octal modes. Enforcement uses bwrap bind mounts + `--remount-ro`; Landlock is defense-in-depth (when `landlock.compatibility=disabled`, bwrap is primary).
+- **Nested paths**: Supported: parent allow + child deny (e.g. allow `/tmp`, deny `/tmp/secret`). Not supported: child allow + parent deny (parent deny wins); the server rejects such configs.
+- **Effective write policy**: `files.allow_write` / `files.deny_write` in the status panel show the merged view of auto-managed and user-configured entries, each labeled `(rw)` or `(ro)`. Auto-managed entries are server-injected (intrinsic files such as `AGENT.md`, `HEARTBEAT.md`, `IDENTITY.md`, `SOUL.md`, `USER.md`, the `memory/daily_memory/` directory, and depending on the mode, `project_dir` and `config/config.yaml`) and cannot be removed via `/sandbox files remove`.
 - **preserve_file_sharing_mode**: Controlled by jiuwenswarm config, not by `/sandbox`. Only `mount` is supported: intrinsic files and `project_dir` are bind-mounted into the sandbox and `project_dir/config/config.yaml` is explicitly added to `deny_write`. Writing any other value into config.yaml is rejected by the server.
 - **excluded_commands**: Match the full command string (not just `argv[0]`); a match makes that tool call run on the host, effectively granting the command's side effects to the local environment.
 - **Add / remove are strict**: `exclude add` rejects a pattern that is already in the list; `exclude remove` rejects a pattern that is not in the list. `files allow|deny` rejects a path that is already in the same bucket, and rejects a path that exists in the opposite bucket (allow vs deny conflict) — run `files remove` first if you want to flip it. `files remove` rejects paths that have no matching user-configured entry.
@@ -505,7 +551,8 @@ Enter / leave jiuwenbox sandbox mode and tune its runtime policy. Calls `command
 
 - `/sandbox enable` — turn on sandbox mode
 - `/sandbox status` — see runtime + effective files
-- `/sandbox files allow ./tmp/ 0777` — let the sandbox write into `./tmp/` with mode 0777
+- `/sandbox files allow ./tmp/` — allow sandbox write access to `./tmp/` (rw)
+- `/sandbox files deny ./tmp/secret/` — deny write under an allowed parent (ro)
 - `/sandbox exclude add "git *"` — let `git` run on the host instead of inside the sandbox
 
 ### `/hooks` (Browse Hooks Configuration)
@@ -926,6 +973,10 @@ If configuration is incomplete, the task creation will prompt the missing fields
 | `/auto-harness schedule logs <task_id> [--history <n>]` | View task execution logs |
 | `/auto-harness schedule cancel <task_id>` | Cancel a task |
 | `/auto-harness schedule delete <task_id>` | Delete a task |
+| `/auto-harness issue fix <issue_numbers>` | Create fix tasks for GitCode issues |
+| `/auto-harness issue scan [--repo <repo>] [--page <n>] [--labels <labels>] [--force-refresh]` | Scan repo GitCode issues |
+| `/auto-harness issue status` | View GitCode issue processing status |
+| `/auto-harness issue delete <issue_numbers>` | Delete issue processing records |
 
 #### `/auto-harness run` (One-time Execution)
 
@@ -961,6 +1012,61 @@ If configuration is incomplete, the task creation will prompt the missing fields
 - Modes:
   - Default: Stream current running logs in real-time (`tail -f` mode); Ctrl+C to interrupt
   - `--history <n>`: View historical execution logs (`view` mode, `n` is the history index, 0 = most recent)
+
+### `/auto-harness issue` (GitCode Issue Auto-Fix)
+
+Manage GitCode issue auto-processing: scan issue matrix, create fix tasks, view status, clean up records.
+
+Requires `git.user_name`, `git.user_email` and `gitcode.access_token` (or `GITCODE_ACCESS_TOKEN` env var) to be configured.
+
+#### Subcommands
+
+| Command | Description |
+|---|---|
+| `/auto-harness issue fix <issue_numbers>` | Create fix tasks for GitCode issues |
+| `/auto-harness issue scan [--repo <repo>] [options]` | Scan repo issues |
+| `/auto-harness issue status` | View issue processing status |
+| `/auto-harness issue delete <issue_numbers>` | Delete issue processing records |
+
+#### `/auto-harness issue fix` (Create Fix Task)
+
+- Usage: `/auto-harness issue fix <issue_numbers>`
+- Parameters:
+  - `<issue_numbers>`: Issue number(s), comma-separated, e.g. `1272,1271,1270`
+  - `--repo <repo>`: Target repository (`jiuwenswarm` / `agent_core`); interactively selected if not specified
+- Issues with bound PRs (open or merged) are automatically skipped
+- Examples:
+  - `/auto-harness issue fix 1286`
+  - `/auto-harness issue fix 1272,1271,1270`
+
+#### `/auto-harness issue scan` (Scan Issue)
+
+- Usage: `/auto-harness issue scan`
+- Parameters:
+  - `--repo <repo>`: Target repository; interactively selected if not specified
+  - `--page <n>`: Page number, default 1
+  - `--labels <labels>`: Label filter, comma-separated; defaults to bug type only
+  - `--force-refresh`: Force refresh from GitCode API (uses cache by default)
+- Displays: issue number, title, labels, difficulty, last updated
+- Examples:
+  - `/auto-harness issue scan`
+  - `/auto-harness issue scan --repo jiuwenswarm --page 1`
+  - `/auto-harness issue scan --repo agent_core --force-refresh`
+
+#### `/auto-harness issue status` (View Status)
+
+- Usage: `/auto-harness issue status` (no parameters)
+- Lists all issue processing records in table format: number, status, stage, progress, details
+- Example: `/auto-harness issue status`
+
+#### `/auto-harness issue delete` (Delete Records)
+
+- Usage: `/auto-harness issue delete <issue_numbers>`
+- Parameters:
+  - `<issue_numbers>`: Issue number(s) to delete
+- Examples:
+  - `/auto-harness issue delete 123`
+  - `/auto-harness issue delete 123 456`
 
 ---
 

@@ -18,6 +18,7 @@ from openjiuwen.core.context_engine.context.context_utils import ContextUtils
 from openjiuwen.core.foundation.llm import (
     AssistantMessage,
     ToolMessage,
+    UserMessage,
 )
 from openjiuwen.core.session.agent import Session
 from openjiuwen.core.session.stream import OutputSchema
@@ -35,16 +36,20 @@ from openjiuwen.harness.workspace.workspace import WorkspaceNode
 from jiuwenswarm.agents.harness.common.rails.interrupt.interrupt_helpers import (
     convert_interactions_to_ask_user_question,
 )
-from jiuwenswarm.agents.harness.common.tools.symphony_status_events import (
-    begin_symphony_status_events,
-    reset_symphony_status_events,
-)
 from jiuwenswarm.common.utils import logger
 
 _TODO_TOOL_NAMES = frozenset(["todo_create", "todo_get", "todo_list", "todo_modify"])
+_IMAGE_CONTENT_TYPES = frozenset({"image", "image_url", "input_image"})
+_IMAGE_CONTENT_OMITTED = (
+    "[Image content omitted from chat-model context. Use the original image "
+    "path or a vision tool when image analysis is required.]"
+)
 
 
 def _structured_tool_result_payload(result: Any) -> Any | None:
+    detailed_output = getattr(result, "detailed_output", None)
+    if detailed_output is not None:
+        return detailed_output
     if isinstance(result, (dict, list)):
         return result
     return None
@@ -80,6 +85,8 @@ def _copy_symphony_result_fields(
         "display_format",
         "mermaid",
         "summary",
+        "continue_after_display",
+        "followup_action",
     ):
         if key in raw_output:
             payload[key] = raw_output[key]
@@ -96,6 +103,50 @@ def _parse_tool_call_arguments(tool_call: Any) -> dict[str, Any]:
             return {}
         return parsed if isinstance(parsed, dict) else {}
     return {}
+
+
+def _is_image_content_block(part: Any) -> bool:
+    if not isinstance(part, dict):
+        return False
+    block_type = str(part.get("type") or "").strip().lower()
+    if block_type in _IMAGE_CONTENT_TYPES:
+        return True
+    return "image_url" in part or "image" in part
+
+
+def _text_from_content_part(part: Any) -> str | None:
+    if isinstance(part, str):
+        return part
+    if isinstance(part, dict) and isinstance(part.get("text"), str):
+        return part["text"]
+    return None
+
+
+def _strip_image_content_blocks(content: Any) -> tuple[Any, int]:
+    if not isinstance(content, list):
+        return content, 0
+
+    kept_parts: list[Any] = []
+    removed = 0
+    for part in content:
+        if _is_image_content_block(part):
+            removed += 1
+            continue
+        kept_parts.append(part)
+
+    if not removed:
+        return content, 0
+    if not kept_parts:
+        return _IMAGE_CONTENT_OMITTED, removed
+
+    text_parts: list[str] = []
+    for part in kept_parts:
+        text = _text_from_content_part(part)
+        if text is None:
+            return kept_parts, removed
+        if text:
+            text_parts.append(text)
+    return "\n".join(text_parts).strip() or _IMAGE_CONTENT_OMITTED, removed
 
 
 def _extract_tool_interrupt(value: Any) -> Any | None:
@@ -280,7 +331,6 @@ class JiuSwarmStreamEventRail(DeepAgentRail):
         # Store cancelled tool info for interrupt response (per-session to avoid
         # cross-session leakage in concurrent collect→get→clear sequences).
         self._cancelled_tool_results: dict[str, list[dict[str, Any]]] = {}
-        self._symphony_status_tokens: dict[str, Any] = {}
 
     def init(self, agent: Any) -> None:
         self._deep_agent = agent
@@ -297,6 +347,145 @@ class JiuSwarmStreamEventRail(DeepAgentRail):
         if self._get_prompt_language() == "en":
             return f"[Tool interrupted] Tool {tool_name} was interrupted by the user and has no result."
         return f"[工具执行被中断] 工具 {tool_name} 执行过程中被用户打断，没有执行结果。"
+
+    @staticmethod
+    def _tool_call_id(tool_call: Any) -> str:
+        if isinstance(tool_call, dict):
+            return str(tool_call.get("id") or tool_call.get("tool_call_id") or "")
+        return str(
+            getattr(tool_call, "id", "")
+            or getattr(tool_call, "tool_call_id", "")
+            or ""
+        )
+
+    @staticmethod
+    def _tool_call_name(tool_call: Any) -> str:
+        if isinstance(tool_call, dict):
+            function = tool_call.get("function")
+            if isinstance(function, dict):
+                return str(function.get("name") or tool_call.get("name") or "")
+            return str(tool_call.get("name") or "")
+        return str(getattr(tool_call, "name", "") or "")
+
+    def _tool_interrupt_placeholders_by_id(
+        self,
+        messages: list[Any],
+    ) -> dict[str, str]:
+        """Map tool_call_id to the exact placeholder content emitted by this rail."""
+        placeholders: dict[str, str] = {}
+        for message in messages:
+            if not isinstance(message, AssistantMessage):
+                continue
+            for tool_call in getattr(message, "tool_calls", None) or []:
+                tool_call_id = self._tool_call_id(tool_call)
+                if not tool_call_id:
+                    continue
+                placeholders[tool_call_id] = self._tool_interrupted_message(
+                    self._tool_call_name(tool_call),
+                )
+        return placeholders
+
+    @staticmethod
+    def _tool_call_names_by_id(messages: list[Any]) -> dict[str, str]:
+        """Map tool_call_id back to the originating assistant tool name.
+
+        This is NOT enough to classify fake/real tool messages by itself.
+        We use it only to recover the expected tool name for a ToolMessage's
+        tool_call_id, then match that message content against known interrupt
+        placeholder templates for that tool.
+        """
+        names: dict[str, str] = {}
+        for message in messages:
+            if not isinstance(message, AssistantMessage):
+                continue
+            for tool_call in getattr(message, "tool_calls", None) or []:
+                tool_call_id = JiuSwarmStreamEventRail._tool_call_id(tool_call)
+                if not tool_call_id:
+                    continue
+                names[tool_call_id] = JiuSwarmStreamEventRail._tool_call_name(tool_call)
+        return names
+
+    @staticmethod
+    def _tool_message_text(message: ToolMessage) -> str | None:
+        content = getattr(message, "content", None)
+        return content if isinstance(content, str) else None
+
+    @staticmethod
+    def _normalize_tool_interrupt_text(text: str) -> str:
+        return re.sub(r"\s+", " ", text).strip()
+
+    def _is_legacy_tool_interrupt_placeholder_text(
+        self,
+        content: str,
+        tool_name: str,
+    ) -> bool:
+        legacy_templates = [
+            f"[Tool execution interrupted] Tool {tool_name} was interrupted by user during execution, "
+            f"no result available.",
+            f"[Tool interrupted] Tool {tool_name} was interrupted by the user and has no result.",
+            f"[工具执行被中断] 工具 {tool_name} 执行过程中被用户打断，没有执行结果。",
+        ]
+        normalized_content = self._normalize_tool_interrupt_text(content)
+        return any(
+            normalized_content == self._normalize_tool_interrupt_text(template)
+            for template in legacy_templates
+        )
+
+    def _is_tool_interrupt_placeholder(
+        self,
+        message: Any,
+        placeholders_by_id: dict[str, str],
+        tool_names_by_id: dict[str, str],
+    ) -> bool:
+        """Classify whether a ToolMessage is an interrupt placeholder.
+
+        Decision rule:
+        1. tool_call_id identifies which assistant tool call this ToolMessage
+           belongs to.
+        2. tool_call_id -> tool_name lets us recover the expected tool name.
+        3. We then compare content against known interrupt placeholder text
+           variants for that tool. So fake/real is still determined by content,
+           not by tool_call_id alone.
+        """
+        if not isinstance(message, ToolMessage):
+            return False
+        tool_call_id = getattr(message, "tool_call_id", "")
+        if not tool_call_id:
+            return False
+        expected = placeholders_by_id.get(tool_call_id)
+        content = self._tool_message_text(message)
+        if not content:
+            return False
+        if expected and content == expected:
+            return True
+        tool_name = tool_names_by_id.get(tool_call_id, "")
+        if not tool_name:
+            return False
+        return self._is_legacy_tool_interrupt_placeholder_text(content, tool_name)
+
+    def _read_image_multimodal_enabled(self) -> bool:
+        deep_config = (
+            getattr(self._deep_agent, "deep_config", None)
+            or getattr(self._deep_agent, "_deep_config", None)
+        )
+        return bool(getattr(deep_config, "enable_read_image_multimodal", False))
+
+    @staticmethod
+    def _strip_image_content_from_model_context(context: Any) -> None:
+        removed_total = 0
+        for message in context.get_messages():
+            sanitized_content, removed = _strip_image_content_blocks(
+                getattr(message, "content", None)
+            )
+            if not removed:
+                continue
+            message.content = sanitized_content
+            removed_total += removed
+        if removed_total:
+            logger.info(
+                "Removed %d image content block(s) from chat-model context",
+                removed_total,
+            )
 
     def _resolve_sid(self, ctx: AgentCallbackContext, session: Session | None = None) -> str:
         """Resolve the per-session key used by this rail.
@@ -500,6 +689,8 @@ class JiuSwarmStreamEventRail(DeepAgentRail):
 
         if ctx.context is not None:
             await self._fix_incomplete_tool_context(ctx)
+            if not self._read_image_multimodal_enabled():
+                self._strip_image_content_from_model_context(ctx.context)
 
     async def after_model_call(self, ctx: AgentCallbackContext) -> None:
         await self._emit_context_usage(
@@ -523,14 +714,6 @@ class JiuSwarmStreamEventRail(DeepAgentRail):
             tc = ctx.inputs.tool_call
             await self._emit_tool_call(session, tc)
             await self._emit_tool_update(session, tc, status="in_progress")
-            tool_name = str(getattr(tc, "name", "") or "").strip()
-            if tool_name == "symphony_compose_score":
-                token = begin_symphony_status_events(
-                    session,
-                    str(getattr(tc, "id", "") or ""),
-                )
-                if token is not None:
-                    self._symphony_status_tokens[str(getattr(tc, "id", ""))] = token
             # Track in-flight tool call for cancellation
             tc_id = getattr(tc, "id", "")
             if tc_id:
@@ -556,11 +739,7 @@ class JiuSwarmStreamEventRail(DeepAgentRail):
             self._inflight_tool_calls.pop(tc_id, None)
 
         await self._emit_tool_result(session, tc, ctx.inputs.tool_result)
-        await self._emit_symphony_direct_display(session, tc, ctx.inputs.tool_result)
-        if tc_id:
-            reset_symphony_status_events(
-                self._symphony_status_tokens.pop(tc_id, None)
-            )
+        self._request_symphony_force_finish(ctx, tc, ctx.inputs.tool_result)
         await self._emit_ask_user_question_if_interrupted(
             session,
             tc,
@@ -644,8 +823,8 @@ class JiuSwarmStreamEventRail(DeepAgentRail):
             logger.debug("tool_result emit failed", exc_info=True)
 
     @staticmethod
-    async def _emit_symphony_direct_display(
-        session: Session,
+    def _request_symphony_force_finish(
+        ctx: AgentCallbackContext,
         tool_call: Any,
         result: Any,
     ) -> None:
@@ -655,25 +834,12 @@ class JiuSwarmStreamEventRail(DeepAgentRail):
         content = _symphony_direct_display_content(result)
         if not content:
             return
-        payload: dict[str, Any] = {
-            "content": content,
-            "source": "symphony_compose_score",
-            "direct_display": True,
-        }
-        if isinstance(result, dict):
-            for key in ("display_format", "mermaid", "score_status", "score_build"):
-                if key in result:
-                    payload[key] = result[key]
-        try:
-            await session.write_stream(
-                OutputSchema(
-                    type="chat.final",
-                    index=0,
-                    payload=payload,
-                )
-            )
-        except Exception:
-            logger.debug("symphony direct display emit failed", exc_info=True)
+        if (
+            isinstance(result, dict)
+            and _boolish_true(result.get("continue_after_display"))
+        ):
+            return
+        ctx.request_force_finish({"output": content, "result_type": "answer"})
 
     @staticmethod
     async def _emit_ask_user_question_if_interrupted(
@@ -1005,29 +1171,16 @@ class JiuSwarmStreamEventRail(DeepAgentRail):
         return s
 
     async def _fix_incomplete_tool_context(self, ctx: AgentCallbackContext) -> None:
-        """Ensure every assistant tool_call has a matching ToolMessage, without
-        disturbing the existing message order or content.
+        """Repair incomplete tool-call history with minimal, rule-based replay.
 
-        Reasoning models (e.g. GLM's interleaved / preserved thinking) require
-        the assistant reasoning + tool-call sequence to be replayed back to the
-        model faithfully across turns; reordering or editing those messages
-        corrupts the model's reasoning state and triggers degenerate behaviour
-        (redoing completed work, emitting malformed/garbled tool calls).
-
-        The previous implementation popped and rebuilt the whole message list
-        on every model call -- reordering tool results, rewriting tool_call
-        arguments, and inserting placeholders -- which broke that contract on
-        every turn. This version is intentionally minimal:
-
-        * It is a strict no-op when the context is already consistent (every
-          assistant tool_call already has a matching ToolMessage).
-        * When a result is genuinely missing, it only INSERTS a placeholder
-          ToolMessage right after the assistant that owns the call. It never
-          reorders, drops, or rewrites any existing message.
-
-        This keeps the behaviour model-agnostic: it neither adds nor removes
-        any model-specific fields (such as reasoning_content), it merely stops
-        scrambling the sequence the model produced.
+        Rule:
+        - For each assistant tool_calls block, only the window before the next
+          UserMessage counts as the "immediate response" area.
+        - If a tool_call_id has no ToolMessage in that window, insert one
+          immediately after the assistant.
+        - If a placeholder ToolMessage exists and a later real ToolMessage with
+          the same tool_call_id exists, replace the placeholder in-place with
+          the real ToolMessage and drop the later duplicate.
         """
         try:
             context = ctx.context
@@ -1066,57 +1219,127 @@ class JiuSwarmStreamEventRail(DeepAgentRail):
                         if normalized != raw:
                             tc.arguments = normalized
 
-            # tool_call_ids that already have a ToolMessage result anywhere
-            # in the context. Computed once so we never insert a duplicate
-            # placeholder for a call whose real result simply appears later.
-            satisfied_ids = {
-                getattr(m, "tool_call_id", None)
-                for m in messages
-                if isinstance(m, ToolMessage)
-            }
-            satisfied_ids.discard(None)
-            satisfied_ids.discard("")
+            placeholders_by_id = self._tool_interrupt_placeholders_by_id(messages)
+            tool_names_by_id = self._tool_call_names_by_id(messages)
 
-            # Is any assistant tool_call missing its result?
-            has_missing = False
-            for m in messages:
-                if isinstance(m, AssistantMessage) and getattr(m, "tool_calls", None):
-                    for tc in m.tool_calls:
-                        tcid = getattr(tc, "id", "")
-                        if tcid and tcid not in satisfied_ids:
-                            has_missing = True
-                            break
-                if has_missing:
-                    break
+            real_tool_messages_by_id: dict[str, ToolMessage] = {}
+            for message in messages:
+                if not isinstance(message, ToolMessage):
+                    continue
+                tool_call_id = getattr(message, "tool_call_id", "")
+                if (
+                    tool_call_id
+                    and tool_call_id not in real_tool_messages_by_id
+                    and not self._is_tool_interrupt_placeholder(
+                        message, placeholders_by_id, tool_names_by_id)
+                ):
+                    real_tool_messages_by_id[tool_call_id] = message
 
-            # Already consistent: leave the context exactly as the model
-            # produced it. This is the common path on every normal turn.
-            if not has_missing:
+            rebuilt_messages: list[Any] = []
+            changed = False
+            inserted = 0
+            removed_orphan = 0
+            removed_duplicate = 0
+            replaced_placeholder = 0
+            consumed_real_ids: set[str] = set()
+            idx = 0
+
+            while idx < len(messages):
+                message = messages[idx]
+
+                if isinstance(message, ToolMessage):
+                    removed_orphan += 1
+                    changed = True
+                    idx += 1
+                    continue
+
+                rebuilt_messages.append(message)
+
+                if not isinstance(message, AssistantMessage) or not getattr(message, "tool_calls", None):
+                    idx += 1
+                    continue
+
+                expected: list[tuple[str, Any]] = []
+                expected_ids: set[str] = set()
+                for tool_call in message.tool_calls:
+                    tcid = self._tool_call_id(tool_call)
+                    if tcid and tcid not in expected_ids:
+                        expected.append((tcid, tool_call))
+                        expected_ids.add(tcid)
+
+                seen_ids: set[str] = set()
+                idx += 1
+                while idx < len(messages) and isinstance(messages[idx], ToolMessage):
+                    tool_message = messages[idx]
+                    tool_message_id = str(getattr(tool_message, "tool_call_id", "") or "")
+                    if tool_message_id not in expected_ids:
+                        changed = True
+                        removed_orphan += 1
+                        idx += 1
+                        continue
+                    if tool_message_id in seen_ids:
+                        changed = True
+                        removed_duplicate += 1
+                        idx += 1
+                        continue
+
+                    replacement = None
+                    if (
+                        self._is_tool_interrupt_placeholder(
+                            tool_message,
+                            placeholders_by_id,
+                            tool_names_by_id,
+                        )
+                        and tool_message_id in real_tool_messages_by_id
+                        and real_tool_messages_by_id[tool_message_id] is not tool_message
+                    ):
+                        replacement = real_tool_messages_by_id[tool_message_id]
+                    if replacement is not None:
+                        rebuilt_messages.append(replacement)
+                        consumed_real_ids.add(tool_message_id)
+                        replaced_placeholder += 1
+                        changed = True
+                    else:
+                        rebuilt_messages.append(tool_message)
+                    seen_ids.add(tool_message_id)
+                    idx += 1
+
+                for tcid, tool_call in expected:
+                    if tcid in seen_ids:
+                        continue
+                    replacement = real_tool_messages_by_id.get(tcid)
+                    if replacement is not None:
+                        rebuilt_messages.append(replacement)
+                        consumed_real_ids.add(tcid)
+                    else:
+                        rebuilt_messages.append(ToolMessage(
+                            content=self._tool_interrupted_message(self._tool_call_name(tool_call)),
+                            tool_call_id=tcid,
+                        ))
+                    inserted += 1
+                    changed = True
+
+            if not changed:
                 return
 
-            # Repair: replay messages in their ORIGINAL order, inserting a
-            # placeholder result immediately after the assistant that owns
-            # each unmatched call. Nothing existing is reordered or dropped.
-            rebuilt = context.pop_messages(size=len(messages))
-            inserted = 0
-            for m in rebuilt:
-                await context.add_messages(m)
-                if isinstance(m, AssistantMessage) and getattr(m, "tool_calls", None):
-                    for tc in m.tool_calls:
-                        tcid = getattr(tc, "id", "")
-                        if tcid and tcid not in satisfied_ids:
-                            await context.add_messages(ToolMessage(
-                                content=self._tool_interrupted_message(
-                                    getattr(tc, "name", ""),
-                                ),
-                                tool_call_id=tcid,
-                            ))
-                            inserted += 1
-            if inserted:
+            context.pop_messages(size=len(messages))
+            for message in rebuilt_messages:
+                await context.add_messages(message)
+
+            repair_count = (
+                inserted
+                + removed_orphan
+                + removed_duplicate
+                + replaced_placeholder
+            )
+            if repair_count:
                 logger.info(
-                    "Inserted %d placeholder tool result(s) for unmatched "
-                    "tool_calls (order/content preserved)",
+                    "Repaired tool message context: inserted=%d orphan_removed=%d "
+                    "duplicate_removed=%d placeholder_replaced=%d",
                     inserted,
+                    removed_orphan,
+                    removed_duplicate,
+                    replaced_placeholder,
                 )
         except Exception as e:
             logger.warning("Failed to fix incomplete tool context: %s", e)

@@ -61,10 +61,11 @@ import {
   setCurrentCwd,
   getCurrentCwd,
 } from "./core/tui-trusted-dirs-store.js";
-import { loadTuiConfig, type StatusLineSetting } from "./core/tui-config-store.js";
-import { applyWorkflowUpdate, type WorkflowRun } from "./core/workflows.js";
+import { loadTuiConfig } from "./core/tui-config-store.js";
+import { applyWorkflowUpdate, normalizeWorkflowRun, type WorkflowRun } from "./core/workflows.js";
 import { execFile, spawnSync } from "node:child_process";
 import { writeFileSync } from "node:fs";
+import { createConnection } from "node:net";
 import { tmpdir } from "node:os";
 import { join, sep } from "node:path";
 
@@ -133,6 +134,8 @@ export interface AppSnapshot {
   }[];
   /** 当前正在执行的命令名称，用于追踪不可中断命令。 */
   runningCommand: string | null;
+  streamStalled: boolean;
+  streamIdleMs: number | null;
 }
 
 function formatElapsed(ms: number): string {
@@ -186,6 +189,36 @@ const DEFERRED_TRANSCRIPT_EVENTS = new Set([
 const AUTO_RECAP_IDLE_THRESHOLD_MS = 5 * 60_000;
 /** 周期性检查空闲状态的时间间隔（30秒）。 */
 const AUTO_RECAP_CHECK_INTERVAL_MS = 30_000;
+const ACTIVE_TURN_RECONNECT_TIMEOUT_MS = 60_000;
+const ACTIVE_NETWORK_CHECK_INTERVAL_MS = 8_000;
+
+function probeTcp(host: string, port: number, timeoutMs: number): Promise<boolean> {
+  return new Promise((resolve) => {
+    const socket = createConnection({ host, port });
+    let settled = false;
+    const finish = (ok: boolean) => {
+      if (settled) return;
+      settled = true;
+      socket.removeAllListeners();
+      socket.destroy();
+      resolve(ok);
+    };
+    socket.setTimeout(timeoutMs);
+    socket.once("connect", () => finish(true));
+    socket.once("timeout", () => finish(false));
+    socket.once("error", () => finish(false));
+  });
+}
+
+async function hasExternalNetwork(): Promise<boolean> {
+  const probes = [
+    probeTcp("223.5.5.5", 53, 1500),
+    probeTcp("114.114.114.114", 53, 1500),
+    probeTcp("1.1.1.1", 443, 1500),
+  ];
+  const results = await Promise.all(probes);
+  return results.some(Boolean);
+}
 
 function isLocalFileSearchTool(name: string): boolean {
   return LOCAL_FILE_SEARCH_TOOL_NAMES.has(name.trim().toLowerCase());
@@ -267,6 +300,12 @@ export class CliPiAppState {
     message: string;
   }[] = [];
   private memoryRefreshTimer: ReturnType<typeof setInterval> | null = null;
+  private activeTurnReconnectTimer: ReturnType<typeof setTimeout> | null = null;
+  private activeTurnReconnectNoticeShown = false;
+  private lastStreamActivityAt: number | null = null;
+  private streamStallNoticeTimer: ReturnType<typeof setTimeout> | null = null;
+  private streamStallNoticeShown = false;
+  private streamStalled = false;
   /** 当 closeUi 中 cancelBeforeExit 调 cancel({showNotice:false}) 时置 true，抑制 chat.interrupt_result 的 UI 通知。 */
   private suppressInterruptResult = false;
   /** 本地中断请求标志，cancel() 调用时立即置 true，用于 long-running 命令的中断检测。 */
@@ -314,7 +353,7 @@ export class CliPiAppState {
       this.entries = entries;
     },
     setStreamingState: (state) => {
-      this.streamingState = state;
+      this.setStreamingStateInternal(state);
       this.emitChange();
     },
     setPendingQuestion: (question) => {
@@ -467,6 +506,7 @@ export class CliPiAppState {
   start(): void {
     this.unlistenStatus = this.wsClient.onStatusChange(async (status) => {
       this.connectionStatus = status;
+      this.handleConnectionStatusChanged(status);
       this.emitChange();
       if (status === "connected") {
         await this.fetchModelInfo();
@@ -499,6 +539,8 @@ export class CliPiAppState {
       clearTimeout(this.toolTimeoutTimer);
       this.toolTimeoutTimer = null;
     }
+    this.clearActiveTurnReconnectTimer();
+    this.clearStreamStallWatchdog();
     this.unlistenStatus?.();
     this.unlistenStatus = null;
     this.unlistenFrames?.();
@@ -615,6 +657,189 @@ export class CliPiAppState {
     }
   }
 
+  private hasActiveResponseStream(): boolean {
+    return this.connectionStatus === "connected" && this.streamingState === StreamingState.Responding;
+  }
+
+  private handleStreamingStateChanged(wasActiveResponseStream: boolean): void {
+    const isActiveResponseStream = this.hasActiveResponseStream();
+    if (isActiveResponseStream && !wasActiveResponseStream) {
+      this.noteStreamActivity();
+      return;
+    }
+    if (!isActiveResponseStream) {
+      this.clearStreamStallWatchdog();
+    }
+  }
+
+  private setStreamingStateInternal(state: StreamingState): void {
+    const wasActiveResponseStream = this.hasActiveResponseStream();
+    this.streamingState = state;
+    this.handleStreamingStateChanged(wasActiveResponseStream);
+  }
+
+  private noteStreamActivity(): void {
+    if (!this.hasActiveResponseStream()) {
+      return;
+    }
+    this.lastStreamActivityAt = Date.now();
+    this.streamStalled = false;
+    this.streamStallNoticeShown = false;
+    this.scheduleStreamStallWatchdog();
+  }
+
+  private scheduleStreamStallWatchdog(): void {
+    this.clearStreamStallTimers();
+    if (!this.hasActiveResponseStream() || this.lastStreamActivityAt === null) {
+      return;
+    }
+    const idleMs = Date.now() - this.lastStreamActivityAt;
+    this.streamStallNoticeTimer = setTimeout(() => {
+      this.streamStallNoticeTimer = null;
+      void this.handleStreamStallNotice();
+    }, Math.max(0, ACTIVE_NETWORK_CHECK_INTERVAL_MS - idleMs));
+  }
+
+  private clearStreamStallTimers(): void {
+    if (this.streamStallNoticeTimer) {
+      clearTimeout(this.streamStallNoticeTimer);
+      this.streamStallNoticeTimer = null;
+    }
+  }
+
+  private clearStreamStallWatchdog(): void {
+    this.clearStreamStallTimers();
+    this.lastStreamActivityAt = null;
+    this.streamStallNoticeShown = false;
+    this.streamStalled = false;
+  }
+
+  private async handleStreamStallNotice(): Promise<void> {
+    if (!this.hasActiveResponseStream()) {
+      return;
+    }
+    if (await hasExternalNetwork()) {
+      this.lastStreamActivityAt = Date.now();
+      this.scheduleStreamStallWatchdog();
+      return;
+    }
+    if (this.streamStallNoticeShown) {
+      return;
+    }
+    this.streamStallNoticeShown = true;
+    this.failActiveTurnAfterConnectionLoss(
+      "Network appears offline while the task is running. Stopped the current TUI response; reconnect and retry.",
+    );
+  }
+
+  private frameBelongsToActiveSession(frame: EventFrame): boolean {
+    const eventSessionId = typeof frame.payload.session_id === "string" ? frame.payload.session_id : "";
+    return !eventSessionId || eventSessionId === this.sessionId;
+  }
+
+  private isStreamProgressFrame(frame: EventFrame): boolean {
+    const event = typeof frame.payload.event_type === "string" ? frame.payload.event_type : frame.event;
+    return event !== "chat.processing_status" &&
+      event !== "connection.ack" &&
+      event !== "history.message" &&
+      event !== "context.usage" &&
+      event !== "context.compression_state";
+  }
+
+  private handleConnectionStatusChanged(status: ConnectionStatus): void {
+    if (status === "reconnecting") {
+      this.clearStreamStallWatchdog();
+      this.startActiveTurnReconnectWatchdog();
+      return;
+    }
+    if (status === "connected") {
+      const hadReconnectNotice = this.activeTurnReconnectNoticeShown;
+      this.clearActiveTurnReconnectTimer();
+      this.activeTurnReconnectNoticeShown = false;
+      if (hadReconnectNotice) {
+        this.addItem(
+          addInfo(
+            this.sessionId,
+            "Connection restored. Syncing session updates from the backend.",
+            "i",
+            { view: "dim" },
+          ),
+        );
+      }
+      if (this.streamingState === StreamingState.Responding) {
+        this.noteStreamActivity();
+      }
+      return;
+    }
+    if (status === "auth_failed" || status === "message_too_big") {
+      this.failActiveTurnAfterConnectionLoss(
+        status === "auth_failed"
+          ? "Backend connection failed authentication. Stopped waiting for the current response."
+          : "Backend closed the connection because the message was too large. Stopped waiting for the current response.",
+      );
+    }
+  }
+
+  private startActiveTurnReconnectWatchdog(): void {
+    const snapshot = this.getSnapshot();
+    if (!snapshot.cancellableWork && !snapshot.pendingQuestion) {
+      return;
+    }
+    if (!this.activeTurnReconnectNoticeShown) {
+      this.activeTurnReconnectNoticeShown = true;
+      this.addItem(
+        addInfo(this.sessionId, "Connection lost. Retrying backend connection...", "!", {
+          view: "dim",
+        }),
+      );
+    }
+    if (this.activeTurnReconnectTimer) {
+      return;
+    }
+    this.activeTurnReconnectTimer = setTimeout(() => {
+      this.activeTurnReconnectTimer = null;
+      if (this.connectionStatus === "connected") {
+        return;
+      }
+      this.failActiveTurnAfterConnectionLoss(
+        "Connection lost for over 60 seconds. Stopped waiting for the current response; the backend may still finish it after reconnect.",
+      );
+    }, ACTIVE_TURN_RECONNECT_TIMEOUT_MS);
+  }
+
+  private clearActiveTurnReconnectTimer(): void {
+    if (this.activeTurnReconnectTimer) {
+      clearTimeout(this.activeTurnReconnectTimer);
+      this.activeTurnReconnectTimer = null;
+    }
+  }
+
+  private failActiveTurnAfterConnectionLoss(message: string): void {
+    this.clearActiveTurnReconnectTimer();
+    this.clearStreamStallWatchdog();
+    const snapshot = this.getSnapshot();
+    if (!snapshot.cancellableWork && !snapshot.pendingQuestion) {
+      return;
+    }
+    if (this.localPendingQuestion) {
+      this.localPendingQuestion.reject(new Error(message));
+      this.localPendingQuestion = null;
+    }
+    if (this.activeCommandRequestId) {
+      this.wsClient.cancelRequest(this.activeCommandRequestId, message);
+      this.activeCommandRequestId = null;
+    }
+    this.pendingQuestion = null;
+    this.setStreamingStateInternal(StreamingState.Idle);
+    this.streamingStateBeforeQuestion = null;
+    this.activeSubtasks.clear();
+    this.todos = [];
+    this.evolutionStatus = "idle";
+    this.clearInterruptRequested();
+    this.markRunningToolsConnectionLost();
+    this.addItem(addError(this.sessionId, message));
+  }
+
   onChange(listener: () => void): () => void {
     this.listeners.add(listener);
     return () => {
@@ -677,9 +902,9 @@ export class CliPiAppState {
       workflowRuns: this.workflowRuns.map((workflow) => ({
         ...workflow,
         logs: workflow.logs ? [...workflow.logs] : undefined,
-        phases: workflow.phases.map((phase) => ({
+        phases: (workflow.phases ?? []).map((phase) => ({
           ...phase,
-          agents: phase.agents.map((agent) => ({
+          agents: (phase.agents ?? []).map((agent) => ({
             ...agent,
             activity: agent.activity ? [...agent.activity] : undefined,
           })),
@@ -695,6 +920,8 @@ export class CliPiAppState {
       statusLineText: this.statusLineText,
       memoryWarnings: [...this.memoryWarnings],
       runningCommand: this.runningCommand,
+      streamStalled: this.streamStalled,
+      streamIdleMs: this.lastStreamActivityAt === null ? null : Date.now() - this.lastStreamActivityAt,
     };
   }
 
@@ -920,7 +1147,7 @@ export class CliPiAppState {
   };
 
   readonly setWorkflowRuns = (workflows: WorkflowRun[]): void => {
-    this.workflowRuns = workflows;
+    this.workflowRuns = workflows.map((workflow) => normalizeWorkflowRun(workflow));
     this.emitChange();
   };
 
@@ -1001,7 +1228,7 @@ export class CliPiAppState {
     this.entries = [];
     this.pendingQuestion = null;
     this.lastError = null;
-    this.streamingState = StreamingState.Idle;
+    this.setStreamingStateInternal(StreamingState.Idle);
     this.collapsedToolGroupIds.clear();
     this.activeSubtasks.clear();
     this.todos = [];
@@ -1020,6 +1247,9 @@ export class CliPiAppState {
     this.harnessActivateInteraction = null;
     this.deferTranscriptFrames = false;
     this.deferredTranscriptFrames = [];
+    this.clearActiveTurnReconnectTimer();
+    this.activeTurnReconnectNoticeShown = false;
+    this.clearStreamStallWatchdog();
     this.emitChange();
   };
 
@@ -1043,6 +1273,11 @@ export class CliPiAppState {
       this.preferredLanguage = language;
       this.emitChange();
     }
+  };
+
+  readonly setLastError = (error: string | null): void => {
+    this.lastError = error;
+    this.emitChange();
   };
 
   readonly setThemeName = (theme: ThemeName): void => {
@@ -1129,7 +1364,8 @@ export class CliPiAppState {
       this.emitChange();
       return null;
     }
-    if (this.streamingState !== StreamingState.Idle) {
+    // Team 模式允许在 stream 未结束时直接 chat.send，不先发 cancel interrupt。
+    if (this.streamingState !== StreamingState.Idle && !isTeamMode(mode)) {
       this.suppressInterruptResult = true;
       this.sendEventOnly("chat.interrupt", { intent: "cancel", mode: this.mode });
     }
@@ -1161,7 +1397,7 @@ export class CliPiAppState {
     } else {
       this.lastVisibleUserRequest = null;
     }
-    this.streamingState = StreamingState.Responding;
+    this.setStreamingStateInternal(StreamingState.Responding);
     this.turnStartedAt = Date.now();
     this.emitChange();
     return requestId;
@@ -1197,7 +1433,7 @@ export class CliPiAppState {
         at: new Date().toISOString(),
       },
     ];
-    this.streamingState = StreamingState.Responding;
+    this.setStreamingStateInternal(StreamingState.Responding);
     this.emitChange();
     return requestId;
   }
@@ -1218,7 +1454,7 @@ export class CliPiAppState {
       this.localPendingQuestion.reject(new Error("interrupted by Ctrl+C"));
       this.localPendingQuestion = null;
       this.pendingQuestion = null;
-      this.streamingState = StreamingState.Idle;
+      this.setStreamingStateInternal(StreamingState.Idle);
     }
     // Set local interrupt flag immediately for long-running command detection
     this.interruptRequested = true;
@@ -1266,12 +1502,18 @@ export class CliPiAppState {
       return;
     }
     const source = this.pendingQuestion.source;
-
-    if (
+    const approvalTransport =
+      this.pendingQuestion.evolutionMeta &&
+      typeof this.pendingQuestion.evolutionMeta.approval_transport === "string"
+        ? this.pendingQuestion.evolutionMeta.approval_transport
+        : undefined;
+    const shouldResumeInterrupt =
       source === "permission_interrupt" ||
       source === "confirm_interrupt" ||
-      source === "ask_user_interrupt"
-    ) {
+      source === "ask_user_interrupt" ||
+      (source === "skill_evolution_approval" && approvalTransport === "interrupt");
+
+    if (shouldResumeInterrupt) {
       const resumeMode = this.pendingQuestion.resumeMode ?? this.mode;
       this.sendEventOnly(
         "chat.send",
@@ -1284,7 +1526,7 @@ export class CliPiAppState {
         },
         true,
       );
-      this.streamingState = StreamingState.Responding;
+      this.setStreamingStateInternal(StreamingState.Responding);
     } else {
       const params: Record<string, unknown> = {
         request_id: this.pendingQuestion.requestId,
@@ -1301,7 +1543,7 @@ export class CliPiAppState {
     }
     this.pendingQuestion = null;
     if (this.streamingState !== StreamingState.Responding) {
-      this.streamingState = StreamingState.Idle;
+      this.setStreamingStateInternal(StreamingState.Idle);
     }
     this.streamingStateBeforeQuestion = null;
     this.emitChange();
@@ -1330,7 +1572,7 @@ export class CliPiAppState {
       source,
       questions,
     };
-    this.streamingState = StreamingState.Idle;
+    this.setStreamingStateInternal(StreamingState.Idle);
     this.emitChange();
 
     return new Promise<UserAnswer[]>((resolve, reject) => {
@@ -1646,7 +1888,15 @@ export class CliPiAppState {
 
     this.entries = [...sorted];
     this.rebuildToolExecutionState();
+    this.collapseAllToolGroupsAfterRestore();
     this.emitChange();
+  }
+
+  private collapseAllToolGroupsAfterRestore(): void {
+    const ids = getToolGroupIds(this.entries, Array.from(this.toolExecutions.values()));
+    for (const id of ids) {
+      this.collapsedToolGroupIds.add(id);
+    }
   }
 
   private readonly clearToolExecutionState = (): void => {
@@ -1701,6 +1951,38 @@ export class CliPiAppState {
         ...execution.tool,
         status: "completed",
         summary: execution.tool.summary?.trim() ? execution.tool.summary : "Interrupted",
+      };
+      this.toolExecutions.set(toolCallId, {
+        ...execution,
+        tool: nextTool,
+        updatedAt: nowIso,
+      });
+      this.entries = upsertToolGroupDisplay(
+        this.entries,
+        execution.sessionId,
+        execution.requestId,
+        nextTool,
+      );
+      changed = true;
+    }
+    if (changed) {
+      this.scheduleToolTimeoutCheck();
+      this.emitChange();
+    }
+  }
+
+  private markRunningToolsConnectionLost(): void {
+    const nowIso = new Date().toISOString();
+    let changed = false;
+    for (const [toolCallId, execution] of this.toolExecutions) {
+      if (execution.tool.status !== "running") {
+        continue;
+      }
+      const nextTool: ToolCallDisplay = {
+        ...execution.tool,
+        status: "error",
+        isError: true,
+        summary: execution.tool.summary?.trim() ? execution.tool.summary : "Connection lost",
       };
       this.toolExecutions.set(toolCallId, {
         ...execution,
@@ -1999,8 +2281,16 @@ export class CliPiAppState {
     ) {
       return null;
     }
-    if (status === "in_progress" || status === "completed" || status === "pending") {
+    if (
+      status === "in_progress" ||
+      status === "completed" ||
+      status === "pending" ||
+      status === "error"
+    ) {
       return status;
+    }
+    if (status === "failed") {
+      return "error";
     }
     return undefined;
   }
@@ -2299,6 +2589,9 @@ export class CliPiAppState {
       return;
     }
     const typedFrame = frame as EventFrame;
+    if (this.frameBelongsToActiveSession(typedFrame) && this.isStreamProgressFrame(typedFrame)) {
+      this.noteStreamActivity();
+    }
     if (this.shouldDeferTranscriptFrame(typedFrame)) {
       this.deferredTranscriptFrames.push(typedFrame);
       return;

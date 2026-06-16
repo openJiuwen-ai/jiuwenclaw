@@ -72,18 +72,18 @@ def render_retrieve_success(
         f"- Index directory: `{index_dir}`",
         f"- Indexed skills: {indexed_count}",
         f"- Retrieved candidates: {len(records)}",
-        f"- Dispatch settings: {settings_summary}",
+        f"- Retrieval settings: {settings_summary}",
     ]
     elapsed = getattr(result, "elapsed_ms", None)
     if elapsed is not None:
-        lines.append(f"- Dispatch elapsed: {float(elapsed):.0f}ms")
+        lines.append(f"- Retrieval elapsed: {float(elapsed):.0f}ms")
     summary_lines = getattr(result, "summary_lines", None) or []
     if summary_lines:
-        lines.extend(["", "## Dispatch Summary"])
+        lines.extend(["", "## Retrieval Summary"])
         lines.extend(f"- {line}" for line in summary_lines[:10])
     lines.extend(["", "## Retrieved Skills"])
     if not records:
-        lines.append("No relevant installed skills were returned by dispatch.")
+        lines.append("No relevant installed skills were returned by retrieval.")
     else:
         for index, record in enumerate(records, start=1):
             worker_id = str(record.get("worker_id") or record.get("resolved_payload") or "").strip()

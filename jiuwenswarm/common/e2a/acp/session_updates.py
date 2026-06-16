@@ -104,15 +104,17 @@ def build_acp_session_update(
     state: AcpSessionUpdateState,
 ) -> dict[str, Any] | None:
     event_type = msg.event_type
+    if event_type == EventType.CHAT_SYMPHONY_STATUS:
+        return None
+
     if event_type in (
         EventType.CHAT_DELTA,
         EventType.CHAT_REASONING,
-        EventType.CHAT_SYMPHONY_STATUS,
     ):
         text = str(payload.get("content", "") or "")
         if not text:
             return None
-        if event_type != EventType.CHAT_SYMPHONY_STATUS and is_reasoning_event(
+        if is_reasoning_event(
             event_type,
             payload,
         ):

@@ -674,6 +674,11 @@ class GatewayServer:
             project_dir = params.get("project_dir")
             if project_dir and isinstance(project_dir, str) and project_dir.strip():
                 metadata["project_dir"] = project_dir.strip()
+                # 记录会话首条消息时所在的 git 分支，供 /resume 按分支过滤（Ctrl+B）。
+                # 非 git/detached/失败时为哨兵 "HEAD"，对齐 Claude Code。
+                from jiuwenswarm.common.utils import resolve_git_branch
+
+                metadata["git_branch"] = resolve_git_branch(project_dir.strip())
 
             is_stream = bool(data.get("is_stream", False))
 
@@ -795,6 +800,7 @@ async def _run(
         DiscordChannelConfig
     from jiuwenswarm.gateway.channel_manager.im_platforms.wecom.wecom_connect import WecomChannel, WecomConfig
     from jiuwenswarm.common.config import get_config
+    from jiuwenswarm.common.cleanup import start_background_cleanup
     from jiuwenswarm.gateway.routing.agent_client import WebSocketAgentServerClient
     from jiuwenswarm.gateway.channel_manager.channel_manager import ChannelManager
     from jiuwenswarm.gateway.cron import CronController, CronJobStore, CronSchedulerService
@@ -931,6 +937,8 @@ async def _run(
         message_handler=message_handler,
     )
     await heartbeat_service.start()
+
+    _cleanup_task = start_background_cleanup()
 
     initial_channels_conf: dict = channels_cfg if isinstance(channels_cfg, dict) else {}
     channel_manager = ChannelManager(message_handler, config=initial_channels_conf)
@@ -1758,6 +1766,12 @@ async def _run(
         await heartbeat_service.stop()
         await message_handler.stop_forwarding()
         await client.disconnect()
+
+        _cleanup_task.cancel()
+        try:
+            await _cleanup_task
+        except (asyncio.CancelledError, Exception):
+            pass
 
         logger.info("[App] Gateway stopped")
 

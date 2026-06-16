@@ -159,8 +159,10 @@ class NormalizationConfig:
 
     `name` and `type` have different roles:
     - `name` is the I/O semantic term used by graph construction.
-    - `type` is the data format or carrier, such as text, pdf, csv,
-      or markdown.
+    - `type` is the artifact kind or concrete format, such as text, pdf, csv,
+      markdown, image, audio, or video. Media resources should keep the media
+      artifact type even when carried as a URL, local path, file reference,
+      base64 string, or bytes string.
     """
 
     # Dynamic vocabulary version for normalized I/O semantic names.

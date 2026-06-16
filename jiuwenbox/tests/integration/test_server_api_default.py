@@ -594,12 +594,10 @@ class TestSandboxLifecycle:
     @staticmethod
     def test_sandbox_process_cannot_target_sandbox_daemon(client):
         # The long-running daemon shares the sandbox PID namespace with
-        # user-spawned children (the daemon is PID 1 in that namespace).
-        # The kernel protects PID 1 of a namespace from in-namespace senders
-        # for any signal that PID 1 has not registered a handler for; the
-        # daemon registers no handlers, so SIGTERM/SIGINT/SIGKILL from user
-        # code must all be silently dropped and the daemon must continue to
-        # service requests.
+        # user-spawned children.  bwrap's monitor is typically PID 1 and
+        # the daemon is PID 2; seccomp blocks kill-family syscalls that
+        # target those PIDs (plus broadcast/process-group forms), and each
+        # exec runs in its own session so kill(0) cannot reach the daemon.
         create_resp = client.post("/api/v1/sandboxes", json={})
         assert create_resp.status_code == 201
         sandbox = create_resp.json()
@@ -620,24 +618,35 @@ class TestSandboxLifecycle:
                     targets = [signal.SIGTERM, signal.SIGINT, signal.SIGKILL,
                                signal.SIGHUP, signal.SIGUSR1, signal.SIGUSR2]
                     delivered = []
-                    for sig in targets:
+                    for pid in (1, 2):
+                        for sig in targets:
+                            try:
+                                os.kill(pid, sig)
+                            except ProcessLookupError:
+                                delivered.append(f"missing:{pid}:{sig}")
+                            except PermissionError:
+                                continue
+                            except OSError as exc:
+                                delivered.append(f"error:{pid}:{sig}:{exc.errno}")
+                    for pid in (0, -1, -2):
                         try:
-                            os.kill(1, sig)
+                            os.kill(pid, signal.SIGKILL)
                         except ProcessLookupError:
-                            delivered.append(f"missing:{sig}")
+                            delivered.append(f"missing:{pid}")
                         except PermissionError:
                             continue
                         except OSError as exc:
-                            delivered.append(f"error:{sig}:{exc.errno}")
+                            delivered.append(f"error:{pid}:{exc.errno}")
                     time.sleep(0.5)
 
-                    try:
-                        os.kill(1, 0)
-                    except ProcessLookupError:
-                        print("daemon-killed")
-                        sys.exit(1)
-                    except PermissionError:
-                        pass
+                    for pid in (1, 2):
+                        try:
+                            os.kill(pid, 0)
+                        except ProcessLookupError:
+                            print(f"daemon-killed:{pid}")
+                            sys.exit(1)
+                        except PermissionError:
+                            pass
 
                     if delivered:
                         print(f"unexpected:{','.join(delivered)}")
@@ -652,6 +661,21 @@ class TestSandboxLifecycle:
         kill_data = kill_resp.json()
         assert kill_data["exit_code"] == 0, kill_data
         assert kill_data["stdout"].strip() == "daemon-survived"
+
+        shell_kill_resp = client.post(f"/api/v1/sandboxes/{sandbox_id}/exec", json={
+            "command": [
+                "sh",
+                "-c",
+                "kill -9 1 2>/dev/null; kill -9 2 2>/dev/null; "
+                "kill -9 0 2>/dev/null; kill -9 -1 2>/dev/null; "
+                "kill -9 -2 2>/dev/null; echo daemon-survived",
+            ],
+            "timeout_seconds": 10,
+        })
+        assert shell_kill_resp.status_code == 200
+        shell_kill_data = shell_kill_resp.json()
+        assert shell_kill_data["exit_code"] == 0, shell_kill_data
+        assert shell_kill_data["stdout"].strip() == "daemon-survived"
 
         status_resp = client.get(f"/api/v1/sandboxes/{sandbox_id}")
         assert status_resp.status_code == 200
@@ -668,12 +692,11 @@ class TestSandboxLifecycle:
 
     @staticmethod
     def test_sandbox_process_cannot_inspect_sandbox_daemon_memory(client):
-        # PID 1 of the sandbox PID namespace is the long-running daemon.
-        # Reading the daemon's address space (``/proc/1/mem``) requires
-        # CAP_SYS_PTRACE (stripped by the default policy) and
-        # ``ptrace(PTRACE_ATTACH, 1)`` is blocked by seccomp. Together
-        # these prevent a sandboxed process from extracting secrets from
-        # or hijacking the long-running daemon.
+        # The sandbox infrastructure occupies PID 1/2 (bwrap monitor and
+        # daemon). Reading either process' address space requires
+        # CAP_SYS_PTRACE (stripped by the default policy), and ptrace attach is
+        # blocked by seccomp. Together these prevent a sandboxed process from
+        # extracting secrets from or hijacking the long-running daemon.
         create_resp = client.post("/api/v1/sandboxes", json={})
         assert create_resp.status_code == 201
         sandbox = create_resp.json()
@@ -686,34 +709,36 @@ class TestSandboxLifecycle:
             import os
             import sys
 
-            try:
-                fd = os.open('/proc/1/mem', os.O_RDONLY)
-            except PermissionError:
-                pass
-            except FileNotFoundError:
-                pass
-            else:
+            for pid in (1, 2):
                 try:
-                    os.read(fd, 16)
+                    fd = os.open(f'/proc/{pid}/mem', os.O_RDONLY)
                 except PermissionError:
-                    pass
+                    continue
+                except FileNotFoundError:
+                    continue
+                else:
+                    try:
+                        os.read(fd, 16)
+                    except PermissionError:
+                        pass
+                    except OSError:
+                        pass
+                    else:
+                        os.close(fd)
+                        print(f'infrastructure-memory-readable:{pid}')
+                        sys.exit(2)
+                    os.close(fd)
+
+            libc = ctypes.CDLL('libc.so.6', use_errno=True)
+            PTRACE_ATTACH = 16
+            for pid in (1, 2):
+                try:
+                    rc = libc.ptrace(PTRACE_ATTACH, pid, 0, 0)
+                    if rc == 0:
+                        print(f'infrastructure-ptraceable:{pid}')
+                        sys.exit(3)
                 except OSError:
                     pass
-                else:
-                    os.close(fd)
-                    print('daemon-memory-readable')
-                    sys.exit(2)
-                os.close(fd)
-
-            try:
-                libc = ctypes.CDLL('libc.so.6', use_errno=True)
-                PTRACE_ATTACH = 16
-                rc = libc.ptrace(PTRACE_ATTACH, 1, 0, 0)
-                if rc == 0:
-                    print('daemon-ptraceable')
-                    sys.exit(3)
-            except OSError:
-                pass
 
             print('daemon-protected')
             """
@@ -726,6 +751,111 @@ class TestSandboxLifecycle:
         data = response.json()
         assert data["exit_code"] == 0, data
         assert data["stdout"].strip() == "daemon-protected"
+
+    @staticmethod
+    def test_default_policy_seccomp_allows_sandbox_startup(client):
+        # End-to-end regression for the seccomp BPF chain: the default policy
+        # blocks many syscalls and uses isolated networking. A malformed filter
+        # used to make bwrap exit with SIGSEGV (code 139) before the daemon
+        # printed anything, leaving the sandbox stuck in ``error``.
+        create_resp = client.post("/api/v1/sandboxes", json={})
+        assert create_resp.status_code == 201
+        sandbox = create_resp.json()
+        assert sandbox["phase"] == "ready", sandbox
+        assert sandbox.get("error_message") in (None, ""), sandbox
+
+        exec_resp = client.post(f"/api/v1/sandboxes/{sandbox['id']}/exec", json={
+            "command": ["echo", "seccomp-ok"],
+            "timeout_seconds": 5,
+        })
+        assert exec_resp.status_code == 200
+        exec_data = exec_resp.json()
+        assert exec_data["exit_code"] == 0, exec_data
+        assert exec_data["stdout"].strip() == "seccomp-ok"
+
+    @staticmethod
+    def test_default_policy_blocked_syscall_is_enforced(client):
+        # Prove the installed default-policy seccomp filter still denies blocked
+        # syscalls at exec time (not only at sandbox startup).
+        create_resp = client.post("/api/v1/sandboxes", json={})
+        assert create_resp.status_code == 201
+        sandbox = create_resp.json()
+        assert sandbox["phase"] == "ready", sandbox
+        sandbox_id = sandbox["id"]
+
+        response = client.post(f"/api/v1/sandboxes/{sandbox_id}/exec", json={
+            "command": [
+                "python3",
+                "-c",
+                textwrap.dedent(
+                    """
+                    import ctypes
+                    import errno
+                    import platform
+                    import sys
+
+                    syscall_numbers = {
+                        "x86_64": 165,
+                        "AMD64": 165,
+                        "aarch64": 40,
+                    }
+                    nr = syscall_numbers.get(platform.machine())
+                    if nr is None:
+                        print(f"unsupported-arch:{platform.machine()}")
+                        sys.exit(2)
+
+                    libc = ctypes.CDLL("libc.so.6", use_errno=True)
+                    libc.syscall.restype = ctypes.c_long
+                    ctypes.set_errno(0)
+                    result = libc.syscall(nr)
+                    err = ctypes.get_errno()
+                    if result == -1 and err == errno.EPERM:
+                        print("syscall-blocked")
+                        sys.exit(7)
+
+                    print(f"unexpected-success:{result}:{err}")
+                    """
+                ).strip(),
+            ],
+            "timeout_seconds": 5,
+        })
+        assert response.status_code == 200
+        data = response.json()
+        assert data["exit_code"] == 7, data
+        assert "syscall-blocked" in data["stdout"]
+        assert "unexpected-success" not in data["stdout"]
+
+    @staticmethod
+    def test_sandbox_process_can_kill_unprotected_child(client):
+        # Seccomp only guards infrastructure PIDs (0/1/2 and broadcast forms).
+        # User payloads must still be able to signal their own children.
+        create_resp = client.post("/api/v1/sandboxes", json={})
+        assert create_resp.status_code == 201
+        sandbox = create_resp.json()
+        assert sandbox["phase"] == "ready", sandbox
+        sandbox_id = sandbox["id"]
+
+        kill_child_resp = client.post(f"/api/v1/sandboxes/{sandbox_id}/exec", json={
+            "command": [
+                "sh",
+                "-c",
+                "sleep 30 & pid=$!; "
+                "kill -0 $pid || exit 11; "
+                "kill -9 $pid || exit 12; "
+                "wait $pid; "
+                "echo killed:$pid",
+            ],
+            "timeout_seconds": 10,
+        })
+        assert kill_child_resp.status_code == 200
+        kill_child_data = kill_child_resp.json()
+        assert kill_child_data["exit_code"] == 0, kill_child_data
+        assert kill_child_data["stdout"].strip().startswith("killed:")
+        assert "Operation not permitted" not in kill_child_data["stderr"]
+
+        status_resp = client.get(f"/api/v1/sandboxes/{sandbox_id}")
+        assert status_resp.status_code == 200
+        assert status_resp.json()["phase"] == "ready", status_resp.json()
 
     @staticmethod
     def test_get_logs(client):
@@ -1885,6 +2015,10 @@ class TestPolicyEnforcement:
         client,
         create_sandbox_with_policy,
     ):
+        # Use ``mount`` rather than ``getpid``: seccomp is installed once for the
+        # whole sandbox lifecycle (daemon + user exec children), so blocking a
+        # syscall the daemon needs during startup would prevent the sandbox from
+        # reaching ``ready``.
         sandbox = create_sandbox_with_policy(
             policy={
                 "name": "syscall-block-policy",
@@ -1893,8 +2027,8 @@ class TestPolicyEnforcement:
                     "read_write": ["/tmp"],
                 },
                 "syscall": {
-                    "x86_64": {"blocked": ["getpid"]},
-                    "arm64": {"blocked": ["getpid"]},
+                    "x86_64": {"blocked": ["mount"]},
+                    "arm64": {"blocked": ["mount"]},
                 },
                 "network": {
                     "mode": "host",
@@ -1914,9 +2048,9 @@ class TestPolicyEnforcement:
                     import sys
 
                     syscall_numbers = {
-                        "x86_64": 39,
-                        "AMD64": 39,
-                        "aarch64": 172,
+                        "x86_64": 165,
+                        "AMD64": 165,
+                        "aarch64": 40,
                     }
                     nr = syscall_numbers.get(platform.machine())
                     if nr is None:

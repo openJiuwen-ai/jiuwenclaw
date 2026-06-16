@@ -27,8 +27,7 @@ import { a2uiContentToText } from '../../features/a2ui/a2uiContent';
 import { formatTimestamp, onTtsStop, sanitizeTtsText } from '../../utils';
 import { useSpeechSynthesis } from '../../hooks';
 import clsx from 'clsx';
-import ReactMarkdown from 'react-markdown';
-import remarkGfm from 'remark-gfm';
+import { MarkdownRenderer } from '../../components/MarkdownRenderer';
 import { isTeamP2PMessageToUser, parseTeamEventMessage } from './teamEventUtils';
 import { TeamMemberAvatar } from '../TeamMemberAvatar';
 
@@ -42,25 +41,11 @@ export function MarkdownMessageBody({
   testId?: string;
 }) {
   return (
-    <div className={clsx('chat-text chat-markdown', className)} data-testid={testId}>
-      <ReactMarkdown
-        remarkPlugins={[remarkGfm]}
-        components={{
-          a: ({ href, children, ...props }) => (
-            <a
-              href={href}
-              target="_blank"
-              rel="noopener noreferrer"
-              {...props}
-            >
-              {children}
-            </a>
-          ),
-        }}
-      >
-        {content}
-      </ReactMarkdown>
-    </div>
+    <MarkdownRenderer
+      content={content}
+      className={clsx('chat-text chat-markdown', className)}
+      testId={testId}
+    />
   );
 }
 
@@ -92,13 +77,19 @@ export function TeamMemberMessageFrame({
 function TeamLeaderPlainTextMessage({
   member = 'team_leader',
   content,
+  messageId,
+  isStreaming = false,
   showAvatar = true,
   fileItems,
+  disableA2UIInteraction = false,
 }: {
   member?: string;
   content: string;
+  messageId: string;
+  isStreaming?: boolean;
   showAvatar?: boolean;
   fileItems?: FileDownloadItem[];
+  disableA2UIInteraction?: boolean;
 }) {
   return (
     <TeamMemberMessageFrame
@@ -108,10 +99,15 @@ function TeamLeaderPlainTextMessage({
       {fileItems && fileItems.length > 0 && (
         <FileDownloadList files={fileItems} className="w-full md:w-1/2" />
       )}
-      <MarkdownMessageBody
-        content={content}
-        className="team-member-message__plain"
-      />
+      <div className="team-member-message__plain">
+        <A2UIMessageContent
+          content={content}
+          messageId={messageId}
+          isStreaming={isStreaming}
+          disableInteraction={disableA2UIInteraction}
+          testId="team-leader-message-body"
+        />
+      </div>
     </TeamMemberMessageFrame>
   );
 }
@@ -185,12 +181,14 @@ interface MessageItemProps {
   message: Message;
   autoSpeak?: boolean;
   showAvatar?: boolean;
+  disableA2UIInteraction?: boolean;
 }
 
 export function MessageItem({
   message,
   autoSpeak = false,
   showAvatar = true,
+  disableA2UIInteraction = false,
 }: MessageItemProps) {
   const { t } = useTranslation();
   const {
@@ -407,6 +405,7 @@ export function MessageItem({
 	               <TeamLeaderPlainTextMessage
 	                 member={event.fromMember}
 	                 content={event.content}
+	                 messageId={id}
 	                 showAvatar={showAvatar}
 	               />
 	             );
@@ -467,8 +466,11 @@ export function MessageItem({
 	         <TeamLeaderPlainTextMessage
 	           member="team_leader"
 	           content={messageContent || (isStreaming ? '正在接收中...' : '')}
+	           messageId={id}
+	           isStreaming={isStreaming}
 	           showAvatar={showAvatar}
 	           fileItems={fileItems}
+	           disableA2UIInteraction={disableA2UIInteraction}
 	         />
 	       );
 	     }
@@ -499,7 +501,7 @@ export function MessageItem({
       'flex mb-3 animate-rise',
       isUser ? 'justify-end' : 'justify-start'
     )}>
-      <div className="max-w-[82%] min-w-0">
+      <div className="chat-bubble-wrapper max-w-[82%] min-w-0">
         {!isUser && (
           <div className="hidden" data-testid="thinking-summary" aria-hidden="true" />
         )}
@@ -522,6 +524,7 @@ export function MessageItem({
                   content={content}
                   messageId={id}
                   isStreaming={true}
+                  disableInteraction={disableA2UIInteraction}
                   testId="thinking-body"
                 />
               )
@@ -535,6 +538,7 @@ export function MessageItem({
                   <A2UIMessageContent
                     content={content}
                     messageId={id}
+                    disableInteraction={disableA2UIInteraction}
                     testId="thinking-body"
                   />
                 )}

@@ -190,6 +190,12 @@ async def _run(host: str, port: int) -> None:
             except Exception as exc:
                 logger.warning("[AgentServer] teammate bootstrap daemon stop failed: %s", exc)
         await server.stop()
+        # Shutdown team observability (flush & close spans)
+        try:
+            from jiuwenswarm.agents.harness.team.team_manager import shutdown_team_observability
+            shutdown_team_observability()
+        except Exception as exc:
+            logger.warning("[AgentServer] team observability shutdown failed: %s", exc)
         logger.info("[AgentServer] stopped")
 
 

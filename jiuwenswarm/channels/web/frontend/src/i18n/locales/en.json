@@ -362,7 +362,7 @@
     "restoreDisabledUnsupported": "Only web frontend sessions (sess_) can be restored",
     "restoreEmpty": "This session has no restorable messages (empty or filtered). You can still chat from here.",
     "delete": "Delete session",
-      "teamLabel": "Team: {{team}}",
+    "teamLabel": "Team: {{team}}",
     "files": "Session Files",
     "selectFirst": "Select a session first",
     "loadingFiles": "Loading files...",
@@ -438,7 +438,7 @@
     "errors": {
       "loadConfig": "Failed to load heartbeat settings",
       "saveConfig": "Failed to save heartbeat settings",
-      "invalidEvery": "Heartbeat interval must be a number greater than 0",
+      "invalidEvery": "Heartbeat interval must be greater than 0",
       "invalidActiveHours": "active_hours must use HH:MM format (for example 08:00)",
       "invalidRange": "End time must be later than start time"
     }
@@ -670,7 +670,7 @@
       "memoryForbiddenEnabled": "Enable",
       "memoryForbiddenDescription": "Forbidden memory content description",
       "memoryForbiddenDescriptionPlaceholder": "e.g. passwords, API keys, secrets, tokens, credit card numbers, ID numbers, phone numbers",
-      "skillRetrievalBuildRootCategoriesPlaceholder": "Leave empty for built-in defaults, or enter a JSON/YAML file path",
+      "skillRetrievalBuildRootCategoriesPlaceholder": "Edit the YAML/JSON root taxonomy directly",
       "agentSkillsPlaceholder": "Click to select skills",
       "agentSkillsEmpty": "No installed skills",
       "agentName": "Name",
@@ -690,23 +690,28 @@
       "teamMemberPersona": "Persona",
       "teamMemberPromptHint": "Prompt Hint",
       "teamMemberAgentKey": "Agent Key",
+      "symphonyEnabled": "Enable Skill Symphony",
       "skillRetrievalEnabled": "Enable skill retrieval",
-      "skillRetrievalBuildBranchingFactor": "Tree branching factor",
+      "skillRetrievalBuildBranchingFactor": "Split threshold base",
       "skillRetrievalBuildMaxDepth": "Max tree depth",
       "skillRetrievalBuildRootCategories": "Root taxonomy config",
       "skillRetrievalBuildMaxWorkers": "Build workers",
+      "skillRetrievalBuildMaxRetries": "Build retries",
       "skillRetrievalBuildTimeout": "Build request timeout (s)",
-      "skillRetrievalTopK": "Retrieved skill count",
-      "skillRetrievalCompactCodes": "Compact retrieval",
-      "skillRetrievalFlattenTree": "Flat tree retrieval",
-      "skillRetrievalMaxExposureDepth": "Max exposure depth",
-      "skillRetrievalMaxBranchChoices": "Branch choices per step",
-      "skillRetrievalMaxParallelBranches": "Parallel branches",
-      "skillRetrievalRetrieveTimeout": "Retrieve request timeout (s)"
+      "skillRetrievalBuildTotalTimeout": "Build total timeout (s, 0 disables)",
+      "skillRetrievalBuildClassificationBatchLimit": "Classification batch limit",
+      "skillRetrievalBuildDiscoverySeed": "Discovery seed",
+      "skillRetrievalBuildPostprocessEnabled": "Enable build postprocess",
+      "skillRetrievalBuildPostprocessMaxPasses": "Postprocess max passes",
+      "skillRetrievalBuildPostprocessMinSkills": "Postprocess min skills",
+      "skillRetrievalBuildEquivalenceEnabled": "Enable equivalent branch merge",
+      "skillRetrievalCompactCodes": "Compact code mode",
+      "skillRetrievalFlattenTree": "Flatten retrieval tree",
+      "skillRetrievalMaxExposureDepth": "Exposure depth per call"
     },
     "keyHelp": {
       "skillCreate": "Install `skill-creator` and `teamskill-creator` before enabling",
-      "skillRetrievalBuildRootCategories": "Optional. Leave empty to use the built-in root taxonomy; when set, use a JSON/YAML file containing tree_root_categories or root_categories."
+      "skillRetrievalBuildRootCategories": "Edit YAML/JSON containing tree_root_categories or root_categories directly. The page shows the default taxonomy as a reference; saving writes the config content itself, not an external file path."
     },
     "hideValue": "Hide value",
     "showValue": "Show value",
@@ -794,6 +799,7 @@
       "contextEngine": { "label": "Context Compression", "hint": "Enable or disable dialogue context compression" },
       "permissions": { "label": "Tool Safety Guardrail", "hint": "Enable or disable permission checks for tool calls" },
       "a2ui": { "label": "A2UI", "hint": "Enable or disable generated UI rendering and A2UI runtime prompts." },
+      "symphony": { "label": "Skill Symphony", "hint": "Master switch for Skill Symphony orchestration" },
       "skillRetrieval": { "label": "Agentic Skill Retrieval", "hint": "Agentic skill retrieval for larger sets of installed skills" },
       "memory": { "label": "Memory Sensitive Info Filter", "hint": "Configure sensitive content types forbidden from memory" },
       "email": { "label": "Email Settings", "hint": "Email account and token settings" },
@@ -805,9 +811,7 @@
       "freeSearchDdg": "Enable DuckDuckGo (including DDG via Jina)",
       "freeSearchBing": "Enable Bing",
       "enabled": "Enable",
-      "kvCacheAffinity": "Compute affinity (KV cache release)",
-      "skillRetrievalCompact": "Enable compact code",
-      "skillRetrievalFlat": "Enable flat tree"
+      "kvCacheAffinity": "Compute affinity (KV cache release)"
     },
     "permissionsTools": {
       "title": "Tool Guardrail (permissions.tools)",
@@ -825,14 +829,14 @@
       "levelDeny": "Deny",
       "delete": "Remove",
       "deleteConfirm": "Remove “{{tool}}” from permissions.tools?",
-        "invalidValue": "Non-standard value; choosing a policy will rewrite it. Current: {{raw}}",
-        "addTitle": "Add tool rule",
-        "toolPlaceholder": "e.g. mcp_exec_command",
-        "duplicateTool": "Tool already exists: {{tool}}",
-        "add": "Add",
-        "loadFailed": "Failed to load tool permissions",
-        "saveFailed": "Save failed"
-      },
+      "invalidValue": "Non-standard value; choosing a policy will rewrite it. Current: {{raw}}",
+      "addTitle": "Add tool rule",
+      "toolPlaceholder": "e.g. mcp_exec_command",
+      "duplicateTool": "Tool already exists: {{tool}}",
+      "add": "Add",
+      "loadFailed": "Failed to load tool permissions",
+      "saveFailed": "Save failed"
+    },
     "errors": {
       "requiredModelFields": "These model fields are required: {{fields}}. Complete them before saving and restarting.",
       "saveFailed": "Save failed, please try again later",
@@ -1048,12 +1052,71 @@
       "stale": "Index needs update",
       "missing": "Index not built",
       "indexedCount": "{{count}} indexed",
-      "enabledCount": "{{count}} enabled",
+      "installedCount": "{{count}} installed",
       "build": "Build Index",
+      "fullRebuild": "Full Rebuild",
       "building": "Building...",
-      "search": "Retrieve",
-      "searching": "Retrieving...",
-      "queryPlaceholder": "Enter a task to retrieve installed skills",
+      "buildFailed": "Build failed",
+      "cancel": "Cancel Build",
+      "cancelling": "Cancelling...",
+      "cancelled": "Build cancelled",
+      "buildStageUnknown": "Waiting for build status",
+      "buildProgress": "Progress {{progress}}%",
+      "buildMonitorTitle": "Build Progress",
+      "buildMonitorSubtitle": "Current stage: {{stage}}",
+      "buildPipelineTitle": "Index Build Flow",
+      "buildMetric": {
+        "progress": "Progress",
+        "skills": "Skills",
+        "indexed": "Indexed"
+      },
+      "buildPipeline": {
+        "queued": {
+          "title": "Prepare Build",
+          "detail": "Create temporary output directories and resolve build configuration and index paths."
+        },
+        "scan": {
+          "title": "Scan Installed Skills",
+          "detail": "Read {{count}} installed and enabled skills, then extract name, description, and SKILL.md."
+        },
+        "llmCheck": {
+          "title": "Check Model Connectivity",
+          "detail": "Send a lightweight request with the current model configuration before building the index."
+        },
+        "build": {
+          "title": "Build Skill Tree",
+          "detail": "Group skills by capability, classify them into branches, generate branch descriptions, and write the tree."
+        },
+        "publish": {
+          "title": "Publish Artifacts",
+          "detail": "Validate tree_index.yaml, catalog.jsonl, and manifest.json, then replace the live index directory."
+        },
+        "success": {
+          "title": "Index Ready",
+          "detail": "{{count}} skills are available for Agentic skill retrieval."
+        }
+      },
+      "buildPhaseState": {
+        "done": "Done",
+        "active": "Current",
+        "pending": "Pending",
+        "failed": "Failed",
+        "cancelled": "Cancelled"
+      },
+      "buildStages": {
+        "queued": "Queued",
+        "scan": "Scanning skills",
+        "llmCheck": "Checking model connectivity",
+        "buildTree": "Building skill tree",
+        "publish": "Publishing index",
+        "reuse": "Reusing index",
+        "success": "Build complete",
+        "failed": "Build failed",
+        "timeout": "Build timed out",
+        "llmConfig": "Model config",
+        "cancelled": "Cancelled",
+        "interrupted": "Interrupted"
+      },
       "treeTitle": "Index Tree",
       "treeCount": "{{branches}} branches · {{skills}} skills",
       "noTree": "No index tree",
@@ -1253,7 +1316,6 @@
   },
   "fileViewer": {
     "chatPreview": "Chat preview",
-    "chatPreviewHint": "Only partial data is shown",
     "historyPreviewEmpty": "No messages to show after the same filtering as history restore (or the file is empty). Turn off preview to see raw JSON.",
     "edit": "Edit",
     "unknownError": "Unknown error",
@@ -1299,22 +1361,18 @@
       "progress": {
         "completed": "Task completed",
         "inactive": "No activity",
-        "activeMembers": "Active members: {{count}}"
+        "activeMembers": "Members: {{count}}"
       },
       "status": {
         "completed": "Task completed",
         "cancelled": "Task cancelled",
         "thinking": "Thinking",
+        "idle": "Idle",
         "message": "Sent message",
+        "receivedMessage": "Received message",
         "file": "Sent file",
         "executingTool": "Running tool",
         "toolCall": "Tool call"
-      },
-      "summary": {
-        "task": "{{status}}: {{content}}",
-        "message": "Sent message: {{content}}",
-        "file": "Sent file: {{content}}",
-        "tool": "Calling tool: {{content}}"
       },
       "counts": {
         "tasks": "Tasks executed",
@@ -1461,8 +1519,10 @@
     "restarting": "Restarting service",
     "restartSuccess": "Restart successful",
     "configApplied": "Config applied",
+    "a2uiRefresh": "Config applied",
     "restartWaiting": "Waiting for backend to restart and reconnect...",
     "configAppliedDesc": "Config hot-reloaded, this dialog will close in 5 seconds.",
+    "a2uiRefreshDesc": "The page will refresh in 5 seconds.",
     "restartSuccessDesc": "Backend started successfully, this dialog will close in 5 seconds."
   },
   "extensions": {
@@ -1475,7 +1535,7 @@
     "importing": "Importing...",
     "folderPathPlaceholder": "Enter extension folder path (e.g., D:/extensions/my_extension)",
     "importHint": "Folder requirements: 1) English name 2) Contains rail.py entry file",
-"importFailed": "Failed to import extension",
+    "importFailed": "Failed to import extension",
     "noExtensions": "No extensions",
     "confirmDelete": "Are you sure you want to delete extension \"{{name}}\"?",
     "deleteButton": "Delete",

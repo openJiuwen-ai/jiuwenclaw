@@ -25,6 +25,55 @@ from jiuwenswarm.symphony.fingerprint.normalize.io_name_vocab import (
 from jiuwenswarm.symphony.fingerprint.normalize.vocabulary import term_similarity
 from jiuwenswarm.symphony.fingerprint.utils import normalize_parameter_name, to_dict
 
+NATURAL_LANGUAGE_COMMAND_NAMES = frozenset(
+    {
+        "command",
+        "instruction",
+        "user_command",
+        "user_instruction",
+    }
+)
+NATURAL_LANGUAGE_COMMAND_TYPES = frozenset(
+    {
+        "markdown",
+        "natural_language",
+        "string",
+        "text",
+    }
+)
+NATURAL_LANGUAGE_COMMAND_HINTS = frozenset(
+    {
+        "free-form",
+        "free form",
+        "natural language",
+        "request",
+        "user input",
+        "user instruction",
+        "user request",
+        "用户指令",
+        "用户输入",
+        "用户请求",
+        "自然语言",
+    }
+)
+CONTROL_COMMAND_HINTS = frozenset(
+    {
+        "allowed values",
+        "cli",
+        "command line",
+        "enum",
+        "flag",
+        "subcommand",
+        "命令行",
+        "可选值",
+        "子命令",
+        "枚举",
+    }
+)
+NATURAL_LANGUAGE_COMMAND_ALIAS_REASON = (
+    "natural-language user request/input, not control command"
+)
+
 
 @dataclass(frozen=True)
 class IONameNormalizationContext:
@@ -72,10 +121,15 @@ class IONameNormalizer:
                 raw_name = str(data.get("name") or default_name)
                 raw_type = str(data.get("type") or default_type)
                 token = normalize_parameter_name(raw_name)
-                if (
-                    not token
-                    or token in seen
-                    or self.vocabulary.lookup(token) is not None
+                if not token or token in seen:
+                    continue
+                if self.vocabulary.lookup(token) is not None:
+                    continue
+                if _is_natural_language_command_input(
+                    token,
+                    raw_type,
+                    str(data.get("description") or ""),
+                    direction,
                 ):
                     continue
                 with self._resolution_cache_lock:
@@ -117,6 +171,39 @@ class IONameNormalizer:
         context: IONameNormalizationContext,
     ) -> Optional[str]:
         token = normalize_parameter_name(raw_name)
+        if _is_natural_language_command_input(
+            token,
+            context.raw_type,
+            context.description,
+            context.direction,
+        ):
+            normalized = self.vocabulary.ensure_term(
+                "text",
+                alias=token,
+                example=context.description,
+                definition="Natural-language user task, request, or instruction text.",
+            )
+            self.recorder.record(
+                context.decisions,
+                skill_id=context.skill_id,
+                path=str(context.manifest.folder.path),
+                direction=context.direction,
+                field="name",
+                raw_value=raw_name,
+                token=token,
+                normalized_value=normalized,
+                method="semantic_alias",
+                vocab="io_name_vocab",
+                vocab_version=self.vocabulary.version,
+                confidence=0.95,
+                details={
+                    "reason": NATURAL_LANGUAGE_COMMAND_ALIAS_REASON,
+                    "vocab_size": self.vocabulary.size(),
+                    "max_vocab_size": self.vocabulary.max_vocab_size,
+                },
+            )
+            return normalized
+
         resolution = self._cached_resolution(token)
         if resolution is None:
             existing = self.vocabulary.lookup(token)
@@ -298,3 +385,22 @@ class IONameNormalizer:
                 },
             )
         )
+
+
+def _is_natural_language_command_input(
+    token: str,
+    raw_type: str,
+    description: str,
+    direction: str,
+) -> bool:
+    if direction != "input":
+        return False
+    if token not in NATURAL_LANGUAGE_COMMAND_NAMES:
+        return False
+    if normalize_parameter_name(raw_type) not in NATURAL_LANGUAGE_COMMAND_TYPES:
+        return False
+
+    folded_description = str(description or "").casefold()
+    if any(hint in folded_description for hint in CONTROL_COMMAND_HINTS):
+        return False
+    return any(hint in folded_description for hint in NATURAL_LANGUAGE_COMMAND_HINTS)

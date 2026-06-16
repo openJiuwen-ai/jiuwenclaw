@@ -3,6 +3,7 @@
  */
 
 export * from './message';
+export * from './skillTree';
 export * from './todo';
 export * from './websocket';
 

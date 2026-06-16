@@ -12,6 +12,8 @@ export interface SessionMeta {
   message_count?: number;
   /** 会话所属项目目录（由 gateway 从 channel_metadata 中提取） */
   project_dir?: string;
+  /** 会话首条消息时所在的 git 分支（gateway 回填；非 git/detached 为 "HEAD"，存量会话为空串） */
+  git_branch?: string;
 }
 
 export interface SessionListPayload {
@@ -19,6 +21,8 @@ export interface SessionListPayload {
   total?: number;
   limit?: number;
   offset?: number;
+  /** 当前项目的 git 分支（gateway 计算；非 git/失败为 "HEAD"），供 Ctrl+B 分支过滤对比 */
+  current_branch?: string;
 }
 
 export interface ResumeResumePayload {

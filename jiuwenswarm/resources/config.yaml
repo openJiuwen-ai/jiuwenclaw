@@ -58,16 +58,11 @@ symphony:
       postprocess_enabled: true
       postprocess_max_passes: 1
       postprocess_min_skills: 6
-      equivalence_enabled: true
+      equivalence_enabled: false
     retrieve:
-      top_k: 10
       compact_codes_enabled: false
       flatten_tree: false
-      max_exposure_depth: 99
-      max_branch_choices: 2
-      max_parallel_branches: 2
-      max_tokens: 96
-      request_timeout_seconds: 120
+      max_exposure_depth: 1
 
 # 日志目录：~/.jiuwenswarm/agent/.logs/
 # gateway.log / channel.log / agent_server.log 按源码路径分流；full.log 为汇总。
@@ -313,6 +308,30 @@ telemetry:
     endpoint:                       # metrics endpoint，默认回退到 telemetry.endpoint
     protocol:                       # metrics protocol，默认回退到 telemetry.protocol
     headers: {}                     # metrics headers，默认回退到 telemetry.headers
+
+# ============================================================
+# Team 可观测性配置（OTel + Langfuse）
+# ============================================================
+# 与 telemetry 不同，team_observability 专门用于 TeamAgent 的
+# 可观测性追踪，包括 team/member/task/message 级别的 span。
+# 启用后会自动将 OtelTeamMonitorHandler 注册到 TeamAgent，
+# 将事件转为 OTel span 导出到 Langfuse / OTLP Collector。
+#
+# 前置条件：
+#   1. 启动 OTel Collector + Langfuse
+#   2. 在用户配置中设置 team_observability.enabled: true
+# ============================================================
+team_observability:
+  enabled: false                     # Team observability 总开关
+  exporter: otlp_grpc               # otlp_grpc / otlp_http / console
+  endpoint: http://localhost:4317   # OTLP gRPC endpoint
+  service_name: jiuwenswarm         # 服务名称（OTel resource service.name）
+  sample_rate: 1.0                  # 采样率 (0.0-1.0)
+  redact_prompts: false             # 是否脱敏 prompt 内容
+  redact_completions: false         # 是否脱敏 completion 内容
+  attribute_value_max_length: 10240 # OTel attribute value 最大长度
+  langfuse_public_key: ""           # Langfuse OTLP 认证 public key（可选）
+  langfuse_secret_key: ""           # Langfuse OTLP 认证 secret key（可选）
 
 react:
   agent_name: main_agent

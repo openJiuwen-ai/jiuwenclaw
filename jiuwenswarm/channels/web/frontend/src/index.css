@@ -827,6 +827,8 @@ select {
 
   .chat-markdown {
     @apply prose prose-sm max-w-none;
+    max-width: 100%;
+    min-width: 0;
     --tw-prose-body: var(--chat-text);
     --tw-prose-headings: var(--text-strong);
     --tw-prose-lead: var(--muted);
@@ -843,7 +845,45 @@ select {
     --tw-prose-pre-bg: var(--secondary);
     --tw-prose-th-borders: var(--border);
     --tw-prose-td-borders: var(--border);
+    overflow-wrap: anywhere;
+    word-break: break-word;
     white-space: normal;
+  }
+
+  .chat-markdown :where(p, li, blockquote, h1, h2, h3, h4, h5, h6) {
+    max-width: 100%;
+    overflow-wrap: anywhere;
+    word-break: break-word;
+  }
+
+  .chat-markdown :where(ul, ol) {
+    max-width: 100%;
+  }
+
+  .chat-markdown :where(pre, table) {
+    max-width: 100%;
+    overflow-x: auto;
+  }
+
+  .chat-markdown :where(pre code) {
+    overflow-wrap: normal;
+    word-break: normal;
+    white-space: pre;
+  }
+
+  .chat-markdown :where(:not(pre) > code) {
+    overflow-wrap: anywhere;
+    white-space: break-spaces;
+  }
+
+  /* Remove the default prose paragraph margins so single-line messages sit flush
+     inside the bubble. Keep spacing between consecutive paragraphs. */
+  .chat-markdown p {
+    margin-block: 0;
+  }
+
+  .chat-markdown p + p {
+    margin-top: 1em;
   }
 
   .chat-bubble.assistant.streaming .chat-text {
@@ -1027,6 +1067,7 @@ select {
   .team-member-message__card {
     width: fit-content;
     max-width: min(82%, 720px);
+    min-width: 0;
     border-radius: var(--radius-lg);
     border: 1px solid var(--border);
     background: color-mix(in srgb, var(--secondary) 72%, transparent);
@@ -1037,12 +1078,19 @@ select {
     word-break: break-word;
   }
 
+  .team-member-message__content {
+    max-width: 100%;
+    min-width: 0;
+  }
+
   :root[data-theme="light"] .team-member-message__card {
     background: var(--bg-muted);
   }
 
   .team-member-message__plain {
     max-width: min(82%, 720px);
+    min-width: 0;
+    overflow-x: auto;
     color: var(--text);
     font-size: var(--font-size-sm);
     line-height: 1.75;
@@ -1610,8 +1658,9 @@ select {
 
   /* Skill action button - white/black in light mode, gray/white in dark mode */
   .skill-action-btn {
-    width: 76px;
+    min-width: 76px;
     height: 28px;
+    padding: 0 12px;
     border-radius: 24px;
     font-size: var(--font-size-sm);
     border: 1px solid #000000;

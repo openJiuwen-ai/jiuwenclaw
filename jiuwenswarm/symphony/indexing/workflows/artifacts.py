@@ -51,7 +51,7 @@ class TaxonomyBuildConfig:
     """Tree shape and taxonomy refinement settings.
 
     Attributes:
-        branching_factor: Target maximum branching factor for discovered groups.
+        branching_factor: Base scale for split thresholds and tree shape controls.
         max_depth: Maximum tree depth used by recursive construction.
         root_categories: Optional predefined root taxonomy. When omitted,
             `FIXED_ROOT_CATEGORIES` is used by the tree schema resolver.
@@ -130,7 +130,7 @@ class ResolvedTaxonomyBuildConfig:
     """Normalized taxonomy build settings used inside workflows.
 
     Attributes:
-        branching_factor: Normalized tree branching factor.
+        branching_factor: Normalized split-threshold/tree-shape scale.
         max_depth: Normalized maximum tree depth.
         root_categories: Root categories after applying schema defaults.
         postprocess_enabled: Whether repair passes run.

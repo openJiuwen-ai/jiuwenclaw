@@ -13,6 +13,12 @@ from typing import Any
 
 from jiuwenswarm.common.utils import logger
 
+SKILL_EVOLUTION_APPROVAL_SCHEMA = "openjiuwen.skill_evolution_approval.v1"
+SKILL_EVOLUTION_APPROVAL_TOOL_KINDS = {
+    "evolve_skill_experiences": "evolve",
+    "simplify_skill_experiences": "simplify",
+}
+
 
 def build_permission_rail(
     config: dict[str, Any],
@@ -352,7 +358,8 @@ _PERMISSION_INTERRUPT_MARKERS = (
     "Permission denied",
     "安全风险评估",
 )
-_CONFIRM_INTERRUPT_TOOLS = frozenset({"switch_mode", "exit_plan_mode"})
+# exit_plan_mode uses PlanApprovalInterruptRail (extends ConfirmInterruptRail)
+_CONFIRM_INTERRUPT_TOOLS = frozenset({"switch_mode", "exit_plan_mode"})  
 
 
 def _read_interrupt_fields(value_obj: Any) -> tuple[str, str, dict | None]:
@@ -490,6 +497,9 @@ def convert_interactions_to_ask_user_question(state_outputs: list) -> dict | Non
             payload["plan_path"] = plan_path
         if plan_slug:
             payload["plan_slug"] = plan_slug
+        structured_approval = _classify_structured_approval(value_obj, question_data)
+        if structured_approval:
+            payload.update(structured_approval)
         return payload
 
     return None
@@ -565,18 +575,83 @@ def _build_multi_questions(questions_data: list) -> list:
     for q in questions_data:
         raw_options = q.get("options", [])
         if raw_options:
-            options = [{"label": opt["label"], "description": opt.get("description", "")}
-                       for opt in raw_options]
+            options = [_normalize_question_option(opt) for opt in raw_options if isinstance(opt, dict)]
             options.append({"label": "Other", "description": "Custom input"})
         else:
             options = []
-        questions.append({
+        question_payload = {
             "question": q["question"],
             "header": q["header"],
             "options": options,
             "multi_select": q.get("multi_select", False),
-        })
+        }
+        questions.append(question_payload)
     return questions
+
+
+def _extract_ui_options(value_obj: Any) -> list[dict[str, Any]]:
+    options = getattr(value_obj, "ui_options", None) if hasattr(value_obj, "ui_options") else None
+    if options is None and isinstance(value_obj, dict):
+        options = value_obj.get("ui_options")
+    return [item for item in options or [] if isinstance(item, dict)]
+
+
+def _extract_tool_name(value_obj: Any) -> str:
+    if hasattr(value_obj, "tool_name"):
+        return str(getattr(value_obj, "tool_name", "") or "")
+    if isinstance(value_obj, dict):
+        return str(value_obj.get("tool_name") or "")
+    return ""
+
+
+def _normalize_question_option(option: dict[str, Any]) -> dict[str, Any]:
+    normalized = {
+        "label": str(option.get("label") or option.get("value") or "").strip(),
+        "description": str(option.get("description") or "").strip(),
+    }
+    value = option.get("value")
+    if isinstance(value, str) and value:
+        normalized["value"] = value
+    return normalized
+
+
+def _default_interrupt_options() -> list[dict[str, str]]:
+    return [
+        {"label": "本次允许", "description": "仅本次授权执行"},
+        {"label": "总是允许", "description": "记住该规则，以后自动放行"},
+        {"label": "拒绝", "description": "拒绝执行此工具"},
+    ]
+
+
+def _question_options_from_ui_options(value_obj: Any) -> list[dict[str, Any]]:
+    options = []
+    for option in _extract_ui_options(value_obj):
+        normalized = _normalize_question_option(option)
+        if normalized["label"]:
+            options.append(normalized)
+    return options or _default_interrupt_options()
+
+
+def _classify_structured_approval(
+    value_obj: Any,
+    question_data: dict[str, Any],
+) -> dict[str, Any] | None:
+    del question_data
+    tool_name = _extract_tool_name(value_obj)
+    if tool_name not in SKILL_EVOLUTION_APPROVAL_TOOL_KINDS:
+        return None
+    approval_kind = SKILL_EVOLUTION_APPROVAL_TOOL_KINDS[tool_name]
+
+    return {
+        "source": "skill_evolution_approval",
+        "approval_schema": SKILL_EVOLUTION_APPROVAL_SCHEMA,
+        "evolution_meta": {
+            "event_kind": "approval",
+            "rail_kind": "regular",
+            "approval_kind": approval_kind,
+            "approval_transport": "interrupt",
+        },
+    }
 
 
 def extract_question_from_interaction(payload: Any) -> dict | None:
@@ -621,10 +696,5 @@ def extract_question_from_interaction(payload: Any) -> dict | None:
     return {
         "question": message,
         "header": header,
-        "options": [
-            {"label": "本次允许", "description": "仅本次授权执行"},
-            {"label": "总是允许", "description": "记住该规则，以后自动放行"},
-            {"label": "拒绝", "description": "拒绝执行此工具"},
-        ],
-        "multi_select": False,
+        "options": _question_options_from_ui_options(value_obj),
     }

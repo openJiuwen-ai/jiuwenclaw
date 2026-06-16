@@ -143,6 +143,7 @@ export interface AskUserQuestionPayload {
   request_id: string;
   questions: Question[];
   source?: string; // 来源标识，用于区分自进化确认和工具权限确认
+  approvalSchema?: string;
   evolutionMeta?: Record<string, unknown>;
 }
 

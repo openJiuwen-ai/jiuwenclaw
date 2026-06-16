@@ -15,8 +15,6 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from openjiuwen.harness.prompts.prompt_attachment_manager import PromptAttachmentManager
-
 from jiuwenswarm.server.runtime.agent_adapter.interface_code import JiuwenSwarmCodeAdapter
 from jiuwenswarm.server.runtime.agent_adapter.interface_deep import JiuWenSwarmDeepAdapter
 from jiuwenswarm.agents.harness.common.rails.project_memory import (
@@ -61,7 +59,6 @@ def _make_agent_with_builder() -> MagicMock:
     builder.remove_section = MagicMock(side_effect=_remove)
     agent = MagicMock()
     agent.system_prompt_builder = builder
-    agent.prompt_attachment_manager = PromptAttachmentManager()
     return agent
 
 
@@ -74,15 +71,18 @@ def _make_ctx(agent: MagicMock, session_id: str = "sess1") -> SimpleNamespace:
     )
 
 
-async def _project_memory_attachment(agent: MagicMock, session_id: str = "sess1"):
-    items = await agent.prompt_attachment_manager.collect_for_turn(session_id, "turn1")
-    project_items = [item for item in items if item.id.endswith(".project_memory")]
-    return project_items[-1] if project_items else None
+async def _project_memory_section(agent: MagicMock):
+    for section in reversed(agent.system_prompt_builder.added_sections):
+        if section.name == "project_memory":
+            return section
+    return None
 
 
-async def _project_memory_body(agent: MagicMock, session_id: str = "sess1") -> str:
-    item = await _project_memory_attachment(agent, session_id)
-    return item.content if item is not None else ""
+async def _project_memory_body(agent: MagicMock, language: str = "en") -> str:
+    for section in reversed(agent.system_prompt_builder.added_sections):
+        if section.name == "project_memory":
+            return section.render(language)
+    return ""
 
 
 @pytest.fixture(autouse=True)
@@ -111,10 +111,9 @@ class TestProjectMemoryRailEndToEnd:
             rail.init(agent)
             await rail.before_model_call(ctx=_make_ctx(agent))
 
-            section = await _project_memory_attachment(agent)
+            section = await _project_memory_section(agent)
             assert section is not None
-            assert section.id == "session.sess1.project_memory"
-            assert "PROJECT-RULE-1" in section.content
+            assert "PROJECT-RULE-1" in section.render("en")
 
     @pytest.mark.asyncio
     async def test_rail_reloads_after_file_change(self):
@@ -138,22 +137,6 @@ class TestProjectMemoryRailEndToEnd:
             assert "VERSION-1" not in body2
 
     @pytest.mark.asyncio
-    async def test_rail_removes_section_on_uninit(self):
-        with tempfile.TemporaryDirectory() as td:
-            root = Path(td)
-            _touch(root, ".git/HEAD", "")
-            _touch(root, "JIUWENSWARM.md", "BEFORE-UNINIT")
-
-            rail = ProjectMemoryRail(workspace=str(root), language="en")
-            agent = _make_agent_with_builder()
-            rail.init(agent)
-            await rail.before_model_call(ctx=_make_ctx(agent))
-            assert await _project_memory_attachment(agent) is not None
-
-            rail.uninit(agent)
-            assert rail.attachment_manager is None
-
-    @pytest.mark.asyncio
     async def test_rail_no_section_when_workspace_empty(self):
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
@@ -164,7 +147,7 @@ class TestProjectMemoryRailEndToEnd:
             rail.init(agent)
             await rail.before_model_call(ctx=_make_ctx(agent))
 
-            assert await _project_memory_attachment(agent) is None
+            assert await _project_memory_section(agent) is None
 
     @pytest.mark.asyncio
     async def test_rail_additional_directories_via_env(self, monkeypatch):
@@ -701,7 +684,7 @@ class TestProjectMemoryRailLanguagePropagation:
             rail.init(agent)
             await rail.before_model_call(ctx=_make_ctx(agent))
 
-            cn_body = await _project_memory_body(agent)
+            cn_body = await _project_memory_body(agent, "cn")
             assert "项目记忆" in cn_body
 
             # Switch to English
@@ -709,7 +692,7 @@ class TestProjectMemoryRailLanguagePropagation:
             assert rail.get_language() == "en"
 
             await rail.before_model_call(ctx=_make_ctx(agent))
-            en_body = await _project_memory_body(agent)
+            en_body = await _project_memory_body(agent, "en")
             assert "Project Memory" in en_body
 
     @pytest.mark.asyncio

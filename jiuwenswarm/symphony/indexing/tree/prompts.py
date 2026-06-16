@@ -5,13 +5,16 @@ GROUP_DISCOVERY_PROMPT = """Capability tree planning pass.
 Scope note:
 {context_section}
 
-Candidate skills:
+Candidate skills ({count} total):
 {skills_list}
 
-Return {min_groups}-{max_groups} proposed groups only. Do not place skills into groups yet.
+Return proposed groups only. Do not place skills into groups yet.
 
 Design guidance:
 - optimize for retrieval usefulness rather than implementation taxonomy
+- choose the number of groups from the skill diversity, not from a fixed configured count
+- prefer the smallest set of groups that keeps routing boundaries clear
+- avoid singleton groups unless a skill has genuinely unique routing semantics
 - keep groups distinct enough that a router can tell them apart
 - prefer names that remain readable as tree labels
 - ids should be lowercase and hyphenated
@@ -110,8 +113,8 @@ Candidate group definitions:
 {all_groups}
 
 Produce one merged set of canonical groups.
-The final count must stay between {min_groups} and {max_groups}.
-Merge synonyms where possible and keep labels stable enough for reuse in later indexing runs.
+Choose the final count from semantic diversity, not from a fixed configured count.
+Merge synonyms where possible, remove duplicate boundaries, and keep labels stable enough for reuse in later indexing runs.
 
 Respond as JSON:
 {{

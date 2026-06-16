@@ -18,11 +18,13 @@ from openjiuwen.harness.rails import (
     SysOperationRail,
     HeartbeatRail,
     SecurityRail,
+    EvolutionInterruptRail,
     SkillEvolutionRail,
     TaskPlanningRail,
     TeamSkillEvolutionRail,
     TeamSkillCreateRail,
 )
+from openjiuwen.harness.rails.evolution import EvolutionReviewRuntime
 from openjiuwen.harness.rails.context_engineer import ContextProcessorRail
 
 from jiuwenswarm.agents.harness.common.rails.avatar_rail import AvatarPromptRail
@@ -74,6 +76,7 @@ RAIL_WHITELIST = frozenset({
     "SysOperationRail",
     "TeamSkillEvolutionRail",
     "TeamSkillCreateRail",
+    "EvolutionInterruptRail",
     "SkillEvolutionRail",
     "TeamWorkspaceReportPathRail",
     "ContextProcessorRail",
@@ -96,7 +99,8 @@ TOOL_WHITELIST = frozenset({
     "install_skill",
     "uninstall_skill",
     "skill_index_build",
-    "skill_retrieve",
+    "skill_branch_explore",
+    "skill_branch_peek",
     "user_todos",
     "get_user_location",
     "create_note",
@@ -148,9 +152,6 @@ def build_member_rails(
     runtime = runtime or RuntimeInfo()
     team_workspace = team_workspace or TeamWorkspaceInfo()
 
-    # 从 dataclass 提取参数
-    agent_name = member_info.agent_name
-    model_name = member_info.model_name
     role = member_info.role
     channel = runtime.channel
     language = runtime.language
@@ -174,8 +175,9 @@ def build_member_rails(
 
     try:
         rail = ResponsePromptRail()
+        rail.set_channel(channel)
         rails_list.append(rail)
-        logger.info("[TeamRuntime] ResponsePromptRail created")
+        logger.info("[TeamRuntime] ResponsePromptRail created: channel=%s", channel)
     except Exception as exc:
         logger.warning("[TeamRuntime] ResponsePromptRail failed: %s", exc)
 
@@ -246,10 +248,12 @@ def build_member_rails(
             llm_model, actual_model_name = build_evolution_llm()
             evolution_auto_scan = get_evolution_auto_scan_enabled(config)
             bound_team_trajectory_registry = team_trajectory_registry if team_id else None
+            review_runtime = EvolutionReviewRuntime()
             team_skill_rail = TeamSkillEvolutionRail(
                 skills_dir=team_ws_skills_dir,
                 llm=llm_model,
                 model=actual_model_name,
+                review_runtime=review_runtime,
                 language=language,
                 trajectory_source=bound_team_trajectory_registry,
                 trajectory_sink=bound_team_trajectory_registry,
@@ -258,6 +262,14 @@ def build_member_rails(
                 auto_save=False,
                 team_id=team_id,
                 disabled_skills=load_execution_disabled_skills(),
+            )
+            rails_list.append(
+                EvolutionInterruptRail(
+                    review_runtime=review_runtime,
+                    submission_service=team_skill_rail.experience_manager.experience_submission_service,
+                    auto_save=False,
+                    language=language,
+                )
             )
             rails_list.append(team_skill_rail)
             logger.info(
@@ -291,13 +303,27 @@ def build_member_rails(
 
     # Non-leader: SkillEvolutionRail for member skill self-evolution.
     if role != "leader" and team_ws_skills_dir:
+        review_runtime = EvolutionReviewRuntime()
         evo_rail = build_skill_evolution_rail(
             skills_dir=team_ws_skills_dir,
             config=config,
             team_trajectory_sink=team_trajectory_registry,
             team_id=team_id,
+            review_runtime=review_runtime,
         )
         if evo_rail is not None:
+            try:
+                rails_list.append(
+                    EvolutionInterruptRail(
+                        review_runtime=review_runtime,
+                        submission_service=evo_rail.experience_manager.experience_submission_service,
+                        auto_save=True,
+                        language=language,
+                    )
+                )
+                logger.info("[TeamRuntime] EvolutionInterruptRail created for member skill evolution")
+            except Exception as exc:
+                logger.warning("[TeamRuntime] EvolutionInterruptRail failed: %s", exc, exc_info=True)
             rails_list.append(evo_rail)
 
     # Context compression rail for all members (leader + teammates).
@@ -493,6 +519,7 @@ def build_skill_evolution_rail(
     config: dict[str, Any] | None = None,
     team_trajectory_sink: Any | None = None,
     team_id: str | None = None,
+    review_runtime: EvolutionReviewRuntime | None = None,
 ) -> Any | None:
     """为 Team member 构造 SkillEvolutionRail.
 
@@ -506,11 +533,13 @@ def build_skill_evolution_rail(
     try:
         llm, model_name = build_evolution_llm(config)
         evolution_auto_scan = get_evolution_auto_scan_enabled(config)
+        review_runtime = review_runtime or EvolutionReviewRuntime()
 
         rail = SkillEvolutionRail(
             skills_dir=skills_dir,
             llm=llm,
             model=model_name,
+            review_runtime=review_runtime,
             auto_scan=evolution_auto_scan,
             auto_save=True,
             disabled_skills=load_execution_disabled_skills(),

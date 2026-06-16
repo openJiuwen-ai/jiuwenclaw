@@ -16,8 +16,12 @@ present before ``register_from_catalog`` runs.
 
 from __future__ import annotations
 
+from typing import Any
+
 from openjiuwen.agent_teams.harness.manifest import (
+    ConstructionInput,
     ElementKind,
+    context_field,
     harness_element,
 )
 
@@ -34,12 +38,32 @@ RESPONSE_PROMPT = "swarm.response_prompt"
 STREAM_EVENT = "swarm.stream_event"
 AVATAR_PROMPT = "swarm.avatar_prompt"
 
-harness_element(
+
+class ResponsePromptInput(ConstructionInput):
+    """Construction inputs for the response-format prompt rail."""
+
+    channel: str = context_field(
+        attr="channel",
+        default="default",
+        description="Resolved channel key.",
+    )
+
+
+@harness_element(
     kind=ElementKind.RAIL,
     name=RESPONSE_PROMPT,
     description="Appends the response-format prompt segment before each model call.",
-    builder=ResponsePromptRail,
 )
+def _build_response_prompt_rail(
+    params: dict[str, Any],
+    context: Any,
+) -> ResponsePromptRail:
+    inp = ResponsePromptInput.resolve(params, context)
+    rail = ResponsePromptRail()
+    rail.set_channel(inp.channel)
+    return rail
+
+
 harness_element(
     kind=ElementKind.RAIL,
     name=STREAM_EVENT,

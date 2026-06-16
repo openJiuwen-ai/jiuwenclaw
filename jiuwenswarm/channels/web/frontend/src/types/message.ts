@@ -2,6 +2,8 @@
  * 消息类型定义
  */
 
+import type { SkillTreePath } from './skillTree';
+
 export type MessageRole = 'user' | 'assistant' | 'system' | 'tool';
 
 export interface MediaItem {
@@ -76,6 +78,8 @@ export interface ToolResult {
   success: boolean;
   toolCallId?: string;
   summary?: string;  // 结果摘要
+  // agentic search（symphony 技能检索）下发的技能树路径，用于内联回放路径流转
+  skillTree?: SkillTreePath;
 }
 
 export type ToolExecutionStatus = 'pending' | 'timeout' | 'completed' | 'error';

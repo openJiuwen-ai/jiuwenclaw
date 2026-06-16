@@ -1180,6 +1180,18 @@ wheels = [
 ]
 
 [[package]]
+name = "gitcode-api"
+version = "1.3.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "httpx" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/6b/c6/764e504be1b9d09bfb66c758eb74a609859fb0c6cd29aaa9b2e9cfb749ef/gitcode_api-1.3.0.tar.gz", hash = "sha256:b97b21f2f41e2448362565b6f7f45112ae82ac1e1004aa45caa64b240fcc099d", size = 94628, upload-time = "2026-06-08T16:35:47.343Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/42/f3/dc4b871add178a0366ddccc6abd5b7bf177d6c0ae5b78c2db36ae916fe40/gitcode_api-1.3.0-py3-none-any.whl", hash = "sha256:951fcb130185cf33bf423c2052c86d64b594f8ab57fc04e2ab944bb9124867f3", size = 94947, upload-time = "2026-06-08T16:35:45.948Z" },
+]
+
+[[package]]
 name = "google-adk"
 version = "2.1.0"
 source = { registry = "https://pypi.org/simple" }
@@ -1674,6 +1686,7 @@ dependencies = [
     { name = "google-genai" },
     { name = "greenlet" },
     { name = "httpx" },
+    { name = "json-repair" },
     { name = "lark-oapi" },
     { name = "loguru" },
     { name = "mutagen" },
@@ -1779,6 +1792,7 @@ requires-dist = [
     { name = "greenlet", specifier = ">=3.3.2" },
     { name = "httpx", specifier = ">=0.27" },
     { name = "jiuwenswarm-tui", marker = "extra == 'tui'", directory = "packages/jiuwenswarm-tui" },
+    { name = "json-repair", specifier = ">=0.30.0" },
     { name = "lark-oapi", specifier = ">=1.5.3" },
     { name = "loguru", specifier = ">=0.7.3" },
     { name = "mutagen", specifier = ">=1.47.0" },
@@ -2642,7 +2656,7 @@ wheels = [
 [[package]]
 name = "openjiuwen"
 version = "0.1.14"
-source = { git = "https://gitcode.com/openJiuwen/agent-core.git?rev=develop#4eccf9ee99daced398525bec8e941921d8843cd3" }
+source = { git = "https://gitcode.com/openJiuwen/agent-core.git?rev=develop#5a569f534c202c74c8e973c0cd2e43eee7556441" }
 dependencies = [
     { name = "aiofiles" },
     { name = "aiohttp" },
@@ -2655,6 +2669,7 @@ dependencies = [
     { name = "docx2txt" },
     { name = "fastmcp" },
     { name = "filelock" },
+    { name = "gitcode-api" },
     { name = "json-repair" },
     { name = "loguru" },
     { name = "mcp" },

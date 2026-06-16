@@ -314,17 +314,6 @@ export function FileViewer({ filePath, fileName, reloadNonce = 0 }: FileViewerPr
             <div className="flex flex-shrink-0 items-center gap-2 self-stretch">
               <span className="inline-flex items-center gap-1 text-xs leading-snug text-text-muted whitespace-nowrap">
                 {t('fileViewer.chatPreview')}
-                <span
-                  tabIndex={0}
-                  role="img"
-                  aria-label={t('fileViewer.chatPreviewHint')}
-                  className="group relative inline-flex h-4 w-4 items-center justify-center rounded-full border border-border bg-secondary text-[10px] font-medium text-text-muted outline-none transition-colors hover:border-border-hover hover:text-text focus-visible:border-accent focus-visible:text-text"
-                >
-                  ?
-                  <span className="pointer-events-none absolute right-0 top-[calc(100%+6px)] z-50 hidden w-max max-w-[180px] rounded-md border border-border bg-[var(--popover)] px-2 py-1 text-xs font-normal leading-snug text-[var(--popover-foreground)] shadow-lg group-hover:block group-focus-visible:block">
-                    {t('fileViewer.chatPreviewHint')}
-                  </span>
-                </span>
               </span>
               <button
                 type="button"
@@ -427,6 +416,7 @@ export function FileViewer({ filePath, fileName, reloadNonce = 0 }: FileViewerPr
                 <ChatTimelineList
                   messages={historyMessages}
                   mode={historyPreviewMode ?? undefined}
+                  disableA2UIInteraction={true}
                 />
               </div>
             )

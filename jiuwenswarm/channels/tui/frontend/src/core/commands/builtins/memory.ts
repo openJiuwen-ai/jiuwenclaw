@@ -1,4 +1,6 @@
-import { join } from "path";
+import { existsSync, readdirSync, statSync, readFileSync } from "node:fs";
+import { homedir } from "node:os";
+import { dirname, join, parse, relative } from "node:path";
 import { addError, addInfo, makeItem } from "../helpers.js";
 import { CommandKind, type SlashCommand } from "../types.js";
 import { getEditorInfo } from "../../utils/editor.js";
@@ -74,6 +76,140 @@ interface MemoryOpenResult {
   project_memory_dir: string;
   project_dir?: string;
   coding_memory_dir?: string;
+}
+
+// ---------------------------------------------------------------------------
+// Frontend-side memory file discovery (mirrors Claude Code's unguarded walk)
+// ---------------------------------------------------------------------------
+
+/** File patterns to scan at each directory level (aligned with backend's files.py). */
+const PROJECT_MEMORY_FILES: [string, string][] = [
+  ["JIUWENSWARM.md", "project"],
+  [".jiuwen/JIUWENSWARM.md", "project"],
+];
+const LOCAL_MEMORY_FILES: [string, string][] = [
+  ["JIUWENSWARM.local.md", "local"],
+];
+
+/** Probe a single path on disk; returns real state if file exists, placeholder if not. */
+function probeFile(absPath: string, relPath: string, kind: string): MemoryFile {
+  if (existsSync(absPath)) {
+    try {
+      const stat = statSync(absPath);
+      const content = readFileSync(absPath, "utf-8");
+      const lines = content.split("\n").length;
+      return {
+        path: absPath,
+        relative_path: relPath,
+        kind,
+        exists: true,
+        size: stat.size,
+        mtime: Math.floor(stat.mtimeMs / 1000),
+        lines,
+      };
+    } catch {
+      // stat/read failed — still mark exists, just with zero metrics
+      return { path: absPath, relative_path: relPath, kind, exists: true, size: 0, mtime: 0, lines: 0 };
+    }
+  }
+  return { path: absPath, relative_path: relPath, kind, exists: false, size: 0, mtime: 0, lines: 0 };
+}
+
+/** Normalize path for de-duplication (case-insensitive on Windows). */
+function normalizePathKey(p: string): string {
+  try {
+    return process.platform === "win32" ? p.toLowerCase() : p;
+  } catch {
+    return p;
+  }
+}
+
+/**
+ * Walk from CWD upward to root, scanning each directory for memory files.
+ * This mirrors Claude Code's unguarded traversal in claudemd.ts — no project
+ * root marker is required, every level is scanned unconditionally.
+ *
+ * Order: root → CWD (outermost ancestor first, CWD last), so closer files
+ * have higher priority (loaded later → override earlier).
+ */
+function discoverMemoryFilesFromFs(cwd: string): MemoryFile[] {
+  const results: MemoryFile[] = [];
+  const seenPaths = new Set<string>();
+
+  // 1. User-level memory
+  const userJiuwenDir = join(homedir(), ".jiuwen");
+  const userMemoryPath = join(userJiuwenDir, "JIUWENSWARM.md");
+  const userFile = probeFile(userMemoryPath, relative(homedir(), userMemoryPath), "user");
+  if (userFile.exists) {
+    results.push(userFile);
+    seenPaths.add(normalizePathKey(userFile.path));
+  }
+  // .jiuwen/rules/*.md at user level
+  const userRulesDir = join(userJiuwenDir, "rules");
+  if (existsSync(userRulesDir)) {
+    try {
+      for (const entry of readdirSync(userRulesDir)) {
+        if (entry.endsWith(".md")) {
+          const absPath = join(userRulesDir, entry);
+          const f = probeFile(absPath, relative(homedir(), absPath), "user");
+          if (f.exists && !seenPaths.has(normalizePathKey(f.path))) {
+            results.push(f);
+            seenPaths.add(normalizePathKey(f.path));
+          }
+        }
+      }
+    } catch { /* ignore unreadable dirs */ }
+  }
+
+  // 2. Project & Local — walk from root → CWD (reversed so closer dirs come last = higher priority)
+  const dirs: string[] = [];
+  let currentDir = cwd;
+  const root = parse(currentDir).root;
+  while (currentDir !== root) {
+    dirs.push(currentDir);
+    currentDir = dirname(currentDir);
+  }
+  // root directory itself is NOT included (same as Claude Code)
+
+  // Reverse: root → CWD so closer-to-CWD files appear later (higher priority)
+  dirs.reverse();
+
+  for (const dir of dirs) {
+    for (const [rel, kind] of PROJECT_MEMORY_FILES) {
+      const absPath = join(dir, rel);
+      const f = probeFile(absPath, relative(cwd, absPath), kind);
+      if (!seenPaths.has(normalizePathKey(absPath))) {
+        seenPaths.add(normalizePathKey(absPath));
+        if (f.exists) results.push(f);
+      }
+    }
+    // .jiuwen/rules/*.md at this level
+    const rulesDir = join(dir, ".jiuwen", "rules");
+    if (existsSync(rulesDir)) {
+      try {
+        for (const entry of readdirSync(rulesDir)) {
+          if (entry.endsWith(".md")) {
+            const absPath = join(rulesDir, entry);
+            if (!seenPaths.has(normalizePathKey(absPath))) {
+              seenPaths.add(normalizePathKey(absPath));
+              const f = probeFile(absPath, relative(cwd, absPath), "project");
+              if (f.exists) results.push(f);
+            }
+          }
+        }
+      } catch { /* ignore */ }
+    }
+    for (const [rel, kind] of LOCAL_MEMORY_FILES) {
+      const absPath = join(dir, rel);
+      if (!seenPaths.has(normalizePathKey(absPath))) {
+        seenPaths.add(normalizePathKey(absPath));
+        const f = probeFile(absPath, relative(cwd, absPath), kind);
+        if (f.exists) results.push(f);
+      }
+    }
+  }
+
+  return results;
 }
 
 function formatSize(bytes: number): string {
@@ -187,6 +323,27 @@ async function listMemory(ctx: import("../types.js").CommandContext): Promise<vo
     });
     const files = payload.files ?? [];
 
+    // Patch backend relative_path fallback: when the backend returns
+    // relative_path === path (absolute path) for files outside workspace/project_dir,
+    // use frontend discovery to compute a correct relative path.
+    const projectDir = ctx.getCurrentProjectDir();
+    if (projectDir && files.some((f) => f.relative_path === f.path)) {
+      const discovered = discoverMemoryFilesFromFs(projectDir);
+      const frontendByPath = new Map<string, MemoryFile>();
+      for (const d of discovered) {
+        frontendByPath.set(normalizePathKey(d.path), d);
+      }
+      for (let i = 0; i < files.length; i++) {
+        const f = files[i];
+        if (f.relative_path === f.path) {
+          const frontend = frontendByPath.get(normalizePathKey(f.path));
+          if (frontend && frontend.relative_path !== frontend.path) {
+            files[i] = { ...f, relative_path: frontend.relative_path };
+          }
+        }
+      }
+    }
+
     if (files.length === 0) {
       ctx.addItem(addInfo(ctx.sessionId, "No memory files found.", "m"));
       return;
@@ -241,44 +398,60 @@ async function editMemoryInteractive(
     const workspaceDir = ctx.getWorkspaceDir() || "";
     const projectDir = ctx.getCurrentProjectDir();
 
-    // Check if project and local memory exist
-    const hasProjectMemory = files.some(
+    // Frontend-side unguarded traversal (aligned with Claude Code's claudemd.ts):
+    // Walk from CWD up to root, scanning every directory for memory files.
+    // This supplements the backend's `discover_and_load_memory_files`, which
+    // skips the entire project layer when `find_project_root()` returns None
+    // (e.g. empty dirs without .git/.jiuwen markers), causing JIUWENSWARM.md
+    // to never be discovered even if it exists on disk.
+    const discovered = discoverMemoryFilesFromFs(projectDir);
+
+    // Build a frontend lookup by normalized path for relative_path patching.
+    // When the backend's _relative_path() falls back to the absolute path itself
+    // (i.e. relative_path === path, e.g. parent-directory memory files outside
+    // both workspace and project_dir), the frontend's own discovery can provide
+    // a correct relative path like "../JIUWENSWARM.md".  Use it to fix the
+    // backend's stale relative_path instead of discarding the frontend entry.
+    const frontendByPath = new Map<string, MemoryFile>();
+    for (const f of discovered) {
+      frontendByPath.set(normalizePathKey(f.path), f);
+    }
+
+    // Merge: backend results take precedence, but patch stale relative_path
+    // with frontend-computed values when the backend fell back to abs_path.
+    const seenPaths = new Set(files.map((f) => normalizePathKey(f.path)));
+    const mergedFiles: MemoryFile[] = files.map((f) => {
+      if (f.relative_path === f.path) {
+        const frontend = frontendByPath.get(normalizePathKey(f.path));
+        if (frontend && frontend.relative_path !== frontend.path) {
+          return { ...f, relative_path: frontend.relative_path };
+        }
+      }
+      return f;
+    });
+    // Frontend-discovered files fill gaps (files the backend didn't find at all).
+    for (const f of discovered) {
+      if (!seenPaths.has(normalizePathKey(f.path))) {
+        mergedFiles.push(f);
+        seenPaths.add(normalizePathKey(f.path));
+      }
+    }
+
+    // Always provide JIUWENSWARM.md / JIUWENSWARM.local.md entries so users
+    // can create them if they don't exist yet.  Use actual file state when
+    // available rather than fabricating a stale "0 lines (new)" placeholder.
+    const hasProjectMemory = mergedFiles.some(
       (f) => f.path.endsWith("JIUWENSWARM.md") && !f.path.endsWith("JIUWENSWARM.local.md"),
     );
-    const hasLocalMemory = files.some((f) => f.path.endsWith("JIUWENSWARM.local.md"));
+    const hasLocalMemory = mergedFiles.some((f) => f.path.endsWith("JIUWENSWARM.local.md"));
 
-    // Add default options if not exist
     const projectMemoryPath = join(projectDir, "JIUWENSWARM.md");
     const localMemoryPath = join(projectDir, "JIUWENSWARM.local.md");
 
     const allFiles: MemoryFile[] = [
-      ...files,
-      ...(hasProjectMemory
-        ? []
-        : [
-            {
-              path: projectMemoryPath,
-              relative_path: "JIUWENSWARM.md",
-              kind: "project",
-              exists: false,
-              size: 0,
-              mtime: 0,
-              lines: 0,
-            },
-          ]),
-      ...(hasLocalMemory
-        ? []
-        : [
-            {
-              path: localMemoryPath,
-              relative_path: "JIUWENSWARM.local.md",
-              kind: "local",
-              exists: false,
-              size: 0,
-              mtime: 0,
-              lines: 0,
-            },
-          ]),
+      ...mergedFiles,
+      ...(hasProjectMemory ? [] : [probeFile(projectMemoryPath, "JIUWENSWARM.md", "project")]),
+      ...(hasLocalMemory ? [] : [probeFile(localMemoryPath, "JIUWENSWARM.local.md", "local")]),
     ];
 
     if (allFiles.length === 0) {

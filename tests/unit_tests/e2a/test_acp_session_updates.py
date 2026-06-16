@@ -79,7 +79,7 @@ def test_build_acp_session_update_maps_chat_reasoning_to_agent_thought_chunk():
     assert isinstance(state.thought_message_id, str)
 
 
-def test_build_acp_session_update_maps_symphony_status_to_agent_message_chunk():
+def test_build_acp_session_update_ignores_symphony_status():
     state = _build_state()
     update = build_acp_session_update(
         _build_message(EventType.CHAT_SYMPHONY_STATUS),
@@ -87,18 +87,14 @@ def test_build_acp_session_update_maps_symphony_status_to_agent_message_chunk():
             "source": "symphony_compose_score",
             "operation_id": "call-1",
             "phase": "checking_score",
-            "content": "正在读取 Symphony 总谱...",
+            "content": "Symphony status",
             "status": "in_progress",
         },
         state,
     )
 
-    assert update == {
-        "sessionUpdate": "agent_message_chunk",
-        "messageId": state.assistant_message_id,
-        "content": {"type": "text", "text": "正在读取 Symphony 总谱..."},
-    }
-    assert isinstance(state.assistant_message_id, str)
+    assert update is None
+    assert state.assistant_message_id is None
 
 
 def test_build_acp_session_update_keeps_reasoning_consistent_between_delta_and_reasoning():

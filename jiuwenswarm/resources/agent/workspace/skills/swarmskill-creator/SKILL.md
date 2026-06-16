@@ -159,26 +159,7 @@ For the full Markdown spec + SwarmFlow shape, Stage 3b has two passes:
 
 Do not let the script invent a different workflow from `workflow.md`; do not let `workflow.md` describe behavior the script cannot execute.
 
-Generate `scripts/workflow.py` from [templates/scripts/workflow.py.template](templates/scripts/workflow.py.template). The script must follow the executable SwarmFlow template:
-
-1. Keep top-level `META` as a pure literal.
-2. Keep the entrypoint `async def run(args)`.
-3. Import runtime primitives explicitly from `swarmflow`.
-4. Keep agent prompts inside the script as constants or prompt-builder functions.
-5. Use JSON Schema literals for structured agent outputs. **Do NOT include `"additionalProperties": False` or `"required"`** — both are too strict for LLM outputs and cause `agent()` to silently return `None`. Use a permissive schema that only declares `"type": "object"` and `"properties"` to guide the LLM's output format, then extract only the fields you need with `safe_get()`.
-6. Use stable labels for every `agent(...)` call.
-7. When an `agent(...)` call passes a `phase=` argument, that value MUST equal the active `phase("...")` event for that block. Mismatched phase labels break runtime statistics.
-8. Choose the orchestration primitive that matches the topology:
-   - `map_parallel(items, fn)` for homogeneous fan-out over a list.
-   - `parallel([lambda: ...])` for a fixed heterogeneous set of roles or voters.
-   - `pipeline(items, stage1, stage2, ...)` for ordered per-item multi-stage processing.
-   - `compact(...)`, `flatten_filter(...)`, and `log(...)` when they make result cleanup or runtime tracing clearer.
-9. **Resilient data handling** — the template provides three helpers that every workflow MUST use:
-   - `parse_args(args)` — call at the top of `run()`. Swarmflow may pass `args` as a JSON string instead of a dict; this normalizes it to a dict unconditionally.
-   - `extract_json(raw, fallback={...})` — wrap every `agent()` return value. `agent()` may return `None` (schema validation failed) or a raw string (no schema match); `extract_json` handles both by extracting the first JSON object or falling back to defaults. Never use an `agent()` return value directly without this wrapper.
-   - `safe_get(obj, key, default)` — use instead of `obj["key"]` or `obj.get("key")`. Handles `None` results and missing keys uniformly.
-10. **Cache validation** — when loading cached results from incremental runs, verify key fields are non-empty (not just that the cache file exists). An empty `scores: []` or `signal: null` indicates a failed prior run and should be treated as a cache miss, not a valid result to skip.
-11. Delete all template notes and placeholder values before publishing.
+Generate `scripts/workflow.py` from [templates/scripts/workflow.py.template](templates/scripts/workflow.py.template). Before editing, read that template's `TEMPLATE AUTHORING CONSTRAINTS` block; it is the single full source for executable SwarmFlow script constraints. Keep this stage focused on routing and topology synchronization rather than restating those rules.
 
 For the full Markdown spec + SwarmFlow shape, the final script must match the topology in `workflow.md` and the executable constraints in `bind.md`: same phases, same parallel or sequential structure, same integration point, and no extra hidden workflow that the Markdown spec does not describe.
 
@@ -226,18 +207,23 @@ Run the automated validator:
 python scripts/validate_swarmskill.py path/to/<swarmskill-name>/
 ```
 
-The validator checks:
+The validator checks two output shapes:
+
+**Full Markdown spec**
 - **Structural**: 5 files present, role file names match `roles[].id`, no orphan role files
-- **Script-only structural**: when the skill intentionally contains only `SKILL.md` + `scripts/workflow.py`, skip the 5-file Markdown-spec checks and validate the executable script instead
 - **Frontmatter**: `name` / `description` / `version` / `kind: swarm-skill` / `roles[]` present; each role has `id` + `purpose`; `name` == directory name
 - **Section presence**: SKILL.md body has `## Workflow` / `## Roles` / `## Files`; each `roles/*.md` has all 5 mandatory sections; `workflow.md` has `## Overview` / `## Detailed Steps` / `## Acceptance Criteria` (and at least one mermaid block); `bind.md` has all 3 mandatory sections
 - **Cross-file consistency**: every `roles[].skills` and `roles[].tools` in SKILL.md appears in `dependencies.yaml`; every `## Identity` in roles starts with a `> *"..."*` motto line
 - **Output discipline**: `## Inline Persona for Teammate` present in each role file; `dependencies.yaml` skills/tools segments present even if empty
-- **SwarmFlow script**: if `scripts/workflow.py` exists, it is legal Python, exports literal `META`, defines `async def run(args)`, imports primitives from `swarmflow`, contains no template placeholders, keeps prompts inline, keeps explicit `agent(..., phase=...)` values aligned with the active `phase("...")`, avoids local absolute paths, and avoids dangerous calls such as `eval`, `exec`, `os.system`, or `subprocess`
+
+**Script-only SwarmFlow**
+- **Structural**: exactly `SKILL.md` + `scripts/workflow.py`; no `roles/`, `workflow.md`, `bind.md`, `dependencies.yaml`, or `prompts/`
+- **SKILL.md**: valid frontmatter plus `## Workflow` and `## Files`; `roles:` omitted or empty
+- **SwarmFlow script safety envelope**: standalone script shape, inline prompts, safe imports, phase/agent consistency, schema permissiveness, and blocked runtime patterns
 
 **Exit code 0 = compliant**. Non-zero exit prints the failing checks with file:line references.
 
-The manual checklist (for design-time judgment calls the script cannot automate, like "is this content really redundant?") lives in [reference/compliance-checklist.md](reference/compliance-checklist.md). Read it before declaring the Swarm Skill done.
+The full script authoring constraint list lives only in [templates/scripts/workflow.py.template](templates/scripts/workflow.py.template). The manual checklist (for design-time judgment calls the script cannot automate, like "is this content really redundant?") lives in [reference/compliance-checklist.md](reference/compliance-checklist.md). Read it before declaring the Swarm Skill done.
 
 ### Post-generation: Creation Summary + Community Enrichment
 

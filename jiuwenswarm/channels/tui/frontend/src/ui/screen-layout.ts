@@ -79,6 +79,15 @@ function renderInterruptedStatus(): string {
   return "• Interrupted";
 }
 
+function renderReconnectingStatus(elapsedMs: number | undefined): string {
+  return `retrying connection (${formatElapsed(elapsedMs)} · esc to interrupt)`;
+}
+
+function renderNetworkOfflineStatus(streamIdleMs: number | null, elapsedMs: number | undefined): string {
+  const idle = streamIdleMs === null ? "0s" : formatElapsed(streamIdleMs);
+  return `network offline? (${idle} since progress, ${formatElapsed(elapsedMs)} total · esc to interrupt)`;
+}
+
 function connectionStatusLabel(status: AppSnapshot["connectionStatus"]): string | null {
   switch (status) {
     case "connecting":
@@ -119,16 +128,19 @@ function buildStatusLines(
   const teamWorking =
     isTeamMode(snapshot.mode) &&
     isTeamWorking(snapshot.teamMemberEvents, snapshot.teamMessageEvents);
-
   const right = snapshot.lastError
-    ? `error:${snapshot.lastError.split('\n')[0].slice(0, 50)}`
+    ? `error:${snapshot.lastError.split("\n")[0].slice(0, 50)}`
     : snapshot.isInterrupted
       ? renderInterruptedStatus()
-    : snapshot.isPaused
-      ? "paused"
-      : snapshot.isProcessing || teamWorking
-        ? renderRunningStatus(animationPhase, runningElapsedMs)
-        : null;
+      : snapshot.isPaused
+        ? "paused"
+        : snapshot.isProcessing || teamWorking
+          ? snapshot.connectionStatus === "reconnecting"
+            ? renderReconnectingStatus(runningElapsedMs)
+            : snapshot.streamStalled
+              ? renderNetworkOfflineStatus(snapshot.streamIdleMs, runningElapsedMs)
+              : renderRunningStatus(animationPhase, runningElapsedMs)
+          : null;
 
   const lines = transientNotice ? [padToWidth(palette.status.warning(transientNotice), width)] : [];
   const leadSubtask = snapshot.activeSubtasks[0];
@@ -287,7 +299,11 @@ export function buildAppScreenLines(snapshot: AppSnapshot, options: ScreenLayout
     isTeamMode(snapshot.mode) &&
     isTeamWorking(snapshot.teamMemberEvents, snapshot.teamMessageEvents);
   const liveTranscript =
-    snapshot.isProcessing || snapshot.isPaused || snapshot.cancellableWork || teamWorking;
+    snapshot.isProcessing ||
+    snapshot.isPaused ||
+    snapshot.cancellableWork ||
+    teamWorking ||
+    snapshot.workflowRuns.some((workflow) => workflow.status === "running");
   if (requestedOffset === 0 && !liveTranscript) {
     return [...transcriptLines, ...fixedLines];
   }

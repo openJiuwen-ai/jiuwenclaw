@@ -6,9 +6,9 @@ How to create and manage a simple scheduled job in JiuwenSwarm and push results 
 
 ### 1. What can cron jobs do?
 
-- **Run a one-line instruction on a schedule**, e.g. “every morning at 9, summarize yesterday’s todos.”
-- **Let the agent execute work** on a timer (search, daily report, etc.).
-- **Multi-channel delivery** — results can go to web or Feishu (Feishu may need `chat_id`; see the Feishu section in [Channels](Channels.md)).
+- **Run a one-line instruction on a schedule**, e.g. “send me the weather in Hangzhou every morning at 9.”
+- **Let the agent execute work** on a timer, such as running searches and generating results.
+- **Multi-channel delivery** — scheduled tasks are currently supported on web, Feishu, WeCom, DingTalk, and WeChat. Non-web channels must be enabled in channel management; see [Channels](Channels.md).
 
 ---
 
@@ -17,38 +17,40 @@ How to create and manage a simple scheduled job in JiuwenSwarm and push results 
 1. Open **Cron / Scheduled tasks**.
 2. Click **New job** and fill in:
 
-   - **name**: e.g. `daily_todo_summary`
-   - **cron_expr**:  
-     - Every day 09:00: `0 9 * * *`  
-     - Minute 15 every hour: `15 * * * *`
-   - **timezone**: often `Asia/Shanghai`
-   - **targets**: `web` and/or `feishu`
-   - **enabled**: checked (`true`)
-   - **description**: natural language for what the agent should do at fire time, e.g. a short health reminder in Chinese or English.
-   - **wake_offset_seconds** (optional): default `300` to wake the agent five minutes early.
+   - **Task name**: e.g. `Daily Hangzhou weather update`
+   - **Cron expression** (supports seven-field cron expressions):
+     - Every day at 09:00: `0 0 9 * * ? *`
+     - Minute 15 every hour: `0 15 * * * ? *`
+   - **Status (enabled)**: on means enabled
+   - **Description (task content)**: a natural-language description of what the agent should do at the scheduled time, e.g.
+     `Check the weather in Hangzhou and send it to the user`
+   - **Wake offset in seconds** (how long before the scheduled delivery time the task starts): `300` (default)
+   - **Timezone**: usually `Asia/Shanghai`
+   - **Delivery channel**: select from the dropdown:
+     - `Web (web)`: deliver to the web panel
 
 ![](../assets/images/定时任务1.png)
 
-3. Save. Jobs are stored in `~/.jiuwenswarm/workspace/cron_jobs.json` and picked up by the scheduler.
+3. Save. Jobs are stored in `~/.jiuwenswarm/agent/home/cron_jobs.json` and picked up by the scheduler.
 
 ---
 
 ### 3. Common cron expressions
 
-- **Daily 09:00**: `0 9 * * *`
-- **Daily 18:30**: `30 18 * * *`
-- **Monday 09:00**: `0 9 * * 1`
-- **Every hour on the hour**: `0 * * * *`
+- **Daily 09:00**: `0 0 9 * * ? *`
+- **Daily 18:30**: `0 30 18 * * ? *`
+- **Monday 09:00**: `0 30 9 ? * MON *`
+- **Every hour on the hour**: `0 0 * * * ? *`
 
-Format: `minute hour day month weekday` (5 fields, space-separated),
-or  `minute hour day month weekday second year` (7 fields, space-separated).
+Format (7 fields, space-separated):
+`second minute hour day month weekday year`
 ---
 
 ### 4. Create via chat (optional)
 
 If the agent has `cron_create_job`, you can say things like:
 
-> “Create a scheduled task to remind me to drink water every day at 9 on the web.”
+> “Create a scheduled task to remind me to drink water on the web every morning at 8:30.”
 
 The agent fills `cron_expr`, `description`, `targets`, etc., equivalent to using the form.
 

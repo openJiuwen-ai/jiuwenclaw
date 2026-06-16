@@ -302,6 +302,43 @@ async def test_normal_evolution_watcher_ends_on_cancelled_progress(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_normal_evolution_watcher_does_not_start_for_no_signal_scan(monkeypatch):
+    _FakeTransport.pushes = []
+    rail = _FakeEvolutionRail(
+        [
+            [_progress_event("starting regular skill evolution review", stage="started")],
+            [
+                _progress_event(
+                    "checking regular skill(s) for evolution signals",
+                    stage="detecting_signals",
+                )
+            ],
+            [
+                _progress_event(
+                    "no skill usage of a regular skill or actionable evolution signal detected",
+                    stage="cancelled",
+                )
+            ],
+        ]
+    )
+    adapter = _TestAdapter.build_with_rail(rail)
+
+    monkeypatch.setattr(
+        "jiuwenswarm.server.gateway_push.WebSocketGatewayPushTransport",
+        _FakeTransport,
+    )
+
+    await adapter.watch_evolution_and_push("stream-rid", "web", "sess-no-signal-scan")
+
+    status_pushes = [
+        push for push in _FakeTransport.pushes
+        if push["payload"]["event_type"] == "chat.evolution_status"
+    ]
+    assert status_pushes == []
+    assert rail.cleanup_calls == 1
+
+
+@pytest.mark.asyncio
 async def test_normal_evolution_watcher_ends_on_auto_approved_progress(monkeypatch):
     _FakeTransport.pushes = []
     rail = _FakeEvolutionRail([[_progress_event("auto saved", stage="auto_approved")]])
@@ -350,7 +387,7 @@ async def test_normal_evolution_watcher_reads_outcome_status_from_metadata(monke
 
 
 @pytest.mark.asyncio
-async def test_normal_evolution_watcher_ends_on_sdk_noop_outcome_without_prior_progress(monkeypatch):
+async def test_normal_evolution_watcher_hides_sdk_noop_outcome_without_prior_generation(monkeypatch):
     _FakeTransport.pushes = []
     rail = _FakeEvolutionRail([[_sdk_noop_outcome_event()]])
     adapter = _TestAdapter.build_with_rail(rail)
@@ -366,9 +403,35 @@ async def test_normal_evolution_watcher_ends_on_sdk_noop_outcome_without_prior_p
         push for push in _FakeTransport.pushes
         if push["payload"]["event_type"] == "chat.evolution_status"
     ]
+    assert status_pushes == []
+    assert rail.cleanup_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_normal_evolution_watcher_ends_sdk_noop_outcome_after_generation(monkeypatch):
+    _FakeTransport.pushes = []
+    rail = _FakeEvolutionRail(
+        [
+            [_progress_event("generating", stage="generating_updates")],
+            [_sdk_noop_outcome_event()],
+        ]
+    )
+    adapter = _TestAdapter.build_with_rail(rail)
+
+    monkeypatch.setattr(
+        "jiuwenswarm.server.gateway_push.WebSocketGatewayPushTransport",
+        _FakeTransport,
+    )
+
+    await adapter.watch_evolution_and_push("stream-rid", "web", "sess-sdk-noop-after-generation")
+
+    status_pushes = [
+        push for push in _FakeTransport.pushes
+        if push["payload"]["event_type"] == "chat.evolution_status"
+    ]
     assert [push["payload"]["status"] for push in status_pushes] == ["start", "end"]
     assert [push["payload"]["stage"] for push in status_pushes] == [
-        "no_evolution_no_records",
+        "generating",
         "no_evolution_no_records",
     ]
     assert rail.cleanup_calls == 1

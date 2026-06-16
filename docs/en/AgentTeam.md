@@ -238,12 +238,38 @@ In Agent Team mode you can still use and develop **Skills**. Each agent can conf
 
 ### 2.5 Team Memory
 
-Each Agent Team has two memory layers: **personal memory** (each member reads/writes its own) and a shared **`TEAM_MEMORY.md`** (read-only to members; the Leader writes it via an extractor agent at the end of each round).
+**Round definition**: In Agent Team, a round is one complete team collaboration cycle, typically including task assignment, execution, reporting, and consolidation.
 
-- **Temporary team** — members read-only access the parent agent's workspace memory; nothing persists once the team is torn down
-- **Persistent team** — each member has isolated personal memory plus team memory that accumulates across rounds; predefined members keep their existing workspace via symlink
+In Agent Team mode, each team has two-layer memory: each member's own **personal memory** (independent read/write) and a shared **`TEAM_MEMORY.md`** (read-only to all members; the Leader writes it via an extractor agent at the end of each round).
 
-For the full layout, extraction categories (`[decision]` / `[lesson]` / `[member]` / `[context]`), and cross-team / cross-member isolation, see [Memory → Agent Team Memory](Memory.md#agent-team-memory).
+**Team lifecycle and memory behavior:**
+
+| Lifecycle | Personal Memory | Team Memory | Applicable Scenarios |
+|-----------|-----------------|-------------|----------------------|
+| **Temporary team** | Read-only access to parent agent's workspace memory | None | One-off tasks, use-and-discard |
+| **Persistent team** | Each member reads/writes independently | Auto-extracted + accumulated across rounds | Long-term collaboration, experience accumulation |
+
+**Detailed explanation:**
+
+- **Temporary team**:
+  - Members have read-only access to the parent agent's workspace memory and cannot pollute the source memory
+  - No team memory; nothing persists after the team is destroyed
+  - Suitable for one-off tasks and use-and-discard scenarios
+
+- **Persistent team**:
+  - Each member has independent personal memory with read/write support
+  - Team memory is auto-extracted by the Leader at the end of each round and accumulates across rounds
+  - Predefined members' existing workspaces are continued via symlink
+  - Suitable for long-term collaboration and scenarios requiring experience accumulation
+
+**Memory hierarchy and access permissions:**
+
+| Layer | Access Permission | Writer |
+|-------|-------------------|--------|
+| Personal memory | Exclusive to the member | The member itself (via memory tool calls in session) |
+| Team memory | Read-only to all members | Leader writes via extractor agent at the end of each round |
+
+For the full storage layout, extraction categories (`[decision]` / `[lesson]` / `[member]` / `[context]`), and cross-team / cross-member isolation, see [Memory → Agent Team Memory](Memory.md#advanced-agent-swarm-team-memory).
 
 ---
 
@@ -391,8 +417,6 @@ Full path layout:
     │   │   ├── docs/                  ← document artifacts
     │   │   └── reports/               ← report artifacts
     │   └── skills/                    ← team-shared skills
-    ├── team-memory/                   ← shared team memory (auto-extracted by leader)
-    │   └── TEAM_MEMORY.md
     └── workspaces/                    ← per-member workspaces
         └── <agent_name>_workspace/    ← each agent’s private space
             ├── AGENT.md               ← agent configuration

@@ -2,6 +2,8 @@
 
 from jiuwenswarm.symphony.orchestration.planning.models import (
     ArtifactRef,
+    GroundedQuery,
+    GroundingClient,
     InferredInput,
     OrchestrationPlan,
     PlanStep,
@@ -16,6 +18,8 @@ from jiuwenswarm.symphony.orchestration.planning.plan_builder import (
 
 __all__ = [
     "ArtifactRef",
+    "GroundedQuery",
+    "GroundingClient",
     "InferredInput",
     "OrchestrationPlan",
     "PlanStep",

@@ -155,6 +155,7 @@ class TreeGroupingEngine:
                     assignments.update(future.result())
                 except Exception as exc:
                     console.print(f"[red]Classification batch failed: {exc}[/red]")
+                    raise RuntimeError(f"Skill classification batch failed: {exc}") from exc
         return assignments
 
     @staticmethod
@@ -224,15 +225,11 @@ class TreeGroupingEngine:
     def discover_groups(self, skills: list[dict], parent_context: Optional[dict], verbose: bool = False) -> dict:
         del verbose
         builder = self._builder
-        min_groups = max(2, builder.config.branching_factor - 3)
-        max_groups = builder.config.branching_factor + 2
         context_section = self._render_context(parent_context)
         prompt = GROUP_DISCOVERY_PROMPT.format(
             count=len(skills),
             context_section=context_section,
             skills_list=self.format_skills_list(skills),
-            min_groups=min_groups,
-            max_groups=max_groups,
         )
         response = _builder_call(builder, "_call_llm_json", prompt)
         groups = response.get("groups", {}) if isinstance(response, dict) else {}
@@ -249,15 +246,10 @@ class TreeGroupingEngine:
     def merge_group_definitions(self, all_group_defs: list[dict], verbose: bool = False) -> dict:
         if verbose:
             console.print(f"[cyan]    Consolidating {len(all_group_defs)} discovery passes[/cyan]")
-        builder = self._builder
-        min_groups = max(2, builder.config.branching_factor - 3)
-        max_groups = builder.config.branching_factor + 2
         prompt = GROUP_MERGE_PROMPT.format(
             all_groups=self._render_group_definition_samples(all_group_defs),
-            min_groups=min_groups,
-            max_groups=max_groups,
         )
-        response = _builder_call(builder, "_call_llm_json", prompt)
+        response = _builder_call(self._builder, "_call_llm_json", prompt)
         canonical_groups = response.get("canonical_groups", {}) if isinstance(response, dict) else {}
         merged: dict[str, dict[str, str]] = {}
         for group_id, payload in self.iter_group_items(canonical_groups):
@@ -327,6 +319,7 @@ class TreeGroupingEngine:
                     payload = future.result()
                 except Exception as exc:
                     console.print(f"[red]Discovery batch failed: {exc}[/red]")
+                    raise RuntimeError(f"Skill group discovery batch failed: {exc}") from exc
                 else:
                     if payload:
                         collected.append((future_map[future], payload))

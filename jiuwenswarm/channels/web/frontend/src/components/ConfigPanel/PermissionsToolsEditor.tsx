@@ -8,6 +8,13 @@ export type PermissionsToolsEditorProps = {
 
 type PermLevel = "allow" | "ask" | "deny";
 
+const LEVEL_ORDER: PermLevel[] = ["ask", "deny", "allow"];
+const LEVEL_LABELS: Record<PermLevel, string> = {
+  ask: "ASK",
+  deny: "DENY",
+  allow: "ALLOW",
+};
+
 function normalizeLevel(value: unknown): PermLevel | null {
   if (typeof value === "string") {
     const l = value.trim().toLowerCase();
@@ -24,25 +31,35 @@ function normalizeLevel(value: unknown): PermLevel | null {
   return null;
 }
 
-function parseToolsFromPayload(data: Record<string, unknown>): Record<string, { level: PermLevel | null; raw?: string }> {
+function parseToolsFromPayload(data: Record<string, unknown>): Record<string, PermLevel> {
   const tools = data.tools;
   if (!tools || typeof tools !== "object" || Array.isArray(tools)) return {};
-  const out: Record<string, { level: PermLevel | null; raw?: string }> = {};
+  const out: Record<string, PermLevel> = {};
   for (const [k, v] of Object.entries(tools as Record<string, unknown>)) {
     const name = String(k).trim();
     if (!name) continue;
     const level = normalizeLevel(v);
-    out[name] =
-      level === null
-        ? { level: null, raw: typeof v === "string" ? v : JSON.stringify(v) }
-        : { level };
+    if (level) out[name] = level;
   }
   return out;
 }
 
+function groupToolsByLevel(tools: Record<string, PermLevel>): Record<PermLevel, string[]> {
+  const result: Record<PermLevel, string[]> = { ask: [], deny: [], allow: [] };
+  for (const [name, level] of Object.entries(tools)) {
+    if (LEVEL_ORDER.includes(level)) {
+      result[level].push(name);
+    }
+  }
+  for (const lv of LEVEL_ORDER) {
+    result[lv].sort((a, b) => a.localeCompare(b));
+  }
+  return result;
+}
+
 export function PermissionsToolsEditor({ isConnected }: PermissionsToolsEditorProps) {
   const { t } = useTranslation();
-  const [tools, setTools] = useState<Record<string, { level: PermLevel | null; raw?: string }>>({});
+  const [tools, setTools] = useState<Record<string, PermLevel>>({});
   const [loading, setLoading] = useState(false);
   const [busyKey, setBusyKey] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -50,10 +67,7 @@ export function PermissionsToolsEditor({ isConnected }: PermissionsToolsEditorPr
   const [newName, setNewName] = useState("");
   const [newLevel, setNewLevel] = useState<PermLevel>("ask");
 
-  const sortedEntries = useMemo(
-    () => Object.entries(tools).sort(([a], [b]) => a.localeCompare(b)),
-    [tools]
-  );
+  const grouped = useMemo(() => groupToolsByLevel(tools), [tools]);
   const normalizedToolNames = useMemo(() => new Set(Object.keys(tools).map((name) => name.trim())), [tools]);
 
   const load = useCallback(async () => {
@@ -141,6 +155,8 @@ export function PermissionsToolsEditor({ isConnected }: PermissionsToolsEditorPr
   const levelSelectClass =
     "rounded-md border border-border bg-bg px-2 py-1.5 text-[13px] outline-none focus:border-accent min-w-[5.5rem]";
 
+  const hasAnyTools = Object.keys(tools).length > 0;
+
   return (
     <div className="border-t border-border px-4 py-4 bg-secondary/10 space-y-3">
       <div className="flex flex-wrap items-center justify-between gap-2">
@@ -168,64 +184,69 @@ export function PermissionsToolsEditor({ isConnected }: PermissionsToolsEditorPr
         </p>
       ) : null}
 
-      {loading && sortedEntries.length === 0 ? (
+      {loading && !hasAnyTools ? (
         <p className="text-xs text-text-muted">{t("config.permissionsTools.loadingList")}</p>
-      ) : sortedEntries.length === 0 ? (
+      ) : !hasAnyTools ? (
         <p className="text-xs text-text-muted">{t("config.permissionsTools.empty")}</p>
       ) : (
-        <div className="rounded-md border border-border/80 overflow-hidden">
-          <table className="w-full text-xs">
-            <thead>
-              <tr className="bg-secondary/40 text-text-muted text-left">
-                <th className="px-3 py-2 font-medium w-[40%]">{t("config.permissionsTools.colTool")}</th>
-                <th className="px-3 py-2 font-medium">{t("config.permissionsTools.colLevel")}</th>
-                <th className="px-3 py-2 font-medium w-[4rem] text-right">{t("config.permissionsTools.colActions")}</th>
-              </tr>
-            </thead>
-            <tbody>
-              {sortedEntries.map(([name, meta]) => {
-                const effectiveLevel: PermLevel = meta.level ?? "ask";
-                const invalid = meta.level === null;
-                return (
-                  <tr key={name} className="border-t border-border even:bg-secondary/10">
-                    <td className="px-3 py-2 align-middle">
-                      <span className="mono text-[13px] text-text break-all">{name}</span>
-                      {invalid ? (
-                        <span className="block text-[10px] text-amber-600 dark:text-amber-400 mt-0.5">
-                          {t("config.permissionsTools.invalidValue", { raw: meta.raw ?? "" })}
-                        </span>
-                      ) : null}
-                    </td>
-                    <td className="px-3 py-2 align-middle">
-                      <select
-                        className={levelSelectClass}
-                        value={effectiveLevel}
-                        disabled={!isConnected || busyKey === name}
-                        onChange={(e) => {
-                          const v = e.target.value as PermLevel;
-                          void handleLevelChange(name, v);
-                        }}
-                      >
-                        <option value="allow">{t("config.permissionsTools.levelAllow")}</option>
-                        <option value="ask">{t("config.permissionsTools.levelAsk")}</option>
-                        <option value="deny">{t("config.permissionsTools.levelDeny")}</option>
-                      </select>
-                    </td>
-                    <td className="px-3 py-2 align-middle text-right">
-                      <button
-                        type="button"
-                        onClick={() => void handleDelete(name)}
-                        disabled={!isConnected || busyKey === name}
-                        className="text-danger hover:underline disabled:opacity-50 text-[11px]"
-                      >
-                        {t("config.permissionsTools.delete")}
-                      </button>
-                    </td>
-                  </tr>
-                );
-              })}
-            </tbody>
-          </table>
+        <div className="space-y-2">
+          {LEVEL_ORDER.map((level) => {
+            const names = grouped[level];
+            if (names.length === 0) return null;
+
+            return (
+              <div key={level}>
+                <h4 className="text-[11px] font-semibold text-text-muted uppercase tracking-wide mb-1">
+                  ── {LEVEL_LABELS[level]} ──
+                </h4>
+                <div className="rounded-md border border-border/80 overflow-hidden">
+                  <table className="w-full text-xs">
+                    <thead>
+                      <tr className="bg-secondary/40 text-text-muted text-left">
+                        <th className="px-3 py-2 font-medium w-[40%]">{t("config.permissionsTools.colTool")}</th>
+                        <th className="px-3 py-2 font-medium">{t("config.permissionsTools.colLevel")}</th>
+                        <th className="px-3 py-2 font-medium w-[4rem] text-right">{t("config.permissionsTools.colActions")}</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {names.map((name) => (
+                        <tr key={name} className="border-t border-border even:bg-secondary/10">
+                          <td className="px-3 py-2 align-middle">
+                            <span className="mono text-[13px] text-text break-all">{name}</span>
+                          </td>
+                          <td className="px-3 py-2 align-middle">
+                            <select
+                              className={levelSelectClass}
+                              value={tools[name] ?? level}
+                              disabled={!isConnected || busyKey === name}
+                              onChange={(e) => {
+                                const v = e.target.value as PermLevel;
+                                void handleLevelChange(name, v);
+                              }}
+                            >
+                              <option value="allow">{t("config.permissionsTools.levelAllow")}</option>
+                              <option value="ask">{t("config.permissionsTools.levelAsk")}</option>
+                              <option value="deny">{t("config.permissionsTools.levelDeny")}</option>
+                            </select>
+                          </td>
+                          <td className="px-3 py-2 align-middle text-right">
+                            <button
+                              type="button"
+                              onClick={() => void handleDelete(name)}
+                              disabled={!isConnected || busyKey === name}
+                              className="text-danger hover:underline disabled:opacity-50 text-[11px]"
+                            >
+                              {t("config.permissionsTools.delete")}
+                            </button>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            );
+          })}
         </div>
       )}
 

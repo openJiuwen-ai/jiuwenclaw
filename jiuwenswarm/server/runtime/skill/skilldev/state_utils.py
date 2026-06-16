@@ -102,6 +102,22 @@ def set_skill_enabled(
     configs[skill_name] = {"enabled": bool(enabled)}
 
 
+def remove_skill_config(state: dict[str, Any], skill_name: str) -> bool:
+    """Drop a skill's per-skill config record. Returns True if anything was removed.
+
+    skill_configs only holds the enabled flag, so on uninstall the whole record
+    can be dropped — otherwise a stale ``{"enabled": false}`` would be re-applied
+    when a skill of the same name is reinstalled later.
+    """
+    if not skill_name:
+        return False
+    configs = state.get("skill_configs")
+    if not isinstance(configs, dict) or skill_name not in configs:
+        return False
+    del configs[skill_name]
+    return True
+
+
 def list_disabled_skills(state: dict[str, Any]) -> list[str]:
     """Return sorted disabled skill names from canonical config."""
     configs = state.get("skill_configs", {})

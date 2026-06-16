@@ -1,9 +1,14 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
-"""Prompt attachment directory loader for jiuwenswarm."""
+"""Prompt attachment directory loader for jiuwenswarm.
+
+This module is the jiuwenswarm-side file hot-load adapter. Before model calls,
+it reads ``.md``/``.txt`` files from the current session's prompt attachment
+directory, converts them into agent-core ``PromptAttachment`` objects, and
+syncs them into the agent's ``PromptAttachmentManager``.
+"""
 from __future__ import annotations
 
 import hashlib
-import json
 import logging
 import os
 import re
@@ -15,22 +20,16 @@ from typing import Any, Iterable
 
 from openjiuwen.harness.prompts.prompt_attachment_manager import (
     PromptAttachment,
-    PromptAttachmentUpdate,
-)
-from jiuwenswarm.agents.harness.common.prompt_attachment_compat import (
     PromptAttachmentKind,
-    PromptAttachmentScope,
 )
 
 
 logger = logging.getLogger(__name__)
 
 SESSION_SOURCE = "jiuwenswarm.prompt_attachment.session"
-TURN_SOURCE = "jiuwenswarm.prompt_attachment.turn"
 DEFAULT_MAX_FILE_CHARS = 12000
 _SAFE_SESSION_CHARS = re.compile(r"[^A-Za-z0-9_.-]+")
 _TEXT_SUFFIXES = frozenset({".md", ".txt"})
-_JSON_SUFFIX = ".json"
 _README_TEXT = """# Prompt Attachment
 
 Files in this directory are injected as dynamic prompt attachments for model calls.
@@ -38,9 +37,7 @@ They are not user-uploaded attachments and are not written to long-term
 conversation history.
 
 Layout:
-- <session_id>/session/: session-scope prompt attachment files.
-- <session_id>/turn/<invoke_turn_id>/: request-scope prompt attachment
-  files, hot-loaded before each request.
+- <session_id>/session/: hot-loaded prompt attachment files for one session.
 
 Markdown frontmatter is intentionally small: simple key-value fields and one
 level of metadata map are supported. Arrays, multiline strings, and full YAML
@@ -81,11 +78,11 @@ def _is_reparse_path(path: Path) -> bool:
     return bool(attrs & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0))
 
 
-def _iter_safe_files(scope_dir: Path, suffixes: frozenset[str]) -> Iterable[Path]:
-    if not scope_dir.exists() or not scope_dir.is_dir():
+def _iter_safe_files(session_dir: Path, suffixes: frozenset[str]) -> Iterable[Path]:
+    if not session_dir.exists() or not session_dir.is_dir():
         return
-    scope_root = scope_dir.resolve()
-    pending = [scope_dir]
+    session_root = session_dir.resolve()
+    pending = [session_dir]
     while pending:
         current = pending.pop()
         try:
@@ -95,7 +92,7 @@ def _iter_safe_files(scope_dir: Path, suffixes: frozenset[str]) -> Iterable[Path
             continue
         for path in entries:
             try:
-                relative = path.relative_to(scope_dir)
+                relative = path.relative_to(session_dir)
             except ValueError:
                 continue
             if any(part.startswith(".") for part in relative.parts):
@@ -108,8 +105,8 @@ def _iter_safe_files(scope_dir: Path, suffixes: frozenset[str]) -> Iterable[Path
             except OSError as exc:
                 logger.warning("[PromptAttachmentLoader] failed to resolve prompt attachment path %s: %s", path, exc)
                 continue
-            if not _is_relative_to(resolved, scope_root):
-                logger.warning("[PromptAttachmentLoader] skip prompt attachment path outside scope: %s", path)
+            if not _is_relative_to(resolved, session_root):
+                logger.warning("[PromptAttachmentLoader] skip prompt attachment path outside session: %s", path)
                 continue
             if path.is_dir():
                 pending.append(path)
@@ -117,13 +114,9 @@ def _iter_safe_files(scope_dir: Path, suffixes: frozenset[str]) -> Iterable[Path
                 yield path
 
 
-def _managed_source_for_scope(scope: PromptAttachmentScope) -> str:
-    return TURN_SOURCE if scope == PromptAttachmentScope.TURN else SESSION_SOURCE
-
-
 def _metadata_with_origin_source(metadata: dict[str, Any], origin_source: str | None) -> dict[str, Any]:
     result = dict(metadata)
-    if origin_source and origin_source not in {SESSION_SOURCE, TURN_SOURCE}:
+    if origin_source and origin_source != SESSION_SOURCE:
         result.setdefault("origin_source", origin_source)
     return result
 
@@ -263,41 +256,36 @@ def _resolve_from_context(ctx: Any, *names: str) -> str | None:
 
 
 class PromptAttachmentFileStore:
-    """User-friendly file CRUD for prompt attachment directories."""
+    """File CRUD helper for session prompt attachment directories."""
 
     def __init__(self, root: Path | str, *, max_file_chars: int = DEFAULT_MAX_FILE_CHARS) -> None:
         self.root = Path(root)
         self.max_file_chars = max_file_chars
 
-    def for_context(self, ctx: Any) -> "PromptAttachmentContextStore":
+    def bind_context(self, ctx: Any) -> "PromptAttachmentContextStore":
         return PromptAttachmentContextStore(self, ctx)
 
-    def for_session(self, session_id: str, *, invoke_turn_id: str | None = None) -> "PromptAttachmentSessionStore":
-        return PromptAttachmentSessionStore(self, session_id=session_id, invoke_turn_id=invoke_turn_id)
+    def for_session(self, session_id: str) -> "PromptAttachmentSessionStore":
+        return PromptAttachmentSessionStore(self, session_id=session_id)
 
     def add_markdown(
         self,
         *,
         session_id: str,
         content: str,
-        scope: PromptAttachmentScope | str = PromptAttachmentScope.SESSION,
-        invoke_turn_id: str | None = None,
         name: str | None = None,
-        priority: int = 0,
+        section: str | None = None,
+        priority: int = 100,
         kind: PromptAttachmentKind | str = PromptAttachmentKind.TEXT,
         source: str | None = None,
         metadata: dict[str, Any] | None = None,
     ) -> PromptAttachment:
-        path = self._file_path(
-            session_id=session_id,
-            scope=scope,
-            invoke_turn_id=invoke_turn_id,
-            name=name,
-            suffix=".md",
-        )
+        section_id = _safe_id_part(section) if section else self._section_from_name(name)
+        path = self._file_path(session_id=session_id, name=name or section_id, suffix=".md")
         if path.exists():
             raise FileExistsError(f"prompt attachment already exists: {path}")
         frontmatter = self._frontmatter(
+            section=section_id,
             priority=priority,
             kind=kind,
             source=source or _USER_SOURCE,
@@ -305,15 +293,13 @@ class PromptAttachmentFileStore:
         )
         with _path_lock(path):
             _atomic_write_text(path, _dump_frontmatter(frontmatter) + content)
-        return self._item_from_file(path, session_id=session_id, scope=scope, invoke_turn_id=invoke_turn_id)
+        return self._item_from_file(path, session_id=session_id)
 
     def update_markdown(
         self,
         id_or_name: str,
         *,
         session_id: str,
-        scope: PromptAttachmentScope | str = PromptAttachmentScope.SESSION,
-        invoke_turn_id: str | None = None,
         content: str | None = None,
         priority: int | None = None,
         source: str | None = None,
@@ -322,18 +308,14 @@ class PromptAttachmentFileStore:
         metadata_replace: bool = False,
         replace: bool = False,
     ) -> PromptAttachment:
-        path = self._resolve_id_or_name(
-            id_or_name,
-            session_id=session_id,
-            scope=scope,
-            invoke_turn_id=invoke_turn_id,
-            include_json=False,
-        )
+        path = self._resolve_id_or_name(id_or_name, session_id=session_id)
         if path is None:
             raise FileNotFoundError(f"prompt attachment does not exist: {id_or_name}")
         with _path_lock(path):
             old_meta, old_content = _parse_frontmatter(path.read_text(encoding="utf-8"))
             next_meta = {} if replace else dict(old_meta)
+            if old_meta.get("section") is not None:
+                next_meta["section"] = old_meta["section"]
             if priority is not None:
                 next_meta["priority"] = priority
             if source is not None:
@@ -347,86 +329,16 @@ class PromptAttachmentFileStore:
                     next_meta["metadata"] = {**dict(next_meta.get("metadata") or {}), **metadata}
             next_content = old_content if content is None else content
             _atomic_write_text(path, _dump_frontmatter(next_meta) + next_content)
-        return self._item_from_file(path, session_id=session_id, scope=scope, invoke_turn_id=invoke_turn_id)
+        return self._item_from_file(path, session_id=session_id)
 
-    def add(self, prompt_attachment: PromptAttachment) -> PromptAttachment:
-        path = self._json_path(prompt_attachment)
-        if path.exists():
-            raise FileExistsError(f"prompt attachment already exists: {prompt_attachment.id}")
-        with _path_lock(path):
-            _atomic_write_text(
-                path,
-                json.dumps(
-                    prompt_attachment.model_dump(exclude_none=True),
-                    ensure_ascii=False,
-                    indent=2,
-                    sort_keys=True,
-                )
-                + "\n",
-            )
-        return prompt_attachment.model_copy(deep=True)
-
-    def update(
-        self,
-        prompt_attachment_id: str,
-        update: PromptAttachmentUpdate,
-        *,
-        metadata_replace: bool = False,
-    ) -> PromptAttachment:
-        path, current = self._find_json(prompt_attachment_id)
-        if path is None or current is None:
-            raise FileNotFoundError(f"prompt attachment does not exist: {prompt_attachment_id}")
-        with _path_lock(path):
-            data = current.model_dump()
-            patch = update.model_dump(exclude_unset=True)
-            if "metadata" in patch and not metadata_replace:
-                patch["metadata"] = {
-                    **dict(data.get("metadata") or {}),
-                    **dict(patch.get("metadata") or {}),
-                }
-            data.update(patch)
-            updated = PromptAttachment(**data)
-            next_path = self._json_path(updated)
-            _atomic_write_text(
-                next_path,
-                json.dumps(updated.model_dump(exclude_none=True), ensure_ascii=False, indent=2, sort_keys=True) + "\n",
-            )
-            if next_path != path:
-                path.unlink()
-        return updated
-
-    def get(
-        self,
-        id_or_name: str,
-        *,
-        session_id: str,
-        scope: PromptAttachmentScope | str = PromptAttachmentScope.SESSION,
-        invoke_turn_id: str | None = None,
-    ) -> PromptAttachment | None:
-        path = self._resolve_id_or_name(
-            id_or_name,
-            session_id=session_id,
-            scope=scope,
-            invoke_turn_id=invoke_turn_id,
-        )
+    def get(self, id_or_name: str, *, session_id: str) -> PromptAttachment | None:
+        path = self._resolve_id_or_name(id_or_name, session_id=session_id)
         if path is None:
             return None
-        return self._item_from_file(path, session_id=session_id, scope=scope, invoke_turn_id=invoke_turn_id)
+        return self._item_from_file(path, session_id=session_id)
 
-    def delete(
-        self,
-        id_or_name: str,
-        *,
-        session_id: str,
-        scope: PromptAttachmentScope | str = PromptAttachmentScope.SESSION,
-        invoke_turn_id: str | None = None,
-    ) -> bool:
-        path = self._resolve_id_or_name(
-            id_or_name,
-            session_id=session_id,
-            scope=scope,
-            invoke_turn_id=invoke_turn_id,
-        )
+    def delete(self, id_or_name: str, *, session_id: str) -> bool:
+        path = self._resolve_id_or_name(id_or_name, session_id=session_id)
         if path is None:
             return False
         with _path_lock(path):
@@ -435,92 +347,32 @@ class PromptAttachmentFileStore:
             path.unlink()
         return True
 
-    def list(
-        self,
-        *,
-        session_id: str,
-        scope: PromptAttachmentScope | str | None = None,
-        invoke_turn_id: str | None = None,
-    ) -> list[PromptAttachment]:
-        scopes = [self._coerce_scope(scope)] if scope is not None else [
-            PromptAttachmentScope.SESSION,
-            PromptAttachmentScope.TURN,
-        ]
+    def list(self, *, session_id: str) -> list[PromptAttachment]:
+        session_dir = self._session_dir(session_id)
         items: list[PromptAttachment] = []
-        for scope_value in scopes:
-            for scope_dir, turn_id in self._list_scope_dirs(
-                session_id=session_id,
-                scope=scope_value,
-                invoke_turn_id=invoke_turn_id,
-            ):
-                if not scope_dir.exists():
-                    continue
-                for path in _iter_safe_files(scope_dir, _TEXT_SUFFIXES | {_JSON_SUFFIX}):
-                    item = self._item_from_file(
-                        path,
-                        session_id=session_id,
-                        scope=scope_value,
-                        invoke_turn_id=turn_id,
-                    )
-                    items.append(item)
-        return items
+        for path in _iter_safe_files(session_dir, _TEXT_SUFFIXES):
+            item = self._item_from_file(path, session_id=session_id)
+            if item is not None:
+                items.append(item)
+        return sorted(items, key=lambda item: (item.priority, item.source or "", item.section))
 
-    def _list_scope_dirs(
-        self,
-        *,
-        session_id: str,
-        scope: PromptAttachmentScope,
-        invoke_turn_id: str | None,
-    ) -> list[tuple[Path, str | None]]:
-        if scope == PromptAttachmentScope.SESSION:
-            return [(self._scope_dir(session_id, scope=scope, invoke_turn_id=None), None)]
-        if invoke_turn_id:
-            return [(self._scope_dir(session_id, scope=scope, invoke_turn_id=invoke_turn_id), invoke_turn_id)]
-        turn_root = self.root / sanitize_session_id(session_id) / "turn"
-        if not turn_root.exists():
-            return []
-        return [
-            (path, path.name)
-            for path in sorted(turn_root.iterdir(), key=lambda item: item.as_posix())
-            if path.is_dir() and not path.name.startswith(".")
-        ]
-
-    def _item_from_file(
-        self,
-        path: Path,
-        *,
-        session_id: str,
-        scope: PromptAttachmentScope | str,
-        invoke_turn_id: str | None,
-    ) -> PromptAttachment:
-        scope_value = self._coerce_scope(scope)
-        if path.suffix.lower() == _JSON_SUFFIX:
-            item = PromptAttachment(**json.loads(path.read_text(encoding="utf-8")))
-            metadata = _metadata_with_origin_source(dict(item.metadata or {}), item.source)
-            return item.model_copy(update={
-                "source": _managed_source_for_scope(scope_value),
-                "metadata": metadata,
-            })
-        scope_dir = self._scope_dir(session_id, scope=scope_value, invoke_turn_id=invoke_turn_id)
-        meta, content = _parse_frontmatter(path.read_text(encoding="utf-8"))
-        item_id = self._id_from_path(
-            path,
-            scope_dir,
-            session_id=session_id,
-            scope=scope_value,
-            invoke_turn_id=invoke_turn_id,
-        )
+    def _item_from_file(self, path: Path, *, session_id: str) -> PromptAttachment | None:
+        raw = self._read_text_file(path, self._session_dir(session_id))
+        if raw is None:
+            return None
+        meta, content = _parse_frontmatter(raw)
+        session_dir = self._session_dir(session_id)
+        section = _safe_id_part(str(meta.get("section") or self.relative_key(path, session_dir)))
         metadata = _metadata_with_origin_source(dict(meta.get("metadata") or {}), meta.get("source"))
-        metadata.update({"path": str(path), "relative_path": path.relative_to(scope_dir).as_posix()})
+        metadata.update({"path": str(path), "relative_path": path.relative_to(session_dir).as_posix()})
         return PromptAttachment(
-            id=item_id,
-            scope=scope_value,
+            id=self._item_id(session_id=session_id, section=section),
+            section=section,
             kind=meta.get("kind") or PromptAttachmentLoader.kind_for_file(path),
             content=content,
-            priority=int(meta.get("priority") or 0),
-            source=_managed_source_for_scope(scope_value),
+            priority=int(meta.get("priority") or 100),
+            source=SESSION_SOURCE,
             session_id=session_id,
-            invoke_turn_id=invoke_turn_id if scope_value == PromptAttachmentScope.TURN else None,
             metadata=metadata,
             content_kind="text/markdown" if path.suffix.lower() == ".md" else "text/plain",
         )
@@ -530,160 +382,75 @@ class PromptAttachmentFileStore:
         id_or_name: str,
         *,
         session_id: str,
-        scope: PromptAttachmentScope | str,
-        invoke_turn_id: str | None,
-        include_json: bool = True,
     ) -> Path | None:
-        scope_value = self._coerce_scope(scope)
-        scope_dir = self._scope_dir(session_id, scope=scope_value, invoke_turn_id=invoke_turn_id)
-        suffixes = _TEXT_SUFFIXES | ({_JSON_SUFFIX} if include_json else frozenset())
-        try:
-            name_path = self._safe_relative_file_name(name=id_or_name, suffix=".md")
-            candidate = scope_dir / name_path
-            if candidate.suffix.lower() in suffixes and candidate.exists():
-                return candidate
-        except ValueError:
-            pass
-        for path in _iter_safe_files(scope_dir, suffixes):
-            item_id = self._id_from_path(
-                path,
-                scope_dir,
-                session_id=session_id,
-                scope=scope_value,
-                invoke_turn_id=invoke_turn_id,
-            )
-            if item_id == id_or_name:
+        session_dir = self._session_dir(session_id)
+        for path in _iter_safe_files(session_dir, _TEXT_SUFFIXES):
+            relative_key = self.relative_key(path, session_dir)
+            generated_id = f"session.{sanitize_session_id(session_id)}.{relative_key}"
+            if id_or_name in {path.name, path.stem, relative_key, generated_id}:
                 return path
-        if not include_json:
-            return None
-        json_path, _ = self._find_json(
-            id_or_name,
-            session_id=session_id,
-            scope=scope_value,
-            invoke_turn_id=invoke_turn_id,
-        )
-        return json_path
+            item = self._item_from_file(path, session_id=session_id)
+            if item is not None and item.id == id_or_name:
+                return path
+        return None
 
-    def _file_path(
-        self,
-        *,
-        session_id: str,
-        scope: PromptAttachmentScope | str,
-        invoke_turn_id: str | None,
-        name: str | None,
-        suffix: str,
-    ) -> Path:
-        scope_value = self._coerce_scope(scope)
-        if name is None:
-            name = f"auto_{time.time_ns()}_{threading.get_ident()}{suffix}"
-        return self._scope_dir(
-            session_id,
-            scope=scope_value,
-            invoke_turn_id=invoke_turn_id,
-        ) / self._safe_relative_file_name(
-            name=name, suffix=suffix,
-        )
+    def _file_path(self, *, session_id: str, name: str, suffix: str) -> Path:
+        relative = self._safe_relative_file_name(name=name, suffix=suffix)
+        return self._session_dir(session_id) / relative
 
-    def _scope_dir(
-        self,
-        session_id: str,
-        *,
-        scope: PromptAttachmentScope,
-        invoke_turn_id: str | None,
-    ) -> Path:
-        safe_session_id = sanitize_session_id(session_id)
-        if scope == PromptAttachmentScope.TURN:
-            if not invoke_turn_id:
-                raise ValueError("invoke_turn_id is required for turn-scope prompt attachments")
-            return self.root / safe_session_id / "turn" / _safe_id_part(invoke_turn_id)
-        return self.root / safe_session_id / "session"
+    def _session_dir(self, session_id: str) -> Path:
+        return self.root / sanitize_session_id(session_id) / "session"
+
+    @staticmethod
+    def _item_id(*, session_id: str, section: str) -> str:
+        return f"session.{sanitize_session_id(session_id)}.{_safe_id_part(section)}"
+
+    @staticmethod
+    def _section_from_name(name: str | None) -> str:
+        if not name:
+            return _safe_id_part(f"attachment_{time.time_ns()}_{threading.get_ident()}")
+        raw_path = Path(name)
+        parts = list(raw_path.with_suffix("").parts)
+        return ".".join(_safe_id_part(part) for part in parts)
 
     @staticmethod
     def _frontmatter(
         *,
+        section: str,
         priority: int,
         kind: PromptAttachmentKind | str,
         source: str,
         metadata: dict[str, Any] | None,
     ) -> dict[str, Any]:
         data: dict[str, Any] = {
-            "kind": _kind_value(kind),
+            "section": section,
             "priority": priority,
+            "kind": _kind_value(kind),
             "source": source,
         }
         if metadata:
             data["metadata"] = dict(metadata)
         return data
 
-    @staticmethod
-    def _id_from_path(
-        path: Path,
-        scope_dir: Path,
-        *,
-        session_id: str,
-        scope: PromptAttachmentScope,
-        invoke_turn_id: str | None,
-    ) -> str:
-        relative_key = PromptAttachmentLoader.relative_key(path, scope_dir)
-        safe_session_id = sanitize_session_id(session_id)
-        if scope == PromptAttachmentScope.TURN:
-            return f"{scope.value}.{safe_session_id}.{_safe_id_part(invoke_turn_id or 'turn')}.{relative_key}"
-        return f"{scope.value}.{safe_session_id}.{relative_key}"
-
-    def _json_path(self, prompt_attachment: PromptAttachment) -> Path:
-        scope = self._coerce_scope(prompt_attachment.scope)
-        return self._scope_dir(
-            prompt_attachment.session_id or "default",
-            scope=scope,
-            invoke_turn_id=prompt_attachment.invoke_turn_id,
-        ) / f"{_safe_id_part(prompt_attachment.id)}{_JSON_SUFFIX}"
-
-    def _find_json(
-        self,
-        prompt_attachment_id: str,
-        *,
-        session_id: str | None = None,
-        scope: PromptAttachmentScope | str | None = None,
-        invoke_turn_id: str | None = None,
-    ) -> tuple[Path | None, PromptAttachment | None]:
-        file_name = f"{_safe_id_part(prompt_attachment_id)}{_JSON_SUFFIX}"
-        if session_id is not None and scope is not None:
-            scope_value = self._coerce_scope(scope)
-            search_dirs = []
-            for scope_dir, _ in self._list_scope_dirs(
-                session_id=session_id,
-                scope=scope_value,
-                invoke_turn_id=invoke_turn_id,
-            ):
-                search_dirs.append(scope_dir)
-        elif session_id is not None:
-            search_dirs = []
-            for scope_value in (PromptAttachmentScope.SESSION, PromptAttachmentScope.TURN):
-                turn_id = invoke_turn_id if scope_value == PromptAttachmentScope.TURN else None
-                for scope_dir, _ in self._list_scope_dirs(
-                    session_id=session_id,
-                    scope=scope_value,
-                    invoke_turn_id=turn_id,
-                ):
-                    search_dirs.append(scope_dir)
-        else:
-            search_dirs = [self.root]
-        for search_dir in search_dirs:
-            for path in _iter_safe_files(search_dir, frozenset({_JSON_SUFFIX})):
-                if path.name != file_name:
-                    continue
-                item = PromptAttachment(**json.loads(path.read_text(encoding="utf-8")))
-                if item.id == prompt_attachment_id:
-                    return path, item
-        return None, None
-
-    @staticmethod
-    def coerce_scope(scope: PromptAttachmentScope | str) -> PromptAttachmentScope:
-        return scope if isinstance(scope, PromptAttachmentScope) else PromptAttachmentScope(str(scope))
-
-    @staticmethod
-    def _coerce_scope(scope: PromptAttachmentScope | str) -> PromptAttachmentScope:
-        return PromptAttachmentFileStore.coerce_scope(scope)
+    def _read_text_file(self, path: Path, session_dir: Path) -> str | None:
+        text = path.read_text(encoding="utf-8")
+        if not text.strip():
+            logger.debug(
+                "[PromptAttachmentLoader] skip empty prompt attachment file: %s",
+                path.relative_to(session_dir).as_posix(),
+            )
+            return None
+        if self.max_file_chars > 0 and len(text) > self.max_file_chars:
+            original_chars = len(text)
+            text = text[:self.max_file_chars] + "\n\n[Prompt attachment file truncated by jiuwenswarm loader.]"
+            logger.warning(
+                "[PromptAttachmentLoader] truncated prompt attachment file: "
+                "path=%s original_chars=%s truncated_chars=%s",
+                path.relative_to(session_dir).as_posix(),
+                original_chars,
+                len(text),
+            )
+        return text
 
     @staticmethod
     def _coerce_kind(kind: PromptAttachmentKind | str) -> PromptAttachmentKind:
@@ -697,126 +464,67 @@ class PromptAttachmentFileStore:
             raise ValueError(f"unsafe prompt attachment file name: {name}")
         if any(part.startswith(".") for part in raw_path.parts):
             raise ValueError(f"hidden prompt attachment file names are not supported: {name}")
-        if raw_path.suffix.lower() not in (_TEXT_SUFFIXES | {_JSON_SUFFIX}):
+        if raw_path.suffix.lower() not in _TEXT_SUFFIXES:
             raise ValueError(f"unsupported prompt attachment file suffix: {raw_path.suffix}")
-        return Path(*[
-            (
-                f"{_safe_id_part(Path(part).stem)}{Path(part).suffix.lower()}"
-                if index == len(raw_path.parts) - 1
-                else _safe_id_part(part)
-            )
-            for index, part in enumerate(raw_path.parts)
-        ])
+        parts = []
+        for index, part in enumerate(raw_path.parts):
+            part_path = Path(part)
+            if index == len(raw_path.parts) - 1:
+                parts.append(f"{_safe_id_part(part_path.stem)}{part_path.suffix.lower()}")
+            else:
+                parts.append(_safe_id_part(part))
+        return Path(*parts)
+
+    @staticmethod
+    def relative_key(path: Path, session_dir: Path) -> str:
+        rel = path.relative_to(session_dir).with_suffix("")
+        return ".".join(_safe_id_part(part) for part in rel.parts)
 
 
 class PromptAttachmentContextStore:
-    """Context-bound writer that hides session and turn ids from callers."""
+    """Context-bound file writer that hides the session id from callers."""
 
     def __init__(self, store: PromptAttachmentFileStore, ctx: Any) -> None:
         self._store = store
         self.session_id = _resolve_from_context(ctx, "session_id", "_session_id", "id") or "default"
-        self.invoke_turn_id = _resolve_from_context(
-            ctx,
-            "invoke_turn_id",
-            "_invoke_turn_id",
-            "request_id",
-            "rid",
-        )
 
     def add_markdown(self, **kwargs: Any) -> PromptAttachment:
-        scope = kwargs.get("scope", PromptAttachmentScope.TURN)
-        if PromptAttachmentFileStore.coerce_scope(scope) == PromptAttachmentScope.TURN and not self.invoke_turn_id:
-            raise ValueError(
-                "No active invoke_turn_id is bound. Use for_session(...).add_turn_markdown or pass context."
-            )
-        kwargs.setdefault("scope", scope)
-        return self._store.add_markdown(
-            session_id=self.session_id,
-            invoke_turn_id=self.invoke_turn_id,
-            **kwargs,
-        )
+        return self._store.add_markdown(session_id=self.session_id, **kwargs)
 
     def update_markdown(self, id_or_name: str, **kwargs: Any) -> PromptAttachment:
-        self._bind_turn_id_if_needed(kwargs)
         return self._store.update_markdown(id_or_name, session_id=self.session_id, **kwargs)
 
-    def get(self, id_or_name: str, **kwargs: Any) -> PromptAttachment | None:
-        self._bind_turn_id_if_needed(kwargs)
-        return self._store.get(id_or_name, session_id=self.session_id, **kwargs)
+    def get(self, id_or_name: str) -> PromptAttachment | None:
+        return self._store.get(id_or_name, session_id=self.session_id)
 
-    def delete(self, id_or_name: str, **kwargs: Any) -> bool:
-        self._bind_turn_id_if_needed(kwargs)
-        return self._store.delete(id_or_name, session_id=self.session_id, **kwargs)
+    def delete(self, id_or_name: str) -> bool:
+        return self._store.delete(id_or_name, session_id=self.session_id)
 
-    def list(self, **kwargs: Any) -> list[PromptAttachment]:
-        self._bind_turn_id_if_needed(kwargs)
-        return self._store.list(session_id=self.session_id, **kwargs)
-
-    def _bind_turn_id_if_needed(self, kwargs: dict[str, Any]) -> None:
-        scope = kwargs.get("scope")
-        if scope is None or PromptAttachmentFileStore.coerce_scope(scope) != PromptAttachmentScope.TURN:
-            return
-        if kwargs.get("invoke_turn_id"):
-            return
-        if not self.invoke_turn_id:
-            raise ValueError("No active invoke_turn_id is bound. Pass invoke_turn_id explicitly.")
-        kwargs["invoke_turn_id"] = self.invoke_turn_id
+    def list(self) -> list[PromptAttachment]:
+        return self._store.list(session_id=self.session_id)
 
 
 class PromptAttachmentSessionStore:
     """Session-bound writer for services that know session_id but not full ctx."""
 
-    def __init__(self, store: PromptAttachmentFileStore, *, session_id: str, invoke_turn_id: str | None = None) -> None:
+    def __init__(self, store: PromptAttachmentFileStore, *, session_id: str) -> None:
         self._store = store
         self.session_id = session_id
-        self.invoke_turn_id = invoke_turn_id
 
-    def add_session_markdown(self, **kwargs: Any) -> PromptAttachment:
-        return self._store.add_markdown(
-            session_id=self.session_id,
-            scope=PromptAttachmentScope.SESSION,
-            **kwargs,
-        )
-
-    def add_turn_markdown(self, *, invoke_turn_id: str | None = None, **kwargs: Any) -> PromptAttachment:
-        turn_id = invoke_turn_id or self.invoke_turn_id
-        if not turn_id:
-            raise ValueError("No active invoke_turn_id is bound. Pass invoke_turn_id explicitly.")
-        return self._store.add_markdown(
-            session_id=self.session_id,
-            invoke_turn_id=turn_id,
-            scope=PromptAttachmentScope.TURN,
-            **kwargs,
-        )
-
-    def add_current_turn_markdown(self, **kwargs: Any) -> PromptAttachment:
-        return self.add_turn_markdown(**kwargs)
+    def add_markdown(self, **kwargs: Any) -> PromptAttachment:
+        return self._store.add_markdown(session_id=self.session_id, **kwargs)
 
     def update_markdown(self, id_or_name: str, **kwargs: Any) -> PromptAttachment:
-        self._bind_turn_id_if_needed(kwargs)
         return self._store.update_markdown(id_or_name, session_id=self.session_id, **kwargs)
 
-    def get(self, id_or_name: str, **kwargs: Any) -> PromptAttachment | None:
-        self._bind_turn_id_if_needed(kwargs)
-        return self._store.get(id_or_name, session_id=self.session_id, **kwargs)
+    def get(self, id_or_name: str) -> PromptAttachment | None:
+        return self._store.get(id_or_name, session_id=self.session_id)
 
-    def delete(self, id_or_name: str, **kwargs: Any) -> bool:
-        self._bind_turn_id_if_needed(kwargs)
-        return self._store.delete(id_or_name, session_id=self.session_id, **kwargs)
+    def delete(self, id_or_name: str) -> bool:
+        return self._store.delete(id_or_name, session_id=self.session_id)
 
-    def list(self, **kwargs: Any) -> list[PromptAttachment]:
-        self._bind_turn_id_if_needed(kwargs)
-        return self._store.list(session_id=self.session_id, **kwargs)
-
-    def _bind_turn_id_if_needed(self, kwargs: dict[str, Any]) -> None:
-        scope = kwargs.get("scope")
-        if scope is None or PromptAttachmentFileStore.coerce_scope(scope) != PromptAttachmentScope.TURN:
-            return
-        if kwargs.get("invoke_turn_id"):
-            return
-        if not self.invoke_turn_id:
-            raise ValueError("No active invoke_turn_id is bound. Pass invoke_turn_id explicitly.")
-        kwargs["invoke_turn_id"] = self.invoke_turn_id
+    def list(self) -> list[PromptAttachment]:
+        return self._store.list(session_id=self.session_id)
 
 
 class PromptAttachmentLoader:
@@ -827,15 +535,15 @@ class PromptAttachmentLoader:
         self.max_file_chars = max_file_chars
         self.file_store = PromptAttachmentFileStore(self.root, max_file_chars=max_file_chars)
 
-    def for_context(self, ctx: Any) -> PromptAttachmentContextStore:
+    def bind_context(self, ctx: Any) -> PromptAttachmentContextStore:
         """Return a context-bound file writer facade."""
 
-        return self.file_store.for_context(ctx)
+        return self.file_store.bind_context(ctx)
 
-    def for_session(self, session_id: str, *, invoke_turn_id: str | None = None) -> PromptAttachmentSessionStore:
+    def for_session(self, session_id: str) -> PromptAttachmentSessionStore:
         """Return a session-bound file writer facade."""
 
-        return self.file_store.for_session(session_id, invoke_turn_id=invoke_turn_id)
+        return self.file_store.for_session(session_id)
 
     def ensure_layout(self) -> None:
         """Create the root prompt attachment layout."""
@@ -853,40 +561,11 @@ class PromptAttachmentLoader:
             readme.write_text(_README_TEXT, encoding="utf-8")
 
     def load_session_attachments(self, session_id: str) -> list[PromptAttachment]:
-        """Load session-scope prompt attachments for one jiuwenswarm session."""
+        """Load prompt attachments for one jiuwenswarm session."""
 
-        safe_session_id = sanitize_session_id(session_id)
-        scope_dir = self.root / safe_session_id / "session"
-        return self._load_scope_dir(
-            scope_dir,
-            scope=PromptAttachmentScope.SESSION,
-            source=SESSION_SOURCE,
-            session_id=session_id,
-            safe_session_id=safe_session_id,
-        )
+        return self.file_store.list(session_id=session_id)
 
-    def load_turn_attachments(self, session_id: str, invoke_turn_id: str) -> list[PromptAttachment]:
-        """Load turn-scope prompt attachments for one user request."""
-
-        safe_session_id = sanitize_session_id(session_id)
-        turn_root = self.root / safe_session_id / "turn"
-        safe_turn_id = _safe_id_part(invoke_turn_id or "turn")
-        return self._load_scope_dir(
-            turn_root / safe_turn_id,
-            scope=PromptAttachmentScope.TURN,
-            source=TURN_SOURCE,
-            session_id=session_id,
-            safe_session_id=safe_session_id,
-            invoke_turn_id=invoke_turn_id,
-        )
-
-    async def sync_to_agent(
-        self,
-        agent: Any,
-        *,
-        session_id: str,
-        invoke_turn_id: str,
-    ) -> None:
+    async def sync_to_agent(self, agent: Any, *, session_id: str) -> None:
         """Synchronize current prompt attachment files to a DeepAgent instance.
 
         Loader failures are intentionally non-fatal. User requests must continue
@@ -902,30 +581,14 @@ class PromptAttachmentLoader:
             return
 
         try:
-            # Clear only this request's old turn attachments. Clearing the whole
-            # session would make concurrent requests remove each other's
-            # request-local attachments.
-            await manager.remove_by_filter(
-                source=TURN_SOURCE,
-                session_id=session_id,
-                invoke_turn_id=invoke_turn_id,
-                scope=PromptAttachmentScope.TURN,
-            )
-        except Exception as exc:
-            logger.warning("[PromptAttachmentLoader] failed to clear old turn prompt attachments: %s", exc)
-
-        try:
             session_attachments = self.load_session_attachments(session_id)
-            turn_attachments = self.load_turn_attachments(session_id, invoke_turn_id)
         except Exception as exc:
             logger.warning("[PromptAttachmentLoader] failed to load prompt attachment directory: %s", exc)
             return
         logger.info(
-            "[PromptAttachmentLoader] sync prompt attachments: session_id=%s invoke_turn_id=%s session=%d turn=%d",
+            "[PromptAttachmentLoader] sync prompt attachments: session_id=%s session=%d",
             session_id,
-            invoke_turn_id,
             len(session_attachments),
-            len(turn_attachments),
         )
 
         try:
@@ -933,177 +596,17 @@ class PromptAttachmentLoader:
                 source=SESSION_SOURCE,
                 prompt_attachments=session_attachments,
                 session_id=session_id,
-                scope=PromptAttachmentScope.SESSION,
             )
         except Exception as exc:
             logger.warning("[PromptAttachmentLoader] failed to sync session prompt attachments: %s", exc)
-
-        try:
-            await manager.replace_source(
-                source=TURN_SOURCE,
-                prompt_attachments=turn_attachments,
-                session_id=session_id,
-                invoke_turn_id=invoke_turn_id,
-                scope=PromptAttachmentScope.TURN,
-            )
-        except Exception as exc:
-            logger.warning("[PromptAttachmentLoader] failed to sync turn prompt attachments: %s", exc)
-
-    @staticmethod
-    async def clear_turn_from_agent(
-        agent: Any,
-        *,
-        session_id: str,
-        invoke_turn_id: str,
-    ) -> None:
-        """Remove prompt attachments loaded for one completed request."""
-
-        try:
-            manager = getattr(agent, "prompt_attachment_manager", None)
-            if manager is None:
-                raise AttributeError("agent.prompt_attachment_manager is unavailable")
-            # Request cleanup must stay scoped by invoke_turn_id for concurrent
-            # requests in the same session.
-            await manager.remove_by_filter(
-                source=TURN_SOURCE,
-                session_id=session_id,
-                invoke_turn_id=invoke_turn_id,
-                scope=PromptAttachmentScope.TURN,
-            )
-        except Exception as exc:
-            logger.warning("[PromptAttachmentLoader] failed to clear completed turn prompt attachments: %s", exc)
-
-    def _load_scope_dir(
-        self,
-        scope_dir: Path,
-        *,
-        scope: PromptAttachmentScope,
-        source: str,
-        session_id: str,
-        safe_session_id: str,
-        invoke_turn_id: str | None = None,
-    ) -> list[PromptAttachment]:
-        if not scope_dir.exists():
-            return []
-        if not scope_dir.is_dir():
-            logger.warning("[PromptAttachmentLoader] prompt attachment scope path is not a directory: %s", scope_dir)
-            return []
-
-        items: list[PromptAttachment] = []
-        for path in self._iter_attachment_files(scope_dir):
-            try:
-                if path.suffix.lower() == _JSON_SUFFIX:
-                    item = self._read_json_file(
-                        path,
-                        scope_dir,
-                        scope=scope,
-                        source=source,
-                        session_id=session_id,
-                        invoke_turn_id=invoke_turn_id,
-                    )
-                    if item is not None:
-                        items.append(item)
-                    continue
-                content = self._read_text_file(path, scope_dir)
-            except Exception as exc:
-                logger.warning("[PromptAttachmentLoader] failed to read prompt attachment file %s: %s", path, exc)
-                continue
-            if content is None:
-                continue
-            meta, content = _parse_frontmatter(content)
-            metadata = _metadata_with_origin_source(dict(meta.get("metadata") or {}), meta.get("source"))
-            metadata.update({"path": str(path), "relative_path": path.relative_to(scope_dir).as_posix()})
-            relative_key = self._relative_key(path, scope_dir)
-            if scope == PromptAttachmentScope.TURN:
-                safe_turn_id = _safe_id_part(invoke_turn_id or "turn")
-                item_id = f"{scope.value}.{safe_session_id}.{safe_turn_id}.{relative_key}"
-            else:
-                item_id = f"{scope.value}.{safe_session_id}.{relative_key}"
-            items.append(PromptAttachment(
-                id=item_id,
-                scope=scope,
-                kind=meta.get("kind") or self._kind_for_file(path),
-                content=content,
-                priority=int(meta.get("priority") or 0),
-                source=source,
-                session_id=session_id,
-                invoke_turn_id=invoke_turn_id if scope == PromptAttachmentScope.TURN else None,
-                metadata=metadata,
-                content_kind="text/markdown" if path.suffix.lower() == ".md" else "text/plain",
-            ))
-        return items
-
-    @staticmethod
-    def _iter_attachment_files(scope_dir: Path) -> Iterable[Path]:
-        files = list(_iter_safe_files(scope_dir, _TEXT_SUFFIXES | {_JSON_SUFFIX}))
-        return sorted(files, key=lambda path: path.relative_to(scope_dir).as_posix())
-
-    @staticmethod
-    def _read_json_file(
-        path: Path,
-        scope_dir: Path,
-        *,
-        scope: PromptAttachmentScope,
-        source: str,
-        session_id: str,
-        invoke_turn_id: str | None,
-    ) -> PromptAttachment | None:
-        raw = path.read_text(encoding="utf-8")
-        if not raw.strip():
-            logger.debug(
-                "[PromptAttachmentLoader] skip empty prompt attachment file: %s",
-                path.relative_to(scope_dir).as_posix(),
-            )
-            return None
-        item = PromptAttachment(**json.loads(raw))
-        if item.scope != scope:
-            logger.warning("[PromptAttachmentLoader] skip prompt attachment with mismatched scope: %s", path)
-            return None
-        metadata = _metadata_with_origin_source(dict(item.metadata or {}), item.source)
-        metadata.update({"path": str(path), "relative_path": path.relative_to(scope_dir).as_posix()})
-        return item.model_copy(update={
-            "source": source,
-            "session_id": item.session_id or session_id,
-            "invoke_turn_id": invoke_turn_id if scope == PromptAttachmentScope.TURN else None,
-            "metadata": metadata,
-        })
-
-    def _read_text_file(self, path: Path, scope_dir: Path) -> str | None:
-        text = path.read_text(encoding="utf-8")
-        if not text.strip():
-            logger.debug(
-                "[PromptAttachmentLoader] skip empty prompt attachment file: %s",
-                path.relative_to(scope_dir).as_posix(),
-            )
-            return None
-        if self.max_file_chars > 0 and len(text) > self.max_file_chars:
-            original_chars = len(text)
-            text = text[:self.max_file_chars] + "\n\n[Prompt attachment file truncated by jiuwenswarm loader.]"
-            logger.warning(
-                "[PromptAttachmentLoader] truncated prompt attachment file: "
-                "path=%s original_chars=%s truncated_chars=%s",
-                path.relative_to(scope_dir).as_posix(),
-                original_chars,
-                len(text),
-            )
-        return text
 
     @staticmethod
     def kind_for_file(path: Path) -> PromptAttachmentKind:
         return _KIND_BY_STEM.get(path.stem, PromptAttachmentKind.TEXT)
 
     @staticmethod
-    def _kind_for_file(path: Path) -> PromptAttachmentKind:
-        return PromptAttachmentLoader.kind_for_file(path)
-
-    @staticmethod
-    def relative_key(path: Path, scope_dir: Path) -> str:
-        rel = path.relative_to(scope_dir).with_suffix("")
-        return ".".join(_safe_id_part(part) for part in rel.parts)
-
-    @staticmethod
-    def _relative_key(path: Path, scope_dir: Path) -> str:
-        return PromptAttachmentLoader.relative_key(path, scope_dir)
+    def relative_key(path: Path, session_dir: Path) -> str:
+        return PromptAttachmentFileStore.relative_key(path, session_dir)
 
 
 __all__ = [
@@ -1113,6 +616,5 @@ __all__ = [
     "PromptAttachmentLoader",
     "PromptAttachmentSessionStore",
     "SESSION_SOURCE",
-    "TURN_SOURCE",
     "sanitize_session_id",
 ]

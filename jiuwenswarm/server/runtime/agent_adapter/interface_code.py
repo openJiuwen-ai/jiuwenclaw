@@ -55,7 +55,7 @@ from jiuwenswarm.agents.harness.code.prompt.code_prompt_builder import (
 )
 from jiuwenswarm.agents.harness.code.rails import (
     CodeTaskPlanningRail,
-    PlanApprovalRail,
+    PlanApprovalInterruptRail,
 )
 from jiuwenswarm.agents.harness.common.rails import (
     ProjectMemoryRail,
@@ -63,9 +63,7 @@ from jiuwenswarm.agents.harness.common.rails import (
 )
 from jiuwenswarm.agents.harness.common.memory.config import get_memory_mode
 from jiuwenswarm.agents.harness.common.tools import (
-    SkillRetrievalToolkit,
     SkillToolkit,
-    is_skill_retrieval_enabled,
 )
 from jiuwenswarm.agents.harness.common.tools.acp_chat import acp_chat
 from jiuwenswarm.common.config import get_config
@@ -195,7 +193,7 @@ _RAIL_BUILD_NAMES: dict[str, str] = {
     "CodingMemoryRail": "_build_coding_memory_rail",
     "WorktreeRail": "_build_worktree_rail_via_config",
     "CodeAgentRail": "_build_code_agent_rail",
-    "PlanApprovalRail": "_build_plan_approval_rail",
+    "PlanApprovalInterruptRail": "_build_plan_approval_rail",
 }
 
 _TOOL_BUILD_NAMES: dict[str, str] = {
@@ -402,6 +400,21 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
             raw = "cn"
         return resolve_language(raw)
 
+    def _resolve_output_language(self) -> str:
+        """Resolve user's preferred output language for runtime_state display.
+
+        Distinct from prompt/runtime language (always "en" in code mode).
+        Returns the normalized language code ("cn"/"en") based on
+        config.yaml preferred_language, so the Language section injected
+        by RuntimePromptRail can instruct the LLM to respond in the
+        user's chosen language.
+        """
+        config_base = get_config()
+        raw = str(config_base.get("preferred_language", "zh")).strip().lower()
+        if raw == "zh":
+            raw = "cn"
+        return resolve_language(raw)
+
     # ─── 初始化 ──────────────────────────────
 
     async def create_instance(self, config: dict[str, Any] | None = None, *,
@@ -479,6 +492,7 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
             workspace=workspace,
             sys_operation=sys_operation,
             language=self._resolve_runtime_language(),
+            enable_read_image_multimodal=False,
             auto_create_workspace=False
         )
 
@@ -531,6 +545,7 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
         rail_infos = [
             _RailBuildInfo("_runtime_prompt_rail", self._build_runtime_prompt_rail),
             _RailBuildInfo("_response_prompt_rail", self._build_response_prompt_rail),
+            _RailBuildInfo("_skill_retrieval_prompt_rail", self._build_skill_retrieval_prompt_rail),
             _RailBuildInfo("_stream_event_rail", self._build_stream_event_rail),
             _RailBuildInfo("_security_rail", self._build_security_rail),
             _RailBuildInfo("_lsp_rail", self._build_lsp_rail_via_config),
@@ -652,7 +667,16 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
             return None
 
     def _build_agent_mode_rail(self) -> AgentModeRail | None:
-        """构建 CodeAgentModeRail（plan 退出需用户批准后生效）."""
+        """构建 CodeAgentModeRail。
+
+        与 Claude Code 对齐：
+        - ``plan_mode_system_note``: 静态注入 system prompt（KV-cache 友好），
+          告知 LLM 必须先调 ``enter_plan_mode``。
+        - ``enter_plan_instructions``: 追加到 ``enter_plan_mode`` 的 tool_result，
+          包含完整的 5-phase 工作流说明（指令在对话中，不在 system prompt）。
+        - ``exit_plan_notification``: 追加到 ``exit_plan_mode`` 的 tool_result，
+          显式告知 LLM 已退出 plan 模式，可以开始编辑文件。
+        """
         try:
             from jiuwenswarm.agents.harness.code.rails.code_agent_mode_rail import (
                 CodeAgentModeRail,
@@ -660,6 +684,9 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
 
             return CodeAgentModeRail(
                 allowed_tools=_CODE_PLAN_ALLOWED_TOOLS,
+                plan_mode_system_note=_PLAN_MODE_SYSTEM_NOTE,
+                enter_plan_instructions=_ENTER_PLAN_MODE_INSTRUCTIONS_EN,
+                exit_plan_notification=_EXIT_PLAN_MODE_NOTIFICATION,
             )
         except Exception as exc:
             logger.warning("[JiuwenSwarmCodeAdapter] CodeAgentModeRail create failed: %s", exc)
@@ -689,7 +716,7 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
                 CodeConfirmInterruptRail,
             )
 
-            # exit_plan_mode 由 PlanApprovalRail 负责计划审批，不再走 ConfirmInterrupt。
+            # exit_plan_mode 由 PlanApprovalInterruptRail 负责计划审批，不再走 ConfirmInterrupt。
             filtered = [name for name in (tool_names or []) if name != "exit_plan_mode"]
             return CodeConfirmInterruptRail(tool_names=filtered or ["switch_mode"])
         except Exception as exc:
@@ -987,6 +1014,7 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
         rail_specs = (
             ("_task_planning_rail", "TaskPlanningRail"),
             ("_skill_evolution_rail", "SkillEvolutionRail"),
+            ("_evolution_interrupt_rail", "EvolutionInterruptRail"),
         )
 
         for attr, label in rail_specs:
@@ -1040,14 +1068,18 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
             logger.warning("[JiuwenSwarmCodeAdapter] CodeAgentRail create failed: %s", exc)
             return None
 
-    def _build_plan_approval_rail(self) -> PlanApprovalRail | None:
-        """构建 PlanApprovalRail，管理 plan 审批生命周期。"""
+    def _build_plan_approval_rail(self) -> PlanApprovalInterruptRail | None:
+        """构建 PlanApprovalInterruptRail，管理 plan 审批生命周期。
+
+        ``exit_plan_mode`` 触发即时审批弹窗（对齐 Claude Code），
+        用户批准后立即恢复 normal 模式。
+        """
         try:
-            rail = PlanApprovalRail()
-            logger.info("[JiuwenSwarmCodeAdapter] PlanApprovalRail created")
+            rail = PlanApprovalInterruptRail()
+            logger.info("[JiuwenSwarmCodeAdapter] PlanApprovalInterruptRail created")
             return rail
         except Exception as exc:
-            logger.warning("[JiuwenSwarmCodeAdapter] PlanApprovalRail create failed: %s", exc)
+            logger.warning("[JiuwenSwarmCodeAdapter] PlanApprovalInterruptRail create failed: %s", exc)
             return None
 
     def _get_current_agent_rails(
@@ -1056,7 +1088,7 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
         """扩展父类方法，将 Code/Plan 专属 Rail 纳入热重载范围。
 
         父类 _get_current_agent_rails 只返回 skill/context/memory 等 rail，
-        CodeAgentRail 和 PlanApprovalRail 不在其中。覆盖此方法确保 config reload
+        CodeAgentRail 和 PlanApprovalInterruptRail 不在其中。覆盖此方法确保 config reload
         时这些 rail 被正确重新初始化。
         """
         rails_list = super()._get_current_agent_rails(config, config_base)
@@ -1253,20 +1285,35 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
             logger.warning("[JiuwenSwarmCodeAdapter] skill_toolkit build failed: %s", exc)
             return None
 
+    def _skill_retrieval_tools_enabled_for_runtime(
+        self,
+        config_base: dict[str, Any] | None = None,
+    ) -> bool:
+        """Respect code-mode configured tools during runtime skill retrieval sync."""
+        if not super()._skill_retrieval_tools_enabled_for_runtime(config_base):
+            return False
+        config = config_base if isinstance(config_base, dict) else get_config()
+        configured_tools = config.get("modes", {}).get("code", {}).get("tools") or []
+        return "skill_retrieval" in configured_tools
+
     def _build_skill_retrieval_toolkit(self, agent_id: str) -> list[Any] | None:
         """构建 SkillRetrievalToolkit 工具（不注册到 Runner，由 _get_tool_cards 统一注册）."""
-        if not is_skill_retrieval_enabled():
-            logger.info("[JiuwenClawCodeAdapter] SkillRetrievalToolkit skipped: disabled")
+        if not self._skill_retrieval_tools_enabled_for_runtime():
+            logger.info("[JiuwenSwarmCodeAdapter] SkillRetrievalToolkit skipped: disabled")
             return None
         try:
-            skill_retrieval_toolkit = SkillRetrievalToolkit(manager=self._skill_manager)
+            tools = self._create_skill_retrieval_tools()
+            if not tools:
+                return None
+            self._skill_retrieval_tools = tools
+            self._skill_retrieval_tools_registered = bool(tools)
             logger.info(
-                "[JiuwenClawCodeAdapter] SkillRetrievalToolkit built: tools=%s",
-                [t.card.name for t in skill_retrieval_toolkit.get_tools()],
+                "[JiuwenSwarmCodeAdapter] SkillRetrievalToolkit built: tools=%s",
+                [tool.card.name for tool in tools],
             )
-            return skill_retrieval_toolkit.get_tools()
+            return tools
         except Exception as exc:
-            logger.warning("[JiuwenClawCodeAdapter] skill_retrieval build failed: %s", exc)
+            logger.warning("[JiuwenSwarmCodeAdapter] skill_retrieval build failed: %s", exc)
             return None
 
     def _build_acp_chat_tool(self, agent_id: str) -> Any | None:

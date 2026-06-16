@@ -11,8 +11,6 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from openjiuwen.harness.prompts.prompt_attachment_manager import PromptAttachmentManager
-
 from jiuwenswarm.agents.harness.common.rails import project_memory_rail as _rail_mod
 from jiuwenswarm.agents.harness.common.rails.project_memory import SECTION_NAME
 from jiuwenswarm.agents.harness.common.rails.project_memory import (
@@ -60,7 +58,6 @@ def _make_agent_with_builder() -> MagicMock:
     builder.remove_section = MagicMock(side_effect=_remove)
     agent = MagicMock()
     agent.system_prompt_builder = builder
-    agent.prompt_attachment_manager = PromptAttachmentManager()
     return agent
 
 
@@ -73,19 +70,18 @@ def _make_ctx(agent: MagicMock, session_id: str = "sess1") -> SimpleNamespace:
     )
 
 
-async def _project_memory_attachment(agent: MagicMock, session_id: str = "sess1"):
-    items = await agent.prompt_attachment_manager.collect_for_turn(session_id, "turn1")
-    project_items = [item for item in items if item.id.endswith(".project_memory")]
-    return project_items[-1] if project_items else None
+async def _project_memory_section(agent: MagicMock):
+    for section in reversed(agent.system_prompt_builder.added_sections):
+        if section.name == SECTION_NAME:
+            return section
+    return None
 
 
 async def _project_memory_body(agent: MagicMock, language: str = "en") -> str:
-    item = await _project_memory_attachment(agent)
-    if item is None:
-        return ""
-    if language == "cn" and "## Project Memory" in item.content:
-        return item.content
-    return item.content
+    for section in reversed(agent.system_prompt_builder.added_sections):
+        if section.name == SECTION_NAME:
+            return section.render(language)
+    return ""
 
 
 @pytest.mark.asyncio
@@ -100,11 +96,10 @@ async def test_loads_jiuwenswarm_md_from_root():
         rail.init(agent)
         await rail.before_model_call(ctx=_make_ctx(agent))
 
-        section = await _project_memory_attachment(agent)
+        section = await _project_memory_section(agent)
         assert section is not None
-        assert section.id == "session.sess1.project_memory"
-        assert "PROJECT RULE 1" in section.content
-        agent.system_prompt_builder.add_section.assert_not_called()
+        assert "PROJECT RULE 1" in section.render("en")
+        agent.system_prompt_builder.add_section.assert_called()
 
 
 @pytest.mark.asyncio
@@ -119,9 +114,9 @@ async def test_section_is_bilingual_with_localized_headers():
         rail.init(agent)
         await rail.before_model_call(ctx=_make_ctx(agent))
 
-        section = await _project_memory_attachment(agent)
+        section = await _project_memory_section(agent)
         assert section is not None
-        assert "Project Memory" in section.content
+        assert "Project Memory" in section.render("en")
 
 
 @pytest.mark.asyncio
@@ -170,7 +165,7 @@ async def test_empty_directory_no_section():
         rail.init(agent)
         await rail.before_model_call(ctx=_make_ctx(agent))
 
-        assert await _project_memory_attachment(agent) is None
+        assert await _project_memory_section(agent) is None
 
 
 @pytest.mark.asyncio
@@ -225,7 +220,7 @@ async def test_ignores_legacy_runtime_files():
         rail.init(agent)
         await rail.before_model_call(ctx=_make_ctx(agent))
 
-        assert await _project_memory_attachment(agent) is None
+        assert await _project_memory_section(agent) is None
 
 
 @pytest.mark.asyncio
@@ -332,7 +327,7 @@ async def test_conditional_rule_skips_nonmatching_workspace():
         rail.init(agent)
         await rail.before_model_call(ctx=_make_ctx(agent))
 
-        assert await _project_memory_attachment(agent) is None
+        assert await _project_memory_section(agent) is None
 
 
 @pytest.mark.asyncio
@@ -369,7 +364,7 @@ async def test_frontmatter_at_end_of_file_stripped():
         rail.init(agent)
         await rail.before_model_call(ctx=_make_ctx(agent))
 
-        assert await _project_memory_attachment(agent) is None
+        assert await _project_memory_section(agent) is None
 
 
 @pytest.mark.asyncio
@@ -383,10 +378,11 @@ async def test_uninit_clears_section():
         agent = _make_agent_with_builder()
         rail.init(agent)
         await rail.before_model_call(ctx=_make_ctx(agent))
-        assert await _project_memory_attachment(agent) is not None
+        assert await _project_memory_section(agent) is not None
 
         rail.uninit(agent)
-        assert agent.system_prompt_builder.remove_section.call_count == 0
+        agent.system_prompt_builder.remove_section.assert_any_call(SECTION_NAME)
+        assert await _project_memory_section(agent) is None
 
 
 @pytest.mark.asyncio
@@ -510,9 +506,9 @@ async def test_b1_parent_set_workspace_does_not_break_path_resolution():
         rail.init(agent)
         await rail.before_model_call(ctx=_make_ctx(agent))
 
-        section = await _project_memory_attachment(agent)
+        section = await _project_memory_section(agent)
         assert section is not None
-        assert "STILL-WORKING" in section.content
+        assert "STILL-WORKING" in section.render("en")
 
 
 @pytest.mark.asyncio
@@ -529,9 +525,9 @@ async def test_b1_no_workspace_falls_back_to_constructor_path():
         rail.init(agent)
         await rail.before_model_call(ctx=_make_ctx(agent))
 
-        section = await _project_memory_attachment(agent)
+        section = await _project_memory_section(agent)
         assert section is not None
-        assert "FROM-CTOR-PATH" in section.content
+        assert "FROM-CTOR-PATH" in section.render("en")
 
 
 @pytest.mark.asyncio

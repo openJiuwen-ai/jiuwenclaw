@@ -772,6 +772,23 @@ export function parseHistoryFrame(frame: EventFrame): HistoryItem | null {
     };
   }
 
+  if (eventType === "context.rewind_summary") {
+    const content = pickFirstString(record, ["content", "text", "body"]) ?? "";
+    if (!content) return null;
+    return {
+      kind: "info",
+      id,
+      sessionId,
+      content,
+      icon: "i",
+      meta: {
+        view: "rewind_summary",
+        title: "Summarized conversation",
+      },
+      at,
+    };
+  }
+
   if (
     eventType === "context.usage" ||
     eventType === "chat.subtask_update" ||

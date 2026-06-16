@@ -7,7 +7,7 @@
 ## 1. Overview
 
 - **Liveness**: Sends on a fixed interval to confirm the service is up.
-- **Optional tasks**: If `HEARTBEAT.md` exists under the workspace, the agent runs “active task items” in order and writes results back; otherwise the response is `HEARTBEAT_OK`.
+- **Optional tasks**: If `workspace/HEARTBEAT.md` exists under the project root, the agent runs “active task items” in order and returns the results; otherwise the response is `HEARTBEAT_OK`.
 - **Relay**: Heartbeat responses can be forwarded to a configured channel (e.g. web) for UI display.
 
 ---
@@ -54,7 +54,7 @@ Env vars override the `heartbeat` section in `config/config.yaml`.
 
 Open **Heartbeat** in the sidebar to:
 
-- View current interval, relay target, and active window  
+- View the current heartbeat configuration (interval, relay target, and active window)
 ![](../assets/images/heartbeat1.png)
 - Edit and save (writes `config.yaml` and restarts the heartbeat service)  
 ![](../assets/images/heartbeat2.png)
@@ -67,21 +67,20 @@ Open **Heartbeat** in the sidebar to:
 
 ### 3.1 Location and role
 
-- **Path**: `workspace/HEARTBEAT.md` at the workspace root (same file as in the UI; you can click **Edit** in the panel).  
+- **Path**: In the web UI, the file appears on the right side of the panel and can be changed by clicking **Edit**.
 ![](../assets/images/heartbeat5.png)
-- **Role**: If the file exists and lists tasks, each heartbeat run parses and executes them; otherwise only `HEARTBEAT_OK` is returned.
+- **Role**: If the file exists and lists tasks, each heartbeat run parses and executes them and returns the results; otherwise only `HEARTBEAT_OK` is returned.
 
 ### 3.2 Agent behavior
 
-- Each heartbeat includes instructions to read active items from `HEARTBEAT.md` and complete them; otherwise reply `HEARTBEAT_OK`.
-- The server reads `workspace/HEARTBEAT.md`, builds a chat request, and runs the normal flow; on empty/parse failure, returns `HEARTBEAT_OK`.
+- The server reads `HEARTBEAT.md`, parses the task list, builds a chat request, and runs the normal flow. If parsing fails or the task list is empty, it returns `HEARTBEAT_OK`; otherwise, it executes the tasks and returns the response.
 
 ---
 
 ## 4. Web UI and events
 
-- **Status**: The heartbeat panel/toolbar shows last status (“OK” / alert), last body, and time.
-- **Events**: When `target` is `web`, responses are pushed via `heartbeat.relay`; non-`HEARTBEAT_OK` content may trigger a popup.  
+- **Status**: The heartbeat panel and toolbar show the latest heartbeat information (such as `HEARTBEAT_OK`) and time.
+- **Events**: When `target` is `web`, each heartbeat response is pushed to the frontend through the `heartbeat.relay` event to update status and history. Content other than `HEARTBEAT_OK` is displayed in a popup so task results or errors can be viewed.
 ![](../assets/images/heartbeat4.png)
 
 ---
@@ -98,13 +97,13 @@ A: Set `heartbeat.active_hours.start` / `end`, e.g. `09:00`–`18:00`.
 A: Set `HEARTBEAT_TIMEOUT` (seconds). On timeout the beat is marked failed and a WARNING is logged.
 
 **Q: Where must `HEARTBEAT.md` live?**
-A: At the DeepAgent workspace root: `~/.jiuwenswarm/agent/jiuwenswarm_workspace/HEARTBEAT.md` (in installed mode) or `jiuwenswarm/resources/agent/jiuwenswarm_workspace/HEARTBEAT.md` (in source mode). Otherwise it is treated as no custom tasks.
+A: At the DeepAgent workspace root: `~/.jiuwenswarm/agent/workspace/HEARTBEAT.md`. Otherwise it is treated as no custom tasks and only `HEARTBEAT_OK` is returned.
 
 ---
 
 ## 6. Code index
 
-- Service: `jiuwenswarm/gateway/heartbeat.py` (`GatewayHeartbeatService`, `HeartbeatConfig`).
-- Config: `config/config.py` (`update_heartbeat_in_config`); `app.py` builds `HeartbeatConfig` from YAML + env.
-- Agent: `jiuwenswarm/server/runtime/agent_adapter/interface.py` reads `HEARTBEAT.md` when `request.params` indicates heartbeat.
+- Service: `jiuwenswarm/gateway/heartbeat/heartbeat.py`.
+- Config: `jiuwenswarm/common/config.py` (`update_heartbeat_in_config`); at startup, `app.py` builds `HeartbeatConfig` from the `heartbeat` section of `~/.jiuwenswarm/config/config.yaml` and environment variables.
+- Agent: `jiuwenswarm/server/runtime/agent_adapter/interface_deep.py` determines whether the current session is a heartbeat session, then reads `HEARTBEAT.md` and triggers the tasks.
 - Web: `jiuwenswarm/channels/web/frontend/src/components/HeartbeatPanel/`, `heartbeat.get_conf` / `heartbeat.set_conf`, `heartbeat.relay`.

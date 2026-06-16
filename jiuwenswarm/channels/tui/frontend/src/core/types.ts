@@ -28,7 +28,7 @@ export interface SystemMeta {
 }
 
 export interface InfoMeta {
-  view?: "help" | "list" | "kv" | "dim" | "compact_boundary" | "compact_summary";
+  view?: "help" | "list" | "kv" | "dim" | "compact_boundary" | "compact_summary" | "rewind_summary";
   title?: string;
   items?: Array<{ label: string; value?: string; description?: string }>;
   groups?: Array<{
@@ -88,7 +88,7 @@ export interface ContextCompressionStats {
   trigger?: "manual" | "auto";
 }
 
-export type TodoStatus = "pending" | "in_progress" | "completed";
+export type TodoStatus = "pending" | "in_progress" | "completed" | "error";
 
 export interface TodoItem {
   id: string;

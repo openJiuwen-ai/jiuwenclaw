@@ -1,10 +1,12 @@
 import asyncio
 import json
+from unittest.mock import Mock
 
 import pytest
 
 from jiuwenswarm.server import agent_ws_server as agent_ws_server_module
 from jiuwenswarm.common.schema.agent import AgentRequest, AgentResponse, AgentResponseChunk
+from jiuwenswarm.server.runtime.agent_adapter import interface_deep as interface_deep_module
 
 
 class FakeWebSocket:
@@ -279,6 +281,246 @@ def test_build_inputs_does_not_map_team_plan_approval_answers_to_interactive_inp
     inputs, _, _ = interface_module.JiuWenSwarm().build_inputs(request)
 
     assert not isinstance(inputs["query"], InteractiveInput)
+
+
+def test_build_inputs_maps_skill_evolution_interrupt_answers_to_actions(monkeypatch):
+    from openjiuwen.core.session.interaction.interactive_input import InteractiveInput
+    from jiuwenswarm.server.runtime.agent_adapter import interface as interface_module
+
+    monkeypatch.setattr(interface_module, "get_config", lambda: {"preferred_language": "zh"})
+    monkeypatch.setattr(interface_module, "get_memory_mode", lambda _config: "disabled")
+
+    expected_actions = {
+        "accept": "allow_once",
+        "接收": "allow_once",
+        "接受": "allow_once",
+        "allow_once": "allow_once",
+        "本次允许": "allow_once",
+        "allow_always": "allow_always",
+        "总是允许": "allow_always",
+        "reject": "reject",
+        "拒绝": "reject",
+    }
+    for selected_option, expected_action in expected_actions.items():
+        request = AgentRequest(
+            request_id="req-answer",
+            channel_id="web",
+            session_id="web_session",
+            params={
+                "query": "",
+                "request_id": "call_123",
+                "answers": [{"selected_options": [selected_option], "custom_input": ""}],
+                "source": "skill_evolution_approval",
+            },
+        )
+
+        inputs, _, _ = interface_module.JiuWenSwarm().build_inputs(request)
+        interactive_input = inputs["query"]
+
+        assert isinstance(interactive_input, InteractiveInput)
+        assert interactive_input is not None
+        assert interactive_input.user_inputs["call_123"] == {"action": expected_action}
+        assert "approved" not in interactive_input.user_inputs["call_123"]
+
+
+def test_deep_adapter_registers_evolution_interrupt_rail_before_skill_evolution(monkeypatch):
+    from jiuwenswarm.server.runtime.agent_adapter.interface_deep import JiuWenSwarmDeepAdapter
+
+    class FakeSkillEvolutionRail:
+        pass
+
+    class FakeEvolutionInterruptRail:
+        pass
+
+    class FakeSubagentRail:
+        pass
+
+    class FakeAbilityManager:
+        @staticmethod
+        def list():
+            return []
+
+    class FakeInstance:
+        def __init__(self):
+            self.registered = []
+            self.ability_manager = FakeAbilityManager()
+
+        async def register_rail(self, rail):
+            self.registered.append(rail)
+
+        async def unregister_rail(self, _rail):
+            pass
+
+        def find_rails_by_type(self, rail_types):
+            return [rail for rail in self.registered if isinstance(rail, rail_types)]
+
+    class FakeSkillManager:
+        @staticmethod
+        def list_execution_disabled_skills():
+            return []
+
+    adapter = JiuWenSwarmDeepAdapter()
+    adapter._instance = FakeInstance()  # pylint: disable=protected-access
+    adapter._config_cache = {  # pylint: disable=protected-access
+        "evolution": {"enabled": True},
+        "context_engineering": {"enabled": False},
+    }
+    adapter._skill_manager = FakeSkillManager()  # pylint: disable=protected-access
+
+    async def _noop(*_args, **_kwargs):
+        return None
+
+    monkeypatch.setattr(adapter, "_build_task_planning_rail", lambda: None)
+    monkeypatch.setattr(adapter, "_handle_memory_rail_by_config", _noop)
+    monkeypatch.setattr(adapter, "_handle_external_memory_rail_by_config", _noop)
+    monkeypatch.setattr(interface_deep_module, "SkillEvolutionRail", FakeSkillEvolutionRail)
+    monkeypatch.setattr(interface_deep_module, "EvolutionInterruptRail", FakeEvolutionInterruptRail)
+    monkeypatch.setattr(interface_deep_module, "SubagentRail", FakeSubagentRail)
+
+    async def _fake_configure(agent, **_kwargs):
+        await agent.register_rail(FakeEvolutionInterruptRail())
+        await agent.register_rail(FakeSkillEvolutionRail())
+
+    monkeypatch.setattr(
+        interface_deep_module,
+        "configure_skill_evolution_runtime",
+        _fake_configure,
+    )
+
+    asyncio.run(adapter._update_rails_for_mode("agent.plan"))  # pylint: disable=protected-access
+
+    registered = adapter._instance.registered  # pylint: disable=protected-access
+    interrupt_index = next(
+        index for index, rail in enumerate(registered) if isinstance(rail, FakeEvolutionInterruptRail)
+    )
+    skill_evolution_index = next(
+        index for index, rail in enumerate(registered) if isinstance(rail, FakeSkillEvolutionRail)
+    )
+    assert interrupt_index < skill_evolution_index
+
+
+def test_deep_adapter_unregisters_evolution_runtime_rails_when_leaving_plan(monkeypatch):
+    from jiuwenswarm.server.runtime.agent_adapter.interface_deep import JiuWenSwarmDeepAdapter
+
+    class FakeInstance:
+        def __init__(self):
+            self.unregistered = []
+
+        async def unregister_rail(self, rail):
+            self.unregistered.append(rail)
+
+    async def _noop(*_args, **_kwargs):
+        return None
+
+    adapter = JiuWenSwarmDeepAdapter()
+    adapter._instance = FakeInstance()  # pylint: disable=protected-access
+    adapter._task_planning_rail = "task-planning-rail"  # pylint: disable=protected-access
+    adapter._subagent_rail = "subagent-rail"  # pylint: disable=protected-access
+    adapter._evolution_interrupt_rail = "evolution-interrupt-rail"  # pylint: disable=protected-access
+    adapter._skill_evolution_rail = "skill-evolution-rail"  # pylint: disable=protected-access
+    adapter._context_assemble_rail = "agent-context-assemble-rail"  # pylint: disable=protected-access
+    adapter._context_assemble_mode = "agent.fast"  # pylint: disable=protected-access
+
+    monkeypatch.setattr(adapter, "_handle_memory_rail_by_config", _noop)
+    monkeypatch.setattr(adapter, "_handle_external_memory_rail_by_config", _noop)
+    monkeypatch.setattr(interface_deep_module, "_build_context_processor_rail", lambda _config: None)
+
+    asyncio.run(adapter._update_rails_for_mode("agent.fast"))  # pylint: disable=protected-access
+
+    assert adapter._instance.unregistered[:4] == [  # pylint: disable=protected-access
+        "task-planning-rail",
+        "skill-evolution-rail",
+        "evolution-interrupt-rail",
+        "subagent-rail",
+    ]
+    assert adapter._skill_evolution_rail is None  # pylint: disable=protected-access
+    assert adapter._evolution_interrupt_rail is None  # pylint: disable=protected-access
+    assert adapter._subagent_rail is None  # pylint: disable=protected-access
+
+
+def test_deep_adapter_reconfigures_plan_evolution_rails_idempotently(monkeypatch, tmp_path):
+    from jiuwenswarm.server.runtime.agent_adapter.interface_deep import JiuWenSwarmDeepAdapter
+
+    class FakeAbilityManager:
+        @staticmethod
+        def list():
+            return []
+
+    class FakeInstance:
+        def __init__(self):
+            self._pending_rails = []
+            self._registered_rails = []
+            self.ability_manager = FakeAbilityManager()
+
+        def add_rail(self, rail):
+            self._pending_rails.append(rail)
+            return self
+
+        async def register_rail(self, rail):
+            self._registered_rails.append(rail)
+            self._pending_rails = [queued for queued in self._pending_rails if queued is not rail]
+            return self
+
+        def find_rails_by_type(self, rail_types):
+            return [
+                rail
+                for rail in (*self._pending_rails, *self._registered_rails)
+                if isinstance(rail, rail_types)
+            ]
+
+        def strip_rails_by_type(self, rail_types):
+            removed = 0
+            kept_pending = []
+            for rail in self._pending_rails:
+                if isinstance(rail, rail_types):
+                    removed += 1
+                else:
+                    kept_pending.append(rail)
+            kept_registered = []
+            for rail in self._registered_rails:
+                if isinstance(rail, rail_types):
+                    removed += 1
+                else:
+                    kept_registered.append(rail)
+            self._pending_rails = kept_pending
+            self._registered_rails = kept_registered
+            return removed
+
+    class FakeSkillManager:
+        @staticmethod
+        def list_execution_disabled_skills():
+            return []
+
+    adapter = JiuWenSwarmDeepAdapter()
+    adapter._instance = FakeInstance()  # pylint: disable=protected-access
+    adapter._config_cache = {  # pylint: disable=protected-access
+        "evolution": {"enabled": True, "auto_scan": False},
+        "model_name": "configured-model",
+    }
+    adapter._skill_manager = FakeSkillManager()  # pylint: disable=protected-access
+    adapter._model = Mock()  # pylint: disable=protected-access
+
+    monkeypatch.setattr(interface_deep_module, "get_agent_skills_dir", lambda: tmp_path)
+
+    asyncio.run(adapter._ensure_active_evolution_rails_registered())  # pylint: disable=protected-access
+    asyncio.run(adapter._ensure_active_evolution_rails_registered())  # pylint: disable=protected-access
+
+    registered = adapter._instance._registered_rails  # pylint: disable=protected-access
+    assert (
+        sum(
+            isinstance(rail, interface_deep_module.EvolutionInterruptRail)
+            for rail in registered
+        )
+        == 1
+    )
+    assert (
+        sum(
+            isinstance(rail, interface_deep_module.SkillEvolutionRail)
+            and not isinstance(rail, interface_deep_module.EvolutionInterruptRail)
+            for rail in registered
+        )
+        == 1
+    )
 
 
 def test_deep_adapter_handle_user_answer_ignores_team_plan_approval_compat(monkeypatch):

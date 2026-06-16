@@ -279,8 +279,14 @@ example, textResult[].translateText may become translated_text with type text.
 If the document says to send, show, return, or provide something in markdown,
 markdown delivery instructions must be represented as markdown outputs.
 
-Use name for the semantic role and type for the data format or carrier that is
-passed between Skills.
+Use name for the semantic role and type for the artifact kind or concrete
+format that is passed between Skills. For media resources, prefer the media
+artifact type even when the runtime value is a URL, local path, file reference,
+base64 string, or bytes string. For example, imageUrl, translated_image_url,
+and image base64 should use type=image. audio_url, audioUrl, audio_file_path,
+and audio base64 should use type=audio. video_url, videoUrl, video_path, and
+mp4_url should use type=video. Use type=url for ordinary links, webpages,
+download links, or non-media remote references.
 
 Prefer these type values:
 text, markdown, json, csv, table, yaml, xml, pdf, html, docx, pptx, xlsx,
@@ -288,7 +294,10 @@ image, png, jpg, svg, webp, gif, audio, video, file, path, url, code,
 archive, unknown.
 
 For example, a PDF paper should use name=paper and type=pdf. A markdown
-summary should use name=summary and type=markdown.
+summary should use name=summary and type=markdown. A generated image URL should
+use name=image or translated_image_url and type=image, with URL details in the
+description. Generated audio/video URLs should similarly use type=audio or
+type=video, not type=url.
 
 Use input and output names as canonical semantic vocab terms for graph linking. Prefer
 short noun roles such as query, topic, url, paper, summary, report, table,
@@ -300,6 +309,12 @@ control/configuration inputs such as target_language, output_format, limit, or
 command when the caller must provide them for normal execution. Do not turn
 environment setup, API keys, permissions, installed tools, caches, or persistent
 local configuration into inputs; mention them in warnings when relevant.
+
+If an input is a user's natural-language task, request, instruction, topic, or
+free-form text to be interpreted by the Skill, name it text, query, or topic
+instead of command. Reserve command for true control commands such as CLI
+subcommands, action enums, command-line flags, execution switches, or a closed
+set of operation names.
 
 Set required=true only when the caller must provide the value for normal
 execution. Use required=false for optional preferences, limits, defaults, or

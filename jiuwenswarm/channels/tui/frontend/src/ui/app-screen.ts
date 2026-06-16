@@ -14,7 +14,9 @@ import {
   truncateToWidth,
 } from "@mariozechner/pi-tui";
 import { spawnSync } from "node:child_process";
-import { statSync } from "node:fs";
+import * as fs from "node:fs";
+import * as path from "node:path";
+import * as os from "node:os";
 import type { CliPiAppState } from "../app-state.js";
 import { openFileInEditor as openInExternalEditor } from "../core/utils/editor.js";
 import {
@@ -23,6 +25,7 @@ import {
   findAttachmentTokenAtCursor,
   formatAttachmentMention,
   isImageAttachment,
+  isPurePathPaste,
   isSupportedAttachment,
   syncComposerImageTokens,
 } from "../core/attachments.js";
@@ -49,6 +52,9 @@ import {
   countCompletedWorkflowAgents,
   countWorkflowAgents,
   findWorkflowAgent,
+  formatWorkflowTimingText,
+  runningWorkflowsBannerText,
+  workflowStatusBannerText,
   workflowStatusIcon,
   type WorkflowRun,
   type WorkflowStatus,
@@ -61,6 +67,7 @@ import {
   setCurrentCwd,
   setCurrentProjectDir,
 } from "../core/tui-trusted-dirs-store.js";
+import { consumeParseError } from "../core/tui-config-store.js";
 import { handleAppScreenKeyInput } from "./keymap.js";
 import { buildAppScreenLines } from "./screen-layout.js";
 import { buildTranscriptLines } from "./transcript-renderer.js";
@@ -70,7 +77,7 @@ import {
   teamWorkingStartedAtMs,
 } from "./components/team-shared.js";
 import { padToWidth, renderWrappedText } from "./rendering/text.js";
-import { editorTheme, palette, selectListTheme, setCurrentThemeName } from "./theme.js";
+import { chalk, editorTheme, palette, selectListTheme, setCurrentThemeName } from "./theme.js";
 
 const END_CURSOR = "\x1b[7m \x1b[0m";
 const ENABLE_MOUSE_TRACKING = "\x1b[?1000h\x1b[?1006h";
@@ -84,6 +91,8 @@ const SWARM_WORKFLOW_AGENT_TEXT_PREVIEW_ROWS = 6;
 const PERMISSION_TOOL_RE = /工具\s+`([^`]+)`\s+需要授权/;
 const CONFIRM_TOOL_RE = /(?:Tool|工具)\s*:\s*`([^`]+)`/i;
 const CONFIRM_ACTION_RE = /\*\*(?:Agent wants to|Tool `[^`]+` requires your approval)([^*]*)\*\*/i;
+const PLAN_APPROVAL_RE = /\*\*(?:Plan Approval|计划审批)\*\*/i;
+const PLAN_REJECT_INPUT_RE = /(\s+\[ .+ \])$/;
 const PERMISSION_RISK_RE = /安全风险评估：\**\s*([^\s*]+)?\s*\**([^*\n]+?风险)\**/m;
 const PERMISSION_QUOTE_RE = /^>\s*(.+)$/gm;
 const PERMISSION_JSON_BLOCK_RE = /```json\s*([\s\S]*?)\s*```/i;
@@ -156,6 +165,13 @@ type ResumeSessionListState = {
   sessions: SessionMeta[];
   total: number;
   searchQuery: string;
+  showAllProjects: boolean;
+  branchFilterEnabled: boolean;
+  currentBranch: string;
+  /** 非空时进入只读预览态（Space 触发，对齐 Claude Code preview）：展示选中会话的信息卡 */
+  preview: SessionMeta | null;
+  /** 非空时进入重命名态（Ctrl+R 触发，对齐 Claude Code Ctrl+R）：编辑选中会话标题 */
+  rename: { sessionId: string; value: string } | null;
 };
 
 type ModelListState = {
@@ -290,10 +306,188 @@ type FileViewerState = {
   searchTerm: string;    // Search term
 };
 
-class ComposerAutocompleteProvider implements AutocompleteProvider {
-  constructor(private readonly inner: AutocompleteProvider) {}
+const PATH_DELIMITERS = new Set([" ", "\t", '"', "'", "="]);
 
-  getSuggestions(
+function findLastPathDelimiter(text: string): number {
+  for (let i = text.length - 1; i >= 0; i--) {
+    if (PATH_DELIMITERS.has(text[i] ?? "")) return i;
+  }
+  return -1;
+}
+
+function isPathTokenStart(text: string, index: number): boolean {
+  return index === 0 || PATH_DELIMITERS.has(text[index - 1] ?? "");
+}
+
+function extractQuotedAtPrefix(text: string): string | null {
+  let inQuotes = false;
+  let quoteStart = -1;
+  for (let i = 0; i < text.length; i++) {
+    if (text[i] === '"') {
+      inQuotes = !inQuotes;
+      if (inQuotes) quoteStart = i;
+    }
+  }
+  if (!inQuotes) return null;
+  if (quoteStart > 0 && text[quoteStart - 1] === "@") {
+    if (!isPathTokenStart(text, quoteStart - 1)) return null;
+    return text.slice(quoteStart - 1);
+  }
+  if (!isPathTokenStart(text, quoteStart)) return null;
+  return text.slice(quoteStart);
+}
+
+function extractAtPrefix(textBeforeCursor: string): string | null {
+  const quotedPrefix = extractQuotedAtPrefix(textBeforeCursor);
+  if (quotedPrefix?.startsWith('@"')) return quotedPrefix;
+  const lastDelim = findLastPathDelimiter(textBeforeCursor);
+  const tokenStart = lastDelim === -1 ? 0 : lastDelim + 1;
+  if (textBeforeCursor[tokenStart] === "@") {
+    return textBeforeCursor.slice(tokenStart);
+  }
+  return null;
+}
+
+interface ParsedPathPrefix {
+  rawPrefix: string;
+  isAtPrefix: boolean;
+  isQuotedPrefix: boolean;
+}
+
+function parseAtPathPrefix(prefix: string): ParsedPathPrefix {
+  if (prefix.startsWith('@"')) return { rawPrefix: prefix.slice(2), isAtPrefix: true, isQuotedPrefix: true };
+  if (prefix.startsWith('"')) return { rawPrefix: prefix.slice(1), isAtPrefix: false, isQuotedPrefix: true };
+  if (prefix.startsWith("@")) return { rawPrefix: prefix.slice(1), isAtPrefix: true, isQuotedPrefix: false };
+  return { rawPrefix: prefix, isAtPrefix: false, isQuotedPrefix: false };
+}
+
+function expandHomePrefix(filePath: string): string {
+  if (filePath.startsWith("~/")) {
+    const expanded = path.join(os.homedir(), filePath.slice(2));
+    return filePath.endsWith("/") && !expanded.endsWith(path.sep) ? `${expanded}/` : expanded;
+  }
+  if (filePath === "~") return os.homedir();
+  return filePath;
+}
+
+function buildAtCompletionValue(filePath: string, opts: { isAtPrefix: boolean; isQuotedPrefix: boolean }): string {
+  const needsQuotes = opts.isQuotedPrefix || filePath.includes(" ");
+  const at = opts.isAtPrefix ? "@" : "";
+  if (!needsQuotes) return `${at}${filePath}`;
+  return `${at}"${filePath}"`;
+}
+
+function fallbackAtFileSuggestions(
+  textBeforeCursor: string,
+  cwd: string,
+): { items: AutocompleteItem[]; prefix: string } | null {
+  const atPrefix = extractAtPrefix(textBeforeCursor);
+  if (!atPrefix) return null;
+
+  const { rawPrefix, isAtPrefix, isQuotedPrefix } = parseAtPathPrefix(atPrefix);
+  let expandedPrefix = rawPrefix;
+  if (expandedPrefix.startsWith("~")) {
+    expandedPrefix = expandHomePrefix(expandedPrefix);
+  }
+
+  const isRootPrefix =
+    rawPrefix === "" ||
+    rawPrefix === "./" ||
+    rawPrefix === "../" ||
+    rawPrefix === "~" ||
+    rawPrefix === "~/" ||
+    rawPrefix === "/" ||
+    (isAtPrefix && rawPrefix === "");
+
+  let searchDir: string;
+  let searchPrefix: string;
+
+  if (isRootPrefix) {
+    searchDir = rawPrefix.startsWith("~") || expandedPrefix.startsWith("/") ? expandedPrefix : path.join(cwd, expandedPrefix);
+    searchPrefix = "";
+  } else if (rawPrefix.endsWith("/")) {
+    searchDir = rawPrefix.startsWith("~") || expandedPrefix.startsWith("/") ? expandedPrefix : path.join(cwd, expandedPrefix);
+    searchPrefix = "";
+  } else {
+    const dir = path.dirname(expandedPrefix);
+    const file = path.basename(expandedPrefix);
+    searchDir = rawPrefix.startsWith("~") || expandedPrefix.startsWith("/") ? dir : path.join(cwd, dir);
+    searchPrefix = file;
+  }
+
+  let entries: fs.Dirent[];
+  try {
+    entries = fs.readdirSync(searchDir, { withFileTypes: true });
+  } catch {
+    return null;
+  }
+
+  const suggestions: AutocompleteItem[] = [];
+  for (const entry of entries) {
+    if (!entry.name.toLowerCase().startsWith(searchPrefix.toLowerCase())) continue;
+
+    let isDirectory = entry.isDirectory();
+    if (!isDirectory && entry.isSymbolicLink()) {
+      try {
+        isDirectory = fs.statSync(path.join(searchDir, entry.name)).isDirectory();
+      } catch {
+        continue;
+      }
+    }
+
+    const name = entry.name;
+    const displayPrefix = rawPrefix;
+    let relativePath: string;
+
+    if (displayPrefix.endsWith("/")) {
+      relativePath = displayPrefix + name;
+    } else if (displayPrefix.includes("/") || displayPrefix.includes("\\")) {
+      if (displayPrefix.startsWith("~/")) {
+        const homeRelativeDir = displayPrefix.slice(2);
+        const parentDir = path.dirname(homeRelativeDir);
+        relativePath = `~/${parentDir === "." ? name : path.join(parentDir, name)}`;
+      } else if (displayPrefix.startsWith("/")) {
+        const parentDir = path.dirname(displayPrefix);
+        relativePath = parentDir === "/" ? `/${name}` : `${parentDir}/${name}`;
+      } else {
+        relativePath = path.join(path.dirname(displayPrefix), name);
+        if (displayPrefix.startsWith("./") && !relativePath.startsWith("./")) {
+          relativePath = `./${relativePath}`;
+        }
+      }
+    } else {
+      relativePath = displayPrefix.startsWith("~") ? `~/${name}` : name;
+    }
+
+    relativePath = relativePath.replace(/\\/g, "/");
+    const pathValue = isDirectory ? `${relativePath}/` : relativePath;
+    const value = buildAtCompletionValue(pathValue, { isAtPrefix, isQuotedPrefix });
+    const displayLabel = relativePath + (isDirectory ? "/" : "");
+    suggestions.push({
+      value,
+      label: displayLabel,
+      description: isDirectory ? "directory" : undefined,
+    });
+  }
+
+  suggestions.sort((a, b) => {
+    const aIsDir = a.value.endsWith("/");
+    const bIsDir = b.value.endsWith("/");
+    if (aIsDir && !bIsDir) return -1;
+    if (!aIsDir && bIsDir) return 1;
+    return a.label.localeCompare(b.label);
+  });
+
+  return suggestions.length > 0 ? { items: suggestions, prefix: atPrefix } : null;
+}
+
+class ComposerAutocompleteProvider implements AutocompleteProvider {
+  constructor(
+    private readonly inner: AutocompleteProvider,
+    private readonly cwd: string,
+  ) {}
+
+  async getSuggestions(
     lines: string[],
     cursorLine: number,
     cursorCol: number,
@@ -305,10 +499,20 @@ class ComposerAutocompleteProvider implements AutocompleteProvider {
       textBeforeCursor.startsWith("/") && !textBeforeCursor.includes(" ");
 
     if (isCommandNameCompletion && cursorCol !== currentLine.length) {
-      return Promise.resolve(null);
+      return null;
     }
 
-    return this.inner.getSuggestions(lines, cursorLine, cursorCol, options);
+    const innerResult = await this.inner.getSuggestions(lines, cursorLine, cursorCol, options);
+    if (innerResult) return innerResult;
+
+    if (options.signal.aborted) return null;
+
+    const atPrefix = extractAtPrefix(textBeforeCursor);
+    if (atPrefix) {
+      return fallbackAtFileSuggestions(textBeforeCursor, this.cwd);
+    }
+
+    return null;
   }
 
   applyCompletion(
@@ -326,7 +530,16 @@ class ComposerAutocompleteProvider implements AutocompleteProvider {
       return { lines, cursorLine, cursorCol };
     }
 
-    return this.inner.applyCompletion(lines, cursorLine, cursorCol, item, prefix);
+    const result = this.inner.applyCompletion(lines, cursorLine, cursorCol, item, prefix);
+
+    if (prefix.startsWith("@") && !result.lines[result.cursorLine]?.endsWith(" ")) {
+      const line = result.lines[result.cursorLine] ?? "";
+      const newLines = [...result.lines];
+      newLines[result.cursorLine] = line + " ";
+      return { lines: newLines, cursorLine: result.cursorLine, cursorCol: result.cursorCol + 1 };
+    }
+
+    return result;
   }
 }
 
@@ -351,6 +564,10 @@ function resolveFdBinary(): string | null {
   return null;
 }
 
+export function isPlanApprovalRequest(source: string | undefined, questionText: string): boolean {
+  return source === "confirm_interrupt" && PLAN_APPROVAL_RE.test(questionText);
+}
+
 function isPermissionRequest(source: string | undefined, questionText: string): boolean {
   return (
     source === "permission_interrupt" ||
@@ -360,6 +577,24 @@ function isPermissionRequest(source: string | undefined, questionText: string): 
     CONFIRM_ACTION_RE.test(questionText) ||
     /\*\*Tool `/i.test(questionText)
   );
+}
+
+export function getPendingQuestionTitle(
+  source: string | undefined,
+  questionText: string,
+  progress: string,
+  activeQuestionIndex: number,
+  total: number,
+): string {
+  if (isPlanApprovalRequest(source, questionText)) {
+    return progress
+      ? `Exit Plan and Execute: ${activeQuestionIndex + 1}/${total}`
+      : "Exit Plan and Execute:";
+  }
+  if (source === "confirm_interrupt") {
+    return progress ? `Confirm ${activeQuestionIndex + 1}/${total}` : "Confirm action";
+  }
+  return progress ? `Permission ${activeQuestionIndex + 1}/${total}` : "Permission";
 }
 
 function parsePermissionSummary(questionText: string): PermissionSummary {
@@ -531,6 +766,18 @@ function normalizePermissionOptionLabel(label: string): string {
   return trimmed;
 }
 
+export function formatQuestionOptionLabelForDisplay(label: string, planApproval: boolean): string {
+  if (!planApproval) {
+    return normalizePermissionOptionLabel(label);
+  }
+  return isRejectOption(label) ? "Reject" : "Approve";
+}
+
+function isAlwaysAllowOption(label: string): boolean {
+  const normalized = label.trim();
+  return normalized.includes("总是允许") || /^always allow\b/i.test(normalized);
+}
+
 function isAllowOption(label: string): boolean {
   const normalized = label.trim();
   return normalized.includes("允许") || /^allow\b/i.test(normalized);
@@ -542,6 +789,76 @@ function isRejectOption(label: string): boolean {
     normalized.includes("拒绝") || /^reject\b/i.test(normalized) || /^deny\b/i.test(normalized)
   );
 }
+
+export function shouldCollectPlanRejectFeedback(
+  source: string | undefined,
+  questionText: string,
+  label: string,
+): boolean {
+  return isPlanApprovalRequest(source, questionText) && isRejectOption(label);
+}
+
+export function shouldAppendPlanRejectFeedback(
+  source: string | undefined,
+  questionText: string,
+  label: string,
+): boolean {
+  return shouldCollectPlanRejectFeedback(source, questionText, label);
+}
+
+export function getPlanRejectFeedbackHint(
+  feedback: string,
+  showCursor = false,
+  cursorIndex?: number,
+): string {
+  const trimmed = feedback.trim();
+  if (!showCursor) {
+    return `[ ${trimmed || "tell jiuwenswarm what to change"} ]`;
+  }
+  const cursor = Math.max(0, Math.min(cursorIndex ?? feedback.length, feedback.length));
+  return trimmed
+    ? `[ ${feedback.slice(0, cursor)}${END_CURSOR}${feedback.slice(cursor)} ]`
+    : `[ ${END_CURSOR}tell jiuwenswarm what to change ]`;
+}
+
+export function buildPlanApprovalQuestionItems(
+  options: Array<{ label: string; description?: string }>,
+  feedback: string,
+  showRejectCursor = false,
+  cursorIndex?: number,
+): SelectItem[] {
+  return options
+    .filter((option) => !isAlwaysAllowOption(option.label))
+    .map((option) => ({
+      value: option.label,
+      label: formatQuestionOptionLabelForDisplay(option.label, true),
+      description: isRejectOption(option.label)
+        ? getPlanRejectFeedbackHint(feedback, showRejectCursor, cursorIndex)
+        : undefined,
+    }));
+}
+
+export function getPlanApprovalListLayout(): {
+  minPrimaryColumnWidth: number;
+  maxPrimaryColumnWidth: number;
+} {
+  return { minPrimaryColumnWidth: 10, maxPrimaryColumnWidth: 10 };
+}
+
+const planApprovalSelectListTheme = {
+  ...selectListTheme,
+  selectedText: (value: string) => {
+    const match = PLAN_REJECT_INPUT_RE.exec(value);
+    if (!match?.index) {
+      return selectListTheme.selectedText(value);
+    }
+    return (
+      selectListTheme.selectedText(value.slice(0, match.index)) +
+      chalk.dim(match[1])
+    );
+  },
+  description: (value: string) => chalk.dim(value),
+};
 
 function wrapPlainText(text: string, width: number): string[] {
   const maxWidth = Math.max(12, width - 1);
@@ -594,13 +911,6 @@ function formatWorkflowStatus(status: WorkflowStatus): string {
   return workflowStatusTone(status)(`${workflowStatusIcon(status)} ${status}`);
 }
 
-function formatWorkflowElapsed(startedAt: number): string {
-  const totalSeconds = Math.max(0, Math.floor((Date.now() - startedAt) / 1000));
-  const minutes = Math.floor(totalSeconds / 60);
-  const seconds = totalSeconds % 60;
-  return minutes > 0 ? `${minutes}m ${seconds}s` : `${seconds}s`;
-}
-
 function formatWorkflowDuration(durationMs?: number | null): string | null {
   if (typeof durationMs !== "number" || !Number.isFinite(durationMs) || durationMs < 0) {
     return null;
@@ -635,10 +945,11 @@ function getDisplayLabel(s: SessionMeta): string {
   return s.session_id;
 }
 
-function sessionToSelectItem(s: SessionMeta): SelectItem {
+function sessionToSelectItem(s: SessionMeta, showProject = false): SelectItem {
   const parts: string[] = [formatRelativeTime(s.last_message_at)];
   const msgCount = s.message_count ?? 0;
   if (msgCount > 0) parts.push(`${msgCount} msgs`);
+  if (showProject && s.project_dir?.trim()) parts.push(s.project_dir.trim());
   return {
     value: s.session_id,
     label: getDisplayLabel(s),
@@ -646,19 +957,34 @@ function sessionToSelectItem(s: SessionMeta): SelectItem {
   };
 }
 
-function buildResumeSessionItems(sessions: SessionMeta[]): SelectItem[] {
-  return sessions.map(sessionToSelectItem);
-}
+type ResumeItemOptions = {
+  query: string;
+  showProject: boolean;
+  branchFilter: boolean;
+  currentBranch: string;
+};
 
-function filterResumeSessions(sessions: SessionMeta[], query: string): SelectItem[] {
-  const normalizedQuery = query.toLowerCase();
-  return sessions
-    .filter((s) => {
+function computeResumeItems(sessions: SessionMeta[], opts: ResumeItemOptions): SelectItem[] {
+  let list = sessions;
+  // 按 git 分支过滤（对齐 Claude Code Ctrl+B）：严格匹配当前分支。
+  // 无分支记录的存量会话、以及非 git/HEAD 会话都会被过滤掉；关掉 Ctrl+B 即可看到全部。
+  if (opts.branchFilter && opts.currentBranch) {
+    list = list.filter((s) => (s.git_branch ?? "").trim() === opts.currentBranch);
+  }
+  const normalizedQuery = opts.query.toLowerCase();
+  if (normalizedQuery) {
+    list = list.filter((s) => {
       const label = getDisplayLabel(s).toLowerCase();
       const sid = s.session_id.toLowerCase();
-      return label.includes(normalizedQuery) || sid.includes(normalizedQuery);
-    })
-    .map(sessionToSelectItem);
+      const proj = (s.project_dir ?? "").toLowerCase();
+      return (
+        label.includes(normalizedQuery) ||
+        sid.includes(normalizedQuery) ||
+        (opts.showProject && proj.includes(normalizedQuery))
+      );
+    });
+  }
+  return list.map((s) => sessionToSelectItem(s, opts.showProject));
 }
 
 function formatConfigValue(schema: ConfigItemSchema, val: string): string {
@@ -809,6 +1135,9 @@ export class AppScreen implements Component, Focusable {
     this.unsubscribe = this.state.onChange(() => {
       this.handleStateChange();
     });
+    // Ensure VSCode user settings have terminal.integrated.tabs.title
+    // set to ${sequence} so OSC 0 sequences update the tab title.
+    this.ensureVscodeSettings();
     // Set initial terminal window title
     this.tui.terminal.setTitle("jiuwenswarm");
     // Inject editor refs into app-state so tryAutoRestoreAfterCancel can
@@ -822,6 +1151,56 @@ export class AppScreen implements Component, Focusable {
     setCurrentCwd(process.cwd());
     // Initialize startup prompt for workspace trust
     this.initStartupPrompt();
+    // 检查一次 config.json 解析错误，用 setTimeout(0) 延迟到 TUI 初始化完成
+    setTimeout(() => {
+      const parseError = consumeParseError();
+      if (parseError) {
+        this.state.setLastError("Invalid config.json. Please fix and restart.");
+        this.tui.requestRender();
+      }
+    }, 0);
+  }
+
+  private ensureVscodeSettings(): void {
+    if (process.env.TERM_PROGRAM !== "vscode") return;
+    try {
+      const userSettingsPath = this.getVscodeUserSettingsPath();
+      if (!userSettingsPath) return;
+
+      let settings: Record<string, unknown> = {};
+      try {
+        const raw = fs.readFileSync(userSettingsPath, "utf-8");
+        settings = JSON.parse(raw);
+      } catch {
+        // File doesn't exist or is invalid — start fresh.
+      }
+
+      if (settings["terminal.integrated.tabs.title"] === "${sequence}") return;
+      settings["terminal.integrated.tabs.title"] = "${sequence}";
+      fs.mkdirSync(path.dirname(userSettingsPath), { recursive: true });
+      fs.writeFileSync(userSettingsPath, JSON.stringify(settings, null, 2), "utf-8");
+    } catch {
+      // Best-effort only — silent failure.
+    }
+  }
+
+  private getVscodeUserSettingsPath(): string | null {
+    switch (process.platform) {
+      case "win32":
+        return process.env.APPDATA
+          ? path.join(process.env.APPDATA, "Code", "User", "settings.json")
+          : null;
+      case "darwin":
+        return process.env.HOME
+          ? path.join(process.env.HOME, "Library", "Application Support", "Code", "User", "settings.json")
+          : null;
+      case "linux":
+        return process.env.HOME
+          ? path.join(process.env.HOME, ".config", "Code", "User", "settings.json")
+          : null;
+      default:
+        return null;
+    }
   }
 
   private initStartupPrompt(): void {
@@ -1209,6 +1588,53 @@ export class AppScreen implements Component, Focusable {
     }
 
     if (!snapshot.pendingQuestion && this.resumeSessionList !== null) {
+      // 重命名态：Enter 保存，Esc 取消，其余按键编辑标题（允许空格）
+      if (this.resumeSessionList.rename !== null) {
+        if (matchesKey(data, "return")) {
+          void this.submitResumeRename();
+        } else if (matchesKey(data, "escape")) {
+          this.resumeSessionList = { ...this.resumeSessionList, rename: null };
+          this.tui.requestRender();
+        } else if (matchesKey(data, "backspace")) {
+          const r = this.resumeSessionList.rename;
+          this.resumeSessionList = {
+            ...this.resumeSessionList,
+            rename: { ...r, value: r.value.slice(0, -1) },
+          };
+          this.tui.requestRender();
+        } else {
+          const ch = this.getPrintableChar(data);
+          if (ch !== undefined) {
+            const r = this.resumeSessionList.rename;
+            this.resumeSessionList = {
+              ...this.resumeSessionList,
+              rename: { ...r, value: r.value + ch },
+            };
+            this.tui.requestRender();
+          }
+        }
+        return;
+      }
+      // 只读预览态：Enter 恢复该会话，Space/Esc 返回列表，其余按键忽略
+      if (this.resumeSessionList.preview !== null) {
+        if (matchesKey(data, "return")) {
+          void this.handleResumeSessionSelection(this.resumeSessionList.preview.session_id);
+        } else if (matchesKey(data, "space") || matchesKey(data, "escape")) {
+          this.resumeSessionList = { ...this.resumeSessionList, preview: null };
+          this.tui.requestRender();
+        }
+        return;
+      }
+      // Space 打开选中会话的预览（牺牲在搜索框输入空格的能力，按用户要求）
+      if (matchesKey(data, "space")) {
+        this.openResumeSessionPreview();
+        return;
+      }
+      // Ctrl+R 重命名选中会话
+      if (matchesKey(data, "ctrl+r")) {
+        this.openResumeRename();
+        return;
+      }
       const printableChar = this.getPrintableChar(data);
       if (printableChar !== undefined) {
         const newQuery = this.resumeSessionList.searchQuery + printableChar;
@@ -1216,6 +1642,10 @@ export class AppScreen implements Component, Focusable {
       } else if (matchesKey(data, "backspace")) {
         const newQuery = this.resumeSessionList.searchQuery.slice(0, -1);
         this.updateResumeSearchQuery(newQuery);
+      } else if (matchesKey(data, "ctrl+a")) {
+        void this.toggleResumeAllProjects();
+      } else if (matchesKey(data, "ctrl+b")) {
+        this.toggleResumeBranchFilter();
       } else if (matchesKey(data, "escape")) {
         if (this.resumeSessionList.searchQuery) {
           this.updateResumeSearchQuery("");
@@ -1272,8 +1702,11 @@ export class AppScreen implements Component, Focusable {
           return;
         }
         // Printable character → append to search query
-        if (data.length === 1 && !matchesKey(data, "up") && !matchesKey(data, "tab")) {
-          this.statusViewState.searchQuery += data;
+        // Use getPrintableChar() to handle Kitty CSI-u sequences (VSCode terminal)
+        // and UTF-8 multi-byte chars (IME input), not just raw data.length === 1
+        const searchPrintableChar = this.getPrintableChar(data);
+        if (searchPrintableChar !== undefined && !matchesKey(data, "up") && !matchesKey(data, "tab")) {
+          this.statusViewState.searchQuery += searchPrintableChar;
           this.rebuildStatusViewTabList();
           this.tui.requestRender();
           return;
@@ -1294,6 +1727,7 @@ export class AppScreen implements Component, Focusable {
         return;
       }
       // On config tab, / enters search mode; printable chars also enter search mode
+      // Use getPrintableChar() for Kitty CSI-u (VSCode) + UTF-8 multi-byte (IME) support
       if (this.statusViewState.tab === "config") {
         if (data === "/") {
           this.statusViewState.searchMode = true;
@@ -1301,9 +1735,10 @@ export class AppScreen implements Component, Focusable {
           this.tui.requestRender();
           return;
         }
-        if (data.length === 1 && !matchesKey(data, "up") && !matchesKey(data, "down") && !matchesKey(data, "return") && !matchesKey(data, "tab") && !matchesKey(data, "backspace") && !matchesKey(data, "delete") && !matchesKey(data, "escape")) {
+        const initialPrintableChar = this.getPrintableChar(data);
+        if (initialPrintableChar !== undefined && !matchesKey(data, "up") && !matchesKey(data, "down") && !matchesKey(data, "return") && !matchesKey(data, "tab") && !matchesKey(data, "backspace") && !matchesKey(data, "delete") && !matchesKey(data, "escape")) {
           this.statusViewState.searchMode = true;
-          this.statusViewState.searchQuery = data;
+          this.statusViewState.searchQuery = initialPrintableChar;
           this.rebuildStatusViewTabList();
           this.tui.requestRender();
           return;
@@ -1411,10 +1846,12 @@ export class AppScreen implements Component, Focusable {
     // When files are dragged in, they arrive as a pasted string.
     // Windows/PowerShell may not send bracketed paste markers,
     // so we detect file paths in any multi-character input.
+    // Only intercept when the paste is *pure* file paths (drag-and-drop).
+    // If there's command text interleaved, treat it as a normal paste.
     if (!snapshot.pendingQuestion && data.length > 4) {
       const pastedContent = data.replace(/\x1b\[200~/, "").replace(/\x1b\[201~/, "");
       const filePaths = extractFilePathsFromPaste(pastedContent);
-      if (filePaths.length > 0) {
+      if (filePaths.length > 0 && isPurePathPaste(pastedContent)) {
         // 若解析出路径但无一通过附件校验（扩展名不在白名单等），须把原文交给编辑器，避免粘贴被吞掉
         if (this.handleDroppedFiles(filePaths)) {
           return;
@@ -1442,8 +1879,15 @@ export class AppScreen implements Component, Focusable {
     // IME composing text from appearing in the bottom input box instead of the config panel.
     // input_value phase: editor is rendered inside buildConfigEditorLines.
     // search_list/select_value phase: no text input needed in the main editor.
+    // The resume picker has its own search input, so hide the main editor while it is
+    // open to avoid a misleading second input bar (restored on Esc). Mirrors Claude Code.
     const isConfigEditorActive = this.configEditorState !== null;
-    const editorLines = isConfigEditorActive
+    const hideEditorForInlinePlanReject = this.isEditingInlinePlanReject(snapshot);
+    const hideMainEditor =
+      isConfigEditorActive ||
+      hideEditorForInlinePlanReject ||
+      this.resumeSessionList !== null;
+    const editorLines = hideMainEditor
       ? []
       : this.applySlashCommandHint(this.editor.render(width), width);
     const composerPreviewLines: string[] = [];
@@ -1510,7 +1954,9 @@ export class AppScreen implements Component, Focusable {
       },
       runningElapsedMs:
         !snapshot.isInterrupted &&
-        (snapshot.isProcessing || teamWorking) &&
+        (snapshot.isProcessing ||
+          teamWorking ||
+          snapshot.workflowRuns.some((workflow) => workflow.status === "running")) &&
         this.runningStartedAtMs !== null
           ? Date.now() - this.runningStartedAtMs
           : undefined,
@@ -1543,9 +1989,9 @@ export class AppScreen implements Component, Focusable {
 
     const { content, attachments } = this.buildOutgoingMessage(text);
 
-    if (!content) return;
-
     const snapshot = this.state.getSnapshot();
+    if (!content && !(snapshot.pendingQuestion && this.otherInputMode)) return;
+
     if (snapshot.pendingQuestion) {
       if (this.questionList !== null) {
         const selected = this.questionList.getSelectedItem();
@@ -1572,11 +2018,19 @@ export class AppScreen implements Component, Focusable {
 
         const answers = pendingQuestion.questions.map((question, index) => {
           const label = this.pendingQuestionAnswers.get(index) ?? "";
-          if (label === "Other") {
+          const isPlanRejectFeedback = shouldAppendPlanRejectFeedback(
+            pendingQuestion.source,
+            question.question,
+            label,
+          );
+          if (label === "Other" || isPlanRejectFeedback) {
             return {
               question: question.question,
               selected_options: [label],
-              custom_input: index === this.activeQuestionIndex ? text : undefined,
+              custom_input:
+                index === this.activeQuestionIndex && (label === "Other" || text)
+                  ? text
+                  : undefined,
             };
           }
           return {
@@ -1719,7 +2173,8 @@ export class AppScreen implements Component, Focusable {
         this.editor.addToHistory(text);
         this.editor.setText("");
         this.state.addItem(addCommandEcho(snapshot.sessionId, text));
-        await this.openResumeSessionList();
+        // 默认列出全部项目的会话；进入后可按 Ctrl+A 切回仅当前项目
+        await this.openResumeSessionList(true);
         return;
       }
       if (/^\/model\s*$/.test(text)) {
@@ -1790,7 +2245,8 @@ export class AppScreen implements Component, Focusable {
       return;
     }
 
-    if (snapshot.isProcessing || snapshot.isPaused) {
+    // Team 模式持续对话走 chat.send（interact），不通过 supplement 中断当前 stream。
+    if ((snapshot.isProcessing || snapshot.isPaused) && !isTeamMode(snapshot.mode)) {
       this.beginPendingSubmittedInput(text, snapshot);
       const requestId = this.state.supplement(content, attachments);
       if (!requestId) {
@@ -1865,6 +2321,7 @@ export class AppScreen implements Component, Focusable {
       this.pendingQuestionAnswers.clear();
       this.questionList = null;
       this.questionDetailsMap = null;
+      this.setMouseTrackingEnabled(false);
       if (!this.editor.getText() && this.draftBeforeQuestion) {
         this.editor.setText(this.draftBeforeQuestion);
       }
@@ -1974,31 +2431,57 @@ export class AppScreen implements Component, Focusable {
     }
   }
 
-  private async openResumeSessionList(): Promise<void> {
+  private makeResumeSelectList(items: SelectItem[]): SelectList {
+    const list = new SelectList(items, Math.min(Math.max(items.length, 1), 8), selectListTheme, {
+      minPrimaryColumnWidth: 24,
+      maxPrimaryColumnWidth: 42,
+    });
+    list.onSelect = (item) => {
+      if (item && item.value) {
+        void this.handleResumeSessionSelection(item.value);
+      }
+    };
+    list.onCancel = () => {
+      this.resumeSessionList = null;
+      this.tui.requestRender();
+    };
+    return list;
+  }
+
+  private async openResumeSessionList(allProjects = false): Promise<void> {
     const snapshot = this.state.getSnapshot();
     try {
-      const payload = await this.state.request<SessionListPayload>("session.list", {});
+      const payload = await this.state.request<SessionListPayload>("session.list", {
+        all_projects: allProjects,
+      });
       const sessions = payload.sessions ?? [];
       const total = payload.total ?? sessions.length;
-      if (sessions.length === 0) {
+      const currentBranch = payload.current_branch ?? "HEAD";
+      // 全部项目仍为空：确无可恢复会话，直接提示，不打开选择器
+      if (sessions.length === 0 && allProjects) {
         this.resumeSessionList = null;
         this.state.addItem(addInfo(snapshot.sessionId, "No sessions found", "r"));
         return;
       }
+      // 当前项目为空：仍打开（空）选择器，便于用户按 Ctrl+A 切到全部项目
 
-      const items = buildResumeSessionItems(sessions);
-      const list = new SelectList(items, Math.min(Math.max(items.length, 1), 8), selectListTheme, {
-        minPrimaryColumnWidth: 24,
-        maxPrimaryColumnWidth: 42,
+      const items = computeResumeItems(sessions, {
+        query: "",
+        showProject: allProjects,
+        branchFilter: false,
+        currentBranch,
       });
-      list.onSelect = (item) => {
-        void this.handleResumeSessionSelection(item.value);
+      this.resumeSessionList = {
+        list: this.makeResumeSelectList(items),
+        sessions,
+        total,
+        searchQuery: "",
+        showAllProjects: allProjects,
+        branchFilterEnabled: false,
+        currentBranch,
+        preview: null,
+        rename: null,
       };
-      list.onCancel = () => {
-        this.resumeSessionList = null;
-        this.tui.requestRender();
-      };
-      this.resumeSessionList = { list, sessions, total, searchQuery: "" };
       this.tui.requestRender();
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
@@ -2007,7 +2490,64 @@ export class AppScreen implements Component, Focusable {
     }
   }
 
+  private async toggleResumeAllProjects(): Promise<void> {
+    if (!this.resumeSessionList) return;
+    const next = !this.resumeSessionList.showAllProjects;
+    const { searchQuery, branchFilterEnabled } = this.resumeSessionList;
+    const snapshot = this.state.getSnapshot();
+    try {
+      const payload = await this.state.request<SessionListPayload>("session.list", {
+        all_projects: next,
+      });
+      const sessions = payload.sessions ?? [];
+      const total = payload.total ?? sessions.length;
+      const currentBranch = payload.current_branch ?? this.resumeSessionList.currentBranch;
+      const items = computeResumeItems(sessions, {
+        query: searchQuery,
+        showProject: next,
+        branchFilter: branchFilterEnabled,
+        currentBranch,
+      });
+      this.resumeSessionList = {
+        list: this.makeResumeSelectList(items),
+        sessions,
+        total,
+        searchQuery,
+        showAllProjects: next,
+        branchFilterEnabled,
+        currentBranch,
+        preview: null,
+        rename: null,
+      };
+      this.tui.requestRender();
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.state.addItem(addError(snapshot.sessionId, `resume failed: ${message}`));
+    }
+  }
+
+  private toggleResumeBranchFilter(): void {
+    if (!this.resumeSessionList) return;
+    const st = this.resumeSessionList;
+    const next = !st.branchFilterEnabled;
+    const items = computeResumeItems(st.sessions, {
+      query: st.searchQuery,
+      showProject: st.showAllProjects,
+      branchFilter: next,
+      currentBranch: st.currentBranch,
+    });
+    this.resumeSessionList = {
+      ...st,
+      list: this.makeResumeSelectList(items),
+      branchFilterEnabled: next,
+    };
+    this.tui.requestRender();
+  }
+
   private async handleResumeSessionSelection(sessionId: string): Promise<void> {
+    if (!sessionId || typeof sessionId !== "string") {
+      return;
+    }
     const nextSessionId = sessionId.trim();
     if (!nextSessionId) {
       return;
@@ -2087,18 +2627,130 @@ export class AppScreen implements Component, Focusable {
 
   private updateResumeSearchQuery(query: string): void {
     if (!this.resumeSessionList) return;
-    const filteredItems = filterResumeSessions(this.resumeSessionList.sessions, query);
-    const list = new SelectList(filteredItems, Math.min(Math.max(filteredItems.length, 1), 8), selectListTheme, {
-      minPrimaryColumnWidth: 24,
-      maxPrimaryColumnWidth: 42,
+    const st = this.resumeSessionList;
+    const filteredItems = computeResumeItems(st.sessions, {
+      query,
+      showProject: st.showAllProjects,
+      branchFilter: st.branchFilterEnabled,
+      currentBranch: st.currentBranch,
     });
-    list.onSelect = (item) => void this.handleResumeSessionSelection(item.value);
-    list.onCancel = () => {
-      this.resumeSessionList = null;
-      this.tui.requestRender();
+    this.resumeSessionList = {
+      ...st,
+      list: this.makeResumeSelectList(filteredItems),
+      searchQuery: query,
     };
-    this.resumeSessionList = { ...this.resumeSessionList, list, searchQuery: query };
     this.tui.requestRender();
+  }
+
+  /** 打开选中会话的只读预览（信息卡）。Space 触发，对齐 Claude Code 的 preview。 */
+  private openResumeSessionPreview(): void {
+    if (!this.resumeSessionList) return;
+    const selected = this.resumeSessionList.list.getSelectedItem();
+    if (!selected) return;
+    const session = this.resumeSessionList.sessions.find(
+      (s) => s.session_id === selected.value,
+    );
+    if (!session) return;
+    this.resumeSessionList = { ...this.resumeSessionList, preview: session };
+    this.tui.requestRender();
+  }
+
+  /** 进入重命名态，初始值取当前标题。Ctrl+R 触发，对齐 Claude Code。 */
+  private openResumeRename(): void {
+    if (!this.resumeSessionList) return;
+    const selected = this.resumeSessionList.list.getSelectedItem();
+    if (!selected) return;
+    const session = this.resumeSessionList.sessions.find(
+      (s) => s.session_id === selected.value,
+    );
+    if (!session) return;
+    this.resumeSessionList = {
+      ...this.resumeSessionList,
+      rename: { sessionId: session.session_id, value: session.title?.trim() ?? "" },
+    };
+    this.tui.requestRender();
+  }
+
+  /** 提交重命名：调用 session.rename 写入标题，成功后就地更新列表并退出重命名态。 */
+  private async submitResumeRename(): Promise<void> {
+    if (!this.resumeSessionList || !this.resumeSessionList.rename) return;
+    const st = this.resumeSessionList;
+    const { sessionId, value } = st.rename!;
+    const title = value.trim();
+    try {
+      const resp = await this.state.request<{ session_id: string; title: string }>(
+        "session.rename",
+        { session_id: sessionId, title },
+      );
+      const newTitle = resp.title ?? title;
+      // 就地更新本地会话标题并重建列表项
+      const sessions = st.sessions.map((s) =>
+        s.session_id === sessionId ? { ...s, title: newTitle } : s,
+      );
+      const items = computeResumeItems(sessions, {
+        query: st.searchQuery,
+        showProject: st.showAllProjects,
+        branchFilter: st.branchFilterEnabled,
+        currentBranch: st.currentBranch,
+      });
+      this.resumeSessionList = {
+        ...st,
+        sessions,
+        list: this.makeResumeSelectList(items),
+        rename: null,
+      };
+      // 若重命名的是当前活动会话，同步终端窗口标题
+      if (sessionId === this.state.getSnapshot().sessionId) {
+        this.state.setSessionTitle(newTitle);
+      }
+      this.tui.requestRender();
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.resumeSessionList = { ...st, rename: null };
+      this.state.addItem(
+        addError(this.state.getSnapshot().sessionId, `rename failed: ${message}`),
+      );
+      this.tui.requestRender();
+    }
+  }
+
+  private buildResumeSessionRenameLines(width: number, session: SessionMeta | undefined, value: string): string[] {
+    const placeholder = session?.title?.trim() || session?.session_id || "";
+    return [
+      padToWidth(palette.status.warning("Rename session"), width),
+      padToWidth(palette.text.dim(session?.session_id ?? ""), width),
+      "",
+      padToWidth(`${palette.text.dim("Title: ")}${palette.text.primary(value)}${END_CURSOR}`, width),
+      value.length === 0
+        ? padToWidth(palette.text.dim(`(current: ${placeholder})`), width)
+        : "",
+      "",
+      padToWidth(palette.text.dim("Enter save · Esc cancel · empty clears title"), width),
+    ].filter((l) => l !== "");
+  }
+
+  private buildResumeSessionPreviewLines(width: number, session: SessionMeta): string[] {
+    const title = session.title?.trim() || "(untitled)";
+    const project = session.project_dir?.trim() || "-";
+    const branch = session.git_branch?.trim() || "(unknown)";
+    const msgs = session.message_count ?? 0;
+    const lastActive = formatRelativeTime(session.last_message_at);
+    const created = formatRelativeTime(session.created_at);
+    const row = (k: string, v: string) =>
+      padToWidth(`${palette.text.dim(k.padEnd(11))}${palette.text.primary(v)}`, width);
+    return [
+      padToWidth(palette.status.warning("Session preview"), width),
+      padToWidth(palette.text.primary(title), width),
+      "",
+      row("ID", session.session_id),
+      row("Project", project),
+      row("Branch", branch),
+      row("Messages", String(msgs)),
+      row("Last active", lastActive),
+      row("Created", created),
+      "",
+      padToWidth(palette.text.dim("Enter resume · Space/Esc back"), width),
+    ];
   }
 
   private buildStartupPromptLines(width: number): string[] {
@@ -2125,21 +2777,59 @@ export class AppScreen implements Component, Focusable {
     if (!this.resumeSessionList) {
       return [];
     }
+    if (this.resumeSessionList.rename !== null) {
+      const r = this.resumeSessionList.rename;
+      const session = this.resumeSessionList.sessions.find((s) => s.session_id === r.sessionId);
+      return this.buildResumeSessionRenameLines(width, session, r.value);
+    }
+    if (this.resumeSessionList.preview !== null) {
+      return this.buildResumeSessionPreviewLines(width, this.resumeSessionList.preview);
+    }
+    const showAll = this.resumeSessionList.showAllProjects;
+    const branchOn = this.resumeSessionList.branchFilterEnabled;
+    const scopeLabel = showAll ? "all projects" : "current dir";
+    const projectHint = showAll ? "Ctrl+A current dir" : "Ctrl+A all projects";
+    const branchHint = branchOn
+      ? `Ctrl+B all branches`
+      : `Ctrl+B branch:${this.resumeSessionList.currentBranch}`;
+    const toggleHint = `${projectHint} · ${branchHint}`;
+    const scopeSuffix = branchOn ? ` · branch:${this.resumeSessionList.currentBranch}` : "";
     const searchBox = this.resumeSessionList.searchQuery
       ? padToWidth(palette.text.primary(`Search: ${this.resumeSessionList.searchQuery}${END_CURSOR}`), width)
-      : padToWidth(palette.text.dim("Type to search · ↑/↓ choose · Enter resume · Esc cancel"), width);
+      : padToWidth(
+          palette.text.dim(`Type to search · ↑/↓ choose · Enter resume · Space preview · Ctrl+R rename · ${toggleHint} · Esc cancel`),
+          width,
+        );
+    const st = this.resumeSessionList;
+    const visibleCount = computeResumeItems(st.sessions, {
+      query: st.searchQuery,
+      showProject: st.showAllProjects,
+      branchFilter: st.branchFilterEnabled,
+      currentBranch: st.currentBranch,
+    }).length;
+    const emptyMessage = st.searchQuery
+      ? "No matches"
+      : showAll
+        ? "No sessions found"
+        : "No sessions in current project · press Ctrl+A to search all projects";
+    const listLines =
+      visibleCount === 0
+        ? [padToWidth(palette.text.dim(emptyMessage), width)]
+        : this.resumeSessionList.list.render(width);
     return [
       padToWidth(
-        palette.status.warning(`Resume session (${this.resumeSessionList.total} total)`),
+        palette.status.warning(
+          `Resume session (${this.resumeSessionList.total} total · ${scopeLabel}${scopeSuffix})`,
+        ),
         width,
       ),
       searchBox,
-      ...this.resumeSessionList.list.render(width),
+      ...listLines,
       padToWidth(
         palette.text.dim(
           this.resumeSessionList.searchQuery
-            ? "Backspace delete · Enter resume · Esc clear"
-            : "↑/↓ choose · Enter resume · Esc cancel"
+            ? `Backspace delete · Enter resume · Space preview · Ctrl+R rename · ${toggleHint} · Esc clear`
+            : `↑/↓ choose · Enter resume · Space preview · Ctrl+R rename · ${toggleHint} · Esc cancel`
         ),
         width,
       ),
@@ -2819,10 +3509,13 @@ export class AppScreen implements Component, Focusable {
       return;
     }
     if (current.phase === "workflow") {
+      const selectedAgentId =
+        current.focus === "agents" ? current.agentList.getSelectedItem()?.value : undefined;
       this.swarmWorkflowsViewState = this.buildSwarmWorkflowDetailState(
         current.workflowId,
         current.selectedPhaseId,
         current.focus,
+        selectedAgentId,
       );
       return;
     }
@@ -2872,6 +3565,7 @@ export class AppScreen implements Component, Focusable {
     workflowId: string,
     selectedPhaseId?: string,
     focus: "phases" | "agents" = "phases",
+    selectedAgentId?: string,
   ): SwarmWorkflowsViewState {
     const workflow = this.state.getSnapshot().workflowRuns.find((item) => item.id === workflowId);
     if (!workflow) return this.buildSwarmWorkflowsListState();
@@ -2886,10 +3580,9 @@ export class AppScreen implements Component, Focusable {
       const phaseCompleted =
         phase.completed_agent_count ??
         phase.agents.filter((agent) => agent.status === "completed").length;
-      const selectedMark = phase.id === activePhaseId ? palette.text.accent("•") : " ";
       return {
         value: phase.id,
-        label: `${selectedMark} ${formatWorkflowStatus(phase.status)} ${phase.name}`,
+        label: `${formatWorkflowStatus(phase.status)} ${phase.name}`,
         description: `${phaseCompleted}/${phaseTotal}`,
       };
     });
@@ -2924,15 +3617,11 @@ export class AppScreen implements Component, Focusable {
       this.tui.requestRender();
     };
 
-    const agentItems: SelectItem[] = (selectedPhase?.agents ?? []).map((agent) => {
-      const duration = formatWorkflowDuration(agent.duration_ms);
-      const description = [agent.model, duration].filter((item): item is string => Boolean(item));
-      return {
-        value: agent.id,
-        label: `${formatWorkflowStatus(agent.status)} ${agent.name}`,
-        description: description.join(" - "),
-      };
-    });
+    const agentItems: SelectItem[] = (selectedPhase?.agents ?? []).map((agent) => ({
+      value: agent.id,
+      label: `${formatWorkflowStatus(agent.status)} ${agent.name}`,
+      description: agent.model ?? "",
+    }));
     const agentList = new SelectList(
       agentItems,
       Math.min(Math.max(agentItems.length, 1), 10),
@@ -2942,6 +3631,11 @@ export class AppScreen implements Component, Focusable {
         maxPrimaryColumnWidth: 44,
       },
     );
+    const selectedAgentIndex = Math.max(
+      0,
+      agentItems.findIndex((agent) => agent.value === selectedAgentId),
+    );
+    agentList.setSelectedIndex(selectedAgentIndex);
     agentList.onSelect = (item) => {
       this.swarmWorkflowsViewState = {
         phase: "agent",
@@ -2986,6 +3680,7 @@ export class AppScreen implements Component, Focusable {
           state.workflowId,
           lookup?.phase.id,
           "agents",
+          state.agentId,
         );
       }
       this.tui.requestRender();
@@ -3002,11 +3697,17 @@ export class AppScreen implements Component, Focusable {
           state.workflowId,
           lookup?.phase.id,
           "agents",
+          state.agentId,
         );
       } else if (state.phase === "workflow") {
         this.swarmWorkflowsViewState =
           state.focus === "agents"
-            ? this.buildSwarmWorkflowDetailState(state.workflowId, state.selectedPhaseId, "phases")
+            ? this.buildSwarmWorkflowDetailState(
+                state.workflowId,
+                state.selectedPhaseId,
+                "phases",
+                state.agentList.getSelectedItem()?.value,
+              )
             : this.buildSwarmWorkflowsListState();
       }
       this.tui.requestRender();
@@ -3096,18 +3797,39 @@ export class AppScreen implements Component, Focusable {
   }
 
   private buildWorkflowRuntimeLines(width: number): string[] {
-    const workflow = this.state
+    const runningWorkflows = this.state
       .getSnapshot()
-      .workflowRuns.find((item) => item.status === "running");
-    if (!workflow) return [];
-    const spinner = ["◐", "◓", "◑", "◒"][this.animationPhase % 4]!;
-    const elapsed = formatWorkflowElapsed(Date.parse(workflow.started_at ?? "") || Date.now());
-    return [
+      .workflowRuns.filter((item) => item.status === "running");
+    if (runningWorkflows.length === 0) return [];
+    const spinner = palette.status.warning(["◐", "◓", "◑", "◒"][this.animationPhase % 4]!);
+
+    const renderRow = (workflow: WorkflowRun, prefix: string): string =>
       padToWidth(
-        `${palette.status.warning(spinner)} ${palette.text.assistant(`Workflow ${workflow.name} running...`)} ${palette.text.dim(`(${elapsed})`)}`,
+        `${prefix}${palette.text.dim(workflow.name)} ${palette.text.dim(formatWorkflowTimingText(workflow))}`,
+        width,
+      );
+
+    if (runningWorkflows.length === 1) {
+      const workflow = runningWorkflows[0]!;
+      return [
+        padToWidth(
+          `${spinner} ${palette.text.assistant(runningWorkflowsBannerText(1))}`,
+          width,
+        ),
+        renderRow(workflow, "  "),
+      ];
+    }
+
+    const lines = [
+      padToWidth(
+        `${spinner} ${palette.text.assistant(runningWorkflowsBannerText(runningWorkflows.length))}`,
         width,
       ),
     ];
+    for (const workflow of runningWorkflows) {
+      lines.push(renderRow(workflow, "  "));
+    }
+    return lines;
   }
 
   private buildSwarmWorkflowsListLines(
@@ -3149,20 +3871,31 @@ export class AppScreen implements Component, Focusable {
     if (!workflow) return [padToWidth(palette.status.error("Workflow not found"), width)];
     const total = workflow.agent_count ?? countWorkflowAgents(workflow);
     const completed = workflow.completed_agent_count ?? countCompletedWorkflowAgents(workflow);
-    const duration = formatWorkflowDuration(workflow.duration_ms);
+    const statusBanner = workflowStatusBannerText(workflow.status);
     const selectedPhase =
       workflow.phases.find((phase) => phase.id === state.selectedPhaseId) ?? workflow.phases[0];
+    const workflowSummary = workflow.summary.trim();
+    const summaryLines =
+      workflowSummary.length > 0 && workflowSummary !== workflow.name.trim()
+        ? wrapPlainText(workflowSummary, width).map((line) =>
+            padToWidth(palette.text.dim(line), width),
+          )
+        : [];
     const lines: string[] = [
       padToWidth(palette.text.accent(workflow.name), width),
-      ...wrapPlainText(workflow.summary, width).map((line) =>
-        padToWidth(palette.text.dim(line), width),
-      ),
+      ...summaryLines,
       padToWidth(
         `${formatWorkflowStatus(workflow.status)} ${palette.text.dim(`· ${completed}/${total} agents`)}`,
         width,
       ),
-      ...(duration
-        ? [padToWidth(palette.text.dim(`duration ${duration}`), width)]
+      padToWidth(palette.text.dim(formatWorkflowTimingText(workflow)), width),
+      ...(workflow.status === "failed" && workflow.error
+        ? wrapPlainText(workflow.error, width).map((line) =>
+            padToWidth(palette.status.error(line), width),
+          )
+        : []),
+      ...(statusBanner
+        ? [padToWidth(workflowStatusTone(workflow.status)(statusBanner), width)]
         : []),
       "",
       padToWidth(palette.text.secondary("Logs"), width),
@@ -3193,7 +3926,7 @@ export class AppScreen implements Component, Focusable {
     } else if (selectedPhase) {
       lines.push(
         ...this.renderSwarmWorkflowAgentRows(
-          selectedPhase.agents,
+          selectedPhase.agents ?? [],
           width,
           SWARM_WORKFLOW_AGENT_PREVIEW_LIMIT,
         ),
@@ -4233,7 +4966,7 @@ export class AppScreen implements Component, Focusable {
     }
 
     try {
-      const stats = statSync(path);
+      const stats = fs.statSync(path);
       if (!stats.isFile()) {
         return false;
       }
@@ -4276,9 +5009,13 @@ export class AppScreen implements Component, Focusable {
       snapshot.teamMemberEvents,
       snapshot.teamMessageEvents,
     );
-    const runningWorkflow = snapshot.workflowRuns.find((workflow) => workflow.status === "running");
+    const runningWorkflows = snapshot.workflowRuns.filter(
+      (workflow) => workflow.status === "running",
+    );
+    const hasRunningWorkflow = runningWorkflows.length > 0;
+    const runningWorkflow = runningWorkflows[0];
     const shouldAnimate =
-      !snapshot.isInterrupted && (snapshot.isProcessing || hasRunningTools || teamWorking || Boolean(runningWorkflow));
+      !snapshot.isInterrupted && (snapshot.isProcessing || hasRunningTools || teamWorking || hasRunningWorkflow);
     if (!shouldAnimate) {
       const nowMs = Date.now();
       if (this.runningStoppedAtMs === null) {
@@ -4307,9 +5044,12 @@ export class AppScreen implements Component, Focusable {
       }
     } else if (teamWorking) {
       this.runningStartedAtMs = teamStartedAt ?? this.runningStartedAtMs ?? Date.now();
-    } else if (runningWorkflow) {
-      this.runningStartedAtMs =
-        Date.parse(runningWorkflow.started_at ?? "") || this.runningStartedAtMs || Date.now();
+    } else if (hasRunningWorkflow) {
+      const earliestStartedAt = runningWorkflows.reduce((earliest, workflow) => {
+        const startedAt = Date.parse(workflow.started_at ?? "") || Date.now();
+        return startedAt < earliest ? startedAt : earliest;
+      }, Date.now());
+      this.runningStartedAtMs = earliestStartedAt || this.runningStartedAtMs || Date.now();
     }
     this.runningStoppedAtMs = null;
     if (this.animationTimer) {
@@ -4470,6 +5210,7 @@ export class AppScreen implements Component, Focusable {
         getCurrentCwd() || process.cwd(),
         resolveFdBinary(),
       ),
+      getCurrentCwd() || process.cwd(),
     );
   }
 
@@ -4603,18 +5344,18 @@ export class AppScreen implements Component, Focusable {
     const total = pendingQuestion.questions.length;
     const progress = total > 1 ? ` (${this.activeQuestionIndex + 1}/${total})` : "";
     const permissionRequest = isPermissionRequest(pendingQuestion.source, question.question);
+    const planApprovalRequest = isPlanApprovalRequest(pendingQuestion.source, question.question);
     const lines: string[] = [];
 
-    if (permissionRequest) {
+    if (permissionRequest && !this.otherInputMode) {
       const summary = parsePermissionSummary(question.question);
-      const title =
-        pendingQuestion.source === "confirm_interrupt"
-          ? progress
-            ? `Confirm ${this.activeQuestionIndex + 1}/${total}`
-            : "Confirm action"
-          : progress
-            ? `Permission ${this.activeQuestionIndex + 1}/${total}`
-            : "Permission";
+      const title = getPendingQuestionTitle(
+        pendingQuestion.source,
+        question.question,
+        progress,
+        this.activeQuestionIndex,
+        total,
+      );
       lines.push(...renderPermissionBlock(width, summary, title));
     } else if (this.otherInputMode) {
       lines.push(
@@ -4632,12 +5373,20 @@ export class AppScreen implements Component, Focusable {
       }
       lines.push("");
       lines.push(
-        ...wrapPlainText(
-          `[Answer] Please enter your answer:`,
-          width,
-        ).map((line) => padToWidth(palette.status.info(line), width)),
+        ...wrapPlainText(`[Answer] Please enter your answer:`, width).map((line) =>
+          padToWidth(palette.status.info(line), width),
+        ),
       );
-      lines.push(padToWidth(palette.text.dim("Type your answer · Enter submit · Esc back to options"), width));
+      lines.push(
+        padToWidth(
+          palette.text.dim(
+            planApprovalRequest
+              ? "tell jiuwenswarm what to change · Enter submit · Esc back to options"
+              : "Type your answer · Enter submit · Esc back to options",
+          ),
+          width,
+        ),
+      );
     } else {
       lines.push(
         ...wrapPlainText(
@@ -4684,7 +5433,9 @@ export class AppScreen implements Component, Focusable {
         padToWidth(
           palette.text.dim(
             permissionRequest
-              ? "↑/↓ review · Enter/click confirm · Esc reject"
+              ? planApprovalRequest
+                ? "↑/↓ review · Type feedback on Reject · Enter/click confirm"
+                : "↑/↓ review · Enter/click confirm · Esc reject"
               : "↑/↓ choose · Enter/click confirm · Esc reject",
           ),
           width,
@@ -4715,6 +5466,32 @@ export class AppScreen implements Component, Focusable {
     }
 
     if (this.questionList !== null) {
+      const question =
+        snapshot.pendingQuestion.questions[this.activeQuestionIndex] ??
+        snapshot.pendingQuestion.questions[0];
+      const selected = this.questionList.getSelectedItem();
+      const editingPlanReject = !!question &&
+        !!selected &&
+        shouldAppendPlanRejectFeedback(
+          snapshot.pendingQuestion.source,
+          question.question,
+          selected.value,
+        );
+      const printableChar = this.getPrintableChar(data);
+      if (
+        editingPlanReject &&
+        (printableChar !== undefined ||
+          matchesKey(data, "backspace") ||
+          matchesKey(data, "delete") ||
+          this.isInlinePlanRejectCursorInput(data))
+      ) {
+        this.pendingQuestionAnswers.set(this.activeQuestionIndex, selected.value);
+        this.editor.handleInput(data);
+        this.syncQuestionList(this.state.getSnapshot());
+        this.syncEditorSubmitState(this.state.getSnapshot());
+        this.tui.requestRender();
+        return true;
+      }
       this.questionList.handleInput(data);
       return true;
     }
@@ -4750,15 +5527,31 @@ export class AppScreen implements Component, Focusable {
       return;
     }
 
-    for (const option of question.options) {
-      const displayLabel = normalizePermissionOptionLabel(option.label);
+    const planApprovalRequest = isPlanApprovalRequest(
+      snapshot.pendingQuestion.source,
+      question.question,
+    );
+    const rowItems = planApprovalRequest
+      ? buildPlanApprovalQuestionItems(
+          question.options,
+          this.editor.getText(),
+          this.isEditingInlinePlanReject(snapshot),
+          this.editor.getCursor().col,
+        )
+      : question.options.map((option) => ({
+          value: option.label,
+          label: formatQuestionOptionLabelForDisplay(option.label, false),
+        }));
+
+    for (const option of rowItems) {
+      const displayLabel = option.label ?? option.value;
       for (let i = 0; i < screenLines.length; i++) {
         const plain = stripAnsi(screenLines[i]);
         if (
           (plain.startsWith("→ ") || plain.startsWith("  ")) &&
           plain.includes(displayLabel)
         ) {
-          this.questionOptionRows.push({ row: i + 1, value: option.label });
+          this.questionOptionRows.push({ row: i + 1, value: option.value });
           break;
         }
       }
@@ -4770,7 +5563,40 @@ export class AppScreen implements Component, Focusable {
     this.editor.disableSubmit =
       !!pendingQuestion &&
       !this.otherInputMode &&
+      !this.isEditingInlinePlanReject(snapshot) &&
       (this.questionList !== null || (pendingQuestion.questions[0]?.options.length ?? 0) > 0);
+  }
+
+  private isEditingInlinePlanReject(snapshot: ReturnType<CliPiAppState["getSnapshot"]>): boolean {
+    const pendingQuestion = snapshot.pendingQuestion;
+    if (!pendingQuestion || this.questionList === null) {
+      return false;
+    }
+    const question =
+      pendingQuestion.questions[this.activeQuestionIndex] ?? pendingQuestion.questions[0];
+    const selected = this.questionList.getSelectedItem();
+    return !!question &&
+      !!selected &&
+      shouldAppendPlanRejectFeedback(pendingQuestion.source, question.question, selected.value);
+  }
+
+  private isInlinePlanRejectCursorInput(data: string): boolean {
+    return (
+      matchesKey(data, "left") ||
+      matchesKey(data, "right") ||
+      matchesKey(data, "home") ||
+      matchesKey(data, "end") ||
+      matchesKey(data, "ctrl+b") ||
+      matchesKey(data, "ctrl+f") ||
+      matchesKey(data, "ctrl+a") ||
+      matchesKey(data, "ctrl+e") ||
+      matchesKey(data, "alt+left") ||
+      matchesKey(data, "alt+right") ||
+      matchesKey(data, "ctrl+left") ||
+      matchesKey(data, "ctrl+right") ||
+      matchesKey(data, "alt+b") ||
+      matchesKey(data, "alt+f")
+    );
   }
 
   private syncQuestionList(snapshot: ReturnType<CliPiAppState["getSnapshot"]>): void {
@@ -4783,6 +5609,7 @@ export class AppScreen implements Component, Focusable {
     }
 
     const question = pendingQuestion.questions[this.activeQuestionIndex];
+    const planApprovalRequest = isPlanApprovalRequest(pendingQuestion.source, question?.question ?? "");
     if (!question || question.options.length === 0) {
       this.questionList = null;
       this.questionDetailsMap = null;
@@ -4790,15 +5617,32 @@ export class AppScreen implements Component, Focusable {
       return;
     }
 
-    const items: SelectItem[] = question.options.map((option) => ({
-      value: option.label,
-      label:
-        pendingQuestion.source === "permission_interrupt" ||
-        pendingQuestion.source === "confirm_interrupt"
-          ? normalizePermissionOptionLabel(option.label)
-          : option.label,
-      description: option.description,
-    }));
+    const currentSelectedValue = this.questionList?.getSelectedItem()?.value;
+    const showRejectCursor =
+      planApprovalRequest &&
+      !!currentSelectedValue &&
+      shouldAppendPlanRejectFeedback(
+        pendingQuestion.source,
+        question.question,
+        currentSelectedValue,
+      );
+
+    const items: SelectItem[] = planApprovalRequest
+      ? buildPlanApprovalQuestionItems(
+          question.options,
+          this.editor.getText(),
+          showRejectCursor,
+          this.editor.getCursor().col,
+        )
+      : question.options.map((option) => ({
+          value: option.label,
+          label:
+            pendingQuestion.source === "permission_interrupt" ||
+            pendingQuestion.source === "confirm_interrupt"
+              ? formatQuestionOptionLabelForDisplay(option.label, false)
+              : option.label,
+          description: option.description,
+        }));
 
     // Build details map for options that have sub-lines (e.g. rewind file changes)
     const detailsMap = new Map<string, string[]>();
@@ -4817,15 +5661,17 @@ export class AppScreen implements Component, Focusable {
     // For memory edit, use a layout that shows short labels with full-path details sub-lines.
     // For rewind and other questions with details sub-lines, use a narrower label column
     // so the description starts sooner and details can align beneath it.
-    const layout = pendingQuestion.source === "local_command_memory_edit"
-      ? { minPrimaryColumnWidth: 24, maxPrimaryColumnWidth: 30 }
-      : detailsMap.size > 0
-        ? { minPrimaryColumnWidth: 10, maxPrimaryColumnWidth: 10 }
-        : { minPrimaryColumnWidth: 34, maxPrimaryColumnWidth: 42 };
+    const layout = planApprovalRequest
+      ? getPlanApprovalListLayout()
+      : pendingQuestion.source === "local_command_memory_edit"
+        ? { minPrimaryColumnWidth: 24, maxPrimaryColumnWidth: 30 }
+        : detailsMap.size > 0
+          ? { minPrimaryColumnWidth: 10, maxPrimaryColumnWidth: 10 }
+          : { minPrimaryColumnWidth: 34, maxPrimaryColumnWidth: 42 };
     const list = new SelectList(
       items,
       Math.min(Math.max(items.length, 1), maxVisible),
-      selectListTheme,
+      planApprovalRequest ? planApprovalSelectListTheme : selectListTheme,
       layout,
     );
     list.onSelect = (item) => {
@@ -4842,7 +5688,8 @@ export class AppScreen implements Component, Focusable {
     list.onSelectionChange = () => {
       this.invalidate();
     };
-    let selectedValue = this.pendingQuestionAnswers.get(this.activeQuestionIndex);
+    let selectedValue =
+      currentSelectedValue ?? this.pendingQuestionAnswers.get(this.activeQuestionIndex);
     // For memory edit, restore cursor to the last selected file within this session
     if (!selectedValue && pendingQuestion.source === "local_command_memory_edit" && lastMemorySelection) {
       selectedValue = lastMemorySelection;
@@ -4863,6 +5710,14 @@ export class AppScreen implements Component, Focusable {
     if (!pendingQuestion) {
       return;
     }
+
+    const question =
+      pendingQuestion.questions[this.activeQuestionIndex] ?? pendingQuestion.questions[0];
+    const collectPlanRejectFeedback = shouldCollectPlanRejectFeedback(
+      pendingQuestion.source,
+      question?.question ?? "",
+      label,
+    );
 
     if (label === "Other") {
       this.otherInputMode = true;
@@ -4889,11 +5744,25 @@ export class AppScreen implements Component, Focusable {
 
     const answers = pendingQuestion.questions.map((question, index) => {
       const answerValue = this.pendingQuestionAnswers.get(index) ?? question.options[0]?.label ?? "";
-      return {
+      const answer = {
         question: question.question,
         selected_options: [answerValue],
       };
+      if (
+        index === this.activeQuestionIndex &&
+        collectPlanRejectFeedback &&
+        shouldAppendPlanRejectFeedback(pendingQuestion.source, question.question, answerValue)
+      ) {
+        const feedback = this.editor.getText().trim();
+        if (feedback) {
+          return { ...answer, custom_input: feedback };
+        }
+      }
+      return answer;
     });
     this.state.submitQuestionAnswers(answers);
+    if (collectPlanRejectFeedback) {
+      this.editor.setText("");
+    }
   }
 }

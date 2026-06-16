@@ -35,10 +35,18 @@ def test_a2ui_prompt_discourages_nested_templates():
 def test_a2ui_zh_prompt_section_is_readable():
     prompt = build_a2ui_prompt_section("zh")
 
-    assert "你是 jiuwenswarm 的 A2UI 生成器" in prompt
+    assert "你是 jiuwenswarm 的 A2UI 生成器" not in prompt
+    assert "JiuwenSwarm 支持可选的 A2UI 输出格式" in prompt
     assert "当用户需要列表、卡片、表单" in prompt
     assert "浣犳槸" not in prompt
     assert "鐢熸垚" not in prompt
+
+
+def test_a2ui_en_prompt_does_not_use_generator_identity():
+    prompt = build_a2ui_prompt_section("en")
+
+    assert "You are jiuwenswarm's A2UI generator" not in prompt
+    assert "JiuwenSwarm supports an optional A2UI output format" in prompt
 
 
 def test_a2ui_zh_client_event_prompt_is_readable():

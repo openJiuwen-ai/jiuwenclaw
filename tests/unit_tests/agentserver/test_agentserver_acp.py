@@ -230,6 +230,106 @@ def test_interface_deep_parse_stream_chunk_preserves_tool_result_status():
     }
 
 
+def test_parse_stream_chunk_uses_raw_output_skill_tree_for_frontend():
+    raw_output = {
+        "success": True,
+        "result": "# Skill Branch Explore",
+        "skill_tree": {
+            "query": "skill_branch_explore: SoftwareEngineering",
+            "steps": [{"order": 0, "node_id": "SoftwareEngineering"}],
+            "candidates": [],
+        },
+    }
+    parsed = parse_stream_chunk(
+        types.SimpleNamespace(
+            type="tool_result",
+            payload={
+                "tool_result": {
+                    "tool_call_id": "call-1",
+                    "tool_name": "skill_branch_explore",
+                    "result": "# Skill Branch Explore",
+                    "raw_output": raw_output,
+                }
+            },
+        )
+    )
+
+    assert parsed["event_type"] == "chat.tool_result"
+    assert parsed["tool_name"] == "skill_branch_explore"
+    assert parsed["tool_call_id"] == "call-1"
+    assert parsed["raw_output"] == raw_output
+
+
+def test_interface_deep_parse_stream_chunk_uses_raw_output_skill_tree_for_frontend():
+    parse_chunk = getattr(interface_deep_module.JiuWenSwarmDeepAdapter, "_parse_stream_chunk")
+    raw_output = {
+        "success": True,
+        "result": "# Skill Branch Explore",
+        "skill_tree": {
+            "query": "skill_branch_explore: SoftwareEngineering",
+            "steps": [{"order": 0, "node_id": "SoftwareEngineering"}],
+            "candidates": [],
+        },
+    }
+    parsed = parse_chunk(
+        types.SimpleNamespace(
+            type="tool_result",
+            payload={
+                "tool_result": {
+                    "tool_call_id": "call-1",
+                    "tool_name": "skill_branch_explore",
+                    "result": "# Skill Branch Explore",
+                    "raw_output": raw_output,
+                }
+            },
+        )
+    )
+
+    assert parsed["event_type"] == "chat.tool_result"
+    assert parsed["tool_name"] == "skill_branch_explore"
+    assert parsed["tool_call_id"] == "call-1"
+    assert parsed["raw_output"] == raw_output
+
+
+def test_parse_stream_chunk_does_not_lift_top_level_skill_tree_to_raw_output():
+    parsed = parse_stream_chunk(
+        types.SimpleNamespace(
+            type="tool_result",
+            payload={
+                "tool_result": {
+                    "tool_call_id": "call-1",
+                    "tool_name": "skill_branch_explore",
+                    "result": "# Skill Branch Explore",
+                    "skill_tree": {"steps": [{"node_id": "SoftwareEngineering"}]},
+                }
+            },
+        )
+    )
+
+    assert parsed["event_type"] == "chat.tool_result"
+    assert "raw_output" not in parsed
+
+
+def test_interface_deep_parse_stream_chunk_does_not_lift_top_level_skill_tree_to_raw_output():
+    parse_chunk = getattr(interface_deep_module.JiuWenSwarmDeepAdapter, "_parse_stream_chunk")
+    parsed = parse_chunk(
+        types.SimpleNamespace(
+            type="tool_result",
+            payload={
+                "tool_result": {
+                    "tool_call_id": "call-1",
+                    "tool_name": "skill_branch_explore",
+                    "result": "# Skill Branch Explore",
+                    "skill_tree": {"steps": [{"node_id": "SoftwareEngineering"}]},
+                }
+            },
+        )
+    )
+
+    assert parsed["event_type"] == "chat.tool_result"
+    assert "raw_output" not in parsed
+
+
 def test_parse_stream_chunk_preserves_symphony_status_payload():
     parsed = parse_stream_chunk(
         types.SimpleNamespace(
@@ -238,7 +338,7 @@ def test_parse_stream_chunk_preserves_symphony_status_payload():
                 "source": "symphony_compose_score",
                 "operation_id": "call-1",
                 "phase": "checking_score",
-                "content": "正在读取 Symphony 总谱...",
+                "content": "Symphony status",
                 "status": "in_progress",
             },
         )
@@ -249,7 +349,7 @@ def test_parse_stream_chunk_preserves_symphony_status_payload():
         "source": "symphony_compose_score",
         "operation_id": "call-1",
         "phase": "checking_score",
-        "content": "正在读取 Symphony 总谱...",
+        "content": "Symphony status",
         "status": "in_progress",
     }
 
@@ -263,7 +363,7 @@ def test_interface_deep_parse_stream_chunk_preserves_symphony_status_payload():
                 "source": "symphony_compose_score",
                 "operation_id": "call-1",
                 "phase": "planning",
-                "content": "正在编排技能执行乐谱...",
+                "content": "Symphony planning status",
                 "status": "in_progress",
             },
         )
@@ -274,7 +374,7 @@ def test_interface_deep_parse_stream_chunk_preserves_symphony_status_payload():
         "source": "symphony_compose_score",
         "operation_id": "call-1",
         "phase": "planning",
-        "content": "正在编排技能执行乐谱...",
+        "content": "Symphony planning status",
         "status": "in_progress",
     }
 

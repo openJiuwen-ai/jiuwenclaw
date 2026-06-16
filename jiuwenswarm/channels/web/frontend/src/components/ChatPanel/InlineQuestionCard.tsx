@@ -11,12 +11,20 @@
 import { useState, useCallback, useMemo, useEffect } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useChatStore } from '../../stores';
-import { UserAnswer, QuestionOption } from '../../types';
+import { UserAnswer, QuestionOption, Question } from '../../types';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 
 interface InlineQuestionCardProps {
   onSubmit: (requestId: string, answers: UserAnswer[], source?: string) => void;
+}
+
+function ApprovalQuestionContent({ question }: { question: Question }) {
+  return (
+    <ReactMarkdown remarkPlugins={[remarkGfm]}>
+      {question.question}
+    </ReactMarkdown>
+  );
 }
 
 export function InlineQuestionCard({ onSubmit }: InlineQuestionCardProps) {
@@ -209,9 +217,7 @@ export function InlineQuestionCard({ onSubmit }: InlineQuestionCardProps) {
                   className="px-4 pt-3 pb-2 text-sm prose prose-sm max-w-none prose-headings:font-semibold prose-headings:text-sm prose-ul:my-1 prose-li:my-0 prose-li:pl-1"
                   style={{ color: 'var(--text)' }}
                 >
-                  <ReactMarkdown remarkPlugins={[remarkGfm]}>
-                    {question.question}
-                  </ReactMarkdown>
+                  <ApprovalQuestionContent question={question} />
                 </div>
 
                 {/* 选项按钮 */}

@@ -58,13 +58,16 @@ class _FakeTeamMonitor:
 # Fake raw EventMessage carrying a WorkflowProgress payload
 # ---------------------------------------------------------------------------
 
+_DEFAULT_RUN_ID = "wf_testrun00001"
+
+
 class _FakeRawEvent:
     """Simulates a raw EventMessage already filtered to workflow_progress."""
 
-    def __init__(self, kind: str, **kwargs: Any):
+    def __init__(self, kind: str, run_id: str = _DEFAULT_RUN_ID, **kwargs: Any):
         self.event_type = SimpleNamespace(value="workflow_progress")
         self.sender_id = "swarmflow"
-        self.payload = WorkflowProgress(kind=kind, **kwargs)
+        self.payload = WorkflowProgress(kind=kind, run_id=run_id, **kwargs)
 
     def get_payload(self) -> WorkflowProgress:
         return self.payload
@@ -73,7 +76,7 @@ class _FakeRawEvent:
 class _FakeAgentCoreRawEvent:
     """Simulates agent-core EventMessage with WorkflowProgressTeamEvent payload."""
 
-    def __init__(self, kind: str, **kwargs: Any) -> None:
+    def __init__(self, kind: str, run_id: str = _DEFAULT_RUN_ID, **kwargs: Any) -> None:
         from openjiuwen.agent_teams.schema.events import EventMessage, WorkflowProgressTeamEvent
         from openjiuwen.agent_teams.workflow.engine.progress import PhasePlan as CorePhasePlan
 
@@ -88,6 +91,7 @@ class _FakeAgentCoreRawEvent:
             WorkflowProgressTeamEvent(
                 team_name="t",
                 kind=kind,
+                run_id=run_id,
                 phases=core_phases,
                 **kwargs,
             )
@@ -238,7 +242,8 @@ class TestWorkflowMonitorHandlerEventProcessing:
         assert phases[1]["status"] == "planned"
 
     @pytest.mark.anyio
-    async def test_phase_event_produces_delta(self) -> None:
+    async def test_phase_event_ignored_by_handler(self) -> None:
+        """PHASE events are ignored; only workflow_started produces a delta."""
         monitor = _FakeTeamMonitor()
         handler = WorkflowMonitorHandler(monitor=monitor, session_id="sess-1")
 
@@ -250,12 +255,28 @@ class TestWorkflowMonitorHandlerEventProcessing:
             ],
         )
 
+        assert len(results) == 1
+        assert results[0]["workflow"]["name"] == "research-flow"
+
+    @pytest.mark.anyio
+    async def test_agent_started_produces_phase_delta(self) -> None:
+        monitor = _FakeTeamMonitor()
+        handler = WorkflowMonitorHandler(monitor=monitor, session_id="sess-1")
+
+        results = await _run_handler_with_events(
+            handler, monitor,
+            [
+                _FakeRawEvent(kind="workflow_started", workflow_name="research-flow"),
+                _FakeRawEvent(kind="agent_started", phase="planning", label="agent-a"),
+            ],
+        )
+
         assert len(results) == 2
-        phase_item = results[1]
-        assert phase_item["event_type"] == "workflow.updated"
-        assert "phases" in phase_item["workflow"]
-        assert len(phase_item["workflow"]["phases"]) == 1
-        assert phase_item["workflow"]["phases"][0]["name"] == "planning"
+        agent_item = results[1]
+        assert agent_item["event_type"] == "workflow.updated"
+        assert "phases" in agent_item["workflow"]
+        assert len(agent_item["workflow"]["phases"]) == 1
+        assert agent_item["workflow"]["phases"][0]["name"] == "planning"
 
     @pytest.mark.anyio
     async def test_log_kind_produces_delta_with_logs(self) -> None:
@@ -283,15 +304,16 @@ class TestWorkflowMonitorHandlerEventProcessing:
         results = await _run_handler_with_events(
             handler, monitor,
             [
-                _FakeRawEvent(kind="workflow_started", workflow_name="flow-a"),
-                _FakeRawEvent(kind="workflow_completed", text="done a"),
-                _FakeRawEvent(kind="workflow_started", workflow_name="flow-b"),
+                _FakeRawEvent(kind="workflow_started", workflow_name="flow-a", run_id="wf_flowa001"),
+                _FakeRawEvent(kind="workflow_completed", text="done a", run_id="wf_flowa001"),
+                _FakeRawEvent(kind="workflow_started", workflow_name="flow-b", run_id="wf_flowb001"),
             ],
         )
 
         assert len(results) == 3
         names_in_deltas = [r["workflow"].get("name") for r in results if r["workflow"].get("name")]
         assert "flow-a" in names_in_deltas
+        assert "flow-b" in names_in_deltas
 
 
 # ---------------------------------------------------------------------------
@@ -328,9 +350,9 @@ class TestWorkflowMonitorHandlerGetSnapshot:
         await _run_handler_with_events(
             handler, monitor,
             [
-                _FakeRawEvent(kind="workflow_started", workflow_name="flow-a"),
-                _FakeRawEvent(kind="workflow_completed", text="done a"),
-                _FakeRawEvent(kind="workflow_started", workflow_name="flow-b"),
+                _FakeRawEvent(kind="workflow_started", workflow_name="flow-a", run_id="wf_flowa001"),
+                _FakeRawEvent(kind="workflow_completed", text="done a", run_id="wf_flowa001"),
+                _FakeRawEvent(kind="workflow_started", workflow_name="flow-b", run_id="wf_flowb001"),
             ],
         )
 
@@ -382,19 +404,19 @@ class TestWorkflowMonitorHandlerEventsIterator:
 # Temp-key rekey tests
 # ---------------------------------------------------------------------------
 
-class TestWorkflowMonitorHandlerTempKeyRekey:
+class TestWorkflowMonitorHandlerRunIdRegistry:
     @pytest.mark.anyio
-    async def test_temp_key_replaced_with_real_id(self) -> None:
+    async def test_run_id_used_as_registry_key(self) -> None:
         monitor = _FakeTeamMonitor()
         handler = WorkflowMonitorHandler(monitor=monitor, session_id="sess-1")
+        run_id = "wf_explicitrun01"
 
         await _run_handler_with_events(
             handler, monitor,
-            [_FakeRawEvent(kind="workflow_started", workflow_name="research-flow")],
+            [_FakeRawEvent(kind="workflow_started", workflow_name="research-flow", run_id=run_id)],
         )
 
         runs = handler.get_run_states()
         assert len(runs) == 1
-        key = list(runs.keys())[0]
-        assert key.startswith("wf_")
-        assert "_pending_" not in key
+        assert run_id in runs
+        assert runs[run_id].id == run_id

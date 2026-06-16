@@ -16,15 +16,17 @@ import yaml
 
 from openjiuwen.core.single_agent.rail.base import AgentCallbackContext
 from openjiuwen.harness.prompts import PromptSection
-from jiuwenswarm.agents.harness.common.prompt_attachment_compat import (
+from openjiuwen.harness.prompts.prompt_attachment_manager import (
     PromptAttachmentKind,
-    PromptAttachmentScope,
 )
+
 from openjiuwen.harness.rails.base import DeepAgentRail
 from jiuwenswarm.agents.harness.common.prompt.shell_environment import build_shell_environment_prompt
 from jiuwenswarm.common.utils import get_config_dir, logger
 
 from jiuwenswarm.common.utils import get_agent_workspace_dir
+
+_LANGUAGE_NAMES = {"cn": "Chinese", "zh": "Chinese", "en": "English"}
 
 _LANGUAGE_NAMES = {"cn": "Chinese", "zh": "Chinese", "en": "English"}
 
@@ -61,12 +63,10 @@ class RuntimePromptRail(DeepAgentRail):
         """清理注入的 section 并释放引用。"""
         if self.system_prompt_builder is not None:
             self.system_prompt_builder.remove_section("time")
-            self.system_prompt_builder.remove_section("runtime")
+            self.system_prompt_builder.remove_section("runtime.model_answer_policy")
             self.system_prompt_builder.remove_section("language_output")
             self.system_prompt_builder.remove_section("env")
-            self.system_prompt_builder.remove_section("git_status")
             self.system_prompt_builder.remove_section("browser_tool_policy")
-            self.system_prompt_builder.remove_section("trusted_dirs_policy")
         self.system_prompt_builder = None
         self.attachment_manager = None
 
@@ -134,9 +134,15 @@ class RuntimePromptRail(DeepAgentRail):
         if not self.system_prompt_builder:
             return
 
-        for name in ("runtime", "language_output", "env", "git_status", "trusted_dirs_policy"):
+        for name in (
+            "time",
+            "runtime.model_answer_policy",
+            "language_output",
+            "env",
+            "browser_tool_policy"):
             self.system_prompt_builder.remove_section(name)
 
+        # ── time ──
         if not self._force_english and self._language == "cn":
             time_content = (
                 f"# 时间说明\n\n"
@@ -156,6 +162,7 @@ class RuntimePromptRail(DeepAgentRail):
             priority=92,
         ))
 
+        # ── runtime ──
         runtime_state: dict[str, Any] = {}
         try:
             with open(get_config_dir() / "runtime_state.yaml", encoding="utf-8") as f:
@@ -180,9 +187,12 @@ class RuntimePromptRail(DeepAgentRail):
                 f"- 当前模型：{model}\n"
                 f"- 当前模式：{mode}\n"
                 f"- 当前语言：{language_val}\n"
-                f"- 当前渠道：{channel}\n"
+                f"- 当前渠道：{channel}"
+            )
+            model_answer_policy = (
+                "# 模型名称回答策略\n\n"
                 "- 当用户询问「你是什么模型」「当前用的是哪个模型」等问题时，"
-                "直接用上方「当前模型」的值回答，只说模型名称，不要介绍身份或列出能力"
+                "直接使用 `runtime.setting` 中的当前模型值回答，只说模型名称，不要介绍身份或列出能力。"
             )
         else:
             runtime_content = (
@@ -190,23 +200,30 @@ class RuntimePromptRail(DeepAgentRail):
                 f"- Current model: {model}\n"
                 f"- Current mode: {mode}\n"
                 f"- Current language: {language_val}\n"
-                f"- Current channel: {channel}\n"
-                "- When the user asks \"what model are you\" or similar questions, "
-                "answer with only the model name above in one sentence — "
-                "do NOT introduce yourself or list capabilities."
+                f"- Current channel: {channel}"
+            )
+            model_answer_policy = (
+                "# Model Name Answer Policy\n\n"
+                "- When the user asks what model you are using, answer with only the current model "
+                "value from `runtime.setting`. Do not introduce yourself or list capabilities."
             )
 
+        self.system_prompt_builder.add_section(PromptSection(
+            name="runtime.model_answer_policy",
+            content={"cn": model_answer_policy, "en": model_answer_policy},
+            priority=95,
+        ))
+
+        await self._clear_prompt_attachment(ctx, section="runtime.setting")
         await self._upsert_prompt_attachment(
             ctx,
-            section="runtime",
+            section="runtime.setting",
             content=runtime_content,
-            scope=PromptAttachmentScope.TURN,
             kind=PromptAttachmentKind.RUNTIME,
-            source="jiuwenswarm.runtime_prompt.runtime",
             priority=95,
         )
 
-        # ── Language output constraint (injected near end, like Claude Code) ──
+        # ── Language output constraint (injected near end) ──
         language_name = _LANGUAGE_NAMES.get(language_val, language_val)
         language_output_content = (
             "# Language\n\n"
@@ -216,15 +233,11 @@ class RuntimePromptRail(DeepAgentRail):
             f"Technical terms and code identifiers should remain "
             f"in their original form."
         )
-        await self._upsert_prompt_attachment(
-            ctx,
-            section="language_output",
-            content=language_output_content,
-            scope=PromptAttachmentScope.TURN,
-            kind=PromptAttachmentKind.RUNTIME,
-            source="jiuwenswarm.runtime_prompt.language_output",
+        self.system_prompt_builder.add_section(PromptSection(
+            name="language_output",
+            content={"cn": language_output_content, "en": language_output_content},
             priority=93,
-        )
+        ))
 
         # ── Platform / OS environment section ──
         os_type = sys.platform
@@ -325,19 +338,16 @@ class RuntimePromptRail(DeepAgentRail):
                 ctx,
                 section="git_status",
                 content=git_content,
-                scope=PromptAttachmentScope.SESSION,
                 kind=PromptAttachmentKind.WORKSPACE_DELTA,
-                source="jiuwenswarm.runtime_prompt.git_status",
                 priority=87,
             )
         else:
             await self._clear_prompt_attachment(
                 ctx,
                 section="git_status",
-                scope=PromptAttachmentScope.SESSION,
             )
 
-        self.system_prompt_builder.remove_section("browser_tool_policy")
+        # ── Channel: browser_tool_policy or trusted_dirs_policy──
         if self._channel == "web":
             browser_tool_policy = (
                 "# Browser Tool Policy\n\n"
@@ -350,21 +360,11 @@ class RuntimePromptRail(DeepAgentRail):
                 "- If `spawn_sub_agent` or `browser_agent` is unavailable, say that the browser "
                 "subagent is unavailable before trying to start a browser through commands."
             )
-            await self._upsert_prompt_attachment(
-                ctx,
-                section="browser_tool_policy",
-                content=browser_tool_policy,
-                scope=PromptAttachmentScope.TURN,
-                kind=PromptAttachmentKind.RUNTIME,
-                source="jiuwenswarm.runtime_prompt.browser_tool_policy",
+            self.system_prompt_builder.add_section(PromptSection(
+                name="browser_tool_policy",
+                content={"cn": browser_tool_policy, "en": browser_tool_policy},
                 priority=98,
-            )
-        else:
-            await self._clear_prompt_attachment(
-                ctx,
-                section="browser_tool_policy",
-                scope=PromptAttachmentScope.TURN,
-            )
+            ))
 
         if self._channel == "tui":
             # Trusted directories policy for TUI mode
@@ -425,15 +425,15 @@ class RuntimePromptRail(DeepAgentRail):
                     )
                 await self._upsert_prompt_attachment(
                     ctx,
-                    section="trusted_dirs",
+                    section="trusted_dirs_policy",
                     content=trusted_dirs_content,
-                    scope=PromptAttachmentScope.TURN,
                     kind=PromptAttachmentKind.WORKSPACE_DELTA,
-                    source="jiuwenswarm.runtime_prompt.trusted_dirs",
                     priority=90,
                 )
             else:
-                self.system_prompt_builder.remove_section("trusted_dirs_policy")
+                await self._clear_prompt_attachment(ctx, section="trusted_dirs_policy")
+        else:
+            await self._clear_prompt_attachment(ctx, section="trusted_dirs_policy")
 
     async def _upsert_prompt_attachment(
         self,
@@ -441,9 +441,7 @@ class RuntimePromptRail(DeepAgentRail):
         *,
         section: str,
         content: str,
-        scope: PromptAttachmentScope,
         kind: PromptAttachmentKind,
-        source: str,
         priority: int,
     ) -> None:
         if self.attachment_manager is None:
@@ -453,13 +451,12 @@ class RuntimePromptRail(DeepAgentRail):
             )
             return
         try:
-            writer = self.attachment_manager.for_context(ctx)
-            await writer.upsert_section(
-                section=section,
-                content=content,
-                scope=scope,
-                kind=kind,
-                source=source,
+            writer = self.attachment_manager.bind_context(ctx)
+            await writer.add_section(
+                section,
+                content,
+                kind,
+                "jiuwenswarm.runtime_prompt_rail",
                 priority=priority,
                 content_kind="text/markdown",
             )
@@ -471,14 +468,10 @@ class RuntimePromptRail(DeepAgentRail):
         ctx: AgentCallbackContext,
         *,
         section: str,
-        scope: PromptAttachmentScope,
     ) -> None:
         if self.attachment_manager is None:
             return
         try:
-            await self.attachment_manager.for_context(ctx).clear_section(
-                section=section,
-                scope=scope,
-            )
+            await self.attachment_manager.bind_context(ctx).clear_section(section)
         except ValueError as exc:
             logger.warning("[RuntimePromptRail] skip clearing prompt attachment section=%s: %s", section, exc)

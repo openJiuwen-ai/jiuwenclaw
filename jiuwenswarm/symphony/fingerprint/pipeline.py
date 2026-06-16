@@ -69,16 +69,22 @@ class FingerprintExtractor:
         *,
         max_depth: int | None = None,
         force: bool = False,
+        cache_dir: Union[Path, str] | None = None,
+        fingerprint_signature: str = "",
     ) -> FingerprintExtractionResult:
         output_path = Path(output_dir).resolve()
+        cache_path = Path(cache_dir).resolve() if cache_dir is not None else output_path
         folders, current_hashes = self.scanner.snapshot(
             skills_root,
             max_depth=max_depth,
         )
         self._emit_event("scan.done", skill_count=len(folders))
-        incremental_store = IncrementalFingerprintStore(output_path)
+        incremental_store = IncrementalFingerprintStore(
+            cache_path,
+            signature=fingerprint_signature,
+        )
         self.normalizer.io_name_vocabulary = load_io_name_vocabulary(
-            output_path,
+            cache_path,
             self.normalizer,
         )
         reuse_plan = incremental_store.plan(
@@ -112,6 +118,11 @@ class FingerprintExtractor:
             normalized = extracted_results[folder_index]
             fingerprints.append(normalized.fingerprint)
             fingerprints_by_path[folder.relative_path] = normalized.fingerprint
+            incremental_store.save_result(
+                folder,
+                current_hashes[folder.relative_path],
+                normalized,
+            )
             diagnostics.extend(normalized.diagnostics)
             decisions.extend(normalized.decisions)
             self._emit_event(

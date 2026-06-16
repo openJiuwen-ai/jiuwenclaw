@@ -1,4 +1,0 @@
-model_name: deepseek-v4-flash
-api_base: https://api.deepseek.com
-api_key: sk-e6709f7581574183968a634d789b6e9e
-model_provider: OpenAI

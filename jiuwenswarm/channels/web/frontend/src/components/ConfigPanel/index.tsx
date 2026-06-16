@@ -1,11 +1,11 @@
 import { useEffect, useLayoutEffect, useMemo, useState, useRef, type ReactNode } from "react";
 import { createPortal } from "react-dom";
+import { Music2 } from "lucide-react";
 import { useTranslation } from 'react-i18next';
 import { useChatStore, useSessionStore } from '../../stores';
 import type { ModelEntry } from '../../types';
 import { webRequest } from '../../services/webClient';
 import { PermissionsToolsEditor } from "./PermissionsToolsEditor";
-import clusterIcon from '../../assets/cluster.svg';
 
 function MultiSelectDropdown({
   options,
@@ -283,28 +283,39 @@ const AGENT_KEYS = new Set(["name", "model", "skills"]);
 const TEAM_KEYS = new Set(["team_name", "lifecycle", "teammate_mode", "spawn_mode"]);
 const FREE_SEARCH_BOOLEAN_KEYS = new Set(["free_search_ddg_enabled", "free_search_bing_enabled"]);
 const FREE_SEARCH_KEYS = new Set([...FREE_SEARCH_BOOLEAN_KEYS]);
-const HIDDEN_CONFIG_KEYS = new Set(["free_search_proxy_url"]);
+const HIDDEN_CONFIG_KEYS = new Set([
+  "free_search_proxy_url",
+  "skill_retrieval_build_branching_factor",
+  "skill_retrieval_build_root_categories",
+  "skill_retrieval_build_request_timeout_seconds",
+  "skill_retrieval_build_discovery_seed",
+  "skill_retrieval_build_postprocess_enabled",
+  "skill_retrieval_build_postprocess_max_passes",
+  "skill_retrieval_build_postprocess_min_skills",
+  "skill_retrieval_build_equivalence_enabled",
+  "skill_retrieval_retrieve_compact_codes_enabled",
+  "skill_retrieval_retrieve_flatten_tree",
+]);
 const MEMORY_KEYS = new Set(["memory_forbidden_enabled", "memory_forbidden_description"]);
 const A2UI_KEYS = new Set(["a2ui_enabled"]);
+const SYMPHONY_BOOLEAN_KEYS = new Set(["symphony_enabled"]);
+const SYMPHONY_KEYS = new Set([
+  ...SYMPHONY_BOOLEAN_KEYS,
+]);
 const SKILL_RETRIEVAL_BOOLEAN_KEYS = new Set([
   "skill_retrieval_enabled",
-  "skill_retrieval_compact_codes_enabled",
-  "skill_retrieval_flatten_tree",
+]);
+const MULTILINE_CONFIG_KEYS = new Set([
+  "skill_retrieval_build_root_categories",
 ]);
 const SKILL_RETRIEVAL_KEYS = new Set([
   "skill_retrieval_enabled",
-  "skill_retrieval_build_branching_factor",
   "skill_retrieval_build_max_depth",
-  "skill_retrieval_build_root_categories",
   "skill_retrieval_build_max_workers",
-  "skill_retrieval_build_request_timeout_seconds",
-  "skill_retrieval_retrieve_top_k",
-  "skill_retrieval_compact_codes_enabled",
-  "skill_retrieval_flatten_tree",
+  "skill_retrieval_build_max_retries",
+  "skill_retrieval_build_total_timeout_seconds",
+  "skill_retrieval_build_classification_batch_limit",
   "skill_retrieval_retrieve_max_exposure_depth",
-  "skill_retrieval_retrieve_max_branch_choices",
-  "skill_retrieval_retrieve_max_parallel_branches",
-  "skill_retrieval_retrieve_request_timeout_seconds",
 ]);
 
 function classifyKey(key: string): string {
@@ -321,6 +332,7 @@ function classifyKey(key: string): string {
   if (FREE_SEARCH_KEYS.has(key)) return "free_search";
   if (MEMORY_KEYS.has(key)) return "memory";
   if (A2UI_KEYS.has(key)) return "a2ui";
+  if (SYMPHONY_KEYS.has(key)) return "symphony";
   if (SKILL_RETRIEVAL_KEYS.has(key)) return "skill_retrieval";
   if (key === "context_engine_enabled" || key === "kv_cache_affinity_enabled") return "context_engine";
   if (key === "permissions_enabled") return "permissions";
@@ -389,14 +401,18 @@ function getGroupIcon(tag: string) {
   }
   if (tag === "agents") {
     return (
-      <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={1.8}>
-        <path strokeLinecap="round" strokeLinejoin="round" d="M15.042 21.672L13.684 16.6m0 0l-2.51 2.225.569-9.47 2.51 2.225a4.5 4.5 0 00-6.286-3.774l-.53.938a4.5 4.5 0 002.024 2.024l4.286-.572zm-7.97-3.043l-2.51-2.225.569 9.47-2.51-2.225a4.5 4.5 0 016.286 3.774l.53-.938a4.5 4.5 0 00-2.024-2.024z" />
+      <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="lucide lucide-hat-glasses-icon lucide-hat-glasses">
+        <path d="M14 18a2 2 0 0 0-4 0"/><path d="m19 11-2.11-6.657a2 2 0 0 0-2.752-1.148l-1.276.61A2 2 0 0 1 12 4H8.5a2 2 0 0 0-1.925 1.456L5 11"/><path d="M2 11h20"/><circle cx="17" cy="18" r="3"/><circle cx="7" cy="18" r="3"/>
       </svg>
     );
   }
   if (tag === "team") {
     return (
-      <img src={clusterIcon} className="w-3.5 h-3.5" alt="" aria-hidden="true" />
+      <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="rgb(217 70 239)" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="lucide lucide-users text-text-muted" aria-hidden="true">
+        <path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"></path><path d="M16 3.128a4 4 0 0 1 0 7.744"></path>
+        <path d="M22 21v-2a4 4 0 0 0-3-3.87"></path>
+        <circle cx="9" cy="7" r="4"></circle>
+      </svg>
     );
   }
   if (tag === "context_engine") {
@@ -420,6 +436,9 @@ function getGroupIcon(tag: string) {
         <path strokeLinecap="round" strokeLinejoin="round" d="M7.5 9.75h9M7.5 14.25h5.25" />
       </svg>
     );
+  }
+  if (tag === "symphony") {
+    return <Music2 className="w-3.5 h-3.5" strokeWidth={1.8} />;
   }
   if (tag === "skill_retrieval") {
     return (
@@ -451,6 +470,7 @@ function getGroupToneClass(tag: string): string {
   if (tag === "context_engine") return "text-sky-500 bg-sky-500/10 border-sky-500/20";
   if (tag === "permissions") return "text-rose-500 bg-rose-500/10 border-rose-500/20";
   if (tag === "a2ui") return "text-fuchsia-500 bg-fuchsia-500/10 border-fuchsia-500/20";
+  if (tag === "symphony") return "text-amber-500 bg-amber-500/10 border-amber-500/20";
   if (tag === "skill_retrieval") return "text-emerald-500 bg-emerald-500/10 border-emerald-500/20";
   if (tag === "email") return "text-emerald-500 bg-emerald-500/10 border-emerald-500/20";
   return "text-text-muted bg-secondary/70 border-border";
@@ -476,6 +496,7 @@ function isBooleanKey(key: string): boolean {
     key === "permissions_enabled" ||
     key === "memory_forbidden_enabled" ||
     key === "a2ui_enabled" ||
+    SYMPHONY_BOOLEAN_KEYS.has(key) ||
     SKILL_RETRIEVAL_BOOLEAN_KEYS.has(key)
   );
 }
@@ -495,9 +516,8 @@ function getBooleanKeyLabel(key: string, t: (key: string) => string): string {
     permissions_enabled: t('config.booleanLabels.enabled'),
     memory_forbidden_enabled: t('config.booleanLabels.enabled'),
     a2ui_enabled: t('config.booleanLabels.enabled'),
+    symphony_enabled: t('config.booleanLabels.enabled'),
     skill_retrieval_enabled: t('config.booleanLabels.enabled'),
-    skill_retrieval_compact_codes_enabled: t('config.booleanLabels.skillRetrievalCompact'),
-    skill_retrieval_flatten_tree: t('config.booleanLabels.skillRetrievalFlat'),
   };
   return labels[key] ?? key;
 }
@@ -511,6 +531,10 @@ function isSensitiveKey(key: string): boolean {
     lower.includes("password") ||
     lower.includes("proxy")
   );
+}
+
+function isMultilineConfigKey(key: string): boolean {
+  return MULTILINE_CONFIG_KEYS.has(key);
 }
 
 function normalizeConfigValue(value: unknown): string {
@@ -540,6 +564,7 @@ function getGroupMeta(t: (key: string) => string): Record<string, { label: strin
     context_engine: { label: t('config.groups.contextEngine.label'), order: 8, hint: t('config.groups.contextEngine.hint') },
     permissions: { label: t('config.groups.permissions.label'), order: 9, hint: t('config.groups.permissions.hint') },
     a2ui: { label: t('config.groups.a2ui.label'), order: 10, hint: t('config.groups.a2ui.hint') },
+    symphony: { label: t('config.groups.symphony.label'), order: 10.4, hint: t('config.groups.symphony.hint') },
     skill_retrieval: { label: t('config.groups.skillRetrieval.label'), order: 10.5, hint: t('config.groups.skillRetrieval.hint') },
     memory: { label: t('config.groups.memory.label'), order: 11, hint: t('config.groups.memory.hint') },
     email: { label: t('config.groups.email.label'), order: 12, hint: t('config.groups.email.hint') },
@@ -563,19 +588,24 @@ const KEY_DISPLAY_I18N: Record<string, string> = {
   name: "config.keys.agentName",
   model: "config.keys.agentModel",
   skills: "config.keys.agentSkills",
+  symphony_enabled: "config.keys.symphonyEnabled",
   skill_retrieval_enabled: "config.keys.skillRetrievalEnabled",
   skill_retrieval_build_branching_factor: "config.keys.skillRetrievalBuildBranchingFactor",
   skill_retrieval_build_max_depth: "config.keys.skillRetrievalBuildMaxDepth",
   skill_retrieval_build_root_categories: "config.keys.skillRetrievalBuildRootCategories",
   skill_retrieval_build_max_workers: "config.keys.skillRetrievalBuildMaxWorkers",
+  skill_retrieval_build_max_retries: "config.keys.skillRetrievalBuildMaxRetries",
   skill_retrieval_build_request_timeout_seconds: "config.keys.skillRetrievalBuildTimeout",
-  skill_retrieval_retrieve_top_k: "config.keys.skillRetrievalTopK",
-  skill_retrieval_compact_codes_enabled: "config.keys.skillRetrievalCompactCodes",
-  skill_retrieval_flatten_tree: "config.keys.skillRetrievalFlattenTree",
+  skill_retrieval_build_total_timeout_seconds: "config.keys.skillRetrievalBuildTotalTimeout",
+  skill_retrieval_build_classification_batch_limit: "config.keys.skillRetrievalBuildClassificationBatchLimit",
+  skill_retrieval_build_discovery_seed: "config.keys.skillRetrievalBuildDiscoverySeed",
+  skill_retrieval_build_postprocess_enabled: "config.keys.skillRetrievalBuildPostprocessEnabled",
+  skill_retrieval_build_postprocess_max_passes: "config.keys.skillRetrievalBuildPostprocessMaxPasses",
+  skill_retrieval_build_postprocess_min_skills: "config.keys.skillRetrievalBuildPostprocessMinSkills",
+  skill_retrieval_build_equivalence_enabled: "config.keys.skillRetrievalBuildEquivalenceEnabled",
+  skill_retrieval_retrieve_compact_codes_enabled: "config.keys.skillRetrievalCompactCodes",
+  skill_retrieval_retrieve_flatten_tree: "config.keys.skillRetrievalFlattenTree",
   skill_retrieval_retrieve_max_exposure_depth: "config.keys.skillRetrievalMaxExposureDepth",
-  skill_retrieval_retrieve_max_branch_choices: "config.keys.skillRetrievalMaxBranchChoices",
-  skill_retrieval_retrieve_max_parallel_branches: "config.keys.skillRetrievalMaxParallelBranches",
-  skill_retrieval_retrieve_request_timeout_seconds: "config.keys.skillRetrievalRetrieveTimeout",
 };
 const KEY_PLACEHOLDER_I18N: Record<string, string> = {
   memory_forbidden_description: "config.keys.memoryForbiddenDescriptionPlaceholder",
@@ -592,19 +622,14 @@ const KEY_SORT_PRIORITY: Record<string, number> = {
   skill_create: 1,
   free_search_ddg_enabled: 0,
   free_search_bing_enabled: 1,
+  symphony_enabled: 0,
   skill_retrieval_enabled: 0,
-  skill_retrieval_build_branching_factor: 10,
-  skill_retrieval_build_max_depth: 11,
-  skill_retrieval_build_root_categories: 12,
-  skill_retrieval_build_max_workers: 13,
-  skill_retrieval_build_request_timeout_seconds: 14,
-  skill_retrieval_retrieve_top_k: 20,
-  skill_retrieval_compact_codes_enabled: 21,
-  skill_retrieval_flatten_tree: 22,
-  skill_retrieval_retrieve_max_exposure_depth: 23,
-  skill_retrieval_retrieve_max_branch_choices: 24,
-  skill_retrieval_retrieve_max_parallel_branches: 25,
-  skill_retrieval_retrieve_request_timeout_seconds: 26,
+  skill_retrieval_retrieve_max_exposure_depth: 10,
+  skill_retrieval_build_max_depth: 20,
+  skill_retrieval_build_max_workers: 21,
+  skill_retrieval_build_max_retries: 22,
+  skill_retrieval_build_total_timeout_seconds: 23,
+  skill_retrieval_build_classification_batch_limit: 24,
   memory_forbidden_enabled: 0,
   memory_forbidden_description: 1,
   model: 0,
@@ -778,6 +803,25 @@ function GroupSection({
                           </select>
                         </div>
                       </div>
+                    ) : isMultilineConfigKey(key) ? (
+                      <div className="flex items-start gap-2">
+                        <span
+                          className={`inline-flex w-3 justify-center shrink-0 font-semibold leading-none select-none pt-2 ${isRequiredModelField(key) ? "text-danger" : "text-transparent"
+                            }`}
+                          aria-hidden="true"
+                        >
+                          *
+                        </span>
+                        <div className="relative flex-1">
+                          <textarea
+                            value={draftValues[key] ?? value}
+                            onChange={(e) => onChange(key, e.target.value)}
+                            placeholder={KEY_PLACEHOLDER_I18N[key] ? t(KEY_PLACEHOLDER_I18N[key]) : t('config.enterValue')}
+                            className="w-full min-h-[320px] rounded-md border border-border bg-bg px-3 py-2 font-mono text-[12px] leading-5 outline-none focus:border-accent whitespace-pre"
+                            spellCheck={false}
+                          />
+                        </div>
+                      </div>
                     ) : (
                       <div className="flex items-center gap-2">
                         <span
@@ -837,6 +881,16 @@ function GroupSection({
 const MODEL_PROVIDER_OPTIONS = ["OpenAI", "OpenRouter", "DashScope", "SiliconFlow", "InferenceAffinity", "DeepSeek"] as const;
 const REASONING_LEVEL_OPTIONS = ["off", "low", "medium", "high"] as const;
 
+function getModelValidationKey(model: ModelEntry): string {
+  return [
+    model.model_name,
+    model.model_provider,
+    model.api_base,
+    model.api_key,
+    model.reasoning_level ?? "",
+  ].join("\u0000");
+}
+
 /** 多默认模型管理（受控组件，编辑状态由父组件持有） */
 function MultiModelSection({
   models,
@@ -858,7 +912,7 @@ function MultiModelSection({
   t: (key: string, options?: Record<string, unknown>) => string;
 }) {
   const [validatingModel, setValidatingModel] = useState<number | null>(null);
-  const [validateResults, setValidateResults] = useState<Record<number, "ok" | "err">>({});
+  const [validateResults, setValidateResults] = useState<Record<string, "ok" | "err">>({});
   const [expandedIdx, setExpandedIdx] = useState<number | null>(0);
   const [addingNew, setAddingNew] = useState(false);
   const [newModel, setNewModel] = useState<ModelEntry>({
@@ -905,18 +959,23 @@ function MultiModelSection({
 
   const handleValidate = async (model: ModelEntry, idx: number) => {
     if (!onModelValidate) return;
+    const validationKey = getModelValidationKey(model);
     setValidatingModel(idx);
-    setValidateResults((prev) => ({ ...prev, [idx]: undefined as any }));
+    setValidateResults((prev) => {
+      const next = { ...prev };
+      delete next[validationKey];
+      return next;
+    });
     try {
       await onModelValidate({
         api_base: model.api_base, api_key: model.api_key,
         model: model.model_name, model_provider: model.model_provider,
         reasoning_level: model.reasoning_level || undefined,
       });
-      setValidateResults((prev) => ({ ...prev, [idx]: "ok" }));
+      setValidateResults((prev) => ({ ...prev, [validationKey]: "ok" }));
       setValidateToast({ show: true, success: true, message: t("config.validateModel.success") });
     } catch {
-      setValidateResults((prev) => ({ ...prev, [idx]: "err" }));
+      setValidateResults((prev) => ({ ...prev, [validationKey]: "err" }));
       setValidateToast({ show: true, success: false, message: t("config.validateModel.notWorking") });
     } finally {
       setValidatingModel(null);
@@ -1129,7 +1188,7 @@ function MultiModelSection({
         )}
         {models.map((model, idx) => {
           const isExpanded = expandedIdx === idx;
-          const vr = validateResults[idx];
+          const vr = validateResults[getModelValidationKey(model)];
           const isDefault = model.is_default !== false;
           const isPrimaryDefault = idx === 0;
           // 同名模型计数，用于区分显示
@@ -1815,7 +1874,8 @@ function TeamItemSection({
   };
 
   const updateTeamField = (field: keyof TeamEntry, value: string) => {
-    onTeamChange({ ...team, [field]: value });
+    const trimmedValue = field === "team_name" ? value.trim() : value;
+    onTeamChange({ ...team, [field]: trimmedValue });
   };
 
   const removeMember = (idx: number) => {
@@ -1915,7 +1975,7 @@ function TeamItemSection({
                 type="text"
                 value={(team[field] as string) ?? ""}
                 onChange={(e) => updateTeamField(field, e.target.value)}
-                maxLength={field === "team_name" ? 64 : undefined}
+                maxLength={field === "team_name" ? 32 : undefined}
                 className="flex-1 rounded border border-border bg-bg px-2 py-1 text-text text-xs"
               />
             )}
@@ -2348,45 +2408,12 @@ export function ConfigPanel({
   });
   const [draftModels, setDraftModels] = useState<ModelEntry[]>(() => storeAvailableModels.map((m) => ({ ...m })));
 
-  // 从 localStorage 加载缓存的 agents 和 teams
-  const loadCachedAgentsTeams = (): { agents: AgentEntry[]; teams: TeamEntry[]; edited?: boolean; userCleared?: boolean } | null => {
-    try {
-      const cached = localStorage.getItem('jiuwenclaw_agents_teams_cache');
-      if (cached) {
-        return JSON.parse(cached);
-      }
-    } catch (e) {
-      console.error('Failed to load cached agents/teams:', e);
-    }
-    return null;
-  };
-
-  // 仅缓存当前页面未保存的 agents 和 teams 草稿；后端配置始终是页面初始化来源。
-  const saveCachedAgentsTeams = (agents: AgentEntry[], teams: TeamEntry[], userCleared?: boolean) => {
-    try {
-      localStorage.setItem('jiuwenclaw_agents_teams_cache', JSON.stringify({ agents, teams, edited: true, userCleared }));
-    } catch (e) {
-      console.error('Failed to save agents/teams cache:', e);
-    }
-  };
-
-  const clearCachedAgentsTeams = () => {
-    try {
-      localStorage.removeItem('jiuwenclaw_agents_teams_cache');
-    } catch (e) {
-      console.error('Failed to clear agents/teams cache:', e);
-    }
-  };
-
-  const cached = loadCachedAgentsTeams();
-  const [draftAgents, setDraftAgents] = useState<AgentEntry[]>(cached?.agents || []);
-  const [draftTeams, setDraftTeams] = useState<TeamEntry[]>(cached?.teams || []);
-  const [initialAgents, setInitialAgents] = useState<AgentEntry[]>(cached?.agents || []);
-  const [initialTeams, setInitialTeams] = useState<TeamEntry[]>(cached?.teams || []);
-  const [agentsTeamsEdited, setAgentsTeamsEdited] = useState(cached?.edited ?? false);
+  const [draftAgents, setDraftAgents] = useState<AgentEntry[]>([]);
+  const [draftTeams, setDraftTeams] = useState<TeamEntry[]>([]);
+  const [initialAgents, setInitialAgents] = useState<AgentEntry[]>([]);
+  const [initialTeams, setInitialTeams] = useState<TeamEntry[]>([]);
+  const [agentsTeamsEdited, setAgentsTeamsEdited] = useState(false);
   const [agentsTeamsUserEdited, setAgentsTeamsUserEdited] = useState(false);
-  // 标志用户是否手动清空过 agent/team，用于区分"主动删除"和"从未配置"
-  const [userClearedAgentsTeams, setUserClearedAgentsTeams] = useState(cached?.userCleared ?? false);
   const [configTab, setConfigTab] = useState<ConfigMainTab>("model");
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -2420,6 +2447,29 @@ export function ConfigPanel({
     };
     fetchSkills();
   }, []);
+
+  // 当技能列表更新时，自动清理 agent 配置中已卸载的技能
+  useEffect(() => {
+    if (installedSkills.length === 0) return; // 避免初始化时误清理
+
+    const installedSkillNames = new Set(installedSkills.map((s) => s.name));
+    let hasChanges = false;
+
+    const cleanedAgents = draftAgents.map((agent) => {
+      const originalSkills = agent.skills || [];
+      const cleanedSkills = originalSkills.filter((skill) => installedSkillNames.has(skill));
+      if (cleanedSkills.length !== originalSkills.length) {
+        hasChanges = true;
+        return { ...agent, skills: cleanedSkills };
+      }
+      return agent;
+    });
+
+    if (hasChanges) {
+      setDraftAgents(cleanedAgents);
+      // 不需要标记为编辑状态，因为这是自动清理
+    }
+  }, [installedSkills, draftAgents, setDraftAgents]);
 
   const handleDeleteAgent = (idx: number, agentName: string, references: string[]) => {
     setDeleteAgentConfirm({ idx, agentName, references });
@@ -2503,8 +2553,7 @@ export function ConfigPanel({
     if (!deleteTeamConfirm) return;
     const newTeams = draftTeams.filter((_, i) => i !== deleteTeamConfirm.idx);
     setDraftTeams(newTeams);
-    saveCachedAgentsTeams(draftAgents, newTeams);
-    setAgentsTeamsEdited(true);
+    markAgentsTeamsEdited();
     setDeleteTeamConfirm(null);
   };
 
@@ -2557,8 +2606,6 @@ export function ConfigPanel({
   }, [storeAvailableModels]);
 
   const agentsFromConfig = useMemo<AgentEntry[]>(() => {
-    // 用户主动清空过，忽略后端返回的默认配置
-    if (userClearedAgentsTeams) return [];
     const agents: AgentEntry[] = [];
     for (let i = 0; i < 10; i++) {
       const name = normalizedConfig[`agent_name_${i}`] || normalizedConfig[`agent_${i}_name`];
@@ -2577,11 +2624,9 @@ export function ConfigPanel({
       });
     }
     return agents;
-  }, [normalizedConfig, storeAvailableModels, userClearedAgentsTeams]);
+  }, [normalizedConfig, storeAvailableModels]);
 
   const teamsFromConfig = useMemo<TeamEntry[]>(() => {
-    // 用户主动清空过，忽略后端返回的默认配置
-    if (userClearedAgentsTeams) return [];
     const teams: TeamEntry[] = [];
     const validAgentKeys = new Set<string>();
     for (let i = 0; i < 10; i++) {
@@ -2624,38 +2669,15 @@ export function ConfigPanel({
       });
     }
     return teams;
-  }, [normalizedConfig, userClearedAgentsTeams]);
+  }, [normalizedConfig]);
 
   useEffect(() => {
     if (agentsTeamsEdited) return;
     setDraftAgents(agentsFromConfig);
     setDraftTeams(teamsFromConfig);
-    // 同时更新初始值，用于比较是否有修改
     setInitialAgents(agentsFromConfig);
     setInitialTeams(teamsFromConfig);
-    if (agentsFromConfig.length === 0 && teamsFromConfig.length === 0) {
-      // 如果用户主动清空过，保留缓存标志以便下次识别；否则清除缓存
-      if (userClearedAgentsTeams) {
-        saveCachedAgentsTeams([], [], true);
-      } else {
-        clearCachedAgentsTeams();
-      }
-    }
-  }, [agentsFromConfig, teamsFromConfig, agentsTeamsEdited, userClearedAgentsTeams]);
-
-  // 自动保存 agents 和 teams 到 localStorage
-  useEffect(() => {
-    if (!agentsTeamsEdited) {
-      return;
-    }
-    if (draftAgents.length > 0 || draftTeams.length > 0) {
-      saveCachedAgentsTeams(draftAgents, draftTeams, userClearedAgentsTeams);
-    } else {
-      // 用户手动清空所有 agent/team，设置 userCleared 标志
-      setUserClearedAgentsTeams(true);
-      saveCachedAgentsTeams([], [], true);
-    }
-  }, [draftAgents, draftTeams, agentsTeamsEdited, userClearedAgentsTeams]);
+  }, [agentsFromConfig, teamsFromConfig, agentsTeamsEdited]);
 
   const groups = useMemo<ConfigGroup[]>(() => {
     if (!Object.keys(normalizedConfig).length) return [];
@@ -2966,13 +2988,7 @@ export function ConfigPanel({
     };
   };
 
-  const updateCacheAfterSave = () => {
-    // 如果用户主动清空过，保留 userCleared 标志，否则清除缓存
-    if (userClearedAgentsTeams) {
-      saveCachedAgentsTeams([], [], true);
-    } else {
-      clearCachedAgentsTeams();
-    }
+  const resetEditStateAfterSave = () => {
     setAgentsTeamsEdited(false);
     setAgentsTeamsUserEdited(false);
   };
@@ -3069,7 +3085,7 @@ export function ConfigPanel({
         await onSaveAllConfig(payload);
         if (hasModelChanges && onModelsRefresh) await onModelsRefresh();
         if (hasAgentsTeamsChanges) {
-          updateCacheAfterSave();
+          resetEditStateAfterSave();
           setInitialAgents(draftAgents);
           setInitialTeams(draftTeams);
         }
@@ -3083,7 +3099,7 @@ export function ConfigPanel({
           const agentsTeamsPayload = buildAgentsTeamsPayload();
           const showRestartModal = !(hasConfigChanges || hasModelChanges);
           await onAgentsTeamsSave(agentsTeamsPayload, showRestartModal);
-          updateCacheAfterSave();
+          resetEditStateAfterSave();
         }
         if (hasConfigChanges) {
           await onSaveConfig(configUpdates);
@@ -3279,13 +3295,9 @@ export function ConfigPanel({
                         onAgentsChange={(agents) => {
                           setDraftAgents(agents);
                           markAgentsTeamsEdited();
-                          // 用户重新添加 agent，清除 userCleared 标志
-                          if (agents.length > 0 && userClearedAgentsTeams) {
-                            setUserClearedAgentsTeams(false);
-                          }
                         }}
                         teams={draftTeams}
-                        onTeamsChange={(teams) => { setDraftTeams(teams); setAgentsTeamsEdited(true); }}
+                        onTeamsChange={(teams) => { setDraftTeams(teams); markAgentsTeamsEdited(); }}
                         availableModels={draftModels}
                         installedSkills={installedSkills}
                         onDeleteAgent={handleDeleteAgent}
@@ -3314,10 +3326,6 @@ export function ConfigPanel({
                         onTeamsChange={(teams) => {
                           setDraftTeams(teams);
                           markAgentsTeamsEdited();
-                          // 用户重新添加 team，清除 userCleared 标志
-                          if (teams.length > 0 && userClearedAgentsTeams) {
-                            setUserClearedAgentsTeams(false);
-                          }
                         }}
                         agents={draftAgents}
                         onDeleteTeam={handleDeleteTeam}

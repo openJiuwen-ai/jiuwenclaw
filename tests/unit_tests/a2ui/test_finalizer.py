@@ -83,7 +83,8 @@ async def test_a2ui_finalizer_falls_back_after_failed_repairs():
     )
 
     assert "<a2ui-json>" not in result
-    assert "A2UI 界面生成失败" in result
+    assert "A2UI 界面生成失败" not in result
+    assert result == "Here is the UI."
 
 
 @pytest.mark.asyncio

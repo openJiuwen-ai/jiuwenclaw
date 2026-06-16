@@ -92,8 +92,28 @@
 
 #### `/resume` 与 `/continue` 在 TUI 中的特殊行为
 
-- 输入 **`/resume`** 或 **`/continue`** 且 **无其它参数** 时，TUI 会打开 **会话列表** 供选择恢复，而不走纯文本 `session.list` 展示（`app-screen.ts`）。
+- 输入 **`/resume`** 或 **`/continue`** 且 **无其它参数** 时，TUI 会打开 **交互式会话选择器** 供选择恢复，而不走纯文本 `session.list` 展示（`app-screen.ts`）。
 - 带参数时仍走命令实现：`/resume list`、`/resume <conversation_id>` 等。
+
+交互式选择器的快捷键：
+
+| 按键 | 功能 |
+| --- | --- |
+| `↑` / `↓` | 在会话间移动焦点 |
+| `Enter` | 恢复当前焦点的会话 |
+| 输入字符 | 实时搜索（按会话 ID / 标题 / 项目目录过滤） |
+| `Backspace` | 删除搜索字符 |
+| `Space` | 预览当前焦点会话的信息卡（标题、ID、项目目录、分支、消息数、最近活跃/创建时间）；预览态 `Enter` 恢复、`Space`/`Esc` 返回 |
+| `Ctrl+R` | 重命名当前焦点会话；编辑态 `Enter` 保存、`Esc` 取消、留空则清除标题 |
+| `Ctrl+A` | 在「全部项目」与「仅当前项目」范围间切换 |
+| `Ctrl+B` | 开关 git 分支过滤（仅显示 `git_branch` 严格等于当前项目分支的会话） |
+| `Esc` | 有搜索词时清空搜索；否则关闭选择器 |
+
+行为说明：
+
+- **默认列出全部项目** 的会话（进入后可按 `Ctrl+A` 切回仅当前项目）。当前项目无会话时仍会打开（空）选择器，便于按 `Ctrl+A` 查看其它项目。
+- **分支记录与过滤（`Ctrl+B`）**：会话首条消息时会按其 `project_dir` 记录 git 分支（非 git/detached 记为 `HEAD`）。开启过滤后按「分支名」**严格匹配**当前项目分支，存量无分支记录的会话与 `HEAD` 会话都会被过滤掉；关掉过滤即可看到全部。注意分支过滤仅按名字比对，不区分仓库——「全部项目 + 分支过滤」同时开启时，不同目录下的同名分支会一并显示。
+- **恢复范围**：resume 仅恢复 **会话上下文**（对话历史、会话 ID、accent 颜色、workflow 快照、窗口标题），**不切换 workspace / 当前工作目录**。
 
 ---
 
@@ -316,11 +336,13 @@
 - 状态面板字段：
   - `enabled` — 当前开关。
   - `excluded_commands` — 命中后穿透到本地执行的 shell glob 列表。
-  - `files.allow_write` / `files.deny_write` — 生效（auto-managed ∪ user-configured，去重）的写入策略。
+  - `landlock` — jiuwenbox Landlock 支持情况（`supported` + `compatibility`）。
+  - `files.allow_write` / `files.deny_write` — 生效（auto-managed ∪ user-configured，去重）的写入策略，显示 `(rw)` / `(ro)`。
 - 自动配置路径：文件 `AGENT.md`、`HEARTBEAT.md`、`IDENTITY.md`、`SOUL.md`、`USER.md`，目录 `memory/daily_memory/`，以及 `project_dir`（allow_write）与 `project_dir/config/config.yaml`（deny_write）。`preserve_file_sharing_mode` 仅支持 `mount`。
 - `excluded_commands` 的匹配：按完整命令字符串匹配，不仅看 `argv[0]`；写 glob 时要把参数也覆盖进去（例如 `"git *"` 而不是 `git`）。本质等同于沙箱穿透口，不要对 `rm -rf` / `curl` 这类高风险命令使用。
 - add / remove 严格校验：`exclude add` 已存在 pattern、`exclude remove` 不存在 pattern 都会报错；`files allow|deny` 在同 bucket 已有 path 或对侧 bucket 已有 path（allow/deny 冲突）会报错，先 `files remove` 再 add；`files remove` 没匹配到也会报错。避免"看起来执行了实际什么也没改"。
-- 示例：`/sandbox enable`、`/sandbox status`、`/sandbox files allow ./tmp/ 0777`、`/sandbox exclude add "git *"`。
+- 写入策略：`allow` / `deny` 控制写访问（rw/ro），不是 Unix 八进制权限；支持「父 allow + 子 deny」，不支持「子 allow + 父 deny」。
+- 示例：`/sandbox enable`、`/sandbox status`、`/sandbox files allow ./tmp/`、`/sandbox exclude add "git *"`。
 
 #### `/hooks`（浏览 Hooks 配置）
 

@@ -208,6 +208,7 @@ class TreeLLMRuntime:
                     messages=[{"role": "user", "content": prompt}],
                     max_tokens=max_tokens,
                     timeout=mcfg.build.timeout,
+                    stream=False,
                     extra_body=self.merged_extra_body(),
                 )
             finish_reason = response.choices[0].finish_reason
@@ -226,10 +227,13 @@ class TreeLLMRuntime:
                 )
             else:
                 thread_local.truncated = False
+            content = response.choices[0].message.content
+            if not content:
+                raise RuntimeError("empty response from skill index build model")
             with counter_lock:
                 _set_builder_attr(builder, "_consecutive_failures", 0)
                 self.record_cache_observation(None)
-            return response.choices[0].message.content or "{}"
+            return content
         except Exception as e:
             if AuthenticationError is not None and isinstance(e, AuthenticationError):
                 console.print("[red]Authentication failed - check API key[/red]")
@@ -250,7 +254,9 @@ class TreeLLMRuntime:
                     _set_builder_attr(builder, "_consecutive_failures", consecutive_failures)
                     if consecutive_failures >= builder.max_consecutive_failures:
                         raise RuntimeError(f"Circuit breaker: {consecutive_failures} consecutive LLM failures") from e
-                return "{}"
+                raise RuntimeError(
+                    f"Skill index build model call exceeded the model context window: {e}"
+                ) from e
             is_transient = (
                 (APITimeoutError is not None and isinstance(e, APITimeoutError))
                 or (APIConnectionError is not None and isinstance(e, APIConnectionError))
@@ -266,7 +272,7 @@ class TreeLLMRuntime:
                 _set_builder_attr(builder, "_consecutive_failures", consecutive_failures)
                 if consecutive_failures >= builder.max_consecutive_failures:
                     raise RuntimeError(f"Circuit breaker: {consecutive_failures} consecutive LLM failures") from e
-            return "{}"
+            raise RuntimeError(f"Skill index build model call failed: {e}") from e
 
     def call_llm_json(self, prompt: str, max_retries: int = 3, is_retry: bool = False) -> dict:
         builder = self._builder
@@ -276,17 +282,20 @@ class TreeLLMRuntime:
         while attempts_remaining > 0:
             thread_local.truncated = False
             response = self.call_llm(prompt, is_retry=is_retry or attempt_index > 0)
-            parsed = parse_json_from_response(response, default={})
+            if getattr(thread_local, "truncated", False):
+                raise RuntimeError(
+                    "Skill index build model output was truncated before a complete JSON object was produced."
+                )
+            parse_failed = object()
+            parsed = parse_json_from_response(response, default=parse_failed)
             if isinstance(parsed, dict):
                 return parsed
-            if getattr(thread_local, "truncated", False):
-                console.print("[yellow]Skipping retry because the model output was truncated[/yellow]")
-                return {}
             console.print(
                 f"[yellow]Expected a JSON object but received {type(parsed).__name__} "
                 f"(attempt {attempt_index + 1}/{max_retries})[/yellow]"
             )
             attempt_index += 1
             attempts_remaining -= 1
-        console.print("[red]All retries exhausted, returning empty dict[/red]")
-        return {}
+        raise RuntimeError(
+            f"Skill index build model did not return a valid JSON object after {max_retries} attempts."
+        )

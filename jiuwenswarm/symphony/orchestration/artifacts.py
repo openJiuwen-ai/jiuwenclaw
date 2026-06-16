@@ -7,6 +7,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from jiuwenswarm.symphony.score_storage import resolve_score_artifact_dir
+
 
 @dataclass(frozen=True)
 class ScoreArtifacts:
@@ -27,7 +29,7 @@ class ScoreArtifacts:
 def load_score_artifacts(score_dir: str | Path) -> ScoreArtifacts:
     """Load Score artifacts through score_manifest.json."""
 
-    root = Path(score_dir).resolve()
+    root = resolve_score_artifact_dir(score_dir)
     manifest = _read_json(root / "score_manifest.json")
     artifacts = manifest.get("artifacts", {})
     skills_payload = _read_json(root / artifacts.get("skills", "skills.json"))

@@ -533,7 +533,7 @@ export function SkillNetSearchModal({
           )}
 
           {loadState === "loading" && (
-            <div className="text-sm text-text-muted">{t("common.loading")}</div>
+            <div className="flex items-center justify-center h-full text-text-muted">{t("common.loading")}</div>
           )}
           {loadState === "error" && (
             <div className="text-sm text-text-muted">{t("skills.skillNet.searchFailed")}</div>
@@ -544,14 +544,18 @@ export function SkillNetSearchModal({
                 <div className="text-xs text-text-muted">{t("skills.skillNet.noResults")}</div>
               ) : (
                 results.map((item) => {
+                  const hasUrl = Boolean(item.skill_url);
                   const byUrl =
-                    item.skill_url &&
+                    hasUrl &&
                     (installedSkillOrigins?.has(
                       normalizeSkillNetUrl(item.skill_url)
                     ) ??
                       false);
                   const byName = installedSkillNames?.has(item.skill_name) ?? false;
-                  const isInstalled = Boolean(byUrl || byName);
+                  // SkillNet results carry a unique skill_url, so trust URL matching
+                  // and skip the name fallback — otherwise same-name/different-source
+                  // results all flip to "已安装" when only one was installed.
+                  const isInstalled = hasUrl ? byUrl : byName;
                   const isInstalling = installingUrls.has(item.skill_url);
                   const atConcurrentLimit =
                     installingUrls.size >= SKILLNET_MAX_CONCURRENT_INSTALLS;
@@ -633,7 +637,7 @@ export function SkillNetSearchModal({
                                       ? t("skills.skillNet.installingInProgress")
                                       : undefined
                                 }
-                                className={`w-[76px] h-[28px] rounded-[24px] text-sm text-[#191919] border border-[#191919] hover:bg-secondary/50 transition-colors whitespace-nowrap ${
+                                className={`min-w-[76px] h-[28px] px-3 rounded-[24px] text-sm text-[#191919] border border-[#191919] hover:bg-secondary/50 transition-colors whitespace-nowrap ${
                                   isInstalling || installBlockedByLimit
                                     ? "text-text-muted cursor-not-allowed"
                                     : ""
@@ -652,7 +656,7 @@ export function SkillNetSearchModal({
                                   void handleEvaluate(item);
                                 }}
                                 disabled={evalGloballyBusy}
-                                className={`w-[76px] h-[28px] rounded-[24px] text-sm text-[#191919] border border-[#191919] hover:bg-secondary/50 transition-colors ${
+                                className={`min-w-[76px] h-[28px] px-3 rounded-[24px] text-sm text-[#191919] border border-[#191919] hover:bg-secondary/50 transition-colors whitespace-nowrap ${
                                   evalGloballyBusy
                                     ? "text-text-muted cursor-not-allowed"
                                     : ""
@@ -750,7 +754,7 @@ export function SkillNetSearchModal({
                                     void handleInstall(item);
                                   }}
                                   disabled={isInstalling || installBlockedByLimit}
-                                  className={`w-[76px] h-[28px] rounded-[24px] text-sm text-[#191919] border border-[#191919] hover:bg-secondary/50 transition-colors whitespace-nowrap ${
+                                  className={`min-w-[76px] h-[28px] px-3 rounded-[24px] text-sm text-[#191919] border border-[#191919] hover:bg-secondary/50 transition-colors whitespace-nowrap ${
                                     isInstalling || installBlockedByLimit
                                       ? "text-text-muted cursor-not-allowed"
                                       : ""
@@ -907,14 +911,18 @@ export function SkillNetSearchModal({
                 <div className="text-xs text-text-muted">{t("skills.skillNet.noResults")}</div>
               ) : (
                 results.map((item) => {
+                  const hasUrl = Boolean(item.skill_url);
                   const byUrl =
-                    item.skill_url &&
+                    hasUrl &&
                     (installedSkillOrigins?.has(
                       normalizeSkillNetUrl(item.skill_url)
                     ) ??
                       false);
                   const byName = installedSkillNames?.has(item.skill_name) ?? false;
-                  const isInstalled = Boolean(byUrl || byName);
+                  // SkillNet results carry a unique skill_url, so trust URL matching
+                  // and skip the name fallback — otherwise same-name/different-source
+                  // results all flip to "已安装" when only one was installed.
+                  const isInstalled = hasUrl ? byUrl : byName;
                   const isInstalling = installingUrls.has(item.skill_url);
                   const atConcurrentLimit =
                     installingUrls.size >= SKILLNET_MAX_CONCURRENT_INSTALLS;
@@ -998,7 +1006,7 @@ export function SkillNetSearchModal({
                                   ? t("skills.skillNet.installingInProgress")
                                   : undefined
                             }
-                            className={`w-[76px] h-[28px] rounded-[24px] text-sm text-[#191919] border border-[#191919] hover:bg-secondary/50 transition-colors whitespace-nowrap ${
+                            className={`min-w-[76px] h-[28px] px-3 rounded-[24px] text-sm text-[#191919] border border-[#191919] hover:bg-secondary/50 transition-colors whitespace-nowrap ${
                               isInstalling || installBlockedByLimit
                                 ? "text-text-muted cursor-not-allowed"
                                 : ""
@@ -1017,7 +1025,7 @@ export function SkillNetSearchModal({
                               void handleEvaluate(item);
                             }}
                             disabled={evalGloballyBusy}
-                            className={`w-[76px] h-[28px] rounded-[24px] text-sm text-[#191919] border border-[#191919] hover:bg-secondary/50 transition-colors ${
+                            className={`min-w-[76px] h-[28px] px-3 rounded-[24px] text-sm text-[#191919] border border-[#191919] hover:bg-secondary/50 transition-colors whitespace-nowrap ${
                               evalGloballyBusy
                                 ? "text-text-muted cursor-not-allowed"
                                 : ""

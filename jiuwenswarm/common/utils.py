@@ -1432,6 +1432,45 @@ def get_agent_sessions_dir() -> Path:
     return get_agent_root_dir() / "sessions"
 
 
+# 当前 git 分支解析（带短 TTL 缓存），用于 /resume 按分支过滤会话。
+# 对齐 Claude Code：非 git 目录 / detached HEAD / 任何失败一律返回 "HEAD" 哨兵值。
+_GIT_BRANCH_CACHE: dict[str, tuple[float, str]] = {}
+_GIT_BRANCH_TTL_SECONDS = 5.0
+
+
+def resolve_git_branch(project_dir: str | None) -> str:
+    """返回 ``project_dir`` 当前 git 分支，取不到时返回哨兵 ``"HEAD"``。
+
+    结果按 ``project_dir`` 缓存数秒，避免在 session.list / 每次聊天请求时
+    频繁 spawn git 进程。
+    """
+    if not project_dir or not os.path.isdir(project_dir):
+        return "HEAD"
+    now = time.time()
+    cached = _GIT_BRANCH_CACHE.get(project_dir)
+    if cached and now - cached[0] < _GIT_BRANCH_TTL_SECONDS:
+        return cached[1]
+    branch = "HEAD"
+    git_bin = shutil.which("git")
+    if git_bin:
+        try:
+            import subprocess
+
+            result = subprocess.run(
+                [git_bin, "rev-parse", "--abbrev-ref", "HEAD"],
+                capture_output=True,
+                text=True,
+                timeout=5,
+                cwd=project_dir,
+            )
+            if result.returncode == 0:
+                branch = result.stdout.strip() or "HEAD"
+        except Exception:
+            branch = "HEAD"
+    _GIT_BRANCH_CACHE[project_dir] = (now, branch)
+    return branch
+
+
 _legacy_migration_done: bool = False
 
 

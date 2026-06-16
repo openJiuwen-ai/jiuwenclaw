@@ -256,6 +256,74 @@ def test_candidate_generator_emits_remote_reference_candidate_for_url_file_like_
     ]
 
 
+def test_candidate_generator_emits_remote_reference_candidate_for_url_text_input():
+    candidates = _candidates(
+        _skill(
+            "source",
+            outputs=[
+                ArtifactSpec(
+                    name="translated_image_url",
+                    type="url",
+                    description="URL of the translated image.",
+                )
+            ],
+        ),
+        _skill(
+            "target",
+            inputs=[
+                ParameterSpec(
+                    name="image_url",
+                    type="text",
+                    description="Public image URL to process.",
+                )
+            ],
+        ),
+    )
+
+    assert len(candidates) == 1
+    candidate = candidates[0]
+    assert candidate.source_id == "source"
+    assert candidate.target_id == "target"
+    assert "semantic_overlap_match" in candidate.candidate_methods
+    evidence = candidate.evidence["directions"]["source->target"]
+    assert evidence["port_mappings"][0]["source_output"] == "translated_image_url"
+    assert evidence["port_mappings"][0]["target_input"] == "image_url"
+
+
+def test_candidate_generator_emits_image_artifact_candidate():
+    candidates = _candidates(
+        _skill(
+            "source",
+            outputs=[
+                ArtifactSpec(
+                    name="translated_image_url",
+                    type="image",
+                    description="URL of the translated image.",
+                )
+            ],
+        ),
+        _skill(
+            "target",
+            inputs=[
+                ParameterSpec(
+                    name="image",
+                    type="image",
+                    description="Image input to process.",
+                )
+            ],
+        ),
+    )
+
+    assert len(candidates) == 1
+    candidate = candidates[0]
+    assert candidate.source_id == "source"
+    assert candidate.target_id == "target"
+    assert "semantic_overlap_match" in candidate.candidate_methods
+    evidence = candidate.evidence["directions"]["source->target"]
+    assert evidence["port_mappings"][0]["source_output"] == "translated_image_url"
+    assert evidence["port_mappings"][0]["target_input"] == "image"
+
+
 def test_candidate_generator_emits_remote_reference_for_explicit_url_descriptions():
     for description in ("accepts remote URL", "download URL"):
         candidates = _candidates(

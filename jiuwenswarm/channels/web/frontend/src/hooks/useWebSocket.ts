@@ -46,6 +46,18 @@ import {
 
 const WS_RECONNECT_EVENT = 'jiuwenclaw:ws-reconnect-request';
 
+function isCompletedResumeResult(interruptResult: unknown): boolean {
+  if (!interruptResult || typeof interruptResult !== 'object') {
+    return false;
+  }
+  const result = interruptResult as {
+    intent?: unknown;
+    success?: unknown;
+    has_active_task?: unknown;
+  };
+  return result.intent === 'resume' && result.success === true && result.has_active_task === false;
+}
+
 const TEAM_TASK_STATUS_SET = new Set<TeamTaskStatus>([
   'pending',
   'blocked',
@@ -989,25 +1001,42 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
     async (sessionId: string, requestId: string, answers: UserAnswer[], source?: string) => {
       try {
         const pendingQuestion = useChatStore.getState().pendingQuestion;
+        const pendingMatches = pendingQuestion?.request_id === requestId;
+        const effectiveSource = source ?? (pendingMatches ? pendingQuestion?.source : undefined);
+        const approvalSchema =
+          pendingMatches
+            ? pendingQuestion?.approvalSchema
+            : undefined;
         const evolutionMeta =
-          pendingQuestion?.request_id === requestId
+          pendingMatches
             ? pendingQuestion.evolutionMeta
             : undefined;
         const evolutionMetaPayload =
           evolutionMeta && typeof evolutionMeta === 'object'
             ? { evolution_meta: evolutionMeta }
             : {};
+        const approvalSchemaPayload = approvalSchema ? { approval_schema: approvalSchema } : {};
+        const sourcePayload = effectiveSource ? { source: effectiveSource } : {};
+        const approvalTransport =
+          evolutionMeta && typeof evolutionMeta.approval_transport === 'string'
+            ? evolutionMeta.approval_transport
+            : undefined;
         // 如果是需要走 interrupt/interact 的确认，发送 chat.send
-        if (source === 'permission_interrupt' || source === 'confirm_interrupt') {
+        if (
+          effectiveSource === 'permission_interrupt' ||
+          effectiveSource === 'confirm_interrupt' ||
+          (effectiveSource === 'skill_evolution_approval' && approvalTransport === 'interrupt')
+        ) {
           await request('chat.send', {
             session_id: sessionId,
             query: '',
             request_id: requestId,
             answers: answers,
-            source,
+            ...sourcePayload,
+            ...approvalSchemaPayload,
             ...evolutionMetaPayload,
           });
-        } else if (source === 'activate_confirm') {
+        } else if (effectiveSource === 'activate_confirm') {
           const action = answers[0]?.selected_options[0] === '拒绝' ? 'reject' : 'accept';
           const interactionId = requestId || useHarnessStore.getState().activateInteraction?.interactionId || '';
           if (!interactionId) {
@@ -1030,6 +1059,8 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
             session_id: sessionId,
             request_id: requestId,
             answers,
+            ...sourcePayload,
+            ...approvalSchemaPayload,
             ...evolutionMetaPayload,
           });
         }
@@ -1335,6 +1366,16 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
             });
           }
           return;
+        }
+        // Defensive: chat.final is the definitive end-of-response marker.
+        // The primary transition is driven by chat.processing_status
+        // (is_processing=false), but if that frame is lost the UI would be stuck
+        // showing the stop button. Setting isProcessing=false here is safe —
+        // processing_status will override if needed.
+        if (!useChatStore.getState().isLoadingHistory) {
+          setProcessing(false);
+          setThinking(false);
+          clearSubtasks();
         }
         if (content) {
           revealPendingContextUsage();
@@ -1694,12 +1735,13 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
         if (useChatStore.getState().switchingMode) return;
         // 加载历史消息时忽略处理状态更新
         if (useChatStore.getState().isLoadingHistory) return;
+        const isProcessingNow = Boolean(payload.is_processing);
         // 如果 interrupt_result 指示任务已完成，忽略 processing_status=true
         const { interruptResult } = useChatStore.getState();
-        if (interruptResult && interruptResult.intent === 'resume' && interruptResult.success && interruptResult.has_active_task === false) {
+        const resumeAlreadyCompleted = isCompletedResumeResult(interruptResult);
+        if (isProcessingNow && resumeAlreadyCompleted) {
           return;
         }
-        const isProcessingNow = Boolean(payload.is_processing);
         if (isProcessingNow && useChatStore.getState().isPaused) {
           return;
         }
@@ -1707,11 +1749,16 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
         if (!isProcessingNow) {
           setThinking(false);
           clearSubtasks();
+          stopStreaming();
 
           // 检查是否有等待的任务队列
           const currentMode = useSessionStore.getState().mode;
           const { taskQueue } = useChatStore.getState();
-          if (currentMode === 'agent.fast' && taskQueue.length > 0) {
+          if (
+            currentMode === 'agent.fast' &&
+            !resumeAlreadyCompleted &&
+            taskQueue.length > 0
+          ) {
             // 智能执行模式下，自动处理队列中的下一个任务
             const nextTask = taskQueue[0];
             if (nextTask && activeSessionIdRef.current && sendMessageRef.current) {
@@ -1927,10 +1974,16 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
             : questionPayload._evolution_meta && typeof questionPayload._evolution_meta === 'object'
               ? (questionPayload._evolution_meta as Record<string, unknown>)
               : undefined;
+        const questions = Array.isArray(questionPayload.questions) ? questionPayload.questions : [];
+        const approvalSchema =
+          typeof questionPayload.approval_schema === 'string'
+            ? questionPayload.approval_schema
+            : undefined;
         const normalizedPayload: AskUserQuestionPayload = {
           request_id: typeof questionPayload.request_id === 'string' ? questionPayload.request_id : '',
           source: typeof questionPayload.source === 'string' ? questionPayload.source : undefined,
-          questions: Array.isArray(questionPayload.questions) ? questionPayload.questions : [],
+          questions,
+          ...(approvalSchema ? { approvalSchema } : {}),
           ...(evolutionMeta ? { evolutionMeta } : {}),
         };
         setPendingQuestion(normalizedPayload);

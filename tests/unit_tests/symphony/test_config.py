@@ -90,16 +90,7 @@ def test_symphony_config_normalizes_values(monkeypatch, tmp_path):
     assert cfg.enabled is True
 
 
-@pytest.mark.parametrize("mode", ["", None])
-def test_symphony_config_uses_fast_mode_default(mode):
-    cfg = symphony_config.symphony_config_from_dict(
-        {"orchestration": {"mode": mode}}
-    )
-
-    assert cfg.orchestration.mode == "fast"
-
-
-@pytest.mark.parametrize("mode", ["fast"])
+@pytest.mark.parametrize("mode", ["fast", "", None])
 def test_symphony_config_accepts_fast_mode_aliases(mode):
     cfg = symphony_config.symphony_config_from_dict(
         {"orchestration": {"mode": mode}}

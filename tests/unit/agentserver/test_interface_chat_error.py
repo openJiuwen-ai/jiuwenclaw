@@ -175,16 +175,23 @@ async def test_chat_error_history_record_persists_error_type_at_top_level(
 
     history_file = sessions_root / sid / "history.json"
     chat_errors: list[dict[str, Any]] = []
-    for _ in range(50):
+    for _ in range(100):
         if history_file.exists():
-            persisted = json.loads(history_file.read_text(encoding="utf-8"))
-            chat_errors = [r for r in persisted if r.get("event_type") == "chat.error"]
-            if chat_errors:
-                break
-        await asyncio.sleep(0.02)
+            raw = history_file.read_text(encoding="utf-8")
+            if raw.strip():
+                try:
+                    persisted = json.loads(raw)
+                except json.JSONDecodeError:
+                    # 文件正在写入中，下一轮重试
+                    pass
+                else:
+                    chat_errors = [r for r in persisted if r.get("event_type") == "chat.error"]
+                    if chat_errors:
+                        break
+        await asyncio.sleep(0.05)
 
     assert history_file.exists(), f"history.json not written at {history_file}"
-    assert len(chat_errors) == 1
+    assert len(chat_errors) == 1, f"expected 1 chat.error record, got {len(chat_errors)}"
     # The doc claims this field is at the top level (not nested under
     # event_payload or extra). Pin it.
     assert chat_errors[0].get("error_type") == "LookupError"

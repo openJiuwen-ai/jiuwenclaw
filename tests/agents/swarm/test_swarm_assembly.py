@@ -27,14 +27,17 @@ from pathlib import Path
 import pytest
 
 from openjiuwen.agent_teams.schema import deep_agent_spec as das
+from openjiuwen.agent_teams.harness.manifest import get_catalog, resolve_factory
 from openjiuwen.agent_teams.schema.blueprint import LeaderSpec, TeamAgentSpec
 from openjiuwen.agent_teams.schema.deep_agent_spec import (
     BuiltinToolSpec,
     DeepAgentSpec,
     RailSpec,
+    register_rail_provider,
 )
-from openjiuwen.core.single_agent.rail.base import AgentCallbackContext, ToolCallInputs
+from openjiuwen.core.single_agent.rail.base import AgentCallbackContext, AgentRail, ToolCallInputs
 from openjiuwen.harness.prompts.builder import SystemPromptBuilder
+from openjiuwen.harness.rails import SkillUseRail
 
 from jiuwenswarm.agents.swarm import (
     SwarmBuildContext,
@@ -58,9 +61,6 @@ from jiuwenswarm.agents.swarm.providers import (
     runtime_tools,
     tools,
 )
-from jiuwenswarm.agents.harness.team.team_runtime_inheritance import (
-    resolve_model_config,
-)
 from jiuwenswarm.common.config import get_config
 
 logger = logging.getLogger(__name__)
@@ -82,6 +82,7 @@ _COMMON_RAIL_NAMES: frozenset[str] = frozenset(
         registry.TEAM_WORKSPACE_REPORT_PATH,
         registry.CONTEXT_PROCESSOR,
         registry.PLUGIN_RAILS,
+        registry.SKILL_RETRIEVAL_PROMPT,
         registry.MEMBER_SKILL_TOOLKIT,
     }
 )
@@ -97,6 +98,7 @@ _COMMON_TOOL_NAMES: frozenset[str] = frozenset(
         # MEMBER_SKILL_TOOLKIT rail is the sole registrar of skill tools.
         # Skill retrieval is a separate self-gated tool provider.
         registry.SKILL_RETRIEVAL,
+        registry.SYMPHONY_TOOLKIT,
         registry.USER_TODOS,
         registry.VIDEO,
         registry.IMAGE_GEN,
@@ -122,6 +124,10 @@ def _make_team_spec() -> TeamAgentSpec:
         team_name="unit_team",
         leader=LeaderSpec(member_name="team_leader"),
     )
+
+
+def _agentic_retrieval_config(enabled: bool = True) -> dict:
+    return {"symphony": {"skill_retrieval": {"enabled": enabled}}}
 
 
 def test_register_swarm_providers_is_idempotent() -> None:
@@ -183,7 +189,7 @@ def test_runtime_prompt_rail_resolves_via_registry() -> None:
     rail = RailSpec(type=registry.RUNTIME_PROMPT).build(language="cn", context=fake_ctx)
 
     assert rail is not None
-    assert type(rail).__name__ == "RuntimePromptRail"
+    assert rail.__class__.__name__ == "RuntimePromptRail"
 
 
 @pytest.mark.asyncio
@@ -291,8 +297,19 @@ def test_unknown_swarm_rail_type_raises() -> None:
 @pytest.mark.parametrize(
     ("role", "extra_rails"),
     [
-        ("leader", {registry.TEAM_SKILL_EVOLUTION, registry.TEAM_SKILL_CREATE}),
-        ("teammate", {registry.MEMBER_SKILL_EVOLUTION}),
+        (
+            "leader",
+            {
+                registry.TEAM_SKILL_EVOLUTION,
+                registry.TEAM_SKILL_CREATE,
+            },
+        ),
+        (
+            "teammate",
+            {
+                registry.MEMBER_SKILL_EVOLUTION,
+            },
+        ),
     ],
 )
 def test_build_member_capability_specs_rail_names(
@@ -312,9 +329,9 @@ def test_build_member_capability_specs_rail_names(
 
     assert _COMMON_RAIL_NAMES <= rail_names
     assert extra_rails <= rail_names
-    # The common set has exactly 14 entries; the role adds only its evolution
+    # The common set has exactly 15 entries; the role adds only its evolution
     # rails on top.
-    assert len(_COMMON_RAIL_NAMES) == 14
+    assert len(_COMMON_RAIL_NAMES) == 15
     assert rail_names == _COMMON_RAIL_NAMES | extra_rails
     # No DeepAgent is involved; every entry is a plain declarative RailSpec.
     assert all(isinstance(spec, RailSpec) for spec in rails_specs)
@@ -351,22 +368,139 @@ def test_member_skill_toolkit_carries_selected_skills() -> None:
     assert toolkit.params == {"skills": ["alpha", "beta"]}
 
 
+def test_swarm_skill_retrieval_tools_use_global_skill_manager(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Skill retrieval indexes globally installed skills, not member workspace skills."""
+    calls: list[str | None] = []
+
+    class FakeSkillManager:
+        def __init__(self, workspace_dir: str | None = None) -> None:
+            calls.append(workspace_dir)
+
+    class FakeToolkit:
+        def __init__(
+            self,
+            manager: FakeSkillManager,
+            visible_skill_names: object | None = None,
+        ) -> None:
+            self.manager = manager
+            self.visible_skill_names = visible_skill_names
+
+        @staticmethod
+        def get_tools() -> list:
+            return []
+
+    monkeypatch.setattr(tools, "is_skill_retrieval_enabled", lambda: True)
+    monkeypatch.setattr(tools, "SkillManager", FakeSkillManager)
+    monkeypatch.setattr(tools, "SkillRetrievalToolkit", FakeToolkit)
+
+    factory = resolve_factory(get_catalog()[registry.SKILL_RETRIEVAL].factory_ref)
+    built = factory({}, SwarmBuildContext())
+
+    assert built == []
+    assert calls == [None]
+
+
+def test_swarm_skill_retrieval_prompt_uses_global_skill_manager(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """The retrieval prompt must match the same global index as the retrieval tools."""
+    workspace_root = str(tmp_path / "member-workspace")
+    calls: list[str | None] = []
+
+    class FakeSkillManager:
+        def __init__(self, workspace_dir: str | None = None) -> None:
+            calls.append(workspace_dir)
+
+    monkeypatch.setattr(
+        "jiuwenswarm.agents.harness.common.tools.skill_retrieval_toolkits.is_skill_retrieval_enabled",
+        lambda: True,
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.server.runtime.skill.skill_manager.SkillManager",
+        FakeSkillManager,
+    )
+
+    factory = resolve_factory(get_catalog()[registry.SKILL_RETRIEVAL_PROMPT].factory_ref)
+    rail = factory(
+        {},
+        SwarmBuildContext(
+            global_skills_dir=str(tmp_path / "global-skills"),
+            workspace=types.SimpleNamespace(root_path=workspace_root),
+        ),
+    )
+
+    assert rail is not None
+    assert calls == [None]
+
+
+def test_code_skill_use_rail_kept_as_auto_list_when_retrieval_enabled(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Agentic retrieval hides list_skill later, but skill_tool stays available."""
+    monkeypatch.setattr(
+        "jiuwenswarm.agents.harness.common.tools.skill_retrieval_toolkits.is_skill_retrieval_enabled",
+        lambda: True,
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.common.utils.get_agent_skills_dir",
+        lambda: tmp_path,
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.server.runtime.skill.load_execution_disabled_skills",
+        lambda: [],
+    )
+
+    rail = code_rails.build_code_skill_use(
+        {"skill_mode": SkillUseRail.SKILL_MODE_ALL},
+        SwarmBuildContext(),
+    )
+
+    assert isinstance(rail, SkillUseRail)
+    assert rail.skill_mode == SkillUseRail.SKILL_MODE_AUTO_LIST
+
+
 @pytest.mark.parametrize("role", ["leader", "teammate"])
-def test_team_member_deep_agent_spec_enables_skill_discovery(role: str) -> None:
-    """Chat-team members rely on the core default SkillUseRail."""
+def test_team_member_deep_agent_spec_uses_agentic_skill_disclosure(role: str) -> None:
+    """Chat-team members keep skill_tool while retrieval owns discovery."""
     base = DeepAgentSpec(enable_skill_discovery=False)
 
-    spec = build_member_deep_agent_spec({}, "team", role, base)
+    spec = build_member_deep_agent_spec(_agentic_retrieval_config(), "team", role, base)
+
+    assert spec.enable_skill_discovery is True
+
+
+@pytest.mark.parametrize("role", ["leader", "teammate"])
+def test_team_member_deep_agent_spec_keeps_core_skill_discovery_when_retrieval_disabled(role: str) -> None:
+    """Chat-team members keep the original skill discovery path when retrieval is disabled."""
+    base = DeepAgentSpec(enable_skill_discovery=False)
+
+    spec = build_member_deep_agent_spec(_agentic_retrieval_config(False), "team", role, base)
 
     assert spec.enable_skill_discovery is True
 
 
 @pytest.mark.parametrize("mode", ["code.team", "team.plan"])
-def test_code_member_deep_agent_spec_keeps_explicit_skill_use_rail(mode: str) -> None:
-    """Code profiles keep their explicit SkillUseRail provider path."""
+def test_code_member_deep_agent_spec_keeps_skill_use_rail_when_retrieval_enabled(mode: str) -> None:
+    """Code profiles keep skill_tool while retrieval owns discovery."""
     base = DeepAgentSpec(enable_skill_discovery=False)
 
-    spec = build_member_deep_agent_spec({}, mode, "leader", base)
+    spec = build_member_deep_agent_spec(_agentic_retrieval_config(), mode, "leader", base)
+    rail_names = {rail.type for rail in (spec.rails or [])}
+
+    assert spec.enable_skill_discovery is False
+    assert registry.CODE_SKILL_USE in rail_names
+
+
+@pytest.mark.parametrize("mode", ["code.team", "team.plan"])
+def test_code_member_deep_agent_spec_keeps_skill_use_rail_when_retrieval_disabled(mode: str) -> None:
+    """Code profiles keep their explicit SkillUseRail provider when retrieval is disabled."""
+    base = DeepAgentSpec(enable_skill_discovery=False)
+
+    spec = build_member_deep_agent_spec(_agentic_retrieval_config(False), mode, "leader", base)
     rail_names = {rail.type for rail in (spec.rails or [])}
 
     assert spec.enable_skill_discovery is False
@@ -421,8 +555,12 @@ def test_enrich_team_spec_for_swarm_rewrites_spec_in_place() -> None:
     assert not hasattr(spec, "agent_customizer")
 
 
-def test_enrich_team_spec_appends_after_existing_rails() -> None:
+def test_enrich_team_spec_appends_after_existing_rails(monkeypatch) -> None:
     """Provider rails are appended after a member's pre-existing rails."""
+    monkeypatch.setattr(
+        "jiuwenswarm.agents.swarm.config_specs._retrieval_enabled",
+        lambda config=None: False,
+    )
     spec = _make_team_spec()
     # Seed the leader with a non-swarm rail to prove ordering is preserved.
     spec.agents["leader"].rails = [RailSpec(type="skill_use")]
@@ -599,6 +737,49 @@ def test_image_gen_tool_gated_by_env(monkeypatch: pytest.MonkeyPatch) -> None:
     assert [tool.card.name for tool in built] == ["generate_image"]
 
 
+def test_symphony_toolkit_is_leader_only(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Symphony tools are built only for the team leader."""
+    seen_configs: list[dict] = []
+    fake_tool = types.SimpleNamespace(
+        card=types.SimpleNamespace(name="symphony_compose_score")
+    )
+
+    class FakeSymphonyToolkit:
+        @staticmethod
+        def get_tools(config_base):
+            seen_configs.append(config_base)
+            return [fake_tool] if config_base["symphony"]["enabled"] else []
+
+    monkeypatch.setattr(tools, "SymphonyToolkit", FakeSymphonyToolkit)
+    monkeypatch.setattr(
+        tools,
+        "get_config",
+        lambda: {"symphony": {"enabled": True}},
+    )
+
+    leader = SwarmBuildContext(role="leader")
+    teammate = SwarmBuildContext(role="teammate")
+
+    built = tools.build_symphony_toolkit({}, leader)
+
+    assert [tool.card.name for tool in built] == ["symphony_compose_score"]
+    assert tools.build_symphony_toolkit({}, teammate) == []
+    assert seen_configs == [{"symphony": {"enabled": True}}]
+
+
+def test_symphony_toolkit_respects_disabled_config(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The provider delegates symphony.enabled gating to SymphonyToolkit."""
+    monkeypatch.setattr(
+        tools,
+        "get_config",
+        lambda: {"symphony": {"enabled": False}},
+    )
+
+    assert tools.build_symphony_toolkit({}, SwarmBuildContext(role="leader")) == []
+
+
 def test_vision_model_config_params_gating(monkeypatch: pytest.MonkeyPatch) -> None:
     """Vision config params are empty without a dedicated model, filled when complete."""
     assert tools.vision_model_config_params({}) == {}
@@ -632,6 +813,164 @@ def test_vision_audio_config_params_empty_when_unconfigured() -> None:
 # ---------------------------------------------------------------------------
 # Evolution hot-reload: full TeamWorkspaceInfo on the registered rail context
 # ---------------------------------------------------------------------------
+
+
+def test_team_skill_evolution_provider_passes_review_runtime(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _FakeTeamSkillEvolutionRail:
+        def __init__(self, *args, **kwargs):
+            self.args = args
+            self.kwargs = kwargs
+            self.swarm_context = {}
+            self.approval_submission_service = object()
+
+        def bind_swarm_context(self, **kwargs) -> None:
+            self.swarm_context.update(kwargs)
+
+    class _FakeEvolutionInterruptRail:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+    monkeypatch.setattr(
+        evolution_rails,
+        "SwarmTeamSkillEvolutionRail",
+        _FakeTeamSkillEvolutionRail,
+    )
+    monkeypatch.setattr(evolution_rails, "EvolutionInterruptRail", _FakeEvolutionInterruptRail)
+    monkeypatch.setattr(
+        evolution_rails,
+        "_build_evolution_llm_from",
+        lambda config: (object(), "model"),
+    )
+    monkeypatch.setattr(evolution_rails, "load_execution_disabled_skills", lambda: [])
+
+    ctx = SwarmBuildContext(
+        language="cn",
+        role="leader",
+        session_id="sess",
+        channel="web",
+        team_id="t",
+        team_ws_root=str(tmp_path),
+        team_skills_dir=str(tmp_path / "skills"),
+        trajectory_registry=object(),
+        config={},
+    )
+
+    built = evolution_rails.build_team_skill_evolution_rail(
+        {"evolution_model_config": {}, "auto_scan": False},
+        ctx,
+    )
+
+    assert len(built) == 2
+    interrupt_rail, rail = built
+    assert isinstance(rail, _FakeTeamSkillEvolutionRail)
+    assert isinstance(interrupt_rail, _FakeEvolutionInterruptRail)
+    assert "review_runtime" in rail.kwargs
+    assert rail.kwargs["review_runtime"] is not None
+    assert interrupt_rail.kwargs == {
+        "review_runtime": rail.kwargs["review_runtime"],
+        "submission_service": rail.approval_submission_service,
+        "auto_save": False,
+        "language": "cn",
+    }
+
+
+def test_member_skill_evolution_provider_passes_review_runtime(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _FakeMemberSkillEvolutionRail:
+        def __init__(self, *args, **kwargs):
+            self.args = args
+            self.kwargs = kwargs
+            self.swarm_context = {}
+            self.bound_sink = None
+            self.approval_submission_service = object()
+
+        def set_trajectory_sink(self, sink, *, team_id, member_role) -> None:
+            self.bound_sink = (sink, team_id, member_role)
+
+        def bind_swarm_context(self, **kwargs) -> None:
+            self.swarm_context.update(kwargs)
+
+    class _FakeEvolutionInterruptRail:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+    monkeypatch.setattr(
+        evolution_rails,
+        "SwarmMemberSkillEvolutionRail",
+        _FakeMemberSkillEvolutionRail,
+    )
+    monkeypatch.setattr(evolution_rails, "EvolutionInterruptRail", _FakeEvolutionInterruptRail)
+    monkeypatch.setattr(
+        evolution_rails,
+        "_build_evolution_llm_from",
+        lambda config: (object(), "model"),
+    )
+    monkeypatch.setattr(evolution_rails, "load_execution_disabled_skills", lambda: [])
+
+    registry_obj = object()
+    ctx = SwarmBuildContext(
+        language="en",
+        role="teammate",
+        session_id="sess",
+        channel="web",
+        team_id="t",
+        team_skills_dir=str(tmp_path / "skills"),
+        trajectory_registry=registry_obj,
+        config={},
+    )
+
+    built = evolution_rails.build_member_skill_evolution_rail(
+        {"evolution_model_config": {}, "auto_scan": False},
+        ctx,
+    )
+
+    assert len(built) == 2
+    interrupt_rail, rail = built
+    assert isinstance(rail, _FakeMemberSkillEvolutionRail)
+    assert isinstance(interrupt_rail, _FakeEvolutionInterruptRail)
+    assert "review_runtime" in rail.kwargs
+    assert rail.kwargs["review_runtime"] is not None
+    assert rail.kwargs["language"] == "en"
+    assert interrupt_rail.kwargs == {
+        "review_runtime": rail.kwargs["review_runtime"],
+        "submission_service": rail.approval_submission_service,
+        "auto_save": True,
+        "language": "en",
+    }
+    assert rail.bound_sink == (registry_obj, "t", "teammate")
+
+
+def test_rail_spec_build_flattens_single_and_list_provider_returns() -> None:
+    """Declarative rail providers may return either one rail or a rail stack."""
+    single_rail = AgentRail()
+    first_stack_rail = AgentRail()
+    second_stack_rail = AgentRail()
+
+    register_rail_provider("swarm.test_single_rail", lambda params, ctx: single_rail)
+    register_rail_provider(
+        "swarm.test_rail_stack",
+        lambda params, ctx: [first_stack_rail, second_stack_rail],
+    )
+
+    spec = DeepAgentSpec(
+        rails=[
+            RailSpec(type="swarm.test_single_rail"),
+            RailSpec(type="swarm.test_rail_stack"),
+        ],
+    )
+
+    parts = spec.resolve_parts(context=SwarmBuildContext(language="cn"))
+
+    assert parts.rails[:3] == [
+        single_rail,
+        first_stack_rail,
+        second_stack_rail,
+    ]
 
 
 def test_team_skill_create_rail_registers_full_workspace(
@@ -723,6 +1062,7 @@ _EXPECTED_CODE_RAIL_NAMES: frozenset[str] = frozenset(
         registry.USER_HOOKS,
         registry.CODE_SKILL_USE,
         registry.CODE_WORKTREE,
+        registry.SKILL_RETRIEVAL_PROMPT,
         registry.CODE_CONFIRM_INTERRUPT,
         registry.MEMBER_SKILL_TOOLKIT,
         registry.TEAM_WORKSPACE_REPORT_PATH,
@@ -755,6 +1095,7 @@ def test_code_capability_specs_rail_and_tool_names(mode: str) -> None:
         registry.VIDEO,
         registry.IMAGE_GEN,
         registry.XIAOYI_PHONE,
+        registry.SYMPHONY_TOOLKIT,
         registry.CODE_EXTRA_TOOLS,
         registry.CRON_TOOLS,
         registry.SEND_FILE,
@@ -814,10 +1155,14 @@ def test_code_member_builds_declaratively_without_post_processing(
     """
     register_swarm_providers()
     config = get_config()
-    model_client_config, _, _ = resolve_model_config(config)
     base = DeepAgentSpec(
         model=TeamModelConfig(
-            model_client_config=ModelClientConfig(**model_client_config)
+            model_client_config=ModelClientConfig(
+                client_provider="OpenAI",
+                api_key="test-key",
+                api_base="https://example.test/v1",
+                verify_ssl=False,
+            )
         ),
         workspace=WorkspaceSpec(root_path=str(tmp_path), language="en"),
     )
@@ -852,7 +1197,7 @@ def test_code_member_builds_declaratively_without_post_processing(
     rails = list(getattr(agent, "_pending_rails", [])) + list(
         getattr(agent, "_registered_rails", [])
     )
-    rail_types = {type(rail).__name__ for rail in rails}
+    rail_types = {rail.__class__.__name__ for rail in rails}
 
     # Zero post-processing: the legacy code customizer is never invoked.
     assert post_processing_calls == []

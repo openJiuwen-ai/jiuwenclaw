@@ -1,7 +1,8 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 import sys
 from enum import IntEnum
-from typing import Optional
+from pathlib import Path
+from typing import Any, Optional
 
 from openjiuwen.harness.prompts import SystemPromptBuilder, PromptSection, resolve_language
 from jiuwenswarm.agents.harness.common.prompt.shell_environment import build_shell_environment_prompt
@@ -20,25 +21,42 @@ def _get_config_dir() -> "Path":
     return get_user_workspace_dir() / "config"
 
 
-def _symphony_routing_prompt() -> str:
+def _symphony_routing_prompt(config_base: dict[str, Any] | None = None) -> str:
     try:
         from jiuwenswarm.symphony.config import load_symphony_config
 
-        if not load_symphony_config().enabled:
+        config = (
+            load_symphony_config()
+            if config_base is None
+            else load_symphony_config(config_base)
+        )
+        if not config.enabled:
             return ""
     except Exception:
         return ""
     return """
 ## Symphony Routing
 
-When the user says to use skill(s) or 技能 to complete a task, you MUST call
-`symphony_compose_score` with the original user task as `query` before answering.
-Do not manually list skill names, inspect skill folders, choose a skill chain,
-or recommend skills before calling `symphony_compose_score`. After it returns, present its returned `content` or `markdown` directly to the user. If Symphony reports
-missing inputs, ask for those inputs.
+When the user says to use skill(s) or 技能, or when you judge that skill
+capabilities, skill chaining, skill ordering, or a specialized toolchain could
+help complete the task, you MUST call `symphony_compose_score` with the original
+user task as `query` before answering.
+When installed-skill retrieval is available and can narrow the search space,
+use `skill_branch_peek` / `skill_branch_explore` to shortlist candidate skills
+first, then pass the selected `worker_id` values as
+`symphony_compose_score.candidate_skill_ids`. Do not inspect skill folders
+manually or choose the execution chain yourself; Symphony owns ordering and
+graph composition. After it returns, present its returned `content` directly to
+the user. If Symphony reports missing inputs, ask for those inputs.
 
-For ordinary tasks that do not ask to use installed skills, continue normally
-without Symphony.
+If Symphony reports no suitable candidates, a missing capability, or caveats
+that point to a skill gap, use `search_skill` to discover external skills. When
+installing a discovered skill is appropriate, call `install_skill`; after a
+successful install, call `symphony_refresh_score` and then call
+`symphony_compose_score` again with the original user task.
+
+For clearly ordinary tasks that do not benefit from skill capabilities, continue
+normally without Symphony.
 """
 
 
@@ -152,7 +170,10 @@ After completing a system task, notify the user via a reply.
 # ─── identity section (general agent only) ──────
 
 
-def _identity_prompt(language: str) -> PromptSection:
+def _identity_prompt(
+    language: str,
+    config_base: dict[str, Any] | None = None,
+) -> PromptSection:
     config_dir = _get_config_dir()
     workspace_dir = get_agent_workspace_dir()
     memory_dir = get_agent_memory_dir()
@@ -160,7 +181,7 @@ def _identity_prompt(language: str) -> PromptSection:
     todo_dir = get_deepagent_todo_dir()
     os_type = sys.platform
     shell_env_prompt = build_shell_environment_prompt(language, os_type)
-    symphony_routing_prompt = _symphony_routing_prompt()
+    symphony_routing_prompt = _symphony_routing_prompt(config_base)
 
     if language == "cn":
         content = f"""你是一个私人智能体，由 JiuwenSwarm 创建。像一个有温度的人类助手一样与用户互动。
@@ -209,6 +230,16 @@ def _identity_prompt(language: str) -> PromptSection:
 | 查找文件 | `dir /s pattern` 或 PowerShell `Get-ChildItem -Recurse -Filter pattern` | `find . -name pattern` |
 
 **特别注意**：Windows 的 cmd/PowerShell `mkdir` 不支持 `-p` 参数；只有在 Shell 能力显示 Git Bash/PATH bash 可用且实际使用 bash/Git Bash 时，`mkdir -p` 才是合适的。如需在 cmd/PowerShell 中创建嵌套目录，请使用 PowerShell `New-Item -ItemType Directory -Path "parent/child" -Force`，或使用 cmd 分步创建 `mkdir parent && mkdir parent\\child`。
+
+## 任务执行准则
+
+- **数据保真**：写入文件或结构化结果时，字段值必须与来源逐字一致；严禁擅自规范化、改写、翻译、补全或截断（如编号、代码、单位、大小写）。
+- **沿用模板**：任务已给输出文件/模板/示例时，必须先读取并严格沿用其表头、列名、列序与形态，只填数据；严禁增删改列或改变表格形态，不要自创格式。
+- **按条件取舍**：要求挑选/过滤/排除时绝不照单全收；综合所有相关信息（含需跨源交叉核对的条件）逐项判断，命中排除或豁免条件的主动剔除。
+- **时间与时区零误差**：先认清来源时区并全程保持一致，加减（如“截止前 N 小时”）必须基于带时区的时间精确计算；写入外部系统（日历/数据库/API）时，时区偏移必须内联在时间值里（如 `2025-10-01T16:59:00+08:00`），严禁裸时间，也不要只用独立的 timeZone 字段；除非要求换算，优先保留来源时区。
+- **高效查询**：访问数据库优先用聚合查询（如 `GROUP BY`）一次取回，避免逐行/重复查询及反复列目录、重读文件等冗余操作。
+- **写入范围匹配意图**：写操作的影响范围要与任务意图一致。只需改动部分数据、或须保留既有数据时，仅增改目标记录，不要用整体覆盖/清空/重建去完成局部改动而误伤其他数据；调用写入或导入类工具前，先确认并显式设置写入模式等关键参数，不要盲信默认。仅当确需整体替换、或无既有数据可保留时才整体覆盖。要求设置/更新某字段时，确认已真正写入。
+- **交付前自检**：交付前逐条核对全部条件是否满足、有无错纳漏纳、时间/数值/单位是否精确、既有数据是否完好、格式是否与模板一致；不过关先修正。
 
 ## 输出文件放置规范
 执行用户任务时产生的生成产物（如代码文件、文档、数据文件等），若用户未指定存放位置，请遵循以下规则：
@@ -273,6 +304,16 @@ Common command differences:
 
 **WARNING**: Windows cmd/PowerShell `mkdir` does NOT support the `-p` flag; `mkdir -p` is appropriate only when Shell capabilities show Git Bash/PATH bash is available and you are actually using bash/Git Bash. To create nested directories in cmd/PowerShell, use either PowerShell `New-Item -ItemType Directory -Path "parent/child" -Force` or cmd with step-by-step creation `mkdir parent && mkdir parent\\child`.
 
+## Task Execution Principles
+
+- **Data fidelity**: Field values written to files or structured results MUST match the source character for character; never normalize, rewrite, translate, complete, or truncate (IDs, codes, units, casing).
+- **Follow the template**: If the task provides an output file/template/example, read it first and strictly reuse its header, column names, order, and shape, filling in data only; never add/drop/rename/reorder columns or change the table shape, and don't invent your own format.
+- **Select by criteria**: When asked to select/filter/exclude, never include everything; judge each item against all relevant info (including conditions cross-checked across sources) and actively drop those hitting an exclusion/exemption.
+- **Zero tolerance on time/timezones**: Identify the source timezone and keep it consistent; do arithmetic ("N hours before a deadline") on timezone-aware values. When writing time to an external system (calendar/DB/API), the offset MUST be inline in the value (e.g. `2025-10-01T16:59:00+08:00`) — never a "naked" time, and don't rely on a separate timeZone field; unless conversion is required, preserve the source timezone.
+- **Efficient queries**: Prefer aggregate queries (e.g. `GROUP BY`) to fetch in one shot; avoid per-row/repeated queries and redundant listing or re-reading of files.
+- **Match write scope to intent**: A write's impact should match the task's intent. When only part of the data changes or existing data must be kept, modify just the target records — don't use a wholesale overwrite/clear/rebuild for a partial change and harm other data; before any write or import tool, confirm and explicitly set its write mode and other key parameters rather than trusting defaults. Do a full replace only when truly required or there is no existing data to keep. When setting/updating a field, confirm it was actually written.
+- **Self-check before delivery**: Before delivering, verify item by item that all conditions hold, nothing is wrongly included/omitted, times/numbers/units are exact, existing data is intact, and the format matches the template; fix any failure first.
+
 ## Output File Placement
 Generated artifacts (code files, documents, data files, etc.) produced during user task execution should follow these placement rules unless the user specifies otherwise:
 - **General Artifacts**: Non-skill-related artifacts must be placed in an appropriate location within `{workspace_dir}`, organized according to file purpose and project structure for unified user management and access
@@ -297,7 +338,10 @@ When the `send_file_to_user` tool is available in your tool list, you **must** p
 # ─── entry point (general agent) ────────────────
 
 
-def build_agent_identity_prompt(language: str) -> str:
+def build_agent_identity_prompt(
+    language: str,
+    config_base: dict[str, Any] | None = None,
+) -> str:
     """Build the system prompt for the general (non-code) agent.
 
     Contains only the identity section. Code mode uses its own
@@ -306,7 +350,7 @@ def build_agent_identity_prompt(language: str) -> str:
     resolved_language = resolve_language(language)
     builder = SystemPromptBuilder(language=resolved_language)
 
-    builder.add_section(_identity_prompt(resolved_language))
+    builder.add_section(_identity_prompt(resolved_language, config_base))
 
     return builder.build()
 

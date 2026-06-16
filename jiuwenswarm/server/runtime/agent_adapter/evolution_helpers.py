@@ -57,6 +57,11 @@ TEAM_EVOLUTION_VISIBLE_PROGRESS_STAGES = {
     "completed",
     *TEAM_EVOLUTION_NOOP_STAGES,
 }
+REGULAR_EVOLUTION_VISIBLE_START_STAGES = {
+    "generating",
+    "approval_required",
+    "completed",
+}
 
 
 @dataclass(frozen=True)
@@ -103,7 +108,15 @@ _SDK_PROGRESS_TERMINAL_STAGES = {
     "timed_out",
 }
 
-EVOLUTION_ACCEPT_LABELS = ("accept", "接收", "接受")
+EVOLUTION_ACCEPT_LABELS = (
+    "accept",
+    "接收",
+    "接受",
+    "allow_once",
+    "allow_always",
+    "本次允许",
+    "总是允许",
+)
 EVOLUTION_EXECUTE_LABELS = ("execute", "执行")
 REGULAR_EVOLUTION_SLASH_WARNING_PHRASES = (
     "未生成可保存经验",
@@ -599,6 +612,16 @@ def visible_evolution_progress_from_events(events: list[Any]) -> list[EvolutionP
         progress
         for progress in (evolution_progress_status_from_event(evt) for evt in events)
         if progress is not None and progress.stage in TEAM_EVOLUTION_VISIBLE_PROGRESS_STAGES
+    ]
+
+
+def visible_regular_evolution_start_progress(
+    progress_statuses: list[EvolutionProgressStatus],
+) -> list[EvolutionProgressStatus]:
+    return [
+        progress
+        for progress in progress_statuses
+        if progress.stage in REGULAR_EVOLUTION_VISIBLE_START_STAGES
     ]
 
 

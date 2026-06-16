@@ -1,6 +1,15 @@
 import { flattenArrayPayload, formatValue, makeItem } from "../helpers.js";
 import { CommandKind, type SlashCommand } from "../types.js";
 
+type SkillNetItem = {
+  skill_name: string;
+  skill_description: string;
+  author: string;
+  stars: number;
+  skill_url: string;
+  category: string;
+};
+
 type MarketPlaceItem = {
   name: string;
   url: string;
@@ -28,6 +37,30 @@ async function listMarketplaces(ctx: import("../types.js").CommandContext): Prom
       { view: "list", title: "Marketplaces", items },
     ),
   );
+}
+
+/** Poll SkillNet install_status until done, failed, or timeout.
+ *  Returns the final status payload. */
+async function pollSkillNetInstall(
+  ctx: import("../types.js").CommandContext,
+  installId: string,
+  maxWaitMs: number = 15 * 60 * 1000,
+  pollMs: number = 800,
+): Promise<{ success?: boolean; status?: string; detail?: string; skill?: { name?: string; source?: string } }> {
+  const deadline = Date.now() + maxWaitMs;
+  while (Date.now() < deadline) {
+    await new Promise((r) => setTimeout(r, pollMs));
+    const st = await ctx.request<{ success?: boolean; status?: string; detail?: string; detail_key?: string; skill?: { name?: string; source?: string } }>(
+      "skills.skillnet.install_status",
+      { install_id: installId },
+      10_000,
+    );
+    if (st.status === "done") return st;
+    if (st.status === "failed") return st;
+    if (!st.success && st.status !== "pending") return st;
+    // still pending — keep polling
+  }
+  return { success: false, detail: `SkillNet install timed out after ${Math.round(maxWaitMs / 1000)}s` };
 }
 
 async function listSkills(ctx: import("../types.js").CommandContext): Promise<void> {
@@ -84,9 +117,9 @@ async function listSkills(ctx: import("../types.js").CommandContext): Promise<vo
 export function createSkillsCommand(): SlashCommand {
   return {
     name: "skills",
-    description: "Manage skills (list, install, uninstall, marketplace, use)",
-    usage: "/skills [list|install|uninstall|marketplace|use]",
-    example: "/skills install my-skill  |  /skills install /path/to/skill",
+    description: "Manage skills (list, install, uninstall, marketplace, skillnet, use)",
+    usage: "/skills [list|install|uninstall|marketplace|skillnet|use]",
+    example: "/skills install my-skill  |  /skills install code-review@clawhub  |  /skills skillnet search code",
     kind: CommandKind.BUILT_IN,
     action: async (ctx) => {
       await listSkills(ctx);
@@ -105,15 +138,15 @@ export function createSkillsCommand(): SlashCommand {
       },
       {
         name: "install",
-        description: "Install a skill (builtin name, plugin@marketplace, or local path/URL)",
-        usage: "/skills install <skill> | <skill@marketplace> | <path_or_url>",
-        example: "/skills install my-skill  |  /skills install /path/to/skill",
+        description: "Install a skill (builtin name, slug@clawhub, name@skillnet, plugin@marketplace, or local path/URL)",
+        usage: "/skills install <skill> | <slug@clawhub> | <name@skillnet> | <skill@marketplace> | <path_or_url>",
+        example: "/skills install my-skill  |  /skills install code-review@clawhub  |  /skills install code-review@skillnet",
         kind: CommandKind.BUILT_IN,
         takesArgs: true,
         action: async (ctx, args) => {
           const spec = args.trim();
           if (!spec) {
-            ctx.addItem(makeItem(ctx.sessionId, "error", "Usage: /skills install <skill> | <skill@marketplace> | <path_or_url>"));
+            ctx.addItem(makeItem(ctx.sessionId, "error", "Usage: /skills install <skill> | <slug@clawhub> | <name@skillnet> | <skill@marketplace> | <path_or_url>"));
             return;
           }
 
@@ -134,6 +167,189 @@ export function createSkillsCommand(): SlashCommand {
               ctx.addItem(
                 makeItem(ctx.sessionId, "error", payload.detail || `Import failed: ${spec}`),
               );
+            }
+            return;
+          }
+
+          // ClawHub install flow: "slug@clawhub" or bare slug that looks like a ClawHub identifier
+          // ClawHub identifiers are alphanumeric slugs like "code-review", "daily-report" etc.
+          if (spec.includes("@clawhub") || (spec.includes("@") && spec.endsWith("@clawhub"))) {
+            const slug = spec.replace(/@clawhub$/i, "");
+            ctx.addItem(makeItem(ctx.sessionId, "info", `Installing from ClawHub: ${slug}`));
+            const downloadPayload = await ctx.request<{ success?: boolean; detail?: string; detail_key?: string; skill?: { name?: string; source?: string } }>(
+              "skills.clawhub.download",
+              { slug, force: false },
+              120_000,
+            );
+            if (downloadPayload.success) {
+              const skillName = downloadPayload.skill?.name || slug;
+              ctx.addItem(makeItem(ctx.sessionId, "info", `Skill installed from ClawHub: ${skillName}`));
+            } else {
+              // Token not configured — give actionable guidance
+              if (downloadPayload.detail_key === "skills.clawhub.errors.tokenNotConfigured") {
+                ctx.addItem(makeItem(ctx.sessionId, "error",
+                  `ClawHub token not configured. Please set your token first:\n` +
+                  `  /skills marketplace clawhub token <your-token>\n` +
+                  `Get your token at: https://clawhub.ai`));
+                return;
+              }
+              // Skill already installed — ask user if they want to force overwrite
+              if (downloadPayload.detail_key === "skills.clawhub.errors.skillAlreadyInstalled"
+                  || downloadPayload.detail?.includes("已安装") || downloadPayload.detail?.includes("已存在")) {
+                const answers = await ctx.askQuestions([
+                  {
+                    header: "ClawHub",
+                    question: `Skill "${slug}" is already installed. Do you want to force overwrite it?`,
+                    options: [
+                      { label: "Yes, overwrite", description: `Re-install "${slug}" from ClawHub, replacing the existing version` },
+                      { label: "No, cancel", description: "Keep the existing skill unchanged" },
+                    ],
+                  },
+                ]);
+                const selected = answers[0]?.selected_options?.[0];
+                if (selected === "Yes, overwrite") {
+                  ctx.addItem(makeItem(ctx.sessionId, "info", `Force re-installing from ClawHub: ${slug}`));
+                  const forcePayload = await ctx.request<{ success?: boolean; detail?: string; detail_key?: string; skill?: { name?: string; source?: string } }>(
+                    "skills.clawhub.download",
+                    { slug, force: true },
+                    120_000,
+                  );
+                  if (forcePayload.success) {
+                    const skillName = forcePayload.skill?.name || slug;
+                    ctx.addItem(makeItem(ctx.sessionId, "info", `Skill re-installed from ClawHub: ${skillName}`));
+                  } else {
+                    ctx.addItem(makeItem(ctx.sessionId, "error", forcePayload.detail || `ClawHub force install failed: ${slug}`));
+                  }
+                } else {
+                  ctx.addItem(makeItem(ctx.sessionId, "info", `Installation cancelled. Skill "${slug}" remains unchanged.`));
+                }
+                return;
+              }
+              // Other download error — try searching ClawHub so user can find the correct slug
+              ctx.addItem(makeItem(ctx.sessionId, "info", `Direct install failed for "${slug}", searching ClawHub for matching skills...`));
+              try {
+                const searchPayload = await ctx.request<{ success?: boolean; detail?: string; detail_key?: string; skills?: Array<{ slug: string; display_name: string; summary: string; version: string; updated_at: number }> }>(
+                  "skills.clawhub.search",
+                  { q: slug, limit: 10 },
+                  60_000,
+                );
+                if (searchPayload.success && searchPayload.skills?.length) {
+                  const items = searchPayload.skills.map((s) => ({
+                    label: `${s.display_name || s.slug}`,
+                    value: s.slug,
+                    description: `${s.summary || "(no description)"} | slug: ${s.slug} | v${s.version || "?"}`,
+                  }));
+                  ctx.addItem(makeItem(ctx.sessionId, "info", `Found ${searchPayload.skills.length} matching skills on ClawHub. Use the slug shown below:`, "*", { view: "list", title: "ClawHub Search Results (use slug@clawhub to install)", items }));
+                } else {
+                  // Search also requires token — if token error, give guidance
+                  if (searchPayload.detail_key === "skills.clawhub.errors.tokenNotConfigured") {
+                    ctx.addItem(makeItem(ctx.sessionId, "error",
+                      `ClawHub token not configured. Please set your token first:\n` +
+                      `  /skills marketplace clawhub token <your-token>\n` +
+                      `Get your token at: https://clawhub.ai`));
+                  } else {
+                    ctx.addItem(makeItem(ctx.sessionId, "error", downloadPayload.detail || `ClawHub install failed: ${slug}`));
+                  }
+                }
+              } catch {
+                ctx.addItem(makeItem(ctx.sessionId, "error", downloadPayload.detail || `ClawHub install failed: ${slug}`));
+              }
+            }
+            return;
+          }
+
+          // SkillNet install flow: "skill_name@skillnet"
+          // SkillNet skills are identified by URL, not slug. The @skillnet format triggers
+          // a search first. Only auto-installs if an exact match by skill_name is found;
+          // otherwise shows search results and lets the user pick the right one.
+          if (spec.endsWith("@skillnet")) {
+            const skillName = spec.replace(/@skillnet$/i, "");
+            ctx.addItem(makeItem(ctx.sessionId, "info", `Searching SkillNet for: ${skillName}`));
+            const searchPayload = await ctx.request<{ success?: boolean; detail?: string; detail_key?: string; count?: number; skills?: SkillNetItem[] }>(
+              "skills.skillnet.search",
+              { q: skillName, limit: 10 },
+              60_000,
+            );
+            if (!searchPayload.success || !searchPayload.skills?.length) {
+              ctx.addItem(makeItem(ctx.sessionId, "error",
+                searchPayload.detail || `No matching skills found on SkillNet for: ${skillName}`));
+              return;
+            }
+            // Find exact match by skill_name
+            const exactMatch = searchPayload.skills.find((s) => s.skill_name === skillName);
+            if (!exactMatch) {
+              // No exact match — only show search results, do NOT auto-install
+              const items = searchPayload.skills.map((s) => ({
+                label: s.skill_name || "?",
+                value: s.skill_url,
+                description: `${s.skill_description || "(no description)"} | by ${s.author || "?"} | ⭐${s.stars || 0}`,
+              }));
+              ctx.addItem(makeItem(ctx.sessionId, "info",
+                `No exact match for "${skillName}" on SkillNet. Found ${searchPayload.skills.length} related skills.\n` +
+                `To install, use one of:\n` +
+                `  /skills skillnet install <url>\n` +
+                `  /skills install <exact_skill_name>@skillnet`, "*", { view: "list", title: "SkillNet Search Results", items }));
+              return;
+            }
+            // Exact match found — proceed with install
+            const skillUrl = exactMatch.skill_url;
+            ctx.addItem(makeItem(ctx.sessionId, "info", `Installing from SkillNet: ${exactMatch.skill_name}`));
+            const installPayload = await ctx.request<{ success?: boolean; detail?: string; pending?: boolean; install_id?: string }>(
+              "skills.skillnet.install",
+              { url: skillUrl, force: false },
+              120_000,
+            );
+            if (!installPayload.success) {
+              if (installPayload.detail?.includes("已存在") || installPayload.detail?.includes("已安装")) {
+                const answers = await ctx.askQuestions([
+                  {
+                    header: "SkillNet",
+                    question: `Skill "${exactMatch.skill_name}" is already installed. Do you want to force overwrite it?`,
+                    options: [
+                      { label: "Yes, overwrite", description: `Re-install from SkillNet, replacing the existing version` },
+                      { label: "No, cancel", description: "Keep the existing skill unchanged" },
+                    ],
+                  },
+                ]);
+                const selected = answers[0]?.selected_options?.[0];
+                if (selected === "Yes, overwrite") {
+                  const forcePayload = await ctx.request<{ success?: boolean; detail?: string; pending?: boolean; install_id?: string }>(
+                    "skills.skillnet.install",
+                    { url: skillUrl, force: true },
+                    120_000,
+                  );
+                  if (forcePayload.success && forcePayload.pending && forcePayload.install_id) {
+                    ctx.addItem(makeItem(ctx.sessionId, "info", `Downloading... (install_id: ${forcePayload.install_id.slice(0, 8)})`));
+                    const finalSt = await pollSkillNetInstall(ctx, forcePayload.install_id);
+                    if (finalSt.success && finalSt.status === "done") {
+                      ctx.addItem(makeItem(ctx.sessionId, "info", `Skill re-installed from SkillNet: ${finalSt.skill?.name || exactMatch.skill_name}`));
+                    } else {
+                      ctx.addItem(makeItem(ctx.sessionId, "error", finalSt.detail || `SkillNet force install failed`));
+                    }
+                  } else if (forcePayload.success && !forcePayload.pending) {
+                    ctx.addItem(makeItem(ctx.sessionId, "info", `Skill re-installed from SkillNet: ${exactMatch.skill_name}`));
+                  } else {
+                    ctx.addItem(makeItem(ctx.sessionId, "error", forcePayload.detail || `SkillNet force install failed`));
+                  }
+                } else {
+                  ctx.addItem(makeItem(ctx.sessionId, "info", `Installation cancelled. Skill remains unchanged.`));
+                }
+              } else {
+                ctx.addItem(makeItem(ctx.sessionId, "error", installPayload.detail || `SkillNet install failed: ${skillUrl}`));
+              }
+              return;
+            }
+            // Async install — poll for completion
+            if (installPayload.pending && installPayload.install_id) {
+              ctx.addItem(makeItem(ctx.sessionId, "info", `Downloading... (install_id: ${installPayload.install_id.slice(0, 8)})`));
+              const finalSt = await pollSkillNetInstall(ctx, installPayload.install_id);
+              if (finalSt.success && finalSt.status === "done") {
+                ctx.addItem(makeItem(ctx.sessionId, "info", `Skill installed from SkillNet: ${finalSt.skill?.name || exactMatch.skill_name}`));
+              } else {
+                ctx.addItem(makeItem(ctx.sessionId, "error", finalSt.detail || `SkillNet install failed: ${skillUrl}`));
+              }
+            } else {
+              ctx.addItem(makeItem(ctx.sessionId, "info", `Skill installed from SkillNet: ${exactMatch.skill_name}`));
             }
             return;
           }
@@ -203,9 +419,9 @@ export function createSkillsCommand(): SlashCommand {
       },
       {
         name: "marketplace",
-        description: "Manage marketplace sources",
-        usage: "/skills marketplace [list|add|remove|toggle]",
-        example: "/skills marketplace list",
+        description: "Manage marketplace sources (Git repos) and ClawHub token",
+        usage: "/skills marketplace [list|add|remove|toggle|clawhub]",
+        example: "/skills marketplace list  |  /skills marketplace clawhub token abc123",
         kind: CommandKind.BUILT_IN,
         action: async (ctx) => {
           await listMarketplaces(ctx);
@@ -300,6 +516,234 @@ export function createSkillsCommand(): SlashCommand {
                 await listMarketplaces(ctx);
               } else {
                 ctx.addItem(makeItem(ctx.sessionId, "error", payload.detail || `Toggle failed: ${name}`));
+              }
+            },
+          },
+          {
+            name: "clawhub",
+            description: "Manage ClawHub token (view or set)",
+            usage: "/skills marketplace clawhub token [value]",
+            example: "/skills marketplace clawhub token abc123  |  /skills marketplace clawhub",
+            kind: CommandKind.BUILT_IN,
+            takesArgs: true,
+            action: async (ctx, args) => {
+              const token = args.trim();
+              if (!token) {
+                // View current token status
+                const payload = await ctx.request<{ success?: boolean; token?: string; has_token?: boolean }>(
+                  "skills.clawhub.get_token",
+                  {},
+                );
+                if (payload.success) {
+                  if (payload.has_token) {
+                    ctx.addItem(makeItem(ctx.sessionId, "info", `ClawHub token configured: ${payload.token}`));
+                  } else {
+                    ctx.addItem(makeItem(ctx.sessionId, "info",
+                      `ClawHub token not configured.\n` +
+                      `To set your token:\n` +
+                      `  /skills marketplace clawhub token <your-token>\n` +
+                      `Get your token at: https://clawhub.ai`));
+                  }
+                } else {
+                  ctx.addItem(makeItem(ctx.sessionId, "error", "Failed to check ClawHub token status"));
+                }
+                return;
+              }
+              // Set token
+              const payload = await ctx.request<{ success?: boolean; detail?: string; token?: string }>(
+                "skills.clawhub.set_token",
+                { token },
+              );
+              if (payload.success) {
+                ctx.addItem(makeItem(ctx.sessionId, "info", `ClawHub token saved: ${payload.token || "(masked)"}`));
+              } else {
+                ctx.addItem(makeItem(ctx.sessionId, "error", payload.detail || "Failed to save ClawHub token"));
+              }
+            },
+            subCommands: [
+              {
+                name: "token",
+                description: "Set or view ClawHub CLI token",
+                usage: "/skills marketplace clawhub token [value]",
+                example: "/skills marketplace clawhub token abc123  |  /skills marketplace clawhub token",
+                kind: CommandKind.BUILT_IN,
+                takesArgs: true,
+                action: async (ctx, args) => {
+                  const token = args.trim();
+                  if (!token) {
+                    const payload = await ctx.request<{ success?: boolean; token?: string; has_token?: boolean }>(
+                      "skills.clawhub.get_token",
+                      {},
+                    );
+                    if (payload.success) {
+                      if (payload.has_token) {
+                        ctx.addItem(makeItem(ctx.sessionId, "info", `ClawHub token configured: ${payload.token}`));
+                      } else {
+                        ctx.addItem(makeItem(ctx.sessionId, "info",
+                          `ClawHub token not configured.\n` +
+                          `To set your token:\n` +
+                          `  /skills marketplace clawhub token <your-token>\n` +
+                          `Get your token at: https://clawhub.ai`));
+                      }
+                    } else {
+                      ctx.addItem(makeItem(ctx.sessionId, "error", "Failed to check ClawHub token status"));
+                    }
+                    return;
+                  }
+                  const payload = await ctx.request<{ success?: boolean; detail?: string; token?: string }>(
+                    "skills.clawhub.set_token",
+                    { token },
+                  );
+                  if (payload.success) {
+                    ctx.addItem(makeItem(ctx.sessionId, "info", `ClawHub token saved: ${payload.token || "(masked)"}`));
+                  } else {
+                    ctx.addItem(makeItem(ctx.sessionId, "error", payload.detail || "Failed to save ClawHub token"));
+                  }
+                },
+              },
+            ],
+          },
+        ],
+      },
+      {
+        name: "skillnet",
+        description: "SkillNet online skill registry (search, install)",
+        usage: "/skills skillnet [search|install]",
+        example: "/skills skillnet search code  |  /skills skillnet install <url>",
+        kind: CommandKind.BUILT_IN,
+        takesArgs: true,
+        action: async (ctx, args) => {
+          const q = args.trim();
+          if (!q) {
+            ctx.addItem(makeItem(ctx.sessionId, "info",
+              `SkillNet — online skill registry (OpenKG/ZJU).\n` +
+              `Search:   /skills skillnet search <query>\n` +
+              `Install:  /skills skillnet install <skill_url>\n` +
+              `Or use:   /skills install <skill_name>@skillnet`));
+            return;
+          }
+          // Default: search
+          ctx.addItem(makeItem(ctx.sessionId, "info", `Searching SkillNet for: ${q}`));
+          const payload = await ctx.request<{ success?: boolean; detail?: string; detail_key?: string; count?: number; skills?: SkillNetItem[] }>(
+            "skills.skillnet.search",
+            { q, limit: 20 },
+            60_000,
+          );
+          if (payload.success && payload.skills?.length) {
+            const items = payload.skills.map((s) => ({
+              label: s.skill_name || "?",
+              value: s.skill_url,
+              description: `${s.skill_description || "(no description)"} | by ${s.author || "?"} | ⭐${s.stars || 0} | ${s.category || "-"}`,
+            }));
+            ctx.addItem(makeItem(ctx.sessionId, "info", `SkillNet results (${payload.skills.length})`, "*", { view: "list", title: "SkillNet Search Results (use /skills skillnet install <url> to install)", items }));
+          } else {
+            ctx.addItem(makeItem(ctx.sessionId, "error", payload.detail || `SkillNet search failed: ${q}`));
+          }
+        },
+        subCommands: [
+          {
+            name: "search",
+            description: "Search skills on SkillNet",
+            usage: "/skills skillnet search <query>",
+            example: "/skills skillnet search code-review",
+            kind: CommandKind.BUILT_IN,
+            takesArgs: true,
+            action: async (ctx, args) => {
+              const q = args.trim();
+              if (!q) {
+                ctx.addItem(makeItem(ctx.sessionId, "error", "Usage: /skills skillnet search <query>"));
+                return;
+              }
+              ctx.addItem(makeItem(ctx.sessionId, "info", `Searching SkillNet for: ${q}`));
+              const payload = await ctx.request<{ success?: boolean; detail?: string; detail_key?: string; count?: number; skills?: SkillNetItem[] }>(
+                "skills.skillnet.search",
+                { q, limit: 20 },
+                60_000,
+              );
+              if (payload.success && payload.skills?.length) {
+                const items = payload.skills.map((s) => ({
+                  label: s.skill_name || "?",
+                  value: s.skill_url,
+                  description: `${s.skill_description || "(no description)"} | by ${s.author || "?"} | ⭐${s.stars || 0} | ${s.category || "-"}`,
+                }));
+                ctx.addItem(makeItem(ctx.sessionId, "info", `SkillNet results (${payload.skills.length})`, "*", { view: "list", title: "SkillNet Search Results (use /skills skillnet install <url> to install)", items }));
+              } else {
+                ctx.addItem(makeItem(ctx.sessionId, "error", payload.detail || `SkillNet search failed: ${q}`));
+              }
+            },
+          },
+          {
+            name: "install",
+            description: "Install a skill from SkillNet by URL",
+            usage: "/skills skillnet install <skill_url>",
+            example: "/skills skillnet install https://github.com/user/skill-repo",
+            kind: CommandKind.BUILT_IN,
+            takesArgs: true,
+            action: async (ctx, args) => {
+              const url = args.trim();
+              if (!url) {
+                ctx.addItem(makeItem(ctx.sessionId, "error", "Usage: /skills skillnet install <skill_url>"));
+                return;
+              }
+              ctx.addItem(makeItem(ctx.sessionId, "info", `Installing from SkillNet: ${url}`));
+              const installPayload = await ctx.request<{ success?: boolean; detail?: string; pending?: boolean; install_id?: string }>(
+                "skills.skillnet.install",
+                { url, force: false },
+                120_000,
+              );
+              if (!installPayload.success) {
+                // Skill already installed — ask user if they want to force overwrite
+                if (installPayload.detail?.includes("已存在") || installPayload.detail?.includes("已安装")) {
+                  const answers = await ctx.askQuestions([
+                    {
+                      header: "SkillNet",
+                      question: `Skill already exists. Do you want to force overwrite it from SkillNet?`,
+                      options: [
+                        { label: "Yes, overwrite", description: `Re-install from SkillNet, replacing the existing version` },
+                        { label: "No, cancel", description: "Keep the existing skill unchanged" },
+                      ],
+                    },
+                  ]);
+                  const selected = answers[0]?.selected_options?.[0];
+                  if (selected === "Yes, overwrite") {
+                    ctx.addItem(makeItem(ctx.sessionId, "info", `Force re-installing from SkillNet: ${url}`));
+                    const forcePayload = await ctx.request<{ success?: boolean; detail?: string; pending?: boolean; install_id?: string }>(
+                      "skills.skillnet.install",
+                      { url, force: true },
+                      120_000,
+                    );
+                    if (forcePayload.success && forcePayload.pending && forcePayload.install_id) {
+                      ctx.addItem(makeItem(ctx.sessionId, "info", `Downloading... (install_id: ${forcePayload.install_id.slice(0, 8)})`));
+                      const finalSt = await pollSkillNetInstall(ctx, forcePayload.install_id);
+                      if (finalSt.success && finalSt.status === "done") {
+                        ctx.addItem(makeItem(ctx.sessionId, "info", `Skill re-installed from SkillNet: ${finalSt.skill?.name || url}`));
+                      } else {
+                        ctx.addItem(makeItem(ctx.sessionId, "error", finalSt.detail || `SkillNet force install failed: ${url}`));
+                      }
+                    } else if (forcePayload.success && !forcePayload.pending) {
+                      ctx.addItem(makeItem(ctx.sessionId, "info", `Skill re-installed from SkillNet: ${url}`));
+                    } else {
+                      ctx.addItem(makeItem(ctx.sessionId, "error", forcePayload.detail || `SkillNet force install failed: ${url}`));
+                    }
+                  } else {
+                    ctx.addItem(makeItem(ctx.sessionId, "info", `Installation cancelled. Skill remains unchanged.`));
+                  }
+                } else {
+                  ctx.addItem(makeItem(ctx.sessionId, "error", installPayload.detail || `SkillNet install failed: ${url}`));
+                }
+                return;
+              }
+              // Async install — poll for completion
+              if (installPayload.pending && installPayload.install_id) {
+                ctx.addItem(makeItem(ctx.sessionId, "info", `Downloading... (install_id: ${installPayload.install_id.slice(0, 8)})`));
+                const finalSt = await pollSkillNetInstall(ctx, installPayload.install_id);
+                if (finalSt.success && finalSt.status === "done") {
+                  ctx.addItem(makeItem(ctx.sessionId, "info", `Skill installed from SkillNet: ${finalSt.skill?.name || url}`));
+                } else {
+                  ctx.addItem(makeItem(ctx.sessionId, "error", finalSt.detail || `SkillNet install failed: ${url}`));
+                }
+              } else {
+                ctx.addItem(makeItem(ctx.sessionId, "info", `Skill installed from SkillNet: ${url}`));
               }
             },
           },

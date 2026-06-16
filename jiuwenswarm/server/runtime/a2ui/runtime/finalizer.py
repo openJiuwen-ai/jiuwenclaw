@@ -6,12 +6,22 @@ from __future__ import annotations
 
 import inspect
 from collections.abc import Callable
+from dataclasses import dataclass
 from typing import Any
 
 from jiuwenswarm.server.runtime.a2ui.protocol import A2UI_OPEN_TAG, get_protocol_spec
 
 
 RepairCall = Callable[[str], Any]
+
+
+@dataclass(frozen=True)
+class A2UIFinalizationResult:
+    """Structured finalization result for retry decisions."""
+
+    content: str
+    status: str
+    validation_error: str | None = None
 
 
 def _coerce_model_message_content(message: Any) -> str:
@@ -33,14 +43,9 @@ def _a2ui_failure_text(content: str, validation_error: str) -> str:
     spec = get_protocol_spec()
     readable = spec.format_for_text_channel(content)
     if readable:
-        return (
-            "A2UI 界面生成失败，已退回纯文本结果。\n\n"
-            f"{readable}"
-        )
-    return (
-        "A2UI 界面生成失败，模型连续返回了不符合 A2UI 0.8 schema "
-        f"的内容。最后一次校验错误：{validation_error}"
-    )
+        return readable
+    _ = validation_error
+    return "界面内容生成失败，请重试或换一种方式描述你的需求。"
 
 
 class A2UIResponseFinalizer:
@@ -55,14 +60,32 @@ class A2UIResponseFinalizer:
             repair_call: RepairCall | None,
             max_repair_attempts: int = 2,
     ) -> str:
+        result = await self.finalize_result(
+            content,
+            user_query=user_query,
+            request_id=request_id,
+            repair_call=repair_call,
+            max_repair_attempts=max_repair_attempts,
+        )
+        return result.content
+
+    async def finalize_result(
+            self,
+            content: str,
+            *,
+            user_query: Any,
+            request_id: str,
+            repair_call: RepairCall | None,
+            max_repair_attempts: int = 2,
+    ) -> A2UIFinalizationResult:
         _ = request_id
         if A2UI_OPEN_TAG not in (content or ""):
-            return content
+            return A2UIFinalizationResult(content=content, status="skipped")
 
         spec = get_protocol_spec()
         validation = spec.validate_response(content)
         if validation.valid:
-            return content
+            return A2UIFinalizationResult(content=content, status="valid")
 
         repaired_content = content
         last_error = validation.error
@@ -80,10 +103,14 @@ class A2UIResponseFinalizer:
             repaired_content = _coerce_model_message_content(response)
             validation = spec.validate_response(repaired_content)
             if validation.valid:
-                return repaired_content
+                return A2UIFinalizationResult(content=repaired_content, status="repaired")
             last_error = validation.error
 
-        return _a2ui_failure_text(repaired_content, last_error)
+        return A2UIFinalizationResult(
+            content=_a2ui_failure_text(repaired_content, last_error),
+            status="repair_failed",
+            validation_error=last_error,
+        )
 
 
-__all__ = ["A2UIResponseFinalizer"]
+__all__ = ["A2UIFinalizationResult", "A2UIResponseFinalizer"]

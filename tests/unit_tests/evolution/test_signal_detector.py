@@ -60,8 +60,8 @@ class TestSignalDetector:
         ]
         signals = await detector.detect_user_message_feedback(messages)
         assert len(signals) == 1
-        assert signals[0].signal_type == "user_correction"
-        assert signals[0].section == "Examples"
+        assert signals[0].signal_type == "user_intent"
+        assert signals[0].section == "Instructions"
 
     @staticmethod
     @pytest.mark.asyncio
@@ -83,8 +83,8 @@ class TestSignalDetector:
         ]
         signals = await detector.detect_user_message_feedback(messages)
         assert len(signals) == 1
-        assert signals[0].signal_type == "user_correction"
-        assert signals[0].section == "Examples"
+        assert signals[0].signal_type == "user_intent"
+        assert signals[0].section == "Instructions"
 
     @staticmethod
     def test_detect_multiple_signals():

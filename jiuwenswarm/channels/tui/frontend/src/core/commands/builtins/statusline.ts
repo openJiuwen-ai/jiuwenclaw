@@ -30,7 +30,6 @@ function stripOuterQuotes(s: string): string {
   return trimmed;
 }
 
-/** Unescape JSON-style backslash sequences so users can type `\"` to mean `"`, aligning with Claude Code's JSON config behavior. */
 function unescapeCommand(s: string): string {
   return s.replace(/\\(["\\])/g, "$1");
 }
@@ -82,11 +81,19 @@ function showHelp(ctx: CommandContext): void {
     "  JSON is piped via stdin. On Windows, you can also use the file at $JIUWENSWARM_SL_FILE.",
     "",
     "Subcommands:",
+    "  /statusline                 — show current configuration",
+    "  /statusline get             — show current configuration",
     "  /statusline set <command>   — set the shell command to run",
     "  /statusline padding <n>     — set left & right padding (0 or positive)",
     "  /statusline clear           — remove statusline configuration",
     "  /statusline help            — show this guide",
     "  /statusline json            — show the real JSON data your command receives right now",
+    "",
+    "Agent-generated mode :",
+    "  /statusline <prompt>        — describe what you want the statusline to show,",
+    "                                and the agent will automatically generate the",
+    "                                appropriate shell command and configure it for you.",
+    "                                Example: /statusline show my shell PS1 configuration",
     "",
     "How to write a command:",
     "  Single field:  jq -r '.field'",
@@ -128,12 +135,43 @@ function showActualJsonData(ctx: CommandContext): void {
   );
 }
 
+/**
+ * Agent-generated mode: send a prompt to the agent to automatically write a statusline script.
+ *
+ * 
+ * - User types: /statusline <description of what they want>
+ * - TUI sends it as a chat message with skills_to_use=["script-creator"] metadata
+ * - SkillUseRail loads script-creator SKILL.md
+ * - Agent writes the script and configures the statusline
+ */
+function agentGenerate(ctx: CommandContext, prompt: string): void {
+  if (!prompt.trim()) {
+    // No prompt given — show current config
+    showCurrentConfig(ctx);
+    return;
+  }
+
+  // Send the prompt as a chat message. The backend build_user_prompt will
+  // detect "/statusline" prefix and inject skills_to_use=["script-creator"].
+  const fullPrompt = `/statusline ${prompt.trim()}`;
+  const requestId = ctx.sendMessage(fullPrompt);
+  if (!requestId) {
+    ctx.addItem(
+      makeItem(ctx.sessionId, "error", "offline: waiting for reconnect before sending statusline request"),
+    );
+  }
+}
+
+// Known subcommands that are handled locally (not sent to agent)
+const KNOWN_SUBCOMMANDS = ["set", "padding", "clear", "help", "json", "get"];
+
 export function createStatusLineCommand(): SlashCommand {
   return {
     name: "statusline",
+    altNames: ["sl"],
     description: "Configure custom status line footer",
-    usage: "/statusline <set|padding|clear|help|json>",
-    example: "/statusline set 'echo $mode | $model'",
+    usage: "/statusline <set|padding|clear|help|json> | /statusline <prompt>",
+    example: "/statusline set 'echo $mode | $model'  OR  /statusline show my PS1 config",
     kind: CommandKind.BUILT_IN,
     takesArgs: true,
     subCommands: [
@@ -182,22 +220,36 @@ export function createStatusLineCommand(): SlashCommand {
         isSafeConcurrent: true,
         action: (ctx) => showActualJsonData(ctx),
       },
+      {
+        name: "get",
+        description: "Show current statusline configuration",
+        usage: "/statusline get",
+        kind: CommandKind.BUILT_IN,
+        takesArgs: false,
+        isSafeConcurrent: true,
+        action: (ctx) => showCurrentConfig(ctx),
+      },
     ],
     action: (ctx, args) => {
-      const sub = args.trim().split(/\s+/)[0];
-      if (!sub) {
-        showHelp(ctx);
+      const trimmedArgs = args.trim();
+      if (!trimmedArgs) {
+        // No args — show current config (per docs: "/statusline" shows current config)
+        showCurrentConfig(ctx);
         return;
       }
-      const matched = createStatusLineCommand().subCommands?.find((s) => s.name === sub);
+
+      const firstWord = trimmedArgs.split(/\s+/)[0];
+
+      // Check if first word is a known subcommand
+      const matched = createStatusLineCommand().subCommands?.find((s) => s.name === firstWord);
       if (matched) {
-        const rest = args.trim().slice(sub.length).trim();
+        const rest = trimmedArgs.slice(firstWord.length).trim();
         matched.action(ctx, rest);
         return;
       }
-      ctx.addItem(
-        makeItem(ctx.sessionId, "error", `Unknown sub-command: ${sub}\nUsage: /statusline <set|padding|clear|help|json>`, "m"),
-      );
+
+      // NOT a known subcommand — treat as prompt for agent-generated mode
+      agentGenerate(ctx, trimmedArgs);
     },
   };
 }

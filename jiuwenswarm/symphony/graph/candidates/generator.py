@@ -603,7 +603,7 @@ def _can_feed_by_type(output_type: str, input_type: str) -> bool:
 def _can_feed_by_remote_reference(output: ArtifactSpec, parameter: ParameterSpec) -> bool:
     if output.type != "url":
         return False
-    if parameter.type not in {"file", "image"}:
+    if parameter.type not in {"file", "image", "text"}:
         return False
     return _accepts_remote_reference(parameter)
 

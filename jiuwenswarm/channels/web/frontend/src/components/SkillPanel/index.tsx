@@ -19,6 +19,8 @@ import { Switch } from "../Switch";
 /** 刷新会 git pull marketplace，略放宽；普通进页单次 RPC 一般很快。 */
 const SKILLS_FETCH_TIMEOUT_REFRESH_MS = 60_000;
 const SKILLS_FETCH_TIMEOUT_NORMAL_MS = 30_000;
+const SKILL_RETRIEVAL_RUNNING_POLL_MS = 10_000;
+const SKILL_RETRIEVAL_IDLE_POLL_MS = 5 * 60_000;
 
 type SkillItem = {
   name: string;
@@ -69,10 +71,28 @@ type SkillRetrievalStatus = {
   enabled?: boolean;
   index_exists?: boolean;
   fresh?: boolean;
+  installed_count?: number;
   installed_enabled_count?: number;
   indexed_count?: number;
   built_at?: string;
   index_dir?: string;
+  build_status?: string;
+  build_stage?: string;
+  build_message?: string;
+  build_error?: string;
+  build_progress?: number;
+  build_started_at?: string;
+  build_finished_at?: string;
+  build_elapsed_seconds?: number;
+  build_cancel_requested?: boolean;
+  build_logs?: SkillRetrievalBuildLog[];
+};
+
+type SkillRetrievalBuildLog = {
+  time?: string;
+  stage?: string;
+  status?: string;
+  message?: string;
 };
 
 type SkillRetrievalTreeResponse = {
@@ -106,6 +126,8 @@ type SkillIndexTreeNode = SkillIndexNode & {
 interface SkillPanelProps {
   sessionId: string;
   onNavigateToConfig?: () => void;
+  /** 当前是否处于激活状态（左边栏选中技能） */
+  isActive?: boolean;
 }
 
 function getSourceLabel(source: string, t: (key: string) => string, isBuiltinSource?: boolean): string {
@@ -179,6 +201,226 @@ function getSkillIndexNodeLabel(node: SkillIndexNode): string {
 function findSkillIndexNode(nodes: SkillIndexNode[], cid: string | null): SkillIndexNode | null {
   if (!cid) return null;
   return nodes.find((node) => node.cid === cid) || null;
+}
+
+type SkillIndexBuildPhaseState = "done" | "active" | "pending" | "failed" | "cancelled";
+
+type SkillIndexBuildPhase = {
+  key: string;
+  title: string;
+  detail: string;
+  state: SkillIndexBuildPhaseState;
+};
+
+function getSkillIndexBuildStageLabel(
+  stage: string | undefined,
+  t: (key: string, options?: Record<string, unknown>) => string
+): string {
+  const key = String(stage || "").trim();
+  if (!key) return t('skills.retrieval.buildStageUnknown');
+  const known: Record<string, string> = {
+    queued: 'queued',
+    scan: 'scan',
+    llm_check: 'llmCheck',
+    build: 'buildTree',
+    publish: 'publish',
+    reuse: 'reuse',
+    success: 'success',
+    failed: 'failed',
+    timeout: 'timeout',
+    llm_config: 'llmConfig',
+    cancelled: 'cancelled',
+    interrupted: 'interrupted',
+  };
+  const mapped = known[key];
+  return mapped ? t(`skills.retrieval.buildStages.${mapped}`) : key;
+}
+
+function getSkillIndexBuildPhaseState(
+  phaseKey: string,
+  currentStage: string,
+  buildStatus: string
+): SkillIndexBuildPhaseState {
+  const order = ["queued", "scan", "llm_check", "build", "publish", "success"];
+  const normalizedStage = order.includes(currentStage)
+    ? currentStage
+    : currentStage === "llm_config"
+    ? "llm_check"
+    : ["failed", "timeout", "interrupted", "cancelled"].includes(currentStage)
+    ? "build"
+    : buildStatus === "success"
+    ? "success"
+    : "queued";
+  const currentIndex = order.indexOf(normalizedStage);
+  const phaseIndex = order.indexOf(phaseKey);
+  if (buildStatus === "failed") {
+    if (phaseKey === normalizedStage) return "failed";
+    if (phaseIndex < currentIndex) return "done";
+    return "pending";
+  }
+  if (buildStatus === "cancelled") {
+    if (phaseKey === normalizedStage) return "cancelled";
+    if (phaseIndex < currentIndex) return "done";
+    return "pending";
+  }
+  if (buildStatus === "success") return "done";
+  if (phaseIndex < currentIndex) return "done";
+  if (phaseIndex === currentIndex) return "active";
+  return "pending";
+}
+
+function buildSkillIndexBuildPhases(
+  status: SkillRetrievalStatus | null,
+  t: (key: string, options?: Record<string, unknown>) => string
+): SkillIndexBuildPhase[] {
+  const buildStatus = String(status?.build_status || "idle");
+  const currentStage = String(status?.build_stage || (buildStatus === "success" ? "success" : "queued"));
+  const installedCount = status?.installed_count ?? status?.installed_enabled_count ?? 0;
+  const indexedCount = status?.indexed_count ?? 0;
+  const base = [
+    {
+      key: "queued",
+      title: t('skills.retrieval.buildPipeline.queued.title'),
+      detail: t('skills.retrieval.buildPipeline.queued.detail'),
+    },
+    {
+      key: "scan",
+      title: t('skills.retrieval.buildPipeline.scan.title'),
+      detail: t('skills.retrieval.buildPipeline.scan.detail', { count: installedCount }),
+    },
+    {
+      key: "llm_check",
+      title: t('skills.retrieval.buildPipeline.llmCheck.title'),
+      detail: t('skills.retrieval.buildPipeline.llmCheck.detail'),
+    },
+    {
+      key: "build",
+      title: t('skills.retrieval.buildPipeline.build.title'),
+      detail: t('skills.retrieval.buildPipeline.build.detail'),
+    },
+    {
+      key: "publish",
+      title: t('skills.retrieval.buildPipeline.publish.title'),
+      detail: t('skills.retrieval.buildPipeline.publish.detail'),
+    },
+    {
+      key: "success",
+      title: t('skills.retrieval.buildPipeline.success.title'),
+      detail: t('skills.retrieval.buildPipeline.success.detail', { count: indexedCount || installedCount }),
+    },
+  ];
+  return base.map((phase) => ({
+    ...phase,
+    state: getSkillIndexBuildPhaseState(phase.key, currentStage, buildStatus),
+  }));
+}
+
+function getBuildPhaseClass(state: SkillIndexBuildPhaseState): string {
+  if (state === "done") return "border-emerald-500/30 bg-emerald-500/10 text-emerald-600";
+  if (state === "active") return "border-sky-500/40 bg-sky-500/10 text-sky-600";
+  if (state === "failed") return "border-red-500/35 bg-red-500/10 text-red-600";
+  if (state === "cancelled") return "border-amber-500/35 bg-amber-500/10 text-amber-600";
+  return "border-border bg-secondary/30 text-text-muted";
+}
+
+function SkillIndexBuildProgressPanel({
+  status,
+  progress,
+  logs,
+  t,
+}: {
+  status: SkillRetrievalStatus | null;
+  progress: number;
+  logs: SkillRetrievalBuildLog[];
+  t: (key: string, options?: Record<string, unknown>) => string;
+}) {
+  const phases = buildSkillIndexBuildPhases(status, t);
+  const stageLabel = getSkillIndexBuildStageLabel(status?.build_stage, t);
+  const isError = status?.build_status === "failed";
+  const showPipeline = status?.build_status !== "success";
+  return (
+    <div className="mt-4 rounded-lg border border-border bg-panel p-4">
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div className="min-w-[220px]">
+          <div className="text-sm font-medium text-text-strong">
+            {t('skills.retrieval.buildMonitorTitle')}
+          </div>
+          <div className="mt-1 text-xs text-text-muted">
+            {t('skills.retrieval.buildMonitorSubtitle', { stage: stageLabel })}
+          </div>
+        </div>
+        <div className="grid grid-cols-3 gap-2 text-xs">
+          <div className="rounded-md border border-border bg-secondary/40 px-3 py-2">
+            <div className="text-text-muted">{t('skills.retrieval.buildMetric.progress')}</div>
+            <div className="mt-1 font-medium text-text-strong">{progress}%</div>
+          </div>
+          <div className="rounded-md border border-border bg-secondary/40 px-3 py-2">
+            <div className="text-text-muted">{t('skills.retrieval.buildMetric.skills')}</div>
+            <div className="mt-1 font-medium text-text-strong">
+              {status?.installed_count ?? status?.installed_enabled_count ?? 0}
+            </div>
+          </div>
+          <div className="rounded-md border border-border bg-secondary/40 px-3 py-2">
+            <div className="text-text-muted">{t('skills.retrieval.buildMetric.indexed')}</div>
+            <div className="mt-1 font-medium text-text-strong">{status?.indexed_count ?? 0}</div>
+          </div>
+        </div>
+      </div>
+
+      <div className="mt-4 h-2 overflow-hidden rounded-full bg-secondary">
+        <div
+          className={`h-full rounded-full transition-all ${isError ? "bg-red-500" : "bg-emerald-500"}`}
+          style={{ width: `${progress}%` }}
+        />
+      </div>
+
+      {showPipeline ? (
+        <div className="mt-4 grid gap-4">
+          <div className="rounded-md border border-border bg-secondary/30 p-3">
+            <div className="mb-3 text-xs font-medium uppercase tracking-wide text-text-muted">
+              {t('skills.retrieval.buildPipelineTitle')}
+            </div>
+            <div className="space-y-2">
+              {phases.map((phase, index) => (
+                <div key={phase.key} className={`rounded-md border px-3 py-2 ${getBuildPhaseClass(phase.state)}`}>
+                  <div className="flex items-center gap-2">
+                    <span className="flex h-5 w-5 shrink-0 items-center justify-center rounded-full border border-current text-[10px]">
+                      {index + 1}
+                    </span>
+                    <span className="min-w-0 truncate text-xs font-medium">{phase.title}</span>
+                    <span className="ml-auto text-[10px] uppercase opacity-70">
+                      {t(`skills.retrieval.buildPhaseState.${phase.state}`)}
+                    </span>
+                  </div>
+                  <div className="mt-1 pl-7 text-[11px] leading-5 opacity-80">{phase.detail}</div>
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+      ) : null}
+      {status?.build_message ? (
+        <div className="mt-3 rounded-md border border-border bg-secondary/30 px-3 py-2 text-xs text-text-muted">
+          {status.build_message}
+        </div>
+      ) : null}
+      {status?.build_error ? (
+        <pre className="mt-3 max-h-32 overflow-auto whitespace-pre-wrap rounded border border-red-500/20 bg-red-500/5 p-2 text-xs text-red-600">
+          {status.build_error}
+        </pre>
+      ) : null}
+      {logs.length > 0 ? (
+        <div className="mt-3 grid gap-1 text-[11px] text-text-muted">
+          {logs.slice(-5).map((log, index) => (
+            <div key={`${log.time || index}-${log.stage || ""}`} className="flex min-w-0 gap-2">
+              <span className="shrink-0 font-mono text-text-muted/70">[{log.stage || "-"}]</span>
+              <span className="min-w-0 truncate">{log.message || log.status || ""}</span>
+            </div>
+          ))}
+        </div>
+      ) : null}
+    </div>
+  );
 }
 
 function SkillIndexTreeView({
@@ -285,8 +527,8 @@ function SkillIndexTreeView({
   return <div className="space-y-1" role="tree">{roots.map((node) => renderNode(node, 0))}</div>;
 }
 
-export function SkillPanel({ sessionId, onNavigateToConfig }: SkillPanelProps) {
-  const { t } = useTranslation();
+export function SkillPanel({ sessionId, onNavigateToConfig, isActive = false }: SkillPanelProps) {
+  const { t, i18n } = useTranslation();
   const [activeTab, setActiveTab] = useState<"my" | "marketplace" | "index" | "graph">("my");
   const [mySkillsSubTab, setMySkillsSubTab] = useState<"all" | "enabled" | "disabled">("all");
   const [marketplaceSubTab, setMarketplaceSubTab] = useState<"builtin" | "swarmskills" | "online">("builtin");
@@ -298,6 +540,7 @@ export function SkillPanel({ sessionId, onNavigateToConfig }: SkillPanelProps) {
   const [search, setSearch] = useState("");
   const [debouncedSearch, setDebouncedSearch] = useState("");
   const searchDebounceRef = useRef<number | null>(null);
+  const prevIsActiveRef = useRef(isActive);
   const [selectedSkill, setSelectedSkill] = useState<SkillDetail | null>(null);
   const [listState, setListState] = useState<LoadState>("idle");
   const [detailState, setDetailState] = useState<LoadState>("idle");
@@ -305,15 +548,16 @@ export function SkillPanel({ sessionId, onNavigateToConfig }: SkillPanelProps) {
   const [message, setMessage] = useState<string | null>(null);
   const [messageType, setMessageType] = useState<"success" | "error" | "loading" | null>(null);
   const messageTimerRef = useRef<number | null>(null);
+  const retrievalPollRef = useRef<number | null>(null);
+  const retrievalDiscoveryPollRef = useRef<number | null>(null);
+  const retrievalStatusRequestRef = useRef(0);
   const [viewMode, setViewMode] = useState<"list" | "grid">("list");
   const [retrievalStatus, setRetrievalStatus] = useState<SkillRetrievalStatus | null>(null);
-  const [retrievalQuery, setRetrievalQuery] = useState("");
-  const [retrievalResult, setRetrievalResult] = useState("");
   const [retrievalTree, setRetrievalTree] = useState("");
   const [retrievalTreeNodes, setRetrievalTreeNodes] = useState<SkillIndexNode[]>([]);
   const [retrievalTreeCounts, setRetrievalTreeCounts] = useState({ branches: 0, skills: 0 });
   const [selectedTreeNodeCid, setSelectedTreeNodeCid] = useState<string | null>(null);
-  const [retrievalLoading, setRetrievalLoading] = useState<"idle" | "status" | "tree" | "build" | "search">("idle");
+  const [retrievalLoading, setRetrievalLoading] = useState<"idle" | "status" | "tree" | "build" | "cancel">("idle");
 
   useEffect(() => {
     return () => {
@@ -322,6 +566,12 @@ export function SkillPanel({ sessionId, onNavigateToConfig }: SkillPanelProps) {
       }
       if (searchDebounceRef.current !== null) {
         window.clearTimeout(searchDebounceRef.current);
+      }
+      if (retrievalPollRef.current !== null) {
+        window.clearInterval(retrievalPollRef.current);
+      }
+      if (retrievalDiscoveryPollRef.current !== null) {
+        window.clearInterval(retrievalDiscoveryPollRef.current);
       }
     };
   }, []);
@@ -343,11 +593,13 @@ export function SkillPanel({ sessionId, onNavigateToConfig }: SkillPanelProps) {
     const displayText = type === "success" ? `√ ${text}` : text;
     setMessage(displayText);
     setMessageType(type);
+    // 错误信息显示时间更长（8秒），方便用户阅读详细错误描述
+    const duration = type === "error" ? 8000 : 3000;
     messageTimerRef.current = window.setTimeout(() => {
       setMessage(null);
       setMessageType(null);
       messageTimerRef.current = null;
-    }, 3000);
+    }, duration);
   }, []);
   const [sourceModalOpen, setSourceModalOpen] = useState(false);
   const [skillNetModalOpen, setSkillNetModalOpen] = useState(false);
@@ -509,27 +761,36 @@ export function SkillPanel({ sessionId, onNavigateToConfig }: SkillPanelProps) {
     [withSession]
   );
 
-  const fetchRetrievalStatus = useCallback(async () => {
-    setRetrievalLoading((current) => (current === "idle" ? "status" : current));
+  const fetchRetrievalStatus = useCallback(async (options?: { silent?: boolean }) => {
+    const requestId = ++retrievalStatusRequestRef.current;
+    if (!options?.silent) {
+      setRetrievalLoading((current) => (current === "idle" ? "status" : current));
+    }
     try {
       const data = await webRequest<SkillRetrievalStatus>(
         "skills.retrieval.status",
         withSession()
       );
-      setRetrievalStatus(data);
+      if (requestId === retrievalStatusRequestRef.current) {
+        setRetrievalStatus(data);
+      }
     } catch (error) {
       console.error('Failed to load skill retrieval status:', error);
     } finally {
-      setRetrievalLoading((current) => (current === "status" ? "idle" : current));
+      if (!options?.silent) {
+        setRetrievalLoading((current) => (current === "status" ? "idle" : current));
+      }
     }
   }, [withSession]);
 
-  const fetchRetrievalTree = useCallback(async () => {
-    setRetrievalLoading((current) => (current === "idle" ? "tree" : current));
+  const fetchRetrievalTree = useCallback(async (options?: { silent?: boolean }) => {
+    if (!options?.silent) {
+      setRetrievalLoading((current) => (current === "idle" ? "tree" : current));
+    }
     try {
       const data = await webRequest<SkillRetrievalTreeResponse>(
         "skills.retrieval.tree",
-        withSession()
+        withSession({ language: i18n.language || "cn" })
       );
       const nodes = Array.isArray(data.nodes) ? data.nodes : [];
       setRetrievalTree(data.result || "");
@@ -555,13 +816,29 @@ export function SkillPanel({ sessionId, onNavigateToConfig }: SkillPanelProps) {
       setRetrievalTreeCounts({ branches: 0, skills: 0 });
       setSelectedTreeNodeCid(null);
     } finally {
-      setRetrievalLoading((current) => (current === "tree" ? "idle" : current));
+      if (!options?.silent) {
+        setRetrievalLoading((current) => (current === "tree" ? "idle" : current));
+      }
     }
-  }, [withSession]);
+  }, [i18n.language, withSession]);
 
+  // 当左边栏切换到技能页面时，或切换到"我的技能"页签时，调用 list 接口
   useEffect(() => {
-    fetchSkills();
-  }, [fetchSkills]);
+    const prevIsActive = prevIsActiveRef.current;
+
+    // 场景1：从其他页面切换到技能页面（isActive 变为 true）
+    if (isActive && !prevIsActive) {
+      fetchSkills();
+    }
+
+    // 场景2：在技能页面内切换到"我的技能"页签（isActive 保持 true，activeTab 变化）
+    if (isActive && prevIsActive && activeTab === "my") {
+      fetchSkills();
+    }
+
+    // 更新 ref
+    prevIsActiveRef.current = isActive;
+  }, [isActive, activeTab, fetchSkills]);
 
   useEffect(() => {
     fetchRetrievalStatus();
@@ -573,46 +850,95 @@ export function SkillPanel({ sessionId, onNavigateToConfig }: SkillPanelProps) {
     void fetchRetrievalTree();
   }, [activeTab, fetchRetrievalStatus, fetchRetrievalTree]);
 
-  const handleBuildRetrievalIndex = useCallback(async () => {
+  useEffect(() => {
+    const disabled = retrievalStatus?.enabled === false;
+    const running = retrievalStatus?.build_status === "running";
+    if (activeTab !== "index" || disabled || !running) {
+      if (retrievalPollRef.current !== null) {
+        window.clearInterval(retrievalPollRef.current);
+        retrievalPollRef.current = null;
+      }
+      return;
+    }
+    if (retrievalPollRef.current !== null) return;
+    retrievalPollRef.current = window.setInterval(() => {
+      void fetchRetrievalStatus({ silent: true });
+    }, SKILL_RETRIEVAL_RUNNING_POLL_MS);
+    return () => {
+      if (retrievalPollRef.current !== null) {
+        window.clearInterval(retrievalPollRef.current);
+        retrievalPollRef.current = null;
+      }
+    };
+  }, [activeTab, fetchRetrievalStatus, fetchRetrievalTree, retrievalStatus?.build_status, retrievalStatus?.enabled]);
+
+  useEffect(() => {
+    const disabled = retrievalStatus?.enabled === false;
+    const running = retrievalStatus?.build_status === "running";
+    if (activeTab !== "index" || disabled || running) {
+      if (retrievalDiscoveryPollRef.current !== null) {
+        window.clearInterval(retrievalDiscoveryPollRef.current);
+        retrievalDiscoveryPollRef.current = null;
+      }
+      return;
+    }
+    if (retrievalDiscoveryPollRef.current !== null) return;
+    retrievalDiscoveryPollRef.current = window.setInterval(() => {
+      void fetchRetrievalStatus({ silent: true });
+    }, SKILL_RETRIEVAL_IDLE_POLL_MS);
+    return () => {
+      if (retrievalDiscoveryPollRef.current !== null) {
+        window.clearInterval(retrievalDiscoveryPollRef.current);
+        retrievalDiscoveryPollRef.current = null;
+      }
+    };
+  }, [activeTab, fetchRetrievalStatus, retrievalStatus?.build_status, retrievalStatus?.enabled]);
+
+  useEffect(() => {
+    if (activeTab !== "index") return;
+    if (retrievalStatus?.build_status === "success" || (retrievalStatus?.index_exists && retrievalStatus?.fresh)) {
+      void fetchRetrievalTree();
+    }
+  }, [
+    activeTab,
+    fetchRetrievalTree,
+    retrievalStatus?.build_status,
+    retrievalStatus?.fresh,
+    retrievalStatus?.index_exists,
+  ]);
+
+  const handleBuildRetrievalIndex = useCallback(async (force = false) => {
     setRetrievalLoading("build");
-    setRetrievalResult("");
     try {
-      const data = await webRequest<{ success: boolean; result?: string }>(
+      await webRequest<{ success: boolean; result?: string }>(
         "skills.retrieval.index_build",
-        withSession(),
-        { timeoutMs: 10 * 60_000 }
+        withSession({ force, source: "web" }),
+        { timeoutMs: 30_000 }
       );
-      setRetrievalResult(data.result || "");
       await fetchRetrievalStatus();
       await fetchRetrievalTree();
     } catch (error) {
       console.error(error);
-      setRetrievalResult(error instanceof Error ? error.message : String(error));
     } finally {
       setRetrievalLoading("idle");
     }
   }, [fetchRetrievalStatus, fetchRetrievalTree, withSession]);
 
-  const handleSkillRetrieve = useCallback(async () => {
-    const query = retrievalQuery.trim();
-    if (!query) return;
-    setRetrievalLoading("search");
-    setRetrievalResult("");
+  const handleCancelRetrievalBuild = useCallback(async () => {
+    setRetrievalLoading("cancel");
     try {
-      const data = await webRequest<{ success: boolean; result?: string }>(
-        "skills.retrieval.search",
-        withSession({ query }),
-        { timeoutMs: 120_000 }
+      await webRequest<{ success: boolean; result?: string }>(
+        "skills.retrieval.index_cancel",
+        withSession(),
+        { timeoutMs: 30_000 }
       );
-      setRetrievalResult(data.result || "");
       await fetchRetrievalStatus();
     } catch (error) {
       console.error(error);
-      setRetrievalResult(error instanceof Error ? error.message : String(error));
     } finally {
       setRetrievalLoading("idle");
     }
-  }, [fetchRetrievalStatus, retrievalQuery, withSession]);
+  }, [fetchRetrievalStatus, withSession]);
 
   const handleOpenSkill = useCallback(
     (skillName: string) => {
@@ -1033,12 +1359,32 @@ export function SkillPanel({ sessionId, onNavigateToConfig }: SkillPanelProps) {
   const retrievalStatusText = retrievalStatus
     ? retrievalStatus.enabled === false
       ? t('skills.retrieval.disabled')
+      : retrievalStatus.build_status === "running"
+      ? t('skills.retrieval.building')
+      : retrievalStatus.build_status === "failed"
+      ? t('skills.retrieval.buildFailed')
+      : retrievalStatus.build_status === "cancelled"
+      ? t('skills.retrieval.cancelled')
       : retrievalStatus.index_exists
       ? retrievalStatus.fresh
         ? t('skills.retrieval.ready')
         : t('skills.retrieval.stale')
       : t('skills.retrieval.missing')
     : t('common.loading');
+  const retrievalBuildRunning = retrievalStatus?.build_status === "running";
+  const retrievalBuildProgress = Math.round(Math.max(0, Math.min(1, retrievalStatus?.build_progress ?? 0)) * 100);
+  const retrievalBuildLogs = Array.isArray(retrievalStatus?.build_logs)
+    ? retrievalStatus.build_logs.slice(-12)
+    : [];
+  const retrievalHasBuildInfo = Boolean(
+    retrievalStatus
+      && retrievalStatus.enabled !== false
+      && (
+        retrievalBuildRunning
+        || ["success", "failed", "cancelled"].includes(String(retrievalStatus.build_status || ""))
+        || retrievalBuildLogs.length > 0
+      )
+  );
   return (
     <>
       {message && messageType === "success" && (
@@ -1194,7 +1540,7 @@ export function SkillPanel({ sessionId, onNavigateToConfig }: SkillPanelProps) {
         </div>
 
         {activeTab === "index" ? (
-          <div className="mt-4 flex flex-col flex-1 min-h-0 gap-4">
+          <div className="mt-4 flex flex-col flex-1 min-h-0 gap-4 overflow-y-auto pr-2">
             <div className="rounded-lg border border-border bg-panel p-4">
               <div className="flex flex-wrap items-center justify-between gap-3">
                 <div className="min-w-[220px]">
@@ -1206,21 +1552,45 @@ export function SkillPanel({ sessionId, onNavigateToConfig }: SkillPanelProps) {
                     {retrievalStatus?.indexed_count != null
                       ? ` · ${t('skills.retrieval.indexedCount', { count: retrievalStatus.indexed_count })}`
                       : ""}
-                    {retrievalStatus?.installed_enabled_count != null
-                      ? ` · ${t('skills.retrieval.enabledCount', { count: retrievalStatus.installed_enabled_count })}`
+                    {(retrievalStatus?.installed_count ?? retrievalStatus?.installed_enabled_count) != null
+                      ? ` · ${t('skills.retrieval.installedCount', {
+                          count: retrievalStatus?.installed_count ?? retrievalStatus?.installed_enabled_count,
+                        })}`
                       : ""}
                   </div>
                 </div>
                 <div className="flex items-center gap-2">
                   <button
-                    onClick={handleBuildRetrievalIndex}
+                    onClick={() => void handleBuildRetrievalIndex(false)}
                     className="px-3 py-1.5 rounded-lg text-sm border border-border hover:bg-secondary transition-colors disabled:opacity-60"
-                    disabled={retrievalLoading === "build" || retrievalStatus?.enabled === false}
+                    disabled={retrievalLoading === "build" || retrievalBuildRunning || retrievalStatus?.enabled === false}
                   >
                     {retrievalLoading === "build"
                       ? t('skills.retrieval.building')
                       : t('skills.retrieval.build')}
                   </button>
+                  {retrievalStatus?.index_exists ? (
+                    <button
+                      onClick={() => void handleBuildRetrievalIndex(true)}
+                      className="px-3 py-1.5 rounded-lg text-sm border border-border hover:bg-secondary transition-colors disabled:opacity-60"
+                      disabled={retrievalLoading === "build" || retrievalBuildRunning || retrievalStatus?.enabled === false}
+                    >
+                      {retrievalLoading === "build"
+                        ? t('skills.retrieval.building')
+                        : t('skills.retrieval.fullRebuild')}
+                    </button>
+                  ) : null}
+                  {retrievalBuildRunning ? (
+                    <button
+                      onClick={handleCancelRetrievalBuild}
+                      className="px-3 py-1.5 rounded-lg text-sm border border-border hover:bg-secondary transition-colors disabled:opacity-60"
+                      disabled={retrievalLoading === "cancel"}
+                    >
+                      {retrievalLoading === "cancel"
+                        ? t('skills.retrieval.cancelling')
+                        : t('skills.retrieval.cancel')}
+                    </button>
+                  ) : null}
                   <button
                     onClick={() => {
                       void fetchRetrievalStatus();
@@ -1235,34 +1605,14 @@ export function SkillPanel({ sessionId, onNavigateToConfig }: SkillPanelProps) {
                   </button>
                 </div>
               </div>
-              <div className="mt-4 flex items-center gap-2">
-                <input
-                  type="text"
-                  value={retrievalQuery}
-                  onChange={(event) => setRetrievalQuery(event.target.value)}
-                  onKeyDown={(event) => {
-                    if (event.key === "Enter") {
-                      handleSkillRetrieve();
-                    }
-                  }}
-                  placeholder={t('skills.retrieval.queryPlaceholder')}
-                  className="w-full px-3 py-1.5 rounded-lg text-sm bg-secondary border border-border text-text placeholder:text-text-muted"
+              {retrievalHasBuildInfo ? (
+                <SkillIndexBuildProgressPanel
+                  status={retrievalStatus}
+                  progress={retrievalBuildProgress}
+                  logs={retrievalBuildLogs}
+                  t={t}
                 />
-                <button
-                  onClick={handleSkillRetrieve}
-                  className="px-3 py-1.5 rounded-lg text-sm border border-border hover:bg-secondary transition-colors disabled:opacity-60"
-                  disabled={retrievalLoading === "search" || !retrievalQuery.trim() || retrievalStatus?.enabled === false}
-                >
-                  {retrievalLoading === "search"
-                    ? t('skills.retrieval.searching')
-                    : t('skills.retrieval.search')}
-                </button>
-              </div>
-              {retrievalResult && (
-                <pre className="mt-3 max-h-64 overflow-auto whitespace-pre-wrap rounded-md bg-secondary p-3 text-xs text-text">
-                  {retrievalResult}
-                </pre>
-              )}
+              ) : null}
             </div>
             <div className="grid flex-1 min-h-0 grid-cols-1 gap-4 lg:grid-cols-[minmax(320px,1fr)_minmax(320px,0.9fr)]">
               <div className="rounded-lg border border-border bg-panel p-4 min-h-0 flex flex-col">
@@ -1477,7 +1827,7 @@ export function SkillPanel({ sessionId, onNavigateToConfig }: SkillPanelProps) {
               {marketplaceSubTab === "builtin" && (
                 <>
                   {listState === "loading" && (
-                    <div className="text-sm text-text-muted">{t('common.loading')}</div>
+                    <div className="flex items-center justify-center h-full text-text-muted">{t('common.loading')}</div>
                   )}
                   {listState === "error" && (
                     <div className="text-sm text-text-muted">{t('skills.listError')}</div>
@@ -1521,8 +1871,7 @@ export function SkillPanel({ sessionId, onNavigateToConfig }: SkillPanelProps) {
                                       event.stopPropagation();
                                       handleInstall(skill.name);
                                     }}
-                                    className="px-3 py-1 text-sm rounded-full border border-black bg-white text-black hover:bg-gray-100 transition-colors"
-                                    style={{ width: '76px', height: '28px' }}
+                                    className="min-w-[76px] h-[28px] px-3 text-sm rounded-full border border-black bg-white text-black hover:bg-gray-100 transition-colors whitespace-nowrap"
                                     disabled={isInstalling}
                                   >
                                     {isInstalling ? t('skills.actions.installing') : t('skills.actions.install')}
@@ -1598,7 +1947,7 @@ export function SkillPanel({ sessionId, onNavigateToConfig }: SkillPanelProps) {
                     sessionId={sessionId}
                     externalSearchQuery={debouncedSearch}
                     installedSkillNames={installedSkillNames}
-                    installedSkillOrigins={new Set()}
+                    installedSkillOrigins={installedSkillOrigins}
                     viewMode={viewMode}
                     onClose={() => {}}
                     onInstalled={(_skillName: string) => {
@@ -1774,7 +2123,7 @@ export function SkillPanel({ sessionId, onNavigateToConfig }: SkillPanelProps) {
 
                 <div className={`mt-4 flex-1 min-h-0 overflow-y-auto ${viewMode === "grid" ? "flex flex-wrap gap-4 content-start" : "space-y-3"}`}>
                   {listState === "loading" && (
-                    <div className="text-sm text-text-muted">{t('common.loading')}</div>
+                    <div className="flex items-center justify-center h-full text-text-muted">{t('common.loading')}</div>
                   )}
                   {listState === "error" && (
                     <div className="text-sm text-text-muted">

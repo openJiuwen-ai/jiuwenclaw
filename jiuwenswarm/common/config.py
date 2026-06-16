@@ -20,7 +20,6 @@ logger = logging.getLogger(__name__)
 
 _CONFIG_MODULE_DIR = Path(__file__).parent
 CONFIG_YAML_PATH = get_config_file()
-
 # Check if user workspace exists and use it if configured via env
 _user_config = os.getenv("JIUWENSWARM_CONFIG_DIR")
 if _user_config:
@@ -257,6 +256,28 @@ def update_kv_cache_affinity_enabled_in_config(value: bool) -> None:
     dump_yaml_round_trip(CONFIG_YAML_PATH, data)
 
 
+def _merge_config_dict(target: dict[str, Any], patch: dict[str, Any]) -> None:
+    for key, value in patch.items():
+        if isinstance(value, dict):
+            child = target.get(key)
+            if not isinstance(child, dict):
+                child = {}
+                target[key] = child
+            _merge_config_dict(child, value)
+        else:
+            target[key] = value
+
+
+def update_symphony_in_config(updates: dict[str, Any]) -> None:
+    """更新 symphony 配置段并写回。"""
+    data = load_yaml_round_trip(CONFIG_YAML_PATH)
+    if "symphony" not in data or data["symphony"] is None:
+        data["symphony"] = {}
+    symphony = data["symphony"]
+    _merge_config_dict(symphony, updates)
+    dump_yaml_round_trip(CONFIG_YAML_PATH, data)
+
+
 def update_skill_retrieval_in_config(updates: dict[str, Any]) -> None:
     """更新 symphony.skill_retrieval 配置段并写回。"""
     data = load_yaml_round_trip(CONFIG_YAML_PATH)
@@ -265,19 +286,8 @@ def update_skill_retrieval_in_config(updates: dict[str, Any]) -> None:
     symphony = data["symphony"]
     if "skill_retrieval" not in symphony or symphony["skill_retrieval"] is None:
         symphony["skill_retrieval"] = {}
-
-    def merge_dict(target: dict[str, Any], patch: dict[str, Any]) -> None:
-        for key, value in patch.items():
-            if isinstance(value, dict):
-                child = target.get(key)
-                if not isinstance(child, dict):
-                    child = {}
-                    target[key] = child
-                merge_dict(child, value)
-            else:
-                target[key] = value
-
-    merge_dict(symphony["skill_retrieval"], updates)
+    section = symphony["skill_retrieval"]
+    _merge_config_dict(section, updates)
     dump_yaml_round_trip(CONFIG_YAML_PATH, data)
 
 

@@ -18,7 +18,7 @@ The JiuwenSwarm web app uses a classic three-column layout—common in professio
 | Main workspace | Center | Chat, task execution, controls |
 | Right info panel | Right edge | Status, task list, system info |
 
-![JiuwenSwarm web UI: three-column layout](../assets/images/jiuwenswarm布局概览.png)
+![JiuwenSwarm web UI: three-column layout](../assets/images/jiuwenswarm布局概览.png) 
 
 ### Layout notes
 
@@ -41,10 +41,12 @@ The left bar is the main entry to features.
 | **Chat** | AI conversation: text in, multi-turn context | Q&A, tasks, code help, day-to-day use |
 | **Agents** | Agent setup: switch personas, create custom agents, tune parameters | When you need a different style or domain expert |
 | **Sessions** | Session list: history, restore context, new session | When continuing or finding past chats |
+| **Team** | Team workspace management: create teams, view team directories, manage team sessions, share team resources (skills, artifacts, workspaces, etc.) | Multi-user collaboration, resource sharing, team project management |
 | **Heartbeat** | Heartbeat / health: runtime checks, scheduled job signals | To confirm the system and cron-style work are healthy |
 | **Scheduled tasks** | Cron-style jobs: create, edit, delete | Recurring work (e.g. daily reports, reminders) |
 | **Skills** | Skills library: browse, install, configure extensions | Extra capabilities (e.g. deep search, PPT) |
 | **Channels** | Outbound channels: Feishu, WeChat, Telegram, etc. | Push AI messages to other apps |
+| **Harness** | Harness Package management: select Agent runtime mode, import/export extension packages, manage different version configurations | Switching native/extended mode, customizing Agent capabilities |
 | **Configuration** | System and model settings | Change behavior or switch models |
 | **Browser** | Browser automation | When the agent should drive a real browser |
 | **Logs** | Application logs and traces | Debug issues and audit what happened |
@@ -107,15 +109,11 @@ While a task is **running**, you can often **manually** control the current run 
 
 | State | Meaning | What you can do (typical) |
 |------|---------|----------------------------|
-| **Running** | The model is replying to your input | Wait; in supported versions you can often **Pause** or **Cancel / stop** the run |
-| **Paused** | You **manually** paused; not finished | **Resume**, or **Cancel / stop** again |
+| **Running** | The model is replying to your input | Wait; in supported versions you can often **Cancel / stop** the run |
 | **Cancelled** | Stopped; the same user instruction will not continue | Usually nothing more for that run; you can send a new input |
 
 **Running (example)**  
 ![Task running](../assets/images/jiuwenswarm处理中.png)
-
-**Paused (example)**  
-![Task paused](../assets/images/jiuwenswarm暂停.png)
 
 **Cancelled (example)**  
 ![Task cancelled](../assets/images/jiuwenswarm取消.png)
@@ -142,7 +140,6 @@ The right side shows system status and supporting context.
 |-------|------------|--------------|
 | **Task list** | Current and queued work | See progress and queue |
 | **Context compression** | Context compression state | Understand long threads |
-| **Heartbeat** | Heartbeat state | Health at a glance |
 | **Time** | Current time and optional uptime | Reference |
 
 > **Tip:** The info panel content updates in real time; you usually do not need to refresh manually.

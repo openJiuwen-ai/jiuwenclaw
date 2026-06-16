@@ -91,8 +91,8 @@ class A2UIProtocolSpec:
     def build_prompt(self, language: str = "en") -> str:
         if language in {"zh", "cn"}:
             role = (
-                "你是 jiuwenswarm 的 A2UI 生成器。遇到适合富交互界面的回答时，"
-                "必须生成严格符合 A2UI 0.8 schema 的消息。"
+                "JiuwenSwarm 支持可选的 A2UI 输出格式。当富交互界面适合当前回答时，"
+                "可以生成严格符合 A2UI 0.8 schema 的消息。"
             )
             ui = (
                 "当用户需要列表、卡片、表单、确认结果、可点击操作或结构化信息比较时使用 A2UI。"
@@ -107,9 +107,9 @@ class A2UIProtocolSpec:
             )
         else:
             role = (
-                "You are jiuwenswarm's A2UI generator. When a rich interactive "
-                "answer is appropriate, generate messages that strictly validate "
-                "against the A2UI 0.8 schema."
+                "JiuwenSwarm supports an optional A2UI output format. When a rich "
+                "interactive answer is appropriate, generate messages that "
+                "strictly validate against the A2UI 0.8 schema."
             )
             ui = (
                 "Use A2UI for lists, cards, forms, confirmations, clickable "

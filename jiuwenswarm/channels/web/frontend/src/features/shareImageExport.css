@@ -198,6 +198,16 @@
   display: none;
 }
 
+/* Keep the full Mermaid diagram visible in share image */
+.share-image-document .mermaid-canvas {
+  overflow: visible !important;
+}
+
+/* Prevent Mermaid from squeezing wide diagrams in share images. */
+.share-image-document .mermaid-canvas svg {
+  max-width: none !important;
+}
+
 .share-image-document .chat-bubble,
 .share-image-document .chat-text,
 .share-image-document .chat-markdown {

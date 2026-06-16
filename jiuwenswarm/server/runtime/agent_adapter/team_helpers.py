@@ -8,9 +8,10 @@ import asyncio
 import logging
 import os
 import time
+from pathlib import Path
 from typing import Any, AsyncIterator
 
-from openjiuwen.agent_teams.paths import get_agent_teams_home
+from openjiuwen.agent_teams.paths import get_agent_teams_home, team_home
 from openjiuwen.agent_teams.runtime import RunActionKind
 from openjiuwen.agent_teams.schema.team import TeamRole
 from openjiuwen.agent_teams.monitor import TeamStreamLogger
@@ -47,7 +48,6 @@ from jiuwenswarm.server.runtime.agent_adapter.evolution_helpers import (
     evolution_progress_status_from_event,
     evolution_slash_command_name,
     evolution_slash_result,
-    evolution_status_response,
     extract_evolution_request_id,
     group_evolution_approvals,
     is_evolution_outcome_event,
@@ -59,10 +59,13 @@ from jiuwenswarm.server.runtime.agent_adapter.evolution_helpers import (
     team_evolution_end_update,
     terminal_progress_from_events,
     terminal_stage,
-    validate_evolution_log_writable,
     validate_evolution_skill,
     validate_team_evolution_skill,
     visible_evolution_progress_from_events,
+)
+from jiuwenswarm.server.runtime.agent_adapter.evolution_slash import (
+    EvolutionSlashContext,
+    handle_evolution_slash_command,
 )
 
 logger = logging.getLogger(__name__)
@@ -170,6 +173,42 @@ def restore_workflow_runs(session_id: str) -> dict[str, WorkflowRunState] | None
 
 def _resolve_channel_id(channel_id: str | None) -> str:
     return str(channel_id or "default").strip() or "default"
+
+
+def _resolve_request_language(request: Any) -> str:
+    metadata = getattr(request, "metadata", None)
+    params = getattr(request, "params", None)
+    sources = []
+    if isinstance(metadata, dict):
+        sources.append(metadata)
+    if isinstance(params, dict):
+        sources.append(params)
+
+    for source in sources:
+        for key in ("language", "preferred_language", "preferred_response_language"):
+            value = source.get(key)
+            if value:
+                return str(value).strip().lower() or "zh"
+    return "zh"
+
+
+def _safe_query_preview(query: Any, limit: int = 200) -> str:
+    if isinstance(query, str):
+        return query[:limit]
+    return str(query)[:limit]
+
+
+def _normalize_team_query(query: Any, *, channel_id: str | None, language: str) -> Any:
+    from jiuwenswarm.server.runtime.a2ui.integration import build_user_prompt_if_a2ui_event
+
+    a2ui_prompt = build_user_prompt_if_a2ui_event(
+        query,
+        channel=_resolve_channel_id(channel_id),
+        language=language,
+    )
+    if a2ui_prompt is not None:
+        return a2ui_prompt
+    return query
 
 
 async def ensure_monitor_handlers_for_active_runtime(
@@ -597,126 +636,66 @@ async def _handle_team_slash_command(
     channel_id: str | None,
     session_id: str,
     query: str,
+    *,
+    defer_missing_rail: bool = False,
+    skills_dir: str | list[str] | None = None,
+    language: str = "cn",
 ) -> dict[str, Any] | None:
     """Handle team-only slash commands before entering the team stream."""
-    evolve_list_result = await _handle_team_evolve_list_command(channel_id, session_id, query)
-    if evolve_list_result is not None:
-        return evolve_list_result
-
     stripped = str(query or "").strip()
     if not (
-        stripped.startswith("/evolve_simplify")
+        stripped.startswith("/evolve_list")
+        or stripped.startswith("/evolve_rebuild")
+        or stripped.startswith("/evolve_simplify")
         or stripped == "/evolve"
         or stripped.startswith("/evolve ")
     ):
         return None
 
-    tm = get_team_manager(channel_id)
-    rail = tm.get_team_skill_rail(session_id)
-    if rail is None:
-        return {
-            "output": "团队技能演进不可用：未找到 TeamSkillEvolutionRail。",
-            "result_type": "error",
-        }
-
-    store = rail.store
-
-    if stripped.startswith("/evolve_simplify"):
-        parts = stripped.split(maxsplit=2)
-        skill_name = parts[1] if len(parts) > 1 else ""
-        user_intent = parts[2] if len(parts) > 2 else None
-
-        if not skill_name:
-            return {
-                "output": "请指定 Skill 名称：`/evolve_simplify <skill_name> [user_intent]`",
-                "result_type": "error",
-            }
-
-        validation_error = validate_team_evolution_skill(store, skill_name, require_skill_md=True)
-        if validation_error is not None:
-            return {"output": validation_error, "result_type": "error"}
-
-        writable_error = validate_evolution_log_writable(store, skill_name)
-        if writable_error is not None:
-            return {"output": writable_error, "result_type": "error"}
-
-        try:
-            simplify_result = await rail.request_simplify(skill_name, user_intent)
-        except Exception as exc:
-            logger.warning(
-                "[TeamHelpers] evolve_simplify failed: session_id=%s error=%s",
-                session_id,
-                exc,
-            )
-            return {
-                "output": f"团队技能整理分析失败：{exc}",
-                "result_type": "error",
-            }
-
-        return _approval_result_from_event_or_items(
-            skill_name=skill_name,
-            event=getattr(simplify_result, "approval_event", None),
-            items=list(getattr(simplify_result, "actions", []) or []),
-            no_changes_output=f"Skill '{skill_name}' 经验库状态良好，无需整理。",
-            invalid_output=f"Skill '{skill_name}' 精简方案已生成，但审批事件为空或格式无效。",
-        )
-
-    parts = stripped.split(maxsplit=2)
-    if len(parts) < 2:
+    if stripped == "/evolve" or (
+        stripped.startswith("/evolve ") and len(stripped.split(maxsplit=2)) < 3
+    ):
         return {
             "output": "请补充演进意图：`/evolve <skill_name> <user_query>`",
             "result_type": "error",
         }
 
-    skill_name = parts[1].strip()
-    user_query = parts[2].strip() if len(parts) > 2 else ""
-
-    if not user_query:
+    resolved_skills_dir = skills_dir or _resolve_team_slash_skills_dir(session_id)
+    if resolved_skills_dir is None:
+        if defer_missing_rail:
+            return None
         return {
-            "output": "请补充演进意图：`/evolve <skill_name> <user_query>`",
+            "output": "团队技能演进不可用：未找到团队 Skill 目录。",
             "result_type": "error",
         }
 
-    validation_error = validate_team_evolution_skill(store, skill_name, require_skill_md=True)
-    if validation_error is not None:
-        return {"output": validation_error, "result_type": "error"}
-
-    writable_error = validate_evolution_log_writable(store, skill_name)
-    if writable_error is not None:
-        return {"output": writable_error, "result_type": "error"}
-
-    try:
-        evolve_result = await rail.request_user_evolution(skill_name, user_query)
-    except Exception as exc:
-        logger.warning(
-            "[TeamHelpers] evolve failed: session_id=%s error=%s",
-            session_id,
-            exc,
-        )
-        return {
-            "output": f"团队技能演进请求失败：{exc}",
-            "result_type": "error",
-        }
-
-    if isinstance(evolve_result, str) and evolve_result.strip():
-        return {
-            "output": f"Skill '{skill_name}' 演进请求已提交，请等待审批。",
-            "result_type": "answer",
-        }
-    status_response = evolution_status_response(
-        evolve_result,
-        generation_failed_output="llm error",
-        no_records_output="已请求团队 Skill 演进，但本次未生成可保存经验。",
+    return await handle_evolution_slash_command(
+        stripped,
+            EvolutionSlashContext(
+                mode="team",
+                session_id=session_id,
+                skills_dir=resolved_skills_dir,
+                evolution_enabled=True,
+                language=language,
+        ),
     )
-    if status_response is not None:
-        return status_response
-    return _approval_result_from_event_or_items(
-        skill_name=skill_name,
-        event=getattr(evolve_result, "approval_event", None),
-        items=list(getattr(evolve_result, "records", []) or []),
-        no_changes_output=f"Skill '{skill_name}' 未生成新的团队技能演进经验。",
-        invalid_output=f"Skill '{skill_name}' 已生成团队技能演进经验，但审批事件为空或格式无效。",
-    )
+
+
+def _resolve_team_slash_skills_dir(session_id: str) -> str | None:
+    metadata = get_session_metadata(session_id)
+    team_name = str(metadata.get("team_name") or "").strip()
+    if not team_name:
+        return None
+    return str(team_home(team_name) / "team-workspace" / "skills")
+
+
+def _team_spec_skills_dir(team_spec: Any) -> str:
+    workspace = getattr(team_spec, "workspace", None)
+    root_path = str(getattr(workspace, "root_path", "") or "").strip()
+    if root_path:
+        return str(Path(root_path) / "skills")
+    team_name = str(getattr(team_spec, "team_name", "") or "").strip()
+    return str(team_home(team_name) / "team-workspace" / "skills")
 
 
 async def process_team_message_stream(
@@ -730,7 +709,12 @@ async def process_team_message_stream(
     channel_id = request.channel_id
 
     team_manager = get_team_manager(channel_id)
-    query = inputs.get("query", "")
+    language = _resolve_request_language(request)
+    query = _normalize_team_query(
+        inputs.get("query", ""),
+        channel_id=channel_id,
+        language=language,
+    )
     query_text = query if isinstance(query, str) else ""
     try:
         from jiuwenswarm.agents.harness.team.remote_member_bootstrap import (
@@ -751,6 +735,7 @@ async def process_team_message_stream(
     debug = False
     if is_first_request:
         query, hide_dm, debug = _extract_query_directives(str(query or ""))
+        query_text = query if isinstance(query, str) else ""
         if hide_dm or debug:
             logger.info(
                 "[TeamHelpers] query directives captured for first team request: "
@@ -761,10 +746,59 @@ async def process_team_message_stream(
                 debug,
             )
 
+    try:
+        request_metadata = dict(request.metadata or {})
+        if isinstance(getattr(request, "params", None), dict):
+            request_metadata.setdefault("mode", request.params.get("mode"))
+        resolved_mode = str(request_metadata.get("mode") or "").strip()
+        # Page-selected model name (from chat page model selector). Used as a
+        # fallback for team members whose ``modes.team.agents.*.model`` is not
+        # explicitly configured, so cluster mode honors the page model when no
+        # per-agent model is set in config.yaml.
+        params_obj = getattr(request, "params", None)
+        requested_model_name = (
+            str(params_obj.get("model_name") or "").strip()
+            if isinstance(params_obj, dict)
+            else ""
+        ) or None
+        # Provider-based assembly: build members from the shared config source,
+        # no pre-built parent DeepAgent required.
+        team_spec = await team_manager.get_swarm_enriched_team_spec(
+            session_id=session_id,
+            mode=resolved_mode,
+            project_dir=request_metadata.get("project_dir"),
+            request_id=rid,
+            channel_id=channel_id,
+            request_metadata=request_metadata,
+            requested_model_name=requested_model_name,
+        )
+    except Exception as exc:
+        logger.exception("[TeamHelpers] TeamAgent create failed: %s", exc)
+        yield AgentResponseChunk(
+            request_id=rid,
+            channel_id=channel_id,
+            payload={"event_type": "chat.error", "error": str(exc)},
+            is_complete=False,
+        )
+        yield AgentResponseChunk(
+            request_id=rid,
+            channel_id=channel_id,
+            payload=None,
+            is_complete=True,
+        )
+        return
+
+    team_name = team_spec.team_name
+    team_skills_dir = _team_spec_skills_dir(team_spec)
+    ensure_ready = getattr(team_manager, "ensure_team_shared_skills_ready_for_session", None)
+    if callable(ensure_ready):
+        ensure_ready(session_id, team_spec)
+
     slash_result = await _handle_team_slash_command(
         channel_id,
         session_id,
         query_text,
+        skills_dir=team_skills_dir,
     )
     if slash_result is not None:
         approval_chunks = slash_result.get("approval_chunks")
@@ -785,96 +819,50 @@ async def process_team_message_stream(
             )
             return
 
-        slash_result = evolution_slash_result(
-            evolution_slash_command_name(query_text),
-            slash_result,
-            warning_phrases=TEAM_EVOLUTION_SLASH_WARNING_PHRASES,
-        )
-        result_type = str(slash_result.get("result_type", "answer")).strip().lower()
-        content = str(slash_result.get("output", ""))
-        slash_meta = {
-            "source": slash_result.get("source"),
-            "slash_command": slash_result.get("slash_command"),
-            "display_level": slash_result.get("display_level"),
-        }
-        payload = (
-            {"event_type": "chat.error", "error": content, **slash_meta}
-            if result_type == "error"
-            else {"event_type": "chat.final", "content": content, **slash_meta}
-        )
-        yield AgentResponseChunk(
-            request_id=rid,
-            channel_id=channel_id,
-            payload=payload,
-            is_complete=False,
-        )
-        yield _team_processing_done_chunk(rid, channel_id, session_id)
-        yield AgentResponseChunk(
-            request_id=rid,
-            channel_id=channel_id,
-            payload=None,
-            is_complete=True,
-        )
-        return
-
-    try:
-        request_metadata = dict(request.metadata or {})
-        if isinstance(getattr(request, "params", None), dict):
-            request_metadata.setdefault("mode", request.params.get("mode"))
-        resolved_mode = str(request_metadata.get("mode") or "").strip()
-        # Provider-based assembly: build members from the shared config source,
-        # no pre-built parent DeepAgent required.
-        team_spec = await team_manager.get_swarm_enriched_team_spec(
-            session_id=session_id,
-            mode=resolved_mode,
-            project_dir=request_metadata.get("project_dir"),
-            request_id=rid,
-            channel_id=channel_id,
-            request_metadata=request_metadata,
-        )
-    except Exception as exc:
-        logger.exception("[TeamHelpers] TeamAgent create failed: %s", exc)
-        yield AgentResponseChunk(
-            request_id=rid,
-            channel_id=channel_id,
-            payload={"event_type": "chat.error", "error": str(exc)},
-            is_complete=False,
-        )
-        yield AgentResponseChunk(
-            request_id=rid,
-            channel_id=channel_id,
-            payload=None,
-            is_complete=True,
-        )
-        return
-
-    team_name = team_spec.team_name
-
-    followup_prompt, rebuild_error = await _resolve_team_rebuild_followup(
-        channel_id,
-        session_id,
-        query_text,
-    )
-    if rebuild_error is not None:
-        yield AgentResponseChunk(
-            request_id=rid,
-            channel_id=channel_id,
-            payload={"event_type": "chat.error", "error": rebuild_error},
-            is_complete=False,
-        )
-        yield AgentResponseChunk(
-            request_id=rid,
-            channel_id=channel_id,
-            payload=None,
-            is_complete=True,
-        )
-        return
-    if followup_prompt is not None:
-        query = followup_prompt
+        prompt = str(slash_result.get("followup_prompt", "") or "").strip()
+        if prompt:
+            query = prompt
+        else:
+            slash_result = evolution_slash_result(
+                evolution_slash_command_name(query_text),
+                slash_result,
+                warning_phrases=TEAM_EVOLUTION_SLASH_WARNING_PHRASES,
+            )
+            result_type = str(slash_result.get("result_type", "answer")).strip().lower()
+            content = str(slash_result.get("output", ""))
+            slash_meta = {
+                "source": slash_result.get("source"),
+                "slash_command": slash_result.get("slash_command"),
+                "display_level": slash_result.get("display_level"),
+            }
+            payload = (
+                {"event_type": "chat.error", "error": content, **slash_meta}
+                if result_type == "error"
+                else {"event_type": "chat.final", "content": content, **slash_meta}
+            )
+            yield AgentResponseChunk(
+                request_id=rid,
+                channel_id=channel_id,
+                payload=payload,
+                is_complete=False,
+            )
+            yield _team_processing_done_chunk(rid, channel_id, session_id)
+            yield AgentResponseChunk(
+                request_id=rid,
+                channel_id=channel_id,
+                payload=None,
+                is_complete=True,
+            )
+            return
 
     try:
         if is_first_request:
-            team_manager.ensure_team_shared_skills_ready_for_session(session_id, team_spec)
+            # Sync team observability with current config before streaming.
+            # Runner.run_agent_team_streaming auto-attaches handlers when
+            # is_initialized() is True; this call ensures init/shutdown
+            # matches the latest config toggle.
+            from jiuwenswarm.agents.harness.team.team_manager import sync_team_observability
+            sync_team_observability()
             await team_manager.prepare_runtime_activation(session_id, team_name)
             request_queue = asyncio.Queue()
             waiter_key = (_resolve_channel_id(channel_id), session_id)
@@ -918,7 +906,7 @@ async def process_team_message_stream(
                         _resolve_channel_id(channel_id),
                         session_id,
                         reason,
-                        query[:200],
+                        _safe_query_preview(query),
                     )
                     error_msg = _INTERACT_REASON_ERROR_MAP.get(reason or "",
                         "Failed to send message, please try again later")
@@ -1194,7 +1182,7 @@ async def _consume_monitor_events(
             session_id,
         )
         async for event in monitor_handler.events():
-            _persist_team_member_status_event(channel_id, session_id, event)
+            _persist_team_history_event(channel_id, session_id, event)
             _broadcast_event(channel_id, session_id, event)
 
         logger.info(
@@ -1271,35 +1259,44 @@ async def _consume_workflow_events(
         )
 
 
-def _persist_team_member_status_event(
+def _persist_team_history_event(
     channel_id: str | None,
     session_id: str,
     event: dict[str, Any],
 ) -> None:
-    """Persist member status changes so team.history.get can restore refresh state."""
-    if event.get("event_type") != "team.member":
+    """Persist team monitor events required by team.history.get panel restore."""
+    evt_type = event.get("event_type")
+    if evt_type not in {"team.member", "team.task"}:
         return
 
     payload = event.get("event")
     if not isinstance(payload, dict):
         return
-    if payload.get("type") != "team.member.status_changed":
-        return
 
-    member_id = str(payload.get("member_id") or "").strip()
-    new_status = str(payload.get("new_status") or "").strip()
-    if not member_id or not new_status:
-        return
+    request_key = ""
+    if evt_type == "team.member":
+        if payload.get("type") != "team.member.status_changed":
+            return
+        member_id = str(payload.get("member_id") or "").strip()
+        new_status = str(payload.get("new_status") or "").strip()
+        if not member_id or not new_status:
+            return
+        request_key = member_id
+    else:
+        task_id = str(payload.get("task_id") or payload.get("id") or "").strip()
+        if not task_id:
+            return
+        request_key = task_id
 
     timestamp = time.time()
     append_history_record(
         session_id=session_id,
-        request_id=f"team-status-{member_id}-{int(timestamp * 1000)}",
+        request_id=f"{evt_type}-{request_key}-{int(timestamp * 1000)}",
         channel_id=_resolve_channel_id(channel_id),
         role="assistant",
         content="",
         timestamp=timestamp,
-        event_type="team.member",
+        event_type=event_type,
         extra={
             "session_id": session_id,
             "event": dict(payload),

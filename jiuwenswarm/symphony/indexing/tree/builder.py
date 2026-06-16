@@ -491,6 +491,7 @@ class TreeBuilder:
                 child_groups = future.result()
             except Exception as exc:
                 console.print(f"[red]Error processing {job.node.id}: {exc}[/red]")
+                raise RuntimeError(f"Skill tree node processing failed for '{job.node.id}': {exc}") from exc
             else:
                 for child_group in child_groups:
                     pending_nodes.append(self._queue_child_node(child_group, depth=job.depth + 1))

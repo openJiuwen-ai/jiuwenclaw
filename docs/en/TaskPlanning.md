@@ -8,39 +8,39 @@ For long, shifting tasks, users need to **interrupt**, **insert new work**, and 
 
 Complex requests are split into subtasks and tracked with built-in todo tools. After each subtask, state updates so progress stays visible. **openJiuwen** interrupt/resume and scheduling help insert urgent items or new goals without breaking the overall flow.
 
-## Todo toolkit (`TodoToolkit`)
+## Todo tools
 
-Tasks are stored as Markdown in `workspace/session/{session_id}/todo.md`, isolated per session with safe concurrent access.
+JiuwenSwarm provides a series of tools covering the full task management workflow. Tasks are persisted as JSON in `workspace/todo/{session_id}/todo.json`, isolated per session with safe concurrent access.
 
 ### Tools
 
 | Tool | Description |
 | :--- | :--- |
-| `todo_create` | Create the initial list. **Fails** if a list already exists — use `todo_insert` instead. |
-| `todo_insert` | Insert at an index; shifts later tasks. Creates the list if missing. |
-| `todo_complete` | Mark done; optional `result` text. |
-| `todo_remove` | Remove a task; renumbers remaining items. |
-| `todo_list` | List all tasks and states. |
+| `todo_create` | Create the initial todo list. **Note**: If a todo list already exists for the session, it will be overwritten. |
+| `todo_modify` | Modify a specified todo list, including updating, deleting, cancelling, and appending subtasks. |
+| `todo_list` | List all current todo items, their states, and a summary of each subtask. |
+| `todo_get` | Get the detailed description of a specified subtask. |
 
 ### States
 
 | State | Meaning |
 | :--- | :--- |
-| `waiting` | Not started |
-| `running` | In progress |
+| `pending` | Not started |
+| `in_progress` | In progress |
 | `completed` | Done |
 | `cancelled` | Cancelled |
 
 ### Typical flow
 
 1. User asks for something complex → `todo_create` breaks it into steps.
-2. User adds work mid-flight → `todo_insert`.
-3. Subtask done → `todo_complete` with result.
-4. Drop a task → `todo_remove`.
+2. User adds work mid-flight → `todo_modify` inserts it at the appropriate position.
+3. Subtask done → `todo_modify` updates its state.
+4. Cancel or delete a task → `todo_modify`.
 5. Check status anytime → `todo_list`.
+6. Get detailed information about a subtask anytime → `todo_get`.
 
 This reduces **lost goals** and **broken execution** on long jobs.
 
-You can toggle task planning in the chat UI; when enabled it defaults to planning mode, otherwise classic ReAct.
+You can toggle task planning in the chat UI. The current chat enables task planning by default and can be switched to performance mode or cluster mode.
 
 ![Task planning](../assets/images/todo.png)

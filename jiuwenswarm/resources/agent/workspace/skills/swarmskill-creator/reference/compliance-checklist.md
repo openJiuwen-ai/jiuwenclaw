@@ -4,8 +4,10 @@
 
 ## What the validator script catches (do not duplicate here)
 
-The validator handles:
-- Five-file structure (SKILL.md / roles/ / workflow.md / bind.md / dependencies.yaml)
+The validator handles two output shapes:
+
+**Full Markdown spec**
+- Five-file structure (`SKILL.md` / `roles/` / `workflow.md` / `bind.md` / `dependencies.yaml`)
 - Frontmatter required fields (`name`, `description`, `version`, `kind: swarm-skill`, `roles[]`)
 - Each `roles[].id` has matching `roles/<id>.md`
 - Each role file has the 5 mandatory sections
@@ -15,7 +17,12 @@ The validator handles:
 - `dependencies.yaml` has both `skills:` and `tools:` segments
 - Every `roles[].skills` and `roles[].tools` declared in SKILL.md appears in dependencies.yaml
 
-If the script reports failures, fix them first. **This checklist starts where the script ends.**
+**Script-only SwarmFlow**
+- Minimal `SKILL.md` + `scripts/workflow.py`
+- No `roles/`, `workflow.md`, `bind.md`, `dependencies.yaml`, or `prompts/`
+- Executable `scripts/workflow.py` safety envelope
+
+The full SwarmFlow script authoring constraints live in [templates/scripts/workflow.py.template](../templates/scripts/workflow.py.template) under `TEMPLATE AUTHORING CONSTRAINTS`. Do not duplicate that list here. If the script reports failures, fix them first. **This checklist starts where the script ends.**
 
 ---
 
@@ -147,6 +154,46 @@ Read the `description` and ask:
 - Is it 1–5 lines (system prompts hard-cap descriptions)?
 
 A description that omits "when not to use" causes the skill to over-trigger. A description without trigger phrases causes the skill to under-trigger.
+
+### B9. SwarmFlow barriers are justified
+
+For every `parallel(...)` barrier, ask:
+
+- Does the next step genuinely need all prior results together?
+- If each item can continue independently, is the barrier adding avoidable latency?
+- Does the final report make partial branch failure visible to the user?
+
+A barrier is a latency cost. Use it only when it carries real cross-item semantics.
+
+### B10. Dynamic fan-out has explicit bounds
+
+For every dynamic fan-out or loop over user-provided input, confirm:
+
+- The chosen bound is meaningful for the task size, not an arbitrary silent cap.
+- Skipped or truncated work is visible in the returned result or user-facing report.
+- Empty input produces a clear skip/degraded outcome, not a misleading success.
+
+The validator can warn on suspicious shapes; it cannot judge whether the bound is correct for the user's domain.
+
+### B11. Runtime values are injected, not discovered
+
+If validator warnings around time, randomization, or file access are intentionally accepted, confirm:
+
+- The workflow explains why the runtime value cannot be supplied through `args` or runtime-provided data.
+- Resume, journal replay, and cache behavior remain understandable.
+- The final sign-off names the accepted warning instead of silently ignoring it.
+
+Unexplained runtime discovery makes replay and cache behavior hard to reason about.
+
+### B12. Semantic success is stronger than schema success
+
+For every integration/final result, verify:
+
+- The chosen success fields actually prove the answer is useful for this workflow.
+- Empty-but-schema-valid outputs cannot be reported as complete success.
+- Missing teammate outputs are visible in the returned result or user-facing report.
+
+Schema shape only proves the container exists; it does not prove the answer is useful.
 
 ---
 

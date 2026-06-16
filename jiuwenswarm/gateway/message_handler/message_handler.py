@@ -52,6 +52,7 @@ _KNOWN_JIUWENSWARM_SESSION_PREFIXES = (
     "discord_",
     "whatsapp_",
 )
+_SKILL_EVOLUTION_APPROVAL_SCHEMA = "openjiuwen.skill_evolution_approval.v1"
 
 _A2UI_OPEN_TAG_MARKER = "<a2ui-json>"
 
@@ -2097,7 +2098,7 @@ class MessageHandler(ABC):
         """
         from jiuwenswarm.common.schema.message import ReqMethod
 
-        m = env.method
+        m = getattr(env.method, "value", env.method)
         if not m:
             return False
         return m not in (
@@ -2152,6 +2153,96 @@ class MessageHandler(ABC):
             request_id.startswith("team_skill_evolve_")
         )
 
+    @classmethod
+    def _is_evolution_approval_payload(cls, payload: Any) -> bool:
+        if not isinstance(payload, dict):
+            return False
+        if cls._is_evolution_approval_request_id(payload.get("request_id")):
+            return True
+        if payload.get("source") == "skill_evolution_approval":
+            return True
+        if payload.get("approval_schema") == _SKILL_EVOLUTION_APPROVAL_SCHEMA:
+            return True
+
+        evolution_meta = payload.get("evolution_meta")
+        if isinstance(evolution_meta, dict) and evolution_meta.get("event_kind") == "approval":
+            return True
+        return False
+
+    def _is_current_pending_evolution_approval(
+        self,
+        session_id: str | None,
+        request_id: Any,
+    ) -> bool:
+        return (
+            isinstance(session_id, str)
+            and isinstance(request_id, str)
+            and self._pending_evolution_approval.get(session_id) == request_id
+        )
+
+    def _is_interrupt_evolution_approval_chat_send(
+        self,
+        msg: "Message",
+        *,
+        method: Any | None = None,
+    ) -> bool:
+        effective_method = getattr(method, "value", method)
+        if effective_method is None:
+            if not self._is_chat_send_message(msg):
+                return False
+        elif effective_method != "chat.send":
+            return False
+        if not isinstance(msg.params, dict):
+            return False
+        return self._is_interrupt_evolution_approval_answer_payload(msg.params)
+
+    @classmethod
+    def _is_interrupt_evolution_approval_answer_payload(cls, payload: Any) -> bool:
+        if not cls._is_evolution_approval_payload(payload):
+            return False
+        evolution_meta = payload.get("evolution_meta")
+        return (
+            isinstance(evolution_meta, dict)
+            and evolution_meta.get("approval_transport") == "interrupt"
+        )
+
+    async def _dispatch_interrupt_evolution_approval_as_chat_send(
+        self,
+        msg: "Message",
+    ) -> None:
+        from jiuwenswarm.common.schema.message import ReqMethod
+
+        if self._is_current_pending_evolution_approval(
+            msg.session_id,
+            (msg.params or {}).get("request_id") if isinstance(msg.params, dict) else None,
+        ):
+            self._user_messages.put_nowait(
+                replace(msg, req_method=ReqMethod.CHAT_SEND, is_stream=True)
+            )
+            return
+        logger.info(
+            "[MessageHandler] stale interrupt evolution approval answer ignored: "
+            "session_id=%s request_id=%s",
+            msg.session_id,
+            (msg.params or {}).get("request_id") if isinstance(msg.params, dict) else None,
+        )
+
+    @staticmethod
+    def _ensure_regular_evolution_approval_metadata(payload: dict[str, Any]) -> dict[str, Any]:
+        enriched = dict(payload)
+        enriched["source"] = "skill_evolution_approval"
+        enriched.setdefault("approval_schema", _SKILL_EVOLUTION_APPROVAL_SCHEMA)
+        request_id = enriched.get("request_id")
+        evolution_meta = enriched.get("evolution_meta")
+        if not isinstance(evolution_meta, dict):
+            evolution_meta = {}
+        evolution_meta = dict(evolution_meta)
+        evolution_meta.setdefault("event_kind", "approval")
+        evolution_meta.setdefault("rail_kind", "regular")
+        evolution_meta.setdefault("approval_kind", "evolve")
+        enriched["evolution_meta"] = evolution_meta
+        return enriched
+
     def _queue_supplement_input(
         self,
         session_id: str | None,
@@ -2170,11 +2261,14 @@ class MessageHandler(ABC):
             return None
         return self._queued_supplement_input.pop(session_id, None)
 
-    def _mark_pending_evolution_approval(self, session_id: str | None, request_id: Any) -> None:
+    def _mark_pending_evolution_approval(
+        self,
+        session_id: str | None,
+        request_id: Any,
+    ) -> None:
         if not session_id:
             return
-        if self._is_evolution_approval_request_id(request_id):
-            self._pending_evolution_approval[session_id] = str(request_id)
+        self._pending_evolution_approval[session_id] = str(request_id)
 
     def _build_auto_accept_evolution_answer(
         self,
@@ -2186,16 +2280,19 @@ class MessageHandler(ABC):
     ) -> "Message":
         from jiuwenswarm.common.schema.message import Message, ReqMethod
 
+        params = self._ensure_regular_evolution_approval_metadata({
+            "request_id": request_id,
+            "answers": [{"selected_options": ["接收"]}],
+        })
+        if request_id.startswith("call_"):
+            params["evolution_meta"]["approval_transport"] = "interrupt"
+
         return Message(
             id=f"auto_evolve_answer_{int(time.time() * 1000):x}_{secrets.token_hex(3)}",
             type="req",
             channel_id=channel_id,
             session_id=session_id,
-            params={
-                "request_id": request_id,
-                "answers": [{"selected_options": ["接收"]}],
-                "source": "auto_accept",
-            },
+            params=params,
             timestamp=time.time(),
             ok=True,
             req_method=ReqMethod.CHAT_ANSWER,
@@ -2273,6 +2370,61 @@ class MessageHandler(ABC):
         self._clear_session_evolution_in_progress(session_id)
         return self._pop_queued_supplement_input(session_id)
 
+    async def _complete_evolution_approval_if_current(
+        self,
+        msg: "Message",
+        answered_request_id: str | None,
+    ) -> None:
+        if not self._is_current_pending_evolution_approval(msg.session_id, answered_request_id):
+            self._finish_evolution_approval_if_current(
+                msg.session_id,
+                answered_request_id,
+            )
+            return
+
+        queued_payload = self._finish_evolution_approval_if_current(
+            msg.session_id,
+            answered_request_id,
+        )
+        queued_input = str((queued_payload or {}).get("new_input") or "").strip()
+        queued_attachments = (queued_payload or {}).get("attachments")
+        if queued_input:
+            queued_msg = self._build_queued_chat_send_message(
+                msg,
+                queued_input,
+                queued_attachments if isinstance(queued_attachments, list) else None,
+                self._get_session_last_user_query(msg.session_id),
+            )
+            self._user_messages.put_nowait(queued_msg)
+            logger.info(
+                "[MessageHandler] evolution approval answered (resolved), "
+                "queued supplement dispatched: id=%s session_id=%s",
+                queued_msg.id,
+                msg.session_id,
+            )
+        else:
+            logger.info(
+                "[MessageHandler] evolution approval answered (resolved), "
+                "no queued supplement: request_id=%s session_id=%s",
+                answered_request_id,
+                msg.session_id,
+            )
+        await self._send_processing_status(
+            msg.id,
+            msg.session_id,
+            msg.channel_id,
+            is_processing=False,
+        )
+
+    @staticmethod
+    def _approval_response_resolved(resp: Any) -> bool:
+        return (
+            resp is not None
+            and hasattr(resp, "payload")
+            and isinstance(resp.payload, dict)
+            and resp.payload.get("resolved", False) is True
+        )
+
     async def _handle_evolution_chunk(
         self,
         chunk,
@@ -2307,7 +2459,7 @@ class MessageHandler(ABC):
         approval_request_id = chunk.payload.get("request_id")
         if (
             event_type == "chat.ask_user_question"
-            and self._is_evolution_approval_request_id(approval_request_id)
+            and self._is_evolution_approval_payload(chunk.payload)
         ):
             self._maybe_auto_accept_replaced_evolution_approval(
                 session_id=session_id,
@@ -2401,6 +2553,16 @@ class MessageHandler(ABC):
                 resp.request_id,
                 resp.channel_id,
             )
+            if (
+                self._is_interrupt_evolution_approval_chat_send(msg, method=env.method)
+                and self._approval_response_resolved(resp)
+            ):
+                answer_payload = msg.params if isinstance(msg.params, dict) else {}
+                answer_request_id = answer_payload.get("request_id")
+                await self._complete_evolution_approval_if_current(
+                    msg,
+                    str(answer_request_id or ""),
+                )
             return resp
         except Exception as e:
             logger.exception("AgentServer send_request failed for %s: %s", msg.id, e)
@@ -2453,36 +2615,24 @@ class MessageHandler(ABC):
 
                 # 检查是否是中断请求
                 if msg.req_method == ReqMethod.CHAT_ANSWER:
+                    answer_payload = msg.params if isinstance(msg.params, dict) else {}
+                    is_evolution_approval_answer = self._is_evolution_approval_payload(answer_payload)
+                    if is_evolution_approval_answer:
+                        msg.params = self._ensure_regular_evolution_approval_metadata(answer_payload)
+                        if self._is_interrupt_evolution_approval_answer_payload(msg.params):
+                            await self._dispatch_interrupt_evolution_approval_as_chat_send(msg)
+                            continue
                     agent_msg = await self._prepare_agent_dispatch_message(msg)
                     env = self.message_to_e2a(agent_msg)
                     resp = await self._process_non_stream_request(msg, env)
-                    answer_request_id = (msg.params or {}).get("request_id")
-                    if self._is_evolution_approval_request_id(answer_request_id):
-                        # Check whether the response indicates the approval was actually resolved.
-                        resolved = False
-                        if resp is not None and hasattr(resp, "payload") and isinstance(resp.payload, dict):
-                            resolved = resp.payload.get("resolved", False) is True
-                        if resolved:
-                            queued_payload = self._finish_evolution_approval_if_current(
-                                msg.session_id,
+                    answer_payload = msg.params if isinstance(msg.params, dict) else {}
+                    answer_request_id = answer_payload.get("request_id")
+                    if is_evolution_approval_answer:
+                        if self._approval_response_resolved(resp):
+                            await self._complete_evolution_approval_if_current(
+                                msg,
                                 str(answer_request_id or ""),
                             )
-                            queued_input = str((queued_payload or {}).get("new_input") or "").strip()
-                            queued_attachments = (queued_payload or {}).get("attachments")
-                            if queued_input:
-                                queued_msg = self._build_queued_chat_send_message(
-                                    msg,
-                                    queued_input,
-                                    queued_attachments if isinstance(queued_attachments, list) else None,
-                                    self._get_session_last_user_query(msg.session_id),
-                                )
-                                self._user_messages.put_nowait(queued_msg)
-                                logger.info(
-                                    "[MessageHandler] evolution approval answered (resolved), "
-                                    "queued supplement dispatched: id=%s session_id=%s",
-                                    queued_msg.id,
-                                    msg.session_id,
-                                )
                         else:
                             logger.info(
                                 "[MessageHandler] evolution approval answered but not resolved: "
@@ -2754,6 +2904,20 @@ class MessageHandler(ABC):
                     "[MessageHandler] 从 user_messages 取出，发往 AgentServer: id=%s channel_id=%s is_stream=%s",
                     msg.id, msg.channel_id, msg.is_stream,
                 )
+                if self._is_interrupt_evolution_approval_chat_send(msg):
+                    if self._is_current_pending_evolution_approval(
+                        msg.session_id,
+                        (msg.params or {}).get("request_id") if isinstance(msg.params, dict) else None,
+                    ):
+                        msg = replace(msg, is_stream=True)
+                    else:
+                        logger.info(
+                            "[MessageHandler] stale interrupt evolution approval chat.send ignored: "
+                            "session_id=%s request_id=%s",
+                            msg.session_id,
+                            (msg.params or {}).get("request_id") if isinstance(msg.params, dict) else None,
+                        )
+                        continue
                 agent_msg = await self._prepare_agent_dispatch_message(msg)
                 await self._trigger_before_chat_request_hook(agent_msg)
                 env = self.message_to_e2a(agent_msg)
@@ -2877,6 +3041,28 @@ class MessageHandler(ABC):
             )
             raise  # 重新抛出，让调用者知道任务被取消
         finally:
+            if (
+                not cancelled
+                and self._is_interrupt_evolution_approval_answer_payload(env.params)
+            ):
+                from jiuwenswarm.common.schema.message import Message, ReqMethod
+
+                await self._complete_evolution_approval_if_current(
+                    Message(
+                        id=rid,
+                        type="req",
+                        channel_id=channel_id,
+                        session_id=session_id,
+                        params=dict(env.params or {}),
+                        timestamp=time.time(),
+                        ok=True,
+                        req_method=ReqMethod.CHAT_SEND,
+                        is_stream=True,
+                        metadata=request_metadata,
+                    ),
+                    str((env.params or {}).get("request_id") or ""),
+                )
+                has_processing_status_false = True
             # 清理状态
             self._pop_stream_tracking(rid)
             if session_id is not None and session_id not in self._stream_sessions.values():
@@ -3028,6 +3214,12 @@ class MessageHandler(ABC):
             metadata=None,
         )
         await self.publish_robot_messages(status_msg)
+        logger.info(
+            "[MessageHandler] processing status sent: request_id=%s session_id=%s is_processing=%s",
+            request_id,
+            session_id,
+            is_processing,
+        )
 
     def _build_error_out_message(self, msg: "Message", error: Exception) -> "Message":
         from jiuwenswarm.common.schema.message import Message

@@ -13,6 +13,7 @@ from jiuwenswarm.common.config import (
     migrate_config_from_template,
     replace_teams_in_config,
     resolve_env_vars,
+    update_skill_retrieval_in_config,
 )
 
 
@@ -168,6 +169,87 @@ symphony:
         assert migrated["symphony"]["fingerprint"]["extraction"]["workers"] == 3
         assert migrated["symphony"]["fingerprint"]["extraction"]["batch_size"] == 1
         assert migrated["symphony"]["fingerprint"]["normalization"]["workers"] == 1
+
+    @staticmethod
+    def test_update_skill_retrieval_preserves_existing_hidden_config(
+        monkeypatch: pytest.MonkeyPatch,
+        temp_config_file: Path,
+    ):
+        temp_config_file.write_text(
+            """
+symphony:
+  skill_retrieval:
+    enabled: false
+    build:
+      branching_factor: 96
+      root_categories: old
+      max_depth: 7
+      request_timeout_seconds: 300
+      max_workers: 4
+      max_retries: 2
+      classification_batch_limit: 24
+      discovery_seed: 42
+      postprocess_enabled: true
+      postprocess_max_passes: 1
+      postprocess_min_skills: 6
+      equivalence_enabled: true
+    retrieve:
+      top_k: 8
+      compact_codes_enabled: true
+      flatten_tree: true
+      max_exposure_depth: 12
+      max_branch_choices: 3
+      max_parallel_branches: 4
+""",
+            encoding="utf-8",
+        )
+        monkeypatch.setattr("jiuwenswarm.common.config.CONFIG_YAML_PATH", temp_config_file)
+
+        update_skill_retrieval_in_config(
+            {
+                "build": {
+                    "root_categories": "new",
+                    "max_depth": 9,
+                    "max_workers": 8,
+                    "max_retries": 3,
+                    "classification_batch_limit": 12,
+                    "discovery_seed": 7,
+                    "postprocess_enabled": False,
+                    "postprocess_max_passes": 4,
+                    "postprocess_min_skills": 10,
+                    "equivalence_enabled": False,
+                },
+                "retrieve": {
+                    "top_k": 6,
+                    "max_branch_choices": 5,
+                },
+            }
+        )
+
+        raw = yaml.safe_load(temp_config_file.read_text(encoding="utf-8"))
+        section = raw["symphony"]["skill_retrieval"]
+        assert section["build"] == {
+            "branching_factor": 96,
+            "root_categories": "new",
+            "max_depth": 9,
+            "request_timeout_seconds": 300,
+            "max_workers": 8,
+            "max_retries": 3,
+            "classification_batch_limit": 12,
+            "discovery_seed": 7,
+            "postprocess_enabled": False,
+            "postprocess_max_passes": 4,
+            "postprocess_min_skills": 10,
+            "equivalence_enabled": False,
+        }
+        assert section["retrieve"] == {
+            "top_k": 6,
+            "compact_codes_enabled": True,
+            "flatten_tree": True,
+            "max_exposure_depth": 12,
+            "max_branch_choices": 5,
+            "max_parallel_branches": 4,
+        }
 
 
 class TestTeamModesConfig:

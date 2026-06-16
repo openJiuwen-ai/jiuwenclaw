@@ -1849,8 +1849,7 @@ class ProcessRuntime(RuntimeAdapter):
             # ``exit(1)`` before printing anything).
             message = (
                 f"{message} No stdout/stderr was captured before the "
-                f"daemon exited; re-run with the container attached "
-                f"(``docker run -it``) to see live bwrap output."
+                f"daemon exited."
             )
         raise RuntimeError(message)
 

@@ -19,6 +19,7 @@ class ReqMethod(Enum):
     COMMAND_ADD_DIR = "command.add_dir"
     COMMAND_CHROME = "command.chrome"
     COMMAND_COMPACT = "command.compact"
+    COMMAND_COMPACT_PARTIAL = "command.compact_partial"
     COMMAND_CONTEXT = "command.context"
     COMMAND_RECAP = "command.recap"
     COMMAND_DIFF = "command.diff"
@@ -43,6 +44,7 @@ class ReqMethod(Enum):
     SESSION_REWIND = "session.rewind"
     SESSION_REWIND_AND_RESTORE = "session.rewind_and_restore"
     SESSION_REWIND_CONTEXT = "session.rewind_context"
+    SESSION_REWIND_COMPACT = "session.rewind_compact"
     SESSION_RESTORE_FILES = "session.restore_files"
     HISTORY_LIST_TURNS = "history.list_turns"
     TEAM_DELETE = "team.delete"
@@ -100,6 +102,7 @@ class ReqMethod(Enum):
     SKILLS_TEAMSKILLS_HUB_DELETE = "skills.teamskillshub.delete"
     SKILLS_RETRIEVAL_STATUS = "skills.retrieval.status"
     SKILLS_RETRIEVAL_INDEX_BUILD = "skills.retrieval.index_build"
+    SKILLS_RETRIEVAL_INDEX_CANCEL = "skills.retrieval.index_cancel"
     SKILLS_RETRIEVAL_SEARCH = "skills.retrieval.search"
     SKILLS_RETRIEVAL_TREE = "skills.retrieval.tree"
     SKILLS_EVOLUTION_STATUS = "skills.evolution.status"
@@ -107,6 +110,7 @@ class ReqMethod(Enum):
     SKILLS_EVOLUTION_SAVE = "skills.evolution.save"
 
     SYMPHONY_BUILD_SCORE = "symphony.build_score"
+    SYMPHONY_PAUSE_BUILD = "symphony.pause_build"
     SYMPHONY_SCORE_STATUS = "symphony.score_status"
     SYMPHONY_GRAPH = "symphony.graph"
     SYMPHONY_PLAN = "symphony.plan"
@@ -187,6 +191,10 @@ class ReqMethod(Enum):
     SCHEDULE_LOGS = "schedule.logs"
     SCHEDULE_CANCEL = "schedule.cancel"
     SCHEDULE_DELETE = "schedule.delete"
+    ISSUE_WATCH_ONCE = "issue.watch_once"
+    ISSUE_STATE_LIST = "issue.state.list"
+    ISSUE_DELETE = "issue.delete"
+    ISSUE_MATRIX = "issue.matrix"
 
 
 class EventType(Enum):

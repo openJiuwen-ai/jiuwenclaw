@@ -362,7 +362,7 @@
     "restoreDisabledUnsupported": "仅支持恢复 web 前端会话（sess_）",
     "restoreEmpty": "该会话没有可恢复的消息（为空或均被过滤）。仍可在此继续对话。",
     "delete": "删除会话",
-      "teamLabel": "团队：{{team}}",
+    "teamLabel": "团队：{{team}}",
     "files": "会话文件",
     "selectFirst": "请先选择会话",
     "loadingFiles": "加载文件中...",
@@ -438,7 +438,7 @@
     "errors": {
       "loadConfig": "加载心跳配置失败",
       "saveConfig": "保存心跳配置失败",
-      "invalidEvery": "心跳间隔 every 必须是大于 0 的数字",
+      "invalidEvery": "心跳间隔必须是大于 0 的正数",
       "invalidActiveHours": "active_hours 需使用 HH:MM 格式（例如 08:00）",
       "invalidRange": "结束时间必须大于开始时间"
     }
@@ -669,7 +669,7 @@
       "memoryForbiddenEnabled": "启用",
       "memoryForbiddenDescription": "禁止记忆内容描述",
       "memoryForbiddenDescriptionPlaceholder": "例如：密码、API密钥、Secret、Token、信用卡号、身份证号、手机号等敏感信息",
-      "skillRetrievalBuildRootCategoriesPlaceholder": "留空使用内置默认分层，或填写 JSON/YAML 文件路径",
+      "skillRetrievalBuildRootCategoriesPlaceholder": "直接编辑 YAML/JSON 树根分层配置",
       "agentSkillsPlaceholder": "点击选择技能",
       "agentSkillsEmpty": "暂无已安装技能",
       "agentName": "名称",
@@ -689,23 +689,28 @@
       "teamMemberPersona": "人设",
       "teamMemberPromptHint": "提示词",
       "teamMemberAgentKey": "Agent Key",
+      "symphonyEnabled": "启用技能交响乐",
       "skillRetrievalEnabled": "启用技能检索",
-      "skillRetrievalBuildBranchingFactor": "树分支数",
+      "skillRetrievalBuildBranchingFactor": "拆分阈值基数",
       "skillRetrievalBuildMaxDepth": "最大树深",
       "skillRetrievalBuildRootCategories": "树根分层配置",
       "skillRetrievalBuildMaxWorkers": "构建并发数",
+      "skillRetrievalBuildMaxRetries": "构建重试次数",
       "skillRetrievalBuildTimeout": "构建请求超时（秒）",
-      "skillRetrievalTopK": "检索返回数量",
-      "skillRetrievalCompactCodes": "Compact 检索",
-      "skillRetrievalFlattenTree": "扁平树检索",
-      "skillRetrievalMaxExposureDepth": "最大暴露深度",
-      "skillRetrievalMaxBranchChoices": "每层分支选择数",
-      "skillRetrievalMaxParallelBranches": "并行分支数",
-      "skillRetrievalRetrieveTimeout": "检索请求超时（秒）"
+      "skillRetrievalBuildTotalTimeout": "构建总超时（秒，0为不限制）",
+      "skillRetrievalBuildClassificationBatchLimit": "分类批大小上限",
+      "skillRetrievalBuildDiscoverySeed": "分支发现随机种子",
+      "skillRetrievalBuildPostprocessEnabled": "启用构建后处理",
+      "skillRetrievalBuildPostprocessMaxPasses": "后处理最大轮次",
+      "skillRetrievalBuildPostprocessMinSkills": "后处理最小技能数",
+      "skillRetrievalBuildEquivalenceEnabled": "启用等价分支合并",
+      "skillRetrievalCompactCodes": "紧凑编码模式",
+      "skillRetrievalFlattenTree": "平铺检索树",
+      "skillRetrievalMaxExposureDepth": "单次披露深度"
     },
     "keyHelp": {
       "skillCreate": "建议先安装 `skill-creator` 和 `teamskill-creator`，再开启",
-      "skillRetrievalBuildRootCategories": "可选。留空使用内置默认树分层；填写时应为包含 tree_root_categories 或 root_categories 的 JSON/YAML 文件路径。"
+      "skillRetrievalBuildRootCategories": "直接编辑包含 tree_root_categories 或 root_categories 的 YAML/JSON；页面会展示默认分层供参考。保存后会写入配置内容本身，而不是外部文件路径。"
     },
     "hideValue": "隐藏明文",
     "showValue": "显示明文",
@@ -793,6 +798,7 @@
       "contextEngine": { "label": "上下文压缩", "hint": "控制对话上下文是否启用压缩" },
       "permissions": { "label": "工具安全护栏", "hint": "控制工具调用时的权限检查" },
       "a2ui": { "label": "A2UI", "hint": "开启或关闭生成式界面渲染与 A2UI 运行时提示词" },
+      "symphony": { "label": "技能交响乐", "hint": "控制技能交响乐编排能力总开关" },
       "skillRetrieval": { "label": "Agentic技能检索", "hint": "适用于较大规模已安装技能场景下的 Agentic 技能检索" },
       "memory": { "label": "记忆系统敏感信息过滤", "hint": "配置禁止写入记忆的敏感信息类型" },
       "email": { "label": "邮箱配置", "hint": "邮件账号与令牌参数" },
@@ -804,9 +810,7 @@
       "freeSearchDdg": "启用 DuckDuckGo（含 DDG via Jina）",
       "freeSearchBing": "启用 Bing",
       "enabled": "启用",
-      "kvCacheAffinity": "算力亲和（KV 释放）",
-      "skillRetrievalCompact": "启用 compact code",
-      "skillRetrievalFlat": "启用 flat tree"
+      "kvCacheAffinity": "算力亲和（KV 释放）"
     },
     "permissionsTools": {
       "title": "工具防护（permissions.tools）",
@@ -824,14 +828,14 @@
       "levelDeny": "拒绝 (deny)",
       "delete": "删除",
       "deleteConfirm": "确定从 permissions.tools 中删除「{{tool}}」吗？",
-        "invalidValue": "配置值非标准格式，选择策略后将写回为合法值。当前：{{raw}}",
-        "addTitle": "添加工具规则",
-        "toolPlaceholder": "例如 mcp_exec_command",
-        "duplicateTool": "工具已存在：{{tool}}",
-        "add": "添加",
-        "loadFailed": "加载工具权限失败",
-        "saveFailed": "保存失败"
-      },
+      "invalidValue": "配置值非标准格式，选择策略后将写回为合法值。当前：{{raw}}",
+      "addTitle": "添加工具规则",
+      "toolPlaceholder": "例如 mcp_exec_command",
+      "duplicateTool": "工具已存在：{{tool}}",
+      "add": "添加",
+      "loadFailed": "加载工具权限失败",
+      "saveFailed": "保存失败"
+    },
     "errors": {
       "requiredModelFields": "模型配置为必填：{{fields}}。请完整填写后再保存并重启。",
       "saveFailed": "保存失败，请稍后重试",
@@ -1047,12 +1051,71 @@
       "stale": "索引需要更新",
       "missing": "索引未构建",
       "indexedCount": "已索引 {{count}} 个",
-      "enabledCount": "启用 {{count}} 个",
+      "installedCount": "已安装 {{count}} 个",
       "build": "构建索引",
+      "fullRebuild": "全量重新构建",
       "building": "构建中...",
-      "search": "检索",
-      "searching": "检索中...",
-      "queryPlaceholder": "输入任务需求，检索已安装技能",
+      "buildFailed": "构建失败",
+      "cancel": "取消构建",
+      "cancelling": "取消中...",
+      "cancelled": "构建已取消",
+      "buildStageUnknown": "等待构建状态",
+      "buildProgress": "进度 {{progress}}%",
+      "buildMonitorTitle": "构建进度",
+      "buildMonitorSubtitle": "当前阶段：{{stage}}",
+      "buildPipelineTitle": "索引构建流程",
+      "buildMetric": {
+        "progress": "进度",
+        "skills": "技能",
+        "indexed": "索引"
+      },
+      "buildPipeline": {
+        "queued": {
+          "title": "准备构建任务",
+          "detail": "创建临时输出目录，解析构建配置和索引路径。"
+        },
+        "scan": {
+          "title": "扫描已安装技能",
+          "detail": "读取 {{count}} 个已安装且启用的技能，提取名称、描述和 SKILL.md。"
+        },
+        "llmCheck": {
+          "title": "检查模型连接",
+          "detail": "使用当前模型配置发送轻量请求，确认构建模型可访问。"
+        },
+        "build": {
+          "title": "构建技能树",
+          "detail": "根据技能能力进行分组、分类和分支描述生成，并写入树结构。"
+        },
+        "publish": {
+          "title": "发布索引产物",
+          "detail": "校验 tree_index.yaml、catalog.jsonl、manifest.json，并替换线上索引目录。"
+        },
+        "success": {
+          "title": "索引就绪",
+          "detail": "{{count}} 个技能可用于 Agentic 技能检索。"
+        }
+      },
+      "buildPhaseState": {
+        "done": "完成",
+        "active": "当前",
+        "pending": "等待",
+        "failed": "失败",
+        "cancelled": "取消"
+      },
+      "buildStages": {
+        "queued": "任务排队",
+        "scan": "扫描技能",
+        "llmCheck": "检查模型连接",
+        "buildTree": "构建技能树",
+        "publish": "发布索引",
+        "reuse": "复用索引",
+        "success": "构建完成",
+        "failed": "构建失败",
+        "timeout": "构建超时",
+        "llmConfig": "模型配置",
+        "cancelled": "已取消",
+        "interrupted": "构建中断"
+      },
       "treeTitle": "索引树",
       "treeCount": "{{branches}} 个分支 · {{skills}} 个技能",
       "noTree": "暂无索引树",
@@ -1252,7 +1315,6 @@
   },
   "fileViewer": {
     "chatPreview": "对话预览",
-    "chatPreviewHint": "仅展示部分数据",
     "historyPreviewEmpty": "按与历史恢复相同的规则过滤后，没有可展示的消息（或文件为空）。可关闭预览查看原始 JSON。",
     "edit": "编辑",
     "unknownError": "未知错误",
@@ -1298,22 +1360,18 @@
       "progress": {
         "completed": "任务完成",
         "inactive": "当前无进行中的活动",
-        "activeMembers": "活跃成员数： {{count}}"
+        "activeMembers": "成员数： {{count}}"
       },
       "status": {
         "completed": "任务完成",
         "cancelled": "任务取消",
         "thinking": "正在思考",
+        "idle": "空闲",
         "message": "发送消息",
+        "receivedMessage": "接收消息",
         "file": "发送文件",
         "executingTool": "执行工具",
         "toolCall": "工具调用"
-      },
-      "summary": {
-        "task": "{{status}}：{{content}}",
-        "message": "发送消息：{{content}}",
-        "file": "发送文件：{{content}}",
-        "tool": "调用工具：{{content}}"
       },
       "counts": {
         "tasks": "执行任务",
@@ -1460,21 +1518,23 @@
     "restarting": "正在重启服务",
     "restartSuccess": "重启成功",
     "configApplied": "配置已生效",
+    "a2uiRefresh": "配置已生效",
     "restartWaiting": "正在等待后端重新启动并恢复连接，请稍候...",
     "configAppliedDesc": "配置已热更新，窗口将在 5 秒后自动关闭。",
+    "a2uiRefreshDesc": "页面将在 5 秒后自动刷新。",
     "restartSuccessDesc": "后端已启动成功，窗口将在 5 秒后自动关闭。"
   },
   "extensions": {
     "title": "Rails 管理",
     "description": "管理自定义 Rail 扩展",
-"loadListFailed": "加载扩展列表失败",
+    "loadListFailed": "加载扩展列表失败",
     "enterFolderPath": "请输入扩展文件夹路径",
     "importTitle": "导入 Rails",
     "importButton": "导入",
     "importing": "导入中...",
     "folderPathPlaceholder": "输入扩展文件夹路径 (例如: D:/extensions/my_extension)",
     "importHint": "文件夹要求：1) 英文名称 2) 包含 rail.py 入口文件",
-"importFailed": "导入扩展失败",
+    "importFailed": "导入扩展失败",
     "noExtensions": "暂无 rails",
     "confirmDelete": "确定要删除扩展 \"{{name}}\" 吗？",
     "deleteButton": "删除",

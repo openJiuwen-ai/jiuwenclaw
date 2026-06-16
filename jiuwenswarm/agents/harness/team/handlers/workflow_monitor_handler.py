@@ -60,12 +60,27 @@ class WorkflowMonitorHandler(BaseMonitorHandler):
     # ------------------------------------------------------------------
 
     async def _collect_events(self) -> None:
-        """Drain monitor.workflow_events() and process each raw EventMessage."""
+        """Drain monitor.workflow_events() and process each raw EventMessage.
+
+        Each event is processed under its own try/except so a single malformed
+        event cannot terminate the whole collection loop — otherwise one bad
+        event would silently drop all subsequent workflow updates. The outer
+        try only guards the monitor stream iteration itself.
+        """
         try:
             async for raw_event in self._monitor.workflow_events():
                 if not self._running:
                     break
-                await self._process_event(raw_event)
+                try:
+                    await self._process_event(raw_event)
+                except Exception as e:
+                    logger.error(
+                        "[WorkflowMonitorHandler] 单事件处理失败（已跳过该事件）: "
+                        "session_id=%s, error=%s",
+                        self._session_id,
+                        e,
+                        exc_info=True,
+                    )
         except Exception as e:
             logger.error(
                 "[WorkflowMonitorHandler] 事件收集失败: session_id=%s, error=%s",
@@ -79,7 +94,27 @@ class WorkflowMonitorHandler(BaseMonitorHandler):
         if progress is None:
             return
 
-        run_state, temp_key = self._get_or_create_run(progress)
+        logger.info(
+            "[WF_DBG WorkflowMonitorHandler] received progress: "
+            "session_id=%s kind=%s run_id=%s workflow_name=%s "
+            "phase=%s label=%s",
+            self._session_id,
+            progress.kind,
+            progress.run_id,
+            progress.workflow_name,
+            progress.phase,
+            progress.label,
+        )
+
+        run_state = self._get_or_create_run(progress)
+        if run_state is None:
+            logger.warning(
+                "[WF_DBG WorkflowMonitorHandler] progress event missing run_id, "
+                "session_id=%s kind=%s — ignored",
+                self._session_id,
+                progress.kind,
+            )
+            return
 
         delta = run_state.apply(progress)
         if delta is None:
@@ -91,9 +126,6 @@ class WorkflowMonitorHandler(BaseMonitorHandler):
                 run_state.id or "(pending)",
             )
             return
-
-        if temp_key is not None:
-            self._rekey_run(temp_key, run_state)
 
         updated_event = self._build_updated_event(delta)
 
@@ -134,6 +166,21 @@ class WorkflowMonitorHandler(BaseMonitorHandler):
         """Return a list of all workflow run dicts for ``command.workflows``."""
         return [run.to_workflow_run_dict() for run in self._runs.values()]
 
+    def finalize_pending_runs(self, terminal_status: str = "stopped") -> None:
+        """Mark every non-terminal run as terminal and persist the result.
+
+        Called on non-resumable teardown (session cancel / stop / destroy) so a
+        torn-down runtime never leaves a workflow stuck in ``running`` on the
+        checkpoint — once the runtime is gone no further ``workflow.updated``
+        events can arrive, so a restored snapshot must show a terminal status.
+        """
+        changed = False
+        for run in self._runs.values():
+            if run.finalize_if_running(terminal_status):
+                changed = True
+        if changed:
+            self._persist()
+
     def get_run_states(self) -> dict[str, WorkflowRunState]:
         """Return a shallow copy of in-memory workflow run states."""
         return dict(self._runs)
@@ -154,9 +201,6 @@ class WorkflowMonitorHandler(BaseMonitorHandler):
         if payload is None:
             return None
 
-        if isinstance(payload, WorkflowProgress):
-            return payload
-
         if isinstance(payload, dict):
             return WorkflowProgress(**payload)
 
@@ -173,7 +217,9 @@ class WorkflowMonitorHandler(BaseMonitorHandler):
         try:
             return WorkflowProgress(
                 kind=payload.kind if hasattr(payload, "kind") else "unknown",
+                run_id=getattr(payload, "run_id", None),
                 workflow_name=getattr(payload, "workflow_name", None),
+                description=getattr(payload, "description", None),
                 phase=getattr(payload, "phase", None),
                 label=getattr(payload, "label", None),
                 prompt=getattr(payload, "prompt", None),
@@ -189,33 +235,25 @@ class WorkflowMonitorHandler(BaseMonitorHandler):
     def _get_or_create_run(
             self,
             progress: WorkflowProgress,
-    ) -> tuple[WorkflowRunState, Optional[str]]:
-        """Find an existing non-terminal WorkflowRunState or create a new one."""
-        kind = progress.kind
+    ) -> WorkflowRunState | None:
+        """Find an existing WorkflowRunState by run_id, or create a new one.
 
-        if kind == "workflow_started":
-            new_run = WorkflowRunState()
-            temp_key = f"_pending_{len(self._runs)}"
-            self._runs[temp_key] = new_run
-            return new_run, temp_key
+        ``run_id`` is required — every progress event carries one, set by
+        SwarmflowTool at launch. Returns ``None`` if ``run_id`` is missing.
+        """
+        run_id = progress.run_id
+        if not run_id:
+            return None
 
-        for key, run in reversed(list(self._runs.items())):
-            if not run.is_terminal:
-                return run, None
+        # Direct lookup by run_id
+        if run_id in self._runs:
+            return self._runs[run_id]
 
+        # New run — register under its run_id
         new_run = WorkflowRunState()
-        temp_key = f"_pending_{len(self._runs)}"
-        self._runs[temp_key] = new_run
-        return new_run, temp_key
-
-    def _rekey_run(self, temp_key: str, run_state: WorkflowRunState) -> None:
-        """Move a run from its temp key to its real id after apply() assigns an id."""
-        real_id = run_state.id
-        if not real_id:
-            return
-        if temp_key != real_id and temp_key in self._runs:
-            self._runs[real_id] = run_state
-            del self._runs[temp_key]
+        new_run.id = run_id
+        self._runs[run_id] = new_run
+        return new_run
 
     def _build_updated_event(
             self,

@@ -8,6 +8,7 @@ import asyncio
 import copy
 import logging
 import re
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -70,6 +71,76 @@ _PG_POST_START_READY_INIT_SLEEP = 0.4
 _PG_POST_START_READY_MAX_SLEEP = 2.0
 _PG_POST_START_READY_BACKOFF = 1.45
 _PG_POST_START_LOG_EVERY_SEC = 5.0
+
+# ── Team Observability ──────────────────────────────────────
+# Tracks whether observability is currently active so we can
+# detect config toggles (enabled → disabled or vice-versa)
+# and init / shutdown accordingly on each team request.
+_observability_active: bool = False
+
+
+def sync_team_observability() -> None:
+    """Synchronize observability state with current config.
+
+    Called before each ``Runner.run_agent_team_streaming`` so that
+    hot-reloading the ``team_observability.enabled`` flag takes
+    effect immediately:
+
+    * disabled → enabled : ``init_observability()``
+    * enabled → disabled : ``shutdown_observability()``
+    * unchanged          : no-op
+    """
+    global _observability_active
+    cfg = get_config().get("team_observability", {}) or {}
+    want_enabled = bool(cfg.get("enabled", False))
+
+    if want_enabled and not _observability_active:
+        try:
+            from openjiuwen.agent_teams.observability import (
+                ObservabilityConfig,
+                init_observability,
+                is_initialized,
+            )
+            if is_initialized():
+                _observability_active = True
+                return
+            obs_cfg = ObservabilityConfig(
+                enabled=True,
+                service_name=cfg.get("service_name", "jiuwenswarm"),
+                exporter=cfg.get("exporter", "otlp_grpc"),
+                endpoint=cfg.get("endpoint", "http://localhost:4317"),
+                sample_rate=cfg.get("sample_rate", 1.0),
+                attribute_value_max_length=cfg.get("attribute_value_max_length", 10240),
+                redact_prompts=cfg.get("redact_prompts", False),
+                redact_completions=cfg.get("redact_completions", False),
+                langfuse_public_key=cfg.get("langfuse_public_key", ""),
+                langfuse_secret_key=cfg.get("langfuse_secret_key", ""),
+            )
+            init_observability(obs_cfg)
+            _observability_active = True
+            logger.info(
+                "[TeamObservability] enabled: exporter=%s endpoint=%s",
+                obs_cfg.exporter, obs_cfg.endpoint,
+            )
+        except Exception as exc:
+            logger.warning("[TeamObservability] init failed: %s", exc)
+
+    elif not want_enabled and _observability_active:
+        shutdown_team_observability()
+
+
+def shutdown_team_observability() -> None:
+    """Shutdown team observability (called on disable or process exit)."""
+    global _observability_active
+    if not _observability_active:
+        return
+    try:
+        from openjiuwen.agent_teams.observability import shutdown_observability
+        shutdown_observability()
+        _observability_active = False
+        logger.info("[TeamObservability] disabled")
+    except Exception as exc:
+        logger.warning("[TeamObservability] shutdown failed: %s", exc)
 
 
 @dataclass
@@ -256,7 +327,11 @@ class TeamManager:
         )
 
     @staticmethod
-    def _load_team_spec(session_id: str) -> TeamAgentSpec:
+    def _load_team_spec(
+        session_id: str,
+        *,
+        requested_model_name: str | None = None,
+    ) -> TeamAgentSpec:
         config_base = get_config()
         # Keep dependency checks scoped to distributed mode to make the
         # control flow explicit at the call site (local mode bypasses checks).
@@ -279,7 +354,10 @@ class TeamManager:
                 )
                 config_base = fallback_distributed_to_local(config_base)
 
-        spec_dict = load_team_spec_dict(config_base=config_base)
+        spec_dict = load_team_spec_dict(
+            config_base=config_base,
+            requested_model_name=requested_model_name,
+        )
         spec_dict = TeamManager._normalize_team_identity_fields(spec_dict)
         if TeamManager._is_distributed_mode(config_base):
             spec_dict = TeamManager._normalize_distributed_transport_fields(config_base, spec_dict)
@@ -328,6 +406,7 @@ class TeamManager:
         request_id: str | None = None,
         channel_id: str | None = None,
         request_metadata: dict[str, Any] | None = None,
+        requested_model_name: str | None = None,
     ) -> TeamAgentSpec:
         """Build a team spec via provider-based assembly (no parent DeepAgent).
 
@@ -351,7 +430,10 @@ class TeamManager:
 
         config_base = get_config()
         await self._ensure_postgresql_for_leader(config_base)
-        spec = self._load_team_spec(session_id)
+        spec = self._load_team_spec(
+            session_id,
+            requested_model_name=requested_model_name,
+        )
         self._apply_session_scoped_team_name(spec, session_id=session_id)
         self.apply_team_plan_mode(spec, request_metadata=request_metadata)
         enrich_team_spec_for_swarm(
@@ -379,6 +461,7 @@ class TeamManager:
                 object.__setattr__(spec, "enable_team_plan", True)
 
     async def prepare_runtime_activation(self, session_id: str, team_name: str) -> None:
+        await self._wait_same_session_runner_runtime_released(session_id)
         await self.prepare_session_switch(
             session_id,
             reason="switch runtime: ",
@@ -387,6 +470,52 @@ class TeamManager:
         async with self._lock:
             self._pending_session_id = session_id
             self._pending_team_name = team_name
+
+    async def _wait_same_session_runner_runtime_released(
+        self,
+        session_id: str,
+        *,
+        timeout_sec: float = 5.0,
+        poll_interval_sec: float = 0.1,
+    ) -> None:
+        """Before same-session rebuild, wait old Runner runtime/messager to stop."""
+        if not self._is_distributed_mode(get_config()):
+            return
+        if self._active_session_id != session_id:
+            return
+        if self.has_stream_task(session_id):
+            return
+
+        # Best-effort eager stop for the cached Runner-owned team agent transport.
+        await self._stop_runner_team_agent_transport(session_id)
+
+        team_name = self._resolve_session_team_name(session_id)
+        if not team_name:
+            return
+
+        from openjiuwen.core.runner.runner import GLOBAL_RUNNER
+
+        runtime_mgr = _runner_team_runtime_manager(GLOBAL_RUNNER)
+        deadline = time.monotonic() + max(0.0, timeout_sec)
+        while time.monotonic() < deadline:
+            active_team = await runtime_mgr.pool.get(team_name)
+            if active_team is None:
+                logger.info(
+                    "[TeamManager] same-session runtime released before rebuild: "
+                    "session_id=%s team_name=%s",
+                    session_id,
+                    team_name,
+                )
+                return
+            await asyncio.sleep(max(0.02, poll_interval_sec))
+
+        logger.warning(
+            "[TeamManager] same-session runtime still active before rebuild timeout: "
+            "session_id=%s team_name=%s timeout=%.1fs",
+            session_id,
+            team_name,
+            timeout_sec,
+        )
 
     async def prepare_session_switch(self, target_session_id: str, reason: str = "") -> None:
         """Stop other active or pending team runtimes before switching sessions."""
@@ -612,11 +741,11 @@ class TeamManager:
             if self._is_distributed_mode(config_base):
                 try:
                     from jiuwenswarm.agents.harness.team.remote_member_bootstrap import (
+                        attach_build_team_post_tool_registration_hook,
+                        attach_clean_team_distributed_teardown_wrapper,
                         attach_distributed_local_spawn_guard,
                         attach_remote_bootstrap_ack_listener,
-                        attach_remote_teammate_bootstrap_listener,
                         attach_shutdown_member_remote_cleanup_wrapper,
-                        attach_spawn_member_remote_bootstrap_wrapper,
                     )
 
                     attach_distributed_local_spawn_guard(
@@ -624,7 +753,7 @@ class TeamManager:
                         session_id=session_id,
                         channel_id=channel_id,
                     )
-                    attach_spawn_member_remote_bootstrap_wrapper(
+                    attach_build_team_post_tool_registration_hook(
                         team_agent,
                         session_id=session_id,
                         channel_id=channel_id,
@@ -634,12 +763,12 @@ class TeamManager:
                         session_id=session_id,
                         channel_id=channel_id,
                     )
-                    attach_remote_bootstrap_ack_listener(
+                    attach_clean_team_distributed_teardown_wrapper(
                         team_agent,
                         session_id=session_id,
                         channel_id=channel_id,
                     )
-                    attach_remote_teammate_bootstrap_listener(
+                    attach_remote_bootstrap_ack_listener(
                         team_agent,
                         session_id=session_id,
                         channel_id=channel_id,
@@ -1028,11 +1157,11 @@ class TeamManager:
 
         try:
             from jiuwenswarm.agents.harness.team.remote_member_bootstrap import (
+                attach_build_team_post_tool_registration_hook,
+                attach_clean_team_distributed_teardown_wrapper,
                 attach_distributed_local_spawn_guard,
                 attach_remote_bootstrap_ack_listener,
-                attach_remote_teammate_bootstrap_listener,
                 attach_shutdown_member_remote_cleanup_wrapper,
-                attach_spawn_member_remote_bootstrap_wrapper,
             )
 
             attach_distributed_local_spawn_guard(
@@ -1040,7 +1169,7 @@ class TeamManager:
                 session_id=session_id,
                 channel_id=channel_id,
             )
-            attach_spawn_member_remote_bootstrap_wrapper(
+            attach_build_team_post_tool_registration_hook(
                 team_agent,
                 session_id=session_id,
                 channel_id=channel_id,
@@ -1050,12 +1179,12 @@ class TeamManager:
                 session_id=session_id,
                 channel_id=channel_id,
             )
-            attach_remote_bootstrap_ack_listener(
+            attach_clean_team_distributed_teardown_wrapper(
                 team_agent,
                 session_id=session_id,
                 channel_id=channel_id,
             )
-            attach_remote_teammate_bootstrap_listener(
+            attach_remote_bootstrap_ack_listener(
                 team_agent,
                 session_id=session_id,
                 channel_id=channel_id,
@@ -1143,7 +1272,9 @@ class TeamManager:
                 exc,
             )
 
-    async def _cleanup_runtime_locals(self, session_id: str) -> None:
+    async def _cleanup_runtime_locals(
+        self, session_id: str, *, finalize_workflows: bool = True
+    ) -> None:
         watcher_task = self._team_evolution_watchers.pop(session_id, None)
         if watcher_task and not watcher_task.done():
             watcher_task.cancel()
@@ -1186,10 +1317,24 @@ class TeamManager:
         workflow_handler = self.pop_workflow_handler(session_id)
         if workflow_handler is not None:
             try:
+                # On non-resumable teardown the team runtime (and the swarmflow
+                # background task it drives) is gone, so no further workflow
+                # events can arrive — finalize any still-running run to a
+                # terminal status before stopping, otherwise the checkpoint
+                # would keep it 'running' forever. Pause keeps the runtime
+                # parked and resumable in place, so it opts out.
+                if finalize_workflows:
+                    workflow_handler.finalize_pending_runs()
                 await workflow_handler.stop()
+                logger.info(
+                    "[WF_DBG cleanup] workflow handler stopped: session_id=%s "
+                    "finalized=%s",
+                    session_id,
+                    finalize_workflows,
+                )
             except Exception as exc:
                 logger.warning(
-                    "[TeamManager] workflow handler stop failed: session_id=%s error=%s",
+                    "[WF_DBG cleanup] workflow handler stop failed: session_id=%s error=%s",
                     session_id,
                     exc,
                 )
@@ -1304,6 +1449,7 @@ class TeamManager:
                         team_name,
                         exc,
                     )
+                await self._stop_runner_team_agent_transport(session_id)
 
             cleaned = False
 
@@ -1426,7 +1572,9 @@ class TeamManager:
                         exc,
                     )
 
-            await self._cleanup_runtime_locals(session_id)
+            # Pause parks the runtime in place (resumable via a later chat.send),
+            # so running workflows may still continue — do NOT finalize them.
+            await self._cleanup_runtime_locals(session_id, finalize_workflows=False)
             self.clear_active_runtime(session_id)
             self.clear_pending_runtime(session_id)
 

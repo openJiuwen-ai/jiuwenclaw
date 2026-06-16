@@ -6,6 +6,7 @@ from jiuwenswarm.symphony.orchestration.planning.models import (
     SearchState,
 )
 from jiuwenswarm.symphony.orchestration.planning.plan_builder import (
+    compose_dag_plans,
     compose_plan_group,
     plan_stages,
     state_to_plan,
@@ -130,6 +131,45 @@ def test_compose_plan_group_merges_steps_edges_and_reorders_by_dependencies():
     ]
     assert round(composed.edge_confidence, 2) == 0.85
     assert composed.status == "ready"
+
+
+def test_compose_dag_plans_keeps_unrelated_seed_plans_separate():
+    left = _plan(
+        [_step("draft"), _step("review")],
+        [{"source_id": "draft", "target_id": "review", "confidence": 0.8}],
+    )
+    right = _plan(
+        [_step("outline"), _step("publish")],
+        [{"source_id": "outline", "target_id": "publish", "confidence": 0.9}],
+    )
+
+    composed_plans = compose_dag_plans([left, right], max_plans=10)
+
+    signatures = {
+        tuple(step.skill_id for step in plan.steps) for plan in composed_plans
+    }
+    assert signatures == {("draft", "review"), ("outline", "publish")}
+
+
+def test_compose_dag_plans_dedupes_edges_by_highest_confidence():
+    low_confidence = _plan(
+        [_step("draft"), _step("review")],
+        [{"source_id": "draft", "target_id": "review", "confidence": 0.4}],
+    )
+    high_confidence = _plan(
+        [_step("draft"), _step("review")],
+        [{"source_id": "draft", "target_id": "review", "confidence": 0.9}],
+    )
+
+    composed_plans = compose_dag_plans(
+        [low_confidence, high_confidence],
+        max_plans=10,
+    )
+
+    assert len(composed_plans) == 1
+    assert composed_plans[0].can_feed_edges == [
+        {"source_id": "draft", "target_id": "review", "confidence": 0.9}
+    ]
 
 
 def _step(skill_id: str) -> PlanStep:

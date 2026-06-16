@@ -141,7 +141,6 @@ class OpenAICompatibleOntologyMatcher:
         return {
             "model": self.config.model,
             "backend": self.config.backend,
-            "base_url": self.config.base_url,
             "temperature": self.config.temperature,
             "prompt_version": self.prompt_version,
             "batch_size": self.batch_size,

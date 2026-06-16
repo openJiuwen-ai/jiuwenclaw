@@ -19,6 +19,7 @@ import { HistoryPagerBar } from './HistoryPagerBar';
 import { HarnessProgressBar } from './HarnessProgressBar';
 import { AgentTeamActivityCard } from './TeamEventGroupDisplay';
 import { isTeamActivityMessage, parseTeamEventMessage } from './teamEventUtils';
+import { isTeamLeaderMember } from '../../utils/teamMemberAvatar';
 import './ChatPanel.css';
 
 export interface ChatHistoryPagerProps {
@@ -41,6 +42,8 @@ interface ChatPanelProps {
   canExportShare?: boolean;
   /** 自会话管理恢复历史后出现；支持分页加载更早消息 */
   historyPager?: ChatHistoryPagerProps | null;
+  /** 右侧面板展开状态：展开时隐藏对话框上方的活跃成员 */
+  teamAreaExpanded?: boolean;
 }
 
 function ThinkingIndicator() {
@@ -85,7 +88,7 @@ function InterruptResultBubble() {
   );
 }
 
-function ActiveTeamGroupEntry({ isProcessing }: { isProcessing: boolean }) {
+function ActiveTeamGroupEntry({ isProcessing, teamAreaExpanded }: { isProcessing: boolean; teamAreaExpanded?: boolean }) {
   const { messages } = useChatStore();
   const {
     mode,
@@ -93,19 +96,18 @@ function ActiveTeamGroupEntry({ isProcessing }: { isProcessing: boolean }) {
     teamMemberExecutionEvents,
     teamTaskEvents,
     teamTasks,
+    teamMembers,
   } = useSessionStore();
   const { todos } = useTodoStore();
   const activeTeamMessages = useMemo(
     () => getActiveTeamMessages(teamHistoryMessages, messages),
     [teamHistoryMessages, messages]
   );
-  const hasTeamActivity = activeTeamMessages.length > 0
-    || teamTasks.length > 0
-    || teamTaskEvents.length > 0
-    || todos.some((todo) => Boolean(todo.claimedBy))
-    || teamMemberExecutionEvents.length > 0;
+  const hasVisibleMembers = teamMembers.some(
+    (m) => m.member_id && m.member_id !== 'user' && !isTeamLeaderMember(m.member_id)
+  );
 
-  if (mode !== 'team' || !hasTeamActivity) {
+  if (mode !== 'team' || !hasVisibleMembers || teamAreaExpanded) {
     return null;
   }
 
@@ -196,6 +198,7 @@ export function ChatPanel({
   isExportingShare = false,
   canExportShare = false,
   historyPager = null,
+  teamAreaExpanded = false,
 }: ChatPanelProps) {
   const { t } = useTranslation();
   const {
@@ -387,7 +390,7 @@ export function ChatPanel({
                 {t('chat.welcomeSubtext')}
               </p>
               <div className="chat-welcome__composer">
-                <ActiveTeamGroupEntry isProcessing={isProcessing} />
+                <ActiveTeamGroupEntry isProcessing={isProcessing} teamAreaExpanded={teamAreaExpanded} />
                 <InterruptResultBubble />
                 <InputArea
                   onSubmit={handleSendMessage}
@@ -411,7 +414,7 @@ export function ChatPanel({
 
       {hasConversation && (
         <div className="chat-compose">
-          <ActiveTeamGroupEntry isProcessing={isProcessing} />
+          <ActiveTeamGroupEntry isProcessing={isProcessing} teamAreaExpanded={teamAreaExpanded} />
           <InterruptResultBubble />
           <InputArea
             onSubmit={handleSendMessage}

@@ -600,13 +600,6 @@
       "isMarkdown": false
     }
   ],
-  "workspace/skills/skill-retrieval": [
-    {
-      "name": "SKILL.md",
-      "path": "agent/workspace/skills/skill-retrieval/SKILL.md",
-      "isMarkdown": true
-    }
-  ],
   "workspace/skills/skvm-general": [
     {
       "name": "SKILL.md",
@@ -691,6 +684,13 @@
     {
       "name": "workflow.md.template",
       "path": "agent/workspace/skills/swarmskill-creator/templates/workflow.md.template",
+      "isMarkdown": false
+    }
+  ],
+  "workspace/skills/swarmskill-creator/templates/scripts": [
+    {
+      "name": "workflow.py.template",
+      "path": "agent/workspace/skills/swarmskill-creator/templates/scripts/workflow.py.template",
       "isMarkdown": false
     }
   ],

@@ -4,8 +4,9 @@ Standalone Python workflow module: META + JSON Schema literals +
 explicit swarmflow primitive imports + async def run(args).
 """
 import json
+from string import Template
 
-from swarmflow import agent, compact, map_parallel, parallel, phase
+from swarmflow import agent, compact, log, map_parallel, parallel, phase
 
 META = {
     "name": "<swarmskill-name>",
@@ -44,41 +45,64 @@ def extract_json(text, fallback=None):
     3. JSON embedded in prose — scan for outermost {…} and parse.
     Falls back to *fallback* (default {}) if nothing parses.
     """
+    fallback_value = {} if fallback is None else fallback
     if isinstance(text, dict):
         return text
     if not isinstance(text, str):
-        return fallback or {}
+        return fallback_value
     text = text.strip()
     # Direct parse
     try:
-        return json.loads(text)
+        parsed = json.loads(text)
+        return parsed if isinstance(parsed, dict) else fallback_value
     except (json.JSONDecodeError, ValueError):
         pass
     # Scan for outermost { ... }
     depth = 0
     start = None
+    in_string = False
+    escaped = False
     for i, ch in enumerate(text):
+        if in_string:
+            if escaped:
+                escaped = False
+            elif ch == "\\":
+                escaped = True
+            elif ch == '"':
+                in_string = False
+            continue
+        if ch == '"':
+            in_string = True
         if ch == '{':
             if depth == 0:
                 start = i
             depth += 1
-        elif ch == '}':
+        elif ch == '}' and depth > 0:
             depth -= 1
             if depth == 0 and start is not None:
                 try:
-                    return json.loads(text[start:i + 1])
+                    parsed = json.loads(text[start:i + 1])
+                    return parsed if isinstance(parsed, dict) else fallback_value
                 except (json.JSONDecodeError, ValueError):
                     start = None
-    return fallback or {}
+    return fallback_value
 
 
 def safe_get(obj, key, default=""):
     """Safely get a key from an agent result, handling None/non-dict."""
     if obj is None:
-        return default
+        return str(default)
     if isinstance(obj, dict):
-        return obj.get(key, default)
-    return default
+        return str(obj.get(key, default))
+    return str(default)
+
+
+def has_meaningful_result(obj):
+    """Return True only when semantic success fields are non-empty."""
+    return (
+        safe_get(obj, "verdict", "unknown") != "unknown"
+        and bool(safe_get(obj, "result", "").strip())
+    )
 
 
 def parse_args(args):
@@ -94,20 +118,33 @@ def parse_args(args):
 
 
 # ---------------------------------------------------------------------------
-# Prompt builders — keep prompts inside this script
+# Prompt builders — keep prompts inside this script.
+# Use string.Template ($-placeholders) so literal braces in prompt prose or JSON
+# examples are never interpreted as Python expressions (an f-string would treat
+# a literal `{N}` as the variable N and raise NameError at runtime).
 # ---------------------------------------------------------------------------
 
-def build_inline_prompt(role_id, payload):
-    """Build an inline prompt requesting JSON output."""
-    return f"""You are {role_id}.
+INLINE_PROMPT = Template(
+    """You are $role_id.
 
 Task input:
-{json.dumps(payload, ensure_ascii=False) if isinstance(payload, (dict, list)) else payload}
+$payload
 
 IMPORTANT: Return ONLY a valid JSON object. No markdown fences, no explanation, just JSON.
 Fields expected: "result" (string), "verdict" (string).
 You may include additional fields if they add value.
 """
+)
+
+
+def build_inline_prompt(role_id, payload):
+    """Build an inline prompt requesting JSON output."""
+    payload_text = (
+        json.dumps(payload, ensure_ascii=False)
+        if isinstance(payload, (dict, list))
+        else str(payload)
+    )
+    return INLINE_PROMPT.substitute(role_id=role_id, payload=payload_text)
 
 
 # ---------------------------------------------------------------------------
@@ -119,6 +156,7 @@ async def run(args):
     args = parse_args(args)
 
     phase("<Phase 1>")
+    log("Starting <Phase 1>")
     raw_results = await parallel(
         [
             lambda: agent(
@@ -142,6 +180,7 @@ async def run(args):
     ])
 
     phase("<Phase 2>")
+    log("Starting <Phase 2>")
     final_raw = await agent(
         build_inline_prompt(
             "<integrator-role-id>",
@@ -154,36 +193,94 @@ async def run(args):
     final = extract_json(final_raw, fallback={"result": "integration_failed", "verdict": "unknown"})
 
     return {
-        "status": "complete" if safe_get(final, "verdict") != "unknown" else "degraded",
+        "status": "complete" if has_meaningful_result(final) else "degraded",
         "role_results": role_results,
         "final": final,
     }
 
-# TEMPLATE NOTES (delete before publishing):
+# TEMPLATE AUTHORING CONSTRAINTS (delete before publishing):
+# This block is the canonical full constraint list for SwarmFlow workflow
+# scripts generated by swarmskill-creator. SKILL.md, the compliance checklist,
+# and the validator summarize or enforce parts of this list; do not duplicate
+# the full list elsewhere.
 # - Keep META a pure literal; do not use calls, names, f-strings, or concatenation.
 # - Keep a top-level async def run(args) entrypoint.
 # - Keep all prompts in this file as constants or prompt-builder functions.
-# - Use explicit `from swarmflow import ...` imports.
+# - Build prompts with string.Template as shown above, not f-strings/str.format
+#   (see the prompt-builder comment for why). The validator rejects f-strings
+#   that reference undefined names.
+# - Use top-level explicit `from swarmflow import ...` imports for the operators
+#   this script actually uses. Do not use import *, delayed imports, aliases, or
+#   dynamic import/importlib/getattr(sys.modules[...]) lookup. Do not import or
+#   call workflow(...): sub-workflow composition is not part of this template's
+#   supported surface. The supported operators are agent, budget, compact,
+#   flatten_filter, log, map_parallel, parallel, phase, pipeline, and pmap.
+# - Do not define variables, functions, parameters, or classes named like
+#   SwarmFlow operators. They shadow the imported runtime primitives.
 # - Use JSON Schema literals for structured agent outputs. Keep schema but
-#   REMOVE "additionalProperties": False — it is too strict for LLM outputs and
-#   causes agent() to silently return None when the LLM adds extra fields.
-# - ALWAYS wrap agent() return values with extract_json(..., fallback={...}).
-#   agent() may return None (schema validation failed) or a raw string (no
-#   schema match); extract_json handles both gracefully.
+#   REMOVE schema-object keywords "additionalProperties": False and "required"
+#   — both are too strict for LLM outputs and can cause agent() to silently
+#   return None. A business output field named "required" under "properties" is
+#   allowed; the ban is on the JSON Schema strictness keyword.
+# - For this template, every agent() call should request JSON and be wrapped
+#   with extract_json(..., fallback={...}). agent() may return None (schema
+#   validation failed) or a raw string (no schema match); extract_json handles
+#   both gracefully.
+# - After extract_json(...), verify semantic key fields before treating a
+#   result as successful. Missing or empty key fields should trigger fallback,
+#   retry, or degraded handling.
 # - ALWAYS call parse_args(args) at the top of run(). Swarmflow may pass args
 #   as a JSON string instead of a dict.
 # - Use safe_get(obj, key, default) instead of obj["key"] or obj.get("key")
 #   to handle None results and missing keys uniformly.
-# - If an agent(...) call passes phase="...", it must match the nearest active
-#   phase("...") event for that block. Runtime statistics group by this value.
-# - Fixed heterogeneous roles: parallel([lambda: agent(...), ...]).
-# - Homogeneous dynamic item fan-out: map_parallel(items, fn).
+# - Import and use `log` from swarmflow. Do not define a local log() helper,
+#   assign to `log`, or import another logging function as `log`; those calls
+#   will not show in SwarmFlow workflow logs.
+# - Use log(...), not print(...), for workflow-visible runtime messages.
+# - phase("...") is a stable workflow stage, not a progress log; use log("...")
+#   for events. Every META["phases"][].title must have a matching phase("...")
+#   call in run().
+# - Every agent(...) must pass phase="..." exactly equal to the nearest active
+#   phase("...") string; no aliases, paraphrases, dynamic labels, or prefixes.
+# - Every agent(...) must pass a stable literal label="..."; dynamic labels are
+#   rejected so progress groups and failure locations stay stable.
+# - log(...) takes exactly one positional argument; format details into one string.
+# - Default multi-stage item work to pipeline(items, stage1, stage2, ...).
+#   Use parallel([...]) as a barrier only when the next step genuinely needs all
+#   prior results together, such as dedup/merge, early zero-count exit, or
+#   cross-item comparison.
+# - Fixed heterogeneous roles inside one phase: parallel([lambda: agent(...), ...]).
+# - Homogeneous dynamic item fan-out: map_parallel(items, fn). Declare an item
+#   cap and log skipped work; do not silently truncate user input.
 # - Per-item ordered multi-stage processing: pipeline(items, stage1, stage2).
+#   Each pipeline stage receives (prev_result, original_item, index), not just
+#   the previous result.
+#   If you use extra primitives such as pipeline/log/flatten_filter, add them
+#   to the explicit swarmflow import.
+# - Do not use asyncio.gather/create_task around agent calls, including alias
+#   forms such as import asyncio as aio or from asyncio import gather. Use
+#   parallel() or pipeline() so resume, counters, and progress grouping stay
+#   correct.
+# - Outside parallel thunks, await every agent() call. Inside parallel([...]),
+#   pass thunks such as lambda: agent(...); if intermediate awaits are needed,
+#   use an async def thunk.
 # - A single agent() or consecutive awaited agent() calls are sequential.
-# - Encode actual parallel/pipeline/gate/retry/degraded behavior here. workflow.md
-#   explains this script but must not define a different topology.
+# - Encode actual parallel/pipeline/gate/retry/degraded behavior here. When
+#   workflow.md exists, it explains this script but must not define a different
+#   topology.
 # - For custom parallel thunks, bind loop variables in lambda defaults to avoid
-#   late-binding bugs.
+#   late-binding bugs. Prefer map_parallel(items, fn) for homogeneous fan-out.
+# - parallel([...]) may return [dict, None, dict] when one branch fails. Always
+#   compact/filter results before integration, and report missing branches.
+# - Dynamic fan-out and loops must have a visible stop condition. Use at least
+#   one of: max_rounds, dry_count/no-new-results limit, budget guard, or input
+#   length cap. Do not write unbounded while loops or recursive fan-out.
+# - Handle empty input sequences before indexing results[0] or assuming work ran.
+# - Avoid non-determinism inside workflow.py: no random values, current time, or
+#   direct filesystem reads/writes. Pass timestamps, sampled inputs, and file
+#   contents through args or runtime-provided data instead.
+# - Keep all mutable run state inside run(args). Do not use module-level lists,
+#   dicts, sets, caches, counters, or accumulated results.
 # - Cache validation: when loading cached results from incremental runs, verify
 #   key fields are non-empty (not just that the cache file exists). An empty
 #   scores list or null signal indicates a failed prior run and should be

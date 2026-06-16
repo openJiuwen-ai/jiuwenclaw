@@ -113,21 +113,90 @@ _INTRINSIC_RO_FILE_PATH_FUNCS = (
 )
 
 
-def _normalize_fs_entry(entry: Any, default_permissions: str) -> dict[str, Any] | None:
-    """归一化 {path, permissions} 项；接受 str/dict，过滤空值。"""
+def _normalize_fs_entry(entry: Any) -> dict[str, str] | None:
     if entry is None:
         return None
     if isinstance(entry, str):
         path = entry.strip()
         if not path:
             return None
-        return {"path": path, "permissions": default_permissions}
+        return {"path": path}
     if isinstance(entry, dict):
         path = str(entry.get("path") or "").strip()
         if not path:
             return None
-        permissions = str(entry.get("permissions") or default_permissions)
-        return {"path": path, "permissions": permissions}
+        return {"path": path}
+    return None
+
+
+def _sandbox_files_entry_path(entry: Any) -> str | None:
+    """Extract the path string from a sandbox.files allow/deny entry."""
+    normalized = _normalize_fs_entry(entry)
+    if normalized is None:
+        return None
+    return normalized["path"]
+
+
+def _is_strict_path_prefix(parent: str, child: str) -> bool:
+    """Return True when ``parent`` is a strict directory ancestor of ``child``."""
+    parent_norm = parent.rstrip("/") or "/"
+    child_norm = child.rstrip("/") or "/"
+    if parent_norm == child_norm:
+        return False
+    if parent_norm == "/":
+        return child_norm != "/"
+    return child_norm.startswith(parent_norm + "/")
+
+
+def validate_sandbox_files_runtime(files: dict[str, Any] | None) -> None:
+    """Reject invalid ``sandbox.files`` shapes."""
+    if not isinstance(files, dict):
+        return
+    for bucket in ("allow", "deny"):
+        entries = files.get(bucket)
+        if not isinstance(entries, list):
+            continue
+        for entry in entries:
+            _normalize_fs_entry(entry)
+
+
+def find_nested_files_conflict(
+    path: str,
+    bucket: str,
+    files: dict[str, Any],
+) -> str | None:
+    """Return an error message when ``path`` would create unsupported nesting.
+
+    Supported: allow parent + deny child (parent rw, child ro).
+    Rejected: allow child while deny ancestor exists, or deny parent while allow
+    descendant exists (parent deny overrides child allow at mount time).
+    """
+    target = _resolve_display_path(path)
+    if target is None:
+        return None
+
+    if bucket == "allow":
+        for entry in files.get("deny") or []:
+            deny_path = _sandbox_files_entry_path(entry)
+            if deny_path is None:
+                continue
+            deny_resolved = _resolve_display_path(deny_path)
+            if deny_resolved is not None and _is_strict_path_prefix(deny_resolved, target):
+                return (
+                    f"cannot allow {path!r}: ancestor {deny_path!r} is deny_write; "
+                    f"remove `/sandbox files remove {deny_path}` first"
+                )
+    elif bucket == "deny":
+        for entry in files.get("allow") or []:
+            allow_path = _sandbox_files_entry_path(entry)
+            if allow_path is None:
+                continue
+            allow_resolved = _resolve_display_path(allow_path)
+            if allow_resolved is not None and _is_strict_path_prefix(target, allow_resolved):
+                return (
+                    f"cannot deny {path!r}: descendant {allow_path!r} is allow_write; "
+                    f"remove `/sandbox files remove {allow_path}` first"
+                )
     return None
 
 
@@ -392,6 +461,7 @@ def build_filesystem_policy(
             的 dry-run 会把它捕获成 ``ValueError`` 回 TUI 让用户看到。
     """
     files_runtime = files_runtime or {}
+    validate_sandbox_files_runtime(files_runtime)
 
     allow_files: list[dict[str, Any]] = []
     allow_dirs: list[dict[str, Any]] = []
@@ -591,7 +661,7 @@ def build_filesystem_policy(
     #   - 用户语义是 "把 host 已有 path 带进沙箱", 不存在的 path 操作
     #     本身就是 no-op, 报错让用户立刻知道 path 拼错或文件还没建。
     for entry in files_runtime.get("allow") or []:
-        normalized = _normalize_fs_entry(entry, default_permissions="0666")
+        normalized = _normalize_fs_entry(entry)
         if normalized is None:
             continue
         path = normalized["path"].rstrip("/") or "/"
@@ -605,7 +675,7 @@ def build_filesystem_policy(
             path,
             path,
             is_dir=host.is_dir(),
-            permissions=str(normalized.get("permissions") or "0666"),
+            permissions="0666",
         )
         if path not in read_write_promote:
             read_write_promote.append(path)
@@ -614,7 +684,7 @@ def build_filesystem_policy(
     # 跟 agent_skills 一起在上面统一注册; 这里不再单独处理。 (见
     # ``_collect_intrinsic_targets`` 与 ``_record_ro_resource_bind`` 的注释.)
     for entry in files_runtime.get("deny") or []:
-        normalized = _normalize_fs_entry(entry, default_permissions="0000")
+        normalized = _normalize_fs_entry(entry)
         if normalized is None:
             continue
         path = normalized["path"].rstrip("/") or "/"
@@ -866,7 +936,7 @@ def list_auto_managed_sandbox_paths(
 
     Returns:
         ``{"allow_write": [...], "deny_write": [...]}`` where each entry is
-        ``{"path": str, "permissions": str, "kind": "file" | "directory"}``.
+        ``{"path": str, "access": "rw"|"ro", "kind": "file" | "directory"}``.
         Directory paths carry a trailing ``/``.
     """
     allow: list[dict[str, str]] = []
@@ -885,7 +955,7 @@ def list_auto_managed_sandbox_paths(
             continue
         _append_unique(
             allow,
-            {"path": str(Path(raw)), "permissions": "0666", "kind": "file"},
+            {"path": str(Path(raw)), "access": "rw", "kind": "file"},
         )
 
     try:
@@ -904,7 +974,7 @@ def list_auto_managed_sandbox_paths(
                 allow,
                 {
                     "path": str(daily_memory_path) + "/",
-                    "permissions": "0777",
+                    "access": "rw",
                     "kind": "directory",
                 },
             )
@@ -935,7 +1005,7 @@ def list_auto_managed_sandbox_paths(
                 allow,
                 {
                     "path": str(resolved_project) + "/",
-                    "permissions": "0777",
+                    "access": "rw",
                     "kind": "directory",
                 },
             )
@@ -965,7 +1035,7 @@ def list_auto_managed_sandbox_paths(
             continue
         _append_unique(
             deny,
-            {"path": str(resolved), "permissions": "0444", "kind": "file"},
+            {"path": str(resolved), "access": "ro", "kind": "file"},
         )
 
     # Built-in skills directory mirrors what :func:`build_filesystem_policy`
@@ -981,7 +1051,7 @@ def list_auto_managed_sandbox_paths(
             allow,
             {
                 "path": str(agent_skills) + "/",
-                "permissions": "0777",
+                "access": "rw",
                 "kind": "directory",
             },
         )
@@ -1016,7 +1086,7 @@ def list_effective_sandbox_files(
 
     Returns:
         ``{"allow_write": [...], "deny_write": [...]}`` where every entry is
-        ``{"path": str, "permissions": str, "kind": "file" | "directory"}``.
+        ``{"path": str, "access": "rw"|"ro", "kind": "file" | "directory"}``.
     """
     auto = list_auto_managed_sandbox_paths(
         project_dir=project_dir,
@@ -1026,9 +1096,10 @@ def list_effective_sandbox_files(
     deny = list(auto["deny_write"])
 
     files_runtime = files_runtime or {}
+    validate_sandbox_files_runtime(files_runtime)
 
-    def _emit(bucket: list[dict[str, str]], entry: Any, default_permissions: str) -> None:
-        normalized = _normalize_fs_entry(entry, default_permissions=default_permissions)
+    def _emit(bucket: list[dict[str, str]], entry: Any, *, access: str) -> None:
+        normalized = _normalize_fs_entry(entry)
         if normalized is None:
             return
         stripped = str(normalized["path"]).rstrip("/") or "/"
@@ -1038,15 +1109,15 @@ def list_effective_sandbox_files(
             bucket,
             {
                 "path": display,
-                "permissions": str(normalized["permissions"]),
+                "access": access,
                 "kind": kind,
             },
         )
 
     for entry in files_runtime.get("allow") or []:
-        _emit(allow, entry, "0666")
+        _emit(allow, entry, access="rw")
     for entry in files_runtime.get("deny") or []:
-        _emit(deny, entry, "0000")
+        _emit(deny, entry, access="ro")
 
     return {"allow_write": allow, "deny_write": deny}
 
@@ -1096,6 +1167,8 @@ __all__ = [
     "create_sandbox_sysop_card",
     "create_local_sysop_card",
     "find_auto_managed_match",
+    "find_nested_files_conflict",
     "list_auto_managed_sandbox_paths",
     "list_effective_sandbox_files",
+    "validate_sandbox_files_runtime",
 ]

@@ -5,6 +5,7 @@ import json
 import logging
 import re
 import shutil
+import time
 from pathlib import Path
 from typing import Any, TYPE_CHECKING
 
@@ -216,6 +217,176 @@ def rewind_session(
         "content_preview": removed_turn_content[:80] if removed_turn_content else "",
         "remaining_records": result["remaining_records"],
         "removed_records": result["removed_records"],
+    }
+
+
+def compact_partial_session(
+    *,
+    session_id: str,
+    turn_index: int,
+    direction: str = "from",
+    llm_summary: str | None = None,
+) -> dict[str, Any]:
+    if turn_index < 1:
+        raise ValueError("turn_index must be >= 1")
+
+    sessions_dir = get_agent_sessions_dir()
+    history_path = sessions_dir / session_id / "history.json"
+    if not history_path.exists():
+        raise ValueError("session history not found")
+
+    history = json.loads(history_path.read_text(encoding="utf-8"))
+    if not isinstance(history, list):
+        raise ValueError("invalid history format")
+
+    user_positions = []
+    for i, record in enumerate(history):
+        if record.get("role") == "user":
+            user_positions.append(i)
+
+    total_turns = len(user_positions)
+    if total_turns == 0:
+        raise ValueError("no user messages in session")
+    if turn_index > total_turns:
+        raise ValueError(
+            f"turn_index {turn_index} exceeds total turns ({total_turns})"
+        )
+
+    target_user_index = user_positions[turn_index - 1]
+
+    import uuid
+    from jiuwenswarm.server.runtime.session.session_history import (
+        _FILE_LOCK,
+        _WRITE_QUEUE,
+        truncate_history_records,
+    )
+    from jiuwenswarm.server.runtime.session.session_metadata import update_session_metadata
+
+    removed_turn_content = ""
+    if 0 <= target_user_index < len(history):
+        content = history[target_user_index].get("content", "")
+        raw = content if isinstance(content, str) else str(content)
+        removed_turn_content = re.sub(r"<file-content[^>]*>.*?</file-content>", "", raw, flags=re.DOTALL).strip()
+
+    if direction == "from":
+        cut_timestamp = history[target_user_index].get("timestamp")
+        summarized_count = len(history) - target_user_index
+
+        result = truncate_history_records(session_id=session_id, cut_index=target_user_index)
+        remaining = result["remaining_records"]
+        removed = result["removed_records"]
+
+        if cut_timestamp is not None:
+            try:
+                from jiuwenswarm.server.utils.diff_service import get_diff_service
+                get_diff_service().truncate_file_ops_by_timestamp(session_id, cut_timestamp)
+            except Exception as exc:
+                logger.warning("compact_partial_session: failed to truncate file_ops: %s", exc)
+
+    elif direction == "up_to":
+        kept = history[target_user_index:]
+        summarized_count = target_user_index
+        removed = summarized_count
+        remaining = len(kept)
+
+        _WRITE_QUEUE.join()
+        with _FILE_LOCK:
+            history_path.write_text(
+                json.dumps(kept, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+    else:
+        raise ValueError(f"unknown direction: {direction}")
+
+    update_session_metadata(
+        session_id=session_id,
+        set_message_count=remaining,
+    )
+
+    request_id = str(uuid.uuid4())
+    now = time.time()
+
+    short_text = (
+        f"Summarized {summarized_count} messages from this point."
+        if direction == "from"
+        else f"Summarized {summarized_count} messages up to this point."
+    )
+
+    boundary_record = {
+        "id": f"{request_id}:assistant",
+        "role": "assistant",
+        "request_id": request_id,
+        "channel_id": "tui",
+        "timestamp": now,
+        "content": "Conversation compacted",
+        "event_type": "context.compact_boundary",
+        "compact_metadata": {
+            "trigger": "manual_rewind",
+            "direction": direction,
+            "turn_index": turn_index,
+            "summarized_messages": summarized_count,
+        },
+    }
+
+    summary_record = {
+        "id": f"{request_id}:assistant_summary",
+        "role": "assistant",
+        "request_id": request_id,
+        "channel_id": "tui",
+        "timestamp": now + 0.001,
+        "content": short_text,
+        "event_type": "context.rewind_summary",
+        "compact_metadata": {
+            "trigger": "manual_rewind",
+            "direction": direction,
+            "turn_index": turn_index,
+            "summarized_messages": summarized_count,
+        },
+        "is_compact_summary": True,
+    }
+
+    _WRITE_QUEUE.join()
+    with _FILE_LOCK:
+        existing = json.loads(history_path.read_text(encoding="utf-8")) if history_path.exists() else []
+        if not isinstance(existing, list):
+            existing = []
+        existing.append(boundary_record)
+        existing.append(summary_record)
+
+        if llm_summary:
+            compact_summary_record = {
+                "id": f"{request_id}:assistant_csummary",
+                "role": "assistant",
+                "request_id": request_id,
+                "channel_id": "tui",
+                "timestamp": now + 0.002,
+                "content": llm_summary,
+                "event_type": "context.compact_summary",
+                "compact_metadata": {
+                    "trigger": "manual_rewind",
+                    "direction": direction,
+                    "turn_index": turn_index,
+                    "summarized_messages": summarized_count,
+                },
+                "is_compact_summary": True,
+                "transcript_only": True,
+            }
+            existing.append(compact_summary_record)
+
+        history_path.write_text(
+            json.dumps(existing, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+
+    return {
+        "session_id": session_id,
+        "turn_index": turn_index,
+        "content": removed_turn_content,
+        "content_preview": removed_turn_content[:80] if removed_turn_content else "",
+        "remaining_records": remaining + 2,
+        "removed_records": removed,
+        "summarized_messages": summarized_count,
+        "direction": direction,
     }
 
 
@@ -576,9 +747,22 @@ async def rewind_session_context(
                     reasoning_content=reasoning if reasoning else None,
                 ))
 
+        elif event_type == "context.compact_summary":
+            if current_tool_calls:
+                _flush_pending_assistant()
+            if content.strip():
+                context_messages.append(UserMessage(content=content))
+
+        elif event_type == "context.rewind_summary":
+            if current_tool_calls:
+                _flush_pending_assistant()
+            if content.strip():
+                context_messages.append(UserMessage(content=content))
+
         else:
             # chat.delta, chat.tool_update, chat.usage_metadata,
-            # chat.usage_summary, chat.ask_user_question
+            # chat.usage_summary, chat.ask_user_question,
+            # context.compact_boundary
             skipped += 1
 
     # Flush any remaining state (e.g. interrupted turn with only reasoning)

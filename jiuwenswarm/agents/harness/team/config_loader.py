@@ -86,13 +86,30 @@ def resolve_team_sqlite_db_path(config_base: dict[str, Any] | None = None) -> Pa
     return get_agent_teams_home() / conn_str
 
 
-def _resolve_default_model_config(config_base: dict[str, Any]) -> dict[str, Any]:
+def _resolve_default_model_config(
+    config_base: dict[str, Any],
+    *,
+    requested_model_name: str | None = None,
+) -> dict[str, Any]:
     models_raw = config_base.get("models", {})
     if not isinstance(models_raw, dict):
         return {}
 
     defaults_raw = models_raw.get("defaults")
     if isinstance(defaults_raw, list):
+        # When the caller (chat page) provides a requested model name, prefer
+        # the entry whose ``model_client_config.model_name`` matches it so
+        # team members without an explicit ``modes.team.agents.*.model`` fall
+        # back to the page-selected model instead of the first list item.
+        requested = (requested_model_name or "").strip()
+        if requested:
+            for item in defaults_raw:
+                if not isinstance(item, dict):
+                    continue
+                mcc = item.get("model_client_config") or {}
+                if isinstance(mcc, dict) and mcc.get("model_name") == requested:
+                    return item
+
         for item in defaults_raw:
             if isinstance(item, dict):
                 return item
@@ -104,8 +121,15 @@ def _resolve_default_model_config(config_base: dict[str, Any]) -> dict[str, Any]
     return {}
 
 
-def _build_default_model_dict(config_base: dict[str, Any]) -> dict[str, Any]:
-    model_config = _resolve_default_model_config(config_base)
+def _build_default_model_dict(
+    config_base: dict[str, Any],
+    *,
+    requested_model_name: str | None = None,
+) -> dict[str, Any]:
+    model_config = _resolve_default_model_config(
+        config_base,
+        requested_model_name=requested_model_name,
+    )
     model_client_config = dict(model_config.get("model_client_config", {}))
     model_request_config = dict(model_config.get("model_config_obj", {}))
 
@@ -168,8 +192,16 @@ def _build_agent_spec_dict(
     return merged
 
 
-def _build_agents_config(team_raw: dict[str, Any], config_base: dict[str, Any]) -> dict[str, Any]:
-    default_model = _build_default_model_dict(config_base)
+def _build_agents_config(
+    team_raw: dict[str, Any],
+    config_base: dict[str, Any],
+    *,
+    requested_model_name: str | None = None,
+) -> dict[str, Any]:
+    default_model = _build_default_model_dict(
+        config_base,
+        requested_model_name=requested_model_name,
+    )
     default_workspace, max_iterations, completion_timeout = _build_agent_defaults()
 
     agents_raw = team_raw.get("agents", {})
@@ -299,8 +331,18 @@ def _build_predefined_members(team_raw: dict[str, Any]) -> list[dict[str, Any]]:
     return predefined_members
 
 
-def load_team_spec_dict(config_base: dict[str, Any] | None = None) -> dict[str, Any]:
-    """Load team config and build a TeamAgentSpec-compatible dict."""
+def load_team_spec_dict(
+    config_base: dict[str, Any] | None = None,
+    *,
+    requested_model_name: str | None = None,
+) -> dict[str, Any]:
+    """Load team config and build a TeamAgentSpec-compatible dict.
+
+    When ``requested_model_name`` is provided (e.g. from the chat page model
+    selector), team members without an explicit ``modes.team.agents.*.model``
+    fall back to the matching entry in ``models.defaults`` instead of the
+    first list item.
+    """
     if config_base is None:
         config_base = get_config()
     team_raw = _select_first_modes_team(config_base)
@@ -309,7 +351,11 @@ def load_team_spec_dict(config_base: dict[str, Any] | None = None) -> dict[str, 
         logger.warning("[TeamConfigLoader] no modes.team config found, using defaults")
         team_raw = {}
 
-    agents = _build_agents_config(team_raw, config_base)
+    agents = _build_agents_config(
+        team_raw,
+        config_base,
+        requested_model_name=requested_model_name,
+    )
     spec_dict = deepcopy(team_raw)
     spec_dict.pop("enable_team_plan", None)
 

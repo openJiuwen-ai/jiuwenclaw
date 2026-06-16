@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any, Iterable
 
 from jiuwenswarm.symphony.fingerprint.models import SkillFingerprint
+from jiuwenswarm.symphony.score_storage import resolve_score_artifact_dir
 
 SCORE_STATE_FILENAME = "score_state.json"
 
@@ -152,7 +153,7 @@ class ScoreStateBuilder:
 def load_score_state(score_dir: str | Path) -> ScoreState:
     """Load score_state.json, returning an empty state when it is missing."""
 
-    path = Path(score_dir) / SCORE_STATE_FILENAME
+    path = resolve_score_artifact_dir(score_dir) / SCORE_STATE_FILENAME
     if not path.exists():
         return ScoreState()
     return ScoreState.from_dict(json.loads(path.read_text(encoding="utf-8")))

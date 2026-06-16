@@ -5,6 +5,7 @@ import pytest
 from jiuwenswarm.gateway.channel_manager.web.app_web_handlers import (
     WebHandlersBindParams,
     _flatten_modes_team_for_config_panel,
+    _flatten_symphony_for_config_panel,
     _register_web_handlers,
 )
 
@@ -129,3 +130,80 @@ def test_config_panel_flatten_reads_standalone_agent_registry():
     assert flat["agent_skills_0"] == "coding"
     assert flat["agent_max_iterations_0"] == "12"
     assert flat["agent_completion_timeout_0"] == "34"
+
+
+def test_config_panel_flatten_reads_symphony_enabled_and_skill_retrieval():
+    raw = {
+        "symphony": {
+            "enabled": True,
+            "orchestration": {"mode": "fast"},
+            "skill_retrieval": {
+                "enabled": True,
+                "build": {"branching_factor": 64},
+                "retrieve": {"top_k": 5, "flatten_tree": True},
+            },
+        }
+    }
+
+    flat = _flatten_symphony_for_config_panel(raw)
+
+    assert flat["symphony_enabled"] == "true"
+    assert "symphony_orchestration_mode" not in flat
+    assert flat["skill_retrieval_enabled"] == "true"
+    assert flat["skill_retrieval_build_branching_factor"] == "64"
+    assert "skill_retrieval_retrieve_top_k" not in flat
+    assert flat["skill_retrieval_retrieve_flatten_tree"] == "true"
+
+
+@pytest.mark.asyncio
+async def test_config_set_routes_symphony_payload_to_config_helper(monkeypatch):
+    channel = FakeWebChannel()
+    recorded_symphony: list[dict] = []
+    recorded_skill_retrieval: list[dict] = []
+
+    _register_web_handlers(WebHandlersBindParams(channel=channel))
+
+    monkeypatch.setattr(
+        "jiuwenswarm.gateway.channel_manager.web.app_web_handlers.get_config_raw",
+        lambda: {"preferred_language": "zh"},
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.gateway.channel_manager.web.app_web_handlers.get_config",
+        lambda: {"symphony": {}},
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.gateway.channel_manager.web.app_web_handlers.update_symphony_in_config",
+        lambda updates: recorded_symphony.append(updates),
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.gateway.channel_manager.web.app_web_handlers.update_skill_retrieval_in_config",
+        lambda updates: recorded_skill_retrieval.append(updates),
+    )
+
+    await channel.methods["config.set"](
+        object(),
+        "req-3",
+        {
+            "symphony_enabled": "true",
+            "skill_retrieval_enabled": "false",
+            "skill_retrieval_retrieve_flatten_tree": "true",
+        },
+        "sess-3",
+    )
+
+    assert recorded_symphony == [{"enabled": True}]
+    assert recorded_skill_retrieval == [{"enabled": False, "retrieve": {"flatten_tree": True}}]
+    assert channel.responses[-1] == {
+        "id": "req-3",
+        "ok": True,
+        "payload": {
+            "updated": [
+                "symphony_enabled",
+                "skill_retrieval_enabled",
+                "skill_retrieval_retrieve_flatten_tree",
+            ],
+            "applied_without_restart": True,
+        },
+        "error": None,
+        "code": None,
+    }

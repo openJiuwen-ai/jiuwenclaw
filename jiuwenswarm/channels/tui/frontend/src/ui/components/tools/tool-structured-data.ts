@@ -105,11 +105,11 @@ function isPrimitive(value: unknown): value is string | number | boolean | null 
   );
 }
 
-function formatLeafValue(value: unknown): string {
+function formatLeafValue(value: unknown, preserveString = false): string {
   if (value === null) return "null";
   if (typeof value === "string") {
     const compact = value.replace(/\s+/g, " ").trim();
-    return compact ? summarize(compact, 96) : '""';
+    return compact ? (preserveString ? compact : summarize(compact, 96)) : '""';
   }
   if (typeof value === "number" || typeof value === "boolean") return String(value);
   return summarize(JSON.stringify(value), 96);
@@ -140,11 +140,11 @@ export function formatStructuredValue(
         if (label && !append(`${indent}${label}:`)) return;
         const visible = compactLines.slice(0, Math.max(1, maxLines - output.length));
         for (const line of visible) {
-          if (!append(`${indent}  ${summarize(line, 96)}`)) return;
+          if (!append(`${indent}  ${maxDepth > 2 ? line : summarize(line, 96)}`)) return;
         }
         return;
       }
-      append(`${indent}${label ? `${label}: ` : ""}${formatLeafValue(parsed)}`);
+      append(`${indent}${label ? `${label}: ` : ""}${formatLeafValue(parsed, maxDepth > 2)}`);
       return;
     }
 
@@ -163,7 +163,7 @@ export function formatStructuredValue(
       for (const item of parsed) {
         if (output.length >= maxLines) return;
         if (isPrimitive(item)) {
-          append(`${childIndent}- ${formatLeafValue(item)}`);
+          append(`${childIndent}- ${formatLeafValue(item, maxDepth > 2)}`);
           continue;
         }
         if (!append(`${childIndent}-`)) return;
@@ -287,6 +287,7 @@ export function getStringListFromValue(value: unknown): string[] {
 export function nonEmptyLines(value: unknown): string[] {
   if (typeof value !== "string") return [];
   return value
+    .replace(/\\r\\n|\\n|\\r/g, "\n")
     .split("\n")
     .map((line) => line.trimEnd())
     .filter((line) => line.trim().length > 0);

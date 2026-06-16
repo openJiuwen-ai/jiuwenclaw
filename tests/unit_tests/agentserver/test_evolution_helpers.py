@@ -213,6 +213,41 @@ def test_evolution_helpers_map_cancelled_progress_to_hidden():
     assert update.stage == "hidden"
 
 
+def test_evolution_helpers_regular_start_progress_excludes_scan_and_noop_stages():
+    events = [
+        SimpleNamespace(
+            type="llm_reasoning",
+            payload={
+                "_evolution_meta": {"event_kind": "progress", "stage": "detecting_signals"},
+                "content": "checking regular skill(s) for evolution signals",
+            },
+        ),
+        SimpleNamespace(
+            type="llm_reasoning",
+            payload={
+                "_evolution_meta": {"event_kind": "progress", "stage": "completed"},
+                "content": "no evolution records generated",
+            },
+        ),
+        SimpleNamespace(
+            type="llm_reasoning",
+            payload={
+                "_evolution_meta": {"event_kind": "progress", "stage": "generating_updates"},
+                "content": "generating evolution records",
+            },
+        ),
+    ]
+
+    visible = evolution_helpers.visible_evolution_progress_from_events(events)
+    regular_start = evolution_helpers.visible_regular_evolution_start_progress(visible)
+
+    assert [progress.stage for progress in visible] == [
+        "no_evolution_no_records",
+        "generating",
+    ]
+    assert [progress.stage for progress in regular_start] == ["generating"]
+
+
 def test_evolution_helpers_group_approvals_skips_missing_request_ids():
     missing_request_id = SimpleNamespace(
         type="chat.ask_user_question",
@@ -263,6 +298,28 @@ def test_evolution_helpers_preserve_legacy_whole_request_without_record_ids():
 
     assert accepted is True
     assert approved_ids is None
+
+
+@pytest.mark.parametrize("label", ["allow_once", "allow_always", "本次允许", "总是允许"])
+def test_evolution_helpers_accept_interrupt_approval_labels(label: str):
+    accepted, approved_ids = evolution_helpers.approved_record_ids_from_answers(
+        [{"selected_options": [label]}],
+        evolution_helpers.EVOLUTION_ACCEPT_LABELS,
+    )
+
+    assert accepted is True
+    assert approved_ids is None
+
+
+@pytest.mark.parametrize("label", ["reject", "拒绝"])
+def test_evolution_helpers_do_not_accept_reject_labels(label: str):
+    accepted, approved_ids = evolution_helpers.approved_record_ids_from_answers(
+        [{"selected_options": [label]}],
+        evolution_helpers.EVOLUTION_ACCEPT_LABELS,
+    )
+
+    assert accepted is False
+    assert approved_ids == []
 
 
 def test_evolution_helpers_do_not_whole_approve_when_snapshot_id_is_missing():

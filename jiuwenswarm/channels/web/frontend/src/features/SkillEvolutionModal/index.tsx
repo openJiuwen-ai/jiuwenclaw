@@ -225,7 +225,7 @@ export function SkillEvolutionModal({
           )}
 
           {listState === "loading" && (
-            <div className="text-sm text-text-muted">{t("common.loading")}</div>
+            <div className="flex items-center justify-center h-full text-text-muted">{t("common.loading")}</div>
           )}
           {listState === "error" && (
             <div className="text-sm text-text-muted">

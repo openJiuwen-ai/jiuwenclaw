@@ -115,9 +115,13 @@ class CronSchedulerService:
         self._last_store_mtime = self._get_store_mtime()
 
     async def _check_store_changed(self) -> bool:
-        """If cron_jobs.json was modified externally, reload and return True."""
+        """If cron_jobs.json was modified or deleted externally, reload and return True."""
         mtime = self._get_store_mtime()
-        if mtime and mtime != self._last_store_mtime and self._last_store_mtime != 0.0:
+        # Detect: file modified (mtime changed, both nonzero),
+        #         file deleted (mtime became 0.0 from nonzero),
+        #         file recreated (mtime became nonzero from 0.0).
+        # Skip: no change (mtime == last), or both 0.0 (never had a file).
+        if mtime != self._last_store_mtime and (mtime or self._last_store_mtime):
             logger.info(
                 "[Cron] store file changed (mtime %.3f -> %.3f), reloading",
                 self._last_store_mtime,
@@ -155,19 +159,49 @@ class CronSchedulerService:
         logger.info("[Cron] scheduler stopped")
 
     async def reload(self) -> None:
-        """Reload jobs from store and rebuild the event queue."""
+        """Reload jobs from store and rebuild the event queue.
+
+        When the store is empty (e.g. cron_jobs.json was deleted externally),
+        all in-memory running tasks for jobs that no longer exist in the store
+        are cancelled and their state cleaned up, preventing "ghost" tasks that
+        continue executing and pushing results despite having no persistent record.
+        """
         jobs = await self._store.list_jobs()
         self._jobs = {j.id: j for j in jobs}
-        # 保留飞行中的 push_update 事件（单次任务 push 后即 disabled，但补发结果还未完成）
+        new_job_ids = set(self._jobs.keys())
+
+        # 保留飞行中的 push_update 事件，但仅限于仍存在于 store 中的 job。
+        # 不存在的 job 的 push_update 不应继续推送：store 已无记录意味着
+        # 用户已明确删除了这些任务（或删除了整个文件），它们的运行结果
+        # 也应该中止，否则会形成"幽灵任务"——/cron 显示无任务但后台仍在推送。
         pending_push_updates = [
             (at_ts, seq, ev)
             for at_ts, seq, ev in self._events
-            if ev.kind == "push_update"
+            if ev.kind == "push_update" and ev.job_id in new_job_ids
         ]
         self._events.clear()
         self._seq = 0
         for item in pending_push_updates:
             heapq.heappush(self._events, item)
+
+        # 取消并清理不再存在于 store 中的运行任务（ghost tasks）。
+        # 这些 task 的 job 已经没有持久化记录了，继续运行只会产生
+        # 无法被用户管理（无 job_id 可删除）的后台任务。
+        ghost_run_ids = [
+            rid for rid, state in self._runs.items()
+            if state.job_id not in new_job_ids
+        ]
+        for rid in ghost_run_ids:
+            task = self._run_tasks.pop(rid, None)
+            if task is not None and not task.done():
+                logger.info(
+                    "[Cron] cancelling ghost run task: job_id=%s run_id=%s "
+                    "(job no longer in store)",
+                    self._runs[rid].job_id,
+                    rid,
+                )
+                task.cancel()
+            self._runs.pop(rid, None)
 
         now = self._now_fn()
         for job in jobs:
@@ -283,7 +317,36 @@ class CronSchedulerService:
         job = self._jobs.get(ev.job_id)
         if job is None and ev.kind != "push_update":
             return
+        # For wake/push/push_update events: if the job no longer exists in the
+        # persistent store (e.g. cron_jobs.json was deleted), skip execution.
+        # This prevents "ghost tasks" — tasks that continue running and pushing
+        # results even though the user sees no tasks in /cron and has no job_id
+        # to manage or delete them.
+        # Note: push_update was previously exempted to deliver already-computed
+        # results, but that exemption creates the ghost task problem. When the
+        # store is gone, the job is gone, and its results should not be pushed.
+        store_job = await self._store.get_job(ev.job_id)
+        if store_job is None:
+            # If job was in memory but not in store, reload to clear stale data
+            if ev.kind in ("wake", "push") and job is not None:
+                logger.info(
+                    "[Cron] job %s no longer in store (file may have been deleted), "
+                    "skipping event %s and triggering reload",
+                    ev.job_id, ev.kind,
+                )
+                await self.reload()
+            elif ev.kind == "push_update":
+                logger.info(
+                    "[Cron] push_update skipped: job %s no longer in store "
+                    "(file may have been deleted), skipping ghost push job_id=%s run_id=%s",
+                    ev.job_id, ev.job_id, ev.run_id,
+                )
+            return
         if job is None and ev.kind == "push_update":
+            # Job not in _jobs but still in store (e.g. disabled/expired job):
+            # rebuild from state for routing purposes. This is legitimate —
+            # push_update for a disabled one-shot job that's still in the store
+            # must still deliver its result.
             state = self._runs.get(ev.run_id)
             if state is None:
                 logger.info("[Cron] push_update skipped: no state and no job job_id=%s run_id=%s", ev.job_id, ev.run_id)

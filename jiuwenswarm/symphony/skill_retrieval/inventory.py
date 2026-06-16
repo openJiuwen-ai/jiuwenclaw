@@ -61,8 +61,6 @@ def scan_skill_inventory(manager: Any) -> SkillInventory:
                 continue
             meta, body = _parse_skill_md(skill_file)
             name = str(meta.get("name") or child.name).strip() or child.name
-            if not _is_enabled(manager, name):
-                continue
             description = str(meta.get("description") or "").strip() or _first_paragraph(body)
             items.append(
                 SkillInventoryItem(
@@ -116,16 +114,6 @@ def _call_list(manager: Any, method_name: str) -> list[dict[str, Any]]:
     except Exception:
         return []
     return [dict(item) for item in value if isinstance(item, dict)] if isinstance(value, list) else []
-
-
-def _is_enabled(manager: Any, name: str) -> bool:
-    method = getattr(manager, "get_skill_enabled", None)
-    if not callable(method):
-        return True
-    try:
-        return bool(method(name))
-    except Exception:
-        return True
 
 
 def _find_skill_file(skill_dir: Path) -> Path | None:

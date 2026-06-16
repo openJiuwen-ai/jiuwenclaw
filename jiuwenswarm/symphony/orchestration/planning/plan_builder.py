@@ -212,9 +212,17 @@ def compose_plan_group(plans: list[OrchestrationPlan]) -> OrchestrationPlan:
         for step in plan.steps:
             steps_by_id.setdefault(step.skill_id, step)
         for edge in plan.can_feed_edges:
-            key = (str(edge.get("source_id") or ""), str(edge.get("target_id") or ""))
+            key = (
+                edge_endpoint_id(edge, "source"),
+                edge_endpoint_id(edge, "target"),
+            )
             if key[0] and key[1]:
-                edges_by_key.setdefault(key, edge)
+                existing = edges_by_key.get(key)
+                if (
+                    existing is None
+                    or edge_confidence_value(edge) > edge_confidence_value(existing)
+                ):
+                    edges_by_key[key] = edge
         for artifact in plan.produced_artifacts:
             produced_by_key.setdefault(artifact.key, artifact)
         for item in plan.missing_inputs:
@@ -257,6 +265,16 @@ def compose_plan_group(plans: list[OrchestrationPlan]) -> OrchestrationPlan:
     )
 
 
+def edge_endpoint_id(edge: dict[str, Any], side: str) -> str:
+    if side == "source":
+        return skill_id(edge.get("source_id") or edge.get("source"))
+    return skill_id(edge.get("target_id") or edge.get("target"))
+
+
+def edge_confidence_value(edge: dict[str, Any]) -> float:
+    return float(edge.get("confidence") or 0.0)
+
+
 def topological_step_ids(
     skill_ids: set[str],
     edges: list[dict[str, Any]],
@@ -272,7 +290,11 @@ def topological_step_ids(
         incoming[target_id] += 1
 
     queue = deque(
-        sorted(current_skill_id for current_skill_id, count in incoming.items() if count == 0)
+        sorted(
+            current_skill_id
+            for current_skill_id, count in incoming.items()
+            if count == 0
+        )
     )
     ordered: list[str] = []
     while queue:
