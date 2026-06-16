@@ -4,7 +4,7 @@
 
 For enterprise_dev (SDK Adapter architecture):
   - LLM/Tool/Agent/Session: handled by TelemetryRail (no monkey-patch)
-  - Entry/Queue/Gateway Agent Client: monkey-patch still applies
+  - Entry/Gateway Agent Client: monkey-patch still applies
 
 For officeclaw (ReActAgent architecture):
   - All instrumentors use monkey-patch
@@ -53,7 +53,7 @@ def apply_instrumentors(
     """Apply all instrumentors. Called once at startup.
 
     For SDK Adapter mode (enterprise_dev):
-      - Entry, Queue, Gateway Agent Client: monkey-patch
+      - Entry, Gateway Agent Client: monkey-patch
       - LLM/Tool/Agent/Session: handled by TelemetryRail
 
     For ReActAgent mode (officeclaw):
@@ -64,7 +64,6 @@ def apply_instrumentors(
 
     from jiuwenclaw.telemetry.instrumentors.entry import instrument_entry
     from jiuwenclaw.telemetry.instrumentors.gateway_agent_client import instrument_gateway_agent_client
-    from jiuwenclaw.telemetry.instrumentors.queue import instrument_queue
 
     # These instrumentors work in both architectures modes
     instrument_entry()
@@ -72,9 +71,6 @@ def apply_instrumentors(
 
     instrument_gateway_agent_client()
     logger.info("[Telemetry] gateway agent client instrumentor applied")
-
-    instrument_queue()
-    logger.info("[Telemetry] queue instrumentor applied")
 
     if _SDK_ADAPTER_MODE:
         # SDK Adapter mode: LLM/Tool/Agent handled by TelemetryRail; Session

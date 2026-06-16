@@ -27,7 +27,7 @@ JAEGER_URL = os.getenv("JAEGER_URL", "http://localhost:16686")
 PROM_URL = os.getenv("PROM_URL", "http://localhost:9090")
 SERVICE = os.getenv("OTEL_SERVICE_NAME", "jiuwenclaw")
 
-# Canonical Prometheus-normalized metric names for the 19 Plan-B metrics.
+# Canonical Prometheus-normalized metric names for the 20 Plan-B metrics.
 # The OTel → Prometheus normalization drops units, replaces dots with
 # underscores, and appends `_total` on counters, `_count` on histogram
 # sample counts, or bare name on gauges.
@@ -42,15 +42,16 @@ EXPECTED_METRICS = [
     "gen_ai_tool_duration_seconds_count",
     "gen_ai_tool_call_count_total",
     "gen_ai_tool_error_count_total",
-    "jiuwenclaw_queue_depth",
-    "jiuwenclaw_queue_enqueued_total",
-    "jiuwenclaw_queue_dequeued_total",
-    "jiuwenclaw_queue_wait_duration_milliseconds_count",
-    "jiuwenclaw_message_processed_total",
+    "gen_ai_skill_call_count_total",
+    "gen_ai_skill_duration_seconds_count",
+    "gen_ai_skill_error_count_total",
+    "gen_ai_tool_token_usage_total",
+    "gen_ai_skill_token_usage_total",
     "jiuwenclaw_session_created_count_total",
     "jiuwenclaw_session_state_total",
     "jiuwenclaw_session_stuck_total",
     "jiuwenclaw_session_stuck_age_ms_milliseconds_count",
+    "jiuwenclaw_session_active",
 ]
 
 

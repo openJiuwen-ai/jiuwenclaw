@@ -208,63 +208,6 @@ session_stuck_age = _meter.create_histogram(
     description="Duration a session has been stuck",
 )
 
-# --- Queue metrics ---
-_queue_depth_observer: Callable[[], list[Observation]] | None = None
-
-
-def set_queue_depth_observer(observer: Callable[[], list[Observation]] | None) -> None:
-    """Register the queue depth observer used by the queue gauge."""
-    global _queue_depth_observer
-    _queue_depth_observer = observer
-
-
-def _observe_queue_depth(_options: CallbackOptions) -> Iterable[Observation]:
-    observer = _queue_depth_observer
-    if observer is None:
-        return []
-    try:
-        observations = observer()
-        # Wrap each Observation with common labels.
-        wrapped = []
-        for obs in observations:
-            attrs = _with_common_labels(dict(obs.attributes or {}))
-            wrapped.append(Observation(obs.value, attributes=attrs))
-        return wrapped
-    except Exception:
-        return []
-
-
-queue_depth = _meter.create_observable_gauge(
-    name="jiuwenclaw.queue.depth",
-    callbacks=[_observe_queue_depth],
-    unit="{message}",
-    description="Current message count in queue",
-)
-
-queue_enqueued = _meter.create_counter(
-    name="jiuwenclaw.queue.enqueued",
-    unit="{message}",
-    description="Total enqueued message count",
-)
-
-queue_dequeued = _meter.create_counter(
-    name="jiuwenclaw.queue.dequeued",
-    unit="{message}",
-    description="Total dequeued message count",
-)
-
-queue_wait_duration = _meter.create_histogram(
-    name="jiuwenclaw.queue.wait_duration",
-    unit="ms",
-    description="Message wait duration in queue",
-)
-
-message_processed = _meter.create_counter(
-    name="jiuwenclaw.message.processed",
-    unit="{message}",
-    description="Processed message count by status",
-)
-
 # --- Recorder helpers with resource labels injection ---
 
 
@@ -282,10 +225,6 @@ def record_llm_duration(duration: float, attrs: dict) -> None:
 
 def record_tool_duration(duration: float, attrs: dict) -> None:
     tool_duration.record(duration, _with_resource_labels(attrs))
-
-
-def record_queue_wait_duration(duration_ms: float, attrs: dict) -> None:
-    queue_wait_duration.record(duration_ms, _with_resource_labels(attrs))
 
 
 def record_session_stuck_age(age_ms: float, attrs: dict) -> None:
@@ -328,13 +267,56 @@ def add_session_stuck_count(value: int, attrs: dict) -> None:
     session_stuck_count.add(value, _with_resource_labels(attrs))
 
 
-def add_queue_enqueued(value: int, attrs: dict) -> None:
-    queue_enqueued.add(value, _with_resource_labels(attrs))
+# --- Skill metrics ---
+skill_call_count = _meter.create_counter(
+    name="gen_ai.skill.call.count",
+    unit="{call}",
+    description="Number of skill activations",
+)
+
+skill_duration = _meter.create_histogram(
+    name="gen_ai.skill.duration",
+    unit="s",
+    description="Skill session duration from activation to completion",
+    explicit_bucket_boundaries_advisory=[1, 5, 10, 30, 60, 120, 300],
+)
+
+skill_error_count = _meter.create_counter(
+    name="gen_ai.skill.error.count",
+    unit="{call}",
+    description="Number of errors during skill execution",
+)
 
 
-def add_queue_dequeued(value: int, attrs: dict) -> None:
-    queue_dequeued.add(value, _with_resource_labels(attrs))
+def add_skill_call_count(value: int, attrs: dict) -> None:
+    skill_call_count.add(value, _with_resource_labels(attrs))
 
 
-def add_message_processed(value: int, attrs: dict) -> None:
-    message_processed.add(value, _with_resource_labels(attrs))
+def record_skill_duration(duration: float, attrs: dict) -> None:
+    skill_duration.record(duration, _with_resource_labels(attrs))
+
+
+def add_skill_error_count(value: int, attrs: dict) -> None:
+    skill_error_count.add(value, _with_resource_labels(attrs))
+
+
+# --- Tool & skill token usage metrics ---
+tool_token_usage = _meter.create_counter(
+    name="gen_ai.tool.token.usage",
+    unit="{token}",
+    description="Token usage per tool definition consumed in LLM call",
+)
+
+skill_token_usage = _meter.create_counter(
+    name="gen_ai.skill.token.usage",
+    unit="{token}",
+    description="Token usage consumed by skill content (body + pin) in LLM call",
+)
+
+
+def add_tool_token_usage(value: int, attrs: dict) -> None:
+    tool_token_usage.add(value, _with_resource_labels(attrs))
+
+
+def add_skill_token_usage(value: int, attrs: dict) -> None:
+    skill_token_usage.add(value, _with_resource_labels(attrs))

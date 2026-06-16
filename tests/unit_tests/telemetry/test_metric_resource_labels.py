@@ -3,16 +3,13 @@
 """Unit tests for metric common labels injection."""
 
 import pytest
-from opentelemetry.metrics import Observation
 from opentelemetry.sdk.resources import Resource, SERVICE_NAME
 
 from jiuwenclaw.extensions.identity_provider import IdentityInfo, IdentityStore
 from jiuwenclaw.telemetry.attributes import JIUWENCLAW_CLAW_ID
 from jiuwenclaw.telemetry.metrics import (
-    _observe_queue_depth,
     _observe_session_active,
     _with_resource_labels,
-    set_queue_depth_observer,
     set_resource,
     set_session_active_observer,
 )
@@ -26,7 +23,6 @@ class TestResourceLabelsInjection:
         """Reset global state changed by metric label tests."""
         set_resource(None)
         set_session_active_observer(None)
-        set_queue_depth_observer(None)
         IdentityStore.reset_instance()
 
     @staticmethod
@@ -154,7 +150,6 @@ class TestSessionActiveObserver:
         """Reset global state changed by metric label tests."""
         set_resource(None)
         set_session_active_observer(None)
-        set_queue_depth_observer(None)
         IdentityStore.reset_instance()
 
     @staticmethod
@@ -212,88 +207,6 @@ class TestSessionActiveObserver:
 
         assert len(result) == 1
         assert result[0].value == 2
-        assert result[0].attributes["user_id"] == "user-123"
-        assert result[0].attributes["domain_id"] == "domain-abc"
-        assert result[0].attributes["app_id"] == "app-xyz"
-
-
-class TestQueueDepthObserver:
-    """Test _observe_queue_depth with resource labels."""
-
-    @staticmethod
-    def teardown_method() -> None:
-        """Reset global state changed by metric label tests."""
-        set_resource(None)
-        set_session_active_observer(None)
-        set_queue_depth_observer(None)
-        IdentityStore.reset_instance()
-
-    @staticmethod
-    def test_observe_queue_depth_with_resource() -> None:
-        """Queue depth observation should include claw_id (not SERVICE_NAME)."""
-        resource = Resource({
-            SERVICE_NAME: "test-service",
-            JIUWENCLAW_CLAW_ID: "claw-123",
-        })
-        set_resource(resource)
-        set_queue_depth_observer(lambda: [Observation(10, {"queue": "main"})])
-
-        observations = list(_observe_queue_depth(None))
-        assert len(observations) == 1
-        obs = observations[0]
-        assert obs.value == 10
-        assert obs.attributes["queue"] == "main"
-        assert obs.attributes[JIUWENCLAW_CLAW_ID] == "claw-123"
-        # SERVICE_NAME is NOT injected into metric attributes
-        assert SERVICE_NAME not in obs.attributes
-
-    @staticmethod
-    def test_observe_queue_depth_no_resource() -> None:
-        """Queue depth observation without resource should only have original attrs."""
-        set_resource(None)
-        set_queue_depth_observer(lambda: [Observation(5, {"queue": "default"})])
-
-        observations = list(_observe_queue_depth(None))
-        assert len(observations) == 1
-        obs = observations[0]
-        assert obs.value == 5
-        assert obs.attributes == {"queue": "default"}
-
-    @staticmethod
-    def test_observe_queue_depth_no_observer() -> None:
-        """No observer should return empty list."""
-        set_queue_depth_observer(None)
-        observations = list(_observe_queue_depth(None))
-        assert observations == []
-
-    @staticmethod
-    def test_observe_queue_depth_observer_exception() -> None:
-        """Observer exception should return empty list."""
-        resource = Resource({SERVICE_NAME: "test-service"})
-        set_resource(resource)
-        set_queue_depth_observer(lambda: int("invalid"))  # type: ignore
-
-        observations = list(_observe_queue_depth(None))
-        assert observations == []
-
-    @staticmethod
-    def test_observe_queue_depth_preserves_queue_and_injects_identity_labels() -> None:
-        """Queue depth gauge observations should preserve queue and add identity."""
-        store = IdentityStore.get_instance()
-        store.set_test_state(identity=IdentityInfo(
-            user_id="user-123",
-            domain_id="domain-abc",
-            app_id="app-xyz",
-        ))
-        set_queue_depth_observer(
-            lambda: [Observation(3, attributes={"queue": "user"})],
-        )
-
-        result = list(_observe_queue_depth(None))
-
-        assert len(result) == 1
-        assert result[0].value == 3
-        assert result[0].attributes["queue"] == "user"
         assert result[0].attributes["user_id"] == "user-123"
         assert result[0].attributes["domain_id"] == "domain-abc"
         assert result[0].attributes["app_id"] == "app-xyz"

@@ -20,6 +20,7 @@ The following runtime metrics are also recorded:
 - Current active session count and total created session count
 - Token usage (broken down by input/output/cache)
 - Model call failures can be derived from `gen_ai.client.operation.count{status="error"}`
+- Context composition token distribution (skill/system/user/assistant/tool/tool_definitions breakdown), calculated precisely with tiktoken
 
 ## 2. Quick enable
 
@@ -113,6 +114,21 @@ A full request trace looks like this:
 - `gen_ai.response.finish_reason` — Finish reason (string)
 - `gen_ai.span.type` — `"model"`
 
+**LLM span — Context composition attributes** (computed before each LLM call, using tiktoken cl100k_base for precise counting):
+
+| Attribute | Type | Meaning |
+|-----------|------|---------|
+| `gen_ai.context.skill` | int | All skill-related content (body + pin) |
+| `gen_ai.context.system_prompt` | int | System instructions (excluding skill pins) |
+| `gen_ai.context.user_messages` | int | User messages |
+| `gen_ai.context.assistant_messages` | int | Assistant replies (including tool_calls and reasoning_content) |
+| `gen_ai.context.tool_results` | int | Tool results (excluding skill body) |
+| `gen_ai.context.tool_definitions` | int | Tool definitions (including full JSON Schema parameters) |
+
+Estimation reference: `skill + system_prompt + user_messages + assistant_messages + tool_results + tool_definitions ≈ gen_ai.usage.input_tokens`
+
+> **Estimation reference notes**: This equation serves as an approximate reference for context token distribution, not a strict verification formula. Known deviations: (1) tiktoken cl100k_base encoding differs from provider-specific tokenizers — Chinese text has ~5-15% variance; (2) background task 0.2s timeout may leave some span attributes unwritten; (3) `input_tokens` may include provider-specific billing items (cache prefix, reasoning tokens) not covered in the above breakdown; (4) tool definition framing tokens (`<|start|>…<|end|>`) are counted in tool_definitions but framing format varies across providers.
+
 **TOOL span** (`gen_ai.span.type=tool`):
 
 - `gen_ai.tool.name` — Tool name
@@ -178,7 +194,7 @@ This section is based on the current code implementation rather than only the hi
 - `jiuwenclaw/telemetry/instrumentors/llm.py`
 - `jiuwenclaw/telemetry/instrumentors/tool.py`
 - `jiuwenclaw/telemetry/instrumentors/session.py`
-- `jiuwenclaw/telemetry/instrumentors/queue.py`
+- `jiuwenclaw/telemetry/instrumentors/telemetry_rail.py`
 
 ### 5.1 Metric Overview
 
@@ -194,32 +210,33 @@ This section is based on the current code implementation rather than only the hi
 | `gen_ai.tool.duration` | Histogram | `s` | Recorded when a tool execution finishes | `gen_ai.tool.name`, `jiuwenclaw.channel.id` | `agentserver` | Tool execution latency |
 | `gen_ai.tool.call.count` | Counter | `{call}` | Incremented when a tool call is initiated | `gen_ai.tool.name`, `jiuwenclaw.channel.id` | `agentserver` | Tool call count |
 | `gen_ai.tool.error.count` | Counter | `{call}` | Incremented when a tool result is classified as an error | `gen_ai.tool.name`, `jiuwenclaw.channel.id` | `agentserver` | Tool error count |
+| `gen_ai.skill.call.count` | Counter | `{call}` | Incremented when skill_tool is invoked | `gen_ai.skill.name`, `gen_ai.skill.version`, `gen_ai.system`, `jiuwenclaw.channel.id` | `agentserver` | Skill activation count |
+| `gen_ai.skill.duration` | Histogram | `s` | Recorded on skill_complete, measuring activation-to-completion duration | `gen_ai.skill.name`, `gen_ai.skill.version`, `gen_ai.system`, `jiuwenclaw.channel.id` | `agentserver` | Skill execution latency |
+| `gen_ai.skill.error.count` | Counter | `{call}` | Incremented when skill execution result contains an error | `gen_ai.skill.name`, `gen_ai.skill.version`, `gen_ai.system`, `jiuwenclaw.channel.id` | `agentserver` | Skill error count |
 | `jiuwenclaw.session.active` | ObservableGauge | `{session}` | Sampled in real time during export | None | `agentserver` | Current active session count |
 | `jiuwenclaw.session.created.count` | Counter | `{session}` | Incremented when a session processor is created for the first time | None | `agentserver` | Total created session count |
 | `jiuwenclaw.session.state` | Counter | `{transition}` | Incremented on session state transition | `jiuwenclaw.session.id`, `jiuwenclaw.session.state`, `jiuwenclaw.session.state.reason` | `agentserver` | Session state transition count |
 | `jiuwenclaw.session.stuck` | Counter | `{occurrence}` | Incremented on first stuck detection for a session | `jiuwenclaw.session.id` | `agentserver` | Session stuck occurrence count |
 | `jiuwenclaw.session.stuck_age_ms` | Histogram | `ms` | Recorded when a session is detected as stuck | `jiuwenclaw.session.id` | `agentserver` | Session stuck duration |
-| `jiuwenclaw.queue.depth` | ObservableGauge | `{message}` | Sampled on each metrics collection | `queue` | `gateway` | Current queue depth |
-| `jiuwenclaw.queue.enqueued` | Counter | `{message}` | Incremented on message enqueue | `queue`, `jiuwenclaw.channel.id` | `gateway` | Total enqueued messages |
-| `jiuwenclaw.queue.dequeued` | Counter | `{message}` | Incremented on message dequeue | `queue`, `jiuwenclaw.channel.id` | `gateway` | Total dequeued messages |
-| `jiuwenclaw.queue.wait_duration` | Histogram | `ms` | Recorded on message dequeue | `queue`, `jiuwenclaw.channel.id` | `gateway` | Queue wait duration |
-| `jiuwenclaw.message.processed` | Counter | `{message}` | Incremented on message dequeue | `queue`, `jiuwenclaw.channel.id`, `status` | `gateway` | Processed message count |
+| `gen_ai.tool.token.usage` | Counter | `{token}` | Per-tool token count consumed by tool definitions before each LLM call | `gen_ai.tool.name`, `gen_ai.request.model`, `jiuwenclaw.channel.id` | `agentserver` | Tool definition token usage |
+| `gen_ai.skill.token.usage` | Counter | `{token}` | Token count consumed by skill content (body + pin) before each LLM call | `gen_ai.skill.name`, `gen_ai.request.model`, `jiuwenclaw.channel.id` | `agentserver` | Skill content token usage |
 
 ### 5.2 Label Reference
 
 | Label | Metrics | Value description |
 |---|---|---|
-| `jiuwenclaw.channel.id` | `jiuwenclaw.request.duration` `jiuwenclaw.request.count` `jiuwenclaw.request.error.count` `jiuwenclaw.agent.duration` `gen_ai.client.operation.duration` `gen_ai.client.operation.count` `gen_ai.client.token.usage` `gen_ai.tool.duration` `gen_ai.tool.call.count` `gen_ai.tool.error.count` `jiuwenclaw.queue.enqueued` `jiuwenclaw.queue.dequeued` `jiuwenclaw.queue.wait_duration` `jiuwenclaw.message.processed` | Channel ID such as `web`, `feishu`, or `wecom`; empty string when missing |
+| `jiuwenclaw.channel.id` | `jiuwenclaw.request.duration` `jiuwenclaw.request.count` `jiuwenclaw.request.error.count` `jiuwenclaw.agent.duration` `gen_ai.client.operation.duration` `gen_ai.client.operation.count` `gen_ai.client.token.usage` `gen_ai.tool.duration` `gen_ai.tool.call.count` `gen_ai.tool.error.count` `gen_ai.tool.token.usage` `gen_ai.skill.call.count` `gen_ai.skill.duration` `gen_ai.skill.error.count` `gen_ai.skill.token.usage` | Channel ID such as `web`, `feishu`, or `wecom`; empty string when missing |
 | `jiuwenclaw.agent.name` | `jiuwenclaw.agent.duration` | Agent name; empty string when missing |
-| `gen_ai.request.model` | `gen_ai.client.operation.duration` `gen_ai.client.operation.count` `gen_ai.client.token.usage` | LLM model name, for example the configured `model_name` |
-| `gen_ai.system` | `gen_ai.client.operation.duration` `gen_ai.client.token.usage` | Model provider inferred from `model_client_config.client_provider`; `unknown` on inference failure |
-| `status` | `gen_ai.client.operation.count` `jiuwenclaw.message.processed` | Current implementation uses only `success` and `error` |
+| `gen_ai.request.model` | `gen_ai.client.operation.duration` `gen_ai.client.operation.count` `gen_ai.client.token.usage` `gen_ai.tool.token.usage` `gen_ai.skill.token.usage` | LLM model name, for example the configured `model_name` |
+| `gen_ai.system` | `gen_ai.client.operation.duration` `gen_ai.client.token.usage` `gen_ai.skill.call.count` `gen_ai.skill.duration` `gen_ai.skill.error.count` | Model provider inferred from `model_client_config.client_provider`; skill metrics always use `jiuwenclaw` |
+| `status` | `gen_ai.client.operation.count` | Current implementation uses only `success` and `error` |
 | `gen_ai.token.type` | `gen_ai.client.token.usage` | Current implementation uses `input`, `output`, and `cache_read` |
-| `gen_ai.tool.name` | `gen_ai.tool.duration` `gen_ai.tool.call.count` `gen_ai.tool.error.count` | Tool name; empty string when missing |
+| `gen_ai.tool.name` | `gen_ai.tool.duration` `gen_ai.tool.call.count` `gen_ai.tool.error.count` `gen_ai.tool.token.usage` | Tool name; empty string when missing |
+| `gen_ai.skill.name` | `gen_ai.skill.call.count` `gen_ai.skill.duration` `gen_ai.skill.error.count` `gen_ai.skill.token.usage` | Skill name; empty string when missing |
+| `gen_ai.skill.version` | `gen_ai.skill.call.count` `gen_ai.skill.duration` `gen_ai.skill.error.count` | Skill version; empty string when missing |
 | `jiuwenclaw.session.id` | `jiuwenclaw.session.state` `jiuwenclaw.session.stuck` `jiuwenclaw.session.stuck_age_ms` | Session ID |
 | `jiuwenclaw.session.state` | `jiuwenclaw.session.state` | Current implementation uses `created`, `active`, `idle`, `cancelled`, and `destroyed` |
 | `jiuwenclaw.session.state.reason` | `jiuwenclaw.session.state` | Current implementation uses `new_request`, `task_started`, `task_completed`, `task_error`, `user_cancel`, and `queue_closed` |
-| `queue` | `jiuwenclaw.queue.depth` `jiuwenclaw.queue.enqueued` `jiuwenclaw.queue.dequeued` `jiuwenclaw.queue.wait_duration` `jiuwenclaw.message.processed` | Queue name: `user` (user message queue) or `robot` (robot message queue) |
 
 ### 5.3 Metric Interpretation Details
 
@@ -235,12 +252,19 @@ This section is based on the current code implementation rather than only the hi
 
 ### 5.4 Resource Attributes
 
-In addition to the point labels above, the default provider attaches the following resource attributes to all metrics:
+In addition to the point labels above, the default provider attaches the following resource attributes to all telemetry data:
 
-| Attribute | Value source |
-|---|---|
-| `service.name` | `OTEL_SERVICE_NAME` or `telemetry.service_name`, default `jiuwenclaw` |
-| `service.version` | Currently hard-coded to `0.1.5` |
+| Attribute | Value source | Description |
+|---|---|---|
+| `service.name` | `OTEL_SERVICE_NAME` or `telemetry.service_name`, default `jiuwenclaw` | Service identifier for distinguishing different deployments |
+| `service.version` | Currently hard-coded to `0.1.5` | Service version |
+| `jiuwenclaw.claw.id` | `OTEL_CLAW_ID` or `telemetry.claw_id` | Claw instance identifier for distinguishing different Claw instances under the same service |
+
+> **Injection mechanism**:
+> - **Resource layer**: Set via `Resource.create(resource_attrs)` in `provider.py`; all spans and metrics automatically carry Resource attributes
+> - **Metric Attributes layer**: `jiuwenclaw.claw.id` is additionally injected into every metric data point's attributes (read from Resource), enabling per-instance aggregation in metric backends
+> - **Identity Metric Attributes layer**: `jiuwenclaw.user.id`, `jiuwenclaw.domain.id`, `jiuwenclaw.app.id` are read from `IdentityStore` and injected into all metric data points
+> - `service.name` is NOT injected into metric attributes; it is associated only through Resource
 
 ### 5.5 Code Sources
 
@@ -252,8 +276,19 @@ In addition to the point labels above, the default provider attaches the followi
 | `jiuwenclaw/telemetry/instrumentors/llm.py` | LLM metrics |
 | `jiuwenclaw/telemetry/instrumentors/tool.py` | Tool metrics |
 | `jiuwenclaw/telemetry/instrumentors/session.py` | Session lifecycle and stuck metrics |
-| `jiuwenclaw/telemetry/instrumentors/queue.py` | Message queue monitoring metrics |
+| `jiuwenclaw/telemetry/instrumentors/telemetry_rail.py` | Context composition attributes, context token distribution metric, Agent/LLM/Tool spans (SDK Adapter mode) |
 | `jiuwenclaw/telemetry/provider.py` | Resource attributes such as `service.name` and `service.version` |
+
+### 5.6 Span attribute coverage
+
+In addition to metrics labels, each span carries the following attributes for filtering and querying in trace backends:
+
+| Span | Key attributes carried |
+|---|---|
+| Entry (`jiuwenclaw.request`) | `jiuwenclaw.channel.id`, `jiuwenclaw.session.id` |
+| Agent (`jiuwenclaw.agent.invoke`) | `jiuwenclaw.agent.name`, `jiuwenclaw.session.id`, `jiuwenclaw.channel.id`, `jiuwenclaw.request.id` |
+| LLM (`gen_ai.chat`) | `gen_ai.system`, `gen_ai.request.model`, `jiuwenclaw.session.id`, `gen_ai.context.skill`, `gen_ai.context.system_prompt`, `gen_ai.context.user_messages`, `gen_ai.context.assistant_messages`, `gen_ai.context.tool_results`, `gen_ai.context.tool_definitions` |
+| Tool (`gen_ai.tool.execute: *`) | `gen_ai.tool.name`, `gen_ai.tool.call.id`, `jiuwenclaw.session.id` |
 
 ## 6. Jaeger example
 
@@ -275,6 +310,28 @@ Open http://localhost:16686 to view full traces in the Jaeger UI.
 - When `telemetry.enabled` is `false`, the telemetry module is not loaded at all; there is no performance impact.
 - With `log_messages` set to `true`, full system prompts, user input, and model output are recorded in span events, which can be large; you may disable this in production as needed.
 - W3C TraceContext propagation across WebSockets is supported, so traces stay complete when Gateway and AgentServer are deployed separately.
+- Telemetry initialization duration is logged: `[AgentServer] Telemetry initialized, took X.XXs` / `[AgentGateway] Telemetry initialized, took X.XXs`, for monitoring startup performance.
+
+### 7.1 Known limitations and behavior notes
+
+This section documents known deviations in the current implementation for troubleshooting:
+
+1. **`gen_ai.system` may be `unknown` under SDK Adapter mode**
+   - Symptom: The `gen_ai.system` label on LLM spans and `gen_ai.client.*` metrics shows `unknown`.
+   - Root cause: `TelemetryRail` reads `model_provider` / `model_client_config` directly from `ctx.agent`, but `ReActAgent` stores them under `agent._config`.
+   - Impact: Only enterprise_dev / SDK Adapter architecture; officeclaw architecture reads `agent._config` via `instrumentors/llm.py` and is unaffected.
+
+2. **`gen_ai.client.token.usage` may have no data for streaming requests**
+   - Symptom: Even when the model response is received normally, the token usage metric is not reported.
+   - Root cause: The OpenAI-compatible protocol requires `stream_options={"include_usage": true}` for streaming requests to return a usage chunk; `OpenAIModelClient._build_request_params` does not set this parameter, so `chunk.usage` is always `None`.
+   - Applicability: Only when using OpenAI / compatible providers with `stream=True`. Non-streaming (`stream=False`) requests are unaffected.
+
+3. **Session metrics are not reported under SDK Adapter mode**
+   - Symptom: `jiuwenclaw.session.active` / `session.created.count` / `session.state` / `session.stuck` / `session.stuck_age_ms` have no data points.
+   - Root cause:
+     - `instrumentors/__init__.py` does not call `instrument_session()` in the SDK Adapter branch;
+     - `instrumentors/session.py` still patches `JiuWenClaw._ensure_session_processor` / `_cancel_session_task`, but under enterprise_dev these methods have migrated to `SessionManager`.
+   - Applicability: Only enterprise_dev / SDK Adapter architecture; officeclaw architecture is unaffected.
 
 ## 8. Low-intrusion provider extension and third-party integration
 
