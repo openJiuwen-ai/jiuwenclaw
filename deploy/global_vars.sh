@@ -38,8 +38,8 @@ declare -A CONFIG=(
     ["WEB_TEMPLATE_FILE"]="${SCRIPT_DIR}/conf/web.template.yaml"
     ["WEB_FILE"]="${SCRIPT_DIR}/conf/web.yaml"
 
-    ["MANAGER_TEMPLATE_FILE"]="${SCRIPT_DIR}/conf/manager.template.yaml"
-    ["MANAGER_FILE"]="${SCRIPT_DIR}/conf/manager.yaml"
+    ["MANAGER_SERVER_TEMPLATE_FILE"]="${SCRIPT_DIR}/conf/manager_server.template.yaml"
+    ["MANAGER_SERVER_FILE"]="${SCRIPT_DIR}/conf/manager_server.yaml"
 
     ["MANAGER_WEB_TEMPLATE_FILE"]="${SCRIPT_DIR}/conf/manager_web.template.yaml"
     ["MANAGER_WEB_FILE"]="${SCRIPT_DIR}/conf/manager_web.yaml"
@@ -134,7 +134,7 @@ declare -A DEPLOY_VARS=(
     ["MINIO_STORAGE_SIZE"]="4Gi"
     ["MINIO_PATH"]="/exports/minio"
     ["MINIO_NFS_PATH"]="/minio"
-    ["MANAGER_NAME"]="jiuwenclaw-manager"
+    ["MANAGER_SERVER_NAME"]="jiuwenclaw-manager-server"
     ["MANAGER_WEB_NAME"]="jiuwenclaw-manager-web"
     ["MANAGER_REST_PORT"]="8765"
     ["MANAGER_WS_PORT"]="8766"

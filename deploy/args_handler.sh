@@ -84,13 +84,13 @@ Modules (Optional):
 
 Options:
   -n NAMESPACE              Specify Kubernetes namespace (defaults to default if unspecified)
-  --web-port PORT           Set host port for web service (default: 8080)
-  --manager-web-port PORT   Set host port for manager web UI (5273 in container)
+  --web-port PORT           Set host port for web service （range: 30000-32767）
+  --manager-web-port PORT   Set host port for manager web UI （range: 30000-32767）
   -h, --help                Display this help message and exit
 
 Examples:
   ./$(basename "$0") up                                # Deploy default modules in default namespace
-  ./$(basename "$0") up web --web-port 8000 -n myns    # Deploy web module with host port 8000 in myns namespace
+  ./$(basename "$0") up web --web-port 30000 -n myns   # Deploy web module with host port 30000 in myns namespace
   ./$(basename "$0") up nfs                            # Deploy NFS (always uses default namespace, ignores -n parameter)
   ./$(basename "$0") down                              # Uninstall default modules in default namespace
   ./$(basename "$0") restart                           # Restart default modules in default namespace

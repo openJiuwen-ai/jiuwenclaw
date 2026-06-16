@@ -139,7 +139,6 @@ deploy_gateway() {
     gen_gateway_file
     exec_cmd kubectl apply -f ${gateway_file}
     wait_k8s_resource_ready "deployment" "${name}" "${namespace}"
-    success "Gateway deployed (no NodePort; browser WS on Web Pod)"
 }
 
 uninstall_gateway() {

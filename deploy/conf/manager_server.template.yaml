@@ -2,11 +2,11 @@
 apiVersion: v1
 kind: Service
 metadata:
-  name: <<MANAGER_NAME>>
+  name: <<MANAGER_SERVER_NAME>>
   namespace: <<NAMESPACE>>
 spec:
   selector:
-    app: <<MANAGER_NAME>>
+    app: <<MANAGER_SERVER_NAME>>
   ports:
     - name: rest
       port: <<MANAGER_REST_PORT>>
@@ -21,7 +21,7 @@ spec:
 apiVersion: v1
 kind: Service
 metadata:
-  name: <<MANAGER_NAME>>-nodeport
+  name: <<MANAGER_SERVER_NAME>>-nodeport
   namespace: <<NAMESPACE>>
 spec:
   type: NodePort
@@ -29,29 +29,29 @@ spec:
     - name: rest
       port: <<MANAGER_REST_PORT>>       # 集群内部端口
       targetPort: <<MANAGER_REST_PORT>> # 容器端口
-      nodePort: <<MANAGER_NODE_PORT>>   # 外部访问端口（30000-32767）
+      nodePort: <<MANAGER_SERVER_NODE_PORT>>   # 外部访问端口（30000-32767）
   selector:
-    app: <<MANAGER_NAME>>
+    app: <<MANAGER_SERVER_NAME>>
 
 ---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: <<MANAGER_NAME>>
+  name: <<MANAGER_SERVER_NAME>>
   namespace: <<NAMESPACE>>
 spec:
   replicas: 1
   selector:
     matchLabels:
-      app: <<MANAGER_NAME>>
+      app: <<MANAGER_SERVER_NAME>>
   template:
     metadata:
       labels:
-        app: <<MANAGER_NAME>>
+        app: <<MANAGER_SERVER_NAME>>
     spec:
       containers:
       - name: manager
-        image: <<MANAGER_IMAGE>>
+        image: <<MANAGER_SERVER_IMAGE>>
         ports:
         - name: rest
           containerPort: <<MANAGER_REST_PORT>>
