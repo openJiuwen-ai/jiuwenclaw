@@ -18,6 +18,7 @@ dependencies = [
     "loguru>=0.7.3",
     "openjiuwen @ git+https://gitcode.com/openJiuwen/agent-core.git@enterprise-dev",
     "pip==26.0.1",
+    "virtualenv>=20.29.0",
     "pgvector>=0.4.2",
     "websockets>=12.0",
     "psutil>=7.2.2",
