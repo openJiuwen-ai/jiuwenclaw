@@ -13,6 +13,7 @@ import asyncio
 import json
 import logging
 import os
+import uuid
 from contextvars import ContextVar, Token
 from dataclasses import dataclass
 
@@ -235,6 +236,12 @@ from jiuwenclaw.utils import (
 from jiuwenclaw.local_env_config import set_local_config
 
 load_dotenv(dotenv_path=get_env_file())
+
+# Shared resource tag for Runner.resource_mgr tool/MCP registration.
+# AgentCard.id uses a per-session suffix so outer rail callbacks stay isolated.
+JIUWENCLAW_RESOURCE_AGENT_ID = "jiuwenclaw"
+# AgentManager fallback when request.session_id is missing; needs per-instance uuid suffix.
+DEFAULT_SESSION_ID = "default"
 
 _react_config = get_config().get("react", {})
 _sandbox_config = get_config().get("sandbox", {})
@@ -935,6 +942,8 @@ class JiuWenClawDeepAdapter:
         self._vision_tools: list[Any] = []
         self._audio_tools: list[Any] = []
         self._instance_overrides: dict[str, Any] = {}
+        self._session_id: str | None = None
+        self._fallback_card_suffix: str | None = None
         self._xiaoyi_phone_tools_registered: bool = False
         self._skill_manager: SkillManager | None = None
         self._cron_runtime = CronRuntimeBridge()
@@ -981,6 +990,39 @@ class JiuWenClawDeepAdapter:
     def _skill_include_skill_body_tools(self) -> bool:
         """Expose ``skill_tool`` / ``skill_complete`` unless the session is an ACP tool profile."""
         return not self._is_acp_tool_profile(self._instance_overrides)
+
+    def _ensure_fallback_card_suffix(self, *, raw_session: str) -> str:
+        """Allocate a stable per-adapter suffix for empty/default session_id."""
+        if self._fallback_card_suffix is None:
+            self._fallback_card_suffix = uuid.uuid4().hex[:12]
+            session_label = raw_session or "(empty)"
+            logger.info(
+                "[JiuWenClawDeepAdapter] AgentCard.id: allocated uuid suffix for "
+                "shared session_id=%r -> card_key=%s_%s",
+                session_label,
+                DEFAULT_SESSION_ID,
+                self._fallback_card_suffix,
+            )
+        return self._fallback_card_suffix
+
+    def _resolve_agent_card_id(self, session_id: str | None = None) -> str:
+        """Return per-session AgentCard.id to isolate outer rail callback namespaces."""
+        raw_session = (session_id or self._session_id or "").strip()
+
+        if raw_session and raw_session != DEFAULT_SESSION_ID:
+            return f"{JIUWENCLAW_RESOURCE_AGENT_ID}_{raw_session}"
+
+        suffix = self._ensure_fallback_card_suffix(raw_session=raw_session)
+        effective = f"{DEFAULT_SESSION_ID}_{suffix}"
+        card_id = f"{JIUWENCLAW_RESOURCE_AGENT_ID}_{effective}"
+        session_label = raw_session or "(empty)"
+        logger.debug(
+            "[JiuWenClawDeepAdapter] AgentCard.id resolved: session_id=%r "
+            "agent_card_id=%s (uuid-suffix isolation)",
+            session_label,
+            card_id,
+        )
+        return card_id
 
     @staticmethod
     def _resolve_prompt_channel(session_id: str | None = None) -> str:
@@ -1465,7 +1507,7 @@ class JiuWenClawDeepAdapter:
             )
             CheckpointerFactory.set_default_checkpointer(checkpointer)
         except Exception as e:
-            logger.error("[JiuWenClawDeepAdapter] fail to setup checkpoint due to: %s", e, 
+            logger.error("[JiuWenClawDeepAdapter] fail to setup checkpoint due to: %s", e,
                          extra={'user_visible': 'critical'})
 
 
@@ -1724,7 +1766,7 @@ class JiuWenClawDeepAdapter:
                 skills_dirs.append(extra_skill_dir)
                 logger.info("[JiuWenClawDeepAdapter] extra_skill_dir added: %s", extra_skill_dir,
                        extra={'user_visible': 'progress'})
-            
+
             skill_rail_kwargs: dict[str, Any] = dict(
                 skills_dir=skills_dirs,
                 skill_mode=skill_mode,
@@ -2423,18 +2465,18 @@ class JiuWenClawDeepAdapter:
         # 如果你要更新rail，就传一个新的对象；如果不要更新，就不传；如果需要仅卸载，就传原来的rail对象。
         if disabled_tools_rail_newly_created and self._disabled_tools_rail is not None:
             rails_list.append(self._disabled_tools_rail)
- 
-        #  诊断日志：观察 rails_list 包含哪些 Rails 
-        logger.info( 
+
+        #  诊断日志：观察 rails_list 包含哪些 Rails
+        logger.info(
             "[JiuWenClawDeepAdapter]  DIAGNOSTIC: rails_list 构建完成 " 
             "| rails_count=%d " 
             "| rails_names=[%s] " 
-            "| has_runtime_prompt_rail=%s", 
-            len(rails_list), 
-            ", ".join(type(r).__name__ for r in rails_list), 
-            any(type(r).__name__ == "RuntimePromptRail" for r in rails_list), 
+            "| has_runtime_prompt_rail=%s",
+            len(rails_list),
+            ", ".join(type(r).__name__ for r in rails_list),
+            any(type(r).__name__ == "RuntimePromptRail" for r in rails_list),
         )
-        
+
         return rails_list
 
     async def _get_tool_cards(self, agent_id: str, *, mode: str = "agent.plan"):
@@ -2650,7 +2692,13 @@ class JiuWenClawDeepAdapter:
                 completion_timeout=ctx.config.get("completion_timeout", 21600.0),
             )
 
-    async def create_instance(self, config: dict[str, Any] | None = None, *, mode: str = "agent.plan") -> None:
+    async def create_instance(
+        self,
+        config: dict[str, Any] | None = None,
+        *,
+        mode: str = "agent.plan",
+        session_id: str | None = None,
+    ) -> None:
         """初始化 DeepAgent 实例.
 
         Args:
@@ -2659,7 +2707,11 @@ class JiuWenClawDeepAdapter:
                 - workspace_dir: 工作区目录，默认 "workspace/agent"。
                 - 其余字段透传给 DeepAgentConfig。
             mode: 实例化模式，支持 "claw"（默认，使用 create_deep_agent）和 "code"（使用 create_code_agent）。
+            session_id: 会话 ID，用于生成唯一的 AgentCard.id，隔离 outer rail 回调命名空间。
         """
+        if session_id is not None:
+            self._session_id = session_id.strip() or None
+
         await self.set_checkpoint()
 
         self._instance_overrides = dict(config or {}) if isinstance(config, dict) else {}
@@ -2676,9 +2728,9 @@ class JiuWenClawDeepAdapter:
             self._workspace_dir = configured_workspace
 
         model = self._create_model(config_base)
-        agent_card = AgentCard(name=self._agent_name, id='jiuwenclaw')
-
-        tool_cards = await self._get_tool_cards(agent_card.id, mode=mode)
+        agent_card_id = self._resolve_agent_card_id(session_id)
+        agent_card = AgentCard(name=self._agent_name, id=agent_card_id)
+        tool_cards = await self._get_tool_cards(JIUWENCLAW_RESOURCE_AGENT_ID, mode=mode)
         self._tool_cards = tool_cards
 
         permissions_cfg = config_base.get("permissions", {})
@@ -2722,7 +2774,11 @@ class JiuWenClawDeepAdapter:
                 extra_skill_dir=extra_skill_dir,
             )),
         )
-        logger.info("[JiuWenClawDeepAdapter] 初始化完成: agent_name=%s", self._agent_name)
+        logger.info(
+            "[JiuWenClawDeepAdapter] 初始化完成: agent_name=%s agent_card_id=%s",
+            self._agent_name,
+            agent_card_id,
+        )
 
         # 动态加载用户自定义的 Rail 扩展
         await self.load_user_rails()
@@ -2854,7 +2910,8 @@ class JiuWenClawDeepAdapter:
 
         model = self._create_model(config_base)
         self._agent_name = self._instance_overrides.get("agent_name", config.get("agent_name", "main_agent"))
-        agent_card = AgentCard(name=self._agent_name, id='jiuwenclaw')
+        agent_card_id = self._resolve_agent_card_id()
+        agent_card = AgentCard(name=self._agent_name, id=agent_card_id)
         self._sync_multimodal_tools_for_runtime()
 
         if not self._filesystem_rail_enabled_for_profile() and self._filesystem_rail is not None:
@@ -2884,15 +2941,15 @@ class JiuWenClawDeepAdapter:
             rails=rails_list,
         )
 
-        #  诊断日志：观察 Agent.configure() 收到的 rails_list 
-        logger.info( 
+        #  诊断日志：观察 Agent.configure() 收到的 rails_list
+        logger.info(
             "[JiuWenClawDeepAdapter]  DIAGNOSTIC: 准备调用 Agent.configure() " 
             "| rails_count=%d " 
             "| rails_names=[%s] " 
-            "| deep_cfg.rails 配置完成", 
-            len(rails_list), 
-            ", ".join(type(r).__name__ for r in rails_list), 
-        ) 
+            "| deep_cfg.rails 配置完成",
+            len(rails_list),
+            ", ".join(type(r).__name__ for r in rails_list),
+        )
 
         self._instance.configure(deep_cfg)
 
@@ -3274,86 +3331,86 @@ class JiuWenClawDeepAdapter:
             set_cwd(resolved_workspace_dir)
         except Exception as exc:
             logger.warning("[JiuWenClawDeepAdapter] set_cwd(%s) failed: %s", resolved_workspace_dir, exc)
-    
-        # 设置 output_dir ContextVar（新增） 
-        # Agent 可在 effective_project_dir 工作但将输出文件保存至 output_dir 
-        from jiuwenclaw.agentserver.tools.subagent_executor.context_vars import ( 
-            set_effective_request_output_dir, 
-            get_effective_request_output_dir, 
-        ) 
- 
-        output_dir = md.get("output_dir") 
-        if isinstance(output_dir, str) and output_dir.strip(): 
-            set_effective_request_output_dir(output_dir.strip()) 
-            logger.info( 
+
+        # 设置 output_dir ContextVar（新增）
+        # Agent 可在 effective_project_dir 工作但将输出文件保存至 output_dir
+        from jiuwenclaw.agentserver.tools.subagent_executor.context_vars import (
+            set_effective_request_output_dir,
+            get_effective_request_output_dir,
+        )
+
+        output_dir = md.get("output_dir")
+        if isinstance(output_dir, str) and output_dir.strip():
+            set_effective_request_output_dir(output_dir.strip())
+            logger.info(
                 "[JiuWenClawDeepAdapter] output_dir 设置完成: output_dir=%s " 
-                "(effective_project_dir=%s)", 
-                output_dir.strip(), 
-                resolved_workspace_dir 
-            ) 
+                "(effective_project_dir=%s)",
+                output_dir.strip(),
+                resolved_workspace_dir
+            )
 
 
-            #  方案A：动态更新write_file工具描述，注入output_dir路径 
-            # 让Agent在工具选择阶段就能看到推荐的保存位置 
-            # 正确模式：ability_manager用tool_name，resource_mgr用tool_card.id 
-            try: 
-                # Step 1: 从 ability_manager 获取 ToolCard（使用工具名称） 
-                tool_card = self._instance.ability_manager.get("write_file") 
-                if not tool_card: 
-                    logger.warning("[JiuWenClawDeepAdapter] write_file 工具卡片未在 ability_manager 中注册") 
-                else: 
-                    # Step 2: 使用 tool_card.id 获取 Tool 对象 
-                    write_file_tool = Runner.resource_mgr.get_tool(tool_card.id) 
-                    if write_file_tool and hasattr(write_file_tool, 'card'): 
-                        # 更新工具描述，在参数说明中注入output_dir推荐路径 
-                        original_description = write_file_tool.card.description or "" 
-                        output_dir_hint = ( 
+            #  方案A：动态更新write_file工具描述，注入output_dir路径
+            # 让Agent在工具选择阶段就能看到推荐的保存位置
+            # 正确模式：ability_manager用tool_name，resource_mgr用tool_card.id
+            try:
+                # Step 1: 从 ability_manager 获取 ToolCard（使用工具名称）
+                tool_card = self._instance.ability_manager.get("write_file")
+                if not tool_card:
+                    logger.warning("[JiuWenClawDeepAdapter] write_file 工具卡片未在 ability_manager 中注册")
+                else:
+                    # Step 2: 使用 tool_card.id 获取 Tool 对象
+                    write_file_tool = Runner.resource_mgr.get_tool(tool_card.id)
+                    if write_file_tool and hasattr(write_file_tool, 'card'):
+                        # 更新工具描述，在参数说明中注入output_dir推荐路径
+                        original_description = write_file_tool.card.description or ""
+                        output_dir_hint = (
                             f"\n\n推荐保存路径：{output_dir.strip()}\n\n" 
-                            f"参数 file_path 推荐使用：{output_dir.strip()}/filename.ext" 
-                        ) 
+                            f"参数 file_path 推荐使用：{output_dir.strip()}/filename.ext"
+                        )
 
 
-                        # 创建新的描述（保留原描述 + 添加output_dir提示） 
-                        enhanced_description = original_description + output_dir_hint 
+                        # 创建新的描述（保留原描述 + 添加output_dir提示）
+                        enhanced_description = original_description + output_dir_hint
 
 
-                        # 更新工具卡片描述 
-                        write_file_tool.card.description = enhanced_description 
+                        # 更新工具卡片描述
+                        write_file_tool.card.description = enhanced_description
 
 
-                        logger.info( 
-                            "[JiuWenClawDeepAdapter] ✅ write_file工具描述已更新，注入output_dir路径: %s (tool_id=%s)", 
-                            output_dir.strip(), 
-                            tool_card.id 
-                        ) 
-                    else: 
-                        logger.warning( 
-                            "[JiuWenClawDeepAdapter] write_file Tool对象未找到 (tool_id=%s)", 
-                            tool_card.id 
-                        ) 
-            except Exception as exc: 
-                logger.warning( 
-                    "[JiuWenClawDeepAdapter] write_file工具描述更新失败: %s", 
-                    exc, 
-                    exc_info=True  # 打印完整堆栈 
-                ) 
-        else: 
-            set_effective_request_output_dir(None) 
+                        logger.info(
+                            "[JiuWenClawDeepAdapter] ✅ write_file工具描述已更新，注入output_dir路径: %s (tool_id=%s)",
+                            output_dir.strip(),
+                            tool_card.id
+                        )
+                    else:
+                        logger.warning(
+                            "[JiuWenClawDeepAdapter] write_file Tool对象未找到 (tool_id=%s)",
+                            tool_card.id
+                        )
+            except Exception as exc:
+                logger.warning(
+                    "[JiuWenClawDeepAdapter] write_file工具描述更新失败: %s",
+                    exc,
+                    exc_info=True  # 打印完整堆栈
+                )
+        else:
+            set_effective_request_output_dir(None)
 
 
-        #  诊断日志：观察 RuntimePromptRail 实例状态 
-        logger.info( 
+        #  诊断日志：观察 RuntimePromptRail 实例状态
+        logger.info(
             "[JiuWenClawDeepAdapter]  DIAGNOSTIC: RuntimePromptRail 状态检查 " 
             "| request_id=%s " 
             "| _runtime_prompt_rail is %s " 
             "| output_dir ContextVar=%s " 
-            "| workspace_dir=%s", 
-            params.request_id, 
-            "None (未创建)" if self._runtime_prompt_rail is None else "已创建", 
-            get_effective_request_output_dir(), 
-            resolved_workspace_dir, 
-        ) 
- 
+            "| workspace_dir=%s",
+            params.request_id,
+            "None (未创建)" if self._runtime_prompt_rail is None else "已创建",
+            get_effective_request_output_dir(),
+            resolved_workspace_dir,
+        )
+
         if self._runtime_prompt_rail:
             self._runtime_prompt_rail.set_language(resolved_language)
             resolved_channel = (
