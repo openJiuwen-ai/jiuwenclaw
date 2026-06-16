@@ -4,6 +4,8 @@ import types
 
 import pytest
 
+from openjiuwen.core.context_engine.qa_artifact.schema import QAArtifactConfig
+
 from jiuwenclaw.agentserver import agent_ws_server as agent_ws_server_module
 from jiuwenclaw.agentserver.agent_manager import ACP_DEFAULT_CAPABILITIES
 from jiuwenclaw.agentserver.tools import acp_output_tools
@@ -564,6 +566,10 @@ def test_build_context_engineering_rail_prefers_summary_offloader_config(monkeyp
     ]
 
 
+def _default_qa_artifact_processor_cfg() -> dict:
+    return QAArtifactConfig().model_dump(mode="json")
+
+
 def test_build_context_engineering_rail_chain_b_merges_processor_configs(monkeypatch):
     monkeypatch.setattr(
         interface_deep_module,
@@ -590,12 +596,21 @@ def test_build_context_engineering_rail_chain_b_merges_processor_configs(monkeyp
     assert isinstance(rail.session_memory, _FakeSM)
     assert rail.processors == [
         ("ToolResultBudgetProcessor", {"tokens_threshold": 40000}),
-        ("FullCompactProcessor", {"trigger_total_tokens": 120000}),
+        (
+            "FullCompactProcessor",
+            {
+                "trigger_total_tokens": 120000,
+                "qa_artifact": _default_qa_artifact_processor_cfg(),
+            },
+        ),
     ]
 
 
 def test_build_context_engineering_rail_defaults_to_preset_chain_b(monkeypatch):
-    """缺省 session_memory 时走预置链 B：传入非 None session_memory，不合并链 A 四类处理器。"""
+    """缺省 session_memory 时走预置链 B：传入非 None session_memory，不合并链 A 四类处理器。
+
+    qa_artifact 在链 B 下默认启用，会自动追加 FullCompactProcessor 作为压缩安全网。
+    """
     monkeypatch.setattr(
         interface_deep_module,
         "JiuClawContextEngineeringRail",
@@ -619,6 +634,8 @@ def test_build_context_engineering_rail_defaults_to_preset_chain_b(monkeypatch):
 
     assert isinstance(rail, FakeJiuClawContextEngineeringRail)
     assert rail.preset is True
-    assert rail.processors is None
+    assert rail.processors == [
+        ("FullCompactProcessor", {"qa_artifact": _default_qa_artifact_processor_cfg()}),
+    ]
     assert isinstance(rail.session_memory, _FakeSessionMemoryConfig)
     assert rail.session_memory.kwargs == {}

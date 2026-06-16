@@ -16,6 +16,36 @@ from openjiuwen.harness.tools.todo import TodoItem, TodoStatus
 
 logger = logging.getLogger(__name__)
 
+
+def resolve_context_engine(agent: Any) -> Any:
+    """Resolve context_engine from DeepAgent or nested react_agent."""
+    engine = getattr(agent, "context_engine", None)
+    if engine is not None:
+        return engine
+    react_agent = getattr(agent, "react_agent", None) or getattr(agent, "_react_agent", None)
+    if react_agent is not None:
+        return getattr(react_agent, "context_engine", None)
+    return None
+
+
+def resolve_actual_session(session: Any) -> Any:
+    """Unwrap sub-session to the parent session when present."""
+    if session is None:
+        return None
+    return getattr(session, "_parent", session) or session
+
+
+def session_id_from_session(session: Any) -> str:
+    """Best-effort session id for rails / tools (multi-session safe lookups)."""
+    getter = getattr(session, "get_session_id", None)
+    if callable(getter):
+        return str(getter() or "")
+    sid = getattr(session, "session_id", None)
+    if callable(sid):
+        return str(sid() or "")
+    return str(sid or "")
+
+
 PLAN_PAUSED_SESSION_KEY = "jiuwenclaw_plan_paused"
 PLAN_PAUSED_SNAPSHOT_KEY = "jiuwenclaw_plan_paused_snapshot"
 
@@ -106,13 +136,7 @@ def clear_plan_pause_on_session(session: Any) -> None:
 
 
 def _session_id_from_session(session: Any) -> str:
-    getter = getattr(session, "get_session_id", None)
-    if callable(getter):
-        return str(getter() or "")
-    sid = getattr(session, "session_id", None)
-    if callable(sid):
-        return str(sid() or "")
-    return str(sid or "")
+    return session_id_from_session(session)
 
 
 async def _resolve_session_for_checkpoint(
@@ -134,34 +158,38 @@ async def persist_checkpoint_for_session(
     session_id: str,
     *,
     card: Any,
+    session: Any | None = None,
 ) -> None:
     """Persist context + agent state before abort (mirrors StreamEventRail early checkpoint)."""
     if not session_id or instance is None:
         return
 
-    context_engine = getattr(instance, "context_engine", None)
+    context_engine = resolve_context_engine(instance)
     if context_engine is None:
-        logger.warning(
+        logger.error(
             "[plan_pause] skip pre-abort checkpoint: no context_engine session_id=%s",
             session_id,
         )
         return
 
-    session, owned = await _resolve_session_for_checkpoint(instance, session_id, card=card)
+    owned = False
+    reused_session = session is not None
+    if session is None:
+        session, owned = await _resolve_session_for_checkpoint(instance, session_id, card=card)
     try:
         if owned:
             await session.pre_run(inputs=None)
         actual_session = getattr(session, "_parent", session) or session
         await context_engine.save_contexts(actual_session)
-        inner = getattr(actual_session, "_inner", actual_session)
-        await CheckpointerFactory.get_checkpointer().post_agent_execute(inner)
+        await post_agent_execute_for_session(session)
         logger.info(
-            "[plan_pause] pre-abort checkpoint saved session_id=%s owned=%s",
+            "[plan_pause] pre-abort checkpoint saved session_id=%s owned=%s reused_session=%s",
             session_id,
             owned,
+            reused_session,
         )
     except Exception as exc:
-        logger.warning(
+        logger.error(
             "[plan_pause] pre-abort checkpoint failed session_id=%s: %s",
             session_id,
             exc,

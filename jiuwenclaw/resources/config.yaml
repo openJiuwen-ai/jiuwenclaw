@@ -330,6 +330,71 @@ react:
     #     micro_compact.trigger_threshold: 99999  + keep_recent_per_tool: 99999
     #     full_compact.trigger_total_tokens: 99999999
     #   彻底物理移除某层须改 agent-core 的 _merge_processors 预置或切链 A。
+    #
+    # ============ Session 级 QA 块（qa_block）============
+    # 职责：一次 invoke = 一个 QA 块；Freeze 落盘 L0；每轮注入全量 L1 Catalog；
+    #       Selector 按用户问题 preload 部分历史 QA 原文；仅主 agent.plan session 启用。
+    # 关闭：enabled: false → 不 Freeze/Assembly，行为回退链 B 整窗压缩。
+    qa_block:
+      enabled: true                    # 总开关；subagent spawn/fork 在代码层强制 false
+
+      # --- L1 目录（写入 registry，供 [QA_BLOCK_CATALOG] 与 Selector）---
+      l1_inline_max_chars: 500         # Q+A 合计 ≤ 此值：Catalog 直接存原文（l1_source=inline）
+      l1_summary_max_chars: 300        # 超长时 L1 目标长度上限（截断或 LLM 摘要）
+      l1_llm_min_chars: 1500           # Q+A ≥ 此值且走 persist 阶段才调 LLM 摘要；commit 阶段仅截断
+      excerpt_max_chars: 200           # registry 中 user/answer 短摘录（Catalog pending 时兜底展示）
+
+      # --- L0 热缓存与落盘 ---
+      history_qa_buffer_size: 3        # 进程内保留最近 N 个 QA 的 L0 全文；超出则 hydrate 读盘
+      async_freeze_persist: true       # true= L0 写盘与 L1 定稿异步；cancel 路径仍同步 persist
+
+      # --- Catalog 二次压缩（块很多、目录超 token 预算时缩短 l1_text，不改 qa_id/handle）---
+      # catalog_max_tokens: 8000       # [QA_BLOCK_CATALOG] 总 token 超此值触发缩短（默认 8000）
+      # catalog_short_max_chars: 150     # 二次压缩后每条 l1_text 目标长度
+
+      # --- Selector：决定哪些历史 QA 的 L0  preload 进窗（块级；块内索引用 load_qa_index）---
+      selector_enabled: true           # false= 回退为全量 hydrate 所有历史块（调试用）
+      selector_mode: llm               # llm | rule | hybrid（hybrid= LLM 失败必走 rule）
+      max_preload_blocks: 15            # 每轮最多 preload 几个历史 QA
+      selector_rule_fallback: true     # LLM 调用/解析失败时是否回退 rule 选块
+      selector_fallback: last_n        # LLM+rule 仍为空：last_n=续作语义时 preload 最近 1 块；none=不兜底
+      selector_min_relevance: 0.12     # rule 模式：query 与 Catalog 文本 token 重叠率下限
+      # selector_fallback_on_empty: false  # true= 无续作语义时仍 preload 最近 1 块（默认 false）
+
+      # --- Hydrate：preload 时若该 QA 已有 qa_artifact 产物，直接注入概览+目录而非全文 ---
+      # hydrate_artifact_aware: true     # 默认 true；false= 始终回灌 L0 原文
+
+    # ============ 单 QA 卸载/引用（qa_artifact）============
+    # 职责：对已 preload 进窗的历史 QA 生成「概览 + 逐 message 目录 + reload 句柄」；
+    #       三级触发（单块 / 整窗 / full compact 安全网）；须配合 qa_block + session_memory（链 B）。
+    # 注意：启用 qa_artifact 且 yaml 未配 full_compact_processor_config 时，运行时会自动注入
+    #       FullCompactProcessor（挂载 qa_artifact 安全网）；仅写 qa_artifact.enabled 不会单独生效于链 A。
+    # 工具：load_qa_index(qa_id) 展开块内目录；reload_original_context_messages 按句柄取 round 原文。
+    # 阈值须严格递增：history_block_compact_tokens < session_memory.trigger_tokens
+    #                < full_compact_target_tokens < full_compact.trigger_total_tokens
+    qa_artifact:
+      enabled: true
+
+      # --- 触发 1：单历史 QA 块过大，异步生成产物（概览+目录）---
+      history_block_compact_tokens: 8000   # 窗内该 QA「未覆盖原文」token ≥ 此值 → 异步压该块
+
+      # --- 触发 2：整窗达 session_memory 阈值时，扫剩余 RAW 历史 + 预生成当前 QA（STAGED）---
+      qa_min_worth_tokens: 2000            # 低于此 token 的 QA 不参与压块/安全网候选
+
+      # --- 触发 3 / FullCompact 安全网：同步把总窗压到目标以下 ---
+      full_compact_target_tokens: 92000    # 单轮 full compact 目标总窗 token（须 < trigger_total_tokens）
+      # full_compact_max_qas: 4            # 每波最多并发压缩几个 QA（默认 4）
+      # full_compact_max_waves: 8            # 单轮最多循环几波；仍超则整窗兜底（默认 8）
+
+      # --- 块内目录（catalog.json）生成 ---
+      catalog_long_message_tokens: 800     # 单 round 超此值 → offload + 一行摘要；否则原文进目录
+      # catalog_summary_max_tokens: 80       # 每条长 round LLM 摘要长度上限（默认 80）
+
+      # --- 健壮性（同步压块 / 与异步线撞车时）---
+      # degrade_max_retries: 2             # 同步生成失败重试次数，超过则降级为保留尾部原文（默认 2）
+      # await_products_max_polls: 20         # 安全网等待异步产物就绪的最大轮询次数（默认 20）
+      # await_products_poll_interval_s: 0.1  # 上述轮询间隔秒（默认 0.1）
+
     enable_kv_cache_release: false
     enable_reload: true
     # 关闭 SDK 默认英文 reload prompt；中文版由 JiuClawContextEngineeringRail 注入。
@@ -531,6 +596,7 @@ react:
       - todo_list
       - todo_modify
       - reload_original_context_messages
+      - load_qa_index                 # 展开指定 QA 块内「概览+逐 round 目录」；非 Selector 选块
     subagents:
       enabled: true
       inherit_parent_eager_tools: true
