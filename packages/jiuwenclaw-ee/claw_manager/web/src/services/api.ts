@@ -124,9 +124,9 @@ interface InstancePageRaw {
 
 export const InstanceApi = {
   list: (params?: { page?: number; page_size?: number; status?: string }) =>
-    http<InstancePageRaw>('/v1/instances', { query: params }),
+    http<InstancePageRaw>('/v1/instances/', { query: params }),
   get: (id: string) => http<InstanceDetail>(`/v1/instances/${encodeURIComponent(id)}`),
-  create: (body: CreateInstanceBody) => http<InstanceSummary>('/v1/instances', { method: 'POST', body }),
+  create: (body: CreateInstanceBody) => http<InstanceSummary>('/v1/instances/', { method: 'POST', body }),
   provisionLocal: (body: ProvisionLocalInstanceBody) =>
     http<Record<string, unknown>>('/v1/instances/provision-local', { method: 'POST', body }),
   update: (id: string, body: { data?: Record<string, unknown> }) =>
@@ -287,12 +287,12 @@ export const MappingApi = {
     }
   ) =>
     http<PageResult<ConfigDefaultTemplateMapping>>(
-      `${policyBase(instanceId)}/config-default-template-mappings`,
+      `${policyBase(instanceId)}/config-default-template-mappings/`,
       { query: params }
     ),
   create: (instanceId: string, body: ConfigDefaultTemplateMappingCreateBody) =>
     http<ConfigDefaultTemplateMapping>(
-      `${policyBase(instanceId)}/config-default-template-mappings`,
+      `${policyBase(instanceId)}/config-default-template-mappings/`,
       { method: 'POST', body }
     ),
   update: (instanceId: string, mappingId: number, body: ConfigDefaultTemplateMappingUpdateBody) =>
@@ -320,12 +320,12 @@ export const GlobalPolicyApi = {
     }
   ) =>
     http<PageResult<ConfigEffectiveGlobalPolicy>>(
-      `${policyBase(instanceId)}/config-effective/global-policies`,
+      `${policyBase(instanceId)}/config-effective/global-policies/`,
       { query: params }
     ),
   create: (instanceId: string, body: ConfigEffectiveGlobalPolicyCreateBody) =>
     http<ConfigEffectiveGlobalPolicy>(
-      `${policyBase(instanceId)}/config-effective/global-policies`,
+      `${policyBase(instanceId)}/config-effective/global-policies/`,
       { method: 'POST', body }
     ),
   update: (instanceId: string, policyId: number, body: ConfigEffectiveGlobalPolicyUpdateBody) =>
@@ -353,12 +353,12 @@ export const ServicePolicyApi = {
     }
   ) =>
     http<PageResult<ConfigEffectiveServicePolicy>>(
-      `${policyBase(instanceId)}/config-effective/service-policies`,
+      `${policyBase(instanceId)}/config-effective/service-policies/`,
       { query: params }
     ),
   create: (instanceId: string, body: ConfigEffectiveServicePolicyCreateBody) =>
     http<ConfigEffectiveServicePolicy>(
-      `${policyBase(instanceId)}/config-effective/service-policies`,
+      `${policyBase(instanceId)}/config-effective/service-policies/`,
       { method: 'POST', body }
     ),
   update: (instanceId: string, policyId: number, body: ConfigEffectiveServicePolicyUpdateBody) =>
@@ -395,12 +395,12 @@ export const AgentPolicyApi = {
     }
   ) =>
     http<PageResult<ConfigEffectiveAgentPolicy>>(
-      `${policyBase(instanceId)}/config-effective/agent-policies`,
+      `${policyBase(instanceId)}/config-effective/agent-policies/`,
       { query: params }
     ),
   create: (instanceId: string, body: ConfigEffectiveAgentPolicyCreateBody) =>
     http<ConfigEffectiveAgentPolicy>(
-      `${policyBase(instanceId)}/config-effective/agent-policies`,
+      `${policyBase(instanceId)}/config-effective/agent-policies/`,
       { method: 'POST', body }
     ),
   update: (instanceId: string, policyId: number, body: ConfigEffectiveAgentPolicyUpdateBody) =>
