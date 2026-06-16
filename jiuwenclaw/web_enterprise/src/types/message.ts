@@ -30,6 +30,13 @@ export interface FileDownloadItem {
   expires_at?: number;
 }
 
+/** 用户通过 MinIO 上传后随 chat.send 发送的附件 */
+export interface ChatSendFile {
+  url: string;
+  name: string;
+  size?: number;
+}
+
 export interface Message {
   id: string;
   role: MessageRole;

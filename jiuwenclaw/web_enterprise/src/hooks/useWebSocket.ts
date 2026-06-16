@@ -23,6 +23,7 @@ import {
  	ToolCall,
   UsageSummary,
   FileDownloadItem,
+  ChatSendFile,
 } from '../types';
 import {
   useChatStore,
@@ -69,7 +70,7 @@ interface UseWebSocketReturn {
     params?: Record<string, unknown>,
     options?: WebRequestOptions
   ) => Promise<T>;
-  sendMessage: (content: string, sessionId: string) => Promise<void>;
+  sendMessage: (content: string, sessionId: string, files?: ChatSendFile[]) => Promise<void>;
   interrupt: (
     sessionId: string,
     intent: InterruptIntent,
@@ -266,17 +267,27 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
 
   // 发送聊天消息
   const sendMessage = useCallback(
-    async (content: string, sessionId: string) => {
-      if (!content.trim()) return;
+    async (content: string, sessionId: string, files?: ChatSendFile[]) => {
+      const trimmed = content.trim();
+      const hasFiles = Boolean(files && files.length > 0);
+      if (!trimmed && !hasFiles) return;
 
       userInputVersionRef.current += 1;
       stopAllTts();
+
+      const displayContent =
+        trimmed ||
+        (hasFiles
+          ? i18n.t('chat.fileUpload.messageFallback', {
+              count: files?.length ?? 0,
+            })
+          : '');
 
       // 添加用户消息
       addMessage({
         id: `user-${Date.now()}`,
         role: 'user',
-        content,
+        content: displayContent,
         timestamp: new Date().toISOString(),
       });
 
@@ -293,10 +304,20 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
         const ext = useExtSettingsStore.getState();
         await request('chat.send', {
           session_id: sessionId,
-          content,
-          query: content,
+          content: trimmed,
+          query: trimmed || displayContent,
           mode: currentMode,
           ...(selectedModel ? { model_name: selectedModel } : {}),
+          ...(hasFiles
+            ? {
+                files: files?.map((file) => ({
+                  url: file.url,
+                  name: file.name,
+                  filename: file.name,
+                  size: file.size,
+                })),
+              }
+            : {}),
           ...extSettingsToRoutingParams(ext),
         });
       } catch (error) {

@@ -7,7 +7,7 @@
 import React, { useRef, useEffect, useLayoutEffect, useCallback } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useChatStore } from '../../stores';
-import { AgentMode, UserAnswer } from '../../types';
+import { AgentMode, UserAnswer, ChatSendFile } from '../../types';
 import { MessageList } from './MessageList';
 import { InputArea } from './InputArea';
 import { SubtaskProgress } from './SubtaskProgress';
@@ -23,7 +23,7 @@ export interface ChatHistoryPagerProps {
 }
 
 interface ChatPanelProps {
-  onSendMessage: (content: string) => void;
+  onSendMessage: (content: string, files?: ChatSendFile[]) => void;
   onInterrupt: (newInput?: string) => void;
   onSwitchMode: (mode: AgentMode) => void;
   isProcessing: boolean;
@@ -157,9 +157,9 @@ export function ChatPanel({
   }, [historyPager, messages.length]);
 
   // 包装发送消息函数，添加滚动逻辑
-  const handleSendMessage = useCallback((content: string) => {
+  const handleSendMessage = useCallback((content: string, files?: ChatSendFile[]) => {
     setIsSending(true);
-    onSendMessage(content);
+    onSendMessage(content, files);
   }, [onSendMessage]);
 
   // 当发送消息时强制滚动到底部

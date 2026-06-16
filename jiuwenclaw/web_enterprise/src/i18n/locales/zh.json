@@ -94,6 +94,17 @@
       "tooltip": "切换对话使用的模型"
     },
     "newSessionDisabled": "处理中或录音中不可新建",
+    "fileUpload": {
+      "button": "上传文件",
+      "uploading": "正在上传...",
+      "remove": "移除附件",
+      "messageFallback": "已上传 {{count}} 个文件",
+      "errors": {
+        "failed": "文件上传失败：{{message}}",
+        "tooLarge": "文件过大（最大 50MB）",
+        "empty": "不能上传空文件"
+      }
+    },
     "modeSwitchTitle": "切换模式",
     "modeSwitchConfirm": "当前会话有历史消息，切换模式将新建会话。是否继续？",
     "historyPager": {

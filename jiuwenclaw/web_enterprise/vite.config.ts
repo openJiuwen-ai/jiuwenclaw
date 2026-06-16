@@ -63,7 +63,7 @@ function suppressWsProxySocketErrors(): Plugin {
   }
 }
 
-/** 在 dev 模式下将前端上报的 /ws req/res/event 记录到本地文件 */
+/** 开发环境 WS 流量日志（/__dev/ws-log） */
 function devWsTrafficLogger(): Plugin {
   return {
     name: 'dev-ws-traffic-logger',
@@ -489,8 +489,17 @@ function devFileContentApi(): Plugin {
 }
 
 // https://vitejs.dev/config/
+const uploadApiTarget =
+  process.env.JIUWENCLAW_WEB_UPLOAD_TARGET ||
+  `http://127.0.0.1:${process.env.JIUWENCLAW_WEB_UPLOAD_PORT || '5174'}`
+
 export default defineConfig({
-  plugins: [suppressWsProxySocketErrors(), devWsTrafficLogger(), devFileContentApi(), react()],
+  plugins: [
+    suppressWsProxySocketErrors(),
+    devWsTrafficLogger(),
+    devFileContentApi(),
+    react(),
+  ],
   resolve: {
     alias: {
       '@': path.resolve(__dirname, './src'),
@@ -502,6 +511,10 @@ export default defineConfig({
     proxy: {
       '/api': {
         target: 'http://127.0.0.1:19000',
+        changeOrigin: true,
+      },
+      '/file-api/upload-obs': {
+        target: uploadApiTarget,
         changeOrigin: true,
       },
       '/ws': {

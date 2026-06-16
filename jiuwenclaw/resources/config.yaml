@@ -400,6 +400,17 @@ heartbeat:
     start: 08:00
     end: 22:00
 
+# web_enterprise 聊天附件上传（自部署 MinIO / S3 兼容对象存储）
+# 环境变量可覆盖：JIUWENCLAW_MINIO_ENDPOINT / ACCESS_KEY / SECRET_KEY / BUCKET / SECURE / PUBLIC_BASE_URL
+minio:
+  endpoint:
+  access_key:
+  secret_key:
+  bucket: jiuwenclaw
+  secure: false
+  # 可选。设置后返回固定公网 URL（需 bucket 可读策略）；未设置则返回 presigned URL（默认 7 天）
+  public_base_url:
+
 channels:
   web:
     send_file_allowed: true

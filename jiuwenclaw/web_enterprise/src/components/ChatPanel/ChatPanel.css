@@ -74,6 +74,61 @@
   box-shadow: none;
 }
 
+/* Pending OBS attachments */
+.chat-input-attachments {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 10px 16px 0;
+}
+
+.chat-input-attachment-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 240px;
+  padding: 4px 8px;
+  border-radius: var(--radius-md);
+  border: 1px solid var(--border);
+  background: var(--panel-strong);
+  font-size: var(--font-size-xs);
+  color: var(--text);
+}
+
+.chat-input-attachment-remove {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 2px;
+  border: none;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+}
+
+.chat-input-attachment-remove:hover {
+  color: var(--danger);
+}
+
+.chat-input-upload-error {
+  padding: 6px 16px 0;
+  font-size: var(--font-size-xs);
+  color: var(--danger);
+}
+
+.chat-input-btn-icon--spin {
+  animation: spin 0.9s linear infinite;
+}
+
+@keyframes spin {
+  from {
+    transform: rotate(0deg);
+  }
+  to {
+    transform: rotate(360deg);
+  }
+}
+
 /* Toolbar (hints + actions) */
 .chat-input-toolbar {
   display: flex;

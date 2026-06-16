@@ -73,6 +73,12 @@ def _build_commands(mode: str) -> list[tuple[str, list[str], Path]]:
             )
         commands.append(("web-dev", ["npm", "run", "dev"], WEB_DEV_DIR))
     elif mode == "dev-enterprise":
+        upload_port = os.getenv("JIUWENCLAW_WEB_UPLOAD_PORT", "5174")
+        commands.append((
+            "upload-api",
+            [python_cmd, "-m", "jiuwenclaw.app_web", "--upload-api-only", "--port", upload_port],
+            DATA_ROOT,
+        ))
         commands.append(("web-dev-enterprise", ["npm", "run", "dev"], ENTERPRISE_WEB_DEV_DIR))
 
     return commands
