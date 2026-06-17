@@ -55,13 +55,10 @@ declare -A CONFIG=(
 )
 
 
-
-
 # Parsed command-line arguments
 declare -A ARGS=(
     ["CMD"]=""
 )
-
 
 
 # ==== All available modules ====
@@ -131,6 +128,7 @@ declare -A DEPLOY_VARS=(
     ["MINIO_IMAGE"]="minio/minio-arm64:RELEASE.2024-12-18T13-15-44Z"
     ["MINIO_ROOT_USER"]="minioadmin"
     ["MINIO_ROOT_PASSWORD"]="Minio@123456"
+    ["MINIO_SECURE"]="false"
     ["MINIO_STORAGE_SIZE"]="4Gi"
     ["MINIO_PATH"]="/exports/minio"
     ["MINIO_NFS_PATH"]="/minio"
@@ -139,6 +137,8 @@ declare -A DEPLOY_VARS=(
     ["MANAGER_REST_PORT"]="8765"
     ["MANAGER_WS_PORT"]="8766"
     ["MANAGER_WEB_PORT"]="5273"
+    ["OBS_TYPE"]="minio"
+    ["OBS_BUCKET"]="jiuwenclaw"
     ["DB_TYPE"]="sqlite"
     ["MANAGER_DB_NAME"]="manager"
     ["GATEWAY_DB_NAME"]="gateway"
@@ -150,6 +150,7 @@ declare -A DEPLOY_VARS=(
     ["ENABLE_EXTERNAL_MYSQL"]="false"
     ["ENABLE_EXTERNAL_POSTGRES"]="false"
     ["ENABLE_EXTERNAL_REDIS"]="false"
+    ["ENABLE_EXTERNAL_MINIO"]="false"
 )
 
 

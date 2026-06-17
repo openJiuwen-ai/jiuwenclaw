@@ -212,10 +212,33 @@ check_if_db_up() {
     local db_type="${DEPLOY_VARS["DB_TYPE"]}"
 
     info "DB_TYPE: ${db_type}"
-    if [[ "${db_type}" == "sqlite" ]]; then
+    if [ "${db_type}" == "sqlite" ]; then
         return
     fi 
     check_if_${db_type}_up
+}
+
+check_if_minio_up() {
+    local name="${DEPLOY_VARS["MINIO_NAME"]}"
+
+    # Check if external Minio server
+    if [ -n "${DEPLOY_VARS["MINIO_URL"]:-}" ]; then
+        info "Use external Minio server"
+        DEPLOY_VARS["ENABLE_EXTERNAL_MINIO"]="true"
+        return
+    fi
+
+    info "Use built-in Minio server"
+}
+
+check_if_obs_up() {
+    local obs_type="${DEPLOY_VARS["OBS_TYPE"]}"
+
+    info "OBS_TYPE: ${obs_type}"
+    if [ "${obs_type}" != "minio" ]; then
+        return
+    fi
+    check_if_minio_up
 }
 
 
@@ -292,6 +315,8 @@ check_redis_up_dependency() {
 }
 
 check_web_up_dependency(){
+    check_if_obs_up
+
     if ! check_k8s_resource_exists "deployment" "${DEPLOY_VARS["GATEWAY_NAME"]}" "${DEPLOY_VARS["NAMESPACE"]}"; then
         error "GATEWAY is not deployed. Please deploy it first with: ./$(basename "$0") up gateway"
     fi
