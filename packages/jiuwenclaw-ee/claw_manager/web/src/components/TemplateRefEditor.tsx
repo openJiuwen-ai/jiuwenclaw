@@ -248,6 +248,15 @@ export function TemplateRefEditor({ label, hint, required, value, onChange }: Te
   );
 
   useEffect(() => {
+    setRows((current) => {
+      if (JSON.stringify(serializeTemplateRef(current)) === JSON.stringify(value)) {
+        return current;
+      }
+      return templateRefRowsFromMap(value);
+    });
+  }, [value]);
+
+  useEffect(() => {
     let cancelled = false;
     setLoadingTemplates(true);
     void loadTemplateOptions()
