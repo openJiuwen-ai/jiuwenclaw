@@ -121,6 +121,10 @@ from jiuwenclaw.agentserver.deep_agent.interrupt.interrupt_helpers import (
     build_permission_rail,
     convert_interactions_to_ask_user_question,
 )
+from jiuwenclaw.agentserver.deep_agent.interrupt_resume_helpers import (
+    prepare_interrupt_resume_for_request,
+    set_todo_resume_snapshot_pending,
+)
 from jiuwenclaw.agentserver.deep_agent.plan_pause_helpers import (
     build_paused_plan_decision_prompt_from_session_snapshot,
     cancel_todos_via_modify_tool,
@@ -3874,6 +3878,7 @@ class JiuWenClawDeepAdapter:
             await self._clear_session_persisted_interrupt_state(
                 request.session_id,
                 reason="interrupt(supplement)",
+                clear_todo_resume_snapshot_pending=True,
             )
             # 5. 不清理 todo — 保留给新任务继续
             logger.info(
@@ -3947,6 +3952,7 @@ class JiuWenClawDeepAdapter:
             await self._clear_session_persisted_interrupt_state(
                 request.session_id,
                 reason="interrupt(cancel)",
+                clear_todo_resume_snapshot_pending=True,
             )
             # 5. plan：pause todo + repair task_plan + 持久化 plan_paused；其它模式标 cancelled
             updated_todos = None
@@ -4043,6 +4049,7 @@ class JiuWenClawDeepAdapter:
         session_id: str | None,
         *,
         reason: str,
+        clear_todo_resume_snapshot_pending: bool = False,
     ) -> None:
         if not session_id:
             return
@@ -4053,6 +4060,9 @@ class JiuWenClawDeepAdapter:
             session = create_agent_session(session_id=session_id, card=self._instance.card)
             await session.pre_run(inputs=None)
             clear_session_interrupt_state(session)
+            if clear_todo_resume_snapshot_pending:
+                set_todo_resume_snapshot_pending(session, pending=False)
+            await post_agent_execute_for_session(session)
             await session.post_run()
             logger.info(
                 "[JiuWenClawDeepAdapter] %s: cleared persisted interrupt state session_id=%s",
@@ -4736,6 +4746,10 @@ class JiuWenClawDeepAdapter:
             )
         finally:
             await session.post_run()
+
+    async def prepare_interrupt_resume_for_request(self, request: AgentRequest) -> None:
+        """On agent.plan continue/resume: inject todo resume guidance when active todos exist."""
+        await prepare_interrupt_resume_for_request(self, request)
 
     async def _cancel_pending_todos(self, session_id: str) -> list[dict] | None:
         """将未完成的 todo 项标记为 cancelled.
