@@ -2302,19 +2302,29 @@ class JiuWenClawDeepAdapter:
                 evolution_auto_scan: bool = _env_auto_scan.lower() in ("true", "1", "yes")
             else:
                 evolution_auto_scan = config.get("evolution", {}).get("auto_scan", False)
+            
+            # 处理 auto_save：优先环境变量，其次配置文件，默认 True
+            _env_auto_save = os.getenv("EVOLUTION_AUTO_SAVE")
+            if _env_auto_save is not None:
+                evolution_auto_save: bool = _env_auto_save.lower() in ("true", "1", "yes")
+            else:
+                evolution_auto_save = config.get("evolution", {}).get("auto_save", True)
+            
             trajectory_dir = self._resolve_evolution_trajectory_dir(config)
             skill_evolution_rail = SkillEvolutionRail(
                 skills_dir=self._resolve_skill_dirs(),
                 llm=self._model,
                 model=config.get("model_name", "gpt-4"),
                 auto_scan=evolution_auto_scan,
-                auto_save=False,
+                auto_save=evolution_auto_save,
                 trajectory_store=FileTrajectoryStore(trajectory_dir),
             )
             self._skill_evolution_rail = skill_evolution_rail
             logger.info(
-                "[JiuWenClaw] SkillEvolutionRail create success, trajectory_dir=%s",
+                "[JiuWenClaw] SkillEvolutionRail create success, trajectory_dir=%s, auto_scan=%r, auto_save=%r",
                 trajectory_dir,
+                evolution_auto_scan,
+                evolution_auto_save,
                 extra={'user_visible': 'progress'},
             )
         except Exception as exc:
