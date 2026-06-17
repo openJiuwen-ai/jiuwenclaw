@@ -123,6 +123,32 @@ def set_config(config):
         yaml.safe_dump(config, f, allow_unicode=True, sort_keys=False)
 
 
+def is_auto_memory_enabled() -> bool:
+    """Check if auto-memory feature is enabled in config.
+
+    Returns:
+        True if auto_memory_enabled is True in config.yaml, False otherwise.
+        Defaults to True if not configured.
+    """
+    try:
+        config = get_config()
+        return bool(config.get("auto_memory_enabled", True))
+    except Exception:
+        # Default to True if config cannot be read
+        return True
+
+
+def set_auto_memory_enabled(enabled: bool) -> None:
+    """Set auto-memory enabled status in config.
+
+    Args:
+        enabled: True to enable, False to disable.
+    """
+    data = load_yaml_round_trip(CONFIG_YAML_PATH)
+    data["auto_memory_enabled"] = enabled
+    dump_yaml_round_trip(CONFIG_YAML_PATH, data)
+
+
 def load_yaml_round_trip(config_path: Path):
     """ruamel 加载 config，保留注释与格式。"""
     rt = YAML()

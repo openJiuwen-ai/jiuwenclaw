@@ -11,6 +11,7 @@ from jiuwenswarm.extensions.symphony.extension import (
     SymphonyExtension,
     _BuildProcessLogger,
     _build_log_payload,
+    _latest_effective_build_log_entry,
 )
 from jiuwenswarm.common.schema.agent import AgentRequest
 from jiuwenswarm.common.schema.message import ReqMethod
@@ -460,6 +461,8 @@ def test_pause_build_cancels_active_build(monkeypatch, tmp_path):
 
     assert pause_result["success"] is True
     assert pause_result["paused"] is True
+    assert pause_result["build_progress"]["status"] == "paused"
+    assert pause_result["build_log"][-1]["stage"] == "update.paused"
     assert build_result["success"] is False
     assert build_result["paused"] is True
     assert build_result["build_progress"]["status"] == "paused"
@@ -570,6 +573,25 @@ def test_build_log_payload_clamps_progress_count_to_total(tmp_path):
     assert result["build_progress"]["current"] == 14
     assert result["build_progress"]["total"] == 14
     assert result["build_progress"]["percent"] == 48
+
+
+def test_build_log_payload_terminal_stage_wins_over_late_progress(tmp_path):
+    logger = _BuildProcessLogger(tmp_path / "build_log.jsonl")
+    logger.reset()
+    logger.record("fingerprint.extract.start", current=14, total=15, path="demo")
+    logger.record("update.failed", error="bad model")
+    logger.record("fingerprint.extract.start", current=15, total=15, path="late-demo")
+
+    result = _build_log_payload(tmp_path)
+
+    assert result["build_progress"]["status"] == "error"
+    assert result["build_progress"]["stage"] == "update.failed"
+    assert result["build_progress"]["label"] == "总谱构建失败"
+    assert result["build_progress"]["percent"] == 100
+
+
+def test_latest_effective_build_log_entry_handles_empty_entries():
+    assert _latest_effective_build_log_entry([]) == {}
 
 
 def test_build_log_payload_includes_manifest_token_usage(tmp_path):

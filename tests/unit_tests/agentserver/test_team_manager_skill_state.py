@@ -5,6 +5,10 @@
 from pathlib import Path
 from types import SimpleNamespace
 
+from jiuwenswarm.common.coding_memory_paths import (
+    resolve_project_coding_memory_dir,
+    resolve_project_coding_memory_workspace_path,
+)
 
 
 
@@ -100,6 +104,16 @@ def test_configure_code_team_member_uses_agent_workspace_coding_memory_path(monk
     )
 
     coding_memory_path = Path(workspace.directories[0]["path"])
-    assert coding_memory_path.is_absolute()
-    assert coding_memory_path == global_workspace / "coding_memory" / "project"
-    assert coding_memory_path != member_workspace / "coding_memory"
+    assert coding_memory_path.is_absolute() is False
+    assert workspace.directories[0]["path"] == resolve_project_coding_memory_workspace_path(
+        project_dir=str(parent_project),
+    )
+
+    coding_memory_storage_path = Path(
+        resolve_project_coding_memory_dir(
+            agent_workspace_dir=str(global_workspace),
+            project_dir=str(parent_project),
+        )
+    )
+    assert coding_memory_storage_path == global_workspace / "coding_memory" / "project"
+    assert coding_memory_storage_path != member_workspace / "coding_memory"

@@ -8,7 +8,7 @@ const COMMAND_GROUPS: Record<string, { name: string; commands: string[] }> = {
   },
   session: {
     name: "Session",
-    commands: ["resume", "rename", "session", "compact", "sessions", "new"],
+    commands: ["resume", "rename", "session", "compact", "sessions", "new", "recap"],
   },
   model: {
     name: "Model",
@@ -24,7 +24,7 @@ const COMMAND_GROUPS: Record<string, { name: string; commands: string[] }> = {
   },
   config: {
     name: "Config",
-    commands: ["config", "workspace", "diff", "plan"],
+    commands: ["config", "workspace", "permissions"],
   },
 };
 

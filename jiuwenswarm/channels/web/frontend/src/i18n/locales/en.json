@@ -385,6 +385,7 @@
       "wechat": "WeChat",
       "discord": "Discord",
       "heartbeat": "Heartbeat",
+      "tui": "TUI",
       "unknown": "Unknown"
     },
     "errors": {
@@ -690,7 +691,7 @@
       "teamMemberPersona": "Persona",
       "teamMemberPromptHint": "Prompt Hint",
       "teamMemberAgentKey": "Agent Key",
-      "symphonyEnabled": "Enable Skill Symphony",
+      "symphonyEnabled": "Enable skill orchestration",
       "skillRetrievalEnabled": "Enable skill retrieval",
       "skillRetrievalBuildBranchingFactor": "Split threshold base",
       "skillRetrievalBuildMaxDepth": "Max tree depth",
@@ -799,8 +800,8 @@
       "contextEngine": { "label": "Context Compression", "hint": "Enable or disable dialogue context compression" },
       "permissions": { "label": "Tool Safety Guardrail", "hint": "Enable or disable permission checks for tool calls" },
       "a2ui": { "label": "A2UI", "hint": "Enable or disable generated UI rendering and A2UI runtime prompts." },
-      "symphony": { "label": "Skill Symphony", "hint": "Master switch for Skill Symphony orchestration" },
-      "skillRetrieval": { "label": "Agentic Skill Retrieval", "hint": "Agentic skill retrieval for larger sets of installed skills" },
+      "symphony": { "label": "Skill Symphony", "hint": "Control Skill Symphony" },
+      "skillRetrieval": { "label": "Skill Symphony", "hint": "Control Skill Symphony" },
       "memory": { "label": "Memory Sensitive Info Filter", "hint": "Configure sensitive content types forbidden from memory" },
       "email": { "label": "Email Settings", "hint": "Email account and token settings" },
       "other": { "label": "Other Settings", "hint": "Unclassified extended parameters" }
@@ -980,7 +981,8 @@
     "tabs": {
       "mySkills": "My Skills",
       "marketplace": "Marketplace",
-      "skillIndex": "Skill Index"
+      "skillIndex": "Skill Index",
+      "skillGraph": "Skill Score"
     },
     "mySkillsTabs": {
       "all": "All",
@@ -1133,6 +1135,95 @@
       "nodeTypes": {
         "branch": "Branch",
         "skill": "Skill"
+      }
+    },
+    "graph": {
+      "stats": {
+        "skillsSuffix": " skills",
+        "edgesSuffix": " edges"
+      },
+      "searchPlaceholder": "Search skills",
+      "minConfidence": "Minimum confidence {{percent}}%",
+      "buildLogFallback": "Build log",
+      "tokenUsage": "{{prompt}} in / {{completion}} out / {{total}} total",
+      "required": "Required",
+      "skillList": "Skill List",
+      "noVisibleSkills": "No skills to display.",
+      "degreeSummary": "In {{inDegree}} · Out {{outDegree}}",
+      "updatedAt": "Updated {{time}}",
+      "inDegree": "In",
+      "outDegree": "Out",
+      "inputs": "Inputs",
+      "noInputs": "No inputs",
+      "outputs": "Outputs",
+      "noOutputs": "No outputs",
+      "tasks": "Tasks",
+      "relatedEdges": "Related Edges",
+      "noRelatedEdges": "No related edges.",
+      "selectSkillHint": "Select a skill to view its fingerprint",
+      "actions": {
+        "read": "Read score",
+        "incrementalBuild": "Incremental build",
+        "pauseBuild": "Pause build",
+        "fullRebuild": "Full rebuild",
+        "fitView": "Fit view"
+      },
+      "status": {
+        "refreshing": "Refreshing skill score",
+        "paused": "Skill score build paused",
+        "reading": "Reading skill score",
+        "noBuildLogs": "No build logs",
+        "waitingBuildLogs": "Waiting for build logs...",
+        "prepareFull": "Preparing full skill score rebuild",
+        "prepareIncremental": "Preparing incremental skill score build"
+      },
+      "errors": {
+        "readFailed": "Unable to read the skill score. Refresh the score first.",
+        "refreshFailed": "Failed to refresh the skill score",
+        "pauseFailed": "Failed to pause the skill score build",
+        "buildFailedWithDetail": "Symphony score build failed: {{detail}}"
+      },
+      "serverDetails": {
+        "noRunningBuild": "No skill score build is currently running.",
+        "pauseRequested": "Skill score build pause requested. Completed cache and checkpoints will be kept.",
+        "buildRunning": "A skill score build is already running. Wait for it to finish or pause the current build first.",
+        "buildPaused": "Skill score build paused. Run an incremental build again to continue.",
+        "scoreMissing": "The skill score is missing or incomplete. Build the score first."
+      },
+      "buildStages": {
+        "idle": "No build logs",
+        "updateStart": "Starting skill score build",
+        "updatePauseRequested": "Pausing skill score build",
+        "updatePaused": "Skill score build paused",
+        "scanStart": "Scanning skill directories",
+        "scanDone": "Skill directory scan complete",
+        "diffDone": "Checking skill changes",
+        "fingerprintReuse": "Reusing skill fingerprints",
+        "fingerprintParseStart": "Parsing skill fingerprints",
+        "fingerprintExtractStart": "Extracting skill fingerprints",
+        "fingerprintNormalizeStart": "Normalizing skill fingerprints",
+        "fingerprintDone": "Skill fingerprint processing complete",
+        "artifactFingerprintsWriteStart": "Writing skill fingerprint files",
+        "artifactFingerprintsWriteDone": "Skill fingerprint files written",
+        "graphBuildStart": "Building skill relation graph",
+        "graphRegistryStart": "Registering skill nodes",
+        "graphRegistryDone": "Skill node registration complete",
+        "graphCandidatesStart": "Generating candidate relations",
+        "graphCandidatesDone": "Candidate relation generation complete",
+        "graphResolveStart": "Resolving candidate relations",
+        "graphResolveProgress": "Resolving candidate relations",
+        "graphResolveDone": "Candidate relation resolution complete",
+        "graphMaterializeStart": "Generating score structure",
+        "graphMaterializeDone": "Score structure generated",
+        "graphScoreStart": "Building score retrieval structure",
+        "graphScoreDone": "Score retrieval structure built",
+        "graphBuildDone": "Skill relation graph built",
+        "artifactGraphWriteStart": "Writing score files",
+        "artifactGraphWriteDone": "Score files written",
+        "stateWriteStart": "Writing score state",
+        "stateWriteDone": "Score state written",
+        "updateFailed": "Score build failed",
+        "updateDone": "Score build complete"
       }
     },
     "evolution": {

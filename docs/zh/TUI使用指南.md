@@ -66,7 +66,7 @@
 | `/compact` | - | 压缩上下文，保留摘要 | `/compact` | 全部 |
 | `/config` | `/settings`, `/setting` | 查看/设置后端配置 | `/config`、`/config get`、`/config set key value` | 全部 |
 | `/context` | - | 查看上下文窗口占用与 Token 用量明细 | `/context` | 全部 |
-| `/diff` | - | 查看本会话按轮次的文件改动 | `/diff` | 全部 |
+| `/diff` | - | 交互式查看工作树与按轮次的文件改动 | `/diff` | 全部 |
 | `/evolve` | - | 触发技能演进 | `/evolve myskill 修正错误处理` | `agent.plan` / `team`（见下） |
 | `/evolve_list` | - | 列出某技能的演进条目 | `/evolve_list myskill --sort score` | `agent.plan` / `team` |
 | `/evolve_rebuild` | - | 从归档与演进记录重建 SKILL.md | `/evolve_rebuild myskill 强化错误处理` | `agent.plan` / `team` |
@@ -197,9 +197,24 @@
 - 交互选择范围：团队共享 `JIUWENSWARM.md`、个人 `JIUWENSWARM.local.md` 或两者；然后向后端发送编排提示（`logAsUser: false`）。
 - 详见 [Slash命令表.md](Slash命令表.md) 与源码 `init.ts`。
 
-#### `/diff` 与 `/compact`
+#### `/diff`（交互式改动回顾）
 
-- **`/diff`**：调用 `command.diff`，展示本会话内有文件变更的轮次（非完整 `git diff` 替代）。
+- **`/diff`**：调用 `command.diff`，获取工作树（uncommitted changes）及本会话内有文件变更的轮次，然后打开 **交互式 Diff 查看器**（全屏覆盖模式）。
+
+  **快捷键**：
+
+  | 按键 | 功能 |
+  |------|------|
+  | `↑` / `↓` | 在文件列表间移动焦点 |
+  | `Enter` | 查看焦点文件的完整 diff（进入详情视图） |
+  | `Esc` / `Ctrl+C` | 详情视图 → 返回列表；列表视图 → 关闭 |
+  | `←` | 从详情视图返回列表 |
+  | `PgUp` / `PgDn` | 详情视图上下翻页 |
+  | `Home` / `g` | 列表 → 跳至顶部；详情 → 跳至文件开头 |
+  | `End` / `Shift+g` | 列表 → 跳至底部；详情 → 跳至文件末尾 |
+
+  注意：未提交的工作树改动通过 `git diff HEAD` 获取；同一文件在工作树和某轮次中均出现时会重复列出，来源标注为 `working` 或 `Turn N`。
+
 - **`/compact`**：调用 `command.compact`，返回 `busy` | `compressed` | `noop`；成功时展示 token 节省比例（`compact.ts`）。
 
 #### `/context`（上下文窗口用量）
@@ -427,10 +442,16 @@
 
 ### 输入、附件与 `@` 引用
 
-- **文件/图片附件**：在输入中使用 `@路径` 或 `@"含空格路径"`；解析规则见 `attachments.ts`。
-- **图片扩展名**：`.png`、`.jpg`、`.jpeg`、`.gif`、`.webp`。
+- **`@` 路径自动补全**：在输入框中键入 `@` 后，TUI 会自动弹出文件路径补全下拉框，支持：
+  - 相对路径补全（基于当前工作目录 `cwd`）；
+  - 绝对路径补全（`/` 开头）；
+  - home 目录简写补全（`~` / `~/` 开头）；
+  - 含空格路径补全：使用 `@"路径"` 语法。
+  - 选择补全项后自动补全路径并追加一个空格。
+  - 补全来源为文件系统实时扫描，目录优先排序。
+- **文件附件**：在输入中使用 `@路径` 或 `@"含空格路径"` 后，`@` 引用的文件会作为消息附件发送给 Agent；解析规则见 `attachments.ts`。
 - **常见作为附件的文件扩展名**：含源码、文档、配置、压缩包、Office 文档等一大类扩展名（见 `SUPPORTED_FILE_EXTENSIONS`）；未在列表中的扩展名可能不会生成附件。
-- **粘贴路径**：支持引号路径、`file://`、Windows 盘符路径等，由 `extractFilePathsFromPaste` 解析。
+- **粘贴路径**：支持拖拽文件到终端（纯文件路径粘贴）、`file://` 协议路径、Windows 盘符路径等，由 `extractFilePathsFromPaste` 解析并自动转换为 `@路径` 引用。
 
 ### 命令与路径补全
 

@@ -295,13 +295,16 @@ const HIDDEN_CONFIG_KEYS = new Set([
   "skill_retrieval_build_equivalence_enabled",
   "skill_retrieval_retrieve_compact_codes_enabled",
   "skill_retrieval_retrieve_flatten_tree",
+  "skill_retrieval_retrieve_max_exposure_depth",
+  "skill_retrieval_build_max_depth",
+  "skill_retrieval_build_max_workers",
+  "skill_retrieval_build_max_retries",
+  "skill_retrieval_build_total_timeout_seconds",
+  "skill_retrieval_build_classification_batch_limit",
 ]);
 const MEMORY_KEYS = new Set(["memory_forbidden_enabled", "memory_forbidden_description"]);
 const A2UI_KEYS = new Set(["a2ui_enabled"]);
 const SYMPHONY_BOOLEAN_KEYS = new Set(["symphony_enabled"]);
-const SYMPHONY_KEYS = new Set([
-  ...SYMPHONY_BOOLEAN_KEYS,
-]);
 const SKILL_RETRIEVAL_BOOLEAN_KEYS = new Set([
   "skill_retrieval_enabled",
 ]);
@@ -309,13 +312,17 @@ const MULTILINE_CONFIG_KEYS = new Set([
   "skill_retrieval_build_root_categories",
 ]);
 const SKILL_RETRIEVAL_KEYS = new Set([
-  "skill_retrieval_enabled",
+  ...SKILL_RETRIEVAL_BOOLEAN_KEYS,
   "skill_retrieval_build_max_depth",
   "skill_retrieval_build_max_workers",
   "skill_retrieval_build_max_retries",
   "skill_retrieval_build_total_timeout_seconds",
   "skill_retrieval_build_classification_batch_limit",
   "skill_retrieval_retrieve_max_exposure_depth",
+]);
+const SYMPHONY_KEYS = new Set([
+  ...SYMPHONY_BOOLEAN_KEYS,
+  ...SKILL_RETRIEVAL_KEYS,
 ]);
 
 function classifyKey(key: string): string {
@@ -333,7 +340,6 @@ function classifyKey(key: string): string {
   if (MEMORY_KEYS.has(key)) return "memory";
   if (A2UI_KEYS.has(key)) return "a2ui";
   if (SYMPHONY_KEYS.has(key)) return "symphony";
-  if (SKILL_RETRIEVAL_KEYS.has(key)) return "skill_retrieval";
   if (key === "context_engine_enabled" || key === "kv_cache_affinity_enabled") return "context_engine";
   if (key === "permissions_enabled") return "permissions";
   if (key.startsWith("feishu")) return "feishu";
@@ -623,7 +629,7 @@ const KEY_SORT_PRIORITY: Record<string, number> = {
   free_search_ddg_enabled: 0,
   free_search_bing_enabled: 1,
   symphony_enabled: 0,
-  skill_retrieval_enabled: 0,
+  skill_retrieval_enabled: 1,
   skill_retrieval_retrieve_max_exposure_depth: 10,
   skill_retrieval_build_max_depth: 20,
   skill_retrieval_build_max_workers: 21,

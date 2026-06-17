@@ -1,193 +1,217 @@
-<div align="center">
-
-# JiuwenSwarm
-
-> 随叫随到的智能管家，让AI触手可及
-
-[![Python Version](https://img.shields.io/badge/python-3.11%2C3.12%2C3.13-blue)](https://www.python.org/)
-[![License](https://img.shields.io/badge/license-Apache--2.0-green)](LICENSE)
-[![华为云MaaS](https://img.shields.io/badge/华为云-MaaS-red)](https://www.huaweicloud.com/)
-
-</div>
-
-## 🌟 项目简介
-
-**JiuwenSwarm** 是一款基于Python开发的智能AI Agent，正如其名——"Swarm"象征着让多个智能体像蜂群⼀样⾼效协作、⾃主演进，正式按下"群体智能"的加速键!
-
-### ✨ 核心特色
-
-- **生态兼容**：完美支持**华为云MaaS**等主流模型平台
-- **无缝对接**：与**小艺开放平台**无缝接入，华为手机用户可通过小艺直接唤醒
-- **灵活部署**：支持自托管部署，数据完全自主可控
-- **多端接入**：支持Web端、聊天软件等多种交互方式
-
-## 🎯 核心理念
-
-> **懂你所想，自主演进**
-
-### 🤝 贴身任务管家
-面对复杂的输入场景——任务追加、指令打断、需求修改，JiuwenSwarm都能精准理解，为你智能排期，有条不紊地完成任务。
-
-### 🔄 自主演进
-当你表达不满或运行出错时，它会根据你的反馈自动调整相应技能，持续演进，全心全意为你服务。
-
 <p align="center">
-  <strong>⚡ 一个始终在线、数据自主的专属AI助理 ⚡</strong>
+  <img src="docs/assets/images/logo.svg" alt="JiuwenSwarm Logo" width="160" />
 </p>
 
-## ⚠️ 版本升级提醒
+<h1 align="center">JiuwenSwarm</h1>
 
-如果您从旧版本升级，请查看更新日志确认是否有重大变更。如有重大变更，升级后**必须**重新初始化 JiuwenSwarm，否则服务将无法启动。
+<p align="center">
+  <strong>懂你所想自主演进，蜂群协作完成复杂任务</strong>
+</p>
 
-### 升级前备份数据
+<p align="center">
+  <a href="README_CN.md">中文</a>
+  ·
+  <a href="README.md">English</a>
+  ·
+  <a href="docs/README.md">文档</a>
+  ·
+  <a href="docs/README_EN.md">Docs</a>
+  ·
+  <a href="https://openjiuwen.com">官网</a>
+  ·
+  <a href="https://gitcode.com/openJiuwen/jiuwenswarm">GitCode</a>
+</p>
 
-| 数据类型 | 原路径 | 说明 |
-|---------|--------|------|
-| 记忆数据 | `.jiuwenswarm/workspace/agent/memory` | 所有对话记忆 |
-| 自定义技能 | `.jiuwenswarm/workspace/agent/skills` | 您的自定义技能 |
-| 配置文件 | `.jiuwenswarm/config` | 应用设置 |
+<p align="center">
+  <a href="LICENSE">
+    <img src="https://img.shields.io/badge/license-Apache--2.0-green.svg" alt="License" />
+  </a>
+  <a href="https://gitcode.com/openJiuwen/jiuwenswarm/releases">
+    <img src="https://img.shields.io/pypi/v/jiuwenswarm.svg" alt="Release" />
+  </a>
+  <img src="https://img.shields.io/badge/python-%E2%89%A53.11-blue.svg" alt="Python Version" />
+  <img src="https://img.shields.io/badge/os-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey.svg" alt="OS Support" />
+  <img src="https://img.shields.io/badge/agent-coordination--engineering-purple.svg" alt="Coordination Engineering" />
+  <img src="https://img.shields.io/badge/skill-self--evolution-teal.svg" alt="Skill Self-Evolution" />
+</p>
 
-### 数据迁移步骤
+<p align="center">
+  <img src="docs/assets/images/jiuwenswarm布局概览.png" alt="JiuwenSwarm 产品界面预览" />
+</p>
 
-升级并运行 `jiuwenswarm-init` 后，请手动迁移数据：
+---
 
-1. **迁移记忆数据**：将原目录下的 `.jiuwenswarm/workspace/agent/memory` 复制到 `.jiuwenswarm/agent/memory`
+## 简介
 
-2. **迁移技能数据**：将原目录下的 `.jiuwenswarm/workspace/agent/skills` 复制到 `.jiuwenswarm/agent/skills`
+**JiuwenSwarm** 是一款让多智能体真正协作起来的 Agent 系统，面向需要自动化处理复杂任务的开发者和团队，帮助用户通过自然语言驱动多 Agent 协作、Skill 自演进和工具调用，实现从意图到结果的端到端交付。与同类项目相比，JiuwenSwarm 的核心差异在于：Skill 自演进让能力越用越强、蜂群协作让多 Agent 专业分工、协同完成复杂任务、多端接入覆盖主流 IM 平台。
 
-## 🚀 快速上手
+### 为什么选择 JiuwenSwarm
 
-### 📦 安装
+| 能力 | 价值 |
+| --- | --- |
+| 多智能体协作 | 复杂任务不再是一个 Agent 的战场：Leader 自动拆解任务、组建团队，多个 Agent 专业分工、动态协商 |
+| 分布式 Agent Swarm | 突破单机算力瓶颈：Leader/Teammate 跨进程、跨机器部署，多机协同处理大规模任务 |
+| Swarmflow | 用自然语言驱动工作流编排：Leader 自动拆解为多阶段工作流，各阶段 Agent 自动衔接 |
+| Skill 自演进 | 能力越用越强而非越跑越僵：执行出错或用户不满时自动检测信号、优化 Skill 定义 |
+| Skill Hub 流通 | 能力资产一次沉淀、处处复用：Skill 在开发者之间搜索、安装、组合与二次创作 |
+| Auto Harness | 评测驱动、端到端自动优化 Harness：不是训练模型权重，而是让 Harness 在实战中自动学习、自动优化 |
+| AI 基础设施亲和 | 一套系统适配多种推理后端：兼容华为云 MaaS 等主流平台，支持 OpenAI 兼容接口与本地模型 |
+| 工具权限与安全防护 | 每一步操作都在你的掌控中：工具执行前审批、文件访问白名单、敏感操作拦截 |
+
+## 最新动态
+
+- **2026-05-18**：`v0.2.0` 发布，JiuwenClaw 正式升级为 JiuwenSwarm，桌面端发布与自动更新、Swarm 模式与演进能力增强、CLI/TUI 命令扩展。
+- **2026-05-21**：openJiuwen 圆桌派直播，开放式分享 Swarm Skills Hub 生态共建与 Skills 自演进。
+- **2026-06-02**：`v0.2.1` 发布，Swarm 集群模式前端显示优化、TUI 接入 Auto Harness 新指令、自动化演进与定时任务体系完善。
+- **2026-06-12**：受邀参加新加坡 Lorong AI 社区活动。
+
+## 安装与启动
+
+### 桌面版
+
+| 系统 | 下载链接 | 说明 |
+| --- | --- | --- |
+| Windows | [下载 Windows 版本](https://openjiuwen.com/jiuwenswarm) | 适用于 Windows 10 / 11 |
+| macOS | [下载 macOS 版本](https://openjiuwen.com/jiuwenswarm) | 适用于 Intel / Apple Silicon |
+
+下载后按照提示安装使用。
+
+### 命令行版
 
 ```bash
 # 安装 JiuwenSwarm
+## 方式一：默认安装
 pip install jiuwenswarm
 
-# 初始化 JiuwenSwarm (首次启动)
+## 方式二：使用国内镜像源（推荐）
+# 清华源
+pip install jiuwenswarm -i https://pypi.tuna.tsinghua.edu.cn/simple
+
+# 初始化 JiuwenSwarm（首次启动）
 jiuwenswarm-init
 
 # 启动 JiuwenSwarm
 jiuwenswarm-start
+```
 
+启动后访问 http://localhost:5173 打开前端页面即可使用。
+
+如需使用 TUI（终端交互界面），在启动 JiuwenSwarm 后另开终端：
+
+```bash
 # 安装 JiuwenSwarm-tui
+## 方式一：默认安装
 pip install jiuwenswarm-tui
+
+## 方式二：使用国内镜像源（推荐）
+# 清华源
+pip install jiuwenswarm-tui -i https://pypi.tuna.tsinghua.edu.cn/simple
 
 # 启动 JiuwenSwarm-tui
 jiuwenswarm-tui
 ```
 
-### 💬 使用方式
+> 详细安装指导请见：[安装指南](docs/zh/安装指南.md)
 
-📖 详细的快速上手指南，请参阅 [📖 快速开始文档](docs/zh/Quickstart.md)，包含：
+## 快速上手
 
-- **配置模型**：模型配置与API设置
-- **开始对话**：如何与JiuwenSwarm对话
-- **会话管理**：清空会话的场景与效果对比
-- **清空记忆**：风险提示与操作步骤
+### 配置模型
 
-快速启动命令：
+JiuwenSwarm 支持多种模型平台：华为云 MaaS、OpenAI、DeepSeek、DashScope、SiliconFlow、OpenRouter 等 OpenAI 兼容接口，也支持本地模型部署。
 
-```bash
-# 安装并启动 JiuwenSwarm
-pip install jiuwenswarm
-jiuwenswarm-init    # 首次运行或升级后执行
-jiuwenswarm-start   # 启动服务，访问 http://localhost:5173
+![JiuwenSwarm 模型配置](docs/assets/images/jiuwenswarm配置模型.png)
 
-# 或使用 TUI 版本
-pip install jiuwenswarm-tui
-jiuwenswarm-tui
+### 执行对话
+
+JiuwenSwarm 支持三种执行模式，按需切换：
+
+| 模式 | 说明 | 适用场景 |
+| --- | --- | --- |
+| 规划模式 | 将需求分解为具体步骤，按计划逐步执行 | 复杂任务、需确认每步结果 |
+| 性能模式 | 灵活处理，支持并行任务 | 简单任务、快速响应 |
+| 集群模式 | Leader 编排多个专业 Agent 分工协同 | 大型复杂任务、需多角色协作 |
+
+**集群模式**（默认）
+
+示例输入：
+
+```text
+帮我深度调研新能源汽车行业，并生成一份分析报告。
 ```
 
-### 💬 对话模式
+![JiuwenSwarm 集群模式](docs/assets/images/jiuwenswarm集群模式.png)
 
-| 方式 | 说明                                        |
-|------|-------------------------------------------|
-| **Web前端** | 启动服务后访问 `http://localhost:5173`，通过浏览器直接对话 |
-| **小艺频道** | 华为手机用户可直接唤醒小艺，与JiuwenSwarm对话               |
-| **飞书频道** | 完成渠道配置后，在飞书中与JiuwenSwarm畅聊                 |
+**规划模式**
 
-### ⏰ 定时任务
+示例输入：
 
-设置心跳任务，填写待办事项，JiuwenSwarm即可定时被唤醒，自动执行预设任务。让你的日程管理更加智能高效！
+```text
+帮我开发一个个人博客网站，从技术选型、页面设计、前后端开发到部署上线，制定完整的开发计划并逐步执行。
+```
 
-#### 6️⃣ 清空记忆
+![JiuwenSwarm 规划模式](docs/assets/images/jiuwenswarm规划模式.png)
 
-当你需要让 JiuwenSwarm忘记之前的所有对话历史和用户信息时，可以清空记忆文件。
+**性能模式**
 
-**适用场景：**
-- **隐私保护**：清除包含敏感信息的历史记录
-- **全新开始**：开始一个完全不同的项目或话题，避免历史信息干扰
-- **调试排错**：记忆文件损坏或内容异常时重置
-- **用户切换**：多用户共用环境时，清除上一个用户的信息
+示例输入：
 
-**清空记忆操作步骤：**
+```text
+帮我查看下北京今天的天气。
+```
 
-记忆文件存储在 `{workspace_dir}/memory/` 目录下：
+![JiuwenSwarm 性能模式](docs/assets/images/jiuwenswarm性能模式.png)
 
-**方式一：通过 Agent 删除**
-直接告诉 JiuwenSwarm："请删除所有记忆文件" 或 "清空我的记忆"，Agent 会调用文件工具删除 memory 目录下的文件。
-![](docs/assets/images/jiuwenswarm_delete_memory.png)
+### TUI 界面
 
-**方式二：手动删除**
-停止 JiuwenSwarm服务后，直接删除 `memory/` 目录下的所有 Markdown 文件即可。
-![](docs/assets/images/jiuwenswarm_memory.png)
+在终端中体验 JiuwenSwarm，适合无 GUI 环境或偏好命令行的用户。
 
-> ⚠️ **注意**：清空记忆后无法恢复，请谨慎操作。建议定期备份重要的记忆文件。
+示例输入：
 
-## 📚 文档导航
+```text
+帮我写一个冒泡排序算法代码。
+```
 
-| 文档 | 核心内容 |
-|:-----|:---------|
-| [📖 安装指南](docs/zh/安装指南.md) | 从零安装（pip、源码、conda、Docker 等） |
-| [📖 快速开始](docs/zh/Quickstart.md) | 5分钟上手JiuwenSwarm |
-| [📖 快速开始(TUI)](docs/zh/Quickstart_tui.md) | 5分钟上手JiuwenSwarm-tui |
-| [📖 TUI 使用指南](docs/zh/TUI使用指南.md) | TUI 命令行参数、Slash 命令、工具与 Code 模式详解 |
-| [⚙️ 配置与工作空间](docs/zh/配置信息.md) | 环境配置与工作区管理 |
-| [📁 工作区结构](docs/zh/智能体.md) | workspace 目录说明，预置与动态生成内容 |
-| [🔄 模式系统](docs/zh/模式系统.md) | PLAN / AGENT / CODE / TEAM 模式切换与配置 |
-| [🛠️ 技能系统](docs/zh/技能.md) | 自定义技能开发指南 |
-| [🔄 Skill自演进](docs/zh/Skill自演进.md) | Skill自演进机制 |
-| [📱 频道配置](docs/zh/频道.md) | 飞书、小艺等频道接入 |
-| [💬 Discord](docs/zh/Discord.md) | Discord频道配置与使用 |
-| [💬 WhatsApp](docs/zh/whatsapp.md) | WhatsApp频道配置与使用 |
-| [⌨️ 命令行指令](docs/zh/命令行指令.md) | 命令行工具使用指南 |
-| [⏰ 定时任务](docs/zh/定时任务.md) | 定时任务管理 |
-| [💓 心跳](docs/zh/心跳.md) | 心跳机制与配置 |
-| [🧠 记忆功能](docs/zh/记忆.md) | 智能记忆与学习 |
-| [💡 经验记忆](docs/zh/经验记忆.md) | 任务级经验检索与沉淀 |
-| [📦 上下文压缩](docs/zh/上下文压缩卸载.md) | 上下文压缩与卸载 |
-| [💻 编码记忆](docs/zh/编码记忆.md) | Code模式专属记忆系统 |
-| [📋 任务规划](docs/zh/任务规划.md) | 任务规划与待办事项 |
-| [🌐 浏览器相关](docs/zh/浏览器.md) | 自动化浏览功能 |
-| [🔌 MCP配置](docs/zh/MCP配置.md) | MCP服务接入与配置 |
-| [🔒 工具权限与安全](docs/zh/工具权限与安全防护.md) | 权限模型与安全配置 |
-| [📝 Slash命令](docs/zh/Slash命令表.md) | Slash命令速查 |
-| [🏗️ Slash命令架构](docs/zh/SLASH_COMMAND_ARCHITECTURE.md) | Slash命令内部机制与扩展 |
-| [📨 E2A协议](docs/zh/E2A-protocol.md) | Gateway ↔ Agent 请求信封规范 |
-| [🤝 A2A接入](docs/zh/A2A.md) | A2A协议接入说明 |
-| [🔌 ACP插件配置](docs/zh/ACP插件使用.md) | ACP客户端插件配置 |
-| [👥 分布式Team](docs/zh/分布式Team.md) | 多进程分布式团队模式 |
-| [🔀 单机多实例](docs/zh/单机多实例运行.md) | 同一机器运行多个独立实例 |
-| [📦 打包桌面应用](docs/zh/打包exe指南.md) | 打包独立桌面可执行文件 |
-| [🚀 开发实践](docs/zh/开发实践/) | 开发实践与经验分享 |
+![JiuwenSwarm TUI 界面](docs/assets/images/jiuwenswarm_tui.png)
 
-## 🤝 参与贡献
+> 详细操作指南请见：[Quick Start](docs/zh/Quickstart.md)
 
-我们热烈欢迎社区贡献！无论是提交Bug、提出新功能建议，还是完善文档，都是对项目的宝贵支持。
+## 文档导航
 
-1. Fork 本仓库
-2. 创建您的特性分支 (`git checkout -b feature/AmazingFeature`)
-3. 提交您的改动 (`git commit -m 'Add some AmazingFeature'`)
-4. 推送到分支 (`git push origin feature/AmazingFeature`)
-5. 打开一个 Pull Request
+如需了解查看JiuwenSwarm 的常用使用说明与功能文档，请见：[文档导航](docs/README.md)
 
-## 📄 开源协议
+## Roadmap
 
-本项目采用 **Apache License 2.0** 开源协议，详情请参阅 [LICENSE](LICENSE) 文件。
+| 功能 | 状态  | 预计时间 | 价值 |
+| --- |-----| --- | --- |
+| Swarmflow 有状态算子 | 规划中 | 2026-07 | 工作流节点支持人工介入，作为有状态算子参与流程，根据中间结果审批、修正或接管后续步骤 |
+| Team 模式同 Session 飞书联机 | 规划中 | 2026-07 | 飞书用户作为 Human Agent 加入同会话，与 AI Agent 团队共同协作，人机混合编队让决策更精准 |
 
----
+## 常见问题
 
-<p align="center">
-  <strong>让智能触手可及，让生活更加简单</strong><br>
-  <sub>✨ JiuwenSwarm—— 您的专属AI助理 ✨</sub>
-</p>
+如需查询使用 JiuwenSwarm 中常见问题的解决方案，请见：[FAQ](docs/zh/FAQ.md)。
+
+## 参与贡献
+
+欢迎开发者参与 JiuwenSwarm 的建设。你可以通过以下方式贡献：
+
+- 提交 Bug、功能建议或使用问题：[Issues](https://gitcode.com/openJiuwen/jiuwenswarm/issues)
+- 提交代码、文档或示例：[Pull Requests](https://gitcode.com/openJiuwen/jiuwenswarm/pulls)
+- 分享 Skill：[Swarm Skills Hub](https://swarmskills.openjiuwen.com/)
+
+贡献前请阅读 [贡献指南](docs/zh/贡献指南.md)，了解调试流程、代码风格和提交规范。贡献路径地图见 [openJiuwen 贡献页面](https://openjiuwen.com/contribute)。
+
+### 贡献者
+
+感谢所有为 JiuwenSwarm 做出贡献的开发者：[查看贡献者列表](https://openjiuwen.com/community/contributors)
+
+## 加入社区
+
+| 入口 | 用途 | 链接 |
+| --- | --- | --- |
+| 官网 | 产品介绍、动态与生态建设 | [访问官网](https://openjiuwen.com) |
+| SIG | 技术路线、工程实践、生态共建 | [加入 SIG](https://openjiuwen.com/community/sig-center) |
+| Swarm Skills Hub | 浏览、发布和复用 JiuwenSwarm Skill | [访问 Swarm Skills Hub](https://swarmskills.openjiuwen.com/) |
+    
+## License  
+
+本项目基于 [Apache License 2.0](LICENSE) 开源。

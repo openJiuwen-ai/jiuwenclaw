@@ -56,7 +56,7 @@ async def test_cancel_session_agent_tasks_cancels_registered_task() -> None:
     getattr(adapter, "_session_agent_tasks")["sess_x"] = {task}
     await asyncio.sleep(0)
 
-    cancelled_count = getattr(adapter, "_cancel_session_agent_tasks")("sess_x")
+    cancelled_count = await getattr(adapter, "_cancel_session_agent_tasks")("sess_x")
     assert cancelled_count == 1
     await asyncio.wait_for(cancelled.wait(), timeout=2)
 

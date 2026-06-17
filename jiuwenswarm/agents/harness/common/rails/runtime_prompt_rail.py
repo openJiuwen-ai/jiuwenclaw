@@ -239,6 +239,23 @@ class RuntimePromptRail(DeepAgentRail):
             priority=93,
         ))
 
+        # ── Language output constraint (injected near end) ──
+        self.system_prompt_builder.remove_section("language_output")
+        language_name = _LANGUAGE_NAMES.get(language_val, language_val)
+        language_output_content = (
+            "# Language\n\n"
+            f"Always respond in {language_name}. "
+            f"Use {language_name} for all explanations, comments, "
+            f"and communications with the user. "
+            f"Technical terms and code identifiers should remain "
+            f"in their original form."
+        )
+        self.system_prompt_builder.add_section(PromptSection(
+            name="language_output",
+            content={"cn": language_output_content, "en": language_output_content},
+            priority=93,
+        ))
+
         # ── Platform / OS environment section ──
         os_type = sys.platform
         shell_path = os.environ.get("SHELL", "")

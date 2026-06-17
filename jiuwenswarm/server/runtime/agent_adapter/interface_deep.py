@@ -63,10 +63,10 @@ from openjiuwen.harness.rails import (
     HeartbeatRail,
     MemoryRail,
     configure_skill_evolution_runtime,
+    unconfigure_skill_evolution,
 )
 from openjiuwen.harness.rails.context_engineer.context_assemble_rail import ContextAssembleRail
 from openjiuwen.harness.rails.context_engineer.context_processor_rail import ContextProcessorRail
-from openjiuwen.agent_evolving.signal import SignalDetector
 from openjiuwen.harness.subagents.browser_agent import build_browser_agent_config
 from openjiuwen.harness.subagents.research_agent import build_research_agent_config
 from openjiuwen.harness.tools import (
@@ -326,7 +326,31 @@ def _get_skill_create_enabled(config: dict[str, Any] | None) -> bool:
     env_skill_create = os.getenv("SKILL_CREATE")
     if env_skill_create is not None:
         return env_skill_create.lower() in ("true", "1", "yes")
-    return (config or {}).get("evolution", {}).get("skill_create", False)
+    return _get_evolution_config(config).get("skill_create", False)
+
+
+def _get_evolution_config(config: dict[str, Any] | None) -> dict[str, Any]:
+    if not isinstance(config, dict):
+        return {}
+    react_config = config.get("react")
+    if isinstance(react_config, dict) and isinstance(react_config.get("evolution"), dict):
+        return react_config["evolution"]
+    evolution_config = config.get("evolution")
+    if isinstance(evolution_config, dict):
+        return evolution_config
+    return {}
+
+
+def _get_evolution_auto_scan_enabled(config: dict[str, Any] | None) -> bool:
+    env_auto_scan = os.getenv("EVOLUTION_AUTO_SCAN")
+    if env_auto_scan is not None:
+        return env_auto_scan.lower() in ("true", "1", "yes")
+    return _get_evolution_config(config).get("auto_scan", False)
+
+
+def _set_skill_evolution_auto_scan(rail: Any, enabled: bool) -> None:
+    rail.auto_scan = enabled
+    rail.fuzzy_review = enabled
 
 
 def _clean_heartbeat_content(content: str) -> str:
@@ -836,7 +860,7 @@ class JiuWenSwarmDeepAdapter:
         if not bucket:
             self._session_agent_tasks.pop(sid, None)
 
-    def _cancel_session_agent_tasks(self, session_id: str) -> int:
+    async def _cancel_session_agent_tasks(self, session_id: str) -> int:
         sid = self._resolve_interrupt_session_id(session_id)
         tasks_dict = getattr(self, "_session_agent_tasks", None)
         if not tasks_dict:
@@ -853,6 +877,11 @@ class JiuWenSwarmDeepAdapter:
                 cancelled,
                 sid,
             )
+            # 等待被取消的任务完成清理，避免僵尸调用：
+            # task.cancel() 只调度 CancelledError，不保证任务已停止。
+            # 如果不等待，后续 interrupt 处理（rail.abort, instance.abort）
+            # 可能与任务清理并发执行，且调用方可能在任务仍在运行时返回"成功"。
+            await asyncio.gather(*[t for t in tasks if t is not None], return_exceptions=True)
         return cancelled
 
     def _clear_a2x_runtime_state(self) -> None:
@@ -2427,17 +2456,14 @@ class JiuWenSwarmDeepAdapter:
     def _build_skill_evolution_rail(self, config: dict[str, Any]) -> SkillEvolutionRail | None:
         """Build SkillEvolutionRail."""
         try:
-            _env_auto_scan = os.getenv("EVOLUTION_AUTO_SCAN")
-            if _env_auto_scan is not None:
-                evolution_auto_scan: bool = _env_auto_scan.lower() in ("true", "1", "yes")
-            else:
-                evolution_auto_scan = config.get("evolution", {}).get("auto_scan", False)
+            evolution_auto_scan = _get_evolution_auto_scan_enabled(config)
             model_name = self._default_model_name or config.get("model_name", "gpt-4")
             skill_evolution_rail = SkillEvolutionRail(
                 skills_dir=str(get_agent_skills_dir()),
                 llm=self._model,
                 model=model_name,
                 auto_scan=evolution_auto_scan,
+                fuzzy_review=evolution_auto_scan,
                 auto_save=False,
                 disabled_skills=self._skill_manager.list_execution_disabled_skills(),
             )
@@ -2453,11 +2479,13 @@ class JiuWenSwarmDeepAdapter:
         if self._instance is None:
             return
 
-        _env_auto_scan = os.getenv("EVOLUTION_AUTO_SCAN")
-        if _env_auto_scan is not None:
-            evolution_auto_scan = _env_auto_scan.lower() in ("true", "1", "yes")
-        else:
-            evolution_auto_scan = self._config_cache.get("evolution", {}).get("auto_scan", False)
+        resolved_language = self._resolve_runtime_language()
+        evolution_auto_scan = _get_evolution_auto_scan_enabled(self._config_cache)
+        if (
+            self._skill_evolution_rail is not None
+            and getattr(self._skill_evolution_rail, "_language", None) != resolved_language
+        ):
+            await self._unconfigure_active_evolution_rails()
 
         disabled_skills = (
             self._skill_manager.list_execution_disabled_skills()
@@ -2471,11 +2499,38 @@ class JiuWenSwarmDeepAdapter:
             model=self._default_model_name
             or self._config_cache.get("model_name", "gpt-4"),
             auto_scan=evolution_auto_scan,
+            fuzzy_review=evolution_auto_scan,
             auto_save=False,
             disabled_skills=disabled_skills,
-            language=self._resolve_runtime_language(),
+            language=resolved_language,
         )
         self._refresh_active_evolution_rail_refs()
+        if self._skill_evolution_rail is not None:
+            _set_skill_evolution_auto_scan(self._skill_evolution_rail, evolution_auto_scan)
+
+    async def _unconfigure_active_evolution_rails(self) -> None:
+        """Remove cached single-agent evolution rails before rebuilding them."""
+        if self._instance is None:
+            return
+
+        rails = [
+            rail
+            for rail in (self._skill_evolution_rail, self._evolution_interrupt_rail)
+            if rail is not None
+        ]
+        unconfigure_skill_evolution(self._instance, team=False)
+        unregister = getattr(self._instance, "unregister_rail", None)
+        if callable(unregister):
+            for rail in rails:
+                await unregister(rail)
+        stale_rails = getattr(self._instance, "_stale_rails", None)
+        if isinstance(stale_rails, list):
+            removed_ids = {id(rail) for rail in rails}
+            self._instance._stale_rails = [  # pylint: disable=protected-access
+                rail for rail in stale_rails if id(rail) not in removed_ids
+            ]
+        self._skill_evolution_rail = None
+        self._evolution_interrupt_rail = None
 
     def _refresh_active_evolution_rail_refs(self) -> None:
         """Refresh cached rail references after agent-core runtime configure."""
@@ -2804,11 +2859,13 @@ class JiuWenSwarmDeepAdapter:
     def _resolve_enable_task_loop(
         config: dict[str, Any], config_base: dict[str, Any] | None
     ) -> bool:
-        """Resolve enable_task_loop considering skill_create requirement.
+        """Resolve enable_task_loop considering evolution rail requirements.
 
-        SkillCreateRail requires task-loop mode (enable_task_loop=True) to function
-        because it uses AFTER_TASK_ITERATION event and enqueue_follow_up().
-        When skill_create=True, we force enable_task_loop=True regardless of user config.
+        SkillCreateRail and auto-scan SkillEvolutionRail follow-ups require
+        task-loop mode (enable_task_loop=True) because they use
+        AFTER_TASK_ITERATION events and enqueue_follow_up().
+        When skill_create=True or auto_scan=True, we force enable_task_loop=True
+        regardless of user config.
 
         Args:
             config: The react config section.
@@ -2819,6 +2876,7 @@ class JiuWenSwarmDeepAdapter:
         """
         config_base = config_base or get_config()
         skill_create_enabled = _get_skill_create_enabled(config_base)
+        evolution_auto_scan_enabled = _get_evolution_auto_scan_enabled(config_base)
         configured_value = config.get("enable_task_loop", True)
 
         if skill_create_enabled:
@@ -2826,6 +2884,14 @@ class JiuWenSwarmDeepAdapter:
                 logger.warning(
                     "[JiuWenSwarmDeepAdapter] skill_create=True requires enable_task_loop=True; "
                     "overriding user config (enable_task_loop=%s -> True)",
+                    configured_value,
+                )
+            return True
+        if evolution_auto_scan_enabled:
+            if not configured_value:
+                logger.warning(
+                    "[JiuWenSwarmDeepAdapter] evolution.auto_scan=True requires "
+                    "enable_task_loop=True; overriding user config (enable_task_loop=%s -> True)",
                     configured_value,
                 )
             return True
@@ -2906,18 +2972,10 @@ class JiuWenSwarmDeepAdapter:
         # Apply in-place updates to skill_evolution_rail (no re-init needed).
         if self._skill_evolution_rail is not None:
             self._skill_evolution_rail.update_llm(self._model, self._default_model_name)
-            _env_auto_scan = os.getenv("EVOLUTION_AUTO_SCAN")
-            if _env_auto_scan is not None:
-                self._skill_evolution_rail.auto_scan = _env_auto_scan.lower() in (
-                    "true",
-                    "1",
-                    "yes",
-                )
-            else:
-                self._skill_evolution_rail.auto_scan = config.get("evolution", {}).get(
-                    "auto_scan",
-                    False,
-                )
+            _set_skill_evolution_auto_scan(
+                self._skill_evolution_rail,
+                _get_evolution_auto_scan_enabled(config),
+            )
 
         # Reuse existing SkillUseRail to preserve dynamically loaded skills
         # from activate_package() / load_harness_config().  When agentic
@@ -3982,7 +4040,7 @@ class JiuWenSwarmDeepAdapter:
     def _resolve_interrupt_session_id(session_id: str | None) -> str:
         return (session_id or "default").strip() or "default"
 
-    def _stop_session_interrupt_work(
+    async def _stop_session_interrupt_work(
         self,
         session_id: str | None,
         *,
@@ -3992,7 +4050,7 @@ class JiuWenSwarmDeepAdapter:
         """Per-session teardown: rail abort, shell kill, cancelled tool collection."""
         sid = self._resolve_interrupt_session_id(session_id)
         cancelled_tool_results: list[dict[str, Any]] = []
-        cancelled_tasks = self._cancel_session_agent_tasks(sid)
+        cancelled_tasks = await self._cancel_session_agent_tasks(sid)
         if self._stream_event_rail is not None:
             self._stream_event_rail.abort(session_id or sid)
             self._stream_event_rail.collect_cancelled_tool_updates(session_id or sid)
@@ -4123,7 +4181,7 @@ class JiuWenSwarmDeepAdapter:
 
         elif intent == "supplement":
             # supplement: 停止当前执行，但保留 todo（新任务会根据 todo 待办继续执行）
-            cancelled_tool_results = self._stop_session_interrupt_work(
+            cancelled_tool_results = await self._stop_session_interrupt_work(
                 request.session_id,
                 intent="supplement",
             )
@@ -4145,7 +4203,7 @@ class JiuWenSwarmDeepAdapter:
             # DeepAgent 的 _run_task_loop_stream 后台 Task 不会停止
             # （stream_task.cancel() 只取消了 chunk 转发 Task，不影响 _stream_process）。
             # SessionManager.cancel_session_task 仅管理非流式队列 Task，对流式后台 Task 无效。
-            cancelled_tool_results = self._stop_session_interrupt_work(
+            cancelled_tool_results = await self._stop_session_interrupt_work(
                 request.session_id,
                 intent="cancel",
                 reset_for_new_task=True,
@@ -4657,163 +4715,6 @@ class JiuWenSwarmDeepAdapter:
                 exc,
             )
 
-    # ------------------------------------------------------------------
-    # /evolve, /evolve_list, /evolve_simplify & /solidify command handlers
-    # ------------------------------------------------------------------
-
-    async def _handle_evolve_command(self, query: str, session_id: str) -> dict[str, Any]:
-        """/evolve [<skill_name> [<user_query>...]] handler using the active SDK path.
-
-        Newer regular SkillEvolutionRail returns a follow-up prompt for the
-        agent-driven active review path. Older SDKs may still return structured
-        approval data directly. Passive/background evolution still uses the
-        host-event drain path.
-
-        Args:
-            query: Command query, format: /evolve <skill_name> [<user_query>...]
-            session_id: Current session ID for message collection
-
-        Returns a result dict.  When evolution records are generated the dict
-        includes an ``approval_chunks`` list so the caller can forward the
-        approval event to the frontend.
-        """
-        rail = self._skill_evolution_rail
-        assert rail is not None
-        store = rail.store
-
-        skill_names = filter_visible_skill_names(store.list_skill_names())
-
-        parts = query.split(maxsplit=1)
-        skill_arg = parts[1].strip() if len(parts) > 1 else ""
-
-        # --- bare /evolve summary. "list" is retained for backward compatibility. ---
-        if not skill_arg or skill_arg == "list":
-            if not skill_names:
-                return {
-                    "output": "当前 skills_base_dir 下未找到任何 Skill 目录。",
-                    "result_type": "answer",
-                }
-            summary = await store.list_pending_summary(skill_names)
-            return {
-                "output": f"**Skills 演进记录：**\n\n{summary}",
-                "result_type": "answer",
-            }
-
-        # --- /evolve <skill_name> [<user_query>...] ---
-        # Parse skill_name and optional user_query
-        skill_parts = skill_arg.split(maxsplit=1)
-        skill_name = skill_parts[0].strip()
-        user_query = skill_parts[1].strip() if len(skill_parts) > 1 else ""
-
-        validation_error = validate_evolution_skill(store, skill_name, require_skill_md=True)
-        if validation_error is not None:
-            return {"output": validation_error, "result_type": "error"}
-
-        writable_error = validate_evolution_log_writable(store, skill_name)
-        if writable_error is not None:
-            return {"output": writable_error, "result_type": "error"}
-
-        # 1) Collect conversation messages from the context engine cache
-        parsed_messages = self._collect_messages_for_evolve(session_id)
-
-        # 2) Detect signals (reuse rail's dedup set)
-        existing_skills = {n for n in skill_names if store.skill_exists(n)}
-        detector = SignalDetector(existing_skills=existing_skills)
-        detected = detector.detect(parsed_messages) if parsed_messages else []
-
-        new_signals = [
-            sig
-            for sig in detected
-            if (sig.signal_type, sig.excerpt[:100]) not in rail.processed_signal_keys
-        ]
-        for sig in new_signals:
-            rail.processed_signal_keys.add((sig.signal_type, sig.excerpt[:100]))
-
-        attributed = [s for s in new_signals if s.skill_name == skill_name]
-
-        evolution_intent = user_query
-        if not evolution_intent:
-            for sig in attributed:
-                if getattr(sig, "excerpt", ""):
-                    evolution_intent = sig.excerpt
-                    break
-        if not evolution_intent:
-            for message in reversed(parsed_messages):
-                content = message.get("content") if isinstance(message, dict) else getattr(message, "content", "")
-                if isinstance(content, str) and content:
-                    evolution_intent = content
-                    break
-        if not evolution_intent:
-            evolution_intent = f"用户显式请求演进 Skill '{skill_name}'。"
-
-        try:
-            evolve_result = await rail.request_user_evolution(
-                skill_name,
-                evolution_intent,
-            )
-        except Exception as exc:
-            logger.warning("[JiuWenSwarmDeepAdapter] evolve generate failed (skill=%s): %s", skill_name, exc)
-            return {
-                "output": f"演进经验生成失败：{exc}",
-                "result_type": "error",
-            }
-
-        followup_prompt = str(getattr(evolve_result, "followup_prompt", "") or "").strip()
-        if followup_prompt:
-            return self._followup_response("run_evolve_followup", followup_prompt, skill_name)
-
-        status_response = evolution_status_response(
-            evolve_result,
-            generation_failed_output="llm error",
-            no_records_output="已请求演进，但本次未生成可保存经验。",
-        )
-        if status_response is not None:
-            return status_response
-
-        if not getattr(evolve_result, "has_changes", False):
-            return {
-                "output": "当前对话未发现明确的演进信号（无工具执行失败、无用户纠正）。\n",
-                "result_type": "answer",
-            }
-
-        approval_chunks: list[dict[str, Any]] = []
-        parsed = self._parse_stream_chunk(getattr(evolve_result, "approval_event", None))
-        if isinstance(parsed, dict) and parsed.get("event_type") == "chat.ask_user_question":
-            request_id = parsed.get("request_id")
-            questions = parsed.get("questions")
-            has_request_id = isinstance(request_id, str) and bool(request_id.strip())
-            has_questions = isinstance(questions, list) and bool(questions)
-            if has_request_id and has_questions:
-                approval_chunks.append(parsed)
-
-        if approval_chunks:
-            questions = approval_chunks[0].get("questions", [])
-        else:
-            records = list(getattr(evolve_result, "records", []) or [])
-            if not records:
-                return {
-                    "output": "当前对话未发现明确的演进信号（无工具执行失败、无用户纠正）。\n",
-                    "result_type": "answer",
-                }
-            return {
-                "output": f"已为 Skill '{skill_name}' 生成 {len(records)} 条演进经验，但审批事件为空或格式无效。",
-                "result_type": "error",
-            }
-
-        # Build summary from questions
-        summaries = "\n".join(
-            f"  {i + 1}. {q.get('question', '')[:200]}" for i, q in enumerate(questions)
-        )
-
-        return {
-            "output": (
-                f"已为 Skill '{skill_name}' 生成 {len(questions)} 条演进经验，请审批：\n"
-                f"{summaries}"
-            ),
-            "result_type": "answer",
-            "approval_chunks": approval_chunks,
-        }
-
     @staticmethod
     def _approval_chunk_from_event(event: Any) -> dict[str, Any] | None:
         parsed = JiuWenSwarmDeepAdapter._parse_stream_chunk(event)
@@ -4894,154 +4795,6 @@ class JiuWenSwarmDeepAdapter:
             no_changes_output="当前对话未发现明确的演进信号（无工具执行失败、无用户纠正）。\n",
             invalid_output=f"已为 Skill '{skill_name}' 生成演进经验，但审批事件为空或格式无效。",
         )
-
-    def _collect_messages_for_evolve(self, session_id: str) -> list[dict]:
-        """Retrieve and normalize cached conversation messages for /evolve."""
-        if self._instance is None or self._instance.react_agent is None:
-            return []
-
-        context_engine = self._instance.react_agent.context_engine
-        context = context_engine.get_context(session_id=session_id)
-        if context is None:
-            return []
-
-        try:
-            raw_messages = list(context.get_messages())
-        except Exception as exc:
-            logger.debug("[JiuWenSwarmDeepAdapter] _collect_messages_for_evolve failed: %s", exc)
-            return []
-
-        return SkillEvolutionRail._parse_messages(raw_messages)
-
-    async def _handle_evolve_list_command(self, query: str) -> dict[str, Any]:
-        """/evolve_list <skill_name> [--sort score] — show experiences with scores."""
-        rail = self._skill_evolution_rail
-        assert rail is not None
-        store = rail.store
-
-        parts = query.split()
-        skill_name = parts[1] if len(parts) > 1 else ""
-        if not skill_name or skill_name.startswith("--"):
-            return {
-                "output": "请指定 Skill 名称：`/evolve_list <skill_name>`",
-                "result_type": "error",
-            }
-
-        validation_error = validate_evolution_skill(store, skill_name, require_skill_md=False)
-        if validation_error is not None:
-            return {"output": validation_error, "result_type": "error"}
-
-        records = await store.get_records_by_score(skill_name)
-        if not records:
-            return {
-                "output": f"Skill '{skill_name}' 暂无演进经验。",
-                "result_type": "answer",
-            }
-
-        avg_score = sum(r.score for r in records) / len(records)
-
-        lines = [
-            f'📊 Skill "{skill_name}" — 经验库摘要\n',
-            f"共 {len(records)} 条经验 | 平均分：{avg_score:.2f}\n",
-            "| # | Score | Used | Effect | Section | Content (preview) |",
-            "|---|---:|---|---|---|---|",
-        ]
-        for i, r in enumerate(records, 1):
-            stats = r.usage_stats
-            if stats:
-                used_str = (
-                    f"{stats.times_used}/{stats.times_presented}"
-                    if stats.times_presented
-                    else "0/0"
-                )
-                effect_str = f"+{stats.times_positive}/-{stats.times_negative}"
-            else:
-                used_str = "0/0"
-                effect_str = "+0/-0"
-            section = str(r.change.section).replace("|", "\\|")
-            preview = r.change.content.split("\n")[0][:40].replace("|", "\\|")
-            lines.append(
-                f"| {i} | {r.score:.2f} | {used_str} | {effect_str} | {section} | {preview} |"
-            )
-
-        lines.append(f"\n提示：使用 /evolve_simplify {skill_name} 执行智能整理")
-        return {
-            "output": "\n".join(lines),
-            "result_type": "answer",
-        }
-
-    async def _handle_evolve_simplify_command(self, query: str) -> dict[str, Any]:
-        """/evolve_simplify <skill_name> [user_intent] — LLM-based experience cleanup with approval."""
-        rail = self._skill_evolution_rail
-        assert rail is not None
-        store = rail.store
-
-        parts = query.split(maxsplit=2)
-        skill_name = parts[1] if len(parts) > 1 else ""
-        user_intent = parts[2] if len(parts) > 2 else None
-
-        if not skill_name:
-            return {
-                "output": "请指定 Skill 名称：`/evolve_simplify <skill_name> [user_intent]`",
-                "result_type": "error",
-            }
-
-        validation_error = validate_evolution_skill(store, skill_name, require_skill_md=True)
-        if validation_error is not None:
-            return {"output": validation_error, "result_type": "error"}
-
-        writable_error = validate_evolution_log_writable(store, skill_name)
-        if writable_error is not None:
-            return {"output": writable_error, "result_type": "error"}
-
-        try:
-            simplify_result = await rail.request_simplify(skill_name, user_intent)
-        except Exception as exc:
-            logger.warning("[JiuWenSwarmDeepAdapter] evolve_simplify failed: %s", exc)
-            return {"output": f"智能整理分析失败：{exc}", "result_type": "error"}
-
-        followup_prompt = str(getattr(simplify_result, "followup_prompt", "") or "").strip()
-        if followup_prompt:
-            return self._followup_response("run_simplify_followup", followup_prompt, skill_name)
-
-        return self._approval_response_from_simplify_result(
-            skill_name=skill_name,
-            simplify_result=simplify_result,
-        )
-
-    async def _handle_evolve_rebuild_command(self, query: str) -> dict[str, Any]:
-        """/evolve_rebuild <skill_name> [user_intent] — Build followup prompt for rebuild."""
-        rail = self._skill_evolution_rail
-        assert rail is not None
-        store = rail.store
-
-        parts = query.split(maxsplit=2)
-        skill_name = parts[1] if len(parts) > 1 else ""
-        user_intent = parts[2] if len(parts) > 2 else None
-
-        if not skill_name:
-            return {
-                "output": "请指定 Skill 名称：`/evolve_rebuild <skill_name> [user_intent]`",
-                "result_type": "error",
-            }
-
-        validation_error = validate_evolution_skill(store, skill_name, require_skill_md=False)
-        if validation_error is not None:
-            return {"output": validation_error, "result_type": "error"}
-
-        try:
-            followup_prompt = await rail.request_rebuild(skill_name, user_intent)
-        except Exception as exc:
-            logger.warning("[JiuWenSwarmDeepAdapter] evolve_rebuild failed: %s", exc)
-            return {"output": f"重建分析失败：{exc}", "result_type": "error"}
-
-        if not followup_prompt:
-            return {
-                "output": f"Skill '{skill_name}' 未生成可执行的重建指令。",
-                "result_type": "error",
-            }
-
-        return self._followup_response("run_rebuild_followup", followup_prompt, skill_name)
 
     async def _handle_evolve_rollback_command(self, query: str) -> dict[str, Any]:
         """/evolve_rollback <skill_name> [version] — Rollback skill to archived version."""

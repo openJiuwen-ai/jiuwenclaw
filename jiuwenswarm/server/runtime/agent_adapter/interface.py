@@ -11,13 +11,17 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import dataclass
 import inspect
 import json
 import logging
 import re
 import time
 from pathlib import Path
-from typing import Any, AsyncIterator, Tuple
+from typing import TYPE_CHECKING, Any, AsyncIterator, Tuple
+
+if TYPE_CHECKING:
+    from openjiuwen.core.context_engine.engine import ContextEngine
 
 from datetime import datetime, timedelta, timezone
 from dotenv import load_dotenv
@@ -35,7 +39,7 @@ from jiuwenswarm.server.runtime.session.session_history import (
 from jiuwenswarm.server.runtime.session.session_manager import SessionManager
 from jiuwenswarm.server.runtime.skill.skill_manager import SkillManager
 from jiuwenswarm.server.utils.utils import is_team_params
-from jiuwenswarm.common.config import get_config
+from jiuwenswarm.common.config import get_config, is_auto_memory_enabled
 from jiuwenswarm.extensions.registry import ExtensionRegistry
 from jiuwenswarm.common.schema.agent import AgentRequest, AgentResponse, AgentResponseChunk
 from jiuwenswarm.extensions.hook_event import AgentServerHookEvents
@@ -48,6 +52,9 @@ from jiuwenswarm.common.utils import (
     reset_free_search_runtime_flags,
 )
 from jiuwenswarm.server.runtime.a2ui.integration import finalize_assistant_response_if_a2ui
+from jiuwenswarm.agents.harness.common.auto_memory import (
+    _execute_auto_memory_extraction,
+)
 
 
 def _history_user_content(params: Any, query: Any) -> Any:
@@ -107,6 +114,58 @@ def _contains_a2ui_marker(value: Any) -> bool:
 
 load_dotenv(dotenv_path=get_env_file(), override=True)
 reset_free_search_runtime_flags()
+
+
+def _trigger_auto_memory_extraction(
+    adapter: Any,
+    request: AgentRequest,
+    session_id: str,
+    is_stream: bool = False,
+) -> None:
+    """Trigger auto memory extraction after conversation ends.
+
+    Extracted helper to avoid code duplication between process_message and process_message_stream.
+
+    Args:
+        adapter: The AgentAdapter instance (e.g., JiuwenSwarmCodeAdapter).
+        request: The agent request containing project_dir.
+        session_id: The session ID for context retrieval.
+        is_stream: Whether this is from stream mode (for logging).
+    """
+    project_dir = request.params.get("project_dir") if isinstance(request.params, dict) else None
+    mode_label = "(stream)" if is_stream else ""
+    logger.info("[auto_memory] Trigger check %s: enabled=%s", mode_label, True)
+
+    if not project_dir:
+        logger.info("[auto_memory] Skipped %s: no project_dir", mode_label)
+        return
+
+    # Get context_engine from adapter._instance.react_agent
+    # adapter is AgentAdapter (e.g., CodeAgentRail), adapter._instance is DeepAgent
+    context_engine = None
+    adapter_instance = getattr(adapter, "_instance", None)
+    if adapter_instance is not None:
+        react_agent = getattr(adapter_instance, "react_agent", None)
+        if react_agent is not None:
+            context_engine = getattr(react_agent, "context_engine", None)
+            logger.debug("[auto_memory] context_engine obtained: %s",
+                     type(context_engine).__name__ if context_engine else "None")
+        else:
+            logger.warning("[auto_memory] adapter._instance has no react_agent")
+    else:
+        logger.warning("[auto_memory] adapter has no _instance attribute")
+
+    # Fire-and-forget: don't block on extraction
+    logger.info("[auto_memory] Launching extraction task %s", mode_label)
+    asyncio.create_task(
+        _execute_auto_memory_extraction(
+            project_dir=project_dir,
+            session_id=session_id,
+            request=request,
+            context_engine=context_engine,
+            parent_agent=adapter,  # Pass adapter (not adapter._instance) for cache sharing
+        )
+    )
 
 logger = logging.getLogger(__name__)
 
@@ -1311,6 +1370,10 @@ class JiuWenSwarm:
                 )
                 await ExtensionRegistry.get_instance().trigger(AgentServerHookEvents.MEMORY_AFTER_CHAT, after_ctx)
 
+            # auto memory: extract memories after conversation ends
+            if is_auto_memory_enabled():
+                _trigger_auto_memory_extraction(adapter, request, session_id, is_stream=False)
+
         return result
 
     async def process_message_stream(
@@ -1652,6 +1715,10 @@ class JiuWenSwarm:
                 extra=request.params,
             )
             await ExtensionRegistry.get_instance().trigger(AgentServerHookEvents.MEMORY_AFTER_CHAT, after_ctx)
+
+        # auto memory: extract memories after conversation ends
+        if is_auto_memory_enabled():
+            _trigger_auto_memory_extraction(adapter, request, session_id, is_stream=True)
 
         yield AgentResponseChunk(
             request_id=rid,

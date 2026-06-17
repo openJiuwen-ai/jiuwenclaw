@@ -67,7 +67,10 @@ from jiuwenswarm.agents.harness.common.tools import (
 )
 from jiuwenswarm.agents.harness.common.tools.acp_chat import acp_chat
 from jiuwenswarm.common.config import get_config
-from jiuwenswarm.common.coding_memory_paths import resolve_project_coding_memory_dir
+from jiuwenswarm.common.coding_memory_paths import (
+    resolve_project_coding_memory_dir,
+    resolve_project_coding_memory_workspace_path,
+)
 from jiuwenswarm.server.runtime.agent_adapter.code_agent_rail import CodeAgentRail
 from jiuwenswarm.common.hooks_config import load_hooks_config
 from jiuwenswarm.server.hooks.user_hook_rail import UserHookRail
@@ -231,14 +234,14 @@ def _resolve_coding_memory_dir(
 
 
 def _build_coding_memory_directory_node(
-    coding_memory_dir: str,
+    coding_memory_path: str,
     *,
     description: str,
 ) -> dict[str, Any]:
     return {
         "name": "coding_memory",
         "description": description,
-        "path": coding_memory_dir,
+        "path": coding_memory_path,
         "children": [
             {
                 "name": "MEMORY.md",
@@ -263,13 +266,12 @@ def _set_workspace_coding_memory_directory(
     if not callable(set_directory):
         return
 
-    coding_memory_dir = _resolve_coding_memory_dir(
+    coding_memory_path = resolve_project_coding_memory_workspace_path(
         project_dir=project_dir,
-        agent_workspace_dir=agent_workspace_dir,
     )
     set_directory(
         _build_coding_memory_directory_node(
-            coding_memory_dir,
+            coding_memory_path,
             description=description,
         )
     )

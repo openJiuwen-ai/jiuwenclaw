@@ -1,4 +1,4 @@
-# Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
+# Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 
 """Stream utilities for parsing agent output chunks."""
 
@@ -167,9 +167,22 @@ def _parse_typed_chunk(chunk: Any, _has_streamed_content: bool) -> dict[str, Any
             if data is None and isinstance(payload, dict):
                 data = payload.get("data", [])
             error = next(
-                (item.text for item in data if hasattr(item, "text")),
-                "任务执行失败",
+                (
+                    item.text
+                    for item in data
+                    if hasattr(item, "text") and str(item.text or "").strip()
+                ),
+                None,
             )
+            if error is None:
+                error = next(
+                    (
+                        str(item.get("text"))
+                        for item in data
+                        if isinstance(item, dict) and str(item.get("text") or "").strip()
+                    ),
+                    "任务执行失败",
+                )
             return {"event_type": "chat.error", "error": error}
 
     if chunk_type == "llm_output":

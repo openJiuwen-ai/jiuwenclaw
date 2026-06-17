@@ -177,6 +177,7 @@ async def test_evolve_slash_lazy_init_registers_active_review_rails(monkeypatch)
             "llm": adapter._model,  # pylint: disable=protected-access
             "model": "default-model",
             "auto_scan": True,
+            "fuzzy_review": True,
             "auto_save": False,
             "disabled_skills": ["disabled-demo"],
             "language": "en",
@@ -241,41 +242,26 @@ def test_sync_active_evolution_review_agent_after_reload_skips_when_disabled():
 
 
 @pytest.mark.anyio
-async def test_agent_evolve_simplify_already_minimal_returns_answer():
-    class _FakeStore:
-        @staticmethod
-        def list_skill_names() -> list[str]:
-            return ["demo-skill"]
-
-        @staticmethod
-        def skill_exists(skill_name: str) -> bool:
-            return skill_name == "demo-skill"
-
-        @staticmethod
-        def skill_definition_exists(skill_name: str) -> bool:
-            return skill_name == "demo-skill"
-
-    class _FakeRail:
-        store = _FakeStore()
-
-        @staticmethod
-        async def request_simplify(*_args, **_kwargs):
-            return SimpleNamespace(
-                status="already_minimal",
-                message="Already minimal",
-                approval_event=None,
-                actions=[],
-            )
-
+async def test_agent_evolve_simplify_routes_to_slash_handler(monkeypatch):
     adapter = JiuWenSwarmDeepAdapter()
-    adapter._skill_evolution_rail = _FakeRail()  # pylint: disable=protected-access
+    adapter._config_cache = {"evolution": {"enabled": True}}  # pylint: disable=protected-access
 
-    result = await adapter._handle_evolve_simplify_command(  # pylint: disable=protected-access
+    async def _fake_handler(_query, context):
+        assert context.mode == "agent.plan"
+        return {"result_type": "answer", "output": "Already minimal"}
+
+    monkeypatch.setattr(interface_deep_module, "handle_evolution_slash_command", _fake_handler)
+
+    result = await adapter._handle_slash_command(  # pylint: disable=protected-access
         "/evolve_simplify demo-skill",
+        session_id="sess-agent-evolve",
+        mode="agent.plan",
     )
 
+    assert result is not None
+    assert result["slash_command"] == "evolve_simplify"
     assert result["result_type"] == "answer"
-    assert result["output"].strip()
+    assert result["output"] == "Already minimal"
 
 
 @pytest.mark.anyio
@@ -347,322 +333,32 @@ async def test_handle_user_answer_does_not_route_call_interrupt_approval_to_regu
 
 
 @pytest.mark.anyio
-async def test_agent_evolve_missing_skill_md_fails_before_sdk_call(monkeypatch):
-    class _FakeStore:
-        @staticmethod
-        def list_skill_names() -> list[str]:
-            return ["demo-skill"]
-
-        @staticmethod
-        def skill_exists(skill_name: str) -> bool:
-            return skill_name == "demo-skill"
-
-        @staticmethod
-        def skill_definition_exists(skill_name: str) -> bool:
-            return False
-
-    class _FakeRail:
-        store = _FakeStore()
-        processed_signal_keys: set[tuple[str, str]] = set()
-
-        @staticmethod
-        async def request_user_evolution(*_args, **_kwargs):
-            pytest.fail("missing SKILL.md must be rejected before calling SDK evolution")
-
+async def test_agent_evolve_rebuild_routes_to_slash_adapter(monkeypatch):
     adapter = JiuWenSwarmDeepAdapter()
-    adapter._skill_evolution_rail = _FakeRail()  # pylint: disable=protected-access
-    monkeypatch.setattr(
-        adapter,
-        "_collect_messages_for_evolve",
-        lambda _session_id: [{"role": "user", "content": "please evolve"}],
+    adapter._config_cache = {"evolution": {"enabled": True}}  # pylint: disable=protected-access
+
+    async def _fake_handler(query, _context):
+        assert query == "/evolve_rebuild demo-skill"
+        return {
+            "result_type": "followup",
+            "action": "run_rebuild_followup",
+            "followup_prompt": "review and rebuild demo-skill",
+            "skill_name": "demo-skill",
+        }
+
+    monkeypatch.setattr(interface_deep_module, "handle_evolution_slash_command", _fake_handler)
+
+    result = await adapter._handle_slash_command(  # pylint: disable=protected-access
+        "/evolve_rebuild demo-skill",
+        session_id="sess-agent-evolve",
+        mode="agent.plan",
     )
 
-    result = await adapter._handle_evolve_command(  # pylint: disable=protected-access
-        "/evolve demo-skill improve review flow",
-        "sess-agent-evolve",
-    )
-
-    assert result["result_type"] == "error"
-    assert "SKILL.md" in result["output"]
-
-
-@pytest.mark.anyio
-@pytest.mark.parametrize(
-    ("status", "message", "expected_type", "expected_output"),
-    [
-        ("generation_failed", "llm unavailable", "error", "llm unavailable"),
-        (
-            "no_evolution_no_records",
-            "",
-            "answer",
-            "已请求演进，但本次未生成可保存经验。",
-        ),
-    ],
-)
-async def test_agent_evolve_maps_sdk_result_status(
-    monkeypatch,
-    status: str,
-    message: str,
-    expected_type: str,
-    expected_output: str,
-):
-    class _FakeStore:
-        @staticmethod
-        def list_skill_names() -> list[str]:
-            return ["demo-skill"]
-
-        @staticmethod
-        def skill_exists(skill_name: str) -> bool:
-            return skill_name == "demo-skill"
-
-        @staticmethod
-        def skill_definition_exists(skill_name: str) -> bool:
-            return skill_name == "demo-skill"
-
-    class _FakeRail:
-        store = _FakeStore()
-        processed_signal_keys: set[tuple[str, str]] = set()
-
-        @staticmethod
-        async def request_user_evolution(*_args, **_kwargs):
-            return SimpleNamespace(
-                status=status,
-                message=message,
-                has_changes=False,
-                approval_event=None,
-                records=[],
-            )
-
-    adapter = JiuWenSwarmDeepAdapter()
-    adapter._skill_evolution_rail = _FakeRail()  # pylint: disable=protected-access
-    monkeypatch.setattr(adapter, "_collect_messages_for_evolve", lambda _session_id: [])
-
-    result = await adapter._handle_evolve_command(  # pylint: disable=protected-access
-        "/evolve demo-skill improve review flow",
-        "sess-agent-evolve",
-    )
-
-    assert result == {"output": expected_output, "result_type": expected_type}
-
-
-@pytest.mark.anyio
-async def test_agent_evolve_without_local_signal_still_maps_sdk_generation_failure(monkeypatch):
-    class _FakeStore:
-        @staticmethod
-        def list_skill_names() -> list[str]:
-            return ["code-runner"]
-
-        @staticmethod
-        def skill_exists(skill_name: str) -> bool:
-            return skill_name == "code-runner"
-
-        @staticmethod
-        def skill_definition_exists(skill_name: str) -> bool:
-            return skill_name == "code-runner"
-
-    recorded_intents: list[str] = []
-
-    class _FakeRail:
-        store = _FakeStore()
-        processed_signal_keys: set[tuple[str, str]] = set()
-
-        @staticmethod
-        async def request_user_evolution(skill_name: str, evolution_intent: str, **_kwargs):
-            recorded_intents.append(evolution_intent)
-            return SimpleNamespace(
-                status="generation_failed",
-                message="llm unavailable",
-                has_changes=False,
-                approval_event=None,
-                records=[],
-            )
-
-    adapter = JiuWenSwarmDeepAdapter()
-    adapter._skill_evolution_rail = _FakeRail()  # pylint: disable=protected-access
-    monkeypatch.setattr(adapter, "_collect_messages_for_evolve", lambda _session_id: [])
-
-    result = await adapter._handle_evolve_command(  # pylint: disable=protected-access
-        "/evolve code-runner",
-        "sess-agent-evolve",
-    )
-
-    assert result == {"output": "llm unavailable", "result_type": "error"}
-    assert recorded_intents == ["用户显式请求演进 Skill 'code-runner'。"]
-
-
-@pytest.mark.anyio
-async def test_agent_evolve_returns_followup_when_sdk_uses_active_review(monkeypatch):
-    class _FakeStore:
-        @staticmethod
-        def list_skill_names() -> list[str]:
-            return ["code-runner"]
-
-        @staticmethod
-        def skill_exists(skill_name: str) -> bool:
-            return skill_name == "code-runner"
-
-        @staticmethod
-        def skill_definition_exists(skill_name: str) -> bool:
-            return skill_name == "code-runner"
-
-    recorded_calls: list[tuple[str, str]] = []
-
-    class _FakeRail:
-        store = _FakeStore()
-        processed_signal_keys: set[tuple[str, str]] = set()
-
-        @staticmethod
-        async def request_user_evolution(skill_name: str, evolution_intent: str):
-            recorded_calls.append((skill_name, evolution_intent))
-            return SimpleNamespace(
-                followup_prompt="review and evolve code-runner",
-                status=None,
-                message="",
-                has_changes=True,
-                approval_event=None,
-                records=[],
-            )
-
-    adapter = JiuWenSwarmDeepAdapter()
-    adapter._skill_evolution_rail = _FakeRail()  # pylint: disable=protected-access
-    monkeypatch.setattr(adapter, "_collect_messages_for_evolve", lambda _session_id: [])
-
-    result = await adapter._handle_evolve_command(  # pylint: disable=protected-access
-        "/evolve code-runner improve review flow",
-        "sess-agent-evolve",
-    )
-
-    assert recorded_calls == [("code-runner", "improve review flow")]
-    assert result == {
-        "action": "run_evolve_followup",
-        "followup_prompt": "review and evolve code-runner",
-        "skill_name": "code-runner",
-        "result_type": "followup",
-    }
-
-
-@pytest.mark.anyio
-async def test_agent_evolve_hides_internal_toolchain_generation_error(monkeypatch):
-    class _FakeStore:
-        @staticmethod
-        def list_skill_names() -> list[str]:
-            return ["code-runner"]
-
-        @staticmethod
-        def skill_exists(skill_name: str) -> bool:
-            return skill_name == "code-runner"
-
-        @staticmethod
-        def skill_definition_exists(skill_name: str) -> bool:
-            return skill_name == "code-runner"
-
-    class _FakeRail:
-        store = _FakeStore()
-        processed_signal_keys: set[tuple[str, str]] = set()
-
-        @staticmethod
-        async def request_user_evolution(*_args, **_kwargs):
-            return SimpleNamespace(
-                status="generation_failed",
-                message=(
-                    "[170001] toolchain optimizer_backword execution error, "
-                    "reason: [174031] toolchain optimizer tool_call lim_call "
-                    "execution error, reason: invoke_failed"
-                ),
-                has_changes=False,
-                approval_event=None,
-                records=[],
-            )
-
-    adapter = JiuWenSwarmDeepAdapter()
-    adapter._skill_evolution_rail = _FakeRail()  # pylint: disable=protected-access
-    monkeypatch.setattr(adapter, "_collect_messages_for_evolve", lambda _session_id: [])
-
-    result = await adapter._handle_evolve_command(  # pylint: disable=protected-access
-        "/evolve code-runner",
-        "sess-agent-evolve",
-    )
-
-    assert result == {
-        "output": "LLM 服务调用失败，请检查模型配置或稍后重试",
-        "result_type": "error",
-    }
-
-
-@pytest.mark.anyio
-async def test_agent_evolve_list_allows_skill_without_skill_md():
-    class _FakeStore:
-        @staticmethod
-        def list_skill_names() -> list[str]:
-            return ["demo-skill"]
-
-        @staticmethod
-        def skill_exists(skill_name: str) -> bool:
-            return skill_name == "demo-skill"
-
-        @staticmethod
-        def skill_definition_exists(skill_name: str) -> bool:
-            return False
-
-        @staticmethod
-        async def get_records_by_score(skill_name: str) -> list[object]:
-            return []
-
-    adapter = JiuWenSwarmDeepAdapter()
-    adapter._skill_evolution_rail = SimpleNamespace(  # pylint: disable=protected-access
-        store=_FakeStore()
-    )
-
-    result = await adapter._handle_evolve_list_command(  # pylint: disable=protected-access
-        "/evolve_list demo-skill",
-    )
-
-    assert result == {
-        "output": "Skill 'demo-skill' 暂无演进经验。",
-        "result_type": "answer",
-    }
-
-
-@pytest.mark.anyio
-async def test_agent_evolve_simplify_returns_followup_when_sdk_uses_active_review():
-    class _FakeStore:
-        @staticmethod
-        def skill_exists(skill_name: str) -> bool:
-            return skill_name == "demo-skill"
-
-        @staticmethod
-        def skill_definition_exists(skill_name: str) -> bool:
-            return skill_name == "demo-skill"
-
-    recorded_calls: list[tuple[str, str | None]] = []
-
-    class _FakeRail:
-        store = _FakeStore()
-
-        @staticmethod
-        async def request_simplify(skill_name: str, user_intent: str | None):
-            recorded_calls.append((skill_name, user_intent))
-            return SimpleNamespace(
-                followup_prompt="review and simplify demo-skill",
-                request_id=None,
-                approval_event=None,
-                actions=[],
-            )
-
-    adapter = JiuWenSwarmDeepAdapter()
-    adapter._skill_evolution_rail = _FakeRail()  # pylint: disable=protected-access
-
-    result = await adapter._handle_evolve_simplify_command(  # pylint: disable=protected-access
-        "/evolve_simplify demo-skill merge duplicate records",
-    )
-
-    assert recorded_calls == [("demo-skill", "merge duplicate records")]
-    assert result == {
-        "action": "run_simplify_followup",
-        "followup_prompt": "review and simplify demo-skill",
-        "skill_name": "demo-skill",
-        "result_type": "followup",
-    }
+    assert result is not None
+    assert result["slash_command"] == "evolve_rebuild"
+    assert result["result_type"] == "followup"
+    assert result["action"] == "run_rebuild_followup"
+    assert result["skill_name"] == "demo-skill"
 
 
 @pytest.mark.parametrize(

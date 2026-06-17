@@ -160,8 +160,6 @@ async def _handle_evolve(
 
     skill_name = parts[1].strip()
     user_intent = parts[2].strip() if len(parts) > 2 else ""
-    if not user_intent:
-        return _error("请补充演进意图：`/evolve <skill_name> <user_query>`")
 
     subject = _subject(store, skill_name)
     validation_error = _validate_skill(

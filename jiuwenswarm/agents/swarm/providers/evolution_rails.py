@@ -456,8 +456,10 @@ def build_team_skill_evolution_rail(
             trajectory_source=bound_registry,
             trajectory_sink=bound_registry,
             member_role=inp.role,
-            auto_scan=inp.auto_scan,
+            auto_scan=False,
             auto_save=False,
+            fuzzy_review=False,
+            completion_followup_enabled=inp.auto_scan,
             team_id=inp.team_id,
             disabled_skills=load_execution_disabled_skills(),
         )
@@ -471,9 +473,11 @@ def build_team_skill_evolution_rail(
             trajectory_registry=inp.trajectory_registry,
         )
         logger.info(
-            "[swarm.team_skill_evolution] built: skills_dir=%s, model=%s, auto_scan=%s",
+            "[swarm.team_skill_evolution] built: skills_dir=%s, model=%s, "
+            "auto_scan=%s, completion_followup_enabled=%s",
             inp.team_skills_dir,
             actual_model_name,
+            False,
             inp.auto_scan,
         )
         return _build_evolution_approval_stack(
@@ -647,9 +651,11 @@ def build_member_skill_evolution_rail(
             language=inp.language,
             auto_scan=inp.auto_scan,
             auto_save=True,
+            fuzzy_review=False,
             disabled_skills=load_execution_disabled_skills(),
         )
-        if inp.trajectory_registry is not None and inp.team_id:
+        has_team_trajectory_sink = inp.trajectory_registry is not None and bool(inp.team_id)
+        if has_team_trajectory_sink:
             rail.set_trajectory_sink(
                 inp.trajectory_registry,
                 team_id=inp.team_id,
@@ -661,7 +667,7 @@ def build_member_skill_evolution_rail(
             "team_trajectory_sink=%s",
             actual_model_name,
             inp.auto_scan,
-            inp.trajectory_registry is not None and bool(inp.team_id),
+            has_team_trajectory_sink,
         )
         return _build_evolution_approval_stack(
             rail,

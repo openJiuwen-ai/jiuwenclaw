@@ -6,7 +6,7 @@ const CODE_MODES = new Set(["code.normal", "code.team", "code.plan"]);
 export function createPlanCommand(): SlashCommand {
   return {
     name: "plan",
-
+    hidden: true, // TUI release: not registered in registry.ts; re-enable next version
     description: "Switch to plan mode, or send a planning request",
     usage: "/plan [open|<description>]",
     example: "/plan outline the migration steps",

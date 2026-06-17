@@ -1022,6 +1022,8 @@ export class CliPiAppState {
       getCurrentProjectDir: getCurrentProjectDir,
       getWorkspaceDir: () => getCurrentCwd() || process.cwd(),
       enterConfigEditor: undefined, // AppScreen injects the real handler when executing slash commands.
+      enterFileViewer: undefined, // AppScreen injects the real handler when executing slash commands.
+      enterDiffViewer: undefined, // AppScreen injects the real handler when executing slash commands.
       setInput: this._setInputRef ?? undefined,
       enterStatusView: undefined,
       getUsageSummary: () => this.getUsageSummary(),

@@ -230,12 +230,8 @@ async def handle_memory_list(
             })
             seen_paths.add(f.path)
 
-    memory_dir = os.path.join(workspace, "memory")
-    for item in _scan_md_files(memory_dir, "auto", workspace, project_dir):
-        if item["path"] not in seen_paths:
-            files.append(item)
-            seen_paths.add(item["path"])
-
+    # Auto-memory: unified with coding memory directory
+    # Scan coding memory directory (auto-memory files are also stored there)
     coding_dir = _get_coding_memory_dir(workspace, project_dir)
     for item in _scan_md_files(coding_dir, "coding", workspace, project_dir):
         if item["path"] not in seen_paths:
@@ -294,6 +290,8 @@ async def handle_memory_status(
     mode: str,
     params: dict[str, Any],
 ) -> dict[str, Any]:
+    from jiuwenswarm.common.config import is_auto_memory_enabled
+
     detailed = params.get("detailed", False)
     config = get_config()
 
@@ -308,6 +306,7 @@ async def handle_memory_status(
         "enabled": enabled,
         "proactive": proactive,
         "forbidden_enabled": _is_forbidden_enabled(config),
+        "auto_memory_enabled": is_auto_memory_enabled(),
     }
 
     if detailed:
@@ -366,20 +365,20 @@ async def handle_memory_status(
             "dir": coding_dir if os.path.isdir(coding_dir) else "",
         }
 
-        memory_dir = os.path.join(workspace, "memory")
-        auto_files = _scan_md_files(memory_dir, "auto", workspace)
-        auto_total_chars = 0
-        for af in auto_files:
-            try:
-                text = Path(af["path"]).read_text(encoding="utf-8", errors="replace")
-                auto_total_chars += len(text)
-            except OSError:
-                pass
-        result["auto_memory"] = {
-            "files_count": len(auto_files),
-            "total_chars": auto_total_chars,
-            "dir": memory_dir if os.path.isdir(memory_dir) else "",
-        }
+        # Auto-memory: unified with coding memory (same directory)
+        if project_dir:
+            # Auto-memory now uses coding memory directory (unified)
+            result["auto_memory"] = {
+                "files_count": len(coding_files),
+                "total_chars": coding_total_chars,
+                "dir": coding_dir if os.path.isdir(coding_dir) else "",
+            }
+        else:
+            result["auto_memory"] = {
+                "files_count": 0,
+                "total_chars": 0,
+                "dir": "",
+            }
 
         engine = get_memory_engine(config)
         if engine in ("external", "both"):
@@ -438,6 +437,26 @@ async def handle_memory_toggle(
             "needs_restart": True,
         }
 
+    if key == "auto_memory_enabled":
+        from jiuwenswarm.common.config import (
+            is_auto_memory_enabled,
+            set_auto_memory_enabled,
+        )
+        old = is_auto_memory_enabled()
+        new = not old
+        set_auto_memory_enabled(new)
+        logger.info(
+            "[memory_rpc] Toggle auto_memory_enabled: old=%s -> new=%s",
+            old, new,
+        )
+        return {
+            "key": key,
+            "old_value": old,
+            "new_value": new,
+            "mode_affected": "global",
+            "needs_restart": False,  # No restart needed, config read each session
+        }
+
     return {
         "key": key,
         "old_value": False,
@@ -470,7 +489,14 @@ async def handle_memory_open(
     }
     if project_dir:
         result["project_dir"] = project_dir
-    coding_dir = _get_coding_memory_dir(workspace, project_dir)
-    if os.path.isdir(coding_dir):
+        # Unified: Auto-memory now uses coding memory directory
+        coding_dir = _get_coding_memory_dir(workspace, project_dir)
+        result["auto_memory_dir"] = coding_dir  # Backward compatibility
         result["coding_memory_dir"] = coding_dir
+        logger.info(
+            "[memory_rpc] memory.open: project_dir=%s unified_memory_dir=%s",
+            project_dir, coding_dir,
+        )
+    else:
+        logger.info("[memory_rpc] memory.open: no project_dir provided")
     return result

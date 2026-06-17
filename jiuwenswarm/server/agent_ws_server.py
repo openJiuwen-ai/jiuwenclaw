@@ -1113,6 +1113,7 @@ class AgentWebSocketServer:
 
                 # 只有 cancel/supplement 才取消流式任务
                 # pause/resume 不取消，因为任务仍在运行（pause 在 checkpoint 阻塞，resume 解除阻塞）
+                stream_task: asyncio.Task | None = None
                 if intent in ("cancel", "supplement"):
                     stream_task = self._session_stream_tasks.get(sid)
                     if stream_task is not None and not stream_task.done():
@@ -1125,6 +1126,14 @@ class AgentWebSocketServer:
 
                 # 专门处理 cancel，复用已有 agent（不再 fallthrough 到 _handle_unary）
                 await self._handle_cancel(ws, request, send_lock)
+
+                # 等待被取消的 stream task 完成清理（finally 块中的 heartbeat 取消、
+                # _session_stream_tasks 清理、plan mode exit 检查等），避免僵尸调用。
+                if stream_task is not None and not stream_task.done():
+                    try:
+                        await stream_task
+                    except asyncio.CancelledError:
+                        pass
                 return
             if request.is_stream:
                 await self._handle_stream(ws, request, send_lock)

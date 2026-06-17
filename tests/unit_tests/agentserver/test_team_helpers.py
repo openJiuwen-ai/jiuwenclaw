@@ -83,15 +83,6 @@ class _TeamHelpersTestApi:
         ensure_watcher(channel_id, session_id, source=source)
 
     @staticmethod
-    async def handle_team_evolve_list_command(
-            channel_id: str | None,
-            session_id: str,
-            query: str,
-    ) -> dict[str, object] | None:
-        handler = getattr(team_helpers, "_handle_team_evolve_list_command")
-        return await handler(channel_id, session_id, query)
-
-    @staticmethod
     async def handle_team_slash_command(
             channel_id: str | None,
             session_id: str,
@@ -993,44 +984,18 @@ async def test_consume_monitor_events_only_broadcasts_monitor_events(monkeypatch
 
 
 @pytest.mark.anyio
-async def test_handle_team_evolve_list_command_returns_team_store_summary(monkeypatch):
-    record = SimpleNamespace(
-        score=0.88,
-        usage_stats=SimpleNamespace(
-            times_used=2,
-            times_presented=3,
-            times_positive=1,
-            times_negative=0,
-        ),
-        change=SimpleNamespace(section="workflow", content="Improve retry flow\nSecond line"),
+async def test_handle_team_slash_command_returns_team_evolve_list_summary(tmp_path):
+    skills_dir = _write_team_skill(
+        tmp_path,
+        "demo-skill",
+        records=[_evolution_record("Improve retry flow\nSecond line", score=0.88)],
     )
 
-    class _FakeStore:
-        @staticmethod
-        def skill_exists(skill_name: str) -> bool:
-            return skill_name == "demo-skill"
-
-        @staticmethod
-        def list_skill_names() -> list[str]:
-            return ["demo-skill"]
-
-        @staticmethod
-        async def get_records_by_score(skill_name: str):
-            assert skill_name == "demo-skill"
-            return [record]
-
-    class _FakeManager:
-        @staticmethod
-        def get_team_skill_rail(session_id: str):
-            assert session_id == "sess-team-list"
-            return SimpleNamespace(store=_FakeStore())
-
-    monkeypatch.setattr(team_helpers, "get_team_manager", lambda channel_id: _FakeManager())
-
-    result = await _TeamHelpersTestApi.handle_team_evolve_list_command(
+    result = await _TeamHelpersTestApi.handle_team_slash_command(
         "web",
         "sess-team-list",
         "/evolve_list demo-skill",
+        skills_dir=skills_dir,
     )
 
     assert result is not None
@@ -1589,6 +1554,126 @@ async def test_consume_stream_with_query_broadcasts_leader_and_teammate_outputs(
     assert broadcasted[3]["member_name"] == "analyst"
 
 
+@pytest.mark.anyio
+async def test_consume_stream_with_query_broadcasts_leader_task_failed_detail_and_final(monkeypatch):
+    broadcasted: list[dict] = []
+    detail = (
+        "[181001] model call failed, reason: openAI API async stream error: "
+        "BadRequestError: deepseek-v4-X is invalid, use deepseek-v4-pro or deepseek-v4-flash"
+    )
+
+    async def _fake_stream(**kwargs):
+        yield SimpleNamespace(
+            type="controller_output",
+            payload={
+                "type": "task_failed",
+                "data": [{"type": "text", "text": detail}],
+            },
+            role=TeamRole.LEADER,
+        )
+
+    class _FakeRunner:
+        run_agent_team_streaming = staticmethod(_fake_stream)
+
+    class _FakeManager:
+        @staticmethod
+        def clear_pending_runtime(session_id: str) -> None:
+            pass
+
+        @staticmethod
+        def pop_stream_task(session_id: str) -> None:
+            pass
+
+    monkeypatch.setattr(team_helpers, "Runner", _FakeRunner)
+    monkeypatch.setattr(team_helpers, "get_team_manager", lambda channel_id: _FakeManager())
+    monkeypatch.setattr(
+        team_helpers,
+        "_broadcast_event",
+        lambda channel_id, session_id, event: broadcasted.append(event),
+    )
+
+    await _TeamHelpersTestApi.consume_stream_with_query(
+        "web",
+        "sess-leader-error",
+        SimpleNamespace(team_name="demo-team"),
+        "hello",
+    )
+
+    assert [event["event_type"] for event in broadcasted] == [
+        "chat.processing_status",
+        "chat.error",
+        "chat.final",
+    ]
+    assert "deepseek-v4-X" in broadcasted[1]["error"]
+    assert "deepseek-v4-pro" in broadcasted[1]["error"]
+    assert broadcasted[1]["rid"] == 1
+    assert broadcasted[2] == {
+        "event_type": "chat.final",
+        "content": "",
+        "session_id": "sess-leader-error",
+        "rid": 1,
+    }
+    assert not any(
+        event.get("event_type") == "chat.processing_status" and event.get("is_processing") is False
+        for event in broadcasted
+    )
+
+
+@pytest.mark.anyio
+async def test_consume_stream_with_query_does_not_final_teammate_task_failed(monkeypatch):
+    broadcasted: list[dict] = []
+    detail = (
+        "[181001] model call failed, reason: openAI API async stream error: "
+        "BadRequestError: deepseek-v4-X is invalid, use deepseek-v4-pro or deepseek-v4-flash"
+    )
+
+    async def _fake_stream(**kwargs):
+        yield SimpleNamespace(
+            type="controller_output",
+            payload={
+                "type": "task_failed",
+                "data": [{"type": "text", "text": detail}],
+            },
+            role=TeamRole.TEAMMATE,
+            source_member="analyst",
+        )
+
+    class _FakeRunner:
+        run_agent_team_streaming = staticmethod(_fake_stream)
+
+    class _FakeManager:
+        @staticmethod
+        def clear_pending_runtime(session_id: str) -> None:
+            pass
+
+        @staticmethod
+        def pop_stream_task(session_id: str) -> None:
+            pass
+
+    monkeypatch.setattr(team_helpers, "Runner", _FakeRunner)
+    monkeypatch.setattr(team_helpers, "get_team_manager", lambda channel_id: _FakeManager())
+    monkeypatch.setattr(
+        team_helpers,
+        "_broadcast_event",
+        lambda channel_id, session_id, event: broadcasted.append(event),
+    )
+
+    await _TeamHelpersTestApi.consume_stream_with_query(
+        "web",
+        "sess-teammate-error",
+        SimpleNamespace(team_name="demo-team"),
+        "hello",
+    )
+
+    assert [event["event_type"] for event in broadcasted] == [
+        "chat.processing_status",
+        "chat.error",
+    ]
+    assert "deepseek-v4-X" in broadcasted[1]["error"]
+    assert broadcasted[1]["role"] == TeamRole.TEAMMATE.value
+    assert broadcasted[1]["member_name"] == "analyst"
+
+
 def test_extract_query_directives_strips_hide_dm_prefix_and_flags():
     cleaned, hide_dm, debug = team_helpers._extract_query_directives(  # pylint: disable=protected-access
         "/hide_dm please summarize"
@@ -1749,17 +1834,37 @@ async def test_consume_stream_with_query_propagates_hide_dm_to_monitor(monkeypat
 
 
 @pytest.mark.anyio
-async def test_handle_team_slash_command_requires_explicit_evolve_intent():
+async def test_handle_team_slash_command_requires_skill_name_for_bare_evolve():
+    result = await _TeamHelpersTestApi.handle_team_slash_command(
+        "web",
+        "sess-team-evolve",
+        "/evolve",
+    )
+
+    assert result == {
+        "output": "请补充 Skill 名称：`/evolve <skill_name> [user_query]`",
+        "result_type": "error",
+    }
+
+
+@pytest.mark.anyio
+async def test_handle_team_slash_command_submits_evolve_request_without_intent(tmp_path):
+    skills_dir = _write_team_skill(tmp_path, "demo-skill")
+
     result = await _TeamHelpersTestApi.handle_team_slash_command(
         "web",
         "sess-team-evolve",
         "/evolve demo-skill",
+        skills_dir=skills_dir,
     )
 
-    assert result == {
-        "output": "请补充演进意图：`/evolve <skill_name> <user_query>`",
-        "result_type": "error",
-    }
+    assert result is not None
+    assert result["result_type"] == "followup"
+    assert result["action"] == "run_evolve_followup"
+    assert result["skill_name"] == "demo-skill"
+    assert "prepare_skill_evolution" in result["followup_prompt"]
+    assert 'subject={"kind": "swarm-skill", "name": "demo-skill"}' in result["followup_prompt"]
+    assert 'user_intent=""' in result["followup_prompt"]
 
 
 @pytest.mark.anyio

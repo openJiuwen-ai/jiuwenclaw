@@ -18,7 +18,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import * as os from "node:os";
 import type { CliPiAppState } from "../app-state.js";
-import { openFileInEditor as openInExternalEditor } from "../core/utils/editor.js";
+import { openFileInEditor as openInExternalEditor, openFolderInExplorer } from "../core/utils/editor.js";
 import {
   extractAttachmentsFromText,
   extractFilePathsFromPaste,
@@ -42,7 +42,11 @@ import {
   type ModelListPayload,
   isReservedMultimodalModelKey,
 } from "../core/commands/builtins/model.js";
-import type { SessionListPayload, SessionMeta } from "../core/commands/builtins/resume.js";
+import {
+  sanitizeSessionList,
+  type SessionListPayload,
+  type SessionMeta,
+} from "../core/commands/builtins/resume.js";
 import type { ConfigItemSchema } from "../core/commands/builtins/config.js";
 import type { McpListItem, McpListPayload } from "../core/commands/builtins/mcp.js";
 import { buildModeAutocompleteItems } from "../core/commands/builtins/mode.js";
@@ -68,6 +72,13 @@ import {
   setCurrentProjectDir,
 } from "../core/tui-trusted-dirs-store.js";
 import { consumeParseError } from "../core/tui-config-store.js";
+import {
+  expandPastedTextMarkers,
+  formatPastedTextMarker,
+  normalizePastedText,
+  shouldCollapsePastedText,
+  stripBracketedPasteMarkers,
+} from "../core/pasted-text.js";
 import { handleAppScreenKeyInput } from "./keymap.js";
 import { buildAppScreenLines } from "./screen-layout.js";
 import { buildTranscriptLines } from "./transcript-renderer.js";
@@ -78,6 +89,7 @@ import {
 } from "./components/team-shared.js";
 import { padToWidth, renderWrappedText } from "./rendering/text.js";
 import { chalk, editorTheme, palette, selectListTheme, setCurrentThemeName } from "./theme.js";
+import type { Hunk, GitDiffData, TurnDiff } from "../core/types.js";
 
 const END_CURSOR = "\x1b[7m \x1b[0m";
 const ENABLE_MOUSE_TRACKING = "\x1b[?1000h\x1b[?1006h";
@@ -170,8 +182,19 @@ type ResumeSessionListState = {
   currentBranch: string;
   /** 非空时进入只读预览态（Space 触发，对齐 Claude Code preview）：展示选中会话的信息卡 */
   preview: SessionMeta | null;
+  /** 预览时的最新对话摘要列表 */
+  previewMessages: PreviewMessage[];
+  /** 预览消息是否仍在请求中（用于区分"加载中"与"已加载但为空"） */
+  previewLoading: boolean;
   /** 非空时进入重命名态（Ctrl+R 触发，对齐 Claude Code Ctrl+R）：编辑选中会话标题 */
   rename: { sessionId: string; value: string } | null;
+};
+
+/** 预览消息摘要 */
+type PreviewMessage = {
+  role: string;
+  summary: string;
+  event_type: string;
 };
 
 type ModelListState = {
@@ -304,6 +327,25 @@ type FileViewerState = {
   scrollOffset: number;  // Current scroll position
   searchMode: boolean;   // Whether in search mode
   searchTerm: string;    // Search term
+};
+
+interface DiffFileEntry {
+  filePath: string;
+  linesAdded: number;
+  linesRemoved: number;
+  isNewFile: boolean;
+  isUntracked: boolean;
+  hunks: Hunk[];
+  source: "working" | string;
+}
+
+type DiffViewerState = {
+  viewMode: "list" | "detail";
+  selectedIndex: number;
+  files: DiffFileEntry[];
+  scrollOffset: number;
+  title: string;
+  subtitle: string;
 };
 
 const PATH_DELIMITERS = new Set([" ", "\t", '"', "'", "="]);
@@ -965,7 +1007,7 @@ type ResumeItemOptions = {
 };
 
 function computeResumeItems(sessions: SessionMeta[], opts: ResumeItemOptions): SelectItem[] {
-  let list = sessions;
+  let list = sanitizeSessionList(sessions);
   // 按 git 分支过滤（对齐 Claude Code Ctrl+B）：严格匹配当前分支。
   // 无分支记录的存量会话、以及非 git/HEAD 会话都会被过滤掉；关掉 Ctrl+B 即可看到全部。
   if (opts.branchFilter && opts.currentBranch) {
@@ -975,7 +1017,7 @@ function computeResumeItems(sessions: SessionMeta[], opts: ResumeItemOptions): S
   if (normalizedQuery) {
     list = list.filter((s) => {
       const label = getDisplayLabel(s).toLowerCase();
-      const sid = s.session_id.toLowerCase();
+      const sid = s.session_id.toLowerCase(); // session_id 已由 sanitizeSessionList 保证非空
       const proj = (s.project_dir ?? "").toLowerCase();
       return (
         label.includes(normalizedQuery) ||
@@ -1103,8 +1145,14 @@ export class AppScreen implements Component, Focusable {
   private lastTranscriptLineWidth = 0;
   /** Image attachments keyed by composer `@path` tokens (e.g. cached base64 for terminal preview). */
   private composerAttachments: FileAttachment[] = [];
+  private pastedTextById = new Map<number, string>();
+  private pastedTextIdByContent = new Map<string, number>();
+  private nextPastedTextId = 1;
+  private pastedTextClearTimer: ReturnType<typeof setTimeout> | null = null;
   /** FileViewer state for viewing large content (e.g., formatted logs) */
   private fileViewerState: FileViewerState | null = null;
+  /** DiffViewer state for interactive diff browsing */
+  private diffViewerState: DiffViewerState | null = null;
   /** Previous session title for terminal window title sync. */
   private previousSessionTitle: string = "";
 
@@ -1126,6 +1174,11 @@ export class AppScreen implements Component, Focusable {
       this.editor.setAutocompleteProvider(this.composerAutocompleteProvider);
     };
     this.editor.onChange = () => {
+      if (!this.editor.getText()) {
+        this.schedulePastedTextStateClear();
+      } else {
+        this.cancelPastedTextStateClear();
+      }
       this.tui.requestRender();
     };
     this.editor.onSubmit = async (value) => {
@@ -1144,6 +1197,11 @@ export class AppScreen implements Component, Focusable {
     // check input emptiness and populate the input field after auto-restore.
     this.state.setInputRef((text: string) => {
       this.editor.setText(text);
+      if (!text) {
+        this.schedulePastedTextStateClear();
+      } else {
+        this.cancelPastedTextStateClear();
+      }
     });
     this.state.getInputValueRef(() => this.editor.getText());
     // Initialize project scope from the user's actual cwd
@@ -1399,6 +1457,277 @@ export class AppScreen implements Component, Focusable {
     return lines;
   }
 
+  /** Enter DiffViewer mode to browse git/turn diffs interactively */
+  enterDiffViewer(payload: Record<string, unknown>): void {
+    const turns = (payload.turns || []) as TurnDiff[];
+    const gitDiff = (payload.gitDiff || null) as GitDiffData | null;
+    const files: DiffFileEntry[] = [];
+
+    if (gitDiff) {
+      for (const f of Object.values(gitDiff.files)) {
+        files.push({
+          filePath: f.filePath,
+          linesAdded: f.linesAdded,
+          linesRemoved: f.linesRemoved,
+          isNewFile: f.isNewFile,
+          isUntracked: f.isNewFile,
+          hunks: f.hunks || [],
+          source: "working",
+        });
+      }
+    }
+
+    for (const turn of turns) {
+      for (const f of Object.values(turn.files)) {
+        files.push({
+          filePath: f.filePath,
+          linesAdded: f.linesAdded,
+          linesRemoved: f.linesRemoved,
+          isNewFile: f.isNewFile,
+          isUntracked: false,
+          hunks: f.hunks || [],
+          source: `Turn ${turn.turnIndex}`,
+        });
+      }
+    }
+
+    const totalAdded = files.reduce((s, f) => s + f.linesAdded, 0);
+    const totalRemoved = files.reduce((s, f) => s + f.linesRemoved, 0);
+    const title = `Diff`;
+    const subtitle = `${files.length} files changed  +${totalAdded} -${totalRemoved}`;
+
+    this.diffViewerState = {
+      viewMode: "list",
+      selectedIndex: 0,
+      files,
+      scrollOffset: 0,
+      title,
+      subtitle,
+    };
+    this.tui.requestRender();
+  }
+
+  exitDiffViewer(): void {
+    this.diffViewerState = null;
+    this.tui.requestRender();
+  }
+
+  private handleDiffViewerInput(data: string, height: number): void {
+    if (!this.diffViewerState) return;
+
+    if (matchesKey(data, "escape") || matchesKey(data, "ctrl+c")) {
+      if (this.diffViewerState.viewMode === "detail") {
+        this.diffViewerState.viewMode = "list";
+        this.diffViewerState.scrollOffset = 0;
+      } else {
+        this.exitDiffViewer();
+      }
+      this.tui.requestRender();
+      return;
+    }
+
+    if (this.diffViewerState.viewMode === "list") {
+      const visibleFiles = Math.max(1, height - 5);
+      if (matchesKey(data, "up") || data.toLowerCase() === "k") {
+        if (this.diffViewerState.selectedIndex > 0) {
+          this.diffViewerState.selectedIndex--;
+          if (this.diffViewerState.selectedIndex < this.diffViewerState.scrollOffset) {
+            this.diffViewerState.scrollOffset = this.diffViewerState.selectedIndex;
+          }
+          this.tui.requestRender();
+        }
+        return;
+      }
+      if (matchesKey(data, "down") || data.toLowerCase() === "j") {
+        if (this.diffViewerState.selectedIndex < this.diffViewerState.files.length - 1) {
+          this.diffViewerState.selectedIndex++;
+          if (this.diffViewerState.selectedIndex >= this.diffViewerState.scrollOffset + visibleFiles) {
+            this.diffViewerState.scrollOffset = this.diffViewerState.selectedIndex - visibleFiles + 1;
+          }
+          this.tui.requestRender();
+        }
+        return;
+      }
+      if (matchesKey(data, "return")) {
+        const file = this.diffViewerState.files[this.diffViewerState.selectedIndex];
+        if (file) {
+          this.diffViewerState.viewMode = "detail";
+          this.diffViewerState.scrollOffset = 0;
+          this.tui.requestRender();
+        }
+        return;
+      }
+      if (matchesKey(data, "home") || data.toLowerCase() === "g") {
+        this.diffViewerState.selectedIndex = 0;
+        this.diffViewerState.scrollOffset = 0;
+        this.tui.requestRender();
+        return;
+      }
+      if (matchesKey(data, "end") || data.toLowerCase() === "shift+g") {
+        this.diffViewerState.selectedIndex = Math.max(0, this.diffViewerState.files.length - 1);
+        this.diffViewerState.scrollOffset = Math.max(0, this.diffViewerState.files.length - visibleFiles);
+        this.tui.requestRender();
+        return;
+      }
+      return;
+    }
+
+    if (this.diffViewerState.viewMode === "detail") {
+      const file = this.diffViewerState.files[this.diffViewerState.selectedIndex];
+      if (!file) return;
+
+      if (matchesKey(data, "left") || data.toLowerCase() === "h") {
+        this.diffViewerState.viewMode = "list";
+        this.diffViewerState.scrollOffset = 0;
+        this.tui.requestRender();
+        return;
+      }
+
+      const totalLines = this._countDiffLines(file);
+      const availableHeight = Math.max(1, height - 3);
+
+      if (matchesKey(data, "up") || data.toLowerCase() === "k") {
+        this.diffViewerState.scrollOffset = Math.max(0, this.diffViewerState.scrollOffset - 1);
+        this.tui.requestRender();
+        return;
+      }
+      if (matchesKey(data, "down") || data.toLowerCase() === "j") {
+        const maxScroll = Math.max(0, totalLines - availableHeight);
+        this.diffViewerState.scrollOffset = Math.min(maxScroll, this.diffViewerState.scrollOffset + 1);
+        this.tui.requestRender();
+        return;
+      }
+      if (matchesKey(data, "pageUp")) {
+        this.diffViewerState.scrollOffset = Math.max(0, this.diffViewerState.scrollOffset - availableHeight);
+        this.tui.requestRender();
+        return;
+      }
+      if (matchesKey(data, "pageDown")) {
+        const maxScroll = Math.max(0, totalLines - availableHeight);
+        this.diffViewerState.scrollOffset = Math.min(maxScroll, this.diffViewerState.scrollOffset + availableHeight);
+        this.tui.requestRender();
+        return;
+      }
+      if (matchesKey(data, "home") || data.toLowerCase() === "g") {
+        this.diffViewerState.scrollOffset = 0;
+        this.tui.requestRender();
+        return;
+      }
+      if (matchesKey(data, "end") || data.toLowerCase() === "shift+g") {
+        const maxScroll = Math.max(0, totalLines - availableHeight);
+        this.diffViewerState.scrollOffset = maxScroll;
+        this.tui.requestRender();
+        return;
+      }
+      return;
+    }
+  }
+
+  private _countDiffLines(file: DiffFileEntry): number {
+    let count = 2;
+    for (const hunk of file.hunks) {
+      count++;
+      count += hunk.lines.length;
+    }
+    return count;
+  }
+
+  private _toRelativePath(absPath: string): string {
+    const cwd = getCurrentCwd() || process.cwd();
+    const normalized = path.resolve(absPath);
+    if (normalized.startsWith(cwd + path.sep) || normalized === cwd) {
+      const rel = path.relative(cwd, normalized);
+      return rel || path.basename(absPath);
+    }
+    return absPath;
+  }
+
+  private _renderDiffDetailLines(file: DiffFileEntry, width: number): string[] {
+    const lines: string[] = [];
+    const displayPath = this._toRelativePath(file.filePath);
+    const label = file.isUntracked ? "(untracked)" : file.isNewFile ? "(new)" : "";
+
+    lines.push(`│   ${displayPath} ${label} +${file.linesAdded} -${file.linesRemoved}`);
+    lines.push(`│   ${"─".repeat(Math.max(0, width - 4))}`);
+
+    for (const hunk of file.hunks) {
+      lines.push(`│     @@ -${hunk.oldStart},${hunk.oldLines} +${hunk.newStart},${hunk.newLines} @@`);
+      for (const line of hunk.lines) {
+        const display = `│     ${line}`;
+        lines.push(truncateToWidth(display, width, ""));
+      }
+    }
+    return lines;
+  }
+
+  private renderDiffViewer(width: number): string[] {
+    if (!this.diffViewerState) return [];
+
+    const safeWidth = Math.max(1, width);
+    const lines: string[] = [];
+
+    // Title
+    lines.push(padToWidth(palette.border.panel(`━━━ ${this.diffViewerState.title} ━━━`), safeWidth));
+    // Subtitle
+    lines.push(padToWidth(palette.text.dim(`  ${this.diffViewerState.subtitle}`), safeWidth));
+    lines.push(padToWidth(palette.text.dim(`  ${"─".repeat(Math.max(0, safeWidth - 4))}`), safeWidth));
+
+    if (this.diffViewerState.viewMode === "list") {
+      const availableHeight = Math.max(1, this.tui.terminal.rows - 5);
+
+      for (let i = this.diffViewerState.scrollOffset; i < this.diffViewerState.files.length; i++) {
+        const file = this.diffViewerState.files[i]!;
+        const isSelected = i === this.diffViewerState.selectedIndex;
+        const pointer = isSelected ? "❯ " : "  ";
+        const relativePath = this._toRelativePath(file.filePath);
+        const displayPath = relativePath.length > safeWidth - 16
+          ? relativePath.slice(0, safeWidth - 19) + "..."
+          : relativePath;
+        const label = file.isUntracked ? "untracked" : file.source;
+        const stats = `+${file.linesAdded} -${file.linesRemoved}`;
+        const line = `${pointer}${displayPath}`;
+        const padded = padToWidth(line, safeWidth - stats.length - label.length - 3);
+        const fullLine = `${padded}${label} ${stats}`;
+        if (isSelected) {
+          lines.push(palette.text.accent(fullLine));
+        } else {
+          lines.push(fullLine);
+        }
+
+        if (lines.length >= availableHeight + 4) break;
+      }
+    } else {
+      const file = this.diffViewerState.files[this.diffViewerState.selectedIndex];
+      if (!file) return lines;
+
+      const detailLines = this._renderDiffDetailLines(file, safeWidth);
+      const availableHeight = Math.max(1, this.tui.terminal.rows - 4);
+
+      const offset = this.diffViewerState.scrollOffset;
+      const maxLines = Math.min(detailLines.length, offset + availableHeight);
+
+      for (let i = offset; i < maxLines; i++) {
+        lines.push(detailLines[i] || "");
+      }
+
+      const totalLines = detailLines.length;
+      const scrollPercent = totalLines > 0 ? Math.round((offset / totalLines) * 100) : 0;
+      const positionInfo = totalLines > availableHeight
+        ? ` [${offset + 1}-${Math.min(offset + availableHeight, totalLines)}/${totalLines} (${scrollPercent}%)]`
+        : "";
+      const hintText = `  ↑/↓ scroll · ← back · Esc back${positionInfo}`;
+      lines.push(padToWidth(palette.text.dim(hintText), safeWidth));
+      return lines;
+    }
+
+    const hintText = this.diffViewerState.files.length > 0
+      ? "  ↑/↓ to select · Enter to view · Esc to close"
+      : "  Esc to close";
+    lines.push(padToWidth(palette.text.dim(hintText), safeWidth));
+
+    return lines;
+  }
+
   /**
    * Ctrl+C / SIGINT 始终尝试向服务端发送当前 session 的中断请求。
    * 是否真的存在运行任务由服务端判断；CLI/TUI 本身不退出。
@@ -1416,6 +1745,12 @@ export class AppScreen implements Component, Focusable {
     // FileViewer mode: handle input separately
     if (this.fileViewerState) {
       this.handleFileViewerInput(data);
+      return;
+    }
+
+    // DiffViewer mode: handle input separately
+    if (this.diffViewerState) {
+      this.handleDiffViewerInput(data, this.tui.terminal.rows);
       return;
     }
 
@@ -1439,7 +1774,8 @@ export class AppScreen implements Component, Focusable {
       this.toolSelector !== null ||
       this.themeList !== null ||
       this.swarmWorkflowsViewState !== null ||
-      this.configEditorState !== null;
+      this.configEditorState !== null ||
+      this.diffViewerState !== null;
 
     if (!pendingQuestion && !hasOverlay && this.handleTranscriptScrollInput(data)) {
       return;
@@ -1620,14 +1956,14 @@ export class AppScreen implements Component, Focusable {
         if (matchesKey(data, "return")) {
           void this.handleResumeSessionSelection(this.resumeSessionList.preview.session_id);
         } else if (matchesKey(data, "space") || matchesKey(data, "escape")) {
-          this.resumeSessionList = { ...this.resumeSessionList, preview: null };
+          this.resumeSessionList = { ...this.resumeSessionList, preview: null, previewMessages: [], previewLoading: false };
           this.tui.requestRender();
         }
         return;
       }
       // Space 打开选中会话的预览（牺牲在搜索框输入空格的能力，按用户要求）
       if (matchesKey(data, "space")) {
-        this.openResumeSessionPreview();
+        void this.openResumeSessionPreview();
         return;
       }
       // Ctrl+R 重命名选中会话
@@ -1849,13 +2185,22 @@ export class AppScreen implements Component, Focusable {
     // Only intercept when the paste is *pure* file paths (drag-and-drop).
     // If there's command text interleaved, treat it as a normal paste.
     if (!snapshot.pendingQuestion && data.length > 4) {
-      const pastedContent = data.replace(/\x1b\[200~/, "").replace(/\x1b\[201~/, "");
+      const hasPasteStart = data.includes("\x1b[200~");
+      const hasPasteEnd = data.includes("\x1b[201~");
+      if (hasPasteStart !== hasPasteEnd) {
+        this.editor.handleInput(data);
+        return;
+      }
+      const pastedContent = stripBracketedPasteMarkers(data);
       const filePaths = extractFilePathsFromPaste(pastedContent);
       if (filePaths.length > 0 && isPurePathPaste(pastedContent)) {
         // 若解析出路径但无一通过附件校验（扩展名不在白名单等），须把原文交给编辑器，避免粘贴被吞掉
         if (this.handleDroppedFiles(filePaths)) {
           return;
         }
+      }
+      if (this.handlePastedTextCollapse(pastedContent)) {
+        return;
       }
     }
 
@@ -1866,6 +2211,11 @@ export class AppScreen implements Component, Focusable {
     // FileViewer mode: render file viewer instead of normal view
     if (this.fileViewerState) {
       return this.renderFileViewer(width);
+    }
+
+    // DiffViewer mode: render diff viewer instead of normal view
+    if (this.diffViewerState) {
+      return this.renderDiffViewer(width);
     }
 
     const snapshot = this.state.getSnapshot();
@@ -1966,7 +2316,8 @@ export class AppScreen implements Component, Focusable {
   }
 
   private async handleSubmit(raw: string): Promise<void> {
-    const text = raw.trim();
+    const editorText = raw.trim();
+    const text = this.expandPastedText(editorText).trim();
     if (!text) return;
 
     // 更新用户活动时间戳（用于 auto-recap 空闲检测）
@@ -1987,7 +2338,7 @@ export class AppScreen implements Component, Focusable {
       return;
     }
 
-    const { content, attachments } = this.buildOutgoingMessage(text);
+    const { content, attachments } = this.buildOutgoingMessage(editorText);
 
     const snapshot = this.state.getSnapshot();
     if (!content && !(snapshot.pendingQuestion && this.otherInputMode)) return;
@@ -2173,8 +2524,8 @@ export class AppScreen implements Component, Focusable {
         this.editor.addToHistory(text);
         this.editor.setText("");
         this.state.addItem(addCommandEcho(snapshot.sessionId, text));
-        // 默认列出全部项目的会话；进入后可按 Ctrl+A 切回仅当前项目
-        await this.openResumeSessionList(true);
+        // 默认仅列出当前项目的会话；进入后可按 Ctrl+A 查看全部项目
+        await this.openResumeSessionList(false);
         return;
       }
       if (/^\/model\s*$/.test(text)) {
@@ -2235,8 +2586,14 @@ export class AppScreen implements Component, Focusable {
           openInEditor: (filePath: string) => {
             openInExternalEditor(this.tui, filePath);
           },
+          openFolder: (folderPath: string) => {
+            openFolderInExplorer(folderPath);
+          },
           enterFileViewer: (content, title, source) => {
             this.enterFileViewer(content, title, source);
+          },
+          enterDiffViewer: (payload) => {
+            this.enterDiffViewer(payload);
           },
         });
       } finally {
@@ -2454,7 +2811,7 @@ export class AppScreen implements Component, Focusable {
       const payload = await this.state.request<SessionListPayload>("session.list", {
         all_projects: allProjects,
       });
-      const sessions = payload.sessions ?? [];
+      const sessions = sanitizeSessionList(payload.sessions);
       const total = payload.total ?? sessions.length;
       const currentBranch = payload.current_branch ?? "HEAD";
       // 全部项目仍为空：确无可恢复会话，直接提示，不打开选择器
@@ -2480,6 +2837,8 @@ export class AppScreen implements Component, Focusable {
         branchFilterEnabled: false,
         currentBranch,
         preview: null,
+        previewMessages: [],
+        previewLoading: false,
         rename: null,
       };
       this.tui.requestRender();
@@ -2499,7 +2858,7 @@ export class AppScreen implements Component, Focusable {
       const payload = await this.state.request<SessionListPayload>("session.list", {
         all_projects: next,
       });
-      const sessions = payload.sessions ?? [];
+      const sessions = sanitizeSessionList(payload.sessions);
       const total = payload.total ?? sessions.length;
       const currentBranch = payload.current_branch ?? this.resumeSessionList.currentBranch;
       const items = computeResumeItems(sessions, {
@@ -2517,6 +2876,8 @@ export class AppScreen implements Component, Focusable {
         branchFilterEnabled,
         currentBranch,
         preview: null,
+        previewMessages: [],
+        previewLoading: false,
         rename: null,
       };
       this.tui.requestRender();
@@ -2642,8 +3003,8 @@ export class AppScreen implements Component, Focusable {
     this.tui.requestRender();
   }
 
-  /** 打开选中会话的只读预览（信息卡）。Space 触发，对齐 Claude Code 的 preview。 */
-  private openResumeSessionPreview(): void {
+  /** 打开选中会话的只读预览（信息卡 + 最新对话）。Space 触发，对齐 Claude Code 的 preview。 */
+  private async openResumeSessionPreview(): Promise<void> {
     if (!this.resumeSessionList) return;
     const selected = this.resumeSessionList.list.getSelectedItem();
     if (!selected) return;
@@ -2651,8 +3012,36 @@ export class AppScreen implements Component, Focusable {
       (s) => s.session_id === selected.value,
     );
     if (!session) return;
-    this.resumeSessionList = { ...this.resumeSessionList, preview: session };
+    // 先设置 preview 状态并标记加载中，显示基本信息
+    this.resumeSessionList = {
+      ...this.resumeSessionList,
+      preview: session,
+      previewMessages: [],
+      previewLoading: true,
+    };
     this.tui.requestRender();
+    // 异步获取预览消息
+    try {
+      const resp = await this.state.request<{ session_id: string; preview_messages: PreviewMessage[] }>(
+        "session.preview",
+        { session_id: session.session_id, count: 2 },
+      );
+      if (this.resumeSessionList && this.resumeSessionList.preview?.session_id === session.session_id) {
+        this.resumeSessionList = {
+          ...this.resumeSessionList,
+          previewMessages: resp.preview_messages ?? [],
+          previewLoading: false,
+        };
+        this.tui.requestRender();
+      }
+    } catch (error) {
+      // 获取失败不影响预览基本信息显示，但需结束加载态
+      console.debug("[openResumeSessionPreview] session.preview failed:", error);
+      if (this.resumeSessionList && this.resumeSessionList.preview?.session_id === session.session_id) {
+        this.resumeSessionList = { ...this.resumeSessionList, previewLoading: false };
+        this.tui.requestRender();
+      }
+    }
   }
 
   /** 进入重命名态，初始值取当前标题。Ctrl+R 触发，对齐 Claude Code。 */
@@ -2684,8 +3073,10 @@ export class AppScreen implements Component, Focusable {
       );
       const newTitle = resp.title ?? title;
       // 就地更新本地会话标题并重建列表项
-      const sessions = st.sessions.map((s) =>
-        s.session_id === sessionId ? { ...s, title: newTitle } : s,
+      const sessions = sanitizeSessionList(
+        st.sessions.map((s) =>
+          s.session_id === sessionId ? { ...s, title: newTitle } : s,
+        ),
       );
       const items = computeResumeItems(sessions, {
         query: st.searchQuery,
@@ -2729,25 +3120,59 @@ export class AppScreen implements Component, Focusable {
     ].filter((l) => l !== "");
   }
 
-  private buildResumeSessionPreviewLines(width: number, session: SessionMeta): string[] {
+  private buildResumeSessionPreviewLines(width: number, session: SessionMeta, previewMessages: PreviewMessage[]): string[] {
     const title = session.title?.trim() || "(untitled)";
     const project = session.project_dir?.trim() || "-";
-    const branch = session.git_branch?.trim() || "(unknown)";
-    const msgs = session.message_count ?? 0;
-    const lastActive = formatRelativeTime(session.last_message_at);
-    const created = formatRelativeTime(session.created_at);
-    const row = (k: string, v: string) =>
-      padToWidth(`${palette.text.dim(k.padEnd(11))}${palette.text.primary(v)}`, width);
+
+    // 构建预览消息行：每条对话按宽度换行展示，内容超长时优先保留后半部分（末尾若干行）
+    const MAX_LINES_PER_MSG = 5;
+    const indent = "  ";
+    const contentWidth = Math.max(1, width - indent.length);
+    const messageLines: string[] = [];
+    if (previewMessages.length > 0) {
+      previewMessages.forEach((msg, msgIdx) => {
+        const isUser = msg.role === "user";
+        const roleLabel = isUser ? "You:" : "Assistant:";
+        const roleColor = isUser ? palette.text.accent : palette.text.primary;
+        messageLines.push(padToWidth(roleColor(roleLabel), width));
+        // 按宽度换行，内容过长时只保留末尾 MAX_LINES_PER_MSG 行（展示对话后半部分）
+        const wrapped = renderWrappedText(contentWidth, msg.summary.trim());
+        let shown = wrapped;
+        let headTruncated = false;
+        if (wrapped.length > MAX_LINES_PER_MSG) {
+          shown = wrapped.slice(wrapped.length - MAX_LINES_PER_MSG);
+          headTruncated = true;
+        }
+        if (headTruncated) {
+          // 用纯 ASCII 省略号另起一行标记“上文已截断”，避免 U+2026 在部分终端按 2 列
+          // 渲染、而 visibleWidth 按 1 列计算导致该行超宽
+          messageLines.push(padToWidth(palette.text.dim(`${indent}...`), width));
+        }
+        shown.forEach((line) => {
+          messageLines.push(padToWidth(palette.text.dim(`${indent}${line}`), width));
+        });
+        // 消息之间留空行分隔（最后一条不加）
+        if (msgIdx < previewMessages.length - 1) {
+          messageLines.push("");
+        }
+      });
+    } else if (this.resumeSessionList?.previewLoading) {
+      // 请求进行中：显示加载提示
+      messageLines.push(padToWidth(palette.text.dim("Loading recent messages..."), width));
+    } else {
+      // 请求已完成但无可展示对话（如全部为 tool_call/tool_result，被后端过滤）
+      messageLines.push(padToWidth(palette.text.dim("No conversation to preview"), width));
+    }
+
     return [
       padToWidth(palette.status.warning("Session preview"), width),
       padToWidth(palette.text.primary(title), width),
       "",
-      row("ID", session.session_id),
-      row("Project", project),
-      row("Branch", branch),
-      row("Messages", String(msgs)),
-      row("Last active", lastActive),
-      row("Created", created),
+      padToWidth(`${palette.text.dim("Project:   ")}${palette.text.primary(project)}`, width),
+      "",
+      padToWidth(palette.text.dim("Recent conversation"), width),
+      "",
+      ...messageLines,
       "",
       padToWidth(palette.text.dim("Enter resume · Space/Esc back"), width),
     ];
@@ -2783,7 +3208,7 @@ export class AppScreen implements Component, Focusable {
       return this.buildResumeSessionRenameLines(width, session, r.value);
     }
     if (this.resumeSessionList.preview !== null) {
-      return this.buildResumeSessionPreviewLines(width, this.resumeSessionList.preview);
+      return this.buildResumeSessionPreviewLines(width, this.resumeSessionList.preview, this.resumeSessionList.previewMessages);
     }
     const showAll = this.resumeSessionList.showAllProjects;
     const branchOn = this.resumeSessionList.branchFilterEnabled;
@@ -3475,7 +3900,14 @@ export class AppScreen implements Component, Focusable {
   }
 
   private async openSwarmWorkflowsView(): Promise<void> {
-    this.swarmWorkflowsViewState = this.buildSwarmWorkflowsListState(true);
+    const selectedWorkflowId =
+      this.swarmWorkflowsViewState?.phase === "list"
+        ? this.swarmWorkflowsViewState.list.getSelectedItem()?.value
+        : this.swarmWorkflowsViewState?.phase === "workflow" ||
+            this.swarmWorkflowsViewState?.phase === "agent"
+          ? this.swarmWorkflowsViewState.workflowId
+          : undefined;
+    this.swarmWorkflowsViewState = this.buildSwarmWorkflowsListState(true, selectedWorkflowId);
     this.tui.requestRender();
     try {
       await this.state.loadWorkflowSnapshot();
@@ -3485,7 +3917,7 @@ export class AppScreen implements Component, Focusable {
         addError(this.state.getSnapshot().sessionId, `workflow list failed: ${message}`),
       );
     }
-    this.swarmWorkflowsViewState = this.buildSwarmWorkflowsListState(false);
+    this.swarmWorkflowsViewState = this.buildSwarmWorkflowsListState(false, selectedWorkflowId);
     this.tui.requestRender();
   }
 
@@ -3505,7 +3937,10 @@ export class AppScreen implements Component, Focusable {
     const current = this.swarmWorkflowsViewState;
     if (!current) return;
     if (current.phase === "list") {
-      this.swarmWorkflowsViewState = this.buildSwarmWorkflowsListState();
+      this.swarmWorkflowsViewState = this.buildSwarmWorkflowsListState(
+        false,
+        current.list.getSelectedItem()?.value,
+      );
       return;
     }
     if (current.phase === "workflow") {
@@ -3525,7 +3960,7 @@ export class AppScreen implements Component, Focusable {
       current.agentId,
     );
     if (!lookup) {
-      this.swarmWorkflowsViewState = this.buildSwarmWorkflowsListState();
+      this.swarmWorkflowsViewState = this.buildSwarmWorkflowsListState(false, current.workflowId);
     } else {
       this.swarmWorkflowsViewState = {
         phase: "agent",
@@ -3535,7 +3970,10 @@ export class AppScreen implements Component, Focusable {
     }
   }
 
-  private buildSwarmWorkflowsListState(loading = false): SwarmWorkflowsViewState {
+  private buildSwarmWorkflowsListState(
+    loading = false,
+    selectedWorkflowId?: string,
+  ): SwarmWorkflowsViewState {
     const workflows = this.state.getSnapshot().workflowRuns;
     const items: SelectItem[] = workflows.map((workflow) => {
       const total = workflow.agent_count ?? countWorkflowAgents(workflow);
@@ -3551,6 +3989,12 @@ export class AppScreen implements Component, Focusable {
       minPrimaryColumnWidth: 24,
       maxPrimaryColumnWidth: 42,
     });
+    const selectedWorkflowIndex = selectedWorkflowId
+      ? items.findIndex((workflow) => workflow.value === selectedWorkflowId)
+      : -1;
+    if (selectedWorkflowIndex >= 0) {
+      list.setSelectedIndex(selectedWorkflowIndex);
+    }
     list.onSelect = (item) => {
       this.swarmWorkflowsViewState = this.buildSwarmWorkflowDetailState(item.value);
       this.tui.requestRender();
@@ -3568,7 +4012,7 @@ export class AppScreen implements Component, Focusable {
     selectedAgentId?: string,
   ): SwarmWorkflowsViewState {
     const workflow = this.state.getSnapshot().workflowRuns.find((item) => item.id === workflowId);
-    if (!workflow) return this.buildSwarmWorkflowsListState();
+    if (!workflow) return this.buildSwarmWorkflowsListState(false, workflowId);
     const selectedPhaseIndex = Math.max(
       0,
       workflow.phases.findIndex((phase) => phase.id === selectedPhaseId),
@@ -3613,7 +4057,7 @@ export class AppScreen implements Component, Focusable {
       this.tui.requestRender();
     };
     phaseList.onCancel = () => {
-      this.swarmWorkflowsViewState = this.buildSwarmWorkflowsListState();
+      this.swarmWorkflowsViewState = this.buildSwarmWorkflowsListState(false, workflowId);
       this.tui.requestRender();
     };
 
@@ -3669,7 +4113,7 @@ export class AppScreen implements Component, Focusable {
       if (state.phase === "list") {
         this.closeSwarmWorkflowsView();
       } else if (state.phase === "workflow") {
-        this.swarmWorkflowsViewState = this.buildSwarmWorkflowsListState();
+        this.swarmWorkflowsViewState = this.buildSwarmWorkflowsListState(false, state.workflowId);
       } else {
         const lookup = findWorkflowAgent(
           this.state.getSnapshot().workflowRuns,
@@ -3708,7 +4152,7 @@ export class AppScreen implements Component, Focusable {
                 "phases",
                 state.agentList.getSelectedItem()?.value,
               )
-            : this.buildSwarmWorkflowsListState();
+            : this.buildSwarmWorkflowsListState(false, state.workflowId);
       }
       this.tui.requestRender();
       return;
@@ -4086,9 +4530,10 @@ export class AppScreen implements Component, Focusable {
   }
 
   private buildOutgoingMessage(text: string): { content: string; attachments: FileAttachment[] } {
+    const expandedText = this.expandPastedText(text);
     return {
-      content: text.replace(/[ \t]{2,}/g, " ").replace(/[ \t]+\n/g, "\n").trim(),
-      attachments: this.collectComposerAttachments(text),
+      content: this.expandPastedText(text.replace(/[ \t]{2,}/g, " ").replace(/[ \t]+\n/g, "\n").trim()),
+      attachments: this.collectComposerAttachments(expandedText),
     };
   }
 
@@ -4898,6 +5343,35 @@ export class AppScreen implements Component, Focusable {
     this.tui.requestRender();
   }
 
+  private clearPastedTextState(): void {
+    this.cancelPastedTextStateClear();
+    this.pastedTextById.clear();
+    this.pastedTextIdByContent.clear();
+    this.nextPastedTextId = 1;
+  }
+
+  private cancelPastedTextStateClear(): void {
+    if (!this.pastedTextClearTimer) {
+      return;
+    }
+    clearTimeout(this.pastedTextClearTimer);
+    this.pastedTextClearTimer = null;
+  }
+
+  private schedulePastedTextStateClear(): void {
+    if (this.pastedTextClearTimer) {
+      clearTimeout(this.pastedTextClearTimer);
+    }
+    // Editor clears text and emits onChange("") before onSubmit(value), so keep paste data for that submit.
+    this.pastedTextClearTimer = setTimeout(() => {
+      this.clearPastedTextState();
+    }, 0);
+  }
+
+  private expandPastedText(text: string): string {
+    return expandPastedTextMarkers(text, this.pastedTextById);
+  }
+
   private syncComposerAttachmentsFromEditor(): void {
     if (this.syncingComposerInput) {
       return;
@@ -4978,6 +5452,25 @@ export class AppScreen implements Component, Focusable {
 
   private isComposerImageFile(path: string): boolean {
     return this.isAcceptedAttachment(path) && isImageAttachment(path);
+  }
+
+  private handlePastedTextCollapse(text: string): boolean {
+    const normalizedText = normalizePastedText(text);
+    if (!shouldCollapsePastedText(normalizedText)) {
+      return false;
+    }
+
+    let pasteId = this.pastedTextIdByContent.get(normalizedText);
+    if (!pasteId) {
+      pasteId = this.nextPastedTextId;
+      this.nextPastedTextId += 1;
+      this.pastedTextIdByContent.set(normalizedText, pasteId);
+      this.pastedTextById.set(pasteId, normalizedText);
+    }
+
+    this.editor.insertTextAtCursor(formatPastedTextMarker(pasteId, normalizedText));
+    this.tui.requestRender();
+    return true;
   }
 
   /** Handle pasted/dragged content - detects file paths and converts to @path references. */
@@ -5217,11 +5710,13 @@ export class AppScreen implements Component, Focusable {
   private buildSlashCommands(): TuiSlashCommand[] {
     const hasAnyCompletion = (cmd: SlashCommand): boolean =>
       !!cmd.completion || (cmd.subCommands?.some(hasAnyCompletion) ?? false);
-    return this.commands.getAll().map((command) => ({
-      name: command.name,
-      description: command.description,
-      getArgumentCompletions: hasAnyCompletion(command)
-        ? async (argumentPrefix: string): Promise<AutocompleteItem[] | null> => {
+    const result: TuiSlashCommand[] = [];
+    for (const command of this.commands.getAll()) {
+      result.push({
+        name: command.name,
+        description: command.description,
+        getArgumentCompletions: hasAnyCompletion(command)
+          ? async (argumentPrefix: string): Promise<AutocompleteItem[] | null> => {
             const trimmed = argumentPrefix.trim();
             // Traverse subcommand chain to find the deepest command with completion
             let currentCommand: typeof command = command;
@@ -5323,7 +5818,9 @@ export class AppScreen implements Component, Focusable {
             return null;
           }
         : undefined,
-    }));
+      });
+    }
+    return result;
   }
 
   private buildPendingQuestionLines(
@@ -5454,15 +5951,6 @@ export class AppScreen implements Component, Focusable {
   ): boolean {
     if (!snapshot.pendingQuestion) {
       return false;
-    }
-
-    const mouse = parseSgrMouseRelease(data);
-    if (mouse?.button === 0 && this.questionList !== null) {
-      const hit = this.questionOptionRows.find((entry) => entry.row === mouse.row);
-      if (hit) {
-        this.handleQuestionSelection(hit.value);
-        return true;
-      }
     }
 
     if (this.questionList !== null) {
@@ -5657,14 +6145,17 @@ export class AppScreen implements Component, Focusable {
       pendingQuestion.source === "permission_interrupt" ||
       pendingQuestion.source === "confirm_interrupt"
         ? 4
-        : 6;
-    // For memory edit, use a layout that shows short labels with full-path details sub-lines.
+        : 20;
+    // For memory edit, use a layout that mirrors Claude Code's /memory selector:
+    //   - Short labels ("Project memory", "User memory", ".jiuwen/rules/foo.md")
+    //   - Descriptions ("Checked in at ./JIUWENSWARM.md", "Saved in ~/.jiuwen/...")
+    //   - Allow wider primary column so rule paths aren't truncated
     // For rewind and other questions with details sub-lines, use a narrower label column
     // so the description starts sooner and details can align beneath it.
     const layout = planApprovalRequest
       ? getPlanApprovalListLayout()
       : pendingQuestion.source === "local_command_memory_edit"
-        ? { minPrimaryColumnWidth: 24, maxPrimaryColumnWidth: 30 }
+        ? { minPrimaryColumnWidth: 20, maxPrimaryColumnWidth: 50 }
         : detailsMap.size > 0
           ? { minPrimaryColumnWidth: 10, maxPrimaryColumnWidth: 10 }
           : { minPrimaryColumnWidth: 34, maxPrimaryColumnWidth: 42 };

@@ -98,8 +98,12 @@ export interface CommandContext {
   ) => void;
   enterStatusView?: (tab?: StatusViewTab) => void;
   openInEditor?: (filePath: string) => void;
+  /** Open a folder in system file explorer (Windows: explorer, macOS: open -R, Linux: xdg-open) */
+  openFolder?: (folderPath: string) => void;
   /** Enter FileViewer mode to view large content (e.g., formatted logs) */
   enterFileViewer?: (content: string, title: string, source: string) => void;
+  /** Enter DiffViewer mode to browse git/turn diffs interactively */
+  enterDiffViewer?: (payload: Record<string, unknown>) => void;
   restartStatusLine?: () => void;
   /** Get the current JSON data that would be piped to the statusline command */
   getStatusLineJsonInput?: () => Record<string, unknown>;

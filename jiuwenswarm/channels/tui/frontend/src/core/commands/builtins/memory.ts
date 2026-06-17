@@ -30,6 +30,7 @@ interface MemoryStatusResult {
   enabled: boolean;
   proactive: boolean;
   forbidden_enabled: boolean;
+  auto_memory_enabled: boolean;
   index?: {
     available: boolean;
     provider?: string | null;
@@ -76,6 +77,141 @@ interface MemoryOpenResult {
   project_memory_dir: string;
   project_dir?: string;
   coding_memory_dir?: string;
+  auto_memory_dir?: string;
+}
+
+// ---------------------------------------------------------------------------
+// Path display utilities (aligned with Claude Code's getDisplayPath)
+// ---------------------------------------------------------------------------
+
+/**
+ * Convert an absolute path to a display-friendly relative path.
+ * Mirrors Claude Code's getDisplayPath logic — uses git root as base for
+ * computing relative paths (not the deep projectDir subdirectory), which
+ * produces short paths like ".jiuwen/rules/foo.md" instead of long
+ * "../../../../../.jiuwen/rules/foo.md".
+ *
+ * Priority order (aligned with Claude Code):
+ * 1. If git root found → compute relative path from git root
+ *    (e.g. ".jiuwen/rules/foo.md", "JIUWENSWARM.md")
+ * 2. If no git root → compute relative path from projectDir
+ *    (e.g. "../JIUWENSWARM.md", ".jiuwen/rules/foo.md")
+ * 3. If file is in home directory → use tilde notation
+ *    (e.g. "~/.jiuwen/JIUWENSWARM.md")
+ * 4. Otherwise → fallback to absolute path with forward slashes
+ *
+ * On Windows, THREE critical issues must be handled:
+ * - path.relative() returns absolute paths when source/target are on different
+ *   drives (e.g. E: vs C:) — must NOT treat these as valid relative paths.
+ * - Case mismatch: getCurrentProjectDir() lowercases paths on Windows, but
+ *   backend returns original-case paths. We normalize both paths to the same
+ *   case before computing relative().
+ * - **Unicode path bug**: Node.js path.relative() on Windows silently drops
+ *   backslash separators from paths containing multi-byte characters (e.g.
+ *   C:\Users\李雯琳 → "C:Users李雯琳"), producing garbage output. We convert
+ *   all backslashes to forward slashes before calling relative(), which avoids
+ *   this bug because forward slashes are also valid separators on Windows.
+ *
+ * All output is normalized to forward slashes (aligned with Claude Code).
+ */
+/**
+ * Convert an absolute path to the shortest display-friendly path.
+ * Mirrors Claude Code's getDisplayPath logic — generates ALL candidate paths
+ * and picks the shortest one:
+ *
+ *   Candidates:
+ *   1. Relative from git root  (e.g. ".jiuwen/rules/foo.md", "../JIUWENSWARM.md")
+ *   2. Relative from projectDir (e.g. "../../JIUWENSWARM.md", ".jiuwen/rules/foo.md")
+ *   3. Tilde notation          (e.g. "~/.jiuwen/JIUWENSWARM.md")
+ *
+ *   Winner = shortest candidate.
+ *   Examples:
+ *   - ../JIUWENSWARM.md (17 chars) beats ~/AppData/Local/.../JIUWENSWARM.md (49 chars)
+ *   - .jiuwen/rules/git.md (21 chars) beats ../../.jiuwen/rules/git.md (26 chars)
+ *   - ~/.jiuwen/JIUWENSWARM.md (22 chars) beats ../JIUWENSWARM.md when in deep subdir
+ *
+ * All output uses forward slashes. Claude Code allows ../ prefix paths.
+ *
+ * On Windows, THREE critical issues must be handled:
+ * - path.relative() returns absolute paths for cross-drive paths — must discard.
+ * - Case mismatch: getCurrentProjectDir() lowercases on Windows, backend doesn't.
+ * - Unicode bug: Node.js path.relative() silently drops \ from multi-byte paths.
+ */
+function getDisplayPath(filePath: string, projectDir: string): string {
+  const fileSlashes = filePath.replace(/\\/g, "/");
+  const fileNorm = process.platform === "win32" ? fileSlashes.toLowerCase() : fileSlashes;
+  const homeDir = homedir();
+  const homeDirSlashes = homeDir.replace(/\\/g, "/");
+  const homeDirNorm = process.platform === "win32" ? homeDirSlashes.toLowerCase() : homeDirSlashes;
+
+  // Collect all valid candidate paths, then pick the shortest
+  const candidates: string[] = [];
+
+  // Candidate 1: relative from git root (if inside git repo)
+  const gitRoot = findGitRoot(projectDir);
+  if (gitRoot) {
+    const gitRootSlashes = gitRoot.replace(/\\/g, "/");
+    const gitRootNorm = process.platform === "win32" ? gitRootSlashes.toLowerCase() : gitRootSlashes;
+    const projectDirSlashes = projectDir.replace(/\\/g, "/");
+    const projectDirNorm = process.platform === "win32" ? projectDirSlashes.toLowerCase() : projectDirSlashes;
+    // Only use git root as base if projectDir is inside the git repo
+    if (projectDirNorm.startsWith(gitRootNorm + "/") || projectDirNorm === gitRootNorm) {
+      const relFromGit = relative(gitRootNorm, fileNorm);
+      // Discard cross-drive absolute paths from relative()
+      if (relFromGit && !relFromGit.startsWith("/") && !/^[A-Za-z]:/.test(relFromGit)) {
+        const display = relative(gitRootSlashes, fileSlashes).replace(/\\/g, "/");
+        candidates.push(display);
+      }
+    }
+  }
+
+  // Candidate 2: relative from projectDir
+  const projectDirSlashes = projectDir.replace(/\\/g, "/");
+  const projectDirNorm = process.platform === "win32" ? projectDirSlashes.toLowerCase() : projectDirSlashes;
+  const relFromProj = relative(projectDirNorm, fileNorm);
+  if (relFromProj && !relFromProj.startsWith("/") && !/^[A-Za-z]:/.test(relFromProj)) {
+    const display = relative(projectDirSlashes, fileSlashes).replace(/\\/g, "/");
+    candidates.push(display);
+  }
+
+  // Candidate 3: tilde notation (if file is in home directory)
+  if (fileNorm.startsWith(homeDirNorm + "/") || fileNorm === homeDirNorm) {
+    const tildePath = "~" + fileSlashes.slice(homeDirSlashes.length);
+    candidates.push(tildePath);
+  }
+
+  // Pick the shortest candidate — this is exactly what Claude Code does
+  if (candidates.length > 0) {
+    return candidates.reduce((shortest, c) => c.length < shortest.length ? c : shortest, candidates[0]);
+  }
+
+  // Fallback: absolute path with forward slashes
+  return fileSlashes;
+}
+
+/**
+ * Find the git repository root directory.
+ * Walks upward from cwd looking for a .git directory or file (worktree/submodule).
+ * Returns the git root path if found, or null if not in a git repo.
+ * Mirrors Claude Code's findGitRoot logic.
+ */
+function findGitRoot(cwd: string): string | null {
+  let current = cwd;
+  const root = parse(current).root;
+  while (current !== root) {
+    try {
+      const gitPath = join(current, ".git");
+      const stat = statSync(gitPath);
+      // .git can be a directory (regular repo) or file (worktree/submodule)
+      if (stat.isDirectory() || stat.isFile()) {
+        return current;
+      }
+    } catch {
+      // .git doesn't exist at this level, continue walking up
+    }
+    current = dirname(current);
+  }
+  return null;
 }
 
 // ---------------------------------------------------------------------------
@@ -247,6 +383,7 @@ async function showMemoryOverview(ctx: import("../types.js").CommandContext): Pr
     items.push({ label: "Enabled", value: payload.enabled ? "✓ on" : "✗ off" });
     items.push({ label: "Proactive", value: payload.proactive ? "✓ on" : "✗ off" });
     items.push({ label: "Forbidden Filter", value: payload.forbidden_enabled ? "✓ on" : "✗ off" });
+    items.push({ label: "Auto Memory", value: payload.auto_memory_enabled ? "✓ on" : "✗ off" });
 
     if (payload.index) {
       items.push({
@@ -316,52 +453,215 @@ async function showMemoryOverview(ctx: import("../types.js").CommandContext): Pr
 }
 
 async function listMemory(ctx: import("../types.js").CommandContext): Promise<void> {
+  // Aligned with Claude Code: /memory list uses an interactive selector
+  // with two-column layout (label + description), same as the default /memory action.
+  await showMemorySelector(ctx);
+}
+
+/**
+ * Show memory file selector — the core UI shared by /memory and /memory list.
+ * EXACTLY aligned with Claude Code's /memory display format:
+ *
+ *   1. Project memory           Checked in at ./CLAUDE.md
+ *   2. .claude/rules/git.md
+ *   3. .claude/rules/testing.md
+ *   4. User memory              Saved in ~/.claude/CLAUDE.md
+ *
+ * Key principles (mirroring Claude Code exactly):
+ * - "Project memory" and "User memory" are short labels with descriptions
+ *   showing "Checked in at"/"Saved in" + the relative path
+ * - Rules files (.jiuwen/rules/*.md) are listed with their relative path
+ *   as the ONLY label — NO description column (same as Claude Code)
+ * - Paths are always relative (from git root when available), using /
+ *   separators, never absolute or long ../../ paths
+ * - Sort order: Project memory → project rules → Local memory → User memory → user rules
+ *   (mirrors Claude Code's project-first ordering)
+ *
+ * Uses ctx.askQuestions → SelectList for proper two-column rendering that
+ * never truncates the label.
+ */
+async function showMemorySelector(ctx: import("../types.js").CommandContext): Promise<void> {
   const mode = modeToShort(ctx.mode);
+  const projectDir = ctx.getCurrentProjectDir();
+
   try {
     const payload = await ctx.request<{ files: MemoryFile[] }>("memory.list", {
       mode,
     });
     const files = payload.files ?? [];
 
-    // Patch backend relative_path fallback: when the backend returns
-    // relative_path === path (absolute path) for files outside workspace/project_dir,
-    // use frontend discovery to compute a correct relative path.
-    const projectDir = ctx.getCurrentProjectDir();
-    if (projectDir && files.some((f) => f.relative_path === f.path)) {
-      const discovered = discoverMemoryFilesFromFs(projectDir);
-      const frontendByPath = new Map<string, MemoryFile>();
-      for (const d of discovered) {
-        frontendByPath.set(normalizePathKey(d.path), d);
-      }
-      for (let i = 0; i < files.length; i++) {
-        const f = files[i];
-        if (f.relative_path === f.path) {
-          const frontend = frontendByPath.get(normalizePathKey(f.path));
-          if (frontend && frontend.relative_path !== frontend.path) {
-            files[i] = { ...f, relative_path: frontend.relative_path };
-          }
+    // Frontend-side unguarded traversal to fill gaps
+    const discovered = discoverMemoryFilesFromFs(projectDir);
+    const frontendByPath = new Map<string, MemoryFile>();
+    for (const f of discovered) {
+      frontendByPath.set(normalizePathKey(f.path), f);
+    }
+    const seenPaths = new Set(files.map((f) => normalizePathKey(f.path)));
+    const mergedFiles: MemoryFile[] = files.map((f) => {
+      if (f.relative_path === f.path) {
+        const frontend = frontendByPath.get(normalizePathKey(f.path));
+        if (frontend && frontend.relative_path !== frontend.path) {
+          return { ...f, relative_path: frontend.relative_path };
         }
+      }
+      return f;
+    });
+    for (const f of discovered) {
+      if (!seenPaths.has(normalizePathKey(f.path))) {
+        mergedFiles.push(f);
+        seenPaths.add(normalizePathKey(f.path));
       }
     }
 
-    if (files.length === 0) {
+    const homeDir = homedir();
+    const gitRoot = findGitRoot(projectDir);
+    const homeDirLower = process.platform === "win32" ? homeDir.toLowerCase() : homeDir;
+    const userMemoryPath = join(homeDir, ".jiuwen", "JIUWENSWARM.md");
+    const filePathLowerFn = (p: string) => process.platform === "win32" ? p.toLowerCase() : p;
+
+    // Categorize files into groups, aligned with Claude Code's display order.
+    // Important: project_dir is the TUI's cwd (a deep subdirectory), but the actual
+    // JIUWENSWARM.md files may be in parent directories. We match by filename + kind
+    // rather than by exact path, since backend discovers files via upward traversal.
+    const projectMemoryFile = mergedFiles.find(
+      (f) => f.kind === "project"
+        && f.path.endsWith("JIUWENSWARM.md")
+        && !f.path.endsWith("JIUWENSWARM.local.md")
+        && !f.path.endsWith(".jiuwen/JIUWENSWARM.md"),
+    );
+    const localMemoryFile = mergedFiles.find(
+      (f) => f.kind === "local" && f.path.endsWith("JIUWENSWARM.local.md"),
+    );
+    const userMemoryFile = mergedFiles.find(
+      (f) => filePathLowerFn(f.path) === filePathLowerFn(userMemoryPath),
+    );
+
+    // Project-level rules files: any project-kind file that is NOT the main JIUWENSWARM.md
+    // This includes .jiuwen/rules/*.md files and .jiuwen/JIUWENSWARM.md
+    const projectRules = mergedFiles.filter(
+      (f) => f.kind === "project"
+        && f !== projectMemoryFile
+        && f !== localMemoryFile,
+    );
+
+    // User-level rules files: any user-kind file that is NOT the main user JIUWENSWARM.md
+    const userRules = mergedFiles.filter(
+      (f) => f.kind === "user"
+        && filePathLowerFn(f.path) !== filePathLowerFn(userMemoryPath),
+    );
+
+    // Build ordered file list matching Claude Code's exact order:
+    // Project memory → project rules → Local memory → User memory → user rules
+    const orderedFiles: MemoryFile[] = [];
+    if (projectMemoryFile) orderedFiles.push(projectMemoryFile);
+    for (const f of projectRules) orderedFiles.push(f);
+    if (localMemoryFile) orderedFiles.push(localMemoryFile);
+    if (userMemoryFile) orderedFiles.push(userMemoryFile);
+    for (const f of userRules) orderedFiles.push(f);
+
+    // Always provide JIUWENSWARM.md / JIUWENSWARM.local.md entries so users can create them
+    // (only if they don't already exist in the ordered list)
+    // Use git root as base for project/local memory paths (same as getDisplayPath)
+    const projMemBase = gitRoot || projectDir;
+    if (!projectMemoryFile) {
+      orderedFiles.unshift(probeFile(join(projMemBase, "JIUWENSWARM.md"), "JIUWENSWARM.md", "project"));
+    }
+    if (!localMemoryFile) {
+      // Insert after project rules, before user memory
+      const insertIdx = orderedFiles.findIndex(
+        (f) => filePathLowerFn(f.path) === filePathLowerFn(userMemoryPath),
+      );
+      const localProbe = probeFile(join(projMemBase, "JIUWENSWARM.local.md"), "JIUWENSWARM.local.md", "local");
+      if (insertIdx >= 0) {
+        orderedFiles.splice(insertIdx, 0, localProbe);
+      } else {
+        orderedFiles.push(localProbe);
+      }
+    }
+    if (!userMemoryFile) {
+      orderedFiles.push(probeFile(userMemoryPath, "JIUWENSWARM.md", "user"));
+    }
+
+    if (orderedFiles.length === 0) {
       ctx.addItem(addInfo(ctx.sessionId, "No memory files found.", "m"));
       return;
     }
 
-    const items = files.map((f) => ({
-      label: f.path,
-      value: f.kind,
-      description: `${f.relative_path !== f.path ? f.relative_path + " · " : ""}${formatSize(f.size)} · ${f.lines} line${f.lines <= 1 ? "" : "s"} · ${formatTime(f.mtime)}`,
-    }));
+    // Build options — EXACTLY aligned with Claude Code's /memory display
+    // Claude Code format:
+    //   "Project memory"  → description: "Checked in at ./CLAUDE.md"
+    //   ".claude/rules/git.md"  → no description (just path as label)
+    //   "User memory"  → description: "Saved in ~/.claude/CLAUDE.md"
+    const options = orderedFiles.map((f) => {
+      const filePathLower = filePathLowerFn(f.path);
+      const displayPath = getDisplayPath(f.path, projectDir);
 
-    ctx.addItem(
-      makeItem(ctx.sessionId, "info", `${files.length} memory files`, "m", {
-        view: "list",
-        title: "Memory Files",
-        items,
-      }),
-    );
+      let label: string;
+      let description: string | undefined;
+
+      if (filePathLower === filePathLowerFn(userMemoryPath)) {
+        // User memory — short label, description with "Saved in"
+        label = "User memory";
+        description = `Saved in ${displayPath}`;
+      } else if (f.kind === "project" && f.path.endsWith("JIUWENSWARM.md") && !f.path.endsWith("JIUWENSWARM.local.md") && !f.path.endsWith(".jiuwen/JIUWENSWARM.md")) {
+        // Project memory — short label, description with "Checked in at"/"Saved in"
+        label = "Project memory";
+        description = `${gitRoot ? "Checked in at" : "Saved in"} ${displayPath}`;
+      } else if (f.kind === "local" && f.path.endsWith("JIUWENSWARM.local.md")) {
+        // Local memory — short label, description with "Saved in"
+        label = "Local memory";
+        description = `Saved in ${displayPath}`;
+      } else {
+        // Rules files — just show the relative path as label, NO description
+        // (exactly like Claude Code's ".claude/rules/git.md" entries)
+        label = displayPath;
+        description = undefined;
+      }
+
+      return { label, description };
+    });
+
+    let selectedLabel: string | undefined;
+    try {
+      const [answer] = await ctx.askQuestions(
+        [
+          {
+            header: "Memory",
+            question: "Select a memory file to edit:",
+            options,
+          },
+        ],
+        "local_command_memory_edit",
+      );
+      selectedLabel = answer?.selected_options?.[0];
+    } catch {
+      ctx.addItem(addInfo(ctx.sessionId, "Cancelled.", "i"));
+      return;
+    }
+
+    if (!selectedLabel) {
+      ctx.addItem(addInfo(ctx.sessionId, "Cancelled.", "i"));
+      return;
+    }
+
+    // Find the selected file — match against all possible label formats
+    const selectedFile = orderedFiles.find((f) => {
+      const fLower = filePathLowerFn(f.path);
+      if (selectedLabel === "User memory" && fLower === filePathLowerFn(userMemoryPath)) return true;
+      if (selectedLabel === "Project memory" && f.kind === "project" && f.path.endsWith("JIUWENSWARM.md") && !f.path.endsWith("JIUWENSWARM.local.md") && !f.path.endsWith(".jiuwen/JIUWENSWARM.md")) return true;
+      if (selectedLabel === "Local memory" && f.kind === "local" && f.path.endsWith("JIUWENSWARM.local.md")) return true;
+      // Rules files use path as label
+      return getDisplayPath(f.path, projectDir) === selectedLabel
+        || f.relative_path === selectedLabel
+        || f.path === selectedLabel;
+    });
+
+    if (!selectedFile) {
+      ctx.addItem(addError(ctx.sessionId, `Could not find selected file: ${selectedLabel}`));
+      return;
+    }
+
+    await editMemoryByPath(ctx, selectedFile.path);
   } catch (err) {
     ctx.addItem(
       addError(ctx.sessionId, `Failed to list memory files: ${err instanceof Error ? err.message : String(err)}`),
@@ -376,133 +676,11 @@ async function editMemory(
   const targetPath = args.trim();
 
   if (!targetPath) {
-    await editMemoryInteractive(ctx);
+    await showMemorySelector(ctx);
     return;
   }
 
   await editMemoryByPath(ctx, targetPath);
-}
-
-async function editMemoryInteractive(
-  ctx: import("../types.js").CommandContext,
-): Promise<void> {
-  const mode = modeToShort(ctx.mode);
-
-  try {
-    const payload = await ctx.request<{ files: MemoryFile[] }>("memory.list", {
-      mode,
-    });
-    const files = payload.files ?? [];
-
-    // Get workspace and project directories
-    const workspaceDir = ctx.getWorkspaceDir() || "";
-    const projectDir = ctx.getCurrentProjectDir();
-
-    // Frontend-side unguarded traversal (aligned with Claude Code's claudemd.ts):
-    // Walk from CWD up to root, scanning every directory for memory files.
-    // This supplements the backend's `discover_and_load_memory_files`, which
-    // skips the entire project layer when `find_project_root()` returns None
-    // (e.g. empty dirs without .git/.jiuwen markers), causing JIUWENSWARM.md
-    // to never be discovered even if it exists on disk.
-    const discovered = discoverMemoryFilesFromFs(projectDir);
-
-    // Build a frontend lookup by normalized path for relative_path patching.
-    // When the backend's _relative_path() falls back to the absolute path itself
-    // (i.e. relative_path === path, e.g. parent-directory memory files outside
-    // both workspace and project_dir), the frontend's own discovery can provide
-    // a correct relative path like "../JIUWENSWARM.md".  Use it to fix the
-    // backend's stale relative_path instead of discarding the frontend entry.
-    const frontendByPath = new Map<string, MemoryFile>();
-    for (const f of discovered) {
-      frontendByPath.set(normalizePathKey(f.path), f);
-    }
-
-    // Merge: backend results take precedence, but patch stale relative_path
-    // with frontend-computed values when the backend fell back to abs_path.
-    const seenPaths = new Set(files.map((f) => normalizePathKey(f.path)));
-    const mergedFiles: MemoryFile[] = files.map((f) => {
-      if (f.relative_path === f.path) {
-        const frontend = frontendByPath.get(normalizePathKey(f.path));
-        if (frontend && frontend.relative_path !== frontend.path) {
-          return { ...f, relative_path: frontend.relative_path };
-        }
-      }
-      return f;
-    });
-    // Frontend-discovered files fill gaps (files the backend didn't find at all).
-    for (const f of discovered) {
-      if (!seenPaths.has(normalizePathKey(f.path))) {
-        mergedFiles.push(f);
-        seenPaths.add(normalizePathKey(f.path));
-      }
-    }
-
-    // Always provide JIUWENSWARM.md / JIUWENSWARM.local.md entries so users
-    // can create them if they don't exist yet.  Use actual file state when
-    // available rather than fabricating a stale "0 lines (new)" placeholder.
-    const hasProjectMemory = mergedFiles.some(
-      (f) => f.path.endsWith("JIUWENSWARM.md") && !f.path.endsWith("JIUWENSWARM.local.md"),
-    );
-    const hasLocalMemory = mergedFiles.some((f) => f.path.endsWith("JIUWENSWARM.local.md"));
-
-    const projectMemoryPath = join(projectDir, "JIUWENSWARM.md");
-    const localMemoryPath = join(projectDir, "JIUWENSWARM.local.md");
-
-    const allFiles: MemoryFile[] = [
-      ...mergedFiles,
-      ...(hasProjectMemory ? [] : [probeFile(projectMemoryPath, "JIUWENSWARM.md", "project")]),
-      ...(hasLocalMemory ? [] : [probeFile(localMemoryPath, "JIUWENSWARM.local.md", "local")]),
-    ];
-
-    if (allFiles.length === 0) {
-      ctx.addItem(addInfo(ctx.sessionId, "No memory files to edit.", "m"));
-      return;
-    }
-
-    const options = allFiles.map((f) => ({
-      label: f.relative_path,
-      description: `${f.kind} · ${f.lines} line${f.lines <= 1 ? "" : "s"}${f.exists ? "" : " (new)"}`,
-      details: f.relative_path !== f.path ? [f.path] : undefined,
-    }));
-
-    let selectedLabel: string | undefined;
-    try {
-      const [answer] = await ctx.askQuestions(
-        [
-          {
-            header: "Edit Memory",
-            question: "Select a memory file to edit:",
-            options,
-          },
-        ],
-        "local_command_memory_edit",
-      );
-      selectedLabel = answer?.selected_options?.[0];
-    } catch {
-      ctx.addItem(addInfo(ctx.sessionId, "Cancelled memory editing.", "i"));
-      return;
-    }
-
-    if (!selectedLabel) {
-      ctx.addItem(addInfo(ctx.sessionId, "Cancelled memory editing.", "i"));
-      return;
-    }
-
-    const selectedFile = allFiles.find(
-      (f) => f.relative_path === selectedLabel || f.path === selectedLabel,
-    );
-
-    if (!selectedFile) {
-      ctx.addItem(addError(ctx.sessionId, `Could not find selected file: ${selectedLabel}`));
-      return;
-    }
-
-    await editMemoryByPath(ctx, selectedFile.path);
-  } catch (err) {
-    ctx.addItem(
-      addError(ctx.sessionId, `Failed to list files for edit: ${err instanceof Error ? err.message : String(err)}`),
-    );
-  }
 }
 
 async function editMemoryByPath(
@@ -525,6 +703,8 @@ async function editMemoryByPath(
     if (ctx.openInEditor) {
       ctx.openInEditor(payload.path);
 
+      const projectDir = ctx.getCurrentProjectDir();
+      const displayPath = getDisplayPath(payload.path, projectDir);
       const { source, value } = getEditorInfo();
       const editorHint = source !== "default"
         ? `(${source}="${value}")`
@@ -533,15 +713,17 @@ async function editMemoryByPath(
       ctx.addItem(
         addInfo(
           ctx.sessionId,
-          `Finished editing ${payload.path} ${editorHint}`,
+          `Opened memory file at ${displayPath} ${editorHint}`,
           "m",
         ),
       );
     } else {
+      const projectDir = ctx.getCurrentProjectDir();
+      const displayPath = getDisplayPath(payload.path, projectDir);
       ctx.addItem(
         addInfo(
           ctx.sessionId,
-          `Edit with:  $EDITOR ${payload.path}`,
+          `Edit with:  $EDITOR ${displayPath}`,
           "i",
         ),
       );
@@ -674,6 +856,7 @@ const TOGGLE_KEYS = [
   { key: "memory_enabled", label: "Enabled", config_path: "modes.agent.<mode>.memory.enabled" },
   { key: "memory_proactive", label: "Proactive", config_path: "modes.agent.<mode>.memory.is_proactive" },
   { key: "memory_forbidden_enabled", label: "Forbidden Filter", config_path: "memory.forbidden_memory_definition.enabled" },
+  { key: "auto_memory_enabled", label: "Auto Memory", config_path: "auto_memory_enabled" },
 ];
 
 async function toggleMemory(
@@ -703,7 +886,9 @@ async function showToggleList(
       let current: boolean;
       if (t.key === "memory_enabled") current = payload.enabled;
       else if (t.key === "memory_proactive") current = payload.proactive;
-      else current = payload.forbidden_enabled;
+      else if (t.key === "memory_forbidden_enabled") current = payload.forbidden_enabled;
+      else if (t.key === "auto_memory_enabled") current = payload.auto_memory_enabled;
+      else current = false;
 
       return {
         label: t.key,
@@ -783,6 +968,9 @@ async function openMemoryDir(
     if (payload.coding_memory_dir) {
       items.push({ label: "Coding Memory Dir", value: payload.coding_memory_dir });
     }
+    if (payload.auto_memory_dir) {
+      items.push({ label: "Auto Memory Dir", value: payload.auto_memory_dir });
+    }
 
     ctx.addItem(
       makeItem(ctx.sessionId, "info", "Memory Directories", "m", {
@@ -806,17 +994,145 @@ async function openMemoryDir(
   }
 }
 
+const OPEN_FOLDER_PREFIX = "__open_folder__";
+
+async function showAutoMemoryInteractive(
+  ctx: import("../types.js").CommandContext,
+): Promise<void> {
+  const mode = modeToShort(ctx.mode);
+  const workspaceDir = ctx.getWorkspaceDir() || "";
+  const projectDir = ctx.getCurrentProjectDir() || workspaceDir;
+
+  try {
+    // Get memory status and files
+    const statusPayload = await ctx.request<MemoryStatusResult>("memory.status", {
+      detailed: true,
+      mode,
+    });
+
+    const listPayload = await ctx.request<{ files: MemoryFile[] }>("memory.list", {
+      mode,
+      include_project: true,
+      project_dir: projectDir,
+    });
+
+    const autoMemoryEnabled = statusPayload.auto_memory_enabled ?? false;
+    const files = listPayload.files ?? [];
+
+    // Build memory file options (Project and User memory)
+    const projectMemoryPath = join(projectDir, "JIUWENSWARM.md");
+    const userMemoryPath = join(workspaceDir, "JIUWENSWARM.local.md");
+
+    const hasProjectMemory = files.some(
+      (f) => f.path === projectMemoryPath || f.relative_path === "JIUWENSWARM.md",
+    );
+    const hasUserMemory = files.some(
+      (f) => f.path === userMemoryPath || f.relative_path === "JIUWENSWARM.local.md",
+    );
+
+    // Add memory file options
+    const memoryOptions: { label: string; description: string; value: string }[] = [];
+
+    // Project memory
+    memoryOptions.push({
+      label: "Project memory",
+      value: projectMemoryPath,
+      description: hasProjectMemory ? `Saved in ./JIUWENSWARM.md` : "Saved in ./JIUWENSWARM.md (new)",
+    });
+
+    // User memory (local)
+    memoryOptions.push({
+      label: "User memory",
+      value: userMemoryPath,
+      description: hasUserMemory ? "Saved in ./JIUWENSWARM.local.md" : "Saved in ./JIUWENSWARM.local.md (new)",
+    });
+
+    // Add open folder option at the bottom (only when auto-memory enabled)
+    if (autoMemoryEnabled) {
+      memoryOptions.push({
+        label: "Open auto-memory folder",
+        value: `${OPEN_FOLDER_PREFIX}auto`,
+        description: "",
+      });
+    }
+
+    // Build toggle option at the top - align with Claude Code format: "Auto-memory: on/off"
+    const toggleOption: { label: string; description: string; value: string } = {
+      label: `Auto-memory: ${autoMemoryEnabled ? "on" : "off"}`,
+      value: "__toggle__",
+      description: "Press Enter to toggle",
+    };
+
+    // Combine all options: toggle at top, then files, then open folder
+    const allOptions = [toggleOption, ...memoryOptions];
+
+    let selectedValue: string | undefined;
+    try {
+      const [answer] = await ctx.askQuestions(
+        [
+          {
+            header: "Memory",
+            question: "Select an action:",
+            options: allOptions.map((opt) => ({
+              label: opt.label,
+              description: opt.description,
+            })),
+          },
+        ],
+        "local_command_memory",
+      );
+      selectedValue = answer?.selected_options?.[0]
+        ? allOptions.find((opt) => opt.label === answer.selected_options[0])?.value
+        : undefined;
+    } catch {
+      ctx.addItem(addInfo(ctx.sessionId, "Cancelled Memory interaction.", "i"));
+      return;
+    }
+
+    if (!selectedValue) {
+      ctx.addItem(addInfo(ctx.sessionId, "Cancelled Memory interaction.", "i"));
+      return;
+    }
+
+    // Handle selected action
+    if (selectedValue === "__toggle__") {
+      await toggleByKey(ctx, "auto_memory_enabled");
+    } else if (selectedValue.startsWith(OPEN_FOLDER_PREFIX)) {
+      // Open coding memory folder in system file explorer (unified with Auto Memory)
+      const openPayload = await ctx.request<MemoryOpenResult>("memory.open", {
+        project_dir: projectDir,
+      });
+      // Use coding_memory_dir as the unified memory location
+      const targetDir = openPayload.coding_memory_dir || openPayload.auto_memory_dir;
+      if (targetDir && ctx.openFolder) {
+        ctx.openFolder(targetDir);
+        ctx.addItem(
+          addInfo(ctx.sessionId, "Opened memory folder", "m"),
+        );
+      }
+    } else {
+      // Edit the selected memory file
+      await editMemoryByPath(ctx, selectedValue);
+    }
+  } catch (err) {
+    ctx.addItem(
+      addError(ctx.sessionId, `Failed to show Memory interface: ${err instanceof Error ? err.message : String(err)}`),
+    );
+  }
+}
+
 export function createMemoryCommand(): SlashCommand {
   return {
     name: "memory",
     altNames: ["mem"],
-    description: "Edit memory files (list, edit, status, toggle, open)",
+    description: "Manage memory settings and files (Auto-memory, edit, toggle, open)",
     usage: "/memory [list|edit|status|toggle|open] [args]",
-    example: "/memory edit",
+    example: "/memory",
     kind: CommandKind.BUILT_IN,
     takesArgs: true,
     action: async (ctx) => {
-      await editMemoryInteractive(ctx);
+      await showMemorySelector(ctx);
+      await showAutoMemoryInteractive(ctx);
     },
     completion: async () => {
       return ["list", "edit", "status", "toggle", "open"];

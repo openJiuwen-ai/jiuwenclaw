@@ -83,8 +83,8 @@ function parseSessionDisplayLabel(sessionId: string, t: (key: string, options?: 
     return `${wechatLabel}-${shortenDiscordIDForLabel(idPart)}`;
   }
 
-  // 处理以 sess_、cron_、feishu_、wechat_、xiaoyi_、dingtalk_ 开头的会话ID
-  const prefixes = ['sess_', 'cron_', 'feishu_', 'wechat_', 'xiaoyi_', 'dingtalk_', 'wecom_'];
+  // 处理以 sess_、cron_、feishu_、wechat_、xiaoyi_、dingtalk_、tui_ 开头的会话ID
+  const prefixes = ['sess_', 'cron_', 'feishu_', 'wechat_', 'xiaoyi_', 'dingtalk_', 'wecom_', 'tui_'];
   const prefixMap: Record<string, string> = {
     'sess_': t('sessions.prefixes.session'),
     'cron_': t('sessions.prefixes.cron'),
@@ -92,17 +92,24 @@ function parseSessionDisplayLabel(sessionId: string, t: (key: string, options?: 
     'wechat_': t('sessions.prefixes.wechat'),
     'xiaoyi_': t('sessions.prefixes.xiaoyi'),
     'dingtalk_': t('sessions.prefixes.dingtalk'),
-    'wecom_': t('sessions.prefixes.wecom')
+    'wecom_': t('sessions.prefixes.wecom'),
+    'tui_': t('sessions.prefixes.tui')
   };
-  
+
   for (const prefix of prefixes) {
     if (sessionId.startsWith(prefix)) {
       const parts = sessionId.split('_');
       const hexTs = parts[1] ?? '';
       if (/^[0-9a-fA-F]+$/.test(hexTs)) {
-        const ms = Number.parseInt(hexTs, 16);
-        if (Number.isFinite(ms)) {
-          const date = new Date(ms);
+        const raw = Number.parseInt(hexTs, 16);
+        if (Number.isFinite(raw)) {
+          // 先尝试将 hex 解析为毫秒
+          let date = new Date(raw);
+          if (!Number.isNaN(date.getTime()) && isPlausibleDate(date)) {
+            return `${prefixMap[prefix]}-${formatDateTime(date)}`;
+          }
+          // 若毫秒解析失败（如 TUI 会话使用秒级时间戳），尝试将 hex 解析为秒后转毫秒
+          date = new Date(raw * 1000);
           if (!Number.isNaN(date.getTime()) && isPlausibleDate(date)) {
             return `${prefixMap[prefix]}-${formatDateTime(date)}`;
           }

@@ -160,14 +160,27 @@
   - 切换模型会校验配置与环境变量占位符，更新 `MODEL_NAME` / `MODEL_PROVIDER` / `API_BASE` / `API_KEY`，并回写 `.env`。
 - 安全展示：涉及 `api_key`、`token` 等敏感字段会掩码显示。
 
-### `/diff`（会话改动回顾）
+### `/diff`（交互式改动回顾）
 
 - 用法：`/diff`（无子命令）。
-- 数据来源：TUI 通过 `command.diff` 请求 Agent 侧 diff 服务，按当前 `session_id` 返回 `turns`（每轮改动集合）。
-- 展示规则：
-  - 有改动：显示 `Found N turn(s) with file changes` 并附结构化 `turns`；
-  - 无改动：显示 `No file changes in this session`。
-- 作用范围：用于查看当前会话内未提交的按轮次改动轨迹，不替代 `git diff` 的完整版本控制视角。
+- 数据来源：TUI 通过 `command.diff` 请求 Agent 侧 diff 服务，按当前 `session_id` 返回 `turns`（每轮改动集合）及 `gitDiff`（未提交的工作树改动）。
+- 展示方式：打开 **交互式 Diff 查看器**（全屏覆盖模式）：
+  - **列表视图**：展示所有变更文件（含工作树 `working` 和按轮次 `Turn N`），显示相对路径、来源、增删行数；
+  - **详情视图**：选中文件后 `Enter` 进入，展示完整的 hunk diff，支持上下滚动。
+- 列表视图快捷键：
+  - `↑` / `↓` — 移动选择，自动滚动；
+  - `Enter` — 查看选中文件的完整 diff；
+  - `Home` / `g` — 跳至列表顶部；
+  - `End` / `Shift+g` — 跳至列表底部；
+  - `Esc` / `Ctrl+C` — 关闭。
+- 详情视图快捷键：
+  - `↑` / `↓` — 逐行滚动；
+  - `PgUp` / `PgDn` — 上下翻页；
+  - `Home` / `g` — 跳至文件开头；
+  - `End` / `Shift+g` — 跳至文件末尾；
+  - `←` / `Esc` — 返回列表视图。
+- 作用范围：同时覆盖工作树（`git diff HEAD`）和会话按轮次改动轨迹，不替代 `git diff` 的完整版本控制视角。
+- 回退行为：当 TUI 不提供 `enterDiffViewer` 能力时，回退为内联展示（仅显示文件名、来源和增删行数）。
 
 ### `/compact`（上下文压缩）
 

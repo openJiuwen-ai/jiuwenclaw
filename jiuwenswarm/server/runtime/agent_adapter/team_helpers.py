@@ -1,4 +1,4 @@
-# Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
+# Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 
 """Team agent streaming helpers."""
 
@@ -59,8 +59,6 @@ from jiuwenswarm.server.runtime.agent_adapter.evolution_helpers import (
     team_evolution_end_update,
     terminal_progress_from_events,
     terminal_stage,
-    validate_evolution_skill,
-    validate_team_evolution_skill,
     visible_evolution_progress_from_events,
 )
 from jiuwenswarm.server.runtime.agent_adapter.evolution_slash import (
@@ -523,114 +521,6 @@ def ensure_team_evolution_watcher(
     tm.register_team_evolution_watcher(session_id, task)
 
 
-async def _resolve_team_rebuild_followup(
-    channel_id: str | None,
-    session_id: str,
-    query: str,
-) -> tuple[str | None, str | None]:
-    """Resolve /evolve_rebuild into a followup prompt for the team session."""
-    stripped = str(query or "").strip()
-    if not stripped.startswith("/evolve_rebuild"):
-        return None, None
-
-    tm = get_team_manager(channel_id)
-    rail = tm.get_team_skill_rail(session_id)
-    if rail is None:
-        return None, "团队技能重建不可用：未找到 TeamSkillEvolutionRail。"
-
-    store = rail.store
-    parts = stripped.split(maxsplit=2)
-    skill_name = parts[1] if len(parts) > 1 else ""
-    user_intent = parts[2] if len(parts) > 2 else None
-
-    if not skill_name:
-        return None, "请指定 Skill 名称：`/evolve_rebuild <skill_name> [user_intent]`"
-
-    validation_error = validate_team_evolution_skill(store, skill_name, require_skill_md=False)
-    if validation_error is not None:
-        return None, validation_error
-
-    try:
-        followup_prompt = await rail.request_rebuild(skill_name, user_intent)
-    except Exception as exc:
-        logger.warning("[TeamHelpers] evolve_rebuild failed: session_id=%s error=%s", session_id, exc)
-        return None, f"团队技能重建分析失败：{exc}"
-
-    if not followup_prompt:
-        return None, f"Skill '{skill_name}' 未生成可执行的重建指令。"
-
-    return followup_prompt, None
-
-
-async def _handle_team_evolve_list_command(
-    channel_id: str | None,
-    session_id: str,
-    query: str,
-) -> dict[str, Any] | None:
-    """Handle /evolve_list directly against the team skill store."""
-    stripped = str(query or "").strip()
-    if not stripped.startswith("/evolve_list"):
-        return None
-
-    tm = get_team_manager(channel_id)
-    rail = tm.get_team_skill_rail(session_id)
-    if rail is None:
-        return {
-            "output": "团队技能演进记录不可用：未找到 TeamSkillEvolutionRail。",
-            "result_type": "error",
-        }
-
-    store = rail.store
-    parts = stripped.split()
-    skill_name = parts[1] if len(parts) > 1 else ""
-    if not skill_name or skill_name.startswith("--"):
-        return {
-            "output": "请指定 Skill 名称：`/evolve_list <skill_name>`",
-            "result_type": "error",
-        }
-
-    validation_error = validate_evolution_skill(store, skill_name, require_skill_md=False)
-    if validation_error is not None:
-        return {"output": validation_error, "result_type": "error"}
-
-    records = await store.get_records_by_score(skill_name)
-    if not records:
-        return {
-            "output": f"Skill '{skill_name}' 暂无演进经验。",
-            "result_type": "answer",
-        }
-
-    avg_score = sum(r.score for r in records) / len(records)
-    lines = [
-        f'📊 Skill "{skill_name}" — 经验库摘要\n',
-        f"共 {len(records)} 条经验 | 平均分：{avg_score:.2f}\n",
-        "| # | Score | Used | Effect | Section | Content (preview) |",
-        "|---|---:|---|---|---|---|",
-    ]
-    for i, record in enumerate(records, 1):
-        stats = record.usage_stats
-        if stats:
-            used_str = (
-                f"{stats.times_used}/{stats.times_presented}"
-                if stats.times_presented
-                else "0/0"
-            )
-            effect_str = f"+{stats.times_positive}/-{stats.times_negative}"
-        else:
-            used_str = "0/0"
-            effect_str = "+0/-0"
-        section = str(record.change.section).replace("|", "\\|")
-        preview = record.change.content.split("\n")[0][:40].replace("|", "\\|")
-        lines.append(
-            f"| {i} | {record.score:.2f} | {used_str} | {effect_str} | {section} | {preview} |"
-        )
-
-    lines.append(f"\n提示：使用 /evolve_simplify {skill_name} 执行智能整理")
-    return {
-        "output": "\n".join(lines),
-        "result_type": "answer",
-    }
-
 
 async def _handle_team_slash_command(
     channel_id: str | None,
@@ -652,11 +542,9 @@ async def _handle_team_slash_command(
     ):
         return None
 
-    if stripped == "/evolve" or (
-        stripped.startswith("/evolve ") and len(stripped.split(maxsplit=2)) < 3
-    ):
+    if stripped == "/evolve":
         return {
-            "output": "请补充演进意图：`/evolve <skill_name> <user_query>`",
+            "output": "请补充 Skill 名称：`/evolve <skill_name> [user_query]`",
             "result_type": "error",
         }
 
@@ -1114,6 +1002,20 @@ async def _consume_stream_with_query(
                             "task_count": parsed.get("task_count"),
                         },
                     )
+                    continue
+                elif parsed.get("event_type") == "chat.error":
+                    _broadcast_event(channel_id, session_id, parsed)
+                    if is_leader:
+                        _broadcast_event(
+                            channel_id,
+                            session_id,
+                            {
+                                "event_type": "chat.final",
+                                "content": "",
+                                "session_id": session_id,
+                                "rid": round_id,
+                            },
+                        )
                     continue
                 _broadcast_event(channel_id, session_id, parsed)
 

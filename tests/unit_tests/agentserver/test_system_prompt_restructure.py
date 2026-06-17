@@ -684,7 +684,7 @@ def test_code_adapter_skill_retrieval_sync_respects_configured_tools(monkeypatch
     )
 
 
-def test_resolve_enable_task_loop_can_be_called_on_class(monkeypatch):
+def test_resolve_enable_task_loop_forces_true_when_skill_create_enabled(monkeypatch):
     monkeypatch.delenv("SKILL_CREATE", raising=False)
     assert (
         JiuWenSwarmDeepAdapter._resolve_enable_task_loop(
@@ -693,10 +693,38 @@ def test_resolve_enable_task_loop_can_be_called_on_class(monkeypatch):
         )
         is True
     )
+
+
+def test_resolve_enable_task_loop_forces_true_when_auto_scan_enabled(monkeypatch):
+    monkeypatch.delenv("EVOLUTION_AUTO_SCAN", raising=False)
     assert (
         JiuWenSwarmDeepAdapter._resolve_enable_task_loop(
             {"enable_task_loop": False},
-            {"evolution": {"skill_create": False}},
+            {"evolution": {"auto_scan": True}},
+        )
+        is True
+    )
+
+
+def test_resolve_enable_task_loop_preserves_false_when_only_evolution_enabled(monkeypatch):
+    monkeypatch.delenv("EVOLUTION_AUTO_SCAN", raising=False)
+    monkeypatch.delenv("SKILL_CREATE", raising=False)
+    assert (
+        JiuWenSwarmDeepAdapter._resolve_enable_task_loop(
+            {"enable_task_loop": False},
+            {"evolution": {"enabled": True, "auto_scan": False, "skill_create": False}},
+        )
+        is False
+    )
+
+
+def test_resolve_enable_task_loop_preserves_false_without_enforcers(monkeypatch):
+    monkeypatch.delenv("EVOLUTION_AUTO_SCAN", raising=False)
+    monkeypatch.delenv("SKILL_CREATE", raising=False)
+    assert (
+        JiuWenSwarmDeepAdapter._resolve_enable_task_loop(
+            {"enable_task_loop": False},
+            {"evolution": {"enabled": False, "skill_create": False}},
         )
         is False
     )

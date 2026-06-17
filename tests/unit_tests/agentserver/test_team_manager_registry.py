@@ -45,8 +45,9 @@ class _FakeSkillEvolutionRail:
 
 
 class _FakeTeamSkillEvolutionRail:
-    def __init__(self, *, auto_scan: bool = True) -> None:
+    def __init__(self, *, auto_scan: bool = True, completion_followup_enabled: bool = True) -> None:
         self.auto_scan = auto_scan
+        self.completion_followup_enabled = completion_followup_enabled
         self._pending_approval_snapshots: dict[str, object] = {}
         self._pending_governance: dict[str, object] = {}
 
@@ -148,7 +149,8 @@ async def test_update_evolution_config_keeps_team_skill_rail_when_only_auto_scan
     await manager.update_evolution_config({"evolution": {"enabled": True, "auto_scan": False}})
 
     assert manager.get_team_skill_rail("sess-1") is rail
-    assert rail.auto_scan is False
+    assert rail.auto_scan is True
+    assert rail.completion_followup_enabled is False
 
 
 @pytest.mark.asyncio
@@ -163,7 +165,8 @@ async def test_update_evolution_config_enabled_false_does_not_override_auto_scan
     await manager.update_evolution_config({"evolution": {"enabled": False, "auto_scan": True}})
 
     assert manager.get_team_skill_rail("sess-1") is rail
-    assert rail.auto_scan is True
+    assert rail.auto_scan is False
+    assert rail.completion_followup_enabled is True
 
 
 @pytest.mark.asyncio
@@ -180,7 +183,8 @@ async def test_update_evolution_config_auto_scan_only_updates_existing_rails(
     monkeypatch.setenv("SKILL_CREATE", "false")
     await manager.update_evolution_config({"evolution": {"auto_scan": False}})
 
-    assert team_rail.auto_scan is False
+    assert team_rail.auto_scan is True
+    assert team_rail.completion_followup_enabled is False
     assert member_rail.auto_scan is False
     assert manager.get_team_skill_rail("sess-1") is team_rail
     assert manager.get_team_skill_create_rail("sess-1") is None

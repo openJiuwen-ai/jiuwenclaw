@@ -2618,7 +2618,7 @@ export function createAutoHarnessCommand(): SlashCommand {
     takesArgs: true,
     subCommands: [runCommand, scheduleCommand, issueCommand],
     completion: (_ctx, partial) => {
-      const subNames = ["run", "schedule", "issue"];
+      const subNames = ["run", "schedule"];
       const prefix = partial.trim().toLowerCase();
       if (!prefix) return subNames;
       return subNames.filter((n) => n.startsWith(prefix));

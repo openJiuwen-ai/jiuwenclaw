@@ -13,7 +13,7 @@ import { ClawHubSearchModal } from "../../features/ClawHubSearchModal";
 import { TeamSkillsHubModal } from "../../features/TeamSkillsHubModal";
 import { SkillEvolutionModal } from "../../features/SkillEvolutionModal";
 import { normalizeSkillNetUrl } from "../../utils/skillNetUrl";
-import { SkillGraphPanel } from "../SkillGraphPanel";
+import { SkillGraphPanel, type SkillGraphPanelHandle } from "../SkillGraphPanel";
 import { Switch } from "../Switch";
 
 /** 刷新会 git pull marketplace，略放宽；普通进页单次 RPC 一般很快。 */
@@ -21,6 +21,7 @@ const SKILLS_FETCH_TIMEOUT_REFRESH_MS = 60_000;
 const SKILLS_FETCH_TIMEOUT_NORMAL_MS = 30_000;
 const SKILL_RETRIEVAL_RUNNING_POLL_MS = 10_000;
 const SKILL_RETRIEVAL_IDLE_POLL_MS = 5 * 60_000;
+const GRAPH_READING_MIN_VISIBLE_MS = 500;
 
 type SkillItem = {
   name: string;
@@ -551,6 +552,10 @@ export function SkillPanel({ sessionId, onNavigateToConfig, isActive = false }: 
   const retrievalPollRef = useRef<number | null>(null);
   const retrievalDiscoveryPollRef = useRef<number | null>(null);
   const retrievalStatusRequestRef = useRef(0);
+  const skillGraphPanelRef = useRef<SkillGraphPanelHandle | null>(null);
+  const graphReadingStartedAtRef = useRef<number | null>(null);
+  const graphReadingTimerRef = useRef<number | null>(null);
+  const [graphReading, setGraphReading] = useState(false);
   const [viewMode, setViewMode] = useState<"list" | "grid">("list");
   const [retrievalStatus, setRetrievalStatus] = useState<SkillRetrievalStatus | null>(null);
   const [retrievalTree, setRetrievalTree] = useState("");
@@ -573,7 +578,34 @@ export function SkillPanel({ sessionId, onNavigateToConfig, isActive = false }: 
       if (retrievalDiscoveryPollRef.current !== null) {
         window.clearInterval(retrievalDiscoveryPollRef.current);
       }
+      if (graphReadingTimerRef.current !== null) {
+        window.clearTimeout(graphReadingTimerRef.current);
+      }
     };
+  }, []);
+
+  const updateGraphReading = useCallback((reading: boolean) => {
+    if (graphReadingTimerRef.current !== null) {
+      window.clearTimeout(graphReadingTimerRef.current);
+      graphReadingTimerRef.current = null;
+    }
+    if (reading) {
+      graphReadingStartedAtRef.current = Date.now();
+      setGraphReading(true);
+      return;
+    }
+    const startedAt = graphReadingStartedAtRef.current;
+    graphReadingStartedAtRef.current = null;
+    const elapsed = startedAt == null ? GRAPH_READING_MIN_VISIBLE_MS : Date.now() - startedAt;
+    const delay = Math.max(0, GRAPH_READING_MIN_VISIBLE_MS - elapsed);
+    if (delay === 0) {
+      setGraphReading(false);
+      return;
+    }
+    graphReadingTimerRef.current = window.setTimeout(() => {
+      graphReadingTimerRef.current = null;
+      setGraphReading(false);
+    }, delay);
   }, []);
 
   useEffect(() => {
@@ -1432,6 +1464,11 @@ export function SkillPanel({ sessionId, onNavigateToConfig, isActive = false }: 
                 if (activeTab === "index") {
                   void fetchRetrievalStatus();
                   void fetchRetrievalTree();
+                } else if (activeTab === "graph") {
+                  const started = skillGraphPanelRef.current?.refresh() ?? false;
+                  if (started) {
+                    updateGraphReading(true);
+                  }
                 } else if (activeTab === "my" || (activeTab === "marketplace" && marketplaceSubTab === "builtin")) {
                   setSearch("");
                   fetchSkills(true);
@@ -1439,12 +1476,17 @@ export function SkillPanel({ sessionId, onNavigateToConfig, isActive = false }: 
                   setSearchTrigger((prev) => prev + 1);
                 }
               }}
-              className="flex items-center gap-1.5 px-1 py-1.5 rounded-lg text-sm text-text-muted hover:text-text hover:bg-secondary/50 transition-colors"
+              className={`flex items-center gap-1.5 px-1 py-1.5 rounded-lg text-sm text-text-muted transition-colors ${
+                activeTab === "graph" && graphReading
+                  ? "cursor-not-allowed opacity-70"
+                  : "hover:text-text hover:bg-secondary/50"
+              }`}
+              disabled={activeTab === "graph" && graphReading}
             >
-              <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={1.5}>
+              <svg className={`w-4 h-4 ${activeTab === "graph" && graphReading ? "animate-spin" : ""}`} fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={1.5}>
                 <path strokeLinecap="round" strokeLinejoin="round" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
               </svg>
-              {t('common.refresh')}
+              {activeTab === "graph" && graphReading ? "正在读取技能总谱" : t('common.refresh')}
             </button>
             <button
               onClick={handleImportLocal}
@@ -1494,7 +1536,7 @@ export function SkillPanel({ sessionId, onNavigateToConfig, isActive = false }: 
                   : "text-text-muted hover:text-text"
               }`}
             >
-              技能总谱
+              {t('skills.tabs.skillGraph')}
             </button>
             <button
               onClick={() => setActiveTab("index")}
@@ -1753,7 +1795,7 @@ export function SkillPanel({ sessionId, onNavigateToConfig, isActive = false }: 
 
         {activeTab === "graph" ? (
           <div className="mt-4 flex-1 min-h-0">
-            <SkillGraphPanel />
+            <SkillGraphPanel ref={skillGraphPanelRef} onReadingChange={updateGraphReading} />
           </div>
         ) : null}
 

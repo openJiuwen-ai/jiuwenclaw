@@ -32,6 +32,31 @@ export interface ResumeResumePayload {
   preview?: string;
 }
 
+function normalizeSessionId(value: unknown): string | null {
+  if (typeof value === "string") {
+    const trimmed = value.trim();
+    return trimmed ? trimmed : null;
+  }
+  if (value != null && typeof value !== "object") {
+    const trimmed = String(value).trim();
+    return trimmed ? trimmed : null;
+  }
+  return null;
+}
+
+/** 过滤 null/非对象/无效 session_id，供 /resume 交互选择与文本命令共用。 */
+export function sanitizeSessionList(sessions: unknown): SessionMeta[] {
+  if (!Array.isArray(sessions)) return [];
+  const result: SessionMeta[] = [];
+  for (const raw of sessions) {
+    if (!raw || typeof raw !== "object") continue;
+    const sessionId = normalizeSessionId((raw as SessionMeta).session_id);
+    if (!sessionId) continue;
+    result.push({ ...(raw as SessionMeta), session_id: sessionId });
+  }
+  return result;
+}
+
 const COMPLETION_MAX_ITEMS = 10;
 
 async function doResume(
@@ -72,7 +97,7 @@ export function createResumeCommand(): SlashCommand {
 
       try {
         const listPayload = await ctx.request<SessionListPayload>("session.list", {});
-        const allSessions = listPayload.sessions ?? [];
+        const allSessions = sanitizeSessionList(listPayload.sessions);
         const query = value.toLowerCase();
 
         const matches = allSessions.filter((s) => {
@@ -99,7 +124,7 @@ export function createResumeCommand(): SlashCommand {
       const value = args.trim();
       try {
         const listPayload = await ctx.request<SessionListPayload>("session.list", {});
-        const allSessions = listPayload.sessions ?? [];
+        const allSessions = sanitizeSessionList(listPayload.sessions);
 
         if (value === "" || value === "list") {
           const total = listPayload.total ?? allSessions.length;

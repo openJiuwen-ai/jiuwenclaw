@@ -158,14 +158,27 @@ Behavior:
   - Switching model validates config and environment variable placeholders, updates `MODEL_NAME` / `MODEL_PROVIDER` / `API_BASE` / `API_KEY`, writes back to `.env`.
 - Secure display: Sensitive fields like `api_key`, `token` are masked.
 
-### `/diff` (Session Change Review)
+### `/diff` (Interactive Change Review)
 
 - Usage: `/diff` (no subcommands).
-- Data source: TUI requests Agent diff service via `command.diff`, returns `turns` (change sets per turn) for current `session_id`.
-- Display rules:
-  - With changes: Shows `Found N turn(s) with file changes` with structured `turns`;
-  - Without changes: Shows `No file changes in this session`.
-- Scope: For viewing uncommitted per-turn change traces in current session, not a replacement for `git diff` full version control perspective.
+- Data source: TUI requests Agent diff service via `command.diff`, returns `turns` (change sets per turn) and `gitDiff` (uncommitted working tree changes) for current `session_id`.
+- Display mode: Opens a **full-screen interactive Diff viewer**:
+  - **List view**: Shows all changed files (working tree `working` and per-turn `Turn N`) with relative paths, source label, and added/removed line counts;
+  - **Detail view**: Press `Enter` on a selected file to view its full hunk-by-hunk diff with scrolling support.
+- List view keybindings:
+  - `↑` / `↓` — Move selection (auto-scrolls);
+  - `Enter` — View full diff for the selected file;
+  - `Home` / `g` — Jump to top;
+  - `End` / `Shift+g` — Jump to bottom;
+  - `Esc` / `Ctrl+C` — Close.
+- Detail view keybindings:
+  - `↑` / `↓` — Scroll line by line;
+  - `PgUp` / `PgDn` — Page up / down;
+  - `Home` / `g` — Go to file top;
+  - `End` / `Shift+g` — Go to file bottom;
+  - `←` / `Esc` — Return to list view.
+- Scope: Covers both the working tree (`git diff HEAD`) and per-turn change traces. Not a replacement for `git diff` full version control perspective.
+- Fallback: When the TUI does not provide the `enterDiffViewer` capability, falls back to inline display (file names, source, and line stats only).
 
 ### `/compact` (Context Compression)
 

@@ -234,12 +234,19 @@ def build_code_coding_memory(params: dict[str, Any], ctx: SwarmBuildContext) -> 
     try:
         from jiuwenswarm.server.runtime.agent_adapter.interface_code import (
             create_coding_memory_rail,
+            _set_workspace_coding_memory_directory,
         )
 
         inp = CodeCodingMemoryInput.resolve(params, ctx)
+        workspace_root = str(inp.workspace_root or "./")
+        _set_workspace_coding_memory_directory(
+            ctx.workspace,
+            project_dir=inp.project_dir,
+            agent_workspace_dir=workspace_root,
+        )
         rail = create_coding_memory_rail(
             project_dir=inp.project_dir,
-            agent_workspace_dir=str(inp.workspace_root or "./"),
+            agent_workspace_dir=workspace_root,
             config={"embed": inp.embed_config},
         )
         # Share the instance with the code_agent sub-agent via the build context.

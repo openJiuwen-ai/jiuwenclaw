@@ -277,6 +277,8 @@ def test_build_member_rails_wires_team_trajectory_registry_to_evolution_rails(
     assert leader_rail.kwargs["trajectory_source"] is registry
     assert leader_rail.kwargs["trajectory_sink"] is registry
     assert leader_rail.kwargs["member_role"] == "leader"
+    assert leader_rail.kwargs["auto_scan"] is False
+    assert leader_rail.kwargs["completion_followup_enabled"] is True
     assert member_rail.bound_sink is registry
     assert member_rail.bound_team_id == "demo-team"
     assert member_rail.bound_member_role == "teammate"
@@ -291,7 +293,7 @@ def test_build_member_rails_wires_team_trajectory_registry_to_evolution_rails(
         ("false", {"evolution": {"enabled": True, "auto_scan": True}}, False),
     ],
 )
-def test_build_member_rails_creates_leader_team_skill_evolution_rail_with_auto_scan(
+def test_build_member_rails_creates_leader_team_skill_evolution_rail_with_completion_followup(
     tmp_path,
     monkeypatch,
     env_auto_scan,
@@ -328,7 +330,8 @@ def test_build_member_rails_creates_leader_team_skill_evolution_rail_with_auto_s
 
     team_skill_rails = [rail for rail in rails if isinstance(rail, _FakeTeamSkillEvolutionRail)]
     assert len(team_skill_rails) == 1
-    assert team_skill_rails[0].kwargs["auto_scan"] is expected_auto_scan
+    assert team_skill_rails[0].kwargs["auto_scan"] is False
+    assert team_skill_rails[0].kwargs["completion_followup_enabled"] is expected_auto_scan
 
 
 def test_build_member_rails_wires_leader_team_skill_evolution_active_review_rails(

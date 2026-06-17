@@ -118,6 +118,7 @@ class SymphonyExtension(BaseExtension):
                 return payload
             build_logger.record("update.pause_requested")
             task.cancel("symphony.pause_build")
+            build_logger.record("update.paused")
         payload = {
             "success": True,
             "score_dir": str(score_dir),
@@ -270,7 +271,8 @@ class SymphonyExtension(BaseExtension):
                 )
             ).to_dict()
         except asyncio.CancelledError:
-            build_logger.record("update.paused")
+            if _build_progress(_read_build_log(score_dir)).get("status") != "paused":
+                build_logger.record("update.paused")
             payload = {
                 "success": False,
                 "score_dir": str(score_dir),
@@ -456,7 +458,7 @@ def _build_progress(entries: list[dict[str, Any]]) -> dict[str, Any]:
             "percent": 0,
             "status": "idle",
         }
-    latest = entries[-1]
+    latest = _latest_effective_build_log_entry(entries)
     stage = str(latest.get("stage") or "")
     status = "running"
     if stage == "update.done":
@@ -474,6 +476,15 @@ def _build_progress(entries: list[dict[str, Any]]) -> dict[str, Any]:
         "total": latest.get("total"),
         "ts": latest.get("ts"),
     }
+
+
+def _latest_effective_build_log_entry(entries: list[dict[str, Any]]) -> dict[str, Any]:
+    if not entries:
+        return {}
+    for entry in reversed(entries):
+        if str(entry.get("stage") or "") in {"update.done", "update.failed", "update.paused"}:
+            return entry
+    return entries[-1]
 
 
 def _build_token_usage_payload(score_dir: Path, entries: list[dict[str, Any]]) -> dict[str, Any]:

@@ -1000,10 +1000,10 @@ class TeamManager:
 
         for rail in self._team_skill_rails.values():
             try:
-                rail.auto_scan = auto_scan_enabled
+                rail.completion_followup_enabled = auto_scan_enabled
             except Exception as exc:
                 logger.warning(
-                    "[TeamManager] TeamSkillEvolutionRail auto_scan update failed: %s",
+                    "[TeamManager] TeamSkillEvolutionRail completion_followup_enabled update failed: %s",
                     exc,
                 )
 

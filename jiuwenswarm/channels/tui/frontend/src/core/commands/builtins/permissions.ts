@@ -491,7 +491,6 @@ export function createPermissionsCommand(): SlashCommand {
     usage: "/permissions [allow|ask|deny] <tool_name | tool(pattern)>",
     example: "/permissions ask write_file\n/permissions allow bash(ls *)",
     kind: CommandKind.BUILT_IN,
-    hidden: true,
     takesArgs: true,
     action: async (ctx, args) => {
       const raw = args.trim();
