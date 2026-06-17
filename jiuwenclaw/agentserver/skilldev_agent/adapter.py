@@ -18,9 +18,6 @@ from openjiuwen.core.runner import Runner
 from openjiuwen.core.single_agent import AgentCard
 from openjiuwen.core.sys_operation import LocalWorkConfig, OperationMode, SysOperation, SysOperationCard
 from openjiuwen.harness.factory import create_deep_agent
-from openjiuwen.harness.rails import SecurityRail
-from openjiuwen.harness.rails.filesystem_rail import FileSystemRail
-from openjiuwen.harness.rails.heartbeat_rail import HeartbeatRail
 from openjiuwen.harness.rails.skill_use_rail import SkillUseRail
 from openjiuwen.harness.rails.task_planning_rail import TaskPlanningRail
 from openjiuwen.harness.tools.todo import TodoItem, TodoStatus
@@ -61,7 +58,6 @@ from jiuwenclaw.agentserver.skilldev_agent.utils.direct_import import (
     extract_packages_to_skill_dir,
     find_skill_root,
 )
-from jiuwenclaw.agentserver.skilldev_agent.rails.context_engineering_rail import SkillDevContextEngineeringRail
 from jiuwenclaw.agentserver.skilldev.session_history.service import SkillDevSessionHistoryService
 from jiuwenclaw.agentserver.skilldev_agent.utils.session_recorder import AgentSessionRecorder
 from jiuwenclaw.agentserver.skilldev_agent.utils.skill_search import search_skills
@@ -177,8 +173,6 @@ class SkillDevDeepAdapter:
         self._stream_event_rail = JiuClawStreamEventRail()
         self._task_planning_rail = TaskPlanningRail()
         rails = [
-            # SkillDevContextEngineeringRail(),
-            SecurityRail(),
             SkillUseRail(
                 skills_dir=self._skills_dir,
                 skill_mode="all",
