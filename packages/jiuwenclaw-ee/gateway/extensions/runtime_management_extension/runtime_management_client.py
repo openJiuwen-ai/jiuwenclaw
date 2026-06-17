@@ -124,16 +124,28 @@ async def load_effective_service_config_for_request(request: AgentRequest) -> An
 
 
 async def load_all_service_configs() -> list[dict[str, Any]]:
-    """查询全量 service_config_template（enabled=True）。"""
+    """查询当前 ``jiuwenclaw_id`` 下全量 ``service_config_template``（enabled=True）。"""
     try:
         from jiuwenclaw.infrastructure.module_importer import (
             import_manager_ws_client_module,
         )
 
         gateway_db_mod = import_manager_ws_client_module("core.enterprise_config.gateway_db")
-        db = gateway_db_mod.GatewayDb.current()
+        jiuwenclaw_id = os.getenv("JIUWENCLAW_ID", "").strip() or None
+        if not jiuwenclaw_id:
+            logger.warning(
+                "[RuntimeManagementAgentClient] load_all_service_configs skipped: "
+                "jiuwenclaw_id not set"
+            )
+            return []
+        db = gateway_db_mod.GatewayDb.bind(jiuwenclaw_id)
         rows = await db.list_records("service_config_template", filters={"enabled": True})
-        logger.info("[RuntimeManagementAgentClient] load_all_service_configs: count=%s", len(rows))
+        logger.info(
+            "[RuntimeManagementAgentClient] load_all_service_configs: "
+            "jiuwenclaw_id=%s count=%s",
+            jiuwenclaw_id,
+            len(rows),
+        )
         for row in rows:
             logger.info("[RuntimeManagementAgentClient] service_config: %s", row)
         return rows
