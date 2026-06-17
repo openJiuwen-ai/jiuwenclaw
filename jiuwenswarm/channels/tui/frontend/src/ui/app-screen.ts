@@ -1382,6 +1382,11 @@ function formatWorkflowStatus(status: WorkflowStatus): string {
   return workflowStatusTone(status)(`${workflowStatusIcon(status)} ${status}`);
 }
 
+function formatSwarmWorkflowListStatus(status: WorkflowStatus): string {
+  const icon = status === "running" ? "●" : workflowStatusIcon(status);
+  return workflowStatusTone(status)(`${icon} ${status}`);
+}
+
 function formatWorkflowStatusWord(status: WorkflowStatus): string {
   return status === "waiting_for_human" ? "waiting" : status;
 }
@@ -5541,7 +5546,7 @@ export class AppScreen implements Component, Focusable {
       const progress = workflow.status === "running" ? `${completed}/${total}` : `${total}`;
       return {
         value: workflow.id,
-        label: `${formatWorkflowStatus(workflow.status)} ${workflow.name}`,
+        label: `${formatSwarmWorkflowListStatus(workflow.status)} ${workflow.name}`,
         description: `${progress} agents`,
       };
     });
