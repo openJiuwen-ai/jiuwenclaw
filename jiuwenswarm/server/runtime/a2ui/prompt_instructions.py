@@ -14,6 +14,8 @@ def build_a2ui_autonomy_instruction(language: str = "en") -> str:
         "browser tool or browser subagent. If required details are missing and "
         "the Web A2UI channel is available, do not start browser automation yet. "
         "Instead, render an A2UI information-collection or confirmation form. "
+        "Do not ask for those missing browser-task details through plain natural "
+        "language, Markdown, or the ask_user tool when A2UI is available. "
         "The submit Button action name MUST be 'browser_preflight_submit'. Its "
         "action.context MUST include original_query, task_type, next_action with "
         "the value 'run_browser_agent', must_confirm_before_payment with true, "

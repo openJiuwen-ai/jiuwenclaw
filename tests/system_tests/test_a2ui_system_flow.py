@@ -79,6 +79,8 @@ async def test_a2ui_system_flow_accepts_event_and_valid_response(monkeypatch):
     assert config.enabled is True
     assert "<a2ui-json>" in prompt_section
     assert "browser_preflight_submit" in prompt_section
+    assert "Do not ask for those missing browser-task details" in prompt_section
+    assert "ask_user tool" in prompt_section
     assert client_prompt is not None
     assert "submit_selection" in client_prompt
     assert "alpha" in client_prompt
