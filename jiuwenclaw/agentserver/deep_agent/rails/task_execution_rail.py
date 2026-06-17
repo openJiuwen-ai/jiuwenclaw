@@ -11,10 +11,13 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
 
+from openjiuwen.core.foundation.llm.schema.message import ToolMessage
 from openjiuwen.core.session.agent import Session
 from openjiuwen.core.session.stream import OutputSchema
 from openjiuwen.core.single_agent.rail.base import AgentCallbackContext, InvokeInputs, ToolCallInputs
 from openjiuwen.harness.rails.base import DeepAgentRail
+from openjiuwen.harness.prompts import resolve_language
+from openjiuwen.harness.tools.todo_resume import todo_create_blocked_message
 from openjiuwen.harness.workspace.workspace import WorkspaceNode
 
 from jiuwenclaw.utils import get_agent_sessions_dir
@@ -495,6 +498,13 @@ class TaskExecutionRail(DeepAgentRail):
             return
         tool_name = ctx.inputs.tool_name
 
+        if tool_name == "todo_create":
+            force = self._todo_create_force_requested(ctx.inputs.tool_args)
+            if not force and self._has_active_todos_in_map(self._todo_map):
+                language = self._resolve_todo_tool_language(ctx)
+                self._reject_todo_create_over_active_plan(ctx, language=language)
+                return
+
         if tool_name in self.TODO_TOOLS:
             session_id = ""
             if ctx.session is not None:
@@ -517,6 +527,49 @@ class TaskExecutionRail(DeepAgentRail):
             return
 
         self._bind_context_to_in_progress_task()
+
+    @staticmethod
+    def _todo_create_force_requested(tool_args: Any) -> bool:
+        if not isinstance(tool_args, dict):
+            return False
+        return bool(tool_args.get("force"))
+
+    @staticmethod
+    def _has_active_todos_in_map(todo_map: dict[str, dict[str, Any]]) -> bool:
+        for task in todo_map.values():
+            status = str(task.get("status", "")).lower()
+            if status in ("pending", "in_progress"):
+                return True
+        return False
+
+    @staticmethod
+    def _resolve_todo_tool_language(ctx: AgentCallbackContext) -> str:
+        agent = getattr(ctx, "agent", None)
+        if agent is not None:
+            deep_config = getattr(agent, "deep_config", None)
+            if deep_config is not None:
+                lang = getattr(deep_config, "language", None)
+                if isinstance(lang, str) and lang.strip():
+                    return resolve_language(lang.strip())
+        return "cn"
+
+    @staticmethod
+    def _reject_todo_create_over_active_plan(
+        ctx: AgentCallbackContext,
+        *,
+        language: str = "cn",
+    ) -> None:
+        tool_call = ctx.inputs.tool_call if isinstance(ctx.inputs, ToolCallInputs) else None
+        tool_call_id = getattr(tool_call, "id", "") if tool_call else ""
+        error_msg = todo_create_blocked_message(language)
+        msg = ToolMessage(content=error_msg, tool_call_id=tool_call_id)
+        ctx.extra["_skip_tool"] = True
+        ctx.inputs.tool_result = {"error": error_msg, "message": error_msg}
+        ctx.inputs.tool_msg = msg
+        logger.warning(
+            "[TaskExecutionRail] blocked todo_create over active plan session_id=%s",
+            ctx.session.get_session_id() if ctx.session else "",
+        )
 
     async def after_tool_call(self, ctx: AgentCallbackContext) -> None:
         if not isinstance(ctx.inputs, ToolCallInputs):

@@ -1140,6 +1140,10 @@ class JiuWenClaw:
         if callable(prepare_plan_pause):
             await prepare_plan_pause(request)
 
+        prepare_interrupt_resume = getattr(adapter, "prepare_interrupt_resume_for_request", None)
+        if callable(prepare_interrupt_resume):
+            await prepare_interrupt_resume(request)
+
         inputs, memory_mode, raw_query = self._build_inputs(request)
         self._apply_effective_project_dir_to_request(request, session_id, inputs)
 
@@ -1299,6 +1303,10 @@ class JiuWenClaw:
         prepare_plan_pause = getattr(adapter, "prepare_plan_pause_for_request", None)
         if callable(prepare_plan_pause):
             await prepare_plan_pause(request)
+
+        prepare_interrupt_resume = getattr(adapter, "prepare_interrupt_resume_for_request", None)
+        if callable(prepare_interrupt_resume):
+            await prepare_interrupt_resume(request)
 
         inputs, memory_mode, raw_query = self._build_inputs(request)
         logger.info(
