@@ -1218,6 +1218,8 @@ class JiuWenClawDeepAdapter:
         """从 models.defaults 列表构建模型缓存。"""
         for entry in get_default_models(config):
             mcc = entry.get("model_client_config") or {}
+            # 注入session id
+            mcc.setdefault("session", {"sessionId": self._service_id})
             # 将claw_config的配置传入到model的扩展字段中, 方便注册的model实例使用
             mcc["claw_config"] = config
             if not mcc.get("model_name"):

@@ -133,6 +133,8 @@ class SkillDevService:
         if not task_id:
             yield self._error_chunk(request_id, channel_id, "缺少 task_id 或 session_id 参数")
             return
+        # 注入session id
+        self._deps.model_client_config.setdefault("session", {"sessionId": task_id})
 
         loaded = await self._deps.state_store.load_state(task_id)
         # 新建任务：无状态或已完成 → 创建新 State；否则续跑已有任务（恢复后继续执行）
