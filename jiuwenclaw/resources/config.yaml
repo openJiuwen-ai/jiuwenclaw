@@ -621,6 +621,7 @@ react:
       - todo_modify
       - reload_original_context_messages
       - load_qa_index                 # 展开指定 QA 块内「概览+逐 round 目录」；非 Selector 选块
+      - deepresearch_run_task
     subagents:
       enabled: true
       inherit_parent_eager_tools: true
