@@ -21,6 +21,7 @@ from jiuwenclaw.channel.base import BaseChannel, ChannelMetadata, RobotMessageRo
 from jiuwenclaw.channel.enterprise_web_uplink_config import get_enterprise_web_uplink_client_settings
 from jiuwenclaw.gateway.local_rpc_hooks import LocalRpcHookDispatcher
 from jiuwenclaw.request_ext import attach_to_metadata as _ext_attach
+from jiuwenclaw.request_ext import build_ext_from_source as _ext_build
 from jiuwenclaw.schema.message import Message, Mode, ReqMethod
 from jiuwenclaw.utils import get_agent_sessions_dir
 
@@ -472,6 +473,14 @@ class EnterpriseWebChannel(BaseChannel):
         stream_methods = ("skilldev.start", "skilldev.respond")
         is_stream = method in stream_methods
 
+        # request_ext 透传：Web Pod 把浏览器握手 query 随帧带上（_browser_query），
+        # 据此抽取 ext —— 与 web_channel 的"从 query 抽 ext"逻辑一致；
+        # forward_headers 仍在 Gateway 进程按 JIUWENCLAW_REQUEST_EXT_FORWARD_HEADERS 读取。
+        browser_query = data.get("_browser_query")
+        if not isinstance(browser_query, dict):
+            browser_query = query
+        ext = _ext_build(browser_query)
+
         user_message = Message(
             id=req_id,
             type="req",
@@ -483,7 +492,7 @@ class EnterpriseWebChannel(BaseChannel):
             req_method=self._parse_req_method(method),
             mode=self._parse_mode(params.get("mode")),
             is_stream=is_stream,
-            metadata=_ext_attach({"query": query, "method": method}),
+            metadata=_ext_attach({"query": browser_query, "method": method}, ext=ext),
         )
 
         if self._on_message_cb is not None:

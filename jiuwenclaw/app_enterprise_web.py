@@ -16,7 +16,7 @@ from functools import partial
 from http.server import ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse
 
 from jiuwenclaw.app_web import (
     _SpaStaticHandler,
@@ -68,6 +68,9 @@ class EnterpriseWebWsServer:
         self._pending_requests: dict[str, str] = {}
         self._active_session: dict[str, str] = {}
         self._internal_res_waiters: dict[str, asyncio.Future[dict[str, Any]]] = {}
+        # request_ext 透传：记住每条浏览器连接握手时的 query（含透传字段），
+        # 转发给 Gateway 时随帧带上，由 EnterpriseWebChannel 抽取为 ext。
+        self._browser_query: dict[str, dict[str, list[str]]] = {}
 
     async def start(self) -> None:
         if self._running:
@@ -154,7 +157,7 @@ class EnterpriseWebWsServer:
             await ws.close(code=1008, reason=f"unsupported path: {request_path}")
             return
 
-        await self._handle_browser(ws)
+        await self._handle_browser(ws, parse_qs(parsed.query))
 
     async def _handle_gateway(self, ws: Any) -> None:
         async with self._gateway_lock:
@@ -288,6 +291,16 @@ class EnterpriseWebWsServer:
         async with self._gateway_lock:
             return self._gateway_ws is not None
 
+    def _inject_browser_query(self, conn_id: str, data: dict[str, Any], raw: str) -> str:
+        """把该浏览器连接握手 query 附到转发帧上，供 Gateway 抽取为 request_ext。
+
+        无 query 时原样返回 raw（零行为变更）。
+        """
+        bq = self._browser_query.get(conn_id)
+        if not bq:
+            return raw
+        return json.dumps({**data, "_browser_query": bq}, ensure_ascii=False)
+
     async def _send_to_gateway(self, payload: str) -> bool:
         async with self._gateway_lock:
             gw = self._gateway_ws
@@ -300,11 +313,13 @@ class EnterpriseWebWsServer:
             logger.warning("[jiuwenclaw-enterprise-web] 向 Gateway 发送失败: %s", exc)
             return False
 
-    async def _handle_browser(self, ws: Any) -> None:
+    async def _handle_browser(self, ws: Any, query: dict[str, list[str]] | None = None) -> None:
         conn_id = str(uuid.uuid4())
         remote = getattr(ws, "remote_address", None)
         self._connections[conn_id] = ws
         self._conn_by_ws[id(ws)] = conn_id
+        # 记住握手 query（含 request_ext 透传字段），随每帧转发给 Gateway。
+        self._browser_query[conn_id] = query or {}
         logger.info("[jiuwenclaw-enterprise-web] 浏览器连接: conn_id=%s remote=%s", conn_id, remote)
 
         await self.request_gateway_connection_ack(conn_id)
@@ -324,6 +339,7 @@ class EnterpriseWebWsServer:
         ws = self._connections.pop(conn_id, None)
         if ws is not None:
             self._conn_by_ws.pop(id(ws), None)
+        self._browser_query.pop(conn_id, None)
         session_id = self._active_session.pop(conn_id, None)
         if session_id:
             subs = self._session_subscribers.get(session_id)
@@ -415,7 +431,7 @@ class EnterpriseWebWsServer:
             )
             if not await self._uplink_connected():
                 return
-            if not await self._send_to_gateway(raw):
+            if not await self._send_to_gateway(self._inject_browser_query(conn_id, data, raw)):
                 return
             return
 
@@ -433,7 +449,7 @@ class EnterpriseWebWsServer:
             return
 
         self._pending_requests[req_id] = conn_id
-        if not await self._send_to_gateway(raw):
+        if not await self._send_to_gateway(self._inject_browser_query(conn_id, data, raw)):
             self._pending_requests.pop(req_id, None)
             await self._respond_browser(
                 conn_id,
