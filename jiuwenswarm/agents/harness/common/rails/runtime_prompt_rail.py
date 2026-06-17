@@ -355,6 +355,10 @@ class RuntimePromptRail(DeepAgentRail):
                 "page inspection, or extracting data from a live website, use `spawn_sub_agent` with "
                 '`subagent_type` set to `"browser_agent"` and put the full browser objective in '
                 "`task_description`.\n"
+                "- Before spawning `browser_agent` for booking, ticketing, purchasing, reservation, or "
+                "form-filling tasks, check whether the user has supplied enough confirmed details. "
+                "If required details are missing and A2UI is available, render a preflight A2UI form "
+                "with action name `browser_preflight_submit` instead of starting browser automation.\n"
                 "- Do not use bash, execute_code, subprocess, shell commands, or direct Chrome/Edge launches "
                 "for browser automation.\n"
                 "- If `spawn_sub_agent` or `browser_agent` is unavailable, say that the browser "

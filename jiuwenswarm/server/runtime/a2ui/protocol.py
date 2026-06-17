@@ -270,8 +270,56 @@ def _log_a2ui_client_event(event: dict[str, Any]) -> None:
     )
 
 
+def _get_a2ui_user_action(event: dict[str, Any]) -> dict[str, Any]:
+    payload = event.get("event")
+    user_action = payload.get("userAction") if isinstance(payload, dict) else None
+    return user_action if isinstance(user_action, dict) else {}
+
+
+def _is_browser_preflight_submit(event: dict[str, Any]) -> bool:
+    user_action = _get_a2ui_user_action(event)
+    action_name = str(user_action.get("name") or "").strip()
+    context = user_action.get("context")
+    next_action = (
+        str(context.get("next_action") or "").strip()
+        if isinstance(context, dict)
+        else ""
+    )
+    return action_name == "browser_preflight_submit" or next_action == "run_browser_agent"
+
+
+def _build_browser_preflight_client_event_prompt(
+    event: dict[str, Any],
+    channel: str,
+    language: str,
+) -> str:
+    payload = {
+        "source": channel,
+        "preferred_response_language": language,
+        "type": A2UI_CLIENT_EVENT_TYPE,
+        "protocolVersion": event.get("protocolVersion", VERSION_0_8),
+        "event": event.get("event", {}),
+    }
+    prefix = (
+        "You receive an A2UI browser task preflight submission. The user has "
+        "confirmed the values in event.userAction.context. Combine those values "
+        "with original_query and start the browser task now by calling "
+        "spawn_sub_agent with subagent_type='browser_agent' and a complete "
+        "task_description. Do not ask again for values already present in the "
+        "context. If any required browser-task detail is still missing, render "
+        "one more A2UI form instead of starting the browser. Never buy, book, "
+        "pay, submit an order, or perform an irreversible action without a final "
+        "explicit user confirmation after the browser has shown the exact option "
+        "or order summary.\n"
+    )
+    return prefix + json.dumps(payload, ensure_ascii=False)
+
+
 def build_a2ui_client_event_prompt(event: dict[str, Any], channel: str, language: str) -> str:
     _log_a2ui_client_event(event)
+    if _is_browser_preflight_submit(event):
+        return _build_browser_preflight_client_event_prompt(event, channel, language)
+
     prefix = (
         "你收到了一次 A2UI 组件交互。请把 event.userAction.context "
         "视为用户提交的值。对于普通表单或按钮提交，请直接、简洁地使用首选回复语言回答。"

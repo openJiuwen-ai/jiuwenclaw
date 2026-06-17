@@ -6,6 +6,22 @@ from __future__ import annotations
 
 
 def build_a2ui_autonomy_instruction(language: str = "en") -> str:
+    browser_preflight_rule_en = (
+        " Browser task preflight: when the user asks you to perform a browser "
+        "automation task such as booking tickets, reserving hotels, buying "
+        "products, filling forms, or comparing purchasable options, first check "
+        "whether the task has enough user-confirmed details before calling any "
+        "browser tool or browser subagent. If required details are missing and "
+        "the Web A2UI channel is available, do not start browser automation yet. "
+        "Instead, render an A2UI information-collection or confirmation form. "
+        "The submit Button action name MUST be 'browser_preflight_submit'. Its "
+        "action.context MUST include original_query, task_type, next_action with "
+        "the value 'run_browser_agent', must_confirm_before_payment with true, "
+        "and all form values using path references. After this action is "
+        "submitted, combine the original request and submitted values, then use "
+        "spawn_sub_agent with subagent_type 'browser_agent'. Never buy, book, "
+        "pay, or place an order without a final explicit user confirmation."
+    )
     template_binding_rule_en = (
         " For repeated list/card data, use A2UI template binding correctly: "
         "Duplicate dataModelUpdate keys are invalid. Encode arrays as one "
@@ -95,6 +111,7 @@ def build_a2ui_autonomy_instruction(language: str = "en") -> str:
         + image_url_rule_zh
         + icon_font_rule_en
         + autonomy_rule_zh
+        + browser_preflight_rule_en
     )
 
     if language in {"zh", "cn"}:
@@ -120,6 +137,7 @@ def build_a2ui_autonomy_instruction(language: str = "en") -> str:
         "server-to-client message list, with beginRendering before "
         "surfaceUpdate and dataModelUpdate only when needed."
         + autonomy_rule_en
+        + browser_preflight_rule_en
         + requested_component_rule_en
     )
 
