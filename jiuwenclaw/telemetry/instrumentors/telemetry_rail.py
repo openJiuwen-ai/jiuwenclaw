@@ -81,6 +81,8 @@ from jiuwenclaw.telemetry.attributes import (
 )
 from jiuwenclaw.telemetry.metrics import (
     _identity_span_attrs,
+    metrics_session_id,
+    _with_resource_labels,
     add_skill_call_count,
     add_skill_error_count,
     add_skill_token_usage,
@@ -88,12 +90,12 @@ from jiuwenclaw.telemetry.metrics import (
     agent_duration,
     llm_call_count,
     llm_duration,
+    record_first_token_duration,
     record_skill_duration,
     token_usage,
     tool_call_count,
     tool_duration,
     tool_error_count,
-    _with_resource_labels,
 )
 from jiuwenclaw.telemetry.context_propagation import extract_trace_context
 
@@ -127,6 +129,10 @@ _agent_span_ctx: ContextVar[Optional[Tuple[trace.Span, float, Optional[Token]]]]
 _agent_token_usage: ContextVar[Optional[dict]] = ContextVar(
     "telemetry_agent_token_usage", default=None
 )
+# Time when first streaming token arrived (monotonic timestamp).
+# Set by TTFT stream patch (inlined in instrumentors/__init__.py) on the first yielded chunk,
+# read here in after_model_call. Non-streaming calls never set it.
+first_token_time: ContextVar[Optional[float]] = ContextVar("first_token_time", default=None)
 # Skill sessions are now tracked via ``ctx.extra["_skill_sessions"]`` shared dict
 # instead of a ContextVar. ContextVars are per-asyncio-task, but skill_tool and
 # skill_complete execute in DIFFERENT tasks (each tool call is a new task via
@@ -275,6 +281,8 @@ class TelemetryRail(DeepAgentRail):
         self._tool_spans: dict[str, tuple[trace.Span, float, str]] = {}
         # P0: Background tasks for heavy context recording (concurrent with LLM call)
         self._bg_tasks: dict[str, asyncio.Task] = {}
+        # Skill session tracking: shared across skill_tool / skill_complete (ctx.extra is per-call)
+        self._skill_sessions: dict[str, dict] = {}
         # P1: Cache for tool definition token estimates (tools rarely change between iterations)
         self._tools_cache_key: Optional[tuple[str, ...]] = None
         self._tools_cache_value: int = 0
@@ -318,6 +326,8 @@ class TelemetryRail(DeepAgentRail):
             "trace_context": trace_ctx,
             "iteration": 0,
         })
+        # Sync session_id to metrics-scoped ContextVar (decouples metrics.py from this module)
+        metrics_session_id.set(session_id)
 
     def _get_request_context(self) -> dict:
         """Get current request context from ContextVar."""
@@ -344,6 +354,15 @@ class TelemetryRail(DeepAgentRail):
 
         # Reset token accumulation for this agent invoke
         _agent_token_usage.set({"input_tokens": 0, "output_tokens": 0})
+        # Reset first_token_time defensively — prevents stale value from
+        # a previous request if after_model_call was skipped (circuit breaker, error).
+        first_token_time.set(None)
+        # Defensive cleanup: remove orphaned skill sessions from a previous request
+        # with the same session_id (if after_invoke was skipped due to circuit breaker).
+        session_id = req_ctx.get("session_id", "")
+        orphaned_keys = [k for k in self._skill_sessions if k.startswith(f"skill_{session_id}_")]
+        for k in orphaned_keys:
+            self._skill_sessions.pop(k, None)
 
         # Get conversation_id from inputs
         conversation_id = ""
@@ -481,9 +500,12 @@ class TelemetryRail(DeepAgentRail):
         _agent_span_ctx.set(None)
         _agent_token_usage.set(None)
 
-        # Cleanup incomplete skill sessions (skill activated but no skill_complete)
-        # call_count already recorded in before_tool_call; only discard duration
-        ctx.extra.pop("_skill_sessions", None)
+        # Cleanup skill sessions for this request only (keyed by session_id).
+        # Do NOT .clear() — other concurrent requests may have active sessions.
+        session_id = req_ctx.get("session_id", "")
+        keys_to_remove = [k for k in self._skill_sessions if k.startswith(f"skill_{session_id}_")]
+        for k in keys_to_remove:
+            self._skill_sessions.pop(k, None)
 
         # Defensive cleanup: cancel any lingering background tasks that weren't
         # consumed by after_model_call / on_model_exception (e.g. hook skipped, rail degraded)
@@ -768,6 +790,25 @@ class TelemetryRail(DeepAgentRail):
             JIUWENCLAW_CHANNEL_ID: channel_id,
         }))
 
+        # --- TTFT: first iteration only ---
+        # first_token_time is set by the TTFT stream patch on the first yielded chunk.
+        # Non-streaming calls never set it, so they're naturally skipped.
+        ft_time = first_token_time.get()
+        if ft_time is not None and req_ctx.get("iteration", 0) == 1:
+            agent_ctx = _agent_span_ctx.get()
+            if agent_ctx is not None:
+                _, agent_start_time, _ = agent_ctx
+                ttft_ms = (ft_time - agent_start_time) * 1000  # convert to ms
+                if ttft_ms >= 0:
+                    ttft_attrs = {
+                        GEN_AI_REQUEST_MODEL: model_name,
+                        GEN_AI_SYSTEM: system,
+                        JIUWENCLAW_CHANNEL_ID: channel_id,
+                    }
+                    record_first_token_duration(ttft_ms, ttft_attrs)
+        # Clear ContextVar for next invoke cycle
+        first_token_time.set(None)
+
         span.end()
 
     @_hook_safe
@@ -787,6 +828,9 @@ class TelemetryRail(DeepAgentRail):
             bg_task.cancel()
 
         span, start_time = entry
+
+        # Clear first_token_time on exception path (consistent with after_model_call)
+        first_token_time.set(None)
 
         if hasattr(ctx, "exception"):
             exc = ctx.exception
@@ -881,9 +925,8 @@ class TelemetryRail(DeepAgentRail):
                     JIUWENCLAW_CHANNEL_ID: req_ctx["channel_id"],
                 })
 
-                sessions = ctx.extra.setdefault("_skill_sessions", {})
                 session_id = req_ctx.get("session_id", "")
-                sessions[f"skill_{session_id}_{skill_name}"] = {
+                self._skill_sessions[f"skill_{session_id}_{skill_name}"] = {
                     "start_time": time.monotonic(),
                     "skill_name": skill_name,
                     "skill_version": skill_version,
@@ -1004,34 +1047,30 @@ class TelemetryRail(DeepAgentRail):
 
             # Skill session completion: record duration and error_count
             if skill_name:
-                sessions = ctx.extra.get("_skill_sessions", {})
-                if sessions:
-                    session_id = req_ctx.get("session_id", "")
-                    session_key = f"skill_{session_id}_{skill_name}"
-                    session_info = sessions.pop(session_key, None)
-                    if not sessions:
-                        ctx.extra.pop("_skill_sessions", None)
+                session_id = req_ctx.get("session_id", "")
+                session_key = f"skill_{session_id}_{skill_name}"
+                session_info = self._skill_sessions.pop(session_key, None)
 
-                    if session_info:
-                        duration = time.monotonic() - session_info["start_time"]
+                if session_info:
+                    duration = time.monotonic() - session_info["start_time"]
 
-                        has_error = False
-                        tool_result = getattr(inputs, "tool_result", None) if inputs else None
-                        if tool_result is not None:
-                            if hasattr(tool_result, "error") and getattr(tool_result, "error", None):
-                                has_error = True
-                            elif isinstance(tool_result, dict) and tool_result.get("error"):
-                                has_error = True
+                    has_error = False
+                    tool_result = getattr(inputs, "tool_result", None) if inputs else None
+                    if tool_result is not None:
+                        if hasattr(tool_result, "error") and getattr(tool_result, "error", None):
+                            has_error = True
+                        elif isinstance(tool_result, dict) and tool_result.get("error"):
+                            has_error = True
 
-                        attrs = {
-                            GEN_AI_SKILL_NAME: skill_name,
-                            GEN_AI_SKILL_VERSION: session_info.get("skill_version", ""),
-                            GEN_AI_SYSTEM: "jiuwenclaw",
-                            JIUWENCLAW_CHANNEL_ID: req_ctx["channel_id"],
-                        }
-                        record_skill_duration(duration, attrs)
-                        if has_error:
-                            add_skill_error_count(1, attrs)
+                    attrs = {
+                        GEN_AI_SKILL_NAME: skill_name,
+                        GEN_AI_SKILL_VERSION: session_info.get("skill_version", ""),
+                        GEN_AI_SYSTEM: "jiuwenclaw",
+                        JIUWENCLAW_CHANNEL_ID: req_ctx["channel_id"],
+                    }
+                    record_skill_duration(duration, attrs)
+                    if has_error:
+                        add_skill_error_count(1, attrs)
 
         span.end()
 
