@@ -303,6 +303,7 @@ class RuntimeManagementAgentClient(AgentServerClient):
         agent_memory_limit = os.getenv("AGENT_SERVER_MEMORY_LIMIT")
         agent_readiness_initial_delay = int(os.getenv("AGENT_SERVER_READINESS_INITIAL_DELAY", "10"))
         agent_readiness_period = int(os.getenv("AGENT_SERVER_READINESS_PERIOD", "5"))
+        agent_custom_envs = os.getenv("AGENT_SERVER_CUSTOM_ENVS")
 
         container_name = os.getenv("AGENT_SERVER_CONTAINER_NAME", "agentserver")
         container_port = int(os.getenv("AGENT_SERVER_PORT", "8080"))
@@ -393,9 +394,14 @@ class RuntimeManagementAgentClient(AgentServerClient):
                 ("GATEWAY_DB_PASSWORD", gateway_db_password),
                 ("GATEWAY_DB_NAME", gateway_db_name),
                 ("JIUWENCLAW_ID", os.getenv("JIUWENCLAW_ID")),
+                ("LLM_SSL_VERIFY", os.getenv("LLM_SSL_VERIFY")),
+                ("HOME", os.getenv("AGENT_SERVER_HOME")),
+                ("PYTHONPATH", os.getenv("PYTHONPATH")),
+                ("AGENT_SERVER_LOG_FILE", os.getenv("AGENT_SERVER_LOG_FILE")),
             ):
                 if value is not None:
                     base[key] = value
+
             if api_key:
                 base.update(
                     {
@@ -405,22 +411,28 @@ class RuntimeManagementAgentClient(AgentServerClient):
                         "API_KEY": api_key,
                     }
                 )
-            ssl_verify = os.getenv("LLM_SSL_VERIFY")
-            if ssl_verify is not None:
-                base["LLM_SSL_VERIFY"] = ssl_verify
-            home = os.getenv("AGENT_SERVER_HOME")
-            if home:
-                base["HOME"] = home
-            pythonpath = os.getenv("PYTHONPATH")
-            if pythonpath:
-                base["PYTHONPATH"] = pythonpath
-            log_file = os.getenv("AGENT_SERVER_LOG_FILE")
-            if log_file:
-                base["AGENT_SERVER_LOG_FILE"] = log_file
+
             if mode == "dev":
                 base["LOG_ROOT_PATH"] = "/root/.logs"
             else:
                 base["LOG_ROOT_PATH"] = "/home/app/.logs"
+
+            try:
+                custom_env_dict = json.loads(agent_custom_envs)
+                if isinstance(custom_env_dict, dict):
+                    base.update(custom_env_dict)
+                else:
+                    # JSON不是字典类型，打印警告
+                    logger.warning(
+                        f"AGENT_SERVER_CUSTOM_ENVS 解析成功但非字典类型，类型：{type(custom_env_dict)}，内容忽略"
+                    )
+            except json.JSONDecodeError as e:
+                # JSON格式非法时静默跳过，不阻断启动
+                # JSON格式非法，打印详细错误+原始文本，方便排障
+                logger.warning(
+                    f"解析 AGENT_SERVER_CUSTOM_ENVS JSON 格式失败，错误信息：{str(e)}，原始配置字符串：{agent_custom_envs}"
+            )
+                pass
             return base
 
         _client = self  # 捕获外层 RuntimeManagementAgentClient 实例，供内部类使用
