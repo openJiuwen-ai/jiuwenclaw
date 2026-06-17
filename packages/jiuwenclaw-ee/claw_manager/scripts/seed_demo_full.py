@@ -134,7 +134,7 @@ def _model_templates() -> list[dict[str, Any]]:
         {
             "template_name": "全局兜底-经济型",
             "description": "未命中其他策略时使用，便宜稳定",
-            "model_type": "default",
+            "model_type": ["default"],
             "model_tags": ["chat", "fallback", "cn"],
             "api_base": "https://api.openai.com/v1",
             "api_key": "sk-demo-global-fallback",
@@ -152,7 +152,7 @@ def _model_templates() -> list[dict[str, Any]]:
         {
             "template_name": "销售组-标准型",
             "description": "销售部门常规对话",
-            "model_type": "default",
+            "model_type": ["default"],
             "model_tags": ["chat", "sales"],
             "api_base": "https://api.openai.com/v1",
             "api_key": "sk-demo-sales-standard",
@@ -188,7 +188,7 @@ def _model_templates() -> list[dict[str, Any]]:
         {
             "template_name": "DeepSeek 中文模型",
             "description": "中文长上下文场景",
-            "model_type": "default",
+            "model_type": ["default"],
             "model_tags": ["chat", "cn", "long-context"],
             "api_base": "https://api.deepseek.com/v1",
             "api_key": "sk-demo-deepseek",
@@ -206,7 +206,7 @@ def _model_templates() -> list[dict[str, Any]]:
         {
             "template_name": "Claude 推理",
             "description": "复杂推理 / 代码生成",
-            "model_type": "default",
+            "model_type": ["default"],
             "model_tags": ["chat", "reasoning", "code"],
             "api_base": "https://api.anthropic.com/v1",
             "api_key": "sk-ant-demo",
@@ -224,7 +224,7 @@ def _model_templates() -> list[dict[str, Any]]:
         {
             "template_name": "通义千问",
             "description": "国产合规中文场景",
-            "model_type": "default",
+            "model_type": ["default"],
             "model_tags": ["chat", "cn", "compliance"],
             "api_base": "https://dashscope.aliyuncs.com/compatible-mode/v1",
             "api_key": "sk-demo-qwen",
@@ -242,7 +242,7 @@ def _model_templates() -> list[dict[str, Any]]:
         {
             "template_name": "智谱 GLM",
             "description": "智谱清言中文场景，关闭流式以适配老客户端",
-            "model_type": "default",
+            "model_type": ["default"],
             "model_tags": ["chat", "cn"],
             "api_base": "https://open.bigmodel.cn/api/paas/v4",
             "api_key": "sk-demo-glm",
@@ -260,7 +260,7 @@ def _model_templates() -> list[dict[str, Any]]:
         {
             "template_name": "视觉-小型",
             "description": "前端低成本视觉理解",
-            "model_type": "vision",
+            "model_type": ["vision"],
             "model_tags": ["vision"],
             "api_base": "https://api.openai.com/v1",
             "api_key": "sk-demo-vision",

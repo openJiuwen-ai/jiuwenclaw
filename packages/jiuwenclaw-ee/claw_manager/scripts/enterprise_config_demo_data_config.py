@@ -135,7 +135,7 @@ class ManagerClient:
         json_body: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         url = self._url(path)
-        with httpx.Client(timeout=self._timeout) as client:
+        with httpx.Client(timeout=self._timeout, follow_redirects=True) as client:
             resp = client.request(method, url, json=json_body)
         if resp.status_code >= 400:
             detail = resp.text.strip()
@@ -210,7 +210,7 @@ def _model_templates() -> list[tuple[str, dict[str, Any]]]:
             {
                 "template_name": "全局兜底-经济型",
                 "description": "无服务/Agent 命中时使用",
-                "model_type": "default",
+                "model_type": ["default"],
                 "model_tags": ["chat"],
                 "api_base": "https://api.openai.com/v1",
                 "api_key": "sk-demo-global",
@@ -225,7 +225,7 @@ def _model_templates() -> list[tuple[str, dict[str, Any]]]:
             "M2 销售组-标准型",
             {
                 "template_name": "销售组-标准型",
-                "model_type": "default",
+                "model_type": ["default"],
                 "api_base": "https://api.openai.com/v1",
                 "api_key": "sk-demo-sales",
                 "model_id": "gpt-4o",
@@ -252,7 +252,7 @@ def _model_templates() -> list[tuple[str, dict[str, Any]]]:
             "M4 Carol 默认映射模型",
             {
                 "template_name": "Carol 默认映射模型",
-                "model_type": "default",
+                "model_type": ["default"],
                 "api_base": "https://api.deepseek.com/v1",
                 "api_key": "sk-demo-carol",
                 "model_id": "deepseek-v3",
@@ -265,7 +265,7 @@ def _model_templates() -> list[tuple[str, dict[str, Any]]]:
             "M5 销售组映射专用",
             {
                 "template_name": "销售组映射专用",
-                "model_type": "default",
+                "model_type": ["default"],
                 "api_base": "https://api.openai.com/v1",
                 "api_key": "sk-demo-group-map",
                 "model_id": "gpt-4o-group-map",
@@ -495,7 +495,7 @@ def seed_demo_config(client: ManagerClient) -> dict[str, Any]:
 
     logger.info("[5/8] 创建 service-policies")
     sales = client.post(
-        "/config-effective/service-policies",
+        "/config-effective/service-policies/",
         {
             "policy_name": "销售通道高优先级",
             "policy_desc": "命中 g_demo_sales 时的主服务策略",
@@ -530,7 +530,7 @@ def seed_demo_config(client: ManagerClient) -> dict[str, Any]:
     )
 
     fallback = client.post(
-        "/config-effective/service-policies",
+        "/config-effective/service-policies/",
         {
             "policy_name": "销售组低优先级兜底",
             "service_id": "${group_id}::${bot_id}",
@@ -554,7 +554,7 @@ def seed_demo_config(client: ManagerClient) -> dict[str, Any]:
 
     logger.info("[6/8] 创建 agent-policies")
     vip = client.post(
-        "/config-effective/agent-policies",
+        "/config-effective/agent-policies/",
         {
             "policy_name": "VIP alice",
             "policy_desc": "alice 覆盖为 M3",
@@ -592,7 +592,7 @@ def seed_demo_config(client: ManagerClient) -> dict[str, Any]:
     )
 
     mapping_rule = client.post(
-        "/config-effective/agent-policies",
+        "/config-effective/agent-policies/",
         {
             "policy_name": "组映射 default_model",
             "agent_id": "default_agent_id_1",
@@ -619,7 +619,7 @@ def seed_demo_config(client: ManagerClient) -> dict[str, Any]:
 
     logger.info("[7/8] 创建 global-policies")
     global_row = client.post(
-        "/config-effective/global-policies",
+        "/config-effective/global-policies/",
         {
             "policy_name": "全局兜底",
             "policy_desc": "未命中服务/Agent 策略时使用",
@@ -651,7 +651,7 @@ def seed_demo_config(client: ManagerClient) -> dict[str, Any]:
 
     logger.info("[8/8] 创建 config-default-template-mappings")
     carol_map = client.post(
-        "/config-default-template-mappings",
+        "/config-default-template-mappings/",
         {
             "policy_name": "carol 默认 default_model",
             "user_id": "carol",
@@ -675,7 +675,7 @@ def seed_demo_config(client: ManagerClient) -> dict[str, Any]:
     )
 
     group_map = client.post(
-        "/config-default-template-mappings",
+        "/config-default-template-mappings/",
         {
             "policy_name": "销售组 default_model 映射",
             "user_id": None,

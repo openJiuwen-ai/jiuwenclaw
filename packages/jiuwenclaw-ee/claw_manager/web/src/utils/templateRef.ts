@@ -20,6 +20,17 @@ export interface TemplateRefSlotRow {
   refs: string[];
 }
 
+function dedupePreserveOrder(refs: string[]): string[] {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const ref of refs) {
+    if (seen.has(ref)) continue;
+    seen.add(ref);
+    out.push(ref);
+  }
+  return out;
+}
+
 function normalizeSlotRefs(raw: unknown): string[] {
   if (raw == null) return [];
   if (typeof raw === 'string') {
@@ -27,9 +38,11 @@ function normalizeSlotRefs(raw: unknown): string[] {
     return text ? [text] : [];
   }
   if (Array.isArray(raw)) {
-    return raw
-      .map((item) => (item == null ? '' : String(item).trim()))
-      .filter(Boolean);
+    return dedupePreserveOrder(
+      raw
+        .map((item) => (item == null ? '' : String(item).trim()))
+        .filter(Boolean),
+    );
   }
   const text = String(raw).trim();
   return text ? [text] : [];
@@ -61,7 +74,7 @@ export function serializeTemplateRef(rows: TemplateRefSlotRow[]): TemplateRefMap
   for (const row of rows) {
     const slot = row.slot.trim();
     if (!slot) continue;
-    const refs = row.refs.map((r) => r.trim()).filter(Boolean);
+    const refs = dedupePreserveOrder(row.refs.map((r) => r.trim()).filter(Boolean));
     if (refs.length) out[slot] = refs;
   }
   return out;

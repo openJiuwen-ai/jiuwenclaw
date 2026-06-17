@@ -28,7 +28,7 @@ import { formatTime, truncate } from '../../../utils/format';
 import { TEMPLATE_REF_SLOTS } from '../../../utils/templateRef';
 
 /** 与 Manager / Gateway 默认模板映射允许的 template_type 一致 */
-const MAPPING_TEMPLATE_SLOTS = TEMPLATE_REF_SLOTS.filter((slot) => slot !== 'service_config');
+const MAPPING_TEMPLATE_SLOTS = TEMPLATE_REF_SLOTS;
 
 /** 与 config_default_template_mapping 表 ColumnDefinition length 一致 */
 const FIELD_MAX_LENGTH = {

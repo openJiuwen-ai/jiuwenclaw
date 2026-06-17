@@ -39,16 +39,6 @@ def _normalize_image_pull_policy(value: str) -> str:
     return normalized
 
 
-def _autoscale_interval_to_db(value: float) -> str:
-    return str(value)
-
-
-def _autoscale_interval_from_db(value: Any) -> float:
-    if value is None:
-        return 0.2
-    return float(value)
-
-
 def _template_pk(jiuwenclaw_id: str, template_id: str) -> dict[str, str]:
     return {
         "jiuwenclaw_id": jiuwenclaw_id,
@@ -107,10 +97,6 @@ async def update_service_config_template(
     if "image_pull_policy" in updates and updates["image_pull_policy"] is not None:
         updates["image_pull_policy"] = _normalize_image_pull_policy(
             updates["image_pull_policy"]
-        )
-    if "autoscale_interval" in updates and updates["autoscale_interval"] is not None:
-        updates["autoscale_interval"] = _autoscale_interval_to_db(
-            float(updates["autoscale_interval"])
         )
 
     if not updates:
@@ -221,9 +207,7 @@ def _build_row_from_template(
         "max_services": int(template.get("max_services", 20)),
         "service_concurrency": int(template.get("service_concurrency", 30)),
         "service_ttl": int(template.get("service_ttl", 180)),
-        "autoscale_interval": _autoscale_interval_to_db(
-            _autoscale_interval_from_db(template.get("autoscale_interval", "5"))
-        ),
+        "autoscale_interval": float(template.get("autoscale_interval", 5)),
         "message_timeout": int(template.get("message_timeout", 60)),
         "session_concurrency": int(template.get("session_concurrency", 3)),
         "session_ttl": int(template.get("session_ttl", 60)),

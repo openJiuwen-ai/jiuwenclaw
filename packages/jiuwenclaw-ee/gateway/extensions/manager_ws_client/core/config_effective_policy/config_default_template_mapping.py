@@ -28,6 +28,7 @@ _ALLOWED_TEMPLATE_TYPES = frozenset({
     "vision_model",
     "skill_whitelist",
     "extension_config",
+    "service_config",
 })
 
 

@@ -35,7 +35,7 @@ def model_templates() -> list[tuple[str, dict[str, Any]]]:
             {
                 "template_name": "全局兜底-经济型",
                 "description": "无服务/Agent 命中时使用",
-                "model_type": "default",
+                "model_type": ["default"],
                 "model_tags": ["chat"],
                 "api_base": "https://api.openai.com/v1",
                 "api_key": "sk-demo-global",
@@ -50,7 +50,7 @@ def model_templates() -> list[tuple[str, dict[str, Any]]]:
             "M2",
             {
                 "template_name": "销售组-标准型",
-                "model_type": "default",
+                "model_type": ["default"],
                 "api_base": "https://api.openai.com/v1",
                 "api_key": "sk-demo-sales",
                 "model_id": "gpt-4o",
@@ -77,7 +77,7 @@ def model_templates() -> list[tuple[str, dict[str, Any]]]:
             "M4",
             {
                 "template_name": "Carol 默认映射模型",
-                "model_type": "default",
+                "model_type": ["default"],
                 "api_base": "https://api.deepseek.com/v1",
                 "api_key": "sk-demo-carol",
                 "model_id": "deepseek-v3",
@@ -90,7 +90,7 @@ def model_templates() -> list[tuple[str, dict[str, Any]]]:
             "M5",
             {
                 "template_name": "销售组映射专用",
-                "model_type": "default",
+                "model_type": ["default"],
                 "api_base": "https://api.openai.com/v1",
                 "api_key": "sk-demo-group-map",
                 "model_id": "gpt-4o-group-map",

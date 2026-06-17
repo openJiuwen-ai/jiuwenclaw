@@ -34,6 +34,7 @@ from jiuwenclaw_manager.schemas.template_schemas import (
     SkillWhitelistTemplateCreateBody,
     SkillWhitelistTemplateListQuery,
     SkillWhitelistTemplateUpdateBody,
+    TemplateIdPath,
 )
 
 templates_router = APIRouter()
@@ -78,16 +79,7 @@ async def list_model_templates(
 ):
     svc = _model_template_svc(handler)
     try:
-        data = await svc.list_templates(
-            page=query.page,
-            page_size=query.page_size,
-            enabled=query.enabled,
-            model_type=query.model_type,
-            model_provider=query.model_provider,
-            search=query.search,
-            sort_by=query.sort_by,
-            sort_order=query.sort_order,
-        )
+        data = await svc.list_templates(query)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return ResponseModel(code=200, message="success", data=data)
@@ -95,7 +87,7 @@ async def list_model_templates(
 
 @templates_router.get("/model-templates/{template_id}", response_model=ResponseModel)
 async def get_model_template(
-    template_id: str,
+    template_id: TemplateIdPath,
     handler: Annotated[DBHandler, Depends(get_db_handler)],
 ):
     svc = _model_template_svc(handler)
@@ -110,7 +102,7 @@ async def get_model_template(
 
 @templates_router.patch("/model-templates/{template_id}", response_model=ResponseModel)
 async def update_model_template(
-    template_id: str,
+    template_id: TemplateIdPath,
     body: ModelTemplateUpdateBody,
     handler: Annotated[DBHandler, Depends(get_db_handler)],
 ):
@@ -126,7 +118,7 @@ async def update_model_template(
 
 @templates_router.delete("/model-templates/{template_id}", response_model=ResponseModel)
 async def delete_model_template(
-    template_id: str,
+    template_id: TemplateIdPath,
     handler: Annotated[DBHandler, Depends(get_db_handler)],
 ):
     svc = _model_template_svc(handler)
@@ -164,16 +156,7 @@ async def list_extension_config_templates(
 ):
     svc = _extension_config_template_svc(handler)
     try:
-        data = await svc.list_templates(
-            page=query.page,
-            page_size=query.page_size,
-            enabled=query.enabled,
-            component=query.component,
-            hook_type=query.hook_type,
-            search=query.search,
-            sort_by=query.sort_by,
-            sort_order=query.sort_order,
-        )
+        data = await svc.list_templates(query)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return ResponseModel(code=200, message="success", data=data)
@@ -183,7 +166,7 @@ async def list_extension_config_templates(
     "/extension-config-templates/{template_id}", response_model=ResponseModel
 )
 async def get_extension_config_template(
-    template_id: str,
+    template_id: TemplateIdPath,
     handler: Annotated[DBHandler, Depends(get_db_handler)],
 ):
     svc = _extension_config_template_svc(handler)
@@ -200,7 +183,7 @@ async def get_extension_config_template(
     "/extension-config-templates/{template_id}", response_model=ResponseModel
 )
 async def update_extension_config_template(
-    template_id: str,
+    template_id: TemplateIdPath,
     body: ExtensionConfigTemplateUpdateBody,
     handler: Annotated[DBHandler, Depends(get_db_handler)],
 ):
@@ -218,7 +201,7 @@ async def update_extension_config_template(
     "/extension-config-templates/{template_id}", response_model=ResponseModel
 )
 async def delete_extension_config_template(
-    template_id: str,
+    template_id: TemplateIdPath,
     handler: Annotated[DBHandler, Depends(get_db_handler)],
 ):
     svc = _extension_config_template_svc(handler)
@@ -256,16 +239,7 @@ async def list_skill_whitelist_templates(
 ):
     svc = _skill_whitelist_template_svc(handler)
     try:
-        data = await svc.list_templates(
-            page=query.page,
-            page_size=query.page_size,
-            enabled=query.enabled,
-            skill_id=query.skill_id,
-            skill_source=query.skill_source,
-            search=query.search,
-            sort_by=query.sort_by,
-            sort_order=query.sort_order,
-        )
+        data = await svc.list_templates(query)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return ResponseModel(code=200, message="success", data=data)
@@ -275,7 +249,7 @@ async def list_skill_whitelist_templates(
     "/skill-whitelist-templates/{template_id}", response_model=ResponseModel
 )
 async def get_skill_whitelist_template(
-    template_id: str,
+    template_id: TemplateIdPath,
     handler: Annotated[DBHandler, Depends(get_db_handler)],
 ):
     svc = _skill_whitelist_template_svc(handler)
@@ -292,7 +266,7 @@ async def get_skill_whitelist_template(
     "/skill-whitelist-templates/{template_id}", response_model=ResponseModel
 )
 async def update_skill_whitelist_template(
-    template_id: str,
+    template_id: TemplateIdPath,
     body: SkillWhitelistTemplateUpdateBody,
     handler: Annotated[DBHandler, Depends(get_db_handler)],
 ):
@@ -310,7 +284,7 @@ async def update_skill_whitelist_template(
     "/skill-whitelist-templates/{template_id}", response_model=ResponseModel
 )
 async def delete_skill_whitelist_template(
-    template_id: str,
+    template_id: TemplateIdPath,
     handler: Annotated[DBHandler, Depends(get_db_handler)],
 ):
     svc = _skill_whitelist_template_svc(handler)
@@ -348,15 +322,7 @@ async def list_service_config_templates(
 ):
     svc = _service_config_template_svc(handler)
     try:
-        data = await svc.list_templates(
-            page=query.page,
-            page_size=query.page_size,
-            enabled=query.enabled,
-            namespace=query.namespace,
-            search=query.search,
-            sort_by=query.sort_by,
-            sort_order=query.sort_order,
-        )
+        data = await svc.list_templates(query)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return ResponseModel(code=200, message="success", data=data)
@@ -366,7 +332,7 @@ async def list_service_config_templates(
     "/service-config-templates/{template_id}", response_model=ResponseModel
 )
 async def get_service_config_template(
-    template_id: str,
+    template_id: TemplateIdPath,
     handler: Annotated[DBHandler, Depends(get_db_handler)],
 ):
     svc = _service_config_template_svc(handler)
@@ -383,7 +349,7 @@ async def get_service_config_template(
     "/service-config-templates/{template_id}", response_model=ResponseModel
 )
 async def update_service_config_template(
-    template_id: str,
+    template_id: TemplateIdPath,
     body: ServiceConfigTemplateUpdateBody,
     handler: Annotated[DBHandler, Depends(get_db_handler)],
 ):
@@ -401,7 +367,7 @@ async def update_service_config_template(
     "/service-config-templates/{template_id}", response_model=ResponseModel
 )
 async def delete_service_config_template(
-    template_id: str,
+    template_id: TemplateIdPath,
     handler: Annotated[DBHandler, Depends(get_db_handler)],
 ):
     svc = _service_config_template_svc(handler)

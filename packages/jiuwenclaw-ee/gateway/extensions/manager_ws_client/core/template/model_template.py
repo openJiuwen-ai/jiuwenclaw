@@ -28,23 +28,28 @@ def _normalize_template_id(template_id: Any) -> str:
     return normalized
 
 
-def _validate_model_type(value: str | list[str]) -> str | list[str]:
+def _normalize_model_types(value: Any) -> list[str]:
+    if value is None:
+        return []
     if isinstance(value, str):
-        if value not in _ALLOWED_MODEL_TYPES:
+        items = [value] if value.strip() else []
+    elif isinstance(value, list):
+        items = value
+    else:
+        raise ValueError("model_type must be a list of strings")
+    normalized: list[str] = []
+    for item in items:
+        if not isinstance(item, str):
+            raise ValueError("model_type must be a list of strings")
+        text = item.strip()
+        if not text or text in normalized:
+            continue
+        if text not in _ALLOWED_MODEL_TYPES:
             raise ValueError(
-                f"model_type must be one of {sorted(_ALLOWED_MODEL_TYPES)}, got {value!r}"
+                f"model_type entries must be in {sorted(_ALLOWED_MODEL_TYPES)}, got {text!r}"
             )
-        return value
-    if isinstance(value, list):
-        if not value:
-            raise ValueError("model_type list cannot be empty")
-        for item in value:
-            if item not in _ALLOWED_MODEL_TYPES:
-                raise ValueError(
-                    f"model_type entries must be in {sorted(_ALLOWED_MODEL_TYPES)}, got {item!r}"
-                )
-        return value
-    raise ValueError("model_type must be a string or a list of strings")
+        normalized.append(text)
+    return normalized
 
 
 def _template_pk(jiuwenclaw_id: str, template_id: str) -> dict[str, str]:
@@ -79,7 +84,7 @@ async def update_model_template(
 
     updates = request.model_dump(exclude_unset=True)
     if "model_type" in updates and updates["model_type"] is not None:
-        updates["model_type"] = _validate_model_type(updates["model_type"])
+        updates["model_type"] = _normalize_model_types(updates["model_type"])
     if "template_name" in updates and updates["template_name"] is not None:
         updates["template_name"] = updates["template_name"].strip()
     if "api_base" in updates and updates["api_base"] is not None:
@@ -115,7 +120,7 @@ def _build_row_from_template(
     now: Any,
 ) -> dict[str, Any]:
     template_uuid = _normalize_template_id(template.get("template_id"))
-    model_type = _validate_model_type(template["model_type"])
+    model_type = _normalize_model_types(template.get("model_type"))
     return {
         "jiuwenclaw_id": jiuwenclaw_id,
         "template_id": template_uuid,

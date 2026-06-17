@@ -206,10 +206,6 @@ _PUSH_CONFIG_OP_MODULES = (
 
 _PUSH_CONFIG_OP_TO_ALL_MODULES = (
     "jiuwenclaw_manager.manager_ws_server.server",
-    "jiuwenclaw_manager.core.template.model_template",
-    "jiuwenclaw_manager.core.template.extension_config_template",
-    "jiuwenclaw_manager.core.template.skill_whitelist_template",
-    "jiuwenclaw_manager.core.template.service_config_template",
 )
 
 

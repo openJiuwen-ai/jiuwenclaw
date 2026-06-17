@@ -280,7 +280,7 @@ export function ModelTemplatesPage() {
                   </td>
                 </tr>
               ) : items.map((row) => {
-                const types = Array.isArray(row.model_type) ? row.model_type : [row.model_type];
+                const types = row.model_type;
                 const providerClass = (row.model_provider ?? '').toLowerCase();
                 return (
                   <tr key={row.template_id}>

@@ -7,20 +7,32 @@ from typing import Any
 
 from openjiuwen_runtime.foundation.db.handler import DBHandler
 
-from jiuwenclaw_manager.core.instance.instance_service import get_instance_row
-from jiuwenclaw_manager.infrastructure.utils import iso_datetime, new_uuid4, utc_now
+from jiuwenclaw_manager.core.template.push_template_to_gateway import (
+    sync_gateway_templates_after_template_ref_change,
+)
+from jiuwenclaw_manager.infrastructure.common import (
+    DEFAULT_POLICY_ORDER_BY,
+    resolve_order_by,
+)
+from jiuwenclaw_manager.infrastructure.jiuwenclaw_id import validate_jiuwenclaw_id
+from jiuwenclaw_manager.infrastructure.utils import (
+    iso_datetime,
+    new_uuid4,
+    utc_now,
+)
 from jiuwenclaw_manager.manager_ws_server.server import push_config_op
 from jiuwenclaw_manager.models.config_effective_policy_models import (
     CONFIG_EFFECTIVE_AGENT_POLICY_TABLE_DEF,
     CONFIG_EFFECTIVE_SERVICE_POLICY_TABLE_DEF,
 )
-from jiuwenclaw_manager.core.config_effective_policy.template_ref import (
+from jiuwenclaw_manager.infrastructure.template_ref import (
     apply_template_ref_to_updates,
     normalize_template_ref,
     read_template_ref_from_row,
 )
 from jiuwenclaw_manager.schemas.config_effective_policy_schemas import (
     ConfigEffectiveAgentPolicyCreateBody,
+    ConfigEffectiveAgentPolicyListQuery,
     ConfigEffectiveAgentPolicyOut,
     ConfigEffectiveAgentPolicyUpdateBody,
 )
@@ -28,8 +40,6 @@ from jiuwenclaw_manager.schemas.config_effective_policy_schemas import (
 _AGENT_POLICY_TABLE = CONFIG_EFFECTIVE_AGENT_POLICY_TABLE_DEF.table_name
 _SERVICE_POLICY_TABLE = CONFIG_EFFECTIVE_SERVICE_POLICY_TABLE_DEF.table_name
 _LIST_ALL_CAP = 10_000
-# order_by 元组第二项为 is_desc（True=降序），与 SQLAlchemyHandler.list_records 一致。
-_DEFAULT_ORDER_BY: list[tuple[str, bool]] = [("priority", False), ("updated_at", False)]
 _ALLOWED_SORT_FIELDS = frozenset({
     "policy_name",
     "policy_desc",
@@ -39,22 +49,6 @@ _ALLOWED_SORT_FIELDS = frozenset({
     "agent_id",
     "updated_at",
 })
-
-
-def _resolve_order_by(
-    sort_by: str | None,
-    sort_order: str | None,
-) -> list[tuple[str, bool]]:
-    field = (sort_by or "").strip()
-    order = (sort_order or "").strip().lower()
-    if not field or not order:
-        return list(_DEFAULT_ORDER_BY)
-    if field not in _ALLOWED_SORT_FIELDS or order not in {"asc", "desc"}:
-        return list(_DEFAULT_ORDER_BY)
-    is_desc = order == "desc"
-    if field == "priority":
-        return [(field, is_desc), ("updated_at", is_desc)]
-    return [(field, is_desc), ("id", is_desc)]
 
 
 def _matches_search(
@@ -147,15 +141,6 @@ class ConfigEffectiveAgentPolicyService:
     def __init__(self, handler: DBHandler) -> None:
         self._handler = handler
 
-    async def _validate_jiuwenclaw_id(self, jiuwenclaw_id: str) -> str:
-        normalized = jiuwenclaw_id.strip()
-        if not normalized:
-            raise ValueError("jiuwenclaw_id is required")
-        inst = await get_instance_row(self._handler, normalized)
-        if inst is None:
-            raise ValueError(f"unknown jiuwenclaw_id={normalized!r}")
-        return normalized
-
     async def _validate_parent_refs(
         self,
         *,
@@ -196,7 +181,7 @@ class ConfigEffectiveAgentPolicyService:
         jiuwenclaw_id: str,
         body: ConfigEffectiveAgentPolicyCreateBody,
     ) -> ConfigEffectiveAgentPolicyOut:
-        normalized = await self._validate_jiuwenclaw_id(jiuwenclaw_id)
+        normalized = await validate_jiuwenclaw_id(self._handler, jiuwenclaw_id)
         await self._validate_parent_refs(
             jiuwenclaw_id=normalized,
             service_policy_id=body.service_policy_id,
@@ -237,12 +222,18 @@ class ConfigEffectiveAgentPolicyService:
 
         payload = {**row, "id": row_id}
         created = await self._handler.create(_AGENT_POLICY_TABLE, payload)
+        await sync_gateway_templates_after_template_ref_change(
+            self._handler,
+            normalized,
+            old_template_ref={},
+            new_template_ref=row["template_ref"],
+        )
         return _row_to_out(created)
 
     async def get(
         self, jiuwenclaw_id: str, policy_id: int
     ) -> ConfigEffectiveAgentPolicyOut | None:
-        normalized = await self._validate_jiuwenclaw_id(jiuwenclaw_id)
+        normalized = await validate_jiuwenclaw_id(self._handler, jiuwenclaw_id)
         row = await self._handler.get(
             _AGENT_POLICY_TABLE, _agent_policy_pk(normalized, policy_id)
         )
@@ -253,29 +244,26 @@ class ConfigEffectiveAgentPolicyService:
     async def list_policies(
         self,
         jiuwenclaw_id: str,
-        *,
-        page: int,
-        page_size: int,
-        service_policy_id: str | None,
-        enabled: bool | None,
-        send_file_allowed: bool | None,
-        search: str | None = None,
-        sort_by: str | None = None,
-        sort_order: str | None = None,
+        query: ConfigEffectiveAgentPolicyListQuery,
     ) -> dict[str, Any]:
-        normalized = await self._validate_jiuwenclaw_id(jiuwenclaw_id)
-        page = max(page, 1)
-        page_size = min(max(page_size, 1), 200)
+        normalized = await validate_jiuwenclaw_id(self._handler, jiuwenclaw_id)
+        page = max(query.page, 1)
+        page_size = min(max(query.page_size, 1), 200)
         filters: dict[str, Any] = {"jiuwenclaw_id": normalized}
-        if service_policy_id is not None:
-            filters["service_policy_id"] = service_policy_id.strip()
-        if enabled is not None:
-            filters["enabled"] = enabled
-        if send_file_allowed is not None:
-            filters["send_file_allowed"] = send_file_allowed
+        if query.service_policy_id is not None:
+            filters["service_policy_id"] = query.service_policy_id.strip()
+        if query.enabled is not None:
+            filters["enabled"] = query.enabled
+        if query.send_file_allowed is not None:
+            filters["send_file_allowed"] = query.send_file_allowed
 
-        order_by = _resolve_order_by(sort_by, sort_order)
-        search_query = (search or "").strip()
+        order_by = resolve_order_by(
+            query.sort_by,
+            query.sort_order,
+            allowed_sort_fields=_ALLOWED_SORT_FIELDS,
+            default_order_by=DEFAULT_POLICY_ORDER_BY,
+        )
+        search_query = (query.search or "").strip()
 
         service_policy_names: dict[str, str] = {}
         if search_query:
@@ -334,7 +322,7 @@ class ConfigEffectiveAgentPolicyService:
         policy_id: int,
         body: ConfigEffectiveAgentPolicyUpdateBody,
     ) -> ConfigEffectiveAgentPolicyOut | None:
-        normalized = await self._validate_jiuwenclaw_id(jiuwenclaw_id)
+        normalized = await validate_jiuwenclaw_id(self._handler, jiuwenclaw_id)
 
         updates = body.model_dump(exclude_unset=True)
         row = await self._handler.get(
@@ -364,6 +352,7 @@ class ConfigEffectiveAgentPolicyService:
         if not updates:
             return _row_to_out(row)
 
+        old_template_ref = read_template_ref_from_row(row)
         updates = apply_template_ref_to_updates(updates, existing_row=row)
 
         await push_config_effective_agent_policy_op(
@@ -381,6 +370,13 @@ class ConfigEffectiveAgentPolicyService:
         )
         if updated is None:
             return None
+        if "template_ref" in updates:
+            await sync_gateway_templates_after_template_ref_change(
+                self._handler,
+                normalized,
+                old_template_ref=old_template_ref,
+                new_template_ref=updates["template_ref"],
+            )
         return _row_to_out(updated)
 
     async def delete(
@@ -388,7 +384,7 @@ class ConfigEffectiveAgentPolicyService:
         jiuwenclaw_id: str,
         policy_id: int,
     ) -> bool:
-        normalized = await self._validate_jiuwenclaw_id(jiuwenclaw_id)
+        normalized = await validate_jiuwenclaw_id(self._handler, jiuwenclaw_id)
         row = await self._handler.get(
             _AGENT_POLICY_TABLE, _agent_policy_pk(normalized, policy_id)
         )
@@ -399,6 +395,14 @@ class ConfigEffectiveAgentPolicyService:
             "delete",
             row_id=policy_id,
         )
-        return await self._handler.delete(
+        deleted = await self._handler.delete(
             _AGENT_POLICY_TABLE, _agent_policy_pk(normalized, policy_id)
         )
+        if deleted:
+            await sync_gateway_templates_after_template_ref_change(
+                self._handler,
+                normalized,
+                old_template_ref=read_template_ref_from_row(row),
+                new_template_ref={},
+            )
+        return deleted

@@ -11,8 +11,10 @@ from jiuwenclaw_manager.infrastructure.db import get_db_handler
 from jiuwenclaw_manager.schemas.common_schemas import ResponseModel
 from jiuwenclaw_manager.schemas.config_effective_policy_schemas import (
     ConfigDefaultTemplateMappingCreateBody,
+    ConfigDefaultTemplateMappingListQuery,
     ConfigDefaultTemplateMappingUpdateBody,
     ConfigEffectiveAgentPolicyCreateBody,
+    ConfigEffectiveAgentPolicyListQuery,
     ConfigEffectiveAgentPolicyUpdateBody,
     ConfigEffectiveGlobalPolicyCreateBody,
     ConfigEffectiveGlobalPolicyListQuery,
@@ -57,47 +59,11 @@ async def create_template_mapping(
 async def list_template_mappings(
     jiuwenclaw_id: str,
     handler: Annotated[DBHandler, Depends(get_db_handler)],
-    page: int = Query(1, ge=1),
-    page_size: int = Query(20, ge=1, le=200),
-    user_id: str | None = Query(default=None, description="按 user_id 精确筛选"),
-    group_id: str | None = Query(default=None, description="按 group_id 精确筛选"),
-    template_type: str | None = Query(
-        default=None,
-        description=(
-            "模板类型：default_model / video_model / audio_model / "
-            "vision_model / skill_whitelist / extension_config"
-        ),
-    ),
-    template_id: str | None = Query(default=None, description="按 template_id 精确筛选"),
-    enabled: bool | None = None,
-    search: str | None = Query(
-        default=None,
-        description="搜索策略 ID、名称、描述、User ID、Group ID、槽位、模板 ID 或优先级",
-    ),
-    sort_by: str | None = Query(
-        default=None,
-        description=(
-            "排序字段：policy_name、policy_desc、priority、user_id、group_id、"
-            "template_type、template_id、updated_at"
-        ),
-    ),
-    sort_order: str | None = Query(default=None, description="排序方向：asc、desc"),
+    query: Annotated[ConfigDefaultTemplateMappingListQuery, Query()],
 ):
     svc = _mapping_svc(handler)
     try:
-        data = await svc.list_mappings(
-            jiuwenclaw_id,
-            page=page,
-            page_size=page_size,
-            user_id=user_id,
-            group_id=group_id,
-            template_type=template_type,
-            template_id=template_id,
-            enabled=enabled,
-            search=search,
-            sort_by=sort_by,
-            sort_order=sort_order,
-        )
+        data = await svc.list_mappings(jiuwenclaw_id, query)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return ResponseModel(code=200, message="success", data=data)
@@ -184,15 +150,7 @@ async def list_global_policies(
 ):
     svc = _global_svc(handler)
     try:
-        data = await svc.list_policies(
-            jiuwenclaw_id,
-            page=query.page,
-            page_size=query.page_size,
-            enabled=query.enabled,
-            search=query.search,
-            sort_by=query.sort_by,
-            sort_order=query.sort_order,
-        )
+        data = await svc.list_policies(jiuwenclaw_id, query)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return ResponseModel(code=200, message="success", data=data)
@@ -279,15 +237,7 @@ async def list_service_policies(
 ):
     svc = _service_svc(handler)
     try:
-        data = await svc.list_policies(
-            jiuwenclaw_id,
-            page=query.page,
-            page_size=query.page_size,
-            enabled=query.enabled,
-            search=query.search,
-            sort_by=query.sort_by,
-            sort_order=query.sort_order,
-        )
+        data = await svc.list_policies(jiuwenclaw_id, query)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return ResponseModel(code=200, message="success", data=data)
@@ -371,34 +321,11 @@ async def create_agent_policy(
 async def list_agent_policies(
     jiuwenclaw_id: str,
     handler: Annotated[DBHandler, Depends(get_db_handler)],
-    page: int = Query(1, ge=1),
-    page_size: int = Query(20, ge=1, le=200),
-    service_policy_id: str | None = Query(default=None, description="按服务级策略 policy_id 筛选"),
-    enabled: bool | None = None,
-    send_file_allowed: bool | None = None,
-    search: str | None = Query(
-        default=None,
-        description="搜索策略 ID、名称、描述、Agent ID、关联服务策略、优先级或匹配表达式",
-    ),
-    sort_by: str | None = Query(
-        default=None,
-        description="排序字段：policy_name、policy_desc、service_policy_id、priority、match_expr、agent_id、updated_at",
-    ),
-    sort_order: str | None = Query(default=None, description="排序方向：asc、desc"),
+    query: Annotated[ConfigEffectiveAgentPolicyListQuery, Query()],
 ):
     svc = _agent_svc(handler)
     try:
-        data = await svc.list_policies(
-            jiuwenclaw_id,
-            page=page,
-            page_size=page_size,
-            service_policy_id=service_policy_id,
-            enabled=enabled,
-            send_file_allowed=send_file_allowed,
-            search=search,
-            sort_by=sort_by,
-            sort_order=sort_order,
-        )
+        data = await svc.list_policies(jiuwenclaw_id, query)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return ResponseModel(code=200, message="success", data=data)

@@ -1,4 +1,4 @@
-export type ModelTypeValue = string | string[];
+export type ModelTypeValue = string[];
 
 export interface ModelTemplate {
   id: number;

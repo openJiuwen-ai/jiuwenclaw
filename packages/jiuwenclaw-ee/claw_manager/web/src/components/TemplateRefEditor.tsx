@@ -71,9 +71,7 @@ interface TemplateRefEditorProps {
 }
 
 function modelMatchesSlot(template: ModelTemplate, slot: string): boolean {
-  const types = Array.isArray(template.model_type)
-    ? template.model_type
-    : [template.model_type];
+  const types = template.model_type;
   if (slot === 'default_model') return types.includes('default');
   const kind = slot.replace(/_model$/, '');
   return types.includes(kind);

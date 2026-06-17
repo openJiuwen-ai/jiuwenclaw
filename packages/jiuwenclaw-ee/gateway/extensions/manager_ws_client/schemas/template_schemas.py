@@ -8,7 +8,7 @@ from pydantic import BaseModel, ConfigDict, Field
 class ModelTemplateUpdateRequest(BaseModel):
     template_name: str | None = Field(default=None, max_length=128)
     description: str | None = Field(default=None, max_length=512)
-    model_type: str | list[str] | None = None
+    model_type: list[str] | None = None
     model_tags: list[str] | None = None
     api_base: str | None = Field(default=None, max_length=512)
     api_key: str | None = None

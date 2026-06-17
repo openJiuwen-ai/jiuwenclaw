@@ -91,7 +91,7 @@ interface FormState {
 const empty: FormState = {
   template_name: '',
   description: '',
-  model_type: ['default'],
+  model_type: [],
   model_tags: '',
   api_base: '',
   api_key: '',
@@ -116,11 +116,7 @@ export function ModelTemplateModal({ open, template, onClose, onSaved }: Props) 
   useEffect(() => {
     if (!open) return;
     if (template) {
-      const types = Array.isArray(template.model_type)
-        ? template.model_type
-        : template.model_type
-          ? [template.model_type]
-          : ['default'];
+      const types = template.model_type ?? [];
       setForm({
         template_name: clipField(template.template_name, FIELD_MAX_LENGTH.template_name),
         description: clipField(template.description ?? '', FIELD_MAX_LENGTH.description),
@@ -174,7 +170,6 @@ export function ModelTemplateModal({ open, template, onClose, onSaved }: Props) 
       { label: t('modelTemplate.templateName'), invalid: !form.template_name.trim() },
       { label: t('modelTemplate.modelProvider'), invalid: !form.model_provider.trim() },
       { label: t('modelTemplate.modelId'), invalid: !form.model_id.trim() },
-      { label: t('modelTemplate.modelType'), invalid: form.model_type.filter(Boolean).length === 0 },
       { label: t('modelTemplate.apiBase'), invalid: !form.api_base.trim() },
       { label: t('modelTemplate.apiKey'), invalid: !form.api_key.trim() },
     ];
@@ -202,7 +197,7 @@ export function ModelTemplateModal({ open, template, onClose, onSaved }: Props) 
     const body: ModelTemplateCreateBody | ModelTemplateUpdateBody = {
       template_name: form.template_name.trim(),
       description: form.description.trim() || undefined,
-      model_type: modelTypeList.length > 1 ? modelTypeList : modelTypeList[0] ?? 'default',
+      model_type: modelTypeList,
       model_tags: fromCommaList(form.model_tags),
       api_base: form.api_base.trim(),
       api_key: form.api_key,
@@ -306,7 +301,7 @@ export function ModelTemplateModal({ open, template, onClose, onSaved }: Props) 
           />
         </div>
         <div>
-          <FieldLabel required>{t('modelTemplate.modelType')}</FieldLabel>
+          <FieldLabel>{t('modelTemplate.modelType')}</FieldLabel>
           <div className="relative" ref={typeRef}>
             <button
               type="button"

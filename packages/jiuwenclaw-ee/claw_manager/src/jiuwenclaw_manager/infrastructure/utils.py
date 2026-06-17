@@ -25,6 +25,14 @@ def new_uuid4() -> str:
     return str(uuid.uuid4())
 
 
+def strip_optional(value: str | None) -> str | None:
+    """去除首尾空白；``None`` 或空白字符串返回 ``None``。"""
+    if value is None:
+        return None
+    stripped = value.strip()
+    return stripped or None
+
+
 def format_ts(val: Any) -> str:
     if val is None:
         return ""

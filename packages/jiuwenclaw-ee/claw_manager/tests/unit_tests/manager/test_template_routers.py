@@ -65,11 +65,7 @@ async def test_model_template_list_filter_by_model_type(manager_api: ManagerApiH
     vision_rows = await h.get_json("/model-templates", model_type="vision")
     assert vision_rows["total"] >= 1
     for item in vision_rows["items"]:
-        model_type = item["model_type"]
-        if isinstance(model_type, list):
-            assert "vision" in model_type
-        else:
-            assert model_type == "vision"
+        assert "vision" in item["model_type"]
 
 
 @pytest.mark.asyncio

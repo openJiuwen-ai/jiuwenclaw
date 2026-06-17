@@ -164,10 +164,9 @@ SERVICE_CONFIG_TEMPLATE_TABLE_DEF = TableDefinition(
         ColumnDefinition("service_ttl", "integer", nullable=False, default=180),
         ColumnDefinition(
             "autoscale_interval",
-            "string",
-            length=32,
+            "decimal",
             nullable=False,
-            default="5",
+            default=5,
         ),
         ColumnDefinition("message_timeout", "integer", nullable=False, default=60),
         ColumnDefinition("session_concurrency", "integer", nullable=False, default=3),
