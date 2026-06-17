@@ -15,7 +15,6 @@ import logging
 import importlib
 import os
 from urllib.parse import quote_plus
-import uuid
 from contextvars import ContextVar, Token
 from dataclasses import dataclass
 
@@ -261,11 +260,12 @@ from jiuwenclaw.local_env_config import set_local_config
 
 load_dotenv(dotenv_path=get_env_file())
 
-# Shared resource tag for Runner.resource_mgr tool/MCP registration.
-# AgentCard.id uses a per-session suffix so outer rail callbacks stay isolated.
-JIUWENCLAW_RESOURCE_AGENT_ID = "jiuwenclaw"
-# AgentManager fallback when request.session_id is missing; needs per-instance uuid suffix.
-DEFAULT_SESSION_ID = "default"
+from jiuwenclaw.agentserver.deep_agent.agent_card_id import (
+    DEFAULT_SESSION_ID,
+    JIUWENCLAW_RESOURCE_AGENT_ID,
+    is_default_session,
+    resolve_agent_card_id as _resolve_agent_card_id_pure,
+)
 
 _react_config = get_config().get("react", {})
 
@@ -1390,10 +1390,17 @@ class JiuWenClawDeepAdapter:
         """Expose ``skill_tool`` / ``skill_complete`` unless the session is an ACP tool profile."""
         return not self._is_acp_tool_profile(self._instance_overrides)
 
-    def _ensure_fallback_card_suffix(self, *, raw_session: str) -> str:
-        """Allocate a stable per-adapter suffix for empty/default session_id."""
-        if self._fallback_card_suffix is None:
-            self._fallback_card_suffix = uuid.uuid4().hex[:12]
+    def _resolve_agent_card_id(self, session_id: str | None = None) -> str:
+        """Return per-session AgentCard.id to isolate outer rail callback namespaces."""
+        had_suffix = self._fallback_card_suffix is not None
+        card_id, suffix = _resolve_agent_card_id_pure(
+            session_id,
+            cached_session_id=self._session_id,
+            fallback_card_suffix=self._fallback_card_suffix,
+        )
+        raw_session = (session_id or self._session_id or "").strip()
+        if suffix is not None and not had_suffix:
+            self._fallback_card_suffix = suffix
             session_label = raw_session or "(empty)"
             logger.info(
                 "[JiuWenClawDeepAdapter] AgentCard.id: allocated uuid suffix for "
@@ -1402,25 +1409,14 @@ class JiuWenClawDeepAdapter:
                 DEFAULT_SESSION_ID,
                 self._fallback_card_suffix,
             )
-        return self._fallback_card_suffix
-
-    def _resolve_agent_card_id(self, session_id: str | None = None) -> str:
-        """Return per-session AgentCard.id to isolate outer rail callback namespaces."""
-        raw_session = (session_id or self._session_id or "").strip()
-
-        if raw_session and raw_session != DEFAULT_SESSION_ID:
-            return f"{JIUWENCLAW_RESOURCE_AGENT_ID}_{raw_session}"
-
-        suffix = self._ensure_fallback_card_suffix(raw_session=raw_session)
-        effective = f"{DEFAULT_SESSION_ID}_{suffix}"
-        card_id = f"{JIUWENCLAW_RESOURCE_AGENT_ID}_{effective}"
-        session_label = raw_session or "(empty)"
-        logger.debug(
-            "[JiuWenClawDeepAdapter] AgentCard.id resolved: session_id=%r "
-            "agent_card_id=%s (uuid-suffix isolation)",
-            session_label,
-            card_id,
-        )
+        if is_default_session(raw_session):
+            session_label = raw_session or "(empty)"
+            logger.debug(
+                "[JiuWenClawDeepAdapter] AgentCard.id resolved: session_id=%r "
+                "agent_card_id=%s (uuid-suffix isolation)",
+                session_label,
+                card_id,
+            )
         return card_id
 
     @staticmethod
@@ -1856,7 +1852,7 @@ class JiuWenClawDeepAdapter:
 
     def _sync_multimodal_tools_for_runtime(self) -> None:
         """Sync multimodal tool registration after config reload."""
-        agent_id = self._instance.card.id if self._instance else None
+        agent_id = JIUWENCLAW_RESOURCE_AGENT_ID
         self._vision_tools, self._vision_tools_registered = self._sync_tool_group(
             current_tools=self._vision_tools,
             registered=self._vision_tools_registered,
@@ -3246,8 +3242,10 @@ class JiuWenClawDeepAdapter:
         if not should_register_cron_tools():
             logger.info("[JiuWenClawDeepAdapter] skip cron tool build: disabled by env")
             return []
-        agent_id = self._instance.card.id if self._instance else None
-        return self._cron_runtime.build_tools(context=self._runtime_cron_tool_context, agent_id=agent_id)
+        return self._cron_runtime.build_tools(
+            context=self._runtime_cron_tool_context,
+            agent_id=JIUWENCLAW_RESOURCE_AGENT_ID,
+        )
 
     async def _proc_context_compaction(self) -> None:
         """Backward-compatible no-op hook for tests and legacy call sites."""
@@ -4808,8 +4806,11 @@ class JiuWenClawDeepAdapter:
                 mcc = entry.get("model_client_config") or {}
                 if self._model_client_config_has_api_key(mcc):
                     return True
-        except Exception:  # noqa: BLE001
-            pass
+        except Exception as exc:
+            logger.debug(
+                "[JiuWenClawDeepAdapter] _has_valid_model_config: get_default_models failed: %s",
+                exc,
+            )
 
         return False
 
