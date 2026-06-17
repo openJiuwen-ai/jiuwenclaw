@@ -32,6 +32,7 @@ expressions = import_manager_ws_client_module("core.enterprise_config.expression
 routing_id = import_manager_ws_client_module("core.enterprise_config.routing_id")
 loader = import_manager_ws_client_module("core.enterprise_config.loader")
 resolve_policy_field = loader.resolve_policy_field
+routing_context_from_request = loader.routing_context_from_request
 
 
 def _bind_gateway_db(monkeypatch: pytest.MonkeyPatch, jiuwenclaw_id: str) -> GatewayDb:
@@ -86,6 +87,64 @@ def sales_ctx() -> RoutingContext:
         bot_id="bot_main",
         user_id="alice",
     )
+
+
+def test_routing_context_from_params() -> None:
+    request = AgentRequest(
+        request_id="req-routing-params",
+        params={
+            "group_id": "g_demo_sales",
+            "bot_id": "bot_main",
+            "user_id": "bob",
+        },
+    )
+    ctx = routing_context_from_request(request)
+    assert ctx.group_id == "g_demo_sales"
+    assert ctx.bot_id == "bot_main"
+    assert ctx.user_id == "bob"
+
+
+def test_routing_context_from_metadata_query_lists() -> None:
+    """WebChannel：URL query 经 parse_qs 落在 metadata.query。"""
+    request = AgentRequest(
+        request_id="req-routing-web",
+        params={"query": "hello", "session_id": "sess_1", "is_supplement": True},
+        metadata={
+            "query": {
+                "user_id": ["bob"],
+                "group_id": ["g_demo_sales"],
+                "bot_id": ["bot_main"],
+            },
+            "method": "chat.interrupt",
+        },
+    )
+    ctx = routing_context_from_request(request)
+    assert ctx.group_id == "g_demo_sales"
+    assert ctx.bot_id == "bot_main"
+    assert ctx.user_id == "bob"
+
+
+def test_routing_context_params_override_metadata_query() -> None:
+    request = AgentRequest(
+        request_id="req-routing-priority",
+        params={"group_id": "g_override"},
+        metadata={"query": {"group_id": ["g_demo_sales"], "user_id": ["bob"]}},
+    )
+    ctx = routing_context_from_request(request)
+    assert ctx.group_id == "g_override"
+    assert ctx.user_id == "bob"
+
+
+def test_routing_context_group_id_from_chat_id() -> None:
+    request = AgentRequest(
+        request_id="req-routing-chat",
+        chat_id="oc_group_chat_123",
+        metadata={"user_id": "alice", "bot_id": "bot_feishu"},
+    )
+    ctx = routing_context_from_request(request)
+    assert ctx.group_id == "oc_group_chat_123"
+    assert ctx.bot_id == "bot_feishu"
+    assert ctx.user_id == "alice"
 
 
 def test_normalize_template_ref_accepts_list() -> None:

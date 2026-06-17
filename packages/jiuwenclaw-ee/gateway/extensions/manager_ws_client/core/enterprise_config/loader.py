@@ -100,15 +100,57 @@ async def _resolve_policy_match(ctx: RoutingContext) -> _PolicyMatchResult:
     )
 
 
+def _coerce_routing_field(value: Any) -> str:
+    """将路由字段规范为字符串（兼容 WebChannel ``parse_qs`` 的列表值）。"""
+    if value is None:
+        return ""
+    if isinstance(value, (list, tuple)):
+        value = value[0] if value else None
+    if value is None:
+        return ""
+    return str(value).strip()
+
+
+def _routing_field_sources(request: Any) -> list[dict[str, Any]]:
+    """按优先级收集路由字段来源：``params`` → ``metadata`` → ``metadata.query``。"""
+    sources: list[dict[str, Any]] = []
+    params = getattr(request, "params", None)
+    if isinstance(params, dict):
+        sources.append(params)
+    metadata = getattr(request, "metadata", None)
+    if isinstance(metadata, dict):
+        sources.append(metadata)
+        query = metadata.get("query")
+        if isinstance(query, dict):
+            sources.append(query)
+    return sources
+
+
+def _resolve_routing_field(request: Any, field: str) -> str:
+    for source in _routing_field_sources(request):
+        if field not in source:
+            continue
+        coerced = _coerce_routing_field(source[field])
+        if coerced:
+            return coerced
+    if field == "group_id":
+        return _coerce_routing_field(getattr(request, "chat_id", None))
+    return ""
+
+
 def routing_context_from_request(request: Any) -> RoutingContext:
-    """从 ``request.params`` 解析路由上下文（调用方保证字段格式正确）。"""
-    p = getattr(request, "params", None) or {}
-    if not isinstance(p, dict):
-        p = {}
+    """从 AgentRequest 解析企业策略路由上下文。
+
+    各 Channel 入参形态不一，统一在此合并：
+    - JSON ``params`` 中的 ``group_id`` / ``bot_id`` / ``user_id``（如联调脚本）；
+    - E2A ``metadata`` 扁平字段（如 IM 通道 ``chat_id`` → ``group_id``）；
+    - WebChannel URL query（``metadata.query``，``parse_qs`` 列表值）；
+    - ``request.chat_id`` 作为 ``group_id`` 兜底。
+    """
     return RoutingContext(
-        group_id=p.get("group_id", ""),
-        bot_id=p.get("bot_id", ""),
-        user_id=p.get("user_id", ""),
+        group_id=_resolve_routing_field(request, "group_id"),
+        bot_id=_resolve_routing_field(request, "bot_id"),
+        user_id=_resolve_routing_field(request, "user_id"),
     )
 
 
