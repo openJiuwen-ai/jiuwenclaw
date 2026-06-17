@@ -418,7 +418,7 @@ export function MessageItem({ message, autoSpeak = false }: MessageItemProps) {
                 <MediaRenderer items={mediaItems} />
               )}
               {fileItems && fileItems.length > 0 && (
-                <FileDownloadList files={fileItems} />
+                <FileDownloadList files={fileItems} hideDownload={isUser} />
               )}
             </>
           )}
@@ -543,8 +543,10 @@ function getFileTypeConfig(mimeType: string | undefined, name: string) {
 
 function FileDownloadList({
   files,
+  hideDownload = false,
 }: {
   files: FileDownloadItem[];
+  hideDownload?: boolean;
 }) {
   const { t } = useTranslation();
 
@@ -588,9 +590,11 @@ function FileDownloadList({
               'flex items-center gap-3 rounded-lg border px-3 py-2.5 transition-all duration-fast',
               expired
                 ? 'border-border/50 bg-card/50 cursor-not-allowed opacity-60'
-                : 'border-border bg-card hover:shadow-md hover:border-border-hover cursor-pointer group'
+                : hideDownload
+                  ? 'border-border bg-card'
+                  : 'border-border bg-card hover:shadow-md hover:border-border-hover cursor-pointer group'
             )}
-            onClick={() => handleDownload(file)}
+            onClick={() => { if (!hideDownload) handleDownload(file); }}
           >
             <div className={`flex-shrink-0 w-10 h-10 rounded-lg ${typeConfig.bg} flex items-center justify-center`}>
               {typeof typeConfig.icon === 'string' ? (
@@ -613,6 +617,7 @@ function FileDownloadList({
                 )}
               </div>
             </div>
+            {!hideDownload && (
             <div
               className={clsx(
                 'flex-shrink-0 w-8 h-8 rounded-lg flex items-center justify-center transition-colors duration-fast',
@@ -631,6 +636,7 @@ function FileDownloadList({
                 </svg>
               )}
             </div>
+            )}
           </div>
         );
       })}

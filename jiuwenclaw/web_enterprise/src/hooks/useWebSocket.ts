@@ -289,6 +289,17 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
         role: 'user',
         content: displayContent,
         timestamp: new Date().toISOString(),
+        ...(hasFiles
+          ? {
+              fileItems: files!.map((file) => ({
+                name: file.name,
+                size: file.size ?? 0,
+                mime_type: '',
+                download_url: file.url,
+                download_token: '',
+              })),
+            }
+          : {}),
       });
 
       // 不再预先创建助手消息，而是在收到第一个 content_chunk 时创建

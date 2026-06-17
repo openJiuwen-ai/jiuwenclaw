@@ -26,13 +26,13 @@ export function FileUploadButton({
 
   const handleFileChange = useCallback(
     async (event: ChangeEvent<HTMLInputElement>) => {
-      const selected = event.target.files;
+      const selected = Array.from(event.target.files ?? []);
       event.target.value = '';
-      if (!selected?.length) return;
+      if (!selected.length) return;
 
       setIsUploading(true);
       try {
-        for (const file of Array.from(selected)) {
+        for (const file of selected) {
           const uploaded = await uploadFileToObs(file);
           onUploaded(uploaded);
         }
