@@ -973,6 +973,9 @@ class JiuWenClaw:
             if handler_name == "handle_skills_skillnet_install" and payload.get("pending"):
                 _reload_after_skills = False
             if _reload_after_skills:
+                # Rebuild agent after skill changes; session_id is omitted here and
+                # create_instance() reuses cached self._session_id set at first init
+                # (AgentManager always passes session_id on the initial create_instance).
                 await self.create_instance()
         except Exception as exc:
             logger.error("[JiuWenClaw] skills 请求处理失败: %s", exc, extra={'user_visible': 'critical'})
