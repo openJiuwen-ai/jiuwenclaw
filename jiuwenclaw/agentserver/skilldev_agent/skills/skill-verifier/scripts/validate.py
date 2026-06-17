@@ -10,23 +10,70 @@ Enforces both character limits and token limits (dual-limit policy).
 from __future__ import annotations
 
 import logging
+import math
 import re
 import sys
 from pathlib import Path
+from typing import TypeAlias
 
 import yaml
 
 logger = logging.getLogger(__name__)
 
+CredentialPattern: TypeAlias = tuple[re.Pattern[str], str, str | int | None]
+
 DANGEROUS_PATTERNS = [
-    (re.compile(r"\brm\s+-[^\n]*r[^\n]*f\s+/"), "forced recursive root deletion"),
-    (re.compile(r"\bchmod\s+777\b"), "world-writable permissions"),
-    (re.compile(r"\bcurl\b[^\n|]*\|\s*(?:sh|bash)\b"), "piped remote shell execution"),
-    (re.compile(r"\beval\s*\("), "dynamic eval execution"),
+    # destructive deletion
+    (re.compile(r"(?i)\brm\b[^\n\r]*\s-[a-z]*r[a-z]*f[a-z]*\b"), "forced recursive deletion"),
+    # risky permissions
+    (re.compile(r"(?i)\bchmod\b[^\n\r]*\b777\b"), "world-writable permissions"),
+    (re.compile(r"(?i)\bchmod\b[^\n\r]*\bu\+s\b"), "setuid bit modification"),
+    # download & execute (bash/sh/iex/etc)
+    (
+        re.compile(r"(?i)\b(curl|wget|fetch)\b[^\n\r|]*\|\s*\b(bash|sh|zsh|dash|ash|source)\b"),
+        "piped remote shell execution",
+    ),
+    (
+        re.compile(
+            r"(?i)\b(iwr|irm|Invoke-WebRequest|Invoke-RestMethod)\b[^\n\r|]*\|\s*\b(iex|Invoke-Expression)\b"
+        ),
+        "piped remote powershell execution",
+    ),
+    # obfuscated/dynamic execution
+    (re.compile(r"(?i)\bbase64\s+(-d|--decode)\b[^\n\r|]*\|\s*\b(bash|sh|zsh|dash|ash)\b"), "base64 decode then execute"),
+    (re.compile(r"(?i)\bcertutil\s+-decode\b"), "certutil decode (potentially obfuscated payload)"),
+    (re.compile(r"(?i)\b-EncodedCommand\b|\b-[Ee]nc\b"), "powershell encoded command"),
+    (re.compile(r"\[Convert\]::FromBase64String\("), "powershell base64 decode"),
+    # eval/exec-like
+    (re.compile(r"(?i)\beval\s*\("), "dynamic eval execution"),
+    (re.compile(r"(?i)\bexec\s*\("), "dynamic exec execution"),
+    (re.compile(r"(?i)\bos\.system\s*\("), "os.system execution"),
+    (re.compile(r"(?i)\bsubprocess\.(?:call|run|Popen)\b[^\n\r]*\bshell\s*=\s*True\b"), "subprocess shell=True execution"),
 ]
-CREDENTIAL_PATTERNS = [
-    re.compile(r"(?i)\b(api[_-]?key|secret|token|password)\b\s*[:=]\s*['\"][^'\"\n]{8,}['\"]"),
-    re.compile(r"\bsk-[A-Za-z0-9_-]{16,}\b"),
+CREDENTIAL_PATTERNS: list[CredentialPattern] = [
+    # (pattern, label, capture-group or named-group for placeholder filtering)
+    (re.compile(r"\bAKIA[0-9A-Z]{16}\b"), "aws_access_key_id", None),
+    (re.compile(r"\bsk-[A-Za-z0-9_-]{20,}\b"), "openai_api_key", None),
+    (re.compile(r"\bsk-ant-[A-Za-z0-9_-]{20,}\b"), "anthropic_api_key", None),
+    (re.compile(r"\bgh[pousu]_[A-Za-z0-9]{36}\b"), "github_token", None),
+    (re.compile(r"-----BEGIN (?:RSA |EC |DSA )?PRIVATE KEY-----"), "private_key", None),
+    (re.compile(r"(?i)\b(postgresql|mongodb|mysql|redis)://[^:\s]+:[^@\s]+@"), "db_url_with_credentials", None),
+    (re.compile(r"\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b"), "jwt_token", None),
+    # password is often short and may contain special characters, so check it explicitly
+    (
+        re.compile(
+            r"(?i)\bpassword\b\s*[:=]\s*(?P<val>(?:['\"][^'\"\n]{6,}['\"]|[^\s#]{6,}))"
+        ),
+        "password_assignment",
+        "val",
+    ),
+    (
+        re.compile(
+            r"(?i)\b(api[_-]?key|apikey|api_secret|secret|token|password|credential)\b\s*[:=]\s*(?P<val>(?:['\"][^'\"\n]{12,}['\"]|[A-Za-z0-9_\-\.]{12,}))"
+        ),
+        "generic_secret_assignment",
+        "val",
+    ),
 ]
 
 ALLOWED_FRONTMATTER_KEYS = {
@@ -48,7 +95,11 @@ BODY_MAX_TOKENS = 5000
 def _estimate_tokens(text: str) -> int:
     if not text:
         return 0
-    return len(text) // 4
+    # 快速估算：只判断是否包含中文，避免逐字符统计的开销
+    # - 包含中文：按 0.6 token/字符估算
+    # - 不包含中文：按 0.3 token/字符估算
+    factor = 0.6 if _contains_cjk(text) else 0.3
+    return int(math.ceil(len(text) * factor))
 
 
 def _contains_cjk(text: str) -> bool:
@@ -66,6 +117,91 @@ def _find_duplicate_frontmatter_key(frontmatter_text: str) -> str | None:
             return key
         seen.add(key)
     return None
+
+
+_PLACEHOLDER_SUBSTRINGS = (
+    "your_",
+    "example",
+    "sample",
+    "placeholder",
+    "enter_",
+    "insert_",
+    "replace_",
+    "env_",
+)
+
+
+def _is_placeholder(value: str | None) -> bool:
+    """Heuristic allowlist to reduce false positives for template values."""
+    if value is None:
+        return False
+    v = value.strip()
+    if not v:
+        return True
+
+    # Common template syntaxes
+    if v.startswith("${") and v.endswith("}"):
+        return True
+    if v.startswith("$") and re.match(r"^\$[A-Za-z_][A-Za-z0-9_]*$", v):
+        return True
+    if v.startswith("<") and v.endswith(">"):
+        return True
+
+    # Strip quotes for checks
+    if (v.startswith("'") and v.endswith("'")) or (v.startswith('"') and v.endswith('"')):
+        v = v[1:-1].strip()
+        if not v:
+            return True
+
+    lower = v.lower()
+    if any(s in lower for s in _PLACEHOLDER_SUBSTRINGS):
+        return True
+    if lower.startswith("your"):
+        return True
+    if set(lower) <= {"x"} and len(lower) >= 6:
+        return True
+    if set(lower) <= {"*"} and len(lower) >= 6:
+        return True
+    if re.fullmatch(r"sk-[xX]{6,}", v):
+        return True
+    return False
+
+
+def _iter_scannable_files(skill_path: Path, skill_content: str) -> list[tuple[Path, str]]:
+    """Return UTF-8 text files to scan: SKILL.md + scripts/** text files."""
+    files: list[tuple[Path, str]] = [(skill_path / "SKILL.md", skill_content)]
+    scripts_dir = skill_path / "scripts"
+    if not scripts_dir.exists():
+        return files
+
+    for sp in scripts_dir.rglob("*"):
+        if not sp.is_file():
+            continue
+        try:
+            text = sp.read_text(encoding="utf-8")
+        except UnicodeDecodeError:
+            # Non-text (binary) files are skipped.
+            continue
+        files.append((sp, text))
+    return files
+
+
+def _iter_script_text_files(skill_path: Path) -> list[tuple[Path, str]]:
+    """Return UTF-8 text files under scripts/** (excluding SKILL.md)."""
+    scripts_dir = skill_path / "scripts"
+    if not scripts_dir.exists():
+        return []
+
+    files: list[tuple[Path, str]] = []
+    for sp in scripts_dir.rglob("*"):
+        if not sp.is_file():
+            continue
+        try:
+            text = sp.read_text(encoding="utf-8")
+        except UnicodeDecodeError:
+            continue
+        files.append((sp, text))
+    return files
 
 
 def validate_skill(skill_path: str | Path) -> tuple[bool, str]:
@@ -190,25 +326,15 @@ def validate_skill(skill_path: str | Path) -> tuple[bool, str]:
 def _validate_static_security_all(skill_path: Path, skill_content: str) -> list[str]:
     """Collect all static security errors instead of stopping at the first."""
     errors: list[str] = []
-    credential_files: list[tuple[Path, str]] = [(skill_path / "SKILL.md", skill_content)]
-    script_files: list[tuple[Path, str]] = []
-    scripts_dir = skill_path / "scripts"
-    if scripts_dir.exists():
-        for sp in scripts_dir.rglob("*"):
-            if sp.is_file():
-                try:
-                    text = sp.read_text(encoding="utf-8")
-                except UnicodeDecodeError:
-                    continue
-                script_files.append((sp, text))
-                credential_files.append((sp, text))
+    files = _iter_scannable_files(skill_path, skill_content)
 
-    for file_path, _ in credential_files:
+    for file_path, _ in files:
         rel = file_path.relative_to(skill_path)
         if ".." in rel.parts:
             errors.append(f"Path traversal detected: {rel}")
 
-    for file_path, text in script_files:
+    # dangerous commands: scripts/** only (SKILL.md excluded)
+    for file_path, text in _iter_script_text_files(skill_path):
         rel = file_path.relative_to(skill_path)
         for line_no, line in enumerate(text.splitlines(), start=1):
             for pattern, label in DANGEROUS_PATTERNS:
@@ -218,11 +344,29 @@ def _validate_static_security_all(skill_path: Path, skill_content: str) -> list[
                         f"prohibited command pattern `{label}`"
                     )
 
-    for file_path, text in credential_files:
+    # hardcoded credentials: SKILL.md + scripts/**
+    for file_path, text in files:
         rel = file_path.relative_to(skill_path)
-        for pattern in CREDENTIAL_PATTERNS:
-            if pattern.search(text):
-                errors.append(f"Security check failed in {rel}: possible hardcoded credential")
+        for line_no, line in enumerate(text.splitlines(), start=1):
+            for pattern, label, value_group in CREDENTIAL_PATTERNS:
+                m = pattern.search(line)
+                if not m:
+                    continue
+
+                if isinstance(value_group, str):
+                    raw_val = m.groupdict().get(value_group)
+                elif isinstance(value_group, int):
+                    raw_val = m.group(value_group)
+                else:
+                    raw_val = m.group(0)
+
+                if raw_val is not None and _is_placeholder(str(raw_val)):
+                    continue
+
+                errors.append(
+                    f"Security check failed in {rel}:{line_no}: "
+                    f"possible hardcoded credential (`{label}`)"
+                )
 
     return errors
 

@@ -52,6 +52,12 @@ from jiuwenclaw.agentserver.skilldev.session_history.restore_chunks import (
     restore_payload_to_json_bytes,
 )
 from jiuwenclaw.agentserver.skilldev.utils.download_file_from_url import download_file
+from jiuwenclaw.agentserver.skilldev.utils.skill_md_validation import (
+    validate_skill_md_content,
+)
+from jiuwenclaw.agentserver.skilldev.utils.static_security import (
+    validate_scripts_file_content,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -734,7 +740,19 @@ class SkillDevService:
 
         # 如果修改的是 SKILL.md，写入前校验内容格式
         if full_path.name == "SKILL.md":
-            validation_error = self._validate_skill_md_content(content)
+            validation_error = validate_skill_md_content(content)
+            if validation_error:
+                return self._rpc_error_chunk(request_id, channel_id, validation_error)
+
+        # 如果修改的是 skill/<skill_name>/scripts/**，写入前做静态安全校验（规则同 skill-verifier）
+        try:
+            rel = full_path.relative_to(skill_dir)
+        except ValueError:
+            rel = None
+
+        if rel is not None and len(rel.parts) >= 3 and rel.parts[1] == "scripts":
+            rel_path = rel.as_posix()
+            validation_error = validate_scripts_file_content(content, rel_path=rel_path)
             if validation_error:
                 return self._rpc_error_chunk(request_id, channel_id, validation_error)
 
@@ -766,10 +784,6 @@ class SkillDevService:
             is_complete=True,
         )
 
-    # ------------------------------------------------------------------
-    # SKILL.md 内容校验
-    # ------------------------------------------------------------------
-
     @staticmethod
     def _rpc_error_chunk(
         request_id: str, channel_id: str, message: str
@@ -781,78 +795,6 @@ class SkillDevService:
             payload={"ok": False, "error": message},
             is_complete=True,
         )
-
-    @staticmethod
-    def _validate_skill_md_content(content: str) -> str | None:
-        """校验 SKILL.md 内容格式，返回错误信息或 None（通过）."""
-        import re
-
-        from jiuwenclaw.agentserver.memory.internal import estimate_tokens
-        from jiuwenclaw.agentserver.skilldev.utils.skill_description_fix import (
-            normalize_skill_description,
-            parse_frontmatter,
-        )
-
-        # frontmatter 格式校验
-        if not content.startswith("---"):
-            return "SKILL.md 缺少 YAML frontmatter（应以 --- 开头）"
-        match = re.match(r"^---\n(.*?)\n---\n?(.*)", content, re.DOTALL)
-        if not match:
-            return "SKILL.md frontmatter 格式无效（缺少闭合 ---）"
-
-        frontmatter = parse_frontmatter(match.group(1))
-        body = match.group(2)
-
-        errors: list[str] = []
-
-        # name 校验
-        name = str(frontmatter.get("name") or "").strip()
-        skill_name_pattern = re.compile(r"^[a-zA-Z0-9_-]{1,64}$")
-        if not name:
-            errors.append("frontmatter 缺少必填字段 name")
-        else:
-            if not skill_name_pattern.match(name):
-                errors.append(
-                    f"skill-name '{name}' 不符合规范：仅允许 [a-zA-Z0-9_-]，长度 1-64"
-                )
-            if name.startswith("-") or name.endswith("-") or "--" in name:
-                errors.append(
-                    f"skill-name '{name}' 不能以 '-' 开头/结尾或包含连续 '--'"
-                )
-
-        # description 校验
-        description = normalize_skill_description(
-            str(frontmatter.get("description") or "")
-        )
-        if not description:
-            errors.append("description 不能为空")
-        else:
-            is_cjk = any("\u4e00" <= c <= "\u9fff" for c in description)
-            max_chars = 256 if is_cjk else 512
-            if len(description) > max_chars:
-                errors.append(
-                    f"description 字符数超限（{len(description)} > {max_chars}）"
-                )
-            desc_tokens = estimate_tokens(description)
-            if desc_tokens > 300:
-                errors.append(
-                    f"description token 数超限（约 {desc_tokens} > 300）"
-                )
-
-        # body 校验
-        if not body.strip():
-            errors.append("SKILL.md 正文不能为空")
-        else:
-            body_lines = body.splitlines()
-            if len(body_lines) > 500:
-                errors.append(f"正文行数超限（{len(body_lines)} > 500）")
-            body_tokens = estimate_tokens(body)
-            if body_tokens > 5000:
-                errors.append(f"正文 token 数超限（约 {body_tokens} > 5000）")
-
-        if errors:
-            return "SKILL.md 校验失败:\n" + "\n".join(f"- {e}" for e in errors)
-        return None
 
     # ------------------------------------------------------------------
     # skilldev.batch_upload — 批量打包 workspace 并上传 OBS
