@@ -796,6 +796,7 @@ def apply_openai_model_client_patch() -> None:
     _impl = PatchOpenAIModelClient.__dict__
     setattr(OpenAIModelClient, "_create_async_openai_client", _impl["_create_async_openai_client"])
     setattr(OpenAIModelClient, "_parse_stream_chunk", _impl["_parse_stream_chunk"])
+    setattr(OpenAIModelClient, "_parse_response", _impl["_parse_response"])
     setattr(OpenAIModelClient, "_build_request_params", _patched_build_request_params)
 
     OpenAIModelClient.invoke = PatchOpenAIModelClient.invoke
