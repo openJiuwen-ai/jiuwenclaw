@@ -5,19 +5,25 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Iterable
+from contextvars import ContextVar
 
 from opentelemetry import metrics
 from opentelemetry.metrics import CallbackOptions, Observation
 from opentelemetry.sdk.resources import Resource
 
 from jiuwenclaw.extensions.identity_provider import IdentityStore
-from jiuwenclaw.telemetry.attributes import JIUWENCLAW_CLAW_ID
+from jiuwenclaw.telemetry.attributes import JIUWENCLAW_CLAW_ID, JIUWENCLAW_SESSION_ID
 
 _meter = metrics.get_meter("jiuwenclaw")
 _session_active_observer: Callable[[], int] | None = None
 
 # Global Resource reference for metric attributes
 _resource: Resource | None = None
+
+# Request-scoped session_id for metric labels.
+# Set by TelemetryRail.set_telemetry_context(), read by _resource_metric_labels().
+# Decouples metrics.py from telemetry_rail.py (no circular import).
+metrics_session_id: ContextVar[str] = ContextVar("metrics_session_id", default="")
 
 
 def set_resource(resource: Resource | None) -> None:
@@ -27,12 +33,16 @@ def set_resource(resource: Resource | None) -> None:
 
 
 def _resource_metric_labels() -> dict:
-    """Build Resource-derived metric attributes."""
+    """Build Resource-derived + request-scoped metric attributes."""
     labels = {}
     if _resource is not None:
         claw_id = _resource.attributes.get(JIUWENCLAW_CLAW_ID)
         if claw_id is not None:
             labels[JIUWENCLAW_CLAW_ID] = claw_id
+    # Inject session_id from metrics-scoped ContextVar (set by TelemetryRail.set_telemetry_context)
+    session_id = metrics_session_id.get()
+    if session_id:
+        labels[JIUWENCLAW_SESSION_ID] = session_id
     return labels
 
 
@@ -53,6 +63,9 @@ def _identity_metric_labels() -> dict:
         labels["domain_id"] = identity.domain_id
     if identity.app_id is not None:
         labels["app_id"] = identity.app_id
+    for k, v in identity.extra.items():
+        if isinstance(v, str):
+            labels[k] = v
     return labels
 
 
@@ -320,3 +333,16 @@ def add_tool_token_usage(value: int, attrs: dict) -> None:
 
 def add_skill_token_usage(value: int, attrs: dict) -> None:
     skill_token_usage.add(value, _with_resource_labels(attrs))
+
+
+# --- TTFT (Time to First Token) ---
+first_token_duration = _meter.create_histogram(
+    name="gen_ai.client.token.first_token_duration",
+    unit="ms",
+    description="Duration from agent invoke to first streaming token (TTFT)",
+    explicit_bucket_boundaries_advisory=[50, 100, 200, 500, 1000, 2000, 5000, 10000, 30000],
+)
+
+
+def record_first_token_duration(duration: float, attrs: dict) -> None:
+    first_token_duration.record(duration, _with_resource_labels(attrs))

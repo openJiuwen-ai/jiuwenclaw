@@ -12,6 +12,8 @@ For officeclaw (ReActAgent architecture):
 
 from __future__ import annotations
 
+import time
+
 from jiuwenclaw.utils import logger
 
 # Architecture detection
@@ -82,6 +84,27 @@ def apply_instrumentors(
         set_log_messages(log_messages)
 
         logger.info("[Telemetry] telemetry_rail instrumentor configured")
+
+        # Apply TTFT stream instrumentation (detects first streaming token)
+        # Must be called AFTER apply_openai_model_client_patch() so that we wrap
+        # the already-patched _stream_with_retry (which includes retry logic).
+        # We patch OpenAIModelClient (the base class that gets all retry methods
+        # injected), NOT PatchOpenAIModelClient (the subclass).
+        from openjiuwen.core.foundation.llm.model_clients.openai_model_client import OpenAIModelClient
+        from jiuwenclaw.telemetry.instrumentors.telemetry_rail import first_token_time
+
+        _original_stream_with_retry = getattr(OpenAIModelClient, '_stream_with_retry')
+
+        async def _ttft_patched_stream_with_retry(self, stream_func, *args, **kwargs):
+            first_chunk = True
+            async for chunk in _original_stream_with_retry(self, stream_func, *args, **kwargs):
+                if first_chunk:
+                    first_chunk = False
+                    first_token_time.set(time.monotonic())
+                yield chunk
+
+        setattr(OpenAIModelClient, '_stream_with_retry', _ttft_patched_stream_with_retry)
+        logger.info("[Telemetry] TTFT stream patch applied")
 
         from jiuwenclaw.telemetry.instrumentors.session import instrument_session
         instrument_session(
