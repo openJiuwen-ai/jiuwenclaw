@@ -5717,12 +5717,6 @@ export class AppScreen implements Component, Focusable {
           }
         : undefined,
       });
-      for (const altName of command.altNames ?? []) {
-        result.push({
-          name: altName,
-          description: command.description,
-        });
-      }
     }
     return result;
   }
