@@ -58,6 +58,9 @@ def _wrap_subagent_result(result_dict: dict[str, Any]) -> dict[str, Any]:
         "you need shared context (e.g., parallel tasks with consistent document understanding). "
         "Use spawn_subagent (isolated) for normal tasks. Fork inherits parent history which may "
         "contaminate subAgent reasoning.\n\n"
+        "Optional model selection: pass `model_tier` (lite/pro from config) or `model_name` "
+        "(exact model name). Omit both to use the parent agent's default model. If the requested "
+        "tier is not configured, the parent agent's default model is used instead.\n\n"
         "**IMPORTANT**: After receiving the fork_agent result, you MUST summarize the result to the "
         "user and STOP. Do NOT call fork_agent or spawn_subagent again on the same task. The "
         "subagent has already completed its work — your job is to present the findings, not to "
@@ -67,6 +70,8 @@ def _wrap_subagent_result(result_dict: dict[str, Any]) -> dict[str, Any]:
 async def fork_agent(
     objective: str,
     prompt: str = "",
+    model_name: str = "",
+    model_tier: str = "",
 ) -> dict[str, Any]:
     """
     Create fork subAgent inheriting parent Agent's message history (shared context).
@@ -81,6 +86,8 @@ async def fork_agent(
     Args:
         objective: Task objective (what to accomplish)
         prompt: Execution prompt (optional, detailed instructions)
+        model_name: Optional exact model name for this subagent
+        model_tier: Optional model tier (lite or pro) configured in models.defaults
 
     Returns:
         {"success": bool, "task_id": str, "role_id": str, "result": str, "error": str, "usage": dict}
@@ -97,6 +104,8 @@ async def fork_agent(
     task = ForkAgentTaskSpec(
         objective=objective,
         prompt=prompt,
+        model_name=model_name,
+        model_tier=model_tier,
     )
 
     result = await executor.execute_fork(
@@ -113,6 +122,10 @@ async def fork_agent(
         "most tasks. The subagent has full Agent capabilities: multi-round reasoning, tool calls, "
         "skill loading. Use fork_agent only when you need shared context (parallel tasks with "
         "consistent document understanding).\n\n"
+        "Optional model selection: pass `model_tier` (lite/pro from config) or `model_name` "
+        "(exact model name). Omit both to use the parent agent's default model. If the requested "
+        "tier is not configured, the parent agent's default model is used instead. Skills may "
+        "describe this in plain language, e.g. 'use lite model' or 'start subagent with pro model'.\n\n"
         "**IMPORTANT**: After receiving the spawn_subagent result, you MUST summarize the result to "
         "the user and STOP. Do NOT call fork_agent or spawn_subagent again on the same task. The "
         "subagent has already completed its work — your job is to present the findings, not to "
@@ -123,6 +136,8 @@ async def spawn_subagent(
     objective: str,
     role_id: str = "MainAgent",
     prompt: str = "",
+    model_name: str = "",
+    model_tier: str = "",
 ) -> dict[str, Any]:
     """
     Spawn a subagent to execute a task, blocking until result is returned.
@@ -140,6 +155,8 @@ async def spawn_subagent(
         objective: Task objective description
         role_id: Role ID to use (default: MainAgent)
         prompt: Execution prompt (optional)
+        model_name: Optional exact model name for this subagent
+        model_tier: Optional model tier (lite or pro) configured in models.defaults
 
     Returns:
         {"success": bool, "task_id": str, "role_id": str, "result": str, "error": str, "usage": dict}
@@ -154,6 +171,8 @@ async def spawn_subagent(
         role_id=role_id,
         objective=objective,
         prompt=prompt,
+        model_name=model_name,
+        model_tier=model_tier,
     )
 
     result = await executor.execute_spawn(

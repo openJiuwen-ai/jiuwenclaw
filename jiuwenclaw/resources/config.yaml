@@ -181,7 +181,31 @@ memory:
 #   timeout — 非流式 invoke；流式未配置 stream_timeout 时也使用此值（整包响应上限）
 #   stream_timeout — 可选，仅 stream 使用；未配置则回退 timeout
 #     （httpx read：等首包 / chunk 间最长空闲，不是 SSE 整段总时长上限）
+# models.defaults 列表项可选 tier: lite | pro（每个 tier 只能配置在一个模型上，供 subagent 按等级选模型）
 models:
+  # defaults:
+  #   - tier: pro
+  #     model_client_config:
+  #       api_base: ${API_BASE}
+  #       api_key: ${API_KEY}
+  #       model_name: ${MODEL_NAME}
+  #       client_provider: ${MODEL_PROVIDER}
+  #       timeout: 1800
+  #       max_retries: 1
+  #       verify_ssl: false
+  #     model_config_obj:
+  #       temperature: 0.6
+  #   - tier: lite
+  #     model_client_config:
+  #       api_base: ${API_BASE}
+  #       api_key: ${API_KEY}
+  #       model_name: ${MODEL_NAME}
+  #       client_provider: ${MODEL_PROVIDER}
+  #       timeout: 1800
+  #       max_retries: 1
+  #       verify_ssl: false
+  #     model_config_obj:
+  #       temperature: 0.6
   default:
     model_client_config:
       api_base: ${API_BASE}
