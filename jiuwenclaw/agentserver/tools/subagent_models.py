@@ -64,6 +64,8 @@ class SubagentTaskSpec(BaseModel):
     role_id: str = "MainAgent"
     objective: str
     prompt: str = ""
+    model_name: str = ""
+    model_tier: str = ""
     timeout: float | None = None  # 执行超时（秒），None 使用默认值 _DEFAULT_TIMEOUT_SECONDS
 
 
@@ -100,6 +102,8 @@ class ForkAgentTaskSpec(BaseModel):
     )
     objective: str
     prompt: str = ""
+    model_name: str = ""
+    model_tier: str = ""
     role_id: str = "ForkedWorker"  # 内部使用，不再从工具入参传入
     timeout: float | None = None  # 执行超时（秒），None 使用默认值 _DEFAULT_TIMEOUT_SECONDS
 

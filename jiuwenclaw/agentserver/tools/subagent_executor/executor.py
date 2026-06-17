@@ -11,7 +11,7 @@ import asyncio
 import inspect
 import time
 from pathlib import Path
-from typing import Any, TYPE_CHECKING
+from typing import Any, TYPE_CHECKING, Callable
 
 from openjiuwen.core.runner import Runner
 from openjiuwen.core.session.agent import Session
@@ -121,18 +121,13 @@ class ForkAgentExecutor:
         parent_agent: DeepAgent,
         model: Model,
         default_role_prompts: dict[str, str] | None = None,
+        resolve_model: Callable[..., tuple[Model, str | None]] | None = None,
     ) -> None:
-        """Initialize the subagent executor.
-
-        Args:
-            parent_agent: Parent DeepAgent instance (for inheriting tools)
-            model: Model instance for creating subagents
-            default_role_prompts: Default role prompts (used when role_id not found)
-        """
         self._parent_agent = parent_agent
         self._model = model
+        self._resolve_model = resolve_model
         self._default_role_prompts = default_role_prompts or {}
-        self._active_fork_agents: dict[str, Any] = {}  # task_id -> subagent instance
+        self._active_fork_agents: dict[str, Any] = {}
 
     _FORWARDED_MODEL_EVENTS = {
         "chat.delta",
@@ -387,6 +382,17 @@ class ForkAgentExecutor:
         finally:
             self._active_fork_agents.pop(task_id, None)
 
+    def _resolve_task_model(
+        self,
+        *,
+        model_name: str = "",
+        model_tier: str = "",
+    ) -> tuple[Model, str | None]:
+        """Delegate model selection to adapter (same cache as request-level switching)."""
+        if self._resolve_model is None:
+            return self._model, None
+        return self._resolve_model(model_name=model_name, model_tier=model_tier)
+
     def _resolve_subagent_workspace_dir(self) -> tuple[str, str]:
         """Resolve workspace for fork/spawn to match the main agent for the current request.
 
@@ -589,6 +595,18 @@ Approach each task methodically and deliver high-quality results.
 
         executor_token = set_current_fork_agent_executor(self)
         try:
+            task_model, model_err = self._resolve_task_model(
+                model_name=task.model_name,
+                model_tier=task.model_tier,
+            )
+            if model_err:
+                return ForkAgentResult(
+                    success=False,
+                    task_id=task.task_id,
+                    role_id=task.role_id,
+                    error=model_err,
+                )
+
             # 1. Create session proxy FIRST (needed for SubagentContextRail to emit events)
             session_proxy: SubagentSessionProxy | None = None
             if parent_session is not None:
@@ -599,7 +617,9 @@ Approach each task methodically and deliver high-quality results.
                 )
 
             # 2. Create fork agent with fork_messages injection rail
-            fork_agent = await self._create_fork_agent(task, fork_messages, parent_session=session_proxy)
+            fork_agent = await self._create_fork_agent(
+                task, fork_messages, parent_session=session_proxy, model=task_model
+            )
 
             # 3. Build full prompt
             full_prompt = task.objective
@@ -717,6 +737,18 @@ Approach each task methodically and deliver high-quality results.
 
         executor_token = set_current_fork_agent_executor(self)
         try:
+            task_model, model_err = self._resolve_task_model(
+                model_name=task.model_name,
+                model_tier=task.model_tier,
+            )
+            if model_err:
+                return SubagentResult(
+                    success=False,
+                    task_id=task.task_id,
+                    role_id=task.role_id,
+                    error=model_err,
+                )
+
             # 1. Get role definition
             role_def = self._get_role_definition(task.role_id)
 
@@ -737,7 +769,9 @@ Approach each task methodically and deliver high-quality results.
                 )
 
             # 4. Create spawn agent (DeepAgent instance)
-            spawn_agent = await self._create_spawn_agent(task, system_prompt, parent_session=session_proxy)
+            spawn_agent = await self._create_spawn_agent(
+                task, system_prompt, parent_session=session_proxy, model=task_model
+            )
 
             # 5. Build full prompt
             full_prompt = task.objective
@@ -838,6 +872,7 @@ Approach each task methodically and deliver high-quality results.
         task: SubagentTaskSpec,
         system_prompt: str,
         parent_session: Session | None = None,
+        model: Model | None = None,
     ) -> DeepAgent:
         """Create spawn agent (DeepAgent instance) with isolated context.
 
@@ -928,7 +963,7 @@ Approach each task methodically and deliver high-quality results.
         rails.insert(0, telemetry_rail)
 
         spawn_agent = create_deep_agent(
-            model=self._model,
+            model=model or self._model,
             card=card,
             system_prompt=augmented_prompt,
             max_iterations=max_iterations,
@@ -1004,6 +1039,7 @@ Approach each task methodically and deliver high-quality results.
         task: ForkAgentTaskSpec,
         fork_messages: list[Any],
         parent_session: Session | None = None,
+        model: Model | None = None,
     ) -> DeepAgent:
         """Create fork agent (DeepAgent instance) with inherited messages.
 
@@ -1108,7 +1144,7 @@ Execute the given task using inherited context and available tools.
         rails.insert(0, telemetry_rail)
 
         fork_agent = create_deep_agent(
-            model=self._model,
+            model=model or self._model,
             card=card,
             system_prompt=augmented_prompt,
             max_iterations=max_iterations,

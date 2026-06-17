@@ -1337,6 +1337,7 @@ class JiuWenClawDeepAdapter:
         )
         self._is_proactive_memory: bool | None = None
         self._model_cache: dict[str, Model] = {}
+        self._tier_model_cache: dict[str, Model] = {}
         self._default_model_name: str = ""
         self._model_config_source: str = "config.yaml"
         self._enterprise_config: Any = None
@@ -1965,6 +1966,7 @@ class JiuWenClawDeepAdapter:
 
     def _build_model_cache_from_defaults(self, config: dict) -> None:
         """从 models.defaults 列表构建模型缓存。"""
+        self._tier_model_cache = {}
         for entry in get_default_models(config):
             mcc = entry.get("model_client_config") or {}
             # 将claw_config的配置传入到model的扩展字段中, 方便注册的model实例使用
@@ -1974,6 +1976,13 @@ class JiuWenClawDeepAdapter:
             self._model_cache[mcc["model_name"]] = self._build_model_from_entry(
                 mcc, entry.get("model_config_obj") or {},
             )
+            tier_raw = entry.get("tier")
+            if not tier_raw:
+                continue
+            tier = str(tier_raw).strip().lower()
+            if tier not in ("lite", "pro") or tier in self._tier_model_cache:
+                continue
+            self._tier_model_cache[tier] = self._model_cache[mcc["model_name"]]
 
     def _build_model_cache_legacy(self, config: dict) -> None:
         """回退到旧格式（models.default / react 段）构建单条目缓存。"""
@@ -2000,6 +2009,62 @@ class JiuWenClawDeepAdapter:
         self._model_client_config = self._model.model_client_config
         self._model_request_config = self._model.model_config
         return self._model
+
+    def _resolve_model(
+        self,
+        *,
+        model_name: str = "",
+        model_tier: str = "",
+    ) -> tuple[Model, str | None]:
+        """按 model_name 或 model_tier 从缓存解析 Model；未指定则回退默认模型。"""
+        name = (model_name or "").strip()
+        if name:
+            if name in self._model_cache:
+                return self._model_cache[name], None
+            logger.info(
+                "[JiuWenClawDeepAdapter] 模型名无效 model_name=%r，尝试选用等级模型",
+                model_name,
+                extra={"user_visible": "progress"},
+            )
+        tier = (model_tier or "").strip().lower()
+        if tier:
+            if tier not in ("lite", "pro"):
+                logger.info(
+                    "[JiuWenClawDeepAdapter] 模型等级无效 model_tier=%r，回退主 Agent 默认模型",
+                    model_tier,
+                    extra={"user_visible": "progress"},
+                )
+                return self._model, None
+            model = self._tier_model_cache.get(tier)
+            if model is None:
+                logger.info(
+                    "[JiuWenClawDeepAdapter] 模型等级未配置 model_tier=%r，回退主 Agent 默认模型",
+                    tier,
+                    extra={"user_visible": "progress"},
+                )
+                return self._model, None
+            return model, None
+
+        if name:
+            logger.info(
+                "[JiuWenClawDeepAdapter] 模型名无效且无可用 model_tier=%r，回退主 Agent 默认模型",
+                model_tier or None,
+                extra={"user_visible": "progress"},
+            )
+
+        return self._model, None
+
+    def _resolve_model_for_subagent(
+        self,
+        *,
+        model_name: str = "",
+        model_tier: str = "",
+    ) -> tuple[Model, str | None]:
+        """Subagent 工具选模型；model_name 或 model_tier 未匹配时回退默认模型。"""
+        return self._resolve_model(
+            model_name=model_name,
+            model_tier=model_tier,
+        )
 
     def _get_task_id(self) -> str | None:
         if self._task_execution_rail is not None:
@@ -3538,6 +3603,7 @@ class JiuWenClawDeepAdapter:
                 self._instance,
                 model=self._model,
                 default_role_prompts=None,
+                resolve_model=self._resolve_model_for_subagent,
             )
             if self._stream_event_rail is not None:
                 self._stream_event_rail.set_fork_agent_executor(self._fork_agent_executor)
