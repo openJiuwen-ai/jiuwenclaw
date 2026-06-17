@@ -608,9 +608,11 @@ class RuntimeManagementAgentClient(AgentServerClient):
 
         async def create_service_manager() -> ServiceManager:
             service_templates = await load_all_service_configs()
+            # 每次创建 ServiceManager 时使用新的队列实例，避免热更新时队列被关闭导致后续请求失败
+            new_dual_q = PriorityDualAsyncQueues(1000, 100)
             return ServiceManager(
                 service_factory=factory,
-                dual_queue=dual_q,
+                dual_queue=new_dual_q,
                 timer=Timer(),
                 service_concurrency=service_concurrency,
                 min_idle_services=min_idle_services,
