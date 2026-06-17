@@ -15,11 +15,12 @@ from openjiuwen.core.common.security.url_utils import UrlUtils
 from openjiuwen.core.foundation.llm.schema.config import ModelClientConfig
 from openjiuwen.core.foundation.llm.model_clients.openai_model_client import \
     AssistantMessageChunk, OpenAIModelClient, ToolCall, UsageMetadata
-
+from openjiuwen.core.foundation.llm import BaseOutputParser, AssistantMessage
 from openjiuwen.core.foundation.llm.model_clients.siliconflow_model_client import (
     SiliconFlowModelClient,
 )
 from openjiuwen.core.session.stream import OutputSchema
+from jiuwenclaw.parser_patch import assemble_openai_response
 llm_logger = logging.getLogger("jiuwenclaw.agentserver")
 # Session context for retry notifications.
 # Set by react_agent._call_llm_stream before calling llm.stream/invoke.
@@ -30,6 +31,7 @@ _ORIGINAL_BUILD_REQUEST_PARAMS = None
 # ============================================================
 # LLM Retry Mechanism
 # ============================================================
+_parse_response = OpenAIModelClient._parse_response
 _orig_invoke = OpenAIModelClient.invoke
 _orig_stream = OpenAIModelClient.stream # SiliconFlow 原始方法引用
 _sf_orig_invoke = SiliconFlowModelClient.invoke
@@ -595,7 +597,17 @@ class PatchOpenAIModelClient(RetryMixin, OpenAIModelClient):
             usage_metadata=usage_metadata,
             finish_reason=choice.finish_reason or "null"
         )
-    
+
+    async def _parse_response(
+            self,
+            response: Any,
+            parser: Optional[BaseOutputParser] = None
+    ) -> AssistantMessage:
+        # 非标准OpenAi格式
+        if isinstance(response, str):
+            response = assemble_openai_response(response)
+        return await _parse_response(self, response, parser)
+
     async def invoke(
         self,
         messages,

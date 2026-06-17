@@ -514,7 +514,7 @@ class AgentWebSocketServer:
         from websockets.legacy.client import connect as legacy_connect
 
         retry_count = 0
-
+        timeout = os.getenv("AGENTSERVER_TO_OA_CONNECT_TIMEOUT", 2.0)
         while self._oa_running:
             ws = None
             try:
@@ -538,8 +538,9 @@ class AgentWebSocketServer:
                         ping_interval=self._ping_interval,
                         ping_timeout=self._ping_timeout,
                         extra_headers=auth_headers,
+                        open_timeout=timeout
                     ),
-                    timeout=10.0
+                    timeout=timeout
                 )
                 retry_count = 0  # 重置重试计数
 
@@ -549,7 +550,7 @@ class AgentWebSocketServer:
                 await ws.send(json.dumps(init_msg, ensure_ascii=False))
                 logger.info("[AgentWebSocketServer] 已发送 INIT 消息到 OpenAbility")
                 # 等待 OA 返回第一条建连成功消息
-                if not await oa_wait_connection_ack(ws, timeout=10.0):
+                if not await oa_wait_connection_ack(ws, timeout=timeout):
                     await ws.close()
                     raise RuntimeError("OpenAbility 建连确认失败")
                 logger.info("[AgentWebSocketServer] OpenAbility 连接已确认，开始业务处理")
