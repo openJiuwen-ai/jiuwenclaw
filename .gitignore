@@ -79,3 +79,8 @@ packages/jiuwenswarm-tui/jiuwenswarm_tui/resources/tui-bin/
 
 .crossnote/
 .trae/
+
+# Benchmark & evolution artifacts
+ai/
+evolve-draft.md
+traces.db

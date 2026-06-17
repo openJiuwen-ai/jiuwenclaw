@@ -145,6 +145,27 @@ class SkillExperienceWriter(ApplyWriter):
                 encoding="utf-8",
             )
 
+            # Render evolution-index into SKILL.md + detail files
+            # so SkillTool can discover body experiences on next read.
+            try:
+                from openjiuwen.agent_evolving.checkpointing import (
+                    EvolutionStore as _OJStore,
+                )
+
+                oj_store = _OJStore(str(self._skills_dir))
+                await oj_store.render_evolution_markdown(skill_name)
+                logger.info(
+                    "SkillExperienceWriter: rendered markdown for '%s'",
+                    skill_name,
+                )
+            except Exception as render_exc:
+                logger.warning(
+                    "SkillExperienceWriter: render_evolution_markdown "
+                    "failed for '%s' (non-fatal): %s",
+                    skill_name,
+                    render_exc,
+                )
+
             logger.info(
                 "SkillExperienceWriter: appended record %s → %s",
                 record.id,  # type: ignore[attr-defined]
