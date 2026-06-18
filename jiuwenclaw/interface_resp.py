@@ -247,9 +247,11 @@ async def _tracked_resp(rec: InterfaceRespLog):
 
 
 @asynccontextmanager
-async def track_llm_resp(client: Any, *, streaming: bool):
+async def track_llm_resp(client: Any, *, streaming: bool, span_id: str | None = None):
     """One RESP line per LLM invoke/stream (including retries)."""
-    rec = start_llm_resp(client, streaming=streaming, session_id=session_id_from_context())
+    rec = start_llm_resp(
+        client, streaming=streaming, session_id=session_id_from_context(), span_id=span_id,
+    )
     async with _tracked_resp(rec):
         yield
 
@@ -363,7 +365,7 @@ async def maybe_track_e2a_resp(
         yield
 
 
-def start_llm_resp(client: Any, *, streaming: bool, session_id: str) -> InterfaceRespLog:
+def start_llm_resp(client: Any, *, streaming: bool, session_id: str, span_id: str | None = None) -> InterfaceRespLog:
     host, api_base = "-", ""
     mcc = getattr(client, "model_client_config", None)
     if mcc is not None:
@@ -380,6 +382,7 @@ def start_llm_resp(client: Any, *, streaming: bool, session_id: str) -> Interfac
         "streaming": streaming,
         "model": model,
         "system": provider,
+        "x_span_id": span_id or "",
     }
     if api_base:
         info["api_base"] = api_base
