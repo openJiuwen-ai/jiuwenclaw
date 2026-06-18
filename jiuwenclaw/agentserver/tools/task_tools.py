@@ -197,8 +197,8 @@ def _get_service():
 @tool(
     name="experience_retrieve",
     description=(
-        "Retrieve relevant past memories and lessons for the current task. "
-        "Call this at the start of every task to check for prior experience."
+        "检索与当前任务相关的历史记忆与经验教训。"
+        "每个任务开始时都应调用，以检查是否有先例可参考。"
     ),
 )
 async def experience_retrieve(
@@ -294,16 +294,15 @@ def _format_trajectory_feedback(entry: Dict[str, Any]) -> str:
 @tool(
     name="experience_learn",
     description=(
-        "Record a key finding, rule, or insight from the current task and consolidate it into "
-        "reusable memory. Call this once before the final reply — it both saves the new entry "
-        "and summarizes everything learned so far. "
-        "Pass all fields inside a `params` object: "
-        "{content, section, when_to_use, title, description, query, label, tools_used}. "
-        "Include tools_used as a list of objects describing each tool call outcome this turn, "
-        "e.g. tools_used=[{\"tool\": \"web_search\", \"status\": \"success\"}, "
+        "记录当前任务的关键发现、规则或洞察，并整合为可复用记忆。"
+        "在最终回复前调用一次——既保存新条目，也汇总迄今所学。"
+        "所有字段放在 params 对象内："
+        "{content, section, when_to_use, title, description, query, label, tools_used}。"
+        "tools_used 为描述本轮各工具调用结果的对象列表，"
+        "例如 tools_used=[{\"tool\": \"web_search\", \"status\": \"success\"}, "
         "{\"tool\": \"write_memory\", \"status\": \"failed\", \"error\": \"permission denied\", "
-        "\"note\": \"fell back to in-chat reply\"}]. "
-        "Always record failed tool calls — these are the most valuable learning signals."
+        "\"note\": \"fell back to in-chat reply\"}]。"
+        "务必记录失败的工具调用——这些是最有价值的学习信号。"
     ),
 )
 async def experience_learn(params: TaskAddParams, matts: str = "none") -> Dict[str, Any]:
@@ -484,8 +483,8 @@ async def experience_learn(params: TaskAddParams, matts: str = "none") -> Dict[s
 @tool(
     name="experience_clear",
     description=(
-        "Wipe all stored task memory from task-data.json. "
-        "ONLY call this when the user explicitly asks to clear all stored knowledge. Always confirm first."
+        "清空 task-data.json 中存储的全部任务记忆。"
+        "仅当用户明确要求清除所有已存储知识时调用，且须先确认。"
     ),
 )
 async def experience_clear() -> Dict[str, Any]:

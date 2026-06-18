@@ -149,10 +149,8 @@ def _build_missing_key_msg(tool_name: str) -> str:
 @tool(
     name="audio_question_answering",
     description=(
-        "Answer questions based on audio content. Use this tool when the user provides "
-        "an audio file and asks questions about the audio content, such as 'what is "
-        "discussed in this audio', 'how many speakers', or any analysis requiring "
-        "understanding of the audio."
+        "基于音频内容回答问题。用户提供音频文件并询问内容时使用，"
+        "例如「这段音频讲了什么」「有多少说话人」或任何需要理解音频的分析。"
     ),
 )
 async def audio_question_answering(audio_path_or_url: str, question: str) -> str:
@@ -227,7 +225,7 @@ async def audio_question_answering(audio_path_or_url: str, question: str) -> str
 
 @tool(
     name="audio_metadata",
-    description="Identify the metadata (name, author, year) of the given audio file using the ACRCloud API.",
+    description="使用 ACRCloud API 识别给定音频文件的元数据（曲名、作者、年份）。",
 )
 async def audio_metadata(audio_path_or_url: str) -> str:
     cleanup = False

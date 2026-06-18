@@ -420,11 +420,13 @@ def _resolve_workspace(workspace: str) -> Path:
 
 @tool(
     name="wiki_ingest",
-    description="Ingest a source file (PDF, TXT, MD) or a directory into the LLM Wiki."
-    " By default, identical files (by SHA-256) are skipped perfectly (deduplication)."
-    " Set `force=True` if the user explicitly asks to re-ingest, rebuild, or force the ingestion."
-    " The `workspace` parameter is the root folder where the `.llm_wiki` will be created."
-    " If the user specifies a target directory like 'wiki_lib' or 'bibliography', pass that exact path as `workspace`.",
+    description=(
+        "将源文件（PDF、TXT、MD）或目录导入 LLM Wiki。"
+        "默认按 SHA-256 跳过相同文件（去重）。"
+        "若用户明确要求重新导入、重建或强制导入，设置 force=True。"
+        "workspace 为创建 .llm_wiki 的根目录；"
+        "若用户指定 wiki_lib、bibliography 等目录，将该路径作为 workspace。"
+    ),
 )
 async def wiki_ingest(
     source: str,
@@ -475,9 +477,11 @@ async def wiki_ingest(
 
 @tool(
     name="wiki_query",
-    description="Query the LLM Wiki's compiled knowledge base directly via Natural Language."
-    " The `workspace` parameter is the folder containing the `.llm_wiki`."
-    " If the user specifies a target directory like 'wiki_lib' or 'bibliography', pass that exact path as `workspace`.",
+    description=(
+        "用自然语言直接查询 LLM Wiki 编译后的知识库。"
+        "workspace 为包含 .llm_wiki 的文件夹；"
+        "若用户指定 wiki_lib、bibliography 等目录，将该路径作为 workspace。"
+    ),
 )
 async def wiki_query(
     query: str, workspace: str = "", sys_operation: Optional[SysOperation] = None
@@ -507,9 +511,11 @@ async def wiki_query(
 
 @tool(
     name="wiki_lint",
-    description="Health-check and trigger automatic repairs of broken links, orphans, or anomalies in the LLM Wiki."
-    " The `workspace` parameter is the root folder containing the `.llm_wiki`."
-    " If the user specifies a target directory like 'wiki_lib' or 'bibliography', pass that exact path as `workspace`.",
+    description=(
+        "对 LLM Wiki 进行健康检查，并自动修复断链、孤立页或异常。"
+        "workspace 为包含 .llm_wiki 的根目录；"
+        "若用户指定 wiki_lib、bibliography 等目录，将该路径作为 workspace。"
+    ),
 )
 async def wiki_lint(workspace: str = "", sys_operation: Optional[SysOperation] = None) -> str:
     try:

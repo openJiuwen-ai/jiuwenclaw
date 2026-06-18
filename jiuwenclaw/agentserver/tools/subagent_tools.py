@@ -54,17 +54,15 @@ def _wrap_subagent_result(result_dict: dict[str, Any]) -> dict[str, Any]:
 @tool(
     name="fork_agent",
     description=(
-        "Create fork subAgent inheriting parent Agent's context. **Do NOT use by default** unless "
-        "you need shared context (e.g., parallel tasks with consistent document understanding). "
-        "Use spawn_subagent (isolated) for normal tasks. Fork inherits parent history which may "
-        "contaminate subAgent reasoning.\n\n"
-        "Optional model selection: pass `model_tier` (lite/pro from config) or `model_name` "
-        "(exact model name). Omit both to use the parent agent's default model. If the requested "
-        "tier is not configured, the parent agent's default model is used instead.\n\n"
-        "**IMPORTANT**: After receiving the fork_agent result, you MUST summarize the result to the "
-        "user and STOP. Do NOT call fork_agent or spawn_subagent again on the same task. The "
-        "subagent has already completed its work — your job is to present the findings, not to "
-        "re-delegate or continue processing."
+        "创建分叉子代理，继承父代理的上下文。**默认情况下不要使用**，除非你需要共享上下文（例如，"
+        "具有一致文档理解的并行任务）。对于常规任务，请使用 spawn_subagent（隔离上下文）。"
+        "分叉会继承父代理的历史记录，可能污染子代理的推理。\n\n"
+        "可选模型选择：传递 `model_tier`（配置文件中的 lite/pro）或 `model_name`"
+        "（精确模型名称）。两者都省略则使用父代理的默认模型。如果请求的 tier 未配置，"
+        "则改用父代理的默认模型。\n\n"
+        "**重要提示**：收到 fork_agent 结果后，你**必须**将结果总结给用户并**停止**。"
+        "不要再次对同一任务调用 fork_agent 或 spawn_subagent。子代理已完成其工作——你的职责是呈现结果，"
+        "而不是重新委派或继续处理。"
     ),
 )
 async def fork_agent(
@@ -118,18 +116,15 @@ async def fork_agent(
 @tool(
     name="spawn_subagent",
     description=(
-        "Spawn a subagent to execute a task with isolated context. **Default choice** for "
-        "most tasks. The subagent has full Agent capabilities: multi-round reasoning, tool calls, "
-        "skill loading. Use fork_agent only when you need shared context (parallel tasks with "
-        "consistent document understanding).\n\n"
-        "Optional model selection: pass `model_tier` (lite/pro from config) or `model_name` "
-        "(exact model name). Omit both to use the parent agent's default model. If the requested "
-        "tier is not configured, the parent agent's default model is used instead. Skills may "
-        "describe this in plain language, e.g. 'use lite model' or 'start subagent with pro model'.\n\n"
-        "**IMPORTANT**: After receiving the spawn_subagent result, you MUST summarize the result to "
-        "the user and STOP. Do NOT call fork_agent or spawn_subagent again on the same task. The "
-        "subagent has already completed its work — your job is to present the findings, not to "
-        "re-delegate or continue processing."
+        "生成一个子代理，使用隔离的上下文执行任务。**默认选择**适用于大多数任务。"
+        "子代理拥有完整的代理能力：多轮推理、工具调用、技能加载。仅在需要共享上下文时使用 fork_agent"
+        "（用于具有一致文档理解的并行任务）。\n\n"
+        "可选模型选择：传递 `model_tier`（配置文件中的 lite/pro）或 `model_name`"
+        "（精确模型名称）。两者都省略则使用父代理的默认模型。如果请求的 tier 未配置，"
+        "则改用父代理的默认模型。技能可以用自然语言描述这一点，例如“使用 lite 模型”或“使用 pro 模型启动子代理”。\n\n"
+        "**重要提示**：收到 spawn_subagent 结果后，你**必须**将结果总结给用户并**停止**。"
+        "不要再次对同一任务调用 fork_agent 或 spawn_subagent。子代理已完成其工作——你的职责是呈现结果，"
+        "而不是重新委派或继续处理。"
     ),
 )
 async def spawn_subagent(
