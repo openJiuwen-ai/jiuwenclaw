@@ -2372,8 +2372,8 @@ class JiuWenClawDeepAdapter:
             )
             return None
 
+    @staticmethod
     def _build_skill_credential_injection_rail(
-        self,
         config: dict[str, Any],
     ) -> SkillCredentialInjectionRail | None:
         """Build SkillCredentialInjectionRail for per-skill env-var injection."""
