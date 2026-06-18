@@ -393,13 +393,13 @@ class CronTools:
         return [
             make_tool(
                 name="cron_list_jobs",
-                description="List all cron jobs.",
+                description="列出所有定时任务。",
                 input_params={"type": "object", "properties": {}},
                 func=self.list_jobs,
             ),
             make_tool(
                 name="cron_get_job",
-                description="Get a cron job by id.",
+                description="按 id 获取单个定时任务详情。",
                 input_params={
                     "type": "object",
                     "properties": {"job_id": {"type": "string"}},
@@ -409,7 +409,7 @@ class CronTools:
             ),
             make_tool(
                 name="cron_create_job",
-                description="Create cron job.",
+                description="创建定时任务。",
                 input_params={
                     "type": "object",
                     "properties": {
@@ -427,7 +427,7 @@ class CronTools:
             ),
             make_tool(
                 name="cron_update_job",
-                description="Update cron job.",
+                description="更新已有定时任务。",
                 input_params={
                     "type": "object",
                     "properties": {
@@ -440,13 +440,13 @@ class CronTools:
             ),
             make_tool(
                 name="cron_delete_job",
-                description="Delete cron job by id.",
+                description="按 id 删除定时任务。",
                 input_params={"type": "object", "properties": {"job_id": {"type": "string"}}, "required": ["job_id"]},
                 func=self.delete_job,
             ),
             make_tool(
                 name="cron_toggle_job",
-                description="Enable or disable cron job.",
+                description="启用或禁用定时任务。",
                 input_params={
                     "type": "object",
                     "properties": {
@@ -459,7 +459,7 @@ class CronTools:
             ),
             make_tool(
                 name="cron_preview_job",
-                description="Preview next runs.",
+                description="预览任务接下来若干次计划执行时间。",
                 input_params={
                     "type": "object",
                     "properties": {
@@ -472,7 +472,7 @@ class CronTools:
             ),
             make_tool(
                 name="cron_run_now",
-                description="Trigger run now.",
+                description="立即触发定时任务执行。",
                 input_params={"type": "object", "properties": {"job_id": {"type": "string"}}, "required": ["job_id"]},
                 func=self.run_now,
             ),

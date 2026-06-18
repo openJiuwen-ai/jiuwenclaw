@@ -220,13 +220,13 @@ def _run_command_background(
 @tool(
     name="mcp_exec_command",
     description=(
-        "Execute simple cross-platform command-line command in project workspace. "
-        "Supports Windows cmd/PowerShell and macOS/Linux bash/sh. "
-        "Optional shell_type=auto|cmd|powershell|bash|sh. "
-        "Set background=True to run non-blocking (e.g. start a server); returns immediately on success, error on failure. "
-        "Set max_output_chars=0 to disable output clipping. "
-        "Use a larger timeout_seconds for long-running commands. "
-        "Returns JSON: exit_code/stdout/stderr (blocking) or pid/status (background)."
+        "在项目工作区执行跨平台命令行命令。"
+        "支持 Windows cmd/PowerShell 与 macOS/Linux bash/sh。"
+        "可选 shell_type=auto|cmd|powershell|bash|sh。"
+        "设置 background=True 可非阻塞运行（如启动服务）；成功立即返回，失败返回错误。"
+        "设置 max_output_chars=0 可禁用输出截断。"
+        "长时间命令可增大 timeout_seconds。"
+        "返回 JSON：exit_code/stdout/stderr（阻塞）或 pid/status（后台）。"
     ),
 )
 async def mcp_exec_command(

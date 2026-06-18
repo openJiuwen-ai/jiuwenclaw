@@ -273,10 +273,8 @@ def _build_vqa_prompt(ocr_result: str, question: str) -> str:
 @tool(
     name="visual_question_answering",
     description=(
-        "Analyze and understand image content. Use this tool when the user provides "
-        "an image file path (e.g., .jpg, .png, .gif) or image URL and asks questions "
-        "about the image content, such as describing objects, scenes, text (OCR), "
-        "or people in the image."
+        "分析并理解图片内容。用户提供图片文件路径（如 .jpg、.png、.gif）"
+        "或图片 URL 并询问图片内容时使用，例如描述物体、场景、文字（OCR）或人物。"
     ),
 )
 async def visual_question_answering(image_path_or_url: str, question: str) -> str:

@@ -522,8 +522,8 @@ class SkillToolkit:
                 make_tool(
                     name="search_skill",
                     description=(
-                        "Search installable skills from SkillNet and ClawHub. "
-                        "Use the returned identifier with install_skill."
+                        "从 SkillNet 和 ClawHub 搜索可安装技能。"
+                        "将返回的 identifier 用于 install_skill。"
                     ),
                     input_params={
                         "type": "object",
@@ -559,8 +559,8 @@ class SkillToolkit:
             make_tool(
                 name="install_skill",
                 description=(
-                    "Install a skill using the identifier returned by search_skill. "
-                    "Returns the installed skill summary and where to read SKILL.md."
+                    "使用 search_skill 返回的 identifier 安装技能。"
+                    "返回已安装技能摘要及 SKILL.md 阅读位置。"
                 ),
                 input_params={
                     "type": "object",
@@ -586,7 +586,7 @@ class SkillToolkit:
             ),
             make_tool(
                 name="uninstall_skill",
-                description="Uninstall an installed skill by name.",
+                description="按名称卸载已安装的技能。",
                 input_params={
                     "type": "object",
                     "properties": {

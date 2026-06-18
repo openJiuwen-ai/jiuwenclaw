@@ -649,8 +649,8 @@ async def _fetch_webpage_async(
         id="mcp_fetch_webpage",
         name="mcp_fetch_webpage",
         description=(
-            "Fetch webpage text content from URL with concurrent fallback. "
-            "Returns status/title/plain text content."
+            "抓取网页文本内容，支持并发回退。"
+            "返回状态码、标题和纯文本正文。"
         ),
         properties={"truncate_length": 60000},
         input_params={

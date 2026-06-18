@@ -432,17 +432,15 @@ async def _text_to_image_impl(inputs: dict[str, Any]) -> str:
 @tool(
     name="text_to_image",
     description=(
-        "Generate images from a text prompt (text-to-image). "
-        "Use when the user asks to create, draw, or generate pictures from description. "
-        "Input: prompt (required text description); optional size "
-        "(DashScope: 1920*1080; OpenAI/Huawei MaaS: 1024x1024 — * and x separators accepted), "
-        "negative_prompt, n (image count; DashScope-only: prompt_extend; "
-        "Huawei MaaS/OpenAI-compatible: watermark, seed). "
-        "After save, a configurable post watermark (default: semi-transparent 'AI Generated' "
-        "at bottom-right via models.image_gen.post_watermark in config). "
-        "Output: local file path(s). When effective_project_dir is active, images are saved "
-        "under effective_project_dir/generated_images/; otherwise under the agent workspace "
-        "generated_images directory."
+        "根据文本提示生成图片（文生图）。用户要求创作、绘制或根据描述生成图片时使用。"
+        "输入：prompt（必填文本描述）；可选 size"
+        "（DashScope: 1920*1080；OpenAI/华为 MaaS: 1024x1024，* 与 x 均可）、"
+        "negative_prompt、n（图片数量；DashScope 独有 prompt_extend；"
+        "华为 MaaS/OpenAI 兼容 watermark、seed）。"
+        "保存后可配置后处理水印（默认右下角半透明「AI Generated」，"
+        "见 config models.image_gen.post_watermark）。"
+        "输出为本地文件路径。有 effective_project_dir 时保存到其 generated_images/；"
+        "否则保存到 agent 工作区 generated_images。"
     ),
 )
 async def text_to_image(inputs: dict[str, Any], **kwargs) -> str:

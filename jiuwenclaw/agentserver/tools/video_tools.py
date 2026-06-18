@@ -210,11 +210,9 @@ def _glm_video_understanding_sync(req: VideoUnderstandingRequest) -> str:
 @tool(
     name="video_understanding",
     description=(
-        "Analyze and understand video content. "
-        "Use this tool when the user provides a video file path (e.g., .mp4, .mov, .avi) "
-        "or video URL and asks questions about the video content, such as describing "
-        "scenes, actions, people, or objects in the video. "
-        "Input: query (question about the video) and video_path (local file path or HTTP/HTTPS URL)."
+        "分析并理解视频内容。用户提供视频文件路径（如 .mp4、.mov、.avi）"
+        "或视频 URL 并询问视频内容时使用，例如描述场景、动作、人物或物体。"
+        "输入：query（关于视频的问题）和 video_path（本地文件路径或 HTTP/HTTPS URL）。"
     ),
 )
 async def video_understanding(inputs: dict[str, Any], **kwargs) -> str:
