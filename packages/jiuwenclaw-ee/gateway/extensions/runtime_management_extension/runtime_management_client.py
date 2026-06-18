@@ -429,22 +429,22 @@ class RuntimeManagementAgentClient(AgentServerClient):
             else:
                 base["LOG_ROOT_PATH"] = "/home/app/.logs"
 
-            try:
-                custom_env_dict = json.loads(agent_custom_envs)
-                if isinstance(custom_env_dict, dict):
-                    base.update(custom_env_dict)
-                else:
-                    # JSON不是字典类型，打印警告
+            if agent_custom_envs and agent_custom_envs.strip():
+                try:
+                    custom_env_dict = json.loads(agent_custom_envs)
+                    if isinstance(custom_env_dict, dict):
+                        base.update(custom_env_dict)
+                    else:
+                        logger.warning(
+                            "AGENT_SERVER_CUSTOM_ENVS 解析成功但非字典类型，类型：%s，内容忽略",
+                            type(custom_env_dict),
+                        )
+                except json.JSONDecodeError as e:
                     logger.warning(
-                        f"AGENT_SERVER_CUSTOM_ENVS 解析成功但非字典类型，类型：{type(custom_env_dict)}，内容忽略"
+                        "解析 AGENT_SERVER_CUSTOM_ENVS JSON 格式失败，错误信息：%s，原始配置：%r",
+                        e,
+                        agent_custom_envs,
                     )
-            except json.JSONDecodeError as e:
-                # JSON格式非法时静默跳过，不阻断启动
-                # JSON格式非法，打印详细错误+原始文本，方便排障
-                logger.warning(
-                    f"解析 AGENT_SERVER_CUSTOM_ENVS JSON 格式失败，错误信息：{str(e)}，原始配置字符串：{agent_custom_envs}"
-            )
-                pass
             return base
 
         _client = self  # 捕获外层 RuntimeManagementAgentClient 实例，供内部类使用
