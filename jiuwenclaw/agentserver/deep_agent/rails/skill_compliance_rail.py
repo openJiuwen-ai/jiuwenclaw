@@ -177,9 +177,10 @@ class SkillComplianceRail(DeepAgentRail):
 
     priority = 30
 
-    def __init__(self, session_id: Optional[str] = None) -> None:
+    def __init__(self, session_id: Optional[str] = None, skill_dir_resolver: Optional[Any] = None) -> None:
         super().__init__()
         self._preset_session_id: Optional[str] = session_id
+        self._skill_dir_resolver = skill_dir_resolver
 
     def _resolve_session_id(self, ctx: AgentCallbackContext) -> str:
         return (
@@ -188,6 +189,22 @@ class SkillComplianceRail(DeepAgentRail):
             or _current_session_var.get()
             or _DEFAULT_SESSION_ID
         )
+
+    def _resolve_skill_dir(self, skill_name: str) -> Optional[str]:
+        """Resolve skill directory via the injected resolver callable."""
+        if self._skill_dir_resolver is None:
+            return None
+        try:
+            skills = self._skill_dir_resolver()
+            if not skills:
+                return None
+            for skill in skills:
+                if getattr(skill, "name", None) == skill_name:
+                    directory = getattr(skill, "directory", None)
+                    return str(directory) if directory is not None else None
+        except Exception as exc:
+            logger.warning("[SkillComplianceRail] skill_dir_resolver failed: %s", exc)
+        return None
 
     @staticmethod
     def _get_arg(tc: Any, key: str, default: Any = None) -> Any:
@@ -375,6 +392,42 @@ class SkillComplianceRail(DeepAgentRail):
                 state.active_skill, session_id, state.no_tool_invoke_count,
             )
             state.reset()
+
+    async def before_tool_call(self, ctx: AgentCallbackContext) -> None:
+        """Trigger BEFORE_SKILL_EXECUTE hook event when skill_tool is about to execute."""
+        inputs = getattr(ctx, "inputs", None)
+        if inputs is None:
+            return
+        tool_name = getattr(inputs, "tool_name", "") or ""
+        if tool_name != "skill_tool":
+            return
+
+        tool_args = getattr(inputs, "tool_args", None) or {}
+        skill_name = str(tool_args.get("skill_name", "") or "").strip()
+        if not skill_name:
+            return
+
+        skill_dir = self._resolve_skill_dir(skill_name)
+        if not skill_dir:
+            return
+
+        try:
+            from jiuwenclaw.extensions.registry import ExtensionRegistry
+            from jiuwenclaw.schema import AgentServerHookEvents
+            from jiuwenclaw.schema.hooks_context import BeforeSkillExecuteHookContext
+
+            hook_ctx = BeforeSkillExecuteHookContext(
+                skill_name=skill_name,
+                skill_dir=skill_dir,
+                session_id=self._resolve_session_id(ctx),
+            )
+            await ExtensionRegistry.get_instance().trigger(
+                AgentServerHookEvents.BEFORE_SKILL_EXECUTE, hook_ctx
+            )
+        except Exception as exc:
+            logger.warning(
+                "[SkillComplianceRail] BEFORE_SKILL_EXECUTE handler failed: %s", exc
+            )
 
     async def after_model_call(self, ctx: AgentCallbackContext) -> None:
         inputs = getattr(ctx, "inputs", None)
