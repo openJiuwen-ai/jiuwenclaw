@@ -50,16 +50,13 @@ def _setup_mocks(monkeypatch: pytest.MonkeyPatch):
         lambda *args, **kwargs: MagicMock()
     )
     
-    # Mock _resolve_skill_dirs
-    def mock_resolve_skill_dirs(self, *args, **kwargs):
-        return ["mock_skills_dir"]
-    
+    # Mock get_agent_registered_skill_dirs (replaces legacy _resolve_skill_dirs)
     monkeypatch.setattr(
-        JiuWenClawDeepAdapter,
-        "_resolve_skill_dirs",
-        mock_resolve_skill_dirs
+        interface_deep_module,
+        "get_agent_registered_skill_dirs",
+        lambda: [Path("mock_skills_dir")],
     )
-    
+
     # Mock _resolve_evolution_trajectory_dir - fix: use instance method signature
     def mock_resolve_evolution_trajectory_dir(self, config):
         return Path("/mock/trajectory/path")
