@@ -52,6 +52,7 @@ from openjiuwen_runtime.management.session.ws_client_channel import (
 )
 
 from jiuwenclaw.e2a.agent_compat import e2a_to_agent_request
+from jiuwenclaw.e2a.constants import E2A_WIRE_SERVER_PUSH_KEY
 from jiuwenclaw.e2a.models import E2AEnvelope, E2AResponse
 from jiuwenclaw.e2a.wire_codec import (
     is_e2a_response_wire_dict,
@@ -280,6 +281,10 @@ class E2aEnvelopResponseParser(IResponseParser):
         if not isinstance(data, dict):
             return True
         if data.get("type") == "event":
+            return False
+        md = data.get("metadata")
+        if isinstance(md, dict) and md.get(E2A_WIRE_SERVER_PUSH_KEY):
+            # server_push（如 cron 同步）不得终止用户请求的流式会话
             return False
         if is_e2a_response_wire_dict(data):
             try:
@@ -883,6 +888,7 @@ class RuntimeManagementAgentClient(AgentServerClient):
     async def send_request(self, envelope: E2AEnvelope) -> AgentResponse:
         """发送非流式请求。"""
         self._ensure_connected()
+        envelope.is_stream = False
         request = e2a_to_agent_request(envelope)
 
         # 加载服务配置
@@ -931,8 +937,26 @@ class RuntimeManagementAgentClient(AgentServerClient):
         session_request = _SessionRequest(request, envelope, service_template=service_template)
 
         try:
+            final: AgentResponse | None = None
             async for chunk in self._access.send_message(session_request):
-                return chunk
+                if isinstance(chunk, AgentResponse):
+                    final = chunk
+                elif isinstance(chunk, AgentResponseChunk) and chunk.is_complete:
+                    final = AgentResponse(
+                        request_id=chunk.request_id,
+                        channel_id=chunk.channel_id,
+                        ok=True,
+                        payload=chunk.payload,
+                    )
+            if final is not None:
+                return final
+            return AgentResponse(
+                request_id=request.request_id,
+                channel_id=request.channel_id,
+                ok=False,
+                payload={"error": "AgentServer returned no response"},
+                metadata={},
+            )
         except Exception as exc:
             logger.exception("[RuntimeManagementAgentClient] send_request failed: %s", exc)
             return AgentResponse(

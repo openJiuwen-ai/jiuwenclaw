@@ -101,8 +101,14 @@ class CronController:
 
     @staticmethod
     def _routing_session_id_for_feishu_multi(targets: str, raw: Any) -> str | None:
-        """Only accept SessionMap-style ids (feishu::...) for feishu:<app_id> targets."""
-        if not str(targets or "").strip().startswith("feishu:"):
+        """Persist delivery session for web and feishu:<app_id> targets."""
+        targets_s = str(targets or "").strip()
+        if targets_s == "web":
+            if isinstance(raw, str):
+                s = raw.strip()
+                return s or None
+            return None
+        if not targets_s.startswith("feishu:"):
             return None
         if not isinstance(raw, str):
             return None

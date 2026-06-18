@@ -10,12 +10,18 @@ from zoneinfo import ZoneInfo
 
 from openjiuwen.core.foundation.tool import LocalFunction, Tool, ToolCard
 from jiuwenclaw.gateway.cron.store import CronJobStore
+from jiuwenclaw.gateway.cron.store_base import CronJobStoreBackend
 from jiuwenclaw.gateway.cron.scheduler import _cron_next_push_dt, CronSchedulerService
 from jiuwenclaw.gateway.cron.models import (
     CronTargetChannel,
     is_valid_target_channel_id,
     normalize_target_channel_id,
     upgrade_bare_feishu_target_for_multi_bot_config,
+)
+from jiuwenclaw.agentserver.cron_tool_context import (
+    get_cron_tool_channel_id,
+    get_cron_tool_metadata,
+    get_cron_tool_session_id,
 )
 from jiuwenclaw.agentserver.gateway_push import (
     GatewayPushTransport,
@@ -66,6 +72,8 @@ class CronTools:
         self._agent_client = agent_client
         self._message_handler = message_handler
         self._scheduler_started = False
+        self._shared_store: CronJobStoreBackend | None = None
+        self._shared_store_tried = False
 
     async def ensure_scheduler(self) -> CronSchedulerService | None:
         """Ensure the scheduler is started."""
@@ -139,13 +147,62 @@ class CronTools:
 
     @staticmethod
     def _route() -> CronToolRoute:
+        return CronTools.resolve_route()
+
+    @classmethod
+    def resolve_route(cls) -> CronToolRoute:
         r = _cron_route_ctx.get()
+        if r is not None and str(r.request_id or "").strip():
+            return r
+        fallback = cls._runtime_route_fallback()
+        if fallback is not None:
+            return fallback
         return r if r is not None else CronToolRoute()
+
+    @classmethod
+    def _runtime_route_fallback(cls) -> CronToolRoute | None:
+        """K8s 多 Pod 下 delete/list 等未 push_cron_route 时，从 Deep 请求上下文补全路由。"""
+        metadata = get_cron_tool_metadata()
+        if not isinstance(metadata, dict):
+            return None
+        request_id = str(metadata.get("request_id") or "").strip()
+        if not request_id:
+            return None
+        channel_id = (
+            str(get_cron_tool_channel_id() or "").strip()
+            or CronTargetChannel.WEB.value
+        )
+        session_raw = get_cron_tool_session_id()
+        session_id = (
+            str(session_raw).strip()
+            if isinstance(session_raw, str) and session_raw.strip()
+            else None
+        )
+        chat_type = str(metadata.get("chat_type") or "").strip() or None
+        return CronToolRoute(
+            request_id=request_id,
+            channel_id=channel_id,
+            session_id=session_id,
+            chat_type=chat_type,
+        )
+
+    async def _shared_gateway_store(self) -> CronJobStoreBackend | None:
+        if self._shared_store_tried:
+            return self._shared_store
+        self._shared_store_tried = True
+        try:
+            from jiuwenclaw.gateway.cron.factory import create_gateway_cron_store
+
+            self._shared_store = await create_gateway_cron_store()
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("[CronTools] shared gateway store unavailable: %s", exc)
+            self._shared_store = None
+        return self._shared_store
 
     async def _send_split(self, action: str, params: dict[str, Any]) -> dict[str, Any]:
         from jiuwenclaw.e2a.constants import E2A_RESPONSE_KIND_CRON
 
-        r = self._route()
+        r = self.resolve_route()
         payload = {
             "request_id": r.request_id,
             "channel_id": r.channel_id,
@@ -235,11 +292,31 @@ class CronTools:
 
     async def list_jobs(self) -> Any:
         jobs = await self._local_store.list_jobs()
-        return [j.to_dict() for j in jobs]
+        if jobs:
+            return [j.to_dict() for j in jobs]
+        shared = await self._shared_gateway_store()
+        if shared is None:
+            return []
+        try:
+            shared_jobs = await shared.list_jobs()
+            return [j.to_dict() for j in shared_jobs]
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[CronTools] list jobs from shared store failed: %s", exc)
+            return []
 
     async def get_job(self, job_id: str) -> Any:
         job = await self._local_store.get_job(job_id)
-        return job.to_dict() if job else None
+        if job is not None:
+            return job.to_dict()
+        shared = await self._shared_gateway_store()
+        if shared is None:
+            return None
+        try:
+            shared_job = await shared.get_job(job_id)
+            return shared_job.to_dict() if shared_job else None
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[CronTools] get job from shared store failed: %s", exc)
+            return None
 
     async def create_job(self, params: dict[str, Any]) -> Any:
         normalized = dict(params or {})
@@ -314,16 +391,26 @@ class CronTools:
         return job.to_dict()
 
     async def delete_job(self, job_id: str) -> Any:
-        deleted = await self._local_store.delete_job(job_id)
+        gateway_synced = False
         try:
             await self._send("delete", {"job_id": job_id})
+            gateway_synced = True
         except Exception as exc:  # noqa: BLE001
             logger.warning("[CronTools] sync delete to gateway failed: %s", exc)
-        
+
+        deleted_local = await self._local_store.delete_job(job_id)
+        deleted_shared = False
+        shared = await self._shared_gateway_store()
+        if shared is not None:
+            try:
+                deleted_shared = await shared.delete_job(job_id)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("[CronTools] delete from shared store failed: %s", exc)
+
         # Reload scheduler to pick up the changes
         await self._reload_scheduler()
-        
-        return deleted
+
+        return gateway_synced or deleted_local or deleted_shared
 
     async def toggle_job(self, job_id: str, enabled: bool) -> Any:
         job = await self._local_store.update_job(job_id, {"enabled": bool(enabled)})
