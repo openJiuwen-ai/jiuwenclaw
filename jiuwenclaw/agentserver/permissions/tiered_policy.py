@@ -41,6 +41,8 @@ _SHELL_SUBCOMMANDS_PREFIX = f"{_MR}:shell_subcommands"
 
 _SHELL_TOOLS = SHELL_PERMISSION_TOOLS
 
+_MAX_SUBCOMMANDS = 30
+
 # 仅 UI 追问、不向磁盘/网络执行敏感操作；未在 permissions.tools 中显式配置时，
 # 若仍走 defaults.guard，则非 shell 未知工具会变成 ASK → PermissionRail 在工具体之前
 # 弹出「权限审批」，导致 chat.ask_user_question 永远不发出，表现为「引导选择题不弹」。
@@ -280,20 +282,49 @@ def _scan_whole_command_deny(
     return False, None
 
 
-def _evaluate_subcommand_allow(
+def _evaluate_subcommand_rules(
     subcommand_text: str,
     user_rules: list[dict[str, Any]],
     overrides: list[dict[str, Any]],
     builtin_rules: list[dict[str, Any]],
 ) -> tuple[PermissionLevel, str]:
+    """按 deny → approval_override → ask → allow 优先级评估单个子命令。
+
+    - deny: user_rules + builtin_rules（安全边界，最高优先级）
+    - approval_override allow: 用户「总是允许」的选择（尊重用户意图）
+    - ask: user_rules（管理员配置的询问规则）
+    - allow: rules → builtin_rules
+    - fallback: ASK（无规则命中）
+    """
+    # Phase 1: deny（最高优先级，builtin 优先于 user，与 _scan_whole_command_deny 保持一致）
     for namespace, rules in (
-        ("approval_overrides", overrides),
+        ("builtin", builtin_rules),
+        ("rules", user_rules),
+    ):
+        for rule in _iter_shell_rules(rules, "deny"):
+            if _allow_rule_matches_invocation(rule, subcommand_text):
+                return PermissionLevel.DENY, f"{_MR}:{namespace}:deny:{_rule_label(namespace, rule)}"
+
+    # Phase 2: approval_override allow（用户主动选择的「总是允许」）
+    for rule in _iter_shell_rules(overrides, "allow"):
+        if _allow_rule_matches_invocation(rule, subcommand_text):
+            return PermissionLevel.ALLOW, f"{_MR}:approval_overrides:{_rule_label('approval_overrides', rule)}"
+
+    # Phase 3: ask
+    for rule in _iter_shell_rules(user_rules, "ask"):
+        if _allow_rule_matches_invocation(rule, subcommand_text):
+            return PermissionLevel.ASK, f"{_MR}:rules:ask:{_rule_label('rules', rule)}"
+
+    # Phase 4: allow
+    for namespace, rules in (
         ("rules", user_rules),
         ("builtin", builtin_rules),
     ):
         for rule in _iter_shell_rules(rules, "allow"):
             if _allow_rule_matches_invocation(rule, subcommand_text):
                 return PermissionLevel.ALLOW, f"{_MR}:{namespace}:{_rule_label(namespace, rule)}"
+
+    # Phase 5: 无匹配 → ASK（字符串保持不变，permission_rail 依赖）
     return PermissionLevel.ASK, f"{_MR}:fallback(no_allow_match)"
 
 
@@ -568,13 +599,31 @@ def evaluate_tiered_policy_detailed(
         return PermissionLevel.DENY, deny_rule or f"{_MR}:whole_command_deny", None
 
     invocations = _subcommands_for_evaluation(command)
+
+    # 子命令数量保护：超过阈值跳过常规子命令匹配，但仍需检查子命令级 deny 规则，
+    # 防止攻击者通过拼接大量无害子命令绕过 deny 规则。
+    if invocations and len(invocations) > _MAX_SUBCOMMANDS:
+        for invocation in invocations:
+            for namespace, rule_list in (
+                ("builtin", builtin_rules),
+                ("rules", rules),
+            ):
+                for rule in _iter_shell_rules(rule_list, "deny"):
+                    if _allow_rule_matches_invocation(rule, invocation):
+                        return PermissionLevel.DENY, f"{_MR}:{namespace}:deny:{_rule_label(namespace, rule)}", None
+        return (
+            PermissionLevel.ASK,
+            f"{_MR}:too_many_subcommands({len(invocations)})",
+            None,
+        )
+
     if not invocations:
-        level, rule = _evaluate_subcommand_allow(command, rules, approval_overrides, builtin_rules)
+        level, rule = _evaluate_subcommand_rules(command, rules, approval_overrides, builtin_rules)
         return level, rule, None
 
     subcommand_results: list[tuple[str, PermissionLevel, str]] = []
     for invocation in invocations:
-        level, rule = _evaluate_subcommand_allow(invocation, rules, approval_overrides, builtin_rules)
+        level, rule = _evaluate_subcommand_rules(invocation, rules, approval_overrides, builtin_rules)
         subcommand_results.append((invocation, level, rule))
 
     final_level, final_rule = _aggregate_subcommand_results(subcommand_results)
