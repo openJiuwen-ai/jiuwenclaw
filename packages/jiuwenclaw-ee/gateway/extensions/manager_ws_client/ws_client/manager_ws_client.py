@@ -445,6 +445,13 @@ class ManagerWsClient:
                 if client is None or not hasattr(client, "collect_pod_status"):
                     continue
                 status_data = await client.collect_pod_status()
+                try:
+                    if hasattr(client, "collect_request_volume"):
+                        bv = client.collect_request_volume()
+                        if bv is not None:
+                            status_data["request_volume"] = bv
+                except Exception as _bv_exc:
+                    logger.debug("[ManagerWsClient] collect_request_volume failed: %s", _bv_exc)
                 snapshot_time = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
                 frame = build_pod_status_report(
                     jiuwenclaw_id=jid,

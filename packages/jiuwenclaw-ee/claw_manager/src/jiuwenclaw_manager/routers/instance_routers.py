@@ -27,6 +27,53 @@ def _svc(handler: DBHandler) -> InstanceService:
     return InstanceService(handler)
 
 
+def _request_volume_value(bv: dict, key: str, legacy_key: str | None = None) -> int:
+    value = bv.get(key)
+    if value is None and legacy_key is not None:
+        value = bv.get(legacy_key)
+    return int(value or 0)
+
+
+def _normalize_request_volume(bv: dict) -> dict:
+    return {
+        "gateway_queued": _request_volume_value(bv, "gateway_queued"),
+        "gateway_running": _request_volume_value(bv, "gateway_running"),
+        "service_manager_queued": _request_volume_value(
+            bv, "service_manager_queued", "sm_queued"
+        ),
+        "service_manager_routing": _request_volume_value(
+            bv, "service_manager_routing", "sm_routing"
+        ),
+        "service_manager_running": _request_volume_value(
+            bv, "service_manager_running", "sm_running"
+        ),
+        "requests_started_total": _request_volume_value(bv, "requests_started_total"),
+        "requests_finished_total": _request_volume_value(bv, "requests_finished_total"),
+        "pods_in_use": _request_volume_value(bv, "pods_in_use"),
+        "pods_idle": _request_volume_value(bv, "pods_idle"),
+    }
+
+
+def _build_request_volume_summary(bv: dict) -> dict:
+    queued_requests = _request_volume_value(
+        bv, "gateway_queued"
+    ) + _request_volume_value(
+        bv, "service_manager_queued", "sm_queued"
+    )
+    running_requests = _request_volume_value(
+        bv, "service_manager_running", "sm_running"
+    ) or _request_volume_value(
+        bv, "gateway_running"
+    )
+    return {
+        "queued_requests": queued_requests,
+        "running_requests": running_requests,
+        "finished_requests": _request_volume_value(bv, "requests_finished_total"),
+        "active_pods": _request_volume_value(bv, "pods_in_use"),
+        "idle_pods": _request_volume_value(bv, "pods_idle"),
+    }
+
+
 @instance_router.post("/provision-local", response_model=ResponseModel)
 async def provision_local_instance(
     body: ProvisionLocalInstanceBody,
@@ -158,4 +205,53 @@ async def get_instance_pods(
         }
     pod_data["include_metrics_requested"] = include_metrics
     return ResponseModel(code=200, message="success", data=pod_data)
+
+
+@instance_router.get("/{jiuwenclaw_id}/request-volume", response_model=ResponseModel)
+async def get_instance_request_volume(
+    jiuwenclaw_id: str,
+    handler: Annotated[DBHandler, Depends(get_db_handler)],
+):
+    """获取指定 Gateway 实例的业务量统计（排队中 / 运行中消息数）。
+
+    数据来源：Gateway 周期性通过 pod_status.report 帧上报的快照（含 request_volume 字段）。
+    stale=true 表示快照已超过 90 秒未更新。
+    """
+    svc = _svc(handler)
+    instance = await svc.get(jiuwenclaw_id)
+    if instance is None:
+        raise HTTPException(status_code=404, detail="instance not found")
+
+    snapshot = get_pod_status_snapshot(jiuwenclaw_id)
+    if snapshot is None:
+        return ResponseModel(
+            code=200,
+            message="success",
+            data={
+                "jiuwenclaw_id": jiuwenclaw_id,
+                "snapshot_time": None,
+                "stale": True,
+                "request_volume": None,
+                "summary": None,
+            },
+        )
+
+    bv = snapshot.get("request_volume")
+    summary = None
+    if isinstance(bv, dict):
+        bv = _normalize_request_volume(bv)
+        summary = _build_request_volume_summary(bv)
+
+    return ResponseModel(
+        code=200,
+        message="success",
+        data={
+            "jiuwenclaw_id": jiuwenclaw_id,
+            "snapshot_time": snapshot.get("snapshot_time"),
+            "snapshot_age_seconds": snapshot.get("snapshot_age_seconds"),
+            "stale": snapshot.get("stale", True),
+            "request_volume": bv,
+            "summary": summary,
+        },
+    )
 

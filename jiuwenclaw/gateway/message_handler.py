@@ -132,6 +132,8 @@ class MessageHandler(ABC):
         self._stream_sessions: dict[str, str | None] = {}  # request_id -> session_id
         self._stream_metadata: dict[str, dict[str, Any] | None] = {}  # request_id -> request metadata
         self._stream_modes: dict[str, str] = {}  # request_id -> mode
+        self._requests_started_total = 0
+        self._requests_finished_total = 0
         self._pending_evolution_approval: dict[str, str] = {}  # session_id -> approval_request_id
         self._queued_supplement_input: dict[str, dict[str, Any]] = {}  # session_id -> queued supplement payload
         self._session_evolution_in_progress: set[str] = set()
@@ -2028,6 +2030,7 @@ class MessageHandler(ABC):
 
     async def _process_non_stream_request(self, msg: "Message", env: "E2AEnvelope") -> None:
         """执行单次非流式 Agent 请求并将结果写入 robot_messages（供串行或后台任务复用）。"""
+        self._requests_started_total += 1
         try:
             resp = await self._agent_client.send_request(env)
             out = self._response_to_message(
@@ -2052,6 +2055,8 @@ class MessageHandler(ABC):
                 msg.id,
                 msg.channel_id,
             )
+        finally:
+            self._requests_finished_total += 1
 
     # ---------- 入队 -> AgentServer -> 出队 转发循环 ----------
 
@@ -2372,6 +2377,7 @@ class MessageHandler(ABC):
         channel_id = env.channel or ""
         cancelled = False
         has_processing_status_false = False  # 追踪 AgentServer 是否已发送 processing_status=false
+        self._requests_started_total += 1
         try:
             async for chunk in self._agent_client.send_request_stream(env):
                 # 跳过终止 chunk（仅作为流结束信号，不含实际数据）
@@ -2461,6 +2467,7 @@ class MessageHandler(ABC):
                 "[MessageHandler] Stream 任务状态已清理: request_id=%s",
                 rid,
             )
+            self._requests_finished_total += 1
             # 所有流式任务正常结束后，通知前端全部处理完成
             # 只有当 AgentServer 没有发送过 processing_status=false 时才发送
             if not cancelled and not self._stream_tasks and not has_processing_status_false:
@@ -3136,3 +3143,15 @@ class MessageHandler(ABC):
     @property
     def robot_messages_size(self) -> int:
         return self._robot_messages.qsize()
+
+    @property
+    def stream_tasks_size(self) -> int:
+        return len(self._stream_tasks)
+
+    @property
+    def requests_started_total(self) -> int:
+        return self._requests_started_total
+
+    @property
+    def requests_finished_total(self) -> int:
+        return self._requests_finished_total

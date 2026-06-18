@@ -61,6 +61,7 @@ from jiuwenclaw.gateway.agent_client import AgentServerClient, _wire_request_id_
 from jiuwenclaw.gateway.session_map import load_session_map_scope
 from jiuwenclaw.schema import AgentRequest
 from jiuwenclaw.schema.agent import AgentResponse, AgentResponseChunk
+from jiuwenclaw.gateway.message_handler import MessageHandler
 
 logger = logging.getLogger(__name__)
 
@@ -691,6 +692,66 @@ class RuntimeManagementAgentClient(AgentServerClient):
                 }
                 for pod in pods
             ],
+        }
+
+    def collect_request_volume(self):
+        """
+        采集当前 Gateway 的业务量统计（内存读取，无 IO）。
+
+        返回格式：
+        {
+            "gateway_queued": int,      # MessageHandler._user_messages.qsize()
+            "gateway_running": int,     # len(MessageHandler._stream_tasks)
+            "service_manager_queued": int,   # ServiceManager._q.user_qsize()
+            "service_manager_routing": int,  # len(ServiceManager._user_route_tasks)
+            "service_manager_running": int,  # sum(ServiceHandler.inflight_requests)
+            "requests_started_total": int,
+            "requests_finished_total": int,
+            "pods_in_use": int,
+            "pods_idle": int,
+        }
+        """
+        try:
+
+            handler = MessageHandler.get_instance()
+            if handler is None:
+                return None
+
+            gateway_queued = handler.user_messages_size
+            gateway_running = handler.stream_tasks_size
+            requests_started_total = handler.requests_started_total
+            requests_finished_total = handler.requests_finished_total
+
+        except Exception as exc:
+            logger.warning("[RuntimeManagementAgentClient] collect_request_volume: MessageHandler error: %s", exc)
+            return None
+
+        service_manager_queued = 0
+        service_manager_routing = 0
+        service_manager_running = 0
+        pods_in_use = 0
+        pods_idle = 0
+        try:
+            stats = self._access.get_service_manager_stats()
+            if stats is not None:
+                service_manager_queued = stats.get("user_queue_size", 0)
+                service_manager_routing = stats.get("routing_tasks", 0)
+                service_manager_running = stats.get("total_inflight_requests", 0)
+                pods_in_use = stats.get("pods_in_use", 0)
+                pods_idle = stats.get("pods_idle", 0)
+        except Exception as exc:
+            logger.warning("[RuntimeManagementAgentClient] collect_request_volume: ServiceManager error: %s", exc)
+
+        return {
+            "gateway_queued": gateway_queued,
+            "gateway_running": gateway_running,
+            "service_manager_queued": service_manager_queued,
+            "service_manager_routing": service_manager_routing,
+            "service_manager_running": service_manager_running,
+            "requests_started_total": requests_started_total,
+            "requests_finished_total": requests_finished_total,
+            "pods_in_use": pods_in_use,
+            "pods_idle": pods_idle,
         }
 
     def set_or_update_server_config(
