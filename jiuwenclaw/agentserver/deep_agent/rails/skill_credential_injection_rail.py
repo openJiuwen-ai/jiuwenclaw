@@ -139,7 +139,9 @@ class SkillCredentialInjectionRail(DeepAgentRail):
             inputs.tool_args = tool_args
 
         if isinstance(tool_args, dict):
-            env: dict[str, str] = tool_args.get("env") or {}
+            env = tool_args.get("env")
+            if not isinstance(env, dict):
+                env = {}
             for key, value in credentials.items():
                 if key not in env:
                     env[key] = value
