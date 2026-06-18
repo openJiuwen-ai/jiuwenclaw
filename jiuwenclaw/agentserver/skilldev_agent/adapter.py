@@ -5,7 +5,6 @@
 from __future__ import annotations
 
 import asyncio
-import base64
 import json
 import logging
 import sys
@@ -18,6 +17,8 @@ from openjiuwen.core.runner import Runner
 from openjiuwen.core.single_agent import AgentCard
 from openjiuwen.core.sys_operation import LocalWorkConfig, OperationMode, SysOperation, SysOperationCard
 from openjiuwen.harness.factory import create_deep_agent
+from openjiuwen.harness.rails import SecurityRail
+from openjiuwen.harness.rails.filesystem_rail import FileSystemRail
 from openjiuwen.harness.rails.skill_use_rail import SkillUseRail
 from openjiuwen.harness.rails.task_planning_rail import TaskPlanningRail
 from openjiuwen.harness.tools.todo import TodoItem, TodoStatus
@@ -29,9 +30,12 @@ from jiuwenclaw.agentserver.deep_agent.ask_user_question_registry import (
     ask_user_question_request_scope,
 )
 from jiuwenclaw.agentserver.deep_agent.rails import JiuClawStreamEventRail
-from jiuwenclaw.agentserver.skilldev.common_utils import safe_extract_zip
-from jiuwenclaw.agentserver.skilldev.utils.download_file_from_url import download_file
 from jiuwenclaw.agentserver.stream_utils import tool_calls_payload_to_json_list
+from jiuwenclaw.agentserver.skilldev_agent.utils.resource_sync import (
+    record_direct_imported_skills,
+    write_skill_searched,
+    write_uploaded_resources,
+)
 from jiuwenclaw.agentserver.tools.subagent_executor import init_subagent_executor
 from jiuwenclaw.agentserver.tools.subagent_executor.context_vars import set_effective_request_workspace_dir
 from jiuwenclaw.config import get_config, get_default_models
@@ -45,13 +49,6 @@ from jiuwenclaw.agentserver.skilldev_agent.subagents.skill_naming import (
     resolve_skill_name_for_first_input,
 )
 from jiuwenclaw.agentserver.skilldev_agent.tools import build_skilldev_tools
-from jiuwenclaw.agentserver.skilldev_agent.meta_tools.external_tool_registry import (
-    format_tool_usage_hint,
-    iter_tool_definitions_from_json,
-    resolve_tool_spec_identity,
-    write_tool_spec_file,
-    write_tool_usage_catalog,
-)
 from jiuwenclaw.agentserver.skilldev_agent.utils.direct_import import (
     collect_skill_packages,
     extract_import_url,
@@ -542,9 +539,9 @@ class SkillDevDeepAdapter:
 
         # 初始化工作区，写入上传资源，写入搜索到的技能
         self._init_workspace_dirs(task_workspace)
-        await self._write_uploaded_resources(task_workspace, params)
+        await write_uploaded_resources(task_workspace, params)
         if params.get("skill_searched"):
-            await self._write_skill_searched(task_workspace, params.get("skill_searched"))
+            await write_skill_searched(task_workspace, params.get("skill_searched"))
         await self.update_workspace(task_workspace)
 
         resource_hint = self._build_resource_hint(task_workspace, params, task_id)
@@ -733,6 +730,9 @@ class SkillDevDeepAdapter:
             ):
                 yield chunk
             return
+
+        if packages:
+            record_direct_imported_skills(task_workspace, packages)
 
         skill_name, _, _ = parse_skill_frontmatter(skill_root / "SKILL.md")
         if skill_name:
@@ -1014,129 +1014,6 @@ class SkillDevDeepAdapter:
             (task_workspace / rel).mkdir(parents=True, exist_ok=True)
 
     @staticmethod
-    async def _write_uploaded_resources(task_workspace: Path, params: dict[str, Any]) -> None:
-        await SkillDevDeepAdapter._write_resource_group(
-            params.get("files") or [],
-            task_workspace / "resources" / "ref-files",
-            extract_zip_to_subdir=True,
-        )
-        await SkillDevDeepAdapter._write_resource_group(
-            params.get("skill_packages") or params.get("skillPackages") or [],
-            task_workspace / "resources" / "ref-skills",
-            extract_zip_to_subdir=True,
-            allowed_suffixes=(".zip", ".skill"),
-        )
-        await SkillDevDeepAdapter._write_tool_spec_files(
-            params.get("tool_spec_files") or params.get("toolSpecFiles") or [],
-            task_workspace / "resources" / "available-tools",
-        )
-        agent_definitions = params.get("agent_definitions") or params.get("agentDefinitions")
-        if agent_definitions:
-            agents_dir = task_workspace / "resources" / "agents"
-            agents_dir.mkdir(parents=True, exist_ok=True)
-            (agents_dir / "available_agents.json").write_text(
-                json.dumps(agent_definitions, ensure_ascii=False, indent=2), encoding="utf-8"
-            )
-        cli_definitions = params.get("cli_definitions") or params.get("cliDefinitions")
-        if cli_definitions:
-            clis_dir = task_workspace / "resources" / "clis"
-            clis_dir.mkdir(parents=True, exist_ok=True)
-            (clis_dir / "available_clis.json").write_text(
-                json.dumps(cli_definitions, ensure_ascii=False, indent=2), encoding="utf-8"
-            )
-
-    @staticmethod
-    async def _write_tool_spec_files(resources: list[dict[str, Any]], dest_dir: Path) -> None:
-        """Write uploaded tool specs as ``<pluginId>__<toolName>.json`` (pass-through)."""
-        if not resources:
-            return
-        dest_dir.mkdir(parents=True, exist_ok=True)
-        for res in resources:
-            content_b64 = res.get("base64Data") or res.get("base64") or ""
-            if content_b64:
-                try:
-                    raw_bytes = base64.b64decode(content_b64)
-                    parsed = json.loads(raw_bytes.decode("utf-8"))
-                except Exception as exc:
-                    fname = res.get("filename", "?")
-                    raise ValueError(f"工具定义文件 [{fname}] 解析失败: {exc}") from exc
-                for tool_def in iter_tool_definitions_from_json(parsed):
-                    write_tool_spec_file(dest_dir, tool_def)
-            else:
-                plugin_id, tool_name = resolve_tool_spec_identity(res)
-                if plugin_id and tool_name:
-                    write_tool_spec_file(dest_dir, res)
-                else:
-                    logger.warning(
-                        "[SkillDevDeepAdapter] skip tool_spec entry without base64 or "
-                        "pluginId/bundleName+toolName: %s",
-                        res.get("filename", res),
-                    )
-        # write_tool_usage_catalog(dest_dir)
-
-    @staticmethod
-    async def _write_skill_searched(task_workspace: Path, skill_searched: dict[str, Any]) -> None:
-        """Download a skill selected from search results into ref-skills."""
-        skill_name = skill_searched.get("skillId") or skill_searched.get("skillName") or "unknown"
-        url = skill_searched.get("url", "")
-        if not url:
-            logger.warning("[SkillDevDeepAdapter] skill_searched missing url: %s", skill_searched)
-            return
-
-        dest_dir = task_workspace / "resources" / "ref-skills"
-        dest_dir.mkdir(parents=True, exist_ok=True)
-        suffix = Path(url).suffix.lower() or ".skill"
-        if ".skill" in suffix:
-            suffix = ".skill"
-        elif ".zip" in suffix:
-            suffix = ".zip"
-        file_path = dest_dir / f"{skill_name}{suffix}"
-        await download_file(url, str(file_path))
-        if suffix in (".zip", ".skill"):
-            safe_extract_zip(file_path, dest_dir, extract_to_stem_dir=False)
-
-    @staticmethod
-    async def _write_resource_group(
-        resources: list[dict[str, Any]],
-        dest_dir: Path,
-        *,
-        extract_zip_to_subdir: bool,
-        allowed_suffixes: tuple[str, ...] | None = None,
-    ) -> None:
-        if not resources:
-            return
-        dest_dir.mkdir(parents=True, exist_ok=True)
-
-        # 适配小艺：通过 URL 下载文件
-        if resources[0].get("url", ""):
-            for res in resources:
-                name = str(res.get("filename") or res.get("name") or "unknown")
-                suffix = Path(name).suffix.lower()
-                if allowed_suffixes and suffix not in allowed_suffixes:
-                    raise ValueError(f"不支持的文件类型: {name}")
-                download_url = str(res.get("url", ""))
-                if not download_url:
-                    continue
-                file_path = dest_dir / name
-                await download_file(download_url, str(file_path))
-                if suffix in (".zip", ".skill"):
-                    safe_extract_zip(file_path, dest_dir, extract_to_stem_dir=False)
-            return
-
-        for res in resources:
-            name = str(res.get("filename") or res.get("name") or "unknown")
-            suffix = Path(name).suffix.lower()
-            if allowed_suffixes and suffix not in allowed_suffixes:
-                raise ValueError(f"不支持的文件类型: {name}")
-            content_b64 = res.get("base64Data") or res.get("base64") or ""
-            if not content_b64:
-                continue
-            file_path = dest_dir / name
-            file_path.write_bytes(base64.b64decode(content_b64))
-            if suffix in (".zip", ".skill"):
-                safe_extract_zip(file_path, dest_dir, extract_to_stem_dir=extract_zip_to_subdir)
-
-    @staticmethod
     def _build_resource_hint(task_workspace: Path, params: dict[str, Any], task_id: str) -> str:
         files = params.get("files") or []
         skills = params.get("skill_packages") or params.get("skillPackages") or []
@@ -1167,8 +1044,6 @@ class SkillDevDeepAdapter:
                 "用户上传资源已写入：\n"
             )
             parts.append(header + "\n".join(resource_lines))
-            # if tools:
-            #     parts.append(format_tool_usage_hint())
         if skill_searched:
             skill_name = skill_searched.get("skillId") or skill_searched.get("skillName") or "未知"
             ref_skills_dir = task_workspace / "resources" / "ref-skills"
