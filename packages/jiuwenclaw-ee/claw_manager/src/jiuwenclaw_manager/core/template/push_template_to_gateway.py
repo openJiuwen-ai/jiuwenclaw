@@ -16,7 +16,11 @@ from jiuwenclaw_manager.infrastructure.template_ref import (
     read_template_ref_from_row,
 )
 from jiuwenclaw_manager.infrastructure.utils import utc_now
-from jiuwenclaw_manager.manager_ws_server.server import push_config_op
+from jiuwenclaw_manager.infrastructure.logger import get_logger
+from jiuwenclaw_manager.manager_ws_server.server import (
+    ManagerWsServer,
+    push_config_op,
+)
 from jiuwenclaw_manager.models.config_effective_policy_models import (
     CONFIG_DEFAULT_TEMPLATE_MAPPING_TABLE_DEF,
     CONFIG_EFFECTIVE_AGENT_POLICY_TABLE_DEF,
@@ -38,6 +42,8 @@ from jiuwenclaw_manager.schemas.template_slot_schemas import (
     SERVICE_CONFIG_SLOT,
     SKILL_WHITELIST_SLOT,
 )
+
+logger = get_logger(__name__)
 
 _LIST_ALL_CAP = 10_000
 _OR_SPLIT_PATTERN = re.compile(r"\s+or\s+", flags=re.IGNORECASE)
@@ -285,6 +291,14 @@ async def collect_referenced_jiuwenclaw_ids_for_template(
     )
 
 
+async def _connected_gateway_jiuwenclaw_ids() -> set[str]:
+    """当前已通过 manager_ws_server 建立长连接的 Gateway ``jiuwenclaw_id`` 集合。"""
+    server = ManagerWsServer.get_instance()
+    if server is None:
+        return set()
+    return set(await server.list_registered_jiuwenclaw_ids())
+
+
 async def _push_template_config_op(
     jiuwenclaw_id: str,
     kind: str,
@@ -374,7 +388,18 @@ async def push_template_to_referencing_gateways(
     if not tid:
         return
     jids = await collect_referenced_jiuwenclaw_ids_for_template(handler, tid, normalized)
+    connected = await _connected_gateway_jiuwenclaw_ids()
     for jid in sorted(jids):
+        if jid not in connected:
+            logger.info(
+                "[push_template] skip disconnected gateway jiuwenclaw_id=%s "
+                "kind=%s op=%s template_id=%s",
+                jid,
+                normalized,
+                op,
+                tid,
+            )
+            continue
         await _push_template_config_op(
             jid,
             normalized,

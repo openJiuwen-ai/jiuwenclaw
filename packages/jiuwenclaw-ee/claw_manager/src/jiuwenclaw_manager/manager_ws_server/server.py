@@ -348,7 +348,6 @@ class ManagerWsServer:
                     f"no gateway websocket connected for jiuwenclaw_id={jiuwenclaw_id!r}; "
                     f"registered_jiuwenclaw_ids={registered}; "
                     "ensure gateway manager_ws_client is connected "
-                    "(restart gateway after claw-manager restart)"
                 )
             try:
                 async with client.send_lock:
