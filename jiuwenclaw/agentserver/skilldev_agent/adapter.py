@@ -58,6 +58,12 @@ from jiuwenclaw.agentserver.skilldev_agent.utils.direct_import import (
     extract_packages_to_skill_dir,
     find_skill_root,
 )
+from jiuwenclaw.agentserver.skilldev_agent.utils.finalize import (
+    collect_output_packages,
+    get_review_benchmark,
+    get_static_review_report,
+    repackage_if_stale,
+)
 from jiuwenclaw.agentserver.skilldev.session_history.service import SkillDevSessionHistoryService
 from jiuwenclaw.agentserver.skilldev_agent.utils.session_recorder import AgentSessionRecorder
 from jiuwenclaw.agentserver.skilldev_agent.utils.skill_search import search_skills
@@ -788,11 +794,7 @@ class SkillDevDeepAdapter:
         rid: str,
         cid: str,
     ) -> AsyncIterator[AgentResponseChunk]:
-        output_dir = task_workspace / "output"
-        skill_files = [
-            f for f in output_dir.iterdir()
-            if f.is_file() and f.suffix in (".skill", ".zip")
-        ] if output_dir.exists() else []
+        skill_files = collect_output_packages(task_workspace / "output")
 
         if skill_files:
             yield AgentResponseChunk(
@@ -832,8 +834,8 @@ class SkillDevDeepAdapter:
         rid: str,
         cid: str,
     ) -> AsyncIterator[AgentResponseChunk]:
-        static_result, static_report = self._get_static_review_report(task_workspace)
-        benchmark, report, iteration = self._get_review_benchmark(task_workspace)
+        static_result, static_report = get_static_review_report(task_workspace)
+        benchmark, report, iteration = get_review_benchmark(task_workspace)
         has_static = static_result is not None
         has_dynamic = benchmark is not None and report is not None and iteration >= 0
 
@@ -922,12 +924,11 @@ class SkillDevDeepAdapter:
                 is_complete=False,
             )
             return
-
-        output_dir = task_workspace / "output"
-        skill_files = [
-            f for f in output_dir.iterdir()
-            if f.is_file() and f.suffix in (".skill", ".zip")
-        ] if output_dir.exists() else []
+        
+        # Check output/ for packaged skill artifacts (.skill/.zip).
+        skill_files = collect_output_packages(task_workspace / "output")
+        if skill_files:
+            skill_files = repackage_if_stale(task_workspace, skill_files)
 
         if skill_files:
             async for chunk in self._yield_packaged_skill_completion(
@@ -1006,98 +1007,6 @@ class SkillDevDeepAdapter:
         if request.session_id:
             return str(request.session_id)
         return uuid.uuid4().hex
-
-    @staticmethod
-    def _get_static_review_report(
-        task_workspace: Path,
-    ) -> tuple[dict[str, Any] | None, str | None]:
-        """Load static_report.json / static_report.md from evals/static.
-
-        Returns (static_result_dict, report_markdown).
-        """
-        static_dir = task_workspace / "evals" / "static"
-        report_json = static_dir / "static_report.json"
-        if not report_json.is_file():
-            return None, None
-
-        try:
-            static_result = json.loads(report_json.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError) as exc:
-            logger.warning("[SkillDevDeepAdapter] static report load failed: %s", exc)
-            return None, None
-
-        if not isinstance(static_result, dict) or static_result.get("reviewed", False):
-            return None, None
-
-        updated = {**static_result, "reviewed": True}
-        try:
-            report_json.write_text(
-                json.dumps(updated, ensure_ascii=False, indent=2),
-                encoding="utf-8",
-            )
-        except OSError as exc:
-            logger.warning("[SkillDevDeepAdapter] static report mark reviewed failed: %s", exc)
-            return None, None
-
-        report_md = static_dir / "static_report.md"
-        report = report_md.read_text(encoding="utf-8") if report_md.is_file() else ""
-        return static_result, report
-
-    @staticmethod
-    def _get_review_benchmark(
-        task_workspace: Path,
-    ) -> tuple[dict[str, Any] | None, str | None, int]:
-        """Load the latest benchmark.json / benchmark.md from the evals dir.
-
-        Returns (benchmark_dict, report_markdown, iteration_number).
-        """
-        evals_dir = task_workspace / "evals"
-
-        iter_dirs = [
-            d for d in evals_dir.iterdir()
-            if d.is_dir() and d.name.startswith("iteration-")
-        ] if evals_dir.is_dir() else []
-
-        if iter_dirs:
-            def _iter_num(d: Path) -> int:
-                try:
-                    return int(d.name.split("-", 1)[1])
-                except (IndexError, ValueError):
-                    return -1
-
-            latest = max(iter_dirs, key=_iter_num)
-            iteration = _iter_num(latest)
-            target_dir = latest
-        else:
-            iteration = 0
-            target_dir = evals_dir
-
-        benchmark: dict[str, Any] | None = None
-        report: str | None = None
-
-        bm_json = target_dir / "benchmark.json"
-        if bm_json.is_file():
-            benchmark = json.loads(bm_json.read_text(encoding="utf-8"))
-            try:
-                benchmark["run_summary"]["with_skill"]["pass_rate"]["mean"]
-                benchmark["run_summary"]["without_skill"]["pass_rate"]["mean"]
-                benchmark["run_summary"]["delta"]["pass_rate"]
-                has_required_summary = True
-            except (KeyError, TypeError):
-                has_required_summary = False
-            if not has_required_summary or benchmark.get("reviewed"):
-                return None, None, -1
-            updated = {**benchmark, "reviewed": True}
-            bm_json.write_text(
-                json.dumps(updated, ensure_ascii=False, indent=2),
-                encoding="utf-8",
-            )
-
-        bm_md = target_dir / "benchmark.md"
-        if bm_md.is_file():
-            report = bm_md.read_text(encoding="utf-8")
-
-        return benchmark, report, iteration
 
     @staticmethod
     def _init_workspace_dirs(task_workspace: Path) -> None:

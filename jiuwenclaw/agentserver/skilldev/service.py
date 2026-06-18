@@ -704,14 +704,26 @@ class SkillDevService:
         content = params.get("content")
 
         if not task_id or not file_path:
+            logger.warning(
+                "[session=%s] [SkillDevService] file_write 缺少参数: task_id=%s, path=%s",
+                session_id, task_id, file_path,
+            )
             return self._rpc_error_chunk(
                 request_id, channel_id, "缺少 task_id 或 path 参数"
             )
         if content is None:
+            logger.warning(
+                "[session=%s] [SkillDevService] file_write 缺少 content 参数, path=%s",
+                session_id, file_path,
+            )
             return self._rpc_error_chunk(
                 request_id, channel_id, "缺少 content 参数"
             )
         if len(content) > self._MAX_FILE_CONTENT_SIZE:
+            logger.warning(
+                "[session=%s] [SkillDevService] file_write 内容超限: path=%s, size=%d, limit=%d",
+                session_id, file_path, len(content), self._MAX_FILE_CONTENT_SIZE,
+            )
             return self._rpc_error_chunk(
                 request_id, channel_id,
                 f"文件内容超过大小限制 ({self._MAX_FILE_CONTENT_SIZE} 字符)"
@@ -722,11 +734,19 @@ class SkillDevService:
         full_path = (skill_dir / file_path).resolve()
 
         if not str(full_path).startswith(str(skill_dir.resolve())):
+            logger.warning(
+                "[session=%s] [SkillDevService] file_write 路径越界: path=%s, resolved=%s",
+                session_id, file_path, full_path,
+            )
             return self._rpc_error_chunk(
                 request_id, channel_id, "路径非法：不能访问工作区外的文件"
             )
 
         if not full_path.exists() or not full_path.is_file():
+            logger.warning(
+                "[session=%s] [SkillDevService] file_write 文件不存在: path=%s, full_path=%s",
+                session_id, file_path, full_path,
+            )
             return self._rpc_error_chunk(
                 request_id, channel_id, f"文件不存在: {file_path}"
             )
@@ -734,6 +754,10 @@ class SkillDevService:
         try:
             full_path.read_text(encoding="utf-8")
         except UnicodeDecodeError:
+            logger.warning(
+                "[session=%s] [SkillDevService] file_write 二进制文件不可编辑: path=%s",
+                session_id, file_path,
+            )
             return self._rpc_error_chunk(
                 request_id, channel_id, "不支持修改二进制文件"
             )
@@ -742,6 +766,10 @@ class SkillDevService:
         if full_path.name == "SKILL.md":
             validation_error = validate_skill_md_content(content)
             if validation_error:
+                logger.warning(
+                    "[session=%s] [SkillDevService] file_write SKILL.md 校验失败: %s",
+                    session_id, validation_error,
+                )
                 return self._rpc_error_chunk(request_id, channel_id, validation_error)
 
         # 如果修改的是 skill/<skill_name>/scripts/**，写入前做静态安全校验（规则同 skill-verifier）
@@ -754,6 +782,10 @@ class SkillDevService:
             rel_path = rel.as_posix()
             validation_error = validate_scripts_file_content(content, rel_path=rel_path)
             if validation_error:
+                logger.warning(
+                    "[session=%s] [SkillDevService] file_write 脚本安全校验失败: path=%s, error=%s",
+                    session_id, rel_path, validation_error,
+                )
                 return self._rpc_error_chunk(request_id, channel_id, validation_error)
 
         full_path.write_text(content, encoding="utf-8")

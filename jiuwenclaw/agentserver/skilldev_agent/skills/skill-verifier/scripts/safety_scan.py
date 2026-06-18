@@ -1,5 +1,6 @@
 import json
 import os
+import random
 import sys
 import time
 import warnings
@@ -26,6 +27,8 @@ COMMON_HEADERS = {
     "x-request-from": "jiuwenclaw",
     "Content-Type": "application/json",
 }
+
+_MAX_CONSECUTIVE_ERRORS = 3
 
 
 def get_skill_scan_url():
@@ -124,7 +127,7 @@ def _format_failure(raw_result):
     return json.dumps(raw_result, indent=2, ensure_ascii=False)
 
 
-def scan_url(skill_name, url, max_attempts=20, interval=2):
+def scan_url(skill_name, url, max_attempts=20, interval=3):
     """Submit scan task, poll for status, return result dict."""
     req_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
 
@@ -149,14 +152,28 @@ def scan_url(skill_name, url, max_attempts=20, interval=2):
     if not task_id:
         return submit_data
 
+    time.sleep(3)
     last_data = None
+    consecutive_errors = 0
     for attempt in range(1, max_attempts + 1):
         try:
             last_data = _post_request("skill_scan_query_task", {"taskID": task_id})
+            consecutive_errors = 0
         except Exception:
+            consecutive_errors += 1
+            if consecutive_errors >= _MAX_CONSECUTIVE_ERRORS:
+                return {
+                    "error": (
+                        f"Service unavailable: {consecutive_errors} consecutive "
+                        f"poll failures, aborting."
+                    ),
+                    "maxAttempts": max_attempts,
+                    "attemptReached": attempt,
+                    "last_response": last_data,
+                }
             if attempt >= max_attempts:
                 raise
-            time.sleep(interval)
+            time.sleep(interval + random.uniform(0, 1))
             continue
 
         results = last_data.get("data", {}).get("result", [])
@@ -164,7 +181,7 @@ def scan_url(skill_name, url, max_attempts=20, interval=2):
             return last_data
 
         if attempt < max_attempts:
-            time.sleep(interval)
+            time.sleep(interval + random.uniform(0, 1))
 
     return {
         "error": "Safety scan did not complete before polling timed out.",
