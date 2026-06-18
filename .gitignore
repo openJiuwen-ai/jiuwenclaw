@@ -81,6 +81,12 @@ packages/jiuwenswarm-tui/jiuwenswarm_tui/resources/tui-bin/
 .trae/
 
 # Benchmark & evolution artifacts
-ai/
+benchmark/report/
+benchmark/__pycache__/
+benchmark/skills/**/.DS_Store
+benchmark/skills/**/__pycache__/
+ai/trace*.json
+ai/trace*.txt
+ai/evolve.html
 evolve-draft.md
 traces.db

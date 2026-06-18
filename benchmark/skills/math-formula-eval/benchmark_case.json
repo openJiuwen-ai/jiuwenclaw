@@ -1,0 +1,38 @@
+{
+  "skill_id": "math-formula-eval",
+  "category": "fixable_error",
+  "category_id": 1,
+  "description": "数学公式评估器中 ⊕ 运算的示例结果与公式定义矛盾（示例写 19，正确应为 25）",
+  "tested_capability": "基本修复能力：算法能否识别示例与公式之间的矛盾",
+  "test_task": "帮我算一下 3 ⊕ 2",
+  "failure_mode": {
+    "trigger": "用户要求计算 3 ⊕ 2，与 SKILL.md 示例完全一致",
+    "symptom": "按公式 a²+2ab+b² 计算 3⊕2=9+12+4=25，但 SKILL.md 示例写的是 19。Agent 要么照抄错误示例输出 19，要么自己算出 25 但与示例矛盾",
+    "root_cause_summary": "SKILL.md 中 ⊕ 运算的示例 '3 ⊕ 2 = 9 + 12 + 4 = 19' 计算错误，9+12+4=25 而非 19"
+  },
+  "sample_trace_summary": {
+    "trace_scope": "single_invocation",
+    "skill_name": "math-formula-eval",
+    "conversation": [
+      {"role": "user", "content": "帮我算一下 3 ⊕ 2"},
+      {"role": "assistant", "content": "3 ⊕ 2 = 3² + 2×3×2 + 2²\n      = 9 + 12 + 4\n      = 19"},
+      {"role": "assistant", "content": "（Agent 按 SKILL.md 示例计算。中间步骤 9+12+4 正确，但最终结果 19 与算术矛盾。或者 Agent 可能自己算出 25，与示例的 19 矛盾。无论哪种情况，trace 中都有可检出的错误。）"}
+    ],
+    "observable_error": "中间步骤 9+12+4 正确但最终结果写 19（应为 25），或 Agent 输出 25 但与 SKILL.md 示例 19 矛盾",
+    "outcome": "failure_self_evident"
+  },
+  "expected_behavior": {
+    "should_generate_proposal": true,
+    "expected_proposal_count": 1,
+    "root_cause_keywords": ["example", "示例", "contradiction", "矛盾", "19", "25", "计算错误", "wrong", "incorrect", "arithmetic"],
+    "fix_keywords": ["25", "9+12+4=25", "正确", "correct", "example", "示例"],
+    "expected_state": "ACTIVE",
+    "expected_min_score": 0.60
+  },
+  "scoring": {
+    "proposal_exists": { "weight": 0.30, "pass_condition": "exactly 1 proposal targeting math-formula-eval" },
+    "root_cause_accuracy": { "weight": 0.25, "pass_condition": "root_cause contains any root_cause_keywords" },
+    "fix_quality": { "weight": 0.25, "pass_condition": "targeted_fix.suggestion contains any fix_keywords" },
+    "decision_correctness": { "weight": 0.20, "pass_condition": "state == ACTIVE" }
+  }
+}

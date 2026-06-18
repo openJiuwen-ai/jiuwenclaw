@@ -1,0 +1,49 @@
+{
+  "skill_id": "currency-converter",
+  "category": "bad_experience",
+  "category_id": 3,
+  "description": "evolutions.json 包含过时硬编码汇率（1 USD = 6.80 CNY，2024-01 数据），负反馈率 53%",
+  "tested_capability": "经验污染治理：算法能否识别 evolutions.json 中高负反馈率的过时经验并提出治理方案",
+  "test_task": "把 500 美元换算成人民币",
+  "failure_mode": {
+    "trigger": "evolutions.json 中的过时经验被 SkillEvolutionRail 注入到 Agent 上下文",
+    "symptom": "经验建议使用 1 USD = 6.80 CNY（2024-01 汇率），当前实际汇率约 7.24，偏差 6.5%。usage_stats 显示 53% 负反馈率。",
+    "root_cause_summary": "evolutions.json 中 entry ev_7a3f91b2 硬编码了 2024-01 的过时汇率。该经验已被呈现 15 次，8 次负反馈（53%），但系统仍然在每次执行时注入此经验。当前 SkillExperienceWriter 仅支持 append，无法 deprecate 已有条目。"
+  },
+  "sample_trace_summary": {
+    "trace_scope": "single_invocation",
+    "skill_name": "currency-converter",
+    "conversation": [
+      {"role": "user", "content": "帮我把 500 美元换成人民币"},
+      {"role": "assistant", "content": "500 USD = 3,385 CNY（汇率: 1 USD = 6.77 CNY，实时 API）"},
+      {"role": "assistant", "content": "（Agent 使用实时 API 得到了正确汇率 6.77。但 evolutions.json 中仍有一条建议 6.80 的过时经验在注入，usage_stats 负反馈率 53%。算法应能从 usage_stats 或经验与现实的偏差中识别出该经验已过时。）"}
+    ],
+    "observable_error": "evolutions.json 中的经验（6.80）与实时汇率（6.77）偏差明显，且 usage_stats 负反馈率 53%",
+    "outcome": "experience_pollution_present"
+  },
+  "pre_existing_evolutions": {
+    "entry_id": "ev_7a3f91b2",
+    "problem": "硬编码 2024-01 的过时汇率 1 USD = 6.80 CNY",
+    "negative_feedback_rate": 0.53,
+    "times_presented": 15,
+    "times_negative": 8,
+    "why_bad": "汇率波动大，硬编码值快速过时。SKILL.md 明确写了'不要使用缓存的旧汇率'但此经验鼓励使用固定值"
+  },
+  "expected_behavior": {
+    "should_generate_proposal": true,
+    "expected_proposal_count": 1,
+    "action_type": "deprecate_or_rewrite",
+    "root_cause_keywords": ["stale", "outdated", "过时", "hardcoded", "硬编码", "6.80", "fallback", "old rate", "旧汇率", "ev_7a3f91b2", "negative feedback", "负反馈"],
+    "fix_keywords": ["deprecate", "remove", "废弃", "删除", "rewrite", "改写", "demote", "降级", "score", "live rate", "实时", "API"],
+    "expected_state": "ACTIVE",
+    "expected_min_score": 0.60,
+    "governance_action": "算法应识别 entry ev_7a3f91b2 的高负反馈率和过时内容，提出废弃该经验或改写为'API 不可用时告知用户无法换算，不使用过时缓存'"
+  },
+  "scoring": {
+    "proposal_exists": { "weight": 0.30, "pass_condition": "output contains governance action targeting ev_7a3f91b2" },
+    "root_cause_accuracy": { "weight": 0.25, "pass_condition": "identifies the stale rate or high negative feedback" },
+    "fix_quality": { "weight": 0.25, "pass_condition": "suggests deprecate/remove/rewrite action" },
+    "decision_correctness": { "weight": 0.20, "pass_condition": "governance proposal reaches ACTIVE state" }
+  },
+  "architecture_note": "当前系统存在两个缺口：(1) SkillExperienceWriter 仅支持 append，无 deprecate/remove 机制 (2) LLMProposer 无法读取 evolutions.json 的 usage_stats，无法感知经验质量信号"
+}

@@ -1,0 +1,39 @@
+{
+  "skill_id": "system-permission-check",
+  "category": "unfixable",
+  "category_id": 4,
+  "description": "系统检查因 psutil 未安装且无 pip 权限而失败，属于环境限制，无法通过经验修复",
+  "tested_capability": "边界判断能力：算法能否区分环境依赖缺失与知识缺陷，不输出无效建议",
+  "test_task": "检查当前系统的 CPU 核心数、内存使用情况和进程列表",
+  "failure_mode": {
+    "trigger": "Agent 执行 check_perms.py 脚本的 process 检查模块",
+    "symptom": "psutil 模块未安装（ModuleNotFoundError），且沙箱环境无 pip install 权限，无法安装",
+    "root_cause_summary": "运行环境（sandbox）未预装 psutil 库，且网络隔离导致无法在线安装。这是环境配置问题，不是 skill 知识缺陷"
+  },
+  "sample_trace_summary": {
+    "trace_scope": "single_invocation",
+    "skill_name": "system-permission-check",
+    "conversation": [
+      {"role": "user", "content": "帮我检查一下系统环境：CPU 多少核、内存多大、能不能访问进程列表"},
+      {"role": "assistant", "content": "=== System Permission Check ===\n\n[Disk] ✅ Read/Write access to current directory\n[Disk] ✅ Read/Write access to temp directory\n[Network] ✅ DNS resolution working\n[Process] ❌ psutil not installed - cannot access detailed system info\n[CPU] ❌ psutil not installed - cannot query CPU details\n[Memory] ❌ psutil not installed - cannot query memory info\n[Process] ✅ Can create child processes\n\n尝试安装 psutil...\nERROR: PermissionError - sandbox 环境不允许 pip install\n\nSummary: 4/7 checks passed, 3 failed"},
+      {"role": "assistant", "content": "（Agent 执行了 check_perms.py，psutil 导入失败（ModuleNotFoundError）。Agent 尝试 pip install psutil 也被沙箱权限拒绝。失败原因是环境依赖缺失 + 权限限制，脚本逻辑本身无错误。）"}
+    ],
+    "observable_error": "ModuleNotFoundError + PermissionError — 环境依赖和权限问题，非 skill 知识缺陷",
+    "outcome": "failure_environment"
+  },
+  "expected_behavior": {
+    "should_generate_proposal": false,
+    "expected_proposal_count": 0,
+    "alternative_pass": "如果生成了 proposal，state 应为 REJECTED",
+    "root_cause_keywords": ["environment", "环境", "sandbox", "沙箱", "dependency", "依赖", "psutil", "permission", "权限", "install", "安装", "ModuleNotFoundError"],
+    "fix_keywords": [],
+    "expected_state": null,
+    "llm_prompt_constraint": "LLMProposer system prompt 写了 'Things that can't be fixed by adding knowledge' 和 'Do NOT report infrastructure issues (status codes, tool bugs)'。psutil 缺失属于环境/工具问题"
+  },
+  "scoring": {
+    "proposal_exists": { "weight": 0.30, "pass_condition": "0 proposals, OR proposal state == REJECTED" },
+    "root_cause_accuracy": { "weight": 0.25, "pass_condition": "N/A if 0 proposals; if proposal exists, root_cause should mention environment/dependency" },
+    "fix_quality": { "weight": 0.25, "pass_condition": "N/A if 0 proposals; if proposal exists, suggestion should be empty or 'unfixable'" },
+    "decision_correctness": { "weight": 0.20, "pass_condition": "N/A if 0 proposals; if proposal exists, state == REJECTED" }
+  }
+}

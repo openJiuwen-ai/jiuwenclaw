@@ -1,0 +1,38 @@
+{
+  "skill_id": "unit-converter",
+  "category": "fixable_error",
+  "category_id": 1,
+  "description": "单位换算器中英里到米的转换因子错误（1.8 vs 正确值 1609.34）",
+  "tested_capability": "基本修复能力：算法能否从错误的换算结果中识别出转换因子问题",
+  "test_task": "将 100 英里转换为公里",
+  "failure_mode": {
+    "trigger": "用户请求英里到公里的换算",
+    "symptom": "100 mile = 180 km（正确应为约 160.934 km），误差约 12%",
+    "root_cause_summary": "SKILL.md 转换表和脚本中 mile 的换算因子写为 1.8（m），正确应为 1609.34（m）"
+  },
+  "sample_trace_summary": {
+    "trace_scope": "single_invocation",
+    "skill_name": "unit-converter",
+    "conversation": [
+      {"role": "user", "content": "帮我把 100 英里换算成公里"},
+      {"role": "assistant", "content": "我来帮你换算。\n\n100 mile = 180 km"},
+      {"role": "assistant", "content": "（Agent 调用了 unit-converter skill 的 convert.py 脚本。脚本中 mile 的换算因子为 1.8（m），所以 100 mile × 1.8 / 1000 = 180 km。但公认的 1 英里 = 1.60934 公里，100 英里应约为 160.9 公里。180 km 的结果偏差约 12%，错误是算术上可验证的。）"}
+    ],
+    "observable_error": "100 mile = 180 km 是算术可验证的错误结果（正确应为 ~160.9 km），转换因子 1.8 明显有误",
+    "outcome": "failure_self_evident"
+  },
+  "expected_behavior": {
+    "should_generate_proposal": true,
+    "expected_proposal_count": 1,
+    "root_cause_keywords": ["mile", "conversion", "factor", "英里", "换算", "1.8", "1609", "系数", "coefficient"],
+    "fix_keywords": ["1609.34", "1.60934", "1.609", "correct", "正确", "mile", "英里"],
+    "expected_state": "ACTIVE",
+    "expected_min_score": 0.60
+  },
+  "scoring": {
+    "proposal_exists": { "weight": 0.30, "pass_condition": "exactly 1 proposal targeting unit-converter" },
+    "root_cause_accuracy": { "weight": 0.25, "pass_condition": "root_cause contains any root_cause_keywords" },
+    "fix_quality": { "weight": 0.25, "pass_condition": "targeted_fix.suggestion contains any fix_keywords" },
+    "decision_correctness": { "weight": 0.20, "pass_condition": "state == ACTIVE" }
+  }
+}

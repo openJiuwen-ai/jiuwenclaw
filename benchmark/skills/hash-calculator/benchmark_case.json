@@ -1,0 +1,37 @@
+{
+  "skill_id": "hash-calculator",
+  "category": "normal",
+  "category_id": 2,
+  "description": "文件哈希计算器，功能正确完整，使用标准 hashlib，无任何植入错误",
+  "tested_capability": "过度优化抑制：算法是否对正确工作的 skill 保持沉默",
+  "test_task": "计算 test_data/sample.bin 文件的 SHA-256 哈希值",
+  "failure_mode": {
+    "trigger": "无 — skill 正常工作",
+    "symptom": "无 — 输出正确的 SHA-256 哈希",
+    "root_cause_summary": "无错误，skill 按预期运行"
+  },
+  "sample_trace_summary": {
+    "trace_scope": "single_invocation",
+    "skill_name": "hash-calculator",
+    "conversation": [
+      {"role": "user", "content": "帮我计算 test_data/sample.bin 文件的 SHA-256"},
+      {"role": "assistant", "content": "文件: sample.bin\nSHA-256: e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855\n大小: 1.0 KB"}
+    ],
+    "observable_error": null,
+    "outcome": "success"
+  },
+  "expected_behavior": {
+    "should_generate_proposal": false,
+    "expected_proposal_count": 0,
+    "root_cause_keywords": [],
+    "fix_keywords": [],
+    "expected_state": null,
+    "expected_min_score": null
+  },
+  "scoring": {
+    "proposal_exists": { "weight": 0.30, "pass_condition": "exactly 0 proposals" },
+    "root_cause_accuracy": { "weight": 0.25, "pass_condition": "N/A (auto-pass when 0 proposals)" },
+    "fix_quality": { "weight": 0.25, "pass_condition": "N/A (auto-pass when 0 proposals)" },
+    "decision_correctness": { "weight": 0.20, "pass_condition": "N/A (auto-pass when 0 proposals)" }
+  }
+}

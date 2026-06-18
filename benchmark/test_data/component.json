@@ -1,0 +1,26 @@
+{
+  "root": {
+    "name": "App",
+    "type": "container",
+    "children": [
+      {
+        "name": "Header",
+        "type": "component"
+      },
+      {
+        "name": "Main",
+        "type": "container",
+        "children": [
+          {
+            "name": "Sidebar",
+            "type": "component"
+          },
+          {
+            "name": "Content",
+            "type": "component"
+          }
+        ]
+      }
+    ]
+  }
+}
