@@ -69,6 +69,20 @@ def create_manager_web_app(dist_root: Path, backend_url: str) -> FastAPI:
             headers=response_headers,
         )
 
+    @application.middleware("http")
+    async def static_cache_control(request: Request, call_next) -> Response:
+        """HTML 可缓存但须校验（未发版刷新走 304）；/assets/ 带 hash 长期缓存。"""
+        response = await call_next(request)
+        content_type = (response.headers.get("content-type") or "").lower()
+        if "text/html" in content_type:
+            response.headers["Cache-Control"] = "no-cache, must-revalidate"
+        elif request.url.path.startswith("/assets/"):
+            response.headers.setdefault(
+                "Cache-Control",
+                "public, max-age=31536000, immutable",
+            )
+        return response
+
     application.mount(
         "/",
         StaticFiles(directory=str(dist_root), html=True),

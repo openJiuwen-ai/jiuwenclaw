@@ -642,6 +642,12 @@ async def test_global_policy_patch_and_delete(manager_api: ManagerApiHarness):
     )
     assert patched["priority"] == 5
 
+    replaced = await h.patch_json(
+        f"/config-effective/global-policies/{policy_id}",
+        {"template_ref": {"service_config": [m1]}},
+    )
+    assert replaced["template_ref"] == {"service_config": [m1]}
+
     await h.delete_ok(f"/config-effective/global-policies/{policy_id}")
 
 

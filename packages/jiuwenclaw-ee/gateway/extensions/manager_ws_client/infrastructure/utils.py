@@ -138,10 +138,10 @@ def apply_template_ref_to_updates(
     *,
     existing_row: Any | None,
 ) -> dict[str, Any]:
+    """PATCH 含 ``template_ref`` 时整列替换（与 Manager / 前端编辑器一致）。"""
     payload = dict(updates)
     if "template_ref" not in payload:
         return payload
     patch = payload.pop("template_ref")
-    base = read_template_ref_from_row(existing_row) if existing_row is not None else {}
-    payload["template_ref"] = merge_template_ref(base, normalize_template_ref(patch))
+    payload["template_ref"] = normalize_template_ref(patch)
     return payload
