@@ -49,11 +49,11 @@ async def web_search(
     mode = normalize_search_mode(search_mode)
     if not is_valid_search_mode(mode):
         logger.warning(
-            "[web_search] rejected invalid search_mode=%r query=%r",
+            "[web_search] invalid search_mode=%r, using default; query=%r",
             search_mode,
             query[:120],
         )
-        return "[ERROR]: search_mode must be default, paid, or free."
+        mode = "default"
 
     return await run_web_search(query, search_mode=mode, max_results=max_results)
 

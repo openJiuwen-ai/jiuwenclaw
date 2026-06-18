@@ -177,3 +177,26 @@ def test_web_search_entry_delegates_to_orchestrator(monkeypatch):
     result = asyncio.run(web_search.invoke({"query": "hello"}))
     assert result == "ok"
     assert calls == 1
+
+
+def test_web_search_invalid_search_mode_falls_back_to_default(monkeypatch):
+    import asyncio
+
+    calls: list[str] = []
+
+    async def fake_run(query, *, search_mode="default", max_results=None):
+        calls.append(search_mode)
+        return "ok"
+
+    monkeypatch.setattr(
+        "jiuwenclaw.agentserver.tools.web_search.tool.run_web_search",
+        fake_run,
+    )
+
+    from jiuwenclaw.agentserver.tools.web_search.tool import web_search
+
+    result = asyncio.run(
+        web_search.invoke({"query": "hello", "search_mode": "fast"})
+    )
+    assert result == "ok"
+    assert calls == ["default"]
