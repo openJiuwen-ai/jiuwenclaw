@@ -36,12 +36,9 @@ apply_openai_model_client_patch()
 apply_shell_pip_isolation_patch()
 migrate_legacy_user_config_if_needed()
 
-try:
-    import jiuwenclaw.agentserver.deep_agent.interface_deep  # 重要：优化冷启动性能，不要删除
-except ImportError:
-    # Fallback for environments where interface_deep dependencies are not available.
-    # The module will be imported lazily when needed in _run().
-    pass
+# interface_deep 改为懒加载：第一条聊天消息时由 create_adapter() 触发 import，
+# 避免 AgentServer 冷启时加载整个 openjiuwen 框架（~170s 冷/ ~7s 热），
+# 使权限配置 RPC 等非聊天请求无需等待即可秒级响应。
 
 # 确保工作区已初始化（使用跨进程锁保护并发访问）
 ensure_workspace_initialized(component_name="AgentServer")
