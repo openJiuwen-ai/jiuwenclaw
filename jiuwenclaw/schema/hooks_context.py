@@ -157,3 +157,21 @@ class AgentReloadConfigHookContext:
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
+
+
+@dataclass
+class BeforeSkillExecuteHookContext:
+    """技能执行前扩展点的事件上下文。
+
+    下游 handler 接收此对象，可执行任意逻辑（如懒加载依赖文件）。
+    框架不做业务判断；handler 通过文件系统修改或异常表达效果。
+    """
+
+    skill_name: str
+    skill_dir: str
+    session_id: str | None = None
+    extra: dict[str, Any] = field(default_factory=dict)
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)

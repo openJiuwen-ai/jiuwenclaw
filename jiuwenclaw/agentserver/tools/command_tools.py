@@ -164,15 +164,33 @@ def _resolve_execution_plan(command: str, shell_type: str) -> tuple[list[str] | 
     raise RuntimeError(f"Unsupported shell_type: {normalized}")
 
 
+def _build_subprocess_env(extra_env: dict[str, str] | None) -> dict[str, str] | None:
+    """Merge *extra_env* into the runtime subprocess environment.
+
+    Uses ``runtime_subprocess_env()`` as the base so that the runtime venv
+    (VIRTUAL_ENV / PATH / PYTHONPATH) is always included.
+
+    Returns ``None`` when *extra_env* is empty so that ``subprocess`` falls back
+    to inheriting the parent environment (the default behaviour).
+    """
+    if not extra_env:
+        return None
+    merged = runtime_subprocess_env()
+    merged.update(extra_env)
+    return merged
+
+
 def _run_command_sync(
     command: str,
     timeout_seconds: int,
     workdir: Path,
     shell_type: str,
+    *,
+    extra_env: dict[str, str] | None = None,
 ) -> tuple[subprocess.CompletedProcess[str], str]:
     plan, use_shell, resolved_shell = _resolve_execution_plan(command, shell_type)
     # Windows 下 cmd 的输出通常是系统代码页（常见 CP936/GBK），
-    # 这里不要强行按 UTF-8 解码，否则会出现中文乱码（如 .lnk 名称）。
+    # 这里不要按 UTF-8 解码，否则会出现中文乱码（如 .lnk 名称）。
     encoding = locale.getpreferredencoding(False) or "utf-8"
     result = subprocess.run(
         plan,
@@ -183,7 +201,7 @@ def _run_command_sync(
         errors='replace',
         capture_output=True,
         timeout=timeout_seconds,
-        env=runtime_subprocess_env(),
+        env=_build_subprocess_env(extra_env),
     )
     return result, resolved_shell
 
@@ -193,6 +211,8 @@ def _run_command_background(
     workdir: Path,
     shell_type: str,
     grace_seconds: float = 5.0,
+    *,
+    extra_env: dict[str, str] | None = None,
 ) -> tuple[int, str, str | None]:
     """Start command in background. Returns (pid, resolved_shell, error_msg).
     error_msg is None on success.
@@ -206,7 +226,7 @@ def _run_command_background(
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
         text=True,
-        env=runtime_subprocess_env(),
+        env=_build_subprocess_env(extra_env),
     )
     try:
         exit_code = proc.wait(timeout=grace_seconds)
@@ -236,6 +256,7 @@ async def mcp_exec_command(
     max_output_chars: int = 0,
     shell_type: str = "auto",
     background: bool = False,
+    env: dict[str, str] | None = None,
 ) -> str:
     command = (command or "").strip()
     if not command:
@@ -280,6 +301,7 @@ async def mcp_exec_command(
                 command,
                 resolved_workdir,
                 normalized_shell_type,
+                extra_env=env,
             )
         except Exception as exc:
             return f"[ERROR]: command failed to start: {exc}"
@@ -307,6 +329,7 @@ async def mcp_exec_command(
             timeout_seconds,
             resolved_workdir,
             normalized_shell_type,
+            extra_env=env,
         )
     except subprocess.TimeoutExpired:
         return f"[ERROR]: command timed out after {timeout_seconds}s."

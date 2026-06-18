@@ -322,6 +322,18 @@ react:
   #      在 .env 文件中设置：DISABLED_SKILLS=dangerous_skill,deprecated_skill（逗号/分号分隔）
   # disabled_skills: ["dangerous_skill"]
   disabled_skills: ${DISABLED_SKILLS:-}
+  # Skill 认证信息注入：skill_name → env dict
+  # 当指定 skill 处于激活状态时，对应的环境变量会自动注入到 shell 工具（mcp_exec_command / bash）
+  # 的子进程中，skill 脚本可通过 os.getenv() 读取认证信息。
+  # 值支持 ${ENV_VAR:-default} 语法，由框架的 resolve_env_vars 统一解析。
+  # 示例：
+  # skill_envs:
+  #   akg-agents:
+  #     AKG_API_KEY: ${AKG_API_KEY:-}
+  #     AKG_BASE_URL: ${AKG_BASE_URL:-https://api.example.com}
+  #   search-workflow:
+  #     SEARCH_API_KEY: ${SEARCH_API_KEY:-}
+  skill_envs: {}
   # code_agent / research_agent 默认不启用；只有显式配置 enabled: true 才会显示并可被 task_tool 调用
   # browser_agent 保持原行为，仍由浏览器 runtime 开关决定是否默认注册；这里只支持覆盖其参数
   subagents:

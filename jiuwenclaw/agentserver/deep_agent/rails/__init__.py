@@ -8,6 +8,9 @@ from jiuwenclaw.agentserver.deep_agent.rails.avatar_rail import AvatarPromptRail
 from jiuwenclaw.agentserver.deep_agent.rails.response_prompt_rail import ResponsePromptRail
 from jiuwenclaw.agentserver.deep_agent.rails.runtime_prompt_rail import RuntimePromptRail
 from jiuwenclaw.agentserver.deep_agent.rails.skill_compliance_rail import SkillComplianceRail
+from jiuwenclaw.agentserver.deep_agent.rails.skill_credential_injection_rail import (
+    SkillCredentialInjectionRail,
+)
 from jiuwenclaw.agentserver.deep_agent.rails.skill_prompt_rail import SkillProtocolPromptRail
 from jiuwenclaw.agentserver.deep_agent.rails.team_member_skill_toolkit_rail import (
     MemberSkillToolkitRail,
@@ -32,6 +35,7 @@ __all__ = [
     "ResponsePromptRail",
     "RuntimePromptRail",
     "SkillComplianceRail",
+    "SkillCredentialInjectionRail",
     "SkillProtocolPromptRail",
     "MemberSkillToolkitRail",
 ]

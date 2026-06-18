@@ -34,3 +34,4 @@ class AgentServerHookEvents(HookEventBase):
     BEFORE_SYSTEM_PROMPT_BUILD = HookEventBase.get_event("before_system_prompt_build")
     AGENT_RELOAD_CONFIG = HookEventBase.get_event("agent_reload_config")
     ARTIFACT_POST_PROCESS = HookEventBase.get_event("artifact_post_process")
+    BEFORE_SKILL_EXECUTE = HookEventBase.get_event("before_skill_execute")

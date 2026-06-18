@@ -151,6 +151,7 @@ from jiuwenclaw.agentserver.deep_agent.rails import (
     ResponsePromptRail,
     RuntimePromptRail,
     SkillComplianceRail,
+    SkillCredentialInjectionRail,
     SkillProtocolPromptRail,
     TaskExecutionRail,
 )
@@ -1087,6 +1088,7 @@ class JiuWenClawDeepAdapter:
         self._qa_block_assembly_rail: JiuClawQABlockAssemblyRail | None = None
         self._qa_artifact_rail: JiuClawQAArtifactRail | None = None
         self._permission_rail: Any = None
+        self._skill_credential_injection_rail: SkillCredentialInjectionRail | None = None
         self._avatar_rail: Any = None
         self._tool_cards = None
         self._sys_operation = None
@@ -2349,20 +2351,45 @@ class JiuWenClawDeepAdapter:
             )
             return None
 
-    @staticmethod
-    def _build_skill_compliance_rail() -> SkillComplianceRail | None:
+    def _build_skill_compliance_rail(self) -> SkillComplianceRail | None:
         """Build SkillComplianceRail：硬绑 SKILL.md usage lifecycle。"""
         try:
-            rail = SkillComplianceRail()
+            skill_dir_resolver = None
+            if self._skill_rail is not None:
+                skill_dir_resolver = self._skill_rail.get_skills_meta
+            rail = SkillComplianceRail(skill_dir_resolver=skill_dir_resolver)
             logger.info(
                 "[JiuWenClawDeepAdapter] SkillComplianceRail create success "
-                "(skill compliance)",
+                "(skill_dir_resolver=%s)",
+                "wired" if skill_dir_resolver else "none",
                 extra={'user_visible': 'progress'}
             )
             return rail
         except Exception as exc:
             logger.warning(
                 "[JiuWenClawDeepAdapter] SkillComplianceRail create failed: %s", exc,
+                extra={'user_visible': 'progress'}
+            )
+            return None
+
+    @staticmethod
+    def _build_skill_credential_injection_rail(
+        config: dict[str, Any],
+    ) -> SkillCredentialInjectionRail | None:
+        """Build SkillCredentialInjectionRail for per-skill env-var injection."""
+        try:
+            skill_envs = config.get("skill_envs", {})
+            rail = SkillCredentialInjectionRail(skill_envs=skill_envs)
+            logger.info(
+                "[JiuWenClawDeepAdapter] SkillCredentialInjectionRail create success "
+                "(skills=[%s])",
+                ", ".join(skill_envs.keys()) if skill_envs else "",
+                extra={'user_visible': 'progress'}
+            )
+            return rail
+        except Exception as exc:
+            logger.warning(
+                "[JiuWenClawDeepAdapter] SkillCredentialInjectionRail create failed: %s", exc,
                 extra={'user_visible': 'progress'}
             )
             return None
@@ -2544,9 +2571,17 @@ class JiuWenClawDeepAdapter:
             rail_infos.append(
                 _RailBuildInfo("_skill_compliance_rail", self._build_skill_compliance_rail)
             )
+            rail_infos.append(
+                _RailBuildInfo(
+                    "_skill_credential_injection_rail",
+                    self._build_skill_credential_injection_rail,
+                    {"config": config},
+                )
+            )
         else:
             self._skill_protocol_prompt_rail = None
             self._skill_compliance_rail = None
+            self._skill_credential_injection_rail = None
 
         if self._filesystem_rail_enabled_for_profile():
             rail_infos.insert(1, _RailBuildInfo("_filesystem_rail", self._build_filesystem_rail))
@@ -2704,6 +2739,18 @@ class JiuWenClawDeepAdapter:
         if not self._filesystem_rail_enabled_for_profile():
             self._filesystem_rail = None
 
+        # --- SkillCredentialInjectionRail hot-update (before permission rail) ---
+        skill_credential_rail_newly_created = False
+        new_skill_envs = config.get("skill_envs", {})
+        if self._skill_credential_injection_rail is not None:
+            self._skill_credential_injection_rail.update_skill_envs(new_skill_envs)
+            logger.info("[JiuWenClawDeepAdapter] skill_envs hot-updated for SkillCredentialInjectionRail")
+        else:
+            # First-time activation: create the rail (will be added to rails_list below)
+            self._skill_credential_injection_rail = self._build_skill_credential_injection_rail(config)
+            if self._skill_credential_injection_rail is not None:
+                skill_credential_rail_newly_created = True
+
         self._update_permission_rail(config_base)
 
         # ProgressiveToolRail 可通过热重载启停；更新时传新对象，关闭时传旧对象仅用于卸载。
@@ -2751,6 +2798,9 @@ class JiuWenClawDeepAdapter:
         # 如果你要更新rail，就传一个新的对象；如果不要更新，就不传；如果需要仅卸载，就传原来的rail对象。
         if disabled_tools_rail_newly_created and self._disabled_tools_rail is not None:
             rails_list.append(self._disabled_tools_rail)
+        # SkillCredentialInjectionRail: only add when newly created (in-place update otherwise)
+        if skill_credential_rail_newly_created and self._skill_credential_injection_rail is not None:
+            rails_list.append(self._skill_credential_injection_rail)
 
         #  诊断日志：观察 rails_list 包含哪些 Rails
         logger.info(
@@ -3358,6 +3408,15 @@ class JiuWenClawDeepAdapter:
                 logger.info(
                     "[JiuWenClawDeepAdapter] SkillComplianceRail registered for plan mode"
                 )
+        if self._skill_credential_injection_rail is None:
+            self._skill_credential_injection_rail = self._build_skill_credential_injection_rail(
+                self._config_cache
+            )
+            if self._skill_credential_injection_rail is not None:
+                await self._instance.register_rail(self._skill_credential_injection_rail)
+                logger.info(
+                    "[JiuWenClawDeepAdapter] SkillCredentialInjectionRail registered for plan mode"
+                )
         await self._handle_qa_block_rails_for_plan()
 
     async def _handle_qa_block_rails_for_plan(self) -> None:
@@ -3419,6 +3478,7 @@ class JiuWenClawDeepAdapter:
                 ("_subagent_rail", "SubagentRail"),
                 ("_skill_protocol_prompt_rail", "SkillProtocolPromptRail"),
                 ("_skill_compliance_rail", "SkillComplianceRail"),
+                ("_skill_credential_injection_rail", "SkillCredentialInjectionRail"),
         ):
             rail = getattr(self, attr)
             if rail is not None:
