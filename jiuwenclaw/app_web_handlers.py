@@ -2153,8 +2153,11 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             deny_guidance = params.get("deny_guidance_message")
             update_permissions_owner_scopes_in_config(owner_scopes, deny_guidance)
             try:
-                perm_cfg = get_config().get("permissions", {})
-                get_permission_engine().update_config(perm_cfg)
+                from jiuwenclaw.agentserver.permissions.config_loader import (
+                    get_effective_permissions_config,
+                )
+
+                get_permission_engine().update_config(get_effective_permissions_config(force_reload=True))
             except Exception as e:
                 logger.warning("[permissions.owner_scopes.set] Failed to hot reload permission engine: %s", e)
             await channel.send_response(ws, req_id, ok=True, payload={"ok": True})

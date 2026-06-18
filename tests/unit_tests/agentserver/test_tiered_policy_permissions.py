@@ -76,6 +76,21 @@ def _config_dir_with_builtin(base_dir: Path, monkeypatch, rules: list[dict]) -> 
     return cfg_dir
 
 
+def _patch_config_yaml_path(monkeypatch, config_path: Path) -> None:
+    """Route config.yaml read/write (get_config / persist) to a temp file."""
+    config_mod = importlib.import_module("jiuwenclaw.config")
+    utils_mod = importlib.import_module("jiuwenclaw.utils")
+    loader_mod = importlib.import_module("jiuwenclaw.agentserver.permissions.config_loader")
+
+    def _config_file() -> Path:
+        return config_path
+
+    monkeypatch.setattr(config_mod, "_CONFIG_YAML_PATH", config_path)
+    monkeypatch.setattr(config_mod, "get_config_file", _config_file)
+    monkeypatch.setattr(utils_mod, "get_config_file", _config_file)
+    loader_mod.clear_permissions_config_cache()
+
+
 def test_tools_allow_short_circuits_builtin_deny(monkeypatch):
     _config_dir_with_builtin(
         _tmp_dir("builtin-allow-short"),
@@ -442,8 +457,7 @@ def test_persist_shell_allow_rule_writes_minimal_approval_override(monkeypatch):
         yaml.safe_dump({"permissions": {"enabled": True, "tools": {"bash": "ask"}, "rules": []}}, allow_unicode=True),
         encoding="utf-8",
     )
-    config_mod = importlib.import_module("jiuwenclaw.config")
-    monkeypatch.setattr(config_mod, "_CONFIG_YAML_PATH", config_path)
+    _patch_config_yaml_path(monkeypatch, config_path)
     _config_dir_with_builtin(base_dir, monkeypatch, [])
     set_permission_engine(PermissionEngine({"enabled": True, "tools": {"bash": "ask"}}))
 
@@ -478,8 +492,7 @@ def test_persist_shell_allow_rule_fallback_uses_ask_subcommands(monkeypatch):
         }, allow_unicode=True),
         encoding="utf-8",
     )
-    config_mod = importlib.import_module("jiuwenclaw.config")
-    monkeypatch.setattr(config_mod, "_CONFIG_YAML_PATH", config_path)
+    _patch_config_yaml_path(monkeypatch, config_path)
     _config_dir_with_builtin(base_dir, monkeypatch, [])
     set_permission_engine(PermissionEngine({"enabled": True, "tools": {"bash": "ask"}}))
 
@@ -497,8 +510,7 @@ def test_persist_shell_allow_rule_prefers_preview_patterns(monkeypatch):
         yaml.safe_dump({"permissions": {"enabled": True, "tools": {"bash": "ask"}, "rules": []}}, allow_unicode=True),
         encoding="utf-8",
     )
-    config_mod = importlib.import_module("jiuwenclaw.config")
-    monkeypatch.setattr(config_mod, "_CONFIG_YAML_PATH", config_path)
+    _patch_config_yaml_path(monkeypatch, config_path)
     _config_dir_with_builtin(base_dir, monkeypatch, [])
     set_permission_engine(PermissionEngine({"enabled": True, "tools": {"bash": "ask"}}))
 
@@ -538,8 +550,7 @@ def test_persist_shell_allow_rule_expands_preseeded_approval_overrides(monkeypat
 """,
         encoding="utf-8",
     )
-    config_mod = importlib.import_module("jiuwenclaw.config")
-    monkeypatch.setattr(config_mod, "_CONFIG_YAML_PATH", config_path)
+    _patch_config_yaml_path(monkeypatch, config_path)
     _config_dir_with_builtin(base_dir, monkeypatch, [])
     set_permission_engine(PermissionEngine({"enabled": True, "tools": {"bash": "ask"}}))
 
@@ -566,8 +577,7 @@ def test_persist_shell_allow_rule_uses_short_stable_id_for_long_exact_pattern(mo
         ),
         encoding="utf-8",
     )
-    config_mod = importlib.import_module("jiuwenclaw.config")
-    monkeypatch.setattr(config_mod, "_CONFIG_YAML_PATH", config_path)
+    _patch_config_yaml_path(monkeypatch, config_path)
     _config_dir_with_builtin(base_dir, monkeypatch, [])
     set_permission_engine(PermissionEngine({"enabled": True, "tools": {"bash": "ask"}}))
 
@@ -596,8 +606,7 @@ def test_persist_non_shell_allow_rule_updates_whole_tool(monkeypatch):
         yaml.safe_dump({"permissions": {"enabled": True, "tools": {"Write": "ask"}}}, allow_unicode=True),
         encoding="utf-8",
     )
-    config_mod = importlib.import_module("jiuwenclaw.config")
-    monkeypatch.setattr(config_mod, "_CONFIG_YAML_PATH", config_path)
+    _patch_config_yaml_path(monkeypatch, config_path)
     _config_dir_with_builtin(base_dir, monkeypatch, [])
     set_permission_engine(PermissionEngine({"enabled": True, "tools": {"Write": "ask"}}))
 

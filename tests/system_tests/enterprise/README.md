@@ -42,6 +42,8 @@ enterprise/
 ├── test_gateway_runtime_e2e.py    # Gateway + AgentServer 运行时 E2E
 ├── test_logging_config_process_e2e.py  # logging_config 真实进程 E2E（Manager + Gateway + AgentServer）
 ├── test_logging_config.md  # 上述用例五阶段调用链文档
+├── test_permissions_config_process_e2e.py  # permissions_config 真实进程 E2E（Manager + Gateway + AgentServer）
+├── test_permissions_config.md  # 上述用例五阶段调用链文档
 ├── e2e_helpers.py                 # 进程 E2E 公共 helper
 ├── mock_llm_server.py             # 本地 Mock LLM（OpenAI SSE 流式）
 ├── agentserver_launcher.py        # AgentServer 启动入口（注入测试 stub 依赖）

@@ -2213,7 +2213,9 @@ class JiuWenClawDeepAdapter:
 
     def _update_permission_rail(self, config_base: dict[str, Any] | None) -> None:
         """原地更新已有 PermissionRail 配置，或在首次启用时新建。"""
-        permission_config = config_base.get("permissions", {}) if config_base else {}
+        from jiuwenclaw.agentserver.permissions.config_loader import get_effective_permissions_config
+
+        permission_config = get_effective_permissions_config()
         model_name = (config_base or {}).get("models", {}).get(
             "default", {}).get("model_client_config", {}).get("model_name", "gpt-4")
         if self._permission_rail is not None:
@@ -2410,7 +2412,7 @@ class JiuWenClawDeepAdapter:
                 )
 
         # 小艺手机端工具：由 channels.xiaoyi.phone_tools_enabled 控制
-        config_base = get_config()
+        config_base = get_config() or {}
         xiaoyi_phone_tools_enabled = (
             config_base.get("channels", {}).get("xiaoyi", {}).get("phone_tools_enabled", False)
         )
@@ -2698,7 +2700,9 @@ class JiuWenClawDeepAdapter:
         tool_cards = await self._get_tool_cards(agent_card.id, mode=mode)
         self._tool_cards = tool_cards
 
-        permissions_cfg = config_base.get("permissions", {})
+        from jiuwenclaw.agentserver.permissions.config_loader import get_effective_permissions_config
+
+        permissions_cfg = get_effective_permissions_config()
         init_permission_engine(permissions_cfg)
         logger.info(
             "[JiuWenClawDeepAdapter] Permission engine initialized: enabled=%s",

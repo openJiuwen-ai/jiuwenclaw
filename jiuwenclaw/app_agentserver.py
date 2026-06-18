@@ -157,6 +157,16 @@ async def _run(host: str, port: int) -> None:
         except Exception:  # noqa: BLE001
             logger.warning("[AgentServer] logging_config cold load skipped", exc_info=True)
 
+        try:
+            from jiuwenclaw.agentserver.permissions.config_loader import (
+                reload_permissions_from_gateway_db,
+            )
+
+            await reload_permissions_from_gateway_db()
+            logger.info("[AgentServer] permissions config loaded from Gateway DB (if any)")
+        except Exception:  # noqa: BLE001
+            logger.warning("[AgentServer] permissions_config cold load skipped", exc_info=True)
+
     # ---------- Telemetry 初始化 ----------
     init_telemetry()
 

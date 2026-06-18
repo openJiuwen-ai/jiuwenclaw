@@ -39,6 +39,13 @@ JiuwenClaw 细粒度权限管控系统（Phase-1）。
             print(op.action, op.path, op.source)
 """
 
+from jiuwenclaw.agentserver.permissions.config_loader import (
+    apply_permissions_config_payload,
+    clear_permissions_config_cache,
+    get_effective_permissions_config,
+    is_enterprise_runtime,
+    reload_permissions_from_gateway_db,
+)
 from jiuwenclaw.agentserver.permissions.core import (
     PermissionEngine,
     get_permission_engine,
@@ -92,6 +99,12 @@ __all__ = [
     "PermissionLevel",
     "PermissionResult",
     "SubcommandPermissionResult",
+    # Config loader (enterprise GDB + YAML fallback)
+    "apply_permissions_config_payload",
+    "clear_permissions_config_cache",
+    "get_effective_permissions_config",
+    "is_enterprise_runtime",
+    "reload_permissions_from_gateway_db",
     # Core
     "PermissionEngine",
     "init_permission_engine",

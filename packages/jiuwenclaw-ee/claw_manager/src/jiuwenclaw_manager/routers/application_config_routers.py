@@ -22,6 +22,7 @@ from jiuwenclaw_manager.schemas.application_config_schemas import (
 )
 
 from jiuwenclaw_manager.core.application_config.logging_config import LoggingConfigService
+from jiuwenclaw_manager.core.application_config.permissions_config import PermissionsConfigService
 
 from jiuwenclaw_manager.infrastructure.db import get_db_handler
 from jiuwenclaw_manager.schemas.common_schemas import ResponseModel
@@ -47,6 +48,10 @@ def _log_masking_rule_svc(handler: DBHandler) -> LogMaskingRuleService:
 
 def _logging_config_svc(handler: DBHandler) -> LoggingConfigService:
     return LoggingConfigService(handler)
+
+
+def _permissions_config_svc(handler: DBHandler) -> PermissionsConfigService:
+    return PermissionsConfigService(handler)
 
 
 class ChannelRegisterRequest(BaseModel):
@@ -456,3 +461,55 @@ async def delete_task_memory(
             raise HTTPException(status_code=404, detail=str(exc)) from exc
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return ResponseModel(code=200, message="success")
+
+
+class PermissionsConfigUpsertRequest(BaseModel):
+    body: dict = Field(..., description="完整 permissions 段，结构与 config.yaml::permissions 一致")
+
+
+@application_config_router.put(
+    "/{jiuwenclaw_id}/permissions", response_model=ResponseModel
+)
+async def upsert_permissions_config(
+    jiuwenclaw_id: str,
+    body: PermissionsConfigUpsertRequest,
+    handler: Annotated[DBHandler, Depends(get_db_handler)],
+):
+    svc = _permissions_config_svc(handler)
+    try:
+        data = await svc.upsert(jiuwenclaw_id=jiuwenclaw_id, body=body.body)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return ResponseModel(code=200, message="success", data=data)
+
+
+@application_config_router.get(
+    "/{jiuwenclaw_id}/permissions", response_model=ResponseModel
+)
+async def get_permissions_config(
+    jiuwenclaw_id: str,
+    handler: Annotated[DBHandler, Depends(get_db_handler)],
+):
+    svc = _permissions_config_svc(handler)
+    data = await svc.get(jiuwenclaw_id=jiuwenclaw_id)
+    if data is None:
+        raise HTTPException(status_code=404, detail="permissions config not found")
+    return ResponseModel(code=200, message="success", data=data)
+
+
+@application_config_router.delete(
+    "/{jiuwenclaw_id}/permissions", response_model=ResponseModel
+)
+async def delete_permissions_config(
+    jiuwenclaw_id: str,
+    handler: Annotated[DBHandler, Depends(get_db_handler)],
+):
+    svc = _permissions_config_svc(handler)
+    try:
+        await svc.delete(jiuwenclaw_id=jiuwenclaw_id)
+    except ValueError as exc:
+        if "not found" in str(exc):
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return ResponseModel(code=200, message="success")
+

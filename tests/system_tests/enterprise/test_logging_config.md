@@ -302,6 +302,7 @@ python -c "import structlog; import jiuwenclaw_manager"
 |------|------|------|
 | `ModuleNotFoundError: No module named 'structlog'` | 未安装 claw_manager 依赖 | 执行上方 `pip install -e packages/jiuwenclaw-ee/claw_manager` |
 | `Timed out waiting for HTTP .../api/health` | Manager 进程未监听（多为 import 崩溃） | 先看 `manager.log` 堆栈 |
+| `error: unable to create file ... Filename too long` / `git submodule update --init --recursive -q did not run successfully` | Windows 默认路径长度限制 260 字符，`agent-runtime` 子模块 `agent-studio` 中有文件路径超限 | 执行 `git config --global core.longpaths true` 后重新 `pip install -e packages/jiuwenclaw-ee/claw_manager` |
 
 Claw Manager 依赖声明见：`packages/jiuwenclaw-ee/claw_manager/pyproject.toml`（含 `structlog>=24.0`、`fastapi`、`uvicorn` 等）。
 

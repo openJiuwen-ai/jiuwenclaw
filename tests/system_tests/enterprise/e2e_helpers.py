@@ -423,6 +423,10 @@ def manager_logging_api_url(manager_rest_port: int, jiuwenclaw_id: str) -> str:
     return f"http://127.0.0.1:{manager_rest_port}/api/v1/instances/{jiuwenclaw_id}/logging"
 
 
+def manager_permissions_api_url(manager_rest_port: int, jiuwenclaw_id: str) -> str:
+    return f"http://127.0.0.1:{manager_rest_port}/api/v1/instances/{jiuwenclaw_id}/permissions"
+
+
 async def read_gdb_logging_row(db_path: Path, jiuwenclaw_id: str):
     import warnings
 
@@ -439,6 +443,25 @@ async def read_gdb_logging_row(db_path: Path, jiuwenclaw_id: str):
             warnings.simplefilter("ignore", category=sqlalchemy.exc.SAWarning)
             await handler.init_table(models.LOGGING_CONFIG_TABLE_DEF)
         return await handler.get("logging_config", {"jiuwenclaw_id": jiuwenclaw_id})
+    finally:
+        await handler.disconnect()
+
+
+async def read_gdb_permissions_row(db_path: Path, jiuwenclaw_id: str):
+    import warnings
+
+    import sqlalchemy.exc
+    from jiuwenclaw.infrastructure.module_importer import import_manager_ws_client_module
+
+    models = import_manager_ws_client_module("models.application_config_models")
+    handler = SQLiteHandler(str(db_path))
+    await handler.init_database()
+    await handler.connect()
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", category=sqlalchemy.exc.SAWarning)
+            await handler.init_table(models.PERMISSIONS_CONFIG_TABLE_DEF)
+        return await handler.get("permissions_config", {"jiuwenclaw_id": jiuwenclaw_id})
     finally:
         await handler.disconnect()
 

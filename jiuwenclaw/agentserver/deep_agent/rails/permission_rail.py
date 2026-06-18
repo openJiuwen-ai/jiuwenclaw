@@ -794,7 +794,9 @@ class PermissionInterruptRail(ConfirmInterruptRail):
             # 与磁盘上的 permissions 对齐：persist_cli_trusted_directory 等只更新了全局
             # PermissionEngine；若此处仍用旧的 _static_config 覆盖引擎，会抹掉刚写入的
             # approval_overrides / external_directory。
-            perm = get_config().get("permissions")
+            from jiuwenclaw.agentserver.permissions.config_loader import get_effective_permissions_config
+
+            perm = get_effective_permissions_config()
             if isinstance(perm, dict):
                 self.update_config(perm)
             elif self._engine is get_permission_engine():
