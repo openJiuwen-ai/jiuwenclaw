@@ -92,7 +92,7 @@ Skill Compass requires Node.js. Before running the evaluation, verify that a usa
 12. Identify the weakest dimension. On ties, use priority:
     `security > compliance > functional > trigger > structure > comparative`.
 13. Generate at most 5 improvement suggestions for dimensions scoring below 8. Suggestions belong only in `static_report.md`; do not save them in `static_report.json`.
-14. Before saving JSON or Markdown, recompute every contribution, `sum_contributions`, and `overall_score` from the final D1-D6 scores using the exact formula in step 10. If any drafted contribution, total, or `overall_score` differs from the recomputed value, replace it and use the recomputed value for verdict rules and both reports. Do not save inconsistent scores.
+14. Before saving JSON or Markdown, recompute every contribution, `sum_contributions`, and `overall_score` from the final D1-D6 scores using the exact formula in step 10. If any drafted contribution, total, or `overall_score` differs from the recomputed value, replace it and use the recomputed value for verdict rules and both reports. Do not save inconsistent scores. Before saving `static_report.md`, verify that both `{Impact summary}` and every `{suggestion text}` entry use the same language as the latest user request; if either does not, discard and regenerate those placeholder values before writing the file.
 15. Save both outputs:
     - JSON: `<workspace>/evals/static/static_report.json`
     - Markdown summary: `<workspace>/evals/static/static_report.md`
@@ -178,13 +178,15 @@ The Markdown output may contain only these headings:
 - `### Weakest: {Dimension Name} ({score}/10)`
 - `### Improvement Suggestions`
 
+Mandatory language rule for placeholders: `{Impact summary}` and each `{suggestion text}` must match the language of the current user request. Use Chinese for Chinese requests and English for English requests. This applies to every explanatory sentence, quoted phrase, replacement wording, example trigger description, and proposed `description` snippet inside those placeholders.
+
 ## Rules
 
 1. Do not modify the target skill.
 2. Do not ask interactive follow-up questions during evaluation.
 3. Evaluate only one skill per run. If multiple are provided, evaluate the first and note that only one was evaluated.
 4. Always write the report files under `<workspace>/evals/static/`, creating the directory if needed.
-5. Keep JSON field names in English. Translate only the human-readable summary if the user is using Chinese.
+5. Keep JSON field names and fixed Markdown template labels/headings in English. Free-text Markdown content, especially `{Impact summary}` and every `{suggestion text}`, must match the current user request language.
 6. Score consistency is mandatory in every output. If any D1-D6 score changes after drafting, immediately recompute the weighted breakdown contributions, weighted total, `overall_score`, and verdict before presenting the result.
 7. Static reports are snapshot reports, not comparison reports. Even after optimization, regenerate JSON and Markdown from the original schema/template and do not include improvement amounts or before/after commentary.
 8. If a drafted Markdown report does not match the template above, discard it and regenerate `static_report.md` before saving.

@@ -6,8 +6,8 @@ The evaluation flow:
 
 1. Clarify the evaluation scope if the requested target, baseline, or success criteria are ambiguous.
 2. Visibly propose test cases and expectations.
-3. Ask for approval with `ask_user_question` and wait for the user's response.
-4. Run each approved case with the skill and with a baseline.
+3. First show the proposed cases visibly to the user; only then save the proposed cases directly to `<workspace>/evals/evals.json`.
+4. Run each proposed case with the skill and with a baseline.
 5. Grade all runs with the `grader` subagent.
 6. Aggregate results with `scripts.aggregate_benchmark`.
 7. Present the full benchmark results.
@@ -15,8 +15,7 @@ The evaluation flow:
 
 Hard checkpoints:
 
-- Do not hide generated eval cases in thinking or tool-only output. The user must see and approve them before any eval run starts.
-- Do not treat a visible text question as approval. Use `ask_user_question` for test-case approval, and do not continue until the user answers it.
+- Do not hide generated eval cases in thinking or tool-only output. The user must see them before any eval run starts.
 - Do not proceed with missing executor artifacts.
 - Do not present results until every run has `grading.json` and the iteration has `benchmark.md`.
 - Do not fabricate scores, transcripts, metrics, or benchmark output.
@@ -25,16 +24,7 @@ Hard checkpoints:
 
 ## 1. Propose Test Cases
 
-Generate 2-3 realistic test prompts, each with objectively verifiable expectations, and show them in the visible assistant message. Present prompts and expectations together:
-
-> "Here are a few test cases and the expectations I'll grade them on. Do these look right?"
-
-Immediately after showing the cases, call `ask_user_question` with exactly two options:
-
-1. **Approve and run** - save these cases and start the evaluation runs.
-2. **Revise cases** - collect feedback, rewrite the cases visibly, then ask again with `ask_user_question`.
-
-Only after approval, save the approved cases to `<workspace>/evals/evals.json` using the schema in `references/schemas.md`.
+Generate 2-3 realistic test prompts, each with objectively verifiable expectations, and show them in the visible assistant message. Present prompts and expectations together. Save the cases immediately to `<workspace>/evals/evals.json` using the schema in `references/schemas.md`.
 
 Test types worth covering:
 
@@ -47,7 +37,7 @@ Test types worth covering:
 
 ## 2. Run The Evals
 
-Every approved test case needs **both** a with-skill run and a baseline:
+Every proposed test case needs **both** a with-skill run and a baseline:
 
 - **New skill:** compare with-skill against no-skill.
 - **Improving a skill:** snapshot the old skill first and compare new skill against the old-skill snapshot. Do not run a no-skill baseline for improvement work.
@@ -91,7 +81,7 @@ The same rule applies to any subagent you spawn outside the eval flow.
 
 Process each test case in parallel.
 
-Write `eval_metadata.json` to `<workspace>/evals/iteration-<N>/eval-<N>/eval_metadata.json`. Copy the expectations the user already approved; do not re-draft.
+Write `eval_metadata.json` to `<workspace>/evals/iteration-<N>/eval-<N>/eval_metadata.json`. Copy the expectations from `<workspace>/evals/evals.json`; do not re-draft.
 
 ```json
 {

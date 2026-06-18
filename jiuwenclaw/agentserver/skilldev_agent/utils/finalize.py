@@ -160,11 +160,20 @@ def get_review_benchmark(
     if bm_json.is_file():
         benchmark = json.loads(bm_json.read_text(encoding="utf-8"))
         try:
-            benchmark["run_summary"]["with_skill"]["pass_rate"]["mean"]
-            benchmark["run_summary"]["without_skill"]["pass_rate"]["mean"]
-            benchmark["run_summary"]["delta"]["pass_rate"]
+            run_summary = benchmark["run_summary"]
+            with_pass_rate = run_summary["with_skill"]["pass_rate"]
+            without_pass_rate = run_summary["without_skill"]["pass_rate"]
+            delta = run_summary["delta"]
+
+            with_mean = with_pass_rate["mean"]
+            without_mean = without_pass_rate["mean"]
+            delta_pass_rate = delta["pass_rate"]
+            if with_mean > 1 or without_mean > 1:
+                with_pass_rate["mean"] = with_mean / 100
+                without_pass_rate["mean"] = without_mean / 100
+                delta["pass_rate"] = f"{float(delta_pass_rate) / 100:+g}"
             has_required_summary = True
-        except (KeyError, TypeError):
+        except (KeyError, TypeError, ValueError):
             has_required_summary = False
         if not has_required_summary or benchmark.get("reviewed"):
             return None, None, -1
