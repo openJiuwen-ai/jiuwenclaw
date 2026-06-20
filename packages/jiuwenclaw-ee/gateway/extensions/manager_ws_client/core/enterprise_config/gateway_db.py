@@ -106,6 +106,14 @@ class GatewayDb(Database):
         order_by: str | list[tuple[str, bool]] = "",
     ) -> list[dict[str, Any]]:
         """列表查询；策略/映射表自动按构造时的 ``jiuwenclaw_id`` 隔离。"""
+        # 如果未绑定 jiuwenclaw_id，对于需要隔离的表直接返回空列表
+        if table in _INSTANCE_SCOPED_TABLES and not self._jiuwenclaw_id:
+            logger.warning(
+                "[enterprise_config] list_records skipped: jiuwenclaw_id not bound for table=%s",
+                table,
+            )
+            return []
+        
         query = self.apply_instance_scope(table, dict(filters or {}))
 
         try:
