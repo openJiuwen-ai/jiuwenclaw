@@ -34,6 +34,11 @@ __all__ = [
     "get_evolve_config",
     "proposal_generators",
     "trace_samplers",
+    # PDA algorithm (pluggable, no overlap with existing)
+    "PdaProposer",
+    "PdaDecisionPolicy",
+    "ExperienceGovernor",
+    "DiagnosisAgent",
 ]
 
 # Cached merged config, loaded once per process.

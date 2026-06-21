@@ -48,3 +48,30 @@ evolve:
   # 演进专用 LLM
   llm:
     model_name: "gpt-4"             # 如不配置，回退到 agents.default_model
+
+  # PDA-style AHE 算法配置 (pluggable, added in Phase 1)
+  pda:
+    proposer:
+      max_proposals_per_batch: 3
+      max_skill_proposals: 2
+      max_per_skill_per_batch: 1
+    decision:
+      llm_decision_enabled: true
+      rule_gate_strict: true
+    governor:
+      max_per_skill: 10
+      deprecate_threshold_days: 30
+
+  # DiagnosisAgent 配置
+  diagnosis:
+    max_iterations: 20
+    temperature: 0.4
+    max_tokens: 20000
+    max_context_tokens: 200000
+    context:
+      compact_threshold: 0.75
+      keep_iterations: 3
+    tool_output:
+      max_chars: 10000
+      head_lines: 50
+      tail_lines: 30

@@ -20,8 +20,13 @@ from pathlib import Path
 logger = logging.getLogger(__name__)
 
 
-def _build_pipeline_from_config(config: dict) -> object:
-    """Build an EvolutionPipeline from config."""
+def _build_pipeline_from_config(config: dict, use_pda: bool = False) -> object:
+    """Build an EvolutionPipeline from config.
+
+    Args:
+        config: Main jiuwenswarm config dict.
+        use_pda: If True, use PDA-style AHE algorithm instead of default generators.
+    """
     from jiuwenswarm.evolve.pipeline import EvolutionPipeline
     from jiuwenswarm.evolve.proposal_generators.llm_proposer import LLMProposer
     from jiuwenswarm.evolve.decision_policies.rule_policy import RulePolicy
@@ -62,14 +67,7 @@ def _build_pipeline_from_config(config: dict) -> object:
         elif name == "rule_proposer":
             logger.info("rule_proposer is disabled, skipping")
 
-    # Build policies from config, or use defaults
-    policy_names = pipeline_cfg.get("decision_policies", ["rule_policy", "eval_policy"])
-    policies: list = []
-    for name in policy_names:
-        if name in decision_policies:
-            policies.append(decision_policies.get(name)())
-
-    # Build writers
+    # Build writers (used by both default and PDA paths)
     writer_names = pipeline_cfg.get(
         "apply_writers", ["skill_writer", "memory_writer", "training_writer"]
     )
@@ -87,6 +85,39 @@ def _build_pipeline_from_config(config: dict) -> object:
     max_proposals = limits.get("max_proposals_per_batch", 3)
     max_behavior = limits.get("max_behavior_proposals", 2)
 
+    # If --pda flag is set, use PDA algorithm instead of configured generators
+    if use_pda:
+        from jiuwenswarm.evolve.pda.proposer import PdaProposer
+
+        pda_proposer = PdaProposer(
+            trace_reader=trace_reader,
+            store=store,
+            skills_dir=str(Path(getattr(store, '_skills_dir', "skills"))),
+            traces_db_path=pipeline_cfg.get("traces_db_path", "traces.db"),
+        )
+        generators = [pda_proposer]
+        logger.info("Using PDA algorithm: PdaProposer")
+        # Use PDA decision policy when --pda is active
+        from jiuwenswarm.evolve.pda.decision_policy import PdaDecisionPolicy
+
+        policies = [PdaDecisionPolicy(governor=None, model=None)]
+        logger.info("Using PDA decision policy: PdaDecisionPolicy")
+        return EvolutionPipeline(
+            generators=generators,
+            policies=policies,
+            writers=writers,
+            store=store,
+            max_proposals=limits.get("max_proposals_per_batch", 3),
+            max_behavior_proposals=limits.get("max_behavior_proposals", 2),
+        )
+
+    # Build policies from config, or use defaults
+    policy_names = pipeline_cfg.get("decision_policies", ["rule_policy", "eval_policy"])
+    policies: list = []
+    for name in policy_names:
+        if name in decision_policies:
+            policies.append(decision_policies.get(name)())
+
     return EvolutionPipeline(
         generators=generators,
         policies=policies,
@@ -103,7 +134,7 @@ def _run_command(args: argparse.Namespace) -> int:
     from jiuwenswarm.evolve.models import TraceBatch
 
     config = get_config()
-    pipeline = _build_pipeline_from_config(config)
+    pipeline = _build_pipeline_from_config(config, use_pda=args.pda)
     trace_reader = pipeline._store._sqlite  # type: ignore[union-attr]
 
     # Build TraceBatch from CLI args
@@ -240,6 +271,10 @@ def main() -> None:
     run_parser.add_argument(
         "--benchmark-run-id", type=str, metavar="ID",
         help="Process traces from a benchmark run",
+    )
+    run_parser.add_argument(
+        "--pda", action="store_true",
+        help="Use PDA-style AHE algorithm instead of default proposal generators",
     )
 
     # list
