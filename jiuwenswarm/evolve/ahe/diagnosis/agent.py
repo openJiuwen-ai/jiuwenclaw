@@ -17,16 +17,16 @@ import logging
 import re
 from typing import Any
 
-from jiuwenswarm.evolve.diagnosis.models import (
+from jiuwenswarm.evolve.ahe.diagnosis.models import (
     DiagnosisIssue,
     DiagnosisResult,
     ALLOWED_ISSUE_TYPES,
 )
-from jiuwenswarm.evolve.diagnosis.prompts import (
+from jiuwenswarm.evolve.ahe.diagnosis.prompts import (
     DIAGNOSIS_SYSTEM_PROMPT,
     TOOL_DESCRIPTIONS,
 )
-from jiuwenswarm.evolve.diagnosis.tools import DiagnosisToolExecutor
+from jiuwenswarm.evolve.ahe.diagnosis.tools import DiagnosisToolExecutor
 
 logger = logging.getLogger(__name__)
 

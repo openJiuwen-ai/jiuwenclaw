@@ -602,54 +602,5 @@ class ExperienceOperation(BaseModel):
         return self
 
 
-class GovernanceContext(BaseModel):
-    """Current experience governance state for a skill.
-
-    Provided by ExperienceGovernor before Propose; used by PdaDecisionPolicy
-    for validation. Pluggable — only PDA algorithm consumes this.
-    """
-
-    model_config = ConfigDict(extra="forbid")
-
-    skill_name: str
-    current_count: int
-    max_count: int = 10
-    can_add: bool
-    existing_experiences: list[dict[str, Any]] = Field(default_factory=list)
-    similar_experiences: list[dict[str, Any]] = Field(default_factory=list)
-    replaceable_experiences: list[dict[str, Any]] = Field(default_factory=list)
-    protected_experiences: list[str] = Field(default_factory=list)
-    allowed_operations: list[ExperienceOperationType] = Field(default_factory=list)
-
-
-class TraceOutcome(BaseModel):
-    """Task completion evaluation result for a single trace.
-
-    Produced by TraceOutcomeEvaluator (PDA algorithm). Other algorithms
-    (LLMProposer) do not use this — they directly read spans.
-    """
-
-    model_config = ConfigDict(extra="forbid")
-
-    trace_id: str
-    task_name: str | None = None
-    outcome: str
-    """Must be "pass", "fail", or "uncertain"."""
-
-    score: float = Field(ge=0.0, le=1.0)
-    confidence: float = Field(ge=0.0, le=1.0, default=0.0)
-    judgment_method: str = ""
-    """How this outcome was determined: "span_error" | "heuristic" | "llm_evaluator"."""
-    reason: str = ""
-    key_evidence: str = ""
-    missing_requirements: list[str] = Field(default_factory=list)
-    needs_external_verification: bool = False
-
-    @model_validator(mode="after")
-    def _validate_outcome(self) -> "TraceOutcome":
-        valid = {"pass", "fail", "uncertain"}
-        if self.outcome not in valid:
-            raise ValueError(
-                f"outcome must be one of {sorted(valid)}, got '{self.outcome}'"
-            )
-        return self
+# NOTE: GovernanceContext and TraceOutcome have been moved to
+# jiuwenswarm/evolve/ahe/models.py — they are AHE algorithm internals.

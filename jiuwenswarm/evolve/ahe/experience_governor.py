@@ -23,8 +23,8 @@ from typing import Any
 from jiuwenswarm.evolve.models import (
     ExperienceOperationType,
     ExperienceOperation,
-    GovernanceContext,
 )
+from jiuwenswarm.evolve.ahe.models import GovernanceContext
 
 logger = logging.getLogger(__name__)
 

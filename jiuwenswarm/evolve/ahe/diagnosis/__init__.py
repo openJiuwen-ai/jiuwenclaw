@@ -5,7 +5,7 @@ Pluggable: PDA algorithm owns this module. No dependency on existing
 LLMProposer, RulePolicy, or EvalPolicy.
 """
 
-from jiuwenswarm.evolve.diagnosis.agent import DiagnosisAgent
-from jiuwenswarm.evolve.diagnosis.models import DiagnosisResult, DiagnosisIssue
+from jiuwenswarm.evolve.ahe.diagnosis.agent import DiagnosisAgent
+from jiuwenswarm.evolve.ahe.diagnosis.models import DiagnosisResult, DiagnosisIssue
 
 __all__ = ["DiagnosisAgent", "DiagnosisResult", "DiagnosisIssue"]

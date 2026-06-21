@@ -100,7 +100,7 @@ assert len(parsed2.get('proposals', [])) == 1
 print('PASS: AheProposer JSON parsing')
 
 # AheProposer summaries
-from jiuwenswarm.evolve.models import TraceOutcome
+from jiuwenswarm.evolve.ahe.models import TraceOutcome
 failed = [
     ({"trace_id": "abc123", "input": {"message": "help"}, "output": {"content": "ok"}},
      TraceOutcome(trace_id="abc123", outcome="fail", score=0.1, reason="incomplete")),
@@ -110,7 +110,7 @@ assert summaries[0]["trace_id"] == "abc123"
 assert summaries[0]["outcome"] == "fail"
 print('PASS: trace summary building')
 
-from jiuwenswarm.evolve.diagnosis.models import DiagnosisResult, DiagnosisIssue
+from jiuwenswarm.evolve.ahe.diagnosis.models import DiagnosisResult, DiagnosisIssue
 diag = DiagnosisResult(mode="diagnose", issues=[
     DiagnosisIssue(issue_type="工具错误", summary="bash error", evidence="s7",
                    trace_id="abc123", span_index=7, root_cause="Missing path",

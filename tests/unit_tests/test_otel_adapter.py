@@ -3,7 +3,7 @@
 
 import pytest
 
-from jiuwenswarm.evolve.otel_adapter import (
+from jiuwenswarm.evolve.ahe.otel_adapter import (
     OtelTraceAdapter,
     _ns_to_iso,
     _ns_to_ms,

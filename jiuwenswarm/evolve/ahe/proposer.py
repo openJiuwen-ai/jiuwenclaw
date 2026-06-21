@@ -18,16 +18,16 @@ from jiuwenswarm.evolve.models import (
     ProposalTargetType,
     EvidenceRef,
     TraceBatch,
-    TraceOutcome,
     ExperienceOperationType,
     ExperienceOperation,
 )
+from jiuwenswarm.evolve.ahe.models import TraceOutcome
 from jiuwenswarm.evolve.proposal_generators.base import ProposalGenerator
 from jiuwenswarm.evolve.registry import proposal_generators
-from jiuwenswarm.evolve.otel_adapter import OtelTraceAdapter
+from jiuwenswarm.evolve.ahe.otel_adapter import OtelTraceAdapter
 from jiuwenswarm.evolve.ahe.evaluator import TraceOutcomeEvaluator, TaskNameInferrer
 from jiuwenswarm.evolve.ahe.experience_governor import ExperienceGovernor
-from jiuwenswarm.evolve.diagnosis.agent import DiagnosisAgent
+from jiuwenswarm.evolve.ahe.diagnosis.agent import DiagnosisAgent
 from jiuwenswarm.evolve.ahe.proposer_prompts import AHE_PROPOSER_SYSTEM_PROMPT
 
 logger = logging.getLogger(__name__)

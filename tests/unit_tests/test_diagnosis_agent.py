@@ -4,8 +4,8 @@
 import pytest
 import json
 
-from jiuwenswarm.evolve.diagnosis.models import DiagnosisIssue, DiagnosisResult, ALLOWED_ISSUE_TYPES
-from jiuwenswarm.evolve.diagnosis.tools import DiagnosisToolExecutor, _truncate_tool_output
+from jiuwenswarm.evolve.ahe.diagnosis.models import DiagnosisIssue, DiagnosisResult, ALLOWED_ISSUE_TYPES
+from jiuwenswarm.evolve.ahe.diagnosis.tools import DiagnosisToolExecutor, _truncate_tool_output
 
 
 class TestDiagnosisIssue:
@@ -183,20 +183,20 @@ class TestToolCallParsing:
     """Test DiagnosisAgent._parse_tool_calls static method."""
 
     def test_json_tool_call(self):
-        from jiuwenswarm.evolve.diagnosis.agent import DiagnosisAgent
+        from jiuwenswarm.evolve.ahe.diagnosis.agent import DiagnosisAgent
         content = '{"tool_name": "read_spans", "arguments": {"trace_id": "abc123"}}'
         result = DiagnosisAgent._parse_tool_calls(content)
         assert len(result) == 1
         assert result[0]["name"] == "read_spans"
 
     def test_no_tool_call(self):
-        from jiuwenswarm.evolve.diagnosis.agent import DiagnosisAgent
+        from jiuwenswarm.evolve.ahe.diagnosis.agent import DiagnosisAgent
         content = "I think the trace shows a bash command error."
         result = DiagnosisAgent._parse_tool_calls(content)
         assert len(result) == 0
 
     def test_submit_result_detection(self):
-        from jiuwenswarm.evolve.diagnosis.agent import DiagnosisAgent
+        from jiuwenswarm.evolve.ahe.diagnosis.agent import DiagnosisAgent
         content = '{"tool_name": "submit_result", "arguments": {"result": "{\\"mode\\": \\"diagnose\\"}"}}'
         result = DiagnosisAgent._parse_tool_calls(content)
         assert len(result) == 1

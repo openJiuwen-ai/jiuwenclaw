@@ -14,7 +14,7 @@ import logging
 import re
 from typing import Any
 
-from jiuwenswarm.evolve.models import TraceOutcome
+from jiuwenswarm.evolve.ahe.models import TraceOutcome
 
 logger = logging.getLogger(__name__)
 
