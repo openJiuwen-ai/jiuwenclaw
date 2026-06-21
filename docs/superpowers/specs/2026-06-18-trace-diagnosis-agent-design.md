@@ -119,9 +119,9 @@ class DiagnosisAgent:
 
 | 工具名 | 功能 | 参数 |
 |--------|------|------|
-| `read_spans` | 读取指定 trace_id 的 OTEL spans（支持分页） | `trace_id`, `offset`, `limit`, `name_filter` |
-| `search_spans` | 在 spans 中按 regex 搜索关键词 | `trace_id`, `pattern`, `max_results` |
-| `list_traces` | 列出最近 N 条 trace_id | `limit`, `since` |
+| `read_trace` | 读取指定 trace_id 的 NormalizedTrace 消息（支持分页） | `trace_id`, `offset`, `limit`, `name_filter` |
+| `search_trace` | 在 NormalizedTrace 消息中按 regex 搜索关键词 | `trace_id`, `pattern`, `max_results` |
+| `list_traces` | 列出所有可用 trace 的 ID 和概览 | 无需参数 |
 | `query_evolve_records` | 查询指定 trace_id 的 Proposal/Decision/Apply 链 | `trace_id` |
 | `query_proposals` | 查询指定 batch_id 的所有 Proposal | `batch_id` |
 | `read_file` | 读取本地文件（trace JSON、evolve 输出文件等） | `path`, `offset`, `limit` |
@@ -129,7 +129,7 @@ class DiagnosisAgent:
 
 **设计说明**：
 
-- `read_spans` 和 `search_spans` 对应原 `agent-debugger-cli` 的 `read_file` + `search_file_content`，但直接从 SQLite 读取而非文件系统。这解决了"trace 很大，一次性读不完"的问题——Agent 可以先 `list_traces` 获取概览，再 `read_spans(trace_id, offset=0, limit=20)` 分页读取，或 `search_spans(trace_id, pattern="error")` 精准定位。
+- `read_trace` 和 `search_trace` 对应原 `agent-debugger-cli` 的 `read_file` + `search_file_content`，但直接从 SQLite 读取而非文件系统。这解决了"trace 很大，一次性读不完"的问题——Agent 可以先 `list_traces` 获取概览，再 `read_trace(trace_id, offset=0, limit=20)` 分页读取，或 `search_trace(trace_id, pattern="error")` 精准定位。
 - `read_file` 保留，用于读取被导出到文件系统的 trace JSON 或其他辅助文件。
 - `submit_result` 对应原 `complete_task`，作为停止信号。
 
@@ -171,16 +171,16 @@ class DiagnosisResult:
 - evolution.db: Proposal/Decision/Apply 记录
 
 ## 工具
-read_spans, search_spans, list_traces, query_evolve_records,
+read_trace, search_trace, list_traces, query_evolve_records,
 query_proposals, read_file, submit_result
 
 ## 迭代预算（硬限制）
 最多 20 次工具调用。第 20 次必须是 submit_result。
 
 ## 工作流
-1. Skim (≈1-3): list_traces 概览 → read_spans(trace_id, limit=10) 粗看结构
-2. Locate (≈4-10): search_spans 搜索错误关键词、工具名、异常事件
-3. Read (≈11-15): read_spans(trace_id, offset=X, limit=Y) 精读关键 span 上下文
+1. Skim (≈1-3): list_traces 概览 → read_trace(trace_id, limit=10) 粗看结构
+2. Locate (≈4-10): search_trace 搜索错误关键词、工具名、异常事件
+3. Read (≈11-15): read_trace(trace_id, offset=X, limit=Y) 精读关键 span 上下文
 4. Cross-trace (≈16-18): 多 trace 比对
 5. Finalize (≤20): submit_result 提交结果
 
@@ -253,7 +253,7 @@ async def _react_loop(self, messages: list) -> DiagnosisResult:
 
 ### 3.3b 上下文管理（双保险策略）
 
-ReAct loop 的上下文会随着迭代累积增长。20 次迭代中，如果一半调用 `read_spans` 等返回大量数据的工具，工具结果可能累积 50k-100k chars，加上 assistant 消息和 system prompt，总量可能超出 LLM 的 context window（如 GPT-4 是 128k tokens）。
+ReAct loop 的上下文会随着迭代累积增长。20 次迭代中，如果一半调用 `read_trace` 等返回大量数据的工具，工具结果可能累积 50k-100k chars，加上 assistant 消息和 system prompt，总量可能超出 LLM 的 context window（如 GPT-4 是 128k tokens）。
 
 采用双保险策略：
 
@@ -265,13 +265,13 @@ ReAct loop 的上下文会随着迭代累积增长。20 次迭代中，如果一
 原始 tool result (800 lines / 50000 chars):
   前 50 行（开头，包含 span 概要 / 结构信息）
   [...truncated: 700 lines omitted, total_spans=120.
-   Use read_spans(trace_id, offset=50, limit=30) to read more...]
+   Use read_trace(trace_id, offset=50, limit=30) to read more...]
   后 30 行（结尾，包含 status/error 信息）
 ```
 
 截断参数：`max_tool_output_chars = 10000`，`head_lines = 50`，`tail_lines = 30`。
 
-**关键设计**：截断信息中提示 Agent 可以用分页参数重新读取被截断的部分。截断不是丢弃信息，而是引导 Agent 用更精准的 `offset/limit` 或 `search_spans` 重新读取需要的部分。这与 Agent 的五阶段工作流（Skim → Locate → Read）天然配合——先粗看，再精读。
+**关键设计**：截断信息中提示 Agent 可以用分页参数重新读取被截断的部分。截断不是丢弃信息，而是引导 Agent 用更精准的 `offset/limit` 或 `search_trace` 重新读取需要的部分。这与 Agent 的五阶段工作流（Skim → Locate → Read）天然配合——先粗看，再精读。
 
 #### 第二层：上下文压缩（阈值触发）
 
@@ -483,16 +483,16 @@ propose 模式的 `proposals` 数组中的每个元素直接对应 `jiuwenswarm.
 
 ## 6. 工具详细设计
 
-### 6.1 read_spans
+### 6.1 read_trace
 
 ```python
-def read_spans(
+def read_trace(
     trace_id: str,
     offset: int = 0,        # 跳过前 N 个 span
     limit: int = 50,        # 最多返回 N 个 span
     name_filter: str = "",  # 按 span name 过滤（regex）
 ) -> dict:
-    """从 traces.db 读取 OTEL spans。
+    """从 NormalizedTrace 读取结构化对话数据。
 
     返回:
     {
@@ -508,17 +508,17 @@ def read_spans(
 
 关键设计：返回 `total_spans` 让 Agent 知道总大小，从而决定分页策略。
 
-### 6.2 search_spans
+### 6.2 search_trace
 
 ```python
-def search_spans(
+def search_trace(
     trace_id: str,
     pattern: str,            # regex 搜索关键词
     max_results: int = 20,   # 最多返回 N 个匹配 span
 ) -> dict:
     """在指定 trace 的 spans 中搜索匹配 pattern 的 span。
 
-    搜索范围：span name, attributes JSON, events JSON, status description。
+    搜索范围：消息 content 和 tool_calls 内容。
     返回:
     {
         "trace_id": "...",
@@ -626,7 +626,7 @@ def submit_result(result: str) -> str:
 | 工具执行失败 | 返回错误信息给 Agent（`{"error": "..."}`），Agent 可换策略 |
 | 输出 JSON schema 验证失败 | 追加修正提示，重试 1 次 |
 | 预算耗尽 | 返回 `budget_exceeded=True`，`response` 为最后 LLM 文本 |
-| traces.db 不存在 | `list_traces` / `read_spans` 返回空，Agent 自行决定下一步 |
+| traces.db 不存在 | `list_traces` / `read_trace` 返回空，Agent 自行决定下一步 |
 
 ## 8. 测试策略
 

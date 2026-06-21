@@ -70,23 +70,26 @@ jiuwenswarm/evolve/
 
   # ── 新增模块 ──
   otel_adapter.py                    # OtelTraceAdapter — OTEL spans → Langfuse dict
-  pda/
-    __init__.py                      # 导出 PdaProposer, PdaDecisionPolicy
-    proposer.py                      # PdaProposer — 自含 CLEAN→EVAL→DIAG→PROPOSE 流程
-    decision_policy.py               # PdaDecisionPolicy — RuleGate + LLMDecision
+  ahe/
+    __init__.py                      # 导出 AheProposer, AheDecisionPolicy, ExperienceGovernor
+    models.py                        # GovernanceContext, TraceOutcome (AHE 算法内部模型)
+    proposer.py                      # AheProposer — 自含 CLEAN→EVAL→DIAG→PROPOSE 流程
+    decision_policy.py               # AheDecisionPolicy — RuleGate + LLMDecision
+    evaluator.py                     # TraceOutcomeEvaluator
     experience_governor.py           # ExperienceGovernor — 经验治理上下文提供
-  diagnosis/                         # Trace Diagnosis Agent（已有设计文档）
-    __init__.py
-    agent.py                         # DiagnosisAgent
-    tools.py                         # 只读工具集
-    prompts.py                       # System prompt
-    models.py                        # DiagnosisResult, DiagnosisIssue
+    otel_adapter.py                  # OTEL spans → NormalizedTrace
+    diagnosis/                       # AHE 诊断方案
+      __init__.py
+      agent.py                       # DiagnosisAgent — 消费 NormalizedTrace
+      tools.py                       # 只读工具集 (read_trace, search_trace, list_traces)
+      prompts.py                     # System prompt
+      models.py                      # DiagnosisResult, DiagnosisIssue
 ```
 
 ### 2.2 数据流
 
 ```
-PdaProposer.generate(batch):
+AheProposer.generate(batch):
   ┌──────────────────────────────────────────────────────────┐
   │ 1. LOAD: TraceBatch.trace_ids → SqliteStore.read_spans   │
   │ 2. CLEAN: OtelTraceAdapter.convert_trace() → Langfuse dict│
@@ -94,7 +97,7 @@ PdaProposer.generate(batch):
   │ 3. EVAL: TraceOutcomeEvaluator.evaluate(input, output)    │
   │           → TraceOutcome (pass/fail/uncertain)            │
   │    → 筛选: 只保留 fail/uncertain trace 进入后续步骤       │
-  │ 4. DIAG: DiagnosisAgent.run(trace_ids, mode="diagnose")   │
+  │ 4. DIAG: DiagnosisAgent.run(normalized_traces, mode="diagnose") │
   │           → DiagnosisResult (issues + response)           │
   │ 5. GOV: ExperienceGovernor.get_context(skill_name)        │
   │           → GovernanceContext (已有经验、容量、可替换集)  │
@@ -103,7 +106,7 @@ PdaProposer.generate(batch):
   │              → Proposal[] (含 ExperienceOperation[])       │
   └──────────────────────────────────────────────────────────┘
 
-PdaDecisionPolicy.evaluate(proposal):
+AheDecisionPolicy.evaluate(proposal):
   ┌──────────────────────────────────────────────────────────┐
   │ 1. RuleGate: 硬约束检查                                   │
   │    - 字段完整性、evidence 非空、target_type 允许范围       │
@@ -134,7 +137,7 @@ SkillExperienceWriter.apply(proposal):
 
 ### 2.3 与其他 ProposalGenerator 的解耦
 
-PdaProposer 自含步骤 2-4，不依赖外部前置步骤。它从 `TraceBatch.trace_ids` 和 `SqliteStore` 开始，内部完成所有数据处理。
+AheProposer 自含步骤 2-4，不依赖外部前置步骤。它从 `TraceBatch.trace_ids` 和 `SqliteStore` 开始，内部完成所有数据处理。
 
 其他 ProposalGenerator（如 `LLMProposer`、`RuleProposer`）保持不变，可以独立运行。Pipeline 的 `_generate()` 并发执行所有 generators，各自产出的 Proposal 合并后进入 Decision 阶段。
 
@@ -145,9 +148,9 @@ evolve:
   pipeline:
     proposal_generators:
       # 方案 A：只用 PDA-style AHE
-      - pda_proposer
+      - ahe_proposer
       # 方案 B：PDA + 基础 LLMProposer 并发
-      - pda_proposer
+      - ahe_proposer
       - llm_proposer
       # 方案 C：只用原始 LLMProposer
       - llm_proposer
@@ -160,7 +163,7 @@ evolve:
 **复用现有实现**，不改 `TraceBatch` 或 `SqliteStore`。
 
 ```python
-# PdaProposer.generate() 内部
+# AheProposer.generate() 内部
 batch_trace_ids = batch.trace_ids
 trace_reader = self._trace_reader  # SqliteStore 实例
 ```
@@ -189,7 +192,7 @@ trace_reader = self._trace_reader  # SqliteStore 实例
 
 ### 3.3 步骤 3 — TASK_EVALUATE (TraceOutcomeEvaluator)
 
-**新增模块**: `jiuwenswarm/evolve/pda/evaluator.py`（包含 TraceOutcome, TaskNameInferrer, TraceOutcomeEvaluator）
+**新增模块**: `jiuwenswarm/evolve/ahe/evaluator.py`（包含 TraceOutcome, TaskNameInferrer, TraceOutcomeEvaluator）
 
 ```python
 class TraceOutcome(BaseModel):
@@ -246,19 +249,20 @@ class TraceOutcomeEvaluator:
 **已有设计文档**: `docs/superpowers/specs/2026-06-18-trace-diagnosis-agent-design.md`
 
 关键集成点：
-- PdaProposer 在步骤 4 中调用 `DiagnosisAgent.run(trace_ids, mode="diagnose")`
-- DiagnosisAgent 从 `SqliteStore` 直接读取 OTEL spans（不依赖 NormalizedTrace）
+- AheProposer 在步骤 4 中调用 `DiagnosisAgent.run(normalized_traces=..., mode="diagnose")`
+- DiagnosisAgent 消费 **NormalizedTrace**（即 CLEAN 步骤产出的结构化数据），而非原始 OTEL spans
+- 工具集操作在 `messages` 字段上：`read_trace`、`search_trace`、`list_traces`
 - 输出 `DiagnosisResult` 包含 `issues` 列表和 `response` 摘要
 
-**注意**: DiagnosisAgent 也可独立运行（CLI `jiuwenswarm-evolve diagnose`），与 PdaProposer 的调用互不冲突。
+**注意**: DiagnosisAgent 也可独立运行（CLI 模式），此时内部自行执行 CLEAN 步骤。
 
-### 3.5 步骤 5 — PROPOSE (PdaProposer)
+### 3.5 步骤 5 — PROPOSE (AheProposer)
 
-**新增模块**: `jiuwenswarm/evolve/pda/proposer.py`
+**新增模块**: `jiuwenswarm/evolve/ahe/proposer.py`
 
 ```python
-@proposal_generators.register("pda_proposer")
-class PdaProposer(ProposalGenerator):
+@proposal_generators.register("ahe_proposer")
+class AheProposer(ProposalGenerator):
     """PDA-style One-shot AHE — 自含 CLEAN→EVAL→DIAG→GOV→PROPOSE 流程。
 
     与其他 ProposalGenerator（llm_proposer, rule_proposer）完全解耦。
@@ -273,7 +277,7 @@ class PdaProposer(ProposalGenerator):
         max_proposals: int = 3,
         max_skill_proposals: int = 2,
     ) -> None:
-        super().__init__(name="pda_proposer", trace_reader=trace_reader)
+        super().__init__(name="ahe_proposer", trace_reader=trace_reader)
         self._store = store
         self._model = model
         self._max_proposals = max_proposals
@@ -481,13 +485,13 @@ PDA_PROPOSER_SYSTEM_PROMPT = """
 """
 ```
 
-### 3.6 步骤 6 — DECISION (PdaDecisionPolicy)
+### 3.6 步骤 6 — DECISION (AheDecisionPolicy)
 
-**新增模块**: `jiuwenswarm/evolve/pda/decision_policy.py`
+**新增模块**: `jiuwenswarm/evolve/ahe/decision_policy.py`
 
 ```python
-@decision_policies.register("pda_decision_policy")
-class PdaDecisionPolicy(DecisionPolicy):
+@decision_policies.register("ahe_decision_policy")
+class AheDecisionPolicy(DecisionPolicy):
     """PDA-style Decision — RuleGate + LLMDecision 两阶段判定。
 
     RuleGate 负责硬约束检查，失败时 blocking=True。
@@ -499,7 +503,7 @@ class PdaDecisionPolicy(DecisionPolicy):
         governor: ExperienceGovernor | None = None,
         model: Model | None = None,
     ) -> None:
-        super().__init__(name="pda_decision_policy")
+        super().__init__(name="ahe_decision_policy")
         self._governor = governor or ExperienceGovernor(store=...)
         self._model = model
 
@@ -661,10 +665,10 @@ record.metadata = {
 | # | 规则 | 实现位置 |
 |---|------|---------|
 | 1 | 新增 experience 默认 state = candidate | SkillExperienceWriter |
-| 2 | 每批最多生成 3 个 Proposal | PdaProposer._enforce_limits() |
-| 3 | 每个 skill 每次最多新增 1 条 experience | ExperienceGovernor + PdaDecisionPolicy |
-| 4 | 每条 experience 必须包含 evidence_refs | PdaDecisionPolicy RuleGate |
-| 5 | 写入前重复检测，优先 merge evidence | ExperienceGovernor + PdaProposer prompt |
+| 2 | 每批最多生成 3 个 Proposal | AheProposer._enforce_limits() |
+| 3 | 每个 skill 每次最多新增 1 条 experience | ExperienceGovernor + AheDecisionPolicy |
+| 4 | 每条 experience 必须包含 evidence_refs | AheDecisionPolicy RuleGate |
+| 5 | 写入前重复检测，优先 merge evidence | ExperienceGovernor + AheProposer prompt |
 | 6 | 记录 created_at, last_used_at, hit_count, success_after_hit_count | EvolutionRecord.metadata |
 | 7 | 长期未命中 candidate 可 deprecated | ExperienceGovernor（后续阶段实现） |
 | 8 | 被验证有害 experience 标记 rejected | ExperienceGovernor（后续阶段实现） |
@@ -679,11 +683,11 @@ record.metadata = {
 evolve:
   pipeline:
     proposal_generators:
-      - pda_proposer          # 新增 PDA-style AHE
+      - ahe_proposer          # 新增 PDA-style AHE
 
     decision_policies:
-      - pda_decision_policy   # 新增 RuleGate + LLMDecision
-      # - rule_policy         # 可保留，但与 pda_decision_policy 并发时需注意重复判定
+      - ahe_decision_policy   # 新增 RuleGate + LLMDecision
+      # - rule_policy         # 可保留，但与 ahe_decision_policy 并发时需注意重复判定
       # - eval_policy         # 可保留
 
   pda:
@@ -723,7 +727,7 @@ evolve:
 在 `jiuwenswarm/evolve/cli.py` 中新增：
 
 ```
-jiuwenswarm-evolve run --pda               # 使用 pda_proposer + pda_decision_policy
+jiuwenswarm-evolve run --pda               # 使用 ahe_proposer + ahe_decision_policy
 jiuwenswarm-evolve run --latest 10          # 现有 CLI（可选择不同 proposer）
 jiuwenswarm-evolve diagnose --latest 5     # 独立诊断模式
 jiuwenswarm-evolve governor --skill bash --status  # 查看某 skill 的经验治理状态
@@ -735,15 +739,15 @@ jiuwenswarm-evolve governor --skill bash --deprecate <exp-id>  # 手动 deprecat
 | 集成点 | 文件 | 改动类型 |
 |--------|------|---------|
 | Registry | `evolve/registry.py` | 无改动（通过 `@proposal_generators.register` / `@decision_policies.register` 自动注册） |
-| Pipeline | `evolve/pipeline.py` | 无改动（PdaProposer/PdaDecisionPolicy 通过标准接口接入） |
+| Pipeline | `evolve/pipeline.py` | 无改动（AheProposer/AheDecisionPolicy 通过标准接口接入） |
 | CLI | `evolve/cli.py` | 新增 `--pda` 选项 + `governor` 子命令 |
 | Config | `evolve/config.yaml` | 新增 `pda:` 配置段 |
 | Skill Writer | `evolve/apply_writers/skill_writer.py` | 扩展支持 ExperienceOperation |
-| Storage | `evolve/storage/` | 无改动（PdaProposer 通过 SqliteStore 参数读取） |
+| Storage | `evolve/storage/` | 无改动（AheProposer 通过 SqliteStore 参数读取） |
 | Models | `evolve/models.py` | 新增 ExperienceOperationType, ExperienceOperation, GovernanceContext, TraceOutcome |
 | OTEL Adapter | `evolve/otel_adapter.py` | 新增（按照 clean_trace.md 实现） |
 | Diagnosis | `evolve/diagnosis/` | 新增（按照 2026-06-18 设计文档实现） |
-| PDA | `evolve/pda/` | 新增 PdaProposer, PdaDecisionPolicy, ExperienceGovernor |
+| PDA | `evolve/ahe/` | 新增 AheProposer, AheDecisionPolicy, ExperienceGovernor |
 
 ## 8. 测试策略
 
@@ -754,11 +758,11 @@ jiuwenswarm-evolve governor --skill bash --deprecate <exp-id>  # 手动 deprecat
 | 单元测试 | TaskNameInferrer 各策略路径 |
 | 单元测试 | ExperienceGovernor.get_context() 分类逻辑 |
 | 单元测试 | ExperienceGovernor.validate_operation() 各操作校验 |
-| 单元测试 | PdaDecisionPolicy._rule_gate() 硬约束检查 |
-| 单元测试 | PdaProposer 数量控制 (_enforce_limits) |
+| 单元测试 | AheDecisionPolicy._rule_gate() 硬约束检查 |
+| 单元测试 | AheProposer 数量控制 (_enforce_limits) |
 | 单元测试 | SkillExperienceWriter ExperienceOperation 执行 (ADD/MERGE/REPLACE/NOOP) |
 | 单元测试 | DiagnosisAgent 工具集、ReAct loop、上下文管理 |
-| 集成测试 | PdaProposer.generate() 完整流程 (Mock Store + Mock LLM) |
-| 集成测试 | PdaDecisionPolicy.evaluate() 完整流程 (RuleGate + Mock LLM) |
-| 集成测试 | EvolutionPipeline.run() 使用 pda_proposer + pda_decision_policy |
+| 集成测试 | AheProposer.generate() 完整流程 (Mock Store + Mock LLM) |
+| 集成测试 | AheDecisionPolicy.evaluate() 完整流程 (RuleGate + Mock LLM) |
+| 集成测试 | EvolutionPipeline.run() 使用 ahe_proposer + ahe_decision_policy |
 | 端到端测试 | Mini benchmark: 从 traces.db → 完整闭环 → evolutions.json 写入验证 |

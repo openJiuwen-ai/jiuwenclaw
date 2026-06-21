@@ -4,7 +4,7 @@
 
 **Goal:** Implement the PDA-style One-shot AHE裁剪版 — a minimal closed-loop: Trace → Clean → Eval → Diagnose → Propose → Decide → Apply → Record, limited to Skill Experience Proposal in phase 1.
 
-**Architecture:** PdaProposer self-contains CLEAN→EVAL→DIAG→GOV→PROPOSE steps; PdaDecisionPolicy combines RuleGate + LLMDecision; ExperienceGovernor provides governance context before Propose and validates during Decision; SkillExperienceWriter extends to support ExperienceOperation types (ADD/MERGE/REPLACE/etc).
+**Architecture:** AheProposer self-contains CLEAN→EVAL→DIAG→GOV→PROPOSE steps; AheDecisionPolicy combines RuleGate + LLMDecision; ExperienceGovernor provides governance context before Propose and validates during Decision; SkillExperienceWriter extends to support ExperienceOperation types (ADD/MERGE/REPLACE/etc).
 
 **Tech Stack:** Python 3.10+, Pydantic, openjiuwen Model (LLM calls), SQLite (traces.db + evolution.db), asyncio
 
@@ -22,11 +22,11 @@
 | `jiuwenswarm/evolve/diagnosis/tools.py` | Read-only tool implementations (read_spans, search_spans, etc.) |
 | `jiuwenswarm/evolve/diagnosis/prompts.py` | System prompt + tool descriptions |
 | `jiuwenswarm/evolve/diagnosis/agent.py` | DiagnosisAgent ReAct loop + runner |
-| `jiuwenswarm/evolve/pda/__init__.py` | Export PdaProposer, PdaDecisionPolicy, ExperienceGovernor |
-| `jiuwenswarm/evolve/pda/evaluator.py` | TraceOutcome, TaskNameInferrer, TraceOutcomeEvaluator |
-| `jiuwenswarm/evolve/pda/experience_governor.py` | GovernanceContext, ExperienceGovernor |
-| `jiuwenswarm/evolve/pda/proposer.py` | PdaProposer — self-contained CLEAN→EVAL→DIAG→GOV→PROPOSE |
-| `jiuwenswarm/evolve/pda/decision_policy.py` | PdaDecisionPolicy — RuleGate + LLMDecision |
+| `jiuwenswarm/evolve/ahe/__init__.py` | Export AheProposer, AheDecisionPolicy, ExperienceGovernor |
+| `jiuwenswarm/evolve/ahe/evaluator.py` | TraceOutcome, TaskNameInferrer, TraceOutcomeEvaluator |
+| `jiuwenswarm/evolve/ahe/experience_governor.py` | GovernanceContext, ExperienceGovernor |
+| `jiuwenswarm/evolve/ahe/proposer.py` | AheProposer — self-contained CLEAN→EVAL→DIAG→GOV→PROPOSE |
+| `jiuwenswarm/evolve/ahe/decision_policy.py` | AheDecisionPolicy — RuleGate + LLMDecision |
 
 ### Modified Files
 
@@ -48,8 +48,8 @@
 | `tests/unit_tests/test_experience_governor.py` | get_context, validate_operation, classification |
 | `tests/unit_tests/test_evaluator.py` | TraceOutcomeEvaluator, TaskNameInferrer |
 | `tests/unit_tests/test_diagnosis_agent.py` | Tool implementations, payload validation |
-| `tests/unit_tests/test_pda_proposer.py` | PdaProposer flow (mocked), limit enforcement |
-| `tests/unit_tests/test_pda_decision_policy.py` | RuleGate checks, LLMDecision (mocked) |
+| `tests/unit_tests/test_ahe_proposer.py` | AheProposer flow (mocked), limit enforcement |
+| `tests/unit_tests/test_ahe_decision_policy.py` | RuleGate checks, LLMDecision (mocked) |
 | `tests/unit_tests/test_skill_writer_ops.py` | ADD/MERGE/REPLACE/DEPRECATE/NOOP operations |
 
 ---
@@ -63,7 +63,7 @@ Layer 1: OtelTraceAdapter (Task 2) ─── DiagnosisAgent (Task 3)
   ↓                                       ↓
 Layer 2: TraceOutcomeEvaluator (Task 4) ── ExperienceGovernor (Task 5)
   ↓                                       ↓
-Layer 3: PdaProposer (Task 6) ────────── PdaDecisionPolicy (Task 7)
+Layer 3: AheProposer (Task 6) ────────── AheDecisionPolicy (Task 7)
   ↓                                       ↓
 Layer 4: SkillWriter Extension (Task 8) ── CLI + Config (Task 9)
   ↓
@@ -783,7 +783,7 @@ git commit -m "feat(evolve): add DiagnosisAgent — lightweight ReAct trace diag
 ## Task 4: TraceOutcomeEvaluator
 
 **Files:**
-- Create: `jiuwenswarm/evolve/pda/evaluator.py`
+- Create: `jiuwenswarm/evolve/ahe/evaluator.py`
 - Create: `tests/unit_tests/test_evaluator.py`
 
 - [ ] **Step 1: Write failing tests**
@@ -791,7 +791,7 @@ git commit -m "feat(evolve): add DiagnosisAgent — lightweight ReAct trace diag
 ```python
 # tests/unit_tests/test_evaluator.py
 import pytest
-from jiuwenswarm.evolve.pda.evaluator import (
+from jiuwenswarm.evolve.ahe.evaluator import (
     TraceOutcomeEvaluator,
     TaskNameInferrer,
 )
@@ -846,7 +846,7 @@ Expected: FAIL — module not found
 
 - [ ] **Step 3: Implement evaluator.py**
 
-Create `jiuwenswarm/evolve/pda/evaluator.py` containing:
+Create `jiuwenswarm/evolve/ahe/evaluator.py` containing:
 
 - `TaskNameInferrer` — infer task_name from skill_name, user message, or trace_id
 - `TraceOutcomeEvaluator` — two evaluation methods:
@@ -864,7 +864,7 @@ Expected: ALL PASS (fast/heuristic tests pass; async LLM tests may need mock)
 - [ ] **Step 5: Commit**
 
 ```bash
-git add jiuwenswarm/evolve/pda/evaluator.py tests/unit_tests/test_evaluator.py
+git add jiuwenswarm/evolve/ahe/evaluator.py tests/unit_tests/test_evaluator.py
 git commit -m "feat(evolve): add TraceOutcomeEvaluator — task completion assessment"
 ```
 
@@ -873,7 +873,7 @@ git commit -m "feat(evolve): add TraceOutcomeEvaluator — task completion asses
 ## Task 5: ExperienceGovernor
 
 **Files:**
-- Create: `jiuwenswarm/evolve/pda/experience_governor.py`
+- Create: `jiuwenswarm/evolve/ahe/experience_governor.py`
 - Create: `tests/unit_tests/test_experience_governor.py`
 
 - [ ] **Step 1: Write failing tests**
@@ -886,7 +886,7 @@ from jiuwenswarm.evolve.models import (
     ExperienceOperation,
     GovernanceContext,
 )
-from jiuwenswarm.evolve.pda.experience_governor import ExperienceGovernor
+from jiuwenswarm.evolve.ahe.experience_governor import ExperienceGovernor
 
 
 class TestGovernorGetContext:
@@ -964,32 +964,32 @@ Key responsibilities:
 - [ ] **Step 5: Commit**
 
 ```bash
-git add jiuwenswarm/evolve/pda/experience_governor.py tests/unit_tests/test_experience_governor.py
+git add jiuwenswarm/evolve/ahe/experience_governor.py tests/unit_tests/test_experience_governor.py
 git commit -m "feat(evolve): add ExperienceGovernor — experience governance context provider"
 ```
 
 ---
 
-## Task 6: PdaProposer
+## Task 6: AheProposer
 
 **Files:**
-- Create: `jiuwenswarm/evolve/pda/proposer.py`
-- Create: `tests/unit_tests/test_pda_proposer.py`
+- Create: `jiuwenswarm/evolve/ahe/proposer.py`
+- Create: `tests/unit_tests/test_ahe_proposer.py`
 
 This self-contains CLEAN→EVAL→DIAG→GOV→PROPOSE.
 
 - [ ] **Step 1: Write failing tests**
 
 ```python
-# tests/unit_tests/test_pda_proposer.py
+# tests/unit_tests/test_ahe_proposer.py
 import pytest
 from jiuwenswarm.evolve.models import TraceBatch, Proposal, ProposalTargetType
-from jiuwenswarm.evolve.pda.proposer import PdaProposer
+from jiuwenswarm.evolve.ahe.proposer import AheProposer
 
 
-class TestPdaProposerEnforceLimits:
+class TestAheProposerEnforceLimits:
     def test_max_proposals_per_batch(self):
-        proposer = PdaProposer.__new__(PdaProposer)
+        proposer = AheProposer.__new__(AheProposer)
         proposer._max_proposals = 3
         proposer._max_skill_proposals = 2
         proposals = [
@@ -1006,7 +1006,7 @@ class TestPdaProposerEnforceLimits:
 
     def test_all_pass_returns_empty(self):
         """When all traces are 'pass', no proposals are generated."""
-        proposer = PdaProposer(trace_reader=MockTraceReader(), store=MockStore())
+        proposer = AheProposer(trace_reader=MockTraceReader(), store=MockStore())
         # Mock: all outcomes are "pass"
         result = await proposer.generate(TraceBatch(trace_ids=["abc123"]))
         assert result == []
@@ -1014,9 +1014,9 @@ class TestPdaProposerEnforceLimits:
 
 - [ ] **Step 2: Run tests to verify they fail**
 
-- [ ] **Step 3: Implement PdaProposer**
+- [ ] **Step 3: Implement AheProposer**
 
-Create `jiuwenswarm/evolve/pda/proposer.py`. The `generate(batch)` method implements the full pipeline:
+Create `jiuwenswarm/evolve/ahe/proposer.py`. The `generate(batch)` method implements the full pipeline:
 
 1. LOAD: read trace_ids from batch
 2. CLEAN: OtelTraceAdapter.convert_trace() → extract_trace_data() → NormalizedTrace dict
@@ -1033,28 +1033,28 @@ LLM prompt (`PDA_PROPOSER_SYSTEM_PROMPT`) includes: task outcomes, diagnosis res
 - [ ] **Step 5: Commit**
 
 ```bash
-git add jiuwenswarm/evolve/pda/proposer.py tests/unit_tests/test_pda_proposer.py
-git commit -m "feat(evolve): add PdaProposer — self-contained CLEAN→EVAL→DIAG→GOV→PROPOSE pipeline"
+git add jiuwenswarm/evolve/ahe/proposer.py tests/unit_tests/test_ahe_proposer.py
+git commit -m "feat(evolve): add AheProposer — self-contained CLEAN→EVAL→DIAG→GOV→PROPOSE pipeline"
 ```
 
 ---
 
-## Task 7: PdaDecisionPolicy
+## Task 7: AheDecisionPolicy
 
 **Files:**
-- Create: `jiuwenswarm/evolve/pda/decision_policy.py`
-- Create: `tests/unit_tests/test_pda_decision_policy.py`
+- Create: `jiuwenswarm/evolve/ahe/decision_policy.py`
+- Create: `tests/unit_tests/test_ahe_decision_policy.py`
 
 - [ ] **Step 1: Write failing tests for RuleGate**
 
 ```python
-# tests/unit_tests/test_pda_decision_policy.py
+# tests/unit_tests/test_ahe_decision_policy.py
 import pytest
 from jiuwenswarm.evolve.models import (
     Proposal, ProposalTargetType, ProposalState, DecisionResult,
     DecisionSuggestion, EvidenceRef,
 )
-from jiuwenswarm.evolve.pda.decision_policy import PdaDecisionPolicy
+from jiuwenswarm.evolve.ahe.decision_policy import AheDecisionPolicy
 
 
 class TestRuleGate:
@@ -1067,13 +1067,13 @@ class TestRuleGate:
             "root_cause": "Missing path specification",
             "targeted_fix": {"action": "add_knowledge", "suggestion": "Use /usr/bin/python3"},
             "predicted_impact": "Reduce tool error rate",
-            "proposer_name": "pda_proposer",
+            "proposer_name": "ahe_proposer",
         }
         defaults.update(overrides)
         return Proposal(**defaults)
 
     def test_empty_evidence_blocked(self):
-        policy = PdaDecisionPolicy(governor=MockGovernor())
+        policy = AheDecisionPolicy(governor=MockGovernor())
         proposal = self._make_proposal(failure_evidence=[])
         result = policy._rule_gate(proposal)
         assert result.blocking is True
@@ -1110,9 +1110,9 @@ class TestRuleGate:
 
 - [ ] **Step 2: Run tests to verify they fail**
 
-- [ ] **Step 3: Implement PdaDecisionPolicy**
+- [ ] **Step 3: Implement AheDecisionPolicy**
 
-Create `jiuwenswarm/evolve/pda/decision_policy.py` with:
+Create `jiuwenswarm/evolve/ahe/decision_policy.py` with:
 
 - `_rule_gate(proposal)` — hard constraint checks (field completeness, target_type, governance, duplicate)
 - `_llm_decision(proposal)` — LLM semantic judgment (consistency, reasonability, risk)
@@ -1125,8 +1125,8 @@ LLM prompt includes: proposal content, governance context summary, evaluation di
 - [ ] **Step 5: Commit**
 
 ```bash
-git add jiuwenswarm/evolve/pda/decision_policy.py tests/unit_tests/test_pda_decision_policy.py
-git commit -m "feat(evolve): add PdaDecisionPolicy — RuleGate + LLMDecision two-phase judgment"
+git add jiuwenswarm/evolve/ahe/decision_policy.py tests/unit_tests/test_ahe_decision_policy.py
+git commit -m "feat(evolve): add AheDecisionPolicy — RuleGate + LLMDecision two-phase judgment"
 ```
 
 ---
@@ -1165,7 +1165,7 @@ class TestSkillWriterAdd:
                 targeted_fix={"action": "add_knowledge", "suggestion": "Use /usr/bin/python3"},
                 predicted_impact="reduce errors",
                 state=ProposalState.ACTIVE,
-                proposer_name="pda_proposer",
+                proposer_name="ahe_proposer",
                 metadata={
                     "operations": [ExperienceOperation(
                         op=ExperienceOperationType.ADD,
@@ -1236,14 +1236,14 @@ git commit -m "feat(evolve): extend SkillExperienceWriter with ExperienceOperati
 **Files:**
 - Modify: `jiuwenswarm/evolve/cli.py`
 - Modify: `jiuwenswarm/evolve/config.yaml`
-- Create: `jiuwenswarm/evolve/pda/__init__.py`
+- Create: `jiuwenswarm/evolve/ahe/__init__.py`
 
 - [ ] **Step 1: Write failing test for CLI --pda flag**
 
 ```python
 # tests/unit_tests/test_cli_pda.py (or extend existing test)
-def test_pda_flag_selects_pda_proposer():
-    """When --pda is passed, PdaProposer is used instead of llm_proposer."""
+def test_pda_flag_selects_ahe_proposer():
+    """When --pda is passed, AheProposer is used instead of llm_proposer."""
     ...
 ```
 
@@ -1251,7 +1251,7 @@ def test_pda_flag_selects_pda_proposer():
 
 - [ ] **Step 3: Add --pda flag to CLI**
 
-In `jiuwenswarm/evolve/cli.py`, extend the `run` subcommand to accept `--pda` flag. When set, use `pda_proposer` + `pda_decision_policy` instead of the default generators.
+In `jiuwenswarm/evolve/cli.py`, extend the `run` subcommand to accept `--pda` flag. When set, use `ahe_proposer` + `ahe_decision_policy` instead of the default generators.
 
 Add `diagnose` subcommand:
 ```
@@ -1272,15 +1272,15 @@ In `jiuwenswarm/evolve/config.yaml`, add the `pda:` section from the design doc 
 - [ ] **Step 5: Create pda/__init__.py**
 
 ```python
-# jiuwenswarm/evolve/pda/__init__.py
-from jiuwenswarm.evolve.pda.proposer import PdaProposer
-from jiuwenswarm.evolve.pda.decision_policy import PdaDecisionPolicy
-from jiuwenswarm.evolve.pda.experience_governor import ExperienceGovernor
-from jiuwenswarm.evolve.pda.evaluator import TraceOutcomeEvaluator, TaskNameInferrer
+# jiuwenswarm/evolve/ahe/__init__.py
+from jiuwenswarm.evolve.ahe.proposer import AheProposer
+from jiuwenswarm.evolve.ahe.decision_policy import AheDecisionPolicy
+from jiuwenswarm.evolve.ahe.experience_governor import ExperienceGovernor
+from jiuwenswarm.evolve.ahe.evaluator import TraceOutcomeEvaluator, TaskNameInferrer
 
 __all__ = [
-    "PdaProposer",
-    "PdaDecisionPolicy",
+    "AheProposer",
+    "AheDecisionPolicy",
     "ExperienceGovernor",
     "TraceOutcomeEvaluator",
     "TaskNameInferrer",
@@ -1296,7 +1296,7 @@ Add `DiagnosisAgent` and PDA module exports.
 - [ ] **Step 8: Commit**
 
 ```bash
-git add jiuwenswarm/evolve/cli.py jiuwenswarm/evolve/config.yaml jiuwenswarm/evolve/pda/__init__.py jiuwenswarm/evolve/__init__.py tests/unit_tests/test_cli_pda.py
+git add jiuwenswarm/evolve/cli.py jiuwenswarm/evolve/config.yaml jiuwenswarm/evolve/ahe/__init__.py jiuwenswarm/evolve/__init__.py tests/unit_tests/test_cli_pda.py
 git commit -m "feat(evolve): add CLI --pda flag, diagnose/governor subcommands, pda config"
 ```
 
@@ -1313,8 +1313,8 @@ git commit -m "feat(evolve): add CLI --pda flag, diagnose/governor subcommands, 
 # tests/integration_tests/test_pda_e2e.py
 import pytest
 from jiuwenswarm.evolve.models import TraceBatch
-from jiuwenswarm.evolve.pda.proposer import PdaProposer
-from jiuwenswarm.evolve.pda.decision_policy import PdaDecisionPolicy
+from jiuwenswarm.evolve.ahe.proposer import AheProposer
+from jiuwenswarm.evolve.ahe.decision_policy import AheDecisionPolicy
 
 
 @pytest.mark.asyncio
@@ -1324,8 +1324,8 @@ class TestPdaEndToEnd:
         # Setup: create traces.db with 5 test traces (3 fail, 2 pass)
         # Setup: create evolution.db and skills dir
         store = create_mock_store(...)
-        proposer = PdaProposer(trace_reader=store._sqlite, store=store, model=mock_model)
-        policy = PdaDecisionPolicy(governor=ExperienceGovernor(store=store))
+        proposer = AheProposer(trace_reader=store._sqlite, store=store, model=mock_model)
+        policy = AheDecisionPolicy(governor=ExperienceGovernor(store=store))
 
         # Run
         batch = TraceBatch(trace_ids=["fail1", "fail2", "fail3", "pass1", "pass2"])
@@ -1373,12 +1373,12 @@ git commit -m "test(evolve): add PDA end-to-end integration test"
 
 | Spec Requirement | Task |
 |---|---|
-| LOAD traces from traces.db | Task 6 (PdaProposer step 1) |
+| LOAD traces from traces.db | Task 6 (AheProposer step 1) |
 | CLEAN — OTEL spans → NormalizedTrace | Task 2 (OtelTraceAdapter) |
 | TaskCompletion evaluator — pass/fail/uncertain | Task 4 (TraceOutcomeEvaluator) |
 | Diagnosis — root cause analysis | Task 3 (DiagnosisAgent) |
-| Proposal with ExperienceOperation | Task 1 (models) + Task 6 (PdaProposer) |
-| Decision — RuleGate + LLMDecision | Task 7 (PdaDecisionPolicy) |
+| Proposal with ExperienceOperation | Task 1 (models) + Task 6 (AheProposer) |
+| Decision — RuleGate + LLMDecision | Task 7 (AheDecisionPolicy) |
 | Apply — candidate experience write | Task 8 (SkillWriter extension) |
 | Record — audit chain persistence | Existing pipeline._persist() |
 | Experience governance — governor + operations | Task 5 (ExperienceGovernor) |
@@ -1396,5 +1396,5 @@ No TBD/TODO found ✅
 - `ExperienceOperationType` defined in Task 1 (models.py), used consistently in Tasks 5, 6, 7, 8 ✅
 - `TraceOutcome` defined in Task 1 (models.py), used in Task 4 (evaluator) ✅
 - `GovernanceContext` defined in Task 1 (models.py), used in Task 5 (governor) ✅
-- `DiagnosisResult` defined in Task 3 (diagnosis/models.py), used in Task 6 (PdaProposer) ✅
+- `DiagnosisResult` defined in Task 3 (diagnosis/models.py), used in Task 6 (AheProposer) ✅
 - All method signatures match across tasks ✅
