@@ -34,9 +34,9 @@ logger = logging.getLogger(__name__)
 class DiagnosisAgent:
     """Lightweight ReAct Agent for trace diagnosis.
 
-    Not a DeepAgent — uses its own simple loop with 7 read-only tools.
-    Context management: tool output truncation + context compression
-    when approaching token limits.
+    Operates on NormalizedTrace data (structured messages), not raw OTEL spans.
+    Uses its own simple loop with 7 read-only tools.
+    Context management: tool output truncation + context compression.
     """
 
     def __init__(
@@ -56,22 +56,39 @@ class DiagnosisAgent:
 
     async def run(
         self,
-        trace_ids: list[str],
+        trace_ids: list[str] | None = None,
+        normalized_traces: list[dict] | None = None,
         mode: str = "diagnose",
         question: str | None = None,
     ) -> DiagnosisResult:
-        """Execute ReAct loop, return diagnosis result."""
+        """Execute ReAct loop over NormalizedTrace data.
+
+        Two entry points:
+        - From AheProposer: pass normalized_traces directly.
+        - Standalone (CLI): pass trace_ids (CLEAN step done here).
+        """
         if mode not in ("diagnose", "propose"):
             raise ValueError(f"mode must be 'diagnose' or 'propose', got '{mode}'")
 
-        # Initialize tool executor
-        if self._store:
-            self._tool_executor = DiagnosisToolExecutor(
-                store=self._store, workspace_dir=self._workspace_dir
-            )
+        # Resolve NormalizedTrace data
+        traces = normalized_traces
+        if traces is None and trace_ids:
+            traces = await self._clean_traces(trace_ids)
+
+        if not traces:
+            logger.warning("DiagnosisAgent: no NormalizedTrace data available")
+            return DiagnosisResult(mode=mode, issues=[], response="No trace data", iterations=0)
+
+        # Initialize tool executor with NormalizedTrace data
+        self._tool_executor = DiagnosisToolExecutor(
+            normalized_traces=traces,
+            store=self._store,
+            workspace_dir=self._workspace_dir,
+        )
 
         # Build initial messages
-        messages = self._build_messages(trace_ids, mode, question)
+        trace_ids_to_show = [nt.get("id") or nt.get("trace_id", "unknown") for nt in traces]
+        messages = self._build_messages(trace_ids_to_show, mode, question)
 
         # ReAct loop
         for iteration in range(self._max_iterations):
@@ -198,6 +215,26 @@ class DiagnosisAgent:
             {"role": "system", "content": system_msg},
             {"role": "user", "content": user_content},
         ]
+
+    async def _clean_traces(self, trace_ids: list[str]) -> list[dict]:
+        """CLEAN step: OTEL spans → NormalizedTrace dicts.
+
+        For standalone use (CLI) where NormalizedTrace not pre-computed.
+        """
+        try:
+            from jiuwenswarm.evolve.ahe.otel_adapter import OtelTraceAdapter
+
+            adapter = OtelTraceAdapter(db_path=self._store._traces_db_path if self._store else "traces.db")
+            normalized = []
+            for tid in trace_ids:
+                trace_dict = adapter.convert_trace(tid)
+                if trace_dict.get("observations"):
+                    trace_dict["trace_id"] = tid
+                    normalized.append(trace_dict)
+            return normalized
+        except Exception as exc:
+            logger.warning("DiagnosisAgent._clean_traces failed: %s", exc)
+            return []
 
     async def _call_llm(self, messages: list[dict]) -> str:
         """Call LLM using openjiuwen Model — same pattern as LLMProposer."""
@@ -344,7 +381,7 @@ class DiagnosisAgent:
     def _execute_tool(self, tool_name: str, arguments: dict) -> dict:
         """Execute a tool via DiagnosisToolExecutor."""
         if self._tool_executor is None:
-            return {"error": "No tool executor configured (store not provided)"}
+            return {"error": "No tool executor configured (no NormalizedTrace data)"}
         return self._tool_executor.execute(tool_name, arguments)
 
     def _finalize(

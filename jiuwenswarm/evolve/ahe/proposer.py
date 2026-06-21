@@ -95,6 +95,10 @@ class AheProposer(ProposalGenerator):
             )
         return self._diagnosis_agent
 
+    def _normalized_trace_dicts(self, failed: list[tuple]) -> list[dict]:
+        """Extract NormalizedTrace dicts from failed trace tuples."""
+        return [nt for nt, _ in failed]
+
     async def generate(self, batch: TraceBatch) -> list[Proposal]:
         """Execute the full PDA pipeline for a trace batch.
 
@@ -140,9 +144,9 @@ class AheProposer(ProposalGenerator):
                      len(failed), len(normalized_traces))
 
         # ── Step 4: DIAG ──
-        diag_trace_ids = [nt["trace_id"] for nt, _ in failed]
         diagnosis_result = await self._diag.run(
-            trace_ids=diag_trace_ids,
+            trace_ids=[nt["trace_id"] for nt, _ in failed],
+            normalized_traces=self._normalized_trace_dicts(failed),
             mode="diagnose",
             question="Analyze these traces for root causes of task failure.",
         )

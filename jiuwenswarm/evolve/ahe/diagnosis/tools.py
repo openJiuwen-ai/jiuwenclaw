@@ -1,9 +1,9 @@
 # Copyright (c) Huawei Technologies, Co., Ltd. 2026. All rights reserved.
 """DiagnosisAgent read-only tool implementations.
 
-Pluggable: PDA algorithm owns these tools. No dependency on LLMProposer
-or other proposal generators. Tools only read from SqliteStore and local
-files — no write capabilities.
+Operates on NormalizedTrace dicts (output of OtelTraceAdapter + _extract_trace_data).
+This means DiagnosisAgent consumes the same structured data format used by
+TraceOutcomeEvaluator and AheProposer — the CLEAN step is NOT bypassed.
 """
 
 from __future__ import annotations
@@ -25,11 +25,7 @@ def _truncate_tool_output(
     head_lines: int = 50,
     tail_lines: int = 30,
 ) -> str:
-    """Truncate long tool output, keeping head + tail with truncation notice.
-
-    The truncation message hints the Agent to use offset/limit for targeted
-    re-reading — truncation is not data loss, it's a navigation hint.
-    """
+    """Truncate long tool output, keeping head + tail with truncation notice."""
     lines = content.split("\n")
     total_lines = len(lines)
     total_chars = len(content)
@@ -50,25 +46,45 @@ def _truncate_tool_output(
     return "\n".join(head) + truncation_notice + "\n".join(tail)
 
 
+# ── Helpers ──────────────────────────────────────────────────────────────
+
+
+def _find_trace(
+    normalized_traces: list[dict], trace_id: str
+) -> int | None:
+    """Find index of a trace in normalized_traces by trace_id."""
+    for i, nt in enumerate(normalized_traces):
+        tid = nt.get("id") or nt.get("trace_id") or ""
+        if tid == trace_id:
+            return i
+    return None
+
+
 # ── Tool executor ────────────────────────────────────────────────────────
 
 
 class DiagnosisToolExecutor:
-    """Dispatches tool calls to the appropriate method.
+    """Dispatches tool calls — operates on NormalizedTrace data.
 
-    Each tool receives a store (SqliteStore) for data access.
-    All methods return dicts that are serialized back to the LLM.
+    Consumes NormalizedTrace dicts (not raw OTEL spans). Optional store
+    for evolution.db queries (query_evolve_records, query_proposals).
     """
 
-    def __init__(self, store: Any, workspace_dir: str | None = None):
+    def __init__(
+        self,
+        normalized_traces: list[dict] | None = None,
+        store: Any | None = None,
+        workspace_dir: str | None = None,
+    ) -> None:
+        self._normalized_traces = normalized_traces or []
         self._store = store
         self._workspace_dir = workspace_dir
 
     def execute(self, tool_name: str, arguments: dict) -> dict:
         """Dispatch a tool call by name."""
         dispatch = {
-            "read_spans": self._read_spans,
-            "search_spans": self._search_spans,
+            "read_trace": self._read_trace,
+            "search_trace": self._search_trace,
             "list_traces": self._list_traces,
             "query_evolve_records": self._query_evolve_records,
             "query_proposals": self._query_proposals,
@@ -82,12 +98,10 @@ class DiagnosisToolExecutor:
 
         try:
             result = handler(**arguments)
-            # Truncate if needed (except submit_result)
             if tool_name != "submit_result" and isinstance(result, str):
                 result = _truncate_tool_output(result)
             elif tool_name != "submit_result" and isinstance(result, dict):
-                # Truncate the 'spans' or 'content' fields if they exist
-                for key in ("spans", "content", "matches"):
+                for key in ("content", "matches"):
                     if key in result and isinstance(result[key], (str, list)):
                         raw = json.dumps(result[key], ensure_ascii=False)
                         if len(raw) > 10000:
@@ -97,86 +111,140 @@ class DiagnosisToolExecutor:
             logger.warning("Tool '%s' execution failed: %s", tool_name, exc)
             return {"error": str(exc)}
 
-    # ── Tool implementations ──────────────────────────────────────────
+    # ── NormalizedTrace tools ─────────────────────────────────────────
 
-    def _read_spans(
+    def _read_trace(
         self,
         trace_id: str,
+        target: str = "overview",
         offset: int = 0,
-        limit: int = 50,
-        name_filter: str = "",
+        limit: int = 20,
     ) -> dict:
-        """Read OTEL spans for trace_id from traces.db with pagination."""
-        spans = self._store.read_spans(trace_id)
-        total_spans = len(spans)
+        """Read NormalizedTrace data — works on structured messages, not raw spans.
 
-        # Apply name filter
-        if name_filter:
-            try:
-                pattern = re.compile(name_filter, re.IGNORECASE)
-                spans = [s for s in spans if pattern.search(s.get("name", ""))]
-            except re.error:
-                pass  # Invalid regex — skip filter
+        Args:
+            trace_id: Trace to read.
+            target: "overview" | "messages" | "tool_calls" | "subagents"
+            offset: 0-based message index offset.
+            limit: Max messages to return.
+        """
+        idx = _find_trace(self._normalized_traces, trace_id)
+        if idx is None:
+            return {"error": f"Trace {trace_id} not found in normalized data"}
 
-        # Pagination
-        page = spans[offset : offset + limit]
+        nt = self._normalized_traces[idx]
+        result = {"trace_id": trace_id}
 
-        # Serialize each span's attributes/events from JSON strings
-        serialized = []
-        for s in page:
-            entry = dict(s)
-            for key in ("attributes", "events", "resource"):
-                raw = entry.get(key)
-                if isinstance(raw, str):
-                    try:
-                        entry[key] = json.loads(raw)
-                    except (json.JSONDecodeError, TypeError):
-                        entry[key] = raw
-            serialized.append(entry)
+        if target == "overview":
+            # Return trace summary
+            messages = nt.get("messages", [])
+            result.update({
+                "trace_id": trace_id,
+                "message_count": len(messages),
+                "system_prompt": str(nt.get("system_prompt", ""))[:500],
+                "input_snippet": self._get_input_snippet(nt)[:300],
+                "output_snippet": self._get_output_snippet(nt)[:300],
+                "subagent_count": len(nt.get("subagents", [])),
+                "total_tokens": nt.get("total_tokens", "N/A"),
+            })
 
-        return {
-            "trace_id": trace_id,
-            "total_spans": total_spans,
-            "offset": offset,
-            "limit": limit,
-            "returned": len(serialized),
-            "spans": serialized,
-        }
+        elif target == "messages":
+            messages = nt.get("messages", [])
+            total = len(messages)
+            page = messages[offset : offset + limit]
 
-    def _search_spans(
+            # Flatten each message for LLM readability
+            flat = []
+            for i, msg in enumerate(page):
+                flat.append({
+                    "index": offset + i,
+                    "role": msg.get("role", ""),
+                    "content": str(msg.get("content", ""))[:2000],
+                    "tool_call_count": len(msg.get("tool_calls", [])),
+                })
+            result.update({
+                "total_messages": total,
+                "offset": offset,
+                "limit": limit,
+                "returned": len(flat),
+                "messages": flat,
+            })
+
+        elif target == "tool_calls":
+            messages = nt.get("messages", [])
+            tool_calls = []
+            for msg in messages:
+                for tc in msg.get("tool_calls", []):
+                    tool_calls.append({
+                        "name": tc.get("name", ""),
+                        "input": str(tc.get("input", ""))[:500],
+                        "output": str(tc.get("output", ""))[:500],
+                        "latency": tc.get("latency"),
+                    })
+            total = len(tool_calls)
+            page = tool_calls[offset : offset + limit]
+            result.update({
+                "total_tool_calls": total,
+                "offset": offset,
+                "limit": limit,
+                "returned": len(page),
+                "tool_calls": page,
+            })
+
+        elif target == "subagents":
+            subagents = nt.get("subagents", [])
+            total = len(subagents)
+            page = subagents[offset : offset + limit]
+            summaries = []
+            for sa in page:
+                summaries.append({
+                    "name": sa.get("name", ""),
+                    "mode": sa.get("mode", ""),
+                    "message_count": len(sa.get("messages", [])),
+                })
+            result.update({
+                "total_subagents": total,
+                "subagents": summaries,
+            })
+
+        else:
+            return {"error": f"Unknown target: {target}. Use: overview, messages, tool_calls, subagents"}
+
+        return result
+
+    def _search_trace(
         self,
         trace_id: str,
         pattern: str,
         max_results: int = 20,
     ) -> dict:
-        """Regex search within spans for targeted lookups."""
-        spans = self._store.read_spans(trace_id)
-        matches = []
+        """Regex search within normalized trace messages."""
+        idx = _find_trace(self._normalized_traces, trace_id)
+        if idx is None:
+            return {"error": f"Trace {trace_id} not found"}
 
         try:
             regex = re.compile(pattern, re.IGNORECASE)
         except re.error:
             return {"error": f"Invalid regex pattern: {pattern}"}
 
-        for i, span in enumerate(spans):
+        nt = self._normalized_traces[idx]
+        messages = nt.get("messages", [])
+        matches = []
+
+        for i, msg in enumerate(messages):
             searchable = (
-                span.get("name", "")
+                str(msg.get("content", ""))
                 + " "
-                + str(span.get("attributes", ""))
-                + " "
-                + str(span.get("events", ""))
-                + " "
-                + str(span.get("status_description", ""))
+                + str(msg.get("tool_calls", ""))
             )
             if regex.search(searchable):
-                # Extract brief context
                 matched_text = ""
                 for m in regex.finditer(searchable):
                     matched_text += m.group(0)[:200] + " "
-
                 matches.append({
-                    "span_index": i,
-                    "name": span.get("name", ""),
+                    "message_index": i,
+                    "role": msg.get("role", ""),
                     "matched_text": matched_text.strip()[:500],
                 })
                 if len(matches) >= max_results:
@@ -189,52 +257,54 @@ class DiagnosisToolExecutor:
             "total_matches": len(matches),
         }
 
-    def _list_traces(self, limit: int = 20, since: str = "") -> dict:
-        """List recent trace_ids with summary info."""
-        if since:
-            trace_ids = self._store.get_trace_ids_since(since, limit=limit)
-        else:
-            trace_ids = self._store.get_recent_trace_ids(limit=limit)
-
+    def _list_traces(self) -> dict:
+        """List all available NormalizedTrace summaries."""
         traces = []
-        for tid in trace_ids:
-            spans = self._store.read_spans(tid)
-            first_name = spans[0].get("name", "N/A") if spans else "N/A"
+        for nt in self._normalized_traces:
+            tid = nt.get("id") or nt.get("trace_id") or "unknown"
+            messages = nt.get("messages", [])
             traces.append({
                 "trace_id": tid,
-                "span_count": len(spans),
-                "first_span_name": first_name,
+                "message_count": len(messages),
+                "input_snippet": self._get_input_snippet(nt)[:100],
+                "output_snippet": self._get_output_snippet(nt)[:100],
             })
 
         return {"traces": traces}
 
+    # ── Legacy tools (from evolution.db) ──────────────────────────────
+
     def _query_evolve_records(self, trace_id: str) -> dict:
-        """Query Proposal/Decision/Apply chain for trace_id."""
+        """Query Proposal/Decision/Apply chain — uses store (evolution.db)."""
+        if not self._store:
+            return {"error": "No evolution store configured"}
         return self._store.query_by_trace_id(trace_id)
 
     def _query_proposals(self, batch_id: str) -> dict:
         """Query all Proposals for a batch."""
+        if not self._store:
+            return {"error": "No evolution store configured"}
         batch = self._store.get_batch(batch_id)
         if not batch:
             return {"error": f"Batch {batch_id} not found"}
         return batch
 
+    # ── File tool ─────────────────────────────────────────────────────
+
     def _read_file(self, path: str, offset: int = 0, limit: int = 100) -> dict:
         """Read local file content with pagination and safety constraints."""
         target = Path(path)
 
-        # Safety: only allow specific directories
         if self._workspace_dir:
             allowed_dirs = [
                 Path(self._workspace_dir) / "evolution",
                 Path(self._workspace_dir) / ".jiuwenswarm",
             ]
-            # Also allow the data_dir where traces.db lives
-            try:
-                allowed_dirs.append(Path(self._store._traces_db_path).parent)
-            except Exception:
-                pass
-
+            if self._store:
+                try:
+                    allowed_dirs.append(Path(self._store._traces_db_path).parent)
+                except Exception:
+                    pass
             is_allowed = any(
                 str(target.resolve()).startswith(str(d.resolve()))
                 for d in allowed_dirs
@@ -250,7 +320,6 @@ class DiagnosisToolExecutor:
             total_lines = len(lines)
             page = lines[offset : offset + limit]
             content = "\n".join(page)
-
             return {
                 "path": path,
                 "total_lines": total_lines,
@@ -261,6 +330,24 @@ class DiagnosisToolExecutor:
         except Exception as exc:
             return {"error": f"Failed to read file: {exc}"}
 
-    def _submit_result(self, result: str) -> str:
-        """Stop tool — submit final JSON result and terminate ReAct loop."""
+    # ── Stop signal ───────────────────────────────────────────────────
+
+    @staticmethod
+    def _submit_result(result: str) -> str:
         return "TASK_COMPLETED"
+
+    # ── Helpers ───────────────────────────────────────────────────────
+
+    @staticmethod
+    def _get_input_snippet(nt: dict) -> str:
+        input_data = nt.get("input", {})
+        if isinstance(input_data, dict):
+            return input_data.get("message", str(input_data))
+        return str(input_data)
+
+    @staticmethod
+    def _get_output_snippet(nt: dict) -> str:
+        output_data = nt.get("output", {})
+        if isinstance(output_data, dict):
+            return output_data.get("content", str(output_data))
+        return str(output_data)
