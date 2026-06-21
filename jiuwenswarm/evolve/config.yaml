@@ -50,7 +50,7 @@ evolve:
     model_name: "gpt-4"             # 如不配置，回退到 agents.default_model
 
   # PDA-style AHE 算法配置 (pluggable, added in Phase 1)
-  pda:
+  ahe:
     proposer:
       max_proposals_per_batch: 3
       max_skill_proposals: 2
