@@ -638,6 +638,8 @@ class TraceOutcome(BaseModel):
 
     score: float = Field(ge=0.0, le=1.0)
     confidence: float = Field(ge=0.0, le=1.0, default=0.0)
+    judgment_method: str = ""
+    """How this outcome was determined: "span_error" | "heuristic" | "llm_evaluator"."""
     reason: str = ""
     key_evidence: str = ""
     missing_requirements: list[str] = Field(default_factory=list)
