@@ -2,7 +2,7 @@
 """Import verification and sync test runner for all AHE modules."""
 import sys
 import os
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..'))
 
 import importlib
 
