@@ -35,7 +35,7 @@ from datetime import datetime, timezone
 from enum import StrEnum
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 # ============================================================================
@@ -524,3 +524,130 @@ class TraceBatch:
 
     metadata: dict[str, JsonValue] = field(default_factory=dict)
     """Extension point (e.g. ``benchmark_run_id``)."""
+
+
+# ============================================================================
+# PDA Phase 1 — Experience governance & task evaluation models
+# ============================================================================
+
+
+class ExperienceOperationType(StrEnum):
+    """Operation types for experience governance.
+
+    Propose phase explicitly declares governance intent; Decision validates;
+    Apply faithfully executes. These are pluggable — PDA algorithm defines
+    them independently; other algorithms (LLMProposer) do not use them.
+    """
+
+    ADD = "add"
+    MERGE = "merge"
+    UPDATE = "update"
+    DEPRECATE = "deprecate"
+    REPLACE = "replace"
+    NOOP = "noop"
+
+
+class ExperienceOperation(BaseModel):
+    """A single experience operation within a Proposal.
+
+    Carried in ``Proposal.metadata["operations"]``. Only used by PDA-style
+    algorithms — existing algorithms (LLMProposer, RulePolicy) ignore this
+    field entirely.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    op: ExperienceOperationType
+    """Operation type — determines what Apply does."""
+
+    target_experience_id: str | None = None
+    """Target experience for MERGE/REPLACE/UPDATE/DEPRECATE.
+    Required when op != ADD/NOOP."""
+
+    new_content: str | None = None
+    """New experience content for ADD/REPLACE/UPDATE.
+    Required when op in {ADD, REPLACE, UPDATE}."""
+
+    reason: str
+    """Why this operation was chosen over alternatives."""
+
+    evidence_refs: list[EvidenceRef] = Field(default_factory=list)
+    """Evidence supporting this operation."""
+
+    expected_effect: str | None = None
+    """Predicted improvement if this operation is applied."""
+
+    risk: str | None = None
+    """Potential downsides."""
+
+    @model_validator(mode="after")
+    def _validate_op_requirements(self) -> "ExperienceOperation":
+        """Ensure required fields are present for each operation type."""
+        content_required = {
+            ExperienceOperationType.ADD,
+            ExperienceOperationType.REPLACE,
+            ExperienceOperationType.UPDATE,
+        }
+        target_required = {
+            ExperienceOperationType.MERGE,
+            ExperienceOperationType.REPLACE,
+            ExperienceOperationType.UPDATE,
+            ExperienceOperationType.DEPRECATE,
+        }
+
+        if self.op in content_required and not self.new_content:
+            raise ValueError(f"op={self.op.value} requires new_content")
+        if self.op in target_required and not self.target_experience_id:
+            raise ValueError(f"op={self.op.value} requires target_experience_id")
+        return self
+
+
+class GovernanceContext(BaseModel):
+    """Current experience governance state for a skill.
+
+    Provided by ExperienceGovernor before Propose; used by PdaDecisionPolicy
+    for validation. Pluggable — only PDA algorithm consumes this.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    skill_name: str
+    current_count: int
+    max_count: int = 10
+    can_add: bool
+    existing_experiences: list[dict[str, Any]] = Field(default_factory=list)
+    similar_experiences: list[dict[str, Any]] = Field(default_factory=list)
+    replaceable_experiences: list[dict[str, Any]] = Field(default_factory=list)
+    protected_experiences: list[str] = Field(default_factory=list)
+    allowed_operations: list[ExperienceOperationType] = Field(default_factory=list)
+
+
+class TraceOutcome(BaseModel):
+    """Task completion evaluation result for a single trace.
+
+    Produced by TraceOutcomeEvaluator (PDA algorithm). Other algorithms
+    (LLMProposer) do not use this — they directly read spans.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    trace_id: str
+    task_name: str | None = None
+    outcome: str
+    """Must be "pass", "fail", or "uncertain"."""
+
+    score: float = Field(ge=0.0, le=1.0)
+    confidence: float = Field(ge=0.0, le=1.0, default=0.0)
+    reason: str = ""
+    key_evidence: str = ""
+    missing_requirements: list[str] = Field(default_factory=list)
+    needs_external_verification: bool = False
+
+    @model_validator(mode="after")
+    def _validate_outcome(self) -> "TraceOutcome":
+        valid = {"pass", "fail", "uncertain"}
+        if self.outcome not in valid:
+            raise ValueError(
+                f"outcome must be one of {sorted(valid)}, got '{self.outcome}'"
+            )
+        return self
