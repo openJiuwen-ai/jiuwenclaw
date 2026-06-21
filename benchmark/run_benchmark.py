@@ -90,13 +90,13 @@ def setup_environment(workspace: Path) -> None:
     # Set bash/write/edit tools to auto-allow so agent can execute without prompts
     config_path = workspace / "config" / "config.yaml"
     if config_path.exists():
-        _config_backup = config_path.read_text()
+        _config_backup = config_path.read_text(encoding="utf-8")
         modified = _config_backup
         for tool in ("bash", "write", "write_file", "edit_file", "search_replace",
                       "mcp_exec_command", "create_terminal"):
             modified = modified.replace(f"{tool}: ask", f"{tool}: allow")
         if modified != _config_backup:
-            config_path.write_text(modified)
+            config_path.write_text(modified, encoding="utf-8")
             log.info("  ✓ permissions: bash/write/edit → allow (backup saved)")
 
 
@@ -106,7 +106,7 @@ def teardown_environment(workspace: Path) -> None:
 
     config_path = workspace / "config" / "config.yaml"
     if _config_backup is not None and config_path.exists():
-        config_path.write_text(_config_backup)
+        config_path.write_text(_config_backup, encoding="utf-8")
         _config_backup = None
         log.info("  ✓ permissions: restored original config")
 
@@ -119,7 +119,7 @@ def load_test_cases() -> list[dict]:
     """Load all benchmark_case.json files, sorted by category_id then skill_id."""
     cases = []
     for case_file in sorted(SKILLS_SRC.glob("*/benchmark_case.json")):
-        with open(case_file) as f:
+        with open(case_file, encoding="utf-8") as f:
             case = json.load(f)
         case["_dir"] = str(case_file.parent)
         cases.append(case)
@@ -323,7 +323,13 @@ def run_evolution(n_traces: int = 20, use_ahe: bool = False) -> bool:
         n_traces: Number of recent traces to process.
         use_ahe: If True, pass --ahe flag to use AHE algorithm.
     """
-    cmd = ["jiuwenswarm-evolve", "run", "--latest", str(n_traces)]
+    import shutil
+    cli = shutil.which("jiuwenswarm-evolve")
+    if cli:
+        cmd = [cli, "run", "--latest", str(n_traces)]
+    else:
+        # Fallback: invoke as Python module
+        cmd = [sys.executable, "-m", "jiuwenswarm.evolve.cli", "run", "--latest", str(n_traces)]
     if use_ahe:
         cmd.append("--ahe")
     log.info(f"  Running: {' '.join(cmd)}")
@@ -386,7 +392,7 @@ def read_evolutions_for_skill(skills_dir: Path, skill_id: str) -> list[dict]:
     evo_path = skills_dir / skill_id / "evolutions.json"
     if not evo_path.exists():
         return []
-    with open(evo_path) as f:
+    with open(evo_path, encoding="utf-8") as f:
         data = json.load(f)
     return data.get("entries", [])
 
