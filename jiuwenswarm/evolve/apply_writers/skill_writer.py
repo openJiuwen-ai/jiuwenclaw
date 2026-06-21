@@ -21,6 +21,8 @@ from jiuwenswarm.evolve.models import (
     ProposalState,
     ProposalTargetType,
     TargetStore,
+    ExperienceOperationType,
+    ExperienceOperation,
 )
 from jiuwenswarm.evolve.registry import apply_writers
 
@@ -128,9 +130,30 @@ class SkillExperienceWriter(ApplyWriter):
                 evolution_path, skill_name
             )
 
-            # Build a new EvolutionRecord and append it
-            record = self._build_record(proposal)
-            evolution_log.entries.append(record)  # type: ignore[attr-defined]
+            # Check for ExperienceOperation in metadata
+            operations_raw = proposal.metadata.get("operations", [])
+            if operations_raw:
+                # Dispatch per operation — PDA-style governance-aware pipeline
+                for op_dict in operations_raw:
+                    op = ExperienceOperation(**op_dict)
+                    match op.op:
+                        case ExperienceOperationType.ADD:
+                            self._apply_add(evolution_log, proposal, op)
+                        case ExperienceOperationType.MERGE:
+                            self._apply_merge(evolution_log, proposal, op)
+                        case ExperienceOperationType.REPLACE:
+                            self._apply_replace(evolution_log, proposal, op)
+                        case ExperienceOperationType.UPDATE:
+                            self._apply_update(evolution_log, proposal, op)
+                        case ExperienceOperationType.DEPRECATE:
+                            self._apply_deprecate(evolution_log, proposal, op)
+                        case ExperienceOperationType.NOOP:
+                            pass  # No action needed
+            else:
+                # Legacy path (no operations): default ADD behavior
+                record = self._build_record(proposal)
+                evolution_log.entries.append(record)  # type: ignore[attr-defined]
+
             evolution_log.updated_at = (  # type: ignore[attr-defined]
                 datetime.now(timezone.utc).isoformat()
             )
@@ -242,7 +265,6 @@ class SkillExperienceWriter(ApplyWriter):
             target=EvolutionTarget.BODY,
         )
 
-        # Carry over score if present in metadata
         score = float(proposal.metadata.get("max_score", 0.6))
         summary = proposal.predicted_impact.strip() or None
 
@@ -261,3 +283,91 @@ class SkillExperienceWriter(ApplyWriter):
             score=score,
             summary=summary,
         )
+
+    # ── PDA ExperienceOperation handlers ──────────────────────────────
+
+    def _apply_add(
+        self, evolution_log, proposal: Proposal, op: ExperienceOperation
+    ) -> None:
+        """ADD a new experience entry with state=candidate."""
+        from openjiuwen.agent_evolving.checkpointing.types import (
+            EvolutionPatch, EvolutionRecord,
+        )
+        from openjiuwen.agent_evolving.signal.base import EvolutionTarget
+
+        content = op.new_content or _build_content(proposal)
+        patch = EvolutionPatch(
+            section=_DEFAULT_SECTION, action=_DEFAULT_ACTION,
+            content=content, target=EvolutionTarget.BODY,
+        )
+        record = EvolutionRecord.make(
+            source="pda_proposer",
+            context=f"PDA proposal {proposal.proposal_id}: {op.reason}",
+            change=patch,
+            score=float(proposal.metadata.get("max_score", 0.6)),
+            summary=proposal.predicted_impact.strip() or None,
+        )
+        record.metadata["state"] = "candidate"
+        record.metadata["proposal_id"] = proposal.proposal_id
+        record.metadata["evidence_refs"] = [
+            e.model_dump() for e in op.evidence_refs
+        ]
+        record.metadata["created_at"] = datetime.now(timezone.utc).isoformat()
+        record.metadata["hit_count"] = 0
+        record.metadata["success_after_hit_count"] = 0
+        evolution_log.entries.append(record)
+
+    def _apply_merge(
+        self, evolution_log, proposal: Proposal, op: ExperienceOperation
+    ) -> None:
+        """MERGE evidence_refs into an existing entry."""
+        target_id = op.target_experience_id
+        for entry in evolution_log.entries:
+            if entry.id == target_id:
+                if entry.metadata is None:
+                    entry.metadata = {}
+                existing_ev = entry.metadata.get("evidence_refs", [])
+                existing_ev.extend(
+                    e.model_dump() for e in op.evidence_refs
+                )
+                entry.metadata["evidence_refs"] = existing_ev
+                entry.metadata["merged_from"] = proposal.proposal_id
+                logger.info("MERGE evidence to %s (%d refs)", target_id, len(op.evidence_refs))
+                return
+        logger.warning("MERGE target %s not found", target_id)
+
+    def _apply_replace(
+        self, evolution_log, proposal: Proposal, op: ExperienceOperation
+    ) -> None:
+        """REPLACE an existing entry's content."""
+        target_id = op.target_experience_id
+        new_content = op.new_content or _build_content(proposal)
+        for entry in evolution_log.entries:
+            if entry.id == target_id:
+                if entry.change is not None:
+                    entry.change.content = new_content
+                entry.metadata["replaced_by"] = proposal.proposal_id
+                entry.metadata["replaced_at"] = datetime.now(timezone.utc).isoformat()
+                logger.info("REPLACE %s with new content", target_id)
+                return
+        logger.warning("REPLACE target %s not found", target_id)
+
+    def _apply_update(
+        self, evolution_log, proposal: Proposal, op: ExperienceOperation
+    ) -> None:
+        """UPDATE an existing entry's content."""
+        self._apply_replace(evolution_log, proposal, op)
+
+    def _apply_deprecate(
+        self, evolution_log, proposal: Proposal, op: ExperienceOperation
+    ) -> None:
+        """DEPRECATE an existing entry."""
+        target_id = op.target_experience_id
+        for entry in evolution_log.entries:
+            if entry.id == target_id:
+                entry.metadata["state"] = "deprecated"
+                entry.metadata["deprecated_by"] = proposal.proposal_id
+                entry.metadata["deprecated_at"] = datetime.now(timezone.utc).isoformat()
+                logger.info("DEPRECATE %s", target_id)
+                return
+        logger.warning("DEPRECATE target %s not found", target_id)
