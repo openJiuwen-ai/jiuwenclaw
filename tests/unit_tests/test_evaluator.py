@@ -2,7 +2,7 @@
 """Tests for TraceOutcomeEvaluator and TaskNameInferrer."""
 
 import pytest
-from jiuwenswarm.evolve.pda.evaluator import TraceOutcomeEvaluator, TaskNameInferrer
+from jiuwenswarm.evolve.ahe.evaluator import TraceOutcomeEvaluator, TaskNameInferrer
 from jiuwenswarm.evolve.models import TraceOutcome
 
 

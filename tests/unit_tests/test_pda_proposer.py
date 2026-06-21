@@ -1,17 +1,17 @@
 # Copyright (c) Huawei Technologies, Co., Ltd. 2026. All rights reserved.
-"""Tests for PdaProposer — limit enforcement and proposal parsing."""
+"""Tests for AheProposer — limit enforcement and proposal parsing."""
 
 import pytest
 from jiuwenswarm.evolve.models import (
     Proposal, ProposalTargetType, ProposalState,
     TraceBatch,
 )
-from jiuwenswarm.evolve.pda.proposer import PdaProposer
+from jiuwenswarm.evolve.ahe.proposer import AheProposer
 
 
-class TestPdaProposerEnforceLimits:
+class TestAheProposerEnforceLimits:
     def test_activates_top_skills(self):
-        proposer = PdaProposer.__new__(PdaProposer)
+        proposer = AheProposer.__new__(AheProposer)
         proposer._max_proposals = 3
         proposer._max_skill_proposals = 2
 
@@ -46,18 +46,18 @@ class TestPdaProposerEnforceLimits:
         assert len(result) == 2
 
     def test_all_pass_returns_empty_from_generate(self):
-        """When MockEvaluator returns all 'pass', PdaProposer returns []."""
+        """When MockEvaluator returns all 'pass', AheProposer returns []."""
         # This exercises the flow: generate() -> no fail traces -> empty
-        proposer = PdaProposer(trace_reader=None, store=None)
+        proposer = AheProposer(trace_reader=None, store=None)
         # Without real store/traces, generate() should return []
         import asyncio
         result = asyncio.run(proposer.generate(TraceBatch(trace_ids=[])))
         assert result == []
 
 
-class TestPdaProposerParseProposals:
+class TestAheProposerParseProposals:
     def test_parse_valid_proposals(self):
-        proposer = PdaProposer.__new__(PdaProposer)
+        proposer = AheProposer.__new__(AheProposer)
         raw = [
             {
                 "target_id": "bash-tool",
@@ -83,15 +83,15 @@ class TestPdaProposerParseProposals:
         assert "operations" in proposals[0].metadata
 
     def test_parse_invalid_proposal_skipped(self):
-        proposer = PdaProposer.__new__(PdaProposer)
+        proposer = AheProposer.__new__(AheProposer)
         raw = [{"invalid": "no required fields"}]
         proposals = proposer._parse_proposals(raw, "batch-001")
         assert len(proposals) == 0
 
 
-class TestPdaProposerBuildSummaries:
+class TestAheProposerBuildSummaries:
     def test_build_trace_summaries(self):
-        proposer = PdaProposer.__new__(PdaProposer)
+        proposer = AheProposer.__new__(AheProposer)
         from jiuwenswarm.evolve.models import TraceOutcome
         failed = [
             (
@@ -120,7 +120,7 @@ class TestPdaProposerBuildSummaries:
             response="Found 1 issue",
             iterations=5,
         )
-        summary = PdaProposer._build_diagnosis_summary(diag)
+        summary = AheProposer._build_diagnosis_summary(diag)
         assert "bash error" in summary
         assert "Missing path" in summary
 
@@ -134,6 +134,6 @@ class TestPdaProposerBuildSummaries:
             replaceable_experiences=[{"id": "exp-001", "state": "candidate"}],
             allowed_operations=[ExperienceOperationType.ADD, ExperienceOperationType.NOOP],
         )
-        summary = PdaProposer._build_governance_summary({"bash-tool": ctx})
+        summary = AheProposer._build_governance_summary({"bash-tool": ctx})
         assert "bash-tool" in summary
         assert "5/10" in summary

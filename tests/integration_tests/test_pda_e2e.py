@@ -11,9 +11,9 @@ from jiuwenswarm.evolve.models import (
     TraceBatch, Proposal, ProposalTargetType, ProposalState,
     EvidenceRef, TraceOutcome,
 )
-from jiuwenswarm.evolve.pda.proposer import PdaProposer
-from jiuwenswarm.evolve.pda.decision_policy import PdaDecisionPolicy
-from jiuwenswarm.evolve.pda.experience_governor import ExperienceGovernor
+from jiuwenswarm.evolve.ahe.proposer import AheProposer
+from jiuwenswarm.evolve.ahe.decision_policy import AheDecisionPolicy
+from jiuwenswarm.evolve.ahe.experience_governor import ExperienceGovernor
 
 
 class MockStore:
@@ -80,8 +80,8 @@ class TestPdaEndToEnd:
         """Run the full PDA pipeline with mocked store (no real DB/LLM needed).
 
         This tests that:
-        1. PdaProposer.generate() returns proposals from mock data
-        2. PdaDecisionPolicy.evaluate() returns decisions
+        1. AheProposer.generate() returns proposals from mock data
+        2. AheDecisionPolicy.evaluate() returns decisions
         3. The results have the right structure
         """
         # Create a batch with 2 traces (1 error, 1 empty)
@@ -90,7 +90,7 @@ class TestPdaEndToEnd:
             source="manual",
         )
 
-        proposer = PdaProposer(
+        proposer = AheProposer(
             trace_reader=self.store,
             store=self.store,
             model=None,  # No LLM — will use fallback
@@ -112,9 +112,9 @@ class TestPdaEndToEnd:
             skills_dir=str(self.skills_dir),
             max_per_skill=10,
         )
-        policy = PdaDecisionPolicy(governor=governor, model=None)
+        policy = AheDecisionPolicy(governor=governor, model=None)
 
-        # Create a valid proposal (mimicking what PdaProposer would produce)
+        # Create a valid proposal (mimicking what AheProposer would produce)
         proposal = Proposal(
             target_type=ProposalTargetType.SKILL,
             target_id="bash-tool",

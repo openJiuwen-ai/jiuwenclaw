@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """Validate Tasks 6-7 inline (sync-only tests)."""
 import asyncio
-from jiuwenswarm.evolve.pda.proposer import PdaProposer
-from jiuwenswarm.evolve.pda.decision_policy import PdaDecisionPolicy
+from jiuwenswarm.evolve.ahe.proposer import AheProposer
+from jiuwenswarm.evolve.ahe.decision_policy import AheDecisionPolicy
 from jiuwenswarm.evolve.models import (
     Proposal, ProposalTargetType, ProposalState, EvidenceRef, DecisionSuggestion
 )
-from jiuwenswarm.evolve.pda.experience_governor import ExperienceGovernor
+from jiuwenswarm.evolve.ahe.experience_governor import ExperienceGovernor
 
-# PdaProposer enforce_limits
-prop = PdaProposer.__new__(PdaProposer)
+# AheProposer enforce_limits
+prop = AheProposer.__new__(AheProposer)
 prop._max_proposals = 3
 prop._max_skill_proposals = 2
 
@@ -32,7 +32,7 @@ proposals = [
 ]
 result = prop._enforce_limits(proposals)
 assert len(result) == 2, 'Expected 2 active, got %d' % len(result)
-print('PASS: PdaProposer limit enforcement')
+print('PASS: AheProposer limit enforcement')
 
 # Proposal parsing
 raw = [{'target_id': 'bash', 'target_type': 'skill', 'proposal_type': 'add',
@@ -43,10 +43,10 @@ parsed = prop._parse_proposals(raw, 'batch-001')
 assert len(parsed) == 1
 assert parsed[0].proposer_name == 'pda_proposer'
 assert 'operations' in parsed[0].metadata
-print('PASS: PdaProposer proposal parsing')
+print('PASS: AheProposer proposal parsing')
 
-# PdaDecisionPolicy RuleGate (sync)
-policy = PdaDecisionPolicy(governor=ExperienceGovernor(), model=None)
+# AheDecisionPolicy RuleGate (sync)
+policy = AheDecisionPolicy(governor=ExperienceGovernor(), model=None)
 
 p_valid = Proposal(target_type=ProposalTargetType.SKILL, proposal_type='test',
                    failure_evidence=[EvidenceRef(trace_id='a', description='e')],
@@ -76,11 +76,11 @@ assert 'unsupported_target_type_memory' in r3.failed_checks
 print('PASS: RuleGate unsupported type blocked')
 
 # LLM JSON parsing
-parsed_json = PdaDecisionPolicy._parse_llm_json('{"score": 0.8, "suggestion": "active", "reason": "ok"}')
+parsed_json = AheDecisionPolicy._parse_llm_json('{"score": 0.8, "suggestion": "active", "reason": "ok"}')
 assert parsed_json['score'] == 0.8
 print('PASS: LLM JSON parsing')
 
-parsed_md = PdaDecisionPolicy._parse_llm_json(
+parsed_md = AheDecisionPolicy._parse_llm_json(
     '```json\n{"score": 0.3, "suggestion": "rejected"}\n```')
 assert parsed_md['score'] == 0.3
 print('PASS: Markdown JSON parsing')
@@ -94,12 +94,12 @@ async def test_evaluate():
 
 asyncio.run(test_evaluate())
 
-# PdaProposer parse_llm_json
-parsed2 = PdaProposer._parse_llm_json('{"proposals": [{"target_id": "test"}]}')
+# AheProposer parse_llm_json
+parsed2 = AheProposer._parse_llm_json('{"proposals": [{"target_id": "test"}]}')
 assert len(parsed2.get('proposals', [])) == 1
-print('PASS: PdaProposer JSON parsing')
+print('PASS: AheProposer JSON parsing')
 
-# PdaProposer summaries
+# AheProposer summaries
 from jiuwenswarm.evolve.models import TraceOutcome
 failed = [
     ({"trace_id": "abc123", "input": {"message": "help"}, "output": {"content": "ok"}},
@@ -116,14 +116,14 @@ diag = DiagnosisResult(mode="diagnose", issues=[
                    trace_id="abc123", span_index=7, root_cause="Missing path",
                    suggested_fix="Add path"),
 ], response="Found 1", iterations=5)
-summary = PdaProposer._build_diagnosis_summary(diag)
+summary = AheProposer._build_diagnosis_summary(diag)
 assert "bash error" in summary and "Missing path" in summary
 print('PASS: diagnosis summary building')
 
 from jiuwenswarm.evolve.models import GovernanceContext, ExperienceOperationType
 ctx = GovernanceContext(skill_name="bash", current_count=5, max_count=10, can_add=True,
                         allowed_operations=[ExperienceOperationType.ADD])
-gov_summary = PdaProposer._build_governance_summary({"bash": ctx})
+gov_summary = AheProposer._build_governance_summary({"bash": ctx})
 assert "bash" in gov_summary and "5/10" in gov_summary
 print('PASS: governance summary building')
 

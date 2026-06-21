@@ -12,7 +12,7 @@ from jiuwenswarm.evolve.models import (
     ExperienceOperation,
     GovernanceContext,
 )
-from jiuwenswarm.evolve.pda.experience_governor import ExperienceGovernor
+from jiuwenswarm.evolve.ahe.experience_governor import ExperienceGovernor
 
 
 def _create_test_skills_dir(entries_count: int = 0) -> str:
