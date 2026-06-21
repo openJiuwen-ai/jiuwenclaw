@@ -316,9 +316,16 @@ async def run_all_prompts(
 # 4. Evolution pipeline
 # ---------------------------------------------------------------------------
 
-def run_evolution(n_traces: int = 20) -> bool:
-    """Trigger the evolution pipeline via CLI."""
+def run_evolution(n_traces: int = 20, use_ahe: bool = False) -> bool:
+    """Trigger the evolution pipeline via CLI.
+
+    Args:
+        n_traces: Number of recent traces to process.
+        use_ahe: If True, pass --ahe flag to use AHE algorithm.
+    """
     cmd = ["jiuwenswarm-evolve", "run", "--latest", str(n_traces)]
+    if use_ahe:
+        cmd.append("--ahe")
     log.info(f"  Running: {' '.join(cmd)}")
 
     try:
@@ -722,7 +729,7 @@ async def main_async(args: argparse.Namespace) -> None:
         # Run evolution
         if not args.skip_evolve:
             log.info("\n=== Step 3: Run evolution pipeline ===")
-            ok = run_evolution(n_traces=20)
+            ok = run_evolution(n_traces=20, use_ahe=args.ahe)
             if not ok:
                 log.warning("  Evolution pipeline had issues, continuing with scoring...")
         else:
@@ -836,6 +843,8 @@ def main() -> None:
     parser.add_argument("--workspace", default="~/.jiuwenswarm/", help="Agent workspace directory")
     parser.add_argument("--evolution-db", default=None,
                         help="Path to evolution.db (default: <workspace>/evolution.db)")
+    parser.add_argument("--ahe", action="store_true",
+                        help="Use AHE algorithm (--ahe flag passed to jiuwenswarm-evolve)")
     parser.add_argument("--skip-prompts", action="store_true", help="Skip sending prompts (traces already exist)")
     parser.add_argument("--skip-evolve", action="store_true", help="Skip evolution pipeline")
     parser.add_argument("--reset", action="store_true",
