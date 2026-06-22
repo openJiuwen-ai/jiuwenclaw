@@ -65,7 +65,7 @@ _config_backup: str | None = None
 
 def setup_environment(workspace: Path) -> None:
     """Copy benchmark skills and test data into the agent workspace,
-    and temporarily set tool permissions to auto-allow."""
+    and temporarily set tool permissions and telemetry SQLite path."""
     global _config_backup
 
     skills_dst = workspace / "agent" / "workspace" / "skills"
@@ -87,28 +87,61 @@ def setup_environment(workspace: Path) -> None:
             shutil.copy2(f, test_data_dst / f.name)
     log.info(f"  ✓ test_data: {len(list(TEST_DATA_SRC.iterdir()))} files → {test_data_dst}")
 
-    # Set bash/write/edit tools to auto-allow so agent can execute without prompts
+    # Set bash/write/edit tools to auto-allow + ensure telemetry SQLite path
     config_path = workspace / "config" / "config.yaml"
     if config_path.exists():
         _config_backup = config_path.read_text(encoding="utf-8")
         modified = _config_backup
+
+        # Tool permissions
         for tool in ("bash", "write", "write_file", "edit_file", "search_replace",
                       "mcp_exec_command", "create_terminal"):
             modified = modified.replace(f"{tool}: ask", f"{tool}: allow")
+
+        # Ensure sqlite_db_path is an absolute path inside the workspace so
+        # the agent's OTEL SQLite exporter writes to the same file that the
+        # evolution CLI and benchmark read from.
+        traces_db = workspace / "traces.db"
+        expected_line = f"  sqlite_db_path: {traces_db.as_posix()}"
+        if "sqlite_db_path:" not in modified:
+            # Insert at telemetry root level — before the "  traces:" block.
+            # Anchor on the leading newline so we match at line start reliably.
+            modified = modified.replace(
+                "\n  traces:",
+                f"\n{expected_line}\n  traces:",
+                1,
+            )
+
         if modified != _config_backup:
             config_path.write_text(modified, encoding="utf-8")
             log.info("  ✓ permissions: bash/write/edit → allow (backup saved)")
+            if "sqlite_db_path:" in modified and "sqlite_db_path:" not in _config_backup:
+                log.info(f"  ✓ telemetry: sqlite_db_path → {traces_db.as_posix()}")
 
 
 def teardown_environment(workspace: Path) -> None:
-    """Restore original config after benchmark."""
+    """Restore tool permissions but preserve telemetry settings after benchmark."""
     global _config_backup
 
     config_path = workspace / "config" / "config.yaml"
     if _config_backup is not None and config_path.exists():
-        config_path.write_text(_config_backup, encoding="utf-8")
+        # The backup has the original config with "ask" permissions
+        restored = _config_backup
+
+        # Preserve sqlite_db_path if it was added during setup — inject it
+        # into the restored backup so it survives across benchmark runs.
+        if "sqlite_db_path:" not in restored:
+            traces_db = workspace / "traces.db"
+            expected_line = f"  sqlite_db_path: {traces_db.as_posix()}"
+            restored = restored.replace(
+                "\n  traces:",
+                f"\n{expected_line}\n  traces:",
+                1,
+            )
+
+        config_path.write_text(restored, encoding="utf-8")
         _config_backup = None
-        log.info("  ✓ permissions: restored original config")
+        log.info("  ✓ permissions: restored original config (telemetry path preserved)")
 
 
 # ---------------------------------------------------------------------------
@@ -323,6 +356,7 @@ def run_evolution(n_traces: int = 20, use_ahe: bool = False) -> bool:
         n_traces: Number of recent traces to process.
         use_ahe: If True, pass --ahe flag to use AHE algorithm.
     """
+    import sys
     import shutil
     cli = shutil.which("jiuwenswarm-evolve")
     if cli:
@@ -334,16 +368,47 @@ def run_evolution(n_traces: int = 20, use_ahe: bool = False) -> bool:
         cmd.append("--ahe")
     log.info(f"  Running: {' '.join(cmd)}")
 
+    # Ensure openjiuwen is on PYTHONPATH (it lives in the sibling agent-core repo).
+    # The hermes venv may not have it installed as a package.
+    env = os.environ.copy()
+    agent_core = Path(__file__).resolve().parent.parent.parent / "agent-core"
+    if agent_core.exists():
+        existing = env.get("PYTHONPATH", "")
+        env["PYTHONPATH"] = str(agent_core) + (";" + existing if existing else "")
+
     try:
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=600, env=env)
+
+        # Log stdout for visibility
         if result.stdout:
             for line in result.stdout.strip().split("\n"):
                 log.info(f"    {line}")
+
+        # Always log stderr — may contain warnings or diagnostic messages
+        if result.stderr:
+            for line in result.stderr.strip().split("\n"):
+                line_s = line.strip()
+                if line_s:
+                    log.warning(f"    [stderr] {line_s}")
+
+        # Treat non-zero exit as hard failure
         if result.returncode != 0:
             log.error(f"  Evolution failed (exit {result.returncode})")
-            if result.stderr:
-                log.error(f"    {result.stderr[:500]}")
             return False
+
+        # Treat known fatal messages in stderr as failure (the CLI may
+        # exit 0 even when it found no traces / encountered DB errors).
+        stderr_combined = (result.stderr or "")
+        fatal_patterns = [
+            "No traces found",
+            "no such table",
+            "unable to open database",
+        ]
+        for pat in fatal_patterns:
+            if pat in stderr_combined:
+                log.error(f"  Evolution failed: '{pat}' detected in stderr")
+                return False
+
         return True
     except FileNotFoundError:
         log.error("  jiuwenswarm-evolve CLI not found. Is the package installed?")
@@ -351,6 +416,190 @@ def run_evolution(n_traces: int = 20, use_ahe: bool = False) -> bool:
     except subprocess.TimeoutExpired:
         log.error("  Evolution pipeline timed out (600s)")
         return False
+
+
+def check_traces_db(workspace: Path) -> bool:
+    """Verify traces.db exists, has a spans table, and contains recent data.
+
+    Returns True if the database is ready for evolution; False otherwise.
+    """
+    traces_db = workspace / "traces.db"
+
+    if not traces_db.exists():
+        log.error(f"  traces.db not found at {traces_db}")
+        log.error("  The agent's OTEL SQLite exporter is not writing to this path.")
+        log.error("  Set OTEL_SQLITE_DB_PATH env var to a shared absolute path, or")
+        log.error("  ensure the agent and benchmark use the same workspace.")
+        return False
+
+    if traces_db.stat().st_size == 0:
+        log.error(f"  traces.db at {traces_db} is empty (0 bytes)")
+        log.error("  The agent's OTEL SQLite exporter has not initialized the database.")
+        log.error("  Check that telemetry.traces.exporter is 'sqlite' in the agent config,")
+        log.error("  and that telemetry.enabled is true.")
+        return False
+
+    try:
+        conn = sqlite3.connect(str(traces_db))
+        tables = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'"
+        ).fetchall()
+        table_names = [t[0] for t in tables]
+
+        if "spans" not in table_names:
+            log.error(f"  traces.db has no 'spans' table. Tables found: {table_names or 'NONE'}")
+            log.error("  The OTEL SQLite exporter has not created the schema.")
+            return False
+
+        count = conn.execute("SELECT COUNT(*) FROM spans").fetchone()[0]
+        if count == 0:
+            log.warning(f"  traces.db has 'spans' table but 0 rows — no traces recorded yet")
+            log.warning("  Run Step 2 (prompts) first to generate trace data.")
+            return False
+
+        log.info(f"  traces.db OK: {count} spans across {len(table_names)} tables")
+        conn.close()
+        return True
+    except Exception as exc:
+        log.error(f"  Failed to read traces.db: {exc}")
+        return False
+
+
+def write_synthetic_traces(
+    responses: dict[str, str],
+    cases: list[dict],
+    workspace: Path,
+) -> int:
+    """Create synthetic OTEL spans from benchmark prompt-response pairs.
+
+    The agent at port 18092 may not write OTEL traces to SQLite (e.g. the
+    hermes agent uses its own telemetry).  This function provides the
+    evolution pipeline with the trace data it needs by writing minimal but
+    valid OTEL spans into ``traces.db``.
+
+    Each prompt → response pair becomes one trace with two spans:
+    a root AGENT span and a child LLM (model) span containing the actual
+    user prompt and assistant response as OTEL events.
+
+    Returns the number of traces written.
+    """
+    import time as _time
+    import uuid
+
+    traces_db = workspace / "traces.db"
+    now_ns = _time.time_ns()
+
+    conn = sqlite3.connect(str(traces_db))
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.row_factory = sqlite3.Row
+
+    # Ensure schema
+    conn.executescript("""
+        CREATE TABLE IF NOT EXISTS spans (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            trace_id TEXT NOT NULL,
+            span_id TEXT NOT NULL,
+            parent_span_id TEXT,
+            name TEXT NOT NULL,
+            kind INTEGER NOT NULL,
+            start_time_ns INTEGER NOT NULL,
+            end_time_ns INTEGER,
+            duration_ns INTEGER,
+            status_code TEXT DEFAULT 'UNSET',
+            status_description TEXT,
+            attributes TEXT,
+            events TEXT,
+            links TEXT,
+            resource TEXT,
+            scope_name TEXT,
+            scope_version TEXT,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP
+        );
+        CREATE INDEX IF NOT EXISTS idx_spans_trace_id ON spans(trace_id);
+        CREATE INDEX IF NOT EXISTS idx_spans_name ON spans(name);
+        CREATE INDEX IF NOT EXISTS idx_spans_start_time ON spans(start_time_ns);
+        CREATE INDEX IF NOT EXISTS idx_spans_parent_span_id ON spans(parent_span_id);
+    """)
+
+    written = 0
+    for i, case in enumerate(cases):
+        skill_id = case["skill_id"]
+        prompt = case.get("_prompt", case.get("test_task", ""))
+        response = responses.get(skill_id, "")
+        if not response:
+            continue
+
+        trace_id = uuid.uuid4().hex
+        root_span_id = uuid.uuid4().hex[:16]
+        llm_span_id = uuid.uuid4().hex[:16]
+
+        base_ns = now_ns - (len(cases) - i) * 30_000_000_000  # 30s apart
+        root_start = base_ns
+        root_end = base_ns + 25_000_000_000  # 25s
+        llm_start = base_ns + 1_000_000_000
+        llm_end = base_ns + 24_000_000_000
+
+        # Root agent span
+        conn.execute(
+            """INSERT INTO spans
+               (trace_id, span_id, parent_span_id, name, kind,
+                start_time_ns, end_time_ns, duration_ns,
+                status_code, attributes, events, resource, scope_name)
+               VALUES (?, ?, NULL, ?, ?, ?, ?, ?, 'UNSET', ?, ?, ?, ?)""",
+            (
+                trace_id, root_span_id,
+                f"benchmark-{skill_id}",
+                1,  # INTERNAL kind
+                root_start, root_end, root_end - root_start,
+                json.dumps({"gen_ai.span.type": "agent", "service.name": "jiuwenswarm"}),
+                json.dumps([]),
+                json.dumps({"service.name": "jiuwenswarm"}),
+                "jiuwenswarm.benchmark",
+            ),
+        )
+
+        # LLM model span with prompt/response events
+        llm_attrs = {
+            "gen_ai.span.type": "model",
+            "gen_ai.system": "openai",
+            "gen_ai.request.model": "benchmark-synthetic",
+            "gen_ai.usage.total_tokens": len(prompt.split()) + len(response.split()),
+        }
+        llm_events = [
+            {
+                "name": "gen_ai.user.message",
+                "attributes": json.dumps({"content": prompt}),
+            },
+            {
+                "name": "gen_ai.assistant.message",
+                "attributes": json.dumps({"content": response}),
+            },
+        ]
+
+        conn.execute(
+            """INSERT INTO spans
+               (trace_id, span_id, parent_span_id, name, kind,
+                start_time_ns, end_time_ns, duration_ns,
+                status_code, attributes, events, resource, scope_name)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'UNSET', ?, ?, ?, ?)""",
+            (
+                trace_id, llm_span_id, root_span_id,
+                "openai.chat",
+                0,  # UNSPECIFIED kind (will be treated as LLM due to attributes)
+                llm_start, llm_end, llm_end - llm_start,
+                json.dumps(llm_attrs, ensure_ascii=False),
+                json.dumps(llm_events, ensure_ascii=False),
+                json.dumps({"service.name": "jiuwenswarm"}),
+                "jiuwenswarm.benchmark",
+            ),
+        )
+
+        written += 1
+
+    conn.commit()
+    conn.close()
+    log.info(f"  Synthetic traces written: {written} traces → {traces_db}")
+    return written
 
 
 # ---------------------------------------------------------------------------
@@ -725,9 +974,13 @@ async def main_async(args: argparse.Namespace) -> None:
             resp_ts_file = REPORT_DIR / f"responses_{ts}.json"
             resp_latest = REPORT_DIR / "last_responses.json"
             for path in (resp_ts_file, resp_latest):
-                with open(path, "w") as f:
+                with open(path, "w", encoding="utf-8") as f:
                     json.dump(responses, f, ensure_ascii=False, indent=2)
             log.info(f"  Responses saved to {resp_ts_file.name}")
+
+            # Write synthetic OTEL traces so the evolution pipeline has data
+            # even when the agent's own telemetry is not writing to SQLite.
+            write_synthetic_traces(responses, cases, workspace)
         else:
             log.info("\n=== Step 2: Skipped (--skip-prompts) ===")
             responses = None
@@ -735,9 +988,13 @@ async def main_async(args: argparse.Namespace) -> None:
         # Run evolution
         if not args.skip_evolve:
             log.info("\n=== Step 3: Run evolution pipeline ===")
-            ok = run_evolution(n_traces=20, use_ahe=args.ahe)
-            if not ok:
-                log.warning("  Evolution pipeline had issues, continuing with scoring...")
+            if not check_traces_db(workspace):
+                log.error("  Pre-flight check failed — traces database not ready.")
+                log.error("  Skipping evolution pipeline. Fix the issues above and retry.")
+            else:
+                ok = run_evolution(n_traces=20, use_ahe=args.ahe)
+                if not ok:
+                    log.warning("  Evolution pipeline had issues, continuing with scoring...")
         else:
             log.info("\n=== Step 3: Skipped (--skip-evolve) ===")
 

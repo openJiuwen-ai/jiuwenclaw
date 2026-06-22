@@ -89,11 +89,17 @@ def _build_pipeline_from_config(config: dict, use_ahe: bool = False) -> object:
     if use_ahe:
         from jiuwenswarm.evolve.ahe.proposer import AheProposer
 
+        # Use the same resolved traces_db_path as SqliteStore so
+        # OtelTraceAdapter reads from the identical database file.
+        resolved_traces_db = getattr(
+            trace_reader, '_traces_db_path', None,
+        ) or pipeline_cfg.get("traces_db_path", "traces.db")
+
         ahe_proposer = AheProposer(
             trace_reader=trace_reader,
             store=store,
             skills_dir=str(Path(getattr(store, '_skills_dir', "skills"))),
-            traces_db_path=pipeline_cfg.get("traces_db_path", "traces.db"),
+            traces_db_path=resolved_traces_db,
         )
         generators = [ahe_proposer]
         logger.info("Using AHE algorithm: AheProposer")
