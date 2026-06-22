@@ -103,9 +103,26 @@ async def _run_one(instance_id: str | None, stop: asyncio.Event) -> None:
     counters: dict[str, int] = {}
     backoff = 1.0
     label = instance_id or "new"
+    # link-auth 非对称：mock gateway 用一对**稳定**的进程内临时签名密钥（循环外生成一次），
+    # 以便重连时指纹不变、不被 Manager 的 TOFU 指纹固定拦截。
+    from openjiuwen_runtime.foundation.security.link_auth import build_token_header, generate_keypair
+
+    _mock_priv, _mock_pub = generate_keypair()
     while not stop.is_set():
         try:
-            async with websockets.connect(MANAGER_WS, ping_interval=20, ping_timeout=60) as ws:
+            # 以 gateway 身份出示链路令牌（CLAW_LINK_AUTH_MODE=off 时为空）。
+            link_headers = build_token_header(
+                service_id=instance_id or "mock-gw",
+                service_type="gateway",
+                private_b64=_mock_priv,
+                public_b64=_mock_pub,
+            )
+            async with websockets.connect(
+                MANAGER_WS,
+                additional_headers=link_headers or None,
+                ping_interval=20,
+                ping_timeout=60,
+            ) as ws:
                 jid = await _handshake(ws, reconnect_id=instance_id)
                 print(f"[mock-gw] {label}: connected jiuwenclaw_id={jid}")
 

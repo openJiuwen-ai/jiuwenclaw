@@ -9,6 +9,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, ClassVar
 
+from openjiuwen_runtime.foundation.security.link_auth import NonceCache, InMemoryPinStore, build_token
 from sqlalchemy.exc import SQLAlchemyError
 
 from jiuwenclaw_manager.infrastructure.config import settings
@@ -44,6 +45,7 @@ from jiuwenclaw_manager.core.instance.instance_service import (
     mark_instance_offline,
     register_gateway_via_ws,
 )
+from jiuwenclaw_manager.manager_ws_server.handshake_auth import check_handshake
 from jiuwenclaw_manager.manager_ws_server.protocol import (
     FRAME_TYPE_CONFIG_ACK,
     FRAME_TYPE_HEARTBEAT,
@@ -113,6 +115,17 @@ class ManagerWsServer:
         self._clients_lock = asyncio.Lock()
         self._pending_acks: dict[str, _PendingConfigAck] = {}
         self._pending_acks_lock = asyncio.Lock()
+        # link-auth: 防重放 nonce 缓存 + Gateway 公钥指纹固定表（仅当 CLAW_LINK_AUTH_MODE != off 时生效）
+        self._link_nonce_cache = NonceCache()
+        self._gateway_pin_store = InMemoryPinStore()
+
+    @staticmethod
+    def _link_keypair() -> tuple[str | None, str | None]:
+        """Manager 的 link-auth 身份密钥对（复用签名身份密钥 manager_identity）。"""
+        key = get_manager_signing_key()
+        if key is None:
+            return None, None
+        return _b64(key.private_raw), _b64(key.public_raw)
 
     @property
     def host(self) -> str:
@@ -140,6 +153,7 @@ class ManagerWsServer:
             self._connection_handler,
             self._host,
             self._port,
+            process_request=self._process_request,
             ping_interval=self._ping_interval,
             ping_timeout=self._ping_timeout,
         )
@@ -407,6 +421,15 @@ class ManagerWsServer:
             "last_ack": last_ack,
         }
 
+    async def _process_request(self, *args: Any) -> Any:
+        """握手期 link-auth 校验。CLAW_LINK_AUTH_MODE=off 时恒放行（返回 None）。"""
+        rejected = check_handshake(args, self._link_nonce_cache, self._gateway_pin_store)
+        if rejected is None:
+            return None
+        response, reason = rejected
+        logger.warning("[ManagerWsServer] handshake rejected reason=link_auth:%s", reason)
+        return response
+
     async def _connection_handler(self, ws: Any) -> None:
         import websockets
 
@@ -416,6 +439,17 @@ class ManagerWsServer:
 
         try:
             ack = build_connection_ack(manager_id=self._manager_id)
+            # link-auth 双向：Manager 在 connection.ack 里附一枚自己签的令牌，
+            # 供 Gateway 反向核验"对面确是合法 Manager"。off 时不签。
+            _mgr_priv, _mgr_pub = self._link_keypair()
+            _ack_token = build_token(
+                service_id=self._manager_id,
+                service_type="manager",
+                private_b64=_mgr_priv,
+                public_b64=_mgr_pub,
+            )
+            if _ack_token and isinstance(ack.get("payload"), dict):
+                ack["payload"]["link_token"] = _ack_token
             await ws.send(json.dumps(ack, ensure_ascii=False))
         except Exception as exc:  # noqa: BLE001
             logger.warning("[ManagerWsServer] connection.ack failed: %s", exc)

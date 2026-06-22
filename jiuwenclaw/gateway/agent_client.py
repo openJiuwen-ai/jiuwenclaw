@@ -7,12 +7,19 @@ from __future__ import annotations
 import logging
 import asyncio
 import json
+import os
 from abc import ABC, abstractmethod
 from collections.abc import Awaitable, Callable
 from dataclasses import asdict
 from typing import Any, AsyncIterator
 from urllib.parse import urlsplit
 
+from openjiuwen_runtime.foundation.security.link_auth import (
+    InMemoryPinStore,
+    build_token_header,
+    generate_keypair,
+    verify_and_pin,
+)
 from jiuwenclaw.e2a.constants import (
     E2A_WIRE_SERVER_PUSH_KEY,
     FILE_TRANSFER_START,
@@ -47,6 +54,15 @@ def _to_json(data: Any) -> str:
         return json.dumps(data, ensure_ascii=False, sort_keys=True, default=str)
     except Exception:
         return repr(data)
+
+
+def _mask_link_token(data: Any) -> str:
+    """日志脱敏：隐去 connection.ack.payload.link_token，避免链路令牌写入日志。"""
+    if isinstance(data, dict):
+        payload = data.get("payload")
+        if isinstance(payload, dict) and payload.get("link_token"):
+            data = {**data, "payload": {**payload, "link_token": "***"}}
+    return _to_json(data)
 
 
 def _build_ws_origin(uri: str) -> str | None:
@@ -129,6 +145,11 @@ class WebSocketAgentServerClient(AgentServerClient):
         self._running = False
         # AgentServer send_push：旁路投递，勿进入与 request_id 绑定的 RPC 等待队列
         self._on_server_push: Callable[[dict[str, Any]], Awaitable[None]] | None = None
+        # link-auth: gateway↔agentserver 为内部链路，进程内生成一对临时 Ed25519 签名密钥
+        # 即可（AgentServer 侧用 TOFU 固定它）。mode=off 时 build_token 返回 None，不加头。
+        self._link_sign_priv_b64, self._link_sign_pub_b64 = generate_keypair()
+        # 对 AgentServer 做 TOFU 指纹固定（仅当 CLAW_LINK_AUTH_MODE != off 时生效）。
+        self._agentserver_pin_store = InMemoryPinStore()
 
     def set_server_push_handler(
         self, handler: Callable[[dict[str, Any]], Awaitable[None]] | None
@@ -163,9 +184,18 @@ class WebSocketAgentServerClient(AgentServerClient):
         except ImportError:
             import websockets
             connect_fn = websockets.connect
+        # link-auth: 作为 gateway 身份（进程内临时 Ed25519 签名密钥）向 agentserver
+        # 出示链路令牌（mode=off 时为空，不加头）。
+        extra_headers = build_token_header(
+            service_id=os.getenv("JIUWENCLAW_SERVICE_ID", "gateway-1"),
+            service_type="gateway",
+            private_b64=self._link_sign_priv_b64,
+            public_b64=self._link_sign_pub_b64,
+        )
         self._ws = await connect_fn(
             uri,
             origin=origin,
+            extra_headers=extra_headers or None,
             ping_interval=self._ping_interval,
             ping_timeout=self._ping_timeout,
             close_timeout=5.0,
@@ -174,23 +204,40 @@ class WebSocketAgentServerClient(AgentServerClient):
         logger.info("[WebSocketAgentServerClient] 已连接: %s", uri)
 
         # 读取 AgentServer 的 connection.ack 事件
+        data: Any = None
         try:
             raw = await asyncio.wait_for(self._ws.recv(), timeout=5.0)
-            logger.info("[WebSocketAgentServerClient] connect 首帧(raw): %s", raw)
             data = json.loads(raw)
-            logger.info("[WebSocketAgentServerClient] connect 首帧(parsed): %s", _to_json(data))
-            if data.get("type") == "event" and data.get("event") == "connection.ack":
-                self._server_ready = True
-                logger.info("[WebSocketAgentServerClient] 收到 connection.ack，AgentServer 已就绪")
-            else:
-                logger.warning(
-                    "[WebSocketAgentServerClient] 首帧非 connection.ack: %s",
-                    data.get("type"),
-                )
+            # 脱敏日志：隐去 link_token，避免令牌写入日志
+            logger.info("[WebSocketAgentServerClient] connect 首帧: %s", _mask_link_token(data))
         except asyncio.TimeoutError:
             logger.warning("[WebSocketAgentServerClient] 等待 connection.ack 超时")
         except Exception as e:
             logger.warning("[WebSocketAgentServerClient] 读取 connection.ack 失败: %s", e)
+
+        # link-auth 双向校验在 try 之外进行，确保校验失败的异常能向外抛出（不被上面的 except 吞掉）。
+        if isinstance(data, dict) and data.get("type") == "event" and data.get("event") == "connection.ack":
+            # 核验 AgentServer 在 connection.ack 里出示的令牌，验签 + TOFU 指纹固定，
+            # 确认连到的是合法 AgentServer（防 MITM/冒充）。off 时恒放行。
+            _ack_payload = data.get("payload") if isinstance(data.get("payload"), dict) else {}
+            _res = verify_and_pin(
+                self._agentserver_pin_store,
+                _ack_payload.get("link_token"),
+                expect_type="agent_server",
+            )
+            if not _res.allowed:
+                logger.error(
+                    "[WebSocketAgentServerClient] 对端 AgentServer link-auth 校验失败: %s", _res.reason
+                )
+                await self.disconnect()
+                raise RuntimeError(f"agentserver link-auth failed: {_res.reason}")
+            self._server_ready = True
+            logger.info("[WebSocketAgentServerClient] 收到 connection.ack，AgentServer 已就绪")
+        elif data is not None:
+            logger.warning(
+                "[WebSocketAgentServerClient] 首帧非 connection.ack: %s",
+                data.get("type") if isinstance(data, dict) else type(data).__name__,
+            )
 
         # 启动消息接收和分发任务
         self._running = True

@@ -32,6 +32,8 @@ dev = [
     "ruff>=0.6",
 ]
 
+[tool.uv.sources]
+
 [project.scripts]
 jiuwenclaw-manager = "jiuwenclaw_manager.main:main"
 jiuwenclaw-manager-start = "jiuwenclaw_manager.start_services:main"

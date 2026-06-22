@@ -13,6 +13,15 @@ import re
 from pathlib import Path
 from typing import Any, ClassVar
 
+from openjiuwen_runtime.foundation.security.link_auth import (
+    LINK_TOKEN_HEADER,
+    NonceCache,
+    InMemoryPinStore,
+    build_token,
+    generate_keypair,
+    verify_and_pin,
+)
+
 from jiuwenclaw.agentserver.session_history import enrich_history_messages_session_id
 from jiuwenclaw.agentserver.gateway_push.wire import build_server_push_wire
 from jiuwenclaw.agentserver.tools.acp_output_tools import get_acp_output_manager
@@ -61,6 +70,7 @@ from jiuwenclaw.security.ws_origin import (
     forbidden_origin_response,
     get_header_value,
     is_allowed_browser_origin,
+    unauthorized_response,
 )
 
 
@@ -153,6 +163,13 @@ class AgentWebSocketServer:
         self._ping_interval = ping_interval
         self._ping_timeout = ping_timeout
         self._server: Any = None
+        # link-auth: AgentServer 身份密钥（Ed25519）。它是被 gateway 按需拉起的临时实例，
+        # 故每进程启动时临时生成、不落库；connection.ack 反向签名用自身私钥。
+        self._link_priv, self._link_pub = generate_keypair()
+        # link-auth: 防重放 nonce 缓存（仅当 CLAW_LINK_AUTH_MODE != off 时生效）
+        self._link_nonce_cache = NonceCache()
+        # link-auth: 给连入的 gateway 做 TOFU 指纹固定（首次见到即固定其公钥指纹）
+        self._gateway_pin_store = InMemoryPinStore()
         # 当前 Gateway 连接，用于 send_push 主动推送
         self._current_ws: Any = None
         self._current_send_lock: asyncio.Lock | None = None
@@ -260,8 +277,27 @@ class AgentWebSocketServer:
         await self._trigger_agent_server_listening_hook()
 
     async def _process_request(self, *args: Any) -> Any:
-        """在握手阶段执行 Origin 校验，兼容 legacy/new websockets APIs。"""
+        """在握手阶段执行 link-auth + Origin 校验，兼容 legacy/new websockets APIs。"""
         path, request_headers = extract_handshake_request(args)
+
+        # link-auth: 校验链路令牌（Ed25519 + TOFU 指纹固定）。独立于 AGENT_RUNTIME 对 Origin 的旁路——
+        # 沙箱/托管运行时下 Origin 全放行，此处仍按 CLAW_LINK_AUTH_MODE 强制。
+        # mode=off 时 verify_and_pin 恒放行，行为与未引入时一致。
+        link_token = get_header_value(request_headers, LINK_TOKEN_HEADER)
+        link_result = verify_and_pin(
+            self._gateway_pin_store,
+            link_token,
+            expect_type="gateway",
+            nonce_cache=self._link_nonce_cache,
+        )
+        if not link_result.allowed:
+            logger.warning(
+                "[AgentWebSocketServer] 握手拒绝 path=%s reason=link_auth:%s",
+                path,
+                link_result.reason,
+            )
+            return unauthorized_response(args)
+
         origin = get_header_value(request_headers, "Origin")
         allowed = is_allowed_browser_origin(origin)
 
@@ -332,10 +368,21 @@ class AgentWebSocketServer:
 
         # 发送 connection.ack 事件，通知 Gateway 服务端已就绪
         try:
+            # link-auth 双向：AgentServer 在 connection.ack 里附一枚自己签的令牌，
+            # 供 Gateway 反向核验"对面确是合法 AgentServer"。off 时不签（payload 不含 link_token）。
+            ack_payload: dict[str, Any] = {"status": "ready"}
+            _ack_token = build_token(
+                service_id=os.getenv("JIUWENCLAW_SERVICE_ID", "agentserver-1"),
+                service_type="agent_server",
+                private_b64=self._link_priv,
+                public_b64=self._link_pub,
+            )
+            if _ack_token:
+                ack_payload["link_token"] = _ack_token
             ack_frame = {
                 "type": "event",
                 "event": "connection.ack",
-                "payload": {"status": "ready"},
+                "payload": ack_payload,
             }
             await ws.send(json.dumps(ack_frame, ensure_ascii=False))
             logger.info("[AgentWebSocketServer] 已发送 connection.ack: %s", remote)

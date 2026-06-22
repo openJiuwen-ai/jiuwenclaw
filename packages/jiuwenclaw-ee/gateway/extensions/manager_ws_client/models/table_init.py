@@ -24,6 +24,7 @@ from .config_effective_policy_models import (
 )
 from .key_models import (
     GATEWAY_ENC_KEYPAIR_TABLE_DEF,
+    GATEWAY_SIGN_KEYPAIR_TABLE_DEF,
     MANAGER_SIGN_PUBKEY_TABLE_DEF,
 )
 from .template_models import (
@@ -35,6 +36,7 @@ from .template_models import (
 
 ALL_TABLE_DEFINITIONS: tuple[TableDefinition, ...] = (
     GATEWAY_ENC_KEYPAIR_TABLE_DEF,
+    GATEWAY_SIGN_KEYPAIR_TABLE_DEF,
     MANAGER_SIGN_PUBKEY_TABLE_DEF,
     MODEL_TEMPLATE_TABLE_DEF,
     EXTENSION_CONFIG_TEMPLATE_TABLE_DEF,

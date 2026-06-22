@@ -4,6 +4,7 @@
 """Gateway 侧配置下发密钥表（**新增独立表，不改动现有表**）。
 
 - ``gateway_enc_keypair``：Gateway 自身 X25519 加密密钥对（单例，私钥本地受保护）。
+- ``gateway_sign_keypair``：Gateway 自身 Ed25519 link-auth 签名密钥对（单例，握手出示令牌）。
 - ``manager_sign_pubkey``：握手分发的 Manager Ed25519 签名公钥，按 jiuwenclaw_id 关联。
 """
 
@@ -21,6 +22,21 @@ GATEWAY_ENC_KEYPAIR_TABLE_DEF = TableDefinition(
     columns=[
         ColumnDefinition("id", "string", length=32, primary_key=True, nullable=False),
         ColumnDefinition("enc_alg", "string", length=32, nullable=False),
+        ColumnDefinition("private_key", "string", length=512, nullable=False),
+        ColumnDefinition("public_key", "string", length=256, nullable=False),
+        ColumnDefinition("fingerprint", "string", length=128, nullable=False),
+        ColumnDefinition("created_at", "datetime", nullable=False),
+        ColumnDefinition("updated_at", "datetime", nullable=False),
+    ],
+    indexes=[],
+)
+
+# Gateway link-auth 签名密钥对（Ed25519，单例，固定主键 id="default"）。
+GATEWAY_SIGN_KEYPAIR_TABLE_DEF = TableDefinition(
+    table_name="gateway_sign_keypair",
+    columns=[
+        ColumnDefinition("id", "string", length=32, primary_key=True, nullable=False),
+        ColumnDefinition("sign_alg", "string", length=32, nullable=False),
         ColumnDefinition("private_key", "string", length=512, nullable=False),
         ColumnDefinition("public_key", "string", length=256, nullable=False),
         ColumnDefinition("fingerprint", "string", length=128, nullable=False),

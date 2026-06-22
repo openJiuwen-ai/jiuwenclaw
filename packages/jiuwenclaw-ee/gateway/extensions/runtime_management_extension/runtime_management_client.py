@@ -50,6 +50,14 @@ from openjiuwen_runtime.management.session.timer import Timer
 from openjiuwen_runtime.management.session.ws_client_channel import (
     WSServiceMessageChannel,
 )
+from openjiuwen_runtime.foundation.security.link_auth import (
+    AuthMode,
+    InMemoryPinStore,
+    build_token_header,
+    generate_keypair,
+    get_auth_mode,
+    verify_and_pin,
+)
 
 from jiuwenclaw.e2a.agent_compat import e2a_to_agent_request
 from jiuwenclaw.e2a.models import E2AEnvelope, E2AResponse
@@ -70,6 +78,12 @@ def _pick_free_port(host: str = "127.0.0.1") -> int:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
         sock.bind((host, 0))
         return int(sock.getsockname()[1])
+
+
+# link-auth：gateway 经管理通道连 agentserver 的进程内签名身份（临时生成，私钥不出端）
+# 与对 agentserver 的指纹固定表。gateway↔agentserver 为内部链路，进程内临时密钥即可。
+_LINK_PRIV, _LINK_PUB = generate_keypair()
+_AGENTSERVER_PIN = InMemoryPinStore()
 
 _load_effective_enterprise_config: Any | None = None
 _service_config_slot: Any | None = None
@@ -446,6 +460,16 @@ class RuntimeManagementAgentClient(AgentServerClient):
                         e,
                         agent_custom_envs,
                     )
+
+            # link-auth：把链路鉴权开关透传给 agentserver，使其在 enforce 时同样校验 gateway 令牌
+            # 并在 connection.ack 反向签名（各端用自身 Ed25519 密钥，无需共享密钥）。off 时变量为空、不注入。
+            for _link_var in (
+                "CLAW_LINK_AUTH_MODE",
+                "CLAW_LINK_TOKEN_TTL",
+            ):
+                _link_val = os.getenv(_link_var)
+                if _link_val:
+                    base[_link_var] = _link_val
             return base
 
         _client = self  # 捕获外层 RuntimeManagementAgentClient 实例，供内部类使用
@@ -581,11 +605,35 @@ class RuntimeManagementAgentClient(AgentServerClient):
                     )
                     deploy_controller = K8sDeployController(k8s)
 
+                # link-auth: 作为 gateway 身份向 agentserver 出示链路令牌。
+                # 传"回调"而非定值——通道每次（重）连都现签一份新令牌（新 nonce/新签发时间），
+                # 避免长命通道重连复用同一令牌被 agentserver 的 nonce/有效期校验拦截。
+                # off 时不传 additional_headers——维持原行为，也兼容尚未支持该参数的旧版 runtime 通道。
+                def _link_token_headers() -> Optional[dict]:
+                    return build_token_header(
+                        service_id=os.getenv("JIUWENCLAW_SERVICE_ID", "gateway-1"),
+                        service_type="gateway",
+                        private_b64=_LINK_PRIV,
+                        public_b64=_LINK_PUB,
+                    ) or None
+
+                def _verify_agentserver(frame: dict) -> bool:
+                    # 反向：核验 AgentServer 在 connection.ack 里出示的令牌（验签 + TOFU 指纹固定，防 MITM/冒充）。
+                    payload = frame.get("payload") if isinstance(frame.get("payload"), dict) else {}
+                    return verify_and_pin(
+                        _AGENTSERVER_PIN, payload.get("link_token"), expect_type="agent_server"
+                    ).allowed
+
+                _ch_kwargs = {} if get_auth_mode() is AuthMode.OFF else {
+                    "additional_headers": _link_token_headers,
+                    "verify_peer": _verify_agentserver,
+                }
                 ch = WSServiceMessageChannel(
                     target_port=target_port,
                     target_container=target_container,
                     invoke_path="",
                     ws_use_tls=False,
+                    **_ch_kwargs,
                 )
 
                 # 从 service_template 中提取 service_id，如果存在则使用，否则让 ServiceHandler 自动生成 UUID

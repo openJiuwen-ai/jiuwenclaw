@@ -4,6 +4,7 @@
 """Gateway 侧密钥落库与生命周期。
 
 - 加密密钥对：单例持久化于 ``gateway_enc_keypair``，私钥永不外发；首启生成。
+- 签名密钥对：单例持久化于 ``gateway_sign_keypair``，握手向对端出示 link-auth 令牌；首启生成。
 - Manager 签名公钥：握手分发，存 ``manager_sign_pubkey``，按 jiuwenclaw_id 关联。
 """
 
@@ -13,11 +14,13 @@ import logging
 from dataclasses import dataclass
 from typing import Any
 
+from openjiuwen_runtime.foundation.security import link_auth
 from openjiuwen_runtime.foundation.db.handler import DBHandler
 
 from ..infrastructure.utils import utc_now
 from ..models.key_models import (
     GATEWAY_ENC_KEYPAIR_TABLE_DEF,
+    GATEWAY_SIGN_KEYPAIR_TABLE_DEF,
     MANAGER_SIGN_PUBKEY_TABLE_DEF,
 )
 from . import crypto_primitives as cp
@@ -25,15 +28,26 @@ from . import crypto_primitives as cp
 logger = logging.getLogger(__name__)
 
 _KEYPAIR_TABLE = GATEWAY_ENC_KEYPAIR_TABLE_DEF.table_name
+_SIGN_KEYPAIR_TABLE = GATEWAY_SIGN_KEYPAIR_TABLE_DEF.table_name
 _SIGN_PUBKEY_TABLE = MANAGER_SIGN_PUBKEY_TABLE_DEF.table_name
 _KEYPAIR_ID = "default"
 ENC_ALG = "X25519"
+SIGN_ALG = "Ed25519"
 
 
 @dataclass(frozen=True)
 class GatewayEncKeypair:
     private_raw: bytes
     public_raw: bytes
+    fingerprint: str
+
+
+@dataclass(frozen=True)
+class GatewaySignKeypair:
+    """Gateway link-auth 签名密钥对（base64 字符串，可直接喂给 link_auth.build_token）。"""
+
+    private_b64: str
+    public_b64: str
     fingerprint: str
 
 
@@ -86,6 +100,38 @@ async def get_or_create_gateway_enc_keypair() -> GatewayEncKeypair:
     )
     logger.info("[keys] generated gateway enc keypair fp=%s", fp[:16])
     return GatewayEncKeypair(priv, pub, fp)
+
+
+async def get_or_create_gateway_sign_keypair() -> GatewaySignKeypair:
+    """加载 Gateway link-auth 签名密钥对；不存在则生成并持久化（单例，幂等）。
+
+    直接存/读 link_auth 给的 base64 字符串，正好喂给 ``build_token``/``build_token_header``。
+    """
+    handler = await _handler()
+    row = _row_to_dict(await handler.get(_SIGN_KEYPAIR_TABLE, {"id": _KEYPAIR_ID}))
+    if row and row.get("private_key") and row.get("public_key"):
+        priv_b64 = str(row["private_key"])
+        pub_b64 = str(row["public_key"])
+        fp = str(row.get("fingerprint") or link_auth.fingerprint(pub_b64))
+        return GatewaySignKeypair(priv_b64, pub_b64, fp)
+
+    priv_b64, pub_b64 = link_auth.generate_keypair()
+    fp = link_auth.fingerprint(pub_b64)
+    now = utc_now()
+    await handler.create(
+        _SIGN_KEYPAIR_TABLE,
+        {
+            "id": _KEYPAIR_ID,
+            "sign_alg": SIGN_ALG,
+            "private_key": priv_b64,
+            "public_key": pub_b64,
+            "fingerprint": fp,
+            "created_at": now,
+            "updated_at": now,
+        },
+    )
+    logger.info("[keys] generated gateway sign keypair fp=%s", fp[:16])
+    return GatewaySignKeypair(priv_b64, pub_b64, fp)
 
 
 async def load_gateway_enc_privkey_by_fp(fingerprint: str | None) -> bytes | None:

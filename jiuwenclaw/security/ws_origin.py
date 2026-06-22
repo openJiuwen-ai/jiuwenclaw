@@ -14,6 +14,7 @@ logger = logging.getLogger(__name__)
 
 _ALLOWED_WS_ORIGIN_HOSTS = {"127.0.0.1", "localhost"}
 _FORBIDDEN_BODY = b"Forbidden: Origin not allowed\n"
+_UNAUTHORIZED_BODY = b"Unauthorized: link token invalid\n"
 
 # 配置缓存，避免每次调用都读取配置文件
 _ws_origin_check_enabled_cache: bool | None = None
@@ -161,3 +162,20 @@ def forbidden_origin_response(process_request_args: tuple[Any, ...]) -> Any:
         return Response(status.value, status.phrase, Headers(headers), _FORBIDDEN_BODY)
 
     return status, headers, _FORBIDDEN_BODY
+
+
+def unauthorized_response(process_request_args: tuple[Any, ...]) -> Any:
+    """Build a 401 response for legacy/new websockets process_request APIs (link-auth reject)."""
+    status = HTTPStatus.UNAUTHORIZED
+    headers = [
+        ("Content-Type", "text/plain; charset=utf-8"),
+        ("Content-Length", str(len(_UNAUTHORIZED_BODY))),
+    ]
+
+    if process_request_args and not isinstance(process_request_args[0], str):
+        from websockets.datastructures import Headers
+        from websockets.http11 import Response
+
+        return Response(status.value, status.phrase, Headers(headers), _UNAUTHORIZED_BODY)
+
+    return status, headers, _UNAUTHORIZED_BODY

@@ -6,6 +6,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 from collections.abc import Awaitable, Callable
 from datetime import datetime, timezone
 from typing import Any
@@ -13,6 +14,7 @@ from urllib.parse import urlsplit
 
 from base64 import b64encode
 
+from openjiuwen_runtime.foundation.security.link_auth import InMemoryPinStore, build_token_header, verify_and_pin
 from sqlalchemy.exc import SQLAlchemyError
 
 from ..core.enterprise_config.gateway_db import GatewayDb
@@ -22,6 +24,7 @@ from ..security.field_crypto import DecryptError, decrypt_config, unwrap_dek
 from ..security.frame_verifier import Ed25519Verifier, ReplayGuard, verify_frame
 from ..security.keys import (
     get_or_create_gateway_enc_keypair,
+    get_or_create_gateway_sign_keypair,
     load_gateway_enc_privkey_by_fp,
     load_manager_sign_pubkey,
     store_manager_sign_pubkey,
@@ -103,6 +106,8 @@ class ManagerWsClient:
         self._replay_guard = ReplayGuard(
             ttl_seconds=max(60.0, float(cfg.gateway_config_sign_skew_seconds) * 2)
         )
+        # link-auth：对 Manager 做 TOFU 指纹固定（仅当 CLAW_LINK_AUTH_MODE != off 时生效）。
+        self._manager_pin_store = InMemoryPinStore()
 
         self._pod_status_interval_seconds = max(
             1.0, float(cfg.gateway_manager_ws_pod_status_interval_seconds)
@@ -259,10 +264,20 @@ class ManagerWsClient:
 
             connect_fn = websockets.connect
 
+        # link-auth: 以 gateway 身份（Ed25519 持久签名密钥）向 Manager 出示链路令牌
+        # （mode=off 时为空，不加头）。
+        _gw_sign_kp = await get_or_create_gateway_sign_keypair()
+        extra_headers = build_token_header(
+            service_id=os.getenv("JIUWENCLAW_SERVICE_ID", "gateway-1"),
+            service_type=self._service_type,
+            private_b64=_gw_sign_kp.private_b64,
+            public_b64=_gw_sign_kp.public_b64,
+        )
         logger.info("[ManagerWsClient] connecting %s", uri)
         async with connect_fn(
             uri,
             origin=origin,
+            extra_headers=extra_headers or None,
             ping_interval=self._ping_interval,
             ping_timeout=self._ping_timeout,
             close_timeout=5.0,
@@ -285,6 +300,15 @@ class ManagerWsClient:
             and data.get("event") == EVENT_CONNECTION_ACK
         ):
             payload = data.get("payload") if isinstance(data.get("payload"), dict) else {}
+            # link-auth 双向：核验 Manager 在 connection.ack 里出示的令牌，
+            # 验签 + TOFU 指纹固定，确认连到的是合法 Manager（防 MITM/冒充）。off 时恒放行。
+            _res = verify_and_pin(
+                self._manager_pin_store,
+                payload.get("link_token"),
+                expect_type="manager",
+            )
+            if not _res.allowed:
+                raise RuntimeError(f"manager link-auth failed: {_res.reason}")
             logger.info(
                 "[ManagerWsClient] connection.ack manager_id=%s",
                 payload.get("manager_id"),
