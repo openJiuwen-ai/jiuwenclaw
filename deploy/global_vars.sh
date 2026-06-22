@@ -151,6 +151,7 @@ declare -A DEPLOY_VARS=(
     ["ENABLE_EXTERNAL_POSTGRES"]="false"
     ["ENABLE_EXTERNAL_REDIS"]="false"
     ["ENABLE_EXTERNAL_MINIO"]="false"
+    ["IS_UP_MANAGER_WEB"]="true"
 )
 
 

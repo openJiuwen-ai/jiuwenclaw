@@ -22,10 +22,10 @@ check_yq() {
 
 check_cmds() {
     if [ "${DEPLOY_VARS["AGENT_RUNTIME"]}" == "yuanrong" ]; then
-        check_cmd helm
+        check_cmd helm docker python3
     fi
 
-    for cmd in docker python3 jq mount.nfs base64
+    for cmd in jq mount.nfs base64
     do
         check_cmd ${cmd}
     done
@@ -62,9 +62,9 @@ check_if_master() {
 
 # ======== Check passwordless SSH connectivity from Master to Worker nodes ========
 check_ssh_connectivity() {
-    #if [ "${DEPLOY_VARS["AGENT_RUNTIME"]}" == "jiuwen" ]; then
-    #    return
-    #fi
+    if [ "${DEPLOY_VARS["AGENT_RUNTIME"]}" != "yuanrong" ]; then
+        return
+    fi
 
     if [ "${CMD}" == "down" ]; then
         return
@@ -168,6 +168,10 @@ check_if_rabbitmq_up() {
 check_if_mysql_up() {
     local name="${DEPLOY_VARS["MYSQL_NAME"]}"
 
+    if [ "${DEPLOY_VARS["DB_TYPE"]}" != "mysql" ]; then
+       return
+    fi
+
     # Check if external MySQL server
     if [ -n "${DEPLOY_VARS["MYSQL_HOST"]:-}" ]; then
         info "Use external MySQL server"
@@ -177,6 +181,11 @@ check_if_mysql_up() {
         DEPLOY_VARS["DB_PASSWORD"]=${DEPLOY_VARS["MYSQL_ROOT_PASSWORD"]}
         DEPLOY_VARS["ENABLE_EXTERNAL_MYSQL"]="true"
         return
+    fi
+
+    # No Build-In MySQL server
+    if ! check_k8s_resource_exists "statefulset" "${name}"; then
+        error "MySQL is not deployed. Please deploy it first with: ./$(basename "$0") up mysql"
     fi
 
     info "Use built-in MySQL server"
@@ -189,6 +198,10 @@ check_if_mysql_up() {
 check_if_postgresql_up() {
     local name="${DEPLOY_VARS["POSTGRES_NAME"]}"
 
+    if [ "${DEPLOY_VARS["DB_TYPE"]}" != "postgresql" ]; then
+        return
+    fi
+
     # Check if external PostgreSQL server
     if [ -n "${DEPLOY_VARS["POSTGRES_HOST"]:-}" ]; then
         info "Use external PostgreSQL server"
@@ -198,6 +211,11 @@ check_if_postgresql_up() {
         DEPLOY_VARS["DB_PASSWORD"]=${DEPLOY_VARS["POSTGRES_PASSWORD"]}
         DEPLOY_VARS["ENABLE_EXTERNAL_POSTGRES"]="true"
         return
+    fi
+
+    # No Build-In PostgreSQL server
+    if ! check_k8s_resource_exists "statefulset" "${name}"; then
+        error "PostgreSQL is not deployed. Please deploy it first with: ./$(basename "$0") up postgresql"
     fi
 
     info "Use built-in PostgreSQL server"
@@ -228,6 +246,11 @@ check_if_minio_up() {
         return
     fi
 
+    # No Build-In Minio server
+    if ! check_k8s_resource_exists "statefulset" "${name}"; then
+        error "Minio is not deployed. Please deploy it first with: ./$(basename "$0") up minio"
+    fi
+
     info "Use built-in Minio server"
 }
 
@@ -252,19 +275,19 @@ check_if_redis_up() {
     fi
 
     if [ -n "${DEPLOY_VARS["REDIS_HOST"]:-}" ]; then
-        info "Use configured Redis: ${DEPLOY_VARS["REDIS_HOST"]}"
+        info "Use external Redis server"
         DEPLOY_VARS["ENABLE_EXTERNAL_REDIS"]="true"
         return
     fi
 
-    if check_k8s_resource_exists "deployment" "${name}" "default"; then
-        DEPLOY_VARS["REDIS_HOST"]="${name}.default.svc.cluster.local"
-        DEPLOY_VARS["REDIS_PORT"]="6379"
-        info "Use built-in Redis: ${DEPLOY_VARS["REDIS_HOST"]}"
-        return
+    # No Build-In Redis server
+    if ! check_k8s_resource_exists "deployment" "${name}"; then
+        error "Redis is not deployed. Please deploy it first with: ./$(basename "$0") up redis"
     fi
 
-    error "DEPLOYMENT_MODE=active-standby but Redis is not ready. Deploy with: ./deploy.sh up redis"
+    info "Use built-in Minio server"
+    DEPLOY_VARS["REDIS_HOST"]="${name}.default.svc.cluster.local"
+    DEPLOY_VARS["REDIS_PORT"]="6379"
 }
 
 check_dependency(){
@@ -272,11 +295,17 @@ check_dependency(){
     check_cmds
     check_if_master
     check_if_root
-    #check_ssh_connectivity
+    check_ssh_connectivity
     check_cluster_has_enough_nodes
 }
 
 check_nfs_up_dependency(){
+    local arch=$(uname -m)
+
+    if [[ "$arch" =~ ^aarch64 || "$arch" =~ arm ]]; then
+        error "ARM arch unsupported for NFS, abort deployment."
+    fi
+
     # Check if NFS client command mount.nfs is installed on all worker nodes
     for node_ip in "${OTHER_NODE_IPS[@]}"; do
         if ssh -o ConnectTimeout=5 -o StrictHostKeyChecking=no ${node_ip} "command -v mount.nfs" >/dev/null 2>&1; then
