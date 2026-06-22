@@ -262,7 +262,7 @@ interface UseWebSocketReturn {
     params?: Record<string, unknown>,
     options?: WebRequestOptions
   ) => Promise<T>;
-  sendMessage: (content: string, sessionId: string) => Promise<void>;
+  sendMessage: (content: string, sessionId: string, mediaItems?: MediaItem[]) => Promise<void>;
   sendStructuredChatContent: (content: unknown, sessionId: string) => Promise<void>;
   interrupt: (
     sessionId: string,
@@ -714,8 +714,9 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
 
   // 发送聊天消息
   const sendMessage = useCallback(
-    async (content: string, sessionId: string) => {
-      if (!content.trim()) return;
+    async (content: string, sessionId: string, mediaItems: MediaItem[] = []) => {
+      const hasMedia = mediaItems.length > 0;
+      if (!content.trim() && !hasMedia) return;
 
       const currentMode = useSessionStore.getState().mode;
       const unsupportedEvolutionMode = unsupportedEvolutionModeMessage(content, currentMode);
@@ -752,6 +753,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
         id: `user-${Date.now()}`,
         role: 'user',
         content,
+        mediaItems,
         timestamp: new Date().toISOString(),
       });
 
@@ -776,6 +778,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
         await request('chat.send', {
           session_id: sessionId,
           content,
+          ...(hasMedia ? { media_items: mediaItems } : {}),
           mode: currentMode,
           ...(selectedModel ? { model_name: selectedModel } : {}),
         });

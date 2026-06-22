@@ -46,6 +46,7 @@ from jiuwenswarm.common.utils import (
     prepare_workspace,
     reset_free_search_runtime_flags,
 )
+from jiuwenswarm.gateway.media_attachments import normalize_chat_media_attachments
 
 # Ensure workspace initialized
 _workspace_dir = get_user_workspace_dir()
@@ -93,6 +94,8 @@ def _normalize_gateway_message(msg):
 
     req_method = getattr(msg, "req_method", None) or ReqMethod.CHAT_SEND
     params = dict(msg.params or {})
+    if req_method == ReqMethod.CHAT_SEND:
+        normalize_chat_media_attachments(params, getattr(msg, "session_id", None))
     if "query" not in params and "content" in params:
         params["query"] = params["content"]
     if req_method == ReqMethod.CHAT_RESUME:
