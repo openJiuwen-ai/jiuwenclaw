@@ -1362,20 +1362,6 @@ class VibeSkillChannel(BaseChannel):
         system_prompt = data.get("system")
         request_id = f"vibeskill-{int(time.time() * 1000):x}-{secrets.token_hex(3)}"
 
-        # Validate parts must be a list
-        if not isinstance(parts, list):
-            await self._send_ws_res_error(
-                ws, data, "parts must be an array", source="message.send.invalid_parts_type"
-            )
-            return True
-
-        # Validate model must be a dict if provided
-        if msg_model is not None and not isinstance(msg_model, dict):
-            await self._send_ws_res_error(
-                ws, data, "model must be an object", source="message.send.invalid_model_type"
-            )
-            return True
-
         session: VibeSkillSession | None = None
         if session_id:
             session = await self._store.resolve_session(session_id)
@@ -1391,6 +1377,33 @@ class VibeSkillChannel(BaseChannel):
             if not session:
                 await self._send_ws_res_error(
                     ws, data, "missing_session_id", source="message.send.missing_session_id"
+                )
+                return True
+
+        # Validate parts must be a list
+        if not isinstance(parts, list):
+            await self._send_ws_res_error(
+                ws, data, "parts must be an array", source="message.send.invalid_parts_type"
+            )
+            return True
+
+        # Validate model must be a dict if provided, and must contain providerID and modelID
+        if msg_model is not None:
+            if not isinstance(msg_model, dict):
+                await self._send_ws_res_error(
+                    ws, data, "model must be an object", source="message.send.invalid_model_type"
+                )
+                return True
+            
+            if not msg_model.get("providerID"):
+                await self._send_ws_res_error(
+                    ws, data, "model.providerID is required", source="message.send.missing_model_provider_id"
+                )
+                return True
+            
+            if not msg_model.get("modelID"):
+                await self._send_ws_res_error(
+                    ws, data, "model.modelID is required", source="message.send.missing_model_id"
                 )
                 return True
 
