@@ -20,6 +20,38 @@ from jiuwenswarm.telemetry.sqlite_exporter import (
 )
 
 
+def deep_decode_json_strings(data):
+    """Recursively decode any JSON-encoded string values in the data structure.
+
+    Handles double-encoding cases where attributes/events/links/resource
+    are stored as JSON strings inside an already-JSON structure.
+    Only parses strings that decode to dicts or lists; scalar strings are kept.
+    """
+    if isinstance(data, list):
+        return [deep_decode_json_strings(item) for item in data]
+    if isinstance(data, dict):
+        result = {}
+        for key, value in data.items():
+            if isinstance(value, str):
+                try:
+                    parsed = json.loads(value)
+                    if isinstance(parsed, (dict, list)):
+                        result[key] = deep_decode_json_strings(parsed)
+                    else:
+                        # Scalar value (int, bool, null, plain string) — keep original
+                        result[key] = value
+                except (json.JSONDecodeError, ValueError):
+                    result[key] = value
+            elif isinstance(value, dict):
+                result[key] = deep_decode_json_strings(value)
+            elif isinstance(value, list):
+                result[key] = deep_decode_json_strings(value)
+            else:
+                result[key] = value
+        return result
+    return data
+
+
 def cmd_stats(args):
     """Show database statistics."""
     stats = get_span_statistics(args.db_path)
@@ -72,6 +104,7 @@ def cmd_traces(args):
 def cmd_trace(args):
     """Show single trace tree."""
     tree = get_trace_tree(args.db_path, args.trace_id)
+    tree = deep_decode_json_strings(tree)
 
     trace_id_short = args.trace_id[:16] + "..."
     print(f"=== Trace Tree: {trace_id_short} ===\n")
@@ -159,8 +192,11 @@ def cmd_export(args):
         spans = query_spans(args.db_path, limit=args.limit)
         data = spans
 
-    with open(args.output, 'w') as f:
-        json.dump(data, f, indent=2)
+    # Recursively decode any nested JSON strings (handles double-encoding)
+    data = deep_decode_json_strings(data)
+
+    with open(args.output, 'w', encoding='utf-8') as f:
+        json.dump(data, f, indent=2, ensure_ascii=False)
 
     print(f"Exported {len(data)} items to {args.output}")
 
