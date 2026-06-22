@@ -852,6 +852,20 @@ class JiuWenClaw:
 
         return cleaned_chat_id, channel
 
+    @staticmethod
+    def _config_value_as_bool(value: Any, default: bool = False) -> bool:
+        if value is None:
+            return default
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, str):
+            normalized = value.strip().lower()
+            if normalized in {"1", "true", "yes", "on", "enabled"}:
+                return True
+            if normalized in {"0", "false", "no", "off", "disabled", ""}:
+                return False
+        return bool(value)
+
     def _build_inputs(self, request: AgentRequest) -> Tuple[dict[str, Any], str]:
         """构建 adapter 所需的 inputs 字典."""
         from openjiuwen.core.session.interaction.interactive_input import InteractiveInput

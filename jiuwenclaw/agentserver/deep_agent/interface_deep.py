@@ -79,6 +79,8 @@ from openjiuwen.harness.rails.lsp_rail import LspRail
 from openjiuwen.harness.rails.context_engineering_rail import ContextEngineeringRail
 from openjiuwen.harness.rails.filesystem_rail import FileSystemRail
 from openjiuwen.harness.rails.heartbeat_rail import HeartbeatRail
+from openjiuwen.harness.rails.interrupt.confirm_rail import ConfirmPayload as _ReplanConfirmPayload
+from openjiuwen.core.runner.callback import AbortError as _ReplanAbortError
 from openjiuwen.agent_evolving.signal import SignalDetector
 from openjiuwen.agent_evolving.trajectory import FileTrajectoryStore
 from openjiuwen.harness.rails.memory_rail import MemoryRail
@@ -110,6 +112,8 @@ from jiuwenclaw.agentserver.deep_agent.ask_user_question_registry import (
     ask_user_question_request_scope,
 )
 from jiuwenclaw.agentserver.llm_io_trace import (
+    begin_llm_trace_event,
+    end_llm_trace_event,
     log_chat_final,
     log_invoke_input,
     log_invoke_output,
@@ -124,6 +128,11 @@ from jiuwenclaw.agentserver.deep_agent.interrupt.interrupt_helpers import (
 from jiuwenclaw.agentserver.deep_agent.interrupt_resume_helpers import (
     prepare_interrupt_resume_for_request,
     set_todo_resume_snapshot_pending,
+)
+from jiuwenclaw.agentserver.replan_agent.permission_bridge import (
+    clear_resume_ctx as _replan_clear_resume_ctx,
+    extract_tool_interrupt as _replan_extract_tool_interrupt,
+    load_resume_ctx as _replan_load_resume_ctx,
 )
 from jiuwenclaw.agentserver.deep_agent.plan_pause_helpers import (
     build_paused_plan_decision_prompt_from_session_snapshot,
@@ -641,30 +650,34 @@ def _apply_llm_io_trace_patch() -> None:
             resolved_iter = (
                 _extract_iteration_from_obj(kwargs) if trace_iter is None else trace_iter
             )
-            log_invoke_input(
-                session_id=trace_sid,
-                request_id=trace_rid,
-                iteration=resolved_iter,
-                model_name=model_name,
-                messages=messages,
-                tools=tools,
-                max_tokens=kwargs.get("max_tokens"),
-                temperature=kwargs.get("temperature"),
-                top_p=kwargs.get("top_p"),
-                stop=kwargs.get("stop"),
-                timeout=kwargs.get("timeout"),
-            )
-            result = await original_invoke(
-                self, messages, tools=tools, model=model, **kwargs
-            )
-            log_invoke_output(
-                session_id=trace_sid,
-                request_id=trace_rid,
-                iteration=resolved_iter,
-                model_name=model_name,
-                assistant_msg=result,
-            )
-            return result
+            event_token = begin_llm_trace_event()
+            try:
+                log_invoke_input(
+                    session_id=trace_sid,
+                    request_id=trace_rid,
+                    iteration=resolved_iter,
+                    model_name=model_name,
+                    messages=messages,
+                    tools=tools,
+                    max_tokens=kwargs.get("max_tokens"),
+                    temperature=kwargs.get("temperature"),
+                    top_p=kwargs.get("top_p"),
+                    stop=kwargs.get("stop"),
+                    timeout=kwargs.get("timeout"),
+                )
+                result = await original_invoke(
+                    self, messages, tools=tools, model=model, **kwargs
+                )
+                log_invoke_output(
+                    session_id=trace_sid,
+                    request_id=trace_rid,
+                    iteration=resolved_iter,
+                    model_name=model_name,
+                    assistant_msg=result,
+                )
+                return result
+            finally:
+                end_llm_trace_event(event_token)
 
         async def _traced_stream(
             self: Model,
@@ -680,6 +693,7 @@ def _apply_llm_io_trace_patch() -> None:
             resolved_iter = (
                 _extract_iteration_from_obj(kwargs) if trace_iter is None else trace_iter
             )
+            event_token = begin_llm_trace_event()
             log_stream_input(
                 session_id=trace_sid,
                 request_id=trace_rid,
@@ -703,7 +717,7 @@ def _apply_llm_io_trace_patch() -> None:
                 log_reasoning_delta(
                     session_id=trace_sid,
                     request_id=trace_rid,
-                    iteration=trace_iter,
+                    iteration=resolved_iter,
                     model_name=model_name,
                     reasoning_seq=reasoning_trace_pending[0][0],
                     fragment="".join(t[1] for t in reasoning_trace_pending),
@@ -758,6 +772,8 @@ def _apply_llm_io_trace_patch() -> None:
             except Exception:
                 emit_reasoning_trace_batch()
                 raise
+            finally:
+                end_llm_trace_event(event_token)
 
         Model.invoke = _traced_invoke
         Model.stream = _traced_stream
@@ -4499,6 +4515,15 @@ class JiuWenClawDeepAdapter:
             if clear_todo_resume_snapshot_pending:
                 set_todo_resume_snapshot_pending(session, pending=False)
             await post_agent_execute_for_session(session)
+            # 同时清理 RePlanAgent 自己的 resume 上下文，避免下次 plain chat 时
+            # 误命中"resume 路径"。
+            try:
+                await _replan_clear_resume_ctx(session)
+            except Exception:
+                logger.debug(
+                    "[JiuWenClawDeepAdapter] clear replan resume ctx failed",
+                    exc_info=True,
+                )
             await session.post_run()
             logger.info(
                 "[JiuWenClawDeepAdapter] %s: cleared persisted interrupt state session_id=%s",
@@ -5354,6 +5379,500 @@ class JiuWenClawDeepAdapter:
             logger.warning("[JiuWenClawDeepAdapter] 标记 todo cancelled 失败: %s", exc)
             return None
 
+    # ──────────── RePlanAgent 集成 ────────────
+
+    @staticmethod
+    def _is_replan_agent_enabled() -> bool:
+        """检查 RePlanAgent 是否启用."""
+        config_base = get_config()
+        react_config = config_base.get("react", {}) if isinstance(config_base, dict) else {}
+        replan_config = react_config.get("replan_agent", {}) if isinstance(react_config, dict) else {}
+        if not isinstance(replan_config, dict):
+            return False
+        enabled = replan_config.get("enabled", False)
+        if isinstance(enabled, bool):
+            return enabled
+        if isinstance(enabled, str):
+            normalized = enabled.strip().lower()
+            return normalized in {"1", "true", "yes", "on", "enabled"}
+        return bool(enabled)
+
+    @staticmethod
+    def _parse_prefer_replan_flag(params: dict[str, Any]) -> bool:
+        raw = params.get("prefer_replan", params.get("preferReplan"))
+        if raw is None:
+            return False
+        if isinstance(raw, bool):
+            return raw
+        if isinstance(raw, str):
+            normalized = raw.strip().lower()
+            return normalized in {"1", "true", "yes", "on", "enabled"}
+        return bool(raw)
+
+    def _should_try_replan_agent(self, request: AgentRequest) -> bool:
+        """判断是否需要尝试 RePlanAgent."""
+        # 1. 配置启用检查
+        if not self._is_replan_agent_enabled():
+            return False
+
+        # 2. mode 检查 - 只处理 agent.* 模式
+        mode = request.params.get("mode", "agent.plan") if isinstance(request.params, dict) else "agent.plan"
+        mode_root = str(mode).split(".")[0] if mode else "agent"
+        if mode_root != "agent":
+            return False
+
+        params = request.params if isinstance(request.params, dict) else {}
+
+        # 3. resume 请求：带 answers 但 query 可能为空，直接放行
+        #    relay-claw 的 permissionBridge submitAnswer 发出的 resume 请求
+        #    params.query='' + params.answers=[...]，必须走 RePlan resume 路径，
+        #    否则 fall through 到 DeepAgent 导致降级。
+        answers = params.get("answers") or []
+        if answers:
+            return True
+
+        # 4. task 非空检查（仅对非 resume 请求）
+        task = params.get("query", "")
+        if not task:
+            return False
+
+        # [TEMP-FORCE-REPLAN] 测试强制开关，前端【快速】按钮合入后整段删除
+        if (get_config().get("react", {}).get("replan_agent", {}) or {}).get("force_enable", False):
+            return True
+
+        # 5. 前端显式开启「快速」模式时才走 RePlanAgent
+        return self._parse_prefer_replan_flag(params)
+
+    def _build_replan_config(self) -> dict[str, Any]:
+        """构建 RePlanAgent 配置."""
+        tool_cards = []
+        if self._instance is not None:
+            ability_manager = getattr(self._instance, "ability_manager", None)
+            if ability_manager is not None:
+                tool_cards = ability_manager.list()
+
+        # 创建 fallback handler，复用 DeepAgent 的工具/rail/模型/权限配置
+        fallback_handler = self._create_replan_fallback_handler()
+
+        return {
+            "skill_codes_dir": "jiuwenclaw.agentserver.replan_agent.skill_codes",
+            "tool_cards": tool_cards,
+            "model_client": self._model,
+            "fallback_handler": fallback_handler,
+            # 传递 agent card，executor 创建 session 时需要它来初始化 checkpointer，
+            # 否则 session.pre_run/post_run 会因 card.id 为 None 崩溃，导致 resume_ctx 无法持久化。
+            "card": self._instance.card if self._instance is not None else None,
+            # LLM 并发上限，同一 RePlanExecutor 内最多并行 LLM 调用数
+            "llm_concurrency_limit": 10,
+        }
+
+    def _create_replan_fallback_handler(self) -> Any:
+        """创建 RePlan 节点级 fallback handler。
+
+        基于 DeepAgent subagent，复用主 agent 的工具、rail、模型、权限配置。
+        每次请求创建独立的 subagent session，避免污染主会话。
+        """
+        from jiuwenclaw.agentserver.replan_agent.fallback_handler import DeepAgentFallbackHandler
+
+        return DeepAgentFallbackHandler(
+            adapter=self,
+            request_id="",
+            channel_id="",
+            session_id="",
+        )
+
+    async def _try_replan_agent(
+        self,
+        request: AgentRequest,
+        inputs: dict[str, Any],
+    ) -> AgentResponse | None:
+        """尝试使用 RePlanAgent 处理请求，失败返回 None."""
+        if not self._should_try_replan_agent(request):
+            return None
+
+        task = request.params.get("query", "") if isinstance(request.params, dict) else ""
+
+        from jiuwenclaw.agentserver.replan_agent.agent import RePlanAgent, RePlanNotHandled
+
+        token_trace_sid = _LLM_TRACE_SESSION_ID.set(request.session_id or "default")
+        token_trace_rid = _LLM_TRACE_REQUEST_ID.set(request.request_id or "")
+        token_trace_iter = _LLM_TRACE_ITERATION.set(0)
+        token_trace_model = _LLM_TRACE_MODEL_NAME.set(
+            getattr(self._model, "model_config", None) and getattr(self._model.model_config, "model_name", "") or ""
+        )
+        try:
+            replan_agent = RePlanAgent(self._build_replan_config())
+            raw_interactive = request.params.get("interactive_ask", request.params.get("interactiveAsk"))
+            interactive_ask = bool(raw_interactive) if raw_interactive is not None else False
+            async with ask_user_question_request_scope(
+                interactive_ask=interactive_ask,
+                session_id=request.session_id or "default",
+                stream_request_id=request.request_id or "",
+                channel_id=request.channel_id or "",
+            ):
+                result = await replan_agent.run(task, inputs)
+        except RePlanNotHandled as exc:
+            logger.info("[JiuWenClawDeepAdapter] RePlanAgent 未处理，继续 DeepAgent 流程: %s", exc)
+            return None
+        except Exception as exc:
+            logger.warning("[JiuWenClawDeepAdapter] RePlanAgent 执行失败，继续 DeepAgent 流程: %s", exc, exc_info=True)
+            return None
+        finally:
+            _reset_llm_trace_tokens(token_trace_sid, token_trace_rid, token_trace_iter, token_trace_model)
+
+        # 处理结果
+        if isinstance(result, AgentResponse):
+            return result
+        if isinstance(result, dict):
+            payload = result if "content" in result or "files" in result else {"content": str(result)}
+        else:
+            payload = {"content": str(result)}
+        return AgentResponse(
+            request_id=request.request_id,
+            channel_id=request.channel_id,
+            ok=True,
+            payload=payload,
+            metadata=request.metadata,
+        )
+
+    async def _try_replan_agent_stream(
+        self,
+        request: AgentRequest,
+        inputs: dict[str, Any],
+    ) -> AsyncIterator[AgentResponseChunk] | None:
+        """尝试使用 RePlanAgent 流式处理请求，失败返回 None。
+
+        按以下优先级路由：
+        1. 若 ``request.params.answers`` 非空且 session 中有 ``__replan_resume_ctx__``，
+           走 resume 路径（跳过 planner，重放 plan_code，注入用户审批答案）。
+        2. 否则按正常路径走 ``replan_agent.run_stream``，
+           AbortError 被捕获并转为 HITL 三件套 chunk 发送给前端。
+
+        Returns:
+            AsyncIterator[AgentResponseChunk] | None:
+            - 如果应该使用 RePlanAgent，返回 AsyncIterator
+            - 否则返回 None
+        """
+        if not self._should_try_replan_agent(request):
+            return None
+
+        if inputs is None:
+            inputs = {}
+
+        params = request.params if isinstance(getattr(request, "params", None), dict) else {}
+        answers: list = params.get("answers") or []
+
+        # ── Resume 路径 ──
+        if answers:
+            session = create_agent_session(
+                session_id=request.session_id or "default",
+                card=self._instance.card if self._instance is not None else None,
+            )
+            resume_ctx = await _replan_load_resume_ctx(session)
+            if resume_ctx is not None:
+                logger.info(
+                    "[JiuWenClawDeepAdapter] RePlan resume detected: tcid=%s",
+                    resume_ctx.get("pending_tool_call_id"),
+                )
+                return self._make_replan_resume_stream(
+                    request=request,
+                    inputs=inputs,
+                    session=session,
+                    resume_ctx=resume_ctx,
+                    answers=answers,
+                )
+            # answers 非空但 resume_ctx 丢失（session 过期/清理），
+            # 不走正常路径（task 为空无意义），返回 None 让上层降级到 DeepAgent。
+            logger.warning(
+                "[JiuWenClawDeepAdapter] RePlan resume requested but resume_ctx is None; "
+                "falling back to DeepAgent. session_id=%s",
+                request.session_id,
+            )
+            return None
+
+        # ── 正常路径 ──
+        task = params.get("query", "")
+
+        from jiuwenclaw.agentserver.replan_agent.agent import RePlanAgent, RePlanNotHandled
+
+        async def _stream_impl() -> AsyncIterator[AgentResponseChunk]:
+            token_trace_sid = _LLM_TRACE_SESSION_ID.set(request.session_id or "default")
+            token_trace_rid = _LLM_TRACE_REQUEST_ID.set(request.request_id or "")
+            token_trace_iter = _LLM_TRACE_ITERATION.set(0)
+            token_trace_model = _LLM_TRACE_MODEL_NAME.set(
+                getattr(self._model, "model_config", None) and getattr(self._model.model_config, "model_name", "") or ""
+            )
+            replan_agent = RePlanAgent(self._build_replan_config())
+            raw_interactive = params.get("interactive_ask", params.get("interactiveAsk"))
+            interactive_ask = bool(raw_interactive) if raw_interactive is not None else False
+            try:
+                async with ask_user_question_request_scope(
+                    interactive_ask=interactive_ask,
+                    session_id=request.session_id or "default",
+                    stream_request_id=request.request_id or "",
+                    channel_id=request.channel_id or "",
+                ):
+                    async for chunk in replan_agent.run_stream(
+                        task, inputs, request.request_id, request.channel_id
+                    ):
+                        yield chunk
+            except _ReplanAbortError as e:
+                # HITL 中断 → 转成前端三件套
+                logger.info(
+                    "[JiuWenClawDeepAdapter] _stream_impl caught AbortError, emitting HITL chunks: %s",
+                    e,
+                )
+                async for hitl_chunk in self._emit_replan_hitl_chunks(
+                    request, e
+                ):
+                    yield hitl_chunk
+                return
+            except RePlanNotHandled as exc:
+                logger.info("[JiuWenClawDeepAdapter] RePlanAgent 未处理，继续 DeepAgent 流程: %s", exc)
+                return
+            except Exception as _stream_exc:
+                logger.warning(
+                    "[JiuWenClawDeepAdapter] _stream_impl caught generic Exception (will re-raise): %r",
+                    _stream_exc,
+                    exc_info=True,
+                )
+                raise
+            finally:
+                _reset_llm_trace_tokens(token_trace_sid, token_trace_rid, token_trace_iter, token_trace_model)
+
+        return _stream_impl()
+
+    def _make_replan_resume_stream(
+        self,
+        request: AgentRequest,
+        inputs: dict[str, Any],
+        session: Any,
+        resume_ctx: dict[str, Any],
+        answers: list,
+    ) -> AsyncIterator[AgentResponseChunk] | None:
+        """构造 resume 的流式 AsyncIterator。"""
+        from jiuwenclaw.agentserver.replan_agent.agent import RePlanAgent, RePlanNotHandled
+
+        async def _resume_impl() -> AsyncIterator[AgentResponseChunk]:
+            token_trace_sid = _LLM_TRACE_SESSION_ID.set(request.session_id or "default")
+            token_trace_rid = _LLM_TRACE_REQUEST_ID.set(request.request_id or "")
+            token_trace_iter = _LLM_TRACE_ITERATION.set(0)
+            token_trace_model = _LLM_TRACE_MODEL_NAME.set(
+                getattr(self._model, "model_config", None) and getattr(self._model.model_config, "model_name", "") or ""
+            )
+            replan_agent = RePlanAgent(self._build_replan_config())
+
+            # 将前端 answers 转为 ConfirmPayload（rail 期望格式）
+            user_input = self._replan_answers_to_confirm_payload(answers, resume_ctx)
+
+            params = request.params or {}
+            raw_interactive = params.get(
+                "interactive_ask", params.get("interactiveAsk")
+            )
+            interactive_ask = bool(raw_interactive) if raw_interactive is not None else False
+
+            try:
+                await _replan_clear_resume_ctx(session)
+                try:
+                    await session.post_run()
+                except Exception:
+                    pass
+                async with ask_user_question_request_scope(
+                    interactive_ask=interactive_ask,
+                    session_id=request.session_id or "default",
+                    stream_request_id=request.request_id or "",
+                    channel_id=request.channel_id or "",
+                ):
+                    async for chunk in replan_agent.resume_stream(
+                        plan_code=resume_ctx["plan_code"],
+                        inputs=resume_ctx.get("inputs", inputs),
+                        request_id=request.request_id,
+                        channel_id=request.channel_id,
+                        pending_tool_call_id=resume_ctx["pending_tool_call_id"],
+                        user_input=user_input,
+                    ):
+                        yield chunk
+            except _ReplanAbortError as e:
+                # 二次中断：理论上不应发生（rail 已收到答案），但防御性处理
+                async for hitl_chunk in self._emit_replan_hitl_chunks(
+                    request, e
+                ):
+                    yield hitl_chunk
+                return
+            except RePlanNotHandled:
+                logger.info("[JiuWenClawDeepAdapter] RePlan resume fallback to DeepAgent")
+                return
+            finally:
+                _reset_llm_trace_tokens(token_trace_sid, token_trace_rid, token_trace_iter, token_trace_model)
+
+        return _resume_impl()
+
+    @staticmethod
+    def _replan_answers_to_confirm_payload(
+        answers: list,
+        resume_ctx: dict[str, Any],
+    ) -> _ReplanConfirmPayload:
+        """将前端 answers（用户对 ask_user_question 的答复）转为 ConfirmPayload。
+
+        前端 answers 结构：
+            [{"question": "...", "answer": "本次允许" / "总是允许" / "拒绝", ...}]
+
+        映射：
+            - "拒绝" → approved=False
+            - "总是允许" → approved=True, auto_confirm=True, persist_allow=True
+            - "本次允许" → approved=True
+        """
+        text = ""
+        for ans in answers:
+            if isinstance(ans, dict):
+                a = ans.get("answer") or ans.get("value") or ""
+                if a:
+                    text = str(a).strip()
+                    break
+        if not text and answers:
+            first = answers[0]
+            if isinstance(first, str):
+                text = first
+
+        if text == "拒绝":
+            return _ReplanConfirmPayload(approved=False, feedback="user rejected")
+        if text == "总是允许":
+            return _ReplanConfirmPayload(approved=True, auto_confirm=True, persist_allow=True)
+        return _ReplanConfirmPayload(approved=True)
+
+    @staticmethod
+    async def _emit_replan_hitl_chunks(
+        request: AgentRequest,
+        abort_exc: _ReplanAbortError,
+    ) -> AsyncIterator[AgentResponseChunk]:
+        """AbortError → HITL 三件套 chunk（tool_call pending + ask_user_question + invocation_paused）。"""
+        tic = _replan_extract_tool_interrupt(abort_exc)
+        if tic is None:
+            raise abort_exc
+
+        tc_data = {
+            "id": tic.tool_call.id if tic.tool_call else "",
+            "name": tic.tool_call.name if tic.tool_call else "",
+            "arguments": tic.tool_call.arguments if tic.tool_call else {},
+        }
+        rid = request.request_id
+        cid = request.channel_id
+
+        # (1) chat.tool_call — pending_approval
+        yield AgentResponseChunk(
+            request_id=rid,
+            channel_id=cid,
+            payload={
+                "event_type": "chat.tool_call",
+                "tool_call": tc_data,
+                "status": "pending_approval",
+                "source": "permission_interrupt",
+            },
+            is_complete=False,
+        )
+
+        # (1.5) chat.tool_update — 让前端建立工具调用卡片上下文
+        # DeepAgent 正常 HITL 路径中，前端会先收到 chat.tool_update(status=in_progress)，
+        # 再收到 chat.ask_user_question。前端依赖 tool_update 来渲染工具调用卡片，
+        # 然后在卡片上叠加审批按钮。RePlan 不走 LLM tool_calls.delta 流程，
+        # 所以需要补一个 tool_update 让前端能正确渲染。
+        yield AgentResponseChunk(
+            request_id=rid,
+            channel_id=cid,
+            payload={
+                "event_type": "chat.tool_update",
+                "tool_name": tc_data.get("name", ""),
+                "tool_call_id": tc_data.get("id", ""),
+                "arguments": tc_data.get("arguments", {}),
+                "status": "in_progress",
+                "source": "permission_interrupt",
+            },
+            is_complete=False,
+        )
+
+        # (2) chat.ask_user_question — 复用 DeepAgent 格式
+        # 注意：convert_interactions_to_ask_user_question 期望 payload 是
+        # InteractionOutput（含 id/value），其中 value 才是带 message/ui_options 的
+        # InterruptRequest。直接把 InterruptRequest 当 payload 会导致 value 缺失，
+        # extract_question_from_interaction 取不到 message，前端无法渲染弹窗。
+        from openjiuwen.core.session.interaction.interaction import InteractionOutput
+        from openjiuwen.core.session.stream import OutputSchema
+        from openjiuwen.core.single_agent.interrupt.response import (
+            ToolCallInterruptRequest as _ReplanToolCallInterruptRequest,
+        )
+
+        # 用 ToolCallInterruptRequest 包装，携带 tool_name / tool_call_id / tool_args，
+        # 让前端能在弹窗里看到具体工具名与命令预览。
+        try:
+            tool_call_request = _ReplanToolCallInterruptRequest.from_tool_call(
+                tic.request, tic.tool_call,
+            )
+            logger.info(
+                "[JiuWenClawDeepAdapter] HITL ToolCallInterruptRequest built: tool=%s tcid=%s msg=%s",
+                tc_data.get("name"), tc_data.get("id"),
+                getattr(tool_call_request, "message", None),
+            )
+        except Exception as tcr_exc:
+            tool_call_request = tic.request
+            logger.warning(
+                "[JiuWenClawDeepAdapter] HITL from_tool_call failed: %s; falling back to raw tic.request",
+                tcr_exc,
+                exc_info=True,
+            )
+
+        interaction_payload = InteractionOutput(
+            id=(tic.tool_call.id if tic.tool_call else "") or "",
+            value=tool_call_request,
+        )
+        ask_payload = convert_interactions_to_ask_user_question([
+            OutputSchema(
+                type="__interaction__",
+                index=0,
+                payload=interaction_payload,
+            )
+        ])
+        logger.info(
+            "[JiuWenClawDeepAdapter] HITL ask_payload type=%s value=%s",
+            type(ask_payload).__name__,
+            ask_payload,
+        )
+        if ask_payload:
+            # 使用原始 request_id（rid），而非 tool_call_id。
+            # relay-claw 的 permissionBridge 用 payload.request_id 作为 jiuwenRequestId，
+            # resume 时把它放进 params.request_id 发回 jiuwenclaw。
+            # jiuwenclaw 的 resume 路径靠 session_id 找 resume_ctx，不依赖 request_id 匹配，
+            # 但保持 request_id 一致可避免 relay-claw 侧的队列路由错乱。
+            if isinstance(ask_payload, dict):
+                ask_payload["request_id"] = rid
+            yield AgentResponseChunk(
+                request_id=rid,
+                channel_id=cid,
+                payload=ask_payload,
+                is_complete=False,
+            )
+        else:
+            logger.warning(
+                "[JiuWenClawDeepAdapter] HITL ask_payload is None; tool=%s tcid=%s",
+                tc_data.get("name"),
+                tc_data.get("id"),
+            )
+
+        # (3) chat.invocation_paused — 标记等待用户输入
+        # is_complete=True + awaiting_user_input=True → E2A 网关转为 is_final=False，
+        # relay-claw 的 consumeFrames 循环不会 break，流保持开启。
+        # 用户授权后，relay-claw permissionBridge.submitAnswer 将 resume 帧转发回原始队列，
+        # consumeFrames 循环继续消费 → 前端看到续跑内容。
+        # 不要在此之后追加 is_final=True 终止帧，否则 consumeFrames 提前 break，resume 帧丢失。
+        yield AgentResponseChunk(
+            request_id=rid,
+            channel_id=cid,
+            payload={
+                "event_type": "chat.invocation_paused",
+                "awaiting_user_input": True,
+            },
+            is_complete=True,
+        )
+
     async def process_message_impl(
             self, request: AgentRequest, inputs: dict[str, Any]
     ) -> AgentResponse:
@@ -5377,6 +5896,11 @@ class JiuWenClawDeepAdapter:
                 payload={"error": "模型未正确配置，请先配置模型信息"},
                 metadata=request.metadata,
             )
+
+        # 尝试使用 RePlanAgent 处理
+        replan_result = await self._try_replan_agent(request, inputs)
+        if replan_result is not None:
+            return replan_result
 
         session_id = request.session_id or "default"
         query = request.params.get("query", "")
@@ -5508,6 +6032,69 @@ class JiuWenClawDeepAdapter:
         session_id = request.session_id or "default"
         rid = request.request_id
         cid = request.channel_id
+        usage_accumulator = self._new_usage_accumulator()
+
+        # 尝试使用 RePlanAgent 流式处理
+        logger.info(
+            "[JiuWenClawDeepAdapter] 尝试使用 RePlanAgent 流式处理: request_id=%s, inputs=%s",
+            request.request_id,
+            inputs,
+        )
+        replan_stream = await self._try_replan_agent_stream(request, inputs)
+        if replan_stream is not None:
+            replan_handled = False
+            replan_completed = False
+            replan_failed = False
+            replan_complete_chunk: AgentResponseChunk | None = None
+            try:
+                async for chunk in replan_stream:
+                    replan_handled = True
+                    payload = getattr(chunk, "payload", None)
+                    usage_meta = self._extract_usage_metadata_from_payload(payload)
+                    if usage_meta is not None:
+                        self._accumulate_usage_metadata(usage_accumulator, usage_meta)
+                    if self._is_replan_failure_payload(payload):
+                        replan_failed = True
+                        continue
+                    if getattr(chunk, "is_complete", False):
+                        replan_complete_chunk = chunk
+                        continue
+                    if replan_failed:
+                        continue
+                    yield chunk
+            except Exception as exc:
+                replan_failed = True
+                logger.warning(
+                    "[JiuWenClawDeepAdapter] RePlanAgent 执行失败，继续 DeepAgent 流程: %s (type=%r)",
+                    exc,
+                    type(exc),
+                    exc_info=True,
+                )
+
+            replan_completed = replan_complete_chunk is not None and not replan_failed
+            if replan_completed:
+                summary = self._build_usage_summary(usage_accumulator)
+                logger.info("[JiuWenClawDeepAdapter] llm_usage summary: request_id=%s session_id=%s usage=%s",
+                            rid, session_id, summary)
+                if usage_accumulator["total_tokens"] > 0:
+                    yield AgentResponseChunk(
+                        request_id=rid,
+                        channel_id=cid,
+                        payload={
+                            "event_type": "chat.usage_summary",
+                            "session_id": session_id,
+                            "usage": summary,
+                        },
+                        is_complete=False,
+                    )
+                yield replan_complete_chunk
+                return
+
+            if replan_handled:
+                logger.info(
+                    "[JiuWenClawDeepAdapter] RePlanAgent 未完整完成，继续 DeepAgent 流程: request_id=%s",
+                    request.request_id,
+                )
         query = request.params.get("query", "")
         mode = request.params.get("mode", "agent.plan")
         self._last_runtime_mode = mode
@@ -5582,14 +6169,6 @@ class JiuWenClawDeepAdapter:
         evolution_status_started = False
         evolution_status_ended = False
         last_logged_iteration = -1  # 用于记录上次记录进度的迭代次数
-        usage_accumulator = {
-            "input_tokens": 0,
-            "output_tokens": 0,
-            "total_tokens": 0,
-            "input_cost": 0.0,
-            "output_cost": 0.0,
-            "total_cost": 0.0,
-        }
         hitl_pending_stream = False
         suppress_stream_after_hitl = False
 
@@ -5704,12 +6283,9 @@ class JiuWenClawDeepAdapter:
 
                     if chunk_type == "llm_usage":
                         logger.info(f"[JiuWenClawDeepAdapter] llm_usage chunk: {chunk}")
-                        usage_meta = chunk.payload.get("usage_metadata", {}) if isinstance(chunk.payload, dict) else {}
-                        if isinstance(usage_meta, dict):
-                            for token in ("input_tokens", "output_tokens", "total_tokens"):
-                                usage_accumulator[token] += usage_meta.get(token, 0) or 0
-                            for cost in ("input_cost", "output_cost", "total_cost"):
-                                usage_accumulator[cost] += usage_meta.get(cost, 0.0) or 0.0
+                        usage_meta = self._extract_usage_metadata_from_payload(chunk.payload)
+                        if usage_meta is not None:
+                            self._accumulate_usage_metadata(usage_accumulator, usage_meta)
                         usage_payload = propagate_stream_source_id(chunk, {
                             "event_type": "chat.usage_metadata",
                             "metadata": chunk.payload,
@@ -6019,17 +6595,7 @@ class JiuWenClawDeepAdapter:
                 self._untrack_session_toolkit(rid)
             await self._on_chat_request_end(chat_env_token, chat_fp_token, chat_skill_dirs_token)
 
-        summary = {
-            "input_tokens": usage_accumulator["input_tokens"],
-            "output_tokens": usage_accumulator["output_tokens"],
-            "total_tokens": usage_accumulator["total_tokens"],
-        }
-        if usage_accumulator["input_cost"] > 0:
-            summary["input_cost"] = round(usage_accumulator["input_cost"], 6)
-        if usage_accumulator["output_cost"] > 0:
-            summary["output_cost"] = round(usage_accumulator["output_cost"], 6)
-        if usage_accumulator["total_cost"] > 0:
-            summary["total_cost"] = round(usage_accumulator["total_cost"], 6)
+        summary = self._build_usage_summary(usage_accumulator)
 
         logger.info("[JiuWenClawDeepAdapter] llm_usage summary: request_id=%s session_id=%s usage=%s",
                     rid, session_id, summary)
@@ -6064,6 +6630,63 @@ class JiuWenClawDeepAdapter:
     @staticmethod
     def _is_ask_user_payload(payload: Any) -> bool:
         return isinstance(payload, dict) and payload.get("event_type") == "chat.ask_user_question"
+
+    @staticmethod
+    def _new_usage_accumulator() -> dict[str, float]:
+        return {
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "total_tokens": 0,
+            "input_cost": 0.0,
+            "output_cost": 0.0,
+            "total_cost": 0.0,
+        }
+
+    @staticmethod
+    def _extract_usage_metadata_from_payload(payload: Any) -> dict[str, Any] | None:
+        if not isinstance(payload, dict):
+            return None
+        raw_meta = payload.get("metadata", payload)
+        if not isinstance(raw_meta, dict):
+            return None
+        usage_meta = raw_meta.get("usage_metadata", raw_meta)
+        return usage_meta if isinstance(usage_meta, dict) else None
+
+    @staticmethod
+    def _is_replan_failure_payload(payload: Any) -> bool:
+        if not isinstance(payload, dict):
+            return False
+        event_type = payload.get("event_type")
+        if event_type == "chat.error":
+            return True
+        if event_type == "plan.finished" and payload.get("status") == "failed":
+            return True
+        return False
+
+    @staticmethod
+    def _accumulate_usage_metadata(
+        usage_accumulator: dict[str, float],
+        usage_meta: dict[str, Any],
+    ) -> None:
+        for token in ("input_tokens", "output_tokens", "total_tokens"):
+            usage_accumulator[token] += usage_meta.get(token, 0) or 0
+        for cost in ("input_cost", "output_cost", "total_cost"):
+            usage_accumulator[cost] += usage_meta.get(cost, 0.0) or 0.0
+
+    @staticmethod
+    def _build_usage_summary(usage_accumulator: dict[str, float]) -> dict[str, Any]:
+        summary: dict[str, Any] = {
+            "input_tokens": usage_accumulator["input_tokens"],
+            "output_tokens": usage_accumulator["output_tokens"],
+            "total_tokens": usage_accumulator["total_tokens"],
+        }
+        if usage_accumulator["input_cost"] > 0:
+            summary["input_cost"] = round(usage_accumulator["input_cost"], 6)
+        if usage_accumulator["output_cost"] > 0:
+            summary["output_cost"] = round(usage_accumulator["output_cost"], 6)
+        if usage_accumulator["total_cost"] > 0:
+            summary["total_cost"] = round(usage_accumulator["total_cost"], 6)
+        return summary
 
     def _should_pause_for_user_input(self, payload: Any) -> bool:
         return self._is_ask_user_payload(payload)

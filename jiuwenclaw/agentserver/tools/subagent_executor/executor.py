@@ -19,6 +19,7 @@ from openjiuwen.core.single_agent import AgentCard
 from openjiuwen.harness import DeepAgent
 from openjiuwen.harness.factory import create_deep_agent
 from openjiuwen.harness.rails.skill_use_rail import SkillUseRail
+from openjiuwen.harness.rails.filesystem_rail import FileSystemRail
 from openjiuwen.harness.workspace.workspace import Workspace
 from openjiuwen.core.foundation.llm import Model
 
@@ -942,20 +943,22 @@ Approach each task methodically and deliver high-quality results.
                 minimal=True,
             ) or JiuClawContextEngineeringRail(preset=True, minimal=True)
         rails = [
+            FileSystemRail(),
             SubagentContextRail(
                 subagent_id=task.task_id,
                 parent_session=parent_session,
                 workspace=workspace_obj,  # Pass workspace for artifact path detection
             ),
             # active-skill body 的 lift/pin 由 rail.after_tool_call 触发；
-            # include_tools/include_skill_body_tools 都关掉：skill_tool/skill_complete
-            # 已通过 _inherit_tools_for_spawn 从父 agent 继承，不重复注册。
+            # include_tools=False：read_file/code/bash 已由 FileSystemRail 注册；
+            # include_skill_body_tools=True：子代理自行注册 skill_tool/skill_complete，
+            # 不依赖父 agent 的 SkillUseRail 是否已初始化。
             # 子类版本跳过 before_model_call 的"# 技能"列表渲染（父 prompt 已指明）。
             SubagentSkillUseRail(
                 skills_dir=[str(p) for p in get_agent_registered_skill_dirs()],
                 skill_mode=SkillUseRail.SKILL_MODE_ALL,
                 include_tools=False,
-                include_skill_body_tools=False,
+                include_skill_body_tools=True,
             ),
         ]
         if ce_rail is not None:
@@ -1125,18 +1128,20 @@ Execute the given task using inherited context and available tools.
             ) or JiuClawContextEngineeringRail(preset=True, minimal=True)
         rails = [
             ForkMessageInjectionRail(fork_messages),  # 注入继承的消息
+            FileSystemRail(),
             SubagentContextRail(
                 subagent_id=task.task_id,
                 parent_session=parent_session,
                 workspace=workspace_obj,  # Pass workspace for artifact path detection
             ),
-            # 与 spawn 路径同样的 active-skill body lift/pin 接入；
-            # fork 继承的 skill_tool/skill_complete 走 _inherit_tools_for_fork。
+            # 与 spawn 路径同样：include_tools=False（FileSystemRail 已注册 fs 工具）；
+            # include_skill_body_tools=True：子代理自行注册 skill_tool/skill_complete，
+            # 不依赖父 agent 的 SkillUseRail 是否已初始化。
             SubagentSkillUseRail(
                 skills_dir=[str(p) for p in get_agent_registered_skill_dirs()],
                 skill_mode=SkillUseRail.SKILL_MODE_ALL,
                 include_tools=False,
-                include_skill_body_tools=False,
+                include_skill_body_tools=True,
             ),
         ]
         if ce_rail is not None:

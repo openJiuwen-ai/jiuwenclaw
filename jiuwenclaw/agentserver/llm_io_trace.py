@@ -19,9 +19,35 @@ from __future__ import annotations
 import json
 import logging
 import os
+import uuid
+from contextvars import ContextVar, Token
 from typing import Any, Mapping
 
 from jiuwenclaw.utils import logger
+
+
+# 单次 LLM 调用的 event_id，由 _apply_llm_io_trace_patch 的 invoke/stream wrapper 在进入时
+# 设置、退出时重置；同一次 LLM 调用内 invoke_request/output、stream_request/output、
+# reasoning_delta、chat.final 等多条 trace 行共享同一个 event_id，便于在 full.log 中
+# 关联同一次 LLM 调用的完整流程。
+_LLM_TRACE_EVENT_ID: ContextVar[str] = ContextVar(
+    "llm_trace_event_id",
+    default="",
+)
+
+
+def begin_llm_trace_event() -> Token:
+    """生成一个新的 event_id 并写入 ContextVar，返回 Token 供 finally 重置。"""
+    return _LLM_TRACE_EVENT_ID.set(uuid.uuid4().hex)
+
+
+def end_llm_trace_event(token: Token) -> None:
+    """重置 event_id ContextVar。"""
+    _LLM_TRACE_EVENT_ID.reset(token)
+
+
+def _current_event_id() -> str:
+    return _LLM_TRACE_EVENT_ID.get()
 
 
 def _env_int(name: str, default: int) -> int:
@@ -169,10 +195,13 @@ def _trace_header(
     iteration: int | None,
     model_name: str,
     event: str,
+    event_id: str = "",
 ) -> str:
     it = "" if iteration is None else str(iteration)
+    eid = event_id or _current_event_id()
+    event_id_str = f"{eid!r}" if eid else ""
     return (
-        f"[LLM_IO_TRACE] event={event} session_id={session_id!r} "
+        f"[LLM_IO_TRACE] event={event} event_id={event_id_str} session_id={session_id!r} "
         f"request_id={request_id!r} iteration={it} model_name={model_name!r}"
     )
 
