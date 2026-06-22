@@ -4470,8 +4470,8 @@ class VibeSkillChannel(BaseChannel):
         """PUT .../file/content?path= — skilldev.file.write，覆盖写入文本文件。
 
         请求体对齐 opencode FileContent schema：``{"content": "..."}``。
-        响应体：成功返回 ``{"ok": True, "path": "...", "size": ...}``，
-        失败返回 ``{"ok": False, "error": "..."}``。
+        响应体均为 HTTP 200：成功 ``{"ok": True, "path": "...", "size": ...}``，
+        业务失败 ``{"ok": False, "error": "..."}``（Agent 通信失败仍为 502）。
         """
         parsed = urlparse(raw_request_path)
         qs = parse_qs(parsed.query)
@@ -4485,7 +4485,7 @@ class VibeSkillChannel(BaseChannel):
         file_path = _q("path", "")
         if not file_path:
             return self._json_response(
-                400, {"ok": False, "error": "path query parameter is required"}
+                200, {"ok": False, "error": "999001500"} # path query parameter is required
             )
 
         path_err = validate_file_path(file_path, operation="write")
@@ -4501,22 +4501,22 @@ class VibeSkillChannel(BaseChannel):
         try:
             req_body = json.loads(body.decode("utf-8")) if body else {}
         except (json.JSONDecodeError, UnicodeDecodeError) as exc:
-            return self._json_response(400, {"ok": False, "error": f"invalid JSON body: {exc}"})
+            return self._json_response(200, {"ok": False, "error": "999001501"}) # invalid JSON body
 
         if not isinstance(req_body, dict):
             return self._json_response(
-                400, {"ok": False, "error": "request body must be a JSON object"}
+                200, {"ok": False, "error": "999001502"} # request body must be a JSON object
             )
 
         if "content" not in req_body:
             return self._json_response(
-                400, {"ok": False, "error": "content field is required"}
+                200, {"ok": False, "error": "999001503"} # content field is required
             )
 
         content = req_body.get("content")
         if not isinstance(content, str):
             return self._json_response(
-                400, {"ok": False, "error": "content must be a string"}
+                200, {"ok": False, "error": "999001504"} # content must be a string
             )
         # Debug aid for mojibake: inspect what gateway actually receives.
         preview = content[:120]
@@ -4563,11 +4563,11 @@ class VibeSkillChannel(BaseChannel):
         payload = dict(resp.payload) if isinstance(resp.payload, dict) else {}
         if payload.get("event_type") == "skilldev.error":
             return self._json_response(
-                400, {"ok": False, "error": str(payload.get("error") or "skilldev.error")}
+                200, {"ok": False, "error": str(payload.get("error") or "skilldev.error")}
             )
         if not payload.get("ok", False):
             return self._json_response(
-                400, {"ok": False, "error": str(payload.get("error") or "failed")}
+                200, {"ok": False, "error": str(payload.get("error") or "failed")}
             )
 
         out: dict[str, Any] = {
