@@ -229,11 +229,16 @@
     "waitingTasks": "Waiting tasks",
     "waitingTasksCount": "Waiting tasks ({{count}})",
     "removeTask": "Remove task",
+    "addImage": "Add image",
+    "addImageDisabled": "Cannot add images while processing or recording",
+    "removeImage": "Remove image",
     "holdToSpeak": "Hold to speak",
     "send": "Send (Enter)",
     "stop": "Stop",
     "modelSelector": {
-      "tooltip": "Switch the model used for chat"
+      "tooltip": "Switch the model used for chat",
+      "noVision": "No vision model",
+      "noVisionTooltip": "models.vision is not configured. Images will be sent, but chat cannot switch to a dedicated vision model."
     },
     "newSessionDisabled": "Cannot create session while processing or recording",
     "modeSwitchTitle": "Switch Mode",

@@ -229,11 +229,16 @@
     "waitingTasks": "等待任务",
     "waitingTasksCount": "等待任务 ({{count}})",
     "removeTask": "移除任务",
+    "addImage": "添加图片",
+    "addImageDisabled": "处理中或录音中不可添加图片",
+    "removeImage": "移除图片",
     "holdToSpeak": "按住说话",
     "send": "发送 (Enter)",
     "stop": "停止",
     "modelSelector": {
-      "tooltip": "切换对话使用的模型"
+      "tooltip": "切换对话使用的模型",
+      "noVision": "未配置视觉模型",
+      "noVisionTooltip": "当前配置缺少 models.vision，图片会随消息发送，但不会切换到专用视觉模型"
     },
     "newSessionDisabled": "处理中或录音中不可新建",
     "modeSwitchTitle": "切换模式",
