@@ -2582,7 +2582,7 @@ class MessageHandler(ABC):
                             )
                             return
                         logger.info(
-                            "[MessageHandler] AGENT_RUNTIME=%s，已推送文件到 Web Server 并获取 Token: %s",
+                            "[MessageHandler] AGENT_RUNTIME=%s，已推送文件到 Web Server, filename: %s",
                             agent_runtime,
                             filename,
                         )

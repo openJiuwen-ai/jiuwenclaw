@@ -51,6 +51,7 @@ _STRUCTURED_EVENTS = frozenset({
     "chat.session_result",
     "chat.usage_metadata",
     "chat.usage_summary",
+    "chat.file",
 })
 
 

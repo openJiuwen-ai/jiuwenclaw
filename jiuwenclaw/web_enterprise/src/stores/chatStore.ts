@@ -538,6 +538,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
     set((state) => {
       const messages = [...state.messages];
       // 找到最后一条 assistant 消息
+      let foundAssistant = false;
       for (let i = messages.length - 1; i >= 0; i--) {
         if (messages[i].role === 'assistant') {
           const existingFiles = messages[i].fileItems || [];
@@ -545,9 +546,23 @@ export const useChatStore = create<ChatState>((set, get) => ({
             ...messages[i],
             fileItems: [...existingFiles, ...files],
           };
+          foundAssistant = true;
           break;
         }
       }
+      
+      // 如果没有找到 assistant 消息，创建一个新消息来显示文件
+      if (!foundAssistant && files.length > 0) {
+        const fileId = `file_${Date.now()}`;
+        messages.push({
+          id: fileId,
+          role: 'assistant',
+          content: '',
+          timestamp: new Date().toISOString(),
+          fileItems: files,
+        });
+      }
+      
       return { messages };
     });
   },
