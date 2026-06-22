@@ -3,14 +3,20 @@ from __future__ import annotations
 import asyncio
 import time
 from copy import deepcopy
-from typing import Any, Optional
+from typing import TYPE_CHECKING, Any, Optional
 
 from openjiuwen.harness.tools.cron import CronToolBackend, CronToolContext, create_cron_tools
 
-from jiuwenclaw.gateway.cron import CronTargetChannel
-from jiuwenclaw.gateway.cron.models import is_valid_target_channel_id, normalize_target_channel_id
+from jiuwenclaw.gateway.cron.models import (
+    CronTargetChannel,
+    is_valid_target_channel_id,
+    normalize_target_channel_id,
+)
 from jiuwenclaw.agentserver.tools.cron_tools import CronToolRoute, CronTools
-from jiuwenclaw.gateway.message_handler import MessageHandler
+
+if TYPE_CHECKING:
+    from jiuwenclaw.gateway.message_handler import MessageHandler
+
 from jiuwenclaw.schema.message import Message, ReqMethod
 from jiuwenclaw.utils import logger
 
@@ -72,7 +78,7 @@ class _CronToolsCronBackend(CronToolBackend):
             getattr(context, "channel_id", None),
             getattr(context, "session_id", None),
             request_id,
-            sorted(list((params or {}).keys())),
+            sorted((params or {}).keys()),
         )
         payload = _extract_legacy_params(dict(params or {}), context=context, require_schedule=True)
         logger.info(
@@ -340,6 +346,7 @@ class CronRuntimeBridge:
 
         message_handler = None
         try:
+            from jiuwenclaw.gateway.message_handler import MessageHandler
             message_handler = MessageHandler.get_instance()
         except RuntimeError:
             message_handler = None

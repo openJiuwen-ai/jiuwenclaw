@@ -20,6 +20,14 @@ from pathlib import Path
 from dotenv import load_dotenv
 from openjiuwen.core.common.logging import LogManager
 
+# Apply lazy-memory patch before any code triggers `openjiuwen.core.memory`
+# import (that chain eagerly pulls in alembic/sqlalchemy migration machinery,
+# ~560ms saved at startup). LogManager itself does not transitively touch
+# openjiuwen.core.memory, so it can be imported above safely.
+from jiuwenclaw.runtime.lazy_memory_patch import apply_lazy_memory_patch
+
+apply_lazy_memory_patch()
+
 from jiuwenclaw.jiuwen_core_patch import (
     apply_openai_model_client_patch,
     configure_openjiuwen_logging_under_jiuwenclaw,

@@ -1,26 +1,23 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
+"""Gateway 模块 - 系统枢纽（惰性加载，避免启动时拉入重型依赖）。"""
 
-"""Gateway 模块 - 系统枢纽."""
+import sys
 
-from jiuwenclaw.gateway.agent_client import AgentServerClient, WebSocketAgentServerClient
-from jiuwenclaw.agentserver.agent_ws_server import AgentWebSocketServer
-from jiuwenclaw.gateway.channel_manager import ChannelManager
-from jiuwenclaw.gateway.heartbeat import (
-    HEARTBEAT_CHANNEL_ID,
-    GatewayHeartbeatService,
-    HeartbeatConfig,
-    IHeartbeat,
-)
-from jiuwenclaw.gateway.message_handler import MessageHandler
+from jiuwenclaw._lazy import install_lazy_attrs
 
-__all__ = [
-    "AgentServerClient",
-    "AgentWebSocketServer",
-    "WebSocketAgentServerClient",
-    "ChannelManager",
-    "GatewayHeartbeatService",
-    "HEARTBEAT_CHANNEL_ID",
-    "HeartbeatConfig",
-    "IHeartbeat",
-    "MessageHandler",
-]
+# Note: AgentWebSocketServer is re-exported across packages (its home is
+# agentserver.agent_ws_server). Kept here for backward compatibility with
+# callers that historically did `from jiuwenclaw.gateway import AgentWebSocketServer`.
+_LAZY_ATTRS = {
+    "AgentServerClient": (".agent_client", "AgentServerClient"),
+    "WebSocketAgentServerClient": (".agent_client", "WebSocketAgentServerClient"),
+    "AgentWebSocketServer": ("jiuwenclaw.agentserver.agent_ws_server", "AgentWebSocketServer"),
+    "ChannelManager": (".channel_manager", "ChannelManager"),
+    "HEARTBEAT_CHANNEL_ID": (".heartbeat", "HEARTBEAT_CHANNEL_ID"),
+    "GatewayHeartbeatService": (".heartbeat", "GatewayHeartbeatService"),
+    "HeartbeatConfig": (".heartbeat", "HeartbeatConfig"),
+    "IHeartbeat": (".heartbeat", "IHeartbeat"),
+    "MessageHandler": (".message_handler", "MessageHandler"),
+}
+
+install_lazy_attrs(sys.modules[__name__], _LAZY_ATTRS)

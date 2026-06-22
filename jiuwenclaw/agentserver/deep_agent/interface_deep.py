@@ -239,7 +239,7 @@ from jiuwenclaw.config import get_config, get_default_models, resolve_env_vars
 from jiuwenclaw.agentserver.stream_content_sanitize import strip_inline_tool_protocol
 from jiuwenclaw.agentserver.stream_utils import propagate_stream_source_id, tool_calls_payload_to_json_list
 from jiuwenclaw.agentserver.extensions import get_rail_manager
-from jiuwenclaw.gateway.cron import CronTargetChannel
+from jiuwenclaw.gateway.cron.models import CronTargetChannel
 from jiuwenclaw.agentserver.team import get_team_manager
 from jiuwenclaw.schema.agent import AgentRequest, AgentResponse, AgentResponseChunk
 from jiuwenclaw.utils import (

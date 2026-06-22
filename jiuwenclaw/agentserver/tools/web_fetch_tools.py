@@ -14,7 +14,6 @@ from typing import Any
 from urllib.parse import parse_qs, unquote, urlparse
 
 import requests
-import trafilatura
 from openjiuwen.core.foundation.tool import ToolCard, tool
 
 from jiuwenclaw.agentserver.tools.ssl_config import get_requests_verify
@@ -282,6 +281,7 @@ def _extract_content_with_trafilatura(
     Returns:
         tuple of (content, title)
     """
+    import trafilatura  # 局部导入：trafilatura 重型依赖链会显著拖慢启动
     content_type_lower = (content_type or "").lower()
 
     if "application/json" in content_type_lower:
