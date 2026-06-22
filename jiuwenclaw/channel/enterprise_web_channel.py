@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import inspect
 import json
 import logging
@@ -183,6 +184,7 @@ class EnterpriseWebChannel(BaseChannel):
         self._uplink_ws: Any | None = None
         self._uplink_shim = _UplinkSocket(self)
         self._stop_event = asyncio.Event()
+        self._uplink_task: asyncio.Task[None] | None = None
         self._clients: set[Any] = set()
 
     @property
@@ -276,6 +278,58 @@ class EnterpriseWebChannel(BaseChannel):
         if not path.startswith("/"):
             path = f"/{path}"
         return f"ws://{self.config.host}:{self.config.port}{path}"
+
+    def is_uplink_connect_running(self) -> bool:
+        """Whether the uplink connect/reconnect background task is active."""
+        task = self._uplink_task
+        return task is not None and not task.done()
+
+    def start_uplink_connect(self) -> None:
+        """Start uplink connect/reconnect loop (idempotent).
+
+        Used in active-standby mode: only PRIMARY should call this after election.
+        """
+        if self._uplink_task is not None and not self._uplink_task.done():
+            return
+        if not self.config.enabled:
+            logger.warning("EnterpriseWebChannel 未启用（enabled=False），跳过 uplink 连接")
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            logger.warning("EnterpriseWebChannel 无运行中的 event loop，跳过 uplink 连接")
+            return
+        self._uplink_task = loop.create_task(
+            self._run_uplink_connect(),
+            name="enterprise-web-uplink",
+        )
+        logger.info(
+            "EnterpriseWebChannel uplink connect task started (target %s)",
+            self._resolve_gateway_url(),
+        )
+
+    async def _run_uplink_connect(self) -> None:
+        try:
+            await self.start()
+        finally:
+            current = asyncio.current_task()
+            if self._uplink_task is current:
+                self._uplink_task = None
+
+    async def stop_uplink_connect(self) -> None:
+        """Stop uplink and cancel reconnect loop (idempotent).
+
+        Used in active-standby mode: STANDBY calls this to release Web Pod /gateway.
+        """
+        await self.stop()
+        task = self._uplink_task
+        if task is not None:
+            if not task.done():
+                task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await task
+            self._uplink_task = None
+        logger.info("EnterpriseWebChannel uplink connect task stopped")
 
     async def start(self) -> None:
         if self._running:

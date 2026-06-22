@@ -1080,6 +1080,14 @@ async def _run(
     else:
         web_channel = WebChannel(web_config, _DummyBus())
 
+    _gateway_deploy_cfg = get_config().get("gateway") or {}
+    _deployment_mode = str(_gateway_deploy_cfg.get("deployment_mode", "standalone")).strip().lower()
+    _defer_enterprise_web_uplink = _use_enterprise_web and _deployment_mode == "active-standby"
+    if _defer_enterprise_web_uplink:
+        logger.info(
+            "[App] active-standby: EnterpriseWeb uplink deferred until PRIMARY elected",
+        )
+
     # 触发 WebChannel 创建完成扩展点
     web_channel_ctx = WebChannelCreatedHookContext(
         web_channel=web_channel,
@@ -1861,6 +1869,19 @@ async def _run(
 
         leader_election.register_callback(_manager_ws_on_role_change)
 
+        # 选主感知：EnterpriseWebChannel 仅在 PRIMARY 连接 Web Pod /gateway；
+        # STANDBY 主动断开 uplink，避免双 Gateway 竞争同一条 Web Pod 连接。
+        if _defer_enterprise_web_uplink and web_channel is not None:
+            async def _enterprise_web_on_role_change(role: Role) -> None:
+                if role == Role.PRIMARY:
+                    logger.info("[App] PRIMARY elected, start EnterpriseWeb uplink connect")
+                    web_channel.start_uplink_connect()
+                else:
+                    logger.info("[App] STANDBY elected, stop EnterpriseWeb uplink connect")
+                    await web_channel.stop_uplink_connect()
+
+            leader_election.register_callback(_enterprise_web_on_role_change)
+
         # 选主感知：升为 PRIMARY 时主动从 channel_config DB 重新加载 channels。
         # STANDBY 期间 ManagerWsClient 未连接 Manager，可能错过 config.push；
         # 升主时主动 reload 一次，补齐 STANDBY 窗口内的配置变更。
@@ -1896,17 +1917,27 @@ async def _run(
     )
     web_task = (
         asyncio.create_task(web_channel.start(), name="web-channel")
-        if web_channel is not None
+        if web_channel is not None and not _defer_enterprise_web_uplink
         else None
     )
     if web_channel is not None:
         if _use_enterprise_web:
-            logger.info(
-                "[App] started: EnterpriseWeb uplink (target %s)  AgentServer: %s",
+            _ent_uplink_target = (
                 os.getenv("ENTERPRISE_WEB_GATEWAY_URL", "").strip()
-                or f"ws://{web_host}:{web_port}{os.getenv('ENTERPRISE_WEB_GATEWAY_PATH', '/gateway')}",
-                agent_server_url,
+                or f"ws://{web_host}:{web_port}{os.getenv('ENTERPRISE_WEB_GATEWAY_PATH', '/gateway')}"
             )
+            if _defer_enterprise_web_uplink:
+                logger.info(
+                    "[App] EnterpriseWeb uplink leader-aware (target %s)  AgentServer: %s",
+                    _ent_uplink_target,
+                    agent_server_url,
+                )
+            else:
+                logger.info(
+                    "[App] started: EnterpriseWeb uplink (target %s)  AgentServer: %s",
+                    _ent_uplink_target,
+                    agent_server_url,
+                )
         else:
             logger.info(
                 "[App] started: Web ws://%s:%s%s  AgentServer: %s  Press Ctrl+C to exit.",
@@ -1963,7 +1994,10 @@ async def _run(
             except asyncio.CancelledError:
                 pass
         if web_channel is not None:
-            await web_channel.stop()
+            if _defer_enterprise_web_uplink:
+                await web_channel.stop_uplink_connect()
+            else:
+                await web_channel.stop()
 
         if feishu_channel is not None and feishu_task is not None:
             feishu_task.cancel()
