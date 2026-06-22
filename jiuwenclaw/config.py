@@ -359,7 +359,7 @@ def update_permissions_deny_guidance_in_config(msg: str) -> None:
 # ---------- Web UI：permissions.tools / rules / approval_overrides ----------
 
 _VALID_PERM_LEVEL = frozenset({"allow", "ask", "deny"})
-_VALID_RULE_ACTION = frozenset({"allow", "deny"})
+_VALID_RULE_ACTION = frozenset({"allow", "ask", "deny"})
 _RULE_MUTABLE_KEYS = frozenset({"pattern", "action", "description"})
 
 
@@ -584,7 +584,7 @@ def delete_permissions_approval_override_in_config(override_id: str) -> bool:
 def _normalize_rule_action(rule: dict[str, Any]) -> None:
     act = str(rule.get("action") or "").strip().lower()
     if act not in _VALID_RULE_ACTION:
-        raise ValueError("action must be allow or deny")
+        raise ValueError("action must be allow, ask, or deny")
     rule["action"] = act
 
 

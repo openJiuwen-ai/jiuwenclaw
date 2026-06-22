@@ -2751,6 +2751,7 @@ class JiuWenClawDeepAdapter:
             if self._skill_credential_injection_rail is not None:
                 skill_credential_rail_newly_created = True
 
+        permission_rail_newly_created = self._permission_rail is None
         self._update_permission_rail(config_base)
 
         # ProgressiveToolRail 可通过热重载启停；更新时传新对象，关闭时传旧对象仅用于卸载。
@@ -2787,7 +2788,7 @@ class JiuWenClawDeepAdapter:
             rails_list.append(self._avatar_rail)
         if getattr(self, "_pip_isolation_rail", None) is not None:
             rails_list.append(self._pip_isolation_rail)
-        if self._permission_rail is not None:
+        if permission_rail_newly_created and self._permission_rail is not None:
             rails_list.append(self._permission_rail)
         if progressive_tool_rail is not None:
             rails_list.append(progressive_tool_rail)
