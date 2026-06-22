@@ -9,9 +9,18 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
-# 沙箱id标识和OBS认证的apikey
 _SANDBOX_ID = None
 _API_KEY = None
+HOSTNAME = "HOSTNAME"
+USE_SIDECAR = "USE_SIDECAR"
+
+
+def generate_random_key():
+    import secrets
+    import string
+    chars = string.ascii_uppercase + string.digits
+    random_part = ''.join(secrets.choice(chars) for _ in range(32))
+    return f"SK-{random_part}"
 
 
 async def oa_wait_connection_ack(ws: Any, timeout: float = 10.0) -> bool:
@@ -43,6 +52,14 @@ def get_sandbox_init_data():
     获取沙箱创建时 gw 持久化的 apikey 和 sandboxId
     """
     global _SANDBOX_ID, _API_KEY
+    # 环境变量中获取沙箱Id
+    sandbox_id = os.getenv(HOSTNAME)
+    if sandbox_id:
+        _SANDBOX_ID = sandbox_id
+    # 是否开启伴生容器
+    if (os.getenv(USE_SIDECAR) or "").lower() == "true":
+        _API_KEY = generate_random_key()
+
     if _SANDBOX_ID and _API_KEY:
         return
     init_path: str = os.getenv("SANDBOX_INIT_DATA_PATH", "").strip()
@@ -81,7 +98,7 @@ def init_oa_message(msg_type, data=None):
 
 
 def get_oa_auth_headers(
-    retry_interval: float = 3.0, session_id: str = ""
+        retry_interval: float = 3.0, session_id: str = ""
 ) -> dict[str, str]:
     """从环境变量获取 OA 鉴权 headers，无限轮询直到获取全。
 
