@@ -538,7 +538,8 @@ class AgentWebSocketServer:
                         ping_interval=self._ping_interval,
                         ping_timeout=self._ping_timeout,
                         extra_headers=auth_headers,
-                        open_timeout=timeout
+                        open_timeout=timeout,
+                        close_timeout=timeout
                     ),
                     timeout=timeout
                 )
