@@ -250,7 +250,6 @@ from jiuwenclaw.utils import (
     get_checkpoint_dir,
     get_env_file,
     get_agent_root_dir,
-    get_multi_tenant_user_workspace_dir,
 )
 from jiuwenclaw.local_env_config import set_local_config
 
@@ -2011,22 +2010,8 @@ class JiuWenClawDeepAdapter:
         return skill_rail
 
     @staticmethod
-    def _resolve_evolution_trajectory_dir(config: dict[str, Any]) -> Path:
-        """Resolve directory for FileTrajectoryStore (env > config > default)."""
-        env_dir = (os.getenv("EVOLUTION_TRAJECTORY_DIR") or "").strip()
-        if env_dir:
-            return Path(env_dir).expanduser().resolve()
-
-        configured = config.get("evolution", {}).get("trajectory_dir")
-        if configured:
-            path = Path(str(configured).strip())
-            if path.is_absolute():
-                return path
-            workspace = get_multi_tenant_user_workspace_dir("default", "default")
-            if workspace is not None:
-                return (workspace / path).resolve()
-            return (get_agent_root_dir().parent / path).resolve()
-
+    def _resolve_evolution_trajectory_dir() -> Path:
+        """Resolve directory for FileTrajectoryStore (always use default)."""
         return get_agent_evolution_trajectories_dir()
 
     def _build_skill_evolution_rail(self, config: dict[str, Any]) -> SkillEvolutionRail | None:
@@ -2035,7 +2020,7 @@ class JiuWenClawDeepAdapter:
             evolution_auto_scan = config.get("evolution", {}).get("auto_scan", False)
             evolution_auto_save = config.get("evolution", {}).get("auto_save", True)
             
-            trajectory_dir = self._resolve_evolution_trajectory_dir(config)
+            trajectory_dir = self._resolve_evolution_trajectory_dir()
             skill_evolution_rail = SkillEvolutionRail(
                 skills_dir=[str(p) for p in get_agent_registered_skill_dirs()],
                 llm=self._model,

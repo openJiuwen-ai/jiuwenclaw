@@ -58,7 +58,7 @@ def _setup_mocks(monkeypatch: pytest.MonkeyPatch):
     )
 
     # Mock _resolve_evolution_trajectory_dir - fix: use instance method signature
-    def mock_resolve_evolution_trajectory_dir(self, config):
+    def mock_resolve_evolution_trajectory_dir(self):
         return Path("/mock/trajectory/path")
     
     monkeypatch.setattr(
