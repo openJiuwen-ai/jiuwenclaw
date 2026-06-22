@@ -681,6 +681,11 @@ class RuntimeManagementAgentClient(AgentServerClient):
         self._create_service_manager = create_service_manager
         self._access: Any = Access(create_service_manager)
         self._connected = False
+        # 防抖：短时间内多次 config.push 只触发一次 update_config
+        self._config_update_handle: Optional[asyncio.TimerHandle] = None
+        self._config_update_debounce_seconds: float = float(
+            os.getenv("RUNTIME_CONFIG_UPDATE_DEBOUNCE_SECONDS", "2.0")
+        )
 
     @property
     def server_ready(self) -> bool:
@@ -813,7 +818,17 @@ class RuntimeManagementAgentClient(AgentServerClient):
         config: dict[str, Any],
         env: dict[str, str] | None = None,
     ) -> None:
-        """触发热更新配置。"""
+        """触发热更新配置（带防抖：短时间内多次 config.push 合并为一次 update_config）。
+
+        当 Manager 在短时间内连续推送多个 config.push（如首次注册时批量推送
+        model_templates、skill_whitelist_templates、service_config_templates 等），
+        每个 push 都会调用此方法。如果不做防抖，每次调用都会创建新的
+        ServiceManager 并部署一个 Pod，导致短时间内拉起大量冗余 Pod。
+
+        防抖策略：收到请求后不立即执行，而是延迟 debounce_seconds 后执行；
+        如果在延迟期间又收到新请求，取消前一个定时器并重新计时，确保只在
+        "最后一波 push 结束后" 执行一次 update_config。
+        """
         # 判断 config 中 enterprise_config_update 是否为 true，否则不执行更新
         if not config.get("enterprise_config_update"):
             logger.debug(
@@ -827,18 +842,46 @@ class RuntimeManagementAgentClient(AgentServerClient):
 
         try:
             loop = asyncio.get_running_loop()
-            # 直接调用 update_config 并创建任务（不等待完成）
-            loop.create_task(
-                self._access.update_config(),
-                name="runtime-mgmt-config-update"
+
+            # 取消之前尚未执行的防抖定时器（如果有）
+            if self._config_update_handle is not None:
+                self._config_update_handle.cancel()
+                logger.debug(
+                    "[RuntimeManagementAgentClient] config update debounce: cancelled previous timer"
+                )
+
+            # 创建新的防抖定时器：延迟 debounce_seconds 后执行 update_config
+            self._config_update_handle = loop.call_later(
+                self._config_update_debounce_seconds,
+                self._do_config_update,
             )
-            logger.info("[RuntimeManagementAgentClient] config update triggered")
+            logger.info(
+                "[RuntimeManagementAgentClient] config update debounced, will execute in %.1fs",
+                self._config_update_debounce_seconds,
+            )
         except RuntimeError:
             logger.warning(
                 "[RuntimeManagementAgentClient] no running event loop, config update skipped"
             )
         except Exception as exc:
             logger.exception("[RuntimeManagementAgentClient] failed to trigger config update: %s", exc)
+
+    def _do_config_update(self) -> None:
+        """防抖定时器到期后实际执行 update_config 的回调。"""
+        self._config_update_handle = None
+        try:
+            loop = asyncio.get_running_loop()
+            loop.create_task(
+                self._access.update_config(),
+                name="runtime-mgmt-config-update"
+            )
+            logger.info("[RuntimeManagementAgentClient] config update executed (debounce timer fired)")
+        except RuntimeError:
+            logger.warning(
+                "[RuntimeManagementAgentClient] no running event loop, config update skipped"
+            )
+        except Exception as exc:
+            logger.exception("[RuntimeManagementAgentClient] failed to execute config update: %s", exc)
 
     async def connect(self, uri: str) -> None:
         """建立连接并初始化 Access。"""
