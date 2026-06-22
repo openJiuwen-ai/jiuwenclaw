@@ -24,6 +24,21 @@ def build_a2ui_autonomy_instruction(language: str = "en") -> str:
         "spawn_sub_agent with subagent_type 'browser_agent'. Never buy, book, "
         "pay, or place an order without a final explicit user confirmation."
     )
+    hotel_booking_flow_rule_en = (
+        " Hotel booking A2UI flow: after browser_agent returns candidate hotels, "
+        "present the candidates as A2UI cards or a comparable list. Each hotel's "
+        "selection Button action name MUST be 'hotel_option_select'. Its "
+        "action.context MUST include task_type='hotel', next_action with the "
+        "value 'continue_hotel_booking', original_query, selected hotel name, "
+        "candidate index or id, and the confirmed city/check-in/check-out/guest "
+        "and room criteria. Include a candidate/detail URL, provider, room type, "
+        "price, currency, and cancellation policy when available. After the user "
+        "selects a hotel, continue the existing browser state for that candidate; "
+        "do not restart the broad city/date search. At the payment or order "
+        "summary page, render a final A2UI confirmation whose confirm Button "
+        "action name is 'hotel_payment_confirm' and whose cancel Button action "
+        "name is 'hotel_payment_cancel'."
+    )
     template_binding_rule_en = (
         " For repeated list/card data, use A2UI template binding correctly: "
         "Duplicate dataModelUpdate keys are invalid. Encode arrays as one "
@@ -114,6 +129,7 @@ def build_a2ui_autonomy_instruction(language: str = "en") -> str:
         + icon_font_rule_en
         + autonomy_rule_zh
         + browser_preflight_rule_en
+        + hotel_booking_flow_rule_en
     )
 
     if language in {"zh", "cn"}:
@@ -140,6 +156,7 @@ def build_a2ui_autonomy_instruction(language: str = "en") -> str:
         "surfaceUpdate and dataModelUpdate only when needed."
         + autonomy_rule_en
         + browser_preflight_rule_en
+        + hotel_booking_flow_rule_en
         + requested_component_rule_en
     )
 

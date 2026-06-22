@@ -79,6 +79,8 @@ async def test_a2ui_system_flow_accepts_event_and_valid_response(monkeypatch):
     assert config.enabled is True
     assert "<a2ui-json>" in prompt_section
     assert "browser_preflight_submit" in prompt_section
+    assert "hotel_option_select" in prompt_section
+    assert "hotel_payment_confirm" in prompt_section
     assert "Do not ask for those missing browser-task details" in prompt_section
     assert "ask_user tool" in prompt_section
     assert client_prompt is not None
@@ -126,3 +128,84 @@ def test_a2ui_browser_preflight_event_prompts_browser_subagent(monkeypatch):
     assert "browser_agent" in client_prompt
     assert "Book a hotel in Shanghai" in client_prompt
     assert "must_confirm_before_payment" in client_prompt
+
+
+def test_a2ui_hotel_option_select_continues_current_browser_state(monkeypatch):
+    """Hotel candidate selection should not be interpreted as a fresh hotel search."""
+    from jiuwenswarm.server.runtime.a2ui.integration import build_user_prompt_if_a2ui_event
+
+    monkeypatch.setenv("JIUWENSWARM_A2UI_ENABLED", "true")
+
+    client_event = {
+        "type": "a2ui.client_event",
+        "event": {
+            "userAction": {
+                "name": "hotel_option_select",
+                "surfaceId": "hotel-candidates",
+                "sourceComponentId": "hotel-2-select",
+                "context": {
+                    "original_query": "Book a hotel in Shanghai",
+                    "task_type": "hotel",
+                    "next_action": "continue_hotel_booking",
+                    "city": "Shanghai",
+                    "check_in": "2026-07-01",
+                    "check_out": "2026-07-03",
+                    "guest_count": 2,
+                    "hotel_name": "Example Riverside Hotel",
+                    "candidate_index": 2,
+                    "detail_url": "https://example.test/hotel/2",
+                },
+            }
+        },
+    }
+
+    client_prompt = build_user_prompt_if_a2ui_event(
+        client_event,
+        channel="web",
+        language="en",
+    )
+
+    assert client_prompt is not None
+    assert "hotel candidate selection" in client_prompt
+    assert "spawn_sub_agent" in client_prompt
+    assert "browser_agent" in client_prompt
+    assert "current browser state/session" in client_prompt
+    assert "Do not repeat the broad hotel search" in client_prompt
+    assert "hotel_payment_confirm" in client_prompt
+    assert "Example Riverside Hotel" in client_prompt
+
+
+def test_a2ui_hotel_payment_confirmation_is_guarded(monkeypatch):
+    """Final payment confirmation should verify the visible order before proceeding."""
+    from jiuwenswarm.server.runtime.a2ui.integration import build_user_prompt_if_a2ui_event
+
+    monkeypatch.setenv("JIUWENSWARM_A2UI_ENABLED", "true")
+
+    client_event = {
+        "type": "a2ui.client_event",
+        "event": {
+            "userAction": {
+                "name": "hotel_payment_confirm",
+                "surfaceId": "hotel-payment",
+                "sourceComponentId": "confirm",
+                "context": {
+                    "task_type": "hotel",
+                    "next_action": "confirm_hotel_payment",
+                    "hotel_name": "Example Riverside Hotel",
+                    "total_price": "CNY 1288",
+                },
+            }
+        },
+    }
+
+    client_prompt = build_user_prompt_if_a2ui_event(
+        client_event,
+        channel="web",
+        language="en",
+    )
+
+    assert client_prompt is not None
+    assert "final hotel payment confirmation" in client_prompt
+    assert "verify that the selected hotel" in client_prompt
+    assert "current browser state match the context" in client_prompt
+    assert "Example Riverside Hotel" in client_prompt

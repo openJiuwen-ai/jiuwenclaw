@@ -276,16 +276,61 @@ def _get_a2ui_user_action(event: dict[str, Any]) -> dict[str, Any]:
     return user_action if isinstance(user_action, dict) else {}
 
 
-def _is_browser_preflight_submit(event: dict[str, Any]) -> bool:
+def _get_a2ui_action_context(event: dict[str, Any]) -> dict[str, Any]:
     user_action = _get_a2ui_user_action(event)
-    action_name = str(user_action.get("name") or "").strip()
     context = user_action.get("context")
-    next_action = (
-        str(context.get("next_action") or "").strip()
-        if isinstance(context, dict)
-        else ""
-    )
+    return context if isinstance(context, dict) else {}
+
+
+def _get_a2ui_action_name(event: dict[str, Any]) -> str:
+    user_action = _get_a2ui_user_action(event)
+    return str(user_action.get("name") or "").strip()
+
+
+def _get_a2ui_next_action(event: dict[str, Any]) -> str:
+    context = _get_a2ui_action_context(event)
+    return str(context.get("next_action") or "").strip()
+
+
+def _is_browser_preflight_submit(event: dict[str, Any]) -> bool:
+    action_name = _get_a2ui_action_name(event)
+    next_action = _get_a2ui_next_action(event)
     return action_name == "browser_preflight_submit" or next_action == "run_browser_agent"
+
+
+def _is_hotel_option_select(event: dict[str, Any]) -> bool:
+    action_name = _get_a2ui_action_name(event)
+    next_action = _get_a2ui_next_action(event)
+    return action_name in {"hotel_option_select", "hotel_candidate_select"} or next_action in {
+        "continue_hotel_booking",
+        "select_hotel_candidate",
+    }
+
+
+def _is_hotel_payment_confirm(event: dict[str, Any]) -> bool:
+    action_name = _get_a2ui_action_name(event)
+    next_action = _get_a2ui_next_action(event)
+    return action_name == "hotel_payment_confirm" or next_action == "confirm_hotel_payment"
+
+
+def _is_hotel_payment_cancel(event: dict[str, Any]) -> bool:
+    action_name = _get_a2ui_action_name(event)
+    next_action = _get_a2ui_next_action(event)
+    return action_name == "hotel_payment_cancel" or next_action == "cancel_hotel_payment"
+
+
+def _build_a2ui_event_payload(
+    event: dict[str, Any],
+    channel: str,
+    language: str,
+) -> dict[str, Any]:
+    return {
+        "source": channel,
+        "preferred_response_language": language,
+        "type": A2UI_CLIENT_EVENT_TYPE,
+        "protocolVersion": event.get("protocolVersion", VERSION_0_8),
+        "event": event.get("event", {}),
+    }
 
 
 def _build_browser_preflight_client_event_prompt(
@@ -293,13 +338,7 @@ def _build_browser_preflight_client_event_prompt(
     channel: str,
     language: str,
 ) -> str:
-    payload = {
-        "source": channel,
-        "preferred_response_language": language,
-        "type": A2UI_CLIENT_EVENT_TYPE,
-        "protocolVersion": event.get("protocolVersion", VERSION_0_8),
-        "event": event.get("event", {}),
-    }
+    payload = _build_a2ui_event_payload(event, channel, language)
     prefix = (
         "You receive an A2UI browser task preflight submission. The user has "
         "confirmed the values in event.userAction.context. Combine those values "
@@ -315,8 +354,77 @@ def _build_browser_preflight_client_event_prompt(
     return prefix + json.dumps(payload, ensure_ascii=False)
 
 
+def _build_hotel_option_select_client_event_prompt(
+    event: dict[str, Any],
+    channel: str,
+    language: str,
+) -> str:
+    payload = _build_a2ui_event_payload(event, channel, language)
+    prefix = (
+        "You receive an A2UI hotel candidate selection. The user selected one "
+        "candidate from a hotel list previously returned by browser automation. "
+        "Treat event.userAction.context as the authoritative selected candidate "
+        "and booking context. Continue the existing hotel booking flow by calling "
+        "spawn_sub_agent with subagent_type='browser_agent'. The task_description "
+        "must instruct the browser_agent to continue from the current browser "
+        "state/session and select or open the already chosen hotel candidate. Do "
+        "not repeat the broad hotel search, do not change city/date/guest filters, "
+        "and do not search again by city/date/hotel name unless recovery is needed "
+        "because the current browser state no longer contains the selected "
+        "candidate. If recovery is needed, prefer opening a candidate/detail URL "
+        "from context; otherwise search narrowly for the selected hotel name using "
+        "the already confirmed city, dates, guests, and room criteria. Continue "
+        "only until the exact order summary or payment page is visible. Then stop "
+        "and render a final A2UI confirmation with action name "
+        "'hotel_payment_confirm' and a cancel action named 'hotel_payment_cancel'. "
+        "Never buy, book, pay, submit an order, or perform an irreversible action "
+        "until the user clicks that final confirmation.\n"
+    )
+    return prefix + json.dumps(payload, ensure_ascii=False)
+
+
+def _build_hotel_payment_confirm_client_event_prompt(
+    event: dict[str, Any],
+    channel: str,
+    language: str,
+) -> str:
+    payload = _build_a2ui_event_payload(event, channel, language)
+    prefix = (
+        "You receive an A2UI final hotel payment confirmation. The user is "
+        "confirming the exact order summary shown in event.userAction.context. "
+        "Before taking any irreversible action, verify that the selected hotel, "
+        "dates, guest/room details, total price, cancellation policy, and payment "
+        "step in the current browser state match the context. If they do not "
+        "match, stop and render a corrected A2UI confirmation instead of paying. "
+        "If they match, continue with browser_agent only as far as allowed by the "
+        "current product safety policy and available credentials; otherwise tell "
+        "the user what must be completed manually.\n"
+    )
+    return prefix + json.dumps(payload, ensure_ascii=False)
+
+
+def _build_hotel_payment_cancel_client_event_prompt(
+    event: dict[str, Any],
+    channel: str,
+    language: str,
+) -> str:
+    payload = _build_a2ui_event_payload(event, channel, language)
+    prefix = (
+        "You receive an A2UI hotel payment cancellation. Do not continue browser "
+        "automation and do not submit payment or booking. Acknowledge the "
+        "cancellation briefly in the preferred response language.\n"
+    )
+    return prefix + json.dumps(payload, ensure_ascii=False)
+
+
 def build_a2ui_client_event_prompt(event: dict[str, Any], channel: str, language: str) -> str:
     _log_a2ui_client_event(event)
+    if _is_hotel_option_select(event):
+        return _build_hotel_option_select_client_event_prompt(event, channel, language)
+    if _is_hotel_payment_confirm(event):
+        return _build_hotel_payment_confirm_client_event_prompt(event, channel, language)
+    if _is_hotel_payment_cancel(event):
+        return _build_hotel_payment_cancel_client_event_prompt(event, channel, language)
     if _is_browser_preflight_submit(event):
         return _build_browser_preflight_client_event_prompt(event, channel, language)
 
@@ -333,13 +441,7 @@ def build_a2ui_client_event_prompt(event: dict[str, Any], channel: str, language
             "requests external work.\n"
         )
     )
-    payload = {
-        "source": channel,
-        "preferred_response_language": language,
-        "type": A2UI_CLIENT_EVENT_TYPE,
-        "protocolVersion": event.get("protocolVersion", VERSION_0_8),
-        "event": event.get("event", {}),
-    }
+    payload = _build_a2ui_event_payload(event, channel, language)
     return prefix + json.dumps(payload, ensure_ascii=False)
 
 

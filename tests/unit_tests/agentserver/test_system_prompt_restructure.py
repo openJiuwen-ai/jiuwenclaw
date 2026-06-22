@@ -258,6 +258,8 @@ async def test_runtime_dynamic_sections_go_to_prompt_attachment_when_manager_ava
     assert "# Language" in prompt
     assert "# Browser Tool Policy" in prompt
     assert "browser_preflight_submit" in prompt
+    assert "hotel_option_select" in prompt
+    assert "hotel_payment_confirm" in prompt
     assert "Do not use plain natural-language questions or `ask_user`" in prompt
     assert "# Environment" in prompt
 

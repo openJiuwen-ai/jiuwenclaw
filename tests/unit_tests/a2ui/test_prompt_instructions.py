@@ -32,6 +32,15 @@ def test_a2ui_prompt_discourages_nested_templates():
     assert "flatten repeated item details" in instruction
 
 
+def test_a2ui_prompt_defines_hotel_booking_actions():
+    instruction = build_a2ui_autonomy_instruction("en")
+
+    assert "hotel_option_select" in instruction
+    assert "continue_hotel_booking" in instruction
+    assert "hotel_payment_confirm" in instruction
+    assert "hotel_payment_cancel" in instruction
+
+
 def test_a2ui_zh_prompt_section_is_readable():
     prompt = build_a2ui_prompt_section("zh")
 
