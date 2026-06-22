@@ -1,12 +1,24 @@
+# Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
+
 from jiuwenbox.models.sandbox import (
+    BackgroundExecRequest,
+    BackgroundExecResult,
+    BackgroundJobStatus,
+    BackgroundJobSummary,
     ExecResult,
+    InvalidJobIdError,
+    InvalidSandboxIdError,
+    KillBackgroundJobRequest,
+    KillBackgroundJobResult,
     SandboxPhase,
     SandboxRef,
     SandboxSpec,
 )
 from jiuwenbox.models.policy import (
+    ArchitectureSyscallPolicy,
     BindMount,
     DirectoryMount,
+    FileMount,
     FilesystemPolicy,
     CapabilityPolicy,
     LandlockPolicy,
@@ -24,12 +36,22 @@ from jiuwenbox.models.common import (
 )
 
 __all__ = [
+    "BackgroundExecRequest",
+    "BackgroundExecResult",
+    "BackgroundJobStatus",
+    "BackgroundJobSummary",
     "ExecResult",
+    "InvalidJobIdError",
+    "InvalidSandboxIdError",
+    "KillBackgroundJobRequest",
+    "KillBackgroundJobResult",
     "SandboxPhase",
     "SandboxRef",
     "SandboxSpec",
     "BindMount",
+    "ArchitectureSyscallPolicy",
     "DirectoryMount",
+    "FileMount",
     "FilesystemPolicy",
     "CapabilityPolicy",
     "LandlockPolicy",

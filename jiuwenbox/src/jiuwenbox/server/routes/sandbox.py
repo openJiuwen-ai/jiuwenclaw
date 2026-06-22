@@ -1,3 +1,4 @@
+# Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 """Sandbox API routes."""
 
 from __future__ import annotations
@@ -9,11 +10,23 @@ from fastapi import APIRouter, File, Query, UploadFile
 from fastapi.responses import JSONResponse, PlainTextResponse, Response
 from pydantic import BaseModel, Field
 
-from jiuwenbox.models.sandbox import ExecResult, PolicyMode, SandboxRef, SandboxSpec
-from jiuwenbox.server.sandbox_manager import SandboxExecRequest, SandboxListRequest
+from jiuwenbox.logging_config import configure_logging
+from jiuwenbox.models.sandbox import (
+    BackgroundExecRequest,
+    BackgroundExecResult,
+    BackgroundJobStatus,
+    BackgroundJobSummary,
+    ExecResult,
+    KillBackgroundJobRequest,
+    KillBackgroundJobResult,
+    PolicyMode,
+    SandboxRef,
+    SandboxSpec,
+)
+from jiuwenbox.server.sandbox_manager import SandboxBackgroundExecRequest, SandboxExecRequest, SandboxListRequest
 
 router = APIRouter(tags=["sandboxes"])
-logging.basicConfig(level=logging.INFO)
+configure_logging()
 logger = logging.getLogger(__name__)
 
 
@@ -24,10 +37,10 @@ def _mgr():
 
 class CreateSandboxRequest(BaseModel):
     command: list[str] = Field(default_factory=list)
-    workdir: str | None = None
     env: dict[str, str] = Field(default_factory=dict)
     policy: dict[str, Any] | None = None
     policy_mode: PolicyMode = PolicyMode.OVERRIDE
+    sandbox_id: str | None = None
 
 
 class ExecRequest(BaseModel):
@@ -48,13 +61,13 @@ class ListFilesQuery(BaseModel):
 
 @router.post("/sandboxes", response_model=SandboxRef, status_code=201)
 async def create_sandbox(request: CreateSandboxRequest):
-    spec = SandboxSpec(
-        workdir=request.workdir,
-        env=request.env,
-    )
+    if request.sandbox_id is None or request.sandbox_id.strip() == "":
+        sandbox_id = None
+    else:
+        sandbox_id = request.sandbox_id
+    spec = SandboxSpec(env=request.env, sandbox_id=sandbox_id)
     return await _mgr().create_sandbox(
         spec,
-        command=request.command,
         policy_data=request.policy,
         policy_mode=request.policy_mode,
     )
@@ -102,6 +115,68 @@ async def exec_in_sandbox(sandbox_id: str, request: ExecRequest):
             stdin_data=stdin_data,
             timeout=request.timeout_seconds,
         ),
+    )
+
+
+class BackgroundJobListResponse(BaseModel):
+    items: list[BackgroundJobSummary]
+
+
+@router.post("/sandboxes/{sandbox_id}/exec_background", response_model=BackgroundExecResult)
+async def exec_background_in_sandbox(
+    sandbox_id: str,
+    request: BackgroundExecRequest,
+):
+    stdin_data = request.stdin.encode() if request.stdin else None
+    return await _mgr().exec_background_in_sandbox(
+        sandbox_id=sandbox_id,
+        request=SandboxBackgroundExecRequest(
+            command=list(request.command),
+            job_id=request.job_id,
+            workdir=request.workdir,
+            env=request.env,
+            stdin_data=stdin_data,
+            capture_output=request.capture_output,
+        ),
+    )
+
+
+@router.get(
+    "/sandboxes/{sandbox_id}/background",
+    response_model=BackgroundJobListResponse,
+)
+async def list_background_jobs_in_sandbox(
+    sandbox_id: str,
+    running_only: bool = False,
+):
+    items = await _mgr().list_background_jobs_in_sandbox(
+        sandbox_id,
+        running_only=running_only,
+    )
+    return BackgroundJobListResponse(items=items)
+
+
+@router.get(
+    "/sandboxes/{sandbox_id}/background/{job_id}",
+    response_model=BackgroundJobStatus,
+)
+async def get_background_job_in_sandbox(sandbox_id: str, job_id: str):
+    return await _mgr().get_background_job_in_sandbox(sandbox_id, job_id)
+
+
+@router.post(
+    "/sandboxes/{sandbox_id}/background/{job_id}/kill",
+    response_model=KillBackgroundJobResult,
+)
+async def kill_background_job_in_sandbox(
+    sandbox_id: str,
+    job_id: str,
+    request: KillBackgroundJobRequest = KillBackgroundJobRequest(),
+):
+    return await _mgr().kill_background_job_in_sandbox(
+        sandbox_id,
+        job_id,
+        signal=request.signal,
     )
 
 
