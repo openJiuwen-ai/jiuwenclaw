@@ -115,6 +115,11 @@ _SKILLDEV_METHODS: frozenset[ReqMethod] = frozenset(
     m for m in ReqMethod if m.value.startswith("skilldev.")
 )
 
+# Recorded to history.json but not emitted on the E2A WebSocket wire.
+_E2A_SUPPRESSED_EVENT_TYPES: frozenset[str] = frozenset({
+    EventType.CHAT_TOOL_CALLS_DELTA.value,
+})
+
 # Preserve cross-service context-size hints if they are present in request.params.
 _CONTEXT_SIZE_HINT_KEYS: tuple[str, ...] = (
     "context_size",
@@ -1425,6 +1430,11 @@ class JiuWenClaw:
                     if isinstance(data, AgentResponseChunk):
                         if data.is_complete:
                             adapter_emitted_terminal_chunk = True
+                        should_suppress = (
+                            isinstance(data.payload, dict)
+                            and isinstance(data.payload.get("event_type"), str)
+                            and str(data.payload.get("event_type")) in _E2A_SUPPRESSED_EVENT_TYPES
+                        )
                         if isinstance(data.payload, dict) and isinstance(data.payload.get("event_type"), str):
                             et = str(data.payload.get("event_type"))
                             should_record = et.startswith("chat.") or et.startswith("task.")
@@ -1467,9 +1477,11 @@ class JiuWenClaw:
                                         f"[JiuWenClaw] 收集到文件: request_id={rid} files_count={len(files_list)}",
                                         extra={'user_visible': 'critical'}
                                     )
-                        yield data
+                        if not should_suppress:
+                            yield data
                     elif isinstance(data, dict) and isinstance(data.get("event_type"), str):
                         et = str(data.get("event_type"))
+                        should_suppress = et in _E2A_SUPPRESSED_EVENT_TYPES
                         should_record = et.startswith("chat.") or et.startswith("task.")
                         if not should_record and et == EventType.TEAM_MESSAGE.value:
                             should_record = True
@@ -1512,12 +1524,13 @@ class JiuWenClaw:
                                     f"[JiuWenClaw] 收集到文件: request_id={rid} files_count={len(files_list)}",
                                     extra={'user_visible': 'critical'}
                                 )
-                        yield AgentResponseChunk(
-                            request_id=rid,
-                            channel_id=cid,
-                            payload=data,
-                            is_complete=False,
-                        )
+                        if not should_suppress:
+                            yield AgentResponseChunk(
+                                request_id=rid,
+                                channel_id=cid,
+                                payload=data,
+                                is_complete=False,
+                            )
         except asyncio.CancelledError:
             logger.info("[JiuWenClaw] 流式处理被中断: request_id=%s", rid, extra={'user_visible': 'progress'})
             raise
