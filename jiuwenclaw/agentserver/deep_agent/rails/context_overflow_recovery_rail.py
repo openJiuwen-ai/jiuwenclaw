@@ -204,7 +204,7 @@ class ContextOverflowRecoveryRail(DeepAgentRail):
         session = ctx.session
         if session is not None and hasattr(session, "write_stream"):
             try:
-                from openjiuwen.core.common.schema import OutputSchema
+                from openjiuwen.core.session.stream import OutputSchema
                 await session.write_stream(
                     OutputSchema(
                         type="error",
