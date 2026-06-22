@@ -91,6 +91,11 @@
       <td width="50%">智能体技能挂载、调用与扩展机制。</td>
     </tr>
     <tr>
+      <td width="22%"><strong>技能交响乐</strong></td>
+      <td width="28%"><a href="zh/symphony-技能编排与分发.md">技能交响乐</a></td>
+      <td width="50%">技能编排与分发系统。</td>
+    </tr>
+    <tr>
       <td width="22%"><strong>频道</strong></td>
       <td width="28%"><a href="zh/频道.md">频道</a> / <a href="zh/ACP插件使用.md">ACP 插件使用</a> / <a href="zh/TUI使用指南.md">TUI 使用指南</a></td>
       <td width="50%">JiuwenSwarm 的多渠道接入与交互。</td>

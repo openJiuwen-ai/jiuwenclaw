@@ -55,3 +55,15 @@ If the agent has `cron_create_job`, you can say things like:
 The agent fills `cron_expr`, `description`, `targets`, etc., equivalent to using the form.
 
 ![](../assets/images/定时任务2.png)
+
+---
+
+### 5. Push to the TUI channel
+
+When `targets` is `tui` (also the default for `/cron add`):
+
+- The scheduler **intentionally omits** `session_id`, so results are not filtered out after a TUI restart or session switch.
+- The Gateway **broadcasts** these session-less notifications to **every connected TUI window**, so each open terminal receives the cron result.
+- To scope reminders differently, use `targets=web`, or manage jobs via `/cron` in TUI and view them in the Web panel.
+
+Session-scoped chat streams are routed to a single TUI window by `session_id`; cron push to TUI is the exception and reaches all windows.

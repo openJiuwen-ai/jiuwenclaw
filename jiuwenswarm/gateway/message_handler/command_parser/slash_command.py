@@ -28,6 +28,8 @@ class GatewaySlashCommand(str, Enum):
     SKILLS_LIST = "/skills list"
     BRANCH = "/branch"
     REWIND = "/rewind"
+    REVIEW = "/review"
+    SECURITY_REVIEW = "/security-review"
 
 
 class ModeSubcommand(str, Enum):
@@ -89,6 +91,10 @@ class ParsedControlAction(str, Enum):
     REWIND_BAD = "rewind_bad"
     REWIND_CONFIRM = "rewind_confirm"
     REWIND_CANCEL = "rewind_cancel"
+    REVIEW_OK = "review_ok"
+    REVIEW_BAD = "review_bad"
+    SECURITY_REVIEW_OK = "security_review_ok"
+    SECURITY_REVIEW_BAD = "security_review_bad"
 
 
 @dataclass(frozen=True)
@@ -106,6 +112,24 @@ class ParsedChannelControl:
     """rewind_ok 时为用户指定的回退轮次编号；None 表示未指定。"""
     rewind_pending_turn: int | None = None
     """rewind_ok 时记录原始轮次编号，用于 confirm/cancel 两步确认。"""
+    pr_arg: str | None = None
+    """review_ok 时为用户指定的 PR 编号、URL 或自由文本；空字符串表示未指定，将展示 PR 列表。"""
+    security_review_arg: str | None = None
+    """security_review_ok 时为用户可选附加说明；空字符串表示未指定。"""
+
+
+_PR_ARG_MAX_LEN = 2048
+
+
+def _sanitize_pr_arg(arg: str) -> str | None:
+    """Pass-through /review args; reject only unsafe control chars or length."""
+    if not arg:
+        return ""
+    if len(arg) > _PR_ARG_MAX_LEN:
+        return None
+    if any(ord(ch) < 32 for ch in arg):
+        return None
+    return arg
 
 
 def parse_channel_control_text(text: str) -> ParsedChannelControl:
@@ -120,6 +144,10 @@ def parse_channel_control_text(text: str) -> ParsedChannelControl:
     - /rewind [N] 合法；N 为可选回退轮次编号（正整数）；无参数或非整数参数为非法。
     - /rewind confirm N 确认执行之前发起的 /rewind N。
     - /rewind cancel 取消之前发起的 /rewind N。
+    - /review [args] 合法；args 原样透传；无参数展示 PR 列表；
+      过长或含控制字符为非法。
+    - /security-review [args] 合法；args 原样透传；无参数审查当前分支变更；
+      过长或含控制字符为非法。
     """
     if not text:
         return ParsedChannelControl(ParsedControlAction.NONE)
@@ -176,6 +204,32 @@ def parse_channel_control_text(text: str) -> ParsedChannelControl:
             return ParsedChannelControl(ParsedControlAction.REWIND_OK, rewind_turn=turn)
         except (ValueError, TypeError):
             return ParsedChannelControl(ParsedControlAction.REWIND_BAD)
+    if t == GatewaySlashCommand.SECURITY_REVIEW.value:
+        return ParsedChannelControl(
+            ParsedControlAction.SECURITY_REVIEW_OK, security_review_arg=""
+        )
+    if t.startswith(f"{GatewaySlashCommand.SECURITY_REVIEW.value} "):
+        arg = t[len(GatewaySlashCommand.SECURITY_REVIEW.value):].strip()
+        if not arg:
+            return ParsedChannelControl(
+                ParsedControlAction.SECURITY_REVIEW_OK, security_review_arg=""
+            )
+        sanitized = _sanitize_pr_arg(arg)
+        if sanitized is None:
+            return ParsedChannelControl(ParsedControlAction.SECURITY_REVIEW_BAD)
+        return ParsedChannelControl(
+            ParsedControlAction.SECURITY_REVIEW_OK, security_review_arg=sanitized
+        )
+    if t == GatewaySlashCommand.REVIEW.value:
+        return ParsedChannelControl(ParsedControlAction.REVIEW_OK, pr_arg="")
+    if t.startswith(f"{GatewaySlashCommand.REVIEW.value} "):
+        arg = t[len(GatewaySlashCommand.REVIEW.value):].strip()
+        if not arg:
+            return ParsedChannelControl(ParsedControlAction.REVIEW_OK, pr_arg="")
+        sanitized = _sanitize_pr_arg(arg)
+        if sanitized is None:
+            return ParsedChannelControl(ParsedControlAction.REVIEW_BAD)
+        return ParsedChannelControl(ParsedControlAction.REVIEW_OK, pr_arg=sanitized)
     return ParsedChannelControl(ParsedControlAction.NONE)
 
 
@@ -205,6 +259,10 @@ def is_control_like_for_im_batching(text: str) -> bool:
     if t.startswith(GatewaySlashCommand.BRANCH.value):
         return True
     if t.startswith(GatewaySlashCommand.REWIND.value):
+        return True
+    if t.startswith(GatewaySlashCommand.REVIEW.value):
+        return True
+    if t.startswith(GatewaySlashCommand.SECURITY_REVIEW.value):
         return True
     return False
 
@@ -297,6 +355,22 @@ FIRST_BATCH_REGISTRY: tuple[SlashCommandEntry, ...] = (
         scope="client",
         req_method="agents.list",
         notes="TUI agent 配置管理菜单；TUI 通过 agents.* 方法与后端交互。",
+    ),
+    SlashCommandEntry(
+        id="review",
+        canonical_text=f"{GatewaySlashCommand.REVIEW.value} [args]",
+        scope="gateway",
+        req_method=None,
+        notes="受控通道代码审查：args 透传注入 prompt，"
+              "由 Agent 执行 gh pr list/view/diff；无 git/gh 预检。",
+    ),
+    SlashCommandEntry(
+        id="security-review",
+        canonical_text=f"{GatewaySlashCommand.SECURITY_REVIEW.value} [args]",
+        scope="gateway",
+        req_method=None,
+        notes="受控通道安全审查：args 透传注入 prompt，"
+              "由 Agent 执行 git status/diff/log 并做安全分析；无 git 预检。",
     ),
 )
 

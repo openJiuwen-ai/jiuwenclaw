@@ -2420,6 +2420,7 @@ export function ConfigPanel({
   const [initialTeams, setInitialTeams] = useState<TeamEntry[]>([]);
   const [agentsTeamsEdited, setAgentsTeamsEdited] = useState(false);
   const [agentsTeamsUserEdited, setAgentsTeamsUserEdited] = useState(false);
+  const [agentsTeamsJustSaved, setAgentsTeamsJustSaved] = useState(false);
   const [configTab, setConfigTab] = useState<ConfigMainTab>("model");
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -2679,11 +2680,15 @@ export function ConfigPanel({
 
   useEffect(() => {
     if (agentsTeamsEdited) return;
+    if (agentsTeamsJustSaved) {
+      setAgentsTeamsJustSaved(false);
+      return;
+    }
     setDraftAgents(agentsFromConfig);
     setDraftTeams(teamsFromConfig);
     setInitialAgents(agentsFromConfig);
     setInitialTeams(teamsFromConfig);
-  }, [agentsFromConfig, teamsFromConfig, agentsTeamsEdited]);
+  }, [agentsFromConfig, teamsFromConfig, agentsTeamsEdited, agentsTeamsJustSaved]);
 
   const groups = useMemo<ConfigGroup[]>(() => {
     if (!Object.keys(normalizedConfig).length) return [];
@@ -3091,9 +3096,10 @@ export function ConfigPanel({
         await onSaveAllConfig(payload);
         if (hasModelChanges && onModelsRefresh) await onModelsRefresh();
         if (hasAgentsTeamsChanges) {
-          resetEditStateAfterSave();
+          setAgentsTeamsJustSaved(true);
           setInitialAgents(draftAgents);
           setInitialTeams(draftTeams);
+          resetEditStateAfterSave();
         }
       } else {
         // 兼容旧后端：按旧接口顺序保存，但只在普通配置实际变化时调用 config.set。
@@ -3105,14 +3111,14 @@ export function ConfigPanel({
           const agentsTeamsPayload = buildAgentsTeamsPayload();
           const showRestartModal = !(hasConfigChanges || hasModelChanges);
           await onAgentsTeamsSave(agentsTeamsPayload, showRestartModal);
+          setAgentsTeamsJustSaved(true);
+          setInitialAgents(draftAgents);
+          setInitialTeams(draftTeams);
           resetEditStateAfterSave();
         }
         if (hasConfigChanges) {
           await onSaveConfig(configUpdates);
         }
-        // 保存成功后更新初始值，以便下次取消时能正确恢复
-        setInitialAgents(draftAgents);
-        setInitialTeams(draftTeams);
       }
     } catch (saveError) {
       const message = saveError instanceof Error ? saveError.message : t('config.errors.saveFailed');

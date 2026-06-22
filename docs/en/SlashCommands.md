@@ -18,6 +18,7 @@ Executed locally in the terminal UI, not through Gateway control pipeline.
 | `/copy` | Copy last message |
 | `/exit` | Exit |
 | `/help` | Show available commands |
+| `/keybindings` | View, edit, or reset TUI keyboard shortcuts (alias `/keybind`) |
 | `/theme` | Switch theme |
 | `/config` | Modify configuration (currently local, planned to unify with Gateway) |
 | `/context` | Show context window usage and token breakdown (see below) |
@@ -139,6 +140,8 @@ Entering **`/resume`** or **`/continue`** with **no arguments** opens an interac
 | `Ctrl+A` | Toggle scope between "all projects" and "current project only" |
 | `Ctrl+B` | Toggle git branch filter (only show sessions whose `git_branch` strictly equals the current project's branch) |
 | `Esc` | Clear search if any; otherwise close the picker |
+
+> `Space` / `Ctrl+R` / `Ctrl+A` / `Ctrl+B` / `Esc` in the list can be rebound under the `ResumeList` context via `/keybindings` (preview/rename sub-states and search text entry stay hardcoded).
 
 Behavior:
 
@@ -371,7 +374,7 @@ Manage cron jobs via RPC calls to the backend `CronController`, sharing the same
 | `name` | Yes | Job name |
 | `cron_expr` | Yes | Cron expression, supports two formats: 5-field (min hour day month dow) or 7-field Quartz (sec min hour day month dow year). 5-field is auto-converted to 7-field (second=0, year=*). Examples: daily 9am = `0 9 * * *` (5-field) or `0 0 9 * * ? *` (7-field) |
 | `description` | Yes | Job description — the input prompt the Agent receives when executing |
-| `targets` | No | Push channel, default `tui`; options: `tui`, `web`, `feishu`, `whatsapp`, `wecom`, `xiaoyi`, `wechat`, `dingtalk`, or `feishu_enterprise:<app_id>` |
+| `targets` | No | Push channel, default `tui`; options: `tui`, `web`, `feishu`, `whatsapp`, `wecom`, `xiaoyi`, `wechat`, `dingtalk`, or `feishu_enterprise:<app_id>`. With `targets=tui`, results broadcast to all connected TUI windows; see [Scheduled tasks — Push to TUI](ScheduledTasks.md#5-push-to-the-tui-channel) |
 | `timezone` | No | IANA timezone, default `Asia/Shanghai` |
 | `mode` | No | Execution mode: `agent` (default, suitable for simple reminder-type tasks) or `plan` (for more complex reasoning tasks, allowing the Agent to plan the steps first before executing) |
 | `wake_offset_seconds` | No | Wake-up offset in seconds, default 300 |
@@ -567,6 +570,30 @@ Enter / leave jiuwenbox sandbox mode and tune its runtime policy. Calls `command
 - `/sandbox files allow ./tmp/` — allow sandbox write access to `./tmp/` (rw)
 - `/sandbox files deny ./tmp/secret/` — deny write under an allowed parent (ro)
 - `/sandbox exclude add "git *"` — let `git` run on the host instead of inside the sandbox
+
+### `/keybindings` (Keyboard Shortcuts)
+
+View, edit, or reset TUI keyboard shortcuts. Config file: `~/.jiuwenswarm-tui/keybindings.json`.
+
+#### Usage
+
+| Command | Action |
+|---------|--------|
+| `/keybindings` | Same as `/keybindings edit` |
+| `/keybindings edit` | Create or open the config file; reload after the external editor closes |
+| `/keybindings list` | List effective shortcuts grouped by context |
+| `/keybindings reset` | Delete user config and restore built-in defaults |
+
+Alias: `/keybind`.
+
+#### Notes
+
+- Built-in defaults are merged with user JSON per **context**; set a key to `null` to unbind a default.
+- Key ids must match pi-tui `matchesKey` format (`ctrl`/`shift`/`alt` + main key); chords are not supported.
+- **Non-rebindable**: `ctrl+c`, `ctrl+d`, `ctrl+m` (reserved keys).
+- Select-list navigation, config editor text input, Resume preview/rename sub-states, etc. remain hardcoded.
+
+See the Chinese [TUI User Guide · Keyboard shortcuts](../zh/TUI使用指南.md#快捷键) for the full context/action reference.
 
 ### `/hooks` (Browse Hooks Configuration)
 

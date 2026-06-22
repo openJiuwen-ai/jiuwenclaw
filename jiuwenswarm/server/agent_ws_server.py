@@ -130,6 +130,80 @@ def _request_query_text(request: AgentRequest) -> str:
         return ""
     return query.strip()
 
+
+# /simplify prompt template — adapted /simplify skill for jiuwenswarm.
+# Guides the agent through three phases: identify changes → three-dimension review
+# (reuse/quality/efficiency) → aggregate and fix.
+# Note: jiuwenswarm's sub-agents (task_tool / Agent tool) can only be dispatched to registered
+# types (explore/plan/code, etc.) and cannot create custom reviewer roles on the fly. The prompt
+# therefore presents parallel sub-agent review as an optional optimization — the agent may also
+# perform all three reviews itself directly.
+_SIMPLIFY_PROMPT_TEMPLATE = """\
+# Simplify: Code Review and Cleanup
+
+Review all changed files for reuse, quality, and efficiency. Fix any issues found.
+
+## Phase 1: Identify Changes
+
+Run `git diff` (or `git diff HEAD` if there are staged changes) to see what changed. If there are no git changes, review the most recently modified files that the user mentioned or that you edited earlier in this conversation.
+
+## Phase 2: Launch Three Review Agents in Parallel
+
+If sub-agent tools are available (e.g. task_tool / Agent tool), launch all three agents concurrently in a single message. Pass each agent the full diff so it has the complete context. Otherwise, perform all three reviews yourself directly.
+
+### Agent 1: Code Reuse Review
+
+For each change:
+
+1. **Search for existing utilities and helpers** that could replace newly written code. Look for similar patterns elsewhere in the codebase — common locations are utility directories, shared modules, and files adjacent to the changed ones.
+2. **Flag any new function that duplicates existing functionality.** Suggest the existing function to use instead.
+3. **Flag any inline logic that could use an existing utility** — hand-rolled string manipulation, manual path handling, custom environment checks, ad-hoc type guards, and similar patterns are common candidates.
+
+### Agent 2: Code Quality Review
+
+Review the same changes for hacky patterns:
+
+1. **Redundant state**: state that duplicates existing state, cached values that could be derived, observers/effects that could be direct calls
+2. **Parameter sprawl**: adding new parameters to a function instead of generalizing or restructuring existing ones
+3. **Copy-paste with slight variation**: near-duplicate code blocks that should be unified with a shared abstraction
+4. **Leaky abstractions**: exposing internal details that should be encapsulated, or breaking existing abstraction boundaries
+5. **Stringly-typed code**: using raw strings where constants, enums (string unions), or branded types already exist in the codebase
+6. **Unnecessary JSX nesting**: wrapper Boxes/elements that add no layout value — check if inner component props (flexShrink, alignItems, etc.) already provide the needed behavior
+7. **Unnecessary comments**: comments explaining WHAT the code does (well-named identifiers already do that), narrating the change, or referencing the task/caller — delete; keep only non-obvious WHY (hidden constraints, subtle invariants, workarounds)
+
+### Agent 3: Efficiency Review
+
+Review the same changes for efficiency:
+
+1. **Unnecessary work**: redundant computations, repeated file reads, duplicate network/API calls, N+1 patterns
+2. **Missed concurrency**: independent operations run sequentially when they could run in parallel
+3. **Hot-path bloat**: new blocking work added to startup or per-request/per-render hot paths
+4. **Recurring no-op updates**: state/store updates inside polling loops, intervals, or event handlers that fire unconditionally — add a change-detection guard so downstream consumers aren't notified when nothing changed. Also: if a wrapper function takes an updater/reducer callback, verify it honors same-reference returns (or whatever the "no change" signal is) — otherwise callers' early-return no-ops are silently defeated
+5. **Unnecessary existence checks**: pre-checking file/resource existence before operating (TOCTOU anti-pattern) — operate directly and handle the error
+6. **Memory**: unbounded data structures, missing cleanup, event listener leaks
+7. **Overly broad operations**: reading entire files when only a portion is needed, loading all items when filtering for one
+
+## Phase 3: Fix Issues
+
+Wait for all reviewers to complete. Aggregate their findings and fix each issue directly. If a finding is a false positive or not worth addressing, note it and move on — do not argue with the finding, just skip it.
+
+When done, briefly summarize what was fixed (or confirm the code was already clean).
+"""
+
+
+def _build_simplify_prompt(target: str = "") -> str:
+    """Build the prompt for the /simplify command.
+
+    Args:
+        target: Optional additional focus (e.g. file path, module name, specific dimension
+            to emphasize), appended to the end of the prompt.
+    """
+    prompt = _SIMPLIFY_PROMPT_TEMPLATE
+    if target:
+        prompt += f"\n\n## Additional Focus\n\n{target}"
+    return prompt
+
+
 # System prompt for LLM-based agent generation
 _AGENT_CREATION_SYSTEM_PROMPT = """\
 You are an elite AI agent architect. When given an agent name and description, your job is to design a high-performance agent that EXECUTES tasks to completion — not just analyzes and reports.
@@ -381,7 +455,7 @@ def _reject_extra_sandbox_files_params(params: dict[str, Any]) -> None:
 def _inject_plan_mode_activation_reminder(request: AgentRequest) -> None:
     """在用户消息中注入 <system-reminder> 告知 LLM 调用 enter_plan_mode.
 
-    对齐 Claude Code：plan 模式行为指令不进 system prompt，
+    plan 模式行为指令不进 system prompt，
     而是通过对话中的 tool_result 传递。此提醒是进入 plan 模式后的
     第一个引导，告诉 LLM 调用 enter_plan_mode 以获取完整指令。
 
@@ -979,8 +1053,14 @@ class AgentWebSocketServer:
             if request.req_method == ReqMethod.COMMAND_RECAP:
                 await self._handle_command_recap(ws, request, send_lock)
                 return
+            if request.req_method == ReqMethod.COMMAND_BTW:
+                await self._handle_command_btw(ws, request, send_lock)
+                return
             if request.req_method == ReqMethod.COMMAND_DIFF:
                 await self._handle_command_diff(ws, request, send_lock)
+                return
+            if request.req_method == ReqMethod.COMMAND_SIMPLIFY:
+                await self._handle_command_simplify(ws, request, send_lock)
                 return
             if request.req_method == ReqMethod.COMMAND_MODEL:
                 await self._handle_command_model(ws, request, send_lock)
@@ -1376,7 +1456,7 @@ class AgentWebSocketServer:
         此处只需 post_run 持久化到 checkpointer.
 
         切换到 plan 模式且尚未调用 enter_plan_mode 时，注入 <system-reminder>
-        告知 LLM 调用 enter_plan_mode（对齐 Claude Code：plan 指令不进 system prompt）。
+        告知 LLM 调用 enter_plan_mode。
 
         ``exit_plan_mode`` now restores mode immediately inside the tool
         (via ``restore_mode_after_plan_exit``), so this method no longer needs
@@ -2821,6 +2901,83 @@ class AgentWebSocketServer:
         async with send_lock:
             await ws.send(json.dumps(wire, ensure_ascii=False))
 
+    async def _handle_command_btw(self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock) -> None:
+        """处理 /btw 命令：独立、无工具、单轮 LLM 侧问题查询。
+
+        - 获取当前会话上下文（最近消息）
+        - 用隔离的 LLM 查询回答问题
+        - 不修改对话历史
+        - 不使用任何工具（纯文本回答）
+        - 仅单轮（无后续 token 消耗）
+        """
+        try:
+            session_id = request.session_id or "default"
+            params = request.params or {}
+            channel_id = request.channel_id or "default"
+            question = (params.get("question") or "").strip()
+
+            logger.info(
+                "[AgentWebSocketServer] command.btw received: session_id=%s question=%s",
+                session_id,
+                question[:100] if question else "",
+            )
+
+            if not question:
+                resp = AgentResponse(
+                    request_id=request.request_id,
+                    channel_id=request.channel_id,
+                    ok=True,
+                    payload={"status": "failed", "error": "Question is required"},
+                )
+                wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
+                async with send_lock:
+                    await ws.send(json.dumps(wire, ensure_ascii=False))
+                return
+
+            mode, sub_mode, _ = resolve_agent_request_mode(params.get("mode", "agent.plan"))
+            agent_mode = "agent" if mode == "auto_harness" else mode
+
+            agent = await self._agent_manager.get_agent(
+                channel_id=channel_id,
+                mode=agent_mode,
+                project_dir=resolve_request_project_dir(request),
+                sub_mode=sub_mode,
+            )
+
+            if agent is None:
+                raise ValueError("Failed to get agent")
+
+            result_data = await agent.generate_btw_answer(
+                session_id=session_id,
+                question=question,
+            )
+
+            logger.info(
+                "[AgentWebSocketServer] command.btw result: status=%s",
+                result_data.get("status"),
+            )
+
+            resp = AgentResponse(
+                request_id=request.request_id,
+                channel_id=request.channel_id,
+                ok=True,
+                payload=result_data,
+            )
+        except Exception as e:  # noqa: BLE001
+            logger.exception("[AgentWebSocketServer] command.btw failed: %s", e)
+            resp = AgentResponse(
+                request_id=request.request_id,
+                channel_id=request.channel_id,
+                ok=False,
+                payload={
+                    "status": "failed",
+                    "error": str(e),
+                },
+            )
+        wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
+        async with send_lock:
+            await ws.send(json.dumps(wire, ensure_ascii=False))
+
     async def _handle_command_diff(self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock) -> None:
         from jiuwenswarm.server.utils.diff_service import get_diff_service
 
@@ -2854,6 +3011,38 @@ class AgentWebSocketServer:
             )
         except Exception as e:
             logger.exception("[AgentWebSocketServer] command.diff failed: %s", e)
+            resp = AgentResponse(
+                request_id=request.request_id,
+                channel_id=request.channel_id,
+                ok=False,
+                payload={"error": str(e)},
+            )
+        wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
+        async with send_lock:
+            await ws.send(json.dumps(wire, ensure_ascii=False))
+
+    async def _handle_command_simplify(self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock) -> None:
+        """处理 /simplify 命令：组装代码精简审查 prompt 并返回（由前端作为消息发送给 Agent）。
+
+        prompt 指导 Agent 分三阶段完成
+        1) 识别改动（git diff）
+        2) 三维度审查（复用 / 质量 / 效率）—— 子 Agent 并行审查为可选优化手段
+        3) 聚合发现并直接修复
+        """
+        try:
+            params = request.params or {}
+            target = str(params.get("target", "")).strip()
+
+            prompt = _build_simplify_prompt(target)
+
+            resp = AgentResponse(
+                request_id=request.request_id,
+                channel_id=request.channel_id,
+                ok=True,
+                payload={"prompt": prompt},
+            )
+        except Exception as e:  # noqa: BLE001
+            logger.exception("[AgentWebSocketServer] command.simplify failed: %s", e)
             resp = AgentResponse(
                 request_id=request.request_id,
                 channel_id=request.channel_id,

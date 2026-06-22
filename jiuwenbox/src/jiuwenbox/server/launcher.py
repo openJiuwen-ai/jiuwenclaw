@@ -1,16 +1,6 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 """jiuwenbox server 启动器 (HTTP / UDS 二选一).
 
-承担两件事:
-
-1. 把 "怎么 listen" 从 ``Dockerfile`` 命令行硬编码解耦, 改由 ``JIUWENBOX_LISTEN``
-   URI 控制 (``http://host:port`` 或 ``unix:///abs/socket/path``); 兼容老的
-   ``--host/--port`` 用法只能由用户直接调 ``python -m uvicorn ...``。本入口
-   不再透出 host/port flag, 仅暴露 ``--listen``。
-2. UDS 模式下做必要的 socket 文件预处理 (清理 stale socket、拒绝普通文件残留),
-   并把解析后的最终 URI / socket path 写回 ``os.environ``, 让 ASGI lifespan
-   能拿到 path 做后续 ``chmod``。
-
 通过 ``[project.scripts] jiuwenbox-server = jiuwenbox.server.launcher:main`` 安装
 后, 可直接 ``jiuwenbox-server`` 启动; 同时支持 ``python -m jiuwenbox.server.launcher``。
 """

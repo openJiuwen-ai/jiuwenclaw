@@ -521,6 +521,29 @@ _MODE_DISPLAY_MAP: dict[str, dict[str, str]] = {
 }
 
 
+def _try_add_cache_control(msg: Any) -> None:
+    """Add cache_control to the last content block of a message.
+
+    Only modifies dict-based content blocks (safe for openjiuwen message types
+    where content is ``Union[str, List[Union[str, dict]]]``). If the last block
+    is a dict, we add ``cache_control: {"type": "ephemeral"}`` to it.
+
+    Mark the last pre-prompt message for prompt caching, 
+    while the btw/recap prompt itself carries no marker
+    (skipCacheWrite — the side response doesn't create a new cache entry).
+
+    String content is left untouched — converting it to a list would change
+    the wire format and break the byte-identical prefix needed for cache hits.
+    """
+    content = getattr(msg, "content", None)
+    if content is None:
+        return
+    if isinstance(content, list) and len(content) > 0:
+        last_block = content[-1]
+        if isinstance(last_block, dict):
+            last_block["cache_control"] = {"type": "ephemeral"}
+
+
 class _RuntimeCronToolContext:
     """Stable cron tool context proxy backed by per-task contextvars."""
 
@@ -549,6 +572,9 @@ class _RuntimeCronToolContext:
 
 
 class JiuWenSwarmDeepAdapter:
+    SESSION_ADAPTER_IDLE_TTL_SEC = 2 * 60 * 60
+    SESSION_ADAPTER_EVICT_BATCH_SIZE = 3
+
     """Deep SDK 适配器，实现 AgentAdapter 协议.
 
     封装所有 Deep SDK 专属逻辑：
@@ -621,6 +647,14 @@ class JiuWenSwarmDeepAdapter:
         self._vision_tools: list[Any] = []
         self._audio_tools: list[Any] = []
         self._instance_overrides: dict[str, Any] = {}
+        self._is_session_scoped_adapter: bool = False
+        self._parent_session_id: str | None = None
+        self._session_adapters: dict[str, JiuWenSwarmDeepAdapter] = {}
+        self._session_adapter_locks: dict[str, asyncio.Lock] = {}
+        self._session_adapter_last_used: dict[str, float] = {}
+        self._session_instance_config: dict[str, Any] | None = None
+        self._session_instance_mode: str = "agent.plan"
+        self._session_instance_sub_mode: str | None = None
         self._xiaoyi_phone_tools_registered: bool = False
         self._paid_search_registered: bool = False
         self._paid_search_tool: WebPaidSearchTool | None = None
@@ -641,6 +675,10 @@ class JiuWenSwarmDeepAdapter:
         self._is_proactive_memory: bool | None = None
         self._model_cache: dict[str, Model] = {}
         self._model_name_to_keys: dict[str, list[str]] = {}
+        # Cache system prompt to avoid re-building on every btw/recap call.
+        # The system prompt is derived from project context (CLAUDE.md, skills, etc.)
+        # which doesn't change within a session, so caching is safe.
+        self._last_system_prompt: str = ""
         self._default_model_name: str = ""
         self._registered_mcp_server_ids: set[str] = set()
         self._registered_mcp_servers: dict[str, McpServerConfig] = {}
@@ -652,6 +690,97 @@ class JiuWenSwarmDeepAdapter:
     def set_skill_manager(self, skill_manager: SkillManager) -> None:
         """Inject shared SkillManager from facade for tool reuse."""
         self._skill_manager = skill_manager
+        for adapter in getattr(self, "_session_adapters", {}).values():
+            adapter.set_skill_manager(skill_manager)
+
+    @staticmethod
+    def _session_adapter_key(session_id: str | None) -> str:
+        sid = str(session_id or "").strip()
+        return sid or "default"
+
+    def _new_session_scoped_adapter(self, session_id: str) -> "JiuWenSwarmDeepAdapter":
+        """Create a child adapter that owns one DeepAgent for a single session."""
+        adapter = type(self)()
+        adapter.mark_as_session_scoped(session_id)
+        if self._skill_manager is not None:
+            adapter.set_skill_manager(self._skill_manager)
+        return adapter
+
+    def mark_as_session_scoped(self, session_id: str) -> None:
+        self._is_session_scoped_adapter = True
+        self._parent_session_id = session_id
+
+    def _get_cached_session_adapter(self, session_id: str | None) -> "JiuWenSwarmDeepAdapter | None":
+        sid = self._session_adapter_key(session_id)
+        return self._session_adapters.get(sid)
+
+    def _touch_session_adapter(self, session_id: str | None) -> None:
+        self._session_adapter_last_used[self._session_adapter_key(session_id)] = time.time()
+
+    async def _evict_idle_session_adapters(self) -> None:
+        if self._is_session_scoped_adapter:
+            return
+
+        now = time.time()
+        evicted = 0
+        for sid, adapter in list(self._session_adapters.items()):
+            if evicted >= self.SESSION_ADAPTER_EVICT_BATCH_SIZE:
+                break
+            last_used = self._session_adapter_last_used.get(sid, 0.0)
+            if now - last_used < self.SESSION_ADAPTER_IDLE_TTL_SEC:
+                continue
+            if adapter.is_session_active(sid):
+                continue
+            if adapter.is_deep_agent_executing_for_session(sid):
+                continue
+            try:
+                await adapter.cleanup()
+            except Exception as exc:
+                logger.warning(
+                    "[JiuWenSwarmDeepAdapter] idle session adapter cleanup failed: session_id=%s error=%s",
+                    sid,
+                    exc,
+                )
+                continue
+            self._session_adapters.pop(sid, None)
+            self._session_adapter_locks.pop(sid, None)
+            self._session_adapter_last_used.pop(sid, None)
+            evicted += 1
+
+    async def _get_or_create_session_adapter(self, session_id: str | None) -> "JiuWenSwarmDeepAdapter":
+        """Return the session-owned adapter, creating and initializing it once."""
+        if self._is_session_scoped_adapter:
+            self._touch_session_adapter(session_id)
+            return self
+
+        sid = self._session_adapter_key(session_id)
+        existing = self._session_adapters.get(sid)
+        if existing is not None:
+            self._touch_session_adapter(sid)
+            return existing
+
+        lock = self._session_adapter_locks.setdefault(sid, asyncio.Lock())
+        async with lock:
+            existing = self._session_adapters.get(sid)
+            if existing is not None:
+                self._touch_session_adapter(sid)
+                return existing
+
+            adapter = self._new_session_scoped_adapter(sid)
+            config = (
+                dict(self._session_instance_config)
+                if isinstance(self._session_instance_config, dict)
+                else None
+            )
+            await adapter.create_instance(
+                config,
+                mode=self._session_instance_mode,
+                sub_mode=self._session_instance_sub_mode,
+            )
+            self._session_adapters[sid] = adapter
+            self._touch_session_adapter(sid)
+            logger.info("[JiuWenSwarmDeepAdapter] session scoped DeepAgent created: session_id=%s", sid)
+            return adapter
 
     @staticmethod
     def _get_a2x_config(config_base: dict[str, Any]) -> dict[str, Any]:
@@ -716,6 +845,9 @@ class JiuWenSwarmDeepAdapter:
             return True
         return self._session_has_registered_tasks(sid)
 
+    def is_session_active(self, session_id: str) -> bool:
+        return self._is_session_active(session_id)
+
     def _session_has_registered_tasks(self, session_id: str) -> bool:
         tasks = getattr(self, "_session_agent_tasks", {}).get(session_id)
         return bool(tasks and any(not task.done() for task in tasks))
@@ -756,6 +888,9 @@ class JiuWenSwarmDeepAdapter:
                 return True
             return self._is_related_session(session_id, loop_sid)
         return False
+
+    def is_deep_agent_executing_for_session(self, session_id: str) -> bool:
+        return self._is_deep_agent_executing_for_session(session_id)
 
     def _is_session_live(self, session_id: str) -> bool:
         sid = self._resolve_interrupt_session_id(session_id)
@@ -3248,6 +3383,10 @@ class JiuWenSwarmDeepAdapter:
             mode: 实例化模式，默认 "agent.plan"，使用 create_deep_agent。
             sub_mode: 子模式
         """
+        self._session_instance_config = dict(config or {}) if isinstance(config, dict) else None
+        self._session_instance_mode = mode
+        self._session_instance_sub_mode = sub_mode
+
         await self.set_checkpoint()
 
         self._dreaming_mode = mode if mode and mode.startswith("agent") else "agent"
@@ -3268,7 +3407,8 @@ class JiuWenSwarmDeepAdapter:
         self._prompt_attachment_loader.ensure_layout()
 
         model = self._create_model(config_base)
-        await self._try_init_a2x_client(config_base)
+        if self._is_session_scoped_adapter:
+            await self._try_init_a2x_client(config_base)
         agent_card = AgentCard(name=self._agent_name, id='jiuwenswarm')
 
         tool_cards = await self._get_tool_cards(agent_card.id)
@@ -3426,8 +3566,9 @@ class JiuWenSwarmDeepAdapter:
         self._config_cache = config.copy()
 
         model = self._create_model(config_base)
-        await self._try_init_a2x_client(config_base, reload=True)
-        self._sync_a2x_runtime_state()
+        if self._is_session_scoped_adapter:
+            await self._try_init_a2x_client(config_base, reload=True)
+            self._sync_a2x_runtime_state()
         self._agent_name = self._instance_overrides.get("agent_name", config.get("agent_name", "main_agent"))
         agent_card = AgentCard(name=self._agent_name, id='jiuwenswarm')
         self._sync_multimodal_tools_for_runtime()
@@ -3461,6 +3602,17 @@ class JiuWenSwarmDeepAdapter:
         self._instance.configure(deep_cfg)
         self._sync_active_evolution_review_agent_after_reload()
         await self._sync_mcp_servers_for_runtime(config_base, tag="agent.reload")
+
+        if not self._is_session_scoped_adapter:
+            for session_id, adapter in list(self._session_adapters.items()):
+                try:
+                    await adapter.reload_agent_config(config_base, env_overrides)
+                except Exception as exc:
+                    logger.warning(
+                        "[JiuWenSwarmDeepAdapter] session adapter reload failed: session_id=%s error=%s",
+                        session_id,
+                        exc,
+                    )
 
         logger.info("[JiuWenSwarmDeepAdapter] 配置已热更新（configure），未重启进程")
 
@@ -4015,6 +4167,18 @@ class JiuWenSwarmDeepAdapter:
 
     async def cleanup(self) -> None:
         """Release adapter-owned external runtime resources."""
+        if not self._is_session_scoped_adapter:
+            for adapter in list(self._session_adapters.values()):
+                try:
+                    await adapter.cleanup()
+                except Exception as exc:
+                    logger.warning(
+                        "[JiuWenSwarmDeepAdapter] session adapter cleanup failed: %s",
+                        exc,
+                    )
+            self._session_adapters.clear()
+            self._session_adapter_locks.clear()
+            self._session_adapter_last_used.clear()
         await self._close_a2x_client()
 
     def _collect_registered_ability_names(self) -> set[str]:
@@ -4126,6 +4290,13 @@ class JiuWenSwarmDeepAdapter:
         Returns:
             AgentResponse 包含 interrupt_result 事件数据
         """
+        if not self._is_session_scoped_adapter:
+            session_adapter = await self._get_or_create_session_adapter(request.session_id)
+            try:
+                return await session_adapter.process_interrupt(request)
+            finally:
+                await self._evict_idle_session_adapters()
+
         intent = request.params.get("intent", "cancel")
         new_input = request.params.get("new_input")
 
@@ -4334,6 +4505,10 @@ class JiuWenSwarmDeepAdapter:
         与 process_interrupt 的 session guard 不同，gateway 断开意味着前端已无法接收响应，
         继续运行没有意义，因此不需要 other_sessions 保护。
         """
+        if not self._is_session_scoped_adapter:
+            for adapter in list(self._session_adapters.values()):
+                await adapter.abort_on_gateway_disconnect()
+
         if self._stream_event_rail is not None:
             # Abort all active sessions on this shared adapter.
             # Use list() snapshot since abort() doesn't mutate the Counter.
@@ -4402,6 +4577,13 @@ class JiuWenSwarmDeepAdapter:
 
     async def handle_user_answer(self, request: AgentRequest) -> AgentResponse:
         """Handle chat.user_answer request."""
+        if not self._is_session_scoped_adapter:
+            session_adapter = await self._get_or_create_session_adapter(request.session_id)
+            try:
+                return await session_adapter.handle_user_answer(request)
+            finally:
+                await self._evict_idle_session_adapters()
+
         request_id = (
             request.params.get("request_id", "") if isinstance(request.params, dict) else ""
         )
@@ -4485,6 +4667,12 @@ class JiuWenSwarmDeepAdapter:
         sid = str(request.session_id or "")
         if not sid.startswith("heartbeat"):
             return None
+        if not self._is_session_scoped_adapter:
+            session_adapter = await self._get_or_create_session_adapter(request.session_id)
+            try:
+                return await session_adapter.handle_heartbeat(request)
+            finally:
+                await self._evict_idle_session_adapters()
 
         content = ""
         try:
@@ -5066,6 +5254,13 @@ class JiuWenSwarmDeepAdapter:
         Returns:
             AgentResponse 包含执行结果
         """
+        if not self._is_session_scoped_adapter:
+            session_adapter = await self._get_or_create_session_adapter(request.session_id)
+            try:
+                return await session_adapter.process_message_impl(request, inputs)
+            finally:
+                await self._evict_idle_session_adapters()
+
         if self._instance is None:
             raise RuntimeError("JiuWenSwarmDeepAdapter 未初始化，请先调用 create_instance()")
 
@@ -5182,6 +5377,15 @@ class JiuWenSwarmDeepAdapter:
         Yields:
             AgentResponseChunk 流式响应块
         """
+        if not self._is_session_scoped_adapter:
+            session_adapter = await self._get_or_create_session_adapter(request.session_id)
+            try:
+                async for chunk in session_adapter.process_message_stream_impl(request, inputs):
+                    yield chunk
+                return
+            finally:
+                await self._evict_idle_session_adapters()
+
         if self._instance is None:
             raise RuntimeError("JiuWenSwarmDeepAdapter 未初始化，请先调用 create_instance()")
 
@@ -6140,6 +6344,17 @@ class JiuWenSwarmDeepAdapter:
             - result: "busy" | "compressed" | "noop"
             - stats: 压缩统计信息（仅当 result == "compressed" 时）
         """
+        if not self._is_session_scoped_adapter:
+            session_adapter = await self._get_or_create_session_adapter(session_id)
+            try:
+                return await session_adapter.compress_context(
+                    session_id=session_id,
+                    session=session,
+                    return_state=return_state,
+                )
+            finally:
+                await self._evict_idle_session_adapters()
+
         if self._instance is None or self._instance.react_agent is None:
             raise ValueError("Agent instance not available")
 
@@ -6218,6 +6433,13 @@ class JiuWenSwarmDeepAdapter:
             - message_count: 对话消息数量
             - context_occupancy: 上下文占用详情（来自 deepagent）
         """
+        if not self._is_session_scoped_adapter:
+            session_adapter = await self._get_or_create_session_adapter(session_id)
+            try:
+                return await session_adapter.get_context_usage(session_id=session_id)
+            finally:
+                await self._evict_idle_session_adapters()
+
         if self._instance is None:
             raise ValueError("Agent instance not available")
 
@@ -6237,11 +6459,7 @@ class JiuWenSwarmDeepAdapter:
         from openjiuwen.core.foundation.tool import ToolInfo
 
         # 系统提示词
-        system_prompt = ""
-        if hasattr(react_agent, "prompt_builder") and react_agent.prompt_builder is not None:
-            system_prompt = react_agent.prompt_builder.build()
-        elif hasattr(react_agent, "system_prompt_builder") and react_agent.system_prompt_builder is not None:
-            system_prompt = react_agent.system_prompt_builder.build()
+        system_prompt = self._get_agent_system_prompt()
         if system_prompt and token_counter:
             system_prompt_tokens = token_counter.count(system_prompt) or 0
         elif system_prompt:
@@ -6319,6 +6537,14 @@ class JiuWenSwarmDeepAdapter:
 
         取最近30条消息 → fast model → 1-3句摘要。
         """
+        if not self._is_session_scoped_adapter:
+            session_adapter = self._get_cached_session_adapter(session_id)
+            if session_adapter is not None:
+                try:
+                    return await session_adapter.generate_recap(session_id=session_id)
+                finally:
+                    await self._evict_idle_session_adapters()
+
         from jiuwenswarm.server.runtime.agent_adapter.recap_prompts import (
             RECENT_MESSAGE_WINDOW,
             build_recap_prompt,
@@ -6408,39 +6634,76 @@ class JiuWenSwarmDeepAdapter:
             logger.debug("[JiuWenSwarmDeepAdapter] _get_recent_messages disk fallback failed: %s", exc)
             return []
 
+    def _get_agent_system_prompt(self) -> str:
+        """Return the current agent's system prompt, or empty string if unavailable.
+
+        Result is cached since the system prompt is derived from project context
+        (CLAUDE.md, skills, etc.) which doesn't change within a session.
+        Reusing the same bytes is critical for prompt cache prefix matching.
+        """
+        if self._last_system_prompt:
+            return self._last_system_prompt
+        if self._instance is None or self._instance.react_agent is None:
+            return ""
+        react_agent = self._instance.react_agent
+        if hasattr(react_agent, "prompt_builder") and react_agent.prompt_builder is not None:
+            self._last_system_prompt = react_agent.prompt_builder.build()
+            return self._last_system_prompt
+        if hasattr(react_agent, "system_prompt_builder") and react_agent.system_prompt_builder is not None:
+            self._last_system_prompt = react_agent.system_prompt_builder.build()
+            return self._last_system_prompt
+        return ""
+
     async def _call_model_for_recap(
         self,
         messages: list[Any],
         prompt: str,
+        system_prompt: str = "",
+        enable_prompt_caching: bool = True,
     ) -> str | None:
-        """调用 fast model 生成 recap 摘要。
+        """调用 model 生成简短回答（单轮、无工具）。
 
-        - 不传 system prompt（空）
+        - system_prompt 非空时以 SystemMessage 形式前置
         - prompt 作为最后一条 user message 追加到对话末尾
-        - 不传 tools
-        - 不启用 thinking
+        - 不传 tools（通过 btw prompt 中的 <system-reminder> 告知模型无工具可用）
+        - 不设置 temperature（继承模型默认值，与主 agent 保持一致以复用 prompt cache）
+
+        prompt cache 策略：
+        - 保持消息原始格式（保留 structured content blocks，包括 tool_use/tool_result）
+        - 最后一条 pre-prompt 消息添加 cache_control: {type: "ephemeral"} marker
+        - btw prompt 不添加 cache_control（skipCacheWrite — 侧问题响应不写入 cache）
         """
-        from openjiuwen.core.foundation.llm.schema.message import UserMessage, AssistantMessage
+        from openjiuwen.core.foundation.llm.schema.message import (
+            AssistantMessage,
+            SystemMessage,
+            UserMessage,
+        )
 
         if self._model is None:
-            logger.error("[generate_recap] no model instance available")
+            logger.error("[oneshot] no model instance available")
             return None
 
         recap_messages: list[Any] = []
 
+        if system_prompt:
+            recap_messages.append(SystemMessage(content=system_prompt))
+
         for msg in messages:
             role = getattr(msg, "role", None) or ""
             content = getattr(msg, "content", None) or ""
-            if isinstance(content, list):
-                # Multimodal content — extract text parts only
-                content = " ".join(
-                    str(p) for p in content
-                    if isinstance(p, str) or (isinstance(p, dict) and p.get("type") == "text")
-                )
-            content = str(content)
-            if not content.strip():
+
+            # Skip truly empty messages
+            if isinstance(content, str) and not content.strip():
+                continue
+            if isinstance(content, (list, tuple)) and len(content) == 0:
+                continue
+            if content is None:
                 continue
 
+            # Keep original content format (string or list of structured blocks).
+            # This is critical for prompt cache prefix matching — converting to
+            # plain text with str() would strip tool_use/tool_result blocks and
+            # break byte-identical prefix matching with the main agent's calls.
             if role == "user":
                 recap_messages.append(UserMessage(content=content))
             elif role == "assistant":
@@ -6448,18 +6711,81 @@ class JiuWenSwarmDeepAdapter:
             else:
                 recap_messages.append(UserMessage(content=content))
 
-        # Prompt 作为最后一条 user message 追加
+        # Mark the last pre-prompt message for prompt caching.
+        # The btw prompt itself does NOT carry a cache_control marker
+        # skipCacheWrite — the side-question
+        # response doesn't create a new cache entry.
+        if enable_prompt_caching and recap_messages:
+            _try_add_cache_control(recap_messages[-1])
+
+        # Append btw prompt as final user message (no cache_control → skipCacheWrite)
         recap_messages.append(UserMessage(content=prompt))
 
         try:
-            result = await self._model.invoke(
-                recap_messages,
-                temperature=0,
-            )
-            return getattr(result, "content", None) or str(result)
+            # No temperature override — inherit model default to match main agent
+            # API params (thinking config is part of the Anthropic cache key).
+            result = await self._model.invoke(recap_messages)
+            content = getattr(result, "content", None) or str(result)
+            # Log cache metrics for observability
+            usage = getattr(result, "usage_metadata", None)
+            if usage and getattr(usage, "cache_tokens", 0) > 0:
+                logger.info(
+                    "[btw/recap] cache hit: cache_tokens=%s, input_tokens=%s, output_tokens=%s",
+                    getattr(usage, "cache_tokens", 0),
+                    getattr(usage, "input_tokens", 0),
+                    getattr(usage, "output_tokens", 0),
+                )
+            return content
         except Exception:
             logger.exception("[generate_recap] model call failed")
             return None
+
+    async def generate_btw_answer(self, session_id: str, question: str) -> dict[str, Any]:
+        """回答 /btw 侧问题：独立、无工具、单轮 LLM 查询。
+
+        prompt cache 策略：
+        - 共享主 agent 的 system prompt（项目上下文、skills、CLAUDE.md 等）
+        - 保持消息原始格式（含 structured content blocks）以实现 byte-identical 前缀
+        - 最后一条 pre-prompt 消息添加 cache_control marker（ephemeral）
+        - btw prompt 不添加 cache_control（skipCacheWrite）
+        - 直接调用模型（无工具、单轮）
+        - 不修改对话历史（read-only）
+
+        Args:
+            session_id: 会话ID
+            question: 用户侧问题
+
+        Returns:
+            {"status": "ok", "answer": "..."} 或 {"status": "no_context"|"failed", ...}
+        """
+        from jiuwenswarm.server.runtime.agent_adapter.recap_prompts import (
+            RECENT_MESSAGE_WINDOW,
+            _build_btw_prompt,
+        )
+
+        # 1) 获取 system prompt（与主 agent 相同，已缓存）
+        system_prompt = self._get_agent_system_prompt()
+
+        # 2) 获取最近对话消息（保持原始格式，不做 str() 转换）
+        messages = self._get_recent_messages(session_id, window=RECENT_MESSAGE_WINDOW)
+        if not messages and not system_prompt:
+            return {"status": "no_context"}
+
+        # 3) 构建 btw prompt（system prompt 通过 SystemMessage 传递，不嵌入文本）
+        prompt = _build_btw_prompt(
+            question=question,
+            language=self._resolve_prompt_language(),
+        )
+
+        # 4) 调用模型 — system_prompt 作为 SystemMessage 前置，prompt 作为 UserMessage
+        # enable_prompt_caching=True 启用 cache_control marker
+        answer = await self._call_model_for_recap(
+            messages, prompt, system_prompt=system_prompt, enable_prompt_caching=True,
+        )
+        if not answer:
+            return {"status": "failed", "error": "Model returned empty response"}
+
+        return {"status": "ok", "answer": answer.strip()}
 
     async def repair_model_response(self, prompt: str) -> str | None:
         """Run a focused repair prompt using the currently selected chat model."""
@@ -6627,11 +6953,7 @@ class JiuWenSwarmDeepAdapter:
         total_tokens = 0
 
         # 1. 计算系统消息的 tokens
-        system_prompt = ""
-        if hasattr(react_agent, "prompt_builder") and react_agent.prompt_builder is not None:
-            system_prompt = react_agent.prompt_builder.build()
-        elif hasattr(react_agent, "system_prompt_builder") and react_agent.system_prompt_builder is not None:
-            system_prompt = react_agent.system_prompt_builder.build()
+        system_prompt = self._get_agent_system_prompt()
 
         if system_prompt:
             if token_counter is not None:

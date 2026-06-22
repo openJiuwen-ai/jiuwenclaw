@@ -1517,6 +1517,14 @@ export class CliPiAppState {
 
     if (shouldResumeInterrupt) {
       const resumeMode = this.pendingQuestion.resumeMode ?? this.mode;
+      const structuredPlanPayload =
+        this.pendingQuestion.planApprovalKind === "plan_approval"
+          ? {
+              plan_approval_kind: this.pendingQuestion.planApprovalKind,
+              plan_content: this.pendingQuestion.planContent ?? "",
+              plan_language: this.pendingQuestion.planLanguage ?? "cn",
+            }
+          : {};
       this.sendEventOnly(
         "chat.send",
         {
@@ -1525,6 +1533,7 @@ export class CliPiAppState {
           answers,
           source,
           mode: resumeMode,
+          ...structuredPlanPayload,
         },
         true,
       );

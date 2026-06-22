@@ -1,5 +1,8 @@
 import { matchesKey } from "@mariozechner/pi-tui";
 
+import type { KeybindingAction } from "../core/keybindings/actions.js";
+import { resolveAction } from "../core/keybindings/resolver.js";
+
 /**
  * 快捷键约定（Ctrl+C）：
  * 第一次按下：设置本地中断标志（用于中断长运行命令如日志流）；
@@ -33,109 +36,109 @@ export interface AppScreenKeymapDelegate {
   hasServerTask(): boolean;
 }
 
-interface KeyBinding {
+interface KeyBindingDisplay {
+  /** Default key id (display only — effective key may differ via keybindings.json). */
   key: Parameters<typeof matchesKey>[1];
   label: string;
   description: string;
-  run: (delegate: AppScreenKeymapDelegate) => void;
+  /** Resolver action; reserved keys (ctrl+c/d) have no rebindable action. */
+  action?: KeybindingAction;
 }
 
-export const APP_SCREEN_KEY_BINDINGS: readonly KeyBinding[] = [
-  {
-    key: "ctrl+c",
-    label: "ctrl+c",
-    description: "中断任务；连按两次退出",
-    run: (delegate) => {
-      const now = Date.now();
-      if (now - lastInterruptTime < 3000) {
-        delegate.exitApp();
-        return;
-      }
+function runCtrlC(delegate: AppScreenKeymapDelegate): void {
+  const now = Date.now();
+  if (now - lastInterruptTime < 3000) {
+    delegate.exitApp();
+    return;
+  }
 
-      // Always set local interrupt flag (for long-running local commands)
-      // Returns true if an active command request was cancelled — this means
-      // Ctrl+C was consumed by command cancellation, not a generic interrupt.
-      const commandCancelled = delegate.requestLocalInterrupt();
+  // Always set local interrupt flag (for long-running local commands).
+  // Returns true if an active command request was cancelled — this means
+  // Ctrl+C was consumed by command cancellation, not a generic interrupt.
+  const commandCancelled = delegate.requestLocalInterrupt();
 
-      // Only send chat.interrupt if there's a server task running
-      if (delegate.hasServerTask()) {
-        delegate.interruptTask();
-      }
+  // Only send chat.interrupt if there's a server task running
+  if (delegate.hasServerTask()) {
+    delegate.interruptTask();
+  }
 
-      // When a command (e.g. /recap) was cancelled, reset the double-press timer
-      // so the user needs TWO fresh Ctrl+C presses to exit, not just one more.
-      if (commandCancelled && !delegate.hasServerTask()) {
-        lastInterruptTime = 0;
-        // Don't show the "Press Ctrl+C again to exit" hint — the user just
-        // cancelled a command, they don't intend to exit the TUI.
-        return;
-      }
+  // When a command (e.g. /recap) was cancelled, reset the double-press timer
+  // so the user needs TWO fresh Ctrl+C presses to exit, not just one more.
+  if (commandCancelled && !delegate.hasServerTask()) {
+    lastInterruptTime = 0;
+    return;
+  }
 
-      // If idle (no server task and no local command running), clear input
-      if (delegate.isIdle()) {
-        delegate.clearInput();
-      }
+  // If idle (no server task and no local command running), clear input
+  if (delegate.isIdle()) {
+    delegate.clearInput();
+  }
 
-      // Show hint that pressing Ctrl+C again will exit
-      delegate.showCtrlCExitHint();
+  delegate.showCtrlCExitHint();
+  lastInterruptTime = now;
+}
 
-      lastInterruptTime = now;
-    },
-  },
-  {
-    key: "ctrl+d",
-    label: "ctrl+d",
-    description: "中断任务；连按两次退出",
-    run: (delegate) => {
-      const now = Date.now();
-      if (now - lastInterruptTime < 3000) {
-        delegate.exitApp();
-        return;
-      }
-      lastInterruptTime = now;
-      delegate.interruptTask();
-      delegate.showCtrlCExitHint();
-    },
-  },
-  {
-    key: "ctrl+l",
-    label: "ctrl+l",
-    description: "redraw screen",
-    run: (delegate) => {
-      delegate.redraw();
-    },
-  },
-  {
-    key: "ctrl+t",
-    label: "ctrl+t",
-    description: "toggle todos",
-    run: (delegate) => {
-      delegate.toggleTodos();
-    },
-  },
-  {
-    key: "ctrl+g",
-    label: "ctrl+g",
-    description: "toggle team panel",
-    run: (delegate) => {
-      delegate.toggleTeamPanel();
-    },
-  },
-  {
-    key: "ctrl+o",
-    label: "ctrl+o",
-    description: "toggle transcript detail",
-    run: (delegate) => {
-      delegate.toggleTranscript();
-    },
-  },
+function runCtrlD(delegate: AppScreenKeymapDelegate): void {
+  const now = Date.now();
+  if (now - lastInterruptTime < 3000) {
+    delegate.exitApp();
+    return;
+  }
+  lastInterruptTime = now;
+  delegate.interruptTask();
+  delegate.showCtrlCExitHint();
+}
+
+/**
+ * Reserved (non-rebindable) keys with special double-press semantics.
+ * These bypass the keybindings resolver entirely (see core/keybindings/reserved.ts).
+ */
+const RESERVED_BINDINGS: ReadonlyArray<{
+  key: Parameters<typeof matchesKey>[1];
+  run: (delegate: AppScreenKeymapDelegate) => void;
+}> = [
+  { key: "ctrl+c", run: runCtrlC },
+  { key: "ctrl+d", run: runCtrlD },
+];
+
+/** Rebindable Global actions → handlers. */
+const GLOBAL_ACTION_HANDLERS: Partial<Record<KeybindingAction, (d: AppScreenKeymapDelegate) => void>> = {
+  "app:redraw": (d) => d.redraw(),
+  "app:toggleTodos": (d) => d.toggleTodos(),
+  "app:toggleTeamPanel": (d) => d.toggleTeamPanel(),
+  "app:toggleTranscript": (d) => d.toggleTranscript(),
+};
+
+/**
+ * Display metadata for the main-screen shortcuts (used by the shortcut hint
+ * footer). Effective keys come from the resolver; these are the defaults.
+ */
+export const APP_SCREEN_KEY_BINDINGS: readonly KeyBindingDisplay[] = [
+  { key: "ctrl+c", label: "ctrl+c", description: "中断任务；连按两次退出" },
+  { key: "ctrl+d", label: "ctrl+d", description: "中断任务；连按两次退出" },
+  { key: "ctrl+l", label: "ctrl+l", description: "重绘屏幕", action: "app:redraw" },
+  { key: "ctrl+t", label: "ctrl+t", description: "显示/隐藏 Todos 面板", action: "app:toggleTodos" },
+  { key: "ctrl+g", label: "ctrl+g", description: "显示/隐藏 Team 面板", action: "app:toggleTeamPanel" },
+  { key: "ctrl+o", label: "ctrl+o", description: "切换 transcript 紧凑/详细视图", action: "app:toggleTranscript" },
 ] as const;
 
 export function handleAppScreenKeyInput(data: string, delegate: AppScreenKeymapDelegate): boolean {
-  for (const binding of APP_SCREEN_KEY_BINDINGS) {
-    if (!matchesKey(data, binding.key)) continue;
-    binding.run(delegate);
-    return true;
+  // Reserved keys first — never rebindable.
+  for (const binding of RESERVED_BINDINGS) {
+    if (matchesKey(data, binding.key)) {
+      binding.run(delegate);
+      return true;
+    }
+  }
+
+  // Rebindable Global actions via the keybindings resolver.
+  const action = resolveAction("Global", data);
+  if (action) {
+    const handler = GLOBAL_ACTION_HANDLERS[action];
+    if (handler) {
+      handler(delegate);
+      return true;
+    }
   }
 
   return false;

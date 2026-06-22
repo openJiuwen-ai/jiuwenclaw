@@ -10,6 +10,21 @@
 - TUI 通过 **WebSocket** 连接本机 Gateway 的 TUI 端点（默认 `ws://127.0.0.1:19001/tui`）。请先按 [快速开始(TUI)](Quickstart_tui.md) 启动后端服务，再打开 TUI。
 - TUI 需要 **交互式 TTY**；在管道或非 TTY 环境下会报错退出。
 
+### 多窗口 TUI
+
+同一套 **Gateway 后端**（同一 `GATEWAY_PORT`，默认 `ws://127.0.0.1:19001/tui`）可**同时打开多个 TUI 终端窗口**。每个窗口维护独立的 `session_id` 与进行中的对话/任务：
+
+| 行为 | 说明 |
+|------|------|
+| **事件隔离** | Gateway 按 `session_id` 将流式响应、工具输出等事件精确投递到对应窗口，不会串到其他窗口。 |
+| **并发任务** | 不同 session 可并行执行 Agent 任务。 |
+| **同窗口新消息** | 在同一窗口（相同 `session_id`）再次发送聊天，仍会取消该 session 上旧的流式任务。 |
+| **与 ACP 差异** | ACP 仍为 single-user channel（新消息会取消同 channel 上所有进行中任务）；TUI/CLI 已改为按 session 隔离。 |
+
+**打开多窗口**：在多个终端分别运行 `jiuwenswarm-tui` 或 `jiuwenswarm-cli` 即可。需要恢复特定会话时使用 `--session <id>` 或 `/resume`。
+
+> **与「单机多实例」的区别**：[单机多实例运行](单机多实例运行.md) 指不同工作区、不同端口的独立后端；**多窗口 TUI** 指多个终端共享同一 Gateway 后端。二者可同时使用（例如 `dev` 实例上开两个 TUI 窗口），但不要混淆端口与工作区。
+
 ---
 
 ## CLI 参考
@@ -56,7 +71,7 @@
 | 命令 | 别名 | 用途 | 示例 | 适用模式 |
 |------|------|------|------|----------|
 | `/help` | - | 列出已注册 Slash 命令 | `/help` | 全部 |
-| `/hotkey` | - | 显示快捷键与 `/help` 提示 | `/hotkey` | 全部 |
+| `/keybindings` | `/keybind` | 查看/编辑/重置 TUI 快捷键配置 | `/keybindings`、`/keybindings list` | 全部 |
 | `/hooks` | - | 浏览已配置的 hooks（只读） | `/hooks` | 全部 |
 | `/exit` | `/quit` | 退出 TUI | `/exit` | 全部 |
 | `/clear` | `/reset`, `/new` | 新建会话 ID、清空当前 transcript（忙时拒绝） | `/clear` | 全部 |
@@ -108,6 +123,8 @@
 | `Ctrl+A` | 在「全部项目」与「仅当前项目」范围间切换 |
 | `Ctrl+B` | 开关 git 分支过滤（仅显示 `git_branch` 严格等于当前项目分支的会话） |
 | `Esc` | 有搜索词时清空搜索；否则关闭选择器 |
+
+> 上表 `Space` / `Ctrl+R` / `Ctrl+A` / `Ctrl+B` / `Esc` 属于 **`ResumeList` context**，可通过 `/keybindings` 重绑；预览态、重命名编辑态内的 `Enter` / `Esc` / `Backspace` 及搜索框文本输入仍为硬编码。
 
 行为说明：
 
@@ -429,16 +446,77 @@
 
 ### 快捷键
 
+#### 默认全局快捷键
+
 | 按键 | 行为 |
 |------|------|
-| `Ctrl+C` | **第一次**：中断当前任务（`chat.interrupt`）；**1 秒内第二次**：退出 TUI |
+| `Ctrl+C` | **第一次**：中断当前任务（`chat.interrupt`）；**3 秒内第二次**：退出 TUI（**不可重绑**） |
+| `Ctrl+D` | 中断任务；连按两次退出（**不可重绑**） |
 | `Ctrl+L` | 重绘整屏 |
 | `Ctrl+T` | 显示/隐藏 Todos 面板 |
 | `Ctrl+G` | 显示/隐藏 Team 面板 |
 | `Ctrl+O` | 在 transcript **紧凑 / 详细** 视图间切换 |
-| `Esc` | 无待处理问题时，若存在可取消的工作，则发送取消 |
+| `Esc` | 无 overlay 且存在可取消工作时，发送取消 |
 
-权限类问答中，`y` / `n` 可快速选择允许/拒绝类选项（`app-screen.ts`）。
+权限类问答中，`y` / `n` 可快速选择允许/拒绝类选项（`Confirmation` context）。
+
+底部 shortcut 提示栏仍显示**默认键名**；若已自定义，请以 `/keybindings list` 或实际按键行为为准。
+
+#### 自定义快捷键（`/keybindings`）
+
+配置文件路径：`~/.jiuwenswarm-tui/keybindings.json`（首次 `/keybindings` 会按当前默认值生成模板）。
+
+| 子命令 | 作用 |
+|--------|------|
+| `/keybindings` 或 `/keybindings edit` | 创建或打开配置文件；关闭外部编辑器后自动重新加载 |
+| `/keybindings list` | 列出当前**生效**的快捷键（按 context 分组） |
+| `/keybindings reset` | 删除用户配置文件，恢复内置默认 |
+
+**合并规则**：以内置 `DEFAULT_BINDINGS` 为底，用户 JSON 按 context 覆盖；某键设为 `null` 表示取消该默认绑定。非法键名、未知 action、保留键等会给出 warning，TUI 仍用合法部分继续运行。
+
+**示例**（将重绘改为 `F5`，并取消 Esc 取消任务）：
+
+```json
+{
+  "bindings": [
+    {
+      "context": "Global",
+      "bindings": {
+        "f5": "app:redraw",
+        "escape": null
+      }
+    }
+  ]
+}
+```
+
+键名格式需符合 pi-tui 的 `matchesKey` 约定：小写修饰键 `ctrl` / `shift` / `alt`，特殊键如 `pageUp`、`escape`、`return` 等；不支持 chord（空格分隔的多段按键）。
+
+#### 可配置的 Context 与 Action
+
+| Context | 生效场景 | 主要默认键 |
+|---------|----------|------------|
+| `Global` | 主界面（无 overlay 时部分 Esc 行为） | `ctrl+l/t/g/o`，`escape` → 取消任务 |
+| `Scroll` | Transcript 滚动 | `pageUp` / `pageDown`，`ctrl+home/end` |
+| `FileViewer` | 全屏文件/日志查看 | `esc`/`q` 退出，`↑↓`/`jk` 行移，`g`/`shift+g` 顶/底 |
+| `Confirmation` | 权限/确认问答 | `y` / `n` |
+| `TeamPanel` | Team 面板打开 | `←` 返回列表，`↑↓` 选成员，`Enter` 查看 |
+| `SwarmWorkflows` | Swarm 工作流视图 | `esc` 返回，`tab`/`→` 切焦点，`l/p/o/e/r` 等 |
+| `StatusView` | 状态/配置视图 | `esc` 关闭，`←`/`→` 切标签（搜索框输入仍硬编码） |
+| `ResumeList` | 会话选择器列表 | `space` 预览，`ctrl+r` 重命名，`ctrl+a/b`，`esc` 关闭 |
+| `Overlay` | MCP 详情/工具子视图 | `esc` 关闭 |
+
+完整 action 名称与说明见 `/keybindings list` 或生成的 `keybindings.json` 模板。
+
+#### 刻意不可重绑或仍硬编码的部分
+
+- **保留键**：`ctrl+c`、`ctrl+d`、`ctrl+m`（终端语义 / 连按退出，见 `reserved.ts`）。
+- **Select 列表内部**：`/model`、`/theme`、`/mcp` 等 pi-tui `SelectList` 的上下移动、回车选中、typeahead 过滤。
+- **Config 编辑器**：搜索框与值输入阶段的文本键、`/status` 配置 Tab 的 `/` 进入搜索等。
+- **Resume 子态**：只读预览态、重命名输入态内的按键逻辑。
+- **Diff 查看器**、**Startup 提示**等尚未接入 resolver 的视图。
+
+如需扩展可配置范围，需在 `actions.ts` / `defaultBindings.ts` 声明 action，并在 `app-screen.ts` 对应输入路径改为 `resolveAction`。
 
 ### 输入、附件与 `@` 引用
 
@@ -520,6 +598,8 @@
 | 文件路径不在允许范围 | 使用 `/workspace add` 将仓库根或子目录加入可信列表 |
 | 连接失败 | 检查 Gateway 是否监听、`--url` 是否正确、防火墙 |
 | 未安装 `rg` | 安装 ripgrep 以改善搜索体验（欢迎屏提示） |
+| Cron 通知出现在所有 TUI 窗口 | 预期行为：`targets=tui` 的定时任务会广播到所有已连接终端，详见 [定时任务](定时任务.md#5-推送到-tui-频道) |
+| 多窗口之间聊天/流式输出串台 | 请确认 Gateway 为 multi-tui 版本；各窗口应使用不同 `session_id`，事件按 session 精确路由 |
 
 ---
 

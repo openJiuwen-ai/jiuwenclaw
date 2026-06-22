@@ -47,19 +47,28 @@ from jiuwenbox.models.common import AuditEventType
 from jiuwenbox.models.policy import SecurityPolicy, TimeoutPolicy
 from jiuwenbox.models.sandbox import (
     BackgroundExecResult,
+    BackgroundJobStatus,
+    BackgroundJobSummary,
     ExecResult,
+    KillBackgroundJobResult,
     PolicyMode,
     SandboxPhase,
     SandboxRef,
     SandboxSpec,
+    generate_job_id,
     generate_sandbox_id,
+    validate_custom_job_id,
     validate_custom_sandbox_id,
 )
 from jiuwenbox.server.audit_logger import AuditLogger
 from jiuwenbox.server.policy_engine import PolicyEngine
 from jiuwenbox.server.policy_reader import PolicyReader
-from jiuwenbox.server.runtime.base import RuntimeAdapter, RuntimeExecRequest
-from jiuwenbox.server.runtime.process import ProcessRuntime
+from jiuwenbox.server.runtime.base import (
+    RuntimeAdapter,
+    RuntimeBackgroundExecRequest,
+    RuntimeExecRequest,
+)
+from jiuwenbox.server.runtime.process import BackgroundJobNotFoundError, ProcessRuntime
 from jiuwenbox.server.workspace import JIUWENBOX_HOME
 
 configure_logging()
@@ -73,6 +82,16 @@ class SandboxExecRequest:
     env: dict[str, str] | None = None
     stdin_data: bytes | None = None
     timeout: float | None = None
+
+
+@dataclass(frozen=True)
+class SandboxBackgroundExecRequest:
+    command: list[str]
+    job_id: str | None = None
+    workdir: str | None = None
+    env: dict[str, str] | None = None
+    stdin_data: bytes | None = None
+    capture_output: bool = True
 
 
 @dataclass(frozen=True)
@@ -309,26 +328,6 @@ class SandboxManager:
         new_timeout: TimeoutPolicy,
     ) -> TimeoutPolicy:
         """Replace the server-level ``timeout`` policy and restart the reaper.
-
-        Atomically: stops the currently running reaper (if any), swaps in
-        ``new_timeout`` on the root policy, then starts a fresh reaper using
-        the new values. The new reaper only actually launches when
-        ``idle_timeout`` is configured (``not None``); otherwise the call
-        leaves no reaper running. Returns the resulting ``TimeoutPolicy`` so
-        callers (e.g. the PUT route) can echo back the canonical state.
-
-        This only mutates the *root* policy used by the reaper; per-sandbox
-        policies cached in ``self._policies`` are unaffected (timeout has no
-        bearing on sandbox isolation anyway).
-
-        Idempotency: if ``new_timeout`` 与当前 ``self.policy.timeout`` 字段值
-        完全一致 *且* 已有活着的 reaper task (或两者都为 ``None`` 即"禁用且
-        未运行"), 直接 no-op 返回, 不做 stop/start。 这一短路对反复调用
-        ``PUT /api/v1/timeout`` 写入同一组值的客户端 (典型场景: 每次创建
-        沙箱前都重申 idle 配置) 至关重要 —— 否则 ``stop_idle_reaper`` 要等
-        当前 reaper 从 ``stop_event.wait(timeout=check_interval)`` 这一觉
-        醒过来 (最坏 5s 兜底超时), 整个 PUT 调用会平白多出几秒延迟, 把
-        沙箱创建链路一起拖慢。
         """
         if new_timeout == self.policy.timeout:
             reaper_alive = (
@@ -728,7 +727,7 @@ class SandboxManager:
     async def exec_background_in_sandbox(
         self,
         sandbox_id: str,
-        request: SandboxExecRequest,
+        request: SandboxBackgroundExecRequest,
     ) -> BackgroundExecResult:
         async with self._lock:
             ref = self._get_sandbox(sandbox_id)
@@ -738,20 +737,28 @@ class SandboxManager:
                 )
             self._mark_active(ref)
 
-        # Background exec returns a "started yes/no + pid" envelope
-        # rather than stdout/stderr — the raw byte stream is dropped
-        # at the kernel level (runtime.log was removed). One audit row
-        # per call, post-return.
+        job_id = (
+            generate_job_id()
+            if request.job_id is None or request.job_id.strip() == ""
+            else validate_custom_job_id(request.job_id.strip())
+        )
+        existing = await self.runtime.list_background_jobs(sandbox_id)
+        if any(item.job_id == job_id for item in existing):
+            raise SandboxConflictError(
+                f"Background job '{job_id}' already exists in sandbox '{sandbox_id}'",
+            )
+
         start = time.monotonic()
         try:
             result = await self.runtime.exec_background(
                 sandbox_id,
-                RuntimeExecRequest(
+                RuntimeBackgroundExecRequest(
                     command=request.command,
+                    job_id=job_id,
                     workdir=request.workdir,
                     env=request.env,
                     stdin_data=request.stdin_data,
-                    timeout=request.timeout,
+                    capture_output=request.capture_output,
                 ),
             )
         except Exception as exc:
@@ -774,8 +781,80 @@ class SandboxManager:
             background=True,
             ok=result.started,
             started=result.started,
+            job_id=result.job_id,
             pid=result.pid,
+            running=result.running,
+            exit_code=result.exit_code,
             error=result.error_message,
+            duration_ms=int((time.monotonic() - start) * 1000),
+        )
+        return result
+
+    async def get_background_job_in_sandbox(
+        self,
+        sandbox_id: str,
+        job_id: str,
+    ) -> BackgroundJobStatus:
+        async with self._lock:
+            self._get_sandbox(sandbox_id)
+        return await self.runtime.get_background_job(sandbox_id, job_id)
+
+    async def list_background_jobs_in_sandbox(
+        self,
+        sandbox_id: str,
+        *,
+        running_only: bool = False,
+    ) -> list[BackgroundJobSummary]:
+        async with self._lock:
+            self._get_sandbox(sandbox_id)
+        return await self.runtime.list_background_jobs(
+            sandbox_id,
+            running_only=running_only,
+        )
+
+    async def kill_background_job_in_sandbox(
+        self,
+        sandbox_id: str,
+        job_id: str,
+        signal: int = 15,
+    ) -> KillBackgroundJobResult:
+        async with self._lock:
+            ref = self._get_sandbox(sandbox_id)
+            if ref.phase != SandboxPhase.READY:
+                raise SandboxStateError(
+                    f"Cannot kill background job in sandbox '{sandbox_id}': "
+                    f"state is {ref.phase.value}"
+                )
+            self._mark_active(ref)
+
+        start = time.monotonic()
+        try:
+            result = await self.runtime.kill_background_job(
+                sandbox_id,
+                job_id,
+                signum=signal,
+            )
+        except BackgroundJobNotFoundError:
+            raise
+        except Exception as exc:
+            self.audit.log(
+                AuditEventType.KILL_BACKGROUND_JOB,
+                sandbox_id,
+                job_id=job_id,
+                signal=signal,
+                killed=False,
+                reason=repr(exc),
+                duration_ms=int((time.monotonic() - start) * 1000),
+            )
+            raise
+        self.audit.log(
+            AuditEventType.KILL_BACKGROUND_JOB,
+            sandbox_id,
+            job_id=job_id,
+            signal=signal,
+            killed=result.killed,
+            reason=result.reason,
+            exit_code=result.exit_code,
             duration_ms=int((time.monotonic() - start) * 1000),
         )
         return result

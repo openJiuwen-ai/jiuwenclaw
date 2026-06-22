@@ -1017,6 +1017,14 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
             : {};
         const approvalSchemaPayload = approvalSchema ? { approval_schema: approvalSchema } : {};
         const sourcePayload = effectiveSource ? { source: effectiveSource } : {};
+        const structuredPlanPayload =
+          pendingMatches && pendingQuestion?.planApprovalKind === 'plan_approval'
+            ? {
+                plan_approval_kind: pendingQuestion.planApprovalKind,
+                plan_content: pendingQuestion.planContent ?? '',
+                plan_language: pendingQuestion.planLanguage ?? 'cn',
+              }
+            : {};
         const approvalTransport =
           evolutionMeta && typeof evolutionMeta.approval_transport === 'string'
             ? evolutionMeta.approval_transport
@@ -1033,6 +1041,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
             request_id: requestId,
             answers: answers,
             ...sourcePayload,
+            ...structuredPlanPayload,
             ...approvalSchemaPayload,
             ...evolutionMetaPayload,
           });
@@ -1979,12 +1988,27 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
           typeof questionPayload.approval_schema === 'string'
             ? questionPayload.approval_schema
             : undefined;
+        const planApprovalKind =
+          typeof questionPayload.plan_approval_kind === 'string'
+            ? questionPayload.plan_approval_kind
+            : undefined;
+        const planContent =
+          typeof questionPayload.plan_content === 'string'
+            ? questionPayload.plan_content
+            : undefined;
+        const planLanguage =
+          questionPayload.plan_language === 'cn' || questionPayload.plan_language === 'en'
+            ? questionPayload.plan_language
+            : undefined;
         const normalizedPayload: AskUserQuestionPayload = {
           request_id: typeof questionPayload.request_id === 'string' ? questionPayload.request_id : '',
           source: typeof questionPayload.source === 'string' ? questionPayload.source : undefined,
           questions,
           ...(approvalSchema ? { approvalSchema } : {}),
           ...(evolutionMeta ? { evolutionMeta } : {}),
+          ...(planApprovalKind ? { planApprovalKind } : {}),
+          ...(planContent !== undefined ? { planContent } : {}),
+          ...(planLanguage ? { planLanguage } : {}),
         };
         setPendingQuestion(normalizedPayload);
       }),

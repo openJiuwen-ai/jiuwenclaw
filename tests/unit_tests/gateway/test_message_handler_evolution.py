@@ -154,6 +154,9 @@ class _TestMessageHandler(MessageHandler):
     async def _trigger_before_chat_request_hook(self, msg: Message) -> None:
         return None
 
+    async def prepare_agent_dispatch_message(self, msg: Message) -> Message:
+        return await self._prepare_agent_dispatch_message(msg)
+
 
 def _message(req_method: ReqMethod) -> Message:
     return Message(

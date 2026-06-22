@@ -5,8 +5,10 @@
 from __future__ import annotations
 
 import asyncio
+from types import SimpleNamespace
 
 import pytest
+from openjiuwen.agent_teams.runtime.pool import RuntimeState
 
 from jiuwenswarm.agents.harness.team.team_manager import (
     TeamManager,
@@ -33,6 +35,12 @@ class _TeamManagerHarness(TeamManager):
 
     def resolve_session_team_name_for_test(self, session_id: str) -> str | None:
         return self._resolve_session_team_name(session_id)
+
+    def stub_resolve_resumable_runner_entry_for_test(self, resolver) -> None:
+        self._resolve_resumable_runner_entry = resolver  # type: ignore[method-assign]
+
+    async def resolve_resumable_runner_entry_for_test(self, session_id: str):
+        return await self._resolve_resumable_runner_entry(session_id)
 
 
 class _FakeRail:
@@ -765,6 +773,157 @@ async def test_interact_returns_false_for_non_active_session(
     assert success is False
     assert reason == "session_mismatch"
     assert interact_calls == []
+
+
+@pytest.mark.asyncio
+async def test_interact_restores_resumable_runtime_before_runner_call(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manager = _TeamManagerHarness()
+    manager.clear_active_runtime("sess-1")
+
+    async def fake_resolve_resumable_runner_entry(session_id: str):
+        assert session_id == "sess-1"
+        return "demo-team", SimpleNamespace(
+            current_session_id="sess-1",
+            state="paused",
+        )
+
+    interact_calls: list[tuple[str, str, str]] = []
+
+    async def fake_interact_agent_team(user_input: str, *, team_name: str, session_id: str) -> bool:
+        interact_calls.append((user_input, team_name, session_id))
+        return True
+
+    manager.stub_resolve_resumable_runner_entry_for_test(fake_resolve_resumable_runner_entry)
+    monkeypatch.setattr(
+        "jiuwenswarm.agents.harness.team.team_manager.Runner.interact_agent_team",
+        fake_interact_agent_team,
+    )
+
+    success, reason = await manager.interact("sess-1", "plan.approve")
+
+    assert success is True
+    assert reason is None
+    assert manager.active_session_id == "sess-1"
+    assert manager.active_team_name == "demo-team"
+    assert interact_calls == [("plan.approve", "demo-team", "sess-1")]
+
+
+@pytest.mark.asyncio
+async def test_resolve_resumable_runner_entry_ignores_stale_active_session(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manager = _TeamManagerHarness()
+    manager.set_active_runtime_for_test("sess-stale", "stale-team")
+
+    resumable_entry = SimpleNamespace(
+        current_session_id="sess-current",
+        state=RuntimeState.PAUSED,
+    )
+
+    class _FakePool:
+        @staticmethod
+        async def get(team_name: str):
+            assert team_name == "demo-team"
+            return resumable_entry
+
+    fake_runner = SimpleNamespace(_team_runtime_manager=SimpleNamespace(pool=_FakePool()))
+
+    monkeypatch.setattr(
+        "jiuwenswarm.agents.harness.team.team_manager.get_session_metadata",
+        lambda session_id: {"team_name": "demo-team"} if session_id == "sess-current" else {},
+    )
+    monkeypatch.setattr(
+        "openjiuwen.core.runner.runner.GLOBAL_RUNNER",
+        fake_runner,
+    )
+
+    resolved = await manager.resolve_resumable_runner_entry_for_test("sess-current")
+
+    assert resolved == ("demo-team", resumable_entry)
+
+
+@pytest.mark.asyncio
+async def test_interact_restores_resumable_runtime_even_with_stale_active_session(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manager = _TeamManagerHarness()
+    manager.set_active_runtime_for_test("sess-stale", "stale-team")
+
+    resumable_entry = SimpleNamespace(
+        current_session_id="sess-1",
+        state=RuntimeState.PAUSED,
+    )
+
+    class _FakePool:
+        @staticmethod
+        async def get(team_name: str):
+            assert team_name == "demo-team"
+            return resumable_entry
+
+    fake_runner = SimpleNamespace(_team_runtime_manager=SimpleNamespace(pool=_FakePool()))
+    interact_calls: list[tuple[str, str, str]] = []
+
+    async def fake_interact_agent_team(user_input: str, *, team_name: str, session_id: str) -> bool:
+        interact_calls.append((user_input, team_name, session_id))
+        return True
+
+    monkeypatch.setattr(
+        "jiuwenswarm.agents.harness.team.team_manager.get_session_metadata",
+        lambda session_id: {"team_name": "demo-team"} if session_id == "sess-1" else {},
+    )
+    monkeypatch.setattr(
+        "openjiuwen.core.runner.runner.GLOBAL_RUNNER",
+        fake_runner,
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.agents.harness.team.team_manager.Runner.interact_agent_team",
+        fake_interact_agent_team,
+    )
+
+    success, reason = await manager.interact("sess-1", "plan.approve")
+
+    assert success is True
+    assert reason is None
+    assert manager.active_session_id == "sess-1"
+    assert manager.active_team_name == "demo-team"
+    assert interact_calls == [("plan.approve", "demo-team", "sess-1")]
+
+
+@pytest.mark.asyncio
+async def test_wait_for_resumable_runtime_polls_until_runtime_is_restored(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manager = _TeamManagerHarness()
+    restore_calls: list[str] = []
+
+    async def fake_restore(session_id: str) -> bool:
+        restore_calls.append(session_id)
+        if len(restore_calls) == 2:
+            manager.commit_runtime_ready(session_id, "demo-team")
+            return True
+        return False
+
+    async def fake_sleep(_seconds: float) -> None:
+        return None
+
+    manager.restore_resumable_runtime = fake_restore
+    monkeypatch.setattr(
+        "jiuwenswarm.agents.harness.team.team_manager.asyncio.sleep",
+        fake_sleep,
+    )
+
+    restored = await manager.wait_for_resumable_runtime(
+        "sess-1",
+        timeout_sec=0.1,
+        poll_interval_sec=0.01,
+    )
+
+    assert restored is True
+    assert restore_calls == ["sess-1", "sess-1"]
+    assert manager.active_session_id == "sess-1"
+    assert manager.active_team_name == "demo-team"
 
 
 @pytest.mark.asyncio

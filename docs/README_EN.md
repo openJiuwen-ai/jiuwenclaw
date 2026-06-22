@@ -91,6 +91,11 @@ This page collects common JiuwenSwarm usage instructions, feature documentation,
       <td width="50%">Agent skill mounting, invocation, and extension mechanisms.</td>
     </tr>
     <tr>
+      <td width="22%"><strong>Skill Symphony</strong></td>
+      <td width="28%"><a href="en/symphony.md">Skill Symphony</a></td>
+      <td width="50%">Introduces skill orchestration and dispatch system.</td>
+    </tr>
+    <tr>
       <td width="22%"><strong>Channels</strong></td>
       <td width="28%"><a href="en/Channels.md">Channels</a> / <a href="en/ACP_Client_Config.md">ACP Plugin Usage</a> / <a href="en/CLI.md">TUI User Guide</a></td>
       <td width="50%">JiuwenSwarm multi-channel access and interaction.</td>

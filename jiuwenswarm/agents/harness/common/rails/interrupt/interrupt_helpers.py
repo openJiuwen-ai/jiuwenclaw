@@ -11,6 +11,12 @@ import json
 import re
 from typing import Any
 
+from jiuwenswarm.agents.harness.code.rails.code_plan_approval_interrupt_rail import (
+    build_plan_approval_options_from_message,
+    extract_plan_approval_content,
+    is_plan_approval_message,
+    strip_inline_plan_approval_choices,
+)
 from jiuwenswarm.common.utils import logger
 
 SKILL_EVOLUTION_APPROVAL_SCHEMA = "openjiuwen.skill_evolution_approval.v1"
@@ -491,6 +497,15 @@ def convert_interactions_to_ask_user_question(state_outputs: list) -> dict | Non
             "questions": [question_data],
             "source": source,
         }
+        if (
+            source == "confirm_interrupt"
+            and tool_name == "exit_plan_mode"
+            and is_plan_approval_message(message)
+        ):
+            plan_content, plan_language = extract_plan_approval_content(message)
+            payload["plan_content"] = plan_content
+            payload["plan_language"] = "en" if plan_language == "en" else "cn"
+            payload["plan_approval_kind"] = "plan_approval"
         plan_path = str(question_data.get("plan_path") or "").strip()
         plan_slug = str(question_data.get("plan_slug") or "").strip()
         if plan_path:
@@ -623,13 +638,34 @@ def _default_interrupt_options() -> list[dict[str, str]]:
     ]
 
 
-def _question_options_from_ui_options(value_obj: Any) -> list[dict[str, Any]]:
+def _plan_approval_interrupt_options(
+    source: str,
+    tool_name: str,
+    message: str,
+) -> list[dict[str, str]] | None:
+    if not (
+        source == "confirm_interrupt"
+        and tool_name == "exit_plan_mode"
+        and is_plan_approval_message(message)
+    ):
+        return None
+    return build_plan_approval_options_from_message(message)
+
+
+def _question_options_from_ui_options(
+    value_obj: Any,
+    source: str,
+    tool_name: str,
+    message: str,
+) -> list[dict[str, Any]]:
     options = []
     for option in _extract_ui_options(value_obj):
         normalized = _normalize_question_option(option)
         if normalized["label"]:
             options.append(normalized)
-    return options or _default_interrupt_options()
+    if options:
+        return options
+    return _plan_approval_interrupt_options(source, tool_name, message) or _default_interrupt_options()
 
 
 def _classify_structured_approval(
@@ -688,13 +724,20 @@ def extract_question_from_interaction(payload: Any) -> dict | None:
         elif not message:
             message = f"工具 `{tool_name}` 需要授权才能执行"
 
-    if source == "confirm_interrupt":
+    plan_approval_options = _plan_approval_interrupt_options(source, tool_name, message)
+    if plan_approval_options:
+        header = "Exit Plan and Execute"
+        question = strip_inline_plan_approval_choices(message)
+    elif source == "confirm_interrupt":
         header = f"操作确认: {tool_name}" if tool_name else "操作确认"
+        question = message
     else:
         header = f"权限审批: {tool_name}" if tool_name else "权限审批"
+        question = message
 
     return {
-        "question": message,
+        "question": question,
         "header": header,
-        "options": _question_options_from_ui_options(value_obj),
+        "options": _question_options_from_ui_options(value_obj, source, tool_name, message),
+        "multi_select": False,
     }

@@ -42,6 +42,8 @@ async def test_auto_harness_syncs_tui_channel_before_service(monkeypatch):
     """AutoHarness must preserve the TUI channel before downstream model rails run."""
     adapter = object.__new__(JiuWenSwarmDeepAdapter)
     adapter._instance = object()
+    adapter._is_session_scoped_adapter = True
+    adapter._parent_session_id = None
     adapter._auto_harness_service = _FakeAutoHarnessService()
     adapter._stream_event_rail = None
 
@@ -96,6 +98,8 @@ async def test_runtime_config_syncs_channel_to_response_prompt_rail(monkeypatch)
     """Inner ReAct model-call rails need the adapter-resolved channel."""
     adapter = object.__new__(JiuWenSwarmDeepAdapter)
     adapter._instance = object()
+    adapter._is_session_scoped_adapter = True
+    adapter._parent_session_id = None
     adapter._project_dir = None
     adapter._workspace_dir = "/tmp"
     adapter._runtime_prompt_rail = None

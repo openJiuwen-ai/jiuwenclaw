@@ -11,7 +11,6 @@ interface DiffPayload {
 export function createDiffCommand(): SlashCommand {
   return {
     name: "diff",
-    hidden: true, // TUI release: not registered in registry.ts; re-enable next version
     description: "View uncommitted changes and per-turn diffs",
     usage: "/diff",
     example: "/diff",

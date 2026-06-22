@@ -94,21 +94,23 @@ async def test_cancel_stream_tasks_only_affects_same_channel() -> None:
         handler, rid="rid-web", channel_id="web", session_id="sess_web",
     )
 
+    # TUI is no longer single-user: different session on same channel does NOT cancel.
     cancelled = await handler.cancel_stream_tasks_for_channel(
         _chat_send_message(channel_id="tui", session_id="sess_new"),
     )
 
-    assert cancelled == 1
-    assert tui_task.cancelled()
+    assert cancelled == 0
+    assert not tui_task.cancelled()
     assert not web_task.cancelled()
-    assert "rid-tui" not in getattr(handler, "_stream_tasks")
+    assert "rid-tui" in getattr(handler, "_stream_tasks")
     assert "rid-web" in getattr(handler, "_stream_tasks")
     await asyncio.sleep(0)
-    assert len(_FakeAgentClient.sent_requests) == 1
+    assert len(_FakeAgentClient.sent_requests) == 0
 
 
 @pytest.mark.asyncio
-async def test_single_user_channel_cancels_orphan_session_on_same_channel() -> None:
+async def test_tui_no_longer_cancels_orphan_session() -> None:
+    """TUI is no longer single-user: different session does not cancel orphan stream."""
     handler = _TestMessageHandler.create()
     orphan_task = _seed_stream_task(
         handler, rid="rid-orphan", channel_id="tui", session_id="sess_orphan",
@@ -118,10 +120,10 @@ async def test_single_user_channel_cancels_orphan_session_on_same_channel() -> N
         _chat_send_message(channel_id="tui", session_id="sess_new"),
     )
 
-    assert cancelled == 1
-    assert orphan_task.cancelled()
+    assert cancelled == 0
+    assert not orphan_task.cancelled()
     await asyncio.sleep(0)
-    assert len(_FakeAgentClient.sent_requests) == 1
+    assert len(_FakeAgentClient.sent_requests) == 0
 
 
 @pytest.mark.asyncio
@@ -146,8 +148,8 @@ async def test_web_channel_only_cancels_matching_session() -> None:
 
 
 @pytest.mark.asyncio
-async def test_stream_without_session_id_still_notifies_agent() -> None:
-    """Streams missing session metadata must still send chat.interrupt."""
+async def test_tui_keeps_streams_on_different_session() -> None:
+    """TUI is no longer single-user: different session preserves all in-flight streams."""
     handler = _TestMessageHandler.create()
     _seed_stream_task(
         handler, rid="rid-peer", channel_id="tui", session_id="sess_resolved",
@@ -167,17 +169,17 @@ async def test_stream_without_session_id_still_notifies_agent() -> None:
         _chat_send_message(channel_id="tui", session_id="sess_new"),
     )
 
-    assert cancelled == 2
-    assert orphan_task.cancelled()
+    assert cancelled == 0
+    assert not orphan_task.cancelled()
     await asyncio.sleep(0)
-    assert len(_FakeAgentClient.sent_requests) == 1
+    assert len(_FakeAgentClient.sent_requests) == 0
 
 
-def test_is_single_user_channel_includes_cli_alias() -> None:
+def test_is_single_user_channel_acp_only() -> None:
     _is_single_user_channel = getattr(MessageHandler, "_is_single_user_channel")
-    assert _is_single_user_channel("tui")
+    assert not _is_single_user_channel("tui")
     assert _is_single_user_channel("acp")
-    assert _is_single_user_channel("cli")
+    assert not _is_single_user_channel("cli")
     assert not _is_single_user_channel("web")
 
 
@@ -193,6 +195,80 @@ def test_team_chat_send_keeps_existing_team_stream() -> None:
     assert _should_cancel_existing_stream_before_chat_send(
         _chat_send_message(channel_id="web", session_id="sess_agent", mode="agent.plan"),
     )
+
+
+def test_ask_user_answer_chat_send_keeps_existing_stream() -> None:
+    _should_cancel_existing_stream_before_chat_send = getattr(
+        MessageHandler,
+        "_should_cancel_existing_stream_before_chat_send",
+    )
+    msg = _chat_send_message(
+        channel_id="tui",
+        session_id="sess_team",
+        mode="team.plan",
+    )
+    msg.params.update(
+        {
+            "query": "",
+            "source": "ask_user_interrupt",
+            "request_id": "call_ask_1",
+            "answers": [
+                {
+                    "question": "你希望用什么技术实现？",
+                    "selected_options": ["浏览器（HTML/CSS/JS）"],
+                }
+            ],
+        }
+    )
+
+    assert not _should_cancel_existing_stream_before_chat_send(msg)
+
+
+def test_confirm_interrupt_answer_chat_send_keeps_existing_stream() -> None:
+    _should_cancel_existing_stream_before_chat_send = getattr(
+        MessageHandler,
+        "_should_cancel_existing_stream_before_chat_send",
+    )
+    msg = _chat_send_message(
+        channel_id="tui",
+        session_id="sess_team",
+        mode="team.plan",
+    )
+    msg.params.update(
+        {
+            "query": "",
+            "source": "confirm_interrupt",
+            "request_id": "call_confirm_1",
+            "answers": [{"selected_options": ["批准"], "custom_input": ""}],
+            "plan_approval_kind": "plan_approval",
+            "plan_content": "# 团队计划",
+            "plan_language": "cn",
+        }
+    )
+
+    assert not _should_cancel_existing_stream_before_chat_send(msg)
+
+
+def test_permission_interrupt_answer_chat_send_keeps_existing_stream() -> None:
+    _should_cancel_existing_stream_before_chat_send = getattr(
+        MessageHandler,
+        "_should_cancel_existing_stream_before_chat_send",
+    )
+    msg = _chat_send_message(
+        channel_id="tui",
+        session_id="sess_perm",
+        mode="code.plan",
+    )
+    msg.params.update(
+        {
+            "query": "",
+            "source": "permission_interrupt",
+            "request_id": "call_perm_1",
+            "answers": [{"selected_options": ["allow_once"], "custom_input": ""}],
+        }
+    )
+
+    assert not _should_cancel_existing_stream_before_chat_send(msg)
 
 
 # ── cancel_agent_sessions_on_disconnect ─────────────────────────

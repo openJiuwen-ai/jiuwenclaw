@@ -282,6 +282,12 @@ _RAIL_PARAM_BUILDERS: dict[str, Callable[[dict[str, Any]], dict[str, Any]]] = {
         "additional_directories": _additional_directories(c)
     },
     registry.PERMISSION_INTERRUPT: _permission_params,
+    registry.TEAM_PERMISSION: lambda c: {
+        "permissions_config": _config_section(c, "permissions"),
+    },
+    registry.TEAM_PERMISSION_POLICY: lambda c: {
+        "permissions_config": _config_section(c, "permissions"),
+    },
     registry.CODE_CODING_MEMORY: lambda c: {
         "embed_config": _config_section(c, "embed")
     },
@@ -350,6 +356,8 @@ def _role_evolution_rails(config: dict[str, Any], role: str) -> list[RailSpec]:
 def _build_team_capability_specs(
     config: dict[str, Any],
     role: str,
+    *,
+    enable_permissions: bool = False,
 ) -> tuple[list[RailSpec], list[BuiltinToolSpec]]:
     """Build the chat-team profile rail/tool specs for a member."""
     rails_specs: list[RailSpec] = [
@@ -362,6 +370,23 @@ def _build_team_capability_specs(
             params={"skills": _resolve_member_skills(config, role)},
         )
     )
+
+    if enable_permissions and role == "teammate":
+        rails_specs.append(
+            RailSpec(
+                type=registry.TEAM_PERMISSION,
+                params=_rail_params(registry.TEAM_PERMISSION, config),
+            ),
+        )
+
+    if enable_permissions and role == "leader":
+        rails_specs.append(
+            RailSpec(
+                type=registry.TEAM_PERMISSION_POLICY,
+                params=_rail_params(registry.TEAM_PERMISSION_POLICY, config),
+            ),
+        )
+
     rails_specs.extend(_role_evolution_rails(config, role))
 
     tool_specs: list[BuiltinToolSpec] = [
@@ -373,19 +398,64 @@ def _build_team_capability_specs(
 
 def _build_code_capability_specs(
     config: dict[str, Any],
+    mode: str,
     role: str,
+    *,
+    enable_permissions: bool = False,
 ) -> tuple[list[RailSpec], list[BuiltinToolSpec]]:
-    """Build the code profile (code.team / team.plan) rail/tool specs for a member."""
+    """Build the code profile (code.team / team.plan) rail/tool specs for a member.
+
+    PermissionInterruptRail (``swarm.permission_interrupt``) cannot resolve ASK
+    interrupts on headless team members: the user-facing confirmation path
+    requires a frontend connection that team members lack.  When
+    ``enable_permissions`` is true the team permission rails replace it —
+    ``TeamPermissionRail`` for teammates (leader-mediated ASK resolution) and
+    ``TeamPermissionPolicyRail`` for the leader (prompt section injection).
+    When ``enable_permissions`` is false the permission interrupt rail is
+    removed entirely: it would deadlock a teammate on any ASK-level tool call.
+    """
+    is_team_plan_leader = mode == "team.plan" and role == "leader"
+
+    # Exclude PERMISSION_INTERRUPT from code-profile rails for team members.
+    # It relies on a frontend user response that headless teammates cannot
+    # provide, and even the leader's interrupt path is unreliable in a team
+    # context (TOOL_PERMISSION_CHANNEL_ID is never set).
+    base_rail_names = [
+        name for name in _CODE_RAIL_NAMES
+        if name != registry.PERMISSION_INTERRUPT
+    ]
+
     rails_specs: list[RailSpec] = [
         RailSpec(type=name, params=_rail_params(name, config))
-        for name in _CODE_RAIL_NAMES
+        for name in base_rail_names
     ]
-    rails_specs.append(
-        RailSpec(
-            type=registry.CODE_CONFIRM_INTERRUPT,
-            params={"tool_names": ["switch_mode", "exit_plan_mode"]},
+
+    if is_team_plan_leader:
+        rails_specs.append(RailSpec(type=registry.TEAM_PLAN_APPROVAL))
+
+    if enable_permissions and role == "teammate":
+        rails_specs.append(
+            RailSpec(
+                type=registry.TEAM_PERMISSION,
+                params=_rail_params(registry.TEAM_PERMISSION, config),
+            ),
         )
-    )
+
+    if enable_permissions and role == "leader":
+        rails_specs.append(
+            RailSpec(
+                type=registry.TEAM_PERMISSION_POLICY,
+                params=_rail_params(registry.TEAM_PERMISSION_POLICY, config),
+            ),
+        )
+
+    if mode != "team.plan":
+        rails_specs.append(
+            RailSpec(
+                type=registry.CODE_CONFIRM_INTERRUPT,
+                params={"tool_names": ["switch_mode", "exit_plan_mode"]},
+            ),
+        )
     rails_specs.append(
         RailSpec(
             type=registry.MEMBER_SKILL_TOOLKIT,
@@ -409,6 +479,8 @@ def build_member_capability_specs(
     config: dict[str, Any],
     mode: str,
     role: str,
+    *,
+    enable_permissions: bool = False,
 ) -> tuple[list[RailSpec], list[BuiltinToolSpec]]:
     """Build the rail and tool specs for a team member.
 
@@ -421,13 +493,14 @@ def build_member_capability_specs(
         config: The resolved ``config.yaml`` mapping (team blueprint shape).
         mode: The request mode ("team" / "code.team" / "team.plan").
         role: The member role ("leader" or "teammate").
+        enable_permissions: Effective team permission toggle from TeamAgentSpec.
 
     Returns:
         A ``(rails_specs, tool_specs)`` tuple of openjiuwen specs.
     """
     if _is_code_mode(mode):
-        return _build_code_capability_specs(config, role)
-    return _build_team_capability_specs(config, role)
+        return _build_code_capability_specs(config, mode, role, enable_permissions=enable_permissions)
+    return _build_team_capability_specs(config, role, enable_permissions=enable_permissions)
 
 
 def _is_subagent_enabled(sub_cfg: Any) -> bool:
@@ -525,6 +598,8 @@ def build_member_deep_agent_spec(
     mode: str,
     role: str,
     base_spec: DeepAgentSpec,
+    *,
+    enable_permissions: bool = False,
 ) -> DeepAgentSpec:
     """Fold the member capability specs onto *base_spec*.
 
@@ -537,11 +612,14 @@ def build_member_deep_agent_spec(
         mode: The request mode ("team" / "code.team" / "team.plan").
         role: The member role ("leader" or "teammate").
         base_spec: The base member ``DeepAgentSpec`` to extend.
+        enable_permissions: Effective team permission toggle from TeamAgentSpec.
 
     Returns:
         A new ``DeepAgentSpec`` with the capability specs applied.
     """
-    rails_specs, tool_specs = build_member_capability_specs(config, mode, role)
+    rails_specs, tool_specs = build_member_capability_specs(
+        config, mode, role, enable_permissions=enable_permissions,
+    )
 
     merged_rails = list(base_spec.rails or [])
     merged_rails.extend(rails_specs)

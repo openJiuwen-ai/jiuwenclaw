@@ -974,6 +974,9 @@ modes:
       spawn_mode: inprocess
       enable_swarmflow: true
 
+      # Team-specific permission control.
+      enable_permissions: false
+
       leader:
         member_name: team-leader
         display_name: 团队领导

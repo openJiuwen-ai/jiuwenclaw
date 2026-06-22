@@ -18,6 +18,7 @@
 | `/copy` | 复制上一条消息 |
 | `/exit` | 退出 |
 | `/help` | 查看可用命令 |
+| `/keybindings` | 查看/编辑/重置 TUI 快捷键（别名 `/keybind`） |
 | `/theme` | 切换主题 |
 | `/config` | 修改配置（当前为本地实现，后续计划统一到 Gateway） |
 | `/context` | 查看上下文窗口占用与 Token 用量明细（见下文） |
@@ -140,13 +141,15 @@
 | `Ctrl+B` | 开关 git 分支过滤（严格匹配当前项目分支名） |
 | `Esc` | 有搜索词时清空；否则关闭选择器 |
 
+> 上表 `Space` / `Ctrl+R` / `Ctrl+A` / `Ctrl+B` / `Esc` 可在 `ResumeList` context 下通过 `/keybindings` 重绑；预览态、重命名编辑态与搜索文本输入除外。
+
 说明：
 
 - **默认列出全部项目** 的会话（`Ctrl+A` 切回仅当前项目）；当前项目无会话时仍打开（空）选择器以便按 `Ctrl+A`。
 - **分支过滤** 仅按分支名严格匹配，存量无分支记录与 `HEAD` 会话会被过滤；按名比对不区分仓库，「全部项目 + 分支过滤」时同名分支会一并显示。
 - **恢复范围**：仅恢复会话上下文（历史、会话 ID、accent 颜色、workflow 快照、窗口标题），**不切换 workspace / 当前工作目录**。
 
-> 完整快捷键与行为详见 [TUI 使用指南](TUI使用指南.md#resume-与-continue-在-tui-中的特殊行为)。
+> 完整快捷键与行为详见 [TUI 使用指南](TUI使用指南.md#resume-与-continue-在-tui-中的特殊行为)；自定义快捷键见 [快捷键](TUI使用指南.md#快捷键)。
 
 ### `/model`（查看 / 新增 / 切换模型）
 
@@ -395,7 +398,7 @@
 | `name` | 是 | 任务名称 |
 | `cron_expr` | 是 | Cron 表达式，支持两种格式：5 字段（分 时 日 月 周）或 7 字段 Quartz（秒 分 时 日 月 周 年）。5 字段会自动转换为 7 字段（补 second=0, year=*）。示例：每天 9 点 = `0 9 * * *`（5 字段）或 `0 0 9 * * ? *`（7 字段） |
 | `description` | 是 | 任务描述，即 Agent 执行时收到的输入指令 |
-| `targets` | 否 | 推送渠道，默认 `tui`；可选：`tui`、`web`、`feishu`、`whatsapp`、`wecom`、`xiaoyi`、`wechat`、`dingtalk` 或 `feishu_enterprise:<app_id>` |
+| `targets` | 否 | 推送渠道，默认 `tui`；可选：`tui`、`web`、`feishu`、`whatsapp`、`wecom`、`xiaoyi`、`wechat`、`dingtalk` 或 `feishu_enterprise:<app_id>`。`targets=tui` 时结果会广播到所有已连接的 TUI 窗口，详见 [定时任务 — 推送到 TUI](定时任务.md#5-推送到-tui-频道) |
 | `timezone` | 否 | IANA 时区，默认 `Asia/Shanghai` |
 | `mode` | 否 | 执行模式：`agent`（默认，适用于简单提醒类任务）或 `plan`（较复杂的推理任务，让Agent先规划步骤再执行） |
 | `wake_offset_seconds` | 否 | 提前唤醒秒数，默认 300 |
@@ -586,6 +589,30 @@
 - `/sandbox files allow ./tmp/` — 允许沙箱写入 `./tmp/`（rw）
 - `/sandbox files deny ./tmp/secret/` — 在已 allow 的父目录下禁止写入子目录（ro）
 - `/sandbox exclude add "git *"` — 让 `git` 命令穿透到本地执行，不进沙箱
+
+### `/keybindings`（快捷键配置）
+
+查看、编辑或重置 TUI 键盘快捷键。配置文件：`~/.jiuwenswarm-tui/keybindings.json`。
+
+#### 用法
+
+| 命令 | 作用 |
+|------|------|
+| `/keybindings` | 同 `/keybindings edit` |
+| `/keybindings edit` | 创建或打开配置文件；关闭外部编辑器后重新加载 |
+| `/keybindings list` | 列出当前生效的快捷键（按 context 分组） |
+| `/keybindings reset` | 删除用户配置，恢复内置默认 |
+
+别名：`/keybind`。
+
+#### 配置说明
+
+- 以内置默认绑定为底，用户 JSON 按 **context** 覆盖；键设为 `null` 可取消默认绑定。
+- 键名需符合 pi-tui `matchesKey` 格式（`ctrl`/`shift`/`alt` + 主键）；不支持 chord。
+- **不可重绑**：`ctrl+c`、`ctrl+d`、`ctrl+m`（保留键）。
+- Select 列表内部导航、Config 编辑器文本输入、Resume 预览/重命名子态等仍为硬编码。
+
+详见 [TUI 使用指南 · 快捷键](TUI使用指南.md#快捷键)。
 
 ### `/hooks`（浏览 Hooks 配置）
 

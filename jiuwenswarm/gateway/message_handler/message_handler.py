@@ -22,6 +22,10 @@ from jiuwenswarm.gateway.message_handler.command_parser.slash_command import (
     ParsedControlAction,
     parse_channel_control_text,
 )
+from jiuwenswarm.gateway.message_handler.prompts.review_prompt import build_review_prompt
+from jiuwenswarm.gateway.message_handler.prompts.security_review_prompt import (
+    build_security_review_prompt,
+)
 from jiuwenswarm.extensions.hook_event import GatewayHookEvents
 from jiuwenswarm.extensions.hooks_context import GatewayChatHookContext
 from jiuwenswarm.common.hooks_config import load_hooks_config
@@ -31,11 +35,10 @@ logger = logging.getLogger(__name__)
 
 _ACP_CHANNEL_ID = "acp"
 _ACP_ORIGINAL_SESSION_ID_KEY = "acp_original_session_id"
-# TUI/ACP/legacy CLI: one in-flight chat replaces any prior work on that channel.
+# ACP: one in-flight chat replaces any prior work on that channel.
+# TUI/CLI 已移除此列表：多窗口 TUI 各自维护独立 session，互不干扰。
 _SINGLE_USER_CHANNEL_IDS = frozenset({
     ChannelType.ACP.value,
-    ChannelType.CLI.value,
-    "cli",
 })
 _DEFAULT_INLINE_FILE_SIZE_LIMIT = 128 * 1024
 _KNOWN_JIUWENSWARM_SESSION_PREFIXES = (
@@ -263,6 +266,21 @@ class MessageHandler(ABC):
             return ""
         return self._session_last_user_query.get(str(session_id), "")
 
+    def _attach_original_request_to_ask_user_answer(self, msg: "Message") -> "Message":
+        if not isinstance(msg.params, dict):
+            return msg
+        if str(msg.params.get("source") or "").strip() != "ask_user_interrupt":
+            return msg
+        if msg.params.get("original_request"):
+            return msg
+        original_request = self._get_session_last_user_query(msg.session_id)
+        if not original_request:
+            return msg
+
+        params = dict(msg.params)
+        params["original_request"] = original_request
+        return replace(msg, params=params)
+
     @staticmethod
     def _is_chat_send_message(msg: "Message") -> bool:
         method = getattr(msg, "req_method", None)
@@ -276,8 +294,27 @@ class MessageHandler(ABC):
         return str(msg.params.get("mode") or "").strip().lower() == "team"
 
     @classmethod
+    def _is_interrupt_resume_chat_send(cls, msg: "Message") -> bool:
+        if not isinstance(msg.params, dict):
+            return False
+        source = str(msg.params.get("source") or "").strip()
+        answers = msg.params.get("answers")
+        request_id = str(msg.params.get("request_id") or "").strip()
+        if bool(request_id) and isinstance(answers, list) and source in {
+            "ask_user_interrupt",
+            "confirm_interrupt",
+            "permission_interrupt",
+        }:
+            return True
+        return cls._is_interrupt_evolution_approval_answer_payload(msg.params)
+
+    @classmethod
     def _should_cancel_existing_stream_before_chat_send(cls, msg: "Message") -> bool:
-        return cls._is_chat_send_message(msg) and not cls._is_team_chat_send(msg)
+        return (
+            cls._is_chat_send_message(msg)
+            and not cls._is_team_chat_send(msg)
+            and not cls._is_interrupt_resume_chat_send(msg)
+        )
 
     def _get_channel_default_state(self, channel_id: str) -> ChannelControlState:
         """从 config.yaml 读取 Channel 的默认 session_id / mode."""
@@ -424,7 +461,7 @@ class MessageHandler(ABC):
 
     @staticmethod
     def _is_single_user_channel(channel_id: str) -> bool:
-        """Channels where only one user interacts at a time (TUI, ACP, CLI)."""
+        """Channels where a new chat.send replaces all in-flight work on that channel (ACP only)."""
         return channel_id in _SINGLE_USER_CHANNEL_IDS
 
     def _clone_message_for_session_cancel(
@@ -481,7 +518,8 @@ class MessageHandler(ABC):
         """Cancel in-flight stream work on *msg.channel_id* before starting a new chat.send.
 
         Stops both gateway stream consumers and AgentServer work (via interrupt).
-        Single-user channels (TUI/ACP) also drop orphan tasks from other session_ids.
+        ACP also drops orphan tasks from other session_ids; TUI/CLI only cancel
+        streams that share the same session_id as the incoming chat.send.
         """
         channel_id = msg.channel_id
         new_session_id = msg.session_id
@@ -1126,6 +1164,55 @@ class MessageHandler(ABC):
             )
             return True
 
+        if parsed.action is ParsedControlAction.REVIEW_BAD:
+            asyncio.create_task(
+                self._send_channel_notice(
+                    user_infos,
+                    ch,
+                    msg.session_id,
+                    "非法指令，/review 参数过长或含有非法控制字符",
+                )
+            )
+            return True
+
+        if parsed.action is ParsedControlAction.REVIEW_OK:
+            # /review [args]：注入 review prompt，转发 Agent 执行 gh pr list/view/diff 并分析
+            pr_arg = parsed.pr_arg or ""
+            review_prompt = build_review_prompt(pr_arg)
+            if msg.params is None:
+                msg.params = {}
+            msg.params["query"] = review_prompt
+            logger.info(
+                "[MessageHandler] /review prompt injected channel=%s pr_arg=%s",
+                channel_type,
+                pr_arg or "<none>",
+            )
+            return False  # 继续转发给 AgentServer，让 Agent 执行审查
+
+        if parsed.action is ParsedControlAction.SECURITY_REVIEW_BAD:
+            asyncio.create_task(
+                self._send_channel_notice(
+                    user_infos,
+                    ch,
+                    msg.session_id,
+                    "非法指令，/security-review 参数过长或含有非法控制字符",
+                )
+            )
+            return True
+
+        if parsed.action is ParsedControlAction.SECURITY_REVIEW_OK:
+            extra_arg = parsed.security_review_arg or ""
+            security_prompt = build_security_review_prompt(extra_arg)
+            if msg.params is None:
+                msg.params = {}
+            msg.params["query"] = security_prompt
+            logger.info(
+                "[MessageHandler] /security-review prompt injected channel=%s extra_arg=%s",
+                channel_type,
+                extra_arg or "<none>",
+            )
+            return False
+
         return False
 
     async def _skills_slash_notice(
@@ -1533,6 +1620,7 @@ class MessageHandler(ABC):
     async def _prepare_agent_dispatch_message(self, msg: "Message") -> "Message":
         from jiuwenswarm.common.schema.message import ReqMethod
 
+        msg = self._attach_original_request_to_ask_user_answer(msg)
         if msg.channel_id != _ACP_CHANNEL_ID:
             return msg
         if msg.req_method in (ReqMethod.INITIALIZE, ReqMethod.SESSION_CREATE):
@@ -2856,6 +2944,58 @@ class MessageHandler(ABC):
                     content = msg.params.get("query") or msg.params.get("content") or ""
                     attachments = msg.params.get("attachments")
                     if isinstance(content, str):
+                        # ---- Resolve /review and /security-review slash commands (all channels) ----
+                        stripped = content.strip()
+                        if stripped:
+                            parsed = parse_channel_control_text(stripped)
+                            if parsed.action is ParsedControlAction.REVIEW_BAD:
+                                asyncio.create_task(
+                                    self._send_channel_notice(
+                                        {"id": msg.id, "meta_data": msg.metadata},
+                                        msg.channel_id,
+                                        msg.session_id,
+                                        "非法指令，/review 参数过长或含有非法控制字符",
+                                    )
+                                )
+                                continue
+                            if parsed.action is ParsedControlAction.REVIEW_OK:
+                                pr_arg = parsed.pr_arg or ""
+                                review_prompt = build_review_prompt(pr_arg)
+                                msg.params = dict(msg.params)
+                                msg.params["query"] = review_prompt
+                                if "content" in msg.params:
+                                    msg.params["content"] = review_prompt
+                                content = review_prompt
+                                logger.info(
+                                    "[MessageHandler] /review prompt injected for chat.send channel=%s pr_arg=%s",
+                                    getattr(msg, "channel_id", ""),
+                                    pr_arg or "<none>",
+                                )
+                            elif parsed.action is ParsedControlAction.SECURITY_REVIEW_BAD:
+                                asyncio.create_task(
+                                    self._send_channel_notice(
+                                        {"id": msg.id, "meta_data": msg.metadata},
+                                        msg.channel_id,
+                                        msg.session_id,
+                                        "非法指令，/security-review 参数过长或含有非法控制字符",
+                                    )
+                                )
+                                continue
+                            elif parsed.action is ParsedControlAction.SECURITY_REVIEW_OK:
+                                extra_arg = parsed.security_review_arg or ""
+                                security_prompt = build_security_review_prompt(extra_arg)
+                                msg.params = dict(msg.params)
+                                msg.params["query"] = security_prompt
+                                if "content" in msg.params:
+                                    msg.params["content"] = security_prompt
+                                content = security_prompt
+                                logger.info(
+                                    "[MessageHandler] /security-review prompt injected "
+                                    "for chat.send channel=%s extra_arg=%s",
+                                    getattr(msg, "channel_id", ""),
+                                    extra_arg or "<none>",
+                                )
+
                         cwd = None
                         if isinstance(msg.metadata, dict):
                             cwd = msg.metadata.get("cwd")

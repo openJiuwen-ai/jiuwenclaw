@@ -6,6 +6,7 @@ import pytest
 
 from jiuwenswarm.server import agent_ws_server as agent_ws_server_module
 from jiuwenswarm.common.schema.agent import AgentRequest, AgentResponse, AgentResponseChunk
+from jiuwenswarm.common.schema.message import ReqMethod
 from jiuwenswarm.server.runtime.agent_adapter import interface_deep as interface_deep_module
 
 
@@ -331,6 +332,546 @@ def test_build_inputs_maps_skill_evolution_interrupt_answers_to_actions(monkeypa
         assert interactive_input is not None
         assert interactive_input.user_inputs["call_123"] == {"action": expected_action}
         assert "approved" not in interactive_input.user_inputs["call_123"]
+
+
+def test_build_inputs_maps_team_plan_confirm_interrupt_answers_to_interactive_input(monkeypatch):
+    from openjiuwen.core.session.interaction.interactive_input import InteractiveInput
+    from jiuwenswarm.server.runtime.agent_adapter import interface as interface_module
+
+    monkeypatch.setattr(interface_module, "get_config", lambda: {"preferred_language": "zh"})
+    monkeypatch.setattr(interface_module, "get_memory_mode", lambda _config: "disabled")
+
+    answers = [{"selected_options": ["Approve"], "custom_input": ""}]
+    request = AgentRequest(
+        request_id="req-answer",
+        channel_id="tui",
+        session_id="team-session",
+        params={
+            "query": "",
+            "mode": "team.plan",
+            "request_id": "exit_plan_mode_call_1",
+            "answers": answers,
+            "source": "confirm_interrupt",
+            "plan_approval_kind": "plan_approval",
+            "plan_content": "# 团队计划",
+            "plan_language": "cn",
+        },
+    )
+
+    inputs, _, raw_query = interface_module.JiuWenSwarm().build_inputs(request)
+
+    assert isinstance(inputs["query"], InteractiveInput)
+    assert inputs["query"].user_inputs == {
+        "exit_plan_mode_call_1": {
+            "approved": True,
+            "auto_confirm": False,
+            "feedback": "",
+        }
+    }
+    assert raw_query == ""
+
+
+def test_build_inputs_maps_team_plan_reject_answers_to_interactive_input(monkeypatch):
+    from openjiuwen.core.session.interaction.interactive_input import InteractiveInput
+    from jiuwenswarm.server.runtime.agent_adapter import interface as interface_module
+
+    monkeypatch.setattr(interface_module, "get_config", lambda: {"preferred_language": "zh"})
+    monkeypatch.setattr(interface_module, "get_memory_mode", lambda _config: "disabled")
+
+    request = AgentRequest(
+        request_id="req-answer",
+        channel_id="tui",
+        session_id="team-session",
+        params={
+            "query": "",
+            "mode": "team.plan",
+            "request_id": "exit_plan_mode_call_1",
+            "answers": [{"selected_options": ["Reject"], "custom_input": "把任务拆得再细一点"}],
+            "source": "confirm_interrupt",
+            "plan_approval_kind": "plan_approval",
+            "plan_content": "# 团队计划",
+            "plan_language": "cn",
+        },
+    )
+
+    inputs, _, raw_query = interface_module.JiuWenSwarm().build_inputs(request)
+
+    assert isinstance(inputs["query"], InteractiveInput)
+    assert inputs["query"].user_inputs == {
+        "exit_plan_mode_call_1": {
+            "approved": False,
+            "auto_confirm": False,
+            "feedback": "把任务拆得再细一点",
+        }
+    }
+    assert raw_query == ""
+
+
+def test_build_inputs_preserves_original_request_on_ask_user_answers(monkeypatch):
+    from openjiuwen.core.session.interaction.interactive_input import InteractiveInput
+    from jiuwenswarm.server.runtime.agent_adapter import interface as interface_module
+
+    monkeypatch.setattr(interface_module, "get_config", lambda: {"preferred_language": "zh"})
+    monkeypatch.setattr(interface_module, "get_memory_mode", lambda _config: "disabled")
+
+    request = AgentRequest(
+        request_id="req-answer",
+        channel_id="tui",
+        session_id="team-session",
+        params={
+            "query": "",
+            "mode": "team.plan",
+            "request_id": "tool-ask-1",
+            "source": "ask_user_interrupt",
+            "original_request": "做一个斗地主游戏",
+            "answers": [
+                {
+                    "question": "你希望用什么技术实现？",
+                    "selected_options": ["浏览器（HTML/CSS/JS）"],
+                }
+            ],
+        },
+    )
+
+    inputs, _, _ = interface_module.JiuWenSwarm().build_inputs(request)
+
+    assert isinstance(inputs["query"], InteractiveInput)
+    assert inputs["query"].user_inputs == {
+        "tool-ask-1": {
+            "answers": {"你希望用什么技术实现？": "浏览器（HTML/CSS/JS）"},
+            "original_request": "做一个斗地主游戏",
+        }
+    }
+
+
+def test_chat_answer_routes_team_plan_confirm_interrupt_to_adapter(monkeypatch):
+    from jiuwenswarm.server.runtime.agent_adapter import interface as interface_module
+
+    class FakeAdapter:
+        requests = []
+
+        async def handle_user_answer(self, request):
+            self.requests.append(request)
+            return AgentResponse(
+                request_id=request.request_id,
+                channel_id=request.channel_id,
+                ok=True,
+                payload={"routed": "adapter"},
+            )
+
+    monkeypatch.setattr(interface_module, "get_config", lambda: {"preferred_language": "zh"})
+    monkeypatch.setattr(interface_module, "get_memory_mode", lambda _config: "disabled")
+    fake_adapter = FakeAdapter()
+    monkeypatch.setattr(interface_module, "create_adapter", lambda _sdk, mode="agent": fake_adapter)
+
+    request = AgentRequest(
+        request_id="req-answer",
+        req_method=ReqMethod.CHAT_ANSWER,
+        channel_id="tui",
+        session_id="team-session",
+        params={
+            "query": "",
+            "mode": "team.plan",
+            "request_id": "exit_plan_mode_call_1",
+            "answers": [{"selected_options": ["Approve"], "custom_input": ""}],
+            "source": "confirm_interrupt",
+            "plan_approval_kind": "plan_approval",
+            "plan_content": "# Team Plan",
+            "plan_language": "en",
+        },
+    )
+
+    response = asyncio.run(interface_module.JiuWenSwarm().process_message(request))
+
+    assert response.ok is True
+    assert response.payload == {"routed": "adapter"}
+    assert fake_adapter.requests == [request]
+
+
+def test_process_message_stream_routes_team_plan_confirm_interrupt_as_team_follow_up(monkeypatch):
+    from openjiuwen.core.session.interaction.interactive_input import InteractiveInput
+    from jiuwenswarm.server.runtime.agent_adapter import interface as interface_module
+
+    class FakeSessionManager:
+        submit_task_calls = []
+
+        @staticmethod
+        def get_session_id(session_id=None):
+            return session_id or "default"
+
+        @classmethod
+        async def submit_task(cls, session_id, task_factory):
+            cls.submit_task_calls.append(session_id)
+            await task_factory()
+
+    class FakeAdapter:
+        seen_inputs = None
+
+        @staticmethod
+        async def process_message_stream_impl(*_args, **_kwargs):
+            _request, inputs = _args
+            FakeAdapter.seen_inputs = inputs
+            yield AgentResponseChunk(
+                request_id="req-stream-answer",
+                channel_id="tui",
+                payload={"event_type": "chat.done"},
+                is_complete=True,
+            )
+
+    class FakeTeamManager:
+        interact_calls = []
+
+        @staticmethod
+        async def session_has_runtime(session_id: str) -> bool:
+            assert session_id == "team-session"
+            return True
+
+        @classmethod
+        async def interact(cls, session_id, query):
+            cls.interact_calls.append((session_id, query))
+            return True, None
+
+    fake_adapter = FakeAdapter()
+
+    monkeypatch.setattr(interface_module, "SessionManager", FakeSessionManager)
+    monkeypatch.setattr(interface_module, "get_config", lambda: {"preferred_language": "zh"})
+    monkeypatch.setattr(interface_module, "get_memory_mode", lambda _config: "disabled")
+    monkeypatch.setattr(
+        interface_module.JiuWenSwarm,
+        "_ensure_adapter",
+        lambda self, mode="agent": fake_adapter,
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.agents.harness.team.get_team_manager",
+        lambda _channel_id: FakeTeamManager(),
+    )
+
+    request = AgentRequest(
+        request_id="req-stream-answer",
+        channel_id="tui",
+        session_id="team-session",
+        params={
+            "query": "",
+            "mode": "team.plan",
+            "request_id": "exit_plan_mode_call_1",
+            "answers": [{"selected_options": ["Approve"], "custom_input": ""}],
+            "source": "confirm_interrupt",
+            "plan_approval_kind": "plan_approval",
+            "plan_content": "# Team Plan",
+            "plan_language": "en",
+        },
+        is_stream=True,
+    )
+
+    async def collect_chunks():
+        return [chunk async for chunk in interface_module.JiuWenSwarm().process_message_stream(request)]
+
+    chunks = asyncio.run(collect_chunks())
+
+    assert FakeSessionManager.submit_task_calls == []
+    assert len(FakeTeamManager.interact_calls) == 0
+    assert isinstance(fake_adapter.seen_inputs["query"], InteractiveInput)
+    assert fake_adapter.seen_inputs["query"].user_inputs["exit_plan_mode_call_1"]["approved"] is True
+    assert chunks[0].payload == {"event_type": "chat.done"}
+    assert chunks[0].is_complete is True
+    assert chunks[-1].is_complete is True
+
+
+def test_process_message_stream_rejects_malformed_team_plan_approval_payload(monkeypatch):
+    from jiuwenswarm.server.runtime.agent_adapter import interface as interface_module
+
+    monkeypatch.setattr(interface_module, "get_config", lambda: {"preferred_language": "zh"})
+    monkeypatch.setattr(interface_module, "get_memory_mode", lambda _config: "disabled")
+    monkeypatch.setattr(
+        interface_module.JiuWenSwarm,
+        "_ensure_adapter",
+        lambda *_args, **_kwargs: object(),
+    )
+
+    request = AgentRequest(
+        request_id="req-answer",
+        req_method=ReqMethod.CHAT_SEND,
+        channel_id="tui",
+        session_id="team-session",
+        params={
+            "query": "",
+            "mode": "team.plan",
+            "request_id": "call_00_cg5pXlsxHMqNgdRgW6Yr8458",
+            "answers": [
+                {
+                    "question": "**计划审批**\n\nAgent 已完成计划制定，等待你审批：\n\n# 团队计划",
+                    "selected_options": ["批准"],
+                    "custom_input": "",
+                }
+            ],
+            "source": "confirm_interrupt",
+            "plan_approval_kind": "plan_approval",
+        },
+        is_stream=True,
+    )
+
+    async def collect_chunks():
+        return [chunk async for chunk in interface_module.JiuWenSwarm().process_message_stream(request)]
+
+    chunks = asyncio.run(collect_chunks())
+
+    assert chunks[0].payload == {
+        "event_type": "chat.error",
+        "error": "Malformed team.plan approval answer: expected structured "
+        "`confirm_interrupt` payload with `plan_approval_kind`, "
+        "`plan_content`, and `plan_language`.",
+    }
+    assert chunks[-1].is_complete is True
+
+
+def test_process_message_stream_treats_team_plan_confirm_resume_as_team_follow_up(monkeypatch):
+    from openjiuwen.core.session.interaction.interactive_input import InteractiveInput
+    from jiuwenswarm.server.runtime.agent_adapter import interface as interface_module
+
+    class FakeSkillManager:
+        def __init__(self, workspace_dir=None):
+            self.workspace_dir = workspace_dir
+            self.hook = None
+
+        def set_skillnet_install_complete_hook(self, hook):
+            self.hook = hook
+
+    class FakeSessionManager:
+        submit_task_calls = []
+
+        @staticmethod
+        def get_session_id(session_id=None):
+            return session_id or "default"
+
+        @classmethod
+        async def submit_task(cls, session_id, task_factory):
+            cls.submit_task_calls.append(session_id)
+            await task_factory()
+
+    class FakeAdapter:
+        seen_inputs = None
+
+        @staticmethod
+        async def process_message_stream_impl(request, inputs):
+            _ = request
+            FakeAdapter.seen_inputs = inputs
+            yield AgentResponseChunk(
+                request_id="req-resume",
+                channel_id="tui",
+                payload={"event_type": "chat.done"},
+                is_complete=True,
+            )
+
+    class FakeTeamManager:
+        active_session_id = None
+        pending_session_id = None
+        interact_calls = []
+
+        @staticmethod
+        def has_stream_task(session_id: str) -> bool:
+            assert session_id == "team-session"
+            return False
+
+        @staticmethod
+        async def session_has_runtime(session_id: str) -> bool:
+            assert session_id == "team-session"
+            return True
+
+        @classmethod
+        async def interact(cls, session_id: str, query):
+            cls.interact_calls.append((session_id, query))
+            return False, "not_active"
+
+    fake_adapter = FakeAdapter()
+
+    monkeypatch.setattr(interface_module, "SkillManager", FakeSkillManager)
+    monkeypatch.setattr(interface_module, "SessionManager", FakeSessionManager)
+    monkeypatch.setattr(interface_module, "get_config", lambda: {"preferred_language": "zh"})
+    monkeypatch.setattr(interface_module, "get_memory_mode", lambda _config: "disabled")
+    monkeypatch.setattr(interface_module, "append_history_record", lambda **_kwargs: None)
+    monkeypatch.setattr(
+        interface_module.JiuWenSwarm,
+        "_ensure_adapter",
+        lambda self, mode="agent": fake_adapter,
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.agents.harness.team.get_team_manager",
+        lambda _channel_id: FakeTeamManager(),
+    )
+
+    request = AgentRequest(
+        request_id="req-resume",
+        channel_id="tui",
+        session_id="team-session",
+        params={
+            "query": "",
+            "mode": "team.plan",
+            "request_id": "exit_plan_mode_call_1",
+            "answers": [{"selected_options": ["Approve"], "custom_input": ""}],
+            "source": "confirm_interrupt",
+            "plan_approval_kind": "plan_approval",
+            "plan_content": "# 团队计划",
+            "plan_language": "cn",
+        },
+        is_stream=True,
+    )
+
+    async def collect_chunks():
+        return [chunk async for chunk in interface_module.JiuWenSwarm().process_message_stream(request)]
+
+    chunks = asyncio.run(collect_chunks())
+
+    assert isinstance(fake_adapter.seen_inputs["query"], InteractiveInput)
+    assert fake_adapter.seen_inputs["query"].user_inputs == {
+        "exit_plan_mode_call_1": {
+            "approved": True,
+            "auto_confirm": False,
+            "feedback": "",
+        }
+    }
+    assert FakeSessionManager.submit_task_calls == []
+    assert len(FakeTeamManager.interact_calls) == 0
+    assert chunks[0].payload == {"event_type": "chat.done"}
+    assert chunks[0].is_complete is True
+    assert chunks[-1].payload == {"is_complete": True}
+    assert chunks[-1].is_complete is True
+
+
+def test_process_message_stream_treats_plain_team_query_as_first_request_after_round_end(monkeypatch):
+    from jiuwenswarm.server.runtime.agent_adapter import interface as interface_module
+
+    class FakeSessionManager:
+        submit_task_calls = []
+
+        @staticmethod
+        def get_session_id(session_id=None):
+            return session_id or "default"
+
+        @classmethod
+        async def submit_task(cls, session_id, task_factory):
+            cls.submit_task_calls.append(session_id)
+            await task_factory()
+
+    class FakeAdapter:
+        seen_inputs = None
+
+        @staticmethod
+        async def process_message_stream_impl(request, inputs):
+            _ = request
+            FakeAdapter.seen_inputs = inputs
+            yield AgentResponseChunk(
+                request_id="req-team-fresh-round",
+                channel_id="web",
+                payload={"event_type": "chat.done"},
+                is_complete=True,
+            )
+
+    class FakeTeamManager:
+        active_session_id = None
+        pending_session_id = None
+
+        @staticmethod
+        def has_stream_task(session_id: str) -> bool:
+            assert session_id == "team-session"
+            return False
+
+        @staticmethod
+        async def session_has_runtime(session_id: str) -> bool:
+            assert session_id == "team-session"
+            return True
+
+    fake_adapter = FakeAdapter()
+
+    monkeypatch.setattr(interface_module, "SessionManager", FakeSessionManager)
+    monkeypatch.setattr(interface_module, "get_config", lambda: {"preferred_language": "zh"})
+    monkeypatch.setattr(interface_module, "get_memory_mode", lambda _config: "disabled")
+    monkeypatch.setattr(
+        interface_module.JiuWenSwarm,
+        "_ensure_adapter",
+        lambda self, mode="agent": fake_adapter,
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.agents.harness.team.get_team_manager",
+        lambda _channel_id: FakeTeamManager(),
+    )
+
+    request = AgentRequest(
+        request_id="req-team-fresh-round",
+        channel_id="web",
+        session_id="team-session",
+        params={
+            "query": "你好",
+            "mode": "team",
+        },
+        is_stream=True,
+    )
+
+    async def collect_chunks():
+        return [chunk async for chunk in interface_module.JiuWenSwarm().process_message_stream(request)]
+
+    chunks = asyncio.run(collect_chunks())
+
+    assert FakeSessionManager.submit_task_calls == ["team-session"]
+    assert fake_adapter.seen_inputs["query"] == "你好"
+    assert chunks[0].payload == {"event_type": "chat.done"}
+    assert chunks[-1].is_complete is True
+
+
+@pytest.mark.parametrize(
+    "params",
+    [
+        {
+            "query": "",
+            "mode": "team.plan",
+            "request_id": "call_00_question",
+            "source": "ask_user_interrupt",
+            "answers": [{"question": "目标平台和交互方式是什么？", "selected_options": ["浏览器"]}],
+        },
+        {
+            "query": "",
+            "mode": "team.plan",
+            "request_id": "team_plan_approval_plan_rev1",
+            "source": "team_plan_approval",
+            "answers": [{"question": "**计划审批**", "selected_options": ["批准"]}],
+        },
+    ],
+)
+def test_team_plan_answer_routing(monkeypatch, params):
+    from jiuwenswarm.server.runtime.agent_adapter import interface as interface_module
+
+    class FakeAdapter:
+        async def handle_user_answer(self, request):
+            return AgentResponse(
+                request_id=request.request_id,
+                channel_id=request.channel_id,
+                ok=True,
+                payload={"routed": "adapter"},
+            )
+
+    class FakeTeamManager:
+        async def interact(self, _session_id, _query):
+            pytest.fail("unrelated team.plan answers should not resume the team manager")
+
+    monkeypatch.setattr(interface_module, "get_config", lambda: {"preferred_language": "zh"})
+    monkeypatch.setattr(interface_module, "get_memory_mode", lambda _config: "disabled")
+    monkeypatch.setattr(
+        "jiuwenswarm.agents.harness.team.get_team_manager",
+        lambda _channel_id: FakeTeamManager(),
+    )
+    monkeypatch.setattr(interface_module, "create_adapter", lambda _sdk, mode="agent": FakeAdapter())
+
+    request = AgentRequest(
+        request_id="req-answer",
+        req_method=ReqMethod.CHAT_ANSWER,
+        channel_id="tui",
+        session_id="team-session",
+        params=params,
+    )
+
+    response = asyncio.run(interface_module.JiuWenSwarm().process_message(request))
+
+    assert response.ok is True
+    assert response.payload == {"routed": "adapter"}
 
 
 def test_deep_adapter_registers_evolution_interrupt_rail_before_skill_evolution(monkeypatch):

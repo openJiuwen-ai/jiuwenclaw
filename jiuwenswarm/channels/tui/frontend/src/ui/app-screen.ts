@@ -80,6 +80,7 @@ import {
   stripBracketedPasteMarkers,
 } from "../core/pasted-text.js";
 import { handleAppScreenKeyInput } from "./keymap.js";
+import { resolveAction } from "../core/keybindings/resolver.js";
 import { buildAppScreenLines } from "./screen-layout.js";
 import { buildTranscriptLines } from "./transcript-renderer.js";
 import {
@@ -87,7 +88,7 @@ import {
   orderedMemberIds,
   teamWorkingStartedAtMs,
 } from "./components/team-shared.js";
-import { padToWidth, renderWrappedText } from "./rendering/text.js";
+import { padToWidth, prefixedLines, renderStyledMarkdownLines, renderWrappedText } from "./rendering/text.js";
 import { chalk, editorTheme, palette, selectListTheme, setCurrentThemeName } from "./theme.js";
 import type { Hunk, GitDiffData, TurnDiff } from "../core/types.js";
 
@@ -103,7 +104,6 @@ const SWARM_WORKFLOW_AGENT_TEXT_PREVIEW_ROWS = 6;
 const PERMISSION_TOOL_RE = /工具\s+`([^`]+)`\s+需要授权/;
 const CONFIRM_TOOL_RE = /(?:Tool|工具)\s*:\s*`([^`]+)`/i;
 const CONFIRM_ACTION_RE = /\*\*(?:Agent wants to|Tool `[^`]+` requires your approval)([^*]*)\*\*/i;
-const PLAN_APPROVAL_RE = /\*\*(?:Plan Approval|计划审批)\*\*/i;
 const PLAN_REJECT_INPUT_RE = /(\s+\[ .+ \])$/;
 const PERMISSION_RISK_RE = /安全风险评估：\**\s*([^\s*]+)?\s*\**([^*\n]+?风险)\**/m;
 const PERMISSION_QUOTE_RE = /^>\s*(.+)$/gm;
@@ -186,14 +186,16 @@ type ResumeSessionListState = {
   previewMessages: PreviewMessage[];
   /** 预览消息是否仍在请求中（用于区分"加载中"与"已加载但为空"） */
   previewLoading: boolean;
+  /** 预览消息滚动偏移（行数），正数表示向上滚动查看更早内容 */
+  previewScrollOffset: number;
   /** 非空时进入重命名态（Ctrl+R 触发，对齐 Claude Code Ctrl+R）：编辑选中会话标题 */
   rename: { sessionId: string; value: string } | null;
 };
 
-/** 预览消息摘要 */
+/** 预览消息（完整对话内容，对齐 Claude Code session preview） */
 type PreviewMessage = {
   role: string;
-  summary: string;
+  content: string;
   event_type: string;
 };
 
@@ -606,8 +608,14 @@ function resolveFdBinary(): string | null {
   return null;
 }
 
-export function isPlanApprovalRequest(source: string | undefined, questionText: string): boolean {
-  return source === "confirm_interrupt" && PLAN_APPROVAL_RE.test(questionText);
+export function isPlanApprovalRequest(
+  source: string | undefined,
+  planApprovalKind?: string,
+): boolean {
+  if (planApprovalKind) {
+    return source === "confirm_interrupt" && planApprovalKind === "plan_approval";
+  }
+  return false;
 }
 
 function isPermissionRequest(source: string | undefined, questionText: string): boolean {
@@ -623,12 +631,12 @@ function isPermissionRequest(source: string | undefined, questionText: string): 
 
 export function getPendingQuestionTitle(
   source: string | undefined,
-  questionText: string,
   progress: string,
   activeQuestionIndex: number,
   total: number,
+  planApprovalKind?: string,
 ): string {
-  if (isPlanApprovalRequest(source, questionText)) {
+  if (isPlanApprovalRequest(source, planApprovalKind)) {
     return progress
       ? `Exit Plan and Execute: ${activeQuestionIndex + 1}/${total}`
       : "Exit Plan and Execute:";
@@ -834,18 +842,18 @@ function isRejectOption(label: string): boolean {
 
 export function shouldCollectPlanRejectFeedback(
   source: string | undefined,
-  questionText: string,
   label: string,
+  planApprovalKind?: string,
 ): boolean {
-  return isPlanApprovalRequest(source, questionText) && isRejectOption(label);
+  return isPlanApprovalRequest(source, planApprovalKind) && isRejectOption(label);
 }
 
 export function shouldAppendPlanRejectFeedback(
   source: string | undefined,
-  questionText: string,
   label: string,
+  planApprovalKind?: string,
 ): boolean {
-  return shouldCollectPlanRejectFeedback(source, questionText, label);
+  return shouldCollectPlanRejectFeedback(source, label, planApprovalKind);
 }
 
 export function getPlanRejectFeedbackHint(
@@ -1365,56 +1373,38 @@ export class AppScreen implements Component, Focusable {
     const contentLines = this.fileViewerState.content.split("\n");
     const height = this.tui.terminal.rows;
     const availableHeight = Math.max(1, height - 2); // Reserve for title + hint
+    const maxScroll = Math.max(0, contentLines.length - availableHeight);
 
-    // Esc or q to exit
-    if (matchesKey(data, "escape") || data.toLowerCase() === "q") {
-      this.exitFileViewer();
-      return;
-    }
-
-    // Scroll up (up arrow or k)
-    if (matchesKey(data, "up") || data.toLowerCase() === "k") {
-      this.fileViewerState.scrollOffset = Math.max(0, this.fileViewerState.scrollOffset - 1);
-      this.tui.requestRender();
-      return;
-    }
-
-    // Scroll down (down arrow or j)
-    if (matchesKey(data, "down") || data.toLowerCase() === "j") {
-      const maxScroll = Math.max(0, contentLines.length - availableHeight);
-      this.fileViewerState.scrollOffset = Math.min(maxScroll, this.fileViewerState.scrollOffset + 1);
-      this.tui.requestRender();
-      return;
-    }
-
-    // Page up
-    if (matchesKey(data, "pageUp")) {
-      this.fileViewerState.scrollOffset = Math.max(0, this.fileViewerState.scrollOffset - availableHeight);
-      this.tui.requestRender();
-      return;
-    }
-
-    // Page down
-    if (matchesKey(data, "pageDown")) {
-      const maxScroll = Math.max(0, contentLines.length - availableHeight);
-      this.fileViewerState.scrollOffset = Math.min(maxScroll, this.fileViewerState.scrollOffset + availableHeight);
-      this.tui.requestRender();
-      return;
-    }
-
-    // Go to top (Home)
-    if (matchesKey(data, "home") || data.toLowerCase() === "g") {
-      this.fileViewerState.scrollOffset = 0;
-      this.tui.requestRender();
-      return;
-    }
-
-    // Go to bottom (End)
-    if (matchesKey(data, "end") || data.toLowerCase() === "shift+g") {
-      const maxScroll = Math.max(0, contentLines.length - availableHeight);
-      this.fileViewerState.scrollOffset = maxScroll;
-      this.tui.requestRender();
-      return;
+    switch (resolveAction("FileViewer", data)) {
+      case "fileViewer:exit":
+        this.exitFileViewer();
+        return;
+      case "fileViewer:lineUp":
+        this.fileViewerState.scrollOffset = Math.max(0, this.fileViewerState.scrollOffset - 1);
+        this.tui.requestRender();
+        return;
+      case "fileViewer:lineDown":
+        this.fileViewerState.scrollOffset = Math.min(maxScroll, this.fileViewerState.scrollOffset + 1);
+        this.tui.requestRender();
+        return;
+      case "fileViewer:pageUp":
+        this.fileViewerState.scrollOffset = Math.max(0, this.fileViewerState.scrollOffset - availableHeight);
+        this.tui.requestRender();
+        return;
+      case "fileViewer:pageDown":
+        this.fileViewerState.scrollOffset = Math.min(maxScroll, this.fileViewerState.scrollOffset + availableHeight);
+        this.tui.requestRender();
+        return;
+      case "fileViewer:top":
+        this.fileViewerState.scrollOffset = 0;
+        this.tui.requestRender();
+        return;
+      case "fileViewer:bottom":
+        this.fileViewerState.scrollOffset = maxScroll;
+        this.tui.requestRender();
+        return;
+      default:
+        return;
     }
   }
 
@@ -1781,7 +1771,9 @@ export class AppScreen implements Component, Focusable {
       return;
     }
 
-    if (!pendingQuestion && snapshot.cancellableWork && matchesKey(data, "escape") && !hasOverlay) {
+    const isCancelWorkKey = !hasOverlay && resolveAction("Global", data) === "app:cancelWork";
+
+    if (!pendingQuestion && snapshot.cancellableWork && isCancelWorkKey) {
       if (isTeamMode(snapshot.mode)) {
         this.state.pause();
       } else {
@@ -1791,7 +1783,7 @@ export class AppScreen implements Component, Focusable {
     }
 
     // 检查不可中断命令列表（ESC 显示提示）
-    if (!pendingQuestion && snapshot.runningCommand && UNINTERRUPTIBLE_COMMANDS.includes(snapshot.runningCommand) && matchesKey(data, "escape") && !hasOverlay) {
+    if (!pendingQuestion && snapshot.runningCommand && UNINTERRUPTIBLE_COMMANDS.includes(snapshot.runningCommand) && isCancelWorkKey) {
       this.transientNotice = `${snapshot.runningCommand} 命令执行中，无法中断`;
       if (this.transientNoticeTimer) {
         clearTimeout(this.transientNoticeTimer);
@@ -1899,15 +1891,15 @@ export class AppScreen implements Component, Focusable {
     }
 
     if (permissionRequest && activeQuestion) {
-      const lower = data.toLowerCase();
-      if (lower === "y") {
+      const confirmAction = resolveAction("Confirmation", data);
+      if (confirmAction === "confirm:yes") {
         const allow = activeQuestion.options.find((option) => isAllowOption(option.label));
         if (allow) {
           this.handleQuestionSelection(allow.label);
           return;
         }
       }
-      if (lower === "n") {
+      if (confirmAction === "confirm:no") {
         const reject = activeQuestion.options.find((option) => isRejectOption(option.label));
         if (reject) {
           this.handleQuestionSelection(reject.label);
@@ -1954,20 +1946,44 @@ export class AppScreen implements Component, Focusable {
       // 只读预览态：Enter 恢复该会话，Space/Esc 返回列表，其余按键忽略
       if (this.resumeSessionList.preview !== null) {
         if (matchesKey(data, "return")) {
+          this.setMouseTrackingEnabled(false);
           void this.handleResumeSessionSelection(this.resumeSessionList.preview.session_id);
         } else if (matchesKey(data, "space") || matchesKey(data, "escape")) {
           this.resumeSessionList = { ...this.resumeSessionList, preview: null, previewMessages: [], previewLoading: false };
+          this.setMouseTrackingEnabled(false);
           this.tui.requestRender();
+        } else {
+          // Handle scroll in preview
+          const wheelOffset = getSgrMouseWheelOffset(data, this.resumeSessionList.previewScrollOffset);
+          if (wheelOffset !== null) {
+            this.resumeSessionList = { ...this.resumeSessionList, previewScrollOffset: Math.max(0, wheelOffset) };
+            this.tui.requestRender();
+            return;
+          }
+          const pageSize = Math.max(1, Math.floor(this.tui.terminal.rows * 0.8));
+          const scrollAction = resolveAction("Scroll", data);
+          if (scrollAction === "scroll:pageUp" || matchesKey(data, "pageUp")) {
+            this.resumeSessionList = { ...this.resumeSessionList, previewScrollOffset: this.resumeSessionList.previewScrollOffset + pageSize };
+            this.tui.requestRender();
+            return;
+          }
+          if (scrollAction === "scroll:pageDown" || matchesKey(data, "pageDown")) {
+            this.resumeSessionList = { ...this.resumeSessionList, previewScrollOffset: Math.max(0, this.resumeSessionList.previewScrollOffset - pageSize) };
+            this.tui.requestRender();
+            return;
+          }
         }
         return;
       }
-      // Space 打开选中会话的预览（牺牲在搜索框输入空格的能力，按用户要求）
-      if (matchesKey(data, "space")) {
+      const resumeAction = resolveAction("ResumeList", data);
+      // These shortcuts must win over search-text input: the default for
+      // resume:preview is Space, which would otherwise be typed into the query
+      // (intentionally sacrificing the ability to type a space in search).
+      if (resumeAction === "resume:preview") {
         void this.openResumeSessionPreview();
         return;
       }
-      // Ctrl+R 重命名选中会话
-      if (matchesKey(data, "ctrl+r")) {
+      if (resumeAction === "resume:rename") {
         this.openResumeRename();
         return;
       }
@@ -1978,11 +1994,11 @@ export class AppScreen implements Component, Focusable {
       } else if (matchesKey(data, "backspace")) {
         const newQuery = this.resumeSessionList.searchQuery.slice(0, -1);
         this.updateResumeSearchQuery(newQuery);
-      } else if (matchesKey(data, "ctrl+a")) {
+      } else if (resumeAction === "resume:toggleAllProjects") {
         void this.toggleResumeAllProjects();
-      } else if (matchesKey(data, "ctrl+b")) {
+      } else if (resumeAction === "resume:toggleBranchFilter") {
         this.toggleResumeBranchFilter();
-      } else if (matchesKey(data, "escape")) {
+      } else if (resumeAction === "resume:close") {
         if (this.resumeSessionList.searchQuery) {
           this.updateResumeSearchQuery("");
         } else {
@@ -2019,11 +2035,11 @@ export class AppScreen implements Component, Focusable {
           this.tui.requestRender();
           return;
         }
-        if (matchesKey(data, "left")) {
+        if (resolveAction("StatusView", data) === "status:prevTab") {
           this.switchStatusViewTab(-1);
           return;
         }
-        if (matchesKey(data, "right")) {
+        if (resolveAction("StatusView", data) === "status:nextTab") {
           this.switchStatusViewTab(1);
           return;
         }
@@ -2050,17 +2066,18 @@ export class AppScreen implements Component, Focusable {
         return;
       }
       // Normal mode: Esc to close, / or printable char on config tab enters search
-      if (matchesKey(data, "escape")) {
-        this.closeStatusView();
-        return;
-      }
-      if (matchesKey(data, "left")) {
-        this.switchStatusViewTab(-1);
-        return;
-      }
-      if (matchesKey(data, "right")) {
-        this.switchStatusViewTab(1);
-        return;
+      switch (resolveAction("StatusView", data)) {
+        case "status:close":
+          this.closeStatusView();
+          return;
+        case "status:prevTab":
+          this.switchStatusViewTab(-1);
+          return;
+        case "status:nextTab":
+          this.switchStatusViewTab(1);
+          return;
+        default:
+          break;
       }
       // On config tab, / enters search mode; printable chars also enter search mode
       // Use getPrintableChar() for Kitty CSI-u (VSCode) + UTF-8 multi-byte (IME) support
@@ -2110,7 +2127,7 @@ export class AppScreen implements Component, Focusable {
     }
 
     if (this.mcpDetail !== null) {
-      if (matchesKey(data, "escape")) {
+      if (resolveAction("Overlay", data) === "overlay:close") {
         this.mcpDetail = null;
         this.openMcpList();
         return;
@@ -2123,7 +2140,7 @@ export class AppScreen implements Component, Focusable {
     }
 
     if (this.mcpToolDetail !== null) {
-      if (matchesKey(data, "escape")) {
+      if (resolveAction("Overlay", data) === "overlay:close") {
         const serverName = this.mcpToolDetail.serverName;
         this.mcpToolDetail = null;
         void this.openMcpToolsList(serverName);
@@ -2133,7 +2150,7 @@ export class AppScreen implements Component, Focusable {
     }
 
     if (this.mcpTools !== null) {
-      if (matchesKey(data, "escape")) {
+      if (resolveAction("Overlay", data) === "overlay:close") {
         const serverName = this.mcpTools.serverName;
         this.mcpTools = null;
         void this.handleMcpSelection(serverName);
@@ -2156,25 +2173,25 @@ export class AppScreen implements Component, Focusable {
     }
 
     if (!snapshot.pendingQuestion && this.showTeamPanel) {
-      if (matchesKey(data, "left")) {
-        this.viewedTeamMemberId = null;
-        this.tui.requestRender();
-        return;
-      }
-      if (matchesKey(data, "return")) {
-        this.viewedTeamMemberId = this.selectedTeamMemberId;
-        this.tui.requestRender();
-        return;
-      }
-      if (matchesKey(data, "up")) {
-        this.moveTeamPanelSelection(snapshot, -1);
-        this.tui.requestRender();
-        return;
-      }
-      if (matchesKey(data, "down")) {
-        this.moveTeamPanelSelection(snapshot, 1);
-        this.tui.requestRender();
-        return;
+      switch (resolveAction("TeamPanel", data)) {
+        case "team:back":
+          this.viewedTeamMemberId = null;
+          this.tui.requestRender();
+          return;
+        case "team:viewMember":
+          this.viewedTeamMemberId = this.selectedTeamMemberId;
+          this.tui.requestRender();
+          return;
+        case "team:prev":
+          this.moveTeamPanelSelection(snapshot, -1);
+          this.tui.requestRender();
+          return;
+        case "team:next":
+          this.moveTeamPanelSelection(snapshot, 1);
+          this.tui.requestRender();
+          return;
+        default:
+          break;
       }
     }
 
@@ -2371,8 +2388,8 @@ export class AppScreen implements Component, Focusable {
           const label = this.pendingQuestionAnswers.get(index) ?? "";
           const isPlanRejectFeedback = shouldAppendPlanRejectFeedback(
             pendingQuestion.source,
-            question.question,
             label,
+            pendingQuestion.planApprovalKind,
           );
           if (label === "Other" || isPlanRejectFeedback) {
             return {
@@ -2720,27 +2737,27 @@ export class AppScreen implements Component, Focusable {
     }
 
     const pageSize = Math.max(1, Math.floor(this.tui.terminal.rows * 0.8));
-    if (matchesKey(data, "pageUp") || matchesKey(data, "shift+pageUp")) {
-      this.transcriptScrollOffset += pageSize;
-      this.tui.requestRender();
-      return true;
+    const scrollAction = resolveAction("Scroll", data);
+    switch (scrollAction) {
+      case "scroll:pageUp":
+        this.transcriptScrollOffset += pageSize;
+        this.tui.requestRender();
+        return true;
+      case "scroll:pageDown":
+        this.transcriptScrollOffset = Math.max(0, this.transcriptScrollOffset - pageSize);
+        this.tui.requestRender();
+        return true;
+      case "scroll:top":
+        this.transcriptScrollOffset = Number.MAX_SAFE_INTEGER;
+        this.tui.requestRender();
+        return true;
+      case "scroll:bottom":
+        this.transcriptScrollOffset = 0;
+        this.tui.requestRender();
+        return true;
+      default:
+        return false;
     }
-    if (matchesKey(data, "pageDown") || matchesKey(data, "shift+pageDown")) {
-      this.transcriptScrollOffset = Math.max(0, this.transcriptScrollOffset - pageSize);
-      this.tui.requestRender();
-      return true;
-    }
-    if (matchesKey(data, "ctrl+home")) {
-      this.transcriptScrollOffset = Number.MAX_SAFE_INTEGER;
-      this.tui.requestRender();
-      return true;
-    }
-    if (matchesKey(data, "ctrl+end")) {
-      this.transcriptScrollOffset = 0;
-      this.tui.requestRender();
-      return true;
-    }
-    return false;
   }
 
   private clearPendingSubmittedInput(requestRender = true): void {
@@ -2839,6 +2856,7 @@ export class AppScreen implements Component, Focusable {
         preview: null,
         previewMessages: [],
         previewLoading: false,
+        previewScrollOffset: 0,
         rename: null,
       };
       this.tui.requestRender();
@@ -2878,6 +2896,7 @@ export class AppScreen implements Component, Focusable {
         preview: null,
         previewMessages: [],
         previewLoading: false,
+        previewScrollOffset: 0,
         rename: null,
       };
       this.tui.requestRender();
@@ -3018,13 +3037,15 @@ export class AppScreen implements Component, Focusable {
       preview: session,
       previewMessages: [],
       previewLoading: true,
+      previewScrollOffset: 0,
     };
+    this.setMouseTrackingEnabled(true);
     this.tui.requestRender();
     // 异步获取预览消息
     try {
       const resp = await this.state.request<{ session_id: string; preview_messages: PreviewMessage[] }>(
         "session.preview",
-        { session_id: session.session_id, count: 2 },
+        { session_id: session.session_id, count: 30 },
       );
       if (this.resumeSessionList && this.resumeSessionList.preview?.session_id === session.session_id) {
         this.resumeSessionList = {
@@ -3124,44 +3145,57 @@ export class AppScreen implements Component, Focusable {
     const title = session.title?.trim() || "(untitled)";
     const project = session.project_dir?.trim() || "-";
 
-    // 构建预览消息行：每条对话按宽度换行展示，内容超长时优先保留后半部分（末尾若干行）
-    const MAX_LINES_PER_MSG = 5;
-    const indent = "  ";
-    const contentWidth = Math.max(1, width - indent.length);
+    // Build preview message lines: full transcript style, matching Claude Code SessionPreview
     const messageLines: string[] = [];
     if (previewMessages.length > 0) {
       previewMessages.forEach((msg, msgIdx) => {
         const isUser = msg.role === "user";
-        const roleLabel = isUser ? "You:" : "Assistant:";
-        const roleColor = isUser ? palette.text.accent : palette.text.primary;
-        messageLines.push(padToWidth(roleColor(roleLabel), width));
-        // 按宽度换行，内容过长时只保留末尾 MAX_LINES_PER_MSG 行（展示对话后半部分）
-        const wrapped = renderWrappedText(contentWidth, msg.summary.trim());
-        let shown = wrapped;
-        let headTruncated = false;
-        if (wrapped.length > MAX_LINES_PER_MSG) {
-          shown = wrapped.slice(wrapped.length - MAX_LINES_PER_MSG);
-          headTruncated = true;
+        if (isUser) {
+          const lines = renderStyledMarkdownLines(
+            Math.max(1, width - 2),
+            msg.content,
+            { color: palette.text.dim },
+            0,
+            0,
+          );
+          messageLines.push(...prefixedLines(lines, width, "> ", palette.text.user, "  "));
+        } else {
+          const lines = renderStyledMarkdownLines(
+            width,
+            msg.content,
+            { color: palette.text.assistant },
+            0,
+            0,
+          );
+          messageLines.push(...lines);
         }
-        if (headTruncated) {
-          // 用纯 ASCII 省略号另起一行标记“上文已截断”，避免 U+2026 在部分终端按 2 列
-          // 渲染、而 visibleWidth 按 1 列计算导致该行超宽
-          messageLines.push(padToWidth(palette.text.dim(`${indent}...`), width));
-        }
-        shown.forEach((line) => {
-          messageLines.push(padToWidth(palette.text.dim(`${indent}${line}`), width));
-        });
-        // 消息之间留空行分隔（最后一条不加）
         if (msgIdx < previewMessages.length - 1) {
           messageLines.push("");
         }
       });
     } else if (this.resumeSessionList?.previewLoading) {
-      // 请求进行中：显示加载提示
-      messageLines.push(padToWidth(palette.text.dim("Loading recent messages..."), width));
+      messageLines.push(padToWidth(palette.text.dim("Loading session\u2026"), width));
     } else {
-      // 请求已完成但无可展示对话（如全部为 tool_call/tool_result，被后端过滤）
       messageLines.push(padToWidth(palette.text.dim("No conversation to preview"), width));
+    }
+
+    // Clip message lines to fit terminal height with scroll offset.
+    // Overhead: 7 header lines + 2 footer lines in this method,
+    // plus ~4 lines for status bar / welcome / transcript in the screen layout.
+    const overhead = 13;
+    const availableHeight = Math.max(3, this.tui.terminal.rows - overhead);
+    let visibleMessages = messageLines;
+    let scrollHint = "";
+    if (messageLines.length > availableHeight) {
+      const maxOffset = messageLines.length - availableHeight;
+      // previewScrollOffset can temporarily exceed maxOffset (pageUp past bounds);
+      // Math.min clamps it here so display is always correct.
+      const offset = Math.min(maxOffset, this.resumeSessionList?.previewScrollOffset ?? 0);
+      // start from the end of the conversation, moving backwards as offset increases
+      const start = messageLines.length - availableHeight - offset;
+      visibleMessages = messageLines.slice(start, start + availableHeight);
+      const pct = Math.round((offset / maxOffset) * 100);
+      scrollHint = `  \u2195 scroll (${pct}%)`;
     }
 
     return [
@@ -3172,9 +3206,9 @@ export class AppScreen implements Component, Focusable {
       "",
       padToWidth(palette.text.dim("Recent conversation"), width),
       "",
-      ...messageLines,
+      ...visibleMessages,
       "",
-      padToWidth(palette.text.dim("Enter resume · Space/Esc back"), width),
+      padToWidth(palette.text.dim(`Enter resume · Space/Esc back${scrollHint}`), width),
     ];
   }
 
@@ -3213,16 +3247,16 @@ export class AppScreen implements Component, Focusable {
     const showAll = this.resumeSessionList.showAllProjects;
     const branchOn = this.resumeSessionList.branchFilterEnabled;
     const scopeLabel = showAll ? "all projects" : "current dir";
-    const projectHint = showAll ? "Ctrl+A current dir" : "Ctrl+A all projects";
+    const projectHint = showAll ? "Ctrl+A to show current dir" : "Ctrl+A to show all projects";
     const branchHint = branchOn
-      ? `Ctrl+B all branches`
-      : `Ctrl+B branch:${this.resumeSessionList.currentBranch}`;
+      ? `Ctrl+B to show all branches`
+      : `Ctrl+B to filter by branch`;
     const toggleHint = `${projectHint} · ${branchHint}`;
     const scopeSuffix = branchOn ? ` · branch:${this.resumeSessionList.currentBranch}` : "";
     const searchBox = this.resumeSessionList.searchQuery
       ? padToWidth(palette.text.primary(`Search: ${this.resumeSessionList.searchQuery}${END_CURSOR}`), width)
       : padToWidth(
-          palette.text.dim(`Type to search · ↑/↓ choose · Enter resume · Space preview · Ctrl+R rename · ${toggleHint} · Esc cancel`),
+          palette.text.dim(`Type to search · ↑/↓ to choose · Enter to resume · Space to preview · Ctrl+R to rename · ${toggleHint} · Esc to cancel`),
           width,
         );
     const st = this.resumeSessionList;
@@ -3253,8 +3287,8 @@ export class AppScreen implements Component, Focusable {
       padToWidth(
         palette.text.dim(
           this.resumeSessionList.searchQuery
-            ? `Backspace delete · Enter resume · Space preview · Ctrl+R rename · ${toggleHint} · Esc clear`
-            : `↑/↓ choose · Enter resume · Space preview · Ctrl+R rename · ${toggleHint} · Esc cancel`
+            ? `Backspace to delete · Enter to resume · Space to preview · Ctrl+R to rename · ${toggleHint} · Esc to clear`
+            : `↑/↓ to choose · Enter to resume · Space to preview · Ctrl+R to rename · ${toggleHint} · Esc to cancel`
         ),
         width,
       ),
@@ -3555,7 +3589,7 @@ export class AppScreen implements Component, Focusable {
       }
 
       const selectItems: SelectItem[] = items.map((x) => ({
-        label: `${x.name} | ${x.transport}${x.enabled ? " · ✔ enabled" : " · ◯ disabled"}`,
+        label: `${x.name} | ${x.transport}${x.enabled ? " · ✔ enabled" : " · ○ disabled"}`,
         value: x.name,
       }));
       const list = new SelectList(
@@ -3683,7 +3717,7 @@ export class AppScreen implements Component, Focusable {
 
     // Detail fields
     boxedLines.push(padToWidth(
-      `  Status: ${enabled ? palette.status.success("✔ enabled") : palette.text.dim("◯ disabled")}`,
+      `  Status: ${enabled ? palette.status.success("✔ enabled") : palette.text.dim("○ disabled")}`,
       contentWidth,
     ));
     if (info.transport) {
@@ -4109,7 +4143,8 @@ export class AppScreen implements Component, Focusable {
   private handleSwarmWorkflowsInput(data: string): void {
     const state = this.swarmWorkflowsViewState;
     if (!state) return;
-    if (matchesKey(data, "escape")) {
+    const action = resolveAction("SwarmWorkflows", data);
+    if (action === "swarm:back") {
       if (state.phase === "list") {
         this.closeSwarmWorkflowsView();
       } else if (state.phase === "workflow") {
@@ -4130,7 +4165,7 @@ export class AppScreen implements Component, Focusable {
       this.tui.requestRender();
       return;
     }
-    if (matchesKey(data, "left")) {
+    if (action === "swarm:left") {
       if (state.phase === "agent") {
         const lookup = findWorkflowAgent(
           this.state.getSnapshot().workflowRuns,
@@ -4157,7 +4192,7 @@ export class AppScreen implements Component, Focusable {
       this.tui.requestRender();
       return;
     }
-    if (state.phase === "workflow" && (matchesKey(data, "right") || data === "\t")) {
+    if (state.phase === "workflow" && action === "swarm:nextFocus") {
       const nextFocus = state.focus === "phases" ? "agents" : "phases";
       this.swarmWorkflowsViewState = this.buildSwarmWorkflowDetailState(
         state.workflowId,
@@ -4167,25 +4202,25 @@ export class AppScreen implements Component, Focusable {
       this.tui.requestRender();
       return;
     }
-    if (state.phase === "workflow" && matchesKey(data, "l")) {
+    if (state.phase === "workflow" && action === "swarm:logs") {
       this.openSwarmWorkflowLogs(state.workflowId);
       return;
     }
     if (state.phase === "agent") {
-      if (matchesKey(data, "p")) {
+      if (action === "swarm:viewPrompt") {
         this.openSwarmWorkflowAgentText(state.workflowId, state.agentId, "prompt");
         return;
       }
-      if (matchesKey(data, "o")) {
+      if (action === "swarm:viewOutcome") {
         this.openSwarmWorkflowAgentText(state.workflowId, state.agentId, "outcome");
         return;
       }
-      if (matchesKey(data, "e")) {
+      if (action === "swarm:viewError") {
         this.openSwarmWorkflowAgentText(state.workflowId, state.agentId, "error");
         return;
       }
     }
-    if (matchesKey(data, "r")) {
+    if (action === "swarm:refresh") {
       void this.openSwarmWorkflowsView();
       this.tui.requestRender();
       return;
@@ -5840,18 +5875,33 @@ export class AppScreen implements Component, Focusable {
 
     const total = pendingQuestion.questions.length;
     const progress = total > 1 ? ` (${this.activeQuestionIndex + 1}/${total})` : "";
-    const permissionRequest = isPermissionRequest(pendingQuestion.source, question.question);
-    const planApprovalRequest = isPlanApprovalRequest(pendingQuestion.source, question.question);
+    const planApprovalRequest = isPlanApprovalRequest(
+      pendingQuestion.source,
+      pendingQuestion.planApprovalKind,
+    );
+    const permissionRequest = !planApprovalRequest &&
+      isPermissionRequest(pendingQuestion.source, question.question);
     const lines: string[] = [];
 
-    if (permissionRequest && !this.otherInputMode) {
-      const summary = parsePermissionSummary(question.question);
+    if (planApprovalRequest && !this.otherInputMode) {
       const title = getPendingQuestionTitle(
         pendingQuestion.source,
-        question.question,
         progress,
         this.activeQuestionIndex,
         total,
+        pendingQuestion.planApprovalKind,
+      );
+      lines.push(
+        ...wrapPlainText(title, width).map((line) => padToWidth(palette.status.warning(line), width)),
+      );
+    } else if (permissionRequest && !this.otherInputMode) {
+      const summary = parsePermissionSummary(question.question);
+      const title = getPendingQuestionTitle(
+        pendingQuestion.source,
+        progress,
+        this.activeQuestionIndex,
+        total,
+        pendingQuestion.planApprovalKind,
       );
       lines.push(...renderPermissionBlock(width, summary, title));
     } else if (this.otherInputMode) {
@@ -5962,8 +6012,8 @@ export class AppScreen implements Component, Focusable {
         !!selected &&
         shouldAppendPlanRejectFeedback(
           snapshot.pendingQuestion.source,
-          question.question,
           selected.value,
+          snapshot.pendingQuestion.planApprovalKind,
         );
       const printableChar = this.getPrintableChar(data);
       if (
@@ -6017,7 +6067,7 @@ export class AppScreen implements Component, Focusable {
 
     const planApprovalRequest = isPlanApprovalRequest(
       snapshot.pendingQuestion.source,
-      question.question,
+      snapshot.pendingQuestion.planApprovalKind,
     );
     const rowItems = planApprovalRequest
       ? buildPlanApprovalQuestionItems(
@@ -6065,7 +6115,11 @@ export class AppScreen implements Component, Focusable {
     const selected = this.questionList.getSelectedItem();
     return !!question &&
       !!selected &&
-      shouldAppendPlanRejectFeedback(pendingQuestion.source, question.question, selected.value);
+      shouldAppendPlanRejectFeedback(
+        pendingQuestion.source,
+        selected.value,
+        pendingQuestion.planApprovalKind,
+      );
   }
 
   private isInlinePlanRejectCursorInput(data: string): boolean {
@@ -6097,7 +6151,10 @@ export class AppScreen implements Component, Focusable {
     }
 
     const question = pendingQuestion.questions[this.activeQuestionIndex];
-    const planApprovalRequest = isPlanApprovalRequest(pendingQuestion.source, question?.question ?? "");
+    const planApprovalRequest = isPlanApprovalRequest(
+      pendingQuestion.source,
+      pendingQuestion.planApprovalKind,
+    );
     if (!question || question.options.length === 0) {
       this.questionList = null;
       this.questionDetailsMap = null;
@@ -6111,8 +6168,8 @@ export class AppScreen implements Component, Focusable {
       !!currentSelectedValue &&
       shouldAppendPlanRejectFeedback(
         pendingQuestion.source,
-        question.question,
         currentSelectedValue,
+        pendingQuestion.planApprovalKind,
       );
 
     const items: SelectItem[] = planApprovalRequest
@@ -6206,8 +6263,8 @@ export class AppScreen implements Component, Focusable {
       pendingQuestion.questions[this.activeQuestionIndex] ?? pendingQuestion.questions[0];
     const collectPlanRejectFeedback = shouldCollectPlanRejectFeedback(
       pendingQuestion.source,
-      question?.question ?? "",
       label,
+      pendingQuestion.planApprovalKind,
     );
 
     if (label === "Other") {
@@ -6242,7 +6299,11 @@ export class AppScreen implements Component, Focusable {
       if (
         index === this.activeQuestionIndex &&
         collectPlanRejectFeedback &&
-        shouldAppendPlanRejectFeedback(pendingQuestion.source, question.question, answerValue)
+        shouldAppendPlanRejectFeedback(
+          pendingQuestion.source,
+          answerValue,
+          pendingQuestion.planApprovalKind,
+        )
       ) {
         const feedback = this.editor.getText().trim();
         if (feedback) {

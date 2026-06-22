@@ -28,7 +28,7 @@
   - [Context compression & offload](ContextCompression.md)
   - [Coding Memory](CodingMemory.md)
   - [Skills](Skills.md)
-  - [Agentic Skill Retrieval](AgenticSkillRetrieval.md)
+  - [Symphony](symphony.md)
   - [Skill self-evolution](SkillSelfEvolution.md)
   - [Agent & workspace](Agent.md)
   - [Browser tools](Browser.md)

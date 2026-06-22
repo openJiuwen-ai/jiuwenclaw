@@ -56,6 +56,8 @@ Suitable for users who manage their own Python environment. Follow these steps:
   jiuwenswarm-tui
   ```
 
+  You can run the command above in **multiple terminals** against the same Gateway (default `ws://127.0.0.1:19001/tui`) for parallel sessions in separate TUI windows. See the **Multi-window TUI** section in [TUI Usage Guide (zh)](../zh/TUI使用指南.md#多窗口-tui).
+
 ## Method 2: Install from Source
 
 Suitable for users who perform custom development or adaptation based on JiuwenSwarm.

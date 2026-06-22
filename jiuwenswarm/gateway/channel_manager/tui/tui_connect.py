@@ -166,12 +166,14 @@ def _update_auto_harness_gitcode_access_token(value: str) -> None:
 CLI_FORWARD_REQ_METHODS = frozenset(
     {
         "command.add_dir",
+        "command.btw",
         "command.chrome",
         "command.compact",
         "command.compact_partial",
         "command.context",
         "command.recap",
         "command.diff",
+        "command.simplify",
         "command.mcp",
         "command.resume",
         "command.sandbox",
@@ -266,12 +268,14 @@ CLI_FORWARD_REQ_METHODS = frozenset(
 CLI_FORWARD_NO_LOCAL_HANDLER_METHODS = frozenset(
     {
         "command.add_dir",
+        "command.btw",
         "command.chrome",
         "command.compact",
         "command.compact_partial",
         "command.context",
         "command.recap",
         "command.diff",
+        "command.simplify",
         "command.mcp",
         "command.resume",
         "command.sandbox",
@@ -1835,7 +1839,7 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
         )
 
     async def _session_preview(ws, req_id, params, session_id):
-        """获取 session 预览信息，包括最新几条对话摘要。"""
+        """获取 session 预览信息，包括最新几条完整对话内容。"""
         import json
         from pathlib import Path
         from jiuwenswarm.common.utils import get_agent_sessions_dir
@@ -1852,13 +1856,13 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
             )
             return
 
-        # 预览消息数量，默认 3 条
-        preview_count = 3
+        # 预览消息数量，默认 30 条
+        preview_count = 30
         raw_count = params.get("count")
         if isinstance(raw_count, int):
-            preview_count = max(1, min(raw_count, 10))
+            preview_count = max(1, min(raw_count, 100))
         elif isinstance(raw_count, str) and raw_count.strip().isdigit():
-            preview_count = max(1, min(int(raw_count.strip()), 10))
+            preview_count = max(1, min(int(raw_count.strip()), 100))
 
         # 读取 history.json
         history_path: Path = get_agent_sessions_dir() / target / "history.json"
@@ -1900,21 +1904,13 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
                     previewable = [item for item in raw if _is_previewable(item)]
                     # 取时间顺序下最新的 N 条（保持原顺序：旧的在上、新的在下）
                     recent = previewable[-preview_count:]
-                    # 提取摘要（优先展示对话后半部分）
                     for msg in recent:
                         role = msg.get("role", "unknown")
                         content = msg.get("content", "")
                         event_type = msg.get("event_type", "")
-                        if isinstance(content, str):
-                            # 折叠所有空白（含换行/制表符）为单个空格，避免破坏预览布局；
-                            # 再截取末尾 400 字符，优先保留对话的后半部分
-                            normalized = " ".join(content.split())
-                            summary = normalized[-400:]
-                        else:
-                            summary = ""
                         preview_messages.append({
                             "role": role,
-                            "summary": summary,
+                            "content": content if isinstance(content, str) else "",
                             "event_type": event_type,
                         })
             except Exception as exc:

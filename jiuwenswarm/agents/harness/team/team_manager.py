@@ -15,6 +15,7 @@ from typing import Any
 
 from openjiuwen.agent_teams.agent.team_agent import TeamAgent
 from openjiuwen.agent_teams.paths import team_home
+from openjiuwen.agent_teams.runtime.pool import RuntimeState
 from openjiuwen.agent_teams.schema.blueprint import TeamAgentSpec
 from openjiuwen.agent_teams.context import reset_session_id, set_session_id
 from openjiuwen.core.runner import Runner
@@ -564,7 +565,7 @@ class TeamManager:
             self._active_session_id = None
             self._active_team_name = None
 
-    def _resolve_session_team_name(self, session_id: str) -> str | None:
+    def _lookup_session_team_name(self, session_id: str) -> str | None:
         if self._active_session_id == session_id and self._active_team_name:
             return self._active_team_name
         if self._pending_session_id == session_id and self._pending_team_name:
@@ -572,6 +573,10 @@ class TeamManager:
 
         metadata = get_session_metadata(session_id)
         team_name = str(metadata.get("team_name") or "").strip()
+        return team_name or None
+
+    def _resolve_session_team_name(self, session_id: str) -> str | None:
+        team_name = self._lookup_session_team_name(session_id)
         if team_name:
             return team_name
 
@@ -580,6 +585,83 @@ class TeamManager:
             session_id,
         )
         return None
+
+    async def _resolve_resumable_runner_entry(self, session_id: str) -> tuple[str, Any] | None:
+        """Return a same-session paused/running Runner pool entry when resumable."""
+        team_name = self._lookup_session_team_name(session_id)
+        if not team_name:
+            return None
+
+        from openjiuwen.core.runner.runner import GLOBAL_RUNNER
+
+        runtime_mgr = _runner_team_runtime_manager(GLOBAL_RUNNER)
+        entry = await runtime_mgr.pool.get(team_name)
+        if entry is None or getattr(entry, "current_session_id", None) != session_id:
+            return None
+        # Trust the Runner pool over claw-local active/pending markers here.
+        # The local markers can be stale after a team.plan round pauses on
+        # exit_plan_mode, but the pool still owns the resumable runtime.
+        if getattr(entry, "state", None) not in {RuntimeState.PAUSED, RuntimeState.RUNNING}:
+            return None
+        return team_name, entry
+
+    async def has_resumable_runtime(self, session_id: str) -> bool:
+        return await self._resolve_resumable_runner_entry(session_id) is not None
+
+    async def session_has_runtime(self, session_id: str) -> bool:
+        return (
+            self._active_session_id == session_id
+            or self._pending_session_id == session_id
+            or self.has_stream_task(session_id)
+            or await self.has_resumable_runtime(session_id)
+        )
+
+    def _restore_active_runtime(self, session_id: str, team_name: str) -> None:
+        self._active_session_id = session_id
+        self._active_team_name = team_name
+        if self._pending_session_id == session_id:
+            self._pending_session_id = None
+            self._pending_team_name = None
+        logger.info(
+            "[TeamManager] restored resumable runtime: session_id=%s team_name=%s active=%s pending=%s",
+            session_id,
+            team_name,
+            self._active_session_id,
+            self._pending_session_id,
+        )
+
+    async def restore_resumable_runtime(self, session_id: str) -> bool:
+        resolved = await self._resolve_resumable_runner_entry(session_id)
+        if resolved is None:
+            return False
+        team_name, _entry = resolved
+        self._restore_active_runtime(session_id, team_name)
+        return True
+
+    async def wait_for_resumable_runtime(
+        self,
+        session_id: str,
+        *,
+        timeout_sec: float = 1.0,
+        poll_interval_sec: float = 0.05,
+    ) -> bool:
+        """Best-effort wait for a paused/running Runner pool entry to become resumable."""
+        if self._active_session_id == session_id and self._active_team_name:
+            return True
+        if await self.restore_resumable_runtime(session_id):
+            return True
+
+        deadline = time.monotonic() + max(0.0, timeout_sec)
+        sleep_sec = max(0.01, poll_interval_sec)
+        while time.monotonic() < deadline:
+            await asyncio.sleep(sleep_sec)
+            if await self.restore_resumable_runtime(session_id):
+                logger.info(
+                    "[TeamManager] recovered resumable runtime after wait: session_id=%s",
+                    session_id,
+                )
+                return True
+        return self._active_session_id == session_id and bool(self._active_team_name)
 
     @staticmethod
     def _resolve_delete_session_team_name(session_id: str) -> str | None:
@@ -811,6 +893,14 @@ class TeamManager:
 
     async def interact(self, session_id: str, user_input: Any) -> tuple[bool, str | None]:
         try:
+            if session_id != self._active_session_id or not self._active_team_name:
+                restored = await self.wait_for_resumable_runtime(session_id)
+                if restored:
+                    logger.info(
+                        "[TeamManager] interact restored paused runtime before delivery: session_id=%s",
+                        session_id,
+                    )
+
             if session_id != self._active_session_id or not self._active_team_name:
                 reason = "not_active" if not self._active_team_name else "session_mismatch"
                 logger.warning(

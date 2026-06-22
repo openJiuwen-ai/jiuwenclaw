@@ -179,6 +179,7 @@ async def test_create_instance_registers_blank_agent_for_teammate(monkeypatch: p
     fake_module.AsyncA2XRegistryClient = _FakeAsyncA2XRegistryClient
 
     adapter = JiuWenSwarmDeepAdapter()
+    adapter.mark_as_session_scoped("test_session")
     config_base = _make_config(
         "teammate",
         dataset="team_dataset",

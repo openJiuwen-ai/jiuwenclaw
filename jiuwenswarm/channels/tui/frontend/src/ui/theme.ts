@@ -77,7 +77,7 @@ type ThemeDefinition = {
 
 const THEME_DEFINITIONS: Record<"light" | "dark", ThemeDefinition> = {
   light: {
-    textPrimary: "#000000",
+    textPrimary: "#ffffff",
     textSecondary: "#d77757",
     textDim: "#666666",
     textSubtle: "#afafaf",

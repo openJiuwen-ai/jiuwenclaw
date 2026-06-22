@@ -44,6 +44,7 @@ CODE_PROJECT_MEMORY = "swarm.code_project_memory"
 PERMISSION_INTERRUPT = "swarm.permission_interrupt"
 CODE_CODING_MEMORY = "swarm.code_coding_memory"
 CODE_AGENT_MODE = "swarm.code_agent_mode"
+TEAM_PLAN_APPROVAL = "swarm.team_plan_approval"
 STRUCTURED_ASK_USER = "swarm.structured_ask_user"
 CODE_TASK_PLANNING = "swarm.code_task_planning"
 CODE_AGENT_RAIL = "swarm.code_agent_rail"
@@ -53,6 +54,19 @@ CODE_SKILL_USE = "swarm.code_skill_use"
 # Key under ``ctx.extras`` where the main agent's CodingMemoryRail is published
 # for the code_agent sub-agent to reuse the same instance.
 CODING_MEMORY_EXTRAS_KEY = "_coding_memory_rail"
+
+_TEAM_PLAN_EXIT_NOTIFICATION = """\
+<system-reminder>
+The user approved the team plan. Continue as the Team Leader inside the
+team runtime. Do not implement directly as a single code agent. Start the
+approved team workflow with team tools such as build_team, create_task,
+spawn_teammate, and send_message.
+</system-reminder>"""
+
+
+def _is_team_plan_leader(ctx: SwarmBuildContext) -> bool:
+    """Return whether this build context is the team.plan leader."""
+    return ctx.mode == "team.plan" and ctx.role == "leader"
 
 
 def code_runtime_language(ctx: SwarmBuildContext) -> str:
@@ -68,8 +82,7 @@ def code_runtime_language(ctx: SwarmBuildContext) -> str:
     Returns:
         The resolved language code ("en" or the configured preferred language).
     """
-    is_team_plan_leader = ctx.mode == "team.plan" and ctx.role == "leader"
-    if is_team_plan_leader:
+    if _is_team_plan_leader(ctx):
         return resolve_language((ctx.config or {}).get("preferred_language", "zh"))
     return "en"
 
@@ -181,6 +194,42 @@ class PermissionInterruptInput(ConstructionInput):
     )
 
 
+class _TeamPlanPermissionInterruptRail:
+    """Delegate permission checks while letting plan approval own exit_plan_mode."""
+
+    def __init__(self, wrapped: Any) -> None:
+        self._wrapped = wrapped
+        self.priority = getattr(wrapped, "priority", 90)
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._wrapped, name)
+
+    def init(self, agent: Any) -> None:
+        init = getattr(self._wrapped, "init", None)
+        if callable(init):
+            init(agent)
+
+    def uninit(self, agent: Any) -> None:
+        uninit = getattr(self._wrapped, "uninit", None)
+        if callable(uninit):
+            uninit(agent)
+
+    def get_callbacks(self) -> dict[Any, Any]:
+        callbacks = dict(self._wrapped.get_callbacks())
+        from openjiuwen.core.single_agent.rail.base import AgentCallbackEvent
+
+        if AgentCallbackEvent.BEFORE_TOOL_CALL in callbacks:
+            callbacks[AgentCallbackEvent.BEFORE_TOOL_CALL] = self.before_tool_call
+        return callbacks
+
+    async def before_tool_call(self, ctx: Any) -> None:
+        inputs = getattr(ctx, "inputs", None)
+        tool_name = str(getattr(inputs, "tool_name", "") or "").strip()
+        if tool_name == "exit_plan_mode":
+            return
+        await self._wrapped.before_tool_call(ctx)
+
+
 @harness_element(
     kind=ElementKind.RAIL,
     name=PERMISSION_INTERRUPT,
@@ -196,11 +245,14 @@ def build_permission_interrupt(params: dict[str, Any], ctx: SwarmBuildContext) -
         )
 
         inp = PermissionInterruptInput.resolve(params, ctx)
-        return build_permission_rail(
+        rail = build_permission_rail(
             config={"permissions": inp.permissions_config},
             llm=None,
             model_name=inp.model_name,
         )
+        if rail is not None and _is_team_plan_leader(ctx):
+            return _TeamPlanPermissionInterruptRail(rail)
+        return rail
     except Exception as exc:
         logger.warning("[swarm.permission_interrupt] create failed: %s", exc)
         return None
@@ -268,7 +320,16 @@ def build_code_agent_mode(params: dict[str, Any], ctx: SwarmBuildContext) -> Any
         from jiuwenswarm.agents.harness.code.rails.code_agent_mode_rail import (
             CodeAgentModeRail,
         )
+        from jiuwenswarm.server.runtime.agent_adapter.interface_code import (
+            _ENTER_PLAN_MODE_INSTRUCTIONS_EN,
+            _PLAN_MODE_SYSTEM_NOTE,
+        )
 
+        exit_notification = (
+            _TEAM_PLAN_EXIT_NOTIFICATION
+            if _is_team_plan_leader(ctx)
+            else None
+        )
         return CodeAgentModeRail(
             allowed_tools=[
                 "enter_plan_mode",
@@ -283,9 +344,32 @@ def build_code_agent_mode(params: dict[str, Any], ctx: SwarmBuildContext) -> Any
                 "write_file",
                 "edit_file",
             ],
+            plan_mode_system_note=_PLAN_MODE_SYSTEM_NOTE,
+            enter_plan_instructions=_ENTER_PLAN_MODE_INSTRUCTIONS_EN,
+            exit_plan_notification=exit_notification,
         )
     except Exception as exc:
         logger.warning("[swarm.code_agent_mode] create failed: %s", exc)
+        return None
+
+
+@harness_element(
+    kind=ElementKind.RAIL,
+    name=TEAM_PLAN_APPROVAL,
+    description="Reuses the code.plan exit_plan_mode approval interrupt for the team.plan leader.",
+)
+def build_team_plan_approval(params: dict[str, Any], ctx: SwarmBuildContext) -> Any:
+    """Build the team.plan leader approval rail for ``exit_plan_mode``."""
+    try:
+        if not _is_team_plan_leader(ctx):
+            return None
+        from jiuwenswarm.agents.harness.code.rails.code_plan_approval_interrupt_rail import (
+            PlanApprovalInterruptRail,
+        )
+
+        return PlanApprovalInterruptRail()
+    except Exception as exc:
+        logger.warning("[swarm.team_plan_approval] create failed: %s", exc)
         return None
 
 
@@ -446,6 +530,7 @@ __all__ = [
     "PERMISSION_INTERRUPT",
     "CODE_CODING_MEMORY",
     "CODE_AGENT_MODE",
+    "TEAM_PLAN_APPROVAL",
     "STRUCTURED_ASK_USER",
     "CODE_TASK_PLANNING",
     "CODE_AGENT_RAIL",

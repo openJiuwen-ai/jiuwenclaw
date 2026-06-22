@@ -331,6 +331,18 @@ def _build_predefined_members(team_raw: dict[str, Any]) -> list[dict[str, Any]]:
     return predefined_members
 
 
+def _resolve_enable_permissions(config_base: dict[str, Any], team_raw: dict[str, Any]) -> bool:
+    """Resolve the effective team-permission toggle.
+
+    The effective value is ``permissions.enabled`` (global) AND
+    ``enable_permissions`` (team-level). Both must be true for
+    TeamPermissionRail to mount on teammates.
+    """
+    global_enabled = bool((config_base.get("permissions") or {}).get("enabled", False))
+    team_enabled = bool(team_raw.get("enable_permissions", False))
+    return global_enabled and team_enabled
+
+
 def load_team_spec_dict(
     config_base: dict[str, Any] | None = None,
     *,
@@ -365,6 +377,7 @@ def load_team_spec_dict(
     spec_dict["spawn_mode"] = team_raw.get("spawn_mode", "inprocess")
     spec_dict["enable_hitt"] = team_raw.get("enable_hitt", True)
     spec_dict["enable_swarmflow"] = team_raw.get("enable_swarmflow", True)
+    spec_dict["enable_permissions"] = _resolve_enable_permissions(config_base, team_raw)
     spec_dict["leader"] = _build_leader_spec(team_raw)
     spec_dict["agents"] = agents
     spec_dict["language"] = str(config_base.get("preferred_language", "zh")).strip().lower()

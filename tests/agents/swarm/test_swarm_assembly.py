@@ -23,6 +23,7 @@ import json
 import logging
 import types
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -35,7 +36,12 @@ from openjiuwen.agent_teams.schema.deep_agent_spec import (
     RailSpec,
     register_rail_provider,
 )
-from openjiuwen.core.single_agent.rail.base import AgentCallbackContext, AgentRail, ToolCallInputs
+from openjiuwen.core.single_agent.rail.base import (
+    AgentCallbackContext,
+    AgentCallbackEvent,
+    AgentRail,
+    ToolCallInputs,
+)
 from openjiuwen.harness.prompts.builder import SystemPromptBuilder
 from openjiuwen.harness.rails import SkillUseRail
 
@@ -1066,7 +1072,6 @@ _EXPECTED_CODE_RAIL_NAMES: frozenset[str] = frozenset(
         registry.SECURITY,
         registry.CODE_LSP,
         registry.CODE_PROJECT_MEMORY,
-        registry.PERMISSION_INTERRUPT,
         registry.SYS_OPERATION,
         registry.CODE_CODING_MEMORY,
         registry.CODE_AGENT_MODE,
@@ -1092,10 +1097,25 @@ def test_code_capability_specs_rail_and_tool_names(mode: str) -> None:
     register_swarm_providers()
     rails_specs, tool_specs = build_member_capability_specs({}, mode, "leader")
     rail_names = {spec.type for spec in rails_specs}
+    rail_params = {spec.type: spec.params for spec in rails_specs}
     tool_names = {spec.type for spec in tool_specs}
 
-    assert _EXPECTED_CODE_RAIL_NAMES <= rail_names
+    expected_rails = _EXPECTED_CODE_RAIL_NAMES
+    if mode == "team.plan":
+        expected_rails = expected_rails - {registry.CODE_CONFIRM_INTERRUPT}
+    assert expected_rails <= rail_names
     assert registry.TEAM_SKILL_EVOLUTION in rail_names
+    assert registry.STRUCTURED_ASK_USER in rail_names
+    if mode == "team.plan":
+        assert registry.TEAM_PLAN_APPROVAL in rail_names
+        assert registry.CODE_CONFIRM_INTERRUPT not in rail_names
+    else:
+        assert registry.TEAM_PLAN_APPROVAL not in rail_names
+        assert registry.CODE_CONFIRM_INTERRUPT in rail_names
+        assert rail_params[registry.CODE_CONFIRM_INTERRUPT]["tool_names"] == [
+            "switch_mode",
+            "exit_plan_mode",
+        ]
     # The chat-team common runtime prompt is replaced by the code variant.
     assert registry.RUNTIME_PROMPT not in rail_names
     assert tool_names == {
@@ -1115,6 +1135,20 @@ def test_code_capability_specs_rail_and_tool_names(mode: str) -> None:
         registry.CRON_TOOLS,
         registry.SEND_FILE,
     }
+
+
+def test_team_plan_approval_only_mounts_on_leader() -> None:
+    """Only team.plan leader uses the code.plan-style plan approval interrupt."""
+    register_swarm_providers()
+    leader_rails, _ = build_member_capability_specs({}, "team.plan", "leader")
+    teammate_rails, _ = build_member_capability_specs({}, "team.plan", "teammate")
+    code_team_rails, _ = build_member_capability_specs({}, "code.team", "leader")
+
+    assert registry.TEAM_PLAN_APPROVAL in {spec.type for spec in leader_rails}
+    assert registry.TEAM_PLAN_APPROVAL not in {spec.type for spec in teammate_rails}
+    assert registry.TEAM_PLAN_APPROVAL not in {spec.type for spec in code_team_rails}
+    assert registry.CODE_CONFIRM_INTERRUPT not in {spec.type for spec in leader_rails}
+    assert registry.CODE_CONFIRM_INTERRUPT not in {spec.type for spec in teammate_rails}
 
 
 def test_code_subagent_specs_use_factory_names() -> None:
@@ -1145,6 +1179,205 @@ def test_code_runtime_language_by_mode_and_role() -> None:
     assert code_rails.code_runtime_language(plan_leader) in {"cn", "zh"}
     assert code_rails.code_runtime_language(plan_teammate) == "en"
     assert code_rails.code_runtime_language(code_team) == "en"
+
+
+def test_team_plan_approval_provider_builds_only_for_leader() -> None:
+    """The code.plan-style approval rail is scoped to the team.plan leader."""
+    register_swarm_providers()
+    plan_leader = SwarmBuildContext(mode="team.plan", role="leader")
+    plan_teammate = SwarmBuildContext(mode="team.plan", role="teammate")
+    code_team_leader = SwarmBuildContext(mode="code.team", role="leader")
+
+    rail = RailSpec(type=registry.TEAM_PLAN_APPROVAL).build(
+        language="cn",
+        context=plan_leader,
+    )
+
+    from jiuwenswarm.agents.harness.code.rails import PlanApprovalInterruptRail
+
+    assert isinstance(rail, PlanApprovalInterruptRail)
+    assert RailSpec(type=registry.TEAM_PLAN_APPROVAL).build(
+        language="cn",
+        context=plan_teammate,
+    ) is None
+    assert RailSpec(type=registry.TEAM_PLAN_APPROVAL).build(
+        language="cn",
+        context=code_team_leader,
+    ) is None
+
+
+@pytest.mark.asyncio
+async def test_team_plan_approval_reuses_code_plan_copy(
+    tmp_path: Path,
+) -> None:
+    """team.plan reuses the same raw approval copy as code.plan."""
+    register_swarm_providers()
+    plan_leader = SwarmBuildContext(mode="team.plan", role="leader")
+    rail = RailSpec(type=registry.TEAM_PLAN_APPROVAL).build(
+        language="cn",
+        context=plan_leader,
+    )
+    plan_file = tmp_path / "team-plan.md"
+    plan_file.write_text("## 团队计划\n\n- T1", encoding="utf-8")
+    rail.init(
+        SimpleNamespace(
+            system_prompt_builder=SimpleNamespace(language="cn"),
+            get_plan_file_path=lambda _session: plan_file,
+        )
+    )
+
+    decision = await rail.resolve_interrupt(
+        SimpleNamespace(session=SimpleNamespace(), extra={}),
+        SimpleNamespace(name="exit_plan_mode", arguments="{}"),
+        None,
+    )
+    message = decision.request.message
+
+    assert "**计划审批**" in message
+    assert "Agent 已完成计划制定，等待你审批：" in message
+    assert "## 团队计划" in message
+    assert "请选择：" in message
+    assert "- **批准**" in message
+    assert "- **拒绝**" in message
+
+
+@pytest.mark.asyncio
+async def test_code_plan_approval_still_contains_inline_choices(tmp_path: Path) -> None:
+    """The original code.plan rail copy stays unchanged."""
+    from jiuwenswarm.agents.harness.code.rails import PlanApprovalInterruptRail
+
+    plan_file = tmp_path / "code-plan.md"
+    plan_file.write_text("## 计划\n\n- T1", encoding="utf-8")
+    rail = PlanApprovalInterruptRail()
+    rail.init(
+        SimpleNamespace(
+            system_prompt_builder=SimpleNamespace(language="cn"),
+            get_plan_file_path=lambda _session: plan_file,
+        )
+    )
+    decision = await rail.resolve_interrupt(
+        SimpleNamespace(session=SimpleNamespace(), extra={}),
+        SimpleNamespace(name="exit_plan_mode", arguments="{}"),
+        None,
+    )
+    message = decision.request.message
+
+    assert "请选择：" in message
+    assert "- **批准**" in message
+    assert "- **拒绝**" in message
+
+
+def test_team_plan_leader_code_agent_mode_has_team_exit_notification(monkeypatch) -> None:
+    """Approved team plans should resume the Leader into team execution semantics."""
+    from jiuwenswarm.server.runtime.agent_adapter.interface_code import (
+        _ENTER_PLAN_MODE_INSTRUCTIONS_EN,
+        _PLAN_MODE_SYSTEM_NOTE,
+    )
+
+    plan_leader = SwarmBuildContext(mode="team.plan", role="leader")
+    code_team_leader = SwarmBuildContext(mode="code.team", role="leader")
+    captured_configs: list[dict[str, object]] = []
+
+    class FakeCodeAgentModeRail:
+        def __init__(
+            self,
+            *,
+            allowed_tools,
+            plan_mode_system_note,
+            enter_plan_instructions,
+            exit_plan_notification,
+        ):
+            captured_configs.append(
+                {
+                    "allowed_tools": allowed_tools,
+                    "plan_mode_system_note": plan_mode_system_note,
+                    "enter_plan_instructions": enter_plan_instructions,
+                    "exit_plan_notification": exit_plan_notification,
+                }
+            )
+
+    monkeypatch.setattr(
+        "jiuwenswarm.agents.harness.code.rails.code_agent_mode_rail.CodeAgentModeRail",
+        FakeCodeAgentModeRail,
+    )
+    code_rails.build_code_agent_mode({}, plan_leader)
+    code_rails.build_code_agent_mode({}, code_team_leader)
+
+    team_config, code_config = captured_configs
+    assert team_config["plan_mode_system_note"] == _PLAN_MODE_SYSTEM_NOTE
+    assert team_config["enter_plan_instructions"] == _ENTER_PLAN_MODE_INSTRUCTIONS_EN
+    assert "Team Leader" in team_config["exit_plan_notification"]
+    assert "build_team" in team_config["exit_plan_notification"]
+    assert code_config["plan_mode_system_note"] == _PLAN_MODE_SYSTEM_NOTE
+    assert code_config["enter_plan_instructions"] == _ENTER_PLAN_MODE_INSTRUCTIONS_EN
+    assert code_config["exit_plan_notification"] is None
+    assert "ask_user" in team_config["allowed_tools"]
+    assert "ask_user" in code_config["allowed_tools"]
+
+
+def test_team_plan_leader_structured_ask_user_provider_builds() -> None:
+    """team.plan leader keeps code-mode structured ask_user clarification."""
+    register_swarm_providers()
+    plan_leader = SwarmBuildContext(mode="team.plan", role="leader")
+    code_team_leader = SwarmBuildContext(mode="code.team", role="leader")
+
+    assert type(
+        RailSpec(type=registry.STRUCTURED_ASK_USER).build(
+            language="cn",
+            context=plan_leader,
+        )
+    ).__name__ == "StructuredAskUserRail"
+    assert type(
+        RailSpec(type=registry.STRUCTURED_ASK_USER).build(
+            language="cn",
+            context=code_team_leader,
+        )
+    ).__name__ == "StructuredAskUserRail"
+
+
+@pytest.mark.asyncio
+async def test_team_plan_leader_permission_rail_skips_exit_plan_mode(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Plan approval owns exit_plan_mode; permission rail still checks other tools."""
+    from jiuwenswarm.agents.harness.common.rails.interrupt import interrupt_helpers
+
+    calls: list[str] = []
+    created: list[object] = []
+
+    class FakePermissionRail:
+        priority = 90
+
+        def get_callbacks(self) -> dict[AgentCallbackEvent, object]:
+            return {AgentCallbackEvent.BEFORE_TOOL_CALL: self.before_tool_call}
+
+        async def before_tool_call(self, ctx: object) -> None:
+            calls.append(ctx.inputs.tool_name)
+
+    def fake_build_permission_rail(**_kwargs: object) -> FakePermissionRail:
+        rail = FakePermissionRail()
+        created.append(rail)
+        return rail
+
+    monkeypatch.setattr(interrupt_helpers, "build_permission_rail", fake_build_permission_rail)
+
+    plan_rail = code_rails.build_permission_interrupt(
+        {"permissions_config": {"enabled": True}, "model_name": "gpt-4"},
+        SwarmBuildContext(mode="team.plan", role="leader"),
+    )
+    code_rail = code_rails.build_permission_interrupt(
+        {"permissions_config": {"enabled": True}, "model_name": "gpt-4"},
+        SwarmBuildContext(mode="code.team", role="leader"),
+    )
+
+    assert plan_rail is not created[0]
+    assert code_rail is created[1]
+    assert plan_rail.get_callbacks()[AgentCallbackEvent.BEFORE_TOOL_CALL] == plan_rail.before_tool_call
+
+    await plan_rail.before_tool_call(types.SimpleNamespace(inputs=types.SimpleNamespace(tool_name="exit_plan_mode")))
+    await plan_rail.before_tool_call(types.SimpleNamespace(inputs=types.SimpleNamespace(tool_name="bash")))
+
+    assert calls == ["bash"]
 
 
 def test_code_extra_tools_gated_by_config() -> None:

@@ -223,17 +223,23 @@ def test_config_specs_bakes_attribute_params() -> None:
         "permissions": {"enabled": True},
         "models": {"default": {"model_client_config": {"model_name": "gpt-4o"}}},
     }
-    rails, _ = build_member_capability_specs(config, "code.team", "leader")
+    # PERMISSION_INTERRUPT is excluded from code-profile rails;
+    # when enable_permissions=True the leader gets TEAM_PERMISSION_POLICY instead.
+    rails_no_perm, _ = build_member_capability_specs(config, "code.team", "leader")
+    by_type_no_perm = {spec.type: spec.params for spec in rails_no_perm}
+    assert registry.PERMISSION_INTERRUPT not in by_type_no_perm
+
+    rails, _ = build_member_capability_specs(config, "code.team", "leader", enable_permissions=True)
     by_type = {spec.type: spec.params for spec in rails}
 
     assert (
         by_type[registry.CODE_SKILL_USE]["skill_mode"]
         == SkillUseRail.SKILL_MODE_AUTO_LIST
     )
-    assert by_type[registry.PERMISSION_INTERRUPT]["permissions_config"] == {
+    assert registry.PERMISSION_INTERRUPT not in by_type
+    assert by_type[registry.TEAM_PERMISSION_POLICY]["permissions_config"] == {
         "enabled": True
     }
-    assert by_type[registry.PERMISSION_INTERRUPT]["model_name"] == "gpt-4o"
     assert (
         by_type[registry.TEAM_SKILL_EVOLUTION]["evolution_model_config"]["model_name"]
         == "gpt-4o"

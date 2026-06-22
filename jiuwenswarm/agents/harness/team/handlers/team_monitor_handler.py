@@ -1,4 +1,4 @@
-# Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
+# Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 
 """Team Monitor 处理器.
 
@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 from typing import Any
 
@@ -125,27 +126,29 @@ class TeamMonitorHandler(BaseMonitorHandler):
         return base
 
     async def _handle_message(self, base: dict[str, Any], event: MonitorEvent) -> dict[str, Any]:
-        message_content = await self._get_message_content(event.message_id)
+        message_content, message_protocol = await self._get_message_display(event.message_id)
         base.update({
             "message_id": event.message_id,
             "from_member": event.from_member_name,
             "to_member": event.to_member_name,
             "content": message_content,
+            "protocol": message_protocol,
         })
         return base
 
     async def _handle_broadcast(self, base: dict[str, Any], event: MonitorEvent) -> dict[str, Any]:
-        message_content = await self._get_message_content(event.message_id)
+        message_content, message_protocol = await self._get_message_display(event.message_id)
         base.update({
             "message_id": event.message_id,
             "from_member": event.from_member_name,
             "content": message_content,
+            "protocol": message_protocol,
         })
         return base
 
-    async def _get_message_content(self, message_id: str | None) -> str:
+    async def _get_message_display(self, message_id: str | None) -> tuple[str, str]:
         if not message_id or not self._monitor:
-            return ""
+            return "", "plain"
         try:
             from openjiuwen.agent_teams.context import set_session_id, reset_session_id
             token = set_session_id(self._session_id)
@@ -153,8 +156,10 @@ class TeamMonitorHandler(BaseMonitorHandler):
                 messages = await self._monitor.get_messages()
                 for message in messages:
                     if message.message_id == message_id:
-                        return message.content or ""
-                return ""
+                        protocol = self._normalize_message_protocol(message.protocol)
+                        content = self._normalize_message_content(message.content or "", protocol)
+                        return content, protocol
+                return "", "plain"
             finally:
                 reset_session_id(token)
         except Exception as e:
@@ -163,7 +168,21 @@ class TeamMonitorHandler(BaseMonitorHandler):
                 message_id,
                 e,
             )
-            return ""
+            return "", "plain"
+
+    @staticmethod
+    def _normalize_message_protocol(protocol: Any) -> str:
+        value = str(protocol or "plain").strip().lower()
+        return value or "plain"
+
+    @staticmethod
+    def _normalize_message_content(content: str, protocol: str) -> str:
+        if protocol != "json" or not content.strip():
+            return content
+        try:
+            return json.dumps(json.loads(content), ensure_ascii=False)
+        except (TypeError, ValueError):
+            return content
 
     async def _convert_event_to_dict(self, event: MonitorEvent) -> dict[str, Any] | None:
         team_event_type = get_team_event_type(event.event_type)

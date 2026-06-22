@@ -98,6 +98,7 @@ def enrich_team_spec_for_swarm(
                 mode,
                 role,
                 spec.agents[role],
+                enable_permissions=spec.enable_permissions,
             )
 
     spec.build_context = base

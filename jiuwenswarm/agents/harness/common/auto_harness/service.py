@@ -1578,6 +1578,23 @@ class AutoHarnessService:
             )
 
         finally:
+            # Refresh packages cache in finally block to ensure it runs regardless of exit path
+            # (success/failure/cancellation/disconnect)
+            if active_run and active_run.pipeline_preference == EXTENDED_EVOLVE_PIPELINE:
+                try:
+                    data = await asyncio.to_thread(self.scan_runtime_extensions)
+                    await asyncio.to_thread(self.save_packages, data)
+                    logger.info(
+                        "[AutoHarnessService] Packages cache refreshed in finally block after %s, session=%s",
+                        active_run.pipeline_preference,
+                        session_id,
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "[AutoHarnessService] Failed to refresh packages cache in finally block: %s",
+                        exc,
+                    )
+
             if session_id in self._active_runs:
                 del self._active_runs[session_id]
 

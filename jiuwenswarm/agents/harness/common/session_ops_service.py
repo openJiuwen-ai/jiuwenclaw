@@ -565,9 +565,7 @@ async def rewind_session_context(
     compressed by ``round_level_compressor`` / ``dialogue_compressor``), so we
     cannot simply slice the in-memory buffer.  Instead we reload the truncated
     history.json, convert its records to openjiuwen messages, tear down the old
-    context, and build a fresh one — analogous to Claude Code's
-    ``setMessages(prev.slice(0, messageIndex))`` followed by
-    ``resetMicrocompactState``.
+    context, and build a fresh one.
     """
     from openjiuwen.core.foundation.llm.schema.message import (
         UserMessage,
@@ -957,7 +955,7 @@ async def copy_session_state(
     modified_state["stop_condition_state"] = None
     modified_state["pending_follow_ups"] = []
 
-    # Generate new plan slug and copy plan file (like Claude Code's /branch)
+    # Generate new plan slug and copy plan file
     plan_mode = modified_state.get("plan_mode") or {}
     old_slug = plan_mode.get("plan_slug")
     if old_slug:

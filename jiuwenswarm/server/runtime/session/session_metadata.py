@@ -32,7 +32,7 @@ _TITLE_MAX_LEN = 50
 _HEARTBEAT_SESSION_PREFIX = "heartbeat_"
 _DELIVERY_KIND_SERVER_PUSH = "server_push"
 
-# 匹配所有小写 XML 块（对齐 Claude Code stripDisplayTags），
+# 匹配所有小写 XML 块:
 # 如 <system-reminder>、<file-content>、<command-name> 等系统/工具注入内容
 _INJECTED_TAG_RE = re.compile(
     r"<([a-z][\w-]*)(?:\s[^>]*)?>.*?</\1>\n?", re.DOTALL
@@ -44,7 +44,7 @@ _INJECTED_TAG_START_RE = re.compile(
 
 
 def _sanitize_title(title: str) -> str:
-    """清理标题中的系统注入 XML 标签（对齐 Claude Code stripDisplayTags）。
+    """清理标题中的系统注入 XML 标签。
 
     匹配所有小写 XML 标签（如 <system-reminder>、<file-content>、<command-name>），
     不匹配用户提及的大写 HTML/JSX（如 <Button>、<Component>）。
@@ -154,7 +154,7 @@ def _enqueue_write(session_id: str, metadata: dict[str, Any]) -> None:
 
 def _auto_title(content: str) -> str:
     """从首条用户消息自动生成会话标题"""
-    # 先剥离所有小写 XML 注入标签（对齐 Claude Code stripDisplayTags），
+    # 先剥离所有小写 XML 注入标签，
     # 避免将系统提示/文件注入/工具标签误识别为会话标题
     cleaned = _INJECTED_TAG_RE.sub("", content).strip()
     if not cleaned:

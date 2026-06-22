@@ -8,7 +8,13 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from jiuwenbox.models.sandbox import BackgroundExecResult, ExecResult
+from jiuwenbox.models.sandbox import (
+    BackgroundExecResult,
+    BackgroundJobStatus,
+    BackgroundJobSummary,
+    ExecResult,
+    KillBackgroundJobResult,
+)
 
 
 @dataclass(frozen=True)
@@ -18,6 +24,16 @@ class RuntimeExecRequest:
     env: dict[str, str] | None = None
     stdin_data: bytes | None = None
     timeout: float | None = None
+
+
+@dataclass(frozen=True)
+class RuntimeBackgroundExecRequest:
+    command: list[str]
+    job_id: str
+    workdir: str | None = None
+    env: dict[str, str] | None = None
+    stdin_data: bytes | None = None
+    capture_output: bool = True
 
 
 @dataclass(frozen=True)
@@ -75,9 +91,35 @@ class RuntimeAdapter(abc.ABC):
     async def exec_background(
         self,
         sandbox_id: str,
-        request: RuntimeExecRequest,
+        request: RuntimeBackgroundExecRequest,
     ) -> BackgroundExecResult:
         """Start a background command inside a running sandbox."""
+        ...
+
+    @abc.abstractmethod
+    async def get_background_job(
+        self,
+        sandbox_id: str,
+        job_id: str,
+    ) -> BackgroundJobStatus:
+        ...
+
+    @abc.abstractmethod
+    async def list_background_jobs(
+        self,
+        sandbox_id: str,
+        *,
+        running_only: bool = False,
+    ) -> list[BackgroundJobSummary]:
+        ...
+
+    @abc.abstractmethod
+    async def kill_background_job(
+        self,
+        sandbox_id: str,
+        job_id: str,
+        signum: int = 15,
+    ) -> KillBackgroundJobResult:
         ...
 
     @abc.abstractmethod

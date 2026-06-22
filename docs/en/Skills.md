@@ -184,8 +184,8 @@ The Skills management page is the main place to manage and browse all skills. Op
 |--------|------|
 | **My Skills** | Browse and search installed skills, filter by "All / Enabled / Disabled", toggle skills on/off, and open details |
 | **Skill Marketplace** | Install new skills; contains three sub-pages: **Built-in**, **SwarmSkills online search**, and **Skills online search** (SkillNet / ClawHub) |
-| **Skill Graph** | Visualize the capability relationships among installed skills |
-| **Skill Index** | Build a local skill retrieval index and find matching skills by task need |
+| **Skill Graph** | Visualize capability relationships among installed skills; see [Symphony](symphony.md) |
+| **Skill Index** | Build a local skill retrieval index and find matching skills by task need; see [Symphony](symphony.md) |
 
 ![Skills management page](../assets/images/skill_page_auto.png)
 
@@ -215,53 +215,9 @@ In the list, use **View skill experience** to browse evolution entries for that 
 
 > **Why it helps:** Skill experience reflects self-evolution and improvements from real use, so you can judge ongoing usefulness and maintainers get actionable input.
 
-#### Skill graph
+#### Skill graph and skill index
 
-The skill graph shows how installed skills can connect to each other. Each node represents a skill, and each edge represents a `can_feed` relationship: one skill's output can be used as another skill's input. It helps users understand possible skill combinations and gives Skill Symphony candidate relationships for orchestration.
-
-![Skill graph](../assets/images/symphony_score.png)
-
-#### How to read the skill graph
-
-| Element | Description |
-|------|------|
-| **Node** | An installed skill. The node label usually matches the skill name or skill ID |
-| **Edge** | A `can_feed` relationship between two skills |
-| **Direction** | `A -> B` means skill A can feed its output into skill B |
-| **Confidence** | How confident the system is that this connection is usable; higher confidence is a stronger orchestration candidate |
-| **In-degree** | How many upstream skills can feed into this skill under the current filters |
-| **Out-degree** | How many downstream skills this skill can feed under the current filters |
-
-> **Tip:** The graph shows candidate connections, not execution history. A visible edge does not guarantee every task can be chained directly. Always check the skill details, required inputs, and current task goal.
-
-#### Page areas
-
-| Area | Purpose |
-|------|------|
-| **Left panel** | Shows visible skill/edge counts, search, minimum confidence, and the skill list |
-| **Canvas** | Shows the relationship graph. Drag to pan, scroll to zoom, and click a node to inspect it |
-| **Right details** | Shows the selected skill's ID, in-degree, out-degree, description, inputs, outputs, tasks, and related edges |
-
-In **Related edges**:
-- `->` means the selected skill can provide output to the target skill
-- `<-` means the selected skill can receive output from an upstream skill
-- `can_feed · 85%` shows the edge type and confidence
-
-#### Common actions
-
-| Action | Description |
-|------|------|
-| **Search skills** | Enter keywords in the left search box to show matching skills and related connections |
-| **Adjust minimum confidence** | Hide lower-confidence edges so you can focus on stronger connections |
-| **Read graph** | Reload the existing built skill graph |
-| **Incremental build** | Update the graph after adding, removing, or changing skills |
-| **Pause build** | Pause a long-running graph build while keeping completed cache and checkpoints |
-| **Full rebuild** | Recompute everything when the graph looks stale or incorrect |
-| **Fit view** | Re-center and scale the visible graph |
-
-#### Minimum confidence
-
-The minimum confidence slider only filters the already loaded graph locally. It can hide edges below the current threshold, but it does not recompute relationships and cannot reveal edges below the build-time acceptance threshold. To regenerate candidate relationships, run an incremental build or full rebuild.
+The **Skill Graph** and **Skill Index** tabs are part of Symphony. The skill index helps the agent find candidate skills from a large installed-skill set, while the skill graph uses `can_feed` relationships to show whether skills can connect. For multi-skill orchestration, graph building, graph reading, and chat usage, see [Symphony: Skill Orchestration and Dispatch](symphony.md).
 
 ---
 
@@ -432,57 +388,9 @@ Before using a skill, check:
 Show gitcode-pr details and SKILL.md content.
 ```
 
-### How to use Skill Symphony in chat
+### Multi-skill tasks: Skill Symphony
 
-Skill Symphony is useful when a task needs several skills to work together, such as "recognize text from an image, translate it, write copy, and send an email." It first produces an executable route from installed skills and the skill graph, then you can confirm before running the actual skills.
-
-#### Before you use it
-
-1. Open left sidebar → **Configuration** → **Other configuration**.
-2. Expand **Skill Symphony**, turn on **Enable Skill Symphony**, then click **Save** in the top-right corner.
-3. Confirm the required skills are installed. If you recently added, removed, or changed skills, open **Skills** → **Skill graph** and run **Incremental build** or **Read graph** first.
-
-![Skill Symphony configuration](../assets/images/symphony_config.png)
-
-#### Recommended prompt style
-
-In chat, say that you want to use skills, and provide the goal, input material, expected output, and follow-up action in one request.
-
-**Template:**
-
-```text
-Use Skill to complete <final goal>.
-The input is <file, link, text, or account information>.
-I need <output format or deliverable>, then <whether to continue with the next action>.
-```
-
-**Example:**
-
-```text
-Use Skill to translate an English technical blog image into Chinese,
-write a WeChat public-account intro copy, and send it to my email.
-Image URL: https://gitcode.com/lin-xiaoyu/data/blob/main/blog.webp
-```
-
-Prompts that trigger Skill Symphony more reliably:
-- Explicitly say "Use Skill" or "use skills"
-- Describe the complete goal instead of only one step
-- Provide required inputs such as image URL, file path, recipient, target language, or output format
-- If you want the system to continue after planning, reply with "execute according to the orchestration result" or "confirm and continue"
-
-#### Understand the orchestration result
-
-After Skill Symphony is enabled, the system first returns a skill orchestration graph and a short explanation. Each box is a skill, and each arrow shows execution order and result handoff. In the example below, the route is `image-translate -> yescan-ocr-universal -> general-writing -> imap-smtp-email`: translate the image, extract text, write copy, then send the email.
-
-![Skill Symphony chat example](../assets/images/symphony_example.png)
-
-After seeing the route, you can respond in one of these ways:
-- **Route looks right**: reply "execute according to the orchestration result"
-- **Missing information**: provide the missing file, link, email address, account, or parameter
-- **Route is not right**: clarify the change, such as "do not send email, only generate copy" or "run OCR before translation"
-- **Plan only**: stop after the orchestration result and use it as a skill-combination suggestion
-
-> **Tip:** Skill Symphony can only orchestrate installed skills and available configuration. If the result says no suitable skill is available, install the required skill first, then refresh or rebuild the skill graph and try again.
+When a task needs several skills to work together, such as "recognize text from an image, translate it, write copy, and send an email," Skill Symphony can first produce a skill chain and then wait for confirmation before execution. For setup, prompt examples, and how to read the orchestration result, see [Symphony: Skill Orchestration and Dispatch](symphony.md).
 
 ---
 

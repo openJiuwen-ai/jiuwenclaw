@@ -26,6 +26,8 @@ def _build_cancel_request(session_id: str = "tui_sess_1") -> AgentRequest:
 def _make_adapter(**state: object) -> JiuWenSwarmDeepAdapter:
     """Create a bare adapter with internal state set via setattr."""
     adapter = object.__new__(JiuWenSwarmDeepAdapter)
+    adapter._is_session_scoped_adapter = True  # pylint: disable=protected-access
+    adapter._parent_session_id = None  # pylint: disable=protected-access
     for name, value in state.items():
         setattr(adapter, name, value)
     return adapter

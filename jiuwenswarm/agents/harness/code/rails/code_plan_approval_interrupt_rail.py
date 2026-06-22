@@ -81,6 +81,79 @@ Choose:
 # Truncate plan preview to this many characters to keep the dialog readable
 _MAX_PLAN_PREVIEW_CHARS = 3000
 
+_PLAN_APPROVAL_TITLE_CN = "**计划审批**"
+_PLAN_APPROVAL_TITLE_EN = "**Plan Approval**"
+_PLAN_APPROVAL_INTRO_CN = "Agent 已完成计划制定，等待你审批："
+_PLAN_APPROVAL_INTRO_EN = "The agent has completed a plan and is requesting your approval:"
+_PLAN_EMPTY_INTRO_CN = "Agent 请求退出 plan 模式，但计划文件为空。"
+_PLAN_EMPTY_INTRO_EN = "The agent is requesting to exit plan mode, but the plan file is empty."
+_PLAN_CHOICE_MARKERS = ("\n---\n请选择：", "\n---\nChoose:")
+
+
+def is_plan_approval_message(message: str) -> bool:
+    """Return whether ``message`` is a plan-approval interrupt copy."""
+    normalized = message.strip()
+    return _PLAN_APPROVAL_TITLE_CN in normalized or _PLAN_APPROVAL_TITLE_EN in normalized
+
+
+def strip_inline_plan_approval_choices(message: str) -> str:
+    """Remove the text-only approve/reject list from a plan-approval message."""
+    for marker in _PLAN_CHOICE_MARKERS:
+        if marker in message:
+            return message.split(marker, 1)[0].rstrip()
+    return message
+
+
+def extract_plan_approval_content(message: str) -> tuple[str, str]:
+    """Extract ``(plan_content, language)`` from a plan-approval message."""
+    stripped = strip_inline_plan_approval_choices(message).strip()
+    if stripped.startswith(_PLAN_APPROVAL_TITLE_EN):
+        body = stripped[len(_PLAN_APPROVAL_TITLE_EN):].lstrip()
+        if body.startswith(_PLAN_EMPTY_INTRO_EN):
+            return "", "en"
+        if body.startswith(_PLAN_APPROVAL_INTRO_EN):
+            body = body[len(_PLAN_APPROVAL_INTRO_EN):].lstrip()
+        return body.strip(), "en"
+
+    if stripped.startswith(_PLAN_APPROVAL_TITLE_CN):
+        body = stripped[len(_PLAN_APPROVAL_TITLE_CN):].lstrip()
+        if body.startswith(_PLAN_EMPTY_INTRO_CN):
+            return "", "cn"
+        if body.startswith(_PLAN_APPROVAL_INTRO_CN):
+            body = body[len(_PLAN_APPROVAL_INTRO_CN):].lstrip()
+        return body.strip(), "cn"
+
+    return stripped, "cn"
+
+
+def build_plan_approval_options_from_message(message: str) -> list[dict[str, str]]:
+    """Build structured approve/reject options from a plan-approval message."""
+    stripped = strip_inline_plan_approval_choices(message).strip()
+    _, language = extract_plan_approval_content(message)
+
+    if language == "en":
+        if _PLAN_EMPTY_INTRO_EN in stripped:
+            return [
+                {"label": "Approve", "value": "approve", "description": "Exit plan mode (no plan content)"},
+                {"label": "Reject", "value": "reject", "description":
+                    "Stay in plan mode, let the agent write a plan first"},
+            ]
+        return [
+            {"label": "Approve", "value": "approve", "description": "Exit plan mode and begin implementation"},
+            {"label": "Reject", "value": "reject", "description":
+                "Stay in plan mode, the agent will revise the plan based on your feedback"},
+        ]
+
+    if _PLAN_EMPTY_INTRO_CN in stripped:
+        return [
+            {"label": "批准", "value": "approve", "description": "退出 plan 模式（无计划内容）"},
+            {"label": "拒绝", "value": "reject", "description": "留在 plan 模式，让 Agent 先写好计划"},
+        ]
+    return [
+        {"label": "批准", "value": "approve", "description": "退出 plan 模式，开始执行计划"},
+        {"label": "拒绝", "value": "reject", "description": "留在 plan 模式，Agent 将根据你的反馈修改计划"},
+    ]
+
 
 class PlanApprovalInterruptRail(ConfirmInterruptRail):
     """Interrupt ``exit_plan_mode`` to show the plan for user approval.
@@ -237,4 +310,10 @@ class PlanApprovalInterruptRail(ConfirmInterruptRail):
         return template.format(plan_preview=preview)
 
 
-__all__ = ["PlanApprovalInterruptRail"]
+__all__ = [
+    "PlanApprovalInterruptRail",
+    "build_plan_approval_options_from_message",
+    "extract_plan_approval_content",
+    "is_plan_approval_message",
+    "strip_inline_plan_approval_choices",
+]

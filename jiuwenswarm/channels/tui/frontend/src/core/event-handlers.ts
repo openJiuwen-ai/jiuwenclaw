@@ -35,6 +35,9 @@ export interface PendingQuestion {
   source?: string;
   /** Mode active when the interrupt was raised; used when resuming the tool call. */
   resumeMode?: ClientMode;
+  planApprovalKind?: string;
+  planContent?: string;
+  planLanguage?: "cn" | "en";
   planPath?: string;
   planSlug?: string;
   evolutionMeta?: Record<string, unknown>;
@@ -53,6 +56,7 @@ export interface PendingQuestionItem {
 export interface PendingQuestionOption {
   label: string;
   description?: string;
+  value?: string;
   details?: string[];
 }
 
@@ -436,6 +440,7 @@ function normalizePendingQuestion(payload: Record<string, unknown>): PendingQues
             .map((option) => ({
               label: typeof option.label === "string" ? option.label : "",
               description: typeof option.description === "string" ? option.description : undefined,
+              value: typeof option.value === "string" ? option.value : undefined,
             }))
             .filter((option) => option.label.length > 0)
         : [],
@@ -1215,6 +1220,14 @@ export function handleIncomingFrame(delegate: AppEventDelegate, frame: EventFram
             ? (payload._evolution_meta as Record<string, unknown>)
             : undefined;
       const source = typeof payload.source === "string" ? payload.source : undefined;
+      const planApprovalKind =
+        typeof payload.plan_approval_kind === "string" ? payload.plan_approval_kind : undefined;
+      const planContent =
+        typeof payload.plan_content === "string" ? payload.plan_content : undefined;
+      const planLanguage =
+        payload.plan_language === "cn" || payload.plan_language === "en"
+          ? payload.plan_language
+          : undefined;
       const planPath =
         typeof payload.plan_path === "string" && payload.plan_path.trim()
           ? payload.plan_path.trim()
@@ -1227,6 +1240,9 @@ export function handleIncomingFrame(delegate: AppEventDelegate, frame: EventFram
         requestId,
         source,
         resumeMode: delegate.getMode(),
+        planApprovalKind,
+        planContent,
+        planLanguage,
         planPath,
         planSlug,
         evolutionMeta,

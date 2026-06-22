@@ -2,8 +2,8 @@
 
 """Code mode prompt builder — English-only.
 
-Provides 7 static prompt sections aligned with Claude Code's getSystemPrompt()
-section structure. Each section is a PromptSection with English-only content.
+Provides 7 static prompt sections.
+Each section is a PromptSection with English-only content.
 
 Sections are injected once at agent creation time (build_code_system_prompt).
 Dynamic content (time, runtime state, memory) is injected per-request by Rails.

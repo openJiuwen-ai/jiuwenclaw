@@ -21,8 +21,9 @@ The configuration panel contains the following main sections:
 - **Context Compression**: Dialogue history management (see [6. Context Compression](#6-context-compression))
 - **Tool Security Guardrails**: Tool invocation permission checks (see [7. Tool Security Guardrails](#7-tool-security-guardrails))
 - **Memory Sensitive-Info Filtering**: Memory system privacy protection settings (see [8. Memory Sensitive-Info Filtering](#8-memory-sensitive-info-filtering))
+- **Skill Symphony and Skill Retrieval**: Skill-tree retrieval, skill score, and skill orchestration settings (see [9. Skill Symphony and Skill Retrieval Configuration](#9-skill-symphony-and-skill-retrieval-configuration))
 
-The panel also includes **Free Search Engine Configuration**, **Multi-Agent / Team Configuration**, **A2UI**, **Agentic Skill Retrieval**, **Memory Sensitive-Info Filtering**, and **Email Configuration** sections. Configure them as needed.
+The panel also includes **Free Search Engine Configuration**, **Multi-Agent / Team Configuration**, **A2UI**, and **Email Configuration** sections. Configure them as needed.
 
 > 💡 **Tip**: Model configuration (`api_base`, `api_key`, `model`, `model_provider`) is required; all other configurations are optional.
 
@@ -329,11 +330,88 @@ The system automatically identifies and filters the following types of sensitive
 
 ---
 
-## 9. Advanced Configuration
+## 9. Skill Symphony and Skill Retrieval Configuration
+
+Symphony settings control two related capabilities: **Skill Retrieval** finds candidate skills from installed skills, and **Skill Orchestration** uses the skill score to organize candidates into a confirmable, executable skill chain.
+
+### 9.1 Frontend switches
+
+The configuration panel exposes two related switches:
+
+| Switch | Config key | Default | Purpose |
+| --- | --- | --- | --- |
+| **Enable Skill Retrieval** | `symphony.skill_retrieval.enabled` | `false` | Registers skill-tree retrieval tools such as `skill_branch_explore`, `skill_branch_peek`, and `skill_index_build` |
+| **Enable Skill Symphony** | `symphony.enabled` | `false` | Registers skill score and orchestration tools such as `symphony_read_score`, `symphony_refresh_score`, and `symphony_compose_score` |
+
+The two switches are independent. Skill Retrieval answers "how to find candidate skills"; Skill Symphony answers "how to orchestrate candidate skills into a route". If only Skill Retrieval is enabled, the system only gets skill-tree retrieval. If only Skill Symphony is enabled, the system can read and refresh the skill score, but candidate skills do not automatically come from Skill Retrieval.
+
+### 9.2 Skill index and skill score
+
+Related pages are under **Skills** in the left sidebar:
+
+| Page | Purpose |
+| --- | --- |
+| **Skill Index** | Builds the local installed-skill tree index used for step-by-step retrieval |
+| **Skill Graph** | Builds and displays connectable relationships between skills for orchestration |
+
+After installing, uninstalling, or heavily modifying skills, rebuild the skill index. If the skill changes affect relationships between skills, also run an incremental build or full rebuild on the Skill Graph page.
+
+### 9.3 Symphony settings in the main config
+
+Advanced build, retrieval, and orchestration parameters are configured in the user runtime config file:
+
+```text
+~/.jiuwenswarm/config/config.yaml
+```
+
+Common settings:
+
+| Setting | Default | Description |
+| --- | --- | --- |
+| `symphony.paths.skills_root` | Empty string | Skill source directory; empty means the runtime default is used |
+| `symphony.paths.score_dir` | Empty string | Skill score artifact directory; empty means the runtime default is used |
+| `symphony.fingerprint.scan.max_depth` | Empty | Maximum skill-file scan depth; empty means the runtime default is used |
+| `symphony.fingerprint.extraction.workers` | `4` | Skill fingerprint extraction concurrency |
+| `symphony.fingerprint.extraction.batch_size` | `2` | Skill fingerprint extraction batch size |
+| `symphony.fingerprint.extraction.body_limit` | Empty | Body length limit for fingerprint extraction; empty means the runtime default is used |
+| `symphony.fingerprint.normalization.workers` | `4` | Skill fingerprint normalization concurrency |
+| `symphony.fingerprint.normalization.batch_size` | `2` | Skill fingerprint normalization batch size |
+| `symphony.fingerprint.normalization.duplicate_name_similarity_threshold` | `0.8` | Similarity threshold for detecting near-duplicate skill names |
+| `symphony.fingerprint.normalization.max_vocab_size` | Empty | Maximum dynamic vocabulary size; empty means the runtime default is used |
+| `symphony.build.workers` | `4` | Skill score build concurrency |
+| `symphony.build.batch_size` | `16` | Skill score build batch size |
+| `symphony.build.require_consensus` | `false` | Whether multiple judgments must agree before accepting a relationship |
+| `symphony.build.min_edge_confidence` | `0.1` | Minimum edge confidence written into the skill score |
+| `symphony.orchestration.mode` | `fast` | Orchestration mode. The current runtime uses the fast orchestration path |
+| `symphony.orchestration.top_k` | `3` | Maximum number of candidate routes retained during orchestration |
+| `symphony.orchestration.max_depth` | `4` | Maximum skill-chain search depth |
+| `symphony.orchestration.min_edge_confidence` | `0.3` | Minimum skill-score edge confidence preferred by orchestration |
+| `symphony.skill_retrieval.artifact_root` | Empty string | Skill index artifact directory; empty means the default workspace is used; can be supplied by `SYMPHONY_SKILL_RETRIEVAL_ROOT` |
+| `symphony.skill_retrieval.build.branching_factor` | `128` | Skill-tree split-threshold base; controls how coarse or fine the tree is |
+| `symphony.skill_retrieval.build.max_depth` | `6` | Maximum skill-tree depth |
+| `symphony.skill_retrieval.build.root_categories` | Empty string | Root taxonomy configuration used to stabilize the first tree layer |
+| `symphony.skill_retrieval.build.max_workers` | `2` | Skill index build concurrency |
+| `symphony.skill_retrieval.build.max_retries` | `2` | Retry count for failed LLM classification or grouping calls |
+| `symphony.skill_retrieval.build.request_timeout_seconds` | `420` | Timeout for one LLM build request |
+| `symphony.skill_retrieval.build.classification_batch_limit` | `32` | Maximum number of skills per classification call |
+| `symphony.skill_retrieval.build.discovery_seed` | `42` | Random seed used during build sampling for better reproducibility |
+| `symphony.skill_retrieval.build.postprocess_enabled` | `true` | Whether to clean up unclear or too-small branches after build |
+| `symphony.skill_retrieval.build.postprocess_max_passes` | `1` | Maximum number of postprocess passes after build |
+| `symphony.skill_retrieval.build.postprocess_min_skills` | `6` | Minimum skill-count reference used by postprocess branch cleanup |
+| `symphony.skill_retrieval.build.equivalence_enabled` | `false` | Whether to merge semantically duplicate branches |
+| `symphony.skill_retrieval.retrieve.compact_codes_enabled` | `false` | Whether retrieval uses more compact node codes |
+| `symphony.skill_retrieval.retrieve.flatten_tree` | `false` | Whether retrieval flattens the skill tree |
+| `symphony.skill_retrieval.retrieve.max_exposure_depth` | `1` | Maximum tree depth exposed by one `skill_branch_explore` call |
+
+> 📖 For details about Skill Retrieval, the skill score, and Skill Orchestration, see [Symphony: Skill Retrieval, Orchestration, and Dispatch](symphony.md).
+
+---
+
+## 10. Advanced Configuration
 
 Beyond the **Configuration** page, the product may use a **main configuration** for timeouts, temperature, heartbeat interval, context thresholds, and toggles that work together with **context compression**, **permissions**, **memory restrictions**, and similar UI switches. **This document does not state where those files live on disk**; for offline edits or bulk rollout, contact your administrator.
 
-### 9.1 Common logical keys (conceptual paths)
+### 10.1 Common logical keys (conceptual paths)
 
 These are **conceptual** paths in the main configuration for cross-reference with ops or release notes; they are **not** a one-to-one list of every UI field.
 
@@ -349,11 +427,11 @@ These are **conceptual** paths in the main configuration for cross-reference wit
 
 <a id="dotenv-configuration"></a>
 
-### 9.2 Runtime parameters outside the Configuration page
+### 10.2 Runtime parameters outside the Configuration page
 
 Fine-grained options for browser automation, network proxies, or some search paths may be supplied by the **runtime or deployment template** and **may not** appear on the **Configuration** page. Typical users only need required UI fields and business keys; leave the rest to admins or ops.
 
-### 9.3 Precedence (conceptual)
+### 10.3 Precedence (conceptual)
 
 Generally, from highest to lowest: **values you save in the web Configuration UI** → **environment-injected variables** → **built-in product defaults**. Exact behavior depends on your version and deployment.
 

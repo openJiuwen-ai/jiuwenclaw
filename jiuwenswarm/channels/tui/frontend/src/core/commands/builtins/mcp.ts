@@ -94,7 +94,7 @@ export function createMcpCommand(): SlashCommand {
               title: "MCP Servers",
               items: items.map((x, idx) => ({
                 label: String(idx + 1),
-                value: `${x.name} | ${x.transport}${x.enabled ? " · ✔ enabled" : " · ◯ disabled"}`,
+                value: `${x.name} | ${x.transport}${x.enabled ? " · ✔ enabled" : " · ○ disabled"}`,
               })),
             }),
           );

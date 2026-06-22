@@ -57,6 +57,10 @@ from jiuwenswarm.agents.harness.common.auto_memory import (
 )
 
 
+class _TeamPlanApprovalPayloadError(ValueError):
+    """Raised when a structured team.plan approval payload is malformed."""
+
+
 def _history_user_content(params: Any, query: Any) -> Any:
     """返回写入历史记录的用户消息内容.
 
@@ -665,21 +669,24 @@ class JiuWenSwarm:
 
         config_base = get_config()
         memory_mode = get_memory_mode(config_base)
-        query = request.params.get("query")
+        params = request.params if isinstance(request.params, dict) else {}
+        query = params.get("query")
         if query is None or query == "":
-            query = request.params.get("content", "")
+            query = params.get("content", "")
+        if self._is_malformed_team_plan_approval_payload(params):
+            raise _TeamPlanApprovalPayloadError(self._team_plan_approval_payload_error_message())
         channel = request.channel_id or (request.session_id.split('_')[0] if request.session_id else "web")
         language = config_base.get("preferred_language", "zh")
 
         # Get trusted directories from request params (passed by TUI)
         trusted_dirs: list[str] = []
-        raw_trusted_dirs = request.params.get("trusted_dirs")
+        raw_trusted_dirs = params.get("trusted_dirs")
         if isinstance(raw_trusted_dirs, list):
             for d in raw_trusted_dirs:
                 if isinstance(d, str) and d.strip():
                     trusted_dirs.append(d.strip())
         metadata = request.metadata or {}
-        param_project_dir = request.params.get("project_dir")
+        param_project_dir = params.get("project_dir")
         metadata_project_dir = metadata.get("project_dir") if isinstance(metadata, dict) else None
         project_dir = (
             param_project_dir.strip()
@@ -688,7 +695,7 @@ class JiuWenSwarm:
             if isinstance(metadata_project_dir, str) and metadata_project_dir.strip()
             else None
         )
-        param_cwd = request.params.get("cwd")
+        param_cwd = params.get("cwd")
         metadata_cwd = metadata.get("cwd") if isinstance(metadata, dict) else None
         cwd = (
             param_cwd.strip()
@@ -706,23 +713,33 @@ class JiuWenSwarm:
         if isinstance(query, InteractiveInput):
             final_query = query
         else:
-            answers = request.params.get("answers", [])
+            answers = params.get("answers", [])
             if answers:
-                request_id = request.params.get("request_id", "")
-                source = request.params.get("source", "")
-                interactive_input = self._build_interactive_input_from_answers(request_id, answers, source)
-                final_query = interactive_input if interactive_input is not None else build_user_prompt(
-                    query,
-                    files=request.params.get("files", {}),
-                    channel=channel,
-                    language=language,
-                    trusted_dirs=trusted_dirs,
-                    metadata=request.metadata,
+                request_id = params.get("request_id", "")
+                source = params.get("source", "")
+                raw_original_request = params.get("original_request") if source == "ask_user_interrupt" else ""
+                original_request = raw_original_request.strip() if isinstance(raw_original_request, str) else ""
+                interactive_input = self._build_interactive_input_from_answers(
+                    request_id,
+                    answers,
+                    source,
+                    original_request=original_request,
                 )
+                if interactive_input is not None:
+                    final_query = interactive_input
+                else:
+                    final_query = build_user_prompt(
+                        query,
+                        files=params.get("files", {}),
+                        channel=channel,
+                        language=language,
+                        trusted_dirs=trusted_dirs,
+                        metadata=request.metadata,
+                    )
             else:
                 final_query = build_user_prompt(
                     query,
-                    files=request.params.get("files", {}),
+                    files=params.get("files", {}),
                     channel=channel,
                     language=language,
                     trusted_dirs=trusted_dirs,
@@ -759,14 +776,14 @@ class JiuWenSwarm:
         if cwd:
             inputs["cwd"] = cwd
 
-        run = request.params.get("run")
+        run = params.get("run")
         if run:
             inputs["run"] = run
 
         # 处理 cron 字段：将 params.cron 转换为 run 结构
         # scheduler 使用 params.cron 标识定时任务，需要转换为 run.kind="cron"
         # cron 信息放到 RunContext.extra 中
-        cron = request.params.get("cron")
+        cron = params.get("cron")
         if cron:
             inputs["run"] = {
                 "kind": "cron",
@@ -777,7 +794,7 @@ class JiuWenSwarm:
         # directory; threaded into inputs["cwd"] which downstream init_cwd
         # installs onto openjiuwen's CwdState ContextVar. See E2A-protocol.md
         # section 11.6 for the wire contract and precedence rules.
-        workspace_dir = request.params.get("workspace_dir")
+        workspace_dir = params.get("workspace_dir")
         if isinstance(workspace_dir, str) and workspace_dir.strip():
             expanded = Path(workspace_dir).expanduser().resolve()
             try:
@@ -799,6 +816,25 @@ class JiuWenSwarm:
         # 返回原始 query（未经 build_user_prompt 包装）
         # Team 模式需要使用原始 query，而不是 JSON 包装后的 prompt
         return inputs, memory_mode, query
+
+    @staticmethod
+    def _team_plan_approval_payload_error_message() -> str:
+        return (
+            "Malformed team.plan approval answer: expected structured "
+            "`confirm_interrupt` payload with `plan_approval_kind`, "
+            "`plan_content`, and `plan_language`."
+        )
+
+    @classmethod
+    def _is_malformed_team_plan_approval_payload(cls, params: dict[str, Any]) -> bool:
+        return (
+            str(params.get("mode") or "").strip().lower() == "team.plan"
+            and str(params.get("source") or "").strip() == "confirm_interrupt"
+            and isinstance(params.get("answers"), list)
+            and bool(params.get("answers"))
+            and "plan_approval_kind" in params
+            and not cls._is_team_plan_confirm_answer(params)
+        )
 
     def _make_retry_without_a2ui_call(
             self,
@@ -838,7 +874,11 @@ class JiuWenSwarm:
 
     @staticmethod
     def _build_interactive_input_from_answers(
-            request_id: str, answers: list[dict], source: str = ""
+            request_id: str,
+            answers: list[dict],
+            source: str = "",
+            *,
+            original_request: str = "",
     ) -> Any:
         """从用户答案构建 InteractiveInput.
 
@@ -873,10 +913,16 @@ class JiuWenSwarm:
                         free_text_answer = answer_value
             if not answers_dict and free_text_answer:
                 answers_dict["__free_text__"] = free_text_answer
-            interactive_input.update(request_id, {"answers": answers_dict})
+            payload: dict[str, Any] = {"answers": answers_dict}
+            if isinstance(original_request, str) and original_request.strip():
+                payload["original_request"] = original_request.strip()
+            interactive_input.update(request_id, payload)
             logger.info(
-                "[JiuWenSwarm] AskUserRail InteractiveInput.update: request_id=%s payload=%s",
-                request_id, {"answers": answers_dict}
+                "[JiuWenSwarm] AskUserRail InteractiveInput.update: request_id=%s "
+                "answer_count=%s has_original_request=%s",
+                request_id,
+                len(answers_dict),
+                "original_request" in payload,
             )
             return interactive_input
 
@@ -1253,6 +1299,24 @@ class JiuWenSwarm:
             )
             return False
 
+    @staticmethod
+    def _is_team_plan_confirm_answer(params: dict[str, Any]) -> bool:
+        """Return True for structured team.plan approval answers."""
+        request_id = str(params.get("request_id") or "").strip()
+        answers = params.get("answers")
+        if not request_id or not isinstance(answers, list) or not answers:
+            return False
+
+        source = str(params.get("source") or "").strip()
+        if source != "confirm_interrupt":
+            return False
+        if str(params.get("plan_approval_kind") or "").strip() != "plan_approval":
+            return False
+        if "plan_content" not in params:
+            return False
+        plan_language = str(params.get("plan_language") or "").strip().lower()
+        return plan_language in {"cn", "en"}
+
     async def process_message(self, request: AgentRequest) -> AgentResponse:
         """处理非流式请求.
 
@@ -1261,10 +1325,11 @@ class JiuWenSwarm:
         if request.req_method == ReqMethod.CHAT_CANCEL:
             return await self._process_interrupt(request)
 
-        adapter = self._ensure_adapter(mode=self._adapter_mode_for_request(request))
-
         if request.req_method == ReqMethod.CHAT_ANSWER:
+            adapter = self._ensure_adapter(mode=self._adapter_mode_for_request(request))
             return await adapter.handle_user_answer(request)
+
+        adapter = self._ensure_adapter(mode=self._adapter_mode_for_request(request))
 
         heartbeat_response = await adapter.handle_heartbeat(request)
         if heartbeat_response is not None:
@@ -1296,7 +1361,7 @@ class JiuWenSwarm:
                 request_id=request.request_id,
                 channel_id=request.channel_id,
                 role="user",
-                content=query,
+                content=_history_user_content(request.params, query),
                 timestamp=time.time(),
                 channel_metadata=request.metadata,
                 mode=request.params.get("mode", "unknown"),
@@ -1307,7 +1372,16 @@ class JiuWenSwarm:
             request.request_id, request.channel_id, session_id, self._sdk_name,
         )
 
-        inputs, memory_mode, raw_query = self._build_inputs(request)
+        try:
+            inputs, memory_mode, raw_query = self._build_inputs(request)
+        except _TeamPlanApprovalPayloadError as exc:
+            return AgentResponse(
+                request_id=request.request_id,
+                channel_id=request.channel_id,
+                ok=False,
+                payload={"error": str(exc)},
+                metadata=request.metadata,
+            )
 
         # cloud memory: before chat hook
         if memory_mode == "cloud":
@@ -1423,7 +1497,7 @@ class JiuWenSwarm:
                 request_id=request.request_id,
                 channel_id=request.channel_id,
                 role="user",
-                content=query,
+                content=_history_user_content(request.params, query),
                 timestamp=time.time(),
                 channel_metadata=request.metadata,
                 mode=request.params.get("mode", "unknown"),
@@ -1434,15 +1508,32 @@ class JiuWenSwarm:
             request.request_id, request.channel_id, session_id, self._sdk_name,
         )
 
-        inputs, memory_mode, raw_query = self._build_inputs(request)
         rid = request.request_id
         cid = request.channel_id
+        try:
+            inputs, memory_mode, raw_query = self._build_inputs(request)
+        except _TeamPlanApprovalPayloadError as exc:
+            yield AgentResponseChunk(
+                request_id=rid,
+                channel_id=cid,
+                payload={"event_type": "chat.error", "error": str(exc)},
+                is_complete=False,
+            )
+            yield AgentResponseChunk(
+                request_id=rid,
+                channel_id=cid,
+                payload=None,
+                is_complete=True,
+            )
+            return
 
         # Team 模式：使用原始 query，而不是 build_user_prompt 包装后的内容
+        team_query_is_interactive_input = False
         if is_team_mode:
             from openjiuwen.core.session.interaction.interactive_input import InteractiveInput
 
-            if not isinstance(inputs.get("query"), InteractiveInput):
+            team_query_is_interactive_input = isinstance(inputs.get("query"), InteractiveInput)
+            if not team_query_is_interactive_input:
                 inputs["query"] = raw_query
             logger.info(
                 "[JiuWenSwarm] Team模式使用原始query: %s",
@@ -1467,15 +1558,23 @@ class JiuWenSwarm:
         is_team_first_request = True
         if is_team_mode:
             from jiuwenswarm.agents.harness.team import get_team_manager
+            from jiuwenswarm.server.runtime.agent_adapter.team_helpers import _team_session_has_runtime
+
             team_manager = get_team_manager(request.channel_id)
-            is_team_first_request = (
-                team_manager.active_session_id != session_id
-                and team_manager.pending_session_id != session_id
-                and not team_manager.has_stream_task(session_id)
-            )
+            if team_query_is_interactive_input:
+                # Interrupt-resume answers must bypass the session queue and
+                # flow straight into team_helpers, which knows how to wait for
+                # or recover a paused runtime before calling interact().
+                is_team_first_request = False
+            else:
+                is_team_first_request = not await _team_session_has_runtime(
+                    team_manager, session_id
+                )
             logger.info(
-                "[JiuWenSwarm] Team模式: session_id=%s is_first=%s",
-                session_id, is_team_first_request
+                "[JiuWenSwarm] Team模式: session_id=%s is_first=%s interactive_input=%s",
+                session_id,
+                is_team_first_request,
+                team_query_is_interactive_input,
             )
 
         stream_queue = asyncio.Queue()
@@ -1824,6 +1923,27 @@ class JiuWenSwarm:
             turn_index=turn_index,
             direction=direction,
         )
+
+    async def generate_btw_answer(self, session_id: str, question: str) -> dict[str, Any]:
+        """回答 /btw 侧问题：独立、无工具、单轮 LLM 查询。
+
+        将最近对话上下文 + 用户问题发送给模型，模型仅基于已有上下文回答，
+        不使用工具、不修改对话历史。
+
+        Args:
+            session_id: 会话ID
+            question: 用户侧问题
+
+        Returns:
+            包含 btw 结果的字典:
+            - status: "ok" | "no_context" | "failed"
+            - answer: 回答文本（仅当 status == "ok" 时）
+            - error: 错误信息（仅当 status == "failed" 时）
+        """
+        adapter = self._adapter
+        if adapter is None:
+            raise ValueError("Agent adapter not available")
+        return await adapter.generate_btw_answer(session_id=session_id, question=question)
 
     # ---------- 资源清理 ----------
 

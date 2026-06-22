@@ -275,6 +275,25 @@ class GatewayServer:
             if isinstance(key, tuple) and key[0] == channel_id and not getattr(client_ws, "closed", False)
         ]
 
+    @staticmethod
+    def _extract_routing_session_id(msg, *, include_top_level: bool = True) -> str | None:
+        """Best-effort session id from message fields for outbound event routing."""
+        if include_top_level:
+            sid = getattr(msg, "session_id", None)
+            if sid is not None and str(sid).strip():
+                return str(sid).strip()
+        payload = getattr(msg, "payload", None)
+        if isinstance(payload, dict):
+            sid = payload.get("session_id")
+            if sid is not None and str(sid).strip():
+                return str(sid).strip()
+        params = getattr(msg, "params", None)
+        if isinstance(params, dict):
+            sid = params.get("session_id")
+            if sid is not None and str(sid).strip():
+                return str(sid).strip()
+        return None
+
     def on_message(self, callback) -> None:
         self._on_message_cb = callback
 
@@ -428,20 +447,44 @@ class GatewayServer:
         if ws is None or bool(getattr(ws, "closed", False)):
             if ws is None:
                 channel_id = getattr(msg, "channel_id", None)
-                if channel_id and channel_id != "acp" and msg.type != "res":
-                    clients = self._find_channel_clients(channel_id)
-                    if clients:
+                # 多 TUI 窗口：有 session_id 时精确路由；无 session_id 时广播（如 cron 推送到 TUI）。
+                if channel_id and channel_id != "acp":
+                    if msg.type == "res":
+                        payload_data = dict(msg.payload or {}) if isinstance(msg.payload, dict) else {}
+                        frame = {"type": "res", "id": msg.id, "ok": bool(msg.ok), "payload": payload_data}
+                    else:
                         frame = _build_event_frame(msg)
-                        data = json.dumps(frame, ensure_ascii=False)
-                        logger.info(
-                            "[GatewayServer] broadcast fallback: channel_id=%s clients=%d id=%s",
-                            channel_id, len(clients), getattr(msg, "id", None),
-                        )
-                        await asyncio.gather(
-                            *[c.send(data) for c in clients],
-                            return_exceptions=True,
-                        )
-                        return
+
+                    session_id = self._extract_routing_session_id(msg, include_top_level=False)
+                    if session_id:
+                        session_key = self._client_route_key(channel_id, session_id)
+                        if session_key:
+                            client = self._session_to_client.get(session_key)
+                            if client is not None and not bool(getattr(client, "closed", False)):
+                                data = json.dumps(frame, ensure_ascii=False)
+                                try:
+                                    await client.send(data)
+                                except Exception:
+                                    logger.debug(
+                                        "[GatewayServer] session-routed send failed: session_id=%s",
+                                        session_id,
+                                        exc_info=True,
+                                    )
+                                return
+                    elif not self._extract_routing_session_id(msg, include_top_level=True):
+                        clients = self._find_channel_clients(channel_id)
+                        if clients:
+                            data = json.dumps(frame, ensure_ascii=False)
+                            logger.info(
+                                "[GatewayServer] broadcast fallback (no session_id): "
+                                "channel_id=%s clients=%d id=%s type=%s",
+                                channel_id, len(clients), getattr(msg, "id", None), msg.type,
+                            )
+                            await asyncio.gather(
+                                *[c.send(data) for c in clients],
+                                return_exceptions=True,
+                            )
+                            return
                 logger.warning(
                     "[GatewayServer] message dropped: no WebSocket client found for channel_id=%s session_id=%s id=%s",
                     getattr(msg, "channel_id", None),

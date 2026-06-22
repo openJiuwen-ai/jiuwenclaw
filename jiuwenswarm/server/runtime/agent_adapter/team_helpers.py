@@ -121,12 +121,10 @@ def sync_team_identity_metadata(
     ready_team_name: str,
     activation_kind: str | None,
 ) -> None:
-    """Persist team identity only for newly created team sessions."""
+    """Persist team identity when a team runtime becomes ready."""
     metadata = get_session_metadata(session_id)
     existing_team_name = str(metadata.get("team_name") or "").strip()
     normalized_kind = str(activation_kind or "").strip()
-    if normalized_kind not in _TEAM_CREATE_KINDS:
-        return
 
     if existing_team_name and existing_team_name != ready_team_name:
         logger.warning(
@@ -207,6 +205,18 @@ def _normalize_team_query(query: Any, *, channel_id: str | None, language: str) 
     if a2ui_prompt is not None:
         return a2ui_prompt
     return query
+
+
+async def _team_session_has_runtime(team_manager: Any, session_id: str) -> bool:
+    # Keep ordinary team first-request detection scoped to claw-local
+    # live markers only. Resumable Runner-pool entries are reserved for
+    # InteractiveInput recovery and must not make a fresh text request
+    # look like a follow-up after the previous round has ended.
+    return (
+        getattr(team_manager, "active_session_id", None) == session_id
+        or getattr(team_manager, "pending_session_id", None) == session_id
+        or bool(team_manager.has_stream_task(session_id))
+    )
 
 
 async def ensure_monitor_handlers_for_active_runtime(
@@ -400,14 +410,14 @@ def _is_leader_output(chunk: Any) -> bool:
 
 
 def _is_teammate_output(chunk: Any) -> bool:
-    """Return whether a team OutputSchema chunk is from a teammate."""
+    """Return whether a team OutputSchema chunk is from a non-leader member."""
     role = getattr(chunk, "role", None)
     if role is None:
         return False
-    if role == TeamRole.TEAMMATE:
-        return True
+    if role == TeamRole.LEADER:
+        return False
     role_value = getattr(role, "value", role)
-    return str(role_value).strip().lower() == TeamRole.TEAMMATE.value
+    return str(role_value).strip().lower() != TeamRole.LEADER.value
 
 
 def _enrich_teammate_event(parsed: dict[str, Any], chunk: Any) -> dict[str, Any]:
@@ -616,23 +626,75 @@ async def process_team_message_stream(
             session_id,
             exc,
         )
-    is_first_request = not team_manager.has_stream_task(session_id)
+    is_first_request = not await _team_session_has_runtime(
+        team_manager,
+        session_id,
+    )
     request_queue: asyncio.Queue | None = None
 
     hide_dm = False
     debug = False
     if is_first_request:
-        query, hide_dm, debug = _extract_query_directives(str(query or ""))
-        query_text = query if isinstance(query, str) else ""
-        if hide_dm or debug:
-            logger.info(
-                "[TeamHelpers] query directives captured for first team request: "
-                "channel_id=%s session_id=%s hide_dm=%s debug=%s",
-                _resolve_channel_id(channel_id),
-                session_id,
-                hide_dm,
-                debug,
-            )
+        from openjiuwen.core.session.interaction.interactive_input import InteractiveInput
+
+        if isinstance(query, InteractiveInput):
+            wait_for_resumable = getattr(team_manager, "wait_for_resumable_runtime", None)
+            restored = False
+            if callable(wait_for_resumable):
+                try:
+                    restored = bool(await wait_for_resumable(session_id))
+                except Exception as exc:
+                    logger.warning(
+                        "[TeamHelpers] waiting for resumable runtime failed: "
+                        "channel_id=%s session_id=%s error=%s",
+                        _resolve_channel_id(channel_id),
+                        session_id,
+                        exc,
+                    )
+            if restored or await _team_session_has_runtime(team_manager, session_id):
+                is_first_request = False
+                logger.info(
+                    "[TeamHelpers] interactive input recovered paused team runtime: "
+                    "channel_id=%s session_id=%s",
+                    _resolve_channel_id(channel_id),
+                    session_id,
+                )
+            else:
+                logger.warning(
+                    "[TeamHelpers] interactive input ignored because no active team runtime exists: "
+                    "channel_id=%s session_id=%s",
+                    _resolve_channel_id(channel_id),
+                    session_id,
+                )
+                yield AgentResponseChunk(
+                    request_id=rid,
+                    channel_id=channel_id,
+                    payload={
+                        "event_type": "chat.error",
+                        "error": "Team runtime is not active, please restart the task",
+                    },
+                    is_complete=False,
+                )
+                yield _team_processing_done_chunk(rid, channel_id, session_id)
+                yield AgentResponseChunk(
+                    request_id=rid,
+                    channel_id=channel_id,
+                    payload=None,
+                    is_complete=True,
+                )
+                return
+        else:
+            query, hide_dm, debug = _extract_query_directives(str(query or ""))
+            query_text = query if isinstance(query, str) else ""
+            if hide_dm or debug:
+                logger.info(
+                    "[TeamHelpers] query directives captured for first team request: "
+                    "channel_id=%s session_id=%s hide_dm=%s debug=%s",
+                    _resolve_channel_id(channel_id),
+                    session_id,
+                    hide_dm,
+                    debug,
+                )
 
     try:
         request_metadata = dict(request.metadata or {})
@@ -679,7 +741,7 @@ async def process_team_message_stream(
     team_name = team_spec.team_name
     team_skills_dir = _team_spec_skills_dir(team_spec)
     ensure_ready = getattr(team_manager, "ensure_team_shared_skills_ready_for_session", None)
-    if callable(ensure_ready):
+    if is_first_request and callable(ensure_ready):
         ensure_ready(session_id, team_spec)
 
     slash_result = await _handle_team_slash_command(
@@ -842,10 +904,7 @@ async def process_team_message_stream(
                         payload=event,
                         is_complete=False,
                     )
-                    if (
-                        isinstance(event, dict)
-                        and event.get("event_type") == "team.error"
-                    ):
+                    if isinstance(event, dict) and event.get("event_type") == "team.error":
                         break
                 except asyncio.TimeoutError:
                     if not team_manager.has_stream_task(session_id):
@@ -953,6 +1012,11 @@ async def _consume_stream_with_query(
             parsed = parse_stream_chunk(chunk)
             if parsed is not None:
                 if _is_duplicate_ask_user_question(parsed, emitted_ask_user_request_ids):
+                    continue
+                # Skip non-leader __interaction__ (permission ASK) — approval
+                # is routed internally via the leader; only leader
+                # interactions are forwarded to the frontend.
+                if not is_leader and parsed.get("event_type") == "chat.ask_user_question":
                     continue
                 parsed["rid"] = round_id
                 if is_teammate:
@@ -1067,8 +1131,12 @@ async def _consume_stream_with_query(
             },
         )
     finally:
-        get_team_manager(channel_id).clear_pending_runtime(session_id)
-        get_team_manager(channel_id).pop_stream_task(session_id)
+        team_manager = get_team_manager(channel_id)
+        team_manager.clear_pending_runtime(session_id)
+        clear_active_runtime = getattr(team_manager, "clear_active_runtime", None)
+        if callable(clear_active_runtime):
+            clear_active_runtime(session_id)
+        team_manager.pop_stream_task(session_id)
 
 
 async def _consume_monitor_events(
@@ -1198,7 +1266,7 @@ def _persist_team_history_event(
         role="assistant",
         content="",
         timestamp=timestamp,
-        event_type=event_type,
+        event_type=evt_type,
         extra={
             "session_id": session_id,
             "event": dict(payload),

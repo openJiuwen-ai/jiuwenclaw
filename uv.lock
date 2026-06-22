@@ -1796,7 +1796,7 @@ requires-dist = [
     { name = "lark-oapi", specifier = ">=1.5.3" },
     { name = "loguru", specifier = ">=0.7.3" },
     { name = "mutagen", specifier = ">=1.47.0" },
-    { name = "openjiuwen", specifier = "==0.1.15" },
+    { name = "openjiuwen", git = "https://gitcode.com/openJiuwen/agent-core.git?rev=develop" },
     { name = "openjiuwen", extras = ["postgres", "zmq"], marker = "extra == 'distribute'" },
     { name = "opentelemetry-api", specifier = ">=1.25.0" },
     { name = "opentelemetry-exporter-otlp-proto-grpc", specifier = ">=1.25.0" },
@@ -2656,7 +2656,7 @@ wheels = [
 [[package]]
 name = "openjiuwen"
 version = "0.1.15"
-source = { registry = "https://pypi.org/simple" }
+source = { git = "https://gitcode.com/openJiuwen/agent-core.git?rev=develop#b28977b725979e2d2b225171e3b3903547d00e17" }
 dependencies = [
     { name = "aiofiles" },
     { name = "aiohttp" },
@@ -2693,10 +2693,6 @@ dependencies = [
     { name = "tenacity" },
     { name = "tiktoken" },
     { name = "transformers" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/11/dd/50ab15bd464b4cd65ac23b6206bf283dbdcff35bc6c8b55864ed195cfd5a/openjiuwen-0.1.15.tar.gz", hash = "sha256:2e2dd3e53892ada5829c3bde4e3a56d849115a26414df437d3c98d996d4f180d", size = 2961542, upload-time = "2026-06-16T12:56:45.165Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/71/7e/63982fbd3477d7afa58495bdf5048c7fc52aba970760b5e5204b64b85666/openjiuwen-0.1.15-py3-none-any.whl", hash = "sha256:de8052b4d1b0516c88fcf68af2d2343466b554cfcdbcfe5ca3fa504ae9f34a63", size = 3920375, upload-time = "2026-06-16T12:56:42.399Z" },
 ]
 
 [package.optional-dependencies]

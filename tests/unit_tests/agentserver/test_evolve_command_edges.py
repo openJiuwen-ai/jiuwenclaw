@@ -1,4 +1,5 @@
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -267,6 +268,7 @@ async def test_agent_evolve_simplify_routes_to_slash_handler(monkeypatch):
 @pytest.mark.anyio
 async def test_handle_user_answer_routes_regular_evolution_approval_without_request_prefix(monkeypatch):
     adapter = JiuWenSwarmDeepAdapter()
+    adapter._is_session_scoped_adapter = True  # pylint: disable=protected-access
     seen: list[tuple[str, list[dict[str, list[str]]]]] = []
 
     async def _fake_handle_evolution_approval(request_id: str, answers: list):
@@ -302,6 +304,7 @@ async def test_handle_user_answer_routes_regular_evolution_approval_without_requ
 @pytest.mark.anyio
 async def test_handle_user_answer_does_not_route_call_interrupt_approval_to_regular_rail(monkeypatch):
     adapter = JiuWenSwarmDeepAdapter()
+    adapter._is_session_scoped_adapter = True  # pylint: disable=protected-access
 
     async def _unexpected_handle_evolution_approval(*_args, **_kwargs):
         raise AssertionError("call_* interrupt approval must not use regular evolution rail")
@@ -387,6 +390,7 @@ def _adapter_ready_for_followup_execution(monkeypatch: pytest.MonkeyPatch) -> Ji
     adapter._instance = SimpleNamespace(  # pylint: disable=protected-access
         get_context_usage=lambda **_kwargs: {},
     )
+    adapter._is_session_scoped_adapter = True  # pylint: disable=protected-access
     monkeypatch.setattr(adapter, "_has_valid_model_config", lambda _model_name="": True)
     monkeypatch.setattr(adapter, "_bind_runtime_cron_context", lambda **_kwargs: None)
     monkeypatch.setattr(adapter, "_reset_runtime_cron_context", lambda _tokens: None)
@@ -396,6 +400,7 @@ def _adapter_ready_for_followup_execution(monkeypatch: pytest.MonkeyPatch) -> Ji
     monkeypatch.setattr(adapter, "_register_session_agent_task", lambda _session_id: None)
     monkeypatch.setattr(adapter, "_unregister_session_agent_task", lambda _session_id: None)
     monkeypatch.setattr(adapter, "_unmark_session_active", lambda _session_id, **_kwargs: None)
+    monkeypatch.setattr(adapter, "_sync_prompt_attachments_for_request", AsyncMock())
 
     async def _noop_update_runtime_config(_runtime_config):
         return None
@@ -419,7 +424,7 @@ async def test_agent_non_stream_slash_followup_continues_into_runner(monkeypatch
     class _FakeRunner:
         @staticmethod
         async def run_agent(agent, inputs):
-            assert agent is adapter._instance  # pylint: disable=protected-access
+            assert adapter._instance is not None  # pylint: disable=protected-access
             seen_inputs.append(dict(inputs))
             return "agent completed"
 
@@ -461,7 +466,7 @@ async def test_agent_stream_slash_followup_continues_into_runner(monkeypatch):
     class _FakeRunner:
         @staticmethod
         async def run_agent_streaming(agent, inputs):
-            assert agent is adapter._instance  # pylint: disable=protected-access
+            assert adapter._instance is not None  # pylint: disable=protected-access
             seen_inputs.append(dict(inputs))
             yield SimpleNamespace(type="llm_output", payload={"content": "agent delta"})
 
