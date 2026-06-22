@@ -848,6 +848,11 @@ class VibeSkillChannel(BaseChannel):
                 session_id = session_ids[0]
                 session = await self._store.resolve_session(session_id)
                 if not session:
+                    logger.error(
+                        "[VibeSkillChannel] WS connect session not found: session_id=%r remote=%s",
+                        session_id,
+                        remote,
+                    )
                     self._clients.discard(ws)
                     had_ws_error = True
                     await ws.close(code=1008, reason="session_not_found")
@@ -858,6 +863,11 @@ class VibeSkillChannel(BaseChannel):
                         self._ws_sessions[ws] = set()
                     self._ws_sessions[ws].add(session_id)
                     self._session_to_ws[session_id] = ws
+            else:
+                logger.error(
+                    "[VibeSkillChannel] WS connect missing sessionID query: remote=%s",
+                    remote,
+                )
 
             await self._emit_ws_event(ws, "server.connected", {})
             logger.info("[VibeSkillChannel] server.connected sent")
@@ -1371,6 +1381,11 @@ class VibeSkillChannel(BaseChannel):
         if session_id:
             session = await self._store.resolve_session(session_id)
             if not session:
+                logger.error(
+                    "[VibeSkillChannel] message.send session not found: session_id=%r request_id=%s",
+                    session_id,
+                    request_id,
+                )
                 await self._send_ws_res_error(
                     ws, data, "session_not_found", source="message.send.session_not_found"
                 )
@@ -1380,6 +1395,10 @@ class VibeSkillChannel(BaseChannel):
             if bound:
                 session = await self._store.get_session(sorted(bound)[0])
             if not session:
+                logger.error(
+                    "[VibeSkillChannel] message.send missing sessionID: request_id=%s",
+                    request_id,
+                )
                 await self._send_ws_res_error(
                     ws, data, "missing_session_id", source="message.send.missing_session_id"
                 )
