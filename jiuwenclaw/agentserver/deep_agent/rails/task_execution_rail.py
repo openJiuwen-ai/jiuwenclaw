@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
 
-from openjiuwen.core.foundation.llm.schema.message import ToolMessage
+from openjiuwen.core.foundation.llm import ToolMessage
 from openjiuwen.core.session.agent import Session
 from openjiuwen.core.session.stream import OutputSchema
 from openjiuwen.core.single_agent.rail.base import AgentCallbackContext, InvokeInputs, ToolCallInputs
@@ -437,6 +437,7 @@ class TaskExecutionRail(DeepAgentRail):
 
     _BINDING_IN_PROGRESS = frozenset({"in_progress"})
     _BINDING_PENDING = frozenset({"pending", "waiting"})
+    _TODO_DONE_STATUSES = frozenset({"completed", "cancelled"})
 
     priority = 85
 
@@ -524,6 +525,22 @@ class TaskExecutionRail(DeepAgentRail):
                 map_summary,
             )
             self._todo_map_before_tool = dict(self._todo_map)
+            return
+
+        if tool_name in self.SKILL_COMPLETE_TOOLS:
+            if self._has_incomplete_todos(self._todo_map):
+                tc = ctx.inputs.tool_call
+                tool_call_id = str(getattr(tc, "id", "") or "")
+                msg = (
+                    "[SKILL_COMPLETE_BLOCKED] todo.json 中仍有未完成任务，"
+                    "请先用 todo_modify 将全部已完成项标为 completed。"
+                )
+                ctx.extra["_skip_tool"] = True
+                ctx.inputs.tool_result = msg
+                
+                ctx.inputs.tool_msg = ToolMessage(
+                    content=msg, tool_call_id=tool_call_id,
+                )
             return
 
         self._bind_context_to_in_progress_task()
@@ -768,6 +785,15 @@ class TaskExecutionRail(DeepAgentRail):
                 "total": total,
             }
         return mapped
+
+    @staticmethod
+    def _has_incomplete_todos(todo_map: dict[str, dict[str, Any]]) -> bool:
+        if not todo_map:
+            return False
+        return any(
+            str(task.get("status", "pending")).lower() not in TaskExecutionRail._TODO_DONE_STATUSES
+            for task in todo_map.values()
+        )
 
 
     async def _sync_todo_and_emit_transitions(self, ctx: AgentCallbackContext) -> None:

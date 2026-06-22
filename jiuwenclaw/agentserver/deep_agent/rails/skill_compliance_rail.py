@@ -464,6 +464,9 @@ class SkillComplianceRail(DeepAgentRail):
         session_id = self._resolve_session_id(ctx)
         state = _get_or_create_state(session_id)
 
+        if tool_name == "skill_complete" and "SKILL_COMPLETE_BLOCKED" in _str_content(tool_msg):
+            return
+
         try:
             self._handle_tool_event(
                 state, tool_call, tool_msg, tool_name, session_id, ctx=ctx,
