@@ -12,6 +12,11 @@ from collections.abc import Awaitable, Callable
 from typing import Any, AsyncIterator
 from urllib.parse import urlsplit
 
+try:
+    from websockets.exceptions import ConnectionClosed
+except ImportError:  # pragma: no cover - compatibility fallback
+    ConnectionClosed = Exception  # type: ignore[assignment]
+
 from jiuwenclaw.e2a.constants import (
     E2A_WIRE_SERVER_PUSH_KEY,
     FILE_TRANSFER_START,
@@ -31,6 +36,12 @@ logger = logging.getLogger(__name__)
 _STREAM_TRAILING_MESSAGE_GRACE_SECONDS = 0.7
 _UNARY_REQUEST_TIMEOUT_SECONDS = 60.0
 _WS_MAX_SIZE = 8 * 2**20
+_RECONNECT_INITIAL_DELAY_SECONDS = 1.0
+_RECONNECT_MAX_DELAY_SECONDS = 30.0
+
+
+class AgentServerConnectionError(RuntimeError):
+    """AgentServer WebSocket 断开或尚未完成就绪握手。"""
 
 
 def _wire_request_id_key(request_id: Any) -> str:
@@ -107,8 +118,10 @@ class WebSocketAgentServerClient(AgentServerClient):
 
     def __init__(self, *, ping_interval: float | None = 30.0, ping_timeout: float | None = 300.0) -> None:
         self._uri: str | None = None
+        self._target_uri: str | None = None
         self._ws: Any = None
         self._lock = asyncio.Lock()
+        self._connect_lock = asyncio.Lock()
         self._ping_interval = ping_interval
         self._ping_timeout = ping_timeout
         self._server_ready: bool = False
@@ -117,7 +130,9 @@ class WebSocketAgentServerClient(AgentServerClient):
         self._queue_lock = asyncio.Lock()  # 保护队列操作的锁
         self._cancelled_request_ids: set[str] = set()  # 已取消但等待清理的 request_id
         self._receiver_task: asyncio.Task | None = None
+        self._reconnect_task: asyncio.Task | None = None
         self._running = False
+        self._shutdown_requested = False
         # AgentServer send_push：旁路投递，勿进入与 request_id 绑定的 RPC 等待队列
         self._on_server_push: Callable[[dict[str, Any]], Awaitable[None]] | None = None
 
@@ -142,11 +157,14 @@ class WebSocketAgentServerClient(AgentServerClient):
         return self._server_ready
 
     async def connect(self, uri: str) -> None:
-        if self._ws is not None:
+        if self._ws is not None or self._reconnect_task is not None:
             await self.disconnect()
-        logger.info("[WebSocketAgentServerClient] 正在连接: %s", uri)
-        self._uri = uri
-        self._server_ready = False
+        self._target_uri = uri
+        self._shutdown_requested = False
+        await self._connect_once(uri)
+
+    async def _open_websocket(self, uri: str) -> Any:
+        """建立底层 WebSocket；拆分为方法便于连接管理和测试。"""
         origin = _build_ws_origin(uri)
         try:
             from websockets.legacy.client import connect as legacy_connect
@@ -154,7 +172,7 @@ class WebSocketAgentServerClient(AgentServerClient):
         except ImportError:
             import websockets
             connect_fn = websockets.connect
-        self._ws = await connect_fn(
+        return await connect_fn(
             uri,
             origin=origin,
             ping_interval=self._ping_interval,
@@ -162,42 +180,69 @@ class WebSocketAgentServerClient(AgentServerClient):
             close_timeout=5.0,
             max_size=_WS_MAX_SIZE,
         )
-        logger.info("[WebSocketAgentServerClient] 已连接: %s", uri)
 
-        # 读取 AgentServer 的 connection.ack 事件
-        try:
-            raw = await asyncio.wait_for(self._ws.recv(), timeout=5.0)
-            data = json.loads(raw)
-            logger.info(
-                "[WebSocketAgentServerClient] connect 首帧: type=%s event=%s request_id=%s",
-                data.get("type"),
-                data.get("event"),
-                data.get("request_id"),
-            )
-            if data.get("type") == "event" and data.get("event") == "connection.ack":
-                self._server_ready = True
-                logger.info("[WebSocketAgentServerClient] 收到 connection.ack，AgentServer 已就绪")
-            else:
-                logger.warning(
-                    "[WebSocketAgentServerClient] 首帧非 connection.ack: %s",
-                    data.get("type"),
-                )
-        except asyncio.TimeoutError:
-            logger.warning("[WebSocketAgentServerClient] 等待 connection.ack 超时")
-        except Exception as e:
-            logger.warning("[WebSocketAgentServerClient] 读取 connection.ack 失败: %s", e)
+    async def _connect_once(self, uri: str) -> None:
+        """建立一次连接；只有收到 connection.ack 后才发布为可用连接。"""
+        async with self._connect_lock:
+            if self._shutdown_requested:
+                raise AgentServerConnectionError("AgentServer 客户端已停止")
+            if self._connection_is_usable():
+                return
 
-        # 启动消息接收和分发任务
-        self._running = True
-        self._receiver_task = asyncio.create_task(self._message_receiver_loop())
-        logger.info("[WebSocketAgentServerClient] 消息接收任务已启动")
-
-    async def _message_receiver_loop(self) -> None:
-        """后台任务：从 WebSocket 接收消息并根据 request_id 分发到对应队列."""
-        try:
-            while self._running and self._ws is not None:
+            stale_ws = self._ws
+            self._ws = None
+            self._server_ready = False
+            if stale_ws is not None:
                 try:
-                    raw = await self._ws.recv()
+                    await stale_ws.close()
+                except Exception as exc:
+                    logger.debug("关闭旧 AgentServer WebSocket 失败: %s", exc)
+
+            logger.info("[WebSocketAgentServerClient] 正在连接: %s", uri)
+            ws = await self._open_websocket(uri)
+            try:
+                raw = await asyncio.wait_for(ws.recv(), timeout=5.0)
+                data = json.loads(raw)
+                logger.info(
+                    "[WebSocketAgentServerClient] connect 首帧: type=%s event=%s request_id=%s",
+                    data.get("type"),
+                    data.get("event"),
+                    data.get("request_id"),
+                )
+                if not (
+                    data.get("type") == "event"
+                    and data.get("event") == "connection.ack"
+                ):
+                    raise AgentServerConnectionError(
+                        "AgentServer 首帧不是 connection.ack，连接不可用"
+                    )
+            except Exception:
+                try:
+                    await ws.close()
+                except Exception as close_exc:
+                    logger.debug("ACK 失败后关闭 AgentServer WebSocket 失败: %s", close_exc)
+                raise
+
+            if self._shutdown_requested:
+                await ws.close()
+                raise AgentServerConnectionError("AgentServer 客户端已停止")
+
+            self._ws = ws
+            self._uri = uri
+            self._server_ready = True
+            self._running = True
+            self._receiver_task = asyncio.create_task(self._message_receiver_loop(ws))
+            logger.info("[WebSocketAgentServerClient] 已连接并收到 connection.ack: %s", uri)
+            logger.info("[WebSocketAgentServerClient] 消息接收任务已启动")
+
+    async def _message_receiver_loop(self, ws: Any | None = None) -> None:
+        """后台任务：从 WebSocket 接收消息并根据 request_id 分发到对应队列."""
+        active_ws = ws if ws is not None else self._ws
+        disconnect_error: AgentServerConnectionError | None = None
+        try:
+            while self._running and active_ws is not None and self._ws is active_ws:
+                try:
+                    raw = await active_ws.recv()
                     data = json.loads(raw)
                     meta = data.get("metadata")
                     if isinstance(meta, dict) and meta.get(E2A_WIRE_SERVER_PUSH_KEY):
@@ -232,15 +277,99 @@ class WebSocketAgentServerClient(AgentServerClient):
                             )
                 except asyncio.CancelledError:
                     break
+                except ConnectionClosed as exc:
+                    disconnect_error = AgentServerConnectionError(
+                        "AgentServer WebSocket 已断开 "
+                        f"(code={getattr(exc, 'code', None)}, reason={getattr(exc, 'reason', None)})"
+                    )
+                    logger.warning(
+                        "[WebSocketAgentServerClient] WebSocket 连接关闭: code=%s reason=%s",
+                        getattr(exc, "code", None),
+                        getattr(exc, "reason", None),
+                    )
+                    break
                 except Exception as e:
-                    logger.exception("[WebSocketAgentServerClient] 消息接收循环异常: %s", e)
-                    await asyncio.sleep(0.1)  # 避免快速循环
+                    disconnect_error = AgentServerConnectionError(
+                        f"AgentServer WebSocket 接收失败: {e}"
+                    )
+                    logger.exception("[WebSocketAgentServerClient] 消息接收循环异常退出: %s", e)
+                    break
         finally:
+            if disconnect_error is not None:
+                await self._handle_connection_lost(active_ws, disconnect_error)
             logger.info("[WebSocketAgentServerClient] 消息接收任务已停止")
 
+    async def _handle_connection_lost(
+        self, ws: Any, error: AgentServerConnectionError
+    ) -> None:
+        """下线失效连接、失败所有等待者，并启动唯一重连任务。"""
+        if self._ws is not ws:
+            return
+        self._running = False
+        self._server_ready = False
+        self._ws = None
+        self._uri = None
+        try:
+            await ws.close()
+        except Exception as exc:
+            logger.debug("断链后关闭 AgentServer WebSocket 失败: %s", exc)
+        await self._fail_all_pending_requests(error)
+        self._schedule_reconnect()
+
+    async def _fail_all_pending_requests(self, error: BaseException) -> None:
+        async with self._queue_lock:
+            for queue in self._message_queues.values():
+                queue.put_nowait(error)
+
+    def _schedule_reconnect(self) -> None:
+        if self._shutdown_requested or not self._target_uri:
+            return
+        if self._reconnect_task is not None and not self._reconnect_task.done():
+            return
+        self._reconnect_task = asyncio.create_task(
+            self._reconnect_loop(), name="agent-server-reconnect"
+        )
+
+    async def _reconnect_loop(self) -> None:
+        delay = _RECONNECT_INITIAL_DELAY_SECONDS
+        try:
+            while not self._shutdown_requested and self._target_uri:
+                logger.info(
+                    "[WebSocketAgentServerClient] %.1f 秒后重连 AgentServer: %s",
+                    delay,
+                    self._target_uri,
+                )
+                await asyncio.sleep(delay)
+                try:
+                    await self._connect_once(self._target_uri)
+                    logger.info("[WebSocketAgentServerClient] AgentServer 重连成功")
+                    return
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    logger.warning(
+                        "[WebSocketAgentServerClient] AgentServer 重连失败: %s", exc
+                    )
+                    delay = min(delay * 2, _RECONNECT_MAX_DELAY_SECONDS)
+        finally:
+            if self._reconnect_task is asyncio.current_task():
+                self._reconnect_task = None
+
     async def disconnect(self) -> None:
+        self._shutdown_requested = True
+        self._target_uri = None
+        reconnect_task = self._reconnect_task
+        self._reconnect_task = None
+        if reconnect_task is not None and reconnect_task is not asyncio.current_task():
+            reconnect_task.cancel()
+            try:
+                await reconnect_task
+            except asyncio.CancelledError:
+                pass
+
         # 停止接收任务
         self._running = False
+        self._server_ready = False
         if self._receiver_task and not self._receiver_task.done():
             self._receiver_task.cancel()
             try:
@@ -249,8 +378,10 @@ class WebSocketAgentServerClient(AgentServerClient):
                 pass
             self._receiver_task = None
 
-        # 清理所有队列
-        self._message_queues.clear()
+        # 唤醒等待中的 RPC；各请求会在 finally 中自行移除队列。
+        await self._fail_all_pending_requests(
+            AgentServerConnectionError("AgentServer WebSocket 客户端已断开")
+        )
 
         # 关闭 WebSocket
         if self._ws is None:
@@ -265,8 +396,16 @@ class WebSocketAgentServerClient(AgentServerClient):
         logger.info("[WebSocketAgentServerClient] 已断开")
 
     def _ensure_connected(self) -> None:
-        if self._ws is None:
-            raise RuntimeError("未连接 AgentServer，请先调用 connect(uri)")
+        if not self._connection_is_usable():
+            raise AgentServerConnectionError(
+                "AgentServer WebSocket 未连接、已关闭或尚未收到 connection.ack"
+            )
+
+    def _connection_is_usable(self) -> bool:
+        ws = self._ws
+        if ws is None or not self._server_ready:
+            return False
+        return not bool(getattr(ws, "closed", False))
 
     async def send_request(self, envelope: E2AEnvelope) -> AgentResponse:
         self._ensure_connected()
@@ -313,6 +452,8 @@ class WebSocketAgentServerClient(AgentServerClient):
 
             try:
                 data = await asyncio.wait_for(queue.get(), timeout=_UNARY_REQUEST_TIMEOUT_SECONDS)
+                if isinstance(data, BaseException):
+                    raise data
             except asyncio.TimeoutError as e:
                 logger.warning(
                     "[WebSocketAgentServerClient] 非流式请求超时: request_id=%s timeout=%ss",
@@ -398,6 +539,8 @@ class WebSocketAgentServerClient(AgentServerClient):
                         break
                 else:
                     data = await queue.get()
+                if isinstance(data, BaseException):
+                    raise data
                 logger.debug(
                     "[WebSocketAgentServerClient] 收到流式事件 wire: request_id=%s kind=%s status=%s",
                     data.get("request_id"),
