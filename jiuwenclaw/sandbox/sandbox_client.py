@@ -102,10 +102,21 @@ class SandboxClient:
         local_path: str,
         remote_path: str,
         sandbox_id: str,
+        sidecar: bool = False,
     ) -> ExecutionResult:
         return ExecutionResult(
             success=True,
             output=f"placeholder upload_file: {local_path} -> {remote_path} (sandbox_id={sandbox_id})",
+        )
+
+    async def upload_apikey_to_sidecar(
+        self,
+        sandbox_id: str,
+        apikey: str,
+    ) -> ExecutionResult:
+        return ExecutionResult(
+            success=True,
+            output=f"placeholder upload_apikey_to_sidecar: sandbox_id={sandbox_id}",
         )
 
     async def download_file(
