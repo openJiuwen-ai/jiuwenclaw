@@ -50,7 +50,9 @@ def enabled_skills_from_environ() -> str | None:
     SkillUseRail needs the raw comma-separated string for _normalize_name_list.
     Future refactors may move this into config.yaml as well.
     """
-    raw = os.environ.get(ENABLED_SKILLS_ENV)
+    from jiuwenclaw.local_env_config import read_env
+
+    raw = read_env(ENABLED_SKILLS_ENV)
     if raw is None:
         return None
     if not raw.strip():

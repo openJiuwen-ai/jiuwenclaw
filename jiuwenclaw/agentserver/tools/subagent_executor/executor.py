@@ -129,6 +129,10 @@ class ForkAgentExecutor:
         self._default_role_prompts = default_role_prompts or {}
         self._active_fork_agents: dict[str, Any] = {}
 
+    def set_model(self, model: Model) -> None:
+        """Update default model for subagent execution (e.g. after config hot-reload)."""
+        self._model = model
+
     _FORWARDED_MODEL_EVENTS = {
         "chat.delta",
         "chat.reasoning",

@@ -5,12 +5,25 @@
 from __future__ import annotations
 
 import logging
-import os
 import uuid
 from pathlib import Path
 from typing import Any, TYPE_CHECKING
 
 from jiuwenclaw.e2a.acp.protocol import build_acp_initialize_result
+from jiuwenclaw.agentserver.reload_result import (
+    ReloadAggregateResult,
+    ReloadResult,
+    log_agent_config_hot_reload_replay,
+)
+from jiuwenclaw.agentserver.memory import (
+    acquire_memory_cache_session,
+    release_memory_cache_session,
+)
+from jiuwenclaw.local_env_config import (
+    apply_env_overrides_to_active,
+    promote_staged_env,
+)
+from jiuwenclaw.utils import get_agent_workspace_dir
 
 if TYPE_CHECKING:
     from jiuwenclaw.agentserver.interface import JiuWenClaw
@@ -55,6 +68,7 @@ class AgentManager:
             user_workspace_dir: Path | None = None,
             config_base: dict[str, Any] | None = None,
             env_overrides: dict[str, Any] | None = None,
+            last_reload_trace_id: str | None = None,
     ) -> None:
         """初始化 AgentManager.
 
@@ -74,19 +88,15 @@ class AgentManager:
         self._latest_config_base: dict[str, Any] | None = config_base
         self._latest_env_overrides: dict[str, Any] = {}
 
-        # 应用初始 env_overrides
+        # 应用初始 env_overrides（冷启动，尚无在途 session）
         if env_overrides is not None and isinstance(env_overrides, dict):
             self._latest_env_overrides = dict(env_overrides)
-            for env_key, env_value in env_overrides.items():
-                key = str(env_key)
-                if env_value is None:
-                    os.environ.pop(key, None)
-                else:
-                    os.environ[key] = str(env_value)
+            apply_env_overrides_to_active(env_overrides)
 
         self.agent_id = agent_id
         self.service_id = service_id
         self.user_workspace_dir = user_workspace_dir
+        self._last_reload_trace_id = last_reload_trace_id
         logger.info(
             "[AgentManager] 初始化: agent_id=%s, service_id=%s, workspace=%s, has_config=%s",
             agent_id,
@@ -95,7 +105,24 @@ class AgentManager:
             config_base is not None,
         )
 
-    # pylint: disable=protected-access
+    @staticmethod
+    def _build_session_key(channel_id: str, mode: str, session_id: str) -> str:
+        return f"{channel_id}:{mode}:{session_id}"
+
+    def _memory_workspace_dir(self) -> str:
+        return str(self.user_workspace_dir or get_agent_workspace_dir())
+
+    async def _sync_agent_memory_cache(self, session_key: str, agent: "JiuWenClaw") -> None:
+        fingerprint = await agent.get_memory_cache_fingerprint()
+        if not fingerprint:
+            return
+        await acquire_memory_cache_session(
+            session_key,
+            "default",
+            self._memory_workspace_dir(),
+            fingerprint,
+        )
+
     async def _create_agent(
         self,
         agent_key: str,
@@ -116,12 +143,6 @@ class AgentManager:
         """
         from jiuwenclaw.agentserver.interface import JiuWenClaw
 
-        for env_key, env_value in self._latest_env_overrides.items():
-            key = str(env_key)
-            if env_value is None:
-                os.environ.pop(key, None)
-            else:
-                os.environ[key] = str(env_value)
         logger.info("[AgentManager] Creating %s agent (mode=%s, session=%s)", agent_key, mode, session_id,
                    extra={'user_visible': 'progress'})
 
@@ -130,8 +151,12 @@ class AgentManager:
             agent_id=self.agent_id,
             service_id=self.service_id,
         )
-        agent._agent_name = f"agent_{self.agent_id}_{self.service_id}_{agent_key}_{session_id}"
-        await agent.create_instance(config, mode=mode, session_id=session_id)
+        merged_config = dict(config) if isinstance(config, dict) else {}
+        merged_config.setdefault(
+            "agent_name",
+            f"agent_{self.agent_id}_{self.service_id}_{agent_key}_{session_id}",
+        )
+        await agent.create_instance(merged_config, mode=mode, session_id=session_id)
         self.agents.setdefault(agent_key, {}).setdefault(mode, {})[session_id] = agent
 
         # 创建后如果有保存的配置，重放 reload_agent_config
@@ -141,12 +166,23 @@ class AgentManager:
                     config_base=self._latest_config_base,
                     env_overrides=self._latest_env_overrides,
                 )
-                logger.info(
-                    "[AgentManager] Replayed reload_agent_config for %s agent (session=%s)",
-                    agent_key, session_id
+                log_agent_config_hot_reload_replay(
+                    logger,
+                    reload_trace_id=self._last_reload_trace_id,
+                    session=session_id,
+                    agent_key=agent_key,
+                    mode=mode,
+                    config=self._latest_config_base,
+                    env=self._latest_env_overrides,
                 )
             except Exception as e:
                 logger.warning("[AgentManager] Replay reload_agent_config failed: %s", e)
+
+        session_key = self._build_session_key(agent_key, mode, session_id)
+        try:
+            await self._sync_agent_memory_cache(session_key, agent)
+        except Exception as e:
+            logger.warning("[AgentManager] sync memory cache binding failed: %s", e)
 
         logger.info("[AgentManager] %s agent created for tenant %s (session=%s)", agent_key, self.agent_id, session_id,
                    extra={'user_visible': 'progress'})
@@ -248,6 +284,7 @@ class AgentManager:
             mode: str = "agent",
             workspace_dir: str = None,
             session_id: str | None = None,
+            request: Any | None = None,
     ) -> "JiuWenClaw | None":
         """获取 Agent 实例（自动创建）.
 
@@ -278,6 +315,8 @@ class AgentManager:
                 **config,
                 **_build_acp_agent_config()
             }
+        if request is not None:
+            config = {**config, "request": request}
         logger.info(
             f"[AgentManager] 创建新的Agent: channel={channel_id} mode={mode} session={effective_session_id}",
             extra={'user_visible': 'critical'}
@@ -324,19 +363,20 @@ class AgentManager:
                         claws.append(claw)
         return claws
 
-    async def reload_agents_config(self, config, env) -> None:
-        """reload agent config"""
-        # 保存配置（用于后续创建的 agent 重放）
+    async def reload_agents_config(
+        self, config, env, *, reload_trace_id: str | None = None
+    ) -> ReloadAggregateResult:
+        """Reload config for all cached agents in this tenant.
+
+        Env overrides must already be staged by the caller (``TenantAgentPool``).
+        """
+        if reload_trace_id:
+            self._last_reload_trace_id = reload_trace_id
+        previous_config = self._latest_config_base
         self._latest_env_overrides = dict(env) if isinstance(env, dict) else {}
         self._latest_config_base = config
 
-        for env_key, env_value in self._latest_env_overrides.items():
-            key = str(env_key)
-            if env_value is None:
-                os.environ.pop(key, None)
-            else:
-                os.environ[key] = str(env_value)
-
+        aggregate = ReloadAggregateResult()
         for channel_id, channel_agents in self.agents.items():
             if not isinstance(channel_agents, dict):
                 logger.warning(
@@ -345,13 +385,37 @@ class AgentManager:
                     type(channel_agents),
                 )
                 continue
-            for mode_agents in channel_agents.values():
-                for agent in mode_agents.values():
-                    await agent.reload_agent_config(
-                        config_base=config,
-                        env_overrides=env,
-                    )
-            logger.info(f"channel {channel_id} reload agent config success.")
+            for mode, mode_agents in channel_agents.items():
+                for session_id, agent in mode_agents.items():
+                    session_key = f"{channel_id}:{mode}:{session_id}"
+                    try:
+                        result = await agent.reload_agent_config(
+                            config_base=config,
+                            env_overrides=env,
+                        )
+                        aggregate.merge(result, session_key=session_key)
+                        if result.applied or result.deferred:
+                            try:
+                                await self._sync_agent_memory_cache(session_key, agent)
+                            except Exception as exc:
+                                logger.warning(
+                                    "[AgentManager] sync memory cache after reload failed for %s: %s",
+                                    session_key,
+                                    exc,
+                                )
+                    except Exception as exc:
+                        logger.exception(
+                            "[AgentManager] reload_agent_config failed for %s", session_key
+                        )
+                        aggregate.failed.append(
+                            {"session": session_key, "error": str(exc)}
+                        )
+            logger.info("channel %s reload agent config finished.", channel_id)
+
+        if not self.is_working():
+            promote_staged_env()
+
+        return aggregate
 
     async def process_message(self, request: Any) -> Any:
         """处理非流式请求.
@@ -383,6 +447,7 @@ class AgentManager:
             mode=mode,
             workspace_dir=workspace_dir,
             session_id=session_id,
+            request=request,
         )
         if agent is None:
             raise RuntimeError(f"[AgentManager] No agent available for channel {channel_id}")
@@ -445,6 +510,7 @@ class AgentManager:
             mode=mode,
             workspace_dir=workspace_dir,
             session_id=session_id,
+            request=request,
         )
         if agent is None:
             raise RuntimeError(f"[AgentManager] No agent available for channel {channel_id}")
@@ -516,6 +582,12 @@ class AgentManager:
             session_agents = self.agents.get(channel_id, {}).get(mode, {})
             agent = session_agents.pop(session_id, None)
 
+            session_key = self._build_session_key(channel_id, mode, session_id)
+            try:
+                await release_memory_cache_session(session_key)
+            except Exception as exc:
+                logger.warning("[AgentManager] release memory cache failed for %s: %s", session_key, exc)
+
             if agent:
                 if hasattr(agent, "cleanup"):
                     await agent.cleanup()
@@ -528,15 +600,29 @@ class AgentManager:
 
     async def cleanup(self) -> None:
         """清理所有 agent 实例."""
-        for key, channel_agents in list(self.agents.items()):
-            for mode_agents in channel_agents.values():
+        for channel_id, channel_agents in list(self.agents.items()):
+            if not isinstance(channel_agents, dict):
+                continue
+            for mode, mode_agents in channel_agents.items():
+                if not isinstance(mode_agents, dict):
+                    continue
+                for session_id in list(mode_agents.keys()):
+                    session_key = self._build_session_key(channel_id, mode, session_id)
+                    try:
+                        await release_memory_cache_session(session_key)
+                    except Exception as exc:
+                        logger.warning(
+                            "[AgentManager] release memory cache failed for %s: %s",
+                            session_key,
+                            exc,
+                        )
                 for agent in mode_agents.values():
                     if hasattr(agent, "cleanup"):
                         try:
                             await agent.cleanup()
                         except Exception as e:
                             logger.warning("[AgentManager] Agent cleanup failed: %s", e)
-            del self.agents[key]
+            del self.agents[channel_id]
         self._client_capabilities_by_channel.clear()
         logger.info("[AgentManager] All agents cleaned up for tenant %s", self.agent_id)
 

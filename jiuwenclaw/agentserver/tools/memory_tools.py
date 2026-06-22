@@ -10,6 +10,8 @@ from typing import Optional, Dict, Any, List
 
 from openjiuwen.core.foundation.tool.tool import tool
 
+from jiuwenclaw.agentserver.reload_result import memory_cache_fingerprint
+from jiuwenclaw.config import get_config
 from jiuwenclaw.utils import logger
 
 from ..memory import (
@@ -22,6 +24,7 @@ from ..memory import (
     is_memory_enabled,
     get_memory_mode,
     DEFAULT_WORKSPACE_DIR,
+    get_bound_memory_cache_fingerprint,
 )
 from ..memory.external_memory_config import is_builtin_memory_allowed
 
@@ -38,11 +41,83 @@ def is_group_chat_mode() -> bool:
     return _GROUP_CHAT_MODE.get()
 
 
-_global_manager: Optional[MemoryIndexManager | MemoryWikiManager] = None
-_global_workspace_dir: str = "."
-_global_settings: Optional[MemorySettings] = None
-_global_wiki_settings: Optional[WikiMemorySettings] = None
-_global_agent_id: str = "default"
+_default_agent_id: str = "default"
+
+
+def _resolve_workspace_dir(workspace_dir: str | None = None) -> str:
+    if workspace_dir and workspace_dir != ".":
+        return workspace_dir
+    from jiuwenclaw.utils import get_agent_workspace_dir
+    return str(get_agent_workspace_dir())
+
+
+def _resolve_embed_fingerprint(explicit: str | None = None) -> str:
+    if explicit:
+        return explicit
+    bound = get_bound_memory_cache_fingerprint()
+    if bound:
+        return bound
+    return memory_cache_fingerprint(get_config())
+
+
+async def _get_memory_manager(
+    *,
+    workspace_dir: str | None = None,
+    agent_id: str = "default",
+    memory_mode: str | None = None,
+    embed_fingerprint: str | None = None,
+) -> Optional[MemoryIndexManager | MemoryWikiManager]:
+    if not is_builtin_memory_allowed():
+        return None
+
+    mode = memory_mode or get_memory_mode()
+    if not is_memory_enabled(mode):
+        return None
+
+    resolved_workspace = _resolve_workspace_dir(workspace_dir)
+    fp = _resolve_embed_fingerprint(embed_fingerprint)
+    settings = create_memory_settings(resolved_workspace)
+
+    try:
+        if mode == "wiki":
+            wiki_settings = create_wiki_memory_settings()
+            return await MemoryWikiManager.get(
+                agent_id=agent_id,
+                workspace_dir=resolved_workspace,
+                settings=settings,
+                embed_fingerprint=fp,
+                max_iterations=wiki_settings.max_iterations,
+                query_timeout_s=wiki_settings.query_timeout_s,
+                language=wiki_settings.language,
+            )
+        return await MemoryIndexManager.get(
+            agent_id=agent_id,
+            workspace_dir=resolved_workspace,
+            settings=settings,
+            embed_fingerprint=fp,
+        )
+    except Exception as e:
+        logger.error("[MemoryTools] Failed to resolve memory manager: %s", e, exc_info=True)
+        return None
+
+
+def set_global_memory_manager(
+    manager: Optional[MemoryIndexManager | MemoryWikiManager],
+    workspace_dir: str = ".",
+    settings: Optional[MemorySettings] = None,
+    agent_id: str = "default",
+):
+    """Deprecated: memory managers are fingerprint-scoped; kept for test compatibility."""
+    del manager, workspace_dir, settings, agent_id
+
+
+def reset_global_memory_manager(
+    *,
+    agent_id: str | None = None,
+    workspace_dir: str | None = None,
+) -> None:
+    """Deprecated no-op; use cache_registry release helpers instead."""
+    del agent_id, workspace_dir
 
 
 def _is_path_traversal_attempt(normalized: str) -> bool:
@@ -89,37 +164,13 @@ def _validate_memory_path(path: str) -> tuple[bool, str]:
     return (False, f"Path must be memory/YYYY-MM-DD.md, memory/USER.md, or memory/MEMORY.md. Got: {path}")
 
 
-def set_global_memory_manager(
-    manager: Optional[MemoryIndexManager | MemoryWikiManager],
-    workspace_dir: str = ".",
-    settings: Optional[MemorySettings] = None,
-    agent_id: str = "default"
-):
-    """Set global memory manager for tool functions."""
-    global _global_manager, _global_workspace_dir, _global_settings, _global_agent_id
-    _global_manager = manager
-    _global_workspace_dir = workspace_dir
-    _global_settings = settings
-    _global_agent_id = agent_id
-
-
 async def init_memory_manager_async(
     workspace_dir: str = ".",
     agent_id: str = "default",
     memory_mode: str = "plan",
+    embed_fingerprint: str | None = None,
 ) -> Optional[MemoryIndexManager | MemoryWikiManager]:
-    """初始化记忆管理器。
-
-    Args:
-        workspace_dir: 工作区目录
-        agent_id: Agent ID
-        memory_mode: 记忆模式
-
-    Returns:
-        MemoryIndexManager 实例，如果 memory 未启用则返回 None
-    """
-    global _global_manager, _global_workspace_dir, _global_settings, _global_agent_id, _global_wiki_settings
-
+    """Initialize memory manager for the given workspace and config fingerprint."""
     if not is_builtin_memory_allowed():
         logger.info("Memory system is disabled (engine gate)")
         return None
@@ -127,84 +178,21 @@ async def init_memory_manager_async(
     if not is_memory_enabled(memory_mode):
         logger.info("[MemoryTools] Memory system is disabled")
         return None
-    
-    if _global_manager is not None and _global_workspace_dir == workspace_dir:
-        return _global_manager
-    
-    settings = create_memory_settings(workspace_dir)
-    mem_mode = get_memory_mode()
-    
-    _global_workspace_dir = workspace_dir
-    _global_settings = settings
-    _global_agent_id = agent_id
-    
-    try:
-        if mem_mode == "wiki":
-            _global_wiki_settings = create_wiki_memory_settings()
-            _global_manager = await MemoryWikiManager.get(
-                agent_id=agent_id,
-                workspace_dir=workspace_dir,
-                settings=settings,
-                max_iterations=_global_wiki_settings.max_iterations,
-                query_timeout_s=_global_wiki_settings.query_timeout_s,
-                language=_global_wiki_settings.language,
-            )
-        else:
-            _global_manager = await MemoryIndexManager.get(
-                agent_id=agent_id,
-                workspace_dir=workspace_dir,
-                settings=settings
-            )
-        
-        if _global_manager:
-            logger.info(f"[MemoryTools] Memory manager initialized ({mem_mode}) for: {workspace_dir}")
-        
-        return _global_manager
-        
-    except Exception as e:
-        logger.error(f"[MemoryTools] Failed to initialize memory manager: {e}")
-        return None
 
-
-async def _ensure_global_manager() -> bool:
-    global _global_manager, _global_settings, _global_workspace_dir, _global_agent_id, _global_wiki_settings
-    
-    if _global_manager is not None:
-        return True
-    
-    try:
-        mode = get_memory_mode()
-        if _global_workspace_dir == ".":
-            from jiuwenclaw.utils import get_agent_workspace_dir
-            workspace_dir = str(get_agent_workspace_dir())
-            _global_workspace_dir = workspace_dir
-        else:
-            workspace_dir = _global_workspace_dir or DEFAULT_WORKSPACE_DIR
-
-        _global_settings = _global_settings or create_memory_settings(workspace_dir=workspace_dir)
-        logger.info(f"[MemoryTools] _ensure_global_manager: workspace_dir={workspace_dir}, mode={mode}")
-        if mode == "wiki":
-            _global_wiki_settings = create_wiki_memory_settings()
-            _global_manager = await MemoryWikiManager.get(
-                agent_id=_global_agent_id,
-                workspace_dir=workspace_dir,
-                settings=_global_settings,
-                max_iterations=_global_wiki_settings.max_iterations,
-                query_timeout_s=_global_wiki_settings.query_timeout_s,
-                language=_global_wiki_settings.language,
-            )
-        else:
-            _global_manager = await MemoryIndexManager.get(
-                agent_id=_global_agent_id,
-                workspace_dir=workspace_dir,
-                settings=_global_settings
-            )
-        if _global_manager is None:
-            logger.warning("[MemoryTools] _ensure_global_manager: manager is None after init")
-        return _global_manager is not None
-    except Exception as e:
-        logger.error(f"[MemoryTools] Failed to initialize global memory manager: {e}", exc_info=True)
-        return False
+    manager = await _get_memory_manager(
+        workspace_dir=workspace_dir,
+        agent_id=agent_id,
+        memory_mode=memory_mode,
+        embed_fingerprint=embed_fingerprint,
+    )
+    if manager:
+        logger.info(
+            "[MemoryTools] Memory manager initialized (%s) for: %s fp=%s",
+            memory_mode,
+            workspace_dir,
+            embed_fingerprint or _resolve_embed_fingerprint(),
+        )
+    return manager
 
 
 @tool(
@@ -228,20 +216,14 @@ async def memory_search(
     Returns:
         搜索结果字典，包含 results 列表
     """
-    if not await _ensure_global_manager():
+    manager = await _get_memory_manager()
+    if not manager:
         return {
             "results": [],
             "disabled": True,
             "error": "Memory manager not available"
         }
-    
-    if not _global_manager:
-        return {
-            "results": [],
-            "disabled": True,
-            "error": "Memory manager not initialized"
-        }
-    
+
     try:
         opts = {}
         if maxResults is not None:
@@ -250,16 +232,16 @@ async def memory_search(
             opts["minScore"] = minScore
         if sessionKey is not None:
             opts["sessionKey"] = sessionKey
-        
-        results = await _global_manager.search(query, opts=opts if opts else None)
-        
+
+        results = await manager.search(query, opts=opts if opts else None)
+
         for r in results:
             if r["startLine"] == r["endLine"]:
                 r["citation"] = f"{r['path']}#L{r['startLine']}"
             else:
                 r["citation"] = f"{r['path']}#L{r['startLine']}-L{r['endLine']}"
-        
-        status = _global_manager.status()
+
+        status = manager.status()
         
         return {
             "results": results,
@@ -297,9 +279,9 @@ async def memory_index(
     if not is_builtin_memory_allowed():
         return {"success": False, "error": "记忆系统已禁用"}
     try:
-        await _ensure_global_manager()
+        manager = await _get_memory_manager()
 
-        if not _global_manager:
+        if not manager:
             mem_mode = get_memory_mode()
             return {
                 "success": False,
@@ -311,10 +293,10 @@ async def memory_index(
                 ),
             }
 
-        if isinstance(_global_manager, MemoryIndexManager):
-            _global_manager.dirty = True
+        if isinstance(manager, MemoryIndexManager):
+            manager.dirty = True
             try:
-                await _global_manager.sync(reason="memory_index_tool")
+                await manager.sync(reason="memory_index_tool")
             except Exception as sync_err:
                 logger.warning(f"[MemoryTools] local mode sync failed: {sync_err}")
             return {
@@ -323,7 +305,7 @@ async def memory_index(
                 "message": "local 模式下已触发同步索引，文件变更将被自动处理。",
             }
 
-        if not hasattr(_global_manager, 'notify_change'):
+        if not hasattr(manager, 'notify_change'):
             return {
                 "success": False,
                 "error": "记忆管理器不支持索引操作（缺少 notify_change 方法）。",
@@ -337,8 +319,9 @@ async def memory_index(
                 "error": "Invalid path: directory traversal not allowed",
             }
 
+        workspace_dir = _resolve_workspace_dir()
         if not os.path.isabs(path):
-            abs_path = os.path.join(_global_workspace_dir, path)
+            abs_path = os.path.join(workspace_dir, path)
         else:
             abs_path = path
 
@@ -362,7 +345,7 @@ async def memory_index(
             }
 
         try:
-            result = await _global_manager.notify_change(abs_path)
+            result = await manager.notify_change(abs_path)
         except Exception as e:
             logger.warning(f"[MemoryTools] notify_change failed for {path}: {e}")
             return {
@@ -424,24 +407,17 @@ async def memory_get(
     Returns:
         文件内容字典
     """
-    if not await _ensure_global_manager():
+    manager = await _get_memory_manager()
+    if not manager:
         return {
             "path": path,
             "text": "",
             "disabled": True,
             "error": "Memory manager not available"
         }
-    
-    if not _global_manager:
-        return {
-            "path": path,
-            "text": "",
-            "disabled": True,
-            "error": "Memory manager not initialized"
-        }
-    
+
     try:
-        result = await _global_manager.read_file(
+        result = await manager.read_file(
             rel_path=path,
             from_line=from_line,
             lines=lines
@@ -492,7 +468,7 @@ async def write_memory(
             }
         
         resolved_path = result
-        full_path = os.path.join(_global_workspace_dir, resolved_path)
+        full_path = os.path.join(_resolve_workspace_dir(), resolved_path)
         
         parent_dir = os.path.dirname(full_path)
         if parent_dir:
@@ -559,7 +535,7 @@ async def edit_memory(
             }
         
         resolved_path = result
-        full_path = os.path.join(_global_workspace_dir, resolved_path)
+        full_path = os.path.join(_resolve_workspace_dir(), resolved_path)
         
         if not await asyncio.to_thread(os.path.exists, full_path):
             return {
@@ -645,7 +621,7 @@ async def read_memory(
             }
         
         resolved_path = result
-        full_path = os.path.join(_global_workspace_dir, resolved_path)
+        full_path = os.path.join(_resolve_workspace_dir(), resolved_path)
         
         if not await asyncio.to_thread(os.path.exists, full_path):
             return {

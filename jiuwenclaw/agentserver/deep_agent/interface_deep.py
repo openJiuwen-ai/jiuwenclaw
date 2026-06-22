@@ -172,9 +172,36 @@ from jiuwenclaw.agentserver.deep_agent.permissions.owner_scopes import (
     cleanup_permission_context,
 )
 from jiuwenclaw.agentserver.permissions.core import init_permission_engine, get_permission_engine
-from jiuwenclaw.agentserver.memory import clear_memory_manager_cache
+from jiuwenclaw.agentserver.memory import (
+    bind_memory_cache_fingerprint,
+    reset_memory_cache_fingerprint,
+)
+from jiuwenclaw.agentserver.session_skill_dirs import (
+    bind_session_registered_skill_dirs,
+    reset_session_registered_skill_dirs,
+)
+from jiuwenclaw.agentserver.reload_result import (
+    ReloadResult,
+    embed_config_fingerprint,
+    env_touches_memory,
+    env_touches_shared_skills_dirs,
+    memory_cache_fingerprint,
+)
+from jiuwenclaw.local_env_config import (
+    bind_task_env_overlay,
+    build_effective_env_overlay,
+    get_staged_env,
+    read_env,
+    reset_task_env_overlay,
+)
+from jiuwenclaw.agentserver.memory.external_memory_config import (
+    get_memory_engine,
+    external_memory_fingerprint,
+    is_external_memory_enabled,
+)
 from jiuwenclaw.agentserver.memory.config import (clear_config_cache, get_memory_mode, is_memory_enabled,
                                                   is_proactive_memory)
+from jiuwenclaw.agentserver.memory.manager import clear_memory_manager_cache
 from jiuwenclaw.agentserver.permissions.checker import TOOL_PERMISSION_CHANNEL_ID
 from jiuwenclaw.agentserver.cron_config import should_register_cron_tools
 from jiuwenclaw.agentserver.skill_manager import (
@@ -236,7 +263,12 @@ from jiuwenclaw.agentserver.tools.xiaoyi_phone_tools import (
     image_reading,
 )
 from jiuwenclaw.config import (
-    get_config, get_default_models, resolve_env_vars, clear_config_cache as clear_global_config_cache)
+    get_config,
+    get_default_models,
+    patch_model_config_from_env,
+    resolve_env_vars,
+    clear_config_cache as clear_global_config_cache,
+)
 from jiuwenclaw.agentserver.stream_content_sanitize import strip_inline_tool_protocol
 from jiuwenclaw.agentserver.stream_utils import propagate_stream_source_id, tool_calls_payload_to_json_list
 from jiuwenclaw.agentserver.extensions import get_rail_manager
@@ -247,12 +279,12 @@ from jiuwenclaw.utils import (
     deep_merge_dicts,
     get_agent_evolution_trajectories_dir,
     get_agent_registered_skill_dirs,
+    resolve_agent_registered_skill_dirs,
     get_agent_workspace_dir,
     get_checkpoint_dir,
     get_env_file,
     get_agent_root_dir,
 )
-from jiuwenclaw.local_env_config import set_local_config
 
 load_dotenv(dotenv_path=get_env_file())
 
@@ -1078,6 +1110,7 @@ class JiuWenClawDeepAdapter:
         self._memory_rail: MemoryRail | None = None
         self._external_memory_rail: Any = None
         self._external_memory_rail_registered: bool = False
+        self._external_memory_fingerprint: str | None = None
         self._lsp_rail: LspRail | None = None
         self._heartbeat_rail: HeartbeatRail | None = None
         self._skill_evolution_rail: SkillEvolutionRail | None = None
@@ -1116,10 +1149,79 @@ class JiuWenClawDeepAdapter:
         # request_id -> toolkit；session_id -> 关联的 request_id 集合（interrupt 时按会话精确取消）
         self._request_session_toolkits: dict[str, MultiSessionToolkit] = {}
         self._session_toolkit_requests: dict[str, set[str]] = {}
+        self._pending_reload: tuple[
+            dict[str, Any] | None, dict[str, Any] | None, bool
+        ] | None = None
+        self._reload_lock = asyncio.Lock()
+        self._embed_fingerprint: tuple[Any, ...] | None = None
+        self._memory_cache_fingerprint: str | None = None
+        self._registered_skill_dirs: list[str] = []
+        self._memory_engine_snapshot: str | None = None
+        self._context_engine_config_fp: str | None = None
+        self._working_checker: Callable[[], bool] | None = None
+        self._last_runtime_mode: str = "agent.plan"
+        self._chat_env_overlay_token: Token | None = None
+
+    def set_working_checker(self, checker: Callable[[], bool] | None) -> None:
+        """Inject callable returning whether this session has in-flight work."""
+        self._working_checker = checker
+
+    def get_agent_instance(self) -> Any:
+        """Return the underlying DeepAgent instance, if initialized."""
+        return self._instance
+
+    def get_memory_cache_fingerprint(self) -> str | None:
+        """Return the bound memory cache fingerprint for this adapter session."""
+        return self._memory_cache_fingerprint
+
+    def _adapter_is_working(self) -> bool:
+        if self._working_checker is not None:
+            try:
+                return bool(self._working_checker())
+            except Exception:
+                return False
+        return False
+
+    @staticmethod
+    def _embed_config_fingerprint(config: dict[str, Any]) -> tuple[Any, ...]:
+        return embed_config_fingerprint(config)
+
+    @staticmethod
+    def _context_engine_config_fingerprint(config: dict[str, Any]) -> str:
+        react = config.get("react") if isinstance(config, dict) else {}
+        if not isinstance(react, dict):
+            return ""
+        ce = react.get("context_engine_config")
+        try:
+            return json.dumps(ce, sort_keys=True, default=str)
+        except Exception:
+            return str(ce)
+
+    @staticmethod
+    def _env_touches_memory(env_overrides: dict[str, Any] | None) -> bool:
+        return env_touches_memory(env_overrides)
+
+    def _sync_registered_skill_dirs_snapshot(self) -> None:
+        """Capture effective shared skill dirs at create/reload apply (overlay-aware)."""
+        self._registered_skill_dirs = [
+            str(p) for p in resolve_agent_registered_skill_dirs()
+        ]
+
+    def _apply_registered_skill_dirs_to_runtime_rails(self) -> None:
+        if self._runtime_prompt_rail is not None:
+            self._runtime_prompt_rail.set_registered_skill_dirs(
+                list(self._registered_skill_dirs)
+            )
+
+    def _registered_skill_dirs_for_rail(self) -> list[str]:
+        if not self._registered_skill_dirs:
+            self._sync_registered_skill_dirs_snapshot()
+        return list(self._registered_skill_dirs)
 
     def set_skill_manager(self, skill_manager: SkillManager) -> None:
         """Inject shared SkillManager from facade for tool reuse."""
         self._skill_manager = skill_manager
+
 
     @staticmethod
     def _is_acp_tool_profile(config: dict[str, Any] | None = None) -> bool:
@@ -1356,16 +1458,14 @@ class JiuWenClawDeepAdapter:
             )
             return None
         apply_vision_model_config_from_yaml(config_base)
-        api_key = str(os.getenv("VISION_API_KEY", "")).strip()
+        api_key = str(read_env("VISION_API_KEY")).strip()
         base_url = str(
-            os.getenv("VISION_BASE_URL")
-            or os.getenv("VISION_API_BASE")
-            or ""
+            read_env("VISION_BASE_URL")
+            or read_env("VISION_API_BASE")
         ).strip()
         model_name = str(
-            os.getenv("VISION_MODEL")
-            or os.getenv("VISION_MODEL_NAME")
-            or ""
+            read_env("VISION_MODEL")
+            or read_env("VISION_MODEL_NAME")
         ).strip()
         if not api_key or not base_url or not model_name:
             logger.info(
@@ -1391,11 +1491,10 @@ class JiuWenClawDeepAdapter:
             )
             return None
         apply_audio_model_config_from_yaml(config_base)
-        api_key = str(os.getenv("AUDIO_API_KEY", "")).strip()
+        api_key = str(read_env("AUDIO_API_KEY")).strip()
         base_url = str(
-            os.getenv("AUDIO_BASE_URL")
-            or os.getenv("AUDIO_API_BASE")
-            or ""
+            read_env("AUDIO_BASE_URL")
+            or read_env("AUDIO_API_BASE")
         ).strip()
         if not api_key or not base_url:
             logger.info(
@@ -1403,14 +1502,12 @@ class JiuWenClawDeepAdapter:
             )
             return None
         transcription_model = str(
-            os.getenv("AUDIO_TRANSCRIPTION_MODEL")
-            or os.getenv("AUDIO_MODEL_NAME")
-            or ""
+            read_env("AUDIO_TRANSCRIPTION_MODEL")
+            or read_env("AUDIO_MODEL_NAME")
         ).strip()
         question_answering_model = str(
-            os.getenv("AUDIO_QUESTION_ANSWERING_MODEL")
-            or os.getenv("AUDIO_MODEL_NAME")
-            or ""
+            read_env("AUDIO_QUESTION_ANSWERING_MODEL")
+            or read_env("AUDIO_MODEL_NAME")
         ).strip()
         config_kwargs: dict[str, Any] = {
             "api_key": api_key,
@@ -1451,7 +1548,7 @@ class JiuWenClawDeepAdapter:
             )
             return False
         apply_video_model_config_from_yaml(config_base)
-        if not os.getenv("VIDEO_API_KEY"):
+        if not read_env("VIDEO_API_KEY"):
             logger.info(
                 "[JiuWenClawDeepAdapter] video tools skipped: incomplete config"
             )
@@ -1468,9 +1565,9 @@ class JiuWenClawDeepAdapter:
             )
             return False
         apply_image_gen_model_config_from_yaml(config_base)
-        api_key = str(os.getenv("IMAGE_GEN_API_KEY", "")).strip()
-        api_base = str(os.getenv("IMAGE_GEN_API_BASE", "")).strip()
-        model_name = str(os.getenv("IMAGE_GEN_MODEL_NAME", "")).strip()
+        api_key = str(read_env("IMAGE_GEN_API_KEY")).strip()
+        api_base = str(read_env("IMAGE_GEN_API_BASE")).strip()
+        model_name = str(read_env("IMAGE_GEN_MODEL_NAME")).strip()
         if not api_key or not api_base or not model_name:
             logger.info(
                 "[JiuWenClawDeepAdapter] text_to_image skipped: incomplete config"
@@ -1653,11 +1750,21 @@ class JiuWenClawDeepAdapter:
         try:
             PersistenceCheckpointerProvider()
             checkpoint_path = get_checkpoint_dir()
+            conf = {"db_type": "sqlite", "db_path": f"{checkpoint_path}/checkpoint"}
+
+            db_type = os.getenv("GATEWAY_DB_TYPE", "").strip().lower()
+            if db_type == "mysql":
+                mysql_engine = await _build_mysql_async_engine()
+                if mysql_engine is not None:
+                    conf["db_client"] = mysql_engine
+                    logger.info("[JiuWenClawDeepAdapter] use mysql db_client")
+            elif db_type == "postgresql":
+                postgresql_engine = await _build_postgresql_async_engine()
+                if postgresql_engine is not None:
+                    conf["db_client"] = postgresql_engine
+                    logger.info("[JiuWenClawDeepAdapter] use postgresql db_client")
             checkpointer = await CheckpointerFactory.create(
-                CheckpointerConfig(
-                    type="persistence",
-                    conf={"db_type": "sqlite", "db_path": f"{checkpoint_path}/checkpoint"},
-                )
+                CheckpointerConfig(type="persistence", conf=conf)
             )
             CheckpointerFactory.set_default_checkpointer(checkpointer)
         except Exception as e:
@@ -1688,7 +1795,7 @@ class JiuWenClawDeepAdapter:
 
         # 如果 api_key 为空，尝试从环境变量获取或使用默认占位值
         if not mcc.get("api_key"):
-            env_api_key = os.getenv("API_KEY", "").strip()
+            env_api_key = read_env("API_KEY").strip()
             if env_api_key:
                 mcc["api_key"] = env_api_key
                 logger.info(
@@ -1742,15 +1849,38 @@ class JiuWenClawDeepAdapter:
         mco = default_model_config.get("model_config_obj") or react_config.get("model_config_obj") or {}
         self._model_cache[model_name] = self._build_model_from_entry(mcc, mco)
 
-    def _create_model(self, config: dict) -> Model:
+    def _create_model(
+        self,
+        config: dict,
+        env_overrides: dict[str, Any] | None = None,
+    ) -> Model:
+        config = patch_model_config_from_env(config, env_overrides)
         self._model_cache.clear()
         self._build_model_cache_from_defaults(config)
         if not self._model_cache:
             self._build_model_cache_legacy(config)
 
-        first_name = next(iter(self._model_cache))
-        self._default_model_name = first_name
-        self._model = self._model_cache[first_name]
+        env_model_name = ""
+        if isinstance(env_overrides, dict) and "MODEL_NAME" in env_overrides:
+            raw = env_overrides.get("MODEL_NAME")
+            if raw is not None:
+                env_model_name = str(raw).strip()
+        if env_model_name and env_model_name not in self._model_cache:
+            entries = get_default_models(config)
+            if entries:
+                base_entry = entries[0]
+                mcc = dict(base_entry.get("model_client_config") or {})
+                mcc["model_name"] = env_model_name
+                mco = base_entry.get("model_config_obj") or {}
+                self._model_cache[env_model_name] = self._build_model_from_entry(mcc, mco)
+
+        if env_model_name and env_model_name in self._model_cache:
+            self._default_model_name = env_model_name
+            self._model = self._model_cache[env_model_name]
+        else:
+            first_name = next(iter(self._model_cache))
+            self._default_model_name = first_name
+            self._model = self._model_cache[first_name]
         self._model_client_config = self._model.model_client_config
         self._model_request_config = self._model.model_config
         return self._model
@@ -1906,8 +2036,12 @@ class JiuWenClawDeepAdapter:
         try:
             sandbox_url = _sandbox_config.get("url", None)
             sandbox_type = _sandbox_config.get("type", None)
+            sandbox_enabled = _parse_bool_switch(
+                _sandbox_config.get("enabled", False),
+                default=False,
+            )
             work_dir = self._workspace_dir or str(get_agent_root_dir())
-            if sandbox_url and sandbox_type:
+            if sandbox_enabled and sandbox_url and sandbox_type:
                 gateway_config = SandboxGatewayConfig(
                     isolation=SandboxIsolationConfig(container_scope=ContainerScope.SYSTEM),
                     launcher_config=PreDeployLauncherConfig(
@@ -1978,12 +2112,14 @@ class JiuWenClawDeepAdapter:
                 except (TypeError, ValueError):
                     max_bodies = DEFAULT_MAX_ACTIVE_SKILL_BODIES
             
-            # 合并技能目录：基础目录 + 扩展传入的额外目录
-            skills_dirs = [str(p) for p in get_agent_registered_skill_dirs()]
+            skills_dirs = self._registered_skill_dirs_for_rail()
             if extra_skill_dir:
-                skills_dirs.append(extra_skill_dir)
-                logger.info("[JiuWenClawDeepAdapter] extra_skill_dir added: %s", extra_skill_dir,
-                       extra={'user_visible': 'progress'})
+                skills_dirs = list(skills_dirs) + [extra_skill_dir]
+                logger.info(
+                    "[JiuWenClawDeepAdapter] extra_skill_dir added: %s",
+                    extra_skill_dir,
+                    extra={"user_visible": "progress"},
+                )
 
             skill_rail_kwargs: dict[str, Any] = dict(
                 skills_dir=skills_dirs,
@@ -2023,7 +2159,7 @@ class JiuWenClawDeepAdapter:
             
             trajectory_dir = self._resolve_evolution_trajectory_dir()
             skill_evolution_rail = SkillEvolutionRail(
-                skills_dir=[str(p) for p in get_agent_registered_skill_dirs()],
+                skills_dir=self._registered_skill_dirs_for_rail(),
                 llm=self._model,
                 model=config.get("model_name", "gpt-4"),
                 auto_scan=evolution_auto_scan,
@@ -2154,6 +2290,7 @@ class JiuWenClawDeepAdapter:
             rail = None
         return rail
 
+
     def _build_task_planning_rail(self, config: dict[str, Any] | None = None) -> TaskPlanningRail | None:
         """Build TaskPlanningRail."""
         try:
@@ -2199,11 +2336,12 @@ class JiuWenClawDeepAdapter:
 
     def _build_memory_rail(self, mode: str) -> MemoryRail | None:
         try:
+            from jiuwenclaw.agentserver.memory.config import get_embed_config
             config = get_config()
-            embed_config = config.get("embed") if isinstance(config, dict) else None
-            has_api_key = embed_config.get("embed_api_key") if isinstance(embed_config, dict) else None
-            has_base_url = embed_config.get("embed_base_url") if isinstance(embed_config, dict) else None
-            has_model = embed_config.get("embed_model") if isinstance(embed_config, dict) else None
+            embed_config = get_embed_config()
+            has_api_key = embed_config.get("api_key") if isinstance(embed_config, dict) else None
+            has_base_url = embed_config.get("base_url") if isinstance(embed_config, dict) else None
+            has_model = embed_config.get("model") if isinstance(embed_config, dict) else None
             if not all([has_api_key, has_base_url, has_model]):
                 logger.warning("[JiuWenClawDeepAdapter] MemoryRail create failed: No available embedding config",
                           extra={'user_visible': 'progress'})
@@ -2211,9 +2349,9 @@ class JiuWenClawDeepAdapter:
             self._is_proactive_memory = is_proactive_memory(mode, config)
             memory_rail = MemoryRail(
                 embedding_config=EmbeddingConfig(
-                    model_name=embed_config.get("embed_model"),
-                    base_url=embed_config.get("embed_base_url"),
-                    api_key=embed_config.get("embed_api_key")
+                    model_name=embed_config.get("model"),
+                    base_url=embed_config.get("base_url"),
+                    api_key=embed_config.get("api_key")
                 ),
                 is_proactive=self._is_proactive_memory
             )
@@ -2232,13 +2370,14 @@ class JiuWenClawDeepAdapter:
             CodingMemoryRail 实例，失败返回 None
         """
         try:
+            from jiuwenclaw.agentserver.memory.config import get_embed_config
             config = get_config()
-            embed_config = config.get("embed") if isinstance(config, dict) else None
+            embed_config = get_embed_config()
 
             # 检查 embedding 配置
-            has_api_key = embed_config.get("embed_api_key") if isinstance(embed_config, dict) else None
-            has_base_url = embed_config.get("embed_base_url") if isinstance(embed_config, dict) else None
-            has_model = embed_config.get("embed_model") if isinstance(embed_config, dict) else None
+            has_api_key = embed_config.get("api_key") if isinstance(embed_config, dict) else None
+            has_base_url = embed_config.get("base_url") if isinstance(embed_config, dict) else None
+            has_model = embed_config.get("model") if isinstance(embed_config, dict) else None
             if not all([has_api_key, has_base_url, has_model]):
                 logger.warning("[JiuWenClawDeepAdapter] CodingMemoryRail: no embedding config, skipping",
                           extra={'user_visible': 'progress'})
@@ -2255,9 +2394,9 @@ class JiuWenClawDeepAdapter:
             coding_memory_rail = CodingMemoryRail(
                 coding_memory_dir=coding_memory_dir,
                 embedding_config=EmbeddingConfig(
-                    model_name=embed_config.get("embed_model"),
-                    base_url=embed_config.get("embed_base_url"),
-                    api_key=embed_config.get("embed_api_key"),
+                    model_name=embed_config.get("model"),
+                    base_url=embed_config.get("base_url"),
+                    api_key=embed_config.get("api_key"),
                 ),
                 language="cn" if language == "zh" else "en",
             )
@@ -2386,6 +2525,7 @@ class JiuWenClawDeepAdapter:
                 agent_id=self._agent_id,
                 service_id=self._service_id,
             )
+            rail.set_registered_skill_dirs(self._registered_skill_dirs_for_rail())
             logger.info("[JiuWenClawDeepAdapter] RuntimePromptRail create success",
                        extra={'user_visible': 'progress'})
         except Exception as exc:
@@ -2590,6 +2730,8 @@ class JiuWenClawDeepAdapter:
                 logger.warning("[JiuWenClawDeepAdapter] Rail %s build returned None", info.attr_name)
         logger.info("[JiuWenClawDeepAdapter] Total rails built: %d, rail names: %s", len(rails_list),
                     [type(r).__name__ for r in rails_list])
+
+
         if self._task_execution_rail is None:
             logger.warning("[JiuWenClawDeepAdapter] TaskExecutionRail missing after _build_agent_rails")
         else:
@@ -2672,10 +2814,9 @@ class JiuWenClawDeepAdapter:
     ) -> list[Any]:
         """Return rail instances that need to be re-initialized on hot reload.
 
-        SkillUseRail, ContextEngineeringRail, and MemoryRail are rebuilt on config reload.
-        All other rails read language dynamically from system_prompt_builder.language
-        and are updated in-place where needed — they are NOT passed to configure()
-        so their existing registered state is preserved without an uninit/init cycle.
+        Only rails that require a **new object** enter ``rails_list``. Rails updated
+        in-place (PermissionRail, DisabledToolsRail) must not pass the same instance,
+        or openjiuwen will unload without re-registering.
         """
         # 触发钩子获取扩展目录（与 create_instance 保持一致）
         extra_skill_dir: str | None = None
@@ -2752,18 +2893,27 @@ class JiuWenClawDeepAdapter:
         rails_list = []
         if self._skill_rail is not None:
             rails_list.append(self._skill_rail)
-        if self._context_engineering_rail is not None:
-            rails_list.append(self._context_engineering_rail)
-        if self._memory_rail is not None:
-            rails_list.append(self._memory_rail)
-        if self._lsp_rail is not None:
-            rails_list.append(self._lsp_rail)
-        if self._avatar_rail is not None:
-            rails_list.append(self._avatar_rail)
-        if getattr(self, "_pip_isolation_rail", None) is not None:
-            rails_list.append(self._pip_isolation_rail)
+
+        ce_fingerprint = self._context_engine_config_fingerprint(
+            config_base if isinstance(config_base, dict) else {"react": config}
+        )
+        if (
+            self._context_engineering_rail is not None
+            and ce_fingerprint != self._context_engine_config_fp
+        ):
+            mode = self._context_engineering_rail_mode or self._last_runtime_mode
+            new_ce_rail = _build_context_engineering_rail(config, mode=mode)
+            if new_ce_rail is not None:
+                self._context_engineering_rail = new_ce_rail
+                self._context_engineering_rail_mode = mode
+                rails_list.append(new_ce_rail)
+        self._context_engine_config_fp = ce_fingerprint
+
+        # MemoryRail is managed by _handle_memory_rail_by_config after configure().
+        # LspRail / AvatarRail / PipIsolationRail: in-place or cold-start only — do not add.
         if permission_rail_newly_created and self._permission_rail is not None:
             rails_list.append(self._permission_rail)
+
         if progressive_tool_rail is not None:
             rails_list.append(progressive_tool_rail)
         elif progressive_tool_rail_unload_only and old_progressive_tool_rail is not None:
@@ -2958,6 +3108,7 @@ class JiuWenClawDeepAdapter:
         包含 _build_agent_rails（磁盘 I/O 读取技能文件）、_create_sys_operation、
         create_deep_agent / create_code_agent 等耗时同步调用。
         """
+        self._sync_registered_skill_dirs_snapshot()
         rails_list = self._build_agent_rails(
             ctx.config, ctx.config_base, mode=ctx.mode,
             extra_skill_dir=ctx.extra_skill_dir,
@@ -3027,20 +3178,21 @@ class JiuWenClawDeepAdapter:
 
         await self.set_checkpoint()
 
-        self._instance_overrides = dict(config or {}) if isinstance(config, dict) else {}
+        self._instance_overrides = dict(config) if isinstance(config, dict) else {}
         loop = asyncio.get_running_loop()
         config_base = await loop.run_in_executor(None, get_config)
         self._refresh_multimodal_configs(config_base)
         config = config_base.get('react', {}).copy()
         self._config_cache = config.copy()
         self._agent_name = self._instance_overrides.get("agent_name", config.get("agent_name", "main_agent"))
+
+
         # Keep constructor-injected tenant workspace by default.
         # Only override when request explicitly provides workspace_dir.
         configured_workspace = self._instance_overrides.get("workspace_dir")
         if configured_workspace is not None:
             self._workspace_dir = configured_workspace
 
-        model = self._create_model(config_base)
         agent_card_id = self._resolve_agent_card_id(session_id)
         agent_card = AgentCard(name=self._agent_name, id=agent_card_id)
         tool_cards = await self._get_tool_cards(JIUWENCLAW_RESOURCE_AGENT_ID, mode=mode)
@@ -3075,6 +3227,8 @@ class JiuWenClawDeepAdapter:
         except Exception as exc:
             logger.warning("[JiuWenClawDeepAdapter] hook trigger failed: %s", exc)
 
+        model = self._create_model(config_base)
+
         await loop.run_in_executor(
             None,
             lambda: self._init_agent_instance_sync(_AgentInitContext(
@@ -3100,6 +3254,17 @@ class JiuWenClawDeepAdapter:
 
         # Initialize fork_agent tools
         await loop.run_in_executor(None, self._init_subagent_tools)
+
+        cfg = get_config()
+        self._embed_fingerprint = self._embed_config_fingerprint(cfg)
+        self._memory_cache_fingerprint = memory_cache_fingerprint(cfg)
+        self._memory_engine_snapshot = get_memory_engine(cfg)
+        self._context_engine_config_fp = self._context_engine_config_fingerprint(cfg)
+        self._external_memory_fingerprint = (
+            external_memory_fingerprint(cfg)
+            if is_external_memory_enabled(cfg)
+            else None
+        )
 
     def _init_subagent_tools(self) -> None:
         """Initialize fork_agent and spawn_subagent tools for creating subagents."""
@@ -3172,103 +3337,261 @@ class JiuWenClawDeepAdapter:
         except Exception as e:
             logger.error("[JiuWenClawDeepAdapter] 加载用户 Rail 扩展时发生错误: %s", e)
 
+    async def _maybe_apply_pending_reload(self) -> ReloadResult | None:
+        if self._pending_reload is None or self._adapter_is_working():
+            return None
+        async with self._reload_lock:
+            pending = self._pending_reload
+            if pending is None or self._adapter_is_working():
+                return None
+            config_base, env_overrides, invalidate_memory = pending
+            try:
+                result = await self.reload_agent_config(
+                    config_base,
+                    env_overrides,
+                    _force_apply=True,
+                    _invalidate_memory_cache=invalidate_memory,
+                )
+            except Exception:
+                if self._pending_reload is None:
+                    self._pending_reload = pending
+                raise
+            if result.applied:
+                self._pending_reload = None
+                from jiuwenclaw.local_env_config import promote_staged_env
+
+                promote_staged_env()
+            return result
+
+    async def apply_pending_reload_if_idle(self) -> ReloadResult | None:
+        """Apply deferred reload when harness has verified no inflight streams.
+
+        Unlike ``_maybe_apply_pending_reload``, does not consult ``working_checker``
+        (which includes the current stream's inflight slot).
+        """
+        if self._pending_reload is None:
+            return None
+        async with self._reload_lock:
+            pending = self._pending_reload
+            if pending is None:
+                return None
+            config_base, env_overrides, invalidate_memory = pending
+            from jiuwenclaw.local_env_config import promote_staged_env
+
+            try:
+                result = await self.reload_agent_config(
+                    config_base,
+                    env_overrides,
+                    _force_apply=True,
+                    _invalidate_memory_cache=invalidate_memory,
+                )
+            except Exception:
+                if self._pending_reload is None:
+                    self._pending_reload = pending
+                raise
+            if result.applied:
+                self._pending_reload = None
+                promote_staged_env()
+            return result
+
+    async def _on_chat_request_start(self) -> tuple[Token | None, Token | None, Token | None]:
+        await self._maybe_apply_pending_reload()
+        if not self._registered_skill_dirs:
+            self._sync_registered_skill_dirs_snapshot()
+        skill_dirs_token: Token | None = None
+        if self._registered_skill_dirs:
+            skill_dirs_token = bind_session_registered_skill_dirs(
+                self._registered_skill_dirs
+            )
+        overlay = build_effective_env_overlay(get_staged_env())
+        env_token = bind_task_env_overlay(overlay) if overlay else None
+        fp_token: Token | None = None
+        if self._memory_cache_fingerprint:
+            fp_token = bind_memory_cache_fingerprint(self._memory_cache_fingerprint)
+        return env_token, fp_token, skill_dirs_token
+
+    async def _on_chat_request_end(
+            self,
+            overlay_token: Token | None,
+            fp_token: Token | None = None,
+            skill_dirs_token: Token | None = None,
+    ) -> None:
+        if overlay_token is not None:
+            reset_task_env_overlay(overlay_token)
+        if fp_token is not None:
+            reset_memory_cache_fingerprint(fp_token)
+        if skill_dirs_token is not None:
+            reset_session_registered_skill_dirs(skill_dirs_token)
+        await self._maybe_apply_pending_reload()
+
+    def _refresh_fork_agent_executor_model(self) -> None:
+        if self._fork_agent_executor is not None and self._model is not None:
+            self._fork_agent_executor.set_model(self._model)
+        if self._stream_event_rail is not None:
+            self._stream_event_rail.set_fork_agent_executor(self._fork_agent_executor)
+
     async def reload_agent_config(
             self,
             config_base: dict[str, Any] | None = None,
             env_overrides: dict[str, Any] | None = None,
-    ) -> None:
+            *,
+            _force_apply: bool = False,
+            _invalidate_memory_cache: bool | None = None,
+    ) -> ReloadResult:
         """从 config.yaml 重新加载配置，通过 DeepAgent.configure() 热更新当前实例（不新建 DeepAgent）。
 
-        DeepAgent.configure() 现在自动处理 rail 生命周期：保留旧已注册 rails 的注销上下文，
-        并在下次 _ensure_initialized() 时先卸载旧回调，再注册新的 rails。
-
-        Args:
-            config_base: 可选的完整配置快照；传入时优先使用它而不是读取本地 config.yaml。
-            env_overrides: 可选的环境变量增量；仅覆盖请求中出现的 key。
+        When the adapter is busy, stores a pending reload and returns deferred=True.
+        Apply runs when idle (task finally or next chat entry).
         """
         if self._instance is None:
             raise RuntimeError("JiuWenClawDeepAdapter 未初始化，请先调用 create_instance()")
-        clear_config_cache()
-        clear_global_config_cache()
-        clear_memory_manager_cache()
 
-        if env_overrides is not None:
-            if not isinstance(env_overrides, dict):
-                raise TypeError("env_overrides must be a dict when provided")
-            for env_key, env_value in env_overrides.items():
-                set_local_config(env_key, env_value)
-
-        if config_base is None:
-            config_base = get_config()
-        elif not isinstance(config_base, dict):
-            raise TypeError("config_base must be a dict when provided")
+        if _invalidate_memory_cache is None:
+            invalidate_memory_cache = self._env_touches_memory(env_overrides)
         else:
-            # Gateway 可能只传入部分配置（如 logging + preferred_language），
-            # 需要与完整的基础配置合并，否则丢失 react.disabled_tools 等关键字段。
-            full_config = get_config()
-            merged = deep_merge_dicts(full_config, resolve_env_vars(config_base))
-            config_base = merged
+            invalidate_memory_cache = _invalidate_memory_cache
 
-        # 同步扩展配置到 ExtensionRegistry
-         # Gateway 已解密 extension_security_configs，AgentServer 直接使用明文
+        if not _force_apply:
+            pending = (config_base, env_overrides, invalidate_memory_cache)
+            if self._adapter_is_working():
+                self._pending_reload = pending
+                logger.info("[JiuWenClawDeepAdapter] reload deferred (adapter working)")
+                return ReloadResult(deferred=True)
+            async with self._reload_lock:
+                if self._adapter_is_working():
+                    self._pending_reload = pending
+                    return ReloadResult(deferred=True)
+                self._pending_reload = None
+
+        overlay = build_effective_env_overlay(env_overrides)
+        overlay_token = bind_task_env_overlay(overlay) if overlay else None
         try:
-            from jiuwenclaw.extensions.registry import ExtensionRegistry
-            registry = ExtensionRegistry.get_instance()
-            registry.update_config(config_base)
-            logger.info("[JiuWenClaw] Extension config synced to Registry")
-        except Exception as exc:
-            logger.warning("[JiuWenClaw] ExtensionRegistry update failed: %s", exc)
+            if env_overrides is not None and not isinstance(env_overrides, dict):
+                raise TypeError("env_overrides must be a dict when provided")
 
-        self._refresh_multimodal_configs(config_base)
-        config = config_base.get('react', {}).copy()
-        self._config_cache = config.copy()
+            clear_config_cache()
+            clear_global_config_cache()
+            await clear_memory_manager_cache()
 
-        model = self._create_model(config_base)
-        self._agent_name = self._instance_overrides.get("agent_name", config.get("agent_name", "main_agent"))
-        agent_card_id = self._resolve_agent_card_id()
-        agent_card = AgentCard(name=self._agent_name, id=agent_card_id)
-        self._sync_multimodal_tools_for_runtime()
+            if config_base is None:
+                config_base = get_config()
+            elif not isinstance(config_base, dict):
+                raise TypeError("config_base must be a dict when provided")
+            else:
+                # Gateway 可能只传入部分配置（如 logging + preferred_language），
+                # 需要与完整的基础配置合并，否则丢失 react.disabled_tools 等关键字段。
+                full_config = get_config()
+                merged = deep_merge_dicts(full_config, resolve_env_vars(config_base))
+                config_base = merged
 
-        if not self._filesystem_rail_enabled_for_profile() and self._filesystem_rail is not None:
+            new_embed_fp = self._embed_config_fingerprint(config_base)
+            new_memory_fp = memory_cache_fingerprint(config_base)
+
+            # 同步扩展配置到 ExtensionRegistry
+            # Gateway 已解密 extension_security_configs，AgentServer 直接使用明文
             try:
-                await self._instance.unregister_rail(self._filesystem_rail)
+                from jiuwenclaw.extensions.registry import ExtensionRegistry
+                registry = ExtensionRegistry.get_instance()
+                registry.update_config(config_base)
+                logger.info("[JiuWenClaw] Extension config synced to Registry")
             except Exception as exc:
-                logger.warning("[JiuWenClawDeepAdapter] ACP filesystem rail unregister failed: %s", exc)
-            self._filesystem_rail = None
+                logger.warning("[JiuWenClaw] ExtensionRegistry update failed: %s", exc)
 
-        rails_list = await self._get_current_agent_rails(config, config_base)
+            self._refresh_multimodal_configs(config_base)
+            config = config_base.get('react', {}).copy()
+            self._config_cache = config.copy()
 
-        # 加载用户自定义的 Rail 扩展
-        await self.load_user_rails()
+            model = self._create_model(config_base, env_overrides)
+            self._model = model
+            self._agent_name = self._instance_overrides.get("agent_name", config.get("agent_name", "main_agent"))
+            agent_card_id = self._resolve_agent_card_id()
+            agent_card = AgentCard(name=self._agent_name, id=agent_card_id)
+            self._sync_multimodal_tools_for_runtime()
 
-        disabled_names = set(
-            resolve_string_or_list_config(config.get("disabled_tools"))
-        )
-        filtered_tool_cards = [
-            card for card in (self._tool_cards or [])
-            if card.name not in disabled_names
-        ]
-        deep_cfg = self._make_deep_agent_config(
-            model=model,
-            config=config,
-            agent_card=agent_card,
-            tool_cards=filtered_tool_cards,
-            rails=rails_list,
-        )
+            if not self._filesystem_rail_enabled_for_profile() and self._filesystem_rail is not None:
+                try:
+                    await self._instance.unregister_rail(self._filesystem_rail)
+                except Exception as exc:
+                    logger.warning("[JiuWenClawDeepAdapter] ACP filesystem rail unregister failed: %s", exc)
+                self._filesystem_rail = None
 
-        #  诊断日志：观察 Agent.configure() 收到的 rails_list
-        logger.info(
-            "[JiuWenClawDeepAdapter]  DIAGNOSTIC: 准备调用 Agent.configure() " 
-            "| rails_count=%d " 
-            "| rails_names=[%s] " 
-            "| deep_cfg.rails 配置完成",
-            len(rails_list),
-            ", ".join(type(r).__name__ for r in rails_list),
-        )
+            self._sync_registered_skill_dirs_snapshot()
+            if env_touches_shared_skills_dirs(env_overrides):
+                logger.info(
+                    "[JiuWenClawDeepAdapter] registered skill dirs updated on reload: %s",
+                    self._registered_skill_dirs,
+                )
 
-        self._instance.configure(deep_cfg)
+            rails_list = await self._get_current_agent_rails(config, config_base)
 
-        logger.info("[JiuWenClawDeepAdapter] 配置已热更新（configure），未重启进程")
+            # 加载用户自定义的 Rail 扩展
+            await self.load_user_rails()
+
+            disabled_names = set(
+                resolve_string_or_list_config(config.get("disabled_tools"))
+            )
+            filtered_tool_cards = [
+                card for card in (self._tool_cards or [])
+                if card.name not in disabled_names
+            ]
+            deep_cfg = self._make_deep_agent_config(
+                model=model,
+                config=config,
+                agent_card=agent_card,
+                tool_cards=filtered_tool_cards,
+                rails=rails_list,
+            )
+
+            #  诊断日志：观察 Agent.configure() 收到的 rails_list
+            logger.info(
+                "[JiuWenClawDeepAdapter]  DIAGNOSTIC: 准备调用 Agent.configure() "
+                "| rails_count=%d "
+                "| rails_names=[%s] "
+                "| deep_cfg.rails 配置完成",
+                len(rails_list),
+                ", ".join(type(r).__name__ for r in rails_list),
+            )
+
+            self._instance.configure(deep_cfg)
+            self._apply_model_to_react_agent(self._model)
+            self._refresh_fork_agent_executor_model()
+
+            reload_mode = self._last_runtime_mode or "agent.plan"
+            engine_changed = (
+                self._memory_engine_snapshot is not None
+                and get_memory_engine(config_base) != self._memory_engine_snapshot
+            )
+            if engine_changed and self._memory_rail is not None:
+                try:
+                    await self._instance.unregister_rail(self._memory_rail)
+                except Exception as exc:
+                    logger.warning(
+                        "[JiuWenClawDeepAdapter] MemoryRail unregister on engine change failed: %s",
+                        exc,
+                    )
+                self._memory_rail = None
+
+            await self._handle_memory_rail_by_config(reload_mode)
+            await self._handle_external_memory_rail_by_config()
+            self._apply_registered_skill_dirs_to_runtime_rails()
+            self._memory_engine_snapshot = get_memory_engine(config_base)
+
+            if invalidate_memory_cache or (
+                self._embed_fingerprint is not None
+                and new_embed_fp != self._embed_fingerprint
+            ):
+                logger.info(
+                    "[JiuWenClawDeepAdapter] Memory cache fingerprint updated: %s",
+                    new_memory_fp,
+                )
+            self._memory_cache_fingerprint = new_memory_fp
+            self._embed_fingerprint = new_embed_fp
+
+            logger.info("[JiuWenClawDeepAdapter] 配置已热更新（configure），未重启进程")
+            return ReloadResult(applied=True)
+        finally:
+            if overlay_token is not None:
+                reset_task_env_overlay(overlay_token)
 
     def _bind_runtime_cron_context(
             self,
@@ -3598,6 +3921,8 @@ class JiuWenClawDeepAdapter:
         config_base = get_config()
         channel = str(channel_id or self._resolve_prompt_channel(session_id) or "web").strip() or "web"
         send_file_enabled = config_base.get("channels", {}).get(channel, {}).get("send_file_allowed", False)
+
+
         send_file_channel_allowed = send_file_enabled or channel == "officeclaw"
         has_send_file_request_context = bool(request_id and session_id)
         if send_file_channel_allowed and has_send_file_request_context:
@@ -4260,31 +4585,61 @@ class JiuWenClawDeepAdapter:
             finally:
                 self._untrack_session_toolkit(rid)
 
+    @staticmethod
+    def _is_filled_model_credential(value: Any) -> bool:
+        if value is None:
+            return False
+        text = str(value).strip()
+        if not text:
+            return False
+        if text.startswith("${") and text.endswith("}"):
+            return False
+        return True
+
+    @classmethod
+    def _model_client_config_has_api_key(cls, mcc: Any) -> bool:
+        if mcc is None:
+            return False
+        if isinstance(mcc, dict):
+            return cls._is_filled_model_credential(mcc.get("api_key"))
+        return cls._is_filled_model_credential(getattr(mcc, "api_key", None))
+
     def _has_valid_model_config(self) -> bool:
-        """检查是否有有效的模型配置."""
-        # 检查环境变量中是否有 API_KEY
-        if os.getenv("API_KEY"):
+        """检查是否有有效的模型配置（.env、运行时 Model 或 config.yaml defaults）。"""
+        if self._is_filled_model_credential(read_env("API_KEY")):
             return True
 
-        # 检查初始化时设置的 model_client_config（优先）
-        if self._model_client_config is not None:
-            api_key = getattr(self._model_client_config, "api_key", "")
-            if api_key and api_key != "placeholder-api-key":
+        if self._model_client_config_has_api_key(self._model_client_config):
+            return True
+
+        if self._model is not None and self._model_client_config_has_api_key(
+            getattr(self._model, "model_client_config", None),
+        ):
+            return True
+
+        for cached in self._model_cache.values():
+            if self._model_client_config_has_api_key(getattr(cached, "model_client_config", None)):
                 return True
 
-        # 检查实例的配置（作为后备）
+        react_agent = None
         if self._instance is not None:
-            react_agent = getattr(self._instance, "_react_agent", None) or getattr(self._instance, "react_agent", None)
-            if react_agent is not None:
-                config = getattr(react_agent, "_config", None)
-                if config is not None and hasattr(config, "model_client_config"):
-                    mcc = config.model_client_config
-                    if isinstance(mcc, dict):
-                        api_key = mcc.get("api_key", "")
-                    else:
-                        api_key = getattr(mcc, "api_key", "")
-                    if api_key and api_key != "placeholder-api-key":
-                        return True
+            react_agent = getattr(self._instance, "_react_agent", None) or getattr(
+                self._instance, "react_agent", None,
+            )
+        if react_agent is not None:
+            agent_config = getattr(react_agent, "_config", None)
+            if agent_config is not None and self._model_client_config_has_api_key(
+                getattr(agent_config, "model_client_config", None),
+            ):
+                return True
+
+        try:
+            for entry in get_default_models():
+                mcc = entry.get("model_client_config") or {}
+                if self._model_client_config_has_api_key(mcc):
+                    return True
+        except Exception:
+            pass
 
         return False
 
@@ -5026,6 +5381,8 @@ class JiuWenClawDeepAdapter:
         session_id = request.session_id or "default"
         query = request.params.get("query", "")
         mode = request.params.get("mode", "agent.plan")
+        self._last_runtime_mode = mode
+        chat_env_token, chat_fp_token, chat_skill_dirs_token = await self._on_chat_request_start()
 
         if self._plain_chat_should_clear_stale_interrupt(request):
             await self._clear_session_persisted_interrupt_state(
@@ -5051,6 +5408,7 @@ class JiuWenClawDeepAdapter:
                 payload = {"content": content}
             reset_request_id(token_request_id)
             _reset_llm_trace_tokens(token_trace_sid, token_trace_rid, token_trace_iter, token_trace_model)
+            await self._on_chat_request_end(chat_env_token, chat_fp_token, chat_skill_dirs_token)
             return AgentResponse(
                 request_id=request.request_id,
                 channel_id=request.channel_id,
@@ -5078,9 +5436,6 @@ class JiuWenClawDeepAdapter:
                 metadata=request.metadata,
             )
 
-        # 按请求选择模型
-        resolved_model = self._resolve_model_for_request(request)
-        self._apply_model_to_react_agent(resolved_model)
         try:
             await self._update_runtime_config(_RuntimeConfigParams.from_agent_request(request, mode))
 
@@ -5114,6 +5469,7 @@ class JiuWenClawDeepAdapter:
             _reset_llm_trace_tokens(token_trace_sid, token_trace_rid, token_trace_iter, token_trace_model)
             if request.request_id:
                 self._untrack_session_toolkit(request.request_id)
+            await self._on_chat_request_end(chat_env_token, chat_fp_token, chat_skill_dirs_token)
 
         content = result if isinstance(result, (str, dict)) else str(result)
 
@@ -5154,6 +5510,8 @@ class JiuWenClawDeepAdapter:
         cid = request.channel_id
         query = request.params.get("query", "")
         mode = request.params.get("mode", "agent.plan")
+        self._last_runtime_mode = mode
+        chat_env_token, chat_fp_token, chat_skill_dirs_token = await self._on_chat_request_start()
         raw_interactive = request.params.get("interactive_ask", request.params.get("interactiveAsk"))
         interactive_ask = bool(raw_interactive) if raw_interactive is not None else False
         token_trace_sid = _LLM_TRACE_SESSION_ID.set(session_id)
@@ -5172,6 +5530,7 @@ class JiuWenClawDeepAdapter:
                 yield chunk
             reset_request_id(token_request_id)
             _reset_llm_trace_tokens(token_trace_sid, token_trace_rid, token_trace_iter, token_trace_model)
+            await self._on_chat_request_end(chat_env_token, chat_fp_token, chat_skill_dirs_token)
             return
 
         # 拦截斜杠命令
@@ -5208,6 +5567,7 @@ class JiuWenClawDeepAdapter:
                 )
             reset_request_id(token_request_id)
             _reset_llm_trace_tokens(token_trace_sid, token_trace_rid, token_trace_iter, token_trace_model)
+            await self._on_chat_request_end(chat_env_token, chat_fp_token, chat_skill_dirs_token)
             return
 
         if self._plain_chat_should_clear_stale_interrupt(request):
@@ -5251,13 +5611,6 @@ class JiuWenClawDeepAdapter:
             )
         token_cid = TOOL_PERMISSION_CHANNEL_ID.set((request.channel_id or "").strip())
         token_perm = setup_permission_context(request)
-        # 按请求选择模型
-        resolved_model = self._resolve_model_for_request(request)
-        self._apply_model_to_react_agent(resolved_model)
-        logger.info(
-            f"[JiuWenClawDeepAdapter] 模型应用成功: model={resolved_model}",
-            extra={'user_visible': 'progress'}
-        )
         try:
             await self._update_runtime_config(_RuntimeConfigParams.from_agent_request(request, mode))
 
@@ -5664,6 +6017,7 @@ class JiuWenClawDeepAdapter:
             _reset_llm_trace_tokens(token_trace_sid, token_trace_rid, token_trace_iter, token_trace_model)
             if rid:
                 self._untrack_session_toolkit(rid)
+            await self._on_chat_request_end(chat_env_token, chat_fp_token, chat_skill_dirs_token)
 
         summary = {
             "input_tokens": usage_accumulator["input_tokens"],
@@ -6144,20 +6498,23 @@ class JiuWenClawDeepAdapter:
         if memory_mode == "local":
             builtin_on = is_builtin_memory_allowed(config) and is_memory_enabled(mode, config)
             if builtin_on:
-                # 开启记忆
+                embed_fp = self._embed_config_fingerprint(config)
                 if self._memory_rail is not None:
                     cur_memory_type = is_proactive_memory(mode, config)
-                    if self._is_proactive_memory != cur_memory_type:
-                        # 当前记忆类型（主动/被动）和之前注册的不一致，重新注册
+                    embed_changed = (
+                        self._embed_fingerprint is not None
+                        and embed_fp != self._embed_fingerprint
+                    )
+                    if self._is_proactive_memory != cur_memory_type or embed_changed:
                         await self._instance.unregister_rail(self._memory_rail)
                         self._memory_rail = None
                     else:
-                        # 已经注册，且记忆类型相同，无需其他操作
                         return
                 if self._memory_rail is None:
                     self._memory_rail = self._build_memory_rail(mode)
                 if self._memory_rail is not None:
                     await self._instance.register_rail(self._memory_rail)
+                    self._embed_fingerprint = embed_fp
                     logger.info(f"[JiuWenClawDeepAdapter] MemoryRail registered for {mode} mode")
                 else:
                     logger.warning(
@@ -6198,6 +6555,7 @@ class JiuWenClawDeepAdapter:
             workspace_dir=str(get_agent_workspace_dir()),
             agent_id="default",
             memory_mode=mode,
+            embed_fingerprint=self._memory_cache_fingerprint,
         )
 
         if self._instance.system_prompt_builder is not None:
@@ -6230,56 +6588,75 @@ class JiuWenClawDeepAdapter:
             workspace_dir=self._workspace_dir,
         )
 
+    async def _unregister_external_memory_rail(self) -> None:
+        """Unregister ExternalMemoryRail and clear adapter-held references."""
+        if self._external_memory_rail is None or not self._external_memory_rail_registered:
+            self._external_memory_rail = None
+            self._external_memory_rail_registered = False
+            return
+        provider = getattr(self._external_memory_rail, "_provider", None)
+        if provider is not None and hasattr(provider, "on_session_end"):
+            try:
+                await provider.on_session_end()
+            except Exception as exc:
+                logger.debug(
+                    "[JiuWenClawDeepAdapter] on_session_end failed: %s", exc
+                )
+        try:
+            await self._instance.unregister_rail(self._external_memory_rail)
+            logger.info("[JiuWenClawDeepAdapter] ExternalMemoryRail unregistered")
+        except Exception as exc:
+            logger.warning(
+                "[JiuWenClawDeepAdapter] ExternalMemoryRail unregister failed: %s", exc
+            )
+        self._external_memory_rail = None
+        self._external_memory_rail_registered = False
+
     async def _handle_external_memory_rail_by_config(self):
-        """Register / unregister ExternalMemoryRail based on config.
+        """Register / unregister / rebuild ExternalMemoryRail based on config.
 
         External memory is mode-independent — configured once and active for
-        both plan and fast modes. `_external_memory_rail_registered` dedups
-        calls from both _update_plan_mode_rails() and _update_agent_mode_rails().
-        Not part of `_get_current_agent_rails()`, so it is not torn down on
-        config hot-reload (preserves prefetch cache + circuit breaker state).
+        both plan and fast modes. Not part of ``_get_current_agent_rails()``;
+        uses ``register_rail`` / ``unregister_rail`` directly.
+
+        When the external-memory fingerprint is unchanged, the existing rail
+        is kept (prefetch cache and sync circuit breaker state preserved).
+        When the fingerprint changes, the rail is unregistered and rebuilt.
         """
-        from jiuwenclaw.agentserver.memory.external_memory_config import (
-            is_external_memory_enabled,
-        )
         config = get_config()
+        new_fp = external_memory_fingerprint(config)
+
         if is_external_memory_enabled(config):
-            if self._external_memory_rail_registered:
+            if (
+                self._external_memory_rail_registered
+                and self._external_memory_fingerprint == new_fp
+            ):
                 return
+
+            if self._external_memory_rail_registered:
+                await self._unregister_external_memory_rail()
+
+            self._external_memory_rail = self._build_external_memory_rail()
             if self._external_memory_rail is None:
-                self._external_memory_rail = self._build_external_memory_rail()
-            if self._external_memory_rail is None:
+                self._external_memory_fingerprint = None
                 return
             try:
                 await self._instance.register_rail(self._external_memory_rail)
                 self._external_memory_rail_registered = True
-                logger.info("[JiuWenClawDeepAdapter] ExternalMemoryRail registered")
+                self._external_memory_fingerprint = new_fp
+                logger.info(
+                    "[JiuWenClawDeepAdapter] ExternalMemoryRail registered (fp=%s)",
+                    new_fp[:8],
+                )
             except Exception as exc:
                 logger.error(
                     "[JiuWenClawDeepAdapter] ExternalMemoryRail register failed: %s", exc
                 )
                 self._external_memory_rail = None
-        elif self._external_memory_rail is not None and self._external_memory_rail_registered:
-            # Call on_session_end BEFORE unregister_rail: unregister -> uninit()
-            # is sync, and run_coroutine_threadsafe from the same event loop
-            # thread would deadlock.
-            provider = getattr(self._external_memory_rail, "_provider", None)
-            if provider is not None and hasattr(provider, "on_session_end"):
-                try:
-                    await provider.on_session_end()
-                except Exception as exc:
-                    logger.debug(
-                        "[JiuWenClawDeepAdapter] on_session_end failed: %s", exc
-                    )
-            try:
-                await self._instance.unregister_rail(self._external_memory_rail)
-                logger.info("[JiuWenClawDeepAdapter] ExternalMemoryRail unregistered")
-            except Exception as exc:
-                logger.warning(
-                    "[JiuWenClawDeepAdapter] ExternalMemoryRail unregister failed: %s", exc
-                )
-            self._external_memory_rail = None
-            self._external_memory_rail_registered = False
+                self._external_memory_fingerprint = None
+        elif self._external_memory_rail_registered:
+            await self._unregister_external_memory_rail()
+            self._external_memory_fingerprint = None
 
     @classmethod
     def is_working(cls, session_tasks: dict[str, asyncio.Task],
@@ -6294,6 +6671,9 @@ class JiuWenClawDeepAdapter:
         3. Team 流式任务：TeamManager._stream_tasks 中正在执行的 Team 模式流式任务
         4. Team monitors：TeamManager._team_monitors 中正在运行的监控处理器
         5. ACP 待响应请求：AcpOutputManager._pending 中等待用户响应的 ACP 工具请求
+
+        Harness 主对话流式请求在 JiuWenClaw.process_message_stream 入口额外维护
+        _inflight_stream_count，并通过 working_checker 注入本方法的上层判断。
 
         Returns:
             bool: 是否正在工作

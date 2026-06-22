@@ -1,5 +1,7 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 
+# pylint: disable=protected-access
+
 from __future__ import annotations
 
 from types import SimpleNamespace
@@ -11,6 +13,22 @@ from openjiuwen.harness.tools.todo import TodoItem, TodoStatus
 from openjiuwen.harness.tools.todo_resume import TODO_RESUME_SNAPSHOT_PENDING_KEY
 
 from jiuwenclaw.agentserver.deep_agent import interrupt_resume_helpers as helpers
+
+
+class _DeepAdapterInterruptHarness:
+    """Expose DeepAdapter interrupt-clear helpers for unit tests."""
+
+    @classmethod
+    def for_clear_session_test(cls):
+        from jiuwenclaw.agentserver.deep_agent.interface_deep import JiuWenClawDeepAdapter
+
+        adapter = JiuWenClawDeepAdapter.__new__(JiuWenClawDeepAdapter)
+        adapter._instance = SimpleNamespace(card=MagicMock())
+        return adapter
+
+    @staticmethod
+    async def clear_session_persisted_interrupt_state(adapter, session_id: str, **kwargs):
+        return await adapter._clear_session_persisted_interrupt_state(session_id, **kwargs)
 
 
 @pytest.mark.asyncio
@@ -59,13 +77,10 @@ async def test_prepare_interrupt_resume_sets_snapshot_pending_on_resume_query() 
 
 @pytest.mark.asyncio
 async def test_clear_session_persisted_interrupt_state_clears_snapshot_pending() -> None:
-    from jiuwenclaw.agentserver.deep_agent.interface_deep import JiuWenClawDeepAdapter
-
     session = MagicMock()
     session.pre_run = AsyncMock()
     session.post_run = AsyncMock()
-    adapter = JiuWenClawDeepAdapter.__new__(JiuWenClawDeepAdapter)
-    adapter._instance = SimpleNamespace(card=MagicMock())
+    adapter = _DeepAdapterInterruptHarness.for_clear_session_test()
 
     with (
         patch(
@@ -83,7 +98,8 @@ async def test_clear_session_persisted_interrupt_state_clears_snapshot_pending()
             new_callable=AsyncMock,
         ) as post_execute,
     ):
-        await adapter._clear_session_persisted_interrupt_state(
+        await _DeepAdapterInterruptHarness.clear_session_persisted_interrupt_state(
+            adapter,
             "sess-cancel",
             reason="interrupt(cancel)",
             clear_todo_resume_snapshot_pending=True,

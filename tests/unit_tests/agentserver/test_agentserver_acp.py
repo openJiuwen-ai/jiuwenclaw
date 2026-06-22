@@ -4,6 +4,8 @@ import types
 
 import pytest
 
+# pylint: disable=protected-access
+
 from openjiuwen.core.context_engine.qa_artifact.schema import QAArtifactConfig
 
 from jiuwenclaw.agentserver import agent_ws_server as agent_ws_server_module

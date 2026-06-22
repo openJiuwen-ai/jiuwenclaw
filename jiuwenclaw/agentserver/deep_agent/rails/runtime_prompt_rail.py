@@ -11,6 +11,7 @@ import platform
 import subprocess
 from datetime import datetime, timedelta, timezone
 from logging import getLogger
+from pathlib import Path
 from shutil import which
 from typing import Optional
 
@@ -21,8 +22,7 @@ from openjiuwen.harness.rails.base import DeepAgentRail
 from jiuwenclaw.utils import (
     get_user_workspace_dir,
     get_agent_memory_dir,
-    get_agent_registered_skill_dirs,
-    get_shared_agent_skills_dirs,
+    resolve_agent_registered_skill_dirs,
     get_agent_workspace_dir,
     get_deepagent_todo_dir,
     get_multi_tenant_user_workspace_dir,
@@ -64,6 +64,22 @@ class RuntimePromptRail(DeepAgentRail):
         self._request_system_prompt: str = ""
         self._request_identify: str = request_identify.strip() if request_identify else ""
         self._request_soul: str = request_soul.strip() if request_soul else ""
+        self._registered_skill_dirs: list[str] | None = None
+
+    def set_registered_skill_dirs(self, dirs: list[str] | None) -> None:
+        """Use adapter snapshot (reload session isolation); None falls back to resolve."""
+        if dirs is None:
+            self._registered_skill_dirs = None
+            return
+        self._registered_skill_dirs = [str(d) for d in dirs if str(d).strip()]
+
+    def _skills_dirs_display(self, workspace_root: Path) -> str:
+        if self._registered_skill_dirs:
+            return ", ".join(self._registered_skill_dirs)
+        resolved = resolve_agent_registered_skill_dirs()
+        if resolved:
+            return ", ".join(str(p) for p in resolved)
+        return str(workspace_root / "skills")
 
     def init(self, agent) -> None:
         """从 agent 获取 system_prompt_builder 引用。"""
@@ -116,18 +132,18 @@ class RuntimePromptRail(DeepAgentRail):
                     "workspace": self._workspace_dir or str(workspace_root), # 优先使用请求中的 workspace_dir
                     "memory": str(workspace_root / "memory"),
                     "daily_memory": str(workspace_root / "memory" / "daily_memory"),
-                    "skills": ", ".join(str(d) for d in get_shared_agent_skills_dirs())
-                    if get_shared_agent_skills_dirs() else str(workspace_root / "skills"),
+                    "skills": self._skills_dirs_display(workspace_root),
                     "todo": str(workspace_root / "todo"),
                 }
         
         # 单租户模式
+        workspace_root = Path(self._workspace_dir or str(get_agent_workspace_dir()))
         return {
             "config": str(get_user_workspace_dir() / "config"),
             "workspace": self._workspace_dir or str(get_agent_workspace_dir()),
             "memory": str(get_agent_memory_dir()),
             "daily_memory": str(get_agent_memory_dir() / "daily_memory"),
-            "skills": ", ".join(str(d) for d in get_agent_registered_skill_dirs()),
+            "skills": self._skills_dirs_display(workspace_root),
             "todo": str(get_deepagent_todo_dir()),
         }
 

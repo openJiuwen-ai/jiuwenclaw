@@ -7,6 +7,12 @@ from typing import Any, ClassVar
 
 from jiuwenclaw.schema.agent import AgentRequest, AgentResponse, AgentResponseChunk
 from jiuwenclaw.utils import AsyncLRUCache, get_multi_tenant_user_workspace_dir
+from jiuwenclaw.agentserver.reload_result import (
+    ReloadAggregateResult,
+    log_agent_config_hot_reload,
+    log_reload_config_changes,
+)
+from jiuwenclaw.local_env_config import stage_env_overrides
 
 logger = logging.getLogger(__name__)
 
@@ -57,6 +63,7 @@ class TenantAgentPool:
         # 保存全局最新配置，用于后续创建 AgentManager 时传递
         self._latest_config: Any = None
         self._latest_env: Any = None
+        self._last_reload_trace_id: str | None = None
 
     @classmethod
     def get_instance(cls) -> "TenantAgentPool":
@@ -225,27 +232,57 @@ class TenantAgentPool:
                     "[TenantAgentPool] cancel_all_inflight_work failed for key=%s", key
                 )
 
-    async def reload_agents_config(self, config: Any, env: Any) -> None:
+    async def reload_agents_config(
+        self,
+        config: Any,
+        env: Any,
+        *,
+        reload_trace_id: str | None = None,
+    ) -> ReloadAggregateResult:
         """与 ``AgentManager.reload_agents_config`` 一致：对每个已缓存租户热重载配置。"""
-        # 保存配置，用于后续创建的 AgentManager 传递
+        if reload_trace_id:
+            self._last_reload_trace_id = reload_trace_id
+        log_reload_config_changes(
+            logger,
+            env=env,
+            config=config,
+            previous_config=self._latest_config,
+            reload_trace_id=reload_trace_id,
+            source="TenantAgentPool",
+        )
         self._latest_config = config
         self._latest_env = env
+        stage_env_overrides(env)
 
+        aggregate = ReloadAggregateResult()
         keys = await self._agent_wrappers.keys()
         if not keys:
-            logger.info("[TenantAgentPool] No AgentManager instances yet, config saved for future creation")
-            return
+            log_agent_config_hot_reload(
+                logger,
+                reload_trace_id=reload_trace_id,
+                phase="cached",
+                source="TenantAgentPool",
+                note="No AgentManager instances yet, config saved for future creation",
+            )
+            return aggregate
 
         for key in keys:
             agent_manager = await self._agent_wrappers.get(key)
             if agent_manager is None:
                 continue
             try:
-                await agent_manager.reload_agents_config(config, env)
+                result = await agent_manager.reload_agents_config(
+                    config, env, reload_trace_id=reload_trace_id
+                )
+                aggregate.applied += result.applied
+                aggregate.deferred += result.deferred
+                aggregate.failed.extend(result.failed)
             except Exception:
                 logger.exception(
                     "[TenantAgentPool] reload_agents_config failed for key=%s", key
                 )
+                aggregate.failed.append({"session": str(key), "error": "tenant reload failed"})
+        return aggregate
 
     async def _ensure_agent_manager(
             self,
@@ -278,9 +315,17 @@ class TenantAgentPool:
             try:
                 # 设置工作目录隔离
                 agent_dir_path = get_multi_tenant_user_workspace_dir(service_id, agent_id)
+                if agent_dir_path is None:
+                    raise ValueError(
+                        f"invalid tenant workspace: agent_id={agent_id!r}, service_id={service_id!r}"
+                    )
+
+                import os
+                agent_runtime = os.getenv("AGENT_RUNTIME", "").strip()
+                if agent_runtime:
+                    agent_id = cache_key
 
                 from jiuwenclaw.agentserver.agent_manager import AgentManager
-
                 # 创建新的 AgentManager 实例，传入保存的配置
                 agent_manager = AgentManager(
                     agent_id=agent_id,
@@ -288,7 +333,19 @@ class TenantAgentPool:
                     user_workspace_dir=agent_dir_path,
                     config_base=self._latest_config,
                     env_overrides=self._latest_env,
+                    last_reload_trace_id=self._last_reload_trace_id,
                 )
+
+                if self._latest_config is not None or self._latest_env:
+                    log_agent_config_hot_reload(
+                        logger,
+                        reload_trace_id=self._last_reload_trace_id,
+                        phase="cached_apply",
+                        source="TenantAgentPool",
+                        agent_id=agent_id,
+                        service_id=service_id,
+                        has_config=self._latest_config is not None,
+                    )
 
                 # 存入 LRU 缓存
                 await self._agent_wrappers.put(cache_key, agent_manager)

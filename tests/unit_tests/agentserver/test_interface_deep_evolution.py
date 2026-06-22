@@ -2,6 +2,8 @@
 
 """Unit tests for interface_deep evolution-related functionality."""
 
+# pylint: disable=protected-access
+
 import os
 from pathlib import Path
 from typing import Any

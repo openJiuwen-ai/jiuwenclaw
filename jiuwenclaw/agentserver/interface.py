@@ -28,6 +28,7 @@ from jiuwenclaw.agentserver.agent_adapters import (
     resolve_sdk_choice,
 )
 from jiuwenclaw.agentserver.memory.config import get_memory_mode
+from jiuwenclaw.agentserver.reload_result import ReloadResult
 
 
 logger = logging.getLogger(__name__)
@@ -75,6 +76,7 @@ from jiuwenclaw.utils import (
     get_env_file,
     get_user_workspace_dir,
 )
+
 
 load_dotenv(dotenv_path=get_env_file())
 
@@ -227,6 +229,13 @@ class JiuWenClaw:
         self._storage = None
         self._tool_manager = None
         self._session_id: str | None = None
+        self._inflight_stream_count: int = 0
+
+    def _acquire_inflight_stream(self) -> None:
+        self._inflight_stream_count += 1
+
+    def _release_inflight_stream(self) -> None:
+        self._inflight_stream_count = max(0, self._inflight_stream_count - 1)
 
     def _get_skilldev_service(self):
         """懒初始化并返回 SkillDevService 实例.
@@ -286,12 +295,20 @@ class JiuWenClaw:
             )
             if hasattr(self._adapter, "set_skill_manager"):
                 self._adapter.set_skill_manager(self._skill_manager)
+            if hasattr(self._adapter, "set_working_checker"):
+                self._adapter.set_working_checker(self.is_working)
             self._skill_manager.set_skillnet_install_complete_hook(
                 self.create_instance
             )
             logger.info("[JiuWenClaw] Initialized adapter: sdk=%s, workspace_dir=%s",
                         self._sdk_name, self._workspace_dir)
+        if hasattr(self._adapter, "set_working_checker"):
+            self._adapter.set_working_checker(self.is_working)
         return self._adapter
+
+    def _sync_adapter_working_checker(self) -> None:
+        if self._adapter is not None and hasattr(self._adapter, "set_working_checker"):
+            self._adapter.set_working_checker(self.is_working)
 
     def _get_tool_manager(self):
         """懒初始化 ``ToolManager``（依赖 ``get_instance`` 上的底层 Agent）。"""
@@ -505,7 +522,7 @@ class JiuWenClaw:
             self,
             config_base: dict[str, Any] | None = None,
             env_overrides: dict[str, Any] | None = None,
-    ) -> None:
+    ) -> ReloadResult:
         """从配置重新加载.
 
         Args:
@@ -513,8 +530,23 @@ class JiuWenClaw:
             env_overrides: 可选的环境变量增量；仅覆盖请求中出现的 key。
         """
         adapter = await self._ensure_adapter()
-        await adapter.reload_agent_config(config_base, env_overrides)
-        logger.info("[JiuWenClaw] Agent config reloaded: sdk=%s", self._sdk_name)
+        self._sync_adapter_working_checker()
+        result = await adapter.reload_agent_config(config_base, env_overrides)
+        logger.info(
+            "[JiuWenClaw] Agent config reload: sdk=%s applied=%s deferred=%s",
+            self._sdk_name,
+            result.applied,
+            result.deferred,
+        )
+        return result
+
+    async def get_memory_cache_fingerprint(self) -> str | None:
+        """Return the adapter's bound memory cache fingerprint, if any."""
+        adapter = await self._ensure_adapter()
+        getter = getattr(adapter, "get_memory_cache_fingerprint", None)
+        if callable(getter):
+            return getter()
+        return None
 
     async def prepare_files_for_agent(self, request: AgentRequest) -> None:
         """预处理文件：从对象存储下载文件到本地 workspace.
@@ -1348,105 +1380,156 @@ class JiuWenClaw:
                     extra={'user_visible': 'critical'}
                 )
 
-        stream_queue = asyncio.Queue()
-        stream_done = asyncio.Event()
-        final_answer_content = ""
-        final_answer_chunks: list[str] = []
-        adapter_emitted_terminal_chunk = False
-        collected_files: list[dict] = []  # 收集 Agent 生成的文件信息
+        await self._try_apply_adapter_pending_reload()
 
-        async def run_stream_task():
-            try:
-                # 注册 Office Claw MCP（请求级环境变量）
-                office_claw_mcp = request.params.get("office_claw_mcp")
-                if isinstance(office_claw_mcp, dict):
-                    try:
-                        await self._get_tool_manager().register_request_scoped_office_claw_mcp(office_claw_mcp)
-                    except Exception as exc:
-                        logger.error(
-                            f"[JiuWenClaw] office_claw_mcp注册失败: request_id={request.request_id} error={str(exc)}",
-                            extra={'user_visible': 'critical'}
-                        )
-                        logger.warning("[JiuWenClaw] office_claw_mcp 注册失败: %s", exc)
-                async for chunk in adapter.process_message_stream_impl(request, inputs):
-                    await stream_queue.put(("chunk", chunk))
-            except asyncio.CancelledError:
-                logger.info("[JiuWenClaw] 流式任务被取消: request_id=%s session_id=%s", rid, session_id, 
-                            extra={'user_visible': 'progress'})
-                await stream_queue.put(("error", asyncio.CancelledError()))
-            except Exception as exc:
-                logger.exception("[JiuWenClaw] 流式任务异常: %s", exc, extra={'user_visible': 'progress'})
-                await stream_queue.put(("error", exc))
-            finally:
-                stream_done.set()
-
-        # Team 模式: 后续请求直接执行，绕过 Session Manager 队列
-        # 因为 Team 是长期运行的(persistent)，interact 调用不需要等待前一个任务完成
-        # 且 team_helpers 内部已有请求锁保证同一 session 的请求串行执行
-        if is_team_mode and not is_team_first_request:
-            logger.info(
-                "[JiuWenClaw] Team模式后续请求，直接执行: request_id=%s session_id=%s",
-                rid, session_id, extra={'user_visible': 'progress'}
-            )
-            # Team模式后续请求：直接异步执行，不排队。Team 模式支持并发，不需要排队。
-            asyncio.create_task(run_stream_task())
-        else:
-            # 其他情况：通过 SessionManager 排队执行。同 session 内按 FIFO 顺序执行。
-            await self._session_manager.submit_task(session_id, run_stream_task)
+        self._acquire_inflight_stream()
         try:
-            # 1.生产者-消费者模式：run_stream_task 生产 → 循环消费 → yield 转发
-            # 2.历史记录异步写入：不阻塞流式转发
-            # 3.事件类型过滤：只记录 chat.*、task.*、team.message 类型事件
-            while not stream_done.is_set() or not stream_queue.empty():
+            stream_queue = asyncio.Queue()
+            stream_done = asyncio.Event()
+            final_answer_content = ""
+            final_answer_chunks: list[str] = []
+            adapter_emitted_terminal_chunk = False
+            collected_files: list[dict] = []  # 收集 Agent 生成的文件信息
+
+            async def run_stream_task():
                 try:
-                    item = await asyncio.wait_for(stream_queue.get(), timeout=0.1)
-                except asyncio.TimeoutError:
-                    continue
+                    # 注册 Office Claw MCP（请求级环境变量）
+                    office_claw_mcp = request.params.get("office_claw_mcp")
+                    if isinstance(office_claw_mcp, dict):
+                        try:
+                            await self._get_tool_manager().register_request_scoped_office_claw_mcp(office_claw_mcp)
+                        except Exception as exc:
+                            logger.error(
+                                f"[JiuWenClaw] office_claw_mcp注册失败: request_id={request.request_id} error={str(exc)}",
+                                extra={'user_visible': 'critical'}
+                            )
+                            logger.warning("[JiuWenClaw] office_claw_mcp 注册失败: %s", exc)
+                    async for chunk in adapter.process_message_stream_impl(request, inputs):
+                        await stream_queue.put(("chunk", chunk))
+                except asyncio.CancelledError:
+                    logger.info("[JiuWenClaw] 流式任务被取消: request_id=%s session_id=%s", rid, session_id,
+                                extra={'user_visible': 'progress'})
+                    await stream_queue.put(("error", asyncio.CancelledError()))
+                except Exception as exc:
+                    logger.exception("[JiuWenClaw] 流式任务异常: %s", exc, extra={'user_visible': 'progress'})
+                    await stream_queue.put(("error", exc))
+                finally:
+                    stream_done.set()
 
-                event_type, data = item
+            # Team 模式: 后续请求直接执行，绕过 Session Manager 队列
+            # 因为 Team 是长期运行的(persistent)，interact 调用不需要等待前一个任务完成
+            # 且 team_helpers 内部已有请求锁保证同一 session 的请求串行执行
+            if is_team_mode and not is_team_first_request:
+                logger.info(
+                    "[JiuWenClaw] Team模式后续请求，直接执行: request_id=%s session_id=%s",
+                    rid, session_id, extra={'user_visible': 'progress'}
+                )
+                # Team模式后续请求：直接异步执行，不排队。Team 模式支持并发，不需要排队。
+                asyncio.create_task(run_stream_task())
+            else:
+                # 其他情况：通过 SessionManager 排队执行。同 session 内按 FIFO 顺序执行。
+                await self._session_manager.submit_task(session_id, run_stream_task)
+            try:
+                # 1.生产者-消费者模式：run_stream_task 生产 → 循环消费 → yield 转发
+                # 2.历史记录异步写入：不阻塞流式转发
+                # 3.事件类型过滤：只记录 chat.*、task.*、team.message 类型事件
+                while not stream_done.is_set() or not stream_queue.empty():
+                    try:
+                        item = await asyncio.wait_for(stream_queue.get(), timeout=0.1)
+                    except asyncio.TimeoutError:
+                        continue
 
-                if event_type == "error":
-                    if isinstance(data, asyncio.CancelledError):
-                        logger.info("[JiuWenClaw] 流式处理被中断: request_id=%s", rid, extra={'user_visible': 'progress'})
-                        raise data
-                    append_history_record(
-                        session_id=session_id,
-                        request_id=rid,
-                        channel_id=cid,
-                        role="assistant",
-                        event_type="chat.error",
-                        content=str(data),
-                        timestamp=time.time(),
-                        mode=request.params.get("mode", "unknown"),
-                        sessions_root=self._sessions_dir,
-                    )
-                    yield AgentResponseChunk(
-                        request_id=rid,
-                        channel_id=cid,
-                        payload={"event_type": "chat.error", "error": str(data)},
-                        is_complete=False,
-                    )
-                else:
-                    if isinstance(data, AgentResponseChunk):
-                        if data.is_complete:
-                            adapter_emitted_terminal_chunk = True
-                        should_suppress = (
-                            isinstance(data.payload, dict)
-                            and isinstance(data.payload.get("event_type"), str)
-                            and str(data.payload.get("event_type")) in _E2A_SUPPRESSED_EVENT_TYPES
+                    event_type, data = item
+
+                    if event_type == "error":
+                        if isinstance(data, asyncio.CancelledError):
+                            logger.info("[JiuWenClaw] 流式处理被中断: request_id=%s", rid, extra={'user_visible': 'progress'})
+                            raise data
+                        append_history_record(
+                            session_id=session_id,
+                            request_id=rid,
+                            channel_id=cid,
+                            role="assistant",
+                            event_type="chat.error",
+                            content=str(data),
+                            timestamp=time.time(),
+                            mode=request.params.get("mode", "unknown"),
+                            sessions_root=self._sessions_dir,
                         )
-                        if isinstance(data.payload, dict) and isinstance(data.payload.get("event_type"), str):
-                            et = str(data.payload.get("event_type"))
+                        yield AgentResponseChunk(
+                            request_id=rid,
+                            channel_id=cid,
+                            payload={"event_type": "chat.error", "error": str(data)},
+                            is_complete=False,
+                        )
+                    else:
+                        if isinstance(data, AgentResponseChunk):
+                            if data.is_complete:
+                                adapter_emitted_terminal_chunk = True
+                            should_suppress = (
+                                isinstance(data.payload, dict)
+                                and isinstance(data.payload.get("event_type"), str)
+                                and str(data.payload.get("event_type")) in _E2A_SUPPRESSED_EVENT_TYPES
+                            )
+                            if isinstance(data.payload, dict) and isinstance(data.payload.get("event_type"), str):
+                                et = str(data.payload.get("event_type"))
+                                should_record = et.startswith("chat.") or et.startswith("task.")
+                                if not should_record and et == EventType.TEAM_MESSAGE.value:
+                                    should_record = True
+
+                                if should_record:
+                                    payload_dict = dict(data.payload)
+                                    extra_fields = {k: v for k, v in payload_dict.items() if
+                                                    k not in ("event_type", "content", "task_id")}
+                                    if et == EventType.TEAM_MESSAGE.value and "event" in payload_dict:
+                                        event_data = payload_dict.get("event", {})
+                                        if isinstance(event_data, dict):
+                                            for k, v in event_data.items():
+                                                if k not in ("type", "timestamp", "content"):
+                                                    extra_fields[k] = v
+                                    append_history_record(
+                                        session_id=session_id,
+                                        request_id=rid,
+                                        channel_id=cid,
+                                        role="assistant",
+                                        event_type=et,
+                                        content=data.payload.get("content") or data.payload.get("error") or "",
+                                        timestamp=time.time(),
+                                        extra=extra_fields if extra_fields else None,
+                                        mode=request.params.get("mode", "unknown"),
+                                        sessions_root=self._sessions_dir,
+                                        task_id=payload_dict.get("task_id"),
+                                    )
+                                if et == "chat.final":
+                                    final_answer_content = str(data.payload.get("content", ""))
+                                elif et == "chat.delta":
+                                    final_answer_chunks.append(str(data.payload.get("content", "")))
+                                elif et == "chat.file":
+                                    # 收集 Agent 生成的文件信息
+                                    files_list = data.payload.get("files", [])
+                                    if isinstance(files_list, list):
+                                        collected_files.extend(files_list)
+                                        logger.info(
+                                            f"[JiuWenClaw] 收集到文件: request_id={rid} files_count={len(files_list)}",
+                                            extra={'user_visible': 'critical'}
+                                        )
+                            if not should_suppress:
+                                yield data
+                        elif isinstance(data, dict) and isinstance(data.get("event_type"), str):
+                            et = str(data.get("event_type"))
+                            should_suppress = et in _E2A_SUPPRESSED_EVENT_TYPES
                             should_record = et.startswith("chat.") or et.startswith("task.")
                             if not should_record and et == EventType.TEAM_MESSAGE.value:
                                 should_record = True
 
                             if should_record:
-                                payload_dict = dict(data.payload)
-                                extra_fields = {k: v for k, v in payload_dict.items() if
-                                                k not in ("event_type", "content", "task_id")}
-                                if et == EventType.TEAM_MESSAGE.value and "event" in payload_dict:
-                                    event_data = payload_dict.get("event", {})
+                                extra_fields = {
+                                    k: v
+                                    for k, v in data.items()
+                                    if k not in ("event_type", "content", "task_id")
+                                }
+                                if et == EventType.TEAM_MESSAGE.value and "event" in data:
+                                    event_data = data.get("event", {})
                                     if isinstance(event_data, dict):
                                         for k, v in event_data.items():
                                             if k not in ("type", "timestamp", "content"):
@@ -1457,164 +1540,148 @@ class JiuWenClaw:
                                     channel_id=cid,
                                     role="assistant",
                                     event_type=et,
-                                    content=data.payload.get("content") or data.payload.get("error") or "",
+                                    content=data.get("content") or data.get("error") or "",
                                     timestamp=time.time(),
                                     extra=extra_fields if extra_fields else None,
                                     mode=request.params.get("mode", "unknown"),
                                     sessions_root=self._sessions_dir,
-                                    task_id=payload_dict.get("task_id"),
+                                    task_id=data.get("task_id"),
                                 )
                             if et == "chat.final":
-                                final_answer_content = str(data.payload.get("content", ""))
+                                final_answer_content = str(data.get("content", ""))
                             elif et == "chat.delta":
-                                final_answer_chunks.append(str(data.payload.get("content", "")))
+                                final_answer_chunks.append(str(data.get("content", "")))
                             elif et == "chat.file":
                                 # 收集 Agent 生成的文件信息
-                                files_list = data.payload.get("files", [])
+                                files_list = data.get("files", [])
                                 if isinstance(files_list, list):
                                     collected_files.extend(files_list)
                                     logger.info(
                                         f"[JiuWenClaw] 收集到文件: request_id={rid} files_count={len(files_list)}",
                                         extra={'user_visible': 'critical'}
                                     )
-                        if not should_suppress:
-                            yield data
-                    elif isinstance(data, dict) and isinstance(data.get("event_type"), str):
-                        et = str(data.get("event_type"))
-                        should_suppress = et in _E2A_SUPPRESSED_EVENT_TYPES
-                        should_record = et.startswith("chat.") or et.startswith("task.")
-                        if not should_record and et == EventType.TEAM_MESSAGE.value:
-                            should_record = True
-
-                        if should_record:
-                            extra_fields = {
-                                k: v
-                                for k, v in data.items()
-                                if k not in ("event_type", "content", "task_id")
-                            }
-                            if et == EventType.TEAM_MESSAGE.value and "event" in data:
-                                event_data = data.get("event", {})
-                                if isinstance(event_data, dict):
-                                    for k, v in event_data.items():
-                                        if k not in ("type", "timestamp", "content"):
-                                            extra_fields[k] = v
-                            append_history_record(
-                                session_id=session_id,
-                                request_id=rid,
-                                channel_id=cid,
-                                role="assistant",
-                                event_type=et,
-                                content=data.get("content") or data.get("error") or "",
-                                timestamp=time.time(),
-                                extra=extra_fields if extra_fields else None,
-                                mode=request.params.get("mode", "unknown"),
-                                sessions_root=self._sessions_dir,
-                                task_id=data.get("task_id"),
-                            )
-                        if et == "chat.final":
-                            final_answer_content = str(data.get("content", ""))
-                        elif et == "chat.delta":
-                            final_answer_chunks.append(str(data.get("content", "")))
-                        elif et == "chat.file":
-                            # 收集 Agent 生成的文件信息
-                            files_list = data.get("files", [])
-                            if isinstance(files_list, list):
-                                collected_files.extend(files_list)
-                                logger.info(
-                                    f"[JiuWenClaw] 收集到文件: request_id={rid} files_count={len(files_list)}",
-                                    extra={'user_visible': 'critical'}
+                            if not should_suppress:
+                                yield AgentResponseChunk(
+                                    request_id=rid,
+                                    channel_id=cid,
+                                    payload=data,
+                                    is_complete=False,
                                 )
-                        if not should_suppress:
-                            yield AgentResponseChunk(
-                                request_id=rid,
-                                channel_id=cid,
-                                payload=data,
-                                is_complete=False,
-                            )
-        except asyncio.CancelledError:
-            logger.info("[JiuWenClaw] 流式处理被中断: request_id=%s", rid, extra={'user_visible': 'progress'})
-            raise
+            except asyncio.CancelledError:
+                logger.info("[JiuWenClaw] 流式处理被中断: request_id=%s", rid, extra={'user_visible': 'progress'})
+                raise
 
-        # 记录Agent回答到日志（流式delta合并，仅在无chat.final事件时）
-        if not final_answer_content and final_answer_chunks:
-            delta_content = "".join(final_answer_chunks)
-            if delta_content:
+            # 记录Agent回答到日志（流式delta合并，仅在无chat.final事件时）
+            if not final_answer_content and final_answer_chunks:
+                delta_content = "".join(final_answer_chunks)
+                if delta_content:
+                    logger.info(
+                        "[JiuWenClaw] Agent流式回答汇总: %s",
+                        _truncate_for_log(delta_content),
+                        extra={'user_visible': 'critical'}
+                    )
+
+            # cloud memory: after chat hook
+            if memory_mode == "cloud":
+                assistant_message = final_answer_content or "".join(final_answer_chunks)
+                after_ctx = MemoryHookContext(
+                    session_id=request.session_id or "default",
+                    request_id=request.request_id or "",
+                    channel_id=request.channel_id,
+                    agent_name="main_agent",
+                    workspace_dir=str(get_agent_home_dir()),
+                    assistant_message=assistant_message,
+                    extra=request.params,
+                )
+                await ExtensionRegistry.get_instance().trigger(AgentServerHookEvents.MEMORY_AFTER_CHAT, after_ctx)
+
+            # 文件后处理：上传 Agent 生成的输出文件到对象存储
+            # 从 session_id 或 metadata 中提取用户 ID
+            user_id = request.session_id or "default"
+            if request.metadata and isinstance(request.metadata, dict):
+                user_id = request.metadata.get("user_id", user_id)
+
+            # 统一提取 chat_id 和 channel_type
+            cleaned_chat_id, channel_type = self._extract_chat_id(request)
+
+            # 文件后处理：上传 Agent 生成的输出文件到对象存储
+            if collected_files:
+                virtual_response = AgentResponse(
+                    request_id=request.request_id,
+                    channel_id=request.channel_id,
+                    ok=True,
+                    payload={"files": collected_files}
+                )
+
                 logger.info(
-                    "[JiuWenClaw] Agent流式回答汇总: %s",
-                    _truncate_for_log(delta_content),
+                    f"[JiuWenClaw] 开始上传文件: request_id={request.request_id} "
+                    f"files_count={len(collected_files)} user_id={user_id} chat_id={cleaned_chat_id}",
                     extra={'user_visible': 'critical'}
                 )
 
-        # cloud memory: after chat hook
-        if memory_mode == "cloud":
-            assistant_message = final_answer_content or "".join(final_answer_chunks)
-            after_ctx = MemoryHookContext(
-                session_id=request.session_id or "default",
-                request_id=request.request_id or "",
-                channel_id=request.channel_id,
-                agent_name="main_agent",
-                workspace_dir=str(get_agent_home_dir()),
-                assistant_message=assistant_message,
-                extra=request.params,
-            )
-            await ExtensionRegistry.get_instance().trigger(AgentServerHookEvents.MEMORY_AFTER_CHAT, after_ctx)
+                await self.upload_agent_files(virtual_response, user_id, cleaned_chat_id, channel_type)
 
-        # 文件后处理：上传 Agent 生成的输出文件到对象存储
-        # 从 session_id 或 metadata 中提取用户 ID
-        user_id = request.session_id or "default"
-        if request.metadata and isinstance(request.metadata, dict):
-            user_id = request.metadata.get("user_id", user_id)
+                # 上传完成后，发送 chat.file_uploaded 事件（包含 URI）
+                # virtual_response.payload["files"] 现在已包含 uri 字段
+                if virtual_response.payload and virtual_response.payload.get("files"):
+                    yield AgentResponseChunk(
+                        request_id=rid,
+                        channel_id=cid,
+                        payload={
+                            "event_type": "chat.file_uploaded",
+                            "files": virtual_response.payload["files"]
+                        },
+                        is_complete=False,
+                    )
+                    logger.info(
+                        f"[JiuWenClaw] 文件上传完成事件已发送: request_id={request.request_id} "
+                        f"files_count={len(virtual_response.payload['files'])}",
+                        extra={'user_visible': 'critical'}
+                    )
 
-        # 统一提取 chat_id 和 channel_type
-        cleaned_chat_id, channel_type = self._extract_chat_id(request)
-
-        # 文件后处理：上传 Agent 生成的输出文件到对象存储
-        if collected_files:
-            virtual_response = AgentResponse(
-                request_id=request.request_id,
-                channel_id=request.channel_id,
-                ok=True,
-                payload={"files": collected_files}
-            )
-
-            logger.info(
-                f"[JiuWenClaw] 开始上传文件: request_id={request.request_id} "
-                f"files_count={len(collected_files)} user_id={user_id} chat_id={cleaned_chat_id}",
-                extra={'user_visible': 'critical'}
-            )
-
-            await self.upload_agent_files(virtual_response, user_id, cleaned_chat_id, channel_type)
-
-            # 上传完成后，发送 chat.file_uploaded 事件（包含 URI）
-            # virtual_response.payload["files"] 现在已包含 uri 字段
-            if virtual_response.payload and virtual_response.payload.get("files"):
+            if not adapter_emitted_terminal_chunk:
                 yield AgentResponseChunk(
                     request_id=rid,
                     channel_id=cid,
-                    payload={
-                        "event_type": "chat.file_uploaded",
-                        "files": virtual_response.payload["files"]
-                    },
-                    is_complete=False,
-                )
-                logger.info(
-                    f"[JiuWenClaw] 文件上传完成事件已发送: request_id={request.request_id} "
-                    f"files_count={len(virtual_response.payload['files'])}",
-                    extra={'user_visible': 'critical'}
+                    payload={"is_complete": True},
+                    is_complete=True,
                 )
 
-        if not adapter_emitted_terminal_chunk:
-            yield AgentResponseChunk(
-                request_id=rid,
-                channel_id=cid,
-                payload={"is_complete": True},
-                is_complete=True,
+        finally:
+            self._release_inflight_stream()
+            await self._try_apply_adapter_pending_reload()
+
+    async def _try_apply_adapter_pending_reload(self) -> None:
+        """Apply adapter deferred config reload at a harness-idle boundary."""
+        if self._inflight_stream_count > 0:
+            return
+        adapter = self._adapter
+        if adapter is None:
+            return
+        apply_fn = getattr(adapter, "apply_pending_reload_if_idle", None)
+        if not callable(apply_fn):
+            return
+        try:
+            result = await apply_fn()
+            if result is not None and result.applied:
+                logger.info(
+                    "[JiuWenClaw] Agent config pending reload applied at idle boundary"
+                )
+        except Exception:
+            logger.exception(
+                "[JiuWenClaw] apply_pending_reload_if_idle failed at idle boundary"
             )
 
     # ---------- 实例获取 ----------
 
     def get_instance(self):
-        return self._adapter._instance
+        adapter = self._adapter
+        if adapter is None:
+            return None
+        getter = getattr(adapter, "get_agent_instance", None)
+        if callable(getter):
+            return getter()
+        return None
 
     def get_registered_tools_catalog(self) -> list[dict[str, str]]:
         """枚举当前实例已注册工具（name / description / short_description）。"""
@@ -1666,6 +1733,10 @@ class JiuWenClaw:
 
     def is_working(self) -> bool:
         """返回 Agent 是否正在工作."""
+        if self._inflight_stream_count > 0:
+            return True
+        if self._adapter is None:
+            return False
         task = self._session_manager.get_session_tasks()
         queue = self._session_manager.get_session_queues()
         return self._adapter.is_working(task, queue)

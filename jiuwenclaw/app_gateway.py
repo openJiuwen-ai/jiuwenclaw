@@ -987,6 +987,7 @@ async def _run(
         *,
         env_updates: dict[str, str] | None = None,
         config_payload: dict[str, Any] | None = None,
+        config_set_req_id: str | None = None,
     ) -> bool:
         browser_runtime_keys = {
             "MODEL_PROVIDER",
@@ -1010,7 +1011,24 @@ async def _run(
             "IMAGE_GEN_API_BASE",
             "IMAGE_GEN_API_KEY",
         }
+        reload_trace_id = f"agent-reload-{uuid_module.uuid4().hex[:8]}"
+        from jiuwenclaw.agentserver.reload_result import (
+            log_agent_config_hot_reload,
+            log_reload_config_changes,
+            redact_reload_error_message,
+            summarize_reload_payload,
+        )
         try:
+            log_reload_config_changes(
+                logger,
+                env=env_updates,
+                config=config_payload,
+                reload_trace_id=reload_trace_id,
+                source="AppGateway",
+                updated_param_keys=updated_env_keys,
+                config_set_req_id=config_set_req_id,
+            )
+
             client.set_or_update_server_config(
                 config=dict(config_payload or {}),
                 env=dict(env_updates or {}),
@@ -1022,7 +1040,7 @@ async def _run(
             # 发送给 AgentServer 前解密扩展敏感配置
             decrypted_config = decrypt_extensions_sensitive_for_agent(config_payload or {})
             reload_env = e2a_from_agent_fields(
-                request_id=f"agent-reload-{uuid_module.uuid4().hex[:8]}",
+                request_id=reload_trace_id,
                 channel_id="",
                 req_method=ReqMethod.AGENT_RELOAD_CONFIG,
                 params={
@@ -1042,6 +1060,15 @@ async def _run(
                 )
                 raise RuntimeError(f"agent.reload_config rejected: {err_msg}")
 
+            payload = getattr(reload_resp, "payload", None) or {}
+            log_agent_config_hot_reload(
+                logger,
+                reload_trace_id=reload_trace_id,
+                phase="completed",
+                source="AppGateway",
+                **summarize_reload_payload(payload),
+            )
+
             if updated_env_keys and (browser_runtime_keys & set(updated_env_keys)):
                 restart_env = e2a_from_agent_fields(
                     request_id=f"browser-restart-{uuid_module.uuid4().hex[:8]}",
@@ -1050,18 +1077,26 @@ async def _run(
                 )
                 await client.send_request(restart_env)
             return True
-        except Exception as e:  # noqa: BLE001
-            logger.error("[App] hot config reload failed: %s", e)
+        except Exception as e:
+            log_agent_config_hot_reload(
+                logger,
+                reload_trace_id=reload_trace_id,
+                phase="failed",
+                source="AppGateway",
+                level=logging.ERROR,
+                error=redact_reload_error_message(str(e)),
+            )
             return False
     # 启动时将配置同步给agentserver（可通过配置关闭）
     sync_config_enabled_cfg = sync_config_cfg.get("enabled") if isinstance(sync_config_cfg, dict) else None
     sync_config_on_startup = _get_bool_config("SYNC_CONFIG_ON_STARTUP", sync_config_enabled_cfg, default=True)
 
     if sync_config_on_startup:
+        # env is incremental on reload; startup sync relies on config snapshot only.
         callback_result = _on_config_saved(
-            set(_CONFIG_SET_ENV_MAP.values()) | _CONFIG_YAML_KEYS,
-            env_updates=dict(env_dict),
-            config_payload=dict(full_cfg or {})
+            set(_CONFIG_YAML_KEYS),
+            env_updates={},
+            config_payload=dict(full_cfg or {}),
         )
         if inspect.isawaitable(callback_result):
             await callback_result

@@ -8,6 +8,8 @@ import pytest
 # Mock trafilatura before importing jiuwenclaw modules
 sys.modules['trafilatura'] = MagicMock()
 
+# pylint: disable=protected-access
+
 from openjiuwen.core.foundation.llm import Model
 from openjiuwen.core.single_agent.rail.base import AgentCallbackContext
 from openjiuwen.harness.prompts import PromptSection, SystemPromptBuilder
@@ -32,6 +34,10 @@ class _TestableJiuWenClawDeepAdapter(JiuWenClawDeepAdapter):
         config_base: dict | None = None,
     ):
         return self._build_configured_subagents(model, config, config_base)
+
+    @classmethod
+    def resolve_skill_mode_for_test(cls, config: dict) -> str:
+        return cls._resolve_skill_mode(config)
 
 
 def test_build_identity_prompt_contains_identity_section_only():
@@ -84,9 +90,9 @@ async def test_runtime_time_section_in_ctx_extra_not_in_builder():
 
 
 def test_resolve_skill_mode_accepts_all_and_auto_list():
-    assert JiuWenClawDeepAdapter._resolve_skill_mode({"skill_mode": "all"}) == "all"
-    assert JiuWenClawDeepAdapter._resolve_skill_mode({"skill_mode": "auto_list"}) == "auto_list"
-    assert JiuWenClawDeepAdapter._resolve_skill_mode({"skill_mode": "invalid"}) == "all"
+    assert _TestableJiuWenClawDeepAdapter.resolve_skill_mode_for_test({"skill_mode": "all"}) == "all"
+    assert _TestableJiuWenClawDeepAdapter.resolve_skill_mode_for_test({"skill_mode": "auto_list"}) == "auto_list"
+    assert _TestableJiuWenClawDeepAdapter.resolve_skill_mode_for_test({"skill_mode": "invalid"}) == "all"
 
 
 def test_build_configured_subagents_includes_optional_browser_and_configured_code_research():
@@ -206,9 +212,15 @@ async def test_runtime_rail_multi_tenant_workspace_dirs():
     # 真实函数返回: ~/.jiuwenclaw/service_{id}/agent_{id}，不含 /agent 后缀
     # _get_workspace_dirs 会在此基础上追加 "agent"/"jiuwenclaw_workspace"
     expected_base = Path("/tmp/test_jiuwenclaw/service_test_service_001/agent_test_agent_001")
-    with patch(
-        "jiuwenclaw.agentserver.deep_agent.rails.runtime_prompt_rail.get_multi_tenant_user_workspace_dir",
-        return_value=expected_base,
+    with (
+        patch(
+            "jiuwenclaw.agentserver.deep_agent.rails.runtime_prompt_rail.get_multi_tenant_user_workspace_dir",
+            return_value=expected_base,
+        ),
+        patch(
+            "jiuwenclaw.agentserver.deep_agent.rails.runtime_prompt_rail.resolve_agent_registered_skill_dirs",
+            return_value=[],
+        ),
     ):
         ctx = AgentCallbackContext(agent=None, inputs=None, session=None)
         await runtime_rail.before_model_call(ctx)
@@ -265,13 +277,15 @@ async def test_runtime_rail_single_tenant_workspace_dirs():
         patch("jiuwenclaw.agentserver.deep_agent.rails.runtime_prompt_rail.get_user_workspace_dir") as mock_user_ws,
         patch("jiuwenclaw.agentserver.deep_agent.rails.runtime_prompt_rail.get_agent_workspace_dir") as mock_agent_ws,
         patch("jiuwenclaw.agentserver.deep_agent.rails.runtime_prompt_rail.get_agent_memory_dir") as mock_memory,
-        patch("jiuwenclaw.agentserver.deep_agent.rails.runtime_prompt_rail.get_agent_registered_skill_dirs") as mock_skills,
+        patch(
+            "jiuwenclaw.agentserver.deep_agent.rails.runtime_prompt_rail.resolve_agent_registered_skill_dirs",
+            return_value=[Path("/home/user/.jiuwenclaw/skills")],
+        ),
         patch("jiuwenclaw.agentserver.deep_agent.rails.runtime_prompt_rail.get_deepagent_todo_dir") as mock_todo,
     ):
         mock_user_ws.return_value = Path("/home/user/.jiuwenclaw")
         mock_agent_ws.return_value = Path("/home/user/.jiuwenclaw/workspace")
         mock_memory.return_value = Path("/home/user/.jiuwenclaw/memory")
-        mock_skills.return_value = [Path("/home/user/.jiuwenclaw/skills")]
         mock_todo.return_value = Path("/home/user/.jiuwenclaw/todo")
         
         ctx = AgentCallbackContext(agent=None, inputs=None, session=None)
@@ -338,4 +352,4 @@ def test_interface_deep_skill_rail_uses_multi_tenant_paths():
         skill_dirs_single = get_multi_tenant_skill_dirs(None, None)
     
     assert len(skill_dirs_single) == 1
-    assert str(skill_dirs_single[0]) == "/home/user/.jiuwenclaw/skills"
+    assert skill_dirs_single[0] == Path("/home/user/.jiuwenclaw/skills")

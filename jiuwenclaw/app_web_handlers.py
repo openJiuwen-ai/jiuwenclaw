@@ -573,6 +573,7 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
                         set(env_updates.keys()) | set(yaml_updated),
                         env_updates=dict(env_updates),
                         config_payload=config_payload,
+                        config_set_req_id=req_id,
                     )
                     if inspect.isawaitable(callback_result):
                         await callback_result
@@ -814,6 +815,7 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
                     set(),
                     env_updates={},
                     config_payload=config_payload,
+                    config_set_req_id=req_id,
                 )
                 if inspect.isawaitable(callback_result):
                     await callback_result
@@ -863,6 +865,7 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
                     set(),
                     env_updates={},
                     config_payload=config_payload,
+                    config_set_req_id=req_id,
                 )
                 if inspect.isawaitable(callback_result):
                     await callback_result

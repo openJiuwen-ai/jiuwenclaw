@@ -9,10 +9,14 @@ Concrete Store / Embedding instances are built inside the provider — not
 here.
 """
 
+import hashlib
+import json
 import logging
 import os
 from pathlib import Path
 from typing import Any, Dict, Optional
+
+from jiuwenclaw.local_env_config import read_env
 
 from .config import _load_config, get_embed_config
 
@@ -73,6 +77,77 @@ def is_external_memory_enabled(config: Optional[Dict[str, Any]] = None) -> bool:
     return bool(get_external_memory_config(config).get("provider"))
 
 
+def _embed_triple_from_config(config: Optional[Dict[str, Any]]) -> tuple[str, str, str]:
+    """Embedding triple aligned with ``embed_config_fingerprint`` / ``get_embed_config``."""
+    embed_cfg = get_embed_config() or {}
+    if embed_cfg.get("model") or embed_cfg.get("base_url") or embed_cfg.get("api_key"):
+        return (
+            str(embed_cfg.get("api_key") or ""),
+            str(embed_cfg.get("base_url") or ""),
+            str(embed_cfg.get("model") or ""),
+        )
+    embed = config.get("embed") if isinstance(config, dict) else {}
+    if not isinstance(embed, dict):
+        return ("", "", "")
+    return (
+        str(embed.get("embed_api_key") or ""),
+        str(embed.get("embed_base_url") or ""),
+        str(embed.get("embed_model") or ""),
+    )
+
+
+def _external_memory_fingerprint_payload(config: Optional[Dict[str, Any]]) -> dict[str, Any]:
+    """Build stable dict for hashing — mirrors ``external_memory_builder`` inputs."""
+    cfg = config if isinstance(config, dict) else {}
+    ext = dict(get_external_memory_config(cfg))
+    provider = ext.get("provider") or ""
+
+    if provider == "mem0":
+        mem0 = dict(ext.get("mem0") or {})
+        mem0.setdefault(
+            "api_key",
+            mem0.get("api_key") or read_env("MEM0_API_KEY") or os.environ.get("MEM0_API_KEY", ""),
+        )
+        mem0.setdefault(
+            "user_id",
+            mem0.get("user_id") or read_env("MEM0_USER_ID") or os.environ.get("MEM0_USER_ID", ""),
+        )
+        mem0.setdefault(
+            "agent_id",
+            mem0.get("agent_id") or read_env("MEM0_AGENT_ID") or os.environ.get("MEM0_AGENT_ID", ""),
+        )
+        ext["mem0"] = mem0
+    elif provider == "openviking":
+        vk = dict(ext.get("openviking") or {})
+        vk.setdefault(
+            "endpoint",
+            vk.get("endpoint") or read_env("OPENVIKING_ENDPOINT") or os.environ.get("OPENVIKING_ENDPOINT", ""),
+        )
+        vk.setdefault(
+            "api_key",
+            vk.get("api_key") or read_env("OPENVIKING_API_KEY") or os.environ.get("OPENVIKING_API_KEY", ""),
+        )
+        vk.setdefault(
+            "account",
+            vk.get("account") or read_env("OPENVIKING_ACCOUNT") or os.environ.get("OPENVIKING_ACCOUNT", ""),
+        )
+        vk.setdefault("user", vk.get("user") or read_env("OPENVIKING_USER") or os.environ.get("OPENVIKING_USER", ""))
+        ext["openviking"] = vk
+
+    return {
+        "engine": get_memory_engine(cfg),
+        "external": ext,
+        "embed": _embed_triple_from_config(cfg),
+    }
+
+
+def external_memory_fingerprint(config: Optional[Dict[str, Any]] = None) -> str:
+    """Stable short hash for external memory rail rebuild decisions."""
+    payload = _external_memory_fingerprint_payload(config)
+    text = json.dumps(payload, sort_keys=True, default=str)
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
+
+
 def _resolve_ltm_dir() -> Path:
     """Default LTM data dir under ~/.jiuwenclaw/memory/ltm."""
     base = Path.home() / ".jiuwenclaw" / _LTM_SUBDIR
@@ -112,9 +187,9 @@ def build_openjiuwen_provider_config(
     embed_cfg = get_embed_config() or {}
     logger.info("[external_memory] get_embed_config() returned: %s", embed_cfg)
     embedding = {
-        "model_name": embed_cfg.get("model") or os.getenv("EMBED_MODEL", ""),
-        "base_url": embed_cfg.get("base_url") or os.getenv("EMBED_BASE_URL", ""),
-        "api_key": embed_cfg.get("api_key") or os.getenv("EMBED_API_KEY", ""),
+        "model_name": embed_cfg.get("model") or read_env("EMBED_MODEL"),
+        "base_url": embed_cfg.get("base_url") or read_env("EMBED_BASE_URL"),
+        "api_key": embed_cfg.get("api_key") or read_env("EMBED_API_KEY"),
     }
     logger.info("[external_memory] resolved embedding: model_name=%s, base_url=%s, has_api_key=%s",
                 embedding["model_name"], embedding["base_url"], bool(embedding["api_key"]))

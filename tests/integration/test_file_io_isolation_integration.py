@@ -42,10 +42,22 @@ def temp_project_dir():
 async def jiuwenclaw_instance(temp_workspace):
     """创建 JiuWenClaw 实例."""
     instance = JiuWenClaw(user_workspace_dir=str(temp_workspace))
-    instance._adapter = AsyncMock()  # 修复：使用AsyncMock替代MagicMock
-    instance._adapter._instance = MagicMock()
-    instance._adapter.process_message_impl = AsyncMock()
-    instance._adapter.handle_heartbeat = AsyncMock(return_value=None)  # 配置异步方法
+    # Use MagicMock for adapter shell; only async entrypoints need AsyncMock.
+    # Bare AsyncMock makes sync calls like set_working_checker() return unawaited coroutines.
+    adapter = MagicMock(
+        spec=[
+            "process_message_impl",
+            "handle_heartbeat",
+            "handle_user_answer",
+            "set_working_checker",
+            "_instance",
+        ]
+    )
+    adapter._instance = MagicMock()
+    adapter.process_message_impl = AsyncMock()
+    adapter.handle_heartbeat = AsyncMock(return_value=None)
+    adapter.set_working_checker = MagicMock()
+    instance._adapter = adapter
     return instance
 
 

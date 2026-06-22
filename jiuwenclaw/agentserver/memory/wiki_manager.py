@@ -111,10 +111,35 @@ class MemoryWikiManager:
         self._file_hashes: Dict[str, str] = {}
         self._file_indexed_lines: Dict[str, int] = {}
         self._closed = False
+        self.embed_fingerprint: str = ""
+        self.cache_key: str = ""
 
         self._index_queue: asyncio.Queue[Dict[str, Any]] = asyncio.Queue()
         self._index_worker_task: Optional[asyncio.Task] = None
         self._indexing_lock = asyncio.Lock()
+
+    @property
+    def is_closed(self) -> bool:
+        return self._closed
+
+    @classmethod
+    def pop_cached(cls, cache_key: str) -> Optional["MemoryWikiManager"]:
+        return cls._CACHE.pop(cache_key, None)
+
+    @classmethod
+    def iter_cache_keys(cls) -> tuple[str, ...]:
+        return tuple(cls._CACHE.keys())
+
+    @classmethod
+    def remove_cached(cls, cache_key: str) -> None:
+        cls._CACHE.pop(cache_key, None)
+
+    @classmethod
+    def clear_cache_entries(cls) -> None:
+        cls._CACHE.clear()
+
+    async def initialize(self) -> None:
+        await self._initialize()
 
     @staticmethod
     def _normalize_rel_path(rel_path: str) -> str:
@@ -127,11 +152,16 @@ class MemoryWikiManager:
         agent_id: str,
         workspace_dir: str,
         settings: MemorySettings,
+        *,
+        embed_fingerprint: str,
         **kwargs: Any,
     ) -> Optional["MemoryWikiManager"]:
-        cache_key = f"{agent_id}:{workspace_dir}"
-        if cache_key in cls._CACHE:
-            return cls._CACHE[cache_key]
+        from .manager import build_index_cache_key
+
+        cache_key = build_index_cache_key(agent_id, workspace_dir, embed_fingerprint)
+        cached = cls._CACHE.get(cache_key)
+        if cached is not None and not cached.is_closed:
+            return cached
 
         instance = cls(
             agent_id=agent_id,
@@ -139,8 +169,10 @@ class MemoryWikiManager:
             settings=settings,
             **kwargs,
         )
+        instance.embed_fingerprint = embed_fingerprint
+        instance.cache_key = cache_key
         try:
-            await instance._initialize()
+            await instance.initialize()
         except Exception as e:
             logger.error("MemoryWikiManager init failed: %s", e)
             return None
@@ -986,5 +1018,8 @@ class MemoryWikiManager:
             self._index_worker_task = None
 
         self._save_indexed_lines_state()
+
+        if self.cache_key:
+            type(self).remove_cached(self.cache_key)
 
         logger.info("MemoryWikiManager closed for: %s", self.workspace_dir)

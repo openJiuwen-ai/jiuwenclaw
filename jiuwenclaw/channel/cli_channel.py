@@ -513,6 +513,7 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
                         set(env_updates.keys()) | set(yaml_updated),
                         env_updates=dict(env_updates),
                         config_payload=config_payload,
+                        config_set_req_id=req_id,
                     )
                     if inspect.isawaitable(callback_result):
                         await callback_result
@@ -1024,7 +1025,9 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
             await real_client.send_request(_reload_env)
             if on_config_saved:
                 try:
-                    _cb = on_config_saved(set(), env_updates={}, config_payload=get_config())
+                    _cb = on_config_saved(
+                        set(), env_updates={}, config_payload=get_config(), config_set_req_id=req_id
+                    )
                     if inspect.isawaitable(_cb):
                         await _cb
                 except Exception as _e2:
@@ -1185,6 +1188,7 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
                         set(env_updates.keys()),
                         env_updates=dict(env_updates),
                         config_payload=config_payload,
+                        config_set_req_id=req_id,
                     )
                     if inspect.isawaitable(callback_result):
                         await callback_result

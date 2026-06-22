@@ -1592,6 +1592,7 @@ class AgentWebSocketServer:
             await ws.send(json.dumps(wire, ensure_ascii=False))
 
     async def _handle_agent_reload_config(self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock) -> None:
+        reload_trace_id = request.request_id
         try:
             params = request.params or {}
             config_payload = params.get("config")
@@ -1616,18 +1617,44 @@ class AgentWebSocketServer:
                 # ExtensionRegistry 未初始化，跳过
                 pass
 
-            await self._agent_manager.reload_agents_config(
+            from jiuwenclaw.agentserver.reload_result import (
+                log_agent_config_hot_reload,
+                summarize_reload_payload,
+            )
+
+            aggregate = await self._agent_manager.reload_agents_config(
                 config=config_payload,
                 env=env_overrides,
+                reload_trace_id=reload_trace_id,
+            )
+            payload = aggregate.to_payload()
+            log_agent_config_hot_reload(
+                logger,
+                reload_trace_id=reload_trace_id,
+                phase="completed",
+                source="AgentWebSocketServer",
+                **summarize_reload_payload(payload),
             )
             resp = AgentResponse(
                 request_id=request.request_id,
                 channel_id=request.channel_id,
-                ok=True,
-                payload={"reloaded": True},
+                ok=not aggregate.failed or aggregate.applied > 0 or aggregate.deferred > 0,
+                payload=payload,
             )
         except Exception as e:  # noqa: BLE001
             logger.exception("[AgentWebSocketServer] agent.reload_config failed: %s", e)
+            from jiuwenclaw.agentserver.reload_result import (
+                log_agent_config_hot_reload,
+                redact_reload_error_message,
+            )
+            log_agent_config_hot_reload(
+                logger,
+                reload_trace_id=reload_trace_id,
+                phase="failed",
+                source="AgentWebSocketServer",
+                level=logging.ERROR,
+                error=redact_reload_error_message(str(e)),
+            )
             resp = AgentResponse(
                 request_id=request.request_id,
                 channel_id=request.channel_id,

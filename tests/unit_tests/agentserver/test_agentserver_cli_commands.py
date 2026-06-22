@@ -3,6 +3,8 @@ import json
 
 import pytest
 
+# pylint: disable=protected-access
+
 from jiuwenclaw.agentserver import agent_ws_server as agent_ws_server_module
 from jiuwenclaw.schema.agent import AgentRequest
 from jiuwenclaw.schema.message import ReqMethod

@@ -213,3 +213,55 @@ def test_openjiuwen_provider_config_missing_subsection_uses_defaults(monkeypatch
     assert out["kv"]["backend"] == "shelve"
     assert out["vector"]["backend"] == "chroma"
     assert out["db"]["backend"] == "sqlite"
+
+
+# ---------------------------------------------------------------------------
+# external_memory_fingerprint
+# ---------------------------------------------------------------------------
+
+def _base_external_cfg(**overrides):
+    cfg = {
+        "memory": {
+            "engine": "external",
+            "external": {
+                "provider": "openjiuwen",
+                "user_id": "alice",
+                "openjiuwen": {"kv_path": "/data/kv"},
+            },
+        },
+        "embed": {
+            "embed_api_key": "k",
+            "embed_base_url": "https://embed.example",
+            "embed_model": "text-embedding-v3",
+        },
+    }
+    cfg.update(overrides)
+    return cfg
+
+
+def test_external_memory_fingerprint_stable_for_same_config(monkeypatch):
+    monkeypatch.setattr(emc, "get_embed_config", lambda: {})
+    cfg = _base_external_cfg()
+    assert emc.external_memory_fingerprint(cfg) == emc.external_memory_fingerprint(cfg)
+
+
+@pytest.mark.parametrize("mutator", [
+    lambda c: c["memory"]["external"].update({"provider": "mem0"}),
+    lambda c: c["memory"]["external"].update({"user_id": "bob"}),
+    lambda c: c["memory"]["external"]["openjiuwen"].update({"kv_path": "/other/kv"}),
+    lambda c: c["embed"].update({"embed_model": "other-model"}),
+])
+def test_external_memory_fingerprint_changes_on_config_delta(monkeypatch, mutator):
+    monkeypatch.setattr(emc, "get_embed_config", lambda: {})
+    before = _base_external_cfg()
+    after = _base_external_cfg()
+    mutator(after)
+    assert emc.external_memory_fingerprint(before) != emc.external_memory_fingerprint(after)
+
+
+def test_external_memory_fingerprint_engine_gate(monkeypatch):
+    monkeypatch.setattr(emc, "get_embed_config", lambda: {})
+    external_cfg = _base_external_cfg()
+    none_cfg = _base_external_cfg()
+    none_cfg["memory"]["engine"] = "none"
+    assert emc.external_memory_fingerprint(external_cfg) != emc.external_memory_fingerprint(none_cfg)

@@ -2,6 +2,8 @@ import shutil
 
 import pytest
 
+# pylint: disable=protected-access
+
 from jiuwenclaw.agentserver.skill_manager import (
     SkillManager,
     _safe_child_path,

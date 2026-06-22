@@ -732,6 +732,71 @@ def _decrypt_model_entries(entries: list[dict[str, Any]]) -> list[dict[str, Any]
     return result
 
 
+_ENV_TO_MODEL_CLIENT_CONFIG: dict[str, str] = {
+    "MODEL_NAME": "model_name",
+    "API_KEY": "api_key",
+    "API_BASE": "api_base",
+    "MODEL_PROVIDER": "client_provider",
+}
+
+
+def patch_model_config_from_env(
+    config: dict[str, Any],
+    env_overrides: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Patch models from keys present in this reload's env_overrides only.
+
+    Aligns with reload contract: env is incremental; keys omitted are unchanged.
+    Does not read os.environ or ENV_CONFIG_DICT — only the current reload payload.
+    """
+    if not isinstance(env_overrides, dict) or not env_overrides:
+        return config
+
+    patches: dict[str, str] = {}
+    for env_key, mcc_key in _ENV_TO_MODEL_CLIENT_CONFIG.items():
+        if env_key not in env_overrides:
+            continue
+        raw = env_overrides[env_key]
+        if raw is None:
+            continue
+        value = str(raw).strip()
+        if value:
+            patches[mcc_key] = value
+
+    if not patches:
+        return config
+
+    patched = copy.deepcopy(config)
+    models = patched.setdefault("models", {})
+    if not isinstance(models, dict):
+        return patched
+
+    default_entry = models.get("default")
+    if isinstance(default_entry, dict):
+        mcc = default_entry.setdefault("model_client_config", {})
+        if isinstance(mcc, dict):
+            mcc.update(patches)
+
+    defaults = models.get("defaults")
+    if isinstance(defaults, list):
+        for entry in defaults:
+            if not isinstance(entry, dict):
+                continue
+            mcc = entry.setdefault("model_client_config", {})
+            if isinstance(mcc, dict):
+                mcc.update(patches)
+
+    model_name = patches.get("model_name")
+    if model_name:
+        react = patched.get("react")
+        if isinstance(react, dict):
+            react["model_name"] = model_name
+        elif react is None:
+            patched["react"] = {"model_name": model_name}
+
+    return patched
+
+
 def get_default_models(config: dict[str, Any] | None = None) -> list[dict[str, Any]]:
     """获取默认模型列表，兼容新旧格式。
 

@@ -1520,14 +1520,18 @@ def get_multi_tenant_skill_dirs(
     return [get_agent_skills_dir()]
 
 
-def get_shared_agent_skills_dirs() -> list[Path]:
-    raw = (os.getenv("JIUWENCLAW_SHARED_SKILLS_DIRS") or "").strip()
-    if not raw:
+JIUWENCLAW_SHARED_SKILLS_DIRS_ENV = "JIUWENCLAW_SHARED_SKILLS_DIRS"
+
+
+def parse_shared_skills_dirs_raw(raw: str) -> list[Path]:
+    """Parse JIUWENCLAW_SHARED_SKILLS_DIRS value into deduplicated absolute paths."""
+    text = (raw or "").strip()
+    if not text:
         return []
 
     dirs: list[Path] = []
     seen: set[str] = set()
-    for part in [part.strip() for part in raw.split(os.pathsep) if part.strip()]:
+    for part in [part.strip() for part in text.split(os.pathsep) if part.strip()]:
         path = Path(part).expanduser().resolve()
         key = str(path)
         if key in seen:
@@ -1537,10 +1541,31 @@ def get_shared_agent_skills_dirs() -> list[Path]:
     return dirs
 
 
-def get_agent_registered_skill_dirs() -> list[Path]:
-    if get_shared_agent_skills_dirs():
-        return get_shared_agent_skills_dirs()
+def get_shared_agent_skills_dirs() -> list[Path]:
+    from jiuwenclaw.local_env_config import read_env
+
+    raw = read_env("JIUWENCLAW_SHARED_SKILLS_DIRS", "")
+    return parse_shared_skills_dirs_raw(raw)
+
+
+def resolve_agent_registered_skill_dirs() -> list[Path]:
+    """Resolve skill dirs: chat-bound adapter snapshot > shared env > default workspace skills."""
+    from jiuwenclaw.agentserver.session_skill_dirs import (
+        get_bound_session_registered_skill_dirs,
+    )
+
+    bound = get_bound_session_registered_skill_dirs()
+    if bound is not None:
+        return [Path(p) for p in bound]
+
+    shared = get_shared_agent_skills_dirs()
+    if shared:
+        return shared
     return [get_agent_skills_dir()]
+
+
+def get_agent_registered_skill_dirs() -> list[Path]:
+    return resolve_agent_registered_skill_dirs()
 
 
 def get_agent_tools_dir() -> Path:
