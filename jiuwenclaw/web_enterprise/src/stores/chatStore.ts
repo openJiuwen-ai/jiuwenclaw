@@ -534,36 +534,48 @@ export const useChatStore = create<ChatState>((set, get) => ({
   },
 
   addFileItems: (files) => {
-    // 将文件项附加到最新的 assistant 消息上
-    set((state) => {
-      const messages = [...state.messages];
-      // 找到最后一条 assistant 消息
-      let foundAssistant = false;
-      for (let i = messages.length - 1; i >= 0; i--) {
-        if (messages[i].role === 'assistant') {
-          const existingFiles = messages[i].fileItems || [];
-          messages[i] = {
-            ...messages[i],
-            fileItems: [...existingFiles, ...files],
-          };
-          foundAssistant = true;
-          break;
-        }
-      }
-      
-      // 如果没有找到 assistant 消息，创建一个新消息来显示文件
-      if (!foundAssistant && files.length > 0) {
-        const fileId = `file_${Date.now()}`;
-        messages.push({
-          id: fileId,
-          role: 'assistant',
-          content: '',
-          timestamp: new Date().toISOString(),
-          fileItems: files,
-        });
-      }
-      
-      return { messages };
-    });
+    const { currentStreamId, messages } = get();
+
+    // 优先挂到当前轮次的流式 assistant 消息上
+    if (currentStreamId) {
+      set((state) => ({
+        messages: state.messages.map((msg) =>
+          msg.id === currentStreamId
+            ? { ...msg, fileItems: [...(msg.fileItems || []), ...files] }
+            : msg
+        ),
+      }));
+      return;
+    }
+
+    // 若列表最后一条就是 assistant（本轮 chat.final 已落地），挂到它上面
+    const lastMsg = messages[messages.length - 1];
+    if (lastMsg && lastMsg.role === 'assistant') {
+      set((state) => ({
+        messages: state.messages.map((msg) =>
+          msg.id === lastMsg.id
+            ? { ...msg, fileItems: [...(msg.fileItems || []), ...files] }
+            : msg
+        ),
+      }));
+      return;
+    }
+
+    // 本轮还没有 assistant 消息：新建一条承载文件，避免回退挂到上一轮的 assistant 消息上
+    if (files.length > 0) {
+      const fileId = `file_${Date.now()}`;
+      set((state) => ({
+        messages: [
+          ...state.messages,
+          {
+            id: fileId,
+            role: 'assistant',
+            content: '',
+            timestamp: new Date().toISOString(),
+            fileItems: files,
+          },
+        ],
+      }));
+    }
   },
 }));
