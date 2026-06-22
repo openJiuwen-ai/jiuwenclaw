@@ -1357,73 +1357,12 @@ def get_agent_sessions_dir() -> Path:
 _legacy_migration_done: bool = False
 
 
-def _migrate_legacy_checkpoint_and_logs() -> None:
-    """One-time migration: move legacy paths to multi-tenant structure.
-
-    Migration paths:
-    - ~/.jiuwenclaw/.checkpoint -> ~/.jiuwenclaw/service_default/agent_default/.checkpoint
-    - ~/.jiuwenclaw/.logs -> ~/.jiuwenclaw/service_default/.logs
-    - ~/.jiuwenclaw/agent/.checkpoint -> ~/.jiuwenclaw/service_default/agent_default/.checkpoint
-    - ~/.jiuwenclaw/agent/.logs -> ~/.jiuwenclaw/service_default/.logs
-    """
-    global _legacy_migration_done
-    if _legacy_migration_done:
-        return
-    _legacy_migration_done = True
-
-    workspace = get_user_workspace_dir()
-
-    # 目标路径
-    service_root = get_service_root_dir()
-    agent_workspace = get_multi_tenant_user_workspace_dir("default", "default")
-    agent_root = get_agent_root_dir()
-
-    # 确保 target 目录存在
-    service_root.mkdir(parents=True, exist_ok=True)
-    if agent_workspace:
-        agent_workspace.mkdir(parents=True, exist_ok=True)
-    agent_root.mkdir(parents=True, exist_ok=True)
-
-    # 迁移 .checkpoint 到 agent_default 级别
-    checkpoint_target = agent_workspace / ".checkpoint" if agent_workspace else agent_root / ".checkpoint"
-    checkpoint_sources = [
-        workspace / ".checkpoint",
-        workspace / "agent" / ".checkpoint",
-        agent_root / ".checkpoint",  # 从 agent 子目录迁移到 agent_default 级别
-    ]
-    for legacy in checkpoint_sources:
-        if legacy.exists() and not checkpoint_target.exists():
-            checkpoint_target.parent.mkdir(parents=True, exist_ok=True)
-            shutil.move(str(legacy), str(checkpoint_target))
-        elif legacy.exists() and checkpoint_target.exists():
-            # 合并 checkpoint 文件
-            for f in legacy.iterdir():
-                if not (checkpoint_target / f.name).exists():
-                    shutil.move(str(f), str(checkpoint_target / f.name))
-
-    # 迁移 .logs 到 service 级别
-    logs_target = service_root / ".logs"
-    logs_sources = [
-        workspace / ".logs",
-        workspace / "agent" / ".logs",
-    ]
-    for legacy in logs_sources:
-        if legacy.exists() and not logs_target.exists():
-            shutil.move(str(legacy), str(logs_target))
-        elif legacy.exists() and logs_target.exists():
-            # 合并日志：移动旧日志文件到新目录
-            for f in legacy.iterdir():
-                if not (logs_target / f.name).exists():
-                    shutil.move(str(f), str(logs_target / f.name))
-
-
 def get_checkpoint_dir() -> Path:
     """Get the checkpoint directory path (agent_id level).
 
     多租户架构下，checkpoint 存放在 agent_id 级别。
     Path: ~/.jiuwenclaw/service_default/agent_default/.checkpoint
     """
-    _migrate_legacy_checkpoint_and_logs()
     workspace = get_multi_tenant_user_workspace_dir("default", "default")
     if workspace:
         return workspace / ".checkpoint"
@@ -1437,9 +1376,11 @@ def get_logs_dir() -> Path:
     多租户架构下，日志存放在 service 级别，便于多 agent 共享。
     Path: ~/.jiuwenclaw/service_default/.logs
     """
-    _migrate_legacy_checkpoint_and_logs()
-    return get_service_root_dir() / ".logs"
-
+    log_root_path = os.getenv("LOG_ROOT_PATH", "").strip()
+    if not log_root_path:
+        log_root_path = get_service_root_dir() / ".logs"
+    log_root_path = Path(log_root_path).expanduser().resolve()
+    return log_root_path
 
 def get_xy_tmp_dir() -> Path:
     workspace_dir = get_user_workspace_dir()
@@ -1484,8 +1425,7 @@ def setup_logger(log_level: Optional[str] = None) -> logging.Logger:
     """
     from jiuwenclaw.infrastructure.log_masking import SensitiveDataFilter
 
-    log_root_path = os.getenv("LOG_ROOT_PATH", "").strip()
-    logs_root = Path(log_root_path).expanduser().resolve() if log_root_path else get_logs_dir()
+    logs_root = get_logs_dir()
     logs_root.mkdir(parents=True, exist_ok=True)
 
     levels = _resolve_logging_levels(log_level)
