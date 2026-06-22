@@ -29,6 +29,10 @@ from jiuwenclaw.channel.vibeskill_session import (
 from jiuwenclaw.channel.vibeskill_session_dcs_store import VibeSkillSessionDcsStore
 
 from jiuwenclaw.channel.vibeskill_file_utils import skilldev_tree_to_file_tree_nodes
+from jiuwenclaw.channel.vibeskill_security import (
+    validate_file_part,
+    validate_file_path,
+)
 from jiuwenclaw.agentserver.skilldev.session_history.restore_chunks import (
     RestoreChunkDecodeError,
     decode_restore_payload_from_stream_with_retry,
@@ -1362,6 +1366,7 @@ class VibeSkillChannel(BaseChannel):
         system_prompt = data.get("system")
         request_id = f"vibeskill-{int(time.time() * 1000):x}-{secrets.token_hex(3)}"
 
+        # Resolve session first: sessionID is required (WS-bound session is a fallback).
         session: VibeSkillSession | None = None
         if session_id:
             session = await self._store.resolve_session(session_id)
@@ -1387,20 +1392,42 @@ class VibeSkillChannel(BaseChannel):
             )
             return True
 
-        # Validate model must be a dict if provided, and must contain providerID and modelID
+        # Validate each file part (commit 73266ced: harden file endpoints)
+        for part in parts:
+            if not isinstance(part, dict):
+                continue
+            if str(part.get("type") or "").strip() != "file":
+                continue
+            err = validate_file_part(part)
+            if err:
+                logger.warning(
+                    "[VibeSkillChannel] message.send rejected (file part), session_id=%s reason=%s",
+                    session_id,
+                    err,
+                )
+                await self._send_ws_res_error(
+                    ws,
+                    data,
+                    err,
+                    source="message.send.file_part_rejected",
+                )
+                return True
+
+        # Validate model: optional, but if provided must be a dict containing
+        # both providerID and modelID.
         if msg_model is not None:
             if not isinstance(msg_model, dict):
                 await self._send_ws_res_error(
                     ws, data, "model must be an object", source="message.send.invalid_model_type"
                 )
                 return True
-            
+
             if not msg_model.get("providerID"):
                 await self._send_ws_res_error(
                     ws, data, "model.providerID is required", source="message.send.missing_model_provider_id"
                 )
                 return True
-            
+
             if not msg_model.get("modelID"):
                 await self._send_ws_res_error(
                     ws, data, "model.modelID is required", source="message.send.missing_model_id"
@@ -4358,6 +4385,16 @@ class VibeSkillChannel(BaseChannel):
         if not file_path:
             return self._json_response(400, {"error": "path query parameter is required"})
 
+        path_err = validate_file_path(file_path, operation="read")
+        if path_err:
+            logger.warning(
+                "[VibeSkillChannel] file.read rejected (path traversal), session_id=%s path=%r reason=%s",
+                session_id,
+                file_path,
+                path_err,
+            )
+            return self._json_response(400, {"error": path_err})
+
         request_id = f"vibeskill-file-read-{int(time.time() * 1000):x}-{secrets.token_hex(3)}"
         file_read_params: dict[str, Any] = {
             "task_id": session_id,
@@ -4431,6 +4468,16 @@ class VibeSkillChannel(BaseChannel):
             return self._json_response(
                 400, {"ok": False, "error": "path query parameter is required"}
             )
+
+        path_err = validate_file_path(file_path, operation="write")
+        if path_err:
+            logger.warning(
+                "[VibeSkillChannel] file.write rejected (path traversal), session_id=%s path=%r reason=%s",
+                session_id,
+                file_path,
+                path_err,
+            )
+            return self._json_response(400, {"ok": False, "error": path_err})
 
         try:
             req_body = json.loads(body.decode("utf-8")) if body else {}
@@ -4572,6 +4619,7 @@ class VibeSkillChannel(BaseChannel):
             json.loads(body) if body else {}
         except json.JSONDecodeError:
             return self._json_response(400, {"error": "Invalid JSON"})
+
         request_id = f"vibeskill-export-{int(time.time() * 1000):x}-{secrets.token_hex(3)}"
         session = await self._ensure_session_restored(session_id)
         if not session:
