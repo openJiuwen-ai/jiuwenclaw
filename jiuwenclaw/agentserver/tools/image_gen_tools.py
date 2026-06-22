@@ -125,10 +125,9 @@ def _build_image_gen_kwargs(
         "n": n,
     }
     if _is_huawei_maas_config(provider, api_base):
-        # Huawei MaaS: single image, b64_json only; supports seed/watermark.
+        # Huawei MaaS: single image, b64_json only; supports seed.
         gen_kwargs["n"] = 1
         gen_kwargs["response_format"] = "b64_json"
-        gen_kwargs["watermark"] = bool(inputs.get("watermark", False))
         seed = _parse_optional_seed(inputs)
         if seed is not None:
             gen_kwargs["seed"] = seed
@@ -138,7 +137,6 @@ def _build_image_gen_kwargs(
         return gen_kwargs
 
     gen_kwargs["prompt_extend"] = bool(inputs.get("prompt_extend", True))
-    gen_kwargs["watermark"] = bool(inputs.get("watermark", False))
     negative_prompt = inputs.get("negative_prompt")
     if negative_prompt is not None and str(negative_prompt).strip():
         gen_kwargs["negative_prompt"] = str(negative_prompt).strip()
@@ -436,9 +434,10 @@ async def _text_to_image_impl(inputs: dict[str, Any]) -> str:
         "输入：prompt（必填文本描述）；可选 size"
         "（DashScope: 1920*1080；OpenAI/华为 MaaS: 1024x1024，* 与 x 均可）、"
         "negative_prompt、n（图片数量；DashScope 独有 prompt_extend；"
-        "华为 MaaS/OpenAI 兼容 watermark、seed）。"
-        "保存后可配置后处理水印（默认右下角半透明「AI Generated」，"
+        "华为 MaaS/OpenAI 兼容 seed）。"
+        "保存后可配置后处理水印（默认右下角半透明「AI 生成」，"
         "见 config models.image_gen.post_watermark）。"
+        "平台规定生成图须保留合规水印，无法按请求去除。"
         "输出为本地文件路径。有 effective_project_dir 时保存到其 generated_images/；"
         "否则保存到 agent 工作区 generated_images。"
     ),
