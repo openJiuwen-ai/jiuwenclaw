@@ -205,6 +205,22 @@
   color: var(--text);
 }
 
+.chat-mode-btn--disabled,
+.chat-mode-btn:disabled {
+  cursor: not-allowed;
+}
+
+.chat-mode-btn--inactive.chat-mode-btn--disabled,
+.chat-mode-btn--inactive:disabled {
+  opacity: 0.45;
+}
+
+.chat-mode-btn--inactive.chat-mode-btn--disabled:hover,
+.chat-mode-btn--inactive:disabled:hover {
+  background: transparent;
+  color: var(--muted);
+}
+
 /* Keyboard hints */
 .chat-input-hints {
   display: flex;

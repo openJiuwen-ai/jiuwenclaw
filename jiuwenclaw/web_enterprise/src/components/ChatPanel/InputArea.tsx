@@ -4,6 +4,7 @@ import { useSpeechRecognition } from '../../hooks';
 import { stopAllTts } from '../../utils';
 import { useChatStore, useSessionStore } from '../../stores';
 import { AgentMode, ChatSendFile } from '../../types';
+import { FEATURE_AGENT_FAST_MODE, FEATURE_TEAM_MODE } from '../../featureFlags';
 import { ExtSettingsControl } from '../ExtSettingsModal';
 import { FileUploadButton } from './FileUploadButton';
 import clsx from 'clsx';
@@ -40,6 +41,12 @@ export function InputArea({
   const isAgentMode = mode === 'agent.fast';
   const isTeamMode = mode === 'team';
   const hasHistoryMessages = messages.length > 0;
+  const isModeDisabled = useCallback((targetMode: AgentMode) => {
+    if (targetMode === 'agent.fast') return !FEATURE_AGENT_FAST_MODE;
+    if (targetMode === 'team') return !FEATURE_TEAM_MODE;
+    return false;
+  }, []);
+
   const modes: Array<{ value: AgentMode; label: string; icon: JSX.Element }> = [
     { value: 'agent.plan', label: t('chat.modePlan'), icon: (
       <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2}>
@@ -374,21 +381,26 @@ export function InputArea({
             style={{ '--chat-mode-index': modeIndex } as CSSProperties}
           >
             <div className="chat-mode-switch__indicator" />
-            {modes.map((m) => (
+            {modes.map((m) => {
+              const modeDisabled = isModeDisabled(m.value);
+              return (
               <button
                 type="button"
                 key={m.value}
+                disabled={modeDisabled}
                 onClick={() => handleModeSwitch(m.value)}
                 className={clsx(
                   'chat-mode-btn',
-                  mode === m.value ? 'chat-mode-btn--active' : 'chat-mode-btn--inactive'
+                  mode === m.value ? 'chat-mode-btn--active' : 'chat-mode-btn--inactive',
+                  modeDisabled && 'chat-mode-btn--disabled',
                 )}
                 data-testid={`chat-mode-${m.value}`}
               >
                 {m.icon}
                 {m.label}
               </button>
-            ))}
+            );
+            })}
           </div>
 
         </div>

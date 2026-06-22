@@ -124,6 +124,7 @@ declare -A DEPLOY_VARS=(
     ["REDIS_HOST"]=""
     ["DEPLOYMENT_MODE"]="standalone"
     ["GATEWAY_INSTANCE_ID"]=""
+    ["JIUWENCLAW_ID"]=""
     ["MINIO_NAME"]="minio"
     ["MINIO_IMAGE"]="minio/minio-arm64:RELEASE.2024-12-18T13-15-44Z"
     ["MINIO_ROOT_USER"]="minioadmin"
