@@ -226,7 +226,6 @@ _CONFIG_SET_ENV_MAP = {
     "serper_api_key": "SERPER_API_KEY",
     "perplexity_api_key": "PERPLEXITY_API_KEY",
     "github_token": "GITHUB_TOKEN",
-    "evolution_auto_scan": "EVOLUTION_AUTO_SCAN",
     "free_search_ddg_enabled": "FREE_SEARCH_DDG_ENABLED",
     "free_search_bing_enabled": "FREE_SEARCH_BING_ENABLED",
     "free_search_proxy_url": "FREE_SEARCH_PROXY_URL",

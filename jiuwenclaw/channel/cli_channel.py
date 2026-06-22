@@ -167,7 +167,6 @@ _CLI_CONFIG_SET_ENV_MAP = {
     "serper_api_key": "SERPER_API_KEY",
     "perplexity_api_key": "PERPLEXITY_API_KEY",
     "github_token": "GITHUB_TOKEN",
-    "evolution_auto_scan": "EVOLUTION_AUTO_SCAN",
 }
 
 _CLI_CONFIG_YAML_SETTERS: dict[str, Any] = {

@@ -2032,18 +2032,8 @@ class JiuWenClawDeepAdapter:
     def _build_skill_evolution_rail(self, config: dict[str, Any]) -> SkillEvolutionRail | None:
         """Build SkillEvolutionRail."""
         try:
-            _env_auto_scan = os.getenv("EVOLUTION_AUTO_SCAN")
-            if _env_auto_scan is not None:
-                evolution_auto_scan: bool = _env_auto_scan.lower() in ("true", "1", "yes")
-            else:
-                evolution_auto_scan = config.get("evolution", {}).get("auto_scan", False)
-            
-            # 处理 auto_save：优先环境变量，其次配置文件，默认 True
-            _env_auto_save = os.getenv("EVOLUTION_AUTO_SAVE")
-            if _env_auto_save is not None:
-                evolution_auto_save: bool = _env_auto_save.lower() in ("true", "1", "yes")
-            else:
-                evolution_auto_save = config.get("evolution", {}).get("auto_save", True)
+            evolution_auto_scan = config.get("evolution", {}).get("auto_scan", False)
+            evolution_auto_save = config.get("evolution", {}).get("auto_save", True)
             
             trajectory_dir = self._resolve_evolution_trajectory_dir(config)
             skill_evolution_rail = SkillEvolutionRail(
@@ -2725,9 +2715,7 @@ class JiuWenClawDeepAdapter:
         # Apply in-place updates to skill_evolution_rail (no re-init needed).
         if self._skill_evolution_rail is not None:
             self._skill_evolution_rail.update_llm(self._model, config.get("model_name", "gpt-4"))
-            _env_auto_scan = os.getenv("EVOLUTION_AUTO_SCAN")
-            if _env_auto_scan is not None:
-                self._skill_evolution_rail.auto_scan = _env_auto_scan.lower() in ("true", "1", "yes")
+            self._skill_evolution_rail.auto_scan = config.get("evolution", {}).get("auto_scan", False)
 
         self._skill_rail = self._build_skill_rail(
             config,
@@ -4716,6 +4704,95 @@ class JiuWenClawDeepAdapter:
             "result_type": "answer",
         }
 
+    async def _handle_evolve_rollback_command(self, query: str) -> dict[str, Any]:
+        """/evolve_rollback <skill_name> [version] — Rollback skill to archived version."""
+        rail = self._skill_evolution_rail
+        assert rail is not None
+        store = rail.store
+
+        parts = query.split(maxsplit=2)
+        skill_name = parts[1] if len(parts) > 1 else ""
+        version = parts[2].strip() if len(parts) > 2 else None
+
+        if not skill_name:
+            archives_hint = ""
+            for name in store.list_skill_names():
+                archives = store.list_archives(name)
+                body_versions = [a for a in archives if a.startswith("SKILL.v")]
+                if body_versions:
+                    archives_hint += f"\n  - **{name}**: {len(body_versions)} 个版本"
+            return {
+                "output": (
+                    "请指定 Skill 名称：`/evolve_rollback <skill_name> [version]`"
+                    + (f"\n\n可回滚的 Skill：{archives_hint}" if archives_hint else "")
+                ),
+                "result_type": "error",
+            }
+
+        if not store.skill_exists(skill_name):
+            available = "、".join(store.list_skill_names()) or "（无可用 Skill）"
+            return {
+                "output": f"未找到 Skill '{skill_name}'。当前可用：{available}",
+                "result_type": "error",
+            }
+
+        archives = store.list_archives(skill_name)
+        body_versions = [a for a in archives if a.startswith("SKILL.v")]
+        if not body_versions:
+            return {
+                "output": f"Skill '{skill_name}' 没有归档版本可回滚。",
+                "result_type": "error",
+            }
+
+        if not version:
+            lines = [f"**Skill '{skill_name}' 可用归档版本（最新在前）：**\n"]
+            for i, v in enumerate(body_versions):
+                ts = v.replace("SKILL.v", "").replace(".md", "")
+                if len(ts) >= 15:
+                    display_ts = f"{ts[:4]}-{ts[4:6]}-{ts[6:8]} {ts[9:11]}:{ts[11:13]}:{ts[13:15]} UTC"
+                else:
+                    display_ts = ts
+                marker = " ← 最近" if i == 0 else ""
+                lines.append(f"  {i+1}. `{v}` ({display_ts}){marker}")
+            lines.append(f"\n用法：`/evolve_rollback {skill_name} SKILL.v<时间戳>.md`")
+            lines.append(f"快捷回滚到最近版本：`/evolve_rollback {skill_name} latest`")
+            return {"output": "\n".join(lines), "result_type": "answer"}
+
+        if version == "latest":
+            version = body_versions[0]
+
+        if version not in body_versions:
+            hint = "、".join(f"`{v}`" for v in body_versions[:5])
+            return {
+                "output": f"版本 `{version}` 不存在。可用版本：{hint}",
+                "result_type": "error",
+            }
+
+        try:
+            success = await asyncio.wait_for(
+                rail.rollback_skill(skill_name, version),
+                timeout=30.0,
+            )
+        except asyncio.TimeoutError:
+            logger.warning("[JiuWenClaw] evolve_rollback timed out for skill=%s version=%s", skill_name, version)
+            return {"output": "回滚操作超时，请稍后重试。", "result_type": "error"}
+        except Exception as exc:
+            logger.warning("[JiuWenClaw] evolve_rollback failed: %s", exc)
+            return {"output": f"回滚失败：{exc}", "result_type": "error"}
+
+        if success:
+            return {
+                "output": (
+                    f"Skill '{skill_name}' 已成功回滚到 `{version}`。\n\n"
+                    f"（当前状态已自动归档，可再次回滚恢复。）"
+                ),
+                "result_type": "answer",
+            }
+        return {
+            "output": f"Skill '{skill_name}' 回滚失败，请检查归档版本是否有效。",
+            "result_type": "error",
+        }
+
     def _ensure_evolution_rail_for_slash(self, mode: str) -> str | None:
         """Check evolution availability for slash commands; lazily init rail if needed.
 
@@ -4759,6 +4836,12 @@ class JiuWenClawDeepAdapter:
             if err:
                 return {"output": err, "result_type": "error"}
             return await self._handle_evolve_list_command(stripped)
+
+        if stripped.startswith("/evolve_rollback"):
+            err = self._ensure_evolution_rail_for_slash(mode)
+            if err:
+                return {"output": err, "result_type": "error"}
+            return await self._handle_evolve_rollback_command(stripped)
 
         if stripped.startswith("/evolve"):
             err = self._ensure_evolution_rail_for_slash(mode)
