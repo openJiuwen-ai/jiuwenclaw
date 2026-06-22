@@ -310,6 +310,20 @@ class AgentManager:
                 return mode_agents[effective_session_id]
         return None
 
+    def iter_jiuwenclaw_instances(self) -> list["JiuWenClaw"]:
+        """Return all initialized JiuWenClaw instances in this manager."""
+        claws: list["JiuWenClaw"] = []
+        for channel_agents in self.agents.values():
+            if not isinstance(channel_agents, dict):
+                continue
+            for mode_agents in channel_agents.values():
+                if not isinstance(mode_agents, dict):
+                    continue
+                for claw in mode_agents.values():
+                    if claw is not None:
+                        claws.append(claw)
+        return claws
+
     async def reload_agents_config(self, config, env) -> None:
         """reload agent config"""
         # 保存配置（用于后续创建的 agent 重放）

@@ -2769,6 +2769,18 @@ class AsyncLRUCache:
     def __len__(self) -> int:
         return len(self._cache)
 
+    def snapshot_values_nowait(self) -> list[Any]:
+        """Return cached values for sync callers (best-effort, no async lock).
+
+        Entries are stored as ``(value, timestamp)``; malformed entries are skipped.
+        """
+        values: list[Any] = []
+        for entry in self._cache.values():
+            if not isinstance(entry, tuple) or len(entry) < 1:
+                continue
+            values.append(entry[0])
+        return values
+
     async def keys(self) -> list[str]:
         async with self._lock:
             if self._ttl is not None:

@@ -8,7 +8,9 @@ import pytest
 from openjiuwen.core.foundation.tool import ToolCard
 
 from jiuwenclaw.agentserver.tool_catalog import (
+    collect_tools_catalog_from_claws,
     get_registered_tools_catalog,
+    merge_tools_catalog_entries,
     resolve_short_description,
     short_description_from_description,
     tool_catalog_entry_from_card,
@@ -118,3 +120,25 @@ def test_jiuwenclaw_get_registered_tools_catalog_member() -> None:
     assert len(tools) == 1
     assert tools[0]["name"] == "grep"
     assert tools[0]["short_description"] == "Search in files."
+
+
+def test_collect_tools_catalog_from_claws_unions_agents() -> None:
+    class _Claw:
+        def __init__(self, names: list[str]) -> None:
+            self._names = names
+
+        def get_registered_tools_catalog(self) -> list[dict[str, str]]:
+            return [{"name": n, "description": n, "short_description": n} for n in self._names]
+
+    merged = collect_tools_catalog_from_claws([_Claw(["bash"]), _Claw(["read_file", "bash"])])
+    assert set(merged) == {"bash", "read_file"}
+
+
+def test_merge_tools_catalog_entries_prefers_richer_description() -> None:
+    merged = merge_tools_catalog_entries(
+        [
+            [{"name": "bash", "description": "a", "short_description": "工具「bash」（暂无简短说明）"}],
+            [{"name": "bash", "description": "Run shell.", "short_description": "Run shell."}],
+        ]
+    )
+    assert merged["bash"]["short_description"] == "Run shell."

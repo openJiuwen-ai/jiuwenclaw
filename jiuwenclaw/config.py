@@ -372,6 +372,70 @@ def get_permissions_tools() -> dict[str, Any]:
     return {"tools": dict(tools)}
 
 
+def get_permissions_defaults_level() -> str:
+    """Return UI-facing default tool level from ``permissions.defaults``."""
+    cfg = get_config() or {}
+    raw = (cfg.get("permissions") or {}).get("defaults", "guard")
+    return normalize_permissions_tool_level(raw) or "ask"
+
+
+def normalize_permissions_tool_level(raw: Any) -> str | None:
+    """Normalize a configured tool level to ``allow|ask|deny`` for UI display."""
+    if isinstance(raw, str):
+        level = raw.strip().lower()
+        if level in ("guard", "ask"):
+            return "ask"
+        if level in _VALID_PERM_LEVEL:
+            return level
+        return None
+    if isinstance(raw, dict):
+        star = raw.get("*")
+        if star is not None:
+            return normalize_permissions_tool_level(star)
+    return None
+
+
+def build_permissions_tools_list_view(
+    catalog_by_name: dict[str, dict[str, str]] | None = None,
+) -> dict[str, Any]:
+    """Build permissions UI list: runtime catalog tools with explicit/default levels."""
+    from jiuwenclaw.agentserver.tool_catalog import ui_list_short_description
+
+    catalog = dict(catalog_by_name or {})
+    explicit = get_permissions_tools().get("tools")
+    if not isinstance(explicit, dict):
+        explicit = {}
+    default_level = get_permissions_defaults_level()
+
+    tools_out: list[dict[str, Any]] = []
+    for name in sorted(catalog.keys()):
+        entry = catalog.get(name, {})
+        raw_explicit = explicit.get(name)
+        if raw_explicit is not None:
+            level = normalize_permissions_tool_level(raw_explicit) or default_level
+            configured = True
+        else:
+            level = default_level
+            configured = False
+
+        short = ui_list_short_description(
+            name,
+            description=str(entry.get("description", "") or ""),
+            short_description=str(entry.get("short_description", "") or ""),
+        )
+
+        tools_out.append(
+            {
+                "name": name,
+                "short_description": short,
+                "level": level,
+                "configured": configured,
+            }
+        )
+
+    return {"default_level": default_level, "tools": tools_out}
+
+
 def replace_permissions_tools_in_config(tools: Any) -> None:
     """整表替换 ``permissions.tools``；值仅允许 ``allow|ask|deny``。"""
     normalized = _validate_tools_map(tools)

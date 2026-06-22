@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { webRequest } from "../../services/webClient";
 
@@ -7,6 +7,13 @@ export type PermissionsToolsEditorProps = {
 };
 
 type PermLevel = "allow" | "ask" | "deny";
+
+type ToolRow = {
+  name: string;
+  shortDescription: string;
+  level: PermLevel;
+  configured: boolean;
+};
 
 function normalizeLevel(value: unknown): PermLevel | null {
   if (typeof value === "string") {
@@ -24,43 +31,41 @@ function normalizeLevel(value: unknown): PermLevel | null {
   return null;
 }
 
-function parseToolsFromPayload(data: Record<string, unknown>): Record<string, { level: PermLevel | null; raw?: string }> {
+function parseToolsListFromPayload(data: Record<string, unknown>): ToolRow[] {
   const tools = data.tools;
-  if (!tools || typeof tools !== "object" || Array.isArray(tools)) return {};
-  const out: Record<string, { level: PermLevel | null; raw?: string }> = {};
-  for (const [k, v] of Object.entries(tools as Record<string, unknown>)) {
-    const name = String(k).trim();
+  if (!Array.isArray(tools)) return [];
+  const out: ToolRow[] = [];
+  for (const item of tools) {
+    if (!item || typeof item !== "object") continue;
+    const row = item as Record<string, unknown>;
+    const name = String(row.name ?? "").trim();
     if (!name) continue;
-    const level = normalizeLevel(v);
-    out[name] =
-      level === null
-        ? { level: null, raw: typeof v === "string" ? v : JSON.stringify(v) }
-        : { level };
+    out.push({
+      name,
+      shortDescription: String(row.short_description ?? "").trim(),
+      level: normalizeLevel(row.level) ?? "ask",
+      configured: row.configured === true,
+    });
   }
-  return out;
+  return out.sort((a, b) => a.name.localeCompare(b.name));
 }
 
 export function PermissionsToolsEditor({ isConnected }: PermissionsToolsEditorProps) {
   const { t } = useTranslation();
-  const [tools, setTools] = useState<Record<string, { level: PermLevel | null; raw?: string }>>({});
+  const [tools, setTools] = useState<ToolRow[]>([]);
   const [loading, setLoading] = useState(false);
   const [busyKey, setBusyKey] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [newName, setNewName] = useState("");
   const [newLevel, setNewLevel] = useState<PermLevel>("ask");
 
-  const sortedEntries = useMemo(
-    () => Object.entries(tools).sort(([a], [b]) => a.localeCompare(b)),
-    [tools]
-  );
-
   const load = useCallback(async () => {
     if (!isConnected) return;
     setLoading(true);
     setError(null);
     try {
-      const data = await webRequest<Record<string, unknown>>("permissions.tools.get", {});
-      setTools(parseToolsFromPayload(data));
+      const data = await webRequest<Record<string, unknown>>("permissions.tools.list", {});
+      setTools(parseToolsListFromPayload(data));
     } catch (e) {
       const msg = e instanceof Error ? e.message : t("config.permissionsTools.loadFailed");
       setError(msg);
@@ -78,11 +83,11 @@ export function PermissionsToolsEditor({ isConnected }: PermissionsToolsEditorPr
     setBusyKey(tool);
     setError(null);
     try {
-      const data = await webRequest<Record<string, unknown>>("permissions.tools.update", {
+      await webRequest<Record<string, unknown>>("permissions.tools.update", {
         tool,
         level,
       });
-      setTools(parseToolsFromPayload(data));
+      await load();
     } catch (e) {
       const msg = e instanceof Error ? e.message : t("config.permissionsTools.saveFailed");
       setError(msg);
@@ -97,8 +102,8 @@ export function PermissionsToolsEditor({ isConnected }: PermissionsToolsEditorPr
     setBusyKey(tool);
     setError(null);
     try {
-      const data = await webRequest<Record<string, unknown>>("permissions.tools.delete", { tool });
-      setTools(parseToolsFromPayload(data));
+      await webRequest<Record<string, unknown>>("permissions.tools.delete", { tool });
+      await load();
     } catch (e) {
       const msg = e instanceof Error ? e.message : t("config.permissionsTools.saveFailed");
       setError(msg);
@@ -113,13 +118,13 @@ export function PermissionsToolsEditor({ isConnected }: PermissionsToolsEditorPr
     setBusyKey("__add__");
     setError(null);
     try {
-      const data = await webRequest<Record<string, unknown>>("permissions.tools.update", {
+      await webRequest<Record<string, unknown>>("permissions.tools.update", {
         tool: name,
         level: newLevel,
       });
-      setTools(parseToolsFromPayload(data));
       setNewName("");
       setNewLevel("ask");
+      await load();
     } catch (e) {
       const msg = e instanceof Error ? e.message : t("config.permissionsTools.saveFailed");
       setError(msg);
@@ -158,62 +163,68 @@ export function PermissionsToolsEditor({ isConnected }: PermissionsToolsEditorPr
         </p>
       ) : null}
 
-      {loading && sortedEntries.length === 0 ? (
+      {loading && tools.length === 0 ? (
         <p className="text-xs text-text-muted">{t("config.permissionsTools.loadingList")}</p>
-      ) : sortedEntries.length === 0 ? (
+      ) : tools.length === 0 ? (
         <p className="text-xs text-text-muted">{t("config.permissionsTools.empty")}</p>
       ) : (
         <div className="rounded-md border border-border/80 overflow-hidden">
           <table className="w-full text-xs">
             <thead>
               <tr className="bg-secondary/40 text-text-muted text-left">
-                <th className="px-3 py-2 font-medium w-[40%]">{t("config.permissionsTools.colTool")}</th>
-                <th className="px-3 py-2 font-medium">{t("config.permissionsTools.colLevel")}</th>
+                <th className="px-3 py-2 font-medium w-[18%]">{t("config.permissionsTools.colTool")}</th>
+                <th className="px-3 py-2 font-medium">{t("config.permissionsTools.colShortDescription")}</th>
+                <th className="px-3 py-2 font-medium w-[7.5rem]">{t("config.permissionsTools.colLevel")}</th>
                 <th className="px-3 py-2 font-medium w-[4rem] text-right">{t("config.permissionsTools.colActions")}</th>
               </tr>
             </thead>
             <tbody>
-              {sortedEntries.map(([name, meta]) => {
-                const effectiveLevel: PermLevel = meta.level ?? "ask";
-                const invalid = meta.level === null;
-                return (
-                  <tr key={name} className="border-t border-border even:bg-secondary/10">
-                    <td className="px-3 py-2 align-middle">
-                      <span className="mono text-[13px] text-text break-all">{name}</span>
-                      {invalid ? (
-                        <span className="block text-[10px] text-amber-600 dark:text-amber-400 mt-0.5">
-                          {t("config.permissionsTools.invalidValue", { raw: meta.raw ?? "" })}
-                        </span>
-                      ) : null}
-                    </td>
-                    <td className="px-3 py-2 align-middle">
-                      <select
-                        className={levelSelectClass}
-                        value={effectiveLevel}
-                        disabled={!isConnected || busyKey === name}
-                        onChange={(e) => {
-                          const v = e.target.value as PermLevel;
-                          void handleLevelChange(name, v);
-                        }}
-                      >
-                        <option value="allow">{t("config.permissionsTools.levelAllow")}</option>
-                        <option value="ask">{t("config.permissionsTools.levelAsk")}</option>
-                        <option value="deny">{t("config.permissionsTools.levelDeny")}</option>
-                      </select>
-                    </td>
-                    <td className="px-3 py-2 align-middle text-right">
+              {tools.map((row) => (
+                <tr key={row.name} className="border-t border-border even:bg-secondary/10">
+                  <td className="px-3 py-2 align-middle">
+                    <span className="mono text-[13px] text-text break-all">{row.name}</span>
+                    {!row.configured ? (
+                      <span className="block text-[10px] text-text-muted mt-0.5">
+                        {t("config.permissionsTools.usesDefault")}
+                      </span>
+                    ) : null}
+                  </td>
+                  <td className="px-3 py-2 align-middle text-text-muted break-words">
+                    {row.shortDescription && !row.shortDescription.includes("暂无简短说明")
+                      ? row.shortDescription
+                      : t("config.permissionsTools.noDescription")}
+                  </td>
+                  <td className="px-3 py-2 align-middle">
+                    <select
+                      className={levelSelectClass}
+                      value={row.level}
+                      disabled={!isConnected || busyKey === row.name}
+                      onChange={(e) => {
+                        const v = e.target.value as PermLevel;
+                        void handleLevelChange(row.name, v);
+                      }}
+                    >
+                      <option value="allow">{t("config.permissionsTools.levelAllow")}</option>
+                      <option value="ask">{t("config.permissionsTools.levelAsk")}</option>
+                      <option value="deny">{t("config.permissionsTools.levelDeny")}</option>
+                    </select>
+                  </td>
+                  <td className="px-3 py-2 align-middle text-right">
+                    {row.configured ? (
                       <button
                         type="button"
-                        onClick={() => void handleDelete(name)}
-                        disabled={!isConnected || busyKey === name}
+                        onClick={() => void handleDelete(row.name)}
+                        disabled={!isConnected || busyKey === row.name}
                         className="text-danger hover:underline disabled:opacity-50 text-[11px]"
                       >
                         {t("config.permissionsTools.delete")}
                       </button>
-                    </td>
-                  </tr>
-                );
-              })}
+                    ) : (
+                      <span className="text-text-muted text-[11px]">—</span>
+                    )}
+                  </td>
+                </tr>
+              ))}
             </tbody>
           </table>
         </div>

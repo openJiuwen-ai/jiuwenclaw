@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import logging
 import re
-from typing import Any
+from typing import Any, Iterable
 
 from openjiuwen.core.foundation.tool import ToolCard
 
@@ -20,10 +20,14 @@ _CJK_RE = re.compile(r"[\u4e00-\u9fff]")
 _FALLBACK_UNKNOWN_TEMPLATE = "工具「{name}」（暂无简短说明）"
 
 __all__ = [
+    "collect_tools_catalog_from_claws",
     "get_registered_tools_catalog",
+    "is_placeholder_short_description",
+    "merge_tools_catalog_entries",
     "resolve_short_description",
     "short_description_from_description",
     "tool_catalog_entry_from_card",
+    "ui_list_short_description",
 ]
 
 
@@ -134,6 +138,29 @@ def resolve_short_description(tool_name: str, model_description: str = "") -> st
     return _truncate_short_description("未知工具。")
 
 
+def is_placeholder_short_description(text: str) -> bool:
+    """Whether ``text`` is an internal fallback, not real tool documentation."""
+    normalized = str(text or "").strip()
+    if not normalized:
+        return True
+    if normalized in {"未知工具。", "未知工具"}:
+        return True
+    return "暂无简短说明" in normalized
+
+
+def ui_list_short_description(
+    tool_name: str,
+    *,
+    description: str = "",
+    short_description: str = "",
+) -> str:
+    """Short description for permissions UI; never return internal placeholder text."""
+    short = str(short_description or "").strip()
+    if short and not is_placeholder_short_description(short):
+        return short
+    return short_description_from_description(description)
+
+
 def tool_catalog_entry_from_card(card: ToolCard) -> dict[str, str]:
     name = str(getattr(card, "name", "") or "").strip()
     description = str(getattr(card, "description", "") or "")
@@ -165,3 +192,52 @@ def get_registered_tools_catalog(ability_manager: Any) -> list[dict[str, str]]:
         if name:
             by_name[name] = entry
     return [by_name[k] for k in sorted(by_name)]
+
+
+def _catalog_entry_richness(entry: dict[str, str]) -> int:
+    """Score catalog entries so merge prefers richer descriptions over placeholders."""
+    description = str(entry.get("description", "") or "")
+    short = str(entry.get("short_description", "") or "")
+    score = len(description)
+    if short and "暂无简短说明" not in short:
+        score += 1000 + len(short)
+    return score
+
+
+def merge_tools_catalog_entries(
+    catalogs: Iterable[Iterable[dict[str, str]]],
+) -> dict[str, dict[str, str]]:
+    """Merge multiple tool catalogs by ``name``; keep the richest entry on conflict."""
+    by_name: dict[str, dict[str, str]] = {}
+    for catalog in catalogs:
+        for entry in catalog or []:
+            if not isinstance(entry, dict):
+                continue
+            name = str(entry.get("name", "") or "").strip()
+            if not name:
+                continue
+            normalized = {str(k): str(v) for k, v in entry.items() if v is not None}
+            normalized["name"] = name
+            existing = by_name.get(name)
+            if existing is None or _catalog_entry_richness(normalized) > _catalog_entry_richness(existing):
+                by_name[name] = normalized
+    return by_name
+
+
+def collect_tools_catalog_from_claws(claws: Iterable[Any]) -> dict[str, dict[str, str]]:
+    """Union registered tools from multiple ``JiuWenClaw`` instances."""
+    catalogs: list[list[dict[str, str]]] = []
+    for claw in claws or []:
+        if claw is None:
+            continue
+        list_fn = getattr(claw, "get_registered_tools_catalog", None)
+        if not callable(list_fn):
+            continue
+        try:
+            entries = list_fn()
+        except Exception:
+            logger.exception("[tool_catalog] get_registered_tools_catalog failed")
+            continue
+        if entries:
+            catalogs.append(entries)
+    return merge_tools_catalog_entries(catalogs)

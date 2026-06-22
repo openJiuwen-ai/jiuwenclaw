@@ -2,12 +2,30 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections.abc import Iterable
 from typing import Any, ClassVar
 
 from jiuwenclaw.schema.agent import AgentRequest, AgentResponse, AgentResponseChunk
 from jiuwenclaw.utils import AsyncLRUCache, get_multi_tenant_user_workspace_dir
 
 logger = logging.getLogger(__name__)
+
+
+def filter_cached_agent_managers(values: Iterable[Any]) -> list[Any]:
+    """Return ``AgentManager`` instances from cache snapshot values."""
+    from jiuwenclaw.agentserver.agent_manager import AgentManager
+
+    managers: list[Any] = []
+    for value in values:
+        if isinstance(value, AgentManager):
+            managers.append(value)
+            continue
+        if value is not None:
+            logger.warning(
+                "[TenantAgentPool] skip non-AgentManager cache entry: type=%s",
+                type(value).__name__,
+            )
+    return managers
 
 
 class TenantAgentPool:
@@ -181,16 +199,16 @@ class TenantAgentPool:
 
         任意租户在工作则返回 True，立即短路返回。
         """
-        # 直接访问内部缓存
-        cache = self._agent_wrappers._cache
-        for key, (agent_manager, _) in cache.items():
-            if agent_manager is not None:
-                try:
-                    if agent_manager.is_working():
-                        return True
-                except Exception as e:
-                    logger.warning("Get working status failed for key=%s: %s", key, e)
-                    continue
+        for agent_manager in self.iter_agent_managers_nowait():
+            try:
+                if agent_manager.is_working():
+                    return True
+            except Exception as e:
+                logger.warning(
+                    "[TenantAgentPool] get working status failed: type=%s error=%s",
+                    type(agent_manager).__name__,
+                    e,
+                )
         return False
 
     async def cancel_all_inflight_work(self, reason: str = "[gateway ws disconnect] ") -> None:
@@ -426,6 +444,19 @@ class TenantAgentPool:
             AgentManager 实例或 None
         """
         return self._get_agent_manager_nowait(agent_id, service_id)
+
+    def iter_agent_managers_nowait(self) -> list[Any]:
+        """Return cached ``AgentManager`` instances without creating new ones."""
+        return filter_cached_agent_managers(self._agent_wrappers.snapshot_values_nowait())
+
+    def collect_runtime_tools_catalog_nowait(self) -> dict[str, dict[str, str]]:
+        """Union tool catalogs from all initialized JiuWenClaw instances."""
+        from jiuwenclaw.agentserver.tool_catalog import collect_tools_catalog_from_claws
+
+        claws: list[Any] = []
+        for agent_manager in self.iter_agent_managers_nowait():
+            claws.extend(agent_manager.iter_jiuwenclaw_instances())
+        return collect_tools_catalog_from_claws(claws)
 
     async def cancel_all_inflight_work(self, reason: str = "[gateway ws disconnect] ") -> None:
         """Gateway 与 AgentServer 的 WebSocket 断开时：取消所有租户的在途任务。

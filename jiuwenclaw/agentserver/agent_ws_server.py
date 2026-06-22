@@ -990,7 +990,12 @@ class AgentWebSocketServer:
         """处理 permissions.* E2A 请求（与 Web ``register_method`` 同名 method）。"""
         from jiuwenclaw.agentserver.permissions.config_rpc import dispatch_permissions_config_request
 
-        resp = dispatch_permissions_config_request(request)
+        pool = self._agent_manager
+        catalog_fn = pool.collect_runtime_tools_catalog_nowait if pool is not None else None
+        resp = dispatch_permissions_config_request(
+            request,
+            get_runtime_tools_catalog=catalog_fn,
+        )
         wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
         async with send_lock:
             await ws.send(json.dumps(wire, ensure_ascii=False))
