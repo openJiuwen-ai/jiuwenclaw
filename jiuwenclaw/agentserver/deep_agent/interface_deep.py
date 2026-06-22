@@ -179,6 +179,16 @@ from jiuwenclaw.agentserver.deep_agent.sysop_builder import (
 from jiuwenclaw.agentserver.stream_content_sanitize import strip_inline_tool_protocol
 from jiuwenclaw.agentserver.stream_utils import tool_calls_payload_to_json_list
 from jiuwenclaw.agentserver.extensions import get_rail_manager
+from jiuwenclaw.agentserver.cron_tool_context import (
+    CRON_TOOL_CHANNEL_ID,
+    CRON_TOOL_METADATA,
+    CRON_TOOL_MODE,
+    CRON_TOOL_SESSION_ID,
+    get_cron_tool_channel_id,
+    get_cron_tool_metadata,
+    get_cron_tool_mode,
+    get_cron_tool_session_id,
+)
 from jiuwenclaw.gateway.cron import CronTargetChannel
 from jiuwenclaw.agentserver.team import get_team_manager
 from jiuwenclaw.schema.agent import AgentRequest, AgentResponse, AgentResponseChunk
@@ -197,23 +207,6 @@ from jiuwenclaw.local_env_config import set_local_config
 load_dotenv(dotenv_path=get_env_file())
 
 _react_config = get_config().get("react", {})
-
-_CRON_TOOL_CHANNEL_ID: ContextVar[str] = ContextVar(
-    "cron_tool_channel_id",
-    default=CronTargetChannel.WEB.value,
-)
-_CRON_TOOL_SESSION_ID: ContextVar[str | None] = ContextVar(
-    "cron_tool_session_id",
-    default=None,
-)
-_CRON_TOOL_METADATA: ContextVar[dict[str, Any] | None] = ContextVar(
-    "cron_tool_metadata",
-    default=None,
-)
-_CRON_TOOL_MODE: ContextVar[str | None] = ContextVar(
-    "cron_tool_mode",
-    default=None,
-)
 
 _LLM_TRACE_SESSION_ID: ContextVar[str] = ContextVar(
     "llm_trace_session_id",
@@ -840,19 +833,19 @@ class _RuntimeCronToolContext:
 
     @property
     def channel_id(self) -> str:
-        return _CRON_TOOL_CHANNEL_ID.get()
+        return get_cron_tool_channel_id()
 
     @property
     def session_id(self) -> str | None:
-        return _CRON_TOOL_SESSION_ID.get()
+        return get_cron_tool_session_id()
 
     @property
     def metadata(self) -> dict[str, Any] | None:
-        return _CRON_TOOL_METADATA.get()
+        return get_cron_tool_metadata()
 
     @property
     def mode(self) -> str | None:
-        return _CRON_TOOL_MODE.get()
+        return get_cron_tool_mode()
 
     @property
     def tool_scope(self) -> str:
@@ -2948,10 +2941,10 @@ class JiuWenClawDeepAdapter:
             session_id=session_id or "",
         )
         return (
-            _CRON_TOOL_CHANNEL_ID.set(normalized_channel),
-            _CRON_TOOL_SESSION_ID.set(session_id),
-            _CRON_TOOL_METADATA.set(normalized_metadata),
-            _CRON_TOOL_MODE.set(normalized_mode),
+            CRON_TOOL_CHANNEL_ID.set(normalized_channel),
+            CRON_TOOL_SESSION_ID.set(session_id),
+            CRON_TOOL_METADATA.set(normalized_metadata),
+            CRON_TOOL_MODE.set(normalized_mode),
             _plan_todo.PLAN_TODO_SESSION_ID.set(session_id or "default"),
             dr_token,
         )
@@ -2964,10 +2957,10 @@ class JiuWenClawDeepAdapter:
 
         channel_token, session_token, metadata_token, mode_token, todo_token, dr_token = tokens
         _plan_todo.PLAN_TODO_SESSION_ID.reset(todo_token)
-        _CRON_TOOL_MODE.reset(mode_token)
-        _CRON_TOOL_METADATA.reset(metadata_token)
-        _CRON_TOOL_SESSION_ID.reset(session_token)
-        _CRON_TOOL_CHANNEL_ID.reset(channel_token)
+        CRON_TOOL_MODE.reset(mode_token)
+        CRON_TOOL_METADATA.reset(metadata_token)
+        CRON_TOOL_SESSION_ID.reset(session_token)
+        CRON_TOOL_CHANNEL_ID.reset(channel_token)
         # 重置 DeepResearch 路由上下文
         reset_deepresearch_route(dr_token)
 
@@ -3123,7 +3116,7 @@ class JiuWenClawDeepAdapter:
             )
             self._multi_session_toolkit = MultiSessionToolkit(
                 session_id=session_id,
-                channel_id=_CRON_TOOL_CHANNEL_ID.get(),
+                channel_id=get_cron_tool_channel_id(),
                 request_id=request_id,
                 sub_agent_config=sub_agent_config,
             )
@@ -3193,8 +3186,8 @@ class JiuWenClawDeepAdapter:
             send_file_toolkit = SendFileToolkit(
                 request_id=request_id,
                 session_id=session_id,
-                channel_id=_CRON_TOOL_CHANNEL_ID.get(),
-                metadata=_CRON_TOOL_METADATA.get(),
+                channel_id=get_cron_tool_channel_id(),
+                metadata=get_cron_tool_metadata(),
             )
             for sf_tool in send_file_toolkit.get_tools():
                 Runner.resource_mgr.add_tool(sf_tool)
@@ -3334,7 +3327,7 @@ class JiuWenClawDeepAdapter:
                 set_global_channel_id as _set_user_todo_channel_id,
             )
             _set_user_todo_workspace(self._workspace_dir)
-            _set_user_todo_channel_id(_CRON_TOOL_CHANNEL_ID.get())
+            _set_user_todo_channel_id(get_cron_tool_channel_id())
             for tool in _get_user_todo_tools():
                 if not Runner.resource_mgr.get_tool(tool.card.id):
                     Runner.resource_mgr.add_tool(tool)

@@ -562,6 +562,8 @@ class CronSchedulerService:
                         if open_part:
                             metadata["feishu_open_id"] = open_part
                     msg_session_id = chat_part
+        elif channel_id == "web" and routing_sid:
+            msg_session_id = routing_sid
 
         # 针对 feishu/xiaoyi/whatsapp：从 config.yaml 取最近一次可回发的平台身份，写入 metadata
         # 这样即使 cron 推送没有 session_id，也能让 Channel.send 正常路由到对应会话。

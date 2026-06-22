@@ -104,10 +104,18 @@ class _CronToolsCronBackend(CronToolBackend):
         return self._to_backend_job(job)
 
     async def delete_job(self, job_id: str) -> bool:
-        return bool(await self._cron_tools.delete_job(job_id))
+        token = self._cron_tools.push_cron_route(CronTools.resolve_route())
+        try:
+            return bool(await self._cron_tools.delete_job(job_id))
+        finally:
+            self._cron_tools.reset_cron_route(token)
 
     async def toggle_job(self, job_id: str, enabled: bool) -> dict[str, Any]:
-        job = await self._cron_tools.toggle_job(job_id, enabled)
+        token = self._cron_tools.push_cron_route(CronTools.resolve_route())
+        try:
+            job = await self._cron_tools.toggle_job(job_id, enabled)
+        finally:
+            self._cron_tools.reset_cron_route(token)
         return self._to_backend_job(job)
 
     async def preview_job(self, job_id: str, count: int = 5) -> list[dict[str, Any]]:

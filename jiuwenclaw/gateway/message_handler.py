@@ -171,10 +171,9 @@ class MessageHandler(ABC):
         self._get_config_raw = get_config_raw
         self._update_channel_in_config = update_channel_in_config
 
-        from jiuwenclaw.gateway.agent_client import WebSocketAgentServerClient
-
-        if isinstance(self._agent_client, WebSocketAgentServerClient):
-            self._agent_client.set_server_push_handler(self._handle_agent_server_push)
+        set_push_handler = getattr(self._agent_client, "set_server_push_handler", None)
+        if callable(set_push_handler):
+            set_push_handler(self._handle_agent_server_push)
 
         # 文件传输处理器（延迟初始化）
         self._file_transfer_handler = None
@@ -1641,6 +1640,13 @@ class MessageHandler(ABC):
                 request_mode = self._stream_modes.get(request_id)
                 if request_mode:
                     params["mode"] = request_mode
+                if (
+                    str(params.get("targets") or "").strip() == "web"
+                    and session_id
+                    and not params.get("session_id")
+                ):
+                    params = dict(params)
+                    params["session_id"] = session_id
                 data = await cc.create_job(params)
             elif action == "update":
                 data = await cc.update_job(str(params.get("job_id") or ""), dict(params.get("patch") or {}))
@@ -2421,6 +2427,16 @@ class MessageHandler(ABC):
                     if event_type in FILE_TRANSFER_EVENT_TYPES:
                         await self._handle_file_transfer_event(
                             event_type, chunk.payload, session_id, channel_id, request_metadata
+                        )
+                        continue
+
+                    if event_type == "cron.response":
+                        await self._handle_cron_push_payload(
+                            payload=dict(chunk.payload),
+                            request_id=rid,
+                            channel_id=channel_id,
+                            session_id=session_id,
+                            metadata=request_metadata,
                         )
                         continue
 
