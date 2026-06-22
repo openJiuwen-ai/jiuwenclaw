@@ -112,14 +112,16 @@ def _is_placeholder(value: str | None) -> bool:
 
 
 def validate_scripts_file_content(text: str, *, rel_path: str) -> str | None:
-    """Validate a scripts/** text file content. Return error string or None."""
+    """Validate a scripts/** text file content. Return error code or None."""
+    from jiuwenclaw.agentserver.skilldev.error_codes import (
+        ERR_FW_SCRIPT_DANGEROUS_PATTERN,
+        ERR_FW_SCRIPT_CREDENTIAL,
+    )
+
     for line_no, line in enumerate(text.splitlines(), start=1):
         for pattern, label in DANGEROUS_PATTERNS:
             if pattern.search(line):
-                return (
-                    f"Security check failed in {rel_path}:{line_no}: "
-                    f"prohibited command pattern `{label}`"
-                )
+                return ERR_FW_SCRIPT_DANGEROUS_PATTERN
 
     for line_no, line in enumerate(text.splitlines(), start=1):
         for pattern, label, value_group in CREDENTIAL_PATTERNS:
@@ -137,9 +139,6 @@ def validate_scripts_file_content(text: str, *, rel_path: str) -> str | None:
             if raw_val is not None and _is_placeholder(str(raw_val)):
                 continue
 
-            return (
-                f"Security check failed in {rel_path}:{line_no}: "
-                f"possible hardcoded credential (`{label}`)"
-            )
+            return ERR_FW_SCRIPT_CREDENTIAL
 
     return None

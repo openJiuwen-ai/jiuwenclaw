@@ -147,101 +147,96 @@ def _is_placeholder(value: str | None) -> bool:
 
 
 def validate_skill_md_content(content: str) -> str | None:
-    """Validate SKILL.md content. Return error string or None if valid."""
+    """Validate SKILL.md content. Return error code or None if valid.
+
+    Returns the first matching error code (from ``error_codes``), ordered by
+    check priority.  Detailed diagnostic text is **not** returned — callers
+    should rely on server-side logs for troubleshooting.
+    """
+    from jiuwenclaw.agentserver.skilldev.error_codes import (
+        ERR_FW_SKILLMD_FRONTMATTER_FORMAT,
+        ERR_FW_SKILLMD_FRONTMATTER_KEY,
+        ERR_FW_SKILLMD_NAME,
+        ERR_FW_SKILLMD_DESCRIPTION,
+        ERR_FW_SKILLMD_BODY,
+        ERR_FW_SKILLMD_CREDENTIAL,
+    )
+
     if not content.startswith("---"):
-        return "SKILL.md 缺少 YAML frontmatter（应以 --- 开头）"
+        return ERR_FW_SKILLMD_FRONTMATTER_FORMAT
 
     match = re.match(r"^---\n(.*?)\n---", content, re.DOTALL)
     if not match:
-        return "SKILL.md frontmatter 格式无效（缺少闭合 ---）"
+        return ERR_FW_SKILLMD_FRONTMATTER_FORMAT
 
     frontmatter_text = match.group(1)
     body = content[match.end():].lstrip("\n")
 
-    errors: list[str] = []
+    hit_codes: set[str] = set()
 
     dup = _find_duplicate_frontmatter_key(frontmatter_text)
     if dup:
-        errors.append(f"Duplicate key in SKILL.md frontmatter: {dup}")
+        hit_codes.add(ERR_FW_SKILLMD_FRONTMATTER_KEY)
 
     try:
         frontmatter = yaml.safe_load(frontmatter_text)
         if not isinstance(frontmatter, dict):
-            return "Frontmatter must be a YAML dictionary"
-    except yaml.YAMLError as e:
-        return f"Invalid YAML in frontmatter: {e}"
+            return ERR_FW_SKILLMD_FRONTMATTER_FORMAT
+    except yaml.YAMLError:
+        return ERR_FW_SKILLMD_FRONTMATTER_FORMAT
 
     unexpected = set(frontmatter.keys()) - ALLOWED_FRONTMATTER_KEYS
     if unexpected:
-        errors.append(
-            f"Unexpected key(s) in SKILL.md frontmatter: {', '.join(sorted(unexpected))}. "
-            f"Allowed properties are: {', '.join(sorted(ALLOWED_FRONTMATTER_KEYS))}"
-        )
-
-    if "name" not in frontmatter:
-        errors.append("Missing 'name' in frontmatter")
-    if "description" not in frontmatter:
-        errors.append("Missing 'description' in frontmatter")
+        hit_codes.add(ERR_FW_SKILLMD_FRONTMATTER_KEY)
 
     # --- name ---
     name = frontmatter.get("name", "")
     if isinstance(name, str):
         name = name.strip()
         if not name:
-            errors.append("Name cannot be empty")
+            hit_codes.add(ERR_FW_SKILLMD_NAME)
         else:
             if not re.match(r"^[a-z0-9-]+$", name):
-                errors.append(
-                    f"Name '{name}' should be kebab-case (lowercase letters, digits, and hyphens only)"
-                )
+                hit_codes.add(ERR_FW_SKILLMD_NAME)
             if name.startswith("-") or name.endswith("-") or "--" in name:
-                errors.append(f"Name '{name}' cannot start/end with hyphen or contain consecutive hyphens")
+                hit_codes.add(ERR_FW_SKILLMD_NAME)
             if len(name) > 64:
-                errors.append(f"Name is too long ({len(name)} characters). Maximum is 64 characters.")
+                hit_codes.add(ERR_FW_SKILLMD_NAME)
     elif name is not None and "name" in frontmatter:
-        errors.append(f"Name must be a string, got {type(name).__name__}")
+        hit_codes.add(ERR_FW_SKILLMD_NAME)
+    if "name" not in frontmatter:
+        hit_codes.add(ERR_FW_SKILLMD_NAME)
 
     # --- description (char + token dual limit) ---
     description = frontmatter.get("description", "")
     if isinstance(description, str):
         description = description.strip()
         if not description:
-            errors.append("Description cannot be empty")
+            hit_codes.add(ERR_FW_SKILLMD_DESCRIPTION)
         else:
-            if "<" in description or ">" in description:
-                errors.append("Description cannot contain angle brackets (< or >)")
             max_chars = DESCRIPTION_MAX_CHARS_CJK if _contains_cjk(description) else DESCRIPTION_MAX_CHARS_EN
             if len(description) > max_chars:
-                errors.append(
-                    f"Description is too long ({len(description)} characters). "
-                    f"Maximum is {max_chars} characters."
-                )
+                hit_codes.add(ERR_FW_SKILLMD_DESCRIPTION)
             desc_tokens = _estimate_tokens(description)
             if desc_tokens > DESCRIPTION_MAX_TOKENS:
-                errors.append(
-                    f"Description token count too high (~{desc_tokens} tokens). "
-                    f"Maximum is {DESCRIPTION_MAX_TOKENS} tokens."
-                )
+                hit_codes.add(ERR_FW_SKILLMD_DESCRIPTION)
     elif description is not None and "description" in frontmatter:
-        errors.append(f"Description must be a string, got {type(description).__name__}")
+        hit_codes.add(ERR_FW_SKILLMD_DESCRIPTION)
+    if "description" not in frontmatter:
+        hit_codes.add(ERR_FW_SKILLMD_DESCRIPTION)
 
     # --- body (line + token dual limit) ---
     if not body.strip():
-        errors.append("SKILL.md body cannot be empty")
+        hit_codes.add(ERR_FW_SKILLMD_BODY)
     else:
         body_lines = body.splitlines()
         if len(body_lines) > BODY_MAX_LINES:
-            errors.append(
-                f"SKILL.md body is too long ({len(body_lines)} lines). "
-                f"Maximum is {BODY_MAX_LINES} lines."
-            )
+            hit_codes.add(ERR_FW_SKILLMD_BODY)
         body_tokens = _estimate_tokens(body)
         if body_tokens > BODY_MAX_TOKENS:
-            errors.append(
-                f"SKILL.md body token count too high (~{body_tokens} tokens). "
-                f"Maximum is {BODY_MAX_TOKENS} tokens."
-            )
+            hit_codes.add(ERR_FW_SKILLMD_BODY)
 
+    # --- credential leak ---
     for line_no, line in enumerate(content.splitlines(), start=1):
         for pattern, label, value_group in CREDENTIAL_PATTERNS:
             m = pattern.search(line)
@@ -255,12 +250,9 @@ def validate_skill_md_content(content: str) -> str | None:
                 raw_val = m.group(0)
             if raw_val is not None and _is_placeholder(str(raw_val)):
                 continue
-            errors.append(
-                f"Security check failed in SKILL.md:{line_no}: "
-                f"possible hardcoded credential (`{label}`)"
-            )
+            hit_codes.add(ERR_FW_SKILLMD_CREDENTIAL)
 
-    if errors:
-        return "SKILL.md 校验失败:\n" + "\n".join(f"- {e}" for e in errors)
+    if hit_codes:
+        return min(hit_codes)
     return None
 

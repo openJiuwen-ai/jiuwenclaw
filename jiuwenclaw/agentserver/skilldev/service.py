@@ -44,6 +44,14 @@ from jiuwenclaw.agentserver.skilldev.schema import (
     SkillDevStage,
 )
 from jiuwenclaw.agentserver.skilldev.common_utils import safe_extract_zip, repack_skill_dir
+from jiuwenclaw.agentserver.skilldev.error_codes import (
+    ERR_FW_MISSING_TASK_OR_PATH,
+    ERR_FW_MISSING_CONTENT,
+    ERR_FW_CONTENT_TOO_LARGE,
+    ERR_FW_PATH_ESCAPE,
+    ERR_FW_FILE_NOT_FOUND,
+    ERR_FW_BINARY_FILE,
+)
 from jiuwenclaw.agentserver.skilldev.stages.validate_stage import parse_skill_frontmatter
 from jiuwenclaw.agentserver.skilldev.session_history.restore_chunks import (
     RESTORE_RESPONSE_TOO_LARGE_CODE,
@@ -284,7 +292,7 @@ class SkillDevService:
             try:
                 _ = await download_file(download_url, str(download_path))
             except Exception as exc:
-                logger.warning(
+                logger.info(
                     "[session=%s] [SkillDevService] skill 包下载失败: err=%s",
                     task_id,
                     exc,
@@ -326,7 +334,7 @@ class SkillDevService:
                 is_complete=False,
             )
         except Exception as exc:
-            logger.warning(
+            logger.info(
                 "[session=%s] [SkillDevService] skill 包解压缩失败: err=%s",
                 task_id,
                 exc,
@@ -578,7 +586,7 @@ class SkillDevService:
             upload_file_obs = _create_upload_file_obs()
             download_url = await upload_file_obs.upload_file(str(zip_path))
         except Exception as exc:
-            logger.warning(
+            logger.info(
                 "[session=%s] [SkillDevService] skill 包上传到OBS服务器失败: err=%s",
                 task_id,
                 exc,
@@ -704,29 +712,28 @@ class SkillDevService:
         content = params.get("content")
 
         if not task_id or not file_path:
-            logger.warning(
+            logger.info(
                 "[session=%s] [SkillDevService] file_write 缺少参数: task_id=%s, path=%s",
                 session_id, task_id, file_path,
             )
             return self._rpc_error_chunk(
-                request_id, channel_id, "缺少 task_id 或 path 参数"
+                request_id, channel_id, ERR_FW_MISSING_TASK_OR_PATH
             )
         if content is None:
-            logger.warning(
+            logger.info(
                 "[session=%s] [SkillDevService] file_write 缺少 content 参数, path=%s",
                 session_id, file_path,
             )
             return self._rpc_error_chunk(
-                request_id, channel_id, "缺少 content 参数"
+                request_id, channel_id, ERR_FW_MISSING_CONTENT
             )
         if len(content) > self._MAX_FILE_CONTENT_SIZE:
-            logger.warning(
+            logger.info(
                 "[session=%s] [SkillDevService] file_write 内容超限: path=%s, size=%d, limit=%d",
                 session_id, file_path, len(content), self._MAX_FILE_CONTENT_SIZE,
             )
             return self._rpc_error_chunk(
-                request_id, channel_id,
-                f"文件内容超过大小限制 ({self._MAX_FILE_CONTENT_SIZE} 字符)"
+                request_id, channel_id, ERR_FW_CONTENT_TOO_LARGE
             )
 
         workspace = self._deps.workspace_provider.get_local_path(task_id)
@@ -734,39 +741,39 @@ class SkillDevService:
         full_path = (skill_dir / file_path).resolve()
 
         if not str(full_path).startswith(str(skill_dir.resolve())):
-            logger.warning(
+            logger.info(
                 "[session=%s] [SkillDevService] file_write 路径越界: path=%s, resolved=%s",
                 session_id, file_path, full_path,
             )
             return self._rpc_error_chunk(
-                request_id, channel_id, "路径非法：不能访问工作区外的文件"
+                request_id, channel_id, ERR_FW_PATH_ESCAPE
             )
 
         if not full_path.exists() or not full_path.is_file():
-            logger.warning(
+            logger.info(
                 "[session=%s] [SkillDevService] file_write 文件不存在: path=%s, full_path=%s",
                 session_id, file_path, full_path,
             )
             return self._rpc_error_chunk(
-                request_id, channel_id, f"文件不存在: {file_path}"
+                request_id, channel_id, ERR_FW_FILE_NOT_FOUND
             )
 
         try:
             full_path.read_text(encoding="utf-8")
         except UnicodeDecodeError:
-            logger.warning(
+            logger.info(
                 "[session=%s] [SkillDevService] file_write 二进制文件不可编辑: path=%s",
                 session_id, file_path,
             )
             return self._rpc_error_chunk(
-                request_id, channel_id, "不支持修改二进制文件"
+                request_id, channel_id, ERR_FW_BINARY_FILE
             )
 
         # 如果修改的是 SKILL.md，写入前校验内容格式
         if full_path.name == "SKILL.md":
             validation_error = validate_skill_md_content(content)
             if validation_error:
-                logger.warning(
+                logger.info(
                     "[session=%s] [SkillDevService] file_write SKILL.md 校验失败: %s",
                     session_id, validation_error,
                 )
@@ -782,7 +789,7 @@ class SkillDevService:
             rel_path = rel.as_posix()
             validation_error = validate_scripts_file_content(content, rel_path=rel_path)
             if validation_error:
-                logger.warning(
+                logger.info(
                     "[session=%s] [SkillDevService] file_write 脚本安全校验失败: path=%s, error=%s",
                     session_id, rel_path, validation_error,
                 )
@@ -800,9 +807,13 @@ class SkillDevService:
                     parts = file_path.split("/", 1)
                     file_path = f"{renamed_to}/{parts[1]}"
             except Exception as exc:
-                logger.warning(
+                logger.info(
                     "[session=%s] [SkillDevService] 重新打包失败: %s", task_id, exc
                 )
+        logger.info(
+            "[session=%s] [SkillDevService] 文件修改成功: path=%s",
+            session_id, rel
+        )
 
         return AgentResponseChunk(
             request_id=request_id,
@@ -818,13 +829,13 @@ class SkillDevService:
 
     @staticmethod
     def _rpc_error_chunk(
-        request_id: str, channel_id: str, message: str
+        request_id: str, channel_id: str, error_code: str
     ) -> AgentResponseChunk:
         """用于非流式 RPC 请求的错误响应（不含 event_type，确保 gateway 返回 type=res）."""
         return AgentResponseChunk(
             request_id=request_id,
             channel_id=channel_id,
-            payload={"ok": False, "error": message},
+            payload={"ok": False, "error": error_code},
             is_complete=True,
         )
 
@@ -859,7 +870,7 @@ class SkillDevService:
 
             service_dir = get_user_workspace_dir() / f"service_{sid}"
             if not service_dir.is_dir():
-                logger.warning(
+                logger.info(
                     "[SkillDevService] batch_upload 目录不存在: session_id=%s, path=%s",
                     sid, service_dir,
                 )
@@ -886,7 +897,7 @@ class SkillDevService:
                     "status": "success",
                 })
             except Exception as exc:
-                logger.warning(
+                logger.info(
                     "[SkillDevService] batch_upload failed for session_id=%s: %s", sid, exc,
                 )
                 results.append({"sessionID": sid, "url": "", "name": "", "status": "error", "error": str(exc)})
@@ -914,7 +925,7 @@ class SkillDevService:
                     log_result = {"url": log_url, "name": "run_logs.zip", "status": "success"}
                     logger.info("[SkillDevService] batch_upload dev日志上传成功: url=%s", log_url)
                 except Exception as exc:
-                    logger.warning("[SkillDevService] batch_upload dev日志上传失败: %s", exc)
+                    logger.info("[SkillDevService] batch_upload dev日志上传失败: %s", exc)
                     log_result = {"url": "", "name": "run_logs.zip", "status": "error", "error": str(exc)}
                 finally:
                     if tmp_log_dir:
@@ -988,7 +999,7 @@ class SkillDevService:
                 )
                 results.append({"sessionID": sid, "status": "success"})
             except Exception as exc:
-                logger.warning(
+                logger.info(
                     "[SkillDevService] batch_download failed for session_id=%s: %s", sid, exc,
                 )
                 results.append({"sessionID": sid, "status": "error", "error": str(exc)})

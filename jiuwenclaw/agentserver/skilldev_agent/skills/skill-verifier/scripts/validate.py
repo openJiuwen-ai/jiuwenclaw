@@ -280,8 +280,6 @@ def validate_skill(skill_path: str | Path) -> tuple[bool, str]:
         if not description:
             errors.append("Description cannot be empty")
         else:
-            if "<" in description or ">" in description:
-                errors.append("Description cannot contain angle brackets (< or >)")
             max_chars = DESCRIPTION_MAX_CHARS_CJK if _contains_cjk(description) else DESCRIPTION_MAX_CHARS_EN
             if len(description) > max_chars:
                 errors.append(
