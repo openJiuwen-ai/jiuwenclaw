@@ -235,7 +235,8 @@ from jiuwenclaw.agentserver.tools.xiaoyi_phone_tools import (
     xiaoyi_gui_agent,
     image_reading,
 )
-from jiuwenclaw.config import get_config, get_default_models, resolve_env_vars
+from jiuwenclaw.config import (
+    get_config, get_default_models, resolve_env_vars, clear_config_cache as clear_global_config_cache)
 from jiuwenclaw.agentserver.stream_content_sanitize import strip_inline_tool_protocol
 from jiuwenclaw.agentserver.stream_utils import propagate_stream_source_id, tool_calls_payload_to_json_list
 from jiuwenclaw.agentserver.extensions import get_rail_manager
@@ -3188,6 +3189,7 @@ class JiuWenClawDeepAdapter:
         if self._instance is None:
             raise RuntimeError("JiuWenClawDeepAdapter 未初始化，请先调用 create_instance()")
         clear_config_cache()
+        clear_global_config_cache()
         clear_memory_manager_cache()
 
         if env_overrides is not None:

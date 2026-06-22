@@ -42,8 +42,10 @@ from .wiki_prompts import (
 def _get_default_model() -> Model:
     config = get_config()
     default_model_conf = config.get("models", {}).get("default", {})
-    client_config = default_model_conf.get("model_client_config", {})
-    req_config = default_model_conf.get("model_config_obj", {})
+    # Defensive copies: these dicts are mutated below, so we must not
+    # modify the shared get_config() cache.
+    client_config = dict(default_model_conf.get("model_client_config", {}))
+    req_config = dict(default_model_conf.get("model_config_obj", {}))
 
     if client_config and client_config.get("custom_headers") == "":
         del client_config["custom_headers"]

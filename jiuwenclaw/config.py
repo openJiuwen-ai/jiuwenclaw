@@ -4,6 +4,8 @@ import copy
 import logging
 import os
 import sys
+import threading
+import time
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
@@ -61,9 +63,60 @@ def get_merged_config_dict() -> dict[str, Any]:
     return merge_template_with_override(template, override)
 
 
+# Module-level cache for get_config() to avoid repeated YAML disk reads.
+# Expired by TTL (_CONFIG_CACHE_TTL_SECONDS) or explicitly via clear_config_cache().
+_config_cache: dict[str, Any] | None = None
+_config_cache_time: float = 0.0
+_CONFIG_CACHE_TTL_SECONDS: float = 20.0
+_config_lock = threading.Lock()
+_config_version: int = 0
+
+
 def get_config():
+    """Return the merged, env-var-resolved config dict.
+
+    Results are cached at module level with a TTL of
+    ``_CONFIG_CACHE_TTL_SECONDS`` (default 20s).  The cache is also
+    explicitly invalidated by ``clear_config_cache()`` (called on config
+    reload, set_config, and any _dump_yaml_round_trip write).
+
+    **WARNING**: The returned dict is a shared reference. Callers MUST NOT
+    mutate it (including nested dicts/lists), as changes will affect all
+    other callers within the TTL window. Use ``copy.deepcopy()`` if you
+    need to modify the result.
+    """
+    global _config_cache, _config_cache_time, _config_version
+    now = time.monotonic()
+
+    # Fast path: check cache validity under lock
+    with _config_lock:
+        if _config_cache is not None and (now - _config_cache_time) < _CONFIG_CACHE_TTL_SECONDS:
+            return _config_cache
+        read_version = _config_version
+
+    # Slow path: cache expired or missing, recompute (lock released during I/O)
     config_base = get_merged_config_dict()
-    return resolve_env_vars(config_base)
+    new_cache = resolve_env_vars(config_base)
+
+    # Update cache only if no invalidation occurred during the read
+    with _config_lock:
+        if _config_version == read_version:
+            _config_cache = new_cache
+            _config_cache_time = time.monotonic()
+
+    return new_cache
+
+
+def clear_config_cache() -> None:
+    """Invalidate the module-level config cache.
+
+    The next ``get_config()`` call will re-read from disk.
+    """
+    global _config_cache, _config_cache_time, _config_version
+    with _config_lock:
+        _config_cache = None
+        _config_cache_time = 0.0
+        _config_version += 1
 
 
 def get_config_raw():
@@ -78,6 +131,7 @@ def get_config_raw():
 def set_config(config):
     with open(_current_config_yaml_path(), "w", encoding="utf-8") as f:
         yaml.safe_dump(config, f, allow_unicode=True, sort_keys=False)
+    clear_config_cache()  # set_config bypasses _dump_yaml_round_trip, so clear explicitly
 
 
 def _load_yaml_round_trip(config_path: Path):
@@ -98,6 +152,8 @@ def _dump_yaml_round_trip(config_path: Path, data: Any) -> None:
     rt.width = 4096
     with open(config_path, "w", encoding="utf-8") as f:
         rt.dump(data, f)
+    # Any write to a config file invalidates the get_config() cache
+    clear_config_cache()
 
 
 def update_heartbeat_in_config(payload: dict[str, Any]) -> None:
