@@ -222,6 +222,64 @@ def _resource_has_payload(resource: dict[str, Any]) -> bool:
     )
 
 
+def _current_ref_file_resources(
+    files: Any,
+    direct_imported: set[str],
+) -> list[dict[str, Any]]:
+    resources: list[dict[str, Any]] = []
+    for res in _resource_list(files):
+        name = _resource_filename(res)
+        if not name or name in direct_imported:
+            continue
+        if not _resource_has_payload(res):
+            continue
+        resources.append(res)
+    return resources
+
+
+def _ref_files_extract_to_stem_dir(resources: list[dict[str, Any]]) -> bool:
+    """Mirror ``write_resource_group`` URL-batch detection for ref-files."""
+    return not bool(resources and str(resources[0].get("url") or "").strip())
+
+
+def _ref_file_extract_dir(ref_dir: Path, filename: str, *, extract_to_stem_dir: bool) -> Path:
+    suffix = Path(filename).suffix.lower()
+    if suffix in (".zip", ".skill"):
+        return ref_dir / Path(filename).stem if extract_to_stem_dir else ref_dir
+    return ref_dir / filename
+
+
+def build_current_ref_file_hint_lines(task_workspace: str | Path, files: Any) -> list[str]:
+    """Build per-file hint lines for ref-files uploaded in the current round."""
+    task_workspace = Path(task_workspace)
+    ref_dir = task_workspace / "resources" / "ref-files"
+    state = load_resource_state(task_workspace)
+    direct_imported = {
+        str(item)
+        for item in state.get(STATE_DIRECT_IMPORTED, [])
+        if str(item).strip()
+    }
+    resources = _current_ref_file_resources(files, direct_imported)
+    if not resources:
+        return []
+
+    extract_to_stem_dir = _ref_files_extract_to_stem_dir(resources)
+    lines: list[str] = []
+    for res in resources:
+        name = _resource_filename(res)
+        archive_path = (ref_dir / name).resolve()
+        lines.append(f"- {name} -> {archive_path}")
+        suffix = Path(name).suffix.lower()
+        if suffix in (".zip", ".skill"):
+            extract_dir = _ref_file_extract_dir(
+                ref_dir,
+                name,
+                extract_to_stem_dir=extract_to_stem_dir,
+            ).resolve()
+            lines.append(f"  - 解压目录 -> {extract_dir}")
+    return lines
+
+
 def _resource_state_entry(resource: dict[str, Any], name: str) -> dict[str, str]:
     entry = {"filename": name}
     url = str(resource.get("url") or "").strip()

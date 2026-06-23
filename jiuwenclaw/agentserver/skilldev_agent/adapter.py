@@ -32,6 +32,7 @@ from jiuwenclaw.agentserver.deep_agent.ask_user_question_registry import (
 from jiuwenclaw.agentserver.deep_agent.rails import JiuClawStreamEventRail
 from jiuwenclaw.agentserver.stream_utils import tool_calls_payload_to_json_list
 from jiuwenclaw.agentserver.skilldev_agent.utils.resource_sync import (
+    build_current_ref_file_hint_lines,
     record_direct_imported_skills,
     write_skill_searched,
     write_uploaded_resources,
@@ -546,20 +547,30 @@ class SkillDevDeepAdapter:
 
         resource_hint = self._build_resource_hint(task_workspace, params, task_id)
         raw_session_id = str(request.session_id or task_id)
-        combined_query = query
-        if skill_name:
-            combined_query = (
-                f"{query}\n\n"
-                f"当前 Skill 标识名（已确定，后续 SKILL.md frontmatter 的 name 须与此一致）：{skill_name}"
-            )
-        if resource_hint:
-            combined_query = f"{combined_query}\n\n{resource_hint}"
+        combined_parts: list[str] = []
+        combined_parts.append(f"【用户需求】\n{query}")
 
-        name_lock_hint = self._build_name_lock_hint(
-            params, task_workspace, skill_name, task_id
-        )
+        name_lock_hint = self._build_name_lock_hint(params, task_workspace, skill_name, task_id)
+        constraint_lines: list[str] = []
+        if skill_name:
+            constraint_lines.append(
+                f"- Skill 标识名（SKILL.md frontmatter.name 必须一致）：{skill_name}"
+            )
         if name_lock_hint:
-            combined_query = f"{combined_query}\n\n{name_lock_hint}"
+            constraint_lines.append(f"- {name_lock_hint}")
+        if constraint_lines:
+            combined_parts.append("【强约束】\n" + "\n".join(constraint_lines))
+
+        if resource_hint:
+            combined_parts.append(resource_hint)
+
+        combined_query = "\n\n".join(part for part in combined_parts if str(part).strip())
+
+        logger.info(
+            "[session=%s] [SkillDevDeepAdapter] combined_query:\n%s",
+            task_id,
+            combined_query,
+        )
 
         inputs = {
             "conversation_id": self._make_todo_session_id(raw_session_id),
@@ -1020,39 +1031,56 @@ class SkillDevDeepAdapter:
         tools = params.get("tool_spec_files") or params.get("toolSpecFiles") or []
         agents = params.get("agent_definitions") or params.get("agentDefinitions")
         clis = params.get("cli_definitions") or params.get("cliDefinitions")
-        resource_lines: list[str] = []
+        file_lines: list[str] = []
         if files:
-            resource_lines.append(f"- 普通参考文件：{task_workspace / 'resources' / 'ref-files'}")
+            file_lines.extend(build_current_ref_file_hint_lines(task_workspace, files))
+        skill_lines: list[str] = []
         if skills:
-            resource_lines.append(f"- 参考 Skill 包：{task_workspace / 'resources' / 'ref-skills'}")
+            skill_lines.append(f"- ref_skills_dir：{task_workspace / 'resources' / 'ref-skills'}")
+        tool_lines: list[str] = []
         if tools:
-            resource_lines.append(f"- 可用工具说明：{task_workspace / 'resources' / 'available-tools'}")
+            tool_lines.append(f"- tools_dir：{task_workspace / 'resources' / 'available-tools'}")
+        other_lines: list[str] = []
         if agents:
-            resource_lines.append(f"- 可用 Agent 定义：{task_workspace / 'resources' / 'agents' / 'available_agents.json'}")
+            other_lines.append(
+                f"- 可用 Agent 定义：{task_workspace / 'resources' / 'agents' / 'available_agents.json'}"
+            )
         if clis:
-            resource_lines.append(f"- 可用 CLI 定义：{task_workspace / 'resources' / 'clis' / 'available_clis.json'}")
+            other_lines.append(
+                f"- 可用 CLI 定义：{task_workspace / 'resources' / 'clis' / 'available_clis.json'}"
+            )
 
         skill_searched = params.get("skill_searched")
-        if not resource_lines and not skill_searched:
+        if not (file_lines or skill_lines or tool_lines or other_lines) and not skill_searched:
             return ""
 
         parts: list[str] = []
-        if resource_lines:
-            header = (
-                f"任务 ID：{task_id}\n"
-                f"当前 SkillDev 工作区：{task_workspace}\n"
-                "用户上传资源已写入：\n"
-            )
-            parts.append(header + "\n".join(resource_lines))
+        parts.append(
+            "【工作区信息】\n"
+            f"- task_id：{task_id}\n"
+            f"- workspace：{task_workspace}"
+        )
+        if file_lines:
+            parts.append("【本轮上传资源索引（已落盘，可直接读取）】\n" + "\n".join(file_lines))
+        if skill_lines:
+            parts.append("【参考 Skill 包】\n" + "\n".join(skill_lines))
+        if tool_lines:
+            parts.append("【可用工具说明】\n" + "\n".join(tool_lines))
+        if other_lines:
+            parts.append("【其他可用定义】\n" + "\n".join(other_lines))
         if skill_searched:
             skill_name = skill_searched.get("skillId") or skill_searched.get("skillName") or "未知"
             ref_skills_dir = task_workspace / "resources" / "ref-skills"
             parts.append(
-                f"用户明确指明要参考 {ref_skills_dir} 中的{skill_name}技能，"
-                "请在生成前仔细阅读该技能，并结合用户需求，生成新的Skill"
+                "【已选择参考技能】\n"
+                f"- 用户明确指明要参考 {ref_skills_dir} 中的 {skill_name} 技能\n"
+                "- 请在生成前仔细阅读该技能，并结合用户需求生成新的 Skill"
             )
-        parts.append("请在生成 Skill 前按需检查上述资源。")
-        return "\n".join(parts)
+        parts.append(
+            "【执行要求】\n"
+            "- 生成 Skill 前：按需阅读以上资源；若引用其中内容，请注明文件名"
+        )
+        return "\n\n".join(parts)
 
     # ------------------------------------------------------------------
     # interrupt / answer / heartbeat / is_working
