@@ -308,7 +308,10 @@
       "modeGroup": "群组映射",
       "userIdPlaceholder": "用户 ID，如 alice",
       "groupIdPlaceholder": "群组 ID，如 g_demo_sales",
-      "customPlaceholder": "自定义引用表达式",
+      "refItem": "引用项",
+      "orLabel": "or",
+      "addOrSegment": "添加 or 段",
+      "removeOrSegment": "删除 or 段",
       "singleValueHint": "该槽位仅允许配置一条引用",
       "singleValueOnly": "{{slot}} 仅允许配置一条引用",
       "slots": {

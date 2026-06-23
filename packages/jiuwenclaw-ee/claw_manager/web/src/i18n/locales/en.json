@@ -308,7 +308,10 @@
       "modeGroup": "Group Mapping",
       "userIdPlaceholder": "User ID, e.g. alice",
       "groupIdPlaceholder": "Group ID, e.g. g_demo_sales",
-      "customPlaceholder": "Custom reference expression",
+      "refItem": "Reference",
+      "orLabel": "or",
+      "addOrSegment": "Add or segment",
+      "removeOrSegment": "Remove or segment",
       "singleValueHint": "This slot allows only one reference",
       "singleValueOnly": "{{slot}} allows only one reference",
       "slots": {

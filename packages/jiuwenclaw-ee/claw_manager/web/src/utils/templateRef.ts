@@ -132,91 +132,89 @@ export function newTemplateRefRow(slot = 'default_model'): TemplateRefSlotRow {
   };
 }
 
-const USER_EXPR = /^\$\{user::([^}]+)\}(?:\s+or\s+(.+))?$/i;
-const GROUP_EXPR = /^\$\{group::([^}]+)\}(?:\s+or\s+(.+))?$/i;
+const OR_SPLIT_RE = /\s+or\s+/i;
+const USER_SEGMENT_RE = /^\$\{user::([^}]+)\}$/i;
+const GROUP_SEGMENT_RE = /^\$\{group::([^}]+)\}$/i;
 
-export type RefExprMode = 'template' | 'custom' | 'user' | 'group';
+export type RefSegmentMode = 'template' | 'user' | 'group';
 
-export interface ParsedRefExpr {
-  mode: RefExprMode;
+export interface RefSegment {
+  mode: RefSegmentMode;
   templateId: string;
-  custom: string;
   userId: string;
   groupId: string;
-  fallbackId: string;
 }
 
-export function buildRefExpr(state: ParsedRefExpr): string {
-  const fb = state.fallbackId.trim();
-  if (state.mode === 'user') {
-    const id = state.userId.trim();
-    if (!id) return '';
-    const base = `\${user::${id}}`;
-    return fb ? `${base} or ${fb}` : base;
-  }
-  if (state.mode === 'group') {
-    const id = state.groupId.trim();
-    if (!id) return '';
-    const base = `\${group::${id}}`;
-    return fb ? `${base} or ${fb}` : base;
-  }
-  if (state.mode === 'template') return state.templateId.trim();
-  return state.custom.trim();
+export interface ParsedRefChain {
+  segments: RefSegment[];
 }
 
-export function parseRefExpr(value: string): ParsedRefExpr {
-  const text = value.trim();
-  const empty: ParsedRefExpr = {
-    mode: 'custom',
+export function newRefSegment(mode: RefSegmentMode = 'template'): RefSegment {
+  return {
+    mode,
     templateId: '',
-    custom: text,
     userId: '',
     groupId: '',
-    fallbackId: '',
   };
-  if (!text) return { ...empty, mode: 'template' };
+}
 
-  if (!text.includes('${')) {
-    return {
-      mode: 'template',
-      templateId: text,
-      custom: '',
-      userId: '',
-      groupId: '',
-      fallbackId: '',
-    };
-  }
+function parseRefSegment(text: string): RefSegment | null {
+  const trimmed = text.trim();
+  if (!trimmed) return null;
 
-  const userMatch = text.match(USER_EXPR);
+  const userMatch = trimmed.match(USER_SEGMENT_RE);
   if (userMatch) {
     return {
       mode: 'user',
       templateId: '',
-      custom: '',
       userId: userMatch[1].trim(),
       groupId: '',
-      fallbackId: (userMatch[2] ?? '').trim(),
     };
   }
-
-  const groupMatch = text.match(GROUP_EXPR);
+  const groupMatch = trimmed.match(GROUP_SEGMENT_RE);
   if (groupMatch) {
     return {
       mode: 'group',
       templateId: '',
-      custom: '',
       userId: '',
       groupId: groupMatch[1].trim(),
-      fallbackId: (groupMatch[2] ?? '').trim(),
     };
   }
+  if (!trimmed.includes('${')) {
+    return {
+      mode: 'template',
+      templateId: trimmed,
+      userId: '',
+      groupId: '',
+    };
+  }
+  return null;
+}
 
-  return {
-    mode: 'custom',
-    templateId: '',
-    custom: text,
-    userId: '',
-    groupId: '',
-    fallbackId: '',
-  };
+function refSegmentToString(segment: RefSegment): string {
+  if (segment.mode === 'user') {
+    const id = segment.userId.trim();
+    return id ? `\${user::${id}}` : '';
+  }
+  if (segment.mode === 'group') {
+    const id = segment.groupId.trim();
+    return id ? `\${group::${id}}` : '';
+  }
+  return segment.templateId.trim();
+}
+
+export function buildRefChain(chain: ParsedRefChain): string {
+  const parts = chain.segments.map(refSegmentToString).filter(Boolean);
+  return parts.join(' or ');
+}
+
+export function parseRefChain(value: string): ParsedRefChain {
+  const text = value.trim();
+  if (!text) {
+    return { segments: [newRefSegment('template')] };
+  }
+
+  const parts = text.split(OR_SPLIT_RE);
+  const segments = parts.map((part) => parseRefSegment(part) ?? newRefSegment('template'));
+  return { segments: segments.length ? segments : [newRefSegment('template')] };
 }
