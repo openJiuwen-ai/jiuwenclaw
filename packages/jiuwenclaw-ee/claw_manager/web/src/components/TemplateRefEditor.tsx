@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import {
   ExtensionTemplateApi,
@@ -6,16 +6,18 @@ import {
   ServiceConfigTemplateApi,
   SkillWhitelistTemplateApi,
 } from '../services/api';
-import type { ModelTemplate } from '../types';
 import {
   TEMPLATE_REF_SLOTS,
-  buildRefExpr,
+  buildRefChain,
   isSingleValueTemplateRefSlot,
+  newRefSegment,
   newTemplateRefRow,
-  parseRefExpr,
+  parseRefChain,
   serializeTemplateRef,
   templateRefRowsFromMap,
-  type ParsedRefExpr,
+  type ParsedRefChain,
+  type RefSegment,
+  type RefSegmentMode,
   type TemplateRefMap,
   type TemplateRefSlotRow,
 } from '../utils/templateRef';
@@ -71,13 +73,6 @@ interface TemplateRefEditorProps {
   onChange: (value: TemplateRefMap) => void;
 }
 
-function modelMatchesSlot(template: ModelTemplate, slot: string): boolean {
-  const types = template.model_type;
-  if (slot === 'default_model') return types.includes('default');
-  const kind = slot.replace(/_model$/, '');
-  return types.includes(kind);
-}
-
 export async function loadTemplateOptions(): Promise<Record<string, TemplateOption[]>> {
   const pageSize = 200;
   const [models, skills, extensions, services] = await Promise.all([
@@ -93,14 +88,12 @@ export async function loadTemplateOptions(): Promise<Record<string, TemplateOpti
     label: name ? `${name} (${id})` : id,
   });
 
+  const modelOptions = modelItems.map((m) => toOpt(m.template_id, m.template_name));
   const modelSlots = ['default_model', 'video_model', 'audio_model', 'vision_model'] as const;
   const bySlot: Record<string, TemplateOption[]> = {};
 
   for (const slot of modelSlots) {
-    const filtered = modelItems
-      .filter((m) => modelMatchesSlot(m, slot))
-      .map((m) => toOpt(m.template_id, m.template_name));
-    bySlot[slot] = filtered.length ? filtered : modelItems.map((m) => toOpt(m.template_id, m.template_name));
+    bySlot[slot] = modelOptions;
   }
 
   bySlot.skill_whitelist = (skills.items ?? []).map((t) =>
@@ -116,12 +109,85 @@ export async function loadTemplateOptions(): Promise<Record<string, TemplateOpti
   return bySlot;
 }
 
-type RefMode = 'template' | 'user' | 'group';
+function RefSegmentEditor({
+  segment,
+  segmentIndex,
+  options,
+  onChange,
+  onRemove,
+  allowRemove,
+}: {
+  segment: RefSegment;
+  segmentIndex: number;
+  options: TemplateOption[];
+  onChange: (next: RefSegment) => void;
+  onRemove: () => void;
+  allowRemove: boolean;
+}) {
+  const { t } = useTranslation();
 
-function refModeFromExpr(expr: ParsedRefExpr): RefMode {
-  if (expr.mode === 'user') return 'user';
-  if (expr.mode === 'group') return 'group';
-  return 'template';
+  const setMode = (nextMode: RefSegmentMode) => {
+    onChange(newRefSegment(nextMode));
+  };
+
+  return (
+    <div className="flex items-center gap-2">
+      {segmentIndex > 0 ? (
+        <span className="shrink-0 w-[2.25rem] text-center text-[11px] font-medium uppercase text-muted">
+          {t('policies.templateRef.orLabel')}
+        </span>
+      ) : (
+        <span className="shrink-0 w-[2.25rem]" aria-hidden />
+      )}
+      <select
+        className="select w-[8.5rem] shrink-0"
+        value={segment.mode}
+        onChange={(e) => setMode(e.target.value as RefSegmentMode)}
+      >
+        <option value="template">{t('policies.templateRef.modeTemplate')}</option>
+        <option value="user">{t('policies.templateRef.modeUser')}</option>
+        <option value="group">{t('policies.templateRef.modeGroup')}</option>
+      </select>
+
+      <div className="flex-1 min-w-0">
+        {segment.mode === 'template' ? (
+          <select
+            className="select w-full"
+            value={segment.templateId}
+            onChange={(e) => onChange({ ...segment, mode: 'template', templateId: e.target.value })}
+          >
+            <option value="">{t('policies.templateRef.pickTemplate')}</option>
+            {options.map((opt) => (
+              <option key={opt.template_id} value={opt.template_id}>
+                {opt.label}
+              </option>
+            ))}
+          </select>
+        ) : segment.mode === 'user' ? (
+          <input
+            className="input w-full"
+            value={segment.userId}
+            placeholder={t('policies.templateRef.userIdPlaceholder')}
+            onChange={(e) => onChange({ ...segment, mode: 'user', userId: e.target.value })}
+          />
+        ) : (
+          <input
+            className="input w-full"
+            value={segment.groupId}
+            placeholder={t('policies.templateRef.groupIdPlaceholder')}
+            onChange={(e) => onChange({ ...segment, mode: 'group', groupId: e.target.value })}
+          />
+        )}
+      </div>
+
+      {allowRemove ? (
+        <DeleteIconButton
+          label={t('policies.templateRef.removeOrSegment')}
+          onClick={onRemove}
+        />
+      ) : null}
+    </div>
+  );
 }
 
 function RefRowEditor({
@@ -140,98 +206,81 @@ function RefRowEditor({
   allowRemove: boolean;
 }) {
   const { t } = useTranslation();
-  const [expr, setExpr] = useState<ParsedRefExpr>(() => parseRefExpr(value));
+  const [chain, setChain] = useState<ParsedRefChain>(() => parseRefChain(value));
+  /** 避免将序列化结果（已去掉空 or 段）回写时冲掉编辑中的空段 */
+  const lastEmittedRef = useRef<string | undefined>(undefined);
 
   useEffect(() => {
-    setExpr(parseRefExpr(value));
+    if (lastEmittedRef.current !== undefined && value === lastEmittedRef.current) {
+      return;
+    }
+    lastEmittedRef.current = undefined;
+    setChain(parseRefChain(value));
   }, [value]);
 
-  const applyExpr = (next: ParsedRefExpr) => {
-    setExpr(next);
-    onChange(buildRefExpr(next));
+  const applyChain = (next: ParsedRefChain) => {
+    setChain(next);
+    const serialized = buildRefChain(next);
+    lastEmittedRef.current = serialized;
+    onChange(serialized);
   };
 
-  const mode = refModeFromExpr(expr);
+  const updateSegment = (segmentIndex: number, segment: RefSegment) => {
+    const segments = [...chain.segments];
+    segments[segmentIndex] = segment;
+    applyChain({ segments });
+  };
 
-  const setMode = (nextMode: RefMode) => {
-    applyExpr({
-      mode: nextMode,
-      templateId: '',
-      custom: '',
-      userId: '',
-      groupId: '',
-      fallbackId: '',
+  const addOrSegment = () => {
+    applyChain({ segments: [...chain.segments, newRefSegment('template')] });
+  };
+
+  const removeOrSegment = (segmentIndex: number) => {
+    const segments = chain.segments.filter((_, i) => i !== segmentIndex);
+    applyChain({
+      segments: segments.length ? segments : [newRefSegment('template')],
     });
   };
 
   return (
-    <div className="flex items-center gap-2 rounded-md border border-[var(--border)] bg-[var(--card)] px-2.5 py-2 shadow-[inset_0_1px_0_var(--card-highlight)]">
-      <span
-        className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-[var(--bg-muted)] text-[11px] font-semibold text-muted tabular-nums"
-        aria-hidden
-      >
-        {index}
-      </span>
-      <select
-        className="select w-[8.5rem] shrink-0"
-        value={mode}
-        onChange={(e) => setMode(e.target.value as RefMode)}
-      >
-        <option value="template">{t('policies.templateRef.modeTemplate')}</option>
-        <option value="user">{t('policies.templateRef.modeUser')}</option>
-        <option value="group">{t('policies.templateRef.modeGroup')}</option>
-      </select>
-
-      <div className="flex-1 min-w-0">
-        {mode === 'template' && (
-          expr.mode === 'custom' ? (
-            <input
-              className="input mono text-xs w-full"
-              value={expr.custom}
-              placeholder={t('policies.templateRef.customPlaceholder')}
-              onChange={(e) => applyExpr({ ...expr, mode: 'custom', custom: e.target.value })}
-            />
-          ) : (
-            <select
-              className="select w-full"
-              value={expr.templateId}
-              onChange={(e) => applyExpr({ ...expr, mode: 'template', templateId: e.target.value })}
-            >
-              <option value="">{t('policies.templateRef.pickTemplate')}</option>
-              {options.map((opt) => (
-                <option key={opt.template_id} value={opt.template_id}>
-                  {opt.label}
-                </option>
-              ))}
-            </select>
-          )
-        )}
-
-        {mode === 'user' && (
-          <input
-            className="input w-full"
-            value={expr.userId}
-            placeholder={t('policies.templateRef.userIdPlaceholder')}
-            onChange={(e) => applyExpr({ ...expr, mode: 'user', userId: e.target.value })}
+    <div className="rounded-md border border-[var(--border)] bg-[var(--card)] shadow-[inset_0_1px_0_var(--card-highlight)]">
+      <div className="flex items-center gap-2 border-b border-[var(--border)] px-2.5 py-2">
+        <span
+          className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-[var(--bg-muted)] text-[11px] font-semibold text-muted tabular-nums"
+          aria-hidden
+        >
+          {index}
+        </span>
+        <span className="text-xs text-muted">{t('policies.templateRef.refItem')}</span>
+        <div className="flex-1" />
+        {allowRemove ? (
+          <DeleteIconButton
+            label={t('policies.templateRef.removeRef')}
+            onClick={onRemove}
           />
-        )}
-
-        {mode === 'group' && (
-          <input
-            className="input w-full"
-            value={expr.groupId}
-            placeholder={t('policies.templateRef.groupIdPlaceholder')}
-            onChange={(e) => applyExpr({ ...expr, mode: 'group', groupId: e.target.value })}
-          />
-        )}
+        ) : null}
       </div>
 
-      {allowRemove ? (
-        <DeleteIconButton
-          label={t('policies.templateRef.removeRef')}
-          onClick={onRemove}
-        />
-      ) : null}
+      <div className="flex flex-col gap-2 px-2.5 py-2">
+        {chain.segments.map((segment, segmentIndex) => (
+          <RefSegmentEditor
+            key={segmentIndex}
+            segment={segment}
+            segmentIndex={segmentIndex}
+            options={options}
+            onChange={(next) => updateSegment(segmentIndex, next)}
+            onRemove={() => removeOrSegment(segmentIndex)}
+            allowRemove={chain.segments.length > 1}
+          />
+        ))}
+        <button
+          type="button"
+          className="btn sm ghost self-start border border-dashed border-[var(--border)] text-[11px]"
+          onClick={addOrSegment}
+        >
+          + {t('policies.templateRef.addOrSegment')}
+        </button>
+      </div>
     </div>
   );
 }
