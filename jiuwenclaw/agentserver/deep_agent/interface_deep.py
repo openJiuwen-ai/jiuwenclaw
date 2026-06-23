@@ -287,6 +287,8 @@ from jiuwenclaw.config import (
     get_sandbox_endpoint,
     get_sandbox_runtime,
     resolve_env_vars,
+    _FALSE_VALUES,
+    _TRUE_VALUES,
 )
 from jiuwenclaw.agentserver.deep_agent.sysop_builder import (
     create_local_sysop_card,
@@ -320,6 +322,46 @@ from jiuwenclaw.agentserver.deep_agent.agent_card_id import (
 
 _react_config = get_config().get("react", {})
 _sandbox_config = get_config().get("sandbox", {})
+
+_SANDBOX_YAML_TO_ENV: dict[str, str] = {
+    "url": "JIUWENCLAW_SANDBOX_URL",
+    "type": "JIUWENCLAW_SANDBOX_TYPE",
+    "enabled": "JIUWENCLAW_SANDBOX_ENABLED",
+}
+
+
+def _sandbox_yaml_to_env_overlay(sandbox: Any) -> dict[str, str]:
+    """从 config_base['sandbox'] 抽 url/type/enabled, 翻译成 env overlay key。
+
+    缺失字段不进 overlay, 让 env var fallback 生效。enabled 归一化为
+    'true'/'false'。非法 bool 抛 ValueError, 让 reload 整体失败。
+    """
+    if not isinstance(sandbox, dict):
+        return {}
+    out: dict[str, str] = {}
+    for yaml_key, env_key in _SANDBOX_YAML_TO_ENV.items():
+        if yaml_key not in sandbox or sandbox[yaml_key] is None:
+            continue
+        value = sandbox[yaml_key]
+        if yaml_key == "enabled":
+            if isinstance(value, bool):
+                out[env_key] = "true" if value else "false"
+            else:
+                text = str(value).strip().lower()
+                if text in _TRUE_VALUES:
+                    out[env_key] = "true"
+                elif text in _FALSE_VALUES:
+                    out[env_key] = "false"
+                else:
+                    raise ValueError(
+                        f"sandbox.{yaml_key} must be a boolean string, got {value!r}"
+                    )
+        else:
+            text = str(value).strip()
+            if text:
+                out[env_key] = text
+    return out
+
 
 _CRON_TOOL_CHANNEL_ID: ContextVar[str] = ContextVar(
     "cron_tool_channel_id",
@@ -3606,6 +3648,19 @@ class JiuWenClawDeepAdapter:
                 full_config = get_config()
                 merged = deep_merge_dicts(full_config, resolve_env_vars(config_base))
                 config_base = merged
+
+            # 把 config_base['sandbox'] 的 url/type/enabled 翻译为 env overlay key,
+            # 让 _create_sys_operation 经 get_sandbox_endpoint/get_sandbox_runtime 读到。
+            sandbox_yaml = (
+                config_base.get("sandbox") or {}
+                if isinstance(config_base, dict) else {}
+            )
+            sandbox_overlay = _sandbox_yaml_to_env_overlay(sandbox_yaml)
+            if sandbox_overlay:
+                if overlay_token is not None:
+                    reset_task_env_overlay(overlay_token)
+                overlay = build_effective_env_overlay(env_overrides, sandbox_overlay)
+                overlay_token = bind_task_env_overlay(overlay) if overlay else None
 
             new_embed_fp = self._embed_config_fingerprint(config_base)
             new_memory_fp = memory_cache_fingerprint(config_base)

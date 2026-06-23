@@ -719,3 +719,301 @@ async def test_maybe_apply_pending_reload_restores_pending_on_failure():
             await adapter.run_maybe_apply_pending_reload()
 
     assert adapter.get_pending_reload() == pending
+
+
+@pytest.mark.asyncio
+async def test_reload_translates_yaml_sandbox_to_env_overlay(monkeypatch: pytest.MonkeyPatch):
+    """config_base['sandbox'] 翻译为 env overlay, _create_sys_operation 读到 yaml 值."""
+    from jiuwenclaw.agentserver.deep_agent import interface_deep as mod
+    from jiuwenclaw.config import get_sandbox_endpoint, get_sandbox_runtime
+
+    adapter = _DeepAdapterReloadHarness.build(working=False)
+    adapter.configure_for_force_apply_test()
+
+    captured: dict = {}
+
+    def _fake_create_sys_operation(self):
+        endpoint = get_sandbox_endpoint()
+        runtime = get_sandbox_runtime()
+        captured["endpoint"] = endpoint
+        captured["runtime"] = runtime
+        return MagicMock()
+
+    monkeypatch.setattr(
+        mod.JiuWenClawDeepAdapter,
+        "_create_sys_operation",
+        lambda self: _fake_create_sys_operation(self),
+    )
+    monkeypatch.setattr(
+        mod.JiuWenClawDeepAdapter,
+        "_sandbox_config_fingerprint",
+        lambda self: ("yaml-fp",),
+    )
+
+    # 旧指纹不同于 yaml-fp, 触发重建路径调用 _create_sys_operation
+    adapter._sandbox_fingerprint = ("old-fp",)
+    # configure_for_force_apply_test 把 _maybe_recreate_sys_operation 设成 MagicMock
+    # 实例属性会遮蔽类方法, 删掉让真实指纹比对路径跑到 _create_sys_operation
+    monkeypatch.delattr(adapter, "_maybe_recreate_sys_operation")
+
+    with patch(
+        "jiuwenclaw.agentserver.deep_agent.interface_deep.get_config",
+        return_value={"react": {"agent_name": "a"}, "sandbox": {
+            "url": "http://yaml-sb/v1", "type": "yaml-type", "enabled": True,
+        }},
+    ), patch(
+        "jiuwenclaw.agentserver.deep_agent.interface_deep.memory_cache_fingerprint",
+        return_value="mfp",
+    ), patch(
+        "jiuwenclaw.agentserver.deep_agent.interface_deep.get_memory_engine",
+        return_value="builtin",
+    ), patch(
+        "jiuwenclaw.agentserver.deep_agent.interface_deep.clear_config_cache",
+    ), patch(
+        "jiuwenclaw.agentserver.deep_agent.interface_deep.clear_memory_manager_cache",
+        new=AsyncMock(),
+    ):
+        result = await adapter.reload_agent_config(
+            config_base={"sandbox": {
+                "url": "http://yaml-sb/v1", "type": "yaml-type", "enabled": True,
+            }},
+            env_overrides=None,
+            _force_apply=True,
+            _invalidate_memory_cache=False,
+        )
+
+    assert result.applied is True
+    assert captured["endpoint"]["url"] == "http://yaml-sb/v1"
+    assert captured["endpoint"]["type"] == "yaml-type"
+    assert captured["runtime"]["enabled"] is True
+
+
+@pytest.mark.asyncio
+async def test_reload_yaml_sandbox_overrides_env_overrides(monkeypatch: pytest.MonkeyPatch):
+    """yaml sandbox 覆盖 env_overrides 中的 JIUWENCLAW_SANDBOX_URL."""
+    from jiuwenclaw.agentserver.deep_agent import interface_deep as mod
+    from jiuwenclaw.config import get_sandbox_endpoint
+
+    adapter = _DeepAdapterReloadHarness.build(working=False)
+    adapter.configure_for_force_apply_test()
+
+    captured: dict = {}
+
+    monkeypatch.setattr(
+        mod.JiuWenClawDeepAdapter,
+        "_create_sys_operation",
+        lambda self: (captured.setdefault("endpoint", get_sandbox_endpoint()), MagicMock())[1],
+    )
+    monkeypatch.setattr(
+        mod.JiuWenClawDeepAdapter,
+        "_sandbox_config_fingerprint",
+        lambda self: ("yaml-fp",),
+    )
+    adapter._sandbox_fingerprint = ("old-fp",)
+    # 让真实 _maybe_recreate_sys_operation 跑到 _create_sys_operation
+    monkeypatch.delattr(adapter, "_maybe_recreate_sys_operation")
+
+    with patch(
+        "jiuwenclaw.agentserver.deep_agent.interface_deep.get_config",
+        return_value={"react": {"agent_name": "a"}, "sandbox": {"url": "yaml-u"}},
+    ), patch(
+        "jiuwenclaw.agentserver.deep_agent.interface_deep.memory_cache_fingerprint",
+        return_value="mfp",
+    ), patch(
+        "jiuwenclaw.agentserver.deep_agent.interface_deep.get_memory_engine",
+        return_value="builtin",
+    ), patch(
+        "jiuwenclaw.agentserver.deep_agent.interface_deep.clear_config_cache",
+    ), patch(
+        "jiuwenclaw.agentserver.deep_agent.interface_deep.clear_memory_manager_cache",
+        new=AsyncMock(),
+    ):
+        await adapter.reload_agent_config(
+            config_base={"sandbox": {"url": "yaml-u"}},
+            env_overrides={"JIUWENCLAW_SANDBOX_URL": "env-u"},
+            _force_apply=True,
+            _invalidate_memory_cache=False,
+        )
+
+    assert captured["endpoint"]["url"] == "yaml-u"
+
+
+@pytest.mark.asyncio
+async def test_reload_yaml_sandbox_invalid_enabled_raises():
+    """yaml sandbox.enabled='maybe' 让 reload 整体失败."""
+    adapter = _DeepAdapterReloadHarness.build(working=False)
+    adapter.configure_for_force_apply_test()
+
+    with patch(
+        "jiuwenclaw.agentserver.deep_agent.interface_deep.get_config",
+        return_value={"react": {"agent_name": "a"}},
+    ), patch(
+        "jiuwenclaw.agentserver.deep_agent.interface_deep.memory_cache_fingerprint",
+        return_value="mfp",
+    ), patch(
+        "jiuwenclaw.agentserver.deep_agent.interface_deep.get_memory_engine",
+        return_value="builtin",
+    ), patch(
+        "jiuwenclaw.agentserver.deep_agent.interface_deep.clear_config_cache",
+    ), patch(
+        "jiuwenclaw.agentserver.deep_agent.interface_deep.clear_memory_manager_cache",
+        new=AsyncMock(),
+    ):
+        with pytest.raises(ValueError, match="sandbox.enabled"):
+            await adapter.reload_agent_config(
+                config_base={"sandbox": {"enabled": "maybe"}},
+                env_overrides=None,
+                _force_apply=True,
+                _invalidate_memory_cache=False,
+            )
+
+
+@pytest.mark.asyncio
+async def test_create_agent_replays_yaml_sandbox_to_sysop(monkeypatch: pytest.MonkeyPatch):
+    """AgentManager.reload_agents_config 早于 agent 创建时, _create_agent 重放 reload_agent_config.
+
+    场景:
+    1. AgentManager 先收到 reload, _latest_config_base 存了 sandbox yaml 块.
+    2. 后续 _create_agent 创建实例, 重放 reload_agent_config.
+    3. _maybe_recreate_sys_operation 触发, _create_sys_operation 读到 yaml 值.
+    """
+    # 相对 plan Step 3.1 的 5 处调整 (因 reload_agent_config 真实路径需要):
+    # 调整1: _fake_create_instance 设 self._instance = MagicMock(), 否则 reload_agent_config
+    #        在 interface_deep.py:3611 抛 "未初始化" RuntimeError, replay 被 agent_manager.py:178-179 try/except 吞掉.
+    # 调整2: _fake_create_instance 设 self._sandbox_fingerprint = self._sandbox_config_fingerprint()
+    #        消费首次 fingerprint 调用, 让 _maybe_recreate_sys_operation 第二次读到 yaml-fp 触发重建.
+    # 调整3: memory_cache_fingerprint / get_memory_engine 在 interface_deep.py 是模块级 import (非类方法),
+    #        monkeypatch 必须打在 mod 上, 而不是 mod.JiuWenClawDeepAdapter.
+    # 调整4: 多打 mod.clear_global_config_cache (reload_agent_config:3638 调用).
+    # 调整5: 多打 mod.get_config 返回带 sandbox 块的 config, 让 _sandbox_yaml_to_env_overlay 路径生效.
+    from jiuwenclaw.agentserver.agent_manager import AgentManager
+    from jiuwenclaw.agentserver.deep_agent import interface_deep as mod
+    from jiuwenclaw.config import get_sandbox_endpoint, get_sandbox_runtime
+
+    manager = AgentManager(agent_id="a1", service_id="s1")
+    yaml_sandbox = {"url": "http://lazy-sb/v1", "type": "lazy-type", "enabled": True}
+    manager._latest_config_base = {"react": {"agent_name": "a"}, "sandbox": yaml_sandbox}
+    manager._latest_env_overrides = {}
+
+    captured: dict = {}
+
+    async def _fake_create_instance(self, config, *, mode="agent", session_id="default"):
+        # 模拟 _init_agent_instance_sync 完成后的状态 (_instance + _sys_operation + _sandbox_fingerprint 已就位), 不跑重逻辑
+        self._instance = MagicMock()
+        self._sys_operation = MagicMock(id="env-only-sysop")
+        # 模拟 _init_agent_instance_sync 调用 _sandbox_config_fingerprint (env-only)
+        # 存到 _sandbox_fingerprint, 消耗首次调用让 reload 时第二次调用读到 yaml-fp
+        self._sandbox_fingerprint = self._sandbox_config_fingerprint()
+
+    def _fake_create_sys_operation(self):
+        endpoint = get_sandbox_endpoint()
+        runtime = get_sandbox_runtime()
+        captured.setdefault("calls", []).append((endpoint, runtime))
+        new_sysop = MagicMock(id="yaml-sysop")
+        return new_sysop
+
+    monkeypatch.setattr(
+        mod.JiuWenClawDeepAdapter, "create_instance", _fake_create_instance
+    )
+    monkeypatch.setattr(
+        mod.JiuWenClawDeepAdapter,
+        "_create_sys_operation",
+        _fake_create_sys_operation,
+    )
+    # _sandbox_config_fingerprint: 首次 (env-only) 与第二次 (yaml) 不同, 触发重建
+    call_count = {"n": 0}
+    def _fingerprint(self):
+        call_count["n"] += 1
+        return ("env-only-fp",) if call_count["n"] == 1 else ("yaml-fp",)
+    monkeypatch.setattr(
+        mod.JiuWenClawDeepAdapter, "_sandbox_config_fingerprint", _fingerprint
+    )
+    # 屏蔽 reload 其余重逻辑
+    monkeypatch.setattr(
+        mod.JiuWenClawDeepAdapter, "_embed_config_fingerprint", lambda self, c: "fp"
+    )
+    monkeypatch.setattr(mod, "memory_cache_fingerprint", lambda c: "mfp")
+    monkeypatch.setattr(mod, "get_memory_engine", lambda c: "builtin")
+    monkeypatch.setattr(mod, "clear_config_cache", lambda: None)
+    monkeypatch.setattr(mod, "clear_global_config_cache", lambda: None)
+    async def _noop_clear_memory(*a, **kw):
+        return None
+    monkeypatch.setattr(mod, "clear_memory_manager_cache", _noop_clear_memory)
+    # get_config 返回带 sandbox 的 yaml 块, 让 reload 翻译路径走到
+    monkeypatch.setattr(
+        mod,
+        "get_config",
+        lambda: {"react": {"agent_name": "a"}, "sandbox": yaml_sandbox},
+    )
+    # 屏蔽 rails/model 等
+    monkeypatch.setattr(
+        mod.JiuWenClawDeepAdapter, "_refresh_multimodal_configs", lambda self, c: None
+    )
+    monkeypatch.setattr(
+        mod.JiuWenClawDeepAdapter,
+        "_create_model",
+        lambda self, c, e: MagicMock(model_client_config=MagicMock()),
+    )
+    monkeypatch.setattr(
+        mod.JiuWenClawDeepAdapter, "_resolve_agent_card_id", lambda self: "id"
+    )
+    monkeypatch.setattr(
+        mod.JiuWenClawDeepAdapter, "_sync_multimodal_tools_for_runtime", lambda self: None
+    )
+    monkeypatch.setattr(
+        mod.JiuWenClawDeepAdapter,
+        "_filesystem_rail_enabled_for_profile",
+        lambda self: True,
+    )
+    monkeypatch.setattr(
+        mod.JiuWenClawDeepAdapter,
+        "_sync_registered_skill_dirs_snapshot",
+        lambda self: None,
+    )
+    async def _empty_rails(self, c, cb):
+        return []
+    monkeypatch.setattr(mod.JiuWenClawDeepAdapter, "_get_current_agent_rails", _empty_rails)
+    async def _noop(*a, **kw):
+        return None
+    monkeypatch.setattr(mod.JiuWenClawDeepAdapter, "load_user_rails", _noop)
+    monkeypatch.setattr(
+        mod.JiuWenClawDeepAdapter, "_handle_memory_rail_by_config", _noop
+    )
+    monkeypatch.setattr(
+        mod.JiuWenClawDeepAdapter, "_handle_external_memory_rail_by_config", _noop
+    )
+    monkeypatch.setattr(
+        mod.JiuWenClawDeepAdapter,
+        "_apply_registered_skill_dirs_to_runtime_rails",
+        lambda self: None,
+    )
+    monkeypatch.setattr(
+        mod.JiuWenClawDeepAdapter,
+        "_make_deep_agent_config",
+        lambda self, **kw: MagicMock(),
+    )
+    monkeypatch.setattr(
+        mod.JiuWenClawDeepAdapter, "_apply_model_to_react_agent", lambda self, m: None
+    )
+    monkeypatch.setattr(
+        mod.JiuWenClawDeepAdapter,
+        "_refresh_fork_agent_executor_model",
+        lambda self: None,
+    )
+    monkeypatch.setattr(mod.Runner, "resource_mgr", MagicMock(
+        add_sys_operation=MagicMock(return_value=MagicMock(is_err=lambda: False, msg=lambda: "")),
+        get_sys_operation=MagicMock(return_value=MagicMock(id="yaml-sysop")),
+        remove_sys_operation=MagicMock(return_value=MagicMock(is_err=lambda: False, msg=lambda: "")),
+    ))
+
+    agent = await manager._create_agent("default", mode="agent.plan", session_id="sess1")
+
+    # reload_agent_config 被重放, _create_sys_operation 读到 yaml 值
+    # _create_sys_operation 仅在 _maybe_recreate_sys_operation 内被调用一次 (create_instance mock 不调用它).
+    assert len(captured["calls"]) == 1
+    last_endpoint, last_runtime = captured["calls"][-1]
+    assert last_endpoint["url"] == "http://lazy-sb/v1"
+    assert last_endpoint["type"] == "lazy-type"
+    assert last_runtime["enabled"] is True
+    # 旧 env-only sysop (id="env-only-sysop") 被清理, 而非新建的 yaml sysop.
+    mod.Runner.resource_mgr.remove_sys_operation.assert_called_once_with("env-only-sysop")
