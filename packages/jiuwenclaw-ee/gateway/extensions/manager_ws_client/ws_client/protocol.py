@@ -34,12 +34,13 @@ def build_register(
 
     握手期同时上交 Gateway 的加密公钥（``enc_pubkey``），供 Manager 包裹 DEK。
     """
-    from ..infrastructure.utils import get_jiuwenclaw_id
+    from ..infrastructure.utils import get_gateway_register_identity, get_jiuwenclaw_id
 
     payload: dict[str, Any] = {"service_type": service_type}
     jid = str(jiuwenclaw_id or "").strip() or get_jiuwenclaw_id()
     if jid:
         payload["jiuwenclaw_id"] = jid
+    payload.update(get_gateway_register_identity())
     if enc_pubkey:
         payload["enc_pubkey"] = enc_pubkey
         payload["enc_alg"] = enc_alg or "X25519"
