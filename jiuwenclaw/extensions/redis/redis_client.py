@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import AsyncIterator
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
@@ -44,6 +44,8 @@ def _coerce_float(val: Any, default: float) -> float:
 class RedisConfig:
     """与 config 中 ``redis:`` 段及 §3.2.1 对齐。"""
 
+    mode: str = "standalone"                                  # standalone | cluster
+    startup_nodes: list[dict] = field(default_factory=list)   # [{host, port}, ...];cluster 启动节点
     host: str = "localhost"
     port: int = 6379
     password: str | None = None
@@ -63,6 +65,22 @@ class RedisConfig:
             return None
         return str(value)
 
+    @staticmethod
+    def _parse_startup_nodes(value: Any) -> list[dict]:
+        """解析 cluster 启动节点,接受逗号分隔的 'host:port' 字符串或已有列表。"""
+        nodes: list[dict] = []
+        if isinstance(value, (list, tuple)):
+            items = list(value)
+        else:
+            items = str(value).split(",") if value else []
+        for item in items:
+            host, _, port = str(item).partition(":")
+            host = host.strip()
+            if not host:
+                continue
+            nodes.append({"host": host, "port": _coerce_int(port.strip() or "6379", 6379)})
+        return nodes
+
     @classmethod
     def from_mapping(cls, data: dict[str, Any] | None) -> RedisConfig:
         m = data or {}
@@ -70,7 +88,12 @@ class RedisConfig:
         if kp and not kp.endswith(":"):
             kp = f"{kp}:"
         pw = cls._normalize_password(m.get("password"))
+        mode = str(m.get("mode") or "standalone").strip().lower()
+        if mode not in ("standalone", "cluster"):
+            mode = "standalone"
         return cls(
+            mode=mode,
+            startup_nodes=cls._parse_startup_nodes(m.get("startup_nodes")),
             host=str(m.get("host") if m.get("host") is not None else "localhost"),
             port=_coerce_int(m.get("port"), 6379),
             password=pw,
@@ -109,6 +132,21 @@ class RedisClient:
         if self._redis is not None:
             return
         redis = _require_redis_async()
+        if self._cfg.mode == "cluster":
+            from redis.asyncio.cluster import RedisCluster
+            from redis.cluster import ClusterNode
+            nodes = [ClusterNode(n["host"], int(n["port"])) for n in self._cfg.startup_nodes] \
+                or [ClusterNode(self._cfg.host, self._cfg.port)]
+            self._redis = RedisCluster(
+                startup_nodes=nodes,
+                password=self._cfg.password,
+                decode_responses=True,
+                socket_connect_timeout=self._cfg.connect_timeout,
+                socket_timeout=self._cfg.operation_timeout,
+                health_check_interval=self._cfg.health_check_interval,
+                max_connections=self._cfg.pool_size,
+            )
+            return
         self._pool = redis.ConnectionPool(
             host=self._cfg.host,
             port=self._cfg.port,
@@ -159,8 +197,13 @@ class RedisClient:
         if not keys:
             return []
         effective_keys = [self._cfg.effective_key(key) for key in keys]
-        values = await r.mget(effective_keys)
-        return list(values) if values else []
+        try:
+            values = await r.mget(effective_keys)
+            return list(values) if values else []
+        except Exception as exc:
+            # Cluster 跨 slot 抛 CROSSSLOT → 回退逐个 get
+            logger.warning("[RedisClient] mget fallback to per-key get: %s", exc)
+            return [await r.get(k) for k in effective_keys]
 
     async def scan_keys(self, pattern: str) -> list[str]:
         r = self._connection()

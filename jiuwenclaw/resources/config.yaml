@@ -353,6 +353,10 @@ task_memory:
 # ========== Redis（分布式 Gateway：状态存储 / Pub/Sub / Leader；standalone 下不连接）==========
 # 通过 gateway.deployment_mode 控制：standalone（不连接）/ active-standby（连接 Redis）
 redis:
+  # standalone | cluster
+  mode: ${REDIS_MODE:-standalone}
+  # cluster 启动节点,逗号分隔 host:port(如 10.0.0.11:6379,10.0.0.12:6379)
+  startup_nodes: ${REDIS_CLUSTER_NODES:-}
   host: ${REDIS_HOST:-localhost}
   port: ${REDIS_PORT:-6379}
   password: ${REDIS_PASSWORD:-}
