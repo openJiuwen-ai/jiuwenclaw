@@ -37,6 +37,15 @@ from jiuwenclaw.agentserver.skilldev.session_history.restore_chunks import (
     RestoreChunkDecodeError,
     decode_restore_payload_from_stream_with_retry,
 )
+from jiuwenclaw.agentserver.skilldev.file_read_chunks import (
+    FileReadChunkDecodeError,
+    decode_file_read_payload_from_stream_with_retry,
+)
+from jiuwenclaw.agentserver.skilldev.file_write_chunks import (
+    FileWriteChunkError,
+    FileWriteTransportError,
+    send_file_write_with_chunks,
+)
 from jiuwenclaw.schema.message import Message, ReqMethod
 from jiuwenclaw.utils import SafeRotatingFileHandler, SensitiveDataFilter
 
@@ -4414,32 +4423,54 @@ class VibeSkillChannel(BaseChannel):
             )
             return self._json_response(400, {"error": path_err})
 
-        request_id = f"vibeskill-file-read-{int(time.time() * 1000):x}-{secrets.token_hex(3)}"
         file_read_params: dict[str, Any] = {
             "task_id": session_id,
             "path": file_path,
             "session_id": session_id,
         }
         self._apply_tenant_service_id(file_read_params, session_id)
-        env = e2a_from_agent_fields(
-            request_id=request_id,
-            channel_id=VIBESKILL_CHANNEL_ID,
-            session_id=session_id,
-            req_method=ReqMethod.SKILLDEV_FILE_READ,
-            params=file_read_params,
-            is_stream=False,
-            timestamp=time.time(),
-            user_id=self._session_user_id(session_id),
-        )
         logger.info(
             "[VibeSkillChannel] skilldev.file.read sent, session_id=%s",
             session_id,
         )
-        resp = await self._send_agent_request(env)
-        if not resp.ok:
-            pl = dict(resp.payload) if isinstance(resp.payload, dict) else {}
-            return self._json_response(502, {"error": str(pl.get("error") or "request failed")})
-        payload = dict(resp.payload) if isinstance(resp.payload, dict) else {}
+        try:
+            def _open_file_read_stream():
+                request_id = (
+                    f"vibeskill-file-read-{int(time.time() * 1000):x}-{secrets.token_hex(3)}"
+                )
+                env = e2a_from_agent_fields(
+                    request_id=request_id,
+                    channel_id=VIBESKILL_CHANNEL_ID,
+                    session_id=session_id,
+                    req_method=ReqMethod.SKILLDEV_FILE_READ,
+                    params=file_read_params,
+                    is_stream=True,
+                    timestamp=time.time(),
+                    user_id=self._session_user_id(session_id),
+                )
+                return self._agent_client.send_request_stream(env)
+
+            payload = await decode_file_read_payload_from_stream_with_retry(
+                _open_file_read_stream,
+                log_label="VibeSkillChannel.file.read",
+            )
+        except FileReadChunkDecodeError as exc:
+            logger.info(
+                "[VibeSkillChannel] skilldev.file.read stream error: session_id=%s code=%s error=%s",
+                session_id,
+                exc.code,
+                exc,
+            )
+            if exc.code == "SKILLDEV_FILE_READ_ERROR":
+                return self._json_response(400, {"error": str(exc), "code": exc.code})
+            return self._json_response(500, {"error": str(exc), "code": exc.code})
+        except Exception as exc:
+            logger.warning(
+                "[VibeSkillChannel] Failed to read session file content: session_id=%s error=%s",
+                session_id,
+                exc,
+            )
+            return self._json_response(500, {"error": str(exc)})
         if payload.get("event_type") == "skilldev.error":
             return self._json_response(400, {"error": str(payload.get("error") or "skilldev.error")})
         if not payload.get("ok", True):
@@ -4530,31 +4561,53 @@ class VibeSkillChannel(BaseChannel):
             preview_escaped,
         )
 
-        request_id = f"vibeskill-file-write-{int(time.time() * 1000):x}-{secrets.token_hex(3)}"
         file_write_params: dict[str, Any] = {
             "task_id": session_id,
             "path": file_path,
-            "content": content,
             "session_id": session_id,
         }
         self._apply_tenant_service_id(file_write_params, session_id)
-        env = e2a_from_agent_fields(
-            request_id=request_id,
-            channel_id=VIBESKILL_CHANNEL_ID,
-            session_id=session_id,
-            req_method=ReqMethod.SKILLDEV_FILE_WRITE,
-            params=file_write_params,
-            is_stream=False,
-            timestamp=time.time(),
-            user_id=self._session_user_id(session_id),
-        )
         logger.info(
             "[VibeSkillChannel] skilldev.file.write sent, session_id=%s path=%s size=%d",
             session_id,
             file_path,
             len(content),
         )
-        resp = await self._send_agent_request(env)
+        try:
+            async def _send_write_request(
+                phase_params: dict[str, Any], phase: str, attempt: int
+            ):
+                request_id = (
+                    f"vibeskill-file-write-{phase}-{attempt}-"
+                    f"{int(time.time() * 1000):x}-{secrets.token_hex(3)}"
+                )
+                env = e2a_from_agent_fields(
+                    request_id=request_id,
+                    channel_id=VIBESKILL_CHANNEL_ID,
+                    session_id=session_id,
+                    req_method=ReqMethod.SKILLDEV_FILE_WRITE,
+                    params=phase_params,
+                    is_stream=False,
+                    timestamp=time.time(),
+                    user_id=self._session_user_id(session_id),
+                )
+                return await self._send_agent_request(env)
+
+            resp = await send_file_write_with_chunks(
+                base_params=file_write_params,
+                content=content,
+                write_id=secrets.token_hex(16),
+                send_request=_send_write_request,
+            )
+        except FileWriteChunkError as exc:
+            return self._json_response(400, {"ok": False, "error": str(exc)})
+        except FileWriteTransportError as exc:
+            logger.warning(
+                "[VibeSkillChannel] skilldev.file.write transport failed: session_id=%s error=%s",
+                session_id,
+                exc,
+            )
+            return self._json_response(502, {"ok": False, "error": str(exc)})
         if not resp or not getattr(resp, "ok", False):
             pl = dict(resp.payload) if resp and isinstance(resp.payload, dict) else {}
             err = str(pl.get("error") or "request failed")

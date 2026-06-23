@@ -59,6 +59,16 @@ from jiuwenclaw.agentserver.skilldev.session_history.restore_chunks import (
     encode_restore_payload_chunks,
     restore_payload_to_json_bytes,
 )
+from jiuwenclaw.agentserver.skilldev.file_read_chunks import (
+    FILE_READ_RESPONSE_TOO_LARGE_CODE,
+    FILE_READ_UNARY_SAFE_BYTES,
+    encode_file_read_payload_chunks,
+    file_read_payload_to_json_bytes,
+)
+from jiuwenclaw.agentserver.skilldev.file_write_chunks import (
+    FileWriteChunkError,
+    FileWriteStagingStore,
+)
 from jiuwenclaw.agentserver.skilldev.utils.download_file_from_url import download_file
 from jiuwenclaw.agentserver.skilldev.utils.skill_md_validation import (
     validate_skill_md_content,
@@ -134,7 +144,7 @@ class SkillDevService:
             return
 
         handler = getattr(self, handler_name)
-        if handler_name == "_handle_restore":
+        if handler_name in {"_handle_restore", "_handle_file_read"}:
             result = handler(
                 request.params,
                 request.request_id,
@@ -679,27 +689,35 @@ class SkillDevService:
     # ------------------------------------------------------------------
     # skilldev.file.read — 读取工作区文件内容
     # ------------------------------------------------------------------
-    def _handle_file_read(
-        self, params: dict, request_id: str, channel_id: str, session_id: str
-    ) -> AgentResponseChunk:
+    async def _handle_file_read(
+        self,
+        params: dict,
+        request_id: str,
+        channel_id: str,
+        session_id: str,
+        is_stream: bool = False,
+    ) -> AsyncIterator[AgentResponseChunk]:
         task_id = params.get("task_id")
         file_path = params.get("path", "")
         if not task_id or not file_path:
-            return self._error_chunk(
+            yield self._error_chunk(
                 request_id, channel_id, "缺少 task_id 或 path 参数"
             )
+            return
 
         workspace = self._deps.workspace_provider.get_local_path(task_id)
         skill_dir = workspace / "skill"
         full_path = (skill_dir / file_path).resolve()
 
         if not str(full_path).startswith(str(skill_dir.resolve())):
-            return self._error_chunk(
+            yield self._error_chunk(
                 request_id, channel_id, "路径非法：不能访问工作区外的文件"
             )
+            return
 
         if not full_path.exists() or not full_path.is_file():
-            return self._error_chunk(request_id, channel_id, f"文件不存在: {file_path}")
+            yield self._error_chunk(request_id, channel_id, f"文件不存在: {file_path}")
+            return
 
         editable = True
         result = _read_text_with_fallback(full_path)
@@ -709,10 +727,47 @@ class SkillDevService:
         else:
             content, _ = result
 
-        return AgentResponseChunk(
+        payload = {"ok": True, "path": file_path, "content": content, "editable": editable}
+        if is_stream:
+            for chunk in encode_file_read_payload_chunks(
+                payload,
+                request_id=request_id,
+                channel_id=channel_id,
+                task_id=str(task_id),
+                path=str(file_path),
+            ):
+                yield chunk
+            yield AgentResponseChunk(
+                request_id=request_id,
+                channel_id=channel_id,
+                payload={"is_complete": True},
+                is_complete=True,
+            )
+            return
+
+        payload_bytes = file_read_payload_to_json_bytes(payload)
+        if len(payload_bytes) > FILE_READ_UNARY_SAFE_BYTES:
+            yield AgentResponseChunk(
+                request_id=request_id,
+                channel_id=channel_id,
+                payload={
+                    "event_type": "skilldev.error",
+                    "code": FILE_READ_RESPONSE_TOO_LARGE_CODE,
+                    "error": (
+                        "skilldev.file.read response is too large for a unary frame; "
+                        "retry with is_stream=true"
+                    ),
+                    "size_bytes": len(payload_bytes),
+                    "max_unary_bytes": FILE_READ_UNARY_SAFE_BYTES,
+                },
+                is_complete=True,
+            )
+            return
+
+        yield AgentResponseChunk(
             request_id=request_id,
             channel_id=channel_id,
-            payload={"ok": True, "path": file_path, "content": content, "editable": editable},
+            payload=payload,
             is_complete=True,
         )
 
@@ -727,8 +782,6 @@ class SkillDevService:
     ) -> AgentResponseChunk:
         task_id = params.get("task_id")
         file_path = params.get("path", "")
-        content = params.get("content")
-
         if not task_id or not file_path:
             logger.info(
                 "[session=%s] [SkillDevService] file_write 缺少参数: task_id=%s, path=%s",
@@ -737,6 +790,79 @@ class SkillDevService:
             return self._rpc_error_chunk(
                 request_id, channel_id, ERR_FW_MISSING_TASK_OR_PATH
             )
+
+        workspace = self._deps.workspace_provider.get_local_path(task_id)
+        phase = str(params.get("phase") or "").strip().lower()
+        if phase:
+            try:
+                store = FileWriteStagingStore(workspace)
+                if phase == "status":
+                    payload = store.status(params)
+                elif phase == "abort":
+                    payload = store.abort(params)
+                elif phase == "chunk":
+                    target = self._resolve_file_write_target(workspace, file_path)
+                    if isinstance(target, str):
+                        raise FileWriteChunkError(target)
+                    payload = store.accept_chunk(params)
+                elif phase == "commit":
+                    raw, cached = store.assemble(params)
+                    if cached is not None:
+                        payload = cached
+                    else:
+                        assert raw is not None
+                        target = self._resolve_file_write_target(workspace, file_path)
+                        if isinstance(target, str):
+                            raise FileWriteChunkError(target)
+                        skill_dir, full_path = target
+                        try:
+                            content = raw.decode("utf-8")
+                        except UnicodeDecodeError as exc:
+                            raise FileWriteChunkError(
+                                "file write content is not valid UTF-8"
+                            ) from exc
+                        result = self._commit_file_write_content(
+                            task_id=str(task_id),
+                            file_path=str(file_path),
+                            content=content,
+                            workspace=workspace,
+                            skill_dir=skill_dir,
+                            full_path=full_path,
+                            session_id=session_id,
+                        )
+                        if isinstance(result, str):
+                            return self._rpc_error_chunk(request_id, channel_id, result)
+                        payload = store.mark_committed(params, result)
+                else:
+                    raise FileWriteChunkError(f"unsupported file write phase: {phase}")
+            except FileWriteChunkError as exc:
+                logger.warning(
+                    "[session=%s] [SkillDevService] file_write 分块请求失败: path=%s phase=%s error=%s",
+                    session_id,
+                    file_path,
+                    phase,
+                    exc,
+                )
+                return self._rpc_error_chunk(request_id, channel_id, str(exc))
+            return AgentResponseChunk(
+                request_id=request_id,
+                channel_id=channel_id,
+                payload=payload,
+                is_complete=True,
+            )
+
+        target = self._resolve_file_write_target(workspace, file_path)
+        if isinstance(target, str):
+            logger.warning(
+                "[session=%s] [SkillDevService] file_write 目标校验失败: path=%s error=%s",
+                session_id,
+                file_path,
+                target,
+            )
+            return self._rpc_error_chunk(request_id, channel_id, target)
+        skill_dir, full_path = target
+
+        content = params.get("content")
         if content is None:
             logger.info(
                 "[session=%s] [SkillDevService] file_write 缺少 content 参数, path=%s",
@@ -745,45 +871,66 @@ class SkillDevService:
             return self._rpc_error_chunk(
                 request_id, channel_id, ERR_FW_MISSING_CONTENT
             )
+        if not isinstance(content, str):
+            return self._rpc_error_chunk(request_id, channel_id, "content 必须是字符串")
+
+        result = self._commit_file_write_content(
+            task_id=str(task_id),
+            file_path=str(file_path),
+            content=content,
+            workspace=workspace,
+            skill_dir=skill_dir,
+            full_path=full_path,
+            session_id=session_id,
+        )
+        if isinstance(result, str):
+            return self._rpc_error_chunk(request_id, channel_id, result)
+        return AgentResponseChunk(
+            request_id=request_id,
+            channel_id=channel_id,
+            payload=result,
+            is_complete=True,
+        )
+
+    @staticmethod
+    def _resolve_file_write_target(
+        workspace: Path, file_path: str
+    ) -> tuple[Path, Path] | str:
+        skill_dir = workspace / "skill"
+        full_path = (skill_dir / file_path).resolve()
+        try:
+            full_path.relative_to(skill_dir.resolve())
+        except ValueError:
+            return ERR_FW_PATH_ESCAPE
+        if not full_path.exists() or not full_path.is_file():
+            return ERR_FW_FILE_NOT_FOUND
+        try:
+            full_path.read_text(encoding="utf-8")
+        except UnicodeDecodeError:
+            return ERR_FW_BINARY_FILE
+        return skill_dir, full_path
+
+    def _commit_file_write_content(
+        self,
+        *,
+        task_id: str,
+        file_path: str,
+        content: str,
+        workspace: Path,
+        skill_dir: Path,
+        full_path: Path,
+        session_id: str,
+    ) -> dict | str:
+        try:
+            content.encode("utf-8")
+        except UnicodeEncodeError:
+            return "文件内容不是有效的 UTF-8 文本"
         if len(content) > self._MAX_FILE_CONTENT_SIZE:
             logger.info(
                 "[session=%s] [SkillDevService] file_write 内容超限: path=%s, size=%d, limit=%d",
                 session_id, file_path, len(content), self._MAX_FILE_CONTENT_SIZE,
             )
-            return self._rpc_error_chunk(
-                request_id, channel_id, ERR_FW_CONTENT_TOO_LARGE
-            )
-
-        workspace = self._deps.workspace_provider.get_local_path(task_id)
-        skill_dir = workspace / "skill"
-        full_path = (skill_dir / file_path).resolve()
-
-        if not str(full_path).startswith(str(skill_dir.resolve())):
-            logger.info(
-                "[session=%s] [SkillDevService] file_write 路径越界: path=%s, resolved=%s",
-                session_id, file_path, full_path,
-            )
-            return self._rpc_error_chunk(
-                request_id, channel_id, ERR_FW_PATH_ESCAPE
-            )
-
-        if not full_path.exists() or not full_path.is_file():
-            logger.info(
-                "[session=%s] [SkillDevService] file_write 文件不存在: path=%s, full_path=%s",
-                session_id, file_path, full_path,
-            )
-            return self._rpc_error_chunk(
-                request_id, channel_id, ERR_FW_FILE_NOT_FOUND
-            )
-
-        if _read_text_with_fallback(full_path) is None:
-            logger.info(
-                "[session=%s] [SkillDevService] file_write 二进制文件不可编辑: path=%s",
-                session_id, file_path,
-            )
-            return self._rpc_error_chunk(
-                request_id, channel_id, ERR_FW_BINARY_FILE
-            )
+            return ERR_FW_CONTENT_TOO_LARGE
 
         # 如果修改的是 SKILL.md，写入前校验内容格式
         if full_path.name == "SKILL.md":
@@ -793,7 +940,7 @@ class SkillDevService:
                     "[session=%s] [SkillDevService] file_write SKILL.md 校验失败: %s",
                     session_id, validation_error,
                 )
-                return self._rpc_error_chunk(request_id, channel_id, validation_error)
+                return validation_error
 
         # 如果修改的是 skill/<skill_name>/scripts/**，写入前做静态安全校验（规则同 skill-verifier）
         try:
@@ -809,9 +956,17 @@ class SkillDevService:
                     "[session=%s] [SkillDevService] file_write 脚本安全校验失败: path=%s, error=%s",
                     session_id, rel_path, validation_error,
                 )
-                return self._rpc_error_chunk(request_id, channel_id, validation_error)
+                return validation_error
 
-        full_path.write_text(content, encoding="utf-8")
+        temp_path = full_path.with_name(
+            f".{full_path.name}.write-{secrets.token_hex(8)}.tmp"
+        )
+        try:
+            temp_path.write_text(content, encoding="utf-8")
+            os.chmod(temp_path, full_path.stat().st_mode)
+            os.replace(temp_path, full_path)
+        finally:
+            temp_path.unlink(missing_ok=True)
 
         repackaged = False
         output_dir = workspace / "output"
@@ -831,17 +986,12 @@ class SkillDevService:
             session_id, rel
         )
 
-        return AgentResponseChunk(
-            request_id=request_id,
-            channel_id=channel_id,
-            payload={
-                "ok": True,
-                "path": file_path,
-                "size": len(content),
-                "repackaged": repackaged,
-            },
-            is_complete=True,
-        )
+        return {
+            "ok": True,
+            "path": file_path,
+            "size": len(content),
+            "repackaged": repackaged,
+        }
 
     @staticmethod
     def _rpc_error_chunk(

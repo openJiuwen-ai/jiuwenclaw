@@ -55,6 +55,15 @@ from jiuwenclaw.agentserver.skilldev.session_history.restore_chunks import (
     RestoreChunkDecodeError,
     decode_restore_payload_from_stream_with_retry,
 )
+from jiuwenclaw.agentserver.skilldev.file_read_chunks import (
+    FileReadChunkDecodeError,
+    decode_file_read_payload_from_stream_with_retry,
+)
+from jiuwenclaw.agentserver.skilldev.file_write_chunks import (
+    FileWriteChunkError,
+    FileWriteTransportError,
+    send_file_write_with_chunks,
+)
 from jiuwenclaw.version import __version__
 from jiuwenclaw.local_env_config import decrypt, encrypt
 
@@ -143,8 +152,6 @@ _FORWARD_REQ_METHODS = frozenset({
     "skilldev.download",
     "skilldev.cancel",
     "skilldev.file.list",
-    "skilldev.file.read",
-    "skilldev.file.write",
     "skilldev.user_answer",
     "tools.add",
 })
@@ -187,8 +194,6 @@ _FORWARD_NO_LOCAL_HANDLER_METHODS = frozenset({
     "skilldev.parse_skill",
     "skilldev.download",
     "skilldev.file.list",
-    "skilldev.file.read",
-    "skilldev.file.write",
     "skilldev.user_answer",
     "tools.add",
 })
@@ -1363,6 +1368,201 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
 
         await channel.send_response(ws, req_id, ok=True, payload=payload)
 
+    async def _skilldev_file_read(ws, req_id, params, session_id):
+        ac = _resolve(agent_client)
+        if ac is None or (
+            hasattr(ac, "server_ready") and not getattr(ac, "server_ready", False)
+        ):
+            await channel.send_response(
+                ws,
+                req_id,
+                ok=False,
+                error="agent server is not ready",
+                code="AGENT_NOT_READY",
+            )
+            return
+
+        read_params = dict(params) if isinstance(params, dict) else {}
+        task_id = str(read_params.get("task_id") or session_id or "").strip()
+        file_path = str(read_params.get("path") or "").strip()
+        if not task_id:
+            await channel.send_response(
+                ws,
+                req_id,
+                ok=False,
+                error="task_id is required",
+                code="BAD_REQUEST",
+            )
+            return
+        if not file_path:
+            await channel.send_response(
+                ws,
+                req_id,
+                ok=False,
+                error="path is required",
+                code="BAD_REQUEST",
+            )
+            return
+        read_params["task_id"] = task_id
+        read_params["path"] = file_path
+
+        try:
+            import secrets
+            import time
+
+            from jiuwenclaw.e2a.gateway_normalize import e2a_from_agent_fields
+            from jiuwenclaw.schema.message import ReqMethod
+
+            def _open_file_read_stream():
+                stream_request_id = (
+                    f"skilldev-file-read-{int(time.time() * 1000):x}-{secrets.token_hex(3)}"
+                )
+                env = e2a_from_agent_fields(
+                    request_id=stream_request_id,
+                    channel_id=channel.channel_id,
+                    session_id=task_id,
+                    req_method=ReqMethod.SKILLDEV_FILE_READ,
+                    params=read_params,
+                    is_stream=True,
+                    timestamp=time.time(),
+                )
+                return ac.send_request_stream(env)
+
+            payload = await decode_file_read_payload_from_stream_with_retry(
+                _open_file_read_stream,
+            )
+        except FileReadChunkDecodeError as exc:
+            logger.info("[skilldev.file.read] stream decode failed: code=%s error=%s", exc.code, exc)
+            await channel.send_response(
+                ws,
+                req_id,
+                ok=False,
+                error=str(exc),
+                code=exc.code,
+            )
+            return
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("[skilldev.file.read] forward to agent failed: %s", exc)
+            await channel.send_response(
+                ws,
+                req_id,
+                ok=False,
+                error=str(exc),
+                code="INTERNAL_ERROR",
+            )
+            return
+
+        await channel.send_response(ws, req_id, ok=True, payload=payload)
+
+    async def _skilldev_file_write(ws, req_id, params, session_id):
+        ac = _resolve(agent_client)
+        if ac is None or (
+            hasattr(ac, "server_ready") and not getattr(ac, "server_ready", False)
+        ):
+            await channel.send_response(
+                ws,
+                req_id,
+                ok=False,
+                error="agent server is not ready",
+                code="AGENT_NOT_READY",
+            )
+            return
+
+        write_params = dict(params) if isinstance(params, dict) else {}
+        task_id = str(write_params.get("task_id") or session_id or "").strip()
+        file_path = str(write_params.get("path") or "").strip()
+        content = write_params.pop("content", None)
+        if not task_id or not file_path:
+            await channel.send_response(
+                ws,
+                req_id,
+                ok=False,
+                error="task_id and path are required",
+                code="BAD_REQUEST",
+            )
+            return
+        if not isinstance(content, str):
+            await channel.send_response(
+                ws,
+                req_id,
+                ok=False,
+                error="content must be a string",
+                code="BAD_REQUEST",
+            )
+            return
+        write_params["task_id"] = task_id
+        write_params["path"] = file_path
+
+        try:
+            from jiuwenclaw.e2a.gateway_normalize import e2a_from_agent_fields
+            from jiuwenclaw.schema.message import ReqMethod
+
+            async def _send_write_request(
+                phase_params: dict[str, Any], phase: str, attempt: int
+            ):
+                request_id = (
+                    f"skilldev-file-write-{phase}-{attempt}-"
+                    f"{int(time.time() * 1000):x}-{secrets.token_hex(3)}"
+                )
+                env = e2a_from_agent_fields(
+                    request_id=request_id,
+                    channel_id=channel.channel_id,
+                    session_id=task_id,
+                    req_method=ReqMethod.SKILLDEV_FILE_WRITE,
+                    params=phase_params,
+                    is_stream=False,
+                    timestamp=time.time(),
+                )
+                return await ac.send_request(env)
+
+            response = await send_file_write_with_chunks(
+                base_params=write_params,
+                content=content,
+                write_id=secrets.token_hex(16),
+                send_request=_send_write_request,
+            )
+        except FileWriteChunkError as exc:
+            await channel.send_response(
+                ws,
+                req_id,
+                ok=False,
+                error=str(exc),
+                code="BAD_REQUEST",
+            )
+            return
+        except FileWriteTransportError as exc:
+            logger.warning("[skilldev.file.write] transport failed: %s", exc)
+            await channel.send_response(
+                ws,
+                req_id,
+                ok=False,
+                error=str(exc),
+                code="BAD_GATEWAY",
+            )
+            return
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("[skilldev.file.write] forward to agent failed: %s", exc)
+            await channel.send_response(
+                ws,
+                req_id,
+                ok=False,
+                error=str(exc),
+                code="INTERNAL_ERROR",
+            )
+            return
+
+        payload = dict(response.payload) if isinstance(response.payload, dict) else {}
+        if not response.ok or not payload.get("ok", False):
+            await channel.send_response(
+                ws,
+                req_id,
+                ok=False,
+                error=str(payload.get("error") or "request failed"),
+                code=str(payload.get("code") or "BAD_REQUEST"),
+            )
+            return
+        await channel.send_response(ws, req_id, ok=True, payload=payload)
+
     async def _chat_user_answer(ws, req_id, params, session_id):
         payload = {"accepted": True, "session_id": session_id}
         request_id = params.get("request_id") if isinstance(params, dict) else None
@@ -2134,6 +2334,8 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
     channel.register_method("chat.interrupt", _chat_interrupt)
     channel.register_method("skilldev.cancel", _skilldev_cancel)
     channel.register_method("skilldev.restore", _skilldev_restore)
+    channel.register_method("skilldev.file.read", _skilldev_file_read)
+    channel.register_method("skilldev.file.write", _skilldev_file_write)
     channel.register_method("chat.user_answer", _chat_user_answer)
     channel.register_method("skilldev.user_answer", _skilldev_user_answer)
     channel.register_method("history.get", _history_get)
