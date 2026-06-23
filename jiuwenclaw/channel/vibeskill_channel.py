@@ -1185,11 +1185,17 @@ class VibeSkillChannel(BaseChannel):
         # 查找对应的 WebSocket
         ws = self._session_to_ws.get(session_id)
         if ws is None:
-            logger.warning(f"[VibeSkillChannel] send() no ws found for session_id={session_id}")
+            logger.warning(
+                f"[VibeSkillChannel] send() no ws found for session_id={session_id}, "
+                f"req_method={msg.req_method.value if msg.req_method else None}"
+            )
             await self._apply_outbound_session_state(msg)
             return
         if bool(getattr(ws, "closed", False)):
-            logger.warning(f"[VibeSkillChannel] send() ws already closed for session_id={session_id}")
+            logger.warning(
+                f"[VibeSkillChannel] send() ws already closed for session_id={session_id}, "
+                f"req_method={msg.req_method.value if msg.req_method else None}"
+            )
             await self._apply_outbound_session_state(msg)
             return
 

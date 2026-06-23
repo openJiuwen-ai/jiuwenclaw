@@ -40,6 +40,12 @@ from jiuwenclaw.utils import logger
 _WORKSPACE_SKIP_METHODS = frozenset({
     ReqMethod.SKILLDEV_BATCH_UPLOAD.value,
     ReqMethod.SKILLDEV_BATCH_DOWNLOAD.value,
+    ReqMethod.CHAT_CANCEL.value,
+    ReqMethod.SKILLDEV_CANCEL.value,
+})
+_OPENABILITY_RECONNECT_DROP_METHODS = frozenset({
+    ReqMethod.CHAT_CANCEL.value,
+    ReqMethod.SKILLDEV_CANCEL.value,
 })
 _VIBESKILL_CHANNEL_ID = "vibeskill"
 _SYSTEM_SESSION_ID_PREFIXES = ("__", "heartbeat_", "cron")
@@ -217,6 +223,9 @@ class SandboxRouterAgentClient(AgentServerClient):
         self._on_openability_reconnected: (
             Callable[[dict[str, Any]], Awaitable[None]] | None
         ) = None
+        self._on_openability_reconnect_failed: (
+            Callable[[dict[str, Any]], Awaitable[None]] | None
+        ) = None
 
     async def connect(self, uri: str) -> None:
         self._ensure_idle_task()
@@ -291,6 +300,12 @@ class SandboxRouterAgentClient(AgentServerClient):
         handler: Callable[[dict[str, Any]], Awaitable[None]] | None,
     ) -> None:
         self._on_openability_reconnected = handler
+
+    def set_openability_reconnect_failed_handler(
+        self,
+        handler: Callable[[dict[str, Any]], Awaitable[None]] | None,
+    ) -> None:
+        self._on_openability_reconnect_failed = handler
 
     def is_openability_reconnecting(
         self,
@@ -477,15 +492,32 @@ class SandboxRouterAgentClient(AgentServerClient):
             self._get_open_ability_config().reconnect_timeout_seconds,
         )
 
+    @staticmethod
+    def _should_drop_during_openability_reconnect(envelope: E2AEnvelope) -> bool:
+        method = str(envelope.method or "").strip()
+        return method in _OPENABILITY_RECONNECT_DROP_METHODS
+
     async def _wait_for_openability_reconnect_buffer(self, envelope: E2AEnvelope) -> None:
         routing_key = self._routing_key(envelope.user_id, envelope.session_id)
-        buffer_timeout = self._openability_reconnect_buffer_timeout_seconds()
         while True:
             waiter: asyncio.Future[None] | None = None
             async with self._pool_lock:
                 runtime = self._runtimes.get(routing_key)
                 if runtime is None or not self._runtime_needs_openability_refresh(runtime):
                     return
+                if self._should_drop_during_openability_reconnect(envelope):
+                    logger.info(
+                        "Dropping interrupt request during OA reconnect: "
+                        "routing_key=%s sandbox_id=%s session_id=%s request_id=%s method=%s",
+                        routing_key,
+                        runtime.sandbox_id,
+                        envelope.session_id,
+                        envelope.request_id,
+                        envelope.method,
+                    )
+                    raise RuntimeError(
+                        "OpenAbility reconnecting; dropping interrupt request"
+                    )
                 waiters = self._reconnect_waiters.setdefault(routing_key, deque())
                 if len(waiters) >= self._queue_max_size:
                     raise RuntimeError("sandbox reconnect buffer is full")
@@ -493,6 +525,7 @@ class SandboxRouterAgentClient(AgentServerClient):
                 waiters.append(waiter)
             try:
                 assert waiter is not None
+                buffer_timeout = self._openability_reconnect_buffer_timeout_seconds()
                 await asyncio.wait_for(waiter, timeout=buffer_timeout)
                 return
             except asyncio.TimeoutError as exc:
@@ -1928,6 +1961,7 @@ class SandboxRouterAgentClient(AgentServerClient):
         return True
 
     async def _drop_runtime_for_reconnect(self, runtime: SandboxRuntime) -> None:
+        session_ids = _tracked_session_ids_from_metadata(runtime.metadata)
         async with self._pool_lock:
             current = self._runtimes.get(runtime.routing_key)
             if current is runtime:
@@ -1942,7 +1976,17 @@ class SandboxRouterAgentClient(AgentServerClient):
                 runtime.sandbox_id,
             )
         self._notify_next_waiter()
-        session_ids = _tracked_session_ids_from_metadata(runtime.metadata)
+        if self._on_openability_reconnect_failed is not None:
+            asyncio.create_task(self._on_openability_reconnect_failed(
+                {
+                    "event": "openability.reconnect_failed",
+                    "sandbox_id": runtime.sandbox_id,
+                    "routing_key": runtime.routing_key,
+                    "user_id": str(runtime.metadata.get("user_id") or "").strip(),
+                    "session_ids": session_ids,
+                    "reason": "runtime-drop",
+                }
+            ))
         reconnect_timeout = self._get_open_ability_config().reconnect_timeout_seconds
         logger.warning(
             "Dropped runtime after OA reconnect window exhausted; next request will "

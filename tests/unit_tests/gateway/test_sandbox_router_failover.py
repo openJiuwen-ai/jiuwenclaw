@@ -292,6 +292,36 @@ def test_system_session_is_not_tracked_for_workspace_backup() -> None:
     assert runtime.metadata.get("backup_period_session_versions") is None
 
 
+def test_interrupt_request_is_not_tracked_for_workspace_backup() -> None:
+    router = SandboxRouterAgentClient(adopt_existing=False)
+    router._backup_enabled = True
+    runtime = _backup_runtime(BackupAgentClient([]))
+    runtime.metadata["session_ids"] = set()
+    envelope = _envelope(session_id="deleted-session")
+    envelope.method = ReqMethod.SKILLDEV_CANCEL.value
+
+    router._track_session_for_runtime(runtime, envelope)
+
+    assert runtime.metadata["session_ids"] == set()
+    assert runtime.metadata.get("backup_period_active_sessions") is None
+    assert runtime.metadata.get("backup_period_session_versions") is None
+
+
+@pytest.mark.asyncio
+async def test_interrupt_request_is_dropped_during_openability_reconnect() -> None:
+    router = SandboxRouterAgentClient(adopt_existing=False)
+    runtime = _backup_runtime(FakeAgentClient())
+    runtime.metadata["openability_reconnect_required"] = True
+    router._runtimes[runtime.routing_key] = runtime
+    envelope = _envelope(user_id="user-a", session_id="sess-a")
+    envelope.method = ReqMethod.SKILLDEV_CANCEL.value
+
+    with pytest.raises(RuntimeError, match="dropping interrupt request"):
+        await router._wait_for_openability_reconnect_buffer(envelope)
+
+    assert runtime.routing_key not in router._reconnect_waiters
+
+
 @pytest.mark.asyncio
 async def test_adopt_existing_skips_create_sandbox(
     router: SandboxRouterAgentClient,
@@ -567,11 +597,21 @@ async def test_oa_physical_disconnect_drops_runtime_when_refresh_fails(
     runtime = await router._acquire_runtime(_envelope())
     first_client = FakeOpenAbilityClient.instances[0]
     mock_dcs_store.get_openability_endpoint.side_effect = RuntimeError("no fresh endpoint")
+    callback_events: list[dict[str, Any]] = []
+
+    async def on_reconnect_failed(payload: dict[str, Any]) -> None:
+        callback_events.append(payload)
+
+    router.set_openability_reconnect_failed_handler(on_reconnect_failed)
 
     await first_client.emit_connection_lost({"event": "openability.connection_lost"})
+    await asyncio.sleep(0)
 
     assert runtime.routing_key not in router._runtimes
     assert first_client.disconnected is True
+    assert callback_events
+    assert callback_events[-1]["event"] == "openability.reconnect_failed"
+    assert callback_events[-1]["session_ids"] == ["sess-a"]
 
 
 @pytest.mark.asyncio

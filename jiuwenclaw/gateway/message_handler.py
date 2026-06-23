@@ -133,6 +133,7 @@ class MessageHandler(ABC):
         self._stream_channels: dict[str, str] = {}  # request_id -> channel_id
         self._stream_user_ids: dict[str, str | None] = {}  # request_id -> user_id
         self._suppress_stream_cancelled_final: set[str] = set()
+        self._openability_disconnect_pending_cancel: dict[str, str | None] = {}
         self._pending_evolution_approval: dict[str, str] = {}  # session_id -> approval_request_id
         self._queued_supplement_input: dict[str, dict[str, Any]] = {}  # session_id -> queued supplement payload
         self._session_evolution_in_progress: set[str] = set()
@@ -177,6 +178,10 @@ class MessageHandler(ABC):
         if hasattr(self._agent_client, "set_openability_reconnected_handler"):
             self._agent_client.set_openability_reconnected_handler(
                 self._handle_openability_reconnected
+            )
+        if hasattr(self._agent_client, "set_openability_reconnect_failed_handler"):
+            self._agent_client.set_openability_reconnect_failed_handler(
+                self._handle_openability_reconnect_failed
             )
 
         # 文件传输处理器（延迟初始化）
@@ -234,6 +239,11 @@ class MessageHandler(ABC):
                 metadata=None,
             )
             await self.publish_robot_messages(err_msg)
+            self._openability_disconnect_pending_cancel[session_id] = active_sessions[session_id]
+            await self._cancel_gateway_streams_for_session(
+                session_id,
+                suppress_cancelled_final=True,
+            )
         logger.warning(
             "[MessageHandler] OA disconnected; VibeSkill streams closed with task.error: sessions=%s",
             sorted(active_sessions),
@@ -241,8 +251,25 @@ class MessageHandler(ABC):
 
     async def _handle_openability_reconnected(self, payload: dict[str, Any]) -> None:
         active_sessions = self._active_vibeskill_stream_sessions(payload.get("session_ids"))
+        reconnect_session_ids = payload.get("session_ids")
+        if isinstance(reconnect_session_ids, (list, tuple, set)):
+            allowed_pending = {
+                str(sid).strip()
+                for sid in reconnect_session_ids
+                if str(sid).strip()
+            }
+        else:
+            allowed_pending = set()
+        pending_sessions = {
+            session_id: user_id
+            for session_id, user_id in list(
+                self._openability_disconnect_pending_cancel.items()
+            )
+            if not allowed_pending or session_id in allowed_pending
+        }
         payload_user_id = str(payload.get("user_id") or "").strip() or None
-        for session_id, user_id in active_sessions.items():
+        sessions_to_cancel = {**pending_sessions, **active_sessions}
+        for session_id, user_id in sessions_to_cancel.items():
             await self._cancel_gateway_streams_for_session(
                 session_id,
                 suppress_cancelled_final=True,
@@ -251,6 +278,24 @@ class MessageHandler(ABC):
                 session_id,
                 user_id=user_id or payload_user_id,
             )
+            self._openability_disconnect_pending_cancel.pop(session_id, None)
+
+    async def _handle_openability_reconnect_failed(self, payload: dict[str, Any]) -> None:
+        raw_session_ids = payload.get("session_ids")
+        if isinstance(raw_session_ids, (list, tuple, set)):
+            session_ids = {
+                str(session_id).strip()
+                for session_id in raw_session_ids
+                if str(session_id).strip()
+            }
+        else:
+            session_ids = set(self._openability_disconnect_pending_cancel)
+        for session_id in session_ids:
+            self._openability_disconnect_pending_cancel.pop(session_id, None)
+        logger.info(
+            "[MessageHandler] cleared OA disconnect pending cancel after reconnect failure: sessions=%s",
+            sorted(session_ids),
+        )
 
     async def _cancel_gateway_streams_for_session(
         self,
@@ -274,6 +319,16 @@ class MessageHandler(ABC):
                 rids_cancelled.append(rid)
         if tasks_to_cancel:
             await asyncio.gather(*tasks_to_cancel, return_exceptions=True)
+        for rid in rids_cancelled:
+            self._stream_tasks.pop(rid, None)
+            self._stream_sessions.pop(rid, None)
+            self._stream_metadata.pop(rid, None)
+            self._stream_channels.pop(rid, None)
+            self._stream_user_ids.pop(rid, None)
+            self._stream_modes.pop(rid, None)
+            self._suppress_stream_cancelled_final.discard(rid)
+        if sid not in self._stream_sessions.values():
+            self._clear_session_evolution_in_progress(sid)
         return rids_cancelled
 
     async def _send_skilldev_cancel_to_agent_after_openability_reconnect(
@@ -545,6 +600,7 @@ class MessageHandler(ABC):
         sid_for_agent = (old_sid or "").strip()
         if not sid_for_agent:
             return
+        self._openability_disconnect_pending_cancel.pop(sid_for_agent, None)
 
         # 即使网关侧已无活跃流式拉取任务（例如 Agent 正在执行 shell/工具），也必须通知 AgentServer，
         # 否则仅断开 CLI WebSocket 无法停止已派发的工作。
