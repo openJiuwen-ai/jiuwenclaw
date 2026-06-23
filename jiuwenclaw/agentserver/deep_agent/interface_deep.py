@@ -284,6 +284,13 @@ from jiuwenclaw.config import (
     patch_model_config_from_env,
     resolve_env_vars,
     clear_config_cache as clear_global_config_cache,
+    get_sandbox_endpoint,
+    get_sandbox_runtime,
+    resolve_env_vars,
+)
+from jiuwenclaw.agentserver.deep_agent.sysop_builder import (
+    create_local_sysop_card,
+    create_sandbox_sysop_card,
 )
 from jiuwenclaw.agentserver.stream_content_sanitize import strip_inline_tool_protocol
 from jiuwenclaw.agentserver.stream_utils import propagate_stream_source_id, tool_calls_payload_to_json_list
@@ -2064,33 +2071,55 @@ class JiuWenClawDeepAdapter:
     def _create_sys_operation(self) -> SysOperation | None:
         """Create a sys operation with workspace as working directory."""
         try:
-            sandbox_url = _sandbox_config.get("url", None)
-            sandbox_type = _sandbox_config.get("type", None)
-            sandbox_enabled = _parse_bool_switch(
-                _sandbox_config.get("enabled", False),
-                default=False,
-            )
+            endpoint = get_sandbox_endpoint()
+            runtime = get_sandbox_runtime()
             work_dir = self._workspace_dir or str(get_agent_root_dir())
+            sandbox_url = endpoint.get("url") or ""
+            sandbox_type = endpoint.get("type") or ""
+            sandbox_enabled = bool(runtime.get("enabled"))
             if sandbox_enabled and sandbox_url and sandbox_type:
-                gateway_config = SandboxGatewayConfig(
-                    isolation=SandboxIsolationConfig(container_scope=ContainerScope.SYSTEM),
-                    launcher_config=PreDeployLauncherConfig(
-                        base_url=sandbox_url,
-                        sandbox_type=sandbox_type,
-                        idle_ttl_seconds=600,
-                    ),
-                    timeout_seconds=30,
+                logger.info(
+                    "[JiuWenClawDeepAdapter] sandbox mode: url=%s type=%s "
+                    "startup_mode=%s idle_ttl_seconds=%s idle_check_interval=%s",
+                    sandbox_url,
+                    sandbox_type,
+                    endpoint.get("startup_mode"),
+                    runtime.get("idle_ttl_seconds"),
+                    runtime.get("idle_check_interval"),
                 )
-                sysop_card = SysOperationCard(
-                    mode=OperationMode.SANDBOX,
-                    work_config=LocalWorkConfig(work_dir=work_dir, shell_allowlist=None),
-                    gateway_config=gateway_config,
+                sysop_card = create_sandbox_sysop_card(
+                    sandbox_url,
+                    sandbox_type,
+                    self._agent_id,
+                    shared_dir=get_agent_root_dir(),
+                    files_runtime=runtime.get("files"),
+                    excluded_commands=runtime.get("excluded_commands"),
+                    idle_ttl_seconds=runtime.get("idle_ttl_seconds"),
+                    idle_check_interval=runtime.get("idle_check_interval"),
                 )
             else:
-                sysop_card = SysOperationCard(
-                    mode=OperationMode.LOCAL,
-                    work_config=LocalWorkConfig(work_dir=work_dir, shell_allowlist=None),
-                )
+                if sandbox_enabled and not (sandbox_url and sandbox_type):
+                    missing = []
+                    if not sandbox_url:
+                        missing.append("JIUWENCLAW_SANDBOX_URL")
+                    if not sandbox_type:
+                        # TYPE 已有默认值, 真触发说明用户显式设了空串, 罕见
+                        missing.append("JIUWENCLAW_SANDBOX_TYPE")
+                    logger.warning(
+                        "[JiuWenClawDeepAdapter] sandbox enabled but missing %s; "
+                        "falling back to local sys_operation. set the env var(s) "
+                        "and restart agent-server to actually use jiuwenbox.",
+                        ", ".join(missing),
+                    )
+                else:
+                    logger.info(
+                        "[JiuWenClawDeepAdapter] local mode (sandbox %s)",
+                        "disabled" if not sandbox_enabled else "url/type empty",
+                    )
+                sysop_card = create_local_sysop_card(work_dir=work_dir)
+            if sysop_card is None:
+                logger.warning("[JiuWenClawDeepAdapter] add sys_operation failed: sysop_card is None")
+                return None
             result = Runner.resource_mgr.add_sys_operation(sysop_card)
             if result.is_err():
                 logger.warning("[JiuWenClawDeepAdapter] add sys_operation failed: %s", result.msg())
