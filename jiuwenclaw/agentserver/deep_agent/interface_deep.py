@@ -5463,7 +5463,7 @@ class JiuWenClawDeepAdapter:
             # 否则 session.pre_run/post_run 会因 card.id 为 None 崩溃，导致 resume_ctx 无法持久化。
             "card": self._instance.card if self._instance is not None else None,
             # LLM 并发上限，同一 RePlanExecutor 内最多并行 LLM 调用数
-            "llm_concurrency_limit": 10,
+            "llm_concurrency_limit": 20,
         }
 
     def _create_replan_fallback_handler(self) -> Any:

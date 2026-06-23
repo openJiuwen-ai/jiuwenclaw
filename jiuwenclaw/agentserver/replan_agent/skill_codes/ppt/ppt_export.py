@@ -140,8 +140,9 @@ class PPTExportNode(PlanNode):
 
     async def _validate_pptx(self, pptx_path: str, pptx_root: str) -> str:
         try:
+            escaped_path = pptx_path.replace('\\', '\\\\').replace("'", "\\'").replace('"', '\\"')
             stat_cmd = (
-                f'node -e "const fs=require(\'fs\');const s=fs.statSync({quote_path(pptx_path)});'
+                f"node -e \"const fs=require('fs');const s=fs.statSync('{escaped_path}');"
                 f'process.stdout.write(String(s.size))"'
             )
             result = await run_bash(

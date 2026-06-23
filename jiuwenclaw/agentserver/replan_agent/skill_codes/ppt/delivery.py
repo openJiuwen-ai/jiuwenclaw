@@ -11,6 +11,10 @@ from jiuwenclaw.agentserver.replan_agent.plan_node import PlanNode
 logger = logging.getLogger(__name__)
 
 
+def _looks_like_path(value: str) -> bool:
+    return "/" in value or "\\" in value or value.endswith(".html")
+
+
 class DeliveryNode(PlanNode):
     """P10 — 交付与验收（对应 SKILL Stage 9）。"""
 
@@ -162,18 +166,65 @@ class DeliveryNode(PlanNode):
         if result is None:
             return []
         if isinstance(result, list):
-            return [self._basename(str(x)) for x in result]
+            return [self._basename(self._extract_path_from_item(x)) for x in result]
         if isinstance(result, dict):
-            for key in ("entries", "files", "items", "result"):
+            for key in ("entries", "files", "items", "result", "matches", "paths"):
                 v = result.get(key)
                 if isinstance(v, list):
-                    return [self._basename(str(x)) for x in v]
+                    return [self._basename(self._extract_path_from_item(x)) for x in v]
             content = result.get("content")
             if isinstance(content, str):
                 return [self._basename(line.strip()) for line in content.splitlines() if line.strip()]
+        if hasattr(result, "data"):
+            data = result.data
+            if isinstance(data, list):
+                return [self._basename(self._extract_path_from_item(x)) for x in data]
+            if isinstance(data, dict):
+                for key in ("entries", "files", "items", "result", "matches", "paths"):
+                    v = data.get(key)
+                    if isinstance(v, list):
+                        return [self._basename(self._extract_path_from_item(x)) for x in v]
+                content = data.get("content")
+                if isinstance(content, str):
+                    return [self._basename(line.strip()) for line in content.splitlines() if line.strip()]
+            if isinstance(data, str):
+                return [self._basename(line.strip()) for line in data.splitlines() if line.strip()]
+        if hasattr(result, "model_dump"):
+            dumped = result.model_dump(mode="json")
+            if isinstance(dumped, dict):
+                for key in ("entries", "files", "items", "result", "data", "matches", "paths"):
+                    v = dumped.get(key)
+                    if isinstance(v, list):
+                        return [self._basename(self._extract_path_from_item(x)) for x in v]
+                    if isinstance(v, dict):
+                        for sub_key in ("entries", "files", "items", "result", "matches", "paths"):
+                            sv = v.get(sub_key)
+                            if isinstance(sv, list):
+                                return [self._basename(self._extract_path_from_item(x)) for x in sv]
+                content = dumped.get("content")
+                if isinstance(content, str):
+                    return [self._basename(line.strip()) for line in content.splitlines() if line.strip()]
+            if isinstance(dumped, list):
+                return [self._basename(self._extract_path_from_item(x)) for x in dumped]
+            if isinstance(dumped, str):
+                return [self._basename(line.strip()) for line in dumped.splitlines() if line.strip()]
         if isinstance(result, str):
             return [self._basename(line.strip()) for line in result.splitlines() if line.strip()]
         return []
+
+    @staticmethod
+    def _extract_path_from_item(item: Any) -> str:
+        if isinstance(item, str):
+            return item
+        if isinstance(item, dict):
+            for key in ("path", "name", "file", "filename", "filepath", "href", "url"):
+                v = item.get(key)
+                if isinstance(v, str) and v:
+                    return v
+            for v in item.values():
+                if isinstance(v, str) and _looks_like_path(v):
+                    return v
+        return str(item)
 
     @staticmethod
     def _basename(path: str) -> str:
