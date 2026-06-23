@@ -23,8 +23,13 @@ function computeTimeoutAt(baseIso: string): string {
   return new Date(Date.parse(baseIso) + TOOL_TIMEOUT_MS).toISOString();
 }
 
+function resultIndicatesFailure(result: ToolResult): boolean {
+  if (!result.success) return true;
+  return typeof result.result === 'string' && result.result.includes('success=False');
+}
+
 function resolveExecutionStatus(result: ToolResult): ToolExecutionStatus {
-  return result.success ? 'completed' : 'error';
+  return resultIndicatesFailure(result) ? 'error' : 'completed';
 }
 
 /**
