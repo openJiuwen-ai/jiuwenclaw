@@ -21,6 +21,7 @@ The rail still keeps the useful safeguards from the old implementation:
 from __future__ import annotations
 
 import contextvars
+import json
 import re
 from dataclasses import dataclass, field
 from enum import Enum
@@ -49,6 +50,12 @@ _PY_SCRIPT_RE = re.compile(r'([\w][\w.-]*\.py)\b')
 _NO_TOOL_DEACTIVATE_THRESHOLD = 2
 _DEFAULT_SESSION_ID = "default"
 
+# ``before_invoke`` sets the resolved session_id on this ContextVar.
+# ``SkillCredentialInjectionRail`` and ``shell_pip_patch`` both read it to
+# resolve the active skill for credential injection. asyncio.Task snapshots
+# ``contextvars.copy_context()`` at creation, so the var propagates from the
+# rail's invoke task into the per-tool child tasks that run BashTool →
+# ShellOperation.execute_cmd — no module-level fallback needed.
 _current_session_var: contextvars.ContextVar[Optional[str]] = contextvars.ContextVar(
     "skill_compliance_session_id", default=None,
 )
@@ -130,6 +137,24 @@ def _extract_session_id(ctx: AgentCallbackContext) -> Optional[str]:
     return str(conv_id) if conv_id else None
 
 
+def resolve_skill_session_id(
+    ctx: AgentCallbackContext, preset: Optional[str] = None,
+) -> str:
+    """Resolve the session_id used by skill rails and shell_pip_patch.
+
+    Order: ``preset`` → ``inputs.conversation_id`` → ``_current_session_var``
+    (set by ``SkillComplianceRail.before_invoke`` and propagated to per-tool
+    child tasks via asyncio's default ``contextvars.copy_context()``) →
+    ``_DEFAULT_SESSION_ID``.
+    """
+    return (
+        preset
+        or _extract_session_id(ctx)
+        or _current_session_var.get()
+        or _DEFAULT_SESSION_ID
+    )
+
+
 def _read_skill_body_from_session(
     ctx: AgentCallbackContext, skill_name: str, relative_file_path: str,
 ) -> Optional[str]:
@@ -183,12 +208,7 @@ class SkillComplianceRail(DeepAgentRail):
         self._skill_dir_resolver = skill_dir_resolver
 
     def _resolve_session_id(self, ctx: AgentCallbackContext) -> str:
-        return (
-            self._preset_session_id
-            or _extract_session_id(ctx)
-            or _current_session_var.get()
-            or _DEFAULT_SESSION_ID
-        )
+        return resolve_skill_session_id(ctx, self._preset_session_id)
 
     def _resolve_skill_dir(self, skill_name: str) -> Optional[str]:
         """Resolve skill directory via the injected resolver callable."""
@@ -402,7 +422,14 @@ class SkillComplianceRail(DeepAgentRail):
         if tool_name != "skill_tool":
             return
 
-        tool_args = getattr(inputs, "tool_args", None) or {}
+        tool_args = getattr(inputs, "tool_args", None)
+        if isinstance(tool_args, str):
+            try:
+                tool_args = json.loads(tool_args)
+            except (TypeError, ValueError):
+                return
+        if not isinstance(tool_args, dict):
+            return
         skill_name = str(tool_args.get("skill_name", "") or "").strip()
         if not skill_name:
             return

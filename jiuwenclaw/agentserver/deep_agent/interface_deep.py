@@ -104,6 +104,7 @@ from openjiuwen.core.context_engine.qa_artifact.schema import (
 )
 from openjiuwen.core.context_engine.qa_block.config import QABlockConfig
 
+from jiuwenclaw.runtime.shell_pip_patch import set_skill_credential_provider
 from jiuwenclaw.agentserver.utils import DEFAULT_ENABLE_READ_IMAGE_MULTIMODAL
 from jiuwenclaw.agentserver.deep_agent.cron_runtime import CronRuntimeBridge
 from jiuwenclaw.agentserver.deep_agent.ask_user_question_registry import (
@@ -1177,6 +1178,13 @@ class JiuWenClawDeepAdapter:
         self._working_checker: Callable[[], bool] | None = None
         self._last_runtime_mode: str = "agent.plan"
         self._chat_env_overlay_token: Token | None = None
+        set_skill_credential_provider(
+            lambda: (
+                self._skill_credential_injection_rail.get_skill_envs()
+                if self._skill_credential_injection_rail is not None
+                else {}
+            )
+        )
 
     def set_working_checker(self, checker: Callable[[], bool] | None) -> None:
         """Inject callable returning whether this session has in-flight work."""
@@ -3328,6 +3336,9 @@ class JiuWenClawDeepAdapter:
         self._fork_agent_executor = None
         if self._stream_event_rail is not None:
             self._stream_event_rail.set_fork_agent_executor(None)
+        # Release the provider so the lambda registered in __init__ stops
+        # capturing `self` and the adapter can be garbage-collected.
+        set_skill_credential_provider(None)
 
     async def load_user_rails(self) -> None:
         """动态加载用户自定义的 Rail 扩展."""

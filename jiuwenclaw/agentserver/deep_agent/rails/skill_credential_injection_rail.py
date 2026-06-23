@@ -20,10 +20,8 @@ from openjiuwen.core.single_agent.rail.base import AgentCallbackContext, ToolCal
 from openjiuwen.harness.rails.base import DeepAgentRail
 
 from jiuwenclaw.agentserver.deep_agent.rails.skill_compliance_rail import (
-    _DEFAULT_SESSION_ID,
-    _current_session_var,
-    _extract_session_id,
     get_session_active_skill,
+    resolve_skill_session_id,
 )
 from jiuwenclaw.agentserver.permissions.shell_tools import SHELL_PERMISSION_TOOLS
 
@@ -59,6 +57,10 @@ class SkillCredentialInjectionRail(DeepAgentRail):
             ", ".join(self._skill_envs.keys()),
         )
 
+    def get_skill_envs(self) -> dict[str, dict[str, str]]:
+        """Return the current ``skill_envs`` mapping (public read accessor)."""
+        return self._skill_envs
+
     # ── Core hook ──────────────────────────────────────────────
 
     async def before_tool_call(self, ctx: AgentCallbackContext) -> None:
@@ -71,7 +73,7 @@ class SkillCredentialInjectionRail(DeepAgentRail):
 
         session_id = self._resolve_session_id(ctx)
         active_skill = get_session_active_skill(session_id)
-        if not active_skill:    
+        if not active_skill:
             return
 
         credentials = self._get_skill_envs(active_skill)
@@ -89,28 +91,7 @@ class SkillCredentialInjectionRail(DeepAgentRail):
     # ── Internals ──────────────────────────────────────────────
 
     def _resolve_session_id(self, ctx: AgentCallbackContext) -> str:
-        """Resolve session id using the same strategy as SkillComplianceRail.
-
-        Order of precedence (must mirror ``SkillComplianceRail._resolve_session_id``):
-        1. ``preset_session_id`` (explicit override, mainly for tests)
-        2. ``inputs.conversation_id`` (set for chat-level callbacks)
-        3. ``_current_session_var`` (ContextVar set by ``SkillComplianceRail.before_invoke``
-           on every invocation — this is the path that actually carries the
-           session id in production tool dispatch)
-        4. ``_DEFAULT_SESSION_ID``
-
-        Skipping layer 3 causes this rail to always fall through to "default",
-        so ``get_session_active_skill`` returns None and injection silently no-ops.
-        """
-        if self._preset_session_id:
-            return self._preset_session_id
-        extracted = _extract_session_id(ctx)
-        if extracted:
-            return extracted
-        ctx_var = _current_session_var.get()
-        if ctx_var:
-            return ctx_var
-        return _DEFAULT_SESSION_ID
+        return resolve_skill_session_id(ctx, self._preset_session_id)
 
     def _get_skill_envs(self, skill_name: str) -> dict[str, str]:
         return self._skill_envs.get(skill_name, {})
