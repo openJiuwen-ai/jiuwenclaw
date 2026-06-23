@@ -94,6 +94,23 @@ _METHOD_DISPATCH = {
     ReqMethod.SKILLDEV_BATCH_DOWNLOAD: "_handle_batch_download",
 }
 
+# 依次尝试的文本编码顺序。不包含 latin-1，以确保真正的二进制文件能被正确检测出来。
+_TEXT_ENCODINGS = ("utf-8", "gbk", "gb2312", "big5", "shift_jis", "euc-kr")
+
+
+def _read_text_with_fallback(path: Path) -> tuple[str, str] | None:
+    """依次尝试常用编码读取文本文件。
+
+    返回 (content, encoding)；所有编码均失败则返回 None，表示该文件为二进制文件。
+    """
+    raw = path.read_bytes()
+    for enc in _TEXT_ENCODINGS:
+        try:
+            return raw.decode(enc), enc
+        except (UnicodeDecodeError, LookupError):
+            continue
+    return None
+
 
 class SkillDevService:
     """SkillDev 模式的服务入口（无状态）."""
@@ -685,11 +702,12 @@ class SkillDevService:
             return self._error_chunk(request_id, channel_id, f"文件不存在: {file_path}")
 
         editable = True
-        try:
-            content = full_path.read_text(encoding="utf-8")
-        except UnicodeDecodeError:
+        result = _read_text_with_fallback(full_path)
+        if result is None:
             content = f"[二进制文件，大小 {full_path.stat().st_size} bytes]"
             editable = False
+        else:
+            content, _ = result
 
         return AgentResponseChunk(
             request_id=request_id,
@@ -758,9 +776,7 @@ class SkillDevService:
                 request_id, channel_id, ERR_FW_FILE_NOT_FOUND
             )
 
-        try:
-            full_path.read_text(encoding="utf-8")
-        except UnicodeDecodeError:
+        if _read_text_with_fallback(full_path) is None:
             logger.info(
                 "[session=%s] [SkillDevService] file_write 二进制文件不可编辑: path=%s",
                 session_id, file_path,
