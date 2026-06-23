@@ -25,9 +25,12 @@ logger = logging.getLogger(__name__)
 
 
 _PRESET_STYLE_IDS = {"huawei", "dark-tech", "light-tech", "paper-humanities"}
-_DEFAULT_PARALLEL_BATCH_SIZE = 10
 _DEFAULT_GEN_RETRY_ROUND = 1
 _DEFAULT_DENSITY_RETRY_ROUND = 1
+
+
+def _looks_like_path(value: str) -> bool:
+    return "/" in value or "\\" in value or value.endswith(".html")
 
 
 _DESIGN_RULES_DIGEST = (
@@ -39,7 +42,8 @@ _DESIGN_RULES_DIGEST = (
     "5. 步骤/流程页 → 用 HTML/CSS 绘制节点+连线+文字，禁止纯文字描述\n"
     "6. 关键数字必须有放大数字卡片，结论必须有摘要高亮\n"
     "7. 防溢出：单行文字不超容器宽度；连续段落 ≤ 100 字（超过必须拆列表）\n"
-    "8. 布局选择：左右分列 → main 用 `grid grid-cols-2 gap-*`；上下分行 → main 用 `flex flex-col gap-*`\n"
+    "8. 布局结构：严格遵循标准 HTML 骨架——main 用 `grid grid-cols-2 gap-3`，"
+    "恰好 2 个 `<section>` 子元素；header/main/footer 纵向排列在 content-safe 内\n"
     "9. grid 子元素：必须 `h-full min-h-0 overflow-hidden`\n"
     "10. flex-col 子元素：必须 `flex-1 min-h-0 overflow-hidden`\n"
     "11. 配色与字体严格来自风格规范文件，禁止使用未定义的颜色或字体\n"
@@ -49,61 +53,95 @@ _DESIGN_RULES_DIGEST = (
 )
 
 
+_HTML_SKELETON = (
+    "### 标准 HTML 骨架（所有页面必须遵循，禁止改动结构）\n"
+    "```html\n"
+    '<div class="ppt-slide">\n'
+    '  <div class="content-safe flex flex-col gap-3 h-full">\n'
+    '    <header class="flex-shrink-0">标题区</header>\n'
+    '    <main class="flex-1 min-h-0 grid grid-cols-2 gap-3">\n'
+    '      <section class="h-full min-h-0 overflow-hidden">左侧内容</section>\n'
+    '      <section class="h-full min-h-0 overflow-hidden">右侧内容</section>\n'
+    '    </main>\n'
+    '    <footer class="flex-shrink-0">数据来源页脚</footer>\n'
+    '  </div>\n'
+    '</div>\n'
+    "```\n"
+    "规则：\n"
+    "- `content-safe` 用 `flex flex-col` 纵向排列 header/main/footer 三段\n"
+    "- `main` 用 `grid grid-cols-2` 左右分列，恰好 2 个 `<section>` 直接子元素\n"
+    "- 禁止把 header/footer 放进 main 内部；禁止 main 只有 1 个子元素\n"
+)
+
+
 _PAGE_TYPE_RE = re.compile(r"类型[：:]\s*(\w+)", re.IGNORECASE)
 
 _PAGE_LAYOUT_TEMPLATES = {
     "data": (
-        "### 推荐布局（data 类型，直接套用，禁止自行计算像素）\n"
+        "### 推荐布局（data 类型，直接套用标准骨架）\n"
+        "```html\n"
+        '<div class="content-safe flex flex-col gap-3 h-full">\n'
+        '  <header class="flex-shrink-0">4-6 个关键数字卡片，grid grid-cols-6</header>\n'
+        '  <main class="flex-1 min-h-0 grid grid-cols-2 gap-3">\n'
+        '    <section class="h-full min-h-0 overflow-hidden">6 个核心论点卡片，grid grid-cols-2 grid-rows-3 gap-2</section>\n'
+        '    <section class="h-full min-h-0 overflow-hidden">ECharts 柱状图 + 对比表格</section>\n'
+        '  </main>\n'
+        '  <footer class="flex-shrink-0">数据来源汇总条</footer>\n'
+        '</div>\n'
         "```\n"
-        "┌─ 顶部指标条 (flex-shrink-0)：4-6 个关键数字卡片，grid grid-cols-6\n"
-        "├─ 主内容区 (flex-1, grid grid-cols-2 gap-3)：\n"
-        "│  ├─ 左侧：6 个核心论点卡片，grid grid-cols-2 grid-rows-3 gap-2\n"
-        "│  └─ 右侧：ECharts 柱状图（时序数据）+ 对比表格\n"
-        "└─ 底部页脚 (flex-shrink-0)：数据来源汇总条\n"
-        "```\n"
-        "- 所有高度用 flex-1 自动分配，禁止手动计算 px\n"
         "- ECharts 用柱状图(bar)，禁止用折线图\n"
     ),
     "trend": (
-        "### 推荐布局（trend 类型，直接套用，禁止自行计算像素）\n"
-        "```\n"
-        "┌─ 顶部指标条 (flex-shrink-0)：3 个关键数字卡片\n"
-        "├─ 主内容区 (flex-1, grid grid-cols-2 gap-3)：\n"
-        "│  ├─ 左侧：ECharts 折线图（趋势数据）\n"
-        "│  └─ 右侧：4-6 个核心论点卡片，flex-col gap-2\n"
-        "└─ 底部页脚 (flex-shrink-0)：数据来源汇总条\n"
+        "### 推荐布局（trend 类型，直接套用标准骨架）\n"
+        "```html\n"
+        '<div class="content-safe flex flex-col gap-3 h-full">\n'
+        '  <header class="flex-shrink-0">3 个关键数字卡片</header>\n'
+        '  <main class="flex-1 min-h-0 grid grid-cols-2 gap-3">\n'
+        '    <section class="h-full min-h-0 overflow-hidden">ECharts 折线图（趋势数据）</section>\n'
+        '    <section class="h-full min-h-0 overflow-hidden">4-6 个核心论点卡片，flex-col gap-2</section>\n'
+        '  </main>\n'
+        '  <footer class="flex-shrink-0">数据来源汇总条</footer>\n'
+        '</div>\n'
         "```\n"
         "- ECharts 用折线图(line)，禁止用柱状图\n"
     ),
     "comparison": (
-        "### 推荐布局（comparison 类型，直接套用，禁止自行计算像素）\n"
-        "```\n"
-        "┌─ 主内容区 (flex-1, grid grid-cols-2 gap-3)：\n"
-        "│  ├─ 左侧：对比对象 A 的卡片（grid grid-cols-2 grid-rows-3）\n"
-        "│  └─ 右侧：对比对象 B 的卡片（grid grid-cols-2 grid-rows-3）\n"
-        "├─ 中部对比表格 (flex-shrink-0)\n"
-        "└─ 底部页脚 (flex-shrink-0)：数据来源汇总条\n"
+        "### 推荐布局（comparison 类型，直接套用标准骨架）\n"
+        "```html\n"
+        '<div class="content-safe flex flex-col gap-3 h-full">\n'
+        '  <main class="flex-1 min-h-0 grid grid-cols-2 gap-3">\n'
+        '    <section class="h-full min-h-0 overflow-hidden">对比对象 A 的卡片（grid grid-cols-2 grid-rows-3）</section>\n'
+        '    <section class="h-full min-h-0 overflow-hidden">对比对象 B 的卡片（grid grid-cols-2 grid-rows-3）</section>\n'
+        '  </main>\n'
+        '  <footer class="flex-shrink-0">对比表格 + 数据来源汇总条</footer>\n'
+        '</div>\n'
         "```\n"
         "- ECharts 用分组柱状图(grouped bar)\n"
     ),
     "case": (
-        "### 推荐布局（case 类型，直接套用，禁止自行计算像素）\n"
-        "```\n"
-        "┌─ 顶部指标条 (flex-shrink-0)：3 个关键数字卡片\n"
-        "├─ 主内容区 (flex-1, grid grid-cols-2 gap-3)：\n"
-        "│  ├─ 左侧：6 个核心论点卡片，grid grid-cols-2 grid-rows-3\n"
-        "│  └─ 右侧：ECharts 图表 + 关键数据表格\n"
-        "└─ 底部案例条 (flex-shrink-0)：案例素材详细描述 + 数据来源页脚\n"
+        "### 推荐布局（case 类型，直接套用标准骨架）\n"
+        "```html\n"
+        '<div class="content-safe flex flex-col gap-3 h-full">\n'
+        '  <header class="flex-shrink-0">3 个关键数字卡片</header>\n'
+        '  <main class="flex-1 min-h-0 grid grid-cols-2 gap-3">\n'
+        '    <section class="h-full min-h-0 overflow-hidden">6 个核心论点卡片，grid grid-cols-2 grid-rows-3</section>\n'
+        '    <section class="h-full min-h-0 overflow-hidden">ECharts 图表 + 关键数据表格</section>\n'
+        '  </main>\n'
+        '  <footer class="flex-shrink-0">案例素材详细描述 + 数据来源页脚</footer>\n'
+        '</div>\n'
         "```\n"
     ),
     "technology": (
-        "### 推荐布局（technology 类型，直接套用，禁止自行计算像素）\n"
-        "```\n"
-        "┌─ 顶部指标条 (flex-shrink-0)：4 个关键数字卡片\n"
-        "├─ 主内容区 (flex-1, grid grid-cols-2 gap-3)：\n"
-        "│  ├─ 左侧：6 个核心论点卡片，grid grid-cols-2 grid-rows-3\n"
-        "│  └─ 右侧：ECharts 图表 + 对比表格\n"
-        "└─ 底部页脚 (flex-shrink-0)：数据来源汇总条\n"
+        "### 推荐布局（technology 类型，直接套用标准骨架）\n"
+        "```html\n"
+        '<div class="content-safe flex flex-col gap-3 h-full">\n'
+        '  <header class="flex-shrink-0">4 个关键数字卡片</header>\n'
+        '  <main class="flex-1 min-h-0 grid grid-cols-2 gap-3">\n'
+        '    <section class="h-full min-h-0 overflow-hidden">6 个核心论点卡片，grid grid-cols-2 grid-rows-3</section>\n'
+        '    <section class="h-full min-h-0 overflow-hidden">ECharts 图表 + 对比表格</section>\n'
+        '  </main>\n'
+        '  <footer class="flex-shrink-0">数据来源汇总条</footer>\n'
+        '</div>\n'
         "```\n"
     ),
 }
@@ -127,14 +165,8 @@ _DENSITY_CHECKLIST_DIGEST = (
     "5. 数据来源：页脚有标注（机构名 / 资料名）\n"
     "6. 无大段文字：无连续 > 100 字段落\n"
     "7. 视觉层级：标题 → 副标题 → 正文 → 注释 层级清晰\n"
-    "8. 布局正确：main 元素有 ≥2 直接子元素，左右分列用 grid，上下分行用 flex-col\n"
+    "8. 布局正确：main 元素 class 含 `grid grid-cols-2`，且恰好 2 个直接子元素（`<section>` 或 `<div>`）\n"
 )
-
-
-def _chunks(seq: list[int], size: int) -> list[list[int]]:
-    if size <= 0:
-        size = 1
-    return [seq[i:i + size] for i in range(0, len(seq), size)]
 
 
 def _strip_html_fence(text: str) -> str:
@@ -270,6 +302,8 @@ def _build_page_prompt(
         "\n"
         f"{_DESIGN_RULES_DIGEST}"
         "\n"
+        f"{_HTML_SKELETON}"
+        "\n"
         f"{layout_template}"
         "\n"
         f"{_DENSITY_CHECKLIST_DIGEST}"
@@ -313,7 +347,6 @@ class PageGenerateNode(PlanNode):
                 "- `output_dir`（必填）: 工作目录（用于读 outline/research）\n"
                 "- `style_file_path`（必填）: 风格文件绝对路径\n"
                 "- `style_id`（必填）: 用于判定是否预设风格强约束\n"
-                "- `parallel_batch_size`（可选，默认 10）\n"
                 "- `gen_retry_round`（可选，默认 1）\n"
                 "\n"
                 "### 输出\n"
@@ -328,7 +361,7 @@ class PageGenerateNode(PlanNode):
                 "   - 该页 outline 片段（页面类型、标题、数据需求）\n"
                 "   - 该页 research 片段（核心论点、关键数据、案例素材）\n"
                 "   - 风格规范全文 + 视觉与布局硬约束\n"
-                "4. 分批 asyncio.gather 调 LLM；每批 ≤ parallel_batch_size\n"
+                "4. 全部页面 asyncio.gather 并发调 LLM（并发度由框架侧 LLM 调用函数控制）\n"
                 "5. 每页结果剥 ```html 包裹 → 校验（含 <!DOCTYPE> + ppt-slide 容器）→ write_file 落盘\n"
                 "6. 失败页进 missing_pages，按 gen_retry_round 重试（仅缺失页）\n"
                 "7. 返回 page_files + missing_pages + 共享文本\n"
@@ -357,7 +390,6 @@ class PageGenerateNode(PlanNode):
         output_dir = str(inputs.get("output_dir") or "").strip()
         style_file_path = str(inputs.get("style_file_path") or "").strip()
         style_id = str(inputs.get("style_id") or "").strip()
-        batch_size = int(inputs.get("parallel_batch_size") or _DEFAULT_PARALLEL_BATCH_SIZE)
         retry_round = int(inputs.get("gen_retry_round") or _DEFAULT_GEN_RETRY_ROUND)
 
         required_inputs = (
@@ -413,7 +445,6 @@ class PageGenerateNode(PlanNode):
             research_pages=research_pages,
             outline_full=outline_text,
             research_full=research_text,
-            batch_size=batch_size,
         )
 
         for round_idx in range(retry_round):
@@ -433,7 +464,6 @@ class PageGenerateNode(PlanNode):
                 research_pages=research_pages,
                 outline_full=outline_text,
                 research_full=research_text,
-                batch_size=batch_size,
             )
 
         successful_pages = [p for p in all_pages if p not in missing_pages]
@@ -465,47 +495,45 @@ class PageGenerateNode(PlanNode):
         research_pages: dict[int, str],
         outline_full: str,
         research_full: str,
-        batch_size: int,
     ) -> list[int]:
         failed: list[int] = []
-        for batch in _chunks(pages, batch_size):
-            tasks = [
-                self.stream_llm_collect(
-                    prompt=_build_page_prompt(
-                        i,
-                        style_id=style_id,
-                        style_text=style_text,
-                        outline_page=outline_pages.get(i, outline_full),
-                        research_page=research_pages.get(i, ""),
-                        outline_is_full=i not in outline_pages,
-                        research_is_full=False,
-                    ),
-                    system_prompt="你是资深演示文稿设计师，直接输出完整 HTML 原文，不输出任何解释。",
-                    node_name=f"p8_1_page_{i}",
-                    concurrent=True,
-                )
-                for i in batch
-            ]
-            results = await asyncio.gather(*tasks, return_exceptions=True)
+        tasks = [
+            self.stream_llm_collect(
+                prompt=_build_page_prompt(
+                    i,
+                    style_id=style_id,
+                    style_text=style_text,
+                    outline_page=outline_pages.get(i, outline_full),
+                    research_page=research_pages.get(i, ""),
+                    outline_is_full=i not in outline_pages,
+                    research_is_full=False,
+                ),
+                system_prompt="你是资深演示文稿设计师，直接输出完整 HTML 原文，不输出任何解释。",
+                node_name=f"p8_1_page_{i}",
+                concurrent=True,
+            )
+            for i in pages
+        ]
+        results = await asyncio.gather(*tasks, return_exceptions=True)
 
-            for page_num, result in zip(batch, results):
-                if isinstance(result, Exception):
-                    logger.warning("[P8.1] 页面 %d LLM 调用失败: %s", page_num, result)
-                    failed.append(page_num)
-                    continue
+        for page_num, result in zip(pages, results):
+            if isinstance(result, Exception):
+                logger.warning("[P8.1] 页面 %d LLM 调用失败: %s", page_num, result)
+                failed.append(page_num)
+                continue
 
-                html = _strip_html_fence(result or "")
-                if not _is_valid_html(html):
-                    logger.warning("[P8.1] 页面 %d HTML 校验失败", page_num)
-                    failed.append(page_num)
-                    continue
+            html = _strip_html_fence(result or "")
+            if not _is_valid_html(html):
+                logger.warning("[P8.1] 页面 %d HTML 校验失败", page_num)
+                failed.append(page_num)
+                continue
 
-                ok = await self._write_file(
-                    f"{pages_dir}/page-{page_num}.pptx.html",
-                    html,
-                )
-                if not ok:
-                    failed.append(page_num)
+            ok = await self._write_file(
+                f"{pages_dir}/page-{page_num}.pptx.html",
+                html,
+            )
+            if not ok:
+                failed.append(page_num)
 
         return failed
 
@@ -586,7 +614,7 @@ class DensityCheckNode(PlanNode):
                 "   - 数据来源：页脚有标注（机构名 / 资料名）\n"
                 "   - 无大段文字：无连续 > 100 字段落\n"
                 "   - 视觉层级：标题 → 副标题 → 正文 → 注释 层级清晰\n"
-                "   - 布局正确：main 元素有 ≥2 直接子元素，左右分列用 grid，上下分行用 flex-col\n"
+                "   - 布局正确：main 元素 class 含 `grid grid-cols-2`，且恰好 2 个直接子元素\n"
                 "3. 不通过页进入修复流程：\n"
                 "   a. 分析缺失项，判断是否需要搜索补充数据\n"
                 "   b. 若缺数据可视化/缺案例/缺数据来源 → 调用 `web_search` 搜索补充：\n"
@@ -627,7 +655,6 @@ class DensityCheckNode(PlanNode):
         search_mode = str(inputs.get("search_mode") or "auto").strip()
         topic = str(inputs.get("topic") or "").strip()
         retry_round = int(inputs.get("density_retry_round") or _DEFAULT_DENSITY_RETRY_ROUND)
-        batch_size = int(inputs.get("parallel_batch_size") or _DEFAULT_PARALLEL_BATCH_SIZE)
 
         if not pages_dir or not page_files:
             logger.info("[P8.2] 无可检查页面，跳过密度检查")
@@ -645,7 +672,7 @@ class DensityCheckNode(PlanNode):
         density_report: dict[int, dict[str, Any]] = {}
         retry_queue: list[int] = []
 
-        check_results = await self._check_pages(page_numbers, pages_dir, search_mode, batch_size)
+        check_results = await self._check_pages(page_numbers, pages_dir, search_mode)
         for page_num, check in check_results.items():
             density_report[page_num] = check
             if not check.get("pass", True):
@@ -672,10 +699,9 @@ class DensityCheckNode(PlanNode):
                 outline_full=outline_text,
                 research_full=research_text,
                 density_report=density_report,
-                batch_size=batch_size,
                 topic=topic,
             )
-            check_results = await self._check_pages(retry_queue, pages_dir, search_mode, batch_size)
+            check_results = await self._check_pages(retry_queue, pages_dir, search_mode)
             new_queue: list[int] = []
             for page_num in retry_queue:
                 check = check_results.get(page_num, {"pass": False, "reason": "重写后未拿到检查结果"})
@@ -699,22 +725,20 @@ class DensityCheckNode(PlanNode):
         pages: list[int],
         pages_dir: str,
         search_mode: str,
-        batch_size: int,
     ) -> dict[int, dict[str, Any]]:
         results: dict[int, dict[str, Any]] = {}
-        for batch in _chunks(pages, batch_size):
-            tasks = [
-                self._check_one_page(p, pages_dir, search_mode) for p in batch
-            ]
-            batch_results = await asyncio.gather(*tasks, return_exceptions=True)
-            for page_num, r in zip(batch, batch_results):
-                if isinstance(r, Exception):
-                    logger.warning("[P8.2] 页面 %d 密度检查异常（保守通过）: %s", page_num, r)
-                    results[page_num] = {"pass": True, "reason": f"check_error: {r}"}
-                elif isinstance(r, dict):
-                    results[page_num] = r
-                else:
-                    results[page_num] = {"pass": True, "reason": "check_unknown"}
+        tasks = [
+            self._check_one_page(p, pages_dir, search_mode) for p in pages
+        ]
+        batch_results = await asyncio.gather(*tasks, return_exceptions=True)
+        for page_num, r in zip(pages, batch_results):
+            if isinstance(r, Exception):
+                logger.warning("[P8.2] 页面 %d 密度检查异常（保守通过）: %s", page_num, r)
+                results[page_num] = {"pass": True, "reason": f"check_error: {r}"}
+            elif isinstance(r, dict):
+                results[page_num] = r
+            else:
+                results[page_num] = {"pass": True, "reason": "check_unknown"}
         return results
 
     async def _check_one_page(
@@ -794,7 +818,6 @@ class DensityCheckNode(PlanNode):
         outline_full: str,
         research_full: str,
         density_report: dict[int, dict[str, Any]],
-        batch_size: int,
         topic: str = "",
     ) -> None:
         search_supplements: dict[int, str] = {}
@@ -812,43 +835,42 @@ class DensityCheckNode(PlanNode):
         for page_num in pages:
             original_htmls[page_num] = await self._read_file(f"{pages_dir}/page-{page_num}.pptx.html")
 
-        for batch in _chunks(pages, batch_size):
-            tasks = []
-            for page_num in batch:
-                failed_items = density_report.get(page_num, {}).get("failed_items") or []
-                hint = self._build_rewrite_hint(failed_items)
-                supplement = search_supplements.get(page_num, "")
-                if supplement:
-                    hint = f"{hint}\n\n### 搜索补充数据\n{supplement}" if hint else f"### 搜索补充数据\n{supplement}"
-                tasks.append(
-                    self.stream_llm_collect(
-                        prompt=_build_page_prompt(
-                            page_num,
-                            style_id=style_id,
-                            style_text=style_text,
-                            outline_page=outline_pages.get(page_num, outline_full),
-                            research_page=research_pages.get(page_num, ""),
-                            outline_is_full=page_num not in outline_pages,
-                            research_is_full=False,
-                            rewrite_hint=hint,
-                            original_html=original_htmls.get(page_num, ""),
-                        ),
-                        system_prompt="你是资深演示文稿设计师，直接输出完整 HTML 原文，不输出任何解释。",
-                        node_name=f"p8_2_page_{page_num}",
-                        concurrent=True,
-                    )
+        tasks = []
+        for page_num in pages:
+            failed_items = density_report.get(page_num, {}).get("failed_items") or []
+            hint = self._build_rewrite_hint(failed_items)
+            supplement = search_supplements.get(page_num, "")
+            if supplement:
+                hint = f"{hint}\n\n### 搜索补充数据\n{supplement}" if hint else f"### 搜索补充数据\n{supplement}"
+            tasks.append(
+                self.stream_llm_collect(
+                    prompt=_build_page_prompt(
+                        page_num,
+                        style_id=style_id,
+                        style_text=style_text,
+                        outline_page=outline_pages.get(page_num, outline_full),
+                        research_page=research_pages.get(page_num, ""),
+                        outline_is_full=page_num not in outline_pages,
+                        research_is_full=False,
+                        rewrite_hint=hint,
+                        original_html=original_htmls.get(page_num, ""),
+                    ),
+                    system_prompt="你是资深演示文稿设计师，直接输出完整 HTML 原文，不输出任何解释。",
+                    node_name=f"p8_2_page_{page_num}",
+                    concurrent=True,
                 )
-            results = await asyncio.gather(*tasks, return_exceptions=True)
+            )
+        results = await asyncio.gather(*tasks, return_exceptions=True)
 
-            for page_num, result in zip(batch, results):
-                if isinstance(result, Exception):
-                    logger.warning("[P8.2] 页面 %d 重写 LLM 失败: %s", page_num, result)
-                    continue
-                html = _strip_html_fence(result or "")
-                if not _is_valid_html(html):
-                    logger.warning("[P8.2] 页面 %d 重写产物 HTML 校验失败", page_num)
-                    continue
-                await self._write_file(f"{pages_dir}/page-{page_num}.pptx.html", html)
+        for page_num, result in zip(pages, results):
+            if isinstance(result, Exception):
+                logger.warning("[P8.2] 页面 %d 重写 LLM 失败: %s", page_num, result)
+                continue
+            html = _strip_html_fence(result or "")
+            if not _is_valid_html(html):
+                logger.warning("[P8.2] 页面 %d 重写产物 HTML 校验失败", page_num)
+                continue
+            await self._write_file(f"{pages_dir}/page-{page_num}.pptx.html", html)
 
     async def _search_supplement(
         self,
@@ -973,7 +995,7 @@ class DensityCheckNode(PlanNode):
             "缺数据来源": "在页脚标注'数据来源：XXX'（机构名或资料名）",
             "大段文字": "拆分为多个列表项/小节，添加小标题",
             "视觉层级混乱": "调整字号梯度，建立明确的标题→副标题→正文→注释层级",
-            "布局错误": "main 元素至少 2 个直接子元素；左右分列用 grid，上下分行用 flex-col",
+            "布局错误": "main 改为 `grid grid-cols-2 gap-3`，恰好 2 个 `<section>` 子元素；header/footer 放在 main 外部的 content-safe 内",
         }
         lines = ["不通过项与补救动作："]
         for item in failed_items:
@@ -1101,10 +1123,18 @@ class QAFixNode(PlanNode):
         page_count: int,
     ) -> tuple[bool, list[str]]:
         files: list[str] = []
+        logger.debug(
+            "[P8.3] _check_completeness start pages_dir=%s page_count=%d has_list_dir=%s has_glob=%s",
+            pages_dir,
+            page_count,
+            self.has_tool("list_dir"),
+            self.has_tool("glob"),
+        )
         if self.has_tool("list_dir"):
             try:
                 result = await self.call_tool("list_dir", path=pages_dir)
                 files = self._parse_listing(result)
+                logger.debug("[P8.3] list_dir 解析结果 files=%d", len(files))
             except Exception as e:
                 if isinstance(e, AbortError):
                     raise
@@ -1119,6 +1149,7 @@ class QAFixNode(PlanNode):
                     path=pages_dir,
                 )
                 files = self._parse_listing(result)
+                logger.debug("[P8.3] glob 解析结果 files=%d", len(files))
             except Exception as e:
                 if isinstance(e, AbortError):
                     raise
@@ -1144,19 +1175,76 @@ class QAFixNode(PlanNode):
     def _parse_listing(self, result: Any) -> list[str]:
         if result is None:
             return []
+        logger.debug(
+            "[P8.3] _parse_listing input type=%s repr=%.500s",
+            type(result).__name__,
+            repr(result),
+        )
         if isinstance(result, list):
-            return [self._basename(str(x)) for x in result]
+            return [self._basename(self._extract_path_from_item(x)) for x in result]
         if isinstance(result, dict):
-            for key in ("entries", "files", "items", "result"):
+            for key in ("entries", "files", "filenames", "items", "result", "matches", "paths"):
                 v = result.get(key)
                 if isinstance(v, list):
-                    return [self._basename(str(x)) for x in v]
+                    return [self._basename(self._extract_path_from_item(x)) for x in v]
             content = result.get("content")
             if isinstance(content, str):
                 return self._parse_listing_text(content)
+        if hasattr(result, "data"):
+            data = result.data
+            if isinstance(data, list):
+                return [self._basename(self._extract_path_from_item(x)) for x in data]
+            if isinstance(data, dict):
+                for key in ("entries", "files", "filenames", "items", "result", "matches", "paths"):
+                    v = data.get(key)
+                    if isinstance(v, list):
+                        return [self._basename(self._extract_path_from_item(x)) for x in v]
+                content = data.get("content")
+                if isinstance(content, str):
+                    return self._parse_listing_text(content)
+            if isinstance(data, str):
+                return self._parse_listing_text(data)
+        if hasattr(result, "model_dump"):
+            dumped = result.model_dump(mode="json")
+            if isinstance(dumped, dict):
+                for key in ("entries", "files", "filenames", "items", "result", "data", "matches", "paths"):
+                    v = dumped.get(key)
+                    if isinstance(v, list):
+                        return [self._basename(self._extract_path_from_item(x)) for x in v]
+                    if isinstance(v, dict):
+                        for sub_key in ("entries", "files", "filenames", "items", "result", "matches", "paths"):
+                            sv = v.get(sub_key)
+                            if isinstance(sv, list):
+                                return [self._basename(self._extract_path_from_item(x)) for x in sv]
+                content = dumped.get("content")
+                if isinstance(content, str):
+                    return self._parse_listing_text(content)
+            if isinstance(dumped, list):
+                return [self._basename(self._extract_path_from_item(x)) for x in dumped]
+            if isinstance(dumped, str):
+                return self._parse_listing_text(dumped)
         if isinstance(result, str):
             return self._parse_listing_text(result)
+        logger.warning(
+            "[P8.3] _parse_listing 无法解析 result type=%s repr=%.300s",
+            type(result).__name__,
+            repr(result),
+        )
         return []
+
+    @staticmethod
+    def _extract_path_from_item(item: Any) -> str:
+        if isinstance(item, str):
+            return item
+        if isinstance(item, dict):
+            for key in ("path", "name", "file", "filename", "filepath", "href", "url"):
+                v = item.get(key)
+                if isinstance(v, str) and v:
+                    return v
+            for v in item.values():
+                if isinstance(v, str) and _looks_like_path(v):
+                    return v
+        return str(item)
 
     def _parse_listing_text(self, text: str) -> list[str]:
         return [self._basename(line.strip()) for line in text.splitlines() if line.strip()]
@@ -1209,7 +1297,6 @@ class PPTPageGenNode(PlanNode):
                 "- `page_count`（必填）: 大纲页数 N\n"
                 "- `topic`（可选）: PPT 主题，密度检查搜索补充用\n"
                 "- `search_mode`（可选）: 密度阈值放宽依据\n"
-                "- `parallel_batch_size`（可选，默认 10）\n"
                 "- `gen_retry_round`（可选，默认 1）\n"
                 "- `density_retry_round`（可选，默认 1）\n"
                 "\n"
