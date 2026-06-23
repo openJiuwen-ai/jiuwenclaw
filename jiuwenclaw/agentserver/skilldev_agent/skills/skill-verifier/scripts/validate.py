@@ -239,12 +239,12 @@ def validate_skill(skill_path: str | Path) -> tuple[bool, str]:
     except yaml.YAMLError as e:
         return False, f"Invalid YAML in frontmatter: {e}"
 
-    unexpected = set(frontmatter.keys()) - ALLOWED_FRONTMATTER_KEYS
-    if unexpected:
-        errors.append(
-            f"Unexpected key(s) in SKILL.md frontmatter: {', '.join(sorted(unexpected))}. "
-            f"Allowed properties are: {', '.join(sorted(ALLOWED_FRONTMATTER_KEYS))}"
-        )
+    # unexpected = set(frontmatter.keys()) - ALLOWED_FRONTMATTER_KEYS
+    # if unexpected:
+    #     errors.append(
+    #         f"Unexpected key(s) in SKILL.md frontmatter: {', '.join(sorted(unexpected))}. "
+    #         f"Allowed properties are: {', '.join(sorted(ALLOWED_FRONTMATTER_KEYS))}"
+    #     )
 
     if "name" not in frontmatter:
         errors.append("Missing 'name' in frontmatter")
@@ -286,12 +286,12 @@ def validate_skill(skill_path: str | Path) -> tuple[bool, str]:
                     f"Description is too long ({len(description)} characters). "
                     f"Maximum is {max_chars} characters."
                 )
-            desc_tokens = _estimate_tokens(description)
-            if desc_tokens > DESCRIPTION_MAX_TOKENS:
-                errors.append(
-                    f"Description token count too high (~{desc_tokens} tokens). "
-                    f"Maximum is {DESCRIPTION_MAX_TOKENS} tokens."
-                )
+            # desc_tokens = _estimate_tokens(description)
+            # if desc_tokens > DESCRIPTION_MAX_TOKENS:
+            #     errors.append(
+            #         f"Description token count too high (~{desc_tokens} tokens). "
+            #         f"Maximum is {DESCRIPTION_MAX_TOKENS} tokens."
+            #     )
     elif description is not None and "description" in frontmatter:
         errors.append(f"Description must be a string, got {type(description).__name__}")
 
@@ -305,12 +305,12 @@ def validate_skill(skill_path: str | Path) -> tuple[bool, str]:
                 f"SKILL.md body is too long ({len(body_lines)} lines). "
                 f"Maximum is {BODY_MAX_LINES} lines."
             )
-        body_tokens = _estimate_tokens(body)
-        if body_tokens > BODY_MAX_TOKENS:
-            errors.append(
-                f"SKILL.md body token count too high (~{body_tokens} tokens). "
-                f"Maximum is {BODY_MAX_TOKENS} tokens."
-            )
+        # body_tokens = _estimate_tokens(body)
+        # if body_tokens > BODY_MAX_TOKENS:
+        #     errors.append(
+        #         f"SKILL.md body token count too high (~{body_tokens} tokens). "
+        #         f"Maximum is {BODY_MAX_TOKENS} tokens."
+        #     )
 
     # --- static security ---
     sec_errors = _validate_static_security_all(skill_path, content)

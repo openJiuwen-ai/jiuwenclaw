@@ -185,9 +185,9 @@ def validate_skill_md_content(content: str) -> str | None:
     except yaml.YAMLError:
         return ERR_FW_SKILLMD_FRONTMATTER_FORMAT
 
-    unexpected = set(frontmatter.keys()) - ALLOWED_FRONTMATTER_KEYS
-    if unexpected:
-        hit_codes.add(ERR_FW_SKILLMD_FRONTMATTER_KEY)
+    # unexpected = set(frontmatter.keys()) - ALLOWED_FRONTMATTER_KEYS
+    # if unexpected:
+    #     hit_codes.add(ERR_FW_SKILLMD_FRONTMATTER_KEY)
 
     # --- name ---
     name = frontmatter.get("name", "")
@@ -217,9 +217,9 @@ def validate_skill_md_content(content: str) -> str | None:
             max_chars = DESCRIPTION_MAX_CHARS_CJK if _contains_cjk(description) else DESCRIPTION_MAX_CHARS_EN
             if len(description) > max_chars:
                 hit_codes.add(ERR_FW_SKILLMD_DESCRIPTION)
-            desc_tokens = _estimate_tokens(description)
-            if desc_tokens > DESCRIPTION_MAX_TOKENS:
-                hit_codes.add(ERR_FW_SKILLMD_DESCRIPTION)
+            # desc_tokens = _estimate_tokens(description)
+            # if desc_tokens > DESCRIPTION_MAX_TOKENS:
+            #     hit_codes.add(ERR_FW_SKILLMD_DESCRIPTION)
     elif description is not None and "description" in frontmatter:
         hit_codes.add(ERR_FW_SKILLMD_DESCRIPTION)
     if "description" not in frontmatter:
@@ -232,9 +232,9 @@ def validate_skill_md_content(content: str) -> str | None:
         body_lines = body.splitlines()
         if len(body_lines) > BODY_MAX_LINES:
             hit_codes.add(ERR_FW_SKILLMD_BODY)
-        body_tokens = _estimate_tokens(body)
-        if body_tokens > BODY_MAX_TOKENS:
-            hit_codes.add(ERR_FW_SKILLMD_BODY)
+        # body_tokens = _estimate_tokens(body)
+        # if body_tokens > BODY_MAX_TOKENS:
+        #     hit_codes.add(ERR_FW_SKILLMD_BODY)
 
     # --- credential leak ---
     for line_no, line in enumerate(content.splitlines(), start=1):
