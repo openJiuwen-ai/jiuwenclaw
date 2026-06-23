@@ -106,6 +106,10 @@ async def _run(host: str, port: int) -> None:
     await extension_manager.load_all_extensions()
     logger.info("[AgentServer] 扩展加载完成，共 %d 个", len(extension_manager.list_extensions()))
 
+    from jiuwenclaw.agentserver.code_source_unicode import register_code_source_unicode_hook
+
+    register_code_source_unicode_hook()
+
     # ---------- Telemetry 初始化 ----------
     init_telemetry()
 

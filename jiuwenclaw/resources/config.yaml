@@ -274,6 +274,11 @@ models:
       # font_path: "C:/Windows/Fonts/msyh.ttc"
       font_path: ""
 
+# 生成代码可读性：Prompt 约束 + Python 源码 \uXXXX 兜底转换（仅 .py/.pyw）
+# 设为 false 可紧急关闭整套能力
+code_generation:
+  unicode_readable: true
+
 telemetry:
   enabled: false                    # 总开关（环境变量 OTEL_ENABLED 优先）
   exporter: otlp                    # otlp / console / none
