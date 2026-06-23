@@ -2576,14 +2576,15 @@ class MessageHandler(ABC):
                     file_path = result.get("file_path", "")
                     filename = Path(file_path).name
                     logger.info(
-                        "[MessageHandler] 文件下载完成: transfer_id=%s path=%s",
+                        "[MessageHandler] 文件下载完成: transfer_id=%s path=%s channel_id=%s",
                         payload.get("transfer_id"),
                         file_path,
+                        channel_id,
                     )
 
-                    # 检查 AGENT_RUNTIME 环境变量，决定是否推送到 Web Server
+                    # 检查是否应该推送到 Web Server：仅当 channel_id 为 "web" 且设置了 AGENT_RUNTIME 时
                     agent_runtime = os.getenv("AGENT_RUNTIME", "").strip()
-                    should_push_to_web = agent_runtime != ""
+                    should_push_to_web = (channel_id == "web") and (agent_runtime != "")
 
                     if should_push_to_web:
                         # 推送文件到 Web Server 并获取 Web Server 的下载信息

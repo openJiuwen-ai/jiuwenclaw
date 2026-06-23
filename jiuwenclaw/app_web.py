@@ -796,9 +796,14 @@ class _SpaStaticHandler(SimpleHTTPRequestHandler):
             received_dir = Path("./web_received_files")
             received_dir.mkdir(parents=True, exist_ok=True)
 
-            # 生成安全的文件名
-            safe_name = f"{int(time.time())}_{filename}"
-            local_path = received_dir / safe_name
+            # 使用时间戳命名的子文件夹避免冲突，保持原始文件名不变
+            timestamp_folder = str(int(time.time()))
+            session_dir = received_dir / timestamp_folder
+            session_dir.mkdir(parents=True, exist_ok=True)
+
+            # 使用原始文件名
+            safe_name = filename
+            local_path = session_dir / safe_name
 
             # 写入文件
             with open(local_path, "wb") as f:
@@ -810,11 +815,12 @@ class _SpaStaticHandler(SimpleHTTPRequestHandler):
 
             self.logger.info("[WebServer] 接收文件推送: %s -> %s", filename, local_path)
 
-            # 生成 Web 本地的下载 Token
+            # 生成 Web 本地的下载 Token（3个月有效期）
             download_info = build_file_download_info(
                 file_path=str(local_path),
                 file_name=filename,
                 session_id=session_id,
+                expires_in=90 * 24 * 3600,  # 90天 = 7776000秒
             )
 
             # 返回成功响应，包含下载信息

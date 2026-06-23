@@ -1571,7 +1571,7 @@ class JiuWenClawDeepAdapter:
         try:
             endpoint = get_sandbox_endpoint()
             runtime = get_sandbox_runtime()
-            work_dir = self._workspace_dir or str(get_agent_root_dir())
+            shared_dir = get_agent_root_dir()
             sandbox_url = endpoint.get("url") or ""
             sandbox_type = endpoint.get("type") or ""
             sandbox_enabled = bool(runtime.get("enabled"))

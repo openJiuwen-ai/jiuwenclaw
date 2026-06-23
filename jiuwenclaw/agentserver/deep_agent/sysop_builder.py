@@ -90,36 +90,16 @@ def _relax_workspace_perms(root: Path) -> None:
         _relax_workspace_perms(child)
 
 
-def _resolve_workspace_dir(workspace_dir: str | Path | None) -> Path | None:
-    """Resolve and ensure the deep agent workspace dir exists & is sandbox-writable.
-
-    The deep agent's :class:`Workspace` (``root_path``) is the sandbox's
-    main writable root: ``init_workspace`` writes ``.workspace`` markers
-    plus ``MEMORY.md`` / ``HEARTBEAT.md`` / ... inside it. bwrap requires
-    the bind source to exist before launch, so we ``mkdir -p`` it here
-    (matches what :class:`DirectoryBuilder` would do on first run, just
-    earlier so the sandbox bind can succeed). After ensuring the dir
-    exists we also recursively relax perms via :func:`_relax_workspace_perms`
-    so the sandbox uid can actually write through the bind mount; see that
-    function's docstring for the userns-drop-to-sandbox-uid rationale.
-
-    Returns ``None`` when:
-      - ``workspace_dir`` is empty / not provided;
-      - the path can't be created (e.g. permission denied on the parent).
-
-    A ``None`` return is treated by :func:`build_filesystem_policy` as
-    "skip silently": the sandbox launches without an agent-workspace
-    bind, which lets non-deep-agent callers reuse this builder without
-    being forced to provide a workspace path.
-    """
-    if not workspace_dir:
+def _resolve_shared_dir(shared_dir: str | Path | None) -> Path | None:
+    """Resolve and ensure the deep agent shared dir exists & is sandbox-writable."""
+    if not shared_dir:
         return None
     try:
-        resolved = Path(workspace_dir).expanduser()
+        resolved = Path(shared_dir).expanduser()
     except (TypeError, ValueError) as exc:
         logger.warning(
-            "[sysop_builder] workspace_dir %r invalid: %s; skipping bind",
-            workspace_dir, exc,
+            "[sysop_builder] shared_dir %r invalid: %s; skipping bind",
+            shared_dir, exc,
         )
         return None
     try:
@@ -145,33 +125,9 @@ def _resolve_workspace_dir(workspace_dir: str | Path | None) -> Path | None:
 def build_filesystem_policy(
     files_runtime: dict[str, Any] | None,
     *,
-    workspace_dir: str | Path | None = None,
+    shared_dir: str | Path | None = None,
 ) -> tuple[dict[str, Any], list[dict[str, str]]]:
-    """组装 jiuwenbox 沙箱的 filesystem policy.
-
-    Args:
-        files_runtime: ``config.yaml::sandbox.files`` 的字典，可能包含
-            ``allow`` / ``deny`` 列表（项支持 str 或 {path, permissions} 形式）
-        workspace_dir: deep agent 的 ``Workspace.root_path`` (例如
-            ``~/.jiuwenclaw/service_default/agent_default/agent/jiuwenclaw_workspace``).
-            若提供则整体以 ``mode=rw`` bind 进沙箱, 使 ``init_workspace`` 能在
-            其子目录 (memory / todo / messages / ...) 写 ``.workspace`` marker
-            与 ``MEMORY.md`` 等模板文件; ``None`` 时不挂工作区 (允许非 deep
-            agent 调用方复用本 builder).
-
-    Returns:
-        ``(policy_dict, upload_list)``:
-        - ``policy_dict``: ``{"filesystem_policy": {"files": [...], "directories":
-          [...], "bind_mounts": [...], "read_write": [...], "read_only": [...]}}``;
-        - ``upload_list``: 当前一律返回 ``[]``。 该字段是 jiuwenbox provider
-          的 ``preserve_files_upload`` 字段约定 (元素形如
-          ``{host_path, sandbox_path, kind}``); ``mount`` 模式下 agent
-          工作区走 ``bind_mounts``, 不需要 upload, 该列表始终为空。
-
-    Raises:
-        FileNotFoundError: 当 ``files.allow`` / ``files.deny`` 中任何一条 path
-            在 host 上不存在时抛出。
-    """
+    """组装 jiuwenbox 沙箱的 filesystem policy."""
     files_runtime = files_runtime or {}
 
     allow_files: list[dict[str, Any]] = []
@@ -215,7 +171,7 @@ def build_filesystem_policy(
         if sandbox_path not in read_only_promote:
             read_only_promote.append(sandbox_path)
 
-    workspace_root = _resolve_workspace_dir(workspace_dir)
+    workspace_root = _resolve_shared_dir(shared_dir)
     if workspace_root is not None:
         workspace_str = str(workspace_root)
         _record_rw_bind(workspace_str, workspace_str)
@@ -271,39 +227,13 @@ def create_sandbox_sysop_card(
     sandbox_type: str,
     agent_id: str,
     *,
-    workspace_dir: str | Path | None = None,
+    shared_dir: str | Path | None = None,
     files_runtime: dict[str, Any] | None = None,
     excluded_commands: list[str] | None = None,
     idle_ttl_seconds: int | None = None,
     idle_check_interval: int | None = None,
 ) -> SysOperationCard | None:
-    """构造 jiuwenbox 沙箱模式 SysOperationCard.
-
-    Args:
-        sandbox_url: jiuwenbox HTTP 服务的 base url, 例如 ``http://127.0.0.1:8321``
-        sandbox_type: jiuwenbox provider 名, 通常为 ``jiuwenbox``
-        workspace_dir: deep agent 的 ``Workspace.root_path`` (例如
-            ``~/.jiuwenclaw/service_default/agent_default/agent/jiuwenclaw_workspace``);
-            透传给 :func:`build_filesystem_policy` 让其作为 rw bind mount,
-            使沙箱里 ``init_workspace`` / heartbeat / memory 等写入能直达 host。
-        files_runtime: ``sandbox.files`` 字典, 含 allow/deny (来源现在是 env var,
-            见 :func:`get_sandbox_runtime`)
-        excluded_commands: 命令 glob 列表; 命中时 provider 直接走本地
-        idle_ttl_seconds: 沙箱空闲超时 (秒). 默认 ``None`` 表示不进行 idle 驱逐;
-            jiuwenbox provider 会把它转成 ``timeout.idle_timeout`` 注入到
-            ``create_sandbox`` 的 policy 中。 历史上默认 600s, 切换到 env var
-            驱动后改为 ``None`` (不淘汰), 与 ``TimeoutPolicy.idle_timeout`` 的
-            默认语义保持一致。
-        idle_check_interval: idle reaper 轮询间隔 (秒). 默认 ``None`` 让
-            jiuwenbox 服务端使用自身默认值 (``TimeoutPolicy.idle_check_interval``,
-            目前为 60s); jiuwenbox provider 会把它转成
-            ``timeout.idle_check_interval`` 注入到 policy 中。
-
-    Returns:
-        构造成功返回 ``SysOperationCard``; 失败 (``build_filesystem_policy``
-        抛出 ``FileNotFoundError`` / 其他 ``ValueError`` 之类) 返回 ``None``,
-        异常被捕获记 warning。
-    """
+    """构造 jiuwenbox 沙箱模式 SysOperationCard."""
     # 触发 jiuwenbox provider 注册（@SandboxRegistry.provider 装饰器副作用）
     try:
         import openjiuwen.extensions.sys_operation.sandbox.providers  # noqa: F401
@@ -317,7 +247,7 @@ def create_sandbox_sysop_card(
     try:
         policy, upload_list = build_filesystem_policy(
             files_runtime,
-            workspace_dir=workspace_dir,
+            shared_dir=shared_dir,
         )
         extra_params: dict[str, Any] = {
             "policy": policy,
@@ -360,7 +290,7 @@ def create_sandbox_sysop_card(
         logger.info(
             "[sysop_builder] sandbox SysOperationCard created:\n"
             "  base_url=%s sandbox_type=%s\n"
-            "  workspace_dir=%s\n"
+            "  shared_dir=%s\n"
             "  idle_ttl=%s idle_check_interval=%s\n"
             "  preserve_file_sharing_mode=%s\n"
             "  excluded_commands(%d)=%s\n"
@@ -373,7 +303,7 @@ def create_sandbox_sysop_card(
             "  policy_mode=%s",
             sandbox_url,
             sandbox_type,
-            workspace_dir,
+            shared_dir,
             idle_ttl_seconds,
             idle_check_interval,
             _PRESERVE_FILE_SHARING_MODE,
