@@ -51,10 +51,9 @@ export function createModeCommand(): SlashCommand {
   return {
     name: "mode",
     description: "Switch chat mode",
-    usage: "/mode <agent|code|code.normal|code.team|team|team.normal>",
+    usage: "/mode <agent|code|code.plan|code.normal|code.team|team|team.plan>",
     example: "/mode code",
     kind: CommandKind.BUILT_IN,
-    hidden: true,
     takesArgs: true,
     completion: async () => [...directModes],
     action: async (ctx, args) => {

@@ -63,6 +63,14 @@ def build_a2ui_autonomy_instruction(language: str = "en") -> str:
         "use Text literalString emoji or text labels instead so ligature fallback "
         "text does not appear."
     )
+    unsupported_component_rule_en = (
+        " A2UI 0.8 does not support modal, dialog, popup, alert, toast, "
+        "floating overlay, or closeable window components. Do not simulate these "
+        "with absolute-positioned cards or fake close buttons. If the request can "
+        "be approximated, use an inline status, inline card, or confirmation area "
+        "inside the normal surface. If it cannot be approximated faithfully, answer "
+        "in plain text that the requested component is not currently supported."
+    )
     autonomy_rule_en = (
         " A2UI is optional. Use A2UI only when a generated interface improves "
         "the user's experience over plain text. Do not force A2UI for greetings, "
@@ -91,6 +99,7 @@ def build_a2ui_autonomy_instruction(language: str = "en") -> str:
         + template_binding_rule_en
         + image_url_rule_en
         + icon_font_rule_en
+        + unsupported_component_rule_en
     )
 
     template_binding_rule_zh = (
@@ -106,6 +115,12 @@ def build_a2ui_autonomy_instruction(language: str = "en") -> str:
         " 不要编造图片 URL。如果需要外部事实或图片，可以短暂使用可用工具，"
         "随后必须收敛到最终 A2UI 响应。使用用户提供的 HTTPS URL "
         "或已验证的稳定来源 URL；不要使用猜测出来的 upload.wikimedia.org thumbnail 路径。"
+    )
+    unsupported_component_rule_zh = (
+        " A2UI 0.8 不支持弹窗、模态框、dialog、popup、alert、toast、浮层、"
+        "悬浮覆盖层或可关闭窗口组件。不要用绝对定位卡片或假的关闭按钮模拟这些组件。"
+        "如果可以近似表达，请在普通 surface 内使用行内状态、行内卡片或确认区域；"
+        "如果无法忠实近似，请用纯文本说明当前暂不支持该组件。"
     )
     autonomy_rule_zh = (
         " A2UI 是可选能力。只有当生成式 UI 比纯文本更能改善用户体验时才使用 A2UI。"
@@ -127,6 +142,7 @@ def build_a2ui_autonomy_instruction(language: str = "en") -> str:
         + template_binding_rule_zh
         + image_url_rule_zh
         + icon_font_rule_en
+        + unsupported_component_rule_zh
         + autonomy_rule_zh
         + browser_preflight_rule_en
         + hotel_booking_flow_rule_en

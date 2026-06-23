@@ -58,6 +58,16 @@ After successful startup, the terminal will display backend service status:
 
 When you see similar output, the service is ready. Open `http://localhost:5173` in your browser to use.
 
+### Terminal CLI
+
+You can also chat with JiuwenSwarm directly from the terminal:
+
+```bash
+jiuwenswarm chat "Hello, introduce yourself"
+```
+
+For details, see [CLI / Terminal Chat](CLI.md#terminal-cli-jiuwenswarm-chat).
+
 ### Remote Access (Optional)
 
 For remote access, run the following commands:

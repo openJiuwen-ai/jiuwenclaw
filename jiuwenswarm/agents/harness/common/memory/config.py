@@ -196,7 +196,7 @@ def _resolve_mode_memory(mode: str, config: Optional[Dict[str, Any]]) -> Dict[st
     Accepts several mode formats used across the codebase:
       - "agent.plan" / "agent.fast"  -> modes.agent.plan / modes.agent.fast
       - "plan" / "fast"              -> modes.agent.plan / modes.agent.fast
-      - "code"                       -> modes.code
+      - "code" / "code.normal"       -> modes.code
     Returns {} when no block is found (callers treat missing as disabled).
     """
     modes_cfg = (config or {}).get("modes", {}) if isinstance(config, dict) else {}
@@ -206,9 +206,13 @@ def _resolve_mode_memory(mode: str, config: Optional[Dict[str, Any]]) -> Dict[st
     token = (mode or "").strip()
     if "." in token:
         top, sub = token.split(".", 1)
-        node = modes_cfg.get(top, {})
-        if isinstance(node, dict):
-            node = node.get(sub, {})
+        # Special handling for "code.*" -> modes.code (ignore sub_mode)
+        if top == "code":
+            node = modes_cfg.get("code", {})
+        else:
+            node = modes_cfg.get(top, {})
+            if isinstance(node, dict):
+                node = node.get(sub, {})
     elif token == "code":
         node = modes_cfg.get("code", {})
     else:
@@ -231,9 +235,17 @@ def is_memory_enabled(mode: str, config: Optional[Dict[str, Any]] = None) -> boo
     Args:
         config: Optional config dict. If provided, reads from it directly
                 (avoids stale cache). Otherwise reads from config.yaml.
+
+    Note:
+        For 'code' mode, default is True (CodingMemoryRail was always mounted before).
+        For agent modes (plan/fast), default is False.
     """
     try:
-        return bool(_resolve_mode_memory(mode, config).get("enabled", False))
+        mem_cfg = _resolve_mode_memory(mode, config)
+        # code 模式默认开启（之前 CodingMemoryRail 是固定挂载的）
+        # agent 模式默认关闭
+        default_value = True if mode == "code" else False
+        return bool(mem_cfg.get("enabled", default_value))
     except Exception as e:
         logger.warning(f"Invalid memory config, disable memory, error: {e}")
         return False

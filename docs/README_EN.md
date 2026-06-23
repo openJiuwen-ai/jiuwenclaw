@@ -160,8 +160,8 @@ This page collects common JiuwenSwarm usage instructions, feature documentation,
     </tr>
     <tr>
       <td width="22%"><strong>Memory</strong></td>
-      <td width="28%"><a href="en/Memory.md">Memory</a> / <a href="en/CodingMemory.md">Coding Memory</a> / <a href="en/TaskMemory.md">Task Memory</a></td>
-      <td width="50%">Supports short-term and long-term memory management, code-specific memory accumulation, and task experience retrieval, reuse, and continuous accumulation.</td>
+      <td width="28%"><a href="en/Memory.md">Memory</a> / <a href="en/AutoMemory.md">Auto Memory</a> / <a href="en/CodingMemory.md">Coding Memory</a> / <a href="en/TaskMemory.md">Task Memory</a></td>
+      <td width="50%">Supports short-term and long-term memory management, automatic post-conversation memory extraction, code-specific memory accumulation, and task experience retrieval, reuse, and continuous accumulation.</td>
     </tr>
     <tr>
       <td width="22%"><strong>TUI Mode</strong></td>

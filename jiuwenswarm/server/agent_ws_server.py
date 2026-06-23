@@ -39,7 +39,12 @@ from jiuwenswarm.agents.harness.common.rails.permissions.permissions_persist imp
 from jiuwenswarm.extensions.hooks_context import AgentServerChatHookContext
 from jiuwenswarm.server.runtime.agent_manager import AgentManager, ACP_DEFAULT_CAPABILITIES
 from jiuwenswarm.server.runtime.session.session_metadata import get_all_sessions_metadata, remove_session_metadata_cache
-from jiuwenswarm.server.runtime.session.session_history import append_compact_history_records, read_team_history_records
+from jiuwenswarm.server.runtime.session.session_history import (
+    append_compact_history_records,
+    history_exists,
+    load_history_records,
+    read_team_history_records,
+)
 from jiuwenswarm.server.runtime.agent_adapter.sysop_builder import (
     build_filesystem_policy,
     find_auto_managed_match,
@@ -290,6 +295,24 @@ def resolve_request_project_dir(request: AgentRequest) -> str | None:
         if isinstance(first, str) and first.strip():
             return first.strip()
     return None
+
+
+def _harness_error_code(exc: BaseException) -> str:
+    """Map a harness package exception to a wire ``code`` for the frontend.
+
+    Mirrors the import/export code mapping in app_web_handlers.py so the web UI
+    can localize the error via ``err.code`` instead of showing the raw backend
+    message (which is locale-unaware). Keep in sync with the frontend
+    ``resolveHarnessError`` code→i18n mapping.
+    """
+    msg = str(exc).lower()
+    if "already active" in msg or "already exists" in msg:
+        return "CONFLICT"
+    if "not found" in msg:
+        return "NOT_FOUND"
+    if "native" in msg:
+        return "BAD_REQUEST"
+    return "BAD_REQUEST"
 
 
 def resolve_agent_request_mode(raw_mode: Any) -> tuple[str, str | None, str]:
@@ -2337,6 +2360,25 @@ class AgentWebSocketServer:
             dispatch_permissions_config_request
 
         resp = dispatch_permissions_config_request(request)
+
+        # After any successful mutation (delete / update / set / create),
+        # reload agent config so the PermissionInterruptRail picks up the
+        # change immediately instead of waiting for the next tool call's
+        # get_permissions_snapshot refresh.
+        read_only_methods = {
+            ReqMethod.PERMISSIONS_TOOLS_GET,
+            ReqMethod.PERMISSIONS_RULES_GET,
+            ReqMethod.PERMISSIONS_APPROVAL_OVERRIDES_GET,
+        }
+        if resp.ok and request.req_method not in read_only_methods:
+            try:
+                await self._agent_manager.reload_agents_config()
+            except Exception:
+                logger.debug(
+                    "[AgentWebSocketServer] post-permissions reload failed (non-critical)",
+                    exc_info=True,
+                )
+
         wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
         async with send_lock:
             await ws.send(json.dumps(wire, ensure_ascii=False))
@@ -2578,6 +2620,7 @@ class AgentWebSocketServer:
                     payload={
                         "event_type": "history.message",
                         "message": item,
+                        "session_id": str(session_id or ""),
                         "total_pages": total_pages,
                         "page_idx": page,
                     },
@@ -2597,6 +2640,7 @@ class AgentWebSocketServer:
             payload={
                 "event_type": "history.message",
                 "status": "done",
+                "session_id": str(session_id or ""),
                 "total_pages": total_pages,
                 "page_idx": page,
             },
@@ -3446,15 +3490,32 @@ class AgentWebSocketServer:
                             logger.info("[command.mcp] add pre-check ok: %s", check_msg)
 
                 if not pre_check_failed:
+                    # 对于 update，先读旧配置，判断是否真有变化
+                    name = server_payload.get("name", "")
+                    old_item = get_mcp_server_config(name) if name else None
+
                     _, created = upsert_mcp_server_in_config(server_payload)
                     applied = True
                     error_message = ""
-                    try:
-                        await self._agent_manager.reload_agents_config(get_config(), None)
-                    except Exception as reload_exc:  # noqa: BLE001
-                        applied = False
-                        error_message = str(reload_exc)
-                        logger.warning("[command.mcp] reload after add failed: %s", reload_exc)
+
+                    # 判断是否需要 reload: 新增必然需要；更新时做完整比较，
+                    # 配置完全一致才跳过（dict 比较成本极低，避免漏字段导致改了不生效）。
+                    config_changed = created
+                    if not created and old_item is not None:
+                        config_changed = (dict(old_item) != dict(server_payload))
+                        if not config_changed:
+                            logger.info(
+                                "[command.mcp] add/update skipped reload: '%s' config unchanged", name
+                            )
+
+                    if config_changed:
+                        try:
+                            await self._agent_manager.reload_agents_config(get_config(), None)
+                        except Exception as reload_exc:  # noqa: BLE001
+                            applied = False
+                            error_message = str(reload_exc)
+                            logger.warning("[command.mcp] reload after add failed: %s", reload_exc)
+
                     resp_payload: dict[str, Any] = {
                         "type": "added" if created else "updated",
                         "name": server_payload["name"],
@@ -3473,15 +3534,40 @@ class AgentWebSocketServer:
                 if not name:
                     raise ValueError("MCP server name is required")
                 enabled = action == "enable"
+
+                # 读取旧状态以判断 enabled 是否真的变化（容忍读取失败/不存在，
+                # 此时回退为"按变化处理"，由 set_mcp_server_enabled_in_config 自己
+                # 校验存在性并在缺失时抛 KeyError 交外层统一处理）。
+                old_enabled = None
+                try:
+                    old_item = get_mcp_server_config(name)
+                    if old_item is not None:
+                        old_enabled = bool(old_item.get("enabled", True))
+                except Exception:  # noqa: BLE001
+                    old_enabled = None
+
+                # set_mcp_server_enabled_in_config 在 server 不存在时抛 KeyError，
+                # 由外层统一返回 MCP_NOT_FOUND。
                 item = set_mcp_server_enabled_in_config(name, enabled)
+
+                # 只有 enabled 状态真的改变才需要 reload；无法判断旧状态时保守 reload。
+                config_changed = (old_enabled is None) or (old_enabled != enabled)
+                if not config_changed:
+                    logger.info(
+                        "[command.mcp] %s skipped reload: '%s' already %s",
+                        action, name, "enabled" if enabled else "disabled",
+                    )
+
                 applied = True
                 error_message = ""
-                try:
-                    await self._agent_manager.reload_agents_config(get_config(), None)
-                except Exception as reload_exc:  # noqa: BLE001
-                    applied = False
-                    error_message = str(reload_exc)
-                    logger.warning("[command.mcp] reload after %s failed: %s", action, reload_exc)
+                if config_changed:
+                    try:
+                        await self._agent_manager.reload_agents_config(get_config(), None)
+                    except Exception as reload_exc:  # noqa: BLE001
+                        applied = False
+                        error_message = str(reload_exc)
+                        logger.warning("[command.mcp] reload after %s failed: %s", action, reload_exc)
+
                 payload = {
                     "type": "enabled" if enabled else "disabled",
                     "name": name,
@@ -3500,6 +3586,8 @@ class AgentWebSocketServer:
                 name = str(params.get("name", "")).strip()
                 if not name:
                     raise ValueError("MCP server name is required")
+                # remove_mcp_server_in_config 在 server 不存在时抛 KeyError，
+                # 由外层统一返回 MCP_NOT_FOUND，且不会触发 reload（删除不存在 = 无变化）。
                 removed = remove_mcp_server_in_config(name)
                 applied = True
                 error_message = ""
@@ -5181,11 +5269,11 @@ class AgentWebSocketServer:
         if not isinstance(page_idx, int) or page_idx <= 0:
             return None
 
-        history_path: Path = get_agent_sessions_dir() / session_id.strip() / "history.json"
-        if not history_path.exists():
+        normalized_session_id = session_id.strip()
+        if not history_exists(normalized_session_id):
             return None
         try:
-            raw = json.loads(history_path.read_text(encoding="utf-8"))
+            raw = load_history_records(normalized_session_id)
         except Exception:
             return None
         if not isinstance(raw, list):
@@ -5207,7 +5295,7 @@ class AgentWebSocketServer:
         page_messages = ordered[start:end]
         logger.debug(
             "[history.get] session_id=%s page_idx=%s raw_total=%s restorable_total=%s total_pages=%s returned=%s",
-            session_id.strip(),
+            normalized_session_id,
             page_idx,
             len(raw),
             total,
@@ -5572,7 +5660,7 @@ class AgentWebSocketServer:
                 request_id=request.request_id,
                 channel_id=request.channel_id,
                 ok=False,
-                payload={"error": "missing package_id"},
+                payload={"error": "missing package_id", "code": "BAD_REQUEST"},
             )
             wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
             async with send_lock:
@@ -5617,7 +5705,7 @@ class AgentWebSocketServer:
                 request_id=request.request_id,
                 channel_id=request.channel_id,
                 ok=False,
-                payload={"error": str(exc)},
+                payload={"error": str(exc), "code": _harness_error_code(exc)},
             )
         except Exception as exc:
             logger.exception("[AgentServer] harness.packages.activate failed: %s", exc)
@@ -5625,7 +5713,7 @@ class AgentWebSocketServer:
                 request_id=request.request_id,
                 channel_id=request.channel_id,
                 ok=False,
-                payload={"error": str(exc)},
+                payload={"error": str(exc), "code": "INTERNAL_ERROR"},
             )
 
         wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
@@ -5644,7 +5732,7 @@ class AgentWebSocketServer:
                 request_id=request.request_id,
                 channel_id=request.channel_id,
                 ok=False,
-                payload={"error": "missing package_id"},
+                payload={"error": "missing package_id", "code": "BAD_REQUEST"},
             )
             wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
             async with send_lock:
@@ -5684,7 +5772,7 @@ class AgentWebSocketServer:
                 request_id=request.request_id,
                 channel_id=request.channel_id,
                 ok=False,
-                payload={"error": str(exc)},
+                payload={"error": str(exc), "code": _harness_error_code(exc)},
             )
         except Exception as exc:
             logger.exception("[AgentServer] harness.packages.deactivate failed: %s", exc)
@@ -5692,7 +5780,7 @@ class AgentWebSocketServer:
                 request_id=request.request_id,
                 channel_id=request.channel_id,
                 ok=False,
-                payload={"error": str(exc)},
+                payload={"error": str(exc), "code": "INTERNAL_ERROR"},
             )
 
         wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
@@ -5711,7 +5799,7 @@ class AgentWebSocketServer:
                 request_id=request.request_id,
                 channel_id=request.channel_id,
                 ok=False,
-                payload={"error": "missing package_id"},
+                payload={"error": "missing package_id", "code": "BAD_REQUEST"},
             )
             wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
             async with send_lock:
@@ -5723,7 +5811,7 @@ class AgentWebSocketServer:
                 request_id=request.request_id,
                 channel_id=request.channel_id,
                 ok=False,
-                payload={"error": "Cannot delete native agent version"},
+                payload={"error": "Cannot delete native agent version", "code": "BAD_REQUEST"},
             )
             wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
             async with send_lock:
@@ -5761,7 +5849,7 @@ class AgentWebSocketServer:
                 request_id=request.request_id,
                 channel_id=request.channel_id,
                 ok=False,
-                payload={"error": str(exc)},
+                payload={"error": str(exc), "code": _harness_error_code(exc)},
             )
         except Exception as exc:
             logger.exception("[AgentServer] harness.packages.delete failed: %s", exc)
@@ -5769,7 +5857,7 @@ class AgentWebSocketServer:
                 request_id=request.request_id,
                 channel_id=request.channel_id,
                 ok=False,
-                payload={"error": str(exc)},
+                payload={"error": str(exc), "code": "INTERNAL_ERROR"},
             )
 
         wire = encode_agent_response_for_wire(resp, response_id=request.request_id)

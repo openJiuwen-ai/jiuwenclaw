@@ -13,6 +13,7 @@ interface CronJobPayload {
   targets: string;
   mode: string;
   delete_after_run: boolean;
+  timeout_seconds?: number | null;
   created_at: number | null;
   updated_at: number | null;
 }
@@ -21,8 +22,68 @@ interface CronJobListPayload {
   jobs: CronJobPayload[];
 }
 
+interface CronJobMetaPayload {
+  modes: string[];
+  default_mode: string;
+  default_timeout_seconds?: number;
+  default_team_timeout_seconds?: number;
+}
+
 const TARGET_CHANNELS = ["tui", "web", "feishu", "whatsapp", "wecom", "xiaoyi", "wechat", "dingtalk"];
-const MODES = ["agent", "plan"];
+
+let cachedCronMeta: CronJobMetaPayload | null = null;
+
+async function loadCronJobMeta(ctx: CommandContext): Promise<CronJobMetaPayload> {
+  if (cachedCronMeta) {
+    return cachedCronMeta;
+  }
+  const payload = await ctx.request("cron.job.meta", {}) as CronJobMetaPayload;
+  cachedCronMeta = {
+    modes: Array.isArray(payload.modes) ? payload.modes : [],
+    default_mode: payload.default_mode || "agent.fast",
+    default_timeout_seconds: payload.default_timeout_seconds ?? 600,
+    default_team_timeout_seconds: payload.default_team_timeout_seconds ?? 1200,
+  };
+  return cachedCronMeta;
+}
+
+function isValidCronMode(modes: string[], mode: string): boolean {
+  return modes.includes(mode.trim().toLowerCase());
+}
+
+const TEAM_MODES = new Set(["team", "team.plan", "code.team"]);
+
+function resolveDefaultTimeoutSeconds(job: Pick<CronJobPayload, "mode">, cronMeta: CronJobMetaPayload): number {
+  const mode = String(job.mode || cronMeta.default_mode || "agent.fast").trim().toLowerCase();
+  return TEAM_MODES.has(mode)
+    ? (cronMeta.default_team_timeout_seconds ?? 1200)
+    : (cronMeta.default_timeout_seconds ?? 600);
+}
+
+function formatTimeoutLabel(
+  job: Pick<CronJobPayload, "mode" | "timeout_seconds">,
+  cronMeta: CronJobMetaPayload,
+): string {
+  const seconds = job.timeout_seconds ?? resolveDefaultTimeoutSeconds(job, cronMeta);
+  const minutes = Math.round(seconds / 60);
+  if (job.timeout_seconds == null) {
+    return `${seconds}s (${minutes}min, default)`;
+  }
+  return `${seconds}s (${minutes}min)`;
+}
+
+const CRON_MAX_TIMEOUT_SECONDS = 72 * 60 * 60;
+
+function validateTimeoutSeconds(raw: string): string | null {
+  const value = parseInt(raw, 10);
+  if (isNaN(value) || value < 60) {
+    return `Invalid timeout_seconds: "${raw}". Must be an integer >= 60`;
+  }
+  if (value > CRON_MAX_TIMEOUT_SECONDS) {
+    return `Invalid timeout_seconds: "${raw}". Must be <= ${CRON_MAX_TIMEOUT_SECONDS}`;
+  }
+  return null;
+}
 
 // ── field validation constants ──
 
@@ -46,12 +107,12 @@ const UPDATE_RESTRICTED_KEYS: Record<string, string> = {
 };
 
 // Keys allowed for /cron add (user-writable fields that make sense on creation)
-const ADD_ALLOWED_KEYS = new Set(["name", "cron_expr", "description", "targets", "timezone", "mode", "wake_offset_seconds", "delete_after_run"]);
+const ADD_ALLOWED_KEYS = new Set(["name", "cron_expr", "description", "targets", "timezone", "mode", "wake_offset_seconds", "delete_after_run", "timeout_seconds"]);
 
 // Keys allowed for /cron update (user-writable fields; includes enabled/expired for power-users)
 const UPDATE_ALLOWED_KEYS = new Set([
   "name", "cron_expr", "description", "targets", "timezone", "mode",
-  "wake_offset_seconds", "delete_after_run", "enabled", "expired",
+  "wake_offset_seconds", "delete_after_run", "enabled", "expired", "timeout_seconds",
 ]);
 
 /**
@@ -195,6 +256,7 @@ export function createCronCommand(): SlashCommand {
       '/cron list\n' +
       '/cron show <id>\n' +
       '/cron add name=晨报 cron_expr="0 9 * * *" description="生成简短的中文健康打卡提醒" targets=tui\n' +
+      '/cron add name=日报 cron_expr="0 9 * * *" description="汇总团队进展" mode=team targets=tui\n' +
       '/cron update <id> description="新的任务内容"\n' +
       "/cron delete <id>\n" +
       "/cron toggle <id> on|off\n" +
@@ -225,7 +287,7 @@ export function createCronCommand(): SlashCommand {
         name: "add",
         description: "创建定时任务",
         usage: "/cron add name=... cron_expr=\"...\" description=\"...\"",
-        argGuide: "name=任务名 cron_expr=\"时间表达式(5字段或7字段)\" description=\"让Agent做什么\" targets=tui",
+        argGuide: "name=任务名 cron_expr=\"时间表达式(5字段或7字段)\" description=\"让Agent做什么\" mode=agent.fast|team targets=tui (默认 agent.fast；mode=team 走 Team+SwarmFlow)",
         kind: CommandKind.BUILT_IN,
         takesArgs: true,
         action: async (ctx, args) => _handleAdd(ctx, `add ${args}`),
@@ -372,6 +434,7 @@ async function _handleShow(ctx: CommandContext, parts: string[]): Promise<void> 
     }
 
     const job = payload.job;
+    const cronMeta = await loadCronJobMeta(ctx);
     const statusTag = job.expired ? "EXPIRED" : job.enabled ? "ON" : "OFF";
     const isOneShot = job.delete_after_run === true;
     const taskType = isOneShot ? "单次任务" : "周期任务";
@@ -388,7 +451,8 @@ async function _handleShow(ctx: CommandContext, parts: string[]): Promise<void> 
           { label: "timezone", value: job.timezone },
           { label: "description", value: job.description || "-" },
           { label: "targets", value: job.targets },
-          { label: "mode", value: job.mode || "agent" },
+          { label: "mode", value: job.mode || cronMeta.default_mode },
+          { label: "timeout_seconds", value: formatTimeoutLabel(job, cronMeta) },
           { label: "wake_offset_seconds", value: String(job.wake_offset_seconds ?? 300) },
           { label: "delete_after_run", value: String(isOneShot) },
         ],
@@ -433,7 +497,7 @@ async function _handleAdd(ctx: CommandContext, raw: string): Promise<void> {
     ctx.addItem(
       addError(
         ctx.sessionId,
-        `缺少必填字段: ${missing.join(", ")}。必填: name(任务名)、cron_expr(时间)、description(让Agent做什么)。示例: /cron add name=晨报 cron_expr="0 9 * * *" description="生成健康打卡提醒" targets=tui`,
+        `缺少必填字段: ${missing.join(", ")}。必填: name(任务名)、cron_expr(时间)、description(让Agent做什么)。示例: /cron add name=晨报 cron_expr="0 9 * * *" description="生成健康打卡提醒" mode=team targets=tui`,
       ),
     );
     return;
@@ -441,7 +505,6 @@ async function _handleAdd(ctx: CommandContext, raw: string): Promise<void> {
 
   if (!kvPairs.targets) kvPairs.targets = "tui";
   if (!kvPairs.timezone) kvPairs.timezone = "Asia/Shanghai";
-  if (!kvPairs.mode) kvPairs.mode = "agent";
 
   // cron_expr syntax validation
   const cronError = validateCronExpr(kvPairs.cron_expr);
@@ -464,9 +527,20 @@ async function _handleAdd(ctx: CommandContext, raw: string): Promise<void> {
     return;
   }
 
-  if (!MODES.includes(kvPairs.mode.toLowerCase())) {
+  let cronMeta: CronJobMetaPayload;
+  try {
+    cronMeta = await loadCronJobMeta(ctx);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    ctx.addItem(addError(ctx.sessionId, `Failed to load cron mode list: ${message}`));
+    return;
+  }
+
+  if (!kvPairs.mode) kvPairs.mode = cronMeta.default_mode;
+
+  if (!isValidCronMode(cronMeta.modes, kvPairs.mode)) {
     ctx.addItem(
-      addError(ctx.sessionId, `Invalid mode: "${kvPairs.mode}". Valid: ${MODES.join(", ")}`),
+      addError(ctx.sessionId, `Invalid mode: "${kvPairs.mode}". Valid: ${cronMeta.modes.join(", ")}`),
     );
     return;
   }
@@ -486,6 +560,13 @@ async function _handleAdd(ctx: CommandContext, raw: string): Promise<void> {
       return;
     }
   }
+  if (kvPairs.timeout_seconds) {
+    const timeoutError = validateTimeoutSeconds(kvPairs.timeout_seconds);
+    if (timeoutError) {
+      ctx.addItem(addError(ctx.sessionId, timeoutError));
+      return;
+    }
+  }
 
   try {
     const payload = await ctx.request("cron.job.create", {
@@ -497,6 +578,9 @@ async function _handleAdd(ctx: CommandContext, raw: string): Promise<void> {
       mode: kvPairs.mode,
       wake_offset_seconds: parseInt(kvPairs.wake_offset_seconds || "300", 10),
       delete_after_run: kvPairs.delete_after_run === "true",
+      ...(kvPairs.timeout_seconds
+        ? { timeout_seconds: parseInt(kvPairs.timeout_seconds, 10) }
+        : {}),
     }) as { job: CronJobPayload };
 
     const job = payload.job;
@@ -512,6 +596,7 @@ async function _handleAdd(ctx: CommandContext, raw: string): Promise<void> {
           { label: "timezone", value: job.timezone },
           { label: "targets", value: job.targets },
           { label: "mode", value: job.mode },
+          { label: "timeout_seconds", value: job.timeout_seconds == null ? "-" : String(job.timeout_seconds) },
           { label: "enabled", value: String(job.enabled) },
           { label: "delete_after_run", value: String(job.delete_after_run) },
         ],
@@ -609,9 +694,17 @@ async function _handleUpdate(ctx: CommandContext, raw: string, parts: string[]):
     }
   }
   if ("mode" in patch) {
-    const m = String(patch.mode).trim().toLowerCase();
-    if (!MODES.includes(m)) {
-      ctx.addItem(addError(ctx.sessionId, `Invalid mode: "${patch.mode}". Valid: ${MODES.join(", ")}`));
+    let cronMeta: CronJobMetaPayload;
+    try {
+      cronMeta = await loadCronJobMeta(ctx);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      ctx.addItem(addError(ctx.sessionId, `Failed to load cron mode list: ${message}`));
+      return;
+    }
+    const m = String(patch.mode).trim();
+    if (!isValidCronMode(cronMeta.modes, m)) {
+      ctx.addItem(addError(ctx.sessionId, `Invalid mode: "${patch.mode}". Valid: ${cronMeta.modes.join(", ")}`));
       return;
     }
   }
@@ -646,6 +739,14 @@ async function _handleUpdate(ctx: CommandContext, raw: string, parts: string[]):
       return;
     }
     patch.wake_offset_seconds = wos;
+  }
+  if ("timeout_seconds" in patch) {
+    const timeoutError = validateTimeoutSeconds(String(patch.timeout_seconds));
+    if (timeoutError) {
+      ctx.addItem(addError(ctx.sessionId, timeoutError));
+      return;
+    }
+    patch.timeout_seconds = parseInt(String(patch.timeout_seconds), 10);
   }
 
   try {

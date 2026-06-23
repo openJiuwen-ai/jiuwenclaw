@@ -2139,6 +2139,28 @@ class MessageHandler(ABC):
             return False
         return payload.get("is_complete") is True and set(payload.keys()) <= {"is_complete"}
 
+    async def publish_stream_chunk(
+        self,
+        chunk: AgentResponseChunk,
+        *,
+        session_id: str | None,
+        request_metadata: dict[str, Any] | None = None,
+    ) -> bool:
+        """Publish one AgentServer stream chunk (evolution + robot_messages).
+
+        Returns False when the chunk is a terminal stream sentinel.
+        """
+        if self._is_terminal_stream_chunk(chunk):
+            return False
+        await self._handle_evolution_chunk(chunk, session_id, request_metadata)
+        out = self._chunk_to_message(
+            chunk,
+            session_id=session_id,
+            metadata=request_metadata,
+        )
+        await self.publish_robot_messages(out)
+        return True
+
     async def _publish_stream_cancelled_final(
         self,
         request_id: str,
@@ -3140,31 +3162,40 @@ class MessageHandler(ABC):
         has_processing_status_false = False  # 追踪 AgentServer 是否已发送 processing_status=false
         try:
             async for chunk in self._agent_client.send_request_stream(env):
-                # 跳过终止 chunk（仅作为流结束信号，不含实际数据）
                 if self._is_terminal_stream_chunk(chunk):
                     logger.debug(
                         "[MessageHandler] 跳过终止 chunk: request_id=%s",
                         chunk.request_id,
                     )
                     continue
-                await self._handle_evolution_chunk(chunk, session_id, request_metadata)
-                # 携带 request metadata，供 Feishu/Xiaoyi 用平台身份回发
-                # 检查是否是 processing_status=false 事件
-                payload = chunk.payload or {}
-                if isinstance(payload, dict):
-                    if payload.get("event_type") == "chat.processing_status":
-                        if payload.get("is_processing") is False:
-                            has_processing_status_false = True
-
-                out = self._chunk_to_message(
+                published = await self.publish_stream_chunk(
                     chunk,
                     session_id=session_id,
-                    metadata=request_metadata,
+                    request_metadata=request_metadata,
                 )
-                await self.publish_robot_messages(out)
+                if not published:
+                    continue
+                payload = chunk.payload or {}
+                if isinstance(payload, dict):
+                    event_type = payload.get("event_type")
+                    if event_type == "chat.processing_status":
+                        if payload.get("is_processing") is False:
+                            has_processing_status_false = True
+                    elif event_type == "chat.processing_status_deferred":
+                        # Internal placeholder from the cluster-mode
+                        # follow-up short stream: the real round-complete
+                        # signal will be broadcast by the background team
+                        # stream on team.completed. This marker only
+                        # prevents the Gateway from auto-emitting
+                        # is_processing=False when this short stream
+                        # ends, and is NOT forwarded to the frontend.
+                        has_processing_status_false = True
+                        continue
+
                 logger.debug(
                     "[MessageHandler] Stream chunk 已写入 robot_messages: request_id=%s event_type=%s",
-                    chunk.request_id, out.event_type,
+                    chunk.request_id,
+                    payload.get("event_type") if isinstance(payload, dict) else None,
                 )
             logger.info(
                 "[MessageHandler] Stream 正常完成: request_id=%s",

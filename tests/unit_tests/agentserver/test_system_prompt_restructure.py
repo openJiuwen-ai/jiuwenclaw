@@ -327,7 +327,9 @@ async def test_runtime_prompt_uses_runtime_cwd_over_stale_trusted_dir(tmp_path):
     await runtime_rail.before_model_call(ctx)
 
     prompt = builder.build()
-    assert "Current project directory" not in prompt
+    assert "# Current Project Workspace" in prompt
+    assert "Current project directory" in prompt
+    assert "Do not call `pwd`, `ls`" in prompt
     rendered = agent.prompt_attachment_manager.render(
         await agent.prompt_attachment_manager.list_by_filter(session_id="sess1")
     )

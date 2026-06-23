@@ -123,7 +123,7 @@ function buildStatusLines(
     const displayTitle = raw.length > 30 ? raw.slice(0, 30) + "..." : raw;
     left.push(displayTitle);
   }
-  if (snapshot.mode !== "agent.plan") left.push(`mode:${snapshot.mode}`);
+  left.push(`mode:${snapshot.mode}`);
   if (snapshot.transcriptFoldMode !== "none") left.push(`fold:${snapshot.transcriptFoldMode}`);
   const teamWorking =
     isTeamMode(snapshot.mode) &&

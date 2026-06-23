@@ -5,6 +5,7 @@ import {
   parseHistoryJsonFilePreviewMode,
   parseHistoryJsonFileToPreviewMessages,
 } from '../../features/historyRestore';
+import { isHistoryPreviewFile, parseHistoryFileContent } from '../../features/historyFilePreview';
 import { ChatTimelineList } from '../ChatPanel/MessageList';
 import '../ChatPanel/ChatPanel.css';
 
@@ -92,8 +93,8 @@ export function FileViewer({ filePath, fileName, reloadNonce = 0 }: FileViewerPr
   const [fileEncoding, setFileEncoding] = useState<string>('auto');
   const lowerFileName = fileName.toLowerCase();
   const isMarkdown = lowerFileName.endsWith('.md') || lowerFileName.endsWith('.mdx');
-  const isJson = lowerFileName.endsWith('.json');
-  const isHistoryJson = lowerFileName === 'history.json';
+  const isHistoryJson = isHistoryPreviewFile(fileName);
+  const isJson = lowerFileName.endsWith('.json') || lowerFileName.endsWith('.jsonl');
   const isTodoJson = lowerFileName === 'todo.json';
   const isPreviewable = isMarkdown || isJson;
   const fileNotFound = Boolean(error && error.includes('HTTP 404'));
@@ -107,12 +108,12 @@ export function FileViewer({ filePath, fileName, reloadNonce = 0 }: FileViewerPr
       };
     }
     try {
-      const parsed: unknown = JSON.parse(content);
+      const parsed: unknown = isHistoryJson ? parseHistoryFileContent(content) : JSON.parse(content);
       return { parsed, invalid: false };
     } catch {
       return { parsed: null as unknown, invalid: true };
     }
-  }, [isJson, content]);
+  }, [isJson, isHistoryJson, content]);
 
   const historyMessages = useMemo(() => {
     if (!isHistoryJson || !historyChatPreview || !Array.isArray(jsonParseResult.parsed)) {

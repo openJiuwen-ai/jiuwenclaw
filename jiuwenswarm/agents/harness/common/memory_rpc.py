@@ -295,9 +295,9 @@ async def handle_memory_status(
     detailed = params.get("detailed", False)
     config = get_config()
 
-    code_mode = _is_code_mode(mode)
-    enabled = is_memory_enabled(mode, config) if not code_mode else True
-    proactive = is_proactive_memory(mode, config) if not code_mode else False
+    # code 模式现在也有 memory.enabled 配置项，直接读取
+    enabled = is_memory_enabled(mode, config)
+    proactive = is_proactive_memory(mode, config)
 
     result: dict[str, Any] = {
         "current_mode": mode,
@@ -471,9 +471,16 @@ def _update_mode_memory_config(mode: str, field: str, value: bool) -> None:
 
     data = _load_yaml_round_trip(_CONFIG_YAML_PATH)
     modes = data.setdefault("modes", {})
-    agent = modes.setdefault("agent", {})
-    mode_node = agent.setdefault(mode, {})
-    memory = mode_node.setdefault("memory", {})
+
+    # code 模式写入 modes.code.memory，其他模式写入 modes.agent.<mode>.memory
+    if _is_code_mode(mode):
+        code_node = modes.setdefault("code", {})
+        memory = code_node.setdefault("memory", {})
+    else:
+        agent = modes.setdefault("agent", {})
+        mode_node = agent.setdefault(mode, {})
+        memory = mode_node.setdefault("memory", {})
+
     memory[field] = value
     _dump_yaml_round_trip(_CONFIG_YAML_PATH, data)
 

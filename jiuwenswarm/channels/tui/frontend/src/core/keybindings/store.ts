@@ -51,26 +51,43 @@ function buildResolved(blocks: KeybindingBlock[]): ResolvedBindings {
   return resolved;
 }
 
-/** Apply a user block on top of an already-resolved map, collecting warnings. */
+/**
+ * Apply a user block on top of an already-resolved map, collecting warnings.
+ * Returns true if the block contains duplicate keys (fatal — the entire file
+ * should be rejected).
+ */
 function applyUserBlock(
   resolved: ResolvedBindings,
   block: KeybindingBlock,
   warnings: KeybindingWarning[],
-): void {
+): boolean {
+  let hasDuplicate = false;
   if (!isKeybindingContext(block.context)) {
     warnings.push({ context: String(block.context), message: `未知 context："${block.context}"` });
-    return;
+    return false;
   }
   if (typeof block.bindings !== "object" || block.bindings === null) {
     warnings.push({ context: block.context, message: "bindings 必须是对象" });
-    return;
+    return false;
   }
   let ctxMap = resolved.get(block.context);
   if (!ctxMap) {
     ctxMap = new Map<string, KeybindingAction>();
     resolved.set(block.context, ctxMap);
   }
+  const seenKeys = new Set<string>();
   for (const [key, action] of Object.entries(block.bindings)) {
+    if (seenKeys.has(key)) {
+      warnings.push({
+        context: block.context,
+        key,
+        message: `快捷键 "${key}" 重复定义`,
+      });
+      hasDuplicate = true;
+      continue;
+    }
+    seenKeys.add(key);
+
     const keyError = validateKeyId(key);
     if (keyError) {
       warnings.push({ context: block.context, key, message: keyError });
@@ -98,6 +115,63 @@ function applyUserBlock(
     }
     ctxMap.set(key, action);
   }
+  return hasDuplicate;
+}
+
+/**
+ * Scan raw JSON string for duplicate keys within each "bindings" block.
+ * JSON.parse silently drops duplicates, so we must check at the string level.
+ */
+function detectDuplicateKeysInRaw(
+  raw: string,
+  warnings: KeybindingWarning[],
+): boolean {
+  let hasDuplicates = false;
+
+  // Find each "bindings" object in the raw text
+  const bindingsRegex = /"bindings"\s*:\s*\{/g;
+  let match: RegExpExecArray | null;
+  while ((match = bindingsRegex.exec(raw)) !== null) {
+    const openPos = match.index + match[0].length;
+    // Track brace depth to find the matching closing brace
+    let depth = 1;
+    let closePos = openPos;
+    let inString = false;
+    for (let i = openPos; i < raw.length && depth > 0; i++) {
+      const ch = raw[i];
+      if (ch === "\\") {
+        i++; // skip escaped char
+        continue;
+      }
+      if (ch === '"') {
+        inString = !inString;
+        continue;
+      }
+      if (inString) continue;
+      if (ch === "{") depth++;
+      else if (ch === "}") {
+        depth--;
+        if (depth === 0) closePos = i;
+      }
+    }
+
+    const blockContent = raw.slice(openPos, closePos);
+    // Extract all quoted keys before `:` in this block
+    const keyRegex = /"([^"\\]*(?:\\.[^"\\]*)*)"\s*:/g;
+    const seen = new Set<string>();
+    let keyMatch: RegExpExecArray | null;
+    while ((keyMatch = keyRegex.exec(blockContent)) !== null) {
+      const key = keyMatch[1];
+      if (seen.has(key)) {
+        warnings.push({ key, message: `快捷键 "${key}" 重复定义` });
+        hasDuplicates = true;
+      } else {
+        seen.add(key);
+      }
+    }
+  }
+
+  return hasDuplicates;
 }
 
 /**
@@ -113,12 +187,26 @@ export function loadKeybindings(): LoadResult {
     return { resolved, warnings, userFileLoaded: false };
   }
 
+  let raw: string;
+  try {
+    raw = readFileSync(KEYBINDINGS_FILE, "utf8").trim();
+  } catch (err) {
+    warnings.push({ message: `读取 keybindings.json 失败：${(err as Error).message}` });
+    return { resolved, warnings, userFileLoaded: false };
+  }
+  if (!raw) {
+    return { resolved, warnings, userFileLoaded: false };
+  }
+
+  // Detect duplicate keys at the raw string level before JSON.parse,
+  // because JSON.parse silently drops duplicate object keys.
+  if (detectDuplicateKeysInRaw(raw, warnings)) {
+    warnings.push({ message: "keybindings.json 中存在重复快捷键，已回退到默认快捷键" });
+    return { resolved: buildResolved(DEFAULT_BINDINGS), warnings, userFileLoaded: true };
+  }
+
   let parsed: KeybindingsFile;
   try {
-    const raw = readFileSync(KEYBINDINGS_FILE, "utf8").trim();
-    if (!raw) {
-      return { resolved, warnings, userFileLoaded: false };
-    }
     parsed = JSON.parse(raw) as KeybindingsFile;
   } catch (err) {
     warnings.push({ message: `解析 keybindings.json 失败：${(err as Error).message}` });
@@ -130,12 +218,20 @@ export function loadKeybindings(): LoadResult {
     return { resolved, warnings, userFileLoaded: true };
   }
 
+  let hasFatalError = false;
   for (const block of parsed.bindings) {
     if (!block || typeof block !== "object") {
       warnings.push({ message: "bindings 数组中存在无效的 block" });
       continue;
     }
-    applyUserBlock(resolved, block as KeybindingBlock, warnings);
+    if (applyUserBlock(resolved, block as KeybindingBlock, warnings)) {
+      hasFatalError = true;
+    }
+  }
+
+  if (hasFatalError) {
+    warnings.push({ message: "配置中存在重复快捷键，已回退到默认快捷键，请修复 keybindings.json" });
+    return { resolved: buildResolved(DEFAULT_BINDINGS), warnings, userFileLoaded: true };
   }
 
   return { resolved, warnings, userFileLoaded: true };

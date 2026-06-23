@@ -24,6 +24,7 @@
   - [Scheduled tasks](ScheduledTasks.md)
   - [Task planning](TaskPlanning.md)
   - [Memory](Memory.md)
+  - [Auto Memory](AutoMemory.md)
   - [Task Memory](TaskMemory.md)
   - [Context compression & offload](ContextCompression.md)
   - [Coding Memory](CodingMemory.md)

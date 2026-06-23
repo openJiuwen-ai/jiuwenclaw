@@ -13,6 +13,12 @@ import pytest
 # ---------------------------------------------------------------------------
 def _write_history(path: Path, records: list[dict]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
+    if path.suffix == ".jsonl":
+        payload = "\n".join(json.dumps(record, ensure_ascii=False) for record in records)
+        if payload:
+            payload += "\n"
+        path.write_text(payload, encoding="utf-8")
+        return
     path.write_text(json.dumps(records, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
@@ -20,11 +26,26 @@ def _read_history(path: Path) -> list[dict]:
     deadline = time.time() + 5
     while time.time() < deadline:
         if path.exists():
-            data = json.loads(path.read_text(encoding="utf-8"))
+            if path.suffix == ".jsonl":
+                data = [
+                    json.loads(line)
+                    for line in path.read_text(encoding="utf-8").splitlines()
+                    if line.strip()
+                ]
+            else:
+                data = json.loads(path.read_text(encoding="utf-8"))
             if data:
                 return data
         time.sleep(0.05)
-    return json.loads(path.read_text(encoding="utf-8")) if path.exists() else []
+    if not path.exists():
+        return []
+    if path.suffix == ".jsonl":
+        return [
+            json.loads(line)
+            for line in path.read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
+    return json.loads(path.read_text(encoding="utf-8"))
 
 
 def _make_user_record(index: int, content: str | None = None, ts: float | None = None) -> dict:
@@ -93,7 +114,7 @@ class TestCompactPartialSessionFrom:
             _make_user_record(3, "third question"),
             _make_assistant_record(3, "third answer"),
         ]
-        _write_history(tmp_path / "s1" / "history.json", records)
+        _write_history((tmp_path / "s1" / "history.jsonl"), records)
 
         from jiuwenswarm.agents.harness.common.session_ops_service import compact_partial_session
 
@@ -105,7 +126,7 @@ class TestCompactPartialSessionFrom:
         assert result["removed_records"] == 4
         assert "second question" in result["content"]
 
-        final_history = _read_history(tmp_path / "s1" / "history.json")
+        final_history = _read_history(tmp_path / "s1" / "history.jsonl")
         event_types = [r.get("event_type") for r in final_history]
         assert "context.compact_boundary" in event_types
         assert "context.rewind_summary" in event_types
@@ -118,7 +139,7 @@ class TestCompactPartialSessionFrom:
             _make_user_record(1, "hello"),
             _make_assistant_record(1, "hi there"),
         ]
-        _write_history(tmp_path / "s2" / "history.json", records)
+        _write_history((tmp_path / "s2" / "history.jsonl"), records)
 
         from jiuwenswarm.agents.harness.common.session_ops_service import compact_partial_session
 
@@ -129,7 +150,7 @@ class TestCompactPartialSessionFrom:
             llm_summary="LLM generated summary text",
         )
 
-        final_history = _read_history(tmp_path / "s2" / "history.json")
+        final_history = _read_history(tmp_path / "s2" / "history.jsonl")
         event_types = [r.get("event_type") for r in final_history]
         assert event_types == [
             "context.compact_boundary",
@@ -155,7 +176,7 @@ class TestCompactPartialSessionUpTo:
             _make_user_record(3, "third question"),
             _make_assistant_record(3, "third answer"),
         ]
-        _write_history(tmp_path / "s3" / "history.json", records)
+        _write_history((tmp_path / "s3" / "history.jsonl"), records)
 
         from jiuwenswarm.agents.harness.common.session_ops_service import compact_partial_session
 
@@ -166,7 +187,7 @@ class TestCompactPartialSessionUpTo:
         assert result["summarized_messages"] == 4
         assert "third question" in result["content"]
 
-        final_history = _read_history(tmp_path / "s3" / "history.json")
+        final_history = _read_history(tmp_path / "s3" / "history.jsonl")
         event_types = [r.get("event_type") for r in final_history]
         assert "context.compact_boundary" in event_types
         assert "context.rewind_summary" in event_types
@@ -179,11 +200,15 @@ class TestCompactPartialSessionErrors:
             "jiuwenswarm.agents.harness.common.session_ops_service.get_agent_sessions_dir",
             lambda: tmp_path,
         )
+        monkeypatch.setattr(
+            "jiuwenswarm.server.runtime.session.session_history.get_agent_sessions_dir",
+            lambda: tmp_path,
+        )
         records = [
             _make_user_record(1, "hello"),
             _make_assistant_record(1, "hi"),
         ]
-        _write_history(tmp_path / "s4" / "history.json", records)
+        _write_history((tmp_path / "s4" / "history.jsonl"), records)
 
         from jiuwenswarm.agents.harness.common.session_ops_service import compact_partial_session
 
@@ -199,6 +224,10 @@ class TestCompactPartialSessionErrors:
             "jiuwenswarm.agents.harness.common.session_ops_service.get_agent_sessions_dir",
             lambda: tmp_path,
         )
+        monkeypatch.setattr(
+            "jiuwenswarm.server.runtime.session.session_history.get_agent_sessions_dir",
+            lambda: tmp_path,
+        )
         from jiuwenswarm.agents.harness.common.session_ops_service import compact_partial_session
 
         with pytest.raises(ValueError, match="session history not found"):
@@ -210,6 +239,10 @@ class TestCompactPartialSessionErrors:
             "jiuwenswarm.agents.harness.common.session_ops_service.get_agent_sessions_dir",
             lambda: tmp_path,
         )
+        monkeypatch.setattr(
+            "jiuwenswarm.server.runtime.session.session_history.get_agent_sessions_dir",
+            lambda: tmp_path,
+        )
         records = [
             {
                 "id": "a1",
@@ -219,7 +252,7 @@ class TestCompactPartialSessionErrors:
                 "timestamp": 1.0,
             },
         ]
-        _write_history(tmp_path / "s5" / "history.json", records)
+        _write_history((tmp_path / "s5" / "history.jsonl"), records)
 
         from jiuwenswarm.agents.harness.common.session_ops_service import compact_partial_session
 
@@ -232,11 +265,15 @@ class TestCompactPartialSessionErrors:
             "jiuwenswarm.agents.harness.common.session_ops_service.get_agent_sessions_dir",
             lambda: tmp_path,
         )
+        monkeypatch.setattr(
+            "jiuwenswarm.server.runtime.session.session_history.get_agent_sessions_dir",
+            lambda: tmp_path,
+        )
         records = [
             _make_user_record(1, "hello"),
             _make_assistant_record(1, "hi"),
         ]
-        _write_history(tmp_path / "s6" / "history.json", records)
+        _write_history((tmp_path / "s6" / "history.jsonl"), records)
 
         from jiuwenswarm.agents.harness.common.session_ops_service import compact_partial_session
 
@@ -452,10 +489,14 @@ class TestRewindSessionContextInjectsSummaries:
                 "event_type": "context.compact_summary", "timestamp": 2.002,
             },
         ]
-        _write_history(sessions_dir / "s1" / "history.json", history)
+        _write_history((sessions_dir / "s1" / "history.jsonl"), history)
 
         monkeypatch.setattr(
             "jiuwenswarm.agents.harness.common.session_ops_service.get_agent_sessions_dir",
+            lambda: sessions_dir,
+        )
+        monkeypatch.setattr(
+            "jiuwenswarm.server.runtime.session.session_history.get_agent_sessions_dir",
             lambda: sessions_dir,
         )
 
@@ -521,10 +562,14 @@ class TestRewindSessionContextInjectsSummaries:
                 "event_type": "context.rewind_summary", "timestamp": 2.0,
             },
         ]
-        _write_history(sessions_dir / "s2" / "history.json", history)
+        _write_history((sessions_dir / "s2" / "history.jsonl"), history)
 
         monkeypatch.setattr(
             "jiuwenswarm.agents.harness.common.session_ops_service.get_agent_sessions_dir",
+            lambda: sessions_dir,
+        )
+        monkeypatch.setattr(
+            "jiuwenswarm.server.runtime.session.session_history.get_agent_sessions_dir",
             lambda: sessions_dir,
         )
 

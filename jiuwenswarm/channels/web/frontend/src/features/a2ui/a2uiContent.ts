@@ -299,19 +299,23 @@ export function namespaceA2UIMessages(
   messages: ServerToClientMessage[],
   namespace: string
 ): ServerToClientMessage[] {
+  const namespaceSurfaceId = (surfaceId: string): string => (
+    /^msg_[A-Za-z0-9_-]+:/.test(surfaceId) ? surfaceId : `${namespace}:${surfaceId}`
+  );
+
   return messages.map((message) => {
     const cloned = structuredClone(message) as ServerToClientMessage;
     if (cloned.beginRendering?.surfaceId) {
-      cloned.beginRendering.surfaceId = `${namespace}:${cloned.beginRendering.surfaceId}`;
+      cloned.beginRendering.surfaceId = namespaceSurfaceId(cloned.beginRendering.surfaceId);
     }
     if (cloned.surfaceUpdate?.surfaceId) {
-      cloned.surfaceUpdate.surfaceId = `${namespace}:${cloned.surfaceUpdate.surfaceId}`;
+      cloned.surfaceUpdate.surfaceId = namespaceSurfaceId(cloned.surfaceUpdate.surfaceId);
     }
     if (cloned.dataModelUpdate?.surfaceId) {
-      cloned.dataModelUpdate.surfaceId = `${namespace}:${cloned.dataModelUpdate.surfaceId}`;
+      cloned.dataModelUpdate.surfaceId = namespaceSurfaceId(cloned.dataModelUpdate.surfaceId);
     }
     if (cloned.deleteSurface?.surfaceId) {
-      cloned.deleteSurface.surfaceId = `${namespace}:${cloned.deleteSurface.surfaceId}`;
+      cloned.deleteSurface.surfaceId = namespaceSurfaceId(cloned.deleteSurface.surfaceId);
     }
     return cloned;
   });

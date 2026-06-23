@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { FileViewer } from '../AgentPanel/FileViewer';
 import { containsIgnoredDirectory } from '../../features/fileTreeFilters';
+import { isHistoryPreviewFile } from '../../features/historyFilePreview';
 import { webRequest } from '../../services/webClient';
 
 interface SessionsPanelProps {
@@ -228,7 +229,7 @@ function toSessionFiles(raw: unknown[]): SessionFileItem[] {
 
 function isPreviewableSessionFile(fileName: string): boolean {
   const lowerName = fileName.toLowerCase();
-  return lowerName.endsWith('.md') || lowerName.endsWith('.mdx') || lowerName.endsWith('.json');
+  return lowerName.endsWith('.md') || lowerName.endsWith('.mdx') || lowerName.endsWith('.json') || isHistoryPreviewFile(fileName);
 }
 
 export function SessionsPanel({

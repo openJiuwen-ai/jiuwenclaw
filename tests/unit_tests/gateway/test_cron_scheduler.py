@@ -8,12 +8,88 @@ from unittest.mock import patch
 
 import pytest
 
+from jiuwenswarm.common.schema.agent import AgentResponse, AgentResponseChunk
 from jiuwenswarm.gateway.cron.models import CronJob, CronRunState
-from jiuwenswarm.gateway.cron.scheduler import CronSchedulerService, _Event
+from jiuwenswarm.gateway.cron.scheduler import (
+    CronSchedulerService,
+    _Event,
+)
+from jiuwenswarm.common.cron_team_completion import (
+    cron_team_round_should_end,
+    new_cron_team_round_state,
+)
+from jiuwenswarm.gateway.cron import scheduler as cron_scheduler_module
 from jiuwenswarm.gateway.cron.store import CronJobStore
+from jiuwenswarm.gateway.message_handler.message_handler import MessageHandler
 
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
+
+class _CronSchedulerTeamTestApi:
+    """Centralize access to scheduler module helpers (G.CLS.11)."""
+
+    @staticmethod
+    def resolve_cron_execution_context(job, *, ts: str, message_handler=None):
+        fn = getattr(cron_scheduler_module, "_resolve_cron_execution_context")
+        return fn(job, ts=ts, message_handler=message_handler)
+
+    @staticmethod
+    def cron_team_stream_should_end(**kwargs):
+        state = new_cron_team_round_state()
+        state.update(
+            {
+                "workflow_completed": kwargs.get("workflow_completed", False),
+                "leader_final_after_workflow": kwargs.get("leader_final_after_workflow", False),
+                "leader_final_seen": kwargs.get("leader_final_seen", False),
+                "team_round_completed": kwargs.get("team_round_completed", False),
+            }
+        )
+        if kwargs.get("has_result_text"):
+            state["leader_text"] = "result"
+        return cron_team_round_should_end(
+            state,
+            chunk_complete=bool(kwargs.get("chunk_complete", False)),
+        )
+
+    @staticmethod
+    def is_cron_leader_placeholder_text(text: str) -> bool:
+        fn = getattr(cron_scheduler_module, "_is_cron_leader_placeholder_text")
+        return fn(text)
+
+    @staticmethod
+    def is_cron_team_result_insufficient(*, text: str) -> bool:
+        fn = getattr(cron_scheduler_module, "_is_cron_team_result_insufficient")
+        return fn(text=text)
+
+    @staticmethod
+    def extract_workflow_result_text(payload):
+        fn = getattr(cron_scheduler_module, "_extract_workflow_result_text")
+        return fn(payload)
+
+    @staticmethod
+    def resolve_cron_team_timeout_result(**kwargs):
+        fn = getattr(cron_scheduler_module, "_resolve_cron_team_timeout_result")
+        return fn(**kwargs)
+
+    @staticmethod
+    def format_cron_broadcast_text(**kwargs):
+        fn = getattr(cron_scheduler_module, "_format_cron_broadcast_text")
+        return fn(**kwargs)
+
+
+class _MessageHandlerStreamTestApi(MessageHandler):
+    @classmethod
+    def is_terminal_stream_chunk(cls, chunk) -> bool:
+        return cls._is_terminal_stream_chunk(chunk)
+
+    @classmethod
+    def chunk_to_message(cls, chunk, *, session_id, metadata=None):
+        return cls._chunk_to_message(
+            chunk,
+            session_id=session_id,
+            metadata=metadata,
+        )
+
 
 class _TestableScheduler(CronSchedulerService):
     """Subclass that exposes protected members as public methods.
@@ -51,10 +127,23 @@ class _TestableScheduler(CronSchedulerService):
         """Expose _schedule_event for test use (G.CLS.11: access via subclass wrapper)."""
         return self._schedule_event(at_dt, kind, job_id, run_id)
 
+    async def on_wake(self, job, run_id):
+        return await self._on_wake(job, run_id)
+
     @property
     def events(self):
         """Expose _events for test assertions (G.CLS.11: access via subclass property)."""
         return self._events
+
+
+def _cron_published_content(msg) -> str | None:
+    """Extract broadcast text from a cron push Message."""
+    payload = msg.payload if isinstance(getattr(msg, "payload", None), dict) else {}
+    if isinstance(payload.get("content"), str):
+        return payload["content"]
+    params = msg.params if isinstance(getattr(msg, "params", None), dict) else {}
+    content = params.get("content")
+    return content if isinstance(content, str) else None
 
 
 def _make_job(job_id="job-1", name="test", **overrides):
@@ -79,8 +168,40 @@ def _make_job(job_id="job-1", name="test", **overrides):
 class FakeAgentClient:
     """Stub AgentServerClient that never calls a real agent."""
 
-    async def send_request(self, *a, **kw):
-        return {"content": {"output": "done", "result_type": "answer"}}
+    def __init__(self) -> None:
+        self.unary_requests = []
+        self.stream_requests = []
+
+    async def send_request(self, envelope, *a, **kw):
+        self.unary_requests.append(envelope)
+        return AgentResponse(
+            request_id=envelope.request_id or "",
+            channel_id=envelope.channel or "",
+            ok=True,
+            payload={"content": {"output": "done", "result_type": "answer"}},
+        )
+
+    async def send_request_stream(self, envelope):
+        self.stream_requests.append(envelope)
+        payloads = [
+            {
+                "event_type": "workflow.updated",
+                "workflow": {
+                    "id": "wf-1",
+                    "status": "completed",
+                    "summary": "team workflow done",
+                },
+            },
+            {"event_type": "chat.final", "content": "team result"},
+            {"is_complete": True},
+        ]
+        for payload in payloads:
+            yield AgentResponseChunk(
+                request_id=envelope.request_id or "",
+                channel_id=envelope.channel or "",
+                payload=payload,
+                is_complete=bool(payload.get("is_complete")),
+            )
 
 
 class FakeMessageHandler:
@@ -88,9 +209,24 @@ class FakeMessageHandler:
 
     def __init__(self):
         self.published = []
+        self.cancel_calls = []
 
     async def publish_robot_messages(self, msg):
         self.published.append(msg)
+
+    async def publish_stream_chunk(self, chunk, *, session_id, request_metadata=None):
+        if _MessageHandlerStreamTestApi.is_terminal_stream_chunk(chunk):
+            return False
+        out = _MessageHandlerStreamTestApi.chunk_to_message(
+            chunk,
+            session_id=session_id,
+            metadata=request_metadata,
+        )
+        await self.publish_robot_messages(out)
+        return True
+
+    async def _cancel_agent_work_for_session(self, msg, old_sid, **kwargs):
+        self.cancel_calls.append((msg, old_sid, kwargs))
 
 
 async def _create_one_job(store, name="job", targets="tui"):
@@ -104,11 +240,11 @@ async def _create_one_job(store, name="job", targets="tui"):
     )
 
 
-def _make_scheduler(store, handler=None):
+def _make_scheduler(store, handler=None, agent_client=None):
     """Build a _TestableScheduler with fake deps for testing."""
     return _TestableScheduler(
         store=store,
-        agent_client=FakeAgentClient(),
+        agent_client=agent_client or FakeAgentClient(),
         message_handler=handler or FakeMessageHandler(),
     )
 
@@ -322,6 +458,8 @@ class TestHandleEventStoreValidation:
 
         # push_update delivered successfully
         assert len(handler.published) == 1
+        content = _cron_published_content(handler.published[0])
+        assert content == f"[cron] {job.name} result:\n\nresult: 9am now"
 
     @pytest.mark.asyncio
     async def test_wake_executes_normally_when_job_present(self, tmp_path):
@@ -484,3 +622,456 @@ class TestReloadGhostTaskCleanup:
             ev for _, _, ev in svc.events if ev.kind == "push_update"
         ]
         assert len(push_update_events_after) == 0
+
+
+# ── Team mode execution ──────────────────────────────────────────────────────
+
+
+class TestTeamModeWake:
+    """Team-mode cron jobs stream to AgentServer and publish SwarmFlow chunks."""
+
+    @pytest.mark.asyncio
+    async def test_team_wake_uses_isolated_session_and_stream(self, tmp_path):
+        store = CronJobStore(path=tmp_path / "cron_jobs.json")
+        job = _make_job(
+            mode="team",
+            session_id="user-session-1",
+            targets="tui",
+            description="run swarmflow",
+        )
+
+        agent = FakeAgentClient()
+        handler = FakeMessageHandler()
+        svc = _make_scheduler(store, handler, agent_client=agent)
+
+        run_id = f"{job.id}:1234"
+        await svc.on_wake(job, run_id)
+        task = svc.run_tasks.get(run_id)
+        assert task is not None
+        await task
+
+        assert len(agent.stream_requests) == 1
+        assert len(agent.unary_requests) == 0
+        env = agent.stream_requests[0]
+        assert env.is_stream is True
+        assert env.channel == "tui"
+        assert env.session_id.startswith("cron_") and env.session_id.endswith(f"_{job.id}")
+        assert env.params["mode"] == "team"
+
+        state = svc.runs[run_id]
+        assert state.status == "succeeded"
+        assert state.result_text == "team result"
+        assert len(handler.published) == 2
+
+    @pytest.mark.asyncio
+    async def test_agent_wake_uses_unary_cron_channel(self, tmp_path):
+        store = CronJobStore(path=tmp_path / "cron_jobs.json")
+        job = _make_job(description="simple reminder", targets="tui")
+
+        agent = FakeAgentClient()
+        handler = FakeMessageHandler()
+        svc = _make_scheduler(store, handler, agent_client=agent)
+
+        run_id = f"{job.id}:1234"
+        await svc.on_wake(job, run_id)
+        task = svc.run_tasks.get(run_id)
+        assert task is not None
+        await task
+
+        assert len(agent.unary_requests) == 1
+        assert len(agent.stream_requests) == 0
+        env = agent.unary_requests[0]
+        assert env.is_stream is False
+        assert env.channel == "__cron__"
+        assert env.session_id.startswith("cron_") and env.session_id.endswith(f"_{job.id}")
+
+        state = svc.runs[run_id]
+        assert state.status == "succeeded"
+        assert state.result_text == "done"
+
+    @pytest.mark.asyncio
+    async def test_team_wake_stream_timeout(self, tmp_path):
+        store = CronJobStore(path=tmp_path / "cron_jobs.json")
+        job = _make_job(
+            mode="team",
+            session_id="user-session-1",
+            targets="tui",
+            timeout_seconds=1,
+        )
+
+        class HangingStreamClient(FakeAgentClient):
+            async def send_request_stream(self, envelope):
+                self.stream_requests.append(envelope)
+                await asyncio.Event().wait()
+                yield AgentResponseChunk(
+                    request_id=envelope.request_id or "",
+                    channel_id=envelope.channel or "",
+                    payload={"is_complete": True},
+                    is_complete=True,
+                )
+
+        agent = HangingStreamClient()
+        handler = FakeMessageHandler()
+        svc = _make_scheduler(store, handler, agent_client=agent)
+
+        run_id = f"{job.id}:5678"
+        await svc.on_wake(job, run_id)
+        task = svc.run_tasks.get(run_id)
+        assert task is not None
+        await task
+
+        state = svc.runs[run_id]
+        assert state.status == "failed"
+        assert state.result_text is not None
+        assert ">" in state.result_text
+        assert len(handler.cancel_calls) == 1
+
+    @pytest.mark.asyncio
+    async def test_team_stream_ignores_placeholder_before_workflow_completed(self, tmp_path):
+        store = CronJobStore(path=tmp_path / "cron_jobs.json")
+        job = _make_job(mode="team", session_id="user-session-1", targets="tui")
+        placeholder = (
+            "🔗 Integration 阶段进行中 — Integrator 正在接收三位审查员的独立输出。\n"
+            "最终报告即将生成，请稍候。"
+        )
+        final_report = "## 🔬 Code Review Swarm — 审查完成\n\n最终建议: approve"
+
+        class PlaceholderThenReportStreamClient(FakeAgentClient):
+            async def send_request_stream(self, envelope):
+                self.stream_requests.append(envelope)
+                payloads = [
+                    {"event_type": "chat.final", "content": placeholder},
+                    {
+                        "event_type": "workflow.updated",
+                        "workflow": {
+                            "id": "wf-1",
+                            "status": "completed",
+                            "summary": "workflow summary",
+                        },
+                    },
+                    {"event_type": "chat.final", "content": final_report},
+                ]
+                for payload in payloads:
+                    yield AgentResponseChunk(
+                        request_id=envelope.request_id or "",
+                        channel_id=envelope.channel or "",
+                        payload=payload,
+                        is_complete=False,
+                    )
+                await asyncio.Event().wait()
+
+        agent = PlaceholderThenReportStreamClient()
+        handler = FakeMessageHandler()
+        svc = _make_scheduler(store, handler, agent_client=agent)
+
+        run_id = f"{job.id}:placeholder"
+        await svc.on_wake(job, run_id)
+        await svc.run_tasks[run_id]
+
+        state = svc.runs[run_id]
+        assert state.status == "succeeded"
+        assert state.result_text == final_report
+        assert len(handler.cancel_calls) == 1
+
+    @pytest.mark.asyncio
+    async def test_team_stream_ends_early_on_workflow_and_final(self, tmp_path):
+        store = CronJobStore(path=tmp_path / "cron_jobs.json")
+        job = _make_job(mode="team", session_id="user-session-1", targets="tui")
+
+        class EarlyEndStreamClient(FakeAgentClient):
+            async def send_request_stream(self, envelope):
+                self.stream_requests.append(envelope)
+                payloads = [
+                    {
+                        "event_type": "workflow.updated",
+                        "workflow": {
+                            "id": "wf-1",
+                            "status": "completed",
+                            "summary": "workflow summary",
+                        },
+                    },
+                    {"event_type": "chat.final", "content": "leader final report"},
+                ]
+                for payload in payloads:
+                    yield AgentResponseChunk(
+                        request_id=envelope.request_id or "",
+                        channel_id=envelope.channel or "",
+                        payload=payload,
+                        is_complete=False,
+                    )
+                await asyncio.Event().wait()
+
+        agent = EarlyEndStreamClient()
+        handler = FakeMessageHandler()
+        svc = _make_scheduler(store, handler, agent_client=agent)
+
+        run_id = f"{job.id}:early"
+        await svc.on_wake(job, run_id)
+        await svc.run_tasks[run_id]
+
+        state = svc.runs[run_id]
+        assert state.status == "succeeded"
+        assert state.result_text == "leader final report"
+        assert len(handler.cancel_calls) == 1
+
+    @pytest.mark.asyncio
+    async def test_team_timeout_uses_workflow_result_when_available(self, tmp_path):
+        store = CronJobStore(path=tmp_path / "cron_jobs.json")
+        job = _make_job(
+            mode="team",
+            session_id="user-session-1",
+            targets="tui",
+            timeout_seconds=1,
+        )
+
+        class WorkflowOnlyHangStreamClient(FakeAgentClient):
+            async def send_request_stream(self, envelope):
+                self.stream_requests.append(envelope)
+                yield AgentResponseChunk(
+                    request_id=envelope.request_id or "",
+                    channel_id=envelope.channel or "",
+                    payload={
+                        "event_type": "workflow.updated",
+                        "workflow": {
+                            "id": "wf-1",
+                            "status": "completed",
+                            "summary": "workflow-only summary",
+                        },
+                    },
+                    is_complete=False,
+                )
+                await asyncio.Event().wait()
+
+        agent = WorkflowOnlyHangStreamClient()
+        handler = FakeMessageHandler()
+        svc = _make_scheduler(store, handler, agent_client=agent)
+
+        run_id = f"{job.id}:partial"
+        await svc.on_wake(job, run_id)
+        await svc.run_tasks[run_id]
+
+        state = svc.runs[run_id]
+        assert state.status == "succeeded"
+        assert state.result_text == "workflow-only summary"
+        assert len(handler.cancel_calls) == 1
+
+    @pytest.mark.asyncio
+    async def test_team_wake_succeeds_without_publish_stream_chunk(self, tmp_path):
+        store = CronJobStore(path=tmp_path / "cron_jobs.json")
+        job = _make_job(mode="team", session_id="user-session-1", targets="tui")
+
+        class MinimalMessageHandler:
+            async def publish_robot_messages(self, msg):
+                pass
+
+        agent = FakeAgentClient()
+        svc = _make_scheduler(store, MinimalMessageHandler(), agent_client=agent)
+
+        run_id = f"{job.id}:9999"
+        await svc.on_wake(job, run_id)
+        await svc.run_tasks[run_id]
+
+        state = svc.runs[run_id]
+        assert state.status == "succeeded"
+        assert state.result_text == "team result"
+
+    @pytest.mark.asyncio
+    async def test_team_stream_fails_on_placeholder_without_workflow(self, tmp_path):
+        store = CronJobStore(path=tmp_path / "cron_jobs.json")
+        job = _make_job(mode="team", targets="tui")
+        placeholder = "最终报告即将生成，请稍候。"
+
+        class PlaceholderOnlyStreamClient(FakeAgentClient):
+            async def send_request_stream(self, envelope):
+                self.stream_requests.append(envelope)
+                yield AgentResponseChunk(
+                    request_id=envelope.request_id or "",
+                    channel_id=envelope.channel or "",
+                    payload={"event_type": "chat.final", "content": placeholder},
+                    is_complete=False,
+                )
+                yield AgentResponseChunk(
+                    request_id=envelope.request_id or "",
+                    channel_id=envelope.channel or "",
+                    payload={"is_complete": True},
+                    is_complete=True,
+                )
+
+        agent = PlaceholderOnlyStreamClient()
+        handler = FakeMessageHandler()
+        svc = _make_scheduler(store, handler, agent_client=agent)
+
+        run_id = f"{job.id}:placeholder-only"
+        await svc.on_wake(job, run_id)
+        await svc.run_tasks[run_id]
+
+        state = svc.runs[run_id]
+        assert state.status == "failed"
+        assert "未产生有效报告" in (state.result_text or "")
+
+
+class TestResolveCronExecutionContext:
+    @staticmethod
+    def test_team_ignores_creator_session_on_tui():
+        job = _make_job(mode="team", targets="tui", session_id="sess-abc")
+        channel_id, session_id = _CronSchedulerTeamTestApi.resolve_cron_execution_context(job, ts="abc123")
+        assert channel_id == "tui"
+        assert session_id == f"cron_abc123_{job.id}"
+
+    @staticmethod
+    def test_falls_back_to_isolated_session_without_creator_session():
+        job = _make_job(mode="team", targets="tui", session_id=None)
+        channel_id, session_id = _CronSchedulerTeamTestApi.resolve_cron_execution_context(job, ts="abc123")
+        assert channel_id == "tui"
+        assert session_id == f"cron_abc123_{job.id}"
+
+    @staticmethod
+    def test_team_uses_isolated_session_when_job_has_no_session():
+        job = _make_job(mode="team", targets="tui", session_id=None)
+
+        class ActiveSessionHandler:
+            @staticmethod
+            def _resolve_stream_cancel_session_id(channel_id: str) -> str:
+                assert channel_id == "tui"
+                return "active-tui-session"
+
+        channel_id, session_id = _CronSchedulerTeamTestApi.resolve_cron_execution_context(
+            job,
+            ts="abc123",
+            message_handler=ActiveSessionHandler(),
+        )
+        assert channel_id == "tui"
+        assert session_id == f"cron_abc123_{job.id}"
+
+    @staticmethod
+    def test_non_team_does_not_reuse_active_channel_session():
+        job = _make_job(mode="agent.fast", targets="tui", session_id=None)
+
+        class ActiveSessionHandler:
+            @staticmethod
+            def _resolve_stream_cancel_session_id(channel_id: str) -> str:
+                return "active-tui-session"
+
+        channel_id, session_id = _CronSchedulerTeamTestApi.resolve_cron_execution_context(
+            job,
+            ts="abc123",
+            message_handler=ActiveSessionHandler(),
+        )
+        assert channel_id == "tui"
+        assert session_id == f"cron_abc123_{job.id}"
+
+
+class TestCronTeamStreamHelpers:
+    @staticmethod
+    def test_stream_should_end_only_after_workflow_and_real_final():
+        assert _CronSchedulerTeamTestApi.cron_team_stream_should_end(
+            workflow_completed=True,
+            leader_final_after_workflow=True,
+            leader_final_seen=True,
+            team_round_completed=False,
+            has_result_text=True,
+            chunk_complete=False,
+        )
+        assert not _CronSchedulerTeamTestApi.cron_team_stream_should_end(
+            workflow_completed=True,
+            leader_final_after_workflow=False,
+            leader_final_seen=True,
+            team_round_completed=False,
+            has_result_text=True,
+            chunk_complete=False,
+        )
+
+    @staticmethod
+    def test_stream_should_end_on_team_round_completed_with_result():
+        assert _CronSchedulerTeamTestApi.cron_team_stream_should_end(
+            workflow_completed=False,
+            leader_final_after_workflow=False,
+            leader_final_seen=False,
+            team_round_completed=True,
+            has_result_text=True,
+            chunk_complete=False,
+        )
+        assert not _CronSchedulerTeamTestApi.cron_team_stream_should_end(
+            workflow_completed=False,
+            leader_final_after_workflow=False,
+            leader_final_seen=False,
+            team_round_completed=True,
+            has_result_text=False,
+            chunk_complete=False,
+        )
+
+    @staticmethod
+    def test_stream_should_end_on_leader_final_without_team_completed():
+        assert _CronSchedulerTeamTestApi.cron_team_stream_should_end(
+            workflow_completed=False,
+            leader_final_after_workflow=False,
+            leader_final_seen=True,
+            team_round_completed=False,
+            has_result_text=True,
+            chunk_complete=False,
+        )
+        assert not _CronSchedulerTeamTestApi.cron_team_stream_should_end(
+            workflow_completed=False,
+            leader_final_after_workflow=False,
+            leader_final_seen=True,
+            team_round_completed=False,
+            has_result_text=False,
+            chunk_complete=False,
+        )
+
+    @staticmethod
+    def test_placeholder_detection():
+        assert _CronSchedulerTeamTestApi.is_cron_leader_placeholder_text("最终报告即将生成，请稍候。")
+        assert not _CronSchedulerTeamTestApi.is_cron_leader_placeholder_text("## 审查完成\n\n最终建议: approve")
+
+    @staticmethod
+    def test_insufficient_result_checks_empty_and_placeholder():
+        assert _CronSchedulerTeamTestApi.is_cron_team_result_insufficient(text="")
+        assert _CronSchedulerTeamTestApi.is_cron_team_result_insufficient(text="最终报告即将生成，请稍候。")
+        assert not _CronSchedulerTeamTestApi.is_cron_team_result_insufficient(text="## 审查完成\n\n最终建议: approve")
+
+    @staticmethod
+    def test_extract_workflow_result_from_completed_payload():
+        payload = {
+            "event_type": "workflow.updated",
+            "workflow": {
+                "status": "completed",
+                "summary": "all good",
+            },
+        }
+        assert _CronSchedulerTeamTestApi.extract_workflow_result_text(payload) == "all good"
+
+    @staticmethod
+    def test_timeout_ignores_placeholder_when_workflow_completed():
+        text, ok = _CronSchedulerTeamTestApi.resolve_cron_team_timeout_result(
+            leader_text="最终报告即将生成，请稍候。",
+            workflow_text="integrator outcome summary",
+            workflow_completed=True,
+            timeout_min=10,
+        )
+        assert ok is True
+        assert text == "integrator outcome summary"
+
+
+class TestCronBroadcastText:
+    @staticmethod
+    def test_prefixes_final_result_with_job_name():
+        assert _CronSchedulerTeamTestApi.format_cron_broadcast_text(
+            job_name="agent-core-commit-review",
+            text="## 审查完成",
+            is_placeholder=False,
+        ) == "[cron] agent-core-commit-review result:\n\n## 审查完成"
+
+    @staticmethod
+    def test_keeps_existing_placeholder_and_cron_prefix():
+        placeholder = "[cron] agent-core-commit-review 正在执行中"
+        assert _CronSchedulerTeamTestApi.format_cron_broadcast_text(
+            job_name="agent-core-commit-review",
+            text=placeholder,
+            is_placeholder=True,
+        ) == placeholder
+        assert _CronSchedulerTeamTestApi.format_cron_broadcast_text(
+            job_name="agent-core-commit-review",
+            text="[cron] 任务执行超时（>10min）",
+            is_placeholder=False,
+        ) == "[cron] 任务执行超时（>10min）"

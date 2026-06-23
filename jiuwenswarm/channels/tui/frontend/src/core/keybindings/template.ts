@@ -8,8 +8,6 @@ import type { KeybindingsFile } from "./types.js";
  */
 export function generateKeybindingsTemplate(): string {
   const file: KeybindingsFile = {
-    $schema: "https://jiuwenswarm/keybindings.schema.json",
-    $docs: "docs/zh/TUI使用指南.md#快捷键",
     bindings: DEFAULT_BINDINGS.map((block) => ({
       context: block.context,
       bindings: { ...block.bindings },

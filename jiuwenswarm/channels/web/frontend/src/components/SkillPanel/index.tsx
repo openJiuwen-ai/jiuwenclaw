@@ -23,6 +23,22 @@ const SKILL_RETRIEVAL_RUNNING_POLL_MS = 10_000;
 const SKILL_RETRIEVAL_IDLE_POLL_MS = 5 * 60_000;
 const GRAPH_READING_MIN_VISIBLE_MS = 500;
 
+/** 在线技能源存储 key */
+const ONLINE_SOURCE_STORAGE_KEY = "jiuwen:online_source";
+
+/** 获取保存的在线源 */
+function getSavedOnlineSource(): "skillnet" | "clawhub" {
+  try {
+    const saved = localStorage.getItem(ONLINE_SOURCE_STORAGE_KEY);
+    if (saved === "skillnet" || saved === "clawhub") {
+      return saved;
+    }
+  } catch {
+    /* ignore */
+  }
+  return "skillnet";
+}
+
 type SkillItem = {
   name: string;
   description: string;
@@ -533,7 +549,7 @@ export function SkillPanel({ sessionId, onNavigateToConfig, isActive = false }: 
   const [activeTab, setActiveTab] = useState<"my" | "marketplace" | "index" | "graph">("my");
   const [mySkillsSubTab, setMySkillsSubTab] = useState<"all" | "enabled" | "disabled">("all");
   const [marketplaceSubTab, setMarketplaceSubTab] = useState<"builtin" | "swarmskills" | "online">("builtin");
-  const [onlineSource, setOnlineSource] = useState<"skillnet" | "clawhub">("skillnet");
+  const [onlineSource, setOnlineSource] = useState<"skillnet" | "clawhub">(getSavedOnlineSource);
   const [searchTrigger, setSearchTrigger] = useState(0);
   const [skills, setSkills] = useState<SkillItem[]>([]);
   const [plugins, setPlugins] = useState<InstalledPluginItem[]>([]);
@@ -2276,7 +2292,14 @@ export function SkillPanel({ sessionId, onNavigateToConfig, isActive = false }: 
         sessionId={sessionId}
         onClose={() => setSourceModalOpen(false)}
         currentSource={onlineSource}
-        onSourceChange={(source) => setOnlineSource(source)}
+        onSourceChange={(source) => {
+          setOnlineSource(source);
+          try {
+            localStorage.setItem(ONLINE_SOURCE_STORAGE_KEY, source);
+          } catch {
+            /* ignore */
+          }
+        }}
         onNavigateToConfig={() => {
           setSourceModalOpen(false);
           onNavigateToConfig?.();

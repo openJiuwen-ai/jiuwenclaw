@@ -116,6 +116,10 @@ class CodeRuntimePromptInput(ConstructionInput):
     channel: str = context_field(
         attr="channel", default="default", description="Resolved channel key."
     )
+    project_dir: str | None = context_field(
+        attr="project_dir",
+        description="Resolved user project directory.",
+    )
 
 
 @harness_element(
@@ -133,7 +137,9 @@ def build_code_runtime_prompt(params: dict[str, Any], ctx: SwarmBuildContext) ->
 
     try:
         inp = CodeRuntimePromptInput.resolve(params, ctx)
-        return RuntimePromptRail(language=inp.language, channel=inp.channel)
+        rail = RuntimePromptRail(language=inp.language, channel=inp.channel)
+        rail.set_runtime_paths(cwd=inp.project_dir, project_dir=inp.project_dir)
+        return rail
     except Exception as exc:
         logger.warning("[swarm.code_runtime_prompt] create failed: %s", exc)
         return None

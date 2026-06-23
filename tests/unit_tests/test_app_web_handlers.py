@@ -132,6 +132,30 @@ def test_config_panel_flatten_reads_standalone_agent_registry():
     assert flat["agent_completion_timeout_0"] == "34"
 
 
+@pytest.mark.parametrize(
+    ("enabled", "expected"),
+    [
+        (True, "true"),
+        (False, "false"),
+    ],
+)
+def test_config_panel_flatten_reads_team_enable_permissions(enabled: bool, expected: str) -> None:
+    raw = {
+        "modes": {
+            "team": {
+                "alpha_team": {
+                    "team_name": "alpha_team",
+                    "enable_permissions": enabled,
+                },
+            },
+        },
+    }
+
+    flat = _flatten_modes_team_for_config_panel(raw)
+
+    assert flat["team_0_enable_permissions"] == expected
+
+
 def test_config_panel_flatten_reads_symphony_enabled_and_skill_retrieval():
     raw = {
         "symphony": {

@@ -33,9 +33,11 @@ Executed locally in the terminal UI, not through Gateway control pipeline.
 | `/evolve_simplify` | Simplify and consolidate one skill's evolution records (see below) |
 | `/evolve_rebuild` | Rebuild `SKILL.md` from archives and evolution records (see below) |
 | `/hooks` | Browse configured hooks (read-only, see below) |
+| `/simplify` | Code simplify review: checks reuse, quality, efficiency and auto-fixes (`code.*` only, see below) |
 | `/sandbox` | Set sandbox mode (see below) |
 | `/agents` | Manage Agent configs (list, get, create, update, enable, disable, delete, see below) |
 | `/auto-harness` | Auto-Harness task management (`run`/`schedule`/`issue`, see below) |
+| `/btw` | Ask a quick side question without interrupting the main conversation (see below) |
 
 > Note: `/mode` controlled switching logic is primarily on Gateway side, see "`/mode` and `/switch`" below. The TUI local command additionally supports `/mode plan` and `/mode team.normal`; see the TUI guide for details.
 
@@ -60,6 +62,8 @@ Identified by Gateway and forwarded to AgentServer and other backend capabilitie
 | `/rewind` | Rewind conversation to before a specific turn (see below) |
 | `/memory` | Memory management (see below) |
 | `/cron` | Scheduled task (cron job) management (see below) |
+| `/review` | Code review a pull request (see below) |
+| `/security-review` | Security review of pending changes on the current branch (see below) |
 
 ---
 
@@ -376,18 +380,20 @@ Manage cron jobs via RPC calls to the backend `CronController`, sharing the same
 | `description` | Yes | Job description — the input prompt the Agent receives when executing |
 | `targets` | No | Push channel, default `tui`; options: `tui`, `web`, `feishu`, `whatsapp`, `wecom`, `xiaoyi`, `wechat`, `dingtalk`, or `feishu_enterprise:<app_id>`. With `targets=tui`, results broadcast to all connected TUI windows; see [Scheduled tasks — Push to TUI](ScheduledTasks.md#5-push-to-the-tui-channel) |
 | `timezone` | No | IANA timezone, default `Asia/Shanghai` |
-| `mode` | No | Execution mode: `agent` (default, suitable for simple reminder-type tasks) or `plan` (for more complex reasoning tasks, allowing the Agent to plan the steps first before executing) |
+| `mode` | No | Execution mode, default `agent.fast`. Options: `agent`, `agent.fast`, `agent.plan`, `plan`, `team`, `team.plan`, `code.team`. Team modes use streaming multi-agent execution; see [Scheduled tasks — Team mode](ScheduledTasks.md#6-team-mode-and-swarmflow-multi-agent-scheduled-jobs) |
+| `timeout_seconds` | No | Per-run timeout in seconds (60–259200). Default 600 for normal modes, 1200 for team modes |
 | `wake_offset_seconds` | No | Wake-up offset in seconds, default 300 |
 | `delete_after_run` | No | Auto-delete after one run, default false |
 
 - `add` examples:
   - `/cron add name=minute-test cron_expr="0 * * * *" description="Tell me the current time" targets=tui`
-  - `/cron add name=morning-brief cron_expr="0 9 * * *" description="Generate today's morning briefing" targets=tui mode=plan`
+  - `/cron add name=morning-brief cron_expr="0 9 * * *" description="Generate today's morning briefing" targets=tui mode=agent.plan`
+  - `/cron add name=model-weekly cron_expr="0 9 * * 1" description="Compare GLM vs DeepSeek and output a report" targets=tui mode=team`
   - `/cron add name=reminder cron_expr="0 30 17 29 4 ? 2026" description="Don't forget the meeting" targets=tui delete_after_run=true`
   - `/cron add name=weekly-report cron_expr="0 9 * * 1" description="Generate weekly report" targets=web`
 
 - `update` usage: Only pass the fields you want to change, e.g., `/cron update <id> name=new-name enabled=false`
-- `show` display: full job details in key-value format (id, name, status, cron_expr, timezone, description, targets, mode, wake_offset_seconds, delete_after_run)
+- `show` display: full job details in key-value format (id, name, status, cron_expr, timezone, description, targets, mode, timeout_seconds, wake_offset_seconds, delete_after_run)
 - `list` display: sequence number, full job ID, name, cron expression, enabled status, description snippet
 - `preview` display: wake_at and push_at timestamps for each upcoming execution
 
@@ -531,6 +537,49 @@ Timestamp format: `YYYY-MM-DD-HHmmss`.
 - `/export` — Copy conversation to clipboard
 - `/export my-chat` — Save to `my-chat.txt` in workspace
 - `/export 2026-05-09-debug-session.txt` — Save with explicit timestamp name
+
+### `/simplify` (Code Simplify Review)
+
+Parsed **locally by the TUI**, this command sends a dedicated RPC `command.simplify` to get a server-generated three-phase review prompt, then injects it as an Agent message (`logAsUser: false`). The Agent automatically reviews changed code for reuse, quality, and efficiency, and directly fixes issues found.
+
+- **Alias**: None.
+- **Applicable modes**: **`code.*` only**. Non-code mode shows an error prompting `Run /mode code first`.
+- **Parsing location**: TUI local (not a Gateway controlled channel); unavailable in IM.
+
+#### Usage
+
+| Command | Description |
+|---|---|
+| `/simplify` | Review current git changes (or recently edited files) and auto-fix issues |
+| `/simplify <target>` | Add focus: file path, module name, or specific review dimension |
+
+#### Execution Flow
+
+1. **TUI validates**: Confirms current mode starts with `code.`; errors otherwise.
+2. **RPC request**: Calls `command.simplify` (with optional `target`), 30-second timeout.
+3. **Server generates prompt**: Builds a three-phase review instruction from `_SIMPLIFY_PROMPT_TEMPLATE`; appends `## Additional Focus` section if `target` is provided.
+4. **Injects into Agent**: TUI calls `ctx.sendMessage(prompt, ..., { logAsUser: false })` to inject the prompt; the Agent begins execution.
+5. **Offline handling**: Shows a retry message if offline.
+
+#### Three-Phase Review
+
+**Phase 1 — Identify Changes**: Run `git diff` (or `git diff HEAD` for staged changes) to find changed files. If no git changes, review recently edited files from the conversation.
+
+**Phase 2 — Launch Three Review Agents in Parallel** (use sub-agent tools if available; otherwise perform all reviews directly):
+
+| Review Dimension | Focus Areas |
+|---|---|
+| **Code Reuse Review** | Existing utilities/helpers that could replace new code; duplicated functionality; hand-rolled logic that could use an existing utility |
+| **Code Quality Review** | Redundant state; parameter sprawl; copy-paste variations; leaky abstractions; stringly-typed code (use existing constants/enums); unnecessary JSX nesting; unnecessary comments (keep only non-obvious WHY) |
+| **Efficiency Review** | Unnecessary work (redundant computations, repeated I/O, N+1 patterns); missed concurrency; hot-path bloat; recurring no-op updates; TOCTOU anti-patterns; memory leaks / missing cleanup; overly broad operations |
+
+**Phase 3 — Fix Issues**: Aggregate all findings and fix each issue directly. Skip false positives without argument. Briefly summarize what was fixed (or confirm the code was already clean).
+
+#### Examples
+
+- `/simplify` — Review all changes
+- `/simplify src/auth/` — Focus on changes under `src/auth/`
+- `/simplify focus on error handling patterns` — Emphasize error handling
 
 ### `/sandbox` (Sandbox Mode Management)
 
@@ -1108,13 +1157,120 @@ Requires `git.user_name`, `git.user_email` and `gitcode.access_token` (or `GITCO
   - `/auto-harness issue delete 123`
   - `/auto-harness issue delete 123 456`
 
+### `/btw` (By-the-way Side Question)
+
+Parsed **locally by the TUI**, this command sends a dedicated RPC `command.btw` to AgentServer to run an isolated, tool-free, single-turn LLM query against the current conversation context. It answers a quick side question **without interrupting the main conversation**.
+
+- **Alias**: None.
+- **Applicable modes**: All.
+- **Constraint**: A question must be provided; returns `no_context` when no conversation context exists yet.
+
+#### Usage
+
+| Command | Description |
+|---|---|
+| `/btw <question>` | Ask a side question based on current conversation context |
+
+#### Behavior Details
+
+- **Required argument**: `/btw` must include a question; otherwise shows `Usage: /btw <your question>`.
+- **Thinking indicator**: Displays `💭 Answering: <question>` (dim style) while the request is in flight.
+- **RPC timeout**: 120 seconds.
+- **Server-side handling**:
+  - Backend receives the request via `command.btw` RPC and obtains the current Agent instance.
+  - Shares the main Agent's system prompt (project context, skills, CLAUDE.md, etc.) and retrieves recent conversation messages as context.
+  - Builds a dedicated btw prompt with a `<system-reminder>` telling the model: no tools available, single response only, main Agent is not interrupted.
+  - Calls the model directly (no tools, single-turn), without modifying conversation history (read-only).
+- **Return statuses**:
+  - `ok`: Displays `💡 /btw <question>` + answer content.
+  - `no_context`: Shows `No conversation context available yet — send a message first.`
+  - `failed`: Shows error message or `Couldn't answer the side question.`
+
+#### Examples
+
+- `/btw what does git status do?`
+- `/btw What is the time complexity of this code?`
+
+### `/review` (Code Review a Pull Request)
+
+When entered in the **TUI**, sends the raw `/review` text as a chat message to the Gateway. The Gateway recognizes it, injects a review prompt, and the Agent uses `gh` CLI to review the PR.
+
+In **IM controlled channels** (Feishu etc.), the Gateway intercepts `/review`, injects the prompt, and forwards to AgentServer for execution.
+
+- **Alias**: None.
+- **Applicable modes**: All (Agent, Code, Team).
+- **Parsing location**: Gateway controlled channel (`scope: "gateway"`); TUI sends as a chat message.
+
+#### Usage
+
+| Command | Description |
+|---|---|
+| `/review` | Without arguments, the Agent runs `gh pr list` to show open PRs |
+| `/review <PR number or URL>` | Review a specific PR: Agent runs `gh pr view/diff` and analyzes |
+
+#### Behavior Details
+
+- **TUI execution**: Sends `/review [args]` as a user message via `ctx.sendMessage()`; shows `offline: waiting for reconnect before sending review request` if offline.
+- **Gateway interception** (IM side):
+  - Matches exact `/review` or prefix `/review <arg>`.
+  - Argument max 2048 bytes; control characters rejected with an error notice.
+  - Injects the review prompt into `msg.params["query"]` and continues forwarding to AgentServer.
+- **Agent execution**: Upon receiving the review prompt, the Agent uses `gh` CLI:
+  1. Without arguments: runs `gh pr list` to display open PRs.
+  2. With arguments: runs `gh pr view <number>` for details and `gh pr diff <number>` for the diff.
+  3. Analyzes changes and provides a comprehensive review (correctness, conventions, performance, test coverage, security).
+- **No git/gh pre-check**: The Gateway does not check whether `git` or `gh` is installed; the Agent handles missing tools on its own.
+
+#### Examples
+
+- `/review` — List open PRs in the current repo
+- `/review 123` — Review PR #123
+
+### `/security-review` (Security Review)
+
+When entered in the **TUI**, sends the raw `/security-review` text as a chat message to the Gateway. The Gateway recognizes it, injects a security review prompt, and the Agent uses `git` commands to analyze pending changes on the current branch.
+
+In **IM controlled channels** (Feishu etc.), the Gateway intercepts `/security-review`, injects the prompt, and forwards to AgentServer for execution.
+
+- **Alias**: None.
+- **Applicable modes**: All (Agent, Code, Team).
+- **Parsing location**: Gateway controlled channel (`scope: "gateway"`); TUI sends as a chat message.
+
+#### Usage
+
+| Command | Description |
+|---|---|
+| `/security-review` | Review all pending changes on the current branch vs `origin/HEAD` |
+| `/security-review <additional instructions>` | Add focus instructions or constraints (e.g., "focus on auth module") |
+
+#### Behavior Details
+
+- **TUI execution**: Sends `/security-review [args]` as a user message via `ctx.sendMessage()`; shows `offline: waiting for reconnect before sending security review request` if offline.
+- **Gateway interception** (IM side):
+  - Matches exact `/security-review` or prefix `/security-review <arg>`.
+  - Argument max 2048 bytes; control characters rejected with an error notice.
+  - Injects the security review prompt into `msg.params["query"]` and continues forwarding to AgentServer.
+- **Agent execution**: Upon receiving the security review prompt, the Agent performs:
+  1. **Repository context research**: `git status`, `git diff --name-only origin/HEAD...`, `git log` to understand the change scope.
+  2. **Comparative analysis**: `git diff origin/HEAD...` to review diffs file by file.
+  3. **Vulnerability assessment** across these categories:
+     - Input validation vulnerabilities
+     - Authentication and authorization issues
+     - Cryptography and key management
+     - Injection and code execution
+     - Data exposure
+  4. Uses subtasks to identify vulnerabilities and parallel subtasks for false-positive filtering; only reports findings with >80% confidence.
+  5. Outputs a structured Markdown report: file, line number, severity, category, description, exploit scenario, fix recommendation.
+- **Hard exclusion list**: Does not report DoS, secret storage, rate limiting, race conditions, and similar issue types.
+- **No git pre-check**: The Gateway does not check whether `git` is installed; the Agent handles this on its own.
+
+#### Examples
+
+- `/security-review` — Review all pending changes on the current branch
+- `/security-review focus on authentication module security` — With additional focus instructions
+
 ---
 
 ## Planned Features
 
-| Command | Description |
-|---|---|
-| `/btw` | Ask question |
-| `/memory` | Memory management |
-| `/export` | Export related files |
-| `/permissions` | Permission management |
+(None currently)

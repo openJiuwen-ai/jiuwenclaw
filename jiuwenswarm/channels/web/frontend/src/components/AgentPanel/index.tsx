@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { FileViewer } from './FileViewer';
 import { containsIgnoredDirectory } from '../../features/fileTreeFilters';
+import { isHistoryPreviewFile } from '../../features/historyFilePreview';
 
 interface AgentPanelProps {
   sessionId: string;
@@ -55,7 +56,7 @@ const normalizeFolderKey = (folderKey: string) => (folderKey ? folderKey : ROOT_
 
 const isPreviewableFile = (fileName: string) => {
   const lowerName = fileName.toLowerCase();
-  return lowerName.endsWith('.md') || lowerName.endsWith('.mdx') || lowerName.endsWith('.json');
+  return lowerName.endsWith('.md') || lowerName.endsWith('.mdx') || lowerName.endsWith('.json') || isHistoryPreviewFile(fileName);
 };
 
 const getParentFolderKey = (folderKey: string) => {

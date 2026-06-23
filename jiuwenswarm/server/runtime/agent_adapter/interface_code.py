@@ -61,7 +61,7 @@ from jiuwenswarm.agents.harness.common.rails import (
     ProjectMemoryRail,
     StructuredAskUserRail,
 )
-from jiuwenswarm.agents.harness.common.memory.config import get_memory_mode
+from jiuwenswarm.agents.harness.common.memory.config import get_memory_mode, is_memory_enabled
 from jiuwenswarm.agents.harness.common.tools import (
     SkillToolkit,
 )
@@ -757,7 +757,13 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
         """构建 CodingMemoryRail（主 Agent 和 code_agent subagent 共用）.
 
         通过 self._coding_memory_rail 缓存避免重复构建。
+        受 modes.code.memory.enabled 开关控制，关闭时返回 None。
         """
+        # 检查 memory 开关
+        if not is_memory_enabled("code", get_config()):
+            logger.info("[JiuwenSwarmCodeAdapter] CodingMemoryRail disabled by modes.code.memory.enabled")
+            return None
+
         # 单例保护：如果已构建，直接返回缓存实例
         if self._coding_memory_rail is not None:
             logger.info("[JiuwenSwarmCodeAdapter] CodingMemoryRail reuse cached instance")
@@ -781,9 +787,14 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
     def _build_project_memory_rail(self) -> ProjectMemoryRail | None:
         """Build ProjectMemoryRail to auto-load JIUWENSWARM.md / CLAUDE.md etc.
 
-        Code 模式专属 — 始终挂载。
+        Code 模式专属 — 受 modes.code.memory.enabled 开关控制。
         确保能检索到 /init 命令创建 JIUWENSWARM.md 的目录（当前工作目录）。
         """
+        # 检查 memory 开关
+        if not is_memory_enabled("code", get_config()):
+            logger.info("[JiuwenSwarmCodeAdapter] ProjectMemoryRail disabled by modes.code.memory.enabled")
+            return None
+
         try:
             workspace = self._project_dir or self._workspace_dir or "./"
             language = self._resolve_runtime_language()

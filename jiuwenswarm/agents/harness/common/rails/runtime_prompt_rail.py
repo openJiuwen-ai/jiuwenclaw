@@ -67,6 +67,7 @@ class RuntimePromptRail(DeepAgentRail):
             self.system_prompt_builder.remove_section("language_output")
             self.system_prompt_builder.remove_section("env")
             self.system_prompt_builder.remove_section("browser_tool_policy")
+            self.system_prompt_builder.remove_section("tui_current_project_policy")
         self.system_prompt_builder = None
         self.attachment_manager = None
 
@@ -139,7 +140,8 @@ class RuntimePromptRail(DeepAgentRail):
             "runtime.model_answer_policy",
             "language_output",
             "env",
-            "browser_tool_policy"):
+            "browser_tool_policy",
+            "tui_current_project_policy"):
             self.system_prompt_builder.remove_section(name)
 
         # ── time ──
@@ -415,6 +417,15 @@ class RuntimePromptRail(DeepAgentRail):
                 cn_dirs_display = ", ".join(other_dirs) if other_dirs else "无"
                 en_dirs_display = ", ".join(other_dirs) if other_dirs else "none"
                 if not self._force_english and self._language == "cn":
+                    current_project_policy = (
+                        "# 当前项目工作空间\n\n"
+                        f"- 当前项目目录：{project_dir}\n"
+                        f"- 系统目录：{workspace_dir}\n\n"
+                        "- 当用户询问“当前工作空间”“当前工作目录”“当前项目目录”“项目空间”或 workspace，"
+                        "且没有明确限定 team workspace、系统目录或其他目录时，直接回答当前项目目录。\n"
+                        "- 不要为了回答这类问题调用 `pwd`、`ls` 或读取内部 Team Leader workspace；"
+                        "也不要把系统目录、team-workspace 或 Team Leader workspace 称为当前工作空间。\n"
+                    )
                     trusted_dirs_content = (
                         "# 工作目录策略\n\n"
                         f"- 系统目录（不要在其中查找或运行项目文件）：{workspace_dir}\n"
@@ -431,6 +442,19 @@ class RuntimePromptRail(DeepAgentRail):
                         "- 确认时需明确告知：操作的完整路径、操作类型（读取/编辑/执行）、潜在风险\n"
                     )
                 else:
+                    current_project_policy = (
+                        "# Current Project Workspace\n\n"
+                        f"- Current project directory: {project_dir}\n"
+                        f"- System directory: {workspace_dir}\n\n"
+                        "- When the user asks for the current workspace, current working directory, "
+                        "current project directory, project space, or workspace without explicitly "
+                        "saying team workspace, "
+                        "system directory, or another directory, answer directly with the current "
+                        "project directory.\n"
+                        "- Do not call `pwd`, `ls`, or inspect the internal Team Leader workspace "
+                        "to answer this question, and do not call the system directory, "
+                        "team-workspace, or Team Leader workspace the current workspace.\n"
+                    )
                     trusted_dirs_content = (
                         "# Working Directory Policy\n\n"
                         f"- System directory (never search or run project files here): {workspace_dir}\n"
@@ -454,6 +478,11 @@ class RuntimePromptRail(DeepAgentRail):
                         "- When confirming, clearly state: the full path, operation type (read/edit/execute), "
                         "potential risks\n"
                     )
+                self.system_prompt_builder.add_section(PromptSection(
+                    name="tui_current_project_policy",
+                    content={"cn": current_project_policy, "en": current_project_policy},
+                    priority=99,
+                ))
                 await self._upsert_prompt_attachment(
                     ctx,
                     section="trusted_dirs_policy",

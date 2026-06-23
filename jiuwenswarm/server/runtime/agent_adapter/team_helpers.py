@@ -19,6 +19,14 @@ from openjiuwen.core.runner import Runner
 from openjiuwen.harness import DeepAgent
 
 from jiuwenswarm.agents.harness.team import get_team_manager
+from jiuwenswarm.common.cron_team_completion import (
+    _cron_solo_harness_end_pending,
+    _drain_cron_delegation_grace_events,
+    apply_cron_team_round_event,
+    cron_team_round_should_end,
+    is_cron_leader_placeholder_text as _is_cron_leader_placeholder_text,
+    new_cron_team_round_state,
+)
 from jiuwenswarm.agents.harness.team.handlers.workflow_monitor_handler import WorkflowMonitorHandler
 from jiuwenswarm.agents.harness.team.handlers.workflow_state import WorkflowRunState
 from jiuwenswarm.server.runtime.session.session_metadata import (
@@ -69,6 +77,7 @@ from jiuwenswarm.server.runtime.agent_adapter.evolution_slash import (
 logger = logging.getLogger(__name__)
 
 _pending_waiters: dict[tuple[str, str], list[tuple[str, asyncio.Queue]]] = {}
+_cron_team_completion: dict[tuple[str, str], dict[str, Any]] = {}
 _WORKFLOW_RUNS_STATE_KEY = "workflow_runs"
 
 _TEAM_CREATE_KINDS = {
@@ -330,6 +339,200 @@ async def ensure_monitor_handlers_for_active_runtime(
         logger.warning("[TeamHelpers] WorkflowMonitorHandler start failed: %s", exc)
 
 
+def _is_cron_request_id(request_id: str) -> bool:
+    return str(request_id or "").startswith("cron-")
+
+
+async def _wait_for_cron_team_round_events(
+    *,
+    request_queue: asyncio.Queue,
+    round_state: dict[str, Any],
+    request_id: str,
+    channel_id: str | None,
+    session_id: str,
+) -> AsyncIterator[dict[str, Any]]:
+    """Yield team events until cron round completion signals align across modes."""
+    while True:
+        try:
+            event = await asyncio.wait_for(request_queue.get(), timeout=0.1)
+        except asyncio.TimeoutError:
+            if cron_team_round_should_end(round_state):
+                break
+            # Fallback: if the underlying team stream task has ended, no more
+            # events will arrive.  Break so the agent stream can finalise and
+            # the cron scheduler stops receiving keepalive chunks (avoids the
+            # 20-minute timeout when completion events were never produced).
+            try:
+                tm = get_team_manager(channel_id)
+                if not tm.has_stream_task(session_id):
+                    logger.info(
+                        "[TeamHelpers] cron team round ending: stream task gone "
+                        "channel_id=%s session_id=%s request_id=%s "
+                        "workflow_completed=%s leader_final_seen=%s "
+                        "team_round_completed=%s",
+                        _resolve_channel_id(channel_id),
+                        session_id,
+                        request_id,
+                        round_state.get("workflow_completed"),
+                        round_state.get("leader_final_seen"),
+                        round_state.get("team_round_completed"),
+                    )
+                    break
+            except Exception as exc:
+                logger.warning(
+                    "[TeamHelpers] cron team stream-task check failed: "
+                    "channel_id=%s session_id=%s request_id=%s error=%s",
+                    _resolve_channel_id(channel_id),
+                    session_id,
+                    request_id,
+                    exc,
+                )
+            continue
+        if not isinstance(event, dict):
+            continue
+        evt_type = str(event.get("event_type") or "").strip()
+        yield event
+        if evt_type == "team.error":
+            break
+        apply_cron_team_round_event(round_state, event)
+        if cron_team_round_should_end(round_state):
+            if _cron_solo_harness_end_pending(round_state):
+                for grace_event in await _drain_cron_delegation_grace_events(
+                    request_queue=request_queue,
+                    round_state=round_state,
+                ):
+                    yield grace_event
+                if not cron_team_round_should_end(round_state):
+                    continue
+            logger.info(
+                "[TeamHelpers] cron team round complete: channel_id=%s request_id=%s "
+                "workflow_completed=%s leader_final_seen=%s team_round_completed=%s "
+                "open_tasks=%s active_members=%s",
+                _resolve_channel_id(channel_id),
+                request_id,
+                round_state.get("workflow_completed"),
+                round_state.get("leader_final_seen"),
+                round_state.get("team_round_completed"),
+                len(round_state.get("open_team_tasks") or {}),
+                len(round_state.get("active_team_members") or {}),
+            )
+            break
+
+
+_CRON_DELEGATION_GRACE_SECONDS = 2.0
+
+
+async def _finish_cron_team_stream_after_delegation_grace(
+    channel_id: str | None,
+    session_id: str,
+    round_id: Any,
+) -> None:
+    """Wait briefly after a solo harness final before ending the cron team stream."""
+    await asyncio.sleep(_CRON_DELEGATION_GRACE_SECONDS)
+    resolved_channel_id = _resolve_channel_id(channel_id)
+    waiter_key = (resolved_channel_id, session_id)
+    completion = _cron_team_completion.get(waiter_key)
+    if completion is None:
+        return
+    if completion.get("tasks_ever_created"):
+        completion["finish_scheduled"] = False
+        return
+    if not cron_team_round_should_end(completion):
+        completion["finish_scheduled"] = False
+        return
+    await _finish_cron_team_stream_after_round(channel_id, session_id, round_id)
+
+
+async def _finish_cron_team_stream_after_round(
+    channel_id: str | None,
+    session_id: str,
+    round_id: Any,
+) -> None:
+    """Cancel the background team stream once cron SwarmFlow + leader report are done."""
+    resolved_channel_id = _resolve_channel_id(channel_id)
+    waiter_key = (resolved_channel_id, session_id)
+    try:
+        tm = get_team_manager(channel_id)
+        stream_task = tm.pop_stream_task(session_id)
+        if stream_task is not None and not stream_task.done():
+            stream_task.cancel()
+            try:
+                await stream_task
+            except asyncio.CancelledError:
+                pass
+        _broadcast_event(
+            channel_id,
+            session_id,
+            {
+                "event_type": "chat.processing_status",
+                "session_id": session_id,
+                "rid": round_id,
+                "is_processing": False,
+                "is_complete": True,
+            },
+        )
+        logger.info(
+            "[TeamHelpers] cron team stream finished early: channel_id=%s session_id=%s",
+            resolved_channel_id,
+            session_id,
+        )
+    except Exception as exc:
+        logger.warning(
+            "[TeamHelpers] cron team stream finish failed: channel_id=%s session_id=%s error=%s",
+            resolved_channel_id,
+            session_id,
+            exc,
+        )
+    finally:
+        _cron_team_completion.pop(waiter_key, None)
+
+
+def _try_finish_cron_team_stream(
+    channel_id: str | None,
+    session_id: str,
+    event: dict[str, Any],
+) -> None:
+    """End persistent team streams for cron once workflow completes and leader reports."""
+    waiter_key = (_resolve_channel_id(channel_id), session_id)
+    waiters = _pending_waiters.get(waiter_key, [])
+    if not any(_is_cron_request_id(request_id) for request_id, _ in waiters):
+        return
+
+    completion = _cron_team_completion.setdefault(
+        waiter_key,
+        {
+            **new_cron_team_round_state(),
+            "round_id": None,
+            "finish_scheduled": False,
+        },
+    )
+    apply_cron_team_round_event(completion, event)
+    if isinstance(event, dict) and str(event.get("event_type") or "").strip() == "chat.final":
+        completion["round_id"] = event.get("rid")
+
+    if cron_team_round_should_end(completion) and not completion.get("finish_scheduled"):
+        completion["finish_scheduled"] = True
+        round_id = completion.get("round_id")
+        if _cron_solo_harness_end_pending(completion):
+            asyncio.create_task(
+                _finish_cron_team_stream_after_delegation_grace(
+                    channel_id,
+                    session_id,
+                    round_id,
+                ),
+                name=f"cron-team-grace-{waiter_key[0]}-{session_id}",
+            )
+            return
+        asyncio.create_task(
+            _finish_cron_team_stream_after_round(
+                channel_id,
+                session_id,
+                round_id,
+            ),
+            name=f"cron-team-finish-{waiter_key[0]}-{session_id}",
+        )
+
+
 def _broadcast_event(
     channel_id: str | None, session_id: str, event: dict[str, Any]
 ) -> None:
@@ -346,6 +549,7 @@ def _broadcast_event(
                 session_id,
                 request_id,
             )
+    _try_finish_cron_team_stream(channel_id, session_id, event)
 
 
 def _approval_chunk_from_event(evt: Any) -> dict[str, Any] | None:
@@ -877,13 +1081,73 @@ async def process_team_message_stream(
                     )
                     return
 
+            if _is_cron_request_id(rid):
+                request_queue = asyncio.Queue()
+                waiter_key = (_resolve_channel_id(channel_id), session_id)
+                _pending_waiters.setdefault(waiter_key, []).append((rid, request_queue))
+                logger.info(
+                    "[TeamHelpers] cron follow-up team request waits for round: "
+                    "channel_id=%s session_id=%s request_id=%s",
+                    waiter_key[0],
+                    session_id,
+                    rid,
+                )
+                round_state = new_cron_team_round_state()
+                try:
+                    async for event in _wait_for_cron_team_round_events(
+                        request_queue=request_queue,
+                        round_state=round_state,
+                        request_id=rid,
+                        channel_id=channel_id,
+                        session_id=session_id,
+                    ):
+                        yield AgentResponseChunk(
+                            request_id=rid,
+                            channel_id=channel_id,
+                            payload=event,
+                            is_complete=False,
+                        )
+                finally:
+                    waiters = _pending_waiters.get(waiter_key, [])
+                    _pending_waiters[waiter_key] = [
+                        (req_id, queue) for req_id, queue in waiters if req_id != rid
+                    ]
+                    if not _pending_waiters.get(waiter_key, []):
+                        _pending_waiters.pop(waiter_key, None)
+                yield AgentResponseChunk(
+                    request_id=rid,
+                    channel_id=channel_id,
+                    payload=None,
+                    is_complete=True,
+                )
+                return
+
             logger.info(
                 "[TeamHelpers] follow-up request submitted without waiter: channel_id=%s session_id=%s request_id=%s",
                 _resolve_channel_id(channel_id),
                 session_id,
                 rid,
             )
-            yield _team_processing_done_chunk(rid, channel_id, session_id)
+            # NOTE: do NOT emit is_processing=False here.
+            # A follow-up request only enqueues the query into the running
+            # team stream; the actual LLM work still happens inside
+            # _consume_stream_with_query. The real "round complete" signal
+            # will be broadcast by that background stream once team.completed
+            # arrives, and forwarded to the frontend via the long-lived
+            # waiter that was registered by the first request.
+            # The deferred placeholder below tells the Gateway not to
+            # auto-emit is_processing=False when this short stream ends,
+            # which prevents the frontend from flashing
+            # "finished -> wait -> running again" before the LLM replies.
+            yield AgentResponseChunk(
+                request_id=rid,
+                channel_id=channel_id,
+                payload={
+                    "event_type": "chat.processing_status_deferred",
+                    "session_id": session_id,
+                },
+                is_complete=False,
+            )
             yield AgentResponseChunk(
                 request_id=rid,
                 channel_id=channel_id,
@@ -893,23 +1157,40 @@ async def process_team_message_stream(
             return
 
         try:
-            while team_manager.has_stream_task(session_id):
-                if request_queue is None:
-                    break
-                try:
-                    event = await asyncio.wait_for(request_queue.get(), timeout=0.1)
+            if _is_cron_request_id(rid) and request_queue is not None:
+                cron_round_state = new_cron_team_round_state()
+                async for event in _wait_for_cron_team_round_events(
+                    request_queue=request_queue,
+                    round_state=cron_round_state,
+                    request_id=rid,
+                    channel_id=channel_id,
+                    session_id=session_id,
+                ):
                     yield AgentResponseChunk(
                         request_id=rid,
                         channel_id=channel_id,
                         payload=event,
                         is_complete=False,
                     )
-                    if isinstance(event, dict) and event.get("event_type") == "team.error":
+            else:
+                while team_manager.has_stream_task(session_id):
+                    if request_queue is None:
                         break
-                except asyncio.TimeoutError:
-                    if not team_manager.has_stream_task(session_id):
-                        break
-                    continue
+                    try:
+                        event = await asyncio.wait_for(request_queue.get(), timeout=0.1)
+                        yield AgentResponseChunk(
+                            request_id=rid,
+                            channel_id=channel_id,
+                            payload=event,
+                            is_complete=False,
+                        )
+                        if isinstance(event, dict):
+                            if event.get("event_type") == "team.error":
+                                break
+                    except asyncio.TimeoutError:
+                        if not team_manager.has_stream_task(session_id):
+                            break
+                        continue
         except asyncio.CancelledError:
             logger.info(
                 "[TeamHelpers] event stream cancelled: channel_id=%s session_id=%s request_id=%s",
@@ -1131,6 +1412,25 @@ async def _consume_stream_with_query(
             },
         )
     finally:
+        # Broadcast team.completed so cron round watchers (both the agent
+        # adapter's _wait_for_cron_team_round_events and the cron scheduler's
+        # own round_state) can finalise even when the team stream ended
+        # without producing workflow.updated/chat.final/team.completed events.
+        try:
+            _broadcast_event(
+                channel_id,
+                session_id,
+                {
+                    "event_type": "team.completed",
+                    "session_id": session_id,
+                },
+            )
+        except Exception:
+            logger.debug(
+                "[TeamHelpers] failed to broadcast team.completed on stream end: "
+                "session_id=%s",
+                session_id,
+            )
         team_manager = get_team_manager(channel_id)
         team_manager.clear_pending_runtime(session_id)
         clear_active_runtime = getattr(team_manager, "clear_active_runtime", None)

@@ -10,8 +10,6 @@ export interface KeybindingBlock {
 }
 
 export interface KeybindingsFile {
-  $schema?: string;
-  $docs?: string;
   bindings: KeybindingBlock[];
 }
 

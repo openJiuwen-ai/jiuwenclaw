@@ -251,10 +251,13 @@ def start_browser(*, dry_run: bool = False, config_file: str = "") -> int:
     user_data_dir = _resolve_user_data_dir(browser_cfg.get("user_data_dir"), os_name)
     profile_directory = str(browser_cfg.get("profile_directory") or "Default").strip()
 
+    raw_headless = browser_cfg.get("headless", True)
+    headless = bool(raw_headless) if isinstance(raw_headless, bool) else True
+
     logger.info(
         "Resolved browser launch parameters: "
         f"host={host}, port={port}, user_data_dir={user_data_dir}, "
-        f"profile_directory={profile_directory or '(empty)'}"
+        f"profile_directory={profile_directory or '(empty)'}, headless={headless}"
     )
 
     args = [
@@ -263,6 +266,8 @@ def start_browser(*, dry_run: bool = False, config_file: str = "") -> int:
         f"--remote-debugging-port={port}",
         f"--user-data-dir={user_data_dir}",
     ]
+    if headless:
+        args.append("--headless=new")
     if profile_directory:
         args.append(f"--profile-directory={profile_directory}")
 

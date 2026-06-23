@@ -8,7 +8,12 @@ from typing import Any, Optional
 from openjiuwen.harness.tools.cron import CronToolBackend, CronToolContext, create_cron_tools
 
 from jiuwenswarm.gateway.cron import CronTargetChannel
-from jiuwenswarm.gateway.cron.models import is_valid_target_channel_id, normalize_target_channel_id
+from jiuwenswarm.gateway.cron.models import (
+    CRON_JOB_DEFAULT_MODE,
+    coerce_cron_job_mode,
+    is_valid_target_channel_id,
+    normalize_target_channel_id,
+)
 from jiuwenswarm.agents.harness.common.tools.cron.cron_tools import CronToolRoute, CronTools
 from jiuwenswarm.gateway.message_handler.message_handler import MessageHandler
 from jiuwenswarm.common.schema.message import Message, ReqMethod
@@ -158,7 +163,7 @@ class _CronToolsCronBackend(CronToolBackend):
             params={
                 "query": text,
                 "content": text,
-                "mode": (mode or context.mode or "agent.fast"),
+                "mode": (mode or context.mode or CRON_JOB_DEFAULT_MODE),
             },
             timestamp=time.time(),
             ok=True,
@@ -315,16 +320,8 @@ def _extract_legacy_params(
             )
 
         context_mode = getattr(context, "mode", None)
-        mode_resolved = (
-            context_mode
-            or data.get("mode")
-            or "agent.fast"
-        )
-        out["mode"] = (
-            str(mode_resolved).strip().lower()
-            if isinstance(mode_resolved, str) and str(mode_resolved).strip()
-            else "agent.fast"
-        )
+        mode_resolved = context_mode or data.get("mode") or CRON_JOB_DEFAULT_MODE
+        out["mode"] = coerce_cron_job_mode(mode_resolved, default=CRON_JOB_DEFAULT_MODE)
         return out
 
     return data

@@ -67,6 +67,7 @@ type AgentsTeamsSavePayload = {
     lifecycle: string;
     teammate_mode: string;
     spawn_mode: string;
+    enable_permissions: boolean;
     leader: { member_name: string; display_name: string; persona: string; agent_key: string };
     teammate: { agent_key: string };
     predefined_members: Array<{ member_name: string; display_name: string; persona: string; prompt_hint: string; agent_key: string }>;
@@ -614,6 +615,7 @@ function AppContent() {
       updates[`team_lifecycle_${idx}`] = team.lifecycle;
       updates[`team_teammate_mode_${idx}`] = team.teammate_mode;
       updates[`team_spawn_mode_${idx}`] = team.spawn_mode;
+      updates[`team_enable_permissions_${idx}`] = String(team.enable_permissions);
       updates[`team_leader_member_name_${idx}`] = team.leader.member_name;
       updates[`team_leader_display_name_${idx}`] = team.leader.display_name;
       updates[`team_leader_persona_${idx}`] = team.leader.persona;
@@ -628,6 +630,7 @@ for (let i = payload.team.length; i < 10; i++) {
       updates[`team_lifecycle_${i}`] = "";
       updates[`team_teammate_mode_${i}`] = "";
       updates[`team_spawn_mode_${i}`] = "";
+      updates[`team_enable_permissions_${i}`] = "";
       updates[`team_leader_member_name_${i}`] = "";
       updates[`team_leader_display_name_${i}`] = "";
       updates[`team_leader_persona_${i}`] = "";
@@ -1103,7 +1106,7 @@ for (let i = payload.team.length; i < 10; i++) {
     return setA2UIActionHandler((message) => {
       const currentSessionId = sessionIdRef.current;
       if (!currentSessionId || currentSessionId === 'new') return;
-      void sendStructuredChatContent(
+      return sendStructuredChatContent(
         buildA2UIClientEventContent(message),
         currentSessionId,
       );

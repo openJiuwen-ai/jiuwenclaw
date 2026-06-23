@@ -99,9 +99,11 @@ class _TeamHelpersTestApi:
             session_id: str,
             spec: object,
             query: str,
+            **kwargs,
     ) -> None:
         consumer = getattr(team_helpers, "_consume_stream_with_query")
-        await consumer(channel_id, session_id, spec, query, round_id=1)
+        kwargs.setdefault("round_id", 1)
+        await consumer(channel_id, session_id, spec, query, **kwargs)
 
     @staticmethod
     async def consume_monitor_events(
@@ -111,6 +113,43 @@ class _TeamHelpersTestApi:
     ) -> None:
         consumer = getattr(team_helpers, "_consume_monitor_events")
         await consumer(channel_id, session_id, monitor_handler)
+
+    @staticmethod
+    def extract_query_directives(query: str) -> tuple[str, bool, bool]:
+        fn = getattr(team_helpers, "_extract_query_directives")
+        return fn(query)
+
+    @staticmethod
+    async def consume_workflow_events(
+            channel_id: str | None,
+            session_id: str,
+            workflow_handler: object,
+    ) -> None:
+        consumer = getattr(team_helpers, "_consume_workflow_events")
+        await consumer(channel_id, session_id, workflow_handler)
+
+    @staticmethod
+    def seed_cron_team_waiter(
+            waiter_key: tuple[str, str],
+            request_id: str,
+    ) -> None:
+        pending = getattr(team_helpers, "_pending_waiters")
+        pending[waiter_key] = [(request_id, asyncio.Queue())]
+        getattr(team_helpers, "_cron_team_completion").clear()
+
+    @staticmethod
+    def try_finish_cron_team_stream(
+            channel_id: str | None,
+            session_id: str,
+            event: dict[str, object],
+    ) -> None:
+        fn = getattr(team_helpers, "_try_finish_cron_team_stream")
+        fn(channel_id, session_id, event)
+
+    @staticmethod
+    def clear_cron_team_waiter(waiter_key: tuple[str, str]) -> None:
+        getattr(team_helpers, "_pending_waiters").pop(waiter_key, None)
+        getattr(team_helpers, "_cron_team_completion").pop(waiter_key, None)
 
 
 def _write_team_skill(tmp_path, name: str, *, records: list[dict] | None = None) -> str:
@@ -1116,7 +1155,7 @@ async def test_process_team_message_stream_handles_team_evolve_list(monkeypatch,
 
 
 @pytest.mark.anyio
-async def test_process_team_message_stream_emits_processing_done_for_followup(monkeypatch):
+async def test_process_team_message_stream_emits_deferred_marker_for_followup(monkeypatch):
     class _FakeManager:
         interact_calls: list[tuple[str, str]] = []
 
@@ -1156,12 +1195,14 @@ async def test_process_team_message_stream_emits_processing_done_for_followup(mo
     assert _FakeManager.interact_calls == [
         ("sess-team-followup", "$human-reporter claim task"),
     ]
+    # follow-up short stream must NOT emit is_processing=False directly;
+    # it emits an internal deferred marker so the Gateway suppresses the
+    # auto-complete signal. The real round-complete event is broadcast
+    # later by the background team stream on team.completed.
     assert len(chunks) == 2
     assert chunks[0].payload == {
-        "event_type": "chat.processing_status",
+        "event_type": "chat.processing_status_deferred",
         "session_id": "sess-team-followup",
-        "is_processing": False,
-        "is_complete": True,
     }
     assert chunks[0].is_complete is False
     assert chunks[1].payload is None
@@ -1503,10 +1544,8 @@ async def test_process_team_message_stream_recovers_paused_runtime_for_interacti
         ("sess-team-plan-recover", approval_input),
     ]
     assert chunks[0].payload == {
-        "event_type": "chat.processing_status",
+        "event_type": "chat.processing_status_deferred",
         "session_id": "sess-team-plan-recover",
-        "is_processing": False,
-        "is_complete": True,
     }
     assert chunks[-1].is_complete is True
 
@@ -1650,10 +1689,8 @@ async def test_process_team_message_stream_converts_a2ui_followup_event(monkeypa
     assert "submitDietForm" in prompt
     assert "dietType" in prompt
     assert chunks[0].payload == {
-        "event_type": "chat.processing_status",
+        "event_type": "chat.processing_status_deferred",
         "session_id": "sess-team-a2ui",
-        "is_processing": False,
-        "is_complete": True,
     }
     assert chunks[1].is_complete is True
 
@@ -2021,6 +2058,7 @@ async def test_consume_stream_with_query_broadcasts_leader_and_teammate_outputs(
         "chat.final",
         "chat.final",
         "chat.final",
+        "team.completed",
     ]
     # All events before round_complete carry is_processing=True, is_complete=False
     assert broadcasted[0]["is_processing"] is True
@@ -2084,6 +2122,7 @@ async def test_consume_stream_with_query_broadcasts_leader_task_failed_detail_an
         "chat.processing_status",
         "chat.error",
         "chat.final",
+        "team.completed",
     ]
     assert "deepseek-v4-X" in broadcasted[1]["error"]
     assert "deepseek-v4-pro" in broadcasted[1]["error"]
@@ -2149,6 +2188,7 @@ async def test_consume_stream_with_query_does_not_final_teammate_task_failed(mon
     assert [event["event_type"] for event in broadcasted] == [
         "chat.processing_status",
         "chat.error",
+        "team.completed",
     ]
     assert "deepseek-v4-X" in broadcasted[1]["error"]
     assert broadcasted[1]["role"] == TeamRole.TEAMMATE.value
@@ -2156,7 +2196,7 @@ async def test_consume_stream_with_query_does_not_final_teammate_task_failed(mon
 
 
 def test_extract_query_directives_strips_hide_dm_prefix_and_flags():
-    cleaned, hide_dm, debug = team_helpers._extract_query_directives(  # pylint: disable=protected-access
+    cleaned, hide_dm, debug = _TeamHelpersTestApi.extract_query_directives(
         "/hide_dm please summarize"
     )
     assert hide_dm is True
@@ -2223,7 +2263,7 @@ async def test_consume_stream_with_query_deduplicates_ask_user_questions(monkeyp
 
 
 def test_extract_query_directives_ignores_non_prefix():
-    cleaned, hide_dm, debug = team_helpers._extract_query_directives(  # pylint: disable=protected-access
+    cleaned, hide_dm, debug = _TeamHelpersTestApi.extract_query_directives(
         "/hide_dmsomething else"
     )
     assert hide_dm is False
@@ -2232,7 +2272,7 @@ def test_extract_query_directives_ignores_non_prefix():
 
 
 def test_extract_query_directives_handles_bare_hide_dm():
-    cleaned, hide_dm, debug = team_helpers._extract_query_directives("/hide_dm")  # pylint: disable=protected-access
+    cleaned, hide_dm, debug = _TeamHelpersTestApi.extract_query_directives("/hide_dm")
     assert hide_dm is True
     assert debug is False
     assert cleaned == ""
@@ -2298,7 +2338,7 @@ async def test_consume_stream_with_query_propagates_hide_dm_to_monitor(monkeypat
     monkeypatch.setattr(team_helpers, "get_session_metadata", lambda session_id: {})
     monkeypatch.setattr(team_helpers, "update_session_metadata", lambda **kwargs: None)
 
-    await team_helpers._consume_stream_with_query(  # pylint: disable=protected-access
+    await _TeamHelpersTestApi.consume_stream_with_query(
         "web",
         "sess-hide-dm",
         SimpleNamespace(team_name="demo-team"),
@@ -2610,7 +2650,7 @@ async def test_consume_workflow_events_broadcasts_each_event(monkeypatch):
     monkeypatch.setattr(team_helpers, "_broadcast_event", lambda *args: broadcasted.append(args[2]))
 
     handler = _FakeWorkflowHandler()
-    await team_helpers._consume_workflow_events(  # pylint: disable=protected-access
+    await _TeamHelpersTestApi.consume_workflow_events(
         "web", "sess-wf-consume", handler,
     )
 
@@ -2701,3 +2741,134 @@ async def test_consume_stream_with_query_calls_ensure_workflow_handler_after_run
 
     # The merged function is called once for both monitor and workflow handler
     assert "ensure_monitor_handlers" in calls
+
+
+class _CancellableStreamTask:
+    """Minimal asyncio.Task stand-in: supports done/cancel/await like production code expects."""
+
+    def __init__(self, *, cancelled: list[str], session_id: str) -> None:
+        self._cancelled = cancelled
+        self._session_id = session_id
+        self._done = False
+
+    def done(self) -> bool:
+        return self._done
+
+    def cancel(self) -> None:
+        self._done = True
+
+    def __await__(self):
+        async def _finish() -> None:
+            if self._done:
+                self._cancelled.append(self._session_id)
+                raise asyncio.CancelledError()
+            await asyncio.Event().wait()
+
+        return _finish().__await__()
+
+
+def _make_cancellable_stream_task(*, cancelled: list[str], session_id: str) -> _CancellableStreamTask:
+    return _CancellableStreamTask(cancelled=cancelled, session_id=session_id)
+
+
+@pytest.mark.anyio
+async def test_try_finish_cron_team_stream_cancels_background_task(monkeypatch):
+    """Cron waiter should end the team stream once workflow completes and leader reports."""
+    channel_id = "tui"
+    session_id = "sess-cron-finish"
+    waiter_key = (channel_id, session_id)
+    _TeamHelpersTestApi.seed_cron_team_waiter(waiter_key, "cron-job-1:123")
+
+    cancelled: list[str] = []
+    processing_done: list[dict[str, object]] = []
+
+    class _FakeTeamManager:
+        @staticmethod
+        def pop_stream_task(sid: str):
+            assert sid == session_id
+            return _make_cancellable_stream_task(cancelled=cancelled, session_id=session_id)
+
+    monkeypatch.setattr(team_helpers, "get_team_manager", lambda cid: _FakeTeamManager())
+    monkeypatch.setattr(
+        team_helpers,
+        "_broadcast_event",
+        lambda cid, sid, event: processing_done.append(event),
+    )
+
+    _TeamHelpersTestApi.try_finish_cron_team_stream(
+        channel_id,
+        session_id,
+        {
+            "event_type": "chat.final",
+            "content": "最终报告即将生成，请稍候。",
+            "rid": 7,
+        },
+    )
+    _TeamHelpersTestApi.try_finish_cron_team_stream(
+        channel_id,
+        session_id,
+        {
+            "event_type": "workflow.updated",
+            "workflow": {"status": "completed"},
+        },
+    )
+    await asyncio.sleep(0)
+    assert cancelled == []
+
+    _TeamHelpersTestApi.try_finish_cron_team_stream(
+        channel_id,
+        session_id,
+        {
+            "event_type": "chat.final",
+            "content": "## 审查完成\n\n最终建议: approve",
+            "rid": 7,
+        },
+    )
+    await asyncio.sleep(0)
+
+    assert cancelled == [session_id]
+    assert processing_done[-1]["event_type"] == "chat.processing_status"
+    assert processing_done[-1]["is_processing"] is False
+    _TeamHelpersTestApi.clear_cron_team_waiter(waiter_key)
+
+
+@pytest.mark.anyio
+async def test_try_finish_cron_team_stream_on_leader_final_without_team_completed(monkeypatch):
+    """Harness teams may emit chat.final without team.completed."""
+    channel_id = "tui"
+    session_id = "sess-cron-final-only"
+    waiter_key = (channel_id, session_id)
+    _TeamHelpersTestApi.seed_cron_team_waiter(waiter_key, "cron-job-2:456")
+
+    cancelled: list[str] = []
+    processing_done: list[dict[str, object]] = []
+
+    class _FakeTeamManager:
+        @staticmethod
+        def pop_stream_task(sid: str):
+            assert sid == session_id
+            return _make_cancellable_stream_task(cancelled=cancelled, session_id=session_id)
+
+    monkeypatch.setattr(team_helpers, "get_team_manager", lambda cid: _FakeTeamManager())
+    monkeypatch.setattr(
+        team_helpers,
+        "_broadcast_event",
+        lambda cid, sid, event: processing_done.append(event),
+    )
+    monkeypatch.setattr(team_helpers, "_CRON_DELEGATION_GRACE_SECONDS", 0.0)
+
+    _TeamHelpersTestApi.try_finish_cron_team_stream(
+        channel_id,
+        session_id,
+        {
+            "event_type": "chat.final",
+            "content": "## GLM vs DeepSeek\n\n对比汇总完成。",
+            "rid": 3,
+        },
+    )
+    await asyncio.sleep(0.05)
+
+    assert cancelled == [session_id]
+    assert processing_done[-1]["event_type"] == "chat.processing_status"
+    assert processing_done[-1]["is_processing"] is False
+    _TeamHelpersTestApi.clear_cron_team_waiter(waiter_key)

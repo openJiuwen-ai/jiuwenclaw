@@ -256,7 +256,12 @@ class TestTeamModesConfig:
     """Test team config persistence under modes.team."""
 
     @staticmethod
-    def _front_payload(team_names: list[str] | None = None, *, include_teammate: bool = False) -> dict:
+    def _front_payload(
+        team_names: list[str] | None = None,
+        *,
+        include_teammate: bool = False,
+        enable_permissions: bool = False,
+    ) -> dict:
         names = team_names or ["alpha_team", "beta_team"]
         return {
             "agents": {
@@ -295,6 +300,7 @@ class TestTeamModesConfig:
                     "lifecycle": "persistent",
                     "teammate_mode": "build_mode",
                     "spawn_mode": "inprocess",
+                    "enable_permissions": enable_permissions,
                     "leader": {
                         "member_name": f"{team_name}_leader",
                         "display_name": f"{team_name} leader",
@@ -357,12 +363,13 @@ modes:
         )
         monkeypatch.setattr("jiuwenswarm.common.config.CONFIG_YAML_PATH", temp_config_file)
 
-        replace_teams_in_config(TestTeamModesConfig._front_payload(["alpha_team"]))
+        replace_teams_in_config(TestTeamModesConfig._front_payload(["alpha_team"], enable_permissions=True))
 
         raw = yaml.safe_load(temp_config_file.read_text(encoding="utf-8"))
         assert raw["team"] == {"team_name": "legacy_team"}
         saved = raw["modes"]["team"]["alpha_team"]
         assert saved["team_name"] == "alpha_team"
+        assert saved["enable_permissions"] is True
         assert saved["leader"] == {
             "member_name": "alpha_team_leader",
             "display_name": "alpha_team leader",

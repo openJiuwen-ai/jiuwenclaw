@@ -121,3 +121,52 @@ export function visibleChoiceDefault(props: UnknownRecord): unknown {
   }
   return literalDefaults.length > 0 ? literalDefaults : null;
 }
+
+export function a2uiScalarText(value: unknown): string | null {
+  if (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') {
+    return String(value);
+  }
+
+  if (value instanceof Map) {
+    const scalarValues = Array.from(value.values())
+      .map((item) => a2uiScalarText(item))
+      .filter((item): item is string => item !== null);
+    return scalarValues.length === 1 ? scalarValues[0] : null;
+  }
+
+  if (Array.isArray(value)) {
+    return value.length === 1 ? a2uiScalarText(value[0]) : null;
+  }
+
+  if (isRecord(value)) {
+    const scalarValues = Object.values(value)
+      .map((item) => a2uiScalarText(item))
+      .filter((item): item is string => item !== null);
+    return scalarValues.length === 1 ? scalarValues[0] : null;
+  }
+
+  return null;
+}
+
+export function resolveA2UITextValue(
+  value: unknown,
+  getValue: (path: string) => unknown,
+): string | null {
+  if (!isRecord(value)) {
+    return null;
+  }
+
+  if (value.literalString !== undefined) {
+    return a2uiScalarText(value.literalString);
+  }
+
+  if (value.literal !== undefined) {
+    return a2uiScalarText(value.literal);
+  }
+
+  if (typeof value.path === 'string') {
+    return a2uiScalarText(getValue(value.path));
+  }
+
+  return null;
+}

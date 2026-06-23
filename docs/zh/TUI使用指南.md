@@ -92,6 +92,7 @@
 | `/permissions` | - | 设置 `permissions.tools` 中单工具的 allow/ask/deny | `/permissions ask write_file` | 全部 |
 | `/plan` | - | 进入 Agent 规划模式，或发送规划请求 | `/plan`、`/plan open`、`/plan 迁移步骤` | 非 `team` |
 | `/rename` | - | 查看/重命名/清空当前会话标题 | `/rename`、`/rename 标题`、`/rename clear` | 全部 |
+| `/review` | - | 审查 PR（TUI 发送聊天消息，Gateway 拦截注入 prompt） | `/review`、`/review 123` | 全部 |
 | `/resume` | `/continue` | 列出或恢复历史会话；无参 `/resume` 与 `/continue` 在 TUI 中可打开交互列表（见下） | `/resume list`、`/resume <id>` | 全部 |
 | `/skills` | - | 技能与市场源管理 | `/skills`、`/skills install ...` | 全部 |
 | `/teamskills` | - | TeamSkills Hub（初始化、校验、打包、搜索、安装等） | `/teamskills list` | 全部 |
@@ -101,9 +102,12 @@
 | `/status` | - | 查看运行状态概览、用量、配置 | `/status`、`/status usage` | 全部 |
 | `/agents` | - | 管理 Agent 配置（list, get, create, update, enable, disable, delete） | `/agents list`、`/agents get Explore` | 全部 |
 | `/branch` | `/fork` | 从当前对话点创建分支会话 | `/branch fix-login-bug` | 全部 |
+| `/btw` | - | 旁路快速提问，不中断主对话 | `/btw what does git status do?` | 全部 |
 | `/rewind` | `/checkpoint` | 回退对话到指定轮次之前 | `/rewind 2` | 全部 |
 | `/memory` | `/mem` | 记忆管理（状态、文件、开关、目录） | `/memory status` | 全部 |
 | `/sandbox` | - | 进出沙箱模式 / 管理 excluded_commands / files | `/sandbox enable`、`/sandbox status`、`/sandbox files allow ./tmp/` | 全部 |
+| `/security-review` | - | 安全审查当前分支待定变更 | `/security-review`、`/security-review 重点关注认证` | 全部 |
+| `/simplify` | - | 代码精简审查（复用性、质量、效率），自动修复问题 | `/simplify`、`/simplify src/auth/` | **仅 `code.*`** |
 
 #### `/resume` 与 `/continue` 在 TUI 中的特殊行为
 
@@ -332,6 +336,20 @@
 - 行为：生成新 `session_id` 并调用 `session.fork`；TUI 自动切换到新分支会话，清空 transcript 并恢复分支历史。提示用户可用 `/resume <原会话ID>` 返回原会话。
 - 示例：`/branch`、`/branch fix-login-bug`。
 
+#### `/btw`（旁路提问）
+
+- **别名**：无。
+- **适用模式**：全部。
+- 在 TUI 本地解析，通过专用 RPC `command.btw` 向 AgentServer 发起独立、无工具、单轮 LLM 查询，基于当前对话上下文快速回答旁路问题，**不中断主对话**。
+- **参数必填**：`/btw <question>`，无参数时提示 `Usage: /btw <your question>`。
+- 发送后显示 `💭 Answering: <question>`（dim 样式），RPC 超时 120 秒。
+- 返回状态：
+  - `ok`：显示 `💡 /btw <question>` + 回答。
+  - `no_context`：提示无对话上下文。
+  - `failed`：显示错误信息。
+- 服务端与主 Agent 共享 system prompt，直接调用模型（无工具、单轮），不修改对话历史（只读操作）。
+- 示例：`/btw what does git status do?`、`/btw 这段代码的时间复杂度是多少？`
+
 #### `/rewind`（回退对话）
 
 - 别名：`/checkpoint`。
@@ -375,6 +393,41 @@
 - add / remove 严格校验：`exclude add` 已存在 pattern、`exclude remove` 不存在 pattern 都会报错；`files allow|deny` 在同 bucket 已有 path 或对侧 bucket 已有 path（allow/deny 冲突）会报错，先 `files remove` 再 add；`files remove` 没匹配到也会报错。避免"看起来执行了实际什么也没改"。
 - 写入策略：`allow` / `deny` 控制写访问（rw/ro），不是 Unix 八进制权限；支持「父 allow + 子 deny」，不支持「子 allow + 父 deny」。
 - 示例：`/sandbox enable`、`/sandbox status`、`/sandbox files allow ./tmp/`、`/sandbox exclude add "git *"`。
+
+#### `/review`（代码审查 PR）
+
+- **别名**：无。
+- **适用模式**：全部。
+- TUI 通过 `ctx.sendMessage()` 将 `/review [args]` 作为聊天消息发送给 Gateway；离线时提示错误。
+- Gateway 识别后注入 review prompt，由 Agent 使用 `gh` CLI 执行审查。
+- 无参数时 Agent 执行 `gh pr list` 展示开放 PR 列表；有参数时执行 `gh pr view/diff` 并分析变更（正确性、约定、性能、测试覆盖、安全）。
+- 无 git/gh 预检，由 Agent 自行处理缺失工具的情况。
+- 示例：`/review`（列出 PR）、`/review 123`（审查 PR #123）。
+
+#### `/security-review`（安全审查）
+
+- **别名**：无。
+- **适用模式**：全部。
+- TUI 通过 `ctx.sendMessage()` 将 `/security-review [args]` 作为聊天消息发送给 Gateway；离线时提示错误。
+- Gateway 识别后注入安全审查 prompt，由 Agent 使用 `git` 命令分析当前分支相对于 `origin/HEAD` 的待定变更。
+- Agent 执行三步分析：仓库上下文研究（`git status`/`diff --name-only`/`log`）→ 比较分析（`git diff`）→ 漏洞评估（输入验证、认证授权、密码学、注入、数据暴露）。
+- 仅报告置信度 > 80% 的发现，输出结构化 Markdown 报告（文件、行号、严重级别、类别、描述、利用场景、修复建议）。
+- `[args]` 可选，用于附加焦点说明（如"重点关注认证模块"）。
+- 示例：`/security-review`、`/security-review 重点关注认证模块的安全性`。
+
+#### `/simplify`（代码精简审查）
+
+- **别名**：无。
+- **适用模式**：**仅 `code.*`**。非 code 模式下提示先执行 `/mode code`。
+- TUI 本地解析，调用 `command.simplify` RPC（30 秒超时）获取服务端生成的三阶段审查 prompt，然后通过 `ctx.sendMessage(prompt, ..., { logAsUser: false })` 注入为 Agent 消息。
+- 可选参数 `[target]`：附加关注点（文件路径、模块名或特定审查维度）。
+- **执行流程**：校验 code 模式 → RPC 获取 prompt → 注入 Agent → Agent 执行三阶段审查并自动修复。
+- **三阶段**：
+  1. **识别变更**：`git diff` 获取变更列表。
+  2. **并行审查**（三个维度）：代码复用（现有工具/重复功能）、代码质量（冗余状态/参数膨胀/复制粘贴/抽象泄漏/字符串硬编码/不必要注释）、效率（不必要工作/错失并发/热路径膨胀/无效更新/TOCTOU/内存泄漏）。
+  3. **修复问题**：逐一修复，误报跳过，完成后总结。
+- 离线时提示重试。
+- 示例：`/simplify`（审查所有变更）、`/simplify src/auth/`（关注特定目录）、`/simplify focus on error handling`（关注错误处理）。
 
 #### `/hooks`（浏览 Hooks 配置）
 

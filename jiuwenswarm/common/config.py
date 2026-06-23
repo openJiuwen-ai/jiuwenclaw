@@ -132,7 +132,7 @@ def is_auto_memory_enabled() -> bool:
     """
     try:
         config = get_config()
-        return bool(config.get("auto_memory_enabled", True))
+        return bool(config.get("auto_memory_enabled", False))
     except Exception:
         # Default to True if config cannot be read
         return True

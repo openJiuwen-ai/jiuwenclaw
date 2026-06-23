@@ -334,6 +334,9 @@
     "packageExists": "同名扩展已存在",
     "invalidZipFormat": "无效的 zip 文件格式",
     "missingHarnessConfig": "Zip 文件必须包含 harness_config.yaml",
+    "packageNotFound": "扩展版本不存在",
+    "invalidRequest": "请求参数无效",
+    "internalError": "服务器内部错误，请重试",
     "selectZipFile": "选择 .zip 文件导入",
     "deactivate": "取消激活",
     "deactivating": "正在取消激活...",
@@ -680,6 +683,7 @@
       "teamLifecycle": "生命周期",
       "teamTeammateMode": "成员模式",
       "teamSpawnMode": "启动模式",
+      "teamEnablePermissions": "安全护栏",
       "teamLeaderMemberName": "成员名称",
       "teamLeaderDisplayName": "显示名称",
       "teamLeaderPersona": "人设",
@@ -946,6 +950,8 @@
       "fillPath": "请先填写 Chrome 路径",
       "savePath": "请先保存 Chrome 路径"
     },
+    "showBrowser": "显示浏览器",
+    "showBrowserDesc": "执行浏览器任务时打开可见的浏览器窗口。",
     "errors": {
       "loadPath": "加载 Chrome 路径失败",
       "savePath": "保存 Chrome 路径失败",

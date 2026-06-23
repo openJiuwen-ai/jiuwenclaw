@@ -1198,27 +1198,38 @@
   display: flex;
   flex-direction: column;
   gap: 0.75rem;
+  max-width: 100%;
   min-width: 0;
+  overflow-wrap: anywhere;
 }
 
 .a2ui-message-content__surfaces {
   display: flex;
   flex-direction: column;
   gap: 0.75rem;
+  max-width: 100%;
   min-width: 0;
 }
 
 .a2ui-message-content .a2ui-surface {
+  box-sizing: border-box;
   max-width: 100%;
+  min-width: 0;
   color: var(--text);
+  overflow-x: auto;
+  overflow-y: visible;
 }
 
 .a2ui-message-content .a2ui-card > section {
+  max-width: 100%;
+  min-width: 0;
+  max-height: min(70vh, 720px);
   border: 1px solid rgba(148, 163, 184, 0.26);
   border-radius: 12px;
   background: linear-gradient(180deg, rgba(255, 255, 255, 0.08), rgba(255, 255, 255, 0.03));
   box-shadow: 0 12px 28px rgba(15, 23, 42, 0.16);
-  overflow: hidden;
+  overflow: auto;
+  overflow-wrap: anywhere;
 }
 
 :root.a2ui-material-symbols-unavailable .a2ui-message-content .a2ui-icon {

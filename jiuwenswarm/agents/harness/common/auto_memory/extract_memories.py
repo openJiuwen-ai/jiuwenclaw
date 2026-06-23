@@ -120,7 +120,8 @@ def _convert_messages_to_base_messages(messages: list[dict[str, Any] | Any]) -> 
             elif role == "system":
                 converted.append(SystemMessage(content=str(content)))
             elif role == "tool":
-                converted.append(ToolMessage(content=str(content)))
+                tool_call_id = msg.get("tool_call_id", "")
+                converted.append(ToolMessage(content=str(content), tool_call_id=tool_call_id))
             else:
                 # Fallback to user message
                 converted.append(UserMessage(content=str(content)))

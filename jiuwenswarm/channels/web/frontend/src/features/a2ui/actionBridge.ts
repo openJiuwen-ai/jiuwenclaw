@@ -17,6 +17,21 @@ type A2UIActionHandler = (
 ) => void | Promise<void>;
 
 let currentHandler: A2UIActionHandler | null = null;
+const inFlightActionKeys = new Set<string>();
+
+function inFlightActionKey(message: A2UIClientEventMessage): string | null {
+  const userAction = message.userAction;
+  if (!userAction) {
+    return null;
+  }
+  const surfaceId = userAction.surfaceId || '';
+  const sourceComponentId = userAction.sourceComponentId || '';
+  const actionName = userAction.name || '';
+  if (!surfaceId || !sourceComponentId || !actionName) {
+    return null;
+  }
+  return `${surfaceId}\u0000${sourceComponentId}\u0000${actionName}`;
+}
 
 /**
  * Clean up action context to fix model-generated key issues.
@@ -98,9 +113,11 @@ export function setA2UIActionHandler(
   handler: A2UIActionHandler | null
 ): () => void {
   currentHandler = handler;
+  inFlightActionKeys.clear();
   return () => {
     if (currentHandler === handler) {
       currentHandler = null;
+      inFlightActionKeys.clear();
     }
   };
 }
@@ -148,5 +165,24 @@ export async function dispatchA2UIAction(
     });
   }
 
-  await currentHandler(message);
+  const actionKey = inFlightActionKey(message);
+  if (actionKey && inFlightActionKeys.has(actionKey)) {
+    a2uiWarn('[A2UI] duplicate action ignored while request is in flight:', {
+      name: userAction?.name,
+      sourceComponentId: userAction?.sourceComponentId,
+      surfaceId: userAction?.surfaceId,
+    });
+    return;
+  }
+
+  if (actionKey) {
+    inFlightActionKeys.add(actionKey);
+  }
+  try {
+    await currentHandler(message);
+  } finally {
+    if (actionKey) {
+      inFlightActionKeys.delete(actionKey);
+    }
+  }
 }

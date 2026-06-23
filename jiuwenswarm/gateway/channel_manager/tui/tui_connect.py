@@ -2472,6 +2472,17 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
             logger.warning("[cron.job.list] %s", exc)
             await channel.send_response(ws, req_id, ok=False, error=str(exc), code="INTERNAL_ERROR")
 
+    async def _cron_job_meta(ws, req_id, params, session_id):
+        cc = _get_cron()
+        if cc is None:
+            await channel.send_response(ws, req_id, ok=False, error="cron not available", code="INTERNAL_ERROR")
+            return
+        try:
+            await channel.send_response(ws, req_id, ok=True, payload=cc.job_metadata())
+        except Exception as exc:
+            logger.warning("[cron.job.meta] %s", exc)
+            await channel.send_response(ws, req_id, ok=False, error=str(exc), code="INTERNAL_ERROR")
+
     async def _cron_job_get(ws, req_id, params, session_id):
         cc = _get_cron()
         if cc is None:
@@ -2634,6 +2645,7 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
             await channel.send_response(ws, req_id, ok=False, error=str(exc), code="INTERNAL_ERROR")
 
     channel.register_local_handler(path, "cron.job.list", _cron_job_list)
+    channel.register_local_handler(path, "cron.job.meta", _cron_job_meta)
     channel.register_local_handler(path, "cron.job.get", _cron_job_get)
     channel.register_local_handler(path, "cron.job.create", _cron_job_create)
     channel.register_local_handler(path, "cron.job.update", _cron_job_update)

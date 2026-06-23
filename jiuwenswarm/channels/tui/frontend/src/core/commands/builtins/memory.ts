@@ -480,15 +480,24 @@ async function listMemory(ctx: import("../types.js").CommandContext): Promise<vo
  * Uses ctx.askQuestions → SelectList for proper two-column rendering that
  * never truncates the label.
  */
+// Sentinel values for non-file actions in the selector
+const ACTION_TOGGLE_MEMORY_ENABLED = "__toggle_memory_enabled__";
+const ACTION_TOGGLE_AUTO_MEMORY = "__toggle_auto_memory__";
+const ACTION_OPEN_AUTO_MEMORY_FOLDER = "__open_auto_memory_folder__";
+
 async function showMemorySelector(ctx: import("../types.js").CommandContext): Promise<void> {
   const mode = modeToShort(ctx.mode);
   const projectDir = ctx.getCurrentProjectDir();
 
   try {
-    const payload = await ctx.request<{ files: MemoryFile[] }>("memory.list", {
-      mode,
-    });
-    const files = payload.files ?? [];
+    // Fetch both memory file list and status (for auto-memory toggle state)
+    const [listPayload, statusPayload] = await Promise.all([
+      ctx.request<{ files: MemoryFile[] }>("memory.list", { mode }),
+      ctx.request<MemoryStatusResult>("memory.status", { detailed: true, mode }),
+    ]);
+    const files = listPayload.files ?? [];
+    const memoryEnabled = statusPayload.enabled ?? false;
+    const autoMemoryEnabled = statusPayload.auto_memory_enabled ?? false;
 
     // Frontend-side unguarded traversal to fill gaps
     const discovered = discoverMemoryFilesFromFs(projectDir);
@@ -520,9 +529,6 @@ async function showMemorySelector(ctx: import("../types.js").CommandContext): Pr
     const filePathLowerFn = (p: string) => process.platform === "win32" ? p.toLowerCase() : p;
 
     // Categorize files into groups, aligned with Claude Code's display order.
-    // Important: project_dir is the TUI's cwd (a deep subdirectory), but the actual
-    // JIUWENSWARM.md files may be in parent directories. We match by filename + kind
-    // rather than by exact path, since backend discovers files via upward traversal.
     const projectMemoryFile = mergedFiles.find(
       (f) => f.kind === "project"
         && f.path.endsWith("JIUWENSWARM.md")
@@ -537,7 +543,6 @@ async function showMemorySelector(ctx: import("../types.js").CommandContext): Pr
     );
 
     // Project-level rules files: any project-kind file that is NOT the main JIUWENSWARM.md
-    // This includes .jiuwen/rules/*.md files and .jiuwen/JIUWENSWARM.md
     const projectRules = mergedFiles.filter(
       (f) => f.kind === "project"
         && f !== projectMemoryFile
@@ -560,14 +565,11 @@ async function showMemorySelector(ctx: import("../types.js").CommandContext): Pr
     for (const f of userRules) orderedFiles.push(f);
 
     // Always provide JIUWENSWARM.md / JIUWENSWARM.local.md entries so users can create them
-    // (only if they don't already exist in the ordered list)
-    // Use git root as base for project/local memory paths (same as getDisplayPath)
     const projMemBase = gitRoot || projectDir;
     if (!projectMemoryFile) {
       orderedFiles.unshift(probeFile(join(projMemBase, "JIUWENSWARM.md"), "JIUWENSWARM.md", "project"));
     }
     if (!localMemoryFile) {
-      // Insert after project rules, before user memory
       const insertIdx = orderedFiles.findIndex(
         (f) => filePathLowerFn(f.path) === filePathLowerFn(userMemoryPath),
       );
@@ -582,17 +584,33 @@ async function showMemorySelector(ctx: import("../types.js").CommandContext): Pr
       orderedFiles.push(probeFile(userMemoryPath, "JIUWENSWARM.md", "user"));
     }
 
-    if (orderedFiles.length === 0) {
-      ctx.addItem(addInfo(ctx.sessionId, "No memory files found.", "m"));
-      return;
-    }
-
     // Build options — EXACTLY aligned with Claude Code's /memory display
-    // Claude Code format:
-    //   "Project memory"  → description: "Checked in at ./CLAUDE.md"
-    //   ".claude/rules/git.md"  → no description (just path as label)
-    //   "User memory"  → description: "Saved in ~/.claude/CLAUDE.md"
-    const options = orderedFiles.map((f) => {
+    // Aligned with Claude Code format:
+    //   1. Memory: on/off                   (toggle — control CodingMemoryRail/ProjectMemoryRail)
+    //   2. Auto-memory: on/off              (toggle — control auto memory extraction)
+    //   3. Project memory                  Checked in at ./CLAUDE.md
+    //   4. .claude/rules/git.md
+    //   5. User memory                     Saved in ~/.claude/CLAUDE.md
+    //   6. Open auto-memory folder         (only when auto-memory is on)
+
+    const options: { label: string; description: string | undefined; value: string }[] = [];
+
+    // 1. Memory enabled toggle — control CodingMemoryRail and ProjectMemoryRail loading
+    options.push({
+      label: `Memory: ${memoryEnabled ? "on" : "off"}`,
+      description: memoryEnabled ? "Press Enter to toggle" : "Memory disabled - files won't be auto-loaded",
+      value: ACTION_TOGGLE_MEMORY_ENABLED,
+    });
+
+    // 2. Auto-memory toggle — control auto memory extraction after conversation ends
+    options.push({
+      label: `Auto-memory: ${autoMemoryEnabled ? "on" : "off"}`,
+      description: "Press Enter to toggle",
+      value: ACTION_TOGGLE_AUTO_MEMORY,
+    });
+
+    // 3. Memory file entries
+    for (const f of orderedFiles) {
       const filePathLower = filePathLowerFn(f.path);
       const displayPath = getDisplayPath(f.path, projectDir);
 
@@ -600,68 +618,87 @@ async function showMemorySelector(ctx: import("../types.js").CommandContext): Pr
       let description: string | undefined;
 
       if (filePathLower === filePathLowerFn(userMemoryPath)) {
-        // User memory — short label, description with "Saved in"
         label = "User memory";
         description = `Saved in ${displayPath}`;
       } else if (f.kind === "project" && f.path.endsWith("JIUWENSWARM.md") && !f.path.endsWith("JIUWENSWARM.local.md") && !f.path.endsWith(".jiuwen/JIUWENSWARM.md")) {
-        // Project memory — short label, description with "Checked in at"/"Saved in"
         label = "Project memory";
         description = `${gitRoot ? "Checked in at" : "Saved in"} ${displayPath}`;
       } else if (f.kind === "local" && f.path.endsWith("JIUWENSWARM.local.md")) {
-        // Local memory — short label, description with "Saved in"
         label = "Local memory";
         description = `Saved in ${displayPath}`;
       } else {
         // Rules files — just show the relative path as label, NO description
-        // (exactly like Claude Code's ".claude/rules/git.md" entries)
         label = displayPath;
         description = undefined;
       }
 
-      return { label, description };
-    });
+      options.push({ label, description, value: f.path });
+    }
 
-    let selectedLabel: string | undefined;
+    // 3. Open auto-memory folder — only on Windows + when auto-memory is enabled
+    // Linux/macOS: not shown because xdg-open/file-manager support varies and cannot be tested
+    if (autoMemoryEnabled && process.platform === "win32") {
+      options.push({
+        label: "Open auto-memory folder",
+        description: undefined,
+        value: ACTION_OPEN_AUTO_MEMORY_FOLDER,
+      });
+    }
+
+    let selectedValue: string | undefined;
     try {
       const [answer] = await ctx.askQuestions(
         [
           {
             header: "Memory",
-            question: "Select a memory file to edit:",
-            options,
+            question: "Select an action:",
+            options: options.map((opt) => ({
+              label: opt.label,
+              description: opt.description,
+            })),
           },
         ],
         "local_command_memory_edit",
       );
-      selectedLabel = answer?.selected_options?.[0];
+      const selectedLabel = answer?.selected_options?.[0];
+      selectedValue = selectedLabel
+        ? options.find((opt) => opt.label === selectedLabel)?.value
+        : undefined;
     } catch {
       ctx.addItem(addInfo(ctx.sessionId, "Cancelled.", "i"));
       return;
     }
 
-    if (!selectedLabel) {
+    if (!selectedValue) {
       ctx.addItem(addInfo(ctx.sessionId, "Cancelled.", "i"));
       return;
     }
 
-    // Find the selected file — match against all possible label formats
-    const selectedFile = orderedFiles.find((f) => {
-      const fLower = filePathLowerFn(f.path);
-      if (selectedLabel === "User memory" && fLower === filePathLowerFn(userMemoryPath)) return true;
-      if (selectedLabel === "Project memory" && f.kind === "project" && f.path.endsWith("JIUWENSWARM.md") && !f.path.endsWith("JIUWENSWARM.local.md") && !f.path.endsWith(".jiuwen/JIUWENSWARM.md")) return true;
-      if (selectedLabel === "Local memory" && f.kind === "local" && f.path.endsWith("JIUWENSWARM.local.md")) return true;
-      // Rules files use path as label
-      return getDisplayPath(f.path, projectDir) === selectedLabel
-        || f.relative_path === selectedLabel
-        || f.path === selectedLabel;
-    });
-
-    if (!selectedFile) {
-      ctx.addItem(addError(ctx.sessionId, `Could not find selected file: ${selectedLabel}`));
+    // Handle selected action
+    if (selectedValue === ACTION_TOGGLE_MEMORY_ENABLED) {
+      await toggleByKey(ctx, "memory_enabled");
       return;
     }
 
-    await editMemoryByPath(ctx, selectedFile.path);
+    if (selectedValue === ACTION_TOGGLE_AUTO_MEMORY) {
+      await toggleByKey(ctx, "auto_memory_enabled");
+      return;
+    }
+
+    if (selectedValue === ACTION_OPEN_AUTO_MEMORY_FOLDER) {
+      const openPayload = await ctx.request<MemoryOpenResult>("memory.open", {
+        project_dir: projectDir,
+      });
+      const targetDir = openPayload.coding_memory_dir || openPayload.auto_memory_dir;
+      if (targetDir && ctx.openFolder) {
+        ctx.openFolder(targetDir);
+        ctx.addItem(addInfo(ctx.sessionId, "Opened memory folder", "m"));
+      }
+      return;
+    }
+
+    // Edit the selected memory file
+    await editMemoryByPath(ctx, selectedValue);
   } catch (err) {
     ctx.addItem(
       addError(ctx.sessionId, `Failed to list memory files: ${err instanceof Error ? err.message : String(err)}`),
@@ -853,10 +890,15 @@ async function showMemoryStatus(
 }
 
 const TOGGLE_KEYS = [
-  { key: "memory_enabled", label: "Enabled", config_path: "modes.agent.<mode>.memory.enabled" },
-  { key: "memory_proactive", label: "Proactive", config_path: "modes.agent.<mode>.memory.is_proactive" },
-  { key: "memory_forbidden_enabled", label: "Forbidden Filter", config_path: "memory.forbidden_memory_definition.enabled" },
-  { key: "auto_memory_enabled", label: "Auto Memory", config_path: "auto_memory_enabled" },
+  {
+    key: "memory_enabled",
+    label: "Enabled",
+    getConfigPath: (mode: string) =>
+      mode === "code" ? "modes.code.memory.enabled" : `modes.agent.${mode}.memory.enabled`,
+  },
+  { key: "memory_proactive", label: "Proactive", getConfigPath: (mode: string) => `modes.agent.${mode}.memory.is_proactive` },
+  { key: "memory_forbidden_enabled", label: "Forbidden Filter", getConfigPath: () => "memory.forbidden_memory_definition.enabled" },
+  { key: "auto_memory_enabled", label: "Auto Memory", getConfigPath: () => "auto_memory_enabled" },
 ];
 
 async function toggleMemory(
@@ -893,7 +935,7 @@ async function showToggleList(
       return {
         label: t.key,
         value: `${t.label} ${current ? "✓ on" : "✗ off"}`,
-        description: t.config_path,
+        description: t.getConfigPath(mode),
       };
     });
 
@@ -1132,7 +1174,6 @@ export function createMemoryCommand(): SlashCommand {
     takesArgs: true,
     action: async (ctx) => {
       await showMemorySelector(ctx);
-      await showAutoMemoryInteractive(ctx);
     },
     completion: async () => {
       return ["list", "edit", "status", "toggle", "open"];

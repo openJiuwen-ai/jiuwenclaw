@@ -7,6 +7,7 @@ r"""JiuwenSwarm PyInstaller 打包配置。
 3. 执行打包: .\scripts\build-exe.ps1  或  uv run pyinstaller scripts/jiuwenswarm.spec
 """
 
+import glob
 import os
 import sys
 
@@ -16,6 +17,39 @@ block_cipher = None
 
 SPEC_DIR = os.path.abspath(globals().get("SPECPATH", os.getcwd()))
 project_root = os.path.abspath(os.path.join(SPEC_DIR, os.pardir))
+symphony_root = os.path.join(project_root, "jiuwenswarm", "symphony")
+if symphony_root not in sys.path:
+    sys.path.insert(0, symphony_root)
+
+DATA_FILE_PATTERNS = ["**/*.yaml", "**/*.yml", "**/*.json", "**/*.md"]
+EXTENSION_DATA_FILE_PATTERNS = ["**/*.py", *DATA_FILE_PATTERNS]
+DISPATCH_PACKAGE_ROOTS = ("indexing", "models", "orchestration", "retrieval", "shared")
+
+
+def collect_tree_data_files(source_dir, target_dir, patterns):
+    data_files = []
+    for pattern in patterns:
+        full_pattern = os.path.join(source_dir, pattern)
+        for path in glob.glob(full_pattern, recursive=True):
+            if not os.path.isfile(path):
+                continue
+            rel_dir = os.path.dirname(os.path.relpath(path, source_dir))
+            dest_dir = os.path.normpath(os.path.join(target_dir, rel_dir))
+            data_files.append((path, dest_dir))
+    return data_files
+
+
+def collect_tree_python_modules(source_dir, package_roots):
+    modules = []
+    for package_root in package_roots:
+        package_dir = os.path.join(source_dir, *package_root.split("."))
+        for path in glob.glob(os.path.join(package_dir, "**", "*.py"), recursive=True):
+            rel_path = os.path.relpath(path, source_dir)
+            module_name = os.path.splitext(rel_path)[0].replace(os.sep, ".")
+            if module_name.endswith(".__init__"):
+                module_name = module_name[: -len(".__init__")]
+            modules.append(module_name)
+    return sorted(set(modules))
 
 try:
     webview_datas = collect_data_files("webview")
@@ -65,9 +99,27 @@ datas += copy_metadata("fastmcp", recursive=True)
 datas += copy_metadata("mcp", recursive=True)
 datas += copy_metadata("openjiuwen", recursive=True)
 datas += collect_data_files("openjiuwen", include_py_files=False)
+datas += collect_data_files(
+    "jiuwenswarm.extensions",
+    include_py_files=True,
+    includes=EXTENSION_DATA_FILE_PATTERNS,
+)
+datas += collect_data_files(
+    "jiuwenswarm.symphony",
+    include_py_files=False,
+    includes=DATA_FILE_PATTERNS,
+)
+for package_root in DISPATCH_PACKAGE_ROOTS:
+    datas += collect_tree_data_files(
+        os.path.join(symphony_root, package_root),
+        package_root,
+        DATA_FILE_PATTERNS,
+    )
 
 # openjiuwen 使用动态导入，需要收集全部子模块
 openjiuwen_submodules = collect_submodules("openjiuwen")
+symphony_submodules = collect_submodules("jiuwenswarm.symphony")
+dispatch_submodules = collect_tree_python_modules(symphony_root, DISPATCH_PACKAGE_ROOTS)
 
 # 部分包需要显式声明隐藏导入
 hiddenimports = webview_hiddenimports + [
@@ -91,7 +143,7 @@ hiddenimports = webview_hiddenimports + [
     "webview",
     "jiuwenswarm.channels.web.app_web",  # 静态文件服务
     "jiuwenswarm.channels.web.desktop_app",  # 桌面入口
-] + openjiuwen_submodules
+] + openjiuwen_submodules + symphony_submodules + dispatch_submodules
 
 # 排除不需要的模块以减小体积（pandas 为 pymilvus/openjiuwen 所需，不可排除）
 excludes = [
@@ -122,7 +174,7 @@ icon_path = os.path.join(
 
 a = Analysis(
     [entry_script],
-    pathex=[project_root],
+    pathex=[project_root, symphony_root],
     binaries=[],
     datas=datas,
     hiddenimports=hiddenimports,

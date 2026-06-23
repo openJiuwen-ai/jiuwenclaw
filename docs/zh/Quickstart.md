@@ -58,6 +58,16 @@ jiuwenswarm-start
 
 当看到类似上述提示时，表示服务已启动，在浏览器中访问 `http://localhost:5173` 即可使用。
 
+### 终端 CLI
+
+也可以直接在终端中与 JiuwenSwarm 对话：
+
+```bash
+jiuwenswarm chat "你好，介绍一下你自己"
+```
+
+详情见 [命令行指令 / 终端 CLI](命令行指令.md#终端-clijiuwenswarm-chat)。
+
 **配置目录自动创建**：
 首次启动服务后，系统会自动创建配置目录：
 - **Windows**：`C:\Users\<你的用户名>\.jiuwenswarm`

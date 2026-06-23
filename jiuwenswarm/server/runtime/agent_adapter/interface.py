@@ -18,10 +18,7 @@ import logging
 import re
 import time
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, AsyncIterator, Tuple
-
-if TYPE_CHECKING:
-    from openjiuwen.core.context_engine.engine import ContextEngine
+from typing import Any, AsyncIterator, Tuple
 
 from datetime import datetime, timedelta, timezone
 from dotenv import load_dotenv
@@ -31,7 +28,7 @@ from jiuwenswarm.server.runtime.agent_adapter.agent_adapters import (
     create_adapter,
     resolve_sdk_choice,
 )
-from jiuwenswarm.agents.harness.common.memory.config import get_memory_mode
+from jiuwenswarm.agents.harness.common.memory.config import get_memory_mode, is_memory_enabled
 from jiuwenswarm.server.runtime.session.session_history import (
     append_compact_history_records,
     append_history_record,
@@ -137,39 +134,51 @@ def _trigger_auto_memory_extraction(
         is_stream: Whether this is from stream mode (for logging).
     """
     project_dir = request.params.get("project_dir") if isinstance(request.params, dict) else None
-    mode_label = "(stream)" if is_stream else ""
-    logger.info("[auto_memory] Trigger check %s: enabled=%s", mode_label, True)
 
     if not project_dir:
-        logger.info("[auto_memory] Skipped %s: no project_dir", mode_label)
         return
 
-    # Get context_engine from adapter._instance.react_agent
-    # adapter is AgentAdapter (e.g., CodeAgentRail), adapter._instance is DeepAgent
-    context_engine = None
-    adapter_instance = getattr(adapter, "_instance", None)
-    if adapter_instance is not None:
-        react_agent = getattr(adapter_instance, "react_agent", None)
-        if react_agent is not None:
-            context_engine = getattr(react_agent, "context_engine", None)
-            logger.debug("[auto_memory] context_engine obtained: %s",
-                     type(context_engine).__name__ if context_engine else "None")
-        else:
-            logger.warning("[auto_memory] adapter._instance has no react_agent")
-    else:
-        logger.warning("[auto_memory] adapter has no _instance attribute")
+    messages = None
 
-    # Fire-and-forget: don't block on extraction
-    logger.info("[auto_memory] Launching extraction task %s", mode_label)
-    asyncio.create_task(
-        _execute_auto_memory_extraction(
-            project_dir=project_dir,
-            session_id=session_id,
-            request=request,
-            context_engine=context_engine,
-            parent_agent=adapter,  # Pass adapter (not adapter._instance) for cache sharing
+    # Directly read messages from session history file
+    try:
+        from jiuwenswarm.server.runtime.session.session_history import read_session_history_records
+        history_records = read_session_history_records(session_id)
+
+        # Convert history records to message format for memory extraction
+        # Each history record has: role, content, timestamp, etc.
+        messages = []
+        for record in history_records:
+            role = record.get("role", "unknown")
+            content = record.get("content", "")
+            # Skip empty content
+            if not content or not isinstance(content, str):
+                continue
+            # Create message dict in standard format
+            messages.append({"role": role, "content": content})
+    except Exception as e:
+        logger.warning("[auto_memory] Failed to read session history: %s", e, exc_info=True)
+        messages = None
+
+    # If we successfully got messages, proceed with auto memory extraction
+    if messages is None or len(messages) == 0:
+        return
+
+    # Launch auto memory extraction task
+    try:
+        asyncio.create_task(
+            _execute_auto_memory_extraction(
+                session_id=session_id,
+                project_dir=project_dir,
+                messages=messages,
+                parent_agent=adapter,  # Pass adapter for cache sharing
+            )
         )
-    )
+        mode = request.params.get("mode", "unknown") if isinstance(request.params, dict) else "unknown"
+        logger.info("[auto_memory] Extraction task launched successfully for mode=%s", mode)
+    except Exception as e:
+        logger.error("[auto_memory] Failed to launch extraction task: %s", e, exc_info=True)
+
 
 logger = logging.getLogger(__name__)
 
@@ -817,6 +826,42 @@ class JiuWenSwarm:
         # Team 模式需要使用原始 query，而不是 JSON 包装后的 prompt
         return inputs, memory_mode, query
 
+    def _make_retry_without_a2ui_call(
+            self,
+            *,
+            adapter: AgentAdapter,
+            request: AgentRequest,
+    ):
+        async def retry_without_a2ui_call(query: str) -> str | None:
+            if getattr(adapter, "_instance", None) is None:
+                return None
+            try:
+                modified_request = AgentRequest(
+                    request_id=request.request_id,
+                    channel_id=request.channel_id,
+                    session_id=request.session_id,
+                    chat_id=request.chat_id,
+                    req_method=request.req_method,
+                    params={**request.params, "query": query},
+                    is_stream=False,
+                    timestamp=request.timestamp,
+                    metadata={**(request.metadata or {}), "skip_a2ui": True},
+                )
+                retry_inputs, _, _ = self._build_inputs(modified_request)
+                retry_inputs["_invoke_turn_id"] = request.request_id
+                result = await adapter.process_message_impl(modified_request, retry_inputs)
+                if result.ok and result.payload.get("content"):
+                    return str(result.payload["content"])
+            except Exception as exc:
+                logger.warning(
+                    "Retry without A2UI failed: request_id=%s error=%s",
+                    request.request_id,
+                    exc,
+                )
+            return None
+
+        return retry_without_a2ui_call
+
     @staticmethod
     def _team_plan_approval_payload_error_message() -> str:
         return (
@@ -1445,7 +1490,10 @@ class JiuWenSwarm:
                 await ExtensionRegistry.get_instance().trigger(AgentServerHookEvents.MEMORY_AFTER_CHAT, after_ctx)
 
             # auto memory: extract memories after conversation ends
-            if is_auto_memory_enabled():
+            # 需要 auto_memory_enabled 和 memory.enabled 都为 true 才触发
+            mode = request.params.get("mode", "code") if isinstance(request.params, dict) else "code"
+            config = get_config()
+            if is_auto_memory_enabled() and is_memory_enabled(mode, config):
                 _trigger_auto_memory_extraction(adapter, request, session_id, is_stream=False)
 
         return result
@@ -1581,6 +1629,42 @@ class JiuWenSwarm:
         stream_done = asyncio.Event()
         final_answer_content = ""
         final_answer_chunks: list[str] = []
+        durable_pending_final_chunks: list[str] = []
+        durable_pending_reasoning_chunks: list[str] = []
+        durable_final_content = ""
+
+        def _consume_durable_reasoning_content() -> str:
+            nonlocal durable_pending_reasoning_chunks
+            reasoning_text = "".join(durable_pending_reasoning_chunks)
+            durable_pending_reasoning_chunks = []
+            return reasoning_text if reasoning_text.strip() else ""
+
+        def _attach_reasoning_content(extra_fields: dict[str, Any] | None = None) -> dict[str, Any] | None:
+            reasoning_text = _consume_durable_reasoning_content()
+            if not reasoning_text:
+                return extra_fields
+            merged = dict(extra_fields) if isinstance(extra_fields, dict) else {}
+            merged["reasoning_content"] = reasoning_text
+            return merged
+
+        def _persist_pending_final_text() -> None:
+            nonlocal durable_pending_final_chunks, durable_final_content
+            pending_text = "".join(durable_pending_final_chunks)
+            durable_pending_final_chunks = []
+            if not pending_text or pending_text == durable_final_content:
+                return
+            append_history_record(
+                session_id=session_id,
+                request_id=rid,
+                channel_id=cid,
+                role="assistant",
+                event_type="chat.final",
+                content=pending_text,
+                timestamp=time.time(),
+                extra=_attach_reasoning_content(),
+                mode=request.params.get("mode", "unknown"),
+            )
+            durable_final_content = pending_text
 
         async def run_stream_task():
             try:
@@ -1672,14 +1756,25 @@ class JiuWenSwarm:
                                 )
 
                             payload_content = str(data.payload.get("content", ""))
-                            if et == "chat.delta" and (suppress_a2ui_stream or _contains_a2ui_marker(payload_content)):
-                                suppress_a2ui_stream = True
+                            if et == "chat.delta":
                                 final_answer_chunks.append(payload_content)
-                                continue
-                            if et == "chat.final" and (suppress_a2ui_stream or _contains_a2ui_marker(payload_content)):
-                                suppress_a2ui_stream = True
-                                final_answer_content = payload_content
-                                continue
+                                if suppress_a2ui_stream or _contains_a2ui_marker(payload_content):
+                                    suppress_a2ui_stream = True
+                                    continue
+                                durable_pending_final_chunks.append(payload_content)
+                                should_record = False
+                            elif et == "chat.reasoning":
+                                durable_pending_reasoning_chunks.append(payload_content)
+                                should_record = False
+                            elif et == "chat.tool_call":
+                                _persist_pending_final_text()
+                            elif et == "chat.final":
+                                if suppress_a2ui_stream or _contains_a2ui_marker(payload_content):
+                                    suppress_a2ui_stream = True
+                                    final_answer_content = payload_content
+                                    durable_pending_final_chunks = []
+                                    continue
+                                durable_pending_final_chunks = []
 
                             if should_record:
                                 payload_dict = dict(data.payload)
@@ -1691,6 +1786,8 @@ class JiuWenSwarm:
                                         for k, v in event_data.items():
                                             if k not in ("type", "timestamp", "content"):
                                                 extra_fields[k] = v
+                                if et in {"chat.final", "chat.tool_call"}:
+                                    extra_fields = _attach_reasoning_content(extra_fields)
                                 append_history_record(
                                     session_id=session_id,
                                     request_id=rid,
@@ -1702,10 +1799,10 @@ class JiuWenSwarm:
                                     extra=extra_fields if extra_fields else None,
                                     mode=request.params.get("mode", "unknown"),
                                 )
+                                if et == "chat.final":
+                                    durable_final_content = str(data.payload.get("content", ""))
                             if et == "chat.final":
                                 final_answer_content = str(data.payload.get("content", ""))
-                            elif et == "chat.delta":
-                                final_answer_chunks.append(str(data.payload.get("content", "")))
                         yield data
                     elif isinstance(data, dict) and isinstance(data.get("event_type"), str):
                         et = str(data.get("event_type"))
@@ -1722,14 +1819,25 @@ class JiuWenSwarm:
                             )
 
                         payload_content = str(data.get("content", ""))
-                        if et == "chat.delta" and (suppress_a2ui_stream or _contains_a2ui_marker(payload_content)):
-                            suppress_a2ui_stream = True
+                        if et == "chat.delta":
                             final_answer_chunks.append(payload_content)
-                            continue
-                        if et == "chat.final" and (suppress_a2ui_stream or _contains_a2ui_marker(payload_content)):
-                            suppress_a2ui_stream = True
-                            final_answer_content = payload_content
-                            continue
+                            if suppress_a2ui_stream or _contains_a2ui_marker(payload_content):
+                                suppress_a2ui_stream = True
+                                continue
+                            durable_pending_final_chunks.append(payload_content)
+                            should_record = False
+                        elif et == "chat.reasoning":
+                            durable_pending_reasoning_chunks.append(payload_content)
+                            should_record = False
+                        elif et == "chat.tool_call":
+                            _persist_pending_final_text()
+                        elif et == "chat.final":
+                            if suppress_a2ui_stream or _contains_a2ui_marker(payload_content):
+                                suppress_a2ui_stream = True
+                                final_answer_content = payload_content
+                                durable_pending_final_chunks = []
+                                continue
+                            durable_pending_final_chunks = []
 
                         if should_record:
                             extra_fields = {k: v for k, v in data.items() if k not in ("event_type", "content")}
@@ -1739,6 +1847,8 @@ class JiuWenSwarm:
                                     for k, v in event_data.items():
                                         if k not in ("type", "timestamp", "content"):
                                             extra_fields[k] = v
+                            if et in {"chat.final", "chat.tool_call"}:
+                                extra_fields = _attach_reasoning_content(extra_fields)
                             append_history_record(
                                 session_id=session_id,
                                 request_id=rid,
@@ -1750,10 +1860,10 @@ class JiuWenSwarm:
                                 extra=extra_fields if extra_fields else None,
                                 mode=request.params.get("mode", "unknown"),
                             )
+                            if et == "chat.final":
+                                durable_final_content = str(data.get("content", ""))
                         if et == "chat.final":
                             final_answer_content = str(data.get("content", ""))
-                        elif et == "chat.delta":
-                            final_answer_chunks.append(str(data.get("content", "")))
                         yield AgentResponseChunk(
                             request_id=rid,
                             channel_id=cid,
@@ -1790,6 +1900,7 @@ class JiuWenSwarm:
                 event_type="chat.final",
                 content=finalized_assistant_message,
                 timestamp=time.time(),
+                extra=_attach_reasoning_content(),
                 mode=request.params.get("mode", "unknown"),
             )
             final_answer_content = finalized_assistant_message
@@ -1816,7 +1927,10 @@ class JiuWenSwarm:
             await ExtensionRegistry.get_instance().trigger(AgentServerHookEvents.MEMORY_AFTER_CHAT, after_ctx)
 
         # auto memory: extract memories after conversation ends
-        if is_auto_memory_enabled():
+        # 需要 auto_memory_enabled 和 memory.enabled 都为 true 才触发
+        mode = request.params.get("mode", "code") if isinstance(request.params, dict) else "code"
+        config = get_config()
+        if is_auto_memory_enabled() and is_memory_enabled(mode, config):
             _trigger_auto_memory_extraction(adapter, request, session_id, is_stream=True)
 
         yield AgentResponseChunk(
@@ -1830,6 +1944,21 @@ class JiuWenSwarm:
 
     def get_instance(self):
         return self._adapter._instance
+
+    async def apply_package_change_to_session_adapters(
+        self,
+        operation: str,
+        config_path: str,
+    ) -> None:
+        """Propagate a harness package load/unload to all live session adapters.
+        """
+        adapter = self._adapter
+        if adapter is None:
+            return
+        method = getattr(adapter, "apply_package_change_to_session_adapters", None)
+        if method is None:
+            return
+        await method(operation, config_path)
 
     async def compress_context(
             self,

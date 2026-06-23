@@ -2,6 +2,32 @@
 
 /* A2UI Component Styles */
 
+body .a2ui-surface,
+body .a2ui-surface *,
+body .a2ui-surface *::before,
+body .a2ui-surface *::after {
+  box-sizing: border-box;
+}
+
+body .a2ui-surface {
+  max-width: 100%;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+body .a2ui-surface section {
+  max-width: 100%;
+  min-width: 0;
+}
+
+body .a2ui-surface button,
+body .a2ui-surface [role="button"] {
+  max-width: 100%;
+  min-width: 2.5rem;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
 /* ─── Horizontal scrollable containers (utility class) ─── */
 .a2ui-horizontal-scroll {
   overflow-x: auto;

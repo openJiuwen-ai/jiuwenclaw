@@ -8,6 +8,7 @@ How to create and manage a simple scheduled job in JiuwenSwarm and push results 
 
 - **Run a one-line instruction on a schedule**, e.g. “send me the weather in Hangzhou every morning at 9.”
 - **Let the agent execute work** on a timer, such as running searches and generating results.
+- **Team / SwarmFlow on a schedule** (`mode=team`, etc.): wake multi-agent workflows for reports, comparisons, and other complex jobs (see [§6](#6-team-mode-and-swarmflow-multi-agent-scheduled-jobs)).
 - **Multi-channel delivery** — scheduled tasks are currently supported on web, Feishu, WeCom, DingTalk, and WeChat. Non-web channels must be enabled in channel management; see [Channels](Channels.md).
 
 ---
@@ -67,3 +68,82 @@ When `targets` is `tui` (also the default for `/cron add`):
 - To scope reminders differently, use `targets=web`, or manage jobs via `/cron` in TUI and view them in the Web panel.
 
 Session-scoped chat streams are routed to a single TUI window by `session_id`; cron push to TUI is the exception and reaches all windows.
+
+---
+
+### 6. Team mode and SwarmFlow (multi-agent scheduled jobs)
+
+Besides the default single-agent path, cron jobs now support **Team mode**: at wake time the gateway starts multi-agent collaboration and may run a **SwarmFlow** workflow (see [Agent Team](AgentTeam.md) and [TUI SwarmFlow Guide](TUISwarmFlowGuide.md)).
+
+#### 6.1 Supported execution modes (`mode`)
+
+| `mode` | Description |
+|---|---|
+| `agent.fast` | **Default**. Single agent, fast path; good for reminders and simple queries |
+| `agent` / `agent.plan` / `plan` | Single agent with planning or deeper reasoning |
+| `team` | Multi-agent team; may use SwarmFlow |
+| `team.plan` | Team with planning-oriented collaboration |
+| `code.team` | Code-oriented team collaboration |
+
+When creating jobs from TUI/Web, pass `mode=`. The UI loads supported modes and default timeouts via `cron.job.meta`.
+
+#### 6.2 Examples
+
+```text
+# Weekly team report pushed to TUI
+/cron add name=model-weekly cron_expr="0 9 * * 1" description="Compare GLM vs DeepSeek and output a Markdown report" mode=team targets=tui
+
+# Simple reminder with default agent.fast
+/cron add name=water cron_expr="0 30 8 * * *" description="Remind me to drink water" targets=tui
+```
+
+Optional **`timeout_seconds`** (60–259200) overrides the per-run timeout:
+
+| Mode | Default timeout |
+|---|---|
+| Normal modes (e.g. `agent.fast`) | 600 s (10 min) |
+| `team` / `team.plan` / `code.team` | 1200 s (20 min) |
+
+```text
+/cron add name=long-report cron_expr="0 9 * * 1" description="..." mode=team timeout_seconds=3600 targets=tui
+```
+
+#### 6.3 Execution and delivery (vs single-agent jobs)
+
+**Execution path**
+
+- Non-team jobs: unary Agent call on channel `__cron__`, session `cron_{timestamp}_{job_id}`.
+- Team jobs: **streaming** AgentServer call with `mode=team`, same isolated session `cron_{timestamp}_{job_id}` — **not** the creator TUI `session_id`.
+
+**Why an isolated session**
+
+- `session_id` on the job is still stored (mainly for IM routing on Feishu and similar channels).
+- Team runs use `cron_*` so closing the creator TUI does not trigger `cancel_agent_sessions_on_disconnect` against an in-flight team cron stream.
+- **Trade-off**: SwarmFlow / team progress is **not** shown live in the creator TUI window during the run (events use the `cron_*` session).
+
+**Result push**
+
+- With `targets=tui`, the final `[cron] <job name> result: …` is still **broadcast** to all connected TUI windows when the run completes.
+- If no TUI is connected at completion time, the broadcast may be missed; keep the gateway running or inspect the job via `/cron show`.
+
+**Team completion detection**
+
+Gateway and AgentServer share `jiuwenswarm/common/cron_team_completion.py` so runs do not end early when:
+
+- A leader interim reply or placeholder text appears before the real report;
+- Harness delegation still has open `team.task` entries or busy members;
+- SwarmFlow has not reached `completed` while the leader already emitted an interim `chat.final`.
+
+Structured signals (workflow completed + leader final, or harness leader final with no open tasks) gate stream end and `result_text`.
+
+#### 6.4 Implementation map (developers)
+
+| Module | Role |
+|---|---|
+| `gateway/cron/scheduler.py` | Wake/push scheduling; team stream consume/timeout; broadcast formatting |
+| `gateway/cron/models.py` | `mode` / `timeout_seconds` validation and defaults |
+| `common/cron_team_completion.py` | Shared team-round completion state machine |
+| `server/runtime/agent_adapter/team_helpers.py` | Cron team streams and early finish of background tasks |
+| `channels/tui/.../cron.ts` | `/cron` subcommands and `mode` / `timeout_seconds` |
+
+See also [Slash commands — `/cron`](SlashCommands.md#cron-scheduled-task-management).

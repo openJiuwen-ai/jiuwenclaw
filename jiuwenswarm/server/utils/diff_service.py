@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from jiuwenswarm.common.utils import get_agent_sessions_dir, get_agent_workspace_dir, get_user_workspace_dir
+from jiuwenswarm.server.runtime.session.session_history import load_history_records
 
 
 logger = logging.getLogger(__name__)
@@ -147,11 +148,8 @@ class DiffService:
     @staticmethod
     def _read_history(session_id: str) -> list[dict[str, Any]]:
         """读取 session history."""
-        history_file = get_agent_sessions_dir() / session_id / "history.json"
-        if not history_file.exists():
-            return []
         try:
-            return json.loads(history_file.read_text(encoding="utf-8"))
+            return load_history_records(session_id)
         except Exception:
             return []
 

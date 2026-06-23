@@ -8,6 +8,7 @@ import { DateTimeInputWithDefaults } from './DateTimeInputWithDefaults';
 import { MultipleChoiceWithDefaults } from './MultipleChoiceWithDefaults';
 import { SliderWithDefaults } from './SliderWithDefaults';
 import { TextFieldWithDefaults } from './TextFieldWithDefaults';
+import { TextWithDefaults } from './TextWithDefaults';
 
 export interface A2UIRendererProps {
   surfaceId: string;
@@ -19,6 +20,9 @@ const a2uiV08Registry = ComponentRegistry.getInstance();
 // which runs lazily on first A2UI render. We apply them both here (for early
 // access) and again in the renderer component (after ensureInitialized runs).
 function applyOverrides() {
+  a2uiV08Registry.register('Text', {
+    component: TextWithDefaults,
+  });
   a2uiV08Registry.register('CheckBox', {
     component: CheckBoxWithDefaults,
   });

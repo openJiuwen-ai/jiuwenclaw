@@ -24,6 +24,7 @@ import logging
 import types
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
 
@@ -66,9 +67,6 @@ from jiuwenswarm.agents.swarm.providers import (
     member_rails,
     runtime_tools,
     tools,
-)
-from jiuwenswarm.agents.harness.team.team_runtime_inheritance import (
-    resolve_model_config,
 )
 from jiuwenswarm.common.coding_memory_paths import (
     resolve_project_coding_memory_dir,
@@ -1179,6 +1177,27 @@ def test_code_runtime_language_by_mode_and_role() -> None:
     assert code_rails.code_runtime_language(plan_leader) in {"cn", "zh"}
     assert code_rails.code_runtime_language(plan_teammate) == "en"
     assert code_rails.code_runtime_language(code_team) == "en"
+
+
+def test_code_runtime_prompt_provider_carries_project_dir(tmp_path: Path) -> None:
+    """code.team runtime prompts keep the user's project scope visible."""
+    register_swarm_providers()
+    project_dir = tmp_path / "project"
+    project_dir.mkdir()
+    ctx = SwarmBuildContext(
+        mode="code.team",
+        role="leader",
+        channel="tui",
+        project_dir=str(project_dir),
+    )
+
+    rail = RailSpec(type=registry.CODE_RUNTIME_PROMPT).build(
+        language="cn",
+        context=ctx,
+    )
+
+    assert getattr(rail, "_project_dir") == str(project_dir)
+    assert getattr(rail, "_cwd") == str(project_dir)
 
 
 def test_team_plan_approval_provider_builds_only_for_leader() -> None:

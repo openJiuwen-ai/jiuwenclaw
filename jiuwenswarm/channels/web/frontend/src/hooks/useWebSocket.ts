@@ -58,6 +58,16 @@ function isCompletedResumeResult(interruptResult: unknown): boolean {
   return result.intent === 'resume' && result.success === true && result.has_active_task === false;
 }
 
+function getConnectSignature(options: WebConnectOptions): string {
+  return JSON.stringify({
+    provider: options.provider || '',
+    apiKey: options.apiKey || '',
+    apiBase: options.apiBase || '',
+    model: options.model || '',
+    projectPath: options.projectPath || '',
+  });
+}
+
 const TEAM_TASK_STATUS_SET = new Set<TeamTaskStatus>([
   'pending',
   'blocked',
@@ -438,6 +448,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
   const [isConnected, setIsConnected] = useState(false);
   const [connectionState, setConnectionState] =
     useState<WebConnectionState>('idle');
+  const lastConnectSignatureRef = useRef<string>('');
   const onConnectRef = useRef(onConnect);
   const onDisconnectRef = useRef(onDisconnect);
   const onErrorRef = useRef(onError);
@@ -2439,13 +2450,42 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
       model,
       projectPath,
     };
-    void webClient.connect(connectOptions).catch((error) => {
-      const webError = error as WebError;
-      setConnectionStats({ lastError: webError.message });
-      onErrorRef.current?.(webError.message || 'WebSocket connection error');
-    });
+    const nextSignature = getConnectSignature(connectOptions);
+    const previousSignature = lastConnectSignatureRef.current;
+    const state = webClient.getState();
 
+    if (nextSignature === previousSignature && state !== 'closed') {
+      return;
+    }
+
+    lastConnectSignatureRef.current = nextSignature;
+
+    const runConnect = async () => {
+      try {
+        if (previousSignature && previousSignature !== nextSignature && state !== 'closed') {
+          await webClient.disconnect('connect options changed');
+        }
+        await webClient.connect(connectOptions);
+      } catch (error) {
+        const webError = error as WebError;
+        setConnectionStats({ lastError: webError.message });
+        onErrorRef.current?.(webError.message || 'WebSocket connection error');
+      }
+    };
+
+    void runConnect();
+  }, [
+    apiBase,
+    apiKey,
+    model,
+    projectPath,
+    provider,
+    setConnectionStats,
+  ]);
+
+  useEffect(() => {
     return () => {
+      lastConnectSignatureRef.current = '';
       webClient.disconnect();
       clearMessages();
       clearTodos();
@@ -2457,14 +2497,9 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
       setConnectionStats({ state: 'closed', inflight: 0 });
     };
   }, [
-    apiBase,
-    apiKey,
     clearMessages,
     clearSubtasks,
     clearTodos,
-    model,
-    projectPath,
-    provider,
     setContextCompressionStats,
     setConnectionStats,
     setConnected,

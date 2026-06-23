@@ -149,8 +149,7 @@ async def _create_memory_extraction_context(
 async def _execute_auto_memory_extraction(
     project_dir: str,
     session_id: str,
-    request: "AgentRequest",
-    context_engine: "ContextEngine | None" = None,
+    messages: list | None = None,
     parent_agent: "AgentAdapter | None" = None,
 ) -> None:
     """Execute auto memory extraction in background.
@@ -160,8 +159,7 @@ async def _execute_auto_memory_extraction(
     Args:
         project_dir: The project root path.
         session_id: The session ID.
-        request: The agent request.
-        context_engine: The context engine to retrieve conversation messages.
+        messages: Pre-retrieved messages from session history.
         parent_agent: The parent AgentAdapter instance (for cache sharing, optional).
     """
     # Import utility functions from extract_memories module
@@ -187,30 +185,14 @@ async def _execute_auto_memory_extraction(
             logger.warning("[auto_memory] Skipped: project_dir is not a directory")
             return
 
-        # Get conversation messages from context engine
+        # Use pre-retrieved messages from session history
         history = []
-        if context_engine is None:
-            logger.warning("[auto_memory] context_engine is None, cannot retrieve messages")
+        if messages is not None:
+            logger.info("[auto_memory] Using pre-retrieved messages (%d messages)", len(messages))
+            history = messages
         else:
-            try:
-                context = context_engine.get_context(session_id=session_id)
-                if context is None:
-                    logger.warning("[auto_memory] get_context returned None")
-                else:
-                    raw_messages = list(context.get_messages())
-                    logger.debug("[auto_memory] raw_messages count: %d", len(raw_messages))
-                    # Convert to serializable format
-                    for msg in raw_messages:
-                        if hasattr(msg, "to_dict"):
-                            history.append(msg.to_dict())
-                        elif hasattr(msg, "model_dump"):
-                            history.append(msg.model_dump())
-                        elif isinstance(msg, dict):
-                            history.append(msg)
-                        else:
-                            history.append({"role": getattr(msg, "role", "unknown"), "content": str(msg)})
-            except Exception as exc:
-                logger.warning("[auto_memory] Failed to get messages from context_engine: %s", exc)
+            logger.warning("[auto_memory] No messages provided, cannot extract memories")
+            return
 
         if not history:
             logger.debug("[auto_memory] Skipped: no conversation messages found")
@@ -261,8 +243,6 @@ async def _execute_auto_memory_extraction(
 
         # Run memory extraction with cache sharing mode
         # Cache Sharing: inherit parent's model, tools, message prefix for API cache hit
-        logger.info("[auto_memory] === USING CACHE SHARING MODE ===")
-        logger.debug("[auto_memory] parent_agent type: %s", type(parent_agent).__name__)
         await _run_memory_extraction_with_cache_sharing(
             memory_dir=memory_dir,
             prompt=prompt,

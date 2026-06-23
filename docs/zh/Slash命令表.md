@@ -33,9 +33,11 @@
 | `/evolve_simplify` | 整理、合并某个 Skill 的演进经验（见下文） |
 | `/evolve_rebuild` | 基于归档与演进记录重建 `SKILL.md`（见下文） |
 | `/hooks` | 浏览已配置的 hooks（只读，见下文） |
+| `/simplify` | 代码精简审查：检查复用性、质量、效率并自动修复（仅 `code.*`，见下文） |
 | `/sandbox` | 设置沙箱模式（见下文） |
 | `/agents` | 管理 Agent 配置（list, get, create, update, enable, disable, delete，见下文） |
 | `/auto-harness` | Auto-Harness 任务管理（`run`/`schedule`/`issue`，见下文） |
+| `/btw` | 旁路快速提问，不中断主对话（见下文） |
 
 > 说明：本页的 `/mode` 与 `/switch` 以 Gateway 受控通道行为为主。TUI 本地命令另支持 `/mode plan`、`/mode team.normal`，详见 [TUI 使用指南](TUI使用指南.md)。
 
@@ -60,6 +62,8 @@
 | `/rewind` | 回退对话到指定轮次之前（见下文） |
 | `/memory` | 记忆管理（见下文） |
 | `/cron` | 定时任务管理（见下文） |
+| `/review` | 代码审查 PR（见下文） |
+| `/security-review` | 安全审查当前分支待定变更（见下文） |
 
 ---
 
@@ -400,18 +404,20 @@
 | `description` | 是 | 任务描述，即 Agent 执行时收到的输入指令 |
 | `targets` | 否 | 推送渠道，默认 `tui`；可选：`tui`、`web`、`feishu`、`whatsapp`、`wecom`、`xiaoyi`、`wechat`、`dingtalk` 或 `feishu_enterprise:<app_id>`。`targets=tui` 时结果会广播到所有已连接的 TUI 窗口，详见 [定时任务 — 推送到 TUI](定时任务.md#5-推送到-tui-频道) |
 | `timezone` | 否 | IANA 时区，默认 `Asia/Shanghai` |
-| `mode` | 否 | 执行模式：`agent`（默认，适用于简单提醒类任务）或 `plan`（较复杂的推理任务，让Agent先规划步骤再执行） |
+| `mode` | 否 | 执行模式，默认 `agent.fast`。可选：`agent`、`agent.fast`、`agent.plan`、`plan`、`team`、`team.plan`、`code.team`。`team` 系列走多 Agent 流式执行，详见 [定时任务 — Team 模式](定时任务.md#6-team-模式与-swarmflow多智能体定时任务) |
+| `timeout_seconds` | 否 | 单次执行超时（秒），范围 60～259200。未设置时普通模式默认 600，Team 模式默认 1200 |
 | `wake_offset_seconds` | 否 | 提前唤醒秒数，默认 300 |
 | `delete_after_run` | 否 | 执行一次后自动删除，默认 false |
 
 - `add` 示例：
   - `/cron add name=每分钟测试 cron_expr="0 * * * *" description="告诉我现在几点了" targets=tui`
-  - `/cron add name=晨报 cron_expr="0 9 * * *" description="生成今日晨报摘要" targets=tui mode=plan`
+  - `/cron add name=晨报 cron_expr="0 9 * * *" description="生成今日晨报摘要" targets=tui mode=agent.plan`
+  - `/cron add name=模型周报 cron_expr="0 9 * * 1" description="对比 GLM 与 DeepSeek 并输出报告" targets=tui mode=team`
   - `/cron add name=提醒 cron_expr="0 30 17 29 4 ? 2026" description="别忘了开会" targets=tui delete_after_run=true`
   - `/cron add name=每周一报 cron_expr="0 9 * * 1" description="生成本周周报" targets=web`
 
 - `update` 用法：只需传入要修改的字段，如 `/cron update <id> name=新名称 enabled=false`
-- `show` 显示内容：以 key-value 格式展示任务全部字段（id、name、status、cron_expr、timezone、description、targets、mode、wake_offset_seconds、delete_after_run）
+- `show` 显示内容：以 key-value 格式展示任务全部字段（id、name、status、cron_expr、timezone、description、targets、mode、timeout_seconds、wake_offset_seconds、delete_after_run）
 - `list` 显示内容：序号、完整 job ID、名称、cron 表达式、启用状态、描述摘要
 - `preview` 显示内容：每次执行计划的唤醒时间和推送时间
 
@@ -550,6 +556,49 @@
 - `/export` — 复制对话到剪贴板
 - `/export my-chat` — 保存到工作空间下的 `my-chat.txt`
 - `/export 2026-05-09-debug-session.txt` — 使用显式时间戳文件名保存
+
+### `/simplify`（代码精简审查）
+
+在 **TUI 本地解析**，通过专用 RPC `command.simplify` 获取服务端生成的三阶段审查 prompt，然后注入为 Agent 消息（`logAsUser: false`）。Agent 自动审查代码变更的复用性、质量与效率，并直接修复发现的问题。
+
+- **别名**：无。
+- **适用模式**：**仅 `code.*`**。非 code 模式下提示先执行 `/mode code`。
+- **解析位置**：TUI 本地（非 Gateway 受控通道），IM 不可用。
+
+#### 用法
+
+| 命令 | 说明 |
+|---|---|
+| `/simplify` | 审查当前 git 变更（或最近编辑的文件），自动修复问题 |
+| `/simplify <target>` | 附加关注点：文件路径、模块名或特定审查维度 |
+
+#### 执行流程
+
+1. **TUI 校验**：确认当前处于 `code.*` 模式，否则返回错误提示。
+2. **RPC 请求**：调用 `command.simplify`（携带可选 `target`），超时 30 秒。
+3. **服务端生成 prompt**：基于 `_SIMPLIFY_PROMPT_TEMPLATE` 构建三阶段审查指令；若有 `target`，追加 `## Additional Focus` 段落。
+4. **注入 Agent**：TUI 通过 `ctx.sendMessage(prompt, ..., { logAsUser: false })` 注入 prompt，Agent 开始执行。
+5. **离线处理**：离线时提示重试。
+
+#### 三阶段审查
+
+**阶段 1 — 识别变更**：执行 `git diff`（或 `git diff HEAD`）获取变更文件列表；无 git 变更时审查对话中最近编辑的文件。
+
+**阶段 2 — 并行启动三个审查 Agent**（若有子 Agent 工具则并发执行；否则自行完成三项审查）：
+
+| 审查维度 | 关注点 |
+|---|---|
+| **代码复用审查** | 是否存在可替代新代码的现有工具/工具函数；重复实现已有功能；手写逻辑是否可用已有工具替代 |
+| **代码质量审查** | 冗余状态；参数膨胀；复制粘贴变体；抽象泄漏；字符串硬编码（应用已有常量/枚举）；不必要的 JSX 嵌套；不必要的注释（仅保留说明 WHY 的注释） |
+| **效率审查** | 不必要的工作（重复计算/文件读取/N+1）；错失并发机会；热路径膨胀；无条件触发的无效更新；TOCTOU 反模式（先检查再操作）；内存泄漏/未清理的监听器；过度操作（读取整文件但只需部分） |
+
+**阶段 3 — 修复问题**：汇总所有发现，逐一修复；误报跳过即可，不争论；完成后简要总结修复内容（或确认代码已足够精简）。
+
+#### 示例
+
+- `/simplify` — 审查所有变更
+- `/simplify src/auth/` — 关注 `src/auth/` 目录下的变更
+- `/simplify focus on error handling patterns` — 重点关注错误处理模式
 
 ### `/sandbox`（沙箱模式管理）
 
@@ -1121,12 +1170,120 @@ Pipeline 执行过程中，扩展包**默认自动激活生效**，无需用户�
   - `/auto-harness issue delete 123`
   - `/auto-harness issue delete 123 456`
 
+### `/btw`（旁路提问）
+
+在 **TUI 本地解析**，通过专用 RPC `command.btw` 向 AgentServer 发起一个独立的、无工具的、单轮 LLM 查询，基于当前对话上下文快速回答旁路问题，**不中断主对话**。
+
+- **别名**：无。
+- **适用模式**：全部。
+- **约束**：必须提供问题文本；无对话上下文时返回 `no_context`。
+
+#### 用法
+
+| 命令 | 说明 |
+|---|---|
+| `/btw <question>` | 基于当前对话上下文，发起旁路提问 |
+
+#### 行为细节
+
+- **参数必填**：`/btw` 必须带问题文本，否则提示 `Usage: /btw <your question>`。
+- **思考指示器**：发送请求后显示 `💭 Answering: <question>`（dim 样式）。
+- **RPC 超时**：120 秒。
+- **服务端处理**：
+  - 后端通过 `command.btw` RPC 接收请求，获取当前 Agent 实例。
+  - 与主 Agent 共享 system prompt（项目上下文、技能、CLAUDE.md 等），获取最近对话消息作为上下文。
+  - 构建专用 btw prompt，通过 `<system-reminder>` 告知模型：无工具可用、单次回复、不中断主 Agent。
+  - 直接调用模型（无工具、单轮），不修改对话历史（只读操作）。
+- **返回状态**：
+  - `ok`：显示 `💡 /btw <question>` + 回答内容。
+  - `no_context`：提示 `No conversation context available yet — send a message first.`。
+  - `failed`：显示错误信息或 `Couldn't answer the side question.`。
+
+#### 示例
+
+- `/btw what does git status do?` — 询问 git status 命令的作用
+- `/btw 这段代码的时间复杂度是多少？` — 基于上下文分析算法复杂度
+
+### `/review`（代码审查 PR）
+
+在 **TUI** 中输入时，将原始 `/review` 文本作为聊天消息发送给 Gateway。Gateway 识别后注入 review prompt，由 Agent 使用 `gh` CLI 审查 PR。
+
+在 **IM 受控通道**（飞书等）中，Gateway 拦截 `/review` 并注入 prompt，转发给 AgentServer 执行。
+
+- **别名**：无。
+- **适用模式**：全部（Agent、Code、Team）。
+- **解析位置**：Gateway 受控通道（`scope: "gateway"`），TUI 作为聊天消息发送。
+
+#### 用法
+
+| 命令 | 说明 |
+|---|---|
+| `/review` | 无参数时，Agent 执行 `gh pr list` 展示开放 PR 列表 |
+| `/review <PR 编号或 URL>` | 审查指定 PR：Agent 执行 `gh pr view/diff` 并分析 |
+
+#### 行为细节
+
+- **TUI 执行**：通过 `ctx.sendMessage()` 将 `/review [args]` 作为用户消息发送；离线时提示 `offline: waiting for reconnect before sending review request`。
+- **Gateway 拦截**（IM 侧）：
+  - 精确匹配 `/review` 或前缀匹配 `/review <arg>`。
+  - 参数最长 2048 字节；含控制字符返回 `非法指令`。
+  - 注入 review prompt 到 `msg.params["query"]`，继续转发给 AgentServer。
+- **Agent 执行**：收到 review prompt 后，Agent 使用 `gh` CLI：
+  1. 无参数时运行 `gh pr list` 展示开放 PR 列表。
+  2. 有参数时运行 `gh pr view <number>` 获取详情、`gh pr diff <number>` 获取 diff。
+  3. 分析变更并提供全面审查（正确性、约定、性能、测试覆盖、安全）。
+- **无 git/gh 预检**：Gateway 不检查 `git` 或 `gh` 是否安装，由 Agent 自行处理。
+
+#### 示例
+
+- `/review` — 列出当前仓库的开放 PR
+- `/review 123` — 审查 PR #123
+
+### `/security-review`（安全审查）
+
+在 **TUI** 中输入时，将原始 `/security-review` 文本作为聊天消息发送给 Gateway。Gateway 识别后注入安全审查 prompt，由 Agent 使用 `git` 命令分析当前分支的待定变更。
+
+在 **IM 受控通道**（飞书等）中，Gateway 拦截 `/security-review` 并注入 prompt，转发给 AgentServer 执行。
+
+- **别名**：无。
+- **适用模式**：全部（Agent、Code、Team）。
+- **解析位置**：Gateway 受控通道（`scope: "gateway"`），TUI 作为聊天消息发送。
+
+#### 用法
+
+| 命令 | 说明 |
+|---|---|
+| `/security-review` | 审查当前分支相对于 `origin/HEAD` 的所有待定变更 |
+| `/security-review <附加说明>` | 附带焦点说明或约束（如"重点关注认证模块"） |
+
+#### 行为细节
+
+- **TUI 执行**：通过 `ctx.sendMessage()` 将 `/security-review [args]` 作为用户消息发送；离线时提示 `offline: waiting for reconnect before sending security review request`。
+- **Gateway 拦截**（IM 侧）：
+  - 精确匹配 `/security-review` 或前缀匹配 `/security-review <arg>`。
+  - 参数最长 2048 字节；含控制字符返回 `非法指令`。
+  - 注入安全审查 prompt 到 `msg.params["query"]`，继续转发给 AgentServer。
+- **Agent 执行**：收到安全审查 prompt 后，Agent 执行以下步骤：
+  1. **仓库上下文研究**：`git status`、`git diff --name-only origin/HEAD...`、`git log` 获取变更概览。
+  2. **比较分析**：`git diff origin/HEAD...` 逐文件审查 diff。
+  3. **漏洞评估**：按以下类别审查：
+     - 输入验证漏洞
+     - 身份认证和授权问题
+     - 密码学与密钥管理
+     - 注入与代码执行
+     - 数据暴露
+  4. 使用子任务识别漏洞、并行子任务进行误报过滤，仅报告置信度 > 80% 的发现。
+  5. 输出结构化 Markdown 报告：文件、行号、严重级别、类别、描述、利用场景、修复建议。
+- **硬排除列表**：不报告拒绝服务、密钥存储、限速、竞态条件等问题类型。
+- **无 git 预检**：Gateway 不检查 `git` 是否安装，由 Agent 自行处理。
+
+#### 示例
+
+- `/security-review` — 审查当前分支所有待定变更
+- `/security-review 重点关注认证模块的安全性` — 附带焦点说明
+
 ---
 
 ## 待开发
 
-| 命令             | 说明      |
-|----------------|---------|
-| `/btw`         | 提问      |
-| `/export`      | 导出相关文件  |
-| `/permissions` | 权限管理    |
+（暂无）

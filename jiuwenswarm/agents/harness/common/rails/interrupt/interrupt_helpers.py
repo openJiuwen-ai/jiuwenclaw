@@ -107,6 +107,14 @@ def build_permission_rail(
             """Persist merged `permissions` config back to config.yaml.
 
             openjiuwen PermissionInterruptRail calls this when user selects "always allow".
+
+            Instead of replacing the entire ``permissions`` section with the
+            in-memory snapshot (which may contain stale entries that were
+            already deleted from config.yaml), we first re-read the current
+            on-disk permissions, then merge only the *approval_overrides*
+            and *external_directory* deltas from ``permissions`` into it.
+            This prevents re-creating tool-level entries (e.g. ``bash: ask``)
+            that the user has already removed via the webui.
             """
             try:
                 from jiuwenswarm.common.config import _dump_yaml_round_trip, _load_yaml_round_trip
@@ -115,7 +123,23 @@ def build_permission_rail(
                 data = _load_yaml_round_trip(yaml_path)
                 if not isinstance(data, dict):
                     data = {}
-                data["permissions"] = permissions
+
+                on_disk_perms = data.get("permissions")
+                if not isinstance(on_disk_perms, dict):
+                    on_disk_perms = {}
+
+                # Only overlay approval_overrides & external_directory;
+                # keep on-disk tools/defaults/rules to avoid restoring
+                # entries the user already deleted via webui.
+                merged = dict(on_disk_perms)
+                overrides_new = permissions.get("approval_overrides")
+                if overrides_new is not None:
+                    merged["approval_overrides"] = overrides_new
+                ext_dir_new = permissions.get("external_directory")
+                if ext_dir_new is not None:
+                    merged["external_directory"] = ext_dir_new
+
+                data["permissions"] = merged
                 _dump_yaml_round_trip(yaml_path, data)
                 return True
             except Exception as exc:
@@ -251,7 +275,8 @@ def build_permission_rail(
             if not principal_user_id or not channel_id:
                 return None
 
-            perm_all = get_config().get("permissions") if isinstance(get_config(), dict) else {}
+            perm_cfg = get_config()
+            perm_all = perm_cfg.get("permissions") if isinstance(perm_cfg, dict) else {}
             owner_scopes = perm_all.get("owner_scopes") if isinstance(perm_all, dict) else None
             if not isinstance(owner_scopes, dict) or not owner_scopes:
                 return None
@@ -266,10 +291,12 @@ def build_permission_rail(
                 return ("approve",)
             return ("reject", f"[PERMISSION_DENIED] 该工具未被授权 (owner_scopes: {owner_level})")
 
+        def _get_permissions_snapshot():
+            cfg = get_config()
+            return cfg.get("permissions") if isinstance(cfg, dict) else {}
+
         host = ToolPermissionHost(
-            get_permissions_snapshot=lambda: (
-                get_config().get("permissions") if isinstance(get_config(), dict) else {}
-            ),
+            get_permissions_snapshot=_get_permissions_snapshot,
             persist_allow_rule=_persist_allow_rule,
             resolve_workspace_dir=get_workspace_dir,
             permission_yaml_path=get_config_file(),

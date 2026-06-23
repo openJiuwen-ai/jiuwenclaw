@@ -36,9 +36,9 @@ class CircuitBreakerConfig:
     @property
     def history_size(self) -> int:
         return max(
-            self.global_breaker_threshold,
-            2 * self.critical_threshold,
-            2 * self.warning_threshold,
+            4 * self.critical_threshold,
+            2 * self.global_breaker_threshold,
+            2 * self.unknown_tool_threshold,
         )
 
 _invoke_sid: contextvars.ContextVar[str | None] = contextvars.ContextVar(

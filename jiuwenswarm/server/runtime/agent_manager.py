@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import uuid
@@ -85,6 +86,8 @@ class AgentManager:
         self._agent_create_params: dict[str, dict[str, dict[str, Any]]] = {}
         self._client_capabilities_by_channel: dict[str, dict[str, Any]] = {}
         self._latest_env_overrides: dict[str, Any] = {}
+        # reload 串行锁: 防止并发 reload 叠加导致内存爆炸
+        self._reload_lock: asyncio.Lock = asyncio.Lock()
 
     async def _create_agent(
         self,
@@ -342,6 +345,23 @@ class AgentManager:
                 if instance is None:
                     continue
 
+                fanout = getattr(
+                    agent,
+                    "apply_package_change_to_session_adapters",
+                    None,
+                )
+                if callable(fanout):
+                    try:
+                        await fanout(operation, config_path)
+                    except Exception as exc:
+                        logger.warning(
+                            "[AgentManager] session-adapter fanout failed for "
+                            "package %s on agent %s: %s",
+                            package_id,
+                            cache_key,
+                            exc,
+                        )
+
                 # Skip the instance that was already processed by the caller
                 if skip_instance is not None and instance is skip_instance:
                     logger.debug(
@@ -378,38 +398,43 @@ class AgentManager:
                     )
 
     async def reload_agents_config(self, config, env) -> None:
-        """reload agent config"""
-        self._latest_env_overrides = dict(env) if isinstance(env, dict) else {}
-        for env_key, env_value in self._latest_env_overrides.items():
-            key = str(env_key)
-            if env_value is None:
-                os.environ.pop(key, None)
-            else:
-                os.environ[key] = str(env_value)
+        """reload agent config.
 
-        for channel_id, agents in self.agents.items():
-            if not isinstance(agents, dict):
-                logger.warning(
-                    "[AgentManager] unexpected agents entry for channel %s: %r",
-                    channel_id,
-                    type(agents),
-                )
-                continue
-            for _, agent in agents.items():
-                await agent.reload_agent_config(
-                    config_base=config,
-                    env_overrides=env,
-                )
-            try:
-                team_config = config if isinstance(config, dict) else get_config()
-                await get_team_manager(channel_id).update_evolution_config(team_config)
-            except Exception as exc:
-                logger.warning(
-                    "[AgentManager] team evolution config hot-update failed: channel=%s error=%s",
-                    channel_id,
-                    exc,
-                )
-            logger.info(f"channel {channel_id} reload agent config success.")
+        使用 ``self._reload_lock`` 串行化, 避免高频触发(如批量 MCP 增删)时多个
+        reload 并发叠加, 同时重建大量 agent 实例导致内存暴涨被 OOM kill.
+        """
+        async with self._reload_lock:
+            self._latest_env_overrides = dict(env) if isinstance(env, dict) else {}
+            for env_key, env_value in self._latest_env_overrides.items():
+                key = str(env_key)
+                if env_value is None:
+                    os.environ.pop(key, None)
+                else:
+                    os.environ[key] = str(env_value)
+
+            for channel_id, agents in self.agents.items():
+                if not isinstance(agents, dict):
+                    logger.warning(
+                        "[AgentManager] unexpected agents entry for channel %s: %r",
+                        channel_id,
+                        type(agents),
+                    )
+                    continue
+                for _, agent in agents.items():
+                    await agent.reload_agent_config(
+                        config_base=config,
+                        env_overrides=env,
+                    )
+                try:
+                    team_config = config if isinstance(config, dict) else get_config()
+                    await get_team_manager(channel_id).update_evolution_config(team_config)
+                except Exception as exc:
+                    logger.warning(
+                        "[AgentManager] team evolution config hot-update failed: channel=%s error=%s",
+                        channel_id,
+                        exc,
+                    )
+                logger.info(f"channel {channel_id} reload agent config success.")
 
     async def recreate_agent(self, channel_id: str, *, immediate: bool = True) -> None:
         """重建指定 channel 的所有 agent 实例.

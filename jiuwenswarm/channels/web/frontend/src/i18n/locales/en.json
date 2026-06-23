@@ -334,6 +334,9 @@
     "packageExists": "Package with this name already exists",
     "invalidZipFormat": "Invalid zip file format",
     "missingHarnessConfig": "Zip must contain harness_config.yaml",
+    "packageNotFound": "Extension version not found",
+    "invalidRequest": "Invalid request parameters",
+    "internalError": "Internal server error, please retry",
     "selectZipFile": "Select a .zip file to import",
     "deactivate": "Deactivate",
     "deactivating": "Deactivating...",
@@ -681,6 +684,7 @@
       "teamLifecycle": "Lifecycle",
       "teamTeammateMode": "Teammate Mode",
       "teamSpawnMode": "Spawn Mode",
+      "teamEnablePermissions": "Safety Guardrail",
       "teamLeaderMemberName": "Member Name",
       "teamLeaderDisplayName": "Display Name",
       "teamLeaderPersona": "Persona",
@@ -947,6 +951,8 @@
       "fillPath": "Enter a Chrome path first",
       "savePath": "Save the Chrome path first"
     },
+    "showBrowser": "Show Browser",
+    "showBrowserDesc": "Open a visible browser window when running browser tasks.",
     "errors": {
       "loadPath": "Failed to load Chrome path",
       "savePath": "Failed to save Chrome path",

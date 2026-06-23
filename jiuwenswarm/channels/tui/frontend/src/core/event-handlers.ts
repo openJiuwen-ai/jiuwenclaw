@@ -230,11 +230,6 @@ function _getToolResultPayload(payload: Record<string, unknown>): Record<string,
   return payload;
 }
 
-function normalizeVisibleMode(mode: ClientMode): ClientMode {
-  if (mode === "team.plan") return "team";
-  return mode;
-}
-
 function _extractPathFromToolResult(
   payload: Record<string, unknown>,
   pathKeys: string[],
@@ -1303,7 +1298,7 @@ export function handleIncomingFrame(delegate: AppEventDelegate, frame: EventFram
     case "session.updated": {
       const mode = typeof payload.mode === "string" ? payload.mode : "";
       if (isClientMode(mode)) {
-        delegate.setMode(normalizeVisibleMode(mode));
+        delegate.setMode(mode);
       }
       if (typeof payload.title === "string") {
         delegate.setSessionTitle(payload.title);

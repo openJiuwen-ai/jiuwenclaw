@@ -162,6 +162,7 @@ interface TeamEntry {
   lifecycle: string;
   teammate_mode: string;
   spawn_mode: string;
+  enable_permissions: boolean;
   leader: Leader;
   teammate: Teammate;
   predefined_members: TeamMember[];
@@ -196,6 +197,7 @@ interface ConfigPanelProps {
       lifecycle: string;
       teammate_mode: string;
       spawn_mode: string;
+      enable_permissions: boolean;
       leader: { member_name: string; display_name: string; persona: string; agent_key: string };
       teammate: { agent_key: string };
       predefined_members: Array<{ member_name: string; display_name: string; persona: string; prompt_hint: string; agent_key: string }>;
@@ -213,6 +215,7 @@ interface AgentsTeamsPayload {
     lifecycle: string;
     teammate_mode: string;
     spawn_mode: string;
+    enable_permissions: boolean;
     leader: { member_name: string; display_name: string; persona: string; agent_key: string };
     teammate: { agent_key: string };
     predefined_members: Array<{ member_name: string; display_name: string; persona: string; prompt_hint: string; agent_key: string }>;
@@ -1884,6 +1887,10 @@ function TeamItemSection({
     onTeamChange({ ...team, [field]: trimmedValue });
   };
 
+  const updateTeamPermissions = () => {
+    onTeamChange({ ...team, enable_permissions: !team.enable_permissions });
+  };
+
   const removeMember = (idx: number) => {
     const memberName = team.predefined_members[idx]?.member_name || t("config.team.untitled");
     if (onDeleteTeamMember && teamIdx !== undefined) {
@@ -1987,6 +1994,25 @@ function TeamItemSection({
             )}
           </div>
         ))}
+        <div className="flex items-center gap-2 text-xs">
+          <label className="w-28 text-text-muted shrink-0">
+            {t("config.keys.teamEnablePermissions")}
+          </label>
+          <button
+            type="button"
+            role="switch"
+            aria-checked={team.enable_permissions}
+            onClick={updateTeamPermissions}
+            title={t("config.keys.teamEnablePermissions")}
+            className={`relative inline-flex h-5 w-9 flex-shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 focus:outline-none ${team.enable_permissions ? "bg-ok" : "bg-secondary"
+              }`}
+          >
+            <span
+              className={`pointer-events-none inline-block h-4 w-4 transform rounded-full bg-white shadow transition duration-200 ${team.enable_permissions ? "translate-x-4" : "translate-x-0"
+                }`}
+            />
+          </button>
+        </div>
       </div>
 
       {/* Leader配置 */}
@@ -2272,6 +2298,7 @@ function TeamsSection({
     lifecycle: "persistent",
     teammate_mode: "plan_mode",
     spawn_mode: "inprocess",
+    enable_permissions: false,
     leader: { member_name: "", display_name: "", persona: "", agent_key: "" },
     teammate: { agent_key: "" },
     predefined_members: [],
@@ -2310,6 +2337,7 @@ function TeamsSection({
       lifecycle: "persistent",
       teammate_mode: "plan_mode",
       spawn_mode: "inprocess",
+      enable_permissions: false,
       leader: { member_name: "", display_name: "", persona: "", agent_key: "" },
       teammate: { agent_key: "" },
       predefined_members: [],
@@ -2660,6 +2688,11 @@ export function ConfigPanel({
         lifecycle: normalizedConfig[`team_lifecycle_${i}`] || normalizedConfig[`team_${i}_lifecycle`] || "",
         teammate_mode: normalizedConfig[`team_teammate_mode_${i}`] || normalizedConfig[`team_${i}_teammate_mode`] || "",
         spawn_mode: normalizedConfig[`team_spawn_mode_${i}`] || normalizedConfig[`team_${i}_spawn_mode`] || "",
+        enable_permissions: parseBoolValue(
+          normalizedConfig[`team_enable_permissions_${i}`] ||
+            normalizedConfig[`team_${i}_enable_permissions`] ||
+            "false",
+        ),
         leader: {
           member_name: normalizedConfig[`team_leader_member_name_${i}`] || normalizedConfig[`team_${i}_leader_member_name`] || "",
           display_name: normalizedConfig[`team_leader_display_name_${i}`] || normalizedConfig[`team_${i}_leader_display_name`] || "",
@@ -2814,7 +2847,8 @@ export function ConfigPanel({
       const it = initialTeams[i];
       if (!it) return true;
       if (dt.team_name !== it.team_name || dt.lifecycle !== it.lifecycle
-          || dt.teammate_mode !== it.teammate_mode || dt.spawn_mode !== it.spawn_mode) return true;
+          || dt.teammate_mode !== it.teammate_mode || dt.spawn_mode !== it.spawn_mode
+          || dt.enable_permissions !== it.enable_permissions) return true;
       if (dt.leader.member_name !== it.leader.member_name || dt.leader.display_name !== it.leader.display_name
           || dt.leader.persona !== it.leader.persona || dt.leader.agent_key !== it.leader.agent_key) return true;
       if (dt.teammate.agent_key !== it.teammate.agent_key) return true;

@@ -10,6 +10,13 @@ from pathlib import Path
 from typing import Any, TYPE_CHECKING
 
 from jiuwenswarm.common.utils import get_agent_sessions_dir, get_agent_workspace_dir
+from jiuwenswarm.server.runtime.session.session_history import (
+    get_read_history_path,
+    history_exists,
+    load_history_records,
+    write_history_records,
+    _write_records_to_path,
+)
 
 if TYPE_CHECKING:
     from openjiuwen.harness import DeepAgent
@@ -73,23 +80,24 @@ def fork_session(
 
     target_dir.mkdir(parents=True, exist_ok=True)
 
-    source_history = source_dir / "history.json"
-    target_history = target_dir / "history.json"
     history_data: list[dict[str, Any]] = []
-    if source_history.exists():
-        shutil.copy2(source_history, target_history)
+    if history_exists(source_session_id):
         try:
-            data = json.loads(target_history.read_text(encoding="utf-8"))
+            data = load_history_records(source_session_id)
             if isinstance(data, list):
                 history_data = data
+                forked_records: list[dict[str, Any]] = []
                 for record in data:
-                    record["forked_from"] = {
+                    forked_record = dict(record)
+                    forked_record["forked_from"] = {
                         "session_id": source_session_id,
                         "original_id": record.get("id", ""),
                     }
-                target_history.write_text(
-                    json.dumps(data, ensure_ascii=False, indent=2),
-                    encoding="utf-8",
+                    forked_records.append(forked_record)
+                write_history_records(
+                    target_session_id,
+                    forked_records,
+                    preserve_existing_format=False,
                 )
         except Exception as exc:
             logger.warning("fork: failed to add forked_from to history: %s", exc)
@@ -154,14 +162,13 @@ def rewind_session(
     if turn_index < 1:
         raise ValueError("turn_index must be >= 1")
 
-    sessions_dir = get_agent_sessions_dir()
-    history_path = sessions_dir / session_id / "history.json"
+    history_path = get_read_history_path(session_id)
     if not history_path.exists():
         raise ValueError("session history not found")
 
     from jiuwenswarm.server.runtime.session.session_history import truncate_history_records
 
-    history = json.loads(history_path.read_text(encoding="utf-8"))
+    history = load_history_records(session_id)
     if not isinstance(history, list):
         raise ValueError("invalid history format")
 
@@ -230,12 +237,11 @@ def compact_partial_session(
     if turn_index < 1:
         raise ValueError("turn_index must be >= 1")
 
-    sessions_dir = get_agent_sessions_dir()
-    history_path = sessions_dir / session_id / "history.json"
+    history_path = get_read_history_path(session_id)
     if not history_path.exists():
         raise ValueError("session history not found")
 
-    history = json.loads(history_path.read_text(encoding="utf-8"))
+    history = load_history_records(session_id)
     if not isinstance(history, list):
         raise ValueError("invalid history format")
 
@@ -291,10 +297,7 @@ def compact_partial_session(
 
         _WRITE_QUEUE.join()
         with _FILE_LOCK:
-            history_path.write_text(
-                json.dumps(kept, ensure_ascii=False, indent=2),
-                encoding="utf-8",
-            )
+            _write_records_to_path(history_path, kept)
     else:
         raise ValueError(f"unknown direction: {direction}")
 
@@ -347,7 +350,7 @@ def compact_partial_session(
 
     _WRITE_QUEUE.join()
     with _FILE_LOCK:
-        existing = json.loads(history_path.read_text(encoding="utf-8")) if history_path.exists() else []
+        existing = load_history_records(session_id) if history_path.exists() else []
         if not isinstance(existing, list):
             existing = []
         existing.append(boundary_record)
@@ -373,10 +376,7 @@ def compact_partial_session(
             }
             existing.append(compact_summary_record)
 
-        history_path.write_text(
-            json.dumps(existing, ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
+        _write_records_to_path(history_path, existing)
 
     return {
         "session_id": session_id,
@@ -413,14 +413,11 @@ def list_session_turns(
     session_id: str,
     project_dir: str | None = None,
 ) -> dict[str, Any]:
-    sessions_dir = get_agent_sessions_dir()
-    history_path = sessions_dir / session_id / "history.json"
-
-    if not history_path.exists():
+    if not history_exists(session_id):
         return {"turns": [], "total": 0}
 
     try:
-        history = json.loads(history_path.read_text(encoding="utf-8"))
+        history = load_history_records(session_id)
     except Exception as exc:
         logger.warning("list_session_turns: failed to read history: %s", exc)
         return {"turns": [], "total": 0}
@@ -580,18 +577,15 @@ async def rewind_session_context(
         return False
 
     # --- 1. Load truncated history.json (already cut by caller) ---
-    sessions_dir = get_agent_sessions_dir()
-    history_path = sessions_dir / session_id / "history.json"
+    history_path = get_read_history_path(session_id)
     if not history_path.exists():
-        logger.warning("rewind_session_context: history.json not found for %s", session_id)
+        logger.warning("rewind_session_context: history not found for %s", session_id)
         return False
 
     try:
-        history_records: list[dict[str, Any]] = json.loads(
-            history_path.read_text(encoding="utf-8"),
-        )
-    except (json.JSONDecodeError, OSError) as exc:
-        logger.warning("rewind_session_context: failed to read history.json for %s: %s", session_id, exc)
+        history_records = load_history_records(session_id)
+    except OSError as exc:
+        logger.warning("rewind_session_context: failed to read history for %s: %s", session_id, exc)
         return False
 
     if not isinstance(history_records, list) or not history_records:

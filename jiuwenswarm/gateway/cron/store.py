@@ -8,7 +8,13 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
-from jiuwenswarm.gateway.cron.models import CronJob, CronTarget
+from jiuwenswarm.gateway.cron.models import (
+    CronJob,
+    CronTarget,
+    CRON_JOB_DEFAULT_MODE,
+    normalize_cron_job_mode,
+    normalize_cron_job_timeout_seconds,
+)
 from jiuwenswarm.common.utils import get_cron_jobs_path
 
 
@@ -64,12 +70,18 @@ class CronJobStore:
         chat_type: str | None = None,
         mode: str | None = None,
         delete_after_run: bool | None = None,
+        timeout_seconds: int | None = None,
     ) -> CronJob:
         now = time.time()
         sid = str(session_id).strip() if isinstance(session_id, str) and session_id.strip() else None
         ct = str(chat_type).strip() if isinstance(chat_type, str) and chat_type.strip() else None
-        m = str(mode).strip().lower() if isinstance(mode, str) and mode.strip() else "agent"
+        m = normalize_cron_job_mode(mode) if mode is not None and str(mode).strip() else CRON_JOB_DEFAULT_MODE
         dar = bool(delete_after_run) if delete_after_run is not None else False
+        timeout = (
+            normalize_cron_job_timeout_seconds(timeout_seconds)
+            if timeout_seconds is not None
+            else None
+        )
         job = CronJob(
             id=str(job_id or "").strip() or uuid.uuid4().hex,
             name=str(name or "").strip(),
@@ -85,6 +97,7 @@ class CronJobStore:
             chat_type=ct,
             mode=m,
             delete_after_run=dar,
+            timeout_seconds=timeout,
         )
         # validate via round-trip
         CronJob.from_dict(job.to_dict())
@@ -138,11 +151,18 @@ class CronJobStore:
         if "expired" in patch:
             updated = replace(updated, expired=bool(patch.get("expired")))
         if "mode" in patch:
-            raw_mode = patch.get("mode")
-            new_mode = str(raw_mode).strip().lower() if isinstance(raw_mode, str) and str(raw_mode).strip() else "agent"
-            updated = replace(updated, mode=new_mode)
+            updated = replace(updated, mode=normalize_cron_job_mode(patch.get("mode")))
         if "delete_after_run" in patch:
             updated = replace(updated, delete_after_run=bool(patch.get("delete_after_run")))
+        if "timeout_seconds" in patch:
+            raw_timeout = patch.get("timeout_seconds")
+            if raw_timeout is None:
+                updated = replace(updated, timeout_seconds=None)
+            else:
+                updated = replace(
+                    updated,
+                    timeout_seconds=normalize_cron_job_timeout_seconds(raw_timeout),
+                )
 
         updated.updated_at = time.time()
         CronJob.from_dict(updated.to_dict())
