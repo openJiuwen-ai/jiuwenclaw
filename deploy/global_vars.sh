@@ -142,6 +142,7 @@ declare -A DEPLOY_VARS=(
     ["MANAGER_WEB_PORT"]="5273"
     ["OBS_TYPE"]="minio"
     ["OBS_BUCKET"]="jiuwenclaw"
+    ["OBS_PUBLIC_BASE_URL"]=""
     ["DB_TYPE"]="sqlite"
     ["MANAGER_DB_NAME"]="manager"
     ["GATEWAY_DB_NAME"]="gateway"
