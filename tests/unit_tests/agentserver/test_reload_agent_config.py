@@ -373,6 +373,8 @@ class _DeepAdapterReloadHarness:
                     self._tool_cards = []
                     self._model = MagicMock()
                     self._agent_name = "test"
+                    self._sandbox_fingerprint = ()
+                    self._maybe_recreate_sys_operation = MagicMock()
                     mock_model = MagicMock()
                     mock_model.model_client_config = MagicMock()
                     self._instance.configure = MagicMock()
