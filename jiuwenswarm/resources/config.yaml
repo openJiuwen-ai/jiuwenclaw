@@ -47,7 +47,7 @@ symphony:
     enabled: false
     artifact_root: ${SYMPHONY_SKILL_RETRIEVAL_ROOT:-}
     build:
-      branching_factor: 128
+      branching_factor: 12
       max_depth: 6
       root_categories: ""
       max_workers: 2
