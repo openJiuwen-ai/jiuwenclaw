@@ -1222,6 +1222,8 @@ def _ensure_sandbox_runtime_shape(runtime: Any) -> dict[str, Any]:
             runtime["idle_check_interval"],
             env_name="JIUWENCLAW_SANDBOX_IDLE_CHECK_INTERVAL",
         )
+    if "fallback_on_failure" in runtime:
+        out["fallback_on_failure"] = bool(runtime["fallback_on_failure"])
     return out
 
 
@@ -1260,6 +1262,7 @@ def get_sandbox_runtime() -> dict[str, Any]:
         - ``JIUWENCLAW_SANDBOX_FILES_DENY``   (JSON 数组 / 分隔列表)
         - ``JIUWENCLAW_SANDBOX_IDLE_TTL_SECONDS`` (int seconds; ``<=0`` 视作禁用)
         - ``JIUWENCLAW_SANDBOX_IDLE_CHECK_INTERVAL`` (int seconds; ``<=0`` 视作未配置)
+        - ``JIUWENCLAW_SANDBOX_FALLBACK_ON_FAILURE`` (bool, 默认 false)
 
     返回结构与历史 ``config.yaml::sandbox`` runtime 完全相同 (含
     ``files: {allow, deny}`` 子结构), 让下游 ``interface_deep.py`` /
@@ -1287,5 +1290,10 @@ def get_sandbox_runtime() -> dict[str, Any]:
         },
         "idle_ttl_seconds": _read_sandbox_env("IDLE_TTL_SECONDS"),
         "idle_check_interval": _read_sandbox_env("IDLE_CHECK_INTERVAL"),
+        "fallback_on_failure": _coerce_bool_env(
+            _read_sandbox_env("FALLBACK_ON_FAILURE"),
+            env_name="JIUWENCLAW_SANDBOX_FALLBACK_ON_FAILURE",
+            default=False,
+        ),
     }
     return _ensure_sandbox_runtime_shape(raw)

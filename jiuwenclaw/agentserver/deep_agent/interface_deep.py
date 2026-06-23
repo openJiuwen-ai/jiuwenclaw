@@ -1473,12 +1473,13 @@ class JiuWenClawDeepAdapter:
             if sandbox_enabled and sandbox_url and sandbox_type:
                 logger.info(
                     "[JiuWenClawDeepAdapter] sandbox mode: url=%s type=%s "
-                    "startup_mode=%s idle_ttl_seconds=%s idle_check_interval=%s",
+                    "startup_mode=%s idle_ttl_seconds=%s idle_check_interval=%s fallback_on_failure=%s",
                     sandbox_url,
                     sandbox_type,
                     endpoint.get("startup_mode"),
                     runtime.get("idle_ttl_seconds"),
                     runtime.get("idle_check_interval"),
+                    runtime.get("fallback_on_failure"),
                 )
                 sysop_card = create_sandbox_sysop_card(
                     sandbox_url,
@@ -1489,6 +1490,7 @@ class JiuWenClawDeepAdapter:
                     excluded_commands=runtime.get("excluded_commands"),
                     idle_ttl_seconds=runtime.get("idle_ttl_seconds"),
                     idle_check_interval=runtime.get("idle_check_interval"),
+                    fallback_on_failure=runtime.get("fallback_on_failure"),
                 )
             else:
                 if sandbox_enabled and not (sandbox_url and sandbox_type):

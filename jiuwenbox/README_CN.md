@@ -518,6 +518,7 @@ sandbox:
   enabled: true                     # 是否处于沙箱模式
   excluded_commands:                # shell glob，命中后绕过沙箱在本地执行
     - "git *"
+  fallback_on_failure: false        # jiuwenbox exec 异常时回退本地（非零 exit 不回退）
   files:                            # 用户配置的写入策略（auto-managed 路径不需要写在这里，服务端会自动注入）
     allow: []
     deny: []
@@ -534,6 +535,7 @@ sandbox:
 | `sandbox.preserve_file_sharing_mode` | `mount` | `mount` | intrinsic 文件（`AGENT.md` 等）与 `project_dir` 通过 bind mount 注入沙箱，`project_dir/config/config.yaml` 自动加进 `deny_write`。 写入其它值会被服务端拒绝 |
 | `sandbox.enabled` | bool | `false` | 启用后 agent 在重建时会切到 sandbox provider；可用 `/sandbox enable` 触发 |
 | `sandbox.excluded_commands` | list[str] | `[]` | shell glob 列表；按**整条命令字符串**匹配，命中后该次调用穿透到本地 |
+| `sandbox.fallback_on_failure` | bool | `false` | jiuwenbox exec 异常（连接失败、daemon 不可用等）时回退宿主机本地执行；沙箱内命令非零 exit 不回退 |
 | `sandbox.files.allow` / `sandbox.files.deny` | list | `[]` | 用户额外配置的写入策略；最终生效集合是 `auto_managed ∪ user_configured`，详见 [`/sandbox` 命令设计文档](../../agent-core/docs/zh/2.开发指南/沙箱与%20sandbox%20命令.md) |
 
 ### 两种典型部署方式

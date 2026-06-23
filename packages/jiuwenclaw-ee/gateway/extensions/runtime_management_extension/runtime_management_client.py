@@ -407,6 +407,7 @@ class RuntimeManagementAgentClient(AgentServerClient):
         jiuwenbox_idle_check_interval = os.getenv("JIUWENBOX_IDLE_CHECK_INTERVAL", "")
         jiuwenbox_listen = os.getenv("JIUWENBOX_LISTEN", f"tcp://0.0.0.0:{jiuwenbox_port}")
         jiuwenbox_policy_path = os.getenv("JIUWENBOX_POLICY_PATH", "/app/configs/enterprise-policy.yaml")
+        jiuwenbox_fallback_on_failure = _env_bool("JIUWENBOX_FALLBACK_ON_FAILURE", False)
         jiuwenbox_host_mounts: list[HostPathMount] = []
         if _env_bool("JIUWENBOX_MOUNT_CGROUP", True):
             jiuwenbox_host_mounts.append(
@@ -519,6 +520,7 @@ class RuntimeManagementAgentClient(AgentServerClient):
                                 "JIUWENCLAW_SANDBOX_EXCLUDED_COMMANDS": jiuwenbox_excluded_commands,
                                 "JIUWENCLAW_SANDBOX_IDLE_TTL_SECONDS": jiuwenbox_idle_ttl_seconds,
                                 "JIUWENCLAW_SANDBOX_IDLE_CHECK_INTERVAL": jiuwenbox_idle_check_interval,
+                                "JIUWENBOX_FALLBACK_ON_FAILURE": jiuwenbox_fallback_on_failure,
                             }
                         )
 

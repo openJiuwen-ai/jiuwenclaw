@@ -232,6 +232,7 @@ def create_sandbox_sysop_card(
     excluded_commands: list[str] | None = None,
     idle_ttl_seconds: int | None = None,
     idle_check_interval: int | None = None,
+    fallback_on_failure: bool = False,
 ) -> SysOperationCard | None:
     """构造 jiuwenbox 沙箱模式 SysOperationCard."""
     # 触发 jiuwenbox provider 注册（@SandboxRegistry.provider 装饰器副作用）
@@ -257,6 +258,7 @@ def create_sandbox_sysop_card(
             # upload_list 当前固定为空 list。
             "preserve_file_sharing_mode": _PRESERVE_FILE_SHARING_MODE,
             "preserve_files_upload": upload_list,
+            "fallback_on_failure": fallback_on_failure,
         }
         # ``idle_check_interval`` 走 ``extra_params`` 而非 ``launcher_config`` 上
         # 的独立字段, 这样不需要给 ``SandboxLauncherConfig`` 加 jiuwenbox 私有的
