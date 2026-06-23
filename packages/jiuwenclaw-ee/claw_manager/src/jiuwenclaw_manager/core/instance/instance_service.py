@@ -56,6 +56,15 @@ async def get_instance_row(handler: DBHandler, jiuwenclaw_id: str) -> Any | None
 
 
 _MAX_JIUWENCLAW_ID_ATTEMPTS = 10
+_JIUWENCLAW_NAME_MAX_LEN = 128
+_K8S_NAMESPACE_MAX_LEN = 64
+
+
+def _strip_payload_field(payload: dict[str, Any], key: str, *, max_len: int) -> str | None:
+    val = str(payload.get(key) or "").strip()
+    if not val:
+        return None
+    return val[:max_len]
 
 
 async def generate_unique_jiuwenclaw_id(handler: DBHandler) -> str:
@@ -155,27 +164,44 @@ async def register_gateway_via_ws(
     if payload_jiuwenclaw_id:
         existing = await get_instance_row(handler, payload_jiuwenclaw_id)
         if existing is not None:
+            updates: dict[str, Any] = {"status": "online", "updated_at": now}
+            name = _strip_payload_field(
+                payload, "jiuwenclaw_name", max_len=_JIUWENCLAW_NAME_MAX_LEN
+            )
+            namespace = _strip_payload_field(
+                payload, "k8s_namespace", max_len=_K8S_NAMESPACE_MAX_LEN
+            )
+            if name:
+                updates["jiuwenclaw_name"] = name
+            if namespace:
+                updates["k8s_namespace"] = namespace
             await handler.update(
                 _INSTANCE_TABLE,
                 {"jiuwenclaw_id": payload_jiuwenclaw_id},
-                {"status": "online", "updated_at": now},
+                updates,
             )
             return payload_jiuwenclaw_id
         jiuwenclaw_id = payload_jiuwenclaw_id
     else:
         jiuwenclaw_id = await generate_unique_jiuwenclaw_id(handler)
 
+    jiuwenclaw_name = _strip_payload_field(
+        payload, "jiuwenclaw_name", max_len=_JIUWENCLAW_NAME_MAX_LEN
+    ) or f"gateway-{jiuwenclaw_id[-8:]}"
+    k8s_namespace = _strip_payload_field(
+        payload, "k8s_namespace", max_len=_K8S_NAMESPACE_MAX_LEN
+    ) or "default"
     await create_instance_row(
         handler,
         {
             "jiuwenclaw_id": jiuwenclaw_id,
-            "jiuwenclaw_name": f"gateway-{jiuwenclaw_id[-8:]}",
+            "jiuwenclaw_name": jiuwenclaw_name,
             "creator_id": "manager-ws",
             "description": None,
             "k8s_master_host": "manager-ws",
             "k8s_auth_type": "none",
             "k8s_auth_config": dumps_auth_config({}),
-            "k8s_namespace": "default",
+            "k8s_namespace": k8s_namespace,
             "status": "online",
             "resource_quota": None,
             "data": None,

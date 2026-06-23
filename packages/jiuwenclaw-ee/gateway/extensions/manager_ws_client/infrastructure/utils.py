@@ -8,6 +8,50 @@ import os
 from datetime import datetime, timezone
 from typing import Any
 
+_SA_NAMESPACE_FILE = "/var/run/secrets/kubernetes.io/serviceaccount/namespace"
+_SA_TOKEN_FILE = "/var/run/secrets/kubernetes.io/serviceaccount/token"
+
+
+def is_running_in_k8s() -> bool:
+    """判断当前进程是否运行在 K8s Pod 内。"""
+    if os.getenv("KUBERNETES_SERVICE_HOST"):
+        return True
+    return os.path.isfile(_SA_TOKEN_FILE)
+
+
+def get_k8s_namespace() -> str | None:
+    """读取当前 Pod 所在 K8s 命名空间（``NAMESPACE`` env 或 SA 挂载文件）。"""
+    val = os.getenv("NAMESPACE", "").strip()
+    if val:
+        return val
+    try:
+        with open(_SA_NAMESPACE_FILE, encoding="utf-8") as f:
+            text = f.read().strip()
+            return text or None
+    except OSError:
+        return None
+
+
+def get_pod_name() -> str | None:
+    """读取当前 Pod 名称（K8s 会将 ``HOSTNAME`` 设为 Pod 名）。"""
+    val = os.getenv("HOSTNAME", "").strip()
+    return val or None
+
+
+def get_gateway_register_identity() -> dict[str, str]:
+    """采集 Gateway 注册时上报 Manager 的运行时身份（命名空间、Pod 名）。"""
+    if not is_running_in_k8s():
+        return {}
+    out: dict[str, str] = {}
+    ns = get_k8s_namespace()
+    if ns:
+        out["k8s_namespace"] = ns
+    pod = get_pod_name()
+    if pod:
+        out["jiuwenclaw_name"] = pod
+    return out
+
+
 KNOWN_SLOT_KEYS = frozenset({
     "default_model",
     "video_model",

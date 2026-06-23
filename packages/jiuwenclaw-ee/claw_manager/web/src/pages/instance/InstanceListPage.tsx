@@ -45,9 +45,6 @@ function InstanceTopoCard({
           <span className="pill subtle muted">
             {t('topology.namespace')}: <span className="mono text-text">{instance.k8s_namespace}</span>
           </span>
-          <span className="pill subtle muted">
-            {t('topology.group')}: <span className="mono text-text">{instance.group_id}</span>
-          </span>
           <div className="flex items-center gap-1">
             <button className="btn sm" onClick={() => navigate(`/instances/${instance.jiuwenclaw_id}`)}>
               {t('topology.viewDetail')}
