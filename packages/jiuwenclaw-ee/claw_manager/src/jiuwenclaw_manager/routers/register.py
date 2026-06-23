@@ -5,7 +5,7 @@ import os
 from fastapi import APIRouter, FastAPI
 
 from jiuwenclaw_manager.infrastructure.config import settings
-from jiuwenclaw_manager.manager_ws_server import get_manager_ws_server
+from jiuwenclaw_manager.manager_ws_server import ManagerWsServer
 
 from .application_config_routers import application_config_router
 from .config_effective_policy_routers import config_effective_policy_router
@@ -42,7 +42,7 @@ def router_register(app: FastAPI) -> None:
 
     @api_router.get("/manager-ws/status", tags=["System"])
     async def manager_ws_status() -> dict:
-        server = get_manager_ws_server()
+        server = ManagerWsServer.get_instance()
         if server is None:
             return {
                 "enabled": settings.manager_ws_enabled,

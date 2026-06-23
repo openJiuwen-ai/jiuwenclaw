@@ -46,6 +46,10 @@ spec:
       containers:
         - name: <<MYSQL_NAME>>
           image: <<MYSQL_IMAGE>>
+          imagePullPolicy: IfNotPresent
+          args:
+            - --innodb_use_native_aio=0
+            - --innodb_flush_method=O_DIRECT_NO_FSYNC
           env:
             - name: MYSQL_ROOT_PASSWORD
               value: "<<MYSQL_ROOT_PASSWORD>>"  # 生产环境请务必修改！
@@ -86,18 +90,20 @@ metadata:
     app: <<MYSQL_NAME>>
 spec:
   capacity:
-    storage: 100Gi
+    storage: <<MYSQL_STORAGE_SIZE>>
   accessModes:
     - ReadWriteOnce                       # RWX: 多个 Pod 可同时读写
   persistentVolumeReclaimPolicy: Retain   # 删除 PVC 时保留数据
   storageClassName: ""                    # 不使用 StorageClass
   nfs:
     server: <<NFS_SERVER_ADDR>>           # NFS 服务器地址
-    path: /mysql                          # NFS 共享路径
+    path: <<MYSQL_NFS_PATH>>              # NFS 共享路径
     readOnly: false
   mountOptions:
     - nfsvers=4
-    - hard
+    - soft        # 改成 soft！防止节点卡死
+    - timeo=600   # 超时时间：60秒
+    - retrans=2   # 重试2次
     - noatime
 
 ---
@@ -111,7 +117,7 @@ spec:
     - ReadWriteOnce
   resources:
     requests:
-      storage: 10Gi
+      storage: <<MYSQL_STORAGE_SIZE>>
   storageClassName: ""       # 不使用 StorageClass
   selector:
     matchLabels:

@@ -4,45 +4,29 @@
 
 from __future__ import annotations
 
-from datetime import datetime
+import logging
 from typing import Any
 
 from openjiuwen_runtime.foundation.db.handler import DBHandler
 
-from ...infrastructure.utils import assert_jiuwenclaw_id_matches_payload, get_jiuwenclaw_id, utc_now
+from ...infrastructure.db import ensure_db_handler
+from ...infrastructure.utils import (
+    apply_template_ref_to_updates,
+    get_jiuwenclaw_id,
+    normalize_template_ref,
+    parse_iso_datetime,
+    utc_now,
+)
 from ...models.config_effective_policy_models import (
     CONFIG_EFFECTIVE_GLOBAL_POLICY_TABLE_DEF,
 )
 from ...schemas.config_effective_policy_schemas import (
+    ConfigEffectiveGlobalPolicyCreateRequest,
     ConfigEffectiveGlobalPolicyUpdateRequest,
-)
-from ...infrastructure.utils import (
-    apply_template_ref_to_updates,
-    normalize_template_ref,
 )
 
 _TABLE = CONFIG_EFFECTIVE_GLOBAL_POLICY_TABLE_DEF.table_name
-
-
-async def _ensure_unique_jiuwenclaw_id(
-    handler: DBHandler,
-    jiuwenclaw_id: str,
-    *,
-    exclude_policy_id: int | None = None,
-) -> None:
-    rows = await handler.list_records(
-        _TABLE,
-        {"jiuwenclaw_id": jiuwenclaw_id},
-        limit=2,
-        offset=0,
-    )
-    for row in rows:
-        row_id = getattr(row, "id", None)
-        if exclude_policy_id is not None and row_id == exclude_policy_id:
-            continue
-        raise ValueError(
-            f"global policy for jiuwenclaw_id={jiuwenclaw_id!r} already exists (id={row_id})"
-        )
+logger = logging.getLogger(__name__)
 
 
 async def _get_row_for_instance(
@@ -92,22 +76,18 @@ async def delete_config_effective_global_policy_record(
     return await handler.delete(_TABLE, {"id": policy_id})
 
 
-def _parse_iso_datetime(value: Any) -> Any:
-    if value is None or isinstance(value, datetime):
-        return value
-    if isinstance(value, str) and value.strip():
-        text = value.strip().replace("Z", "+00:00")
-        return datetime.fromisoformat(text)
-    return value
-
-
-async def apply_config_effective_global_policy_sync(
-    handler: DBHandler,
-    op: str,
+async def apply_config_effective_global_policy(
     payload: dict[str, Any],
 ) -> dict[str, Any] | None:
     """应用 Claw Manager 经 WebSocket 下发的 config_effective_global_policies 变更。"""
-    jiuwenclaw_id = assert_jiuwenclaw_id_matches_payload(payload)
+    op = str(payload.get("op") or "").strip()
+    if not op:
+        raise ValueError("config_effective_global_policies.op is required")
+
+    jiuwenclaw_id = get_jiuwenclaw_id()
+    if not jiuwenclaw_id:
+        raise ValueError("jiuwenclaw_id is not set")
+    handler = await ensure_db_handler()
 
     if op == "create":
         policy = payload.get("policy")
@@ -115,17 +95,19 @@ async def apply_config_effective_global_policy_sync(
             raise ValueError(
                 "config_effective_global_policies.create requires policy object"
             )
-        await _ensure_unique_jiuwenclaw_id(handler, jiuwenclaw_id)
-
+        req = ConfigEffectiveGlobalPolicyCreateRequest.model_validate(policy)
         now = utc_now()
         row_data: dict[str, Any] = {
             "jiuwenclaw_id": jiuwenclaw_id,
-            "priority": int(policy.get("priority", 0)),
-            "template_ref": normalize_template_ref(policy.get("template_ref")),
-            "enabled": bool(policy.get("enabled", True)),
-            "data": policy.get("data"),
-            "created_at": _parse_iso_datetime(policy.get("created_at")) or now,
-            "updated_at": _parse_iso_datetime(policy.get("updated_at")) or now,
+            "policy_id": req.policy_id,
+            "policy_name": req.policy_name,
+            "policy_desc": req.policy_desc,
+            "priority": req.priority,
+            "template_ref": normalize_template_ref(req.template_ref),
+            "enabled": req.enabled,
+            "data": req.data,
+            "created_at": parse_iso_datetime(policy.get("created_at")) or now,
+            "updated_at": parse_iso_datetime(policy.get("updated_at")) or now,
         }
         created = await handler.create(_TABLE, row_data)
         new_id = int(getattr(created, "id", 0) or 0)
@@ -133,14 +115,14 @@ async def apply_config_effective_global_policy_sync(
             raise ValueError(
                 "config_effective_global_policies.create: database did not return policy id"
             )
-        return {"policy_id": new_id}
+        result: dict[str, Any] | None = {"id": new_id}
 
-    if op == "update":
-        policy_id = payload.get("policy_id")
+    elif op == "update":
+        row_id = payload.get("id")
         updates = payload.get("updates")
-        if policy_id is None:
+        if row_id is None:
             raise ValueError(
-                "config_effective_global_policies.update requires policy_id"
+                "config_effective_global_policies.update requires id"
             )
         if not isinstance(updates, dict) or not updates:
             raise ValueError(
@@ -148,23 +130,33 @@ async def apply_config_effective_global_policy_sync(
             )
         req = ConfigEffectiveGlobalPolicyUpdateRequest.model_validate(updates)
         row = await update_config_effective_global_policy_record(
-            handler, int(policy_id), req
+            handler, int(row_id), req
         )
         if row is None:
-            raise ValueError(f"config effective global policy id={policy_id} not found")
-        return None
+            raise ValueError(f"config effective global policy id={row_id} not found")
+        result = None
 
-    if op == "delete":
-        policy_id = payload.get("policy_id")
-        if policy_id is None:
+    elif op == "delete":
+        row_id = payload.get("id")
+        if row_id is None:
             raise ValueError(
-                "config_effective_global_policies.delete requires policy_id"
+                "config_effective_global_policies.delete requires id"
             )
         deleted = await delete_config_effective_global_policy_record(
-            handler, int(policy_id)
+            handler, int(row_id)
         )
         if not deleted:
-            raise ValueError(f"config effective global policy id={policy_id} not found")
-        return None
+            raise ValueError(f"config effective global policy id={row_id} not found")
+        result = None
 
-    raise ValueError(f"unsupported config_effective_global_policies.op: {op!r}")
+    else:
+        raise ValueError(f"unsupported config_effective_global_policies.op: {op!r}")
+
+    logger.info(
+        "[ManagerWsClient] config_effective_global_policies sync op=%s id=%s",
+        op,
+        (result or {}).get("id")
+        or payload.get("id")
+        or (payload.get("policy") or {}).get("id"),
+    )
+    return result

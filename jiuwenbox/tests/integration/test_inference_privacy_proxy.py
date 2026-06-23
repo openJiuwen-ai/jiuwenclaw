@@ -7,6 +7,7 @@ import logging
 import os
 import socket
 import threading
+import time
 
 import httpx
 import pytest
@@ -35,7 +36,7 @@ def manager():
 
 
 @pytest.fixture
-def proxy_route_factory(http_target_port, mock_server_host_for_docker):
+def proxy_route_factory(http_target_port, proxy_target_host):
     """Factory to create ProxyRoute objects with custom parameters.
     
     Args:
@@ -48,17 +49,147 @@ def proxy_route_factory(http_target_port, mock_server_host_for_docker):
     def create_route(path_prefix: str, api_key: str = "sk-test-key"):
         return ProxyRoute(
             path_prefix=path_prefix,
-            target_endpoint=f"http://{mock_server_host_for_docker}:{http_target_port}",
+            target_endpoint=f"http://{proxy_target_host}:{http_target_port}",
             api_key=api_key,
         )
     return create_route
 
 
+@pytest.fixture(scope="session")
+def proxy_port_session(pytestconfig) -> int:
+    return (
+        pytestconfig.getoption("proxy_port")
+        or int(os.environ.get("JIUWENBOX_PROXY_PORT", "8322"))
+    )
+
+
+@pytest.fixture(scope="session")
+def proxy_target_host(
+    server_url_session,
+    proxy_host_from_test,
+    proxy_port_session,
+    simple_http_target,
+):
+    """Detect target host reachable by proxy without creating sandboxes.
+
+    In proxy-only mode, `/api/v1/sandboxes` is intentionally unavailable.
+    We therefore probe candidate host IPs by creating a temporary proxy route
+    and checking real forwarding through the proxy listener.
+    """
+    if server_url_session.startswith("unix://"):
+        pytest.skip(
+            "proxy integration tests require a TCP API endpoint; "
+            f"got {server_url_session!r}",
+        )
+
+    candidates = ("127.0.0.1", "172.17.0.1")
+    probe_errors: list[str] = []
+
+    with httpx.Client(base_url=server_url_session, timeout=10.0) as api_client:
+        for candidate in candidates:
+            route_name = f"_probe_{candidate.replace('.', '_')}_{int(time.time() * 1000)}"
+            path_prefix = f"/{route_name}"
+            target_endpoint = f"http://{candidate}:{simple_http_target}"
+            try:
+                create_response = api_client.post(
+                    "/api/v1/proxies",
+                    json={
+                        "path_prefix": path_prefix,
+                        "target_endpoint": target_endpoint,
+                    },
+                )
+                if create_response.status_code != 201:
+                    probe_errors.append(
+                        f"{candidate}: create route failed ({create_response.status_code})"
+                    )
+                    continue
+
+                start_response = api_client.post(f"/api/v1/proxies/{route_name}/start")
+                if start_response.status_code != 200:
+                    probe_errors.append(
+                        f"{candidate}: start route failed ({start_response.status_code})"
+                    )
+                    continue
+
+                forward_result = _proxy_http_get(
+                    proxy_host_from_test,
+                    proxy_port_session,
+                    f"{path_prefix}/test",
+                    timeout=3.0,
+                )
+                if "200 OK" in forward_result:
+                    return candidate
+                probe_errors.append(
+                    f"{candidate}: forward probe failed ({forward_result.splitlines()[0]})"
+                )
+            except Exception as exc:
+                probe_errors.append(f"{candidate}: exception ({exc})")
+            finally:
+                api_client.post(f"/api/v1/proxies/{route_name}/stop")
+                api_client.delete(f"/api/v1/proxies/{route_name}")
+
+    raise RuntimeError(
+        "Failed to detect proxy target host without sandbox. "
+        f"Tried {candidates}. Details: {'; '.join(probe_errors)}"
+    )
+
+
 @pytest.fixture
-def integration_target_endpoint(simple_http_target, docker_gateway_ip):
-    """Target endpoint for integration tests (API server perspective)."""
-    gateway_ip = docker_gateway_ip["gateway_ip"]
-    return f"http://{gateway_ip}:{simple_http_target}"
+def integration_target_endpoint(simple_http_target, proxy_target_host):
+    """Target endpoint for integration tests (proxy runtime perspective)."""
+    return f"http://{proxy_target_host}:{simple_http_target}"
+
+
+def _wait_tcp_ready(host: str, port: int, timeout_seconds: float = 10.0) -> bool:
+    deadline = time.monotonic() + timeout_seconds
+    while time.monotonic() < deadline:
+        try:
+            with socket.create_connection((host, port), timeout=1.0):
+                return True
+        except OSError:
+            time.sleep(0.1)
+    return False
+
+
+@pytest.fixture(scope="session")
+def llm_available(test_llm_endpoint, test_llm_api_key):
+    """Best-effort LLM availability probe without sandbox dependency."""
+    if not test_llm_endpoint or not test_llm_api_key:
+        return False
+    try:
+        with httpx.Client(timeout=10.0) as client:
+            response = client.get(
+                f"{test_llm_endpoint.rstrip('/')}/models",
+                headers={"Authorization": f"Bearer {test_llm_api_key}"},
+            )
+            return response.status_code == 200
+    except Exception:
+        return False
+
+
+@pytest.fixture(scope="session")
+def mock_llm_server_ready(mock_llm_server, proxy_target_host):
+    """Ensure mock LLM server is reachable from proxy-side host mapping."""
+    http_port = mock_llm_server["http_port"]
+    process = mock_llm_server["process"]
+    if _wait_tcp_ready(proxy_target_host, http_port, timeout_seconds=10.0):
+        return mock_llm_server
+
+    stderr_detail = ""
+    if process.poll() is not None and process.stderr is not None:
+        try:
+            stderr_raw = process.stderr.read()
+            stderr_text = stderr_raw.decode(errors="replace") if stderr_raw else ""
+            if stderr_text.strip():
+                stderr_detail = f" process exited with stderr: {stderr_text.strip()}"
+        except Exception:
+            logger.debug("process.poll() failed")
+
+    raise RuntimeError(
+        f"mock_llm_server not reachable at {proxy_target_host}:{http_port}; "
+        f"this usually means the fixture subprocess failed to start or host<->container "
+        f"port path is blocked.{stderr_detail}"
+    )
 
 
 def _proxy_http_get(proxy_host: str, proxy_port: int, path: str, timeout: float = 5.0) -> str:
@@ -256,7 +387,7 @@ class TestProxyManagerCRUD:
         proxy_route_factory,
         proxy_listen_port,
         http_target_port,
-        mock_server_host_for_docker,
+        proxy_target_host,
     ):
         route = proxy_route_factory("/test")
         config = InferencePrivacyProxyConfig(listen_port=proxy_listen_port, routes=[route])
@@ -264,7 +395,7 @@ class TestProxyManagerCRUD:
         
         new_route = ProxyRoute(
             path_prefix="/test",
-            target_endpoint=f"http://{mock_server_host_for_docker}:{http_target_port}",
+            target_endpoint=f"http://{proxy_target_host}:{http_target_port}",
             api_key="sk-new-key",
         )
         new_config = InferencePrivacyProxyConfig(routes=[new_route])
@@ -273,7 +404,7 @@ class TestProxyManagerCRUD:
         assert result["name"] == "test"
         
         proxy = await manager.get_proxy("test")
-        assert proxy["route"]["target_endpoint"] == f"http://{mock_server_host_for_docker}:{http_target_port}"
+        assert proxy["route"]["target_endpoint"] == f"http://{proxy_target_host}:{http_target_port}"
 
 
 class TestProxyManagerLifecycle:
@@ -555,7 +686,7 @@ class TestInferencePrivacyProxyHTTPRouting:
     """Tests for actual HTTP request routing."""
 
     @pytest.mark.asyncio
-    async def test_http_request_routing(self, proxy_listen_port, mock_server_host_for_docker):
+    async def test_http_request_routing(self, proxy_listen_port, proxy_target_host):
         """Test HTTP request routing with mock target server."""
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
             s.bind(("0.0.0.0", 0))
@@ -577,7 +708,7 @@ class TestInferencePrivacyProxyHTTPRouting:
             routes=[
                 ProxyRoute(
                     path_prefix="/test",
-                    target_endpoint=f"http://{mock_server_host_for_docker}:{target_port}",
+                    target_endpoint=f"http://{proxy_target_host}:{target_port}",
                     api_key="sk-test-key",
                 ),
             ],
@@ -681,16 +812,16 @@ class TestInferencePrivacyProxyWithMockServer:
     """Tests using the mock_llm_server fixture."""
 
     @pytest.mark.asyncio
-    async def test_http_proxy_with_mock_server(self, mock_llm_server, proxy_listen_port, mock_server_host_for_docker):
+    async def test_http_proxy_with_mock_server(self, mock_llm_server_ready, proxy_listen_port, proxy_target_host):
         """Test HTTP proxy forwarding to mock LLM server."""
-        http_port = mock_llm_server["http_port"]
+        http_port = mock_llm_server_ready["http_port"]
 
         config = InferencePrivacyProxyConfig(
             listen_port=proxy_listen_port,
             routes=[
                 ProxyRoute(
                     path_prefix="/mock",
-                    target_endpoint=f"http://{mock_server_host_for_docker}:{http_port}",
+                    target_endpoint=f"http://{proxy_target_host}:{http_port}",
                     api_key="sk-sandbox-key",
                 ),
             ],
@@ -726,16 +857,16 @@ class TestInferencePrivacyProxyWithMockServer:
             await proxy.stop()
 
     @pytest.mark.asyncio
-    async def test_https_proxy_with_mock_server(self, mock_llm_server, proxy_listen_port, mock_server_host_for_docker):
+    async def test_https_proxy_with_mock_server(self, mock_llm_server_ready, proxy_listen_port, proxy_target_host):
         """Test HTTPS proxy forwarding to mock LLM server."""
-        https_port = mock_llm_server["https_port"]
+        https_port = mock_llm_server_ready["https_port"]
 
         config = InferencePrivacyProxyConfig(
             listen_port=proxy_listen_port,
             routes=[
                 ProxyRoute(
                     path_prefix="/mock",
-                    target_endpoint=f"https://{mock_server_host_for_docker}:{https_port}",
+                    target_endpoint=f"https://{proxy_target_host}:{https_port}",
                     api_key="sk-sandbox-key",
                     skip_cert_verify=True,
                 ),
@@ -772,16 +903,16 @@ class TestInferencePrivacyProxyWithMockServer:
             await proxy.stop()
 
     @pytest.mark.asyncio
-    async def test_anthropic_api_key_injection(self, mock_llm_server, proxy_listen_port, mock_server_host_for_docker):
+    async def test_anthropic_api_key_injection(self, mock_llm_server_ready, proxy_listen_port, proxy_target_host):
         """Test Anthropic-style X-Api-Key header injection."""
-        http_port = mock_llm_server["http_port"]
+        http_port = mock_llm_server_ready["http_port"]
 
         config = InferencePrivacyProxyConfig(
             listen_port=proxy_listen_port,
             routes=[
                 ProxyRoute(
                     path_prefix="/anthropic",
-                    target_endpoint=f"http://{mock_server_host_for_docker}:{http_port}",
+                    target_endpoint=f"http://{proxy_target_host}:{http_port}",
                     api_key="sk-ant-api03-test-key",
                 ),
             ],
@@ -1934,22 +2065,22 @@ class TestRouteLongestPrefixMatching:
 
     @pytest.mark.asyncio
     async def test_longer_prefix_wins_over_string_prefix_collision(
-        self, mock_llm_server, proxy_listen_port, mock_server_host_for_docker
+        self, mock_llm_server_ready, proxy_listen_port, proxy_target_host
     ):
         """Test '/api-v2' wins over '/api' for request '/api-v2/chat'."""
-        http_port = mock_llm_server["http_port"]
+        http_port = mock_llm_server_ready["http_port"]
 
         config = InferencePrivacyProxyConfig(
             listen_port=proxy_listen_port,
             routes=[
                 ProxyRoute(
                     path_prefix="/api",
-                    target_endpoint=f"http://{mock_server_host_for_docker}:{http_port}",
+                    target_endpoint=f"http://{proxy_target_host}:{http_port}",
                     api_key="generic-key",
                 ),
                 ProxyRoute(
                     path_prefix="/api-v2",
-                    target_endpoint=f"http://{mock_server_host_for_docker}:{http_port}",
+                    target_endpoint=f"http://{proxy_target_host}:{http_port}",
                     api_key="specific-key",
                 ),
             ],
@@ -1986,22 +2117,22 @@ class TestRouteLongestPrefixMatching:
 
     @pytest.mark.asyncio
     async def test_shorter_prefix_matches_when_no_longer_match(
-        self, mock_llm_server, proxy_listen_port, mock_server_host_for_docker
+        self, mock_llm_server_ready, proxy_listen_port, proxy_target_host
     ):
         """Test '/api' matches '/api/chat' when '/api-v2' doesn't match."""
-        http_port = mock_llm_server["http_port"]
+        http_port = mock_llm_server_ready["http_port"]
 
         config = InferencePrivacyProxyConfig(
             listen_port=proxy_listen_port,
             routes=[
                 ProxyRoute(
                     path_prefix="/api",
-                    target_endpoint=f"http://{mock_server_host_for_docker}:{http_port}",
+                    target_endpoint=f"http://{proxy_target_host}:{http_port}",
                     api_key="generic-key",
                 ),
                 ProxyRoute(
                     path_prefix="/api-v2",
-                    target_endpoint=f"http://{mock_server_host_for_docker}:{http_port}",
+                    target_endpoint=f"http://{proxy_target_host}:{http_port}",
                     api_key="specific-key",
                 ),
             ],
@@ -2038,22 +2169,22 @@ class TestRouteLongestPrefixMatching:
 
     @pytest.mark.asyncio
     async def test_route_order_does_not_affect_matching(
-        self, mock_llm_server, proxy_listen_port, mock_server_host_for_docker
+        self, mock_llm_server_ready, proxy_listen_port, proxy_target_host
     ):
         """Route order should not affect longest-prefix matching."""
-        http_port = mock_llm_server["http_port"]
+        http_port = mock_llm_server_ready["http_port"]
 
         config = InferencePrivacyProxyConfig(
             listen_port=proxy_listen_port,
             routes=[
                 ProxyRoute(
                     path_prefix="/api-v2",
-                    target_endpoint=f"http://{mock_server_host_for_docker}:{http_port}",
+                    target_endpoint=f"http://{proxy_target_host}:{http_port}",
                     api_key="specific-key",
                 ),
                 ProxyRoute(
                     path_prefix="/api",
-                    target_endpoint=f"http://{mock_server_host_for_docker}:{http_port}",
+                    target_endpoint=f"http://{proxy_target_host}:{http_port}",
                     api_key="generic-key",
                 ),
             ],

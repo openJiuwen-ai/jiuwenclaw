@@ -72,11 +72,12 @@ class EffectiveEnterpriseConfig:
     skill_whitelist: list[dict[str, Any]] | None = None
     extension_config: list[dict[str, Any]] | None = None
     service_config: list[dict[str, Any]] | None = None
-    service_policy_id: int | None = None
+    service_policy_id: str | None = None
     agent_policy_id: int | None = None
     global_policy_id: int | None = None
     service_id: str | None = None
     agent_id: str | None = None
+    send_file_allowed: bool = False
     service_policy: dict[str, Any] | None = None
     agent_policy: dict[str, Any] | None = None
     global_policy: dict[str, Any] | None = None
@@ -94,6 +95,7 @@ class EffectiveEnterpriseConfig:
             "global_policy_id": self.global_policy_id,
             "service_id": self.service_id,
             "agent_id": self.agent_id,
+            "send_file_allowed": self.send_file_allowed,
             "service_policy": self.service_policy,
             "agent_policy": self.agent_policy,
             "global_policy": self.global_policy,

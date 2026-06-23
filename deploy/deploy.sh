@@ -15,7 +15,9 @@ source "gateway_handler.sh"
 source "web_handler.sh"
 source "rabbitmq_handler.sh"
 source "mysql_handler.sh"
+source "redis_handler.sh"
 source "postgresql_handler.sh"
+source "minio_handler.sh"
 source "manager_handler.sh"
 source "ports_handler.sh"
 
@@ -72,7 +74,6 @@ process_restart() {
 main() {
     read_env_from_file "${CUSTOM_ENV_FILE}" "DEPLOY_VARS"
     parse_args "$@"
-    process_namespace
     check_dependency
     process_${CMD}
 }

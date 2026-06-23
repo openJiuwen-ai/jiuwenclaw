@@ -5,11 +5,12 @@ import { Toaster } from './components/Toaster';
 import { ThemeToggle } from './components/ThemeToggle';
 import { LanguageSwitcher } from './components/LanguageSwitcher';
 import { OverviewPage } from './pages/OverviewPage';
-import { TopologyPage } from './pages/topology/TopologyPage';
+import { InstanceListPage } from './pages/instance/InstanceListPage';
 import { InstanceDetailPage } from './pages/instance/InstanceDetailPage';
 import { ModelTemplatesPage } from './pages/templates/ModelTemplatesPage';
 import { ExtensionTemplatesPage } from './pages/templates/ExtensionTemplatesPage';
-import { PoliciesPage } from './pages/policies/PoliciesPage';
+import { SkillWhitelistTemplatesPage } from './pages/templates/SkillWhitelistTemplatesPage';
+import { ServiceConfigTemplatesPage } from './pages/templates/ServiceConfigTemplatesPage';
 import { matchRoute, RouterProvider, useRouter } from './router';
 
 interface ErrorBoundaryState {
@@ -54,8 +55,8 @@ function RouteView() {
   if (path === '/overview' || path === '/') {
     return <OverviewPage />;
   }
-  if (path === '/topology') {
-    return <TopologyPage />;
+  if (path === '/instances' || path === '/topology') {
+    return <InstanceListPage />;
   }
   if (path === '/model-templates') {
     return <ModelTemplatesPage />;
@@ -63,13 +64,23 @@ function RouteView() {
   if (path === '/extension-config-templates') {
     return <ExtensionTemplatesPage />;
   }
+  if (path === '/skill-whitelist-templates') {
+    return <SkillWhitelistTemplatesPage />;
+  }
+  if (path === '/service-config-templates') {
+    return <ServiceConfigTemplatesPage />;
+  }
+  const instancePolicies = matchRoute('/instances/:id/policies', path);
+  if (instancePolicies) {
+    return <InstanceDetailPage instanceId={instancePolicies.id} tab="policies" />;
+  }
+  const instanceConfig = matchRoute('/instances/:id/config', path);
+  if (instanceConfig) {
+    return <InstanceDetailPage instanceId={instanceConfig.id} tab="config" />;
+  }
   const detail = matchRoute('/instances/:id', path);
   if (detail) {
-    return <InstanceDetailPage instanceId={detail.id} />;
-  }
-  const policies = matchRoute('/instances/:id/policies', path);
-  if (policies) {
-    return <PoliciesPage instanceId={policies.id} />;
+    return <InstanceDetailPage instanceId={detail.id} tab="detail" />;
   }
   return <OverviewPage />;
 }

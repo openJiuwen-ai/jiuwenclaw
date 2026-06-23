@@ -86,6 +86,17 @@ def test_extract_legacy_params_delivery_channel_takes_priority_over_targets() ->
 
 
 @pytest.mark.asyncio
+async def test_cron_backend_delete_job_pushes_and_resets_route() -> None:
+    cron_tools = _FakeCronTools()
+    backend = _CronToolsCronBackend(cron_tools=cron_tools, message_handler=None)
+
+    await backend.delete_job("job-1")
+
+    assert len(cron_tools.routes) == 1
+    assert cron_tools.reset_tokens == ["token-1"]
+
+
+@pytest.mark.asyncio
 async def test_cron_backend_create_job_pushes_and_resets_route() -> None:
     cron_tools = _FakeCronTools()
     backend = _CronToolsCronBackend(cron_tools=cron_tools, message_handler=None)

@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
 set -euo >/dev/null 2>&1
 
-
 gen_gateway_config_file() {
     local client_type="${DEPLOY_VARS["AGENT_RUNTIME"]}"
     local field_name="feishu"
@@ -55,6 +54,13 @@ gen_gateway_file() {
 
     enable_dev_mode_if_needed ${file}
 
+    # No need to install packages
+    if [ "${DEPLOY_VARS["MODE"]}" == "dev" ]; then
+        local claw_code="${DEPLOY_VARS["CLAW_CODE_PATH"]}"
+        yq eval '.dependencies = {}' -i ${claw_code}/packages/jiuwenclaw-ee/gateway/extensions/runtime_management_extension/extension.yaml
+        yq eval '.dependencies = {}' -i ${claw_code}/packages/jiuwenclaw-ee/gateway/extensions/manager_ws_client/extension.yaml
+    fi
+
     if [ -n "${DEPLOY_VARS["GATEWAY_CPU_REQUEST"]:-}" ]; then
         yq eval 'select(.kind == "Deployment").spec.template.spec.containers[0].resources.requests.cpu = "'"${DEPLOY_VARS["GATEWAY_CPU_REQUEST"]}"'"' -i "${file}"
     fi
@@ -97,9 +103,20 @@ create_gateway_env_configmap() {
     local mode="${DEPLOY_VARS["MODE"]}"
     local env_template_file="${CONFIG["GATEWAY_ENV_TEMPLATE_FILE"]}"
     local env_file="${CONFIG["GATEWAY_ENV_FILE"]}"
+    local deploy_mode="${DEPLOY_VARS["DEPLOYMENT_MODE"]}"
 
     if [ "${client_type}" != "jiuwen" ]; then
         return
+    fi
+
+    if [ "${mode}" == "dev" ]; then
+        DEPLOY_VARS["AGENT_SERVER_NFS_MOUNT_PATH"]="/root/.jiuwenclaw"
+    else
+        DEPLOY_VARS["AGENT_SERVER_NFS_MOUNT_PATH"]="/home/app/.jiuwenclaw"
+    fi
+
+    if [ "${deploy_mode}" == "active-standby" ]; then
+         DEPLOY_VARS["GATEWAY_INSTANCE_ID"]="gateway-${namespace}"
     fi
 
     render_config_template "${env_template_file}" "${env_file}" "DEPLOY_VARS"
@@ -122,11 +139,12 @@ deploy_gateway() {
     create_gateway_env_configmap
 
     # start gateway
-    find_available_port "GATEWAY_NODE_PORT"
+    if [ "${DEPLOY_VARS["DEPLOYMENT_MODE"]}" == "active-standby" ]; then
+        DEPLOY_VARS["GATEWAY_REPLICAS"]="2"
+    fi
     gen_gateway_file
     exec_cmd kubectl apply -f ${gateway_file}
     wait_k8s_resource_ready "deployment" "${name}" "${namespace}"
-    success "GATEWAY_NODE_PORT: ${DEPLOY_VARS["GATEWAY_NODE_PORT"]}"
 }
 
 uninstall_gateway() {
@@ -136,8 +154,16 @@ uninstall_gateway() {
     local env_name="${DEPLOY_VARS["GATEWAY_ENV_FILE_NAME"]}"
     local gateway_file="${CONFIG["GATEWAY_FILE"]}"
 
-    exec_cmd kubectl delete -f ${gateway_file}
+    # 先优雅停 Pod，再清理周边资源
+    # gateway.yaml 含 ServiceAccount / Role / Deployment 等同文件资源。
+    # 不可 kubectl delete -f 一次性删掉：SA 被删后 Pod 仍在 Terminating 窗口内，
+    # in-cluster token 立即失效 → Gateway shutdown 删 Agent Pod 会 401。
+    info "Deleting Gateway Deployment first (keep ServiceAccount for graceful shutdown)"
+    exec_cmd kubectl delete deployment "${gateway_name}" -n "${namespace}" --ignore-not-found=true
     wait_pod_terminated "${gateway_name}" "${namespace}"
+
+    info "Deleting remaining Gateway resources (ServiceAccount, Role, Service, ...)"
+    exec_cmd kubectl delete -f "${gateway_file}" --ignore-not-found=true
     delete_k8s_resource "configmap" "${conf_name}" "${namespace}"
 
     if [ "${DEPLOY_VARS["AGENT_RUNTIME"]}" == "jiuwen" ]; then

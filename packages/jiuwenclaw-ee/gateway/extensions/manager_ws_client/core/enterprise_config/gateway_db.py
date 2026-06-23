@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import json
+from datetime import date, datetime
 from pathlib import Path
 from typing import Any, ClassVar
 
@@ -12,6 +13,7 @@ from openjiuwen_runtime.foundation.log import get_logger
 
 from ...infrastructure.config import Settings
 from ...infrastructure.db import Database
+from ...infrastructure.utils import format_ts
 from .schemas import SLOT_ENTITY_TABLE, TemplateRefSlot
 
 logger = get_logger(__name__)
@@ -21,6 +23,11 @@ _INSTANCE_SCOPED_TABLES = frozenset({
     "config_effective_agent_policy",
     "config_effective_global_policy",
     "config_default_template_mapping",
+    "log_masking_rule",
+    "model_template",
+    "extension_config_template",
+    "skill_whitelist_template",
+    "service_config_template",
 })
 
 _DEFAULT_RELATIVE_ROOT = Path(__file__).resolve().parents[2]
@@ -96,16 +103,24 @@ class GatewayDb(Database):
         table: str,
         *,
         filters: dict[str, Any] | None = None,
-        order_by: str = "",
+        order_by: str | list[tuple[str, bool]] = "",
     ) -> list[dict[str, Any]]:
         """列表查询；策略/映射表自动按构造时的 ``jiuwenclaw_id`` 隔离。"""
+        # 如果未绑定 jiuwenclaw_id，对于需要隔离的表直接返回空列表
+        if table in _INSTANCE_SCOPED_TABLES and not self._jiuwenclaw_id:
+            logger.warning(
+                "[enterprise_config] list_records skipped: jiuwenclaw_id not bound for table=%s",
+                table,
+            )
+            return []
+        
         query = self.apply_instance_scope(table, dict(filters or {}))
 
         try:
             handler = await self.ensure_ready(log_prefix="enterprise_config")
-            rows = await handler.list_records(table, query, limit=10_000, offset=0)
+            rows = await handler.list_records(table, query, limit=10_000, offset=0, order_by=order_by)
             result = [_row_to_dict(r) for r in rows]
-            return _sort_by_order(result, order_by) if order_by else result
+            return result
         except Exception as exc:
             logger.warning("[enterprise_config] query %s failed: %s", table, exc)
             return []
@@ -133,43 +148,19 @@ def _row_to_dict(row: Any) -> dict[str, Any]:
         )
         if not field_names:
             field_names = vars(row)
-        out = {k: getattr(row, k) for k in field_names}
+        out = {k: getattr(row, k) for k in field_names if not k.startswith("_sa_")}
+
+    out = {k: v for k, v in out.items() if not k.startswith("_sa_")}
 
     for key, value in list(out.items()):
-        if isinstance(value, str):
+        if isinstance(value, (datetime, date)):
+            out[key] = format_ts(value)
+        elif isinstance(value, str):
             parsed = _parse_json_string(value)
             if parsed is not value:
                 out[key] = parsed
+        elif hasattr(value, "to_dict") and callable(getattr(value, "to_dict")):
+            out[key] = value.to_dict()
     return out
-
-
-def _sort_by_order(rows: list[dict[str, Any]], order_by: str) -> list[dict[str, Any]]:
-    """支持 ``priority DESC`` / ``priority ASC`` 或 ``-priority``。"""
-    text = order_by.strip()
-    if not text:
-        return rows
-
-    parts = text.split(None, 1)
-    field = parts[0].strip()
-    reverse = False
-    if len(parts) > 1:
-        reverse = parts[1].strip().upper() == "DESC"
-    elif field.startswith("-"):
-        reverse = True
-        field = field[1:].strip()
-    if not field:
-        return rows
-
-    def _key(row: dict[str, Any]) -> Any:
-        value = row.get(field)
-        if value is None:
-            return 0
-        try:
-            return int(value)
-        except (TypeError, ValueError):
-            return value
-
-    return sorted(rows, key=_key, reverse=reverse)
-
 
 __all__ = ("GatewayDb",)

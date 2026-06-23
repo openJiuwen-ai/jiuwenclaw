@@ -35,6 +35,7 @@ class CreateSandboxRequest(BaseModel):
     env: dict[str, str] = Field(default_factory=dict)
     policy: dict[str, Any] | None = None
     policy_mode: PolicyMode = PolicyMode.OVERRIDE
+    sandbox_id: str | None = None
 
 
 class ExecRequest(BaseModel):
@@ -55,7 +56,11 @@ class ListFilesQuery(BaseModel):
 
 @router.post("/sandboxes", response_model=SandboxRef, status_code=201)
 async def create_sandbox(request: CreateSandboxRequest):
-    spec = SandboxSpec(env=request.env)
+    if request.sandbox_id is None or request.sandbox_id.strip() == "":
+        sandbox_id = None
+    else:
+        sandbox_id = request.sandbox_id
+    spec = SandboxSpec(env=request.env, sandbox_id=sandbox_id)
     return await _mgr().create_sandbox(
         spec,
         policy_data=request.policy,

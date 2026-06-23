@@ -18,5 +18,7 @@ spec:
     readOnly: false
   mountOptions:
     - nfsvers=4
-    - hard
+    - soft        # 改成 soft！防止节点卡死
+    - timeo=600   # 超时时间：60秒
+    - retrans=2   # 重试2次
     - noatime

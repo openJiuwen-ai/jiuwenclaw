@@ -4,6 +4,10 @@ from typing import Annotated, Any
 
 from pydantic import BaseModel, ConfigDict, Field, BeforeValidator
 
+from ..core.enterprise_config.routing_id import (
+    coerce_routing_id,
+    coerce_routing_id_optional,
+)
 from ..infrastructure.utils import normalize_template_ref
 
 TemplateRefField = Annotated[
@@ -16,10 +20,14 @@ OptionalTemplateRefField = Annotated[
         lambda value: None if value is None else normalize_template_ref(value)
     ),
 ]
+RoutingIdField = Annotated[str, BeforeValidator(coerce_routing_id)]
+OptionalRoutingIdField = Annotated[str | None, BeforeValidator(coerce_routing_id_optional)]
 
 
 class ConfigEffectiveServicePolicyUpdateRequest(BaseModel):
-    service_id: str | None = Field(default=None, max_length=512)
+    policy_name: str | None = Field(default=None, max_length=128, min_length=1)
+    policy_desc: str | None = Field(default=None, max_length=512)
+    service_id: OptionalRoutingIdField = Field(default=None, max_length=512)
     priority: int | None = None
     match_expr: str | None = None
     template_ref: OptionalTemplateRefField = None
@@ -32,7 +40,10 @@ class ConfigEffectiveServicePolicyCreateRequest(BaseModel):
 
     model_config = ConfigDict(str_strip_whitespace=True)
 
-    service_id: str = Field(..., max_length=512, min_length=1)
+    policy_id: str = Field(..., max_length=100, min_length=1)
+    policy_name: str = Field(..., max_length=128, min_length=1)
+    policy_desc: str | None = Field(default=None, max_length=512)
+    service_id: RoutingIdField = Field(..., max_length=512, min_length=1)
     priority: int
     match_expr: str | None = None
     template_ref: TemplateRefField = Field(default_factory=dict)
@@ -41,6 +52,8 @@ class ConfigEffectiveServicePolicyCreateRequest(BaseModel):
 
 
 class ConfigEffectiveGlobalPolicyUpdateRequest(BaseModel):
+    policy_name: str | None = Field(default=None, max_length=128, min_length=1)
+    policy_desc: str | None = Field(default=None, max_length=512)
     priority: int | None = None
     template_ref: OptionalTemplateRefField = None
     enabled: bool | None = None
@@ -50,6 +63,11 @@ class ConfigEffectiveGlobalPolicyUpdateRequest(BaseModel):
 class ConfigEffectiveGlobalPolicyCreateRequest(BaseModel):
     """创建全局兜底配置生效策略（WebSocket 同步用，每实例至多一条）。"""
 
+    model_config = ConfigDict(str_strip_whitespace=True)
+
+    policy_id: str = Field(..., max_length=100, min_length=1)
+    policy_name: str = Field(..., max_length=128, min_length=1)
+    policy_desc: str | None = Field(default=None, max_length=512)
     priority: int = 0
     template_ref: TemplateRefField = Field(default_factory=dict)
     enabled: bool = True
@@ -57,6 +75,8 @@ class ConfigEffectiveGlobalPolicyCreateRequest(BaseModel):
 
 
 class ConfigDefaultTemplateMappingUpdateRequest(BaseModel):
+    policy_name: str | None = Field(default=None, max_length=128, min_length=1)
+    policy_desc: str | None = Field(default=None, max_length=512)
     user_id: str | None = Field(default=None, max_length=512)
     group_id: str | None = Field(default=None, max_length=512)
     priority: int | None = None
@@ -67,11 +87,14 @@ class ConfigDefaultTemplateMappingUpdateRequest(BaseModel):
 
 
 class ConfigEffectiveAgentPolicyUpdateRequest(BaseModel):
-    agent_id: str | None = Field(default=None, max_length=512)
-    service_policy_id: int | None = None
+    policy_name: str | None = Field(default=None, max_length=128, min_length=1)
+    policy_desc: str | None = Field(default=None, max_length=512)
+    agent_id: OptionalRoutingIdField = Field(default=None, max_length=512)
+    service_policy_id: str | None = Field(default=None, max_length=100, min_length=1)
     priority: int | None = None
     match_expr: str | None = None
     template_ref: OptionalTemplateRefField = None
+    send_file_allowed: bool | None = None
     enabled: bool | None = None
     data: dict[str, Any] | None = None
 
@@ -81,11 +104,15 @@ class ConfigEffectiveAgentPolicyCreateRequest(BaseModel):
 
     model_config = ConfigDict(str_strip_whitespace=True)
 
-    agent_id: str = Field(..., max_length=512, min_length=1)
-    service_policy_id: int
+    policy_id: str = Field(..., max_length=100, min_length=1)
+    policy_name: str = Field(..., max_length=128, min_length=1)
+    policy_desc: str | None = Field(default=None, max_length=512)
+    agent_id: RoutingIdField = Field(..., max_length=512, min_length=1)
+    service_policy_id: str = Field(..., max_length=100, min_length=1)
     priority: int = 0
     match_expr: str | None = None
     template_ref: TemplateRefField = Field(default_factory=dict)
+    send_file_allowed: bool = False
     enabled: bool = True
     data: dict[str, Any] | None = None
 
@@ -95,6 +122,9 @@ class ConfigDefaultTemplateMappingCreateRequest(BaseModel):
 
     model_config = ConfigDict(str_strip_whitespace=True)
 
+    policy_id: str = Field(..., max_length=100, min_length=1)
+    policy_name: str = Field(..., max_length=128, min_length=1)
+    policy_desc: str | None = Field(default=None, max_length=512)
     user_id: str | None = Field(default=None, max_length=512)
     group_id: str | None = Field(default=None, max_length=512)
     priority: int = 0

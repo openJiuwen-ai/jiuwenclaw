@@ -94,6 +94,17 @@
       "tooltip": "Switch the model used for chat"
     },
     "newSessionDisabled": "Cannot create session while processing or recording",
+    "fileUpload": {
+      "button": "Upload file",
+      "uploading": "Uploading...",
+      "remove": "Remove attachment",
+      "messageFallback": "Uploaded {{count}} file(s)",
+      "errors": {
+        "failed": "Upload failed: {{message}}",
+        "tooLarge": "File is too large (max 50MB)",
+        "empty": "Cannot upload an empty file"
+      }
+    },
     "modeSwitchTitle": "Switch Mode",
     "modeSwitchConfirm": "Current session has history messages. Switching mode will create a new session. Continue?",
     "historyPager": {
@@ -826,6 +837,7 @@
     "copyMessage": "Copy message",
     "stopReading": "Stop reading",
     "readMessage": "Read message",
+    "fileExpired": "Expired",
     "parallelProgress": "Parallel tasks running ({{completedCount}}/{{total}} complete)",
     "subtask": {
       "starting": "Starting...",

@@ -28,6 +28,22 @@ is_port_occupied() {
             ;;
     esac
 
+    # 集群环境补充校验（专门适配K3s 纯 iptables 转发，不会在用户态进程监听任何 NodePort 端口）
+    # 校验1：所有命名空间Service是否绑定该nodePort
+    if [ "$port_occupied" -eq 0 ]; then
+        if kubectl get svc --all-namespaces -o json 2>/dev/null | jq -r '.items[] | .spec.ports[].nodePort' | grep -q "^${port}$"; then
+             port_occupied=1
+        fi
+    fi
+
+    # 校验2：兜底iptables检查
+    # 极端情况处理：遇到那种强制删 Service、删的时候集群节点失联、etcd 事务中断，apiserver 标记端口释放，但 k3s/kube-proxy 没来得及清理 iptables；
+    if [ "$port_occupied" -eq 0 ]; then
+        if iptables -t nat -L KUBE-NODEPORTS -n 2>/dev/null | grep -q ":${port} "; then
+            port_occupied=1
+        fi
+    fi
+
     # Return result: 0 = occupied, 1 = available
     if [ "$port_occupied" -eq 1 ]; then
         return 0
@@ -37,14 +53,27 @@ is_port_occupied() {
 }
 
 # =========== Allocate multiple available ports at once ==============
-# Usage: find_available_port "PORT_NAME_1" ["PORT_NAME_2" ...]
-# Finds and assigns an available port for each provided port name
-find_available_port() {
+# Usage: ensure_available_port "PORT_NAME_1" ["PORT_NAME_2" ...]
+# Function:
+#   1. If port is already configured in DEPLOY_VARS, check if it's available
+#   2. If no port configured, auto-allocate from START_PORT ~ END_PORT
+ensure_available_port() {
     local start_port=${CONFIG["START_PORT"]}
     local end_port=${CONFIG["END_PORT"]}
 
     # Iterate over all passed port name arguments
     for port_name in "$@"; do
+        # If port is already set in config, validate it
+        if [ -n "${DEPLOY_VARS["${port_name}"]:-}" ]; then
+            local port=${DEPLOY_VARS["${port_name}"]}
+            if is_port_occupied "${port}"; then
+                error "[${port_name}] Port ${port} is occupied, please choose another one."
+            fi
+            info "Using pre-configured port ${port} for ${port_name}"
+            continue
+        fi
+
+        # Auto allocate available port from range
         for port in $(seq "$start_port" "$end_port"); do
             if ! is_port_occupied "$port"; then
                 DEPLOY_VARS["${port_name}"]="$port"

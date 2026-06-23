@@ -30,7 +30,9 @@ def build_permission_rail(
     """
     from jiuwenclaw.agentserver.deep_agent.rails.permission_rail import PermissionInterruptRail
 
-    permission_config = config.get("permissions", {})
+    from jiuwenclaw.agentserver.permissions.config_loader import get_effective_permissions_config
+
+    permission_config = get_effective_permissions_config()
     logger.info(
         "[InterruptHelpers] build_permission_rail called: enabled=%s",
         permission_config.get("enabled", False)

@@ -275,6 +275,63 @@ def _make_session_id() -> str:
     return f"sess_{ts}_{suffix}"
 
 
+def _resolve_handler_ref(ref: Any, key: str = "value") -> Any:
+    if isinstance(ref, dict):
+        return ref.get(key)
+    return ref
+
+
+def is_agent_server_ready(agent_client: Any) -> bool:
+    """AgentServer 已发 connection.ack 后才视为就绪（标准 on_connect 与 Enterprise 共用）."""
+    ac = _resolve_handler_ref(agent_client)
+    return ac is not None and bool(getattr(ac, "server_ready", False))
+
+
+def connection_ack_payload(session_id: str, *, route_conn_id: str | None = None) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "session_id": session_id,
+        "mode": "BUILD",
+        "tools": [],
+        "protocol_version": "1.0",
+    }
+    if route_conn_id:
+        payload["_route_conn_id"] = route_conn_id
+    return payload
+
+
+async def emit_connection_ack(
+    channel: Any,
+    agent_client: Any,
+    message_handler: Any = None,
+    *,
+    route_conn_id: str | None = None,
+) -> str | None:
+    """发送 connection.ack event；Enterprise 可传 route_conn_id 供 Web Pod 按浏览器连接路由."""
+    from jiuwenclaw.schema.message import Message, EventType
+
+    if not is_agent_server_ready(agent_client):
+        logger.debug("[emit_connection_ack] Agent 未就绪，跳过 connection.ack")
+        return None
+    sid = _make_session_id()
+    ack_msg = Message(
+        id=f"ack-{sid}",
+        type="event",
+        channel_id=channel.channel_id,
+        session_id=sid,
+        params={},
+        timestamp=time.time(),
+        ok=True,
+        event_type=EventType.CONNECTION_ACK,
+        payload=connection_ack_payload(sid, route_conn_id=route_conn_id),
+    )
+    mh = _resolve_handler_ref(message_handler)
+    if mh:
+        await mh.publish_robot_messages(ack_msg)
+    else:
+        await channel.send(ack_msg)
+    return sid
+
+
 @dataclass
 class WebHandlersBindParams:
     """Named bundle for :func:`_register_web_handlers` (avoids long positional / keyword lists)."""
@@ -287,6 +344,8 @@ class WebHandlersBindParams:
     heartbeat_service: Any = None
     cron_controller: Any = None
     updater_service: WindowsUpdaterService | None = None
+    emit_connection_ack_on_connect: bool = True
+    enable_web_connection_ack_method: bool = False
 
 
 def _register_web_handlers(bind: WebHandlersBindParams) -> None:
@@ -334,35 +393,32 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             return value
 
     async def _on_connect(ws):
-        ac = _resolve(agent_client)
-        if ac is None or not getattr(ac, "server_ready", False):
-            logger.debug("[_on_connect] Agent 未就绪，跳过 connection.ack")
-            return
-        sid = _make_session_id()
-        
-        ack_msg = Message(
-            id=f"ack-{sid}",
-            type="event",
-            channel_id=channel.channel_id,
-            session_id=sid,
-            params={},
-            timestamp=time.time(),
-            ok=True,
-            event_type=EventType.CONNECTION_ACK,
-            payload={
-                "session_id": sid,
-                "mode": "BUILD",
-                "tools": [],
-                "protocol_version": "1.0",
-            },
-        )
-        mh = _resolve(message_handler)
-        if mh:
-            await mh.publish_robot_messages(ack_msg)
-        else:
-            await channel.send(ack_msg)
+        await emit_connection_ack(channel, agent_client, message_handler)
 
-    channel.on_connect(_on_connect)
+    if bind.emit_connection_ack_on_connect:
+        channel.on_connect(_on_connect)
+
+    if bind.enable_web_connection_ack_method:
+
+        async def _web_connection_ack(ws, req_id, params, session_id):
+            conn_id = params.get("conn_id") if isinstance(params, dict) else None
+            if not isinstance(conn_id, str) or not conn_id:
+                await channel.send_response(
+                    ws,
+                    req_id,
+                    ok=False,
+                    error="conn_id is required",
+                    code="BAD_REQUEST",
+                )
+                return
+            await emit_connection_ack(
+                channel,
+                agent_client,
+                message_handler,
+                route_conn_id=conn_id,
+            )
+
+        channel.register_method("web.connection_ack", _web_connection_ack)
 
     async def _config_get(ws, req_id, params, session_id):
         # 返回 _CONFIG_SET_ENV_MAP 里所有键对应的环境变量当前值
@@ -2097,8 +2153,11 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             deny_guidance = params.get("deny_guidance_message")
             update_permissions_owner_scopes_in_config(owner_scopes, deny_guidance)
             try:
-                perm_cfg = get_config().get("permissions", {})
-                get_permission_engine().update_config(perm_cfg)
+                from jiuwenclaw.agentserver.permissions.config_loader import (
+                    get_effective_permissions_config,
+                )
+
+                get_permission_engine().update_config(get_effective_permissions_config(force_reload=True))
             except Exception as e:
                 logger.warning("[permissions.owner_scopes.set] Failed to hot reload permission engine: %s", e)
             await channel.send_response(ws, req_id, ok=True, payload={"ok": True})

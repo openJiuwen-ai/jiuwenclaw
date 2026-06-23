@@ -21,26 +21,28 @@ _log = get_logger(__name__)
 
 @asynccontextmanager
 async def lifespan(application: FastAPI):
+    from jiuwenclaw_manager.manager_ws_server import ManagerWsServer
+
     configure_logging()
     db_handler = create_db_handler()
     application.state.db_handler = db_handler
     await db_handler.init_database()
     await db_handler.connect()
     await init_all_tables(db_handler)
+    # 加载/生成 Manager 签名密钥对（Ed25519），供握手下发公钥与下发加签使用。
+    from jiuwenclaw_manager.security.keys import get_or_create_manager_signing_key
+    from jiuwenclaw_manager.security.sign_provider import set_manager_signing_key
+
+    set_manager_signing_key(await get_or_create_manager_signing_key(db_handler))
     stop = asyncio.Event()
     scan_task = asyncio.create_task(run_heartbeat_scan_loop(stop, db_handler))
-    manager_ws_server = None
     if settings.manager_ws_enabled:
-        from jiuwenclaw_manager.manager_ws_server import ManagerWsServer
-
         manager_ws_server = ManagerWsServer(
             host=settings.manager_ws_host,
             port=settings.manager_ws_port,
         )
         await manager_ws_server.start()
-        from jiuwenclaw_manager.manager_ws_server.server import set_manager_ws_server
-
-        set_manager_ws_server(manager_ws_server)
+        ManagerWsServer.set_instance(manager_ws_server)
     _log.info(
         "startup",
         version=__version__,
@@ -58,10 +60,9 @@ async def lifespan(application: FastAPI):
         await scan_task
     except asyncio.CancelledError:
         pass
+    manager_ws_server = ManagerWsServer.get_instance()
     if manager_ws_server is not None:
-        from jiuwenclaw_manager.manager_ws_server.server import set_manager_ws_server
-
-        set_manager_ws_server(None)
+        ManagerWsServer.set_instance(None)
         await manager_ws_server.stop()
     await db_handler.disconnect()
     _log.info("shutdown")

@@ -19,16 +19,16 @@ async def create_gateway_cron_store() -> CronJobStoreBackend:
         return FileCronJobStore(path=path)
     if not get_effective_distributed_redis_active():
         raise RuntimeError(
-            "gateway.deployment_mode=distributed requires Redis; "
+            "gateway.deployment_mode=active-standby requires Redis; "
             "connection failed or degraded. Fix redis config/connectivity."
         )
     client = get_gateway_redis_client()
     if client is None:
-        raise RuntimeError("distributed mode: Redis client is None")
+        raise RuntimeError("active-standby mode: Redis client is None")
     instance_id = get_gateway_instance_id()
     if not instance_id:
         raise RuntimeError(
-            "distributed mode: gateway.instance_id is required for Cron Redis store "
+            "active-standby mode: gateway.instance_id is required for Cron Redis store "
             "(set gateway.instance_id or GATEWAY_INSTANCE_ID before Gateway starts)"
         )
     return RedisCronJobStore(client, gateway_instance_id=instance_id)

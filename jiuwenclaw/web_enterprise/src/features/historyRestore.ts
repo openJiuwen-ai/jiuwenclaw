@@ -1,4 +1,4 @@
-import { Message, MessageRole, UsageSummary, WsEvent } from '../types';
+import { Message, MessageRole, UsageSummary, FileDownloadItem, WsEvent } from '../types';
 import { webClient } from '../services/webClient';
 import { normalizeFinalContent } from '../utils/finalContent';
 
@@ -11,6 +11,11 @@ const ALLOWED_ASSISTANT_EVENT_TYPES = new Set([
   'chat.tool_call',
   'chat.tool_result',
   'chat.usage_summary',
+  'chat.file',
+  'team.message',
+  'harness.message',
+  'harness.stage_result',
+  'harness.extension_ready'
 ]);
 
 /** 后端约定：最后一帧 `history.message` 使用 `payload.status: done`（兼容旧版 `payload.content: done`） */
@@ -24,11 +29,20 @@ export interface HistoryToolReplayItem {
   payload: Record<string, unknown>;
 }
 
+export interface HistoryHarnessReplayItem {
+  kind: 'harness_message' | 'harness_stage_result';
+  at: string;
+  payload: Record<string, unknown>;
+}
+
 type HistoryTimelineEntry =
   | { kind: 'message'; message: Message }
   | { kind: 'tool_call'; at: string; payload: Record<string, unknown> }
   | { kind: 'tool_result'; at: string; payload: Record<string, unknown> }
-  | { kind: 'usage_summary'; at: string; usage: UsageSummary };
+  | { kind: 'usage_summary'; at: string; usage: UsageSummary }
+  | { kind: 'file_items'; at: string; files: FileDownloadItem[] }
+  | { kind: 'harness_message'; at: string; content: string; stage?: string }
+  | { kind: 'harness_stage_result'; at: string; stage: string; status: string; error: string; messages: string[]; metrics: Record<string, unknown> };
 
 interface BeginHistoryRestoreOptions {
   sessionId: string;
@@ -250,6 +264,40 @@ function parseHistoryTimelineEntry(
     return null;
   }
 
+  if (eventType === 'chat.file') {
+    const rawFiles = payload.files;
+    if (!Array.isArray(rawFiles) || rawFiles.length === 0) {
+      return null;
+    }
+    const files = rawFiles as FileDownloadItem[];
+    return {
+      kind: 'file_items',
+      at,
+      files,
+    };
+  }
+
+  if (eventType === 'harness.message') {
+    const content = typeof payload.content === 'string' ? payload.content : '';
+    const stage = typeof payload.stage === 'string' ? payload.stage : undefined;
+    if (!content.trim()) {
+      return null;
+    }
+    return { kind: 'harness_message', at, content, stage };
+  }
+
+  if (eventType === 'harness.stage_result') {
+    const stage = typeof payload.stage === 'string' ? payload.stage : '';
+    const status = typeof payload.status === 'string' ? payload.status : 'success';
+    const error = typeof payload.error === 'string' ? payload.error : '';
+    const messages = Array.isArray(payload.messages) ? payload.messages.filter((m) => typeof m === 'string') : [];
+    const metrics = isRecord(payload.metrics) ? payload.metrics as Record<string, unknown> : {};
+    if (!stage.trim()) {
+      return null;
+    }
+    return { kind: 'harness_stage_result', at, stage, status, error, messages, metrics };
+  }
+
   return null;
 }
 
@@ -386,8 +434,14 @@ export function beginHistoryRestore(options: BeginHistoryRestoreOptions): Histor
 
     const messages: Message[] = [];
     const toolReplay: HistoryToolReplayItem[] = [];
+    const harnessReplay: HistoryHarnessReplayItem[] = [];
+    let pendingFileItems: FileDownloadItem[] | null = null;
     for (const e of entries) {
       if (e.kind === 'message') {
+        if (e.message.role === 'assistant' && pendingFileItems) {
+          e.message = { ...e.message, fileItems: pendingFileItems };
+          pendingFileItems = null;
+        }
         messages.push(e.message);
       } else if (e.kind === 'usage_summary') {
         for (let i = messages.length - 1; i >= 0; i--) {
@@ -396,6 +450,34 @@ export function beginHistoryRestore(options: BeginHistoryRestoreOptions): Histor
             break;
           }
         }
+      } else if (e.kind === 'harness_message') {
+        harnessReplay.push({
+          kind: 'harness_message',
+          at: e.at,
+          payload: { content: e.content, stage: e.stage },
+        });
+        // Also add as system message with harness flag
+        messages.push({
+          id: `harness-msg-${e.at}`,
+          role: 'system',
+          content: e.content,
+          timestamp: e.at,
+          isHarnessMessage: true,
+        });
+      } else if (e.kind === 'harness_stage_result') {
+        harnessReplay.push({
+          kind: 'harness_stage_result',
+          at: e.at,
+          payload: {
+            stage: e.stage,
+            status: e.status,
+            error: e.error,
+            messages: e.messages,
+            metrics: e.metrics,
+          },
+        });
+      } else if (e.kind === 'file_items') {
+        pendingFileItems = e.files;
       } else {
         toolReplay.push({ kind: e.kind, at: e.at, payload: e.payload });
       }
@@ -511,8 +593,14 @@ export function fetchHistoryPage(options: FetchHistoryPageOptions): HistoryResto
 
     const messages: Message[] = [];
     const toolReplay: HistoryToolReplayItem[] = [];
+    const harnessReplay: HistoryHarnessReplayItem[] = [];
+    let pendingFileItems: FileDownloadItem[] | null = null;
     for (const e of entries) {
       if (e.kind === 'message') {
+        if (e.message.role === 'assistant' && pendingFileItems) {
+          e.message = { ...e.message, fileItems: pendingFileItems };
+          pendingFileItems = null;
+        }
         messages.push(e.message);
       } else if (e.kind === 'usage_summary') {
         for (let i = messages.length - 1; i >= 0; i--) {
@@ -521,6 +609,33 @@ export function fetchHistoryPage(options: FetchHistoryPageOptions): HistoryResto
             break;
           }
         }
+      } else if (e.kind === 'harness_message') {
+        harnessReplay.push({
+          kind: 'harness_message',
+          at: e.at,
+          payload: { content: e.content, stage: e.stage },
+        });
+        messages.push({
+          id: `harness-msg-${e.at}`,
+          role: 'system',
+          content: e.content,
+          timestamp: e.at,
+          isHarnessMessage: true,
+        });
+      } else if (e.kind === 'harness_stage_result') {
+        harnessReplay.push({
+          kind: 'harness_stage_result',
+          at: e.at,
+          payload: {
+            stage: e.stage,
+            status: e.status,
+            error: e.error,
+            messages: e.messages,
+            metrics: e.metrics,
+          },
+        });
+      } else if (e.kind === 'file_items') {
+        pendingFileItems = e.files;
       } else {
         toolReplay.push({ kind: e.kind, at: e.at, payload: e.payload });
       }

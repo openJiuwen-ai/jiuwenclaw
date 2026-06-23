@@ -97,7 +97,7 @@ class CronSchedulerService:
         self._run_tasks: dict[str, asyncio.Task] = {}
         self._last_store_revision: int = 0
         self._store_poll_interval: float = 5.0  # seconds
-        # 分布式部署下由 LeaderElection 控制：STANDBY 期间 loop 自旋但不消费事件
+        # active-standby 下由 LeaderElection 控制：STANDBY 期间 loop 自旋但不消费事件
         self._active: bool = True
 
     async def _get_store_revision(self) -> int:
@@ -562,6 +562,8 @@ class CronSchedulerService:
                         if open_part:
                             metadata["feishu_open_id"] = open_part
                     msg_session_id = chat_part
+        elif channel_id == "web" and routing_sid:
+            msg_session_id = routing_sid
 
         # 针对 feishu/xiaoyi/whatsapp：从 config.yaml 取最近一次可回发的平台身份，写入 metadata
         # 这样即使 cron 推送没有 session_id，也能让 Channel.send 正常路由到对应会话。

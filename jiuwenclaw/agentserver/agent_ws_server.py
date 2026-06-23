@@ -13,6 +13,15 @@ import re
 from pathlib import Path
 from typing import Any, ClassVar
 
+from openjiuwen_runtime.foundation.security.link_auth import (
+    LINK_TOKEN_HEADER,
+    NonceCache,
+    InMemoryPinStore,
+    build_token,
+    generate_keypair,
+    verify_and_pin,
+)
+
 from jiuwenclaw.agentserver.session_history import enrich_history_messages_session_id
 from jiuwenclaw.agentserver.gateway_push.wire import build_server_push_wire
 from jiuwenclaw.agentserver.tools.acp_output_tools import get_acp_output_manager
@@ -61,10 +70,14 @@ from jiuwenclaw.security.ws_origin import (
     forbidden_origin_response,
     get_header_value,
     is_allowed_browser_origin,
+    unauthorized_response,
 )
 
 
 logger = logging.getLogger(__name__)
+
+# 将 websockets.server 日志级别设为 WARNING，屏蔽 K8s 健康检查产生的大量日志
+logging.getLogger("websockets.server").setLevel(logging.WARNING)
 
 # 流式处理心跳间隔：当 Agent 处理时间超过此阈值时，发送心跳 chunk 保持 WebSocket 连接活跃
 # 避免 ping_timeout 导致连接关闭。默认 10 秒，小于服务端 ping_timeout=20s。
@@ -150,6 +163,13 @@ class AgentWebSocketServer:
         self._ping_interval = ping_interval
         self._ping_timeout = ping_timeout
         self._server: Any = None
+        # link-auth: AgentServer 身份密钥（Ed25519）。它是被 gateway 按需拉起的临时实例，
+        # 故每进程启动时临时生成、不落库；connection.ack 反向签名用自身私钥。
+        self._link_priv, self._link_pub = generate_keypair()
+        # link-auth: 防重放 nonce 缓存（仅当 CLAW_LINK_AUTH_MODE != off 时生效）
+        self._link_nonce_cache = NonceCache()
+        # link-auth: 给连入的 gateway 做 TOFU 指纹固定（首次见到即固定其公钥指纹）
+        self._gateway_pin_store = InMemoryPinStore()
         # 当前 Gateway 连接，用于 send_push 主动推送
         self._current_ws: Any = None
         self._current_send_lock: asyncio.Lock | None = None
@@ -214,8 +234,6 @@ class AgentWebSocketServer:
     def port(self) -> int:
         return self._port
 
-    # ---------- 生命周期 ----------
-
     async def start(self) -> None:
         """启动 WebSocket 服务端，开始监听连接。优先使用 legacy.server.serve 以与 Gateway 的 legacy client 握手兼容."""
         await self._trigger_before_ws_server_start_hook()
@@ -259,17 +277,39 @@ class AgentWebSocketServer:
         await self._trigger_agent_server_listening_hook()
 
     async def _process_request(self, *args: Any) -> Any:
-        """在握手阶段执行 Origin 校验，兼容 legacy/new websockets APIs。"""
+        """在握手阶段执行 link-auth + Origin 校验，兼容 legacy/new websockets APIs。"""
         path, request_headers = extract_handshake_request(args)
-        origin = get_header_value(request_headers, "Origin")
 
-        allowed = is_allowed_browser_origin(origin)
-        logger.info(
-            "[AgentWebSocketServer] 握手检查 path=%s origin=%s allowed=%s",
-            path,
-            origin,
-            allowed,
+        # link-auth: 校验链路令牌（Ed25519 + TOFU 指纹固定）。独立于 AGENT_RUNTIME 对 Origin 的旁路——
+        # 沙箱/托管运行时下 Origin 全放行，此处仍按 CLAW_LINK_AUTH_MODE 强制。
+        # mode=off 时 verify_and_pin 恒放行，行为与未引入时一致。
+        link_token = get_header_value(request_headers, LINK_TOKEN_HEADER)
+        link_result = verify_and_pin(
+            self._gateway_pin_store,
+            link_token,
+            expect_type="gateway",
+            nonce_cache=self._link_nonce_cache,
         )
+        if not link_result.allowed:
+            logger.warning(
+                "[AgentWebSocketServer] 握手拒绝 path=%s reason=link_auth:%s",
+                path,
+                link_result.reason,
+            )
+            return unauthorized_response(args)
+
+        origin = get_header_value(request_headers, "Origin")
+        allowed = is_allowed_browser_origin(origin)
+
+        # 避免k8s派来的探针产生大量日志
+        is_probe = bool(path and "K8s-Readiness-Probe" in path)
+        if not is_probe:
+            logger.info(
+                "[AgentWebSocketServer] 握手检查 path=%s origin=%s allowed=%s",
+                path,
+                origin,
+                allowed,
+            )
         if allowed:
             return None
 
@@ -299,6 +339,23 @@ class AgentWebSocketServer:
     async def _connection_handler(self, ws: Any) -> None:
         """处理单个 Gateway WebSocket 连接，同一连接可并发处理多个请求."""
         import websockets
+
+        # 如果是探针，走独立静音通道，避免干扰推送, 直接给它发个响应，证明握手和状态机是完全健康的
+        path = getattr(ws, "path", "")
+        is_probe = bool(path and "K8s-Readiness-Probe" in path)
+        if is_probe:
+            try:
+                # 发送 connection.ack 给探针脚本
+                ack_frame = {
+                    "type": "event",
+                    "event": "connection.ack",
+                    "payload": {"status": "ready"},
+                }
+                await ws.send(json.dumps(ack_frame, ensure_ascii=False))
+            except Exception:
+                pass
+            return
+
         # 和客户端连接成功后, 触发agentserver启动成功的回调事件
         await self._trigger_agent_server_started_hook()
 
@@ -311,10 +368,21 @@ class AgentWebSocketServer:
 
         # 发送 connection.ack 事件，通知 Gateway 服务端已就绪
         try:
+            # link-auth 双向：AgentServer 在 connection.ack 里附一枚自己签的令牌，
+            # 供 Gateway 反向核验"对面确是合法 AgentServer"。off 时不签（payload 不含 link_token）。
+            ack_payload: dict[str, Any] = {"status": "ready"}
+            _ack_token = build_token(
+                service_id=os.getenv("JIUWENCLAW_SERVICE_ID", "agentserver-1"),
+                service_type="agent_server",
+                private_b64=self._link_priv,
+                public_b64=self._link_pub,
+            )
+            if _ack_token:
+                ack_payload["link_token"] = _ack_token
             ack_frame = {
                 "type": "event",
                 "event": "connection.ack",
-                "payload": {"status": "ready"},
+                "payload": ack_payload,
             }
             await ws.send(json.dumps(ack_frame, ensure_ascii=False))
             logger.info("[AgentWebSocketServer] 已发送 connection.ack: %s", remote)
@@ -1211,8 +1279,10 @@ class AgentWebSocketServer:
                     logger.info("[command.model] os.environ 已更新, MODEL_NAME=%s", os.getenv("MODEL_NAME", "unknown"))
 
                     try:
-                        from jiuwenclaw.agentserver.memory.config import clear_config_cache
+                        from jiuwenclaw.agentserver.memory.config import (clear_config_cache,
+                                                                          clear_embed_config_db_cache)
                         clear_config_cache()
+                        clear_embed_config_db_cache()
                         logger.info("[command.model] config cache 已清除")
                     except Exception as e:
                         logger.debug("[command.model] clear_config_cache skipped: %s", e)
@@ -1361,9 +1431,10 @@ class AgentWebSocketServer:
 
     async def _handle_config_cache_clear(self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock) -> None:
         try:
-            from jiuwenclaw.agentserver.memory.config import clear_config_cache
+            from jiuwenclaw.agentserver.memory.config import clear_config_cache, clear_embed_config_db_cache
 
             clear_config_cache()
+            clear_embed_config_db_cache()
             resp = AgentResponse(
                 request_id=request.request_id,
                 channel_id=request.channel_id,

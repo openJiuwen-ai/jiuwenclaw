@@ -274,23 +274,19 @@ def persist_permission_allow_rule(
     )
 
     try:
-        from jiuwenclaw.agentserver.permissions.core import get_permission_engine
+        from jiuwenclaw.agentserver.permissions.config_loader import (
+            get_effective_permissions_config,
+            persist_permissions_mutate,
+        )
         from jiuwenclaw.agentserver.permissions.shell_ast import parse_shell_for_permission
         from jiuwenclaw.agentserver.permissions.tiered_policy import (
             evaluate_tiered_policy,
             evaluate_tiered_policy_detailed,
         )
         from jiuwenclaw.agentserver.permissions.models import PermissionLevel
-        from jiuwenclaw.config import (
-            _CONFIG_YAML_PATH,
-            _load_yaml_round_trip,
-            _dump_yaml_round_trip,
-        )
 
-        logger.debug("[PermissionEngine] permission.persist.config_path path=%s", _CONFIG_YAML_PATH)
-        data = _load_yaml_round_trip(_CONFIG_YAML_PATH)
-        permissions = data.get("permissions")
-        if permissions is None:
+        permissions = get_effective_permissions_config()
+        if not permissions:
             logger.warning(
                 "[PermissionEngine] permission.persist.abort tool=%s reason=no_permissions_section",
                 tool_name,
@@ -338,34 +334,32 @@ def persist_permission_allow_rule(
                     ask_subcommands=ask_subcommands,
                     existing_patterns=_existing_allow_override_patterns(permissions),
                 )
-            persisted = _persist_tiered_approval_override_suggestions(permissions, suggestions)
-            if persisted:
-                logger.info(
-                    "[PermissionEngine] permission.persist.write tool=%s target=approval_overrides persisted=true",
-                    tool_name,
-                )
-            else:
+            if not suggestions:
                 logger.warning(
                     "[PermissionEngine] permission.persist.skip tool=%s reason=no_safe_suggestion",
                     tool_name,
                 )
                 return False
-        else:
-            persisted = _persist_tiered_tool_allow(permissions, tool_name)
+
+            def mutate(perms: dict[str, Any]) -> None:
+                _persist_tiered_approval_override_suggestions(perms, suggestions)
+
+            persist_permissions_mutate(mutate, source="runtime_persist")
             logger.info(
-                "[PermissionEngine] permission.persist.write tool=%s target=tools persisted=%s",
+                "[PermissionEngine] permission.persist.write tool=%s target=approval_overrides persisted=true",
                 tool_name,
-                persisted,
             )
+            return True
 
-        _dump_yaml_round_trip(_CONFIG_YAML_PATH, data)
-        logger.info("[PermissionEngine] permission.persist.write tool=%s target=config_yaml persisted=true", tool_name)
+        def mutate_tool(perms: dict[str, Any]) -> None:
+            _persist_tiered_tool_allow(perms, tool_name)
 
-        verify_data = _load_yaml_round_trip(_CONFIG_YAML_PATH)
-        engine = get_permission_engine()
-        engine.update_config(verify_data.get("permissions", {}))
-        logger.info("[PermissionEngine] permission.persist.reload tool=%s reloaded=true", tool_name)
-        return persisted
+        persist_permissions_mutate(mutate_tool, source="runtime_persist")
+        logger.info(
+            "[PermissionEngine] permission.persist.write tool=%s target=tools persisted=true",
+            tool_name,
+        )
+        return True
 
     except Exception:
         logger.error("[PermissionEngine] permission.persist.failed tool=%s", tool_name, exc_info=True)
@@ -586,62 +580,42 @@ def persist_cli_trusted_directory(raw_path: str) -> dict[str, Any]:
         return {"ok": False, "error": "path resolves to empty"}
 
     try:
-        from jiuwenclaw.agentserver.permissions.core import get_permission_engine
+        from jiuwenclaw.agentserver.permissions.config_loader import persist_permissions_mutate
         from jiuwenclaw.agentserver.permissions.file_guard import (
             apply_cli_trusted_to_permissions_dict,
-        )
-        from jiuwenclaw.config import (
-            _CONFIG_YAML_PATH,
-            _load_yaml_round_trip,
-            _dump_yaml_round_trip,
-        )
-
-        data = _load_yaml_round_trip(_CONFIG_YAML_PATH)
-        permissions = data.get("permissions")
-        if permissions is None:
-            permissions = {}
-            data["permissions"] = permissions
-
-        apply_cli_trusted_to_permissions_dict(permissions, dir_norm)
-        logger.info(
-            "[PermissionEngine] permission.persist.cli_add_dir.file_guard.write path=%s targets=global+trusted_exec",
-            dir_norm,
         )
 
         path_pattern = "re:^" + re.escape(dir_norm) + r"(?:$|/)"
         posix = dir_norm
-        # 仅用正斜杠路径；反斜杠写入 YAML 双引号后易被解析成 \U 等非法正则转义，匹配改由 tiered 对 command 做 \→/ 归一化
         shell_pattern = "re:" + rf".*{re.escape(posix)}.*"
-
         suffix = hashlib.sha256(dir_norm.encode("utf-8")).hexdigest()[:16]
         shell_override_id = f"cli_trusted_shell_{suffix}"
 
-        overrides = permissions.get("approval_overrides")
-        if not isinstance(overrides, list):
-            overrides = []
-        _set_approval_overrides_after_rules(permissions, overrides)
+        def mutate(permissions: dict[str, Any]) -> None:
+            apply_cli_trusted_to_permissions_dict(permissions, dir_norm)
+            overrides = permissions.get("approval_overrides")
+            if not isinstance(overrides, list):
+                overrides = []
+            _set_approval_overrides_after_rules(permissions, overrides)
+            if not any(
+                isinstance(r, dict) and r.get("id") == shell_override_id for r in overrides
+            ):
+                overrides.append({
+                    "id": shell_override_id,
+                    "pattern": shell_pattern,
+                    "action": "allow",
+                })
 
-        def _has_id(oid: str) -> bool:
-            for r in overrides:
-                if isinstance(r, dict) and r.get("id") == oid:
-                    return True
-            return False
-
-        if not _has_id(shell_override_id):
-            overrides.append({
-                "id": shell_override_id,
-                "pattern": shell_pattern,
-                "action": "allow",
-            })
-            logger.info(
-                "[PermissionEngine] permission.persist.cli_add_dir.override.write target=shell id=%s tools=%s",
-                shell_override_id,
-                sorted(SHELL_PERMISSION_TOOLS),
-            )
-
-        _dump_yaml_round_trip(_CONFIG_YAML_PATH, data)
-        engine = get_permission_engine()
-        engine.update_config(data.get("permissions", {}))
+        persist_permissions_mutate(mutate, source="cli_add_dir")
+        logger.info(
+            "[PermissionEngine] permission.persist.cli_add_dir.file_guard.write path=%s targets=global+trusted_exec",
+            dir_norm,
+        )
+        logger.info(
+            "[PermissionEngine] permission.persist.cli_add_dir.override.write target=shell id=%s tools=%s",
+            shell_override_id,
+            sorted(SHELL_PERMISSION_TOOLS),
+        )
         return {
             "ok": True,
             "normalized": dir_norm,

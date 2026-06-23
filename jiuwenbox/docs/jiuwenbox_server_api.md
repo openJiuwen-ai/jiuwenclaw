@@ -223,6 +223,7 @@ print(resp.json())
 | `env` | object | 否 | 沙箱公共环境变量 |
 | `policy` | object/null | 否 | 覆盖或追加的 policy 数据 |
 | `policy_mode` | string | 否 | `override` 或 `append`，默认 `override` |
+| `sandbox_id` | string/null | 否 | 可选，指定沙箱 ID。长度 4~16，仅允许小写字母、数字、减号（`-`）和下划线（`_`）。省略或空字符串时服务端自动生成（形如 `6011f5ca-76a`）。格式非法返回 400；与已有 ID 冲突返回 409 |
 
 Python 请求示例：
 
@@ -232,6 +233,7 @@ import requests
 resp = requests.post(
     "http://127.0.0.1:8321/api/v1/sandboxes",
     json={
+        "sandbox_id": "my-sb_01",
         "env": {
             "DEMO_KEY": "demo-value"
         },
@@ -243,11 +245,11 @@ print(resp.status_code)
 print(resp.json())
 ```
 
-响应示例：
+响应示例（指定 `sandbox_id` 时返回该值；省略时自动生成，形如 `6011f5ca-76a`）：
 
 ```json
 {
-  "id": "abc123def456",
+  "id": "my-sb_01",
   "phase": "ready",
   "runtime": "process",
   "pid": 12345,

@@ -18,7 +18,9 @@ from pydantic import ValidationError
 from jiuwenbox.logging_config import configure_logging
 from jiuwenbox import __version__
 from jiuwenbox.server.audit_logger import AuditLogger
+from jiuwenbox.models.sandbox import InvalidSandboxIdError
 from jiuwenbox.server.sandbox_manager import (
+    SandboxConflictError,
     SandboxManager,
     SandboxNotFoundError,
     SandboxStateError,
@@ -389,6 +391,14 @@ def create_app() -> FastAPI:
     @application.exception_handler(SandboxStateError)
     async def state_error_handler(request: Request, exc: SandboxStateError):
         return JSONResponse(status_code=409, content={"error": str(exc)})
+
+    @application.exception_handler(SandboxConflictError)
+    async def conflict_error_handler(request: Request, exc: SandboxConflictError):
+        return JSONResponse(status_code=409, content={"error": str(exc)})
+
+    @application.exception_handler(InvalidSandboxIdError)
+    async def invalid_sandbox_id_handler(request: Request, exc: InvalidSandboxIdError):
+        return JSONResponse(status_code=400, content={"error": str(exc)})
 
     @application.exception_handler(PolicyValidationError)
     async def policy_validation_error_handler(request: Request, exc: PolicyValidationError):

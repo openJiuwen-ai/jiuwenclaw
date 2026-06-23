@@ -54,21 +54,30 @@ class SendFileToolkit:
         self._request_metadata = dict(metadata) if metadata else None
         logger.debug(
             "[SendFileToolkit] 初始化 request_id=%s session_id=%s channel_id=%s has_metadata=%s",
-            request_id,
-            session_id,
-            channel_id,
-            bool(self._request_metadata),
+            request_id, session_id, channel_id, bool(self._request_metadata),
+        )
+
+    def update_runtime_context(
+        self,
+        *,
+        request_id: str,
+        session_id: str,
+        channel_id: str,
+        metadata: dict[str, Any] | None = None,
+    ) -> None:
+        """Update per-request runtime context without recreating the toolkit/tool.
+        """
+        self.request_id = request_id
+        self.session_id = session_id
+        self.channel_id = channel_id
+        self._request_metadata = dict(metadata) if metadata else None
+        logger.debug(
+            "[SendFileToolkit] update_runtime_context request_id=%s session_id=%s channel_id=%s has_metadata=%s",
+            request_id, session_id, channel_id, bool(self._request_metadata),
         )
 
     async def send_file(self, abs_file_path_list: Union[List[str], str]) -> str:
-        """Send files to user.
-
-        Args:
-            abs_file_path_list: List of absolute file paths to send.
-
-        Returns:
-            Success message or error description.
-        """
+        """Send files to user."""
         if isinstance(abs_file_path_list, str):
             try:
                 parsed = json.loads(abs_file_path_list)
@@ -104,9 +113,7 @@ class SendFileToolkit:
 
         logger.info(
             "[SendFileToolkit] send_file 开始 session_id=%s 有效文件=%d 缺失=%d",
-            self.session_id,
-            len(valid_files),
-            len(missing_files),
+            self.session_id, len(valid_files), len(missing_files),
         )
 
         # 检查是否启用分布式文件传输
@@ -121,19 +128,35 @@ class SendFileToolkit:
         valid_files: List[str],
         missing_files: List[str],
     ) -> str:
-        """本地模式：直接传递文件路径（原有逻辑）.
+        """本地模式：直接传递文件路径。"""
+        from jiuwenclaw.agentserver.agent_ws_server import AgentWebSocketServer
+        server = AgentWebSocketServer.get_instance()
 
-        Args:
-            valid_files: 有效文件路径列表
-            missing_files: 缺失文件路径列表
-
-        Returns:
-            结果消息
-        """
+        files_payload = []
         try:
-            # Lazy import to avoid circular import
-            from jiuwenclaw.agentserver.agent_ws_server import AgentWebSocketServer
-            server = AgentWebSocketServer.get_instance()
+            from jiuwenclaw.agentserver.tools.web_file_download import (
+                build_file_download_info,
+            )
+
+            for file_path in valid_files:
+                base_name = os.path.basename(file_path)
+                download_info = build_file_download_info(
+                    file_path, base_name, self.session_id
+                )
+                files_payload.append({
+                    "path": file_path,
+                    "name": base_name,
+                    "size": download_info["size"],
+                    "mime_type": download_info["mime_type"],
+                    "download_url": download_info["download_url"],
+                    "download_token": download_info["download_token"],
+                    "expires_at": download_info.get("expires_at"),
+                })
+        except Exception as download_err:
+            logger.warning(
+                "[SendFileToolkit] 生成下载信息失败，回退到基础模式: %s",
+                download_err,
+            )
             files_payload = [
                 {
                     "path": file_path,
@@ -141,58 +164,55 @@ class SendFileToolkit:
                 }
                 for file_path in valid_files
             ]
-            msg = {
-                "request_id": self.request_id,
-                "channel_id": self.channel_id,
-                "session_id": self.session_id,
-                "payload": {
-                    "event_type": "chat.file",
-                    "files": files_payload,
-                },
-                "is_complete": False,
-            }
-            if self._request_metadata:
-                msg["metadata"] = dict(self._request_metadata)
-            await server.send_push(msg)
-            result_parts = [f"成功发送 {len(valid_files)} 个文件"]
-            if missing_files:
-                result_parts.append("以下文件不存在，未发送：")
-                for mf in missing_files:
-                    result_parts.append(f"  - {mf}")
-            return "\n".join(result_parts)
-        except Exception as e:
-            logger.exception(
-                "[SendFileToolkit] _send_file_local 失败 session_id=%s error=%s",
-                self.session_id,
-                str(e),
-            )
-            return f"提交文件失败: {str(e)}"
+
+        import time
+        from jiuwenclaw.agentserver.session_history import (
+            append_history_record,
+        )
+        append_history_record(
+            session_id=self.session_id,
+            request_id=self.request_id,
+            channel_id=self.channel_id,
+            role="assistant",
+            event_type="chat.file",
+            content="",
+            timestamp=time.time(),
+            extra={"files": files_payload},
+        )
+
+        msg = {
+            "request_id": self.request_id,
+            "channel_id": self.channel_id,
+            "session_id": self.session_id,
+            "payload": {
+                "event_type": "chat.file",
+                "files": files_payload,
+            },
+            "is_complete": False,
+        }
+        if self._request_metadata:
+            msg["metadata"] = dict(self._request_metadata)
+        await server.send_push(msg)
+        result_parts = [f"成功发送 {len(valid_files)} 个文件"]
+        if missing_files:
+            result_parts.append("以下文件不存在，未发送：")
+            for mf in missing_files:
+                result_parts.append(f"  - {mf}")
+        return "\n".join(result_parts)
 
     async def _send_file_distributed(
         self,
         valid_files: List[str],
         missing_files: List[str],
     ) -> str:
-        """分布式模式：通过分片传输发送文件到 Gateway.
-
-        Args:
-            valid_files: 有效文件路径列表
-            missing_files: 缺失文件路径列表
-
-        Returns:
-            结果消息
-        """
+        """分布式模式：通过分片传输发送文件到 Gateway。"""
         ft_manager = get_file_transfer_manager()
-        results = []
         success_count = 0
         failed_files = []
 
         for file_path in valid_files:
             try:
-                # 定义发送回调函数
                 async def send_callback(event_type: str, params: dict) -> None:
-                    """发送文件传输事件到 Gateway."""
-                    # Lazy import to avoid circular import
                     from jiuwenclaw.agentserver.agent_ws_server import AgentWebSocketServer
                     server = AgentWebSocketServer.get_instance()
                     msg = {
@@ -207,7 +227,6 @@ class SendFileToolkit:
                     }
                     await server.send_push(msg)
 
-                # 使用 FileTransferManager 发送文件
                 result = await ft_manager.send_file(
                     file_path=file_path,
                     send_callback=send_callback,
@@ -219,9 +238,8 @@ class SendFileToolkit:
                 if result.get("success"):
                     success_count += 1
                     logger.info(
-                        "[SendFileToolkit] 分布式发送成功: file=%s transfer_id=%s",
-                        file_path,
-                        result.get("transfer_id"),
+                        "[SendFileToolkit] 分布式发送成功 file=%s transfer_id=%s",
+                        file_path, result.get("transfer_id"),
                     )
                 else:
                     failed_files.append({
@@ -229,22 +247,15 @@ class SendFileToolkit:
                         "error": result.get("error", "unknown error"),
                     })
                     logger.warning(
-                        "[SendFileToolkit] 分布式发送失败: file=%s error=%s",
-                        file_path,
-                        result.get("error"),
+                        "[SendFileToolkit] 分布式发送失败 file=%s error=%s",
+                        file_path, result.get("error"),
                     )
-
             except Exception as e:
-                failed_files.append({
-                    "file": file_path,
-                    "error": str(e),
-                })
+                failed_files.append({"file": file_path, "error": str(e)})
                 logger.exception(
-                    "[SendFileToolkit] 分布式发送异常: file=%s",
-                    file_path,
+                    "[SendFileToolkit] 分布式发送异常 file=%s", file_path,
                 )
 
-        # 构建结果消息
         result_parts = []
         if success_count > 0:
             result_parts.append(f"成功发送 {success_count} 个文件")
@@ -260,24 +271,9 @@ class SendFileToolkit:
         return "\n".join(result_parts) if result_parts else "发送完成"
 
     def get_tools(self) -> List[Tool]:
-        """Return tools for registration in Runner.
-
-        Returns:
-            List of tools for sending files.
-        """
-        session_id = self.session_id
-
-        def make_tool(
-            name: str,
-            description: str,
-            input_params: dict,
-            func,
-        ) -> Tool:
-            card = ToolCard(
-                name=name,
-                description=description,
-                input_params=input_params,
-            )
+        """Return tools for registration in Runner."""
+        def make_tool(name: str, description: str, input_params: dict, func) -> Tool:
+            card = ToolCard(name=name, description=description, input_params=input_params)
             return LocalFunction(card=card, func=func)
 
         return [

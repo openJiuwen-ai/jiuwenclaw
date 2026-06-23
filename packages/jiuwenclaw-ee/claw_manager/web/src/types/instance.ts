@@ -42,6 +42,6 @@ export interface ManagerWsStatus {
   running: boolean;
   host?: string;
   port?: number;
-  registered_instances: string[];
+  registered_jiuwenclaw_ids: string[];
   pid: number;
 }

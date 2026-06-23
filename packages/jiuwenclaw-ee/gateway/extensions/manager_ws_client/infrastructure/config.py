@@ -49,6 +49,7 @@ class Settings(BaseSettings):
     gateway_db_user: Optional[str] = Field(default=None, validation_alias="GATEWAY_DB_USER")
     gateway_db_password: Optional[str] = Field(default=None, validation_alias="GATEWAY_DB_PASSWORD")
     gateway_db_name: Optional[str] = Field(default=None, validation_alias="GATEWAY_DB_NAME")
+    gateway_pg_schema: Optional[str] = Field(default="public", validation_alias="GATEWAY_PG_SCHEMA")
 
     gateway_manager_ws_client_enabled: bool = Field(
         default=True,
@@ -58,9 +59,60 @@ class Settings(BaseSettings):
         default="ws://127.0.0.1:8766",
         validation_alias="GATEWAY_MANAGER_WS_URL",
     )
-    gateway_heartbeat_interval_seconds: int = Field(
+    gateway_manager_ws_max_reconnect_attempts: int = Field(
+        default=3,
+        validation_alias="GATEWAY_MANAGER_WS_MAX_RECONNECT_ATTEMPTS",
+        description=(
+            "Fast-retry phase length before switching to probe mode; "
+            "0 = use exponential backoff only (no separate fast phase)"
+        ),
+    )
+    gateway_manager_ws_reconnect_interval_seconds: float = Field(
+        default=3.0,
+        validation_alias="GATEWAY_MANAGER_WS_RECONNECT_INTERVAL_SECONDS",
+        description="Delay between fast-phase Manager WebSocket reconnect attempts (seconds)",
+    )
+    gateway_manager_ws_probe_interval_seconds: float = Field(
+        default=120.0,
+        validation_alias="GATEWAY_MANAGER_WS_PROBE_INTERVAL_SECONDS",
+        description=(
+            "Interval for probe-mode reconnect when Manager is unavailable "
+            "(seconds); also caps exponential backoff when max attempts is 0"
+        ),
+    )
+    gateway_manager_ws_heartbeat_interval_seconds: int = Field(
+        default=60,
+        validation_alias="GATEWAY_MANAGER_WS_HEARTBEAT_INTERVAL_SECONDS",
+        description="Interval for Gateway → Manager WebSocket heartbeats (seconds)",
+    )
+    gateway_manager_ws_pod_status_interval_seconds: int = Field(
         default=30,
-        validation_alias="GATEWAY_HEARTBEAT_INTERVAL_SECONDS",
+        validation_alias="GATEWAY_MANAGER_WS_POD_STATUS_INTERVAL_SECONDS",
+        description="Interval for Gateway -> Manager AgentServer Pod status reports (seconds)",
+    )
+
+    # ========== 配置下发字段级解密（信封解密，私钥本机自持） ==========
+    gateway_config_dec_enabled: bool = Field(
+        default=True,
+        validation_alias="GATEWAY_CONFIG_DEC_ENABLED",
+        description="是否对 config.push 中的 ENC 信封字段执行解密",
+    )
+
+    # ========== 配置下发验签与防重放（Ed25519，公钥握手分发） ==========
+    gateway_config_verify_enabled: bool = Field(
+        default=True,
+        validation_alias="GATEWAY_CONFIG_VERIFY_ENABLED",
+        description="是否对 config.push 执行验签",
+    )
+    gateway_config_verify_required: bool = Field(
+        default=False,
+        validation_alias="GATEWAY_CONFIG_VERIFY_REQUIRED",
+        description="强制态：无签名或验签失败一律拒绝（fail-closed）",
+    )
+    gateway_config_sign_skew_seconds: int = Field(
+        default=300,
+        validation_alias="GATEWAY_CONFIG_SIGN_SKEW_SECONDS",
+        description="验签允许的时间窗（秒），用于防重放与容忍时钟漂移",
     )
 
     # 在验证之前就把空字符串变成 None

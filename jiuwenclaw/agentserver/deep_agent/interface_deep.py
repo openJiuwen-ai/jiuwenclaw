@@ -110,7 +110,7 @@ from jiuwenclaw.agentserver.deep_agent.permissions.owner_scopes import (
 from jiuwenclaw.agentserver.permissions.core import init_permission_engine
 from jiuwenclaw.agentserver.memory import clear_memory_manager_cache
 from jiuwenclaw.agentserver.memory.config import (clear_config_cache, get_memory_mode, is_memory_enabled,
-                                                  is_proactive_memory)
+                                                  is_proactive_memory, clear_embed_config_db_cache)
 from jiuwenclaw.agentserver.permissions.checker import TOOL_PERMISSION_CHANNEL_ID
 from jiuwenclaw.agentserver.cron_config import should_register_cron_tools
 from jiuwenclaw.agentserver.skill_manager import SkillManager
@@ -178,11 +178,21 @@ from jiuwenclaw.agentserver.deep_agent.sysop_builder import (
 from jiuwenclaw.agentserver.stream_content_sanitize import strip_inline_tool_protocol
 from jiuwenclaw.agentserver.stream_utils import tool_calls_payload_to_json_list
 from jiuwenclaw.agentserver.extensions import get_rail_manager
+from jiuwenclaw.agentserver.cron_tool_context import (
+    CRON_TOOL_CHANNEL_ID,
+    CRON_TOOL_METADATA,
+    CRON_TOOL_MODE,
+    CRON_TOOL_SESSION_ID,
+    get_cron_tool_channel_id,
+    get_cron_tool_metadata,
+    get_cron_tool_mode,
+    get_cron_tool_session_id,
+)
 from jiuwenclaw.gateway.cron import CronTargetChannel
 from jiuwenclaw.agentserver.team import get_team_manager
 from jiuwenclaw.schema.agent import AgentRequest, AgentResponse, AgentResponseChunk
 from jiuwenclaw.agentserver.skill_whitelist import (is_skill_whitelist_tenant, parse_agent_skill_whitelist,
-                                                    SkillWhitelistSynchronizer)
+                                                     SkillWhitelistSynchronizer)
 from jiuwenclaw.utils import (
     get_agent_registered_skill_dirs,
     get_agent_workspace_dir,
@@ -192,27 +202,12 @@ from jiuwenclaw.utils import (
     get_tenant_agent_skills_dirs,
 )
 from jiuwenclaw.local_env_config import set_local_config
+from openjiuwen_runtime.foundation.db.mysql_handler import MySQLHandler
+from openjiuwen_runtime.foundation.db.postgresql_handler import PostgreSQLHandler
 
 load_dotenv(dotenv_path=get_env_file())
 
 _react_config = get_config().get("react", {})
-
-_CRON_TOOL_CHANNEL_ID: ContextVar[str] = ContextVar(
-    "cron_tool_channel_id",
-    default=CronTargetChannel.WEB.value,
-)
-_CRON_TOOL_SESSION_ID: ContextVar[str | None] = ContextVar(
-    "cron_tool_session_id",
-    default=None,
-)
-_CRON_TOOL_METADATA: ContextVar[dict[str, Any] | None] = ContextVar(
-    "cron_tool_metadata",
-    default=None,
-)
-_CRON_TOOL_MODE: ContextVar[str | None] = ContextVar(
-    "cron_tool_mode",
-    default=None,
-)
 
 _LLM_TRACE_SESSION_ID: ContextVar[str] = ContextVar(
     "llm_trace_session_id",
@@ -605,6 +600,126 @@ def _build_context_engineering_rail(config: dict[str, Any],
         return None
 
 
+def _patch_compiler_for_on_conflict():
+    """使 MySQL 和 PostgreSQL SQLAlchemy 编译器支持 SQLite 的 ON CONFLICT DO UPDATE.
+
+    openjiuwen SDK 的 DbBasedKVStore 硬编码了 SQLite upsert 语法.
+    此 patch 在 SQL 编译阶段将 ON CONFLICT ... DO UPDATE 翻译为对应数据库的语法,
+    使 checkpoint 可以正常写入 MySQL/PostgreSQL.
+    """
+    try:
+        from sqlalchemy.ext.compiler import compiles
+        from sqlalchemy.dialects.sqlite.dml import OnConflictDoUpdate
+
+        @compiles(OnConflictDoUpdate, "mysql")
+        def _mysql_on_conflict_do_update(element, compiler, **kw):
+            values = getattr(element, "_update_values", None)
+            set_pairs = []
+            if isinstance(values, dict):
+                for col_key in values:
+                    col_name = compiler.preparer.format_column(col_key)
+                    set_pairs.append(f"{col_name} = VALUES({col_name})")
+            if not set_pairs:
+                set_pairs.append("value = VALUES(value)")
+            return f"\nON DUPLICATE KEY UPDATE {', '.join(set_pairs)}"
+
+        @compiles(OnConflictDoUpdate, "postgresql")
+        def _postgresql_on_conflict_do_update(element, compiler, **kw):
+            values = getattr(element, "_update_values", None)
+            set_pairs = []
+            if isinstance(values, dict):
+                for col_key in values:
+                    col_name = compiler.preparer.format_column(col_key)
+                    set_pairs.append(f"{col_name} = EXCLUDED.{col_name}")
+            if not set_pairs:
+                set_pairs.append("value = EXCLUDED.value")
+            return f" ON CONFLICT (key) DO UPDATE SET {', '.join(set_pairs)}"
+    except Exception:
+        pass
+
+
+_patch_compiler_for_on_conflict()
+
+
+async def _build_mysql_handler_engine():
+    """构建 checkpoint MySQL AsyncEngine，使用 openjiuwen_runtime SDK.
+
+    连接参数从 GATEWAY_DB_* 环境变量读取。
+    未配置 GATEWAY_DB_HOST 时返回 None，checkpoint 回退到 SQLite。
+    """
+    db_host = os.getenv("GATEWAY_DB_HOST", "").strip()
+    if not db_host:
+        return None
+    try:
+        db_port = int(os.getenv("GATEWAY_DB_PORT", "3306").strip())
+        db_user = os.getenv("GATEWAY_DB_USER", "root").strip()
+        db_password = os.getenv("GATEWAY_DB_PASSWORD", "").strip()
+        db_name = os.getenv("GATEWAY_DB_NAME", "openjiuwen_gateway").strip()
+
+        handler = MySQLHandler(
+            host=db_host,
+            port=db_port,
+            user=db_user,
+            password=db_password,
+            database=db_name,
+        )
+        await handler.init_database()
+        await handler.connect()
+        engine = handler.get_engine()
+        logger.info(
+            "[JiuWenClawDeepAdapter] checkpoint MySQL engine created via SDK: %s:%s/%s",
+            db_host, db_port, db_name,
+        )
+        return engine
+    except Exception as exc:
+        logger.error(
+            "[JiuWenClawDeepAdapter] failed to create checkpoint MySQL engine: %s",
+            exc,
+        )
+        return None
+
+
+async def _build_postgresql_handler_engine():
+    """构建 checkpoint PostgreSQL AsyncEngine，使用 openjiuwen_runtime SDK.
+
+    连接参数从 GATEWAY_DB_* 环境变量读取。
+    未配置 GATEWAY_DB_HOST 时返回 None，checkpoint 回退到 SQLite。
+    支持通过 GATEWAY_PG_SCHEMA 环境变量配置 schema。
+    """
+    db_host = os.getenv("GATEWAY_DB_HOST", "").strip()
+    if not db_host:
+        return None
+    try:
+        db_port = int(os.getenv("GATEWAY_DB_PORT", "5432").strip())
+        db_user = os.getenv("GATEWAY_DB_USER", "postgres").strip()
+        db_password = os.getenv("GATEWAY_DB_PASSWORD", "").strip()
+        db_name = os.getenv("GATEWAY_DB_NAME", "openjiuwen_gateway").strip()
+        db_schema = os.getenv("GATEWAY_PG_SCHEMA", "public").strip()
+
+        handler = PostgreSQLHandler(
+            host=db_host,
+            port=db_port,
+            user=db_user,
+            password=db_password,
+            database=db_name,
+            schema=db_schema,
+        )
+        await handler.init_database()
+        await handler.connect()
+        engine = handler.get_engine()
+        logger.info(
+            "[JiuWenClawDeepAdapter] checkpoint PostgreSQL engine created via SDK: %s:%s/%s schema=%s",
+            db_host, db_port, db_name, db_schema,
+        )
+        return engine
+    except Exception as exc:
+        logger.error(
+            "[JiuWenClawDeepAdapter] failed to create checkpoint PostgreSQL engine: %s",
+            exc,
+        )
+        return None
+
+
 class _RuntimeCronToolContext:
     """Stable cron tool context proxy backed by per-task contextvars."""
 
@@ -613,19 +728,19 @@ class _RuntimeCronToolContext:
 
     @property
     def channel_id(self) -> str:
-        return _CRON_TOOL_CHANNEL_ID.get()
+        return get_cron_tool_channel_id()
 
     @property
     def session_id(self) -> str | None:
-        return _CRON_TOOL_SESSION_ID.get()
+        return get_cron_tool_session_id()
 
     @property
     def metadata(self) -> dict[str, Any] | None:
-        return _CRON_TOOL_METADATA.get()
+        return get_cron_tool_metadata()
 
     @property
     def mode(self) -> str | None:
-        return _CRON_TOOL_MODE.get()
+        return get_cron_tool_mode()
 
     @property
     def tool_scope(self) -> str:
@@ -1226,11 +1341,21 @@ class JiuWenClawDeepAdapter:
         try:
             PersistenceCheckpointerProvider()
             checkpoint_path = get_checkpoint_dir()
+            conf = {"db_type": "sqlite", "db_path": f"{checkpoint_path}/checkpoint"}
+
+            db_type = os.getenv("GATEWAY_DB_TYPE", "").strip().lower()
+            if db_type == "mysql":
+                mysql_engine = await _build_mysql_handler_engine()
+                if mysql_engine is not None:
+                    conf["db_client"] = mysql_engine
+                    logger.info("[JiuWenClawDeepAdapter] use mysql db_client from SDK")
+            elif db_type in ("postgresql", "postgres", "pg"):
+                postgresql_engine = await _build_postgresql_handler_engine()
+                if postgresql_engine is not None:
+                    conf["db_client"] = postgresql_engine
+                    logger.info("[JiuWenClawDeepAdapter] use postgresql db_client from SDK")
             checkpointer = await CheckpointerFactory.create(
-                CheckpointerConfig(
-                    type="persistence",
-                    conf={"db_type": "sqlite", "db_path": f"{checkpoint_path}/checkpoint"},
-                )
+                CheckpointerConfig(type="persistence", conf=conf)
             )
             CheckpointerFactory.set_default_checkpointer(checkpointer)
         except Exception as e:
@@ -1337,24 +1462,7 @@ class JiuWenClawDeepAdapter:
         return rail
 
     def _create_sys_operation(self) -> SysOperation | None:
-        """Create a sys operation with workspace as working directory.
-
-        是否走沙箱由 ``JIUWENCLAW_SANDBOX_ENABLED`` 决定（同时要求
-        ``JIUWENCLAW_SANDBOX_URL`` / ``JIUWENCLAW_SANDBOX_TYPE`` 已配置）。
-        其他 sandbox 字段 (``excluded_commands`` / ``files`` /
-        ``idle_ttl_seconds`` / ``idle_check_interval``) 透传给
-        ``create_sandbox_sysop_card``, 分别写入 ``launcher_config.extra_params``
-        与 ``launcher_config`` 上的同名字段。
-
-        注意: 每次都从 ``get_sandbox_endpoint`` / ``get_sandbox_runtime`` 读最新
-        sandbox 配置 (现已切换到 ``JIUWENCLAW_SANDBOX_*`` 环境变量驱动, 不再
-        读 ``config.yaml::sandbox``); 改 env 后重启 agent-server 即可生效。
-        ``startup_mode`` 的合法性校验由 getter 完成。
-
-        当前 claw2b 不负责拉起 jiuwenbox，``startup_mode`` 仅支持 ``external``,
-        表示 “使用 ``JIUWENCLAW_SANDBOX_URL`` 配置的端点连接由外部启动的 jiuwenbox”
-        (在 K8s / 企业部署里 jiuwenbox-server 由 Deployment / sidecar 独立托管)。
-        """
+        """Create a sys operation with workspace as working directory."""
         try:
             endpoint = get_sandbox_endpoint()
             runtime = get_sandbox_runtime()
@@ -1365,27 +1473,26 @@ class JiuWenClawDeepAdapter:
             if sandbox_enabled and sandbox_url and sandbox_type:
                 logger.info(
                     "[JiuWenClawDeepAdapter] sandbox mode: url=%s type=%s "
-                    "startup_mode=%s idle_ttl_seconds=%s idle_check_interval=%s",
+                    "startup_mode=%s idle_ttl_seconds=%s idle_check_interval=%s fallback_on_failure=%s",
                     sandbox_url,
                     sandbox_type,
                     endpoint.get("startup_mode"),
                     runtime.get("idle_ttl_seconds"),
                     runtime.get("idle_check_interval"),
+                    runtime.get("fallback_on_failure"),
                 )
                 sysop_card = create_sandbox_sysop_card(
                     sandbox_url,
                     sandbox_type,
-                    workspace_dir=self._workspace_dir,
+                    self._agent_id,
+                    shared_dir=get_agent_root_dir(),
                     files_runtime=runtime.get("files"),
                     excluded_commands=runtime.get("excluded_commands"),
                     idle_ttl_seconds=runtime.get("idle_ttl_seconds"),
                     idle_check_interval=runtime.get("idle_check_interval"),
+                    fallback_on_failure=runtime.get("fallback_on_failure"),
                 )
             else:
-                # 用户经常踩这种坑: ``JIUWENCLAW_SANDBOX_ENABLED=true`` 但漏配
-                # ``URL`` (或历史上漏配 ``TYPE``, 现在 TYPE 已经默认 ``jiuwenbox``).
-                # 此时静默走 local 模式, 现象上跟"完全没启用 sandbox"一样, 难
-                # 排查, 这里把缺哪个 env 直接打 warn 出来。
                 if sandbox_enabled and not (sandbox_url and sandbox_type):
                     missing = []
                     if not sandbox_url:
@@ -1410,7 +1517,34 @@ class JiuWenClawDeepAdapter:
                 return None
             result = Runner.resource_mgr.add_sys_operation(sysop_card)
             if result.is_err():
-                logger.warning("[JiuWenClawDeepAdapter] add sys_operation failed: %s", result.msg())
+                error_msg = result.msg()
+                logger.warning("[JiuWenClawDeepAdapter] add sys_operation failed: %s", error_msg)
+                
+                # 防护机制：如果错误是因为隔离键已存在，尝试复用现有的 sys_operation
+                if "already registered" in str(error_msg) and "operation '" in str(error_msg):
+                    import re
+                    # 从错误信息中提取已存在的 operation ID
+                    match = re.search(r"by operation '([a-f0-9]+)'", str(error_msg))
+                    if match:
+                        existing_op_id = match.group(1)
+                        logger.info(
+                            "[JiuWenClawDeepAdapter] 检测到隔离键冲突，尝试复用现有 sys_operation: id=%s",
+                            existing_op_id
+                        )
+                        # 尝试获取已存在的 sys_operation
+                        existing_op = Runner.resource_mgr.get_sys_operation(existing_op_id)
+                        if existing_op is not None:
+                            logger.info(
+                                "[JiuWenClawDeepAdapter] 成功复用现有 sys_operation: id=%s",
+                                existing_op_id
+                            )
+                            return existing_op
+                        else:
+                            logger.warning(
+                                "[JiuWenClawDeepAdapter] 无法获取已存在的 sys_operation: id=%s",
+                                existing_op_id
+                            )
+                
                 return None
             return Runner.resource_mgr.get_sys_operation(sysop_card.id)
         except Exception as exc:
@@ -1624,19 +1758,20 @@ class JiuWenClawDeepAdapter:
 
     def _build_memory_rail(self, mode: str) -> MemoryRail | None:
         try:
+            from jiuwenclaw.agentserver.memory.config import get_embed_config
             config = get_config()
-            embed_config = config.get("embed") if isinstance(config, dict) else None
-            has_api_key = embed_config.get("embed_api_key") if isinstance(embed_config, dict) else None
-            has_base_url = embed_config.get("embed_base_url") if isinstance(embed_config, dict) else None
-            has_model = embed_config.get("embed_model") if isinstance(embed_config, dict) else None
+            embed_config = get_embed_config()
+            has_api_key = embed_config.get("api_key") if isinstance(embed_config, dict) else None
+            has_base_url = embed_config.get("base_url") if isinstance(embed_config, dict) else None
+            has_model = embed_config.get("model") if isinstance(embed_config, dict) else None
             if not all([has_api_key, has_base_url, has_model]):
                 logger.warning("[JiuWenClawDeepAdapter] MemoryRail create failed: No available embedding config")
             self._is_proactive_memory = is_proactive_memory(mode, config)
             memory_rail = MemoryRail(
                 embedding_config=EmbeddingConfig(
-                    model_name=embed_config.get("embed_model"),
-                    base_url=embed_config.get("embed_base_url"),
-                    api_key=embed_config.get("embed_api_key")
+                    model_name=embed_config.get("model"),
+                    base_url=embed_config.get("base_url"),
+                    api_key=embed_config.get("api_key")
                 ),
                 is_proactive=self._is_proactive_memory
             )
@@ -1653,13 +1788,14 @@ class JiuWenClawDeepAdapter:
             CodingMemoryRail 实例，失败返回 None
         """
         try:
+            from jiuwenclaw.agentserver.memory.config import get_embed_config
             config = get_config()
-            embed_config = config.get("embed") if isinstance(config, dict) else None
+            embed_config = get_embed_config()
 
             # 检查 embedding 配置
-            has_api_key = embed_config.get("embed_api_key") if isinstance(embed_config, dict) else None
-            has_base_url = embed_config.get("embed_base_url") if isinstance(embed_config, dict) else None
-            has_model = embed_config.get("embed_model") if isinstance(embed_config, dict) else None
+            has_api_key = embed_config.get("api_key") if isinstance(embed_config, dict) else None
+            has_base_url = embed_config.get("base_url") if isinstance(embed_config, dict) else None
+            has_model = embed_config.get("model") if isinstance(embed_config, dict) else None
             if not all([has_api_key, has_base_url, has_model]):
                 logger.warning("[JiuWenClawDeepAdapter] CodingMemoryRail: no embedding config, skipping")
                 return None
@@ -1675,9 +1811,9 @@ class JiuWenClawDeepAdapter:
             coding_memory_rail = CodingMemoryRail(
                 coding_memory_dir=coding_memory_dir,
                 embedding_config=EmbeddingConfig(
-                    model_name=embed_config.get("embed_model"),
-                    base_url=embed_config.get("embed_base_url"),
-                    api_key=embed_config.get("embed_api_key"),
+                    model_name=embed_config.get("model"),
+                    base_url=embed_config.get("base_url"),
+                    api_key=embed_config.get("api_key"),
                 ),
                 language="cn" if language == "zh" else "en",
             )
@@ -1967,7 +2103,9 @@ class JiuWenClawDeepAdapter:
 
     def _update_permission_rail(self, config_base: dict[str, Any] | None) -> None:
         """原地更新已有 PermissionRail 配置，或在首次启用时新建。"""
-        permission_config = config_base.get("permissions", {}) if config_base else {}
+        from jiuwenclaw.agentserver.permissions.config_loader import get_effective_permissions_config
+
+        permission_config = get_effective_permissions_config()
         model_name = (config_base or {}).get("models", {}).get(
             "default", {}).get("model_client_config", {}).get("model_name", "gpt-4")
         if self._permission_rail is not None:
@@ -2164,7 +2302,7 @@ class JiuWenClawDeepAdapter:
                 )
 
         # 小艺手机端工具：由 channels.xiaoyi.phone_tools_enabled 控制
-        config_base = get_config()
+        config_base = get_config() or {}
         xiaoyi_phone_tools_enabled = (
             config_base.get("channels", {}).get("xiaoyi", {}).get("phone_tools_enabled", False)
         )
@@ -2452,7 +2590,9 @@ class JiuWenClawDeepAdapter:
         tool_cards = await self._get_tool_cards(agent_card.id, mode=mode)
         self._tool_cards = tool_cards
 
-        permissions_cfg = config_base.get("permissions", {})
+        from jiuwenclaw.agentserver.permissions.config_loader import get_effective_permissions_config
+
+        permissions_cfg = get_effective_permissions_config()
         init_permission_engine(permissions_cfg)
         logger.info(
             "[JiuWenClawDeepAdapter] Permission engine initialized: enabled=%s",
@@ -2611,6 +2751,7 @@ class JiuWenClawDeepAdapter:
         if self._instance is None:
             raise RuntimeError("JiuWenClawDeepAdapter 未初始化，请先调用 create_instance()")
         clear_config_cache()
+        clear_embed_config_db_cache()
         clear_memory_manager_cache()
 
         if env_overrides is not None:
@@ -2697,10 +2838,10 @@ class JiuWenClawDeepAdapter:
             session_id=session_id or "",
         )
         return (
-            _CRON_TOOL_CHANNEL_ID.set(normalized_channel),
-            _CRON_TOOL_SESSION_ID.set(session_id),
-            _CRON_TOOL_METADATA.set(normalized_metadata),
-            _CRON_TOOL_MODE.set(normalized_mode),
+            CRON_TOOL_CHANNEL_ID.set(normalized_channel),
+            CRON_TOOL_SESSION_ID.set(session_id),
+            CRON_TOOL_METADATA.set(normalized_metadata),
+            CRON_TOOL_MODE.set(normalized_mode),
             _plan_todo.PLAN_TODO_SESSION_ID.set(session_id or "default"),
             dr_token,
         )
@@ -2713,10 +2854,10 @@ class JiuWenClawDeepAdapter:
 
         channel_token, session_token, metadata_token, mode_token, todo_token, dr_token = tokens
         _plan_todo.PLAN_TODO_SESSION_ID.reset(todo_token)
-        _CRON_TOOL_MODE.reset(mode_token)
-        _CRON_TOOL_METADATA.reset(metadata_token)
-        _CRON_TOOL_SESSION_ID.reset(session_token)
-        _CRON_TOOL_CHANNEL_ID.reset(channel_token)
+        CRON_TOOL_MODE.reset(mode_token)
+        CRON_TOOL_METADATA.reset(metadata_token)
+        CRON_TOOL_SESSION_ID.reset(session_token)
+        CRON_TOOL_CHANNEL_ID.reset(channel_token)
         # 重置 DeepResearch 路由上下文
         reset_deepresearch_route(dr_token)
 
@@ -2872,7 +3013,7 @@ class JiuWenClawDeepAdapter:
             )
             self._multi_session_toolkit = MultiSessionToolkit(
                 session_id=session_id,
-                channel_id=_CRON_TOOL_CHANNEL_ID.get(),
+                channel_id=get_cron_tool_channel_id(),
                 request_id=request_id,
                 sub_agent_config=sub_agent_config,
             )
@@ -2920,6 +3061,18 @@ class JiuWenClawDeepAdapter:
         config_base = get_config()
         channel = str(channel_id or self._resolve_prompt_channel(session_id) or "web").strip() or "web"
         send_file_enabled = config_base.get("channels", {}).get(channel, {}).get("send_file_allowed", False)
+        
+        # 如果 AGENT_RUNTIME 环境变量存在（非空），则优先使用企业配置中的 send_file_allowed
+        agent_runtime_env = os.getenv("AGENT_RUNTIME", "").strip()
+        if agent_runtime_env:
+            logger.info(
+                "[JiuWenClawDeepAdapter] AGENT_RUNTIME detected: %s, using enterprise send_file config",
+                agent_runtime_env,
+            )
+            send_file_enabled = True
+            if self._enterprise_config is not None:
+                send_file_enabled = bool(self._enterprise_config.send_file_allowed)
+        
         send_file_channel_allowed = send_file_enabled or channel == "officeclaw"
         has_send_file_request_context = bool(request_id and session_id)
         if send_file_channel_allowed and has_send_file_request_context:
@@ -2930,8 +3083,8 @@ class JiuWenClawDeepAdapter:
             send_file_toolkit = SendFileToolkit(
                 request_id=request_id,
                 session_id=session_id,
-                channel_id=_CRON_TOOL_CHANNEL_ID.get(),
-                metadata=_CRON_TOOL_METADATA.get(),
+                channel_id=get_cron_tool_channel_id(),
+                metadata=get_cron_tool_metadata(),
             )
             for sf_tool in send_file_toolkit.get_tools():
                 Runner.resource_mgr.add_tool(sf_tool)
@@ -3071,7 +3224,7 @@ class JiuWenClawDeepAdapter:
                 set_global_channel_id as _set_user_todo_channel_id,
             )
             _set_user_todo_workspace(self._workspace_dir)
-            _set_user_todo_channel_id(_CRON_TOOL_CHANNEL_ID.get())
+            _set_user_todo_channel_id(get_cron_tool_channel_id())
             for tool in _get_user_todo_tools():
                 if not Runner.resource_mgr.get_tool(tool.card.id):
                     Runner.resource_mgr.add_tool(tool)

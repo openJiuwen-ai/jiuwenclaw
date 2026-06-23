@@ -357,12 +357,5 @@
       "path": "agent/jiuwenclaw_workspace/skills/skill-gen-4-enterprise-doc/scripts/skill_gen/url_ingest/wechat_article.py",
       "isMarkdown": false
     }
-  ],
-  "workspace": [
-    {
-      "name": "agent-data.json",
-      "path": "agent/workspace/agent-data.json",
-      "isMarkdown": false
-    }
   ]
 }

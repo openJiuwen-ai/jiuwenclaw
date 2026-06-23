@@ -298,6 +298,7 @@ class _CliClient:
         env: dict[str, str] | None = None,
         policy: Any = None,
         policy_mode: str | None = None,
+        sandbox_id: str | None = None,
     ) -> dict[str, Any]:
         body: dict[str, Any] = {}
         if env is not None:
@@ -306,6 +307,8 @@ class _CliClient:
             body["policy"] = policy
         if policy_mode is not None:
             body["policy_mode"] = policy_mode
+        if sandbox_id is not None:
+            body["sandbox_id"] = sandbox_id
         return dict(self._post(f"{_API_PREFIX}/sandboxes", json=body).json())
 
     def sandbox_list(self) -> list[dict[str, Any]]:
@@ -675,6 +678,7 @@ def cmd_sandbox_create(args: argparse.Namespace, client: _CliClient) -> Any:
         env=env,
         policy=policy,
         policy_mode=args.policy_mode,
+        sandbox_id=args.sandbox_id,
     )
 
 
@@ -1045,6 +1049,10 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--policy-mode", choices=["override", "append"], default=None,
         help="policy merge mode (default server-side 'override')",
+    )
+    p.add_argument(
+        "--sandbox-id",
+        help="optional sandbox id (4-16 chars: lowercase letters, digits, -, _)",
     )
     p.set_defaults(_handler=cmd_sandbox_create)
 

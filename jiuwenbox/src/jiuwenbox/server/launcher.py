@@ -25,6 +25,8 @@ from pathlib import Path
 from typing import Tuple, Union
 from urllib.parse import urlparse
 
+from jiuwenbox.logging_config import configure_logging, patch_uvicorn_logging
+
 logger = logging.getLogger("jiuwenbox.server.launcher")
 
 ENV_LISTEN = "JIUWENBOX_LISTEN"
@@ -221,6 +223,9 @@ def main(argv: list[str] | None = None) -> int:
     parser = _build_parser()
     args = parser.parse_args(argv)
 
+    log_level = getattr(logging, args.log_level.upper(), logging.INFO)
+    configure_logging(level=log_level)
+
     # 启动期错误报告 (URI 解析 / uvicorn 导入 / UDS 文件冲突) 走 logger.error,
     # 而非 print(..., file=sys.stderr)。Python 的 ``logging.lastResort`` 在无
     # 自定义 handler 时会把 ERROR 级别消息写入 stderr, 与原 print 行为对齐;
@@ -251,6 +256,8 @@ def main(argv: list[str] | None = None) -> int:
     except ImportError as exc:  # pragma: no cover - declared in pyproject
         logger.error("jiuwenbox-server: uvicorn is required (%s)", exc)
         return 3
+
+    patch_uvicorn_logging()
 
     uvicorn_kwargs: dict = {"log_level": args.log_level}
     if spec[0] == "http":

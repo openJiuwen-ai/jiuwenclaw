@@ -34,6 +34,9 @@ jiuwenbox-server = "jiuwenbox.server.launcher:main"
 where = ["src"]
 include = ["jiuwenbox*"]
 
+[tool.setuptools.package-data]
+jiuwenbox = ["configs/*.yaml"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 markers = [

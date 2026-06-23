@@ -5,23 +5,15 @@ from __future__ import annotations
 from dataclasses import replace
 from typing import Any
 
-import importlib
-
 import pytest
 
-from jiuwenclaw.gateway.channel_config_db import (
-    _EXT_PKG,
-    _ensure_extension_package,
-    _resolve_manager_ws_client_root,
+from jiuwenclaw.infrastructure.module_importer import (
+    import_manager_ws_client_module,
 )
 
 
 def _load_manager_ws_utils() -> Any:
-    ext_root = _resolve_manager_ws_client_root()
-    if ext_root is None:
-        raise ImportError("manager_ws_client extension not found")
-    _ensure_extension_package(ext_root)
-    return importlib.import_module(f"{_EXT_PKG}.infrastructure.utils")
+    return import_manager_ws_client_module("infrastructure.utils")
 
 
 from jiuwenclaw.agentserver.enterprise_config.loader import (
@@ -34,13 +26,13 @@ from jiuwenclaw.agentserver.enterprise_config.loader import (
 from jiuwenclaw.schema.agent import AgentRequest
 
 _utils = _load_manager_ws_utils()
-_gateway_db_mod = importlib.import_module(
-    f"{_EXT_PKG}.core.enterprise_config.gateway_db"
-)
+_gateway_db_mod = import_manager_ws_client_module("core.enterprise_config.gateway_db")
 GatewayDb = _gateway_db_mod.GatewayDb
-expressions = importlib.import_module(
-    f"{_EXT_PKG}.core.enterprise_config.expressions"
-)
+expressions = import_manager_ws_client_module("core.enterprise_config.expressions")
+routing_id = import_manager_ws_client_module("core.enterprise_config.routing_id")
+loader = import_manager_ws_client_module("core.enterprise_config.loader")
+resolve_policy_field = loader.resolve_policy_field
+routing_context_from_request = loader.routing_context_from_request
 
 
 def _bind_gateway_db(monkeypatch: pytest.MonkeyPatch, jiuwenclaw_id: str) -> GatewayDb:
@@ -62,7 +54,6 @@ def _patch_gateway_queries(
 RoutingContext = schemas.RoutingContext
 normalize_template_ref = _utils.normalize_template_ref
 fill_missing_template_ref_slots = _utils.fill_missing_template_ref_slots
-agent_rule_matches = expressions.agent_rule_matches
 evaluate_match_expr = expressions.evaluate_match_expr
 resolve_slot_template_id_map = expressions.resolve_slot_template_id_map
 resolve_template_slot_ref = expressions.resolve_template_slot_ref
@@ -96,6 +87,64 @@ def sales_ctx() -> RoutingContext:
         bot_id="bot_main",
         user_id="alice",
     )
+
+
+def test_routing_context_from_params() -> None:
+    request = AgentRequest(
+        request_id="req-routing-params",
+        params={
+            "group_id": "g_demo_sales",
+            "bot_id": "bot_main",
+            "user_id": "bob",
+        },
+    )
+    ctx = routing_context_from_request(request)
+    assert ctx.group_id == "g_demo_sales"
+    assert ctx.bot_id == "bot_main"
+    assert ctx.user_id == "bob"
+
+
+def test_routing_context_from_metadata_query_lists() -> None:
+    """WebChannel：URL query 经 parse_qs 落在 metadata.query。"""
+    request = AgentRequest(
+        request_id="req-routing-web",
+        params={"query": "hello", "session_id": "sess_1", "is_supplement": True},
+        metadata={
+            "query": {
+                "user_id": ["bob"],
+                "group_id": ["g_demo_sales"],
+                "bot_id": ["bot_main"],
+            },
+            "method": "chat.interrupt",
+        },
+    )
+    ctx = routing_context_from_request(request)
+    assert ctx.group_id == "g_demo_sales"
+    assert ctx.bot_id == "bot_main"
+    assert ctx.user_id == "bob"
+
+
+def test_routing_context_params_override_metadata_query() -> None:
+    request = AgentRequest(
+        request_id="req-routing-priority",
+        params={"group_id": "g_override"},
+        metadata={"query": {"group_id": ["g_demo_sales"], "user_id": ["bob"]}},
+    )
+    ctx = routing_context_from_request(request)
+    assert ctx.group_id == "g_override"
+    assert ctx.user_id == "bob"
+
+
+def test_routing_context_group_id_from_chat_id() -> None:
+    request = AgentRequest(
+        request_id="req-routing-chat",
+        chat_id="oc_group_chat_123",
+        metadata={"user_id": "alice", "bot_id": "bot_feishu"},
+    )
+    ctx = routing_context_from_request(request)
+    assert ctx.group_id == "oc_group_chat_123"
+    assert ctx.bot_id == "bot_feishu"
+    assert ctx.user_id == "alice"
 
 
 def test_normalize_template_ref_accepts_list() -> None:
@@ -220,8 +269,20 @@ def test_agent_rule_user_match(sales_ctx: RoutingContext) -> None:
         "agent_id": "${user_id}",
         "match_expr": "user_id == 'alice'",
     }
-    assert agent_rule_matches(rule, sales_ctx) is True
-    assert agent_rule_matches(rule, replace(sales_ctx, user_id="bob")) is False
+    assert evaluate_match_expr(rule.get("match_expr"), sales_ctx) is True
+    assert evaluate_match_expr(rule.get("match_expr"), replace(sales_ctx, user_id="bob")) is False
+
+
+def test_agent_rule_agent_id_template_does_not_filter_match(
+    sales_ctx: RoutingContext,
+) -> None:
+    """``agent_id`` 模板不参与匹配，仅 ``match_expr`` 决定命中。"""
+    rule = {
+        "agent_id": "${group_id}",
+        "match_expr": "",
+    }
+    assert evaluate_match_expr(rule.get("match_expr"), sales_ctx) is True
+    assert evaluate_match_expr(rule.get("match_expr"), replace(sales_ctx, user_id="bob")) is True
 
 
 def test_agent_rule_fixed_agent_id_does_not_filter_match(sales_ctx: RoutingContext) -> None:
@@ -229,8 +290,8 @@ def test_agent_rule_fixed_agent_id_does_not_filter_match(sales_ctx: RoutingConte
         "agent_id": "default_agent_id_1",
         "match_expr": "",
     }
-    assert agent_rule_matches(rule, sales_ctx) is True
-    assert agent_rule_matches(rule, replace(sales_ctx, user_id="bob")) is True
+    assert evaluate_match_expr(rule.get("match_expr"), sales_ctx) is True
+    assert evaluate_match_expr(rule.get("match_expr"), replace(sales_ctx, user_id="bob")) is True
 
 
 def test_match_expr_empty_is_true(sales_ctx: RoutingContext) -> None:
@@ -393,6 +454,7 @@ async def test_load_effective_config_fills_missing_slots_from_global(
                 {
                     "id": 1,
                     "jiuwenclaw_id": jid,
+                    "policy_id": "sp-demo-sales-policy-id",
                     "match_expr": "group_id == 'g_demo_sales'",
                     "template_ref": {
                         "default_model": [m2],
@@ -409,6 +471,7 @@ async def test_load_effective_config_fills_missing_slots_from_global(
                 {
                     "id": 10,
                     "jiuwenclaw_id": jid,
+                    "service_policy_id": "sp-demo-sales-policy-id",
                     "agent_id": "${user_id}",
                     "match_expr": "",
                     "template_ref": {
@@ -573,6 +636,7 @@ async def test_load_service_config_returns_resolved_service_and_agent_id(
                 {
                     "id": 1,
                     "jiuwenclaw_id": jid,
+                    "policy_id": "sp-demo-sales-policy-id",
                     "service_id": "${group_id}::${bot_id}",
                     "match_expr": "group_id == 'g_demo_sales'",
                     "template_ref": {"service_config": [s1]},
@@ -585,8 +649,10 @@ async def test_load_service_config_returns_resolved_service_and_agent_id(
                 {
                     "id": 10,
                     "jiuwenclaw_id": jid,
+                    "service_policy_id": "sp-demo-sales-policy-id",
                     "agent_id": "${user_id}",
                     "match_expr": "user_id == 'alice'",
+                    "send_file_allowed": True,
                     "template_ref": {},
                 }
             ]
@@ -632,6 +698,7 @@ async def test_load_service_config_returns_resolved_service_and_agent_id(
     assert alice_loaded is not None
     assert alice_loaded.service_id == "g_demo_sales::bot_main"
     assert alice_loaded.agent_id == "alice"
+    assert alice_loaded.send_file_allowed is True
 
     bob_request = AgentRequest(
         request_id="req-bob",
@@ -648,3 +715,118 @@ async def test_load_service_config_returns_resolved_service_and_agent_id(
     assert bob_loaded is not None
     assert bob_loaded.service_id == "g_demo_sales::bot_main"
     assert bob_loaded.agent_id is None
+    assert bob_loaded.send_file_allowed is False
+
+
+def test_policy_match_order_by_uses_priority_then_updated_at() -> None:
+    assert loader.POLICY_MATCH_ORDER_BY == [
+        ("priority", True),
+        ("updated_at", True),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_load_effective_config_prefers_newer_rule_at_same_priority(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """同 priority 时 updated_at 更新的 service 规则优先匹配。"""
+    jid = "order-demo"
+    db = _bind_gateway_db(monkeypatch, jid)
+    captured: list[str] = []
+
+    async def _list_records(
+        table: str,
+        *,
+        filters: dict | None = None,
+        order_by: str = "",
+    ) -> list[dict]:
+        if table == "config_effective_service_policy":
+            captured.append(order_by)
+            return [
+                {
+                    "id": 2,
+                    "jiuwenclaw_id": jid,
+                    "policy_id": "sp-new",
+                    "priority": 50,
+                    "updated_at": "2026-06-01T00:00:00",
+                    "match_expr": "group_id == 'g_demo_sales'",
+                    "template_ref": {"default_model": ["new-model"]},
+                },
+                {
+                    "id": 1,
+                    "jiuwenclaw_id": jid,
+                    "policy_id": "sp-old",
+                    "priority": 50,
+                    "updated_at": "2026-01-01T00:00:00",
+                    "match_expr": "group_id == 'g_demo_sales'",
+                    "template_ref": {"default_model": ["old-model"]},
+                },
+            ]
+        if table == "config_effective_global_policy":
+            return []
+        return []
+
+    async def _fetch_template(_slot: str, template_id: str) -> dict | None:
+        return {"template_id": template_id, "model_id": template_id}
+
+    _patch_gateway_queries(
+        monkeypatch,
+        db,
+        list_records=_list_records,
+        fetch_template_by_slot=_fetch_template,
+    )
+
+    request = AgentRequest(
+        request_id="req-order",
+        params={
+            "group_id": "g_demo_sales",
+            "bot_id": "bot_main",
+            "user_id": "alice",
+        },
+    )
+    loaded = await load_effective_enterprise_config(
+        request,
+        [TemplateRefSlot.DEFAULT_MODEL],
+    )
+    assert captured == [[("priority", True), ("updated_at", True)]]
+    assert loaded is not None
+    assert loaded.service_policy_id == "sp-new"
+    assert loaded.models["default_model"][0]["model_id"] == "new-model"
+
+
+def test_validate_routing_id_accepts_fixed_and_placeholders() -> None:
+    assert routing_id.validate_routing_id("sales_pool_v1") == "sales_pool_v1"
+    assert routing_id.validate_routing_id("${user_id}") == "${user_id}"
+    assert (
+        routing_id.validate_routing_id("${group_id}::${bot_id}")
+        == "${group_id}::${bot_id}"
+    )
+
+
+@pytest.mark.parametrize(
+    "value",
+    ["$(user_)", "${user_}", "${service_id}", "$user_id", "a${unknown}b"],
+)
+def test_validate_routing_id_rejects_invalid_dollar(value: str) -> None:
+    with pytest.raises(ValueError, match="invalid routing id placeholder"):
+        routing_id.validate_routing_id(value)
+
+
+def test_resolve_policy_field_fallback_to_raw_when_substitution_empty(
+    sales_ctx: RoutingContext,
+) -> None:
+    policy = {"service_id": "${user_}"}
+    assert (
+        resolve_policy_field(policy, "service_id", sales_ctx) == "${user_}"
+    )
+
+
+def test_resolve_policy_field_substitutes_known_placeholder(
+    sales_ctx: RoutingContext,
+) -> None:
+    policy = {"service_id": "${group_id}::${bot_id}"}
+    assert (
+        resolve_policy_field(policy, "service_id", sales_ctx)
+        == "g_demo_sales::bot_main"
+    )
+

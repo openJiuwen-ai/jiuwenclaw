@@ -72,7 +72,7 @@ def get_declared_deployment_mode() -> str:
 
 
 def get_effective_distributed_redis_active() -> bool:
-    """声明为 distributed 且 Redis 已连接、未因健康检查标记为 degraded。"""
+    """声明为 active-standby 且 Redis 已连接、未因健康检查标记为 degraded。"""
     return _effective_distributed_redis and not _redis_degraded and _redis_client is not None
 
 
@@ -143,17 +143,17 @@ async def init_gateway_redis_from_config(full_cfg: dict[str, Any] | None) -> Non
     gw = cfg_in.get("gateway")
     gw = gw if isinstance(gw, dict) else {}
     declared = str(gw.get("deployment_mode") or "standalone").strip().lower()
-    _declared_deployment_mode = declared if declared in ("standalone", "distributed") else "standalone"
+    _declared_deployment_mode = declared if declared in ("standalone", "active-standby") else "standalone"
 
     iid = str(gw.get("instance_id") or "").strip()
-    if _declared_deployment_mode == "distributed":
+    if _declared_deployment_mode == "active-standby":
         _gateway_instance_id = iid or uuid.uuid4().hex
         if not iid:
             logger.info("[GatewayRedis] gateway.instance_id unset; generated %s", _gateway_instance_id)
     else:
         _gateway_instance_id = iid if iid else None
 
-    if _declared_deployment_mode != "distributed":
+    if _declared_deployment_mode != "active-standby":
         logger.debug("[GatewayRedis] deployment_mode=standalone; skip Redis init (§3.3.4)")
         return
 

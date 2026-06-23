@@ -22,6 +22,8 @@ import {
   ToolResult,
  	ToolCall,
   UsageSummary,
+  FileDownloadItem,
+  ChatSendFile,
 } from '../types';
 import {
   useChatStore,
@@ -68,7 +70,7 @@ interface UseWebSocketReturn {
     params?: Record<string, unknown>,
     options?: WebRequestOptions
   ) => Promise<T>;
-  sendMessage: (content: string, sessionId: string) => Promise<void>;
+  sendMessage: (content: string, sessionId: string, files?: ChatSendFile[]) => Promise<void>;
   interrupt: (
     sessionId: string,
     intent: InterruptIntent,
@@ -164,6 +166,9 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
     clearMessages,
     setPendingQuestion,
     removeFromTaskQueue,
+    addFileItems,
+    addPendingFiles,
+    consumePendingFiles,
   } = useChatStore();
   const { setTodos, clearTodos } = useTodoStore();
   const {
@@ -264,18 +269,39 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
 
   // 发送聊天消息
   const sendMessage = useCallback(
-    async (content: string, sessionId: string) => {
-      if (!content.trim()) return;
+    async (content: string, sessionId: string, files?: ChatSendFile[]) => {
+      const trimmed = content.trim();
+      const hasFiles = Boolean(files && files.length > 0);
+      if (!trimmed && !hasFiles) return;
 
       userInputVersionRef.current += 1;
       stopAllTts();
+
+      const displayContent =
+        trimmed ||
+        (hasFiles
+          ? i18n.t('chat.fileUpload.messageFallback', {
+              count: files?.length ?? 0,
+            })
+          : '');
 
       // 添加用户消息
       addMessage({
         id: `user-${Date.now()}`,
         role: 'user',
-        content,
+        content: displayContent,
         timestamp: new Date().toISOString(),
+        ...(hasFiles
+          ? {
+              fileItems: files!.map((file) => ({
+                name: file.name,
+                size: file.size ?? 0,
+                mime_type: '',
+                download_url: file.url,
+                download_token: '',
+              })),
+            }
+          : {}),
       });
 
       // 不再预先创建助手消息，而是在收到第一个 content_chunk 时创建
@@ -291,10 +317,20 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
         const ext = useExtSettingsStore.getState();
         await request('chat.send', {
           session_id: sessionId,
-          content,
-          query: content,
+          content: trimmed,
+          query: trimmed || displayContent,
           mode: currentMode,
           ...(selectedModel ? { model_name: selectedModel } : {}),
+          ...(hasFiles
+            ? {
+                files: files?.map((file) => ({
+                  url: file.url,
+                  name: file.name,
+                  filename: file.name,
+                  size: file.size,
+                })),
+              }
+            : {}),
           ...extSettingsToRoutingParams(ext),
         });
       } catch (error) {
@@ -555,23 +591,40 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
           return;
         }
         
-        const { currentStreamId } = useChatStore.getState();
+        const { currentStreamId, messages } = useChatStore.getState();
         setThinking(false);
         if (!currentStreamId && content) {
-          const assistantMsgId = `assistant-${Date.now()}`;
-          addMessage({
-            id: assistantMsgId,
-            role: 'assistant',
-            content: '',
-            timestamp: new Date().toISOString(),
-            isStreaming: true,
-          });
+          // 若本轮已有一条"仅文件"的 assistant 消息（chat.file 早于 chat.delta 到达），复用它，使文件与文字合并到同一条
+          const lastMsg = messages[messages.length - 1];
+          const reuseId =
+            lastMsg &&
+            lastMsg.role === 'assistant' &&
+            !lastMsg.content &&
+            (lastMsg.fileItems?.length ?? 0) > 0
+              ? lastMsg.id
+              : null;
+          const assistantMsgId = reuseId ?? `assistant-${Date.now()}`;
+          if (!reuseId) {
+            addMessage({
+              id: assistantMsgId,
+              role: 'assistant',
+              content: '',
+              timestamp: new Date().toISOString(),
+              isStreaming: true,
+            });
+          }
           startStreaming(assistantMsgId);
         }
         appendStreamContent(content);
       }),
       webClient.on('chat.final', ({ payload }) => {
         if (!shouldHandleSessionEvent(payload)) return;
+        
+        // 兜底：若缓存的文件未被 chat.tool_result 消费（如工具名不匹配或 tool_result 未到达），在此挂载
+        const pendingFiles = consumePendingFiles();
+        if (pendingFiles.length) {
+          addFileItems(pendingFiles);
+        }
         
         const currentMode = useSessionStore.getState().mode;
         const content = normalizeFinalContent(payload);
@@ -670,6 +723,18 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
           if (last?.role === 'assistant' && last.content === content) {
             return;
           }
+          // 若上一条是本轮"仅文件"的 assistant 消息（chat.file 早于 chat.final 到达，且无 chat.delta），复用它，使文件与文字合并到同一条
+          if (
+            last?.role === 'assistant' &&
+            !last.content &&
+            (last.fileItems?.length ?? 0) > 0
+          ) {
+            updateMessage(last.id, { content, isStreaming: false });
+            if (!content.includes('MEDIA:')) {
+              handleTtsPlayback(last.id, content);
+            }
+            return;
+          }
           addMessage({
             id: messageId,
             role: 'assistant',
@@ -707,6 +772,14 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
         if (mediaPayload.content) {
           handleTtsPlayback(targetId, mediaPayload.content);
         }
+      }),
+      webClient.on('chat.file', ({ payload }) => {
+        if (!shouldHandleSessionEvent(payload)) return;
+        const files = (payload.files ?? []) as FileDownloadItem[];
+        if (!files.length) return;
+        console.log('[ws][chat.file] received files:', files.map(f => ({ name: f.name, size: f.size, mime_type: f.mime_type })));
+        // 先缓存，等 send_file_to_user 工具调用完成（chat.tool_result）后再挂载，使下载按钮出现在工具调用之后
+        addPendingFiles(files);
       }),
       webClient.on('chat.tool_call', ({ payload }) => {
         if (!shouldHandleSessionEvent(payload)) return;
@@ -747,7 +820,15 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
           }
           return;
         }
-        addToolResult(normalizeToolResultPayload(payload));
+        const normalizedResult = normalizeToolResultPayload(payload);
+        addToolResult(normalizedResult);
+        // send_file_to_user 工具调用完成：把缓存的文件挂载到 assistant 消息，使下载按钮出现在工具调用之后
+        if (normalizedResult.toolName === 'send_file_to_user') {
+          const pending = consumePendingFiles();
+          if (pending.length) {
+            addFileItems(pending);
+          }
+        }
       }),
       // Team 成员子 agent：后端以 team.member.tool_* 广播，与 leader 的 chat.tool_* 区分
       webClient.on('team.member.tool_call', ({ payload }) => {
@@ -768,7 +849,14 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
       webClient.on('team.member.tool_result', ({ payload }) => {
         if (!shouldHandleSessionEvent(payload)) return;
         if (shouldDropDuplicatedEvent('team.member.tool_result', payload)) return;
-        addToolResult(normalizeToolResultPayload(payload));
+        const normalizedResult = normalizeToolResultPayload(payload);
+        addToolResult(normalizedResult);
+        if (normalizedResult.toolName === 'send_file_to_user') {
+          const pending = consumePendingFiles();
+          if (pending.length) {
+            addFileItems(pending);
+          }
+        }
       }),
       webClient.on('todo.updated', ({ payload }) => {
         if (!shouldHandleSessionEvent(payload)) return;

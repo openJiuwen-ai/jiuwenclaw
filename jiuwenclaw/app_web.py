@@ -5,7 +5,9 @@
 from __future__ import annotations
 
 import argparse
+import cgi
 import http.client
+import io
 import json
 import logging
 import mimetypes
@@ -13,6 +15,7 @@ import os
 import select
 import socket
 import ssl
+import time
 from functools import partial
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -673,6 +676,10 @@ class _SpaStaticHandler(SimpleHTTPRequestHandler):
                 self.wfile.write(body)
             return
 
+        if path == "/file-api/download":
+            self._handle_file_download(query)
+            return
+
         if path == "/file-api/ws-debug-config":
             self._write_json(
                 200,
@@ -684,7 +691,168 @@ class _SpaStaticHandler(SimpleHTTPRequestHandler):
 
         self._write_json(404, {"error": "not_found"})
 
+    def _handle_file_download(self, query: dict[str, str]) -> None:
+        token = query.get("token", "")
+        if not token:
+            self._write_json(400, {"error": "missing_token"})
+            return
+
+        try:
+            from jiuwenclaw.agentserver.tools.web_file_download import (
+                validate_file_download_token,
+            )
+        except ImportError:
+            self._write_json(500, {"error": "download_module_unavailable"})
+            return
+
+        payload = validate_file_download_token(token)
+        if payload is None:
+            self._write_json(403, {"error": "invalid_or_expired_token"})
+            return
+
+        file_path = payload.get("path", "")
+        if not file_path or not os.path.isfile(file_path):
+            self._write_json(404, {"error": "file_not_found"})
+            return
+
+        try:
+            file_size = os.path.getsize(file_path)
+            file_name = os.path.basename(file_path)
+
+            mime_type, _ = mimetypes.guess_type(file_name)
+            if not mime_type:
+                mime_type = "application/octet-stream"
+
+            self.send_response(200)
+            self.send_header("Content-Type", mime_type)
+            self.send_header("Content-Length", str(file_size))
+            self.send_header(
+                "Content-Disposition",
+                f'attachment; filename="{file_name}"',
+            )
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+
+            if self.command != "HEAD":
+                with open(file_path, "rb") as f:
+                    while True:
+                        chunk = f.read(65536)
+                        if not chunk:
+                            break
+                        self.wfile.write(chunk)
+        except Exception as exc:
+            self.log_error("file download error: %s", exc)
+            try:
+                self._write_json(500, {"error": "download_failed", "detail": str(exc)})
+            except Exception:
+                # Connection may already be closed or broken; nothing more we can do.
+                self.log_error("failed to send download error response")
+
+    def _handle_file_push(self) -> None:
+        """接收来自 Gateway 的文件推送（反向推送方案）.
+
+        期望 multipart/form-data 格式：
+        - file: 文件内容
+        - session_id: 会话ID
+        - filename: 文件名
+        - file_size: 文件大小
+        """
+        from jiuwenclaw.agentserver.tools.web_file_download import build_file_download_info
+
+        content_type = self.headers.get("Content-Type", "")
+        if "multipart/form-data" not in content_type:
+            self._write_json(400, {"error": "expected_multipart_form_data"})
+            return
+
+        # 解析 multipart 数据
+        try:
+            # 读取整个请求体
+            content_length = int(self.headers.get("Content-Length", 0))
+            body = self.rfile.read(content_length)
+
+            # 使用 cgi.FieldStorage 解析
+            environ = {
+                "REQUEST_METHOD": "POST",
+                "CONTENT_TYPE": content_type,
+                "CONTENT_LENGTH": str(content_length),
+            }
+            fs = cgi.FieldStorage(
+                fp=io.BytesIO(body),
+                headers=self.headers,
+                environ=environ,
+            )
+
+            # 提取字段
+            file_item = fs["file"]
+            session_id = fs.getvalue("session_id", "default")
+            filename = fs.getvalue("filename", file_item.filename or "unnamed")
+            file_size = int(fs.getvalue("file_size", 0))
+
+            if not file_item.file:
+                self._write_json(400, {"error": "missing_file_field"})
+                return
+
+            # 保存文件到 Web Server 本地目录
+            received_dir = Path("./web_received_files")
+            received_dir.mkdir(parents=True, exist_ok=True)
+
+            # 使用时间戳命名的子文件夹避免冲突，保持原始文件名不变
+            timestamp_folder = str(int(time.time()))
+            session_dir = received_dir / timestamp_folder
+            session_dir.mkdir(parents=True, exist_ok=True)
+
+            # 使用原始文件名
+            safe_name = filename
+            local_path = session_dir / safe_name
+
+            # 写入文件
+            with open(local_path, "wb") as f:
+                while True:
+                    chunk = file_item.file.read(65536)
+                    if not chunk:
+                        break
+                    f.write(chunk)
+
+            self.logger.info("[WebServer] 接收文件推送: %s -> %s", filename, local_path)
+
+            # 生成 Web 本地的下载 Token（3个月有效期）
+            download_info = build_file_download_info(
+                file_path=str(local_path),
+                file_name=filename,
+                session_id=session_id,
+                expires_in=90 * 24 * 3600,  # 90天 = 7776000秒
+            )
+
+            # 返回成功响应，包含下载信息
+            self._write_json(200, {
+                "success": True,
+                "file_path": str(local_path),
+                "download_url": download_info["download_url"],
+                "download_token": download_info["download_token"],
+                "expires_at": download_info.get("expires_at"),
+            })
+
+        except Exception as exc:
+            self.logger.error("[WebServer] 处理文件推送失败: %s", exc, exc_info=True)
+            self._write_json(500, {"error": "push_failed", "detail": str(exc)})
+
+    def _handle_obs_upload(self) -> None:
+        """Upload browser file payload to self-hosted MinIO."""
+        length = int(self.headers.get("Content-Length", "0") or "0")
+        raw = self.rfile.read(length) if length > 0 else b""
+        status, payload = _process_obs_upload_body(raw, logger=self.logger)
+        self._write_json(status, payload)
+
     def _handle_file_api_post(self, parsed) -> None:
+        if parsed.path == "/file-api/push":
+            # 【新增】接收来自 Gateway 的文件推送（反向推送方案）
+            self._handle_file_push()
+            return
+
+        if parsed.path == "/file-api/upload-obs":
+            self._handle_obs_upload()
+            return
+
         if parsed.path == "/file-api/rebuild-agent-data":
             try:
                 base_dir = get_multi_tenant_user_workspace_dir("default", "default")
@@ -867,6 +1035,56 @@ def _setup_logger(logs_root: Path, log_level: str) -> logging.Logger:
     return lg
 
 
+def _process_obs_upload_body(raw: bytes, *, logger: logging.Logger | None = None) -> tuple[int, dict[str, Any]]:
+    try:
+        payload = json.loads(raw.decode("utf-8") if raw else "{}")
+    except json.JSONDecodeError:
+        return 400, {"ok": False, "error": "invalid_json"}
+    if not isinstance(payload, dict):
+        return 400, {"ok": False, "error": "invalid_payload"}
+    try:
+        from jiuwenclaw.minio_upload import upload_base64_payload
+
+        return 200, upload_base64_payload(payload)
+    except Exception as exc:
+        if logger is not None:
+            logger.error("[WebServer] MinIO upload failed: %s", exc, exc_info=True)
+        return 500, {"ok": False, "error": str(exc)}
+
+
+def _run_upload_api_server(*, host: str, port: int, log_level: str) -> None:
+    logs_root = get_logs_dir().resolve()
+    logger = _setup_logger(logs_root, log_level)
+
+    class _UploadApiHandler(SimpleHTTPRequestHandler):
+        def log_message(self, fmt: str, *args: Any) -> None:
+            logger.debug(fmt, *args)
+
+        def do_POST(self) -> None:  # noqa: N802
+            if urlparse(self.path).path != "/file-api/upload-obs":
+                self.send_error(404)
+                return
+            length = int(self.headers.get("Content-Length", "0") or "0")
+            raw = self.rfile.read(length) if length > 0 else b""
+            status, payload = _process_obs_upload_body(raw, logger=logger)
+            data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+            self.send_response(status)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+
+    server = ThreadingHTTPServer((host, port), _UploadApiHandler)
+    logger.info("[jiuwenclaw-upload-api] POST http://%s:%s/file-api/upload-obs", host, port)
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        server.server_close()
+        logger.info("[jiuwenclaw-upload-api] server closed")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Serve JiuwenClaw frontend static files.")
     parser.add_argument("--host", default=os.getenv("JIUWENCLAW_WEB_HOST", "localhost"), help="Host to bind.")
@@ -901,7 +1119,16 @@ def main() -> None:
         action="store_true",
         help="Disable websocket compression for easier ws req/res/event debug logging.",
     )
+    parser.add_argument(
+        "--upload-api-only",
+        action="store_true",
+        help="Run a minimal HTTP server that only serves POST /file-api/upload-obs (for Vite dev).",
+    )
     args = parser.parse_args()
+
+    if args.upload_api_only:
+        _run_upload_api_server(host=args.host, port=args.port, log_level=args.log_level)
+        return
 
     dist_dir = Path(args.dist).expanduser().resolve()
     if not dist_dir.exists():

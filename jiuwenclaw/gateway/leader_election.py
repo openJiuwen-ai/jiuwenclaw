@@ -25,10 +25,10 @@ class LeaderElection:
     """Distributed leader election using Redis SETNX + TTL.
 
     Redis lock algorithm:
-    - Lock acquisition: SET gateway:leader <uuid> NX EX 30
-    - Lock renewal: EXPIRE gateway:leader 30 (PRIMARY runs every 10s)
-    - Lock release: DEL gateway:leader (only if value matches)
-    - Lock competition: STANDBY tries SET gateway:leader <uuid> NX EX 30 every 5s
+    - Lock acquisition: SET {instance_id}:gateway:leader <instance_id:uuid> NX EX 30
+    - Lock renewal: EXPIRE {instance_id}:gateway:leader 30 (PRIMARY runs every 10s)
+    - Lock release: DEL {instance_id}:gateway:leader (only if value matches)
+    - Lock competition: STANDBY tries SET {instance_id}:gateway:leader <instance_id:uuid> NX EX 30 every 5s
 
     A single leader loop task handles both PRIMARY renewal and STANDBY competition,
     promoting/demoting as needed without creating new tasks.
@@ -41,16 +41,26 @@ class LeaderElection:
 
     _instance: "LeaderElection | None" = None
 
+    @staticmethod
+    def _with_instance_prefix(instance_id: str, lock_key: str) -> str:
+        iid = str(instance_id or "").strip()
+        if not iid:
+            return str(lock_key or "").strip()
+        key = str(lock_key or "").strip()
+        if key.startswith(f"{iid}:"):
+            return key
+        return f"{iid}:{key}"
+
     def __init__(self) -> None:
         """Initialize LeaderElection."""
-        self._claw_id = self._get_default_claw_id()
-        self._lock_key = self.DEFAULT_LOCK_KEY
+        self._instance_id = self._get_default_instance_id()
+        self._lock_key = self._with_instance_prefix(self._instance_id, self.DEFAULT_LOCK_KEY)
         self._lock_ttl = self.DEFAULT_LOCK_TTL_SECONDS
         self._renewal_interval = self.DEFAULT_RENEWAL_INTERVAL_SECONDS
         self._competition_interval = self.DEFAULT_COMPETITION_INTERVAL_SECONDS
 
         self._role: Role = Role.STANDBY
-        self._lock_value: str = f"{self._claw_id}:{uuid.uuid4()}"
+        self._lock_value: str = f"{self._instance_id}:{uuid.uuid4()}"
         self._callbacks: list[Callable[[Role], Awaitable[None]]] = []
 
         self._redis_store = None
@@ -60,8 +70,8 @@ class LeaderElection:
         self._load_config()
 
     @staticmethod
-    def _get_default_claw_id() -> str:
-        """Get default claw_id from config.yaml gateway.instance_id, fallback to hostname."""
+    def _get_default_instance_id() -> str:
+        """Get default instance_id from config.yaml gateway.instance_id, fallback to hostname."""
         config = get_config()
         gateway_config = config.get("gateway", {}) if isinstance(config, dict) else {}
         instance_id = gateway_config.get("instance_id", "")
@@ -85,7 +95,8 @@ class LeaderElection:
         config = get_config()
         le_config = config.get("leader_election", {}) if isinstance(config, dict) else {}
 
-        self._lock_key = le_config.get("lock_key", self.DEFAULT_LOCK_KEY)
+        configured_lock_key = le_config.get("lock_key", self.DEFAULT_LOCK_KEY)
+        self._lock_key = self._with_instance_prefix(self._instance_id, configured_lock_key)
         self._lock_ttl = le_config.get("lock_ttl_seconds", self.DEFAULT_LOCK_TTL_SECONDS)
         renew_key = "renewal_interval_seconds"
         self._renewal_interval = le_config.get(renew_key, self.DEFAULT_RENEWAL_INTERVAL_SECONDS)
@@ -108,9 +119,9 @@ class LeaderElection:
         return self._role == Role.PRIMARY
 
     @property
-    def claw_id(self) -> str:
+    def instance_id(self) -> str:
         """This Gateway instance's unique identifier."""
-        return self._claw_id
+        return self._instance_id
 
     async def _get_redis_store(self):
         """Lazily initialize RedisStore from config.yaml redis section."""
@@ -262,8 +273,8 @@ class LeaderElection:
 
         self._running = True
         logger.info(
-            "[LeaderElection] Starting: claw_id=%s, lock_key=%s, ttl=%ds, renewal=%ds, competition=%ds",
-            self._claw_id, self._lock_key, self._lock_ttl, self._renewal_interval, self._competition_interval,
+            "[LeaderElection] Starting: instance_id=%s, lock_key=%s, ttl=%ds, renewal=%ds, competition=%ds",
+            self._instance_id, self._lock_key, self._lock_ttl, self._renewal_interval, self._competition_interval,
         )
 
         try:

@@ -3,12 +3,14 @@ import { useTranslation } from 'react-i18next';
 import { useSpeechRecognition } from '../../hooks';
 import { stopAllTts } from '../../utils';
 import { useChatStore, useSessionStore } from '../../stores';
-import { AgentMode } from '../../types';
+import { AgentMode, ChatSendFile } from '../../types';
+import { FEATURE_AGENT_FAST_MODE, FEATURE_TEAM_MODE } from '../../featureFlags';
 import { ExtSettingsControl } from '../ExtSettingsModal';
+import { FileUploadButton } from './FileUploadButton';
 import clsx from 'clsx';
 
 interface InputAreaProps {
-  onSubmit: (content: string) => void;
+  onSubmit: (content: string, files?: ChatSendFile[]) => void;
   onInterrupt: (newInput?: string) => void;
   onSwitchMode: (mode: AgentMode) => void;
   isProcessing: boolean;
@@ -25,6 +27,8 @@ export function InputArea({
   const [pendingVoiceText, setPendingVoiceText] = useState('');
   const [showModeSwitchModal, setShowModeSwitchModal] = useState(false);
   const [pendingMode, setPendingMode] = useState<AgentMode | null>(null);
+  const [pendingAttachments, setPendingAttachments] = useState<ChatSendFile[]>([]);
+  const [uploadError, setUploadError] = useState<string | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const autoSendTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const isComposingRef = useRef(false);
@@ -37,6 +41,12 @@ export function InputArea({
   const isAgentMode = mode === 'agent.fast';
   const isTeamMode = mode === 'team';
   const hasHistoryMessages = messages.length > 0;
+  const isModeDisabled = useCallback((targetMode: AgentMode) => {
+    if (targetMode === 'agent.fast') return !FEATURE_AGENT_FAST_MODE;
+    if (targetMode === 'team') return !FEATURE_TEAM_MODE;
+    return false;
+  }, []);
+
   const modes: Array<{ value: AgentMode; label: string; icon: JSX.Element }> = [
     { value: 'agent.plan', label: t('chat.modePlan'), icon: (
       <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2}>
@@ -114,14 +124,15 @@ export function InputArea({
 
   const handleSubmit = useCallback(() => {
     const trimmed = (inputValue + pendingVoiceText).trim();
-    if (!trimmed) return;
+    const attachments = pendingAttachments;
+    if (!trimmed && attachments.length === 0) return;
 
     if (isListening) {
       stopListening();
     }
 
     if (isTeamMode) {
-      onSubmit(trimmed);
+      onSubmit(trimmed, attachments.length > 0 ? attachments : undefined);
     } else if (isInterruptible) {
       if (isAgentMode) {
         addToTaskQueue(trimmed);
@@ -129,15 +140,17 @@ export function InputArea({
         onInterrupt(trimmed);
       }
     } else {
-      onSubmit(trimmed);
+      onSubmit(trimmed, attachments.length > 0 ? attachments : undefined);
     }
     setInputValue('');
     setPendingVoiceText('');
+    setPendingAttachments([]);
+    setUploadError(null);
 
     if (textareaRef.current) {
       textareaRef.current.style.height = 'auto';
     }
-  }, [inputValue, pendingVoiceText, isInterruptible, isListening, onSubmit, onInterrupt, stopListening, isAgentMode, isTeamMode, addToTaskQueue, setInputValue]);
+  }, [inputValue, pendingVoiceText, pendingAttachments, isInterruptible, isListening, onSubmit, onInterrupt, stopListening, isAgentMode, isTeamMode, addToTaskQueue, setInputValue]);
 
   const handleKeyDown = useCallback(
     (e: KeyboardEvent<HTMLTextAreaElement>) => {
@@ -212,6 +225,8 @@ export function InputArea({
     if (isListening || (isInterruptible && !isTeamMode)) return;
     setInputValue('');
     setPendingVoiceText('');
+    setPendingAttachments([]);
+    setUploadError(null);
     if (textareaRef.current) {
       textareaRef.current.style.height = 'auto';
     }
@@ -249,7 +264,8 @@ export function InputArea({
     ? inputValue + pendingVoiceText + interimTranscript
     : inputValue + pendingVoiceText;
 
-  const canSend = inputValue.trim().length > 0 || isListening;
+  const canSend =
+    inputValue.trim().length > 0 || pendingAttachments.length > 0 || isListening;
   const modeIndex = Math.max(0, modes.findIndex((m) => m.value === mode));
 
   return (
@@ -295,6 +311,47 @@ export function InputArea({
         </div>
       )}
 
+      {pendingAttachments.length > 0 && (
+        <div className="chat-input-attachments">
+          {pendingAttachments.map((file, index) => (
+            <div key={`${file.url}-${index}`} className="chat-input-attachment-chip">
+              <svg
+                className="w-3.5 h-3.5 flex-shrink-0 text-text-muted"
+                fill="none"
+                stroke="currentColor"
+                viewBox="0 0 24 24"
+                strokeWidth={1.5}
+              >
+                <path
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  d="M18.375 12.739l-7.693 7.693a4.5 4.5 0 01-6.364-6.364l10.94-10.94A3 3 0 1119.5 7.372L8.552 18.32m.009-.01l-.01.01"
+                />
+              </svg>
+              <span className="truncate" title={file.name}>
+                {file.name}
+              </span>
+              <button
+                type="button"
+                className="chat-input-attachment-remove"
+                onClick={() =>
+                  setPendingAttachments((prev) => prev.filter((_, i) => i !== index))
+                }
+                title={t('chat.fileUpload.remove')}
+              >
+                <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2}>
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
+                </svg>
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {uploadError && (
+        <div className="chat-input-upload-error">{uploadError}</div>
+      )}
+
       <textarea
         ref={textareaRef}
         value={displayValue}
@@ -324,27 +381,41 @@ export function InputArea({
             style={{ '--chat-mode-index': modeIndex } as CSSProperties}
           >
             <div className="chat-mode-switch__indicator" />
-            {modes.map((m) => (
+            {modes.map((m) => {
+              const modeDisabled = isModeDisabled(m.value);
+              return (
               <button
                 type="button"
                 key={m.value}
+                disabled={modeDisabled}
                 onClick={() => handleModeSwitch(m.value)}
                 className={clsx(
                   'chat-mode-btn',
-                  mode === m.value ? 'chat-mode-btn--active' : 'chat-mode-btn--inactive'
+                  mode === m.value ? 'chat-mode-btn--active' : 'chat-mode-btn--inactive',
+                  modeDisabled && 'chat-mode-btn--disabled',
                 )}
                 data-testid={`chat-mode-${m.value}`}
               >
                 {m.icon}
                 {m.label}
               </button>
-            ))}
+            );
+            })}
           </div>
 
         </div>
 
         <div className="chat-input-actions">
           <ExtSettingsControl />
+
+          <FileUploadButton
+            disabled={isListening}
+            onUploaded={(file) => {
+              setUploadError(null);
+              setPendingAttachments((prev) => [...prev, file]);
+            }}
+            onError={setUploadError}
+          />
 
           <button
             type="button"

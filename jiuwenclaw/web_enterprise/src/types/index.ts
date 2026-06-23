@@ -6,6 +6,9 @@ export * from './message';
 export * from './todo';
 export * from './websocket';
 
+// 从 message 模块重新导出常用类型（便于直接导入）
+export type { FileDownloadItem, ChatSendFile } from './message';
+
 // 会话类型
 export interface Session {
   session_id: string;

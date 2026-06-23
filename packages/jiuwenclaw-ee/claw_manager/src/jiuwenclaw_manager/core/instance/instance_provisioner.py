@@ -100,7 +100,7 @@ def _materialize_instance_config(
             "port": int(os.getenv("DB_PORT", os.getenv("JIUWENCLAW_GATEWAY_DB_PORT", "3306"))),
             "user": os.getenv("DB_USER", os.getenv("JIUWENCLAW_GATEWAY_DB_USER", "root")),
             "password": os.getenv("DB_PASSWORD", os.getenv("JIUWENCLAW_GATEWAY_DB_PASSWORD", "123456")),
-            "db_name": os.getenv("DB_NAME", os.getenv("JIUWENCLAW_GATEWAY_DB_NAME", "openjiuwen_gateway")),
+            "db_name": os.getenv("DB_NAME", os.getenv("JIUWENCLAW_GATEWAY_DB_NAME", "gateway")),
         }
     else:
         # 默认使用 SQLite
@@ -140,7 +140,7 @@ def _child_env_common(
         port = os.getenv("DB_PORT", os.getenv("JIUWENCLAW_GATEWAY_DB_PORT", "3306"))
         user = os.getenv("DB_USER", os.getenv("JIUWENCLAW_GATEWAY_DB_USER", "root"))
         password = os.getenv("DB_PASSWORD", os.getenv("JIUWENCLAW_GATEWAY_DB_PASSWORD", "123456"))
-        db_name = os.getenv("DB_NAME", os.getenv("JIUWENCLAW_GATEWAY_DB_NAME", "openjiuwen_gateway"))
+        db_name = os.getenv("DB_NAME", os.getenv("JIUWENCLAW_GATEWAY_DB_NAME", "gateway"))
         out["DB_HOST"] = host
         out["DB_PORT"] = str(port)
         out["DB_USER"] = user

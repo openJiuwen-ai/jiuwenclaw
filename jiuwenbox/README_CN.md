@@ -12,7 +12,7 @@ agent 工具和代码片段。
 
 - 基于 `bubblewrap` 的进程隔离
 - 基于静态 policy 的文件系统访问控制
-- 通过 `sandbox_workspace` 配置沙箱后端工作目录
+- 服务端管理的沙箱后端存储（`~/.jiuwenbox/workspace`）
 - 可选的 Linux 网络命名空间和防火墙网络隔离
 - 命名空间和 Linux capability 控制
 - 在内核支持时启用 Landlock 文件系统约束
@@ -47,6 +47,7 @@ agent 工具和代码片段。
 - Python 3.11+
 - `bubblewrap`
 - 使用 `network.mode: isolated` 时需要 `iproute2`、`iptables` 和 `nftables`
+- `isolated` 模式启用 uplink 出网时，宿主机需开启 IPv4 转发（`net.ipv4.ip_forward=1`），进程需具备 `NET_ADMIN` capability
 - 启用 Landlock 和 seccomp 时需要内核支持对应能力
 - 如果需要执行 JavaScript，则需要 `nodejs`
 
@@ -69,30 +70,27 @@ python3 -m build --wheel
 uv pip install ./dist/jiuwenbox*.whl
 ```
 
+构建出的 wheel 已包含 `jiuwenbox/configs/*.yaml`（源码位于 `src/jiuwenbox/configs/`）。
+安装后若不设置 `JIUWENBOX_POLICY_PATH`，服务自动使用包内自带的 `default-policy.yaml`。
+
 ## 启动服务
 
 ### 本地启动
 
-设置默认 policy 路径，并通过 venv 里的 python 启动已安装的服务：
+安装 wheel 后可直接启动（使用包内默认 policy）：
 
 ```bash
-sudo env \
-  JIUWENBOX_POLICY_PATH="$(pwd)/configs/default-policy.yaml" \
-  ./.venv/bin/python -m uvicorn jiuwenbox.server.app:app --host 0.0.0.0 --port 8321 --log-level debug
+sudo ./.venv/bin/jiuwenbox-server
+# 或
+sudo ./.venv/bin/python -m uvicorn jiuwenbox.server.app:app --host 0.0.0.0 --port 8321 --log-level debug
 ```
 
-如需使用其他 policy 或端口，可修改环境变量或 uvicorn 参数：
+如需指定其它 policy 或端口，设置 `JIUWENBOX_POLICY_PATH` 为**绝对路径**（也可在开发树里用 `src/jiuwenbox/configs/<name>.yaml`）：
 
 ```bash
 sudo env \
-  JIUWENBOX_POLICY_PATH="$(pwd)/configs/jiuwenswarm-policy.yaml" \
+  JIUWENBOX_POLICY_PATH="/absolute/path/to/policy.yaml" \
   ./.venv/bin/python -m uvicorn jiuwenbox.server.app:app --host 0.0.0.0 --port 9000 --log-level debug
-```
-
-服务会从以下环境变量读取默认 policy 路径：
-
-```bash
-JIUWENBOX_POLICY_PATH=/absolute/path/to/policy.yaml
 ```
 
 ### Docker 启动
@@ -129,7 +127,6 @@ JIUWENBOX_LISTEN=unix:///run/jiuwenbox/jiuwenbox.sock  # 切到 UDS, 路径必�
 
 ```bash
 sudo env \
-  JIUWENBOX_POLICY_PATH="$(pwd)/configs/default-policy.yaml" \
   JIUWENBOX_LISTEN=unix:///run/jiuwenbox/jiuwenbox.sock \
   ./.venv/bin/python -m jiuwenbox.server.launcher
 
@@ -146,7 +143,7 @@ mkdir -p /tmp/jiuwenbox-sock
 sudo env \
   JIUWENBOX_LISTEN=unix:///run/jiuwenbox/jiuwenbox.sock \
   JIUWENBOX_UDS_HOST_DIR=/tmp/jiuwenbox-sock \
-  ./run_docker.sh configs/default-policy.yaml
+  ./run_docker.sh src/jiuwenbox/configs/default-policy.yaml
 ```
 
 `run_docker.sh` 在 UDS 模式下会自动跳过管理 API 的 TCP 端口映射、把宿主
@@ -189,12 +186,6 @@ UDS 相关环境变量：
 开启**审计日志**的持久化。文件**销毁沙箱时不再删除**，便于事后离线
 分析、滚动归档、外挂到日志收集系统。
 
-> 注意：历史版本曾把沙箱 daemon / 后台 exec 的原始 stdout/stderr 写到
-> `runtime.log` / `runtime.bg-N.log` 这一组文件里，现在已经**完全移除**。
-> 审计日志里 `exec_command` 事件本身就携带了每条命令截断后的 stdout/stderr
-> （默认 4 KiB），日常排障已经够用；如果确实需要看原始字节流，请用
-> `docker run -it` 直接看 bwrap 的实时输出。
-
 审计 JSONL 里**每个操作只落一行**，在调用返回后写出，同时携带"做了什么"
 和"结果如何"。只看 JSONL 就能回答"这条指令到底成不成功"：
 
@@ -218,13 +209,10 @@ ISO 8601 基本格式 (`%Y%m%dT%H%M%S`) 是为了让 `ls` 自然按时间排序�
 本地启动：
 
 ```bash
-sudo env \
-  JIUWENBOX_POLICY_PATH="$(pwd)/configs/default-policy.yaml" \
-  ./.venv/bin/jiuwenbox-server --save-logs /var/log/jiuwenbox
+sudo ./.venv/bin/jiuwenbox-server --save-logs /var/log/jiuwenbox
 
 # 或走环境变量, 等价:
 sudo env \
-  JIUWENBOX_POLICY_PATH="$(pwd)/configs/default-policy.yaml" \
   JIUWENBOX_SAVE_LOGS_DIR=/var/log/jiuwenbox \
   ./.venv/bin/jiuwenbox-server
 ```
@@ -256,31 +244,142 @@ ls /tmp/jiuwenbox-logs
 
 服务启动时会加载一个静态默认 policy。当前不启用 policy 动态更新功能。
 
-重要字段：
+### 字段说明
 
-- `sandbox_workspace`
-  - 用于服务端管理沙箱后端存储的宿主机目录。
-  - 该值在展开 `~` 和环境变量之后必须是绝对路径。
-- `filesystem_policy.directories`
-  - 由服务端创建并在沙箱生命周期内绑定到沙箱中的目录。
-- `filesystem_policy.read_only`
-  - 沙箱内授予只读访问权限的路径；这些条目本身不会挂载 host 路径。
-- `filesystem_policy.read_write`
-  - 沙箱内授予读写访问权限的路径；需要通过 `directories` 或 `bind_mounts`
-    让这些路径实际存在于沙箱内。
-- `filesystem_policy.bind_mounts`
-  - 显式的宿主机到沙箱路径的 bind mount 配置。
-- `filesystem_policy.device`
-  - 使用 `bwrap --dev-bind` 暴露到沙箱内的显式设备节点。
+#### 顶层字段
 
-路径字段支持 shell 风格的展开，例如 `~` 和环境变量。
+| 字段 | 默认 | 说明 |
+| --- | --- | --- |
+| `version` | `1` | Policy schema 版本，当前仅支持 `1`。 |
+| `name` | `"default"` | 可读名称，供 policy API 展示。 |
+| `environment` | `{}` | 注入到沙箱内每个进程的环境变量键值对。 |
 
-最小示例：
+#### `filesystem_policy`
+
+| 字段 | 说明 |
+| --- | --- |
+| `directories` | 沙箱生命周期内由服务端创建并 bind 进沙箱的目录。条目可以是 `"/path"` 字符串，或 `{ path, permissions }` 对象（`permissions` 为八进制，如 `"0755"`）。 |
+| `files` | 沙箱生命周期内由服务端创建并 bind 进沙箱的空文件。格式与 `directories` 类似，支持可选 `permissions`。 |
+| `read_only` | 沙箱内可见路径的只读授权列表；本身不会挂载宿主机路径，需配合 `bind_mounts` / `directories` 让路径存在。 |
+| `read_write` | 沙箱内可见路径的读写授权列表；需通过 `directories` 或 `bind_mounts` 让路径实际存在。 |
+| `bind_mounts` | 显式宿主机到沙箱的 bind mount，每项包含 `host_path`、`sandbox_path`、`mode`（`ro` / `rw`）。`host_path` 不能为字面量 `"*"`。 |
+| `bind_root_entries` | 将 `host_root` 下**第一层**子项逐个 bind 到 `sandbox_path/{name}`。支持 `mode`、`include_hidden`（默认排除 `.` 开头项）、`exclude`（fnmatch glob）。适合批量挂载 `/usr` 等目录的直接子项。 |
+| `device` | 通过 `bwrap --dev-bind` 暴露到沙箱内的设备节点，每项包含 `host_path` 和 `sandbox_path`。 |
+
+#### `process`
+
+| 字段 | 默认 | 说明 |
+| --- | --- | --- |
+| `run_as_user` | `sandbox` | 沙箱内进程运行的用户名；无法解析时回退到 nobody 类 UID。 |
+| `run_as_group` | `sandbox` | 沙箱内进程运行的组名；无法解析时回退到 nobody 类 GID。 |
+
+#### `namespace`
+
+控制 `bubblewrap` 创建的 Linux 命名空间，每项为 `true`（新建）或 `false`（复用当前）：
+
+| 字段 | 默认 | 说明 |
+| --- | --- | --- |
+| `user` | `true` | 用户命名空间。 |
+| `pid` | `true` | PID 命名空间。 |
+| `ipc` | `true` | IPC 命名空间。 |
+| `cgroup` | `true` | cgroup 命名空间。 |
+| `uts` | `true` | UTS（主机名）命名空间。 |
+
+#### `capabilities`
+
+| 字段 | 默认 | 说明 |
+| --- | --- | --- |
+| `add` | `[]` | 额外授予的 capability，如 `["CAP_NET_RAW"]` 或 `["NET_RAW"]`。 |
+| `drop` | `[]` | 移除的 capability；`"ALL"` 表示在 bubblewrap 支持时丢弃全部 capability。 |
+
+#### `landlock`
+
+| 字段 | 默认 | 说明 |
+| --- | --- | --- |
+| `compatibility` | `best_effort` | `disabled`：不启用 Landlock；`best_effort`：支持则启用，否则继续；`hard_requirement`：不支持则沙箱启动失败。 |
+
+#### `syscall`
+
+按 CPU 架构配置 seccomp 拦截的系统调用名列表：
+
+| 字段 | 说明 |
+| --- | --- |
+| `x86_64.blocked` | x86_64 上拦截的 syscall 名，如 `ptrace`、`mount`、`bpf` 等。留空表示不额外拦截。 |
+| `arm64.blocked` | arm64/aarch64 上拦截的 syscall 名。 |
+
+#### `network`
+
+出站（`egress`）和入站（`ingress`）流量规则。**仅在 `mode: isolated` 时生效**；`host` 模式下这些规则不会安装到沙箱内。
+
+**`mode`**
+
+| 模式 | 行为 |
+| --- | --- |
+| `isolated`（默认） | 为每个沙箱创建独立网络命名空间（`jbx-{sandbox_id}`），通过 veth uplink 连接宿主机默认路由，并在沙箱 netns 内安装 `egress` / `ingress` iptables 规则。 |
+| `host` | 沙箱进程共享宿主机网络命名空间。**不会**在沙箱内安装 egress/ingress 防火墙规则，`blocked_ips`、`blocked_domains` 等字段不生效。host 模式仅通过 `uid-owner` iptables 保护 jiuwenbox 管理端口（默认 8321），防止沙箱进程访问管理 API。 |
+
+内网部署若需要 egress 封禁（例如 `blocked_ips` 封禁 RFC1918 地址），应使用 `isolated` 模式并配置 `uplink`，不要依赖 `host` 模式。
+
+**`uplink`**（仅 `isolated` 模式）
+
+每个沙箱创建一个 veth 对（`jwbH{hash}` / `jwbS{hash}`），配置地址与默认路由，并可选通过宿主机 NAT 出网。
+
+| 字段 | 默认 | 说明 |
+| --- | --- | --- |
+| `subnet` | `""`（自动选择） | uplink 使用的 IPv4 地址池。留空时 jiuwenbox 依次扫描私有网段（`100.64.0.0/10`、聚焦的 `10.200.x/16` 段、`172.30.0.0/16`、`172.31.0.0/16`、`192.168.240.0/20`，以及 `10.0.0.0/8`、`172.16.0.0/12`、`192.168.0.0/16`），在池内分配不与现有 IPv4 路由（`ip route show table all`）冲突的 `/30` 网段。显式配置时将该 CIDR 视为地址池，并在其中选取空闲 `/30`。 |
+| `nat` | `true` | 是否在宿主机侧对 uplink 流量做 MASQUERADE。内网部署通常需要开启，沙箱才能通过宿主机默认路由访问外网。 |
+| `interface` | `""`（自动探测） | 出网网卡名称。留空时自动探测宿主机默认路由对应的网卡。 |
+
+**`egress` / `ingress`**
+
+| 字段 | 说明 |
+| --- | --- |
+| `default` | `allow`：默认放行，仅 `blocked_*` 匹配项被拒绝；`deny`：默认拒绝，仅 `allowed_*` 匹配项被放行。 |
+| `blocked_ips` / `allowed_ips` | CIDR 格式 IP 规则，作用于沙箱 netns 的 OUTPUT / INPUT 链。`blocked_*` 优先于 `allowed_*`。 |
+| `blocked_domains` / `allowed_domains` | 域名规则，通过 DNS 解析后应用到解析出的 IP。 |
+| `blocked_ports` / `allowed_ports` | TCP 端口规则。 |
+
+iptables 规则写在沙箱 netns（`jbx-{sandbox_id}`）内，不在容器或宿主机的默认 netns。排查 egress 封禁时请进入对应 netns 查看：
+
+```bash
+ip netns list
+ip netns exec jbx-<sandbox_id> iptables -L OUTPUT -n
+```
+
+`isolated` + uplink 的 Docker 部署需要 `net.ipv4.ip_forward=1` 和 `NET_ADMIN`；`run_docker.sh` 已默认配置。自行 `docker run` 时需授予同等权限。
+
+#### `cgroup`
+
+可选的每沙箱 cgroup 资源限制。三个字段默认均为 `null`（不限）；全部为空或省略 `cgroup` 块时，jiuwenbox 跳过 cgroup 设置，便于在无可用 cgroup 树的宿主机上运行。
+
+| 字段 | 格式 | 说明 |
+| --- | --- | --- |
+| `memory_max` | 字节整数或带单位字符串（如 `"256M"`、`"1G"`） | 内存上限。 |
+| `cpu_max` | 小数核数（如 `0.5`）或 `"quota_us period_us"` 对（如 `"50000 100000"`） | CPU 配额。 |
+| `pids_max` | 正整数 | 进程/线程数上限。 |
+
+优先使用 cgroup v2；v2 不可写时回退 v1。至少一个字段非空且两种后端均不可写时，沙箱创建失败。
+
+#### `timeout`
+
+jiuwenbox **服务端**的空闲沙箱淘汰配置，**仅在 server 启动时加载的根 policy 上生效**；per-sandbox policy 上的同名字段不影响沙箱隔离，仅用于配置回显。
+
+| 字段 | 默认 | 说明 |
+| --- | --- | --- |
+| `idle_timeout` | `null`（禁用） | 沙箱最大空闲时长（秒）。`null` / `0` / 负值表示禁用。空闲 = 自最后一次 exec / 文件 IO / 列目录等 API 调用以来的时长；`get_sandbox` / `list_sandboxes` / `get_logs` 不会刷新计时器。 |
+| `idle_check_interval` | `60` | reaper 轮询间隔（秒），必须 `> 0`。 |
+
+#### `inference_privacy_proxies`
+
+推理隐私代理配置。`listen_port: 0`（默认）表示禁用；启用时需同时设置 `listen_host`（IP 地址）和 `listen_port > 0`。`routes` 定义按 `path_prefix` 转发的目标端点和 API 密钥注入规则。详见下文 [推理隐私代理](#推理隐私代理) 章节。
+
+若 policy 仅包含 `version` / `name` / `inference_privacy_proxies` 且 `listen_port > 0`，jiuwenbox 会进入仅代理模式（跳过沙箱子系统）。参考 [`src/jiuwenbox/configs/inference-policy.yaml`](src/jiuwenbox/configs/inference-policy.yaml)。
+
+### 最小示例
 
 ```yaml
 version: 1
 name: "example"
-sandbox_workspace: "/sandbox"
 
 filesystem_policy:
   directories:
@@ -369,6 +468,9 @@ syscall:
 
 network:
   mode: isolated
+  uplink:
+    nat: true
+    interface: ""
   egress:
     default: allow
     allowed_domains: []
@@ -416,6 +518,7 @@ sandbox:
   enabled: true                     # 是否处于沙箱模式
   excluded_commands:                # shell glob，命中后绕过沙箱在本地执行
     - "git *"
+  fallback_on_failure: false        # jiuwenbox exec 异常时回退本地（非零 exit 不回退）
   files:                            # 用户配置的写入策略（auto-managed 路径不需要写在这里，服务端会自动注入）
     allow: []
     deny: []
@@ -432,6 +535,7 @@ sandbox:
 | `sandbox.preserve_file_sharing_mode` | `mount` | `mount` | intrinsic 文件（`AGENT.md` 等）与 `project_dir` 通过 bind mount 注入沙箱，`project_dir/config/config.yaml` 自动加进 `deny_write`。 写入其它值会被服务端拒绝 |
 | `sandbox.enabled` | bool | `false` | 启用后 agent 在重建时会切到 sandbox provider；可用 `/sandbox enable` 触发 |
 | `sandbox.excluded_commands` | list[str] | `[]` | shell glob 列表；按**整条命令字符串**匹配，命中后该次调用穿透到本地 |
+| `sandbox.fallback_on_failure` | bool | `false` | jiuwenbox exec 异常（连接失败、daemon 不可用等）时回退宿主机本地执行；沙箱内命令非零 exit 不回退 |
 | `sandbox.files.allow` / `sandbox.files.deny` | list | `[]` | 用户额外配置的写入策略；最终生效集合是 `auto_managed ∪ user_configured`，详见 [`/sandbox` 命令设计文档](../../agent-core/docs/zh/2.开发指南/沙箱与%20sandbox%20命令.md) |
 
 ### 两种典型部署方式
@@ -501,7 +605,7 @@ sandbox:
 
 启动日志会打印 `Proxy-only policy detected (no sandbox config); skipping sandbox subsystem startup`，随后再输出 `Inference privacy proxy listening on http://<host>:<port>`，便于运维快速确认监听地址。
 
-参考配置：[`configs/inference-policy.yaml`](configs/inference-policy.yaml)。
+参考配置：[`src/jiuwenbox/configs/inference-policy.yaml`](src/jiuwenbox/configs/inference-policy.yaml)（安装后位于包内 `jiuwenbox/configs/`）。
 
 ### 代理配置
 
@@ -580,7 +684,8 @@ inference_privacy_proxies:
 `--server-endpoint=URI` 切换连接方式，**传输协议自动从 URI 形式推断**：
 
 ```bash
-# TCP (默认通路，等价于 --server-endpoint=http://127.0.0.1:8321)
+# TCP（默认通路，等价于 --server-endpoint=http://127.0.0.1:8321；
+# server 应以 default-policy.yaml 作为安全策略启动）
 ./tests/test.sh default
 
 # 自定义 TCP 监听 (host:port 会自动补 http:// 前缀)
@@ -599,7 +704,8 @@ inference_privacy_proxies:
 运行指定测试用例：
 
 ```bash
-python3 -m pytest tests/integration/test_server_api_default.py::TestPolicyEnforcement::test_network_mode_isolated_blocks_http_requests -s --server-endpoint 127.0.0.1:8321
+python3 -m pytest tests/integration/test_server_api_default.py::TestPolicyEnforcement::test_network_mode_isolated_allows_external_http_requests -s --server-endpoint 127.0.0.1:8321
+python3 -m pytest tests/integration/test_server_api_default.py::TestPolicyEnforcement::test_network_mode_isolated_blocked_ip_rejects_egress -s --server-endpoint 127.0.0.1:8321
 ```
 
 ### 性能测试

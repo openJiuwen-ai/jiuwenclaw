@@ -37,7 +37,7 @@ import asyncio
 import shutil
 import mimetypes
 from pathlib import Path
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, Literal, Optional
 from collections import OrderedDict
 import logging
@@ -1357,73 +1357,12 @@ def get_agent_sessions_dir() -> Path:
 _legacy_migration_done: bool = False
 
 
-def _migrate_legacy_checkpoint_and_logs() -> None:
-    """One-time migration: move legacy paths to multi-tenant structure.
-
-    Migration paths:
-    - ~/.jiuwenclaw/.checkpoint -> ~/.jiuwenclaw/service_default/agent_default/.checkpoint
-    - ~/.jiuwenclaw/.logs -> ~/.jiuwenclaw/service_default/.logs
-    - ~/.jiuwenclaw/agent/.checkpoint -> ~/.jiuwenclaw/service_default/agent_default/.checkpoint
-    - ~/.jiuwenclaw/agent/.logs -> ~/.jiuwenclaw/service_default/.logs
-    """
-    global _legacy_migration_done
-    if _legacy_migration_done:
-        return
-    _legacy_migration_done = True
-
-    workspace = get_user_workspace_dir()
-
-    # 目标路径
-    service_root = get_service_root_dir()
-    agent_workspace = get_multi_tenant_user_workspace_dir("default", "default")
-    agent_root = get_agent_root_dir()
-
-    # 确保 target 目录存在
-    service_root.mkdir(parents=True, exist_ok=True)
-    if agent_workspace:
-        agent_workspace.mkdir(parents=True, exist_ok=True)
-    agent_root.mkdir(parents=True, exist_ok=True)
-
-    # 迁移 .checkpoint 到 agent_default 级别
-    checkpoint_target = agent_workspace / ".checkpoint" if agent_workspace else agent_root / ".checkpoint"
-    checkpoint_sources = [
-        workspace / ".checkpoint",
-        workspace / "agent" / ".checkpoint",
-        agent_root / ".checkpoint",  # 从 agent 子目录迁移到 agent_default 级别
-    ]
-    for legacy in checkpoint_sources:
-        if legacy.exists() and not checkpoint_target.exists():
-            checkpoint_target.parent.mkdir(parents=True, exist_ok=True)
-            shutil.move(str(legacy), str(checkpoint_target))
-        elif legacy.exists() and checkpoint_target.exists():
-            # 合并 checkpoint 文件
-            for f in legacy.iterdir():
-                if not (checkpoint_target / f.name).exists():
-                    shutil.move(str(f), str(checkpoint_target / f.name))
-
-    # 迁移 .logs 到 service 级别
-    logs_target = service_root / ".logs"
-    logs_sources = [
-        workspace / ".logs",
-        workspace / "agent" / ".logs",
-    ]
-    for legacy in logs_sources:
-        if legacy.exists() and not logs_target.exists():
-            shutil.move(str(legacy), str(logs_target))
-        elif legacy.exists() and logs_target.exists():
-            # 合并日志：移动旧日志文件到新目录
-            for f in legacy.iterdir():
-                if not (logs_target / f.name).exists():
-                    shutil.move(str(f), str(logs_target / f.name))
-
-
 def get_checkpoint_dir() -> Path:
     """Get the checkpoint directory path (agent_id level).
 
     多租户架构下，checkpoint 存放在 agent_id 级别。
     Path: ~/.jiuwenclaw/service_default/agent_default/.checkpoint
     """
-    _migrate_legacy_checkpoint_and_logs()
     workspace = get_multi_tenant_user_workspace_dir("default", "default")
     if workspace:
         return workspace / ".checkpoint"
@@ -1437,9 +1376,11 @@ def get_logs_dir() -> Path:
     多租户架构下，日志存放在 service 级别，便于多 agent 共享。
     Path: ~/.jiuwenclaw/service_default/.logs
     """
-    _migrate_legacy_checkpoint_and_logs()
-    return get_service_root_dir() / ".logs"
-
+    log_root_path = os.getenv("LOG_ROOT_PATH", "").strip()
+    if not log_root_path:
+        log_root_path = get_service_root_dir() / ".logs"
+    log_root_path = Path(log_root_path).expanduser().resolve()
+    return log_root_path
 
 def get_xy_tmp_dir() -> Path:
     workspace_dir = get_user_workspace_dir()
@@ -1462,82 +1403,6 @@ def is_package_installation() -> bool:
     return _detect_installation_mode()
 
 
-# 统一敏感信息掩码值。
-_SENSITIVE_MASK = "******"
-# 匹配常见敏感字段键值对（不要求值必须带引号），用于覆盖:
-# - token=abc
-# - api_key: sk-xxx
-# - authorization = Bearer ...
-# 分组说明：
-# 1) 敏感键名；2) 分隔符及两侧空白（: 或 =）；3/4) 可选引号（当前替换逻辑未直接使用）
-_KV_SENSITIVE_PATTERN = re.compile(
-    r"(?i)(?<![A-Za-z0-9])"
-    r"(password|passwd|pwd|secret|token|api[_-]?key|access[_-]?token|"
-    r"refresh[_-]?token|authorization|user[_-]?id|userid)"
-    r"(?![A-Za-z0-9])(\s*[:=]\s*)([\"']?)[^,\s\"'\]\}]+([\"']?)"
-)
-# 匹配“键名包含敏感关键词”且“值被引号包裹”的场景，覆盖:
-# - 'CAT_CAFE_CALLBACK_TOKEN': 'xxxx'
-# - 'CAT_CAFE_USER_ID': 'CSDN-weixin'
-# - "my_private_key"="xxxx"
-# 分组说明：
-# 1) 完整的 key + 分隔符（含可选引号）
-# 2) 值的起始引号（' 或 "）
-# 3) 值内容（非贪婪）
-# 4) 结束引号（通过 (\2) 强制与起始引号一致）
-_NAMED_SENSITIVE_KV_PATTERN = re.compile(
-    r"(?i)([\"']?[A-Za-z0-9_.-]*"
-    r"(?:token|secret|password|passwd|pwd|api[_-]?key|authorization|"
-    r"credential|private[_-]?key|user[_-]?id|userid)"
-    r"[A-Za-z0-9_.-]*[\"']?\s*[:=]\s*)([\"'])(.*?)(\2)"
-)
-# 匹配 Authorization Bearer 令牌，保留 "Bearer " 前缀，仅掩码后面的令牌值。
-_BEARER_SENSITIVE_PATTERN = re.compile(r"(?i)\b(Bearer\s+)[A-Za-z0-9\-._~+/]+=*")
-_SENSITIVE_PATTERNS: list[re.Pattern[str]] = [
-    # 匹配 JWT（header.payload.signature 三段式，常见以 eyJ 开头）。
-    re.compile(r"\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b"),
-    # 匹配 OpenAI 风格 key（sk- 前缀）。
-    re.compile(r"\bsk-[A-Za-z0-9]{8,}\b"),
-    # 匹配 GitHub Personal Access Token（ghp_ 前缀）。
-    re.compile(r"\bghp_[A-Za-z0-9]{20,}\b"),
-    # 匹配 GitLab Personal Access Token（glpat- 前缀）。
-    re.compile(r"\bglpat-[A-Za-z0-9_-]{20,}\b"),
-    # 匹配邮箱地址（避免日志中泄露个人身份信息）。
-    re.compile(r"\b[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[A-Za-z]{2,}\b"),
-    # 匹配中国大陆手机号（可带 +86 或 86 前缀，支持空格/短横线分隔）。
-    re.compile(r"(?<!\d)(?:\+?86[-\s]?)?1[3-9]\d{9}(?!\d)"),
-    # 匹配中国身份证号（18 位，最后一位可为 X/x）。
-    re.compile(r"(?<!\d)\d{17}[\dXx](?!\d)"),
-]
-
-
-def _sanitize_log_text(text: str) -> str:
-    if not text:
-        return text
-
-    masked = text
-    masked = _KV_SENSITIVE_PATTERN.sub(r"\1\2" f"{_SENSITIVE_MASK}", masked)
-    masked = _NAMED_SENSITIVE_KV_PATTERN.sub(r"\1\2" f"{_SENSITIVE_MASK}" r"\2", masked)
-    masked = _BEARER_SENSITIVE_PATTERN.sub(r"\1" f"{_SENSITIVE_MASK}", masked)
-    for pattern in _SENSITIVE_PATTERNS:
-        masked = pattern.sub(_SENSITIVE_MASK, masked)
-    return masked
-
-
-class SensitiveDataFilter(logging.Filter):
-    """Mask sensitive data in all log messages."""
-
-    def filter(self, record: logging.LogRecord) -> bool:
-        try:
-            message = record.getMessage()
-            record.msg = _sanitize_log_text(message)
-            record.args = ()
-        except Exception:
-            # Never block logging because of desensitization failure.
-            pass
-        return True
-
-
 class JsonOnlyFormatter(logging.Formatter):
     """只输出message内容，不添加任何前缀（时间戳、级别、logger名）"""
 
@@ -1558,8 +1423,9 @@ def setup_logger(log_level: Optional[str] = None) -> logging.Logger:
     级别由 ``config.yaml`` 的 ``logging`` 段控制；环境变量 ``LOG_LEVEL`` 仅覆盖**控制台**级别
     （``log_level`` 参数为 ``None`` 时）。若传入 ``log_level``（如单测），则控制台与各文件级别均为该值。
     """
-    log_root_path = os.getenv("LOG_ROOT_PATH", "").strip()
-    logs_root = Path(log_root_path).expanduser().resolve() if log_root_path else get_logs_dir()
+    from jiuwenclaw.infrastructure.log_masking import SensitiveDataFilter
+
+    logs_root = get_logs_dir()
     logs_root.mkdir(parents=True, exist_ok=True)
 
     levels = _resolve_logging_levels(log_level)
@@ -1610,6 +1476,119 @@ def setup_logger(log_level: Optional[str] = None) -> logging.Logger:
     stream_handler.addFilter(privacy_filter)
     root.addHandler(stream_handler)
     return root
+
+
+_FILE_HANDLER_LEVEL_MAP: dict[str, str] = {
+    "gateway.log": "gateway",
+    "channel.log": "channel",
+    "agent_server.log": "agent_server",
+    "full.log": "full",
+    "permissions.log": "agent_server",
+}
+
+
+def update_log_levels(
+    log_level: Optional[str] = None,
+    *,
+    console_level: Optional[str] = None,
+    gateway: Optional[str] = None,
+    channel: Optional[str] = None,
+    agent_server: Optional[str] = None,
+    full: Optional[str] = None,
+) -> logging.Logger:
+    """运行时动态更新 ``jiuwenclaw`` 根日志及各 handler 的级别，无需重建 handler。
+
+    参数与 :func:`setup_logger` 一致：传入 ``log_level`` 则统一覆盖所有级别；
+    为 ``None`` 时恢复代码内默认级别（INFO）及环境变量 ``LOG_LEVEL``（仅控制台）。
+
+    可通过关键字参数单独覆盖各组件级别，优先级高于 ``log_level``。
+    """
+    levels = _resolve_logging_levels(log_level)
+
+    if console_level is not None:
+        levels = replace(levels, console=_parse_log_level(console_level, levels.console))
+    if gateway is not None:
+        levels = replace(levels, gateway=_parse_log_level(gateway, levels.gateway))
+    if channel is not None:
+        levels = replace(levels, channel=_parse_log_level(channel, levels.channel))
+    if agent_server is not None:
+        levels = replace(levels, agent_server=_parse_log_level(agent_server, levels.agent_server))
+    if full is not None:
+        levels = replace(levels, full=_parse_log_level(full, levels.full))
+
+    logger_level = min(levels.gateway, levels.channel, levels.agent_server, levels.full)
+    levels = replace(levels, logger=logger_level)
+
+    root = logging.getLogger("jiuwenclaw")
+    root.setLevel(levels.logger)
+
+    for h in root.handlers:
+        if isinstance(h, SafeRotatingFileHandler):
+            fname = Path(h.baseFilename).name
+            attr = _FILE_HANDLER_LEVEL_MAP.get(fname)
+            if attr is not None:
+                h.setLevel(getattr(levels, attr))
+        elif isinstance(h, logging.StreamHandler):
+            h.setLevel(levels.console)
+
+    return root
+
+
+_LOGGING_CONFIG_TABLE = "logging_config"
+
+
+def _logging_config_row_to_dict(obj: Any) -> dict[str, Any]:
+    return {
+        "level": getattr(obj, "level", "INFO"),
+        "console_level": getattr(obj, "console_level", None),
+        "gateway": getattr(obj, "gateway", None),
+        "channel": getattr(obj, "channel", None),
+        "agent_server": getattr(obj, "agent_server", None),
+        "full": getattr(obj, "full", None),
+    }
+
+
+def apply_logging_config_payload(payload: dict[str, Any] | None) -> None:
+    """将 DB 行 / WS payload 转为 :func:`update_log_levels` 调用。"""
+    if not payload or payload.get("op") == "delete":
+        update_log_levels()
+        return
+
+    kwargs: dict[str, Any] = {}
+    if payload.get("level") is not None:
+        kwargs["log_level"] = str(payload["level"])
+    for key in ("console_level", "gateway", "channel", "agent_server", "full"):
+        if payload.get(key) is not None:
+            kwargs[key] = str(payload[key])
+    update_log_levels(**kwargs)
+
+
+async def reload_logging_levels_from_gateway_db() -> None:
+    """从 Gateway 库加载 ``logging_config`` 并刷新**本进程**日志级别。"""
+    try:
+        from jiuwenclaw.infrastructure.module_importer import (
+            import_manager_ws_client_module,
+        )
+
+        db_mod = import_manager_ws_client_module("infrastructure.db")
+        handler = await db_mod.ensure_db_handler(log_prefix="logging_config")
+
+        jid = (os.getenv("JIUWENCLAW_ID") or "").strip()
+        if not jid:
+            update_log_levels()
+            return
+
+        row = await handler.get(_LOGGING_CONFIG_TABLE, {"jiuwenclaw_id": jid})
+        apply_logging_config_payload(
+            _logging_config_row_to_dict(row) if row is not None else None,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "[logging_config_db] logging_config read failed: %s",
+            exc,
+            exc_info=True,
+        )
+        update_log_levels()
 
 
 class AsyncLRUCache:

@@ -26,14 +26,23 @@ declare -A CONFIG=(
     ["MYSQL_TEMPLATE_FILE"]="${SCRIPT_DIR}/conf/mysql.template.yaml"
     ["MYSQL_FILE"]="${SCRIPT_DIR}/conf/mysql.yaml"
 
+    ["REDIS_TEMPLATE_FILE"]="${SCRIPT_DIR}/conf/redis.template.yaml"
+    ["REDIS_FILE"]="${SCRIPT_DIR}/conf/redis.yaml"
+
     ["POSTGRES_TEMPLATE_FILE"]="${SCRIPT_DIR}/conf/postgresql.template.yaml"
     ["POSTGRES_FILE"]="${SCRIPT_DIR}/conf/postgresql.yaml"
+
+    ["MINIO_TEMPLATE_FILE"]="${SCRIPT_DIR}/conf/minio.template.yaml"
+    ["MINIO_FILE"]="${SCRIPT_DIR}/conf/minio.yaml"
 
     ["WEB_TEMPLATE_FILE"]="${SCRIPT_DIR}/conf/web.template.yaml"
     ["WEB_FILE"]="${SCRIPT_DIR}/conf/web.yaml"
 
-    ["MANAGER_TEMPLATE_FILE"]="${SCRIPT_DIR}/conf/manager.template.yaml"
-    ["MANAGER_FILE"]="${SCRIPT_DIR}/conf/manager.yaml"
+    ["MANAGER_SERVER_TEMPLATE_FILE"]="${SCRIPT_DIR}/conf/manager-server.template.yaml"
+    ["MANAGER_SERVER_FILE"]="${SCRIPT_DIR}/conf/manager-server.yaml"
+
+    ["MANAGER_WEB_TEMPLATE_FILE"]="${SCRIPT_DIR}/conf/manager-web.template.yaml"
+    ["MANAGER_WEB_FILE"]="${SCRIPT_DIR}/conf/manager-web.yaml"
 
     ["PV_TEMPLATE_FILE"]="${SCRIPT_DIR}/conf/pv-nfs.template.yaml"
     ["PV_FILE"]="${SCRIPT_DIR}/conf/pv-nfs.yaml"
@@ -46,18 +55,15 @@ declare -A CONFIG=(
 )
 
 
-
-
 # Parsed command-line arguments
 declare -A ARGS=(
     ["CMD"]=""
 )
 
 
-
 # ==== All available modules ====
 #declare -ga ALL_MODULES=("NFS" "RABBITMQ" "YR_CLAW" "GATEWAY" "WEB" "MANAGER")
-declare -ga ALL_MODULES=("NFS" "RABBITMQ" "MYSQL" "POSTGRESQL" "GATEWAY" "WEB" "MANAGER")
+declare -ga ALL_MODULES=("NFS" "RABBITMQ" "MYSQL" "REDIS" "POSTGRESQL" "MINIO" "GATEWAY" "WEB" "MANAGER")
 
 declare -ga MODULES=()
 
@@ -68,6 +74,11 @@ declare -ga OTHER_MASTER_IPS=()
 declare -ga OTHER_NODE_IPS=()
 
 declare -A DEPLOY_VARS=(
+    ["MODE"]=product
+    ["CLAW_CODE_PATH"]=""
+    ["CLAW_CODE_POD_PATH"]="/app/jiuwenclaw"
+    ["RUNTIME_CODE_PATH"]=""
+    ["RUNTIME_CODE_POD_PATH"]="/usr/local/lib/python3.11/site-packages/openjiuwen_runtime"
     ["NAMESPACE"]="default"
     ["POOL_ID"]="claw"
     ["FUNC_SVC_NAME"]="0@jiuwen@clawtest"
@@ -75,9 +86,12 @@ declare -A DEPLOY_VARS=(
     ["GATEWAY_SERVICE_ACCOUNT"]="jiuwenclaw-gateway-sa"
     ["GATEWAY_CONFIG_MAP_NAME"]="jiuwenclaw-gateway-config"
     ["GATEWAY_ENV_FILE_NAME"]="jiuwenclaw-gateway-env"
-    ["GATEWAY_WEBSOCKET_PORT"]="19000"
+    ["GATEWAY_REPLICAS"]="1"
+    ["ENTERPRISE_WEB_WS_PORT"]="19000"
+    ["JIUWENCLAW_PATH"]="/exports/jiuwenclaw"
+    ["JIUWENCLAW_NFS_PATH"]="/jiuwenclaw"
     ["NFS_NAME"]="nfs-server"
-    ["NFS_IMAGE"]="itsthenetwork/nfs-server-alpine:12"
+    ["NFS_IMAGE"]="ghcr.io/obeone/nfs-server:2.2.2"
     ["NFS_HOST_PATH"]="/data/nfs"
     ["NFS_SHARE_PATH"]="/"
     ["PVC_NAME"]="pvc-nfs-shared"
@@ -87,24 +101,61 @@ declare -A DEPLOY_VARS=(
     ["RABBITMQ_NAME"]="rabbitmq"
     ["RABBITMQ_IMAGE"]="rabbitmq:3.9.22-management"
     ["RABBITMQ_PATH"]="/exports/rabbitmq"
+    ["RABBITMQ_NFS_PATH"]="/rabbitmq"
     ["RABBITMQ_USER"]="admin"
     ["RABBITMQ_PASSWORD"]="Rabbitmq@123"
+    ["RABBITMQ_STORAGE_SIZE"]="2Gi"
     ["MYSQL_NAME"]="mysql"
     ["MYSQL_IMAGE"]="mysql:8.0"
     ["MYSQL_PATH"]="/exports/mysql"
+    ["MYSQL_NFS_PATH"]="/mysql"
     ["MYSQL_ROOT_PASSWORD"]="Root@123456"
+    ["MYSQL_STORAGE_SIZE"]="4Gi"
     ["POSTGRES_NAME"]="postgresql"
     ["POSTGRES_IMAGE"]="postgres:16"
     ["POSTGRES_PATH"]="/exports/postgresql"
+    ["POSTGRES_NFS_PATH"]="/postgresql"
     ["POSTGRES_PASSWORD"]="Root@123456"
-    ["MANAGER_NAME"]="jiuwenclaw-manager"
+    ["POSTGRES_STORAGE_SIZE"]="4Gi"
+    ["REDIS_NAME"]="redis"
+    ["REDIS_IMAGE"]="redis:7-alpine"
+    ["REDIS_PORT"]="6379"
+    ["REDIS_PASSWORD"]=""
+    ["REDIS_DB"]="0"
+    ["REDIS_KEY_PREFIX"]="jiuwenclaw:"
+    ["REDIS_HOST"]=""
+    ["DEPLOYMENT_MODE"]="standalone"
+    ["GATEWAY_INSTANCE_ID"]=""
+    ["JIUWENCLAW_ID"]=""
+    ["MINIO_NAME"]="minio"
+    ["MINIO_IMAGE"]="minio/minio-arm64:RELEASE.2024-12-18T13-15-44Z"
+    ["MINIO_ROOT_USER"]="minioadmin"
+    ["MINIO_ROOT_PASSWORD"]="Minio@123456"
+    ["MINIO_SECURE"]="false"
+    ["MINIO_STORAGE_SIZE"]="4Gi"
+    ["MINIO_PATH"]="/exports/minio"
+    ["MINIO_NFS_PATH"]="/minio"
+    ["MANAGER_SERVER_NAME"]="jiuwenclaw-manager-server"
+    ["MANAGER_WEB_NAME"]="jiuwenclaw-manager-web"
     ["MANAGER_REST_PORT"]="8765"
     ["MANAGER_WS_PORT"]="8766"
+    ["MANAGER_WEB_PORT"]="5273"
+    ["OBS_TYPE"]="minio"
+    ["OBS_BUCKET"]="jiuwenclaw"
     ["DB_TYPE"]="sqlite"
-    ["MANAGER_DB_NAME"]="claw_manager"
-    ["GATEWAY_DB_NAME"]="openjiuwen_gateway"
-    ["MANAGER_SQLITE_PATH"]="claw_manager.db"
-    ["GATEWAY_SQLITE_PATH"]="openjiuwen_gateway.db"
+    ["MANAGER_DB_NAME"]="manager"
+    ["GATEWAY_DB_NAME"]="gateway"
+    ["GATEWAY_PG_SCHEMA"]="public"
+    ["MANAGER_PG_SCHEMA"]="public"
+    ["MANAGER_SQLITE_PATH"]="manager.db"
+    ["GATEWAY_SQLITE_PATH"]="gateway.db"
+    ["ENABLE_EXTERNAL_NFS"]="false"
+    ["ENABLE_EXTERNAL_RABBITMQ"]="false"
+    ["ENABLE_EXTERNAL_MYSQL"]="false"
+    ["ENABLE_EXTERNAL_POSTGRES"]="false"
+    ["ENABLE_EXTERNAL_REDIS"]="false"
+    ["ENABLE_EXTERNAL_MINIO"]="false"
+    ["IS_UP_MANAGER_WEB"]="true"
 )
 
 
@@ -121,4 +172,3 @@ declare -A OYR_COMPONENTS=(
         ["etcd"]="statefulset"
         ["minio"]="statefulset"
     )
-

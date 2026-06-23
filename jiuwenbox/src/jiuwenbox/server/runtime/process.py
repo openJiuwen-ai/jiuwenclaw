@@ -510,6 +510,7 @@ class ProcessRuntime(RuntimeAdapter):
         self._policy_binds: dict[str, list[dict[str, str]]] = {}
         self._network_modes: dict[str, NetworkMode] = {}
         self._netns_names: dict[str, str] = {}
+        self._uplink_handles: dict[str, network_module.UplinkHandle] = {}
         self._directory_roots: dict[str, Path] = {}
         self._file_roots: dict[str, Path] = {}
         self._launcher_dirs: dict[str, Path] = {}
@@ -833,12 +834,22 @@ class ProcessRuntime(RuntimeAdapter):
 
         namespace = self._get_netns_name(sandbox_id)
         if network_module.namespace_exists(namespace):
-            return namespace
+            network_module.delete_named_namespace(namespace)
 
         network_module.create_named_namespace(namespace)
+        uplink_handle: network_module.UplinkHandle | None = None
         try:
+            uplink_handle = network_module.setup_network_uplink(
+                namespace,
+                sandbox_id,
+                policy.network.uplink,
+                management_ports=self._server_protect_ports(),
+            )
             network_module.setup_network_isolation(policy.network, namespace=namespace)
+            self._uplink_handles[sandbox_id] = uplink_handle
         except Exception:
+            if uplink_handle is not None:
+                network_module.teardown_network_uplink(uplink_handle)
             try:
                 network_module.delete_named_namespace(namespace)
             except Exception:
@@ -1838,8 +1849,7 @@ class ProcessRuntime(RuntimeAdapter):
             # ``exit(1)`` before printing anything).
             message = (
                 f"{message} No stdout/stderr was captured before the "
-                f"daemon exited; re-run with the container attached "
-                f"(``docker run -it``) to see live bwrap output."
+                f"daemon exited."
             )
         raise RuntimeError(message)
 
@@ -1886,6 +1896,9 @@ class ProcessRuntime(RuntimeAdapter):
         if control_dir is not None:
             shutil.rmtree(control_dir, ignore_errors=True)
         self._daemon_socket_ready.pop(sandbox_id, None)
+        uplink_handle = self._uplink_handles.pop(sandbox_id, None)
+        if uplink_handle is not None:
+            network_module.teardown_network_uplink(uplink_handle)
         if netns_name and network_module.namespace_exists(netns_name):
             network_module.delete_named_namespace(netns_name)
         self._network_modes.pop(sandbox_id, None)
@@ -2709,10 +2722,14 @@ class ProcessRuntime(RuntimeAdapter):
                 sandbox_id,
                 network_module.netns_name_for_sandbox(sandbox_id),
             )
+            uplink_handle = self._uplink_handles.pop(sandbox_id, None)
+            if uplink_handle is not None:
+                network_module.teardown_network_uplink(uplink_handle)
             if network_module.namespace_exists(namespace):
                 network_module.delete_named_namespace(namespace)
         else:
             self._netns_names.pop(sandbox_id, None)
+            self._uplink_handles.pop(sandbox_id, None)
         self._remove_sandbox_host_firewall_rules(sandbox_id)
 
         directory_root = self._directory_roots.pop(sandbox_id, None)

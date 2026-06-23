@@ -37,19 +37,19 @@ def get_jiuwenclaw_id() -> str | None:
     return val or None
 
 
-def assert_jiuwenclaw_id_matches_payload(payload: dict[str, Any]) -> str:
-    """校验 push payload 与已注册 ``jiuwenclaw_id`` 一致，并返回有效 id。"""
+def assert_jiuwenclaw_id_matches(jiuwenclaw_id: str) -> str:
+    """校验 config.push 顶层 ``jiuwenclaw_id`` 与已注册实例一致，并返回有效 id。"""
+    if not jiuwenclaw_id:
+        raise ValueError("config.push payload requires jiuwenclaw_id")
     registered = get_jiuwenclaw_id()
-    payload_jid = str(payload.get("jiuwenclaw_id") or "").strip()
-    if registered and payload_jid and payload_jid != registered:
+    if registered and jiuwenclaw_id != registered:
         raise ValueError(
-            f"jiuwenclaw_id mismatch: push={payload_jid!r} registered={registered!r}"
+            f"jiuwenclaw_id mismatch: push={jiuwenclaw_id!r} registered={registered!r}"
         )
-    jid = registered or payload_jid
+    jid = registered or jiuwenclaw_id
     if not jid:
         raise ValueError(
-            "jiuwenclaw_id is not set; manager ws register.ack required "
-            "or provide jiuwenclaw_id in payload"
+            "jiuwenclaw_id is not set; manager ws register.ack required"
         )
     return jid
 
@@ -69,6 +69,16 @@ def format_ts(val: Any) -> str:
             dt = dt.replace(tzinfo=timezone.utc)
         return dt.isoformat()
     return str(val)
+
+
+def parse_iso_datetime(value: Any) -> Any:
+    """将 ISO 8601 字符串解析为 ``datetime``；已是 ``datetime`` 或空值则原样返回。"""
+    if value is None or isinstance(value, datetime):
+        return value
+    if isinstance(value, str) and value.strip():
+        text = value.strip().replace("Z", "+00:00")
+        return datetime.fromisoformat(text)
+    return value
 
 
 def normalize_template_ref(value: Any) -> dict[str, list[str]]:
@@ -128,10 +138,10 @@ def apply_template_ref_to_updates(
     *,
     existing_row: Any | None,
 ) -> dict[str, Any]:
+    """PATCH 含 ``template_ref`` 时整列替换（与 Manager / 前端编辑器一致）。"""
     payload = dict(updates)
     if "template_ref" not in payload:
         return payload
     patch = payload.pop("template_ref")
-    base = read_template_ref_from_row(existing_row) if existing_row is not None else {}
-    payload["template_ref"] = merge_template_ref(base, normalize_template_ref(patch))
+    payload["template_ref"] = normalize_template_ref(patch)
     return payload

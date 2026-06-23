@@ -23,6 +23,6 @@ def channel_config_reload_change_for_row(row: dict[str, Any]) -> ChannelConfigCh
 async def maybe_trigger_channel_config_reload(
     change: ChannelConfigChange | None = None,
 ) -> None:
-    """distributed 模式下触发 Gateway channel 热加载。"""
+    """active-standby 模式下触发 Gateway channel 热加载。"""
     if channel_config_overlay_enabled():
         await trigger_channel_config_reload(change)

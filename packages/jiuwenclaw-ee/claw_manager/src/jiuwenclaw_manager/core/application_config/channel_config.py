@@ -9,7 +9,7 @@ from typing import Any
 from openjiuwen_runtime.foundation.db.handler import DBHandler
 
 from jiuwenclaw_manager.manager_ws_server import ManagerWsServer
-from jiuwenclaw_manager.manager_ws_server.server import push_to_jiuwenclaw
+from jiuwenclaw_manager.manager_ws_server.server import push_config_op
 
 _CHANNEL_CONFIG_TABLE = "channel_config"
 
@@ -51,10 +51,7 @@ async def push_channel_config_op(
         payload["channel"] = channel
     if channel_id is not None:
         payload["channel_id"] = channel_id
-    return await push_to_jiuwenclaw(
-        jiuwenclaw_id,
-        config={"channel_config": payload},
-    )
+    return await push_config_op(jiuwenclaw_id, {"channel_config": payload})
 
 
 class ChannelConfigService:

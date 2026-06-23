@@ -13,7 +13,7 @@ parse_args() {
                 i=$((i+1))
                 ;;
             #nfs|rabbitmq|yr_claw|gateway|web|manager)
-            nfs|rabbitmq|mysql|postgresql|gateway|web|manager)
+            nfs|rabbitmq|mysql|redis|postgresql|minio|gateway|web|manager)
                 MODULES+=("${args[$i]^^}")
                 i=$((i+1))
                 ;;
@@ -23,6 +23,10 @@ parse_args() {
                 ;;
             --web-port)
                 DEPLOY_VARS["WEB_NODE_PORT"]="${args[$((i+1))]}"
+                i=$((i+2))
+                ;;
+            --manager-web-port)
+                DEPLOY_VARS["MANAGER_WEB_NODE_PORT"]="${args[$((i+1))]}"
                 i=$((i+2))
                 ;;
             -h|--help)
@@ -72,34 +76,25 @@ Modules (Optional):
   nfs       NFS service module (deploys to default namespace, ignores -n parameter)
   rabbitmq  RabbitMQ module (deploys to default namespace, ignores -n parameter)
   mysql     MySQL module (deploys to default namespace, ignores -n parameter)
+  redis     Redis module (deploys to default namespace, ignores -n parameter)
+  minio     Minio module (deploys to default namespace, ignores -n parameter)
   gateway   Gateway service module
   web       Web frontend module
   manager   CLAW Manager module
 
 Options:
-  -n NAMESPACE       Specify Kubernetes namespace (defaults to default if unspecified)
-  --web-port PORT    Set host port for web service (default: 8080)
-  -h, --help         Display this help message and exit
+  -n NAMESPACE              Specify Kubernetes namespace (defaults to default if unspecified)
+  --web-port PORT           Set host port for web service （range: 30000-32767）
+  --manager-web-port PORT   Set host port for manager web UI （range: 30000-32767）
+  -h, --help                Display this help message and exit
 
 Examples:
   ./$(basename "$0") up                                # Deploy default modules in default namespace
-  ./$(basename "$0") up web --web-port 8000 -n myns    # Deploy web module with host port 8000 in myns namespace
+  ./$(basename "$0") up web --web-port 30000 -n myns   # Deploy web module with host port 30000 in myns namespace
   ./$(basename "$0") up nfs                            # Deploy NFS (always uses default namespace, ignores -n parameter)
   ./$(basename "$0") down                              # Uninstall default modules in default namespace
   ./$(basename "$0") restart                           # Restart default modules in default namespace
   ./$(basename "$0") restart gateway                   # Restart gateway module in default namespace
 EOF
     exit 0
-}
-
-process_namespace() {
-    local namespace=${DEPLOY_VARS["NAMESPACE"]}
-    local client_type="${DEPLOY_VARS["AGENT_RUNTIME"]}"
-
-    if [ "${client_type}" == "yuanrong" ]; then
-        # Cluster-scoped resources cannot be isolated by namespace;
-        # use name suffixing to achieve resource isolation
-        DEPLOY_VARS["PV_NAME"]="${DEPLOY_VARS["PV_NAME"]}-${namespace}"
-        DEPLOY_VARS["POOL_ID"]="${DEPLOY_VARS["POOL_ID"]}-${namespace}"
-    fi
 }

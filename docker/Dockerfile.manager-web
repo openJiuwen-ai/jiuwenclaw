@@ -1,0 +1,21 @@
+ARG BASE_IMAGE
+FROM ${BASE_IMAGE}
+
+RUN useradd --create-home --shell /bin/bash app
+
+WORKDIR /app/jiuwenclaw
+COPY . /app/jiuwenclaw/
+RUN chown -R app:app /app/jiuwenclaw
+
+RUN pip install -e "./packages/jiuwenclaw-ee/claw_manager" -i https://pypi.tuna.tsinghua.edu.cn/simple
+
+USER app
+WORKDIR /app/jiuwenclaw/packages/jiuwenclaw-ee/claw_manager/web
+RUN npm install
+RUN npm run build
+
+WORKDIR /app/jiuwenclaw
+ENV PATH=$PATH:/home/app/.local/bin
+
+EXPOSE 5273
+CMD ["jiuwenclaw-manager-web"]

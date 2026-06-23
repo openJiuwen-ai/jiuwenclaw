@@ -23,13 +23,36 @@ spec:
             - name: http
               containerPort: 5173
               protocol: TCP
+            - name: websocket
+              containerPort: <<ENTERPRISE_WEB_WS_PORT>>
+              protocol: TCP
           env:
             - name: JIUWENCLAW_WEB_HOST
               value: "0.0.0.0"
             - name: JIUWENCLAW_WEB_PORT
               value: "5173"
-            - name: JIUWENCLAW_WEB_PROXY_TARGET
-              value: "http://<<GATEWAY_NAME>>:<<GATEWAY_WEBSOCKET_PORT>>"
+            - name: ENTERPRISE_WEB_WS_HOST
+              value: "0.0.0.0"
+            - name: ENTERPRISE_WEB_WS_PORT
+              value: "<<ENTERPRISE_WEB_WS_PORT>>"
+            - name: WS_ORIGIN_CHECK_ENABLED
+              value: "false"
+
+---
+# 集群内部访问： 提供稳定 DNS 域名
+apiVersion: v1
+kind: Service
+metadata:
+  name: <<WEB_NAME>>
+  namespace: <<NAMESPACE>>
+spec:
+  selector:
+    app: <<WEB_NAME>>
+  ports:
+    - name: websocket
+      port: <<ENTERPRISE_WEB_WS_PORT>>         # Service 端口
+      targetPort: <<ENTERPRISE_WEB_WS_PORT>>   # 容器端口
+  type: ClusterIP                             # 集群内部访问，不需要外网
 
 ---
 # NodePort Service：供外连接

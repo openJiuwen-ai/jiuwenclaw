@@ -83,6 +83,9 @@ load_dotenv(dotenv_path=get_env_file())
 
 logger = logging.getLogger(__name__)
 
+# 将 websockets.client 日志级别设为 WARNING，屏蔽大量 websockets 打印日志
+logging.getLogger("websockets.client").setLevel(logging.WARNING)
+
 # Keep gateway idle-finalize fallback aligned with ACP channel default.
 _PROMPT_IDLE_FINALIZE_SECONDS = 3.0
 
@@ -957,7 +960,7 @@ async def _run(
     from jiuwenclaw.gateway.channel_config_overlay import channel_config_overlay_enabled
 
     _channel_db_overlay = channel_config_overlay_enabled()
-    # distributed：channel_config DB；standalone：yaml 直传。
+    # active-standby：channel_config DB；standalone：yaml 直传。
     if _channel_db_overlay:
         channel_manager = ChannelManager(message_handler, config={})
     else:
@@ -1047,7 +1050,43 @@ async def _run(
         logger.info("[App] Sync config to AgentServer on startup disabled by config")
     web_channel = None
     web_config = WebChannelConfig(enabled=True, host=web_host, port=web_port, path=web_path)
-    web_channel = WebChannel(web_config, _DummyBus())
+    _use_enterprise_web = os.getenv("ENTERPRISE_WEB_ENABLED", "").lower() in (
+        "1",
+        "true",
+        "yes",
+    )
+    if _use_enterprise_web:
+        from jiuwenclaw.channel.enterprise_web_channel import (
+            EnterpriseWebChannel,
+            EnterpriseWebChannelConfig,
+        )
+
+        _enterprise_web_url = (
+            os.getenv("ENTERPRISE_WEB_GATEWAY_URL", "").strip()
+            or f"ws://{web_host}:{web_port}{os.getenv('ENTERPRISE_WEB_GATEWAY_PATH', '/gateway')}"
+        )
+        ent_config = EnterpriseWebChannelConfig(
+            enabled=True,
+            gateway_url=_enterprise_web_url,
+            gateway_path=os.getenv("ENTERPRISE_WEB_GATEWAY_PATH", "/gateway"),
+            host=web_host,
+            port=web_port,
+        )
+        web_channel = EnterpriseWebChannel(ent_config, _DummyBus())
+        logger.info(
+            "[App] EnterpriseWebChannel enabled, uplink=%s (browser WS on app_enterprise_web)",
+            _enterprise_web_url,
+        )
+    else:
+        web_channel = WebChannel(web_config, _DummyBus())
+
+    _gateway_deploy_cfg = get_config().get("gateway") or {}
+    _deployment_mode = str(_gateway_deploy_cfg.get("deployment_mode", "standalone")).strip().lower()
+    _defer_enterprise_web_uplink = _use_enterprise_web and _deployment_mode == "active-standby"
+    if _defer_enterprise_web_uplink:
+        logger.info(
+            "[App] active-standby: EnterpriseWeb uplink deferred until PRIMARY elected",
+        )
 
     # 触发 WebChannel 创建完成扩展点
     web_channel_ctx = WebChannelCreatedHookContext(
@@ -1068,6 +1107,8 @@ async def _run(
             heartbeat_service=heartbeat_service if heartbeat_enabled else None,
             cron_controller=cron_controller,
             updater_service=updater_service,
+            emit_connection_ack_on_connect=not _use_enterprise_web,
+            enable_web_connection_ack_method=_use_enterprise_web,
         )
     )
 
@@ -1105,9 +1146,17 @@ async def _run(
             "session.list 由 MessageHandler 读网关索引",
         )
 
+    _web_no_local = _FORWARD_NO_LOCAL_HANDLER_METHODS | get_extra_no_local_methods()
+    if _use_enterprise_web:
+        _web_no_local = _web_no_local | frozenset({
+            "chat.send",
+            "chat.resume",
+            "chat.interrupt",
+            "chat.user_answer",
+        })
     web_norm_and_forward = _make_norm_and_forward(
         _FORWARD_REQ_METHODS | get_extra_forward_methods(),
-        _FORWARD_NO_LOCAL_HANDLER_METHODS | get_extra_no_local_methods(),
+        _web_no_local,
         "Web",
     )
     channel_manager.register_channel_with_inbound(web_channel, web_norm_and_forward)
@@ -1719,11 +1768,39 @@ async def _run(
     await channel_manager.start_dispatch()
     await cron_scheduler.start()
 
+    try:
+        from jiuwenclaw.infrastructure.log_masking.engine import LogMaskingEngine
+
+        await LogMaskingEngine.reload_log_masking_from_gateway_db()
+        logger.info("[App] log masking rules loaded from Gateway DB (if any)")
+    except Exception:  # noqa: BLE001
+        logger.warning("[App] log_masking_rule cold load skipped", exc_info=True)
+
+
+    if os.getenv("AGENT_RUNTIME", "").strip():
+        try:
+            from jiuwenclaw.utils import reload_logging_levels_from_gateway_db
+
+            await reload_logging_levels_from_gateway_db()
+            logger.info("[App] logging levels loaded from Gateway DB (if any)")
+        except Exception:  # noqa: BLE001
+            logger.warning("[App] logging_config cold load skipped", exc_info=True)
+
+        try:
+            from jiuwenclaw.agentserver.permissions.config_loader import (
+                reload_permissions_from_gateway_db,
+            )
+
+            await reload_permissions_from_gateway_db()
+            logger.info("[App] permissions config loaded from Gateway DB (if any)")
+        except Exception:  # noqa: BLE001
+            logger.warning("[App] permissions_config cold load skipped", exc_info=True)
+
     # ---------- LeaderElection 初始化 ----------
     leader_election = None
     config = get_config()
     deployment_mode = str((config.get("gateway") or {}).get("deployment_mode", "standalone")).strip().lower()
-    if deployment_mode != "standalone":
+    if deployment_mode == "active-standby":
         from jiuwenclaw.gateway.leader_election import LeaderElection, Role
         
         leader_election = LeaderElection.get_instance()
@@ -1756,11 +1833,12 @@ async def _run(
         if hasattr(client, "cleanup_all_pods"):
             async def _session_on_role_change(role: Role) -> None:
                 if role == Role.PRIMARY:
-                    logger.info("[App] 角色切换为 PRIMARY，开始清理旧主遗留的所有 Pod")
+                    logger.info("[App] 角色切换为 PRIMARY，清理旧主遗留 Pod 并重新初始化 Access")
                     await client.cleanup_all_pods()
+                    await client.reinit_access()
                 else:
                     logger.info("[App] 角色切换为 STANDBY")
-            leader_election.register_callback(_session_on_role_change)
+            #leader_election.register_callback(_session_on_role_change)
 
         # 选主感知：ManagerWsClient 仅在 PRIMARY 节点连接 Claw Manager；
         # STANDBY 不连，避免与 Manager 建立无意义的会话（共享 MySQL 已保证配置一致）。
@@ -1770,7 +1848,7 @@ async def _run(
         async def _manager_ws_on_role_change(role: Role) -> None:
             try:
                 mod = importlib.import_module(
-                    "jiuwenclaw.loaded_extension.manager_ws_client.extension"
+                    "jiuwenclaw.loaded_extension.manager_ws_client"
                 )
             except Exception:  # noqa: BLE001
                 return
@@ -1790,6 +1868,19 @@ async def _run(
                 logger.exception("[App] manager_ws_client.%s failed", fn_name)
 
         leader_election.register_callback(_manager_ws_on_role_change)
+
+        # 选主感知：EnterpriseWebChannel 仅在 PRIMARY 连接 Web Pod /gateway；
+        # STANDBY 主动断开 uplink，避免双 Gateway 竞争同一条 Web Pod 连接。
+        if _defer_enterprise_web_uplink and web_channel is not None:
+            async def _enterprise_web_on_role_change(role: Role) -> None:
+                if role == Role.PRIMARY:
+                    logger.info("[App] PRIMARY elected, start EnterpriseWeb uplink connect")
+                    web_channel.start_uplink_connect()
+                else:
+                    logger.info("[App] STANDBY elected, stop EnterpriseWeb uplink connect")
+                    await web_channel.stop_uplink_connect()
+
+            leader_election.register_callback(_enterprise_web_on_role_change)
 
         # 选主感知：升为 PRIMARY 时主动从 channel_config DB 重新加载 channels。
         # STANDBY 期间 ManagerWsClient 未连接 Manager，可能错过 config.push；
@@ -1826,17 +1917,35 @@ async def _run(
     )
     web_task = (
         asyncio.create_task(web_channel.start(), name="web-channel")
-        if web_channel is not None
+        if web_channel is not None and not _defer_enterprise_web_uplink
         else None
     )
     if web_channel is not None:
-        logger.info(
-            "[App] started: Web ws://%s:%s%s  AgentServer: %s  Press Ctrl+C to exit.",
-            web_host,
-            web_port,
-            web_path,
-            agent_server_url,
-        )
+        if _use_enterprise_web:
+            _ent_uplink_target = (
+                os.getenv("ENTERPRISE_WEB_GATEWAY_URL", "").strip()
+                or f"ws://{web_host}:{web_port}{os.getenv('ENTERPRISE_WEB_GATEWAY_PATH', '/gateway')}"
+            )
+            if _defer_enterprise_web_uplink:
+                logger.info(
+                    "[App] EnterpriseWeb uplink leader-aware (target %s)  AgentServer: %s",
+                    _ent_uplink_target,
+                    agent_server_url,
+                )
+            else:
+                logger.info(
+                    "[App] started: EnterpriseWeb uplink (target %s)  AgentServer: %s",
+                    _ent_uplink_target,
+                    agent_server_url,
+                )
+        else:
+            logger.info(
+                "[App] started: Web ws://%s:%s%s  AgentServer: %s  Press Ctrl+C to exit.",
+                web_host,
+                web_port,
+                web_path,
+                agent_server_url,
+            )
 
     shutdown_requested: asyncio.Event | None = None
     _setup_signals = getattr(agent_server_ext, "setup_gateway_shutdown_signals", None)
@@ -1885,7 +1994,10 @@ async def _run(
             except asyncio.CancelledError:
                 pass
         if web_channel is not None:
-            await web_channel.stop()
+            if _defer_enterprise_web_uplink:
+                await web_channel.stop_uplink_connect()
+            else:
+                await web_channel.stop()
 
         if feishu_channel is not None and feishu_task is not None:
             feishu_task.cancel()

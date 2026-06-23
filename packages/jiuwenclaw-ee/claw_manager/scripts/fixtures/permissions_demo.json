@@ -1,0 +1,22 @@
+{
+  "enabled": true,
+  "defaults": "ask",
+  "tools": {
+    "bash": "deny",
+    "todo_list": "allow"
+  },
+  "rules": [
+    {
+      "id": "demo_allow_echo",
+      "pattern": "echo *",
+      "action": "allow"
+    }
+  ],
+  "approval_overrides": [],
+  "file_guard": {
+    "workspace": { "rw_enabled": true },
+    "global": {},
+    "trusted_exec_directory": [],
+    "tool_bindings": {}
+  }
+}

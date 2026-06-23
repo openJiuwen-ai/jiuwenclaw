@@ -26,7 +26,7 @@ def _config() -> dict:
     key_prefix = os.getenv("REDIS_KEY_PREFIX", "jiuwenclaw:").strip() or "jiuwenclaw:"
     return {
         "gateway": {
-            "deployment_mode": "distributed",
+            "deployment_mode": "active-standby",
             "instance_id": os.getenv("GATEWAY_INSTANCE_ID", "").strip(),
         },
         "redis": {
@@ -49,7 +49,9 @@ async def run_smoke() -> None:
     await init_gateway_redis_from_config(cfg)
 
     if not get_effective_distributed_redis_active():
-        raise RuntimeError("distributed Redis 未生效（检查 deployment_mode / 网络 / gateway-reliability）")
+        raise RuntimeError(
+            "active-standby Redis 未生效（检查 deployment_mode=active-standby / 网络 / redis extra）"
+        )
 
     client = get_gateway_redis_client()
     if client is None:

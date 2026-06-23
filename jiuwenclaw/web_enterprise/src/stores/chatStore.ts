@@ -13,6 +13,7 @@ import {
   SubtaskUpdatePayload,
   AskUserQuestionPayload,
   UsageSummary,
+  FileDownloadItem,
 } from '../types';
 import { useTodoStore } from './todoStore';
 
@@ -22,8 +23,13 @@ function computeTimeoutAt(baseIso: string): string {
   return new Date(Date.parse(baseIso) + TOOL_TIMEOUT_MS).toISOString();
 }
 
+function resultIndicatesFailure(result: ToolResult): boolean {
+  if (!result.success) return true;
+  return typeof result.result === 'string' && result.result.includes('success=False');
+}
+
 function resolveExecutionStatus(result: ToolResult): ToolExecutionStatus {
-  return result.success ? 'completed' : 'error';
+  return resultIndicatesFailure(result) ? 'error' : 'completed';
 }
 
 /**
@@ -71,6 +77,8 @@ interface ChatState {
   pendingQuestion: AskUserQuestionPayload | null;  // 待回答的问题
   // 输入框内容
   inputValue: string;
+  // 待挂载的文件下载项（chat.file 早于 chat.tool_result 到达时缓存，等工具调用完成后再挂载）
+  pendingFileItems: FileDownloadItem[];
 
   // Actions
   addMessage: (message: Message) => void;
@@ -100,6 +108,12 @@ interface ChatState {
   setInputValue: (value: string) => void;
   // Usage summary
   setUsageSummary: (messageId: string, usage: UsageSummary) => void;
+  // File download items
+  addFileItems: (files: FileDownloadItem[]) => void;
+  // 缓存待挂载的文件（等 send_file_to_user 工具调用完成后挂载）
+  addPendingFiles: (files: FileDownloadItem[]) => void;
+  // 取出并清空待挂载的文件
+  consumePendingFiles: () => FileDownloadItem[];
 }
 
 export const useChatStore = create<ChatState>((set, get) => ({
@@ -123,6 +137,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
   taskQueue: [],
   pendingQuestion: null,
   inputValue: '',
+  pendingFileItems: [],
 
   addMessage: (message) => {
     set((state) => ({
@@ -488,6 +503,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
       },
       taskQueue: [],
       pendingQuestion: null,
+      pendingFileItems: [],
     });
   },
 
@@ -528,5 +544,54 @@ export const useChatStore = create<ChatState>((set, get) => ({
         msg.id === messageId ? { ...msg, usageSummary: usage } : msg
       ),
     }));
+  },
+
+  addFileItems: (files) => {
+    const { currentStreamId } = get();
+
+    // 优先挂到当前轮次的流式 assistant 消息上（工具调用后 agent 已开始新流式的情况）
+    if (currentStreamId) {
+      set((state) => ({
+        messages: state.messages.map((msg) =>
+          msg.id === currentStreamId
+            ? { ...msg, fileItems: [...(msg.fileItems || []), ...files] }
+            : msg
+        ),
+      }));
+      return;
+    }
+
+    // currentStreamId 为空（如 chat.tool_call 已 stopStreaming）：新建一条"仅文件"assistant 消息。
+    // timestamp 取 now，确保在 MessageList 时间线排序中位于工具调用（startedAt 更早）之后；
+    // 后续 chat.delta / chat.final 会复用这条消息把文字写进来。
+    if (files.length > 0) {
+      const fileId = `file_${Date.now()}`;
+      set((state) => ({
+        messages: [
+          ...state.messages,
+          {
+            id: fileId,
+            role: 'assistant',
+            content: '',
+            timestamp: new Date().toISOString(),
+            fileItems: files,
+          },
+        ],
+      }));
+    }
+  },
+
+  addPendingFiles: (files) => {
+    if (!files.length) return;
+    set((state) => ({
+      pendingFileItems: [...state.pendingFileItems, ...files],
+    }));
+  },
+
+  consumePendingFiles: () => {
+    const { pendingFileItems } = get();
+    if (!pendingFileItems.length) return [];
+    set({ pendingFileItems: [] });
+    return pendingFileItems;
   },
 }));

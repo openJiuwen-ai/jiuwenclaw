@@ -3,13 +3,13 @@
 from __future__ import annotations
 
 import json
-import uuid
+import logging
 from collections.abc import Sequence
 from typing import Any
 
 from openjiuwen_runtime.foundation.db.handler import DBHandler
 
-from jiuwenclaw_manager.infrastructure.utils import iso_datetime, utc_now
+from jiuwenclaw_manager.infrastructure.utils import iso_datetime, new_uuid4, utc_now
 from jiuwenclaw_manager.schemas.instance_schemas import (
     CreateInstanceBody,
     InstanceDetail,
@@ -18,7 +18,24 @@ from jiuwenclaw_manager.schemas.instance_schemas import (
 )
 from jiuwenclaw_manager.models.instance_models import INSTANCE_INFO_TABLE_DEF
 
+logger = logging.getLogger(__name__)
+
 _INSTANCE_TABLE = INSTANCE_INFO_TABLE_DEF.table_name
+_LOG_MASKING_SEEDED_KEY = "log_masking_seeded"
+
+
+def _instance_data_dict(row: Any | None) -> dict[str, Any]:
+    data = getattr(row, "data", None) if row is not None else None
+    return dict(data) if isinstance(data, dict) else {}
+
+
+async def is_log_masking_seeded(handler: DBHandler, jiuwenclaw_id: str) -> bool:
+    """``instance_info.data.log_masking_seeded`` 为真时表示 builtin 种子已执行过。"""
+    jid = str(jiuwenclaw_id or "").strip()
+    if not jid:
+        return False
+    row = await get_instance_row(handler, jid)
+    return bool(_instance_data_dict(row).get(_LOG_MASKING_SEEDED_KEY))
 
 
 def dumps_auth_config(cfg: dict) -> str:
@@ -44,10 +61,84 @@ _MAX_JIUWENCLAW_ID_ATTEMPTS = 10
 async def generate_unique_jiuwenclaw_id(handler: DBHandler) -> str:
     """生成 ``instance_info`` 中尚未占用的 ``jiuwenclaw_id``。"""
     for _ in range(_MAX_JIUWENCLAW_ID_ATTEMPTS):
-        jiuwenclaw_id = f"sp-{uuid.uuid4().hex[:12]}"
+        jiuwenclaw_id = new_uuid4()
         if await get_instance_row(handler, jiuwenclaw_id) is None:
             return jiuwenclaw_id
     raise RuntimeError("failed to generate unique jiuwenclaw_id after retries")
+
+
+async def bootstrap_gateway_log_masking(
+    handler: DBHandler,
+    jiuwenclaw_id: str,
+) -> None:
+    """Gateway WS 注册：首次 MDB builtin 种子 + bulk push 到 GDB（``op=sync``）。"""
+    jid = str(jiuwenclaw_id or "").strip()
+    if not jid:
+        return
+    try:
+        from jiuwenclaw_manager.core.application_config.log_masking_rule import (
+            push_log_masking_rules_sync_to_gateway,
+            seed_builtin_log_masking_rules,
+        )
+
+        if not await is_log_masking_seeded(handler, jid):
+            seeded = await seed_builtin_log_masking_rules(handler, jid)
+            await merge_instance_data(handler, jid, {_LOG_MASKING_SEEDED_KEY: True})
+            if seeded:
+                logger.info(
+                    "[Instance] seeded %d builtin log_masking_rule row(s) for %s",
+                    seeded,
+                    jid,
+                )
+            else:
+                logger.info(
+                    "[Instance] log_masking builtin seed completed for %s (no new rows)",
+                    jid,
+                )
+        sync_ack = await push_log_masking_rules_sync_to_gateway(handler, jid)
+        logger.info(
+            "[Instance] log_masking_rule sync on gateway register jiuwenclaw_id=%s "
+            "revision=%s",
+            jid,
+            sync_ack.get("revision"),
+        )
+    except Exception:
+        logger.warning(
+            "[Instance] log_masking_rule bootstrap failed for %s",
+            jid,
+            exc_info=True,
+        )
+
+
+async def bootstrap_gateway_templates(
+    handler: DBHandler,
+    jiuwenclaw_id: str,
+) -> None:
+    """Gateway WS 注册：将配置生效策略引用的模板 bulk push 到 GDB（``op=sync``）。"""
+    jid = str(jiuwenclaw_id or "").strip()
+    if not jid:
+        return
+    try:
+        from jiuwenclaw_manager.core.template.push_template_to_gateway import (
+            rebuild_jid_template_ref_for_gateway,
+            sync_referenced_templates_to_gateway,
+        )
+
+        acks = await sync_referenced_templates_to_gateway(handler, jid)
+        await rebuild_jid_template_ref_for_gateway(handler, jid)
+        for name, ack in acks.items():
+            logger.info(
+                "[Instance] %s sync on gateway register jiuwenclaw_id=%s revision=%s",
+                name,
+                jid,
+                ack.get("revision"),
+            )
+    except Exception:
+        logger.warning(
+            "[Instance] template bootstrap failed for %s",
+            jid,
+            exc_info=True,
+        )
 
 
 async def register_gateway_via_ws(
@@ -161,6 +252,10 @@ async def list_instance_rows(
 
 async def delete_instance_row(handler: DBHandler, jiuwenclaw_id: str) -> None:
     await handler.delete(_INSTANCE_TABLE, {"jiuwenclaw_id": jiuwenclaw_id})
+    # 解绑销毁：一并删除该实例的 Gateway 加密公钥（心跳超时下线不走此路径）。
+    from jiuwenclaw_manager.security.keys import delete_instance_enc_pubkey
+
+    await delete_instance_enc_pubkey(handler, jiuwenclaw_id)
 
 
 async def merge_instance_data(

@@ -61,11 +61,14 @@ def _normalize_permissions_config_params(params: dict[str, Any]) -> dict[str, An
 
 
 def _hot_reload_permission_engine_from_config() -> None:
-    from jiuwenclaw.config import get_config
+    from jiuwenclaw.agentserver.permissions.config_loader import (
+        clear_permissions_config_cache,
+        get_effective_permissions_config,
+    )
     from jiuwenclaw.agentserver.permissions.core import get_permission_engine
 
-    perm_cfg = get_config().get("permissions", {})
-    get_permission_engine().update_config(perm_cfg)
+    clear_permissions_config_cache()
+    get_permission_engine().update_config(get_effective_permissions_config(force_reload=True))
 
 
 def _err(request: AgentRequest, message: str, *, code: str = "BAD_REQUEST") -> AgentResponse:
@@ -91,7 +94,6 @@ def _ok(request: AgentRequest, payload: dict[str, Any] | None) -> AgentResponse:
 def dispatch_permissions_config_request(request: AgentRequest) -> AgentResponse:
     """执行一条 permissions 配置 RPC（与原先 WebSocket register_method 语义一致）。"""
     from jiuwenclaw.config import (
-        get_config,
         get_permissions_approval_overrides,
         get_permissions_rules,
         get_permissions_tools,
@@ -114,7 +116,9 @@ def dispatch_permissions_config_request(request: AgentRequest) -> AgentResponse:
 
     try:
         if m == ReqMethod.PERMISSIONS_ENABLED_GET:
-            enabled = bool((get_config().get("permissions") or {}).get("enabled", True))
+            from jiuwenclaw.agentserver.permissions.config_loader import get_effective_permissions_config
+
+            enabled = bool(get_effective_permissions_config().get("enabled", True))
             return _ok(request, {"enabled": enabled})
 
         if m == ReqMethod.PERMISSIONS_ENABLED_SET:

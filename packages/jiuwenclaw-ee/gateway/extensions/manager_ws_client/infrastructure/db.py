@@ -4,12 +4,14 @@
 
 from __future__ import annotations
 
+import asyncio
 import os
 from pathlib import Path
 from typing import Any
 
 from openjiuwen_runtime.foundation.db.handler import DBHandler
 from openjiuwen_runtime.foundation.db.mysql_handler import MySQLHandler
+from openjiuwen_runtime.foundation.db import postgresql_handler
 from openjiuwen_runtime.foundation.db.postgresql_handler import PostgreSQLHandler
 from openjiuwen_runtime.foundation.db.sqlite_handler import SQLiteHandler
 from openjiuwen_runtime.foundation.log import get_logger
@@ -33,6 +35,7 @@ class Database:
         self._relative_root = relative_root
         self._handler: DBHandler | None = None
         self.tables_registered = False
+        self._ready_lock = asyncio.Lock()
 
     @property
     def settings(self) -> Settings:
@@ -65,13 +68,20 @@ class Database:
         cfg = self.settings
         db_type = str(cfg.gateway_db_type or "").strip().lower() or "sqlite"
         if db_type == "sqlite":
-            return {"db_type": db_type, "sqlite_path": str(self.resolve_sqlite_path())}
-        return {
-            "db_type": db_type,
-            "host": cfg.gateway_db_host,
-            "port": cfg.gateway_db_port,
-            "database": cfg.gateway_db_name,
-        }
+            result = {
+                "db_type": db_type,
+                "sqlite_path": str(self.resolve_sqlite_path()),
+            }
+        else:
+            result = {
+                "db_type": db_type,
+                "host": cfg.gateway_db_host,
+                "port": cfg.gateway_db_port,
+                "database": cfg.gateway_db_name,
+            }
+        if db_type == "postgresql":
+            result["schema"] = cfg.gateway_pg_schema
+        return result
 
     def _create_sqlite_handler(self) -> SQLiteHandler:
         db_path = self.resolve_sqlite_path()
@@ -98,9 +108,10 @@ class Database:
             return PostgreSQLHandler(
                 host=str(cfg.gateway_db_host).strip(),
                 port=int(cfg.gateway_db_port),
+                database=str(cfg.gateway_db_name).strip(),
+                schema=str(cfg.gateway_pg_schema).strip(),
                 user=str(cfg.gateway_db_user).strip(),
                 password=str(cfg.gateway_db_password),
-                database=str(cfg.gateway_db_name).strip(),
             )
         except (TypeError, ValueError) as e:
             logger.exception("Invalid PostgreSQL database configuration.")
@@ -133,21 +144,25 @@ class Database:
         *,
         log_prefix: str = "",
     ) -> DBHandler:
-        """连接数据库并注册 Gateway 表定义（进程内幂等）。"""
-        if self._handler is not None:
+        """连接数据库并注册 Gateway 表定义（进程内幂等、并发安全）。"""
+        if self.tables_registered and self._handler is not None:
             return self._handler
 
-        handler = self.create_handler()
-        await handler.init_database()
-        await handler.connect()
+        async with self._ready_lock:
+            if self.tables_registered and self._handler is not None:
+                return self._handler
 
-        if not self.tables_registered:
-            await init_all_tables(handler)
-            self.tables_registered = True
+            handler = self.create_handler()
+            await handler.init_database()
+            await handler.connect()
 
-        prefix = f"[{log_prefix}] " if log_prefix else ""
-        logger.info("%sdatabase handler ready: %s", prefix, self.config_summary())
-        return handler
+            if not self.tables_registered:
+                await init_all_tables(handler)
+                self.tables_registered = True
+
+            prefix = f"[{log_prefix}] " if log_prefix else ""
+            logger.info("%sdatabase handler ready: %s", prefix, self.config_summary())
+            return handler
 
     async def close(self) -> None:
         """断开连接并释放 handler（CLI / 短生命周期脚本应在 event loop 关闭前调用）。"""
@@ -159,3 +174,12 @@ class Database:
             logger.warning("database disconnect error: %s", exc)
         finally:
             self._handler = None
+            self.tables_registered = False
+
+
+_GATEWAY_DB = Database(relative_root=Path(__file__).resolve().parents[1])
+
+
+async def ensure_db_handler(*, log_prefix: str = "manager_ws_client") -> DBHandler:
+    """获取 Gateway 本地库 ``DBHandler``（进程内幂等）。"""
+    return await _GATEWAY_DB.ensure_ready(log_prefix=log_prefix)

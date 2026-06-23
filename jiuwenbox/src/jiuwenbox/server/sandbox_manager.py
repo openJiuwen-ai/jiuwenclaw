@@ -16,7 +16,6 @@ import logging
 import os
 import textwrap
 import time
-import uuid
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -53,6 +52,8 @@ from jiuwenbox.models.sandbox import (
     SandboxPhase,
     SandboxRef,
     SandboxSpec,
+    generate_sandbox_id,
+    validate_custom_sandbox_id,
 )
 from jiuwenbox.server.audit_logger import AuditLogger
 from jiuwenbox.server.policy_engine import PolicyEngine
@@ -93,6 +94,10 @@ class SandboxStateError(Exception):
     def __init__(self, *args: object) -> None:
         super().__init__(*args)
         logger.error("%s: %s", self.__class__.__name__, str(self))
+
+
+class SandboxConflictError(Exception):
+    """Raised for expected request conflicts such as duplicate sandbox IDs."""
 
 
 class SandboxManager:
@@ -504,7 +509,17 @@ class SandboxManager:
     ) -> SandboxRef:
         """Create a new sandbox."""
         async with self._lock:
-            sandbox_id = str(uuid.uuid4())[:12]
+            if spec.sandbox_id is None:
+                sandbox_id = generate_sandbox_id()
+                while sandbox_id in self._sandboxes:
+                    sandbox_id = generate_sandbox_id()
+            else:
+                validate_custom_sandbox_id(spec.sandbox_id)
+                if spec.sandbox_id in self._sandboxes:
+                    raise SandboxConflictError(
+                        f"Sandbox '{spec.sandbox_id}' already exists"
+                    )
+                sandbox_id = spec.sandbox_id
             policy = self._resolve_effective_policy(policy_data, policy_mode)
             logger.debug("Creating sandbox %s with policy %s", sandbox_id, str(policy))
             self.policy_engine.validate_policy(policy)

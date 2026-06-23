@@ -19,6 +19,21 @@ interface ToolGroupDisplayProps {
   executions: ToolExecution[];
 }
 
+function resultIndicatesFailure(result: ToolExecution['result']): boolean {
+  if (!result) return false;
+  if (!result.success) return true;
+  return typeof result.result === 'string' && result.result.includes('success=False');
+}
+
+function getToolExecutionVisualState(execution: Pick<ToolExecution, 'status' | 'result'>) {
+  const { status, result } = execution;
+  const isTimeout = status === 'timeout';
+  const isPending = status === 'pending';
+  const isFailed = status === 'error' || resultIndicatesFailure(result);
+  const isSuccess = status === 'completed' && !!result && !isFailed;
+  return { isPending, isTimeout, isFailed, isSuccess };
+}
+
 /**
  * 工具详情弹窗组件
  *
@@ -31,10 +46,8 @@ interface ToolDetailModalProps {
 
 function ToolDetailModal({ execution, onClose }: ToolDetailModalProps) {
   const { t } = useTranslation();
-  const { toolCall, result, status } = execution;
-  const isTimeout = status === 'timeout';
-  const isError = status === 'error';
-  const isSuccess = status === 'completed' && !(result && result.result && result.result.includes('success=False'));
+  const { toolCall, result } = execution;
+  const { isPending, isTimeout, isFailed, isSuccess } = getToolExecutionVisualState(execution);
 
   
   // ESC 键关闭
@@ -75,7 +88,7 @@ function ToolDetailModal({ execution, onClose }: ToolDetailModalProps) {
           <div className="flex items-center gap-4">
             <span className={clsx(
               'tool-pair-icon',
-              isSuccess ? 'success' : isError ? 'error' : isTimeout ? 'warning' : 'pending'
+              isSuccess ? 'success' : isFailed ? 'error' : isTimeout ? 'warning' : 'pending'
             )}
             style={{ width: '32px', height: '32px' }}
             >
@@ -83,15 +96,19 @@ function ToolDetailModal({ execution, onClose }: ToolDetailModalProps) {
                 <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2}>
                   <path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" />
                 </svg>
-              ) : isError ? (
+              ) : isFailed ? (
                 '❌'
               ) : isTimeout ? (
                 <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2}>
                   <path strokeLinecap="round" strokeLinejoin="round" d="M12 9v4m0 4h.01M12 3C7.029 3 3 7.029 3 12s4.029 9 9 9 9-4.029 9-9-4.029-9-9-9z" />
                 </svg>
-              ) : (
+              ) : isPending ? (
                 <svg className="w-4 h-4 animate-spin" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2}>
                   <path strokeLinecap="round" strokeLinejoin="round" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+                </svg>
+              ) : (
+                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2}>
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
                 </svg>
               )}
             </span>
@@ -240,7 +257,7 @@ function ToolDetailModal({ execution, onClose }: ToolDetailModalProps) {
           )}
 
           {/* 等待状态 */}
-          {!result && !isTimeout && (
+          {isPending && !isTimeout && (
             <div
               className="flex items-center gap-3 p-4 rounded-lg"
               style={{
@@ -265,11 +282,9 @@ export function ToolExecutionItem({ execution }: { execution: ToolExecution }) {
   const { t } = useTranslation();
   const [showModal, setShowModal] = useState(false);
   const { toolCall, result, status } = execution;
+  const { isPending, isTimeout, isFailed, isSuccess } = getToolExecutionVisualState(execution);
   const subtitle = toolCall.formatted_args || '';
   const hasResult = !!result;
-  const isTimeout = status === 'timeout';
-  const isError = status === 'error';
-  const isSuccess = status === 'completed' && !(result && result.result && result.result.includes('success=False'));
   const resultSummary = result
     ? (result.summary || (isSuccess ? t('chatUi.toolResult.success') : '❌'))
     : '';
@@ -285,13 +300,13 @@ export function ToolExecutionItem({ execution }: { execution: ToolExecution }) {
         <div className="tool-pair-header" onClick={() => setShowModal(true)}>
           <span className={clsx(
             'tool-pair-icon',
-            isSuccess ? 'success' : isError ? 'error' : isTimeout ? 'warning' : 'pending'
+            isSuccess ? 'success' : isFailed ? 'error' : isTimeout ? 'warning' : 'pending'
           )}>
             {isSuccess ? (
               <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2}>
                 <path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" />
               </svg>
-            ) : isError ? (
+            ) : isFailed ? (
               <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2}>
                 <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
               </svg>
@@ -299,9 +314,13 @@ export function ToolExecutionItem({ execution }: { execution: ToolExecution }) {
               <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2}>
                 <path strokeLinecap="round" strokeLinejoin="round" d="M12 9v4m0 4h.01M12 3C7.029 3 3 7.029 3 12s4.029 9 9 9 9-4.029 9-9-4.029-9-9-9z" />
               </svg>
-            ) : (
+            ) : isPending ? (
               <svg className="w-3 h-3 animate-spin" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2}>
                 <path strokeLinecap="round" strokeLinejoin="round" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+              </svg>
+            ) : (
+              <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2}>
+                <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
               </svg>
             )}
           </span>
@@ -335,7 +354,7 @@ export function ToolExecutionItem({ execution }: { execution: ToolExecution }) {
           {hasResult && (
             <span className={clsx(
               'tool-pair-result-badge',
-              result.success ? 'success' : 'error'
+              isSuccess ? 'success' : 'error'
             )}>
               {resultSummary}
             </span>

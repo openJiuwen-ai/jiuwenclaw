@@ -102,6 +102,47 @@ cd jiuwenclaw
 PORT=19000 python -m jiuwenclaw.api.app
 ```
 
+### 配置 MinIO 文件上传
+
+聊天附件上传走自部署 MinIO（S3 兼容），不再依赖华为 OSMS / 小艺 OBS。
+
+在 `~/.jiuwenclaw/config.yaml`（或仓库 `jiuwenclaw/resources/config.yaml`）中配置：
+
+```yaml
+minio:
+  endpoint: 127.0.0.1:9000      # 或 http://127.0.0.1:9000
+  access_key: minioadmin
+  secret_key: Minio@123456
+  bucket: jiuwenclaw
+  secure: false
+  # public_base_url: http://127.0.0.1:9000   # 可选；不设则返回 presigned URL
+```
+
+也可用环境变量（优先级更高）：
+
+```bash
+export JIUWENCLAW_MINIO_ENDPOINT=127.0.0.1:9000
+export JIUWENCLAW_MINIO_ACCESS_KEY=minioadmin
+export JIUWENCLAW_MINIO_SECRET_KEY=Minio@123456
+export JIUWENCLAW_MINIO_BUCKET=jiuwenclaw
+```
+
+MinIO 默认 API 端口 **9000**、Console **9001**。Docker 示例如下：
+
+```bash
+docker run -p 9000:9000 -p 9001:9001 \
+  -e MINIO_ROOT_USER=minioadmin -e MINIO_ROOT_PASSWORD=Minio@123456 \
+  minio/minio server /data --console-address ":9001"
+```
+
+上传链路：浏览器 → `POST /file-api/upload-obs` → `minio_upload.upload_base64_payload` → MinIO bucket。
+
+开发模式（`npm run dev`）下 Vite 将 `/file-api/upload-obs` 代理到 `http://127.0.0.1:5174`；使用 `start_services dev-enterprise` 时会自动启动 upload API。单独开发前端时需另开：
+
+```bash
+python -m jiuwenclaw.app_web --upload-api-only --port 5174
+```
+
 ## 后端 API 要求
 
 前端依赖以下后端接口：

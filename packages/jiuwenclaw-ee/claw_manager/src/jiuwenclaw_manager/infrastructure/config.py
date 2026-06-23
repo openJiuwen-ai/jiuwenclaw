@@ -28,12 +28,13 @@ class Settings(BaseSettings):
     rest_port: int = Field(default=8765, validation_alias="MANAGER_REST_PORT")
 
     db_type: str = Field(default="sqlite", validation_alias="MANAGER_DB_TYPE")
-    sqlite_path: str = Field(default="claw_manager.db", validation_alias="MANAGER_SQLITE_PATH")
+    sqlite_path: str = Field(default="manager.db", validation_alias="MANAGER_SQLITE_PATH")
     db_host: str = Field(default="127.0.0.1", validation_alias="MANAGER_DB_HOST")
     db_port: int = Field(default=3306, validation_alias="MANAGER_DB_PORT")
     db_user: str = Field(default="root", validation_alias="MANAGER_DB_USER")
     db_password: str = Field(default="root", validation_alias="MANAGER_DB_PASSWORD")
-    db_name: str = Field(default="claw_manager", validation_alias="MANAGER_DB_NAME")
+    db_name: str = Field(default="manager", validation_alias="MANAGER_DB_NAME")
+    pg_schema: str = Field(default="public", validation_alias="MANAGER_PG_SCHEMA")
 
     manager_heartbeat_timeout_seconds: int = Field(
         default=120, validation_alias="MANAGER_HEARTBEAT_TIMEOUT_SECONDS"
@@ -62,6 +63,22 @@ class Settings(BaseSettings):
     )
     instance_config_template: str | None = Field(
         default=None, validation_alias="CLAWMANAGER_INSTANCE_CONFIG_TEMPLATE"
+    )
+
+    # ========== 配置下发字段级加密（信封加密，密钥握手分发） ==========
+    config_enc_enabled: bool = Field(
+        default=False, validation_alias="CLAWMANAGER_CONFIG_ENC_ENABLED"
+    )
+    config_enc_required: bool = Field(
+        default=False, validation_alias="CLAWMANAGER_CONFIG_ENC_REQUIRED"
+    )
+
+    # ========== 配置下发加签（Ed25519，公钥握手分发） ==========
+    config_sign_enabled: bool = Field(
+        default=False, validation_alias="CLAWMANAGER_CONFIG_SIGN_ENABLED"
+    )
+    config_sign_alg: str = Field(
+        default="Ed25519", validation_alias="CLAWMANAGER_CONFIG_SIGN_ALG"
     )
 
     manager_ws_enabled: bool = Field(

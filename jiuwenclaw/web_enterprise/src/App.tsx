@@ -23,7 +23,7 @@ import {
 } from './features/tool-events/toolEventNormalizer';
 import { useWebSocket } from './hooks';
 import { webRequest } from './services/webClient';
-import { AgentMode, UserAnswer } from './types';
+import { AgentMode, UserAnswer, ChatSendFile } from './types';
 import { useSessionStore, useChatStore, useTodoStore } from './stores';
 import { useTranslation } from 'react-i18next';
 import i18n from './i18n';
@@ -713,11 +713,11 @@ function AppContent() {
     }
   }, [request]);
 
-  const handleSendMessage = useCallback((content: string) => {
+  const handleSendMessage = useCallback((content: string, files?: ChatSendFile[]) => {
     void (async () => {
       const sid = await ensureSessionForSend();
       if (!sid) return;
-      await sendMessage(content, sid);
+      await sendMessage(content, sid, files);
     })();
   }, [ensureSessionForSend, sendMessage]);
 

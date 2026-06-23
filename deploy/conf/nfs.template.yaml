@@ -6,48 +6,41 @@ metadata:
   labels:
     app: <<NFS_NAME>>
 spec:
-  replicas: 1  # 单节点 NFS，不要多副本
+  replicas: 1
+  strategy:
+    type: Recreate
   selector:
     matchLabels:
       app: <<NFS_NAME>>
-  strategy:
-    type: Recreate  # 确保 NFS 服务不中断
   template:
     metadata:
       labels:
         app: <<NFS_NAME>>
     spec:
-      hostNetwork: true
       # 固定调度到本master节点（运行部署工具的节点）
       nodeName: <<MASTER_NODE_NAME>>
+      hostNetwork: true
       containers:
-      - name: <<NFS_NAME>>
-        image: <<NFS_IMAGE>>  # 轻量稳定镜像
-        imagePullPolicy: IfNotPresent
-        env:
-          - name: SHARED_DIRECTORY
-            value: "/exports"  # 容器内共享目录
-          - name: PERMITTED
-            value: "*"          # 允许所有客户端（可限制网段）
-          - name: SYNC
-            value: "true"       # 同步写入
-        ports:
-          - containerPort: 2049
-            name: nfs
-          - containerPort: 20048
-            name: mountd
-          - containerPort: 111
-            name: rpcbind
-        securityContext:
-          privileged: true      # NFS 必须特权模式
-          capabilities:
-            add:
-              - SYS_ADMIN
-        volumeMounts:
-          - name: nfs-data
-            mountPath: /exports  # 数据持久化挂载
+        - name: <<NFS_NAME>>
+          image: <<NFS_IMAGE>>
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            privileged: true
+          env:
+            - name: NFS_DISABLE_VERSION_3
+              value: "1"
+            - name: NFS_EXPORT_0
+              value: "/exports *(rw,sync,no_subtree_check,no_root_squash,fsid=0,insecure)"
+          ports:
+            - containerPort: 2049
+              name: nfs
+            - containerPort: 111
+              name: rpcbind
+          volumeMounts:
+            - name: nfs-storage
+              mountPath: /exports
       volumes:
-        - name: nfs-data
+        - name: nfs-storage
           hostPath:
-            path: <<NFS_HOST_PATH>>      # 宿主机路径（数据存在节点上）
+            path: <<NFS_HOST_PATH>>
             type: DirectoryOrCreate

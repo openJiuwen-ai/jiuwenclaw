@@ -5,12 +5,13 @@
 启动后会：
   1. 拉取 Manager 所有现存 instance；
   2. 为每个 instance 起一条 WebSocket 连接，register 自己为 service_type=gateway；
-  3. 收到 config.push 立刻回 config.ack(ok=True)。
+  3. 收到 config.push 立刻回 config.ack(success_flag=True)。
 
 用法：
     python3 scripts/mock_gateway_ws.py
     GATEWAY_MANAGER_WS_URL=ws://127.0.0.1:8766 python3 scripts/mock_gateway_ws.py
-    INSTANCE_IDS="sp-aaa,sp-bbb" python3 scripts/mock_gateway_ws.py  # 也可显式指定
+    INSTANCE_IDS="b26bc496-dfee-488b-a2ab-8bae8ce94985,\\
+        c1d2e3f4-a5b6-7890-abcd-ef1234567890" python3 scripts/mock_gateway_ws.py  # 也可显式指定
 
 依赖：仅 stdlib + websockets（jiuwenclaw_manager 已带）。
 """
@@ -55,12 +56,10 @@ def _fetch_instance_ids() -> list[str]:
     return [str(it["jiuwenclaw_id"]) for it in items if it.get("jiuwenclaw_id")]
 
 
-_SECTIONS_RETURNING_POLICY_ID = {
+_SECTIONS_RETURNING_ROW_ID = {
     "config_effective_service_policies",
     "config_effective_global_policies",
     "config_effective_agent_policies",
-}
-_SECTIONS_RETURNING_MAPPING_ID = {
     "config_default_template_mappings",
 }
 
@@ -74,12 +73,9 @@ def _build_ack_result(config: dict[str, Any], counters: dict[str, int]) -> dict[
         op = body.get("op")
         if op != "create":
             continue
-        if section in _SECTIONS_RETURNING_POLICY_ID:
+        if section in _SECTIONS_RETURNING_ROW_ID:
             counters[section] = counters.get(section, 0) + 1
-            result["policy_id"] = counters[section]
-        elif section in _SECTIONS_RETURNING_MAPPING_ID:
-            counters[section] = counters.get(section, 0) + 1
-            result["mapping_id"] = counters[section]
+            result["id"] = counters[section]
     return result
 
 
@@ -107,9 +103,26 @@ async def _run_one(instance_id: str | None, stop: asyncio.Event) -> None:
     counters: dict[str, int] = {}
     backoff = 1.0
     label = instance_id or "new"
+    # link-auth 非对称：mock gateway 用一对**稳定**的进程内临时签名密钥（循环外生成一次），
+    # 以便重连时指纹不变、不被 Manager 的 TOFU 指纹固定拦截。
+    from openjiuwen_runtime.foundation.security.link_auth import build_token_header, generate_keypair
+
+    _mock_priv, _mock_pub = generate_keypair()
     while not stop.is_set():
         try:
-            async with websockets.connect(MANAGER_WS, ping_interval=20, ping_timeout=60) as ws:
+            # 以 gateway 身份出示链路令牌（CLAW_LINK_AUTH_MODE=off 时为空）。
+            link_headers = build_token_header(
+                service_id=instance_id or "mock-gw",
+                service_type="gateway",
+                private_b64=_mock_priv,
+                public_b64=_mock_pub,
+            )
+            async with websockets.connect(
+                MANAGER_WS,
+                additional_headers=link_headers or None,
+                ping_interval=20,
+                ping_timeout=60,
+            ) as ws:
                 jid = await _handshake(ws, reconnect_id=instance_id)
                 print(f"[mock-gw] {label}: connected jiuwenclaw_id={jid}")
 
@@ -151,7 +164,7 @@ async def _run_one(instance_id: str | None, stop: asyncio.Event) -> None:
                                         "type": "config.ack",
                                         "payload": {
                                             "revision": revision,
-                                            "ok": True,
+                                            "success_flag": True,
                                             "result": result,
                                         },
                                     }

@@ -6,7 +6,7 @@ deploy_postgresql() {
     local template_file="${CONFIG["POSTGRES_TEMPLATE_FILE"]}"
     local file="${CONFIG["POSTGRES_FILE"]}"
 
-    find_available_port "POSTGRES_NODE_PORT"
+    ensure_available_port "POSTGRES_NODE_PORT"
     render_config_template "${template_file}" "${file}" "DEPLOY_VARS"
     exec_cmd kubectl apply -f ${file}
     wait_k8s_resource_ready "statefulset" "${pg_name}"
@@ -17,6 +17,6 @@ uninstall_postgresql() {
     local pg_name="${DEPLOY_VARS["POSTGRES_NAME"]}"
     local file="${CONFIG["POSTGRES_FILE"]}"
 
-    exec_cmd kubectl delete -f ${file}
+    exec_cmd kubectl delete -f ${file} --ignore-not-found=true
     wait_pod_terminated "${pg_name}"
 }

@@ -28,6 +28,7 @@ const LEGACY_EVENT_MAP: Record<string, string> = {
   content_chunk: 'chat.delta',
   content: 'chat.final',
   media_content: 'chat.media',
+  file_content: 'chat.file',
   tool_call: 'chat.tool_call',
   tool_result: 'chat.tool_result',
   error: 'chat.error',

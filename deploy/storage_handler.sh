@@ -18,8 +18,8 @@ uninstall_pv_pvc() {
     local pv_file="${CONFIG["PV_FILE"]}"
     local pvc_file="${CONFIG["PVC_FILE"]}"
 
-    exec_cmd kubectl delete -f ${pvc_file} false
-    exec_cmd kubectl delete -f ${pv_file} false
+    exec_cmd kubectl delete -f ${pvc_file} --ignore-not-found=true
+    exec_cmd kubectl delete -f ${pv_file} --ignore-not-found=true
 }
 
 
@@ -27,8 +27,8 @@ uninstall_pv_pvc() {
 deploy_nfs() {
     local nfs_path=${DEPLOY_VARS["NFS_HOST_PATH"]}
     local nfs_dname=${DEPLOY_VARS["NFS_NAME"]}
-    local template_file=${DEPLOY_VARS["NFS_TEMPLATE_FILE"]}
-    local file=${DEPLOY_VARS["NFS_FILE"]}
+    local template_file=${CONFIG["NFS_TEMPLATE_FILE"]}
+    local file=${CONFIG["NFS_FILE"]}
 
     render_config_template ${template_file} ${file} "DEPLOY_VARS"
     exec_cmd mkdir -p ${nfs_path}
