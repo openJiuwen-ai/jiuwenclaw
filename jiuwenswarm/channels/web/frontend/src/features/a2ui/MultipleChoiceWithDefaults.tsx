@@ -21,14 +21,30 @@ import {
 
 type MultipleChoiceNodeLike = Extract<AnyComponentNode, { type: 'MultipleChoice' }>;
 
+function choiceValueToString(value: unknown): string {
+  if (typeof value === 'string') return value;
+  if (typeof value === 'number' || typeof value === 'boolean') return String(value);
+  if (value === null || value === undefined) return '';
+  try {
+    return JSON.stringify(value);
+  } catch {
+    return String(value);
+  }
+}
+
+function nonEmptyChoiceValue(value: unknown): string | null {
+  const text = choiceValueToString(value);
+  return text !== '' ? text : null;
+}
+
 function selectedValuesFromData(value: DataValue | null): string[] {
   if (Array.isArray(value)) {
-    return value.filter((item): item is string => typeof item === 'string' && item !== '');
+    return value
+      .map(nonEmptyChoiceValue)
+      .filter((item): item is string => item !== null);
   }
-  if (typeof value === 'string' && value !== '') {
-    return [value];
-  }
-  return [];
+  const singleValue = nonEmptyChoiceValue(value);
+  return singleValue ? [singleValue] : [];
 }
 
 export function visibleMultipleChoiceDefault(
@@ -36,10 +52,12 @@ export function visibleMultipleChoiceDefault(
 ): string | null {
   const defaultValue = visibleChoiceDefaultValue(props as unknown as Record<string, unknown>);
   if (Array.isArray(defaultValue)) {
-    const firstDefault = defaultValue.find((item): item is string => typeof item === 'string');
+    const firstDefault = defaultValue
+      .map(nonEmptyChoiceValue)
+      .find((item): item is string => item !== null);
     return firstDefault ?? null;
   }
-  return typeof defaultValue === 'string' ? defaultValue : null;
+  return nonEmptyChoiceValue(defaultValue);
 }
 
 export function MultipleChoiceWithDefaults({
@@ -59,9 +77,9 @@ export function MultipleChoiceWithDefaults({
 
   const rawProps = props as unknown as Record<string, unknown>;
   const isMultiSelect = isMultiSelectChoice(rawProps);
-  const literalDefaults = literalArrayValues(props.selections).filter(
-    (item): item is string => typeof item === 'string' && item !== '',
-  );
+  const literalDefaults = literalArrayValues(props.selections)
+    .map(nonEmptyChoiceValue)
+    .filter((item): item is string => item !== null);
   const defaultValue = visibleMultipleChoiceDefault(props);
   const dataValue = selectionsPath ? getValue(selectionsPath) : null;
   const selectedValues = selectedValuesFromData(dataValue);
@@ -83,11 +101,11 @@ export function MultipleChoiceWithDefaults({
     if (!shouldShowFilter || !searchQuery.trim()) return options;
     const q = searchQuery.trim().toLowerCase();
     return options.filter((option) => {
-      const label = resolveString(option.label);
-      const value = option.value;
+      const label = resolveString(option.label) ?? '';
+      const value = choiceValueToString(option.value);
       return (
-        (label && label.toLowerCase().includes(q)) ||
-        (value && value.toLowerCase().includes(q))
+        label.toLowerCase().includes(q) ||
+        value.toLowerCase().includes(q)
       );
     });
   }, [options, searchQuery, shouldShowFilter, resolveString]);
@@ -168,12 +186,13 @@ export function MultipleChoiceWithDefaults({
             />
           )}
           <div className="flex flex-wrap gap-2">
-            {filteredOptions.map((option) => {
-              const optionValue = option.value;
+            {filteredOptions.map((option, index) => {
+              const optionValue = choiceValueToString(option.value);
+              const optionLabel = resolveString(option.label) ?? optionValue;
               const isSelected = effectiveSelectedValues.includes(optionValue);
               return (
                 <button
-                  key={optionValue}
+                  key={optionValue || `option-${index}`}
                   type="button"
                   className={`px-3 py-1 rounded-full border ${
                     isSelected
@@ -183,13 +202,13 @@ export function MultipleChoiceWithDefaults({
                   aria-pressed={isSelected}
                   onClick={() => {
                     try {
-                      handleMultiChange(option.value, !isSelected);
+                      handleMultiChange(optionValue, !isSelected);
                     } catch (err) {
                       a2uiError('[A2UI-MC] handleMultiChange threw:', err);
                     }
                   }}
                 >
-                  {resolveString(option.label)}
+                  {optionLabel}
                 </button>
               );
             })}
@@ -219,12 +238,13 @@ export function MultipleChoiceWithDefaults({
             />
           )}
           <div className="flex flex-col gap-1">
-            {filteredOptions.map((option) => {
-              const optionValue = option.value;
+            {filteredOptions.map((option, index) => {
+              const optionValue = choiceValueToString(option.value);
+              const optionLabel = resolveString(option.label) ?? optionValue;
               const isSelected = effectiveSelectedValues.includes(optionValue);
               return (
                 <label
-                  key={optionValue}
+                  key={optionValue || `option-${index}`}
                   className="flex items-center gap-2 cursor-pointer"
                 >
                   <input
@@ -233,7 +253,7 @@ export function MultipleChoiceWithDefaults({
                     onChange={(e) => handleMultiChange(optionValue, e.target.checked)}
                     className="w-4 h-4"
                   />
-                  <span>{resolveString(option.label)}</span>
+                  <span>{optionLabel}</span>
                 </label>
               );
             })}
@@ -262,11 +282,15 @@ export function MultipleChoiceWithDefaults({
           style={stylesToObject(theme.additionalStyles?.MultipleChoice)}
           onChange={handleSingleChange}
         >
-          {(props.options ?? []).map((option) => (
-            <option key={option.value} value={option.value}>
-              {resolveString(option.label)}
-            </option>
-          ))}
+          {(props.options ?? []).map((option, index) => {
+            const optionValue = choiceValueToString(option.value);
+            const optionLabel = resolveString(option.label) ?? optionValue;
+            return (
+              <option key={optionValue || `option-${index}`} value={optionValue}>
+                {optionLabel}
+              </option>
+            );
+          })}
         </select>
       </section>
     </div>

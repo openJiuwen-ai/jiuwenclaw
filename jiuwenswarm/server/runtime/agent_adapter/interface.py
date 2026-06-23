@@ -49,6 +49,7 @@ from jiuwenswarm.common.utils import (
     reset_free_search_runtime_flags,
 )
 from jiuwenswarm.server.runtime.a2ui.integration import finalize_assistant_response_if_a2ui
+from jiuwenswarm.server.runtime.a2ui.runtime.finalizer import should_finalize_a2ui_content
 from jiuwenswarm.agents.harness.common.auto_memory import (
     _execute_auto_memory_extraction,
 )
@@ -110,7 +111,122 @@ def _append_compact_history_from_payload(
 
 
 def _contains_a2ui_marker(value: Any) -> bool:
-    return isinstance(value, str) and "<a2ui-json>" in value
+    return isinstance(value, str) and should_finalize_a2ui_content(value)
+
+
+_A2UI_STREAM_PROBE_WINDOW = 512
+_A2UI_STREAM_PARTIAL_MARKERS = (
+    "<a2ui-json>",
+    "beginRendering",
+    "surfaceUpdate",
+    "dataModelUpdate",
+    "deleteSurface",
+)
+_A2UI_PENDING_RENDER_DELTA = "<a2ui-json>\n"
+
+
+def _make_a2ui_pending_render_chunk(*, request_id: str, channel_id: str) -> AgentResponseChunk:
+    return AgentResponseChunk(
+        request_id=request_id,
+        channel_id=channel_id,
+        payload={"event_type": "chat.delta", "content": _A2UI_PENDING_RENDER_DELTA},
+        is_complete=False,
+    )
+
+
+def _extend_a2ui_stream_probe(previous: str, content: str) -> str:
+    probe = f"{previous}{content}"
+    if len(probe) <= _A2UI_STREAM_PROBE_WINDOW:
+        return probe
+    return probe[-_A2UI_STREAM_PROBE_WINDOW:]
+
+
+def _looks_like_partial_a2ui_marker(value: Any) -> bool:
+    if not isinstance(value, str) or not value:
+        return False
+    tail = value[-_A2UI_STREAM_PROBE_WINDOW:]
+    recent_lines = tail.splitlines()[-3:] or [tail]
+    for line in recent_lines:
+        candidate = line.strip().lstrip("[{,").strip().lstrip('"')
+        match = re.match(r"<?[A-Za-z][A-Za-z0-9_-]*>?", candidate)
+        if match is None:
+            continue
+        token = match.group(0)
+        if len(token) < 3:
+            continue
+        rest = candidate[len(token):].strip()
+        if rest and not any(marker.startswith(token + rest) for marker in _A2UI_STREAM_PARTIAL_MARKERS):
+            continue
+        if any(marker.startswith(token) and token != marker for marker in _A2UI_STREAM_PARTIAL_MARKERS):
+            return True
+    return False
+
+
+def _stream_probe_has_a2ui_marker(value: Any) -> bool:
+    return _contains_a2ui_marker(value) or _looks_like_partial_a2ui_marker(value)
+
+
+_A2UI_STREAM_PROTOCOL_START_RE = re.compile(
+    r"(?im)^(?P<marker>[ \t]*(?:[\[{,][ \t]*)*\"?"
+    r"(?:beginRendering|surfaceUpdate|dataModelUpdate|deleteSurface)\"?[ \t]*(?::|$))"
+)
+
+
+def _recent_line_offsets(value: str) -> list[tuple[int, str]]:
+    if not value:
+        return []
+    lines = value.splitlines(keepends=True)
+    start = 0
+    offsets: list[tuple[int, str]] = []
+    for line in lines:
+        offsets.append((start, line))
+        start += len(line)
+    if value.endswith("\n"):
+        offsets.append((len(value), ""))
+    return offsets[-3:] or [(0, value)]
+
+
+def _a2ui_marker_start(value: Any) -> int | None:
+    if not isinstance(value, str) or not value:
+        return None
+
+    tag_index = value.find("<a2ui-json")
+    protocol_match = _A2UI_STREAM_PROTOCOL_START_RE.search(value)
+    protocol_index = protocol_match.start("marker") if protocol_match is not None else -1
+    indexes = [index for index in (tag_index, protocol_index) if index >= 0]
+    if indexes:
+        return min(indexes)
+
+    for line_start, line in _recent_line_offsets(value):
+        stripped_line = line.strip()
+        if not stripped_line:
+            continue
+        leading = len(line) - len(line.lstrip())
+        candidate = stripped_line.lstrip("[{,").strip().lstrip('"')
+        match = re.match(r"<?[A-Za-z][A-Za-z0-9_-]*>?", candidate)
+        if match is None:
+            continue
+        token = match.group(0)
+        if len(token) < 3:
+            continue
+        rest = candidate[len(token):].strip()
+        if rest and not any(marker.startswith(token + rest) for marker in _A2UI_STREAM_PARTIAL_MARKERS):
+            continue
+        if any(marker.startswith(token) and token != marker for marker in _A2UI_STREAM_PARTIAL_MARKERS):
+            return line_start + leading
+    return None
+
+
+def _split_a2ui_stream_content(previous_probe: str, content: str) -> tuple[str, str] | None:
+    combined = f"{previous_probe}{content}"
+    marker_start = _a2ui_marker_start(combined)
+    if marker_start is None:
+        return None
+    content_start = len(combined) - len(content)
+    if marker_start <= content_start:
+        return "", content
+    split_index = marker_start - content_start
+    return content[:split_index], content[split_index:]
 
 
 load_dotenv(dotenv_path=get_env_file(), override=True)
@@ -1698,6 +1814,8 @@ class JiuWenSwarm:
             await self._session_manager.submit_task(session_id, run_stream_task)
 
         suppress_a2ui_stream = False
+        a2ui_pending_render_sent = False
+        a2ui_stream_probe = ""
         try:
             while not stream_done.is_set() or not stream_queue.empty():
                 try:
@@ -1756,10 +1874,33 @@ class JiuWenSwarm:
                                 )
 
                             payload_content = str(data.payload.get("content", ""))
+                            a2ui_split = None
+                            if et in {"chat.delta", "chat.final"} and payload_content:
+                                a2ui_split = _split_a2ui_stream_content(a2ui_stream_probe, payload_content)
+                                a2ui_stream_probe = _extend_a2ui_stream_probe(a2ui_stream_probe, payload_content)
                             if et == "chat.delta":
                                 final_answer_chunks.append(payload_content)
-                                if suppress_a2ui_stream or _contains_a2ui_marker(payload_content):
+                                if suppress_a2ui_stream or a2ui_split is not None:
+                                    first_a2ui_suppression = not suppress_a2ui_stream
+                                    if first_a2ui_suppression:
+                                        logger.info(
+                                            "A2UI stream suppression activated: request_id=%s event_type=%s",
+                                            rid,
+                                            et,
+                                        )
                                     suppress_a2ui_stream = True
+                                    if a2ui_split is not None and a2ui_split[0]:
+                                        prefix_payload = dict(data.payload)
+                                        prefix_payload["content"] = a2ui_split[0]
+                                        yield AgentResponseChunk(
+                                            request_id=data.request_id,
+                                            channel_id=data.channel_id,
+                                            payload=prefix_payload,
+                                            is_complete=False,
+                                        )
+                                    if first_a2ui_suppression and not a2ui_pending_render_sent:
+                                        yield _make_a2ui_pending_render_chunk(request_id=rid, channel_id=cid)
+                                        a2ui_pending_render_sent = True
                                     continue
                                 durable_pending_final_chunks.append(payload_content)
                                 should_record = False
@@ -1769,8 +1910,18 @@ class JiuWenSwarm:
                             elif et == "chat.tool_call":
                                 _persist_pending_final_text()
                             elif et == "chat.final":
-                                if suppress_a2ui_stream or _contains_a2ui_marker(payload_content):
+                                if suppress_a2ui_stream or a2ui_split is not None:
+                                    first_a2ui_suppression = not suppress_a2ui_stream
+                                    if first_a2ui_suppression:
+                                        logger.info(
+                                            "A2UI stream suppression activated: request_id=%s event_type=%s",
+                                            rid,
+                                            et,
+                                        )
                                     suppress_a2ui_stream = True
+                                    if first_a2ui_suppression and not a2ui_pending_render_sent:
+                                        yield _make_a2ui_pending_render_chunk(request_id=rid, channel_id=cid)
+                                        a2ui_pending_render_sent = True
                                     final_answer_content = payload_content
                                     durable_pending_final_chunks = []
                                     continue
@@ -1819,10 +1970,33 @@ class JiuWenSwarm:
                             )
 
                         payload_content = str(data.get("content", ""))
+                        a2ui_split = None
+                        if et in {"chat.delta", "chat.final"} and payload_content:
+                            a2ui_split = _split_a2ui_stream_content(a2ui_stream_probe, payload_content)
+                            a2ui_stream_probe = _extend_a2ui_stream_probe(a2ui_stream_probe, payload_content)
                         if et == "chat.delta":
                             final_answer_chunks.append(payload_content)
-                            if suppress_a2ui_stream or _contains_a2ui_marker(payload_content):
+                            if suppress_a2ui_stream or a2ui_split is not None:
+                                first_a2ui_suppression = not suppress_a2ui_stream
+                                if first_a2ui_suppression:
+                                    logger.info(
+                                        "A2UI stream suppression activated: request_id=%s event_type=%s",
+                                        rid,
+                                        et,
+                                    )
                                 suppress_a2ui_stream = True
+                                if a2ui_split is not None and a2ui_split[0]:
+                                    prefix_payload = dict(data)
+                                    prefix_payload["content"] = a2ui_split[0]
+                                    yield AgentResponseChunk(
+                                        request_id=rid,
+                                        channel_id=cid,
+                                        payload=prefix_payload,
+                                        is_complete=False,
+                                    )
+                                if first_a2ui_suppression and not a2ui_pending_render_sent:
+                                    yield _make_a2ui_pending_render_chunk(request_id=rid, channel_id=cid)
+                                    a2ui_pending_render_sent = True
                                 continue
                             durable_pending_final_chunks.append(payload_content)
                             should_record = False
@@ -1832,8 +2006,18 @@ class JiuWenSwarm:
                         elif et == "chat.tool_call":
                             _persist_pending_final_text()
                         elif et == "chat.final":
-                            if suppress_a2ui_stream or _contains_a2ui_marker(payload_content):
+                            if suppress_a2ui_stream or a2ui_split is not None:
+                                first_a2ui_suppression = not suppress_a2ui_stream
+                                if first_a2ui_suppression:
+                                    logger.info(
+                                        "A2UI stream suppression activated: request_id=%s event_type=%s",
+                                        rid,
+                                        et,
+                                    )
                                 suppress_a2ui_stream = True
+                                if first_a2ui_suppression and not a2ui_pending_render_sent:
+                                    yield _make_a2ui_pending_render_chunk(request_id=rid, channel_id=cid)
+                                    a2ui_pending_render_sent = True
                                 final_answer_content = payload_content
                                 durable_pending_final_chunks = []
                                 continue

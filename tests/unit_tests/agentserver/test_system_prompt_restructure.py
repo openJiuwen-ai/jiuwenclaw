@@ -260,7 +260,15 @@ async def test_runtime_dynamic_sections_go_to_prompt_attachment_when_manager_ava
     assert "browser_preflight_submit" in prompt
     assert "hotel_option_select" in prompt
     assert "hotel_payment_confirm" in prompt
+    assert "gmail_email_select" in prompt
+    assert "gmail_cleanup_confirm" in prompt
+    assert "social_post_draft_select" in prompt
+    assert "social_post_confirm" in prompt
     assert "Do not use plain natural-language questions or `ask_user`" in prompt
+    assert "Mandatory Web A2UI account-action gate" in prompt
+    assert "`todo_create`, `todo_modify`, `memory_search`" in prompt
+    assert "`task_tool`, plain text, Markdown, or `ask_user`" in prompt
+    assert "show final A2UI confirmation before any" in prompt
     assert "# Environment" in prompt
 
     items = await agent.prompt_attachment_manager.collect_for_session("sess1")

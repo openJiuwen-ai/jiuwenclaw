@@ -5,6 +5,9 @@
 from __future__ import annotations
 
 import inspect
+import logging
+import re
+import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
@@ -13,6 +16,11 @@ from jiuwenswarm.server.runtime.a2ui.protocol import A2UI_OPEN_TAG, get_protocol
 
 
 RepairCall = Callable[[str], Any]
+logger = logging.getLogger(__name__)
+
+_A2UI_PROTOCOL_LINE_RE = re.compile(
+    r'(?im)^\s*(?:[\[{,]\s*)*"?(?:beginRendering|surfaceUpdate|dataModelUpdate|deleteSurface)"?\s*(?::|$)'
+)
 
 
 @dataclass(frozen=True)
@@ -48,6 +56,17 @@ def _a2ui_failure_text(content: str, validation_error: str) -> str:
     return "界面内容生成失败，请重试或换一种方式描述你的需求。"
 
 
+def has_a2ui_protocol_marker(content: str) -> bool:
+    """Return True when content looks like an A2UI payload or fragment."""
+    text = content or ""
+    return A2UI_OPEN_TAG in text or bool(_A2UI_PROTOCOL_LINE_RE.search(text))
+
+
+def should_finalize_a2ui_content(content: str) -> bool:
+    """Return True when the response should enter A2UI validation/repair."""
+    return isinstance(content, str) and has_a2ui_protocol_marker(content)
+
+
 class A2UIResponseFinalizer:
     """Validate, repair, or safely degrade a complete assistant response."""
 
@@ -79,19 +98,42 @@ class A2UIResponseFinalizer:
             max_repair_attempts: int = 2,
     ) -> A2UIFinalizationResult:
         _ = request_id
-        if A2UI_OPEN_TAG not in (content or ""):
+        if not should_finalize_a2ui_content(content):
             return A2UIFinalizationResult(content=content, status="skipped")
 
         spec = get_protocol_spec()
+        started_at = time.perf_counter()
+        logger.info(
+            "A2UI finalizer validating: request_id=%s content_chars=%d",
+            request_id,
+            len(content or ""),
+        )
         validation = spec.validate_response(content)
+        logger.info(
+            "A2UI finalizer validation complete: request_id=%s valid=%s duration_ms=%.1f",
+            request_id,
+            validation.valid,
+            (time.perf_counter() - started_at) * 1000,
+        )
         if validation.valid:
-            return A2UIFinalizationResult(content=content, status="valid")
+            if A2UI_OPEN_TAG in content or spec.may_contain_a2ui_content(content):
+                return A2UIFinalizationResult(content=content, status="valid")
+            last_error = (
+                "A2UI-like content was emitted without a valid <a2ui-json> block "
+                "or raw A2UI JSON message list."
+            )
+        else:
+            last_error = validation.error
 
         repaired_content = content
-        last_error = validation.error
         for _attempt in range(1, max_repair_attempts + 1):
             if repair_call is None:
                 break
+            logger.info(
+                "A2UI finalizer repair attempt started: request_id=%s attempt=%d",
+                request_id,
+                _attempt,
+            )
             prompt = spec.build_repair_prompt(
                 invalid_content=repaired_content,
                 validation_error=last_error,
@@ -102,6 +144,12 @@ class A2UIResponseFinalizer:
                 response = await response
             repaired_content = _coerce_model_message_content(response)
             validation = spec.validate_response(repaired_content)
+            logger.info(
+                "A2UI finalizer repair attempt complete: request_id=%s attempt=%d valid=%s",
+                request_id,
+                _attempt,
+                validation.valid,
+            )
             if validation.valid:
                 return A2UIFinalizationResult(content=repaired_content, status="repaired")
             last_error = validation.error
@@ -113,4 +161,9 @@ class A2UIResponseFinalizer:
         )
 
 
-__all__ = ["A2UIFinalizationResult", "A2UIResponseFinalizer"]
+__all__ = [
+    "A2UIFinalizationResult",
+    "A2UIResponseFinalizer",
+    "has_a2ui_protocol_marker",
+    "should_finalize_a2ui_content",
+]

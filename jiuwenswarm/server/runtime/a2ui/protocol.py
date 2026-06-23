@@ -319,6 +319,75 @@ def _is_hotel_payment_cancel(event: dict[str, Any]) -> bool:
     return action_name == "hotel_payment_cancel" or next_action == "cancel_hotel_payment"
 
 
+def _is_gmail_email_select(event: dict[str, Any]) -> bool:
+    action_name = _get_a2ui_action_name(event)
+    next_action = _get_a2ui_next_action(event)
+    return action_name in {"gmail_email_select", "gmail_thread_select"} or next_action in {
+        "continue_gmail_email_review",
+        "open_gmail_email",
+    }
+
+
+def _is_gmail_reply_draft_select(event: dict[str, Any]) -> bool:
+    action_name = _get_a2ui_action_name(event)
+    next_action = _get_a2ui_next_action(event)
+    return action_name in {"gmail_reply_draft_select", "gmail_draft_reply"} or next_action in {
+        "continue_gmail_reply_draft",
+        "fill_gmail_reply_draft",
+    }
+
+
+def _is_gmail_send_confirm(event: dict[str, Any]) -> bool:
+    action_name = _get_a2ui_action_name(event)
+    next_action = _get_a2ui_next_action(event)
+    return action_name == "gmail_send_confirm" or next_action == "confirm_gmail_send"
+
+
+def _is_gmail_send_cancel(event: dict[str, Any]) -> bool:
+    action_name = _get_a2ui_action_name(event)
+    next_action = _get_a2ui_next_action(event)
+    return action_name == "gmail_send_cancel" or next_action == "cancel_gmail_send"
+
+
+def _is_gmail_cleanup_select(event: dict[str, Any]) -> bool:
+    action_name = _get_a2ui_action_name(event)
+    next_action = _get_a2ui_next_action(event)
+    return action_name == "gmail_cleanup_select" or next_action == "review_gmail_cleanup"
+
+
+def _is_gmail_cleanup_confirm(event: dict[str, Any]) -> bool:
+    action_name = _get_a2ui_action_name(event)
+    next_action = _get_a2ui_next_action(event)
+    return action_name == "gmail_cleanup_confirm" or next_action == "confirm_gmail_cleanup"
+
+
+def _is_gmail_cleanup_cancel(event: dict[str, Any]) -> bool:
+    action_name = _get_a2ui_action_name(event)
+    next_action = _get_a2ui_next_action(event)
+    return action_name == "gmail_cleanup_cancel" or next_action == "cancel_gmail_cleanup"
+
+
+def _is_social_post_draft_select(event: dict[str, Any]) -> bool:
+    action_name = _get_a2ui_action_name(event)
+    next_action = _get_a2ui_next_action(event)
+    return action_name in {"social_post_draft_select", "social_draft_select"} or next_action in {
+        "continue_social_post_draft",
+        "fill_social_post_draft",
+    }
+
+
+def _is_social_post_confirm(event: dict[str, Any]) -> bool:
+    action_name = _get_a2ui_action_name(event)
+    next_action = _get_a2ui_next_action(event)
+    return action_name == "social_post_confirm" or next_action == "confirm_social_post"
+
+
+def _is_social_post_cancel(event: dict[str, Any]) -> bool:
+    action_name = _get_a2ui_action_name(event)
+    next_action = _get_a2ui_next_action(event)
+    return action_name == "social_post_cancel" or next_action == "cancel_social_post"
+
+
 def _build_a2ui_event_payload(
     event: dict[str, Any],
     channel: str,
@@ -417,6 +486,197 @@ def _build_hotel_payment_cancel_client_event_prompt(
     return prefix + json.dumps(payload, ensure_ascii=False)
 
 
+def _build_gmail_email_select_client_event_prompt(
+    event: dict[str, Any],
+    channel: str,
+    language: str,
+) -> str:
+    payload = _build_a2ui_event_payload(event, channel, language)
+    prefix = (
+        "You receive an A2UI Gmail email/thread selection. The user selected "
+        "one item from Gmail search results previously returned by browser "
+        "automation. Treat event.userAction.context as the authoritative "
+        "selected email/thread and search context. Continue by calling "
+        "spawn_sub_agent with subagent_type='browser_agent'. The task_description "
+        "must instruct browser_agent to continue from the current Gmail browser "
+        "state/session and open the selected email/thread. Do not repeat the "
+        "broad Gmail search or change the query/date/sender filters unless "
+        "browser-state recovery is needed. If recovery is needed, prefer a Gmail "
+        "thread URL or stable message identifier from context; otherwise search "
+        "narrowly for the selected subject/sender using the already confirmed "
+        "filters. Read only the selected email/thread, summarize it, extract "
+        "action items, and render an A2UI summary with reply-draft options. If "
+        "the user asked to draft a reply, include action 'gmail_reply_draft_select'. "
+        "Never send email without a final 'gmail_send_confirm' action.\n"
+    )
+    return prefix + json.dumps(payload, ensure_ascii=False)
+
+
+def _build_gmail_reply_draft_select_client_event_prompt(
+    event: dict[str, Any],
+    channel: str,
+    language: str,
+) -> str:
+    payload = _build_a2ui_event_payload(event, channel, language)
+    prefix = (
+        "You receive an A2UI Gmail reply draft selection. The user selected a "
+        "reply draft or drafting style from an email summary. Treat "
+        "event.userAction.context as the authoritative selected email/thread, "
+        "recipient, subject, and draft body. Continue by calling spawn_sub_agent "
+        "with subagent_type='browser_agent' to open the existing selected Gmail "
+        "thread and fill the reply compose box. Do not send the email. Do not "
+        "repeat the broad Gmail search unless state recovery is needed; prefer "
+        "thread URL or message identifiers from context for recovery. After the "
+        "draft is filled or ready, render a final A2UI confirmation with action "
+        "'gmail_send_confirm' and cancel action 'gmail_send_cancel'.\n"
+    )
+    return prefix + json.dumps(payload, ensure_ascii=False)
+
+
+def _build_gmail_send_confirm_client_event_prompt(
+    event: dict[str, Any],
+    channel: str,
+    language: str,
+) -> str:
+    payload = _build_a2ui_event_payload(event, channel, language)
+    prefix = (
+        "You receive an A2UI final Gmail send confirmation. Before sending, "
+        "verify that the visible Gmail compose/reply state matches "
+        "event.userAction.context for recipient, subject, body, attachment "
+        "state, and selected thread. If anything differs, stop and render a "
+        "corrected A2UI confirmation. If it matches, call browser_agent to send "
+        "the email now using the visible Gmail send action. Never send to a "
+        "different recipient or with different content. If Gmail blocks sending "
+        "or requires account/security steps outside the current browser session, "
+        "stop and report the required manual step.\n"
+    )
+    return prefix + json.dumps(payload, ensure_ascii=False)
+
+
+def _build_gmail_send_cancel_client_event_prompt(
+    event: dict[str, Any],
+    channel: str,
+    language: str,
+) -> str:
+    payload = _build_a2ui_event_payload(event, channel, language)
+    prefix = (
+        "You receive an A2UI Gmail send cancellation. Do not send email and do "
+        "not continue browser automation. Acknowledge the cancellation briefly "
+        "in the preferred response language.\n"
+    )
+    return prefix + json.dumps(payload, ensure_ascii=False)
+
+
+def _build_gmail_cleanup_select_client_event_prompt(
+    event: dict[str, Any],
+    channel: str,
+    language: str,
+) -> str:
+    payload = _build_a2ui_event_payload(event, channel, language)
+    prefix = (
+        "You receive an A2UI Gmail cleanup selection. The user selected messages, "
+        "categories, or cleanup rules from a Gmail cleanup candidate list. Treat "
+        "event.userAction.context as the authoritative cleanup selection. Do not "
+        "modify Gmail yet. Render a final A2UI cleanup confirmation that lists "
+        "the exact operation, selected message count, representative subjects or "
+        "senders, excluded messages, and risk level. The confirm action must be "
+        "'gmail_cleanup_confirm' and the cancel action must be "
+        "'gmail_cleanup_cancel'.\n"
+    )
+    return prefix + json.dumps(payload, ensure_ascii=False)
+
+
+def _build_gmail_cleanup_confirm_client_event_prompt(
+    event: dict[str, Any],
+    channel: str,
+    language: str,
+) -> str:
+    payload = _build_a2ui_event_payload(event, channel, language)
+    prefix = (
+        "You receive an A2UI final Gmail cleanup confirmation. Continue by "
+        "calling spawn_sub_agent with subagent_type='browser_agent'. The "
+        "task_description must instruct browser_agent to continue from the "
+        "current Gmail browser state/session and apply only the confirmed cleanup "
+        "operation to the selected messages/categories in event.userAction.context. "
+        "Do not repeat or broaden the Gmail search unless state recovery is "
+        "needed. Before modifying Gmail, verify the selected messages/count and "
+        "operation match the context. If they do not match, stop and render a "
+        "corrected A2UI confirmation. Never delete, archive, unsubscribe, mark "
+        "read, or label any unconfirmed message.\n"
+    )
+    return prefix + json.dumps(payload, ensure_ascii=False)
+
+
+def _build_gmail_cleanup_cancel_client_event_prompt(
+    event: dict[str, Any],
+    channel: str,
+    language: str,
+) -> str:
+    payload = _build_a2ui_event_payload(event, channel, language)
+    prefix = (
+        "You receive an A2UI Gmail cleanup cancellation. Do not modify Gmail and "
+        "do not continue browser automation. Acknowledge the cancellation briefly "
+        "in the preferred response language.\n"
+    )
+    return prefix + json.dumps(payload, ensure_ascii=False)
+
+
+def _build_social_post_draft_select_client_event_prompt(
+    event: dict[str, Any],
+    channel: str,
+    language: str,
+) -> str:
+    payload = _build_a2ui_event_payload(event, channel, language)
+    prefix = (
+        "You receive an A2UI social media post draft selection. The user selected "
+        "one draft variant for a public social-media post. Treat "
+        "event.userAction.context as the authoritative platform, account, draft "
+        "body, media/link state, visibility, and posting context. Continue by "
+        "calling spawn_sub_agent with subagent_type='browser_agent' to continue "
+        "from the current browser state/session, open or use the selected social "
+        "platform compose surface, and fill the selected draft. Do not publish, "
+        "post, comment, like, follow, delete, or perform any externally visible "
+        "action. After the draft is filled or ready, render a final A2UI "
+        "confirmation with action 'social_post_confirm' and cancel action "
+        "'social_post_cancel'.\n"
+    )
+    return prefix + json.dumps(payload, ensure_ascii=False)
+
+
+def _build_social_post_confirm_client_event_prompt(
+    event: dict[str, Any],
+    channel: str,
+    language: str,
+) -> str:
+    payload = _build_a2ui_event_payload(event, channel, language)
+    prefix = (
+        "You receive an A2UI final social media post confirmation. Before "
+        "publishing, verify that the visible compose state matches "
+        "event.userAction.context for platform, account, body, media/link state, "
+        "visibility, and target audience. If anything differs, stop and render a "
+        "corrected A2UI confirmation. If it matches, call browser_agent to "
+        "publish the post now using the visible platform publish/post action. "
+        "Never publish different content or to a different account. If the "
+        "platform blocks publishing or requires account/security steps outside "
+        "the current browser session, stop and report the required manual step.\n"
+    )
+    return prefix + json.dumps(payload, ensure_ascii=False)
+
+
+def _build_social_post_cancel_client_event_prompt(
+    event: dict[str, Any],
+    channel: str,
+    language: str,
+) -> str:
+    payload = _build_a2ui_event_payload(event, channel, language)
+    prefix = (
+        "You receive an A2UI social media post cancellation. Do not publish the "
+        "post and do not continue browser automation. Acknowledge the cancellation "
+        "briefly in the preferred response language.\n"
+    )
+    return prefix + json.dumps(payload, ensure_ascii=False)
+
+
 def build_a2ui_client_event_prompt(event: dict[str, Any], channel: str, language: str) -> str:
     _log_a2ui_client_event(event)
     if _is_hotel_option_select(event):
@@ -425,6 +685,26 @@ def build_a2ui_client_event_prompt(event: dict[str, Any], channel: str, language
         return _build_hotel_payment_confirm_client_event_prompt(event, channel, language)
     if _is_hotel_payment_cancel(event):
         return _build_hotel_payment_cancel_client_event_prompt(event, channel, language)
+    if _is_gmail_email_select(event):
+        return _build_gmail_email_select_client_event_prompt(event, channel, language)
+    if _is_gmail_reply_draft_select(event):
+        return _build_gmail_reply_draft_select_client_event_prompt(event, channel, language)
+    if _is_gmail_send_confirm(event):
+        return _build_gmail_send_confirm_client_event_prompt(event, channel, language)
+    if _is_gmail_send_cancel(event):
+        return _build_gmail_send_cancel_client_event_prompt(event, channel, language)
+    if _is_gmail_cleanup_select(event):
+        return _build_gmail_cleanup_select_client_event_prompt(event, channel, language)
+    if _is_gmail_cleanup_confirm(event):
+        return _build_gmail_cleanup_confirm_client_event_prompt(event, channel, language)
+    if _is_gmail_cleanup_cancel(event):
+        return _build_gmail_cleanup_cancel_client_event_prompt(event, channel, language)
+    if _is_social_post_draft_select(event):
+        return _build_social_post_draft_select_client_event_prompt(event, channel, language)
+    if _is_social_post_confirm(event):
+        return _build_social_post_confirm_client_event_prompt(event, channel, language)
+    if _is_social_post_cancel(event):
+        return _build_social_post_cancel_client_event_prompt(event, channel, language)
     if _is_browser_preflight_submit(event):
         return _build_browser_preflight_client_event_prompt(event, channel, language)
 

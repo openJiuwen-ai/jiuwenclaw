@@ -7,6 +7,7 @@ interface A2UIErrorBoundaryProps {
   children: ReactNode;
   fallback?: ReactNode;
   onError?: (error: Error, errorInfo: ErrorInfo) => void;
+  resetKey?: string;
 }
 
 interface A2UIErrorBoundaryState {
@@ -34,6 +35,12 @@ export class A2UIErrorBoundary extends Component<
   componentDidCatch(error: Error, errorInfo: ErrorInfo) {
     a2uiError('[A2UI Error Boundary]', { error, errorInfo });
     this.props.onError?.(error, errorInfo);
+  }
+
+  componentDidUpdate(prevProps: A2UIErrorBoundaryProps) {
+    if (prevProps.resetKey !== this.props.resetKey && this.state.hasError) {
+      this.setState({ hasError: false, error: null });
+    }
   }
 
   render() {

@@ -31,10 +31,19 @@ type RenderPart =
       protocolVersion: string;
       messages: Extract<A2UIContentPart, { kind: 'a2ui' }>['messages'];
       surfaceIds: string[];
+      resetKey: string;
     };
 
 function safeNamespace(input: string): string {
   return input.replace(/[^A-Za-z0-9_-]/g, '_');
+}
+
+function stableHash(input: string): string {
+  let hash = 0;
+  for (let index = 0; index < input.length; index += 1) {
+    hash = (hash * 31 + input.charCodeAt(index)) | 0;
+  }
+  return Math.abs(hash).toString(36);
 }
 
 export function A2UIMessageContent({
@@ -63,12 +72,14 @@ export function A2UIMessageContent({
       }
 
       const messages = namespaceA2UIMessages(part.messages, namespace);
+      const resetKey = `${namespace}:${index}:${stableHash(JSON.stringify(messages))}`;
       return {
         kind: 'a2ui',
         key: `a2ui-${index}`,
         protocolVersion: part.protocolVersion,
         messages,
         surfaceIds: extractA2UISurfaceIds(messages),
+        resetKey,
       };
     });
   }, [a2uiEnabled, content, isStreaming, namespace, messageId]);
@@ -166,7 +177,10 @@ export function A2UIMessageContent({
         return (
           <div key={part.key} className="a2ui-message-content__surfaces">
             {part.surfaceIds.map((surfaceId) => (
-              <A2UIErrorBoundary key={surfaceId}>
+              <A2UIErrorBoundary
+                key={`${surfaceId}:${part.resetKey}`}
+                resetKey={part.resetKey}
+              >
                 {disableInteraction ? (
                   <div className="pointer-events-none opacity-75">
                     <Renderer surfaceId={surfaceId} />

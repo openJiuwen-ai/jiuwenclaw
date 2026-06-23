@@ -145,6 +145,79 @@ def test_normal_text_prompt_builder_keeps_string_flow(monkeypatch):
     assert '"type": "user input"' in prompt
 
 
+def test_a2ui_stream_probe_detects_split_protocol_marker():
+    """Stream suppression should survive protocol markers split across chunks."""
+    from jiuwenswarm.server.runtime.agent_adapter.interface import (
+        _extend_a2ui_stream_probe,
+        _stream_probe_has_a2ui_marker,
+    )
+
+    probe = ""
+    probe = _extend_a2ui_stream_probe(probe, "好的，开始整理。\n\nbeg")
+
+    assert _stream_probe_has_a2ui_marker(probe) is True
+
+    probe = _extend_a2ui_stream_probe(probe, "inRend")
+
+    assert _stream_probe_has_a2ui_marker(probe) is True
+
+
+def test_a2ui_stream_probe_ignores_regular_begin_text():
+    """Plain text containing begin-like words should keep normal streaming."""
+    from jiuwenswarm.server.runtime.agent_adapter.interface import (
+        _extend_a2ui_stream_probe,
+        _stream_probe_has_a2ui_marker,
+    )
+
+    probe = _extend_a2ui_stream_probe("", "I will begin by summarizing the mailbox.")
+
+    assert _stream_probe_has_a2ui_marker(probe) is False
+
+
+def test_a2ui_stream_probe_ignores_begin_sentence_at_line_start():
+    """A normal sentence starting with begin should not look like A2UI."""
+    from jiuwenswarm.server.runtime.agent_adapter.interface import (
+        _extend_a2ui_stream_probe,
+        _stream_probe_has_a2ui_marker,
+    )
+
+    probe = _extend_a2ui_stream_probe("", "begin by summarizing the mailbox.")
+
+    assert _stream_probe_has_a2ui_marker(probe) is False
+
+
+def test_split_a2ui_stream_content_keeps_prefix_streamable():
+    """Only A2UI protocol text should be suppressed from a mixed chunk."""
+    from jiuwenswarm.server.runtime.agent_adapter.interface import _split_a2ui_stream_content
+
+    split = _split_a2ui_stream_content(
+        "",
+        "浏览器代理已完成搜索和整理，现在为你展示结果。\n\nbeginRendering\n邮件整理完成",
+    )
+
+    assert split == (
+        "浏览器代理已完成搜索和整理，现在为你展示结果。\n\n",
+        "beginRendering\n邮件整理完成",
+    )
+
+
+def test_split_a2ui_stream_content_handles_partial_marker():
+    """A partial marker should suppress only the marker line."""
+    from jiuwenswarm.server.runtime.agent_adapter.interface import _split_a2ui_stream_content
+
+    split = _split_a2ui_stream_content("", "现在为你展示结果。\n\nbeg")
+
+    assert split == ("现在为你展示结果。\n\n", "beg")
+
+
+def test_a2ui_pending_render_delta_stays_open():
+    """The Web renderer shows its pending state only for an open A2UI block."""
+    from jiuwenswarm.server.runtime.agent_adapter.interface import _A2UI_PENDING_RENDER_DELTA
+
+    assert _A2UI_PENDING_RENDER_DELTA.startswith("<a2ui-json>")
+    assert "</a2ui-json>" not in _A2UI_PENDING_RENDER_DELTA
+
+
 def test_agent_prompt_builder_accepts_a2ui_client_event_dict(monkeypatch):
     """Structured Web A2UI events should bypass normal text prompt wrapping."""
     from jiuwenswarm.server.runtime.agent_adapter.interface import build_user_prompt

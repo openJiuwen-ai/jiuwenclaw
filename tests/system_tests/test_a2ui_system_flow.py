@@ -81,8 +81,15 @@ async def test_a2ui_system_flow_accepts_event_and_valid_response(monkeypatch):
     assert "browser_preflight_submit" in prompt_section
     assert "hotel_option_select" in prompt_section
     assert "hotel_payment_confirm" in prompt_section
+    assert "gmail_email_select" in prompt_section
+    assert "gmail_cleanup_confirm" in prompt_section
+    assert "social_post_draft_select" in prompt_section
+    assert "social_post_confirm" in prompt_section
     assert "Do not ask for those missing browser-task details" in prompt_section
     assert "ask_user tool" in prompt_section
+    assert "Mandatory A2UI account-action gate" in prompt_section
+    assert "task_tool as a substitute" in prompt_section
+    assert "returned emails/threads MUST still be shown as A2UI candidates" in prompt_section
     assert client_prompt is not None
     assert "submit_selection" in client_prompt
     assert "alpha" in client_prompt
@@ -209,3 +216,204 @@ def test_a2ui_hotel_payment_confirmation_is_guarded(monkeypatch):
     assert "verify that the selected hotel" in client_prompt
     assert "current browser state match the context" in client_prompt
     assert "Example Riverside Hotel" in client_prompt
+
+
+def test_a2ui_gmail_email_select_continues_current_search_results(monkeypatch):
+    """Gmail email selection should open the selected result, not rerun the broad search."""
+    from jiuwenswarm.server.runtime.a2ui.integration import build_user_prompt_if_a2ui_event
+
+    monkeypatch.setenv("JIUWENSWARM_A2UI_ENABLED", "true")
+
+    client_event = {
+        "type": "a2ui.client_event",
+        "event": {
+            "userAction": {
+                "name": "gmail_email_select",
+                "surfaceId": "gmail-results",
+                "sourceComponentId": "thread-1-open",
+                "context": {
+                    "original_query": "Summarize recent project delay emails",
+                    "task_type": "gmail",
+                    "next_action": "continue_gmail_email_review",
+                    "search_query": "from:manager@example.com project delay newer:7d",
+                    "sender": "manager@example.com",
+                    "subject": "Project delay update",
+                    "thread_index": 1,
+                    "thread_url": "https://mail.google.com/mail/u/0/#inbox/thread-a:r1",
+                },
+            }
+        },
+    }
+
+    client_prompt = build_user_prompt_if_a2ui_event(
+        client_event,
+        channel="web",
+        language="en",
+    )
+
+    assert client_prompt is not None
+    assert "Gmail email/thread selection" in client_prompt
+    assert "spawn_sub_agent" in client_prompt
+    assert "browser_agent" in client_prompt
+    assert "current Gmail browser state/session" in client_prompt
+    assert "Do not repeat the broad Gmail search" in client_prompt
+    assert "gmail_reply_draft_select" in client_prompt
+    assert "Project delay update" in client_prompt
+
+
+def test_a2ui_gmail_cleanup_confirmation_is_guarded(monkeypatch):
+    """Gmail cleanup confirmation should verify selected messages before mutation."""
+    from jiuwenswarm.server.runtime.a2ui.integration import build_user_prompt_if_a2ui_event
+
+    monkeypatch.setenv("JIUWENSWARM_A2UI_ENABLED", "true")
+
+    client_event = {
+        "type": "a2ui.client_event",
+        "event": {
+            "userAction": {
+                "name": "gmail_cleanup_confirm",
+                "surfaceId": "gmail-cleanup-confirm",
+                "sourceComponentId": "confirm",
+                "context": {
+                    "task_type": "gmail_cleanup",
+                    "next_action": "confirm_gmail_cleanup",
+                    "operation": "archive",
+                    "selected_count": 12,
+                    "search_query": "category:promotions older:30d",
+                },
+            }
+        },
+    }
+
+    client_prompt = build_user_prompt_if_a2ui_event(
+        client_event,
+        channel="web",
+        language="en",
+    )
+
+    assert client_prompt is not None
+    assert "final Gmail cleanup confirmation" in client_prompt
+    assert "spawn_sub_agent" in client_prompt
+    assert "current Gmail browser state/session" in client_prompt
+    assert "verify the selected messages/count" in client_prompt
+    assert "Never delete, archive, unsubscribe" in client_prompt
+    assert "category:promotions older:30d" in client_prompt
+
+
+def test_a2ui_gmail_send_confirmation_allows_confirmed_send(monkeypatch):
+    """Final Gmail send confirmation should send only matching visible content."""
+    from jiuwenswarm.server.runtime.a2ui.integration import build_user_prompt_if_a2ui_event
+
+    monkeypatch.setenv("JIUWENSWARM_A2UI_ENABLED", "true")
+
+    client_event = {
+        "type": "a2ui.client_event",
+        "event": {
+            "userAction": {
+                "name": "gmail_send_confirm",
+                "surfaceId": "gmail-send-confirm",
+                "sourceComponentId": "send",
+                "context": {
+                    "task_type": "gmail",
+                    "next_action": "confirm_gmail_send",
+                    "recipient": "manager@example.com",
+                    "subject": "Re: Project delay update",
+                    "body": "Thanks for the update. I will adjust the plan.",
+                },
+            }
+        },
+    }
+
+    client_prompt = build_user_prompt_if_a2ui_event(
+        client_event,
+        channel="web",
+        language="en",
+    )
+
+    assert client_prompt is not None
+    assert "final Gmail send confirmation" in client_prompt
+    assert "visible Gmail compose/reply state matches" in client_prompt
+    assert "send the email now" in client_prompt
+    assert "Never send to a different recipient" in client_prompt
+    assert "manager@example.com" in client_prompt
+
+
+def test_a2ui_social_post_draft_select_stops_before_publish(monkeypatch):
+    """Social draft selection should fill compose UI but not publish."""
+    from jiuwenswarm.server.runtime.a2ui.integration import build_user_prompt_if_a2ui_event
+
+    monkeypatch.setenv("JIUWENSWARM_A2UI_ENABLED", "true")
+
+    client_event = {
+        "type": "a2ui.client_event",
+        "event": {
+            "userAction": {
+                "name": "social_post_draft_select",
+                "surfaceId": "social-drafts",
+                "sourceComponentId": "draft-1",
+                "context": {
+                    "original_query": "Draft a LinkedIn product update",
+                    "task_type": "social_post",
+                    "next_action": "continue_social_post_draft",
+                    "platform": "LinkedIn",
+                    "account_hint": "Company Page",
+                    "draft_body": "We shipped a faster A2UI booking flow.",
+                    "visibility": "public",
+                },
+            }
+        },
+    }
+
+    client_prompt = build_user_prompt_if_a2ui_event(
+        client_event,
+        channel="web",
+        language="en",
+    )
+
+    assert client_prompt is not None
+    assert "social media post draft selection" in client_prompt
+    assert "spawn_sub_agent" in client_prompt
+    assert "browser_agent" in client_prompt
+    assert "fill the selected draft" in client_prompt
+    assert "Do not publish" in client_prompt
+    assert "social_post_confirm" in client_prompt
+    assert "LinkedIn" in client_prompt
+
+
+def test_a2ui_social_post_confirmation_is_guarded(monkeypatch):
+    """Final social publish should verify visible compose state before posting."""
+    from jiuwenswarm.server.runtime.a2ui.integration import build_user_prompt_if_a2ui_event
+
+    monkeypatch.setenv("JIUWENSWARM_A2UI_ENABLED", "true")
+
+    client_event = {
+        "type": "a2ui.client_event",
+        "event": {
+            "userAction": {
+                "name": "social_post_confirm",
+                "surfaceId": "social-post-confirm",
+                "sourceComponentId": "publish",
+                "context": {
+                    "task_type": "social_post",
+                    "next_action": "confirm_social_post",
+                    "platform": "LinkedIn",
+                    "account_hint": "Company Page",
+                    "draft_body": "We shipped a faster A2UI booking flow.",
+                    "visibility": "public",
+                },
+            }
+        },
+    }
+
+    client_prompt = build_user_prompt_if_a2ui_event(
+        client_event,
+        channel="web",
+        language="en",
+    )
+
+    assert client_prompt is not None
+    assert "final social media post confirmation" in client_prompt
+    assert "verify that the visible compose state matches" in client_prompt
+    assert "publish the post now" in client_prompt
+    assert "Never publish different content" in client_prompt
+    assert "LinkedIn" in client_prompt
