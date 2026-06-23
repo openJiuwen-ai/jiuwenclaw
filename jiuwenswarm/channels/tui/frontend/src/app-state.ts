@@ -211,6 +211,9 @@ function probeTcp(host: string, port: number, timeoutMs: number): Promise<boolea
 }
 
 async function hasExternalNetwork(): Promise<boolean> {
+  if (process.env.JIUWENSWARM_SKIP_NETWORK_CHECK === "1" || process.env.JIUWENSWARM_SKIP_NETWORK_CHECK === "true") {
+    return true;
+  }
   const probes = [
     probeTcp("223.5.5.5", 53, 1500),
     probeTcp("114.114.114.114", 53, 1500),
