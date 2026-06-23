@@ -1848,7 +1848,7 @@ async def _run(
         async def _manager_ws_on_role_change(role: Role) -> None:
             try:
                 mod = importlib.import_module(
-                    "jiuwenclaw.loaded_extension.manager_ws_client.extension"
+                    "jiuwenclaw.loaded_extension.manager_ws_client"
                 )
             except Exception:  # noqa: BLE001
                 return
