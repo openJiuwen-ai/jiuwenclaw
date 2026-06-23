@@ -61,33 +61,16 @@ render_config_template(){
 }
 
 enable_dev_mode_if_needed() {
-    local mode="${DEPLOY_VARS["MODE"]}"
-    local file="$1"
-
-    if [ "${mode}" != "dev" ]; then
+    if [ "${DEPLOY_VARS["MODE"]}" != "dev" ]; then
         return
     fi
 
+    local file="$1"
+    mount_claw_code_path "${file}"
+    mount_runtime_code_path "${file}"
+
     # Force pod to be scheduled on current master node
     yq eval 'select(.kind == "Deployment").spec.template.spec.nodeName = "'"${DEPLOY_VARS["MASTER_NODE_NAME"]}"'"' -i "${file}"
-
-    # Mount host source code directory into container
-    yq eval '
-        select(.kind == "Deployment").spec.template.spec.containers[0].volumeMounts += [{
-            "name": "host-code",
-            "mountPath": "'"${DEPLOY_VARS["POD_CODE_PATH"]}"'"
-        }]
-    ' -i "${file}"
-
-    yq eval '
-        select(.kind == "Deployment").spec.template.spec.volumes += [{
-            "name": "host-code",
-            "hostPath": {
-                "path": "'"${DEPLOY_VARS["HOST_CODE_PATH"]}"'",
-                "type": "Directory"
-            }
-        }]
-    ' -i "${file}"
 
     # Security context adaptation for root user
     yq eval 'select(.kind == "Deployment").spec.template.spec.securityContext.fsGroup = 0' -i "${file}"
@@ -95,4 +78,78 @@ enable_dev_mode_if_needed() {
     yq eval 'select(.kind == "Deployment").spec.template.spec.containers[0].securityContext.runAsNonRoot = false' -i "${file}"
     yq eval 'select(.kind == "Deployment").spec.template.spec.containers[0].securityContext.runAsUser = 0' -i "${file}"
     yq eval 'select(.kind == "Deployment").spec.template.spec.containers[0].securityContext.runAsGroup = 0' -i "${file}"
+}
+
+
+# Mount claw source code from host into container
+mount_claw_code_path() {
+    if [ -z "${DEPLOY_VARS["CLAW_CODE_PATH"]:-}" ]; then
+        return
+    fi
+
+    local file="$1"
+
+    yq eval '
+        select(.kind == "Deployment").spec.template.spec.containers[0].volumeMounts += [{
+            "name": "claw-code",
+            "mountPath": "'"${DEPLOY_VARS["CLAW_CODE_POD_PATH"]}"'"
+        }]
+    ' -i "${file}"
+
+    yq eval '
+        select(.kind == "Deployment").spec.template.spec.volumes += [{
+            "name": "claw-code",
+            "hostPath": {
+                "path": "'"${DEPLOY_VARS["CLAW_CODE_PATH"]}"'",
+                "type": "Directory"
+            }
+        }]
+    ' -i "${file}"
+}
+
+# Mount runtime source code from host into container
+mount_runtime_code_path() {
+    if [ -z "${DEPLOY_VARS["RUNTIME_CODE_PATH"]:-}" ]; then
+        return
+    fi
+
+    local file="$1"
+    local code="${DEPLOY_VARS["RUNTIME_CODE_PATH"]}"
+    local mpath="${code}/management/openjiuwen_runtime/management"
+    local fpath="${code}/foundation/openjiuwen_runtime/foundation"
+    local pod_code="${DEPLOY_VARS["RUNTIME_CODE_POD_PATH"]}"
+
+    yq eval '
+        select(.kind == "Deployment").spec.template.spec.containers[0].volumeMounts += [{
+            "name": "foundation-code",
+            "mountPath": "'"${pod_code}/foundation"'"
+        }]
+    ' -i "${file}"
+
+    yq eval '
+        select(.kind == "Deployment").spec.template.spec.volumes += [{
+            "name": "foundation-code",
+            "hostPath": {
+                "path": "'"${fpath}"'",
+                "type": "Directory"
+            }
+        }]
+    ' -i "${file}"
+
+    yq eval '
+        select(.kind == "Deployment").spec.template.spec.containers[0].volumeMounts += [{
+            "name": "management-code",
+            "mountPath": "'"${pod_code}/management"'"
+        }]
+    ' -i "${file}"
+
+    yq eval '
+        select(.kind == "Deployment").spec.template.spec.volumes += [{
+            "name": "management-code",
+            "hostPath": {
+                "path": "'"${mpath}"'",
+                "type": "Directory"
+            }
+        }]
+    ' -i "${file}"
 }

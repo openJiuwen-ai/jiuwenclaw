@@ -98,11 +98,3 @@ Examples:
 EOF
     exit 0
 }
-
-process_vars() {
-    local mode="${DEPLOY_VARS["MODE"]}"
-
-    if [ "${mode}" == "dev" ]; then
-        DEPLOY_VARS["POD_CODE_PATH"]="/app/jiuwenclaw"
-    fi
-}

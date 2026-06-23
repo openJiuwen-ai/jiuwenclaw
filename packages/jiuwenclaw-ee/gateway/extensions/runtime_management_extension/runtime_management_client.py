@@ -328,7 +328,6 @@ class RuntimeManagementAgentClient(AgentServerClient):
         self.kubeconfig = os.getenv("AGENT_SERVER_KUBECONFIG") or None
 
         agent_image = os.getenv("AGENT_SERVER_IMAGE")
-        agent_runtime = os.getenv("AGENT_RUNTIME")
         agent_cpu_request = os.getenv("AGENT_SERVER_CPU_REQUEST")
         agent_memory_request = os.getenv("AGENT_SERVER_MEMORY_REQUEST")
         agent_cpu_limit = os.getenv("AGENT_SERVER_CPU_LIMIT")
@@ -349,16 +348,36 @@ class RuntimeManagementAgentClient(AgentServerClient):
         nfs_server = os.getenv("AGENT_SERVER_NFS_SERVER", "")
         nfs_path = os.getenv("AGENT_SERVER_NFS_PATH", "/")
         nfs_mount_path = os.getenv("AGENT_SERVER_NFS_MOUNT_PATH")
-        host_path = os.getenv("AGENT_SERVER_HOST_PATH")
-        host_mount_path = os.getenv("AGENT_SERVER_HOST_MOUNT_PATH")
+        claw_code_path = os.getenv("CLAW_CODE_PATH")
+        claw_code_pod_path = os.getenv("CLAW_CODE_POD_PATH")
+        runtime_code_path = os.getenv("RUNTIME_CODE_PATH")
+        runtime_code_pod_path = os.getenv("RUNTIME_CODE_POD_PATH")
 
         agent_host_mounts: list[HostPathMount] = []
-        # 只有当 host_path 和 host_mount_path 都配置时，才添加挂载
-        if host_path and host_mount_path:
+        # 只有当 claw_code_path 和 claw_code_pod_path 都配置时，才添加挂载
+        if claw_code_path and claw_code_pod_path:
             agent_host_mounts.append(
                 HostPathMount(
-                    host_path=host_path,
-                    mount_path=host_mount_path,
+                    host_path=claw_code_path,
+                    mount_path=claw_code_pod_path,
+                    read_only=False,
+                    host_path_type="Directory"
+                )
+            )
+        # 只有当 runtime_code_path 和 runtime_code_pod_path 都配置时，才添加挂载
+        if runtime_code_path and runtime_code_pod_path:
+            agent_host_mounts.append(
+                HostPathMount(
+                    host_path=runtime_code_path+"/management/openjiuwen_runtime/management",
+                    mount_path=runtime_code_pod_path+"/management",
+                    read_only=False,
+                    host_path_type="Directory"
+                )
+            )
+            agent_host_mounts.append(
+                HostPathMount(
+                    host_path=runtime_code_path+"/foundation/openjiuwen_runtime/foundation",
+                    mount_path=runtime_code_pod_path+"/foundation",
                     read_only=False,
                     host_path_type="Directory"
                 )
@@ -368,19 +387,6 @@ class RuntimeManagementAgentClient(AgentServerClient):
         node_name = os.getenv("NODE_NAME")
         ready_timeout = int(os.getenv("AGENT_SERVER_READY_TIMEOUT", "300"))
         ready_poll_interval = int(os.getenv("AGENT_SERVER_READY_POLL_INTERVAL", "5"))
-
-        model_provider = os.getenv("MODEL_PROVIDER")
-        model_name = os.getenv("MODEL_NAME")
-        api_base = os.getenv("API_BASE")
-        api_key = os.getenv("API_KEY")
-        gateway_db_type = os.getenv("GATEWAY_DB_TYPE")
-        gateway_sqlite_path = os.getenv("GATEWAY_SQLITE_PATH")
-        gateway_db_host = os.getenv("GATEWAY_DB_HOST")
-        gateway_db_port = os.getenv("GATEWAY_DB_PORT")
-        gateway_db_user = os.getenv("GATEWAY_DB_USER")
-        gateway_db_password = os.getenv("GATEWAY_DB_PASSWORD")
-        gateway_db_name = os.getenv("GATEWAY_DB_NAME")
-
         deploy_mode = (os.getenv("AGENT_SERVER_DEPLOY_MODE") or "k8s").strip().lower()
         self._deploy_mode = deploy_mode
 
@@ -415,35 +421,27 @@ class RuntimeManagementAgentClient(AgentServerClient):
         def _agent_env_vars() -> dict[str, str]:
             base: dict[str, str] = {
                 "AGENT_SERVER_HOST": "0.0.0.0",
-                "AGENT_RUNTIME": agent_runtime or "",
+                "HOME": os.getenv("AGENT_SERVER_HOME"),
+                "AGENT_RUNTIME": os.getenv("AGENT_RUNTIME"),
+                "MODEL_PROVIDER": os.getenv("MODEL_PROVIDER"),
+                "MODEL_NAME": os.getenv("MODEL_NAME"),
+                "API_BASE": os.getenv("API_BASE"),
+                "API_KEY": os.getenv("API_KEY"),
+                "GATEWAY_DB_TYPE": os.getenv("GATEWAY_DB_TYPE"),
+                "GATEWAY_SQLITE_PATH": os.getenv("GATEWAY_SQLITE_PATH"),
+                "GATEWAY_DB_HOST": os.getenv("GATEWAY_DB_HOST"),
+                "GATEWAY_DB_PORT": os.getenv("GATEWAY_DB_PORT"),
+                "GATEWAY_DB_USER": os.getenv("GATEWAY_DB_USER"),
+                "GATEWAY_DB_PASSWORD": os.getenv("GATEWAY_DB_PASSWORD"),
+                "GATEWAY_DB_NAME": os.getenv("GATEWAY_DB_NAME"),
+                "GATEWAY_PG_SCHEMA": os.getenv("GATEWAY_PG_SCHEMA"),
+                "JIUWENCLAW_ID": os.getenv("JIUWENCLAW_ID"),
+                "LLM_SSL_VERIFY": os.getenv("LLM_SSL_VERIFY"),
+                "PYTHONPATH": os.getenv("PYTHONPATH"),
+                "AGENT_SERVER_LOG_FILE": os.getenv("AGENT_SERVER_LOG_FILE"),
+                "CLAW_LINK_AUTH_MODE": os.getenv("CLAW_LINK_AUTH_MODE"),
+                "CLAW_LINK_TOKEN_TTL": os.getenv("CLAW_LINK_TOKEN_TTL"),
             }
-            for key, value in (
-                ("GATEWAY_DB_TYPE", gateway_db_type),
-                ("GATEWAY_SQLITE_PATH", gateway_sqlite_path),
-                ("GATEWAY_DB_HOST", gateway_db_host),
-                ("GATEWAY_DB_PORT", gateway_db_port),
-                ("GATEWAY_DB_USER", gateway_db_user),
-                ("GATEWAY_DB_PASSWORD", gateway_db_password),
-                ("GATEWAY_DB_NAME", gateway_db_name),
-                ("JIUWENCLAW_ID", os.getenv("JIUWENCLAW_ID")),
-                ("LLM_SSL_VERIFY", os.getenv("LLM_SSL_VERIFY")),
-                ("HOME", os.getenv("AGENT_SERVER_HOME")),
-                ("PYTHONPATH", os.getenv("PYTHONPATH")),
-                ("AGENT_SERVER_LOG_FILE", os.getenv("AGENT_SERVER_LOG_FILE")),
-            ):
-                if value is not None:
-                    base[key] = value
-
-            if api_key:
-                base.update(
-                    {
-                        "MODEL_PROVIDER": model_provider or "",
-                        "MODEL_NAME": model_name or "",
-                        "API_BASE": api_base or "",
-                        "API_KEY": api_key,
-                    }
-                )
-
             if mode == "dev":
                 base["LOG_ROOT_PATH"] = "/root/.logs"
             else:
@@ -465,16 +463,6 @@ class RuntimeManagementAgentClient(AgentServerClient):
                         e,
                         agent_custom_envs,
                     )
-
-            # link-auth：把链路鉴权开关透传给 agentserver，使其在 enforce 时同样校验 gateway 令牌
-            # 并在 connection.ack 反向签名（各端用自身 Ed25519 密钥，无需共享密钥）。off 时变量为空、不注入。
-            for _link_var in (
-                "CLAW_LINK_AUTH_MODE",
-                "CLAW_LINK_TOKEN_TTL",
-            ):
-                _link_val = os.getenv(_link_var)
-                if _link_val:
-                    base[_link_var] = _link_val
             return base
 
         _client = self  # 捕获外层 RuntimeManagementAgentClient 实例，供内部类使用
@@ -603,8 +591,6 @@ class RuntimeManagementAgentClient(AgentServerClient):
                         nfs_server=cfg.get("nfs_server") or nfs_server,
                         nfs_path=cfg.get("nfs_path") or nfs_path,
                         nfs_mount_path=cfg.get("nfs_mount_path") or nfs_mount_path,
-                        host_path=cfg.get("host_path") or host_path,
-                        host_mount_path=cfg.get("host_mount_path") or host_mount_path,
                         mode=cfg.get("mode") or mode,
                         node_name=cfg.get("node_name") or node_name,
                     )

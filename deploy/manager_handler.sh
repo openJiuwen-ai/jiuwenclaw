@@ -1,16 +1,32 @@
 #!/usr/bin/env bash
 set -euo >/dev/null 2>&1
 
+gen_manager_server_file() {
+    local template_file="${CONFIG["MANAGER_SERVER_TEMPLATE_FILE"]}"
+    local file="${CONFIG["MANAGER_SERVER_FILE"]}"
+
+    render_config_template "${template_file}" "${file}" "DEPLOY_VARS"
+    enable_dev_mode_if_needed ${file}
+
+    if [ "${DEPLOY_VARS["DB_TYPE"]}" == "postgresql" ]; then
+        yq eval '
+        select(.kind == "Deployment").spec.template.spec.containers[0].env += [
+            {
+                "name": "MANAGER_PG_SCHEMA",
+                "value": "'"${DEPLOY_VARS["MANAGER_PG_SCHEMA"]}"'"
+            }
+        ]' -i "${file}"
+    fi
+}
+
 deploy_manager() {
     local namespace="${DEPLOY_VARS["NAMESPACE"]}"
     local manager_server_name="${DEPLOY_VARS["MANAGER_SERVER_NAME"]}"
-    local manager_server_template_file="${CONFIG["MANAGER_SERVER_TEMPLATE_FILE"]}"
     local manager_server_file="${CONFIG["MANAGER_SERVER_FILE"]}"
     local is_up_web="${DEPLOY_VARS["IS_UP_MANAGER_WEB"]}"
 
     ensure_available_port "MANAGER_SERVER_NODE_PORT"
-    render_config_template "${manager_server_template_file}" "${manager_server_file}" "DEPLOY_VARS"
-    enable_dev_mode_if_needed ${manager_server_file}
+    gen_manager_server_file
     exec_cmd kubectl apply -f ${manager_server_file}
     wait_k8s_resource_ready "deployment" "${manager_server_name}" "${namespace}"
     success "MANAGER_SERVER_NODE_PORT: ${DEPLOY_VARS["MANAGER_SERVER_NODE_PORT"]}"

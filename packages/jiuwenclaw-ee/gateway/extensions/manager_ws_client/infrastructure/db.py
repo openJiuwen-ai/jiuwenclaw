@@ -11,6 +11,7 @@ from typing import Any
 
 from openjiuwen_runtime.foundation.db.handler import DBHandler
 from openjiuwen_runtime.foundation.db.mysql_handler import MySQLHandler
+from openjiuwen_runtime.foundation.db import postgresql_handler
 from openjiuwen_runtime.foundation.db.postgresql_handler import PostgreSQLHandler
 from openjiuwen_runtime.foundation.db.sqlite_handler import SQLiteHandler
 from openjiuwen_runtime.foundation.log import get_logger
@@ -67,13 +68,20 @@ class Database:
         cfg = self.settings
         db_type = str(cfg.gateway_db_type or "").strip().lower() or "sqlite"
         if db_type == "sqlite":
-            return {"db_type": db_type, "sqlite_path": str(self.resolve_sqlite_path())}
-        return {
-            "db_type": db_type,
-            "host": cfg.gateway_db_host,
-            "port": cfg.gateway_db_port,
-            "database": cfg.gateway_db_name,
-        }
+            result = {
+                "db_type": db_type,
+                "sqlite_path": str(self.resolve_sqlite_path()),
+            }
+        else:
+            result = {
+                "db_type": db_type,
+                "host": cfg.gateway_db_host,
+                "port": cfg.gateway_db_port,
+                "database": cfg.gateway_db_name,
+            }
+        if db_type == "postgresql":
+            result["schema"] = cfg.gateway_pg_schema
+        return result
 
     def _create_sqlite_handler(self) -> SQLiteHandler:
         db_path = self.resolve_sqlite_path()
@@ -100,9 +108,10 @@ class Database:
             return PostgreSQLHandler(
                 host=str(cfg.gateway_db_host).strip(),
                 port=int(cfg.gateway_db_port),
+                database=str(cfg.gateway_db_name).strip(),
+                schema=str(cfg.gateway_pg_schema).strip(),
                 user=str(cfg.gateway_db_user).strip(),
                 password=str(cfg.gateway_db_password),
-                database=str(cfg.gateway_db_name).strip(),
             )
         except (TypeError, ValueError) as e:
             logger.exception("Invalid PostgreSQL database configuration.")

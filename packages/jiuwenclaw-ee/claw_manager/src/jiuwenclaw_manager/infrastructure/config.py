@@ -34,6 +34,7 @@ class Settings(BaseSettings):
     db_user: str = Field(default="root", validation_alias="MANAGER_DB_USER")
     db_password: str = Field(default="root", validation_alias="MANAGER_DB_PASSWORD")
     db_name: str = Field(default="manager", validation_alias="MANAGER_DB_NAME")
+    pg_schema: str = Field(default="public", validation_alias="MANAGER_PG_SCHEMA")
 
     manager_heartbeat_timeout_seconds: int = Field(
         default=120, validation_alias="MANAGER_HEARTBEAT_TIMEOUT_SECONDS"

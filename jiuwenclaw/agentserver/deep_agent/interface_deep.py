@@ -12,7 +12,6 @@ import asyncio
 import logging
 import importlib
 import os
-from urllib.parse import quote_plus
 from contextvars import ContextVar, Token
 from dataclasses import dataclass
 
@@ -193,7 +192,7 @@ from jiuwenclaw.gateway.cron import CronTargetChannel
 from jiuwenclaw.agentserver.team import get_team_manager
 from jiuwenclaw.schema.agent import AgentRequest, AgentResponse, AgentResponseChunk
 from jiuwenclaw.agentserver.skill_whitelist import (is_skill_whitelist_tenant, parse_agent_skill_whitelist,
-                                                    SkillWhitelistSynchronizer)
+                                                     SkillWhitelistSynchronizer)
 from jiuwenclaw.utils import (
     get_agent_registered_skill_dirs,
     get_agent_workspace_dir,
@@ -203,6 +202,8 @@ from jiuwenclaw.utils import (
     get_tenant_agent_skills_dirs,
 )
 from jiuwenclaw.local_env_config import set_local_config
+from openjiuwen_runtime.foundation.db.mysql_handler import MySQLHandler
+from openjiuwen_runtime.foundation.db.postgresql_handler import PostgreSQLHandler
 
 load_dotenv(dotenv_path=get_env_file())
 
@@ -640,83 +641,35 @@ def _patch_compiler_for_on_conflict():
 _patch_compiler_for_on_conflict()
 
 
-async def _build_mysql_async_engine():
-    """构建 checkpoint MySQL AsyncEngine。
+async def _build_mysql_handler_engine():
+    """构建 checkpoint MySQL AsyncEngine，使用 openjiuwen_runtime SDK.
 
-    连接参数从 DB_HOST/PORT/USER/PASSWORD/NAME 环境变量读取，
-    与 runtime 共用同一 MySQL 实例。
-    未配置 DB_HOST 时返回 None，checkpoint 回退到 SQLite。
-    如果目标库不存在，会自动创建。
+    连接参数从 GATEWAY_DB_* 环境变量读取。
+    未配置 GATEWAY_DB_HOST 时返回 None，checkpoint 回退到 SQLite。
     """
     db_host = os.getenv("GATEWAY_DB_HOST", "").strip()
     if not db_host:
         return None
     try:
-        from sqlalchemy import text
-        from sqlalchemy.ext.asyncio import create_async_engine
-
-        db_port = os.getenv("GATEWAY_DB_PORT", "3306").strip()
+        db_port = int(os.getenv("GATEWAY_DB_PORT", "3306").strip())
         db_user = os.getenv("GATEWAY_DB_USER", "root").strip()
         db_password = os.getenv("GATEWAY_DB_PASSWORD", "").strip()
         db_name = os.getenv("GATEWAY_DB_NAME", "openjiuwen_gateway").strip()
-        # URL-encode 用户名/密码，避免特殊字符（如 @ : / # %）破坏连接串解析
-        _encoded_user = quote_plus(db_user)
-        _encoded_password = quote_plus(db_password)
-        # 先连接不指定库，自动建库
-        server_url = (
-            f"mysql+aiomysql://{_encoded_user}:{_encoded_password}"
-            f"@{db_host}:{db_port}?charset=utf8mb4"
-        )
-        temp_engine = create_async_engine(server_url, echo=False)
-        async with temp_engine.begin() as conn:
-            await conn.execute(text(
-                f"CREATE DATABASE IF NOT EXISTS `{db_name}` "
-                f"DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci"
-            ))
-        await temp_engine.dispose()
 
-        # 再连接目标库
-        db_url = (
-            f"mysql+aiomysql://{_encoded_user}:{_encoded_password}"
-            f"@{db_host}:{db_port}/{db_name}?charset=utf8mb4"
+        handler = MySQLHandler(
+            host=db_host,
+            port=db_port,
+            user=db_user,
+            password=db_password,
+            database=db_name,
         )
-        engine = create_async_engine(
-            db_url,
-            pool_size=5,
-            max_overflow=10,
-            pool_recycle=3600,
-            pool_pre_ping=True,
-        )
+        await handler.init_database()
+        await handler.connect()
+        engine = handler.get_engine()
         logger.info(
-            "[JiuWenClawDeepAdapter] checkpoint MySQL engine created: %s:%s/%s",
+            "[JiuWenClawDeepAdapter] checkpoint MySQL engine created via SDK: %s:%s/%s",
             db_host, db_port, db_name,
         )
-
-        # 确保 kv_store.value 列为 LONGTEXT，避免 checkpoint 序列化数据被截断
-        async with engine.begin() as conn:
-            result = await conn.execute(text(
-                "SELECT COLUMN_TYPE FROM INFORMATION_SCHEMA.COLUMNS "
-                "WHERE TABLE_SCHEMA = :db AND TABLE_NAME = 'kv_store' AND COLUMN_NAME = 'value'"
-            ), {"db": db_name})
-            row = result.fetchone()
-            if row is None:
-                await conn.execute(text(
-                    "CREATE TABLE IF NOT EXISTS kv_store ("
-                    "`key` VARCHAR(512) PRIMARY KEY,"
-                    "`value` LONGTEXT NOT NULL"
-                    ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4"
-                ))
-                logger.info(
-                    "[JiuWenClawDeepAdapter] kv_store table created with value LONGTEXT"
-                )
-            elif row[0].upper() != "LONGTEXT":
-                await conn.execute(text(
-                    "ALTER TABLE kv_store MODIFY COLUMN `value` LONGTEXT NOT NULL"
-                ))
-                logger.info(
-                    "[JiuWenClawDeepAdapter] kv_store.value altered to LONGTEXT"
-                )
-
         return engine
     except Exception as exc:
         logger.error(
@@ -726,96 +679,38 @@ async def _build_mysql_async_engine():
         return None
 
 
-async def _build_postgresql_async_engine():
-    """构建 checkpoint PostgreSQL AsyncEngine.
+async def _build_postgresql_handler_engine():
+    """构建 checkpoint PostgreSQL AsyncEngine，使用 openjiuwen_runtime SDK.
 
-    连接参数从 DB_HOST/PORT/USER/PASSWORD/NAME 环境变量读取，
-    与 runtime 共用同一 PostgreSQL 实例。
-    未配置 DB_HOST 时返回 None，checkpoint 回退到 SQLite。
-    如果目标库不存在，会自动创建。
+    连接参数从 GATEWAY_DB_* 环境变量读取。
+    未配置 GATEWAY_DB_HOST 时返回 None，checkpoint 回退到 SQLite。
+    支持通过 GATEWAY_PG_SCHEMA 环境变量配置 schema。
     """
     db_host = os.getenv("GATEWAY_DB_HOST", "").strip()
     if not db_host:
         return None
     try:
-        from sqlalchemy import text
-        from sqlalchemy.ext.asyncio import create_async_engine
-
-        db_port = os.getenv("GATEWAY_DB_PORT", "5432").strip()
+        db_port = int(os.getenv("GATEWAY_DB_PORT", "5432").strip())
         db_user = os.getenv("GATEWAY_DB_USER", "postgres").strip()
         db_password = os.getenv("GATEWAY_DB_PASSWORD", "").strip()
         db_name = os.getenv("GATEWAY_DB_NAME", "openjiuwen_gateway").strip()
-        _encoded_user = quote_plus(db_user)
-        _encoded_password = quote_plus(db_password)
-        server_url = (
-            f"postgresql+asyncpg://{_encoded_user}:{_encoded_password}"
-            f"@{db_host}:{db_port}/postgres"
-        )
-        temp_engine = create_async_engine(
-            server_url,
-            echo=False,
-            isolation_level="AUTOCOMMIT",
-        )
+        db_schema = os.getenv("GATEWAY_PG_SCHEMA", "public").strip()
 
-        async with temp_engine.connect() as conn:
-            result = await conn.execute(
-                text("SELECT 1 FROM pg_database WHERE datname = :name"),
-                {"name": db_name},
-            )
-            if result.scalar() is None:
-                quoted = db_name.replace('"', '""')
-                await conn.execute(text(f'CREATE DATABASE "{quoted}"'))
-                logger.info(
-                    "[JiuWenClawDeepAdapter] PostgreSQL database created: %s",
-                    db_name,
-                )
-            else:
-                logger.debug(
-                    "[JiuWenClawDeepAdapter] PostgreSQL database already exists: %s",
-                    db_name,
-                )
-        await temp_engine.dispose()
-
-        db_url = (
-            f"postgresql+asyncpg://{_encoded_user}:{_encoded_password}"
-            f"@{db_host}:{db_port}/{db_name}"
+        handler = PostgreSQLHandler(
+            host=db_host,
+            port=db_port,
+            user=db_user,
+            password=db_password,
+            database=db_name,
+            schema=db_schema,
         )
-        engine = create_async_engine(
-            db_url,
-            pool_size=5,
-            max_overflow=10,
-            pool_recycle=3600,
-            pool_pre_ping=True,
-        )
+        await handler.init_database()
+        await handler.connect()
+        engine = handler.get_engine()
         logger.info(
-            "[JiuWenClawDeepAdapter] checkpoint PostgreSQL engine created: %s:%s/%s",
-            db_host, db_port, db_name,
+            "[JiuWenClawDeepAdapter] checkpoint PostgreSQL engine created via SDK: %s:%s/%s schema=%s",
+            db_host, db_port, db_name, db_schema,
         )
-
-        # 确保 kv_store.value 列为 TEXT，避免 checkpoint 序列化数据被截断
-        async with engine.begin() as conn:
-            result = await conn.execute(text(
-                "SELECT data_type FROM information_schema.columns "
-                "WHERE table_catalog = :db AND table_name = 'kv_store' AND column_name = 'value'"
-            ), {"db": db_name})
-            row = result.fetchone()
-            if row is None:
-                await conn.execute(text(
-                    "CREATE TABLE IF NOT EXISTS kv_store ("
-                    "key VARCHAR(512) PRIMARY KEY,"
-                    "value TEXT NOT NULL"
-                    ")"
-                ))
-                logger.info(
-                    "[JiuWenClawDeepAdapter] kv_store table created with value TEXT"
-                )
-            elif row[0].lower() != "text":
-                await conn.execute(text(
-                    "ALTER TABLE kv_store ALTER COLUMN value TYPE TEXT"
-                ))
-                logger.info(
-                    "[JiuWenClawDeepAdapter] kv_store.value altered to TEXT"
-                )
         return engine
     except Exception as exc:
         logger.error(
@@ -1450,15 +1345,15 @@ class JiuWenClawDeepAdapter:
 
             db_type = os.getenv("GATEWAY_DB_TYPE", "").strip().lower()
             if db_type == "mysql":
-                mysql_engine = await _build_mysql_async_engine()
+                mysql_engine = await _build_mysql_handler_engine()
                 if mysql_engine is not None:
                     conf["db_client"] = mysql_engine
-                    logger.info("[JiuWenClawDeepAdapter] use mysql db_client")
-            elif db_type == "postgresql":
-                postgresql_engine = await _build_postgresql_async_engine()
+                    logger.info("[JiuWenClawDeepAdapter] use mysql db_client from SDK")
+            elif db_type in ("postgresql", "postgres", "pg"):
+                postgresql_engine = await _build_postgresql_handler_engine()
                 if postgresql_engine is not None:
                     conf["db_client"] = postgresql_engine
-                    logger.info("[JiuWenClawDeepAdapter] use postgresql db_client")
+                    logger.info("[JiuWenClawDeepAdapter] use postgresql db_client from SDK")
             checkpointer = await CheckpointerFactory.create(
                 CheckpointerConfig(type="persistence", conf=conf)
             )

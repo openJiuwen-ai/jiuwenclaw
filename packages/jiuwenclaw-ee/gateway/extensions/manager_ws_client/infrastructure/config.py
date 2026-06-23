@@ -49,6 +49,7 @@ class Settings(BaseSettings):
     gateway_db_user: Optional[str] = Field(default=None, validation_alias="GATEWAY_DB_USER")
     gateway_db_password: Optional[str] = Field(default=None, validation_alias="GATEWAY_DB_PASSWORD")
     gateway_db_name: Optional[str] = Field(default=None, validation_alias="GATEWAY_DB_NAME")
+    gateway_pg_schema: Optional[str] = Field(default="public", validation_alias="GATEWAY_PG_SCHEMA")
 
     gateway_manager_ws_client_enabled: bool = Field(
         default=True,

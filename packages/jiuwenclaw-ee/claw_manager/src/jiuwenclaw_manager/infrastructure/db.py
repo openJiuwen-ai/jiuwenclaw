@@ -61,6 +61,7 @@ def _pg_handler_from_settings(cfg: Settings) -> PostgreSQLHandler:
             user=str(cfg.db_user).strip(),
             password=str(cfg.db_password),
             database=str(cfg.db_name).strip(),
+            schema=str(cfg.pg_schema).strip(),
         )
     except (TypeError, ValueError) as e:
         logger.exception(
@@ -96,10 +97,17 @@ def database_config_summary(cfg: Settings | None = None) -> dict[str, Any]:
     active = cfg or settings
     db_type = str(active.db_type or "").strip().lower() or "sqlite"
     if db_type == "sqlite":
-        return {"db_type": db_type, "sqlite_path": active.sqlite_path}
-    return {
-        "db_type": db_type,
-        "host": active.db_host,
-        "port": active.db_port,
-        "database": active.db_name,
-    }
+        result = {
+            "db_type": db_type,
+            "sqlite_path": active.sqlite_path,
+        }
+    else:
+        result = {
+            "db_type": db_type,
+            "host": active.db_host,
+            "port": active.db_port,
+            "database": active.db_name,
+        }
+    if db_type == "postgresql":
+        result["schema"] = active.pg_schema
+    return result

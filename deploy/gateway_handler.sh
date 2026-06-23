@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
 set -euo >/dev/null 2>&1
 
-
 gen_gateway_config_file() {
     local client_type="${DEPLOY_VARS["AGENT_RUNTIME"]}"
     local field_name="feishu"
@@ -54,6 +53,13 @@ gen_gateway_file() {
     fi
 
     enable_dev_mode_if_needed ${file}
+
+    # No need to install packages
+    if [ "${DEPLOY_VARS["MODE"]}" == "dev" ]; then
+        local claw_code="${DEPLOY_VARS["CLAW_CODE_PATH"]}"
+        yq eval '.dependencies = {}' -i ${claw_code}/packages/jiuwenclaw-ee/gateway/extensions/runtime_management_extension/extension.yaml
+        yq eval '.dependencies = {}' -i ${claw_code}/packages/jiuwenclaw-ee/gateway/extensions/manager_ws_client/extension.yaml
+    fi
 
     if [ -n "${DEPLOY_VARS["GATEWAY_CPU_REQUEST"]:-}" ]; then
         yq eval 'select(.kind == "Deployment").spec.template.spec.containers[0].resources.requests.cpu = "'"${DEPLOY_VARS["GATEWAY_CPU_REQUEST"]}"'"' -i "${file}"
@@ -153,7 +159,7 @@ uninstall_gateway() {
     # 不可 kubectl delete -f 一次性删掉：SA 被删后 Pod 仍在 Terminating 窗口内，
     # in-cluster token 立即失效 → Gateway shutdown 删 Agent Pod 会 401。
     info "Deleting Gateway Deployment first (keep ServiceAccount for graceful shutdown)"
-    exec_cmd kubectl delete deployment "${gateway_name}" -n "${namespace}"
+    exec_cmd kubectl delete deployment "${gateway_name}" -n "${namespace}" --ignore-not-found=true
     wait_pod_terminated "${gateway_name}" "${namespace}"
 
     info "Deleting remaining Gateway resources (ServiceAccount, Role, Service, ...)"
