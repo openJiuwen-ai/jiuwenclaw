@@ -82,6 +82,12 @@ from openjiuwen.harness.rails.heartbeat_rail import HeartbeatRail
 from openjiuwen.harness.rails.interrupt.confirm_rail import ConfirmPayload as _ReplanConfirmPayload
 from openjiuwen.core.runner.callback import AbortError as _ReplanAbortError
 from openjiuwen.agent_evolving.signal import SignalDetector
+try:
+    from openjiuwen.agent_evolving.experience.rebuild import ExperienceRebuildService
+    from openjiuwen.harness.rails.evolution.commands import build_rebuild_command_prompt
+except ImportError:
+    ExperienceRebuildService = None
+    build_rebuild_command_prompt = None
 from openjiuwen.agent_evolving.trajectory import FileTrajectoryStore
 from openjiuwen.harness.rails.memory_rail import MemoryRail
 from openjiuwen.harness.rails.coding_memory_rail import CodingMemoryRail
@@ -5171,6 +5177,109 @@ class JiuWenClawDeepAdapter:
             "result_type": "error",
         }
 
+    async def _handle_evolve_rebuild_command(self, query: str) -> dict[str, Any]:
+        """/evolve_rebuild <skill_name> [user_intent] — Rebuild SKILL.md via agent followup."""
+        rail = self._skill_evolution_rail
+        assert rail is not None
+        store = rail.store
+
+        parts = query.split(maxsplit=2)
+        skill_name = parts[1] if len(parts) > 1 else ""
+        user_intent = parts[2] if len(parts) > 2 else None
+
+        if not skill_name:
+            return {
+                "output": "请指定 Skill 名称：`/evolve_rebuild <skill_name> [user_intent]`",
+                "result_type": "error",
+            }
+
+        if not store.skill_exists(skill_name):
+            available = "、".join(store.list_skill_names()) or "（无可用 Skill）"
+            return {
+                "output": f"未找到 Skill '{skill_name}'。当前可用：{available}",
+                "result_type": "error",
+            }
+
+        if ExperienceRebuildService is None or build_rebuild_command_prompt is None:
+            return {
+                "output": "演进重建功能不可用：当前 openjiuwen 版本缺少 rebuild API。",
+                "result_type": "error",
+            }
+
+        subject = {"kind": "skill", "name": skill_name}
+        resolver = getattr(store, "resolve_subject_payload", None)
+        if callable(resolver):
+            try:
+                payload = resolver(skill_name)
+            except Exception:
+                logger.warning("[JiuWenClaw] could not resolve rebuild subject for skill=%s", skill_name)
+            else:
+                if isinstance(payload, dict):
+                    kind = str(payload.get("kind") or "").strip()
+                    name = str(payload.get("name") or skill_name).strip() or skill_name
+                    if kind:
+                        subject = {"kind": kind, "name": name}
+
+        rebuild_service = ExperienceRebuildService(store=store)
+        rebuild_context = await rebuild_service.prepare_rebuild_context(
+            subject,
+            user_intent=user_intent,
+        )
+        if rebuild_context is None:
+            return {
+                "output": f"Skill '{skill_name}' 未生成可执行的重建指令。",
+                "result_type": "error",
+            }
+
+        prompt = build_rebuild_command_prompt(
+            subject=subject,
+            user_intent=user_intent,
+            rebuild_context=rebuild_context,
+        )
+        return {
+            "action": "run_rebuild_followup",
+            "followup_prompt": prompt,
+            "skill_name": skill_name,
+            "subject": subject,
+            "rebuild_context": rebuild_context,
+            "result_type": "followup",
+        }
+
+    async def _finalize_rebuild_followup(self, slash_result: dict[str, Any] | None) -> None:
+        """Clear evolution log after a successful rebuild followup."""
+        if not isinstance(slash_result, dict):
+            return
+        if slash_result.get("action") != "run_rebuild_followup":
+            return
+        rebuild_context = slash_result.get("rebuild_context")
+        if not isinstance(rebuild_context, dict):
+            return
+        if ExperienceRebuildService is None:
+            return
+        rail = self._skill_evolution_rail
+        if rail is None:
+            return
+        rebuild_service = ExperienceRebuildService(store=rail.store)
+        cleared = await rebuild_service.complete_rebuild(rebuild_context)
+        logger.info(
+            "[JiuWenClawDeepAdapter] rebuild followup finalized for skill=%s cleared=%s",
+            rebuild_context.get("skill_name"),
+            cleared,
+        )
+
+    @staticmethod
+    def _extract_followup_prompt(slash_result: dict[str, Any] | None) -> str | None:
+        """Return follow-up prompt when a slash command should continue as an agent turn."""
+        if not isinstance(slash_result, dict):
+            return None
+        if slash_result.get("result_type") != "followup":
+            return None
+        prompt = slash_result.get("followup_prompt")
+        if not isinstance(prompt, str):
+            return None
+        prompt = prompt.strip()
+        return prompt or None
+
     def _ensure_evolution_rail_for_slash(self, mode: str) -> str | None:
         """Check evolution availability for slash commands; lazily init rail if needed.
 
@@ -5220,6 +5329,12 @@ class JiuWenClawDeepAdapter:
             if err:
                 return {"output": err, "result_type": "error"}
             return await self._handle_evolve_rollback_command(stripped)
+
+        if stripped.startswith("/evolve_rebuild"):
+            err = self._ensure_evolution_rail_for_slash(mode)
+            if err:
+                return {"output": err, "result_type": "error"}
+            return await self._handle_evolve_rebuild_command(stripped)
 
         if stripped.startswith("/evolve"):
             err = self._ensure_evolution_rail_for_slash(mode)
@@ -5935,22 +6050,27 @@ class JiuWenClawDeepAdapter:
 
         slash_result = await self._handle_slash_command(query, session_id, mode)
         if slash_result is not None:
-            approval_chunks = slash_result.get("approval_chunks")
-            if approval_chunks:
-                payload: dict[str, Any] = {"approval_chunks": approval_chunks}
+            followup_prompt = self._extract_followup_prompt(slash_result)
+            if followup_prompt is not None:
+                inputs = dict(inputs)
+                inputs["query"] = followup_prompt
+                inputs["_invoke_turn_id"] = request.request_id
             else:
-                content = slash_result.get("output", str(slash_result))
-                payload = {"content": content}
-            reset_request_id(token_request_id)
-            _reset_llm_trace_tokens(token_trace_sid, token_trace_rid, token_trace_iter, token_trace_model)
-            await self._on_chat_request_end(chat_env_token, chat_fp_token, chat_skill_dirs_token)
-            return AgentResponse(
-                request_id=request.request_id,
-                channel_id=request.channel_id,
-                ok=slash_result.get("result_type") != "error",
-                payload=payload,
-                metadata=request.metadata,
-            )
+                approval_chunks = slash_result.get("approval_chunks")
+                if approval_chunks:
+                    payload: dict[str, Any] = {"approval_chunks": approval_chunks}
+                else:
+                    content = slash_result.get("output", str(slash_result))
+                    payload = {"content": content}
+                reset_request_id(token_request_id)
+                _reset_llm_trace_tokens(token_trace_sid, token_trace_rid, token_trace_iter, token_trace_model)
+                return AgentResponse(
+                    request_id=request.request_id,
+                    channel_id=request.channel_id,
+                    ok=slash_result.get("result_type") != "error",
+                    payload=payload,
+                    metadata=request.metadata,
+                )
 
         cron_context_tokens = self._bind_runtime_cron_context(
             channel_id=request.channel_id,
@@ -6007,6 +6127,8 @@ class JiuWenClawDeepAdapter:
             await self._on_chat_request_end(chat_env_token, chat_fp_token, chat_skill_dirs_token)
 
         content = result if isinstance(result, (str, dict)) else str(result)
+
+        await self._finalize_rebuild_followup(slash_result)
 
         return AgentResponse(
             request_id=request.request_id,
@@ -6134,39 +6256,44 @@ class JiuWenClawDeepAdapter:
         # 拦截斜杠命令
         slash_result = await self._handle_slash_command(query, session_id, mode)
         if slash_result is not None:
-            approval_chunks = slash_result.get("approval_chunks", [])
-            if approval_chunks:
-                for chunk in approval_chunks:
+            followup_prompt = self._extract_followup_prompt(slash_result)
+            if followup_prompt is not None:
+                inputs = dict(inputs)
+                inputs["query"] = followup_prompt
+                inputs["_invoke_turn_id"] = request.request_id
+            else:
+                approval_chunks = slash_result.get("approval_chunks", [])
+                if approval_chunks:
+                    for chunk in approval_chunks:
+                        yield AgentResponseChunk(
+                            request_id=request.request_id,
+                            channel_id=request.channel_id,
+                            payload=chunk,
+                            is_complete=False,
+                        )
                     yield AgentResponseChunk(
                         request_id=request.request_id,
                         channel_id=request.channel_id,
-                        payload=chunk,
-                        is_complete=False,
+                        payload={"event_type": "chat.done"},
+                        is_complete=True,
                     )
-                yield AgentResponseChunk(
-                    request_id=request.request_id,
-                    channel_id=request.channel_id,
-                    payload={"event_type": "chat.done"},
-                    is_complete=True,
-                )
-            else:
-                content = slash_result.get("output", str(slash_result))
-                log_chat_final(
-                    session_id=session_id,
-                    request_id=rid or "",
-                    iteration=_LLM_TRACE_ITERATION.get(),
-                    model_name=_LLM_TRACE_MODEL_NAME.get(),
-                )
-                yield AgentResponseChunk(
-                    request_id=request.request_id,
-                    channel_id=request.channel_id,
-                    payload={"event_type": "chat.final", "content": content},
-                    is_complete=True,
-                )
-            reset_request_id(token_request_id)
-            _reset_llm_trace_tokens(token_trace_sid, token_trace_rid, token_trace_iter, token_trace_model)
-            await self._on_chat_request_end(chat_env_token, chat_fp_token, chat_skill_dirs_token)
-            return
+                else:
+                    content = slash_result.get("output", str(slash_result))
+                    log_chat_final(
+                        session_id=session_id,
+                        request_id=rid or "",
+                        iteration=_LLM_TRACE_ITERATION.get(),
+                        model_name=_LLM_TRACE_MODEL_NAME.get(),
+                    )
+                    yield AgentResponseChunk(
+                        request_id=request.request_id,
+                        channel_id=request.channel_id,
+                        payload={"event_type": "chat.final", "content": content},
+                        is_complete=True,
+                    )
+                reset_request_id(token_request_id)
+                _reset_llm_trace_tokens(token_trace_sid, token_trace_rid, token_trace_iter, token_trace_model)
+                return
 
         if self._plain_chat_should_clear_stale_interrupt(request):
             await self._clear_session_persisted_interrupt_state(
@@ -6535,6 +6662,8 @@ class JiuWenClawDeepAdapter:
                     f"[JiuWenClawDeepAdapter] Agent执行成功: request_id={request.request_id}",
                     extra={'user_visible': 'critical'}
                 )
+
+            await self._finalize_rebuild_followup(slash_result)
 
             if evolution_status_started and not evolution_status_ended:
                 yield AgentResponseChunk(
