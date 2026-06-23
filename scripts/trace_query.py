@@ -93,7 +93,7 @@ def cmd_traces(args):
     print(f"=== Recent Traces (limit {args.limit}) ===\n")
 
     for row in rows:
-        trace_id_short = row['trace_id'][:16] + "..."
+        trace_id_short = row['trace_id']
         duration = row['max_duration_ms'] or 0
         print(f"{trace_id_short}")
         print(f"  Spans: {row['span_count']}, Duration: {duration:.2f}ms")
@@ -106,7 +106,7 @@ def cmd_trace(args):
     tree = get_trace_tree(args.db_path, args.trace_id)
     tree = deep_decode_json_strings(tree)
 
-    trace_id_short = args.trace_id[:16] + "..."
+    trace_id_short = args.trace_id
     print(f"=== Trace Tree: {trace_id_short} ===\n")
 
     def print_node(node: dict, indent: str = ""):
@@ -142,7 +142,7 @@ def cmd_search(args):
     print(f"=== Search Results: '{args.name}' (limit {args.limit}) ===\n")
 
     for span in spans:
-        trace_id_short = span['trace_id'][:16] + "..."
+        trace_id_short = span['trace_id']
         duration_ms = (span['duration_ns'] or 0) / 1e6
 
         print(f"{span['name']} [{duration_ms:.2f}ms]")
@@ -175,7 +175,7 @@ def cmd_slow(args):
     print(f"=== Slowest Spans (limit {args.limit}) ===\n")
 
     for i, row in enumerate(rows, 1):
-        trace_id_short = row['trace_id'][:16] + "..."
+        trace_id_short = row['trace_id']
         print(f"{i}. {row['name']} [{row['duration_ms']:.2f}ms]")
         print(f"   Trace: {trace_id_short} at {row['created_at']}")
         print()
