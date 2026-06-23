@@ -1,10 +1,17 @@
 # AGENT Definition Usage
 
-Translate agentDefinition entries from `<workspace>/resources/agents/available_agents.json` into `invoke(funcName:"agent_as_a_tool", params:{...})` calls in the new skill.
+Translate an agentDefinition into two things in the new skill:
 
-## Metadata Note
+1. **Call syntax** — an `invoke(funcName:"agent_as_a_tool", params:{...})` call.
+2. **Tool-definitions block** — a `### Function: agent_as_a_tool` entry in the skill body's single **tool definitions** section.
 
-If the skill uses agent dependencies, declare them in `SKILL.md` frontmatter so packaging can copy the source definitions:
+Both are generated from the same source JSON below.
+
+## Source & metadata
+
+Read agent definitions from `<workspace>/resources/agents/available_agents.json`.
+
+Declare every agent the skill actually calls in `SKILL.md` frontmatter (no empty placeholders; `agentId` must match the source definition exactly):
 
 ```yaml
 metadata:
@@ -12,133 +19,69 @@ metadata:
     - agentId: "aaabbbccc"
 ```
 
-Only declare agents the skill actually calls. Do not add empty placeholders. `agentId` must match the source definition exactly.
+## Example definition
 
-## Input shape
+This single definition drives both outputs below.
 
-`invoke` always uses the fixed function name `agent_as_a_tool`. Put agent call inputs in `params`:
+```json
+{
+  "agentId": "aaabbbccc",
+  "name": "travelAgent",
+  "description": "查询出行相关资讯与方案",
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "query": {
+        "type": "string",
+        "description": "用户查询问题内容"
+      },
+      "filesInfo": {
+        "type": "Array<Object>",
+        "description": "附带的文件资料信息"
+      }
+    },
+    "required": ["query"]
+  }
+}
+```
+
+## Output 1 — Call syntax
+
+`funcName` is always the fixed string `agent_as_a_tool` (never the agent `name` or `agentId`). `params` carries the call inputs:
+
+- `params.agentId` comes from `agentDefinition.agentId`.
+- `params.query` is the task query to send to the agent — make it self-contained with the user's task, constraints, and expected output.
+- Build the remaining params from the `parameters` JSON Schema; include every field in `parameters.required`.
+- Optional fields, including `filesInfo`, are omitted unless the task needs them. When forwarding files, build `filesInfo` according to `parameters.properties.filesInfo` — do not assume a fixed shape beyond the schema.
+
+From the example:
 
 ```text
 invoke(funcName:"agent_as_a_tool", params:{agentId:"aaabbbccc", query:"查询北京三日游玩攻略"})
 ```
 
-`params.agentId` comes from `agentDefinition.agentId`. `params.query` is the task query to send to the agent. `params.filesInfo` is built according to `agentDefinition.parameters.properties.filesInfo`.
-
-Build all params from the `agentDefinition.parameters` JSON Schema. Include fields listed in `agentDefinition.parameters.required`. Optional fields, including `filesInfo`, should be omitted unless the task needs them.
-
-## agentDefinition fields
-
-Read the source agent definitions from `<workspace>/resources/agents/available_agents.json`:
-
-```json
-{
-  "agentId": "aaabbbccc",
-  "name": "travelAgent",
-  "description": "查询出行相关资讯与方案",
-  "parameters": {
-    "type": "object",
-    "properties": {
-      "query": {
-        "type": "string",
-        "description": "用户查询问题内容"
-      },
-      "filesInfo": {
-        "type": "Array<Object>",
-        "description": "附带的文件资料信息"
-      }
-    },
-    "required": [
-      "query"
-    ]
-  }
-}
-```
-
-Field notes:
-
-| Field | Required | How to use it |
-| --- | --- | --- |
-| `agentId` | Yes | Copy exactly into `invoke.params.agentId`. |
-| `name` | No | Human-readable agent name; do not use as the call identifier. |
-| `description` | Yes | Use to decide when delegation is appropriate. |
-| `parameters` | Yes | JSON Schema used to construct `query`, `filesInfo`, and any required call inputs. |
-| `parameters.properties.query` | Usually | User task content to pass as `invoke.params.query`. |
-| `parameters.properties.filesInfo` | Optional unless required | File metadata to pass as `invoke.params.filesInfo`; follow this schema when files must be forwarded. |
-| `parameters.required` | Yes | Required fields that must be present before calling. |
-
-## Safety
-
-- Copy `agentId` exactly; never use `name` as the call identifier.
-- Use `funcName:"agent_as_a_tool"` exactly; do not replace it with the agent name or agentId.
-- Make `query` self-contained with the user's task, constraints, and expected output.
-- Include `filesInfo` only when it is required by `agentDefinition.parameters.required` or when task-relevant files need to be forwarded.
-- When including `filesInfo`, construct it according to `agentDefinition.parameters.properties.filesInfo`; do not assume a fixed shape beyond the schema.
-- Include all required fields from `agentDefinition.parameters.required`.
-- Ask the user when a required value is missing and cannot be safely inferred.
-
-## Example
-
-agentDefinition:
-
-```json
-{
-  "agentId": "aaabbbccc",
-  "name": "travelAgent",
-  "description": "查询出行相关资讯与方案",
-  "parameters": {
-    "type": "object",
-    "properties": {
-      "query": {
-        "type": "string",
-        "description": "用户查询问题内容"
-      },
-      "filesInfo": {
-        "type": "Array<Object>",
-        "description": "附带的文件资料信息"
-      }
-    },
-    "required": [
-      "query"
-    ]
-  }
-}
-```
-
-Generated:
-Call the platform tool to execute:
-```
-    invoke(funcName:"agent_as_a_tool", params:{agentId:"aaabbbccc", query:"查询北京三日游玩攻略"})
-```
-
-If `filesInfo` is required or files must be forwarded, include it using the schema from `parameters.properties.filesInfo`, for example:
+With files (only when required or task-relevant):
 
 ```text
 invoke(funcName:"agent_as_a_tool", params:{agentId:"aaabbbccc", query:"分析这份行程文件", filesInfo:<value matching parameters.properties.filesInfo>})
 ```
 
-## Generating the tool-definitions entry
+## Output 2 — Tool-definitions block
 
-Agent tools sit in the skill body's single **tool definitions** section. Each agent becomes a `### Function: agent_as_a_tool` sub-block.
-
-Mapping rules:
+Mapping:
 
 | JSON field | Markdown field |
 |------------|----------------|
-| (固定) | `### Function: agent_as_a_tool` heading（恒为此字符串，不用 `name`/`agentId`） |
-| `agentId` | `- **toolName**: <agentId>` |
+| (固定) | `### Function: agent_as_a_tool` 标题（恒为此字符串，不用 `name`/`agentId`） |
+| `agentId` | `- **toolName**: <agentId>`（运行时按它路由） |
 | `description` | `- **description**` |
-| `parameters` | `- **参数**: <one-line flattened parameters JSON body>` |
-| (n/a) | `- **约束**` |
-| (n/a) | `- **语义**` |
+| `parameters` | `- **参数**: <parameters JSON 压缩平铺成一行>` |
+| (n/a) | `- **约束**`：仅在有顺序或前置条件时写 |
+| (n/a) | `- **语义**`：仅在触发措辞会路由到不同 agent 时写 |
 
-- `### Function:` 标题恒为 `agent_as_a_tool`。
-- `- **toolName**` 必须填 `agentId`，运行时按它路由。
-- `- **参数**` 从 `<workspace>/resources/agents/available_agents.json` 中对应 agentDefinition 的 `parameters` 字段生成，直接把该 JSON 体压缩并平铺成一行；不要改写成自定义参数说明格式。
-- 如果 `parameters` 为空对象，写 `{}`。
-- `- **约束**` 仅在有顺序或前置条件时写。
-- `- **语义**` 仅在触发措辞会路由到不同 agent 时写。
+- `- **参数**` 直接把 `parameters` JSON 体压缩平铺成一行，不要改写成自定义参数说明格式。`parameters` 为空对象时写 `{}`。
 
-Example — given the `travelAgent` definition above, generate:
+From the example:
 
 ```markdown
 ### Function: agent_as_a_tool
@@ -146,3 +89,16 @@ Example — given the `travelAgent` definition above, generate:
 - **description**: 查询出行相关资讯与方案
 - **参数**: {"type":"object","properties":{"query":{"type":"string","description":"用户查询问题内容"},"filesInfo":{"type":"Array<Object>","description":"附带的文件资料信息"}},"required":["query"]}
 ```
+
+## Field & safety reference
+
+| Field | How to use it | Hard rule |
+| --- | --- | --- |
+| `agentId` | Into `invoke.params.agentId` and the block's `- **toolName**`. | Copy exactly; never use `name` as the call identifier. |
+| `name` | Human-readable agent name only. | Never use as the call identifier. |
+| `description` | Decide when delegation is appropriate. | — |
+| `parameters` | JSON Schema for building `query`, `filesInfo`, and the `- **参数**` line. | Include all `required` fields. |
+| `parameters.properties.query` | User task content → `invoke.params.query`. | Make it self-contained. |
+| `parameters.properties.filesInfo` | File metadata → `invoke.params.filesInfo`. | Include only when required or task-relevant; follow this schema, don't assume a fixed shape. |
+
+`funcName` is always `agent_as_a_tool` — never replace it with the agent `name` or `agentId`. Ask the user when a required value is missing and cannot be safely inferred.

@@ -1,10 +1,17 @@
 # TOOL Definition Usage
 
-Translate toolDefinition entries from `<workspace>/resources/available-tools/<bundleName>__<toolName>.json` into `invoke(funcName:"toolName", params:{bundleName:"...", ...})` calls in the new skill.
+Translate a toolDefinition into two things in the new skill:
 
-## Metadata Note
+1. **Call syntax** — an `invoke(funcName:"<toolName>", params:{...})` call.
+2. **Tool-definitions block** — a `### Function: <toolName>` entry in the skill body's single **tool definitions** section.
 
-If the skill uses function tool dependencies, declare each tool in `SKILL.md` frontmatter so packaging can copy the source definitions:
+Both are generated from the same source JSON below.
+
+## Source & metadata
+
+Read the toolDefinition from `<workspace>/resources/available-tools/<bundleName>__<toolName>.json`.
+
+Declare every tool the skill actually calls in `SKILL.md` frontmatter (no empty placeholders; `bundleName` / `toolName` must match the source filename and JSON exactly):
 
 ```yaml
 metadata:
@@ -13,69 +20,9 @@ metadata:
       toolName: "weather_query"
 ```
 
-Only declare tools the skill actually calls. Do not add empty placeholders. `bundleName` and `toolName` must match the source filename and JSON exactly.
+## Example definition
 
-## Input shape
-
-For every toolDefinition, `invoke` uses the toolDefinition `toolName` as `funcName` and passes tool arguments through `params`:
-
-```text
-invoke(funcName:"weather_query", params:{bundleName:"bundle_001", city:"北京"})
-```
-
-`params.bundleName` is always required and comes from `toolDefinition.bundleName`. The remaining params are the actual argument object passed to the tool. Build them from the `toolDefinition.arguments` JSON Schema. If `toolDefinition.arguments.required` lists fields, include every required field in `params`.
-
-## toolDefinition fields
-
-Read the source toolDefinition from `<workspace>/resources/available-tools/<bundleName>__<toolName>.json`:
-
-```json
-{
-  "schemaVersion": "1.3",
-  "generatedAt": "2026-04-30T00:00:00Z",
-  "bundleName": "bundle_001",
-  "toolName": "weather_query",
-  "toolType": "XiaoYiPlugin",
-  "pluginType": "Cloud",
-  "protocol": "REST",
-  "description": "查询指定城市的实时天气信息",
-  "arguments": {
-    "type": "object",
-    "properties": {},
-    "required": []
-  },
-  "deviceCommand": "optional backend command template"
-}
-```
-
-Field notes:
-
-| Field | Required | How to use it |
-| --- | --- | --- |
-| `bundleName` | Yes | Copy exactly into metadata, source filename, and `invoke.params.bundleName`. |
-| `toolName` | Yes | Copy exactly into `invoke.funcName`. |
-| `description` | Yes | Use to decide when the tool should be called. |
-| `arguments` | Yes | JSON Schema used to construct `invoke.params`. |
-| `schemaVersion` | Yes | Definition version; do not include in generated usage instructions. |
-| `generatedAt` | Yes | Definition timestamp; do not include in generated usage instructions. |
-| `toolType` | No | Backend tool type; do not include in generated usage instructions. |
-| `pluginType` | Yes | Backend category. |
-| `protocol` | Source-dependent | Transport detail; do not include in generated usage instructions. |
-| `deviceCommand` | Source-dependent | Backend command template; do not call it directly from the skill. Use `invoke` instead. |
-
-## Safety
-
-- Copy `bundleName` and `toolName` exactly; never invent IDs or names.
-- Always include `bundleName` in `invoke.params`.
-- Never write `toolName(...)` or call `deviceCommand` directly.
-- Build tool arguments as structured data, never as command text.
-- Include all required fields from `toolDefinition.arguments.required`.
-- Preserve schema value types.
-- Ask the user when a required value is missing and cannot be safely inferred.
-
-## Example
-
-toolDefinition:
+This single definition drives both outputs below.
 
 ```json
 {
@@ -100,32 +47,34 @@ toolDefinition:
 }
 ```
 
-Generated:
-Call the platform tool to execute:
+## Output 1 — Call syntax
+
+`funcName` is the toolDefinition `toolName`. `params` carries the tool arguments, plus `bundleName`:
+
+- `params.bundleName` is always required and comes from `toolDefinition.bundleName`.
+- Build the remaining params from the `arguments` JSON Schema; include every field in `arguments.required`.
+
+From the example:
+
+```text
+invoke(funcName:"weather_query", params:{bundleName:"bundle_001", city:"北京"})
 ```
-    invoke(funcName:"weather_query", params:{bundleName:"bundle_001", city:"北京"})
-```
 
-## Generating the tool-definitions entry
+## Output 2 — Tool-definitions block
 
-Inside the skill body's single **tool definitions** section (see SKILL.md → Writing principles), each function tool becomes a `### Function: <toolName>` sub-block.
-
-Mapping rules:
+Mapping:
 
 | JSON field | Markdown field |
 |------------|----------------|
 | `toolName` | `### Function: <toolName>` heading + `- **toolName**` |
 | `description` | `- **description**` |
-| `arguments` | `- **参数**: <one-line flattened arguments JSON body>` |
-| (n/a) | `- **约束**` |
-| (n/a) | `- **语义**` |
+| `arguments` | `- **参数**: <arguments JSON 压缩平铺成一行>` |
+| (n/a) | `- **约束**`：仅在工具有顺序、幂等性或前置条件时写 |
+| (n/a) | `- **语义**`：仅在触发措辞会路由到不同工具时写（如"删除" vs "取消"） |
 
-- `- **参数**` 从 `<workspace>/resources/available-tools/<bundleName>__<toolName>.json` 的 `arguments` 字段生成，直接把该 JSON 体压缩并平铺成一行；不要改写成自定义参数说明格式。
-- 如果 `arguments` 为空对象，写 `{}`。
-- `- **约束**` 仅在工具有顺序、幂等性或前置条件时写。
-- `- **语义**` 仅在触发措辞会路由到不同工具时写（如"删除" vs "取消"）。
+- `- **参数**` 直接把 `arguments` JSON 体压缩平铺成一行，不要改写成自定义参数说明格式。`arguments` 为空对象时写 `{}`。
 
-Example — given the `weather_query` JSON above, generate:
+From the example:
 
 ```markdown
 ### Function: weather_query
@@ -134,4 +83,18 @@ Example — given the `weather_query` JSON above, generate:
 - **参数**: {"type":"object","properties":{"city":{"type":"string","description":"城市名称。支持中文（北京、上海）或拼音（beijing）或英文（Beijing）。"}},"required":["city"]}
 ```
 
-No 约束 / 语义 line because the definition implies no special preconditions or trigger-phrase routing.
+No 约束 / 语义 line here — the definition implies no special preconditions or trigger-phrase routing.
+
+## Field & safety reference
+
+| Field | How to use it | Hard rule |
+| --- | --- | --- |
+| `bundleName` | Into metadata, source filename, and `invoke.params.bundleName`. | Copy exactly; never invent. Always present in `params`. |
+| `toolName` | Into `invoke.funcName` and the block heading. | Copy exactly. Never write `toolName(...)` as a direct call. |
+| `description` | Decide when the tool should be called. | — |
+| `arguments` | JSON Schema for building `invoke.params` and the `- **参数**` line. | Include all `required` fields; preserve schema value types; pass as structured data, never command text. |
+| `pluginType` | Backend category. | — |
+| `deviceCommand` | Backend command template. | Never call directly; always go through `invoke`. |
+| `schemaVersion`, `generatedAt`, `toolType`, `protocol` | Internal/transport metadata. | Do not include in generated usage instructions. |
+
+Ask the user when a required value is missing and cannot be safely inferred.

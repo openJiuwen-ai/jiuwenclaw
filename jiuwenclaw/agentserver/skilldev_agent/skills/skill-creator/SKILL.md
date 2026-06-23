@@ -59,7 +59,7 @@ Before writing `SKILL.md` or any skill body, determine which of these the skill 
 | Agent tools (`metadata.agents`) | `references/usage_agents.md` |
 | CLI tools (`metadata.clis`) | `references/usage_clis.md` |
 
-Do this even if you think you know the format. The reference files define the exact metadata shape, call syntax, and tool-definitions block format you must use in the skill body. Writing before reading them is a bug.
+**Read exactly the references that match the declared metadata keys — no more, no less.** Do this even if you think you know the format. The reference files define the exact metadata shape, call syntax, and tool-definitions block format you must use in the skill body. Writing before reading them is a bug.
 
 ---
 
