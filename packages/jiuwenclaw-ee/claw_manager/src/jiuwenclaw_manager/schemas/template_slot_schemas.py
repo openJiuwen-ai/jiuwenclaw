@@ -24,6 +24,9 @@ _TEMPLATE_REF_SLOTS: tuple[str, ...] = (
 
 MODEL_TEMPLATE_SLOTS: frozenset[str] = frozenset(_MODEL_TEMPLATE_SLOTS)
 TEMPLATE_REF_SLOTS: frozenset[str] = frozenset(_TEMPLATE_REF_SLOTS)
+SINGLE_VALUE_TEMPLATE_REF_SLOTS: frozenset[str] = frozenset(
+    (*_MODEL_TEMPLATE_SLOTS, SERVICE_CONFIG_SLOT)
+)
 
 DefaultTemplateMappingTypeLiteral = Literal[
     "default_model",
@@ -40,6 +43,7 @@ __all__ = (
     "SKILL_WHITELIST_SLOT",
     "EXTENSION_CONFIG_SLOT",
     "SERVICE_CONFIG_SLOT",
+    "SINGLE_VALUE_TEMPLATE_REF_SLOTS",
     "TEMPLATE_REF_SLOTS",
     "DefaultTemplateMappingTypeLiteral",
 )

@@ -309,6 +309,8 @@
       "userIdPlaceholder": "用户 ID，如 alice",
       "groupIdPlaceholder": "群组 ID，如 g_demo_sales",
       "customPlaceholder": "自定义引用表达式",
+      "singleValueHint": "该槽位仅允许配置一条引用",
+      "singleValueOnly": "{{slot}} 仅允许配置一条引用",
       "slots": {
         "default_model": "默认模型 (default_model)",
         "video_model": "视频模型 (video_model)",

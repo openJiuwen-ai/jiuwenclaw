@@ -4,18 +4,23 @@ from __future__ import annotations
 
 from typing import Any
 
-from jiuwenclaw_manager.schemas.template_slot_schemas import TEMPLATE_REF_SLOTS
+from jiuwenclaw_manager.schemas.template_slot_schemas import (
+    SINGLE_VALUE_TEMPLATE_REF_SLOTS,
+    TEMPLATE_REF_SLOTS,
+)
 
 KNOWN_SLOT_KEYS = TEMPLATE_REF_SLOTS
 _LEGACY_FLAT_KEYS = tuple(TEMPLATE_REF_SLOTS)
 
 __all__ = (
     "KNOWN_SLOT_KEYS",
+    "SINGLE_VALUE_TEMPLATE_REF_SLOTS",
     "normalize_template_ref",
     "normalize_template_ref_optional",
     "read_template_ref_from_row",
     "merge_template_ref",
     "apply_template_ref_to_updates",
+    "validate_single_value_template_ref_slots",
 )
 
 
@@ -65,7 +70,22 @@ def normalize_template_ref(value: Any) -> dict[str, list[str]]:
         refs = _normalize_slot_refs(raw)
         if refs:
             out[slot] = refs
+    validate_single_value_template_ref_slots(out)
     return out
+
+
+def validate_single_value_template_ref_slots(
+    template_ref: dict[str, list[str]],
+) -> None:
+    """校验单值槽位（默认/视频/音频/视觉模型、服务配置）至多一条引用。"""
+    for slot, refs in template_ref.items():
+        if slot not in SINGLE_VALUE_TEMPLATE_REF_SLOTS:
+            continue
+        if len(refs) > 1:
+            raise ValueError(
+                f"template_ref slot {slot!r} allows at most one reference, "
+                f"got {len(refs)}"
+            )
 
 
 def normalize_template_ref_optional(value: Any) -> dict[str, list[str]] | None:

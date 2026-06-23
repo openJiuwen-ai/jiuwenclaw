@@ -22,7 +22,11 @@ import { MatchExprEditor } from '../../../components/MatchExprEditor';
 import { toast } from '../../../stores/uiStore';
 import { formatTime, truncate } from '../../../utils/format';
 import { validateMatchExprModel, parseMatchExpr } from '../../../utils/matchExpr';
-import { normalizeTemplateRefFromApi, type TemplateRefMap } from '../../../utils/templateRef';
+import {
+  findSingleValueTemplateRefViolation,
+  normalizeTemplateRefFromApi,
+  type TemplateRefMap,
+} from '../../../utils/templateRef';
 
 /** 与 config_effective_agent_policy 表 ColumnDefinition length 一致 */
 const FIELD_MAX_LENGTH = {
@@ -206,6 +210,15 @@ export function AgentPoliciesTab({ instanceId }: { instanceId: string }) {
     const matchExprErr = validateMatchExprModel(parseMatchExpr(form.match_expr));
     if (matchExprErr) {
       toast('warn', t('policies.matchExpr.invalid'));
+      return;
+    }
+    const singleValueViolation = findSingleValueTemplateRefViolation(form.template_ref);
+    if (singleValueViolation) {
+      toast('warn', t('policies.templateRef.singleValueOnly', {
+        slot: t(`policies.templateRef.slots.${singleValueViolation}`, {
+          defaultValue: singleValueViolation,
+        }),
+      }));
       return;
     }
     const body = {

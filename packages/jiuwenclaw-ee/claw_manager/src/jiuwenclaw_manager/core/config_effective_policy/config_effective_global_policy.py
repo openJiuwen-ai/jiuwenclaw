@@ -28,6 +28,7 @@ from jiuwenclaw_manager.infrastructure.template_ref import (
     apply_template_ref_to_updates,
     normalize_template_ref,
     read_template_ref_from_row,
+    validate_single_value_template_ref_slots,
 )
 from jiuwenclaw_manager.schemas.config_effective_policy_schemas import (
     ConfigEffectiveGlobalPolicyCreateBody,
@@ -123,18 +124,27 @@ class ConfigEffectiveGlobalPolicyService:
         normalized = await validate_jiuwenclaw_id(self._handler, jiuwenclaw_id)
 
         now = utc_now()
+        template_ref = normalize_template_ref(body.template_ref)
+        validate_single_value_template_ref_slots(template_ref)
         row = {
             "jiuwenclaw_id": normalized,
             "policy_id": new_uuid4(),
             "policy_name": body.policy_name,
             "policy_desc": body.policy_desc,
             "priority": body.priority,
-            "template_ref": normalize_template_ref(body.template_ref),
+            "template_ref": template_ref,
             "enabled": body.enabled,
             "data": body.data,
             "created_at": now,
             "updated_at": now,
         }
+        await sync_gateway_templates_after_template_ref_change(
+            self._handler,
+            normalized,
+            old_template_ref={},
+            new_template_ref=row["template_ref"],
+            skip_runtime_update=True,
+        )
         ack = await push_config_effective_global_policy_op(
             normalized,
             "create",
@@ -153,12 +163,6 @@ class ConfigEffectiveGlobalPolicyService:
 
         payload = {**row, "id": row_id}
         created = await self._handler.create(_GLOBAL_POLICY_TABLE, payload)
-        await sync_gateway_templates_after_template_ref_change(
-            self._handler,
-            normalized,
-            old_template_ref={},
-            new_template_ref=row["template_ref"],
-        )
         return _row_to_out(created)
 
     async def get(
@@ -250,6 +254,15 @@ class ConfigEffectiveGlobalPolicyService:
         old_template_ref = read_template_ref_from_row(row)
         updates = apply_template_ref_to_updates(updates, existing_row=row)
 
+        if "template_ref" in updates:
+            validate_single_value_template_ref_slots(updates["template_ref"])
+            await sync_gateway_templates_after_template_ref_change(
+                self._handler,
+                normalized,
+                old_template_ref=old_template_ref,
+                new_template_ref=updates["template_ref"],
+                skip_runtime_update=True,
+            )
         await push_config_effective_global_policy_op(
             normalized,
             "update",
@@ -265,13 +278,6 @@ class ConfigEffectiveGlobalPolicyService:
         )
         if updated is None:
             return None
-        if "template_ref" in updates:
-            await sync_gateway_templates_after_template_ref_change(
-                self._handler,
-                normalized,
-                old_template_ref=old_template_ref,
-                new_template_ref=updates["template_ref"],
-            )
         return _row_to_out(updated)
 
     async def delete(
@@ -285,19 +291,18 @@ class ConfigEffectiveGlobalPolicyService:
         )
         if row is None:
             return False
+        await sync_gateway_templates_after_template_ref_change(
+            self._handler,
+            normalized,
+            old_template_ref=read_template_ref_from_row(row),
+            new_template_ref={},
+            skip_runtime_update=True,
+        )
         await push_config_effective_global_policy_op(
             normalized,
             "delete",
             row_id=policy_id,
         )
-        deleted = await self._handler.delete(
+        return await self._handler.delete(
             _GLOBAL_POLICY_TABLE, _global_policy_pk(normalized, policy_id)
         )
-        if deleted:
-            await sync_gateway_templates_after_template_ref_change(
-                self._handler,
-                normalized,
-                old_template_ref=read_template_ref_from_row(row),
-                new_template_ref={},
-            )
-        return deleted

@@ -40,6 +40,38 @@ import type {
 
 const API_BASE = (import.meta.env.VITE_API_BASE ?? '/api').replace(/\/$/, '');
 
+interface FastApiValidationErrorItem {
+  type?: string;
+  loc?: unknown[];
+  msg?: string;
+}
+
+/** 将 FastAPI / Pydantic 的 detail（string | object[]）转为可读文案。 */
+export function formatApiErrorDetail(detail: unknown): string {
+  if (detail == null) return '';
+  if (typeof detail === 'string') return detail.trim();
+  if (Array.isArray(detail)) {
+    const messages = detail
+      .map((item) => {
+        if (typeof item === 'string') return item.trim();
+        if (item && typeof item === 'object' && 'msg' in item) {
+          return String((item as FastApiValidationErrorItem).msg || '')
+            .trim()
+            .replace(/^Value error,\s*/i, '');
+        }
+        return '';
+      })
+      .filter(Boolean);
+    return messages.join('；') || '请求参数校验失败';
+  }
+  if (typeof detail === 'object') {
+    const obj = detail as Record<string, unknown>;
+    if (typeof obj.message === 'string') return obj.message.trim();
+    if (typeof obj.msg === 'string') return obj.msg.trim();
+  }
+  return String(detail);
+}
+
 export class ApiError extends Error {
   constructor(public status: number, public detail: string, public raw?: unknown) {
     super(detail || `HTTP ${status}`);
@@ -89,10 +121,11 @@ async function http<T>(path: string, opts: RequestOptions = {}): Promise<T> {
     }
   }
   if (!resp.ok) {
-    const detail =
-      (json && typeof json === 'object' && 'detail' in (json as Record<string, unknown>)
-        ? String((json as { detail: unknown }).detail)
-        : '') || resp.statusText;
+    const rawDetail =
+      json && typeof json === 'object' && 'detail' in (json as Record<string, unknown>)
+        ? (json as { detail: unknown }).detail
+        : undefined;
+    const detail = formatApiErrorDetail(rawDetail) || resp.statusText;
     throw new ApiError(resp.status, detail, json);
   }
   // 兼容 ResponseModel<T> 包装

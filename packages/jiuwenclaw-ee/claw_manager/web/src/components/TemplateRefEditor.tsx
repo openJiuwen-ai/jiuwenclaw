@@ -10,6 +10,7 @@ import type { ModelTemplate } from '../types';
 import {
   TEMPLATE_REF_SLOTS,
   buildRefExpr,
+  isSingleValueTemplateRefSlot,
   newTemplateRefRow,
   parseRefExpr,
   serializeTemplateRef,
@@ -129,12 +130,14 @@ function RefRowEditor({
   options,
   onChange,
   onRemove,
+  allowRemove,
 }: {
   index: number;
   value: string;
   options: TemplateOption[];
   onChange: (next: string) => void;
   onRemove: () => void;
+  allowRemove: boolean;
 }) {
   const { t } = useTranslation();
   const [expr, setExpr] = useState<ParsedRefExpr>(() => parseRefExpr(value));
@@ -223,15 +226,23 @@ function RefRowEditor({
         )}
       </div>
 
-      <DeleteIconButton
-        label={t('policies.templateRef.removeRef')}
-        onClick={onRemove}
-      />
+      {allowRemove ? (
+        <DeleteIconButton
+          label={t('policies.templateRef.removeRef')}
+          onClick={onRemove}
+        />
+      ) : null}
     </div>
   );
 }
 
-export function TemplateRefEditor({ label, hint, required, value, onChange }: TemplateRefEditorProps) {
+export function TemplateRefEditor({
+  label,
+  hint,
+  required,
+  value,
+  onChange,
+}: TemplateRefEditorProps) {
   const { t } = useTranslation();
   const [rows, setRows] = useState<TemplateRefSlotRow[]>(() => templateRefRowsFromMap(value));
   const [templateOptions, setTemplateOptions] = useState<Record<string, TemplateOption[]>>({});
@@ -278,7 +289,16 @@ export function TemplateRefEditor({ label, hint, required, value, onChange }: Te
   };
 
   const updateSlot = (key: string, slot: string) => {
-    emitChange(rows.map((r) => (r.key === key ? { ...r, slot } : r)));
+    emitChange(
+      rows.map((r) => {
+        if (r.key !== key) return r;
+        const next = { ...r, slot };
+        if (isSingleValueTemplateRefSlot(slot) && next.refs.length > 1) {
+          next.refs = [next.refs[0] ?? ''];
+        }
+        return next;
+      }),
+    );
   };
 
   const removeSlot = (key: string) => {
@@ -287,7 +307,11 @@ export function TemplateRefEditor({ label, hint, required, value, onChange }: Te
 
   const addRef = (key: string) => {
     emitChange(
-      rows.map((r) => (r.key === key ? { ...r, refs: [...r.refs, ''] } : r)),
+      rows.map((r) => {
+        if (r.key !== key) return r;
+        if (isSingleValueTemplateRefSlot(r.slot)) return r;
+        return { ...r, refs: [...r.refs, ''] };
+      }),
     );
   };
 
@@ -306,6 +330,7 @@ export function TemplateRefEditor({ label, hint, required, value, onChange }: Te
     emitChange(
       rows.map((r) => {
         if (r.key !== slotKey) return r;
+        if (isSingleValueTemplateRefSlot(r.slot)) return r;
         const refs = r.refs.filter((_, i) => i !== index);
         return { ...r, refs: refs.length ? refs : [''] };
       }),
@@ -331,6 +356,7 @@ export function TemplateRefEditor({ label, hint, required, value, onChange }: Te
         ) : (
           rows.map((row) => {
             const options = templateOptions[row.slot] ?? [];
+            const singleValue = isSingleValueTemplateRefSlot(row.slot);
             return (
               <div
                 key={row.key}
@@ -371,15 +397,22 @@ export function TemplateRefEditor({ label, hint, required, value, onChange }: Te
                       options={options}
                       onChange={(v) => updateRef(row.key, index, v)}
                       onRemove={() => removeRef(row.key, index)}
+                      allowRemove={!singleValue}
                     />
                   ))}
-                  <button
-                    type="button"
-                    className="btn sm ghost mt-0.5 self-start border border-dashed border-[var(--border)]"
-                    onClick={() => addRef(row.key)}
-                  >
-                    + {t('policies.templateRef.addRef')}
-                  </button>
+                  {!singleValue ? (
+                    <button
+                      type="button"
+                      className="btn sm ghost mt-0.5 self-start border border-dashed border-[var(--border)]"
+                      onClick={() => addRef(row.key)}
+                    >
+                      + {t('policies.templateRef.addRef')}
+                    </button>
+                  ) : (
+                    <div className="text-[11px] text-muted mt-0.5">
+                      {t('policies.templateRef.singleValueHint')}
+                    </div>
+                  )}
                 </div>
               </div>
             );

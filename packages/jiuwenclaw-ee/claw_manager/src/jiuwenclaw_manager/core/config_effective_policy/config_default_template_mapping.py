@@ -166,6 +166,15 @@ class ConfigDefaultTemplateMappingService:
             "created_at": now,
             "updated_at": now,
         }
+        await sync_gateway_templates_after_mapping_change(
+            self._handler,
+            normalized,
+            old_template_type=None,
+            old_template_id=None,
+            new_template_type=body.template_type,
+            new_template_id=body.template_id,
+            skip_runtime_update=True,
+        )
         ack = await push_config_default_template_mapping_op(
             normalized,
             "create",
@@ -184,14 +193,6 @@ class ConfigDefaultTemplateMappingService:
 
         payload = {**row, "id": mapping_id}
         created = await self._handler.create(_TEMPLATE_MAPPING_TABLE, payload)
-        await sync_gateway_templates_after_mapping_change(
-            self._handler,
-            normalized,
-            old_template_type=None,
-            old_template_id=None,
-            new_template_type=body.template_type,
-            new_template_id=body.template_id,
-        )
         return _row_to_out(created)
 
     async def get(
@@ -301,6 +302,20 @@ class ConfigDefaultTemplateMappingService:
         if not updates:
             return _row_to_out(row)
 
+        if "template_type" in updates or "template_id" in updates:
+            await sync_gateway_templates_after_mapping_change(
+                self._handler,
+                normalized,
+                old_template_type=str(getattr(row, "template_type", "") or ""),
+                old_template_id=str(getattr(row, "template_id", "") or ""),
+                new_template_type=str(
+                    updates.get("template_type", getattr(row, "template_type", "") or "")
+                ),
+                new_template_id=str(
+                    updates.get("template_id", getattr(row, "template_id", "") or "")
+                ),
+                skip_runtime_update=True,
+            )
         await push_config_default_template_mapping_op(
             normalized,
             "update",
@@ -316,19 +331,6 @@ class ConfigDefaultTemplateMappingService:
         )
         if updated is None:
             return None
-        if "template_type" in updates or "template_id" in updates:
-            await sync_gateway_templates_after_mapping_change(
-                self._handler,
-                normalized,
-                old_template_type=str(getattr(row, "template_type", "") or ""),
-                old_template_id=str(getattr(row, "template_id", "") or ""),
-                new_template_type=str(
-                    updates.get("template_type", getattr(row, "template_type", "") or "")
-                ),
-                new_template_id=str(
-                    updates.get("template_id", getattr(row, "template_id", "") or "")
-                ),
-            )
         return _row_to_out(updated)
 
     async def delete(
@@ -342,21 +344,20 @@ class ConfigDefaultTemplateMappingService:
         )
         if row is None:
             return False
+        await sync_gateway_templates_after_mapping_change(
+            self._handler,
+            normalized,
+            old_template_type=str(getattr(row, "template_type", "") or ""),
+            old_template_id=str(getattr(row, "template_id", "") or ""),
+            new_template_type=None,
+            new_template_id=None,
+            skip_runtime_update=True,
+        )
         await push_config_default_template_mapping_op(
             normalized,
             "delete",
             row_id=mapping_id,
         )
-        deleted = await self._handler.delete(
+        return await self._handler.delete(
             _TEMPLATE_MAPPING_TABLE, _mapping_pk(normalized, mapping_id)
         )
-        if deleted:
-            await sync_gateway_templates_after_mapping_change(
-                self._handler,
-                normalized,
-                old_template_type=str(getattr(row, "template_type", "") or ""),
-                old_template_id=str(getattr(row, "template_id", "") or ""),
-                new_template_type=None,
-                new_template_id=None,
-            )
-        return deleted

@@ -22,6 +22,7 @@ import { MatchExprEditor } from '../../../components/MatchExprEditor';
 import { toast } from '../../../stores/uiStore';
 import { formatTime, truncate } from '../../../utils/format';
 import {
+  findSingleValueTemplateRefViolation,
   hasTemplateRefContent,
   normalizeTemplateRefFromApi,
   type TemplateRefMap,
@@ -184,6 +185,16 @@ export function ServicePoliciesTab({ instanceId }: { instanceId: string }) {
     const missing = requiredChecks.find((item) => item.invalid);
     if (missing) {
       toast('warn', t('policies.fieldRequired', { field: missing.label }));
+      return;
+    }
+
+    const singleValueViolation = findSingleValueTemplateRefViolation(form.template_ref);
+    if (singleValueViolation) {
+      toast('warn', t('policies.templateRef.singleValueOnly', {
+        slot: t(`policies.templateRef.slots.${singleValueViolation}`, {
+          defaultValue: singleValueViolation,
+        }),
+      }));
       return;
     }
 

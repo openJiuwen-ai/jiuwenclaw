@@ -7,6 +7,7 @@ from typing import Any
 from openjiuwen_runtime.foundation.db.handler import DBHandler
 
 from jiuwenclaw_manager.core.template.push_template_to_gateway import (
+    assert_template_deletable,
     push_template_to_referencing_gateways,
 )
 from jiuwenclaw_manager.infrastructure.common import resolve_order_by
@@ -218,6 +219,9 @@ class ExtensionConfigTemplateService:
         row = await self._handler.get(_TABLE, {"template_id": template_id})
         if row is None:
             return False
+        await assert_template_deletable(
+            self._handler, template_id, "extension_config_templates"
+        )
         await push_template_to_referencing_gateways(
             self._handler,
             "extension_config_templates",

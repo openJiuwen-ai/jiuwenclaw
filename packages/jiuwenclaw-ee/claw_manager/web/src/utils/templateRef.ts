@@ -10,6 +10,31 @@ export const TEMPLATE_REF_SLOTS = [
   'service_config',
 ] as const;
 
+/** 各槽位至多一条引用：默认/视频/音频/视觉模型、服务配置。 */
+export const SINGLE_VALUE_TEMPLATE_REF_SLOTS = new Set<string>([
+  'default_model',
+  'video_model',
+  'audio_model',
+  'vision_model',
+  'service_config',
+]);
+
+export function isSingleValueTemplateRefSlot(slot: string): boolean {
+  return SINGLE_VALUE_TEMPLATE_REF_SLOTS.has(slot.trim());
+}
+
+/** 校验单值槽位引用条数；返回首个违规槽位名，无违规则返回 null。 */
+export function findSingleValueTemplateRefViolation(
+  map: TemplateRefMap,
+): string | null {
+  for (const [slot, refs] of Object.entries(map)) {
+    if (!isSingleValueTemplateRefSlot(slot)) continue;
+    const nonEmpty = refs.filter((r) => r.trim()).length;
+    if (nonEmpty > 1) return slot;
+  }
+  return null;
+}
+
 export type TemplateRefSlot = (typeof TEMPLATE_REF_SLOTS)[number];
 
 export type TemplateRefMap = Record<string, string[]>;
@@ -48,6 +73,11 @@ function normalizeSlotRefs(raw: unknown): string[] {
   return text ? [text] : [];
 }
 
+function clampSingleValueSlotRefs(slot: string, refs: string[]): string[] {
+  if (!isSingleValueTemplateRefSlot(slot) || refs.length <= 1) return refs;
+  return [refs[0]];
+}
+
 /** 将 API 返回的 template_ref 规范为 { slot: string[] }。 */
 export function normalizeTemplateRefFromApi(
   raw: Record<string, string | string[]> | null | undefined,
@@ -57,7 +87,7 @@ export function normalizeTemplateRefFromApi(
   for (const [key, value] of Object.entries(raw)) {
     const slot = key.trim();
     if (!slot) continue;
-    const refs = normalizeSlotRefs(value);
+    const refs = clampSingleValueSlotRefs(slot, normalizeSlotRefs(value));
     if (refs.length) out[slot] = refs;
   }
   return out;
@@ -74,18 +104,24 @@ export function serializeTemplateRef(rows: TemplateRefSlotRow[]): TemplateRefMap
   for (const row of rows) {
     const slot = row.slot.trim();
     if (!slot) continue;
-    const refs = dedupePreserveOrder(row.refs.map((r) => r.trim()).filter(Boolean));
+    const refs = clampSingleValueSlotRefs(
+      slot,
+      dedupePreserveOrder(row.refs.map((r) => r.trim()).filter(Boolean)),
+    );
     if (refs.length) out[slot] = refs;
   }
   return out;
 }
 
 export function templateRefRowsFromMap(map: TemplateRefMap): TemplateRefSlotRow[] {
-  return Object.entries(map).map(([slot, refs]) => ({
-    key: slot,
-    slot,
-    refs: refs.length ? [...refs] : [''],
-  }));
+  return Object.entries(map).map(([slot, refs]) => {
+    const normalized = clampSingleValueSlotRefs(slot, refs.length ? [...refs] : ['']);
+    return {
+      key: slot,
+      slot,
+      refs: normalized.length ? normalized : [''],
+    };
+  });
 }
 
 export function newTemplateRefRow(slot = 'default_model'): TemplateRefSlotRow {

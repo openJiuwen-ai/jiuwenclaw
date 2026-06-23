@@ -154,6 +154,9 @@ async def apply_config_push(
 
     if matched_payload is not None:
         op = str(matched_payload.get("op") or "").strip()
+        skip_runtime_update = skip_runtime_update or bool(
+            matched_payload.get("skip_runtime_update")
+        )
         if op in _RUNTIME_MUTATING_OPS and not skip_runtime_update:
             _trigger_runtime_management_config_update(op)
         return result

@@ -309,6 +309,8 @@
       "userIdPlaceholder": "User ID, e.g. alice",
       "groupIdPlaceholder": "Group ID, e.g. g_demo_sales",
       "customPlaceholder": "Custom reference expression",
+      "singleValueHint": "This slot allows only one reference",
+      "singleValueOnly": "{{slot}} allows only one reference",
       "slots": {
         "default_model": "Default model (default_model)",
         "video_model": "Video model (video_model)",

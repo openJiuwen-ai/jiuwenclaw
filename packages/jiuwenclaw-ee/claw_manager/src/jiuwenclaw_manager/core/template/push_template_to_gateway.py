@@ -227,14 +227,55 @@ async def collect_referenced_template_ids_for_gateway(
     return {tid for _, tid in pairs}
 
 
-async def _scan_jiuwenclaw_ids_for_template(
+async def _resolve_template_ref_lookup(
+    handler: DBHandler,
+    template_id: str,
+    kind: str,
+) -> tuple[str, frozenset[str], bool] | None:
+    """解析模板引用查询上下文：``(template_id, slot_keys, use_jid_template_ref_index)``。"""
+    tid = str(template_id or "").strip()
+    if not tid:
+        return None
+    spec = TEMPLATE_KIND_SPECS[_normalize_kind(kind)]
+    indexed = (
+        await handler.count_records(_JID_TEMPLATE_REF_TABLE, {"template_id": tid})
+    ) > 0
+    return tid, spec.slot_keys, indexed
+
+
+async def _list_active_jid_template_ref_rows(
     handler: DBHandler,
     template_id: str,
     *,
     slot_keys: frozenset[str],
-) -> set[str]:
-    """全表扫描：查找策略/映射中引用指定 ``template_id`` 的 Gateway（索引未建立时回退）。"""
+) -> list[Any]:
+    """从 ``jid_template_ref`` 列出指定 ``template_id`` 的有效引用行。"""
+    rows = await handler.list_records(
+        _JID_TEMPLATE_REF_TABLE,
+        {"template_id": template_id},
+        limit=_LIST_ALL_CAP,
+        offset=0,
+    )
+    matched: list[Any] = []
+    for row in rows:
+        slot = str(getattr(row, "slot", "") or "").strip()
+        if slot not in slot_keys:
+            continue
+        if int(getattr(row, "ref_count", 0) or 0) <= 0:
+            continue
+        matched.append(row)
+    return matched
+
+
+async def _scan_policy_references_for_template(
+    handler: DBHandler,
+    template_id: str,
+    *,
+    slot_keys: frozenset[str],
+) -> tuple[set[str], int]:
+    """全表扫描策略/映射，返回引用的 Gateway 集合与引用条数（索引未建立时回退）。"""
     jids: set[str] = set()
+    count = 0
     mapping_rows = await handler.list_records(
         _MAPPING_TABLE,
         {"template_id": template_id},
@@ -245,6 +286,7 @@ async def _scan_jiuwenclaw_ids_for_template(
         template_type = str(getattr(row, "template_type", "") or "").strip()
         if template_type not in slot_keys:
             continue
+        count += 1
         jid = str(getattr(row, "jiuwenclaw_id", "") or "").strip()
         if jid:
             jids.add(jid)
@@ -262,10 +304,11 @@ async def _scan_jiuwenclaw_ids_for_template(
                 slot_keys=slot_keys,
             ):
                 continue
+            count += 1
             jid = str(getattr(row, "jiuwenclaw_id", "") or "").strip()
             if jid:
                 jids.add(jid)
-    return jids
+    return jids, count
 
 
 async def collect_referenced_jiuwenclaw_ids_for_template(
@@ -274,21 +317,24 @@ async def collect_referenced_jiuwenclaw_ids_for_template(
     kind: str,
 ) -> set[str]:
     """查找在 ``jid_template_ref`` 或策略/映射中引用了指定 ``template_id`` 的全部 ``jiuwenclaw_id``。"""
-    tid = str(template_id or "").strip()
-    if not tid:
+    lookup = await _resolve_template_ref_lookup(handler, template_id, kind)
+    if lookup is None:
         return set()
-    spec = TEMPLATE_KIND_SPECS[_normalize_kind(kind)]
-
-    indexed = await handler.count_records(
-        _JID_TEMPLATE_REF_TABLE, {"template_id": tid}
-    )
-    if indexed > 0:
-        return await collect_jiuwenclaw_ids_referencing_template(
-            handler, tid, slot_keys=spec.slot_keys
+    tid, slot_keys, use_index = lookup
+    if use_index:
+        rows = await _list_active_jid_template_ref_rows(
+            handler, tid, slot_keys=slot_keys
         )
-    return await _scan_jiuwenclaw_ids_for_template(
-        handler, tid, slot_keys=spec.slot_keys
+        jids: set[str] = set()
+        for row in rows:
+            jid = str(getattr(row, "jiuwenclaw_id", "") or "").strip()
+            if jid:
+                jids.add(jid)
+        return jids
+    jids, _ = await _scan_policy_references_for_template(
+        handler, tid, slot_keys=slot_keys
     )
+    return jids
 
 
 async def _connected_gateway_jiuwenclaw_ids() -> set[str]:
@@ -308,6 +354,7 @@ async def _push_template_config_op(
     template_id: str | None = None,
     updates: dict[str, Any] | None = None,
     templates: list[dict[str, Any]] | None = None,
+    skip_runtime_update: bool = False,
 ) -> dict[str, Any]:
     spec = TEMPLATE_KIND_SPECS[_normalize_kind(kind)]
     payload: dict[str, Any] = {"op": op}
@@ -319,6 +366,8 @@ async def _push_template_config_op(
         payload["updates"] = updates
     if templates is not None:
         payload["templates"] = templates
+    if skip_runtime_update:
+        payload["skip_runtime_update"] = True
     return await push_config_op(jiuwenclaw_id, {spec.config_section: payload})
 
 
@@ -506,6 +555,7 @@ async def _apply_slot_pair_delta(
     *,
     added: set[tuple[str, str]],
     removed: set[tuple[str, str]],
+    skip_runtime_update: bool = False,
 ) -> None:
     """更新 ``jid_template_ref``，并按合计引用数差异向 Gateway 增量 create / delete。"""
     jid = str(jiuwenclaw_id or "").strip()
@@ -546,10 +596,14 @@ async def _apply_slot_pair_delta(
             if not payloads:
                 continue
             await _push_template_config_op(
-                jid, kind, "create", template=payloads[0]
+                jid, kind, "create", template=payloads[0],
+                skip_runtime_update=skip_runtime_update,
             )
         else:
-            await _push_template_config_op(jid, kind, "delete", template_id=tid)
+            await _push_template_config_op(
+                jid, kind, "delete", template_id=tid,
+                skip_runtime_update=skip_runtime_update,
+            )
 
 
 async def sync_gateway_templates_after_template_ref_change(
@@ -558,6 +612,7 @@ async def sync_gateway_templates_after_template_ref_change(
     *,
     old_template_ref: Any,
     new_template_ref: Any,
+    skip_runtime_update: bool = False,
 ) -> None:
     old_pairs = slot_template_pairs_from_template_ref(old_template_ref)
     new_pairs = slot_template_pairs_from_template_ref(new_template_ref)
@@ -566,6 +621,7 @@ async def sync_gateway_templates_after_template_ref_change(
         jiuwenclaw_id,
         added=new_pairs - old_pairs,
         removed=old_pairs - new_pairs,
+        skip_runtime_update=skip_runtime_update,
     )
 
 
@@ -577,6 +633,7 @@ async def sync_gateway_templates_after_mapping_change(
     old_template_id: str | None,
     new_template_type: str | None,
     new_template_id: str | None,
+    skip_runtime_update: bool = False,
 ) -> None:
     old_pairs = slot_template_pair_from_mapping(
         old_template_type or "", old_template_id or ""
@@ -589,6 +646,7 @@ async def sync_gateway_templates_after_mapping_change(
         jiuwenclaw_id,
         added=new_pairs - old_pairs,
         removed=old_pairs - new_pairs,
+        skip_runtime_update=skip_runtime_update,
     )
 
 
@@ -646,27 +704,59 @@ async def collect_jiuwenclaw_ids_referencing_template(
     tid = str(template_id or "").strip()
     if not tid:
         return set()
-
-    rows = await handler.list_records(
-        _JID_TEMPLATE_REF_TABLE,
-        {"template_id": tid},
-        limit=_LIST_ALL_CAP,
-        offset=0,
+    rows = await _list_active_jid_template_ref_rows(
+        handler, tid, slot_keys=slot_keys
     )
     jids: set[str] = set()
     for row in rows:
-        slot = str(getattr(row, "slot", "") or "").strip()
-        if slot not in slot_keys:
-            continue
-        if int(getattr(row, "ref_count", 0) or 0) <= 0:
-            continue
         jid = str(getattr(row, "jiuwenclaw_id", "") or "").strip()
         if jid:
             jids.add(jid)
     return jids
 
 
+async def count_config_effective_policy_references_for_template(
+    handler: DBHandler,
+    template_id: str,
+    kind: str,
+) -> int:
+    """统计配置生效策略与默认模板映射对指定 ``template_id`` 的引用条数。"""
+    lookup = await _resolve_template_ref_lookup(handler, template_id, kind)
+    if lookup is None:
+        return 0
+    tid, slot_keys, use_index = lookup
+    if use_index:
+        rows = await _list_active_jid_template_ref_rows(
+            handler, tid, slot_keys=slot_keys
+        )
+        return sum(int(getattr(row, "ref_count", 0) or 0) for row in rows)
+    _, count = await _scan_policy_references_for_template(
+        handler, tid, slot_keys=slot_keys
+    )
+    return count
+
+
+async def assert_template_deletable(
+    handler: DBHandler,
+    template_id: str,
+    kind: str,
+) -> None:
+    """删除模板前校验：若仍被配置生效策略引用则拒绝删除。"""
+    ref_count = await count_config_effective_policy_references_for_template(
+        handler,
+        template_id,
+        kind,
+    )
+    if ref_count > 0:
+        raise ValueError(
+            f"cannot delete template: {ref_count} config effective policy "
+            "reference(s) exist, remove template references from policies first"
+        )
+
+
 __all__ = (
+    "assert_template_deletable",
+    "count_config_effective_policy_references_for_template",
     "sync_referenced_templates_to_gateway",
     "push_template_to_referencing_gateways",
     "sync_gateway_templates_after_template_ref_change",
