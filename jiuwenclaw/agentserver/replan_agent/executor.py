@@ -31,6 +31,12 @@ from openjiuwen.core.single_agent.rail.base import (
 )
 
 from jiuwenclaw.agentserver.deep_agent.rails.stream_event_rail import JiuClawStreamEventRail
+from jiuwenclaw.agentserver.llm_io_trace import (
+    begin_tool_trace_event,
+    end_tool_trace_event,
+    log_tool_call_input,
+    log_tool_call_output,
+)
 from jiuwenclaw.agentserver.replan_agent.rails import RePlanArtifactRail
 from jiuwenclaw.agentserver.replan_agent.permission_bridge import (
     REPLAN_RESUME_CTX_KEY,
@@ -287,7 +293,7 @@ class RePlanExecutor:
         # 按优先级排序（priority越小越先执行）
         self._rails.sort(key=lambda r: getattr(r, 'priority', 0))
 
-        logger.info(
+        logger.debug(
             "[RePlanExecutor] Rails initialized: %s",
             [type(r).__name__ for r in self._rails]
         )
@@ -336,7 +342,7 @@ class RePlanExecutor:
         skill_root = self._env.skill_root
         if skill_root and "skill_root" not in merged:
             merged["skill_root"] = skill_root
-            logger.info(
+            logger.debug(
                 "[RePlanExecutor] merged skill_root from env: %s", skill_root
             )
         # [TEMP-EXTERNAL-SKILL] 注入 skill_name（外部 skill 目录名）
@@ -452,7 +458,6 @@ class RePlanExecutor:
         from jiuwenclaw.schema.agent import AgentResponseChunk
 
         start = time.monotonic()
-        logger.info("[RePlanExecutor] execute_plan_stream start")
 
         merged_inputs = self._merge_env_config_to_inputs(inputs)
         await self._env.register_tools(
@@ -471,7 +476,11 @@ class RePlanExecutor:
             channel_id=channel_id,
             enable_task_tracking=True,
         )
-        logger.info("[RePlanExecutor] execute_plan_stream plan_code=%s", plan_code)
+        logger.info(
+            "[RePlanExecutor] execute_plan_stream start plan_code_len=%s input_keys=%s",
+            len(plan_code),
+            list(merged_inputs.keys()),
+        )
         # plan.started 必须最先发出，前端依赖它创建本次规划流的根节点。
         yield self._make_plan_started_chunk(request_id, channel_id)
 
@@ -494,7 +503,6 @@ class RePlanExecutor:
                 )
                 yield self._make_complete_chunk(request_id, channel_id)
                 return
-            logger.info("[RePlanExecutor] execute_plan_stream prepare root node")
 
             # ⑥ 预先扫描 root 的子节点，初始化所有任务状态（状态为 pending）
             await self._initialize_pending_tasks(root)
@@ -672,7 +680,7 @@ class RePlanExecutor:
             if hook is None:
                 continue
             try:
-                logger.info(
+                logger.debug(
                     "[RePlanExecutor] Running Rail %s hook %s",
                     type(rail).__name__,
                     hook_name,
@@ -726,7 +734,7 @@ class RePlanExecutor:
                 resolved_workspace_dir = effective_project_dir.strip()
                 set_effective_request_workspace_dir(resolved_workspace_dir)
                 set_cwd(resolved_workspace_dir)
-                logger.info(
+                logger.debug(
                     "[RePlanExecutor] effective request workspace set: %s",
                     resolved_workspace_dir,
                 )
@@ -1007,113 +1015,187 @@ class RePlanExecutor:
         tool_call_id = self._next_tool_call_id(tool_name, kwargs)
         resume_input = self._consume_pending_resume_input(tool_call_id)
 
-        # resume 重放时，对已执行过的工具（非 pending_tool_call_id）跳过权限检查，
-        # 直接执行。否则重放会再次触发权限中断，形成"执行→中断→resume→又执行→又中断"死循环。
-        # pending_tool_call_id 由 set_pending_resume 设置，是当前等待用户审批的那个工具。
-        # 其它工具在之前的执行中已经通过权限检查（或已执行完成），重放时应直接放行。
-        is_replay_of_completed_tool = (
-            self._pending_resume is not None
-            and resume_input is None
-            and self._pending_resume.get("expected_tool_call_id") is not None
-            and tool_call_id != self._pending_resume["expected_tool_call_id"]
-        )
-
-        ctx = build_tool_ctx(
-            session=session,
+        # ─── 工具调用 trace 上下文 ───
+        # begin_tool_trace_event 在本次 use_tool 调用范围内分配独立 event_id，
+        # tool_call_request 与 tool_call_output 共享同一 event_id，便于在
+        # full.log 通过 event_id grep 还原一次工具调用的完整入参与出参。
+        trace_token = begin_tool_trace_event()
+        trace_session_id = self._tool_trace_session_id()
+        trace_request_id = _request_id_var.get()
+        log_tool_call_input(
+            session_id=trace_session_id,
+            request_id=trace_request_id,
+            iteration=None,
+            agent="replan",
             tool_name=tool_name,
-            tool_args=kwargs,
             tool_call_id=tool_call_id,
-            resume_user_input=resume_input,
+            args=kwargs,
         )
+        trace_start = time.monotonic()
+        trace_status: str = "ok"
+        trace_result: Any = None
+        trace_error: str | None = None
 
-        if is_replay_of_completed_tool:
-            logger.info(
-                "[RePlanExecutor] use_tool replay-skip-permission name=%s tcid=%s (already executed before interrupt)",
-                tool_name,
-                tool_call_id,
-            )
-        else:
+        def _emit_trace_output() -> None:
+            duration_ms = (time.monotonic() - trace_start) * 1000.0
             try:
-                await self._run_rail_hook("before_tool_call", ctx)
-            except AbortError as e:
-                # HITL 中断：保存断点上下文，再向上抛
-                tic = extract_tool_interrupt(e)
-                logger.info(
-                    "[RePlanExecutor] permission interrupt tool=%s tcid=%s has_request=%s",
-                    tool_name,
-                    tool_call_id,
-                    tic is not None,
+                log_tool_call_output(
+                    session_id=trace_session_id,
+                    request_id=trace_request_id,
+                    iteration=None,
+                    agent="replan",
+                    tool_name=tool_name,
+                    tool_call_id=tool_call_id,
+                    status=trace_status,
+                    duration_ms=duration_ms,
+                    result=trace_result,
+                    error=trace_error,
                 )
-                try:
-                    await save_resume_ctx(
-                        session,
-                        plan_code=self._current_plan_code,
-                        inputs=self._execution_inputs,
-                        pending_tool_call_id=tool_call_id,
-                    )
-                except Exception as save_exc:
-                    logger.warning(
-                        "[RePlanExecutor] save_resume_ctx failed: %s", save_exc
-                    )
-                raise
-
-        # rail 通过 _skip_tool 标记 reject，已经在 ctx.inputs.tool_result 写入结果
-        if ctx.extra.get("_skip_tool"):
-            logger.info(
-                "[RePlanExecutor] use_tool skipped by rail name=%s tcid=%s",
-                tool_name,
-                tool_call_id,
-            )
-            return ctx.inputs.tool_result
-
-        # rail approve（含 resume approve）：清掉断点 ctx，正常执行
-        if resume_input is not None:
-            try:
-                clear_resume_ctx(session)
             except Exception:
                 logger.debug(
-                    "[RePlanExecutor] clear_resume_ctx after approve failed", exc_info=True
+                    "[RePlanExecutor] log_tool_call_output failed name=%s tcid=%s",
+                    tool_name,
+                    tool_call_id,
+                    exc_info=True,
                 )
 
-        # 获取工具函数
-        tool_fn = self._env.get_tool_function(tool_name)
-        if tool_fn is None:
-            raise ValueError(f"未知工具: {tool_name}")
-
-        logger.info(
-            "[RePlanExecutor] use_tool name=%s tcid=%s kwargs_keys=%s",
-            tool_name,
-            tool_call_id,
-            list(kwargs.keys()),
-        )
-
-        if self._current_trace:
-            self._current_trace.node_execution_order.append(f"tool:{tool_name}")
-
         try:
-            from jiuwenclaw.interface_resp import track_tool_resp
+            # resume 重放时，对已执行过的工具（非 pending_tool_call_id）跳过权限检查，
+            # 直接执行。否则重放会再次触发权限中断，形成"执行→中断→resume→又执行→又中断"死循环。
+            # pending_tool_call_id 由 set_pending_resume 设置，是当前等待用户审批的那个工具。
+            # 其它工具在之前的执行中已经通过权限检查（或已执行完成），重放时应直接放行。
+            is_replay_of_completed_tool = (
+                self._pending_resume is not None
+                and resume_input is None
+                and self._pending_resume.get("expected_tool_call_id") is not None
+                and tool_call_id != self._pending_resume["expected_tool_call_id"]
+            )
 
-            async with track_tool_resp(tool_name, session_id=self._interface_log_session_id()):
-                result = await tool_fn(**kwargs)
+            ctx = build_tool_ctx(
+                session=session,
+                tool_name=tool_name,
+                tool_args=kwargs,
+                tool_call_id=tool_call_id,
+                resume_user_input=resume_input,
+            )
+
+            if is_replay_of_completed_tool:
+                logger.debug(
+                    "[RePlanExecutor] use_tool replay-skip-permission name=%s tcid=%s"
+                    " (already executed before interrupt)",
+                    tool_name,
+                    tool_call_id,
+                )
+            else:
+                try:
+                    await self._run_rail_hook("before_tool_call", ctx)
+                except AbortError as e:
+                    # HITL 中断：保存断点上下文，再向上抛
+                    tic = extract_tool_interrupt(e)
+                    logger.info(
+                        "[RePlanExecutor] permission interrupt tool=%s tcid=%s has_request=%s",
+                        tool_name,
+                        tool_call_id,
+                        tic is not None,
+                    )
+                    try:
+                        await save_resume_ctx(
+                            session,
+                            plan_code=self._current_plan_code,
+                            inputs=self._execution_inputs,
+                            pending_tool_call_id=tool_call_id,
+                        )
+                    except Exception as save_exc:
+                        logger.warning(
+                            "[RePlanExecutor] save_resume_ctx failed: %s", save_exc
+                        )
+                    trace_status = "interrupted"
+                    trace_error = repr(e)
+                    raise
+
+            # rail 通过 _skip_tool 标记 reject，已经在 ctx.inputs.tool_result 写入结果
+            if ctx.extra.get("_skip_tool"):
+                logger.debug(
+                    "[RePlanExecutor] use_tool skipped by rail name=%s tcid=%s",
+                    tool_name,
+                    tool_call_id,
+                )
+                trace_status = "skipped"
+                trace_result = ctx.inputs.tool_result
+                return ctx.inputs.tool_result
+
+            # rail approve（含 resume approve）：清掉断点 ctx，正常执行
+            if resume_input is not None:
+                try:
+                    clear_resume_ctx(session)
+                except Exception:
+                    logger.debug(
+                        "[RePlanExecutor] clear_resume_ctx after approve failed", exc_info=True
+                    )
+
+            # 获取工具函数
+            tool_fn = self._env.get_tool_function(tool_name)
+            if tool_fn is None:
+                trace_status = "error"
+                trace_error = f"未知工具: {tool_name}"
+                raise ValueError(f"未知工具: {tool_name}")
+
             logger.debug(
-                "[RePlanExecutor] use_tool done name=%s result_type=%s",
+                "[RePlanExecutor] use_tool name=%s tcid=%s kwargs_keys=%s",
                 tool_name,
-                type(result).__name__,
+                tool_call_id,
+                list(kwargs.keys()),
             )
 
-            ctx.inputs.tool_result = result
-            await self._run_rail_hook("after_tool_call", ctx)
-            return result
-        except Exception as e:
-            if isinstance(e, AbortError):
-                # HITL 中断：透传，不作为普通工具错误处理
+            if self._current_trace:
+                self._current_trace.node_execution_order.append(f"tool:{tool_name}")
+
+            try:
+                from jiuwenclaw.interface_resp import track_tool_resp
+
+                async with track_tool_resp(tool_name, session_id=self._interface_log_session_id()):
+                    result = await tool_fn(**kwargs)
+                logger.debug(
+                    "[RePlanExecutor] use_tool done name=%s result_type=%s",
+                    tool_name,
+                    type(result).__name__,
+                )
+
+                ctx.inputs.tool_result = result
+                await self._run_rail_hook("after_tool_call", ctx)
+                trace_status = "ok"
+                trace_result = result
+                return result
+            except Exception as e:
+                if isinstance(e, AbortError):
+                    # HITL 中断：透传，不作为普通工具错误处理
+                    trace_status = "interrupted"
+                    trace_error = repr(e)
+                    raise
+                logger.exception(
+                    "[RePlanExecutor] use_tool failed name=%s err=%r", tool_name, e
+                )
+                ctx.inputs.tool_result = f"Error: {e}"
+                await self._run_rail_hook("after_tool_call", ctx)
+                trace_status = "error"
+                trace_error = repr(e)
                 raise
-            logger.exception(
-                "[RePlanExecutor] use_tool failed name=%s err=%r", tool_name, e
-            )
-            ctx.inputs.tool_result = f"Error: {e}"
-            await self._run_rail_hook("after_tool_call", ctx)
-            raise
+        finally:
+            _emit_trace_output()
+            end_tool_trace_event(trace_token)
+
+    def _tool_trace_session_id(self) -> str:
+        """工具 trace 用的 session_id，优先复用 LLM trace 的 ContextVar，保持口径一致。"""
+        try:
+            from jiuwenclaw.agentserver.deep_agent.interface_deep import _LLM_TRACE_SESSION_ID
+
+            sid = _LLM_TRACE_SESSION_ID.get()
+            if sid:
+                return str(sid)
+        except Exception:
+            # interface_deep 不可用时回退到本模块自有 session_id 解析。
+            pass
+        return self._interface_log_session_id()
 
     def _read_llm_concurrency_limit(self) -> int:
         """从 environment.config 读取 LLM 并发上限。
@@ -1148,7 +1230,7 @@ class RePlanExecutor:
             return contextlib.nullcontext()
         if self._llm_semaphore is None:
             self._llm_semaphore = asyncio.Semaphore(self._llm_concurrency_limit)
-            logger.info(
+            logger.debug(
                 "[RePlanExecutor] llm semaphore initialized limit=%d",
                 self._llm_concurrency_limit,
             )
@@ -1240,7 +1322,7 @@ class RePlanExecutor:
         # 仅并发时生成 id；串行场景保持 None，行为不变
         source_id = self._gen_stream_source_id(node_name) if concurrent else None
 
-        logger.info(
+        logger.debug(
             "[RePlanExecutor] call_llm prompt_len=%s system_len=%s node=%s source_id=%s",
             len(prompt),
             len(system_prompt),
@@ -1367,7 +1449,7 @@ class RePlanExecutor:
         # 仅并发时生成 id；串行场景保持 None，行为不变
         source_id = self._gen_stream_source_id(node_name) if concurrent else None
 
-        logger.info(
+        logger.debug(
             "[RePlanExecutor] stream_llm prompt_len=%s system_len=%s node=%s source_id=%s",
             len(prompt),
             len(system_prompt),
@@ -1411,10 +1493,6 @@ class RePlanExecutor:
                     # 框架层面自动发送 reasoning 事件，业务代码无需关心
                     reasoning_content = getattr(chunk, "reasoning_content", None)
                     if reasoning_content:
-                        logger.debug(
-                            "[RePlanExecutor] stream_llm reasoning_content: %s",
-                            (str(reasoning_content)[:50] if reasoning_content else "") or "",
-                        )
                         if session:
                             reasoning_payload: dict[str, Any] = {
                                 "content": str(reasoning_content),
@@ -1511,7 +1589,7 @@ class RePlanExecutor:
             )
             raise error
 
-        logger.info(
+        logger.warning(
             "[RePlanExecutor] node fallback via handler plan_name=%s error=%s fallback_count=%d",
             node.plan_name,
             error,
@@ -1558,7 +1636,7 @@ class RePlanExecutor:
             )
             raise error
 
-        logger.info(
+        logger.warning(
             "[RePlanExecutor] node fallback_stream via handler plan_name=%s error=%s fallback_count=%d",
             node.plan_name,
             error,
@@ -1583,7 +1661,7 @@ class RePlanExecutor:
         """流式执行单个节点，并实时转发工具等框架事件。"""
         from jiuwenclaw.schema.agent import AgentResponseChunk
 
-        logger.info("[RePlanExecutor] _execute_node_stream start")
+        logger.debug("[RePlanExecutor] _execute_node_stream start")
         output_queue: asyncio.Queue[AgentResponseChunk | BaseException | None] = asyncio.Queue()
         session = _session_var.get()
 
@@ -2047,7 +2125,7 @@ class RePlanExecutor:
             "timestamp": time.time(),
         }
         
-        logger.info(
+        logger.debug(
             "[RePlanExecutor] task.update: %d tasks - %d completed, %d in_progress, %d pending, %d failed",
             total, completed, in_progress, pending, failed
         )
@@ -2100,7 +2178,7 @@ class RePlanExecutor:
         self._set_current_task_context(subplan, task_id, timestamp)
         self._update_task_state_on_start(task_state, timestamp)
 
-        logger.info(
+        logger.debug(
             "[RePlanExecutor] task.start: task_id=%s task_name=%s status=in_progress depth=%d",
             task_id,
             subplan.plan_name,
@@ -2157,7 +2235,7 @@ class RePlanExecutor:
         is_error = isinstance(result_or_error, Exception)
         status = "failed" if is_error else "completed"
 
-        logger.info(
+        logger.debug(
             "[RePlanExecutor] task.complete: task_id=%s task_name=%s status=%s duration_ms=%d depth=%d",
             task_id,
             subplan.plan_name,
@@ -2216,7 +2294,7 @@ class RePlanExecutor:
         task_states[task_id] = task_state
         # 同时写入实例属性（跨协程共享）
         self._task_states_holder[task_id] = task_state
-        logger.info(
+        logger.debug(
             "[RePlanExecutor] dynamic task added: task_id=%s task_name=%s",
             task_id,
             subplan.plan_name,
@@ -2322,7 +2400,6 @@ class RePlanExecutor:
     def _prepare_root_node(self, plan_code: str) -> PlanNode:
         """统一非流式/流式入口的 plan_code 加载流程，确保安全校验只维护一处。"""
         errors = self._validator.validate(plan_code)
-        logger.info("[RePlanExecutor] validate errors=%s", errors)
         if errors:
             logger.warning("[RePlanExecutor] validation failed errors=%s", errors)
             raise PlanCodeValidationError(errors)
@@ -2481,7 +2558,7 @@ class RePlanExecutor:
         normalized = str(parent)
         if normalized not in sys.path:
             sys.path.append(normalized)
-            logger.info("[RePlanExecutor] added to sys.path: %s", normalized)
+            logger.debug("[RePlanExecutor] added to sys.path: %s", normalized)
 
     @staticmethod
     def _hash_code(code: str) -> str:
@@ -2494,7 +2571,7 @@ class RePlanExecutor:
             try:
                 # 这里调用 Evolver 的接口发送追踪数据
                 # 具体实现取决于 Evolver 的接口设计
-                logger.info(
+                logger.debug(
                     "[RePlanExecutor] sending trace to evolver: fallback_count=%d",
                     self._current_trace.fallback_count,
                 )

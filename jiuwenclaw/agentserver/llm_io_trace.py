@@ -35,6 +35,14 @@ _LLM_TRACE_EVENT_ID: ContextVar[str] = ContextVar(
     default="",
 )
 
+# 工具调用 trace 专用 event_id。与 LLM trace 解耦，避免一次 LLM 调用内多次工具
+# 调用串成同一个 event_id。tool_call_request 与对应的 tool_call_output 共享同一
+# event_id，便于在 full.log 中通过 event_id grep 出完整的一次工具调用。
+_TOOL_TRACE_EVENT_ID: ContextVar[str] = ContextVar(
+    "tool_trace_event_id",
+    default="",
+)
+
 
 def begin_llm_trace_event() -> Token:
     """生成一个新的 event_id 并写入 ContextVar，返回 Token 供 finally 重置。"""
@@ -46,8 +54,22 @@ def end_llm_trace_event(token: Token) -> None:
     _LLM_TRACE_EVENT_ID.reset(token)
 
 
+def begin_tool_trace_event() -> Token:
+    """生成一个新的工具调用 event_id，返回 Token 供 finally 重置。"""
+    return _TOOL_TRACE_EVENT_ID.set(uuid.uuid4().hex)
+
+
+def end_tool_trace_event(token: Token) -> None:
+    """重置工具调用 event_id ContextVar。"""
+    _TOOL_TRACE_EVENT_ID.reset(token)
+
+
 def _current_event_id() -> str:
     return _LLM_TRACE_EVENT_ID.get()
+
+
+def _current_tool_event_id() -> str:
+    return _TOOL_TRACE_EVENT_ID.get()
 
 
 def _env_int(name: str, default: int) -> int:
@@ -396,3 +418,94 @@ def log_chat_final(
         event="chat.final",
     )
     _log_body_parts(header, "")
+
+
+def _tool_trace_header(
+    *,
+    session_id: str,
+    request_id: str,
+    iteration: int | None,
+    agent: str,
+    tool_name: str,
+    tool_call_id: str,
+    event: str,
+) -> str:
+    """工具调用 trace 行头部，复用 LLM_IO_TRACE 前缀以便统一日志解析。"""
+    it = "" if iteration is None else str(iteration)
+    eid = _current_tool_event_id()
+    event_id_str = f"{eid!r}" if eid else ""
+    return (
+        f"[LLM_IO_TRACE] event={event} event_id={event_id_str} session_id={session_id!r} "
+        f"request_id={request_id!r} iteration={it} agent={agent!r} "
+        f"tool_name={tool_name!r} tool_call_id={tool_call_id!r}"
+    )
+
+
+def log_tool_call_input(
+    *,
+    session_id: str,
+    request_id: str,
+    iteration: int | None,
+    agent: str,
+    tool_name: str,
+    tool_call_id: str,
+    args: Mapping[str, Any] | None,
+    extra: Mapping[str, Any] | None = None,
+) -> None:
+    """记录一次工具调用的入参。仅在 DEBUG 级别有效。"""
+    if not _llm_trace_active():
+        return
+    header = _tool_trace_header(
+        session_id=session_id,
+        request_id=request_id,
+        iteration=iteration,
+        agent=agent,
+        tool_name=tool_name,
+        tool_call_id=tool_call_id,
+        event="tool_call_request",
+    )
+    payload: dict[str, Any] = {"args": _serialize_one(dict(args or {}))}
+    if extra:
+        payload["extra"] = _serialize_one(dict(extra))
+    body = json.dumps(payload, ensure_ascii=False, default=str)
+    _log_body_parts(header, body)
+
+
+def log_tool_call_output(
+    *,
+    session_id: str,
+    request_id: str,
+    iteration: int | None,
+    agent: str,
+    tool_name: str,
+    tool_call_id: str,
+    status: str,
+    duration_ms: float,
+    result: Any = None,
+    error: str | None = None,
+    extra: Mapping[str, Any] | None = None,
+) -> None:
+    """记录一次工具调用的出参。``status`` 取值：``ok`` / ``error`` / ``skipped`` / ``interrupted``。"""
+    if not _llm_trace_active():
+        return
+    header = _tool_trace_header(
+        session_id=session_id,
+        request_id=request_id,
+        iteration=iteration,
+        agent=agent,
+        tool_name=tool_name,
+        tool_call_id=tool_call_id,
+        event="tool_call_output",
+    )
+    payload: dict[str, Any] = {
+        "status": status,
+        "duration_ms": round(float(duration_ms), 3),
+    }
+    if result is not None:
+        payload["result"] = _serialize_one(result)
+    if error is not None:
+        payload["error"] = str(error)
+    if extra:
+        payload["extra"] = _serialize_one(dict(extra))
+    body = json.dumps(payload, ensure_ascii=False, default=str)
+    _log_body_parts(header, body)
