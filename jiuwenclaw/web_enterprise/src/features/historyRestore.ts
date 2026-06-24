@@ -1,6 +1,8 @@
 import { Message, MessageRole, UsageSummary, FileDownloadItem, WsEvent } from '../types';
 import { webClient } from '../services/webClient';
 import { normalizeFinalContent } from '../utils/finalContent';
+import { shouldProcessHistoryPayload } from './historyRestoreFilter';
+import { logHistoryRestore } from './historyRestoreLog';
 
 export const HISTORY_GET_METHOD = 'history.get';
 export const HISTORY_MESSAGE_EVENT = 'history.message';
@@ -8,6 +10,7 @@ export const HISTORY_MESSAGE_EVENT = 'history.message';
 /** 助手侧仅恢复这些事件；用户消息无 event_type，单独保留 */
 const ALLOWED_ASSISTANT_EVENT_TYPES = new Set([
   'chat.final',
+  'chat.delta',
   'chat.tool_call',
   'chat.tool_result',
   'chat.usage_summary',
@@ -15,13 +18,14 @@ const ALLOWED_ASSISTANT_EVENT_TYPES = new Set([
   'team.message',
   'harness.message',
   'harness.stage_result',
-  'harness.extension_ready'
+  'harness.extension_ready',
 ]);
 
 /** 后端约定：最后一帧 `history.message` 使用 `payload.status: done`（兼容旧版 `payload.content: done`） */
 const HISTORY_RESTORE_DONE_CONTENT = 'done';
-/** 流式 chunk 之间的兜底：正常情况由 `done` / `page_complete` 等结束帧关闭；仅当缺少明确结束标记时使用 */
-const HISTORY_RESTORE_IDLE_MS = 500;
+/** 两次 history.message 之间无新帧时的兜底（毫秒）；正常链路由 done / page_complete 结束；持续有 chunk 时不会触发 */
+const HISTORY_RESTORE_IDLE_MS = 60_000;
+const HISTORY_RESTORE_MAX_RETRIES = 2;
 
 export interface HistoryToolReplayItem {
   kind: 'tool_call' | 'tool_result';
@@ -37,6 +41,8 @@ export interface HistoryHarnessReplayItem {
 
 type HistoryTimelineEntry =
   | { kind: 'message'; message: Message }
+  | { kind: 'delta'; at: string; content: string; requestId: string }
+  | { kind: 'final_marker'; at: string; requestId: string }
   | { kind: 'tool_call'; at: string; payload: Record<string, unknown> }
   | { kind: 'tool_result'; at: string; payload: Record<string, unknown> }
   | { kind: 'usage_summary'; at: string; usage: UsageSummary }
@@ -46,12 +52,15 @@ type HistoryTimelineEntry =
 
 interface BeginHistoryRestoreOptions {
   sessionId: string;
+  requestId?: string;
   onReady: (messages: Message[], totalPages: number | null) => void;
   /** 与消息同一时间线顺序，用于恢复 ToolGroupDisplay */
   onToolReplay?: (items: HistoryToolReplayItem[]) => void;
   /** 无消息且无工具回放时调用；`totalPages` 来自流中最后一帧（若有） */
   onEmpty?: (totalPages: number | null) => void;
   onError?: (message: string) => void;
+  /** 空闲超时且无数据时重试；由调用方重新发起 `history.get` */
+  onRetry?: (attempt: number) => void | Promise<void>;
 }
 
 export interface HistoryRestoreHandle {
@@ -229,8 +238,9 @@ function parseHistoryTimelineEntry(
 
   if (eventType === 'chat.final') {
     const content = normalizeFinalContent(payload);
+    const requestId = pickFirstString(record, ['request_id']) ?? '';
     if (!content.trim()) {
-      return null;
+      return { kind: 'final_marker', at, requestId };
     }
     const id =
       pickFirstString(record, ['id', 'message_id', 'msg_id']) ?? `hist-final-${sessionId}-${at}`;
@@ -238,6 +248,15 @@ function parseHistoryTimelineEntry(
       kind: 'message',
       message: { id, role: 'assistant', content, timestamp: at },
     };
+  }
+
+  if (eventType === 'chat.delta') {
+    const content = pickFirstString(record, ['content']) ?? '';
+    if (!content) {
+      return null;
+    }
+    const requestId = pickFirstString(record, ['request_id']) ?? '';
+    return { kind: 'delta', at, content, requestId };
   }
 
   if (eventType === 'chat.tool_call') {
@@ -301,6 +320,130 @@ function parseHistoryTimelineEntry(
   return null;
 }
 
+function deltaBufferKey(requestId: string): string {
+  return requestId.trim() || '__default__';
+}
+
+function entrySortKey(entry: HistoryTimelineEntry): number {
+  const raw = entry.kind === 'message' ? entry.message.timestamp : entry.at;
+  const ms = Date.parse(raw);
+  return Number.isFinite(ms) ? ms : 0;
+}
+
+function materializeHistoryTimeline(
+  entries: HistoryTimelineEntry[],
+  sessionId: string
+): { messages: Message[]; toolReplay: HistoryToolReplayItem[] } {
+  const toolReplay: HistoryToolReplayItem[] = [];
+  const chronological = entries
+    .map((entry, index) => ({ entry, index }))
+    .sort((a, b) => {
+      const diff = entrySortKey(a.entry) - entrySortKey(b.entry);
+      return diff !== 0 ? diff : a.index - b.index;
+    })
+    .map(({ entry }) => entry);
+
+  for (const e of chronological) {
+    if (e.kind === 'tool_call' || e.kind === 'tool_result') {
+      toolReplay.push({ kind: e.kind, at: e.at, payload: e.payload });
+    }
+  }
+
+  const messages: Message[] = [];
+  let pendingFileItems: FileDownloadItem[] | null = null;
+  const deltaBuffers = new Map<string, { content: string; at: string }>();
+
+  const flushDelta = (requestId: string) => {
+    const key = deltaBufferKey(requestId);
+    const buf = deltaBuffers.get(key);
+    if (!buf || !buf.content.trim()) {
+      deltaBuffers.delete(key);
+      return;
+    }
+    messages.push({
+      id: `hist-assist-${sessionId}-${key}-${buf.at}`,
+      role: 'assistant',
+      content: buf.content,
+      timestamp: buf.at,
+    });
+    deltaBuffers.delete(key);
+  };
+
+  const flushAllDeltas = () => {
+    for (const key of [...deltaBuffers.keys()]) {
+      flushDelta(key === '__default__' ? '' : key);
+    }
+  };
+
+  // history.message 流为 newest-first；unshift 后 entries 已是 time-asc，再按 timestamp 稳定排序
+  for (const e of chronological) {
+    if (e.kind === 'delta') {
+      const key = deltaBufferKey(e.requestId);
+      const prev = deltaBuffers.get(key);
+      deltaBuffers.set(key, {
+        content: `${prev?.content ?? ''}${e.content}`,
+        at: e.at,
+      });
+      continue;
+    }
+
+    if (e.kind === 'final_marker') {
+      flushDelta(e.requestId);
+      continue;
+    }
+
+    if (e.kind === 'message') {
+      if (e.message.role === 'user') {
+        flushAllDeltas();
+        messages.push(e.message);
+        continue;
+      }
+
+      flushAllDeltas();
+      let message = e.message;
+      if (message.role === 'assistant' && pendingFileItems) {
+        message = { ...message, fileItems: pendingFileItems };
+        pendingFileItems = null;
+      }
+      messages.push(message);
+      continue;
+    }
+
+    if (e.kind === 'usage_summary') {
+      flushAllDeltas();
+      for (let i = messages.length - 1; i >= 0; i--) {
+        if (messages[i].role === 'assistant') {
+          messages[i] = { ...messages[i], usageSummary: e.usage };
+          break;
+        }
+      }
+      continue;
+    }
+
+    if (e.kind === 'harness_message') {
+      flushAllDeltas();
+      messages.push({
+        id: `harness-msg-${e.at}`,
+        role: 'system',
+        content: e.content,
+        timestamp: e.at,
+        isHarnessMessage: true,
+      });
+      continue;
+    }
+
+    if (e.kind === 'file_items') {
+      pendingFileItems = e.files;
+      continue;
+    }
+
+    // harness_stage_result / tool_* 已在上方或 toolReplay 处理
+  }
+
+  flushAllDeltas();
+  return { messages, toolReplay };
+}
+
 /** 工作区 history.json 预览：最多展示条数（按消息时间取最近） */
 export const HISTORY_FILE_PREVIEW_MAX_MESSAGES = 20;
 
@@ -344,31 +487,22 @@ function isHistoryBatchEnd(payload: Record<string, unknown>): boolean {
   return markers.some((marker) => marker === true);
 }
 
-/**
- * 仅处理属于当前 `history.get` 会话的帧，避免多标签/乱序下的串台。
- * 无 `session_id` 时：丢弃数据行；仍接受明确的结束帧（兼容未注入 id 的旧链路）。
- */
-function shouldProcessHistoryPayload(payload: Record<string, unknown>, expectedSessionId: string): boolean {
-  const sid = typeof payload.session_id === 'string' ? payload.session_id.trim() : '';
-  if (sid && sid !== expectedSessionId) {
-    return false;
-  }
-  if (!sid) {
-    return isHistoryRestoreDonePayload(payload) || isHistoryBatchEnd(payload);
-  }
-  return true;
+type HistoryFinalizeReason = 'done' | 'batch_end' | 'idle_timeout';
+
+interface HistoryIdleGuardOptions {
+  errorMessage: string;
+  getEntryCount: () => number;
+  getTotalPages: () => number | null;
+  logPhase: (phase: string, detail: Record<string, unknown>) => void;
+  onError?: (message: string) => void;
+  onExhausted: () => void;
+  onIdleFinalize: () => void;
+  onRetry?: (attempt: number) => void | Promise<void>;
 }
 
-export function beginHistoryRestore(options: BeginHistoryRestoreOptions): HistoryRestoreHandle {
-  disposeActivePageFetch();
-  activeRestore?.dispose();
-
-  const generation = restoreGeneration + 1;
-  restoreGeneration = generation;
-
-  const entries: HistoryTimelineEntry[] = [];
-  let totalPages: number | null = null;
+function createHistoryIdleGuard(options: HistoryIdleGuardOptions) {
   let idleTimer: number | null = null;
+  let retryCount = 0;
   let disposed = false;
 
   const clearIdleTimer = () => {
@@ -378,13 +512,134 @@ export function beginHistoryRestore(options: BeginHistoryRestoreOptions): Histor
     }
   };
 
+  const scheduleIdleTimer = () => {
+    clearIdleTimer();
+    idleTimer = window.setTimeout(() => {
+      if (disposed) {
+        return;
+      }
+
+      options.logPhase('idle_timeout', {
+        entryCount: options.getEntryCount(),
+        totalPages: options.getTotalPages(),
+        retryCount,
+      });
+
+      if (options.getEntryCount() > 0 || options.getTotalPages() != null) {
+        options.onIdleFinalize();
+        return;
+      }
+
+      if (retryCount < HISTORY_RESTORE_MAX_RETRIES && options.onRetry) {
+        retryCount += 1;
+        options.logPhase('retry', {
+          attempt: retryCount,
+          entryCount: options.getEntryCount(),
+        });
+        void Promise.resolve(options.onRetry(retryCount)).finally(() => {
+          if (!disposed) {
+            scheduleIdleTimer();
+          }
+        });
+        return;
+      }
+
+      options.onError?.(options.errorMessage);
+      options.onExhausted();
+    }, HISTORY_RESTORE_IDLE_MS);
+  };
+
+  return {
+    scheduleIdleTimer,
+    clearIdleTimer,
+    dispose: () => {
+      disposed = true;
+      clearIdleTimer();
+    },
+  };
+}
+
+export function beginHistoryRestore(options: BeginHistoryRestoreOptions): HistoryRestoreHandle {
+  disposeActivePageFetch();
+  activeRestore?.dispose();
+
+  const generation = restoreGeneration + 1;
+  restoreGeneration = generation;
+
+  logHistoryRestore('begin', {
+    sessionId: options.sessionId,
+    requestId: options.requestId ?? null,
+    generation,
+  });
+
+  const entries: HistoryTimelineEntry[] = [];
+  let totalPages: number | null = null;
+  let disposed = false;
+
+  function dispose(): void {
+    if (disposed) return;
+    disposed = true;
+    idleGuard.dispose();
+    unsubscribe();
+    if (activeRestore?.generation === generation) {
+      activeRestore = null;
+    }
+  }
+
+  function finalize(reason: HistoryFinalizeReason): void {
+    if (disposed) return;
+
+    const { messages, toolReplay } = materializeHistoryTimeline(entries, options.sessionId);
+
+    logHistoryRestore('finalize', {
+      sessionId: options.sessionId,
+      requestId: options.requestId ?? null,
+      reason,
+      entryCount: entries.length,
+      messageCount: messages.length,
+      toolReplayCount: toolReplay.length,
+      totalPages,
+    });
+
+    dispose();
+
+    if (messages.length === 0 && toolReplay.length === 0) {
+      options.onEmpty?.(totalPages);
+      return;
+    }
+    options.onReady(messages, totalPages);
+    if (toolReplay.length > 0) {
+      options.onToolReplay?.(toolReplay);
+    }
+  }
+
+  const idleGuard = createHistoryIdleGuard({
+    errorMessage: 'history restore timed out waiting for done frame',
+    getEntryCount: () => entries.length,
+    getTotalPages: () => totalPages,
+    logPhase: (phase, detail) => {
+      logHistoryRestore(phase, {
+        sessionId: options.sessionId,
+        requestId: options.requestId ?? null,
+        ...detail,
+      });
+    },
+    onError: options.onError,
+    onExhausted: dispose,
+    onIdleFinalize: () => finalize('idle_timeout'),
+    onRetry: options.onRetry,
+  });
+
   const unsubscribe = webClient.on(HISTORY_MESSAGE_EVENT, (event: WsEvent) => {
     if (disposed || generation !== restoreGeneration) {
       return;
     }
 
-    const payload = event.payload;
-    if (!shouldProcessHistoryPayload(payload, options.sessionId)) {
+    const payload = { ...event.payload };
+    if (event.request_id) {
+      payload.request_id = event.request_id;
+    }
+    if (!shouldProcessHistoryPayload(payload, options.sessionId, options.requestId)) {
       return;
     }
 
@@ -393,8 +648,8 @@ export function beginHistoryRestore(options: BeginHistoryRestoreOptions): Histor
     }
 
     if (isHistoryRestoreDonePayload(payload)) {
-      clearIdleTimer();
-      finalize();
+      idleGuard.clearIdleTimer();
+      finalize('done');
       return;
     }
 
@@ -408,92 +663,15 @@ export function beginHistoryRestore(options: BeginHistoryRestoreOptions): Histor
     }
 
     if (isHistoryBatchEnd(payload)) {
-      clearIdleTimer();
-      finalize();
+      idleGuard.clearIdleTimer();
+      finalize('batch_end');
       return;
     }
 
-    clearIdleTimer();
-    idleTimer = window.setTimeout(() => {
-      finalize();
-    }, HISTORY_RESTORE_IDLE_MS);
+    idleGuard.scheduleIdleTimer();
   });
 
-  function dispose(): void {
-    if (disposed) return;
-    disposed = true;
-    clearIdleTimer();
-    unsubscribe();
-    if (activeRestore?.generation === generation) {
-      activeRestore = null;
-    }
-  }
-
-  function finalize(): void {
-    if (disposed) return;
-
-    const messages: Message[] = [];
-    const toolReplay: HistoryToolReplayItem[] = [];
-    const harnessReplay: HistoryHarnessReplayItem[] = [];
-    let pendingFileItems: FileDownloadItem[] | null = null;
-    for (const e of entries) {
-      if (e.kind === 'message') {
-        if (e.message.role === 'assistant' && pendingFileItems) {
-          e.message = { ...e.message, fileItems: pendingFileItems };
-          pendingFileItems = null;
-        }
-        messages.push(e.message);
-      } else if (e.kind === 'usage_summary') {
-        for (let i = messages.length - 1; i >= 0; i--) {
-          if (messages[i].role === 'assistant') {
-            messages[i] = { ...messages[i], usageSummary: e.usage };
-            break;
-          }
-        }
-      } else if (e.kind === 'harness_message') {
-        harnessReplay.push({
-          kind: 'harness_message',
-          at: e.at,
-          payload: { content: e.content, stage: e.stage },
-        });
-        // Also add as system message with harness flag
-        messages.push({
-          id: `harness-msg-${e.at}`,
-          role: 'system',
-          content: e.content,
-          timestamp: e.at,
-          isHarnessMessage: true,
-        });
-      } else if (e.kind === 'harness_stage_result') {
-        harnessReplay.push({
-          kind: 'harness_stage_result',
-          at: e.at,
-          payload: {
-            stage: e.stage,
-            status: e.status,
-            error: e.error,
-            messages: e.messages,
-            metrics: e.metrics,
-          },
-        });
-      } else if (e.kind === 'file_items') {
-        pendingFileItems = e.files;
-      } else {
-        toolReplay.push({ kind: e.kind, at: e.at, payload: e.payload });
-      }
-    }
-
-    dispose();
-
-    if (messages.length === 0 && toolReplay.length === 0) {
-      options.onEmpty?.(totalPages);
-      return;
-    }
-    options.onReady(messages, totalPages);
-    if (toolReplay.length > 0) {
-      options.onToolReplay?.(toolReplay);
-    }
-  }
+  idleGuard.scheduleIdleTimer();
 
   const handle: HistoryRestoreHandle = { generation, dispose };
   activeRestore = handle;
@@ -508,9 +686,11 @@ export interface FetchHistoryPageResult {
 
 export interface FetchHistoryPageOptions {
   sessionId: string;
+  requestId?: string;
   onReady: (result: FetchHistoryPageResult) => void;
   onEmpty?: (totalPages: number | null) => void;
   onError?: (message: string) => void;
+  onRetry?: (attempt: number) => void | Promise<void>;
 }
 
 /**
@@ -524,25 +704,78 @@ export function fetchHistoryPage(options: FetchHistoryPageOptions): HistoryResto
   const generation = restoreGeneration + 1;
   restoreGeneration = generation;
 
+  logHistoryRestore('fetchPage.begin', {
+    sessionId: options.sessionId,
+    requestId: options.requestId ?? null,
+    generation,
+  });
+
   const entries: HistoryTimelineEntry[] = [];
   let totalPages: number | null = null;
-  let idleTimer: number | null = null;
   let disposed = false;
 
-  const clearIdleTimer = () => {
-    if (idleTimer !== null) {
-      window.clearTimeout(idleTimer);
-      idleTimer = null;
+  function dispose(): void {
+    if (disposed) return;
+    disposed = true;
+    idleGuard.dispose();
+    unsubscribe();
+    activePageFetchDispose = null;
+    if (activeRestore?.generation === generation) {
+      activeRestore = null;
     }
-  };
+  }
+
+  function finalize(reason: HistoryFinalizeReason): void {
+    if (disposed) return;
+
+    const { messages, toolReplay } = materializeHistoryTimeline(entries, options.sessionId);
+
+    logHistoryRestore('fetchPage.finalize', {
+      sessionId: options.sessionId,
+      requestId: options.requestId ?? null,
+      reason,
+      entryCount: entries.length,
+      messageCount: messages.length,
+      toolReplayCount: toolReplay.length,
+      totalPages,
+    });
+
+    dispose();
+
+    if (messages.length === 0 && toolReplay.length === 0) {
+      options.onEmpty?.(totalPages);
+      return;
+    }
+    options.onReady({ messages, toolReplay, totalPages });
+  }
+
+  const idleGuard = createHistoryIdleGuard({
+    errorMessage: 'history page fetch timed out waiting for done frame',
+    getEntryCount: () => entries.length,
+    getTotalPages: () => totalPages,
+    logPhase: (phase, detail) => {
+      logHistoryRestore(`fetchPage.${phase}`, {
+        sessionId: options.sessionId,
+        requestId: options.requestId ?? null,
+        ...detail,
+      });
+    },
+    onError: options.onError,
+    onExhausted: dispose,
+    onIdleFinalize: () => finalize('idle_timeout'),
+    onRetry: options.onRetry,
+  });
 
   const unsubscribe = webClient.on(HISTORY_MESSAGE_EVENT, (event: WsEvent) => {
     if (disposed || generation !== restoreGeneration) {
       return;
     }
 
-    const payload = event.payload;
-    if (!shouldProcessHistoryPayload(payload, options.sessionId)) {
+    const payload = { ...event.payload };
+    if (event.request_id) {
+      payload.request_id = event.request_id;
+    }
+    if (!shouldProcessHistoryPayload(payload, options.sessionId, options.requestId)) {
       return;
     }
 
@@ -551,8 +784,8 @@ export function fetchHistoryPage(options: FetchHistoryPageOptions): HistoryResto
     }
 
     if (isHistoryRestoreDonePayload(payload)) {
-      clearIdleTimer();
-      finalize();
+      idleGuard.clearIdleTimer();
+      finalize('done');
       return;
     }
 
@@ -566,89 +799,15 @@ export function fetchHistoryPage(options: FetchHistoryPageOptions): HistoryResto
     }
 
     if (isHistoryBatchEnd(payload)) {
-      clearIdleTimer();
-      finalize();
+      idleGuard.clearIdleTimer();
+      finalize('batch_end');
       return;
     }
 
-    clearIdleTimer();
-    idleTimer = window.setTimeout(() => {
-      finalize();
-    }, HISTORY_RESTORE_IDLE_MS);
+    idleGuard.scheduleIdleTimer();
   });
 
-  function dispose(): void {
-    if (disposed) return;
-    disposed = true;
-    clearIdleTimer();
-    unsubscribe();
-    activePageFetchDispose = null;
-    if (activeRestore?.generation === generation) {
-      activeRestore = null;
-    }
-  }
-
-  function finalize(): void {
-    if (disposed) return;
-
-    const messages: Message[] = [];
-    const toolReplay: HistoryToolReplayItem[] = [];
-    const harnessReplay: HistoryHarnessReplayItem[] = [];
-    let pendingFileItems: FileDownloadItem[] | null = null;
-    for (const e of entries) {
-      if (e.kind === 'message') {
-        if (e.message.role === 'assistant' && pendingFileItems) {
-          e.message = { ...e.message, fileItems: pendingFileItems };
-          pendingFileItems = null;
-        }
-        messages.push(e.message);
-      } else if (e.kind === 'usage_summary') {
-        for (let i = messages.length - 1; i >= 0; i--) {
-          if (messages[i].role === 'assistant') {
-            messages[i] = { ...messages[i], usageSummary: e.usage };
-            break;
-          }
-        }
-      } else if (e.kind === 'harness_message') {
-        harnessReplay.push({
-          kind: 'harness_message',
-          at: e.at,
-          payload: { content: e.content, stage: e.stage },
-        });
-        messages.push({
-          id: `harness-msg-${e.at}`,
-          role: 'system',
-          content: e.content,
-          timestamp: e.at,
-          isHarnessMessage: true,
-        });
-      } else if (e.kind === 'harness_stage_result') {
-        harnessReplay.push({
-          kind: 'harness_stage_result',
-          at: e.at,
-          payload: {
-            stage: e.stage,
-            status: e.status,
-            error: e.error,
-            messages: e.messages,
-            metrics: e.metrics,
-          },
-        });
-      } else if (e.kind === 'file_items') {
-        pendingFileItems = e.files;
-      } else {
-        toolReplay.push({ kind: e.kind, at: e.at, payload: e.payload });
-      }
-    }
-
-    dispose();
-
-    if (messages.length === 0 && toolReplay.length === 0) {
-      options.onEmpty?.(totalPages);
-      return;
-    }
-    options.onReady({ messages, toolReplay, totalPages });
-  }
+  idleGuard.scheduleIdleTimer();
 
   const handle: HistoryRestoreHandle = { generation, dispose };
   activeRestore = handle;

@@ -20,10 +20,11 @@ import {
   AgentMode,
   Session,
   ToolResult,
- 	ToolCall,
+  ToolCall,
   UsageSummary,
   FileDownloadItem,
   ChatSendFile,
+  WsEvent,
 } from '../types';
 import {
   useChatStore,
@@ -47,6 +48,7 @@ import {
   normalizeToolResultPayload,
   tryDeepResearchStandaloneAssistantTurn,
 } from '../features/tool-events/toolEventNormalizer';
+import { shouldHandleRequestEvent } from './requestEventFilter';
 
 const WS_RECONNECT_EVENT = 'jiuwenclaw:ws-reconnect-request';
 
@@ -122,6 +124,10 @@ function makeEventDedupKey(eventName: string, payload: Record<string, unknown>):
   return `${eventName}::${payloadSessionId}::${payloadEventType}::${payloadSnapshot}`;
 }
 
+function makeClientRequestId(prefix: string): string {
+  return `${prefix}-${Date.now()}-${Math.random().toString(36).substring(2, 11)}`;
+}
+
 export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
   const {
     activeSessionId,
@@ -146,6 +152,9 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
   const sendMessageRef = useRef<typeof sendMessage>();
   const recentEventRef = useRef<Map<string, number>>(new Map());
   const eventDedupDroppedRef = useRef<Record<string, number>>({});
+  const activeRequestIdRef = useRef<string | null>(null);
+  /** 本会话实例发出的 interrupt 请求的 ws req id（用于识别属于本 tab 的 interrupt_result） */
+  const pendingInterruptRequestIdsRef = useRef<Set<string>>(new Set());
 
   // Stores
   const {
@@ -178,6 +187,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
     setConnectionStats,
     updateSession,
     setContextCompressionStats,
+    setContextWindowUsage,
     setHeartbeatStatus,
   } =
     useSessionStore();
@@ -238,6 +248,13 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
     },
     []
   );
+
+  const shouldHandleCurrentRequestEvent = useCallback((event: WsEvent): boolean => {
+    return shouldHandleRequestEvent(event, {
+      activeRequestId: activeRequestIdRef.current,
+      pendingInterruptRequestIds: pendingInterruptRequestIdsRef.current,
+    });
+  }, []);
 
   const handleConnectionAck = useCallback(
     (payload: Record<string, unknown>) => {
@@ -309,7 +326,10 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
 
       setProcessing(true);
       setThinking(true);
-      
+
+      const requestId = makeClientRequestId('chat');
+      activeRequestIdRef.current = requestId;
+
       // 正常调用接口
       const currentMode = useSessionStore.getState().mode;
       const selectedModel = useSessionStore.getState().selectedModelName;
@@ -332,12 +352,13 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
               }
             : {}),
           ...extSettingsToRoutingParams(ext),
-        });
+        }, { requestId });
       } catch (error) {
         const webError = error as WebError;
         setConnectionStats({ lastError: webError.message });
         setProcessing(false);
         setThinking(false);
+        activeRequestIdRef.current = null;
         const errorMsg = webError.message || i18n.t('network.sendMessageFailed');
         onErrorRef.current?.(errorMsg);
         addMessage({
@@ -374,6 +395,8 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
           timestamp: new Date().toISOString(),
         });
       }
+      const interruptRequestId = makeClientRequestId('interrupt');
+      pendingInterruptRequestIdsRef.current.add(interruptRequestId);
       try {
         const params: Record<string, unknown> = {
           session_id: sessionId,
@@ -382,8 +405,9 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
         if (intent === 'supplement') {
           params.new_input = newInput ?? '';
         }
-        await request('chat.interrupt', params);
+        await request('chat.interrupt', params, { requestId: interruptRequestId });
       } catch (error) {
+        pendingInterruptRequestIdsRef.current.delete(interruptRequestId);
         const webError = error as WebError;
         setConnectionStats({ lastError: webError.message });
         onErrorRef.current?.(webError.message || i18n.t('network.interruptFailed'));
@@ -502,6 +526,10 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
     activeSessionIdRef.current = activeSessionId;
   }, [activeSessionId]);
 
+  useEffect(() => {
+    setContextWindowUsage(null);
+  }, [activeSessionId, setContextWindowUsage]);
+
   // 会话切换时不再重置上下文压缩信息，保持本地存储的状态
   // useEffect(() => {
   //   setContextCompressionStats(null);
@@ -619,6 +647,20 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
       }),
       webClient.on('chat.final', ({ payload }) => {
         if (!shouldHandleSessionEvent(payload)) return;
+
+        const finishActiveStream = () => {
+          const { currentStreamId, isProcessing } = useChatStore.getState();
+          if (currentStreamId) {
+            stopStreaming();
+          }
+          if (!currentStreamId && !isProcessing) {
+            return false;
+          }
+          setProcessing(false);
+          setThinking(false);
+          activeRequestIdRef.current = null;
+          return true;
+        };
         
         // 兜底：若缓存的文件未被 chat.tool_result 消费（如工具名不匹配或 tool_result 未到达），在此挂载
         const pendingFiles = consumePendingFiles();
@@ -662,9 +704,24 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
         if (streamId && payloadSessionId) {
           updateMessage(streamId, { ...(content ? { content } : {}), isStreaming: false });
           stopStreaming();
+          setProcessing(false);
+          setThinking(false);
+          activeRequestIdRef.current = null;
           if (content && !content.includes('MEDIA:')) {
             handleTtsPlayback(streamId, content);
           }
+          return;
+        }
+        if (streamId && !payloadSessionId) {
+          if (content) {
+            updateMessage(streamId, { content, isStreaming: false });
+            if (!content.includes('MEDIA:')) {
+              handleTtsPlayback(streamId, content);
+            }
+          } else {
+            updateMessage(streamId, { isStreaming: false });
+          }
+          finishActiveStream();
           return;
         }
         if (content) {
@@ -745,6 +802,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
             handleTtsPlayback(messageId, content);
           }
         }
+        finishActiveStream();
       }),
       webClient.on('chat.media', ({ payload }) => {
         if (!shouldHandleSessionEvent(payload)) return;
@@ -884,6 +942,54 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
           after_compressed: afterCompressed,
         });
       }),
+      webClient.on('context.usage', ({ payload }) => {
+        if (!shouldHandleSessionEvent(payload)) return;
+        const usedFromPayload =
+          typeof payload.used_tokens === 'number' && Number.isFinite(payload.used_tokens)
+            ? Math.max(Math.round(payload.used_tokens), 0)
+            : null;
+        const inputTokens =
+          typeof payload.input_tokens === 'number' && Number.isFinite(payload.input_tokens)
+            ? payload.input_tokens
+            : null;
+        const outputTokens =
+          typeof payload.output_tokens === 'number' && Number.isFinite(payload.output_tokens)
+            ? payload.output_tokens
+            : null;
+        const totalTokens =
+          typeof payload.total_tokens === 'number' && Number.isFinite(payload.total_tokens)
+            ? payload.total_tokens
+            : null;
+        const limitTokens =
+          typeof payload.limit_tokens === 'number' && Number.isFinite(payload.limit_tokens)
+            ? Math.max(Math.round(payload.limit_tokens), 1)
+            : 1;
+        const fromParts = (inputTokens ?? 0) + (outputTokens ?? 0);
+        const hasAnyTokenField =
+          usedFromPayload != null ||
+          inputTokens != null ||
+          outputTokens != null ||
+          totalTokens != null;
+        const usedTokens = !hasAnyTokenField
+          ? null
+          : usedFromPayload != null
+            ? usedFromPayload
+            : Math.max(totalTokens ?? 0, fromParts);
+        const percent =
+          typeof payload.usage_percent === 'number' && Number.isFinite(payload.usage_percent)
+            ? payload.usage_percent
+            : usedTokens != null
+              ? Number(((usedTokens / limitTokens) * 100).toFixed(1))
+              : null;
+
+        setContextWindowUsage({
+          inputTokens,
+          outputTokens,
+          usedTokens,
+          limitTokens,
+          percent,
+        });
+      }),
       webClient.on('heartbeat.relay', ({ payload }) => {
         const heartbeatText =
           typeof payload.heartbeat === 'string' ? payload.heartbeat : '';
@@ -903,14 +1009,24 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
           setMode(normalizeAgentMode(payload.mode));
         }
       }),
-      webClient.on('chat.processing_status', ({ payload }) => {
-        if (!shouldHandleSessionEvent(payload)) return;
-        if (shouldDropDuplicatedEvent('chat.processing_status', payload)) return;
-        const isProcessingNow = Boolean(payload.is_processing);
+      webClient.on('chat.processing_status', (event: WsEvent) => {
+        if (!shouldHandleSessionEvent(event.payload)) return;
+        const isProcessingNow = Boolean(event.payload.is_processing);
+        if (isProcessingNow && !shouldHandleCurrentRequestEvent(event)) return;
+        if (shouldDropDuplicatedEvent('chat.processing_status', event.payload)) return;
+        const procRid = typeof event.request_id === 'string' ? event.request_id.trim() : '';
+        if (
+          isProcessingNow &&
+          procRid &&
+          !pendingInterruptRequestIdsRef.current.has(procRid)
+        ) {
+          activeRequestIdRef.current = procRid;
+        }
         setProcessing(isProcessingNow);
         if (!isProcessingNow) {
           setThinking(false);
           clearSubtasks();
+          activeRequestIdRef.current = null;
           
           // 检查是否有等待的任务队列
           const currentMode = useSessionStore.getState().mode;
@@ -945,10 +1061,11 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
           timestamp: new Date().toISOString(),
         });
       }),
-      webClient.on('chat.interrupt_result', ({ payload }) => {
-        if (!shouldHandleSessionEvent(payload)) return;
-        if (shouldDropDuplicatedEvent('chat.interrupt_result', payload)) return;
-        const resultPayload = payload as unknown as InterruptResultPayload;
+      webClient.on('chat.interrupt_result', (event: WsEvent) => {
+        if (!shouldHandleSessionEvent(event.payload)) return;
+        if (!shouldHandleCurrentRequestEvent(event)) return;
+        if (shouldDropDuplicatedEvent('chat.interrupt_result', event.payload)) return;
+        const resultPayload = event.payload as unknown as InterruptResultPayload;
         setInterruptResult(resultPayload);
         if (resultPayload.intent === 'pause') {
           if (resultPayload.success) {
@@ -956,6 +1073,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
           }
           setProcessing(false);
           setThinking(false);
+          activeRequestIdRef.current = null;
         } else if (resultPayload.intent === 'resume') {
           if (resultPayload.success) {
             setPaused(false);
@@ -964,8 +1082,15 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
           setPaused(false);
           setProcessing(false);
           setThinking(false);
+          activeRequestIdRef.current = null;
         } else if (resultPayload.intent === 'supplement') {
           setPaused(false);
+        }
+        const irid = typeof event.request_id === 'string' ? event.request_id.trim() : '';
+        if (irid) {
+          window.setTimeout(() => {
+            pendingInterruptRequestIdsRef.current.delete(irid);
+          }, 0);
         }
       }),
       webClient.on('chat.subtask_update', ({ payload }) => {
@@ -1161,9 +1286,11 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
     setInterruptResult,
     setTodos,
     setContextCompressionStats,
+    setContextWindowUsage,
     setHeartbeatStatus,
     updateSession,
     shouldHandleSessionEvent,
+    shouldHandleCurrentRequestEvent,
     shouldDropDuplicatedEvent,
     startStreaming,
     stopStreaming,
@@ -1194,12 +1321,15 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
 
     return () => {
       webClient.disconnect();
+      pendingInterruptRequestIdsRef.current.clear();
+      activeRequestIdRef.current = null;
       clearMessages();
       clearTodos();
       clearSubtasks();
       setConnected(false);
       // 不再重置上下文压缩信息，保持本地存储的状态
       // setContextCompressionStats(null);
+      setContextWindowUsage(null);
       setHeartbeatStatus('unknown', null, null);
       setConnectionStats({ state: 'closed', inflight: 0 });
     };
@@ -1213,6 +1343,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
     projectPath,
     provider,
     setContextCompressionStats,
+    setContextWindowUsage,
     setConnectionStats,
     setConnected,
     setHeartbeatStatus,

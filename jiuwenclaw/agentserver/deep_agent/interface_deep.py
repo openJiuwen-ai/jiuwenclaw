@@ -200,6 +200,7 @@ from jiuwenclaw.utils import (
     get_checkpoint_dir,
     get_env_file,
     get_agent_root_dir,
+    get_multi_tenant_user_workspace_dir,
     get_tenant_agent_skills_dirs,
 )
 from jiuwenclaw.local_env_config import set_local_config
@@ -1536,7 +1537,7 @@ class JiuWenClawDeepAdapter:
                     sandbox_url,
                     sandbox_type,
                     self._agent_id,
-                    shared_dir=get_agent_root_dir(),
+                    shared_dir=get_multi_tenant_user_workspace_dir(self._service_id, "default"),
                     files_runtime=runtime.get("files"),
                     excluded_commands=runtime.get("excluded_commands"),
                     idle_ttl_seconds=runtime.get("idle_ttl_seconds"),

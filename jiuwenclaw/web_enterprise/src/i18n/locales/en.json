@@ -113,7 +113,8 @@
       "allLoaded": "All history shown",
       "wheelToLoadMore": "Scroll up to load more",
       "clickToLoadMore": "Click to load more",
-      "clickOrScrollToLoadMore": "Click or scroll up to load more"
+      "clickOrScrollToLoadMore": "Click or scroll up to load more",
+      "loadingHistory": "Loading conversation history..."
     }
   },
   "connection": {
@@ -125,6 +126,9 @@
   "toolPanel": {
     "status": "Status",
     "contextCompression": "Context compression",
+    "contextCompressionHint": "Format: afterK/beforeK(rate%). After: current effective context tokens; before: cumulative token total. Updated before each model call. 0.0% means no compression ran or before/after tokens are equal.",
+    "contextWindow": "Context window",
+    "contextWindowHint": "Numerator: effective context tokens after compression, updated before each model call. Denominator: react.context_window_limit_tokens (align manually with the model's official window; not auto-detected).",
     "memoryUsage": "Memory usage",
     "message": "Message",
     "time": "Time",
