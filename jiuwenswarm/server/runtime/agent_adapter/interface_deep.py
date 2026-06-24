@@ -3188,7 +3188,7 @@ class JiuWenSwarmDeepAdapter:
             rails=rails,
             vision_model_config=self._vision_model_config,
             audio_model_config=self._audio_model_config,
-            enable_read_image_multimodal=False,
+            enable_read_image_multimodal=self._vision_model_config is None,
             completion_timeout=config.get("completion_timeout", 3600.0),
         )
 
@@ -3571,7 +3571,7 @@ class JiuWenSwarmDeepAdapter:
             context_engine_config=_deep_agent_context_engine_config(config),
             vision_model_config=self._vision_model_config,
             audio_model_config=self._audio_model_config,
-            enable_read_image_multimodal=False,
+            enable_read_image_multimodal=self._vision_model_config is None,
             completion_timeout=config.get("completion_timeout", 3600.0),
         )
 

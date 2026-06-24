@@ -200,7 +200,14 @@ async def test_create_instance_registers_blank_agent_for_teammate(monkeypatch: p
                      return_value=(None, False)),
         patch.object(interface_module.JiuWenSwarmDeepAdapter, "load_user_rails", AsyncMock()),
         patch.object(interface_module, "init_permission_engine", return_value=None),
-        patch.object(interface_module, "create_deep_agent", return_value=MagicMock(name="deep_agent", ensure_initialized=AsyncMock())),
+        patch.object(
+            interface_module,
+            "create_deep_agent",
+            return_value=MagicMock(
+                name="deep_agent",
+                ensure_initialized=AsyncMock(),
+            ),
+        ),
     ):
         await adapter.create_instance()
 
@@ -383,13 +390,41 @@ async def test_create_instance_continues_when_a2x_client_init_fails(monkeypatch:
     kwargs = create_agent_mock.call_args.kwargs
     assert "runtime_cwd" not in kwargs
     assert "project_root" not in kwargs
-    assert kwargs["enable_read_image_multimodal"] is False
+    assert kwargs["enable_read_image_multimodal"] is True
 
 
-def test_make_deep_agent_config_disables_read_image_multimodal(
+def test_make_deep_agent_config_keeps_read_image_multimodal_without_vision_model(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     adapter = JiuWenSwarmDeepAdapter()
+    config_base = _make_config("teamleader")
+    monkeypatch.setattr(interface_module, "get_config", lambda: config_base)
+
+    with patch.object(
+        interface_module.JiuWenSwarmDeepAdapter,
+        "_build_configured_subagents",
+        return_value=(None, False),
+    ):
+        deep_cfg = adapter._make_deep_agent_config(
+            model=object(),
+            config=config_base["react"],
+            agent_card=MagicMock(),
+            tool_cards=[],
+            rails=[],
+        )
+
+    assert deep_cfg.enable_read_image_multimodal is True
+
+
+def test_make_deep_agent_config_disables_read_image_multimodal_with_vision_model(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    adapter = JiuWenSwarmDeepAdapter()
+    adapter._vision_model_config = interface_module.VisionModelConfig(
+        api_key="vision-key",
+        base_url="https://vision.example/v1",
+        model="vision-model",
+    )
     config_base = _make_config("teamleader")
     monkeypatch.setattr(interface_module, "get_config", lambda: config_base)
 
