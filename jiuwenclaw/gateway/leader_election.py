@@ -127,43 +127,45 @@ class LeaderElection:
         """Lazily initialize RedisStore from config.yaml redis section."""
         if self._redis_store is None:
             from openjiuwen.extensions.store.kv.redis_store import RedisStore
+            from jiuwenclaw.extensions.redis.redis_client import RedisConfig
 
             config = get_config()
             redis_cfg = config.get("redis", {}) if isinstance(config, dict) else {}
-            password = redis_cfg.get("password") or None
-            mode = str(redis_cfg.get("mode") or "standalone").strip().lower()
+            # 复用 RedisConfig.from_mapping:统一 mode 校验、startup_nodes 解析、密码归一化,
+            # 并把 timeout / health_check / max_connections 一并带给 leader 选主客户端
+            cfg = RedisConfig.from_mapping(redis_cfg)
 
-            if mode == "cluster":
+            if cfg.mode == "cluster":
                 from redis.asyncio.cluster import RedisCluster  # noqa: PLC0415
                 from redis.cluster import ClusterNode  # noqa: PLC0415
-                # LeaderElection 直接读 raw redis 配置(不走 RedisConfig.from_mapping),
-                # 需自行解析逗号分隔的 startup_nodes 字符串
-                raw_nodes = str(redis_cfg.get("startup_nodes") or "")
-                nodes = []
-                for n in raw_nodes.split(","):
-                    n = n.strip()
-                    if not n:
-                        continue
-                    host, _, port = n.partition(":")
-                    nodes.append(ClusterNode(host.strip(), int(port.strip() or "6379")))
-                if not nodes:
-                    nodes = [ClusterNode(redis_cfg.get("host", "localhost"), int(redis_cfg.get("port", 6379)))]
-                redis_client = RedisCluster(startup_nodes=nodes, password=password, decode_responses=False)
+                nodes = [ClusterNode(n["host"], int(n["port"])) for n in cfg.startup_nodes] \
+                    or [ClusterNode(cfg.host, cfg.port)]
+                redis_client = RedisCluster(
+                    startup_nodes=nodes,
+                    password=cfg.password,
+                    decode_responses=False,
+                    socket_connect_timeout=cfg.connect_timeout,
+                    socket_timeout=cfg.operation_timeout,
+                    health_check_interval=cfg.health_check_interval,
+                    max_connections=cfg.pool_size,
+                )
                 logger.info("[LeaderElection] Redis store initialized (cluster, %d nodes)", len(nodes))
             else:
                 from redis.asyncio import Redis  # noqa: PLC0415
                 redis_client = Redis(
-                    host=redis_cfg.get("host", "localhost"),
-                    port=redis_cfg.get("port", 6379),
-                    db=redis_cfg.get("db", 0),
-                    password=password,
+                    host=cfg.host,
+                    port=cfg.port,
+                    db=cfg.db,
+                    password=cfg.password,
                     decode_responses=False,
+                    socket_connect_timeout=cfg.connect_timeout,
+                    socket_timeout=cfg.operation_timeout,
+                    health_check_interval=cfg.health_check_interval,
+                    max_connections=cfg.pool_size,
                 )
                 logger.info(
                     "[LeaderElection] Redis store initialized: %s:%s/%s",
-                    redis_cfg.get("host", "localhost"),
-                    redis_cfg.get("port", 6379),
-                    redis_cfg.get("db", 0),
+                    cfg.host, cfg.port, cfg.db,
                 )
             self._redis_store = RedisStore(redis_client)
         return self._redis_store

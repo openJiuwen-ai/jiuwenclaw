@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
@@ -135,6 +136,12 @@ class RedisClient:
         if self._cfg.mode == "cluster":
             from redis.asyncio.cluster import RedisCluster
             from redis.cluster import ClusterNode
+            if not self._cfg.startup_nodes:
+                logger.warning(
+                    "[RedisClient] cluster 模式未配置 startup_nodes,回退单节点 %s:%s"
+                    "(若该节点非集群成员将连接失败)",
+                    self._cfg.host, self._cfg.port,
+                )
             nodes = [ClusterNode(n["host"], int(n["port"])) for n in self._cfg.startup_nodes] \
                 or [ClusterNode(self._cfg.host, self._cfg.port)]
             self._redis = RedisCluster(
@@ -203,7 +210,7 @@ class RedisClient:
         except Exception as exc:
             # Cluster 跨 slot 抛 CROSSSLOT → 回退逐个 get
             logger.warning("[RedisClient] mget fallback to per-key get: %s", exc)
-            return [await r.get(k) for k in effective_keys]
+            return await asyncio.gather(*(r.get(k) for k in effective_keys))
 
     async def scan_keys(self, pattern: str) -> list[str]:
         r = self._connection()
