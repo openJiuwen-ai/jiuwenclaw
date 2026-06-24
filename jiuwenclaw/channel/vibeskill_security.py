@@ -5,6 +5,7 @@ Security helpers for the VibeSkill channel file endpoints.
 
 from __future__ import annotations
 
+import mimetypes
 from urllib.parse import unquote
 
 
@@ -55,6 +56,82 @@ def is_dangerous_file(filename: str | None) -> str | None:
     ext = filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
     if ext in _DANGEROUS_EXTS:
         return f"file extension '.{ext}' is on the blocklist"
+    return None
+
+
+# 常见非标准 / mimetypes 未覆盖的 mime 别名
+_MIME_ALIASES = {
+    "image/jpg": "image/jpeg",
+    "audio/mp3": "audio/mpeg",
+    "audio/x-wav": "audio/wav",
+    "application/x-zip-compressed": "application/zip",
+    "application/x-gzip": "application/gzip",
+    "text/x-markdown": "text/markdown",
+}
+
+# 扩展名 -> 可接受的 mime（补充 mimetypes 库缺口）
+_EXT_TO_MIMES: dict[str, frozenset[str]] = {
+    "md": frozenset({"text/markdown", "text/plain", "text/x-markdown"}),
+    "markdown": frozenset({"text/markdown", "text/plain", "text/x-markdown"}),
+    "py": frozenset({"text/x-python", "text/plain", "application/x-python"}),
+    "js": frozenset({"application/javascript", "text/javascript"}),
+    "ts": frozenset({"application/typescript", "text/typescript", "video/mp2t"}),
+    "csv": frozenset({"text/csv", "application/csv", "text/plain"}),
+    "htm": frozenset({"text/html"}),
+    "svg": frozenset({"image/svg+xml"}),
+    "webp": frozenset({"image/webp"}),
+    "tif": frozenset({"image/tiff"}),
+    "tiff": frozenset({"image/tiff"}),
+    "rar": frozenset({"application/x-rar-compressed", "application/vnd.rar"}),
+    "7z": frozenset({"application/x-7z-compressed"}),
+    "gz": frozenset({"application/gzip", "application/x-gzip"}),
+    "tar": frozenset({"application/x-tar"}),
+}
+
+
+def _normalize_mime(mime: str) -> str:
+    cleaned = mime.strip().lower()
+    return _MIME_ALIASES.get(cleaned, cleaned)
+
+
+def _guess_mime_from_filename(filename: str) -> str:
+    mime_type, _ = mimetypes.guess_type(filename)
+    return _normalize_mime(mime_type or "application/octet-stream")
+
+
+def _extension_from_filename(filename: str) -> str:
+    return filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
+
+
+def _mime_matches_extension(mime: str, ext: str) -> bool:
+    """判断声明的 mime 是否与扩展名一致。"""
+    if not ext:
+        return False
+    mime_norm = _normalize_mime(mime)
+    expected = _guess_mime_from_filename(f"file.{ext}")
+    if mime_norm == expected:
+        return True
+    supplemental = {_normalize_mime(item) for item in _EXT_TO_MIMES.get(ext, ())}
+    if mime_norm in supplemental:
+        return True
+    for candidate in mimetypes.guess_all_extensions(mime_norm, strict=False):
+        if candidate.lstrip(".").lower() == ext:
+            return True
+    for candidate in mimetypes.guess_all_extensions(mime.strip().lower(), strict=False):
+        if candidate.lstrip(".").lower() == ext:
+            return True
+    return False
+
+
+def validate_mime_extension_match(filename: str, mime: str) -> str | None:
+    """校验 mime 与 filename 扩展名是否一致。返回 ``None`` 表示通过。"""
+    if not mime or not mime.strip():
+        return "mime is required"
+    ext = _extension_from_filename(filename)
+    if not ext:
+        return "filename must include an extension"
+    if not _mime_matches_extension(mime, ext):
+        return "mime does not match filename extension"
     return None
 
 
@@ -125,6 +202,9 @@ def validate_file_part(part: object) -> str | None:
     filename = str(part.get("filename") or "")
     mime = str(part.get("mime") or "")
     err = is_dangerous_file(filename)
+    if err:
+        return err
+    err = validate_mime_extension_match(filename, mime)
     if err:
         return err
     for url in (part.get("url"), part.get("innerurl"), part.get("innerUrl")):
