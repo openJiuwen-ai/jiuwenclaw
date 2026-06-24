@@ -16,6 +16,7 @@ from contextvars import ContextVar, Token
 from dataclasses import dataclass
 
 from typing import Any, AsyncIterator, Callable, List, Self, Tuple
+from sqlalchemy import text
 
 from dotenv import load_dotenv
 try:
@@ -670,6 +671,32 @@ async def _build_mysql_handler_engine():
             "[JiuWenClawDeepAdapter] checkpoint MySQL engine created via SDK: %s:%s/%s",
             db_host, db_port, db_name,
         )
+
+        # 确保 kv_store.value 列为 LONGTEXT，避免 checkpoint 序列化数据被截断
+        async with engine.begin() as conn:
+            result = await conn.execute(text(
+                "SELECT COLUMN_TYPE FROM INFORMATION_SCHEMA.COLUMNS "
+                "WHERE TABLE_SCHEMA = :db AND TABLE_NAME = 'kv_store' AND COLUMN_NAME = 'value'"
+            ), {"db": db_name})
+            row = result.fetchone()
+            if row is None:
+                await conn.execute(text(
+                    "CREATE TABLE IF NOT EXISTS kv_store ("
+                    "`key` VARCHAR(512) PRIMARY KEY,"
+                    "`value` LONGTEXT NOT NULL"
+                    ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4"
+                ))
+                logger.info(
+                    "[JiuWenClawDeepAdapter] kv_store table created with value LONGTEXT"
+                )
+            elif row[0].upper() != "LONGTEXT":
+                await conn.execute(text(
+                    "ALTER TABLE kv_store MODIFY COLUMN `value` LONGTEXT NOT NULL"
+                ))
+                logger.info(
+                    "[JiuWenClawDeepAdapter] kv_store.value altered to LONGTEXT"
+                )
+
         return engine
     except Exception as exc:
         logger.error(
@@ -711,6 +738,30 @@ async def _build_postgresql_handler_engine():
             "[JiuWenClawDeepAdapter] checkpoint PostgreSQL engine created via SDK: %s:%s/%s schema=%s",
             db_host, db_port, db_name, db_schema,
         )
+        # 确保 kv_store.value 列为 TEXT，避免 checkpoint 序列化数据被截断
+        async with engine.begin() as conn:
+            result = await conn.execute(text(
+                "SELECT data_type FROM information_schema.columns "
+                "WHERE table_catalog = :db AND table_name = 'kv_store' AND column_name = 'value'"
+            ), {"db": db_name})
+            row = result.fetchone()
+            if row is None:
+                await conn.execute(text(
+                    "CREATE TABLE IF NOT EXISTS kv_store ("
+                    "key VARCHAR(512) PRIMARY KEY,"
+                    "value TEXT NOT NULL"
+                    ")"
+                ))
+                logger.info(
+                    "[JiuWenClawDeepAdapter] kv_store table created with value TEXT"
+                )
+            elif row[0].lower() != "text":
+                await conn.execute(text(
+                    "ALTER TABLE kv_store ALTER COLUMN value TYPE TEXT"
+                ))
+                logger.info(
+                    "[JiuWenClawDeepAdapter] kv_store.value altered to TEXT"
+                )
         return engine
     except Exception as exc:
         logger.error(
