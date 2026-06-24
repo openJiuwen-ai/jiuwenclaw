@@ -422,27 +422,33 @@ class RuntimeManagementAgentClient(AgentServerClient):
         def _agent_env_vars() -> dict[str, str]:
             base: dict[str, str] = {
                 "AGENT_SERVER_HOST": "0.0.0.0",
-                "HOME": os.getenv("AGENT_SERVER_HOME"),
-                "AGENT_RUNTIME": os.getenv("AGENT_RUNTIME"),
-                "MODEL_PROVIDER": os.getenv("MODEL_PROVIDER"),
-                "MODEL_NAME": os.getenv("MODEL_NAME"),
-                "API_BASE": os.getenv("API_BASE"),
-                "API_KEY": os.getenv("API_KEY"),
-                "GATEWAY_DB_TYPE": os.getenv("GATEWAY_DB_TYPE"),
-                "GATEWAY_SQLITE_PATH": os.getenv("GATEWAY_SQLITE_PATH"),
-                "GATEWAY_DB_HOST": os.getenv("GATEWAY_DB_HOST"),
-                "GATEWAY_DB_PORT": os.getenv("GATEWAY_DB_PORT"),
-                "GATEWAY_DB_USER": os.getenv("GATEWAY_DB_USER"),
-                "GATEWAY_DB_PASSWORD": os.getenv("GATEWAY_DB_PASSWORD"),
-                "GATEWAY_DB_NAME": os.getenv("GATEWAY_DB_NAME"),
-                "GATEWAY_PG_SCHEMA": os.getenv("GATEWAY_PG_SCHEMA"),
-                "JIUWENCLAW_ID": os.getenv("JIUWENCLAW_ID"),
-                "LLM_SSL_VERIFY": os.getenv("LLM_SSL_VERIFY"),
-                "PYTHONPATH": os.getenv("PYTHONPATH"),
-                "AGENT_SERVER_LOG_FILE": os.getenv("AGENT_SERVER_LOG_FILE"),
-                "CLAW_LINK_AUTH_MODE": os.getenv("CLAW_LINK_AUTH_MODE"),
-                "CLAW_LINK_TOKEN_TTL": os.getenv("CLAW_LINK_TOKEN_TTL"),
             }
+
+            for key, value in (
+                ("HOME", os.getenv("AGENT_SERVER_HOME")),
+                ("AGENT_RUNTIME", os.getenv("AGENT_RUNTIME")),
+                ("MODEL_PROVIDER", os.getenv("MODEL_PROVIDER")),
+                ("MODEL_NAME", os.getenv("MODEL_NAME")),
+                ("API_BASE", os.getenv("API_BASE")),
+                ("API_KEY", os.getenv("API_KEY")),
+                ("GATEWAY_DB_TYPE", os.getenv("GATEWAY_DB_TYPE")),
+                ("GATEWAY_SQLITE_PATH", os.getenv("GATEWAY_SQLITE_PATH")),
+                ("GATEWAY_DB_HOST", os.getenv("GATEWAY_DB_HOST")),
+                ("GATEWAY_DB_PORT", os.getenv("GATEWAY_DB_PORT")),
+                ("GATEWAY_DB_USER", os.getenv("GATEWAY_DB_USER")),
+                ("GATEWAY_DB_PASSWORD", os.getenv("GATEWAY_DB_PASSWORD")),
+                ("GATEWAY_DB_NAME", os.getenv("GATEWAY_DB_NAME")),
+                ("GATEWAY_PG_SCHEMA", os.getenv("GATEWAY_PG_SCHEMA")),
+                ("JIUWENCLAW_ID", os.getenv("JIUWENCLAW_ID")),
+                ("LLM_SSL_VERIFY", os.getenv("LLM_SSL_VERIFY")),
+                ("PYTHONPATH", os.getenv("PYTHONPATH")),
+                ("AGENT_SERVER_LOG_FILE", os.getenv("AGENT_SERVER_LOG_FILE")),
+                ("CLAW_LINK_AUTH_MODE", os.getenv("CLAW_LINK_AUTH_MODE")),
+                ("CLAW_LINK_TOKEN_TTL", os.getenv("CLAW_LINK_TOKEN_TTL")),
+            ):
+                if value is not None:
+                    base[key] = value
+
             if mode == "dev":
                 base["LOG_ROOT_PATH"] = "/root/.logs"
             else:
