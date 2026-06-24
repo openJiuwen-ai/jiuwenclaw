@@ -1,12 +1,17 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
 from pathlib import Path
 from typing import Any
 
+from openjiuwen.core.runner.callback import AbortError
+
 from jiuwenclaw.agentserver.replan_agent.plan_node import PlanNode
 from jiuwenclaw.agentserver.replan_agent.skill_codes.ppt.ppt_common import PptCommon
+
+logger = logging.getLogger(__name__)
 
 _TEXT_SOURCE_KEYS = PptCommon.TEXT_SOURCE_KEYS
 _collect_user_text = PptCommon.collect_user_text
@@ -383,6 +388,16 @@ async def _ask_missing_batch_fields(node: PlanNode, inputs: dict[str, Any]) -> N
 
     result = await node.call_tool("ask_user_question", questions=questions)
     status, answers = _normalize_ask_result(result)
+
+    if _is_auto_skip(status, answers):
+        logger.info(
+            "[P2.2] ask_user_question 自动应答（用户超时），LLM 兜底补默认值: %s",
+            missing_fields,
+        )
+        await _llm_default_batch_fields(node, inputs, missing_fields)
+        _prune_satisfied_batch_missing_fields(inputs)
+        return
+
     if status != "answered" or not answers:
         detail = ""
         if isinstance(result, dict):
@@ -394,6 +409,15 @@ async def _ask_missing_batch_fields(node: PlanNode, inputs: dict[str, Any]) -> N
 
     _apply_ask_answers(inputs, answers, sent_questions=questions)
     _prune_satisfied_batch_missing_fields(inputs)
+
+    # 部分字段在回填中仍空（如用户选了"其他"但未填文本）——继续 LLM 兜底
+    still_missing = _unsatisfied_batch_fields(inputs)
+    if still_missing:
+        logger.info(
+            "[P2.2] 用户作答后仍存在缺失字段，LLM 兜底补默认值: %s", still_missing,
+        )
+        await _llm_default_batch_fields(node, inputs, still_missing)
+        _prune_satisfied_batch_missing_fields(inputs)
 
 
 def _parse_derive_params_response(raw: str) -> dict[str, str]:
@@ -626,6 +650,14 @@ async def _ask_missing_style(node: PlanNode, inputs: dict[str, Any]) -> None:
         questions=[style_question],
     )
     status, answers = _normalize_ask_result(result)
+
+    if _is_auto_skip(status, answers):
+        fallback_style = await _llm_default_style(node, inputs)
+        logger.info("[P2.3] ask_user_question 自动应答（用户超时），style_id 兜底为 %s", fallback_style)
+        inputs["style_id"] = fallback_style
+        inputs["need_ask_style"] = False
+        return
+
     if status != "answered" or not answers:
         detail = ""
         if isinstance(result, dict):
@@ -637,6 +669,13 @@ async def _ask_missing_style(node: PlanNode, inputs: dict[str, Any]) -> None:
 
     _apply_ask_answers(inputs, answers, sent_questions=[style_question])
 
+    # 用户作答后仍未拿到有效 style_id（例如选了"其他"未填文本）——LLM 兜底
+    if not _style_id_resolved(inputs):
+        fallback_style = await _llm_default_style(node, inputs)
+        logger.info("[P2.3] 用户作答后仍缺 style_id，LLM 兜底为 %s", fallback_style)
+        inputs["style_id"] = fallback_style
+        inputs["need_ask_style"] = False
+
 
 def _normalize_ask_result(result: Any) -> tuple[str, list[Any]]:
     if not isinstance(result, dict):
@@ -646,6 +685,219 @@ def _normalize_ask_result(result: Any) -> tuple[str, list[Any]]:
     if not isinstance(answers, list):
         answers = []
     return status, answers
+
+
+def _answer_item_is_empty(item: Any) -> bool:
+    """An answer item is 'empty' when both selected_options and free text are blank.
+
+    Relay-Claw 在前端卡片倒计时（120s）到期时会回填空 selected_options，
+    用此函数把这种"自动应答"识别为需要走兜底逻辑。"""
+    if not isinstance(item, dict):
+        return True
+    selected = item.get("selected_options")
+    has_selected = isinstance(selected, list) and any(
+        isinstance(s, str) and s.strip() for s in selected
+    )
+    if has_selected:
+        return False
+    for key in ("other_text", "custom_text", "custom_input", "edited_text", "text", "free_text"):
+        value = item.get(key)
+        if isinstance(value, str) and value.strip():
+            return False
+    return True
+
+
+def _is_auto_skip(status: str, answers: list[Any]) -> bool:
+    """Detect Relay-Claw 侧 120s 倒计时自动应答（answered + 全部空答案）。"""
+    if status != "answered" or not answers:
+        return False
+    return all(_answer_item_is_empty(item) for item in answers)
+
+
+_BATCH_FALLBACK_SYSTEM_PROMPT = """你是 PPT 需求兜底分析助手。当用户未在限时内作答时，请基于用户原始消息、文档摘要与候选选项，为每个缺失字段挑选最合理的默认值。
+
+字段取值范围：
+- page_count: 整数（候选 6 / 10 / 18 中三选一；若用户上下文暗示更具体，可输出 1~30 的整数）
+- audience: 字符串（优先从候选标签中选；无明显倾向时填 "通用商务/知识分享"）
+- presentation_purpose: 字符串（候选「工作汇报」「产品展示」「教学分享」「auto」中四选一）
+
+规则：
+1. 仅为 missing 列表中出现的字段输出值；其他字段省略。
+2. 仅基于已有信息推断，不要编造与上下文无关的内容。
+3. 必须只输出 JSON，且字段名严格匹配 missing 列表。
+
+示例：
+{"page_count": 10, "audience": "技术团队", "presentation_purpose": "工作汇报"}"""
+
+
+_TOPIC_FALLBACK_SYSTEM_PROMPT = """你是 PPT 主题兜底选择助手。用户未在限时内从候选主题中作答，请基于用户消息与文档摘要，从给定候选中挑选最契合的一项。
+
+规则：
+1. 必须从候选列表中选择一项原文，不要改写或新建。
+2. 必须只输出 JSON：{"topic": "候选原文"}。"""
+
+
+_STYLE_FALLBACK_SYSTEM_PROMPT = """你是 PPT 风格兜底选择助手。用户未在限时内作答风格选择，请基于用户消息与主题，从给定 style_id 中挑选最合适的一项。
+
+style_id 候选：huawei / light-tech / paper-humanities / dark-tech / free
+含义：
+- huawei: 企业汇报、红色主题、严谨专业
+- light-tech: 产品发布、黑白调性、极简设计
+- paper-humanities: 文化主题、温暖质感
+- dark-tech: 硬核科技、高对比度
+- free: 由 AI 根据主题自动设计
+
+规则：
+1. style_id 必须取上述五者之一。
+2. 必须只输出 JSON：{"style_id": "<id>"}。"""
+
+
+def _build_batch_fallback_prompt(
+    missing_fields: list[str],
+    user_text: str,
+    doc_excerpt: str,
+) -> str:
+    parts = ["请为下列缺失字段挑选最合理的默认值（用户已超时未作答）。\n"]
+    parts.append(f"missing: {json.dumps(missing_fields, ensure_ascii=False)}\n")
+    if user_text:
+        parts.append(f"用户消息：\n{user_text}\n")
+    if doc_excerpt:
+        parts.append(f"文档摘要：\n{doc_excerpt}\n")
+    parts.append("仅输出 JSON。")
+    return "\n".join(parts)
+
+
+def _build_topic_fallback_prompt(
+    topic_options: list[str],
+    user_text: str,
+    doc_excerpt: str,
+) -> str:
+    parts = ["请从下列候选主题中选出与用户上下文最契合的一项（用户已超时未作答）。\n"]
+    parts.append(f"候选：{json.dumps(topic_options, ensure_ascii=False)}\n")
+    if user_text:
+        parts.append(f"用户消息：\n{user_text}\n")
+    if doc_excerpt:
+        parts.append(f"文档摘要：\n{doc_excerpt}\n")
+    parts.append('仅输出 JSON：{"topic":"候选原文"}。')
+    return "\n".join(parts)
+
+
+def _build_style_fallback_prompt(inputs: dict[str, Any], user_text: str) -> str:
+    parts = ["请为本次 PPT 选择最合适的 style_id（用户已超时未作答）。\n"]
+    topic = str(inputs.get("topic") or "").strip()
+    if topic:
+        parts.append(f"主题：{topic}\n")
+    audience = str(inputs.get("audience") or "").strip()
+    if audience:
+        parts.append(f"受众：{audience}\n")
+    purpose = str(inputs.get("presentation_purpose") or "").strip()
+    if purpose:
+        parts.append(f"目的：{purpose}\n")
+    if user_text:
+        parts.append(f"用户消息：\n{user_text}\n")
+    parts.append('仅输出 JSON：{"style_id":"<id>"}。')
+    return "\n".join(parts)
+
+
+async def _llm_default_batch_fields(
+    node: PlanNode,
+    inputs: dict[str, Any],
+    missing_fields: list[str],
+) -> None:
+    """超时兜底：LLM 推断缺失 batch 字段；最终仍为空时落到模块级 default。"""
+    user_text = _collect_user_text(inputs)
+    doc_excerpt = await PptCommon.read_file(
+        node,
+        inputs.get("doc_raw_path"),
+        max_chars=_DOC_EXCERPT_MAX_CHARS,
+        error_type=RequirementCollectError,
+    )
+    payload: dict[str, Any] = {}
+    try:
+        response = await node.stream_llm_collect(
+            _build_batch_fallback_prompt(missing_fields, user_text, doc_excerpt),
+            system_prompt=_BATCH_FALLBACK_SYSTEM_PROMPT,
+        )
+        parsed = _parse_json_payload(response)
+        if isinstance(parsed, dict):
+            payload = parsed
+    except Exception as exc:
+        if isinstance(exc, AbortError):
+            raise
+        logger.warning("[P2.2] LLM 兜底解析失败，将使用静态默认值: %s", exc)
+
+    if "page_count" in missing_fields:
+        count = _normalize_page_count(payload.get("page_count"))
+        inputs["page_count"] = count if count is not None else _DEFAULT_PAGE_COUNT
+    if "audience" in missing_fields:
+        audience = payload.get("audience")
+        inputs["audience"] = (
+            audience.strip() if isinstance(audience, str) and audience.strip()
+            else _DEFAULT_AUDIENCE
+        )
+    if "presentation_purpose" in missing_fields:
+        purpose_raw = payload.get("presentation_purpose")
+        purpose = purpose_raw.strip() if isinstance(purpose_raw, str) else ""
+        if purpose in _PURPOSE_LABEL_TO_VALUE:
+            purpose = _PURPOSE_LABEL_TO_VALUE[purpose]
+        inputs["presentation_purpose"] = purpose or _DEFAULT_PRESENTATION_PURPOSE
+
+
+async def _llm_default_topic(
+    node: PlanNode,
+    inputs: dict[str, Any],
+    topic_options: list[str],
+) -> str:
+    """超时兜底：LLM 从候选中挑选最契合的主题；失败时取第一项。"""
+    user_text = _collect_user_text(inputs)
+    doc_excerpt = await PptCommon.read_file(
+        node,
+        inputs.get("doc_raw_path"),
+        max_chars=_DOC_EXCERPT_MAX_CHARS,
+        error_type=RequirementCollectError,
+    )
+    try:
+        response = await node.stream_llm_collect(
+            _build_topic_fallback_prompt(topic_options, user_text, doc_excerpt),
+            system_prompt=_TOPIC_FALLBACK_SYSTEM_PROMPT,
+        )
+        payload = _parse_json_payload(response)
+        if isinstance(payload, dict):
+            chosen = payload.get("topic")
+            if isinstance(chosen, str) and chosen.strip():
+                chosen_str = chosen.strip()
+                for option in topic_options:
+                    if option.strip() == chosen_str:
+                        return option
+                # LLM 改写过则退回到与候选近似的项
+                for option in topic_options:
+                    if chosen_str in option or option in chosen_str:
+                        return option
+    except Exception as exc:
+        if isinstance(exc, AbortError):
+            raise
+        logger.warning("[P2.1] LLM 主题兜底解析失败，将取首个候选: %s", exc)
+    return topic_options[0]
+
+
+async def _llm_default_style(node: PlanNode, inputs: dict[str, Any]) -> str:
+    """超时兜底：LLM 从五个有效 style_id 中挑选；失败时返回 'huawei'。"""
+    user_text = _collect_user_text(inputs)
+    try:
+        response = await node.stream_llm_collect(
+            _build_style_fallback_prompt(inputs, user_text),
+            system_prompt=_STYLE_FALLBACK_SYSTEM_PROMPT,
+        )
+        payload = _parse_json_payload(response)
+        if isinstance(payload, dict):
+            normalized = _normalize_style_id(payload.get("style_id"))
+            if normalized and normalized != "custom":
+                return normalized
+    except Exception as exc:
+        if isinstance(exc, AbortError):
+            raise
+        logger.warning("[P2.3] LLM 风格兜底解析失败，将使用 'huawei': %s", exc)
+    return "huawei"
 
 
 def _build_topic_suggest_prompt(inputs: dict[str, Any], doc_excerpt: str) -> str:
@@ -765,17 +1017,24 @@ async def _resolve_topic_via_ask(node: PlanNode, inputs: dict[str, Any]) -> None
         questions=[topic_question],
     )
     status, answers = _normalize_ask_result(ask_result)
-    if status != "answered":
-        detail = ""
-        if isinstance(ask_result, dict):
-            detail = str(ask_result.get("message") or "").strip()
-        raise RequirementCollectError(
-            f"未能获取用户主题选择（status={status}）" + (f": {detail}" if detail else "")
-        )
 
-    selected_topic = _topic_text_from_ask_answers(answers)
-    if not selected_topic:
-        raise RequirementCollectError("用户未选择有效主题")
+    if _is_auto_skip(status, answers):
+        selected_topic = await _llm_default_topic(node, inputs, topic_options)
+        logger.info("[P2.1] ask_user_question 自动应答（用户超时），topic 兜底为 %r", selected_topic)
+    else:
+        if status != "answered":
+            detail = ""
+            if isinstance(ask_result, dict):
+                detail = str(ask_result.get("message") or "").strip()
+            raise RequirementCollectError(
+                f"未能获取用户主题选择（status={status}）" + (f": {detail}" if detail else "")
+            )
+
+        selected_topic = _topic_text_from_ask_answers(answers)
+        if not selected_topic:
+            # 用户在 120s 内点击但未选择有效项 → LLM 兜底从候选中挑选
+            selected_topic = await _llm_default_topic(node, inputs, topic_options)
+            logger.info("[P2.1] 用户作答未给出有效主题，LLM 兜底为 %r", selected_topic)
 
     inputs["topic"] = selected_topic
     inputs["topic_user_reply"] = selected_topic

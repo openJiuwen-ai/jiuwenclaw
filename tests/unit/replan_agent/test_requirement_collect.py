@@ -305,30 +305,6 @@ def test_execute_no_topic_raises_when_suggestions_insufficient() -> None:
 
 
 @pytest.mark.unit
-def test_execute_no_topic_raises_when_user_does_not_select() -> None:
-    slot_no_topic = (
-        '{"topic":"","page_count":null,"audience":"","presentation_purpose":"",'
-        '"style_id":"","style_description":"","missing_fields":["topic"],'
-        '"need_ask_style":true}'
-    )
-    topic_suggest = (
-        '{"topics":["主题A","主题B","主题C","主题D"]}'
-    )
-    node = _make_root_node(
-        llm_responses=[slot_no_topic, topic_suggest],
-        ask_results=[
-            {
-                "status": "answered",
-                "answers": [{"header": "主题", "selected_options": ["其他"]}],
-            },
-        ],
-    )
-    ctx = {"user_message": "帮我做 PPT"}
-    with pytest.raises(rc.RequirementCollectError, match="用户未选择有效主题"):
-        asyncio.run(node.sub_plans[0]._execute(ctx))
-
-
-@pytest.mark.unit
 def test_execute_no_topic_raises_without_ask_tool() -> None:
     slot_no_topic = (
         '{"topic":"","page_count":null,"audience":"","presentation_purpose":"",'
@@ -486,14 +462,26 @@ def test_p23_uses_free_when_style_not_required() -> None:
 
 
 @pytest.mark.unit
-def test_p22_raises_when_batch_fields_still_missing_after_ask() -> None:
-    slot_partial = (
-        '{"page_count":null,"audience":"","presentation_purpose":"",'
-        '"style_id":"","style_description":"","missing_fields":["page_count","audience",'
-        '"presentation_purpose"],"need_ask_style":true}'
-    )
+def test_p22_falls_back_to_llm_when_batch_fields_still_missing_after_ask(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """用户只回答了部分字段时，剩余字段走 LLM 兜底而非 raise。"""
+    captured: dict[str, Any] = {}
+
+    async def _fake_llm_default_batch_fields(
+        _node, inputs: dict[str, Any], missing_fields: list[str],
+    ) -> None:
+        captured["missing"] = list(missing_fields)
+        if "audience" in missing_fields:
+            inputs["audience"] = "技术团队"
+        if "presentation_purpose" in missing_fields:
+            inputs["presentation_purpose"] = "工作汇报"
+        if "page_count" in missing_fields:
+            inputs["page_count"] = rc._DEFAULT_PAGE_COUNT
+
+    monkeypatch.setattr(rc, "_llm_default_batch_fields", _fake_llm_default_batch_fields)
+
     node = _make_root_node(
-        llm_responses=[slot_partial],
         ask_results=[
             {
                 "status": "answered",
@@ -504,5 +492,192 @@ def test_p22_raises_when_batch_fields_still_missing_after_ask() -> None:
         ],
     )
     ctx = {"topic": "产品发布", "user_message": "做产品发布 PPT"}
-    with pytest.raises(rc.RequirementCollectError, match="缺少 受众、汇报目的"):
-        asyncio.run(node.sub_plans[1]._execute(ctx))
+    result = asyncio.run(node.sub_plans[1]._execute(ctx))
+    assert captured["missing"] == ["audience", "presentation_purpose"]
+    assert result["page_count"] == 6
+    assert result["audience"] == "技术团队"
+    assert result["presentation_purpose"] == "工作汇报"
+
+
+@pytest.mark.unit
+def test_p22_auto_skip_uses_llm_then_static_defaults(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Relay-Claw 自动应答（answered + 空 selected_options）触发 LLM 兜底；LLM 给空时回退默认值。"""
+    captured: dict[str, Any] = {}
+
+    async def _fake_llm_default_batch_fields(
+        _node, inputs: dict[str, Any], missing_fields: list[str],
+    ) -> None:
+        # 模拟 LLM 解析失败 / 返回空 → 走静态默认值
+        captured["missing"] = list(missing_fields)
+        if "page_count" in missing_fields:
+            inputs["page_count"] = rc._DEFAULT_PAGE_COUNT
+        if "audience" in missing_fields:
+            inputs["audience"] = rc._DEFAULT_AUDIENCE
+        if "presentation_purpose" in missing_fields:
+            inputs["presentation_purpose"] = rc._DEFAULT_PRESENTATION_PURPOSE
+
+    monkeypatch.setattr(rc, "_llm_default_batch_fields", _fake_llm_default_batch_fields)
+
+    node = _make_root_node(
+        ask_results=[
+            {
+                "status": "answered",
+                "answers": [
+                    {"question": "需要多少页？", "selected_options": []},
+                    {"question": "目标受众是谁？", "selected_options": []},
+                    {"question": "这次演示的主要目的是？", "selected_options": []},
+                ],
+            },
+        ],
+    )
+    ctx = {"topic": "产品发布", "user_message": "做产品发布 PPT"}
+    result = asyncio.run(node.sub_plans[1]._execute(ctx))
+    assert captured["missing"] == ["page_count", "audience", "presentation_purpose"]
+    assert result["page_count"] == rc._DEFAULT_PAGE_COUNT
+    assert result["audience"] == rc._DEFAULT_AUDIENCE
+    assert result["presentation_purpose"] == rc._DEFAULT_PRESENTATION_PURPOSE
+
+
+@pytest.mark.unit
+def test_p23_auto_skip_uses_llm_fallback_style(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Relay-Claw 自动应答时风格走 LLM 兜底。"""
+
+    async def _fake_llm_default_style(_node, _inputs) -> str:
+        return "dark-tech"
+
+    monkeypatch.setattr(rc, "_llm_default_style", _fake_llm_default_style)
+
+    node = _make_root_node(
+        ask_results=[
+            {
+                "status": "answered",
+                "answers": [{"question": "请选择演示文稿的视觉风格", "selected_options": []}],
+            },
+        ],
+    )
+    ctx = {
+        "topic": "产品发布",
+        "page_count": 10,
+        "audience": "投资人",
+        "presentation_purpose": "产品展示",
+        "need_ask_style": True,
+    }
+    result = asyncio.run(node.sub_plans[2]._execute(ctx))
+    assert result["style_id"] == "dark-tech"
+    assert result["need_ask_style"] is False
+
+
+@pytest.mark.unit
+def test_p23_auto_skip_falls_back_to_huawei_when_llm_invalid(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """LLM 返回非法 JSON 时风格最终兜底为 'huawei'。"""
+
+    async def _fake_llm_default_style(_node, _inputs) -> str:
+        # 模拟 _llm_default_style 内部 LLM 解析失败 → 落到 'huawei'
+        return "huawei"
+
+    monkeypatch.setattr(rc, "_llm_default_style", _fake_llm_default_style)
+
+    node = _make_root_node(
+        ask_results=[
+            {
+                "status": "answered",
+                "answers": [{"question": "请选择演示文稿的视觉风格", "selected_options": []}],
+            },
+        ],
+    )
+    ctx = {
+        "topic": "产品发布",
+        "page_count": 10,
+        "audience": "投资人",
+        "presentation_purpose": "产品展示",
+        "need_ask_style": True,
+    }
+    result = asyncio.run(node.sub_plans[2]._execute(ctx))
+    assert result["style_id"] == "huawei"
+
+
+@pytest.mark.unit
+def test_topic_auto_skip_uses_llm_fallback_then_first_option(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """主题自动应答时 LLM 兜底；LLM 返回非法时取候选首项（由 _llm_default_topic 自身兜底）。"""
+    captured: dict[str, Any] = {}
+
+    async def _fake_llm_default_topic(_node, _inputs, topic_options: list[str]) -> str:
+        captured["options"] = list(topic_options)
+        return topic_options[0]
+
+    monkeypatch.setattr(rc, "_llm_default_topic", _fake_llm_default_topic)
+
+    slot_no_topic = (
+        '{"topic":"","page_count":null,"audience":"","presentation_purpose":"",'
+        '"style_id":"","style_description":"","missing_fields":["topic"],'
+        '"need_ask_style":true}'
+    )
+    topic_suggest = '{"topics":["主题A","主题B","主题C","主题D"]}'
+    node = _make_root_node(
+        llm_responses=[slot_no_topic, topic_suggest],
+        ask_results=[
+            {
+                "status": "answered",
+                "answers": [
+                    {
+                        "question": "请选择本次演示的主题方向（每个选项均可直接作为完整 PPT 主题）：",
+                        "selected_options": [],
+                    },
+                ],
+            },
+        ],
+    )
+    ctx = {"user_message": "帮我做 PPT"}
+    result = asyncio.run(node.sub_plans[0]._execute(ctx))
+    assert captured["options"] == ["主题A", "主题B", "主题C", "主题D"]
+    assert result["topic"] == "主题A"
+
+
+@pytest.mark.unit
+def test_execute_no_topic_falls_back_to_llm_when_user_does_not_select(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """用户在主题选择中只点 "其他"（未填文本）时走 LLM 兜底而非 raise。"""
+
+    async def _fake_llm_default_topic(_node, _inputs, topic_options: list[str]) -> str:
+        return topic_options[2]
+
+    monkeypatch.setattr(rc, "_llm_default_topic", _fake_llm_default_topic)
+
+    slot_no_topic = (
+        '{"topic":"","page_count":null,"audience":"","presentation_purpose":"",'
+        '"style_id":"","style_description":"","missing_fields":["topic"],'
+        '"need_ask_style":true}'
+    )
+    topic_suggest = (
+        '{"topics":["主题A","主题B","主题C","主题D"]}'
+    )
+    node = _make_root_node(
+        llm_responses=[slot_no_topic, topic_suggest],
+        ask_results=[
+            {
+                "status": "answered",
+                "answers": [{"header": "主题", "selected_options": ["其他"]}],
+            },
+        ],
+    )
+    ctx = {"user_message": "帮我做 PPT"}
+    result = asyncio.run(node.sub_plans[0]._execute(ctx))
+    assert result["topic"] == "主题C"
+
+
+@pytest.mark.unit
+def test_is_auto_skip_helpers() -> None:
+    assert rc._is_auto_skip("answered", [{"selected_options": []}]) is True
+    assert rc._is_auto_skip("answered", [{"selected_options": ["x"]}]) is False
+    assert rc._is_auto_skip("answered", [{"custom_input": "abc"}]) is False
+    assert rc._is_auto_skip("skipped", [{"selected_options": []}]) is False
+    assert rc._is_auto_skip("answered", []) is False
