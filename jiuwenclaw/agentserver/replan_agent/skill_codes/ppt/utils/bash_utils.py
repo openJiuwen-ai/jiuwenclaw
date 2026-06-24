@@ -112,10 +112,6 @@ async def run_bash(
 
     tool_attempts: list[tuple[str, dict[str, Any]]] = [
         (
-            "mcp_exec_command",
-            _build_mcp_kwargs(command, timeout_seconds, workdir),
-        ),
-        (
             "bash",
             _build_bash_kwargs(command, timeout_seconds, workdir, with_timeout=True),
         ),
@@ -147,22 +143,7 @@ async def run_bash(
 
     if last_error is not None:
         raise BashExecError(f"无法执行 bash 命令: {command}") from last_error
-    raise BashExecError(f"未注册 bash/mcp_exec_command 工具，无法执行: {command}")
-
-
-def _build_mcp_kwargs(
-    command: str,
-    timeout_seconds: int,
-    workdir: str | None,
-) -> dict[str, Any]:
-    kwargs: dict[str, Any] = {
-        "command": command,
-        "timeout_seconds": timeout_seconds,
-        "max_output_chars": 0,
-    }
-    if workdir:
-        kwargs["workdir"] = workdir
-    return kwargs
+    raise BashExecError(f"未注册 bash 工具，无法执行: {command}")
 
 
 def _build_bash_kwargs(

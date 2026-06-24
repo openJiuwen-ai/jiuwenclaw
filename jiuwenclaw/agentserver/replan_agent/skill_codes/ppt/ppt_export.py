@@ -54,7 +54,7 @@ class PPTExportNode(PlanNode):
                 "## P9 PPTX 导出\n"
                 "\n"
                 "### 前置条件\n"
-                "- `bash` 或 `mcp_exec_command` 工具可用\n"
+                "- `bash` 工具可用\n"
                 "- Node.js >= 18 已安装\n"
                 "- P8.3 QA 与自动修复已完成，pages_dir 下 HTML 文件就绪\n"
                 "\n"

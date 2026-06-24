@@ -883,11 +883,12 @@ class FetchValidateNode(PlanNode):
             needs = "；".join(page.get("data_needs", []))
             page_needs[pk] = needs or page.get("title", "")
 
-        filtered: dict[str, list[dict[str, Any]]] = {}
-        for page_key, extractions in page_extractions.items():
+        async def _check_one_ghost(
+            page_key: str,
+            extractions: list[dict[str, Any]],
+        ) -> tuple[str, list[dict[str, Any]]]:
             if not extractions:
-                filtered[page_key] = extractions
-                continue
+                return (page_key, extractions)
 
             needs_desc = page_needs.get(page_key, "")
             source_list = "\n".join(
@@ -917,12 +918,23 @@ class FetchValidateNode(PlanNode):
                 if isinstance(exclude_indices, list):
                     exclude_set = set(int(i) - 1 for i in exclude_indices if isinstance(i, (int, float)))
                     verified = [e for i, e in enumerate(extractions) if i not in exclude_set]
-                    filtered[page_key] = verified
+                    return (page_key, verified)
                 else:
-                    filtered[page_key] = extractions
+                    return (page_key, extractions)
             except (ValueError, TypeError) as e:
                 logger.warning("[P6.3] 幽灵来源LLM识别失败，保留全部: %s", e)
-                filtered[page_key] = extractions
+                return (page_key, extractions)
+
+        tasks = [_check_one_ghost(pk, ext) for pk, ext in page_extractions.items()]
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+
+        filtered: dict[str, list[dict[str, Any]]] = {}
+        for r in results:
+            if isinstance(r, Exception):
+                logger.warning("[P6.3] 幽灵来源识别任务异常: %s", r)
+                continue
+            page_key, verified = r
+            filtered[page_key] = verified
 
         return filtered
 

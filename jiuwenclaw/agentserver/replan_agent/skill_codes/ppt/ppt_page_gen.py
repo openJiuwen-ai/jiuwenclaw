@@ -779,14 +779,35 @@ class DensityCheckNode(PlanNode):
             check = self.extract_json(llm_result, expected_type=dict)
             if not isinstance(check, dict):
                 return {"pass": True, "reason": "json_parse_failed"}
+            failed_items = list(check.get("failed_items") or [])
+            llm_failed = list(failed_items)
+            failed_items = self._post_check_data_viz(html, failed_items, search_mode)
+            if len(failed_items) < len(llm_failed):
+                removed = [x for x in llm_failed if x not in failed_items]
+                logger.info(
+                    "[P8.2] 页面 %d 程序化后置校验移除误判项: %s",
+                    page_num,
+                    removed,
+                )
             return {
-                "pass": bool(check.get("pass", False)),
-                "failed_items": list(check.get("failed_items") or []),
+                "pass": bool(check.get("pass", False)) and not failed_items,
+                "failed_items": failed_items,
                 "reason": str(check.get("reason") or ""),
             }
         except (ValueError, TypeError) as e:
             logger.warning("[P8.2] 页面 %d 密度检查 LLM 失败（保守通过）: %s", page_num, e)
             return {"pass": True, "reason": f"llm_error: {e}"}
+
+    @staticmethod
+    def _post_check_data_viz(html: str, failed_items: list[str], search_mode: str) -> list[str]:
+        if "缺数据可视化" not in failed_items:
+            return failed_items
+        has_echarts = "echarts" in html.lower()
+        card_count = html.lower().count("card")
+        threshold = 2 if search_mode == "no_search" else 3
+        if has_echarts or card_count >= threshold:
+            failed_items = [x for x in failed_items if x != "缺数据可视化"]
+        return failed_items
 
     _SEARCH_NEEDED_ITEMS = frozenset({"缺数据可视化", "缺案例", "缺数据来源"})
 
@@ -988,7 +1009,11 @@ class DensityCheckNode(PlanNode):
         if not failed_items:
             return ""
         actions = {
-            "缺数据可视化": "提取页面文字中的数据点，生成 ECharts 柱状图/折线图/饼图，或转换为 ≥3 个数据卡片",
+            "缺数据可视化": (
+                "在页面底部（footer 之前）插入一个 ECharts 图表，按以下规则选择图表类型："
+                "时间序列数据用折线图，占比/构成数据用饼图，对比/排名数据用柱状图。"
+                "直接使用页面中已有的数字作为数据点，不要修改现有卡片和布局结构"
+            ),
             "核心要点不足": "将段落拆分为 6-10 个列表项或卡片，每条 1-2 行加图标",
             "缺装饰图标": "为每个核心要点/卡片添加相关 FontAwesome 图标（class 含 fa-）",
             "空白率过高": "添加总结框（1-2 句概括性陈述），其次添加分隔线、引用块、背景装饰",
@@ -1051,7 +1076,7 @@ class QAFixNode(PlanNode):
                 "## P8.3 QA 与自动修复\n"
                 "\n"
                 "### 前置条件\n"
-                "- `bash` 或 `mcp_exec_command` 工具可用\n"
+                "- `bash` 工具可用\n"
                 "- `list_dir` / `glob` 工具可用（用于完整性检查）\n"
                 "- pages_dir 已存在\n"
                 "\n"
