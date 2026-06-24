@@ -12,6 +12,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from jiuwenclaw.e2a.models import E2AEnvelope
+from jiuwenclaw.log import interface_info
 
 # Avoid loading gateway/__init__.py (pulls agentserver → broken optional deps in some envs).
 _repo_root = Path(__file__).resolve().parents[3]
@@ -576,6 +577,49 @@ async def test_oa_physical_disconnect_refreshes_runtime_client(
     assert callback_events[0][1]["user_id"] == "user-a"
     assert callback_events[1][1]["session_ids"] == ["sess-a"]
     assert callback_events[1][1]["user_id"] == "user-a"
+
+
+@pytest.mark.asyncio
+async def test_openability_connect_logs_interface_event(
+    router: SandboxRouterAgentClient,
+    mock_dcs_store,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    interface_log_path = tmp_path / "interface.log"
+    monkeypatch.setenv("INTERFACE_LOG_PATH", str(interface_log_path))
+    interface_info.configure_interface_log_path()
+    FakeOpenAbilityClient.instances.clear()
+    monkeypatch.setattr(_sandbox_router_mod, "OpenAbilityWebSocketClient", FakeOpenAbilityClient)
+    monkeypatch.setattr(
+        router,
+        "_probe_link_return_path_for_client",
+        AsyncMock(return_value=True),
+    )
+    try:
+        client = await router._connect_open_ability_client(
+            "sb-oa",
+            "rk-oa",
+            {"session_id": "sess-oa"},
+        )
+    finally:
+        monkeypatch.delenv("INTERFACE_LOG_PATH", raising=False)
+        interface_info.configure_interface_log_path()
+
+    assert client is FakeOpenAbilityClient.instances[0]
+    for handler in interface_info.interface_logger.handlers:
+        handler.flush()
+    rows = [
+        line.split("|")
+        for line in interface_log_path.read_text(encoding="utf-8").splitlines()
+    ]
+    assert len(rows) == 1
+    assert len(rows[0]) == 24
+    assert rows[0][1:11] == [
+        "INFO", "sess-oa", "SkillCreator", "OpenAbility",
+        "WebSocket", "", "", "", "connect", "success",
+    ]
+    assert rows[0][11:24] == [""] * 13
 
 
 @pytest.mark.asyncio

@@ -9,8 +9,6 @@ import secrets
 import socket
 import time
 from dataclasses import dataclass
-from datetime import datetime
-from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, cast
 from urllib.parse import parse_qs, urlparse
 
@@ -47,10 +45,10 @@ from jiuwenclaw.agentserver.skilldev.file_write_chunks import (
     send_file_write_with_chunks,
 )
 from jiuwenclaw.schema.message import Message, ReqMethod
-from jiuwenclaw.utils import SafeRotatingFileHandler, SensitiveDataFilter
+from jiuwenclaw.log import interface_info
 
 logger = logging.getLogger(__name__)
-interface_logger = logging.getLogger(f"{__name__}.interface")
+interface_logger = interface_info.interface_logger
 
 
 def _create_query_url_obs() -> Any:
@@ -95,83 +93,9 @@ async def _delete_obs_url(
         )
     return deleted
 
-_INTERFACE_LOG_HANDLER_ATTR = "_jiuwenclaw_interface_log_file_handler"
-_INTERFACE_LOG_HANDLER_PATH_ATTR = "_jiuwenclaw_interface_log_file_path"
-_INTERFACE_LOG_MAX_BYTES = 20 * 1024 * 1024
-_INTERFACE_LOG_BACKUP_COUNT = 20
-
-
 def _configure_interface_log_path() -> None:
     """若设置环境变量 `INTERFACE_LOG_PATH`，写入独立接口日志文件。"""
-    raw = os.environ.get("INTERFACE_LOG_PATH", "").strip()
-    existing_handlers = [
-        h for h in interface_logger.handlers
-        if getattr(h, _INTERFACE_LOG_HANDLER_ATTR, False)
-    ]
-    if not raw:
-        for h in existing_handlers:
-            interface_logger.removeHandler(h)
-            h.close()
-        return
-
-    log_path = Path(raw).expanduser().resolve()
-    for h in existing_handlers:
-        if getattr(h, _INTERFACE_LOG_HANDLER_PATH_ATTR, None) == str(log_path):
-            return
-        interface_logger.removeHandler(h)
-        h.close()
-
-    try:
-        log_path.parent.mkdir(parents=True, exist_ok=True)
-    except OSError as exc:
-        logger.warning(
-            "INTERFACE_LOG_PATH: cannot create directory %s: %s",
-            log_path.parent,
-            exc,
-        )
-        return
-    formatter = logging.Formatter(fmt="%(message)s")
-    try:
-        fh = SafeRotatingFileHandler(
-            filename=str(log_path),
-            maxBytes=_INTERFACE_LOG_MAX_BYTES,
-            backupCount=_INTERFACE_LOG_BACKUP_COUNT,
-            encoding="utf-8",
-        )
-    except OSError as exc:
-        logger.warning(
-            "INTERFACE_LOG_PATH: cannot open log file %s: %s",
-            log_path,
-            exc,
-        )
-        return
-    setattr(fh, _INTERFACE_LOG_HANDLER_ATTR, True)
-    setattr(fh, _INTERFACE_LOG_HANDLER_PATH_ATTR, str(log_path))
-    fh.setFormatter(formatter)
-    fh.addFilter(SensitiveDataFilter())
-    interface_logger.addHandler(fh)
-    interface_logger.setLevel(logging.INFO)
-    interface_logger.propagate = False
-
-
-def _clean_interface_log_field(value: Any) -> str:
-    if value is None:
-        return ""
-    if isinstance(value, bool):
-        text = "true" if value else "false"
-    else:
-        text = str(value)
-    return (
-        text.replace("|", " ")
-        .replace("\r", " ")
-        .replace("\n", " ")
-        .replace("\t", " ")
-    )
-
-
-def _interface_log_time() -> str:
-    now = datetime.fromtimestamp(time.time())
-    return f"{now:%Y-%m-%d %H:%M:%S}.{now.microsecond // 1000:03d}"
+    interface_info.configure_interface_log_path()
 
 
 def _interface_log_severity_for_status(status: int | None) -> str:
@@ -186,28 +110,37 @@ def _log_interface_event(
     *,
     severity: str,
     session_id: str | None = None,
+    source: str | None = None,
+    destination: str | None = None,
     interface_type: str,
+    interface_name: str | None = None,
     http_url: str | None = None,
+    http_status: int | None = None,
     ws_event: str | None = None,
+    ws_result: str | None = None,
     response_time_ms: int | None = None,
-    return_code: int | None = None,
-    ws_closed_ok: bool | None = None,
 ) -> None:
-    """写入固定 9 字段接口日志：Time|Severity|SessionID|...|WSClosedOK。"""
-    if not interface_logger.handlers:
-        return
-    row = [
-        _interface_log_time(),
-        severity,
-        session_id,
-        interface_type,
-        http_url,
-        ws_event,
-        "" if response_time_ms is None else response_time_ms,
-        "" if return_code is None else return_code,
-        "" if ws_closed_ok is None else ws_closed_ok,
-    ]
-    interface_logger.info("|".join(_clean_interface_log_field(field) for field in row))
+    """Compatibility facade for the fixed-schema interface logger."""
+    resolved_interface_name = interface_name
+    if (
+        resolved_interface_name is None
+        and str(interface_type or "").upper() == "HTTP"
+        and http_url
+    ):
+        method, _, path = str(http_url).partition(" ")
+        resolved_interface_name = _http_interface_name(path, method)
+    interface_info.log_interface_event(
+        severity=severity,
+        session_id=session_id,
+        source=source,
+        destination=destination,
+        interface_type=interface_type,
+        interface_name=resolved_interface_name,
+        http_url=http_url,
+        http_status=http_status,
+        ws_event=ws_event,
+        ws_result=ws_result,
+    )
 
 
 def _interface_response_time_ms(start: float) -> int:
@@ -219,6 +152,42 @@ def _extract_session_id_from_http_path(path: str) -> str:
     if request_path.startswith("/api/v1/session/"):
         rest = request_path[len("/api/v1/session/"):].strip("/")
         return rest.split("/")[0] if rest else ""
+    return ""
+
+
+def _http_interface_name(path: str, method: str) -> str:
+    """Map VibeSkill REST route to the fixed HTTP interface name column."""
+    request_path = urlparse(str(path or "")).path.rstrip("/") or "/"
+    meth_u = str(method or "").strip().upper()
+    if request_path == "/api/v1/session" and meth_u == "POST":
+        return "SessionCreate"
+    if not request_path.startswith("/api/v1/session/"):
+        return ""
+
+    rest = request_path[len("/api/v1/session/"):].strip("/")
+    parts = [part for part in rest.split("/") if part]
+    if not parts:
+        return ""
+    if len(parts) == 1:
+        if meth_u == "GET":
+            return "SessionQuery"
+        if meth_u == "DELETE":
+            return "SessionDelete"
+        return ""
+
+    tail = parts[1:]
+    if tail == ["abort"] and meth_u == "POST":
+        return "SessionAbort"
+    if tail == ["messages"] and meth_u == "GET":
+        return "SessionRestore"
+    if tail == ["file"] and meth_u == "GET":
+        return "FileList"
+    if tail == ["file", "content"] and meth_u == "GET":
+        return "FileRead"
+    if tail == ["file", "content"] and meth_u == "PUT":
+        return "FileWrite"
+    if tail == ["export"] and meth_u == "POST":
+        return "SkillExport"
     return ""
 
 
@@ -467,6 +436,7 @@ class VibeSkillChannel(BaseChannel):
         return str(self.config.channel_id or self.name).strip() or self.name
 
     def _deliver_to_message_handler(self, msg: Message) -> None:
+        interface_info.register_message(msg.id, session_id=msg.session_id or "")
         channel_manager = cast("ChannelManager", self.bus)
         channel_manager.deliver_to_message_handler(msg)
 
@@ -687,37 +657,49 @@ class VibeSkillChannel(BaseChannel):
         """aiohttp REST 适配层：Request -> 现有 http_handler()。"""
         from aiohttp import web
 
-        start = time.monotonic()
         method = request.method
         path = request.path_qs  # 含 query string，与 http_handler 的 urlparse 约定一致
-        try:
-            headers = {k.lower(): v for k, v in request.headers.items()}
-            body = await request.read()
-            status, resp_headers, resp_body = await self.http_handler(
-                method, path, headers, body
-            )
-        except Exception:
-            _log_interface_event(
-                severity="ERROR",
-                session_id=_extract_session_id_from_http_path(path),
-                interface_type="HTTP",
-                http_url=f"{str(method or '').upper()} {path}",
-                response_time_ms=_interface_response_time_ms(start),
-                return_code=500,
-            )
-            raise
-
-        session_id = (
-            _extract_session_id_from_http_path(path)
-            or _extract_session_id_from_http_response(path, method, resp_body)
-        )
-        _log_interface_event(
-            severity=_interface_log_severity_for_status(status),
+        http_url = f"{str(method or '').upper()} {path}"
+        interface_name = _http_interface_name(path, method)
+        session_id = _extract_session_id_from_http_path(path)
+        timing_id = f"http-{int(time.time() * 1000):x}-{secrets.token_hex(4)}"
+        with interface_info.inbound_context(
             session_id=session_id,
             interface_type="HTTP",
-            http_url=f"{str(method or '').upper()} {path}",
-            response_time_ms=_interface_response_time_ms(start),
-            return_code=status,
+            ws_event="",
+        ):
+            interface_info.register_request(
+                timing_id,
+                session_id=session_id,
+                interface_type="HTTP",
+                interface_name=interface_name,
+                http_url=http_url,
+            )
+            try:
+                with interface_info.bind_request(timing_id):
+                    headers = {k.lower(): v for k, v in request.headers.items()}
+                    body = await request.read()
+                    status, resp_headers, resp_body = await self.http_handler(
+                        method, path, headers, body
+                    )
+            except Exception:
+                interface_info.finish_request(
+                    timing_id,
+                    severity="ERROR",
+                    http_status=500,
+                )
+                raise
+
+        session_id = (
+            session_id
+            or _extract_session_id_from_http_response(path, method, resp_body)
+        )
+        interface_info.update_request_session(timing_id, session_id)
+        interface_info.mark_channel_final_response_sent(timing_id)
+        interface_info.finish_request(
+            timing_id,
+            severity=_interface_log_severity_for_status(status),
+            http_status=status,
         )
         _sid_resp, _path_resp_log = _http_response_log_context(path, method)
         logger.info(
@@ -736,18 +718,23 @@ class VibeSkillChannel(BaseChannel):
         """aiohttp WebSocket 适配层：Request -> 现有 _handle_ws_connection()。"""
         from aiohttp import web
 
-        start = time.monotonic()
         # 非 WebSocket 升级请求打到 /api/v1/messages 时，明确返回 426
         upgrade = str(request.headers.get("Upgrade", "")).strip().lower()
         if upgrade != "websocket":
             path = getattr(request, "path_qs", None) or getattr(request, "path", "/api/v1/messages")
             method = str(getattr(request, "method", "GET") or "GET").upper()
-            _log_interface_event(
-                severity="WARN",
+            timing_id = f"http-{int(time.time() * 1000):x}-{secrets.token_hex(4)}"
+            interface_info.register_request(
+                timing_id,
                 interface_type="HTTP",
+                interface_name=_http_interface_name(path, method),
                 http_url=f"{method} {path}",
-                response_time_ms=_interface_response_time_ms(start),
-                return_code=426,
+            )
+            interface_info.mark_channel_final_response_sent(timing_id)
+            interface_info.finish_request(
+                timing_id,
+                severity="WARN",
+                http_status=426,
             )
             return web.Response(
                 status=426,
@@ -811,7 +798,7 @@ class VibeSkillChannel(BaseChannel):
                 severity="ERROR",
                 interface_type="WebSocket",
                 ws_event="close",
-                ws_closed_ok=False,
+                ws_result="error",
             )
             return
 
@@ -912,6 +899,7 @@ class VibeSkillChannel(BaseChannel):
                         ),
                         interface_type="WebSocket",
                         ws_event="invalid_json",
+                        ws_result="error",
                     )
                     continue
 
@@ -934,9 +922,21 @@ class VibeSkillChannel(BaseChannel):
                     _inbound_sid,
                 )
 
-                # 调用 inbound_intercept 处理入站消息
+                # 调用 inbound_intercept 处理入站消息。若请求进入 MessageHandler，
+                # 接口日志延迟到最终响应，以便汇总跨层时间节点。
+                _inbound_event = (
+                    str(data.get("type") or "").strip()
+                    if isinstance(data, dict)
+                    else ""
+                )
                 try:
-                    handled = await self.inbound_intercept(ws, data)
+                    with interface_info.inbound_context(
+                        session_id=_inbound_sid if _inbound_sid != "n/a" else "",
+                        interface_type="WebSocket",
+                        ws_event=_inbound_event,
+                        ws=ws,
+                    ) as timing_context:
+                        handled = await self.inbound_intercept(ws, data)
                 except Exception:
                     _log_interface_event(
                         severity="ERROR",
@@ -947,22 +947,21 @@ class VibeSkillChannel(BaseChannel):
                             if isinstance(data, dict)
                             else ""
                         ),
+                        ws_result="error",
                     )
                     raise
                 if not handled:
                     await self._send_ws_json(ws, {
                         "type": "res", "id": "", "ok": False, "error": "unhandled"
                     }, source="inbound.unhandled")
-                _log_interface_event(
-                    severity="INFO" if handled else "WARN",
-                    session_id=_inbound_sid if _inbound_sid != "n/a" else "",
-                    interface_type="WebSocket",
-                    ws_event=(
-                        str(data.get("type") or "").strip()
-                        if isinstance(data, dict)
-                        else ""
-                    ),
-                )
+                if not timing_context.delivered:
+                    _log_interface_event(
+                        severity="INFO" if handled else "WARN",
+                        session_id=_inbound_sid if _inbound_sid != "n/a" else "",
+                        interface_type="WebSocket",
+                        ws_event=_inbound_event,
+                        ws_result="success" if handled else "error",
+                    )
         except Exception as e:
             had_ws_error = True
             logger.exception(
@@ -978,12 +977,18 @@ class VibeSkillChannel(BaseChannel):
         finally:
             bound_sessions = sorted(self._ws_sessions.get(ws, set()))
             close_session_id = bound_sessions[0] if bound_sessions else ""
+            _closed_ok = _ws_closed_ok(ws, had_error=had_ws_error)
+            interface_info.finish_requests_for_ws(
+                ws,
+                severity="INFO" if _closed_ok else "WARN",
+                ws_result="disconnected" if _closed_ok else "error",
+            )
             _log_interface_event(
-                severity="INFO" if _ws_closed_ok(ws, had_error=had_ws_error) else "WARN",
+                severity="INFO" if _closed_ok else "WARN",
                 session_id=close_session_id,
                 interface_type="WebSocket",
                 ws_event="close",
-                ws_closed_ok=_ws_closed_ok(ws, had_error=had_ws_error),
+                ws_result="success" if _closed_ok else "error",
             )
             self._clients.discard(ws)
             await self.cleanup(ws)
@@ -993,6 +998,7 @@ class VibeSkillChannel(BaseChannel):
         """处理 HTTP 连接（用于 REST 请求）。"""
         method = ""
         raw_path = ""
+        timing_id = ""
         start = time.monotonic()
         try:
             # 读取请求行
@@ -1008,6 +1014,14 @@ class VibeSkillChannel(BaseChannel):
             method = parts[0]
             raw_path = parts[1] if len(parts) > 1 else "/"
             start = time.monotonic()
+            timing_id = f"http-{int(time.time() * 1000):x}-{secrets.token_hex(4)}"
+            interface_info.register_request(
+                timing_id,
+                session_id=_extract_session_id_from_http_path(raw_path),
+                interface_type="HTTP",
+                interface_name=_http_interface_name(raw_path, method),
+                http_url=f"{(method or '').strip().upper()} {raw_path}",
+            )
 
             # 读取 headers
             headers: dict[str, str] = {}
@@ -1032,19 +1046,14 @@ class VibeSkillChannel(BaseChannel):
                 body = await reader.readexactly(content_length)
 
             # 调用 http_handler 处理请求
-            status, resp_headers, resp_body = await self.http_handler(
-                method, raw_path, headers, body
-            )
-            _log_interface_event(
-                severity=_interface_log_severity_for_status(status),
-                session_id=(
-                    _extract_session_id_from_http_path(raw_path)
-                    or _extract_session_id_from_http_response(raw_path, method, resp_body)
-                ),
-                interface_type="HTTP",
-                http_url=f"{(method or '').strip().upper()} {raw_path}",
-                response_time_ms=_interface_response_time_ms(start),
-                return_code=status,
+            with interface_info.bind_request(timing_id):
+                status, resp_headers, resp_body = await self.http_handler(
+                    method, raw_path, headers, body
+                )
+            interface_info.update_request_session(
+                timing_id,
+                _extract_session_id_from_http_path(raw_path)
+                or _extract_session_id_from_http_response(raw_path, method, resp_body),
             )
 
             _sid_resp, _path_resp_log = _http_response_log_context(raw_path, method)
@@ -1065,17 +1074,29 @@ class VibeSkillChannel(BaseChannel):
             writer.write(response.encode("utf-8"))
             writer.write(resp_body)
             await writer.drain()
+            interface_info.mark_channel_final_response_sent(timing_id)
+            interface_info.finish_request(
+                timing_id,
+                severity=_interface_log_severity_for_status(status),
+                http_status=status,
+            )
         except Exception as e:
             logger.warning("[VibeSkillChannel] HTTP handler error: %s", e)
             if method and raw_path:
-                _log_interface_event(
+                if not interface_info.finish_request(
+                    timing_id,
                     severity="ERROR",
-                    session_id=_extract_session_id_from_http_path(raw_path),
-                    interface_type="HTTP",
-                    http_url=f"{(method or '').strip().upper()} {raw_path}",
-                    response_time_ms=_interface_response_time_ms(start),
-                    return_code=500,
-                )
+                    http_status=500,
+                ):
+                    _log_interface_event(
+                        severity="ERROR",
+                        session_id=_extract_session_id_from_http_path(raw_path),
+                        interface_type="HTTP",
+                        interface_name=_http_interface_name(raw_path, method),
+                        http_url=f"{(method or '').strip().upper()} {raw_path}",
+                        response_time_ms=_interface_response_time_ms(start),
+                        http_status=500,
+                    )
         finally:
             try:
                 writer.close()
@@ -1190,6 +1211,9 @@ class VibeSkillChannel(BaseChannel):
                 f"req_method={msg.req_method.value if msg.req_method else None}"
             )
             await self._apply_outbound_session_state(msg)
+            interface_info.finish_request(
+                msg.id, severity="WARN", ws_result="disconnected"
+            )
             return
         if bool(getattr(ws, "closed", False)):
             logger.warning(
@@ -1197,9 +1221,27 @@ class VibeSkillChannel(BaseChannel):
                 f"req_method={msg.req_method.value if msg.req_method else None}"
             )
             await self._apply_outbound_session_state(msg)
+            interface_info.finish_request(
+                msg.id, severity="WARN", ws_result="disconnected"
+            )
             return
 
-        # 使用 outbound_intercept 转换消息格式并推送
+        # ContextVar 让底层 ws.send 关联当前响应 request_id。
+        try:
+            with interface_info.bind_request(msg.id):
+                await self._send_agent_message_to_ws(msg, ws, session_id)
+        except Exception:
+            interface_info.finish_request(
+                msg.id, severity="ERROR", ws_result="error"
+            )
+            raise
+
+    async def _send_agent_message_to_ws(
+        self,
+        msg: Message,
+        ws: Any,
+        session_id: str,
+    ) -> None:
         handled = await self.outbound_intercept(msg, ws)
         if not handled:
             # fallback: 直接推送 chat.delta 或 chat.final
@@ -1246,6 +1288,46 @@ class VibeSkillChannel(BaseChannel):
                         {"type": "task.completed", "properties": {}},
                         source="fallback.chat.final.completed",
                     )
+
+        if self._is_terminal_agent_message(msg):
+            interface_info.promote_last_channel_send_to_final(msg.id)
+            payload = msg.payload if isinstance(msg.payload, dict) else {}
+            event_type = str(payload.get("event_type") or "")
+            interface_info.finish_request(
+                msg.id,
+                severity="ERROR" if event_type.endswith("error") else "INFO",
+                ws_result=self._ws_result_for_terminal_message(msg),
+            )
+
+    @staticmethod
+    def _is_terminal_agent_message(msg: Message) -> bool:
+        payload = msg.payload if isinstance(msg.payload, dict) else {}
+        event_type = str(payload.get("event_type") or "").strip()
+        if event_type in {
+            "chat.final",
+            "chat.error",
+            "skilldev.agent_completed",
+            "skilldev.completed",
+            "skilldev.error",
+        }:
+            return True
+        return (
+            event_type in _CHAT_INTERRUPT_RESULT_EVENT_TYPES
+            and str(payload.get("intent") or "").strip().lower() in {"", "cancel"}
+        )
+
+    @staticmethod
+    def _ws_result_for_terminal_message(msg: Message) -> str:
+        payload = msg.payload if isinstance(msg.payload, dict) else {}
+        event_type = str(payload.get("event_type") or "").strip()
+        if event_type.endswith("error"):
+            return "error"
+        if (
+            event_type in _CHAT_INTERRUPT_RESULT_EVENT_TYPES
+            and str(payload.get("intent") or "").strip().lower() == "cancel"
+        ):
+            return "cancelled"
+        return "success"
 
     async def inbound_intercept(self, ws: Any, data: dict[str, Any]) -> bool:
         """拦截 VibeSkill WebSocket 消息。
@@ -1927,6 +2009,14 @@ class VibeSkillChannel(BaseChannel):
             for response in responses:
                 await self._send_ws_json(ws, response, source=f"skilldev.{event_type}")
             if event_type == "skilldev.agent_completed":
+                # agent_completed 会主动关闭北向 WS。必须在 close 触发连接清理前
+                # 固化最后一次成功发送时间并完成请求，否则终响列会缺失。
+                interface_info.promote_last_channel_send_to_final(msg.id)
+                interface_info.finish_request(
+                    msg.id,
+                    severity="INFO",
+                    ws_result="success",
+                )
                 await self._disconnect_northbound_ws_after_agent_completed(msg.session_id, ws)
                 return True
             if responses:
@@ -3054,6 +3144,7 @@ class VibeSkillChannel(BaseChannel):
         )
         try:
             await ws.send(payload_str)
+            interface_info.mark_channel_response_sent()
         except Exception as exc:
             logger.exception(
                 "[VibeSkillChannel] WS send failed (%s): %s, type=%s, ws_close_code=%s, "
@@ -4084,7 +4175,29 @@ class VibeSkillChannel(BaseChannel):
 
     async def _send_agent_request(self, env) -> Any:
         """发送请求到 AgentServer 并返回响应。"""
-        return await self._agent_client.send_request(env)
+        request_id = str(getattr(env, "request_id", "") or "")
+        interface_info.link_request(request_id)
+        with interface_info.bind_request(request_id):
+            return await self._agent_client.send_request(env)
+
+    async def _send_agent_request_stream(self, env):
+        """发送流式请求，并将内部 request_id 关联到当前 Channel 请求。"""
+        request_id = str(getattr(env, "request_id", "") or "")
+        interface_info.link_request(request_id)
+        stream = self._agent_client.send_request_stream(env)
+        try:
+            while True:
+                with interface_info.bind_request(request_id):
+                    try:
+                        chunk = await stream.__anext__()
+                    except StopAsyncIteration:
+                        return
+                yield chunk
+        finally:
+            close = getattr(stream, "aclose", None)
+            if close is not None:
+                with interface_info.bind_request(request_id):
+                    await close()
 
     async def _ensure_session_restored(self, session_id: str) -> VibeSkillSession | None:
         """从 DCS 恢复本 gateway 陌生的 session 元数据。
@@ -4307,7 +4420,7 @@ class VibeSkillChannel(BaseChannel):
                     timestamp=time.time(),
                     user_id=self._session_user_id(session_id),
                 )
-                return self._agent_client.send_request_stream(env)
+                return self._send_agent_request_stream(env)
 
             try:
                 payload = await decode_restore_payload_from_stream_with_retry(

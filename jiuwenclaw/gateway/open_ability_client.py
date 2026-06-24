@@ -29,6 +29,7 @@ from jiuwenclaw.gateway.open_ability_wire import (
     wrap_openability_message,
 )
 from jiuwenclaw.schema.agent import AgentResponse, AgentResponseChunk
+from jiuwenclaw.log import interface_info
 
 
 logger = logging.getLogger(__name__)
@@ -239,6 +240,10 @@ class OpenAbilityWebSocketClient(AgentServerClient):
                             )
                             continue
                         if request_id and request_id in self._message_queues:
+                            interface_info.mark(
+                                request_id,
+                                interface_info.TimingPoint.OA_FIRST_RESPONSE_RECEIVED,
+                            )
                             await self._message_queues[request_id].put(data)
                         else:
                             logger.debug(
@@ -348,6 +353,9 @@ class OpenAbilityWebSocketClient(AgentServerClient):
                     len(json.dumps(payload, ensure_ascii=False, default=str).encode("utf-8")),
                 )
                 await self._send_wire_payload(payload)
+                interface_info.mark(
+                    rid, interface_info.TimingPoint.OA_REQUEST_SENT
+                )
             try:
                 data = await asyncio.wait_for(
                     queue.get(), timeout=self._request_timeout_seconds
@@ -363,6 +371,9 @@ class OpenAbilityWebSocketClient(AgentServerClient):
                 session_id,
                 rid,
                 envelope.method,
+            )
+            interface_info.mark(
+                rid, interface_info.TimingPoint.OA_FINAL_RESPONSE_RECEIVED
             )
             return parse_agent_server_wire_unary(data)
         finally:
@@ -401,6 +412,9 @@ class OpenAbilityWebSocketClient(AgentServerClient):
                     len(json.dumps(payload, ensure_ascii=False, default=str).encode("utf-8")),
                 )
                 await self._send_wire_payload(payload)
+                interface_info.mark(
+                    rid, interface_info.TimingPoint.OA_REQUEST_SENT
+                )
             saw_complete = False
             while True:
                 if saw_complete:
@@ -414,6 +428,11 @@ class OpenAbilityWebSocketClient(AgentServerClient):
                 else:
                     data = await queue.get()
                 chunk = parse_agent_server_wire_chunk(data)
+                if chunk.is_complete:
+                    interface_info.mark(
+                        rid,
+                        interface_info.TimingPoint.OA_FINAL_RESPONSE_RECEIVED,
+                    )
                 yield chunk
                 if chunk.is_complete:
                     saw_complete = True

@@ -26,6 +26,7 @@ from jiuwenclaw.schema.hook_event import GatewayHookEvents
 from jiuwenclaw.schema.hooks_context import GatewayChatHookContext
 from jiuwenclaw.extensions.registry import ExtensionRegistry
 from jiuwenclaw.utils import FileTransferStartParams
+from jiuwenclaw.log import interface_info
 
 logger = logging.getLogger(__name__)
 
@@ -2236,6 +2237,7 @@ class MessageHandler(ABC):
         """
         from jiuwenclaw.schema.message import ReqMethod
 
+        _timing_token = interface_info.set_current_request(msg.id)
         try:
             # 检查是否是中断请求
             if msg.req_method == ReqMethod.CHAT_ANSWER:
@@ -2531,6 +2533,8 @@ class MessageHandler(ABC):
                 msg.id,
                 msg.channel_id,
             )
+        finally:
+            interface_info.reset_current_request(_timing_token)
 
     async def process_stream(
         self,

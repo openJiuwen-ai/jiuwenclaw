@@ -36,6 +36,7 @@ from jiuwenclaw.sandbox.open_ability import (
 from jiuwenclaw.schema.agent import AgentResponse, AgentResponseChunk
 from jiuwenclaw.schema.message import ReqMethod
 from jiuwenclaw.utils import logger
+from jiuwenclaw.log import interface_info
 
 _WORKSPACE_SKIP_METHODS = frozenset({
     ReqMethod.SKILLDEV_BATCH_UPLOAD.value,
@@ -624,6 +625,7 @@ class SandboxRouterAgentClient(AgentServerClient):
                 routing_key, sandbox_id=record.sandbox_id
             )
             return None
+        interface_info.mark_current(interface_info.TimingPoint.OA_ENDPOINT_OBTAINED)
         logger.info(
             "Adopting existing sandbox from DCS: sandbox_id=%s session_id=%s "
             "prior_gateway=%s",
@@ -654,12 +656,18 @@ class SandboxRouterAgentClient(AgentServerClient):
         routing_claimed = False
         try:
             sandbox_client = self._get_sandbox_client()
+            interface_info.mark_current(
+                interface_info.TimingPoint.SANDBOX_CREATE_STARTED
+            )
             result = await sandbox_client.create_sandbox()
             if not result.success:
                 raise RuntimeError(result.error or "create_sandbox failed")
             sandbox_id = str(result.output or "").strip()
             if not sandbox_id:
                 raise RuntimeError("create_sandbox returned empty sandbox_id")
+            interface_info.mark_current(
+                interface_info.TimingPoint.SANDBOX_CREATE_SUCCEEDED
+            )
 
             if self._adopt_existing_enabled:
                 routing_claimed = await self._get_routing_dcs_store().set_routing_nx(
@@ -991,7 +999,11 @@ class SandboxRouterAgentClient(AgentServerClient):
         store = self._get_dcs_store()
         api_key = get_claw_api_key()
         record = await store.save_sandbox(sandbox_id, api_key=api_key)
+        interface_info.mark_current(interface_info.TimingPoint.SANDBOX_DCS_WRITTEN)
         await self._upload_sandbox_init_data(sandbox_id, api_key)
+        interface_info.mark_current(
+            interface_info.TimingPoint.SANDBOX_API_KEY_UPLOADED
+        )
         return {
             "sandbox_id": record.sandbox_id,
             "api_key": api_key,
@@ -1727,6 +1739,10 @@ class SandboxRouterAgentClient(AgentServerClient):
                 )
                 continue
 
+            interface_info.mark_current(
+                interface_info.TimingPoint.OA_ENDPOINT_OBTAINED
+            )
+
             endpoint_label = format_openability_endpoint(endpoint)
             ws_uri = build_openability_ws_uri(
                 endpoint,
@@ -1746,12 +1762,36 @@ class SandboxRouterAgentClient(AgentServerClient):
                 remaining_seconds,
             )
             try:
+                interface_info.mark_current(
+                    interface_info.TimingPoint.OA_CONNECT_STARTED
+                )
                 await asyncio.wait_for(
                     client.connect(ws_uri),
                     timeout=open_ability_cfg.connect_timeout_seconds,
                 )
+                interface_info.log_interface_event(
+                    severity="INFO",
+                    session_id=trigger_session_id,
+                    source="SkillCreator",
+                    destination="OpenAbility",
+                    interface_type="WebSocket",
+                    ws_event="connect",
+                    ws_result="success",
+                )
+                interface_info.mark_current(
+                    interface_info.TimingPoint.OA_CONNECTED
+                )
             except Exception as exc:  # noqa: BLE001
                 last_failure = f"connect-failed:{exc}"
+                interface_info.log_interface_event(
+                    severity="WARN",
+                    session_id=trigger_session_id,
+                    source="SkillCreator",
+                    destination="OpenAbility",
+                    interface_type="WebSocket",
+                    ws_event="connect",
+                    ws_result="error",
+                )
                 logger.warning(
                     "OpenAbility reconnect attempt %s: WebSocket connect failed, "
                     "will retry: sandbox_id=%s reason=%s "
