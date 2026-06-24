@@ -1451,3 +1451,48 @@ def get_sandbox_runtime() -> dict[str, Any]:
         "idle_check_interval": _read_sandbox_env("IDLE_CHECK_INTERVAL"),
     }
     return _ensure_sandbox_runtime_shape(raw)
+
+
+_SANDBOX_YAML_TO_ENV: dict[str, str] = {
+    "url": "JIUWENCLAW_SANDBOX_URL",
+    "type": "JIUWENCLAW_SANDBOX_TYPE",
+    "enabled": "JIUWENCLAW_SANDBOX_ENABLED",
+}
+
+
+def _sandbox_yaml_to_env_overlay(sandbox: Any) -> dict[str, str]:
+    """从 ``config_base['sandbox']`` 抽 url/type/enabled, 翻译成 env overlay key。
+
+    缺失字段不进 overlay, 让 env var fallback 生效。``enabled`` 归一化为
+    ``'true'`` / ``'false'``。非法 bool 抛 ``ValueError``, 让 reload 整体失败。
+
+    放在本模块 (config.py) 是因为 lazy-path 首次 ``_create_sys_operation``
+    在 ``reload_agent_config`` overlay 绑定之前就执行：必须在 active env
+    (``ENV_CONFIG_DICT``) 写入, 让 :func:`get_sandbox_endpoint` /
+    :func:`get_sandbox_runtime` 在首个请求来时就读到 yaml 的值。
+    """
+    if not isinstance(sandbox, dict):
+        return {}
+    out: dict[str, str] = {}
+    for yaml_key, env_key in _SANDBOX_YAML_TO_ENV.items():
+        if yaml_key not in sandbox or sandbox[yaml_key] is None:
+            continue
+        value = sandbox[yaml_key]
+        if yaml_key == "enabled":
+            if isinstance(value, bool):
+                out[env_key] = "true" if value else "false"
+            else:
+                text = str(value).strip().lower()
+                if text in _TRUE_VALUES:
+                    out[env_key] = "true"
+                elif text in _FALSE_VALUES:
+                    out[env_key] = "false"
+                else:
+                    raise ValueError(
+                        f"sandbox.{yaml_key} must be a boolean string, got {value!r}"
+                    )
+        else:
+            text = str(value).strip()
+            if text:
+                out[env_key] = text
+    return out

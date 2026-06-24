@@ -289,6 +289,7 @@ from jiuwenclaw.config import (
     resolve_env_vars,
     _FALSE_VALUES,
     _TRUE_VALUES,
+    _sandbox_yaml_to_env_overlay,
 )
 from jiuwenclaw.agentserver.deep_agent.sysop_builder import (
     create_local_sysop_card,
@@ -322,45 +323,6 @@ from jiuwenclaw.agentserver.deep_agent.agent_card_id import (
 
 _react_config = get_config().get("react", {})
 _sandbox_config = get_config().get("sandbox", {})
-
-_SANDBOX_YAML_TO_ENV: dict[str, str] = {
-    "url": "JIUWENCLAW_SANDBOX_URL",
-    "type": "JIUWENCLAW_SANDBOX_TYPE",
-    "enabled": "JIUWENCLAW_SANDBOX_ENABLED",
-}
-
-
-def _sandbox_yaml_to_env_overlay(sandbox: Any) -> dict[str, str]:
-    """从 config_base['sandbox'] 抽 url/type/enabled, 翻译成 env overlay key。
-
-    缺失字段不进 overlay, 让 env var fallback 生效。enabled 归一化为
-    'true'/'false'。非法 bool 抛 ValueError, 让 reload 整体失败。
-    """
-    if not isinstance(sandbox, dict):
-        return {}
-    out: dict[str, str] = {}
-    for yaml_key, env_key in _SANDBOX_YAML_TO_ENV.items():
-        if yaml_key not in sandbox or sandbox[yaml_key] is None:
-            continue
-        value = sandbox[yaml_key]
-        if yaml_key == "enabled":
-            if isinstance(value, bool):
-                out[env_key] = "true" if value else "false"
-            else:
-                text = str(value).strip().lower()
-                if text in _TRUE_VALUES:
-                    out[env_key] = "true"
-                elif text in _FALSE_VALUES:
-                    out[env_key] = "false"
-                else:
-                    raise ValueError(
-                        f"sandbox.{yaml_key} must be a boolean string, got {value!r}"
-                    )
-        else:
-            text = str(value).strip()
-            if text:
-                out[env_key] = text
-    return out
 
 
 _CRON_TOOL_CHANNEL_ID: ContextVar[str] = ContextVar(

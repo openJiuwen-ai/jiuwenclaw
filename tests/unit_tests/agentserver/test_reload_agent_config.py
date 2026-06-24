@@ -1020,3 +1020,82 @@ async def test_create_agent_replays_yaml_sandbox_to_sysop(monkeypatch: pytest.Mo
     assert last_runtime["enabled"] is True
     # 旧 env-only sysop (id="env-only-sysop") 被清理, 而非新建的 yaml sysop.
     mod.Runner.resource_mgr.remove_sys_operation.assert_called_once_with("env-only-sysop")
+
+
+def test_agent_manager_init_applies_yaml_sandbox_to_active_env():
+    """AgentManager.__init__ 接收 config_base[sandbox] 时把 yaml 值写入 active env.
+
+    场景 (用户报告的 bug): AgentServer 启动时无 sandbox 配置, reload config 下发
+    yaml sandbox 后第一个请求触发 _ensure_agent_manager → AgentManager(config_base=yaml).
+    此前 lazy-path 首次 _create_sys_operation 在 reload_agent_config overlay 绑定之前
+    执行, 读到的是 env-only (默认 local) 值。__init__ 在 active env 写入 yaml 后,
+    首次 _create_sys_operation 直接读到 yaml 值, 无需依赖后续 overlay 绑定。
+    """
+    yaml_sandbox = {"url": "http://init-sb/v1", "type": "init-type", "enabled": True}
+
+    manager = AgentManager(
+        agent_id="a1",
+        service_id="s1",
+        config_base={"react": {"agent_name": "a"}, "sandbox": yaml_sandbox},
+    )
+
+    # active env 已写入 yaml 翻译后的 sandbox 值
+    assert ENV_CONFIG_DICT["JIUWENCLAW_SANDBOX_URL"] == "http://init-sb/v1"
+    assert ENV_CONFIG_DICT["JIUWENCLAW_SANDBOX_TYPE"] == "init-type"
+    assert ENV_CONFIG_DICT["JIUWENCLAW_SANDBOX_ENABLED"] == "true"
+    # os.environ 也应该同步
+    assert os.environ.get("JIUWENCLAW_SANDBOX_URL") == "http://init-sb/v1"
+    assert manager._latest_config_base["sandbox"] is yaml_sandbox
+
+
+@pytest.mark.asyncio
+async def test_agent_manager_reload_stages_yaml_sandbox_for_promote():
+    """reload_agents_config 收到 config['sandbox'] yaml 时 stage 翻译后的 env overlay.
+
+    场景: AgentManager 已存在但有未完成会话 (is_working=True) 时, stage 不 promote.
+    下一次 promote_staged_env (会话结束后) 把 yaml 值写入 active env, 新 session 的
+    懒加载 _create_sys_operation 才能读到。
+    """
+    manager = AgentManager(agent_id="a1", service_id="s1")
+    mock_agent = MagicMock()
+    mock_agent.reload_agent_config = AsyncMock(return_value=ReloadResult(deferred=True))
+    manager.agents["web"] = {"agent.plan": {"sess1": mock_agent}}
+
+    yaml_sandbox = {"url": "http://reload-sb/v1", "type": "reload-type", "enabled": True}
+
+    with patch.object(AgentManager, "is_working", return_value=True):
+        await manager.reload_agents_config(
+            {"sandbox": yaml_sandbox},
+            {"OTHER_KEY": "x"},
+        )
+
+    # is_working=True → 不 promote, 但 yaml 翻译值已 stage
+    assert get_staged_env().get("JIUWENCLAW_SANDBOX_URL") == "http://reload-sb/v1"
+    assert get_staged_env().get("JIUWENCLAW_SANDBOX_TYPE") == "reload-type"
+    assert get_staged_env().get("JIUWENCLAW_SANDBOX_ENABLED") == "true"
+    # 尚未写入 active env
+    assert "JIUWENCLAW_SANDBOX_URL" not in ENV_CONFIG_DICT
+
+    # promote 后写入 active env
+    promote_staged_env()
+    assert ENV_CONFIG_DICT["JIUWENCLAW_SANDBOX_URL"] == "http://reload-sb/v1"
+    assert ENV_CONFIG_DICT["JIUWENCLAW_SANDBOX_ENABLED"] == "true"
+
+
+@pytest.mark.asyncio
+async def test_agent_manager_reload_promotes_yaml_sandbox_when_idle():
+    """reload_agents_config 在所有会话空闲 (is_working=False) 时直接 promote yaml sandbox."""
+    manager = AgentManager(agent_id="a1", service_id="s1")
+    mock_agent = MagicMock()
+    mock_agent.reload_agent_config = AsyncMock(return_value=ReloadResult(applied=True))
+    manager.agents["web"] = {"agent.plan": {"sess1": mock_agent}}
+
+    yaml_sandbox = {"url": "http://idle-sb/v1", "type": "idle-type", "enabled": True}
+
+    with patch.object(AgentManager, "is_working", return_value=False):
+        await manager.reload_agents_config({"sandbox": yaml_sandbox}, {})
+
+    # is_working=False → promote_staged_env 执行 → yaml 值直接写入 active env
+    assert ENV_CONFIG_DICT["JIUWENCLAW_SANDBOX_URL"] == "http://idle-sb/v1"
+    assert ENV_CONFIG_DICT["JIUWENCLAW_SANDBOX_ENABLED"] == "true"
+    assert get_staged_env() == {}

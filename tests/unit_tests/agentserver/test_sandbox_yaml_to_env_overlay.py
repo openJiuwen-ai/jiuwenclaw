@@ -4,9 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from jiuwenclaw.agentserver.deep_agent.interface_deep import (
-    _sandbox_yaml_to_env_overlay,
-)
+from jiuwenclaw.config import _sandbox_yaml_to_env_overlay
 
 
 class TestSandboxYamlToEnvOverlay:
