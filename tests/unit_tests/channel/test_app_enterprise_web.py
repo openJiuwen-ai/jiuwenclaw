@@ -62,6 +62,98 @@ async def test_event_routes_by_session_id() -> None:
 
 
 @pytest.mark.asyncio
+async def test_event_routes_by_chat_request_id_without_session_id() -> None:
+    ws_server = EnterpriseWebWsServer(host="127.0.0.1", port=0)
+    sent: list[str] = []
+
+    class _FakeBrowser:
+        async def send(self, data: str) -> None:
+            sent.append(data)
+
+    conn_id = "c-chat"
+    ws_server.register_browser_connection(conn_id, _FakeBrowser())
+    ws_server.bind_chat_request_route("chat-test-1", conn_id)
+    ws_server.subscribe_conn_to_session(conn_id, "sess_chat")
+
+    frame = {
+        "type": "event",
+        "event": "context.compressed",
+        "request_id": "chat-test-1",
+        "payload": {
+            "rate": 12.5,
+            "before_compressed": 1000,
+            "after_compressed": 875,
+        },
+    }
+    await ws_server.route_uplink_frame(json.dumps(frame, ensure_ascii=False))
+
+    assert len(sent) == 1
+    browser_frame = json.loads(sent[0])
+    assert browser_frame["event"] == "context.compressed"
+    assert browser_frame["payload"]["session_id"] == "sess_chat"
+    assert browser_frame["payload"]["before_compressed"] == 1000
+
+
+@pytest.mark.asyncio
+async def test_event_without_session_id_dropped_when_active_session_missing() -> None:
+    ws_server = EnterpriseWebWsServer(host="127.0.0.1", port=0)
+    sent: list[str] = []
+
+    class _FakeBrowser:
+        async def send(self, data: str) -> None:
+            sent.append(data)
+
+    conn_id = "c-no-session"
+    ws_server.register_browser_connection(conn_id, _FakeBrowser())
+    ws_server.bind_chat_request_route("chat-no-session", conn_id)
+
+    frame = {
+        "type": "event",
+        "event": "context.compressed",
+        "request_id": "chat-no-session",
+        "payload": {
+            "rate": 12.5,
+            "before_compressed": 1000,
+            "after_compressed": 875,
+        },
+    }
+    await ws_server.route_uplink_frame(json.dumps(frame, ensure_ascii=False))
+
+    assert sent == []
+
+
+@pytest.mark.asyncio
+async def test_chat_accept_binds_request_route() -> None:
+    ws_server = EnterpriseWebWsServer(host="127.0.0.1", port=0)
+
+    class _FakeGateway:
+        async def send(self, data: str) -> None:
+            pass
+
+    class _FakeBrowser:
+        async def send(self, data: str) -> None:
+            pass
+
+    conn_id = "c-send"
+    ws_server.register_browser_connection(conn_id, _FakeBrowser())
+    ws_server.attach_gateway_uplink(_FakeGateway())
+
+    raw = json.dumps(
+        {
+            "type": "req",
+            "id": "chat-bind-1",
+            "method": "chat.send",
+            "params": {"session_id": "sess_bind", "content": "hi"},
+        },
+        ensure_ascii=False,
+    )
+    await ws_server.route_browser_frame(conn_id, raw)
+
+    assert ws_server.get_chat_request_route("chat-bind-1") == conn_id
+    assert ws_server.session_includes_conn("sess_bind", conn_id)
+
+
+@pytest.mark.asyncio
 async def test_connection_ack_routes_by_route_conn_id() -> None:
     ws_server = EnterpriseWebWsServer(host="127.0.0.1", port=0)
     sent: list[str] = []

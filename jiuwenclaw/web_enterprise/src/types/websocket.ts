@@ -31,6 +31,7 @@ export interface WsEvent {
   payload: Record<string, unknown>;
   seq?: number;
   stream_id?: string;
+  request_id?: string;
 }
 
 export type WebMessage = WsRequest | WsResponse | WsEvent;
@@ -38,6 +39,7 @@ export type WebMessage = WsRequest | WsResponse | WsEvent;
 export interface WebRequestOptions {
   timeoutMs?: number;
   signal?: AbortSignal;
+  requestId?: string;
 }
 
 export interface WebConnectOptions {

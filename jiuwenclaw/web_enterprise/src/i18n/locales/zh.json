@@ -113,7 +113,8 @@
       "allLoaded": "已显示全部历史",
       "wheelToLoadMore": "向上滚动加载更多",
       "clickToLoadMore": "点击加载更多",
-      "clickOrScrollToLoadMore": "点击或向上滚动加载更多"
+      "clickOrScrollToLoadMore": "点击或向上滚动加载更多",
+      "loadingHistory": "正在加载会话历史…"
     }
   },
   "connection": {
@@ -125,6 +126,9 @@
   "toolPanel": {
     "status": "状态",
     "contextCompression": "上下文压缩",
+    "contextCompressionHint": "格式：压缩后K/压缩前K（压缩率%）。压缩后为当前有效上下文token，压缩前为累计token总量，每轮模型调用前更新。0.0%表示未触发压缩或压缩前后token相同。",
+    "contextWindow": "上下文窗口",
+    "contextWindowHint": "分子：当前有效上下文 token（压缩后），每轮模型调用前更新；分母：配置项 react.context_window_limit_tokens（需自行与模型官方窗口对齐，非自动检测）。",
     "memoryUsage": "内存占用",
     "message": "消息",
     "time": "时间",

@@ -66,6 +66,8 @@ class EnterpriseWebWsServer:
         self._conn_by_ws: dict[int, str] = {}
         self._session_subscribers: dict[str, set[str]] = {}
         self._pending_requests: dict[str, str] = {}
+        # chat.send 等 CHAT_ACCEPT 方法立即 ack，不入 pending_requests；用此表按 request_id 路由无 session_id 的事件
+        self._chat_request_routes: dict[str, str] = {}
         self._active_session: dict[str, str] = {}
         self._internal_res_waiters: dict[str, asyncio.Future[dict[str, Any]]] = {}
         # request_ext 透传：记住每条浏览器连接握手时的 query（含透传字段），
@@ -195,6 +197,13 @@ class EnterpriseWebWsServer:
         """Associate a pending Gateway req id with the browser conn that sent it."""
         self._pending_requests[request_id] = conn_id
 
+    def bind_chat_request_route(self, request_id: str, conn_id: str) -> None:
+        """Associate a chat.accept request id with the browser conn that sent it."""
+        self._chat_request_routes[request_id] = conn_id
+
+    def get_chat_request_route(self, request_id: str) -> str | None:
+        return self._chat_request_routes.get(request_id)
+
     def attach_gateway_uplink(self, ws: Any) -> None:
         """Attach the Gateway uplink WebSocket (mirrors /gateway accept path)."""
         self._gateway_ws = ws
@@ -211,6 +220,10 @@ class EnterpriseWebWsServer:
 
     def has_pending_uplink_request(self, request_id: str) -> bool:
         return request_id in self._pending_requests
+
+    async def route_browser_frame(self, conn_id: str, raw: str) -> None:
+        """Route a browser req frame (mirrors /ws message handling)."""
+        await self._handle_browser_frame(conn_id, raw)
 
     async def route_uplink_frame(self, raw: str) -> None:
         try:
@@ -266,10 +279,31 @@ class EnterpriseWebWsServer:
             session_id = payload.get("session_id")
             if not isinstance(session_id, str) or not session_id:
                 request_id = data.get("request_id")
+                conn_id: str | None = None
                 if isinstance(request_id, str):
                     conn_id = self._pending_requests.get(request_id)
-                    if conn_id:
-                        await self._send_to_browser_conn(conn_id, raw)
+                    if conn_id is None:
+                        conn_id = self._chat_request_routes.get(request_id)
+                if conn_id is None:
+                    return
+                active_session = self._active_session.get(conn_id)
+                if isinstance(active_session, str) and active_session:
+                    enriched = {
+                        **data,
+                        "payload": {**payload, "session_id": active_session},
+                    }
+                    await self._send_to_browser_conn(
+                        conn_id,
+                        json.dumps(enriched, ensure_ascii=False),
+                    )
+                else:
+                    logger.warning(
+                        "[jiuwenclaw-enterprise-web] 丢弃无 session_id 且无法注入 active_session 的事件 "
+                        "conn_id=%s request_id=%s event=%s",
+                        conn_id,
+                        request_id if isinstance(request_id, str) else "",
+                        data.get("event"),
+                    )
                 return
             for conn_id in list(self._session_subscribers.get(session_id, ())):
                 await self._send_to_browser_conn(conn_id, raw)
@@ -350,6 +384,9 @@ class EnterpriseWebWsServer:
         stale_reqs = [rid for rid, cid in self._pending_requests.items() if cid == conn_id]
         for rid in stale_reqs:
             self._pending_requests.pop(rid, None)
+        stale_chat = [rid for rid, cid in self._chat_request_routes.items() if cid == conn_id]
+        for rid in stale_chat:
+            self._chat_request_routes.pop(rid, None)
 
     async def request_gateway_connection_ack(self, conn_id: str) -> None:
         """通知 Gateway 为浏览器连接生成 connection.ack（逻辑归属 Gateway）."""
@@ -415,6 +452,7 @@ class EnterpriseWebWsServer:
             self._subscribe_session(conn_id, session_id)
 
         if method in CHAT_ACCEPT_METHODS:
+            self._chat_request_routes[req_id] = conn_id
             ack_session = (
                 session_id
                 if isinstance(session_id, str) and session_id
