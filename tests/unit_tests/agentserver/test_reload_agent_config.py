@@ -35,6 +35,7 @@ from jiuwenclaw.local_env_config import (
     get_staged_env,
     promote_staged_env,
     read_env,
+    read_env_if_set,
     reset_task_env_overlay,
     stage_env_overrides,
 )
@@ -90,6 +91,17 @@ class TestEnvStaging:
         stage_env_overrides({"API_KEY": "x"})
         stage_env_overrides({"API_KEY": None})
         assert "API_KEY" not in get_staged_env()
+
+    @staticmethod
+    def test_read_env_if_set_sees_staged_without_affecting_get_local_config():
+        ENV_CONFIG_DICT["API_KEY"] = "old"
+        stage_env_overrides({"API_KEY": "new"})
+        assert get_local_config("API_KEY") == "old"
+        assert read_env_if_set("API_KEY") == "new"
+
+    @staticmethod
+    def test_read_env_if_set_returns_none_when_unset():
+        assert read_env_if_set("MISSING_KEY") is None
 
 
 class TestReloadConfigChangeLogging:

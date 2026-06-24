@@ -229,6 +229,7 @@ _CONFIG_SET_ENV_MAP = {
     "free_search_ddg_enabled": "FREE_SEARCH_DDG_ENABLED",
     "free_search_bing_enabled": "FREE_SEARCH_BING_ENABLED",
     "free_search_proxy_url": "FREE_SEARCH_PROXY_URL",
+    "tool_calling_guard_enabled": "TOOL_CALLING_GUARD_ENABLED",
     "deepsearch_llm_model_name": "LLM_MODEL_NAME",
     "deepsearch_llm_model_type": "LLM_MODEL_TYPE",
     "deepsearch_llm_base_url": "LLM_BASE_URL",

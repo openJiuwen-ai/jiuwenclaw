@@ -320,6 +320,13 @@ react:
   #      在 .env 文件中设置：DISABLED_TOOLS=bash,fork_agent（逗号/分号分隔）
   # disabled_tools: ["fork_agent"]
   disabled_tools: ${DISABLED_TOOLS:-}
+  # Tool Calling Guard：对不支持 function calling 的模型，在 LLM API 层剥离 tools/tool_choice。
+  # 默认关闭；OfficeClaw 嵌入场景通过 env 启用。
+  tool_calling_guard:
+    enabled: ${TOOL_CALLING_GUARD_ENABLED:-false}
+    limited_models:
+      - qwen3-32b
+      - qwen3-30b-a3b
   # 禁用的技能列表（黑名单）：列表中的技能不会被 Agent 加载或使用
   # 支持两种配置方式（同一字段，二选一）：
   #   1) YAML 列表：disabled_skills: ["dangerous_skill"]

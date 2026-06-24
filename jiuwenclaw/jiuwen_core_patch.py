@@ -28,6 +28,7 @@ from jiuwenclaw.tool_arguments_validator import (
     tool_arguments_failure_payload,
     validate_tool_arguments,
 )
+from jiuwenclaw.tool_calling_guard import resolve_tool_calling_guard
 
 if TYPE_CHECKING:
     import openai
@@ -554,6 +555,14 @@ def _sanitize_wire_tool_arguments(params: dict[str, Any]) -> None:
 def _patched_build_request_params(self, *, stream: bool, **kwargs) -> dict:
     """Patched version: ensure usage chunks and sanitize tool arguments before provider calls."""
     params = _ORIGINAL_BUILD_REQUEST_PARAMS(self, stream=stream, **kwargs)
+    decision = resolve_tool_calling_guard()
+    if decision.strip_tools:
+        params.pop("tools", None)
+        params.pop("tool_choice", None)
+        llm_logger.debug(
+            "[tool_calling_guard] stripped tools tool_choice reason=%s",
+            decision.reason,
+        )
     if stream:
         existing = params.get("stream_options")
         if existing is None:

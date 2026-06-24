@@ -122,6 +122,41 @@ def read_env(name: str, default: str = "") -> str:
     return text if text else default
 
 
+def read_env_if_set(name: str) -> str | None:
+    """Return env value when *name* is explicitly set in any resolution layer.
+
+    Resolution order matches ``build_effective_env_overlay`` (staged over active):
+    task overlay → staged env → ``ENV_CONFIG_DICT`` → ``os.environ``.
+
+    Returns ``None`` when unset (callers may fall back to config defaults).
+    Returns ``""`` when explicitly cleared at the env layer (including overlay
+    ``None`` / empty string).
+    """
+    overlay = _task_env_overlay.get()
+    if overlay is not None and name in overlay:
+        value = overlay[name]
+        if value is None:
+            return ""
+        if isinstance(value, str):
+            return decrypt(name, value)
+        return str(value)
+
+    if name in _STAGED_ENV:
+        value = _STAGED_ENV[name]
+        return "" if value is None else str(value)
+
+    if name in ENV_CONFIG_DICT:
+        value = ENV_CONFIG_DICT[name]
+        if isinstance(value, str):
+            return decrypt(name, value)
+        return str(value)
+
+    if name in os.environ:
+        return decrypt(name, os.environ[name])
+
+    return None
+
+
 # set方法只有agentserver使用
 def set_local_config(name: str, value):
     if not value:
