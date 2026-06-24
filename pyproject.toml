@@ -106,6 +106,9 @@ jiuwenclaw = [
     "resources/*",
     "resources/.env.template",
 ]
+"jiuwenclaw.agentserver.skilldev_agent" = [
+    "skills/**/*",
+]
 dispatch = [
     "**/*.yaml",
     "**/*.yml",

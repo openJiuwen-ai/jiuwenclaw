@@ -23,36 +23,6 @@ DESCRIPTION_MAX_TOKENS = 300
 BODY_MAX_LINES = 500
 BODY_MAX_TOKENS = 5000
 
-DANGEROUS_PATTERNS: list[tuple[re.Pattern[str], str]] = [
-    (re.compile(r"(?i)\brm\b[^\n\r]*\s-[a-z]*r[a-z]*f[a-z]*\b"), "forced recursive deletion"),
-    (re.compile(r"(?i)\bchmod\b[^\n\r]*\b777\b"), "world-writable permissions"),
-    (re.compile(r"(?i)\bchmod\b[^\n\r]*\bu\+s\b"), "setuid bit modification"),
-    (
-        re.compile(r"(?i)\b(curl|wget|fetch)\b[^\n\r|]*\|\s*\b(bash|sh|zsh|dash|ash|source)\b"),
-        "piped remote shell execution",
-    ),
-    (
-        re.compile(
-            r"(?i)\b(iwr|irm|Invoke-WebRequest|Invoke-RestMethod)\b[^\n\r|]*\|\s*\b(iex|Invoke-Expression)\b"
-        ),
-        "piped remote powershell execution",
-    ),
-    (
-        re.compile(r"(?i)\bbase64\s+(-d|--decode)\b[^\n\r|]*\|\s*\b(bash|sh|zsh|dash|ash)\b"),
-        "base64 decode then execute",
-    ),
-    (re.compile(r"(?i)\bcertutil\s+-decode\b"), "certutil decode (potentially obfuscated payload)"),
-    (re.compile(r"(?i)\b-EncodedCommand\b|\b-[Ee]nc\b"), "powershell encoded command"),
-    (re.compile(r"\[Convert\]::FromBase64String\("), "powershell base64 decode"),
-    (re.compile(r"(?i)\beval\s*\("), "dynamic eval execution"),
-    (re.compile(r"(?i)\bexec\s*\("), "dynamic exec execution"),
-    (re.compile(r"(?i)\bos\.system\s*\("), "os.system execution"),
-    (
-        re.compile(r"(?i)\bsubprocess\.(?:call|run|Popen)\b[^\n\r]*\bshell\s*=\s*True\b"),
-        "subprocess shell=True execution",
-    ),
-]
-
 CredentialPattern = tuple[re.Pattern[str], str, str | int | None]
 
 CREDENTIAL_PATTERNS: list[CredentialPattern] = [
@@ -154,20 +124,31 @@ def validate_skill_md_content(content: str) -> str | None:
     should rely on server-side logs for troubleshooting.
     """
     from jiuwenclaw.agentserver.skilldev.error_codes import (
-        ERR_FW_SKILLMD_FRONTMATTER_FORMAT,
-        ERR_FW_SKILLMD_FRONTMATTER_KEY,
-        ERR_FW_SKILLMD_NAME,
-        ERR_FW_SKILLMD_DESCRIPTION,
-        ERR_FW_SKILLMD_BODY,
+        ERR_FW_SKILLMD_NO_FRONTMATTER_START,
+        ERR_FW_SKILLMD_NO_FRONTMATTER_END,
+        ERR_FW_SKILLMD_YAML_PARSE_ERROR,
+        ERR_FW_SKILLMD_YAML_NOT_DICT,
+        ERR_FW_SKILLMD_DUPLICATE_KEY,
+        ERR_FW_SKILLMD_UNKNOWN_KEY,
+        ERR_FW_SKILLMD_NAME_MISSING,
+        ERR_FW_SKILLMD_NAME_EMPTY,
+        ERR_FW_SKILLMD_NAME_FORMAT,
+        ERR_FW_SKILLMD_NAME_TOO_LONG,
+        ERR_FW_SKILLMD_DESC_MISSING,
+        ERR_FW_SKILLMD_DESC_EMPTY,
+        ERR_FW_SKILLMD_DESC_TOO_LONG,
+        ERR_FW_SKILLMD_DESC_INVALID_TYPE,
+        ERR_FW_SKILLMD_BODY_EMPTY,
+        ERR_FW_SKILLMD_BODY_TOO_LONG,
         ERR_FW_SKILLMD_CREDENTIAL,
     )
 
     if not content.startswith("---"):
-        return ERR_FW_SKILLMD_FRONTMATTER_FORMAT
+        return ERR_FW_SKILLMD_NO_FRONTMATTER_START
 
     match = re.match(r"^---\n(.*?)\n---", content, re.DOTALL)
     if not match:
-        return ERR_FW_SKILLMD_FRONTMATTER_FORMAT
+        return ERR_FW_SKILLMD_NO_FRONTMATTER_END
 
     frontmatter_text = match.group(1)
     body = content[match.end():].lstrip("\n")
@@ -176,69 +157,63 @@ def validate_skill_md_content(content: str) -> str | None:
 
     dup = _find_duplicate_frontmatter_key(frontmatter_text)
     if dup:
-        hit_codes.add(ERR_FW_SKILLMD_FRONTMATTER_KEY)
+        hit_codes.add(ERR_FW_SKILLMD_DUPLICATE_KEY)
 
     try:
         frontmatter = yaml.safe_load(frontmatter_text)
         if not isinstance(frontmatter, dict):
-            return ERR_FW_SKILLMD_FRONTMATTER_FORMAT
+            return ERR_FW_SKILLMD_YAML_NOT_DICT
     except yaml.YAMLError:
-        return ERR_FW_SKILLMD_FRONTMATTER_FORMAT
+        return ERR_FW_SKILLMD_YAML_PARSE_ERROR
 
     # unexpected = set(frontmatter.keys()) - ALLOWED_FRONTMATTER_KEYS
     # if unexpected:
-    #     hit_codes.add(ERR_FW_SKILLMD_FRONTMATTER_KEY)
+    #     hit_codes.add(ERR_FW_SKILLMD_UNKNOWN_KEY)
 
     # --- name ---
-    name = frontmatter.get("name", "")
-    if isinstance(name, str):
-        name = name.strip()
-        if not name:
-            hit_codes.add(ERR_FW_SKILLMD_NAME)
-        else:
-            if not re.match(r"^[a-z0-9-]+$", name):
-                hit_codes.add(ERR_FW_SKILLMD_NAME)
-            if name.startswith("-") or name.endswith("-") or "--" in name:
-                hit_codes.add(ERR_FW_SKILLMD_NAME)
-            if len(name) > 64:
-                hit_codes.add(ERR_FW_SKILLMD_NAME)
-    elif name is not None and "name" in frontmatter:
-        hit_codes.add(ERR_FW_SKILLMD_NAME)
     if "name" not in frontmatter:
-        hit_codes.add(ERR_FW_SKILLMD_NAME)
-
-    # --- description (char + token dual limit) ---
-    description = frontmatter.get("description", "")
-    if isinstance(description, str):
-        description = description.strip()
-        if not description:
-            hit_codes.add(ERR_FW_SKILLMD_DESCRIPTION)
+        hit_codes.add(ERR_FW_SKILLMD_NAME_MISSING)
+    else:
+        name = frontmatter.get("name", "")
+        if not isinstance(name, str):
+            hit_codes.add(ERR_FW_SKILLMD_NAME_FORMAT)
         else:
-            max_chars = DESCRIPTION_MAX_CHARS_CJK if _contains_cjk(description) else DESCRIPTION_MAX_CHARS_EN
-            if len(description) > max_chars:
-                hit_codes.add(ERR_FW_SKILLMD_DESCRIPTION)
-            # desc_tokens = _estimate_tokens(description)
-            # if desc_tokens > DESCRIPTION_MAX_TOKENS:
-            #     hit_codes.add(ERR_FW_SKILLMD_DESCRIPTION)
-    elif description is not None and "description" in frontmatter:
-        hit_codes.add(ERR_FW_SKILLMD_DESCRIPTION)
-    if "description" not in frontmatter:
-        hit_codes.add(ERR_FW_SKILLMD_DESCRIPTION)
+            name = name.strip()
+            if not name:
+                hit_codes.add(ERR_FW_SKILLMD_NAME_EMPTY)
+            else:
+                if not re.match(r"^[a-z0-9-]+$", name) or name.startswith("-") or name.endswith("-") or "--" in name:
+                    hit_codes.add(ERR_FW_SKILLMD_NAME_FORMAT)
+                if len(name) > 64:
+                    hit_codes.add(ERR_FW_SKILLMD_NAME_TOO_LONG)
 
-    # --- body (line + token dual limit) ---
+    # --- description ---
+    if "description" not in frontmatter:
+        hit_codes.add(ERR_FW_SKILLMD_DESC_MISSING)
+    else:
+        description = frontmatter.get("description", "")
+        if not isinstance(description, str):
+            hit_codes.add(ERR_FW_SKILLMD_DESC_INVALID_TYPE)
+        else:
+            description = description.strip()
+            if not description:
+                hit_codes.add(ERR_FW_SKILLMD_DESC_EMPTY)
+            else:
+                max_chars = DESCRIPTION_MAX_CHARS_CJK if _contains_cjk(description) else DESCRIPTION_MAX_CHARS_EN
+                if len(description) > max_chars:
+                    hit_codes.add(ERR_FW_SKILLMD_DESC_TOO_LONG)
+
+    # --- body ---
     if not body.strip():
-        hit_codes.add(ERR_FW_SKILLMD_BODY)
+        hit_codes.add(ERR_FW_SKILLMD_BODY_EMPTY)
     else:
         body_lines = body.splitlines()
         if len(body_lines) > BODY_MAX_LINES:
-            hit_codes.add(ERR_FW_SKILLMD_BODY)
-        # body_tokens = _estimate_tokens(body)
-        # if body_tokens > BODY_MAX_TOKENS:
-        #     hit_codes.add(ERR_FW_SKILLMD_BODY)
+            hit_codes.add(ERR_FW_SKILLMD_BODY_TOO_LONG)
 
     # --- credential leak ---
-    for line_no, line in enumerate(content.splitlines(), start=1):
-        for pattern, label, value_group in CREDENTIAL_PATTERNS:
+    for _line_no, line in enumerate(content.splitlines(), start=1):
+        for pattern, _label, value_group in CREDENTIAL_PATTERNS:
             m = pattern.search(line)
             if not m:
                 continue

@@ -3,6 +3,14 @@ from __future__ import annotations
 import re
 from typing import TypeAlias
 
+from jiuwenclaw.agentserver.skilldev.error_codes import (
+    ERR_FW_SCRIPT_CREDENTIAL,
+    ERR_FW_SCRIPT_DESTRUCTIVE,
+    ERR_FW_SCRIPT_DYNAMIC_EXEC,
+    ERR_FW_SCRIPT_REMOTE_EXEC,
+    ERR_FW_SCRIPT_RISKY_PERMISSION,
+)
+
 # NOTE:
 # This module intentionally duplicates the static security rules from:
 # jiuwenclaw/agentserver/skilldev_agent/skills/skill-verifier/scripts/validate.py
@@ -10,34 +18,45 @@ from typing import TypeAlias
 
 CredentialPattern: TypeAlias = tuple[re.Pattern[str], str, str | int | None]
 
-DANGEROUS_PATTERNS = [
+# Each entry: (pattern, label, category)
+# category is one of: "destructive" | "risky_permission" | "remote_exec" | "dynamic_exec"
+DANGEROUS_PATTERNS: list[tuple[re.Pattern[str], str, str]] = [
     # destructive deletion
-    (re.compile(r"(?i)\brm\b[^\n\r]*\s-[a-z]*r[a-z]*f[a-z]*\b"), "forced recursive deletion"),
+    (re.compile(r"(?i)\brm\b[^\n\r]*\s-[a-z]*r[a-z]*f[a-z]*\b"), "forced recursive deletion", "destructive"),
     # risky permissions
-    (re.compile(r"(?i)\bchmod\b[^\n\r]*\b777\b"), "world-writable permissions"),
-    (re.compile(r"(?i)\bchmod\b[^\n\r]*\bu\+s\b"), "setuid bit modification"),
+    (re.compile(r"(?i)\bchmod\b[^\n\r]*\b777\b"), "world-writable permissions", "risky_permission"),
+    (re.compile(r"(?i)\bchmod\b[^\n\r]*\bu\+s\b"), "setuid bit modification", "risky_permission"),
     # download & execute (bash/sh/iex/etc)
     (
         re.compile(r"(?i)\b(curl|wget|fetch)\b[^\n\r|]*\|\s*\b(bash|sh|zsh|dash|ash|source)\b"),
         "piped remote shell execution",
+        "remote_exec",
     ),
     (
         re.compile(
             r"(?i)\b(iwr|irm|Invoke-WebRequest|Invoke-RestMethod)\b[^\n\r|]*\|\s*\b(iex|Invoke-Expression)\b"
         ),
         "piped remote powershell execution",
+        "remote_exec",
     ),
     # obfuscated/dynamic execution
-    (re.compile(r"(?i)\bbase64\s+(-d|--decode)\b[^\n\r|]*\|\s*\b(bash|sh|zsh|dash|ash)\b"), "base64 decode then execute"),
-    (re.compile(r"(?i)\bcertutil\s+-decode\b"), "certutil decode (potentially obfuscated payload)"),
-    (re.compile(r"(?i)\b-EncodedCommand\b|\b-[Ee]nc\b"), "powershell encoded command"),
-    (re.compile(r"\[Convert\]::FromBase64String\("), "powershell base64 decode"),
+    (re.compile(r"(?i)\bbase64\s+(-d|--decode)\b[^\n\r|]*\|\s*\b(bash|sh|zsh|dash|ash)\b"), "base64 decode then execute", "remote_exec"),
+    (re.compile(r"(?i)\bcertutil\s+-decode\b"), "certutil decode (potentially obfuscated payload)", "remote_exec"),
+    (re.compile(r"(?i)\b-EncodedCommand\b|\b-[Ee]nc\b"), "powershell encoded command", "remote_exec"),
+    (re.compile(r"\[Convert\]::FromBase64String\("), "powershell base64 decode", "remote_exec"),
     # eval/exec-like
-    (re.compile(r"(?i)\beval\s*\("), "dynamic eval execution"),
-    (re.compile(r"(?i)\bexec\s*\("), "dynamic exec execution"),
-    (re.compile(r"(?i)\bos\.system\s*\("), "os.system execution"),
-    (re.compile(r"(?i)\bsubprocess\.(?:call|run|Popen)\b[^\n\r]*\bshell\s*=\s*True\b"), "subprocess shell=True execution"),
+    (re.compile(r"(?i)\beval\s*\("), "dynamic eval execution", "dynamic_exec"),
+    (re.compile(r"(?i)\bexec\s*\("), "dynamic exec execution", "dynamic_exec"),
+    (re.compile(r"(?i)\bos\.system\s*\("), "os.system execution", "dynamic_exec"),
+    (re.compile(r"(?i)\bsubprocess\.(?:call|run|Popen)\b[^\n\r]*\bshell\s*=\s*True\b"), "subprocess shell=True execution", "dynamic_exec"),
 ]
+
+_CATEGORY_TO_ERROR_CODE: dict[str, str] = {
+    "destructive": ERR_FW_SCRIPT_DESTRUCTIVE,
+    "risky_permission": ERR_FW_SCRIPT_RISKY_PERMISSION,
+    "remote_exec": ERR_FW_SCRIPT_REMOTE_EXEC,
+    "dynamic_exec": ERR_FW_SCRIPT_DYNAMIC_EXEC,
+}
 
 CREDENTIAL_PATTERNS: list[CredentialPattern] = [
     # (pattern, label, capture-group or named-group for placeholder filtering)
@@ -113,18 +132,14 @@ def _is_placeholder(value: str | None) -> bool:
 
 def validate_scripts_file_content(text: str, *, rel_path: str) -> str | None:
     """Validate a scripts/** text file content. Return error code or None."""
-    from jiuwenclaw.agentserver.skilldev.error_codes import (
-        ERR_FW_SCRIPT_DANGEROUS_PATTERN,
-        ERR_FW_SCRIPT_CREDENTIAL,
-    )
 
-    for line_no, line in enumerate(text.splitlines(), start=1):
-        for pattern, label in DANGEROUS_PATTERNS:
+    for _line_no, line in enumerate(text.splitlines(), start=1):
+        for pattern, _label, category in DANGEROUS_PATTERNS:
             if pattern.search(line):
-                return ERR_FW_SCRIPT_DANGEROUS_PATTERN
+                return _CATEGORY_TO_ERROR_CODE[category]
 
-    for line_no, line in enumerate(text.splitlines(), start=1):
-        for pattern, label, value_group in CREDENTIAL_PATTERNS:
+    for _line_no, line in enumerate(text.splitlines(), start=1):
+        for pattern, _label, value_group in CREDENTIAL_PATTERNS:
             m = pattern.search(line)
             if not m:
                 continue

@@ -904,9 +904,7 @@ class SkillDevService:
             return ERR_FW_PATH_ESCAPE
         if not full_path.exists() or not full_path.is_file():
             return ERR_FW_FILE_NOT_FOUND
-        try:
-            full_path.read_text(encoding="utf-8")
-        except UnicodeDecodeError:
+        if _read_text_with_fallback(full_path) is None:
             return ERR_FW_BINARY_FILE
         return skill_dir, full_path
 
