@@ -266,7 +266,8 @@ export function InputArea({
 
   const canSend =
     inputValue.trim().length > 0 || pendingAttachments.length > 0 || isListening;
-  const modeIndex = Math.max(0, modes.findIndex((m) => m.value === mode));
+  const visibleModes = modes.filter((m) => !isModeDisabled(m.value));
+  const modeIndex = Math.max(0, visibleModes.findIndex((m) => m.value === mode));
 
   return (
     <div
@@ -376,32 +377,39 @@ export function InputArea({
 
       <div className="chat-input-toolbar">
         <div className="chat-input-toolbar-left">
+          {visibleModes.length > 0 && (
           <div
-            className="chat-mode-switch"
-            style={{ '--chat-mode-index': modeIndex } as CSSProperties}
+            className={clsx(
+              'chat-mode-switch',
+              visibleModes.length === 1 && 'chat-mode-switch--single',
+            )}
+            style={
+              {
+                '--chat-mode-index': modeIndex,
+                '--chat-mode-count': visibleModes.length,
+              } as CSSProperties
+            }
           >
-            <div className="chat-mode-switch__indicator" />
-            {modes.map((m) => {
-              const modeDisabled = isModeDisabled(m.value);
-              return (
+            {visibleModes.length > 1 && <div className="chat-mode-switch__indicator" />}
+            {visibleModes.map((m) => (
               <button
                 type="button"
                 key={m.value}
-                disabled={modeDisabled}
+                disabled={visibleModes.length === 1}
                 onClick={() => handleModeSwitch(m.value)}
                 className={clsx(
                   'chat-mode-btn',
                   mode === m.value ? 'chat-mode-btn--active' : 'chat-mode-btn--inactive',
-                  modeDisabled && 'chat-mode-btn--disabled',
+                  visibleModes.length === 1 && 'chat-mode-btn--single',
                 )}
                 data-testid={`chat-mode-${m.value}`}
               >
                 {m.icon}
                 {m.label}
               </button>
-            );
-            })}
+            ))}
           </div>
+          )}
 
         </div>
 

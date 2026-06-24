@@ -16,6 +16,7 @@ import {
   HISTORY_GET_METHOD,
   type HistoryRestoreHandle,
 } from './features/historyRestore';
+import { logHistoryRestore } from './features/historyRestoreLog';
 import {
   normalizeToolCallPayload,
   normalizeToolResultPayload,
@@ -120,37 +121,37 @@ function LanguageSwitcher() {
 // 主题切换组件
 function ThemeToggle() {
   const { t } = useTranslation();
-  const [theme, setTheme] = useState(() => {
-    return localStorage.getItem('theme') || 'light';
+  const [theme, setTheme] = useState<'dark' | 'light'>(() => {
+    const stored = localStorage.getItem('theme');
+    if (stored === 'dark' || stored === 'light') {
+      return stored;
+    }
+    // 旧版「跟随系统」与深色效果相同，迁移为 dark
+    if (stored === 'system') {
+      return 'dark';
+    }
+    return 'light';
   });
 
-  const toggleTheme = (newTheme: string) => {
-    setTheme(newTheme);
-    localStorage.setItem('theme', newTheme);
-    if (newTheme === 'light') {
+  useEffect(() => {
+    if (theme === 'light') {
       document.documentElement.setAttribute('data-theme', 'light');
     } else {
       document.documentElement.removeAttribute('data-theme');
     }
+  }, [theme]);
+
+  const toggleTheme = (newTheme: 'dark' | 'light') => {
+    setTheme(newTheme);
+    localStorage.setItem('theme', newTheme);
   };
 
-  const themeIndex = theme === 'system' ? 0 : theme === 'dark' ? 1 : 2;
+  const themeIndex = theme === 'dark' ? 0 : 1;
 
   return (
     <div className="theme-toggle">
       <div className="theme-toggle__track" style={{ '--theme-index': themeIndex } as React.CSSProperties}>
         <div className="theme-toggle__indicator" />
-        <button
-          className={`theme-toggle__button ${theme === 'system' ? 'active' : ''}`}
-          onClick={() => toggleTheme('system')}
-          title={t('app.themeSystem')}
-        >
-          <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-            <rect x="2" y="3" width="20" height="14" rx="2" ry="2" />
-            <line x1="8" y1="21" x2="16" y2="21" />
-            <line x1="12" y1="17" x2="12" y2="21" />
-          </svg>
-        </button>
         <button
           className={`theme-toggle__button ${theme === 'dark' ? 'active' : ''}`}
           onClick={() => toggleTheme('dark')}
@@ -498,14 +499,24 @@ function AppContent() {
     disposeInFlightHistoryHandles();
     setHistoryPagerMeta(null);
     setHistoryLoadingMore(false);
-    
+
+    const historyRequestId = `history-${Date.now()}-${Math.random().toString(36).substring(2, 11)}`;
+    logHistoryRestore('effect.start', { sessionId, historyRequestId, isConnected });
+
     // 开始历史会话加载
     const restoreHandle = beginHistoryRestore({
       sessionId: sessionId,
+      requestId: historyRequestId,
       onReady: (messages, totalPages) => {
         if (sessionIdRef.current !== sessionId) {
+          logHistoryRestore('onReady.stale', { sessionId, current: sessionIdRef.current });
           return;
         }
+        logHistoryRestore('onReady', {
+          sessionId,
+          messageCount: messages.length,
+          totalPages,
+        });
         historyRestoreFromPanelHintRef.current = false;
         clearMessages();
         messages.forEach((message) => addMessage(message));
@@ -519,21 +530,30 @@ function AppContent() {
       },
       onEmpty: (emptyTotalPages) => {
         if (sessionIdRef.current !== sessionId) {
+          logHistoryRestore('onEmpty.stale', { sessionId, current: sessionIdRef.current });
           return;
         }
-        clearMessages();
-        setHistoryPagerMeta({
-          loadedPages: 1,
-          totalPages: emptyTotalPages ?? 1,
+        const total = emptyTotalPages ?? 1;
+        logHistoryRestore('onEmpty', {
+          sessionId,
+          totalPages: total,
+          fromPanel: historyRestoreFromPanelHintRef.current,
         });
+        clearMessages();
         if (historyRestoreFromPanelHintRef.current) {
           historyRestoreFromPanelHintRef.current = false;
+          setHistoryPagerMeta({
+            loadedPages: 1,
+            totalPages: total,
+          });
           addMessage({
             id: `history-restore-empty-${Date.now()}`,
             role: 'system',
-            content: t('sessions.restoreEmpty'),
+            content: i18n.t('sessions.restoreEmpty'),
             timestamp: new Date().toISOString(),
           });
+        } else {
+          setHistoryPagerMeta(null);
         }
         historyRestoreHandleRef.current = null;
       },
@@ -585,31 +605,41 @@ function AppContent() {
       onError: (message) => {
         console.warn('[history.restore]', message);
       },
+      onRetry: async (attempt) => {
+        logHistoryRestore('history.get.retry', { sessionId, historyRequestId, attempt });
+        await request(HISTORY_GET_METHOD, {
+          session_id: sessionId,
+          page_idx: 1,
+        }, { requestId: historyRequestId });
+      },
     });
     historyRestoreHandleRef.current = restoreHandle;
 
     // 调用历史会话接口
     void (async () => {
       try {
+        logHistoryRestore('history.get.request', { sessionId, page_idx: 1, historyRequestId });
         await request(HISTORY_GET_METHOD, {
           session_id: sessionId,
           page_idx: 1,
-        });
+        }, { requestId: historyRequestId });
+        logHistoryRestore('history.get.ack', { sessionId, historyRequestId });
       } catch (error) {
         historyRestoreFromPanelHintRef.current = false;
         restoreHandle.dispose();
         historyRestoreHandleRef.current = null;
         // 发生错误时，设置 historyPagerMeta 为 null，显示欢迎信息
         setHistoryPagerMeta(null);
+        const errorMessage = error instanceof Error ? error.message : String(error);
+        logHistoryRestore('history.get.error', { sessionId, historyRequestId, errorMessage });
         console.error('Failed to load history:', error);
         // 忽略 "invalid page_idx or session history not found" 错误，因为这是新会话的正常情况
-        const errorMessage = error instanceof Error ? error.message : String(error);
         if (sessionIdRef.current === sessionId && !errorMessage.includes('invalid page_idx or session history not found')) {
           clearMessages();
           addMessage({
             id: `history-load-failed-${Date.now()}`,
             role: 'system',
-            content: t('sessions.errors.restoreFailed', { sessionId }),
+            content: i18n.t('sessions.errors.restoreFailed', { sessionId }),
             timestamp: new Date().toISOString(),
           });
         }
@@ -619,7 +649,6 @@ function AppContent() {
     isConnected,
     sessionId,
     request,
-    t,
     addMessage,
     addToolCall,
     addToolResult,
@@ -757,8 +786,11 @@ function AppContent() {
     const fallbackTotal = historyPagerMeta.totalPages;
 
     setHistoryLoadingMore(true);
+    const pageRequestId = `history-page-${Date.now()}-${Math.random().toString(36).substring(2, 11)}`;
+    logHistoryRestore('loadMore.start', { sessionId: sid, nextPage, pageRequestId });
     const pageHandle = fetchHistoryPage({
       sessionId: sid,
+      requestId: pageRequestId,
       onReady: ({ messages, toolReplay, totalPages }) => {
         if (sessionIdRef.current !== sid) {
           setHistoryLoadingMore(false);
@@ -828,6 +860,13 @@ function AppContent() {
       onError: (message) => {
         console.warn('[history.page]', message);
       },
+      onRetry: async (attempt) => {
+        logHistoryRestore('loadMore.retry', { sessionId: sid, nextPage, pageRequestId, attempt });
+        await request(HISTORY_GET_METHOD, {
+          session_id: sid,
+          page_idx: nextPage,
+        }, { requestId: pageRequestId });
+      },
     });
     historyPageHandleRef.current = pageHandle;
 
@@ -835,7 +874,7 @@ function AppContent() {
       await request(HISTORY_GET_METHOD, {
         session_id: sid,
         page_idx: nextPage,
-      });
+      }, { requestId: pageRequestId });
     } catch (error) {
       pageHandle.dispose();
       historyPageHandleRef.current = null;

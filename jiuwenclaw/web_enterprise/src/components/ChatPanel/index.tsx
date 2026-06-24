@@ -201,7 +201,9 @@ export function ChatPanel({
             ) : (
               <div className="flex items-center justify-center h-32">
                 <div className="text-text-muted text-sm">
-                  {t('connection.loadingConfig')}
+                  {historyPager
+                    ? t('chat.historyPager.loadingHistory')
+                    : t('connection.loadingConfig')}
                 </div>
               </div>
             )}

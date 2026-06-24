@@ -91,6 +91,14 @@ interface ContextCompressionStats {
   afterCompressed: number | null;
 }
 
+interface ContextWindowUsage {
+  inputTokens: number | null;
+  outputTokens: number | null;
+  usedTokens: number | null;
+  limitTokens: number;
+  percent: number | null;
+}
+
 interface TeamTaskEvent {
   id: string;
   type: string;
@@ -117,6 +125,7 @@ interface SessionState {
   contextCompressionRate: number;
   contextCompressionBefore: number | null;
   contextCompressionAfter: number | null;
+  contextWindowUsage: ContextWindowUsage | null;
   memoryUsage: MemoryUsage;
   heartbeatState: HeartbeatState;
   heartbeatMessage: string | null;
@@ -139,6 +148,7 @@ interface SessionState {
   setConnectionStats: (stats: Partial<ConnectionStats>) => void;
   setContextCompressionRate: (rate: number) => void;
   setContextCompressionStats: (stats: Partial<ContextCompressionStats> | null) => void;
+  setContextWindowUsage: (usage: Partial<ContextWindowUsage> | null) => void;
   setMemoryUsage: (memoryUsage: Partial<MemoryUsage> | null) => void;
   setHeartbeatStatus: (
     status: HeartbeatState,
@@ -168,6 +178,7 @@ export const useSessionStore = create<SessionState>((set) => ({
   contextCompressionRate: loadFromStorage()?.rate || 0,
   contextCompressionBefore: loadFromStorage()?.beforeCompressed || null,
   contextCompressionAfter: loadFromStorage()?.afterCompressed || null,
+  contextWindowUsage: null,
   memoryUsage: {
     rssMb: null,
     usedPercent: null,
@@ -292,6 +303,44 @@ export const useSessionStore = create<SessionState>((set) => ({
     });
 
     saveToStorage(contextCompressionData);
+  },
+
+  setContextWindowUsage: (usage) => {
+    if (!usage) {
+      set({ contextWindowUsage: null });
+      return;
+    }
+
+    const inputTokens =
+      typeof usage.inputTokens === 'number' && Number.isFinite(usage.inputTokens)
+        ? Math.max(Math.round(usage.inputTokens), 0)
+        : null;
+    const outputTokens =
+      typeof usage.outputTokens === 'number' && Number.isFinite(usage.outputTokens)
+        ? Math.max(Math.round(usage.outputTokens), 0)
+        : null;
+    const usedTokens =
+      typeof usage.usedTokens === 'number' && Number.isFinite(usage.usedTokens)
+        ? Math.max(Math.round(usage.usedTokens), 0)
+        : null;
+    const limitTokensRaw =
+      typeof usage.limitTokens === 'number' && Number.isFinite(usage.limitTokens)
+        ? Math.max(Math.round(usage.limitTokens), 1)
+        : 1;
+    const percent =
+      typeof usage.percent === 'number' && Number.isFinite(usage.percent)
+        ? Number(Math.min(Math.max(usage.percent, 0), 100).toFixed(1))
+        : null;
+
+    set({
+      contextWindowUsage: {
+        inputTokens,
+        outputTokens,
+        usedTokens,
+        limitTokens: limitTokensRaw,
+        percent,
+      },
+    });
   },
 
   setMemoryUsage: (memoryUsage) => {

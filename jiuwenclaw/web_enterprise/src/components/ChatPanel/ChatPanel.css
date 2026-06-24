@@ -149,9 +149,10 @@
 .chat-mode-switch {
   --chat-mode-gap: 4px;
   --chat-mode-pad: 4px;
+  --chat-mode-count: 3;
   position: relative;
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(var(--chat-mode-count), minmax(0, 1fr));
   gap: var(--chat-mode-gap);
   padding: var(--chat-mode-pad);
   border-radius: var(--radius-full);
@@ -159,12 +160,16 @@
   background: var(--secondary);
 }
 
+.chat-mode-switch--single {
+  display: inline-flex;
+}
+
 .chat-mode-switch__indicator {
   position: absolute;
   top: var(--chat-mode-pad);
   left: var(--chat-mode-pad);
   bottom: var(--chat-mode-pad);
-  width: calc((100% - (var(--chat-mode-pad) * 2) - (var(--chat-mode-gap) * 2)) / 3);
+  width: calc((100% - (var(--chat-mode-pad) * 2) - (var(--chat-mode-gap) * (var(--chat-mode-count) - 1))) / var(--chat-mode-count));
   border-radius: var(--radius-full);
   transform: translateX(calc(var(--chat-mode-index, 0) * (100% + var(--chat-mode-gap))));
   background: var(--accent);
@@ -219,6 +224,14 @@
 .chat-mode-btn--inactive:disabled:hover {
   background: transparent;
   color: var(--muted);
+}
+
+.chat-mode-btn--single,
+.chat-mode-btn--single:disabled {
+  cursor: default;
+  color: var(--accent-foreground);
+  background: var(--accent);
+  opacity: 1;
 }
 
 /* Keyboard hints */

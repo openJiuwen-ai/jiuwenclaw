@@ -6,7 +6,8 @@
 
 import { useTranslation } from 'react-i18next';
 import { useSessionStore } from '../../stores';
-import { useEffect, useState } from 'react';
+import { useRef, useState } from 'react';
+import { useMemoryUsagePolling } from '../../hooks/useMemoryUsagePolling';
 import { HeartbeatMessageModal } from '../../features/HeartbeatMessageModal';
 import { TodoList } from '../TodoList';
 import { TeamArea } from '../TeamArea';
@@ -19,6 +20,7 @@ export function ToolPanel() {
     contextCompressionRate,
     contextCompressionBefore,
     contextCompressionAfter,
+    contextWindowUsage,
     isConnected,
     memoryUsage,
     setMemoryUsage,
@@ -30,12 +32,9 @@ export function ToolPanel() {
     teamMembers,
   } = useSessionStore();
   const [heartbeatModalOpen, setHeartbeatModalOpen] = useState(false);
+  const panelRef = useRef<HTMLDivElement>(null);
 
-  useEffect(() => {
-    if (!isConnected) {
-      setMemoryUsage(null);
-    }
-  }, [isConnected, setMemoryUsage]);
+  useMemoryUsagePolling(isConnected, setMemoryUsage, panelRef);
 
   const hasHeartbeatMessage = Boolean(heartbeatMessage?.trim());
   const heartbeatClassName =
@@ -71,10 +70,29 @@ export function ToolPanel() {
       ? contextCompressionRate.toFixed(1)
       : '0.0';
   }
-  const compressionDisplay = `${afterK}K/${beforeK}K (${compressionRateDisplay}%)`;
+  const compressionDisplay = `${afterK}K/${beforeK}K(${compressionRateDisplay}%)`;
+  const windowUsageDisplay = (() => {
+    if (!contextWindowUsage) return '--';
+    const { inputTokens, outputTokens, usedTokens, limitTokens, percent } = contextWindowUsage;
+    const displayUsed =
+      usedTokens != null && Number.isFinite(usedTokens)
+        ? usedTokens
+        : inputTokens != null || outputTokens != null
+          ? (inputTokens ?? 0) + (outputTokens ?? 0)
+          : inputTokens;
+    if (displayUsed == null || !Number.isFinite(displayUsed)) return '--';
+    const usedK = (displayUsed / 1000).toFixed(1);
+    const limitK = (limitTokens / 1000).toFixed(0);
+    const pct =
+      percent != null && Number.isFinite(percent)
+        ? percent.toFixed(1)
+        : Number(((displayUsed / limitTokens) * 100).toFixed(1));
+    return `${usedK}K/${limitK}K(${pct}%)`;
+  })();
 
   return (
     <div
+      ref={panelRef}
       data-testid="tool-panel"
       className="bg-panel border-l border-border h-full overflow-hidden py-4 px-3 shrink-0"
       style={{ width: 'var(--tool-panel-width)' }}
@@ -108,7 +126,7 @@ export function ToolPanel() {
         )}
 
         {/* 状态显示 */}
-        <div className="toolpanel-status-card">
+        <div className="toolpanel-status-card shrink-0">
           <h3 className="toolpanel-status-card__title">
             <svg width="14" height="14" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
               <rect x="1" y="8" width="3" height="7" rx="0.5" fill="currentColor" opacity="0.5" />
@@ -118,9 +136,13 @@ export function ToolPanel() {
             {t('toolPanel.status')}
           </h3>
           <div className="space-y-2">
-            <div className="toolpanel-status-card__row">
+            <div className="toolpanel-status-card__row" title={t('toolPanel.contextCompressionHint')}>
               <span className="text-text-muted">{t('toolPanel.contextCompression')}</span>
               <span className="mono text-text">{compressionDisplay}</span>
+            </div>
+            <div className="toolpanel-status-card__row" title={t('toolPanel.contextWindowHint')}>
+              <span className="text-text-muted">{t('toolPanel.contextWindow')}</span>
+              <span className="mono text-text">{windowUsageDisplay}</span>
             </div>
             <div className="toolpanel-status-card__row">
               <span className="text-text-muted">{t('toolPanel.memoryUsage')}</span>
