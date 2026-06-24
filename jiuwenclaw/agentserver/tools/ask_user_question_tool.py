@@ -101,6 +101,7 @@ def _coerce_raw_options(opts: Any, question_index: int, *, has_preview: bool = F
     if not isinstance(opts, list) or not opts:
         raise ValueError(f"questions[{question_index}].options 必须为非空数组")
     normalized: list[dict[str, Any]] = []
+    has_other = False
     for j, opt in enumerate(opts):
         if isinstance(opt, str):
             entry = {"label": opt.strip()}
@@ -111,6 +112,19 @@ def _coerce_raw_options(opts: Any, question_index: int, *, has_preview: bool = F
         label = str(entry.get("label", "") or "").strip()
         if not label:
             raise ValueError(f"questions[{question_index}].options[{j}].label 不能为空")
+        # free_input=True 时强制将 label 替换为「其他」；下方 elif 分支则处理显式 label 为「其他」的情况。
+        # 两者共享 has_other 唯一性约束，确保最终选项中至多出现一个「其他」类型选项。
+        if entry.pop("free_input", None):
+            if has_other:
+                raise ValueError(f"questions[{question_index}].options 中「其他」选项不能超过1个")
+            entry["label"] = _OTHER_FALLBACK_LABEL
+            has_other = True
+            if not entry.get("description"):
+                entry["description"] = "请在下一句补充说明你的选择"
+        elif label == _OTHER_FALLBACK_LABEL:
+            if has_other:
+                raise ValueError(f"questions[{question_index}].options 中「其他」选项不能超过1个")
+            has_other = True
         normalized.append(entry)
 
     if len(normalized) > _ASK_TOOL_MAX_OPTIONS:
@@ -122,7 +136,7 @@ def _coerce_raw_options(opts: Any, question_index: int, *, has_preview: bool = F
         )
         normalized = normalized[: _ASK_TOOL_MAX_OPTIONS]
 
-    if len(normalized) == 1:
+    if len(normalized) == 1 and not has_other:
         logger.info(
             "[ask_user_question] questions[%s].options 仅 1 项，补充「%s」选项以便交互选择",
             question_index,
@@ -132,7 +146,7 @@ def _coerce_raw_options(opts: Any, question_index: int, *, has_preview: bool = F
             {"label": _OTHER_FALLBACK_LABEL, "description": "请在下一句补充说明你的选择"},
         )
 
-    if len(normalized) < _ASK_TOOL_MIN_OPTIONS:
+    if len(normalized) < _ASK_TOOL_MIN_OPTIONS and not has_other:
         raise ValueError(f"questions[{question_index}].options 至少需要 {_ASK_TOOL_MIN_OPTIONS} 个有效选项")
 
     return normalized
@@ -308,7 +322,7 @@ _ASK_TOOL_CARD = ToolCard(
     description=(
         "向用户展示一组带选项的结构化问题（可多题），推送选择 UI 并阻塞等待用户作答。"
         "questions 为 JSON 数组，每项含 question、"
-        "options[{label, description?, id?}]、可选 header、multi_select；"
+        "options[{label, description?, id?, free_input?}]、可选 header、multi_select；free_input=true 的选项 label 自动设为「其他」；"
         "可选 preview{text,title?,format?,editable?,outline_ref?,meta?} "
         "用于 PPT 大纲 Markdown 审阅（将注入 outline_confirm / outline_use_edited 选项）；"
         "仅带 preview 的大纲确认受引导模式约束，未开启引导时返回 skipped 不弹窗。"
