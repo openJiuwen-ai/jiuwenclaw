@@ -732,6 +732,21 @@ heartbeat:
     start: 08:00
     end: 22:00
 
+# 执行护栏：工具循环检测、无输出超时监控与主动中断
+execution_guard:
+  # 断路器：检测工具重复/交替/无进展循环，critical 级会强制结束当次回答
+  circuit_breaker:
+    # 总开关。默认开启；显式 enabled: false 时关闭
+    enabled: true
+    # 相同工具+参数重复达到该次数时告警（仅日志，不中断）
+    warning_threshold: 5
+    # Ping-Pong 两工具交替且无进展达到该次数时中断
+    critical_threshold: 10
+    # 工具连续无进展（结果不变）达到该次数时兜底中断
+    global_breaker_threshold: 10
+    # 未知/错误工具连续调用达到该次数时停止重试并中断
+    unknown_tool_threshold: 10
+
 channels:
   feishu:
     # 飞书应用配置

@@ -175,6 +175,10 @@ from jiuwenclaw.agentserver.deep_agent.rails.context_engineering_rail_ext import
     normalize_identify_override,
     normalize_soul_override,
 )
+from jiuwenclaw.agentserver.deep_agent.rails.execution_guard import (
+    CircuitBreakerConfig,
+    CircuitBreakerRail,
+)
 from jiuwenclaw.agentserver.deep_agent.rails.disabled_tools_rail import DisabledToolsRail
 from jiuwenclaw.agentserver.deep_agent.rails.jiuwen_progressive_tool_rail import (
     JiuWenProgressiveToolRail,
@@ -2493,6 +2497,31 @@ class JiuWenClawDeepAdapter:
             heartbeat_rail = None
         return heartbeat_rail
 
+    def _build_circuit_breaker_rail(self) -> CircuitBreakerRail | None:
+        try:
+            guard_cfg = (get_config() or {}).get("execution_guard") or {}
+            cb_cfg = guard_cfg.get("circuit_breaker") or {}
+            if cb_cfg.get("enabled", True) is False:
+                logger.info("[JiuWenClawDeepAdapter] CircuitBreakerRail disabled by config")
+                return None
+            defaults = CircuitBreakerConfig()
+            config = CircuitBreakerConfig(
+                warning_threshold=cb_cfg.get("warning_threshold", defaults.warning_threshold),
+                critical_threshold=cb_cfg.get("critical_threshold", defaults.critical_threshold),
+                global_breaker_threshold=cb_cfg.get(
+                    "global_breaker_threshold", defaults.global_breaker_threshold
+                ),
+                unknown_tool_threshold=cb_cfg.get(
+                    "unknown_tool_threshold", defaults.unknown_tool_threshold
+                ),
+            )
+            rail = CircuitBreakerRail(config, language=self._resolve_runtime_language())
+            logger.info("[JiuWenClawDeepAdapter] CircuitBreakerRail create success")
+            return rail
+        except Exception as exc:
+            logger.warning("[JiuWenClawDeepAdapter] CircuitBreakerRail create failed: %s", exc)
+            return None
+
     @staticmethod
     def _build_avatar_rail() -> Any | None:
         """Build AvatarPromptRail for digital avatar mode."""
@@ -2710,6 +2739,7 @@ class JiuWenClawDeepAdapter:
             _RailBuildInfo("_response_prompt_rail", self._build_response_prompt_rail),
             _RailBuildInfo("_task_execution_rail", self._build_task_execution_rail),
             _RailBuildInfo("_context_overflow_recovery_rail", self._build_context_overflow_recovery_rail),
+            _RailBuildInfo("_circuit_breaker_rail", self._build_circuit_breaker_rail),
             _RailBuildInfo("_stream_event_rail", self._build_stream_event_rail),
             _RailBuildInfo("_task_planning_rail", self._build_task_planning_rail, {"config": config_base}),
             _RailBuildInfo("_security_rail", self._build_security_rail),
@@ -3365,12 +3395,29 @@ class JiuWenClawDeepAdapter:
         """Return this adapter's local subagent executor."""
         return getattr(self, "_fork_agent_executor", None)
 
+    def _cleanup_circuit_breaker_session(self, session_id: str | None) -> None:
+        circuit_breaker_rail = getattr(self, "_circuit_breaker_rail", None)
+        if circuit_breaker_rail is None:
+            return
+        sid = str(session_id or "").strip() or "default"
+        try:
+            circuit_breaker_rail.cleanup_session(sid)
+        except Exception as exc:
+            logger.warning(
+                "[JiuWenClawDeepAdapter] circuit_breaker cleanup_session(%s) failed: %s",
+                sid,
+                exc,
+            )
+
     async def cleanup(self) -> None:
         """Abort active subagents and release the local executor."""
         await self._abort_active_subagents("adapter_cleanup")
         self._fork_agent_executor = None
         if self._stream_event_rail is not None:
             self._stream_event_rail.set_fork_agent_executor(None)
+        circuit_breaker_rail = getattr(self, "_circuit_breaker_rail", None)
+        if circuit_breaker_rail is not None:
+            circuit_breaker_rail.cleanup_all()
         # Release the provider so the lambda registered in __init__ stops
         # capturing `self` and the adapter can be garbage-collected.
         set_skill_credential_provider(None)
@@ -4189,6 +4236,10 @@ class JiuWenClawDeepAdapter:
 
         if self._runtime_prompt_rail:
             self._runtime_prompt_rail.set_language(resolved_language)
+        circuit_breaker_rail = getattr(self, "_circuit_breaker_rail", None)
+        if circuit_breaker_rail is not None:
+            circuit_breaker_rail.set_language(resolved_language)
+        if self._runtime_prompt_rail:
             resolved_channel = (
                 str(params.channel_id or self._resolve_prompt_channel(params.session_id) or "web").strip() or "web"
             )
@@ -6153,6 +6204,7 @@ class JiuWenClawDeepAdapter:
             _reset_llm_trace_tokens(token_trace_sid, token_trace_rid, token_trace_iter, token_trace_model)
             if request.request_id:
                 self._untrack_session_toolkit(request.request_id)
+            self._cleanup_circuit_breaker_session(session_id)
             await self._on_chat_request_end(chat_env_token, chat_fp_token, chat_skill_dirs_token)
 
         content = result if isinstance(result, (str, dict)) else str(result)
@@ -6762,6 +6814,7 @@ class JiuWenClawDeepAdapter:
             _reset_llm_trace_tokens(token_trace_sid, token_trace_rid, token_trace_iter, token_trace_model)
             if rid:
                 self._untrack_session_toolkit(rid)
+            self._cleanup_circuit_breaker_session(session_id)
             await self._on_chat_request_end(chat_env_token, chat_fp_token, chat_skill_dirs_token)
 
         summary = self._build_usage_summary(usage_accumulator)
