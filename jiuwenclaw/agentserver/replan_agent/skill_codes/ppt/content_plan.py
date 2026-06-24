@@ -73,7 +73,7 @@ _P43_COMMON_RULES = """大纲格式要求（必须严格遵守）：
    - **标题**：结论性完整句（Action + Result）
    - **内容概要**：具体有信息量
    - **研究查询**：✅ 页 2-4 个精准查询；❌ 页填 `-`
-   - **数据需求**：✅ 页写具体数据类型与维度；❌ 页填 `-`
+   - **数据需求**：✅ 页写具体数据类型和维度，数据需求必须具体化；❌ 页填 `-`
 4. 总页数与目标 page_count 一致（含封面/目录/结语等）。
 5. 基于给定素材与搜索结果，不编造不存在的趋势或数据。
 6. 只输出 Markdown 正文，不要 JSON，不要代码围栏。"""
@@ -444,7 +444,7 @@ def _build_p43_prompt(
         )
     if str(inputs.get("search_mode") or "").strip() == "no_search":
         parts.append(
-            "- no_search 模式：研究查询与数据需求仍需填写，但可在字段后标注「仅参考」。\n"
+            '- no_search 模式：研究查询与数据需求仍需填写（描述"如有搜索会查询什么"），但标注为「仅参考」。\n'
         )
 
     failure_reason = inputs.get("failure_reason")

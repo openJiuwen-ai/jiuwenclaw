@@ -46,6 +46,7 @@ _LLM_PATH_AND_SLOTS_SYSTEM_PROMPT = """你是 PPT 任务分析助手。从用户
 第二步：PPT 需求信息提取（仅当没有找到任何文件路径时执行）
 - 只提取用户**明确提到**的信息，不要推断或补充
 - 未提及的字段留空字符串或 null
+- page_count 必须是正整数（如 10）
 - style_id 可选值：huawei / light-tech / paper-humanities / dark-tech / free / 其他风格名
 - audience 可选值：公司高管 / 技术团队 / 投资人 / 普通受众 / 其他
 - presentation_purpose 可选值：工作汇报 / 产品展示 / 教学分享 / auto / 其他
@@ -55,7 +56,8 @@ _LLM_PATH_AND_SLOTS_SYSTEM_PROMPT = """你是 PPT 任务分析助手。从用户
 
 必须只输出 JSON，格式：
 {"doc_paths": ["路径1"], "slots": {"topic": "", "page_count": null, "audience": "",
-"presentation_purpose": "", "style_id": ""}}"""
+"presentation_purpose": "", "style_id": ""}}
+（page_count 为正整数或 null，禁止字符串）"""
 
 
 def _normalize_doc_path(raw: str) -> str | None:
@@ -159,6 +161,10 @@ def _build_llm_path_and_slots_prompt(text: str) -> str:
     )
 
 
+class IntentClassifyError(RuntimeError):
+    """P1 意图识别失败。"""
+
+
 def _parse_slots_from_llm_response(raw: str) -> dict[str, Any]:
     """从 LLM 响应中提取 slots 字段，返回 {slot_name: value_or_empty}。"""
     if not raw or not raw.strip():
@@ -187,6 +193,10 @@ def _parse_slots_from_llm_response(raw: str) -> dict[str, Any]:
         value = slots_raw.get(name)
         if value is None and name == "page_count":
             result[name] = None
+        elif name == "page_count" and isinstance(value, str) and value.strip():
+            raise IntentClassifyError(
+                f"page_count 必须是正整数或 null，LLM 返回了字符串: {value!r}"
+            )
         elif isinstance(value, str) and value.strip():
             result[name] = value.strip()
         elif isinstance(value, (int, float)) and name == "page_count":
