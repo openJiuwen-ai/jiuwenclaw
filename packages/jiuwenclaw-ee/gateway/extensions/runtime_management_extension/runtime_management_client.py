@@ -388,7 +388,7 @@ class RuntimeManagementAgentClient(AgentServerClient):
         ready_timeout = int(os.getenv("AGENT_SERVER_READY_TIMEOUT", "300"))
         ready_poll_interval = int(os.getenv("AGENT_SERVER_READY_POLL_INTERVAL", "5"))
         deploy_mode = (os.getenv("AGENT_SERVER_DEPLOY_MODE") or "k8s").strip().lower()
-        self._deploy_mode = deploy_mode
+        self.deploy_mode = deploy_mode
 
         # jiuwenbox sidecar: agentserver 与 jiuwenbox 同 Pod，使用 127.0.0.1 访问。
         jiuwenbox_enabled = _env_bool("JIUWENBOX_ENABLED", False)
@@ -670,6 +670,7 @@ class RuntimeManagementAgentClient(AgentServerClient):
                 service_templates=service_templates,
                 namespace=_client.namespace or "default",
                 kubeconfig=_client.kubeconfig,
+                deploy_mode=_client.deploy_mode,
             )
 
         self._create_service_manager = create_service_manager
@@ -693,12 +694,12 @@ class RuntimeManagementAgentClient(AgentServerClient):
             f"{self.POD_LABEL_SELECTOR},"
             f"{self.GATEWAY_ID_LABEL_KEY}={self.gateway_id}"
         )
-        if self._deploy_mode != "k8s":
+        if self.deploy_mode != "k8s":
             return {
                 "runtime_gateway_id": self.gateway_id,
                 "namespace": namespace,
                 "label_selector": label_selector,
-                "deploy_mode": self._deploy_mode,
+                "deploy_mode": self.deploy_mode,
                 "total": 0,
                 "running": 0,
                 "failed": 0,
