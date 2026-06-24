@@ -218,10 +218,12 @@ def test_maybe_recreate_sys_operation_keeps_old_when_recreate_fails(monkeypatch:
 
     # 让 add_sys_operation 失败，使 _create_sys_operation 返回 None
     from jiuwenclaw.agentserver.deep_agent import interface_deep as mod
-    mod.Runner.resource_mgr.add_sys_operation.side_effect = lambda c: (
-        captured["added"].append(c),
-        MagicMock(is_err=lambda: True, msg=lambda: "boom"),
-    )[1]
+
+    def _fail_add(c):
+        captured["added"].append(c)
+        return MagicMock(is_err=lambda: True, msg=lambda: "boom")
+
+    mod.Runner.resource_mgr.add_sys_operation.side_effect = _fail_add
 
     adapter.maybe_recreate_sys_operation_for_test()
 

@@ -886,7 +886,6 @@ async def test_create_agent_replays_yaml_sandbox_to_sysop(monkeypatch: pytest.Mo
     #        monkeypatch 必须打在 mod 上, 而不是 mod.JiuWenClawDeepAdapter.
     # 调整4: 多打 mod.clear_global_config_cache (reload_agent_config:3638 调用).
     # 调整5: 多打 mod.get_config 返回带 sandbox 块的 config, 让 _sandbox_yaml_to_env_overlay 路径生效.
-    from jiuwenclaw.agentserver.agent_manager import AgentManager
     from jiuwenclaw.agentserver.deep_agent import interface_deep as mod
     from jiuwenclaw.config import get_sandbox_endpoint, get_sandbox_runtime
 
@@ -922,6 +921,7 @@ async def test_create_agent_replays_yaml_sandbox_to_sysop(monkeypatch: pytest.Mo
     )
     # _sandbox_config_fingerprint: 首次 (env-only) 与第二次 (yaml) 不同, 触发重建
     call_count = {"n": 0}
+
     def _fingerprint(self):
         call_count["n"] += 1
         return ("env-only-fp",) if call_count["n"] == 1 else ("yaml-fp",)
@@ -936,6 +936,7 @@ async def test_create_agent_replays_yaml_sandbox_to_sysop(monkeypatch: pytest.Mo
     monkeypatch.setattr(mod, "get_memory_engine", lambda c: "builtin")
     monkeypatch.setattr(mod, "clear_config_cache", lambda: None)
     monkeypatch.setattr(mod, "clear_global_config_cache", lambda: None)
+
     async def _noop_clear_memory(*a, **kw):
         return None
     monkeypatch.setattr(mod, "clear_memory_manager_cache", _noop_clear_memory)
@@ -970,9 +971,11 @@ async def test_create_agent_replays_yaml_sandbox_to_sysop(monkeypatch: pytest.Mo
         "_sync_registered_skill_dirs_snapshot",
         lambda self: None,
     )
+
     async def _empty_rails(self, c, cb):
         return []
     monkeypatch.setattr(mod.JiuWenClawDeepAdapter, "_get_current_agent_rails", _empty_rails)
+
     async def _noop(*a, **kw):
         return None
     monkeypatch.setattr(mod.JiuWenClawDeepAdapter, "load_user_rails", _noop)
