@@ -16,7 +16,18 @@ _collect_user_text = PptCommon.collect_user_text
 _DOC_RAW_NAME = "doc_raw.md"
 _MAX_PARSE_ATTEMPTS = 2
 _DOC_EXCERPT_MAX_CHARS = 8000
+_PDF_BATCH_SIZE = 10
+# Keep in sync with agent-core ReadFileTool.MAX_PDF_SIZE_BYTES_WITHOUT_PAGES (10 MB).
+_PDF_LARGE_FILE_BYTES = 10 * 1024 * 1024
+_PDF_MAX_AUTO_PARSE_PAGES = 200
+_PDF_TRUNCATION_MARKER = (
+    "\n\n---\n"
+    "[文档解析说明] 该 PDF 超过自动解析上限（{cap} 页），"
+    "本次仅解析前 {read_pages} 页。"
+    "如需完整内容，请拆分 PDF 后重新上传。\n"
+)
 _IMAGE_EXTENSIONS = frozenset({".png", ".jpg", ".jpeg", ".gif", ".webp"})
+_PDF_EXTENSIONS = frozenset({".pdf"})
 _IMAGE_OCR_QUESTION = (
     "请完整转写图片中的所有可见文字，保留段落与标题结构。"
     "只输出转写文本；若无文字则回复 No text found。"
@@ -85,6 +96,10 @@ def _extract_vqa_ocr_section(text: str) -> str:
 
 def _is_image_path(path: str | Path) -> bool:
     return Path(path).suffix.casefold() in _IMAGE_EXTENSIONS
+
+
+def _is_pdf_path(path: str | Path) -> bool:
+    return Path(path).suffix.casefold() in _PDF_EXTENSIONS
 
 
 def _merge_doc_raw_sections(parts: list[tuple[str, str]]) -> str:
@@ -200,6 +215,60 @@ class DocumentParseNode(PlanNode):
             raise DocumentParseError(f"read_file 返回空内容: {path}")
         return text
 
+    async def _read_pdf_page_batch(self, path: Path, start: int, end: int) -> str | None:
+        """Read one PDF page batch. Returns None when the range is past the document end."""
+        if not self.has_tool("read_file"):
+            raise DocumentParseError("read_file 工具未注册")
+
+        pages = f"{start}-{end}"
+        raw = await self.call_tool("read_file", file_path=str(path), pages=pages)
+        text = _normalize_tool_text(raw).strip()
+
+        if "CODE=PDF_OUTPUT_TOKEN_EXCEEDED" in text:
+            if start < end:
+                mid = start + (end - start) // 2
+                left = await self._read_pdf_page_batch(path, start, mid)
+                right = await self._read_pdf_page_batch(path, mid + 1, end)
+                parts = [part for part in (left, right) if part]
+                if parts:
+                    return "\n\n".join(parts)
+            raise DocumentParseError(text)
+
+        if "CODE=PDF_PAGE_RANGE_OUT_OF_BOUNDS" in text:
+            return None
+
+        if text.startswith("[ERROR]") or text.startswith("[PDF_READ_ERROR]"):
+            raise DocumentParseError(text)
+        return text
+
+    async def _read_large_pdf_file(self, path: Path) -> str:
+        parts: list[str] = []
+        for start in range(1, _PDF_MAX_AUTO_PARSE_PAGES + 1, _PDF_BATCH_SIZE):
+            end = start + _PDF_BATCH_SIZE - 1
+            text = await self._read_pdf_page_batch(path, start, end)
+
+            if text is None:
+                if parts:
+                    break
+                raise DocumentParseError(
+                    f"read_file 返回页范围越界: {path} pages={start}-{end}"
+                )
+            if text:
+                parts.append(text)
+        else:
+            merged = "\n\n".join(parts)
+            merged += _PDF_TRUNCATION_MARKER.format(
+                cap=_PDF_MAX_AUTO_PARSE_PAGES,
+                read_pages=_PDF_MAX_AUTO_PARSE_PAGES,
+            )
+            if not parts:
+                raise DocumentParseError(f"read_file 返回空内容: {path}")
+            return merged
+
+        if not parts:
+            raise DocumentParseError(f"read_file 返回空内容: {path}")
+        return "\n\n".join(parts)
+
     async def _read_image_file(self, path: Path) -> str:
         path_str = str(path)
         if self.has_tool("image_ocr"):
@@ -227,6 +296,8 @@ class DocumentParseNode(PlanNode):
         try:
             if _is_image_path(path):
                 content = await self._read_image_file(path)
+            elif _is_pdf_path(path) and path.stat().st_size > _PDF_LARGE_FILE_BYTES:
+                content = await self._read_large_pdf_file(path)
             else:
                 content = await self._read_text_file(path)
             return path.name, content

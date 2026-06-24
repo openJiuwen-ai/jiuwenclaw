@@ -45,6 +45,7 @@ def _mock_write_file(**kwargs: Any) -> dict[str, Any]:
 def _make_node(
     *,
     read_file_map: dict[str, str] | None = None,
+    read_file_calls: list[dict[str, Any]] | None = None,
     image_ocr_map: dict[str, str] | None = None,
     vqa_map: dict[str, str] | None = None,
     tools: set[str] | None = None,
@@ -63,6 +64,12 @@ def _make_node(
     async def _call_tool(tool_name: str, **kwargs: Any) -> Any:
         if tool_name == "read_file":
             path = str(kwargs.get("file_path", ""))
+            if read_file_calls is not None:
+                read_file_calls.append(dict(kwargs))
+            pages = kwargs.get("pages")
+            paged_key = f"{path}|pages={pages}"
+            if paged_key in read_file_map:
+                return {"content": read_file_map[paged_key]}
             if path in read_file_map:
                 return {"content": read_file_map[path]}
             disk_path = Path(path)
@@ -151,6 +158,129 @@ def test_parse_text_file_via_read_file(tmp_path: Path) -> None:
     text = doc_raw.read_text(encoding="utf-8")
     assert "body" in text
     assert "# brief.md" in text
+
+
+@pytest.mark.unit
+def test_parse_large_pdf_reads_in_page_batches(tmp_path: Path) -> None:
+    source = tmp_path / "deck.pdf"
+    with source.open("wb") as fh:
+        fh.seek(10 * 1024 * 1024)
+        fh.write(b"\0")
+    output_dir = tmp_path / "session"
+    output_dir.mkdir()
+    calls: list[dict[str, Any]] = []
+
+    node = _make_node(
+        read_file_map={
+            f"{source}|pages=1-10": "page batch 1",
+            f"{source}|pages=11-20": "page batch 2",
+            f"{source}|pages=21-30": (
+                "[PDF_READ_ERROR] CODE=PDF_PAGE_RANGE_OUT_OF_BOUNDS\n"
+                "No more pages."
+            ),
+        },
+        read_file_calls=calls,
+        tools={"read_file", "write_file"},
+        llm_responses=['{"topic": ""}'],
+    )
+
+    ctx = {
+        "has_documents": True,
+        "output_dir": str(output_dir),
+        "doc_paths": [str(source)],
+    }
+    result = asyncio.run(node._execute(ctx))
+
+    assert result["doc_parse_ok"] is True
+    pages = [call.get("pages") for call in calls if call.get("file_path") == str(source)]
+    assert pages == ["1-10", "11-20", "21-30"]
+    doc_raw = Path(result["doc_raw_path"]).read_text(encoding="utf-8")
+    assert "page batch 1" in doc_raw
+    assert "page batch 2" in doc_raw
+    assert "PDF_PAGE_RANGE_OUT_OF_BOUNDS" not in doc_raw
+    assert "[文档解析说明]" not in doc_raw
+
+
+@pytest.mark.unit
+def test_parse_large_pdf_adds_truncation_marker_when_page_cap_reached(tmp_path: Path) -> None:
+    source = tmp_path / "huge.pdf"
+    with source.open("wb") as fh:
+        fh.seek(10 * 1024 * 1024)
+        fh.write(b"\0")
+    output_dir = tmp_path / "session"
+    output_dir.mkdir()
+    calls: list[dict[str, Any]] = []
+
+    read_file_map: dict[str, str] = {}
+    for start in range(1, dp._PDF_MAX_AUTO_PARSE_PAGES + 1, dp._PDF_BATCH_SIZE):
+        end = start + dp._PDF_BATCH_SIZE - 1
+        read_file_map[f"{source}|pages={start}-{end}"] = f"batch {start}-{end}"
+
+    node = _make_node(
+        read_file_map=read_file_map,
+        read_file_calls=calls,
+        tools={"read_file", "write_file"},
+        llm_responses=['{"topic": ""}'],
+    )
+
+    ctx = {
+        "has_documents": True,
+        "output_dir": str(output_dir),
+        "doc_paths": [str(source)],
+    }
+    result = asyncio.run(node._execute(ctx))
+
+    assert result["doc_parse_ok"] is True
+    pdf_calls = [call for call in calls if call.get("file_path") == str(source)]
+    assert len(pdf_calls) == dp._PDF_MAX_AUTO_PARSE_PAGES // dp._PDF_BATCH_SIZE
+    doc_raw = Path(result["doc_raw_path"]).read_text(encoding="utf-8")
+    assert "batch 191-200" in doc_raw
+    assert "[文档解析说明]" in doc_raw
+    assert str(dp._PDF_MAX_AUTO_PARSE_PAGES) in doc_raw
+
+
+@pytest.mark.unit
+def test_parse_large_pdf_retries_with_smaller_batch_on_token_exceeded(tmp_path: Path) -> None:
+    source = tmp_path / "token_heavy.pdf"
+    with source.open("wb") as fh:
+        fh.seek(10 * 1024 * 1024)
+        fh.write(b"\0")
+    output_dir = tmp_path / "session"
+    output_dir.mkdir()
+    calls: list[dict[str, Any]] = []
+
+    token_error = (
+        "[PDF_READ_ERROR] CODE=PDF_OUTPUT_TOKEN_EXCEEDED\n"
+        "token limit exceeded"
+    )
+    node = _make_node(
+        read_file_map={
+            f"{source}|pages=1-10": token_error,
+            f"{source}|pages=1-5": "pages 1-5",
+            f"{source}|pages=6-10": "pages 6-10",
+            f"{source}|pages=11-20": (
+                "[PDF_READ_ERROR] CODE=PDF_PAGE_RANGE_OUT_OF_BOUNDS\n"
+                "No more pages."
+            ),
+        },
+        read_file_calls=calls,
+        tools={"read_file", "write_file"},
+        llm_responses=['{"topic": ""}'],
+    )
+
+    ctx = {
+        "has_documents": True,
+        "output_dir": str(output_dir),
+        "doc_paths": [str(source)],
+    }
+    result = asyncio.run(node._execute(ctx))
+
+    assert result["doc_parse_ok"] is True
+    pages = [call.get("pages") for call in calls if call.get("file_path") == str(source)]
+    assert pages == ["1-10", "1-5", "6-10", "11-20"]
+    doc_raw = Path(result["doc_raw_path"]).read_text(encoding="utf-8")
+    assert "pages 1-5" in doc_raw
+    assert "pages 6-10" in doc_raw
 
 
 @pytest.mark.unit
