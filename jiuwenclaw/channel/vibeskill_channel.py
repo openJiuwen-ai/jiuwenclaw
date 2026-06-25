@@ -2807,7 +2807,8 @@ class VibeSkillChannel(BaseChannel):
 
         北向(发往当前会话绑定的 WebSocket 对端)连续两帧, 与其它事件的 type+properties
         形状一致(见同文件 outbound_intercept 对 skilldev 事件的组帧方式):
-        1) type=task.completed, properties 为无键空对象(协议: 不承载业务字段);
+        1) type=task.completed, properties 默认无键空对象; 若入站 payload 含 needSandbox(bool),
+           则透传为字符串 "true" / "false";
         2) type=session.status, 会话状态为 completed.
         """
         if session_id:
@@ -2820,8 +2821,13 @@ class VibeSkillChannel(BaseChannel):
                 )
             except Exception:
                 logger.exception("[VibeSkillChannel] set_state error for skilldev.completed, session_id=%s", session_id)
+        task_completed_properties: dict[str, str] = {}
+        if "needSandbox" in payload and isinstance(payload.get("needSandbox"), bool):
+            task_completed_properties["needSandbox"] = (
+                "true" if payload["needSandbox"] else "false"
+            )
         return [
-            {"type": "task.completed", "properties": {}},
+            {"type": "task.completed", "properties": task_completed_properties},
             {
                 "type": "session.status",
                 "properties": {
