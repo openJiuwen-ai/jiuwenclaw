@@ -55,7 +55,7 @@ gen_gateway_file() {
     enable_dev_mode_if_needed ${file}
 
     # No need to install packages
-    if [ "${DEPLOY_VARS["MODE"]}" == "dev" ]; then
+    if [[ "${mode}" == "dev" && -n "${DEPLOY_VARS["CLAW_CODE_PATH"]:-}" ]]; then
         local claw_code="${DEPLOY_VARS["CLAW_CODE_PATH"]}"
         yq eval '.dependencies = {}' -i ${claw_code}/packages/jiuwenclaw-ee/gateway/extensions/runtime_management_extension/extension.yaml
         yq eval '.dependencies = {}' -i ${claw_code}/packages/jiuwenclaw-ee/gateway/extensions/manager_ws_client/extension.yaml
