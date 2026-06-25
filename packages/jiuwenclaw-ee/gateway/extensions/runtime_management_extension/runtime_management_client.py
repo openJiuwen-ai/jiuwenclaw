@@ -265,7 +265,7 @@ class _SessionRequest(ISessionRequest):
         self._req = msg
         self._envelope = envelope
         self._service_template = service_template
-        svc = str(msg.service_id or "").strip() or "default_agent_id"
+        svc = str(msg.service_id or "").strip() or "default_service_id"
         ag = str(msg.agent_id or "").strip() or "default_agent_id"
         logger.info(
             "[RuntimeManagementAgentClient] resolved SessionRequest ids: service_id=%s agent_id=%s",
@@ -274,6 +274,11 @@ class _SessionRequest(ISessionRequest):
         )
         svc = hashlib.md5(svc.encode("utf-8")).hexdigest()
         ag = hashlib.md5(ag.encode("utf-8")).hexdigest()
+        logger.info(
+            "[RuntimeManagementAgentClient] resolved SessionRequest hash ids: service_id=%s agent_id=%s",
+            svc,
+            ag,
+        )
         self._service_id = svc
         self._req.service_id = svc
         self._req.agent_id = ag

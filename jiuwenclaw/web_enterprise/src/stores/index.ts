@@ -10,6 +10,7 @@ export {
   extSettingsToQueryFields,
   extSettingsToRoutingParams,
   EXT_CUSTOM_KEY_WHITELIST,
+  EXT_ROUTING_CHANGED_EVENT,
   type ExtCustomKV,
   type ExtCustomKey,
   type ExtSettingsSnapshot,

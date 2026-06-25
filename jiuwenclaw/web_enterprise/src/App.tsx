@@ -26,7 +26,12 @@ import {
 import { useWebSocket } from './hooks';
 import { webRequest } from './services/webClient';
 import { AgentMode, UserAnswer, ChatSendFile } from './types';
-import { useSessionStore, useChatStore, useTodoStore } from './stores';
+import {
+  useSessionStore,
+  useChatStore,
+  useTodoStore,
+  EXT_ROUTING_CHANGED_EVENT,
+} from './stores';
 import { useTranslation } from 'react-i18next';
 import i18n from './i18n';
 import './App.css';
@@ -259,6 +264,8 @@ function AppContent() {
   const historyRestoreFromPanelHintRef = useRef(false);
   /** 用户已开始实时对话后，禁止后台 history.get 覆盖当前消息 */
   const historyRestoreSuppressedRef = useRef(false);
+  /** extSettings 路由字段变更后，待 WS 重连完成再 session.create */
+  const pendingRoutingSessionResetRef = useRef(false);
 
   const disposeInFlightHistoryHandles = useCallback(() => {
     historyRestoreHandleRef.current?.dispose();
@@ -764,6 +771,45 @@ function AppContent() {
     setThinking,
     switchMode,
   ]);
+
+  // extSettings 的 user_id / group_id / bot_id 变更：立即清空 UI，重连后新建会话
+  useEffect(() => {
+    const onRoutingChanged = () => {
+      pendingRoutingSessionResetRef.current = true;
+      historyRestoreSuppressedRef.current = true;
+      disposeInFlightHistoryHandles();
+      setHistoryPagerMeta(null);
+      setHistoryLoadingMore(false);
+      setProcessing(false);
+      setThinking(false);
+      setPaused(false);
+      clearMessages();
+      clearTodos();
+      setCurrentSession(null);
+      setSessionId('new');
+      storeSessionId(null);
+    };
+    window.addEventListener(EXT_ROUTING_CHANGED_EVENT, onRoutingChanged);
+    return () => {
+      window.removeEventListener(EXT_ROUTING_CHANGED_EVENT, onRoutingChanged);
+    };
+  }, [
+    clearMessages,
+    clearTodos,
+    disposeInFlightHistoryHandles,
+    setCurrentSession,
+    setPaused,
+    setProcessing,
+    setThinking,
+  ]);
+
+  useEffect(() => {
+    if (!pendingRoutingSessionResetRef.current || !isConnected) {
+      return;
+    }
+    pendingRoutingSessionResetRef.current = false;
+    void handleNewSession();
+  }, [isConnected, handleNewSession]);
 
   // 切换模式
   const handleSwitchMode = useCallback((mode: AgentMode) => {

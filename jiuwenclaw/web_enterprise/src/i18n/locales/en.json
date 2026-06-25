@@ -28,7 +28,7 @@
     "customKvEmpty": "No custom key-value pairs yet",
     "customKvValuePlaceholder": "Enter value",
     "addRow": "Add",
-    "saveHint": "Reconnects automatically after saving",
+    "saveHint": "Reconnects after save, changing User/Group/Bot ID starts a new session",
     "save": "Save & Apply"
   },
   "nav": {

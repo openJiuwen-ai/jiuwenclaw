@@ -28,7 +28,7 @@
     "customKvEmpty": "暂无自定义键值对",
     "customKvValuePlaceholder": "填写字段值",
     "addRow": "添加",
-    "saveHint": "保存后将自动重连以应用",
+    "saveHint": "保存后将自动重连，若修改 User/Group/Bot ID 将新建会话",
     "save": "保存并应用"
   },
   "nav": {

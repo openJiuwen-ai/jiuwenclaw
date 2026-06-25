@@ -12,6 +12,8 @@ import { create } from 'zustand';
 
 const STORAGE_KEY = 'jiuwenclaw_ext_settings';
 const RECONNECT_EVENT = 'jiuwenclaw:ws-reconnect-request';
+/** user_id / group_id / bot_id 变更时派发，触发前端新建 Web 会话（与「新建会话」同等效果）。 */
+export const EXT_ROUTING_CHANGED_EVENT = 'jiuwenclaw:ext-routing-changed';
 
 /** 自定义键值对：key 限制在白名单内，value 由用户填写。 */
 export interface ExtCustomKV {
@@ -79,6 +81,13 @@ function saveToStorage(snapshot: ExtSettingsSnapshot): void {
   }
 }
 
+function routingFieldsEqual(
+  a: Pick<ExtSettingsSnapshot, 'userId' | 'groupId' | 'botId'>,
+  b: Pick<ExtSettingsSnapshot, 'userId' | 'groupId' | 'botId'>,
+): boolean {
+  return a.userId === b.userId && a.groupId === b.groupId && a.botId === b.botId;
+}
+
 interface ExtSettingsState extends ExtSettingsSnapshot {
   /** 是否有未保存的草稿改动（仅在 Modal 打开期间使用）。当前实现：Modal 内部用 useState 管理草稿，store 只保存"已生效"快照。 */
   /** 用一份新快照覆盖并触发 WS 重连。 */
@@ -88,6 +97,7 @@ interface ExtSettingsState extends ExtSettingsSnapshot {
 export const useExtSettingsStore = create<ExtSettingsState>((set) => ({
   ...loadFromStorage(),
   saveAndApply: (next) => {
+    const prev = useExtSettingsStore.getState();
     const sanitized: ExtSettingsSnapshot = {
       userId: next.userId.trim(),
       groupId: next.groupId.trim(),
@@ -96,9 +106,13 @@ export const useExtSettingsStore = create<ExtSettingsState>((set) => ({
         .filter((kv) => kv.key.trim() && kv.value.trim())
         .map((kv) => ({ key: kv.key.trim(), value: kv.value.trim() })),
     };
+    const routingChanged = !routingFieldsEqual(prev, sanitized);
     saveToStorage(sanitized);
     set(sanitized);
     if (typeof window !== 'undefined') {
+      if (routingChanged) {
+        window.dispatchEvent(new Event(EXT_ROUTING_CHANGED_EVENT));
+      }
       window.dispatchEvent(new Event(RECONNECT_EVENT));
     }
   },
