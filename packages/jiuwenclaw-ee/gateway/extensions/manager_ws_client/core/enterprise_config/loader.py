@@ -251,31 +251,6 @@ async def load_effective_enterprise_config(
         raise ValueError("slots must not be empty")
     load_slots = frozenset(slot.value for slot in slots)
     match = await _resolve_policy_match(ctx)
-    filtered_refs = {
-        slot: refs
-        for slot, refs in match.merged_refs.items()
-        if slot in load_slots
-    }
-
-    if not filtered_refs:
-        logger.warning(
-            "[enterprise_config] no template_ref resolved for context %s slots=%s",
-            ctx.as_dict(),
-            sorted(load_slots),
-        )
-        return None
-
-    slot_template_id_map = await expressions.resolve_slot_template_id_map(
-        filtered_refs,
-        ctx,
-    )
-    if not slot_template_id_map:
-        logger.warning(
-            "[enterprise_config] template_ref slots unresolved for context %s refs=%s",
-            ctx.as_dict(),
-            filtered_refs,
-        )
-        return None
 
     resolved_service_id: str | None = None
     resolved_agent_id: str | None = None
@@ -291,6 +266,38 @@ async def load_effective_enterprise_config(
             ctx,
         )
     send_file_allowed = bool((match.matched_agent or {}).get("send_file_allowed", False))
+    has_policy_outcome = bool(
+        resolved_service_id or resolved_agent_id or send_file_allowed
+    )
+
+    filtered_refs = {
+        slot: refs
+        for slot, refs in match.merged_refs.items()
+        if slot in load_slots
+    }
+
+    if not filtered_refs:
+        logger.warning(
+            "[enterprise_config] no template_ref resolved for context %s slots=%s",
+            ctx.as_dict(),
+            sorted(load_slots),
+        )
+        if not has_policy_outcome:
+            return None
+        slot_template_id_map: dict[str, list[str]] = {}
+    else:
+        slot_template_id_map = await expressions.resolve_slot_template_id_map(
+            filtered_refs,
+            ctx,
+        )
+        if not slot_template_id_map:
+            logger.warning(
+                "[enterprise_config] template_ref slots unresolved for context %s refs=%s",
+                ctx.as_dict(),
+                filtered_refs,
+            )
+            if not has_policy_outcome:
+                return None
 
     result = EffectiveEnterpriseConfig(
         routing=ctx,
@@ -325,7 +332,8 @@ async def load_effective_enterprise_config(
             ctx.as_dict(),
             sorted(load_slots),
         )
-        return None
+        if not has_policy_outcome:
+            return None
 
     logger.info(
         "[enterprise_config] loaded enterprise config: slots=%s payload=%s",
