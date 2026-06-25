@@ -56,7 +56,7 @@ class _OpenJiuwenStubLoader(importlib.abc.Loader):
         mod.__path__ = []
         mod.__loader__ = self
         mod.__spec__ = spec
-        mod.__getattr__ = _stub_module_getattr  # type: ignore[attr-defined]
+        setattr(mod, "__getattr__", _stub_module_getattr)
         return mod
 
     def exec_module(self, module):
