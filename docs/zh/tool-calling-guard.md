@@ -40,8 +40,8 @@ react:
 | 变量 | 参与判定 | 用途 |
 | :--- | :--- | :--- |
 | `TOOL_CALLING_GUARD_ENABLED` | 是（总开关） | 启用/关闭 guard 全部逻辑 |
-| `OFFICE_CLAW_DISABLE_TOOL_CALLING` | 是（通道 1） | 显式禁用/强制启用 tool calling |
-| `OFFICE_CLAW_SIMPLE_CHAT_MODE_REASON` | 否 | 仅写入 debug 日志 `reason` |
+| `TOOL_CALLING_GUARD_DISABLE` | 是（通道 1） | 显式禁用/强制启用 tool calling |
+| `TOOL_CALLING_GUARD_STRIP_REASON` | 否 | 仅写入 debug 日志 `reason` |
 | `MODEL_NAME` | 是（通道 2） | 限制模型名推断 |
 
 开关读取优先级：
@@ -54,7 +54,7 @@ react:
 
 | 优先级 | 输入 | 结果 |
 | :--- | :--- | :--- |
-| 1 | `OFFICE_CLAW_DISABLE_TOOL_CALLING` 为 truthy | 剥离 tools |
+| 1 | `TOOL_CALLING_GUARD_DISABLE` 为 truthy | 剥离 tools |
 | 2 | 同上为 falsy | **强制保留** tools（escape hatch） |
 | 3 | env 未设置 + `MODEL_NAME` ∈ `limited_models` | 剥离 tools |
 | 4 | 其他 | 保留 |

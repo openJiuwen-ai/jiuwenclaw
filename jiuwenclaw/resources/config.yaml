@@ -321,7 +321,7 @@ react:
   # disabled_tools: ["fork_agent"]
   disabled_tools: ${DISABLED_TOOLS:-}
   # Tool Calling Guard：对不支持 function calling 的模型，在 LLM API 层剥离 tools/tool_choice。
-  # 默认关闭；OfficeClaw 嵌入场景通过 env 启用。
+  # 默认关闭；嵌入场景通过 env 启用。
   tool_calling_guard:
     enabled: ${TOOL_CALLING_GUARD_ENABLED:-false}
     limited_models:

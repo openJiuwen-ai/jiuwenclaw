@@ -99,7 +99,7 @@ def test_resolve_tool_calling_guard_matrix(
     if guard_enabled:
         os.environ["TOOL_CALLING_GUARD_ENABLED"] = "true"
     if disable_env is not None:
-        os.environ["OFFICE_CLAW_DISABLE_TOOL_CALLING"] = disable_env
+        os.environ["TOOL_CALLING_GUARD_DISABLE"] = disable_env
     os.environ["MODEL_NAME"] = model_name
 
     decision = resolve_tool_calling_guard()
@@ -109,8 +109,8 @@ def test_resolve_tool_calling_guard_matrix(
 def test_t3_env_override_reason(mock_config) -> None:
     mock_config(_guard_config(enabled=True))
     os.environ["TOOL_CALLING_GUARD_ENABLED"] = "true"
-    os.environ["OFFICE_CLAW_DISABLE_TOOL_CALLING"] = "true"
-    os.environ["OFFICE_CLAW_SIMPLE_CHAT_MODE_REASON"] = "huawei_maas_model_without_function_call"
+    os.environ["TOOL_CALLING_GUARD_DISABLE"] = "true"
+    os.environ["TOOL_CALLING_GUARD_STRIP_REASON"] = "huawei_maas_model_without_function_call"
 
     decision = resolve_tool_calling_guard()
     assert decision.strip_tools is True
@@ -167,7 +167,7 @@ def test_t8_reload_removes_limited_models(mock_config) -> None:
 
 def test_patched_build_request_params_strips_tools(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("TOOL_CALLING_GUARD_ENABLED", "true")
-    monkeypatch.setenv("OFFICE_CLAW_DISABLE_TOOL_CALLING", "1")
+    monkeypatch.setenv("TOOL_CALLING_GUARD_DISABLE", "1")
     monkeypatch.setattr(
         "jiuwenclaw.jiuwen_core_patch._ORIGINAL_BUILD_REQUEST_PARAMS",
         lambda self, *, stream, **kwargs: {
@@ -187,7 +187,7 @@ def test_patched_build_request_params_keeps_tools_when_guard_off(
     mock_config,
 ) -> None:
     mock_config(_guard_config(enabled=False))
-    monkeypatch.setenv("OFFICE_CLAW_DISABLE_TOOL_CALLING", "1")
+    monkeypatch.setenv("TOOL_CALLING_GUARD_DISABLE", "1")
     monkeypatch.setenv("MODEL_NAME", "qwen3-32b")
     monkeypatch.setattr(
         "jiuwenclaw.jiuwen_core_patch._ORIGINAL_BUILD_REQUEST_PARAMS",
@@ -205,8 +205,8 @@ def test_patched_build_request_params_keeps_tools_when_guard_off(
 
 def test_patched_build_request_params_logs_reason(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("TOOL_CALLING_GUARD_ENABLED", "true")
-    monkeypatch.setenv("OFFICE_CLAW_DISABLE_TOOL_CALLING", "1")
-    monkeypatch.setenv("OFFICE_CLAW_SIMPLE_CHAT_MODE_REASON", "test_reason")
+    monkeypatch.setenv("TOOL_CALLING_GUARD_DISABLE", "1")
+    monkeypatch.setenv("TOOL_CALLING_GUARD_STRIP_REASON", "test_reason")
     monkeypatch.setattr(
         "jiuwenclaw.jiuwen_core_patch._ORIGINAL_BUILD_REQUEST_PARAMS",
         lambda self, *, stream, **kwargs: {"tools": [], "tool_choice": "auto", "messages": []},

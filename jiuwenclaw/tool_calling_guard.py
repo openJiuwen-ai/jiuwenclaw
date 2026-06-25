@@ -10,7 +10,7 @@ from jiuwenclaw.agentserver.permissions.core import _to_bool
 from jiuwenclaw.config import get_config
 from jiuwenclaw.local_env_config import read_env, read_env_if_set
 
-# Tri-state env override for OFFICE_CLAW_DISABLE_TOOL_CALLING: truthy / falsy / unset.
+# Tri-state env override for TOOL_CALLING_GUARD_DISABLE: truthy / falsy / unset.
 # Unset or unrecognized values fall through to the MODEL_NAME channel — do not use
 # _to_bool here; it treats '' and unknown strings as False/True (binary), which would
 # break the escape hatch and model-name inference paths.
@@ -18,8 +18,8 @@ _TRUTHY = frozenset({"true", "1", "yes", "on"})
 _FALSY = frozenset({"false", "0", "no", "off"})
 
 _GUARD_ENABLED_ENV = "TOOL_CALLING_GUARD_ENABLED"
-_DISABLE_TOOL_CALLING_ENV = "OFFICE_CLAW_DISABLE_TOOL_CALLING"
-_SIMPLE_CHAT_MODE_REASON_ENV = "OFFICE_CLAW_SIMPLE_CHAT_MODE_REASON"
+_DISABLE_TOOL_CALLING_ENV = "TOOL_CALLING_GUARD_DISABLE"
+_SIMPLE_CHAT_MODE_REASON_ENV = "TOOL_CALLING_GUARD_STRIP_REASON"
 _MODEL_NAME_ENV = "MODEL_NAME"
 
 
