@@ -50,7 +50,7 @@ class StylePrepareNode(PlanNode):
                 "### 执行流程\n"
                 "1. **校验 output_dir**：为空直接返回空 style_file_path（记录 error）\n"
                 "2. **预设风格分支**（`style_id` ∈ {huawei/dark-tech/light-tech/paper-humanities}）：\n"
-                "   - 调用 `read_file(file_path={skill_codes}/ppt/styles/{style_id}.md)`，路径由代码 `__file__` 定位\n"
+                "   - 优先从 `pptx_root/styles/{style_id}.md` 读取（外部 skill 目录），兜底 `__file__` 同级 styles 目录\n"
                 "   - 读取成功且非空 → 跳到步骤 4\n"
                 "   - 读取失败/为空 → 落入步骤 3（降级）\n"
                 "3. **自定义风格分支**（free/custom 或预设降级）：\n"
@@ -82,9 +82,11 @@ class StylePrepareNode(PlanNode):
             logger.error("[P7] output_dir 为空，无法落盘风格文件")
             return {"style_file_path": ""}
 
+        pptx_root = str(inputs.get("pptx_root", "")).strip()
+
         style_content = ""
         if style_id in _PRESET_STYLES:
-            style_content = await self._load_preset_style(style_id)
+            style_content = await self._load_preset_style(style_id, pptx_root)
 
         if not style_content:
             if style_id in _PRESET_STYLES:
@@ -103,25 +105,31 @@ class StylePrepareNode(PlanNode):
 
         return {"style_file_path": style_file_path}
 
-    async def _load_preset_style(self, style_id: str) -> str:
-        preset_path = _PRESET_STYLES_DIR / f"{style_id}.md"
+    async def _load_preset_style(self, style_id: str, pptx_root: str = "") -> str:
+        candidates: list[Path] = []
+        if pptx_root:
+            candidates.append(Path(pptx_root) / "styles" / f"{style_id}.md")
+        candidates.append(_PRESET_STYLES_DIR / f"{style_id}.md")
+
         if not self.has_tool("read_file"):
-            logger.warning("[P7] read_file 工具不可用，无法加载预设风格：%s", preset_path)
+            logger.warning("[P7] read_file 工具不可用，无法加载预设风格")
             return ""
 
-        try:
-            result = await self.call_tool("read_file", file_path=str(preset_path))
-            content = PptCommon.parse_tool_file_content(result)
-            if content:
-                logger.info("[P7] 加载预设风格成功：%s", preset_path)
-                return content
-            logger.warning("[P7] 预设风格文件为空：%s", preset_path)
-            return ""
-        except Exception as e:
-            if isinstance(e, AbortError):
-                raise
-            logger.warning("[P7] 读取预设风格失败 %s: %s", preset_path, e)
-            return ""
+        for preset_path in candidates:
+            if not preset_path.is_file():
+                continue
+            try:
+                result = await self.call_tool("read_file", file_path=str(preset_path))
+                content = PptCommon.parse_tool_file_content(result)
+                if content:
+                    logger.info("[P7] 加载预设风格成功：%s", preset_path)
+                    return content
+                logger.warning("[P7] 预设风格文件为空：%s", preset_path)
+            except Exception as e:
+                if isinstance(e, AbortError):
+                    raise
+                logger.warning("[P7] 读取预设风格失败 %s: %s", preset_path, e)
+        return ""
 
     async def _generate_custom_style(
         self,

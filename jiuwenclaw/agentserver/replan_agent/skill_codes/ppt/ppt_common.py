@@ -106,7 +106,10 @@ class PptCommon:
         if result is None:
             return ""
         if isinstance(result, str):
-            return _strip_line_numbers(result.strip())
+            text = result.strip()
+            if text.startswith("success=False") or text.startswith("success= False"):
+                return ""
+            return _strip_line_numbers(text)
         if isinstance(result, dict):
             content = result.get("content", "")
             if isinstance(content, str):
