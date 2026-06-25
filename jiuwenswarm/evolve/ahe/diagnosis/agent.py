@@ -90,7 +90,7 @@ class DiagnosisAgent:
         # Build initial messages
         trace_ids_to_show = [nt.get("id") or nt.get("trace_id", "unknown") for nt in traces]
         messages = self._build_messages(trace_ids_to_show, mode, question)
-        logger.info("start react loop, message is %s", messages)
+        logger.info("start react loop, message is %s", messages[:100])
         # ReAct loop
         for iteration in range(self._max_iterations):
             # 1. Call LLM with tools
@@ -147,7 +147,6 @@ class DiagnosisAgent:
 
             # 4. Check context size and compress if needed
             messages = self._compact_context_if_needed(messages)
-            logger.info("compacted message is %s", messages)
         # Budget exceeded
         last_text = ""
         for msg in reversed(messages):
@@ -269,7 +268,7 @@ class DiagnosisAgent:
         try:
             # Directly pass dict messages to model (no need for SimpleMessage conversion)
             # openai_wrapper.py already handles both dict and object messages correctly
-            logger.info("call llm with message %s", messages[:500])
+            logger.info("call llm with message %s", messages[:100])
             response = await self._model.invoke(messages=messages, tools=DIAGNOSIS_TOOL_SCHEMAS)
 
             # Extract content and tool_calls
@@ -371,14 +370,45 @@ class DiagnosisAgent:
         self, result_json: str, iterations: int, mode: str
     ) -> DiagnosisResult:
         """Parse submit_result payload into DiagnosisResult."""
+        payload = None
         try:
-            payload = json.loads(result_json)
-        except json.JSONDecodeError:
+            parsed = json.loads(result_json)
+            # Handle double-encoded JSON: if parsed is string, parse again
+            if isinstance(parsed, str):
+                logger.warning("DiagnosisAgent: result is double-encoded JSON string, parsing again")
+                payload = json.loads(parsed)
+            elif isinstance(parsed, dict):
+                payload = parsed
+            else:
+                logger.warning("DiagnosisAgent: result is not dict or string, type=%s", type(parsed))
+                return DiagnosisResult(
+                    mode=mode,
+                    issues=[],
+                    response=result_json,
+                    iterations=iterations,
+                    budget_exceeded=False,
+                )
+        except json.JSONDecodeError as e:
             # Try extracting JSON from text
+            logger.warning("DiagnosisAgent: JSON decode failed: %s, trying regex extraction", e)
             m = re.search(r"\{.*\}", result_json, re.DOTALL)
             if m:
                 try:
-                    payload = json.loads(m.group(0))
+                    extracted = m.group(0)
+                    parsed = json.loads(extracted)
+                    # Handle double-encoded JSON after extraction
+                    if isinstance(parsed, str):
+                        payload = json.loads(parsed)
+                    elif isinstance(parsed, dict):
+                        payload = parsed
+                    else:
+                        return DiagnosisResult(
+                            mode=mode,
+                            issues=[],
+                            response=result_json,
+                            iterations=iterations,
+                            budget_exceeded=False,
+                        )
                 except json.JSONDecodeError:
                     return DiagnosisResult(
                         mode=mode,
@@ -395,6 +425,17 @@ class DiagnosisAgent:
                     iterations=iterations,
                     budget_exceeded=False,
                 )
+
+        # Validate payload is dict
+        if not isinstance(payload, dict):
+            logger.warning("DiagnosisAgent: payload is not dict after all parsing attempts, type=%s", type(payload))
+            return DiagnosisResult(
+                mode=mode,
+                issues=[],
+                response=result_json,
+                iterations=iterations,
+                budget_exceeded=False,
+            )
 
         # Validate and convert
         issues = []

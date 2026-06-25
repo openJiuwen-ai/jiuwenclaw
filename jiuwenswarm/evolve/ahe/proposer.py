@@ -241,6 +241,65 @@ class AheProposer(ProposalGenerator):
                             if m:
                                 raw_names.add(m.group(1))
 
+                    # NEW: Extract from bash tool calls (skill scripts invoked via bash)
+                    # Many skills are called via bash, not skill_tool
+                    if tc.get("name") == "bash":
+                        input_data = tc.get("input", {})
+                        if isinstance(input_data, dict):
+                            # Extract from workdir: ".../skills/<skill-name>/"
+                            workdir = input_data.get("workdir", "")
+                            if workdir and "skills" in workdir:
+                                import re as _re
+                                # Pattern: .../skills/<skill-name>/ or ...\\skills\\<skill-name>\\
+                                m = _re.search(r'[\/\\]skills[\/\\]([^\/\\]+)[\/\\]', workdir)
+                                if m:
+                                    skill_name = m.group(1)
+                                    raw_names.add(skill_name)
+
+                            # Extract from command: ".../skills/<skill-name>/scripts/..."
+                            command = input_data.get("command", "")
+                            if command and "skills" in command:
+                                import re as _re
+                                # Pattern: .../skills/<skill-name>/scripts/ or ...\\skills\\<skill-name>\\scripts\\
+                                m = _re.search(r'[\/\\]skills[\/\\]([^\/\\]+)[\/\\]scripts[\/\\]', command)
+                                if m:
+                                    skill_name = m.group(1)
+                                    raw_names.add(skill_name)
+
+                        elif isinstance(input_data, str):
+                            # Fallback: try to extract from string input
+                            import re as _re
+                            # Pattern 1: workdir
+                            m = _re.search(r'workdir["\']?\s*[:=]\s*["\'](?:[^"\']*)[\/\\]skills[\/\\]([^\/\\]+)[\/\\]', input_data)
+                            if m:
+                                raw_names.add(m.group(1))
+                            # Pattern 2: command with skills path
+                            m = _re.search(r'[\/\\]skills[\/\\]([^\/\\]+)[\/\\]scripts[\/\\]', input_data)
+                            if m:
+                                raw_names.add(m.group(1))
+
+                    # Also check tool_calls in assistant message format
+                    # (from NormalizedTrace messages)
+                    func_data = tc.get("function", {})
+                    if func_data.get("name") == "bash":
+                        # Try _arguments_dict first (pre-parsed dict)
+                        args_dict = func_data.get("_arguments_dict", {})
+                        if args_dict:
+                            # Extract from workdir or command in args_dict
+                            workdir = args_dict.get("workdir", "")
+                            if workdir and "skills" in workdir:
+                                import re as _re
+                                m = _re.search(r'[\/\\]skills[\/\\]([^\/\\]+)[\/\\]', workdir)
+                                if m:
+                                    raw_names.add(m.group(1))
+
+                            command = args_dict.get("command", "")
+                            if command and "skills" in command:
+                                import re as _re
+                                m = _re.search(r'[\/\\]skills[\/\\]([^\/\\]+)[\/\\]scripts[\/\\]', command)
+                                if m:
+                                    raw_names.add(m.group(1))
+
         # 2. Extraction from diagnosis issues (fallback)
         if not raw_names and diagnosis_result and diagnosis_result.issues:
             for issue in diagnosis_result.issues:

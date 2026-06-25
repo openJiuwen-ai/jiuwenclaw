@@ -390,7 +390,26 @@ class OtelTraceAdapter:
 
                         # Extract tool_calls if available
                         if "tool_calls" in msg:
-                            result["tool_calls"] = msg["tool_calls"]
+                            # Normalize tool_calls to ensure arguments are complete
+                            normalized_tool_calls = []
+                            for tc in msg["tool_calls"]:
+                                normalized_tc = _normalize_tool_call(tc)
+
+                                # Parse arguments string to dict for better accessibility
+                                func = normalized_tc.get("function", {})
+                                args_str = func.get("arguments", "{}")
+                                if isinstance(args_str, str):
+                                    try:
+                                        args_dict = json.loads(args_str)
+                                        # Store both string and dict versions
+                                        func["arguments"] = args_str  # Keep original string
+                                        func["_arguments_dict"] = args_dict  # Add dict version
+                                    except json.JSONDecodeError:
+                                        pass
+
+                                normalized_tool_calls.append(normalized_tc)
+
+                            result["tool_calls"] = normalized_tool_calls
 
                         # Add usage
                         usage = {}
@@ -418,7 +437,20 @@ class OtelTraceAdapter:
             if tool_calls_raw:
                 parsed_tc = _parse_tool_calls_repr(tool_calls_raw)
                 if parsed_tc:
-                    result["tool_calls"] = parsed_tc
+                    # Normalize and parse arguments
+                    normalized_tool_calls = []
+                    for tc in parsed_tc:
+                        normalized_tc = _normalize_tool_call(tc)
+                        func = normalized_tc.get("function", {})
+                        args_str = func.get("arguments", "{}")
+                        if isinstance(args_str, str):
+                            try:
+                                args_dict = json.loads(args_str)
+                                func["_arguments_dict"] = args_dict
+                            except json.JSONDecodeError:
+                                pass
+                        normalized_tool_calls.append(normalized_tc)
+                    result["tool_calls"] = normalized_tool_calls
 
             # Add usage
             usage = {}
@@ -517,16 +549,92 @@ class OtelTraceAdapter:
         return ""
 
     def _build_agent_turns(self, spans: list[dict]) -> list[dict]:
-        """Build agent turns from LLM spans."""
-        turns = []
-        llm_spans = [s for s in spans if s.get("span_type") == "LLM"]
+        """Build agent turns from LLM spans + TOOL spans.
 
-        for span in llm_spans:
-            output = self._extract_llm_output(span)
+        Returns interleaved assistant + tool messages in chronological order.
+        """
+        turns = []
+
+        # Get all LLM and TOOL spans, sorted by time
+        llm_spans = [s for s in spans if s.get("span_type") == "LLM"]
+        tool_spans = [s for s in spans if s.get("span_type") == "TOOL"]
+
+        # Sort both by start_time
+        llm_spans.sort(key=lambda s: s.get("start_time_ns", 0))
+        tool_spans.sort(key=lambda s: s.get("start_time_ns", 0))
+
+        # Build assistant messages from LLM spans
+        for llm_span in llm_spans:
+            output = self._extract_llm_output(llm_span)
             if output.get("content") or output.get("tool_calls"):
+                # Add span_id for matching tool results
+                output["_llm_span_id"] = llm_span.get("span_id")
                 turns.append(output)
 
+                # Extract tool result messages for this LLM span
+                tool_results = self._extract_tool_results_for_llm(
+                    llm_span, tool_spans
+                )
+                if tool_results:
+                    turns.extend(tool_results)
+
+        # Remove temporary field
+        for turn in turns:
+            if "_llm_span_id" in turn:
+                del turn["_llm_span_id"]
+
         return turns
+
+    def _extract_tool_results_for_llm(
+        self, llm_span: dict, all_tool_spans: list[dict]
+    ) -> list[dict]:
+        """Extract tool result messages for a specific LLM span.
+
+        Returns list of tool messages in OpenAI format:
+        {"role": "tool", "tool_call_id": "...", "name": "...", "content": "..."}
+        """
+        llm_span_id = llm_span.get("span_id")
+        tool_results = []
+
+        # Find TOOL spans that are children of this LLM span
+        child_tool_spans = [
+            s for s in all_tool_spans
+            if s.get("parent_span_id") == llm_span_id
+        ]
+
+        # Sort by start_time
+        child_tool_spans.sort(key=lambda s: s.get("start_time_ns", 0))
+
+        for tool_span in child_tool_spans:
+            attrs = tool_span.get("attributes", {})
+
+            # Extract tool call id (from gen_ai.tool.call.id or generate)
+            tool_call_id = attrs.get("gen_ai.tool.call.id", "")
+            if not tool_call_id:
+                # Generate a synthetic id from span_id
+                tool_call_id = f"call_tool_{tool_span.get('span_id', '')}"
+
+            # Extract tool name
+            tool_name = attrs.get("gen_ai.tool.name", "")
+
+            # Extract tool result (output)
+            tool_result_raw = attrs.get("gen_ai.tool.result", "")
+            if isinstance(tool_result_raw, dict):
+                tool_result_str = json.dumps(tool_result_raw, ensure_ascii=False)
+            else:
+                tool_result_str = str(tool_result_raw)
+
+            # Build tool result message
+            tool_msg = {
+                "role": "tool",
+                "tool_call_id": tool_call_id,
+                "name": tool_name,
+                "content": tool_result_str[:5000],  # Truncate for safety
+            }
+
+            tool_results.append(tool_msg)
+
+        return tool_results
 
     def _extract_subagents(self, spans: list[dict]) -> list[dict]:
         """Extract subagent traces."""

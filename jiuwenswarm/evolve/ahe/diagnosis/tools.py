@@ -175,9 +175,24 @@ class DiagnosisToolExecutor:
             tool_calls = []
             for msg in messages:
                 for tc in msg.get("tool_calls", []):
+                    # Extract input from arguments (parse JSON string or use _arguments_dict)
+                    input_data = ""
+                    func = tc.get("function", {})
+                    args_str = func.get("arguments", "")
+
+                    # Try to use _arguments_dict first (pre-parsed)
+                    if "_arguments_dict" in func:
+                        input_data = func["_arguments_dict"]
+                    elif args_str and isinstance(args_str, str):
+                        # Parse arguments string to dict
+                        try:
+                            input_data = json.loads(args_str)
+                        except json.JSONDecodeError:
+                            input_data = args_str[:500]  # Fallback to truncated string
+
                     tool_calls.append({
-                        "name": tc.get("name", ""),
-                        "input": str(tc.get("input", ""))[:500],
+                        "name": func.get("name", tc.get("name", "")),
+                        "input": input_data,  # Complete input parameters (dict or string)
                         "output": str(tc.get("output", ""))[:500],
                         "latency": tc.get("latency"),
                     })

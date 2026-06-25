@@ -342,7 +342,7 @@ class SkillExperienceWriter(ApplyWriter):
             "content": content,
             "target": "BODY",
             "score": float(proposal.metadata.get("max_score", 0.6)),
-            "summary": content[:200] if content else None,  # Use content snippet as summary (more actionable)
+            "summary": content[:300] if content else None,  # Use content snippet as summary (more actionable)
             "reason": proposal.root_cause.strip() or None,
             "evidence": [
                 {
