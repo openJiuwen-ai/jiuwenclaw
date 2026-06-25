@@ -50,15 +50,34 @@ def _build_content(proposal: Proposal) -> str:
 
     The output is injected into the agent's context, so it should contain
     ACTIONABLE KNOWLEDGE, not diagnostic reports.
+
+    Priority:
+    1. targeted_fix.suggestion (most actionable)
+    2. targeted_fix.action + targeted_fix.suggestion
+    3. root_cause + targeted_fix.action (explanation + concrete action)
+    4. root_cause + predicted_impact (fallback, less actionable)
     """
     fix = proposal.targeted_fix
     if isinstance(fix, dict):
         suggestion = fix.get("suggestion", "")
+        action = fix.get("action", "")
+
+        # Priority 1: Use suggestion directly (most actionable)
         if suggestion:
-            # The suggestion IS the knowledge — use it directly
             return suggestion
 
-    # Fallback: use root_cause + predicted_impact
+        # Priority 2: Combine action + suggestion
+        if action and suggestion:
+            return f"{action}\n\n{suggestion}"
+
+        # Priority 3: root_cause + action (explanation + concrete fix)
+        if action:
+            root = proposal.root_cause.strip()
+            if root:
+                return f"{root}\n\n建议操作：{action}"
+            return action
+
+    # Priority 4: Fallback: use root_cause + predicted_impact (least actionable)
     root = proposal.root_cause.strip()
     impact = proposal.predicted_impact.strip()
     parts = []
@@ -174,13 +193,15 @@ class SkillExperienceWriter(ApplyWriter):
 
             # Check for ExperienceOperation in metadata
             operations_raw = proposal.metadata.get("operations", [])
+            record = None  # Initialize to avoid UnboundLocalError
+
             if operations_raw:
                 # Dispatch per operation — PDA-style governance-aware pipeline
                 for op_dict in operations_raw:
                     op = ExperienceOperation(**op_dict)
                     match op.op:
                         case ExperienceOperationType.ADD:
-                            self._apply_add(evolution_log, proposal, op)
+                            record = self._apply_add(evolution_log, proposal, op)
                         case ExperienceOperationType.MERGE:
                             self._apply_merge(evolution_log, proposal, op)
                         case ExperienceOperationType.REPLACE:
@@ -219,11 +240,21 @@ class SkillExperienceWriter(ApplyWriter):
                 skill_name,
             )
 
-            logger.info(
-                "SkillExperienceWriter: appended record %s → %s",
-                record.get("id", "unknown"),  # type: ignore[attr-defined]
-                evolution_path,
-            )
+            # Log the operation (handle record being None for non-ADD operations)
+            if record:
+                logger.info(
+                    "SkillExperienceWriter: appended record %s → %s",
+                    record.get("id", "unknown"),
+                    evolution_path,
+                )
+                record_id = record.get("id", "unknown")
+            else:
+                logger.info(
+                    "SkillExperienceWriter: applied operations to %s",
+                    evolution_path,
+                )
+                record_id = f"ops-{proposal.proposal_id[:8]}"
+
             return ApplyRecord(
                 proposal_id=proposal.proposal_id,
                 target_type=ProposalTargetType.SKILL,
@@ -232,7 +263,7 @@ class SkillExperienceWriter(ApplyWriter):
                 status=ApplyStatus.APPLIED,
                 stored_object_id=str(evolution_path),
                 reason=(
-                    f"EvolutionRecord {record.id} appended to "  # type: ignore[attr-defined]
+                    f"EvolutionRecord {record_id} applied to "
                     f"{skill_name}/evolutions.json"
                 ),
                 applier_name=self.name,
@@ -311,7 +342,7 @@ class SkillExperienceWriter(ApplyWriter):
             "content": content,
             "target": "BODY",
             "score": float(proposal.metadata.get("max_score", 0.6)),
-            "summary": proposal.predicted_impact.strip() or None,
+            "summary": content[:200] if content else None,  # Use content snippet as summary (more actionable)
             "reason": proposal.root_cause.strip() or None,
             "evidence": [
                 {
@@ -352,10 +383,13 @@ class SkillExperienceWriter(ApplyWriter):
 
     def _apply_add(
         self, evolution_log, proposal: Proposal, op: ExperienceOperation
-    ) -> None:
+    ) -> dict:
         """ADD a new experience entry with state=candidate.
 
         Uses dict format (no openjiuwen dependency).
+
+        Returns:
+            The created record dict for logging purposes.
         """
         content = op.new_content or _build_content(proposal)
 
@@ -369,7 +403,7 @@ class SkillExperienceWriter(ApplyWriter):
             "content": content,
             "target": "BODY",
             "score": float(proposal.metadata.get("max_score", 0.6)),
-            "summary": proposal.predicted_impact.strip() or None,
+            "summary": content[:200] if content else None,  # Use content snippet as summary (more actionable)
             "reason": op.reason,
             "evidence": [
                 {
@@ -388,6 +422,7 @@ class SkillExperienceWriter(ApplyWriter):
         }
 
         evolution_log["entries"].append(record)
+        return record  # Return for logging in outer scope
 
     def _apply_merge(
         self, evolution_log, proposal: Proposal, op: ExperienceOperation

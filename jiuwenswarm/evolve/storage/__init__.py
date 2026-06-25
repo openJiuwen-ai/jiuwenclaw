@@ -47,4 +47,12 @@ def create_evolution_store(config: dict | None = None) -> EvolutionStore:
     sqlite = SqliteStore(db_path=sqlite_path, traces_db_path=traces_db_path)
     file_store = FileStore(root_dir=file_path)
 
-    return EvolutionStore(sqlite_backend=sqlite, file_backend=file_store)
+    # Build EvolutionStore with both backends
+    store = EvolutionStore(sqlite_backend=sqlite, file_backend=file_store)
+
+    # Set _skills_dir for AheProposer to find user skills
+    # This should point to the user workspace skills directory
+    skills_dir = workspace_dir / "agent" / "workspace" / "skills"
+    store._skills_dir = str(skills_dir)
+
+    return store
