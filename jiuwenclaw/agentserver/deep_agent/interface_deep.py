@@ -1537,7 +1537,7 @@ class JiuWenClawDeepAdapter:
                     sandbox_url,
                     sandbox_type,
                     self._agent_id,
-                    shared_dir=get_multi_tenant_user_workspace_dir(self._service_id, "default"),
+                    shared_dir=get_multi_tenant_user_workspace_dir(self._service_id, self._agent_id),
                     files_runtime=runtime.get("files"),
                     excluded_commands=runtime.get("excluded_commands"),
                     idle_ttl_seconds=runtime.get("idle_ttl_seconds"),
