@@ -34,7 +34,10 @@ function ToolDetailModal({ execution, onClose }: ToolDetailModalProps) {
   const { toolCall, result, status } = execution;
   const isTimeout = status === 'timeout';
   const isError = status === 'error';
-  const isSuccess = status === 'completed' && !(result && result.result && result.result.includes('success=False'));
+  const isSuccess =
+    status === 'completed' &&
+    result?.success !== false &&
+    !(result && result.result && result.result.includes('success=False'));
 
   
   // ESC 键关闭
@@ -269,7 +272,10 @@ export function ToolExecutionItem({ execution }: { execution: ToolExecution }) {
   const hasResult = !!result;
   const isTimeout = status === 'timeout';
   const isError = status === 'error';
-  const isSuccess = status === 'completed' && !(result && result.result && result.result.includes('success=False'));
+  const isSuccess =
+    status === 'completed' &&
+    result?.success !== false &&
+    !(result && result.result && result.result.includes('success=False'));
   const resultSummary = result
     ? (result.summary || (isSuccess ? t('chatUi.toolResult.success') : '❌'))
     : '';

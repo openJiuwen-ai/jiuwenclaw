@@ -806,11 +806,12 @@ function AppContent() {
     })();
   }, [disposeInFlightHistoryHandles, ensureSessionForSend, sendMessage]);
 
-  const handleInterrupt = useCallback((newInput?: string) => {
+  const handleInterrupt = useCallback((newInput?: string, files?: ChatSendFile[]) => {
     if (!sessionId || sessionId === 'new') return;
-    const trimmed = newInput?.trim();
-    if (!trimmed) return;
-    void supplement(sessionId, trimmed);
+    const trimmed = newInput?.trim() ?? '';
+    const hasFiles = Boolean(files && files.length > 0);
+    if (!trimmed && !hasFiles) return;
+    void supplement(sessionId, trimmed, files);
   }, [sessionId, supplement]);
 
   const handlePause = useCallback(() => {

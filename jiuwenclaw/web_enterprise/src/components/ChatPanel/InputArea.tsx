@@ -11,7 +11,7 @@ import clsx from 'clsx';
 
 interface InputAreaProps {
   onSubmit: (content: string, files?: ChatSendFile[]) => void;
-  onInterrupt: (newInput?: string) => void;
+  onInterrupt: (newInput?: string, files?: ChatSendFile[]) => void;
   onSwitchMode: (mode: AgentMode) => void;
   isProcessing: boolean;
   onNewSession: () => Promise<void>;
@@ -131,16 +131,17 @@ export function InputArea({
       stopListening();
     }
 
+    const sendFiles = attachments.length > 0 ? attachments : undefined;
     if (isTeamMode) {
-      onSubmit(trimmed, attachments.length > 0 ? attachments : undefined);
+      onSubmit(trimmed, sendFiles);
     } else if (isInterruptible) {
       if (isAgentMode) {
-        addToTaskQueue(trimmed);
+        addToTaskQueue(trimmed, sendFiles);
       } else {
-        onInterrupt(trimmed);
+        onInterrupt(trimmed, sendFiles);
       }
     } else {
-      onSubmit(trimmed, attachments.length > 0 ? attachments : undefined);
+      onSubmit(trimmed, sendFiles);
     }
     setInputValue('');
     setPendingVoiceText('');
@@ -293,9 +294,20 @@ export function InputArea({
             {t('chat.waitingTasksCount', { count: taskQueue.length })}
           </div>
           <div className="chat-input-task-queue-list">
-            {taskQueue.map((task) => (
+            {taskQueue.map((task) => {
+              const attachmentLabel =
+                task.files && task.files.length > 0
+                  ? task.files.map((file) => file.name).join(', ')
+                  : '';
+              const displayText =
+                task.content.trim() ||
+                attachmentLabel ||
+                t('chat.fileUpload.messageFallback', { count: task.files?.length ?? 0 });
+              return (
               <div key={task.id} className="chat-input-task-item">
-                <span className="chat-input-task-content">{task.content}</span>
+                <span className="chat-input-task-content" title={displayText}>
+                  {displayText}
+                </span>
                 <button
                   type="button"
                   onClick={() => removeFromTaskQueue(task.id)}
@@ -307,7 +319,8 @@ export function InputArea({
                   </svg>
                 </button>
               </div>
-            ))}
+              );
+            })}
           </div>
         </div>
       )}

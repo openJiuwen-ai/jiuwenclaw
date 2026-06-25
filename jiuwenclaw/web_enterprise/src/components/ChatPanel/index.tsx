@@ -24,7 +24,7 @@ export interface ChatHistoryPagerProps {
 
 interface ChatPanelProps {
   onSendMessage: (content: string, files?: ChatSendFile[]) => void;
-  onInterrupt: (newInput?: string) => void;
+  onInterrupt: (newInput?: string, files?: ChatSendFile[]) => void;
   onSwitchMode: (mode: AgentMode) => void;
   isProcessing: boolean;
   onNewSession: () => Promise<void>;

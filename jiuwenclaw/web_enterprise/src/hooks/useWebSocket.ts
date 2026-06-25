@@ -77,11 +77,11 @@ interface UseWebSocketReturn {
   interrupt: (
     sessionId: string,
     intent: InterruptIntent,
-    options?: { newInput?: string }
+    options?: { newInput?: string; files?: ChatSendFile[] }
   ) => Promise<void>;
   pause: (sessionId: string) => Promise<void>;
   cancel: (sessionId: string) => Promise<void>;
-  supplement: (sessionId: string, newInput: string) => Promise<void>;
+  supplement: (sessionId: string, newInput: string, files?: ChatSendFile[]) => Promise<void>;
   resume: (sessionId: string) => Promise<void>;
   switchMode: (sessionId: string, mode: AgentMode) => Promise<void>;
   disconnect: () => void;
@@ -383,17 +383,37 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
     async (
       sessionId: string,
       intent: InterruptIntent,
-      options?: { newInput?: string }
+      options?: { newInput?: string; files?: ChatSendFile[] }
     ) => {
       const newInput = options?.newInput;
-      if (intent === 'supplement' && newInput) {
+      const files = options?.files;
+      const hasFiles = Boolean(files && files.length > 0);
+      if (intent === 'supplement' && (newInput || hasFiles)) {
         userInputVersionRef.current += 1;
         stopAllTts();
+        const displayContent =
+          (newInput ?? '').trim() ||
+          (hasFiles
+            ? i18n.t('chat.fileUpload.messageFallback', {
+                count: files?.length ?? 0,
+              })
+            : '');
         addMessage({
           id: `user-${Date.now()}`,
           role: 'user',
-          content: newInput,
+          content: displayContent,
           timestamp: new Date().toISOString(),
+          ...(hasFiles
+            ? {
+                fileItems: files!.map((file) => ({
+                  name: file.name,
+                  size: file.size ?? 0,
+                  mime_type: '',
+                  download_url: file.url,
+                  download_token: '',
+                })),
+              }
+            : {}),
         });
       }
       const interruptRequestId = makeClientRequestId('interrupt');
@@ -405,6 +425,14 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
         };
         if (intent === 'supplement') {
           params.new_input = newInput ?? '';
+          if (hasFiles) {
+            params.files = files?.map((file) => ({
+              url: file.url,
+              name: file.name,
+              filename: file.name,
+              size: file.size,
+            }));
+          }
         }
         await request('chat.interrupt', params, { requestId: interruptRequestId });
       } catch (error) {
@@ -445,9 +473,9 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
   );
 
   const supplement = useCallback(
-    async (sessionId: string, newInput: string) => {
+    async (sessionId: string, newInput: string, files?: ChatSendFile[]) => {
       try {
-        await interrupt(sessionId, 'supplement', { newInput });
+        await interrupt(sessionId, 'supplement', { newInput, files });
       } catch (error) {
         const webError = error as WebError;
         setConnectionStats({ lastError: webError.message });
@@ -1040,7 +1068,11 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
               // 从队列中移除该任务
               removeFromTaskQueue(nextTask.id);
               // 发送下一个任务
-              sendMessageRef.current(nextTask.content, activeSessionIdRef.current);
+              sendMessageRef.current(
+                nextTask.content,
+                activeSessionIdRef.current,
+                nextTask.files
+              );
             }
           }
         }
