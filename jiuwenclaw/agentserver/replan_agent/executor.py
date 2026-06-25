@@ -723,6 +723,26 @@ class RePlanExecutor:
             "channel": _channel_id_var.set(channel_id),
         }
 
+        # 绑定 send_file 路由上下文（请求级，按 async 上下文隔离）。
+        # send_file_to_user 工具按全局名注册成单例，并发请求会互相覆盖实例字段；
+        # 工具执行时优先读此 ContextVar，避免会话串扰。
+        try:
+            from jiuwenclaw.agentserver.tools.subagent_executor.context_vars import (
+                set_send_file_request_context,
+            )
+
+            metadata = inputs.get("metadata")
+            tokens["send_file_ctx"] = set_send_file_request_context(
+                request_id=request_id,
+                session_id=session_id,
+                channel_id=channel_id,
+                metadata=metadata if isinstance(metadata, dict) else None,
+            )
+        except Exception as exc:
+            logger.warning(
+                "[RePlanExecutor] set send_file request context failed: %s", exc
+            )
+
         effective_project_dir = inputs.get("effective_project_dir")
         if isinstance(effective_project_dir, str) and effective_project_dir.strip():
             try:
@@ -769,6 +789,17 @@ class RePlanExecutor:
             _task_states_var.reset(tokens["task_states"])
         if "task_events_queue" in tokens:
             _task_events_queue_var.reset(tokens["task_events_queue"])
+        if "send_file_ctx" in tokens:
+            try:
+                from jiuwenclaw.agentserver.tools.subagent_executor.context_vars import (
+                    reset_send_file_request_context,
+                )
+
+                reset_send_file_request_context(tokens["send_file_ctx"])
+            except Exception as exc:
+                logger.warning(
+                    "[RePlanExecutor] reset send_file request context failed: %s", exc
+                )
         _channel_id_var.reset(tokens["channel"])
         _request_id_var.reset(tokens["request"])
         _session_var.reset(tokens["session"])

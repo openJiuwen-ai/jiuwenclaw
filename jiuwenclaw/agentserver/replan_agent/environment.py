@@ -369,6 +369,12 @@ class RePlanEnvironment:
         tool_id = getattr(tool_card, "id", None)
         if not tool_id:
             return None
+        # 注意：这里按全局 tool_id 从共享的 Runner.resource_mgr 现取实例。
+        # 与 deep agent 不同——deep 每个 session 持有独立 adapter/ability_manager 实例，
+        # 工具实例天然按 session 隔离；而 replan 各 session 注册的工具用同一个固定 tool_id，
+        # 后注册者会覆盖前者，并发请求下这里必然取到“最后注册”的那个实例。
+        # 因此对 send_file_to_user 这类携带 session 路由信息的工具，绝不能依赖其实例字段，
+        # 必须在工具执行时从请求级 ContextVar 解析 session（见 send_file_to_user._resolve_route）。
         tool = Runner.resource_mgr.get_tool(tool_id)
         if tool is None:
             return None
