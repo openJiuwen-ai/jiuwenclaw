@@ -42,6 +42,7 @@ import os
 import re
 import shutil
 import sys
+import threading
 import time
 import contextlib
 from collections import OrderedDict
@@ -1546,6 +1547,111 @@ def get_shared_agent_skills_dirs() -> list[Path]:
 
     raw = read_env("JIUWENCLAW_SHARED_SKILLS_DIRS", "")
     return parse_shared_skills_dirs_raw(raw)
+
+
+_BOOTSTRAP_SKILL_ROW_RE = re.compile(r"^\|\s*`([a-z][-a-z0-9]*)`\s*\|", re.MULTILINE)
+
+
+def parse_bootstrap_skill_names(content: str) -> set[str]:
+    """Parse official skill names from ``BOOTSTRAP.md`` table rows.
+
+    Matches relay-claw ``getBootstrapSkillNames``:
+    ``| `skill-name` | ...``
+    """
+    names: set[str] = set()
+    for match in _BOOTSTRAP_SKILL_ROW_RE.finditer(content or ""):
+        name = match.group(1)
+        if name:
+            names.add(name)
+    return names
+
+
+_bootstrap_skill_names_cache: set[str] | None = None
+_bootstrap_skill_names_cache_lock = threading.Lock()
+_extra_bootstrap_skill_roots: set[str] = set()
+_extra_bootstrap_skill_roots_lock = threading.Lock()
+
+
+def prime_bootstrap_skill_roots(skill_dirs: str | list[str]) -> None:
+    """Register skill roots from SkillEvolutionRail -- may differ from read_env timing."""
+    global _bootstrap_skill_names_cache
+    raw_dirs = [skill_dirs] if isinstance(skill_dirs, (str, Path)) else list(skill_dirs)
+    with _extra_bootstrap_skill_roots_lock:
+        for part in raw_dirs:
+            _extra_bootstrap_skill_roots.add(str(Path(part).expanduser().resolve()))
+    _bootstrap_skill_names_cache = None
+
+
+def _iter_bootstrap_skill_roots() -> list[Path]:
+    """Skill roots that may host ``BOOTSTRAP.md`` -- shared env + registered + rail dirs."""
+    shared = get_shared_agent_skills_dirs()
+    registered = resolve_agent_registered_skill_dirs()
+    with _extra_bootstrap_skill_roots_lock:
+        extra_keys = set(_extra_bootstrap_skill_roots)
+
+    roots: list[Path] = []
+    seen: set[str] = set()
+    for path in (*shared, *registered, *(Path(key) for key in extra_keys)):
+        key = str(path.resolve())
+        if key in seen:
+            continue
+        seen.add(key)
+        roots.append(path)
+
+    return roots
+
+
+def get_bootstrap_skill_names(*, refresh: bool = False) -> set[str]:
+    """Return official skill names declared in shared ``BOOTSTRAP.md`` files."""
+    global _bootstrap_skill_names_cache
+    if not refresh:
+        cached: None | set[str] = _bootstrap_skill_names_cache
+        if cached is not None:
+            return set(cached)
+
+    with _bootstrap_skill_names_cache_lock:
+        if not refresh and _bootstrap_skill_names_cache is not None:
+            return set(_bootstrap_skill_names_cache)
+
+        names: set[str] = set()
+        roots = _iter_bootstrap_skill_roots()
+        for skills_dir in roots:
+            bootstrap_path = skills_dir / "BOOTSTRAP.md"
+            if not bootstrap_path.is_file():
+                continue
+            try:
+                content = bootstrap_path.read_text(encoding="utf-8")
+            except OSError as exc:
+                logger.debug("[bootstrap-skills] read failed -- path=%s (%s)", bootstrap_path, exc)
+                continue
+            names.update(parse_bootstrap_skill_names(content))
+
+        # Avoid poisoning cache with {} before SHARED_SKILLS / session dirs are ready.
+        if names or not roots:
+            _bootstrap_skill_names_cache = set(names)
+            if names:
+                logger.info(
+                    "[bootstrap-skills] builtin skills excluded from evolution -- %s",
+                    sorted(names),
+                )
+            elif roots:
+                logger.warning(
+                    "[bootstrap-skills] no builtin skills parsed -- BOOTSTRAP.md missing or empty, roots=%s",
+                    [str(p) for p in roots],
+                )
+        else:
+            logger.warning(
+                "[bootstrap-skills] no skill roots yet -- builtin filter deferred, not caching empty",
+            )
+        return set(names)
+
+
+def is_bootstrap_builtin_skill(skill_name: str) -> bool:
+    """Whether *skill_name* is an official preset skill from ``BOOTSTRAP.md``."""
+    normalized = (skill_name or "").strip().lower()
+    if not normalized:
+        return False
+    return normalized in get_bootstrap_skill_names()
 
 
 def resolve_agent_registered_skill_dirs() -> list[Path]:

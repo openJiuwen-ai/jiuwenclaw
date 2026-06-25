@@ -73,7 +73,7 @@ from openjiuwen.harness.factory import create_deep_agent
 from openjiuwen.harness.subagents.code_agent import create_code_agent
 from openjiuwen.harness.prompts import resolve_language
 from openjiuwen.harness.prompts.sections.memory import build_memory_section
-from openjiuwen.harness.rails import SkillUseRail, TaskPlanningRail, SecurityRail, SkillEvolutionRail
+from openjiuwen.harness.rails import SkillUseRail, TaskPlanningRail, SecurityRail
 from openjiuwen.harness.rails.subagent_rail import SubagentRail
 from openjiuwen.harness.rails.lsp_rail import LspRail
 from openjiuwen.harness.rails.context_engineering_rail import ContextEngineeringRail
@@ -113,6 +113,7 @@ from openjiuwen.core.context_engine.qa_block.config import QABlockConfig
 from jiuwenclaw.runtime.shell_pip_patch import set_skill_credential_provider
 from jiuwenclaw.agentserver.utils import DEFAULT_ENABLE_READ_IMAGE_MULTIMODAL
 from jiuwenclaw.agentserver.deep_agent.cron_runtime import CronRuntimeBridge
+from jiuwenclaw.agentserver.deep_agent.skill_evolution_rail import JiuClawSkillEvolutionRail
 from jiuwenclaw.agentserver.deep_agent.ask_user_question_registry import (
     ASK_REQUEST_PREFIX,
     AskUserQuestionRegistry,
@@ -322,6 +323,7 @@ from jiuwenclaw.utils import (
     get_checkpoint_dir,
     get_env_file,
     get_agent_root_dir,
+    is_bootstrap_builtin_skill,
 )
 
 load_dotenv(dotenv_path=get_env_file())
@@ -1158,7 +1160,7 @@ class JiuWenClawDeepAdapter:
         self._external_memory_fingerprint: str | None = None
         self._lsp_rail: LspRail | None = None
         self._heartbeat_rail: HeartbeatRail | None = None
-        self._skill_evolution_rail: SkillEvolutionRail | None = None
+        self._skill_evolution_rail: JiuClawSkillEvolutionRail | None = None
         self._subagent_rail: SubagentRail | None = None
         self._disabled_tools_rail: DisabledToolsRail | None = None
         self._progressive_tool_rail: JiuWenProgressiveToolRail | None = None
@@ -2225,15 +2227,16 @@ class JiuWenClawDeepAdapter:
         """Resolve directory for FileTrajectoryStore (always use default)."""
         return get_agent_evolution_trajectories_dir()
 
-    def _build_skill_evolution_rail(self, config: dict[str, Any]) -> SkillEvolutionRail | None:
-        """Build SkillEvolutionRail."""
+    def _build_skill_evolution_rail(self, config: dict[str, Any]) -> JiuClawSkillEvolutionRail | None:
+        """Build JiuClawSkillEvolutionRail with BOOTSTRAP.md builtin skill exclusion."""
         try:
             evolution_auto_scan = config.get("evolution", {}).get("auto_scan", False)
             evolution_auto_save = config.get("evolution", {}).get("auto_save", True)
-            
+
             trajectory_dir = self._resolve_evolution_trajectory_dir()
-            skill_evolution_rail = SkillEvolutionRail(
-                skills_dir=self._registered_skill_dirs_for_rail(),
+            registered_skill_dirs = self._registered_skill_dirs_for_rail()
+            skill_evolution_rail = JiuClawSkillEvolutionRail(
+                skills_dir=registered_skill_dirs,
                 llm=self._model,
                 model=config.get("model_name", "gpt-4"),
                 auto_scan=evolution_auto_scan,
@@ -4889,6 +4892,23 @@ class JiuWenClawDeepAdapter:
     # /evolve, /evolve_list, /evolve_simplify & /solidify command handlers
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _filter_evolution_eligible_skill_names(skill_names: list[str]) -> list[str]:
+        return [name for name in skill_names if not is_bootstrap_builtin_skill(name)]
+
+    @staticmethod
+    def _guard_bootstrap_skill(skill_name: str) -> dict[str, Any] | None:
+        """Return error response if *skill_name* is a built-in BOOTSTRAP skill."""
+        if not is_bootstrap_builtin_skill(skill_name):
+            return None
+        return {
+            "output": (
+                f"Skill '{skill_name}' 为内置官方技能，"
+                f"不参与 Skill 自演进。"
+            ),
+            "result_type": "error",
+        }
+
     async def _handle_evolve_command(self, query: str, session_id: str) -> dict[str, Any]:
         """/evolve [list | <skill_name>] handler using the optimizer path.
 
@@ -4903,7 +4923,7 @@ class JiuWenClawDeepAdapter:
         assert rail is not None
         store = rail.store
 
-        skill_names = store.list_skill_names()
+        skill_names = self._filter_evolution_eligible_skill_names(store.list_skill_names())
 
         parts = query.split(maxsplit=1)
         skill_arg = parts[1].strip() if len(parts) > 1 else ""
@@ -4912,7 +4932,7 @@ class JiuWenClawDeepAdapter:
         if not skill_arg or skill_arg == "list":
             if not skill_names:
                 return {
-                    "output": "当前 skills_base_dir 下未找到任何 Skill 目录。",
+                    "output": "当前 skills_base_dir 下未找到可参与自演进的 Skill 目录。",
                     "result_type": "answer",
                 }
             summary = await store.list_pending_summary(skill_names)
@@ -4923,6 +4943,9 @@ class JiuWenClawDeepAdapter:
 
         # --- /evolve <skill_name> ---
         skill_name = skill_arg
+        err = self._guard_bootstrap_skill(skill_name)
+        if err:
+            return err
         if skill_name not in skill_names:
             available = "、".join(skill_names) or "（无可用 Skill）"
             return {
@@ -5030,7 +5053,7 @@ class JiuWenClawDeepAdapter:
             logger.debug("[JiuWenClaw] _collect_messages_for_evolve failed: %s", exc)
             return []
 
-        return SkillEvolutionRail._parse_messages(raw_messages)
+        return JiuClawSkillEvolutionRail.parse_messages(raw_messages)
 
     async def _handle_solidify_command(self, query: str) -> dict[str, Any]:
         """/solidify <skill_name> handler using the new online EvolutionStore."""
@@ -5045,6 +5068,10 @@ class JiuWenClawDeepAdapter:
                 "output": "请指定 Skill 名称：`/solidify <skill_name>`",
                 "result_type": "error",
             }
+
+        err = self._guard_bootstrap_skill(skill_name)
+        if err:
+            return err
 
         count = await store.solidify(skill_name)
         if count == 0:
@@ -5066,9 +5093,12 @@ class JiuWenClawDeepAdapter:
                 "output": "请指定 Skill 名称：`/evolve_list <skill_name>`",
                 "result_type": "error",
             }
+        err = self._guard_bootstrap_skill(skill_name)
+        if err:
+            return err
 
         if not store.skill_exists(skill_name):
-            available = "、".join(store.list_skill_names()) or "（无可用 Skill）"
+            available = "、".join(self._filter_evolution_eligible_skill_names(store.list_skill_names())) or "（无可用 Skill）"
             return {
                 "output": f"未找到 Skill '{skill_name}'。当前可用：{available}",
                 "result_type": "error",
@@ -5128,9 +5158,12 @@ class JiuWenClawDeepAdapter:
                 "output": "请指定 Skill 名称：`/evolve_simplify <skill_name> [--dry-run]`",
                 "result_type": "error",
             }
+        err = self._guard_bootstrap_skill(skill_name)
+        if err:
+            return err
 
         if not store.skill_exists(skill_name):
-            available = "、".join(store.list_skill_names()) or "（无可用 Skill）"
+            available = "、".join(self._filter_evolution_eligible_skill_names(store.list_skill_names())) or "（无可用 Skill）"
             return {
                 "output": f"未找到 Skill '{skill_name}'。当前可用：{available}",
                 "result_type": "error",
@@ -5198,7 +5231,7 @@ class JiuWenClawDeepAdapter:
 
         if not skill_name:
             archives_hint = ""
-            for name in store.list_skill_names():
+            for name in self._filter_evolution_eligible_skill_names(store.list_skill_names()):
                 archives = store.list_archives(name)
                 body_versions = [a for a in archives if a.startswith("SKILL.v")]
                 if body_versions:
@@ -5210,9 +5243,12 @@ class JiuWenClawDeepAdapter:
                 ),
                 "result_type": "error",
             }
+        err = self._guard_bootstrap_skill(skill_name)
+        if err:
+            return err
 
         if not store.skill_exists(skill_name):
-            available = "、".join(store.list_skill_names()) or "（无可用 Skill）"
+            available = "、".join(self._filter_evolution_eligible_skill_names(store.list_skill_names())) or "（无可用 Skill）"
             return {
                 "output": f"未找到 Skill '{skill_name}'。当前可用：{available}",
                 "result_type": "error",

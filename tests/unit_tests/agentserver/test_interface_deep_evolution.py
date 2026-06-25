@@ -43,7 +43,7 @@ def _setup_mocks(monkeypatch: pytest.MonkeyPatch):
     
     monkeypatch.setattr(
         interface_deep_module,
-        "SkillEvolutionRail",
+        "JiuClawSkillEvolutionRail",
         mock_skill_evolution_rail
     )
     
