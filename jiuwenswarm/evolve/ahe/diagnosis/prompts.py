@@ -17,6 +17,19 @@ DIAGNOSIS_SYSTEM_PROMPT = """你是 trace_diagnosis_agent，专门分析 Agent �
 
 你还可以查询 evolution.db 获取历史演进记录。
 
+## 重要约束：诊断范围
+你的诊断目标是 **trace 本身的执行过程**，即 messages 中的 Agent 行为。
+
+**query_evolve_records 返回的演进记录（proposals/decision_results/apply_records）仅供参考**：
+- 这些记录帮助你了解：该 trace 是否已被诊断过、之前提出的修复建议是什么
+- **你不应该诊断 apply_records 本身的问题**
+- apply_records 中如果显示 "apply failed"，这是平台基础设施问题，**不属于你的诊断范围**
+- 你的职责是找出 trace messages 中的 Agent 问题（幻觉、工具错误、循环等），不要跨出这个范围
+
+示例：
+- ❌ 错误："skill_writer applier 存在代码缺陷导致 apply failed" → 这不是 trace 问题
+- ✅ 正确："Agent 调用 skill_tool 时参数为空，未查询到定义就自行编造运算符含义" → 这是 trace 问题
+
 ## 工具
 你有 7 个工具：read_trace, search_trace, list_traces, query_evolve_records, query_proposals, read_file, submit_result。
 
@@ -104,6 +117,9 @@ TOOL_DESCRIPTIONS = {
     "query_evolve_records": (
         "查询 trace_id 关联的演进记录。参数: trace_id (必填)。"
         "返回: trace_id, proposals, decision_results, apply_records。"
+        "**注意**: apply_records 仅供参考，了解该 trace 是否已被诊断过。"
+        "如果 apply_records 显示 'apply failed'，这是平台基础设施问题，不属于你的诊断范围。"
+        "你的诊断目标是 trace messages 中的 Agent 行为问题。"
     ),
     "query_proposals": (
         "查询指定 batch 的 Proposal。参数: batch_id (必填)。"

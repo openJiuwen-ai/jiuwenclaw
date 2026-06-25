@@ -38,6 +38,11 @@ class ExperienceGovernor:
         # ctx tells Proposer what operations are allowed
         valid = governor.validate_operation("bash-tool", operation)
         # valid tells Decision if the operation is within bounds
+
+    IMPORTANT: Only allows operations on USER skills that ALREADY EXIST in workspace.
+    - BUILTIN/SYSTEM skills (in package resources) are PROTECTED
+    - New skills cannot be created (no mkdir for non-existent skills)
+    - Only existing skills in workspace/skills can be modified
     """
 
     def __init__(
@@ -53,6 +58,35 @@ class ExperienceGovernor:
                 get_user_workspace_dir() / "agent" / "workspace" / "skills"
             )
         self._max_per_skill = max_per_skill
+        self._builtin_skills = self._load_builtin_skills()
+        self._user_skills = self._load_user_skills()
+
+    def get_user_skill_names(self) -> set[str]:
+        """Get the set of user skills that can be modified.
+
+        Returns only skills that:
+        1. Already exist in workspace/skills directory
+        2. Are NOT builtin/system skills
+
+        This is the whitelist of editable skills.
+        """
+        return self._user_skills
+
+    def is_skill_editable(self, skill_name: str) -> bool:
+        """Check if a skill name is editable (exists in user workspace and is not builtin).
+
+        Args:
+            skill_name: Skill name to check.
+
+        Returns:
+            True if skill exists in user workspace and can be modified.
+        """
+        # Must not be a builtin/system skill
+        if self._is_builtin_skill(skill_name):
+            return False
+
+        # Must exist in user workspace skills directory
+        return skill_name in self._user_skills
 
     def get_context(
         self,
@@ -69,7 +103,54 @@ class ExperienceGovernor:
         Returns:
             GovernanceContext with classification of existing experiences
             and allowed operations based on current state.
+
+        CRITICAL SAFETY CHECKS:
+        1. If skill is a BUILTIN/SYSTEM skill → NO operations allowed
+        2. If skill does NOT EXIST in user workspace → NO operations allowed
+           (cannot create new skills, only modify existing ones)
         """
+        # Safety Check 1: Is this a builtin/system skill?
+        if self._is_builtin_skill(skill_name):
+            logger.warning(
+                "ExperienceGovernor: skill '%s' is a builtin/system skill, "
+                "no modifications allowed",
+                skill_name,
+            )
+            return GovernanceContext(
+                skill_name=skill_name,
+                current_count=0,
+                max_count=0,
+                can_add=False,
+                existing_experiences=[],
+                similar_experiences=[],
+                replaceable_experiences=[],
+                protected_experiences=[],
+                allowed_operations=[ExperienceOperationType.NOOP],
+            )
+
+        # Safety Check 2: Does this skill exist in user workspace?
+        # Cannot create new skills - only modify existing ones
+        skill_dir = self._skills_dir / skill_name
+        if not skill_dir.exists() or not skill_dir.is_dir():
+            logger.warning(
+                "ExperienceGovernor: skill '%s' does NOT exist in user workspace "
+                "(skills_dir=%s). Cannot create new skills, only modify existing ones. "
+                "This might be a hallucination from diagnosis_result.",
+                skill_name,
+                self._skills_dir,
+            )
+            return GovernanceContext(
+                skill_name=skill_name,
+                current_count=0,
+                max_count=0,
+                can_add=False,
+                existing_experiences=[],
+                similar_experiences=[],
+                replaceable_experiences=[],
+                protected_experiences=[],
+                allowed_operations=[ExperienceOperationType.NOOP],
+            )
+
         evo_path = self._skills_dir / skill_name / "evolutions.json"
         entries = self._load_entries(evo_path)
         current_count = len(entries)
@@ -105,10 +186,19 @@ class ExperienceGovernor:
 
         Called by AheDecisionPolicy during RuleGate phase.
         Returns False if:
+        - skill is a BUILTIN/SYSTEM skill (PROTECTED)
         - op not in allowed_operations
         - ADD when can_add=False
         - REPLACE/MERGE targeting a protected or non-replaceable experience
         """
+        # First check: is this a builtin/system skill?
+        if self._is_builtin_skill(skill_name):
+            logger.warning(
+                "ExperienceGovernor: rejecting operation on builtin/system skill '%s'",
+                skill_name,
+            )
+            return False
+
         ctx = self.get_context(
             skill_name,
             query_hint=operation.new_content if operation.new_content else None,
@@ -137,6 +227,56 @@ class ExperienceGovernor:
         return True
 
     # ── Internal helpers ──────────────────────────────────────────────
+
+    @staticmethod
+    def _load_builtin_skills() -> set[str]:
+        """Load the set of builtin/system skill names from package resources.
+
+        Builtin skills are protected and cannot be modified by evolution.
+        """
+        try:
+            from jiuwenswarm.common.utils import get_builtin_skills_dir
+            builtin_dir = get_builtin_skills_dir()
+            if not builtin_dir.exists():
+                return set()
+            return {item.name for item in builtin_dir.iterdir() if item.is_dir()}
+        except Exception as exc:
+            logger.warning("ExperienceGovernor._load_builtin_skills failed: %s", exc)
+            return set()
+
+    def _load_user_skills(self) -> set[str]:
+        """Load the set of user skills that exist in workspace/skills directory.
+
+        These are the ONLY skills that can be modified by evolution.
+        New skills cannot be created - only existing ones can be modified.
+
+        Filtering rules:
+        1. Skill must exist as a directory in workspace/skills
+        2. Skill must NOT be a builtin/system skill
+        """
+        if not self._skills_dir.exists():
+            return set()
+
+        user_skills = set()
+        for item in self._skills_dir.iterdir():
+            if item.is_dir():
+                # Filter: Not a builtin skill
+                if item.name not in self._builtin_skills:
+                    user_skills.add(item.name)
+
+        return user_skills
+
+    def _is_builtin_skill(self, skill_name: str) -> bool:
+        """Check if skill_name is a builtin/system skill.
+
+        Args:
+            skill_name: Skill name to check.
+
+        Returns:
+            True if skill is a builtin/system skill (protected).
+        """
+        # Check against builtin skills list
+        return skill_name in self._builtin_skills
 
     @staticmethod
     def _load_entries(evo_path: Path) -> list[dict]:

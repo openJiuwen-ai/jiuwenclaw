@@ -115,9 +115,13 @@ class AheDecisionPolicy(DecisionPolicy):
             for op_dict in operations_raw:
                 try:
                     op = ExperienceOperation(**op_dict)
-                    if not self._governor.validate_operation(
-                        proposal.target_id or "general", op
-                    ):
+                    # Check target_id - must be a user skill, not system/builtin skill
+                    target_skill = proposal.target_id
+                    if not target_skill:
+                        # No target_id means no specific skill - reject
+                        failed_checks.append("no_target_skill")
+                        continue
+                    if not self._governor.validate_operation(target_skill, op):
                         failed_checks.append(f"governance_violation_{op.op.value}")
                 except Exception as exc:
                     failed_checks.append(f"invalid_operation_{exc}")
@@ -186,12 +190,17 @@ class AheDecisionPolicy(DecisionPolicy):
         )
 
         # Add governance context for this skill
-        ctx = self._governor.get_context(proposal.target_id or "general")
-        user_content += (
-            f"\n## Governance Context\n"
-            f"- skill: {ctx.skill_name}\n"
-            f"- existing experiences: {ctx.current_count}/{ctx.max_count}\n"
-            f"- allowed operations: {[o.value for o in ctx.allowed_operations]}\n"
+        target_skill = proposal.target_id
+        if not target_skill:
+            # No target skill - skip governance context (will be rejected by governance check)
+            user_content += "\n## Governance Context\n- No target skill specified (will be rejected)\n"
+        else:
+            ctx = self._governor.get_context(target_skill)
+            user_content += (
+                f"\n## Governance Context\n"
+                f"- skill: {ctx.skill_name}\n"
+                f"- existing experiences: {ctx.current_count}/{ctx.max_count}\n"
+                f"- allowed operations: {[o.value for o in ctx.allowed_operations]}\n"
         )
 
         try:

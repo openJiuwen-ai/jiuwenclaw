@@ -120,9 +120,51 @@ class SkillExperienceWriter(ApplyWriter):
 
         try:
             skill_name = _resolve_skill_name(proposal)
-            skill_dir = self._skills_dir / skill_name
-            skill_dir.mkdir(parents=True, exist_ok=True)
 
+            # SAFETY CHECK 1: Is this a builtin/system skill?
+            if self._is_builtin_skill(skill_name):
+                logger.error(
+                    "SkillExperienceWriter: rejecting write to builtin/system skill '%s'",
+                    skill_name,
+                )
+                return ApplyRecord(
+                    proposal_id=proposal.proposal_id,
+                    target_type=ProposalTargetType.SKILL,
+                    target_store=TargetStore.SKILL_EXPERIENCE_STORE,
+                    status=ApplyStatus.REJECTED,
+                    reason=(
+                        f"skill '{skill_name}' is a builtin/system skill "
+                        "and cannot be modified by evolution."
+                    ),
+                    applier_name=self.name,
+                )
+
+            # SAFETY CHECK 2: Does this skill already exist in user workspace?
+            # CRITICAL: Cannot create new skills - only modify existing ones
+            skill_dir = self._skills_dir / skill_name
+            if not skill_dir.exists() or not skill_dir.is_dir():
+                logger.error(
+                    "SkillExperienceWriter: skill '%s' does NOT exist in user workspace "
+                    "(skills_dir=%s). Cannot create new skills, only modify existing ones.",
+                    skill_name,
+                    self._skills_dir,
+                )
+                return ApplyRecord(
+                    proposal_id=proposal.proposal_id,
+                    target_type=ProposalTargetType.SKILL,
+                    target_store=TargetStore.SKILL_EXPERIENCE_STORE,
+                    status=ApplyStatus.REJECTED,
+                    reason=(
+                        f"skill '{skill_name}' does not exist in user workspace "
+                        f"(skills_dir={self._skills_dir}). "
+                        "Evolution can only modify EXISTING skills, "
+                        "cannot create new skills. "
+                        "This proposal might have hallucinated skill name."
+                    ),
+                    applier_name=self.name,
+                )
+
+            # Skill exists - proceed with modification (no mkdir needed)
             evolution_path = skill_dir / "evolutions.json"
 
             # Read existing log or create a fresh one
@@ -281,6 +323,30 @@ class SkillExperienceWriter(ApplyWriter):
         }
 
         return record
+
+    def _is_builtin_skill(self, skill_name: str) -> bool:
+        """Check if skill_name is a builtin/system skill.
+
+        System skills are protected and cannot be modified by evolution.
+        Only USER skills in workspace/skills can be modified.
+
+        Args:
+            skill_name: Skill name to check.
+
+        Returns:
+            True if skill is a builtin/system skill (protected).
+        """
+        # Check against builtin skills from package resources
+        try:
+            from jiuwenswarm.common.utils import get_builtin_skills_dir
+            builtin_dir = get_builtin_skills_dir()
+            if builtin_dir.exists():
+                builtin_skills = {item.name for item in builtin_dir.iterdir() if item.is_dir()}
+                return skill_name in builtin_skills
+        except Exception as exc:
+            logger.warning("SkillExperienceWriter._is_builtin_skill check failed: %s", exc)
+
+        return False
 
     # ── PDA ExperienceOperation handlers ──────────────────────────────
 

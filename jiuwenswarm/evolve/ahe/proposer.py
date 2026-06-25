@@ -157,12 +157,30 @@ class AheProposer(ProposalGenerator):
 
         # ── Step 5: GOV — get governance context ──
         skill_names = self._extract_skill_names(diagnosis_result, failed)
+
+        # SAFETY: If no valid editable skills found, skip proposal generation
+        # This prevents proposals for:
+        # - Non-existent skills (hallucination from diagnosis)
+        # - Builtin/system skills (protected)
+        # - "general" (protected fallback)
+        if not skill_names:
+            logger.warning(
+                "AheProposer: no editable skills found in user workspace "
+                "(skills_dir=%s). "
+                "Editable skills: %s. "
+                "Skipping proposal generation to prevent creating/modifying invalid skills. "
+                "This trace might not be related to any user skill.",
+                self._gov._skills_dir,
+                self._gov.get_user_skill_names(),
+            )
+            return []
+
         governance_contexts = {
             name: self._gov.get_context(name)
             for name in skill_names
         }
 
-        logger.info("governance contenxt is %s", governance_contexts)
+        logger.info("governance context is %s", governance_contexts)
 
         # ── Step 6: PROPOSE — LLM call ──
         proposals_raw = await self._call_llm_propose(
@@ -188,12 +206,19 @@ class AheProposer(ProposalGenerator):
     ) -> set[str]:
         """Extract skill names from trace data and diagnosis issues.
 
-        Priority:
-        1. Direct extraction from NormalizedTrace tool_calls (most reliable)
-        2. Extraction from diagnosis issues (fallback)
-        3. Fallback to "general" if nothing found
+        IMPORTANT SAFETY CHECKS:
+        1. Extract from trace data and diagnosis issues
+        2. VALIDATE each skill name against user workspace
+        3. Filter out skills that don't exist in user workspace
+        4. Filter out builtin/system skills
+        5. Return empty set if no valid skills found
+
+        This prevents:
+        - Hallucinated skill names from diagnosis_result
+        - Fallback to "general" (which is protected)
+        - Creating new skills that don't exist
         """
-        names = set()
+        raw_names = set()
 
         # 1. Direct extraction from NormalizedTrace tool_calls
         for nt, _ in failed_traces:
@@ -208,16 +233,16 @@ class AheProposer(ProposalGenerator):
                         if isinstance(input_data, dict):
                             skill_name = input_data.get("skill_name")
                             if skill_name:
-                                names.add(skill_name)
+                                raw_names.add(skill_name)
                         # Or from input string (parse if needed)
                         elif isinstance(input_data, str) and "skill_name" in input_data:
                             import re as _re
                             m = _re.search(r'"skill_name"\s*["\']?\s*["\':]\s*["\']([^"\']+)["\']', input_data)
                             if m:
-                                names.add(m.group(1))
+                                raw_names.add(m.group(1))
 
         # 2. Extraction from diagnosis issues (fallback)
-        if not names and diagnosis_result and diagnosis_result.issues:
+        if not raw_names and diagnosis_result and diagnosis_result.issues:
             for issue in diagnosis_result.issues:
                 # Priority: check root_cause and suggested_fix for skill_name
                 text_fields = [
@@ -235,39 +260,66 @@ class AheProposer(ProposalGenerator):
                     # Pattern 1: "skill_name=xxx:" (explicit marker from DiagnosisAgent)
                     m = _re.search(r'skill_name\s*=\s*([a-zA-Z0-9_-]+)', combined_text)
                     if m:
-                        names.add(m.group(1))
+                        raw_names.add(m.group(1))
                         continue
 
                     # Pattern 2: "skill xxx 存在缺陷" or "skill xxx 有问题"
                     m = _re.search(r'skill\s+([a-zA-Z0-9_-]+)\s+(?:存在|有)', combined_text)
                     if m:
-                        names.add(m.group(1))
+                        raw_names.add(m.group(1))
                         continue
 
                     # Pattern 3: "修复 skill xxx" or "修改 skill xxx"
                     m = _re.search(r'(?:修复|修改|添加)\s+skill\s+([a-zA-Z0-9_-]+)', combined_text)
                     if m:
-                        names.add(m.group(1))
+                        raw_names.add(m.group(1))
                         continue
 
                     # Pattern 4: "csv-row-counter skill" or similar patterns
                     m = _re.search(r'([a-zA-Z0-9_-]+)\s+skill', combined_text)
                     if m:
-                        names.add(m.group(1))
+                        raw_names.add(m.group(1))
                         continue
 
                     # Pattern 5: skill_tool 调用
                     m = _re.search(r'skill_tool(?:\s*调用)?(?:\s*[的的是])?\s*["\']?([a-zA-Z0-9_-]+)', combined_text)
                     if m:
-                        names.add(m.group(1))
+                        raw_names.add(m.group(1))
                         continue
 
-        # 3. Fallback to "general"
-        if not names:
-            names.add("general")
+        logger.info("Raw extracted skill names (before validation): %s", raw_names)
 
-        logger.info("Extracted skill names: %s", names)
-        return names
+        # 3. VALIDATE: Filter against user editable skills
+        # Get the list of skills that actually exist in user workspace
+        editable_skills = self._gov.get_user_skill_names()
+
+        valid_names = set()
+        rejected_names = set()
+
+        for name in raw_names:
+            if self._gov.is_skill_editable(name):
+                valid_names.add(name)
+            else:
+                rejected_names.add(name)
+
+        # Log warnings for rejected names
+        if rejected_names:
+            logger.warning(
+                "AheProposer: rejected skill names (not editable or doesn't exist): %s. "
+                "This might be hallucination from diagnosis_result. "
+                "Editable skills are: %s",
+                rejected_names,
+                editable_skills,
+            )
+
+        # Log result
+        logger.info(
+            "Validated skill names: %s (editable_skills=%s)",
+            valid_names,
+            editable_skills,
+        )
+
+        return valid_names
 
     async def _call_llm_propose(
         self,

@@ -85,5 +85,24 @@ class OpenAIModelWrapper:
         # Call OpenAI API
         response = await self._client.chat.completions.create(**params)
 
-        # Return raw response object (contains message.tool_calls if tools provided)
-        return response
+        # Extract message from response
+        message = response.choices[0].message
+
+        # Create wrapper that exposes both .content and .choices for compatibility
+        # Some callers use response.content, others use response.choices[0].message.content
+        class SimpleResponse:
+            """Response wrapper compatible with both .content and .choices access patterns."""
+            def __init__(self, content: str, tool_calls: list | None, original_message: Any):
+                self.content = content
+                self.tool_calls = tool_calls
+                # Create a fake choices structure for compatibility
+                class FakeChoice:
+                    def __init__(self, msg):
+                        self.message = msg
+                self.choices = [FakeChoice(original_message)]
+
+        return SimpleResponse(
+            content=message.content or "",
+            tool_calls=message.tool_calls if hasattr(message, "tool_calls") else None,
+            original_message=message,
+        )
