@@ -212,7 +212,50 @@ def _resource_list(value: Any) -> list[dict[str, Any]]:
 
 def _resource_filename(resource: dict[str, Any]) -> str:
     value = resource.get("filename") or resource.get("name") or ""
-    return str(value).strip()
+    name = str(value).strip()
+    if name:
+        return name
+    path_value = str(resource.get("path") or "").strip()
+    if path_value:
+        return Path(path_value).name
+    return ""
+
+
+def _resource_source_url(resource: dict[str, Any]) -> str:
+    for key in ("url", "uri", "innerurl", "innerUrl"):
+        value = str(resource.get(key) or "").strip()
+        if value:
+            return value
+    return ""
+
+
+_IMAGE_EXTENSIONS = frozenset({".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp", ".svg", ".jfif"})
+
+
+def _resource_mime_type(resource: dict[str, Any]) -> str:
+    for key in ("mime", "mimeType", "type", "content_type", "contentType"):
+        value = str(resource.get(key) or "").strip().lower()
+        if value:
+            return value
+    return ""
+
+
+def _is_image_resource(resource: dict[str, Any], filename: str) -> bool:
+    mime = _resource_mime_type(resource)
+    if mime.startswith("image/"):
+        return True
+    if mime in {"jpeg", "jpg", "png", "gif", "webp", "bmp", "svg", "svg+xml", "jfif"}:
+        return True
+    return Path(filename).suffix.lower() in _IMAGE_EXTENSIONS
+
+
+def _format_ref_file_hint_line(name: str, archive_path: Path, resource: dict[str, Any]) -> str:
+    line = f"- {name} -> 本地路径: {archive_path}"
+    if _is_image_resource(resource, name):
+        source_url = _resource_source_url(resource)
+        if source_url:
+            line = f"{line} ; 可下载url: {source_url}"
+    return line
 
 
 def _resource_has_payload(resource: dict[str, Any]) -> bool:
@@ -268,7 +311,7 @@ def build_current_ref_file_hint_lines(task_workspace: str | Path, files: Any) ->
     for res in resources:
         name = _resource_filename(res)
         archive_path = (ref_dir / name).resolve()
-        lines.append(f"- {name} -> {archive_path}")
+        lines.append(_format_ref_file_hint_line(name, archive_path, res))
         suffix = Path(name).suffix.lower()
         if suffix in (".zip", ".skill"):
             extract_dir = _ref_file_extract_dir(

@@ -728,7 +728,7 @@ class XiaoyiChannel(BaseChannel):
             logger.info(f"XiaoYi: Processed {len(file_attachments)} file(s): {', '.join(file_attachments)}")
 
         # ==================== DOWNLOAD AND SAVE MEDIA FILES ====================
-        media_payload: dict[str, Any] = {}
+        media_payload: list[dict[str, Any]] = []
         if media_files:
             logger.info(f"XiaoYi: Downloading {len(media_files)} media file(s)...")
             from jiuwenclaw.channel.xiaoyi_utils.media import (

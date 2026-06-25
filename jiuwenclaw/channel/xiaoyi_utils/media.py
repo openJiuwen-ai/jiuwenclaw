@@ -36,6 +36,7 @@ class DownloadedMedia:
     content_type: str
     placeholder: str
     file_name: str | None = None
+    source_url: str | None = None
 
 
 @dataclass
@@ -204,6 +205,7 @@ async def download_and_save_media(
             content_type=final_mime_type,
             placeholder=placeholder,
             file_name=file_name,
+            source_url=url,
         )
 
     except ValueError as e:
@@ -253,7 +255,7 @@ async def download_and_save_media_list(
 
 
 # ==================== Media Payload Building ====================
-def build_xiaoyi_media_payload(media_list: list[DownloadedMedia]) -> dict[str, Any]:
+def build_xiaoyi_media_payload(media_list: list[DownloadedMedia]) -> list[dict[str, Any]]:
     """
     构建入站消息的媒体载荷。
 
@@ -261,12 +263,24 @@ def build_xiaoyi_media_payload(media_list: list[DownloadedMedia]) -> dict[str, A
         media_list: 已下载的媒体列表
 
     Returns:
-        dict: 包含 MediaPath, MediaType, MediaPaths, MediaTypes 等字段的载荷
+        list: 每项含 filename/name/url/mime/path，供下游 skilldev 资源同步与提示使用
     """
     if not media_list:
-        return {}
+        return []
 
-    files = [dict(path=str(media.path), type=media.content_type or "") for media in media_list]
+    files: list[dict[str, Any]] = []
+    for media in media_list:
+        filename = media.file_name or os.path.basename(str(media.path))
+        files.append(
+            {
+                "filename": filename,
+                "name": filename,
+                "url": str(media.source_url or ""),
+                "mime": media.content_type or "",
+                "type": media.content_type or "",
+                "path": str(media.path),
+            }
+        )
     return files
 
 

@@ -232,8 +232,8 @@ def test_build_current_ref_file_hint_lines_single_and_multiple(tmp_path: Path) -
     )
 
     assert lines == [
-        f"- requirement.md -> {(ref_dir / 'requirement.md').resolve()}",
-        f"- notes.txt -> {(ref_dir / 'notes.txt').resolve()}",
+        f"- requirement.md -> 本地路径: {(ref_dir / 'requirement.md').resolve()}",
+        f"- notes.txt -> 本地路径: {(ref_dir / 'notes.txt').resolve()}",
     ]
 
 
@@ -246,7 +246,7 @@ def test_build_current_ref_file_hint_lines_zip_includes_extract_dir(tmp_path: Pa
     )
 
     assert lines == [
-        f"- demo.zip -> {(ref_dir / 'demo.zip').resolve()}",
+        f"- demo.zip -> 本地路径: {(ref_dir / 'demo.zip').resolve()}",
         f"  - 解压目录 -> {(ref_dir / 'demo').resolve()}",
     ]
 
@@ -260,7 +260,7 @@ def test_build_current_ref_file_hint_lines_url_zip_extracts_to_ref_dir(tmp_path:
     )
 
     assert lines == [
-        f"- remote.zip -> {(ref_dir / 'remote.zip').resolve()}",
+        f"- remote.zip -> 本地路径: {(ref_dir / 'remote.zip').resolve()}",
         f"  - 解压目录 -> {ref_dir.resolve()}",
     ]
 
@@ -282,6 +282,45 @@ def test_build_current_ref_file_hint_lines_skips_direct_import_and_empty_payload
     assert lines == []
 
 
+def test_build_current_ref_file_hint_lines_image_appends_source_url(tmp_path: Path) -> None:
+    ref_dir = tmp_path / "resources" / "ref-files"
+    ref_dir.mkdir(parents=True)
+    image_url = "https://xiaoyi.example.com/files/222.jpg"
+
+    lines = build_current_ref_file_hint_lines(
+        tmp_path,
+        [
+            {
+                "filename": "222.jpg",
+                "url": image_url,
+                "mime": "image/jpeg",
+            }
+        ],
+    )
+
+    assert lines == [
+        f"- 222.jpg -> 本地路径: {(ref_dir / '222.jpg').resolve()} ; 可下载url: {image_url}",
+    ]
+
+
+def test_build_current_ref_file_hint_lines_non_image_does_not_append_url(tmp_path: Path) -> None:
+    ref_dir = tmp_path / "resources" / "ref-files"
+    ref_dir.mkdir(parents=True)
+
+    lines = build_current_ref_file_hint_lines(
+        tmp_path,
+        [
+            {
+                "filename": "notes.txt",
+                "url": "https://xiaoyi.example.com/files/notes.txt",
+                "mime": "text/plain",
+            }
+        ],
+    )
+
+    assert lines == [f"- notes.txt -> 本地路径: {(ref_dir / 'notes.txt').resolve()}"]
+
+
 def test_build_resource_hint_header_and_file_lines(tmp_path: Path) -> None:
     ref_dir = tmp_path / "resources" / "ref-files"
     ref_dir.mkdir(parents=True)
@@ -297,4 +336,4 @@ def test_build_resource_hint_header_and_file_lines(tmp_path: Path) -> None:
     assert "【本轮上传资源索引（已落盘，可直接读取）】" in hint
     assert "【执行要求】" in hint
     assert "用户上传资源已写入" not in hint
-    assert f"- requirement.md -> {(ref_dir / 'requirement.md').resolve()}" in hint
+    assert f"- requirement.md -> 本地路径: {(ref_dir / 'requirement.md').resolve()}" in hint
