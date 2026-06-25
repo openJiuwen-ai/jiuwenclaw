@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-ALLOWED_ISSUE_TYPES = {"工具错误", "幻觉", "循环", "不合规", "截断"}
+ALLOWED_ISSUE_TYPES = {"工具错误", "幻觉", "循环", "不合规", "截断", "效率问题"}
 
 
 @dataclass
@@ -24,12 +24,9 @@ class DiagnosisIssue:
     root_cause: str | None = None
     suggested_fix: str | None = None
 
-    def __post_init__(self):
-        if self.issue_type not in ALLOWED_ISSUE_TYPES:
-            raise ValueError(
-                f"issue_type must be one of {sorted(ALLOWED_ISSUE_TYPES)}, "
-                f"got '{self.issue_type}'"
-            )
+    # NOTE: Removed __post_init__ validation to allow flexible issue_type
+    # DiagnosisAgent should be free to categorize issues as needed
+    # Proposer can filter/transform issue types as needed
 
 
 @dataclass

@@ -5,6 +5,8 @@ Usage::
 
     jiuwenswarm-evolve run --latest 20
     jiuwenswarm-evolve run --since "2026-06-10T00:00:00"
+    jiuwenswarm-evolve run --trace-ids "abc123,def456,ghi789"
+    jiuwenswarm-evolve run --trace-ids "abc123" --ahe
     jiuwenswarm-evolve list
     jiuwenswarm-evolve show <batch-id>
 """
@@ -139,6 +141,73 @@ def _run_command(args: argparse.Namespace) -> int:
     from jiuwenswarm.common.config import get_config
     from jiuwenswarm.evolve.models import TraceBatch
 
+    # Check for mutually exclusive selection parameters
+    selection_params = [
+        args.latest, args.since, args.benchmark_run_id, args.trace_ids
+    ]
+    used_params = [p for p in selection_params if p is not None]
+
+    if len(used_params) > 1:
+        print(
+            "Error: --trace-ids cannot be used with --latest, --since, or --benchmark-run-id",
+            file=sys.stderr
+        )
+        return 1
+
+    if args.trace_ids:
+        # Parse comma-separated trace IDs
+        trace_ids = [id.strip() for id in args.trace_ids.split(",")]
+
+        if not trace_ids:
+            print("Error: No trace IDs provided", file=sys.stderr)
+            return 1
+
+        config = get_config()
+        pipeline = _build_pipeline_from_config(config, use_ahe=args.ahe)
+        trace_reader = pipeline._store._sqlite
+
+        # Validate trace IDs exist in traces.db
+        all_valid, missing_ids = trace_reader.validate_trace_ids(trace_ids)
+        if not all_valid:
+            print(
+                "Error: The following trace IDs do not exist in traces.db:",
+                file=sys.stderr
+            )
+            for missing in missing_ids:
+                print(f"  - {missing}", file=sys.stderr)
+            print("\nPlease verify the trace IDs and try again.", file=sys.stderr)
+            return 1
+
+        # Create TraceBatch
+        batch = TraceBatch(trace_ids=trace_ids, source="manual")
+
+        print(f"Running evolution pipeline on {len(trace_ids)} traces (batch={batch.batch_id})...")
+
+        async def _run():
+            return await pipeline.run(batch)
+
+        result = asyncio.run(_run())
+
+        print(f"\nPipeline complete: batch={result.batch_id}")
+        print(f"  Proposals: {len(result.proposals)} "
+              f"(active={result.active_count}, rejected={result.rejected_count})")
+        print(f"  Decisions: {len(result.decision_results)}")
+        print(f"  Applied:   {result.applied_count}")
+        if result.errors:
+            print(f"  Errors:    {len(result.errors)}")
+            for e in result.errors:
+                print(f"    - {e}")
+
+        # Show proposals
+        for p in result.proposals:
+            print(f"\n  [{p.state.value}] {p.proposal_type} ({p.target_type.value})")
+            print(f"    Root cause: {p.root_cause[:120]}")
+            print(f"    Fix: {p.targeted_fix.get('action', 'N/A')}")
+            print(f"    ID:  {p.proposal_id}")
+
+        return 0
+
+    # Original logic for --latest, --since, --benchmark-run-id
     config = get_config()
     pipeline = _build_pipeline_from_config(config, use_ahe=args.ahe)
     trace_reader = pipeline._store._sqlite  # type: ignore[union-attr]
@@ -163,7 +232,7 @@ def _run_command(args: argparse.Namespace) -> int:
             metadata={"benchmark_run_id": args.benchmark_run_id},
         )
     else:
-        print("Error: specify --latest, --since, or --benchmark-run-id", file=sys.stderr)
+        print("Error: specify --latest, --since, --benchmark-run-id, or --trace-ids", file=sys.stderr)
         return 1
 
     if not trace_ids:
@@ -277,6 +346,10 @@ def main() -> None:
     run_parser.add_argument(
         "--benchmark-run-id", type=str, metavar="ID",
         help="Process traces from a benchmark run",
+    )
+    run_parser.add_argument(
+        "--trace-ids", type=str, metavar="IDS",
+        help="Comma-separated trace IDs to evolve (mutually exclusive with --latest/--since/--benchmark-run-id)",
     )
     run_parser.add_argument(
         "--ahe", action="store_true",

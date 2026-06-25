@@ -195,17 +195,19 @@ class AheDecisionPolicy(DecisionPolicy):
         )
 
         try:
-            from openjiuwen.core.foundation.llm import (
-                SystemMessage, UserMessage,
-            )
-
+            # Build messages in OpenAI dict format (no openjiuwen dependency)
             messages = [
-                SystemMessage(content=LLM_DECISION_SYSTEM_PROMPT),
-                UserMessage(content=user_content),
+                {"role": "system", "content": LLM_DECISION_SYSTEM_PROMPT},
+                {"role": "user", "content": user_content},
             ]
 
             response = await self._model.invoke(messages=messages)
-            content = response.content if hasattr(response, "content") else str(response)
+
+            # Extract content
+            if hasattr(response, 'choices'):
+                content = response.choices[0].message.content or ""
+            else:
+                content = response.content if hasattr(response, "content") else str(response)
 
             parsed = self._parse_llm_json(str(content))
             score = float(parsed.get("score", 0.5))
@@ -278,26 +280,49 @@ class AheDecisionPolicy(DecisionPolicy):
         return {"score": 0.5, "suggestion": "candidate", "reason": "Failed to parse LLM response"}
 
     async def _init_model(self):
-        """Initialize openjiuwen Model from config."""
+        """Initialize OpenAI Model from config (same pattern as DiagnosisAgent).
+
+        No dependency on openjiuwen - uses OpenAI SDK directly.
+        """
         try:
-            from openjiuwen.core.foundation.llm import (
-                Model, ModelClientConfig, ModelRequestConfig,
-            )
-            from jiuwenswarm.common.config import get_default_models
-            from jiuwenswarm.common.utils import get_env_file
+            from openai import AsyncOpenAI
+            from jiuwenswarm.evolve import get_evolve_config
+            from jiuwenswarm.evolve.ahe.openai_wrapper import OpenAIModelWrapper
+            import os
 
-            env_file = get_env_file()
-            if env_file.exists():
-                from dotenv import load_dotenv
-                load_dotenv(dotenv_path=env_file, override=False)
+            evolve_cfg = get_evolve_config()
+            llm_cfg = evolve_cfg.get("llm", {})
 
-            models = get_default_models()
-            if not models:
+            # Expand environment variables in api_key
+            api_key = llm_cfg.get("api_key")
+            if api_key and isinstance(api_key, str):
+                if api_key.startswith("${") and api_key.endswith("}"):
+                    env_var = api_key[2:-1]
+                    api_key = os.getenv(env_var)
+            else:
+                api_key = os.getenv("EVOLVE_API_KEY")
+
+            if not api_key:
+                logger.warning("AheDecisionPolicy: no API key configured")
                 return None
 
-            first = models[0]
-            client_cfg = first.get("model_client_config", {})
-            model_cfg = first.get("model_config_obj", {})
+            # Get api_base
+            api_base = llm_cfg.get("api_base")
+            if not api_base or not isinstance(api_base, str) or api_base.strip() == "":
+                api_base = "https://api.deepseek.com/v1"
+                logger.info("AheDecisionPolicy: api_base not configured, using DeepSeek default: %s", api_base)
+
+            client = AsyncOpenAI(api_key=api_key, base_url=api_base)
+
+            return OpenAIModelWrapper(
+                client=client,
+                model=llm_cfg.get("model_name", "deepseek-v4-pro"),
+                temperature=llm_cfg.get("temperature", 0.1),
+                max_tokens=llm_cfg.get("max_tokens", 2000),
+            )
+        except Exception as exc:
+            logger.warning("AheDecisionPolicy._init_model failed: %s", exc)
+            return None
 
             return Model(
                 model_client_config=ModelClientConfig(

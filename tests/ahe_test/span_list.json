@@ -1,0 +1,672 @@
+[
+  {
+    "id": 49,
+    "trace_id": "0dc2aa4bf8916201134715573e2196eb",
+    "span_id": "09a7f7330f99f27f",
+    "parent_span_id": null,
+    "name": "jiuwenswarm.agent.invoke",
+    "kind": 1,
+    "start_time_ns": 1782209693841969700,
+    "end_time_ns": 1782209716417732000,
+    "duration_ns": 22575762300,
+    "status_code": "OK",
+    "status_description": null,
+    "attributes": {
+      "gen_ai.agent.name": "jiuwenswarm",
+      "gen_ai.conversation.id": "sess_19ef3f9b6a2_58b598",
+      "gen_ai.span.type": "agent",
+      "jiuwenclaw.agent.name": "jiuwenswarm",
+      "jiuwenclaw.session.id": "",
+      "jiuwenclaw.channel.id": "",
+      "jiuwenclaw.request.id": ""
+    },
+    "events": null,
+    "links": null,
+    "resource": {
+      "service.name": "jiuwenswarm",
+      "service.version": "0.1.0"
+    },
+    "scope_name": "jiuwenswarm.telemetry_rail",
+    "scope_version": "",
+    "created_at": "2026-06-23 10:15:18"
+  },
+  {
+    "id": 45,
+    "trace_id": "0dc2aa4bf8916201134715573e2196eb",
+    "span_id": "c31684fa0b8cecad",
+    "parent_span_id": "09a7f7330f99f27f",
+    "name": "gen_ai.chat",
+    "kind": 0,
+    "start_time_ns": 1782209695495994100,
+    "end_time_ns": 1782209703263651500,
+    "duration_ns": 7767657400,
+    "status_code": "OK",
+    "status_description": null,
+    "attributes": {
+      "gen_ai.system": "openai",
+      "gen_ai.request.model": "deepseek-v4-pro",
+      "gen_ai.response.model": "deepseek-v4-pro",
+      "gen_ai.operation.name": "chat",
+      "gen_ai.span.type": "model",
+      "jiuwenclaw.session.id": "",
+      "jiuwenclaw.channel.id": "",
+      "jiuwenclaw.request.id": "",
+      "gen_ai.request.temperature": 0.95,
+      "gen_ai.request.top_p": 0.1,
+      "jiuwenclaw.iteration": 1,
+      "gen_ai.request.streaming": false,
+      "gen_ai.input.messages.count": 2,
+      "gen_ai.input.messages.total_length": 3378,
+      "gen_ai.input.messages": [
+        {
+          "role": "system",
+          "parts": [
+            {
+              "type": "text",
+              "content": "你是一个私人智能体，由 JiuwenSwarm 创建。像一个有温度的人类助手一样与用户互动。\n\n---\n\n# 你的家\n\n你的一切从 `.jiuwenswarm` 目录开始。\n\n| 路径 | 用途 | 操作建议 |\n|------|------|----------|\n| `C:\\Users\\田汶鑫\\.jiuwenswarm\\config` | 配置信息 | 不要轻易改动，错误配置可能导致异常 |\n| `C:\\Users\\田汶鑫\\.jiuwenswarm\\agent\\workspace` | 身份与任务信息 | 可适当更新，以更好地服务用户 |\n| `C:\\Users\\田汶鑫\\.jiuwenswarm\\agent\\workspace\\memory` | 持久化记忆 | 将其视为你记忆的一部分，随时查阅 |\n| `C:\\Users\\田汶鑫\\.jiuwenswarm\\agent\\workspace\\skills` | 技能库 | 可随时翻阅、调用，不可修改 |\n| `C:\\Users\\田汶鑫\\.jiuwenswarm\\agent\\workspace\\todo` | 待办事项 | 记录用户请求的任务，每次请求后会更新 |\n\n## 配置信息\n\n谨慎对待你的配置信息，如果用户要求你修改，请在修改后重启自己的服务，以保证改动生效。\n\n| 路径 | 用途 |\n|------|------|\n| `C:\\Users\\田汶鑫\\.jiuwenswarm\\config/config.yaml` | 配置信息 |\n| `C:\\Users\\田汶鑫\\.jiuwenswarm\\config/.env` | 环境变量 |\n\n## 运行环境\n\n当前运行平台：`win32`\n\nShell 能力：\n- PowerShell：可用，路径 `C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.EXE`\n- Git Bash：可用，路径 `D:\\applications\\Git\\bin\\bash.exe`\n- PATH bash：不可用\n\nShell 选择规则：\n- Windows 且 Git Bash 可用，或 PATH bash 明确不是 WSL stub 时，可以使用 bash/Git Bash 执行 POSIX 命令，例如 `ls`、`grep`、`cat`、`mkdir -p`、bash 脚本。\n- Windows 且 Git Bash 不可用、PATH bash 也不可用或只是 WSL stub 时，不要使用 POSIX 命令；优先使用 PowerShell 或 cmd。\n- PowerShell cmdlet 不要包在 bash 里执行，应直接使用 PowerShell。\n\n**重要提示**：必须严格使用与当前平台匹配的命令语法，切勿使用其他平台的命令格式。\n\n常见命令差异对照：\n\n| 操作 | Windows (`win32`/`win64`) | Linux/macOS (`linux`/`darwin`) |\n|------|---------------------------|-------------------------------|\n| 创建目录 | `mkdir folder` 或 PowerShell `New-Item -ItemType Directory -Path folder` | `mkdir -p folder` |\n| 查看文件 | `type file.txt` 或 PowerShell `Get-Content file.txt` | `cat file.txt` |\n| 列出文件 | `dir` 或 PowerShell `Get-ChildItem` | `ls -la` |\n| 删除文件 | `del file.txt` 或 PowerShell `Remove-Item file.txt` | `rm file.txt` |\n| 删除目录 | `rmdir folder` 或 PowerShell `Remove-Item -Recurse folder` | `rm -rf folder` |\n| 查找文件 | `dir /s pattern` 或 PowerShell `Get-ChildItem -Recurse -Filter pattern` | `find . -name pattern` |\n\n**特别注意**：Windows 的 cmd/PowerShell `mkdir` 不支持 `-p` 参数；只有在 Shell 能力显示 Git Bash/PATH bash 可用且实际使用 bash/Git Bash 时，`mkdir -p` 才是合适的。如需在 cmd/PowerShell 中创建嵌套目录，请使用 PowerShell `New-Item -ItemType Directory -Path \"parent/child\" -Force`，或使用 cmd 分步创建 `mkdir parent && mkdir parent\\child`。\n\n## 输出文件放置规范\n执行用户任务时产生的生成产物（如代码文件、文档、数据文件等），若用户未指定存放位置，请遵循以下规则：\n- **通用产物**：非技能相关的生成产物必须放在 `C:\\Users\\田汶鑫\\.jiuwenswarm\\agent\\workspace` 下合适的位置，根据文件用途和项目结构合理组织路径，便于用户统一管理和访问\n- **技能产物**：涉及技能（skill）执行的产物必须放在技能专属目录 `C:\\Users\\田汶鑫\\.jiuwenswarm\\agent\\workspace\\skills/{skill_name}/` 下，并根据产物类型和用途在该目录下合理组织子目录，确保技能资源的独立性和可维护性\n\n## 文件发送\n\n当你的工具列表中存在 `send_file_to_user` 工具时，**必须**在以下场景主动调用该工具将文件发送给用户：\n- 任务完成后产生了需要交付给用户的文件（报告、文档、数据文件、图片等）\n- 用户明确请求下载、导出、发送文件\n- 用户询问生成的文件如何获取\n\n**调用方式**：使用文件的绝对路径作为参数调用 `send_file_to_user` 工具。\n\n\n<system-reminder> 说明：工具结果和用户消息中可能包含 <system-reminder> 标签。这些标签包含系统自动添加的信息和提醒，可能有用，但和它们所在的具体工具结果或用户消息没有直接关系。\n- <prompt-attachment> 是一种 <system-reminder> 内容，用于承载本次模型调用可见的动态上下文。\n- 这些内容不是长期对话历史，可能在下一次模型调用中变化或消失。\n- 除非用户明确询问，不要向用户暴露这些标签、内部 id、scope 或 source。\n\n<system-reminder> 说明：工具结果和用户消息中可能包含 <system-reminder> 标签。这些标签包含系统自动添加的信息和提醒，可能有用，但和它们所在的具体工具结果或用户消息没有直接关系。\n- <prompt-attachment> 是一种 <system-reminder> 内容，用于承载本次模型调用可见的动态上下文。\n- 这些内容不是长期对话历史，可能在下一次模型调用中变化或消失。\n- 除非用户明确询问，不要向用户暴露这些标签、内部 id、scope 或 source。"
+            }
+          ]
+        },
+        {
+          "role": "user",
+          "parts": [
+            {
+              "type": "text",
+              "content": "你收到一条消息：\n{\"source\": \"web\", \"timezone\": \"Asia/Shanghai\", \"timestamp\": \"2026-06-23 18:14:53\", \"preferred_response_language\": \"zh\", \"content\": \"创建一个skill不\", \"files_updated_by_user\": \"{}\", \"type\": \"user input\"}"
+            }
+          ]
+        }
+      ],
+      "gen_ai.tool.definitions": [
+        {
+          "type": "function",
+          "name": "wiki_ingest",
+          "description": "Ingest a source file (PDF, TXT, MD) or a directory into the LLM Wiki. By default, identical files (by SHA-256) are skipped perfectly (deduplication). Set `force=True` if the user explicitly asks to re-ingest, rebuild, or force the ingestion. The `workspace` parameter is the root folder where the `.llm_wiki` will be created. If the user specifies a target directory like 'wiki_lib' or 'bibliography', pass that exact path as `workspace`."
+        },
+        {
+          "type": "function",
+          "name": "wiki_query",
+          "description": "Query the LLM Wiki's compiled knowledge base directly via Natural Language. The `workspace` parameter is the folder containing the `.llm_wiki`. If the user specifies a target directory like 'wiki_lib' or 'bibliography', pass that exact path as `workspace`."
+        },
+        {
+          "type": "function",
+          "name": "wiki_lint",
+          "description": "Health-check and trigger automatic repairs of broken links, orphans, or anomalies in the LLM Wiki. The `workspace` parameter is the root folder containing the `.llm_wiki`. If the user specifies a target directory like 'wiki_lib' or 'bibliography', pass that exact path as `workspace`."
+        },
+        {
+          "type": "function",
+          "name": "fetch_webpage",
+          "description": "通常配合 paid_search 或 free_search 使用：先搜索，再抓取结果页，不要只依赖摘要。抓取网页文本，返回状态码、标题和正文文本。通常配合 free_search 使用：先搜索，再抓取前几个结果页，而不是只依赖搜索摘要。可设置 max_chars=0 关闭截断，也可以调大 timeout_seconds 处理慢站点。适用场景：文档、博客、新闻、API 参考等普通网页。代码仓地址（GitHub/GitLab/Gitee/Gitcode/Bitbucket 等）一般不适合用本工具——网页只能看到渲染后的目录页;要读源码、看历史、跨文件搜索，更顺手的方式是用 shell 工具(bash 或 powershell)执行 `git clone` 拉到本地。"
+        },
+        {
+          "type": "function",
+          "name": "search_skill",
+          "description": "Search installable skills from SkillNet, ClawHub, and TeamSkillsHub. Use the returned identifier with install_skill (SkillNet URL, ClawHub slug, or TeamSkillsHub asset_id when source is teamskillshub)."
+        },
+        {
+          "type": "function",
+          "name": "install_skill",
+          "description": "Install a skill using the identifier returned by search_skill. Returns the installed skill summary and where to read SKILL.md."
+        },
+        {
+          "type": "function",
+          "name": "uninstall_skill",
+          "description": "Uninstall an installed skill by name."
+        },
+        {
+          "type": "function",
+          "name": "acp_chat",
+          "description": "Send a user message to an external ACP-compatible agent subprocess defined in config.yaml under acp_agents.<name> (command + args). Use for Codex CLI, Gemini CLI, or any other stdio ACP agent. Parameter agent is the profile key, message is the prompt. Set new_session=true to restart the subprocess and ACP session for that profile."
+        },
+        {
+          "type": "function",
+          "name": "read_file",
+          "description": "增强版文件读取工具。支持文本、图片、PDF 与 Jupyter Notebook。"
+        },
+        {
+          "type": "function",
+          "name": "write_file",
+          "description": "写入文件内容。如果文件已存在，将完全覆盖。"
+        },
+        {
+          "type": "function",
+          "name": "edit_file",
+          "description": "增强版文件编辑工具，对已有文件执行精确的字符串替换操作，仅传输差量。\n\n核心行为：\n- 前置读取要求：编辑前必须通过 read_file 完整读取过该文件\n- 唯一性验证：old_string 须唯一匹配；多个匹配时须设置 replace_all=true 或提供更多上下文\n- 引号容错：自动尝试直引号与弯引号互转后匹配\n- 去消毒处理：自动将 HTML 实体（&lt; &gt; &amp; 等）还原为原始字符后匹配\n- 新文件创建：old_string='' 且目标文件不存在时创建新文件\n- 格式化处理：自动去除 new_string 行尾空白（.md/.mdx 文件除外）；保留文件原有行尾风格（LF/CRLF）\n- 外部修改检测：写入前通过时间戳 + 文件大小双重校验，若文件被外部修改则拒绝写入\n\n拒绝条件：文件超过 1 GiB / old_string 与 new_string 相同 / .ipynb 文件 / 文件不存在且 old_string 非空 / 文件已存在且 old_string 为空"
+        },
+        {
+          "type": "function",
+          "name": "glob",
+          "description": "使用 glob 模式查找文件。"
+        },
+        {
+          "type": "function",
+          "name": "list_files",
+          "description": "列出目录内容。"
+        },
+        {
+          "type": "function",
+          "name": "grep",
+          "description": "在文件中搜索内容。支持正则表达式。"
+        },
+        {
+          "type": "function",
+          "name": "bash",
+          "description": "执行 Shell 命令并返回输出。\n\n工作目录在命令之间保持不变，但 Shell 状态（变量、函数、alias）不保留。Shell 环境从用户的 profile（bash 或 zsh）初始化。\n\nWindows 注意：`cmd`/PowerShell 自带 `mkdir` **不支持 `-p`**，不要在 cmd/PowerShell 中使用 `mkdir -p`。只有运行环境信息显示 Git Bash 或非 WSL stub 的 PATH bash 可用，并且实际使用 bash/Git Bash 时，POSIX `mkdir -p` 才适用。否则应使用 PowerShell `New-Item ... -Force` 或 cmd 逐级 `mkdir`。\n\n重要：避免使用本工具执行 `find`、`grep`、`cat`、`head`、`tail`、`sed`、`awk` 或 `echo` 命令，除非明确指示或确认专用工具无法完成任务。请使用对应的专用工具，以获得更好的体验：\n\n - 文件搜索：使用 glob 工具（不要用 find 或 ls）\n - 内容搜索：使用 grep 工具（不要用 grep 或 rg 命令）\n - 读取文件：使用 read_file 工具（不要用 cat/head/tail）\n - 编辑文件：使用 edit_file 工具（不要用 sed/awk）\n - 写入文件：使用 write_file 工具（不要用 echo > 或 cat <<EOF）\n - 输出文本：直接输出（不要用 echo/printf）\n虽然 bash 工具也能做到，但专用工具提供更好的用户体验，并且更方便审查和授权。\n\n# 使用说明\n - 创建文件或目录前，先用本工具执行 `ls` 确认父目录存在且位置正确\n - 路径包含空格时必须用双引号括起（例如 cd \"path with spaces/file.txt\"）\n - 尽量使用绝对路径维持当前工作目录，避免使用 `cd`；除非用户明确要求\n - 可通过 timeout 参数指定超时（秒），默认 300 秒，上限 3600 秒\n - 可将 run_in_background 设为 true 来后台运行命令。仅在不需要立即获取结果时使用，命令完成后会收到通知。使用该参数时无需在命令末尾加 `&`\n - 发出多条命令时：\n   - 独立命令：在同一消息中多次并行调用本工具。例如需要同时运行 \"git status\" 和 \"git diff\"，发送一条消息包含两次并行调用\n   - 依赖命令：在单次调用中用 `&&` 串联\n   - 仅在不关心前序命令是否失败时使用 `;`\n   - 不要用换行分隔命令（引号字符串内换行可以）\n - Git 命令规范：\n   - 优先创建新提交而非修改已有提交\n   - 执行破坏性操作（如 git reset --hard、git push --force、git checkout --）前，先考虑是否有更安全的替代方案，只在确实必要时使用\n   - 除非用户明确要求，不要跳过 hooks（--no-verify）或绕过签名（--no-gpg-sign）。hook 失败时应排查并修复根本原因\n   - 用户分享代码仓 URL 让你「看看这个仓库」或「分析一下」时，首选动作是 `git clone <url> <本地路径>`；克隆完再用 read_file/grep/glob 等专用工具读源码，比抓取仓库主页能拿到的信息完整得多\n - 避免不必要的 `sleep` 命令：\n   - 能立即执行的命令之间不要 sleep\n   - 长时间运行的命令使用 `run_in_background: true`，无需 sleep 等待\n   - 不要在 sleep 循环中重试失败命令——排查根本原因\n   - 等待后台任务完成时会自动通知——不要轮询\n   - 如必须轮询外部进程，使用检查命令（如 `gh run view`）而非先 sleep\n   - 如必须 sleep，保持短时间（1-5 秒）"
+        },
+        {
+          "type": "function",
+          "name": "powershell",
+          "description": "执行给定的 PowerShell 命令并返回输出。工作目录会在命令之间保持不变；但 shell 状态，例如变量、函数和别名，不会保留。\n\n重要：本工具用于通过 PowerShell 执行终端操作，例如 git、npm、docker、python 和 PowerShell cmdlet。不要用它做文件搜索、内容搜索、读文件、写文件、编辑文件，除非用户明确要求，或你已经确认专用工具无法完成任务。优先使用 glob、grep、read_file、edit_file、write_file。\n\nPowerShell 版本兼容：默认按 Windows PowerShell 5.1 兼容方式编写命令，除非你非常确定当前环境是 PowerShell 7+。\n - 不要默认使用 `&&`、`||`、三元表达式 `?:`、空合并 `??`、空条件 `?.`；这些在 5.1 会直接语法报错\n - 条件串联优先使用 `A; if ($?) { B }`\n - 无条件顺序执行用 `A; B`\n - 避免对原生可执行程序手动做 `2>&1` 重定向；stderr 已经会被工具捕获，5.1 下这样做还可能把输出包装成 ErrorRecord，并把 `$?` 变成 `$false`\n - 写给其他工具读取的文件时，优先显式指定 UTF-8 编码\n - `ConvertFrom-Json` 在 5.1 返回 `PSCustomObject`，不要默认假设支持 `-AsHashtable`\n\n执行前请遵循这些规则：\n1. 目录确认\n - 如果命令会创建新文件或目录，先确认父目录存在且位置正确\n2. 命令编写\n - 路径包含空格时必须使用双引号\n - 尽量使用绝对路径，避免不必要的 `Set-Location` 或 `cd`\n - 优先使用 PowerShell 原生命令和 Verb-Noun 风格，如 `Get-ChildItem`、`Select-String`、`Get-Content`、`New-Item`、`Remove-Item`\n\nPowerShell 语法说明：\n - 变量使用 `$` 前缀，例如 `$name = \"value\"`\n - 转义字符是反引号，不是反斜杠\n - 常见别名：`ls`=`Get-ChildItem`，`cd`=`Set-Location`，`cat`=`Get-Content`，`rm`=`Remove-Item`\n - 管道 `|` 传递的是对象，不是 bash 风格的纯文本\n - 筛选和转换优先使用 `Select-Object`、`Where-Object`、`ForEach-Object`\n - 字符串插值写法：`\"Hello $name\"` 或 `\"Hello $($obj.Property)\"`\n - 注册表路径使用 PSDrive 前缀：`HKLM:\\...`、`HKCU:\\...`\n - 环境变量读取用 `$env:NAME`，设置用 `$env:NAME = \"value\"`\n - 调用路径中带空格的原生 exe 时，用调用运算符：`& \"C:\\Program Files\\App\\app.exe\" arg1 arg2`\n\n交互与阻塞命令限制（本工具以 `-NonInteractive` 方式运行，因此凡是需要人工输入、确认、弹窗或进入交互界面的命令，都可能失败或一直卡住等待）：\n - 不要使用 `Read-Host`、`Get-Credential`、`Out-GridView`、`$Host.UI.PromptForChoice`、`pause`\n - 破坏性 cmdlet 可能要求确认；当你明确需要执行时，可以考虑加 `-Confirm:$false`，对只读或隐藏项必要时加 `-Force`\n - 不要使用会打开交互编辑器的 git 命令，例如 `git rebase -i`、`git add -i`\n\n向原生命令传递多行字符串时：\n - 优先使用单引号 here-string：`@' ... '@`，这样 PowerShell 不会展开其中的 `$` 或反引号\n - 结束标记 `'@` 必须顶格并单独占一行，否则会解析失败\n - 除非确实需要变量插值，否则优先使用 `@' ... '@`，不要用 `@\" ... \"@`\n - 如果原生命令参数中包含 `-`、`@` 等容易继续被 PowerShell 解析的字符，可考虑停止解析标记 `--%`\n\n使用说明：\n - `command` 参数必填\n - `timeout` 单位为秒，默认 30，最大 300\n - 尽量提供简洁清晰的 `description`\n - 如果输出超过 `max_output_chars`，返回内容会被截断\n - 可将 `background` 设为 true 后台运行命令；不需要自己追加 `&`\n - 不要用 PowerShell 去替代专用工具，除非用户明确要求：文件搜索用 glob，不要用 `Get-ChildItem -Recurse`；内容搜索用 grep，不要用 `Select-String`；读文件用 read_file，不要用 `Get-Content`；写文件用 write_file，不要用 `Set-Content` 或 `Out-File`；编辑文件用 edit_file；与用户沟通时直接输出文本，不要用 `Write-Output` 或 `Write-Host`\n - 多条独立命令应并行发起多次工具调用；存在依赖关系时，在单次调用中串联\n - 只有在你不关心前序命令是否失败时才使用 `;`\n - 不要用换行分隔多条命令；换行只用于字符串或 here-string 内部\n - 不要默认在命令前加 `cd` 或 `Set-Location`；优先使用当前工作目录或 `workdir`\n - 避免无意义的 `Start-Sleep`；长任务优先用后台执行；必须 sleep 时保持 1-5 秒短等待\n - Git 操作中，优先创建新提交而不是 amend；执行 `git reset --hard`、`git push --force`、`git checkout --` 等破坏性操作前先考虑更安全替代方案；除非用户明确要求，不要跳过 hooks（`--no-verify`）或绕过签名（`--no-gpg-sign`、`-c commit.gpgsign=false`）\n - 用户分享代码仓 URL 让你「看看这个仓库」或「分析一下」时，首选动作是 `git clone <url> <本地路径>`；克隆完再用 read_file/grep/glob 等专用工具读源码，比抓取仓库主页能拿到的信息完整得多"
+        },
+        {
+          "type": "function",
+          "name": "skill_tool",
+          "description": "使用此工具查看特定技能的内容"
+        },
+        {
+          "type": "function",
+          "name": "code",
+          "description": "执行代码（Python 或 JavaScript）。"
+        },
+        {
+          "type": "function",
+          "name": "todo_create",
+          "description": "\n创建当前会话的待办事项列表，用于跟踪进度、组织复杂任务，帮助用户了解整体执行情况。\n\n## 何时使用\n\n主动在以下场景调用：\n- 任务需要 3 个或更多步骤\n- 用户提供多个待完成事项（编号列表、逗号或分号分隔）\n- 用户明确要求使用待办清单\n- 任务具有规划性质（多步骤实现、功能开发等）\n\n识别到规划需求后，立即调用本工具。\n\n## 何时不使用\n\n- 单个简单任务\n- 纯信息查询或对话\n- 可在 3 步以内完成的琐碎任务\n\n## 使用方式\n\n入参为 JSON 数组（每个任务必须包含 id 字段）：\n    {\"tasks\": [{\"id\": \"translate_doc\", \"content\": \"翻译文档\", \"activeForm\": \"正在翻译文档\", \"description\": \"将文档翻译为目标语言\", \"selected_model_id\": \"fast\"}, {\"id\": \"analyze_arch\", \"content\": \"分析代码架构\", \"activeForm\": \"正在分析代码架构\", \"description\": \"梳理代码模块结构与依赖关系\", \"selected_model_id\": \"smart\"}]}\n\n## 规则\n\n- **id 字段为必填**：必须为每个任务指定简短、语义清晰的唯一字符串 ID（如 \"translate_doc\"、\"analyze_code\"），禁止使用随机字符或 UUID。同一会话内 ID 不得重复。此 ID 在后续 todo_modify 中用于精准定位任务，是跨轮次更新状态的唯一依据\n- 第一个任务自动设为 in_progress，其余为 pending\n- 同一时间只能有一个 in_progress 任务\n- 任务描述必须具体、可执行、清晰明确\n- 调用本工具会覆盖当前会话的任务列表；若需追加任务，请使用 todo_modify\n- 当没有获取到当前可用模型信息时，不要添加 selected_model_id 字段；否则必须添加 selected_model_id 指定执行任务的模型 ID\n"
+        },
+        {
+          "type": "function",
+          "name": "todo_list",
+          "description": "\n检索并显示当前会话的所有待办事项。\n\n## 何时使用 todo_list（而非 todo_modify）\n\n使用 todo_list 的场景：\n- 需要查看当前任务全貌和各任务ID，再决定如何更新\n- 不确定当前有哪些任务处于 in_progress 或 pending\n\n使用 todo_modify 的场景（不需要先调用 todo_list）：\n- 已知任务 ID，直接更新任务信息\n- 任务刚完成，立即标记为 completed\n"
+        },
+        {
+          "type": "function",
+          "name": "todo_get",
+          "description": "\n根据任务 ID 获取单个任务的完整详情。\n\n入参：id（任务唯一标识符）\n\n返回：完整的任务信息，包括 id、content（任务摘要）、activeForm、description（任务详细内容）、status、depends_on、result_summary、meta_data、selected_model_id。\n"
+        },
+        {
+          "type": "function",
+          "name": "todo_modify",
+          "description": "\n修改当前会话的待办事项。支持批量操作，尽量将多个变更合并为一次调用。\n\n核心用途：更新（update）、删除（delete）、取消（cancel）、追加（append）、在其后插入（insert_after）、在其前插入（insert_before）\n\n重要说明：\n- 若需重新规划整个任务列表，请调用 todo_create\n- 支持批量操作，尽量将多个变更合并为一次调用，避免连续多次调用\n- **id 使用你在 todo_create 时自定义的语义 ID**（如 \"translate_doc\"），不要使用 UUID\n\naction 支持的操作类型：\n\nupdate：修改现有任务的状态或标题（id 不可修改，支持部分字段更新）：\n    {\n        \"action\": \"update\",\n        \"todos\": [\n            {\"id\": \"translate_doc\", \"status\": \"completed\"},\n            {\"id\": \"analyze_code\", \"status\": \"in_progress\"}\n        ]\n    }\n\n支持修改 selected_model_id：若任务 selected_model_id 不为空，且执行结果质量不佳（输出不准确、逻辑错误、未达预期），应根据模型描述更新质量更高的模型ID：\n    {\n        \"action\": \"update\",\n        \"todos\": [\n            {\"id\": \"translate_doc\", \"selected_model_id\": \"smart\", \"status\": \"pending\"}\n        ]\n    }\n\ncancel：将指定任务标记为 cancelled（任务将被忽略，不再执行）：\n    {\n        \"action\": \"cancel\",\n        \"ids\": [\"translate_doc\", \"analyze_code\"]\n    }\n\ndelete：从列表中永久删除指定任务：\n    {\n        \"action\": \"delete\",\n        \"ids\": [\"translate_doc\"]\n    }\n\nappend：在列表末尾追加新任务（id 由你指定，须简短语义且唯一）：\n    {\n        \"action\": \"append\",\n        \"todos\": [\n            {\"id\": \"write_report\", \"content\": \"新任务内容\", \"activeForm\": \"执行新任务\", \"description\": \"任务的详细描述\", \"status\": \"pending\"}\n        ]\n    }\n\ninsert_after：在指定任务之后插入新任务（目标任务状态须为 in_progress 或 pending）：\n    {\n        \"action\": \"insert_after\",\n        \"todo_data\": {\"target_id\": \"translate_doc\", \"items\": [{\"id\": \"review_translation\", \"content\": \"插入的任务\", \"activeForm\": \"执行插入的任务\", \"description\": \"任务的详细描述\", \"status\": \"pending\", \"selected_model_id\": \"fast\"}]}\n    }\n\ninsert_before：在指定任务之前插入新任务（目标任务状态须为 pending）：\n    {\n        \"action\": \"insert_before\",\n        \"todo_data\": {\"target_id\": \"analyze_code\", \"items\": [{\"id\": \"setup_env\", \"content\": \"插入的任务\", \"activeForm\": \"执行插入的任务\", \"description\": \"任务的详细描述\", \"status\": \"pending\"}]}\n    }\n\n核心规则：\n- 同一时间只能有一个任务处于 in_progress 状态\n- update 操作：id 字段不可修改，其他字段支持部分更新\n- insert_after：目标任务状态必须为 in_progress 或 pending\n- insert_before：目标任务状态必须为 pending\n- 如果任务的 selected_model_id 为空时，任何操作都不要更改 selected_model_id 字段\n"
+        },
+        {
+          "type": "function",
+          "name": "task_tool",
+          "description": "启动新的子代理，自主处理复杂、多步骤任务。\n\ntask_tool 启动专门的子代理来自主处理复杂任务。每种子代理类型都有特定的能力和可用工具。\n\n可用代理类型及其工具：\n\n- general-purpose: 通用型子代理，继承主代理的工具与能力（文件读写、bash、MCP、skills 等），适合执行独立的复杂子任务（调研、搜代码、多步实现等）。子代理运行在独立上下文窗口中，中间工具调用结果不会污染主代理上下文。当你在搜索关键词或文件时，如果不确定前几次尝试就能找到正确匹配，就用这个子代理来帮你搜索。 (Tools: wiki_ingest, wiki_query, wiki_lint, free_search, fetch_webpage, search_skill, install_skill, uninstall_skill, acp_chat)\n- browser_agent: 专用浏览器子代理，直接使用 Playwright MCP 工具执行网页任务。 (Tools: All tools)\n\n使用 task_tool 时，请通过 subagent_type 参数选择要使用的子代理类型。如果不指定，将使用通用子代理。\n\n何时不使用 task_tool：\n\n- 如果你想读取某个具体文件路径，直接用 read_file 或 glob，比用 task_tool 更快\n- 如果你在查找某个具体的类定义（如 \"class Foo\"），直接用 grep 或 glob，比用 task_tool 更快\n- 如果你在 2-3 个特定文件内搜索代码，直接用 read_file，比用 task_tool 更快\n- 其他与上述代理描述无关的任务\n\n使用注意事项：\n\n- task_description 应包含完整的上下文信息——子代理没有本次对话的任何记忆\n- 子代理完成后会返回一条消息给你。该结果对用户不可见。如需向用户展示结果，你应发送一条文字消息，简明总结子代理的结果。\n- 每次 task_tool 调用都是全新启动——请提供完整的任务描述。\n- 子代理的输出通常应当被信任。\n- 明确告知子代理你期望它写代码还是仅做调研（搜索、读文件、抓取网页等），因为它不知道用户的意图。\n- 如果子代理的描述中提到应主动使用它，你应尽量在用户没有明确要求时就使用它。自行判断。\n- 如果用户明确要求\"并行\"运行子代理，你必须在同一条消息中发出多个 task_tool 调用。例如，如果你需要同时启动 build-validator 子代理和 test-runner 子代理，请在同一条消息中发出两个 tool 调用。\n\n## 如何写好任务描述\n\n像给一位刚走进房间的聪明同事做简报一样描述任务——子代理没看过本次对话，不知道你尝试过什么，也不理解这个任务为什么重要。\n- 说明你想达成什么目标以及为什么。\n- 描述你已经了解到的信息或已排除的可能性。\n- 提供足够的问题背景，让子代理能够自主判断，而不是只能机械执行狭窄的指令。\n- 如果需要简短回复，请明确说明（\"在 200 字内汇报\"）。\n- 查找类任务：直接给出精确命令。调研类任务：给出要回答的问题——规定好的步骤在前提不成立时只会成为累赘。\n\n简短的命令式描述会产生浅层、泛泛的结果。\n\n**永远不要委托理解。** 不要写\"根据你的发现修复 bug\"或\"根据调研结果实现它\"。这类说法把综合分析推给了子代理，而不是你自己完成。写出的描述应能证明你已经理解了问题：包含文件路径、行号、具体需要修改的内容。\n"
+        },
+        {
+          "type": "function",
+          "name": "memory_search",
+          "description": "在长期记忆中检索过往信息（决策、偏好、人物、日期、TODO 等），返回相关片段与引用线索。"
+        },
+        {
+          "type": "function",
+          "name": "memory_get",
+          "description": "按行号切片读取 memory/ 下的记忆 Markdown 文件内容（from_line + lines）。"
+        },
+        {
+          "type": "function",
+          "name": "write_memory",
+          "description": "写入记忆内容到 memory/ 下的 Markdown 文件；支持覆盖写或追加写（append）。"
+        },
+        {
+          "type": "function",
+          "name": "edit_memory",
+          "description": "在 memory/ 下的记忆文件中做精确字符串替换（old_text → new_text）。"
+        },
+        {
+          "type": "function",
+          "name": "read_memory",
+          "description": "按 offset/limit 读取 memory/ 下记忆文件的部分内容（用于分页阅读）。"
+        },
+        {
+          "type": "function",
+          "name": "cron",
+          "description": "使用 action 接口：status、list、add、update、remove、run、runs、wake，并兼容结构化 schedule/payload/delivery 字段。处理“2分钟后”“明天上午9点”“下周一”这类时间时，优先根据系统提示中已提供的当前日期与时间直接换算并调用 cron，不要为了简单的时间换算先调用 code 或 bash。创建一次性提醒时，schedule.at 默认直接使用用户当前本地时区偏移来写，例如 +08:00；除非用户明确要求，否则不要改写成 Z 或 UTC。给当前聊天创建提醒时，优先使用 payload.kind=systemEvent 和 sessionTarget=current。向用户确认创建结果时，优先按 schedule.at 里的原始时区/偏移表述，不要自行改写成 UTC。\n\n【投递频道】delivery.channel / targets：用户未明确指定时不填，系统自动使用当前对话渠道；**禁止从历史记录推断。**\n\n【强制：wake_offset_seconds】这是提前唤醒秒数，不是任务执行时间。除非用户明确说“提前 X 秒/分钟唤醒/准备/执行”，否则**禁止**传 wake_offset_seconds 字段；不要根据任务类型、提醒/查询场景、距离触发时间或历史记录推断为 0、60 或其他值。用户未明确指定时必须省略该字段，后端会默认使用 300 秒。\n\n【重要：cron 表达式格式】只支持7段式(Quartz格式)：秒 分 时 日 月 周 年。字段取值范围：秒(0-59)，分(0-59)，时(0-23)，日(1-31)，月(1-12)，周(1-7或?)，年(1970-2099或*)。日和周字段：不能同时指定具体值，其中一个必须用?表示'不指定'。年份字段：*表示跨年周期，固定年份只在该年执行。真正只执行一次：所有字段均为固定值(无*和?)，如'0 30 17 29 4 ? 2026'表示2026年4月29日17:30:00执行一次。例：每天9点 -> '0 0 9 * * ? *'；每15分钟 -> '0 */15 * * * ? *'；每周一9点 -> '0 0 9 ? * MON *'。注意：一次性任务建议优先使用 schedule.at (ISO8601格式)，cron更适合周期性任务。\n\n【重要：cron 表达式限制】标准 cron 的 */X 语义是'当字段值能被 X 整除时触发'，而非'每隔 X 单位触发'。只有当周期单位能被 X 整除时，间隔才是均匀的。以下是各字段的限制：\n- 秒/分(0-59)：*/X 仅支持 X 整除60的值：1/2/3/4/5/6/10/12/15/20/30。  例如 */40 实际在每小时第0分和第40分触发（间隔40分→20分交替），并非每40分钟。  用户要求'每隔40分钟'时，必须先告知此限制并让用户确认是否接受不均匀间隔，  或建议改用整除60的间隔（如20分钟或30分钟）。未经用户确认不得直接创建。\n- 小时(0-23)：*/X 仅支持 X 整除24的值：1/2/3/4/6/8/12。  例如 */5 实际在每天0/5/10/15/20时触发（间隔5h→4h→5h→4h交替），并非每5小时。  用户要求'每隔5小时'时，必须告知限制并让用户确认，或建议改用整除24的间隔。\n- 日(1-31)：*/X 不可靠，因为不同月份天数不同（28/29/30/31）。  例如 */15 在2月只触发1、15日（共2次），在31天月份触发1、16、31日（共3次）。  用户要求'每隔X天'时，建议改用'每周X'或指定固定日期（如每月1号、15号）。\n- 月(1-12)：*/X 仅支持 X 整除12的值：1/2/3/4/6。  例如 */5 实际在1/5/10月触发，并非每5个月均匀触发。\n- 周(1-7)：*/X 仅支持 X 整除7的值：1/7。1=SUN,7=SAT。  例如 */2 实际在SUN/TUE/THU触发，并非'每隔2周'。  用户要求'每隔2周'时，应直接指定具体星期几或建议简化为'每周一'。\n处理'每隔X分钟/小时/天'需求时，务必检查 X 是否整除对应周期单位；若不整除，必须告知用户限制，让用户确认后再创建，或建议替代方案。"
+        },
+        {
+          "type": "function",
+          "name": "cron_list_jobs",
+          "description": "列出所有 cron 定时任务。"
+        },
+        {
+          "type": "function",
+          "name": "cron_get_job",
+          "description": "根据任务 ID 获取单个 cron 定时任务的详细信息。"
+        },
+        {
+          "type": "function",
+          "name": "cron_create_job",
+          "description": "\n创建新的 cron 定时任务，使用扁平字段（name, cron_expr, timezone, targets, description, wake_offset_seconds）。\n\n【targets】用户未明确指定投递渠道时不填，系统自动使用当前对话渠道；**禁止从历史记录推断。**\n\n【强制：wake_offset_seconds】除非用户明确说“提前 X 秒/分钟唤醒/准备/执行”，否则**禁止**传 wake_offset_seconds。\n用户未明确指定时必须省略该字段，后端会默认使用 300 秒。不要因为是提醒类任务而传 0，\n也不要因为是查询/准备类任务而传 60 或其他值；禁止从任务类型、距离触发时间或历史记录推断。\n\n【重要：cron 表达式格式】只支持7段式(Quartz格式)：秒 分 时 日 月 周 年。\n日和周字段：不能同时指定具体值，其中一个必须用?表示'不指定'。\n年份字段：*表示跨年周期执行，固定年份只在该年执行。\n真正只执行一次：所有字段均为固定值（无*和?），如'0 0 17 28 3 ? 2026'。\n例：每天9点 -> '0 0 9 * * ? *'；每15分钟 -> '0 */15 * * * ? *'；每周一9点 -> '0 0 9 ? * MON *'。\n\n【重要：cron 表达式限制】标准 cron 的 */X 语义是'当字段值能被 X 整除时触发'，而非'每隔 X 单位触发'。\n只有当周期单位能被 X 整除时，间隔才是均匀的。以下是各字段的限制：\n- 秒/分(0-59)：*/X 仅支持 X 整除60的值：1/2/3/4/5/6/10/12/15/20/30。\n  例如 */40 实际在每小时第0分和第40分触发（间隔40分→20分交替），并非每40分钟。\n  用户要求'每隔40分钟'时，必须先告知此限制并让用户确认是否接受不均匀间隔，\n  或建议改用整除60的间隔（如20分钟或30分钟）。未经用户确认不得直接创建。\n- 小时(0-23)：*/X 仅支持 X 整除24的值：1/2/3/4/6/8/12。\n  例如 */5 实际在每天0/5/10/15/20时触发（间隔5h→4h→5h→4h交替），并非每5小时。\n- 日(1-31)：*/X 不可靠，因为不同月份天数不同（28/29/30/31）。\n- 月(1-12)：*/X 仅支持 X 整除12的值：1/2/3/4/6。\n- 周(1-7)：*/X 仅支持 X 整除7的值：1/7。1=SUN,7=SAT。\n\n处理'每隔X分钟/小时/天'需求时，务必检查 X 是否整除对应周期单位；\n若不整除，必须告知用户限制，让用户确认后再创建，或建议替代方案。\n"
+        },
+        {
+          "type": "function",
+          "name": "cron_update_job",
+          "description": "使用扁平字段更新已有的 cron 定时任务。"
+        },
+        {
+          "type": "function",
+          "name": "cron_delete_job",
+          "description": "根据任务 ID 删除 cron 定时任务。"
+        },
+        {
+          "type": "function",
+          "name": "cron_toggle_job",
+          "description": "启用或禁用指定的 cron 定时任务。"
+        },
+        {
+          "type": "function",
+          "name": "cron_preview_job",
+          "description": "预览 cron 定时任务的下 N 次计划执行时间。"
+        },
+        {
+          "type": "function",
+          "name": "send_file_to_user",
+          "description": "【文件发送工具】当需要将生成的文件、导出的数据、创建的文档等发送给用户时使用此工具。使用场景包括：用户请求导出/下载文件、任务完成后需要交付文件、生成报告/文档后发送给用户。参数格式：接受单个路径字符串或路径数组，路径必须是绝对路径。示例：'/tmp/report.pdf' 或 ['/tmp/file1.csv', '/tmp/file2.xlsx']"
+        }
+      ],
+      "gen_ai.usage.input_tokens": 29764,
+      "gen_ai.usage.output_tokens": 239,
+      "gen_ai.usage.total_tokens": 30003,
+      "gen_ai.usage.cache_read.input_tokens": 1024,
+      "gen_ai.usage.cache_read_tokens": 1024,
+      "gen_ai.output.messages": [
+        {
+          "role": "assistant",
+          "parts": [
+            {
+              "type": "text",
+              "content": "想创建 skill？没问题！让我先看看有什么工具可以用，然后我们聊聊你想做什么样的。"
+            },
+            {
+              "type": "reasoning",
+              "content": "用户想创建一个 skill。我需要了解他想创建什么样的 skill。在创建 skill 之前，我先看看已有的 skill 创建工具。\n\n让我先看看有没有相关的技能可用，特别是 `swarmskill-creator` 这个技能（在系统提示中提到了），以及 `create-skill` 相关的内容。\n\n不过首先，让我看看当前的 skills 目录和可用的 skill 创建工具。用户说\"创建一个skill不\"，是一种询问/商量的语气，我应该先了解他的需求。\n\n让我先查看 swarmskill-creator 的 SKILL.md，以及看看有没有通用的 skill 创建技能。"
+            }
+          ],
+          "tool_calls": [
+            {
+              "id": "call_00_PRxiGAizDqKw3CXcjMqt8870",
+              "name": "skill_tool",
+              "arguments": {
+                "skill_name": "swarmskill-creator"
+              }
+            },
+            {
+              "id": "call_01_lrPgJyocGOjCv17Vcjvw1631",
+              "name": "search_skill",
+              "arguments": {
+                "query": "create skill",
+                "source": "auto"
+              }
+            }
+          ]
+        }
+      ],
+      "gen_ai.decision.type": "tool_call",
+      "gen_ai.decision.tool_names": "['skill_tool', 'search_skill']",
+      "gen_ai.decision.tool_count": 2
+    },
+    "events": null,
+    "links": null,
+    "resource": {
+      "service.name": "jiuwenswarm",
+      "service.version": "0.1.0"
+    },
+    "scope_name": "jiuwenswarm.telemetry_rail",
+    "scope_version": "",
+    "created_at": "2026-06-23 10:15:03"
+  },
+  {
+    "id": 46,
+    "trace_id": "0dc2aa4bf8916201134715573e2196eb",
+    "span_id": "22b5f5cabaf586ac",
+    "parent_span_id": "09a7f7330f99f27f",
+    "name": "gen_ai.tool.execute: skill_tool",
+    "kind": 0,
+    "start_time_ns": 1782209703346805800,
+    "end_time_ns": 1782209703483059400,
+    "duration_ns": 136253600,
+    "status_code": "ERROR",
+    "status_description": "success=True data={'skill_directory': 'C:\\\\Users\\\\田汶鑫\\\\.jiuwenswarm\\\\agent\\\\workspace\\\\skills\\\\swarmskill-creator', 'skill_content': '---\\nname: swarmskill-creator\\ndescription: |\\n  Creates, converts, or modifies Swarm Skills — the multi-role extension of",
+    "attributes": {
+      "gen_ai.tool.name": "skill_tool",
+      "gen_ai.tool.call.id": "call_00_PRxiGAizDqKw3CXcjMqt8870",
+      "gen_ai.span.type": "tool",
+      "jiuwenclaw.session.id": "",
+      "jiuwenclaw.channel.id": "",
+      "jiuwenclaw.request.id": "",
+      "gen_ai.tool.arguments": {
+        "skill_name": "swarmskill-creator"
+      },
+      "gen_ai.tool.result": "success=True data={'skill_directory': 'C:\\\\Users\\\\田汶鑫\\\\.jiuwenswarm\\\\agent\\\\workspace\\\\skills\\\\swarmskill-creator', 'skill_content': '---\\nname: swarmskill-creator\\ndescription: |\\n  Creates, converts, or modifies Swarm Skills — the multi-role extension of the Skills standard (specialized roles + workflow + bind constraints).\\n  Use when the user wants to author a multi-role agent team, convert a single-agent skill into one, or refactor an existing team.\\n  Do NOT use for single-agent Skills — use create-skill instead.\\nversion: \"0.2\"\\n---\\n\\n# Swarm Skill Creator\\n\\nAuthoring tool for Swarm Skills — the multi-role extension of the Anthropic Skills standard. Encodes the Swarm Skill spec into a repeatable workflow with templates, decision trees, and an automated validator.\\n\\n## Workflow\\n\\nThis skill has **three modes**. Pick one based on the user\\'s request, then follow the matching pipeline:\\n\\n| Mode | Trigger | Output |\\n|---|---|---|\\n| **CREATE** | User has a fresh need (\"build a team for X\") | New `<swarmskill-name>/` directory with the full 5-file set |\\n| **CONVERT** | User points at an existing single-agent skill | Transformed `<swarmskill-name>/` directory + a delta report explaining what the team adds |\\n| **MODIFY** | User edits an existing Swarm Skill (add/remove role, change workflow, adjust bind, fix validator errors) | Updated files in the existing `<swarmskill-name>/` directory |\\n\\n> **All three modes share Stages 2–6**. CONVERT differs only in Stage 1 (decomposition replaces fresh design). MODIFY skips Stage 0 and Stage 1 (justification and pattern are already settled — re-open them only if the change alters the pattern, e.g. adding a parallel role to a pipeline team), touches only the affected stages in 2–5, and **MUST run Stage 6 (validator) — this is the most-skipped, most-critical step in MODIFY mode**. See the [MODIFY impact matrix](#modify-impact-matrix) for which stages to re-run per change type.\\n\\n### Stage 0: Triage — is a Swarm Skill even justified?\\n\\nA Swarm Skill is **only justified** when at least one of these is true:\\n\\n1. **Adversarial blind spot** — a single agent role-playing N personas produces converging outputs because it cannot escape its own analytical priors. Examples: PR review, security audit, design critique.\\n2. **Parallel decomposition gain** — N independent sub-tasks can run concurrently and the integration is non-trivial. Examples: multi-angle research, multi-perspective due diligence.\\n3. **Specialization pipeline with hard handoffs** — sequential stages with quality gates where blurring stage boundaries causes regressions. Examples: marketing copy (brief → draft → edit → audit), incident response (declare → triage → mitigate → postmortem).\\n\\n**If none apply → STOP. Recommend a single-agent skill instead.** Swarm Skills cost more tokens, more wall-clock, and more authoring overhead. Do not build one out of novelty.\\n\\nAsk the user: *\"Which of these failure modes does a single agent hit on this task today?\"* If they cannot answer, the Swarm Skill is premature.\\n\\n### Stage 1a (CREATE only): Pattern selection\\n\\nPick the architectural pattern (A / B / C / mixed) based on Stage 0 justification. The detailed decision tree with worked examples is in [reference/pattern-selection.md](reference/pattern-selection.md). Quick reference:\\n\\n| Pattern | When | Role count | Roles see each other? |\\n|---|---|---|---|\\n| **A. Adversarial / Cross-check** | Justification #1 (blind spot) | 2–4 | No — isolation is the value |\\n| **B. Parallel decomposition** | Justification #2 (independent sub-tasks) | 2–N (variable) | No until integration |\\n| **C. Specialization pipeline** | Justification #3 (sequential expert stages) | 3–5 | Each stage sees prior stage output |\\n| **Mixed (A+B / B+C / C+A)** | Multiple justifications stack | 4–6 | Pattern-by-stage |\\n| **Debate (Mixed B+A+C)** | #1 + #2 (blind spot + parallel breadth) | 3–N+1 | Phase-scoped: isolated → mutual |\\n\\nRead [reference/pattern-selection.md](reference/pattern-selection.md) before committing — picking the wrong pattern is th"
+    },
+    "events": null,
+    "links": null,
+    "resource": {
+      "service.name": "jiuwenswarm",
+      "service.version": "0.1.0"
+    },
+    "scope_name": "jiuwenswarm.telemetry_rail",
+    "scope_version": "",
+    "created_at": "2026-06-23 10:15:03"
+  },
+  {
+    "id": 47,
+    "trace_id": "0dc2aa4bf8916201134715573e2196eb",
+    "span_id": "d55f5298048df7a0",
+    "parent_span_id": "09a7f7330f99f27f",
+    "name": "gen_ai.tool.execute: search_skill",
+    "kind": 0,
+    "start_time_ns": 1782209703411048900,
+    "end_time_ns": 1782209706651543500,
+    "duration_ns": 3240494600,
+    "status_code": "OK",
+    "status_description": null,
+    "attributes": {
+      "gen_ai.tool.name": "search_skill",
+      "gen_ai.tool.call.id": "call_01_lrPgJyocGOjCv17Vcjvw1631",
+      "gen_ai.span.type": "tool",
+      "jiuwenclaw.session.id": "",
+      "jiuwenclaw.channel.id": "",
+      "jiuwenclaw.request.id": "",
+      "gen_ai.tool.arguments": {
+        "query": "create skill",
+        "source": "auto"
+      },
+      "gen_ai.tool.result": "{'success': True, 'source': 'auto', 'items': [{'name': 'skill-creating', 'description': 'Used to create a new skill. Used when a user wants to create a new skill', 'source': 'skillnet', 'identifier': 'https://github.com/majiayu000/claude-skill-registry/blob/8314f85fb70be05b08eb0e27bea3d62ea3677446/skills/product/skill-creating', 'installed': False, 'version': '', 'author': 'majiayu000', 'score': 104}, {'name': 'skill-creator', 'description': \"MUST BE USED when user says: 'create a skill', 'make a skill', 'new skill', 'build a skill', 'write a skill', 'add a skill', 'skill for X', or any variation. Also use when editing SKILL.md files, updating skill descriptions, adding skill resources, or iterating on existing skills. Load this skill BEFORE any skill-related work.\", 'source': 'skillnet', 'identifier': 'https://github.com/fx/cc/blob/a54ea62c2409e3651abb24ae19b0fc4f2c910bbf/plugins/fx-meta/skills/skill-creator', 'installed': False, 'version': '', 'author': 'fx', 'score': 3}, {'name': 'skill-creator', 'description': 'Guide for creating or updating a skill. Use when the user wants to add a new skill or revise an existing skill for this ai-kit app.', 'source': 'skillnet', 'identifier': 'https://github.com/takatoshi-maeda/ai-kit/blob/06060b1e30be5ff81a5ce3c289e48a48c135ff2a/resources/skills/.system/skill-creator', 'installed': False, 'version': '', 'author': 'takatoshi-maeda', 'score': 0}, {'name': 'sch-create', 'description': \"Create a new Skill from scratch. Use when a student says 'sch create', 'create a skill', 'new skill', '创建skill', or wants to start a fresh Skill project.\", 'source': 'skillnet', 'identifier': 'https://github.com/Trust-App-AI-Lab/StudyClawHub/blob/5007f4fdd8201d1ae5c47f2ad740d364e72503d5/.claude/skills/sch-create', 'installed': False, 'version': '', 'author': 'Trust-App-AI-Lab', 'score': 5}, {'name': 'create-skill', 'description': '创建新 Skill 的 Skill。当需要把能力固化为 Skill 时触发。触发词：创建 skill、新建 skill、写一个 skill、create skill。', 'source': 'skillnet', 'identifier': 'https://github.com/maxoreric/sop-engine/blob/c90ff7adffb955a6a188ca6b1f5f47d1e4c28578/skills/create-skill', 'installed': False, 'version': '', 'author': 'maxoreric', 'score': 0}, {'name': 'create-skill', 'description': '新しいSkillを作成する。「Skill作って」「スキル作成」等で起動。', 'source': 'skillnet', 'identifier': 'https://github.com/ryosukesuto/dotfiles/blob/4554cc48a7b5bad3eb19e5e6bfd896ba603c42d7/config/claude/skills/create-skill', 'installed': False, 'version': '', 'author': 'ryosukesuto', 'score': 0}, {'name': 'skill-maker', 'description': 'Create and manage custom skills for SWYNNAPSE. Use when user wants to create a new skill, improve an existing skill, or teach SWYNNAPSE new capabilities.', 'source': 'skillnet', 'identifier': 'https://github.com/swarnim0129/oc-swyn/blob/ddf130f5e01bb47b77ae23aa1c5fafc2b794caf4/.opencode/skills/skill-maker', 'installed': False, 'version': '', 'author': 'swarnim0129', 'score': 0}, {'name': 'skill-creator', 'description': 'MANDATORY tool for creating SKILLs - MUST be invoked IMMEDIATELY when user wants to create/add any skill', 'source': 'skillnet', 'identifier': 'https://github.com/FeiWangHub/playground/blob/8a34657cbc575b1890595a9cee938c35e85d1d8c/ai-playground/vhs-app-copilot/.trae/skills/skill-creator', 'installed': False, 'version': '', 'author': 'FeiWangHub', 'score': 0}, {'name': 'skill-creator', 'description': 'Use when creating new skills, updating existing skills, or packaging skills for distribution.', 'source': 'skillnet', 'identifier': 'https://github.com/kienhaminh/anti-chaotic/blob/96773c83b3d6702c28496ec6e0bf05d61c2ce6ae/.agent/skills/skill-creator', 'installed': False, 'version': '', 'author': 'kienhaminh', 'score': 76}, {'name': 'skill-creating', 'description': 'Used to create a new skill. Used when a user wants to create a new skill', 'source': 'skillnet', 'identifier': 'https://github.com/TheBBz/HFTPM/blob/e21af63568d7c713e06a2e1506b354475eaf3f3d/.claude/skills/skill-creating', 'installed': False, 'version': '', 'author': 'TheBBz', 'score': 0}], 'detail': 'clawhub: 未配置 ClawHub CLI token，请先配置', 'query_summary': \"search"
+    },
+    "events": null,
+    "links": null,
+    "resource": {
+      "service.name": "jiuwenswarm",
+      "service.version": "0.1.0"
+    },
+    "scope_name": "jiuwenswarm.telemetry_rail",
+    "scope_version": "",
+    "created_at": "2026-06-23 10:15:08"
+  },
+  {
+    "id": 48,
+    "trace_id": "0dc2aa4bf8916201134715573e2196eb",
+    "span_id": "f458ac96b4891e79",
+    "parent_span_id": "09a7f7330f99f27f",
+    "name": "gen_ai.chat",
+    "kind": 0,
+    "start_time_ns": 1782209706730527800,
+    "end_time_ns": 1782209716379213900,
+    "duration_ns": 9648686100,
+    "status_code": "OK",
+    "status_description": null,
+    "attributes": {
+      "gen_ai.system": "openai",
+      "gen_ai.request.model": "deepseek-v4-pro",
+      "gen_ai.response.model": "deepseek-v4-pro",
+      "gen_ai.operation.name": "chat",
+      "gen_ai.span.type": "model",
+      "jiuwenclaw.session.id": "",
+      "jiuwenclaw.channel.id": "",
+      "jiuwenclaw.request.id": "",
+      "gen_ai.request.temperature": 0.95,
+      "gen_ai.request.top_p": 0.1,
+      "jiuwenclaw.iteration": 2,
+      "gen_ai.request.streaming": false,
+      "gen_ai.input.messages.count": 5,
+      "gen_ai.input.messages.total_length": 75990,
+      "gen_ai.input.messages": [
+        {
+          "role": "system",
+          "parts": [
+            {
+              "type": "text",
+              "content": "你是一个私人智能体，由 JiuwenSwarm 创建。像一个有温度的人类助手一样与用户互动。\n\n---\n\n# 你的家\n\n你的一切从 `.jiuwenswarm` 目录开始。\n\n| 路径 | 用途 | 操作建议 |\n|------|------|----------|\n| `C:\\Users\\田汶鑫\\.jiuwenswarm\\config` | 配置信息 | 不要轻易改动，错误配置可能导致异常 |\n| `C:\\Users\\田汶鑫\\.jiuwenswarm\\agent\\workspace` | 身份与任务信息 | 可适当更新，以更好地服务用户 |\n| `C:\\Users\\田汶鑫\\.jiuwenswarm\\agent\\workspace\\memory` | 持久化记忆 | 将其视为你记忆的一部分，随时查阅 |\n| `C:\\Users\\田汶鑫\\.jiuwenswarm\\agent\\workspace\\skills` | 技能库 | 可随时翻阅、调用，不可修改 |\n| `C:\\Users\\田汶鑫\\.jiuwenswarm\\agent\\workspace\\todo` | 待办事项 | 记录用户请求的任务，每次请求后会更新 |\n\n## 配置信息\n\n谨慎对待你的配置信息，如果用户要求你修改，请在修改后重启自己的服务，以保证改动生效。\n\n| 路径 | 用途 |\n|------|------|\n| `C:\\Users\\田汶鑫\\.jiuwenswarm\\config/config.yaml` | 配置信息 |\n| `C:\\Users\\田汶鑫\\.jiuwenswarm\\config/.env` | 环境变量 |\n\n## 运行环境\n\n当前运行平台：`win32`\n\nShell 能力：\n- PowerShell：可用，路径 `C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.EXE`\n- Git Bash：可用，路径 `D:\\applications\\Git\\bin\\bash.exe`\n- PATH bash：不可用\n\nShell 选择规则：\n- Windows 且 Git Bash 可用，或 PATH bash 明确不是 WSL stub 时，可以使用 bash/Git Bash 执行 POSIX 命令，例如 `ls`、`grep`、`cat`、`mkdir -p`、bash 脚本。\n- Windows 且 Git Bash 不可用、PATH bash 也不可用或只是 WSL stub 时，不要使用 POSIX 命令；优先使用 PowerShell 或 cmd。\n- PowerShell cmdlet 不要包在 bash 里执行，应直接使用 PowerShell。\n\n**重要提示**：必须严格使用与当前平台匹配的命令语法，切勿使用其他平台的命令格式。\n\n常见命令差异对照：\n\n| 操作 | Windows (`win32`/`win64`) | Linux/macOS (`linux`/`darwin`) |\n|------|---------------------------|-------------------------------|\n| 创建目录 | `mkdir folder` 或 PowerShell `New-Item -ItemType Directory -Path folder` | `mkdir -p folder` |\n| 查看文件 | `type file.txt` 或 PowerShell `Get-Content file.txt` | `cat file.txt` |\n| 列出文件 | `dir` 或 PowerShell `Get-ChildItem` | `ls -la` |\n| 删除文件 | `del file.txt` 或 PowerShell `Remove-Item file.txt` | `rm file.txt` |\n| 删除目录 | `rmdir folder` 或 PowerShell `Remove-Item -Recurse folder` | `rm -rf folder` |\n| 查找文件 | `dir /s pattern` 或 PowerShell `Get-ChildItem -Recurse -Filter pattern` | `find . -name pattern` |\n\n**特别注意**：Windows 的 cmd/PowerShell `mkdir` 不支持 `-p` 参数；只有在 Shell 能力显示 Git Bash/PATH bash 可用且实际使用 bash/Git Bash 时，`mkdir -p` 才是合适的。如需在 cmd/PowerShell 中创建嵌套目录，请使用 PowerShell `New-Item -ItemType Directory -Path \"parent/child\" -Force`，或使用 cmd 分步创建 `mkdir parent && mkdir parent\\child`。\n\n## 输出文件放置规范\n执行用户任务时产生的生成产物（如代码文件、文档、数据文件等），若用户未指定存放位置，请遵循以下规则：\n- **通用产物**：非技能相关的生成产物必须放在 `C:\\Users\\田汶鑫\\.jiuwenswarm\\agent\\workspace` 下合适的位置，根据文件用途和项目结构合理组织路径，便于用户统一管理和访问\n- **技能产物**：涉及技能（skill）执行的产物必须放在技能专属目录 `C:\\Users\\田汶鑫\\.jiuwenswarm\\agent\\workspace\\skills/{skill_name}/` 下，并根据产物类型和用途在该目录下合理组织子目录，确保技能资源的独立性和可维护性\n\n## 文件发送\n\n当你的工具列表中存在 `send_file_to_user` 工具时，**必须**在以下场景主动调用该工具将文件发送给用户：\n- 任务完成后产生了需要交付给用户的文件（报告、文档、数据文件、图片等）\n- 用户明确请求下载、导出、发送文件\n- 用户询问生成的文件如何获取\n\n**调用方式**：使用文件的绝对路径作为参数调用 `send_file_to_user` 工具。\n\n\n<system-reminder> 说明：工具结果和用户消息中可能包含 <system-reminder> 标签。这些标签包含系统自动添加的信息和提醒，可能有用，但和它们所在的具体工具结果或用户消息没有直接关系。\n- <prompt-attachment> 是一种 <system-reminder> 内容，用于承载本次模型调用可见的动态上下文。\n- 这些内容不是长期对话历史，可能在下一次模型调用中变化或消失。\n- 除非用户明确询问，不要向用户暴露这些标签、内部 id、scope 或 source。\n\n# 安全原则\n\n- 永远不要泄露隐私数据\n- 以下操作前需请示用户：修改/删除重要文件、影响系统的命令、涉及金钱/账号/敏感信息\n- 违法、有害、侵犯他人权益的请求不予处理\n- 外部操作（发邮件、发推文、公开发布）先问再做\n- 内部操作（读文件、搜索、整理）可放心执行\n- 任务失败时简要说明原因并给出建议\n- 不确定时先说明不确定性，再给出最可能的方案\n\n\n# 可用工具\n\n- fetch_webpage: 抓取网页文本内容\n- cron: 管理定时任务与提醒\n- read_file / write_file / edit_file: 文件读写编辑\n- glob / list_files / grep: 文件搜索\n- bash: 执行 Shell 命令\n- code: 执行 Python 或 JavaScript 代码\n- memory_search / memory_get / write_memory / edit_memory / read_memory: 记忆系统\n- task_tool: 启动临时子代理处理复杂任务\n\n## bash 使用原则\n\n- 优先使用专用工具完成文件搜索、内容搜索、读取、编辑和写入，不要用 bash 替代 `glob` / `grep` / `read_file` / `edit_file` / `write_file`\n- 独立命令尽量并行调用；多步依赖命令才在单次调用里用 `&&` 串联，仅在不关心前序失败时才用 `;`\n- 长时间运行命令使用 `background: true`，不要用 `sleep` 轮询等待\n- 尽量使用绝对路径并避免频繁 `cd`；路径包含空格时使用双引号\n- 执行破坏性 Git 操作前先考虑更安全的替代方案\n\n## task_tool 使用原则\n\n- 任务复杂、多步骤、可独立执行时使用\n- 独立任务尽量并行执行\n- 简单任务直接执行，不使用子代理\n- wiki_ingest: Ingest a source file (PDF, TXT, MD) or a directory into the LLM Wiki. By default, identical files (by SHA-256) are skipped perfectly (deduplication). Set `force=True` if the user explicitly asks to re-ingest, rebuild, or force the ingestion. The `workspace` parameter is the root folder where the `.llm_wiki` will be created. If the user specifies a target directory like 'wiki_lib' or 'bibliography', pass that exact path as `workspace`.\n- wiki_query: Query the LLM Wiki's compiled knowledge base directly via Natural Language. The `workspace` parameter is the folder containing the `.llm_wiki`. If the user specifies a target directory like 'wiki_lib' or 'bibliography', pass that exact path as `workspace`.\n- wiki_lint: Health-check and trigger automatic repairs of broken links, orphans, or anomalies in the LLM Wiki. The `workspace` parameter is the root folder containing the `.llm_wiki`. If the user specifies a target directory like 'wiki_lib' or 'bibliography', pass that exact path as `workspace`.\n- search_skill: Search installable skills from SkillNet, ClawHub, and TeamSkillsHub. Use the returned identifier with install_skill (SkillNet URL, ClawHub slug, or TeamSkillsHub asset_id when source is teamskillshub).\n- install_skill: Install a skill using the identifier returned by search_skill. Returns the installed skill summary and where to read SKILL.md.\n- uninstall_skill: Uninstall an installed skill by name.\n- acp_chat: Send a user message to an external ACP-compatible agent subprocess defined in config.yaml under acp_agents.<name> (command + args). Use for Codex CLI, Gemini CLI, or any other stdio ACP agent. Parameter agent is the profile key, message is the prompt. Set new_session=true to restart the subprocess and ACP session for that profile.\n- powershell: 执行给定的 PowerShell 命令并返回输出。工作目录会在命令之间保持不变；但 shell 状态，例如变量、函数和别名，不会保留。\n- skill_tool: 使用此工具查看特定技能的内容\n- todo_create: 创建当前会话的待办事项列表，用于跟踪进度、组织复杂任务，帮助用户了解整体执行情况。\n- todo_list: 检索并显示当前会话的所有待办事项。\n- todo_get: 根据任务 ID 获取单个任务的完整详情。\n- todo_modify: 修改当前会话的待办事项。支持批量操作，尽量将多个变更合并为一次调用。\n- send_file_to_user: 【文件发送工具】当需要将生成的文件、导出的数据、创建的文档等发送给用户时使用此工具。使用场景包括：用户请求导出/下载文件、任务完成后需要交付文件、生成报告/文档后发送给用户。参数格式：接受单个路径字符串或路径数组，路径必须是绝对路径。示例：'/tmp/report.pdf' 或 ['/tmp/file1.csv', '/tmp/file2.xlsx']\n\n\n# 技能\n\n执行前先用 read_file 阅读相关 SKILL.md。\n\n可用技能：\n0. swarmskill-creator: Creates, converts, or modifies Swarm Skills — the multi-role extension of the Skills standard (specialized roles + workflow + bind constraints).\nUse when the user wants to author a multi-role agent team, convert a single-agent skill into one, or refactor an existing team.\nDo NOT use for single-agent Skills — use create-skill instead.\n选择最相关的技能，先阅读其 SKILL.md 再执行。\n\n# 持久化存储体系\n\n每轮对话均从空白状态启动。跨会话的信息持久化依赖于工作区文件系统。记录悄悄进行就好，不需要让用户感知到。\n\n### 存储层级划分\n\n- **会话日志：** `YYYY-MM-DD.md`（存储当日有参考价值的交互记录，包括情景记忆和任务指令。支持增量追加，确保每次操作、用户指令和情景变化都被记录。）\n- **用户画像：** `USER.md`（稳定的身份属性与偏好信息）\n- **知识沉淀：** `MEMORY.md`（经筛选提炼的长期背景知识，非原始流水账）\n\n### 核心操作规范\n\n- 会话本身不具备记忆能力，文件系统是唯一的信息载体。需持久化的内容务必写入文件\n- **路径限制：** 记忆工具（write_memory/edit_memory/read_memory）操作文件时，直接给出文件名\n- 更新 USER.md 或 MEMORY.md 时，必须先读取现有内容再执行修改\n- **字段唯一性约束：** 每个字段仅允许出现一次。已存在字段通过 `edit_memory` 更新，新字段通过 `write_memory` 追加\n\n### 信息采集、存储操作与记录\n\n对话过程中，发现有价值的信息时，应该立即进行分类、存储，并及时记录，确保不拖延记录过程：\n\n**⚠️ 敏感信息冲突处理原则**\n\n如果待记录的内容与敏感信息过滤规则存在冲突，**以敏感信息过滤规则为准，不记录该内容**。敏感信息过滤规则具有最高优先级。\n\n1. **用户画像信息（user_profile）**：记录用户的身份信息、偏好、习惯等稳定属性，比如用户的职业、兴趣、工作模式、喜好、不满等。\n   - **存储**：写入 `USER.md`。\n   - **注意**：USER.md中只允许写入用户相关的记忆内容。当用户提出对Agent的身份、偏好、回答习惯等属性的定义时，记忆工具不做记录\n\n2. **情景记忆信息（episodic_memory）**：记录用户经历的具体事件或重要决策，比如用户要求完成的任务、描述的项目进展、某次事件等。\n   - **存储**：写入 `YYYY-MM-DD.md`。\n\n3. **语义记忆信息（semantic_memory）**：存储背景知识、技术细节、工具相关的本地配置（SSH、摄像头等）等长期有效信息，比如项目技术栈、工具的配置等。\n   - **存储**：写入 `MEMORY.md`。\n\n4. **摘要记忆（summary_memory）**：提炼对话中的关键信息，帮助后续快速回顾，比如对话中形成的重要决策、核心结论、讨论的要点等。\n   - **存储**：写入 `YYYY-MM-DD.md`。\n\n5. **用户请求记录（request_memory）**：记录用户明确请求的信息，帮助后续服务，比如用户要求记住某个信息、用户要求某个动作等。\n   - **存储**：写入 `YYYY-MM-DD.md`。\n\n6. **其他信息（others）**：当用户提到有价值的细节或信息时，或每次文件操作后，需要调用 write_memory 使用 append=true 参数追加记录至 YYYY-MM-DD.md。\n   - 注意：进行信息筛选，仅需要记录有价值的信息。有价值的信息包括但不限于：用户提供的联系人信息、项目细节、任务指令、偏好、文件路径、存储位置、任何可提高效率的信息等。发现的项目背景、技术细节、工作流程等也要写入相关文件。\n\n#### 历史检索机制\n\n — 仅在回答**关于历史事件、日期、人物、过去对话的问题前，先调用 `memory_search` 工具检索相关记忆**\n   - 搜索查询应包含问题中的关键信息（人名、日期、事件关键词）\n   - 如果搜索结果不足，尝试用不同的关键词再次搜索\n   - 基于检索到的记忆信息回答问题，不要依赖预训练知识\n   - 对于不涉及上述历史事件、日期、人物、过去对话的问题，不要调用工具来检索记忆\n\n### 存储管理规范\n\n### 更新规则\n1. 更新前必须先读取现有内容\n2. 合并新信息，避免全量覆盖\n3. MEMORY.md 条目仅记录精炼事实，不含日期/时间戳\n4. **USER.md 字段去重：** 已存在字段通过 `edit_memory` 更新，不存在字段通过 `write_memory` 追加\n\n\n在操作当天的会话日志时，请使用 `2026-06-23.md` 作为文件名。\n\n\n# 消息说明\n\n你会收到用户消息和系统消息，需按来源和类型分别处理。\n\n## 用户消息\n\n```json\n{\n  \"channel\": \"【频道来源，如 feishu / telegram / web】\",\n  \"preferred_response_language\": \"【en 或 zh】\",\n  \"content\": \"【用户消息内容】\",\n  \"source\": \"user\"\n}\n```\n\n## 系统消息\n\n```json\n{\n  \"type\": \"【cron 或 heartbeat 或 notify】\",\n  \"preferred_response_language\": \"【en 或 zh】\",\n  \"content\": \"【任务信息】\",\n  \"source\": \"system\"\n}\n```\n\n- **cron**：定时任务，如「每日提醒」「周报汇总」。\n- **heartbeat**：心跳任务，如「检查待办」「同步状态」。\n\n系统任务完成后，以回复形式通知用户。\n\n## 最终回复\n\n- 用户最终看到的，只有你**最后一条不带任何工具调用的消息**；带工具调用的那一轮里写的正文不会作为最终结果呈现给用户。\n- 因此，**完整的交付物（如完整方案、完整文档、完整结果）必须放在最后一条不带工具调用的消息里**。\n- 不要把交付物正文和工具调用（包括 `todo` 状态更新等）写在同一条消息里——如果这样做，正文会丢失。正确做法是：先用一条消息完成必要的工具调用，再用最后一条不带工具调用的消息输出完整交付物。\n- 不要只用“已完成”“全部完成”“以上方案已完成”“详见上文”等状态确认或指代来代替最终交付物；即使相关内容此前已经产出过，**也要在这最后一条消息里完整重述用户需要看到的内容**。\n\n\n你是 jiuwenswarm 的 A2UI 生成器。遇到适合富交互界面的回答时，必须生成严格符合 A2UI 0.8 schema 的消息。\n\n## Workflow Description:\n\nThe generated response MUST follow these rules:\n- The response can contain one or more A2UI JSON blocks.\n- Each A2UI JSON block MUST be wrapped in `<a2ui-json>` and `</a2ui-json>` tags.\n- Between or around these blocks, you can provide conversational text.\n- The JSON part MUST be a JSON list of A2UI messages and MUST validate against the provided A2UI JSON SCHEMA.\n- Top-Down Component Ordering: Within the `components` list of a message:\n    - The 'root' component MUST be the FIRST element.\n    - Parent components MUST appear before their child components.\n    This specific ordering allows the streaming parser to yield and render the UI incrementally as it arrives.\n\n如果使用 A2UI，回答可以包含说明文本和一个或多个 A2UI JSON block。每个 block 必须用 <a2ui-json> 和 </a2ui-json> 包装。block 内必须是 JSON list，list 中每个元素都是 A2UI server-to-client message。必须先输出 beginRendering，再输出 surfaceUpdate；如果使用数据绑定，再按需输出 dataModelUpdate。父组件必须先于子组件出现。不要输出其他协议版本的 schema、字段或组件。\n\nA2UI 是可选能力；不要强行使用 A2UI。如果富交互界面比纯文本更适合当前回答，可以输出一段很短的说明，然后输出一个合法的 <a2ui-json>...</a2ui-json> block。如果不适合 A2UI，请直接纯文本回答。不要承诺使用 A2UI 却只输出 Markdown。如果确实需要外部事实或图片，可以短暂使用可用工具，随后自行判断是否用 A2UI 呈现。block 内必须是 A2UI 0.8 server-to-client message list，并且必须先 beginRendering，再 surfaceUpdate，再按需 dataModelUpdate。 必须匹配用户请求的组件类型：如果用户要求输入框或文本框，生成 TextField/Form UI；只有用户要求卡片或卡片列表时才生成 card list。Card/list 不是万能 fallback。单个对象详情请求应生成单对象详情布局，不要生成多卡片 demo。不要用固定 demo 替代用户请求的组件。对可编辑 TextField，必须把 TextField.text 绑定到 data model 路径，用 dataModelUpdate 初始化该路径，并在 Button.action.context 中用 path reference 包含提交值。表单提交不能输出空的 Button.action.context。 使用 List 或卡片列表展示重复数据时，dataModelUpdate 的 key 不能重复。请把数组编码为一个集合 key，并在 valueMap 中使用 \"0\"、\"1\" 这类索引项；每个 item 包含自己的嵌套 valueMap 字段。模板组件和 Button.action.context 内使用 item-relative path，例如 name、price 或 /item/name；不要在模板内使用 /phones/name 这类集合绝对路径。 不要编造图片 URL。如果需要外部事实或图片，可以短暂使用可用工具，随后必须收敛到最终 A2UI 响应。使用用户提供的 HTTPS URL 或已验证的稳定来源 URL；不要使用猜测出来的 upload.wikimedia.org thumbnail 路径。 The host app may not have the Material Symbols icon font available. Avoid A2UI Icon for semantic content such as product or status icons; use Text literalString emoji or text labels instead so ligature fallback text does not appear. A2UI 是可选能力。只有当生成式 UI 比纯文本更能改善用户体验时才使用 A2UI。不要为寒暄、两三句话解释、简单事实回答或无结构普通文本强行生成 A2UI。适合 A2UI 的通用场景包括：信息收集表单、可操作确认、多结果比较、单对象详情、带媒体的卡片、仪表盘/状态/库存/任务摘要，以及工具结果的交互式展示。对于真实世界推荐、对比、选购、排行、价格、旅行、餐厅或产品请求，如果有可用工具，应先使用工具获取依据，再判断 A2UI 是否是最佳最终展示方式。如果用户已经提供完整结构化数据，或明确要求演示 UI，可以直接渲染而不调用工具。绝不能把 tool_call、invoke 或函数调用标签当作普通文本输出。\n\n## UI Description:\n当用户需要列表、卡片、表单、确认结果、可点击操作或结构化信息比较时使用 A2UI。普通解释、简短回答、敏感内容或不需要交互的回答保持纯文本。\n\n---BEGIN A2UI JSON SCHEMA---\n\n### Server To Client Schema:\n{\n  \"title\": \"A2UI Message Schema\",\n  \"description\": \"Describes a JSON payload for an A2UI (Agent to UI) message, which is used to dynamically construct and update user interfaces. A message MUST contain exactly ONE of the action properties: 'beginRendering', 'surfaceUpdate', 'dataModelUpdate', or 'deleteSurface'.\",\n  \"type\": \"object\",\n  \"properties\": {\n    \"beginRendering\": {\n      \"type\": \"object\",\n      \"description\": \"Signals the client to begin rendering a surface with a root component and specific styles.\",\n      \"properties\": {\n        \"surfaceId\": {\n          \"type\": \"string\",\n          \"description\": \"The unique identifier for the UI surface to be rendered.\"\n        },\n        \"catalogId\": {\n          \"type\": \"string\",\n          \"description\": \"The identifier of the component catalog to use for this surface. If omitted, the client MUST default to the standard catalog for this A2UI version (https://a2ui.org/specification/v0_8/standard_catalog_definition.json).\"\n        },\n        \"root\": {\n          \"type\": \"string\",\n          \"description\": \"The ID of the root component to render.\"\n        },\n        \"styles\": {\n          \"type\": \"object\",\n          \"description\": \"Styling information for the UI.\",\n          \"additionalProperties\": true\n        }\n      },\n      \"required\": [\n        \"root\",\n        \"surfaceId\"\n      ]\n    },\n    \"surfaceUpdate\": {\n      \"type\": \"object\",\n      \"description\": \"Updates a surface with a new set of components.\",\n      \"properties\": {\n        \"surfaceId\": {\n          \"type\": \"string\",\n          \"description\": \"The unique identifier for the UI surface to be updated. If you are adding a new surface this *must* be a new, unique identified that has never been used for any existing surfaces shown.\"\n        },\n        \"components\": {\n          \"type\": \"array\",\n          \"description\": \"A list containing all UI components for the surface.\",\n          \"minItems\": 1,\n          \"items\": {\n            \"type\": \"object\",\n            \"description\": \"Represents a *single* component in a UI widget tree. This component could be one of many supported types.\",\n            \"properties\": {\n              \"id\": {\n                \"type\": \"string\",\n                \"description\": \"The unique identifier for this component.\"\n              },\n              \"weight\": {\n                \"type\": \"number\",\n                \"description\": \"The relative weight of this component within a Row or Column. This corresponds to the CSS 'flex-grow' property. Note: this may ONLY be set when the component is a direct descendant of a Row or Column.\"\n              },\n              \"component\": {\n                \"type\": \"object\",\n                \"description\": \"A wrapper object that MUST contain exactly one key, which is the name of the component type (e.g., 'Heading'). The value is an object containing the properties for that specific component.\",\n                \"additionalProperties\": true\n              }\n            },\n            \"required\": [\n              \"id\",\n              \"component\"\n            ]\n          }\n        }\n      },\n      \"required\": [\n        \"surfaceId\",\n        \"components\"\n      ]\n    },\n    \"dataModelUpdate\": {\n      \"type\": \"object\",\n      \"description\": \"Updates the data model for a surface.\",\n      \"properties\": {\n        \"surfaceId\": {\n          \"type\": \"string\",\n          \"description\": \"The unique identifier for the UI surface this data model update applies to.\"\n        },\n        \"path\": {\n          \"type\": \"string\",\n          \"description\": \"An optional path to a location within the data model (e.g., '/user/name'). If omitted, or set to '/', the entire data model will be replaced.\"\n        },\n        \"contents\": {\n          \"type\": \"array\",\n          \"description\": \"An array of data entries. Each entry must contain a 'key' and exactly one corresponding typed 'value*' property.\",\n          \"items\": {\n            \"type\": \"object\",\n            \"description\": \"A single data entry. Exactly one 'value*' property should be provided alongside the key.\",\n            \"properties\": {\n              \"key\": {\n                \"type\": \"string\",\n                \"description\": \"The key for this data entry.\"\n              },\n              \"valueString\": {\n                \"type\": \"string\"\n              },\n              \"valueNumber\": {\n                \"type\": \"number\"\n              },\n              \"valueBoolean\": {\n                \"type\": \"boolean\"\n              },\n              \"valueMap\": {\n                \"description\": \"Represents a map as an adjacency list.\",\n                \"type\": \"array\",\n                \"items\": {\n                  \"type\": \"object\",\n                  \"description\": \"One entry in the map. Exactly one 'value*' property should be provided alongside the key.\",\n                  \"properties\": {\n                    \"key\": {\n                      \"type\": \"string\"\n                    },\n                    \"valueString\": {\n                      \"type\": \"string\"\n                    },\n                    \"valueNumber\": {\n                      \"type\": \"number\"\n                    },\n                    \"valueBoolean\": {\n                      \"type\": \"boolean\"\n                    }\n                  },\n                  \"required\": [\n                    \"key\"\n                  ]\n                }\n              }\n            },\n            \"required\": [\n              \"key\"\n            ]\n          }\n        }\n      },\n      \"required\": [\n        \"contents\",\n        \"surfaceId\"\n      ]\n    },\n    \"deleteSurface\": {\n      \"type\": \"object\",\n      \"description\": \"Signals the client to delete the surface identified by 'surfaceId'.\",\n      \"properties\": {\n        \"surfaceId\": {\n          \"type\": \"string\",\n          \"description\": \"The unique identifier for the UI surface to be deleted.\"\n        }\n      },\n      \"required\": [\n        \"surfaceId\"\n      ]\n    }\n  }\n}\n\n### Catalog Schema:\n{\n  \"components\": {\n    \"Text\": {\n      \"type\": \"object\",\n      \"properties\": {\n        \"text\": {\n          \"type\": \"object\",\n          \"description\": \"The text content to display. This can be a literal string or a reference to a value in the data model ('path', e.g., '/doc/title'). While simple Markdown formatting is supported (i.e. without HTML, images, or links), utilizing dedicated UI components is generally preferred for a richer and more structured presentation.\",\n          \"properties\": {\n            \"literalString\": {\n              \"type\": \"string\"\n            },\n            \"path\": {\n              \"type\": \"string\"\n            }\n          }\n        },\n        \"usageHint\": {\n          \"type\": \"string\",\n          \"description\": \"A hint for the base text style. One of:\\n- `h1`: Largest heading.\\n- `h2`: Second largest heading.\\n- `h3`: Third largest heading.\\n- `h4`: Fourth largest heading.\\n- `h5`: Fifth largest heading.\\n- `caption`: Small text for captions.\\n- `body`: Standard body text.\",\n          \"enum\": [\n            \"h1\",\n            \"h2\",\n            \"h3\",\n            \"h4\",\n            \"h5\",\n            \"caption\",\n            \"body\"\n          ]\n        }\n      },\n      \"required\": [\n        \"text\"\n      ]\n    },\n    \"Image\": {\n      \"type\": \"object\",\n      \"properties\": {\n        \"url\": {\n          \"type\": \"object\",\n          \"description\": \"The URL of the image to display. This can be a literal string ('literal') or a reference to a value in the data model ('path', e.g. '/thumbnail/url').\",\n          \"properties\": {\n            \"literalString\": {\n              \"type\": \"string\"\n            },\n            \"path\": {\n              \"type\": \"string\"\n            }\n          }\n        },\n        \"altText\": {\n          \"type\": \"object\",\n          \"description\": \"The alt text for the image. This can be a literal string ('literal') or a reference to a value in the data model ('path', e.g. '/thumbnail/altText').\",\n          \"properties\": {\n            \"literalString\": {\n              \"type\": \"string\"\n            },\n            \"path\": {\n              \"type\": \"string\"\n            }\n          }\n        },\n        \"fit\": {\n          \"type\": \"string\",\n          \"description\": \"Specifies how the image should be resized to fit its container. This corresponds to the CSS 'object-fit' property.\",\n          \"enum\": [\n            \"contain\",\n            \"cover\",\n            \"fill\",\n            \"none\",\n            \"scale-down\"\n          ]\n        },\n        \"usageHint\": {\n          \"type\": \"string\",\n          \"description\": \"A hint for the image size and style. One of:\\n- `icon`: Small square icon.\\n- `avatar`: Circular avatar image.\\n- `smallFeature`: Small feature image.\\n- `mediumFeature`: Medium feature image.\\n- `largeFeature`: Large feature image.\\n- `header`: Full-width, full bleed, header image.\",\n          \"enum\": [\n            \"icon\",\n            \"avatar\",\n            \"smallFeature\",\n            \"mediumFeature\",\n            \"largeFeature\",\n            \"header\"\n          ]\n        }\n      },\n      \"required\": [\n        \"url\"\n      ]\n    },\n    \"Icon\": {\n      \"type\": \"object\",\n      \"properties\": {\n        \"name\": {\n          \"type\": \"object\",\n          \"description\": \"The name of the icon to display. This can be a literal string or a reference to a value in the data model ('path', e.g. '/form/submit').\",\n          \"properties\": {\n            \"literalString\": {\n              \"type\": \"string\",\n              \"enum\": [\n                \"accountCircle\",\n                \"add\",\n                \"arrowBack\",\n                \"arrowForward\",\n                \"attachFile\",\n                \"calendarToday\",\n                \"call\",\n                \"camera\",\n                \"check\",\n                \"close\",\n                \"delete\",\n                \"download\",\n                \"edit\",\n                \"event\",\n                \"error\",\n                \"favorite\",\n                \"favoriteOff\",\n                \"folder\",\n                \"help\",\n                \"home\",\n                \"info\",\n                \"locationOn\",\n                \"lock\",\n                \"lockOpen\",\n                \"mail\",\n                \"menu\",\n                \"moreVert\",\n                \"moreHoriz\",\n                \"notificationsOff\",\n                \"notifications\",\n                \"payment\",\n                \"person\",\n                \"phone\",\n                \"photo\",\n                \"print\",\n                \"refresh\",\n                \"search\",\n                \"send\",\n                \"settings\",\n                \"share\",\n                \"shoppingCart\",\n                \"star\",\n                \"starHalf\",\n                \"starOff\",\n                \"upload\",\n                \"visibility\",\n                \"visibilityOff\",\n                \"warning\"\n              ]\n            },\n            \"path\": {\n              \"type\": \"string\"\n            }\n          }\n        }\n      },\n      \"required\": [\n        \"name\"\n      ]\n    },\n    \"Video\": {\n      \"type\": \"object\",\n      \"properties\": {\n        \"url\": {\n          \"type\": \"object\",\n          \"description\": \"The URL of the video to display. This can be a literal string or a reference to a value in the data model ('path', e.g. '/video/url').\",\n          \"properties\": {\n            \"literalString\": {\n              \"type\": \"string\"\n            },\n            \"path\": {\n              \"type\": \"string\"\n            }\n          }\n        }\n      },\n      \"required\": [\n        \"url\"\n      ]\n    },\n    \"AudioPlayer\": {\n      \"type\": \"object\",\n      \"properties\": {\n        \"url\": {\n          \"type\": \"object\",\n          \"description\": \"The URL of the audio to be played. This can be a literal string ('literal') or a reference to a value in the data model ('path', e.g. '/song/url').\",\n          \"properties\": {\n            \"literalString\": {\n              \"type\": \"string\"\n            },\n            \"path\": {\n              \"type\": \"string\"\n            }\n          }\n        },\n        \"description\": {\n          \"type\": \"object\",\n          \"description\": \"A description of the audio, such as a title or summary. This can be a literal string or a reference to a value in the data model ('path', e.g. '/song/title').\",\n          \"properties\": {\n            \"literalString\": {\n              \"type\": \"string\"\n            },\n            \"path\": {\n              \"type\": \"string\"\n            }\n          }\n        }\n      },\n      \"required\": [\n        \"url\"\n      ]\n    },\n    \"Row\": {\n      \"type\": \"object\",\n      \"properties\": {\n        \"children\": {\n          \"type\": \"object\",\n          \"description\": \"Defines the children. Use 'explicitList' for a fixed set of children, or 'template' to generate children from a data list.\",\n          \"properties\": {\n            \"explicitList\": {\n              \"type\": \"array\",\n              \"items\": {\n                \"type\": \"string\"\n              }\n            },\n            \"template\": {\n              \"type\": \"object\",\n              \"description\": \"A template for generating a dynamic list of children from a data model list. `componentId` is the component to use as a template, and `dataBinding` is the path to the map of components in the data model. Values in the map will define the list of children.\",\n              \"properties\": {\n                \"componentId\": {\n                  \"type\": \"string\"\n                },\n                \"dataBinding\": {\n                  \"type\": \"string\"\n                }\n              },\n              \"required\": [\n                \"componentId\",\n                \"dataBinding\"\n              ]\n            }\n          }\n        },\n        \"distribution\": {\n          \"type\": \"string\",\n          \"description\": \"Defines the arrangement of children along the main axis (horizontally). This corresponds to the CSS 'justify-content' property.\",\n          \"enum\": [\n            \"center\",\n            \"end\",\n            \"spaceAround\",\n            \"spaceBetween\",\n            \"spaceEvenly\",\n            \"start\"\n          ]\n        },\n        \"alignment\": {\n          \"type\": \"string\",\n          \"description\": \"Defines the alignment of children along the cross axis (vertically). This corresponds to the CSS 'align-items' property.\",\n          \"enum\": [\n            \"start\",\n            \"center\",\n            \"end\",\n            \"stretch\"\n          ]\n        }\n      },\n      \"required\": [\n        \"children\"\n      ]\n    },\n    \"Column\": {\n      \"type\": \"object\",\n      \"properties\": {\n        \"children\": {\n          \"type\": \"object\",\n          \"description\": \"Defines the children. Use 'explicitList' for a fixed set of children, or 'template' to generate children from a data list.\",\n          \"properties\": {\n            \"explicitList\": {\n              \"type\": \"array\",\n              \"items\": {\n                \"type\": \"string\"\n              }\n            },\n            \"template\": {\n              \"type\": \"object\",\n              \"description\": \"A template for generating a dynamic list of children from a data model list. `componentId` is the component to use as a template, and `dataBinding` is the path to the map of components in the data model. Values in the map will define the list of children.\",\n              \"properties\": {\n                \"componentId\": {\n                  \"type\": \"string\"\n                },\n                \"dataBinding\": {\n                  \"type\": \"string\"\n                }\n              },\n              \"required\": [\n                \"componentId\",\n                \"dataBinding\"\n              ]\n            }\n          }\n        },\n        \"distribution\": {\n          \"type\": \"string\",\n          \"description\": \"Defines the arrangement of children along the main axis (vertically). This corresponds to the CSS 'justify-content' property.\",\n          \"enum\": [\n            \"start\",\n            \"center\",\n            \"end\",\n            \"spaceBetween\",\n            \"spaceAround\",\n            \"spaceEvenly\"\n          ]\n        },\n        \"alignment\": {\n          \"type\": \"string\",\n          \"description\": \"Defines the alignment of children along the cross axis (horizontally). This corresponds to the CSS 'align-items' property.\",\n          \"enum\": [\n            \"center\",\n            \"end\",\n            \"start\",\n            \"stretch\"\n          ]\n        }\n      },\n      \"required\": [\n        \"children\"\n      ]\n    },\n    \"List\": {\n      \"type\": \"object\",\n      \"properties\": {\n        \"children\": {\n          \"type\": \"object\",\n          \"description\": \"Defines the children. Use 'explicitList' for a fixed set of children, or 'template' to generate children from a data list.\",\n          \"properties\": {\n            \"explicitList\": {\n              \"type\": \"array\",\n              \"items\": {\n                \"type\": \"string\"\n              }\n            },\n            \"template\": {\n              \"type\": \"object\",\n              \"description\": \"A template for generating a dynamic list of children from a data model list. `componentId` is the component to use as a template, and `dataBinding` is the path to the map of components in the data model. Values in the map will define the list of children.\",\n              \"properties\": {\n                \"componentId\": {\n                  \"type\": \"string\"\n                },\n                \"dataBinding\": {\n                  \"type\": \"string\"\n                }\n              },\n              \"required\": [\n                \"componentId\",\n                \"dataBinding\"\n              ]\n            }\n          }\n        },\n        \"direction\": {\n          \"type\": \"string\",\n          \"description\": \"The direction in which the list items are laid out.\",\n          \"enum\": [\n            \"vertical\",\n            \"horizontal\"\n          ]\n        },\n        \"alignment\": {\n          \"type\": \"string\",\n          \"description\": \"Defines the alignment of children along the cross axis.\",\n          \"enum\": [\n            \"start\",\n            \"center\",\n            \"end\",\n            \"stretch\"\n          ]\n        }\n      },\n      \"required\": [\n        \"children\"\n      ]\n    },\n    \"Card\": {\n      \"type\": \"object\",\n      \"properties\": {\n        \"child\": {\n          \"type\": \"string\",\n          \"description\": \"The ID of the component to be rendered inside the card.\"\n        }\n      },\n      \"required\": [\n        \"child\"\n      ]\n    },\n    \"Tabs\": {\n      \"type\": \"object\",\n      \"properties\": {\n        \"tabItems\": {\n          \"type\": \"array\",\n          \"description\": \"An array of objects, where each object defines a tab with a title and a child component.\",\n          \"items\": {\n            \"type\": \"object\",\n            \"properties\": {\n              \"title\": {\n                \"type\": \"object\",\n                \"description\": \"The tab title. Defines the value as either a literal value or a path to data model value (e.g. '/options/title').\",\n                \"properties\": {\n                  \"literalString\": {\n                    \"type\": \"string\"\n                  },\n                  \"path\": {\n                    \"type\": \"string\"\n                  }\n                }\n              },\n              \"child\": {\n                \"type\": \"string\"\n              }\n            },\n            \"required\": [\n              \"title\",\n              \"child\"\n            ]\n          }\n        }\n      },\n      \"required\": [\n        \"tabItems\"\n      ]\n    },\n    \"Divider\": {\n      \"type\": \"object\",\n      \"properties\": {\n        \"axis\": {\n          \"type\": \"string\",\n          \"description\": \"The orientation of the divider.\",\n          \"enum\": [\n            \"horizontal\",\n            \"vertical\"\n          ]\n        }\n      }\n    },\n    \"Modal\": {\n      \"type\": \"object\",\n      \"properties\": {\n        \"entryPointChild\": {\n          \"type\": \"string\",\n          \"description\": \"The ID of the component that opens the modal when interacted with (e.g., a button).\"\n        },\n        \"contentChild\": {\n          \"type\": \"string\",\n          \"description\": \"The ID of the component to be displayed inside the modal.\"\n        }\n      },\n      \"required\": [\n        \"entryPointChild\",\n        \"contentChild\"\n      ]\n    },\n    \"Button\": {\n      \"type\": \"object\",\n      \"properties\": {\n        \"child\": {\n          \"type\": \"string\",\n          \"description\": \"The ID of the component to display in the button, typically a Text component.\"\n        },\n        \"primary\": {\n          \"type\": \"boolean\",\n          \"description\": \"Indicates if this button should be styled as the primary action.\"\n        },\n        \"action\": {\n          \"type\": \"object\",\n          \"description\": \"The client-side action to be dispatched when the button is clicked. It includes the action's name and an optional context payload.\",\n          \"properties\": {\n            \"name\": {\n              \"type\": \"string\"\n            },\n            \"context\": {\n              \"type\": \"array\",\n              \"items\": {\n                \"type\": \"object\",\n                \"properties\": {\n                  \"key\": {\n                    \"type\": \"string\"\n                  },\n                  \"value\": {\n                    \"type\": \"object\",\n                    \"description\": \"Defines the value to be included in the context as either a literal value or a path to a data model value (e.g. '/user/name').\",\n                    \"properties\": {\n                      \"path\": {\n                        \"type\": \"string\"\n                      },\n                      \"literalString\": {\n                        \"type\": \"string\"\n                      },\n                      \"literalNumber\": {\n                        \"type\": \"number\"\n                      },\n                      \"literalBoolean\": {\n                        \"type\": \"boolean\"\n                      }\n                    }\n                  }\n                },\n                \"required\": [\n                  \"key\",\n                  \"value\"\n                ]\n              }\n            }\n          },\n          \"required\": [\n            \"name\"\n          ]\n        }\n      },\n      \"required\": [\n        \"child\",\n        \"action\"\n      ]\n    },\n    \"CheckBox\": {\n      \"type\": \"object\",\n      \"properties\": {\n        \"label\": {\n          \"type\": \"object\",\n          \"description\": \"The text to display next to the checkbox. Defines the value as either a literal value or a path to data model ('path', e.g. '/option/label').\",\n          \"properties\": {\n            \"literalString\": {\n              \"type\": \"string\"\n            },\n            \"path\": {\n              \"type\": \"string\"\n            }\n          }\n        },\n        \"value\": {\n          \"type\": \"object\",\n          \"description\": \"The current state of the checkbox (true for checked, false for unchecked). This can be a literal boolean ('literalBoolean') or a reference to a value in the data model ('path', e.g. '/filter/open').\",\n          \"properties\": {\n            \"literalBoolean\": {\n              \"type\": \"boolean\"\n            },\n            \"path\": {\n              \"type\": \"string\"\n            }\n          }\n        }\n      },\n      \"required\": [\n        \"label\",\n        \"value\"\n      ]\n    },\n    \"TextField\": {\n      \"type\": \"object\",\n      \"properties\": {\n        \"label\": {\n          \"type\": \"object\",\n          \"description\": \"The text label for the input field. This can be a literal string or a reference to a value in the data model ('path, e.g. '/user/name').\",\n          \"properties\": {\n            \"literalString\": {\n              \"type\": \"string\"\n            },\n            \"path\": {\n              \"type\": \"string\"\n            }\n          }\n        },\n        \"text\": {\n          \"type\": \"object\",\n          \"description\": \"The value of the text field. This can be a literal string or a reference to a value in the data model ('path', e.g. '/user/name').\",\n          \"properties\": {\n            \"literalString\": {\n              \"type\": \"string\"\n            },\n            \"path\": {\n              \"type\": \"string\"\n            }\n          }\n        },\n        \"textFieldType\": {\n          \"type\": \"string\",\n          \"description\": \"The type of input field to display.\",\n          \"enum\": [\n            \"date\",\n            \"longText\",\n            \"number\",\n            \"shortText\",\n            \"obscured\"\n          ]\n        },\n        \"validationRegexp\": {\n          \"type\": \"string\",\n          \"description\": \"A regular expression used for client-side validation of the input.\"\n        }\n      },\n      \"required\": [\n        \"label\"\n      ]\n    },\n    \"DateTimeInput\": {\n      \"type\": \"object\",\n      \"properties\": {\n        \"value\": {\n          \"type\": \"object\",\n          \"description\": \"The selected date and/or time value in ISO 8601 format. This can be a literal string ('literalString') or a reference to a value in the data model ('path', e.g. '/user/dob').\",\n          \"properties\": {\n            \"literalString\": {\n              \"type\": \"string\"\n            },\n            \"path\": {\n              \"type\": \"string\"\n            }\n          }\n        },\n        \"enableDate\": {\n          \"type\": \"boolean\",\n          \"description\": \"If true, allows the user to select a date.\"\n        },\n        \"enableTime\": {\n          \"type\": \"boolean\",\n          \"description\": \"If true, allows the user to select a time.\"\n        }\n      },\n      \"required\": [\n        \"value\"\n      ]\n    },\n    \"MultipleChoice\": {\n      \"type\": \"object\",\n      \"required\": [\n        \"selections\",\n        \"options\"\n      ],\n      \"properties\": {\n        \"selections\": {\n          \"type\": \"object\",\n          \"description\": \"The currently selected values for the component. This can be a literal array of strings or a path to an array in the data model('path', e.g. '/hotel/options').\",\n          \"properties\": {\n            \"literalArray\": {\n              \"type\": \"array\",\n              \"items\": {\n                \"type\": \"string\"\n              }\n            },\n            \"path\": {\n              \"type\": \"string\"\n            }\n          }\n        },\n        \"options\": {\n          \"type\": \"array\",\n          \"description\": \"An array of available options for the user to choose from.\",\n          \"items\": {\n            \"type\": \"object\",\n            \"properties\": {\n              \"label\": {\n                \"type\": \"object\",\n                \"description\": \"The text to display for this option. This can be a literal string or a reference to a value in the data model (e.g. '/option/label').\",\n                \"properties\": {\n                  \"literalString\": {\n                    \"type\": \"string\"\n                  },\n                  \"path\": {\n                    \"type\": \"string\"\n                  }\n                }\n              },\n              \"value\": {\n                \"type\": \"string\",\n                \"description\": \"The value to be associated with this option when selected.\"\n              }\n            },\n            \"required\": [\n              \"label\",\n              \"value\"\n            ]\n          }\n        },\n        \"maxAllowedSelections\": {\n          \"type\": \"integer\",\n          \"description\": \"The maximum number of options that the user is allowed to select.\"\n        },\n        \"variant\": {\n          \"type\": \"string\",\n          \"description\": \"The display style of the component.\",\n          \"enum\": [\n            \"checkbox\",\n            \"chips\"\n          ]\n        },\n        \"filterable\": {\n          \"type\": \"boolean\",\n          \"description\": \"If true, displays a search input to filter the options.\"\n        }\n      }\n    },\n    \"Slider\": {\n      \"type\": \"object\",\n      \"properties\": {\n        \"label\": {\n          \"type\": \"object\",\n          \"description\": \"The label for the slider. This can be a literal string or a reference to a value in the data model ('path').\",\n          \"properties\": {\n            \"literalString\": {\n              \"type\": \"string\"\n            },\n            \"path\": {\n              \"type\": \"string\"\n            }\n          }\n        },\n        \"value\": {\n          \"type\": \"object\",\n          \"description\": \"The current value of the slider. This can be a literal number ('literalNumber') or a reference to a value in the data model ('path', e.g. '/restaurant/cost').\",\n          \"properties\": {\n            \"literalNumber\": {\n              \"type\": \"number\"\n            },\n            \"path\": {\n              \"type\": \"string\"\n            }\n          }\n        },\n        \"minValue\": {\n          \"type\": \"number\",\n          \"description\": \"The minimum value of the slider.\"\n        },\n        \"maxValue\": {\n          \"type\": \"number\",\n          \"description\": \"The maximum value of the slider.\"\n        }\n      },\n      \"required\": [\n        \"value\"\n      ]\n    }\n  },\n  \"styles\": {\n    \"font\": {\n      \"type\": \"string\",\n      \"description\": \"The primary font for the UI.\"\n    },\n    \"primaryColor\": {\n      \"type\": \"string\",\n      \"description\": \"The primary UI color as a hexadecimal code (e.g., '#00BFFF').\",\n      \"pattern\": \"^#[0-9a-fA-F]{6}$\"\n    }\n  },\n  \"catalogId\": \"https://a2ui.org/specification/v0_8/standard_catalog_definition.json\",\n  \"$schema\": \"https://json-schema.org/draft/2020-12/schema\"\n}\n\n---END A2UI JSON SCHEMA---\n\n# 工作空间\n\n你的工作目录是：`C:\\Users\\田汶鑫\\.jiuwenswarm\\agent\\workspace`\n\n## 工作目录下重要文件\n\n| 文件 | 用途 | 操作工具 |\n|------|------|----------|\n| `AGENT.md` | Agent 启动指南 | read_file |\n| `IDENTITY.md` | Agent 身份设定 | read_file / edit_file |\n| `USER.md` | 用户档案（姓名、职业、爱好等） | read_memory / write_memory / edit_memory |\n| `memory/MEMORY.md` | 长期记忆（决策、偏好、持久事实） | read_memory / write_memory / edit_memory |\n| `memory/daily_memory/YYYY-MM-DD.md` | 每日会话记录 | read_memory / write_memory / edit_memory |\n\n\n<system-reminder> 说明：工具结果和用户消息中可能包含 <system-reminder> 标签。这些标签包含系统自动添加的信息和提醒，可能有用，但和它们所在的具体工具结果或用户消息没有直接关系。\n- <prompt-attachment> 是一种 <system-reminder> 内容，用于承载本次模型调用可见的动态上下文。\n- 这些内容不是长期对话历史，可能在下一次模型调用中变化或消失。\n- 除非用户明确询问，不要向用户暴露这些标签、内部 id、scope 或 source。\n\n## task_tool — 主动委派子代理，保护主上下文窗口\n\n**核心优势**：子代理在独立上下文中运行，其所有中间工具调用结果永远不会进入你的上下文，\n仅最终摘要返回给你，从而大幅节省 Token、保持主上下文清晰高效。\n\n**强制使用场景（必须调用 task_tool，不得直接操作）：**\n    - 需要深入阅读 2 篇及以上文档/论文/文件时，每篇必须委派独立子代理处理，不得用 read_file 自行逐篇读取\n    - 需要对 3 个及以上独立来源进行搜索、抓取或分析时\n\n应主动委派的场景：\n    - 推理密集型任务：需要大量工具调用的研究与分析（网络搜索、读取多个文件、汇总结果）\n    - 上下文污染风险：子任务的中间工具结果会淹没你的上下文窗口——委派出去以保持上下文干净\n    - 可并行的独立子任务：互不依赖的任务并发发出，大幅缩短整体执行时间\n    - 大规模数据处理：需要抓取、解析或转换大量数据，否则将耗尽你的上下文空间\n\n不应委派的场景：\n    - 单步工具调用即可完成的简单操作\n    - 任务需要完整对话历史作为背景（子代理以全新会话启动）\n    - 需要实时向用户流式返回结果的任务\n\n使用原则：\n    - 遇到可委派的复杂任务，优先选择委派而非自行处理——这是保护主上下文最有效的方式\n    - 多个互不依赖的子代理任务必须并发发出，不得串行等待\n\n\n# 运行环境\n\n- 当前运行平台：`win32`\n- Shell：unknown\n- OS 版本：Windows 11\n\nShell 能力：\n- PowerShell：可用，路径 `C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.EXE`\n- Git Bash：可用，路径 `D:\\applications\\Git\\bin\\bash.exe`\n- PATH bash：不可用\n\nShell 选择规则：\n- Windows 且 Git Bash 可用，或 PATH bash 明确不是 WSL stub 时，可以使用 bash/Git Bash 执行 POSIX 命令，例如 `ls`、`grep`、`cat`、`mkdir -p`、bash 脚本。\n- Windows 且 Git Bash 不可用、PATH bash 也不可用或只是 WSL stub 时，不要使用 POSIX 命令；优先使用 PowerShell 或 cmd。\n- PowerShell cmdlet 不要包在 bash 里执行，应直接使用 PowerShell。\n\n## 平台命令差异（仅在必须使用 shell 时参考）\n\n以下命令差异仅适用于测试、构建、git、包管理、运行脚本等必须调用 shell 的场景。文件读取、编辑、搜索仍应优先使用专用工具。\n\n| 操作 | Windows (`win32`/`win64`) | Linux/macOS (`linux`/`darwin`) |\n|------|---------------------------|-------------------------------|\n| 创建目录 | `mkdir folder` 或 PowerShell `New-Item -ItemType Directory -Path folder` | `mkdir -p folder` |\n| 删除文件 | `del file.txt` 或 PowerShell `Remove-Item file.txt` | `rm file.txt` |\n| 删除目录 | `rmdir folder` 或 PowerShell `Remove-Item -Recurse folder` | `rm -rf folder` |\n| 查找文件 | `dir /s pattern` 或 PowerShell `Get-ChildItem -Recurse -Filter pattern` | `find . -name pattern` |\n\n**特别注意**：Windows 的 cmd/PowerShell `mkdir` 不支持 `-p` 参数；只有在 Shell 能力显示 Git Bash/PATH bash 可用且实际使用 bash/Git Bash 时，`mkdir -p` 才是合适的。如需在 cmd/PowerShell 中创建嵌套目录，请使用 PowerShell `New-Item -ItemType Directory -Path \"parent/child\" -Force`，或使用 cmd 分步创建 `mkdir parent && mkdir parent\\child`。\n\n\n使用 todo 工具（todo_create、todo_modify、todo_list）拆解和管理工作。这些工具用于跟踪进度、组织复杂任务，确保所有需求都被完成。\n\n**何时创建任务列表 — 以下情况立即调用 todo_create：**\n- 用户明确要求使用待办清单，或提供了多个待完成事项\n- 任务需要 3 个或更多步骤\n- 任务具有规划性质（多步骤实现、功能开发等）\n\n**识别到规划需求后，在开始执行前立即调用 todo_create。**\n\n**拆解任务时的并行意识：**\n- 若某个阶段涉及对多个独立对象（多篇文档、多个来源、多个文件）进行相同处理，\n  应将其设计为**单个\"并行批处理\"任务**，而非为每个对象单独建立一条 todo。\n- 该任务的 description 中必须明确列出所有并行子项，例如：\n  \"并行阅读并分析以下5篇论文：[论文A, 论文B, 论文C, 论文D, 论文E]，每篇委派独立子代理处理\"\n  这样执行时才能清楚地为每个子项发出一个 task_tool 调用。\n\n**任务管理规则：**\n- 实时更新状态：任务状态变化时立即调用 todo_modify\n- 同一时间只能有一个任务处于 in_progress，完成后再开始下一个\n  - 例外：若某个 in_progress 任务内部需要并行处理多个独立子项（如同时阅读多篇文档、并发搜索多个来源），\n    可在该任务内一次性发出多个 task_tool 调用，等全部返回后再将任务标记为 completed。\n    这属于任务内部的并行执行，不违反\"同一时间只有一个 in_progress\"原则。\n- 批量更新：将多个状态变更合并为一次 todo_modify 调用\n- 不再需要的任务用 todo_modify 标记为 cancelled\n- 可通过调用 todo_list 了解当前任务规划进展\n\n**将任务标记为已完成前：**\n- 必须仔细验证工作已全部完成（如运行测试用例）\n- 以下情况绝对不能标记为已完成：部分实现、测试失败、存在未解决的错误等\n- 标记完成后，检查实现过程中是否发现新的后续任务，及时通过 todo_modify 追加\n\n## 模型选择说明\n\n当前未配置可选模型列表。创建和更新任务时，**不要使用 selected_model_id 字段**。\n所有任务将使用 Agent 默认模型执行。\n\n\n# 上下文压缩\n\n你的上下文在过长时会被自动压缩，并标记为[OFFLOAD: handle=<id>, type=<type>]。\n\n如果你认为需要读取隐藏的内容，可随时调用reload_original_context_messages工具。\n\n请勿猜测或编造缺失的内容。\n\n存储类型：\"in_memory\"（会话缓存）\n\n# 时间说明\n\n- 当用户询问“最新、当前、今年、本年、实时、近期”等信息并需要搜索时，搜索 query 必须优先使用当前年份或日期"
+            }
+          ]
+        },
+        {
+          "role": "tool",
+          "parts": [
+            {
+              "type": "text",
+              "content": "{'success': True, 'source': 'auto', 'items': [{'name': 'skill-creating', 'description': 'Used to create a new skill. Used when a user wants to create a new skill', 'source': 'skillnet', 'identifier': 'https://github.com/majiayu000/claude-skill-registry/blob/8314f85fb70be05b08eb0e27bea3d62ea3677446/skills/product/skill-creating', 'installed': False, 'version': '', 'author': 'majiayu000', 'score': 104}, {'name': 'skill-creator', 'description': \"MUST BE USED when user says: 'create a skill', 'make a skill', 'new skill', 'build a skill', 'write a skill', 'add a skill', 'skill for X', or any variation. Also use when editing SKILL.md files, updating skill descriptions, adding skill resources, or iterating on existing skills. Load this skill BEFORE any skill-related work.\", 'source': 'skillnet', 'identifier': 'https://github.com/fx/cc/blob/a54ea62c2409e3651abb24ae19b0fc4f2c910bbf/plugins/fx-meta/skills/skill-creator', 'installed': False, 'version': '', 'author': 'fx', 'score': 3}, {'name': 'skill-creator', 'description': 'Guide for creating or updating a skill. Use when the user wants to add a new skill or revise an existing skill for this ai-kit app.', 'source': 'skillnet', 'identifier': 'https://github.com/takatoshi-maeda/ai-kit/blob/06060b1e30be5ff81a5ce3c289e48a48c135ff2a/resources/skills/.system/skill-creator', 'installed': False, 'version': '', 'author': 'takatoshi-maeda', 'score': 0}, {'name': 'sch-create', 'description': \"Create a new Skill from scratch. Use when a student says 'sch create', 'create a skill', 'new skill', '创建skill', or wants to start a fresh Skill project.\", 'source': 'skillnet', 'identifier': 'https://github.com/Trust-App-AI-Lab/StudyClawHub/blob/5007f4fdd8201d1ae5c47f2ad740d364e72503d5/.claude/skills/sch-create', 'installed': False, 'version': '', 'author': 'Trust-App-AI-Lab', 'score': 5}, {'name': 'create-skill', 'description': '创建新 Skill 的 Skill。当需要把能力固化为 Skill 时触发。触发词：创建 skill、新建 skill、写一个 skill、create skill。', 'source': 'skillnet', 'identifier': 'https://github.com/maxoreric/sop-engine/blob/c90ff7adffb955a6a188ca6b1f5f47d1e4c28578/skills/create-skill', 'installed': False, 'version': '', 'author': 'maxoreric', 'score': 0}, {'name': 'create-skill', 'description': '新しいSkillを作成する。「Skill作って」「スキル作成」等で起動。', 'source': 'skillnet', 'identifier': 'https://github.com/ryosukesuto/dotfiles/blob/4554cc48a7b5bad3eb19e5e6bfd896ba603c42d7/config/claude/skills/create-skill', 'installed': False, 'version': '', 'author': 'ryosukesuto', 'score': 0}, {'name': 'skill-maker', 'description': 'Create and manage custom skills for SWYNNAPSE. Use when user wants to create a new skill, improve an existing skill, or teach SWYNNAPSE new capabilities.', 'source': 'skillnet', 'identifier': 'https://github.com/swarnim0129/oc-swyn/blob/ddf130f5e01bb47b77ae23aa1c5fafc2b794caf4/.opencode/skills/skill-maker', 'installed': False, 'version': '', 'author': 'swarnim0129', 'score': 0}, {'name': 'skill-creator', 'description': 'MANDATORY tool for creating SKILLs - MUST be invoked IMMEDIATELY when user wants to create/add any skill', 'source': 'skillnet', 'identifier': 'https://github.com/FeiWangHub/playground/blob/8a34657cbc575b1890595a9cee938c35e85d1d8c/ai-playground/vhs-app-copilot/.trae/skills/skill-creator', 'installed': False, 'version': '', 'author': 'FeiWangHub', 'score': 0}, {'name': 'skill-creator', 'description': 'Use when creating new skills, updating existing skills, or packaging skills for distribution.', 'source': 'skillnet', 'identifier': 'https://github.com/kienhaminh/anti-chaotic/blob/96773c83b3d6702c28496ec6e0bf05d61c2ce6ae/.agent/skills/skill-creator', 'installed': False, 'version': '', 'author': 'kienhaminh', 'score': 76}, {'name': 'skill-creating', 'description': 'Used to create a new skill. Used when a user wants to create a new skill', 'source': 'skillnet', 'identifier': 'https://github.com/TheBBz/HFTPM/blob/e21af63568d7c713e06a2e1506b354475eaf3f3d/.claude/skills/skill-creating', 'installed': False, 'version': '', 'author': 'TheBBz', 'score': 0}], 'detail': 'clawhub: 未配置 ClawHub CLI token，请先配置', 'query_summary': \"search query='create skill' source=auto limit=10\"}"
+            }
+          ],
+          "tool_call_id": "call_01_lrPgJyocGOjCv17Vcjvw1631"
+        },
+        {
+          "role": "assistant",
+          "parts": [
+            {
+              "type": "text",
+              "content": "想创建 skill？没问题！让我先看看有什么工具可以用，然后我们聊聊你想做什么样的。"
+            }
+          ]
+        },
+        {
+          "role": "user",
+          "parts": [
+            {
+              "type": "text",
+              "content": "你收到一条消息：\n{\"source\": \"web\", \"timezone\": \"Asia/Shanghai\", \"timestamp\": \"2026-06-23 18:14:53\", \"preferred_response_language\": \"zh\", \"content\": \"创建一个skill不\", \"files_updated_by_user\": \"{}\", \"type\": \"user input\"}"
+            }
+          ]
+        }
+      ],
+      "gen_ai.tool.definitions": [
+        {
+          "type": "function",
+          "name": "wiki_ingest",
+          "description": "Ingest a source file (PDF, TXT, MD) or a directory into the LLM Wiki. By default, identical files (by SHA-256) are skipped perfectly (deduplication). Set `force=True` if the user explicitly asks to re-ingest, rebuild, or force the ingestion. The `workspace` parameter is the root folder where the `.llm_wiki` will be created. If the user specifies a target directory like 'wiki_lib' or 'bibliography', pass that exact path as `workspace`."
+        },
+        {
+          "type": "function",
+          "name": "wiki_query",
+          "description": "Query the LLM Wiki's compiled knowledge base directly via Natural Language. The `workspace` parameter is the folder containing the `.llm_wiki`. If the user specifies a target directory like 'wiki_lib' or 'bibliography', pass that exact path as `workspace`."
+        },
+        {
+          "type": "function",
+          "name": "wiki_lint",
+          "description": "Health-check and trigger automatic repairs of broken links, orphans, or anomalies in the LLM Wiki. The `workspace` parameter is the root folder containing the `.llm_wiki`. If the user specifies a target directory like 'wiki_lib' or 'bibliography', pass that exact path as `workspace`."
+        },
+        {
+          "type": "function",
+          "name": "fetch_webpage",
+          "description": "通常配合 paid_search 或 free_search 使用：先搜索，再抓取结果页，不要只依赖摘要。抓取网页文本，返回状态码、标题和正文文本。通常配合 free_search 使用：先搜索，再抓取前几个结果页，而不是只依赖搜索摘要。可设置 max_chars=0 关闭截断，也可以调大 timeout_seconds 处理慢站点。适用场景：文档、博客、新闻、API 参考等普通网页。代码仓地址（GitHub/GitLab/Gitee/Gitcode/Bitbucket 等）一般不适合用本工具——网页只能看到渲染后的目录页;要读源码、看历史、跨文件搜索，更顺手的方式是用 shell 工具(bash 或 powershell)执行 `git clone` 拉到本地。"
+        },
+        {
+          "type": "function",
+          "name": "search_skill",
+          "description": "Search installable skills from SkillNet, ClawHub, and TeamSkillsHub. Use the returned identifier with install_skill (SkillNet URL, ClawHub slug, or TeamSkillsHub asset_id when source is teamskillshub)."
+        },
+        {
+          "type": "function",
+          "name": "install_skill",
+          "description": "Install a skill using the identifier returned by search_skill. Returns the installed skill summary and where to read SKILL.md."
+        },
+        {
+          "type": "function",
+          "name": "uninstall_skill",
+          "description": "Uninstall an installed skill by name."
+        },
+        {
+          "type": "function",
+          "name": "acp_chat",
+          "description": "Send a user message to an external ACP-compatible agent subprocess defined in config.yaml under acp_agents.<name> (command + args). Use for Codex CLI, Gemini CLI, or any other stdio ACP agent. Parameter agent is the profile key, message is the prompt. Set new_session=true to restart the subprocess and ACP session for that profile."
+        },
+        {
+          "type": "function",
+          "name": "read_file",
+          "description": "增强版文件读取工具。支持文本、图片、PDF 与 Jupyter Notebook。"
+        },
+        {
+          "type": "function",
+          "name": "write_file",
+          "description": "写入文件内容。如果文件已存在，将完全覆盖。"
+        },
+        {
+          "type": "function",
+          "name": "edit_file",
+          "description": "增强版文件编辑工具，对已有文件执行精确的字符串替换操作，仅传输差量。\n\n核心行为：\n- 前置读取要求：编辑前必须通过 read_file 完整读取过该文件\n- 唯一性验证：old_string 须唯一匹配；多个匹配时须设置 replace_all=true 或提供更多上下文\n- 引号容错：自动尝试直引号与弯引号互转后匹配\n- 去消毒处理：自动将 HTML 实体（&lt; &gt; &amp; 等）还原为原始字符后匹配\n- 新文件创建：old_string='' 且目标文件不存在时创建新文件\n- 格式化处理：自动去除 new_string 行尾空白（.md/.mdx 文件除外）；保留文件原有行尾风格（LF/CRLF）\n- 外部修改检测：写入前通过时间戳 + 文件大小双重校验，若文件被外部修改则拒绝写入\n\n拒绝条件：文件超过 1 GiB / old_string 与 new_string 相同 / .ipynb 文件 / 文件不存在且 old_string 非空 / 文件已存在且 old_string 为空"
+        },
+        {
+          "type": "function",
+          "name": "glob",
+          "description": "使用 glob 模式查找文件。"
+        },
+        {
+          "type": "function",
+          "name": "list_files",
+          "description": "列出目录内容。"
+        },
+        {
+          "type": "function",
+          "name": "grep",
+          "description": "在文件中搜索内容。支持正则表达式。"
+        },
+        {
+          "type": "function",
+          "name": "bash",
+          "description": "执行 Shell 命令并返回输出。\n\n工作目录在命令之间保持不变，但 Shell 状态（变量、函数、alias）不保留。Shell 环境从用户的 profile（bash 或 zsh）初始化。\n\nWindows 注意：`cmd`/PowerShell 自带 `mkdir` **不支持 `-p`**，不要在 cmd/PowerShell 中使用 `mkdir -p`。只有运行环境信息显示 Git Bash 或非 WSL stub 的 PATH bash 可用，并且实际使用 bash/Git Bash 时，POSIX `mkdir -p` 才适用。否则应使用 PowerShell `New-Item ... -Force` 或 cmd 逐级 `mkdir`。\n\n重要：避免使用本工具执行 `find`、`grep`、`cat`、`head`、`tail`、`sed`、`awk` 或 `echo` 命令，除非明确指示或确认专用工具无法完成任务。请使用对应的专用工具，以获得更好的体验：\n\n - 文件搜索：使用 glob 工具（不要用 find 或 ls）\n - 内容搜索：使用 grep 工具（不要用 grep 或 rg 命令）\n - 读取文件：使用 read_file 工具（不要用 cat/head/tail）\n - 编辑文件：使用 edit_file 工具（不要用 sed/awk）\n - 写入文件：使用 write_file 工具（不要用 echo > 或 cat <<EOF）\n - 输出文本：直接输出（不要用 echo/printf）\n虽然 bash 工具也能做到，但专用工具提供更好的用户体验，并且更方便审查和授权。\n\n# 使用说明\n - 创建文件或目录前，先用本工具执行 `ls` 确认父目录存在且位置正确\n - 路径包含空格时必须用双引号括起（例如 cd \"path with spaces/file.txt\"）\n - 尽量使用绝对路径维持当前工作目录，避免使用 `cd`；除非用户明确要求\n - 可通过 timeout 参数指定超时（秒），默认 300 秒，上限 3600 秒\n - 可将 run_in_background 设为 true 来后台运行命令。仅在不需要立即获取结果时使用，命令完成后会收到通知。使用该参数时无需在命令末尾加 `&`\n - 发出多条命令时：\n   - 独立命令：在同一消息中多次并行调用本工具。例如需要同时运行 \"git status\" 和 \"git diff\"，发送一条消息包含两次并行调用\n   - 依赖命令：在单次调用中用 `&&` 串联\n   - 仅在不关心前序命令是否失败时使用 `;`\n   - 不要用换行分隔命令（引号字符串内换行可以）\n - Git 命令规范：\n   - 优先创建新提交而非修改已有提交\n   - 执行破坏性操作（如 git reset --hard、git push --force、git checkout --）前，先考虑是否有更安全的替代方案，只在确实必要时使用\n   - 除非用户明确要求，不要跳过 hooks（--no-verify）或绕过签名（--no-gpg-sign）。hook 失败时应排查并修复根本原因\n   - 用户分享代码仓 URL 让你「看看这个仓库」或「分析一下」时，首选动作是 `git clone <url> <本地路径>`；克隆完再用 read_file/grep/glob 等专用工具读源码，比抓取仓库主页能拿到的信息完整得多\n - 避免不必要的 `sleep` 命令：\n   - 能立即执行的命令之间不要 sleep\n   - 长时间运行的命令使用 `run_in_background: true`，无需 sleep 等待\n   - 不要在 sleep 循环中重试失败命令——排查根本原因\n   - 等待后台任务完成时会自动通知——不要轮询\n   - 如必须轮询外部进程，使用检查命令（如 `gh run view`）而非先 sleep\n   - 如必须 sleep，保持短时间（1-5 秒）"
+        },
+        {
+          "type": "function",
+          "name": "powershell",
+          "description": "执行给定的 PowerShell 命令并返回输出。工作目录会在命令之间保持不变；但 shell 状态，例如变量、函数和别名，不会保留。\n\n重要：本工具用于通过 PowerShell 执行终端操作，例如 git、npm、docker、python 和 PowerShell cmdlet。不要用它做文件搜索、内容搜索、读文件、写文件、编辑文件，除非用户明确要求，或你已经确认专用工具无法完成任务。优先使用 glob、grep、read_file、edit_file、write_file。\n\nPowerShell 版本兼容：默认按 Windows PowerShell 5.1 兼容方式编写命令，除非你非常确定当前环境是 PowerShell 7+。\n - 不要默认使用 `&&`、`||`、三元表达式 `?:`、空合并 `??`、空条件 `?.`；这些在 5.1 会直接语法报错\n - 条件串联优先使用 `A; if ($?) { B }`\n - 无条件顺序执行用 `A; B`\n - 避免对原生可执行程序手动做 `2>&1` 重定向；stderr 已经会被工具捕获，5.1 下这样做还可能把输出包装成 ErrorRecord，并把 `$?` 变成 `$false`\n - 写给其他工具读取的文件时，优先显式指定 UTF-8 编码\n - `ConvertFrom-Json` 在 5.1 返回 `PSCustomObject`，不要默认假设支持 `-AsHashtable`\n\n执行前请遵循这些规则：\n1. 目录确认\n - 如果命令会创建新文件或目录，先确认父目录存在且位置正确\n2. 命令编写\n - 路径包含空格时必须使用双引号\n - 尽量使用绝对路径，避免不必要的 `Set-Location` 或 `cd`\n - 优先使用 PowerShell 原生命令和 Verb-Noun 风格，如 `Get-ChildItem`、`Select-String`、`Get-Content`、`New-Item`、`Remove-Item`\n\nPowerShell 语法说明：\n - 变量使用 `$` 前缀，例如 `$name = \"value\"`\n - 转义字符是反引号，不是反斜杠\n - 常见别名：`ls`=`Get-ChildItem`，`cd`=`Set-Location`，`cat`=`Get-Content`，`rm`=`Remove-Item`\n - 管道 `|` 传递的是对象，不是 bash 风格的纯文本\n - 筛选和转换优先使用 `Select-Object`、`Where-Object`、`ForEach-Object`\n - 字符串插值写法：`\"Hello $name\"` 或 `\"Hello $($obj.Property)\"`\n - 注册表路径使用 PSDrive 前缀：`HKLM:\\...`、`HKCU:\\...`\n - 环境变量读取用 `$env:NAME`，设置用 `$env:NAME = \"value\"`\n - 调用路径中带空格的原生 exe 时，用调用运算符：`& \"C:\\Program Files\\App\\app.exe\" arg1 arg2`\n\n交互与阻塞命令限制（本工具以 `-NonInteractive` 方式运行，因此凡是需要人工输入、确认、弹窗或进入交互界面的命令，都可能失败或一直卡住等待）：\n - 不要使用 `Read-Host`、`Get-Credential`、`Out-GridView`、`$Host.UI.PromptForChoice`、`pause`\n - 破坏性 cmdlet 可能要求确认；当你明确需要执行时，可以考虑加 `-Confirm:$false`，对只读或隐藏项必要时加 `-Force`\n - 不要使用会打开交互编辑器的 git 命令，例如 `git rebase -i`、`git add -i`\n\n向原生命令传递多行字符串时：\n - 优先使用单引号 here-string：`@' ... '@`，这样 PowerShell 不会展开其中的 `$` 或反引号\n - 结束标记 `'@` 必须顶格并单独占一行，否则会解析失败\n - 除非确实需要变量插值，否则优先使用 `@' ... '@`，不要用 `@\" ... \"@`\n - 如果原生命令参数中包含 `-`、`@` 等容易继续被 PowerShell 解析的字符，可考虑停止解析标记 `--%`\n\n使用说明：\n - `command` 参数必填\n - `timeout` 单位为秒，默认 30，最大 300\n - 尽量提供简洁清晰的 `description`\n - 如果输出超过 `max_output_chars`，返回内容会被截断\n - 可将 `background` 设为 true 后台运行命令；不需要自己追加 `&`\n - 不要用 PowerShell 去替代专用工具，除非用户明确要求：文件搜索用 glob，不要用 `Get-ChildItem -Recurse`；内容搜索用 grep，不要用 `Select-String`；读文件用 read_file，不要用 `Get-Content`；写文件用 write_file，不要用 `Set-Content` 或 `Out-File`；编辑文件用 edit_file；与用户沟通时直接输出文本，不要用 `Write-Output` 或 `Write-Host`\n - 多条独立命令应并行发起多次工具调用；存在依赖关系时，在单次调用中串联\n - 只有在你不关心前序命令是否失败时才使用 `;`\n - 不要用换行分隔多条命令；换行只用于字符串或 here-string 内部\n - 不要默认在命令前加 `cd` 或 `Set-Location`；优先使用当前工作目录或 `workdir`\n - 避免无意义的 `Start-Sleep`；长任务优先用后台执行；必须 sleep 时保持 1-5 秒短等待\n - Git 操作中，优先创建新提交而不是 amend；执行 `git reset --hard`、`git push --force`、`git checkout --` 等破坏性操作前先考虑更安全替代方案；除非用户明确要求，不要跳过 hooks（`--no-verify`）或绕过签名（`--no-gpg-sign`、`-c commit.gpgsign=false`）\n - 用户分享代码仓 URL 让你「看看这个仓库」或「分析一下」时，首选动作是 `git clone <url> <本地路径>`；克隆完再用 read_file/grep/glob 等专用工具读源码，比抓取仓库主页能拿到的信息完整得多"
+        },
+        {
+          "type": "function",
+          "name": "skill_tool",
+          "description": "使用此工具查看特定技能的内容"
+        },
+        {
+          "type": "function",
+          "name": "code",
+          "description": "执行代码（Python 或 JavaScript）。"
+        },
+        {
+          "type": "function",
+          "name": "todo_create",
+          "description": "\n创建当前会话的待办事项列表，用于跟踪进度、组织复杂任务，帮助用户了解整体执行情况。\n\n## 何时使用\n\n主动在以下场景调用：\n- 任务需要 3 个或更多步骤\n- 用户提供多个待完成事项（编号列表、逗号或分号分隔）\n- 用户明确要求使用待办清单\n- 任务具有规划性质（多步骤实现、功能开发等）\n\n识别到规划需求后，立即调用本工具。\n\n## 何时不使用\n\n- 单个简单任务\n- 纯信息查询或对话\n- 可在 3 步以内完成的琐碎任务\n\n## 使用方式\n\n入参为 JSON 数组（每个任务必须包含 id 字段）：\n    {\"tasks\": [{\"id\": \"translate_doc\", \"content\": \"翻译文档\", \"activeForm\": \"正在翻译文档\", \"description\": \"将文档翻译为目标语言\", \"selected_model_id\": \"fast\"}, {\"id\": \"analyze_arch\", \"content\": \"分析代码架构\", \"activeForm\": \"正在分析代码架构\", \"description\": \"梳理代码模块结构与依赖关系\", \"selected_model_id\": \"smart\"}]}\n\n## 规则\n\n- **id 字段为必填**：必须为每个任务指定简短、语义清晰的唯一字符串 ID（如 \"translate_doc\"、\"analyze_code\"），禁止使用随机字符或 UUID。同一会话内 ID 不得重复。此 ID 在后续 todo_modify 中用于精准定位任务，是跨轮次更新状态的唯一依据\n- 第一个任务自动设为 in_progress，其余为 pending\n- 同一时间只能有一个 in_progress 任务\n- 任务描述必须具体、可执行、清晰明确\n- 调用本工具会覆盖当前会话的任务列表；若需追加任务，请使用 todo_modify\n- 当没有获取到当前可用模型信息时，不要添加 selected_model_id 字段；否则必须添加 selected_model_id 指定执行任务的模型 ID\n"
+        },
+        {
+          "type": "function",
+          "name": "todo_list",
+          "description": "\n检索并显示当前会话的所有待办事项。\n\n## 何时使用 todo_list（而非 todo_modify）\n\n使用 todo_list 的场景：\n- 需要查看当前任务全貌和各任务ID，再决定如何更新\n- 不确定当前有哪些任务处于 in_progress 或 pending\n\n使用 todo_modify 的场景（不需要先调用 todo_list）：\n- 已知任务 ID，直接更新任务信息\n- 任务刚完成，立即标记为 completed\n"
+        },
+        {
+          "type": "function",
+          "name": "todo_get",
+          "description": "\n根据任务 ID 获取单个任务的完整详情。\n\n入参：id（任务唯一标识符）\n\n返回：完整的任务信息，包括 id、content（任务摘要）、activeForm、description（任务详细内容）、status、depends_on、result_summary、meta_data、selected_model_id。\n"
+        },
+        {
+          "type": "function",
+          "name": "todo_modify",
+          "description": "\n修改当前会话的待办事项。支持批量操作，尽量将多个变更合并为一次调用。\n\n核心用途：更新（update）、删除（delete）、取消（cancel）、追加（append）、在其后插入（insert_after）、在其前插入（insert_before）\n\n重要说明：\n- 若需重新规划整个任务列表，请调用 todo_create\n- 支持批量操作，尽量将多个变更合并为一次调用，避免连续多次调用\n- **id 使用你在 todo_create 时自定义的语义 ID**（如 \"translate_doc\"），不要使用 UUID\n\naction 支持的操作类型：\n\nupdate：修改现有任务的状态或标题（id 不可修改，支持部分字段更新）：\n    {\n        \"action\": \"update\",\n        \"todos\": [\n            {\"id\": \"translate_doc\", \"status\": \"completed\"},\n            {\"id\": \"analyze_code\", \"status\": \"in_progress\"}\n        ]\n    }\n\n支持修改 selected_model_id：若任务 selected_model_id 不为空，且执行结果质量不佳（输出不准确、逻辑错误、未达预期），应根据模型描述更新质量更高的模型ID：\n    {\n        \"action\": \"update\",\n        \"todos\": [\n            {\"id\": \"translate_doc\", \"selected_model_id\": \"smart\", \"status\": \"pending\"}\n        ]\n    }\n\ncancel：将指定任务标记为 cancelled（任务将被忽略，不再执行）：\n    {\n        \"action\": \"cancel\",\n        \"ids\": [\"translate_doc\", \"analyze_code\"]\n    }\n\ndelete：从列表中永久删除指定任务：\n    {\n        \"action\": \"delete\",\n        \"ids\": [\"translate_doc\"]\n    }\n\nappend：在列表末尾追加新任务（id 由你指定，须简短语义且唯一）：\n    {\n        \"action\": \"append\",\n        \"todos\": [\n            {\"id\": \"write_report\", \"content\": \"新任务内容\", \"activeForm\": \"执行新任务\", \"description\": \"任务的详细描述\", \"status\": \"pending\"}\n        ]\n    }\n\ninsert_after：在指定任务之后插入新任务（目标任务状态须为 in_progress 或 pending）：\n    {\n        \"action\": \"insert_after\",\n        \"todo_data\": {\"target_id\": \"translate_doc\", \"items\": [{\"id\": \"review_translation\", \"content\": \"插入的任务\", \"activeForm\": \"执行插入的任务\", \"description\": \"任务的详细描述\", \"status\": \"pending\", \"selected_model_id\": \"fast\"}]}\n    }\n\ninsert_before：在指定任务之前插入新任务（目标任务状态须为 pending）：\n    {\n        \"action\": \"insert_before\",\n        \"todo_data\": {\"target_id\": \"analyze_code\", \"items\": [{\"id\": \"setup_env\", \"content\": \"插入的任务\", \"activeForm\": \"执行插入的任务\", \"description\": \"任务的详细描述\", \"status\": \"pending\"}]}\n    }\n\n核心规则：\n- 同一时间只能有一个任务处于 in_progress 状态\n- update 操作：id 字段不可修改，其他字段支持部分更新\n- insert_after：目标任务状态必须为 in_progress 或 pending\n- insert_before：目标任务状态必须为 pending\n- 如果任务的 selected_model_id 为空时，任何操作都不要更改 selected_model_id 字段\n"
+        },
+        {
+          "type": "function",
+          "name": "task_tool",
+          "description": "启动新的子代理，自主处理复杂、多步骤任务。\n\ntask_tool 启动专门的子代理来自主处理复杂任务。每种子代理类型都有特定的能力和可用工具。\n\n可用代理类型及其工具：\n\n- general-purpose: 通用型子代理，继承主代理的工具与能力（文件读写、bash、MCP、skills 等），适合执行独立的复杂子任务（调研、搜代码、多步实现等）。子代理运行在独立上下文窗口中，中间工具调用结果不会污染主代理上下文。当你在搜索关键词或文件时，如果不确定前几次尝试就能找到正确匹配，就用这个子代理来帮你搜索。 (Tools: wiki_ingest, wiki_query, wiki_lint, free_search, fetch_webpage, search_skill, install_skill, uninstall_skill, acp_chat)\n- browser_agent: 专用浏览器子代理，直接使用 Playwright MCP 工具执行网页任务。 (Tools: All tools)\n\n使用 task_tool 时，请通过 subagent_type 参数选择要使用的子代理类型。如果不指定，将使用通用子代理。\n\n何时不使用 task_tool：\n\n- 如果你想读取某个具体文件路径，直接用 read_file 或 glob，比用 task_tool 更快\n- 如果你在查找某个具体的类定义（如 \"class Foo\"），直接用 grep 或 glob，比用 task_tool 更快\n- 如果你在 2-3 个特定文件内搜索代码，直接用 read_file，比用 task_tool 更快\n- 其他与上述代理描述无关的任务\n\n使用注意事项：\n\n- task_description 应包含完整的上下文信息——子代理没有本次对话的任何记忆\n- 子代理完成后会返回一条消息给你。该结果对用户不可见。如需向用户展示结果，你应发送一条文字消息，简明总结子代理的结果。\n- 每次 task_tool 调用都是全新启动——请提供完整的任务描述。\n- 子代理的输出通常应当被信任。\n- 明确告知子代理你期望它写代码还是仅做调研（搜索、读文件、抓取网页等），因为它不知道用户的意图。\n- 如果子代理的描述中提到应主动使用它，你应尽量在用户没有明确要求时就使用它。自行判断。\n- 如果用户明确要求\"并行\"运行子代理，你必须在同一条消息中发出多个 task_tool 调用。例如，如果你需要同时启动 build-validator 子代理和 test-runner 子代理，请在同一条消息中发出两个 tool 调用。\n\n## 如何写好任务描述\n\n像给一位刚走进房间的聪明同事做简报一样描述任务——子代理没看过本次对话，不知道你尝试过什么，也不理解这个任务为什么重要。\n- 说明你想达成什么目标以及为什么。\n- 描述你已经了解到的信息或已排除的可能性。\n- 提供足够的问题背景，让子代理能够自主判断，而不是只能机械执行狭窄的指令。\n- 如果需要简短回复，请明确说明（\"在 200 字内汇报\"）。\n- 查找类任务：直接给出精确命令。调研类任务：给出要回答的问题——规定好的步骤在前提不成立时只会成为累赘。\n\n简短的命令式描述会产生浅层、泛泛的结果。\n\n**永远不要委托理解。** 不要写\"根据你的发现修复 bug\"或\"根据调研结果实现它\"。这类说法把综合分析推给了子代理，而不是你自己完成。写出的描述应能证明你已经理解了问题：包含文件路径、行号、具体需要修改的内容。\n"
+        },
+        {
+          "type": "function",
+          "name": "memory_search",
+          "description": "在长期记忆中检索过往信息（决策、偏好、人物、日期、TODO 等），返回相关片段与引用线索。"
+        },
+        {
+          "type": "function",
+          "name": "memory_get",
+          "description": "按行号切片读取 memory/ 下的记忆 Markdown 文件内容（from_line + lines）。"
+        },
+        {
+          "type": "function",
+          "name": "write_memory",
+          "description": "写入记忆内容到 memory/ 下的 Markdown 文件；支持覆盖写或追加写（append）。"
+        },
+        {
+          "type": "function",
+          "name": "edit_memory",
+          "description": "在 memory/ 下的记忆文件中做精确字符串替换（old_text → new_text）。"
+        },
+        {
+          "type": "function",
+          "name": "read_memory",
+          "description": "按 offset/limit 读取 memory/ 下记忆文件的部分内容（用于分页阅读）。"
+        },
+        {
+          "type": "function",
+          "name": "cron",
+          "description": "使用 action 接口：status、list、add、update、remove、run、runs、wake，并兼容结构化 schedule/payload/delivery 字段。处理“2分钟后”“明天上午9点”“下周一”这类时间时，优先根据系统提示中已提供的当前日期与时间直接换算并调用 cron，不要为了简单的时间换算先调用 code 或 bash。创建一次性提醒时，schedule.at 默认直接使用用户当前本地时区偏移来写，例如 +08:00；除非用户明确要求，否则不要改写成 Z 或 UTC。给当前聊天创建提醒时，优先使用 payload.kind=systemEvent 和 sessionTarget=current。向用户确认创建结果时，优先按 schedule.at 里的原始时区/偏移表述，不要自行改写成 UTC。\n\n【投递频道】delivery.channel / targets：用户未明确指定时不填，系统自动使用当前对话渠道；**禁止从历史记录推断。**\n\n【强制：wake_offset_seconds】这是提前唤醒秒数，不是任务执行时间。除非用户明确说“提前 X 秒/分钟唤醒/准备/执行”，否则**禁止**传 wake_offset_seconds 字段；不要根据任务类型、提醒/查询场景、距离触发时间或历史记录推断为 0、60 或其他值。用户未明确指定时必须省略该字段，后端会默认使用 300 秒。\n\n【重要：cron 表达式格式】只支持7段式(Quartz格式)：秒 分 时 日 月 周 年。字段取值范围：秒(0-59)，分(0-59)，时(0-23)，日(1-31)，月(1-12)，周(1-7或?)，年(1970-2099或*)。日和周字段：不能同时指定具体值，其中一个必须用?表示'不指定'。年份字段：*表示跨年周期，固定年份只在该年执行。真正只执行一次：所有字段均为固定值(无*和?)，如'0 30 17 29 4 ? 2026'表示2026年4月29日17:30:00执行一次。例：每天9点 -> '0 0 9 * * ? *'；每15分钟 -> '0 */15 * * * ? *'；每周一9点 -> '0 0 9 ? * MON *'。注意：一次性任务建议优先使用 schedule.at (ISO8601格式)，cron更适合周期性任务。\n\n【重要：cron 表达式限制】标准 cron 的 */X 语义是'当字段值能被 X 整除时触发'，而非'每隔 X 单位触发'。只有当周期单位能被 X 整除时，间隔才是均匀的。以下是各字段的限制：\n- 秒/分(0-59)：*/X 仅支持 X 整除60的值：1/2/3/4/5/6/10/12/15/20/30。  例如 */40 实际在每小时第0分和第40分触发（间隔40分→20分交替），并非每40分钟。  用户要求'每隔40分钟'时，必须先告知此限制并让用户确认是否接受不均匀间隔，  或建议改用整除60的间隔（如20分钟或30分钟）。未经用户确认不得直接创建。\n- 小时(0-23)：*/X 仅支持 X 整除24的值：1/2/3/4/6/8/12。  例如 */5 实际在每天0/5/10/15/20时触发（间隔5h→4h→5h→4h交替），并非每5小时。  用户要求'每隔5小时'时，必须告知限制并让用户确认，或建议改用整除24的间隔。\n- 日(1-31)：*/X 不可靠，因为不同月份天数不同（28/29/30/31）。  例如 */15 在2月只触发1、15日（共2次），在31天月份触发1、16、31日（共3次）。  用户要求'每隔X天'时，建议改用'每周X'或指定固定日期（如每月1号、15号）。\n- 月(1-12)：*/X 仅支持 X 整除12的值：1/2/3/4/6。  例如 */5 实际在1/5/10月触发，并非每5个月均匀触发。\n- 周(1-7)：*/X 仅支持 X 整除7的值：1/7。1=SUN,7=SAT。  例如 */2 实际在SUN/TUE/THU触发，并非'每隔2周'。  用户要求'每隔2周'时，应直接指定具体星期几或建议简化为'每周一'。\n处理'每隔X分钟/小时/天'需求时，务必检查 X 是否整除对应周期单位；若不整除，必须告知用户限制，让用户确认后再创建，或建议替代方案。"
+        },
+        {
+          "type": "function",
+          "name": "cron_list_jobs",
+          "description": "列出所有 cron 定时任务。"
+        },
+        {
+          "type": "function",
+          "name": "cron_get_job",
+          "description": "根据任务 ID 获取单个 cron 定时任务的详细信息。"
+        },
+        {
+          "type": "function",
+          "name": "cron_create_job",
+          "description": "\n创建新的 cron 定时任务，使用扁平字段（name, cron_expr, timezone, targets, description, wake_offset_seconds）。\n\n【targets】用户未明确指定投递渠道时不填，系统自动使用当前对话渠道；**禁止从历史记录推断。**\n\n【强制：wake_offset_seconds】除非用户明确说“提前 X 秒/分钟唤醒/准备/执行”，否则**禁止**传 wake_offset_seconds。\n用户未明确指定时必须省略该字段，后端会默认使用 300 秒。不要因为是提醒类任务而传 0，\n也不要因为是查询/准备类任务而传 60 或其他值；禁止从任务类型、距离触发时间或历史记录推断。\n\n【重要：cron 表达式格式】只支持7段式(Quartz格式)：秒 分 时 日 月 周 年。\n日和周字段：不能同时指定具体值，其中一个必须用?表示'不指定'。\n年份字段：*表示跨年周期执行，固定年份只在该年执行。\n真正只执行一次：所有字段均为固定值（无*和?），如'0 0 17 28 3 ? 2026'。\n例：每天9点 -> '0 0 9 * * ? *'；每15分钟 -> '0 */15 * * * ? *'；每周一9点 -> '0 0 9 ? * MON *'。\n\n【重要：cron 表达式限制】标准 cron 的 */X 语义是'当字段值能被 X 整除时触发'，而非'每隔 X 单位触发'。\n只有当周期单位能被 X 整除时，间隔才是均匀的。以下是各字段的限制：\n- 秒/分(0-59)：*/X 仅支持 X 整除60的值：1/2/3/4/5/6/10/12/15/20/30。\n  例如 */40 实际在每小时第0分和第40分触发（间隔40分→20分交替），并非每40分钟。\n  用户要求'每隔40分钟'时，必须先告知此限制并让用户确认是否接受不均匀间隔，\n  或建议改用整除60的间隔（如20分钟或30分钟）。未经用户确认不得直接创建。\n- 小时(0-23)：*/X 仅支持 X 整除24的值：1/2/3/4/6/8/12。\n  例如 */5 实际在每天0/5/10/15/20时触发（间隔5h→4h→5h→4h交替），并非每5小时。\n- 日(1-31)：*/X 不可靠，因为不同月份天数不同（28/29/30/31）。\n- 月(1-12)：*/X 仅支持 X 整除12的值：1/2/3/4/6。\n- 周(1-7)：*/X 仅支持 X 整除7的值：1/7。1=SUN,7=SAT。\n\n处理'每隔X分钟/小时/天'需求时，务必检查 X 是否整除对应周期单位；\n若不整除，必须告知用户限制，让用户确认后再创建，或建议替代方案。\n"
+        },
+        {
+          "type": "function",
+          "name": "cron_update_job",
+          "description": "使用扁平字段更新已有的 cron 定时任务。"
+        },
+        {
+          "type": "function",
+          "name": "cron_delete_job",
+          "description": "根据任务 ID 删除 cron 定时任务。"
+        },
+        {
+          "type": "function",
+          "name": "cron_toggle_job",
+          "description": "启用或禁用指定的 cron 定时任务。"
+        },
+        {
+          "type": "function",
+          "name": "cron_preview_job",
+          "description": "预览 cron 定时任务的下 N 次计划执行时间。"
+        },
+        {
+          "type": "function",
+          "name": "send_file_to_user",
+          "description": "【文件发送工具】当需要将生成的文件、导出的数据、创建的文档等发送给用户时使用此工具。使用场景包括：用户请求导出/下载文件、任务完成后需要交付文件、生成报告/文档后发送给用户。参数格式：接受单个路径字符串或路径数组，路径必须是绝对路径。示例：'/tmp/report.pdf' 或 ['/tmp/file1.csv', '/tmp/file2.xlsx']"
+        }
+      ],
+      "gen_ai.usage.input_tokens": 38088,
+      "gen_ai.usage.output_tokens": 331,
+      "gen_ai.usage.total_tokens": 38419,
+      "gen_ai.usage.cache_read.input_tokens": 29952,
+      "gen_ai.usage.cache_read_tokens": 29952,
+      "gen_ai.output.messages": [
+        {
+          "role": "assistant",
+          "parts": [
+            {
+              "type": "text",
+              "content": "当然可以！不过在动手之前，先聊聊你想做什么样的 skill，这样我才知道该走哪条路。\n\n---\n\n**先帮你理清两个方向：**\n\n| 类型 | 适合什么 | 举例 |\n|---|---|---|\n| **单代理 Skill** | 一个能力、一个流程，一个 Agent 就能搞定 | 「帮我写周报」「代码审查」「翻译润色」 |\n| **Swarm Skill**（多角色团队） | 需要多个不同视角/角色协作的复杂任务 | 「多方辩论后出方案」「安全审计+代码修复」「多角度调研汇总」 |\n\n---\n\n所以先跟我说说：\n\n1. **这个 skill 要干什么？** （解决什么问题、完成什么任务）\n2. **你觉得一个人能搞定，还是需要「几个人」分工合作？**\n3. **有没有现成的流程/模板可以参考？**（比如你平时手动做这件事的步骤）\n\n说个大概就行，我们一起把它梳理成型 👍"
+            },
+            {
+              "type": "reasoning",
+              "content": "好的，我已经了解了 swarmskill-creator 这个技能，也搜索到了社区中有多个 skill-creator 相关的技能。\n\n现在用户说\"创建一个skill不\"，这是想创建一个技能。我需要先和他聊聊，了解他想创建什么样的 skill。\n\n有两种路径：\n1. **单代理 Skill**（普通 skill）—— 适合单一任务的能力封装\n2. **Swarm Skill**（多角色代理团队）—— 适合需要多角色协作的复杂任务\n\n我应该先问用户想做什么类型的 skill，以及具体的使用场景。不过在问之前，我也应该了解本地已经有哪些技能可用。\n\n让我先简单回复用户，了解他的需求。"
+            }
+          ]
+        }
+      ],
+      "gen_ai.decision.type": "answer"
+    },
+    "events": null,
+    "links": null,
+    "resource": {
+      "service.name": "jiuwenswarm",
+      "service.version": "0.1.0"
+    },
+    "scope_name": "jiuwenswarm.telemetry_rail",
+    "scope_version": "",
+    "created_at": "2026-06-23 10:15:18"
+  }
+]

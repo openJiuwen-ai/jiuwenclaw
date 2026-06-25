@@ -13,10 +13,7 @@
   │  OtelTraceAdapter.convert_trace(trace_id, db_path)                 │
   │    │ ① 读 spans → ② 拍平+排序 → ③ 逐 span 转为 observation        │
   │    │ ④ 组装 trace dict → ⑤ 传入 _extract_trace_data_impl          │
-  │    ▼                                                               │
-  │  _extract_trace_data_impl(trace_dict)                              │
-  │    │ 返回 cleaned_trace (标准化后的完整 trace)                      │
-  │    ▼                                                               │
+  │    ▼                                                               │                                                            │
   │  ProposalGenerator 使用 cleaned_trace                              │
   └──────────────────────────────────────────────────────────────────┘
 
@@ -34,442 +31,434 @@
 
   不改 models.py 的 TraceBatch——它已经足够，trace_ids + SqliteStore 的模式不需要扩展。
 
-  三、核心类设计
+让 `otel_adapter.py` 的 `convert_trace()` 返回的数据结构与 `ahe代码仓中的_extract_trace_data_impl` 完全一致，并尽可能包含更多有用的信息（但不冗余）。
 
-  # jiuwenswarm/evolve/otel_adapter.py
+---
 
-  class OtelTraceAdapter:
-      """OTEL SQLite spans → Langfuse-style trace dict 的适配器。
+## 二、数据结构对比
 
-      唯一职责：让 _extract_trace_data_impl 能消费标准 OTEL trace。
-      不修改 OTEL instrumentor，不修改 trace_converter。
+### 2.1 _extract_trace_data_impl 返回的 cleaned_trace
 
-      Usage:
-          adapter = OtelTraceAdapter(db_path="traces.db")
-          trace_dict = adapter.convert_trace("abc123def456...")
-          cleaned = extract_trace_data(trace_dict, ...)
-      """
+```python
+{
+    # 必需字段
+    "id": trace_id,
+    "timestamp": ISO 8601,
+    "name": trace_name,
+    "input": {...},
+    "output": {...},
+    "latency": ms数值,
+    
+    # Langfuse metadata (可选)
+    "totalCost": "N/A",
+    "sessionId": "N/A",
+    "userId": "N/A",
+    "projectId": "N/A",
+    
+    # 从observations提取
+    "system_prompt": str,           # 从LLM span的system message提取
+    "messages_count": int,          # 总消息数
+    "messages": list[dict],         # system + user + agent_turns
+    "total_tokens": int,            # 聚合所有LLM span的tokens
+    "observation_count": int,       # span总数
+    "generation_count": int,        # LLM span数量
+    "subagents": list[dict],        # 子agent轨迹
+    "tool_definitions": list[dict], # 工具定义
+    
+    # 可选字段
+    "user_message": str,
+    "calculated_total_cost": float,
+    "model": str                    # 第一个LLM span的model
+}
+```
 
-      def __init__(self, db_path: str):
-          self.db_path = db_path
+### 2.2 我们的OTEL数据优势
 
-      def convert_trace(self, trace_id: str) -> dict[str, Any]:
-          """将一条 OTEL trace 转为 _extract_trace_data_impl 预期的 dict。"""
-          ...
+| 数据项 | OTEL attributes来源 | 完整度 | 备注 |
+|--------|-------------------|--------|------|
+| **messages** | `gen_ai.input.messages` | ✅ 完整 | 包含system/user/assistant完整对话 |
+| **tool_definitions** | `gen_ai.tool.definitions` | ✅ 完整schema | 37个工具的完整参数定义 |
+| **usage** | `gen_ai.usage.*` | ✅ 完整 | input/output/cache_read tokens |
+| **model参数** | `gen_ai.request.temperature` 等 | ✅ 完整 | temperature, top_p, streaming等 |
+| **统计信息** | `gen_ai.input.messages.count` 等 | ✅ 完整 | messages_count, total_length |
+| **iteration** | `jiuwenclaw.iteration` | ✅ 独有 | LLM调用迭代次数 |
 
-      def convert_batch(self, batch: TraceBatch) -> list[dict[str, Any]]:
-          """将 TraceBatch 中所有 trace_ids 批量转换。"""
-          ...
+**关键差异**：
+- ✅ **我们的数据更完整**：不需要从events重建，直接从attributes读取
+- ✅ **有完整tool schema**：比原方案的"简化版parameters={}"更丰富
+- ✅ **有额外参数**：temperature, top_p, streaming, iteration等
 
-      # ── 内部方法 ──
+---
 
-      def _read_flat_spans(self, trace_id: str) -> list[dict[str, Any]]:
-          """从 SQLite 读取一条 trace 的所有 span（拍平，按 start_time 排序）。"""
-          ...
+## 三、改进方案核心思路
 
-      def _span_to_observation(self, span: dict) -> dict[str, Any]:
-          """单个 OTEL span dict → 单个 Langfuse observation dict。"""
-          ...
+### 3.1 关键改动
 
-      def _reconstruct_llm_input(self, attrs: dict, events: list) -> dict:
-          ...
+#### ✅ **改进方案**：
+```python
+# 直接从attributes读取完整数据
+def _reconstruct_llm_input(attrs, events):
+    # 优先从attributes读取
+    if 'gen_ai.input.messages' in attrs:
+        messages_raw = attrs['gen_ai.input.messages']
+        if isinstance(messages_raw, str):
+            messages = json.loads(messages_raw)  # 二次解码
+        else:
+            messages = messages_raw  # 已经是list
+        
+        # 构建完整input
+        return {
+            'model': attrs.get('gen_ai.request.model'),
+            'messages': messages,  # ✅ 完整对话
+            'tools': attrs.get('gen_ai.tool.definitions', [])  # ✅ 完整schema
+        }
+    
+    # Fallback到events重建（保留兼容性）
+    messages = []
+    for ev in events:
+        # ... 原方案的重建逻辑
+```
 
-      def _reconstruct_llm_output(self, attrs: dict, events: list) -> dict:
-          ...
+### 3.2 新增字段（OTEL特有，更丰富）
 
-      def _reconstruct_tool_input(self, attrs: dict, events: list) -> dict:
-          ...
+在保持与 `_extract_trace_data_impl` 兼容的基础上，增加以下字段：
 
-      def _reconstruct_tool_output(self, attrs: dict, events: list) -> dict:
-          ...
+```python
+{
+    # ... 标准 cleaned_trace 字段 ...
+    
+    # 新增字段（OTEL特有，不冗余）
+    "temperature": 0.95,                    # 模型参数
+    "top_p": 0.1,
+    "streaming": False,
+    "iteration_count": 1,                   # LLM调用迭代次数
+    "input_messages_total_length": 3378,    # messages总长度统计
+    "cache_read_tokens": 1024,              # 缓存读取tokens
+    "response_model": "deepseek-v4-pro",    # 实际使用的模型
+    "agent_name": "jiuwenswarm",            # agent名称
+    "conversation_id": "sess_19ef...",      # 会话ID
+}
+```
 
-      def _collect_tool_definitions(self, spans: list[dict]) -> list[dict]:
-          """从同一 trace 的 tool spans 中推断 tool definitions。"""
-          ...
+**为什么这些字段不冗余**：
+- ✅ **temperature/top_p/streaming**: 影响模型行为的重要参数，对诊断和优化有用
+- ✅ **iteration_count**: 表示agent的迭代次数，反映任务复杂度
+- ✅ **cache_read_tokens**: 成本优化指标，影响pricing
+- ✅ **response_model**: 实际调用的模型（可能与request_model不同）
+- ✅ **agent_name/conversation_id**: trace归属信息，便于分类和追溯
 
-  四、逐字段映射表
+---
 
-  这是方案最核心的部分——每个 OTEL 字段怎么映射到 _extract_trace_data_impl 预期的字段。
+## 四、字段映射表（完整版）
 
-  4.1 Trace 顶层 dict
+### 4.1 Trace顶层字段
 
-  _extract_trace_data_impl 入口处的 trace dict 需要这些顶层字段：
+| cleaned_trace字段 | OTEL来源 | 提取方法 | 优先级 |
+|-------------------|----------|---------|--------|
+| `id` | `trace_id` | 直取 | 必需 |
+| `timestamp` | `root.start_time_ns` | `_ns_to_iso()` | 必需 |
+| `name` | `root.name` | 直取 | 必需 |
+| `input` | 从LLM span提取 | `_reconstruct_trace_input()` | 必需 |
+| `output` | 从LLM span提取 | `_reconstruct_trace_output()` | 必需 |
+| `latency` | `root.duration_ns` | `_ns_to_ms()` | 必需 |
+| `system_prompt` | 第一个LLM span | 从messages提取 | 必需 |
+| `messages_count` | 聚合计算 | `len(messages)` | 必需 |
+| `messages` | 从LLM span提取 | 组装完整messages数组 | 必需 |
+| `total_tokens` | 聚合所有LLM spans | 从`gen_ai.usage.total_tokens` | 必需 |
+| `observation_count` | span总数 | `len(flat_spans)` | 必需 |
+| `generation_count` | LLM span数 | 计数`gen_ai.span.type=="model"` | 必需 |
+| `subagents` | agent span嵌套 | 检测agent层级关系 | 必需 |
+| `tool_definitions` | LLM span attributes | `gen_ai.tool.definitions` | 必需 |
+| `model` | 第一个LLM span | `gen_ai.request.model` | 可选 |
+| `temperature` | LLM span attributes | `gen_ai.request.temperature` | 新增 |
+| `top_p` | LLM span attributes | `gen_ai.request.top_p` | 新增 |
+| `streaming` | LLM span attributes | `gen_ai.request.streaming` | 新增 |
+| `iteration_count` | 聚合LLM spans | `jiuwenclaw.iteration` 最大值 | 新增 |
+| `cache_read_tokens` | 聚合LLM spans | `gen_ai.usage.cache_read_tokens` | 新增 |
+| `agent_name` | agent span | `gen_ai.agent.name` | 新增 |
+| `conversation_id` | agent span | `gen_ai.conversation.id` | 新增 |
 
-  trace_dict = {
-      # ── 直接取自 root span (无 parent_span_id 的第一个 span) ──
-      "id":          trace_id,                          # trace_id hex
-      "trace_id":    trace_id,                          # 同上（兼容两种 key）
-      "timestamp":   _ns_to_iso(root["start_time_ns"]), # ns → ISO 8601
-      "name":        root.get("name", "N/A"),           # agent span name
-      "input":       _reconstruct_trace_input(root),    # 见 §4.5
-      "output":      _reconstruct_trace_output(root),   # 见 §4.5
-      "latency":     _ns_to_ms(root.get("duration_ns")),# ns → ms 字符串
+### 4.2 Observation字段（单个span）
 
-      # ── 从 spans 聚合计算 ──
-      "observations": [self._span_to_observation(s) for s in flat_spans],
-  }
+保持原方案不变，但修改input/output的提取方法：
 
-  4.2 Observation dict（单 span 转换）
+| 字段 | LLM span提取方法 | Tool span提取方法 |
+|------|------------------|------------------|
+| `input` | **优先从attributes读取**<br>`gen_ai.input.messages` + `gen_ai.tool.definitions` | 从events或attributes提取 |
+| `output` | **优先从attributes读取**<br>最后一条assistant message + usage | 从events或attributes提取 |
 
-  _extract_trace_data_impl 内部 _normalize_observations 期望的 observation dict：
+---
 
-  ┌───────────────────────────────────┬─────────────────────────────────────────────────────────┬────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┐
-  │ _extract_trace_data_impl 预期 key │                     OTEL span 来源                      │                                                              转换规则                                                              │
-  ├───────────────────────────────────┼─────────────────────────────────────────────────────────┼────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┤
-  │ id                                │ span["span_id"]                                         │ 直取                                                                                                                               │
-  ├───────────────────────────────────┼─────────────────────────────────────────────────────────┼────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┤
-  │ name                              │ span["name"]                                            │ LLM span 特殊处理: 若 gen_ai.span.type=="model"，重写为 {gen_ai.system}.chat（如 "anthropic.chat"），确保 is_llm_span 的关键词匹配 │
-  ├───────────────────────────────────┼─────────────────────────────────────────────────────────┼────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┤
-  │ type                              │ gen_ai.span.type attribute                              │ "model" → "GENERATION"; "tool" → "SPAN"; "agent" → "SPAN"; 其他 → "SPAN"                                                           │
-  ├───────────────────────────────────┼─────────────────────────────────────────────────────────┼────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┤
-  │ span_type                         │ gen_ai.span.type attribute                              │ "model" → "LLM"; "tool" → "TOOL"; "agent" → "AGENT"; 其他 → span kind name                                                         │
-  ├───────────────────────────────────┼─────────────────────────────────────────────────────────┼────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┤
-  │ parentObservationId               │ span["parent_span_id"]                                  │ 直取（key 名映射）                                                                                                                 │
-  ├───────────────────────────────────┼─────────────────────────────────────────────────────────┼────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┤
-  │ startTime                         │ span["start_time_ns"]                                   │ _ns_to_iso() 转为 ISO 8601 字符串                                                                                                  │
-  ├───────────────────────────────────┼─────────────────────────────────────────────────────────┼────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┤
-  │ endTime                           │ span["end_time_ns"]                                     │ 同上                                                                                                                               │
-  ├───────────────────────────────────┼─────────────────────────────────────────────────────────┼────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┤
-  │ latency                           │ span["duration_ns"]                                     │ _ns_to_ms() 转为毫秒数值                                                                                                           │
-  ├───────────────────────────────────┼─────────────────────────────────────────────────────────┼────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┤
-  │ input                             │ attributes + events                                     │ 按 span_type 分别重构，见 §4.3                                                                                                     │
-  ├───────────────────────────────────┼─────────────────────────────────────────────────────────┼────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┤
-  │ output                            │ attributes + events                                     │ 按 span_type 分别重构，见 §4.4                                                                                                     │
-  ├───────────────────────────────────┼─────────────────────────────────────────────────────────┼────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┤
-  │ model                             │ gen_ai.request.model 或 gen_ai.response.model attribute │ 直取                                                                                                                               │
-  ├───────────────────────────────────┼─────────────────────────────────────────────────────────┼────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┤
-  │ totalTokens                       │ gen_ai.usage.total_tokens attribute                     │ 直取；同时写入 output.usage.total_tokens（双路径兼容 _sum_total_tokens）                                                           │
-  ├───────────────────────────────────┼─────────────────────────────────────────────────────────┼────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┤
-  │ metadata                          │ jiuwenclaw.* attributes + parent 信息                   │ 见 §4.6                                                                                                                            │
-  ├───────────────────────────────────┼─────────────────────────────────────────────────────────┼────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┤
-  │ calculatedTotalCost               │ —                                                       │ 暂设 "N/A"（OTEL 标准不含 cost，后续可从 pricing table 计算）                                                                      │
-  └───────────────────────────────────┴─────────────────────────────────────────────────────────┴────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
+## 五、实现步骤
 
-  4.3 LLM span input 重构
+### 步骤1：修改 `_reconstruct_llm_input`
 
-  extract_tool_definitions_from_observations 和 get_system_prompt_from_observations 都从 LLM span 的 input 字段提取数据。OTEL 把消息记录在 events 中，需要逆向拼装：
-
-  OTEL span.events:
-    [
-      {"name": "gen_ai.system.message",   "attributes": {"content": "You are..."}},
-      {"name": "gen_ai.user.message",     "attributes": {"content": "帮我..."}},
-      {"name": "gen_ai.assistant.message","attributes": {"content": "好的..."}},
-      {"name": "gen_ai.tool.message",     "attributes": {"content": "result...", "tool_call_id": "call_abc"}},
-    ]
-
-  → 重构为 input dict:
-
-    {
-      "model": "claude-sonnet-4-6",       # from gen_ai.request.model
-      "messages": [
-        {"role": "system",   "content": "You are..."},
-        {"role": "user",     "content": "帮我..."},
-        {"role": "assistant","content": "好的..."},
-        {"role": "tool",     "content": "result...", "tool_call_id": "call_abc"},
-      ],
-      "tools": [                          # from _collect_tool_definitions()
-        {"type": "function", "function": {"name": "bash", ...}},
-      ],
+```python
+def _reconstruct_llm_input(self, attrs: dict, events: list) -> dict:
+    """Reconstruct LLM span input - 优先从attributes读取完整数据."""
+    
+    # 优先方案：从attributes直接读取
+    if 'gen_ai.input.messages' in attrs:
+        messages_raw = attrs['gen_ai.input.messages']
+        # 处理双重编码
+        if isinstance(messages_raw, str):
+            try:
+                messages = json.loads(messages_raw)
+                if isinstance(messages, str):  # 三重编码
+                    messages = json.loads(messages)
+            except json.JSONDecodeError:
+                messages = []
+        else:
+            messages = messages_raw if isinstance(messages_raw, list) else []
+        
+        # 读取tools（完整schema）
+        tools = []
+        if 'gen_ai.tool.definitions' in attrs:
+            tools_raw = attrs['gen_ai.tool.definitions']
+            if isinstance(tools_raw, str):
+                try:
+                    tools = json.loads(tools_raw)
+                except:
+                    tools = []
+            else:
+                tools = tools_raw if isinstance(tools_raw, list) else []
+        
+        return {
+            'model': attrs.get('gen_ai.request.model', ''),
+            'messages': messages,
+            'tools': tools  # ✅ 完整schema，不是简化版
+        }
+    
+    # Fallback方案：从events重建（保留兼容性）
+    messages = []
+    for ev in events:
+        ev_attrs = _parse_attrs(ev.get('attributes'))
+        ev_name = ev.get('name', '')
+        
+        if ev_name == "gen_ai.system.message":
+            messages.append({"role": "system", "content": ev_attrs.get("content", "")})
+        elif ev_name == "gen_ai.user.message":
+            messages.append({"role": "user", "content": ev_attrs.get("content", "")})
+        # ... 其他event类型
+    
+    return {
+        'model': attrs.get('gen_ai.request.model', ''),
+        'messages': messages,
+        'tools': []
     }
+```
 
-  事件排序规则: 按 event timestamp 排序（events 中有 timestamp 字段），保证 messages 的顺序正确。
+### 步骤2：修改 `_reconstruct_llm_output`
 
-  Tools 字段: 由于 OTEL instrumentor 不记录 gen_ai.tool.definitions，需要从同 trace 的 tool spans 推断。见 §4.7。
+```python
+def _reconstruct_llm_output(self, attrs: dict, events: list) -> dict:
+    """Reconstruct LLM output - 从最后一个assistant message."""
+    
+    # 尝试从events找assistant message
+    assistant_events = [ev for ev in events if ev.get('name') == 'gen_ai.assistant.message']
+    
+    if assistant_events:
+        last = assistant_events[-1]
+        ev_attrs = _parse_attrs(last.get('attributes'))
+        content = ev_attrs.get('content', '')
+        tool_calls_raw = ev_attrs.get('tool_calls', '')
+        
+        result = {"role": "assistant", "content": content}
+        if tool_calls_raw:
+            parsed_tc = _parse_tool_calls_repr(tool_calls_raw)
+            if parsed_tc:
+                result['tool_calls'] = parsed_tc
+        
+        # 添加usage
+        usage = {}
+        if attrs.get('gen_ai.usage.total_tokens'):
+            usage['total_tokens'] = attrs['gen_ai.usage.total_tokens']
+        if attrs.get('gen_ai.usage.input_tokens'):
+            usage['input_tokens'] = attrs['gen_ai.usage.input_tokens']
+        if attrs.get('gen_ai.usage.output_tokens'):
+            usage['output_tokens'] = attrs['gen_ai.usage.output_tokens']
+        if usage:
+            result['usage'] = usage
+        
+        return result
+    
+    # Fallback: 返回空assistant message
+    return {"role": "assistant", "content": ""}
+```
 
-  4.4 LLM span output 重构
+### 步骤3：在 `convert_trace` 中增加字段
 
-  get_assistant_from_openai_generation_output 和 build_agent_turns_from_observations 都从 LLM span 的 output 字段提取 assistant message。
-
-  OTEL 的 assistant output 是最后一个 gen_ai.assistant.message event：
-
-  OTEL span.events 中 gen_ai.assistant.message events:
-    [
-      {"name": "gen_ai.assistant.message",
-       "attributes": {"content": "I'll run bash...", "tool_calls": "ToolCall(name='bash', ...)"}},
-    ]
-
-  → 重构为 output dict:
-
-    {
-      "role": "assistant",
-      "content": "I'll run bash...",
-      "tool_calls": [                      # 从 tool_calls 字符串解析
-        {"id": "call_abc", "type": "function",
-         "function": {"name": "bash", "arguments": "{}"}},
-      ],
-      "usage": {
-        "total_tokens": 1500,             # from gen_ai.usage.total_tokens
-        "input_tokens":  800,             # from gen_ai.usage.input_tokens
-        "output_tokens": 700,             # from gen_ai.usage.output_tokens
-      },
+```python
+def convert_trace(self, trace_id: str) -> dict[str, Any]:
+    spans = self._read_flat_spans(trace_id)
+    if not spans:
+        return {"id": trace_id, "observations": []}
+    
+    root = self._find_root_span(spans)
+    observations = [self._span_to_observation(s) for s in spans]
+    
+    # 基础trace dict
+    trace_dict = {
+        "id": trace_id,
+        "trace_id": trace_id,
+        "timestamp": _ns_to_iso(root.get("start_time_ns")),
+        "name": root.get("name", "N/A"),
+        "input": self._reconstruct_trace_input(root, spans),
+        "output": self._reconstruct_trace_output(root, spans),
+        "latency": _ns_to_ms(root.get("duration_ns")),
+        "observations": observations,
+        
+        # 新增OTEL特有字段
+        "agent_name": root.get('attributes', {}).get('gen_ai.agent.name'),
+        "conversation_id": root.get('attributes', {}).get('gen_ai.conversation.id'),
     }
+    
+    return trace_dict
+```
 
-  tool_calls 解析难点: instrumentor 把 tool_calls 记为 str(tool_calls)[:4096]——这是 Python 对象的字符串 repr，不是 JSON。需要设计一个 tolerant parser：
+### 步骤4：修改 `convert_trace` 返回cleaned_trace
 
-  def _parse_tool_calls_repr(raw: str) -> list[dict]:
-      """从 Python repr 字符串尽力解析 tool_calls list。
+**选项A**：直接返回cleaned_trace格式
 
-      格式可能是:
-        "[ToolCall(id='call_abc', name='bash', arguments='{\"cmd\":\"ls\"}')]"
-      或 Anthropic 格式:
-        "[{'id': 'toolu_abc', 'type': 'tool_use', 'name': 'bash', 'input': {\"cmd\": \"ls\"}}]"
+```python
+def convert_to_cleaned_trace(self, trace_id: str) -> dict[str, Any]:
+    """直接返回与 _extract_trace_data_impl 一致的 cleaned_trace."""
+    
+    spans = self._read_flat_spans(trace_id)
+    if not spans:
+        return {
+            "id": trace_id,
+            "timestamp": "N/A",
+            "name": "N/A",
+            "input": "N/A",
+            "output": "N/A",
+            "latency": "N/A",
+            "system_prompt": "",
+            "messages_count": 0,
+            "messages": [],
+            "total_tokens": "N/A",
+            "observation_count": 0,
+            "generation_count": 0,
+            "subagents": [],
+            "tool_definitions": []
+        }
+    
+    # ... 提取和计算逻辑
+    
+    # 构建cleaned_trace
+    cleaned = {
+        # 标准字段
+        "id": trace_id,
+        "timestamp": ...,
+        "name": ...,
+        "input": ...,
+        "output": ...,
+        "latency": ...,
+        "system_prompt": ...,
+        "messages_count": ...,
+        "messages": ...,
+        "total_tokens": ...,
+        "observation_count": len(spans),
+        "generation_count": llm_count,
+        "subagents": ...,
+        "tool_definitions": ...,
+        "model": ...,
+        
+        # 新增字段
+        "temperature": ...,
+        "top_p": ...,
+        "streaming": ...,
+        "iteration_count": ...,
+        "cache_read_tokens": ...,
+        "agent_name": ...,
+        "conversation_id": ...
+    }
+    
+    return cleaned
+```
 
-      策略: 先尝试 json.loads，失败则用 regex 提取 name/id/arguments。
-      """
-      # Strategy 1: JSON parse
-      try:
-          parsed = json.loads(raw)
-          if isinstance(parsed, list):
-              return [_normalize_tool_call(tc) for tc in parsed]
-      except json.JSONDecodeError:
-          pass
+**选项B**：保持trace_dict + observations格式，由外部调用`extract_trace_data`
 
-      # Strategy 2: regex fallback
-      # Pattern: name='xxx', id='xxx', arguments='xxx' 或 input={...}
-      pattern = r"(?:name|function\.name)=['\"](\w+)['\"]"
-      names = re.findall(pattern, raw)
-      ...  # 提取后组装为标准 OpenAI tool_calls 格式
+保持原方案，让 `convert_trace` 返回标准trace dict，外部代码调用：
+```python
+trace_dict = adapter.convert_trace(trace_id)
+cleaned = extract_trace_data(trace_dict, include_system_prompt_message=True)
+```
 
-  这是一个尽力而为的解析——repr 格式不稳定，但核心需求只是让 build_agent_turns_from_observations 知道这个 LLM span 后面有 tool call，而 tool call 的详细信息由后续的 tool span observation 提供。
+---
 
-  4.5 Agent span (root) 的 input/output
+## 六、测试验证
 
-  Agent span (jiuwenswarm.agent.invoke) 是 trace 的 root span，_extract_trace_data_impl 从 trace 顶层 input/output 提取 user message。但 agent span 的 events 不包含完整 input/output payload。
+### 6.1 验证与 `_extract_trace_data_impl` 的兼容性
 
-  策略: Agent span 的 input/output 设为从 LLM 子 span 中推断——
+```python
+# 测试代码
+from jiuwenswarm.evolve.ahe.otel_adapter import OtelTraceAdapter
+from trace_converter import extract_trace_data
 
-  def _reconstruct_trace_input(self, root_span: dict, all_spans: list[dict]) -> dict:
-      """Trace 顶层 input — 从第一个 user message event 或第一个 LLM span 推断。"""
-      # 找同 trace 中第一个 LLM span
-      llm_spans = [s for s in all_spans if (s.get("attributes") or {}).get("gen_ai.span.type") == "model"]
-      if llm_spans:
-          first_llm = llm_spans[0]
-          events = first_llm.get("events") or []
-          user_events = [e for e in events if e.get("name") == "gen_ai.user.message"]
-          if user_events:
-              return {"message": user_events[0].get("attributes", {}).get("content", "")}
+adapter = OtelTraceAdapter('traces.db')
+trace_dict = adapter.convert_trace('0dc2aa...')
+cleaned = extract_trace_data(trace_dict, include_system_prompt_message=True)
 
-      # fallback: 从 root span 的 attributes 提取
-      return root_span.get("attributes") or {}
+# 验证必需字段存在
+required_fields = ['id', 'timestamp', 'name', 'input', 'output', 'latency',
+                   'system_prompt', 'messages_count', 'messages', 'total_tokens',
+                   'observation_count', 'generation_count', 'subagents', 'tool_definitions']
 
-  def _reconstruct_trace_output(self, root_span: dict, all_spans: list[dict]) -> dict:
-      """Trace 顶层 output — 从最后一个 LLM span 的 final assistant message 推断。"""
-      llm_spans = [s for s in all_spans if (s.get("attributes") or {}).get("gen_ai.span.type") == "model"]
-      if llm_spans:
-          last_llm = llm_spans[-1]
-          events = last_llm.get("events") or []
-          assistant_events = [e for e in events if e.get("name") == "gen_ai.assistant.message"]
-          if assistant_events:
-              last = assistant_events[-1]
-              return {"role": "assistant", "content": last.get("attributes", {}).get("content", "")}
+for field in required_fields:
+    assert field in cleaned, f"缺少必需字段: {field}"
 
-      return {}
+# 验证新增字段
+new_fields = ['temperature', 'top_p', 'iteration_count', 'cache_read_tokens']
+for field in new_fields:
+    if cleaned.get(field) is not None:  # 可选字段可能为None
+        print(f"✅ 新增字段 {field}: {cleaned[field]}")
+```
 
-  4.6 Subagent 检测所需的 metadata
+### 6.2 验证数据完整性
 
-  extract_subagents_from_observations 通过 metadata.subagent_id + metadata.controller_observation_id 检测子 agent。OTEL 的嵌套 agent 通过 jiuwenclaw.agent.parent attribute 和 parent_span_id 表示层级关系。
+```python
+# 验证messages完整性
+messages = cleaned['messages']
+assert len(messages) > 0, "messages为空"
+assert messages[0]['role'] == 'system', "第一条不是system message"
 
-  转换策略：
+# 验证tool_definitions完整性
+tools = cleaned['tool_definitions']
+assert len(tools) > 0, "tool_definitions为空"
+assert tools[0].get('function', {}).get('name'), "tool没有name"
+# 检查是否是完整schema（不是简化版）
+if 'parameters' in tools[0]['function']:
+    print("✅ tool_definitions包含完整schema")
+```
 
-  # 在 _span_to_observation 中
-  metadata = {}
+---
 
-  # 方案: 若 span 的 gen_ai.span.type == "agent" 且有 parent_span_id，
-  # 则它是一个子 agent span → 生成 subagent_id 和 controller_observation_id
-  if span_type_otel == "agent" and span.get("parent_span_id"):
-      metadata["subagent_id"] = span["span_id"]
-      metadata["subagent_name"] = attrs.get("jiuwenclaw.agent.name", "") or attrs.get("gen_ai.agent.name", "")
-      metadata["controller_observation_id"] = span["parent_span_id"]
+## 七、不做的改动
 
-  # 非 agent span 若其 parent 是 agent span，也标记归属
-  # （这需要 span 父子关系已建立，见 §4.8）
+| 排除项 | 原因 |
+|--------|------|
+| 修改OTEL instrumentor | 保持OTEL标准不变 |
+| 修改trace_converter.py | 上游代码不动，适配层消化差异 |
+| 删除fallback逻辑 | 保留events重建作为兼容性fallback |
+| 添加cost字段 | OTEL不含pricing信息，设"N/A" |
+| 添加所有attributes字段 | 避免冗余，只选有用字段 |
 
-  obs["metadata"] = metadata
+---
 
-  4.7 Tool Definitions 推断（不修改 OTEL 标准）
+## 八、总结
 
-  extract_tool_definitions_from_observations 从 LLM span 的 input.tools 取完整 tool schema。OTEL instrumentor 没有记录这个。
+### 核心改动：
+1. ✅ **优先从attributes读取**messages和tools，不是events重建
+2. ✅ **保留完整tool schema**，不是简化版
+3. ✅ **新增有用的OTEL特有字段**（temperature等）
+4. ✅ **保持与`_extract_trace_data_impl`完全兼容**
 
-  不修改 OTEL 标准的前提下，唯一的信息来源是 tool spans 的 gen_ai.tool.name attribute 和 tool.arguments event。我们只能构建 简化版 tool definition：
+### 数据质量提升：
+- messages: 从空列表 → ✅ 完整对话
+- tool_definitions: 从简化版 → ✅ 完整schema（37个工具）
+- 新增字段: temperature, iteration_count, cache_read_tokens等
 
-  def _collect_tool_definitions(self, spans: list[dict]) -> list[dict]:
-      """从同 trace 的 tool spans 推断简化版 tool definitions。
-
-      产出格式兼容 extract_tool_definitions_from_observations 的预期:
-      {"type": "function", "function": {"name": "bash", "parameters": {}}}
-
-      注意: parameters 为空 dict，因为没有完整的 schema 信息。
-      """
-      seen_names = set()
-      definitions = []
-      for span in spans:
-          attrs = span.get("attributes") or {}
-          if attrs.get("gen_ai.span.type") != "tool":
-              continue
-          tool_name = attrs.get("gen_ai.tool.name", "")
-          if not tool_name or tool_name in seen_names:
-              continue
-          seen_names.add(tool_name)
-          definitions.append({
-              "type": "function",
-              "function": {
-                  "name": tool_name,
-                  "parameters": {},  # 简化版，无完整 schema
-              },
-          })
-      return definitions
-
-  这些简化版 definitions 会写入 每个 LLM span observation 的 input.tools 字段，使 extract_tool_definitions_from_observations 能正常返回结果（虽然 parameters 为空）。
-
-  对下游的影响: extract_tool_definitions_from_observations 只做 dedup + collect，不检查 parameters 内容。ProposalGenerator 在分析 tool 失败时仍然可以知道有哪些 tool 可用，只是无法从 trace 中看到 tool 的完整参数 schema。
-
-  4.8 Span 拍平与排序
-
-  get_trace_tree 返回嵌套树结构，但 _extract_trace_data_impl 需要拍平的 observations list。同时需要保留父子关系信息：
-
-  def _read_flat_spans(self, trace_id: str) -> list[dict[str, Any]]:
-      """读取并拍平排序。用 query_spans 而非 get_trace_tree，直接拿平铺结果。"""
-      from jiuwenswarm.telemetry.sqlite_exporter import query_spans
-      spans = query_spans(self.db_path, trace_id=trace_id, limit=10000)
-      # query_spans 已经按 start_time_ns DESC 排序
-      # 但 _sort_key 需要 startTime 字段（ISO string），这里数据已是 ISO（因为 JSON 已解析）
-      # 按 start_time_ns 升序重排（与 _sort_key 的行为一致）
-      spans.sort(key=lambda s: s.get("start_time_ns", 0))
-      return spans
-
-  五、时间格式转换工具
-
-  # 在 otel_adapter.py 中
-
-  from datetime import datetime, timezone
-
-  def _ns_to_iso(ns: int | None) -> str:
-      """纳秒时间戳 → ISO 8601 字符串。"""
-      if ns is None:
-          return "N/A"
-      seconds = ns / 1_000_000_000
-      dt = datetime.fromtimestamp(seconds, tz=timezone.utc)
-      return dt.isoformat()
-
-  def _ns_to_ms(ns: int | None) -> float | str:
-      """纳秒 → 毫秒数值。"""
-      if ns is None:
-          return "N/A"
-      return ns / 1_000_000
-
-  六、LLM span name 适配策略详细设计
-
-  这是让 is_llm_span 正确识别的关键。当前逻辑：
-
-  # is_llm_span 检查:
-  #   1. type/span_type 是 "SPAN"/"LLM"/"GENERATION" 或 span_type=="LLM"
-  #   2. output 中有 assistant message
-  #   3. name 包含关键词 "openai" | "anthropic" | "gemini" | "gpt" | "llama"
-
-  OTEL span name 是 "gen_ai.chat"——不含任何关键词。适配策略：
-
-  # _adapt_observation_name: 在 _span_to_observation 中应用
-  _LLM_SYSTEM_TO_KEYWORD = {
-      "openai":    "openai",
-      "anthropic": "anthropic",
-      "azure":     "openai",     # Azure OpenAI 用 openai 关键词
-      "gemini":    "gemini",
-      "google":    "gemini",
-      "deepseek":  "llama",      # DeepSeek 用 openai-compatible API，fallback
-      "unknown":   "openai",     # fallback — 保守选一个能匹配的
-  }
-
-  def _adapt_observation_name(original_name: str, attrs: dict, span_type_otel: str) -> str:
-      """确保 LLM span name 包含 is_llm_span 所需的关键词。"""
-      if span_type_otel != "model":
-          return original_name
-      # original_name 是 "gen_ai.chat"
-      system = attrs.get("gen_ai.system", "unknown")
-      keyword = _LLM_SYSTEM_TO_KEYWORD.get(system, "openai")
-      return f"{keyword}.chat"   # e.g. "anthropic.chat", "openai.chat"
-
-  这样 is_llm_span 的三重检查全部通过：
-  - type="GENERATION" ✓
-  - span_type="LLM" ✓
-  - name="anthropic.chat" 包含 "anthropic" ✓
-  - output 有 assistant message ✓（因为重构了 output）
-
-  七、边缘情况处理
-
-  ┌────────────────────────────────────────────────┬───────────────────────────────────────────────────────────────────────────────────────────────────┐
-  │                      场景                      │                                               处理                                                │
-  ├────────────────────────────────────────────────┼───────────────────────────────────────────────────────────────────────────────────────────────────┤
-  │ Span 无 context (trace_id/span_id 为空)        │ 跳过，不转为 observation                                                                          │
-  ├────────────────────────────────────────────────┼───────────────────────────────────────────────────────────────────────────────────────────────────┤
-  │ LLM span 无 assistant message event            │ output 设为 {"role": "assistant", "content": ""}，is_llm_span 返回 False，该 span 被当作普通 span │
-  ├────────────────────────────────────────────────┼───────────────────────────────────────────────────────────────────────────────────────────────────┤
-  │ Tool span 无 arguments/result event            │ input/output 设为空 dict                                                                          │
-  ├────────────────────────────────────────────────┼───────────────────────────────────────────────────────────────────────────────────────────────────┤
-  │ tool_calls repr 无法解析                       │ 返回空 list；build_agent_turns_from_observations 仍能从后续 tool span observation 构建 tool_calls │
-  ├────────────────────────────────────────────────┼───────────────────────────────────────────────────────────────────────────────────────────────────┤
-  │ 同 trace 有多个 root span（无 parent_span_id） │ 取 start_time_ns 最小的作为 trace root                                                            │
-  ├────────────────────────────────────────────────┼───────────────────────────────────────────────────────────────────────────────────────────────────┤
-  │ Trace 无任何 LLM span                          │ 所有 observations 都是普通 span；system_prompt="", agent_turns=[]，total_tokens="N/A"             │
-  ├────────────────────────────────────────────────┼───────────────────────────────────────────────────────────────────────────────────────────────────┤
-  │ Span events 为 None 或空 list                  │ json.loads(span["events"]) 失败时设为 []                                                          │
-  └────────────────────────────────────────────────┴───────────────────────────────────────────────────────────────────────────────────────────────────┘
-
-  八、集成调用示例
-
-  # 在 ProposalGenerator 或 Pipeline 中使用
-
-  from jiuwenswarm.evolve.otel_adapter import OtelTraceAdapter
-  from jiuwenswarm.evolve.models import TraceBatch
-  # trace_converter 来自 agentic-harness-engineering (vendored 或 import)
-
-  def process_batch(batch: TraceBatch, db_path: str) -> list[dict]:
-      adapter = OtelTraceAdapter(db_path=db_path)
-      results = []
-      for trace_id in batch.trace_ids:
-          trace_dict = adapter.convert_trace(trace_id)
-          cleaned = extract_trace_data(
-              trace_dict,
-              include_system_prompt_message=True,
-              include_user_message=True,
-          )
-          results.append(cleaned)
-      return results
-
-  九、测试策略
-
-  ┌─────────────────────────┬──────────────────────────────────────────────────────────────────────────────────────────────────────────────────┐
-  │        测试类别         │                                                      覆盖点                                                      │
-  ├─────────────────────────┼──────────────────────────────────────────────────────────────────────────────────────────────────────────────────┤
-  │ 单 span 转换            │ 每个 span_type（model/tool/agent/unknown）的 _span_to_observation 输出完整性                                     │
-  ├─────────────────────────┼──────────────────────────────────────────────────────────────────────────────────────────────────────────────────┤
-  │ LLM input 重构          │ messages 从 events 正确提取 + 排序；tools 简化版 definitions 正确注入                                            │
-  ├─────────────────────────┼──────────────────────────────────────────────────────────────────────────────────────────────────────────────────┤
-  │ LLM output 重构         │ assistant message + usage + tool_calls 解析                                                                      │
-  ├─────────────────────────┼──────────────────────────────────────────────────────────────────────────────────────────────────────────────────┤
-  │ name 适配               │ 各 gen_ai.system 值映射到正确关键词                                                                              │
-  ├─────────────────────────┼──────────────────────────────────────────────────────────────────────────────────────────────────────────────────┤
-  │ 完整 trace              │ 一条含 agent→LLM→tool→LLM 的完整 trace 转换后，_extract_trace_data_impl 输出字段齐全                             │
-  ├─────────────────────────┼──────────────────────────────────────────────────────────────────────────────────────────────────────────────────┤
-  │ 边缘情况                │ 空 trace、无 LLM span、无 events、tool_calls repr 解析失败                                                       │
-  ├─────────────────────────┼──────────────────────────────────────────────────────────────────────────────────────────────────────────────────┤
-  │ 与 trace_converter 兼容 │ 转换产物直接传入 extract_trace_data 不报错，且关键字段（system_prompt、messages、total_tokens、subagents）值正确 │
-  └─────────────────────────┴──────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
-
-  十、不做的事项（明确排除）
-
-  ┌─────────────────────────────────────┬──────────────────────────────────────────────────────────────┐
-  │               排除项                │                             原因                             │
-  ├─────────────────────────────────────┼──────────────────────────────────────────────────────────────┤
-  │ 修改 OTEL instrumentor 加 attribute │ OTEL 标准不轻易修改                                          │
-  ├─────────────────────────────────────┼──────────────────────────────────────────────────────────────┤
-  │ 修改 trace_converter.py             │ 上游代码，适配层应完全消化差异                               │
-  ├─────────────────────────────────────┼──────────────────────────────────────────────────────────────┤
-  │ 修改 TraceBatch 结构                │ 它只做描述符，不需要扩展                                     │
-  ├─────────────────────────────────────┼──────────────────────────────────────────────────────────────┤
-  │ 实现完整的 tool schema 推断         │ 没有 gen_ai.tool.definitions attribute，无法恢复完整参数定义 │
-  ├─────────────────────────────────────┼──────────────────────────────────────────────────────────────┤
-  │ cost 计算                           │ OTEL 不含 cost attribute，设 "N/A"                           │
-  └─────────────────────────────────────┴──────────────────────────────────────────────────────────────┘
-
-  ---
-  这就是完整细化方案。核心就一个文件 otel_adapter.py，所有映射逻辑集中在那里，OTEL 侧和 trace_converter 侧都不动。要我进入实现阶段吗？
+### 实现建议：
+- **推荐选项B**：保持 `convert_trace` 返回标准trace_dict格式，让外部调用 `extract_trace_data`
+- 这样可以保持灵活性，让用户选择需要哪些字段（`include_system_prompt_message`等参数）

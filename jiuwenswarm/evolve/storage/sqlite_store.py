@@ -355,6 +355,39 @@ class SqliteStore:
             )
             return []
 
+    def validate_trace_ids(
+        self, trace_ids: list[str]
+    ) -> tuple[bool, list[str]]:
+        """Validate that all trace_ids exist in traces.db.
+
+        Args:
+            trace_ids: List of trace IDs to validate
+
+        Returns:
+            Tuple of (all_valid, missing_ids):
+            - all_valid: True if all trace IDs exist
+            - missing_ids: List of trace IDs not found in database
+        """
+        if not trace_ids:
+            return True, []
+
+        try:
+            conn = self._get_traces_conn()
+            placeholders = ",".join("?" * len(trace_ids))
+            rows = conn.execute(
+                f"SELECT DISTINCT trace_id FROM spans WHERE trace_id IN ({placeholders})",
+                trace_ids,
+            ).fetchall()
+            found_ids = {r["trace_id"] for r in rows}
+
+            missing_ids = [tid for tid in trace_ids if tid not in found_ids]
+            all_valid = len(missing_ids) == 0
+
+            return all_valid, missing_ids
+        except Exception as exc:
+            logger.warning("Failed to validate trace_ids: %s", exc)
+            return False, trace_ids
+
     # ------------------------------------------------------------------
     # Queries
     # ------------------------------------------------------------------

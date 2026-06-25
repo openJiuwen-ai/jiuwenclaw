@@ -61,13 +61,22 @@ submit_result 的 result 参数必须是 JSON 字符串。
 {"mode": "propose", "proposals": [...], "response": "..."}
 
 每个 issue:
-{"issue_type": "工具错误|幻觉|循环|不合规|截断",
- "summary": "一行摘要",
+{"issue_type": "工具错误|幻觉|循环|不合规|截断|效率问题",
+ "summary": "一行摘要，如果涉及具体 skill/tool，必须明确写明名称，如 'csv-row-counter skill 存在缺陷'",
  "evidence": "引用原文或消息序号",
  "trace_id": "所属 trace 的 trace_id",
  "span_index": <消息的 0-based 序号>,
- "root_cause": "根因分析",
- "suggested_fix": "建议修复"}
+ "root_cause": "根因分析。如果问题是某个 skill/tool 导致的，必须在开头明确指出：'skill_name=xxx: ...' 或 'skill xxx 存在问题是由于...'",
+ "suggested_fix": "建议修复。如果针对某个 skill，必须明确写明：'修复 skill xxx 的...'; 如果需要添加新 skill，写明 '添加 skill xxx 用于...'"}
+
+## 重要规则：skill 相关问题必须明确指出 skill 名称
+
+当诊断发现问题与某个具体的 skill 或 tool 相关时：
+1. **summary**: 必须包含 skill 名称，如 "csv-row-counter skill 存在已知缺陷"
+2. **root_cause**: 必须在开头明确指出，如 "skill csv-row-counter: 脚本硬编码了跳过第一行的逻辑..."
+3. **suggested_fix**: 必须明确指出目标 skill，如 "修复 csv-row-counter skill，添加 --no-header 参数"
+
+这对于后续生成 Skill Experience Proposal 至关重要！
 
 每个 proposal:
 {"target_id": "skill-name", "target_type": "skill",
@@ -106,3 +115,156 @@ TOOL_DESCRIPTIONS = {
         "停止工具 — 提交最终 JSON 结果并终止循环。result 必须是符合输出契约的 JSON 字符串。"
     ),
 }
+
+# OpenAI function schemas for DiagnosisAgent tools
+DIAGNOSIS_TOOL_SCHEMAS = [
+    {
+        "type": "function",
+        "function": {
+            "name": "read_trace",
+            "description": "读取标准化 trace 数据，包含结构化的对话消息序列。返回概览、消息列表、工具调用列表或子 Agent 信息。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "trace_id": {
+                        "type": "string",
+                        "description": "要读取的 trace ID"
+                    },
+                    "target": {
+                        "type": "string",
+                        "enum": ["overview", "messages", "tool_calls", "subagents"],
+                        "default": "overview",
+                        "description": "读取目标类型：overview(概览)、messages(消息列表)、tool_calls(工具调用)、subagents(子Agent)"
+                    },
+                    "offset": {
+                        "type": "integer",
+                        "default": 0,
+                        "description": "消息起始索引（分页读取时使用）"
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "default": 20,
+                        "description": "返回消息数量上限"
+                    }
+                },
+                "required": ["trace_id"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "search_trace",
+            "description": "在 trace 消息内容中按正则表达式搜索关键词。搜索范围包括消息 content 和 tool_calls 内容。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "trace_id": {
+                        "type": "string",
+                        "description": "要搜索的 trace ID"
+                    },
+                    "pattern": {
+                        "type": "string",
+                        "description": "正则表达式搜索模式"
+                    },
+                    "max_results": {
+                        "type": "integer",
+                        "default": 20,
+                        "description": "返回匹配结果数量上限"
+                    }
+                },
+                "required": ["trace_id", "pattern"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "list_traces",
+            "description": "列出所有可用 trace 的 ID 和概览信息。返回 trace_id、消息数量、输入输出摘要。",
+            "parameters": {
+                "type": "object",
+                "properties": {},
+                "required": []
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "query_evolve_records",
+            "description": "查询 trace ID 关联的所有演进记录（Proposal/Decision/Apply）。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "trace_id": {
+                        "type": "string",
+                        "description": "要查询演进记录的 trace ID"
+                    }
+                },
+                "required": ["trace_id"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "query_proposals",
+            "description": "查询指定 batch 的所有 Proposal。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "batch_id": {
+                        "type": "string",
+                        "description": "要查询的 batch ID"
+                    }
+                },
+                "required": ["batch_id"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "read_file",
+            "description": "读取本地文件内容，支持分页读取。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "要读取的文件路径"
+                    },
+                    "offset": {
+                        "type": "integer",
+                        "default": 0,
+                        "description": "起始行索引"
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "default": 100,
+                        "description": "返回行数上限"
+                    }
+                },
+                "required": ["path"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "submit_result",
+            "description": "提交最终诊断结果并终止 ReAct 循环。result 参数必须是符合输出契约的 JSON 字符串。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "result": {
+                        "type": "string",
+                        "description": "JSON 格式的诊断结果。diagnose 模式包含 issues 和 response；propose 模式包含 proposals 和 response"
+                    }
+                },
+                "required": ["result"]
+            }
+        }
+    }
+]

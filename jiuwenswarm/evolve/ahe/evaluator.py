@@ -96,7 +96,7 @@ class TraceOutcomeEvaluator:
 
     Two modes:
     - evaluate_fast(): heuristic + span_error, no LLM call
-    - evaluate(): LLM-based assessment, uses openjiuwen Model
+    - evaluate(): LLM-based assessment
     """
 
     def __init__(self, model: Any | None = None):
@@ -168,17 +168,19 @@ class TraceOutcomeEvaluator:
             )
 
         try:
-            from openjiuwen.core.foundation.llm import (
-                SystemMessage, UserMessage,
-            )
+            # Create simple message objects
+            class SimpleMessage:
+                def __init__(self, role: str, content: str):
+                    self.role = role
+                    self.content = content
 
             user_msg = (
                 f"[用户输入]: {input_text}\n\n[Agent最终输出]: {output_text}"
             )
 
             messages = [
-                SystemMessage(content=TASK_EVAL_SYSTEM_PROMPT),
-                UserMessage(content=user_msg),
+                SimpleMessage(role="system", content=TASK_EVAL_SYSTEM_PROMPT),
+                SimpleMessage(role="user", content=user_msg),
             ]
 
             response = await self._model.invoke(messages=messages)
@@ -206,13 +208,17 @@ class TraceOutcomeEvaluator:
         for trace in normalized_traces:
             # First try fast evaluation
             fast = self.evaluate_fast(trace)
+            logger.info("evaluate_fast taace_id %s, result is %s", trace["id"], fast)
 
             # If heuristic returns uncertain, try LLM evaluation
             if fast.outcome == "uncertain" and fast.judgment_method == "heuristic":
                 input_text = self._extract_input(trace)
                 output_text = self._extract_output(trace)
                 if input_text and output_text:
-                    llm_outcome = await self.evaluate(input_text, output_text)
+                    # Truncate to avoid token limit issues
+                    llm_outcome = await self.evaluate(input_text[:2000], output_text[:2000])
+                    logger.info("evaluate input is %s", input_text[:300])
+                    logger.info("evaluate output is %s", output_text[:300])
                     llm_outcome.trace_id = trace.get("id", trace.get("trace_id", ""))
                     llm_outcome.task_name = TaskNameInferrer.infer(trace)
                     outcomes.append(llm_outcome)
@@ -227,11 +233,79 @@ class TraceOutcomeEvaluator:
 
     @staticmethod
     def _extract_input(trace: dict) -> str:
-        """Extract user input from NormalizedTrace."""
+        """Extract user input from NormalizedTrace.
+
+        Handles multiple input formats:
+        1. user_message field with JSON wrapper (JiuwenSwarm web format)
+        2. input.messages with parts structure
+        3. input.message as direct string
+        4. Fallback to string representation
+        """
+        # Priority 1: user_message field (most direct)
+        user_message = trace.get("user_message", "")
+        if user_message:
+            # Try to parse JSON wrapper: "你收到一条消息：\n{...content: '真实输入'...}"
+            if "你收到一条消息：" in user_message or "{" in user_message:
+                try:
+                    # Extract JSON part
+                    json_start = user_message.find("{")
+                    if json_start != -1:
+                        json_str = user_message[json_start:]
+                        parsed = json.loads(json_str)
+                        # Extract real content from JSON
+                        real_content = parsed.get("content", "")
+                        if real_content:
+                            return real_content
+                except (json.JSONDecodeError, ValueError):
+                    pass
+            # If not JSON wrapper, return directly
+            return user_message
+
+        # Priority 2: input.messages with parts structure
         input_data = trace.get("input", {})
         if isinstance(input_data, dict):
-            return input_data.get("message", str(input_data))
-        return str(input_data)
+            messages = input_data.get("messages", [])
+            if isinstance(messages, list) and messages:
+                # Find the last user message
+                user_messages = [m for m in messages if m.get("role") == "user"]
+                if user_messages:
+                    last_user_msg = user_messages[-1]
+                    # Extract content - could be direct or in parts
+                    content = ""
+                    if "content" in last_user_msg:
+                        content = last_user_msg["content"]
+                    elif "parts" in last_user_msg:
+                        parts = last_user_msg.get("parts", [])
+                        text_parts = [
+                            p.get("content", "")
+                            for p in parts
+                            if isinstance(p, dict) and p.get("type") == "text"
+                        ]
+                        if text_parts:
+                            content = "\n".join(text_parts)
+
+                    # Parse JSON wrapper if present
+                    if content and ("你收到一条消息：" in content or "{" in content):
+                        try:
+                            json_start = content.find("{")
+                            if json_start != -1:
+                                json_str = content[json_start:]
+                                parsed = json.loads(json_str)
+                                real_content = parsed.get("content", "")
+                                if real_content:
+                                    return real_content
+                        except (json.JSONDecodeError, ValueError):
+                            pass
+
+                    if content:
+                        return content
+
+            # Priority 3: direct message field
+            if "message" in input_data:
+                return str(input_data["message"])
+
+        # Fallback: convert entire input to string
+        return str(input_data if isinstance(input_data, dict) else trace)
 
     @staticmethod
     def _extract_output(trace: dict) -> str:
@@ -284,39 +358,56 @@ class TraceOutcomeEvaluator:
         )
 
     async def _init_model(self):
-        """Initialize openjiuwen Model from config — same pattern as LLMProposer."""
+        """Initialize OpenAI client from evolve config.
+
+        Reads configuration from evolve/config.yaml llm section:
+        - api_key: supports ${ENV_VAR} expansion
+        - api_base: OpenAI-compatible API endpoint
+        - model_name: model to use (e.g., gpt-4)
+        - temperature: generation temperature
+        - max_tokens: max tokens in response
+        """
         try:
-            from openjiuwen.core.foundation.llm import (
-                Model, ModelClientConfig, ModelRequestConfig,
-            )
-            from jiuwenswarm.common.config import get_default_models
-            from jiuwenswarm.common.utils import get_env_file
+            from openai import AsyncOpenAI
+            from jiuwenswarm.evolve import get_evolve_config
+            from jiuwenswarm.evolve.ahe.openai_wrapper import OpenAIModelWrapper
+            import os
 
-            env_file = get_env_file()
-            if env_file.exists():
-                from dotenv import load_dotenv
-                load_dotenv(dotenv_path=env_file, override=False)
+            evolve_cfg = get_evolve_config()
+            llm_cfg = evolve_cfg.get("llm", {})
 
-            models = get_default_models()
-            if not models:
+            # Expand environment variables in api_key
+            api_key = llm_cfg.get("api_key")
+            # Check if api_key is valid string before calling startswith
+            if api_key and isinstance(api_key, str):
+                if api_key.startswith("${") and api_key.endswith("}"):
+                    env_var = api_key[2:-1]
+                    api_key = os.getenv(env_var)
+            else:
+                # api_key is None or not a string
+                api_key = os.getenv("EVOLVE_API_KEY")  # Fallback: try direct env var
+
+            if not api_key:
+                logger.warning("No API key configured in evolve/config.yaml or environment")
                 return None
 
-            first = models[0]
-            client_cfg = first.get("model_client_config", {})
-            model_cfg = first.get("model_config_obj", {})
+            # Get api_base
+            api_base = llm_cfg.get("api_base", "https://api.deepseek.com/v1")
+            if not api_base:
+                api_base = "https://api.deepseek.com/v1"  # Fallback to DeepSeek API
 
-            return Model(
-                model_client_config=ModelClientConfig(
-                    client_provider=client_cfg.get("client_provider", "OpenAI"),
-                    api_base=client_cfg.get("api_base", ""),
-                    api_key=client_cfg.get("api_key", ""),
-                    verify_ssl=client_cfg.get("verify_ssl", False),
-                ),
-                model_config=ModelRequestConfig(
-                    model=client_cfg.get("model_name", "gpt-4"),
-                    temperature=model_cfg.get("temperature", 0.4),
-                    max_tokens=2000,
-                ),
+            # Create AsyncOpenAI client
+            client = AsyncOpenAI(
+                api_key=api_key,
+                base_url=api_base,
+            )
+
+            # Return wrapper that matches expected interface
+            return OpenAIModelWrapper(
+                client=client,
+                model=llm_cfg.get("model_name", "deepseek-v4-pro"),
+                temperature=llm_cfg.get("temperature", 0.4),
+                max_tokens=llm_cfg.get("max_tokens", 2000),
             )
         except Exception as exc:
             logger.warning("TraceOutcomeEvaluator._init_model failed: %s", exc)

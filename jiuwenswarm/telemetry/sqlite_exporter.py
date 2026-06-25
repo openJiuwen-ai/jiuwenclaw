@@ -300,6 +300,27 @@ def query_spans(
     conn.close()
     return results
 
+def read_flat_span(db_path: str, trace_id: str) -> list[dict[str, Any]]:
+    """Read all spans for trace_id from SQLite, sorted by start_time_ns.
+
+    Returns flat list of span dicts (no children, no depth).
+    Compatible with otel_adapter._read_flat_spans format.
+    """
+    try:
+        conn = sqlite3.connect(db_path)
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+
+        spans = cursor.execute(
+            "SELECT * FROM spans WHERE trace_id = ? ORDER BY start_time_ns",
+            (trace_id,),
+        ).fetchall()
+        result = [dict(r) for r in spans]
+        conn.close()
+        return result
+    except Exception as exc:
+        logger.warning("read_flat_span failed: %s", exc)
+        return []
 
 def get_trace_tree(db_path: str, trace_id: str) -> list[dict[str, Any]]:
     """Get complete trace tree with depth information.

@@ -1,14 +1,8 @@
 # Copyright (c) Huawei Technologies, Co., Ltd. 2026. All rights reserved.
 """OTEL SQLite spans → Langfuse-style trace dict adapter.
 
-The sole purpose: let ``_extract_trace_data_impl`` from
-agentic-harness-engineering consume standard OTEL trace data.
-
-Design principles:
-  - OTEL instrumentor is NOT modified
-  - trace_converter is NOT modified
-  - All mapping logic lives here — one file, one responsibility
-  - No dependency on existing evolve proposal generators or policies
+The sole purpose: return cleaned_trace format directly,
+matching extract_trace_data() output structure exactly.
 """
 
 from __future__ import annotations
@@ -92,13 +86,7 @@ def _adapt_observation_name(
 
 
 def _parse_tool_calls_repr(raw: str) -> list[dict]:
-    """Tolerant parser for Python repr tool_calls strings.
-
-    Handles:
-      - JSON format: '[{"id": "call_abc", ...}]'
-      - Python repr: '[ToolCall(id='call_abc', name='bash', arguments='...')]'
-      - Anthropic format: '[{'id': 'toolu_abc', 'type': 'tool_use', ...}]'
-    """
+    """Tolerant parser for Python repr tool_calls strings."""
     if not raw or raw == "None":
         return []
 
@@ -111,7 +99,6 @@ def _parse_tool_calls_repr(raw: str) -> list[dict]:
         pass
 
     # Strategy 2: regex fallback for Python repr
-    # Pattern: name='xxx', id='xxx'
     name_pattern = r"""(?:name|function\.name)=['"](\w+)['"]"""
     id_pattern = r"""(?:id|call_id)=['"]([\w_-]+)['"]"""
     names = re.findall(name_pattern, raw)
@@ -150,39 +137,461 @@ def _normalize_tool_call(tc: dict) -> dict:
 
 
 class OtelTraceAdapter:
-    """OTEL SQLite spans → Langfuse-style trace dict.
+    """OTEL SQLite spans → cleaned_trace dict.
 
-    Usage:
-        adapter = OtelTraceAdapter(db_path="traces.db")
-        trace_dict = adapter.convert_trace("abc123def456...")
-        # trace_dict can be passed to _extract_trace_data_impl
+    Returns data structure identical to trace_converter.extract_trace_data().
     """
 
     def __init__(self, db_path: str):
         self._db_path = db_path
 
     def convert_trace(self, trace_id: str) -> dict[str, Any]:
-        """Convert one OTEL trace to a dict compatible with _extract_trace_data_impl."""
+        """Convert OTEL trace to cleaned_trace format.
+
+        Returns dict identical to extract_trace_data() output.
+        """
         spans = self._read_flat_spans(trace_id)
         if not spans:
             logger.warning("OtelTraceAdapter: no spans for trace_id=%s", trace_id)
-            return {"id": trace_id, "observations": []}
+            return {
+                "id": trace_id,
+                "timestamp": "N/A",
+                "name": "N/A",
+                "input": "N/A",
+                "output": "N/A",
+                "latency": "N/A",
+                "system_prompt": "",
+                "messages_count": 0,
+                "messages": [],
+                "total_tokens": "N/A",
+                "observation_count": 0,
+                "generation_count": 0,
+                "subagents": [],
+                "tool_definitions": [],
+            }
 
-        # Find root span (first span without parent_span_id, or earliest)
-        root = self._find_root_span(spans)
-        observations = [self._span_to_observation(s) for s in spans]
+        # Parse all spans
+        parsed_spans = [self._parse_span(s) for s in spans]
 
-        trace_dict = {
+        # Find root span
+        root = self._find_root_span(parsed_spans)
+
+        # Extract trace-level fields
+        trace_input = self._extract_trace_input(parsed_spans)
+        trace_output = self._extract_trace_output(parsed_spans)
+
+        # Extract observations-level data
+        system_prompt = self._extract_system_prompt(parsed_spans)
+        agent_turns = self._build_agent_turns(parsed_spans)
+        subagents = self._extract_subagents(parsed_spans)
+        tool_definitions = self._extract_tool_definitions(parsed_spans)
+
+        # Build messages
+        messages = []
+        if system_prompt:
+            messages.append({"role": "system", "content": system_prompt})
+
+        # Extract user message from trace input
+        user_message = self._extract_user_message(trace_input)
+        if user_message:
+            messages.append({"role": "user", "content": user_message})
+
+        messages.extend(agent_turns)
+
+        # Calculate aggregates
+        total_tokens = self._sum_total_tokens(parsed_spans)
+        generation_count = len([s for s in parsed_spans if s.get('span_type') == 'LLM'])
+
+        # Build cleaned_trace
+        cleaned_trace = {
             "id": trace_id,
-            "trace_id": trace_id,
             "timestamp": _ns_to_iso(root.get("start_time_ns")),
             "name": root.get("name", "N/A"),
-            "input": self._reconstruct_trace_input(root, spans),
-            "output": self._reconstruct_trace_output(root, spans),
+            "input": trace_input,
+            "output": trace_output,
             "latency": _ns_to_ms(root.get("duration_ns")),
-            "observations": observations,
+            "system_prompt": system_prompt,
+            "messages_count": len(messages),
+            "messages": messages,
+            "total_tokens": total_tokens if total_tokens > 0 else "N/A",
+            "observation_count": len(spans),
+            "generation_count": generation_count,
+            "subagents": subagents,
+            "tool_definitions": tool_definitions,
+            "user_message": user_message or "",
         }
-        return trace_dict
+
+        return cleaned_trace
+
+    # ── Internal methods ──────────────────────────────────────────────
+
+    def _read_flat_spans(self, trace_id: str) -> list[dict[str, Any]]:
+        """Read all spans for trace_id from SQLite, sorted by start_time_ns."""
+        from jiuwenswarm.telemetry.sqlite_exporter import read_flat_span
+
+        try:
+            return read_flat_span(self._db_path, trace_id)
+        except Exception as exc:
+            logger.warning("OtelTraceAdapter._read_flat_spans failed: %s", exc)
+            return []
+
+    def _parse_span(self, span: dict) -> dict[str, Any]:
+        """Parse raw span dict to processed dict."""
+        attrs = _parse_attrs(span.get("attributes"))
+        events = _parse_events(span.get("events"))
+
+        span_type_otel = attrs.get("gen_ai.span.type", "unknown")
+
+        # Determine span_type
+        if span_type_otel == "model":
+            span_type = "LLM"
+        elif span_type_otel == "tool":
+            span_type = "TOOL"
+        elif span_type_otel == "agent":
+            span_type = "AGENT"
+        else:
+            span_type = "SPAN"
+
+        return {
+            "span_id": span.get("span_id"),
+            "parent_span_id": span.get("parent_span_id"),
+            "name": _adapt_observation_name(span.get("name", ""), attrs, span_type_otel),
+            "span_type": span_type,
+            "start_time_ns": span.get("start_time_ns"),
+            "end_time_ns": span.get("end_time_ns"),
+            "duration_ns": span.get("duration_ns"),
+            "attributes": attrs,
+            "events": events,
+        }
+
+    @staticmethod
+    def _find_root_span(spans: list[dict]) -> dict:
+        """Find the root span — no parent_span_id, or earliest such span."""
+        roots = [s for s in spans if not s.get("parent_span_id")]
+        if roots:
+            roots.sort(key=lambda s: s.get("start_time_ns", 0))
+            return roots[0]
+        spans.sort(key=lambda s: s.get("start_time_ns", 0))
+        return spans[0] if spans else {}
+
+    def _extract_trace_input(self, spans: list[dict]) -> dict:
+        """Extract trace-level input from first LLM span."""
+        llm_spans = [s for s in spans if s.get("span_type") == "LLM"]
+        if llm_spans:
+            first_llm = llm_spans[0]
+            return self._extract_llm_input(first_llm)
+        return {}
+
+    def _extract_trace_output(self, spans: list[dict]) -> dict:
+        """Extract trace-level output from last LLM span."""
+        llm_spans = [s for s in spans if s.get("span_type") == "LLM"]
+        if llm_spans:
+            last_llm = llm_spans[-1]
+            return self._extract_llm_output(last_llm)
+        return {}
+
+    def _extract_llm_input(self, span: dict) -> dict:
+        """Extract LLM input - prioritize attributes."""
+        attrs = span.get("attributes", {})
+
+        # ✅ Direct read from attributes (完整数据)
+        if "gen_ai.input.messages" in attrs:
+            messages_raw = attrs["gen_ai.input.messages"]
+            # Handle double encoding
+            if isinstance(messages_raw, str):
+                try:
+                    messages = json.loads(messages_raw)
+                except json.JSONDecodeError:
+                    messages = []
+            else:
+                messages = messages_raw if isinstance(messages_raw, list) else []
+
+            # Extract tools
+            tools = []
+            if "gen_ai.tool.definitions" in attrs:
+                tools_raw = attrs["gen_ai.tool.definitions"]
+                if isinstance(tools_raw, str):
+                    try:
+                        tools = json.loads(tools_raw)
+                    except:
+                        tools = []
+                else:
+                    tools = tools_raw if isinstance(tools_raw, list) else []
+
+            return {
+                "model": attrs.get("gen_ai.request.model", ""),
+                "messages": messages,
+                "tools": tools,
+            }
+
+        # Fallback: rebuild from events
+        messages = []
+        for ev in span.get("events", []):
+            ev_attrs = _parse_attrs(ev.get("attributes"))
+            ev_name = ev.get("name", "")
+
+            if ev_name == "gen_ai.system.message":
+                messages.append({"role": "system", "content": ev_attrs.get("content", "")})
+            elif ev_name == "gen_ai.user.message":
+                messages.append({"role": "user", "content": ev_attrs.get("content", "")})
+            elif ev_name == "gen_ai.assistant.message":
+                content = ev_attrs.get("content", "")
+                tool_calls_raw = ev_attrs.get("tool_calls", "")
+                msg = {"role": "assistant", "content": content}
+                if tool_calls_raw:
+                    parsed_tc = _parse_tool_calls_repr(tool_calls_raw)
+                    if parsed_tc:
+                        msg["tool_calls"] = parsed_tc
+                messages.append(msg)
+
+        return {
+            "model": attrs.get("gen_ai.request.model", ""),
+            "messages": messages,
+            "tools": [],
+        }
+
+    def _extract_llm_output(self, span: dict) -> dict:
+        """Extract LLM output."""
+        attrs = span.get("attributes", {})
+        events = span.get("events", [])
+
+        # ✅ 优先从attributes读取 (完整数据)
+        if "gen_ai.output.messages" in attrs:
+            output_msgs_raw = attrs["gen_ai.output.messages"]
+            # Handle encoding
+            if isinstance(output_msgs_raw, str):
+                try:
+                    output_msgs = json.loads(output_msgs_raw)
+                except json.JSONDecodeError:
+                    output_msgs = []
+            else:
+                output_msgs = output_msgs_raw if isinstance(output_msgs_raw, list) else []
+
+            # Find last assistant message
+            if output_msgs:
+                for msg in reversed(output_msgs):  # 从后往前找
+                    if isinstance(msg, dict) and msg.get("role") == "assistant":
+                        result = {"role": "assistant", "content": ""}
+
+                        # Extract content from parts or direct
+                        content = msg.get("content")
+                        if isinstance(content, str):
+                            result["content"] = content
+                        elif content is None and "parts" in msg:
+                            parts = msg.get("parts", [])
+                            if isinstance(parts, list):
+                                texts = []
+                                for part in parts:
+                                    if isinstance(part, dict) and part.get("type") == "text":
+                                        part_content = part.get("content", "")
+                                        if isinstance(part_content, str):
+                                            texts.append(part_content)
+                                result["content"] = " ".join(texts) if texts else ""
+
+                        # Extract tool_calls if available
+                        if "tool_calls" in msg:
+                            result["tool_calls"] = msg["tool_calls"]
+
+                        # Add usage
+                        usage = {}
+                        if attrs.get("gen_ai.usage.total_tokens"):
+                            usage["total_tokens"] = attrs["gen_ai.usage.total_tokens"]
+                        if attrs.get("gen_ai.usage.input_tokens"):
+                            usage["input_tokens"] = attrs["gen_ai.usage.input_tokens"]
+                        if attrs.get("gen_ai.usage.output_tokens"):
+                            usage["output_tokens"] = attrs["gen_ai.usage.output_tokens"]
+                        if usage:
+                            result["usage"] = usage
+
+                        return result
+
+        # Fallback: from events
+        assistant_events = [ev for ev in events if ev.get("name") == "gen_ai.assistant.message"]
+
+        if assistant_events:
+            last = assistant_events[-1]
+            ev_attrs = _parse_attrs(last.get("attributes"))
+            content = ev_attrs.get("content", "")
+            tool_calls_raw = ev_attrs.get("tool_calls", "")
+
+            result = {"role": "assistant", "content": content}
+            if tool_calls_raw:
+                parsed_tc = _parse_tool_calls_repr(tool_calls_raw)
+                if parsed_tc:
+                    result["tool_calls"] = parsed_tc
+
+            # Add usage
+            usage = {}
+            if attrs.get("gen_ai.usage.total_tokens"):
+                usage["total_tokens"] = attrs["gen_ai.usage.total_tokens"]
+            if attrs.get("gen_ai.usage.input_tokens"):
+                usage["input_tokens"] = attrs["gen_ai.usage.input_tokens"]
+            if attrs.get("gen_ai.usage.output_tokens"):
+                usage["output_tokens"] = attrs["gen_ai.usage.output_tokens"]
+            if usage:
+                result["usage"] = usage
+
+            return result
+
+        return {"role": "assistant", "content": ""}
+
+    def _extract_system_prompt(self, spans: list[dict]) -> str:
+        """Extract system prompt from first LLM span."""
+        llm_spans = [s for s in spans if s.get("span_type") == "LLM"]
+        if llm_spans:
+            attrs = llm_spans[0].get("attributes", {})
+
+            # ✅ Direct read from messages
+            if "gen_ai.input.messages" in attrs:
+                messages_raw = attrs["gen_ai.input.messages"]
+                if isinstance(messages_raw, str):
+                    try:
+                        messages = json.loads(messages_raw)
+                    except json.JSONDecodeError:
+                        messages = []
+                else:
+                    messages = messages_raw if isinstance(messages_raw, list) else []
+
+                # Find first system message
+                for msg in messages:
+                    if isinstance(msg, dict) and msg.get("role") == "system":
+                        # Handle different content formats
+                        content = msg.get("content")
+
+                        # Format 1: Direct string content
+                        if isinstance(content, str):
+                            return content
+
+                        # Format 2: content is None, check parts
+                        if content is None and "parts" in msg:
+                            parts = msg.get("parts", [])
+                            if isinstance(parts, list):
+                                # Extract text from parts
+                                texts = []
+                                for part in parts:
+                                    if isinstance(part, dict) and part.get("type") == "text":
+                                        part_content = part.get("content", "")
+                                        if isinstance(part_content, str):
+                                            texts.append(part_content)
+                                return " ".join(texts) if texts else ""
+
+        # Fallback: from events
+        events = llm_spans[0].get("events", [])
+        for ev in events:
+            if ev.get("name") == "gen_ai.system.message":
+                ev_attrs = _parse_attrs(ev.get("attributes"))
+                return ev_attrs.get("content", "")
+
+        return ""
+
+    def _extract_user_message(self, trace_input: dict) -> str:
+        """Extract user message from trace input."""
+        if isinstance(trace_input, dict):
+            messages = trace_input.get("messages", [])
+            for msg in messages:
+                if isinstance(msg, dict) and msg.get("role") == "user":
+                    # Handle different content formats
+                    content = msg.get("content")
+
+                    # Format 1: Direct string content
+                    if isinstance(content, str):
+                        return content
+
+                    # Format 2: content is None, check parts
+                    if content is None and "parts" in msg:
+                        parts = msg.get("parts", [])
+                        if isinstance(parts, list):
+                            # Extract text from parts
+                            texts = []
+                            for part in parts:
+                                if isinstance(part, dict) and part.get("type") == "text":
+                                    part_content = part.get("content", "")
+                                    if isinstance(part_content, str):
+                                        texts.append(part_content)
+                            return " ".join(texts) if texts else ""
+
+                    # Format 3: content is list (parts directly)
+                    if isinstance(content, list):
+                        texts = [p.get("content", "") for p in content if isinstance(p, dict) and p.get("type") == "text"]
+                        return " ".join(texts)
+        return ""
+
+    def _build_agent_turns(self, spans: list[dict]) -> list[dict]:
+        """Build agent turns from LLM spans."""
+        turns = []
+        llm_spans = [s for s in spans if s.get("span_type") == "LLM"]
+
+        for span in llm_spans:
+            output = self._extract_llm_output(span)
+            if output.get("content") or output.get("tool_calls"):
+                turns.append(output)
+
+        return turns
+
+    def _extract_subagents(self, spans: list[dict]) -> list[dict]:
+        """Extract subagent traces."""
+        subagents = []
+        agent_spans = [s for s in spans if s.get("span_type") == "AGENT"]
+
+        for span in agent_spans:
+            if span.get("parent_span_id"):  # Has parent, so it's a subagent
+                attrs = span.get("attributes", {})
+                subagents.append({
+                    "id": span.get("span_id"),
+                    "name": attrs.get("gen_ai.agent.name", attrs.get("jiuwenclaw.agent.name", "")),
+                    "parent_id": span.get("parent_span_id"),
+                })
+
+        return subagents
+
+    def _extract_tool_definitions(self, spans: list[dict]) -> list[dict]:
+        """Extract tool definitions from LLM span."""
+        llm_spans = [s for s in spans if s.get("span_type") == "LLM"]
+
+        if llm_spans:
+            attrs = llm_spans[0].get("attributes", {})
+
+            # ✅ Direct read from attributes
+            if "gen_ai.tool.definitions" in attrs:
+                tools_raw = attrs["gen_ai.tool.definitions"]
+                if isinstance(tools_raw, str):
+                    try:
+                        tools = json.loads(tools_raw)
+                    except:
+                        tools = []
+                else:
+                    tools = tools_raw if isinstance(tools_raw, list) else []
+
+                # Normalize to OpenAI function format
+                normalized = []
+                for tool in tools:
+                    if isinstance(tool, dict):
+                        if "type" == "function" and "function" in tool:
+                            normalized.append(tool)  # Already correct format
+                        elif "name" in tool:
+                            # Simplified format → OpenAI format
+                            normalized.append({
+                                "type": "function",
+                                "function": {
+                                    "name": tool.get("name"),
+                                    "parameters": tool.get("parameters", {}),
+                                }
+                            })
+
+                return normalized
+
+        return []
+
+    def _sum_total_tokens(self, spans: list[dict]) -> int:
+        """Sum total tokens from all LLM spans."""
+        total = 0
+        for span in spans:
+            if span.get("span_type") == "LLM":
+                attrs = span.get("attributes", {})
+                tokens = attrs.get("gen_ai.usage.total_tokens")
+                if tokens and isinstance(tokens, (int, float)):
+                    total += int(tokens)
+        return total
 
     def convert_batch(self, batch: object) -> list[dict[str, Any]]:
         """Convert all trace_ids in a TraceBatch."""
@@ -196,271 +605,3 @@ class OtelTraceAdapter:
                     trace_id, exc,
                 )
         return results
-
-    # ── Internal methods ──────────────────────────────────────────────
-
-    def _read_flat_spans(self, trace_id: str) -> list[dict[str, Any]]:
-        """Read all spans for trace_id from SQLite, sorted by start_time_ns."""
-        from jiuwenswarm.evolve.storage.sqlite_store import SqliteStore
-
-        # Use SqliteStore.read_spans which returns list of dicts
-        # Create a temporary read-only connection
-        try:
-            conn = SqliteStore.__new__(SqliteStore)
-            conn._traces_db_path = self._db_path
-            spans = conn._get_traces_conn().execute(
-                "SELECT * FROM spans WHERE trace_id = ? ORDER BY start_time_ns",
-                (trace_id,),
-            ).fetchall()
-            return [dict(r) for r in spans]
-        except Exception as exc:
-            logger.warning("OtelTraceAdapter._read_flat_spans failed: %s", exc)
-            return []
-
-    @staticmethod
-    def _find_root_span(spans: list[dict]) -> dict:
-        """Find the root span — no parent_span_id, or earliest such span."""
-        roots = [s for s in spans if not s.get("parent_span_id")]
-        if roots:
-            # Pick the earliest root
-            roots.sort(key=lambda s: s.get("start_time_ns", 0))
-            return roots[0]
-        # Fallback: earliest span overall
-        spans.sort(key=lambda s: s.get("start_time_ns", 0))
-        return spans[0] if spans else {}
-
-    def _span_to_observation(self, span: dict) -> dict[str, Any]:
-        """Single OTEL span dict → Langfuse observation dict."""
-        attrs = _parse_attrs(span.get("attributes"))
-        events = _parse_events(span.get("events"))
-
-        span_type_otel = attrs.get("gen_ai.span.type", "unknown")
-
-        # Determine Langfuse type/span_type
-        if span_type_otel == "model":
-            lf_type = "GENERATION"
-            lf_span_type = "LLM"
-        elif span_type_otel == "tool":
-            lf_type = "SPAN"
-            lf_span_type = "TOOL"
-        elif span_type_otel == "agent":
-            lf_type = "SPAN"
-            lf_span_type = "AGENT"
-        else:
-            lf_type = "SPAN"
-            lf_span_type = span.get("kind", "SPAN")
-
-        name = _adapt_observation_name(span.get("name", ""), attrs, span_type_otel)
-
-        # Build observation dict
-        obs: dict[str, Any] = {
-            "id": span.get("span_id", ""),
-            "name": name,
-            "type": lf_type,
-            "span_type": lf_span_type,
-            "parentObservationId": span.get("parent_span_id") or None,
-            "startTime": _ns_to_iso(span.get("start_time_ns")),
-            "endTime": _ns_to_iso(span.get("end_time_ns")),
-            "latency": _ns_to_ms(span.get("duration_ns")),
-            "model": attrs.get("gen_ai.request.model") or attrs.get("gen_ai.response.model"),
-            "totalTokens": attrs.get("gen_ai.usage.total_tokens"),
-        }
-
-        # Input/output reconstruction depends on span_type
-        if span_type_otel == "model":
-            obs["input"] = self._reconstruct_llm_input(attrs, events)
-            obs["output"] = self._reconstruct_llm_output(attrs, events)
-            obs["totalTokens"] = attrs.get("gen_ai.usage.total_tokens") or "N/A"
-            # Also write usage into output for dual-path compatibility
-            if isinstance(obs["output"], dict):
-                obs["output"]["usage"] = {
-                    "total_tokens": attrs.get("gen_ai.usage.total_tokens", "N/A"),
-                    "input_tokens": attrs.get("gen_ai.usage.input_tokens", "N/A"),
-                    "output_tokens": attrs.get("gen_ai.usage.output_tokens", "N/A"),
-                }
-        elif span_type_otel == "tool":
-            obs["input"] = self._reconstruct_tool_input(attrs, events)
-            obs["output"] = self._reconstruct_tool_output(attrs, events)
-        else:
-            obs["input"] = attrs
-            obs["output"] = {}
-
-        # Metadata for subagent detection
-        metadata: dict[str, Any] = {}
-        if span_type_otel == "agent" and span.get("parent_span_id"):
-            metadata["subagent_id"] = span.get("span_id", "")
-            metadata["subagent_name"] = (
-                attrs.get("jiuwenclaw.agent.name", "")
-                or attrs.get("gen_ai.agent.name", "")
-            )
-            metadata["controller_observation_id"] = span.get("parent_span_id", "")
-
-        if metadata:
-            obs["metadata"] = metadata
-
-        obs["calculatedTotalCost"] = "N/A"
-        return obs
-
-    def _reconstruct_llm_input(self, attrs: dict, events: list) -> dict:
-        """Reconstruct LLM span input from OTEL events → OpenAI messages format."""
-        messages = []
-        for ev in events:
-            ev_attrs = _parse_attrs(ev.get("attributes"))
-            ev_name = ev.get("name", "")
-
-            if ev_name == "gen_ai.system.message":
-                messages.append({"role": "system", "content": ev_attrs.get("content", "")})
-            elif ev_name == "gen_ai.user.message":
-                messages.append({"role": "user", "content": ev_attrs.get("content", "")})
-            elif ev_name == "gen_ai.assistant.message":
-                # May contain tool_calls
-                content = ev_attrs.get("content", "")
-                tool_calls_raw = ev_attrs.get("tool_calls", "")
-                msg = {"role": "assistant", "content": content}
-                if tool_calls_raw:
-                    parsed_tc = _parse_tool_calls_repr(tool_calls_raw)
-                    if parsed_tc:
-                        msg["tool_calls"] = parsed_tc
-                messages.append(msg)
-            elif ev_name == "gen_ai.tool.message":
-                msg = {"role": "tool", "content": ev_attrs.get("content", "")}
-                if ev_attrs.get("tool_call_id"):
-                    msg["tool_call_id"] = ev_attrs["tool_call_id"]
-                messages.append(msg)
-
-        # Add model from attributes
-        model = attrs.get("gen_ai.request.model", "")
-
-        # Tool definitions — simplified from tool spans (see §4.7)
-        # These are collected separately and injected by convert_trace
-        tools = []
-
-        return {
-            "model": model,
-            "messages": messages,
-            "tools": tools,
-        }
-
-    def _reconstruct_llm_output(self, attrs: dict, events: list) -> dict:
-        """Reconstruct LLM span output from OTEL events → assistant message."""
-        # Find the last assistant message event
-        assistant_events = [
-            ev for ev in events
-            if ev.get("name") == "gen_ai.assistant.message"
-        ]
-
-        if not assistant_events:
-            return {"role": "assistant", "content": ""}
-
-        last = assistant_events[-1]
-        ev_attrs = _parse_attrs(last.get("attributes"))
-
-        content = ev_attrs.get("content", "")
-        tool_calls_raw = ev_attrs.get("tool_calls", "")
-
-        result: dict[str, Any] = {"role": "assistant", "content": content}
-
-        if tool_calls_raw:
-            parsed_tc = _parse_tool_calls_repr(tool_calls_raw)
-            if parsed_tc:
-                result["tool_calls"] = parsed_tc
-
-        return result
-
-    def _reconstruct_tool_input(self, attrs: dict, events: list) -> dict:
-        """Reconstruct tool span input from events."""
-        for ev in events:
-            if ev.get("name") == "gen_ai.tool.arguments":
-                ev_attrs = _parse_attrs(ev.get("attributes"))
-                return ev_attrs.get("arguments", ev_attrs)
-        # Fallback: from attributes
-        args_raw = attrs.get("gen_ai.tool.arguments", "")
-        if args_raw:
-            return _parse_attrs(args_raw)
-        return {}
-
-    def _reconstruct_tool_output(self, attrs: dict, events: list) -> dict:
-        """Reconstruct tool span output from events."""
-        for ev in events:
-            if ev.get("name") == "gen_ai.tool.result":
-                ev_attrs = _parse_attrs(ev.get("attributes"))
-                return ev_attrs.get("result", ev_attrs)
-        # Fallback: from attributes
-        result_raw = attrs.get("gen_ai.tool.result", "")
-        if result_raw:
-            return _parse_attrs(result_raw)
-        return {}
-
-    def _reconstruct_trace_input(
-        self, root_span: dict, all_spans: list[dict]
-    ) -> dict:
-        """Trace-level input — from first user message event."""
-        # Find first LLM span's first user message
-        llm_spans = [
-            s for s in all_spans
-            if _parse_attrs(s.get("attributes")).get("gen_ai.span.type") == "model"
-        ]
-        if llm_spans:
-            first_llm = llm_spans[0]
-            events = _parse_events(first_llm.get("events"))
-            user_events = [
-                e for e in events if e.get("name") == "gen_ai.user.message"
-            ]
-            if user_events:
-                return {
-                    "message": _parse_attrs(
-                        user_events[0].get("attributes")
-                    ).get("content", ""),
-                }
-
-        # Fallback: root span attributes
-        return _parse_attrs(root_span.get("attributes"))
-
-    def _reconstruct_trace_output(
-        self, root_span: dict, all_spans: list[dict]
-    ) -> dict:
-        """Trace-level output — from last LLM span's final assistant message."""
-        llm_spans = [
-            s for s in all_spans
-            if _parse_attrs(s.get("attributes")).get("gen_ai.span.type") == "model"
-        ]
-        if llm_spans:
-            last_llm = llm_spans[-1]
-            events = _parse_events(last_llm.get("events"))
-            assistant_events = [
-                e for e in events if e.get("name") == "gen_ai.assistant.message"
-            ]
-            if assistant_events:
-                last_ev = assistant_events[-1]
-                return {
-                    "role": "assistant",
-                    "content": _parse_attrs(
-                        last_ev.get("attributes")
-                    ).get("content", ""),
-                }
-
-        return {}
-
-    def _collect_tool_definitions(self, spans: list[dict]) -> list[dict]:
-        """From tool spans, infer simplified tool definitions.
-
-        Output format compatible with extract_tool_definitions_from_observations:
-        {"type": "function", "function": {"name": "bash", "parameters": {}}
-
-        Note: parameters is empty dict — OTEL doesn't record full tool schemas.
-        """
-        seen_names: set[str] = set()
-        definitions: list[dict] = []
-        for span in spans:
-            attrs = _parse_attrs(span.get("attributes"))
-            if attrs.get("gen_ai.span.type") != "tool":
-                continue
-            tool_name = attrs.get("gen_ai.tool.name", "")
-            if not tool_name or tool_name in seen_names:
-                continue
-            seen_names.add(tool_name)
-            definitions.append({
-                "type": "function",
-                "function": {"name": tool_name, "parameters": {}},
-            })
-        return definitions

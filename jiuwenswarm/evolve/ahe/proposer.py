@@ -117,8 +117,6 @@ class AheProposer(ProposalGenerator):
         for tid in trace_ids:
             try:
                 trace_dict = self._otel_adapter.convert_trace(tid)
-                if not trace_dict.get("observations"):
-                    continue
                 # trace_dict is already in Langfuse format usable by evaluator
                 trace_dict["trace_id"] = tid
                 normalized_traces.append(trace_dict)
@@ -128,9 +126,12 @@ class AheProposer(ProposalGenerator):
         if not normalized_traces:
             logger.info("AheProposer: no traces could be normalized")
             return []
+        
+        logger.info("normalized trace length %s", len(normalized_traces))
 
         # ── Step 3: EVAL — filter fail/uncertain only ──
         outcomes = await self._eval.evaluate_batch(normalized_traces)
+        logger.info("evaluate result is %s", outcomes)
         failed = [
             (nt, oc) for nt, oc in zip(normalized_traces, outcomes)
             if oc.outcome in ("fail", "uncertain")
@@ -142,7 +143,7 @@ class AheProposer(ProposalGenerator):
 
         logger.info("AheProposer: %d of %d traces are fail/uncertain",
                      len(failed), len(normalized_traces))
-
+        
         # ── Step 4: DIAG ──
         diagnosis_result = await self._diag.run(
             trace_ids=[nt["trace_id"] for nt, _ in failed],
@@ -161,6 +162,8 @@ class AheProposer(ProposalGenerator):
             for name in skill_names
         }
 
+        logger.info("governance contenxt is %s", governance_contexts)
+
         # ── Step 6: PROPOSE — LLM call ──
         proposals_raw = await self._call_llm_propose(
             failed_traces=failed,
@@ -175,7 +178,7 @@ class AheProposer(ProposalGenerator):
         # ── Enforce limits ──
         proposals = self._enforce_limits(proposals)
 
-        logger.info("AheProposer: generated %d proposals", len(proposals))
+        logger.info("AheProposer: generated %d proposals, proposals is %s", len(proposals), proposals)
         return proposals
 
     def _extract_skill_names(
@@ -183,33 +186,87 @@ class AheProposer(ProposalGenerator):
         diagnosis_result: Any,
         failed_traces: list[tuple],
     ) -> set[str]:
-        """Extract skill names from diagnosis issues and trace data."""
+        """Extract skill names from trace data and diagnosis issues.
+
+        Priority:
+        1. Direct extraction from NormalizedTrace tool_calls (most reliable)
+        2. Extraction from diagnosis issues (fallback)
+        3. Fallback to "general" if nothing found
+        """
         names = set()
 
-        # From diagnosis issues
-        for issue in diagnosis_result.issues:
-            # Look for skill_tool in evidence
-            if "skill_tool" in (issue.evidence or "").lower():
-                # Try to find the skill name from trace data
-                for nt, _ in failed_traces:
-                    if nt.get("trace_id") == issue.trace_id:
-                        # Scan spans for skill_tool calls
-                        if self._trace_reader:
-                            spans = self._trace_reader.read_spans(issue.trace_id)
-                            for span in spans:
-                                attrs_str = span.get("attributes", "")
-                                if isinstance(attrs_str, str) and "skill_tool" in attrs_str:
-                                    # Rough extraction of skill name from attributes
-                                    if '"skill_name":' in attrs_str:
-                                        import re as _re
-                                        m = _re.search(r'"skill_name"\s*:\s*"([^"]+)"', attrs_str)
-                                        if m:
-                                            names.add(m.group(1))
+        # 1. Direct extraction from NormalizedTrace tool_calls
+        for nt, _ in failed_traces:
+            messages = nt.get("messages", [])
+            for msg in messages:
+                tool_calls = msg.get("tool_calls", [])
+                for tc in tool_calls:
+                    # Check if this is a skill_tool call
+                    if tc.get("name") == "skill_tool" or "skill" in tc.get("name", "").lower():
+                        # Extract skill_name from arguments
+                        input_data = tc.get("input", {})
+                        if isinstance(input_data, dict):
+                            skill_name = input_data.get("skill_name")
+                            if skill_name:
+                                names.add(skill_name)
+                        # Or from input string (parse if needed)
+                        elif isinstance(input_data, str) and "skill_name" in input_data:
+                            import re as _re
+                            m = _re.search(r'"skill_name"\s*["\']?\s*["\':]\s*["\']([^"\']+)["\']', input_data)
+                            if m:
+                                names.add(m.group(1))
 
-        # Fallback: use "general" as default skill name
+        # 2. Extraction from diagnosis issues (fallback)
+        if not names and diagnosis_result and diagnosis_result.issues:
+            for issue in diagnosis_result.issues:
+                # Priority: check root_cause and suggested_fix for skill_name
+                text_fields = [
+                    issue.root_cause or "",
+                    issue.suggested_fix or "",
+                    issue.summary or "",
+                    issue.evidence or "",
+                ]
+                combined_text = " ".join(text_fields)
+
+                # Look for skill-related keywords
+                if "skill" in combined_text.lower():
+                    import re as _re
+
+                    # Pattern 1: "skill_name=xxx:" (explicit marker from DiagnosisAgent)
+                    m = _re.search(r'skill_name\s*=\s*([a-zA-Z0-9_-]+)', combined_text)
+                    if m:
+                        names.add(m.group(1))
+                        continue
+
+                    # Pattern 2: "skill xxx 存在缺陷" or "skill xxx 有问题"
+                    m = _re.search(r'skill\s+([a-zA-Z0-9_-]+)\s+(?:存在|有)', combined_text)
+                    if m:
+                        names.add(m.group(1))
+                        continue
+
+                    # Pattern 3: "修复 skill xxx" or "修改 skill xxx"
+                    m = _re.search(r'(?:修复|修改|添加)\s+skill\s+([a-zA-Z0-9_-]+)', combined_text)
+                    if m:
+                        names.add(m.group(1))
+                        continue
+
+                    # Pattern 4: "csv-row-counter skill" or similar patterns
+                    m = _re.search(r'([a-zA-Z0-9_-]+)\s+skill', combined_text)
+                    if m:
+                        names.add(m.group(1))
+                        continue
+
+                    # Pattern 5: skill_tool 调用
+                    m = _re.search(r'skill_tool(?:\s*调用)?(?:\s*[的的是])?\s*["\']?([a-zA-Z0-9_-]+)', combined_text)
+                    if m:
+                        names.add(m.group(1))
+                        continue
+
+        # 3. Fallback to "general"
         if not names:
             names.add("general")
 
+        logger.info("Extracted skill names: %s", names)
         return names
 
     async def _call_llm_propose(
@@ -219,7 +276,10 @@ class AheProposer(ProposalGenerator):
         governance_contexts: dict[str, Any],
         batch_id: str,
     ) -> list[dict]:
-        """Call LLM to generate proposals from accumulated context."""
+        """Call LLM to generate proposals from accumulated context.
+
+        Uses OpenAI SDK directly (no openjiuwen dependency), same pattern as DiagnosisAgent.
+        """
 
         # Build context
         trace_summaries = self._build_trace_summaries(failed_traces)
@@ -236,28 +296,33 @@ class AheProposer(ProposalGenerator):
             + "\n\nGenerate proposals for the problems found."
         )
 
-        try:
-            from openjiuwen.core.foundation.llm import (
-                Model, SystemMessage, UserMessage,
-            )
-        except ImportError:
-            logger.warning("AheProposer: openjiuwen.llm not available")
-            return []
-
+        # Initialize model if needed (same pattern as DiagnosisAgent)
         model = self._model
         if model is None:
             model = await self._init_model()
         if model is None:
+            logger.warning("AheProposer: no model available")
             return []
 
         try:
+            # Build messages in OpenAI dict format (no openjiuwen dependency)
             messages = [
-                SystemMessage(content=AHE_PROPOSER_SYSTEM_PROMPT),
-                UserMessage(content=user_content),
+                {"role": "system", "content": AHE_PROPOSER_SYSTEM_PROMPT},
+                {"role": "user", "content": user_content},
             ]
-            response = await model.invoke(messages=messages)
-            content = response.content if hasattr(response, "content") else str(response)
 
+            # Call model directly (no tools for proposal generation)
+            response = await model.invoke(messages=messages)
+
+            # Extract content
+            if hasattr(response, 'choices'):
+                # OpenAI SDK response format
+                content = response.choices[0].message.content or ""
+            else:
+                # Fallback for other formats
+                content = response.content if hasattr(response, "content") else str(response)
+
+            # Parse JSON response
             parsed = self._parse_llm_json(str(content))
             return parsed.get("proposals", [])
 
@@ -454,26 +519,60 @@ class AheProposer(ProposalGenerator):
         return {"proposals": []}
 
     async def _init_model(self):
-        """Initialize openjiuwen Model from config."""
+        """Initialize OpenAI Model from config (same pattern as DiagnosisAgent).
+
+        No dependency on openjiuwen - uses OpenAI SDK directly.
+        """
         try:
-            from openjiuwen.core.foundation.llm import (
-                Model, ModelClientConfig, ModelRequestConfig,
-            )
-            from jiuwenswarm.common.config import get_default_models
-            from jiuwenswarm.common.utils import get_env_file
+            from openai import AsyncOpenAI
+            from jiuwenswarm.evolve import get_evolve_config
+            from jiuwenswarm.evolve.ahe.openai_wrapper import OpenAIModelWrapper
+            import os
 
-            env_file = get_env_file()
-            if env_file.exists():
-                from dotenv import load_dotenv
-                load_dotenv(dotenv_path=env_file, override=False)
+            evolve_cfg = get_evolve_config()
+            llm_cfg = evolve_cfg.get("llm", {})
 
-            models = get_default_models()
-            if not models:
+            # Expand environment variables in api_key
+            api_key = llm_cfg.get("api_key")
+            # Check if api_key is valid string before calling startswith
+            if api_key and isinstance(api_key, str):
+                if api_key.startswith("${") and api_key.endswith("}"):
+                    env_var = api_key[2:-1]
+                    api_key = os.getenv(env_var)
+            else:
+                # api_key is None or not a string
+                api_key = os.getenv("EVOLVE_API_KEY")  # Fallback: try direct env var
+
+            if not api_key:
+                logger.warning("AheProposer: no API key configured in evolve/config.yaml or environment")
                 return None
 
-            first = models[0]
-            client_cfg = first.get("model_client_config", {})
-            model_cfg = first.get("model_config_obj", {})
+            # Get api_base (with proper fallback for DeepSeek)
+            api_base = llm_cfg.get("api_base")
+            # Check if api_base is a valid non-empty string
+            if not api_base or not isinstance(api_base, str) or api_base.strip() == "":
+                # Use DeepSeek default endpoint if not configured
+                api_base = "https://api.deepseek.com/v1"
+                logger.info("AheProposer: api_base not configured, using DeepSeek default: %s", api_base)
+            else:
+                logger.info("AheProposer: using configured api_base: %s", api_base)
+
+            # Create AsyncOpenAI client
+            client = AsyncOpenAI(
+                api_key=api_key,
+                base_url=api_base,
+            )
+
+            # Return wrapper that matches expected interface
+            return OpenAIModelWrapper(
+                client=client,
+                model=llm_cfg.get("model_name", "deepseek-v4-pro"),
+                temperature=llm_cfg.get("temperature", 0.1),
+                max_tokens=llm_cfg.get("max_tokens", 2000),
+            )
+        except Exception as exc:
+            logger.warning("AheProposer._init_model failed: %s", exc)
+            return None
 
             return Model(
                 model_client_config=ModelClientConfig(

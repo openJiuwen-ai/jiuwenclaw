@@ -17,6 +17,7 @@ from jiuwenswarm.telemetry.sqlite_exporter import (
     query_spans,
     get_trace_tree,
     get_span_statistics,
+    read_flat_span,
 )
 
 
@@ -188,6 +189,9 @@ def cmd_export(args):
     if args.type == "trace":
         tree = get_trace_tree(args.db_path, args.id)
         data = tree
+    elif args.type == "flat":
+        # Export flat span list (same format as otel_adapter._read_flat_spans)
+        data = read_flat_span(args.db_path, args.id)
     else:  # all
         spans = query_spans(args.db_path, limit=args.limit)
         data = spans
@@ -229,8 +233,8 @@ def main():
 
     # export
     export_parser = subparsers.add_parser("export", help="Export to JSON")
-    export_parser.add_argument("type", choices=["trace", "all"], help="Export type")
-    export_parser.add_argument("id", nargs="?", help="Trace ID (for trace export)")
+    export_parser.add_argument("type", choices=["trace", "flat", "all"], help="Export type: trace (tree), flat (list like otel_adapter), all")
+    export_parser.add_argument("id", nargs="?", help="Trace ID (for trace/flat export)")
     export_parser.add_argument("-o", "--output", required=True, help="Output file")
     export_parser.add_argument("--limit", type=int, default=1000, help="Limit (for all)")
 

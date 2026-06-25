@@ -25,6 +25,7 @@ from jiuwenswarm.evolve.ahe.diagnosis.models import (
 from jiuwenswarm.evolve.ahe.diagnosis.prompts import (
     DIAGNOSIS_SYSTEM_PROMPT,
     TOOL_DESCRIPTIONS,
+    DIAGNOSIS_TOOL_SCHEMAS,
 )
 from jiuwenswarm.evolve.ahe.diagnosis.tools import DiagnosisToolExecutor
 
@@ -69,7 +70,7 @@ class DiagnosisAgent:
         """
         if mode not in ("diagnose", "propose"):
             raise ValueError(f"mode must be 'diagnose' or 'propose', got '{mode}'")
-
+        logger.info("start to run diagnosis agent")
         # Resolve NormalizedTrace data
         traces = normalized_traces
         if traces is None and trace_ids:
@@ -89,45 +90,64 @@ class DiagnosisAgent:
         # Build initial messages
         trace_ids_to_show = [nt.get("id") or nt.get("trace_id", "unknown") for nt in traces]
         messages = self._build_messages(trace_ids_to_show, mode, question)
-
+        logger.info("start react loop, message is %s", messages)
         # ReAct loop
         for iteration in range(self._max_iterations):
-            # 1. Call LLM
-            response_text = await self._call_llm(messages)
-
-            # 2. Parse tool calls
-            tool_calls = self._parse_tool_calls(response_text)
+            # 1. Call LLM with tools
+            content, tool_calls = await self._call_llm(messages)
+            logger.info("diagnosis agent response_text is %s", content)
+            logger.info("diagnosis agent tool_calls is %s", tool_calls)
 
             if not tool_calls:
                 # Pure text response → append and continue
-                messages.append({"role": "assistant", "content": response_text})
+                messages.append({"role": "assistant", "content": content})
                 continue
 
-            # 3. Execute tools
-            tool_results = []
+            logger.info("start to call tools (found %d tool_calls)", len(tool_calls))
+
+            # 2. Append assistant message with tool_calls in OpenAI format
+            # Build tool_calls structure for assistant message
+            assistant_tool_calls = []
+            for tc in tool_calls:
+                # Ensure tool_call has valid id (generate if missing)
+                tc_id = tc.get("id") or f"call_{tc['name']}_{iteration}"
+                tc["id"] = tc_id  # Update tc dict for later use
+
+                assistant_tool_calls.append({
+                    "id": tc_id,
+                    "type": "function",
+                    "function": {
+                        "name": tc["name"],
+                        "arguments": json.dumps(tc["arguments"], ensure_ascii=False)
+                    }
+                })
+
+            messages.append({
+                "role": "assistant",
+                "content": content,
+                "tool_calls": assistant_tool_calls
+            })
+
+            # 3. Execute tools and append results
             for tc in tool_calls:
                 if tc["name"] == "submit_result":
                     # Stop signal — parse result
+                    logger.info("submit_result detected, finalizing diagnosis...")
                     return self._finalize(tc["arguments"].get("result", ""), iteration + 1, mode)
-
+                logger.info("executing tool: %s", tc["name"])
                 result = self._execute_tool(tc["name"], tc["arguments"])
-                tool_results.append({
-                    "tool_name": tc["name"],
-                    "arguments": tc["arguments"],
-                    "result": result,
-                })
 
-            # 4. Append to messages
-            messages.append({"role": "assistant", "content": response_text})
-            for tr in tool_results:
+                # Append tool result in OpenAI format
+                tool_content = json.dumps(result, ensure_ascii=False, default=str)
                 messages.append({
-                    "role": "tool_result",
-                    "content": json.dumps(tr, ensure_ascii=False, default=str),
+                    "role": "tool",
+                    "tool_call_id": tc["id"],  # Use the validated id
+                    "content": tool_content,
                 })
 
-            # 5. Check context size and compress if needed
+            # 4. Check context size and compress if needed
             messages = self._compact_context_if_needed(messages)
-
+            logger.info("compacted message is %s", messages)
         # Budget exceeded
         last_text = ""
         for msg in reversed(messages):
@@ -189,14 +209,8 @@ class DiagnosisAgent:
         self, trace_ids: list[str], mode: str, question: str | None
     ) -> list[dict]:
         """Construct initial messages for the ReAct loop."""
-        # System prompt
+        # System prompt (tools are now defined via OpenAI function schemas)
         system_msg = DIAGNOSIS_SYSTEM_PROMPT
-
-        # Add tool descriptions
-        tool_desc = "\n\n## 工具详细说明\n"
-        for name, desc in TOOL_DESCRIPTIONS.items():
-            tool_desc += f"\n**{name}**: {desc}\n"
-        system_msg += tool_desc
 
         # User message
         trace_list = "\n".join(f"- {tid}" for tid in trace_ids)
@@ -236,147 +250,116 @@ class DiagnosisAgent:
             logger.warning("DiagnosisAgent._clean_traces failed: %s", exc)
             return []
 
-    async def _call_llm(self, messages: list[dict]) -> str:
-        """Call LLM using openjiuwen Model — same pattern as LLMProposer."""
+    async def _call_llm(self, messages: list[dict]) -> tuple[str, list[dict]]:
+        """Call LLM with tools parameter, return content and tool_calls.
+
+        Returns:
+            tuple of (content, tool_calls):
+            - content: Text content from LLM response
+            - tool_calls: List of tool call dicts with 'name' and 'arguments'
+        """
         if self._model is None:
             # Lazy init from config
             self._model = await self._init_model()
 
-        try:
-            from openjiuwen.core.foundation.llm import (
-                Model, ModelClientConfig, ModelRequestConfig,
-                SystemMessage, UserMessage,
-            )
-        except ImportError:
-            logger.warning("DiagnosisAgent: openjiuwen.llm not available")
-            return ""
-
-        # Convert message dicts to openjiuwen message objects
-        oiwen_messages = []
-        for msg in messages:
-            role = msg.get("role", "user")
-            content = msg.get("content", "")
-            if role == "system":
-                oiwen_messages.append(SystemMessage(content=content))
-            else:
-                oiwen_messages.append(UserMessage(content=content))
+        if self._model is None:
+            logger.warning("DiagnosisAgent: no model available")
+            return "", []
 
         try:
-            response = await self._model.invoke(messages=oiwen_messages)
-            content = response.content if hasattr(response, "content") else str(response)
-            return str(content)
+            # Directly pass dict messages to model (no need for SimpleMessage conversion)
+            # openai_wrapper.py already handles both dict and object messages correctly
+            logger.info("call llm with message %s", messages[:500])
+            response = await self._model.invoke(messages=messages, tools=DIAGNOSIS_TOOL_SCHEMAS)
+
+            # Extract content and tool_calls
+            message = response.choices[0].message
+            content = message.content or ""
+
+            tool_calls = []
+            if message.tool_calls:
+                for tc in message.tool_calls:
+                    try:
+                        # Parse arguments JSON
+                        arguments = json.loads(tc.function.arguments)
+                        tool_calls.append({
+                            "id": tc.id,
+                            "name": tc.function.name,
+                            "arguments": arguments,
+                        })
+                    except json.JSONDecodeError as exc:
+                        logger.warning(
+                            "DiagnosisAgent: failed to parse tool arguments for %s: %s",
+                            tc.function.name, exc
+                        )
+                        # Skip this tool call on parse error
+                        continue
+
+            return content, tool_calls
         except Exception as exc:
             logger.warning("DiagnosisAgent._call_llm failed: %s", exc)
-            return ""
+            return "", []
 
     async def _init_model(self):
-        """Initialize openjiuwen Model from config."""
+        """Initialize OpenAI client from evolve config (not openjiuwen).
+
+        Reads configuration from evolve/config.yaml llm section:
+        - api_key: supports ${ENV_VAR} expansion
+        - api_base: OpenAI-compatible API endpoint
+        - model_name: model to use (e.g., gpt-4)
+        - temperature: generation temperature
+        - max_tokens: max tokens in response
+        """
         try:
-            from openjiuwen.core.foundation.llm import (
-                Model, ModelClientConfig, ModelRequestConfig,
-            )
-            from jiuwenswarm.common.config import get_default_models
-            from jiuwenswarm.common.utils import get_env_file
+            from openai import AsyncOpenAI
+            from jiuwenswarm.evolve import get_evolve_config
+            from jiuwenswarm.evolve.ahe.openai_wrapper import OpenAIModelWrapper
+            import os
 
-            # Load .env if not already loaded
-            env_file = get_env_file()
-            if env_file.exists():
-                from dotenv import load_dotenv
-                load_dotenv(dotenv_path=env_file, override=False)
+            evolve_cfg = get_evolve_config()
+            llm_cfg = evolve_cfg.get("llm", {})
 
-            models = get_default_models()
-            if not models:
-                logger.warning("DiagnosisAgent: no default model configured")
+            # Expand environment variables in api_key
+            api_key = llm_cfg.get("api_key")
+            # Check if api_key is valid string before calling startswith
+            if api_key and isinstance(api_key, str):
+                if api_key.startswith("${") and api_key.endswith("}"):
+                    env_var = api_key[2:-1]
+                    api_key = os.getenv(env_var)
+            else:
+                # api_key is None or not a string
+                api_key = os.getenv("EVOLVE_API_KEY")  # Fallback: try direct env var
+
+            if not api_key:
+                logger.warning("DiagnosisAgent: no API key configured in evolve/config.yaml or environment")
                 return None
 
-            first = models[0]
-            client_cfg = first.get("model_client_config", {})
-            model_cfg = first.get("model_config_obj", {})
+            # Get api_base (with proper fallback for DeepSeek)
+            api_base = llm_cfg.get("api_base")
+            # Check if api_base is a valid non-empty string
+            if not api_base or not isinstance(api_base, str) or api_base.strip() == "":
+                # Use DeepSeek default endpoint if not configured
+                api_base = "https://api.deepseek.com/v1"
+                logger.info("DiagnosisAgent: api_base not configured, using DeepSeek default: %s", api_base)
+            else:
+                logger.info("DiagnosisAgent: using configured api_base: %s", api_base)
 
-            model = Model(
-                model_client_config=ModelClientConfig(
-                    client_provider=client_cfg.get("client_provider", "OpenAI"),
-                    api_base=client_cfg.get("api_base", ""),
-                    api_key=client_cfg.get("api_key", ""),
-                    verify_ssl=client_cfg.get("verify_ssl", False),
-                ),
-                model_config=ModelRequestConfig(
-                    model=client_cfg.get("model_name", "gpt-4"),
-                    temperature=self._temperature,
-                    max_tokens=20000,
-                ),
+            # Create AsyncOpenAI client
+            client = AsyncOpenAI(
+                api_key=api_key,
+                base_url=api_base,
             )
-            return model
+
+            # Return wrapper that matches expected interface
+            return OpenAIModelWrapper(
+                client=client,
+                model=llm_cfg.get("model_name", "deepseek-v4-pro"),
+                temperature=self._temperature,
+                max_tokens=llm_cfg.get("max_tokens", 20000),
+            )
         except Exception as exc:
             logger.warning("DiagnosisAgent._init_model failed: %s", exc)
             return None
-
-    @staticmethod
-    def _parse_tool_calls(content: str) -> list[dict]:
-        """Parse tool calls from LLM response.
-
-        Strategy:
-        1. Try entire response as JSON
-        2. Regex search for tool_name + arguments patterns
-        """
-        # Strategy 1: Full JSON parse
-        try:
-            parsed = json.loads(content.strip())
-            if isinstance(parsed, dict):
-                if "tool_name" in parsed:
-                    return [parsed]
-                if "name" in parsed and "arguments" in parsed:
-                    return [{"name": parsed["name"], "arguments": parsed["arguments"]}]
-            if isinstance(parsed, list):
-                results = []
-                for item in parsed:
-                    if isinstance(item, dict) and ("tool_name" in item or "name" in item):
-                        results.append({
-                            "name": item.get("tool_name", item.get("name", "")),
-                            "arguments": item.get("arguments", item.get("args", {})),
-                        })
-                return results
-        except (json.JSONDecodeError, TypeError):
-            pass
-
-        # Strategy 2: Regex search for tool call patterns
-        pattern = r'\{[^{}]*"tool_name"\s*:\s*"(\w+)"[^{}]*"arguments"\s*:\s*\{[^{}]*\}[^{}]*\}'
-        matches = re.findall(pattern, content, re.DOTALL)
-
-        if not matches:
-            # Try alternative pattern
-            pattern2 = r'"tool_name"\s*:\s*"(\w+)"'
-            names = re.findall(pattern2, content)
-            if names:
-                # Extract arguments nearby
-                results = []
-                for name in names:
-                    args = {}
-                    # Simple heuristic: find "arguments": {...} after the name
-                    args_pattern = r'"arguments"\s*:\s*\{([^{}]*)\}'
-                    args_match = re.search(args_pattern, content)
-                    if args_match:
-                        try:
-                            args = json.loads("{" + args_match.group(1) + "}")
-                        except json.JSONDecodeError:
-                            args = {}
-                    results.append({"name": name, "arguments": args})
-                return results
-
-        # Parse full match objects
-        results = []
-        full_matches = re.finditer(pattern, content, re.DOTALL)
-        for m in full_matches:
-            try:
-                parsed = json.loads(m.group(0))
-                results.append({
-                    "name": parsed.get("tool_name", ""),
-                    "arguments": parsed.get("arguments", {}),
-                })
-            except (json.JSONDecodeError, TypeError):
-                pass
-
-        return results
 
     def _execute_tool(self, tool_name: str, arguments: dict) -> dict:
         """Execute a tool via DiagnosisToolExecutor."""
