@@ -92,28 +92,11 @@ export function ChatPanel({
   const handleScroll = useCallback(() => {
     const el = scrollContainerRef.current;
     if (!el) return;
-    
+
     // 检查是否在底部（有 40px 的阈值）
     const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 40;
     userScrolledUpRef.current = !atBottom;
-    
-    // 当滚动到顶部且有更多历史消息时，加载更多
-    if (el.scrollTop === 0 && historyPager && historyPager.loadedPages < historyPager.totalPages && !historyPager.loadingMore) {
-      void historyPager.onLoadMore();
-    }
-  }, [historyPager]);
-
-  // 检测鼠标滚轮事件，即使没有滚动条也能触发加载更多
-  const handleWheel = useCallback((e: React.WheelEvent<HTMLDivElement>) => {
-    // 只有向上滚动时才触发
-    if (e.deltaY < 0 && historyPager && historyPager.loadedPages < historyPager.totalPages && !historyPager.loadingMore) {
-      // 检查是否已经在顶部（没有滚动条时 scrollTop 始终为 0）
-      const el = scrollContainerRef.current;
-      if (el && el.scrollTop === 0) {
-        void historyPager.onLoadMore();
-      }
-    }
-  }, [historyPager]);
+  }, []);
 
   useEffect(() => {
     if (suppressNextScrollToEndRef.current) {
@@ -178,7 +161,7 @@ export function ChatPanel({
 
   return (
     <div className="flex flex-col h-full" data-testid="chat-panel">
-      <div ref={scrollContainerRef} className="flex-1 overflow-y-auto px-3 py-4" onScroll={handleScroll} onWheel={handleWheel}>
+      <div ref={scrollContainerRef} className="flex-1 overflow-y-auto px-3 py-4" onScroll={handleScroll}>
         {historyPager || messages.length > 0 ? (
           <>
             {historyPager && (

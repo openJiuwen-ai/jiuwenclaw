@@ -187,6 +187,7 @@ class EnterpriseWebWsServer:
                 if self._gateway_ws is ws:
                     self._gateway_ws = None
             logger.info("[jiuwenclaw-enterprise-web] Gateway uplink 已断开")
+            await self._disconnect_all_browsers()
 
     def register_browser_connection(self, conn_id: str, ws: Any) -> None:
         """Register a browser WebSocket for routing (mirrors /ws accept path)."""
@@ -368,6 +369,18 @@ class EnterpriseWebWsServer:
         finally:
             await self._teardown_browser(conn_id)
             logger.info("[jiuwenclaw-enterprise-web] 浏览器断开: conn_id=%s", conn_id)
+
+    async def _disconnect_all_browsers(self, reason: str = "gateway uplink disconnected") -> None:
+        """Gateway 断开时关闭浏览器 WS，使前端连接状态与直连 Gateway 一致。"""
+        for conn_id, browser_ws in list(self._connections.items()):
+            try:
+                await browser_ws.close(code=1001, reason=reason)
+            except Exception:
+                logger.debug(
+                    "[jiuwenclaw-enterprise-web] 关闭浏览器连接失败 conn_id=%s",
+                    conn_id,
+                    exc_info=True,
+                )
 
     async def _teardown_browser(self, conn_id: str) -> None:
         ws = self._connections.pop(conn_id, None)

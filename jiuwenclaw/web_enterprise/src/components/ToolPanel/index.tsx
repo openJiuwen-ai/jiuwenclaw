@@ -7,6 +7,7 @@
 import { useTranslation } from 'react-i18next';
 import { useSessionStore } from '../../stores';
 import { useRef, useState } from 'react';
+import { FEATURE_HEARTBEAT_UI } from '../../featureFlags';
 import { useMemoryUsagePolling } from '../../hooks/useMemoryUsagePolling';
 import { HeartbeatMessageModal } from '../../features/HeartbeatMessageModal';
 import { TodoList } from '../TodoList';
@@ -149,30 +150,32 @@ export function ToolPanel() {
               <span className="mono text-text">{memoryDisplay}</span>
             </div>
 
-            <div className={`toolpanel-status-card__heartbeat ${heartbeatClassName}`}>
-              <div className="toolpanel-status-card__heartbeat-row">
-                <span>{t('toolPanel.message')}</span>
-                {canOpenHeartbeatModal ? (
-                  <button
-                    type="button"
-                    className="toolpanel-status-card__heartbeat-link mono"
-                    onClick={() => setHeartbeatModalOpen(true)}
-                  >
-                    {heartbeatDisplayMessage}
-                  </button>
-                ) : (
+            {FEATURE_HEARTBEAT_UI && (
+              <div className={`toolpanel-status-card__heartbeat ${heartbeatClassName}`}>
+                <div className="toolpanel-status-card__heartbeat-row">
+                  <span>{t('toolPanel.message')}</span>
+                  {canOpenHeartbeatModal ? (
+                    <button
+                      type="button"
+                      className="toolpanel-status-card__heartbeat-link mono"
+                      onClick={() => setHeartbeatModalOpen(true)}
+                    >
+                      {heartbeatDisplayMessage}
+                    </button>
+                  ) : (
+                    <span className="toolpanel-status-card__heartbeat-value mono">
+                      {heartbeatDisplayMessage}
+                    </span>
+                  )}
+                </div>
+                <div className="toolpanel-status-card__heartbeat-row">
+                  <span>{t('toolPanel.time')}</span>
                   <span className="toolpanel-status-card__heartbeat-value mono">
-                    {heartbeatDisplayMessage}
+                    {heartbeatDetail}
                   </span>
-                )}
+                </div>
               </div>
-              <div className="toolpanel-status-card__heartbeat-row">
-                <span>{t('toolPanel.time')}</span>
-                <span className="toolpanel-status-card__heartbeat-value mono">
-                  {heartbeatDetail}
-                </span>
-              </div>
-            </div>
+            )}
           </div>
         </div>
 
@@ -186,11 +189,13 @@ export function ToolPanel() {
           </div>
         </div>
       </div>
-      <HeartbeatMessageModal
-        open={heartbeatModalOpen}
-        message={heartbeatMessage ?? ''}
-        onClose={() => setHeartbeatModalOpen(false)}
-      />
+      {FEATURE_HEARTBEAT_UI && (
+        <HeartbeatMessageModal
+          open={heartbeatModalOpen}
+          message={heartbeatMessage ?? ''}
+          onClose={() => setHeartbeatModalOpen(false)}
+        />
+      )}
     </div>
   );
 }

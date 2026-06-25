@@ -10,6 +10,7 @@ import { SessionSidebar } from './components/SessionSidebar';
 import { ToolPanel } from './components/ToolPanel';
 import { StatusBar } from './components/StatusBar';
 import { HeartbeatMessageModal } from './features/HeartbeatMessageModal';
+import { FEATURE_HEARTBEAT_UI } from './featureFlags';
 import {
   beginHistoryRestore,
   fetchHistoryPage,
@@ -256,6 +257,8 @@ function AppContent() {
   const historyPageHandleRef = useRef<HistoryRestoreHandle | null>(null);
   /** 为 true 表示刚从「会话列表」恢复；history 为空时在 useEffect 的 onEmpty 中提示一次 */
   const historyRestoreFromPanelHintRef = useRef(false);
+  /** 用户已开始实时对话后，禁止后台 history.get 覆盖当前消息 */
+  const historyRestoreSuppressedRef = useRef(false);
 
   const disposeInFlightHistoryHandles = useCallback(() => {
     historyRestoreHandleRef.current?.dispose();
@@ -268,12 +271,15 @@ function AppContent() {
     sessionIdRef.current = sessionId;
   }, [sessionId]);
 
+  useEffect(() => {
+    historyRestoreSuppressedRef.current = false;
+  }, [sessionId]);
+
   useEffect(() => () => disposeInFlightHistoryHandles(), [disposeInFlightHistoryHandles]);
 
   const { setCurrentSession, setSessions, setAvailableModels, mode, heartbeatMessage, heartbeatUpdatedAt } = useSessionStore();
   const {
     clearMessages,
-    clearSubtasks,
     addMessage,
     addToolCall,
     addToolResult,
@@ -284,6 +290,20 @@ function AppContent() {
     setPaused,
   } = useChatStore();
   const { clearTodos } = useTodoStore();
+
+  useEffect(() => {
+    setProcessing(false);
+    setThinking(false);
+    setPaused(false);
+  }, [setPaused, setProcessing, setThinking]);
+
+  useEffect(() => {
+    if (!isProcessing) return;
+    historyRestoreSuppressedRef.current = true;
+    disposeInFlightHistoryHandles();
+    setHistoryPagerMeta(null);
+    setHistoryLoadingMore(false);
+  }, [isProcessing, disposeInFlightHistoryHandles]);
 
   // WebSocket 连接 - provider 由后端配置决定 - provider 由后端配置决定，前端默认不在 URL query 传递
   const {
@@ -434,6 +454,9 @@ function AppContent() {
   }, [clearHeartbeatToastTimer, clearNewSessionToastTimer, clearRestartAutoCloseTimer]);
 
   useEffect(() => {
+    if (!FEATURE_HEARTBEAT_UI) {
+      return;
+    }
     const normalized = heartbeatMessage?.trim();
     if (!normalized) {
       return;
@@ -488,26 +511,51 @@ function AppContent() {
       .catch(() => {});
   }, [isConnected]);
 
-  // 当会话 ID 变化或页面加载时，自动加载历史会话
+  // 页面加载或切换会话时尝试恢复历史；用户开始实时对话后不再自动恢复
   useEffect(() => {
     if (!isConnected || !sessionId || sessionId === 'new') return;
-    
+
     // 仅处理以 sess_ 开头的会话 ID
     if (!sessionId.startsWith('sess_')) return;
-    
+
+    if (historyRestoreSuppressedRef.current) return;
+    if (useChatStore.getState().messages.length > 0) {
+      historyRestoreSuppressedRef.current = true;
+      return;
+    }
+
     // 清理之前的历史加载句柄
     disposeInFlightHistoryHandles();
     setHistoryPagerMeta(null);
     setHistoryLoadingMore(false);
+    setProcessing(false);
+    setThinking(false);
+    setPaused(false);
 
     const historyRequestId = `history-${Date.now()}-${Math.random().toString(36).substring(2, 11)}`;
     logHistoryRestore('effect.start', { sessionId, historyRequestId, isConnected });
+
+    const {
+      clearMessages: clearChatMessages,
+      addMessage: appendMessage,
+      addToolCall: appendToolCall,
+      addToolResult: appendToolResult,
+      clearSubtasks: resetSubtasks,
+    } = useChatStore.getState();
 
     // 开始历史会话加载
     const restoreHandle = beginHistoryRestore({
       sessionId: sessionId,
       requestId: historyRequestId,
       onReady: (messages, totalPages) => {
+        if (historyRestoreSuppressedRef.current) {
+          logHistoryRestore('onReady.suppressed', { sessionId });
+          return;
+        }
+        if (useChatStore.getState().messages.length > 0) {
+          logHistoryRestore('onReady.live_chat', { sessionId });
+          return;
+        }
         if (sessionIdRef.current !== sessionId) {
           logHistoryRestore('onReady.stale', { sessionId, current: sessionIdRef.current });
           return;
@@ -518,8 +566,8 @@ function AppContent() {
           totalPages,
         });
         historyRestoreFromPanelHintRef.current = false;
-        clearMessages();
-        messages.forEach((message) => addMessage(message));
+        clearChatMessages();
+        messages.forEach((message) => appendMessage(message));
         setHistoryPagerMeta({
           loadedPages: 1,
           totalPages: totalPages ?? 1,
@@ -529,6 +577,14 @@ function AppContent() {
         });
       },
       onEmpty: (emptyTotalPages) => {
+        if (historyRestoreSuppressedRef.current) {
+          logHistoryRestore('onEmpty.suppressed', { sessionId });
+          return;
+        }
+        if (useChatStore.getState().messages.length > 0) {
+          logHistoryRestore('onEmpty.live_chat', { sessionId });
+          return;
+        }
         if (sessionIdRef.current !== sessionId) {
           logHistoryRestore('onEmpty.stale', { sessionId, current: sessionIdRef.current });
           return;
@@ -539,14 +595,14 @@ function AppContent() {
           totalPages: total,
           fromPanel: historyRestoreFromPanelHintRef.current,
         });
-        clearMessages();
+        clearChatMessages();
         if (historyRestoreFromPanelHintRef.current) {
           historyRestoreFromPanelHintRef.current = false;
           setHistoryPagerMeta({
             loadedPages: 1,
             totalPages: total,
           });
-          addMessage({
+          appendMessage({
             id: `history-restore-empty-${Date.now()}`,
             role: 'system',
             content: i18n.t('sessions.restoreEmpty'),
@@ -558,14 +614,15 @@ function AppContent() {
         historyRestoreHandleRef.current = null;
       },
       onToolReplay: (items) => {
+        if (historyRestoreSuppressedRef.current) return;
         if (sessionIdRef.current !== sessionId) {
           return;
         }
-        clearSubtasks();
+        resetSubtasks();
         for (const item of items) {
           if (item.kind === 'tool_call') {
             const n = normalizeToolCallPayload(item.payload);
-            addToolCall(
+            appendToolCall(
               {
                 id: n.id,
                 name: n.name,
@@ -588,7 +645,7 @@ function AppContent() {
               });
             } else {
               const n = normalizeToolResultPayload(item.payload);
-              addToolResult(
+              appendToolResult(
                 {
                   toolName: n.toolName,
                   result: n.result,
@@ -606,6 +663,7 @@ function AppContent() {
         console.warn('[history.restore]', message);
       },
       onRetry: async (attempt) => {
+        if (historyRestoreSuppressedRef.current) return;
         logHistoryRestore('history.get.retry', { sessionId, historyRequestId, attempt });
         await request(HISTORY_GET_METHOD, {
           session_id: sessionId,
@@ -634,9 +692,13 @@ function AppContent() {
         logHistoryRestore('history.get.error', { sessionId, historyRequestId, errorMessage });
         console.error('Failed to load history:', error);
         // 忽略 "invalid page_idx or session history not found" 错误，因为这是新会话的正常情况
-        if (sessionIdRef.current === sessionId && !errorMessage.includes('invalid page_idx or session history not found')) {
-          clearMessages();
-          addMessage({
+        if (
+          !historyRestoreSuppressedRef.current
+          && sessionIdRef.current === sessionId
+          && !errorMessage.includes('invalid page_idx or session history not found')
+        ) {
+          useChatStore.getState().clearMessages();
+          useChatStore.getState().addMessage({
             id: `history-load-failed-${Date.now()}`,
             role: 'system',
             content: i18n.t('sessions.errors.restoreFailed', { sessionId }),
@@ -645,17 +707,7 @@ function AppContent() {
         }
       }
     })();
-  }, [
-    isConnected,
-    sessionId,
-    request,
-    addMessage,
-    addToolCall,
-    addToolResult,
-    clearMessages,
-    clearSubtasks,
-    disposeInFlightHistoryHandles,
-  ]);
+  }, [isConnected, sessionId, request, disposeInFlightHistoryHandles]);
 
   // 新建会话：立即生成可用的 session_id，避免停留在 'new' 导致无法发送消息
   const handleNewSession = useCallback(async () => {
@@ -744,11 +796,15 @@ function AppContent() {
 
   const handleSendMessage = useCallback((content: string, files?: ChatSendFile[]) => {
     void (async () => {
+      historyRestoreSuppressedRef.current = true;
+      disposeInFlightHistoryHandles();
+      setHistoryPagerMeta(null);
+      setHistoryLoadingMore(false);
       const sid = await ensureSessionForSend();
       if (!sid) return;
       await sendMessage(content, sid, files);
     })();
-  }, [ensureSessionForSend, sendMessage]);
+  }, [disposeInFlightHistoryHandles, ensureSessionForSend, sendMessage]);
 
   const handleInterrupt = useCallback((newInput?: string) => {
     if (!sessionId || sessionId === 'new') return;
@@ -944,11 +1000,7 @@ function AppContent() {
         {configError && (
           <div className="card mb-4">
             <div className="text-sm text-text-muted">
-              {configError}. {t('app.configErrorHint')}
-              <span className="mono"> python -m tests.web_gateway_jiuwenclaw_integration </span>
-              {t('app.configErrorDefault')}
-              <span className="mono"> jiuwenclaw/web/.env.local </span>
-              {t('app.configErrorEnv')} <span className="mono">VITE_API_BASE</span> {t('common.and')} <span className="mono">VITE_WS_BASE</span>.
+              {configError}
             </div>
           </div>
         )}
@@ -1015,7 +1067,7 @@ function AppContent() {
       )}
 
       {/* 全局心跳消息提示 */}
-      {heartbeatToastVisible && (
+      {FEATURE_HEARTBEAT_UI && heartbeatToastVisible && (
         <div className="app-toast-wrapper app-toast-wrapper--top">
           <div className="app-heartbeat-toast animate-rise">
             <div className="app-heartbeat-toast__header">
@@ -1094,11 +1146,13 @@ function AppContent() {
         </div>
       )}
 
-      <HeartbeatMessageModal
-        open={heartbeatModalOpen}
-        message={heartbeatToastMessage}
-        onClose={() => setHeartbeatModalOpen(false)}
-      />
+      {FEATURE_HEARTBEAT_UI && (
+        <HeartbeatMessageModal
+          open={heartbeatModalOpen}
+          message={heartbeatToastMessage}
+          onClose={() => setHeartbeatModalOpen(false)}
+        />
+      )}
     </div>
   );
 }
