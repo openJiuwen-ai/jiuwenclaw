@@ -155,6 +155,17 @@ from jiuwenclaw.agentserver.deep_agent.plan_pause_helpers import (
     repair_task_plan_after_pause,
     write_plan_pause_to_session,
     _resolve_session_for_checkpoint,
+    read_interrupt_artifacts_summary_from_session,
+    read_interrupt_artifacts_from_file,
+    write_interrupt_artifacts_to_file,
+    write_interrupt_artifacts_summary_to_session,
+    build_interrupt_artifacts_resume_prompt,
+    clear_interrupt_artifacts_summary_from_session,
+    clear_interrupt_recovery_injected,
+    clear_interrupt_artifacts_file,
+    is_interrupt_recovery_injected,
+    mark_interrupt_recovery_injected,
+    INTERRUPT_ARTIFACTS_SUMMARY_KEY
 )
 from jiuwenclaw.agentserver.deep_agent.prompt_builder import build_identity_prompt
 from jiuwenclaw.agentserver.deep_agent.rails import (
@@ -4514,6 +4525,12 @@ class JiuWenClawDeepAdapter:
                 except Exception as exc:
                     logger.warning("[JiuWenClawDeepAdapter] 处理 cancel 后 todo 失败: %s", exc)
 
+                # 6. 收集中断前已完成的工作产物摘要（兜底：当 plan_pause / interrupt_resume 都未生效时）
+                try:
+                    await self._persist_interrupt_artifacts_summary(session_id)
+                except Exception as exc:
+                    logger.warning("[JiuWenClawDeepAdapter] persist interrupt artifacts summary failed: %s", exc)
+
             logger.info(
                 "[JiuWenClawDeepAdapter] interrupt(cancel): 已停止执行 request_id=%s",
                 request.request_id,
@@ -4609,6 +4626,7 @@ class JiuWenClawDeepAdapter:
             session = create_agent_session(session_id=session_id, card=self._instance.card)
             await session.pre_run(inputs=None)
             clear_session_interrupt_state(session)
+            clear_interrupt_recovery_injected(session)
             if clear_todo_resume_snapshot_pending:
                 set_todo_resume_snapshot_pending(session, pending=False)
             await post_agent_execute_for_session(session)
@@ -5490,6 +5508,147 @@ class JiuWenClawDeepAdapter:
         finally:
             await session.post_run()
 
+    async def _persist_interrupt_artifacts_summary(self, session_id: str) -> None:
+        """Cancel 时：将 session state 中实时记录的工具产物日志格式化为摘要字符串，作为兜底恢复信息。
+
+        task_execution_rail 在每次工具调用后已将产物信息追加到 session state 的
+        INTERRUPT_ARTIFACTS_SUMMARY_KEY（list 格式）。cancel 时将此 list 转换为
+        可读的文本摘要并覆盖回 session state（string 格式），同时写一份到磁盘文件
+        <workspace>/context/<session_id>/recovery/recovery.json，供进程重启后兜底。
+
+        当 plan_pause 或 interrupt_resume 都无法正常工作时，下一轮新请求仍能
+        通过此摘要识别哪些工作已经完成，避免盲目重复执行已完成步骤。
+        """
+        if not session_id or self._instance is None:
+            return
+
+        session = create_agent_session(session_id=session_id, card=self._instance.card)
+        await session.pre_run(inputs=None)
+        try:
+            artifacts_log = session.get_state(INTERRUPT_ARTIFACTS_SUMMARY_KEY)
+            if not isinstance(artifacts_log, list) or not artifacts_log:
+                return
+
+            summary_lines: list[str] = []
+            for entry in artifacts_log:
+                if not isinstance(entry, dict):
+                    continue
+                tool = str(entry.get("tool", ""))
+                fp = str(entry.get("file_path", ""))
+                emitted = entry.get("artifacts_emitted", False)
+
+                if fp and emitted:
+                    summary_lines.append(f"- {tool} {fp} (产物已生成)")
+                elif fp:
+                    summary_lines.append(f"- {tool} {fp} (已执行)")
+                elif tool:
+                    summary_lines.append(f"- {tool} (已执行)")
+
+            if not summary_lines:
+                return
+
+            summary = "\n".join(summary_lines)
+
+            # 写入 session state（内存，同一 session 内可用）
+            write_interrupt_artifacts_summary_to_session(session, summary)
+            await post_agent_execute_for_session(session)
+
+            # 同时写入磁盘文件（进程重启后兜底）
+            try:
+                workspace_dir = get_agent_workspace_dir()
+                write_interrupt_artifacts_to_file(workspace_dir, session_id, summary)
+            except Exception as file_exc:
+                logger.warning(
+                    "[JiuWenClawDeepAdapter] write interrupt artifacts to file failed session=%s: %s",
+                    session_id, file_exc,
+                )
+
+            logger.info(
+                "[JiuWenClawDeepAdapter] interrupt artifacts summary persisted session=%s items=%d",
+                session_id,
+                len(summary_lines),
+            )
+        except Exception as exc:
+            logger.warning(
+                "[JiuWenClawDeepAdapter] persist interrupt artifacts summary failed: %s",
+                exc,
+            )
+        finally:
+            await session.post_run()
+
+    async def prepare_interrupt_artifacts_for_request(self, request: AgentRequest) -> None:
+        """兜底：plan_pause 和 interrupt_resume 都没触发时，注入中断产物摘要到 supplementary_info。
+
+        确保即使 todo.json 不存在、plan_paused 未写入，LLM 仍能获得结构化的"已完成工作"信息，
+        避免从中断后的压缩对话历史中猜测任务进度而重复执行已完成步骤。
+
+        读取优先级：session state（内存） > disk file（进程重启兜底）。
+        """
+        if self._instance is None:
+            return
+
+        session_id = str(request.session_id or "").strip()
+        if not session_id:
+            return
+
+        params = request.params if isinstance(getattr(request, "params", None), dict) else None
+        if params is None:
+            return
+
+        session = create_agent_session(session_id=session_id, card=self._instance.card)
+        await session.pre_run(inputs=None)
+        try:
+            # 哨兵：plan_pause 或 interrupt_resume 已经注入，不需要兜底
+            if is_interrupt_recovery_injected(session):
+                return
+
+            # 先读 session state（内存，最快路径）
+            summary = read_interrupt_artifacts_summary_from_session(session)
+
+            # 读不到时，尝试从磁盘文件读（进程重启兜底）
+            if not summary:
+                try:
+                    workspace_dir = get_agent_workspace_dir()
+                    summary = read_interrupt_artifacts_from_file(workspace_dir, session_id)
+                except Exception as file_exc:
+                    logger.debug(
+                        "[JiuWenClawDeepAdapter] read interrupt artifacts from file failed session=%s: %s",
+                        session_id, file_exc,
+                    )
+
+            if not summary:
+                return
+
+            language = self._resolve_runtime_language()
+            prompt = build_interrupt_artifacts_resume_prompt(language, summary=summary)
+            merge_supplementary_into_request_params(params, prompt)
+
+            # 一次性使用：注入后即清除（session state + disk file）
+            clear_interrupt_artifacts_summary_from_session(session)
+            try:
+                workspace_dir = get_agent_workspace_dir()
+                clear_interrupt_artifacts_file(workspace_dir, session_id)
+            except Exception as file_exc:
+                logger.debug(
+                    "[JiuWenClawDeepAdapter] clear interrupt artifacts file failed session=%s: %s",
+                    session_id, file_exc,
+                )
+            mark_interrupt_recovery_injected(session)
+            await post_agent_execute_for_session(session)
+
+            logger.info(
+                "[JiuWenClawDeepAdapter] interrupt artifacts summary injected session=%s",
+                session_id,
+            )
+        except Exception as exc:
+            logger.warning(
+                "[JiuWenClawDeepAdapter] prepare_interrupt_artifacts_for_request failed session_id=%s: %s",
+                session_id,
+                exc,
+            )
+        finally:
+            await session.post_run()
+
     async def prepare_plan_pause_for_request(self, request: AgentRequest) -> None:
         """On next agent.plan message after cancel: clear task_plan, inject decision prompt, clear flag."""
         if self._instance is None:
@@ -5510,6 +5669,10 @@ class JiuWenClawDeepAdapter:
         session = create_agent_session(session_id=session_id, card=self._instance.card)
         await session.pre_run(inputs=None)
         try:
+            # 哨兵：已有其他恢复机制注入，跳过
+            if is_interrupt_recovery_injected(session):
+                return
+
             paused, snapshot = read_plan_pause_from_session(session)
             if not paused:
                 return
@@ -5524,6 +5687,7 @@ class JiuWenClawDeepAdapter:
             )
             merge_supplementary_into_request_params(params, decision)
             clear_plan_pause_on_session(session)
+            mark_interrupt_recovery_injected(session)
             await post_agent_execute_for_session(session)
 
             logger.info(

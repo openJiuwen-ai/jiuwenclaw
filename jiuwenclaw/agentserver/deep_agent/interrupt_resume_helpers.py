@@ -18,6 +18,8 @@ from openjiuwen.harness.tools.todo_resume import (
 )
 
 from jiuwenclaw.agentserver.deep_agent.plan_pause_helpers import (
+    is_interrupt_recovery_injected,
+    mark_interrupt_recovery_injected,
     merge_supplementary_into_request_params,
     post_agent_execute_for_session,
     read_plan_pause_from_session,
@@ -90,6 +92,10 @@ async def prepare_interrupt_resume_for_request(
     session = create_agent_session(session_id=session_id, card=instance.card)
     await session.pre_run(inputs=None)
     try:
+        # 哨兵：已有其他恢复机制注入，跳过
+        if is_interrupt_recovery_injected(session):
+            return
+
         paused, _snapshot = read_plan_pause_from_session(session)
         if paused:
             return
@@ -101,6 +107,7 @@ async def prepare_interrupt_resume_for_request(
         )
         merge_supplementary_into_request_params(params, decision)
         set_todo_resume_snapshot_pending(session, pending=True)
+        mark_interrupt_recovery_injected(session)
         await post_agent_execute_for_session(session)
 
         logger.info(

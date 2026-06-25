@@ -699,6 +699,38 @@ class TaskExecutionRail(DeepAgentRail):
             elapsed_ms,
         )
 
+        # 记录工具调用产物信息到 session state，用于中断恢复时生成产物摘要
+        try:
+            from jiuwenclaw.agentserver.deep_agent.plan_pause_helpers import (
+                INTERRUPT_ARTIFACTS_SUMMARY_KEY,
+            )
+            tool_name = ctx.inputs.tool_name
+            tool_args = ctx.inputs.tool_args
+            # 从 tool_args 中提取关键信息（文件路径、大小等）
+            entry = {"tool": tool_name}
+            if isinstance(tool_args, dict):
+                fp = str(tool_args.get("file_path", "") or "")
+                if fp:
+                    entry["file_path"] = fp.replace("\\", "/")
+            elif isinstance(tool_args, str):
+                try:
+                    parsed = json.loads(tool_args)
+                    fp = str(parsed.get("file_path", "") or "")
+                    if fp:
+                        entry["file_path"] = fp.replace("\\", "/")
+                except (json.JSONDecodeError, TypeError):
+                    pass
+            # 如果有产物（emitted=True），记录产物信息
+            if emitted:
+                entry["artifacts_emitted"] = True
+            existing_log = session.get_state(INTERRUPT_ARTIFACTS_SUMMARY_KEY)
+            if not isinstance(existing_log, list):
+                existing_log = []
+            existing_log.append(entry)
+            session.update_state({INTERRUPT_ARTIFACTS_SUMMARY_KEY: existing_log})
+        except Exception as exc:
+            logger.debug("[TaskExecutionRail] 记录产物摘要失败: %s", exc)
+
     def _get_workspace_base_path(self) -> Path | None:
         """获取工作空间基准路径。
         

@@ -67,12 +67,16 @@ async def test_prepare_interrupt_resume_sets_snapshot_pending_on_resume_query() 
         patch.object(helpers, "create_agent_session", return_value=session),
         patch.object(helpers, "post_agent_execute_for_session", new_callable=AsyncMock),
         patch.object(helpers, "read_plan_pause_from_session", return_value=(False, None)),
+        patch.object(helpers, "is_interrupt_recovery_injected", return_value=False),
     ):
         await helpers.prepare_interrupt_resume_for_request(adapter, request)
 
-    session.update_state.assert_called_once_with(
-        {TODO_RESUME_SNAPSHOT_PENDING_KEY: True}
-    )
+    # update_state 被调用两次：set_todo_resume_snapshot_pending 和 mark_interrupt_recovery_injected
+    from jiuwenclaw.agentserver.deep_agent.plan_pause_helpers import INTERRUPT_RECOVERY_INJECTED_KEY
+
+    assert session.update_state.call_count == 2
+    session.update_state.assert_any_call({TODO_RESUME_SNAPSHOT_PENDING_KEY: True})
+    session.update_state.assert_any_call({INTERRUPT_RECOVERY_INJECTED_KEY: True})
 
 
 @pytest.mark.asyncio
@@ -91,6 +95,9 @@ async def test_clear_session_persisted_interrupt_state_clears_snapshot_pending()
             "jiuwenclaw.agentserver.deep_agent.interface_deep.clear_session_interrupt_state",
         ) as clear_interrupt,
         patch(
+            "jiuwenclaw.agentserver.deep_agent.interface_deep.clear_interrupt_recovery_injected",
+        ) as clear_recovery_injected,
+        patch(
             "jiuwenclaw.agentserver.deep_agent.interface_deep.set_todo_resume_snapshot_pending",
         ) as clear_pending,
         patch(
@@ -106,6 +113,7 @@ async def test_clear_session_persisted_interrupt_state_clears_snapshot_pending()
         )
 
     clear_interrupt.assert_called_once_with(session)
+    clear_recovery_injected.assert_called_once_with(session)
     clear_pending.assert_called_once_with(session, pending=False)
     post_execute.assert_awaited_once_with(session)
     session.post_run.assert_awaited_once()
