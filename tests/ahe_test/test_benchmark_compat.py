@@ -103,6 +103,34 @@ def test_fixable_unit():
     print("  PASS: unit-converter (%.2f)" % r["total"])
 
 
+def test_fixable_timeout():
+    expected = {
+        "root_cause_keywords": ["timeout", "10", "ms", "millisecond", "毫秒", "超时", "too short", "太短", "second", "秒", "unit", "单位", "exceed", "premature", "budget"],
+        "fix_keywords": ["timeout", "increase", "增大", "调大", "1000", "2000", "5000", "remove", "去掉", "ms", "millisecond", "毫秒", "second", "秒", "default", "默认"],
+    }
+    prop = {"target_id": "dataset-summarizer",
+            "root_cause": "The documented --timeout 10 is interpreted by the script as 10ms (milliseconds), which is far too short and always exceeds the budget",
+            "targeted_fix": {"suggestion": "Increase the timeout or remove the flag, e.g. --timeout 2000 (the unit is ms) or omit it to use the default"},
+            "state": "active"}
+    r = score_fixable("dataset-summarizer", [prop], expected)
+    assert r["total"] >= 0.80, "dataset-summarizer: got %.2f" % r["total"]
+    print("  PASS: dataset-summarizer (%.2f)" % r["total"])
+
+
+def test_fixable_envvar():
+    expected = {
+        "root_cause_keywords": ["environment variable", "环境变量", "env var", "TEMPLATE_DIR", "not set", "未设置", "missing", "缺少", "unset", "export"],
+        "fix_keywords": ["export", "环境变量", "env var", "TEMPLATE_DIR", "set", "设置", "先", "before", "运行前", "before running"],
+    }
+    prop = {"target_id": "template-renderer",
+            "root_cause": "The render.py script requires the TEMPLATE_DIR environment variable but SKILL.md does not mention it; running without it fails with 'not set'",
+            "targeted_fix": {"suggestion": "Export the environment variable before running: export TEMPLATE_DIR=<templates dir>, then execute render.py"},
+            "state": "active"}
+    r = score_fixable("template-renderer", [prop], expected)
+    assert r["total"] >= 0.80, "template-renderer: got %.2f" % r["total"]
+    print("  PASS: template-renderer (%.2f)" % r["total"])
+
+
 def test_normal_zero():
     r = score_normal("hash-calculator", [])
     assert r["total"] >= 0.90
@@ -186,6 +214,8 @@ def main():
         ("fixable: csv-row-counter", test_fixable_csv),
         ("fixable: math-formula-eval", test_fixable_math),
         ("fixable: unit-converter", test_fixable_unit),
+        ("fixable: dataset-summarizer", test_fixable_timeout),
+        ("fixable: template-renderer", test_fixable_envvar),
         ("normal: zero proposals", test_normal_zero),
         ("normal: spurious blocked", test_normal_spurious),
         ("unfixable: zero proposals", test_unfixable_zero),

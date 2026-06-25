@@ -825,7 +825,9 @@ def print_report(results: list[dict]) -> None:
         totals.append(r["total"])
 
     print("-" * 80)
-    print(f"{'':>2}  {'TOTAL':<26} {'':>10} {'':>5} {'':>5} {'':>5} {'':>5} {sum(totals):>6.2f} / 10.00")
+    # Max possible score = number of cases (each case maxes at 1.0).
+    max_possible = len(results)
+    print(f"{'':>2}  {'TOTAL':<26} {'':>10} {'':>5} {'':>5} {'':>5} {'':>5} {sum(totals):>6.2f} / {max_possible:.1f}")
 
     print("\n" + "=" * 80)
     print("  CAPABILITY SUMMARY")

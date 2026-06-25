@@ -11,7 +11,7 @@
 
 ## 分类别评分规则
 
-### 类别 1：可修复错误（fixable_error）— 3 个 case
+### 类别 1：可修复错误（fixable_error）— 5 个 case
 
 | 维度 | PASS 条件 | FAIL 条件 |
 |------|-----------|-----------|
@@ -58,7 +58,7 @@
 ## 综合评分
 
 ```
-benchmark_score = Σ(case_score) / 9.0
+benchmark_score = Σ(case_score) / N   （N = benchmark skill 总数，当前 11）
 
 其中:
   case_score = proposal_score × 0.30 + root_cause_score × 0.25 + fix_score × 0.25 + decision_score × 0.20

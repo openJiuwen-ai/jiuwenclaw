@@ -11,9 +11,9 @@
 | **经验污染治理** | 算法能否识别并处置 evolutions.json 中的错误经验 | 输出包含 deprecate/demote/rewrite 动作 |
 | **边界判断能力** | 算法能否区分"不可修复"的失败，不输出无效建议 | 零 proposal 或 state=REJECTED |
 
-## 分类与 Skill 清单（9 个）
+## 分类与 Skill 清单（11 个）
 
-### 类别 1：可修复错误（Fixable Error）— 3 个
+### 类别 1：可修复错误（Fixable Error）— 5 个
 
 Skill 中存在人为植入的错误，导致任务失败，可通过新增 evolutions.json 条目修复。
 
@@ -22,6 +22,8 @@ Skill 中存在人为植入的错误，导致任务失败，可通过新增 evol
 | `csv-row-counter` | 无条件跳过首行当表头，无表头 CSV 少计 1 行 | 文件处理 |
 | `math-formula-eval` | 示例 3⊕2=9+12+4=19，正确应为 25 | 数学运算 |
 | `unit-converter` | 英里→公里转换因子写错（1.8 vs 1.60934） | 单位换算 |
+| `dataset-summarizer` | SKILL.md 命令 `--timeout 10` 注释为秒，脚本按毫秒解释，10ms 必超时 | 命令行参数 |
+| `template-renderer` | 脚本依赖 `TEMPLATE_DIR` 环境变量，SKILL.md 完全未说明 | 运行时依赖 |
 
 **期望行为**：LLMProposer 分析失败 trace → 生成包含准确 root_cause 和 actionable fix 的 proposal → RulePolicy 通过 + EvalPolicy score ≥ 0.60 → state=ACTIVE → 写入 evolutions.json
 
@@ -73,7 +75,7 @@ benchmark/
 │   ├── sample_doc.md
 │   ├── sample.bin
 │   └── component_schema.json / component.json
-└── skills/                  # 9 个 benchmark skill
+└── skills/                  # 11 个 benchmark skill
     ├── csv-row-counter/
     │   ├── SKILL.md
     │   ├── scripts/count_rows.py
@@ -133,7 +135,7 @@ python benchmark/run_benchmark.py --skip-prompts
 python benchmark/run_benchmark.py --reset
 ```
 
-脚本自动完成：setup（复制 skill + test_data + 配置权限）→ 发送 9 条 prompt → 调用 evolve pipeline → 读取 evolution.db 评分 → 输出报告到 `benchmark/report/`。
+脚本自动完成：setup（复制 skill + test_data + 配置权限）→ 发送 prompt（每 skill 一条，共 11 条）→ 调用 evolve pipeline → 读取 evolution.db 评分 → 输出报告到 `benchmark/report/`。
 
 每次运行生成带时间戳的报告（`report_YYYYMMDD_HHMMSS.md` + `.json`），同时更新 `last_report.md` / `last_report.json` 指向最新结果。
 
