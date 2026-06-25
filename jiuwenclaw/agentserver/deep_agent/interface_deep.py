@@ -2942,8 +2942,29 @@ class JiuWenClawDeepAdapter:
         except Exception as exc:
             logger.warning("[JiuWenClawDeepAdapter] reload_agent_config hook trigger failed: %s", exc)
 
-        # Apply in-place updates to skill_evolution_rail (no re-init needed).
-        if self._skill_evolution_rail is not None:
+        # SkillEvolutionRail: respond to react.evolution.enabled on hot reload.
+        # core's _hot_reload_rails retires registered rails whose type appears in
+        # rails_list, then loads rails_list entries. Passing the SAME object → core
+        # unregisters the stale twin but skips loading (unload-only). Passing a NEW
+        # object → unregister stale + load new. Omitting the type → retained.
+        evolution_enabled = bool(config.get("evolution", {}).get("enabled", False))
+        # 'retain' | ('retire', old_rail) | ('create', new_rail)
+        evolution_rail_action: tuple[str, Any] | None = None
+        if self._skill_evolution_rail is not None and not evolution_enabled:
+            # enabled true->false: retire the live rail. Pass the original object so
+            # core unregisters it without loading a replacement.
+            evolution_rail_action = ("retire", self._skill_evolution_rail)
+            self._skill_evolution_rail = None
+            logger.info(
+                "[JiuWenClawDeepAdapter] SkillEvolutionRail retiring on reload (evolution disabled)"
+            )
+        elif self._skill_evolution_rail is None and evolution_enabled:
+            # enabled false->true: build a fresh rail and load it.
+            new_evolution_rail = self._build_skill_evolution_rail(config)
+            if new_evolution_rail is not None:
+                evolution_rail_action = ("create", new_evolution_rail)
+        elif self._skill_evolution_rail is not None and evolution_enabled:
+            # enabled unchanged (on): in-place update LLM / auto_scan, rail retained.
             self._skill_evolution_rail.update_llm(self._model, config.get("model_name", "gpt-4"))
             self._skill_evolution_rail.auto_scan = config.get("evolution", {}).get("auto_scan", False)
 
@@ -3029,8 +3050,11 @@ class JiuWenClawDeepAdapter:
         # SkillCredentialInjectionRail: only add when newly created (in-place update otherwise)
         if skill_credential_rail_newly_created and self._skill_credential_injection_rail is not None:
             rails_list.append(self._skill_credential_injection_rail)
-
-        #  诊断日志：观察 rails_list 包含哪些 Rails
+        # SkillEvolutionRail: append the staged rail so core drives its lifecycle.
+        # 'retire' passes the old object (unload-only); 'create' passes a new object.
+        if evolution_rail_action is not None:
+            _action, _rail = evolution_rail_action
+            rails_list.append(_rail)
         logger.info(
             "[JiuWenClawDeepAdapter]  DIAGNOSTIC: rails_list 构建完成 " 
             "| rails_count=%d " 
