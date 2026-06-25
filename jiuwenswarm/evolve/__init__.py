@@ -61,6 +61,17 @@ def get_evolve_config() -> dict[str, Any]:
     if _own_path.exists():
         own_cfg = yaml.load(_own_path.read_text(encoding="utf-8")) or {}
 
+    # The file may wrap its contents under a top-level ``evolve:`` key
+    # (mirroring the main config's ``evolve:`` section). All consumers of
+    # get_evolve_config() read the UNWRAPPED form (e.g. ``.get("llm")``),
+    # so unwrap a single-key ``{"evolve": {...}}`` wrapper here.
+    if (
+        len(own_cfg) == 1
+        and "evolve" in own_cfg
+        and isinstance(own_cfg["evolve"], dict)
+    ):
+        own_cfg = own_cfg["evolve"]
+
     # 2. Merge with main config's evolve: section (main wins)
     try:
         from jiuwenswarm.common.config import get_config
