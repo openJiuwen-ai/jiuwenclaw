@@ -1081,6 +1081,8 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
         if (!shouldHandleSessionEvent(payload)) return;
         if (shouldDropDuplicatedEvent('chat.error', payload)) return;
         setThinking(false);
+        setProcessing(false);
+        activeRequestIdRef.current = null;
         const errorMsg =
           typeof payload.error === 'string' ? payload.error : i18n.t('network.unknownError');
         // 忽略 "invalid page_idx or session history not found" 错误，因为这是新会话的正常情况

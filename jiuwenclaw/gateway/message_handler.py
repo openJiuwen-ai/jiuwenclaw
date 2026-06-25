@@ -1702,13 +1702,21 @@ class MessageHandler(ABC):
 
         # 从 payload 中提取 event_type（如果存在）
         event_type = None
-        if chunk.payload and isinstance(chunk.payload, dict):
-            event_type_str = chunk.payload.get("event_type")
+        payload = dict(chunk.payload) if chunk.payload and isinstance(chunk.payload, dict) else {}
+        if payload:
+            event_type_str = payload.get("event_type")
             if isinstance(event_type_str, str):
                 try:
                     event_type = EventType(event_type_str)
                 except ValueError:
                     logger.debug("未知的 event_type: %s", event_type_str)
+            elif payload.get("error"):
+                event_type = EventType.CHAT_ERROR
+                payload = {
+                    "event_type": EventType.CHAT_ERROR.value,
+                    "error": str(payload.get("error")),
+                    **{k: v for k, v in payload.items() if k not in ("event_type", "error")},
+                }
 
         return Message(
             id=chunk.request_id,
@@ -1717,8 +1725,8 @@ class MessageHandler(ABC):
             session_id=session_id,
             params={},
             timestamp=time.time(),
-            ok=True,
-            payload=chunk.payload,
+            ok=False if event_type == EventType.CHAT_ERROR else True,
+            payload=payload or chunk.payload,
             event_type=event_type,
             metadata=metadata,
             group_digital_avatar=group_digital_avatar,

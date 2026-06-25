@@ -113,6 +113,21 @@ def test_roundtrip_chunk_chat_error() -> None:
     assert back.payload.get("error") == "boom"
 
 
+def test_roundtrip_unary_error_as_stream_chunk() -> None:
+    """Unary e2a.error on a stream waiter must decode as chat.error terminal chunk."""
+    orig = AgentResponse(
+        request_id="r-stream-err",
+        channel_id="c",
+        ok=False,
+        payload={"error": "[181002] model service config error"},
+    )
+    wire = encode_agent_response_for_wire(orig, response_id="r-stream-err")
+    back = parse_agent_server_wire_chunk(wire)
+    assert back.is_complete is True
+    assert back.payload.get("event_type") == "chat.error"
+    assert "[181002]" in str(back.payload.get("error"))
+
+
 def test_deprecated_legacy_unary_dict() -> None:
     d = {
         "request_id": "old",
