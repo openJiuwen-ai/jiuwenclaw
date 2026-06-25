@@ -164,7 +164,7 @@ class BwrapConfig:
         # bind_root_entries is the "wildcard / generic" parent mount (e.g.
         # ``host_root="/"`` expanded into every immediate child of the host
         # rootfs), while ``bind_mounts`` are user-explicit per-path overrides
-        # (``/sandbox files allow|deny <path>`` lowered by jiuwenclaw's
+        # (``/sandbox files allow|deny <path>`` lowered by jiuwenswarm's
         # ``sysop_builder``). bwrap's later-overrides-earlier mount semantics
         # means whichever entry we ``append`` last wins on conflicting paths;
         # putting bind_root_entries first guarantees the explicit

@@ -249,7 +249,7 @@ present:
 # CLI flag (recommended)
 sudo ./run_docker.sh --save-logs /tmp/jiuwenbox-logs
 
-# Equivalent env-var form (kept for backward compatibility)
+# Equivalent env-var form
 sudo env JIUWENBOX_SAVE_LOGS_HOST_DIR=/tmp/jiuwenbox-logs ./run_docker.sh
 
 ls /tmp/jiuwenbox-logs
@@ -612,6 +612,55 @@ Under this mode agent-server **does not** try to spawn jiuwenbox, and `sandbox.p
 For cross-host setups, the jiuwenbox host has to be able to reach jiuwenswarm's intrinsic agent files on the same host paths: `preserve_file_sharing_mode` is now fixed to `mount`, so jiuwenswarm bind-mounts the intrinsic files (`AGENT.md`, `HEARTBEAT.md`, `IDENTITY.md`, `SOUL.md`, `USER.md`, `memory/daily_memory/`) and `project_dir` into the sandbox. Make the relevant directories visible on the jiuwenbox machine (via shared filesystem, container volume, etc.) and confirm the policy allows writes into them (the bundled `jiuwenbox/configs/code-agent-policy.yaml` already does).
 
 
+## Remote MCP
+
+JiuwenBox supports three access modes: **REST API**, **CLI**, and **remote MCP**.
+
+The MCP endpoint is `/mcp` (Streamable HTTP transport). The current MCP tool is
+`sandbox_run_command`, which executes a command inside a JiuwenBox sandbox and
+returns the result.
+
+### Quick start
+
+```bash
+JIUWENBOX_POLICY_PATH=/path/to/default-policy.yaml \
+python -m uvicorn jiuwenbox.server.app:app --host 0.0.0.0 --port 8321 --log-level debug
+```
+
+### OpenCode configuration
+
+```json
+{
+  "mcpServers": {
+    "jiuwenbox": {
+      "url": "http://YOUR_HOST:8321/mcp",
+      "type": "remote",
+      "enabled": true
+    }
+  }
+}
+```
+
+### External IP deployment
+
+When JiuwenBox is deployed on an external IP (not `localhost` / `127.0.0.1`),
+set `JIUWENBOX_MCP_ALLOWED_HOSTS` to allow the client host:
+
+```bash
+JIUWENBOX_MCP_ALLOWED_HOSTS=10.0.0.5,10.0.0.5:8321 \
+JIUWENBOX_POLICY_PATH=/path/to/default-policy.yaml \
+python -m uvicorn jiuwenbox.server.app:app --host 0.0.0.0 --port 8321 --log-level debug
+```
+
+### Notes
+
+- A plain `GET /mcp` may return **406 Not Acceptable** because the endpoint
+  expects MCP Streamable HTTP protocol frames. Use a proper MCP client to
+  interact with it.
+- MCP enables clients to call JiuwenBox, but does **not** mean all commands
+  must go through a sandbox. Clients decide which commands to route via MCP.
+
+
 ## Inference Privacy Proxy
 
 The inference privacy proxy enables secure LLM API access from edge servers:
@@ -739,6 +788,24 @@ python3 -m pytest tests/integration/test_server_api_default.py::TestPolicyEnforc
 python3 -m pytest tests/integration/test_server_api_default.py::TestPolicyEnforcement::test_network_mode_isolated_blocked_ip_rejects_egress -s --server-endpoint 127.0.0.1:8321
 ```
 
+### MCP Integration Tests
+
+`test_mcp_default.py` exercises the `/mcp` Streamable HTTP endpoint and the
+`sandbox_run_command` MCP tool. It is included automatically when running
+`./tests/test.sh default`, or can be run standalone:
+
+```bash
+# TCP
+python3 -m pytest tests/integration/test_mcp_default.py -v --server-endpoint 127.0.0.1:8321
+
+# UDS
+python3 -m pytest tests/integration/test_mcp_default.py -v --server-endpoint=unix:///tmp/jiuwenbox.sock
+```
+
+The MCP tests open a real MCP client session, run commands inside sandboxes,
+and verify sandbox auto-creation/reuse/deletion, stdin/env/workdir forwarding,
+command failure propagation, timeout clamping, and concurrent sessions.
+
 ### Performance Tests
 
 Run the office-workload performance suite:
@@ -798,11 +865,15 @@ you can also run it as `python -m jiuwenbox.cli.jiuwenbox`.
 jiuwenbox health
 
 # Sandbox lifecycle
-ID=$(jiuwenbox sandbox create --output plain)
+ID=$(jiuwenbox sandbox create | jq -r .id)
 jiuwenbox sandbox exec "$ID" -- python3 -c 'print("hi")'
+JOB=$(jiuwenbox sandbox bg-exec "$ID" --job-id http-srv -- python3 -m http.server 18080 | jq -r .job_id)
+jiuwenbox sandbox bg-get "$ID" "$JOB"
+jiuwenbox sandbox bg-list "$ID"
+jiuwenbox sandbox bg-kill "$ID" "$JOB"
 jiuwenbox sandbox upload "$ID" ./data.csv /tmp/data.csv
 jiuwenbox sandbox download "$ID" /tmp/result.json - | jq .
-jiuwenbox sandbox ls --output table
+jiuwenbox sandbox ls
 jiuwenbox sandbox rm "$ID" --yes
 
 # Policy
@@ -819,14 +890,14 @@ Global flags:
 | --- | --- | --- | --- |
 | `--base-url` | `http://127.0.0.1:8321` | `JIUWENBOX_URL` | Server endpoint. Accepts `http://host:port` or `unix:///abs/socket/path` |
 | `--timeout` | `30` | `JIUWENBOX_TIMEOUT` | HTTP timeout seconds |
-| `--output / -o` | `json` | – | `json` \| `table` \| `plain` |
 | `--verbose / -v` | off | – | Debug logging on stderr |
 | `--no-color` | off | `NO_COLOR` | Disable ANSI colors on stderr |
 
 Exit codes: `0` success / sandbox exec returned 0, `1` HTTP 4xx/5xx, `2`
-connection failure, `3` local argument or file error, `130` Ctrl+C; the
+connection failure, `3` local argument or file error, or `sandbox bg-get` /
+`sandbox bg-kill` when the job is missing (404), `130` Ctrl+C; the
 `sandbox exec` subcommand transparently propagates the in-sandbox process
-exit code.
+exit code; `sandbox bg-exec` returns `3` when `started=false`.
 
 ## License
 

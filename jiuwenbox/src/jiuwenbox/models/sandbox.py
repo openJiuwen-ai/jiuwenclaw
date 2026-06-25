@@ -24,6 +24,20 @@ class InvalidSandboxIdError(Exception):
     """Raised when a user-supplied sandbox_id fails format validation."""
 
 
+JOB_ID_MIN_LEN = 4
+JOB_ID_MAX_LEN = 16
+CUSTOM_JOB_ID_RE = re.compile(r"^[0-9a-z_-]{4,16}$")
+
+JOB_ID_FORMAT_MESSAGE = (
+    "job_id must be 4-16 characters and contain only lowercase letters, "
+    "digits, hyphens, and underscores (e.g. http-srv)"
+)
+
+
+class InvalidJobIdError(Exception):
+    """Raised when a user-supplied job_id fails format validation."""
+
+
 def generate_sandbox_id() -> str:
     """Generate a sandbox id using the existing uuid4[:12] scheme."""
     return str(uuid.uuid4())[:12]
@@ -33,6 +47,16 @@ def validate_custom_sandbox_id(value: str) -> str:
     """Validate a user-supplied sandbox_id; return it unchanged on success."""
     if not CUSTOM_SANDBOX_ID_RE.fullmatch(value):
         raise InvalidSandboxIdError(SANDBOX_ID_FORMAT_MESSAGE)
+    return value
+
+
+def generate_job_id() -> str:
+    return str(uuid.uuid4())[:12]
+
+
+def validate_custom_job_id(value: str) -> str:
+    if not CUSTOM_JOB_ID_RE.fullmatch(value):
+        raise InvalidJobIdError(JOB_ID_FORMAT_MESSAGE)
     return value
 
 
@@ -65,10 +89,6 @@ class SandboxRef(BaseModel):
     pid: int | None = None
     created_at: datetime = Field(default_factory=datetime.now)
     started_at: datetime | None = None
-    # 最后一次 sandbox API 调用 (exec / file IO / lifecycle 切换) 的时间戳, 仅
-    # 供 jiuwenbox 服务端 reaper 用于判定空闲淘汰; 不持久化 (重启时跟整个
-    # sandbox 注册表一起被清空) 也不下传到 daemon。``None`` 表示尚未发生过
-    # 任何交互, reaper 会用 ``started_at`` 兜底。
     last_active_at: datetime | None = None
     error_message: str | None = None
     env: dict[str, str] = Field(default_factory=dict)
@@ -82,10 +102,59 @@ class ExecResult(BaseModel):
     stderr: str = ""
 
 
-class BackgroundExecResult(BaseModel):
-    """Result of starting a background command in a sandbox."""
+class BackgroundExecRequest(BaseModel):
+    command: list[str]
+    job_id: str | None = None
+    workdir: str | None = None
+    env: dict[str, str] | None = None
+    stdin: str | None = None
+    timeout_seconds: int | None = None
+    capture_output: bool = True
 
+
+class BackgroundExecResult(BaseModel):
     started: bool
+    job_id: str | None = None
     pid: int | None = None
     command: list[str] = Field(default_factory=list)
+    running: bool | None = None
+    exit_code: int | None = None
     error_message: str | None = None
+    capture_output: bool = True
+
+
+class BackgroundJobSummary(BaseModel):
+    job_id: str
+    pid: int | None
+    command: list[str]
+    running: bool
+    exit_code: int | None
+    started_at: datetime
+    finished_at: datetime | None
+    capture_output: bool
+
+
+class BackgroundJobStatus(BaseModel):
+    job_id: str
+    sandbox_id: str
+    command: list[str]
+    pid: int | None
+    running: bool
+    exit_code: int | None
+    started_at: datetime
+    finished_at: datetime | None
+    capture_output: bool
+    stdout: str = ""
+    stderr: str = ""
+    workdir: str | None = None
+
+
+class KillBackgroundJobRequest(BaseModel):
+    signal: int = 15
+
+
+class KillBackgroundJobResult(BaseModel):
+    job_id: str
+    killed: bool
+    reason: str
+    exit_code: int | None = None

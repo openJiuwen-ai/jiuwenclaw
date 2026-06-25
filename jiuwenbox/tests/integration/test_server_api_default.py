@@ -20,7 +20,7 @@ import yaml
 
 from jiuwenbox.bundled_configs import default_policy_path
 from jiuwenbox.models.policy import SecurityPolicy
-from jiuwenbox.models.sandbox import SANDBOX_ID_FORMAT_MESSAGE
+from jiuwenbox.models.sandbox import JOB_ID_FORMAT_MESSAGE, SANDBOX_ID_FORMAT_MESSAGE
 from jiuwenbox.supervisor import network as network_module
 from jiuwenbox.supervisor.bwrap import BwrapConfig
 
@@ -2443,6 +2443,7 @@ class TestPolicyEnforcement:
         assert response.status_code == 200, response.text
         background = response.json()
         assert background["started"] is True, background
+        assert isinstance(background.get("job_id"), str) and background["job_id"]
         assert isinstance(background["pid"], int), background
         assert background["error_message"] is None
 
@@ -3498,6 +3499,273 @@ class TestSandboxExec:
             "command": ["echo", "hello"],
         })
         assert resp.status_code == 409
+
+
+def _exec_background(client, sandbox_id: str, command: list[str], **kwargs):
+    body = {"command": command, **kwargs}
+    response = client.post(
+        f"/api/v1/sandboxes/{sandbox_id}/exec_background",
+        json=body,
+    )
+    assert response.status_code == 200, response.text
+    return response.json()
+
+
+def _wait_background_job_finished(
+    client,
+    sandbox_id: str,
+    job_id: str,
+    *,
+    timeout: float = 10.0,
+) -> dict:
+    deadline = time.monotonic() + timeout
+    status: dict = {}
+    while time.monotonic() < deadline:
+        response = client.get(f"/api/v1/sandboxes/{sandbox_id}/background/{job_id}")
+        assert response.status_code == 200, response.text
+        status = response.json()
+        if not status.get("running"):
+            return status
+        time.sleep(0.1)
+    raise AssertionError(
+        f"background job {job_id!r} did not finish within {timeout}s; last={status}"
+    )
+
+
+class TestBackgroundJobs:
+    @staticmethod
+    def test_instant_task_captures_output(client):
+        create_resp = client.post("/api/v1/sandboxes", json={})
+        sandbox_id = create_resp.json()["id"]
+        assert create_resp.json()["phase"] == "ready"
+
+        started = _exec_background(
+            client,
+            sandbox_id,
+            ["python3", "--version"],
+        )
+        assert started["started"] is True
+        assert isinstance(started.get("job_id"), str) and started["job_id"]
+
+        status = _wait_background_job_finished(
+            client, sandbox_id, started["job_id"],
+        )
+        assert status["exit_code"] == 0, status
+        assert "Python" in status["stdout"]
+
+    @staticmethod
+    def test_long_running_job_with_custom_job_id(client):
+        create_resp = client.post("/api/v1/sandboxes", json={})
+        sandbox_id = create_resp.json()["id"]
+        job_id = f"sleep-{uuid.uuid4().hex[:4]}"
+
+        started = _exec_background(
+            client,
+            sandbox_id,
+            ["python3", "-c", "import time; time.sleep(3600)"],
+            job_id=job_id,
+        )
+        assert started["started"] is True
+        assert started["job_id"] == job_id
+        assert started["running"] is True
+
+        status_resp = client.get(
+            f"/api/v1/sandboxes/{sandbox_id}/background/{job_id}",
+        )
+        assert status_resp.status_code == 200, status_resp.text
+        status = status_resp.json()
+        assert status["running"] is True
+        assert status["stdout"] == ""
+
+        list_resp = client.get(f"/api/v1/sandboxes/{sandbox_id}/background")
+        assert list_resp.status_code == 200
+        job_ids = [item["job_id"] for item in list_resp.json()["items"]]
+        assert job_id in job_ids
+
+        kill_resp = client.post(
+            f"/api/v1/sandboxes/{sandbox_id}/background/{job_id}/kill",
+            json={},
+        )
+        assert kill_resp.status_code == 200
+        assert kill_resp.json()["killed"] is True
+
+        finished = _wait_background_job_finished(client, sandbox_id, job_id)
+        assert finished["running"] is False
+
+    @staticmethod
+    def test_large_output_not_truncated(client):
+        create_resp = client.post("/api/v1/sandboxes", json={})
+        sandbox_id = create_resp.json()["id"]
+
+        started = _exec_background(
+            client,
+            sandbox_id,
+            ["python3", "-c", "print('x' * 10000)"],
+        )
+        status = _wait_background_job_finished(
+            client, sandbox_id, started["job_id"],
+        )
+        assert len(status["stdout"]) >= 10000
+
+    @staticmethod
+    def test_duplicate_job_id_returns_409(client):
+        create_resp = client.post("/api/v1/sandboxes", json={})
+        sandbox_id = create_resp.json()["id"]
+        job_id = f"dup-{uuid.uuid4().hex[:4]}"
+
+        first = client.post(
+            f"/api/v1/sandboxes/{sandbox_id}/exec_background",
+            json={
+                "command": ["python3", "-c", "import time; time.sleep(3600)"],
+                "job_id": job_id,
+            },
+        )
+        assert first.status_code == 200, first.text
+
+        second = client.post(
+            f"/api/v1/sandboxes/{sandbox_id}/exec_background",
+            json={
+                "command": ["python3", "-c", "import time; time.sleep(3600)"],
+                "job_id": job_id,
+            },
+        )
+        assert second.status_code == 409, second.text
+        assert job_id in second.json()["error"]
+
+        client.post(
+            f"/api/v1/sandboxes/{sandbox_id}/background/{job_id}/kill",
+            json={},
+        )
+
+    @staticmethod
+    @pytest.mark.parametrize("invalid_id", ["ab", "ABC123", "my job", "a" * 17])
+    def test_invalid_job_id_returns_400(client, invalid_id):
+        create_resp = client.post("/api/v1/sandboxes", json={})
+        sandbox_id = create_resp.json()["id"]
+
+        resp = client.post(
+            f"/api/v1/sandboxes/{sandbox_id}/exec_background",
+            json={
+                "command": ["python3", "--version"],
+                "job_id": invalid_id,
+            },
+        )
+        assert resp.status_code == 400, resp.text
+        assert JOB_ID_FORMAT_MESSAGE in resp.json()["error"]
+
+    @staticmethod
+    def test_capture_output_false(client):
+        create_resp = client.post("/api/v1/sandboxes", json={})
+        sandbox_id = create_resp.json()["id"]
+
+        started = _exec_background(
+            client,
+            sandbox_id,
+            ["python3", "--version"],
+            capture_output=False,
+        )
+        status = _wait_background_job_finished(
+            client, sandbox_id, started["job_id"],
+        )
+        assert status["capture_output"] is False
+        assert status["stdout"] == ""
+        assert status["stderr"] == ""
+        assert status["exit_code"] == 0
+
+    @staticmethod
+    def test_kill_already_exited_job(client):
+        create_resp = client.post("/api/v1/sandboxes", json={})
+        sandbox_id = create_resp.json()["id"]
+        job_id = f"done-{uuid.uuid4().hex[:4]}"
+
+        started = _exec_background(
+            client,
+            sandbox_id,
+            ["python3", "--version"],
+            job_id=job_id,
+        )
+        _wait_background_job_finished(client, sandbox_id, job_id)
+
+        kill_resp = client.post(
+            f"/api/v1/sandboxes/{sandbox_id}/background/{job_id}/kill",
+            json={},
+        )
+        assert kill_resp.status_code == 200
+        payload = kill_resp.json()
+        assert payload["killed"] is False
+        assert payload["reason"] == "already_exited"
+        assert payload["exit_code"] == 0
+
+    @staticmethod
+    def test_kill_unknown_job_returns_404(client):
+        create_resp = client.post("/api/v1/sandboxes", json={})
+        sandbox_id = create_resp.json()["id"]
+
+        resp = client.post(
+            f"/api/v1/sandboxes/{sandbox_id}/background/no-such-job/kill",
+            json={},
+        )
+        assert resp.status_code == 404, resp.text
+
+    @staticmethod
+    def test_list_running_only(client):
+        create_resp = client.post("/api/v1/sandboxes", json={})
+        sandbox_id = create_resp.json()["id"]
+
+        finished_job = f"fin-{uuid.uuid4().hex[:4]}"
+        _exec_background(
+            client,
+            sandbox_id,
+            ["python3", "--version"],
+            job_id=finished_job,
+        )
+        _wait_background_job_finished(client, sandbox_id, finished_job)
+
+        running_job = f"run-{uuid.uuid4().hex[:4]}"
+        _exec_background(
+            client,
+            sandbox_id,
+            ["python3", "-c", "import time; time.sleep(3600)"],
+            job_id=running_job,
+        )
+
+        list_resp = client.get(
+            f"/api/v1/sandboxes/{sandbox_id}/background",
+            params={"running_only": "true"},
+        )
+        assert list_resp.status_code == 200
+        items = list_resp.json()["items"]
+        job_ids = {item["job_id"] for item in items}
+        assert running_job in job_ids
+        assert finished_job not in job_ids
+        assert all(item["running"] for item in items)
+
+        client.post(
+            f"/api/v1/sandboxes/{sandbox_id}/background/{running_job}/kill",
+            json={},
+        )
+
+    @staticmethod
+    def test_get_job_after_sandbox_destroy_returns_404(client):
+        create_resp = client.post("/api/v1/sandboxes", json={})
+        sandbox_id = create_resp.json()["id"]
+        job_id = f"gone-{uuid.uuid4().hex[:4]}"
+
+        started = _exec_background(
+            client,
+            sandbox_id,
+            ["python3", "-c", "import time; time.sleep(3600)"],
+            job_id=job_id,
+        )
+        assert started["started"] is True
+
+        delete_resp = client.delete(f"/api/v1/sandboxes/{sandbox_id}")
+        assert delete_resp.status_code in (200, 202, 204)
+
+        get_resp = client.get(
+            f"/api/v1/sandboxes/{sandbox_id}/background/{job_id}",
+        )
+        assert get_resp.status_code == 404, get_resp.text
 
 
 class TestSandboxListing:

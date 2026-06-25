@@ -93,5 +93,8 @@ landlock:
   #   hard_requirement: fail sandbox startup if Landlock is unavailable
   compatibility: best_effort
 
+namespace:
+  user: false
+
 network:
   mode: host
