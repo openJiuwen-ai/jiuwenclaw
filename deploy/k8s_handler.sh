@@ -200,6 +200,6 @@ if_any_nodes_gateway_label() {
         fi
     done
 
-    info "❌ Check result: No nodes with gateway=enable label **exist** in the cluster"
+    info "Check result: No nodes with gateway=enable label **exist** in the cluster"
     return 1
 }
