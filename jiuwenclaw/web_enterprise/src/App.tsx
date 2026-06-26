@@ -25,11 +25,13 @@ import {
 } from './features/tool-events/toolEventNormalizer';
 import { useWebSocket } from './hooks';
 import { webRequest } from './services/webClient';
-import { AgentMode, UserAnswer, ChatSendFile } from './types';
+import { AgentMode, UserAnswer, ChatSendFile, ModelEntry } from './types';
 import {
   useSessionStore,
   useChatStore,
   useTodoStore,
+  useExtSettingsStore,
+  extSettingsToRoutingParams,
   EXT_ROUTING_CHANGED_EVENT,
 } from './stores';
 import { useTranslation } from 'react-i18next';
@@ -377,6 +379,26 @@ function AppContent() {
     }
   }, [request, setSessions]);
 
+  const extUserId = useExtSettingsStore((state) => state.userId);
+  const extGroupId = useExtSettingsStore((state) => state.groupId);
+  const extBotId = useExtSettingsStore((state) => state.botId);
+
+  const fetchModels = useCallback(async () => {
+    try {
+      const routing = extSettingsToRoutingParams(useExtSettingsStore.getState());
+      const resp = await request<{
+        models: ModelEntry[];
+        active_model: string;
+        model_source?: string;
+      }>('models.list', routing);
+      if (resp?.models) {
+        setAvailableModels(resp.models, resp.active_model);
+      }
+    } catch (error) {
+      console.warn('Failed to fetch models list:', error);
+    }
+  }, [request, setAvailableModels]);
+
   // 获取服务端配置（通过 WS 方法）
   const fetchConfig = useCallback(async () => {
     try {
@@ -388,16 +410,8 @@ function AppContent() {
       setServerConfig(null);
       setConfigError(t('app.configError'));
     }
-    // 同步获取多模型列表
-    try {
-      const resp = await request<{ models: Array<{ model_name: string; api_base: string; api_key: string; model_provider: string; temperature?: number }>; active_model: string }>('models.list');
-      if (resp?.models) {
-        setAvailableModels(resp.models, resp.active_model);
-      }
-    } catch (error) {
-      console.warn('Failed to fetch models list:', error);
-    }
-  }, [request, t, setAvailableModels]);
+    await fetchModels();
+  }, [request, t, fetchModels]);
 
   const clearRestartAutoCloseTimer = useCallback(() => {
     if (restartAutoCloseTimerRef.current != null) {
@@ -486,7 +500,15 @@ function AppContent() {
   }, [clearHeartbeatToastTimer, heartbeatMessage, heartbeatUpdatedAt]);
 
   useEffect(() => {
-    if (!isConnected || initialDataLoaded) {
+    if (!isConnected) {
+      if (serverConfig || initialDataLoaded) {
+        setConfigError(t('app.configError'));
+        setInitialDataLoaded(false);
+      }
+      return;
+    }
+    setConfigError(null);
+    if (initialDataLoaded) {
       return;
     }
     void (async () => {
@@ -494,7 +516,15 @@ function AppContent() {
       await fetchSessions();
       setInitialDataLoaded(true);
     })();
-  }, [fetchConfig, fetchSessions, initialDataLoaded, isConnected]);
+  }, [fetchConfig, fetchSessions, initialDataLoaded, isConnected, serverConfig, t]);
+
+  // 扩展字段路由变更或重连后，按三级策略重新解析当前默认模型
+  useEffect(() => {
+    if (!isConnected) {
+      return;
+    }
+    void fetchModels();
+  }, [isConnected, extUserId, extGroupId, extBotId, fetchModels]);
 
   // 聊天处理完成后刷新会话列表，以便拾取自动生成的标题等元数据更新
   const prevProcessingRef = useRef(false);

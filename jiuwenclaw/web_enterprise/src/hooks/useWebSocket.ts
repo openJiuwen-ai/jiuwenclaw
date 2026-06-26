@@ -52,6 +52,12 @@ import {
 import { shouldHandleRequestEvent } from './requestEventFilter';
 
 const WS_RECONNECT_EVENT = 'jiuwenclaw:ws-reconnect-request';
+const BACKEND_PROBE_INTERVAL_MS = 10_000;
+const BACKEND_PROBE_TIMEOUT_MS = 8_000;
+
+interface ConnectionStatusPayload {
+  agent_ready?: boolean;
+}
 
 interface UseWebSocketOptions {
   activeSessionId?: string;
@@ -143,6 +149,8 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
   } = options;
 
   const [isConnected, setIsConnected] = useState(false);
+  const [wsReady, setWsReady] = useState(false);
+  const [backendReady, setBackendReady] = useState(false);
   const [connectionState, setConnectionState] =
     useState<WebConnectionState>('idle');
   const userInputVersionRef = useRef(0);
@@ -260,19 +268,19 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
   const handleConnectionAck = useCallback(
     (payload: Record<string, unknown>) => {
       const ackPayload = payload as unknown as ConnectionAckPayload;
-      setConnected(true);
+      setBackendReady(true);
       if (Array.isArray(ackPayload.tools)) {
         setAvailableTools(ackPayload.tools);
       }
       onConnectRef.current?.(ackPayload);
     },
-    [setAvailableTools, setConnected]
+    [setAvailableTools]
   );
 
   // 断开连接
   const disconnect = useCallback(() => {
     webClient.disconnect();
-  }, [setConnected]);
+  }, []);
 
   const request = useCallback(
     async <T = unknown>(
@@ -1362,7 +1370,8 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
       clearMessages();
       clearTodos();
       clearSubtasks();
-      setConnected(false);
+      setWsReady(false);
+      setBackendReady(false);
       // 不再重置上下文压缩信息，保持本地存储的状态
       // setContextCompressionStats(null);
       setContextWindowUsage(null);
@@ -1383,9 +1392,54 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
     setContextCompressionStats,
     setContextWindowUsage,
     setConnectionStats,
-    setConnected,
     setHeartbeatStatus,
   ]);
+
+  useEffect(() => {
+    const connected = wsReady && backendReady;
+    setIsConnected(connected);
+    setConnected(connected);
+  }, [backendReady, setConnected, wsReady]);
+
+  useEffect(() => {
+    if (!wsReady) {
+      setBackendReady(false);
+      return;
+    }
+
+    let cancelled = false;
+
+    const probeBackend = async () => {
+      try {
+        const status = await request<ConnectionStatusPayload>(
+          'connection.status',
+          {},
+          { timeoutMs: BACKEND_PROBE_TIMEOUT_MS }
+        );
+        if (cancelled) {
+          return;
+        }
+        setBackendReady(status?.agent_ready === true);
+      } catch (error) {
+        if (cancelled) {
+          return;
+        }
+        const webError = error as WebError;
+        setConnectionStats({ lastError: webError.message });
+        setBackendReady(false);
+      }
+    };
+
+    void probeBackend();
+    const timer = window.setInterval(() => {
+      void probeBackend();
+    }, BACKEND_PROBE_INTERVAL_MS);
+
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [request, setConnectionStats, wsReady]);
 
   useEffect(() => {
     const reconnectByDebugToggle = () => {
@@ -1421,22 +1475,24 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
   useEffect(() => {
     const unsub = webClient.onStateChange((state) => {
       setConnectionState(state);
-      const connected = state === 'ready';
-      setIsConnected(connected);
-      setConnected(connected);
+      const ready = state === 'ready';
+      setWsReady(ready);
+      if (!ready) {
+        setBackendReady(false);
+      }
       setConnectionStats({
         state,
         inflight: webClient.getInflightCount(),
         lastError: null,
       });
-      if (!connected && (state === 'reconnecting' || state === 'closed')) {
+      if (!ready && (state === 'reconnecting' || state === 'closed')) {
         onDisconnectRef.current?.();
       }
     });
     return () => {
       unsub();
     };
-  }, [setConnected, setConnectionStats]);
+  }, [setConnectionStats]);
 
   useEffect(() => {
     const timer = window.setInterval(() => {
