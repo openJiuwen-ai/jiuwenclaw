@@ -395,6 +395,7 @@ react:
       # --- L0 热缓存与落盘 ---
       history_qa_buffer_size: 3        # 进程内保留最近 N 个 QA 的 L0 全文；超出则 hydrate 读盘
       async_freeze_persist: true       # true= L0 写盘与 L1 定稿异步；cancel 路径仍同步 persist
+      freeze_overview_await_s: 3.0     # freeze 前等待 overview；显式传入 await_pending_overview
 
       # --- Catalog 二次压缩（块很多、目录超 token 预算时缩短 l1_text，不改 qa_id/handle）---
       # catalog_max_tokens: 8000       # [QA_BLOCK_CATALOG] 总 token 超此值触发缩短（默认 8000）

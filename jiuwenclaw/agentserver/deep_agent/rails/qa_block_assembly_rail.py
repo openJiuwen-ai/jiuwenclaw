@@ -9,6 +9,8 @@ import time
 from typing import Any
 
 from openjiuwen.core.context_engine.qa_artifact.store import QAArtifactStore
+from openjiuwen.core.context_engine.qa_artifact.assembly_state import clear_assembly_qa_artifact_state
+from openjiuwen.core.context_engine.qa_artifact.window import make_processor_ctx
 from openjiuwen.core.context_engine.qa_block.catalog import (
     build_catalog_section,
     build_catalog_text,
@@ -75,6 +77,7 @@ class JiuClawQABlockAssemblyRail(DeepAgentRail):
         assembly_start = time.perf_counter()
         session_id = session.get_session_id() if hasattr(session, "get_session_id") else ""
         context = ctx.context
+        clear_assembly_qa_artifact_state(context)
         registry = load_registry(session)
         registry = maybe_compact_catalog_l1(registry, self._config)
 
@@ -164,6 +167,18 @@ class JiuClawQABlockAssemblyRail(DeepAgentRail):
         save_registry(session, registry)
 
         window_qas = layer.build_window_qas(context)
+
+        qa_mgr = context.get_qa_artifact_manager()
+        if qa_mgr is not None and window_qas:
+            proc_ctx = make_processor_ctx(context, sys_operation=self.sys_operation)
+            store = qa_mgr.build_store(proc_ctx, proc_ctx.workspace)
+            if qa_mgr.needs_history_artifact_work(context, store, window_qas):
+                await qa_mgr.apply_artifact_to_context(
+                    proc_ctx,
+                    workspace=proc_ctx.workspace,
+                    window_qas=window_qas,
+                    context=context,
+                )
 
         ctx.extra[_ASSEMBLED_KEY] = True
         ctx.extra[_WINDOW_QAS_KEY] = window_qas

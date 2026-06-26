@@ -4,11 +4,13 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Any, Literal
 
+from openjiuwen.core.context_engine.qa_artifact.window import make_processor_ctx
 from openjiuwen.core.context_engine.qa_block.config import QABlockConfig
-from openjiuwen.core.context_engine.qa_block.freezer import QABlockFreezer
+from openjiuwen.core.context_engine.qa_block.freezer import FreezeCommitResult, QABlockFreezer
 from openjiuwen.core.context_engine.qa_block.registry import load_registry
 from openjiuwen.core.context_engine.qa_block.selector import resolve_summarizer_model
 from openjiuwen.core.context_engine.qa_block.store import QABlockStore
@@ -63,7 +65,11 @@ class JiuClawQABlockFreezeRail(DeepAgentRail):
         qa_id = registry.current_qa_id
         if not qa_id:
             return
-        finished = await mgr.await_pending_overview(qa_id, session_id=registry.session_id)
+        finished = await mgr.await_pending_overview(
+            qa_id,
+            session_id=registry.session_id,
+            timeout_s=self._config.freeze_overview_await_s,
+        )
         if not finished:
             logger.info(
                 "[QABlockFreezeRail] overview await timeout before freeze qa_id=%s",
@@ -86,6 +92,43 @@ class JiuClawQABlockFreezeRail(DeepAgentRail):
         model_client_config: Any,
     ) -> None:
         self._freezer.bind_summarizer_model_defaults(model_config, model_client_config)
+
+    async def _schedule_freeze_artifact_produce_async(
+        self,
+        *,
+        _session: Any,
+        context: Any,
+        qa_id: str,
+        native_messages: list,
+    ) -> None:
+        mgr = self._qa_artifact_mgr
+        if mgr is None or self.workspace is None:
+            return
+        artifact_ctx = make_processor_ctx(context, sys_operation=self.sys_operation)
+        mgr.schedule_freeze_artifact_produce(
+            artifact_ctx,
+            workspace=self.workspace,
+            qa_id=qa_id,
+            native_messages=native_messages,
+        )
+
+    def _on_freeze_commit(self, session: Any, context: Any, commit: FreezeCommitResult) -> None:
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            logger.warning(
+                "[QABlockFreezeRail] no event loop for freeze produce schedule qa_id=%s",
+                commit.entry.qa_id,
+            )
+            return
+        loop.create_task(
+            self._schedule_freeze_artifact_produce_async(
+                _session=session,
+                context=context,
+                qa_id=commit.entry.qa_id,
+                native_messages=commit.native_messages,
+            )
+        )
 
     async def after_invoke(self, ctx: AgentCallbackContext) -> None:
         if not self._config.enabled:
@@ -138,6 +181,7 @@ class JiuClawQABlockFreezeRail(DeepAgentRail):
             status=status,
             persist_mode="sync",
             summarizer_model=summarizer_model,
+            post_commit=lambda commit, s=actual_session, c=context: self._on_freeze_commit(s, c, commit),
         )
         if entry is not None:
             await context_engine.save_contexts(actual_session)
@@ -196,6 +240,7 @@ class JiuClawQABlockFreezeRail(DeepAgentRail):
             persist_mode=persist_mode,
             preloaded_qa_ids=preloaded if isinstance(preloaded, list) else None,
             summarizer_model=summarizer_model,
+            post_commit=lambda commit, s=session, c=context: self._on_freeze_commit(s, c, commit),
         )
         if entry is None:
             return
