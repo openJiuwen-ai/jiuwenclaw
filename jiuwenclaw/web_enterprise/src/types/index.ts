@@ -39,6 +39,7 @@ export interface ModelEntry {
   model_provider: string;
   timeout?: number;
   temperature?: number;
+  template_id?: string;
   /** 用于原子性重命名操作，指定原模型名 */
   original_model_name?: string;
 }
