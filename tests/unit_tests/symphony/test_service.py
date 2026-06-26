@@ -518,16 +518,60 @@ async def test_plan_from_score_fast_falls_back_for_empty_or_unknown_candidates(
     }
 
 
-async def test_plan_from_score_rejects_non_fast_mode(monkeypatch, tmp_path):
+async def test_plan_from_score_beam_uses_bidirectional_planner(monkeypatch, tmp_path):
+    artifacts = _artifacts(tmp_path)
+    seen = {}
+
+    class FakeBeamPlanner:
+        def __init__(self, artifacts_arg, **kwargs):
+            seen["artifacts"] = artifacts_arg
+            seen["kwargs"] = kwargs
+
+        async def plan(self, query):
+            seen["query"] = query
+            return {
+                "planning_mode": "bidirectional_beam",
+                "recommended_plans": [],
+                "plans": [],
+                "status": "no_plan",
+            }
+
+    monkeypatch.setattr(service, "load_score_artifacts", lambda score_dir: artifacts)
+    monkeypatch.setattr(service, "BidirectionalBeamPlanner", FakeBeamPlanner)
+
+    result = await service.plan_from_score(
+        tmp_path,
+        "beam plan",
+        llm_client=object(),
+        orchestration_config=SymphonyOrchestrationConfig(
+            mode="beam",
+            top_k=2,
+            max_depth=3,
+            min_edge_confidence=0.7,
+        ),
+        candidate_skill_ids=["skill-a", "unknown"],
+    )
+
+    assert result["planning_mode"] == "bidirectional_beam"
+    assert result["execution_graph"]["nodes"] == []
+    assert result["skill_retrieval"]["candidate_skill_ids"] == ["skill-a"]
+    assert seen["artifacts"] is artifacts
+    assert seen["query"] == "beam plan"
+    assert seen["kwargs"]["top_k"] == 2
+    assert seen["kwargs"]["max_depth"] == 3
+    assert seen["kwargs"]["candidate_skill_ids"] == ("skill-a",)
+
+
+async def test_plan_from_score_rejects_unknown_mode(monkeypatch, tmp_path):
     artifacts = _artifacts(tmp_path)
     monkeypatch.setattr(service, "load_score_artifacts", lambda score_dir: artifacts)
 
     with pytest.raises(ValueError, match="Unsupported orchestration mode"):
         await service.plan_from_score(
             tmp_path,
-            "beam plan",
+            "graph plan",
             llm_client=object(),
-            orchestration_config=SymphonyOrchestrationConfig(mode="beam"),
+            orchestration_config=SymphonyOrchestrationConfig(mode="graph"),
         )
 
 

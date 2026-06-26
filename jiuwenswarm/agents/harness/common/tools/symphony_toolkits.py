@@ -648,10 +648,11 @@ class SymphonyToolkit:
                         },
                         "mode": {
                             "type": "string",
-                            "enum": ["fast"],
+                            "enum": ["fast", "beam"],
                             "description": (
                                 "Optional planning mode. The current Symphony runtime "
-                                "supports fast planning only."
+                                "supports fast by default and beam as an opt-in "
+                                "bidirectional search mode."
                             ),
                         },
                         "candidate_skill_ids": {

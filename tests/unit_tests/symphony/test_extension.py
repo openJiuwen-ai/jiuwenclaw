@@ -290,22 +290,45 @@ def test_graph_filters_disabled_skills_from_visual_payload(monkeypatch, tmp_path
     }
 
 
-def test_plan_rejects_requested_beam_mode(monkeypatch, tmp_path):
+def test_plan_uses_requested_beam_mode(monkeypatch, tmp_path):
     configured_score_dir = tmp_path / "configured"
+    seen = {}
     monkeypatch.setattr(
         "jiuwenswarm.extensions.symphony.extension.load_symphony_config",
         lambda: symphony_config_from_dict(
             {"paths": {"score_dir": str(configured_score_dir)}}
         ),
     )
+    monkeypatch.setattr(
+        "jiuwenswarm.extensions.symphony.extension.load_score_artifacts",
+        lambda score_dir: {"score_dir": str(score_dir)},
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.extensions.symphony.extension.LLMConfig.from_default_model",
+        lambda: object(),
+    )
+
+    async def fake_plan_from_score(score_dir, query, received_llm_config, **kwargs):
+        del score_dir, query, received_llm_config
+        seen["orchestration_config"] = kwargs["orchestration_config"]
+        return {
+            "status": "ready",
+            "recommended_plans": [],
+            "execution_graph": {"edges": []},
+        }
+
+    monkeypatch.setattr(
+        "jiuwenswarm.extensions.symphony.extension.plan_from_score",
+        fake_plan_from_score,
+    )
 
     result = asyncio.run(
         SymphonyExtension().plan({"query": "do work", "mode": "beam"})
     )
 
-    assert result["success"] is False
-    assert result["mode"] == "fast"
-    assert "Unsupported Symphony orchestration mode: beam" in result["detail"]
+    assert result["success"] is True
+    assert result["mode"] == "beam"
+    assert seen["orchestration_config"].mode == "beam"
 
 
 def test_plan_presentation_uses_recommended_plan(monkeypatch, tmp_path):

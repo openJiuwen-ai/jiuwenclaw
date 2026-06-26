@@ -133,6 +133,32 @@ def test_toolkit_passes_fast_mode_to_rpc_handler():
     assert seen["mode"] == "fast"
 
 
+def test_toolkit_passes_beam_mode_to_rpc_handler():
+    registry = ExtensionRegistry.create_instance(
+        callback_framework=_CallbackFramework(),
+        config={},
+        logger=object(),
+    )
+    seen = {}
+
+    async def handler(params, request=None):
+        del request
+        seen.update(params)
+        return {"success": True, "params": params}
+
+    registry.register_rpc_handler("symphony.plan", handler)
+    registry.register_rpc_handler(
+        "symphony.score_status",
+        lambda _params, request=None: {"success": True, "exists": True, "stale": False},
+    )
+
+    result = asyncio.run(SymphonyToolkit().plan("use installed skills", mode="beam"))
+
+    assert result["success"] is True
+    assert "params" not in result
+    assert seen["mode"] == "beam"
+
+
 def test_toolkit_passes_candidate_skill_ids_to_rpc_handler():
     registry = ExtensionRegistry.create_instance(
         callback_framework=_CallbackFramework(),
@@ -787,7 +813,10 @@ def test_toolkit_get_tools_respects_symphony_enabled(monkeypatch):
         tool for tool in SymphonyToolkit().get_tools()
         if tool.card.name == "symphony_compose_score"
     )
-    assert compose_tool.card.input_params["properties"]["mode"]["enum"] == ["fast"]
+    assert compose_tool.card.input_params["properties"]["mode"]["enum"] == [
+        "fast",
+        "beam",
+    ]
     assert compose_tool.card.input_params["properties"]["candidate_skill_ids"] == {
         "type": "array",
         "items": {"type": "string"},

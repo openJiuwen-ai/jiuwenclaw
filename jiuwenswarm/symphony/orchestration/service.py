@@ -12,6 +12,7 @@ from jiuwenswarm.symphony.orchestration.artifacts import (
     load_score_artifacts,
 )
 from jiuwenswarm.symphony.orchestration.execution_graph import build_execution_graph
+from jiuwenswarm.symphony.orchestration.planning.beam import BidirectionalBeamPlanner
 from jiuwenswarm.symphony.orchestration.planning.fast import FastOneShotPlanner
 from jiuwenswarm.symphony.orchestration.planning.utils import clamp
 
@@ -21,6 +22,7 @@ async def plan_from_score(
     query: str,
     llm_config: LLMConfig | None = None,
     *,
+    top_k: int = 3,
     max_depth: int = 4,
     min_edge_confidence: float = 0.7,
     llm_client: Any | None = None,
@@ -31,6 +33,8 @@ async def plan_from_score(
     """Run online planning from an existing Symphony score."""
 
     if orchestration_config is not None:
+        top_k = orchestration_config.top_k
+        max_depth = orchestration_config.max_depth
         min_edge_confidence = orchestration_config.min_edge_confidence
     mode = orchestration_config.mode if orchestration_config is not None else "fast"
 
@@ -38,24 +42,32 @@ async def plan_from_score(
         load_score_artifacts(score_dir),
         disabled_skill_names,
     )
-    if mode != "fast":
+    if mode not in {"fast", "beam"}:
         raise ValueError(f"Unsupported orchestration mode: {mode}")
 
     selected_candidate_skill_ids, skill_retrieval = _input_candidate_summary(
         candidate_skill_ids,
         known_skill_ids=set(artifacts.skill_by_id),
     )
-    result = await FastOneShotPlanner(
-        artifacts,
-        llm_config=llm_config,
-        llm_client=llm_client,
-        min_edge_confidence=clamp(min_edge_confidence),
-        max_depth=max(
-            1,
-            int(orchestration_config.max_depth if orchestration_config else max_depth),
-        ),
-        candidate_skill_ids=selected_candidate_skill_ids,
-    ).plan(query)
+    if mode == "beam":
+        result = await BidirectionalBeamPlanner(
+            artifacts,
+            llm_config=llm_config,
+            llm_client=llm_client,
+            min_edge_confidence=clamp(min_edge_confidence),
+            top_k=max(1, int(top_k)),
+            max_depth=max(1, int(max_depth)),
+            candidate_skill_ids=selected_candidate_skill_ids,
+        ).plan(query)
+    else:
+        result = await FastOneShotPlanner(
+            artifacts,
+            llm_config=llm_config,
+            llm_client=llm_client,
+            min_edge_confidence=clamp(min_edge_confidence),
+            max_depth=max(1, int(max_depth)),
+            candidate_skill_ids=selected_candidate_skill_ids,
+        ).plan(query)
     result["skill_retrieval"] = skill_retrieval
     result["execution_graph"] = build_execution_graph(result, artifacts)
     return result

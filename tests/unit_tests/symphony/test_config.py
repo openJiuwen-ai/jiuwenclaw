@@ -88,16 +88,16 @@ def test_symphony_config_normalizes_values(monkeypatch, tmp_path):
     assert cfg.enabled is True
 
 
-@pytest.mark.parametrize("mode", ["fast", "", None])
-def test_symphony_config_accepts_fast_mode_aliases(mode):
+@pytest.mark.parametrize("mode", ["fast", "beam", "", None])
+def test_symphony_config_accepts_supported_orchestration_modes(mode):
     cfg = symphony_config.symphony_config_from_dict(
         {"orchestration": {"mode": mode}}
     )
 
-    assert cfg.orchestration.mode == "fast"
+    assert cfg.orchestration.mode == (mode or "fast")
 
 
-@pytest.mark.parametrize("mode", ["beam", "default", "graph", "unknown", "quick"])
+@pytest.mark.parametrize("mode", ["default", "graph", "unknown", "quick"])
 def test_symphony_config_rejects_non_llm_orchestration_modes(mode):
     with pytest.raises(ValueError, match="Unsupported Symphony orchestration mode"):
         symphony_config.symphony_config_from_dict(
