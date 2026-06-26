@@ -9,11 +9,11 @@ from jiuwenclaw.agentserver.skilldev.utils.path_utils import (
 )
 
 
-def create_upload_file_obs() -> Any:
+def create_upload_file_obs(session_id="default") -> Any:
     from jiuwenclaw.sandbox import sandbox_routing_enabled
     if sandbox_routing_enabled():
         from jiuwenclaw.agentserver.skilldev.utils.upload_file_obs_sandbox import UploadFileByOSMS
-        return UploadFileByOSMS()
+        return UploadFileByOSMS(session_id=session_id)
     from jiuwenclaw.agentserver.skilldev.utils.upload_file_obs import UploadFileOSMS
     return UploadFileOSMS()
 

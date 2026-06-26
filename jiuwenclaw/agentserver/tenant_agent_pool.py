@@ -228,7 +228,8 @@ class TenantAgentPool:
                 return agent_manager
 
             logger.info(
-                "[TenantAgentPool] 创建新 AgentManager 实例: agent_id=%s, service_id=%s",
+                "[session=%s] [TenantAgentPool] 创建新 AgentManager 实例: agent_id=%s, service_id=%s",
+                service_id,
                 agent_id,
                 service_id,
             )
@@ -259,7 +260,8 @@ class TenantAgentPool:
                     self._lock_loops.pop(stale_key, None)
 
                 logger.info(
-                    "[TenantAgentPool] AgentManager 实例创建完成: agent_id=%s, service_id=%s",
+                    "[session=%s] [TenantAgentPool] AgentManager 实例创建完成: agent_id=%s, service_id=%s",
+                    service_id,
                     agent_id,
                     service_id,
                 )

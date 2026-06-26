@@ -23,53 +23,54 @@ read_timeout = 300
 
 
 class UploadFileByOSMS(object):
-    def __init__(self):
+    def __init__(self, session_id="default"):
         self.trace_id = str(uuid.uuid4())[:16]
+        self.session_id = session_id
 
-    async def upload_file(self, file_path: str, useEdge=False):
+    async def upload_file(self, file_path: str, use_edge=False):
         try:
-            updload_file_info = await self.upload_file_and_get_info(file_path, useEdge=useEdge)
-            logger.info(f"upload_file_info:{updload_file_info}")
-            if isinstance(updload_file_info, str) or not updload_file_info:
+            upload_file_info = await self.upload_file_and_get_info(file_path, use_edge=use_edge)
+            logger.info(f"[session={self.session_id}] [SandboxUploadFileByOSMS] upload_file_info: {upload_file_info}")
+            if isinstance(upload_file_info, str) or not upload_file_info:
                 return None
-            return updload_file_info["url"]
+            return upload_file_info["url"]
         except Exception as e:
-            logger.error(f"上传文件失败:{e}", exc_info=True)
+            logger.error(f"[session={self.session_id}] [SandboxUploadFileByOSMS] 上传文件失败: {e}", exc_info=True)
 
-    async def upload_file_and_get_info(self, file_path: str, useEdge=False):
+    async def upload_file_and_get_info(self, file_path: str, use_edge=False):
         if not file_path:
-            logger.error("文件路径为空，无法上传")
+            logger.error(f"[session={self.session_id}] [SandboxUploadFileByOSMS] 文件路径为空，无法上传")
             return "文件路径为空"
 
         if not os.path.exists(file_path):
-            logger.error(f"文件{file_path}不存在")
+            logger.error(f"[session={self.session_id}] [SandboxUploadFileByOSMS] 文件{file_path}不存在")
             return "文件不存在"
 
         if not os.path.isfile(file_path):
-            logger.error(f"{file_path}不是文件")
+            logger.error(f"[session={self.session_id}] [SandboxUploadFileByOSMS] {file_path}不是文件")
             return "路径不是文件"
 
         file_info = await self.invoking_osms_prepare(file_path)
-        logger.info(f"1.开始做上传文件准备: {file_path}")
+        logger.info(f"[session={self.session_id}] [SandboxUploadFileByOSMS] 1.开始做上传文件准备: {file_path}")
         if not file_info:
-            logger.error(f"{file_path} 上传OSMS失败")
+            logger.error(f"[session={self.session_id}] [SandboxUploadFileByOSMS] {file_path} 上传OSMS失败")
             return "{}:文件上传失败OSMS".format(os.path.basename(file_path))
 
-        logger.info(f"2.开始上传: {file_path}")
+        logger.info(f"[session={self.session_id}] [SandboxUploadFileByOSMS] 2.开始上传: {file_path}")
         result = await self.read_file_as_bytes(file_path)
         if not result["success"]:
             return "{}:{}".format(result["file_name"], result["error"])
         upload_file_info = await self.upload_file_to_obs(file_info["uploadInfos"][0], result["bytes"])
 
         if not upload_file_info:
-            logger.error(f"{file_path} 上传OBS失败")
+            logger.error(f"[session={self.session_id}] [SandboxUploadFileByOSMS] {file_path} 上传OBS失败")
             return "{}:上传文件到 obs 报错".format(os.path.basename(file_path))
 
-        logger.info(f"3.查看上传结果: {file_path}")
-        fileDetailInfos = await self.invoking_osms_complete_and_query(file_info, useEdge=useEdge)
-        if not fileDetailInfos:
-            logger.error(f"获取osms的cdn链接失败：{file_path}")
-        return fileDetailInfos
+        logger.info(f"[session={self.session_id}] [SandboxUploadFileByOSMS] 3.查看上传结果: {file_path}")
+        file_detail_info = await self.invoking_osms_complete_and_query(file_info, use_edge=use_edge)
+        if not file_detail_info:
+            logger.error(f"[session={self.session_id}] [SandboxUploadFileByOSMS] 获取osms的cdn链接失败：{file_path}")
+        return file_detail_info
 
     async def read_file_as_bytes(self, file_path):
         # 读取任意文件的原始二进制内容
@@ -89,7 +90,7 @@ class UploadFileByOSMS(object):
         except PermissionError:
             result["error"] = "没有读取权限"
         except Exception as e:
-            logger.error(f"读取文件失败: {e}", exc_info=True)
+            logger.error(f"[session={self.session_id}] [SandboxUploadFileByOSMS] 读取文件失败: {e}", exc_info=True)
             result["error"] = f"读取失败: {str(e)}"
         return result
 
@@ -104,11 +105,17 @@ class UploadFileByOSMS(object):
                 response.raise_for_status()
                 return True
             except Exception as e:
-                logger.error(f"upload file to obs fail:{e}", exc_info=True)
+                logger.error(
+                    f"[session={self.session_id}] [SandboxUploadFileByOSMS] upload file to obs fail: {e}",
+                    exc_info=True
+                )
                 retry_time += 1
                 time.sleep(retry_delay * (2 ** retry_time))
                 if retry_time > MAX_TIMES:
-                    logger.error("{}上传文件到 obs 报错{}".format(file_info["url"], str(e)))
+                    logger.error(
+                        "[session={}] [SandboxUploadFileByOSMS] {}上传文件到 obs 报错{}"
+                        .format(self.session_id, file_info["url"], str(e))
+                    )
                     return False
 
     async def _calculate_file_sha256(self, file_path):
@@ -146,14 +153,20 @@ class UploadFileByOSMS(object):
             try:
                 async with aiohttp.ClientSession() as session:
                     async with session.post(url=osms_prepare_url, headers=headers, json=body, ssl=True) as response:
-                        logger.info(f"Invoke prepare, post to {osms_prepare_url} response: {response}")
+                        logger.info(
+                            f"[session={self.session_id}] [SandboxUploadFileByOSMS] Invoke prepare, "
+                            f"post to {osms_prepare_url} response: {response}"
+                        )
                         if response.status != SUCCESS_STATUS_CODE:
                             text = await response.text()
                             raise RuntimeError(f"Invoke prepare failed, SUCCESS_STATUS_CODE={SUCCESS_STATUS_CODE}, " +
                                                f"but status={response.status}, body={text}")
 
                         resp = await response.json()
-                        logger.info(f"prepare interface business resp: {resp}")
+                        logger.info(
+                            f"[session={self.session_id}] [SandboxUploadFileByOSMS] "
+                            f"prepare interface business resp: {resp}"
+                        )
                         if resp.get("code") != '0':
                             raise RuntimeError(f"prepare interface business error: {resp}")
                         if 'objectId' not in resp or 'draftId' not in resp or 'uploadInfos' not in resp:
@@ -164,34 +177,44 @@ class UploadFileByOSMS(object):
                             raise RuntimeError("The osms prepare interface url and headers for uploadInfos is empty")
                         return resp
             except Exception as e:
-                logger.error(f"{times + 1}st invoking osms prepare interface throws exception: {e}", exc_info=True)
+                logger.error(
+                    f"[session={self.session_id}] [SandboxUploadFileByOSMS]"
+                    f" {times + 1}st invoking osms prepare interface throws exception: {e}",
+                    exc_info=True
+                )
                 if times == MAX_TIMES - 1:
                     raise RuntimeError(
                         f"osms prepare interface call failed after retry limit, type: {type(e).__name__}", e) from e
         return {}
 
-    async def invoking_osms_complete_and_query(self, file_info, useEdge=False):
+    async def invoking_osms_complete_and_query(self, file_info, use_edge=False):
         headers = self._build_headers()
         body = {
             "objectId": file_info["objectId"],
             "draftId": file_info["draftId"],
             "expireTime": 3600,
             # completeAndQuery 调skill_scan的话，就带useEdge=true
-            "useEdge": useEdge
+            "useEdge": use_edge
         }
         for times in range(MAX_TIMES):
             try:
                 async with aiohttp.ClientSession() as session:
                     async with session.post(url=osms_complete_query_url, headers=headers, json=body,
                                             ssl=True) as response:
-                        logger.info(f"Invoke completeAndQuery, post to {osms_complete_query_url} response: {response}")
+                        logger.info(
+                            f"[session={self.session_id}] [SandboxUploadFileByOSMS] "
+                            f"Invoke completeAndQuery, post to {osms_complete_query_url} response: {response}"
+                        )
                         if response.status != SUCCESS_STATUS_CODE:
                             text = await response.text()
                             raise RuntimeError(
                                 f"Invoke completeAndQuery failed, SUCCESS_STATUS_CODE={SUCCESS_STATUS_CODE}, " +
                                 f"but status={response.status}, body={text}")
                         resp = await response.json()
-                        logger.info(f"completeAndQuery interface business resp: {resp}")
+                        logger.info(
+                            f"[session={self.session_id}] [SandboxUploadFileByOSMS] completeAndQuery "
+                            f"interface business resp: {resp}"
+                        )
                         if resp.get("code") != '0':
                             raise RuntimeError(f"completeAndQuery interface business error: {resp}")
                         file_detail = resp.get("fileDetailInfo")
@@ -199,10 +222,13 @@ class UploadFileByOSMS(object):
                             raise RuntimeError("The osms completeAndQuery interface fileDetailInfo.url is empty")
                         return file_detail
             except Exception as e:
-                logger.error(f"{times + 1}st invoking osms completeAndQuery interface throws exception：{e}",
-                             exc_info=True)
+                logger.error(
+                    f"[session={self.session_id}] [SandboxUploadFileByOSMS] "
+                    f"{times + 1}st invoking osms completeAndQuery interface throws exception：{e}",
+                    exc_info=True
+                )
                 if times == MAX_TIMES - 1:
                     raise RuntimeError(
-                        f"osms completeAndQuery interface call failed after retry limit, type :{type(e).__name__}",
+                        f"osms completeAndQuery interface call failed after retry limit, type: {type(e).__name__}",
                         e) from e
         return None

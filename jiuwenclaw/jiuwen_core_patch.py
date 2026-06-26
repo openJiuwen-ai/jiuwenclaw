@@ -21,6 +21,7 @@ from openjiuwen.core.foundation.llm.model_clients.siliconflow_model_client impor
 )
 from openjiuwen.core.session.stream import OutputSchema
 from jiuwenclaw.parser_patch import assemble_openai_response
+
 llm_logger = logging.getLogger("jiuwenclaw.agentserver")
 # Session context for retry notifications.
 # Set by react_agent._call_llm_stream before calling llm.stream/invoke.
@@ -33,7 +34,8 @@ _ORIGINAL_BUILD_REQUEST_PARAMS = None
 # ============================================================
 _parse_response = OpenAIModelClient._parse_response
 _orig_invoke = OpenAIModelClient.invoke
-_orig_stream = OpenAIModelClient.stream # SiliconFlow 原始方法引用
+_orig_stream = OpenAIModelClient.stream
+# SiliconFlow 原始方法引用
 _sf_orig_invoke = SiliconFlowModelClient.invoke
 _sf_orig_stream = SiliconFlowModelClient.stream
 
@@ -94,8 +96,8 @@ class RetryMixin:
             return "请求超时"
         # pylint: disable=complicate-comprehension
         if any(kw in error_msg for kw in ("connection error", "connecttimeout", "connect error",
-                                            "network is unreachable", "connection reset", "broken pipe",
-                                            "connection refused")):  # pylint: disable=complicate-comprehension
+                                          "network is unreachable", "connection reset", "broken pipe",
+                                          "connection refused")):  # pylint: disable=complicate-comprehension
             return "连接错误"
 
         return "未知错误"
@@ -226,7 +228,7 @@ class RetryMixin:
         return False
 
     def _calculate_backoff(self, attempt: int, exc: Exception,
-                        cfg: LlmRetryConfig) -> float:
+                           cfg: LlmRetryConfig) -> float:
         """指数退避 + Retry-After 头（取 max，避免等待过短）。"""
         backoff = min(cfg.initial_backoff * (cfg.backoff_factor ** attempt), cfg.max_backoff)
         retry_after = self._extract_retry_after(exc)
@@ -248,7 +250,7 @@ class RetryMixin:
                     payload={
                         "output": {
                             "output": f"\n\n⚠️ 模型调用异常 [{reason}], "
-                                    f"将在 {backoff:.1f} 秒后进行第 {attempt}/{max_attempts} 次重试...",
+                                      f"将在 {backoff: .1f} 秒后进行第 {attempt}/{max_attempts} 次重试...",
                             "result_type": "text",
                         },
                     },
@@ -312,14 +314,18 @@ class RetryMixin:
                 backoff = self._calculate_backoff(attempt, e, cfg)
                 if attempt >= cfg.max_attempts:
                     break
-                llm_logger.warning(f"LLM invoke 失败 [{reason}] [{details}]，将在 {backoff:.1f}s 后重试, "
-                    f"(第 {attempt + 1} 次重试 / 共 {cfg.max_attempts} 次): {e}")
+                llm_logger.warning(
+                    f"LLM invoke 失败 [{reason}] [{details}]，将在 {backoff: .1f}s 后重试, "
+                    f"(第 {attempt + 1} 次重试 / 共 {cfg.max_attempts} 次): {e}"
+                )
                 await self._notify_retry_start(reason, attempt + 1, cfg.max_attempts, backoff)
                 await asyncio.sleep(backoff)
 
         reason = self._classify_error(last_error, cfg)
         details = self._extract_error_details(last_error)
-        llm_logger.error(f"LLM invoke 重试次数耗尽 [{reason}] [{details}]，已执行 {cfg.max_attempts} 次重试）: {last_error}")
+        llm_logger.error(
+            f"LLM invoke 重试次数耗尽 [{reason}] [{details}]，已执行 {cfg.max_attempts} 次重试）: {last_error}"
+        )
         await self._notify_retry_end()
         raise last_error
 
@@ -353,14 +359,17 @@ class RetryMixin:
                 backoff = self._calculate_backoff(attempt, e, cfg)
                 if attempt >= cfg.max_attempts:
                     break
-                llm_logger.warning(f"LLM stream 失败 [{reason}] [{details}]，将在 {backoff:.1f}s 后重试 "
-                    f"(第 {attempt + 1} 次重试 / 共 {cfg.max_attempts} 次): {e}")
+                llm_logger.warning(
+                    f"LLM stream 失败 [{reason}] [{details}]，将在 {backoff: .1f}s 后重试 "
+                    f"(第 {attempt + 1} 次重试 / 共 {cfg.max_attempts} 次): {e}"
+                )
                 await self._notify_retry_start(reason, attempt + 1, cfg.max_attempts, backoff)
                 await asyncio.sleep(backoff)
 
         reason = self._classify_error(last_error, cfg)
         details = self._extract_error_details(last_error)
-        llm_logger.error(f"LLM stream 重试次数耗尽 [{reason}] [{details}]，已尝试{cfg.max_attempts} 次重试）: {last_error}")
+        llm_logger.error(
+            f"LLM stream 重试次数耗尽 [{reason}] [{details}]，已尝试{cfg.max_attempts} 次重试）: {last_error}")
         await self._notify_retry_end()
         raise last_error
 
@@ -473,10 +482,10 @@ class PatchOpenAIModelClient(RetryMixin, OpenAIModelClient):
             _model_name = getattr(self.model_config, "model_name", "") or ""
         # Check if it's Huawei MaaS AND model is glm-5.1 (the affected model)
         _is_maas_endpoint = (
-            "modelarts-maas.com" in _api_base
-            or "modelarts" in _api_base.lower()
-            or "huaweiapaas.com" in _api_base
-            or "agentarts" in _api_base.lower()
+                "modelarts-maas.com" in _api_base
+                or "modelarts" in _api_base.lower()
+                or "huaweiapaas.com" in _api_base
+                or "agentarts" in _api_base.lower()
         )
         _is_glm51 = _model_name.lower() in ("glm-5.1", "glm5.1")
         _is_huawei_maas = _is_maas_endpoint and _is_glm51
@@ -609,20 +618,26 @@ class PatchOpenAIModelClient(RetryMixin, OpenAIModelClient):
         return await _parse_response(self, response, parser)
 
     async def invoke(
-        self,
-        messages,
-        *,
-        tools=None,
-        temperature=None,
-        top_p=None,
-        model=None,
-        max_tokens=None,
-        stop=None,
-        output_parser=None,
-        timeout=None,
-        **kwargs,
+            self,
+            messages,
+            *,
+            tools=None,
+            temperature=None,
+            top_p=None,
+            model=None,
+            max_tokens=None,
+            stop=None,
+            output_parser=None,
+            timeout=None,
+            **kwargs,
     ):
-        return await self._invoke_with_retry(
+        session_id = self.model_client_config.model_extra.get("session", "default")
+        llm_logger.info(
+            "[session=%s] [LLM] Input messages: %s",
+            session_id,
+            str(messages)
+        )
+        resp = await self._invoke_with_retry(
             _orig_invoke,
             self,
             messages,
@@ -636,69 +651,80 @@ class PatchOpenAIModelClient(RetryMixin, OpenAIModelClient):
             timeout=timeout,
             **kwargs,
         )
+        llm_logger.info(
+            "[session=%s] [LLM] Generation completed.",
+            session_id
+        )
+        return resp
 
     async def stream(
-        self,
-        messages,
-        *,
-        tools=None,
-        temperature=None,
-        top_p=None,
-        model=None,
-        max_tokens=None,
-        stop=None,
-        output_parser=None,
-        timeout=None,
-        **kwargs,
+            self,
+            messages,
+            *,
+            tools=None,
+            temperature=None,
+            top_p=None,
+            model=None,
+            max_tokens=None,
+            stop=None,
+            output_parser=None,
+            timeout=None,
+            **kwargs,
     ):
         session_id = self.model_client_config.model_extra.get("session", "default")
         llm_logger.info(
-            "[LLM] [session_id=%s] Input messages: %s",
+            "[session=%s] [LLM] Input messages: %s",
             session_id,
             str(messages)
         )
         chunk_counter = 0
         async for chunk in self._stream_with_retry(
-            _orig_stream,
-            self,
-            messages,
-            tools=tools,
-            temperature=temperature,
-            top_p=top_p,
-            model=model,
-            max_tokens=max_tokens,
-            stop=stop,
-            output_parser=output_parser,
-            timeout=timeout,
-            **kwargs,
+                _orig_stream,
+                self,
+                messages,
+                tools=tools,
+                temperature=temperature,
+                top_p=top_p,
+                model=model,
+                max_tokens=max_tokens,
+                stop=stop,
+                output_parser=output_parser,
+                timeout=timeout,
+                **kwargs,
         ):
             chunk_counter += 1
-            if chunk_counter % 10 == 0:
+            if chunk_counter % 10 == 1:
                 llm_logger.info(
-                    "[LLM] [session_id=%s] Output chunk #%d: %s...",
+                    "[session=%s] [LLM] Output chunk #%d: %s...",
                     session_id,
                     chunk_counter,
                     str(chunk)[:200]
                 )
             yield chunk
 
+        llm_logger.info(
+            "[session=%s] [LLM] Generation completed. Total chunks: %d",
+            session_id,
+            chunk_counter
+        )
+
 
 class PatchSiliconFlowModelClient(RetryMixin, SiliconFlowModelClient):
     """带重试的 SiliconFlowModelClient。结构同 OpenAI，包装原始方法即可。"""
 
     async def invoke(
-        self,
-        messages,
-        *,
-        tools=None,
-        temperature=None,
-        top_p=None,
-        model=None,
-        max_tokens=None,
-        stop=None,
-        output_parser=None,
-        timeout=None,
-        **kwargs,
+            self,
+            messages,
+            *,
+            tools=None,
+            temperature=None,
+            top_p=None,
+            model=None,
+            max_tokens=None,
+            stop=None,
+            output_parser=None,
+            timeout=None,
+            **kwargs,
     ):
         return await self._invoke_with_retry(
             _sf_orig_invoke,
@@ -716,32 +742,32 @@ class PatchSiliconFlowModelClient(RetryMixin, SiliconFlowModelClient):
         )
 
     async def stream(
-        self,
-        messages,
-        *,
-        tools=None,
-        temperature=None,
-        top_p=None,
-        model=None,
-        max_tokens=None,
-        stop=None,
-        output_parser=None,
-        timeout=None,
-        **kwargs,
-    ):
-        async for chunk in self._stream_with_retry(
-            _sf_orig_stream,
             self,
             messages,
-            tools=tools,
-            temperature=temperature,
-            top_p=top_p,
-            model=model,
-            max_tokens=max_tokens,
-            stop=stop,
-            output_parser=output_parser,
-            timeout=timeout,
+            *,
+            tools=None,
+            temperature=None,
+            top_p=None,
+            model=None,
+            max_tokens=None,
+            stop=None,
+            output_parser=None,
+            timeout=None,
             **kwargs,
+    ):
+        async for chunk in self._stream_with_retry(
+                _sf_orig_stream,
+                self,
+                messages,
+                tools=tools,
+                temperature=temperature,
+                top_p=top_p,
+                model=model,
+                max_tokens=max_tokens,
+                stop=stop,
+                output_parser=output_parser,
+                timeout=timeout,
+                **kwargs,
         ):
             yield chunk
 

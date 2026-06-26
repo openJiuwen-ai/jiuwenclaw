@@ -342,10 +342,10 @@ class AgentWebSocketServer:
             logger.exception("[AgentWebSocketServer] -> OpenAbility 心跳循环异常: %s", e)
 
     async def _handle_link_ping(
-        self,
-        ws: Any,
-        env: E2AEnvelope,
-        send_lock: asyncio.Lock,
+            self,
+            ws: Any,
+            env: E2AEnvelope,
+            send_lock: asyncio.Lock,
     ) -> None:
         """Gateway 经 OA 发来的链路 ping：立即 pong 并主动发一帧 link heartbeat。"""
         from jiuwenclaw.agentserver.open_ability_utils import get_sandbox_id
@@ -772,7 +772,9 @@ class AgentWebSocketServer:
         try:
             data = json.loads(raw)
             logger.info(
-                "[AgentWebSocketServer] inbound message: type=%s request_id=%s channel=%s method=%s is_stream=%s",
+                "[session=%s] [AgentWebSocketServer] inbound message: "
+                "type=%s request_id=%s channel=%s method=%s is_stream=%s",
+                data.get("session_id") if isinstance(data, dict) else None,
                 data.get("type") if isinstance(data, dict) else None,
                 data.get("request_id") if isinstance(data, dict) else None,
                 (data.get("channel") or data.get("channel_id")) if isinstance(data, dict) else None,
@@ -1104,7 +1106,7 @@ class AgentWebSocketServer:
                     sequence=chunk_count - 1,
                 )
                 logger.info(
-                    "[AgentWebSocketServer] [%s] send stream chunk request_id=%s response_id=%s seq=%s",
+                    "[session=%s] [AgentWebSocketServer] send stream chunk request_id=%s response_id=%s seq=%s",
                     str(session_id or "default").strip(),
                     chunk.request_id,
                     request.request_id,

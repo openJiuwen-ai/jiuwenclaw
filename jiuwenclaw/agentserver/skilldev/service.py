@@ -69,6 +69,7 @@ from jiuwenclaw.agentserver.skilldev.file_write_chunks import (
     FileWriteChunkError,
     FileWriteStagingStore,
 )
+from jiuwenclaw.agentserver.skilldev.utils import create_upload_file_obs
 from jiuwenclaw.agentserver.skilldev.utils.download_file_from_url import download_file
 from jiuwenclaw.agentserver.skilldev.utils.skill_md_validation import (
     validate_skill_md_content,
@@ -77,15 +78,7 @@ from jiuwenclaw.agentserver.skilldev.utils.static_security import (
     validate_scripts_file_content,
 )
 
-
 logger = logging.getLogger(__name__)
-
-def _create_upload_file_obs() -> any:
-    if os.getenv("SANDBOX_ENABLE", "").strip().lower() == "true":
-        from jiuwenclaw.agentserver.skilldev.utils.upload_file_obs_sandbox import UploadFileByOSMS
-        return UploadFileByOSMS()
-    from jiuwenclaw.agentserver.skilldev.utils.upload_file_obs import UploadFileOSMS
-    return UploadFileOSMS()
 
 # method → handler 映射，避免 if/elif 链
 _METHOD_DISPATCH = {
@@ -168,7 +161,7 @@ class SkillDevService:
     # ------------------------------------------------------------------
 
     async def _handle_start(
-        self, params: dict, request_id: str, channel_id: str, session_id: str
+            self, params: dict, request_id: str, channel_id: str, session_id: str
     ) -> AsyncIterator[AgentResponseChunk]:
         task_id = str(params.get("task_id") or session_id or "").strip()
         if not task_id:
@@ -275,7 +268,7 @@ class SkillDevService:
     # 仅允许在任务开始前调用（存在 state.json 时拒绝）
     # ------------------------------------------------------------------
     async def _handle_parse_skill(
-        self, params: dict, request_id: str, channel_id: str, session_id: str
+            self, params: dict, request_id: str, channel_id: str, session_id: str
     ) -> AsyncIterator[AgentResponseChunk]:
         task_id = str(
             params.get("task_id") or params.get("session_id") or session_id or ""
@@ -326,7 +319,7 @@ class SkillDevService:
                 )
                 yield self._error_chunk(request_id, channel_id, f"skill 包下载失败: {exc}")
                 return
-            
+
         else:
             filename = str(file_obj.get("filename") or "").strip()
             content_b64 = str(file_obj.get("base64Data") or "").strip()
@@ -346,7 +339,7 @@ class SkillDevService:
 
             skill_dir = workspace / "skill"
             download_path = workspace / f"imported{suffix}"
-            
+
             raw = base64.b64decode(content_b64)
             download_path.write_bytes(raw)
 
@@ -389,7 +382,7 @@ class SkillDevService:
     # ------------------------------------------------------------------
 
     async def _handle_respond(
-        self, params: dict, request_id: str, channel_id: str, session_id: str
+            self, params: dict, request_id: str, channel_id: str, session_id: str
     ) -> AsyncIterator[AgentResponseChunk]:
         task_id = params.get("task_id")
         if not task_id:
@@ -487,7 +480,7 @@ class SkillDevService:
     # ------------------------------------------------------------------
 
     def _handle_status(
-        self, params: dict, request_id: str, channel_id: str, session_id: str
+            self, params: dict, request_id: str, channel_id: str, session_id: str
     ) -> AgentResponseChunk:
         task_id = params.get("task_id")
         if not task_id:
@@ -511,7 +504,7 @@ class SkillDevService:
         )
 
     def _handle_session_list(
-        self, params: dict, request_id: str, channel_id: str, session_id: str
+            self, params: dict, request_id: str, channel_id: str, session_id: str
     ) -> AgentResponseChunk:
         if self._deps.session_history is None:
             return self._error_chunk(request_id, channel_id, "session history service is unavailable")
@@ -524,12 +517,12 @@ class SkillDevService:
         )
 
     async def _handle_restore(
-        self,
-        params: dict,
-        request_id: str,
-        channel_id: str,
-        session_id: str,
-        is_stream: bool = False,
+            self,
+            params: dict,
+            request_id: str,
+            channel_id: str,
+            session_id: str,
+            is_stream: bool = False,
     ) -> AsyncIterator[AgentResponseChunk]:
         if self._deps.session_history is None:
             yield self._error_chunk(request_id, channel_id, "session history service is unavailable")
@@ -545,10 +538,10 @@ class SkillDevService:
         payload = {"ok": True, **restored}
         if is_stream:
             for chunk in encode_restore_payload_chunks(
-                payload,
-                request_id=request_id,
-                channel_id=channel_id,
-                task_id=task_id,
+                    payload,
+                    request_id=request_id,
+                    channel_id=channel_id,
+                    task_id=task_id,
             ):
                 yield chunk
             yield AgentResponseChunk(
@@ -589,7 +582,7 @@ class SkillDevService:
     # ------------------------------------------------------------------
 
     async def _handle_download(
-        self, params: dict, request_id: str, channel_id: str, session_id: str
+            self, params: dict, request_id: str, channel_id: str, session_id: str
     ) -> AgentResponseChunk:
         task_id = params.get("task_id")
         if not task_id:
@@ -610,7 +603,7 @@ class SkillDevService:
         if not zip_path:
             return self._error_chunk(request_id, channel_id, "产物文件不存在")
         try:
-            upload_file_obs = _create_upload_file_obs()
+            upload_file_obs = create_upload_file_obs(session_id=task_id)
             download_url = await upload_file_obs.upload_file(str(zip_path))
         except Exception as exc:
             logger.info(
@@ -639,7 +632,7 @@ class SkillDevService:
     # skilldev.cancel — 取消任务
     # ------------------------------------------------------------------
     def _handle_cancel(
-        self, params: dict, request_id: str, channel_id: str, session_id: str
+            self, params: dict, request_id: str, channel_id: str, session_id: str
     ) -> AgentResponseChunk:
         task_id = params.get("task_id", "")
         event = self._deps.cancel_events.get(task_id)
@@ -662,7 +655,7 @@ class SkillDevService:
     # ------------------------------------------------------------------
 
     def _handle_file_list(
-        self, params: dict, request_id: str, channel_id: str, session_id: str
+            self, params: dict, request_id: str, channel_id: str, session_id: str
     ) -> AgentResponseChunk:
         task_id = params.get("task_id")
         if not task_id:
@@ -690,12 +683,12 @@ class SkillDevService:
     # skilldev.file.read — 读取工作区文件内容
     # ------------------------------------------------------------------
     async def _handle_file_read(
-        self,
-        params: dict,
-        request_id: str,
-        channel_id: str,
-        session_id: str,
-        is_stream: bool = False,
+            self,
+            params: dict,
+            request_id: str,
+            channel_id: str,
+            session_id: str,
+            is_stream: bool = False,
     ) -> AsyncIterator[AgentResponseChunk]:
         task_id = params.get("task_id")
         file_path = params.get("path", "")
@@ -730,11 +723,11 @@ class SkillDevService:
         payload = {"ok": True, "path": file_path, "content": content, "editable": editable}
         if is_stream:
             for chunk in encode_file_read_payload_chunks(
-                payload,
-                request_id=request_id,
-                channel_id=channel_id,
-                task_id=str(task_id),
-                path=str(file_path),
+                    payload,
+                    request_id=request_id,
+                    channel_id=channel_id,
+                    task_id=str(task_id),
+                    path=str(file_path),
             ):
                 yield chunk
             yield AgentResponseChunk(
@@ -778,7 +771,7 @@ class SkillDevService:
     _MAX_FILE_CONTENT_SIZE = 1_048_576  # 1MB
 
     def _handle_file_write(
-        self, params: dict, request_id: str, channel_id: str, session_id: str
+            self, params: dict, request_id: str, channel_id: str, session_id: str
     ) -> AgentResponseChunk:
         task_id = params.get("task_id")
         file_path = params.get("path", "")
@@ -894,7 +887,7 @@ class SkillDevService:
 
     @staticmethod
     def _resolve_file_write_target(
-        workspace: Path, file_path: str
+            workspace: Path, file_path: str
     ) -> tuple[Path, Path] | str:
         skill_dir = workspace / "skill"
         full_path = (skill_dir / file_path).resolve()
@@ -909,15 +902,15 @@ class SkillDevService:
         return skill_dir, full_path
 
     def _commit_file_write_content(
-        self,
-        *,
-        task_id: str,
-        file_path: str,
-        content: str,
-        workspace: Path,
-        skill_dir: Path,
-        full_path: Path,
-        session_id: str,
+            self,
+            *,
+            task_id: str,
+            file_path: str,
+            content: str,
+            workspace: Path,
+            skill_dir: Path,
+            full_path: Path,
+            session_id: str,
     ) -> dict | str:
         try:
             content.encode("utf-8")
@@ -993,7 +986,7 @@ class SkillDevService:
 
     @staticmethod
     def _rpc_error_chunk(
-        request_id: str, channel_id: str, error_code: str
+            request_id: str, channel_id: str, error_code: str
     ) -> AgentResponseChunk:
         """用于非流式 RPC 请求的错误响应（不含 event_type，确保 gateway 返回 type=res）."""
         return AgentResponseChunk(
@@ -1008,7 +1001,7 @@ class SkillDevService:
     # ------------------------------------------------------------------
 
     async def _handle_batch_upload(
-        self, params: dict, request_id: str, channel_id: str, session_id: str
+            self, params: dict, request_id: str, channel_id: str, session_id: str
     ) -> AgentResponseChunk:
         session_ids = params.get("session_ids")
         if not isinstance(session_ids, list) or not session_ids:
@@ -1024,7 +1017,7 @@ class SkillDevService:
         )
 
         results: list[dict] = []
-        upload_file_obs = _create_upload_file_obs()
+        upload_file_obs = create_upload_file_obs(session_id=task_id)
 
         for sid in session_ids:
             sid = str(sid or "").strip()
@@ -1109,7 +1102,7 @@ class SkillDevService:
     # ------------------------------------------------------------------
 
     async def _handle_batch_download(
-        self, params: dict, request_id: str, channel_id: str, session_id: str
+            self, params: dict, request_id: str, channel_id: str, session_id: str
     ) -> AgentResponseChunk:
         items = params.get("items")
         if not isinstance(items, list) or not items:
@@ -1192,7 +1185,7 @@ class SkillDevService:
 
     @staticmethod
     def _event_to_chunk(
-        event: SkillDevEvent, request_id: str, channel_id: str
+            event: SkillDevEvent, request_id: str, channel_id: str
     ) -> AgentResponseChunk:
         return AgentResponseChunk(
             request_id=request_id,
@@ -1203,7 +1196,7 @@ class SkillDevService:
 
     @staticmethod
     def _error_chunk(
-        request_id: str, channel_id: str, message: str
+            request_id: str, channel_id: str, message: str
     ) -> AgentResponseChunk:
         return AgentResponseChunk(
             request_id=request_id,

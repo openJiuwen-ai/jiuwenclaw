@@ -150,10 +150,10 @@ class JiuWenClaw:
     """
 
     def __init__(
-        self,
-        user_workspace_dir: str | None = None,
-        agent_id: str | None = None,
-        service_id: str | None = None,
+            self,
+            user_workspace_dir: str | None = None,
+            agent_id: str | None = None,
+            service_id: str | None = None,
     ) -> None:
         self._adapter: AgentAdapter | None = None
         self._skilldev_adapter: AgentAdapter | None = None
@@ -221,8 +221,12 @@ class JiuWenClaw:
             self._skill_manager.set_skillnet_install_complete_hook(
                 self.create_instance
             )
-            logger.info("[JiuWenClaw] Initialized adapter: sdk=%s, workspace_dir=%s",
-                        self._sdk_name, self._workspace_dir)
+            logger.info(
+                "[session=%s] [JiuWenClaw] Initialized adapter: sdk=%s, workspace_dir=%s",
+                self._service_id,
+                self._sdk_name,
+                self._workspace_dir
+            )
         return self._adapter
 
     async def _ensure_skilldev_adapter(self) -> AgentAdapter:
@@ -249,8 +253,11 @@ class JiuWenClaw:
             )
             if hasattr(self._skilldev_adapter, "set_session_history"):
                 self._skilldev_adapter.set_session_history(session_history)
-            logger.info("[JiuWenClaw] Initialized skilldev adapter: workspace_dir=%s",
-                        self._workspace_dir)
+            logger.info(
+                "[session=%s] [JiuWenClaw] Initialized skilldev adapter: workspace_dir=%s",
+                self._service_id,
+                self._workspace_dir
+            )
         return self._skilldev_adapter
 
     def _get_tool_manager(self):
@@ -279,9 +286,9 @@ class JiuWenClaw:
             d.popitem(last=False)
 
     def _effective_project_dir_for_session(
-        self,
-        session_id: str,
-        param_project_dir: str | None,
+            self,
+            session_id: str,
+            param_project_dir: str | None,
     ) -> str:
         """解析本会话工程目录：首次非空 params.project_dir 绑定并落 metadata；冲突保留首次。"""
         raw = (param_project_dir or "").strip()
@@ -339,10 +346,10 @@ class JiuWenClaw:
         return existing
 
     def _apply_effective_project_dir_to_request(
-        self,
-        request: AgentRequest,
-        session_id: str,
-        inputs: dict[str, Any],
+            self,
+            request: AgentRequest,
+            session_id: str,
+            inputs: dict[str, Any],
     ) -> None:
         """写入 effective_project_dir 到 request.metadata 与 inputs。"""
         param = None

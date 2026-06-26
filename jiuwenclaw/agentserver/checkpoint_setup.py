@@ -17,8 +17,8 @@ _lock = asyncio.Lock()
 
 
 async def ensure_persistent_checkpointer(
-    service_id: str | None = None,
-    agent_id: str | None = None,
+        service_id: str | None = None,
+        agent_id: str | None = None,
 ) -> None:
     """Install or switch to the persistence checkpointer for the given tenant."""
     try:
@@ -44,13 +44,15 @@ async def ensure_persistent_checkpointer(
                 )
                 _checkpointers[key] = checkpointer
                 logger.info(
-                    "[checkpoint_setup] installed persistence checkpointer: %s",
+                    "[session=%s] [checkpoint_setup] installed persistence checkpointer: %s",
+                    service_id,
                     checkpoint_dir,
                 )
             CheckpointerFactory.set_default_checkpointer(_checkpointers[key])
     except Exception as exc:
         logger.error(
-            "[checkpoint_setup] fail to setup checkpoint (service_id=%s, agent_id=%s): %s",
+            "[session=%s] [checkpoint_setup] fail to setup checkpoint (service_id=%s, agent_id=%s): %s",
+            service_id,
             service_id,
             agent_id,
             exc,

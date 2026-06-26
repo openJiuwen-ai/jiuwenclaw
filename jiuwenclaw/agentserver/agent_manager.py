@@ -89,7 +89,8 @@ class AgentManager:
         self.service_id = service_id
         self.user_workspace_dir = user_workspace_dir
         logger.info(
-            "[AgentManager] 初始化: agent_id=%s, service_id=%s, workspace=%s, has_config=%s",
+            "[session=%s] [AgentManager] 初始化: agent_id=%s, service_id=%s, workspace=%s, has_config=%s",
+            service_id,
             agent_id,
             service_id,
             user_workspace_dir,
