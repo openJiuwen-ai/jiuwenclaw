@@ -155,8 +155,8 @@ class RePlanEnvironment:
         # 不再保留 SKILL_ROOT 环境变量和 config.skill_root 两级优先级。
         # 解析优先级：skills_dir → get_agent_registered_skill_dirs()
         self._skill_root: str = self._resolve_skill_root()
-        # [TEMP-EXTERNAL-SKILL] skill_name: PPT skill 的外部目录名（默认 pptx-craft-replan）。
-        self._skill_name: str = config.get("skill_name") or "pptx-craft-replan"
+        # [TEMP-EXTERNAL-SKILL] skill_name: PPT skill 的外部目录名（默认 pptx-craft）。
+        self._skill_name: str = config.get("skill_name") or "pptx-craft"
         # [TEMP-EXTERNAL-SKILL] skill_checksum: 外部 skill 目录的 SHA256 校验值（转测前手动填写）。
         self._skill_checksum: str = config.get("skill_checksum") or ""
         # [TEMP-EXTERNAL-SKILL] skill_checksum_ok: SHA256 校验结果，在 _scan_skills_dir 中计算。
@@ -180,7 +180,7 @@ class RePlanEnvironment:
         """解析 skill_root 路径。
 
         skill_root 是技能根目录，用于 skill_code 定位外部资源（如 pptx-craft）。
-        每个 skill（如 pptx-craft-replan/）是一个包含 SKILL.md + 代码的完整目录。
+        每个 skill（如 pptx-craft/）是一个包含 SKILL.md + 代码的完整目录。
 
         [TEMP-EXTERNAL-SKILL] 统一走 JIUWENCLAW_SHARED_SKILLS_DIRS 标准链路。
         不再保留 config["skill_root"] 和 SKILL_ROOT 环境变量两级优先级。
@@ -307,7 +307,7 @@ class RePlanEnvironment:
 
     @property
     def skill_root(self) -> str:
-        """技能根目录，用于 skill_code 定位外部资源（如 pptx-craft-replan）。"""
+        """技能根目录，用于 skill_code 定位外部资源（如 pptx-craft）。"""
         return self._skill_root
 
     @property
@@ -679,7 +679,7 @@ class RePlanEnvironment:
             self._scan_cache[cache_key] = (current_mtime, scanned_skills)
 
         # [TEMP-EXTERNAL-SKILL] 在框架层完成 SHA256 校验，结果注入到 inputs 供 skill_code 读取。
-        # 校验目标：{skill_root}/{skill_name} 子目录（如 office-claw-skills/pptx-craft-replan），
+        # 校验目标：{skill_root}/{skill_name} 子目录（如 office-claw-skills/pptx-craft），
         # 而非整个 skill_root 根目录（根目录包含多个 skill，任一变更都会导致校验失败）。
         if self._skill_root:
             skill_dir = str(Path(self._skill_root) / self._skill_name)

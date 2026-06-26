@@ -36,12 +36,12 @@ rc = _load_module(
 
 _SLOT_COMPLETE = (
     '{"topic":"2025 AI 趋势","page_count":8,"audience":"企业高管",'
-    '"presentation_purpose":"工作汇报","style_id":"huawei","style_description":"",'
+    '"presentation_purpose":"工作汇报","style_id":"business-classic","style_description":"",'
     '"missing_fields":[],"need_ask_style":false}'
 )
 _SLOT_WITH_TOPIC_PRESET = (
     '{"page_count":8,"audience":"企业高管","presentation_purpose":"工作汇报",'
-    '"style_id":"huawei","style_description":"","missing_fields":[],"need_ask_style":false}'
+    '"style_id":"business-classic","style_description":"","missing_fields":[],"need_ask_style":false}'
 )
 _DERIVE_RESPONSE = (
     '{"search_mode":"force_search","source_type":"topic","research_depth":"L3"}'
@@ -97,7 +97,7 @@ def test_normalize_page_count() -> None:
 
 @pytest.mark.unit
 def test_style_id_from_label() -> None:
-    assert rc._style_id_from_label("华为风格") == ("huawei", "")
+    assert rc._style_id_from_label("商务经典") == ("business-classic", "")
     style_id, desc = rc._style_id_from_label("赛博朋克风")
     assert style_id == "custom"
     assert desc == "赛博朋克风"
@@ -234,7 +234,7 @@ def test_execute_with_topic_from_p3_single_llm_then_p22_skipped() -> None:
     result = asyncio.run(node._execute(ctx))
     assert result["topic"] == "2025 AI 趋势"
     assert result["page_count"] == 8
-    assert result["style_id"] == "huawei"
+    assert result["style_id"] == "business-classic"
     assert result["search_mode"] == "force_search"
     assert result["requirement_collect_status"] == "slots_analyzed"
 
@@ -343,7 +343,7 @@ def test_execute_asks_missing_in_p22_when_topic_known() -> None:
                 "answers": [
                     {
                         "question": "请选择演示文稿的视觉风格",
-                        "selected_options": ["深色科技风"],
+                        "selected_options": ["工业科技"],
                     },
                 ],
             },
@@ -355,7 +355,7 @@ def test_execute_asks_missing_in_p22_when_topic_known() -> None:
     assert result["page_count"] == 6
     assert result["audience"] == "企业高管"
     assert result["presentation_purpose"] == "工作汇报"
-    assert result["style_id"] == "dark-tech"
+    assert result["style_id"] == "industrial-tech"
 
 
 @pytest.mark.unit
@@ -547,7 +547,7 @@ def test_p23_auto_skip_uses_llm_fallback_style(
     """Relay-Claw 自动应答时风格走 LLM 兜底。"""
 
     async def _fake_llm_default_style(_node, _inputs) -> str:
-        return "dark-tech"
+        return "industrial-tech"
 
     monkeypatch.setattr(rc, "_llm_default_style", _fake_llm_default_style)
 
@@ -567,19 +567,19 @@ def test_p23_auto_skip_uses_llm_fallback_style(
         "need_ask_style": True,
     }
     result = asyncio.run(node.sub_plans[2]._execute(ctx))
-    assert result["style_id"] == "dark-tech"
+    assert result["style_id"] == "industrial-tech"
     assert result["need_ask_style"] is False
 
 
 @pytest.mark.unit
-def test_p23_auto_skip_falls_back_to_huawei_when_llm_invalid(
+def test_p23_auto_skip_falls_back_to_business_classic_when_llm_invalid(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """LLM 返回非法 JSON 时风格最终兜底为 'huawei'。"""
+    """LLM 返回非法 JSON 时风格最终兜底为 'business-classic'。"""
 
     async def _fake_llm_default_style(_node, _inputs) -> str:
-        # 模拟 _llm_default_style 内部 LLM 解析失败 → 落到 'huawei'
-        return "huawei"
+        # 模拟 _llm_default_style 内部 LLM 解析失败 → 落到 'business-classic'
+        return "business-classic"
 
     monkeypatch.setattr(rc, "_llm_default_style", _fake_llm_default_style)
 
@@ -599,7 +599,7 @@ def test_p23_auto_skip_falls_back_to_huawei_when_llm_invalid(
         "need_ask_style": True,
     }
     result = asyncio.run(node.sub_plans[2]._execute(ctx))
-    assert result["style_id"] == "huawei"
+    assert result["style_id"] == "business-classic"
 
 
 @pytest.mark.unit

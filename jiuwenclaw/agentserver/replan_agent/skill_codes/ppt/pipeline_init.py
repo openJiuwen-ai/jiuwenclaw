@@ -38,8 +38,7 @@ _PLAYWRIGHT_INSTALL_MARKERS = (
     "浏览器安装必须尝试",
 )
 
-# [TEMP-EXTERNAL-SKILL] 默认 skill 目录名，与原版 pptx-craft 区分。
-_DEFAULT_SKILL_NAME = "pptx-craft-replan"
+_DEFAULT_SKILL_NAME = "pptx-craft"
 
 
 class PipelineInitError(RuntimeError):
@@ -229,7 +228,7 @@ class P01EnvDepsNode(PlanNode):
         必填（二选一）: pptx_root | skill_root + skill_name
 
     预期输出（写入同一 ctx）:
-        pptx_root: str — pptx-craft-replan 根目录绝对路径
+        pptx_root: str — pptx-craft 根目录绝对路径
         env_ok: bool — 环境检测与 npm 依赖就绪
         playwright_ready: bool — Chromium 是否可用（安装失败时为 False，不阻塞后续节点）
     """
@@ -249,11 +248,11 @@ class P01EnvDepsNode(PlanNode):
                 "- 必填（二选一）: `pptx_root` | `skill_root`\n"
                 "\n"
                 "### 输入\n"
-                "- `pptx_root`（可选）: pptx-craft-replan 根目录绝对路径\n"
+                "- `pptx_root`（可选）: pptx-craft 根目录绝对路径\n"
                 "- `skill_root`（可选）: 技能根目录（从中解析 pptx_root）\n"
                 "\n"
                 "### 输出\n"
-                "- `pptx_root`: str — pptx-craft-replan 根目录绝对路径（由 skill_root 或内置路径解析）\n"
+                "- `pptx_root`: str — pptx-craft 根目录绝对路径（由 skill_root 或内置路径解析）\n"
                 "- `env_ok`: bool=True — npm 依赖就绪（npm install 失败时应 raise 而非设 False）\n"
                 "- `playwright_ready`: bool — Chromium 可用；安装失败时为 False，不阻塞\n"
                 "\n"
@@ -316,13 +315,13 @@ class P01EnvDepsNode(PlanNode):
         yield {
             "node": self.plan_name,
             "status": "progress",
-            "message": "正在检测 pptx-craft-replan 环境依赖...",
+            "message": "正在检测 pptx-craft 环境依赖...",
         }
         result = await self._execute(inputs)
         yield {
             "node": self.plan_name,
             "status": "ok",
-            "message": "pptx-craft-replan 环境依赖检测完成",
+            "message": "pptx-craft 环境依赖检测完成",
             **result,
         }
 
@@ -357,13 +356,13 @@ class P02WorkspaceInitNode(PlanNode):
                 "- 必填（二选一）: `pptx_root` | `skill_root`（通常由 P0.1 已写入）\n"
                 "\n"
                 "### 输入\n"
-                "- `pptx_root`（可选）: pptx-craft-replan 根目录（P0.1 已写入时复用）\n"
+                "- `pptx_root`（可选）: pptx-craft 根目录（P0.1 已写入时复用）\n"
                 "- `skill_root`（可选）: 技能根目录\n"
                 "- `output_dir`（可选）: 用户指定输出目录；有则跳过 generate-timestamp-dir\n"
                 "- `workspace_base` | `workspace`（可选）: 自动生成时间戳目录时的父路径（默认 ./workspace）\n"
                 "\n"
                 "### 输出\n"
-                "- `pptx_root`: str — pptx-craft-replan 根目录绝对路径\n"
+                "- `pptx_root`: str — pptx-craft 根目录绝对路径\n"
                 "- `output_dir`: str — 会话产物根目录绝对路径（目录已物理创建且可写入）\n"
                 "- `pages_dir`: str — HTML 页面目录绝对路径（`{output_dir}/pages`，已物理创建）\n"
                 "- `session_dir`: str — 等于 output_dir\n"
@@ -461,13 +460,13 @@ class PipelineInitNode(PlanNode):
                 "- 必填（二选一）: `pptx_root` | `skill_root`（P0.1 解析为 pptx_root）\n"
                 "\n"
                 "### 输入\n"
-                "- `pptx_root`（可选）: pptx-craft-replan 根目录绝对路径\n"
+                "- `pptx_root`（可选）: pptx-craft 根目录绝对路径\n"
                 "- `skill_root`（可选）: 技能根目录（P0.1 从中解析 pptx_root）\n"
                 "- `output_dir`（可选）: 用户指定输出目录（有则跳过自动生成）\n"
                 "- `workspace_base` | `workspace`（可选）: 自动生成时间戳目录时的父路径\n"
                 "\n"
                 "### 输出\n"
-                "- `pptx_root`: str — pptx-craft-replan 根目录绝对路径\n"
+                "- `pptx_root`: str — pptx-craft 根目录绝对路径\n"
                 "- `env_ok`: bool — Node/npm 依赖就绪（必须为 True）\n"
                 "- `playwright_ready`: bool — Chromium 可用（False 不阻塞后续，但影响 P8 导出质量）\n"
                 "- `output_dir`: str — 会话产物根目录绝对路径（目录已物理创建）\n"

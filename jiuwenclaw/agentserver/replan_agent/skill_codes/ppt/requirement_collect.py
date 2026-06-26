@@ -23,17 +23,17 @@ _DEFAULT_PAGE_COUNT = 6
 _MAX_PAGE_COUNT = 30
 
 _VALID_STYLE_IDS = frozenset(
-    {"huawei", "light-tech", "paper-humanities", "dark-tech", "free", "custom"}
+    {"business-classic", "tech-minimal", "elegant-narrative", "industrial-tech", "free", "custom"}
 )
 _VALID_SEARCH_MODES = frozenset({"auto", "no_search", "force_search"})
 _VALID_SOURCE_TYPES = frozenset({"topic", "outline", "description"})
 _VALID_RESEARCH_DEPTHS = frozenset({"L1", "L2", "L3"})
 
 _STYLE_LABEL_TO_ID: dict[str, str] = {
-    "华为风格": "huawei",
-    "浅色科技风": "light-tech",
-    "纸质人文风": "paper-humanities",
-    "深色科技风": "dark-tech",
+    "商务经典": "business-classic",
+    "科技极简": "tech-minimal",
+    "典雅叙事": "elegant-narrative",
+    "工业科技": "industrial-tech",
     "自由发挥": "free",
 }
 
@@ -61,7 +61,7 @@ _P21_SLOT_SYSTEM_PROMPT = ("""你是 PPT 需求槽位分析助手。从用户消
 - page_count: 目标页数（整数；未知则 null）
 - audience: 目标受众（字符串；未知则 ""）
 - presentation_purpose: 汇报目的，如「工作汇报」「产品展示」「教学分享」「auto」；未知则 ""
-- style_id: 用户明确提及风格时填写：huawei / light-tech / paper-humanities / dark-tech / free / custom；未知则 ""
+- style_id: 用户明确提及风格时填写：business-classic / tech-minimal / elegant-narrative / industrial-tech / free / custom；未知则 ""
 - style_description: style_id 为 custom 时的描述；否则 ""
 - missing_fields: 仍缺失且需用户补充的字段名数组，取值限于 topic / page_count / audience / presentation_purpose / style_id
 - need_ask_style: 用户未明确风格时为 true，否则 false
@@ -154,11 +154,11 @@ def _normalize_style_id(value: Any) -> str:
         return ""
     lowered = raw.casefold()
     alias_map = {
-        "huawei": "huawei",
-        "light-tech": "light-tech",
-        "light tech": "light-tech",
-        "paper-humanities": "paper-humanities",
-        "dark-tech": "dark-tech",
+        "business-classic": "business-classic",
+        "tech-minimal": "tech-minimal",
+        "tech minimal": "tech-minimal",
+        "elegant-narrative": "elegant-narrative",
+        "industrial-tech": "industrial-tech",
         "free": "free",
         "custom": "custom",
     }
@@ -608,10 +608,10 @@ def _build_style_question() -> dict[str, Any]:
         "question": "请选择演示文稿的视觉风格",
         "multi_select": False,
         "options": [
-            {"label": "华为风格", "description": "企业汇报、红色主题、严谨专业"},
-            {"label": "浅色科技风", "description": "产品发布、黑白调性、极简设计"},
-            {"label": "纸质人文风", "description": "文化主题、温暖质感"},
-            {"label": "深色科技风", "description": "硬核场景、高对比度"},
+            {"label": "商务经典", "description": "企业汇报、红色主题、严谨专业"},
+            {"label": "科技极简", "description": "产品发布、黑白调性、极简设计"},
+            {"label": "典雅叙事", "description": "文化主题、温暖质感、有机插图"},
+            {"label": "工业科技", "description": "硬核场景、高对比度、工业科技感"},
             {"label": "自由发挥", "description": "由 AI 根据主题自动设计"},
         ],
     }
@@ -739,12 +739,12 @@ _TOPIC_FALLBACK_SYSTEM_PROMPT = """你是 PPT 主题兜底选择助手。用户�
 
 _STYLE_FALLBACK_SYSTEM_PROMPT = """你是 PPT 风格兜底选择助手。用户未在限时内作答风格选择，请基于用户消息与主题，从给定 style_id 中挑选最合适的一项。
 
-style_id 候选：huawei / light-tech / paper-humanities / dark-tech / free
+style_id 候选：business-classic / tech-minimal / elegant-narrative / industrial-tech / free
 含义：
-- huawei: 企业汇报、红色主题、严谨专业
-- light-tech: 产品发布、黑白调性、极简设计
-- paper-humanities: 文化主题、温暖质感
-- dark-tech: 硬核科技、高对比度
+- business-classic: 企业汇报、红色主题、严谨专业
+- tech-minimal: 产品发布、黑白调性、极简设计
+- elegant-narrative: 文化主题、温暖质感
+- industrial-tech: 硬核科技、高对比度
 - free: 由 AI 根据主题自动设计
 
 规则：
@@ -881,7 +881,7 @@ async def _llm_default_topic(
 
 
 async def _llm_default_style(node: PlanNode, inputs: dict[str, Any]) -> str:
-    """超时兜底：LLM 从五个有效 style_id 中挑选；失败时返回 'huawei'。"""
+    """超时兜底：LLM 从五个有效 style_id 中挑选；失败时返回 'business-classic'。"""
     user_text = _collect_user_text(inputs)
     try:
         response = await node.stream_llm_collect(
@@ -896,8 +896,8 @@ async def _llm_default_style(node: PlanNode, inputs: dict[str, Any]) -> str:
     except Exception as exc:
         if isinstance(exc, AbortError):
             raise
-        logger.warning("[P2.3] LLM 风格兜底解析失败，将使用 'huawei': %s", exc)
-    return "huawei"
+        logger.warning("[P2.3] LLM 风格兜底解析失败，将使用 'business-classic': %s", exc)
+    return "business-classic"
 
 
 def _build_topic_suggest_prompt(inputs: dict[str, Any], doc_excerpt: str) -> str:
@@ -1175,7 +1175,7 @@ class P23AskStyleNode(PlanNode):
                 "- `need_ask_style`（可选）: P2.1 标记是否需要 ask\n"
                 "\n"
                 "### 输出\n"
-                "- `style_id`: str — 风格标识（huawei / dark-tech / light-tech / paper-humanities / free / custom）\n"
+                "- `style_id`:str - 风格标识（business-classic/tech-minimal/elegant-narrative/industrial-tech/free/custom）\n"
                 "- `style_description`: str — custom 模式下用户自描述（其他模式为空）\n"
                 "- `additional_notes`: str — 补充说明（通常为空，custom 时可能有值）\n"
                 "\n"
@@ -1308,7 +1308,7 @@ class RequirementCollectNode(PlanNode):
                 "- `page_count`: int/str — 页数\n"
                 "- `audience`: str — 受众\n"
                 "- `presentation_purpose`: str — 演示目的\n"
-                "- `style_id`: str — 风格标识（huawei / dark-tech / light-tech / paper-humanities / free / custom）\n"
+                "- `style_id`:str — 风格标识（business-classic/tech-minimal/elegant-narrative/industrial-tech/free/custom）\n"
                 "- `style_description`: str — custom 模式下用户自描述；其他模式通常为空\n"
                 "- `additional_notes`: str — 补充说明（style_id=custom 时可能有值）\n"
                 "- `search_mode`: str — 搜索策略（no_search / auto / force_search）\n"

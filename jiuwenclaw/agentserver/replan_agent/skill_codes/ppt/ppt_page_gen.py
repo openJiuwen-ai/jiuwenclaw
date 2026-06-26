@@ -25,7 +25,7 @@ _PPT_DIR = str(Path(__file__).resolve().parent)
 logger = logging.getLogger(__name__)
 
 
-_PRESET_STYLE_IDS = {"huawei", "dark-tech", "light-tech", "paper-humanities"}
+_PRESET_STYLE_IDS = {"business-classic", "tech-minimal", "elegant-narrative", "industrial-tech"}
 _DEFAULT_GEN_RETRY_ROUND = 1
 _DEFAULT_DENSITY_RETRY_ROUND = 1
 

@@ -92,9 +92,9 @@ def test_resolve_pptx_root_from_pptx_root_input() -> None:
 def test_resolve_pptx_root_from_skill_root_with_skill_name() -> None:
     """skill_root + skill_name 拼接。"""
     with tempfile.TemporaryDirectory() as tmpdir:
-        skill_dir = os.path.join(tmpdir, "pptx-craft-replan")
+        skill_dir = os.path.join(tmpdir, "pptx-craft")
         os.makedirs(skill_dir, exist_ok=True)
-        inputs = {"skill_root": tmpdir, "skill_name": "pptx-craft-replan"}
+        inputs = {"skill_root": tmpdir, "skill_name": "pptx-craft"}
         assert pi._resolve_pptx_root(inputs) == str(
             os.path.realpath(skill_dir)
         )
@@ -104,9 +104,9 @@ def test_resolve_pptx_root_from_skill_root_with_skill_name() -> None:
 def test_resolve_pptx_root_skill_root_is_skill_dir() -> None:
     """skill_root 本身就是 skill 目录（name == skill_name）。"""
     with tempfile.TemporaryDirectory() as tmpdir:
-        skill_dir = os.path.join(tmpdir, "pptx-craft-replan")
+        skill_dir = os.path.join(tmpdir, "pptx-craft")
         os.makedirs(skill_dir, exist_ok=True)
-        inputs = {"skill_root": skill_dir, "skill_name": "pptx-craft-replan"}
+        inputs = {"skill_root": skill_dir, "skill_name": "pptx-craft"}
         assert pi._resolve_pptx_root(inputs) == str(
             os.path.realpath(skill_dir)
         )
@@ -128,7 +128,7 @@ def test_resolve_pptx_root_raises_on_missing() -> None:
     """没有 pptx_root 且 skill_root 下找不到 skill_name → raise。"""
     with tempfile.TemporaryDirectory() as tmpdir:
         inputs = {"skill_root": tmpdir}
-        with pytest.raises(pi.PipelineInitError, match="pptx-craft-replan"):
+        with pytest.raises(pi.PipelineInitError, match="pptx-craft"):
             pi._resolve_pptx_root(inputs)
 
 

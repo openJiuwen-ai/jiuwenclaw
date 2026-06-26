@@ -13,7 +13,7 @@ from jiuwenclaw.agentserver.replan_agent.skill_codes.ppt.ppt_common import PptCo
 logger = logging.getLogger(__name__)
 
 
-_PRESET_STYLES = {"huawei", "dark-tech", "light-tech", "paper-humanities"}
+_PRESET_STYLES = {"business-classic", "tech-minimal", "elegant-narrative", "industrial-tech"}
 _PRESET_STYLES_DIR = Path(__file__).resolve().parent / "styles"
 
 
@@ -35,7 +35,7 @@ class StylePrepareNode(PlanNode):
                 "- `style_id` 来自上游 P2 需求收集（缺省时按 `free` 处理）\n"
                 "\n"
                 "### 输入\n"
-                "- `style_id`（必填）: 取值范围 huawei / dark-tech / light-tech / paper-humanities / free / custom；"
+                "- `style_id`（必填）: 取值范围 business-classic/tech-minimal/elegant-narrative/industrial-tech/free/custom；"
                 "空值按 `free` 处理\n"
                 "- `output_dir`（必填）: 工作目录绝对路径（落盘 style 文件用）\n"
                 "- `topic`（可选）: PPT 主题，LLM 自定义生成时作为推断依据\n"
@@ -49,7 +49,7 @@ class StylePrepareNode(PlanNode):
                 "\n"
                 "### 执行流程\n"
                 "1. **校验 output_dir**：为空直接返回空 style_file_path（记录 error）\n"
-                "2. **预设风格分支**（`style_id` ∈ {huawei/dark-tech/light-tech/paper-humanities}）：\n"
+                "2. **预设风格分支**（`style_id` ∈ {business-classic/tech-minimal/elegant-narrative/industrial-tech}）：\n"
                 "   - 优先从 `pptx_root/styles/{style_id}.md` 读取（外部 skill 目录），兜底 `__file__` 同级 styles 目录\n"
                 "   - 读取成功且非空 → 跳到步骤 4\n"
                 "   - 读取失败/为空 → 落入步骤 3（降级）\n"

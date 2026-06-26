@@ -334,7 +334,7 @@ class RePlanExecutor:
         """将环境配置合并到 inputs，供 skill_code 使用。
 
         skill_code（如 pipeline_init.py）需要通过 inputs 获取外部资源路径，
-        例如 skill_root 用于定位 pptx-craft-replan 等技能目录。
+        例如 skill_root 用于定位 pptx-craft 等技能目录。
         这些路径由 Environment 在初始化时解析，需要注入到执行上下文中。
         """
         merged = dict(inputs)
