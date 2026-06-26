@@ -8,11 +8,15 @@ from pathlib import Path
 import pytest
 import yaml
 
+import jiuwenswarm.common.config as config_mod
 from jiuwenswarm.common.config import (
     get_config_raw,
+    get_config,
+    invalidate_config_cache,
     migrate_config_from_template,
     replace_teams_in_config,
     resolve_env_vars,
+    set_config,
     update_skill_retrieval_in_config,
 )
 
@@ -111,6 +115,66 @@ class TestResolveEnvVars:
 
 class TestConfigFunctions:
     """Test config module functions."""
+
+    @staticmethod
+    def test_get_config_uses_cached_parsed_config(
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ):
+        config_file = tmp_path / "config.yaml"
+        config_file.write_text("model: ${CONFIG_CACHE_MODEL:-first}\n", encoding="utf-8")
+        monkeypatch.setattr(config_mod, "get_config_file", lambda: config_file)
+        invalidate_config_cache()
+
+        load_calls = 0
+        original_safe_load = config_mod.yaml.safe_load
+
+        def counting_safe_load(*args, **kwargs):
+            nonlocal load_calls
+            load_calls += 1
+            return original_safe_load(*args, **kwargs)
+
+        monkeypatch.setattr(config_mod.yaml, "safe_load", counting_safe_load)
+
+        first = get_config()
+        second = get_config()
+
+        assert first is second
+        assert first["model"] == "first"
+        assert load_calls == 1
+
+    @staticmethod
+    def test_set_config_invalidates_get_config_cache(
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ):
+        config_file = tmp_path / "config.yaml"
+        config_file.write_text("model: old\n", encoding="utf-8")
+        monkeypatch.setattr(config_mod, "get_config_file", lambda: config_file)
+        monkeypatch.setattr(config_mod, "CONFIG_YAML_PATH", config_file)
+        invalidate_config_cache()
+
+        assert get_config()["model"] == "old"
+
+        set_config({"model": "new"})
+
+        assert get_config()["model"] == "new"
+
+    @staticmethod
+    def test_get_config_cache_invalidates_when_env_value_changes(
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ):
+        config_file = tmp_path / "config.yaml"
+        config_file.write_text("model: ${CONFIG_CACHE_MODEL:-default}\n", encoding="utf-8")
+        monkeypatch.setattr(config_mod, "get_config_file", lambda: config_file)
+        invalidate_config_cache()
+
+        monkeypatch.setenv("CONFIG_CACHE_MODEL", "first")
+        assert get_config()["model"] == "first"
+
+        monkeypatch.setenv("CONFIG_CACHE_MODEL", "second")
+        assert get_config()["model"] == "second"
 
     @staticmethod
     def test_get_config_raw(temp_config_file: Path):

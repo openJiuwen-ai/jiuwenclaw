@@ -68,6 +68,12 @@ else:
         _lg.set_level(logging.CRITICAL)
 
 load_dotenv(dotenv_path=get_env_file(), override=True)
+try:
+    from jiuwenswarm.common.config import invalidate_config_cache
+
+    invalidate_config_cache()
+except Exception:  # noqa: BLE001
+    pass
 reset_free_search_runtime_flags()
 
 logger = logging.getLogger("jiuwenswarm.gateway")

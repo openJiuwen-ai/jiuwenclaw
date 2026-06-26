@@ -5,6 +5,7 @@ import logging
 import os
 import re
 import sys
+import threading
 import uuid
 from copy import deepcopy
 from pathlib import Path
@@ -23,6 +24,8 @@ logger = logging.getLogger(__name__)
 _CONFIG_CACHE_ENABLED: bool = os.getenv("JIUWENSWARM_DEV", "0") != "1"
 _config_cache: dict[str, Any] = {}  # {"data": <parsed config>} when valid
 _config_cache_valid: bool = False
+_config_cache_lock = threading.RLock()
+_ENV_VAR_PATTERN = re.compile(r'\$\{([^:}]+)(?::-([^}]*))?\}')
 
 _CONFIG_MODULE_DIR = Path(__file__).parent
 CONFIG_YAML_PATH = get_config_file()
@@ -49,8 +52,6 @@ def resolve_env_vars(value: Any) -> Any:
     """
     if isinstance(value, str):
         # 匹配 ${VAR:-default} 格式
-        pattern = r'\$\{([^:}]+)(?::-([^}]*))?\}'
-
         def replace_env(match):
             var_name = match.group(1)
             default = match.group(2)
@@ -73,7 +74,7 @@ def resolve_env_vars(value: Any) -> Any:
                 return current
             return current if current is not None else ""
 
-        return re.sub(pattern, replace_env, value)
+        return _ENV_VAR_PATTERN.sub(replace_env, value)
     elif isinstance(value, dict):
         return {k: resolve_env_vars(v) for k, v in value.items()}
     elif isinstance(value, list):
@@ -109,37 +110,78 @@ def _normalize_config(config: dict[str, Any] | None) -> None:
         channels["web"] = {"send_file_allowed": True}
 
 
+def _config_file_cache_key(path: Path) -> str | None:
+    try:
+        st = path.stat()
+    except OSError:
+        return None
+    return f"{st.st_mtime_ns}:{st.st_size}"
+
+
+def _collect_env_var_names(value: Any, names: set[str] | None = None) -> set[str]:
+    if names is None:
+        names = set()
+    if isinstance(value, str):
+        names.update(match.group(1) for match in _ENV_VAR_PATTERN.finditer(value))
+    elif isinstance(value, dict):
+        for item in value.values():
+            _collect_env_var_names(item, names)
+    elif isinstance(value, list):
+        for item in value:
+            _collect_env_var_names(item, names)
+    return names
+
+
+def _env_cache_signature(names: set[str] | frozenset[str]) -> tuple[tuple[str, str | None], ...]:
+    return tuple((name, os.getenv(name)) for name in sorted(names))
+
+
+def invalidate_config_cache() -> None:
+    """清除已解析配置缓存，使下一次 get_config() 重新读取并解析 config.yaml."""
+    global _config_cache_valid
+    with _config_cache_lock:
+        _config_cache.clear()
+        _config_cache_valid = False
+
+
 def get_config():
     global _config_cache_valid
     path = get_config_file()
+    path_key = str(path.resolve())
 
-    # 生产模式：写后失效，零 IO
-    if _CONFIG_CACHE_ENABLED:
-        if _config_cache_valid and "data" in _config_cache:
+    with _config_cache_lock:
+        file_key = None
+        if not _CONFIG_CACHE_ENABLED:
+            # 开发模式：stat 检测文件变化，外部编辑即时生效
+            file_key = _config_file_cache_key(path)
+
+        env_names = _config_cache.get("_env_names", frozenset())
+        env_signature = _env_cache_signature(env_names)
+        cache_matches = (
+            _config_cache_valid
+            and "data" in _config_cache
+            and _config_cache.get("_path") == path_key
+            and _config_cache.get("_env_signature") == env_signature
+            and (_CONFIG_CACHE_ENABLED or (file_key and file_key == _config_cache.get("_key")))
+        )
+        if cache_matches:
             return _config_cache["data"]
-    else:
-        # 开发模式：stat 检测文件变化，外部编辑即时生效
-        try:
-            st = path.stat()
-            key = f"{st.st_mtime_ns}:{st.st_size}"
-        except OSError:
-            key = None
-        if key and key == _config_cache.get("_key"):
-            return _config_cache["data"]
 
-    with open(path, "r", encoding="utf-8") as f:
-        config_base = yaml.safe_load(f) or {}
-    config_base = resolve_env_vars(config_base)
-    _normalize_config(config_base)
+        with open(path, "r", encoding="utf-8") as f:
+            config_base = yaml.safe_load(f) or {}
+        env_names = frozenset(_collect_env_var_names(config_base))
+        config_base = resolve_env_vars(config_base)
+        _normalize_config(config_base)
 
-    if _CONFIG_CACHE_ENABLED:
+        _config_cache.clear()
         _config_cache["data"] = config_base
+        _config_cache["_path"] = path_key
+        _config_cache["_env_names"] = env_names
+        _config_cache["_env_signature"] = _env_cache_signature(env_names)
+        if not _CONFIG_CACHE_ENABLED:
+            _config_cache["_key"] = file_key
         _config_cache_valid = True
-    else:
-        _config_cache["_key"] = key
-        _config_cache["data"] = config_base
-
-    return config_base
+        return config_base
 
 
 def get_config_raw():
@@ -149,13 +191,9 @@ def get_config_raw():
 
 
 def set_config(config):
-    global _config_cache_valid
     with open(CONFIG_YAML_PATH, "w", encoding="utf-8") as f:
         yaml.safe_dump(config, f, allow_unicode=True, sort_keys=False)
-    if _CONFIG_CACHE_ENABLED:
-        _config_cache_valid = False
-    else:
-        _config_cache.clear()
+    invalidate_config_cache()
 
 
 def is_auto_memory_enabled() -> bool:
@@ -194,7 +232,6 @@ def load_yaml_round_trip(config_path: Path):
 
 def dump_yaml_round_trip(config_path: Path, data: Any) -> None:
     """ruamel 写回 config，保留注释与格式。"""
-    global _config_cache_valid
     rt = YAML()
     rt.preserve_quotes = True
     rt.default_flow_style = False
@@ -203,10 +240,7 @@ def dump_yaml_round_trip(config_path: Path, data: Any) -> None:
     rt.width = 4096
     with open(config_path, "w", encoding="utf-8") as f:
         rt.dump(data, f)
-    if _CONFIG_CACHE_ENABLED:
-        _config_cache_valid = False
-    else:
-        _config_cache.clear()
+    invalidate_config_cache()
 
 
 # Backward-compat aliases — downstream modules import the underscore-prefixed names

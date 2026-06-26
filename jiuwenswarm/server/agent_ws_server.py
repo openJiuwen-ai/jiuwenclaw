@@ -70,6 +70,7 @@ from jiuwenswarm.common.config import (
     get_sandbox_runtime,
     get_sandbox_startup_mode,
     get_sandbox_startup_mode_explicit,
+    invalidate_config_cache,
     remove_mcp_server_in_config,
     resolve_preserve_file_sharing_mode_default,
     resolve_sandbox_policy_path,
@@ -3122,6 +3123,7 @@ class AgentWebSocketServer:
                         os.environ[k] = v
                     logger.info("[command.model] os.environ 已更新, MODEL_NAME=%s", os.getenv("MODEL_NAME", "unknown"))
 
+                    invalidate_config_cache()
                     try:
                         from jiuwenswarm.agents.harness.common.memory.config import clear_config_cache
                         clear_config_cache()
@@ -5004,6 +5006,7 @@ class AgentWebSocketServer:
 
     async def _handle_config_cache_clear(self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock) -> None:
         try:
+            invalidate_config_cache()
             from jiuwenswarm.agents.harness.common.memory.config import clear_config_cache
 
             clear_config_cache()
