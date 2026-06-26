@@ -129,7 +129,7 @@ def _build_outbound_frames(msg: Message) -> list[dict[str, Any]]:
                 payload["session_id"] = msg.session_id
         else:
             content = str(msg.payload.get("content", "") or "")
-            if not content and not getattr(msg, "ok", True) and msg.payload.get("error"):
+            if not content and msg.payload.get("error"):
                 content = str(msg.payload.get("error", ""))
             payload = {
                 "session_id": msg.session_id,

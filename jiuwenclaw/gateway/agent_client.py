@@ -550,6 +550,7 @@ class WebSocketAgentServerClient(AgentServerClient):
         *,
         service_id: str = "",
         agent_id: str = "",
+        session_id: str = "",
     ) -> dict[str, Any]:
         """发送 FILE_TRANSFER_CHUNK 消息.
 
@@ -584,6 +585,7 @@ class WebSocketAgentServerClient(AgentServerClient):
                 "base64_data": base64_data,
                 "chunk_size": chunk_size,
             },
+            session_id=session_id or None,
             is_stream=False,
             **extra,
         )
@@ -607,6 +609,7 @@ class WebSocketAgentServerClient(AgentServerClient):
         *,
         service_id: str = "",
         agent_id: str = "",
+        session_id: str = "",
     ) -> dict[str, Any]:
         """发送 FILE_TRANSFER_COMPLETE 消息.
 
@@ -637,6 +640,7 @@ class WebSocketAgentServerClient(AgentServerClient):
                 "transfer_id": transfer_id,
                 "sha256": sha256,
             },
+            session_id=session_id or None,
             is_stream=False,
             **extra,
         )

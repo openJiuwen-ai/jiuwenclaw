@@ -20,7 +20,7 @@ from functools import partial
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
-from urllib.parse import unquote, urlparse
+from urllib.parse import quote, unquote, urlparse
 
 from jiuwenclaw.agentserver.tools.ssl_config import get_insecure_ssl_context, get_ssl_verify
 from jiuwenclaw.utils import get_agent_root_dir, get_logs_dir, get_service_root_dir, \
@@ -726,9 +726,10 @@ class _SpaStaticHandler(SimpleHTTPRequestHandler):
             self.send_response(200)
             self.send_header("Content-Type", mime_type)
             self.send_header("Content-Length", str(file_size))
+            encoded_name = quote(file_name, safe="")
             self.send_header(
                 "Content-Disposition",
-                f'attachment; filename="{file_name}"',
+                f"attachment; filename*=UTF-8''{encoded_name}",
             )
             self.send_header("Cache-Control", "no-store")
             self.end_headers()

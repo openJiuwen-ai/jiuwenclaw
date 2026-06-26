@@ -529,7 +529,18 @@ def e2a_response_to_agent_chunk(e2a: E2AResponse) -> "AgentResponseChunk":
 
     if kind == E2A_RESPONSE_KIND_E2A_ERROR and e2a.is_final:
         det = body.get("details")
-        pl = dict(det) if isinstance(det, dict) else dict(body)
+        raw_pl = dict(det) if isinstance(det, dict) else dict(body)
+        if raw_pl.get("event_type") != "chat.error":
+            error_msg = raw_pl.get("error") or body.get("message") or "Agent error"
+            pl: dict[str, Any] = {
+                "event_type": "chat.error",
+                "error": str(error_msg),
+            }
+            code = raw_pl.get("code") if isinstance(det, dict) else body.get("code")
+            if code is not None:
+                pl["code"] = code
+        else:
+            pl = raw_pl
         return AgentResponseChunk(
             request_id=rid,
             channel_id=ch,

@@ -31,6 +31,12 @@ from openjiuwen.harness.rails.base import DeepAgentRail
 from openjiuwen.harness.tools.todo import TodoStatus, TodoListTool
 from openjiuwen.harness.workspace.workspace import WorkspaceNode
 
+from jiuwenclaw.agentserver.deep_agent.read_file_validation import (
+    extract_path_from_arguments,
+    handle_read_file_before_tool_call,
+    is_read_file_tool,
+    normalize_read_file_tool_outcome,
+)
 from jiuwenclaw.config import get_config
 from jiuwenclaw.utils import fix_json_arguments, logger
 
@@ -127,9 +133,11 @@ class JiuClawStreamEventRail(DeepAgentRail):
         if self._abort_requested:
             raise asyncio.CancelledError("Agent abort requested")
 
-        if not ctx.extra.get("_context_fixed") and ctx.context is not None:
+        # Run before every model call: a single ReAct turn may issue multiple
+        # tool rounds; skipping after the first call leaves orphan tool_calls and
+        # triggers OpenAI 400 "insufficient tool messages".
+        if ctx.context is not None:
             await self._fix_incomplete_tool_context(ctx.context)
-            ctx.extra["_context_fixed"] = True
 
         await self._emit_context_compression(ctx)
         await self._emit_context_usage(ctx)
@@ -159,8 +167,14 @@ class JiuClawStreamEventRail(DeepAgentRail):
 
         if session is not None and isinstance(ctx.inputs, ToolCallInputs):
             tc = ctx.inputs.tool_call
+            tool_name = str(getattr(ctx.inputs, "tool_name", "") or getattr(tc, "name", "") or "")
+            if is_read_file_tool(tool_name):
+                path = extract_path_from_arguments(getattr(tc, "arguments", {}))
+                if path:
+                    handle_read_file_before_tool_call(ctx, path)
             await self._emit_tool_call(session, tc)
-            await self._emit_tool_update(session, tc, status="in_progress")
+            if not ctx.extra.get("_skip_tool"):
+                await self._emit_tool_update(session, tc, status="in_progress")
 
     # ------------------------------------------------------------------
     # after_tool_call: emit tool_result + todo.updated + clear context
@@ -175,6 +189,7 @@ class JiuClawStreamEventRail(DeepAgentRail):
         if session is None or not isinstance(ctx.inputs, ToolCallInputs):
             return
 
+        normalize_read_file_tool_outcome(ctx)
         await self._emit_tool_result(session, ctx.inputs.tool_call, ctx.inputs.tool_result)
 
         tool_name = ctx.inputs.tool_name
@@ -279,8 +294,8 @@ class JiuClawStreamEventRail(DeepAgentRail):
             return
 
         try:
-            todo_tool.set_file(session_id)
-            todos_data = await todo_tool.load_todos()
+            file_path = todo_tool.file_path_for_session(session_id)
+            todos_data = await todo_tool.load_todos(file_path)
         except Exception as exc:
             logger.debug(
                 "[StreamEventRail] Failed to load todos: %s", exc

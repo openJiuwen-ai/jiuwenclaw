@@ -206,6 +206,7 @@ class FileTransferHandler:
                     "chunk_size": len(chunk_data),
                     "service_id": service_id,
                     "agent_id": agent_id,
+                    "session_id": session_id,
                 },
             )
 
@@ -225,6 +226,7 @@ class FileTransferHandler:
                 "total_chunks": total_chunks,
                 "service_id": service_id,
                 "agent_id": agent_id,
+                "session_id": session_id,
             },
         )
 

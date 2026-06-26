@@ -11,6 +11,7 @@ import os
 import re
 import secrets
 import time
+
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, replace
 from enum import Enum
@@ -1701,13 +1702,21 @@ class MessageHandler(ABC):
 
         # 从 payload 中提取 event_type（如果存在）
         event_type = None
-        if chunk.payload and isinstance(chunk.payload, dict):
-            event_type_str = chunk.payload.get("event_type")
+        payload = dict(chunk.payload) if chunk.payload and isinstance(chunk.payload, dict) else {}
+        if payload:
+            event_type_str = payload.get("event_type")
             if isinstance(event_type_str, str):
                 try:
                     event_type = EventType(event_type_str)
                 except ValueError:
                     logger.debug("未知的 event_type: %s", event_type_str)
+            elif payload.get("error"):
+                event_type = EventType.CHAT_ERROR
+                payload = {
+                    "event_type": EventType.CHAT_ERROR.value,
+                    "error": str(payload.get("error")),
+                    **{k: v for k, v in payload.items() if k not in ("event_type", "error")},
+                }
 
         return Message(
             id=chunk.request_id,
@@ -1716,8 +1725,8 @@ class MessageHandler(ABC):
             session_id=session_id,
             params={},
             timestamp=time.time(),
-            ok=True,
-            payload=chunk.payload,
+            ok=False if event_type == EventType.CHAT_ERROR else True,
+            payload=payload or chunk.payload,
             event_type=event_type,
             metadata=metadata,
             group_digital_avatar=group_digital_avatar,
@@ -1964,11 +1973,14 @@ class MessageHandler(ABC):
         session_id: str | None,
         new_input: str,
         attachments: list[dict[str, Any]] | None = None,
+        files: list[dict[str, Any]] | None = None,
     ) -> None:
         if not session_id:
             return
         payload: dict[str, Any] = {"new_input": new_input}
-        if attachments:
+        if files:
+            payload["files"] = files
+        elif attachments:
             payload["attachments"] = attachments
         self._queued_supplement_input[session_id] = payload
 
@@ -2007,21 +2019,161 @@ class MessageHandler(ABC):
         self._pop_queued_supplement_input(session_id)
 
     @staticmethod
+    def _is_nonempty_list(value: Any) -> bool:
+        return isinstance(value, list) and bool(value)
+
+    @staticmethod
+    def _extract_supplement_files(params: Any) -> list[dict[str, Any]] | None:
+        if not isinstance(params, dict):
+            return None
+        raw_files = params.get("files")
+        if not isinstance(raw_files, list) or not raw_files:
+            return None
+        files = [item for item in raw_files if isinstance(item, dict)]
+        return files or None
+
+    @classmethod
+    def _collect_supplement_files_from_params(cls, params: Any) -> list[dict[str, Any]] | None:
+        """从 supplement/interrupt 参数中收集附件（files 优先，其次 attachments）。"""
+        files = cls._extract_supplement_files(params)
+        if files:
+            return files
+        if not isinstance(params, dict):
+            return None
+        raw_attachments = params.get("attachments")
+        if not isinstance(raw_attachments, list) or not raw_attachments:
+            return None
+        converted: list[dict[str, Any]] = []
+        for item in raw_attachments:
+            if not isinstance(item, dict):
+                continue
+            file_url = str(item.get("url") or item.get("uri") or "").strip()
+            file_path = str(item.get("path") or "").strip()
+            if not file_url and not file_path:
+                continue
+            file_name = (
+                str(item.get("name") or item.get("filename") or Path(file_path).name or "unknown_file").strip()
+                or "unknown_file"
+            )
+            converted.append(
+                {
+                    **item,
+                    "url": file_url or item.get("url"),
+                    "name": file_name,
+                    "filename": file_name,
+                }
+            )
+        return converted or None
+
+    @classmethod
+    def _normalize_files_for_agent_dispatch(
+        cls,
+        files: list[dict[str, Any]] | None,
+    ) -> list[dict[str, Any]] | None:
+        """保留 url/name 供 Agent 自行下载；仅保留 Agent 可用的 path（已成功传输或本地可读）。"""
+        if not files:
+            return files
+
+        normalized: list[dict[str, Any]] = []
+        for file_info in files:
+            if not isinstance(file_info, dict):
+                normalized.append(file_info)
+                continue
+
+            updated = dict(file_info)
+            file_url = str(updated.get("url") or updated.get("uri") or "").strip()
+            file_name = (
+                str(updated.get("name") or updated.get("filename") or "unknown_file").strip()
+                or "unknown_file"
+            )
+            updated["name"] = file_name
+            updated.setdefault("filename", file_name)
+            if file_url:
+                updated["url"] = file_url
+
+            local_path = str(updated.get("path") or "").strip()
+            transferred = bool(updated.get("_transferred"))
+            if local_path and (transferred or Path(local_path).exists()):
+                updated["path"] = local_path
+            elif file_url:
+                # Gateway 侧无效 path 对 Agent 无意义，改由 Agent 通过 url 下载
+                updated.pop("path", None)
+            elif local_path:
+                updated["path"] = local_path
+
+            normalized.append(updated)
+
+        return normalized or None
+
+    def _prepare_message_files_for_dispatch(self, msg: "Message") -> "Message":
+        """chat.send 出队前规范化 files，确保 url 传给 Agent（含 supplement 重建消息）。"""
+        if not isinstance(msg.params, dict):
+            return msg
+        raw_files = msg.params.get("files")
+        if not isinstance(raw_files, list) or not raw_files:
+            return msg
+
+        file_dicts = [item for item in raw_files if isinstance(item, dict)]
+        if not file_dicts:
+            return msg
+
+        normalized = self._normalize_files_for_agent_dispatch(file_dicts)
+        if not normalized:
+            return msg
+
+        url_count = sum(
+            1 for item in normalized
+            if isinstance(item, dict) and str(item.get("url") or item.get("uri") or "").strip()
+        )
+        if url_count:
+            logger.info(
+                "[MessageHandler] 附件将以 url 传递给 Agent 自行下载: request_id=%s files=%d url=%d",
+                msg.id,
+                len(normalized),
+                url_count,
+            )
+
+        params = dict(msg.params)
+        params["files"] = normalized
+        return replace(msg, params=params)
+
+    @staticmethod
+    def _build_supplement_chat_send_params(
+        new_input: str,
+        session_id: str,
+        *,
+        files: list[dict[str, Any]] | None = None,
+        attachments: list[dict[str, Any]] | None = None,
+    ) -> dict[str, Any]:
+        trimmed = new_input.strip()
+        params: dict[str, Any] = {
+            "query": trimmed,
+            "content": trimmed,
+            "session_id": session_id,
+            "is_supplement": True,
+        }
+        if files:
+            params["files"] = files
+        elif attachments:
+            params["attachments"] = attachments
+        return params
+
+    @staticmethod
     def _build_queued_chat_send_message(
         msg: "Message",
         new_input: str,
         attachments: list[dict[str, Any]] | None = None,
+        files: list[dict[str, Any]] | None = None,
     ) -> "Message":
         from jiuwenclaw.schema.message import Message, ReqMethod
 
         new_req_id = f"req_{int(time.time() * 1000):x}_{msg.id}"
-        params: dict[str, Any] = {
-            "query": new_input,
-            "session_id": msg.session_id,
-            "is_supplement": True,
-        }
-        if attachments:
-            params["attachments"] = attachments
+        params = MessageHandler._build_supplement_chat_send_params(
+            new_input,
+            msg.session_id or "",
+            files=files,
+            attachments=attachments,
+        )
         return Message(
             id=new_req_id,
             type="req",
@@ -2114,11 +2266,17 @@ class MessageHandler(ABC):
                         queued_payload = self._pop_queued_supplement_input(msg.session_id)
                         queued_input = str((queued_payload or {}).get("new_input") or "").strip()
                         queued_attachments = (queued_payload or {}).get("attachments")
-                        if queued_input:
+                        queued_files = (queued_payload or {}).get("files")
+                        if (
+                            queued_input
+                            or self._is_nonempty_list(queued_files)
+                            or self._is_nonempty_list(queued_attachments)
+                        ):
                             queued_msg = self._build_queued_chat_send_message(
                                 msg,
                                 queued_input,
                                 queued_attachments if isinstance(queued_attachments, list) else None,
+                                queued_files if isinstance(queued_files, list) else None,
                             )
                             self._user_messages.put_nowait(queued_msg)
                             logger.info(
@@ -2139,9 +2297,11 @@ class MessageHandler(ABC):
                     supplement_attachments = (
                         raw_attachments if isinstance(raw_attachments, list) else None
                     )
+                    supplement_files = self._collect_supplement_files_from_params(msg.params)
+                    has_supplement_payload = bool(has_new_input or supplement_files or supplement_attachments)
                     intent = (msg.params or {}).get("intent", "cancel")
 
-                    if has_new_input:
+                    if has_supplement_payload:
                         if (
                             self._is_session_evolution_in_progress(msg.session_id)
                             or (
@@ -2149,11 +2309,12 @@ class MessageHandler(ABC):
                                 and msg.session_id in self._pending_evolution_approval
                             )
                         ):
-                            queued_input = new_input.strip()
+                            queued_input = new_input.strip() if isinstance(new_input, str) else ""
                             self._queue_supplement_input(
                                 msg.session_id,
                                 queued_input,
                                 supplement_attachments,
+                                supplement_files,
                             )
                             logger.info(
                                 "[MessageHandler] evolution phase pending, queue supplement input: session_id=%s",
@@ -2218,21 +2379,27 @@ class MessageHandler(ABC):
 
                         new_req_id = f"req_{int(time.time() * 1000):x}_{msg.id}"
                         sup_meta = dict(msg.metadata) if msg.metadata else None
+                        supplement_query = new_input.strip() if isinstance(new_input, str) else ""
+                        prepared_supplement_files = self._normalize_files_for_agent_dispatch(
+                            supplement_files,
+                        )
+                        if prepared_supplement_files:
+                            logger.info(
+                                "[MessageHandler] supplement: 附件将以 url 传递给 Agent session_id=%s files=%d",
+                                msg.session_id,
+                                len(prepared_supplement_files),
+                            )
                         new_msg = Message(
                             id=new_req_id,
                             type="req",
                             channel_id=msg.channel_id,
                             session_id=msg.session_id,
-                            params={
-                                "query": new_input.strip(),
-                                "session_id": msg.session_id,
-                                "is_supplement": True,
-                                **(
-                                    {"attachments": supplement_attachments}
-                                    if supplement_attachments
-                                    else {}
-                                ),
-                            },
+                            params=self._build_supplement_chat_send_params(
+                                supplement_query,
+                                msg.session_id or "",
+                                files=prepared_supplement_files,
+                                attachments=supplement_attachments if not prepared_supplement_files else None,
+                            ),
                             timestamp=time.time(),
                             ok=True,
                             req_method=ReqMethod.CHAT_SEND,
@@ -2306,6 +2473,7 @@ class MessageHandler(ABC):
                 )
                 # remote 模式：用户 chat.send 时在网关索引记录 role=user 预览
                 self._maybe_update_session_index_on_user_msg(msg)
+                msg = self._prepare_message_files_for_dispatch(msg)
                 agent_msg = await self._prepare_agent_dispatch_message(msg)
                 await MessageHandler._trigger_before_chat_request_hook(agent_msg)
                 env = self.message_to_e2a(agent_msg)
@@ -2850,6 +3018,7 @@ class MessageHandler(ABC):
                     channel_id=env.channel or "",
                     service_id=str(ft_params.get("service_id") or _ft_svc or ""),
                     agent_id=str(ft_params.get("agent_id") or _ft_ag or ""),
+                    session_id=str(ft_params.get("session_id") or env.session_id or ""),
                 )
             elif method == FILE_TRANSFER_COMPLETE:
                 return await self._agent_client.file_transfer_complete(
@@ -2858,6 +3027,7 @@ class MessageHandler(ABC):
                     channel_id=env.channel or "",
                     service_id=str(ft_params.get("service_id") or _ft_svc or ""),
                     agent_id=str(ft_params.get("agent_id") or _ft_ag or ""),
+                    session_id=str(ft_params.get("session_id") or env.session_id or ""),
                 )
             else:
                 return {"accepted": False, "error": f"unknown method: {method}"}
@@ -2934,8 +3104,8 @@ class MessageHandler(ABC):
             )
             updated_files = await asyncio.gather(*transfer_tasks)
 
-            # 更新 params.files
-            params["files"] = updated_files
+            # 更新 params.files；未成功传输的条目保留 url，去掉 Gateway 无效 path
+            params["files"] = self._normalize_files_for_agent_dispatch(updated_files) or updated_files
 
             # 创建新的 E2AEnvelope（保持其他字段不变）
             updated_env = E2AEnvelope(

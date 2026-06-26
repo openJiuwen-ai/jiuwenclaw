@@ -5,6 +5,7 @@
  */
 
 import { useEffect, useRef, useCallback, useState } from 'react';
+import { FEATURE_HEARTBEAT_UI } from '../featureFlags';
 import {
   ConnectionAckPayload,
   WebConnectOptions,
@@ -76,11 +77,11 @@ interface UseWebSocketReturn {
   interrupt: (
     sessionId: string,
     intent: InterruptIntent,
-    options?: { newInput?: string }
+    options?: { newInput?: string; files?: ChatSendFile[] }
   ) => Promise<void>;
   pause: (sessionId: string) => Promise<void>;
   cancel: (sessionId: string) => Promise<void>;
-  supplement: (sessionId: string, newInput: string) => Promise<void>;
+  supplement: (sessionId: string, newInput: string, files?: ChatSendFile[]) => Promise<void>;
   resume: (sessionId: string) => Promise<void>;
   switchMode: (sessionId: string, mode: AgentMode) => Promise<void>;
   disconnect: () => void;
@@ -382,17 +383,37 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
     async (
       sessionId: string,
       intent: InterruptIntent,
-      options?: { newInput?: string }
+      options?: { newInput?: string; files?: ChatSendFile[] }
     ) => {
       const newInput = options?.newInput;
-      if (intent === 'supplement' && newInput) {
+      const files = options?.files;
+      const hasFiles = Boolean(files && files.length > 0);
+      if (intent === 'supplement' && (newInput || hasFiles)) {
         userInputVersionRef.current += 1;
         stopAllTts();
+        const displayContent =
+          (newInput ?? '').trim() ||
+          (hasFiles
+            ? i18n.t('chat.fileUpload.messageFallback', {
+                count: files?.length ?? 0,
+              })
+            : '');
         addMessage({
           id: `user-${Date.now()}`,
           role: 'user',
-          content: newInput,
+          content: displayContent,
           timestamp: new Date().toISOString(),
+          ...(hasFiles
+            ? {
+                fileItems: files!.map((file) => ({
+                  name: file.name,
+                  size: file.size ?? 0,
+                  mime_type: '',
+                  download_url: file.url,
+                  download_token: '',
+                })),
+              }
+            : {}),
         });
       }
       const interruptRequestId = makeClientRequestId('interrupt');
@@ -404,6 +425,14 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
         };
         if (intent === 'supplement') {
           params.new_input = newInput ?? '';
+          if (hasFiles) {
+            params.files = files?.map((file) => ({
+              url: file.url,
+              name: file.name,
+              filename: file.name,
+              size: file.size,
+            }));
+          }
         }
         await request('chat.interrupt', params, { requestId: interruptRequestId });
       } catch (error) {
@@ -444,9 +473,9 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
   );
 
   const supplement = useCallback(
-    async (sessionId: string, newInput: string) => {
+    async (sessionId: string, newInput: string, files?: ChatSendFile[]) => {
       try {
-        await interrupt(sessionId, 'supplement', { newInput });
+        await interrupt(sessionId, 'supplement', { newInput, files });
       } catch (error) {
         const webError = error as WebError;
         setConnectionStats({ lastError: webError.message });
@@ -990,16 +1019,19 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
           percent,
         });
       }),
-      webClient.on('heartbeat.relay', ({ payload }) => {
-        const heartbeatText =
-          typeof payload.heartbeat === 'string' ? payload.heartbeat : '';
-        // 只要成功收到 relay 即表示已成功发到前端，始终为 ok，不存在 alert
-        setHeartbeatStatus(
-          'ok',
-          heartbeatText || null,
-          new Date().toISOString()
-        );
-      }),
+      ...(FEATURE_HEARTBEAT_UI
+        ? [
+            webClient.on('heartbeat.relay', ({ payload }) => {
+              const heartbeatText =
+                typeof payload.heartbeat === 'string' ? payload.heartbeat : '';
+              setHeartbeatStatus(
+                'ok',
+                heartbeatText || null,
+                new Date().toISOString()
+              );
+            }),
+          ]
+        : []),
       webClient.on('session.updated', ({ payload }) => {
         const sessionId =
           typeof payload.session_id === 'string' ? payload.session_id : '';
@@ -1012,16 +1044,14 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
       webClient.on('chat.processing_status', (event: WsEvent) => {
         if (!shouldHandleSessionEvent(event.payload)) return;
         const isProcessingNow = Boolean(event.payload.is_processing);
-        if (isProcessingNow && !shouldHandleCurrentRequestEvent(event)) return;
-        if (shouldDropDuplicatedEvent('chat.processing_status', event.payload)) return;
-        const procRid = typeof event.request_id === 'string' ? event.request_id.trim() : '';
-        if (
-          isProcessingNow &&
-          procRid &&
-          !pendingInterruptRequestIdsRef.current.has(procRid)
-        ) {
-          activeRequestIdRef.current = procRid;
+        // 仅在本 tab 已发起 chat.send 后才进入「处理中」；其它流式请求（如 history.get）忽略
+        if (isProcessingNow) {
+          if (!activeRequestIdRef.current) return;
+          if (!shouldHandleCurrentRequestEvent(event)) return;
+        } else if (activeRequestIdRef.current && !shouldHandleCurrentRequestEvent(event)) {
+          return;
         }
+        if (shouldDropDuplicatedEvent('chat.processing_status', event.payload)) return;
         setProcessing(isProcessingNow);
         if (!isProcessingNow) {
           setThinking(false);
@@ -1038,7 +1068,11 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
               // 从队列中移除该任务
               removeFromTaskQueue(nextTask.id);
               // 发送下一个任务
-              sendMessageRef.current(nextTask.content, activeSessionIdRef.current);
+              sendMessageRef.current(
+                nextTask.content,
+                activeSessionIdRef.current,
+                nextTask.files
+              );
             }
           }
         }
@@ -1047,6 +1081,8 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
         if (!shouldHandleSessionEvent(payload)) return;
         if (shouldDropDuplicatedEvent('chat.error', payload)) return;
         setThinking(false);
+        setProcessing(false);
+        activeRequestIdRef.current = null;
         const errorMsg =
           typeof payload.error === 'string' ? payload.error : i18n.t('network.unknownError');
         // 忽略 "invalid page_idx or session history not found" 错误，因为这是新会话的正常情况
@@ -1330,7 +1366,9 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
       // 不再重置上下文压缩信息，保持本地存储的状态
       // setContextCompressionStats(null);
       setContextWindowUsage(null);
-      setHeartbeatStatus('unknown', null, null);
+      if (FEATURE_HEARTBEAT_UI) {
+        setHeartbeatStatus('unknown', null, null);
+      }
       setConnectionStats({ state: 'closed', inflight: 0 });
     };
   }, [

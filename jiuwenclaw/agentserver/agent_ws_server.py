@@ -596,16 +596,33 @@ class AgentWebSocketServer:
                 request.request_id,
                 e,
             )
-            error_resp = AgentResponse(
-                request_id=request.request_id,
-                channel_id=request.channel_id,
-                ok=False,
-                payload={"error": str(e)},
-            )
-            wire = encode_agent_response_for_wire(
-                error_resp, response_id=request.request_id
-            )
+            error_text = str(e)
             async with send_lock:
+                if request.is_stream:
+                    err_chunk = AgentResponseChunk(
+                        request_id=request.request_id,
+                        channel_id=request.channel_id,
+                        payload={
+                            "event_type": "chat.error",
+                            "error": error_text,
+                        },
+                        is_complete=True,
+                    )
+                    wire = encode_agent_chunk_for_wire(
+                        err_chunk,
+                        response_id=request.request_id,
+                        sequence=0,
+                    )
+                else:
+                    error_resp = AgentResponse(
+                        request_id=request.request_id,
+                        channel_id=request.channel_id,
+                        ok=False,
+                        payload={"error": error_text},
+                    )
+                    wire = encode_agent_response_for_wire(
+                        error_resp, response_id=request.request_id
+                    )
                 await ws.send(json.dumps(wire, ensure_ascii=False))
         finally:
             _tp_reset(_ext_token)

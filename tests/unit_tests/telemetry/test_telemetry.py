@@ -2058,7 +2058,7 @@ class TestProviderInitialization:
         assert bundle.tracer_provider is not None
         assert bundle.meter_provider is not None
         assert bundle.tracer_provider._active_span_processor._span_processors == ()
-        assert bundle.meter_provider._sdk_config.metric_readers == []
+        assert bundle.meter_provider._metric_readers == []
 
     @staticmethod
     def test_build_default_providers_adds_claw_id_resource_attribute():

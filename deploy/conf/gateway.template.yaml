@@ -54,6 +54,18 @@ spec:
       labels:
         app: <<GATEWAY_NAME>>
     spec:
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:  # 软限制：优先把pod分开部署，但如果资源紧张、只有一个节点可用的时候，也允许它们挤在同一台机器上
+          - weight: 100                                     # 权重范围（1-100），取最高值，优先分开放置
+            podAffinityTerm:
+              labelSelector:
+                matchExpressions:
+                - key: app
+                  operator: In
+                  values:
+                  - <<GATEWAY_NAME>>
+              topologyKey: "kubernetes.io/hostname"
       containers:
         - name: gateway
           image: <<GATEWAY_IMAGE>>

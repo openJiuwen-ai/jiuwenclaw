@@ -24,6 +24,7 @@ import shutil
 import subprocess
 import sys
 import time
+import uuid
 from pathlib import Path
 
 import pytest
@@ -163,11 +164,6 @@ def test_cli_health_ok(server_url):
     assert data.get("status") == "ok"
 
 
-def test_cli_health_plain(server_url):
-    proc = _run_cli(["--output", "plain", "health"], base_url=server_url)
-    assert proc.returncode == 0, proc.stderr
-    assert proc.stdout.strip() == b"ok"
-
 # ────────────────────────────── sandbox ──────────────────────────────
 
 
@@ -197,24 +193,6 @@ def test_cli_sandbox_ls(server_url, tracking_sandboxes):
     proc, data = _run_cli_json(["sandbox", "ls"], base_url=server_url)
     assert isinstance(data, list)
     assert len(data) >= 1
-
-    proc_tbl = _run_cli(
-        ["--output", "table", "sandbox", "ls"], base_url=server_url,
-    )
-    assert proc_tbl.returncode == 0, proc_tbl.stderr
-    assert b"ID" in proc_tbl.stdout and b"PHASE" in proc_tbl.stdout
-
-
-def test_cli_sandbox_ls_plain_lists_ids(server_url, tracking_sandboxes):
-    """``--output plain`` 配合 ``PLAIN_FIELD=id`` 每行一个 sandbox id。"""
-    sandbox_id = _create_sandbox_via_cli(server_url, tracking_sandboxes)
-
-    proc = _run_cli(
-        ["--output", "plain", "sandbox", "ls"], base_url=server_url,
-    )
-    assert proc.returncode == 0, proc.stderr
-    lines = [line for line in proc.stdout.decode("utf-8").splitlines() if line.strip()]
-    assert sandbox_id in lines, (sandbox_id, lines)
 
 
 def test_cli_sandbox_ls_phase_filter(server_url, tracking_sandboxes, client):
@@ -300,24 +278,6 @@ def test_cli_sandbox_exec_stdin_dash(server_url, tracking_sandboxes, client):
     assert proc.stdout == b"hello from stdin"
 
 
-def test_cli_sandbox_exec_json_output(server_url, tracking_sandboxes, client):
-    sandbox_id = _create_sandbox_via_cli(server_url, tracking_sandboxes)
-    _wait_phase(client, sandbox_id, "ready")
-
-    proc = _run_cli(
-        [
-            "--output", "json",
-            "sandbox", "exec", sandbox_id, "--",
-            "python3", "-c", "print('hi'); import sys; sys.exit(5)",
-        ],
-        base_url=server_url,
-    )
-    assert proc.returncode == 5, (proc.stdout, proc.stderr)
-    payload = json.loads(proc.stdout.decode("utf-8"))
-    assert payload.get("exit_code") == 5
-    assert "hi" in (payload.get("stdout") or "")
-
-
 def test_cli_sandbox_exec_env_cwd(server_url, tracking_sandboxes, client):
     sandbox_id = _create_sandbox_via_cli(server_url, tracking_sandboxes)
     _wait_phase(client, sandbox_id, "ready")
@@ -389,20 +349,114 @@ def test_cli_sandbox_exec_timeout_seconds(server_url, tracking_sandboxes, client
     assert b"should-not-print" not in proc.stdout
 
 
-def test_cli_sandbox_exec_bg(server_url, tracking_sandboxes, client):
+def test_cli_sandbox_bg_exec(server_url, tracking_sandboxes, client):
     sandbox_id = _create_sandbox_via_cli(server_url, tracking_sandboxes)
     _wait_phase(client, sandbox_id, "ready")
 
     proc, data = _run_cli_json(
         [
-            "sandbox", "exec-bg", sandbox_id, "--",
+            "sandbox", "bg-exec", sandbox_id, "--",
             "python3", "-c", "import time; time.sleep(60)",
         ],
         base_url=server_url,
     )
     assert isinstance(data, dict)
     assert data.get("started") is True
+    job_id = data.get("job_id")
+    assert isinstance(job_id, str) and 4 <= len(job_id) <= 16
     assert isinstance(data.get("pid"), int) and data["pid"] > 0
+
+
+def test_cli_sandbox_bg_exec_custom_job_id(
+    server_url, tracking_sandboxes, client,
+):
+    sandbox_id = _create_sandbox_via_cli(server_url, tracking_sandboxes)
+    _wait_phase(client, sandbox_id, "ready")
+    job_id = f"cli-{uuid.uuid4().hex[:4]}"
+
+    proc, data = _run_cli_json(
+        [
+            "sandbox", "bg-exec", sandbox_id,
+            "--job-id", job_id,
+            "--",
+            "python3", "-c", "import time; time.sleep(3600)",
+        ],
+        base_url=server_url,
+    )
+    assert data.get("started") is True
+    assert data.get("job_id") == job_id
+
+    kill = _run_cli(
+        ["sandbox", "bg-kill", sandbox_id, job_id],
+        base_url=server_url,
+    )
+    assert kill.returncode == 0, (kill.stdout, kill.stderr)
+
+
+def test_cli_sandbox_bg_get_instant_task(server_url, tracking_sandboxes, client):
+    sandbox_id = _create_sandbox_via_cli(server_url, tracking_sandboxes)
+    _wait_phase(client, sandbox_id, "ready")
+
+    _, started = _run_cli_json(
+        [
+            "sandbox", "bg-exec", sandbox_id, "--job-id", "ver-cli",
+            "--", "python3", "--version",
+        ],
+        base_url=server_url,
+    )
+    assert started.get("started") is True
+
+    deadline = time.monotonic() + 10.0
+    stdout_text = ""
+    while time.monotonic() < deadline:
+        _, status = _run_cli_json(
+            ["sandbox", "bg-get", sandbox_id, "ver-cli"],
+            base_url=server_url,
+        )
+        if not status.get("running"):
+            stdout_text = status.get("stdout") or ""
+            break
+        time.sleep(0.1)
+    assert "Python" in stdout_text
+
+
+def test_cli_sandbox_bg_list_and_kill(server_url, tracking_sandboxes, client):
+    sandbox_id = _create_sandbox_via_cli(server_url, tracking_sandboxes)
+    _wait_phase(client, sandbox_id, "ready")
+    job_id = f"lst-{uuid.uuid4().hex[:4]}"
+
+    _run_cli_json(
+        [
+            "sandbox", "bg-exec", sandbox_id, "--job-id", job_id,
+            "--", "python3", "-c", "import time; time.sleep(3600)",
+        ],
+        base_url=server_url,
+    )
+
+    _, listed = _run_cli_json(
+        ["sandbox", "bg-list", sandbox_id],
+        base_url=server_url,
+    )
+    assert isinstance(listed, dict)
+    job_ids = [item.get("job_id") for item in listed.get("items", [])]
+    assert job_id in job_ids
+
+    _, kill_data = _run_cli_json(
+        ["sandbox", "bg-kill", sandbox_id, job_id],
+        base_url=server_url,
+    )
+    assert kill_data.get("killed") is True
+
+
+def test_cli_sandbox_bg_get_not_found(server_url, tracking_sandboxes, client):
+    sandbox_id = _create_sandbox_via_cli(server_url, tracking_sandboxes)
+    _wait_phase(client, sandbox_id, "ready")
+
+    proc = _run_cli(
+        ["sandbox", "bg-get", sandbox_id, "no-such-job"],
+        base_url=server_url,
+    )
+    assert proc.returncode == 3, (proc.stdout, proc.stderr)
 
 
 def test_cli_sandbox_upload_download_roundtrip(

@@ -14,6 +14,7 @@ import {
   AskUserQuestionPayload,
   UsageSummary,
   FileDownloadItem,
+  ChatSendFile,
 } from '../types';
 import { useTodoStore } from './todoStore';
 
@@ -51,6 +52,7 @@ interface TaskItem {
   id: string;
   content: string;
   timestamp: number;
+  files?: ChatSendFile[];
 }
 
 interface ChatState {
@@ -99,7 +101,7 @@ interface ChatState {
   /** 在列表头部插入更早的历史消息（数组内建议时间升序） */
   prependMessages: (olderFirst: Message[]) => void;
   // 任务队列相关
-  addToTaskQueue: (content: string) => void;
+  addToTaskQueue: (content: string, files?: ChatSendFile[]) => void;
   clearTaskQueue: () => void;
   removeFromTaskQueue: (id: string) => void;
   // 用户问题相关
@@ -507,7 +509,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
     });
   },
 
-  addToTaskQueue: (content) => {
+  addToTaskQueue: (content, files) => {
     set((state) => ({
       taskQueue: [
         ...state.taskQueue,
@@ -515,6 +517,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
           id: Date.now().toString() + Math.random().toString(36).substr(2, 9),
           content,
           timestamp: Date.now(),
+          ...(files && files.length > 0 ? { files } : {}),
         },
       ],
     }));

@@ -170,6 +170,30 @@ async def load_all_service_configs() -> list[dict[str, Any]]:
         return []
 
 
+def _coalesce_loaded_invoke_ids(
+    request: AgentRequest,
+    loaded: Any | None,
+) -> tuple[str, str]:
+    """优先使用 loaded 中的 id，缺失时用入参拼接默认值。"""
+    service_id: str | None = None
+    agent_id: str | None = None
+    if loaded is not None:
+        raw_svc = getattr(loaded, "service_id", None)
+        raw_ag = getattr(loaded, "agent_id", None)
+        if raw_svc and str(raw_svc).strip():
+            service_id = str(raw_svc).strip()
+        if raw_ag and str(raw_ag).strip():
+            agent_id = str(raw_ag).strip()
+
+    from jiuwenclaw.infrastructure.module_importer import import_manager_ws_client_module
+
+    loader_mod = import_manager_ws_client_module("core.enterprise_config.loader")
+    ctx = loader_mod.routing_context_from_request(request)
+    default_svc = f"{ctx.group_id}{ctx.bot_id}"
+    default_ag = f"{ctx.group_id}{ctx.bot_id}{ctx.user_id}"
+    return service_id or default_svc, agent_id or default_ag
+
+
 def _resolve_invoke_ids_from_request(msg: AgentRequest) -> tuple[str, str | None]:
     """Resolve invoke ids, fallback to ``session_id`` mapping when service_id is missing."""
     svc = str(msg.service_id or "").strip()
@@ -241,12 +265,25 @@ class _SessionRequest(ISessionRequest):
         self._req = msg
         self._envelope = envelope
         self._service_template = service_template
-        service_id, agent_id = _resolve_invoke_ids_from_request(self._req)
-        self._service_id = service_id
-        self._req.service_id = service_id
-        self._req.agent_id = agent_id or ""
-        self._envelope.service_id = service_id
-        self._envelope.agent_id = agent_id or None
+        svc = str(msg.service_id or "").strip() or "default_service_id"
+        ag = str(msg.agent_id or "").strip() or "default_agent_id"
+        logger.info(
+            "[RuntimeManagementAgentClient] resolved SessionRequest ids: service_id=%s agent_id=%s",
+            svc,
+            ag,
+        )
+        svc = hashlib.md5(svc.encode("utf-8")).hexdigest()
+        ag = hashlib.md5(ag.encode("utf-8")).hexdigest()
+        logger.info(
+            "[RuntimeManagementAgentClient] resolved SessionRequest hash ids: service_id=%s agent_id=%s",
+            svc,
+            ag,
+        )
+        self._service_id = svc
+        self._req.service_id = svc
+        self._req.agent_id = ag
+        self._envelope.service_id = svc
+        self._envelope.agent_id = ag or None
 
     @property
     def session_id(self) -> str:
@@ -981,15 +1018,6 @@ class RuntimeManagementAgentClient(AgentServerClient):
         service_template = None
         loaded = await load_effective_service_config_for_request(request)
         if loaded is not None:
-            # 从 loaded 中获取 service_id 和 agent_id
-            service_id = getattr(loaded, "service_id", None)
-            agent_id = getattr(loaded, "agent_id", None)
-            logger.info(
-                "[RuntimeManagementAgentClient] loaded config: service_id=%s agent_id=%s",
-                service_id,
-                agent_id,
-            )
-
             entities = loaded.service_config or []
             if entities:
                 service_template = entities[0]
@@ -1008,19 +1036,24 @@ class RuntimeManagementAgentClient(AgentServerClient):
                     ext_config,
                 )
 
-            # 确保 service_template 是字典，并合并 service_id 和 agent_id
-            if service_template is None:
-                service_template = {}
+        service_id, agent_id = _coalesce_loaded_invoke_ids(request, loaded)
+        logger.info(
+            "[RuntimeManagementAgentClient] resolved config: service_id=%s agent_id=%s",
+            service_id,
+            agent_id,
+        )
+        if service_template is None:
+            service_template = {}
+        request.service_id = service_id
+        request.agent_id = agent_id
+        service_template["service_id"] = service_id
+        service_template["agent_id"] = agent_id
 
-            if service_id:
-                request.service_id = service_id
-                service_template["service_id"] = service_id
-
-            if agent_id:
-                request.agent_id = agent_id
-                service_template["agent_id"] = agent_id
-
-        session_request = _SessionRequest(request, envelope, service_template=service_template)
+        session_request = _SessionRequest(
+            request,
+            envelope,
+            service_template=service_template,
+        )
 
         try:
             final: AgentResponse | None = None
@@ -1062,15 +1095,6 @@ class RuntimeManagementAgentClient(AgentServerClient):
         service_template = None
         loaded = await load_effective_service_config_for_request(request)
         if loaded is not None:
-            # 从 loaded 中获取 service_id 和 agent_id
-            service_id = getattr(loaded, "service_id", None)
-            agent_id = getattr(loaded, "agent_id", None)
-            logger.info(
-                "[RuntimeManagementAgentClient] loaded config: service_id=%s agent_id=%s",
-                service_id,
-                agent_id,
-            )
-
             entities = loaded.service_config or []
             if entities:
                 service_template = entities[0]
@@ -1089,19 +1113,24 @@ class RuntimeManagementAgentClient(AgentServerClient):
                     ext_config,
                 )
 
-            # 确保 service_template 是字典，并合并 service_id 和 agent_id
-            if service_template is None:
-                service_template = {}
+        service_id, agent_id = _coalesce_loaded_invoke_ids(request, loaded)
+        logger.info(
+            "[RuntimeManagementAgentClient] resolved config: service_id=%s agent_id=%s",
+            service_id,
+            agent_id,
+        )
+        if service_template is None:
+            service_template = {}
+        request.service_id = service_id
+        request.agent_id = agent_id
+        service_template["service_id"] = service_id
+        service_template["agent_id"] = agent_id
 
-            if service_id:
-                request.service_id = service_id
-                service_template["service_id"] = service_id
-
-            if agent_id:
-                request.agent_id = agent_id
-                service_template["agent_id"] = agent_id
-
-        session_request = _SessionRequest(request, envelope, service_template=service_template)
+        session_request = _SessionRequest(
+            request,
+            envelope,
+            service_template=service_template,
+        )
 
         try:
             async for chunk in self._access.send_message(session_request):

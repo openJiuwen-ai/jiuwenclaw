@@ -718,6 +718,147 @@ async def test_load_service_config_returns_resolved_service_and_agent_id(
     assert bob_loaded.send_file_allowed is False
 
 
+@pytest.mark.asyncio
+async def test_load_service_config_returns_routing_ids_without_template_slots(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """策略命中且可解析 service_id/agent_id 时，即使 template_ref 无 service_config 槽位也返回。"""
+    jid = "sp-routing-only"
+    db = _bind_gateway_db(monkeypatch, jid)
+    m1 = "8438cdc9-8644-4ca3-b956-ee515d3ef227"
+
+    async def _list_records(
+        table: str,
+        *,
+        filters: dict | None = None,
+        order_by: str = "",
+    ) -> list[dict]:
+        scoped = db.apply_instance_scope(table, dict(filters or {}))
+        if table == "config_effective_service_policy":
+            if scoped.get("jiuwenclaw_id") not in (None, jid):
+                return []
+            return [
+                {
+                    "id": 7,
+                    "jiuwenclaw_id": jid,
+                    "policy_id": "3767048d-9642-49ae-a67b-06588329a6bf",
+                    "service_id": "${group_id}::${bot_id}::${user_id}",
+                    "match_expr": None,
+                    "template_ref": {"default_model": [m1]},
+                }
+            ]
+        if table == "config_effective_agent_policy":
+            if scoped.get("jiuwenclaw_id") not in (None, jid):
+                return []
+            return [
+                {
+                    "id": 7,
+                    "jiuwenclaw_id": jid,
+                    "service_policy_id": "3767048d-9642-49ae-a67b-06588329a6bf",
+                    "agent_id": "${user_id}",
+                    "match_expr": None,
+                    "send_file_allowed": True,
+                    "template_ref": {},
+                }
+            ]
+        return []
+
+    _patch_gateway_queries(
+        monkeypatch,
+        db,
+        list_records=_list_records,
+        fetch_template_by_slot=pytest.fail,
+    )
+
+    request = AgentRequest(
+        request_id="req-routing-only",
+        params={
+            "group_id": "sale",
+            "bot_id": "bot",
+            "user_id": "alice",
+        },
+    )
+    loaded = await load_effective_enterprise_config(
+        request,
+        [TemplateRefSlot.SERVICE_CONFIG, TemplateRefSlot.EXTENSION_CONFIG],
+    )
+    assert loaded is not None
+    assert loaded.service_id == "sale::bot::alice"
+    assert loaded.agent_id == "alice"
+    assert loaded.send_file_allowed is True
+    assert loaded.service_config is None
+    assert loaded.extension_config is None
+
+
+@pytest.mark.asyncio
+async def test_load_returns_send_file_allowed_without_service_config_slot(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Agent 策略命中且 send_file_allowed=True 时，未请求 service_config 槽位也应返回。"""
+    jid = "sp-send-file-only"
+    db = _bind_gateway_db(monkeypatch, jid)
+
+    async def _list_records(
+        table: str,
+        *,
+        filters: dict | None = None,
+        order_by: str = "",
+    ) -> list[dict]:
+        scoped = db.apply_instance_scope(table, dict(filters or {}))
+        if table == "config_effective_service_policy":
+            if scoped.get("jiuwenclaw_id") not in (None, jid):
+                return []
+            return [
+                {
+                    "id": 1,
+                    "jiuwenclaw_id": jid,
+                    "policy_id": "sp-1",
+                    "match_expr": None,
+                    "template_ref": {},
+                }
+            ]
+        if table == "config_effective_agent_policy":
+            if scoped.get("jiuwenclaw_id") not in (None, jid):
+                return []
+            return [
+                {
+                    "id": 2,
+                    "jiuwenclaw_id": jid,
+                    "service_policy_id": "sp-1",
+                    "agent_id": "${user_id}",
+                    "match_expr": None,
+                    "send_file_allowed": True,
+                    "template_ref": {},
+                }
+            ]
+        return []
+
+    _patch_gateway_queries(
+        monkeypatch,
+        db,
+        list_records=_list_records,
+        fetch_template_by_slot=pytest.fail,
+    )
+
+    request = AgentRequest(
+        request_id="req-send-file",
+        params={
+            "group_id": "sale",
+            "bot_id": "bot",
+            "user_id": "alice",
+        },
+    )
+    loaded = await load_effective_enterprise_config(
+        request,
+        [TemplateRefSlot.EXTENSION_CONFIG],
+    )
+    assert loaded is not None
+    assert loaded.send_file_allowed is True
+    assert loaded.service_id is None
+    assert loaded.agent_id is None
+    assert loaded.extension_config is None
+
+
 def test_policy_match_order_by_uses_priority_then_updated_at() -> None:
     assert loader.POLICY_MATCH_ORDER_BY == [
         ("priority", True),

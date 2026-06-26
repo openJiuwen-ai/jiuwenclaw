@@ -23,8 +23,8 @@ const ALLOWED_ASSISTANT_EVENT_TYPES = new Set([
 
 /** 后端约定：最后一帧 `history.message` 使用 `payload.status: done`（兼容旧版 `payload.content: done`） */
 const HISTORY_RESTORE_DONE_CONTENT = 'done';
-/** 两次 history.message 之间无新帧时的兜底（毫秒）；正常链路由 done / page_complete 结束；持续有 chunk 时不会触发 */
-const HISTORY_RESTORE_IDLE_MS = 60_000;
+/** 两次 history.message 之间无新帧时的兜底（毫秒）；正常由 done / batch_end / 流结束信号收尾 */
+const HISTORY_RESTORE_IDLE_MS = 8_000;
 const HISTORY_RESTORE_MAX_RETRIES = 2;
 
 export interface HistoryToolReplayItem {
@@ -77,6 +77,53 @@ let activePageFetchDispose: (() => void) | null = null;
 function disposeActivePageFetch(): void {
   activePageFetchDispose?.();
   activePageFetchDispose = null;
+}
+
+function matchesHistoryStreamRequest(
+  event: WsEvent,
+  expectedRequestId: string | undefined
+): boolean {
+  if (!expectedRequestId) {
+    return false;
+  }
+  const rid = typeof event.request_id === 'string' ? event.request_id.trim() : '';
+  return rid === expectedRequestId;
+}
+
+function subscribeHistoryStreamLifecycle(options: {
+  expectedRequestId?: string;
+  isDisposed: () => boolean;
+  onStreamSettled: () => void;
+  onStreamError: (message: string) => void;
+}): () => void {
+  if (!options.expectedRequestId) {
+    return () => {};
+  }
+
+  const unsubs = [
+    webClient.on('chat.processing_status', (event: WsEvent) => {
+      if (options.isDisposed()) return;
+      if (!matchesHistoryStreamRequest(event, options.expectedRequestId)) return;
+      if (event.payload.is_processing === false) {
+        options.onStreamSettled();
+      }
+    }),
+    webClient.on('chat.error', (event: WsEvent) => {
+      if (options.isDisposed()) return;
+      if (!matchesHistoryStreamRequest(event, options.expectedRequestId)) return;
+      const errorMsg =
+        typeof event.payload.error === 'string'
+          ? event.payload.error
+          : 'history stream error';
+      options.onStreamError(errorMsg);
+    }),
+  ];
+
+  return () => {
+    for (const unsub of unsubs) {
+      unsub();
+    }
+  };
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -487,7 +534,7 @@ function isHistoryBatchEnd(payload: Record<string, unknown>): boolean {
   return markers.some((marker) => marker === true);
 }
 
-type HistoryFinalizeReason = 'done' | 'batch_end' | 'idle_timeout';
+type HistoryFinalizeReason = 'done' | 'batch_end' | 'idle_timeout' | 'stream_settled' | 'stream_error';
 
 interface HistoryIdleGuardOptions {
   errorMessage: string;
@@ -575,11 +622,13 @@ export function beginHistoryRestore(options: BeginHistoryRestoreOptions): Histor
   const entries: HistoryTimelineEntry[] = [];
   let totalPages: number | null = null;
   let disposed = false;
+  let lifecycleUnsubscribe: () => void = () => {};
 
   function dispose(): void {
     if (disposed) return;
     disposed = true;
     idleGuard.dispose();
+    lifecycleUnsubscribe();
     unsubscribe();
     if (activeRestore?.generation === generation) {
       activeRestore = null;
@@ -671,6 +720,24 @@ export function beginHistoryRestore(options: BeginHistoryRestoreOptions): Histor
     idleGuard.scheduleIdleTimer();
   });
 
+  lifecycleUnsubscribe = subscribeHistoryStreamLifecycle({
+    expectedRequestId: options.requestId,
+    isDisposed: () => disposed,
+    onStreamSettled: () => {
+      if (disposed) return;
+      idleGuard.clearIdleTimer();
+      finalize('stream_settled');
+    },
+    onStreamError: (message) => {
+      if (disposed) return;
+      idleGuard.clearIdleTimer();
+      if (!message.includes('invalid page_idx or session history not found')) {
+        options.onError?.(message);
+      }
+      finalize('stream_error');
+    },
+  });
+
   idleGuard.scheduleIdleTimer();
 
   const handle: HistoryRestoreHandle = { generation, dispose };
@@ -713,11 +780,13 @@ export function fetchHistoryPage(options: FetchHistoryPageOptions): HistoryResto
   const entries: HistoryTimelineEntry[] = [];
   let totalPages: number | null = null;
   let disposed = false;
+  let lifecycleUnsubscribe: () => void = () => {};
 
   function dispose(): void {
     if (disposed) return;
     disposed = true;
     idleGuard.dispose();
+    lifecycleUnsubscribe();
     unsubscribe();
     activePageFetchDispose = null;
     if (activeRestore?.generation === generation) {
@@ -805,6 +874,24 @@ export function fetchHistoryPage(options: FetchHistoryPageOptions): HistoryResto
     }
 
     idleGuard.scheduleIdleTimer();
+  });
+
+  lifecycleUnsubscribe = subscribeHistoryStreamLifecycle({
+    expectedRequestId: options.requestId,
+    isDisposed: () => disposed,
+    onStreamSettled: () => {
+      if (disposed) return;
+      idleGuard.clearIdleTimer();
+      finalize('stream_settled');
+    },
+    onStreamError: (message) => {
+      if (disposed) return;
+      idleGuard.clearIdleTimer();
+      if (!message.includes('invalid page_idx or session history not found')) {
+        options.onError?.(message);
+      }
+      finalize('stream_error');
+    },
   });
 
   idleGuard.scheduleIdleTimer();
