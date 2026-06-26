@@ -265,6 +265,11 @@ _SKILLDEV_STREAM_EVENT_TYPES = frozenset({
     "skilldev.agent_output",
 })
 
+# Gateway 内部消费的 skilldev 事件：不向客户端转发，在 send() 入口统一处理（含无 WS 场景）
+_SKILLDEV_GATEWAY_INTERNAL_EVENT_TYPES = frozenset({
+    "skilldev.gate_obs_cleanup",
+})
+
 
 def _resolve_message_send_import_type(data: dict[str, Any]) -> str:
     """message.send 的 importType，默认 vibeImport。"""
@@ -1201,6 +1206,13 @@ class VibeSkillChannel(BaseChannel):
             # Gateway MessageHandler 流结束时会补发 chat.processing_status；VibeSkill
             # 协议以 session.status(busy/idle/completed) 表达状态，此处直接丢弃。
             if event_type == "chat.processing_status":
+                return
+            if event_type in _SKILLDEV_GATEWAY_INTERNAL_EVENT_TYPES:
+                await self._handle_skilldev_gateway_internal_event(
+                    event_type,
+                    msg.payload,
+                    session_id,
+                )
                 return
 
         # 查找对应的 WebSocket
@@ -2169,6 +2181,46 @@ class VibeSkillChannel(BaseChannel):
             "skilldev.agent_completed": self._handle_skilldev_agent_completed,
             "skilldev.completed": self._handle_skilldev_completed,
         }
+
+    async def _handle_skilldev_gateway_internal_event(
+        self,
+        event_type: str,
+        payload: dict,
+        session_id: str,
+    ) -> None:
+        """处理 Gateway 内部 skilldev 事件（不转发北向 WS）。"""
+        if event_type == "skilldev.gate_obs_cleanup":
+            await self._handle_skilldev_gate_obs_cleanup(payload, session_id)
+            return
+        logger.warning(
+            "[VibeSkillChannel] unhandled gateway internal skilldev event: event_type=%s session_id=%s",
+            event_type,
+            session_id,
+        )
+
+    async def _handle_skilldev_gate_obs_cleanup(
+        self,
+        payload: dict,
+        session_id: str,
+    ) -> None:
+        """skilldev.gate_obs_cleanup — 沙箱通知 Gateway 删除临时 OBS 对象。"""
+        url = str(payload.get("url") or "").strip()
+        if not url:
+            logger.warning(
+                "[VibeSkillChannel] skilldev.gate_obs_cleanup missing url, session_id=%s",
+                session_id,
+            )
+            return
+        logger.info(
+            "[VibeSkillChannel] skilldev.gate_obs_cleanup received, session_id=%s url=%s",
+            session_id,
+            url,
+        )
+        await _delete_obs_url(
+            url,
+            session_id=session_id,
+            reason="gate_obs_cleanup",
+        )
 
     async def _handle_skilldev_skill_name_ready(
         self,
