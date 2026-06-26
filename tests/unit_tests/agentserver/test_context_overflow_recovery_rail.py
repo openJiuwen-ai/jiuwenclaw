@@ -185,7 +185,7 @@ class TestProactiveBridgeBeforeModelCall(unittest.TestCase):
         processor = _TestFullCompactProcessor(deferred=False, force_pending=False)
         ctx = _Ctx(
             _Context([processor]),
-            exception=RuntimeError("context length exceeded"),
+            exception=RuntimeError("prompt is too long"),
         )
 
         asyncio.run(rail.on_model_exception(ctx))
