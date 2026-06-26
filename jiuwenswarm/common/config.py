@@ -25,7 +25,7 @@ logger = logging.getLogger(__name__)
 
 def _config_cache_enabled() -> bool:
     return os.getenv("JIUWENSWARM_DEV", "0") != "1"
- 
+
 _config_cache: dict[str, Any] = {}  # {"data": <parsed config>} when valid
 _config_cache_valid: bool = False
 _config_cache_lock = threading.RLock()
@@ -156,7 +156,7 @@ def get_config():
     with _config_cache_lock:
         cache_enabled = _config_cache_enabled()
         file_key = None
-        
+
         if not cache_enabled:
             # 开发模式：stat 检测文件变化，外部编辑即时生效
             file_key = _config_file_cache_key(path)
