@@ -15,6 +15,7 @@ from jiuwenswarm.agents.harness.team.rails.team_member_skill_toolkit_rail import
 )
 from jiuwenswarm.agents.harness.common.rails.ask_user_rail import StructuredAskUserRail
 from jiuwenswarm.agents.harness.common.rails.stream_event_rail import JiuClawStreamEventRail
+from jiuwenswarm.agents.harness.common.rails.tokenjuice_rail import TokenJuiceRail
 
 __all__ = [
     "JiuClawStreamEventRail",
@@ -25,4 +26,5 @@ __all__ = [
     "RuntimePromptRail",
     "MemberSkillToolkitRail",
     "StructuredAskUserRail",
+    "TokenJuiceRail",
 ]

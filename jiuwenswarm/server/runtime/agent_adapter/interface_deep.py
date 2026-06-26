@@ -2305,6 +2305,27 @@ class JiuWenClawDeepAdapter:
         return rail
 
     @staticmethod
+    def _build_tokenjuice_rail(config: dict[str, Any] | None = None) -> Any | None:
+        """Build TokenJuiceRail for deterministic tool output compression.
+
+        Controlled by config.yaml ``tokenjuice.enabled`` (default: True).
+        """
+        tj_config = (config or {}).get("tokenjuice", {})
+        if not tj_config.get("enabled", True):
+            logger.info("[JiuWenClawDeepAdapter] TokenJuiceRail disabled by config")
+            return None
+
+        try:
+            from jiuwenswarm.agents.harness.common.rails.tokenjuice_rail import TokenJuiceRail
+            max_inline = int(tj_config.get("max_inline_chars", 1200))
+            rail = TokenJuiceRail(max_inline_chars=max_inline)
+            logger.info("[JiuWenClawDeepAdapter] TokenJuiceRail create success (max_inline=%d)", max_inline)
+        except Exception as exc:
+            logger.warning("[JiuWenClawDeepAdapter] TokenJuiceRail create failed: %s", exc)
+            rail = None
+        return rail
+
+    @staticmethod
     def _build_task_planning_rail() -> TaskPlanningRail | None:
         """Build TaskPlanningRail."""
         try:
@@ -2451,6 +2472,7 @@ class JiuWenClawDeepAdapter:
         rail_infos = [
             # TelemetryRail - lowest priority, runs first for full coverage
             _RailBuildInfo("_telemetry_rail", self._build_telemetry_rail),
+            _RailBuildInfo("_tokenjuice_rail", self._build_tokenjuice_rail, {"config": config_base}),
             _RailBuildInfo("_runtime_prompt_rail", self._build_runtime_prompt_rail),
             _RailBuildInfo("_response_prompt_rail", self._build_response_prompt_rail),
             _RailBuildInfo("_stream_event_rail", self._build_stream_event_rail),

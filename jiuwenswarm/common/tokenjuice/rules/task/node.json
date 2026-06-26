@@ -1,0 +1,42 @@
+{
+  "_copyright": "Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.",
+  "id": "task/node",
+  "family": "runtime-cli",
+  "description": "Compact node output while preserving error messages and key stack frames.",
+  "match": {
+    "toolNames": [
+      "exec"
+    ],
+    "argv0": [
+      "node"
+    ]
+  },
+  "transforms": {
+    "stripAnsi": true,
+    "dedupeAdjacent": true,
+    "trimEmptyEdges": true
+  },
+  "filters": {
+    "skipPatterns": [
+      "^\\s+at\\s+.*node_modules.*",
+      "^\\s+at\\s+.*\\(internal/.*",
+      "^\\s+at\\s+.*\\(node:.*"
+    ]
+  },
+  "summarize": {
+    "head": 12,
+    "tail": 10
+  },
+  "failure": {
+    "preserveOnFailure": true,
+    "head": 14,
+    "tail": 10
+  },
+  "counters": [
+    {
+      "name": "error",
+      "pattern": "Error:|TypeError:|ReferenceError:|SyntaxError:|UnhandledPromiseRejection|ERR_",
+      "flags": "i"
+    }
+  ]
+}

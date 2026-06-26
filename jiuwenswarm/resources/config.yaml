@@ -254,6 +254,11 @@ telemetry:
     protocol:                       # metrics protocol，默认回退到 telemetry.protocol
     headers: {}                     # metrics headers，默认回退到 telemetry.headers
 
+# tokenjuice — 工具输出确定性压缩（减少 LLM context token 消耗）
+tokenjuice:
+  enabled: true                     # 总开关，设为 false 关闭压缩
+  max_inline_chars: 1200            # 压缩后最大字符数
+
 react:
   agent_name: main_agent
   enable_task_loop: false
