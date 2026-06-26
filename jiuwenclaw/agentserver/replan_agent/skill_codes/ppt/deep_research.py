@@ -179,8 +179,10 @@ class PrepareNode(PlanNode):
         result = await self.stream_llm_collect(prompt=prompt, system_prompt="只输出 JSON 数组，不要输出其他内容")
         try:
             pages = self.extract_json(result, expected_type=list)
-            if isinstance(pages, list):
+            if isinstance(pages, list) and pages:
                 return pages
+            if isinstance(pages, list) and not pages:
+                logger.warning("[P6.0] LLM 返回空列表，尝试正则回退")
         except (ValueError, TypeError):
             logger.warning("[P6.0] LLM 解析大纲页面失败，尝试正则回退")
         return self._parse_outline_pages_fallback(outline_text)

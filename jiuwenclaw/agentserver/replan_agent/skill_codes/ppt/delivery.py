@@ -168,7 +168,7 @@ class DeliveryNode(PlanNode):
         if isinstance(result, list):
             return [self._basename(self._extract_path_from_item(x)) for x in result]
         if isinstance(result, dict):
-            for key in ("entries", "files", "items", "result", "matches", "paths"):
+            for key in ("entries", "files", "filenames", "items", "result", "matches", "paths"):
                 v = result.get(key)
                 if isinstance(v, list):
                     return [self._basename(self._extract_path_from_item(x)) for x in v]
@@ -180,7 +180,7 @@ class DeliveryNode(PlanNode):
             if isinstance(data, list):
                 return [self._basename(self._extract_path_from_item(x)) for x in data]
             if isinstance(data, dict):
-                for key in ("entries", "files", "items", "result", "matches", "paths"):
+                for key in ("entries", "files", "filenames", "items", "result", "matches", "paths"):
                     v = data.get(key)
                     if isinstance(v, list):
                         return [self._basename(self._extract_path_from_item(x)) for x in v]
@@ -192,12 +192,12 @@ class DeliveryNode(PlanNode):
         if hasattr(result, "model_dump"):
             dumped = result.model_dump(mode="json")
             if isinstance(dumped, dict):
-                for key in ("entries", "files", "items", "result", "data", "matches", "paths"):
+                for key in ("entries", "files", "filenames", "items", "result", "data", "matches", "paths"):
                     v = dumped.get(key)
                     if isinstance(v, list):
                         return [self._basename(self._extract_path_from_item(x)) for x in v]
                     if isinstance(v, dict):
-                        for sub_key in ("entries", "files", "items", "result", "matches", "paths"):
+                        for sub_key in ("entries", "files", "filenames", "items", "result", "matches", "paths"):
                             sv = v.get(sub_key)
                             if isinstance(sv, list):
                                 return [self._basename(self._extract_path_from_item(x)) for x in sv]
