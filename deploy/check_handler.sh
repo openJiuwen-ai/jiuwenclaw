@@ -285,7 +285,7 @@ check_if_redis_up() {
         error "Redis is not deployed. Please deploy it first with: ./$(basename "$0") up redis"
     fi
 
-    info "Use built-in Minio server"
+    info "Use built-in Redis server"
     DEPLOY_VARS["REDIS_HOST"]="${name}.default.svc.cluster.local"
     DEPLOY_VARS["REDIS_PORT"]="6379"
 }
