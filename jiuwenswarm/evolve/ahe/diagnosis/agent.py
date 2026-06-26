@@ -440,6 +440,11 @@ class DiagnosisAgent:
         # Validate and convert
         issues = []
         for raw_issue in payload.get("issues", []):
+            # Type safety check: ensure raw_issue is dict
+            if not isinstance(raw_issue, dict):
+                logger.warning("DiagnosisAgent: issue is not dict, skipping: %s", raw_issue)
+                continue
+
             try:
                 issues.append(DiagnosisIssue(
                     issue_type=raw_issue.get("issue_type", ""),
@@ -450,7 +455,7 @@ class DiagnosisAgent:
                     root_cause=raw_issue.get("root_cause"),
                     suggested_fix=raw_issue.get("suggested_fix"),
                 ))
-            except ValueError as exc:
+            except (ValueError, AttributeError) as exc:
                 logger.warning("DiagnosisAgent: invalid issue: %s", exc)
 
         proposals = payload.get("proposals")  # Raw dicts for propose mode

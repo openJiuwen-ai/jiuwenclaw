@@ -100,7 +100,10 @@ class AheProposer(ProposalGenerator):
         return [nt for nt, _ in failed]
 
     async def generate(self, batch: TraceBatch) -> list[Proposal]:
-        """Execute the full PDA pipeline for a trace batch.
+        """Execute the full PDA pipeline with batch processing.
+
+        Strategy: Process traces in batches (max 10 per batch), each batch executes
+        complete flow: LOAD → CLEAN → EVAL → failed逐个 DIAG/GOV/PROPOSE.
 
         Returns:
             List of Proposal objects (may be empty if nothing qualifies).
@@ -110,69 +113,135 @@ class AheProposer(ProposalGenerator):
         if not trace_ids:
             return []
 
-        logger.info("AheProposer: processing %d traces", len(trace_ids))
+        logger.info("AheProposer: processing %d traces in batches", len(trace_ids))
 
-        # ── Step 2: CLEAN ──
+        # ── Batch Processing ──
+        batch_size = 10  # Max traces per batch
+        all_proposals = []
+
+        total_batches = (len(trace_ids) - 1) // batch_size + 1
+        for i in range(0, len(trace_ids), batch_size):
+            batch_trace_ids = trace_ids[i:i+batch_size]
+            batch_num = i // batch_size + 1
+
+            logger.info(
+                "Processing batch %d/%d: %d traces",
+                batch_num, total_batches, len(batch_trace_ids)
+            )
+
+            # Execute complete flow for current batch
+            try:
+                proposals = await self._process_batch_traces(
+                    batch_trace_ids, batch.batch_id
+                )
+                all_proposals.extend(proposals)
+                logger.info(
+                    "Batch %d/%d completed: %d proposals (total so far: %d)",
+                    batch_num, total_batches, len(proposals), len(all_proposals)
+                )
+            except Exception as exc:
+                logger.warning(
+                    "Batch %d/%d failed: %s. Continuing with next batch.",
+                    batch_num, total_batches, exc
+                )
+
+        # ── Global Limits ──
+        final_proposals = self._enforce_limits(all_proposals)
+
+        logger.info(
+            "AheProposer: completed %d batches, %d traces processed, %d proposals generated",
+            total_batches, len(trace_ids), len(final_proposals)
+        )
+
+        return final_proposals
+
+    async def _process_batch_traces(
+        self, trace_ids: list[str], batch_id: str
+    ) -> list[Proposal]:
+        """Execute complete flow for a single batch of traces.
+
+        Flow: LOAD → CLEAN → EVAL → failed逐个 DIAG/GOV/PROPOSE
+        """
+        # ── Step 2: CLEAN (batch level) ──
         normalized_traces = []
         for tid in trace_ids:
             try:
                 trace_dict = self._otel_adapter.convert_trace(tid)
-                # trace_dict is already in Langfuse format usable by evaluator
                 trace_dict["trace_id"] = tid
                 normalized_traces.append(trace_dict)
             except Exception as exc:
-                logger.warning("AheProposer: CLEAN failed for %s: %s", tid, exc)
+                logger.warning("CLEAN failed for %s: %s", tid, exc)
 
         if not normalized_traces:
-            logger.info("AheProposer: no traces could be normalized")
+            logger.info("Batch: no traces could be normalized")
             return []
-        
-        logger.info("normalized trace length %s", len(normalized_traces))
 
-        # ── Step 3: EVAL — filter fail/uncertain only ──
+        logger.info("Batch: normalized %d traces", len(normalized_traces))
+
+        # ── Step 3: EVAL (batch level) ──
         outcomes = await self._eval.evaluate_batch(normalized_traces)
-        logger.info("evaluate result is %s", outcomes)
         failed = [
             (nt, oc) for nt, oc in zip(normalized_traces, outcomes)
             if oc.outcome in ("fail", "uncertain")
         ]
 
         if not failed:
-            logger.info("AheProposer: no fail/uncertain traces, skipping")
+            logger.info("Batch: no fail/uncertain traces")
             return []
 
-        logger.info("AheProposer: %d of %d traces are fail/uncertain",
-                     len(failed), len(normalized_traces))
-        
-        # ── Step 4: DIAG ──
+        logger.info(
+            "Batch: %d of %d traces are fail/uncertain",
+            len(failed), len(normalized_traces)
+        )
+
+        # ── Step 4-6: Individual DIAG/GOV/PROPOSE for each failed trace ──
+        batch_proposals = []
+        for nt, oc in failed:
+            try:
+                proposals = await self._diagnose_single_trace(nt, oc, batch_id)
+                batch_proposals.extend(proposals)
+            except Exception as exc:
+                trace_id = nt.get("trace_id", "unknown")
+                logger.warning(
+                    "Failed to diagnose trace %s: %s. Continuing with next.",
+                    trace_id, exc
+                )
+
+        return batch_proposals
+
+    async def _diagnose_single_trace(
+        self, normalized_trace: dict, outcome: Any, batch_id: str
+    ) -> list[Proposal]:
+        """Execute DIAG → GOV → PROPOSE for a single trace.
+
+        Args:
+            normalized_trace: Normalized trace dict
+            outcome: TraceOutcome object
+            batch_id: Batch ID for metadata
+
+        Returns:
+            List of Proposal objects for this trace
+        """
+        trace_id = normalized_trace.get("trace_id", "unknown")
+
+        # ── Step 4: DIAG (single trace) ──
         diagnosis_result = await self._diag.run(
-            trace_ids=[nt["trace_id"] for nt, _ in failed],
-            normalized_traces=self._normalized_trace_dicts(failed),
+            trace_ids=[trace_id],
+            normalized_traces=[normalized_trace],
             mode="diagnose",
-            question="Analyze these traces for root causes of task failure.",
+            question="Analyze this trace for root causes of task failure.",
         )
 
         if diagnosis_result.budget_exceeded:
-            logger.warning("AheProposer: DiagnosisAgent budget exceeded")
+            logger.warning("DiagnosisAgent budget exceeded for trace %s", trace_id)
 
-        # ── Step 5: GOV — get governance context ──
-        skill_names = self._extract_skill_names(diagnosis_result, failed)
+        # ── Step 5: GOV (extract skill names) ──
+        skill_names = self._extract_skill_names(
+            diagnosis_result, [(normalized_trace, outcome)]
+        )
 
-        # SAFETY: If no valid editable skills found, skip proposal generation
-        # This prevents proposals for:
-        # - Non-existent skills (hallucination from diagnosis)
-        # - Builtin/system skills (protected)
-        # - "general" (protected fallback)
         if not skill_names:
-            logger.warning(
-                "AheProposer: no editable skills found in user workspace "
-                "(skills_dir=%s). "
-                "Editable skills: %s. "
-                "Skipping proposal generation to prevent creating/modifying invalid skills. "
-                "This trace might not be related to any user skill.",
-                self._gov._skills_dir,
-                self._gov.get_user_skill_names(),
-            )
+            logger.info("No editable skills found for trace %s", trace_id)
             return []
 
         governance_contexts = {
@@ -180,23 +249,26 @@ class AheProposer(ProposalGenerator):
             for name in skill_names
         }
 
-        logger.info("governance context is %s", governance_contexts)
-
-        # ── Step 6: PROPOSE — LLM call ──
-        proposals_raw = await self._call_llm_propose(
-            failed_traces=failed,
-            diagnosis_result=diagnosis_result,
-            governance_contexts=governance_contexts,
-            batch_id=batch.batch_id,
+        logger.info(
+            "Governance context for trace %s: %d skills",
+            trace_id, len(skill_names)
         )
 
-        # ── Parse into Proposal objects ──
-        proposals = self._parse_proposals(proposals_raw, batch.batch_id)
+        # ── Step 6: PROPOSE (generate proposals) ──
+        proposals_raw = await self._call_llm_propose(
+            failed_traces=[(normalized_trace, outcome)],
+            diagnosis_result=diagnosis_result,
+            governance_contexts=governance_contexts,
+            batch_id=batch_id,
+        )
 
-        # ── Enforce limits ──
-        proposals = self._enforce_limits(proposals)
+        proposals = self._parse_proposals(proposals_raw, batch_id)
 
-        logger.info("AheProposer: generated %d proposals, proposals is %s", len(proposals), proposals)
+        logger.info(
+            "Generated %d proposals for trace %s",
+            len(proposals), trace_id
+        )
+
         return proposals
 
     def _extract_skill_names(
