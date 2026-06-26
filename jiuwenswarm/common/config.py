@@ -18,6 +18,12 @@ from jiuwenswarm.common.utils import get_config_dir, get_config_file
 
 logger = logging.getLogger(__name__)
 
+# --- config read cache ---
+# 生产模式：写后失效（零 IO）；开发模式（JIUWENSWARM_DEV=1）：每次 stat 检测文件变化
+_CONFIG_CACHE_ENABLED: bool = os.getenv("JIUWENSWARM_DEV", "0") != "1"
+_config_cache: dict[str, Any] = {}  # {"data": <parsed config>} when valid
+_config_cache_valid: bool = False
+
 _CONFIG_MODULE_DIR = Path(__file__).parent
 CONFIG_YAML_PATH = get_config_file()
 # Check if user workspace exists and use it if configured via env
@@ -104,10 +110,34 @@ def _normalize_config(config: dict[str, Any] | None) -> None:
 
 
 def get_config():
-    with open(get_config_file(), "r", encoding="utf-8") as f:
+    global _config_cache_valid
+    path = get_config_file()
+
+    # 生产模式：写后失效，零 IO
+    if _CONFIG_CACHE_ENABLED:
+        if _config_cache_valid and "data" in _config_cache:
+            return _config_cache["data"]
+    else:
+        # 开发模式：stat 检测文件变化，外部编辑即时生效
+        try:
+            st = path.stat()
+            key = f"{st.st_mtime_ns}:{st.st_size}"
+        except OSError:
+            key = None
+        if key and key == _config_cache.get("_key"):
+            return _config_cache["data"]
+
+    with open(path, "r", encoding="utf-8") as f:
         config_base = yaml.safe_load(f) or {}
     config_base = resolve_env_vars(config_base)
     _normalize_config(config_base)
+
+    if _CONFIG_CACHE_ENABLED:
+        _config_cache["data"] = config_base
+        _config_cache_valid = True
+    else:
+        _config_cache["_key"] = key
+        _config_cache["data"] = config_base
 
     return config_base
 
@@ -119,8 +149,13 @@ def get_config_raw():
 
 
 def set_config(config):
+    global _config_cache_valid
     with open(CONFIG_YAML_PATH, "w", encoding="utf-8") as f:
         yaml.safe_dump(config, f, allow_unicode=True, sort_keys=False)
+    if _CONFIG_CACHE_ENABLED:
+        _config_cache_valid = False
+    else:
+        _config_cache.clear()
 
 
 def is_auto_memory_enabled() -> bool:
@@ -159,6 +194,7 @@ def load_yaml_round_trip(config_path: Path):
 
 def dump_yaml_round_trip(config_path: Path, data: Any) -> None:
     """ruamel 写回 config，保留注释与格式。"""
+    global _config_cache_valid
     rt = YAML()
     rt.preserve_quotes = True
     rt.default_flow_style = False
@@ -167,6 +203,10 @@ def dump_yaml_round_trip(config_path: Path, data: Any) -> None:
     rt.width = 4096
     with open(config_path, "w", encoding="utf-8") as f:
         rt.dump(data, f)
+    if _CONFIG_CACHE_ENABLED:
+        _config_cache_valid = False
+    else:
+        _config_cache.clear()
 
 
 # Backward-compat aliases — downstream modules import the underscore-prefixed names
