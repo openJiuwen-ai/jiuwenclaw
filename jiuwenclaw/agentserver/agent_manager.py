@@ -22,8 +22,10 @@ from jiuwenclaw.agentserver.memory import (
 from jiuwenclaw.local_env_config import (
     apply_env_overrides_to_active,
     promote_staged_env,
+    stage_env_overrides,
 )
 from jiuwenclaw.utils import get_agent_workspace_dir
+from jiuwenclaw.config import _sandbox_yaml_to_env_overlay
 
 if TYPE_CHECKING:
     from jiuwenclaw.agentserver.interface import JiuWenClaw
@@ -92,6 +94,14 @@ class AgentManager:
         if env_overrides is not None and isinstance(env_overrides, dict):
             self._latest_env_overrides = dict(env_overrides)
             apply_env_overrides_to_active(env_overrides)
+
+        # 把 config_base['sandbox'] 的 url/type/enabled 翻译成 active env,
+        # 让懒加载路径首次 _create_sys_operation 也能读到 yaml 配置的值
+        # (reload_agent_config 内的 task overlay 仅对在途 session 生效)。
+        if isinstance(config_base, dict):
+            sandbox_overlay = _sandbox_yaml_to_env_overlay(config_base.get("sandbox"))
+            if sandbox_overlay:
+                apply_env_overrides_to_active(sandbox_overlay)
 
         self.agent_id = agent_id
         self.service_id = service_id
@@ -375,6 +385,15 @@ class AgentManager:
         previous_config = self._latest_config_base
         self._latest_env_overrides = dict(env) if isinstance(env, dict) else {}
         self._latest_config_base = config
+
+        # 把 config['sandbox'] 的 url/type/enabled 翻译成 env overlay 并 stage,
+        # 让 promote_staged_env 把它们写入 active env。这样后续懒加载的 agent
+        # (含首个 _create_sys_operation 调用) 能读到 yaml 配置的 sandbox 值。
+        # (TenantAgentPool.stage_env_overrides(env) 只处理 env payload, 不含 yaml。)
+        if isinstance(config, dict):
+            sandbox_overlay = _sandbox_yaml_to_env_overlay(config.get("sandbox"))
+            if sandbox_overlay:
+                stage_env_overrides(sandbox_overlay)
 
         aggregate = ReloadAggregateResult()
         for channel_id, channel_agents in self.agents.items():

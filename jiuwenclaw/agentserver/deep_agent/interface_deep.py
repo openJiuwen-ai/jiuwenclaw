@@ -303,6 +303,9 @@ from jiuwenclaw.config import (
     get_sandbox_endpoint,
     get_sandbox_runtime,
     resolve_env_vars,
+    _FALSE_VALUES,
+    _TRUE_VALUES,
+    _sandbox_yaml_to_env_overlay,
 )
 from jiuwenclaw.agentserver.deep_agent.sysop_builder import (
     create_local_sysop_card,
@@ -337,6 +340,7 @@ from jiuwenclaw.agentserver.deep_agent.agent_card_id import (
 
 _react_config = get_config().get("react", {})
 _sandbox_config = get_config().get("sandbox", {})
+
 
 _CRON_TOOL_CHANNEL_ID: ContextVar[str] = ContextVar(
     "cron_tool_channel_id",
@@ -1172,6 +1176,7 @@ class JiuWenClawDeepAdapter:
         self._avatar_rail: Any = None
         self._tool_cards = None
         self._sys_operation = None
+        self._sandbox_fingerprint: tuple[Any, ...] | None = None
         self._vision_model_config: VisionModelConfig | None = None
         self._audio_model_config: AudioModelConfig | None = None
         self._video_model_config: bool = False
@@ -1239,6 +1244,21 @@ class JiuWenClawDeepAdapter:
     @staticmethod
     def _embed_config_fingerprint(config: dict[str, Any]) -> tuple[Any, ...]:
         return embed_config_fingerprint(config)
+
+    @staticmethod
+    def _sandbox_config_fingerprint() -> tuple[Any, ...]:
+        """计算 sandbox 配置指纹（enabled/url/type），用于 reload 时判断是否需要重建 _sys_operation。
+
+        与 ``_create_sys_operation`` 读取同一对 helper（``get_sandbox_endpoint`` /
+        ``get_sandbox_runtime``），确保指纹变更等价于 sysop 路由变更。
+        """
+        endpoint = get_sandbox_endpoint()
+        runtime = get_sandbox_runtime()
+        return (
+            bool(runtime.get("enabled")),
+            endpoint.get("url") or "",
+            endpoint.get("type") or "",
+        )
 
     @staticmethod
     def _context_engine_config_fingerprint(config: dict[str, Any]) -> str:
@@ -2145,6 +2165,50 @@ class JiuWenClawDeepAdapter:
         except Exception as exc:
             logger.warning("[JiuWenClawDeepAdapter] add sys_operation failed: %s", exc)
             return None
+
+    def _maybe_recreate_sys_operation(self) -> None:
+        """reload 时若 sandbox 配置变更，重建 _sys_operation 以让新 sandbox 生效。
+
+        按 (enabled, url, type) 指纹比对；变更时调用 ``_create_sys_operation`` 重建，
+        旧实例从 ``Runner.resource_mgr`` 清理；清理失败仅记录日志，不影响 reload。
+        重建失败保留旧实例避免 reload 整体崩溃。
+        """
+        new_fp = self._sandbox_config_fingerprint()
+        old_fp = getattr(self, "_sandbox_fingerprint", None)
+        if new_fp == old_fp:
+            return
+        old_sysop = getattr(self, "_sys_operation", None)
+        new_sysop = self._create_sys_operation()
+        if new_sysop is None:
+            logger.warning(
+                "[JiuWenClawDeepAdapter] reload sandbox changed %s -> %s but "
+                "_create_sys_operation returned None; keep old sys_operation",
+                old_fp, new_fp,
+            )
+            return
+        self._sys_operation = new_sysop
+        self._sandbox_fingerprint = new_fp
+        logger.info(
+            "[JiuWenClawDeepAdapter] sandbox config changed on reload: %s -> %s, "
+            "sys_operation recreated",
+            old_fp, new_fp,
+        )
+        if old_sysop is None:
+            return
+        old_id = getattr(old_sysop, "id", None) or getattr(getattr(old_sysop, "card", None), "id", None)
+        if not old_id:
+            return
+        try:
+            remove_result = Runner.resource_mgr.remove_sys_operation(old_id)
+            if hasattr(remove_result, "is_err") and remove_result.is_err():
+                logger.warning(
+                    "[JiuWenClawDeepAdapter] remove old sys_operation failed: %s",
+                    remove_result.msg(),
+                )
+        except Exception as exc:
+            logger.warning(
+                "[JiuWenClawDeepAdapter] remove old sys_operation raised: %s", exc,
+            )
 
     def _build_filesystem_rail(self) -> FileSystemRail | None:
         """Build FileSystemRail."""
@@ -3246,6 +3310,7 @@ class JiuWenClawDeepAdapter:
             raise RuntimeError("sys_operation is not available, maybe task is not running")
 
         self._sys_operation = sys_operation
+        self._sandbox_fingerprint = self._sandbox_config_fingerprint()
         configured_subagents = self._build_configured_subagents(ctx.model, ctx.config, ctx.config_base)
         common_kwargs = dict(
             model=ctx.model,
@@ -3631,6 +3696,19 @@ class JiuWenClawDeepAdapter:
                 merged = deep_merge_dicts(full_config, resolve_env_vars(config_base))
                 config_base = merged
 
+            # 把 config_base['sandbox'] 的 url/type/enabled 翻译为 env overlay key,
+            # 让 _create_sys_operation 经 get_sandbox_endpoint/get_sandbox_runtime 读到。
+            sandbox_yaml = (
+                config_base.get("sandbox") or {}
+                if isinstance(config_base, dict) else {}
+            )
+            sandbox_overlay = _sandbox_yaml_to_env_overlay(sandbox_yaml)
+            if sandbox_overlay:
+                if overlay_token is not None:
+                    reset_task_env_overlay(overlay_token)
+                overlay = build_effective_env_overlay(env_overrides, sandbox_overlay)
+                overlay_token = bind_task_env_overlay(overlay) if overlay else None
+
             new_embed_fp = self._embed_config_fingerprint(config_base)
             new_memory_fp = memory_cache_fingerprint(config_base)
 
@@ -3702,6 +3780,10 @@ class JiuWenClawDeepAdapter:
             self._instance.configure(deep_cfg)
             self._apply_model_to_react_agent(self._model)
             self._refresh_fork_agent_executor_model()
+
+            # sandbox 配置可能随 reload 变更；按指纹重建 _sys_operation 让新 url/type/enabled 生效。
+            # 必须在 overlay_token 释放前调用，否则 get_sandbox_endpoint 读不到 env overlay。
+            self._maybe_recreate_sys_operation()
 
             reload_mode = self._last_runtime_mode or "agent.plan"
             engine_changed = (
