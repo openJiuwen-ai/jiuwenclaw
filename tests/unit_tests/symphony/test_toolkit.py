@@ -667,6 +667,167 @@ def test_toolkit_compacts_inferred_edge_provenance():
     }
 
 
+def test_toolkit_plan_returns_compact_beam_search():
+    registry = ExtensionRegistry.create_instance(
+        callback_framework=_CallbackFramework(),
+        config={},
+        logger=object(),
+    )
+    registry.register_rpc_handler(
+        "symphony.score_status",
+        lambda _params, request=None: {"success": True, "exists": True, "stale": False},
+    )
+    registry.register_rpc_handler(
+        "symphony.plan",
+        lambda _params, request=None: {
+            "success": True,
+            "planning_mode": "bidirectional_beam",
+            "recommended_plans": [
+                {
+                    "title": "Beam Plan",
+                    "status": "ready",
+                    "steps": [{"skill_id": "skill-a", "name": "Skill A"}],
+                }
+            ],
+            "beam_search": {
+                "mode": "bidirectional_beam",
+                "top_k": 2,
+                "max_depth": 3,
+                "seed_skill_ids": ["skill-a"],
+                "graph": {
+                    "nodes": [
+                        {
+                            "id": "skill-a",
+                            "label": "Skill A",
+                            "status": "final",
+                            "seed": True,
+                            "direction": "seed",
+                        },
+                        {
+                            "id": "skill-b",
+                            "label": "Skill B",
+                            "status": "final",
+                            "seed": False,
+                            "direction": "forward",
+                        },
+                        {
+                            "id": "skill-c",
+                            "label": "Skill C",
+                            "status": "rejected",
+                            "seed": False,
+                            "direction": "forward",
+                        },
+                    ],
+                    "edges": [
+                        {
+                            "id": "skill-a->skill-b",
+                            "source": "skill-a",
+                            "target": "skill-b",
+                            "status": "final",
+                            "confidence": 0.9,
+                            "direction": "forward",
+                        },
+                        {
+                            "id": "skill-a->skill-c",
+                            "source": "skill-a",
+                            "target": "skill-c",
+                            "status": "rejected",
+                            "confidence": 0.8,
+                            "direction": "forward",
+                        },
+                    ],
+                },
+                "rounds": [
+                    {
+                        "round": 1,
+                        "frontier_count": 1,
+                        "judge_request_count": 1,
+                        "judged_candidate_count": 2,
+                        "candidate_count": 2,
+                        "selected_count": 1,
+                        "rejected_count": 1,
+                        "accepted_count": 1,
+                        "retained_count": 1,
+                        "candidates": [
+                            {
+                                "direction": "forward",
+                                "current_skill_id": "skill-a",
+                                "candidate_skill_id": "skill-b",
+                                "candidate_label": "Skill B",
+                                "status": "selected",
+                                "edge": {
+                                    "id": "skill-a->skill-b",
+                                    "source": "skill-a",
+                                    "target": "skill-b",
+                                    "confidence": 0.9,
+                                },
+                            },
+                            {
+                                "direction": "forward",
+                                "current_skill_id": "skill-a",
+                                "candidate_skill_id": "skill-c",
+                                "candidate_label": "Skill C",
+                                "status": "rejected",
+                                "edge": {
+                                    "id": "skill-a->skill-c",
+                                    "source": "skill-a",
+                                    "target": "skill-c",
+                                    "confidence": 0.8,
+                                },
+                            }
+                        ],
+                    }
+                ],
+                "retained_paths": [
+                    {
+                        "rank": 1,
+                        "score": 0.88,
+                        "skill_ids": ["skill-a", "skill-b"],
+                        "edge_count": 1,
+                    }
+                ],
+            },
+            "presentation": {
+                "markdown": "## Beam Plan\n\n## Beam search",
+                "mermaid": "flowchart LR\n  A",
+            },
+        },
+    )
+
+    result = asyncio.run(SymphonyToolkit().plan("compose with beam", mode="beam"))
+
+    assert result["success"] is True
+    assert result["beam_search"]["seed_skill_ids"] == ["skill-a"]
+    assert result["beam_search"]["graph"]["nodes"][2]["status"] == "rejected"
+    assert result["beam_search"]["graph"]["edges"][0] == {
+        "id": "skill-a->skill-b",
+        "source": "skill-a",
+        "target": "skill-b",
+        "status": "final",
+        "confidence": 0.9,
+        "direction": "forward",
+    }
+    assert result["beam_search"]["rounds"][0]["selected_count"] == 1
+    assert result["beam_search"]["rounds"][0]["rejected_count"] == 1
+    assert result["beam_search"]["rounds"][0]["candidates"][0] == {
+        "direction": "forward",
+        "current_skill_id": "skill-a",
+        "candidate_skill_id": "skill-b",
+        "candidate_label": "Skill B",
+        "status": "selected",
+        "edge": {
+            "id": "skill-a->skill-b",
+            "source": "skill-a",
+            "target": "skill-b",
+            "confidence": 0.9,
+        },
+    }
+    assert result["beam_search"]["retained_paths"][0]["skill_ids"] == [
+        "skill-a",
+        "skill-b",
+    ]
+
+
 def test_toolkit_no_plan_continues_for_skill_discovery():
     registry = ExtensionRegistry.create_instance(
         callback_framework=_CallbackFramework(),

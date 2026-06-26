@@ -60,6 +60,38 @@ async def test_beam_batches_outgoing_neighbors_and_filters_low_scores(tmp_path):
 
     assert result["planning_mode"] == "bidirectional_beam"
     assert result["llm_call_count"] == 1
+    assert result["beam_search"]["seed_skill_ids"] == ["skill-a"]
+    assert result["beam_search"]["events"][0]["event"] == "started"
+    assert result["beam_search"]["events"][0]["payload"]["graph"]["nodes"] == [
+        {
+            "id": "skill-a",
+            "label": "Skill A",
+            "status": "seed",
+            "seed": True,
+            "direction": "seed",
+        }
+    ]
+    assert result["beam_search"]["rounds"][0]["selected_count"] == 1
+    assert result["beam_search"]["rounds"][0]["rejected_count"] == 1
+    assert result["beam_search"]["rounds"][0]["retained_paths"][0]["skill_ids"] == [
+        "skill-a",
+        "skill-b",
+    ]
+    candidates = result["beam_search"]["rounds"][0]["candidates"]
+    assert [item["candidate_skill_id"] for item in candidates] == [
+        "skill-b",
+        "skill-c",
+    ]
+    assert {item["status"] for item in candidates} == {"selected", "rejected"}
+    assert all("score" not in item and "reason" not in item for item in candidates)
+    graph_nodes = {
+        item["id"]: item
+        for item in result["beam_search"]["graph"]["nodes"]
+    }
+    assert graph_nodes["skill-a"]["status"] == "final"
+    assert graph_nodes["skill-a"]["seed"] is True
+    assert graph_nodes["skill-b"]["status"] == "final"
+    assert graph_nodes["skill-c"]["status"] == "rejected"
     payload = json.loads(llm.calls[0]["user_content"])
     assert payload["direction"] == "forward"
     assert [item["skill"]["id"] for item in payload["candidates"]] == [
@@ -182,6 +214,53 @@ async def test_beam_merges_converging_paths_into_dag_plan(tmp_path):
         (edge["source_id"], edge["target_id"])
         for edge in merged["can_feed_edges"]
     } == {("skill-a", "skill-c"), ("skill-b", "skill-c")}
+    graph = result["beam_search"]["graph"]
+    assert sorted(node["id"] for node in graph["nodes"]) == [
+        "skill-a",
+        "skill-b",
+        "skill-c",
+    ]
+    assert {
+        (edge["source"], edge["target"])
+        for edge in graph["edges"]
+    } == {("skill-a", "skill-c"), ("skill-b", "skill-c")}
+    assert {edge["status"] for edge in graph["edges"]} == {"final", "selected"}
+
+
+async def test_beam_progress_callback_receives_lightweight_graph_events(tmp_path):
+    artifacts = _artifacts(
+        tmp_path,
+        edges=[
+            _edge("skill-a", "skill-b", confidence=0.91),
+            _edge("skill-a", "skill-c", confidence=0.88),
+        ],
+    )
+    llm = _FakeBeamLLM({"skill-b": 0.9, "skill-c": 0.4})
+    events = []
+
+    async def progress_callback(event):
+        events.append(event)
+
+    result = await _planner(
+        artifacts,
+        llm,
+        top_k=2,
+        max_depth=2,
+        candidate_skill_ids=["skill-a"],
+        progress_callback=progress_callback,
+    ).plan("compose an alpha plan")
+
+    assert [event["event"] for event in events] == [
+        "started",
+        "candidates_found",
+        "candidates_judged",
+        "graph_merged",
+        "completed",
+    ]
+    assert events == result["beam_search"]["events"]
+    judged = events[2]["payload"]["candidates"]
+    assert {item["status"] for item in judged} == {"selected", "rejected"}
+    assert all("score" not in item and "reason" not in item for item in judged)
 
 
 def _planner(
@@ -191,6 +270,7 @@ def _planner(
     top_k: int,
     max_depth: int,
     candidate_skill_ids: list[str],
+    progress_callback=None,
 ) -> BidirectionalBeamPlanner:
     return BidirectionalBeamPlanner(
         artifacts,
@@ -200,6 +280,7 @@ def _planner(
         top_k=top_k,
         max_depth=max_depth,
         candidate_skill_ids=candidate_skill_ids,
+        progress_callback=progress_callback,
     )
 
 

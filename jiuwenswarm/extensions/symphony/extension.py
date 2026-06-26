@@ -167,7 +167,6 @@ class SymphonyExtension(BaseExtension):
         return await asyncio.to_thread(load)
 
     async def plan(self, params: dict[str, Any] | None = None, request: Any = None) -> dict[str, Any]:
-        del request
         params = params or {}
         query = str(params.get("query") or "").strip()
         if not query:
@@ -203,6 +202,7 @@ class SymphonyExtension(BaseExtension):
             payload = _missing_artifacts_payload(score_dir, exc)
             payload.update(_build_log_payload(score_dir))
             return payload
+        progress_callback = _beam_progress_callback(request)
         payload = await plan_from_score(
             score_dir,
             query,
@@ -210,6 +210,7 @@ class SymphonyExtension(BaseExtension):
             orchestration_config=orchestration_config,
             candidate_skill_ids=candidate_skill_ids,
             disabled_skill_names=load_execution_disabled_skills(),
+            progress_callback=progress_callback,
         )
         if payload.get("success") is False:
             return {
@@ -337,6 +338,39 @@ def _param_bool(value: Any, default: bool = False) -> bool:
     if isinstance(value, str):
         return value.strip().lower() in {"1", "true", "yes", "on"}
     return bool(value)
+
+
+def _beam_progress_callback(request: Any):
+    async def callback(event: dict[str, Any]) -> None:
+        await _emit_beam_progress_event(request, event)
+
+    return callback
+
+
+async def _emit_beam_progress_event(request: Any, event: dict[str, Any]) -> None:
+    if request is None:
+        return
+    payload = {
+        "event_type": event.get("type") or "symphony.beam_search.update",
+        "beam_search_event": event,
+    }
+    metadata = getattr(request, "metadata", None)
+    if isinstance(metadata, dict):
+        metadata_callback = metadata.get("symphony_progress_callback")
+        if callable(metadata_callback):
+            result = metadata_callback(event)
+            if asyncio.iscoroutine(result):
+                await result
+            return
+
+    for name in ("write_stream", "send_event", "send_stream"):
+        writer = getattr(request, name, None)
+        if not callable(writer):
+            continue
+        result = writer(payload)
+        if asyncio.iscoroutine(result):
+            await result
+        return
 
 
 _BUILD_STAGE_LABELS = {
@@ -626,6 +660,9 @@ def _build_presentation(
     reason = str(plan.get("reason") or payload.get("reason") or "").strip()
     if reason:
         lines.extend(["", reason])
+    beam_lines = _beam_search_markdown(payload.get("beam_search"))
+    if beam_lines:
+        lines.extend(["", *beam_lines])
     steps = plan.get("steps") if isinstance(plan, dict) else []
     if isinstance(steps, list) and steps:
         confirmation = (
@@ -635,6 +672,114 @@ def _build_presentation(
         )
         lines.extend(["", confirmation])
     return {"markdown": "\n".join(lines), "mermaid": mermaid}
+
+
+def _beam_search_markdown(payload: Any) -> list[str]:
+    if not isinstance(payload, dict):
+        return []
+    graph = payload.get("graph")
+    rounds = payload.get("rounds")
+    lines = [
+        "## Beam search",
+        "",
+        "```mermaid",
+        _beam_graph_to_mermaid(graph),
+        "```",
+        "",
+        (
+            f"- Seeds: {_format_inline_list(payload.get('seed_skill_ids'))}"
+        ),
+        (
+            f"- TopK: `{payload.get('top_k')}`; "
+            f"max depth: `{payload.get('max_depth')}`"
+        ),
+    ]
+    if isinstance(rounds, list):
+        lines.append(f"- Rounds: `{len(rounds)}`")
+        round_lines = [
+            _beam_round_summary(item)
+            for item in rounds
+            if isinstance(item, dict)
+        ]
+        if round_lines:
+            lines.extend(["", "### Rounds", *round_lines])
+    return lines
+
+
+def _beam_round_summary(item: dict[str, Any]) -> str:
+    return (
+        f"- Round `{item.get('round')}`: "
+        f"`{item.get('candidate_count', item.get('judged_candidate_count', 0))}` "
+        f"candidates, `{item.get('selected_count', item.get('accepted_count', 0))}` "
+        f"selected, `{item.get('rejected_count', 0)}` rejected, "
+        f"`{item.get('retained_count', 0)}` retained"
+    )
+
+
+def _beam_graph_to_mermaid(graph: Any) -> str:
+    if not isinstance(graph, dict):
+        return "flowchart LR\n  none[\"No beam search graph\"]"
+    nodes = [node for node in graph.get("nodes") or [] if isinstance(node, dict)]
+    edges = [edge for edge in graph.get("edges") or [] if isinstance(edge, dict)]
+    if not nodes:
+        return "flowchart LR\n  none[\"No beam search graph\"]"
+
+    node_keys = {
+        str(node.get("id") or ""): f"B{index}"
+        for index, node in enumerate(nodes, start=1)
+        if str(node.get("id") or "").strip()
+    }
+    lines = ["flowchart LR"]
+    for node in nodes:
+        node_id = str(node.get("id") or "").strip()
+        if not node_id:
+            continue
+        label = str(node.get("label") or node_id)
+        lines.append(f'  {node_keys[node_id]}["{_mermaid_escape(label)}"]')
+    link_styles = []
+    link_index = 0
+    for edge in edges:
+        source = str(edge.get("source") or "").strip()
+        target = str(edge.get("target") or "").strip()
+        if source not in node_keys or target not in node_keys:
+            continue
+        lines.append(f"  {node_keys[source]} --> {node_keys[target]}")
+        edge_style = _beam_edge_style(str(edge.get("status") or ""))
+        if edge_style:
+            link_styles.append(f"  linkStyle {link_index} {edge_style}")
+        link_index += 1
+    lines.extend(
+        [
+            "  classDef seed fill:#e0f2fe,stroke:#0284c7,color:#0f172a",
+            "  classDef pending fill:#fef9c3,stroke:#ca8a04,color:#422006",
+            "  classDef selected fill:#dcfce7,stroke:#16a34a,color:#052e16",
+            "  classDef rejected fill:#f3f4f6,stroke:#9ca3af,color:#6b7280",
+            "  classDef final fill:#ede9fe,stroke:#7c3aed,color:#2e1065",
+        ]
+    )
+    for node in nodes:
+        node_id = str(node.get("id") or "").strip()
+        status = str(node.get("status") or "pending").strip()
+        if node_id in node_keys and status in {
+            "seed",
+            "pending",
+            "selected",
+            "rejected",
+            "final",
+        }:
+            lines.append(f"  class {node_keys[node_id]} {status}")
+    lines.extend(link_styles)
+    return "\n".join(lines)
+
+
+def _beam_edge_style(status: str) -> str:
+    if status == "rejected":
+        return "stroke:#9ca3af,stroke-width:1px,color:#6b7280"
+    if status == "selected":
+        return "stroke:#16a34a,stroke-width:2px"
+    if status == "final":
+        return "stroke:#7c3aed,stroke-width:3px"
+    return ""
 
 
 def _plan_to_mermaid(plan: dict[str, Any], graph: dict[str, Any]) -> str:
@@ -672,3 +817,19 @@ def _plan_to_mermaid(plan: dict[str, Any], graph: dict[str, Any]) -> str:
 
 def _mermaid_escape(value: str) -> str:
     return str(value or "").replace("\\", "\\\\").replace('"', '\\"')[:80]
+
+
+def _format_inline_list(values: Any) -> str:
+    if not isinstance(values, list) or not values:
+        return "`none`"
+    rendered = [
+        f"`{_compact_text(str(value), 80)}`"
+        for value in values[:8]
+        if str(value or "").strip()
+    ]
+    return ", ".join(rendered) if rendered else "`none`"
+
+
+def _compact_text(value: str, limit: int) -> str:
+    text = " ".join(str(value or "").split())
+    return text if len(text) <= limit else text[: limit - 3] + "..."

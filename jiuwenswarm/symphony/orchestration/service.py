@@ -29,6 +29,7 @@ async def plan_from_score(
     orchestration_config: SymphonyOrchestrationConfig | None = None,
     candidate_skill_ids: Sequence[str] | None = None,
     disabled_skill_names: Sequence[str] | None = None,
+    progress_callback: Any | None = None,
 ) -> dict[str, Any]:
     """Run online planning from an existing Symphony score."""
 
@@ -58,6 +59,7 @@ async def plan_from_score(
             top_k=max(1, int(top_k)),
             max_depth=max(1, int(max_depth)),
             candidate_skill_ids=selected_candidate_skill_ids,
+            progress_callback=progress_callback,
         ).plan(query)
     else:
         result = await FastOneShotPlanner(

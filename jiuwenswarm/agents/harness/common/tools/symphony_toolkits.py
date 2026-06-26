@@ -222,6 +222,10 @@ class SymphonyToolkit:
         if isinstance(skill_retrieval, dict):
             compact["skill_retrieval"] = cls._compact_skill_retrieval(skill_retrieval)
 
+        beam_search = planning_payload.get("beam_search")
+        if isinstance(beam_search, dict):
+            compact["beam_search"] = cls._compact_beam_search(beam_search)
+
         plan = cls._compact_plan(cls._primary_plan(planning_payload))
         if plan:
             compact["plan"] = plan
@@ -394,6 +398,133 @@ class SymphonyToolkit:
         return _copy_compact_fields(
             record,
             ("rank", "skill_id", "skill_name", "score", "source"),
+        )
+
+    @classmethod
+    def _compact_beam_search(cls, payload: dict[str, Any]) -> dict[str, Any]:
+        compact = _copy_compact_fields(
+            payload,
+            (
+                "mode",
+                "top_k",
+                "max_depth",
+                "min_edge_confidence",
+                "max_concurrent_judges",
+                "seed_skill_ids",
+            ),
+        )
+        graph = payload.get("graph")
+        if isinstance(graph, dict):
+            compact["graph"] = cls._compact_beam_graph(graph)
+        rounds = payload.get("rounds")
+        if isinstance(rounds, list):
+            compact["rounds"] = [
+                cls._compact_beam_round(item)
+                for item in rounds
+                if isinstance(item, dict)
+            ]
+        retained_paths = payload.get("retained_paths")
+        if isinstance(retained_paths, list):
+            compact["retained_paths"] = [
+                cls._compact_beam_path(item)
+                for item in retained_paths
+                if isinstance(item, dict)
+            ]
+        return compact
+
+    @classmethod
+    def _compact_beam_graph(cls, graph: dict[str, Any]) -> dict[str, Any]:
+        compact: dict[str, Any] = {}
+        nodes = graph.get("nodes")
+        if isinstance(nodes, list):
+            compact["nodes"] = [
+                cls._compact_beam_node(node)
+                for node in nodes
+                if isinstance(node, dict)
+            ]
+        edges = graph.get("edges")
+        if isinstance(edges, list):
+            compact["edges"] = [
+                cls._compact_beam_edge(edge)
+                for edge in edges
+                if isinstance(edge, dict)
+            ]
+        return compact
+
+    @staticmethod
+    def _compact_beam_node(node: dict[str, Any]) -> dict[str, Any]:
+        return _copy_compact_fields(
+            node,
+            ("id", "label", "status", "seed", "direction"),
+        )
+
+    @staticmethod
+    def _compact_beam_edge(edge: dict[str, Any]) -> dict[str, Any]:
+        return _copy_compact_fields(
+            edge,
+            ("id", "source", "target", "status", "confidence", "direction"),
+        )
+
+    @classmethod
+    def _compact_beam_round(cls, item: dict[str, Any]) -> dict[str, Any]:
+        compact = _copy_compact_fields(
+            item,
+            (
+                "round",
+                "frontier_count",
+                "judge_request_count",
+                "fresh_candidate_count",
+                "cached_candidate_count",
+                "judged_candidate_count",
+                "candidate_count",
+                "selected_count",
+                "rejected_count",
+                "accepted_count",
+                "retained_count",
+            ),
+        )
+        candidates = item.get("candidates")
+        if isinstance(candidates, list):
+            compact["candidates"] = [
+                cls._compact_beam_candidate(candidate)
+                for candidate in candidates
+                if isinstance(candidate, dict)
+            ]
+        retained_paths = item.get("retained_paths")
+        if isinstance(retained_paths, list):
+            compact["retained_paths"] = [
+                cls._compact_beam_path(path)
+                for path in retained_paths
+                if isinstance(path, dict)
+            ]
+        return compact
+
+    @staticmethod
+    def _compact_beam_candidate(candidate: dict[str, Any]) -> dict[str, Any]:
+        compact = _copy_compact_fields(
+            candidate,
+            (
+                "direction",
+                "current_skill_id",
+                "candidate_skill_id",
+                "candidate_label",
+                "status",
+                "path",
+            ),
+        )
+        edge = candidate.get("edge")
+        if isinstance(edge, dict):
+            compact["edge"] = _copy_compact_fields(
+                edge,
+                ("id", "source", "target", "confidence"),
+            )
+        return compact
+
+    @staticmethod
+    def _compact_beam_path(path: dict[str, Any]) -> dict[str, Any]:
+        return _copy_compact_fields(
+            path,
+            ("rank", "skill_ids", "edge_count", "directions"),
         )
 
     @classmethod

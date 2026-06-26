@@ -1,6 +1,7 @@
 import asyncio
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -331,6 +332,71 @@ def test_plan_uses_requested_beam_mode(monkeypatch, tmp_path):
     assert seen["orchestration_config"].mode == "beam"
 
 
+def test_plan_streams_beam_progress_events(monkeypatch, tmp_path):
+    configured_score_dir = tmp_path / "configured"
+    events = []
+    monkeypatch.setattr(
+        "jiuwenswarm.extensions.symphony.extension.load_symphony_config",
+        lambda: symphony_config_from_dict(
+            {
+                "paths": {"score_dir": str(configured_score_dir)},
+                "orchestration": {"mode": "beam"},
+            }
+        ),
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.extensions.symphony.extension.load_score_artifacts",
+        lambda score_dir: {"score_dir": str(score_dir)},
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.extensions.symphony.extension.LLMConfig.from_default_model",
+        lambda: object(),
+    )
+
+    async def fake_plan_from_score(score_dir, query, received_llm_config, **kwargs):
+        del score_dir, query, received_llm_config
+        await kwargs["progress_callback"](
+            {
+                "type": "symphony.beam_search.started",
+                "event": "started",
+                "sequence": 1,
+                "round": 0,
+                "payload": {"seed_skill_ids": ["skill-1"]},
+            }
+        )
+        return {
+            "status": "ready",
+            "recommended_plans": [],
+            "execution_graph": {"edges": []},
+            "beam_search": {"graph": {"nodes": [], "edges": []}},
+        }
+
+    monkeypatch.setattr(
+        "jiuwenswarm.extensions.symphony.extension.plan_from_score",
+        fake_plan_from_score,
+    )
+    request = SimpleNamespace(
+        metadata={
+            "symphony_progress_callback": lambda event: events.append(event),
+        }
+    )
+
+    result = asyncio.run(
+        SymphonyExtension().plan({"query": "do work", "mode": "beam"}, request)
+    )
+
+    assert result["success"] is True
+    assert events == [
+        {
+            "type": "symphony.beam_search.started",
+            "event": "started",
+            "sequence": 1,
+            "round": 0,
+            "payload": {"seed_skill_ids": ["skill-1"]},
+        }
+    ]
+
+
 def test_plan_presentation_uses_recommended_plan(monkeypatch, tmp_path):
     configured_score_dir = tmp_path / "configured"
     monkeypatch.setattr(
@@ -386,6 +452,104 @@ def test_plan_presentation_uses_recommended_plan(monkeypatch, tmp_path):
                     }
                 ]
             },
+            "beam_search": {
+                "seed_skill_ids": ["skill-1"],
+                "top_k": 2,
+                "max_depth": 3,
+                "graph": {
+                    "nodes": [
+                        {
+                            "id": "skill-1",
+                            "label": "Skill 1",
+                            "status": "final",
+                            "seed": True,
+                            "direction": "seed",
+                        },
+                        {
+                            "id": "skill-2",
+                            "label": "Skill 2",
+                            "status": "final",
+                            "seed": False,
+                            "direction": "forward",
+                        },
+                        {
+                            "id": "skill-3",
+                            "label": "Skill 3",
+                            "status": "rejected",
+                            "seed": False,
+                            "direction": "forward",
+                        },
+                    ],
+                    "edges": [
+                        {
+                            "id": "skill-1->skill-2",
+                            "source": "skill-1",
+                            "target": "skill-2",
+                            "status": "final",
+                            "confidence": 0.91,
+                        },
+                        {
+                            "id": "skill-1->skill-3",
+                            "source": "skill-1",
+                            "target": "skill-3",
+                            "status": "rejected",
+                            "confidence": 0.72,
+                        },
+                    ],
+                },
+                "rounds": [
+                    {
+                        "round": 1,
+                        "frontier_count": 1,
+                        "judge_request_count": 1,
+                        "candidate_count": 2,
+                        "selected_count": 1,
+                        "rejected_count": 1,
+                        "candidates": [
+                            {
+                                "direction": "forward",
+                                "current_skill_id": "skill-1",
+                                "candidate_skill_id": "skill-2",
+                                "candidate_label": "Skill 2",
+                                "status": "selected",
+                                "edge": {
+                                    "id": "skill-1->skill-2",
+                                    "source": "skill-1",
+                                    "target": "skill-2",
+                                    "confidence": 0.91,
+                                },
+                            },
+                            {
+                                "direction": "forward",
+                                "current_skill_id": "skill-1",
+                                "candidate_skill_id": "skill-3",
+                                "candidate_label": "Skill 3",
+                                "status": "rejected",
+                                "edge": {
+                                    "id": "skill-1->skill-3",
+                                    "source": "skill-1",
+                                    "target": "skill-3",
+                                    "confidence": 0.72,
+                                },
+                            }
+                        ],
+                        "retained_paths": [
+                            {
+                                "rank": 1,
+                                "score": 0.88,
+                                "skill_ids": ["skill-1", "skill-2"],
+                            }
+                        ],
+                    }
+                ],
+                "retained_paths": [
+                    {
+                        "rank": 1,
+                        "score": 0.88,
+                        "skill_ids": ["skill-1", "skill-2"],
+                    }
+                ],
+            },
         }
 
     monkeypatch.setattr(
@@ -404,6 +568,15 @@ def test_plan_presentation_uses_recommended_plan(monkeypatch, tmp_path):
     assert result["result"]["recommended_plans"][0]["status"] == "ready"
     assert "Best match." in result["content"]
     assert result["content"].endswith("是否按照上述编排结果执行？")
+    assert "## Beam search" in result["content"]
+    assert "classDef seed" in result["content"]
+    assert "classDef selected" in result["content"]
+    assert "classDef rejected fill:#f3f4f6" in result["content"]
+    assert "B1 --> B2" in result["content"]
+    assert "B1 --> B3" in result["content"]
+    assert "Round `1`: `2` candidates, `1` selected, `1` rejected" in result["content"]
+    assert "score `0.91`" not in result["content"]
+    assert "strong can_feed match" not in result["content"]
     assert "Missing inputs:" not in result["content"]
     assert "收件邮箱地址" not in result["content"]
     assert "imap-smtp-email" not in result["content"]

@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import replace
 import inspect
 import json
 import logging
@@ -1466,6 +1467,75 @@ class JiuWenSwarm:
             metadata=request.metadata,
         )
 
+    async def _handle_symphony_request_stream(
+        self,
+        request: AgentRequest,
+    ) -> AsyncIterator[AgentResponseChunk]:
+        """Stream Symphony RPC progress events, then the final RPC payload."""
+        if request.req_method not in _SYMPHONY_METHODS:
+            return
+
+        queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
+
+        async def progress_callback(event: dict[str, Any]) -> None:
+            await queue.put(event)
+
+        metadata = dict(request.metadata or {})
+        metadata["symphony_progress_callback"] = progress_callback
+        stream_request = replace(request, metadata=metadata)
+        task = asyncio.create_task(self._handle_symphony_request(stream_request))
+
+        try:
+            while not task.done() or not queue.empty():
+                try:
+                    event = await asyncio.wait_for(queue.get(), timeout=0.1)
+                except asyncio.TimeoutError:
+                    continue
+                yield AgentResponseChunk(
+                    request_id=request.request_id,
+                    channel_id=request.channel_id,
+                    payload={
+                        "event_type": event.get("type")
+                        or "symphony.beam_search.update",
+                        "beam_search_event": event,
+                    },
+                    is_complete=False,
+                )
+            response = await task
+        except Exception as exc:
+            logger.exception("[JiuWenSwarm] Symphony stream failed: %s", exc)
+            yield AgentResponseChunk(
+                request_id=request.request_id,
+                channel_id=request.channel_id,
+                payload={"event_type": "chat.error", "error": str(exc)},
+                is_complete=False,
+            )
+            yield AgentResponseChunk(
+                request_id=request.request_id,
+                channel_id=request.channel_id,
+                payload=None,
+                is_complete=True,
+            )
+            return
+
+        payload = dict(response.payload or {}) if response is not None else {}
+        payload.setdefault(
+            "event_type",
+            f"{request.req_method.value if request.req_method else 'symphony'}.result",
+        )
+        yield AgentResponseChunk(
+            request_id=request.request_id,
+            channel_id=request.channel_id,
+            payload=payload,
+            is_complete=False,
+        )
+        yield AgentResponseChunk(
+            request_id=request.request_id,
+            channel_id=request.channel_id,
+            payload=None,
+            is_complete=True,
+        )
+
     async def _process_interrupt(self, request: AgentRequest) -> AgentResponse:
         """处理 interrupt 请求.
 
@@ -1807,7 +1877,12 @@ class JiuWenSwarm:
                     channel_id=request.channel_id,
                     payload={"event_type": "skilldev.error", "error": str(exc)},
                     is_complete=True,
-                )
+            )
+            return
+
+        if request.req_method in _SYMPHONY_METHODS:
+            async for chunk in self._handle_symphony_request_stream(request):
+                yield chunk
             return
 
         # 无状态 RPC（skills / plugins / symphony）不需要 adapter，

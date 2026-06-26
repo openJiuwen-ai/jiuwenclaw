@@ -5,9 +5,10 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import logging
 from collections import defaultdict
 from dataclasses import dataclass
-from typing import Any, Callable, Protocol, Sequence
+from typing import Any, Awaitable, Callable, Protocol, Sequence
 
 from jiuwenswarm.symphony.llm import LLMConfig, create_llm_client, llm_usage_context
 from jiuwenswarm.symphony.orchestration.artifacts import ScoreArtifacts
@@ -26,6 +27,8 @@ from jiuwenswarm.symphony.orchestration.planning.utils import skill_id
 
 SEMANTIC_SCORE_THRESHOLD = 0.5
 DEFAULT_MAX_CONCURRENT_JUDGES = 3
+BeamProgressCallback = Callable[[dict[str, Any]], Awaitable[None] | None]
+logger = logging.getLogger(__name__)
 
 BEAM_JUDGE_SYSTEM_PROMPT = """You are Symphony's bidirectional beam expansion judge.
 Return strict JSON only.
@@ -103,6 +106,201 @@ class SemanticJudgement:
     candidate_id: str
     score: float
     reason: str
+
+
+_GRAPH_STATUS_PRIORITY = {
+    "pending": 0,
+    "rejected": 1,
+    "seed": 2,
+    "selected": 3,
+    "final": 4,
+}
+
+
+class BeamSearchGraph:
+    """Lightweight search graph for user-facing beam progress."""
+
+    def __init__(
+        self,
+        skill_by_id: dict[str, dict[str, Any]],
+        edges: list[dict[str, Any]],
+    ) -> None:
+        self.skill_by_id = skill_by_id
+        self.edges = edges
+        self.nodes: dict[str, dict[str, Any]] = {}
+        self.graph_edges: dict[str, dict[str, Any]] = {}
+
+    def add_seed(self, current_skill_id: str) -> None:
+        self._ensure_node(current_skill_id, status="seed", direction="seed", seed=True)
+
+    def add_candidate(self, expansion: NeighborExpansion) -> dict[str, Any]:
+        self._ensure_node(
+            expansion.current_skill_id,
+            status="seed" if self._is_seed(expansion.current_skill_id) else "selected",
+            direction=expansion.direction,
+        )
+        candidate = self._ensure_node(
+            expansion.candidate_skill_id,
+            status="pending",
+            direction=expansion.direction,
+        )
+        edge = self._ensure_edge(expansion, status="pending")
+        return {
+            "current_skill_id": expansion.current_skill_id,
+            "candidate_skill_id": expansion.candidate_skill_id,
+            "candidate_label": candidate["label"],
+            "direction": expansion.direction,
+            "status": "pending",
+            "edge": edge,
+        }
+
+    def apply_judgement(
+        self,
+        expansion: NeighborExpansion,
+        judgement: SemanticJudgement,
+    ) -> dict[str, Any]:
+        status = (
+            "selected"
+            if judgement.score >= SEMANTIC_SCORE_THRESHOLD
+            else "rejected"
+        )
+        candidate = self._ensure_node(
+            expansion.candidate_skill_id,
+            status=status,
+            direction=expansion.direction,
+        )
+        edge = self._ensure_edge(expansion, status=status)
+        return {
+            "current_skill_id": expansion.current_skill_id,
+            "candidate_skill_id": expansion.candidate_skill_id,
+            "candidate_label": candidate["label"],
+            "direction": expansion.direction,
+            "status": status,
+            "edge": edge,
+        }
+
+    def mark_final_plan(self, plan: dict[str, Any]) -> dict[str, Any]:
+        final_skill_ids: list[str] = []
+        for step in plan.get("steps") or []:
+            if not isinstance(step, dict):
+                continue
+            current_skill_id = str(step.get("skill_id") or "").strip()
+            if not current_skill_id:
+                continue
+            self._ensure_node(current_skill_id, status="final", direction="final")
+            final_skill_ids.append(current_skill_id)
+
+        final_edge_ids: list[str] = []
+        for edge in plan.get("can_feed_edges") or []:
+            if not isinstance(edge, dict):
+                continue
+            source_id = str(edge.get("source_id") or edge.get("source") or "").strip()
+            target_id = str(edge.get("target_id") or edge.get("target") or "").strip()
+            edge_id = self._existing_edge_id(source_id, target_id)
+            if not edge_id:
+                continue
+            self.graph_edges[edge_id]["status"] = _dominant_status(
+                str(self.graph_edges[edge_id].get("status") or ""),
+                "final",
+            )
+            final_edge_ids.append(edge_id)
+
+        return {
+            "final_skill_ids": list(dict.fromkeys(final_skill_ids)),
+            "final_edge_ids": list(dict.fromkeys(final_edge_ids)),
+        }
+
+    def snapshot(self) -> dict[str, Any]:
+        nodes = []
+        for node in self.nodes.values():
+            directions = sorted(node.get("directions") or [])
+            nodes.append(
+                {
+                    "id": node["id"],
+                    "label": node["label"],
+                    "status": node["status"],
+                    "seed": bool(node.get("seed")),
+                    "direction": _direction_label(directions),
+                }
+            )
+        edges = [
+            _copy_public_graph_edge(edge)
+            for edge in self.graph_edges.values()
+        ]
+        return {"nodes": nodes, "edges": edges}
+
+    def _ensure_node(
+        self,
+        current_skill_id: str,
+        *,
+        status: str,
+        direction: str,
+        seed: bool = False,
+    ) -> dict[str, Any]:
+        node = self.nodes.get(current_skill_id)
+        if node is None:
+            node = {
+                "id": current_skill_id,
+                "label": _skill_label(self.skill_by_id.get(current_skill_id, {})),
+                "status": status,
+                "seed": seed,
+                "directions": set(),
+            }
+            self.nodes[current_skill_id] = node
+        else:
+            node["status"] = _dominant_status(str(node.get("status") or ""), status)
+            node["seed"] = bool(node.get("seed")) or seed
+        if direction:
+            node["directions"].add(direction)
+        return node
+
+    def _ensure_edge(
+        self,
+        expansion: NeighborExpansion,
+        *,
+        status: str,
+    ) -> dict[str, Any]:
+        edge = self.edges[expansion.edge_index]
+        source_id = expansion.current_skill_id
+        target_id = expansion.candidate_skill_id
+        edge_id = f"{source_id}->{target_id}"
+        graph_edge = self.graph_edges.get(edge_id)
+        confidence = edge.get("confidence")
+        if graph_edge is None:
+            graph_edge = {
+                "id": edge_id,
+                "source": source_id,
+                "target": target_id,
+                "status": status,
+                "confidence": confidence,
+                "direction": expansion.direction,
+                "can_feed_source_id": skill_id(edge.get("source")),
+                "can_feed_target_id": skill_id(edge.get("target")),
+            }
+            self.graph_edges[edge_id] = graph_edge
+        else:
+            graph_edge["status"] = _dominant_status(
+                str(graph_edge.get("status") or ""),
+                status,
+            )
+            graph_edge["confidence"] = _max_confidence(
+                graph_edge.get("confidence"),
+                confidence,
+            )
+        return _copy_public_graph_edge(graph_edge)
+
+    def _existing_edge_id(self, source_id: str, target_id: str) -> str:
+        forward_id = f"{source_id}->{target_id}"
+        if forward_id in self.graph_edges:
+            return forward_id
+        backward_id = f"{target_id}->{source_id}"
+        if backward_id in self.graph_edges:
+            return backward_id
+        return ""
+
+    def _is_seed(self, current_skill_id: str) -> bool:
+        node = self.nodes.get(current_skill_id)
+        return bool(node and node.get("seed"))
 
 
 class SemanticJudgementCache:
@@ -218,6 +416,7 @@ class BidirectionalBeamPlanner:
         max_depth: int,
         candidate_skill_ids: Sequence[str] | None = None,
         max_concurrent_judges: int = DEFAULT_MAX_CONCURRENT_JUDGES,
+        progress_callback: BeamProgressCallback | None = None,
     ) -> None:
         self.artifacts = artifacts
         self.llm_config = llm_config
@@ -231,7 +430,11 @@ class BidirectionalBeamPlanner:
             candidate_skill_ids,
             known_skill_ids=set(self.skill_by_id),
         )
+        self.progress_callback = progress_callback
+        self._beam_event_sequence = 0
+        self._beam_events: list[dict[str, Any]] = []
         self.eligible_edges = self._sorted_eligible_edges()
+        self._beam_graph = BeamSearchGraph(self.skill_by_id, self.eligible_edges)
         self.outgoing_edges = build_outgoing_edges(self.eligible_edges)
         self.incoming_edges = build_incoming_edges(self.eligible_edges)
         self.cache = SemanticJudgementCache()
@@ -239,9 +442,22 @@ class BidirectionalBeamPlanner:
     async def plan(self, query: str) -> dict[str, Any]:
         client = self._client()
         del client
+        self._reset_beam_progress()
         query_signature = _query_signature(query)
         frontier = self._initial_states()
         all_states = list(frontier)
+        seed_skill_ids = tuple(state.skill_ids[0] for state in frontier)
+        for current_skill_id in seed_skill_ids:
+            self._beam_graph.add_seed(current_skill_id)
+        await self._emit_beam_event(
+            "started",
+            round_index=0,
+            payload={
+                "seed_skill_ids": list(seed_skill_ids),
+                "graph": self._beam_graph.snapshot(),
+            },
+        )
+        rounds: list[dict[str, Any]] = []
         judge_queue = BeamJudgeQueue(
             planner=self,
             max_concurrent_judges=self.max_concurrent_judges,
@@ -249,6 +465,16 @@ class BidirectionalBeamPlanner:
 
         for _round in range(max(0, self.max_depth - 1)):
             groups, cached = self._expansion_groups(query_signature, frontier)
+            found = self._record_candidates_found()
+            if found:
+                await self._emit_beam_event(
+                    "candidates_found",
+                    round_index=_round + 1,
+                    payload={
+                        "expansions": found,
+                        "graph": self._beam_graph.snapshot(),
+                    },
+                )
             if not groups and not cached:
                 break
             fresh = await judge_queue.judge_groups(query, groups)
@@ -258,20 +484,78 @@ class BidirectionalBeamPlanner:
                 if expansion is not None:
                     self.cache.set(query_signature, expansion, judgement)
             judgements = {**cached, **fresh}
+            judged = self._record_candidates_judged(judgements)
+            if judged:
+                await self._emit_beam_event(
+                    "candidates_judged",
+                    round_index=_round + 1,
+                    payload={
+                        "candidates": judged,
+                        "graph": self._beam_graph.snapshot(),
+                    },
+                )
             next_states = self._apply_judgements(judgements)
             if not next_states:
+                rounds.append(
+                    self._round_summary(
+                        round_index=_round + 1,
+                        frontier=frontier,
+                        groups=groups,
+                        cached=cached,
+                        judgements=judgements,
+                        retained=[],
+                    )
+                )
+                await self._emit_beam_event(
+                    "graph_merged",
+                    round_index=_round + 1,
+                    payload={
+                        "retained_paths": [],
+                        "graph": self._beam_graph.snapshot(),
+                    },
+                )
                 break
+            merged_states = self._merge_states(next_states)
+            retained = self._rank_and_trim(merged_states, limit=self.top_k)
+            rounds.append(
+                self._round_summary(
+                    round_index=_round + 1,
+                    frontier=frontier,
+                    groups=groups,
+                    cached=cached,
+                    judgements=judgements,
+                    retained=retained,
+                )
+            )
             all_states = self._rank_and_trim(
-                self._merge_states(next_states),
+                merged_states,
                 limit=self.top_k,
             )
-            frontier = self._rank_and_trim(
-                self._merge_states(next_states),
-                limit=self.top_k,
+            frontier = retained
+            await self._emit_beam_event(
+                "graph_merged",
+                round_index=_round + 1,
+                payload={
+                    "retained_paths": [
+                        self._state_summary(state, rank=index)
+                        for index, state in enumerate(retained, start=1)
+                    ],
+                    "graph": self._beam_graph.snapshot(),
+                },
             )
 
         plans = self._plans_from_states(all_states)[: self.top_k]
         recommended_plans = [self._plan_payload(plan) for plan in plans]
+        final_plan = recommended_plans[0] if recommended_plans else {}
+        final_graph_payload = self._beam_graph.mark_final_plan(final_plan)
+        await self._emit_beam_event(
+            "completed",
+            round_index=len(rounds),
+            payload={
+                **final_graph_payload,
+                "graph": self._beam_graph.snapshot(),
+            },
+        )
         status = recommended_plans[0]["status"] if recommended_plans else "no_plan"
         reason = recommended_plans[0].get("reason", "") if recommended_plans else ""
         unique_skill_ids = {
@@ -289,6 +573,22 @@ class BidirectionalBeamPlanner:
             "plans": recommended_plans,
             "recommended_plans": recommended_plans,
             "ranking_mode": "bidirectional_beam",
+            "beam_search": {
+                "mode": "bidirectional_beam",
+                "top_k": self.top_k,
+                "max_depth": self.max_depth,
+                "min_edge_confidence": self.min_edge_confidence,
+                "semantic_score_threshold": SEMANTIC_SCORE_THRESHOLD,
+                "max_concurrent_judges": self.max_concurrent_judges,
+                "seed_skill_ids": list(seed_skill_ids),
+                "graph": self._beam_graph.snapshot(),
+                "rounds": rounds,
+                "events": self._beam_events,
+                "retained_paths": [
+                    self._state_summary(state, rank=index)
+                    for index, state in enumerate(all_states, start=1)
+                ],
+            },
             "decision": {
                 "mode": "bidirectional_beam",
                 "strategy": "semantic_bidirectional_beam",
@@ -552,6 +852,150 @@ class BidirectionalBeamPlanner:
 
     def _expansion_by_id(self, candidate_id: str) -> NeighborExpansion | None:
         return getattr(self, "_current_expansions", {}).get(candidate_id)
+
+    def _reset_beam_progress(self) -> None:
+        self._beam_event_sequence = 0
+        self._beam_events = []
+        self._beam_graph = BeamSearchGraph(self.skill_by_id, self.eligible_edges)
+
+    async def _emit_beam_event(
+        self,
+        event: str,
+        *,
+        round_index: int,
+        payload: dict[str, Any],
+    ) -> None:
+        self._beam_event_sequence += 1
+        item = {
+            "type": f"symphony.beam_search.{event}",
+            "event": event,
+            "sequence": self._beam_event_sequence,
+            "round": round_index,
+            "payload": payload,
+        }
+        self._beam_events.append(_json_safe(item))
+        if self.progress_callback is None:
+            return
+        try:
+            result = self.progress_callback(_json_safe(item))
+            if asyncio.iscoroutine(result):
+                await result
+        except Exception as exc:
+            logger.debug("beam progress callback failed: %s", exc)
+
+    def _record_candidates_found(self) -> list[dict[str, Any]]:
+        output = []
+        for expansion in _sorted_expansions(
+            getattr(self, "_current_expansions", {}).values()
+        ):
+            output.append(self._beam_graph.add_candidate(expansion))
+        return output
+
+    def _record_candidates_judged(
+        self,
+        judgements: dict[str, SemanticJudgement],
+    ) -> list[dict[str, Any]]:
+        output = []
+        for candidate_id in sorted(judgements):
+            expansion = self._expansion_by_id(candidate_id)
+            if expansion is None:
+                continue
+            output.append(
+                self._beam_graph.apply_judgement(
+                    expansion,
+                    judgements[candidate_id],
+                )
+            )
+        return output
+
+    def _round_summary(
+        self,
+        *,
+        round_index: int,
+        frontier: list[BeamState],
+        groups: list[list[NeighborExpansion]],
+        cached: dict[str, SemanticJudgement],
+        judgements: dict[str, SemanticJudgement],
+        retained: list[BeamState],
+    ) -> dict[str, Any]:
+        candidates = []
+        for candidate_id, judgement in judgements.items():
+            expansion = self._expansion_by_id(candidate_id)
+            if expansion is None:
+                continue
+            candidates.append(
+                self._candidate_status_summary(expansion, judgement)
+            )
+        candidates.sort(
+            key=lambda item: (
+                item["status"] != "selected",
+                item["direction"],
+                item["candidate_skill_id"],
+            )
+        )
+        retained_summaries = [
+            self._state_summary(state, rank=index)
+            for index, state in enumerate(retained, start=1)
+        ]
+        return {
+            "round": round_index,
+            "frontier_count": len(frontier),
+            "judge_request_count": len(groups),
+            "fresh_candidate_count": sum(len(group) for group in groups),
+            "cached_candidate_count": len(cached),
+            "judged_candidate_count": len(candidates),
+            "candidate_count": len(candidates),
+            "selected_count": sum(
+                1 for item in candidates if item["status"] == "selected"
+            ),
+            "rejected_count": sum(
+                1 for item in candidates if item["status"] == "rejected"
+            ),
+            "accepted_count": sum(
+                1 for item in candidates if item["status"] == "selected"
+            ),
+            "retained_count": len(retained_summaries),
+            "candidates": candidates,
+            "retained_paths": retained_summaries,
+        }
+
+    def _candidate_status_summary(
+        self,
+        expansion: NeighborExpansion,
+        judgement: SemanticJudgement,
+    ) -> dict[str, Any]:
+        edge = self.eligible_edges[expansion.edge_index]
+        status = (
+            "selected"
+            if judgement.score >= SEMANTIC_SCORE_THRESHOLD
+            else "rejected"
+        )
+        return {
+            "candidate_id": expansion.candidate_id,
+            "direction": expansion.direction,
+            "current_skill_id": expansion.current_skill_id,
+            "candidate_skill_id": expansion.candidate_skill_id,
+            "candidate_label": _skill_label(
+                self.skill_by_id.get(expansion.candidate_skill_id, {})
+            ),
+            "status": status,
+            "edge": {
+                "id": f"{expansion.current_skill_id}->{expansion.candidate_skill_id}",
+                "source": expansion.current_skill_id,
+                "target": expansion.candidate_skill_id,
+                "confidence": edge.get("confidence"),
+            },
+            "path": list(expansion.state.skill_ids),
+        }
+
+    def _state_summary(self, state: BeamState, *, rank: int) -> dict[str, Any]:
+        return {
+            "rank": rank,
+            "score": round(self._state_score(state), 4),
+            "skill_ids": list(state.skill_ids),
+            "edge_count": len(state.edge_indices),
+            "directions": sorted(state.directions),
+        }
 
     def _plans_from_states(self, states: list[BeamState]) -> list[OrchestrationPlan]:
         state_plans = [
@@ -926,3 +1370,70 @@ def _group_states(
     for state in states:
         grouped[str(key_fn(state))].append(state)
     return list(grouped.values())
+
+
+def _dominant_status(current: str, incoming: str) -> str:
+    current_priority = _GRAPH_STATUS_PRIORITY.get(current, -1)
+    incoming_priority = _GRAPH_STATUS_PRIORITY.get(incoming, -1)
+    return incoming if incoming_priority >= current_priority else current
+
+
+def _direction_label(directions: list[str]) -> str:
+    filtered = [item for item in directions if item and item != "final"]
+    if not filtered:
+        return ""
+    if len(filtered) == 1:
+        return filtered[0]
+    if "seed" in filtered and len(filtered) == 2:
+        return next(item for item in filtered if item != "seed")
+    return "mixed"
+
+
+def _copy_public_graph_edge(edge: dict[str, Any]) -> dict[str, Any]:
+    output = {
+        "id": edge.get("id"),
+        "source": edge.get("source"),
+        "target": edge.get("target"),
+        "status": edge.get("status"),
+        "confidence": edge.get("confidence"),
+    }
+    direction = edge.get("direction")
+    if direction not in (None, ""):
+        output["direction"] = direction
+    return output
+
+
+def _max_confidence(left: Any, right: Any) -> Any:
+    try:
+        left_value = float(left)
+    except (TypeError, ValueError):
+        return right
+    try:
+        right_value = float(right)
+    except (TypeError, ValueError):
+        return left
+    return max(left_value, right_value)
+
+
+def _skill_label(skill: dict[str, Any]) -> str:
+    current_skill_id = str(skill.get("id") or "").strip()
+    return str(skill.get("name") or current_skill_id).strip() or current_skill_id
+
+
+def _json_safe(payload: dict[str, Any]) -> dict[str, Any]:
+    return json.loads(json.dumps(payload, ensure_ascii=False, default=str))
+
+
+def _sorted_expansions(
+    expansions: Sequence[NeighborExpansion],
+) -> list[NeighborExpansion]:
+    return sorted(
+        expansions,
+        key=lambda item: (
+            item.direction,
+            item.current_skill_id,
+            item.candidate_skill_id,
+            item.edge_index,
+            item.candidate_id,
+        ),
+    )
