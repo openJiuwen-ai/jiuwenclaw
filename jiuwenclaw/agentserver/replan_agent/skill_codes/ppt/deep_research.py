@@ -980,6 +980,10 @@ class PageWorkerNode(PlanNode):
             "4. 无法回溯的二手转述（如\"据XX报道\"但无原始链接）\n"
             "5. 引用来源与页面数据需求领域不符\n"
             "6. 发布时间异常（>2年旧信息，非经典案例）\n\n"
+            "### 输出纪律（硬约束，必须遵守）\n"
+            "- 逐个来源快速判定，每个来源只给「排除/保留」结论，给出结论后不得回溯反复论证\n"
+            "- 仅在确凿命中上述特征时排除；存在歧义一律保留，避免过度思考\n"
+            "- 必须先输出最终 JSON 数组，补充说明合计 ≤2 句，禁止逐条来源展开论证\n\n"
             '以 JSON 数组输出应排除的序号（从1开始），无需排除则输出 []。\n'
             "只输出 JSON 数组，不要输出其他内容。"
         )
@@ -1037,10 +1041,11 @@ class PageWorkerNode(PlanNode):
 
         prompt = (
             "请校验以下抓取内容的数据充分性，仅输出 JSON。\n\n"
-            "【判断纪律】\n"
-            "- 逐项快速判断，每项给出结论后不再回溯，禁止反复质疑\n"
-            "- 存在歧义时一律按\"通过\"处理，避免过度思考\n"
-            "- 简洁推理，直接给结论\n\n"
+            "【判断纪律（硬约束，必须遵守）】\n"
+            "- 逐项快速判断，每项给出结论后不再回溯，禁止反复质疑已下结论的项\n"
+            "- 推理总步数 ≤5 步；存在歧义时一律按\"通过\"处理，避免过度思考\n"
+            "- 校验项4 交叉验证：直接用上方独立来源数与阈值比对，不得展开论证\n"
+            "- 必须先输出最终 JSON，禁止在结论后继续推理或自我推翻\n\n"
             f"页面类型：{page_type}\n"
             f"数据需求：{data_needs}\n"
             f"研究深度：{research_depth}\n"
@@ -1317,6 +1322,7 @@ class PageWorkerNode(PlanNode):
             result = await self.stream_llm_collect(
                 prompt=prompt,
                 system_prompt="你是深度内容研究员，直接输出该页的 Markdown 内容，不要输出解释。",
+                concurrent=True,
             )
             return result.strip() if result else ""
         except Exception as e:
