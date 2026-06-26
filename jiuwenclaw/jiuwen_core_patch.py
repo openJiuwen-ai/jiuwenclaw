@@ -23,6 +23,7 @@ from openjiuwen.core.foundation.llm.model_clients.siliconflow_model_client impor
     SiliconFlowModelClient,
 )
 from openjiuwen.core.session.stream import OutputSchema
+from jiuwenclaw.local_env_config import read_default_headers
 from jiuwenclaw.tool_arguments_validator import (
     tool_arguments_failure_message,
     tool_arguments_failure_payload,
@@ -621,13 +622,13 @@ class PatchOpenAIModelClient(RetryMixin, OpenAIModelClient):
             final_timeout,
             self.model_client_config.max_retries
         )
-        default_headers_raw = os.getenv("default_headers", None)
         try:
-            parsed_default_headers = (
-                json.loads(default_headers_raw) if default_headers_raw else None
+            parsed_default_headers = read_default_headers()
+        except ValueError as exc:
+            llm_logger.warning(
+                "Failed to parse default_headers, ignoring: %s",
+                exc,
             )
-        except json.decoder.JSONDecodeError as error:
-            llm_logger.warning(f"Model default headers parse failed: {error}")
             parsed_default_headers = None
         # Main MaaS chat uses placeholder api_key + relay-claw Basic headers in default_headers.
         # Image/other clients use real api_key and Bearer from the SDK only.

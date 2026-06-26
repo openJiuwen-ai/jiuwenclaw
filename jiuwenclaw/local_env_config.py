@@ -1,8 +1,16 @@
+import json
 import os
 import sys
 import logging
 from contextvars import ContextVar, Token
 from typing import Any
+
+DEFAULT_HEADERS_ENV_KEY = "default_headers"
+_DEFAULT_HEADERS_ALIASES = (
+    DEFAULT_HEADERS_ENV_KEY,
+    "DEFAULT_HEADERS",
+    "OPENAI_DEFAULT_HEADERS",
+)
 
 logger = logging.getLogger(__name__)
 
@@ -157,12 +165,50 @@ def read_env_if_set(name: str) -> str | None:
     return None
 
 
+def read_default_headers_raw() -> str:
+    """Overlay-aware raw JSON string for default HTTP headers."""
+    for env_key in _DEFAULT_HEADERS_ALIASES:
+        raw = read_env(env_key, "")
+        if raw.strip():
+            return raw.strip()
+    return ""
+
+
+def parse_default_headers(raw: str) -> dict[str, str] | None:
+    """Parse and validate default_headers JSON; return None when empty."""
+    text = (raw or "").strip()
+    if not text:
+        return None
+    try:
+        parsed = json.loads(text)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"default_headers is not valid JSON: {exc}") from exc
+    if not isinstance(parsed, dict):
+        raise ValueError("default_headers must be a JSON object")
+    return {str(k): str(v) for k, v in parsed.items() if v is not None}
+
+
+def read_default_headers() -> dict[str, str] | None:
+    """Read overlay-aware default_headers as a header map."""
+    return parse_default_headers(read_default_headers_raw())
+
+
+def is_sensitive_env_name(name: str) -> bool:
+    lower = name.lower()
+    return (
+        "api_key" in lower
+        or "token" in lower
+        or lower == DEFAULT_HEADERS_ENV_KEY
+        or "header" in lower
+    )
+
+
 # set方法只有agentserver使用
-def set_local_config(name: str, value):
-    if not value:
+def set_local_config(name: str, value) -> None:
+    if value:
+        ENV_CONFIG_DICT[name] = value
+    else:
         ENV_CONFIG_DICT.pop(name, None)
-        return
-    ENV_CONFIG_DICT[name] = value
 
 
 def decrypt(name, cipher):
@@ -170,8 +216,7 @@ def decrypt(name, cipher):
     if reg_mod is not None and hasattr(reg_mod, "ExtensionRegistry"):
         try:
             crypto = reg_mod.ExtensionRegistry.get_instance().get_crypto_provider()
-            is_need_decrypt = "api_key" in name.lower() or "token" in name.lower()
-            if is_need_decrypt and crypto:
+            if is_sensitive_env_name(name) and crypto:
                 return crypto.decrypt(cipher)
         except Exception as e:
             logger.warning(f"Decryption failed exception: {e}")
@@ -183,8 +228,7 @@ def encrypt(name, text):
     if reg_mod is not None and hasattr(reg_mod, "ExtensionRegistry"):
         try:
             crypto = reg_mod.ExtensionRegistry.get_instance().get_crypto_provider()
-            is_need_decrypt = "api_key" in name.lower() or "token" in name.lower()
-            if is_need_decrypt and crypto:
+            if is_sensitive_env_name(name) and crypto:
                 return crypto.encrypt(text)
         except Exception as e:
             logger.warning(f"Encryption failed exception: {e}")

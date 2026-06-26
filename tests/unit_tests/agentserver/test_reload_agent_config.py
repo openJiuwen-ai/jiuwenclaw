@@ -33,7 +33,9 @@ from jiuwenclaw.local_env_config import (
     clear_staged_env,
     get_local_config,
     get_staged_env,
+    parse_default_headers,
     promote_staged_env,
+    read_default_headers,
     read_env,
     read_env_if_set,
     reset_task_env_overlay,
@@ -102,6 +104,26 @@ class TestEnvStaging:
     @staticmethod
     def test_read_env_if_set_returns_none_when_unset():
         assert read_env_if_set("MISSING_KEY") is None
+
+    @staticmethod
+    def test_default_headers_task_overlay():
+        ENV_CONFIG_DICT["default_headers"] = '{"Authorization":"Basic active"}'
+        stage_env_overrides(
+            {"default_headers": '{"Authorization":"Basic staged"}'}
+        )
+        token = bind_task_env_overlay(
+            {"default_headers": '{"Authorization":"Basic overlay"}'}
+        )
+        try:
+            assert read_default_headers() == {"Authorization": "Basic overlay"}
+        finally:
+            reset_task_env_overlay(token)
+        assert read_default_headers() == {"Authorization": "Basic active"}
+
+    @staticmethod
+    def test_parse_default_headers_invalid():
+        with pytest.raises(ValueError, match="must be a JSON object"):
+            parse_default_headers("[]")
 
 
 class TestReloadConfigChangeLogging:
@@ -541,7 +563,9 @@ async def test_force_apply_with_invalidate_memory_false():
     ), patch(
         "jiuwenclaw.agentserver.deep_agent.interface_deep.clear_memory_manager_cache",
         new=AsyncMock(),
-    ):
+    ), patch(
+        "jiuwenclaw.agentserver.deep_agent.interface_deep.clear_task_memory_service",
+    ) as mock_clear_task_memory:
         result = await adapter.reload_agent_config(
             config_base=None,
             env_overrides={"MODEL_NAME": ""},
@@ -550,6 +574,7 @@ async def test_force_apply_with_invalidate_memory_false():
         )
 
     assert result.applied is True
+    mock_clear_task_memory.assert_called_once()
 
 
 @pytest.mark.asyncio

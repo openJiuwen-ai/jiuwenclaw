@@ -234,6 +234,7 @@ from jiuwenclaw.agentserver.memory.external_memory_config import (
 from jiuwenclaw.agentserver.memory.config import (clear_config_cache, get_memory_mode, is_memory_enabled,
                                                   is_proactive_memory)
 from jiuwenclaw.agentserver.memory.manager import clear_memory_manager_cache
+from jiuwenclaw.agentserver.tools.task_tools import clear_task_memory_service
 from jiuwenclaw.agentserver.permissions.checker import TOOL_PERMISSION_CHANNEL_ID
 from jiuwenclaw.agentserver.cron_config import should_register_cron_tools
 from jiuwenclaw.agentserver.skill_manager import (
@@ -3684,6 +3685,7 @@ class JiuWenClawDeepAdapter:
             clear_config_cache()
             clear_global_config_cache()
             await clear_memory_manager_cache()
+            clear_task_memory_service()
 
             if config_base is None:
                 config_base = get_config()

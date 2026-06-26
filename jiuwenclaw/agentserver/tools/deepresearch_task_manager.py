@@ -28,6 +28,7 @@ from jiuwenclaw.agentserver.gateway_push import GatewayPushTransport, WebSocketG
 from jiuwenclaw.agentserver.tools.deepresearch_plugin.convert_docx_offline import convert_md_to_docx
 from jiuwenclaw.agentserver.tools.deepresearch_plugin.convert_html_offline import convert_md_to_html
 from jiuwenclaw.agentserver.tools.deepresearch_plugin.report_bundle import build_report_bundle
+from jiuwenclaw.local_env_config import read_default_headers_raw
 from jiuwenclaw.utils import get_logs_dir
 from jiuwenclaw.agentserver.tools.subagent_executor.context_vars import get_effective_request_workspace_dir
 
@@ -249,11 +250,7 @@ class DeepResearchTaskManager:
             # 使用对应引擎的 API Key
             web_search_api_key = configured_engines[web_search_engine_name]
         if not web_search_api_key:
-            # Fallback 到 OPENAI_DEFAULT_HEADERS 或 default_headers
-            web_search_api_key = (
-                    os.environ.get("OPENAI_DEFAULT_HEADERS")
-                    or os.environ.get("default_headers", "")
-            ).strip()
+            web_search_api_key = read_default_headers_raw()
 
         web_search_url = os.environ.get("WEB_SEARCH_URL", "").strip()
         if not web_search_url and web_search_engine_name == SearchEngine.PETAL.value:

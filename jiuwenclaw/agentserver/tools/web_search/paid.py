@@ -9,6 +9,7 @@ import os
 import re
 from typing import Any
 
+from jiuwenclaw.local_env_config import read_default_headers, read_env
 from jiuwenclaw.agentserver.tools.web_search.http_client import http_request
 from jiuwenclaw.config import get_config
 
@@ -21,9 +22,9 @@ _TAVILY_MAX_CONTENT_LEN = 4000
 
 def _resolve_petal_search_url() -> str:
     api_base = (
-        os.environ.get("API_BASE")
-        or os.environ.get("OPENAI_BASE_URL")
-        or os.environ.get("OPENAI_API_BASE")
+        read_env("API_BASE")
+        or read_env("OPENAI_BASE_URL")
+        or read_env("OPENAI_API_BASE")
         or ""
     ).strip()
     if not api_base:
@@ -36,16 +37,10 @@ def _resolve_petal_search_url() -> str:
 
 
 def _load_llm_default_headers() -> dict[str, str]:
-    raw = os.environ.get("default_headers", "").strip()
-    if not raw:
+    header_map = read_default_headers()
+    if not header_map:
         raise ValueError("default_headers is not set")
-    try:
-        parsed = json.loads(raw)
-    except json.JSONDecodeError as exc:
-        raise ValueError(f"default_headers is not valid JSON: {exc}") from exc
-    if not isinstance(parsed, dict):
-        raise ValueError("default_headers must be a JSON object")
-    return {str(k): str(v) for k, v in parsed.items() if v is not None}
+    return header_map
 
 
 def _petal_normalize_web_page_item(item: dict[str, Any]) -> dict[str, str]:
