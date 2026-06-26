@@ -2067,6 +2067,19 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
         except Exception as e:  # noqa: BLE001
             await channel.send_response(ws, req_id, ok=False, error=str(e), code="INTERNAL_ERROR")
 
+    async def _connection_status(ws, req_id, params, session_id):
+        """返回 Gateway / AgentServer 就绪状态，供企业版 Web 探测后端链路."""
+        await channel.send_response(
+            ws,
+            req_id,
+            ok=True,
+            payload={
+                "agent_ready": is_agent_server_ready(agent_client),
+                "protocol_version": "1.0",
+            },
+        )
+
+    channel.register_method("connection.status", _connection_status)
     channel.register_method("config.get", _config_get)
     channel.register_method("config.set", _config_set)
     channel.register_method("config.validate_model", _config_validate_model)

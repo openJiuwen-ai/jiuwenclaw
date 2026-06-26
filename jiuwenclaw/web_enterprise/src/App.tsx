@@ -486,7 +486,15 @@ function AppContent() {
   }, [clearHeartbeatToastTimer, heartbeatMessage, heartbeatUpdatedAt]);
 
   useEffect(() => {
-    if (!isConnected || initialDataLoaded) {
+    if (!isConnected) {
+      if (serverConfig || initialDataLoaded) {
+        setConfigError(t('app.configError'));
+        setInitialDataLoaded(false);
+      }
+      return;
+    }
+    setConfigError(null);
+    if (initialDataLoaded) {
       return;
     }
     void (async () => {
@@ -494,7 +502,7 @@ function AppContent() {
       await fetchSessions();
       setInitialDataLoaded(true);
     })();
-  }, [fetchConfig, fetchSessions, initialDataLoaded, isConnected]);
+  }, [fetchConfig, fetchSessions, initialDataLoaded, isConnected, serverConfig, t]);
 
   // 聊天处理完成后刷新会话列表，以便拾取自动生成的标题等元数据更新
   const prevProcessingRef = useRef(false);
