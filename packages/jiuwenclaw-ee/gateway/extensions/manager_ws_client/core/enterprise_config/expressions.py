@@ -207,6 +207,8 @@ def evaluate_match_expr(expr: Any, ctx: RoutingContext) -> bool:
     if expr is None:
         return True
     if isinstance(expr, list):
+        if not expr:
+            return True
         return any(evaluate_match_expr(item, ctx) for item in expr)
     text = str(expr).strip()
     if not text:
@@ -215,6 +217,8 @@ def evaluate_match_expr(expr: Any, ctx: RoutingContext) -> bool:
         try:
             parsed = json.loads(text)
             if isinstance(parsed, list):
+                if not parsed:
+                    return True
                 return any(evaluate_match_expr(item, ctx) for item in parsed)
         except json.JSONDecodeError:
             pass

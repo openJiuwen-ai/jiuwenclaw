@@ -761,25 +761,41 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
         return []
 
     async def _models_list(ws, req_id, params, session_id):
-        """返回已配置的所有默认模型列表（与 config.get 一致，返回解密后的完整值）。"""
+        """返回当前路由上下文下生效的默认模型列表（企业策略优先，否则 config.yaml）。"""
         try:
-            config = get_config()
+            from jiuwenclaw.agentserver.enterprise_config.apply_models import (
+                build_routing_agent_request,
+                resolve_effective_models_config,
+            )
+
+            routing = params if isinstance(params, dict) else {}
+            request = build_routing_agent_request(
+                request_id=str(req_id or "models.list"),
+                channel_id="web",
+                session_id=session_id,
+                routing=routing,
+            )
+            config, model_source = await resolve_effective_models_config(request)
             models = get_default_models(config)
             result = []
             for entry in models:
                 mcc = entry.get("model_client_config", {})
                 mco = entry.get("model_config_obj", {})
+                runtime_model = str(mcc.get("model_name") or "").strip()
+                template_label = str(entry.get("template_name") or "").strip()
                 result.append({
-                    "model_name": mcc.get("model_name", ""),
+                    "model_name": template_label or runtime_model,
                     "api_base": mcc.get("api_base", ""),
                     "api_key": mcc.get("api_key", ""),
                     "model_provider": mcc.get("client_provider", ""),
                     "temperature": mco.get("temperature", 0.95),
+                    "template_id": str(entry.get("template_id") or "").strip(),
                 })
             active_model = result[0]["model_name"] if result else ""
             await channel.send_response(ws, req_id, ok=True, payload={
                 "models": result,
                 "active_model": active_model,
+                "model_source": model_source,
             })
         except Exception as exc:  # noqa: BLE001
             logger.warning("[models.list] %s", exc)

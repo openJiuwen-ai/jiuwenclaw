@@ -126,7 +126,7 @@ function ExtSettingsModal({ onClose }: ExtSettingsModalProps) {
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
       <div className="absolute inset-0 bg-black/60" onClick={onClose} />
       <div
-        className="relative w-full max-w-lg max-h-[85vh] overflow-hidden rounded-xl flex flex-col animate-rise"
+        className="relative w-full max-w-2xl max-h-[85vh] overflow-hidden rounded-xl flex flex-col animate-rise"
         style={{
           backgroundColor: 'var(--card)',
           boxShadow: 'var(--shadow-xl)',

@@ -1,14 +1,24 @@
-"""将 ``EffectiveEnterpriseConfig`` 中的模型模板写入 config 快照（覆盖 ``config.yaml`` 对应槽位）。"""
+"""将 ``EffectiveEnterpriseConfig`` 中的模型模板写入 config 快照，并按策略解析生效模型。"""
 
 from __future__ import annotations
 
 import copy
+import logging
 from typing import Any
 
+from jiuwenclaw.config import get_config
+
 from .loader import (
+    DEFAULT_AGENT_LOAD_SLOTS,
     EffectiveEnterpriseConfig,
     TemplateRefSlot,
+    load_effective_enterprise_config,
 )
+
+logger = logging.getLogger(__name__)
+
+MODEL_SOURCE_CONFIG = "config.yaml"
+MODEL_SOURCE_ENTERPRISE = "enterprise_policy"
 
 SLOT_TO_CONFIG_KEY: dict[TemplateRefSlot, str] = {
     TemplateRefSlot.DEFAULT_MODEL: "default",
@@ -115,3 +125,66 @@ def apply_enterprise_models_to_config(
                 react["model_config_obj"] = dict(mco)
 
     return merged, applied
+
+
+def build_routing_agent_request(
+    *,
+    request_id: str = "models.list",
+    channel_id: str = "web",
+    session_id: str | None = None,
+    routing: dict[str, Any] | None = None,
+) -> Any:
+    """由路由字段构造 ``AgentRequest``（供 ``routing_context_from_request`` 解析）。"""
+    from jiuwenclaw.schema.agent import AgentRequest
+
+    params: dict[str, str] = {}
+    metadata_query: dict[str, list[str]] = {}
+    if isinstance(routing, dict):
+        for key in ("user_id", "group_id", "bot_id"):
+            raw = routing.get(key)
+            if raw is None:
+                continue
+            text = str(raw).strip()
+            if not text:
+                continue
+            params[key] = text
+            metadata_query[key] = [text]
+
+    metadata = {"query": metadata_query} if metadata_query else None
+    return AgentRequest(
+        request_id=request_id,
+        channel_id=channel_id,
+        session_id=session_id,
+        params=params,
+        metadata=metadata,
+    )
+
+
+async def resolve_effective_models_config(
+    request: Any | None = None,
+) -> tuple[dict[str, Any], str]:
+    """三级策略匹配企业模型并合并进 config 快照；未命中则返回 ``config.yaml``。
+
+    返回 ``(config_snapshot, model_source)``，``model_source`` 为
+    ``enterprise_policy`` 或 ``config.yaml``。
+    """
+    config_base = get_config()
+    if request is None:
+        return config_base, MODEL_SOURCE_CONFIG
+
+    try:
+        loaded = await load_effective_enterprise_config(
+            request,
+            DEFAULT_AGENT_LOAD_SLOTS,
+        )
+    except Exception as exc:
+        logger.warning("[enterprise_config] resolve_effective_models_config failed: %s", exc)
+        return config_base, MODEL_SOURCE_CONFIG
+
+    if loaded is None:
+        return config_base, MODEL_SOURCE_CONFIG
+
+    merged, applied = apply_enterprise_models_to_config(config_base, loaded)
+    if applied:
+        return merged, MODEL_SOURCE_ENTERPRISE
+    return config_base, MODEL_SOURCE_CONFIG

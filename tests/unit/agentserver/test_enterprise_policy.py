@@ -297,6 +297,8 @@ def test_agent_rule_fixed_agent_id_does_not_filter_match(sales_ctx: RoutingConte
 def test_match_expr_empty_is_true(sales_ctx: RoutingContext) -> None:
     assert evaluate_match_expr("", sales_ctx) is True
     assert evaluate_match_expr(None, sales_ctx) is True
+    assert evaluate_match_expr([], sales_ctx) is True
+    assert evaluate_match_expr("[]", sales_ctx) is True
 
 
 @pytest.mark.asyncio
