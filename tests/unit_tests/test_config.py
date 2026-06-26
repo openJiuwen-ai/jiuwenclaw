@@ -3,6 +3,7 @@
 """Unit tests for config module."""
 
 import math
+import os
 from pathlib import Path
 
 import pytest
@@ -139,7 +140,7 @@ class TestConfigFunctions:
         first = get_config()
         second = get_config()
 
-        assert first is second
+        assert first == second
         assert first["model"] == "first"
         assert load_calls == 1
 
@@ -175,6 +176,41 @@ class TestConfigFunctions:
 
         monkeypatch.setenv("CONFIG_CACHE_MODEL", "second")
         assert get_config()["model"] == "second"
+
+    @staticmethod
+    def test_dev_mode_reloads_on_file_change(
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ):
+        from jiuwenswarm.common.config import _config_cache_enabled
+
+        config_file = tmp_path / "config.yaml"
+        config_file.write_text("model: old\n", encoding="utf-8")
+        monkeypatch.setattr(config_mod, "get_config_file", lambda: config_file)
+        monkeypatch.setattr(config_mod, "_config_cache_enabled", lambda: False)
+        invalidate_config_cache()
+
+        assert get_config()["model"] == "old"
+
+        config_file.write_text("model: new\n", encoding="utf-8")
+        os.utime(config_file, None)
+
+        assert get_config()["model"] == "new"
+
+    @staticmethod
+    def test_get_config_return_is_isolated_from_cache(
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ):
+        config_file = tmp_path / "config.yaml"
+        config_file.write_text("model: original\n", encoding="utf-8")
+        monkeypatch.setattr(config_mod, "get_config_file", lambda: config_file)
+        invalidate_config_cache()
+
+        cfg = get_config()
+        cfg["model"] = "mutated"
+
+        assert get_config()["model"] == "original"
 
     @staticmethod
     def test_get_config_raw(temp_config_file: Path):
