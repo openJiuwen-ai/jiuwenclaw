@@ -182,8 +182,6 @@ class TestConfigFunctions:
         monkeypatch: pytest.MonkeyPatch,
         tmp_path: Path,
     ):
-        from jiuwenswarm.common.config import _config_cache_enabled
-
         config_file = tmp_path / "config.yaml"
         config_file.write_text("model: old\n", encoding="utf-8")
         monkeypatch.setattr(config_mod, "get_config_file", lambda: config_file)
@@ -192,10 +190,10 @@ class TestConfigFunctions:
 
         assert get_config()["model"] == "old"
 
-        config_file.write_text("model: new\n", encoding="utf-8")
+        config_file.write_text("model: newer-model\n", encoding="utf-8")
         os.utime(config_file, None)
 
-        assert get_config()["model"] == "new"
+        assert get_config()["model"] == "newer-model"
 
     @staticmethod
     def test_get_config_return_is_isolated_from_cache(
