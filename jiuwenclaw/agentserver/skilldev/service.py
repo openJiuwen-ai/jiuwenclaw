@@ -1017,7 +1017,7 @@ class SkillDevService:
         )
 
         results: list[dict] = []
-        upload_file_obs = create_upload_file_obs(session_id=task_id)
+        upload_file_obs = create_upload_file_obs()
 
         for sid in session_ids:
             sid = str(sid or "").strip()
@@ -1042,6 +1042,7 @@ class SkillDevService:
                     "[SkillDevService] batch_upload 打包完成: session_id=%s, zip_path=%s",
                     sid, zip_path,
                 )
+                upload_file_obs.session_id = sid
                 download_url = await upload_file_obs.upload_file(zip_path)
                 logger.info(
                     "[SkillDevService] batch_upload 上传成功: session_id=%s, url=%s",
