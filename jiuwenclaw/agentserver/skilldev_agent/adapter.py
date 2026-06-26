@@ -57,6 +57,7 @@ from jiuwenclaw.agentserver.skilldev_agent.utils.direct_import import (
     find_skill_root,
 )
 from jiuwenclaw.agentserver.skilldev_agent.utils.finalize import (
+    packaged_skill_requires_sandbox,
     collect_output_packages,
     get_review_benchmark,
     get_static_review_report,
@@ -808,6 +809,7 @@ class SkillDevDeepAdapter:
         skill_files = collect_output_packages(task_workspace / "output")
 
         if skill_files:
+            need_sandbox = packaged_skill_requires_sandbox(skill_files)
             yield AgentResponseChunk(
                 request_id=rid,
                 channel_id=cid,
@@ -822,6 +824,7 @@ class SkillDevDeepAdapter:
                 task_id=task_id,
                 rid=rid,
                 cid=cid,
+                need_sandbox=need_sandbox,
                 packaged_files=skill_files,
             ):
                 yield chunk
@@ -942,10 +945,12 @@ class SkillDevDeepAdapter:
             skill_files = repackage_if_stale(task_workspace, skill_files)
 
         if skill_files:
+            need_sandbox = packaged_skill_requires_sandbox(skill_files)
             async for chunk in self._yield_packaged_skill_completion(
                 task_id=task_id,
                 rid=rid,
                 cid=cid,
+                need_sandbox=need_sandbox,
                 packaged_files=skill_files,
             ):
                 yield chunk
@@ -967,6 +972,7 @@ class SkillDevDeepAdapter:
         task_id: str,
         rid: str,
         cid: str,
+        need_sandbox: bool,
         packaged_files: list[Path],
     ) -> AsyncIterator[AgentResponseChunk]:
         for sf in packaged_files:
@@ -993,6 +999,7 @@ class SkillDevDeepAdapter:
             payload={
                 "event_type": "skilldev.completed",
                 "task_id": task_id,
+                "needSandbox": need_sandbox,
             },
             is_complete=True,
         )

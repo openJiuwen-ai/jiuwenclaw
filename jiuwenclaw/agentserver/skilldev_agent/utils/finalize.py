@@ -7,6 +7,8 @@ from __future__ import annotations
 import fnmatch
 import json
 import logging
+import re
+import stat
 import zipfile
 from pathlib import Path
 from typing import Any
@@ -19,6 +21,53 @@ _PKG_EXCLUDE_DIRS: frozenset[str] = frozenset({"__pycache__", "node_modules"})
 _PKG_EXCLUDE_GLOBS: frozenset[str] = frozenset({"*.pyc", "*.swp", "*.bak-*"})
 _PKG_EXCLUDE_FILES: frozenset[str] = frozenset({".DS_Store"})
 _PKG_ROOT_EXCLUDE_DIRS: frozenset[str] = frozenset({"evals", "output"})
+_EXECUTABLE_CODE_FENCE_LANGS = frozenset({
+    "bash",
+    "cjs",
+    "cmd",
+    "javascript",
+    "js",
+    "node",
+    "perl",
+    "powershell",
+    "ps1",
+    "pwsh",
+    "py",
+    "python",
+    "python3",
+    "ruby",
+    "shell",
+    "sh",
+    "ts",
+    "typescript",
+    "zsh",
+})
+_EXECUTABLE_FILE_SUFFIXES = frozenset({
+    ".appimage",
+    ".bat",
+    ".bin",
+    ".cmd",
+    ".com",
+    ".command",
+    ".cjs",
+    ".exe",
+    ".jar",
+    ".js",
+    ".mjs",
+    ".msi",
+    ".pl",
+    ".ps1",
+    ".py",
+    ".pyw",
+    ".rb",
+    ".run",
+    ".sh",
+    ".ts",
+})
+_CODE_FENCE_PATTERN = re.compile(
+    r"```(?P<lang>[^\n`]*)\n(?P<body>.*?)\n```",
+    re.DOTALL,
+)
 
 
 def _should_exclude_from_package(rel_path: Path) -> bool:
@@ -38,6 +87,83 @@ def collect_output_packages(output_dir: Path) -> list[Path]:
     if not output_dir.exists():
         return []
     return [f for f in output_dir.iterdir() if f.is_file() and f.suffix in (".skill", ".zip")]
+
+
+def _normalize_code_fence_lang(lang: str) -> str:
+    stripped = lang.strip().lower()
+    if not stripped:
+        return ""
+    return re.split(r"[\s,\{\[]", stripped, maxsplit=1)[0]
+
+
+def _looks_like_executable_code_block(lang: str, body: str) -> bool:
+    normalized_lang = _normalize_code_fence_lang(lang)
+    if normalized_lang in _EXECUTABLE_CODE_FENCE_LANGS:
+        return True
+    first_line = next((line.strip() for line in body.splitlines() if line.strip()), "")
+    return first_line.startswith("#!")
+
+
+def _skill_md_content_has_executable_code_block(content: str) -> bool:
+    return any(
+        _looks_like_executable_code_block(match.group("lang") or "", match.group("body") or "")
+        for match in _CODE_FENCE_PATTERN.finditer(content)
+    )
+
+
+def _archive_member_is_executable(archive: zipfile.ZipFile, info: zipfile.ZipInfo) -> bool:
+    if info.is_dir():
+        return False
+
+    member_path = Path(info.filename)
+    if member_path.suffix.lower() in _EXECUTABLE_FILE_SUFFIXES:
+        return True
+
+    mode = (info.external_attr >> 16) & 0xFFFF
+    if stat.S_ISREG(mode) and mode & (stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH):
+        return True
+
+    try:
+        with archive.open(info, "r") as fh:
+            return fh.read(2) == b"#!"
+    except OSError:
+        return False
+
+
+def _package_has_executable_file(package_path: Path) -> bool:
+    if not package_path.is_file():
+        return False
+    try:
+        with zipfile.ZipFile(package_path, "r") as archive:
+            for info in archive.infolist():
+                if _archive_member_is_executable(archive, info):
+                    return True
+                if Path(info.filename).name != "SKILL.md":
+                    continue
+                try:
+                    with archive.open(info, "r") as fh:
+                        content = fh.read().decode("utf-8")
+                except (OSError, UnicodeDecodeError) as exc:
+                    logger.warning(
+                        "[SkillDevDeepAdapter] Failed to read SKILL.md from %s: %s",
+                        package_path,
+                        exc,
+                    )
+                    return True
+                if _skill_md_content_has_executable_code_block(content):
+                    return True
+            return False
+    except (OSError, zipfile.BadZipFile) as exc:
+        logger.warning(
+            "[SkillDevDeepAdapter] Failed to inspect packaged skill %s: %s",
+            package_path,
+            exc,
+        )
+        return True
+
+
+def packaged_skill_requires_sandbox(packaged_files: list[Path]) -> bool:
+    return any(_package_has_executable_file(package_path) for package_path in packaged_files)
 
 
 def repackage_if_stale(task_workspace: Path, existing_packages: list[Path]) -> list[Path]:
