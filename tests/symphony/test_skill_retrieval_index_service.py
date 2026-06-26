@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 import json
 import threading
 from pathlib import Path
@@ -65,6 +66,83 @@ def test_scan_skill_inventory_includes_all_installed_skills(tmp_path: Path) -> N
         "disabled-skill",
         "enabled-plugin",
     ]
+
+
+def test_index_fingerprint_tracks_only_skill_inventory(tmp_path: Path) -> None:
+    skills_dir = tmp_path / "skills"
+    skills_dir.mkdir()
+    _write_skill(skills_dir, "enabled-skill")
+    inventory = scan_skill_inventory(SimpleNamespace(_skills_dir=skills_dir))
+    settings = SkillRetrievalSettings(
+        enabled=True,
+        artifact_root=tmp_path / "artifact",
+        llm=LLMSettings(model="model-a", api_key="key-a", base_url="https://api-a.example"),
+        build=BuildSettings(max_depth=4),
+        retrieve=RetrieveSettings(),
+    )
+
+    changed_llm = replace(
+        settings,
+        llm=LLMSettings(model="model-b", api_key="key-b", base_url="https://api-b.example", seed=123),
+    )
+    changed_build = replace(settings, build=BuildSettings(max_depth=5))
+    _write_skill(skills_dir, "another-skill")
+    changed_inventory = scan_skill_inventory(SimpleNamespace(_skills_dir=skills_dir))
+
+    assert expected_index_fingerprint(inventory, changed_llm) == expected_index_fingerprint(inventory, settings)
+    assert expected_index_fingerprint(inventory, changed_build) == expected_index_fingerprint(inventory, settings)
+    assert expected_index_fingerprint(changed_inventory, settings) != expected_index_fingerprint(inventory, settings)
+
+
+def test_status_and_tree_keep_index_available_when_build_llm_changes(monkeypatch, tmp_path: Path) -> None:
+    skills_dir = tmp_path / "skills"
+    skills_dir.mkdir()
+    _write_skill(skills_dir, "enabled-skill")
+    manager = SimpleNamespace(_skills_dir=skills_dir)
+    inventory = scan_skill_inventory(manager)
+    artifact_root = tmp_path / "artifact"
+    index_dir = artifact_root / "index"
+    index_dir.mkdir(parents=True)
+    settings = SkillRetrievalSettings(
+        enabled=True,
+        artifact_root=artifact_root,
+        llm=LLMSettings(model="model-a", api_key="key-a", base_url="https://api-a.example"),
+        build=BuildSettings(max_depth=4),
+        retrieve=RetrieveSettings(),
+    )
+    changed_llm = replace(
+        settings,
+        llm=LLMSettings(model="model-b", api_key="key-b", base_url="https://api-b.example"),
+    )
+    (index_dir / "tree_index.yaml").write_text("nodes: []\n", encoding="utf-8")
+    (index_dir / "catalog.jsonl").write_text("", encoding="utf-8")
+    (index_dir / "manifest.json").write_text(
+        json.dumps({"item_paths": inventory.item_paths}),
+        encoding="utf-8",
+    )
+    (artifact_root / "state.json").write_text(
+        json.dumps(
+            {
+                "fingerprint": expected_index_fingerprint(inventory, settings),
+                "indexed_count": inventory.count,
+                "build": {"status": "success", "stage": "success", "progress": 1.0},
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.symphony.skill_retrieval.index_service.load_settings",
+        lambda: changed_llm,
+    )
+
+    status = SkillIndexService(manager).status()
+    tree = SkillIndexService(manager).tree(language="zh")
+
+    assert status["index_exists"] is True
+    assert status["fresh"] is True
+    assert status["build_status"] == "success"
+    assert tree["success"] is True
+    assert tree["index_dir"] == str(index_dir)
 
 
 def test_build_index_with_no_skills_clears_stale_index_and_records_failure(monkeypatch, tmp_path: Path) -> None:

@@ -59,6 +59,29 @@ class TestEvents:
         assert is_terminal_event("chat.final", {"event_type": "keepalive"}) is False
 
     @staticmethod
+    def test_is_terminal_chat_final_team_runtime_ready():
+        # team.runtime_ready is a control event wrapped in chat.final envelope;
+        # it must NOT terminate the CLI stream (the team hasn't answered yet).
+        assert is_terminal_event(
+            "chat.final", {"event_type": "team.runtime_ready"}
+        ) is False
+
+    @staticmethod
+    def test_is_terminal_chat_final_team_completed():
+        # team.completed is a control event; the real terminal signal is
+        # chat.processing_status(is_processing=False).
+        assert is_terminal_event(
+            "chat.final", {"event_type": "team.completed"}
+        ) is False
+
+    @staticmethod
+    def test_is_terminal_chat_final_team_error():
+        # team.error indicates a failed team stream and should terminate.
+        assert is_terminal_event(
+            "chat.final", {"event_type": "team.error", "error": "boom"}
+        ) is True
+
+    @staticmethod
     def test_is_terminal_chat_error():
         assert is_terminal_event("chat.error", {}) is True
 

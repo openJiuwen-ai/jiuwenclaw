@@ -14,6 +14,7 @@
 - [Auto Harness 特性说明](AutoHarness.md)
 - [单机多实例运行](单机多实例运行.md)
 - [使用指南](README.md)
+  - [对话](对话.md)
   - [频道](频道.md)
     - [Discord](Discord.md)
     - [WhatsApp（中文）](whatsapp.md)

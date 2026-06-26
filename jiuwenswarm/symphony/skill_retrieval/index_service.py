@@ -6,7 +6,6 @@ import shutil
 import threading
 import time
 from contextlib import contextmanager, redirect_stderr, redirect_stdout
-from dataclasses import asdict
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -771,12 +770,6 @@ def _expected_fingerprint(inventory: SkillInventory, settings: SkillRetrievalSet
 
     payload = {
         "inventory": inventory.fingerprint,
-        "build": asdict(settings.build),
-        "llm": {
-            "model": settings.llm.model,
-            "base_url": settings.llm.base_url,
-            "seed": settings.llm.seed,
-        },
     }
     return hashlib.sha256(json.dumps(payload, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()
 

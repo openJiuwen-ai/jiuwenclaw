@@ -19,7 +19,7 @@ English: [Distributed Team](../en/DistributedTeam.md)
 | **配置装载** | `load_team_spec_dict()`（`jiuwenswarm/agents/harness/team/config_loader.py`）：leader / `predefined_members` 的 name 与 display_name 兼容 |
 | **样例** | 仓库内 `jiuwenswarm/resources/config.team.distributed.leader.yaml` / `config.team.distributed.teammate.yaml`（当前分角色模板） |
 
-**会话语义**：与原 Team 一致倾向 **单活 session**——新建 session 的 Team 前会清理其它 session 的 Team 资源；分布式下不在本文档引入多 session 并发路由层。
+**会话语义**：分布式模式保持 **单活 session**——为同一频道新建或切换 Team 会话时，会先停止该频道中原有的活动或待启动会话，确保远程成员 bootstrap、传输连接和运行时资源不会跨会话复用。**本地模式**则支持同一频道下多个 Team 会话并发运行，不应用此单会话切换策略。
 
 ---
 

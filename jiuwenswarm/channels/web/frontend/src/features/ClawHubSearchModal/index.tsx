@@ -242,7 +242,7 @@ export function ClawHubSearchModal({
     }
   }, [token, query, t, withSession, showMessage, handleSearch]);
 
-  const handleInstall = useCallback(async (item: ClawHubSkillItem) => {
+  const handleInstall = useCallback(async (item: ClawHubSkillItem, forceOverwrite: boolean = false) => {
     const slug = item.slug;
     if (installingSlug) return;
 
@@ -256,12 +256,27 @@ export function ClawHubSearchModal({
         skill?: { name: string };
       }>(
         "skills.clawhub.download",
-        withSession({ slug, force: true })
+        withSession({ slug, force: forceOverwrite })
       );
       if (!data.success) {
         const message = data.detail_key
           ? t(data.detail_key)
           : (data.detail || t("skills.clawhub.errors.downloadFailed"));
+
+        // 如果是"已安装"错误且尚未强制覆盖，则弹窗确认
+        if (!forceOverwrite && data.detail_key === "skills.clawhub.errors.skillAlreadyInstalled") {
+          setInstallingSlug(null);
+
+          const confirmed = window.confirm(
+            t("skills.clawhub.replaceConfirm", { name: item.display_name || item.slug })
+          );
+          if (confirmed) {
+            // 用户确认后重新调用，带 force=true
+            await handleInstall(item, true);
+          }
+          return;
+        }
+
         throw new Error(message);
       }
       const skillName = data.skill?.name || slug;

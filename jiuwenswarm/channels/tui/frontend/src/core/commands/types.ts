@@ -52,6 +52,12 @@ export interface CommandContext {
   accentColor: AccentColorName;
   updateSession: (id: string) => void;
   addItem: (item: HistoryItem) => void;
+  /** 设置 /btw 侧问题覆盖层（独立于 transcript 渲染，不受滚动影响） */
+  setBtwOverlay?: (question: string, answer: string) => void;
+  /** 清除 /btw 侧问题覆盖层 */
+  clearBtwOverlay?: () => void;
+  /** 设置 BTW 活动状态（加载中或 overlay 可见），用于 Esc 优先级判断 */
+  setBtwActive?: (active: boolean) => void;
   clearEntries: () => void;
   restoreHistory: (sessionId: string) => Promise<void>;
   exitApp: () => void;

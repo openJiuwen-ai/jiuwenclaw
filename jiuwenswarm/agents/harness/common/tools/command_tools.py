@@ -222,6 +222,97 @@ def _check_command_safety(command: str) -> str | None:
     return None
 
 
+# Options of `git worktree add` that consume the following token as a value.
+_WORKTREE_ADD_VALUE_OPTS = frozenset({"-b", "-B", "--branch", "--no-track"})
+
+# Cheap prescreen: only commands mentioning `worktree add` are worth the full
+# shlex parse. This runs on every bash command, so it must be O(regex) for the
+# common (non-worktree) case.
+_WORKTREE_ADD_PRESCREEN = re.compile(r"\bworktree\s+add\b", re.IGNORECASE)
+
+
+def _parse_worktree_add_target(command: str) -> str | None:
+    """Return the target path token of a `git worktree add` command, else None.
+
+    The target is the first non-option positional after `add`. Handles
+    `-b <branch>` / `-B <branch>` / `--branch=<branch>` (value-bearing) and
+    boolean options like `-f`/`--detach`/`--no-checkout`. Returns None if the
+    command is not a worktree-add or no positional target is present.
+    """
+    if not _WORKTREE_ADD_PRESCREEN.search(command):
+        return None
+    try:
+        tokens = shlex.split(command)
+    except ValueError:
+        return None
+    # Find `worktree add` (allow a leading `git` and `sudo git` etc.).
+    try:
+        add_idx = _find_worktree_add_index(tokens)
+    except ValueError:
+        return None
+    i = add_idx + 1
+    while i < len(tokens):
+        tok = tokens[i]
+        if tok.startswith("--") and "=" in tok:
+            i += 1
+            continue
+        if tok in _WORKTREE_ADD_VALUE_OPTS:
+            i += 2  # skip opt + its value
+            continue
+        if tok.startswith("-"):
+            i += 1  # boolean option
+            continue
+        return tok  # first positional = worktree target path
+    return None
+
+
+def _find_worktree_add_index(tokens: list[str]) -> int:
+    """Return the index of the `add` token in a `... worktree add` chain.
+
+    Matches the positional `worktree add` pair regardless of a leading
+    `git`/`sudo` prefix. Raises ValueError if not found.
+    """
+    lowered = [t.lower() for t in tokens]
+    for i in range(len(lowered) - 1):
+        if lowered[i] == "worktree" and lowered[i + 1] == "add":
+            return i + 1
+    raise ValueError("not a git worktree add command")
+
+
+def _check_worktree_path_safety(command: str) -> str | None:
+    """Block `git worktree add` whose target lands outside the project dir.
+
+    team.code does not mount the `enter_worktree` tool, so the LLM may hand-run
+    `git worktree add`. Without a constraint it tends to target the project's
+    sibling directory (../). This refuses out-of-project targets and points the
+    model at `.worktrees/<name>`. Self-gating: only triggers on a manual
+    `git worktree add`; when the `enter_worktree` tool is mounted the LLM does
+    not hand-run the command, so this never fires.
+    """
+    target = _parse_worktree_add_target(command)
+    if target is None:
+        return None
+    try:
+        project_root = _context_project_root()
+    except Exception:
+        return None  # no project context → do not risk false positives
+    try:
+        target_path = Path(target)
+        if not target_path.is_absolute():
+            target_path = project_root / target_path
+        target_path = target_path.resolve()
+    except Exception:
+        return None
+    if _is_relative_to(target_path, project_root):
+        return None  # inside the project (e.g. .worktrees/<name>) → allow
+    return (
+        f"worktree target must live under the project dir at "
+        f".worktrees/<name> (e.g. `git worktree add .worktrees/<name> "
+        f"-b <branch> HEAD`); refused path outside the project: {target}. "
+        f"Do NOT use `../` or sibling directories."
+    )
+
+
 def _context_cwd() -> Path:
     try:
         from openjiuwen.core.sys_operation.cwd import get_cwd

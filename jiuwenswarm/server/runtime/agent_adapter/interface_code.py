@@ -507,7 +507,8 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
             for tool in getattr(rail, 'tools', []) or []:
                 if hasattr(tool, '_workspace_path'):
                     setattr(tool, '_workspace_path', self._agent_workspace_dir)
-        self._seed_runtime_cwd(self._project_dir or self._workspace_dir)
+        initial_workspace = self._project_dir or self._workspace_dir
+        self._seed_runtime_cwd(initial_workspace, workspace=initial_workspace)
 
         setattr(self._instance, "_jiuwenswarm_adapter_mode", "code")
         setattr(
@@ -1119,11 +1120,17 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
         if self._instance is None:
             raise RuntimeError("JiuwenSwarmCodeAdapter 未初始化，请先调用 create_instance()")
 
+        project_workspace = (
+            runtime_config.project_dir
+            or self._project_dir
+            or self._workspace_dir
+        )
         self._seed_runtime_cwd(
             runtime_config.cwd
             or runtime_config.project_dir
             or self._project_dir
-            or self._workspace_dir
+            or self._workspace_dir,
+            workspace=project_workspace,
         )
         resolved_language = self._resolve_runtime_language()
         resolved_channel = str(runtime_config.channel_id or
@@ -1425,7 +1432,8 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
             "project_dir": self._project_dir,
             "channel_id": channel_id,
         }
-        self._seed_runtime_cwd(self._project_dir or self._workspace_dir)
+        initial_workspace = self._project_dir or self._workspace_dir
+        self._seed_runtime_cwd(initial_workspace, workspace=initial_workspace)
 
         model = self._create_model(config_base)
         deep_config = getattr(agent, "deep_config", None)

@@ -1017,6 +1017,26 @@ wheels = [
 ]
 
 [[package]]
+name = "faiss-cpu"
+version = "1.14.3"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "numpy" },
+    { name = "packaging" },
+]
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/83/b0/48c083d01b7b68c463c1d56507147a9d733f791e1c469a77215a872a9fb5/faiss_cpu-1.14.3-cp310-abi3-macosx_14_0_arm64.whl", hash = "sha256:a9369863290a3f0e033757e4c10577b6ef7431f1cede394dabd0a137e4e2ed45", size = 4768290, upload-time = "2026-06-13T02:19:03.427Z" },
+    { url = "https://files.pythonhosted.org/packages/ab/34/6b04ef5bae3eada6b5a9457d7875cce041c040d53c890815cbd1e9821c65/faiss_cpu-1.14.3-cp310-abi3-macosx_15_0_x86_64.whl", hash = "sha256:f9d0e84d909194f63f027bbd3c1e35e905e48c9345c2db6e6f24da09a6bc5906", size = 6925734, upload-time = "2026-06-13T02:19:05.232Z" },
+    { url = "https://files.pythonhosted.org/packages/7c/8a/b451af4b3c6dd18749ecfb58ccb68503b77e49c9aa4a89d950e9d521e058/faiss_cpu-1.14.3-cp310-abi3-manylinux_2_27_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:1d734cfa9ac90b6a5dfed3a27cb706d05f22824703dafc3969b4e2071877a31c", size = 9661210, upload-time = "2026-06-13T02:19:06.99Z" },
+    { url = "https://files.pythonhosted.org/packages/a0/ed/57335bc18c9e18677587bec9bf070c675b29c8e683e13f4def0440731ca0/faiss_cpu-1.14.3-cp310-abi3-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:8780b526c06e57aad90a8c4655dfba2ff1b3195bd600ff4499752fc45159c9fc", size = 18506292, upload-time = "2026-06-13T02:19:09.621Z" },
+    { url = "https://files.pythonhosted.org/packages/e7/d3/c6ca8c44a63b909e78aa8a69e14501c79c89613e62261d58455ea603d710/faiss_cpu-1.14.3-cp310-abi3-musllinux_1_2_aarch64.whl", hash = "sha256:b28ba083e8c02f2c9be03783402537fd3f00d27e68799c44bf88931500ee12ec", size = 11238800, upload-time = "2026-06-13T02:19:12.821Z" },
+    { url = "https://files.pythonhosted.org/packages/93/5f/b405692913a301251749cb175cb3f564ed257fdaa80a22c9a36444d0095d/faiss_cpu-1.14.3-cp310-abi3-musllinux_1_2_x86_64.whl", hash = "sha256:cdcb90850cb4b7c27d270839b37bcc0dc8d1fb6a62d1e13053e51ac95061ca25", size = 19237637, upload-time = "2026-06-13T02:19:15.531Z" },
+    { url = "https://files.pythonhosted.org/packages/78/6c/bbf670ad727502102fa90c52f9b47c73753f0adda880d30427ac1d48b37b/faiss_cpu-1.14.3-cp311-cp311-win_amd64.whl", hash = "sha256:f278003d00c30c90cf118b98428bb96f73eba4b9dadac6993c788966d2e983bd", size = 16159350, upload-time = "2026-06-13T02:19:20.601Z" },
+    { url = "https://files.pythonhosted.org/packages/59/aa/bfa53255a6aa6e79b2471bb5af895f662feb02b612e1e0f9efc3d893286e/faiss_cpu-1.14.3-cp312-cp312-win_amd64.whl", hash = "sha256:0a5eb27184123c7ac1060c6b862978eabf0e30c1369ccf8bdb1497d35c06ad3d", size = 16164699, upload-time = "2026-06-13T02:19:22.969Z" },
+    { url = "https://files.pythonhosted.org/packages/1d/c1/2fb14f58ff74d7a7d6fd13084c016d9b144ce0bcdf77f6526cc2e4828278/faiss_cpu-1.14.3-cp313-cp313-win_amd64.whl", hash = "sha256:ea2340f675db59af8db6da4535b541ce6948d68a008989c656c292c7b0c77127", size = 16162836, upload-time = "2026-06-13T02:19:25.529Z" },
+]
+
+[[package]]
 name = "fakeredis"
 version = "2.34.1"
 source = { registry = "https://pypi.org/simple" }
@@ -1687,6 +1707,7 @@ dependencies = [
     { name = "croniter" },
     { name = "dingtalk-stream" },
     { name = "discord-py" },
+    { name = "faiss-cpu" },
     { name = "fastapi" },
     { name = "gitcode-api" },
     { name = "google-genai" },
@@ -1696,6 +1717,7 @@ dependencies = [
     { name = "lark-oapi" },
     { name = "loguru" },
     { name = "mutagen" },
+    { name = "numpy" },
     { name = "openjiuwen" },
     { name = "opentelemetry-api" },
     { name = "opentelemetry-exporter-otlp-proto-grpc" },
@@ -1795,6 +1817,7 @@ requires-dist = [
     { name = "discord-py", specifier = ">=2.4.0" },
     { name = "fastapi", specifier = ">=0.115" },
     { name = "gitcode-api", specifier = ">=1.2.20" },
+    { name = "faiss-cpu", specifier = ">=1.7.0" },
     { name = "google-genai", specifier = ">=1.68.0" },
     { name = "greenlet", specifier = ">=3.3.2" },
     { name = "httpx", extras = ["socks"], specifier = ">=0.27" },
@@ -1803,6 +1826,7 @@ requires-dist = [
     { name = "lark-oapi", specifier = ">=1.5.3" },
     { name = "loguru", specifier = ">=0.7.3" },
     { name = "mutagen", specifier = ">=1.47.0" },
+    { name = "numpy", specifier = ">=1.24.0" },
     { name = "openjiuwen", git = "https://gitcode.com/openJiuwen/agent-core.git?rev=develop" },
     { name = "openjiuwen", extras = ["postgres", "zmq"], marker = "extra == 'distribute'" },
     { name = "opentelemetry-api", specifier = ">=1.25.0" },
@@ -2663,7 +2687,7 @@ wheels = [
 [[package]]
 name = "openjiuwen"
 version = "0.1.15"
-source = { git = "https://gitcode.com/openJiuwen/agent-core.git?rev=develop#b28977b725979e2d2b225171e3b3903547d00e17" }
+source = { git = "https://gitcode.com/openJiuwen/agent-core.git?rev=develop#6bb621d62892d213f07ed694dcee75db4617be1d" }
 dependencies = [
     { name = "aiofiles" },
     { name = "aiohttp" },

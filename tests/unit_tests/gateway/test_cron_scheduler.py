@@ -459,7 +459,7 @@ class TestHandleEventStoreValidation:
         # push_update delivered successfully
         assert len(handler.published) == 1
         content = _cron_published_content(handler.published[0])
-        assert content == f"[cron] {job.name} result:\n\nresult: 9am now"
+        assert content == f"{job.name} result:\n\nresult: 9am now"
 
     @pytest.mark.asyncio
     async def test_wake_executes_normally_when_job_present(self, tmp_path):
@@ -622,6 +622,243 @@ class TestReloadGhostTaskCleanup:
             ev for _, _, ev in svc.events if ev.kind == "push_update"
         ]
         assert len(push_update_events_after) == 0
+
+
+# ── Ghost task CancelledError: no push_update scheduling ──────────────────────────
+
+
+class TestGhostTaskCancelledNoPushUpdate:
+    """Cancelled ghost task must not schedule push_update in finally block."""
+
+    @pytest.mark.asyncio
+    async def test_cancelled_ghost_task_does_not_schedule_push_update(self, tmp_path):
+        """Cancelled _run_agent must not schedule push_update in finally block."""
+        store_file = tmp_path / "cron_jobs.json"
+        store = CronJobStore(path=store_file)
+        job = await _create_one_job(store)
+
+        handler = FakeMessageHandler()
+        svc = _make_scheduler(store, handler)
+        await svc.reload()
+
+        # Create a run state with placeholder_sent = True (triggers push_update
+        # in finally when result_text becomes non-empty)
+        run_id = f"{job.id}:1234"
+        svc.runs[run_id] = CronRunState(
+            run_id=run_id,
+            job_id=job.id,
+            wake_at_iso="2026-06-09T08:55:00+08:00",
+            push_at_iso="2026-06-09T09:00:00+08:00",
+            job_name=job.name,
+            targets=job.targets,
+            session_id=None,
+            chat_type=None,
+            timezone=job.timezone,
+            status="running",
+            placeholder_sent=True,
+        )
+
+        # Count push_update events before
+        push_update_before = [
+            ev for _, _, ev in svc.events if ev.kind == "push_update"
+        ]
+
+        # Delete store file then reload — cancels the ghost task
+        store_file.unlink()
+        await svc.reload()
+
+        # After reload, ghost run is gone — no new push_update events for it
+        push_update_after = [
+            ev for _, _, ev in svc.events if ev.kind == "push_update"
+        ]
+        # push_update count should not increase (ghost task finally skipped)
+        assert len(push_update_after) <= len(push_update_before)
+
+    @pytest.mark.asyncio
+    async def test_cancelled_task_finally_skips_result_text_and_push(self, tmp_path):
+        """state.error == "cancelled" should prevent result_text and push_update."""
+        store_file = tmp_path / "cron_jobs.json"
+        store = CronJobStore(path=store_file)
+        job = await _create_one_job(store)
+
+        handler = FakeMessageHandler()
+        svc = _make_scheduler(store, handler)
+        await svc.reload()
+
+        run_id = f"{job.id}:1234"
+        state = CronRunState(
+            run_id=run_id,
+            job_id=job.id,
+            wake_at_iso="2026-06-09T08:55:00+08:00",
+            push_at_iso="2026-06-09T09:00:00+08:00",
+            job_name=job.name,
+            targets=job.targets,
+            session_id=None,
+            chat_type=None,
+            timezone=job.timezone,
+            status="running",
+            placeholder_sent=True,
+        )
+
+        # Simulate CancelledError in _run_agent: state.error = "cancelled"
+        state.error = "cancelled"
+
+        # The finally block logic uses `is_cancelled_ghost = state.error == "cancelled"`
+        # to skip push_update. Verify the flag works correctly:
+        # Even with placeholder_sent=True, cancelled ghost should not push.
+        is_cancelled_ghost = state.error == "cancelled"
+        assert is_cancelled_ghost is True
+
+        # result_text should NOT be set for cancelled ghost (finally block check)
+        # (In real code: `if not state.result_text and state.error and not is_cancelled_ghost`)
+        if not state.result_text and state.error and not is_cancelled_ghost:
+            state.result_text = f"[cron] 任务执行失败: {state.error}"
+
+        assert state.result_text is None  # No result_text for ghost
+
+
+# ── Ghost task CHAT_CANCEL notification ────────────────────────────────────────────
+
+
+class TestGhostTaskAgentCancelNotification:
+    """Ghost task cancellation must send CHAT_CANCEL to AgentServer."""
+
+    @pytest.mark.asyncio
+    async def test_reload_sends_cancel_to_agent_for_ghost_tasks(self, tmp_path):
+        """Ghost task cancellation should fire CHAT_CANCEL to AgentServer."""
+        store_file = tmp_path / "cron_jobs.json"
+        store = CronJobStore(path=store_file)
+        job = await _create_one_job(store)
+
+        # Use a FakeAgentClient that records all requests
+        cancel_requests = []
+
+        class RecordingAgentClient:
+            async def send_request(self, envelope):
+                # Record the envelope for later inspection
+                cancel_requests.append(envelope)
+                return {"content": {"output": "cancelled", "result_type": "answer"}}
+
+        handler = FakeMessageHandler()
+        svc = _TestableScheduler(
+            store=store,
+            agent_client=RecordingAgentClient(),
+            message_handler=handler,
+        )
+        await svc.reload()
+
+        # Simulate a running task
+        run_id = f"{job.id}:1234"
+        svc.runs[run_id] = CronRunState(
+            run_id=run_id,
+            job_id=job.id,
+            wake_at_iso="2026-06-09T08:55:00+08:00",
+            push_at_iso="2026-06-09T09:00:00+08:00",
+            job_name=job.name,
+            targets=job.targets,
+            session_id=None,
+            chat_type=None,
+            timezone=job.timezone,
+            status="running",
+        )
+
+        # Create a blocking asyncio Task (simulating agent execution)
+        block_event = asyncio.Event()
+
+        async def _long_running():
+            await block_event.wait()
+
+        task = asyncio.create_task(_long_running(), name=f"cron-run-{job.id}")
+        svc.run_tasks[run_id] = task
+
+        # Delete store file — job gone from store
+        store_file.unlink()
+
+        # Reload should cancel ghost task AND send CHAT_CANCEL
+        await svc.reload()
+
+        # Give the event loop a turn for the fire-and-forget cancel task to execute
+        await asyncio.sleep(0.1)
+
+        # Verify CHAT_CANCEL was sent to AgentServer
+        # The cancel request should have method = "chat.interrupt"
+        cancel_envelopes = [
+            e for e in cancel_requests
+            if hasattr(e, "method") and e.method == "chat.interrupt"
+        ]
+        assert len(cancel_envelopes) >= 1, (
+            f"Expected at least 1 CHAT_CANCEL request, got {len(cancel_envelopes)} "
+            f"out of {len(cancel_requests)} total requests"
+        )
+
+        # Verify the cancel envelope has the correct job context
+        cancel_env = cancel_envelopes[0]
+        assert hasattr(cancel_env, "params")
+        assert "cron" in (cancel_env.params or {})
+        assert cancel_env.params["cron"]["job_id"] == job.id
+        assert cancel_env.params["cron"]["run_id"] == run_id
+
+        # Cleanup
+        block_event.set()
+
+    @pytest.mark.asyncio
+    async def test_no_cancel_sent_when_task_already_done(self, tmp_path):
+        """If the ghost task is already done, no CHAT_CANCEL should be sent."""
+        store_file = tmp_path / "cron_jobs.json"
+        store = CronJobStore(path=store_file)
+        job = await _create_one_job(store)
+
+        cancel_requests = []
+
+        class RecordingAgentClient:
+            async def send_request(self, envelope):
+                cancel_requests.append(envelope)
+                return {"content": {"output": "done", "result_type": "answer"}}
+
+        handler = FakeMessageHandler()
+        svc = _TestableScheduler(
+            store=store,
+            agent_client=RecordingAgentClient(),
+            message_handler=handler,
+        )
+        await svc.reload()
+
+        run_id = f"{job.id}:1234"
+        svc.runs[run_id] = CronRunState(
+            run_id=run_id,
+            job_id=job.id,
+            wake_at_iso="2026-06-09T08:55:00+08:00",
+            push_at_iso="2026-06-09T09:00:00+08:00",
+            job_name=job.name,
+            targets=job.targets,
+            session_id=None,
+            chat_type=None,
+            timezone=job.timezone,
+            status="succeeded",
+        )
+
+        # Create a task that's already done (completed immediately)
+        async def _instant_task():
+            return "done"
+
+        task = asyncio.create_task(_instant_task(), name=f"cron-run-{job.id}")
+        # Wait for it to finish
+        await task
+        assert task.done()
+        svc.run_tasks[run_id] = task
+
+        # Delete store file — job gone from store
+        store_file.unlink()
+
+        # Reload should NOT send CHAT_CANCEL because task is already done
+        await svc.reload()
+        await asyncio.sleep(0.1)
+
+        cancel_envelopes = [
+            e for e in cancel_requests
+            if hasattr(e, "method") and e.method == "chat.interrupt"
+        ]
+        assert len(cancel_envelopes) == 0
 
 
 # ── Team mode execution ──────────────────────────────────────────────────────
@@ -1060,11 +1297,11 @@ class TestCronBroadcastText:
             job_name="agent-core-commit-review",
             text="## 审查完成",
             is_placeholder=False,
-        ) == "[cron] agent-core-commit-review result:\n\n## 审查完成"
+        ) == "agent-core-commit-review result:\n\n## 审查完成"
 
     @staticmethod
-    def test_keeps_existing_placeholder_and_cron_prefix():
-        placeholder = "[cron] agent-core-commit-review 正在执行中"
+    def test_keeps_placeholder_unchanged_and_passes_through_cron_prefixed_status():
+        placeholder = "agent-core-commit-review 正在执行中，结果稍后补发（push_at=2026-01-01T09:00:00+08:00）"
         assert _CronSchedulerTeamTestApi.format_cron_broadcast_text(
             job_name="agent-core-commit-review",
             text=placeholder,

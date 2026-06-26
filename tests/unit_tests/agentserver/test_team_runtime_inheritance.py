@@ -62,6 +62,8 @@ def test_filter_inheritable_ability_cards_includes_extended_swarm_tools():
                 _make_tool_card("user_todos"),
                 _make_tool_card("task_tool"),
                 _make_tool_card("acp_chat"),
+                _make_tool_card("enter_worktree"),
+                _make_tool_card("exit_worktree"),
                 _make_tool_card("send_file_to_user"),
             ]
         )
@@ -75,6 +77,8 @@ def test_filter_inheritable_ability_cards_includes_extended_swarm_tools():
     assert "audio_question_answering" in inherited_names
     assert "audio_metadata" in inherited_names
     assert "user_todos" in inherited_names
+    assert "enter_worktree" not in inherited_names
+    assert "exit_worktree" not in inherited_names
     assert "task_tool" not in inherited_names
     assert "send_file_to_user" not in inherited_names
 

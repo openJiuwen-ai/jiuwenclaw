@@ -18,7 +18,7 @@ from openjiuwen.agent_teams.monitor import TeamStreamLogger
 from openjiuwen.core.runner import Runner
 from openjiuwen.harness import DeepAgent
 
-from jiuwenswarm.agents.harness.team import get_team_manager
+from jiuwenswarm.agents.harness.team import TeamManager, get_team_manager
 from jiuwenswarm.common.cron_team_completion import (
     _cron_solo_harness_end_pending,
     _drain_cron_delegation_grace_events,
@@ -216,14 +216,14 @@ def _normalize_team_query(query: Any, *, channel_id: str | None, language: str) 
     return query
 
 
-async def _team_session_has_runtime(team_manager: Any, session_id: str) -> bool:
+async def _team_session_has_runtime(team_manager: TeamManager, session_id: str) -> bool:
     # Keep ordinary team first-request detection scoped to claw-local
     # live markers only. Resumable Runner-pool entries are reserved for
     # InteractiveInput recovery and must not make a fresh text request
     # look like a follow-up after the previous round has ended.
     return (
-        getattr(team_manager, "active_session_id", None) == session_id
-        or getattr(team_manager, "pending_session_id", None) == session_id
+        team_manager.is_runtime_active(session_id)
+        or team_manager.is_runtime_pending(session_id)
         or bool(team_manager.has_stream_task(session_id))
     )
 
@@ -565,6 +565,66 @@ def _approval_chunk_from_event(evt: Any) -> dict[str, Any] | None:
     return parsed
 
 
+async def _broadcast_team_state_snapshot(
+    channel_id: str | None,
+    session_id: str,
+) -> None:
+    """Broadcast a snapshot of all member and task states.
+
+    Called before ``team.completed`` so the frontend receives the final
+    state (e.g. members transitioning from "busy" to "ready") even when
+    the monitor events arrive after the has_stream_task loop exits.
+
+    Each snapshot event is also persisted via ``_persist_team_history_event``,
+    mirroring the behaviour of ``_consume_monitor_events``.
+    """
+    try:
+        team_manager = get_team_manager(channel_id)
+        monitor_handler = team_manager.get_monitor_handler(session_id)
+        if monitor_handler is None:
+            return
+        snapshot = await monitor_handler.get_team_snapshot()
+        if snapshot is None:
+            return
+        team_id = snapshot.get("team_id", "")
+
+        # Broadcast member status snapshot
+        for m in snapshot.get("members", []):
+            event = {
+                "event_type": "team.member",
+                "session_id": session_id,
+                "event": {
+                    "type": "team.member.status_changed",
+                    "team_id": team_id,
+                    "member_id": m["member_id"],
+                    "new_status": m["status"],
+                },
+            }
+            _persist_team_history_event(channel_id, session_id, event)
+            _broadcast_event(channel_id, session_id, event)
+
+        # Broadcast task status snapshot
+        for t in snapshot.get("tasks", []):
+            event = {
+                "event_type": "team.task",
+                "session_id": session_id,
+                "event": {
+                    "type": "team.task.status_snapshot",
+                    "team_id": team_id,
+                    "task_id": t["task_id"],
+                    "status": t["status"],
+                    "assignee": t.get("assignee"),
+                },
+            }
+            _persist_team_history_event(channel_id, session_id, event)
+            _broadcast_event(channel_id, session_id, event)
+    except Exception:
+        logger.debug(
+            "[TeamHelpers] failed to broadcast team state snapshot: session_id=%s",
+            session_id,
+        )
+
+
 def _approval_result_from_event_or_items(
     *,
     skill_name: str,
@@ -704,15 +764,18 @@ def ensure_team_evolution_watcher(
 
     rail = tm.get_team_skill_rail(session_id)
     if rail is None:
+        mark_deferred = getattr(tm, "mark_team_evolution_watcher_deferred", None)
+        if callable(mark_deferred):
+            mark_deferred(session_id)
         logger.warning(
             "[TeamHelpers] no TeamSkillEvolutionRail found, evolution watcher launch deferred: session_id=%s source=%s",
             session_id,
             source,
         )
         return
-    if not getattr(rail, "auto_scan", True):
+    if not getattr(rail, "auto_scan", True) and not getattr(rail, "completion_followup_enabled", False):
         logger.info(
-            "[TeamHelpers] evolution monitor skipped because auto_scan is disabled: "
+            "[TeamHelpers] evolution monitor skipped because team evolution is disabled: "
             "channel_id=%s session_id=%s source=%s",
             channel_id,
             session_id,
@@ -1191,6 +1254,42 @@ async def process_team_message_stream(
                         if not team_manager.has_stream_task(session_id):
                             break
                         continue
+                # Drain any events that were enqueued by
+                # _consume_stream_with_query but not yet read when the
+                # has_stream_task loop exited.  This can happen when
+                # _consume_stream_with_query's finally block calls
+                # pop_stream_task (making has_stream_task return False)
+                # in the same async frame that it broadcast
+                # chat.processing_status / team.completed into
+                # request_queue.  Without this drain, those events would
+                # be lost and the frontend would never receive
+                # is_complete=True.
+                if request_queue is not None:
+                    drained = 0
+                    while True:
+                        try:
+                            event = request_queue.get_nowait()
+                        except asyncio.QueueEmpty:
+                            break
+                        drained += 1
+                        yield AgentResponseChunk(
+                            request_id=rid,
+                            channel_id=channel_id,
+                            payload=event,
+                            is_complete=False,
+                        )
+                        if isinstance(event, dict):
+                            if event.get("event_type") == "team.error":
+                                break
+                    if drained:
+                        logger.info(
+                            "[TeamHelpers] drained remaining events after has_stream_task loop: "
+                            "channel_id=%s session_id=%s request_id=%s drained=%s",
+                            _resolve_channel_id(channel_id),
+                            session_id,
+                            rid,
+                            drained,
+                        )
         except asyncio.CancelledError:
             logger.info(
                 "[TeamHelpers] event stream cancelled: channel_id=%s session_id=%s request_id=%s",
@@ -1416,6 +1515,10 @@ async def _consume_stream_with_query(
         # adapter's _wait_for_cron_team_round_events and the cron scheduler's
         # own round_state) can finalise even when the team stream ended
         # without producing workflow.updated/chat.final/team.completed events.
+        # Before broadcasting team.completed, broadcast a snapshot of all
+        # member and task statuses so the frontend receives the final state
+        # even when monitor events arrive after the has_stream_task loop exits.
+        await _broadcast_team_state_snapshot(channel_id, session_id)
         try:
             _broadcast_event(
                 channel_id,

@@ -59,7 +59,21 @@ function formatElapsed(ms: number | undefined): string {
   return minutes > 0 ? `${minutes}m ${seconds}s` : `${seconds}s`;
 }
 
-function renderRunningStatus(animationPhase: number, elapsedMs: number | undefined): string {
+function formatTokenCount(tokens: number): string {
+  if (!Number.isFinite(tokens) || tokens < 0) {
+    return "0";
+  }
+  if (tokens < 1000) {
+    return Math.floor(tokens).toLocaleString("en-US");
+  }
+  return `${(tokens / 1000).toFixed(1).replace(/\.0$/, "")}k`;
+}
+
+function renderRunningStatus(
+  animationPhase: number,
+  elapsedMs: number | undefined,
+  usage: AppSnapshot["currentQueryUsage"],
+): string {
   const label = "Working";
   const sweep = animationPhase % (label.length + 3);
   const focus = sweep - 1;
@@ -72,7 +86,11 @@ function renderRunningStatus(animationPhase: number, elapsedMs: number | undefin
       return palette.text.subtle(char);
     })
     .join("");
-  return `• ${animatedLabel} (${formatElapsed(elapsedMs)} • esc to interrupt)`;
+  const totalTokens =
+    usage.total_tokens > 0 ? usage.total_tokens : usage.input_tokens + usage.output_tokens;
+  const tokenStatus =
+    totalTokens > 0 ? ` • ${formatTokenCount(totalTokens)} tokens` : "";
+  return `• ${animatedLabel} (${formatElapsed(elapsedMs)}${tokenStatus} • esc to interrupt)`;
 }
 
 function renderInterruptedStatus(): string {
@@ -139,7 +157,11 @@ function buildStatusLines(
             ? renderReconnectingStatus(runningElapsedMs)
             : snapshot.streamStalled
               ? renderNetworkOfflineStatus(snapshot.streamIdleMs, runningElapsedMs)
-              : renderRunningStatus(animationPhase, runningElapsedMs)
+              : renderRunningStatus(
+                  animationPhase,
+                  runningElapsedMs,
+                  snapshot.currentQueryUsage,
+                )
           : null;
 
   const lines = transientNotice ? [padToWidth(palette.status.warning(transientNotice), width)] : [];
@@ -179,6 +201,35 @@ function buildStatusLineBar(snapshot: AppSnapshot, width: number): string[] {
     const inner = padToWidth(palette.text.dim(truncated), paddedWidth);
     return " ".repeat(paddingX) + inner + " ".repeat(paddingX);
   });
+}
+
+function renderBtwOverlay(
+  overlay: { question: string; answer: string },
+  width: number,
+): string[] {
+  const lines: string[] = [];
+  const safeWidth = Math.max(1, width);
+  // 确保与其他固定区块有视觉分隔
+  lines.push(" ".repeat(safeWidth));
+
+  // 标题行: 💡 /btw <question>
+  const headerText = `💡 /btw ${overlay.question}`;
+  lines.push(padToWidth(palette.text.accent(headerText), safeWidth));
+
+  // 分隔线
+  lines.push(padToWidth(palette.text.dim("─".repeat(Math.min(safeWidth, 80))), safeWidth));
+
+  // 回答内容：完整展示，不折叠（btw 本身是单轮简短回答，不会过长）
+  const answerLines = overlay.answer.split("\n");
+  for (const line of answerLines) {
+    lines.push(padToWidth(palette.text.secondary(line), safeWidth));
+  }
+
+  // 提示行: Esc to dismiss
+  lines.push(padToWidth(palette.text.dim("Esc to dismiss"), safeWidth));
+  lines.push(" ".repeat(safeWidth));
+
+  return lines;
 }
 
 function buildShortcutLines(width: number): string[] {
@@ -259,6 +310,9 @@ export function buildAppScreenLines(snapshot: AppSnapshot, options: ScreenLayout
           options.width,
         )
       : [];
+  const btwOverlayLines =
+    snapshot.btwOverlay ? renderBtwOverlay(snapshot.btwOverlay, options.width) : [];
+
   const fixedLines = [
     ...todoLines,
     ...(todoLines.length > 0 &&
@@ -269,6 +323,7 @@ export function buildAppScreenLines(snapshot: AppSnapshot, options: ScreenLayout
     ...miniTeamTreeLines,
     ...teamPanelLines,
     ...options.questionLines,
+    ...btwOverlayLines,
     ...options.editorLines,
     ...options.composerPreviewLines,
     ...statusLineBarLines,

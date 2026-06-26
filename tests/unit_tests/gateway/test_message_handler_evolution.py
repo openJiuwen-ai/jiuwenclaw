@@ -382,8 +382,10 @@ async def test_handle_evolution_chunk_auto_accepts_replaced_regular_call_with_me
     assert handler.pending_evolution_approval("sess-1") == "skill_evolve_new"
     auto_msg = handler.pop_user_message_nowait()
     assert auto_msg.params["request_id"] == "call_123"
-    assert auto_msg.params["approval_schema"] == _APPROVAL_SCHEMA
-    assert auto_msg.params["evolution_meta"] == _interrupt_approval_meta()
+    assert auto_msg.params["source"] == "evolution_interrupt"
+    assert auto_msg.params["approval_kind"] == "evolve"
+    assert "approval_schema" not in auto_msg.params
+    assert "evolution_meta" not in auto_msg.params
     assert auto_msg.metadata == {"k": "v"}
 
 

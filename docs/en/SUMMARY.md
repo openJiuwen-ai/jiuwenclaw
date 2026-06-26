@@ -12,6 +12,7 @@
 - [Multi-Instance](MultiInstance.md)
 - [Auto Harness Feature Overview](AutoHarness.md)
 - [User guide](README.md)
+  - [Conversation](Conversation.md)
   - [Channels](Channels.md)
     - [Discord](Discord.md)
     - [WhatsApp](WhatsApp.md)

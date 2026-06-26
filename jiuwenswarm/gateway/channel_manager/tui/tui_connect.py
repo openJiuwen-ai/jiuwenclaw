@@ -1840,9 +1840,7 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
 
     async def _session_preview(ws, req_id, params, session_id):
         """获取 session 预览信息，包括最新几条完整对话内容。"""
-        import json
-        from pathlib import Path
-        from jiuwenswarm.common.utils import get_agent_sessions_dir
+        from jiuwenswarm.server.runtime.session.session_history import load_history_records
 
         if not isinstance(params, dict):
             await channel.send_response(
@@ -1864,57 +1862,55 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
         elif isinstance(raw_count, str) and raw_count.strip().isdigit():
             preview_count = max(1, min(int(raw_count.strip()), 100))
 
-        # 读取 history.json
-        history_path: Path = get_agent_sessions_dir() / target / "history.json"
+        # 读取历史记录（自动兼容 history.json 和 history.jsonl）
         preview_messages = []
-        if history_path.exists():
-            try:
-                raw = json.loads(history_path.read_text(encoding="utf-8"))
-                if isinstance(raw, list):
-                    # history.json 的写入很宽松：interface.py 中所有 event_type 以 "chat." 开头
-                    # 的记录（外加 team.message）都会以 role="assistant" 落盘，因此历史里混有大量
-                    # 非对话内容。预览只需展示真正代表"对话"的两类，用白名单显式放行：
-                    #   - chat.final ：assistant 的完整最终回复（单人模式与团队成员回复都用它）
-                    #   - team.message：团队消息
-                    # 刻意排除（均非完整对话文本，纳入会造成碎片化/重复/噪声）：
-                    #   - chat.delta（流式增量片段，内容已包含在 chat.final 中）
-                    #   - chat.reasoning（思考过程）/ chat.tool_call / chat.tool_update / chat.tool_result
-                    #   - chat.error / chat.processing_status / chat.usage_* / chat.media / chat.file 等
-                    # 注：用白名单而非黑名单，是为了让将来新增的 chat.* 状态类型不会意外混入预览。
-                    _chat_event_types = frozenset({
-                        "chat.final",  # assistant 最终回复
-                        "team.message",  # team 消息
-                    })
+        try:
+            raw = load_history_records(target)
+            if isinstance(raw, list):
+                # history.json 的写入很宽松：interface.py 中所有 event_type 以 "chat." 开头
+                # 的记录（外加 team.message）都会以 role="assistant" 落盘，因此历史里混有大量
+                # 非对话内容。预览只需展示真正代表"对话"的两类，用白名单显式放行：
+                #   - chat.final ：assistant 的完整最终回复（单人模式与团队成员回复都用它）
+                #   - team.message：团队消息
+                # 刻意排除（均非完整对话文本，纳入会造成碎片化/重复/噪声）：
+                #   - chat.delta（流式增量片段，内容已包含在 chat.final 中）
+                #   - chat.reasoning（思考过程）/ chat.tool_call / chat.tool_update / chat.tool_result
+                #   - chat.error / chat.processing_status / chat.usage_* / chat.media / chat.file 等
+                # 注：用白名单而非黑名单，是为了让将来新增的 chat.* 状态类型不会意外混入预览。
+                _chat_event_types = frozenset({
+                    "chat.final",  # assistant 最终回复
+                    "team.message",  # team 消息
+                })
 
-                    def _is_previewable(item):
-                        if not isinstance(item, dict):
-                            return False
-                        role = item.get("role")
-                        content = item.get("content")
-                        has_content = isinstance(content, str) and bool(content.strip())
-                        if role == "user":
-                            return has_content
-                        # 非 user 记录只放行白名单内的对话类型（不依赖 role，
-                        # 以兼容团队成员回复可能带 teammate 等非 assistant role 的情况）
-                        event_type = item.get("event_type")
-                        if event_type in _chat_event_types:
-                            return has_content
+                def _is_previewable(item):
+                    if not isinstance(item, dict):
                         return False
+                    role = item.get("role")
+                    content = item.get("content")
+                    has_content = isinstance(content, str) and bool(content.strip())
+                    if role == "user":
+                        return has_content
+                    # 非 user 记录只放行白名单内的对话类型（不依赖 role，
+                    # 以兼容团队成员回复可能带 teammate 等非 assistant role 的情况）
+                    event_type = item.get("event_type")
+                    if event_type in _chat_event_types:
+                        return has_content
+                    return False
 
-                    previewable = [item for item in raw if _is_previewable(item)]
-                    # 取时间顺序下最新的 N 条（保持原顺序：旧的在上、新的在下）
-                    recent = previewable[-preview_count:]
-                    for msg in recent:
-                        role = msg.get("role", "unknown")
-                        content = msg.get("content", "")
-                        event_type = msg.get("event_type", "")
-                        preview_messages.append({
-                            "role": role,
-                            "content": content if isinstance(content, str) else "",
-                            "event_type": event_type,
-                        })
-            except Exception as exc:
-                logger.warning("[session.preview] read history failed: %s", exc)
+                previewable = [item for item in raw if _is_previewable(item)]
+                # 取时间顺序下最新的 N 条（保持原顺序：旧的在上、新的在下）
+                recent = previewable[-preview_count:]
+                for msg in recent:
+                    role = msg.get("role", "unknown")
+                    content = msg.get("content", "")
+                    event_type = msg.get("event_type", "")
+                    preview_messages.append({
+                        "role": role,
+                        "content": content if isinstance(content, str) else "",
+                        "event_type": event_type,
+                    })
+        except Exception as exc:
+            logger.warning("[session.preview] read history failed: %s", exc)
 
         await channel.send_response(
             ws, req_id, ok=True,
@@ -1975,6 +1971,28 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
             )
             return
 
+        async def _reload_model_config_background(config_payload: dict[str, Any], label: str) -> None:
+            _reload_env = e2a_from_agent_fields(
+                request_id=req_id,
+                channel_id="cli",
+                session_id=session_id,
+                req_method=ReqMethod.AGENT_RELOAD_CONFIG,
+                params={"config": config_payload, "env": {}},
+                is_stream=False,
+                timestamp=time.time(),
+            )
+            try:
+                await real_client.send_request(_reload_env)
+            except Exception as _e_reload:
+                logger.warning("[cli command.model] %s AGENT_RELOAD_CONFIG failed: %s", label, _e_reload)
+            if on_config_saved:
+                try:
+                    _cb = on_config_saved(set(), env_updates={}, config_payload=config_payload)
+                    if inspect.isawaitable(_cb):
+                        await _cb
+                except Exception as _e_saved:
+                    logger.warning("[cli command.model] %s on_config_saved failed: %s", label, _e_saved)
+
         if action == "add_model":
             target = str(params.get("target", "")).strip()
             configs = params.get("config", {})
@@ -1984,9 +2002,16 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
                 )
                 return
             client_cfg = {}
+            model_config_obj = configs.get("model_config_obj", {})
+            if not isinstance(model_config_obj, dict):
+                model_config_obj = {}
             key_map = {
                 "model": "model_name",
+                "model_name": "model_name",
                 "provider": "client_provider",
+                "model_provider": "client_provider",
+                "client_provider": "client_provider",
+                "reasoning_level": "reasoning_level",
                 "api_key": "api_key",
                 "key": "api_key",
                 "api_base": "api_base",
@@ -2001,19 +2026,40 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
             if "=" in target:
                 _eq = target.index("=")
                 _k, _v = target[:_eq].strip().lower(), target[_eq + 1:].strip()
-                client_cfg[key_map.get(_k, _k)] = _v
+                _mapped_target_key = key_map.get(_k, _k)
+                if _mapped_target_key == "reasoning_level":
+                    if _v:
+                        model_config_obj["reasoning_level"] = _v
+                else:
+                    client_cfg[_mapped_target_key] = _v
                 if _k in ("model", "model_name"):
                     target = _v
             for k, v in configs.items():
-                mapped_k = key_map.get(k.lower(), k)
+                mapped_k = key_map.get(str(k).lower(), str(k))
+                if mapped_k == "model_config_obj":
+                    continue
+                if mapped_k == "reasoning_level":
+                    if str(v).strip():
+                        model_config_obj["reasoning_level"] = str(v).strip()
+                    else:
+                        model_config_obj.pop("reasoning_level", None)
+                    continue
                 client_cfg[mapped_k] = v
             if "verify_ssl" not in client_cfg:
                 client_cfg["verify_ssl"] = False
             if "timeout" not in client_cfg:
                 client_cfg["timeout"] = 1800
-            model_cfg_obj = configs.get("model_config_obj", {})
-            if not model_cfg_obj:
-                model_cfg_obj = {"temperature": 0.95}
+            if "temperature" not in model_config_obj:
+                model_config_obj["temperature"] = 0.95
+            _reasoning_level = str(model_config_obj.get("reasoning_level", "")).strip()
+            if _reasoning_level and _reasoning_level not in {"off", "low", "medium", "high"}:
+                await channel.send_response(
+                    ws,
+                    req_id,
+                    ok=False,
+                    error="reasoning_level must be one of: off, low, medium, high",
+                )
+                return
             # target 作为 model_name 的回退：若未通过 model= 参数指定，则以 target 为准
             if not client_cfg.get("model_name"):
                 client_cfg["model_name"] = target
@@ -2025,7 +2071,7 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
 
             new_entry = {
                 "model_client_config": client_cfg,
-                "model_config_obj": model_cfg_obj,
+                "model_config_obj": model_config_obj,
             }
             new_entry["alias"] = effective_alias
             try:
@@ -2033,7 +2079,7 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
                 _raw_defs = ensure_defaults_list_in_config()
                 # 与web端一致：允许同名 model_name 多条目（不同 api_key/api_base 即为不同配置），
                 # 仅拒绝完全相同的配置重复添加（model_name + api_base + api_key 全部一致）
-                _is_duplicate = False
+                _has_same_config = False
                 _effective_api_base = resolve_env_vars(str(client_cfg.get("api_base", "")))
                 _effective_api_key = resolve_env_vars(str(client_cfg.get("api_key", "")))
                 for _e in _raw_defs:
@@ -2042,14 +2088,12 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
                     _emn = resolve_env_vars(str((_e.get("model_client_config") or {}).get("model_name", "")))
                     _eab = resolve_env_vars(str((_e.get("model_client_config") or {}).get("api_base", "")))
                     _eak = resolve_env_vars(str((_e.get("model_client_config") or {}).get("api_key", "")))
-                    _ea = resolve_env_vars(str(_e.get("alias", ""))) if _e.get("alias") else ""
                     _same_config = _emn == effective_name and _eab == _effective_api_base and _eak == _effective_api_key
-                    _same_alias = _ea and _ea == effective_alias
-                    if _same_config or _same_alias:
-                        _is_duplicate = True
+                    if _same_config:
+                        _has_same_config = True
                         break
                 # 完全重复时拒绝添加
-                if _is_duplicate:
+                if _has_same_config:
                     await channel.send_response(
                         ws, req_id, ok=False,
                         error=f"Model '{effective_name}' with the same api_base and api_key already exists",
@@ -2059,8 +2103,8 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
                 _required = {
                     "api_key": "api_key",
                     "api_base": "api_base",
-                    "model_name": "model_name/model",
-                    "client_provider": "client_provider/provider",
+                    "model_name": "model_name",
+                    "client_provider": "model_provider",
                 }
                 _missing = []
                 for field, display in _required.items():
@@ -2073,7 +2117,7 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
                         f"Required fields missing: {', '.join(_missing)}. "
                         f"Usage: /model add <name> "
                         f"api_base=xxx api_key=xxx "
-                        f"model=<name> provider=<provider>"
+                        f"model=<name> model_provider=<provider>"
                     )
                     await channel.send_response(
                         ws, req_id, ok=False,
@@ -2104,25 +2148,162 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
                 logger.info(
                     "[cli command.model] 新增模型: name=%s, "
                     "client_cfg=%s, model_config_obj=%s",
-                    effective_name, client_cfg, model_cfg_obj,
+                    effective_name, client_cfg, model_config_obj,
                 )
             except Exception as e:
                 await channel.send_response(ws, req_id, ok=False, error=str(e))
                 return
-            _reload_env = e2a_from_agent_fields(
-                request_id=req_id,
-                channel_id="cli",
-                session_id=session_id,
-                req_method=ReqMethod.AGENT_RELOAD_CONFIG,
-                params={},
-                is_stream=False,
-                timestamp=time.time(),
-            )
-            await real_client.send_request(_reload_env)
+            _config_payload = get_config()
+            await _reload_model_config_background(_config_payload, "model.add")
             await channel.send_response(
                 ws, req_id, ok=True,
                 payload={"type": "model_added", "name": target},
             )
+            return
+
+        if action == "update_model":
+            configs = params.get("config", {})
+            if not isinstance(configs, dict):
+                await channel.send_response(ws, req_id, ok=False, error="config must be object")
+                return
+            try:
+                _idx = int(model_index)
+            except (ValueError, TypeError):
+                await channel.send_response(ws, req_id, ok=False, error="index is required")
+                return
+            _raw_defs = ensure_defaults_list_in_config()
+            if _idx < 0 or _idx >= len(_raw_defs) or not isinstance(_raw_defs[_idx], dict):
+                await channel.send_response(ws, req_id, ok=False, error="model index not found")
+                return
+
+            _entry = _raw_defs[_idx]
+            _client_cfg = _entry.get("model_client_config")
+            if not isinstance(_client_cfg, dict):
+                _client_cfg = {}
+                _entry["model_client_config"] = _client_cfg
+            key_map = {
+                "model": "model_name",
+                "model_name": "model_name",
+                "provider": "client_provider",
+                "model_provider": "client_provider",
+                "client_provider": "client_provider",
+                "reasoning_level": "reasoning_level",
+                "api_key": "api_key",
+                "key": "api_key",
+                "api_base": "api_base",
+                "url": "api_base",
+                "base_url": "api_base",
+                "timeout": "timeout",
+                "verify_ssl": "verify_ssl",
+                "ssl_cert": "ssl_cert",
+                "alias": "alias",
+            }
+            _model_cfg_obj = _entry.get("model_config_obj")
+            if not isinstance(_model_cfg_obj, dict):
+                _model_cfg_obj = {}
+                _entry["model_config_obj"] = _model_cfg_obj
+            for k, v in configs.items():
+                mapped_k = key_map.get(str(k).lower(), str(k))
+                if mapped_k == "alias":
+                    _entry["alias"] = str(v).strip()
+                elif mapped_k == "reasoning_level":
+                    _reasoning_level = str(v).strip()
+                    if _reasoning_level:
+                        _model_cfg_obj["reasoning_level"] = _reasoning_level
+                    else:
+                        _model_cfg_obj.pop("reasoning_level", None)
+                elif mapped_k == "model_config_obj":
+                    continue
+                else:
+                    _client_cfg[mapped_k] = v
+            _reasoning_level = str(_model_cfg_obj.get("reasoning_level", "")).strip()
+            if _reasoning_level and _reasoning_level not in {"off", "low", "medium", "high"}:
+                await channel.send_response(
+                    ws,
+                    req_id,
+                    ok=False,
+                    error="reasoning_level must be one of: off, low, medium, high",
+                )
+                return
+            if "verify_ssl" not in _client_cfg:
+                _client_cfg["verify_ssl"] = False
+            if "timeout" not in _client_cfg:
+                _client_cfg["timeout"] = 1800
+
+            _missing_fields = []
+            for _req_field, _display in [
+                ("api_key", "api_key"),
+                ("api_base", "api_base"),
+                ("model_name", "model_name"),
+                ("client_provider", "model_provider"),
+            ]:
+                _val = resolve_env_vars(str(_client_cfg.get(_req_field, "")))
+                if not _val:
+                    _missing_fields.append(_display)
+            if _missing_fields:
+                await channel.send_response(
+                    ws, req_id, ok=False,
+                    error=f"Model missing required config: {', '.join(_missing_fields)}",
+                )
+                return
+
+            _effective_alias = resolve_env_vars(str(_entry.get("alias", ""))) if _entry.get("alias") else ""
+            if _effective_alias:
+                for _other_idx, _other in enumerate(_raw_defs):
+                    if _other_idx == _idx or not isinstance(_other, dict):
+                        continue
+                    _other_mn = resolve_env_vars(str((_other.get("model_client_config") or {}).get("model_name", "")))
+                    _other_alias = resolve_env_vars(str(_other.get("alias", ""))) if _other.get("alias") else ""
+                    if _other_alias == _effective_alias:
+                        await channel.send_response(
+                            ws, req_id, ok=False,
+                            error=f"Alias '{_effective_alias}' is already used by model '{_other_mn}'",
+                        )
+                        return
+                    if _other_mn == _effective_alias:
+                        await channel.send_response(
+                            ws, req_id, ok=False,
+                            error=f"Alias '{_effective_alias}' conflicts with model name '{_other_mn}'",
+                        )
+                        return
+
+            update_default_models_in_config(_raw_defs)
+            _updated_name = resolve_env_vars(str(_client_cfg.get("model_name", "")))
+            _current_name = resolve_env_vars(str((_raw_defs[0].get("model_client_config") or {}).get("model_name", "")))
+            _config_payload = get_config()
+            await _reload_model_config_background(_config_payload, "model.update")
+            await channel.send_response(ws, req_id, ok=True, payload={
+                "type": "model_updated",
+                "name": _updated_name,
+                "index": _idx,
+                "current": _current_name,
+            })
+            return
+
+        if action == "delete_model":
+            try:
+                _idx = int(model_index)
+            except (ValueError, TypeError):
+                await channel.send_response(ws, req_id, ok=False, error="index is required")
+                return
+            _raw_defs = ensure_defaults_list_in_config()
+            if len(_raw_defs) <= 1:
+                await channel.send_response(ws, req_id, ok=False, error="Cannot delete the last model")
+                return
+            if _idx < 0 or _idx >= len(_raw_defs) or not isinstance(_raw_defs[_idx], dict):
+                await channel.send_response(ws, req_id, ok=False, error="model index not found")
+                return
+            _removed = _raw_defs.pop(_idx)
+            update_default_models_in_config(_raw_defs)
+            _removed_name = resolve_env_vars(str((_removed.get("model_client_config") or {}).get("model_name", "")))
+            _current_name = resolve_env_vars(str((_raw_defs[0].get("model_client_config") or {}).get("model_name", "")))
+            _config_payload = get_config()
+            await _reload_model_config_background(_config_payload, "model.delete")
+            await channel.send_response(ws, req_id, ok=True, payload={
+                "type": "model_deleted",
+                "name": _removed_name,
+                "current": _current_name,
+            })
             return
 
         if not model_name or not str(model_name).strip():
@@ -2149,10 +2330,25 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
                     {
                         "name": resolve_env_vars(str(e.get("alias", ""))) or
                                 resolve_env_vars(str((e.get("model_client_config") or {}).get("model_name", ""))),
+                        "alias": resolve_env_vars(str(e.get("alias", ""))) if e.get("alias") else "",
                         "model_name": resolve_env_vars(str((e.get("model_client_config") or {}).get("model_name", ""))),
+                        "model_provider": resolve_env_vars(
+                            str((e.get("model_client_config") or {}).get("client_provider", ""))),
                         "api_base": resolve_env_vars(str((e.get("model_client_config") or {}).get("api_base", ""))),
+                        "reasoning_level": resolve_env_vars(
+                            str((e.get("model_config_obj") or {}).get("reasoning_level", ""))),
+                        "api_key_prefix": (
+                            resolve_env_vars(
+                                str((e.get("model_client_config") or {}).get("api_key", ""))
+                            )[:8]
+                            if resolve_env_vars(
+                                str((e.get("model_client_config") or {}).get("api_key", ""))
+                            )
+                            else ""
+                        ),
+                        "is_current": i == 0,
                     }
-                    for e in _defs if isinstance(e, dict)
+                    for i, e in enumerate(_defs) if isinstance(e, dict)
                 ]
             else:
                 payload["current"] = os.getenv("MODEL_NAME", "unknown")
@@ -2160,7 +2356,7 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
             return
 
         target = str(model_name).strip()
-        logger.info("[cli command.model] 切换模型: target=%s", target)
+        logger.info("[cli command.model] 切换模型: target=%s, model_index=%s, params=%s", target, model_index, params)
         _raw_defs_check = (get_config_raw().get("models") or {}).get("defaults") or []
         _valid_names: set[str] = set()
         for _e in _raw_defs_check:
@@ -2250,6 +2446,17 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
                 error=f"Model '{target}' missing required config: {', '.join(_missing_fields)}",
             )
             return
+        # 切换后确保目标条目 is_default=True，清除其他同名模型的 is_default
+        # AgentServer 用 is_default=True 确定默认模型，defaults[0] 位置不够——同名模型
+        # 需靠 is_default 标记来区分哪个是当前激活的
+        _target_model_name_resolved = resolve_env_vars(str(_target_mcc.get("model_name", "")))
+        _target_entry["is_default"] = True
+        for _e in _other_entries:
+            if isinstance(_e, dict):
+                _other_mcc = _e.get("model_client_config") or {}
+                _other_name = resolve_env_vars(str(_other_mcc.get("model_name", "")))
+                if _other_name == _target_model_name_resolved and _e.get("is_default") is True:
+                    _e["is_default"] = False
         update_default_models_in_config([_target_entry] + _other_entries)
         logger.info("[cli command.model] 切换，已更新 models.defaults 首位: %s", target)
         _target_model_name = resolve_env_vars(
@@ -2265,13 +2472,15 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
         })
 
         # 后台触发 AgentServer reload + on_config_saved（不阻塞 WS 消息循环）
+        _config_payload = get_config()
+
         async def _model_switch_background():
             _reload_env = e2a_from_agent_fields(
                 request_id=req_id,
                 channel_id="cli",
                 session_id=session_id,
                 req_method=ReqMethod.AGENT_RELOAD_CONFIG,
-                params={},
+                params={"config": _config_payload, "env": {}},
                 is_stream=False,
                 timestamp=time.time(),
             )
@@ -2281,7 +2490,7 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
                 logger.warning("[cli model.switch] AGENT_RELOAD_CONFIG failed: %s", _e_reload)
             if on_config_saved:
                 try:
-                    _cb = on_config_saved(set(), env_updates={}, config_payload=get_config())
+                    _cb = on_config_saved(set(), env_updates={}, config_payload=_config_payload)
                     if inspect.isawaitable(_cb):
                         await _cb
                 except Exception as _e2:
@@ -2313,6 +2522,7 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
                     "api_key": mcc.get("api_key", ""),
                     "model_provider": mcc.get("client_provider", ""),
                     "temperature": mco.get("temperature", 0.95),
+                    "reasoning_level": "off" if mco.get("reasoning_level") is False else mco.get("reasoning_level", ""),
                     "alias": entry.get("alias", ""),
                     "context_window_tokens": context_window_tokens,
                 })

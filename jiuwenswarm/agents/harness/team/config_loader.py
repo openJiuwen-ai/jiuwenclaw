@@ -253,6 +253,19 @@ def _build_agents_config(
             completion_timeout=completion_timeout,
         )
 
+    if set(agents.keys()) == {"leader"}:
+        logger.info(
+            "[TeamConfigLoader] agents config contains only leader; "
+            "adding default teammate template"
+        )
+        agents["teammate"] = _build_agent_spec_dict(
+            {},
+            default_model=default_model,
+            default_workspace=default_workspace,
+            max_iterations=max_iterations,
+            completion_timeout=completion_timeout,
+        )
+
     return agents
 
 

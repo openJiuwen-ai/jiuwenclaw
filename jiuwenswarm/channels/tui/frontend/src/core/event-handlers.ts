@@ -154,6 +154,8 @@ export interface AppEventDelegate {
   tryAutoRestoreAfterCancel(): Promise<void>;
   /** 累加 chat.usage_summary 事件的 token/cost 数据（按 model 分桶）。 */
   appendUsageSummary(usage: Record<string, unknown>, model?: string): void;
+  /** 累计 chat.usage_metadata 事件中已完成 model call 的 provider token 用量。 */
+  appendUsageMetadata(usage: Record<string, unknown>): void;
   /** 回合结束时记录执行耗时条目到对话区。 */
   addWorkedForEntry(): void;
   /** Set harness extension ready info (for file tree display) */
@@ -1317,6 +1319,19 @@ export function handleIncomingFrame(delegate: AppEventDelegate, frame: EventFram
 
     case "workflow.updated":
       return handleWorkflowUpdated(delegate, payload);
+
+    case "chat.usage_metadata": {
+      const metadata =
+        typeof payload.metadata === "object" && payload.metadata !== null
+          ? (payload.metadata as Record<string, unknown>)
+          : {};
+      const usage =
+        typeof metadata.usage_metadata === "object" && metadata.usage_metadata !== null
+          ? (metadata.usage_metadata as Record<string, unknown>)
+          : {};
+      delegate.appendUsageMetadata(usage);
+      return true;
+    }
 
     case "chat.usage_summary":
       delegate.appendUsageSummary(

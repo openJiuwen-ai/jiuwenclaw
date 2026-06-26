@@ -39,6 +39,7 @@ import { addCommandEcho, addError, addInfo } from "../core/commands/helpers.js";
 import { CheckboxList, CheckboxGroup as CheckboxGroupType } from "./components/checkbox-list.js";
 import type { FileAttachment } from "../core/protocol.js";
 import {
+  type ModelMeta,
   type ModelListPayload,
   isReservedMultimodalModelKey,
 } from "../core/commands/builtins/model.js";
@@ -199,11 +200,37 @@ type PreviewMessage = {
   event_type: string;
 };
 
+type ModelFormField = "model_name" | "alias" | "api_base" | "api_key" | "model_provider" | "reasoning_level";
+
+type ModelFormState = {
+  fields: Record<ModelFormField, string>;
+  selectedField: number;
+  original: Record<ModelFormField, string>;
+};
+
 type ModelListState = {
-  list: SelectList;
+  phase: "list" | "input" | "delete_confirm";
+  list: SelectList | null;
   models: string[];
   current: string;
+  modelsMeta: ModelMeta[];
+  emptyMessage?: string;
+  inputMode?: "add" | "edit";
+  target?: { name: string; index: number };
+  form?: ModelFormState;
+  inputError?: string;
 };
+
+const MODEL_VALUE_SEPARATOR = "\x00";
+const MODEL_FORM_FIELDS: ModelFormField[] = ["model_name", "alias", "api_base", "api_key", "model_provider", "reasoning_level"];
+const MODEL_REQUIRED_FIELDS: ModelFormField[] = ["model_name", "api_base", "api_key", "model_provider"];
+const DEFAULT_MODEL_PROVIDER = "OpenAI";
+const MODEL_PROVIDER_OPTIONS = ["OpenAI", "OpenRouter", "DashScope", "SiliconFlow", "InferenceAffinity", "DeepSeek"];
+const REASONING_LEVEL_OPTIONS = ["", "off", "low", "medium", "high"];
+const MAX_MODEL_NAME_LENGTH = 100;
+const MAX_ALIAS_LENGTH = 100;
+const MAX_API_BASE_LENGTH = 100;
+const MAX_API_KEY_LENGTH = 500;
 
 type ToolSelectorState = {
   list: CheckboxList;
@@ -1773,6 +1800,20 @@ export class AppScreen implements Component, Focusable {
 
     const isCancelWorkKey = !hasOverlay && resolveAction("Global", data) === "app:cancelWork";
 
+    // BTW 浮层优先消费 Esc（不干扰主会话）
+    // 只要 btw 浮层弹窗存在（可见、加载中、正在输出），按一次 Esc 只关闭/终止 btw 旁路
+    if (!pendingQuestion && isCancelWorkKey && snapshot.btwActive) {
+      // 关闭 BTW overlay（如果可见）
+      if (snapshot.btwOverlay) {
+        this.state.clearBtwOverlay();
+      }
+      // 取消正在进行的 BTW WS 请求（加载中状态），不影响主会话
+      this.state.requestLocalInterrupt();
+      this.state.setBtwActive(false);
+      this.tui.requestRender();
+      return;
+    }
+
     if (!pendingQuestion && snapshot.cancellableWork && isCancelWorkKey) {
       if (isTeamMode(snapshot.mode)) {
         this.state.pause();
@@ -1795,6 +1836,23 @@ export class AppScreen implements Component, Focusable {
       }, 3500);
       this.tui.requestRender();
       return;
+    }
+
+    // ESC 关闭 /btw overlay（独立于 transcript 的覆盖层）
+    if (!pendingQuestion && !hasOverlay && !snapshot.cancellableWork && isCancelWorkKey) {
+      if (snapshot.btwOverlay) {
+        this.state.clearBtwOverlay();
+        this.tui.requestRender();
+        return;
+      }
+    }
+
+    // ESC 关闭 help 视图（只读，无输入栏）
+    if (!pendingQuestion && !hasOverlay && !snapshot.cancellableWork && isCancelWorkKey) {
+      if (this.state.dismissHelp()) {
+        this.tui.requestRender();
+        return;
+      }
     }
 
     if (this.startupPromptList !== null && matchesKey(data, "ctrl+c")) {
@@ -2109,7 +2167,7 @@ export class AppScreen implements Component, Focusable {
     }
 
     if (!snapshot.pendingQuestion && this.modelList !== null) {
-      this.modelList.list.handleInput(data);
+      this.handleModelListInput(data);
       this.tui.requestRender();
       return;
     }
@@ -2195,6 +2253,10 @@ export class AppScreen implements Component, Focusable {
       }
     }
 
+    if (!snapshot.pendingQuestion && this.state.isHelpVisible()) {
+      return;
+    }
+
     // Detect pasted file paths (drag-and-drop) in the terminal
     // When files are dragged in, they arrive as a pasted string.
     // Windows/PowerShell may not send bracketed paste markers,
@@ -2248,12 +2310,15 @@ export class AppScreen implements Component, Focusable {
     // search_list/select_value phase: no text input needed in the main editor.
     // The resume picker has its own search input, so hide the main editor while it is
     // open to avoid a misleading second input bar (restored on Esc). Mirrors Claude Code.
+    // /help is read-only transcript content — hide the composer until Esc dismisses it.
     const isConfigEditorActive = this.configEditorState !== null;
     const hideEditorForInlinePlanReject = this.isEditingInlinePlanReject(snapshot);
     const hideMainEditor =
       isConfigEditorActive ||
       hideEditorForInlinePlanReject ||
-      this.resumeSessionList !== null;
+      this.resumeSessionList !== null ||
+      this.state.isHelpVisible() ||
+      this.modelList !== null;
     const editorLines = hideMainEditor
       ? []
       : this.applySlashCommandHint(this.editor.render(width), width);
@@ -2355,7 +2420,16 @@ export class AppScreen implements Component, Focusable {
       return;
     }
 
-    const { content, attachments } = this.buildOutgoingMessage(editorText);
+    if (this.modelList !== null) {
+      if (this.modelList.phase === "input") {
+        void this.submitModelInput();
+      } else if (this.modelList.phase === "delete_confirm") {
+        void this.submitModelDelete();
+      }
+      return;
+    }
+
+    const { content, attachments } = this.buildOutgoingMessage(text);
 
     const snapshot = this.state.getSnapshot();
     if (!content && !(snapshot.pendingQuestion && this.otherInputMode)) return;
@@ -2543,6 +2617,20 @@ export class AppScreen implements Component, Focusable {
         this.state.addItem(addCommandEcho(snapshot.sessionId, text));
         // 默认仅列出当前项目的会话；进入后可按 Ctrl+A 查看全部项目
         await this.openResumeSessionList(false);
+        return;
+      }
+      if (/^\/model\s+add\s*$/.test(text)) {
+        this.editor.addToHistory(text);
+        this.editor.setText("");
+        this.state.addItem(addCommandEcho(snapshot.sessionId, text));
+        await this.openModelList("add");
+        return;
+      }
+      if (/^\/model\s+delete\s*$/.test(text)) {
+        this.editor.addToHistory(text);
+        this.editor.setText("");
+        this.state.addItem(addCommandEcho(snapshot.sessionId, text));
+        await this.openModelList("delete");
         return;
       }
       if (/^\/model\s*$/.test(text)) {
@@ -3295,15 +3383,14 @@ export class AppScreen implements Component, Focusable {
     ];
   }
 
-  async openModelList(): Promise<void> {
+  async openModelList(openAction?: "add" | "delete"): Promise<void> {
     const snapshot = this.state.getSnapshot();
     try {
       const payload = await this.state.request<ModelListPayload>("command.model", {});
       const models = payload.available_models ?? [];
       const current = payload.current ?? "unknown";
       if (models.length === 0) {
-        this.modelList = null;
-        this.state.addItem(addInfo(snapshot.sessionId, "No models configured", "m"));
+        this.openEmptyModelList(current, "No models configured");
         return;
       }
 
@@ -3323,20 +3410,23 @@ export class AppScreen implements Component, Focusable {
         );
       }
       if (selectable.length === 0) {
-        this.modelList = null;
-        this.state.addItem(addInfo(snapshot.sessionId, "No switchable models in list", "m"));
+        this.openEmptyModelList(current, "No switchable models");
         return;
       }
 
       const modelsMeta = payload.models ?? [];
-      // 与web端一致：同名模型通过编号区分（如 model_name #1, model_name #2）
-      // 后端 available_models 和 models 位置对齐，用索引匹配而非名称查找
+      // 优先用后端 is_current 标记判断当前模型（同名模型仅靠名字无法区分），
+      // 回退到 name-matching（兼容不带 is_current 的旧后端）
+      const currentIdx = selectableWithOrigIdx.findIndex((entry) => {
+        const meta = modelsMeta[entry.origIdx];
+        return meta?.is_current === true;
+      });
+      const fallbackCurrentIdx = currentIdx < 0 ? selectable.findIndex((m) => m === current) : currentIdx;
       const nameOccurrence: Record<string, number> = {};
-      const currentIdx = selectable.findIndex((m) => m === current);
       const items = selectableWithOrigIdx.map((entry, i) => {
         const m = entry.name;
         const meta = modelsMeta[entry.origIdx];
-        const isCurrent = i === currentIdx;
+        const isCurrent = i === fallbackCurrentIdx;
         const seq = (nameOccurrence[m] ?? 0) + 1;
         nameOccurrence[m] = seq;
         const sameNameTotal = selectable.filter((x) => x === m).length;
@@ -3350,16 +3440,31 @@ export class AppScreen implements Component, Focusable {
         } else {
           displayName = m;
         }
-        const suffix = meta?.api_base && sameNameTotal > 1 ? ` [${meta.api_base}]` : "";
+        // 同名模型显示 api_key_prefix + api_base 作为区分标识
+        const suffixParts: string[] = [];
+        if (sameNameTotal > 1 && meta?.api_key_prefix) {
+          suffixParts.push(`key:${meta.api_key_prefix}…`);
+        }
+        if (sameNameTotal > 1 && meta?.api_base) {
+          suffixParts.push(meta.api_base);
+        }
+        const suffix = suffixParts.length > 0 ? ` [${suffixParts.join(" | ")}]` : "";
+        const provider = meta?.model_provider ? ` · ${meta.model_provider}` : "";
+        const apiBase = meta?.api_base ? ` · ${meta.api_base}` : "";
+        const reasoning = meta?.reasoning_level ? ` · reasoning:${meta.reasoning_level}` : "";
         return {
-          label: `${i + 1}. ${displayName}${suffix}${isCurrent ? " (current)" : ""}`,
-          value: `${m}\x00${entry.origIdx}`,
+          label: `${i + 1}. ${displayName}${isCurrent ? " (current)" : ""}`,
+          description: `${provider}${apiBase}${reasoning}`.replace(/^ · /, ""),
+          value: `${m}${MODEL_VALUE_SEPARATOR}${entry.origIdx}`,
         };
       });
       const list = new SelectList(items, Math.min(Math.max(items.length, 1), 8), selectListTheme, {
         minPrimaryColumnWidth: 24,
         maxPrimaryColumnWidth: 42,
       });
+      if (currentIdx >= 0) {
+        list.setSelectedIndex(currentIdx);
+      }
       list.onSelect = (item) => {
         void this.handleModelSelection(item.value);
       };
@@ -3367,7 +3472,21 @@ export class AppScreen implements Component, Focusable {
         this.modelList = null;
         this.tui.requestRender();
       };
-      this.modelList = { list, models: selectable, current };
+      this.modelList = {
+        phase: "list",
+        list,
+        models: selectable,
+        current,
+        modelsMeta,
+      };
+      if (openAction === "add") {
+        this.openModelInput("add");
+      } else if (openAction === "delete") {
+        const target = this.getSelectedModelTarget();
+        if (target) {
+          this.openModelDeleteConfirm(target);
+        }
+      }
       this.tui.requestRender();
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
@@ -3455,14 +3574,357 @@ export class AppScreen implements Component, Focusable {
     }
   }
 
+  private openEmptyModelList(current: string, emptyMessage: string): void {
+    this.modelList = {
+      phase: "list",
+      list: null,
+      models: [],
+      current,
+      modelsMeta: [],
+      emptyMessage,
+    };
+    this.tui.requestRender();
+  }
+
+  private parseModelValue(modelValue: string): { modelName: string; modelIndex?: number } {
+    const sepIdx = modelValue.indexOf(MODEL_VALUE_SEPARATOR);
+    const modelName = sepIdx >= 0 ? modelValue.substring(0, sepIdx) : modelValue;
+    const modelIndex = sepIdx >= 0 ? parseInt(modelValue.substring(sepIdx + 1), 10) : undefined;
+    return { modelName, modelIndex };
+  }
+
+  private getSelectedModelTarget(): { name: string; index: number; value: string } | null {
+    const selected = this.modelList?.list?.getSelectedItem();
+    if (!selected) return null;
+    const { modelName, modelIndex } = this.parseModelValue(selected.value);
+    if (modelIndex === undefined || isNaN(modelIndex)) return null;
+    return { name: modelName, index: modelIndex, value: selected.value };
+  }
+
+  private createModelForm(mode: "add" | "edit", target?: { index: number }): ModelFormState {
+    const meta = target ? this.modelList?.modelsMeta[target.index] : undefined;
+    const fields: Record<ModelFormField, string> = {
+      model_name: mode === "edit" ? meta?.model_name ?? "" : "",
+      alias: mode === "edit" ? meta?.alias ?? "" : "",
+      api_base: mode === "edit" ? meta?.api_base ?? "" : "",
+      api_key: "",
+      model_provider: mode === "edit"
+        ? meta?.model_provider ?? DEFAULT_MODEL_PROVIDER
+        : DEFAULT_MODEL_PROVIDER,
+      reasoning_level: mode === "edit" ? meta?.reasoning_level ?? "" : "",
+    };
+    return {
+      fields,
+      selectedField: 0,
+      original: { ...fields },
+    };
+  }
+
+  private openModelInput(mode: "add" | "edit", target?: { name: string; index: number }): void {
+    if (!this.modelList) return;
+    this.editor.setText("");
+    this.modelList = {
+      ...this.modelList,
+      phase: "input",
+      inputMode: mode,
+      target,
+      form: this.createModelForm(mode, target),
+    };
+    this.tui.requestRender();
+  }
+
+  private openModelDeleteConfirm(target: { name: string; index: number }): void {
+    if (!this.modelList) return;
+    this.modelList = {
+      ...this.modelList,
+      phase: "delete_confirm",
+      target,
+    };
+    this.tui.requestRender();
+  }
+
+  private returnToModelList(): void {
+    if (!this.modelList) return;
+    this.editor.setText("");
+    this.modelList = {
+      ...this.modelList,
+      phase: "list",
+      inputMode: undefined,
+      target: undefined,
+      form: undefined,
+    };
+    this.tui.requestRender();
+  }
+
+  private handleModelFormInput(data: string): void {
+    const state = this.modelList;
+    const form = state?.form;
+    if (!form) return;
+    state.inputError = undefined;
+    if (matchesKey(data, "up")) {
+      form.selectedField = form.selectedField === 0 ? MODEL_FORM_FIELDS.length - 1 : form.selectedField - 1;
+      return;
+    }
+    if (matchesKey(data, "down") || matchesKey(data, "tab")) {
+      form.selectedField = form.selectedField === MODEL_FORM_FIELDS.length - 1 ? 0 : form.selectedField + 1;
+      return;
+    }
+    const field = MODEL_FORM_FIELDS[form.selectedField];
+    if (field === "reasoning_level" || field === "model_provider") {
+      if (matchesKey(data, "left") || matchesKey(data, "backspace") || matchesKey(data, "delete")) {
+        this.cycleModelFormOption(field, -1);
+        return;
+      }
+      if (matchesKey(data, "right") || matchesKey(data, "space")) {
+        this.cycleModelFormOption(field, 1);
+        return;
+      }
+    }
+    if (matchesKey(data, "backspace") || matchesKey(data, "delete")) {
+      form.fields[field] = form.fields[field].slice(0, -1);
+      return;
+    }
+    if (data === "\x15") {
+      form.fields[field] = "";
+      return;
+    }
+    const printableChar = this.getPrintableChar(data);
+    if (printableChar !== undefined) {
+      form.fields[field] += printableChar;
+    }
+  }
+
+  private cycleModelFormOption(field: "model_provider" | "reasoning_level", direction: -1 | 1): void {
+    const form = this.modelList?.form;
+    if (!form) return;
+    const options = field === "model_provider" ? MODEL_PROVIDER_OPTIONS : REASONING_LEVEL_OPTIONS;
+    const current = form.fields[field].trim();
+    const currentIndex = options.indexOf(current);
+    const nextIndex = currentIndex >= 0
+      ? (currentIndex + direction + options.length) % options.length
+      : 0;
+    form.fields[field] = options[nextIndex];
+  }
+
+  private modelFormConfigForSubmit(state: ModelListState): Record<string, string> {
+    const form = state.form;
+    if (!form) return {};
+    const config: Record<string, string> = {};
+    for (const field of MODEL_FORM_FIELDS) {
+      const value = form.fields[field].trim();
+      const configKey = field === "model_provider" ? "provider" : field;
+      if (state.inputMode === "edit") {
+        if (field === "api_key") {
+          if (value) config[configKey] = value;
+          continue;
+        }
+        if (field === "alias") {
+          if (value !== form.original[field]) config[configKey] = value;
+          continue;
+        }
+        if (value !== form.original[field]) config[configKey] = value;
+      } else if (value) {
+        config[configKey] = value;
+      }
+    }
+    return config;
+  }
+
+  private handleModelListInput(data: string): void {
+    if (!this.modelList) return;
+    if (this.modelList.phase === "input") {
+      if (matchesKey(data, "escape")) {
+        this.returnToModelList();
+        return;
+      }
+      if (matchesKey(data, "return")) {
+        void this.submitModelInput();
+        return;
+      }
+      this.handleModelFormInput(data);
+      return;
+    }
+    if (this.modelList.phase === "delete_confirm") {
+      if (matchesKey(data, "escape")) {
+        this.returnToModelList();
+        return;
+      }
+      if (matchesKey(data, "return")) {
+        void this.submitModelDelete();
+      }
+      return;
+    }
+
+    const lower = data.toLowerCase();
+    if (matchesKey(data, "escape")) {
+      this.modelList = null;
+      return;
+    }
+    if (lower === "a") {
+      this.openModelInput("add");
+      return;
+    }
+    if (matchesKey(data, "return")) {
+      const target = this.getSelectedModelTarget();
+      if (target) {
+        void this.handleModelSelection(target.value);
+      }
+      return;
+    }
+    if (lower === "e") {
+      const target = this.getSelectedModelTarget();
+      if (target) {
+        this.openModelInput("edit", target);
+      }
+      return;
+    }
+    if (lower === "d") {
+      const target = this.getSelectedModelTarget();
+      if (target) {
+        this.openModelDeleteConfirm(target);
+      }
+      return;
+    }
+    this.modelList.list?.handleInput(data);
+  }
+
+  private async submitModelInput(): Promise<void> {
+    const state = this.modelList;
+    if (!state || state.phase !== "input" || !state.inputMode || !state.form) return;
+    state.inputError = undefined;
+    const config = this.modelFormConfigForSubmit(state);
+    const validationError = this.validateModelForm(state);
+    if (validationError) {
+      state.inputError = validationError;
+      this.tui.requestRender();
+      return;
+    }
+    if (state.inputMode === "add") {
+      try {
+        await this.state.request("command.model", {
+          action: "add_model",
+          target: config.model_name,
+          config,
+        });
+        this.state.addItem(addInfo(this.state.getSnapshot().sessionId, `Added model: ${config.alias || config.model_name}`, "m"));
+        await this.state.refreshModelInfo();
+        this.editor.setText("");
+        await this.openModelList();
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        state.inputError = message.startsWith("Failed to add model")
+          ? message
+          : `Failed to add model: ${message}`;
+        this.tui.requestRender();
+      }
+      return;
+    }
+
+    if (!state.target) return;
+    if (Object.keys(config).length === 0) {
+      this.state.addItem(addInfo(this.state.getSnapshot().sessionId, "No model changes", "m"));
+      this.returnToModelList();
+      return;
+    }
+    try {
+      const payload = await this.state.request<{ type?: string }>("command.model", {
+        action: "update_model",
+        index: state.target.index,
+        config,
+      });
+      if (payload.type !== "model_updated") {
+        state.inputError = "Failed to edit model: backend does not support model editing yet. Restart the TUI/backend and try again.";
+        this.tui.requestRender();
+        return;
+      }
+      this.state.addItem(addInfo(this.state.getSnapshot().sessionId, `Updated model: ${state.target.name}`, "m"));
+      await this.state.refreshModelInfo();
+      this.editor.setText("");
+      await this.openModelList();
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      state.inputError = message.startsWith("Failed to edit model")
+        ? message
+        : `Failed to edit model: ${message}`;
+      this.tui.requestRender();
+    }
+  }
+
+  private validateModelForm(state: ModelListState): string | null {
+    const form = state.form;
+    if (!form) return null;
+    const fields = form.fields;
+    const trimmed = {
+      model_name: fields.model_name.trim(),
+      alias: fields.alias.trim(),
+      api_base: fields.api_base.trim(),
+      api_key: fields.api_key.trim(),
+      model_provider: fields.model_provider.trim(),
+      reasoning_level: fields.reasoning_level.trim(),
+    };
+    const missing = MODEL_REQUIRED_FIELDS
+      .filter((field) => !(state.inputMode === "edit" && field === "api_key"))
+      .filter((field) => !trimmed[field]);
+    if (missing.length > 0) {
+      return `Missing: ${missing.join(", ")}`;
+    }
+    if (trimmed.model_name.length > MAX_MODEL_NAME_LENGTH) {
+      return `model_name must be ${MAX_MODEL_NAME_LENGTH} characters or fewer`;
+    }
+    if (trimmed.alias.length > MAX_ALIAS_LENGTH) {
+      return `alias must be ${MAX_ALIAS_LENGTH} characters or fewer`;
+    }
+    if (trimmed.api_base.length > MAX_API_BASE_LENGTH) {
+      return `api_base must be ${MAX_API_BASE_LENGTH} characters or fewer`;
+    }
+    if (trimmed.api_key.length > MAX_API_KEY_LENGTH) {
+      return `api_key must be ${MAX_API_KEY_LENGTH} characters or fewer`;
+    }
+    if (trimmed.api_base && !/^https?:\/\//i.test(trimmed.api_base)) {
+      return "api_base must start with http:// or https://";
+    }
+    if (!MODEL_PROVIDER_OPTIONS.includes(trimmed.model_provider)) {
+      return `model_provider must be one of: ${MODEL_PROVIDER_OPTIONS.join(", ")}`;
+    }
+    if (!REASONING_LEVEL_OPTIONS.includes(trimmed.reasoning_level)) {
+      return "reasoning_level must be default, off, low, medium, or high";
+    }
+    if (trimmed.alias) {
+      const conflict = state.modelsMeta.find((model, index) => {
+        if (state.inputMode === "edit" && index === state.target?.index) return false;
+        return (model.alias || "") === trimmed.alias || model.model_name === trimmed.alias;
+      });
+      if (conflict) {
+        return `Alias '${trimmed.alias}' is already used by model '${conflict.model_name || conflict.name}'`;
+      }
+    }
+    return null;
+  }
+
+  private async submitModelDelete(): Promise<void> {
+    const target = this.modelList?.target;
+    if (!target) return;
+    try {
+      await this.state.request("command.model", {
+        action: "delete_model",
+        index: target.index,
+      });
+      this.state.addItem(addInfo(this.state.getSnapshot().sessionId, `Deleted model: ${target.name}`, "m"));
+      await this.state.refreshModelInfo();
+      await this.openModelList();
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.state.addItem(addError(this.state.getSnapshot().sessionId, `Failed to delete model: ${message}`));
+      this.returnToModelList();
+    }
+  }
+
   private async handleModelSelection(modelValue: string): Promise<void> {
     if (!modelValue) {
       return;
     }
     // Parse "modelName\x00origIdx" format from SelectList (null separator avoids collision with model names)
-    const sepIdx = modelValue.indexOf("\x00");
-    const modelName = sepIdx >= 0 ? modelValue.substring(0, sepIdx) : modelValue;
-    const modelIndex = sepIdx >= 0 ? parseInt(modelValue.substring(sepIdx + 1), 10) : undefined;
+    const { modelName, modelIndex } = this.parseModelValue(modelValue);
 
     if (isReservedMultimodalModelKey(modelName)) {
       this.modelList = null;
@@ -3562,14 +4024,78 @@ export class AppScreen implements Component, Focusable {
     if (!this.modelList) {
       return [];
     }
+    if (this.modelList.phase === "input") {
+      const isAdd = this.modelList.inputMode === "add";
+      const targetName = this.modelList.target?.name ?? "";
+      const title = isAdd ? "Add model" : `Edit model: ${targetName}`;
+      const hint = "  ↑/↓ field · type value · ←/→ option · Ctrl+U clear · Enter save · Esc back";
+      return [
+        padToWidth(palette.status.warning(title), width),
+        padToWidth(palette.text.dim(hint), width),
+        ...this.buildModelFormLines(width),
+      ];
+    }
+    if (this.modelList.phase === "delete_confirm") {
+      return [
+        padToWidth(palette.status.error(`Delete model: ${this.modelList.target?.name ?? "unknown"}`), width),
+        padToWidth(palette.text.dim("Enter confirm · Esc cancel"), width),
+      ];
+    }
+    const listLines = this.modelList.list
+      ? this.modelList.list.render(width)
+      : [padToWidth(palette.text.dim(this.modelList.emptyMessage ?? "No models configured"), width)];
+    const hint = this.modelList.models.length > 0
+      ? "↑/↓ choose · Enter switch · a add · e edit · d delete · Esc close"
+      : "a add · Esc close";
     return [
       padToWidth(
         palette.status.warning(`Available models (${this.modelList.models.length} total)`),
         width,
       ),
-      ...this.modelList.list.render(width),
-      padToWidth(palette.text.dim("choose model · Enter switch · Esc cancel"), width),
+      ...listLines,
+      padToWidth(palette.text.dim(hint), width),
     ];
+  }
+
+  private buildModelFormLines(width: number): string[] {
+    const state = this.modelList;
+    const form = state?.form;
+    if (!state || !form) return [];
+    const activeField = MODEL_FORM_FIELDS[form.selectedField];
+    const activeValue = this.formatModelFormValue(activeField, form.fields[activeField], state.inputMode);
+    const activeHint = activeField === "reasoning_level"
+      ? "    ←/→ default, off, low, medium, high"
+      : activeField === "model_provider"
+        ? `    ←/→ ${MODEL_PROVIDER_OPTIONS.join(", ")}`
+        : "";
+    const lines = [
+      padToWidth(`${palette.text.primary(`${activeField}: ${activeValue}${END_CURSOR}`)}${palette.text.dim(activeHint)}`, width),
+    ];
+    if (state.inputError) {
+      lines.push(padToWidth(palette.status.error(`! ${state.inputError}`), width));
+    }
+    for (const [index, field] of MODEL_FORM_FIELDS.entries()) {
+      const selected = index === form.selectedField;
+      const required = MODEL_REQUIRED_FIELDS.includes(field) && !(state.inputMode === "edit" && field === "api_key");
+      const label = `${selected ? "> " : "  "}${field}${required ? " *" : ""}`;
+      const value = this.formatModelFormValue(field, form.fields[field], state.inputMode);
+      const line = `${label.padEnd(24, " ")}${value}`;
+      lines.push(padToWidth(selected ? palette.text.primary(line) : palette.text.dim(line), width));
+    }
+    return lines;
+  }
+
+  private formatModelFormValue(field: ModelFormField, rawValue: string, mode?: "add" | "edit"): string {
+    if (field === "reasoning_level" && !rawValue) {
+      return "<default>";
+    }
+    if (field !== "api_key") {
+      return rawValue;
+    }
+    if (rawValue) {
+      return "*".repeat(Math.min(rawValue.length, 12));
+    }
+    return mode === "edit" ? "<unchanged>" : "";
   }
 
   private buildToolSelectorLines(width: number): string[] {

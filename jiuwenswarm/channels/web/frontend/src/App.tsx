@@ -611,32 +611,34 @@ function AppContent() {
       updates[`agent_skills_${i}`] = "";
     }
     payload.team.forEach((team, idx) => {
-      updates[`team_name_${idx}`] = team.team_name;
-      updates[`team_lifecycle_${idx}`] = team.lifecycle;
-      updates[`team_teammate_mode_${idx}`] = team.teammate_mode;
-      updates[`team_spawn_mode_${idx}`] = team.spawn_mode;
-      updates[`team_enable_permissions_${idx}`] = String(team.enable_permissions);
-      updates[`team_leader_member_name_${idx}`] = team.leader.member_name;
-      updates[`team_leader_display_name_${idx}`] = team.leader.display_name;
-      updates[`team_leader_persona_${idx}`] = team.leader.persona;
-      updates[`team_leader_agent_key_${idx}`] = team.leader.agent_key;
-      updates[`team_teammate_agent_key_${idx}`] = team.teammate.agent_key;
-      updates[`team_predefined_members_${idx}`] = team.predefined_members?.length
+      // 使用与后端一致的键名格式：team_${idx}_name
+      updates[`team_${idx}_name`] = team.team_name;
+      updates[`team_${idx}_lifecycle`] = team.lifecycle;
+      updates[`team_${idx}_teammate_mode`] = team.teammate_mode;
+      updates[`team_${idx}_spawn_mode`] = team.spawn_mode;
+      updates[`team_${idx}_enable_permissions`] = String(team.enable_permissions);
+      updates[`team_${idx}_leader_member_name`] = team.leader.member_name;
+      updates[`team_${idx}_leader_display_name`] = team.leader.display_name;
+      updates[`team_${idx}_leader_persona`] = team.leader.persona;
+      updates[`team_${idx}_leader_agent_key`] = team.leader.agent_key;
+      updates[`team_${idx}_teammate_agent_key`] = team.teammate.agent_key;
+      updates[`team_${idx}_predefined_members`] = team.predefined_members?.length
         ? JSON.stringify(team.predefined_members)
         : "";
     });
-for (let i = payload.team.length; i < 10; i++) {
-      updates[`team_name_${i}`] = "";
-      updates[`team_lifecycle_${i}`] = "";
-      updates[`team_teammate_mode_${i}`] = "";
-      updates[`team_spawn_mode_${i}`] = "";
-      updates[`team_enable_permissions_${i}`] = "";
-      updates[`team_leader_member_name_${i}`] = "";
-      updates[`team_leader_display_name_${i}`] = "";
-      updates[`team_leader_persona_${i}`] = "";
-      updates[`team_leader_agent_key_${i}`] = "";
-      updates[`team_teammate_agent_key_${i}`] = "";
-      updates[`team_predefined_members_${i}`] = "";
+    for (let i = payload.team.length; i < 10; i++) {
+      // 使用与后端一致的键名格式：team_${i}_name
+      updates[`team_${i}_name`] = "";
+      updates[`team_${i}_lifecycle`] = "";
+      updates[`team_${i}_teammate_mode`] = "";
+      updates[`team_${i}_spawn_mode`] = "";
+      updates[`team_${i}_enable_permissions`] = "";
+      updates[`team_${i}_leader_member_name`] = "";
+      updates[`team_${i}_leader_display_name`] = "";
+      updates[`team_${i}_leader_persona`] = "";
+      updates[`team_${i}_leader_agent_key`] = "";
+      updates[`team_${i}_teammate_agent_key`] = "";
+      updates[`team_${i}_predefined_members`] = "";
     }
     return updates;
   }, []);

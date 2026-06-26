@@ -58,9 +58,9 @@ services:
       LANGFUSE_INIT_PROJECT_NAME: Jiuwen Project
       LANGFUSE_INIT_PROJECT_PUBLIC_KEY: pk-lf-jiuwen
       LANGFUSE_INIT_PROJECT_SECRET_KEY: sk-lf-jiuwen
-      LANGFUSE_INIT_USER_EMAIL: jiuwensarm@jiuwen.local
-      LANGFUSE_INIT_USER_NAME: jiuwensarm
-      LANGFUSE_INIT_USER_PASSWORD: jiuwensarm
+      LANGFUSE_INIT_USER_EMAIL: jiuwenswarm@jiuwen.local
+      LANGFUSE_INIT_USER_NAME: jiuwenswarm
+      LANGFUSE_INIT_USER_PASSWORD: jiuwenswarm
 
       LANGFUSE_DEFAULT_ORG_ID: jiuwen-org
       LANGFUSE_DEFAULT_ORG_ROLE: ADMIN
@@ -105,9 +105,9 @@ services:
       LANGFUSE_INIT_PROJECT_NAME: Jiuwen Project
       LANGFUSE_INIT_PROJECT_PUBLIC_KEY: pk-lf-jiuwen
       LANGFUSE_INIT_PROJECT_SECRET_KEY: sk-lf-jiuwen
-      LANGFUSE_INIT_USER_EMAIL: jiuwensarm@jiuwen.local
-      LANGFUSE_INIT_USER_NAME: jiuwensarm
-      LANGFUSE_INIT_USER_PASSWORD: jiuwensarm
+      LANGFUSE_INIT_USER_EMAIL: jiuwenswarm@jiuwen.local
+      LANGFUSE_INIT_USER_NAME: jiuwenswarm
+      LANGFUSE_INIT_USER_PASSWORD: jiuwenswarm
 
       LANGFUSE_DEFAULT_ORG_ID: jiuwen-org
       LANGFUSE_DEFAULT_ORG_ROLE: ADMIN

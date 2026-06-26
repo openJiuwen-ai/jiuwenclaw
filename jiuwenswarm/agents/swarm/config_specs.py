@@ -31,6 +31,7 @@ from openjiuwen.agent_teams.schema.deep_agent_spec import (
     RailSpec,
     SubAgentSpec,
 )
+from openjiuwen.core.foundation.tool import McpServerConfig
 from openjiuwen.core.single_agent import AgentCard
 from openjiuwen.harness.prompts import resolve_language
 from openjiuwen.harness.rails import SkillUseRail
@@ -109,7 +110,6 @@ _CODE_RAIL_NAMES: tuple[str, ...] = (
     registry.CODE_AGENT_RAIL,
     registry.USER_HOOKS,
     registry.CODE_SKILL_USE,
-    registry.CODE_WORKTREE,
     registry.SKILL_RETRIEVAL_PROMPT,
 )
 
@@ -600,6 +600,7 @@ def build_member_deep_agent_spec(
     base_spec: DeepAgentSpec,
     *,
     enable_permissions: bool = False,
+    mcp_configs: list[McpServerConfig] | None = None,
 ) -> DeepAgentSpec:
     """Fold the member capability specs onto *base_spec*.
 
@@ -613,6 +614,7 @@ def build_member_deep_agent_spec(
         role: The member role ("leader" or "teammate").
         base_spec: The base member ``DeepAgentSpec`` to extend.
         enable_permissions: Effective team permission toggle from TeamAgentSpec.
+        mcp_configs: MCP server configs inherited from ``config.yaml``.
 
     Returns:
         A new ``DeepAgentSpec`` with the capability specs applied.
@@ -625,8 +627,13 @@ def build_member_deep_agent_spec(
     merged_rails.extend(rails_specs)
     merged_tools = list(base_spec.tools or [])
     merged_tools.extend(tool_specs)
+    merged_mcps = _merge_mcp_configs(base_spec.mcps, mcp_configs)
 
-    update: dict[str, Any] = {"rails": merged_rails, "tools": merged_tools}
+    update: dict[str, Any] = {
+        "rails": merged_rails,
+        "tools": merged_tools,
+        "mcps": merged_mcps,
+    }
     if not _is_code_mode(mode):
         update["enable_skill_discovery"] = True
 
@@ -644,6 +651,39 @@ def build_member_deep_agent_spec(
         update["system_prompt"] = build_code_system_prompt()
 
     return base_spec.model_copy(update=update)
+
+
+def _merge_mcp_configs(
+    base_mcps: list[McpServerConfig] | None,
+    config_mcps: list[McpServerConfig] | None,
+) -> list[McpServerConfig] | None:
+    merged = list(base_mcps or [])
+    if not config_mcps:
+        return merged or None
+
+    existing_ids = {
+        str(getattr(cfg, "server_id", "") or "").strip()
+        for cfg in merged
+    }
+    existing_names = {
+        str(getattr(cfg, "server_name", "") or "").strip()
+        for cfg in merged
+    }
+
+    for cfg in config_mcps:
+        server_id = str(getattr(cfg, "server_id", "") or "").strip()
+        server_name = str(getattr(cfg, "server_name", "") or "").strip()
+        duplicate_id = bool(server_id and server_id in existing_ids)
+        duplicate_name = bool(server_name and server_name in existing_names)
+        if duplicate_id or duplicate_name:
+            continue
+        merged.append(cfg.model_copy(deep=True))
+        if server_id:
+            existing_ids.add(server_id)
+        if server_name:
+            existing_names.add(server_name)
+
+    return merged or None
 
 
 __all__ = [

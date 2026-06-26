@@ -21,6 +21,7 @@ export interface Session {
   is_processing?: boolean;
   current_task?: string;
   tools?: string[];
+  team_name?: string;
   // ---- session.list 扩展字段 ----
   channel_id?: string;         // 渠道ID
   user_id?: string;            // 创建人ID

@@ -3,6 +3,10 @@
  * the main conversation. The backend spawns an isolated, tool-free,
  * single-turn LLM query against the current conversation context
  * and returns just the answer.
+ *
+ * UI 隔离：btw 回答渲染在固定的 overlay 区域（transcript 之外），
+ * 不会混入主对话的流式输出，也不受 transcript 滚动影响。
+ * 等待响应期间可按 Esc 取消请求。
  */
 import { addError, addInfo } from "../helpers.js";
 import { CommandKind, type CommandContext, type SlashCommand } from "../types.js";
@@ -16,6 +20,7 @@ interface BtwResponse {
 const NO_CONTEXT_MSG = "No conversation context available yet — send a message first.";
 const FAILED_MSG = "Couldn't answer the side question. Please try again or ask in the main conversation.";
 const EMPTY_QUESTION_MSG = "Usage: /btw <your question>";
+const CANCELLED_MSG = "Side question cancelled.";
 
 export function createBtwCommand(): SlashCommand {
   return {
@@ -32,17 +37,22 @@ export function createBtwCommand(): SlashCommand {
         return;
       }
 
-      // Dim indicator while the side query is running
+      // 标记 BTW 活动状态，确保 Esc 优先消费（不干扰主会话）
+      ctx.setBtwActive?.(true);
+
+      // Dim indicator while the side query is running — placed in transcript
       const thinkingId = `btw-thinking-${Date.now()}`;
       ctx.addItem({
         kind: "info",
         id: thinkingId,
         sessionId: ctx.sessionId,
-        content: `Answering: ${question}`,
+        content: `Answering: ${question} (Esc to cancel)`,
         icon: "💭",
         at: new Date().toISOString(),
         meta: { view: "dim" as const },
       });
+
+      let overlayShown = false;
 
       try {
         const payload = await ctx.request<BtwResponse>(
@@ -51,12 +61,20 @@ export function createBtwCommand(): SlashCommand {
           120000,
         );
 
+        // Check if cancelled mid-request (Esc pressed during wait)
+        if (ctx.isInterruptRequested?.()) {
+          ctx.addItem(
+            addInfo(ctx.sessionId, CANCELLED_MSG, "i", { view: "dim" as const }),
+          );
+          return;
+        }
+
         switch (payload.status) {
           case "ok":
             if (payload.answer) {
-              ctx.addItem(
-                addInfo(ctx.sessionId, `💡 /btw ${question}\n\n${payload.answer}`),
-              );
+              // 使用 overlay 渲染 btw 回答（固定在屏幕底部，独立于 transcript）
+              ctx.setBtwOverlay?.(question, payload.answer);
+              overlayShown = true;
             } else {
               ctx.addItem(addInfo(ctx.sessionId, "(empty answer)", "💡"));
             }
@@ -71,8 +89,21 @@ export function createBtwCommand(): SlashCommand {
             ctx.addItem(addError(ctx.sessionId, FAILED_MSG));
         }
       } catch (error) {
+        // Cancelled by Esc → the WS request was aborted; show dim notice
+        if (ctx.isInterruptRequested?.()) {
+          ctx.addItem(
+            addInfo(ctx.sessionId, CANCELLED_MSG, "i", { view: "dim" as const }),
+          );
+          return;
+        }
         const message = error instanceof Error ? error.message : String(error);
         ctx.addItem(addError(ctx.sessionId, `btw failed: ${message}`));
+      } finally {
+        // 只有在 overlay 未显示时才清除活动状态
+        // overlay 显示时保持 btwActive = true，由 Esc 处理清除
+        if (!overlayShown) {
+          ctx.setBtwActive?.(false);
+        }
       }
     },
   };

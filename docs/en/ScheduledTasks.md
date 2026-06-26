@@ -123,8 +123,21 @@ Optional **`timeout_seconds`** (60–259200) overrides the per-run timeout:
 
 **Result push**
 
-- With `targets=tui`, the final `[cron] <job name> result: …` is still **broadcast** to all connected TUI windows when the run completes.
-- If no TUI is connected at completion time, the broadcast may be missed; keep the gateway running or inspect the job via `/cron show`.
+All `targets` channels (`web`, `tui`, Feishu, DingTalk, WeCom, etc.) share the same `_push_to_targets` delivery path and body formatting:
+
+| Scenario | Push body format |
+|---|---|
+| **Successful completion** | `{job name} result:\n\n{agent output}` (no `[cron]` prefix) |
+| **Failure / timeout / no valid report** | Status text starting with `[cron]` (e.g. `[cron] 任务执行失败: …`), not wrapped as `{job name} result:` |
+| **In-progress placeholder** | `{job name} 正在执行中，结果稍后补发（push_at=…）` |
+
+Channel differences are mainly **routing**, not body format:
+
+- **`web`**: delivered to the Web chat panel; placeholders can be replaced by final results via `payload.cron.is_placeholder` and `run_id`.
+- **`tui`**: intentionally omits `session_id`; Gateway **broadcasts** to every connected TUI window. Broadcast may be missed if no TUI is online at completion time.
+- **Feishu / DingTalk / WeCom and other IM channels**: route via the job’s bound `session_id` and `metadata`; group-created jobs may use IMOutboundPipeline routing.
+
+Keep the gateway running, or inspect jobs via `/cron show` or the Web Cron panel.
 
 **Team completion detection**
 

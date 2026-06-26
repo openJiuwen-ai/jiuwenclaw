@@ -19,7 +19,7 @@ The main config file is usually `~/.jiuwenswarm/config/config.yaml`. Override th
 | **Loading** | `load_team_spec_dict()` (`jiuwenswarm/agents/harness/team/config_loader.py`): `name` / `display_name` compatibility for leader and `predefined_members` |
 | **Sample** | `jiuwenswarm/resources/config.team.distributed.leader.yaml` / `config.team.distributed.teammate.yaml` (current role-specific templates) |
 
-**Session semantics**: aligned with regular Team—**single active session** per process: creating a Team for a new session tears down other session Teams first. This document does not add a multi-session routing layer for distributed mode.
+**Session semantics**: distributed mode retains **single active session** per channel — creating or switching to a Team for a new session first tears down other active or pending session Teams in the same channel, so remote member bootstrap, transport connections, and runtime resources are not reused across sessions. **Local mode** instead allows multiple Team sessions to run concurrently in the same channel and does not apply this single-session switch policy.
 
 ---
 

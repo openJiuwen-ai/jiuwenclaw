@@ -271,6 +271,74 @@ def test_permission_interrupt_answer_chat_send_keeps_existing_stream() -> None:
     assert not _should_cancel_existing_stream_before_chat_send(msg)
 
 
+@pytest.mark.parametrize(
+    "params",
+    [
+        {
+            "query": "",
+            "source": "evolution_interrupt",
+            "request_id": "call_evolve_1",
+            "answers": [{"selected_options": ["allow_always"], "custom_input": ""}],
+            "approval_kind": "evolve",
+        },
+        {
+            "query": "",
+            "source": "skill_evolution_approval",
+            "request_id": "call_evolve_1",
+            "answers": [{"selected_options": ["allow_always"], "custom_input": ""}],
+            "approval_schema": "openjiuwen.skill_evolution_approval.v1",
+            "evolution_meta": {
+                "event_kind": "approval",
+                "rail_kind": "regular",
+                "approval_kind": "evolve",
+                "approval_transport": "interrupt",
+            },
+        },
+    ],
+)
+def test_evolution_interrupt_answer_chat_send_keeps_existing_stream(params) -> None:
+    _should_cancel_existing_stream_before_chat_send = getattr(
+        MessageHandler,
+        "_should_cancel_existing_stream_before_chat_send",
+    )
+    msg = _chat_send_message(
+        channel_id="web",
+        session_id="sess_evolve",
+        mode="agent.plan",
+    )
+    msg.params.update(params)
+
+    assert not _should_cancel_existing_stream_before_chat_send(msg)
+
+
+def test_passive_evolution_approval_chat_send_still_cancels_existing_stream() -> None:
+    _should_cancel_existing_stream_before_chat_send = getattr(
+        MessageHandler,
+        "_should_cancel_existing_stream_before_chat_send",
+    )
+    msg = _chat_send_message(
+        channel_id="web",
+        session_id="sess_evolve",
+        mode="agent.plan",
+    )
+    msg.params.update(
+        {
+            "query": "",
+            "source": "skill_evolution_approval",
+            "request_id": "regular_evolve_1",
+            "answers": [{"selected_options": ["allow_always"], "custom_input": ""}],
+            "approval_schema": "openjiuwen.skill_evolution_approval.v1",
+            "evolution_meta": {
+                "event_kind": "approval",
+                "rail_kind": "regular",
+                "approval_kind": "evolve",
+            },
+        }
+    )
+
+    assert _should_cancel_existing_stream_before_chat_send(msg)
+
+
 # ── cancel_agent_sessions_on_disconnect ─────────────────────────
 #
 # Regression: when the user's WebSocket closes but `_session_to_client`

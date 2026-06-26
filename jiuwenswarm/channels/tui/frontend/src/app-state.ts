@@ -83,6 +83,12 @@ export interface SessionUsageSummary {
   byModel: ModelUsageEntry[];
 }
 
+export interface CurrentQueryUsage {
+  input_tokens: number;
+  output_tokens: number;
+  total_tokens: number;
+}
+
 interface VisibleUserRequest {
   requestId: string;
   content: string;
@@ -136,6 +142,11 @@ export interface AppSnapshot {
   runningCommand: string | null;
   streamStalled: boolean;
   streamIdleMs: number | null;
+  currentQueryUsage: CurrentQueryUsage;
+  /** /btw 侧问题覆盖层：独立于 transcript 渲染，不受滚动影响 */
+  btwOverlay: { question: string; answer: string } | null;
+  /** BTW 是否处于活动状态（加载中或 overlay 可见），Esc 优先消费 */
+  btwActive: boolean;
 }
 
 function formatElapsed(ms: number): string {
@@ -286,6 +297,11 @@ export class CliPiAppState {
   private statusLineText: string | null = null;
   private statusLineTimer: ReturnType<typeof setInterval> | null = null;
   private usageByModel = new Map<string, ModelUsageEntry>();
+  private currentQueryUsage: CurrentQueryUsage = {
+    input_tokens: 0,
+    output_tokens: 0,
+    total_tokens: 0,
+  };
   private modelInfo: { provider: string; model: string; version: string } = {
     provider: "",
     model: "",
@@ -308,6 +324,10 @@ export class CliPiAppState {
   private streamStalled = false;
   /** 当 closeUi 中 cancelBeforeExit 调 cancel({showNotice:false}) 时置 true，抑制 chat.interrupt_result 的 UI 通知。 */
   private suppressInterruptResult = false;
+  /** /btw 侧问题覆盖层：独立于 transcript 渲染 */
+  private btwOverlay: { question: string; answer: string } | null = null;
+  /** BTW 是否处于活动状态（加载中或 overlay 可见），用于 Esc 优先级判断 */
+  private _btwActive = false;
   /** 本地中断请求标志，cancel() 调用时立即置 true，用于 long-running 命令的中断检测。 */
   private interruptRequested = false;
   /** 当前正在执行的斜杠命令 WS 请求 ID，用于 Ctrl+C 时立即取消。 */
@@ -442,20 +462,10 @@ export class CliPiAppState {
     },
     tryAutoRestoreAfterCancel: () => this.tryAutoRestoreAfterCancel(),
     appendUsageSummary: (usage, model) => {
-      const key = model || "unknown";
-      const existing = this.usageByModel.get(key);
-      const u = usage as Record<string, unknown>;
-      const entry: ModelUsageEntry = {
-        model: key,
-        input_tokens:
-          (existing?.input_tokens ?? 0) + (typeof u.input_tokens === "number" ? u.input_tokens : 0),
-        output_tokens:
-          (existing?.output_tokens ?? 0) +
-          (typeof u.output_tokens === "number" ? u.output_tokens : 0),
-        total_tokens:
-          (existing?.total_tokens ?? 0) + (typeof u.total_tokens === "number" ? u.total_tokens : 0),
-      };
-      this.usageByModel.set(key, entry);
+      this.appendUsageDelta(usage, model);
+    },
+    appendUsageMetadata: (usage) => {
+      this.updateCurrentUsageTokens(usage);
     },
     addWorkedForEntry: () => {
       if (this.turnStartedAt === null) return;
@@ -623,6 +633,10 @@ export class CliPiAppState {
       this.startAutoRecapTimer();
     }
   }
+
+  readonly refreshModelInfo = async (): Promise<void> => {
+    await this.fetchModelInfo();
+  };
 
   private startMemoryRefresh(): void {
     this.stopMemoryRefresh();
@@ -859,12 +873,15 @@ export class CliPiAppState {
       (s) => s.status !== "completed" && s.status !== "error",
     );
     // 与「Ctrl+C 强制结束当前任务」对齐：有任一进行中工作则为 true。
+    // 包含 activeCommandRequestId 以确保 /btw 等命令请求在等待响应期间
+    // 也能被 Esc 取消（WS 请求会被立即中止，避免等待超时）。
     const cancellableWork =
       isProcessing ||
       this.streamingState === StreamingState.Paused ||
       hasRunningTools ||
       hasActiveSubtasks ||
       this.evolutionStatus === "running" ||
+      this.activeCommandRequestId !== null ||
       (isTeamMode(this.mode) && isTeamWorking(this.teamMemberEvents, this.teamMessageEvents));
     return {
       connectionStatus: this.connectionStatus,
@@ -921,7 +938,11 @@ export class CliPiAppState {
       memoryWarnings: [...this.memoryWarnings],
       runningCommand: this.runningCommand,
       streamStalled: this.streamStalled,
-      streamIdleMs: this.lastStreamActivityAt === null ? null : Date.now() - this.lastStreamActivityAt,
+      streamIdleMs:
+        this.lastStreamActivityAt === null ? null : Date.now() - this.lastStreamActivityAt,
+      currentQueryUsage: { ...this.currentQueryUsage },
+      btwOverlay: this.btwOverlay,
+      btwActive: this._btwActive,
     };
   }
 
@@ -982,6 +1003,9 @@ export class CliPiAppState {
       accentColor: snapshot.accentColor,
       updateSession: this.updateSession,
       addItem: this.addItem,
+      setBtwOverlay: this.setBtwOverlay,
+      clearBtwOverlay: this.clearBtwOverlay,
+      setBtwActive: this.setBtwActive,
       clearEntries: this.clearEntries,
       restoreHistory: this.restoreHistory,
       exitApp: () => {
@@ -1045,6 +1069,53 @@ export class CliPiAppState {
       total_output_tokens: entries.reduce((s, e) => s + e.output_tokens, 0),
       total_tokens: entries.reduce((s, e) => s + e.total_tokens, 0),
       byModel: entries,
+    };
+  }
+
+  private appendUsageDelta(usage: Record<string, unknown>, model?: string): void {
+    const key = model || "unknown";
+    const existing = this.usageByModel.get(key);
+    const inputDelta = this.safeTokenCount(usage.input_tokens);
+    const outputDelta = this.safeTokenCount(usage.output_tokens);
+    const totalDelta =
+      typeof usage.total_tokens === "number" && Number.isFinite(usage.total_tokens)
+        ? Math.max(0, usage.total_tokens)
+        : inputDelta + outputDelta;
+    const entry: ModelUsageEntry = {
+      model: key,
+      input_tokens: (existing?.input_tokens ?? 0) + inputDelta,
+      output_tokens: (existing?.output_tokens ?? 0) + outputDelta,
+      total_tokens: (existing?.total_tokens ?? 0) + totalDelta,
+    };
+    this.usageByModel.set(key, entry);
+  }
+
+  private updateCurrentUsageTokens(usage: Record<string, unknown>): void {
+    const inputDelta = this.safeTokenCount(usage.input_tokens);
+    const outputDelta = this.safeTokenCount(usage.output_tokens);
+    const totalDelta =
+      typeof usage.total_tokens === "number" && Number.isFinite(usage.total_tokens)
+        ? Math.max(0, usage.total_tokens)
+        : inputDelta + outputDelta;
+    if (inputDelta === 0 && outputDelta === 0 && totalDelta === 0) {
+      return;
+    }
+    this.currentQueryUsage = {
+      input_tokens: this.currentQueryUsage.input_tokens + inputDelta,
+      output_tokens: this.currentQueryUsage.output_tokens + outputDelta,
+      total_tokens: this.currentQueryUsage.total_tokens + totalDelta,
+    };
+  }
+
+  private safeTokenCount(value: unknown): number {
+    return typeof value === "number" && Number.isFinite(value) ? Math.max(0, value) : 0;
+  }
+
+  private resetCurrentUsageTokens(): void {
+    this.currentQueryUsage = {
+      input_tokens: 0,
+      output_tokens: 0,
+      total_tokens: 0,
     };
   }
 
@@ -1162,7 +1233,10 @@ export class CliPiAppState {
     this.sessionId = newId;
     this.lastVisibleUserRequest = null;
     this.usageByModel.clear();
+    this.resetCurrentUsageTokens();
     this.workflowRuns = [];
+    this.btwOverlay = null;
+    this._btwActive = false;
     if (this.accentColor !== "default") {
       this.accentColor = "default";
       setCurrentAccentColor("default");
@@ -1198,8 +1272,49 @@ export class CliPiAppState {
     // 用户发言后重置自动回顾状态，允许下一次空闲时触发新的回顾
     if (item.kind === "user") {
       this.autoRecapState = "idle";
+      // 用户发送新消息时自动清除 /btw overlay
+      if (this.btwOverlay !== null) {
+        this.btwOverlay = null;
+        this._btwActive = false;
+      }
     }
     this.emitChange();
+  };
+
+  /** 设置 /btw 侧问题覆盖层（独立于 transcript 渲染，不受滚动影响） */
+  readonly setBtwOverlay = (question: string, answer: string): void => {
+    this.btwOverlay = { question, answer };
+    this.emitChange();
+  };
+
+  /** 设置 BTW 活动状态（加载中或 overlay 可见），用于 Esc 优先级判断 */
+  readonly setBtwActive = (active: boolean): void => {
+    if (this._btwActive !== active) {
+      this._btwActive = active;
+      this.emitChange();
+    }
+  };
+
+  /** 清除 /btw 侧问题覆盖层 */
+  readonly clearBtwOverlay = (): void => {
+    if (this.btwOverlay !== null) {
+      this.btwOverlay = null;
+      this._btwActive = false;
+      this.emitChange();
+    }
+  };
+
+  readonly isHelpVisible = (): boolean => {
+    if (this.entries.length === 0) return false;
+    const lastEntry = this.entries[this.entries.length - 1];
+    return lastEntry?.kind === "info" && lastEntry.meta?.view === "help";
+  };
+
+  readonly dismissHelp = (): boolean => {
+    if (!this.isHelpVisible()) return false;
+    this.entries = this.entries.slice(0, -1);
+    this.emitChange();
+    return true;
   };
 
   readonly beginDeferredTranscript = (): void => {
@@ -1230,6 +1345,8 @@ export class CliPiAppState {
     this.entries = [];
     this.pendingQuestion = null;
     this.lastError = null;
+    this.btwOverlay = null;
+    this._btwActive = false;
     this.setStreamingStateInternal(StreamingState.Idle);
     this.collapsedToolGroupIds.clear();
     this.activeSubtasks.clear();
@@ -1382,6 +1499,7 @@ export class CliPiAppState {
       true,
     );
     this.lastError = null;
+    this.resetCurrentUsageTokens();
     if (options?.logAsUser !== false) {
       this.lastVisibleUserRequest = { requestId, content, sessionId: this.sessionId };
       // 用户发言后重置自动回顾状态，允许下一次空闲时触发新的回顾
@@ -1423,6 +1541,7 @@ export class CliPiAppState {
       ...(attachments?.length ? { attachments } : {}),
     });
     this.lastError = null;
+    this.resetCurrentUsageTokens();
     // 用户发言后重置自动回顾状态（supplement 也是用户消息）
     this.autoRecapState = "idle";
     this.entries = [
@@ -1513,6 +1632,7 @@ export class CliPiAppState {
       source === "permission_interrupt" ||
       source === "confirm_interrupt" ||
       source === "ask_user_interrupt" ||
+      source === "evolution_interrupt" ||
       (source === "skill_evolution_approval" && approvalTransport === "interrupt");
 
     if (shouldResumeInterrupt) {
@@ -2433,6 +2553,10 @@ export class CliPiAppState {
     }
     // 条件4：WebSocket 已连接
     if (this.connectionStatus !== "connected") {
+      return;
+    }
+    // 条件5：对话中至少要有用户或助手的消息可回顾（排除 command_echo / info 等系统条目）
+    if (!this.entries.some((e) => e.kind === "user" || e.kind === "assistant")) {
       return;
     }
 

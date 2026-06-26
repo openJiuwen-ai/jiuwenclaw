@@ -1509,6 +1509,7 @@ def get_model_config(name: str, index: int | None = None) -> dict[str, Any] | No
 #     files: { allow: [...], deny: [...] }
 #     idle_ttl_seconds: 600         # 可选, 默认 None = 不进行 idle 驱逐
 #     idle_check_interval: 60       # 可选, 默认 None = 让 jiuwenbox 端用自身默认值
+#     fallback_on_failure: false    # jiuwenbox exec 异常时回退本地 (见 agent-core jiuwenbox provider)
 #
 # ``get_sandbox_runtime`` 把这些 key 读出来填默认值;
 # ``update_sandbox_runtime`` 写回时也只动这几个 key, 不动 endpoint 字段。
@@ -1525,6 +1526,7 @@ _SANDBOX_RUNTIME_DEFAULTS: dict[str, Any] = {
     "files": {"allow": [], "deny": []},
     "idle_ttl_seconds": None,
     "idle_check_interval": None,
+    "fallback_on_failure": False,
 }
 
 # 受 ``get_sandbox_runtime`` / ``update_sandbox_runtime`` 管辖的 sandbox 字段。
@@ -1580,6 +1582,8 @@ def _ensure_sandbox_runtime_shape(runtime: Any) -> dict[str, Any]:
     out = dict(base)
     if "enabled" in runtime:
         out["enabled"] = bool(runtime["enabled"])
+    if "fallback_on_failure" in runtime:
+        out["fallback_on_failure"] = bool(runtime["fallback_on_failure"])
     raw_excluded = runtime.get("excluded_commands")
     if isinstance(raw_excluded, list):
         out["excluded_commands"] = [
@@ -1946,7 +1950,8 @@ def update_sandbox_runtime(patch: dict[str, Any]) -> dict[str, Any]:
 
     Args:
         patch: 部分字段更新；支持顶层键 ``enabled`` / ``excluded_commands``
-            / ``files`` / ``idle_ttl_seconds`` / ``idle_check_interval``。
+            / ``files`` / ``idle_ttl_seconds`` / ``idle_check_interval``
+            / ``fallback_on_failure``。
             ``files`` 字典若提供则整体替换；其余键按值合并。 ``idle_*`` 字段
             接受整数秒数 (``<= 0`` 归一化为 ``None`` = 禁用淘汰) 或 ``None``。
     """
@@ -1958,6 +1963,8 @@ def update_sandbox_runtime(patch: dict[str, Any]) -> dict[str, Any]:
 
     if "enabled" in patch:
         merged["enabled"] = bool(patch["enabled"])
+    if "fallback_on_failure" in patch:
+        merged["fallback_on_failure"] = bool(patch["fallback_on_failure"])
     if "excluded_commands" in patch:
         value = patch["excluded_commands"]
         if not isinstance(value, list):

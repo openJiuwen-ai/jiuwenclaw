@@ -2449,6 +2449,9 @@ export function ConfigPanel({
   const [agentsTeamsEdited, setAgentsTeamsEdited] = useState(false);
   const [agentsTeamsUserEdited, setAgentsTeamsUserEdited] = useState(false);
   const [agentsTeamsJustSaved, setAgentsTeamsJustSaved] = useState(false);
+  // 使用ref记录保存后的配置,避免依赖数组触发多次useEffect
+  const savedAgentsRef = useRef<AgentEntry[] | null>(null);
+  const savedTeamsRef = useRef<TeamEntry[] | null>(null);
   const [configTab, setConfigTab] = useState<ConfigMainTab>("model");
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -2712,16 +2715,46 @@ export function ConfigPanel({
   }, [normalizedConfig]);
 
   useEffect(() => {
+    // 如果用户正在编辑，不自动更新
     if (agentsTeamsEdited) return;
+
+    // 如果刚保存完，检查配置是否已经正确更新
     if (agentsTeamsJustSaved) {
-      setAgentsTeamsJustSaved(false);
+      const savedAgents = savedAgentsRef.current;
+      const savedTeams = savedTeamsRef.current;
+
+      if (savedAgents && savedTeams) {
+        const teamsMatch = teamsFromConfig.length === savedTeams.length &&
+          teamsFromConfig.every((t, i) => {
+            const st = savedTeams[i];
+            if (!st) return false;
+            return t.team_name === st.team_name;
+          });
+        const agentsMatch = agentsFromConfig.length === savedAgents.length &&
+          agentsFromConfig.every((a, i) => {
+            const sa = savedAgents[i];
+            if (!sa) return false;
+            return a.name === sa.name;
+          });
+
+        if (teamsMatch && agentsMatch) {
+          setAgentsTeamsJustSaved(false);
+          savedAgentsRef.current = null;
+          savedTeamsRef.current = null;
+        }
+      }
       return;
     }
-    setDraftAgents(agentsFromConfig);
-    setDraftTeams(teamsFromConfig);
-    setInitialAgents(agentsFromConfig);
-    setInitialTeams(teamsFromConfig);
-  }, [agentsFromConfig, teamsFromConfig, agentsTeamsEdited, agentsTeamsJustSaved]);
+
+    // 只有在首次挂载且draftTeams为空时，才从配置加载
+    // 这样可以避免在用户删除team后切换tab时自动恢复配置
+    if (draftTeams.length === 0 && initialTeams.length === 0) {
+      setDraftAgents(agentsFromConfig);
+      setDraftTeams(teamsFromConfig);
+      setInitialAgents(agentsFromConfig);
+      setInitialTeams(teamsFromConfig);
+    }
+  }, [agentsFromConfig, teamsFromConfig, agentsTeamsEdited, agentsTeamsJustSaved, draftTeams.length, initialTeams.length]);
 
   const groups = useMemo<ConfigGroup[]>(() => {
     if (!Object.keys(normalizedConfig).length) return [];
@@ -3131,6 +3164,9 @@ export function ConfigPanel({
         if (hasModelChanges && onModelsRefresh) await onModelsRefresh();
         if (hasAgentsTeamsChanges) {
           setAgentsTeamsJustSaved(true);
+          // 记录保存后的配置到ref，用于后续比较
+          savedAgentsRef.current = draftAgents;
+          savedTeamsRef.current = draftTeams;
           setInitialAgents(draftAgents);
           setInitialTeams(draftTeams);
           resetEditStateAfterSave();
@@ -3146,6 +3182,9 @@ export function ConfigPanel({
           const showRestartModal = !(hasConfigChanges || hasModelChanges);
           await onAgentsTeamsSave(agentsTeamsPayload, showRestartModal);
           setAgentsTeamsJustSaved(true);
+          // 记录保存后的配置到ref，用于后续比较
+          savedAgentsRef.current = draftAgents;
+          savedTeamsRef.current = draftTeams;
           setInitialAgents(draftAgents);
           setInitialTeams(draftTeams);
           resetEditStateAfterSave();

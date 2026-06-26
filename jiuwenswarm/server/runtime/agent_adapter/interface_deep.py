@@ -240,7 +240,17 @@ from jiuwenswarm.agents.harness.common.tools.xiaoyi_phone_tools import (
     xiaoyi_gui_agent,
     image_reading,
 )
-from jiuwenswarm.common.config import get_config, get_default_models, get_sandbox_runtime, resolve_env_vars
+from jiuwenswarm.common.config import (
+    get_config,
+    get_default_models,
+    get_sandbox_runtime,
+    get_sandbox_startup_mode,
+    resolve_env_vars,
+)
+from jiuwenswarm.common.mcp_config import (
+    build_mcp_server_config,
+    extract_enabled_mcp_server_entries,
+)
 from jiuwenswarm.common.reasoning_injector import build_reasoning_model_request_kwargs
 from jiuwenswarm.server.runtime.agent_adapter.sysop_builder import (
     build_filesystem_policy,
@@ -1441,69 +1451,11 @@ class JiuWenSwarmDeepAdapter:
 
     @staticmethod
     def _build_mcp_server_config(entry: dict[str, Any]) -> McpServerConfig | None:
-        name = str(entry.get("name", "")).strip()
-        if not name:
-            return None
-        transport = str(entry.get("transport", "")).strip().lower()
-        if transport not in {"stdio", "sse"}:
-            return None
-        payload: dict[str, Any] = {
-            "server_name": name,
-            "client_type": transport,
-        }
-        if transport == "stdio":
-            command = str(entry.get("command", "")).strip()
-            if not command:
-                return None
-            params: dict[str, Any] = {"command": command}
-            args = entry.get("args")
-            if isinstance(args, list):
-                params["args"] = [str(item) for item in args]
-            cwd = entry.get("cwd")
-            if isinstance(cwd, str) and cwd.strip():
-                params["cwd"] = cwd.strip()
-            env = entry.get("env")
-            if isinstance(env, dict):
-                params["env"] = {str(k): str(v) for k, v in env.items()}
-            timeout_s = entry.get("timeout_s")
-            if isinstance(timeout_s, (int, float)) and int(timeout_s) > 0:
-                params["timeout_s"] = int(timeout_s)
-            payload["server_path"] = f"stdio://{name}"
-            payload["params"] = params
-        else:
-            url = str(entry.get("url", "")).strip()
-            if not url:
-                return None
-            payload["server_path"] = url
-            params: dict[str, Any] = {}
-            headers = entry.get("headers")
-            if isinstance(headers, dict):
-                params["headers"] = {str(k): str(v) for k, v in headers.items()}
-            timeout_s = entry.get("timeout_s")
-            if isinstance(timeout_s, (int, float)) and int(timeout_s) > 0:
-                params["timeout_s"] = int(timeout_s)
-            if params:
-                payload["params"] = params
-        return McpServerConfig(**payload)
+        return build_mcp_server_config(entry)
 
     @staticmethod
     def _extract_enabled_mcp_server_entries(config_base: dict[str, Any]) -> list[dict[str, Any]]:
-        if not isinstance(config_base, dict):
-            return []
-        mcp_cfg = config_base.get("mcp", {})
-        if not isinstance(mcp_cfg, dict):
-            return []
-        servers = mcp_cfg.get("servers", [])
-        if not isinstance(servers, list):
-            return []
-        result: list[dict[str, Any]] = []
-        for item in servers:
-            if not isinstance(item, dict):
-                continue
-            if not bool(item.get("enabled", True)):
-                continue
-            result.append(item)
-        return result
+        return extract_enabled_mcp_server_entries(config_base)
 
     async def _register_mcp_server(self, cfg: McpServerConfig, *, tag: str) -> bool:
         if self._instance is None:
@@ -2323,8 +2275,10 @@ class JiuWenSwarmDeepAdapter:
             excluded_commands=runtime.get("excluded_commands"),
             idle_ttl_seconds=runtime.get("idle_ttl_seconds"),
             idle_check_interval=runtime.get("idle_check_interval"),
+            fallback_on_failure=bool(runtime.get("fallback_on_failure", False)),
             project_dir=project_dir,
             is_code_agent=self._is_code_agent,
+            startup_mode=get_sandbox_startup_mode(),
         )
 
     def _resolve_project_dir_for_sandbox(self) -> str | None:
@@ -2489,10 +2443,12 @@ class JiuWenSwarmDeepAdapter:
 
         extra = launcher.extra_params or {}
         extra["excluded_commands"] = list(runtime.get("excluded_commands") or [])
+        extra["fallback_on_failure"] = bool(runtime.get("fallback_on_failure", False))
         new_policy, upload_list = build_filesystem_policy(
             runtime.get("files") or {},
             project_dir=self._resolve_project_dir_for_sandbox(),
             is_code_agent=self._is_code_agent,
+            startup_mode=get_sandbox_startup_mode(),
         )
         extra["policy"] = new_policy
         # provider 侧契约: 沙箱 sysop 永远带这两个 key, mode 固定 ``mount``,
@@ -4231,7 +4187,7 @@ class JiuWenSwarmDeepAdapter:
             runtime_cwd = str(self._project_dir or "").strip()
         if not runtime_cwd or not os.path.isdir(runtime_cwd):
             runtime_cwd = workspace_root
-        init_cwd(runtime_cwd, workspace=workspace_root)
+        init_cwd(runtime_cwd, project_root=workspace_root, workspace=workspace_root)
 
     @dataclass
     class _RuntimeConfig:
@@ -6776,10 +6732,14 @@ class JiuWenSwarmDeepAdapter:
     def _get_recent_messages(self, session_id: str, window: int = 30) -> list[Any]:
         """从当前 agent 对话上下文中提取最近N条消息。
 
-        当 context_engine 中没有该 session 的上下文时（例如 /resume 之后），
-        回退到从磁盘读取兼容格式的 history 文件。
+        查找顺序：
+        1. 当前 adapter 的 context_engine（session-scoped adapter 自身或已加载的 parent）
+        2. 父 adapter 查找 session-scoped child adapter 的 context_engine
+           （解决 /btw 等侧查询在 parent adapter 上执行时，会话上下文在 child adapter
+           中而 parent 的 context_engine 未加载该 session 的问题）
+        3. 回退到从磁盘读取兼容格式的 history 文件
         """
-        # --- 快速路径：context_engine 已加载 ---
+        # --- 快速路径：当前 adapter 的 context_engine 已加载 ---
         if self._instance is not None and self._instance.react_agent is not None:
             context_engine = self._instance.react_agent.context_engine
             context = context_engine.get_context(session_id=session_id)
@@ -6790,6 +6750,36 @@ class JiuWenSwarmDeepAdapter:
                         return all_messages[-window:]
                 except Exception as exc:
                     logger.debug("[JiuWenSwarmDeepAdapter] _get_recent_messages from context_engine failed: %s", exc)
+
+        # --- 中间路径：从 session-scoped child adapter 的 context_engine 查找 ---
+        # 当 /btw 等侧查询在 parent adapter 上执行时，会话上下文实际在
+        # session-scoped child adapter 的内存中（context_engine），而非磁盘。
+        # 直接从内存读取可避免与异步写队列的"写后读"竞态。
+        if not getattr(self, "_is_session_scoped_adapter", False):
+            session_adapter = self._get_cached_session_adapter(session_id)
+            if session_adapter is not None:
+                inst = getattr(session_adapter, "_instance", None)
+                if inst is not None and getattr(inst, "react_agent", None) is not None:
+                    ctx_eng = inst.react_agent.context_engine
+                    ctx = ctx_eng.get_context(session_id=session_id)
+                    if ctx is not None:
+                        try:
+                            all_msgs = list(ctx.get_messages() or [])
+                            if all_msgs:
+                                logger.debug(
+                                    "[JiuWenSwarmDeepAdapter] _get_recent_messages: "
+                                    "read %d messages from session-scoped adapter context_engine "
+                                    "for session %s",
+                                    len(all_msgs),
+                                    session_id,
+                                )
+                                return all_msgs[-window:]
+                        except Exception as exc:
+                            logger.debug(
+                                "[JiuWenSwarmDeepAdapter] _get_recent_messages "
+                                "from session-scoped adapter context_engine failed: %s",
+                                exc,
+                            )
 
         # --- 回退路径：从磁盘读取兼容格式 history ---
         # 典型场景：/resume 之后，context_engine 还未加载新 session 的上下文，

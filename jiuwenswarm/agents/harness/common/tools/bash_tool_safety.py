@@ -22,12 +22,16 @@ def _pre_execute_shell_command(command: str) -> str | None:
 
     from jiuwenswarm.agents.harness.common.tools.command_tools import (
         _check_command_safety,
+        _check_worktree_path_safety,
         _enforce_tui_spawn_budget,
     )
 
     blocked = _check_command_safety(command)
     if blocked:
         return f"[ERROR]: command rejected for safety ({blocked})."
+    worktree_block = _check_worktree_path_safety(command)
+    if worktree_block:
+        return f"[ERROR]: {worktree_block}"
     spawn_block = _enforce_tui_spawn_budget(command, resolve_shell_session_id() or "")
     if spawn_block:
         return f"[ERROR]: {spawn_block}"

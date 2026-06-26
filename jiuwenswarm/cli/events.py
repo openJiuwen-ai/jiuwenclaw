@@ -14,6 +14,14 @@ def is_terminal_event(event_type: str, payload: dict[str, Any]) -> bool:
         inner = payload.get("event_type", "")
         if inner == "keepalive":
             return False
+        # Team control events (team.runtime_ready, team.completed) are
+        # broadcast through the chat.final envelope because they lack an
+        # EventType enum mapping on the gateway side. They are NOT terminal —
+        # the real round-complete signal is
+        # chat.processing_status(is_processing=False). team.error is the
+        # exception: it indicates a failed team stream and should terminate.
+        if isinstance(inner, str) and inner.startswith("team."):
+            return inner == "team.error"
         return True
     if event_type == "chat.processing_status":
         if not payload.get("is_processing", True):

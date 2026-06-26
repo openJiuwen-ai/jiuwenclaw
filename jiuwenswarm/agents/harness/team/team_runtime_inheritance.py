@@ -127,8 +127,6 @@ TOOL_WHITELIST = frozenset({
     "web_fetch_webpage",
     "web_paid_search",
     "skill_toolkit",
-    "enter_worktree",
-    "exit_worktree",
     "acp_chat",
 })
 

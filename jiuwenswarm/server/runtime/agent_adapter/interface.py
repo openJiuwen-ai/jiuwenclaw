@@ -11,7 +11,6 @@
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass
 import inspect
 import json
 import logging
@@ -52,6 +51,10 @@ from jiuwenswarm.server.runtime.a2ui.integration import finalize_assistant_respo
 from jiuwenswarm.server.runtime.a2ui.runtime.finalizer import should_finalize_a2ui_content
 from jiuwenswarm.agents.harness.common.auto_memory import (
     _execute_auto_memory_extraction,
+)
+from jiuwenswarm.agents.harness.common.rails.interrupt.interrupt_helpers import (
+    EVOLUTION_INTERRUPT_METADATA_SOURCES,
+    is_interrupt_resume_payload,
 )
 
 
@@ -1087,7 +1090,7 @@ class JiuWenSwarm:
             )
             return interactive_input
 
-        if source == "skill_evolution_approval":
+        if source in EVOLUTION_INTERRUPT_METADATA_SOURCES:
             answer = answers[0] if answers else {}
             selected_options = answer.get("selected_options", []) if isinstance(answer, dict) else []
             custom_input = answer.get("custom_input", "") if isinstance(answer, dict) else ""
@@ -1514,9 +1517,7 @@ class JiuWenSwarm:
 
         session_id = self._session_manager.get_session_id(request.session_id)
         query = request.params.get("query", "")
-        source = request.params.get("source", "")
-        _interrupt_sources = {"permission_interrupt", "confirm_interrupt", "ask_user_interrupt"}
-        if source not in _interrupt_sources:
+        if not is_interrupt_resume_payload(request.params):
             append_history_record(
                 session_id=session_id,
                 request_id=request.request_id,
@@ -1653,9 +1654,7 @@ class JiuWenSwarm:
             and isinstance(request.params.get("activate_response"), dict)
         )
 
-        source = request.params.get("source", "")
-        _interrupt_sources = {"permission_interrupt", "confirm_interrupt", "ask_user_interrupt"}
-        if source not in _interrupt_sources:
+        if not is_interrupt_resume_payload(request.params):
             append_history_record(
                 session_id=session_id,
                 request_id=request.request_id,

@@ -35,6 +35,9 @@ from jiuwenswarm.common.schema.agent import AgentRequest, AgentResponse, AgentRe
 from jiuwenswarm.common.version import __version__
 from jiuwenswarm.extensions.hook_event import AgentServerHookEvents
 from jiuwenswarm.agents.harness.common.plugins.rail_manager import get_rail_manager
+from jiuwenswarm.agents.harness.common.rails.interrupt.interrupt_helpers import (
+    is_interrupt_resume_payload,
+)
 from jiuwenswarm.agents.harness.common.rails.permissions.permissions_persist import persist_cli_trusted_directory
 from jiuwenswarm.extensions.hooks_context import AgentServerChatHookContext
 from jiuwenswarm.server.runtime.agent_manager import AgentManager, ACP_DEFAULT_CAPABILITIES
@@ -65,6 +68,7 @@ from jiuwenswarm.common.config import (
     get_mcp_servers,
     get_sandbox_endpoint,
     get_sandbox_runtime,
+    get_sandbox_startup_mode,
     get_sandbox_startup_mode_explicit,
     remove_mcp_server_in_config,
     resolve_preserve_file_sharing_mode_default,
@@ -511,24 +515,6 @@ def _inject_plan_mode_activation_reminder(request: AgentRequest) -> None:
             "request.params is not a dict (type=%s), session=%s",
             type(request.params).__name__, request.session_id,
         )
-
-
-# ── Plan approval helpers ──────────────────────────────────────────────
-
-
-def _is_resuming_tool_interrupt(request: AgentRequest) -> bool:
-    """Return True when the request resumes a paused tool-call interrupt."""
-    params = request.params if isinstance(request.params, dict) else {}
-    request_id = str(params.get("request_id") or "").strip()
-    answers = params.get("answers")
-    if not request_id or not answers:
-        return False
-    source = str(params.get("source") or "").strip()
-    return source in {
-        "permission_interrupt",
-        "confirm_interrupt",
-        "ask_user_interrupt",
-    }
 
 
 class AgentWebSocketServer:
@@ -1438,11 +1424,6 @@ class AgentWebSocketServer:
                 session_id,
             )
 
-    @staticmethod
-    def _is_resuming_tool_interrupt(request: AgentRequest) -> bool:
-        """Return True when the request resumes a paused tool-call interrupt."""
-        return _is_resuming_tool_interrupt(request)
-
     async def _prepare_code_mode_chat_turn(
         self,
         request: AgentRequest,
@@ -1492,7 +1473,7 @@ class AgentWebSocketServer:
             return False
         if not self._should_sync_code_mode_state(request):
             return False
-        if self._is_resuming_tool_interrupt(request):
+        if is_interrupt_resume_payload(request.params):
             logger.info(
                 "[_ensure_code_mode_state] Skip mode sync while resuming tool interrupt "
                 "for session=%s source=%s",
@@ -2372,7 +2353,7 @@ class AgentWebSocketServer:
         }
         if resp.ok and request.req_method not in read_only_methods:
             try:
-                await self._agent_manager.reload_agents_config()
+                await self._agent_manager.reload_agents_config(get_config(), None)
             except Exception:
                 logger.debug(
                     "[AgentWebSocketServer] post-permissions reload failed (non-critical)",
@@ -2667,6 +2648,14 @@ class AgentWebSocketServer:
                 persist = {"ok": False, "error": "path is required"}
             else:
                 persist = persist_cli_trusted_directory(str(directory_path))
+                if persist.get("ok", False):
+                    try:
+                        await self._agent_manager.reload_agents_config(get_config(), None)
+                    except Exception:
+                        logger.debug(
+                            "[AgentWebSocketServer] command.add_dir reload failed (non-critical)",
+                            exc_info=True,
+                        )
             resp = AgentResponse(
                 request_id=request.request_id,
                 channel_id=request.channel_id,
@@ -3983,6 +3972,7 @@ class AgentWebSocketServer:
                 files,
                 project_dir=project_dir,
                 is_code_agent=is_code_agent,
+                startup_mode=get_sandbox_startup_mode(),
             )
         except FileNotFoundError as exc:
             raise ValueError(str(exc)) from exc
@@ -4019,6 +4009,7 @@ class AgentWebSocketServer:
             path,
             project_dir=project_dir,
             is_code_agent=is_code_agent,
+            startup_mode=get_sandbox_startup_mode(),
         )
         if match is not None:
             matched_bucket, canonical = match
@@ -4091,6 +4082,7 @@ class AgentWebSocketServer:
             path,
             project_dir=project_dir,
             is_code_agent=is_code_agent,
+            startup_mode=get_sandbox_startup_mode(),
         )
         if match is not None:
             matched_bucket, canonical = match
@@ -4247,6 +4239,7 @@ class AgentWebSocketServer:
                 files_runtime,
                 project_dir=project_dir,
                 is_code_agent=is_code_agent,
+                startup_mode=get_sandbox_startup_mode(),
             )
         except Exception as exc:  # noqa: BLE001
             logger.warning("[command.sandbox] attach effective_files failed: %s", exc)
@@ -5221,6 +5214,10 @@ class AgentWebSocketServer:
                 ok=False,
                 payload={"error": str(e)},
             )
+
+        wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
+        async with send_lock:
+            await ws.send(json.dumps(wire, ensure_ascii=False))
 
     async def send_push(self, msg) -> None:
         """AgentServer 主动向 Gateway 推送消息。

@@ -426,6 +426,48 @@ def test_load_team_spec_dict_preserves_explicit_enable_swarmflow_false(monkeypat
     assert spec["enable_swarmflow"] is False
 
 
+def test_load_team_spec_dict_adds_default_teammate_when_only_leader_configured(monkeypatch, tmp_path):
+    """A leader-only team config still needs a teammate template for dynamic spawns."""
+    config = {
+        "models": {
+            "default": {
+                "model_client_config": {
+                    "model_name": "gpt-role-default",
+                    "client_provider": "openai",
+                },
+                "model_config_obj": {},
+            }
+        },
+        **_wrap_modes_team(
+            {
+                "demo_team": {
+                    "team_name": "demo_team",
+                    "agents": {
+                        "leader": {
+                            "skills": ["team-management"],
+                        },
+                    },
+                }
+            }
+        ),
+    }
+
+    monkeypatch.setattr(
+        "jiuwenswarm.agents.harness.team.config_loader.get_config",
+        lambda: config,
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.agents.harness.team.config_loader.get_agent_teams_home",
+        lambda: tmp_path / ".agent_teams",
+    )
+
+    spec = load_team_spec_dict()
+
+    assert set(spec["agents"]) == {"leader", "teammate"}
+    assert spec["agents"]["leader"]["skills"] == ["team-management"]
+    assert "skills" not in spec["agents"]["teammate"]
+
+
 def test_load_team_spec_dict_keeps_role_defaults_when_member_alias_is_added(monkeypatch, tmp_path):
     """Role keys should remain usable after member_name aliases are injected."""
     config = {

@@ -145,6 +145,10 @@ def fork_session(
         "mode": source_mode,
         "forked_from": source_session_id,
     }
+    # 复制源会话的 channel_metadata，确保分叉会话在 /resume 按项目目录过滤时可见
+    source_channel_meta = source_meta.get("channel_metadata")
+    if source_channel_meta and isinstance(source_channel_meta, dict):
+        metadata["channel_metadata"] = dict(source_channel_meta)
     _enqueue_write(target_session_id, metadata)
 
     return {

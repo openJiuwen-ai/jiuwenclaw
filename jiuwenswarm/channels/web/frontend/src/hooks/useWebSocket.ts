@@ -95,6 +95,15 @@ function pickString(...values: unknown[]) {
   return undefined;
 }
 
+function resolveInterruptResumeMode(sessionId: string): AgentMode {
+  const sessionStore = useSessionStore.getState();
+  const session =
+    sessionStore.currentSession?.session_id === sessionId
+      ? sessionStore.currentSession
+      : sessionStore.sessions.find((item) => item.session_id === sessionId);
+  return session?.team_name?.trim() ? 'team' : sessionStore.mode;
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
 }
@@ -1044,11 +1053,15 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
         if (
           effectiveSource === 'permission_interrupt' ||
           effectiveSource === 'confirm_interrupt' ||
+          effectiveSource === 'ask_user_interrupt' ||
+          effectiveSource === 'evolution_interrupt' ||
           (effectiveSource === 'skill_evolution_approval' && approvalTransport === 'interrupt')
         ) {
+          const resolvedResumeMode = resolveInterruptResumeMode(sessionId);
           await request('chat.send', {
             session_id: sessionId,
             query: '',
+            mode: resolvedResumeMode,
             request_id: requestId,
             answers: answers,
             ...sourcePayload,
@@ -1443,9 +1456,12 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
           const cronMeta = payload.cron as Record<string, unknown> | undefined;
           const cronRunId =
             typeof cronMeta?.run_id === 'string' ? cronMeta.run_id.trim() : '';
-          const isCronPlaceholderContent = /^\[cron\].*正在执行中/.test(content);
+          const isCronPlaceholderContent =
+            cronMeta?.is_placeholder === true ||
+            /正在执行中，结果稍后补发/.test(content) ||
+            /^\[cron\].*正在执行中/.test(content);
 
-          // 正式结果：替换同 run_id 的占位气泡，或最近的 [cron]…正在执行中…
+          // 正式结果：替换同 run_id 的占位气泡，或最近的定时任务「正在执行中」占位
           if (!isCronPlaceholderContent) {
             let placeholderId: string | null = null;
             if (cronRunId) {
@@ -1456,7 +1472,10 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
               for (let i = messages.length - 1; i >= 0; i -= 1) {
                 const msg = messages[i];
                 if (msg.role !== 'assistant' || typeof msg.content !== 'string') continue;
-                if (/^\[cron\].*正在执行中/.test(msg.content)) {
+                if (
+                  /正在执行中，结果稍后补发/.test(msg.content) ||
+                  /^\[cron\].*正在执行中/.test(msg.content)
+                ) {
                   placeholderId = msg.id;
                   break;
                 }

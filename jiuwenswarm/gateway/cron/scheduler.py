@@ -208,7 +208,7 @@ def _format_cron_broadcast_text(*, job_name: str, text: str, is_placeholder: boo
     if is_placeholder or body.startswith("[cron]"):
         return body
     name = str(job_name or "").strip() or "cron"
-    return f"[cron] {name} result:\n\n{body}"
+    return f"{name} result:\n\n{body}"
 
 
 def _cron_next_push_dt(cron_expr: str, base_dt: datetime) -> datetime:
@@ -298,6 +298,42 @@ class CronSchedulerService:
     def is_running(self) -> bool:
         return self._running
 
+    async def _cancel_agent_session(self, state: CronRunState) -> None:
+        """Fire-and-forget: 向 AgentServer 发送 CHAT_CANCEL 中断请求。
+
+        当 cron_jobs.json 被删除或 job 被移除后，gateway 的 asyncio Task
+        被 task.cancel() 取消，但这只终止了 gateway 端等待响应的协程。
+        AgentServer 不知道请求已被取消，会继续执行 LLM 调用。此方法
+        主动发送中断请求，让后端也停止处理，彻底消灭"幽灵任务"。
+        """
+        try:
+            interrupt_env = e2a_from_agent_fields(
+                request_id=f"cron-cancel-{state.run_id}",
+                channel_id="__cron__",
+                session_id=f"cron_{state.job_id}",
+                req_method=ReqMethod.CHAT_CANCEL,
+                params={"cron": {"job_id": state.job_id, "run_id": state.run_id}},
+                is_stream=False,
+                timestamp=self._now_fn(),
+            )
+            await self._agent_client.send_request(interrupt_env)
+            logger.info(
+                "[Cron] AgentServer interrupt sent for ghost task: "
+                "job_id=%s run_id=%s",
+                state.job_id,
+                state.run_id,
+            )
+        except (OSError, RuntimeError) as exc:
+            # Fire-and-forget: 网络断开、连接超时或 AgentServer 不可达
+            # 都不影响主流程，只是最佳努力的中断
+            logger.warning(
+                "[Cron] AgentServer interrupt failed for ghost task "
+                "(non-critical): job_id=%s run_id=%s error=%s",
+                state.job_id,
+                state.run_id,
+                exc,
+            )
+
     async def start(self) -> None:
         if self._running:
             return
@@ -351,20 +387,29 @@ class CronSchedulerService:
         # 取消并清理不再存在于 store 中的运行任务（ghost tasks）。
         # 这些 task 的 job 已经没有持久化记录了，继续运行只会产生
         # 无法被用户管理（无 job_id 可删除）的后台任务。
+        # 同时向 AgentServer 发送 CHAT_CANCEL 中断请求，否则
+        # task.cancel() 只取消 gateway 端的等待协程，AgentServer
+        # 仍会继续执行 LLM 请求（用户看到的"后台还在派发"现象）。
         ghost_run_ids = [
             rid for rid, state in self._runs.items()
             if state.job_id not in new_job_ids
         ]
         for rid in ghost_run_ids:
+            state = self._runs[rid]
             task = self._run_tasks.pop(rid, None)
             if task is not None and not task.done():
                 logger.info(
                     "[Cron] cancelling ghost run task: job_id=%s run_id=%s "
                     "(job no longer in store)",
-                    self._runs[rid].job_id,
+                    state.job_id,
                     rid,
                 )
                 task.cancel()
+                # 向 AgentServer 发送 fire-and-forget 中断请求，让后端真正停止 LLM 处理
+                asyncio.create_task(
+                    self._cancel_agent_session(state),
+                    name=f"cron-ghost-cancel-{state.job_id}",
+                )
             self._runs.pop(rid, None)
 
         now = self._now_fn()
@@ -653,16 +698,25 @@ class CronSchedulerService:
             except asyncio.CancelledError:
                 state.status = "failed"
                 state.error = "cancelled"
+                # Ghost task: cancelled by reload because job no longer in store.
+                # Do NOT schedule push_update — the user has removed this job and
+                # should not see any result from it. Raising CancelledError here
+                # so the finally block can detect it via state.error == "cancelled"
+                # and skip push_update scheduling.
                 raise
             except Exception as exc:  # noqa: BLE001
                 state.status = "failed"
                 state.error = str(exc)
             finally:
                 state.finished_at = self._now_fn()
-                # Ensure failed runs also produce result_text so push logic can deliver it
-                if not state.result_text and state.error:
+                is_cancelled_ghost = state.error == "cancelled"
+                should_deliver_result = bool(state.result_text) and not is_cancelled_ghost
+                # Ensure failed runs also produce result_text so push logic can deliver it.
+                # But for cancelled ghost tasks, skip — no result should be pushed for
+                # a job the user has removed.
+                if not state.result_text and state.error and not is_cancelled_ghost:
                     state.result_text = f"[cron] 任务执行失败: {state.error}"
-                if not state.pushed_final and state.result_text:
+                if not state.pushed_final and state.result_text and not is_cancelled_ghost:
                     logger.info(
                         "[Cron] scheduling push_update after agent finished "
                         "job=%s run_id=%s text_len=%d",
@@ -670,8 +724,11 @@ class CronSchedulerService:
                         run_id,
                         len(state.result_text or ""),
                     )
+                    push_dt = datetime.fromisoformat(state.push_at_iso)
+                    now_dt = datetime.fromtimestamp(self._now_fn(), tz=ZoneInfo(job.timezone))
+                    scheduled_dt = max(now_dt, push_dt)
                     self._schedule_event(
-                        datetime.fromtimestamp(self._now_fn(), tz=ZoneInfo(job.timezone)),
+                        scheduled_dt,
                         "push_update", job.id, run_id,
                     )
 
@@ -726,7 +783,7 @@ class CronSchedulerService:
                 getattr(envelope, "request_id", ""),
                 exec_session_id,
             )
-        except Exception as exc:  # noqa: BLE001
+        except (OSError, RuntimeError, ValueError) as exc:
             logger.warning(
                 "[Cron] failed to cancel team agent session request_id=%s session_id=%s error=%s",
                 getattr(envelope, "request_id", ""),
@@ -901,7 +958,7 @@ class CronSchedulerService:
             return
 
         # Not ready: send placeholder
-        placeholder = f"[cron] {job.name} 正在执行中，结果稍后补发（push_at={state.push_at_iso}）"
+        placeholder = f"{job.name} 正在执行中，结果稍后补发（push_at={state.push_at_iso}）"
         await self._push_to_targets(job, state, text=placeholder, is_placeholder=True)
         state.placeholder_sent = True
 

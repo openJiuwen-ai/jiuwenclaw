@@ -148,7 +148,7 @@ const ACCENT_COLORS: Record<Exclude<AccentColorName, "default">, string> = {
 };
 
 const _initConfig = loadTuiConfig();
-let currentThemeName: ThemeName = _initConfig.theme ?? "default";
+let currentThemeName: ThemeName = _initConfig.theme ?? "dark";
 let currentAccentColor: AccentColorName = "default";
 
 function detectSystemTheme(): "light" | "dark" {

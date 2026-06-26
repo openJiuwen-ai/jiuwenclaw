@@ -2585,6 +2585,7 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             owner_scopes = params.get("owner_scopes", {})
             deny_guidance = params.get("deny_guidance_message")
             update_permissions_owner_scopes_in_config(owner_scopes, deny_guidance)
+            await _notify_config_saved_once({}, ["permissions"], force=True)
             await channel.send_response(ws, req_id, ok=True, payload={"ok": True})
         except Exception as e:
             logger.exception("[permissions.owner_scopes.set] %s", e)
@@ -2628,6 +2629,12 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
                 )
                 return
             out = resp.payload if isinstance(resp.payload, dict) else {}
+            if resp.ok and req_method not in (
+                ReqMethod.PERMISSIONS_TOOLS_GET,
+                ReqMethod.PERMISSIONS_RULES_GET,
+                ReqMethod.PERMISSIONS_APPROVAL_OVERRIDES_GET,
+            ):
+                await _notify_config_saved_once({}, ["permissions"], force=True)
             await channel.send_response(ws, req_id, ok=True, payload=out)
             return
 

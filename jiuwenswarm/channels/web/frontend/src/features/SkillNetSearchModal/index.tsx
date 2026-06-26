@@ -395,7 +395,7 @@ export function SkillNetSearchModal({
   }, []);
 
   const handleInstall = useCallback(
-    async (item: SkillNetItem) => {
+    async (item: SkillNetItem, forceOverwrite: boolean = false) => {
       const url = item.skill_url;
       if (!url) return;
       if (installingUrlsRef.current.has(url)) return;
@@ -427,12 +427,28 @@ export function SkillNetSearchModal({
           skill?: { name?: string };
         }>(
           "skills.skillnet.install",
-          withSession({ url: item.skill_url, force: true })
+          withSession({ url: item.skill_url, force: forceOverwrite })
         );
         if (!data.success) {
           const message = data.detail_key
             ? t(data.detail_key, data.detail_params as Record<string, string> | undefined)
             : (data.detail || t("skills.errors.skillNetInstallFailed"));
+
+          // 如果是"已安装"错误且尚未强制覆盖，则弹窗确认
+          if (!forceOverwrite && data.detail_key === "skills.skillNet.errors.skillAlreadyInstalled") {
+            installingUrlsRef.current.delete(url);
+            syncInstallingState();
+
+            const confirmed = window.confirm(
+              t("skills.skillNet.replaceConfirm", { name: item.skill_name })
+            );
+            if (confirmed) {
+              // 用户确认后重新调用，带 force=true
+              await handleInstall(item, true);
+            }
+            return;
+          }
+
           throw new Error(message);
         }
 
@@ -463,6 +479,22 @@ export function SkillNetSearchModal({
               const message = st.detail_key
                 ? t(st.detail_key, st.detail_params as Record<string, string> | undefined)
                 : (st.detail || t("skills.errors.skillNetInstallFailed"));
+
+              // 如果是"已安装"错误且尚未强制覆盖，则弹窗确认
+              if (!forceOverwrite && st.detail_key === "skills.skillNet.errors.skillAlreadyInstalled") {
+                installingUrlsRef.current.delete(url);
+                syncInstallingState();
+
+                const confirmed = window.confirm(
+                  t("skills.skillNet.replaceConfirm", { name: item.skill_name })
+                );
+                if (confirmed) {
+                  // 用户确认后重新调用，带 force=true
+                  await handleInstall(item, true);
+                }
+                return;
+              }
+
               throw new Error(message);
             }
             await new Promise((r) => window.setTimeout(r, pollMs));

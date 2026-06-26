@@ -56,6 +56,12 @@ _KNOWN_JIUWENSWARM_SESSION_PREFIXES = (
     "whatsapp_",
 )
 _SKILL_EVOLUTION_APPROVAL_SCHEMA = "openjiuwen.skill_evolution_approval.v1"
+_INTERRUPT_RESUME_SOURCES = frozenset({
+    "ask_user_interrupt",
+    "confirm_interrupt",
+    "permission_interrupt",
+    "evolution_interrupt",
+})
 
 _A2UI_OPEN_TAG_MARKER = "<a2ui-json>"
 
@@ -300,11 +306,7 @@ class MessageHandler(ABC):
         source = str(msg.params.get("source") or "").strip()
         answers = msg.params.get("answers")
         request_id = str(msg.params.get("request_id") or "").strip()
-        if bool(request_id) and isinstance(answers, list) and source in {
-            "ask_user_interrupt",
-            "confirm_interrupt",
-            "permission_interrupt",
-        }:
+        if bool(request_id) and isinstance(answers, list) and source in _INTERRUPT_RESUME_SOURCES:
             return True
         return cls._is_interrupt_evolution_approval_answer_payload(msg.params)
 
@@ -2269,6 +2271,8 @@ class MessageHandler(ABC):
             return False
         if cls._is_evolution_approval_request_id(payload.get("request_id")):
             return True
+        if payload.get("source") == "evolution_interrupt":
+            return True
         if payload.get("source") == "skill_evolution_approval":
             return True
         if payload.get("approval_schema") == _SKILL_EVOLUTION_APPROVAL_SCHEMA:
@@ -2310,6 +2314,8 @@ class MessageHandler(ABC):
     def _is_interrupt_evolution_approval_answer_payload(cls, payload: Any) -> bool:
         if not cls._is_evolution_approval_payload(payload):
             return False
+        if payload.get("source") == "evolution_interrupt":
+            return True
         evolution_meta = payload.get("evolution_meta")
         return (
             isinstance(evolution_meta, dict)
@@ -2342,7 +2348,6 @@ class MessageHandler(ABC):
         enriched = dict(payload)
         enriched["source"] = "skill_evolution_approval"
         enriched.setdefault("approval_schema", _SKILL_EVOLUTION_APPROVAL_SCHEMA)
-        request_id = enriched.get("request_id")
         evolution_meta = enriched.get("evolution_meta")
         if not isinstance(evolution_meta, dict):
             evolution_meta = {}
@@ -2395,7 +2400,12 @@ class MessageHandler(ABC):
             "answers": [{"selected_options": ["接收"]}],
         })
         if request_id.startswith("call_"):
-            params["evolution_meta"]["approval_transport"] = "interrupt"
+            params = {
+                "request_id": request_id,
+                "answers": [{"selected_options": ["接收"]}],
+                "source": "evolution_interrupt",
+                "approval_kind": "evolve",
+            }
 
         return Message(
             id=f"auto_evolve_answer_{int(time.time() * 1000):x}_{secrets.token_hex(3)}",

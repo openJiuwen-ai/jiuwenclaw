@@ -191,6 +191,16 @@ class SwarmTeamSkillEvolutionRail(TeamSkillEvolutionRail):
             team_manager = get_team_manager(self._swarm_channel)
             team_manager.register_team_live_rail(self._swarm_session_id, agent, self)
             team_manager.register_team_skill_rail(self._swarm_session_id, self)
+            if team_manager.consume_team_evolution_watcher_deferred(self._swarm_session_id):
+                from jiuwenswarm.server.runtime.agent_adapter.team_helpers import (
+                    ensure_team_evolution_watcher,
+                )
+
+                ensure_team_evolution_watcher(
+                    self._swarm_channel,
+                    self._swarm_session_id,
+                    source="rail_registered",
+                )
             _register_team_rail_context(
                 self._swarm_channel,
                 self._swarm_session_id,

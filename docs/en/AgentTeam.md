@@ -505,6 +505,12 @@ Yes. Users can observe:
 - Agent member status  
 - Intermediate artifacts and consolidated results  
 
+### Q6: Can multiple Team sessions run in the same channel at the same time?
+
+Local runtime supports multiple concurrent Team sessions in the same channel. Switching the currently viewed session only affects the UI display and does not stop background tasks of other sessions; pause, cancel, and delete operations act on the specified session only.
+
+Distributed runtime keeps single-active-session semantics per channel. Creating or switching to another Team session first stops the existing active or pending session in that channel, so remote member bootstrap, transport connections, and runtime resources are not reused across sessions.
+
 ---
 
 ## Appendix

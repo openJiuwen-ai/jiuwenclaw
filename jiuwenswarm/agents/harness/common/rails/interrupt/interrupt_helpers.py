@@ -20,10 +20,46 @@ from jiuwenswarm.agents.harness.code.rails.code_plan_approval_interrupt_rail imp
 from jiuwenswarm.common.utils import logger
 
 SKILL_EVOLUTION_APPROVAL_SCHEMA = "openjiuwen.skill_evolution_approval.v1"
+EVOLUTION_INTERRUPT_SOURCE = "evolution_interrupt"
+LEGACY_SKILL_EVOLUTION_APPROVAL_SOURCE = "skill_evolution_approval"
+INTERRUPT_RESUME_SOURCES = frozenset({
+    "permission_interrupt",
+    "confirm_interrupt",
+    "ask_user_interrupt",
+    EVOLUTION_INTERRUPT_SOURCE,
+})
+EVOLUTION_INTERRUPT_METADATA_SOURCES = frozenset({
+    EVOLUTION_INTERRUPT_SOURCE,
+    LEGACY_SKILL_EVOLUTION_APPROVAL_SOURCE,
+})
 SKILL_EVOLUTION_APPROVAL_TOOL_KINDS = {
     "evolve_skill_experiences": "evolve",
     "simplify_skill_experiences": "simplify",
 }
+
+
+def has_interrupt_resume_payload(params: Any) -> bool:
+    if not isinstance(params, dict):
+        return False
+    if not str(params.get("request_id") or "").strip():
+        return False
+    answers = params.get("answers")
+    return isinstance(answers, list) and bool(answers)
+
+
+def is_interrupt_resume_payload(params: Any) -> bool:
+    if not has_interrupt_resume_payload(params):
+        return False
+    source = str(params.get("source") or "").strip()
+    if source in INTERRUPT_RESUME_SOURCES:
+        return True
+    if source != LEGACY_SKILL_EVOLUTION_APPROVAL_SOURCE:
+        return False
+    evolution_meta = params.get("evolution_meta")
+    return (
+        isinstance(evolution_meta, dict)
+        and evolution_meta.get("approval_transport") == "interrupt"
+    )
 
 
 def build_permission_rail(
@@ -646,6 +682,13 @@ def _extract_tool_name(value_obj: Any) -> str:
     return ""
 
 
+def _extract_interrupt_metadata(value_obj: Any) -> dict[str, Any]:
+    metadata = getattr(value_obj, "metadata", None)
+    if metadata is None and isinstance(value_obj, dict):
+        metadata = value_obj.get("metadata")
+    return dict(metadata) if isinstance(metadata, dict) else {}
+
+
 def _normalize_question_option(option: dict[str, Any]) -> dict[str, Any]:
     normalized = {
         "label": str(option.get("label") or option.get("value") or "").strip(),
@@ -700,21 +743,29 @@ def _classify_structured_approval(
     question_data: dict[str, Any],
 ) -> dict[str, Any] | None:
     del question_data
+    metadata = _extract_interrupt_metadata(value_obj)
+    source = str(metadata.get("source") or "").strip()
+    interrupt_kind = str(metadata.get("interrupt_kind") or "").strip()
     tool_name = _extract_tool_name(value_obj)
-    if tool_name not in SKILL_EVOLUTION_APPROVAL_TOOL_KINDS:
-        return None
-    approval_kind = SKILL_EVOLUTION_APPROVAL_TOOL_KINDS[tool_name]
 
-    return {
-        "source": "skill_evolution_approval",
-        "approval_schema": SKILL_EVOLUTION_APPROVAL_SCHEMA,
-        "evolution_meta": {
-            "event_kind": "approval",
-            "rail_kind": "regular",
-            "approval_kind": approval_kind,
-            "approval_transport": "interrupt",
-        },
+    is_evolution_interrupt = (
+        source in EVOLUTION_INTERRUPT_METADATA_SOURCES
+        or interrupt_kind == LEGACY_SKILL_EVOLUTION_APPROVAL_SOURCE
+    )
+    if not is_evolution_interrupt and tool_name not in SKILL_EVOLUTION_APPROVAL_TOOL_KINDS:
+        return None
+    approval_kind = str(metadata.get("approval_kind") or "").strip()
+    if approval_kind not in {"evolve", "simplify"}:
+        approval_kind = SKILL_EVOLUTION_APPROVAL_TOOL_KINDS.get(tool_name, "evolve")
+
+    payload: dict[str, Any] = {
+        "source": EVOLUTION_INTERRUPT_SOURCE,
+        "approval_kind": approval_kind,
     }
+    evolution_context = str(metadata.get("evolution_context") or "").strip()
+    if evolution_context in {"agent", "team"}:
+        payload["evolution_context"] = evolution_context
+    return payload
 
 
 def extract_question_from_interaction(payload: Any) -> dict | None:

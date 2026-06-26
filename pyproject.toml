@@ -45,6 +45,8 @@ dependencies = [
     "httpx[socks]>=0.27",
     "json-repair>=0.30.0",
     "gitcode-api>=1.2.20",
+    "faiss-cpu>=1.7.0",
+    "numpy>=1.24.0",
 ]
 
 [project.optional-dependencies]

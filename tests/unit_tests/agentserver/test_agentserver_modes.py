@@ -334,6 +334,53 @@ def test_build_inputs_maps_skill_evolution_interrupt_answers_to_actions(monkeypa
         assert "approved" not in interactive_input.user_inputs["call_123"]
 
 
+@pytest.mark.parametrize(
+    "params",
+    [
+        {
+            "query": "",
+            "request_id": "call_123",
+            "answers": [{"selected_options": ["allow_always"], "custom_input": ""}],
+            "source": "evolution_interrupt",
+            "approval_kind": "evolve",
+        },
+        {
+            "query": "",
+            "request_id": "call_123",
+            "answers": [{"selected_options": ["allow_always"], "custom_input": ""}],
+            "source": "skill_evolution_approval",
+            "approval_schema": "openjiuwen.skill_evolution_approval.v1",
+            "evolution_meta": {
+                "event_kind": "approval",
+                "rail_kind": "regular",
+                "approval_kind": "evolve",
+                "approval_transport": "interrupt",
+            },
+        },
+    ],
+)
+def test_agent_ws_resuming_tool_interrupt_recognizes_evolution_interrupt_approval(params):
+    from jiuwenswarm.agents.harness.common.rails.interrupt.interrupt_helpers import (
+        is_interrupt_resume_payload,
+    )
+
+    passive_params = {
+        "query": "",
+        "request_id": "regular_123",
+        "answers": [{"selected_options": ["allow_always"], "custom_input": ""}],
+        "source": "skill_evolution_approval",
+        "approval_schema": "openjiuwen.skill_evolution_approval.v1",
+        "evolution_meta": {
+            "event_kind": "approval",
+            "rail_kind": "regular",
+            "approval_kind": "evolve",
+        },
+    }
+
+    assert is_interrupt_resume_payload(params)
+    assert not is_interrupt_resume_payload(passive_params)
+
+
 def test_build_inputs_maps_team_plan_confirm_interrupt_answers_to_interactive_input(monkeypatch):
     from openjiuwen.core.session.interaction.interactive_input import InteractiveInput
     from jiuwenswarm.server.runtime.agent_adapter import interface as interface_module
@@ -577,6 +624,151 @@ def test_process_message_stream_routes_team_plan_confirm_interrupt_as_team_follo
     assert chunks[-1].is_complete is True
 
 
+def test_process_message_stream_routes_web_evolution_interrupt_without_user_history(monkeypatch):
+    from openjiuwen.core.session.interaction.interactive_input import InteractiveInput
+    from jiuwenswarm.server.runtime.agent_adapter import interface as interface_module
+
+    class FakeSessionManager:
+        @staticmethod
+        def get_session_id(session_id=None):
+            return session_id or "default"
+
+        @staticmethod
+        async def submit_task(_session_id, task_factory):
+            await task_factory()
+
+    class FakeAdapter:
+        seen_inputs = None
+
+        @staticmethod
+        async def process_message_stream_impl(*_args, **_kwargs):
+            _request, inputs = _args
+            FakeAdapter.seen_inputs = inputs
+            yield AgentResponseChunk(
+                request_id="req-stream-answer",
+                channel_id="web",
+                payload={"event_type": "chat.done"},
+                is_complete=True,
+            )
+
+    history_records = []
+
+    monkeypatch.setattr(interface_module, "SessionManager", FakeSessionManager)
+    monkeypatch.setattr(interface_module, "get_config", lambda: {"preferred_language": "zh"})
+    monkeypatch.setattr(interface_module, "get_memory_mode", lambda _config: "disabled")
+    monkeypatch.setattr(
+        interface_module.JiuWenSwarm,
+        "_ensure_adapter",
+        lambda self, mode="agent": FakeAdapter(),
+    )
+    monkeypatch.setattr(
+        interface_module,
+        "append_history_record",
+        lambda **kwargs: history_records.append(kwargs),
+    )
+
+    request = AgentRequest(
+        request_id="req-stream-answer",
+        channel_id="web",
+        session_id="web-session",
+        params={
+            "query": "",
+            "mode": "agent.plan",
+            "request_id": "call_evolve_1",
+            "answers": [{"selected_options": ["allow_always"], "custom_input": ""}],
+            "source": "evolution_interrupt",
+            "approval_kind": "evolve",
+        },
+        is_stream=True,
+    )
+
+    async def collect_chunks():
+        return [chunk async for chunk in interface_module.JiuWenSwarm().process_message_stream(request)]
+
+    chunks = asyncio.run(collect_chunks())
+
+    assert isinstance(FakeAdapter.seen_inputs["query"], InteractiveInput)
+    assert FakeAdapter.seen_inputs["query"].user_inputs == {
+        "call_evolve_1": {"action": "allow_always"}
+    }
+    assert [record for record in history_records if record["role"] == "user"] == []
+    assert chunks[0].payload == {"event_type": "chat.done"}
+    assert chunks[-1].is_complete is True
+
+
+def test_process_message_stream_keeps_passive_evolution_approval_as_user_history(monkeypatch):
+    from openjiuwen.core.session.interaction.interactive_input import InteractiveInput
+    from jiuwenswarm.server.runtime.agent_adapter import interface as interface_module
+
+    class FakeSessionManager:
+        @staticmethod
+        def get_session_id(session_id=None):
+            return session_id or "default"
+
+        @staticmethod
+        async def submit_task(_session_id, task_factory):
+            await task_factory()
+
+    class FakeAdapter:
+        seen_inputs = None
+
+        @staticmethod
+        async def process_message_stream_impl(*_args, **_kwargs):
+            _request, inputs = _args
+            FakeAdapter.seen_inputs = inputs
+            yield AgentResponseChunk(
+                request_id="req-stream-answer",
+                channel_id="web",
+                payload={"event_type": "chat.done"},
+                is_complete=True,
+            )
+
+    history_records = []
+
+    monkeypatch.setattr(interface_module, "SessionManager", FakeSessionManager)
+    monkeypatch.setattr(interface_module, "get_config", lambda: {"preferred_language": "zh"})
+    monkeypatch.setattr(interface_module, "get_memory_mode", lambda _config: "disabled")
+    monkeypatch.setattr(
+        interface_module.JiuWenSwarm,
+        "_ensure_adapter",
+        lambda self, mode="agent": FakeAdapter(),
+    )
+    monkeypatch.setattr(
+        interface_module,
+        "append_history_record",
+        lambda **kwargs: history_records.append(kwargs),
+    )
+
+    request = AgentRequest(
+        request_id="req-stream-answer",
+        channel_id="web",
+        session_id="web-session",
+        params={
+            "query": "",
+            "mode": "agent.plan",
+            "request_id": "regular_evolve_1",
+            "answers": [{"selected_options": ["allow_always"], "custom_input": ""}],
+            "source": "skill_evolution_approval",
+            "approval_schema": "openjiuwen.skill_evolution_approval.v1",
+            "evolution_meta": {
+                "event_kind": "approval",
+                "rail_kind": "regular",
+                "approval_kind": "evolve",
+            },
+        },
+        is_stream=True,
+    )
+
+    async def collect_chunks():
+        return [chunk async for chunk in interface_module.JiuWenSwarm().process_message_stream(request)]
+
+    chunks = asyncio.run(collect_chunks())
+
+    assert isinstance(FakeAdapter.seen_inputs["query"], InteractiveInput)
+    assert [record for record in history_records if record["role"] == "user"]
+    assert chunks[-1].is_complete is True
+
+
 def test_process_message_stream_rejects_malformed_team_plan_approval_payload(monkeypatch):
     from jiuwenswarm.server.runtime.agent_adapter import interface as interface_module
 
@@ -663,9 +855,17 @@ def test_process_message_stream_treats_team_plan_confirm_resume_as_team_follow_u
             )
 
     class FakeTeamManager:
-        active_session_id = None
-        pending_session_id = None
         interact_calls = []
+
+        @staticmethod
+        def is_runtime_active(session_id: str) -> bool:
+            assert session_id == "team-session"
+            return False
+
+        @staticmethod
+        def is_runtime_pending(session_id: str) -> bool:
+            assert session_id == "team-session"
+            return False
 
         @staticmethod
         def has_stream_task(session_id: str) -> bool:
@@ -767,8 +967,15 @@ def test_process_message_stream_treats_plain_team_query_as_first_request_after_r
             )
 
     class FakeTeamManager:
-        active_session_id = None
-        pending_session_id = None
+        @staticmethod
+        def is_runtime_active(session_id: str) -> bool:
+            assert session_id == "team-session"
+            return False
+
+        @staticmethod
+        def is_runtime_pending(session_id: str) -> bool:
+            assert session_id == "team-session"
+            return False
 
         @staticmethod
         def has_stream_task(session_id: str) -> bool:
