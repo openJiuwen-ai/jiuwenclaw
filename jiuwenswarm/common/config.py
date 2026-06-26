@@ -25,6 +25,7 @@ logger = logging.getLogger(__name__)
 
 def _config_cache_enabled() -> bool:
     return os.getenv("JIUWENSWARM_DEV", "0") != "1"
+ 
 _config_cache: dict[str, Any] = {}  # {"data": <parsed config>} when valid
 _config_cache_valid: bool = False
 _config_cache_lock = threading.RLock()
@@ -153,8 +154,10 @@ def get_config():
     path_key = str(path.resolve())
 
     with _config_cache_lock:
+        cache_enabled = _config_cache_enabled()
         file_key = None
-        if not _config_cache_enabled():
+        
+        if not cache_enabled:
             # 开发模式：stat 检测文件变化，外部编辑即时生效
             file_key = _config_file_cache_key(path)
 
@@ -165,7 +168,7 @@ def get_config():
             and "data" in _config_cache
             and _config_cache.get("_path") == path_key
             and _config_cache.get("_env_signature") == env_signature
-            and (_config_cache_enabled() or (file_key and file_key == _config_cache.get("_key")))
+            and (cache_enabled or (file_key and file_key == _config_cache.get("_key")))
         )
         if cache_matches:
             # 只读返回，防止调用方意外改污染缓存
@@ -182,7 +185,7 @@ def get_config():
         _config_cache["_path"] = path_key
         _config_cache["_env_names"] = env_names
         _config_cache["_env_signature"] = _env_cache_signature(env_names)
-        if not _config_cache_enabled():
+        if not cache_enabled:
             _config_cache["_key"] = file_key
         _config_cache_valid = True
         return config_base
