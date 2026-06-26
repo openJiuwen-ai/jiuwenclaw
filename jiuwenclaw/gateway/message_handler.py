@@ -2070,10 +2070,14 @@ class MessageHandler(ABC):
         cls,
         files: list[dict[str, Any]] | None,
     ) -> list[dict[str, Any]] | None:
-        """保留 url/name 供 Agent 自行下载；仅保留 Agent 可用的 path（已成功传输或本地可读）。"""
+        """保留 url/name 供 Agent 自行拉取。
+
+        企业版（``AGENT_RUNTIME`` 非空）且有 url 时，不向 Agent 传递 Gateway 本地 path。
+        """
         if not files:
             return files
 
+        strip_path_for_url = bool(os.getenv("AGENT_RUNTIME", "").strip())
         normalized: list[dict[str, Any]] = []
         for file_info in files:
             if not isinstance(file_info, dict):
@@ -2081,6 +2085,7 @@ class MessageHandler(ABC):
                 continue
 
             updated = dict(file_info)
+
             file_url = str(updated.get("url") or updated.get("uri") or "").strip()
             file_name = (
                 str(updated.get("name") or updated.get("filename") or "unknown_file").strip()
@@ -2092,14 +2097,23 @@ class MessageHandler(ABC):
                 updated["url"] = file_url
 
             local_path = str(updated.get("path") or "").strip()
-            transferred = bool(updated.get("_transferred"))
-            if local_path and (transferred or Path(local_path).exists()):
-                updated["path"] = local_path
-            elif file_url:
-                # Gateway 侧无效 path 对 Agent 无意义，改由 Agent 通过 url 下载
-                updated.pop("path", None)
-            elif local_path:
-                updated["path"] = local_path
+            if strip_path_for_url:
+                if file_url:
+                    # Web/MinIO 附件只传 url，避免 Agent 看到 Gateway path 后先 read_file
+                    updated.pop("path", None)
+                elif local_path:
+                    updated["path"] = local_path
+                else:
+                    updated.pop("path", None)
+            else:
+                transferred = bool(updated.get("_transferred"))
+                if local_path and (transferred or Path(local_path).exists()):
+                    updated["path"] = local_path
+                elif file_url:
+                    # Gateway 侧无效 path 对 Agent 无意义，改由 Agent 通过 url 下载
+                    updated.pop("path", None)
+                elif local_path:
+                    updated["path"] = local_path
 
             normalized.append(updated)
 
