@@ -2,15 +2,24 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 import logging
 import os
 import sys
 import time
+from pathlib import Path
 
 import aiohttp
 import requests
 
+GATE_OBS_STATE_FILE = ".gate_obs_upload.json"
+_GATE_OBS_MIME_TYPE = "application/zip"
+
 logger = logging.getLogger(__name__)
+
+
+def gate_obs_state_path(task_workspace: str | Path) -> Path:
+    return Path(task_workspace) / GATE_OBS_STATE_FILE
 
 OSMS_SLB_URL = os.environ.get('SANDBOX_OSMS_SLB_URL', 'null')
 OSMS_PREPARE_URL = OSMS_SLB_URL.rstrip('/') + '/osms/v1/file/manager/prepare'
@@ -184,6 +193,29 @@ async def upload_file(file_path: str) -> str | None:
     except Exception as e:
         logger.error(f"上传文件失败: {e}", exc_info=True)
         return None
+
+
+def record_gate_obs_upload(
+    task_workspace: str | Path,
+    url: str,
+    packaged_path: str | Path,
+) -> None:
+    """Write the gate upload OBS URL to a hidden file under the workspace root."""
+    obs_url = str(url or "").strip()
+    if not obs_url:
+        return
+
+    packaged = Path(packaged_path)
+    path = gate_obs_state_path(task_workspace)
+    payload = {
+        "url": obs_url,
+        "filename": packaged.name,
+        "mimeType": _GATE_OBS_MIME_TYPE,
+    }
+    try:
+        path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+    except Exception as exc:
+        logger.warning("[upload_skill] failed to write %s: %s", path, exc)
 
 
 def main(argv: list[str]) -> int:

@@ -7,8 +7,10 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import secrets
 import sys
 import uuid
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, AsyncIterator
 
@@ -63,6 +65,7 @@ from jiuwenclaw.agentserver.skilldev_agent.utils.finalize import (
     get_static_review_report,
     repackage_if_stale,
 )
+from jiuwenclaw.agentserver.skilldev_agent.utils.gate_obs_upload import pop_gate_obs_upload
 from jiuwenclaw.agentserver.skilldev.session_history.service import SkillDevSessionHistoryService
 from jiuwenclaw.agentserver.skilldev_agent.utils.session_recorder import AgentSessionRecorder
 from jiuwenclaw.agentserver.skilldev_agent.utils.skill_search import search_skills
@@ -798,6 +801,35 @@ class SkillDevDeepAdapter:
         ):
             yield chunk
 
+    async def _yield_gate_obs_cleanup_if_needed(
+        self,
+        *,
+        task_workspace: Path,
+        task_id: str,
+        rid: str,
+        cid: str,
+    ) -> AsyncIterator[AgentResponseChunk]:
+        record = pop_gate_obs_upload(task_workspace)
+        if not record or not record.get("url"):
+            return
+
+        export_id = f"gate_{secrets.token_hex(3)}"
+        export_time = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        yield AgentResponseChunk(
+            request_id=rid,
+            channel_id=cid,
+            payload={
+                "event_type": "skilldev.gate_obs_cleanup",
+                "task_id": task_id,
+                "filename": record.get("filename") or "",
+                "url": record["url"],
+                "mimeType": record.get("mimeType") or "application/zip",
+                "exportId": export_id,
+                "exportedAt": export_time,
+            },
+            is_complete=False,
+        )
+
     async def _finalize_direct_import_run(
         self,
         *,
@@ -806,6 +838,14 @@ class SkillDevDeepAdapter:
         rid: str,
         cid: str,
     ) -> AsyncIterator[AgentResponseChunk]:
+        async for chunk in self._yield_gate_obs_cleanup_if_needed(
+            task_workspace=task_workspace,
+            task_id=task_id,
+            rid=rid,
+            cid=cid,
+        ):
+            yield chunk
+
         skill_files = collect_output_packages(task_workspace / "output")
 
         if skill_files:
@@ -848,6 +888,14 @@ class SkillDevDeepAdapter:
         rid: str,
         cid: str,
     ) -> AsyncIterator[AgentResponseChunk]:
+        async for chunk in self._yield_gate_obs_cleanup_if_needed(
+            task_workspace=task_workspace,
+            task_id=task_id,
+            rid=rid,
+            cid=cid,
+        ):
+            yield chunk
+
         static_result, static_report = get_static_review_report(task_workspace)
         benchmark, report, iteration = get_review_benchmark(task_workspace)
         has_static = static_result is not None

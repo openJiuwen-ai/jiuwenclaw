@@ -197,6 +197,7 @@ class EventType(Enum):
     SKILLDEV_TOOL_CALL = "skilldev.tool_call"
     SKILLDEV_TOOL_RESULT = "skilldev.tool_result"
     SKILLDEV_FILE_READY = "skilldev.file_ready"
+    SKILLDEV_GATE_OBS_CLEANUP = "skilldev.gate_obs_cleanup"
 
 
 class Mode(Enum):

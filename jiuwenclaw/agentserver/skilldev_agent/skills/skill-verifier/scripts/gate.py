@@ -20,7 +20,7 @@ import yaml
 
 from scripts.validate import find_skill_root, validate_skill
 from scripts.package import package_skill
-from scripts.upload_skill import upload_file
+from scripts.upload_skill import record_gate_obs_upload, upload_file
 from scripts.safety_scan import scan_url, _get_conclusion, _format_failure
 
 logger = logging.getLogger(__name__)
@@ -77,6 +77,7 @@ def main(argv: list[str]) -> int:
     if packaged is not None:
         url = asyncio.run(upload_file(str(packaged)))
         if url is not None:
+            record_gate_obs_upload(workspace, url, packaged)
             stages["upload"] = {"passed": True, "url": url}
             print(f"Stage [upload]: {url}")
         else:
