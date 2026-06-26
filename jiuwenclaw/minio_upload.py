@@ -24,6 +24,7 @@ class MinioUploadConfig:
     bucket: str
     secure: bool = False
     public_base_url: str = ""
+    region: str = "default"
 
 
 def _parse_endpoint(raw: str) -> tuple[str, bool | None]:
@@ -61,6 +62,7 @@ def load_minio_upload_config() -> MinioUploadConfig:
     bucket = os.environ.get("JIUWENCLAW_MINIO_BUCKET", "").strip()
     public_base_url = os.environ.get("JIUWENCLAW_MINIO_PUBLIC_BASE_URL", "").strip()
     secure_env = os.environ.get("JIUWENCLAW_MINIO_SECURE", "").strip()
+    region = os.environ.get("JIUWENCLAW_MINIO_REGION", "").strip()
 
     yaml_secure: bool | None = None
     if not all((endpoint, access_key, secret_key, bucket)):
@@ -81,7 +83,7 @@ def load_minio_upload_config() -> MinioUploadConfig:
             "MinIO upload config missing: set JIUWENCLAW_MINIO_ENDPOINT / "
             "JIUWENCLAW_MINIO_ACCESS_KEY / JIUWENCLAW_MINIO_SECRET_KEY "
             "(optional JIUWENCLAW_MINIO_BUCKET / JIUWENCLAW_MINIO_SECURE / "
-            "JIUWENCLAW_MINIO_PUBLIC_BASE_URL), or configure minio.endpoint / "
+            "JIUWENCLAW_MINIO_REGION / JIUWENCLAW_MINIO_PUBLIC_BASE_URL), or configure minio.endpoint / "
             "access_key / secret_key / bucket in config.yaml"
         )
 
@@ -99,6 +101,7 @@ def load_minio_upload_config() -> MinioUploadConfig:
         bucket=bucket or "jiuwenclaw",
         secure=secure,
         public_base_url=public_base_url,
+        region=region or "default",
     )
 
 
@@ -124,6 +127,7 @@ def upload_local_file_to_minio(
         access_key=config.access_key,
         secret_key=config.secret_key,
         secure=config.secure,
+        region=config.region,
     )
     if not client.bucket_exists(config.bucket):
         client.make_bucket(config.bucket)

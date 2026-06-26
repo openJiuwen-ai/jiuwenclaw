@@ -67,19 +67,15 @@ class RedisConfig:
         return str(value)
 
     @staticmethod
-    def _parse_startup_nodes(value: Any) -> list[dict]:
-        """解析 cluster 启动节点,接受逗号分隔的 'host:port' 字符串或已有列表。"""
+    def _parse_startup_nodes(value: Any, default_port: int = 6379) -> list[dict]:
+        """解析 'host[:port]' 或逗号分隔列表;未带端口用 default_port。"""
         nodes: list[dict] = []
-        if isinstance(value, (list, tuple)):
-            items = list(value)
-        else:
-            items = str(value).split(",") if value else []
-        for item in items:
-            host, _, port = str(item).partition(":")
+        for item in str(value or "").split(","):
+            host, _, port = item.partition(":")
             host = host.strip()
             if not host:
                 continue
-            nodes.append({"host": host, "port": _coerce_int(port.strip() or "6379", 6379)})
+            nodes.append({"host": host, "port": _coerce_int(port.strip() or str(default_port), default_port)})
         return nodes
 
     @classmethod
@@ -92,11 +88,22 @@ class RedisConfig:
         mode = str(m.get("mode") or "standalone").strip().lower()
         if mode not in ("standalone", "cluster"):
             mode = "standalone"
+        # host 字段承载地址:单机 host/host:port 或集群逗号列表;未带端口用 port(REDIS_PORT)
+        fallback_port = _coerce_int(m.get("port"), 6379)
+        node_list = cls._parse_startup_nodes(m.get("host"), default_port=fallback_port)
+        if node_list:
+            host = node_list[0]["host"]
+            port = node_list[0]["port"]
+            startup_nodes = node_list if mode == "cluster" else []
+        else:
+            host = "localhost"
+            port = fallback_port
+            startup_nodes = []
         return cls(
             mode=mode,
-            startup_nodes=cls._parse_startup_nodes(m.get("startup_nodes")),
-            host=str(m.get("host") if m.get("host") is not None else "localhost"),
-            port=_coerce_int(m.get("port"), 6379),
+            startup_nodes=startup_nodes,
+            host=host,
+            port=port,
             password=pw,
             db=_coerce_int(m.get("db"), 0),
             key_prefix=kp,

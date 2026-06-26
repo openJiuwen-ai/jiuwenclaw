@@ -38,6 +38,10 @@ gen_web_file() {
             {
                 "name": "JIUWENCLAW_MINIO_PUBLIC_BASE_URL",
                 "value": "'"${DEPLOY_VARS["OBS_PUBLIC_BASE_URL"]}"'"
+            },
+            {
+                "name": "JIUWENCLAW_MINIO_REGION",
+                "value": "'"${DEPLOY_VARS["MINIO_REGION"]}"'"
             }
         ]' -i "${file}"
     fi
