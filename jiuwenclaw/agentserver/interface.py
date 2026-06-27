@@ -108,6 +108,20 @@ _CONTEXT_SIZE_HINT_KEYS: tuple[str, ...] = (
 )
 
 
+def _enterprise_file_download_hint(language: str) -> str:
+    if language == "zh":
+        return (
+            "附件中的 http/https url 是远程文件地址，不在本机 path 上。"
+            "请先用 bash/curl 等工具将 url 下载到当前工作区，再对下载后的本地文件使用 read_file；"
+            "不要根据 path 字段或文件名猜测并直接 read_file 本地路径。"
+        )
+    return (
+        "Attachments with http/https url point to remote files, not local path values. "
+        "Download the url to the workspace with bash/curl first, then use read_file on the "
+        "downloaded local file. Do not guess local paths from path or filename."
+    )
+
+
 def build_user_prompt(content: str, files: dict | list, channel: str, language: str) -> str:
     """Build user prompt for the agent."""
     if language == "zh":
@@ -127,16 +141,16 @@ def build_user_prompt(content: str, files: dict | list, channel: str, language: 
     # 兼容 files 为 dict 或 list 格式
     # 空容器统一输出 "{}"（对 Agent 来说空 dict 和空 list 都表示无文件）
     files_json = json.dumps(files, ensure_ascii=False) if files else "{}"
-    return prompt + json.dumps(
-        {
-            "source": channel,
-            "preferred_response_language": language,
-            "content": content,
-            "files_updated_by_user": files_json,
-            "type": "user input",
-        },
-        ensure_ascii=False,
-    )
+    payload: dict[str, Any] = {
+        "source": channel,
+        "preferred_response_language": language,
+        "content": content,
+        "files_updated_by_user": files_json,
+        "type": "user input",
+    }
+    if os.getenv("AGENT_RUNTIME", "").strip() and files:
+        payload["file_handling_hint"] = _enterprise_file_download_hint(language)
+    return prompt + json.dumps(payload, ensure_ascii=False)
 
 
 class JiuWenClaw:
