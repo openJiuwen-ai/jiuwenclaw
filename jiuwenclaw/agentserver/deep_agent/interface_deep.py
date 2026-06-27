@@ -2298,7 +2298,6 @@ class JiuWenClawDeepAdapter:
             evolution_auto_scan = config.get("evolution", {}).get("auto_scan", False)
             evolution_auto_save = config.get("evolution", {}).get("auto_save", True)
 
-            trajectory_dir = self._resolve_evolution_trajectory_dir()
             registered_skill_dirs = self._registered_skill_dirs_for_rail()
             skill_evolution_rail = JiuClawSkillEvolutionRail(
                 skills_dir=registered_skill_dirs,
@@ -2306,12 +2305,10 @@ class JiuWenClawDeepAdapter:
                 model=config.get("model_name", "gpt-4"),
                 auto_scan=evolution_auto_scan,
                 auto_save=evolution_auto_save,
-                trajectory_store=FileTrajectoryStore(trajectory_dir),
             )
             self._skill_evolution_rail = skill_evolution_rail
             logger.info(
-                "[JiuWenClaw] SkillEvolutionRail create success, trajectory_dir=%s, auto_scan=%r, auto_save=%r",
-                trajectory_dir,
+                "[JiuWenClaw] SkillEvolutionRail create success, auto_scan=%r, auto_save=%r",
                 evolution_auto_scan,
                 evolution_auto_save,
                 extra={'user_visible': 'progress'},
