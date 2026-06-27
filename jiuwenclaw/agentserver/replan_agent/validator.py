@@ -133,7 +133,7 @@ class CodeValidationPolicy:
                 "pathlib",
                 "re",
                 "typing",
-                "openjiuwen.core.runner.callback",
+                # AbortError 经 plan_node 统一 re-export，skill_code 不直连 openjiuwen
                 "jiuwenclaw.agentserver.replan_agent.plan_node",
             ),
             allowed_import_prefixes=tuple(allowed_import_prefixes or ()),

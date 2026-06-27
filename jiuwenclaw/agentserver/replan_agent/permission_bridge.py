@@ -17,13 +17,15 @@ import logging
 from dataclasses import dataclass
 from typing import Any
 
-from openjiuwen.core.runner.callback import AbortError
 from openjiuwen.core.single_agent.interrupt.exception import ToolInterruptException
 from openjiuwen.core.single_agent.interrupt.state import RESUME_USER_INPUT_KEY
 from openjiuwen.core.single_agent.rail.base import (
     AgentCallbackContext,
     ToolCallInputs,
 )
+
+# AbortError 经 plan_node 统一 re-export，不在本模块直连 openjiuwen（见 plan_node 注释）。
+from jiuwenclaw.agentserver.replan_agent.plan_node import AbortError
 
 # RePlan 自有 session state key —— 与 openjiuwen 自身命名空间区分，所以前后用双下划线。
 REPLAN_RESUME_CTX_KEY = "__replan_resume_ctx__"

@@ -6,10 +6,9 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any, AsyncIterator
 
-from openjiuwen.core.runner.callback import AbortError
-
 from jiuwenclaw.agentserver.replan_agent.environment import RePlanEnvironment
 from jiuwenclaw.agentserver.replan_agent.executor import PlanCodeLoadError, RePlanExecutor
+from jiuwenclaw.agentserver.replan_agent.plan_node import AbortError
 from jiuwenclaw.agentserver.replan_agent.validator import PlanCodeValidationError
 from jiuwenclaw.agentserver.replan_agent.planner import RePlanPlanner
 

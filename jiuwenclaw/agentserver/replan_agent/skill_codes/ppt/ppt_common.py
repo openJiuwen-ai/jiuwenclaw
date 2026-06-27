@@ -5,7 +5,7 @@ import re
 from pathlib import Path
 from typing import Any
 
-from openjiuwen.core.runner.callback import AbortError
+from jiuwenclaw.agentserver.replan_agent.plan_node import AbortError
 
 _JSON_FENCE_PATTERN = re.compile(r"```(?:json)?\s*(.*?)\s*```", re.DOTALL | re.IGNORECASE)
 _CAT_N_PREFIX_RE = re.compile(r"^[ \t]*\d+[ \t]", re.MULTILINE)

@@ -23,7 +23,6 @@ from typing import TYPE_CHECKING, Any, AsyncIterator
 from openjiuwen.core.single_agent import create_agent_session
 from openjiuwen.core.session.agent import Session
 from openjiuwen.core.session.stream import OutputSchema
-from openjiuwen.core.runner.callback import AbortError
 from openjiuwen.core.single_agent.rail.base import (
     AgentCallbackContext,
     ModelCallInputs,
@@ -47,7 +46,7 @@ from jiuwenclaw.agentserver.replan_agent.permission_bridge import (
 )
 from jiuwenclaw.agentserver.stream_utils import STREAM_SOURCE_ID_FIELD, parse_stream_chunk
 from jiuwenclaw.agentserver.replan_agent.json_utils import extract_llm_json
-from jiuwenclaw.agentserver.replan_agent.plan_node import PlanNode
+from jiuwenclaw.agentserver.replan_agent.plan_node import AbortError, PlanNode
 from jiuwenclaw.agentserver.replan_agent.validator import (
     PlanCodeValidationError,
     PlanCodeValidator,

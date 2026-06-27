@@ -23,9 +23,20 @@ from abc import ABC, abstractmethod
 from collections.abc import AsyncIterator, Awaitable, Callable
 from typing import Any, Union
 
+# ─────────────────────────────────────────────────────────────────────────────
+# AbortError 唯一触点：openjiuwen 的 HITL 中断异常。
+# 整个 replan_agent 与所有 skill_code 一律从本模块取 AbortError，
+# 禁止在 plan_node 之外的任何地方再 `from openjiuwen... import AbortError`。
+# skill_code 的静态白名单（validator）只放行 plan_node，不放行 openjiuwen，
+# 故必须经此 re-export 才能让 skill_code 合法引用 AbortError。
+# 注意：这是纯 re-export（同一类对象），不重新定义；rail 抛出的 AbortError
+# 实例与本模块导出的 AbortError 是同一个类，isinstance / except 行为不变。
+# ─────────────────────────────────────────────────────────────────────────────
 from openjiuwen.core.runner.callback import AbortError
 
 logger = logging.getLogger(__name__)
+
+__all__ = ["AbortError", "PlanNode"]
 
 
 class PlanNode(ABC):

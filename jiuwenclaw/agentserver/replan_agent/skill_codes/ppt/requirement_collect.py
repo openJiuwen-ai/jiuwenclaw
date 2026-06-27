@@ -6,9 +6,7 @@ import re
 from pathlib import Path
 from typing import Any
 
-from openjiuwen.core.runner.callback import AbortError
-
-from jiuwenclaw.agentserver.replan_agent.plan_node import PlanNode
+from jiuwenclaw.agentserver.replan_agent.plan_node import AbortError, PlanNode
 from jiuwenclaw.agentserver.replan_agent.skill_codes.ppt.ppt_common import PptCommon
 
 logger = logging.getLogger(__name__)
