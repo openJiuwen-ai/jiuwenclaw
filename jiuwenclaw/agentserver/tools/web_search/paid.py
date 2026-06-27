@@ -9,9 +9,9 @@ import os
 import re
 from typing import Any
 
-from jiuwenclaw.local_env_config import read_default_headers, read_env
 from jiuwenclaw.agentserver.tools.web_search.http_client import http_request
 from jiuwenclaw.config import get_config
+from jiuwenclaw.local_env_config import read_default_headers, read_env
 
 _PETAL_MAX_TITLE_LEN = 2000
 _PETAL_MAX_URL_LEN = 2048
@@ -141,12 +141,12 @@ def _parse_perplexity_citations(data: dict[str, Any]) -> list[str]:
 def perplexity_search_sync(
     query: str, max_results: int, timeout_seconds: int
 ) -> dict[str, Any]:
-    perplexity_key = os.environ.get("PERPLEXITY_API_KEY", "")
+    perplexity_key = read_env("PERPLEXITY_API_KEY", "")
     if not perplexity_key:
         raise ValueError("PERPLEXITY_API_KEY is not set")
 
     payload = {
-        "model": os.environ.get("PPLX_MODEL", "sonar-pro"),
+        "model": read_env("PPLX_MODEL", "sonar-pro"),
         "messages": [
             {
                 "role": "system",
@@ -160,7 +160,7 @@ def perplexity_search_sync(
     }
     response = http_request(
         "POST",
-        os.environ.get("PPLX_API_URL", "https://api.perplexity.ai/chat/completions"),
+        read_env("PPLX_API_URL", "https://api.perplexity.ai/chat/completions"),
         headers={
             "Authorization": f"Bearer {perplexity_key}",
             "Content-Type": "application/json",
@@ -186,7 +186,7 @@ def perplexity_search_sync(
 def serper_search_sync(
     query: str, max_results: int, timeout_seconds: int
 ) -> dict[str, Any]:
-    serper_key = os.environ.get("SERPER_API_KEY", "")
+    serper_key = read_env("SERPER_API_KEY", "")
     if not serper_key:
         raise ValueError("SERPER_API_KEY is not set")
 
@@ -209,7 +209,7 @@ def serper_search_sync(
 
 
 def jina_search_sync(query: str, timeout_seconds: int) -> dict[str, Any]:
-    jina_key = os.environ.get("JINA_API_KEY", "")
+    jina_key = read_env("JINA_API_KEY", "")
     if not jina_key:
         raise ValueError("JINA_API_KEY is not set")
 
@@ -243,13 +243,13 @@ def jina_search_sync(query: str, timeout_seconds: int) -> dict[str, Any]:
 def bocha_search_sync(
     query: str, max_results: int, timeout_seconds: int
 ) -> dict[str, Any]:
-    bocha_key = os.environ.get("BOCHA_API_KEY", "")
+    bocha_key = read_env("BOCHA_API_KEY", "")
     if not bocha_key:
         raise ValueError("BOCHA_API_KEY is not set")
 
     response = http_request(
         "POST",
-        os.environ.get("BOCHA_API_URL", "https://api.bocha.cn/v1/web-search"),
+        read_env("BOCHA_API_URL", "https://api.bocha.cn/v1/web-search"),
         headers={"Authorization": f"Bearer {bocha_key}", "Content-Type": "application/json"},
         json={"query": query, "summary": True, "count": max_results},
         timeout=timeout_seconds,
@@ -289,12 +289,12 @@ def bocha_search_sync(
 
 
 def _resolve_tavily_api_key() -> str:
-    return os.environ.get("TAVILY_API_KEY", "").strip()
+    return read_env("TAVILY_API_KEY", "").strip()
 
 
 def _resolve_tavily_api_url() -> str:
     raw = (
-        os.environ.get("TAVILY_API_URL", "").strip()
+        read_env("TAVILY_API_URL", "").strip()
         or _TAVILY_DEFAULT_API_URL
     )
     return raw.rstrip("/")

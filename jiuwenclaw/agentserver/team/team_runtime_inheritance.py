@@ -15,9 +15,10 @@ from openjiuwen.core.foundation.tool import ToolCard
 from openjiuwen.harness.rails.filesystem_rail import FileSystemRail
 from openjiuwen.harness.rails.heartbeat_rail import HeartbeatRail
 from openjiuwen.harness.rails.security_rail import SecurityRail
-from openjiuwen.harness.rails.skill_use_rail import SkillUseRail
 from openjiuwen.harness.rails.subagent_rail import SubagentRail
 from openjiuwen.harness.rails.task_planning_rail import TaskPlanningRail
+
+from jiuwenclaw.agentserver.deep_agent.rails.jiuwen_skill_use_rail import JiuWenSkillUseRail
 
 from jiuwenclaw.agentserver.deep_agent.rails.avatar_rail import AvatarPromptRail
 from jiuwenclaw.agentserver.deep_agent.rails.response_prompt_rail import ResponsePromptRail
@@ -211,9 +212,9 @@ def build_member_rails(config: MemberRailConfig) -> list[Any]:
         config_base = get_config() or {}
         react_config = config_base.get("react", {}) or {}
         disabled_skills_list = resolve_string_or_list_config(react_config.get("disabled_skills"))
-        rail = SkillUseRail(
+        rail = JiuWenSkillUseRail(
             skills_dir=skill_dirs,
-            skill_mode=SkillUseRail.SKILL_MODE_ALL,
+            skill_mode=JiuWenSkillUseRail.SKILL_MODE_ALL,
             include_tools=False,
             include_skill_body_tools=True,
             enabled_skills=enabled_skills_from_environ(),
@@ -221,7 +222,7 @@ def build_member_rails(config: MemberRailConfig) -> list[Any]:
         )
         rails_list.append(rail)
         logger.info(
-            "[TeamRuntime] SkillUseRail created: skills_dir=%s, disabled_skills=%s",
+            "[TeamRuntime] JiuWenSkillUseRail created: skills_dir=%s, disabled_skills=%s",
             skill_dirs, disabled_skills_list,
         )
     except Exception as exc:

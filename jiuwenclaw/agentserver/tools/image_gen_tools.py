@@ -26,6 +26,7 @@ from jiuwenclaw.agentserver.tools.subagent_executor.context_vars import (
     get_effective_request_workspace_dir,
 )
 from jiuwenclaw.config import get_config
+from jiuwenclaw.local_env_config import read_env
 from jiuwenclaw.utils import get_agent_workspace_dir, get_config_file
 
 
@@ -147,10 +148,10 @@ def _build_image_gen_kwargs(
 
 
 def _get_image_gen_credentials() -> tuple[str, str, str, str]:
-    api_key = os.environ.get("IMAGE_GEN_API_KEY", "").strip()
-    api_base = os.environ.get("IMAGE_GEN_API_BASE", "").strip()
-    model_name = os.environ.get("IMAGE_GEN_MODEL_NAME", "").strip()
-    provider = os.environ.get("IMAGE_GEN_PROVIDER", "").strip() or "DashScope"
+    api_key = read_env("IMAGE_GEN_API_KEY", "").strip()
+    api_base = read_env("IMAGE_GEN_API_BASE", "").strip()
+    model_name = read_env("IMAGE_GEN_MODEL_NAME", "").strip()
+    provider = read_env("IMAGE_GEN_PROVIDER", "").strip() or "DashScope"
     return api_key, api_base, model_name, provider
 
 
@@ -449,3 +450,10 @@ async def text_to_image(inputs: dict[str, Any], **kwargs) -> str:
     except Exception as exc:
         logger.warning("[text_to_image] failed: %s", exc, exc_info=True)
         return f"[ERROR]: text-to-image failed: {exc}"
+
+
+def create_session_text_to_image_tool(agent_card_id: str):
+    """Return a session-scoped text_to_image tool for Runner.resource_mgr."""
+    from jiuwenclaw.agentserver.deep_agent.tool_qualify import clone_tool_for_session
+
+    return clone_tool_for_session(text_to_image, agent_card_id)

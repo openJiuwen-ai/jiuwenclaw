@@ -195,6 +195,14 @@ from jiuwenclaw.agentserver.deep_agent.rails.disabled_tools_rail import Disabled
 from jiuwenclaw.agentserver.deep_agent.rails.jiuwen_progressive_tool_rail import (
     JiuWenProgressiveToolRail,
 )
+from jiuwenclaw.agentserver.deep_agent.rails.jiuwen_skill_use_rail import JiuWenSkillUseRail
+from jiuwenclaw.agentserver.deep_agent.tool_qualify import (
+    clone_tool_for_session,
+    register_qualified_tool,
+    register_qualified_tools,
+    remove_tool_from_resource_mgr,
+    reregister_qualified_tool_in_resource_mgr,
+)
 from jiuwenclaw.agentserver.deep_agent.rails.permission_rail import clear_session_interrupt_state
 from jiuwenclaw.agentserver.deep_agent.rails.pip_isolation_rail import PipIsolationRail
 from jiuwenclaw.agentserver.deep_agent.rails.task_execution_rail import get_current_task_id
@@ -251,7 +259,7 @@ from jiuwenclaw.agentserver.tools.multimodal_config import (
     apply_vision_model_config_from_yaml,
     dedicated_multimodal_model_configured,
 )
-from jiuwenclaw.agentserver.tools.image_gen_tools import text_to_image
+from jiuwenclaw.agentserver.tools.image_gen_tools import create_session_text_to_image_tool
 from jiuwenclaw.agentserver.tools.video_tools import video_understanding
 from jiuwenclaw.agentserver.tools.harness_named_web_tools import build_jiuwen_harness_named_web_tools
 
@@ -1147,7 +1155,9 @@ class JiuWenClawDeepAdapter:
         self._model_request_config: ModelRequestConfig | None = None
         self._config_cache: dict[str, Any] = {}
         self._filesystem_rail: FileSystemRail | None = None
-        self._skill_rail: SkillUseRail | None = None
+        self._skill_rail: JiuWenSkillUseRail | None = None
+        self._qualified_memory_tool_ids: list[str] = []
+        self._qualified_runtime_tool_ids: list[str] = []
         self._stream_event_rail: JiuClawStreamEventRail | None = None
         self._context_overflow_recovery_rail: ContextOverflowRecoveryRail | None = None
         self._task_execution_rail: TaskExecutionRail | None = None
@@ -1182,6 +1192,7 @@ class JiuWenClawDeepAdapter:
         self._audio_model_config: AudioModelConfig | None = None
         self._video_model_config: bool = False
         self._image_gen_enabled: bool = False
+        self._image_gen_tools: list[Any] = []
         self._vision_tools: list[Any] = []
         self._audio_tools: list[Any] = []
         self._instance_overrides: dict[str, Any] = {}
@@ -1699,6 +1710,69 @@ class JiuWenClawDeepAdapter:
         for tool in self._audio_tools:
             tool.audio_model_config = self._audio_model_config
 
+    def _track_qualified_runtime_tool_id(self, tool_id: str) -> None:
+        if tool_id and tool_id not in self._qualified_runtime_tool_ids:
+            self._qualified_runtime_tool_ids.append(tool_id)
+
+    def _untrack_qualified_runtime_tool_id(self, tool_id: str) -> None:
+        try:
+            self._qualified_runtime_tool_ids.remove(tool_id)
+        except ValueError:
+            pass
+
+    @staticmethod
+    def _tools_in_resource_mgr(tools: list[Any]) -> bool:
+        if not tools:
+            return False
+        for tool in tools:
+            tool_id = str(getattr(getattr(tool, "card", None), "id", "") or "")
+            if not tool_id or Runner.resource_mgr.get_tool(tool_id) is None:
+                return False
+        return True
+
+    def _cleanup_qualified_runtime_tools(self) -> None:
+        for tool_id in list(self._qualified_runtime_tool_ids):
+            remove_tool_from_resource_mgr(tool_id)
+        self._qualified_runtime_tool_ids.clear()
+
+    def _register_runtime_tools(
+            self,
+            tools: list[Any],
+            agent_card_id: str,
+    ) -> bool:
+        """Register session-qualified tools into resource_mgr (and ability_manager when ready)."""
+        if not tools:
+            return False
+        if self._instance is None:
+            registered_any = False
+            for tool in tools:
+                try:
+                    _, qualified_id = reregister_qualified_tool_in_resource_mgr(
+                        tool,
+                        agent_card_id,
+                    )
+                    self._track_qualified_runtime_tool_id(qualified_id)
+                    self._append_tool_card(tool.card)
+                    registered_any = True
+                except Exception as exc:
+                    logger.warning(
+                        "[JiuWenClawDeepAdapter] resource_mgr tool register failed: %s",
+                        exc,
+                    )
+            return registered_any
+        try:
+            register_qualified_tools(self._instance, tools, agent_card_id)
+            for tool in tools:
+                self._track_qualified_runtime_tool_id(str(tool.card.id))
+                self._append_tool_card(tool.card)
+            return True
+        except Exception as exc:
+            logger.warning(
+                "[JiuWenClawDeepAdapter] runtime tool register failed: %s",
+                exc,
+            )
+            return False
+
     def _sync_tool_group(
             self,
             *,
@@ -1707,26 +1781,26 @@ class JiuWenClawDeepAdapter:
             enabled: bool,
             create_fn: Callable[[], list[Any]],
             warn_label: str,
+            agent_card_id: str | None = None,
     ) -> tuple[list[Any], bool]:
         """统一处理一组工具的热更新：启用时注册，禁用时移除。
 
         Returns:
             (updated_tools, updated_registered)
         """
+        card_id = agent_card_id or self._resolve_agent_card_id()
         if not enabled:
             if registered:
                 self._remove_registered_tools(current_tools)
                 self._prune_tool_cards({t.card.name for t in current_tools})
             return [], False
+        if registered and current_tools and not self._tools_in_resource_mgr(current_tools):
+            registered = False
         if not registered:
             try:
                 new_tools = create_fn()
-                for tool in new_tools:
-                    Runner.resource_mgr.add_tool(tool)
-                    self._append_tool_card(tool.card)
-                    if self._instance is not None and hasattr(self._instance, "ability_manager"):
-                        self._instance.ability_manager.add(tool.card)
-                return new_tools, bool(new_tools)
+                ok = self._register_runtime_tools(new_tools, card_id)
+                return new_tools, ok and bool(new_tools)
             except Exception as exc:
                 logger.warning(
                     "[JiuWenClawDeepAdapter] %s reload failed: %s", warn_label, exc
@@ -1739,13 +1813,9 @@ class JiuWenClawDeepAdapter:
         if not tools:
             return
         for tool in tools:
-            try:
-                Runner.resource_mgr.remove_tool(tool.card.id)
-            except Exception as exc:
-                logger.warning(
-                    "[JiuWenClawDeepAdapter] remove tool failed: %s",
-                    exc,
-                )
+            tool_id = str(tool.card.id)
+            remove_tool_from_resource_mgr(tool_id)
+            self._untrack_qualified_runtime_tool_id(tool_id)
             if self._instance is not None and hasattr(
                     self._instance,
                     "ability_manager",
@@ -1784,7 +1854,8 @@ class JiuWenClawDeepAdapter:
 
     def _sync_multimodal_tools_for_runtime(self) -> None:
         """Sync multimodal tool registration after config reload."""
-        agent_id = JIUWENCLAW_RESOURCE_AGENT_ID
+        agent_card_id = self._resolve_agent_card_id()
+        audio_tools_enabled = bool(self._iter_runtime_audio_tools(agent_card_id))
         self._vision_tools, self._vision_tools_registered = self._sync_tool_group(
             current_tools=self._vision_tools,
             registered=self._vision_tools_registered,
@@ -1792,17 +1863,19 @@ class JiuWenClawDeepAdapter:
             create_fn=lambda: create_vision_tools(
                 language=self._resolve_runtime_language(),
                 vision_model_config=self._vision_model_config,
-                agent_id=agent_id,
+                agent_id=agent_card_id,
             ),
             warn_label="vision tools",
+            agent_card_id=agent_card_id,
         )
 
         self._audio_tools, self._audio_tools_registered = self._sync_tool_group(
             current_tools=self._audio_tools,
             registered=self._audio_tools_registered,
-            enabled=True,
-            create_fn=lambda: self._iter_runtime_audio_tools(agent_id),
+            enabled=audio_tools_enabled,
+            create_fn=lambda: self._iter_runtime_audio_tools(agent_card_id),
             warn_label="audio tools",
+            agent_card_id=agent_card_id,
         )
 
         _, self._video_tool_registered = self._sync_tool_group(
@@ -1811,14 +1884,17 @@ class JiuWenClawDeepAdapter:
             enabled=bool(self._video_model_config),
             create_fn=lambda: [video_understanding],
             warn_label="video tool",
+            agent_card_id=agent_card_id,
         )
 
-        _, self._image_gen_tool_registered = self._sync_tool_group(
-            current_tools=[text_to_image],
+        self._image_gen_tools = getattr(self, "_image_gen_tools", []) or []
+        self._image_gen_tools, self._image_gen_tool_registered = self._sync_tool_group(
+            current_tools=self._image_gen_tools,
             registered=self._image_gen_tool_registered,
             enabled=bool(self._image_gen_enabled),
-            create_fn=lambda: [text_to_image],
+            create_fn=lambda: [create_session_text_to_image_tool(agent_card_id)],
             warn_label="text_to_image tool",
+            agent_card_id=agent_card_id,
         )
 
     @staticmethod
@@ -2231,8 +2307,8 @@ class JiuWenClawDeepAdapter:
         include_tools: bool = False,
         include_skill_body_tools: bool = True,
         extra_skill_dir: str | None = None,
-    ) -> SkillUseRail | None:
-        """Build SkillUseRail.
+    ) -> JiuWenSkillUseRail | None:
+        """Build JiuWenSkillUseRail (per-session qualified skill tools).
         
         Args:
             config: React config dict
@@ -2279,8 +2355,8 @@ class JiuWenClawDeepAdapter:
                     "[JiuWenClawDeepAdapter] disabled_skills resolved: %s",
                     skill_rail_kwargs["disabled_skills"],
                 )
-            skill_rail = SkillUseRail(**skill_rail_kwargs)
-            logger.info("[JiuWenClawDeepAdapter] SkillUseRail create success",
+            skill_rail = JiuWenSkillUseRail(**skill_rail_kwargs)
+            logger.info("[JiuWenClawDeepAdapter] JiuWenSkillUseRail create success",
                        extra={'user_visible': 'progress'})
         except Exception as exc:
             logger.warning("[JiuWenClawDeepAdapter] SkillUseRail create failed: %s", exc,
@@ -3130,30 +3206,32 @@ class JiuWenClawDeepAdapter:
 
         return rails_list
 
-    async def _get_tool_cards(self, agent_id: str, *, mode: str = "agent.plan"):
-        """Get tool cards."""
+    async def _get_tool_cards(self, agent_card_id: str, *, mode: str = "agent.plan"):
+        """Get tool cards with session-qualified resource_mgr registration."""
         tool_cards = []
 
-        for tool in build_jiuwen_harness_named_web_tools(
-                agent_id=agent_id,
-                language=self._resolve_runtime_language(),
-        ):
-            Runner.resource_mgr.add_tool(tool)
-            tool_cards.append(tool.card)
+        web_tools = build_jiuwen_harness_named_web_tools(
+            agent_id=agent_card_id,
+            language=self._resolve_runtime_language(),
+        )
+        self._register_runtime_tools(list(web_tools), agent_card_id)
+        tool_cards.extend(t.card for t in web_tools)
 
         self._vision_tools = []
         self._vision_tools_registered = False
         if self._vision_model_config is not None:
             try:
-                for tool in create_vision_tools(
-                        language=self._resolve_runtime_language(),
-                        vision_model_config=self._vision_model_config,
-                        agent_id=agent_id
-                ):
-                    Runner.resource_mgr.add_tool(tool)
-                    tool_cards.append(tool.card)
-                    self._vision_tools.append(tool)
-                self._vision_tools_registered = bool(self._vision_tools)
+                vision_tools = create_vision_tools(
+                    language=self._resolve_runtime_language(),
+                    vision_model_config=self._vision_model_config,
+                    agent_id=agent_card_id,
+                )
+                self._vision_tools = vision_tools
+                self._vision_tools_registered = self._register_runtime_tools(
+                    vision_tools,
+                    agent_card_id,
+                )
+                tool_cards.extend(t.card for t in vision_tools)
             except Exception as exc:
                 self._vision_tools = []
                 logger.warning(
@@ -3164,11 +3242,12 @@ class JiuWenClawDeepAdapter:
         self._audio_tools = []
         self._audio_tools_registered = False
         try:
-            self._audio_tools = self._iter_runtime_audio_tools(agent_id)
-            for tool in self._audio_tools:
-                Runner.resource_mgr.add_tool(tool)
-                tool_cards.append(tool.card)
-            self._audio_tools_registered = bool(self._audio_tools)
+            self._audio_tools = self._iter_runtime_audio_tools(agent_card_id)
+            self._audio_tools_registered = self._register_runtime_tools(
+                self._audio_tools,
+                agent_card_id,
+            )
+            tool_cards.extend(t.card for t in self._audio_tools)
         except Exception as exc:
             self._audio_tools = []
             logger.warning(
@@ -3189,11 +3268,16 @@ class JiuWenClawDeepAdapter:
                 )
 
         self._image_gen_tool_registered = False
+        self._image_gen_tools = []
         if self._image_gen_enabled:
             try:
-                Runner.resource_mgr.add_tool(text_to_image)
-                tool_cards.append(text_to_image.card)
-                self._image_gen_tool_registered = True
+                image_tool = create_session_text_to_image_tool(agent_card_id)
+                self._image_gen_tools = [image_tool]
+                self._image_gen_tool_registered = self._register_runtime_tools(
+                    [image_tool],
+                    agent_card_id,
+                )
+                tool_cards.append(image_tool.card)
             except Exception as exc:
                 logger.warning(
                     "[JiuWenClawDeepAdapter] text_to_image registration failed: %s",
@@ -3386,7 +3470,7 @@ class JiuWenClawDeepAdapter:
 
         agent_card_id = self._resolve_agent_card_id(session_id)
         agent_card = AgentCard(name=self._agent_name, id=agent_card_id)
-        tool_cards = await self._get_tool_cards(JIUWENCLAW_RESOURCE_AGENT_ID, mode=mode)
+        tool_cards = await self._get_tool_cards(agent_card_id, mode=mode)
         self._tool_cards = tool_cards
 
         permissions_cfg = config_base.get("permissions", {})
@@ -3523,6 +3607,14 @@ class JiuWenClawDeepAdapter:
         # Release the provider so the lambda registered in __init__ stops
         # capturing `self` and the adapter can be garbage-collected.
         set_skill_credential_provider(None)
+        runtime_tools = (
+            list(self._vision_tools or [])
+            + list(self._audio_tools or [])
+            + list(self._image_gen_tools or [])
+        )
+        if runtime_tools:
+            self._remove_registered_tools(runtime_tools)
+        self._cleanup_qualified_runtime_tools()
 
     async def load_user_rails(self) -> None:
         """动态加载用户自定义的 Rail 扩展."""
@@ -7900,6 +7992,10 @@ class JiuWenClawDeepAdapter:
 
         # 同步清理 Runner.resource_mgr 中对应的工具实例，避免后续 ability_manager.add
         # 再次基于 resource_mgr 的旧实例自动注册
+        for qualified_id in list(self._qualified_memory_tool_ids):
+            remove_tool_from_resource_mgr(qualified_id)
+        self._qualified_memory_tool_ids = []
+
         try:
             for tool in get_decorated_tools():
                 tool_card = getattr(tool, "card", None)
@@ -8018,14 +8114,16 @@ class JiuWenClawDeepAdapter:
                 self._instance.system_prompt_builder.remove_section("memory")
                 self._instance.system_prompt_builder.add_section(memory_section)
 
+        agent_card_id = self._resolve_agent_card_id()
+        self._qualified_memory_tool_ids = []
         for tool in get_decorated_tools():
             tool_card = getattr(tool, "card", None)
             if tool_card is None:
                 continue
             if getattr(tool_card, "name", "") in ("memory_index", "memory_search"):
-                if Runner.resource_mgr.get_tool(tool_card.id) is None:
-                    Runner.resource_mgr.add_tool(tool)
-                self._instance.ability_manager.add(tool_card)
+                session_tool = clone_tool_for_session(tool, agent_card_id)
+                register_qualified_tool(self._instance, session_tool, agent_card_id)
+                self._qualified_memory_tool_ids.append(session_tool.card.id)
 
     def _build_external_memory_rail(self):
         from jiuwenclaw.agentserver.memory.external_memory_builder import (

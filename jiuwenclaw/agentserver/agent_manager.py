@@ -20,10 +20,12 @@ from jiuwenclaw.agentserver.memory import (
     release_memory_cache_session,
 )
 from jiuwenclaw.local_env_config import (
+    ENV_CONFIG_DICT,
     apply_env_overrides_to_active,
     promote_staged_env,
     stage_env_overrides,
 )
+from jiuwenclaw.agentserver.tools.multimodal_config import infer_multimodal_env_removals
 from jiuwenclaw.utils import get_agent_workspace_dir
 from jiuwenclaw.config import _sandbox_yaml_to_env_overlay
 
@@ -92,6 +94,13 @@ class AgentManager:
 
         # 应用初始 env_overrides（冷启动，尚无在途 session）
         if env_overrides is not None and isinstance(env_overrides, dict):
+            omission_removals = infer_multimodal_env_removals(
+                None,
+                env_overrides,
+                active_env=ENV_CONFIG_DICT,
+            )
+            if omission_removals:
+                apply_env_overrides_to_active(omission_removals)
             self._latest_env_overrides = dict(env_overrides)
             apply_env_overrides_to_active(env_overrides)
 
