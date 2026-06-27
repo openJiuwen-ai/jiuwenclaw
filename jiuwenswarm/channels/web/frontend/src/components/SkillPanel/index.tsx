@@ -14,6 +14,7 @@ import { TeamSkillsHubModal } from "../../features/TeamSkillsHubModal";
 import { SkillEvolutionModal } from "../../features/SkillEvolutionModal";
 import { normalizeSkillNetUrl } from "../../utils/skillNetUrl";
 import { SkillGraphPanel, type SkillGraphPanelHandle } from "../SkillGraphPanel";
+import { getRetrievalPollingMode, type RetrievalPollingStatus } from "./polling";
 import { Switch } from "../Switch";
 
 /** 刷新会 git pull marketplace，略放宽；普通进页单次 RPC 一般很快。 */
@@ -84,8 +85,7 @@ type SkillDetail = SkillItem & {
 
 type LoadState = "idle" | "loading" | "success" | "error";
 
-type SkillRetrievalStatus = {
-  enabled?: boolean;
+type SkillRetrievalStatus = RetrievalPollingStatus & {
   index_exists?: boolean;
   fresh?: boolean;
   installed_count?: number;
@@ -93,7 +93,6 @@ type SkillRetrievalStatus = {
   indexed_count?: number;
   built_at?: string;
   index_dir?: string;
-  build_status?: string;
   build_stage?: string;
   build_message?: string;
   build_error?: string;
@@ -580,6 +579,12 @@ export function SkillPanel({ sessionId, onNavigateToConfig, isActive = false }: 
   const [selectedTreeNodeCid, setSelectedTreeNodeCid] = useState<string | null>(null);
   const [retrievalLoading, setRetrievalLoading] = useState<"idle" | "status" | "tree" | "build" | "cancel">("idle");
 
+  const retrievalPollingMode = getRetrievalPollingMode(
+    activeTab,
+    isActive,
+    retrievalStatus,
+  );
+
   useEffect(() => {
     return () => {
       if (messageTimerRef.current !== null) {
@@ -884,9 +889,21 @@ export function SkillPanel({ sessionId, onNavigateToConfig, isActive = false }: 
       fetchSkills();
     }
 
+    // 场景3：重新激活且处于 index 页签，立即刷新状态和树
+    if (isActive && !prevIsActive && activeTab === "index") {
+      void fetchRetrievalStatus();
+      void fetchRetrievalTree();
+    }
+
     // 更新 ref
     prevIsActiveRef.current = isActive;
-  }, [isActive, activeTab, fetchSkills]);
+  }, [
+    isActive,
+    activeTab,
+    fetchSkills,
+    fetchRetrievalStatus,
+    fetchRetrievalTree,
+  ]);
 
   useEffect(() => {
     fetchRetrievalStatus();
@@ -899,9 +916,7 @@ export function SkillPanel({ sessionId, onNavigateToConfig, isActive = false }: 
   }, [activeTab, fetchRetrievalStatus, fetchRetrievalTree]);
 
   useEffect(() => {
-    const disabled = retrievalStatus?.enabled === false;
-    const running = retrievalStatus?.build_status === "running";
-    if (activeTab !== "index" || disabled || !running) {
+    if (retrievalPollingMode !== "running") {
       if (retrievalPollRef.current !== null) {
         window.clearInterval(retrievalPollRef.current);
         retrievalPollRef.current = null;
@@ -918,12 +933,10 @@ export function SkillPanel({ sessionId, onNavigateToConfig, isActive = false }: 
         retrievalPollRef.current = null;
       }
     };
-  }, [activeTab, fetchRetrievalStatus, fetchRetrievalTree, retrievalStatus?.build_status, retrievalStatus?.enabled]);
+  }, [fetchRetrievalStatus, retrievalPollingMode]);
 
   useEffect(() => {
-    const disabled = retrievalStatus?.enabled === false;
-    const running = retrievalStatus?.build_status === "running";
-    if (activeTab !== "index" || disabled || running) {
+    if (retrievalPollingMode !== "idle") {
       if (retrievalDiscoveryPollRef.current !== null) {
         window.clearInterval(retrievalDiscoveryPollRef.current);
         retrievalDiscoveryPollRef.current = null;
@@ -940,7 +953,7 @@ export function SkillPanel({ sessionId, onNavigateToConfig, isActive = false }: 
         retrievalDiscoveryPollRef.current = null;
       }
     };
-  }, [activeTab, fetchRetrievalStatus, retrievalStatus?.build_status, retrievalStatus?.enabled]);
+  }, [fetchRetrievalStatus, retrievalPollingMode]);
 
   useEffect(() => {
     if (activeTab !== "index") return;
