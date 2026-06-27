@@ -7677,11 +7677,78 @@ class JiuWenClawDeepAdapter:
 
         return None
 
+    def _cleanup_builtin_memory_artifacts(self) -> None:
+        """卸载 builtin memory 在 ability_manager / Runner.resource_mgr / system_prompt_builder
+        中残留的工具与 prompt section。
+
+        当 ``MEMORY_ENGINE=none`` 或 ``modes.*.memory.enabled=false`` 时，仅 unregister
+        ``MemoryRail`` 不足以让 memory_search / memory_index 在当前会话失效——这些工具是
+        ``_init_builtin_memory_manager`` 在以前某次配置中通过 ``ability_manager.add`` 与
+        ``Runner.resource_mgr.add_tool`` 注入的，必须显式移除。memory prompt section 同理。
+        """
+        instance = self._instance
+        if instance is None:
+            return
+
+        ability_manager = getattr(instance, "ability_manager", None)
+        if ability_manager is not None:
+            for tool_name in ("memory_search", "memory_index"):
+                try:
+                    ability_manager.remove(tool_name)
+                except Exception as exc:
+                    logger.debug(
+                        "[JiuWenClawDeepAdapter] ability_manager.remove(%s) skipped: %s",
+                        tool_name, exc,
+                    )
+
+        prompt_builder = getattr(instance, "system_prompt_builder", None)
+        if prompt_builder is not None:
+            try:
+                prompt_builder.remove_section("memory")
+            except Exception as exc:
+                logger.debug(
+                    "[JiuWenClawDeepAdapter] system_prompt_builder.remove_section('memory') skipped: %s",
+                    exc,
+                )
+
+        # 同步清理 Runner.resource_mgr 中对应的工具实例，避免后续 ability_manager.add
+        # 再次基于 resource_mgr 的旧实例自动注册
+        try:
+            for tool in get_decorated_tools():
+                tool_card = getattr(tool, "card", None)
+                if tool_card is None:
+                    continue
+                if getattr(tool_card, "name", "") in ("memory_search", "memory_index"):
+                    try:
+                        if Runner.resource_mgr.get_tool(tool_card.id) is not None:
+                            Runner.resource_mgr.remove_tool(tool_card.id)
+                    except Exception as exc:
+                        logger.debug(
+                            "[JiuWenClawDeepAdapter] Runner.resource_mgr.remove_tool(%s) skipped: %s",
+                            tool_card.id, exc,
+                        )
+        except Exception as exc:
+            logger.debug(
+                "[JiuWenClawDeepAdapter] _cleanup_builtin_memory_artifacts: "
+                "iterate decorated tools failed: %s", exc,
+            )
+
     async def _handle_memory_rail_by_config(self, mode: str):
         config = get_config()
         memory_mode = get_memory_mode(config)
 
         if memory_mode == "wiki":
+            if not (is_builtin_memory_allowed(config) and is_memory_enabled(mode, config)):
+                # 引擎为 none 或当前模式下记忆关闭 —— 清理 wiki 模式可能注入的工具与 prompt section
+                self._cleanup_builtin_memory_artifacts()
+                logger.info(
+                    "[JiuWenClawDeepAdapter] Wiki memory disabled for %s mode "
+                    "(engine_allowed=%s, mode_enabled=%s)，已清理记忆工具与 prompt section",
+                    mode,
+                    is_builtin_memory_allowed(config),
+                    is_memory_enabled(mode, config),
+                )
+                return
             await self._init_builtin_memory_manager(mode, config)
             logger.info("[JiuWenClawDeepAdapter] Wiki memory initialized for %s mode", mode)
             return
@@ -7738,6 +7805,9 @@ class JiuWenClawDeepAdapter:
                     await self._instance.unregister_rail(self._memory_rail)
                     self._memory_rail = None
                     logger.info(f"[JiuWenClawDeepAdapter] MemoryRail unregistered for {mode} mode")
+                # 即使 MemoryRail 已不存在，FTS-only 降级路径或之前的 wiki 模式也可能已注入
+                # memory_search / memory_index 与 memory prompt section —— 一并清理避免会话内残留
+                self._cleanup_builtin_memory_artifacts()
 
     async def _init_builtin_memory_manager(self, mode: str,
         config: dict) -> None:

@@ -71,7 +71,7 @@ class AvatarPromptRail(DeepAgentRail):
         if engine_disabled or forbidden:
             parts = []
             if engine_disabled:
-                parts.append(_build_memory_disabled_prompt(language))
+                parts.append(_build_memory_fully_disabled_prompt(language))
             if forbidden:
                 parts.append(forbidden)
             content = "\n\n".join(parts)
@@ -249,27 +249,6 @@ def _build_avatar_prompt(principal_user_id: str | None, language: str) -> str:
 {boundary}
 3. **Natural and concise**: Reply style should resemble a real person's expression in group chat.
 4. **Do not reveal identity**: Never mention that you are an AI, digital avatar, or bot.
-"""
-
-
-def _build_memory_disabled_prompt(language: str) -> str:
-    """记忆写入禁用提示词（保留读能力，与 React 链路行为一致）。"""
-    if language == "cn":
-        return """## 记忆系统 - 写入已禁用
-
-**记忆写入功能当前已禁用。**
-
-- **禁止** 使用 write_memory、edit_memory 写入或修改记忆文件
-- **允许** 使用 memory_search、memory_get、read_memory 查询已有记忆
-- 如果用户要求记住某些内容，回复："记忆写入功能当前未启用，无法保存新信息，但我可以查询已有的记忆。"
-"""
-    return """## Memory System - Write Disabled
-
-**Memory write operations are currently disabled.**
-
-- **Do NOT** use write_memory or edit_memory to write or modify memory files
-- **Allowed**: memory_search, memory_get, read_memory for reading existing memories
-- If the user asks to remember something, reply: "Memory writing is currently disabled, but I can query existing memories."
 """
 
 
