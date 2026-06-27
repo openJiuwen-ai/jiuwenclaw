@@ -14,6 +14,7 @@ from jiuwenclaw.agentserver.tools.web_search.orchestrator import (
     normalize_search_mode,
     run_web_search,
 )
+from jiuwenclaw.agentserver.tools.web_search.constants import KNOWN_PAID_PROVIDERS
 
 logger = logging.getLogger(__name__)
 
@@ -25,6 +26,7 @@ _HARNESS_STRIP_PARAMS = frozenset({
     "mode",
     "search_tool",
     "provider",
+    "search_source",
 })
 
 
@@ -33,12 +35,15 @@ _HARNESS_STRIP_PARAMS = frozenset({
     description=(
         "网页搜索统一入口。search_mode=default（默认）先付费后免费；"
         "search_mode=paid 仅付费，失败报错；search_mode=free 仅免费且不调用付费。"
+        "search_source 可选，指定付费源名称（如 bocha/petal/tavily/perplexity/serper/jina），"
+        "配合 search_mode=paid 使用时优先使用指定源，不可用时返回明确错误。"
         "max_results 可选，限制单个 query 的最大返回条数。"
     ),
 )
 async def web_search(
     query: str,
     search_mode: str = "default",
+    search_source: str | None = None,
     max_results: int | None = None,
 ) -> str:
     query = (query or "").strip()
@@ -46,7 +51,7 @@ async def web_search(
         logger.warning("[web_search] invoke rejected: empty query")
         return "[ERROR]: query cannot be empty."
 
-    mode = normalize_search_mode(search_mode)
+    mode, extracted_source = normalize_search_mode(search_mode)
     if not is_valid_search_mode(mode):
         logger.warning(
             "[web_search] invalid search_mode=%r, using default; query=%r",
@@ -55,7 +60,13 @@ async def web_search(
         )
         mode = "default"
 
-    return await run_web_search(query, search_mode=mode, max_results=max_results)
+    source = extracted_source
+    if not source and search_source:
+        raw = search_source.strip().lower()
+        if raw in KNOWN_PAID_PROVIDERS:
+            source = raw
+
+    return await run_web_search(query, search_mode=mode, search_source=source, max_results=max_results)
 
 
 def _fallback_web_search_input_params(language: str) -> dict[str, Any]:
@@ -73,6 +84,11 @@ def _fallback_web_search_input_params(language: str) -> dict[str, Any]:
             "description": "default | paid | free",
             "default": "default",
         }
+        props["search_source"] = {
+            "type": "string",
+            "description": "指定付费源名称：bocha | petal | tavily | perplexity | serper | jina。配合 search_mode=paid 使用。",
+            "default": None,
+        }
         if "max_results" in props:
             props["max_results"]["description"] = (
                 "Optional result count; defaults to web_search.max_results in config."
@@ -87,7 +103,12 @@ def _fallback_web_search_input_params(language: str) -> dict[str, Any]:
             "type": "object",
             "properties": {
                 "query": {"type": "string", "description": "Search query."},
-                "search_mode": {"type": "string", "default": "default"},
+                "search_mode": {
+                    "type": "string",
+                    "default": "default",
+                    "description": "default | paid | free",
+                },
+                "search_source": {"type": "string", "description": "指定付费源：bocha | petal | tavily 等"},
                 "max_results": {"type": "integer", "description": "Optional."},
             },
             "required": ["query"],

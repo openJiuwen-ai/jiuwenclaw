@@ -49,10 +49,12 @@ def test_evaluate_search_quality_paid_long_answer_without_skip_snippet():
 
 
 def test_normalize_search_mode_aliases():
-    assert normalize_search_mode("") == "default"
-    assert normalize_search_mode("paid") == "paid"
-    assert normalize_search_mode("mcp_petal_search") == "paid"
-    assert normalize_search_mode("free_search") == "free"
+    assert normalize_search_mode("") == ("default", None)
+    assert normalize_search_mode("paid") == ("paid", None)
+    assert normalize_search_mode("mcp_petal_search") == ("paid", None)
+    assert normalize_search_mode("free_search") == ("free", None)
+    assert normalize_search_mode("paid:bocha") == ("paid", "bocha")
+    assert normalize_search_mode("paid:petal") == ("paid", "petal")
 
 
 def test_format_web_search_response_header():
@@ -128,7 +130,7 @@ def test_run_web_search_free_does_not_call_paid(monkeypatch):
 
 
 def test_run_web_search_default_paid_then_free(monkeypatch):
-    async def fake_paid(query, settings):
+    async def fake_paid(query, settings, preferred_provider=None):
         return None, ["paid:petal(skipped)"]
 
     async def fake_free(query, settings):
@@ -159,7 +161,7 @@ def test_web_search_entry_delegates_to_orchestrator(monkeypatch):
 
     calls = 0
 
-    async def fake_run(query, *, search_mode="default", max_results=None):
+    async def fake_run(query, *, search_mode="default", search_source=None, max_results=None):
         nonlocal calls
         calls += 1
         assert query == "hello"
@@ -184,7 +186,7 @@ def test_web_search_invalid_search_mode_falls_back_to_default(monkeypatch):
 
     calls: list[str] = []
 
-    async def fake_run(query, *, search_mode="default", max_results=None):
+    async def fake_run(query, *, search_mode="default", search_source=None, max_results=None):
         calls.append(search_mode)
         return "ok"
 

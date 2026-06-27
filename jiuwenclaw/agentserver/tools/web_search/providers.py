@@ -176,10 +176,18 @@ async def invoke_paid_provider(
 async def run_paid_chain(
     query: str,
     settings: WebSearchSettings,
+    preferred_provider: str | None = None,
 ) -> tuple[ProviderRun | None, list[str]]:
     tried: list[str] = []
     last_run: ProviderRun | None = None
-    for name in settings.paid_provider_order:
+    order: tuple[str, ...] = settings.paid_provider_order
+    if preferred_provider:
+        preferred = preferred_provider.strip().lower()
+        if preferred in order:
+            order = (preferred,) + tuple(n for n in order if n != preferred)
+        else:
+            order = (preferred,) + order
+    for name in order:
         run = await invoke_paid_provider(
             name,
             query,
