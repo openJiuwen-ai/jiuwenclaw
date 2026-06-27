@@ -156,7 +156,14 @@ interface InstancePageRaw {
 }
 
 export const InstanceApi = {
-  list: (params?: { page?: number; page_size?: number; status?: string }) =>
+  list: (params?: {
+    page?: number;
+    page_size?: number;
+    status?: string;
+    search?: string;
+    sort_by?: 'jiuwenclaw_name' | 'status' | 'last_heartbeat' | 'k8s_namespace' | 'updated_at';
+    sort_order?: 'asc' | 'desc';
+  }) =>
     http<InstancePageRaw>('/v1/instances/', { query: params }),
   get: (id: string) => http<InstanceDetail>(`/v1/instances/${encodeURIComponent(id)}`),
   create: (body: CreateInstanceBody) => http<InstanceSummary>('/v1/instances/', { method: 'POST', body }),

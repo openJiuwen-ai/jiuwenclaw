@@ -58,12 +58,18 @@ export function InstanceDetailPage({ instanceId, tab = 'detail' }: Props) {
   return (
     <>
       <div className="flex min-w-0 flex-col gap-4 overflow-x-auto">
-        <div className="page-header w-max min-w-full shrink-0">
-          <div className="flex shrink-0 items-center gap-3">
-            <button className="btn ghost sm shrink-0" onClick={() => navigate('/instances')}>
-              ← {t('instanceDetail.back')}
+        <div className="page-header flex w-full min-w-0 shrink-0 flex-col items-stretch gap-3 lg:grid lg:grid-cols-[1fr_auto_1fr] lg:items-center lg:gap-4">
+          <div className="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-2 lg:justify-self-start">
+            <button
+              type="button"
+              className="btn ghost sm shrink-0"
+              onClick={() => navigate('/instances')}
+              aria-label={t('topology.title')}
+              title={t('topology.title')}
+            >
+              ←
             </button>
-            <div className="min-w-[7.5rem] max-w-[12rem] shrink-0 sm:max-w-[16rem]">
+            <div className="min-w-0 max-w-full flex-1 sm:max-w-[16rem] sm:flex-none">
               <div
                 className="page-title truncate"
                 title={instance.data?.jiuwenclaw_name ?? undefined}
@@ -77,7 +83,7 @@ export function InstanceDetailPage({ instanceId, tab = 'detail' }: Props) {
             {instance.data?.status && <StatusBadge status={instance.data.status} />}
           </div>
 
-          <div className="tabs-bar mx-3 shrink-0">
+          <div className="tabs-bar max-w-full shrink-0 self-center overflow-x-auto lg:justify-self-center">
             {mainTabs.map((it) => (
               <button
                 key={it.key}
@@ -89,7 +95,7 @@ export function InstanceDetailPage({ instanceId, tab = 'detail' }: Props) {
             ))}
           </div>
 
-          <div className="min-w-0 flex-1" />
+          <div aria-hidden="true" className="hidden min-w-0 lg:block" />
         </div>
 
         <div className="w-full min-w-0 shrink-0">

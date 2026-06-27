@@ -1,19 +1,47 @@
 #!/usr/bin/env bash
 set -euo >/dev/null 2>&1
 
-gen_gateway_config_file() {
+create_gateway_env_file() {
+    local client_type="${DEPLOY_VARS["AGENT_RUNTIME"]}"
+    local namespace="${DEPLOY_VARS["NAMESPACE"]}"
+    
+    local mode="${DEPLOY_VARS["MODE"]}"
+    local env_template_file="${CONFIG["GATEWAY_ENV_TEMPLATE_FILE"]}"
+    local env_file="${CONFIG["GATEWAY_ENV_FILE"]}"
+    local deploy_mode="${DEPLOY_VARS["DEPLOYMENT_MODE"]}"
+
+    if [ "${client_type}" != "jiuwen" ]; then
+        return
+    fi
+
+    if [ "${mode}" == "dev" ]; then
+        DEPLOY_VARS["AGENT_SERVER_NFS_MOUNT_PATH"]="/root/.jiuwenclaw"
+    else
+        DEPLOY_VARS["AGENT_SERVER_NFS_MOUNT_PATH"]="/home/app/.jiuwenclaw"
+    fi
+
+    if [ "${deploy_mode}" == "active-standby" ]; then
+         DEPLOY_VARS["GATEWAY_INSTANCE_ID"]="gateway-${namespace}"
+    fi
+
+    render_config_template "${env_template_file}" "${env_file}" "DEPLOY_VARS"
+}
+
+create_gateway_config_file() {
     local client_type="${DEPLOY_VARS["AGENT_RUNTIME"]}"
     local field_name="feishu"
-    local template_file="${SCRIPT_DIR}/conf/gateway-config-${client_type}.template.yaml"
+    local template_file="${TEMPLATE_DIR}/gateway-config-${client_type}.template.yaml"
     local file="${CONFIG["GATEWAY_CONFIG_FILE"]}"
-
+    local namespace="${DEPLOY_VARS["NAMESPACE"]}"
+    
     info "AGENT_RUNTIME: ${client_type}"
     if [ "${client_type}" == "yuanrong" ]; then
         collect_oyr_info
         field_name="feishu_enterprise"
     fi
-    info "GATEWAY_CONFIG_TEMPLATE_FILE: ${template_file}"
 
+    
+    info "GATEWAY_CONFIG_TEMPLATE_FILE: ${template_file}"
     render_config_template ${template_file} ${file} "DEPLOY_VARS"
 
     # Clear configuration
@@ -45,6 +73,7 @@ gen_gateway_file() {
     local mode="${DEPLOY_VARS["MODE"]}"
     local template_file="${CONFIG["GATEWAY_TEMPLATE_FILE"]}"
     local file="${CONFIG["GATEWAY_FILE"]}"
+    local enable_gw_lable="${DEPLOY_VARS["ENABLE_GATEWAY_SCHED_LABEL"]}"
 
     render_config_template "${template_file}" "${file}" "DEPLOY_VARS"
     if [ "${client_type}" != "jiuwen" ]; then
@@ -75,60 +104,33 @@ gen_gateway_file() {
         }]
     ' -i "${file}"
 
-    if [[ "${mode}" != "dev" ]] && if_any_nodes_gateway_label; then
+    if [[ "${mode}" != "dev" &&  "${enable_gw_lable}" == "true" ]]; then
         # Automatically create nodeSelector and set gateway=enable
         yq eval 'select(.kind == "Deployment").spec.template.spec.nodeSelector |= {"gateway": "enable"}' -i "${file}"
     fi
     success "Gateway file generation completed: ${file}"
 }
 
-create_gateway_env_configmap() {
-    local client_type="${DEPLOY_VARS["AGENT_RUNTIME"]}"
-    local namespace="${DEPLOY_VARS["NAMESPACE"]}"
-    local env_name="${DEPLOY_VARS["GATEWAY_ENV_FILE_NAME"]}"
-    local mode="${DEPLOY_VARS["MODE"]}"
-    local env_template_file="${CONFIG["GATEWAY_ENV_TEMPLATE_FILE"]}"
-    local env_file="${CONFIG["GATEWAY_ENV_FILE"]}"
-    local deploy_mode="${DEPLOY_VARS["DEPLOYMENT_MODE"]}"
-
-    if [ "${client_type}" != "jiuwen" ]; then
-        return
-    fi
-
-    if [ "${mode}" == "dev" ]; then
-        DEPLOY_VARS["AGENT_SERVER_NFS_MOUNT_PATH"]="/root/.jiuwenclaw"
-    else
-        DEPLOY_VARS["AGENT_SERVER_NFS_MOUNT_PATH"]="/home/app/.jiuwenclaw"
-    fi
-
-    if [ "${deploy_mode}" == "active-standby" ]; then
-         DEPLOY_VARS["GATEWAY_INSTANCE_ID"]="gateway-${namespace}"
-    fi
-
-    render_config_template "${env_template_file}" "${env_file}" "DEPLOY_VARS"
-    exec_cmd kubectl create configmap -n ${namespace} ${env_name} --from-env-file=${env_file}
-}
-
-deploy_gateway() {
-    local namespace="${DEPLOY_VARS["NAMESPACE"]}"
-    local name="${DEPLOY_VARS["GATEWAY_NAME"]}"
-    local conf_name="${DEPLOY_VARS["GATEWAY_CONFIG_MAP_NAME"]}"
-    local conf_file="${CONFIG["GATEWAY_CONFIG_FILE"]}"
-    local gateway_file="${CONFIG["GATEWAY_FILE"]}"
-
-    # create configMap from config.yaml
-    gen_gateway_config_file
-    info "Executing: kubectl create configmap -n ${namespace} ${conf_name} --from-file=config.yaml=${conf_file} --dry-run=client -o yaml | kubectl apply -f -"
-    kubectl create configmap -n ${namespace} ${conf_name} --from-file=config.yaml=${conf_file} --dry-run=client -o yaml | kubectl apply -f -
-
-    # create configMap from gateway.env
-    create_gateway_env_configmap
-
-    # start gateway
+render_gateway_files() {
+    create_gateway_env_file
+    create_gateway_config_file
     if [ "${DEPLOY_VARS["DEPLOYMENT_MODE"]}" == "active-standby" ]; then
         DEPLOY_VARS["GATEWAY_REPLICAS"]="2"
     fi
     gen_gateway_file
+}
+
+deploy_gateway() {
+    local namespace="${DEPLOY_VARS["NAMESPACE"]}"
+    local env_name="${DEPLOY_VARS["GATEWAY_ENV_FILE_NAME"]}"
+    local env_file="${CONFIG["GATEWAY_ENV_FILE"]}"
+    local conf_name="${DEPLOY_VARS["GATEWAY_CONFIG_MAP_NAME"]}"
+    local conf_file="${CONFIG["GATEWAY_CONFIG_FILE"]}"
+    local name="${DEPLOY_VARS["GATEWAY_NAME"]}"
+    local gateway_file="${CONFIG["GATEWAY_FILE"]}"
+
+    exec_cmd kubectl create configmap -n ${namespace} ${env_name} --from-env-file=${env_file}
+    exec_cmd kubectl create configmap -n ${namespace} ${conf_name} --from-file=config.yaml=${conf_file}
     exec_cmd kubectl apply -f ${gateway_file}
     wait_k8s_resource_ready "deployment" "${name}" "${namespace}"
 }

@@ -82,7 +82,7 @@ check_ssh_connectivity() {
 
 # ======== Check if the cluster has at least 2 nodes ======== 
 check_cluster_has_enough_nodes() {
-    if [ "${CMD}" == "down" ]; then
+    if [ "${CMD}" == "down"  ]; then
         return
     fi
     info "===== Checking cluster node count ====="
@@ -135,6 +135,7 @@ check_if_nfs_up() {
     fi
 
     info "Use built-in NFS server"
+    fetch_master_node_ip
     DEPLOY_VARS["NFS_SERVER_ADDR"]=${DEPLOY_VARS["MASTER_NODE_IP"]}
 }
 
@@ -291,7 +292,10 @@ check_if_redis_up() {
 }
 
 check_dependency(){
-    detect_os
+    if [ "${DEPLOY_VARS["RENDER_ONLY"]}" == "true" ]; then
+        return
+    fi
+
     check_cmds
     check_if_master
     check_if_root
@@ -303,7 +307,7 @@ check_nfs_up_dependency(){
     local arch=$(uname -m)
 
     if [[ "$arch" =~ ^aarch64 || "$arch" =~ arm ]]; then
-        error "ARM arch unsupported for NFS, abort deployment."
+        info "ARM arch unsupported for NFS, abort deployment."
     fi
 
     # Check if NFS client command mount.nfs is installed on all worker nodes

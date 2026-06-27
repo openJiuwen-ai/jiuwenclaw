@@ -1442,33 +1442,40 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
   }, [request, setConnectionStats, wsReady]);
 
   useEffect(() => {
-    const reconnectByDebugToggle = () => {
-      // 重连时从 store 拉最新 ext 设置（保存按钮也会派发本事件触发）。
-      const ext = useExtSettingsStore.getState();
-      const extQuery = extSettingsToQueryFields(ext);
-      const { user_id: _uid, group_id: _gid, bot_id: _bid, ...extraFields } = extQuery;
-      const connectOptions: WebConnectOptions = {
-        provider,
-        apiKey,
-        apiBase,
-        model,
-        projectPath,
-        userId: ext.userId || undefined,
-        groupId: ext.groupId || undefined,
-        botId: ext.botId || undefined,
-        extraFields: Object.keys(extraFields).length > 0 ? extraFields : undefined,
-      };
-      void webClient.disconnect('ext settings or debug mode changed').then(() => {
-        void webClient.connect(connectOptions).catch((error) => {
+    let debounceTimer: number | null = null;
+    const reconnectByExtSettings = () => {
+      if (debounceTimer !== null) {
+        window.clearTimeout(debounceTimer);
+      }
+      debounceTimer = window.setTimeout(() => {
+        debounceTimer = null;
+        const ext = useExtSettingsStore.getState();
+        const extQuery = extSettingsToQueryFields(ext);
+        const { user_id: _uid, group_id: _gid, bot_id: _bid, ...extraFields } = extQuery;
+        const connectOptions: WebConnectOptions = {
+          provider,
+          apiKey,
+          apiBase,
+          model,
+          projectPath,
+          userId: ext.userId || undefined,
+          groupId: ext.groupId || undefined,
+          botId: ext.botId || undefined,
+          extraFields: Object.keys(extraFields).length > 0 ? extraFields : undefined,
+        };
+        void webClient.reconnect(connectOptions).catch((error) => {
           const webError = error as WebError;
           setConnectionStats({ lastError: webError.message });
           onErrorRef.current?.(webError.message || 'WebSocket reconnect error');
         });
-      });
+      }, 200);
     };
-    window.addEventListener(WS_RECONNECT_EVENT, reconnectByDebugToggle);
+    window.addEventListener(WS_RECONNECT_EVENT, reconnectByExtSettings);
     return () => {
-      window.removeEventListener(WS_RECONNECT_EVENT, reconnectByDebugToggle);
+      if (debounceTimer !== null) {
+        window.clearTimeout(debounceTimer);
+      }
+      window.removeEventListener(WS_RECONNECT_EVENT, reconnectByExtSettings);
     };
   }, [apiBase, apiKey, model, projectPath, provider, setConnectionStats]);
 

@@ -90,9 +90,8 @@ JiuwenClaw_deployTool_0.0.74k_arm64/
 ├── mysql_handler.sh                      # MySQL 数据库模块部署运维脚本
 ├── ports_handler.sh                      # 端口分配、校验、冲突检测管理脚本
 ├── postgresql_handler.sh                 # PostgreSQL 数据库模块部署运维脚本
-├── rabbitmq_handler.sh                   # RabbitMQ 消息队列模块部署运维脚本
 ├── redis_handler.sh                      # Redis 缓存模块部署运维脚本
-├── storage_handler.sh                    # 通用存储模块统一调度脚本
+├── nfs_handler.sh                        # NFS 模块部署运维脚本
 ├── template_handler.sh                   # Kubernetes 模板文件渲染、配置生成脚本
 ├── update_conf.sh                        # 配置更新、重载处理脚本
 ├── update_docker_registry.py             # 镜像仓库地址批量更新工具
@@ -107,7 +106,6 @@ JiuwenClaw_deployTool_0.0.74k_arm64/
     ├── mysql.template.yaml                 # MySQL 数据库 Kubernetes 资源模板
     ├── nfs.template.yaml                   # NFS 存储 Kubernetes 资源模板
     ├── postgresql.template.yaml            # PostgreSQL 数据库 Kubernetes 资源模板
-    ├── rabbitmq.template.yaml              # RabbitMQ 消息队列 Kubernetes 资源模板
     ├── redis.template.yaml                 # Redis 缓存 Kubernetes 资源模板
     └── web.template.yaml                   # Web 前端 Kubernetes 部署资源模板
 ```
@@ -170,7 +168,6 @@ FEISHU_BOTS="
 
 **部署工具支持对以下独立模块进行精细化管理：**
 - **nfs**：NFS 存储服务模块
-- **rabbitmq**：RabbitMQ 存储服务模块
 - **mysql**：MySQL 存储服务模块
 - **redis**：Redis 服务模块
 - **postgresql**：PostgreSQL 存储服务模块
@@ -182,10 +179,10 @@ FEISHU_BOTS="
 **单模块操作示例：**
 ```
 ./deploy.sh [操作命令] nfs          # 仅操作 NFS 模块
-./deploy.sh [操作命令] rabbitmq     # 仅操作 RabbitMQ 模块
 ./deploy.sh [操作命令] mysql        # 仅操作 MySQL 模块
 ./deploy.sh [操作命令] redis        # 仅操作 Redis 模块
 ./deploy.sh [操作命令] postgresql   # 仅操作 PostgreSQL 模块
+./deploy.sh [操作命令] minio        # 仅操作 MinIO 模块
 ./deploy.sh [操作命令] gateway      # 仅操作 Gateway 模块
 ./deploy.sh [操作命令] web          # 仅操作 Web 模块
 ./deploy.sh [操作命令] manager      # 仅操作 Manager 模块
@@ -193,7 +190,7 @@ FEISHU_BOTS="
 
 **重要约束：**
 
-- **NFS / RabbitMQ / MySQL / Redis / PostgreSQL：** 以上基础依赖模块全局仅支持单次部署，固定运行于 default 命名空间，部署命令自动忽略自定义命名空间参数。
+- **NFS / MySQL / Redis / PostgreSQL：** 以上基础依赖模块全局仅支持单次部署，固定运行于 default 命名空间，部署命令自动忽略自定义命名空间参数。
 - **Web / Gateway / CLAW-Manager：** 业务服务模块需保持命名空间一致，否则服务间网络互通异常、功能不可用。
 
 
@@ -236,7 +233,7 @@ FEISHU_BOTS="
 - `-n`:  指定部署目标命名空间, 从而实现模块多实例隔离部署，不同命名空间的资源不冲突，默认值：`default`。需要注意的是：操作基础依赖模块时，该参数强制失效，固定部署于 `default` 命名空间。
 - `--web-port`: 自定义Web模块对外访问端口，按需适配环境端口规划（范围：30000-32767）。若未传入该参数，且 `.env.custom` 文件中未配置 WEB_NODE_PORT 环境变量，程序将自动选取可用空闲端口。
 - `--manager-web-port`: 自定义 `Manager Web UI` 对外访问端口（范围：30000-32767）。若未传入该参数，且 `.env.custom` 文件中未配置 `MANAGER_WEB_NODE_PORT` 环境变量，程序将自动选取可用空闲端口。
-
+- `--render-only`：只渲染模板输出文件，不操作集群、不校验集群资源
 
 **参数使用示例：**
 ```
@@ -272,9 +269,6 @@ NFS_SERVER_ADDR=""
 
 # 本工具内置部署的 AgentServer 组件在外部 NFS 服务中的共享目录，请确保该目录存在，且目录属主UID/GID统一为1000
 JIUWENCLAW_NFS_PATH=""
-
-# 本工具内置部署的 RabbitMQ 服务在 外部 NFS 服务中的共享目录（外部 RabbitMQ 服务不用填），请确保该目录存在
-RABBITMQ_NFS_PATH=""
 
 # 本工具内置部署的 MySQL 服务在 外部 NFS 服务中的共享目录（外部 MySQL 服务不用填），请确保该目录存在
 MYSQL_NFS_PATH=""
@@ -408,7 +402,7 @@ MINIO_SECURE="false"
 
 JiuwenSwarm 企业级服务完整支持基于 Kubernetes 命名空间的多实例隔离部署，可在同一集群内通过不同命名空间部署多套独立运行的业务实例，实现环境隔离、多实例并行使用。
 
-同一业务实例下的所有组件（Gateway、Web、CLAW-Manager）只有部署在同一个命名空间内才能服务调用和互通。而基础依赖组件（NFS、MySQL、Redis、MinIO、PostgreSQL、RabbitMQ）为所有业务实例的公共组件，无需随业务实例重复部署。
+同一业务实例下的所有组件（Gateway、Web、CLAW-Manager）只有部署在同一个命名空间内才能服务调用和互通。而基础依赖组件（NFS、MySQL、Redis、MinIO、PostgreSQL）为所有业务实例的公共组件，无需随业务实例重复部署。
 
 ### 4.1 部署 Gateway (必选部署)
 

@@ -80,6 +80,7 @@ class WebClient {
   private manualClose = false;
   private connectPromise: Promise<void> | null = null;
   private lastConnectOptions: WebConnectOptions = {};
+  private activeWsUrl: string | null = null;
   private requestSeq = 0;
 
   getState(): WebConnectionState {
@@ -115,18 +116,27 @@ class WebClient {
   }
 
   async connect(options: WebConnectOptions = {}): Promise<void> {
-    if (this.ws?.readyState === WebSocket.OPEN) {
+    this.lastConnectOptions = options;
+    const url = this.buildWsUrl(options);
+
+    if (this.ws?.readyState === WebSocket.OPEN && this.activeWsUrl === url) {
       return;
     }
+
+    if (
+      this.ws?.readyState === WebSocket.OPEN ||
+      this.ws?.readyState === WebSocket.CONNECTING ||
+      this.connectPromise
+    ) {
+      await this.disconnect('reconnect with new options');
+    }
+
     if (this.connectPromise) {
       return this.connectPromise;
     }
 
-    this.lastConnectOptions = options;
     this.manualClose = false;
     this.updateState(this.reconnectAttempts > 0 ? 'reconnecting' : 'connecting');
-
-    const url = this.buildWsUrl(options);
 
     this.connectPromise = new Promise<void>((resolve, reject) => {
       const ws = new WebSocket(url);
@@ -136,6 +146,7 @@ class WebClient {
         if (ws !== this.ws) {
           return;
         }
+        this.activeWsUrl = url;
         logDevWsTraffic({
           direction: 'lifecycle',
           data: { event: 'open', url },
@@ -186,6 +197,7 @@ class WebClient {
             wasClean: closeEvent.wasClean,
           },
         });
+        this.activeWsUrl = null;
         this.ws = null;
         this.connectPromise = null;
         this.rejectAllPending(
@@ -205,6 +217,17 @@ class WebClient {
     });
 
     return this.connectPromise;
+  }
+
+  /** 断开并按新参数重连（扩展字段变更等场景）。 */
+  private reconnectTask: Promise<void> = Promise.resolve();
+
+  async reconnect(options: WebConnectOptions = {}): Promise<void> {
+    this.reconnectTask = this.reconnectTask.then(async () => {
+      await this.disconnect('reconnect');
+      await this.connect(options);
+    });
+    return this.reconnectTask;
   }
 
   disconnect(reason = 'User disconnect'): Promise<void> {
@@ -241,6 +264,7 @@ class WebClient {
     }
     this.ws = null;
     this.connectPromise = null;
+    this.activeWsUrl = null;
     this.updateState('closed');
     return closedPromise;
   }

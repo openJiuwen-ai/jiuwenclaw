@@ -2,7 +2,7 @@
 PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 SRC_FILE=${PROJECT_DIR}/jiuwenclaw/resources/config.yaml
-DEST_FILE=${PROJECT_DIR}/deploy/conf/gateway-config-jiuwen.template.yaml
+DEST_FILE=${PROJECT_DIR}/deploy/templates/gateway-config-jiuwen.template.yaml
 
 rm -f "${DEST_FILE}"
 cp -f "${SRC_FILE}" "${DEST_FILE}"

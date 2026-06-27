@@ -29,6 +29,10 @@ parse_args() {
                 DEPLOY_VARS["MANAGER_WEB_NODE_PORT"]="${args[$((i+1))]}"
                 i=$((i+2))
                 ;;
+            --render-only)
+                DEPLOY_VARS["RENDER_ONLY"]="true"
+                i=$((i+1))
+                ;;
             -h|--help)
                 print_help
                 ;;
@@ -86,6 +90,7 @@ Options:
   -n NAMESPACE              Specify Kubernetes namespace (defaults to default if unspecified)
   --web-port PORT           Set host port for web service （range: 30000-32767）
   --manager-web-port PORT   Set host port for manager web UI （range: 30000-32767）
+  --render-only                 Only render and output YAML manifests
   -h, --help                Display this help message and exit
 
 Examples:

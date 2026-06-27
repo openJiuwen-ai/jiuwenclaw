@@ -27,7 +27,7 @@ type ServiceConfigTemplateSortField =
 export function ServiceConfigTemplatesPage() {
   const { t } = useTranslation();
   const [page, setPage] = useState(1);
-  const [pageSize] = useState(20);
+  const [pageSize, setPageSize] = useState(20);
   const { searchInput, setSearchInput, searchQuery } = useListSearch();
   const [enabledFilter, setEnabledFilter] = useState<string>('');
   const [sortBy, setSortBy] = useState<ServiceConfigTemplateSortField | ''>('');
@@ -107,8 +107,8 @@ export function ServiceConfigTemplatesPage() {
 
   return (
     <>
-      <div className="flex min-w-0 flex-col gap-4 overflow-x-auto">
-        <div className="page-header w-max min-w-full shrink-0">
+      <div className="flex min-w-0 flex-col gap-4">
+        <div className="page-header w-full min-w-0 flex-wrap items-start gap-y-3">
           <div className="min-w-[7.5rem] max-w-[12rem] shrink-0 sm:max-w-[16rem]">
             <div className="page-title truncate" title={t('serviceConfigTemplate.title')}>
               {t('serviceConfigTemplate.title')}
@@ -117,11 +117,12 @@ export function ServiceConfigTemplatesPage() {
               {t('serviceConfigTemplate.subtitle')}
             </div>
           </div>
-          <div className="flex shrink-0 items-center gap-2">
+          <div className="flex min-w-0 flex-1 flex-wrap items-center justify-end gap-2">
           <ListSearchInput
             value={searchInput}
             onChange={setSearchInput}
             placeholder={t('serviceConfigTemplate.searchPlaceholder')}
+            className="basis-full sm:basis-auto"
           />
           <button className="btn sm" onClick={() => void reload()}>
             {t('common.refresh')}
@@ -258,7 +259,10 @@ export function ServiceConfigTemplatesPage() {
           page={page}
           pageSize={pageSize}
           total={data.total ?? data.items.length}
-          onChange={(p) => setPage(p)}
+          onChange={(p, ps) => {
+            setPage(p);
+            setPageSize(ps);
+          }}
         />
       )}
       </div>

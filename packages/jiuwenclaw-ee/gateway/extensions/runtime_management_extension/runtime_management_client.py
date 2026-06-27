@@ -291,10 +291,22 @@ class _SessionRequest(ISessionRequest):
 
     @property
     def session_concurrency(self) -> int:
-        return int(os.getenv("AGENT_SERVER_SESSION_CONCURRENCY", "3"))
+        # 优先使用 service_template 中的值（与 ServiceHandler.total_concurrency 同源），
+        # 缺失时回退到环境变量。避免出现 need(session_concurrency) > avail(service_concurrency)
+        # 的配置不匹配导致资源不足。
+        cfg = self._service_template or {}
+        val = cfg.get("session_concurrency")
+        if val is not None:
+            return int(val)
+        return int(os.getenv("AGENT_SERVER_SESSION_CONCURRENCY", "10"))
 
     @property
     def session_ttl(self) -> int:
+        # 优先使用 service_template 中的值，缺失时回退到环境变量
+        cfg = self._service_template or {}
+        val = cfg.get("session_ttl")
+        if val is not None:
+            return int(val)
         return int(os.getenv("AGENT_SERVER_SESSION_TTL", "60"))
 
     @property
@@ -925,14 +937,14 @@ class RuntimeManagementAgentClient(AgentServerClient):
     async def _init_access(self) -> None:
         """初始化（或重新初始化）Access：读取环境变量构建配置，调用 Access.init。"""
         agent_image = os.getenv("AGENT_SERVER_IMAGE")
-        service_concurrency = int(os.getenv("AGENT_SERVER_SERVICE_CONCURRENCY", "30"))
+        service_concurrency = int(os.getenv("AGENT_SERVER_SERVICE_CONCURRENCY", "10"))
         min_idle_services = int(os.getenv("AGENT_SERVER_MIN_IDLE_SERVICES", "1"))
         max_services = int(os.getenv("AGENT_SERVER_MAX_SERVICES", "20"))
         target_port = int(os.getenv("AGENT_SERVER_PORT", "8080"))
         service_ttl = int(os.getenv("AGENT_SERVER_SERVICE_TTL", "180"))
         message_timeout = int(os.getenv("AGENT_SERVER_MESSAGE_TIMEOUT", "60"))
         autoscale_interval = float(os.getenv("AGENT_SERVER_AUTOSCALE_INTERVAL", "5"))
-        session_concurrency = int(os.getenv("AGENT_SERVER_SESSION_CONCURRENCY", "3"))
+        session_concurrency = int(os.getenv("AGENT_SERVER_SESSION_CONCURRENCY", "10"))
         session_ttl = int(os.getenv("AGENT_SERVER_SESSION_TTL", "60"))
 
         acc_cfg = AccessConfig(
