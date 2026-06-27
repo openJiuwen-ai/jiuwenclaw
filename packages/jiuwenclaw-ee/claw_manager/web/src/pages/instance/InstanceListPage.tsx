@@ -7,7 +7,7 @@ import { useRouter } from '../../router';
 import { StatusBadge } from '../../components/StatusBadge';
 import { ConfirmDialog } from '../../components/ConfirmDialog';
 import { Empty } from '../../components/Empty';
-import { relativeTime } from '../../utils/format';
+import { formatTime, relativeTime } from '../../utils/format';
 import { toast } from '../../stores/uiStore';
 import { ApiError } from '../../services/api';
 import { CreateInstanceModal } from './modal/CreateInstanceModal';
@@ -66,7 +66,20 @@ function InstanceTopoCard({
         <div className="topo-gateway__meta">
           <span className="topo-gateway__meta-item">
             <span>{t('topology.lastHeartbeat')}</span>
-            <span className="mono">{relativeTime(instance.last_heartbeat)}</span>
+            <span
+              className="mono"
+              title={instance.last_heartbeat ? formatTime(instance.last_heartbeat) : undefined}
+            >
+              {relativeTime(instance.last_heartbeat)}
+            </span>
+            <span aria-hidden>，</span>
+            <span>{t('topology.lastUpdated')}</span>
+            <span
+              className="mono"
+              title={instance.updated_at ? formatTime(instance.updated_at) : undefined}
+            >
+              {relativeTime(instance.updated_at)}
+            </span>
           </span>
         </div>
       </div>

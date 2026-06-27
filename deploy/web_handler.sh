@@ -45,6 +45,8 @@ gen_web_file() {
             }
         ]' -i "${file}"
     fi
+
+    add_resource_if_set "WEB" "${file}"
 }
 
 deploy_web() {

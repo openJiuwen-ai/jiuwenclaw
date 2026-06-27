@@ -17,6 +17,8 @@ gen_manager_server_file() {
             }
         ]' -i "${file}"
     fi
+
+    add_resource_if_set "MANAGER_SERVER" "${file}"
 }
 
 deploy_manager() {
@@ -38,6 +40,7 @@ deploy_manager() {
 
         ensure_available_port "MANAGER_WEB_NODE_PORT"
         render_config_template "${manager_web_template_file}" "${manager_web_file}" "DEPLOY_VARS"
+        add_resource_if_set "MANAGER_WEB" "${manager_web_file}"
         exec_cmd kubectl apply -f ${manager_web_file}
         wait_k8s_resource_ready "deployment" "${manager_web_name}" "${namespace}"
         success "MANAGER_WEB_NODE_PORT: ${DEPLOY_VARS["MANAGER_WEB_NODE_PORT"]}"

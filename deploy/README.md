@@ -484,20 +484,31 @@ kubectl exec -it <pod-name> -n <namespace> -c <container-name> bash
 
 # FAQ
 
-## 如何在线调试代码
+## 如何在线调试业务代码
 
-如果需要对 Gateway、Manager、AgentServer 业务组件进行代码在线修改以及调试配置，请在启动前，修改配置文件 `.env.custom` 如下参数：
+    在开发调试环境中，如果需要对 Gateway、Manager、AgentServer 业务组件进行代码在线修改以及调试配置，可通过配置变量控制 Pod 启动时挂载宿主机本地源码，Pod 不再使用镜像内置代码，直接加载本地修改后的源码，无需重新构建推送镜像，即可实时调试功能。
+
+**使用前注意事项：**
+- 提前在部署节点的宿主机上拉取对应模块完整源码，并切换至指定开发分支
+- 具备部署节点的宿主机上的本地源码目录可读权限；
+- 不调试某个模块时，对应路径变量必须留空，否则会覆盖镜像内置代码。
+
+**使用方法：**
+    请在启动服务前，修改配置文件 `.env.custom` 如下参数：
+
 ```
+# 设置运行模式为开发模式，开启本地源码挂载调试逻辑
 MODE=dev
-# jiuwenclaw 项目在宿主机本地代码路径（请填写绝对路径）
-# 如果需要修改该模块代码，请提前准备好代码；如果不需要修改该模块代码，不要设置
-# 代码下载路径：https://gitcode.com/openJiuwen/jiuwenswarm
+
+# ===================== jiuwenclaw 模块调试 =====================
+# CLAW源码宿主机绝对路径，仅调试claw组件时填写；不调试直接留空
+# 源码仓库：https://gitcode.com/openJiuwen/jiuwenswarm
 # 代码分支：dev/enterprise_kub
 CLAW_CODE_PATH=""
 
-# agent-runtime 项目在宿主机本地代码路径（请填写绝对路径）
-# 如果需要修改该模块代码，请提前准备好代码；如果不需要修改该模块代码，不要设置
-# 代码下载路径：https://gitcode.com/openJiuwen/agent-runtime
+# ===================== agent-runtime 模块调试 =====================
+# Runtime源码宿主机绝对路径，仅调试runtime组件时填写；不调试直接留空
+# 源码仓库：https://gitcode.com/openJiuwen/agent-runtime
 # 代码分支：develop
 RUNTIME_CODE_PATH=""
 ```

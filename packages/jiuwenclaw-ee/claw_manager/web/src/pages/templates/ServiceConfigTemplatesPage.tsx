@@ -106,13 +106,18 @@ export function ServiceConfigTemplatesPage() {
   };
 
   return (
-    <div className="flex flex-col gap-4">
-      <div className="page-header">
-        <div>
-          <div className="page-title">{t('serviceConfigTemplate.title')}</div>
-          <div className="page-subtitle">{t('serviceConfigTemplate.subtitle')}</div>
-        </div>
-        <div className="flex items-center gap-2">
+    <>
+      <div className="flex min-w-0 flex-col gap-4 overflow-x-auto">
+        <div className="page-header w-max min-w-full shrink-0">
+          <div className="min-w-[7.5rem] max-w-[12rem] shrink-0 sm:max-w-[16rem]">
+            <div className="page-title truncate" title={t('serviceConfigTemplate.title')}>
+              {t('serviceConfigTemplate.title')}
+            </div>
+            <div className="page-subtitle truncate" title={t('serviceConfigTemplate.subtitle')}>
+              {t('serviceConfigTemplate.subtitle')}
+            </div>
+          </div>
+          <div className="flex shrink-0 items-center gap-2">
           <ListSearchInput
             value={searchInput}
             onChange={setSearchInput}
@@ -133,13 +138,15 @@ export function ServiceConfigTemplatesPage() {
         </div>
       </div>
 
+      <div className="flex w-full min-w-0 shrink-0 flex-col gap-4">
       <div className="card !p-0">
         {loading ? (
           <div className="p-4 text-sm text-muted">{t('common.loading')}</div>
         ) : error ? (
           <div className="p-4 text-sm text-danger">{t('errors.loadFailed', { detail: error })}</div>
         ) : (
-          <table className="table">
+          <div className="overflow-x-auto">
+          <table className="table w-max min-w-full">
             <thead>
               <tr>
                 <th>
@@ -189,7 +196,7 @@ export function ServiceConfigTemplatesPage() {
                     onChange={(value) => handleSortChange('updated_at', value)}
                   />
                 </th>
-                <th>{t('common.actions')}</th>
+                <th className="whitespace-nowrap min-w-[9.5rem]">{t('common.actions')}</th>
               </tr>
             </thead>
             <tbody>
@@ -201,17 +208,19 @@ export function ServiceConfigTemplatesPage() {
                 </tr>
               ) : items.map((row) => (
                 <tr key={row.template_id}>
-                  <td>
-                    <div className="text-text-strong font-medium">{row.template_name}</div>
-                    <div className="text-[11px] text-muted mono">{row.template_id}</div>
+                  <td className="align-top">
+                    <div className="text-text-strong font-medium break-words">{row.template_name}</div>
+                    <div className="text-[11px] text-muted mono break-all" title={row.template_id}>
+                      {row.template_id}
+                    </div>
                   </td>
-                  <td className="text-[11px] text-muted" title={row.description ?? undefined}>
+                  <td className="text-[11px] text-muted max-w-[14rem]" title={row.description ?? undefined}>
                     {row.description ? truncate(row.description, 48) : '—'}
                   </td>
-                  <td className="mono text-[11px] text-muted" title={row.agent_image}>
-                    {truncate(row.agent_image, 32)}
+                  <td className="mono text-[11px] text-muted min-w-[10rem] max-w-[18rem] break-all align-top" title={row.agent_image}>
+                    {row.agent_image}
                   </td>
-                  <td>
+                  <td className="whitespace-nowrap">
                     <Switch
                       checked={row.enabled}
                       disabled={togglingId === row.template_id}
@@ -219,8 +228,8 @@ export function ServiceConfigTemplatesPage() {
                       onChange={(enabled) => void toggleEnabled(row, enabled)}
                     />
                   </td>
-                  <td className="mono text-[11px] text-muted">{formatTime(row.updated_at)}</td>
-                  <td>
+                  <td className="mono text-[11px] text-muted whitespace-nowrap">{formatTime(row.updated_at)}</td>
+                  <td className="whitespace-nowrap min-w-[9.5rem]">
                     <div className="flex items-center gap-1">
                       <button
                         className="btn sm ghost"
@@ -240,6 +249,7 @@ export function ServiceConfigTemplatesPage() {
               ))}
             </tbody>
           </table>
+          </div>
         )}
       </div>
 
@@ -251,6 +261,8 @@ export function ServiceConfigTemplatesPage() {
           onChange={(p) => setPage(p)}
         />
       )}
+      </div>
+      </div>
 
       <ServiceConfigTemplateModal
         open={modalOpen}
@@ -278,6 +290,6 @@ export function ServiceConfigTemplatesPage() {
         }}
         onClose={() => setDelTarget(null)}
       />
-    </div>
+    </>
   );
 }

@@ -73,6 +73,7 @@
     "managePolicies": "Policies",
     "noServices": "No Gateway / AgentServer yet (awaiting heartbeats)",
     "lastHeartbeat": "Last heartbeat",
+    "lastUpdated": "Last updated",
     "endpoint": "Endpoint",
     "version": "Version",
     "deleteConfirm": "Delete this instance?",

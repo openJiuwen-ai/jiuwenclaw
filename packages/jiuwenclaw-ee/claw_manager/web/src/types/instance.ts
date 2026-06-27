@@ -7,6 +7,7 @@ export interface InstanceSummary {
   space_id: string;
   created_at?: string | null;
   last_heartbeat?: string | null;
+  updated_at?: string | null;
 }
 
 export interface InstanceDetail extends InstanceSummary {

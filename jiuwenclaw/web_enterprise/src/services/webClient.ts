@@ -133,6 +133,9 @@ class WebClient {
       this.ws = ws;
 
       ws.onopen = () => {
+        if (ws !== this.ws) {
+          return;
+        }
         logDevWsTraffic({
           direction: 'lifecycle',
           data: { event: 'open', url },
@@ -144,10 +147,16 @@ class WebClient {
       };
 
       ws.onmessage = (event) => {
+        if (ws !== this.ws) {
+          return;
+        }
         this.handleIncoming(event.data);
       };
 
       ws.onerror = () => {
+        if (ws !== this.ws) {
+          return;
+        }
         logDevWsTraffic({
           direction: 'lifecycle',
           data: { event: 'error' },
@@ -165,6 +174,9 @@ class WebClient {
       };
 
       ws.onclose = (closeEvent) => {
+        if (ws !== this.ws) {
+          return;
+        }
         logDevWsTraffic({
           direction: 'lifecycle',
           data: {

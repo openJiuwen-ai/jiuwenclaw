@@ -289,7 +289,8 @@ export function MappingTab({ instanceId }: { instanceId: string }) {
         ) : error ? (
           <div className="p-4 text-sm text-danger">{t('errors.loadFailed', { detail: error })}</div>
         ) : (
-          <table className="table">
+          <div className="overflow-x-auto">
+          <table className="table w-max min-w-full">
             <thead>
               <tr>
                 <th>
@@ -391,7 +392,7 @@ export function MappingTab({ instanceId }: { instanceId: string }) {
                     onChange={(value) => handleSortChange('updated_at', value)}
                   />
                 </th>
-                <th>{t('common.actions')}</th>
+                <th className="whitespace-nowrap min-w-[9.5rem]">{t('common.actions')}</th>
               </tr>
             </thead>
             <tbody>
@@ -409,43 +410,49 @@ export function MappingTab({ instanceId }: { instanceId: string }) {
                   const templateName = templateOptionName(templateOption?.label, row.template_id);
                   return (
                     <tr key={row.id}>
-                      <td>
-                        <div className="text-text-strong font-medium">
+                      <td className="align-top">
+                        <div className="text-text-strong font-medium break-words">
                           {row.policy_name || '—'}
                         </div>
-                        <div className="text-[11px] text-muted mono" title={row.policy_id}>
+                        <div className="text-[11px] text-muted mono break-all" title={row.policy_id}>
                           {row.policy_id}
                         </div>
                       </td>
-                      <td className="text-[11px] text-muted" title={row.policy_desc ?? undefined}>
+                      <td className="text-[11px] text-muted max-w-[14rem]" title={row.policy_desc ?? undefined}>
                         {row.policy_desc ? truncate(row.policy_desc, 48) : '—'}
                       </td>
-                      <td>
+                      <td className="whitespace-nowrap">
                         <span className="pill accent mono text-[11px] tabular-nums">
                           {row.priority}
                         </span>
                       </td>
-                      <td className="mono text-xs" title={row.user_id ?? undefined}>
-                        {row.user_id ? truncate(row.user_id, 24) : '—'}
+                      <td
+                        className="mono text-xs min-w-[10rem] max-w-[18rem] break-all align-top"
+                        title={row.user_id ?? undefined}
+                      >
+                        {row.user_id || '—'}
                       </td>
-                      <td className="mono text-xs" title={row.group_id ?? undefined}>
-                        {row.group_id ? truncate(row.group_id, 24) : '—'}
+                      <td
+                        className="mono text-xs min-w-[10rem] max-w-[18rem] break-all align-top"
+                        title={row.group_id ?? undefined}
+                      >
+                        {row.group_id || '—'}
                       </td>
-                      <td className="text-xs max-w-[10rem]" title={row.template_type}>
+                      <td className="text-xs max-w-[10rem] truncate" title={row.template_type}>
                         {truncate(slotLabel(t, row.template_type), 28)}
                       </td>
-                      <td className="max-w-[14rem]">
+                      <td className="min-w-[12rem] max-w-[20rem] align-top">
                         <div
                           className="text-text-strong font-medium text-xs truncate"
                           title={templateOption?.label ?? templateName}
                         >
                           {templateName}
                         </div>
-                        <div className="text-[11px] text-muted mono truncate" title={row.template_id}>
+                        <div className="text-[11px] text-muted mono break-all" title={row.template_id}>
                           {row.template_id}
                         </div>
                       </td>
-                      <td>
+                      <td className="whitespace-nowrap">
                         <Switch
                           checked={row.enabled}
                           disabled={togglingId === row.id}
@@ -453,8 +460,8 @@ export function MappingTab({ instanceId }: { instanceId: string }) {
                           onChange={(enabled) => void toggleEnabled(row, enabled)}
                         />
                       </td>
-                      <td className="mono text-[11px] text-muted">{formatTime(row.updated_at)}</td>
-                      <td>
+                      <td className="mono text-[11px] text-muted whitespace-nowrap">{formatTime(row.updated_at)}</td>
+                      <td className="whitespace-nowrap min-w-[9.5rem]">
                         <div className="flex items-center gap-1">
                           <button
                             className="btn sm ghost"
@@ -476,6 +483,7 @@ export function MappingTab({ instanceId }: { instanceId: string }) {
               )}
             </tbody>
           </table>
+          </div>
         )}
       </div>
 

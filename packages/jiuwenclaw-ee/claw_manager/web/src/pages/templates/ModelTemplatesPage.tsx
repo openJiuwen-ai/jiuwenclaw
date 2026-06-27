@@ -122,13 +122,18 @@ export function ModelTemplatesPage() {
   };
 
   return (
-    <div className="flex flex-col gap-4">
-      <div className="page-header">
-        <div>
-          <div className="page-title">{t('modelTemplate.title')}</div>
-          <div className="page-subtitle">{t('modelTemplate.subtitle')}</div>
-        </div>
-        <div className="flex items-center gap-2">
+    <>
+      <div className="flex min-w-0 flex-col gap-4 overflow-x-auto">
+        <div className="page-header w-max min-w-full shrink-0">
+          <div className="min-w-[7.5rem] max-w-[12rem] shrink-0 sm:max-w-[16rem]">
+            <div className="page-title truncate" title={t('modelTemplate.title')}>
+              {t('modelTemplate.title')}
+            </div>
+            <div className="page-subtitle truncate" title={t('modelTemplate.subtitle')}>
+              {t('modelTemplate.subtitle')}
+            </div>
+          </div>
+          <div className="flex shrink-0 items-center gap-2">
           <ListSearchInput
             value={searchInput}
             onChange={setSearchInput}
@@ -149,13 +154,15 @@ export function ModelTemplatesPage() {
         </div>
       </div>
 
+      <div className="flex w-full min-w-0 shrink-0 flex-col gap-4">
       <div className="card !p-0">
         {loading ? (
           <div className="p-4 text-sm text-muted">{t('common.loading')}</div>
         ) : error ? (
           <div className="p-4 text-sm text-danger">{t('errors.loadFailed', { detail: error })}</div>
         ) : (
-          <table className="table">
+          <div className="overflow-x-auto">
+          <table className="table w-max min-w-full">
             <thead>
               <tr>
                 <th>
@@ -269,7 +276,7 @@ export function ModelTemplatesPage() {
                     onChange={(value) => handleSortChange('updated_at', value)}
                   />
                 </th>
-                <th>{t('common.actions')}</th>
+                <th className="whitespace-nowrap min-w-[9.5rem]">{t('common.actions')}</th>
               </tr>
             </thead>
             <tbody>
@@ -284,24 +291,30 @@ export function ModelTemplatesPage() {
                 const providerClass = (row.model_provider ?? '').toLowerCase();
                 return (
                   <tr key={row.template_id}>
-                    <td>
-                      <div className="text-text-strong font-medium">{row.template_name}</div>
-                      <div className="text-[11px] text-muted mono">{row.template_id}</div>
+                    <td className="align-top">
+                      <div className="text-text-strong font-medium break-words">{row.template_name}</div>
+                      <div className="text-[11px] text-muted mono break-all" title={row.template_id}>
+                        {row.template_id}
+                      </div>
                     </td>
-                    <td className="text-[11px] text-muted" title={row.description ?? undefined}>
+                    <td className="text-[11px] text-muted max-w-[14rem]" title={row.description ?? undefined}>
                       {row.description ? truncate(row.description, 48) : '—'}
                     </td>
-                    <td><span className={`tag ${providerClass}`}>{row.model_provider}</span></td>
-                    <td className="mono text-xs text-text-strong">{row.model_id}</td>
-                    <td>
+                    <td className="whitespace-nowrap"><span className={`tag ${providerClass}`}>{row.model_provider}</span></td>
+                    <td className="mono text-xs min-w-[10rem] max-w-[18rem] break-all align-top text-text-strong" title={row.model_id}>
+                      {row.model_id}
+                    </td>
+                    <td className="whitespace-nowrap">
                       <div className="flex items-center gap-1 flex-wrap">
                         {types.map((it) => (
                           <span key={String(it)} className={`tag ${String(it).toLowerCase()}`}>{String(it)}</span>
                         ))}
                       </div>
                     </td>
-                    <td className="mono text-[11px] text-muted" title={row.api_base}>{truncate(row.api_base, 36)}</td>
-                    <td>
+                    <td className="mono text-[11px] text-muted max-w-[12rem]" title={row.api_base}>
+                      {truncate(row.api_base, 36)}
+                    </td>
+                    <td className="whitespace-nowrap">
                       <Switch
                         checked={row.enabled}
                         disabled={togglingId === row.template_id}
@@ -309,8 +322,8 @@ export function ModelTemplatesPage() {
                         onChange={(enabled) => void toggleEnabled(row, enabled)}
                       />
                     </td>
-                    <td className="mono text-[11px] text-muted">{formatTime(row.updated_at)}</td>
-                    <td>
+                    <td className="mono text-[11px] text-muted whitespace-nowrap">{formatTime(row.updated_at)}</td>
+                    <td className="whitespace-nowrap min-w-[9.5rem]">
                       <div className="flex items-center gap-1">
                         <button
                           className="btn sm ghost"
@@ -331,6 +344,7 @@ export function ModelTemplatesPage() {
               })}
             </tbody>
           </table>
+          </div>
         )}
       </div>
 
@@ -342,6 +356,8 @@ export function ModelTemplatesPage() {
           onChange={(p) => setPage(p)}
         />
       )}
+      </div>
+      </div>
 
       <ModelTemplateModal
         open={modalOpen}
@@ -369,6 +385,6 @@ export function ModelTemplatesPage() {
         }}
         onClose={() => setDelTarget(null)}
       />
-    </div>
+    </>
   );
 }

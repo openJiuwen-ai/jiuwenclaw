@@ -57,6 +57,7 @@ class InstanceSummary(BaseModel):
     space_id: str
     created_at: str | None = None
     last_heartbeat: str | None = None
+    updated_at: str | None = None
 
 
 class InstanceDetail(InstanceSummary):
