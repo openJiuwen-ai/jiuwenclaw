@@ -680,7 +680,7 @@ react:
   concurrency:
     enabled: true
     tool_limits:
-      spawn_subagent: 5
+      spawn_subagent: 10
       web_search: 10
 tools:
   - todo
