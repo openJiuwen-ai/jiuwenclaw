@@ -10,6 +10,8 @@ from jiuwenclaw.agentserver.replan_agent.plan_node import PlanNode
 
 logger = logging.getLogger(__name__)
 
+_DEFAULT_STRUCTURAL_PAGES = 2
+
 
 def _looks_like_path(value: str) -> bool:
     return "/" in value or "\\" in value or value.endswith(".html")
@@ -63,6 +65,9 @@ class DeliveryNode(PlanNode):
         pptx_filename = str(inputs.get("pptx_filename") or "").strip()
         export_status = str(inputs.get("export_status") or "failed").strip()
         page_count = int(inputs.get("page_count") or 0)
+        total_pages = int(
+            inputs.get("total_pages") or (page_count + _DEFAULT_STRUCTURAL_PAGES)
+        )
 
         if not pages_dir:
             logger.error("[P10] pages_dir 为空")
@@ -81,7 +86,7 @@ class DeliveryNode(PlanNode):
                 export_status,
             )
 
-        pages_ok = await self._check_pages(pages_dir, page_count)
+        pages_ok = await self._check_pages(pages_dir, total_pages)
 
         send_file_status = "skipped"
         if pptx_ok and pptx_path:

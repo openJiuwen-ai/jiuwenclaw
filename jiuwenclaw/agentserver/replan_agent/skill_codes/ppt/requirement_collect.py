@@ -559,7 +559,7 @@ def _build_batch_questions(missing_fields: list[str]) -> list[dict[str, Any]]:
         questions.append(
             {
                 "header": "页数",
-                "question": "需要多少页？",
+                "question": "需要多少页内容页？（不含封面、结束页）",
                 "multi_select": False,
                 "options": [
                     {"label": "3-6 页（推荐）", "description": "适合简短汇报、产品介绍"},
@@ -717,7 +717,7 @@ def _is_auto_skip(status: str, answers: list[Any]) -> bool:
 _BATCH_FALLBACK_SYSTEM_PROMPT = """你是 PPT 需求兜底分析助手。当用户未在限时内作答时，请基于用户原始消息、文档摘要与候选选项，为每个缺失字段挑选最合理的默认值。
 
 字段取值范围：
-- page_count: 整数（候选 6 / 10 / 18 中三选一；若用户上下文暗示更具体，可输出 1~30 的整数）
+- page_count: 整数（内容页数，不含封面/结束页；候选 6 / 10 / 18 中三选一；若用户上下文暗示更具体，可输出 1~30 的整数）
 - audience: 字符串（优先从候选标签中选；无明显倾向时填 "通用商务/知识分享"）
 - presentation_purpose: 字符串（候选「工作汇报」「产品展示」「教学分享」「auto」中四选一）
 

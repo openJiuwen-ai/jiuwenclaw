@@ -46,7 +46,7 @@ _LLM_PATH_AND_SLOTS_SYSTEM_PROMPT = """你是 PPT 任务分析助手。从用户
 第二步：PPT 需求信息提取（仅当没有找到任何文件路径时执行）
 - 只提取用户**明确提到**的信息，不要推断或补充
 - 未提及的字段留空字符串或 null
-- page_count 必须是正整数（如 10）
+- page_count 必须是正整数（内容页数，不含封面/结束页；如 10）
 - style_id 可选值：business-classic / tech-minimal / elegant-narrative / industrial-tech / free / 其他风格名
 - audience 可选值：公司高管 / 技术团队 / 投资人 / 普通受众 / 其他
 - presentation_purpose 可选值：工作汇报 / 产品展示 / 教学分享 / auto / 其他

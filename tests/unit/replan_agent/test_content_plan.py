@@ -41,18 +41,11 @@ def _make_outline_markdown(
 ) -> str:
     pages = []
     for index in range(1, page_count + 1):
-        if index == 1:
-            page_type = "intro"
-            research = "❌"
-            queries = "-"
-            data_need = "-"
-            title = f"{topic} 概览"
-        else:
-            page_type = "trend"
-            research = "✅"
-            queries = "-" if p2_missing_research_query else '"AI agent market 2026", "智能体市场规模"'
-            data_need = "全球市场规模、CAGR"
-            title = "AI Agent 市场规模持续扩大"
+        page_type = "trend"
+        research = "✅"
+        queries = "-" if p2_missing_research_query else '"AI agent market 2026", "智能体市场规模"'
+        data_need = "全球市场规模、CAGR"
+        title = "AI Agent 市场规模持续扩大"
         pages.append(
             f"""### P{index}: 页面{index}
 - **类型**：{page_type}
@@ -427,7 +420,7 @@ def test_validate_outline_markdown_basic() -> None:
 
 @pytest.mark.unit
 def test_validate_outline_raises_on_page_count_mismatch() -> None:
-    with pytest.raises(cp.ContentPlanError, match="页数应为"):
+    with pytest.raises(cp.ContentPlanError, match="内容页数"):
         cp._validate_outline_markdown_basic(
             _make_outline_markdown(page_count=2),
             topic="2025 AI 趋势",

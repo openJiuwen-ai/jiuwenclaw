@@ -137,7 +137,7 @@ def test_apply_answer_item_page_count() -> None:
     sent = rc._build_batch_questions(["page_count"])
     rc._apply_ask_answers(
         ctx,
-        [{"question": "需要多少页？", "selected_options": ["8-12 页"]}],
+        [{"question": "需要多少页内容页？（不含封面、结束页）", "selected_options": ["8-12 页"]}],
         sent_questions=sent,
     )
     assert ctx["page_count"] == 10
@@ -265,7 +265,7 @@ def test_execute_no_topic_asks_user_then_uses_selected_topic() -> None:
             {
                 "status": "answered",
                 "answers": [
-                    {"question": "需要多少页？", "selected_options": ["3-6 页（推荐）"]},
+                    {"question": "需要多少页内容页？（不含封面、结束页）", "selected_options": ["3-6 页（推荐）"]},
                     {"question": "目标受众是谁？", "selected_options": ["企业高管"]},
                     {"question": "这次演示的主要目的是？", "selected_options": ["工作汇报"]},
                 ],
@@ -331,7 +331,7 @@ def test_execute_asks_missing_in_p22_when_topic_known() -> None:
                 "status": "answered",
                 "answers": [
                     {
-                        "question": "需要多少页？",
+                        "question": "需要多少页内容页？（不含封面、结束页）",
                         "selected_options": ["3-6 页（推荐）"],
                     },
                     {"question": "目标受众是谁？", "selected_options": ["企业高管"]},
@@ -486,7 +486,7 @@ def test_p22_falls_back_to_llm_when_batch_fields_still_missing_after_ask(
             {
                 "status": "answered",
                 "answers": [
-                    {"question": "需要多少页？", "selected_options": ["3-6 页（推荐）"]},
+                    {"question": "需要多少页内容页？（不含封面、结束页）", "selected_options": ["3-6 页（推荐）"]},
                 ],
             },
         ],
@@ -525,7 +525,7 @@ def test_p22_auto_skip_uses_llm_then_static_defaults(
             {
                 "status": "answered",
                 "answers": [
-                    {"question": "需要多少页？", "selected_options": []},
+                    {"question": "需要多少页内容页？（不含封面、结束页）", "selected_options": []},
                     {"question": "目标受众是谁？", "selected_options": []},
                     {"question": "这次演示的主要目的是？", "selected_options": []},
                 ],

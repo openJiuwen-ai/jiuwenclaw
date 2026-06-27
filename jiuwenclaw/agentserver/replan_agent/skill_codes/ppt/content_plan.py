@@ -68,13 +68,14 @@ _P43_COMMON_RULES = """大纲格式要求（必须严格遵守）：
 2. 若需写入已搜索来源，在 `## 已搜索来源` 下用表格列出 URL 与覆盖维度（不写正式评分，评分留给 P6）。
    无需搜索时删除整个 `## 已搜索来源` 章节。
 3. `## 页面规划` 下每页一个 `### P{N}:` 块，字段齐全：
-   - **类型**：intro/agenda/conclusion/trend/data/case/comparison/technology 等
-   - **研究需求**：intro/agenda/conclusion 标 ❌，其余标 ✅
+   - **类型**：cover/ending/agenda/section/chapter/transition/conclusion/trend/data/case/comparison/technology 等
+   - **研究需求**：cover/ending/agenda/section/chapter/transition/conclusion 标 ❌，其余标 ✅
    - **标题**：结论性完整句（Action + Result）
    - **内容概要**：具体有信息量
    - **研究查询**：✅ 页 2-4 个精准查询；❌ 页填 `-`
    - **数据需求**：✅ 页写具体数据类型和维度，数据需求必须具体化；❌ 页填 `-`
-4. 总页数与目标 page_count 一致（含封面/目录/结语等）。
+4. 内容页数（研究需求：✅）等于 page_count；默认总页数为 page_count + 2（封面 + 结束页）。
+   仅当用户明确要求目录/章节/过渡/总结等结构页时才额外增加，这些结构页不占用内容页数。
 5. 基于给定素材与搜索结果，不编造不存在的趋势或数据。
 6. 只输出 Markdown 正文，不要 JSON，不要代码围栏。"""
 
@@ -429,7 +430,7 @@ def _build_p43_prompt(
 
     parts = [
         f"请生成 outline.md 正文，主题：{topic}\n",
-        f"- page_count: {page_count}\n",
+        f"- page_count: {page_count}（内容页数，不含封面/结束页；默认总页数为 page_count + 2）\n",
         f"- audience: {audience}\n",
         f"- source_type: {source_type}\n",
         f"- search_mode: {search_mode}\n",
@@ -495,11 +496,15 @@ def _validate_outline_markdown_basic(text: str, *, topic: str, page_count: Any) 
     if not page_numbers:
         raise ContentPlanError("P4.3 outline 缺少 `### P{N}:` 页面块")
 
-    expected_pages = int(page_count) if page_count is not None else None
-    if expected_pages is not None and len(page_numbers) != expected_pages:
-        raise ContentPlanError(
-            f"P4.3 outline 页数应为 {expected_pages}，实际 {len(page_numbers)}"
-        )
+    expected_content_pages = int(page_count) if page_count is not None else None
+    if expected_content_pages is not None:
+        pages = _split_outline_pages(stripped)
+        content_count = sum(1 for _, blk in pages if _is_research_required_page(blk))
+        if content_count != expected_content_pages:
+            raise ContentPlanError(
+                f"P4.3 outline 内容页数（✅）应为 {expected_content_pages}，"
+                f"实际 {content_count}"
+            )
 
     required_fields = ("**类型**", "**研究需求**", "**标题**", "**内容概要**", "**研究查询**", "**数据需求**")
     for field in required_fields:
@@ -650,6 +655,9 @@ async def _run_p43_outline_gen(node: PlanNode, inputs: dict[str, Any]) -> None:
     outline_text = _strip_markdown_fence(response)
     topic = str(inputs.get("topic") or "").strip()
     _validate_outline_markdown_basic(outline_text, topic=topic, page_count=inputs.get("page_count"))
+
+    _all_page_nums = [int(m.group(1)) for m in _PAGE_HEADING_PATTERN.finditer(outline_text)]
+    inputs["total_pages"] = len(_all_page_nums)
 
     outline_path = await _write_outline(
         node,

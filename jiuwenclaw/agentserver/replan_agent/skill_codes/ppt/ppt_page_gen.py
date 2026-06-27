@@ -34,6 +34,8 @@ def _looks_like_path(value: str) -> bool:
     return "/" in value or "\\" in value or value.endswith(".html")
 
 
+_DEFAULT_STRUCTURAL_PAGES = 2
+
 _DESIGN_RULES_DIGEST = (
     "### 视觉与布局硬约束（精选 14 条）\n"
     "1. 容器：`.ppt-slide { width:1280px; height:720px; overflow:hidden; box-sizing:border-box }`\n"
@@ -75,7 +77,36 @@ _HTML_SKELETON = (
 )
 
 
-_PAGE_TYPE_RE = re.compile(r"类型[：:]\s*(\w+)", re.IGNORECASE)
+_STRUCTURAL_DESIGN_RULES = (
+    "### 视觉与布局硬约束（结构页精选 8 条）\n"
+    "1. 容器：`.ppt-slide { width:1280px; height:720px; overflow:hidden; box-sizing:border-box }`\n"
+    "2. 安全区：`.content-safe { width:1220px; height:660px; margin:30px auto }`\n"
+    "3. 字号：封面标题 48-64px / 副标题 24-28px / 日期 18px；"
+    "结束页标题 42-48px / 正文 22px\n"
+    "4. 防溢出：单行文字不超容器宽度\n"
+    "5. 配色与字体严格来自风格规范文件，禁止使用未定义的颜色或字体\n"
+    "6. 布局：居中排列（`flex flex-col items-center justify-center`），"
+    "不强制 grid-cols-2 双栏\n"
+    "7. 留白：允许较高留白，不强制数据卡片、图表或数据来源页脚\n"
+    "8. 全局禁止 `rounded-*` 类，所有元素 border-radius:0\n"
+)
+
+_STRUCTURAL_HTML_SKELETON = (
+    "### 标准 HTML 骨架（结构页专用）\n"
+    "```html\n"
+    '<div class="ppt-slide">\n'
+    '  <div class="content-safe flex flex-col items-center justify-center h-full">\n'
+    "    <h1 class=\"text-center\">标题</h1>\n"
+    "    <p class=\"text-center mt-4\">副标题</p>\n"
+    "  </div>\n"
+    '</div>\n'
+    "```\n"
+    "- 居中布局，不使用 grid-cols-2\n"
+    "- 无需 header/main/footer 三段式，无需数据来源页脚\n"
+)
+
+
+_PAGE_TYPE_RE = re.compile(r"类型\*{0,2}[：:]\s*(\w+)", re.IGNORECASE)
 
 _PAGE_LAYOUT_TEMPLATES = {
     "data": (
@@ -145,6 +176,27 @@ _PAGE_LAYOUT_TEMPLATES = {
         '</div>\n'
         "```\n"
     ),
+    "cover": (
+        "### 推荐布局（cover 类型，封面页）\n"
+        "```html\n"
+        '<div class="content-safe flex flex-col items-center justify-center h-full">\n'
+        '  <h1 class="text-[48px] font-bold text-center">演示标题</h1>\n'
+        '  <p class="text-[24px] text-center mt-4">副标题</p>\n'
+        '  <p class="text-[18px] text-center mt-2">日期</p>\n'
+        '</div>\n'
+        "```\n"
+        "- 低密度页面，允许较高留白，不要求 grid-cols-2、数据卡片或图表\n"
+    ),
+    "ending": (
+        "### 推荐布局（ending 类型，结束页）\n"
+        "```html\n"
+        '<div class="content-safe flex flex-col items-center justify-center h-full">\n'
+        '  <h2 class="text-[42px] font-bold text-center">感谢聆听</h2>\n'
+        '  <p class="text-[22px] text-center mt-4">联系方式（可选）</p>\n'
+        '</div>\n'
+        "```\n"
+        "- 低密度页面，允许较高留白，不要求 grid-cols-2、数据卡片或图表\n"
+    ),
 }
 
 
@@ -156,6 +208,18 @@ def _detect_page_type(outline_page: str) -> str:
         return match.group(1).strip().lower()
     return ""
 
+
+_STRUCTURAL_PAGE_TYPES = {
+    "cover", "ending", "agenda", "section", "chapter", "transition", "conclusion",
+}
+
+_STRUCTURAL_DENSITY_CHECKLIST = (
+    "### 结构页密度检查（4 项，全部必须通过）\n"
+    "1. 完整显示：核心内容未被裁切、滚动、折叠或省略\n"
+    "2. 无大段文字：无连续 > 100 字段落\n"
+    "3. 视觉层级：标题 → 副标题 → 正文 层级清晰\n"
+    "4. 留白质量：留白服务于视觉聚焦，非空洞\n"
+)
 
 _DENSITY_CHECKLIST_DIGEST = (
     "### 内容密度检查（8 项，全部必须通过）\n"
@@ -390,17 +454,23 @@ def _build_page_prompt(
     no_outline = not outline_page.strip()
     no_research = not research_page.strip()
 
+    page_type = _detect_page_type(outline_page)
+    is_structural = page_type in _STRUCTURAL_PAGE_TYPES
+
     if no_outline:
         outline_label = "大纲（未提供，请根据重写指引和搜索补充数据自行推断页面类型与布局）"
-    if no_research:
+    if is_structural:
+        research_label = "（结构页，无需研究素材，仅依据大纲内容生成）"
+    elif no_research:
         research_label = "研究报告（未提供，请根据重写指引和搜索补充数据自行生成内容）"
 
-    fusion_rules = (
-        "- 大纲提供页面类型与数据需求，决定页面布局和内容方向\n"
-        "- 研究报告提供核心论点、关键数据、案例素材，决定页面具体内容\n"
-        "- 上述大纲 + 研究报告中的全部信息点都必须体现\n"
-    )
-    if outline_is_full or research_is_full:
+    if is_structural:
+        fusion_rules = (
+            "- 本页为结构页，内容仅从大纲提取标题、副标题等\n"
+            "- 无需研究报告、搜索补充或数据可视化\n"
+            "- 保持低密度，允许较高留白\n"
+        )
+    elif outline_is_full or research_is_full:
         fusion_rules = (
             f"- 以下素材为完整文档，你**仅负责第 {page_number} 页**，"
             f"请从全文中定位 `### P{page_number}:` 章节，仅使用该页内容\n"
@@ -408,15 +478,24 @@ def _build_page_prompt(
             "- 研究报告提供核心论点、关键数据、案例素材，决定页面具体内容\n"
             "- 严禁将其他页面的内容混入本页\n"
         )
-    if no_outline or no_research:
+    elif no_outline or no_research:
         fusion_rules = (
             "- 部分素材缺失，请根据重写指引和搜索补充数据生成内容\n"
             "- 严格遵循视觉风格规范和布局硬约束\n"
             "- 确保所有文字为真实内容，禁止占位文本\n"
         )
+    else:
+        fusion_rules = (
+            "- 大纲提供页面类型与数据需求，决定页面布局和内容方向\n"
+            "- 研究报告提供核心论点、关键数据、案例素材，决定页面具体内容\n"
+            "- 上述大纲 + 研究报告中的全部信息点都必须体现\n"
+        )
 
-    page_type = _detect_page_type(outline_page)
     layout_template = _PAGE_LAYOUT_TEMPLATES.get(page_type, "")
+
+    density_checklist = _STRUCTURAL_DENSITY_CHECKLIST if is_structural else _DENSITY_CHECKLIST_DIGEST
+    design_rules = _STRUCTURAL_DESIGN_RULES if is_structural else _DESIGN_RULES_DIGEST
+    html_skeleton = _STRUCTURAL_HTML_SKELETON if is_structural else _HTML_SKELETON
 
     return (
         "## 0. 输出要求（最高优先级）\n"
@@ -431,13 +510,13 @@ def _build_page_prompt(
         f"{style_text}\n"
         f"{preset_clause}"
         "\n"
-        f"{_DESIGN_RULES_DIGEST}"
+        f"{design_rules}"
         "\n"
-        f"{_HTML_SKELETON}"
+        f"{html_skeleton}"
         "\n"
         f"{layout_template}"
         "\n"
-        f"{_DENSITY_CHECKLIST_DIGEST}"
+        f"{density_checklist}"
         "\n"
         "## 2. 内容素材\n"
         "\n"
@@ -508,6 +587,9 @@ class PrepareNode(PlanNode):
 
     async def _execute(self, inputs: dict[str, Any]) -> dict[str, Any]:
         page_count = int(inputs.get("page_count") or 0)
+        total_pages = int(
+            inputs.get("total_pages") or (page_count + _DEFAULT_STRUCTURAL_PAGES)
+        )
         output_dir = str(inputs.get("output_dir") or "").strip()
         style_file_path = str(inputs.get("style_file_path") or "").strip()
 
@@ -529,7 +611,7 @@ class PrepareNode(PlanNode):
                 "outline_text": outline_text,
                 "research_text": research_text,
                 "style_text": style_text,
-                "all_pages": list(range(1, page_count + 1)) if page_count > 0 else [],
+                "all_pages": list(range(1, total_pages + 1)) if total_pages > 0 else [],
             }
 
         outline_pages = _split_md_pages(outline_text)
@@ -551,7 +633,7 @@ class PrepareNode(PlanNode):
             "outline_text": outline_text,
             "research_text": research_text,
             "style_text": style_text,
-            "all_pages": list(range(1, page_count + 1)),
+            "all_pages": list(range(1, total_pages + 1)),
         }
 
     async def _read_file(self, path: str) -> str:
@@ -793,13 +875,15 @@ class PageWorkerNode(PlanNode):
 
         report: dict[str, Any] = {"pass": True}
         low_density = False
+        page_type = _detect_page_type(outline_page)
+        is_structural = page_type in _STRUCTURAL_PAGE_TYPES
         total_rounds = max(density_retry_round + 1, 1)
         for round_idx in range(total_rounds):
             current = await self._read_file(path)
             if not current:
                 logger.warning("[P8.1] 页面 %d 重检时读取失败，保守判通过", page_num)
                 break
-            report = await self._check_one(page_num, current, search_mode)
+            report = await self._check_one(page_num, current, search_mode, page_type)
             if report.get("pass", True):
                 break
             if round_idx == total_rounds - 1:
@@ -807,9 +891,12 @@ class PageWorkerNode(PlanNode):
                 logger.info("[P8.1] 页面 %d 密度重试用尽，进 low_density", page_num)
                 break
 
-            supplement = await self._search_supplement_one(
-                page_num, report, research_page, topic,
-            )
+            if is_structural:
+                supplement = ""
+            else:
+                supplement = await self._search_supplement_one(
+                    page_num, report, research_page, topic,
+                )
             rewritten = await self._rewrite_one(
                 ctx,
                 report.get("failed_items") or [], current, supplement,
@@ -863,24 +950,38 @@ class PageWorkerNode(PlanNode):
         page_num: int,
         html: str,
         search_mode: str,
+        page_type: str = "",
     ) -> dict[str, Any]:
         """单页密度判定（LLM + 程序化后置校验）。LLM 异常保守判通过。"""
-        no_search_hint = ""
-        if search_mode == "no_search":
-            no_search_hint = "\n注意：当前为 no_search 模式，标注'数据有限'的页面，数据可视化阈值降至 ≥2 个数据卡片。\n"
+        is_structural = page_type in _STRUCTURAL_PAGE_TYPES
+
+        if is_structural:
+            checklist = _STRUCTURAL_DENSITY_CHECKLIST
+            failed_enum = "内容被裁切 / 大段文字 / 视觉层级混乱 / 空白失衡"
+        else:
+            checklist = _DENSITY_CHECKLIST_DIGEST
+            no_search_hint = ""
+            if search_mode == "no_search":
+                no_search_hint = (
+                    "\n注意：当前为 no_search 模式，标注'数据有限'的页面，"
+                    "数据可视化阈值降至 ≥2 个数据卡片。\n"
+                )
+            failed_enum = (
+                "缺数据可视化 / 核心要点不足 / 缺装饰图标 / 空白率过高 / "
+                "缺数据来源 / 大段文字 / 视觉层级混乱 / 布局错误"
+            )
 
         prompt = (
-            "请对以下 PPT 单页 HTML 做内容密度检查，按 8 项清单逐项判定，仅输出 JSON。\n\n"
-            f"{_DENSITY_CHECKLIST_DIGEST}"
-            f"{no_search_hint}"
+            "请对以下 PPT 单页 HTML 做内容密度检查，按清单逐项判定，仅输出 JSON。\n\n"
+            f"{checklist}"
+            f"{no_search_hint if not is_structural else ''}"
             "\nHTML 内容：\n"
             "```html\n"
             f"{html}\n"
             "```\n\n"
             "输出 JSON（受控字段）：\n"
-            '{"pass": true/false, "failed_items": ["缺数据可视化","缺装饰图标"...], "reason": "简要说明"}\n'
-            "failed_items 仅可从以下取值：\n"
-            "缺数据可视化 / 核心要点不足 / 缺装饰图标 / 空白率过高 / 缺数据来源 / 大段文字 / 视觉层级混乱 / 布局错误\n"
+            '{"pass": true/false, "failed_items": [...], "reason": "简要说明"}\n'
+            f"failed_items 仅可从以下取值：\n{failed_enum}\n"
             "全部通过则 failed_items: []。只输出 JSON，不输出其他内容。"
         )
         try:
@@ -895,7 +996,8 @@ class PageWorkerNode(PlanNode):
                 return {"pass": True, "reason": "json_parse_failed"}
             failed_items = list(check.get("failed_items") or [])
             llm_failed = list(failed_items)
-            failed_items = _post_check_data_viz(html, failed_items, search_mode)
+            if not is_structural:
+                failed_items = _post_check_data_viz(html, failed_items, search_mode)
             if len(failed_items) < len(llm_failed):
                 removed = [x for x in llm_failed if x not in failed_items]
                 logger.info(
@@ -1069,6 +1171,9 @@ class QAFixNode(PlanNode):
     async def _execute(self, inputs: dict[str, Any]) -> dict[str, Any]:
         pages_dir = str(inputs.get("pages_dir") or "").strip()
         page_count = int(inputs.get("page_count") or 0)
+        total_pages = int(
+            inputs.get("total_pages") or (page_count + _DEFAULT_STRUCTURAL_PAGES)
+        )
 
         if not pages_dir:
             logger.error("[P8.3] pages_dir 为空")
@@ -1078,7 +1183,7 @@ class QAFixNode(PlanNode):
                 "fix_report": "pages_dir empty",
             }
 
-        completeness_ok, page_files = await self._check_completeness(pages_dir, page_count)
+        completeness_ok, page_files = await self._check_completeness(pages_dir, total_pages)
         qa_status = "ok" if completeness_ok else "partial"
 
         fix_report = ""
@@ -1354,13 +1459,17 @@ class PPTPageGenNode(PlanNode):
                 "ppt_gen_status": "failed",
             }
 
+        total_pages = int(
+            inputs.get("total_pages") or (page_count + _DEFAULT_STRUCTURAL_PAGES)
+        )
+
         prep_result = await self.execute_subplan(self.sub_plans[0], inputs)
         if not isinstance(prep_result, dict) or prep_result.get("prepare_status") != "ok":
             logger.error("[P8] P8.0 预处理失败，终止生成")
             return {
                 "pages_dir": str(inputs.get("pages_dir") or ""),
                 "page_files": [],
-                "missing_pages": list(range(1, page_count + 1)),
+                "missing_pages": list(range(1, total_pages + 1)),
                 "low_density_pages": [],
                 "ppt_gen_status": "failed",
             }
