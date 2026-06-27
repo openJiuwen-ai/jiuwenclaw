@@ -881,7 +881,12 @@ class AgentWebSocketServer:
         params = request.params if isinstance(request.params, dict) else {}
         session_id = params.get("session_id")
         page_idx = params.get("page_idx")
-        data = self.get_conversation_history(session_id=session_id, page_idx=page_idx)
+        if os.getenv("AGENT_RUNTIME", "").strip():
+            agent_id, service_id = TenantAgentPool.extract_ids(request)
+            sessions_dir = get_multi_tenant_user_workspace_dir(service_id, agent_id) / "agent" / "sessions"
+        else:
+            sessions_dir = get_agent_sessions_dir()
+        data = self.get_conversation_history(sessions_dir, session_id=session_id, page_idx=page_idx)
         if data is None:
             resp = AgentResponse(
                 request_id=request.request_id,
@@ -904,7 +909,12 @@ class AgentWebSocketServer:
         params = request.params if isinstance(request.params, dict) else {}
         session_id = params.get("session_id")
         page_idx = params.get("page_idx")
-        data = self.get_conversation_history(session_id=session_id, page_idx=page_idx)
+        if os.getenv("AGENT_RUNTIME", "").strip():
+            agent_id, service_id = TenantAgentPool.extract_ids(request)
+            sessions_dir = get_multi_tenant_user_workspace_dir(service_id, agent_id) / "agent" / "sessions"
+        else:
+            sessions_dir = get_agent_sessions_dir()
+        data = self.get_conversation_history(sessions_dir, session_id=session_id, page_idx=page_idx)
         if data is None:
             err_chunk = AgentResponseChunk(
                 request_id=request.request_id,
@@ -1764,20 +1774,38 @@ class AgentWebSocketServer:
             await ws.send(json.dumps(wire, ensure_ascii=False))
             
     @staticmethod
-    def get_conversation_history(session_id: str, page_idx: int) -> dict[str, Any] | None:
+    def get_conversation_history(
+        sessions_dir: Path | str | None,
+        *,
+        session_id: str,
+        page_idx: int,
+    ) -> dict[str, Any] | None:
         # 按照 session_id 和分页消息获取历史记录
         if not isinstance(session_id, str) or not session_id.strip():
             return None
         if not isinstance(page_idx, int) or page_idx <= 0:
             return None
 
-        history_path: Path = get_agent_sessions_dir() / session_id.strip() / "history.json"
+        # 优先使用调用方解析好的 sessions_dir（多租户/托管运行时），
+        # 回退到默认单租户路径以保持向后兼容。
+        if sessions_dir is None:
+            sessions_dir = get_agent_sessions_dir()
+        history_path: Path = Path(sessions_dir) / session_id.strip() / "history.json"
+        logger.info(
+            "[AgentWebSocketServer] get_conversation_history: history_path=%s exists=%s",
+            history_path,
+            history_path.exists(),
+        )
         if not history_path.exists():
             return None
         try:
             from jiuwenclaw.agentserver.session_history import read_history_records
             raw = read_history_records(history_path)
-        except Exception:
+        except Exception as e:
+            logger.warning(
+                "[AgentWebSocketServer] get_conversation_history: read_history_records failed: %s",
+                e,
+            )
             return None
         if not isinstance(raw, list):
             return None
