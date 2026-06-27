@@ -287,19 +287,26 @@ def read_team_history_records(session_id: str) -> list[dict[str, Any]]:
     return [item for item in all_records if isinstance(item, dict) and _is_team_relevant(item)]
 
 
+def _read_history_by_path(path: Path) -> list[dict[str, Any]]:
+    """根据文件扩展名选择正确的读取函数。"""
+    if path.suffix.lower() == ".jsonl":
+        return _read_history_jsonl(path)
+    return _read_history(path)
+
+
 def read_session_history_records(session_id: str) -> list[dict[str, Any]]:
     """读取指定会话的历史记录，返回所有记录。
 
     用于 auto memory 功能提取对话消息。
     """
-    fpath = _history_file(session_id)
-    all_records = _read_history(fpath)
+    fpath = get_read_history_path(session_id)
+    all_records = _read_history_by_path(fpath)
     # write_text 非原子写入（先截断再写入），读取可能命中截断窗口，
     # 用递增间隔重试最多 5 次等待写入完成
     if not all_records and fpath.exists():
         for attempt in range(1, 6):
             time.sleep(0.2 * attempt)
-            all_records = _read_history(fpath)
+            all_records = _read_history_by_path(fpath)
             if all_records:
                 logger.info("read_session_history_records: recovered on retry %d", attempt)
                 break

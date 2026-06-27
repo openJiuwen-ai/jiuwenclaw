@@ -218,6 +218,53 @@ def is_auto_memory_enabled() -> bool:
         return True
 
 
+def _get_bool_env(value: str | None) -> bool | None:
+    if value is None:
+        return None
+    return value.lower() in ("true", "1", "yes")
+
+
+def _get_evolution_config(config: dict[str, Any] | None) -> dict[str, Any]:
+    if not isinstance(config, dict):
+        return {}
+    react_config = config.get("react")
+    if isinstance(react_config, dict) and isinstance(react_config.get("evolution"), dict):
+        return react_config["evolution"]
+    evolution_config = config.get("evolution")
+    if isinstance(evolution_config, dict):
+        return evolution_config
+    return {}
+
+
+def get_evolution_auto_scan_enabled(config: dict[str, Any] | None) -> bool:
+    env_auto_scan = _get_bool_env(os.getenv("EVOLUTION_AUTO_SCAN"))
+    if env_auto_scan is not None:
+        return env_auto_scan
+    return _get_evolution_config(config).get("auto_scan", False)
+
+
+def get_skill_create_enabled(config: dict[str, Any] | None) -> bool:
+    env_skill_create = _get_bool_env(os.getenv("SKILL_CREATE"))
+    if env_skill_create is not None:
+        return env_skill_create
+    return _get_evolution_config(config).get("skill_create", False)
+
+
+def get_evolution_auto_save_enabled(config: dict[str, Any] | None = None) -> bool:
+    """Return whether evolution approvals may auto-save without user action."""
+    try:
+        env_auto_save = _get_bool_env(os.getenv("EVOLUTION_AUTO_SAVE"))
+        if env_auto_save is not None:
+            return env_auto_save
+        if config is None:
+            config = get_config()
+        if not isinstance(config, dict):
+            return False
+        return _get_evolution_config(config).get("auto_save") is True
+    except Exception:
+        return False
+
+
 def set_auto_memory_enabled(enabled: bool) -> None:
     """Set auto-memory enabled status in config.
 

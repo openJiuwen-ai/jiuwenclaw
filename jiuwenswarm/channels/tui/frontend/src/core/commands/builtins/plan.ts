@@ -29,6 +29,7 @@ export function createPlanCommand(): SlashCommand {
       if (ctx.mode !== target) {
         ctx.setMode(target);
       }
+      ctx.markPlanEntryFromSlashCommand?.();
 
       if (!value) {
         ctx.addItem(addInfo(ctx.sessionId, "Plan mode enabled", "p"));

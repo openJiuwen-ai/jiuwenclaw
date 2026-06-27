@@ -235,7 +235,7 @@ Cancel operation:
 
 ## Terminal CLI: `jiuwenswarm chat`
 
-Starting from v0.2.1, JiuwenSwarm provides a first-party command-line chat entry point to interact with JiuwenSwarm directly from the terminal.
+Starting from v0.2.3, JiuwenSwarm provides a first-party command-line chat entry point to interact with JiuwenSwarm directly from the terminal.
 
 ### Quick Start
 
@@ -247,7 +247,7 @@ jiuwenswarm-start app
 jiuwenswarm chat "Hello, introduce yourself"
 ```
 
-`jiuwenswarm chat` calls JiuwenSwarm's runtime through the Gateway's `/cli` WebSocket route, using the same MessageHandler and AgentServer path as the TUI.
+`jiuwenswarm chat` calls JiuwenSwarm's runtime through the Gateway's `/tui` WebSocket route (`channel_id="tui"`), sharing the same MessageHandler and AgentServer path as the TUI.
 
 ### Basic Usage
 
@@ -267,14 +267,14 @@ jiuwenswarm chat "Hello, introduce yourself"
 | `--cwd <path>` | Current dir | Working directory for file mentions and agent context |
 | `--project-dir <path>` | `--cwd` | Project identity for session and agent cache |
 | `--trusted-dir <path>` | `--project-dir` | Trusted directory (repeatable) |
-| `--gateway-url <url>` | `ws://127.0.0.1:19001/cli` | Explicit Gateway WebSocket URL |
+| `--gateway-url <url>` | `ws://127.0.0.1:19001/tui` | Explicit Gateway WebSocket URL |
 | `--name <instance>` | — | Named instance for env isolation |
 | `--dotenv <path>` | — | Path to .env file |
 | `--json` | — | Print one final JSON object |
 | `--jsonl` | — | Print each Gateway event frame as JSON Lines |
 | `--show-reasoning` | — | Include reasoning output (to stderr) |
 | `--show-tools` | — | Include compact tool call/result status (to stderr) |
-| `--timeout <seconds>` | 300 | Per-recv timeout in seconds |
+| `--timeout <seconds>` | — | Total response timeout in seconds |
 
 ### Modes (`--mode`)
 
@@ -319,10 +319,16 @@ jiuwenswarm chat
 # Session: cli-20260616-120500-abc12345
 # > show me the files in the current directory
 # > analyze main.py
-# > Ctrl+D to exit
+# > /exit
 ```
 
 All messages in REPL mode share the same session, maintaining continuous context.
+
+**Exit the REPL** with any of:
+
+- `/exit`, `/quit`, or `/q`
+- `Ctrl+D` (Unix) / `Ctrl+Z`+Enter (Windows)
+- `Ctrl+C` at the input prompt
 
 ### Loading Spinner
 
@@ -359,8 +365,10 @@ jiuwenswarm chat --jsonl "analyze README" | jq
 
 | Action | Behavior |
 |---|---|
-| First Ctrl+C | Sends `chat.interrupt` to Agent, graceful cancel |
-| Second Ctrl+C | Immediate exit (`os._exit(130)`) |
+| First Ctrl+C | Sends `chat.interrupt` to Agent, graceful cancel. In REPL, stays in the loop for the next prompt |
+| Second Ctrl+C | Force exit (exit code 130) |
+
+> **Windows note**: `loop.add_signal_handler` is not supported on Windows. The CLI falls back to `signal.signal(SIGINT, ...)` so Ctrl+C still triggers graceful cancel (sends `chat.interrupt`) instead of raising an unhandled `KeyboardInterrupt`. Two rapid Ctrl+C presses force-exit on Windows as well.
 
 ### Exit Codes
 
@@ -375,4 +383,4 @@ jiuwenswarm chat --jsonl "analyze README" | jq
 
 ### Relationship with TUI
 
-`jiuwenswarm chat` uses an independent `/cli` route (`channel_id="cli"`), isolated from the TUI's `/tui` route. Both can be used simultaneously without interfering with each other. The first version of the terminal CLI does not aim to replicate all TUI slash commands.
+`jiuwenswarm chat` reuses the TUI's `/tui` route (`channel_id="tui"`), sharing the same MessageHandler and AgentServer pipeline. Only one TUI/CLI connection per `channel_id="tui"` is active at a time — opening the TUI while `jiuwenswarm chat` is running (or vice versa) will replace the previous WebSocket client on that channel. The first version of the terminal CLI does not aim to replicate all TUI slash commands.

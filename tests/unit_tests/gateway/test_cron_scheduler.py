@@ -459,7 +459,7 @@ class TestHandleEventStoreValidation:
         # push_update delivered successfully
         assert len(handler.published) == 1
         content = _cron_published_content(handler.published[0])
-        assert content == f"[cron] {job.name} result:\n\nresult: 9am now"
+        assert content == f"{job.name} result:\n\nresult: 9am now"
 
     @pytest.mark.asyncio
     async def test_wake_executes_normally_when_job_present(self, tmp_path):
@@ -1297,11 +1297,11 @@ class TestCronBroadcastText:
             job_name="agent-core-commit-review",
             text="## 审查完成",
             is_placeholder=False,
-        ) == "[cron] agent-core-commit-review result:\n\n## 审查完成"
+        ) == "agent-core-commit-review result:\n\n## 审查完成"
 
     @staticmethod
-    def test_keeps_existing_placeholder_and_cron_prefix():
-        placeholder = "[cron] agent-core-commit-review 正在执行中"
+    def test_keeps_placeholder_unchanged_and_passes_through_cron_prefixed_status():
+        placeholder = "agent-core-commit-review 正在执行中，结果稍后补发（push_at=2026-01-01T09:00:00+08:00）"
         assert _CronSchedulerTeamTestApi.format_cron_broadcast_text(
             job_name="agent-core-commit-review",
             text=placeholder,

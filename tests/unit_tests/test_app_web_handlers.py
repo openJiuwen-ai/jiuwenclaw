@@ -1,5 +1,7 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 
+import asyncio
+
 import pytest
 
 from jiuwenswarm.gateway.channel_manager.web.app_web_handlers import (
@@ -32,6 +34,95 @@ class FakeWebChannel:
                 "code": code,
             }
         )
+
+
+class FakeAgentClient:
+    def __init__(self):
+        self.reload_started = asyncio.Event()
+        self.release_reload = asyncio.Event()
+        self.reload_finished = asyncio.Event()
+
+    async def send_request(self, envelope):
+        self.reload_started.set()
+        try:
+            await self.release_reload.wait()
+            return type("Resp", (), {"ok": True, "payload": {}})()
+        finally:
+            self.reload_finished.set()
+
+
+class FakeChannelManager:
+    def __init__(self):
+        self.configs: dict[str, dict] = {}
+
+    async def set_conf(self, channel_id, new_conf):
+        self.configs[channel_id] = dict(new_conf)
+
+    def get_conf(self, channel_id):
+        return dict(self.configs.get(channel_id, {}))
+
+
+class FakeHeartbeatService:
+    def __init__(self):
+        self.config = {"every": 60.0, "target": "web"}
+
+    async def set_heartbeat_conf(self, *, every=None, target=None, active_hours=None):
+        if every is not None:
+            self.config["every"] = every
+        if target is not None:
+            self.config["target"] = target
+        if active_hours is not None:
+            self.config["active_hours"] = active_hours
+
+    def get_heartbeat_conf(self):
+        return dict(self.config)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("method", "params"),
+    [
+        ("channel.feishu.set_conf", {"enabled": False, "app_id": "app-1"}),
+        ("channel.dingtalk.set_conf", {"enabled": False, "client_id": "client-1"}),
+        ("heartbeat.set_conf", {"every": 30, "target": "web"}),
+    ],
+)
+async def test_config_save_handlers_respond_before_agent_reload_finishes(monkeypatch, method, params):
+    channel = FakeWebChannel()
+    agent_client = FakeAgentClient()
+    channel_manager = FakeChannelManager()
+    heartbeat_service = FakeHeartbeatService()
+    persisted: list[tuple[str, dict]] = []
+
+    monkeypatch.setattr(
+        "jiuwenswarm.gateway.channel_manager.web.app_web_handlers.update_channel_in_config",
+        lambda channel_id, conf: persisted.append((channel_id, dict(conf))),
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.gateway.channel_manager.web.app_web_handlers.update_heartbeat_in_config",
+        lambda payload: persisted.append(("heartbeat", dict(payload))),
+    )
+
+    _register_web_handlers(
+        WebHandlersBindParams(
+            channel=channel,
+            agent_client=agent_client,
+            channel_manager=channel_manager,
+            heartbeat_service=heartbeat_service,
+        )
+    )
+
+    task = asyncio.create_task(channel.methods[method](object(), "req-save", params, "sess-1"))
+    try:
+        await asyncio.wait_for(agent_client.reload_started.wait(), timeout=0.5)
+
+        assert persisted
+        assert channel.responses[-1]["id"] == "req-save"
+        assert channel.responses[-1]["ok"] is True
+    finally:
+        agent_client.release_reload.set()
+        await task
+        await asyncio.wait_for(agent_client.reload_finished.wait(), timeout=0.5)
 
 
 @pytest.mark.asyncio

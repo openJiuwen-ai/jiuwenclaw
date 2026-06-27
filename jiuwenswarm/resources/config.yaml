@@ -147,7 +147,7 @@ memory:
   # - 失败降级：provider 构建失败或网络异常不阻塞主流程
   external:
     # 选哪家 provider。空字符串 = 禁用外接（等价于 engine=builtin）
-    provider: ${MEMORY_EXTERNAL_PROVIDER:-}   # '' | openjiuwen | mem0 | openviking | <plugin-name>
+    provider: ${MEMORY_EXTERNAL_PROVIDER:-}   # '' | openjiuwen | mem0 | openviking | lakebase | <plugin-name>
     # 数据隔离标识（所有 provider 共用）
     user_id: ${MEMORY_USER_ID:-__default__}
     scope_id: ${MEMORY_SCOPE_ID:-__default__}
@@ -180,6 +180,12 @@ memory:
       api_key: ${OPENVIKING_API_KEY:-}
       account: ${OPENVIKING_ACCOUNT:-root}
       user: ${OPENVIKING_USER:-default}
+
+    lakebase:
+      api_key: ${LAKEBASE_API_KEY:-}
+      base_url: ${LAKEBASE_API_URL:-}
+      base_id: ${LAKEBASE_MEM_BASE_ID:-}
+      database_id: ${LAKEBASE_DATABASE_ID:-}
 
 models:
   defaults:
@@ -411,6 +417,7 @@ react:
   evolution:
     enabled: true             # true = 启用在线 Skills 自演进
     auto_scan: false           # true = 每轮对话后自动扫描（建议先用手动 /evolve）
+    auto_save: false           # true = 自演进审批无需用户点击自动通过（内部开关）
     skill_create: false        # true = 注册 SkillCreateRail（单 agent）及 TeamSkillCreateRail（leader）
     skill_base_dir: "agent/skills"  # Skill 根目录
   a2x_registry:

@@ -19,6 +19,7 @@ import pytest
 
 from jiuwenswarm.common.schema.agent import AgentRequest
 from jiuwenswarm.common.schema.message import ReqMethod
+from jiuwenswarm.server import agent_ws_server as agent_ws_server_module
 from jiuwenswarm.server.agent_ws_server import AgentWebSocketServer
 
 
@@ -132,6 +133,50 @@ async def test_ensure_code_mode_state_skips_if_mode_already_matches() -> None:
 
     assert restored is False
     plan_instance.switch_mode.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_ensure_code_mode_state_allows_explicit_plan_reentry_after_exit() -> None:
+    """A user-triggered /plan re-entry must not be blocked by stale exit guards."""
+    session_id = "sess_explicit_reentry"
+
+    plan_agent = MagicMock()
+    plan_instance = MagicMock()
+    plan_agent.get_instance.return_value = plan_instance
+    plan_instance.card = SimpleNamespace(id="code-agent")
+    plan_state = SimpleNamespace(mode="normal", plan_slug="old-plan")
+    plan_instance.load_state.return_value = SimpleNamespace(plan_mode=plan_state)
+
+    session = MagicMock()
+    create_session = MagicMock(return_value=session)
+
+    server = AgentWebSocketServer.__new__(AgentWebSocketServer)
+    server._push_plan_mode_exited = AsyncMock()
+    request = _chat_request(
+        session_id,
+        "implement this in plan mode",
+        mode="code.plan",
+        extra_params={"plan_entry_source": "slash_command"},
+    )
+
+    agent_ws_server_module._plan_exited_sessions.add(session_id)
+    try:
+        with patch(
+            "openjiuwen.core.single_agent.create_agent_session",
+            create_session,
+        ):
+            session.pre_run = AsyncMock()
+            session.post_run = AsyncMock()
+            restored = await server._ensure_code_mode_state(
+                request, "code", "plan", plan_agent
+            )
+    finally:
+        agent_ws_server_module._plan_exited_sessions.discard(session_id)
+
+    assert restored is False
+    plan_instance.switch_mode.assert_called_once_with(session=session, mode="plan")
+    server._push_plan_mode_exited.assert_not_awaited()
+    assert request.params["mode"] == "code.plan"
 
 
 @pytest.mark.asyncio

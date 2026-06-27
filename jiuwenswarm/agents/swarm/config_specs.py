@@ -36,10 +36,13 @@ from openjiuwen.core.single_agent import AgentCard
 from openjiuwen.harness.prompts import resolve_language
 from openjiuwen.harness.rails import SkillUseRail
 
-from jiuwenswarm.agents.harness.team.team_runtime_inheritance import (
-    get_context_engine_enabled,
+from jiuwenswarm.common.config import (
+    get_evolution_auto_save_enabled,
     get_evolution_auto_scan_enabled,
     get_skill_create_enabled,
+)
+from jiuwenswarm.agents.harness.team.team_runtime_inheritance import (
+    get_context_engine_enabled,
     resolve_model_config,
 )
 from jiuwenswarm.agents.swarm import registry
@@ -267,8 +270,17 @@ def _permission_params(config: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _evolution_rail_params(config: dict[str, Any]) -> dict[str, Any]:
-    """Attribute params for the team / member skill-evolution rails."""
+def _team_evolution_rail_params(config: dict[str, Any]) -> dict[str, Any]:
+    """Attribute params for the leader team skill-evolution rail."""
+    return {
+        "evolution_model_config": _evolution_model_config(config),
+        "auto_scan": get_evolution_auto_scan_enabled(config),
+        "auto_save": get_evolution_auto_save_enabled(config),
+    }
+
+
+def _member_evolution_rail_params(config: dict[str, Any]) -> dict[str, Any]:
+    """Attribute params for the member skill-evolution rail."""
     return {
         "evolution_model_config": _evolution_model_config(config),
         "auto_scan": get_evolution_auto_scan_enabled(config),
@@ -339,7 +351,7 @@ def _role_evolution_rails(config: dict[str, Any], role: str) -> list[RailSpec]:
         return [
             RailSpec(
                 type=registry.TEAM_SKILL_EVOLUTION,
-                params=_evolution_rail_params(config),
+                params=_team_evolution_rail_params(config),
             ),
             RailSpec(
                 type=registry.TEAM_SKILL_CREATE,
@@ -348,7 +360,8 @@ def _role_evolution_rails(config: dict[str, Any], role: str) -> list[RailSpec]:
         ]
     return [
         RailSpec(
-            type=registry.MEMBER_SKILL_EVOLUTION, params=_evolution_rail_params(config)
+            type=registry.MEMBER_SKILL_EVOLUTION,
+            params=_member_evolution_rail_params(config),
         ),
     ]
 

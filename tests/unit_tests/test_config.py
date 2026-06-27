@@ -12,6 +12,9 @@ import yaml
 import jiuwenswarm.common.config as config_mod
 from jiuwenswarm.common.config import (
     get_config_raw,
+    get_evolution_auto_save_enabled,
+    get_evolution_auto_scan_enabled,
+    get_skill_create_enabled,
     get_config,
     invalidate_config_cache,
     migrate_config_from_template,
@@ -116,6 +119,104 @@ class TestResolveEnvVars:
 
 class TestConfigFunctions:
     """Test config module functions."""
+
+    @pytest.mark.parametrize(
+        ("config", "expected"),
+        [
+            ({}, False),
+            ({"react": {"evolution": {"auto_save": False}}}, False),
+            ({"react": {"evolution": {"auto_save": True}}}, True),
+            ({"evolution": {"auto_save": True}}, True),
+            ({"react": {"evolution": {"auto_save": "true"}}}, False),
+        ],
+    )
+    def test_evolution_auto_save_config_values(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        config,
+        expected,
+    ):
+        monkeypatch.delenv("EVOLUTION_AUTO_SAVE", raising=False)
+        assert get_evolution_auto_save_enabled(config) is expected
+
+    @staticmethod
+    def test_evolution_auto_save_read_failure_returns_false(monkeypatch: pytest.MonkeyPatch):
+        def _raise() -> dict:
+            raise OSError("config unavailable")
+
+        monkeypatch.delenv("EVOLUTION_AUTO_SAVE", raising=False)
+        monkeypatch.setattr("jiuwenswarm.common.config.get_config", _raise)
+
+        assert get_evolution_auto_save_enabled() is False
+
+    @pytest.mark.parametrize(
+        ("env_value", "config", "expected"),
+        [
+            (None, {"react": {"evolution": {"auto_save": True}}}, True),
+            (None, {"evolution": {"auto_save": True}}, True),
+            ("false", {"react": {"evolution": {"auto_save": True}}}, False),
+            ("true", {"react": {"evolution": {"auto_save": False}}}, True),
+        ],
+    )
+    def test_evolution_auto_save_config_and_env_values(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        env_value,
+        config,
+        expected,
+    ):
+        if env_value is None:
+            monkeypatch.delenv("EVOLUTION_AUTO_SAVE", raising=False)
+        else:
+            monkeypatch.setenv("EVOLUTION_AUTO_SAVE", env_value)
+
+        assert get_evolution_auto_save_enabled(config) is expected
+
+    @pytest.mark.parametrize(
+        ("env_value", "config", "expected"),
+        [
+            (None, {"react": {"evolution": {"auto_scan": True}}}, True),
+            (None, {"evolution": {"auto_scan": True}}, True),
+            ("false", {"react": {"evolution": {"auto_scan": True}}}, False),
+            ("true", {"react": {"evolution": {"auto_scan": False}}}, True),
+        ],
+    )
+    def test_evolution_auto_scan_config_and_env_values(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        env_value,
+        config,
+        expected,
+    ):
+        if env_value is None:
+            monkeypatch.delenv("EVOLUTION_AUTO_SCAN", raising=False)
+        else:
+            monkeypatch.setenv("EVOLUTION_AUTO_SCAN", env_value)
+
+        assert get_evolution_auto_scan_enabled(config) is expected
+
+    @pytest.mark.parametrize(
+        ("env_value", "config", "expected"),
+        [
+            (None, {"react": {"evolution": {"skill_create": True}}}, True),
+            (None, {"evolution": {"skill_create": True}}, True),
+            ("false", {"react": {"evolution": {"skill_create": True}}}, False),
+            ("true", {"react": {"evolution": {"skill_create": False}}}, True),
+        ],
+    )
+    def test_skill_create_config_and_env_values(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        env_value,
+        config,
+        expected,
+    ):
+        if env_value is None:
+            monkeypatch.delenv("SKILL_CREATE", raising=False)
+        else:
+            monkeypatch.setenv("SKILL_CREATE", env_value)
+
+        assert get_skill_create_enabled(config) is expected
 
     @staticmethod
     def test_get_config_uses_cached_parsed_config(

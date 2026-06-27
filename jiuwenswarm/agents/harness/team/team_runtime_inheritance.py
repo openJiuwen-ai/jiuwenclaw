@@ -8,7 +8,6 @@ TeamMember 专用 Rail、Ability 继承逻辑，不依赖主 agent adapter。
 from __future__ import annotations
 
 import logging
-import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -32,7 +31,12 @@ from jiuwenswarm.agents.harness.common.rails.response_prompt_rail import Respons
 from jiuwenswarm.agents.harness.common.rails.runtime_prompt_rail import RuntimePromptRail
 from jiuwenswarm.agents.harness.common.rails.stream_event_rail import JiuSwarmStreamEventRail
 from jiuwenswarm.agents.harness.team.rails.team_workspace_report_path_rail import TeamWorkspaceReportPathRail
-from jiuwenswarm.common.config import get_config
+from jiuwenswarm.common.config import (
+    get_config,
+    get_evolution_auto_save_enabled,
+    get_evolution_auto_scan_enabled,
+    get_skill_create_enabled,
+)
 from jiuwenswarm.common.reasoning_injector import build_reasoning_model_request_kwargs
 from jiuwenswarm.server.runtime.skill import load_execution_disabled_skills
 
@@ -245,6 +249,7 @@ def build_member_rails(
             Path(team_ws_skills_dir).mkdir(parents=True, exist_ok=True)
             llm_model, actual_model_name = build_evolution_llm()
             evolution_auto_scan = get_evolution_auto_scan_enabled(config)
+            evolution_auto_save = get_evolution_auto_save_enabled(config)
             bound_team_trajectory_registry = team_trajectory_registry if team_id else None
             review_runtime = EvolutionReviewRuntime()
             team_skill_rail = TeamSkillEvolutionRail(
@@ -257,7 +262,7 @@ def build_member_rails(
                 trajectory_sink=bound_team_trajectory_registry,
                 member_role=role,
                 auto_scan=False,
-                auto_save=False,
+                auto_save=evolution_auto_save,
                 fuzzy_review=False,
                 completion_followup_enabled=evolution_auto_scan,
                 team_id=team_id,
@@ -267,7 +272,7 @@ def build_member_rails(
                 EvolutionInterruptRail(
                     review_runtime=review_runtime,
                     submission_service=team_skill_rail.experience_manager.experience_submission_service,
-                    auto_save=False,
+                    auto_save=evolution_auto_save,
                     language=language,
                 )
             )
@@ -391,38 +396,6 @@ def get_default_model_name(config: dict[str, Any] | None = None) -> str:
         logger.warning("[TeamRuntime] Failed to resolve default model name: %s", exc)
 
     return "gpt-4"
-
-
-def _get_bool_env(value: str | None) -> bool | None:
-    if value is None:
-        return None
-    return value.lower() in ("true", "1", "yes")
-
-
-def _get_evolution_config(config: dict[str, Any] | None) -> dict[str, Any]:
-    if not isinstance(config, dict):
-        return {}
-    react_config = config.get("react")
-    if isinstance(react_config, dict) and isinstance(react_config.get("evolution"), dict):
-        return react_config["evolution"]
-    evolution_config = config.get("evolution")
-    if isinstance(evolution_config, dict):
-        return evolution_config
-    return {}
-
-
-def get_evolution_auto_scan_enabled(config: dict[str, Any] | None) -> bool:
-    env_auto_scan = _get_bool_env(os.getenv("EVOLUTION_AUTO_SCAN"))
-    if env_auto_scan is not None:
-        return env_auto_scan
-    return _get_evolution_config(config).get("auto_scan", False)
-
-
-def get_skill_create_enabled(config: dict[str, Any] | None) -> bool:
-    env_skill_create = _get_bool_env(os.getenv("SKILL_CREATE"))
-    if env_skill_create is not None:
-        return env_skill_create
-    return _get_evolution_config(config).get("skill_create", False)
 
 
 def resolve_model_config(

@@ -119,6 +119,10 @@ class RuntimePromptInput(ConstructionInput):
         default="default",
         description="Resolved channel key.",
     )
+    project_dir: str | None = context_field(
+        attr="project_dir",
+        description="Resolved user project directory (seeds the TUI cwd policy).",
+    )
 
 
 @harness_element(
@@ -141,7 +145,14 @@ def _build_runtime_prompt_rail(
         A ``RuntimePromptRail`` bound to the member's language and channel.
     """
     inp = RuntimePromptInput.resolve(params, context)
-    return RuntimePromptRail(language=inp.language, channel=inp.channel)
+    rail = RuntimePromptRail(language=inp.language, channel=inp.channel)
+    # Seed cwd/project_dir so the TUI branch injects the "current project
+    # directory" policy and the model answers with the project dir instead of
+    # calling `pwd` (which would surface the per-member workspace path).
+    # Mirrors the code-team rail (code_rails.build_code_runtime_prompt).
+    if inp.project_dir:
+        rail.set_runtime_paths(cwd=inp.project_dir, project_dir=inp.project_dir)
+    return rail
 
 
 class TeamSkillStoragePolicyInput(ConstructionInput):

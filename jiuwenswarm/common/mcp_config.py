@@ -49,7 +49,7 @@ def build_mcp_server_config(
     if not name:
         return None
     transport = str(entry.get("transport", "")).strip().lower()
-    if transport not in {"stdio", "sse"}:
+    if transport not in {"stdio", "sse", "http", "streamable-http", "streamable_http"}:
         return None
 
     payload: dict[str, Any] = {

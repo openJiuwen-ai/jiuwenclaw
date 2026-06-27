@@ -1039,9 +1039,11 @@ def test_vision_audio_config_params_empty_when_unconfigured() -> None:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.parametrize("auto_save", [False, True])
 def test_team_skill_evolution_provider_passes_review_runtime(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    auto_save: bool,
 ) -> None:
     monkeypatch.setattr(
         evolution_rails,
@@ -1069,18 +1071,19 @@ def test_team_skill_evolution_provider_passes_review_runtime(
     )
 
     built = evolution_rails.build_team_skill_evolution_rail(
-        {"evolution_model_config": {}, "auto_scan": True},
+        {"evolution_model_config": {}, "auto_scan": True, "auto_save": auto_save},
         ctx,
     )
 
     _assert_evolution_approval_stack(
         built,
         _FakeEvolutionRail,
-        auto_save=False,
+        auto_save=auto_save,
         language="cn",
     )
     rail = built[1]
     assert rail.kwargs["auto_scan"] is False
+    assert rail.kwargs["auto_save"] is auto_save
     assert rail.kwargs["completion_followup_enabled"] is True
 
 
@@ -1180,6 +1183,7 @@ def test_member_skill_evolution_provider_passes_review_runtime(
     )
     assert rail.kwargs["language"] == "en"
     assert rail.kwargs["auto_scan"] is False
+    assert rail.kwargs["auto_save"] is True
     assert rail.bound_sink == (registry_obj, "t", "teammate")
 
 

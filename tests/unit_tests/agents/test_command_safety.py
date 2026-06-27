@@ -133,3 +133,90 @@ def test_enforce_tui_spawn_budget_global_bucket_for_empty_session() -> None:
     for _ in range(TUI_SPAWN_LIMIT):
         assert _enforce_tui_spawn_budget("jiuwenswarm-tui", "") is None
     assert _enforce_tui_spawn_budget("jiuwenswarm-tui", "") is not None
+
+
+# ── git worktree add 路径护栏 ────────────────────────────────
+
+from jiuwenswarm.agents.harness.common.tools import command_tools  # noqa: E402
+
+
+@pytest.fixture
+def _project_root(tmp_path, monkeypatch):
+    """Pin the project root to a tmp dir so path bounds are deterministic."""
+    root = tmp_path / "project"
+    root.mkdir()
+    monkeypatch.setattr(command_tools, "_context_project_root", lambda: root)
+    return root
+
+
+def test_worktree_add_sibling_dir_blocked(_project_root) -> None:
+    from jiuwenswarm.agents.harness.common.tools.command_tools import (
+        _check_worktree_path_safety,
+    )
+
+    msg = _check_worktree_path_safety("git worktree add ../foo main")
+    assert msg is not None
+    assert ".worktrees/" in msg
+    assert "../" in msg
+
+
+def test_worktree_add_outside_abs_path_blocked(_project_root) -> None:
+    from jiuwenswarm.agents.harness.common.tools.command_tools import (
+        _check_worktree_path_safety,
+    )
+
+    msg = _check_worktree_path_safety("git worktree add /tmp/outside-wt")
+    assert msg is not None
+    assert ".worktrees/" in msg
+
+
+def test_worktree_add_inside_dot_worktrees_allowed(_project_root) -> None:
+    from jiuwenswarm.agents.harness.common.tools.command_tools import (
+        _check_worktree_path_safety,
+    )
+
+    # Target under the project's .worktrees/ → inside project → allow.
+    assert (
+        _check_worktree_path_safety(
+            "git worktree add -b feature-x .worktrees/feature-x HEAD"
+        )
+        is None
+    )
+    # Absolute path inside the project → allow.
+    assert (
+        _check_worktree_path_safety(
+            f"git worktree add {_project_root / '.worktrees' / 'foo'}"
+        )
+        is None
+    )
+
+
+def test_worktree_add_with_branch_value_correctly_skips_target(_project_root) -> None:
+    """`-b <branch>` consumes the branch name; the next token is the path."""
+    from jiuwenswarm.agents.harness.common.tools.command_tools import (
+        _check_worktree_path_safety,
+    )
+
+    # `-b ../escape` would wrongly look like a path if -b didn't eat its value;
+    # here the real target is .worktrees/x (inside) so it must be allowed.
+    assert (
+        _check_worktree_path_safety(
+            "git worktree add -b ../escape .worktrees/x HEAD"
+        )
+        is None
+    )
+    # And the inverse: -b <name> then a sibling path → blocked.
+    msg = _check_worktree_path_safety("git worktree add -b feature ../sibling")
+    assert msg is not None
+
+
+def test_worktree_check_ignores_non_worktree_commands(_project_root) -> None:
+    from jiuwenswarm.agents.harness.common.tools.command_tools import (
+        _check_worktree_path_safety,
+    )
+
+    assert _check_worktree_path_safety("git status") is None
+    assert _check_worktree_path_safety("git worktree list") is None
+    assert _check_worktree_path_safety("ls -la ../somewhere") is None
+    assert _check_worktree_path_safety("git branch feature-x") is None
+

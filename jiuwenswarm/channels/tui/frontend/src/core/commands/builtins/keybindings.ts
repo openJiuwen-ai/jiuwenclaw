@@ -78,16 +78,26 @@ function listBindings(ctx: CommandContext): void {
 
 function resetBindings(ctx: CommandContext): void {
   const path = getKeybindingsPath();
+  let deleted = false;
   if (existsSync(path)) {
     try {
       rmSync(path);
+      deleted = true;
     } catch (err) {
       ctx.addItem(addError(ctx.sessionId, `删除 keybindings.json 失败：${(err as Error).message}`));
       return;
     }
   }
   applyAndReport(ctx);
-  ctx.addItem(addInfo(ctx.sessionId, "已重置为默认快捷键", "k"));
+  ctx.addItem(
+    addInfo(
+      ctx.sessionId,
+      deleted
+        ? `已删除 ${path}，恢复为默认快捷键`
+        : "已是默认快捷键，无需重置",
+      "k",
+    ),
+  );
 }
 
 export function createKeybindingsCommand(): SlashCommand {

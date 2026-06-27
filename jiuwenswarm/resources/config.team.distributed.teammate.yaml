@@ -256,6 +256,7 @@ react:
   evolution:
     enabled: true             # true = 启用在线 Skills 自演进
     auto_scan: false           # true = 每轮对话后自动扫描（建议先用手动 /evolve）
+    auto_save: false           # true = 自演进审批无需用户点击自动通过（内部开关）
     skill_base_dir: "agent/skills"  # Skill 根目录
   a2x_registry:
     base_url: "http://127.0.0.1:8000"

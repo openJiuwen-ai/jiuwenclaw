@@ -11,6 +11,7 @@ import logging
 import os
 import signal
 import sys
+import time
 import uuid as uuid_module
 from pathlib import Path
 
@@ -34,6 +35,15 @@ MODE_ALIASES: dict[str, str] = {
 
 VALID_MODES = frozenset({
     "agent.plan", "agent.fast", "code.plan", "code.normal", "code.team", "team",
+})
+
+# Sources that require the answer to be sent via ``chat.send`` (streaming) to
+# resume the paused agent task.  Other sources use ``chat.user_answer``.
+_INTERRUPT_RESUME_SOURCES = frozenset({
+    "confirm_interrupt",
+    "permission_interrupt",
+    "ask_user_interrupt",
+    "evolution_interrupt",
 })
 
 
@@ -182,7 +192,39 @@ async def _run_interactive_loop(
     timeout: float | None = None,
 ) -> int:
     interrupted = False
-    per_recv_timeout = timeout if timeout and timeout > 0 else 300.0
+    # `timeout` is the TOTAL response timeout (matches --help/docs). We track
+    # the deadline and compute the remaining budget for each recv() call so
+    # long-running streams still respect the overall cap. When unset, a
+    # generous per-recv idle timeout keeps the connection alive.
+    total_timeout = timeout if timeout and timeout > 0 else None
+    recv_idle_timeout = 300.0
+    deadline = None
+    if total_timeout is not None:
+        deadline = time.monotonic() + total_timeout
+    # In team mode the session is persistent: leader replies arrive as
+    # chat.final but the team keeps working (creating workflows, delegating
+    # to members, etc.). Only chat.processing_status(is_processing=False)
+    # or team.error should terminate the CLI stream.
+    team_mode = request.get("params", {}).get("mode", "") in ("team", "team.plan", "code.team")
+    # In plan mode the agent may end its turn with a text question (without
+    # calling ask_user or exit_plan_mode). In that case chat.final arrives
+    # but the conversation isn't really done — the user needs to respond.
+    # We track plan_exited (set when plan.mode_exited is received) to
+    # distinguish "agent finished implementing after approval" from "agent
+    # ended turn with text, waiting for user follow-up".
+    plan_mode = request.get("params", {}).get("mode", "") in ("code.plan", "agent.plan")
+    plan_exited = False
+    # When we send an interrupt-resume answer (chat.send with source), the
+    # previous stream's trailing chat.final / processing_status(False) may
+    # still arrive. We skip terminal events until the resumed stream sends
+    # its own processing_status(False).
+    awaiting_resume = False
+    # Tracks whether we just sent a plan-approval answer (source=confirm_interrupt
+    # with exit_plan_mode). When True, the next chat.final is the completion of
+    # the approved plan execution — do NOT prompt for follow-up. plan.mode_exited
+    # arrives as a separate push AFTER the stream finishes, so plan_exited would
+    # still be False when chat.final hits.
+    _approval_resume = False
 
     loop = asyncio.get_running_loop()
 
@@ -198,10 +240,30 @@ async def _run_interactive_loop(
     def _on_second_sigint() -> None:
         os.kill(os.getpid(), signal.SIGTERM)
 
+    # Windows does not support loop.add_signal_handler; fall back to
+    # signal.signal so Ctrl+C sets the interrupted flag instead of raising
+    # KeyboardInterrupt and skipping the graceful cancel path.
+    _win_prev_handler = None
+    _force_exit = False
+
     try:
         loop.add_signal_handler(signal.SIGINT, _on_first_sigint)
     except NotImplementedError:
-        pass
+        import threading
+
+        def _win_sigint_handler(signum, frame) -> None:
+            nonlocal interrupted, _force_exit
+            if interrupted:
+                # Second Ctrl+C — force exit
+                _force_exit = True
+                logger.warning("Force exiting...")
+                return
+            interrupted = True
+            logger.warning("Interrupted. Sending cancel (press Ctrl+C again to force exit)...")
+
+        # signal.signal must be called from the main thread.
+        if threading.current_thread() is threading.main_thread():
+            _win_prev_handler = signal.signal(signal.SIGINT, _win_sigint_handler)
 
     await client.send_request(request)
 
@@ -210,13 +272,41 @@ async def _run_interactive_loop(
 
     try:
         while True:
+            # Compute the recv timeout: when a total deadline is set, use
+            # the remaining budget (clamped to a small floor so we still
+            # yield to the event loop); otherwise fall back to the idle
+            # timeout.
+            if deadline is not None:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    logger.warning("response timed out")
+                    return 1
+                cur_timeout = max(remaining, 0.1)
+            else:
+                cur_timeout = recv_idle_timeout
             try:
-                data = await asyncio.wait_for(client.recv(), timeout=per_recv_timeout)
+                data = await asyncio.wait_for(client.recv(), timeout=cur_timeout)
             except asyncio.TimeoutError:
-                logger.warning("response timed out")
-                return 1
+                if deadline is not None:
+                    # Total budget exhausted
+                    logger.warning("response timed out")
+                    return 1
+                # Idle timeout between events — keep waiting
+                continue
             except ConnectionError:
                 return 0
+            except KeyboardInterrupt:
+                # Windows: Ctrl+C interrupts the blocking recv() with
+                # KeyboardInterrupt even when a signal handler is set.
+                # The handler has already set the `interrupted` flag, so
+                # fall through to the graceful-cancel path below.
+                if _force_exit:
+                    return 130
+                if not interrupted:
+                    interrupted = True
+
+            if _force_exit:
+                return 130
 
             if interrupted:
                 await client.send_request({
@@ -248,6 +338,13 @@ async def _run_interactive_loop(
             elif kind == "tool_result":
                 renderer.handle_tool_result(payload)
             elif kind == "final":
+                # team.error is broadcast through the chat.final envelope
+                # (gateway default for unknown EventType). Route it to the
+                # error handler so the message is shown instead of silently
+                # exiting on an empty content field.
+                if payload.get("event_type") == "team.error":
+                    renderer.handle_error(payload)
+                    return 1
                 renderer.handle_final(payload)
             elif kind == "error":
                 renderer.handle_error(payload)
@@ -258,30 +355,154 @@ async def _run_interactive_loop(
             elif kind == "interactive":
                 renderer.clear_loading()
                 if sys.stdin.isatty():
-                    write_stderr(
-                        f"\n[{event_type}] "
-                        f"{payload.get('question') or payload.get('message', 'Input needed')}\n"
-                    )
-                    answer = input("> ").strip()
+                    source = str(payload.get("source") or "").strip()
+                    request_id = str(payload.get("request_id") or "").strip()
+                    questions = payload.get("questions") or []
+
+                    # Collect all options across questions for input mapping
+                    all_options: list[dict] = []
+                    # Display question(s) and options
+                    if isinstance(questions, list) and questions:
+                        for q in questions:
+                            header = q.get("header", "Input needed")
+                            question_text = q.get("question", "")
+                            options = q.get("options") or []
+                            write_stderr(f"\n[{header}] {question_text}\n")
+                            if isinstance(options, list) and options:
+                                for i, opt in enumerate(options, 1):
+                                    label = opt.get("label", "")
+                                    desc = opt.get("description", "")
+                                    write_stderr(
+                                        f"  {i}. {label}"
+                                        + (f" — {desc}" if desc else "")
+                                        + "\n"
+                                    )
+                                    all_options.append(opt)
+                    else:
+                        write_stderr(
+                            f"\n[{event_type}] "
+                            f"{payload.get('question') or payload.get('message', 'Input needed')}\n"
+                        )
+
+                    answer = (await asyncio.to_thread(input, "> ")).strip()
+                    # Map numeric input or label text to the option's value.
+                    # E.g. "1" → "approve", "Approve" → "approve", "批准" → "approve"
+                    selected = answer
+                    if all_options:
+                        # Try numeric index (1-based)
+                        if answer.isdigit():
+                            idx = int(answer) - 1
+                            if 0 <= idx < len(all_options):
+                                selected = str(all_options[idx].get("value") or all_options[idx].get("label") or answer)
+                        # Try matching label (case-insensitive)
+                        if selected == answer:
+                            for opt in all_options:
+                                label = str(opt.get("label") or "")
+                                if label and label.lower() == answer.lower():
+                                    selected = str(opt.get("value") or label)
+                                    break
+                    answers = [{"selected_options": [selected], "custom_input": answer}]
+
                     try:
-                        await client.send_request({
-                            "type": "req",
-                            "id": f"answer-{uuid_module.uuid4().hex[:12]}",
-                            "method": "chat.user_answer",
-                            "is_stream": False,
-                            "params": {
-                                "session_id": request["params"]["session_id"],
-                                "answer": answer,
-                                "request_id": payload.get("request_id", ""),
-                            },
-                        })
+                        if source in _INTERRUPT_RESUME_SOURCES and request_id:
+                            # Interrupt resume: send via chat.send (streaming)
+                            # to resume the paused agent task. Using
+                            # chat.user_answer here would NOT resume the task.
+                            awaiting_resume = True
+                            if source == "confirm_interrupt":
+                                _approval_resume = True
+                            await client.send_request({
+                                "type": "req",
+                                "id": f"answer-{uuid_module.uuid4().hex[:12]}",
+                                "method": "chat.send",
+                                "is_stream": True,
+                                "params": {
+                                    "session_id": request["params"]["session_id"],
+                                    "query": "",
+                                    "request_id": request_id,
+                                    "answers": answers,
+                                    "source": source,
+                                    "mode": request["params"]["mode"],
+                                },
+                            })
+                        else:
+                            await client.send_request({
+                                "type": "req",
+                                "id": f"answer-{uuid_module.uuid4().hex[:12]}",
+                                "method": "chat.user_answer",
+                                "is_stream": False,
+                                "params": {
+                                    "session_id": request["params"]["session_id"],
+                                    "answers": answers,
+                                    "request_id": request_id,
+                                },
+                            })
                     except ConnectionError:
                         return 0
                 else:
                     logger.error("interactive input required but stdin is not a TTY: %s", event_type)
                     return 4
+            elif event_type == "plan.mode_exited":
+                # Agent exited plan mode (user approved). Subsequent
+                # chat.final is a real terminal event.
+                plan_exited = True
 
             if is_terminal_event(event_type, payload):
+                # After sending an interrupt-resume answer, the previous
+                # stream's trailing chat.final / processing_status(False)
+                # may arrive. Skip them — the resumed stream will send its
+                # own terminal events.
+                if awaiting_resume:
+                    awaiting_resume = False
+                    continue
+                # In team mode, chat.final (leader reply) is not terminal —
+                # the team keeps working after the leader responds. Only
+                # processing_status(is_processing=False) or team.error ends
+                # the stream.
+                if team_mode and event_type == "chat.final":
+                    if payload.get("event_type") == "team.error":
+                        renderer.clear_loading()
+                        return 1
+                    # leader reply or team control event — keep listening
+                    continue
+                # In plan mode, chat.final is only terminal if the agent
+                # has exited plan mode (plan_exited=True) or this is an
+                # approval-resume completion. Otherwise prompt for follow-up.
+                _follow_up_in_plan = (
+                    plan_mode and not plan_exited and not _approval_resume
+                )
+                if _follow_up_in_plan and event_type == "chat.final" and sys.stdin.isatty():
+                    renderer.clear_loading()
+                    if renderer.streamed_text and not renderer.streamed_text.endswith("\n"):
+                        write_stdout("\n")
+                    try:
+                        line = (await asyncio.to_thread(input, "\n> ")).strip()
+                    except EOFError:
+                        return 0
+                    if not line or line in ("/exit", "/quit", "/q"):
+                        return 0
+                    # Send follow-up message and continue streaming.
+                    # Reset the renderer's streamed text so the next
+                    # response starts fresh.
+                    renderer.reset_streamed_text()
+                    await client.send_request({
+                        "type": "req",
+                        "id": f"chat-{uuid_module.uuid4().hex[:12]}",
+                        "method": "chat.send",
+                        "is_stream": True,
+                        "params": {
+                            "session_id": request["params"]["session_id"],
+                            "query": line,
+                            "mode": request["params"]["mode"],
+                            "cwd": request["params"].get("cwd", ""),
+                            "project_dir": request["params"].get("project_dir", ""),
+                        },
+                    })
+                    # After sending the follow-up, the previous stream's
+                    # trailing chat.final / processing_status(False) may
+                    # still arrive. Skip them and wait for the new stream.
+                    awaiting_resume = True
+                    continue
                 renderer.clear_loading()
                 if renderer.streamed_text and not renderer.streamed_text.endswith("\n"):
                     write_stdout("\n")
@@ -293,6 +514,13 @@ async def _run_interactive_loop(
             await spinner
         except asyncio.CancelledError:
             pass
+        # Restore the previous SIGINT handler (Windows fallback or Unix
+        # loop handler removal) so the REPL loop regains control.
+        if _win_prev_handler is not None:
+            try:
+                signal.signal(signal.SIGINT, _win_prev_handler)
+            except (ValueError, OSError):
+                pass
         try:
             loop.remove_signal_handler(signal.SIGINT)
         except (NotImplementedError, ValueError):
@@ -304,6 +532,7 @@ async def _run_jsonl_loop(
     renderer: JsonlRenderer,
     request: dict,
 ) -> int:
+    team_mode = request.get("params", {}).get("mode", "") in ("team", "team.plan", "code.team")
     await client.send_request(request)
     while True:
         data = await client.recv()
@@ -315,6 +544,15 @@ async def _run_jsonl_loop(
         if event_type == "chat.error":
             return 1
         if is_terminal_event(event_type, payload):
+            # team.error is wrapped in chat.final by the gateway; treat it
+            # as an error exit so callers can detect the failure.
+            if payload.get("event_type") == "team.error":
+                return 1
+            # In team mode, chat.final (leader reply) is not terminal —
+            # the team keeps working. Keep listening for
+            # processing_status(is_processing=False).
+            if team_mode and event_type == "chat.final":
+                continue
             return 0
 
 
@@ -323,6 +561,7 @@ async def _run_json_loop(
     renderer: JsonRenderer,
     request: dict,
 ) -> int:
+    team_mode = request.get("params", {}).get("mode", "") in ("team", "team.plan", "code.team")
     await client.send_request(request)
     has_error = False
     while True:
@@ -332,7 +571,14 @@ async def _run_json_loop(
         event_type = data.get("event", "")
         payload = data.get("payload", {})
         if event_type == "chat.final":
-            renderer.handle_event(event_type, payload)
+            # team.error is wrapped in chat.final by the gateway; route it
+            # through the error path so has_error is set and the JSON output
+            # reports ok=false.
+            if payload.get("event_type") == "team.error":
+                renderer.handle_error(payload)
+                has_error = True
+            else:
+                renderer.handle_event(event_type, payload)
         elif event_type == "chat.error":
             renderer.handle_error(payload)
             has_error = True
@@ -341,6 +587,12 @@ async def _run_json_loop(
         else:
             renderer.handle_event(event_type, payload)
         if is_terminal_event(event_type, payload):
+            if team_mode and event_type == "chat.final":
+                if payload.get("event_type") == "team.error":
+                    renderer.output()
+                    return 1
+                # leader reply — team keeps working, keep listening
+                continue
             renderer.output()
             return 1 if has_error else 0
 
@@ -427,7 +679,16 @@ def _run_repl(args: argparse.Namespace) -> int:
     args.session = session_id
 
     logger.info("Session: %s", session_id)
-    logger.info("Type your prompt and press Enter.  Ctrl+C to interrupt, Ctrl+D to exit.")
+    if os.name == "nt":
+        logger.info(
+            "Type your prompt and press Enter.  Ctrl+C to interrupt, "
+            "Ctrl+Z+Enter or /exit to exit."
+        )
+    else:
+        logger.info(
+            "Type your prompt and press Enter.  Ctrl+C to interrupt, "
+            "Ctrl+D or /exit to exit."
+        )
 
     exit_code = 0
     try:
@@ -439,9 +700,15 @@ def _run_repl(args: argparse.Namespace) -> int:
                 break
             if not line.strip():
                 continue
+            # Cross-platform exit commands (Ctrl+D does not send EOF on Windows)
+            if line.strip() in ("/exit", "/quit", "/q"):
+                logger.info("<exit>")
+                break
             exit_code = asyncio.run(_run_chat(args, line.strip()))
             if exit_code == 130:
-                break
+                # Task was interrupted via Ctrl+C — cancel was already sent,
+                # stay in the REPL for the next prompt instead of exiting.
+                continue
             if exit_code != 0:
                 logger.warning("[exit code: %s]", exit_code)
     except KeyboardInterrupt:

@@ -1,7 +1,7 @@
 import { addError, addInfo } from "../helpers.js";
 import { CommandKind, type SlashCommand } from "../types.js";
 
-type McpTransport = "stdio" | "sse";
+type McpTransport = "stdio" | "sse" | "http" | "streamable-http" | "streamable_http";
 
 export type McpListItem = {
   name: string;
@@ -21,7 +21,13 @@ type McpShowPayload = {
   items?: Record<string, unknown>[];
 };
 
-const VALID_TRANSPORTS = new Set<McpTransport>(["stdio", "sse"]);
+const VALID_TRANSPORTS = new Set<McpTransport>([
+  "stdio",
+  "sse",
+  "http",
+  "streamable-http",
+  "streamable_http",
+]);
 
 function tokenize(raw: string): string[] {
   const re = /"([^"]*)"|'([^']*)'|(\S+)/g;
@@ -179,7 +185,7 @@ export function createMcpCommand(): SlashCommand {
           if (opts.transport) {
             const transport = String(opts.transport).trim().toLowerCase() as McpTransport;
             if (!VALID_TRANSPORTS.has(transport)) {
-              ctx.addItem(addError(ctx.sessionId, "Invalid update transport: stdio|sse"));
+              ctx.addItem(addError(ctx.sessionId, "Invalid update transport: stdio|sse|http"));
               return;
             }
             payload.transport = transport;
@@ -215,7 +221,7 @@ export function createMcpCommand(): SlashCommand {
             ctx.addItem(
               addError(
                 ctx.sessionId,
-                "Invalid add arguments. Usage: /mcp add --name <name> --transport <stdio|sse> ...",
+                "Invalid add arguments. Usage: /mcp add --name <name> --transport <stdio|sse|http> ... (sse/http require --url)",
               ),
             );
             return;
@@ -242,7 +248,7 @@ export function createMcpCommand(): SlashCommand {
               (typeof opts.headers === "string" && opts.headers.trim())
             ) {
               ctx.addItem(
-                addError(ctx.sessionId, "Invalid stdio args: --url/--headers are only for sse"),
+                addError(ctx.sessionId, "Invalid stdio args: --url/--headers are only for sse/http"),
               );
               return;
             }

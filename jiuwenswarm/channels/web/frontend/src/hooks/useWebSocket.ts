@@ -101,7 +101,7 @@ function resolveInterruptResumeMode(sessionId: string): AgentMode {
     sessionStore.currentSession?.session_id === sessionId
       ? sessionStore.currentSession
       : sessionStore.sessions.find((item) => item.session_id === sessionId);
-  return session?.team_name?.trim() ? 'team' : sessionStore.mode;
+  return normalizeAgentMode(session?.mode);
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -127,6 +127,21 @@ function getPayloadSessionId(payload: Record<string, unknown>): string | undefin
   const event = payload.event;
   if (isRecord(event)) {
     return pickString(event.session_id);
+  }
+  return undefined;
+}
+
+function getPayloadRequestId(payload: Record<string, unknown>): string | undefined {
+  const direct = pickString(payload.request_id, payload.rid);
+  if (direct) {
+    return direct;
+  }
+  const nestedPayload = payload.payload;
+  if (isRecord(nestedPayload)) {
+    const nested = pickString(nestedPayload.request_id, nestedPayload.rid);
+    if (nested) {
+      return nested;
+    }
   }
   return undefined;
 }
@@ -1202,6 +1217,25 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
     setThinking(false);
   }, [setThinking]);
 
+  const shouldRecoverProcessingFromReasoning = useCallback((payload: Record<string, unknown>): boolean => {
+    const chatState = useChatStore.getState();
+    if (chatState.isProcessing || chatState.isLoadingHistory) {
+      return false;
+    }
+    if (chatState.currentStreamId) {
+      return true;
+    }
+    if (webClient.getInflightCount() > 0) {
+      return true;
+    }
+    const payloadRequestId = getPayloadRequestId(payload);
+    return Boolean(
+      payloadRequestId &&
+      activeRequestIdRef.current &&
+      payloadRequestId === activeRequestIdRef.current
+    );
+  }, []);
+
   const getTeamMemberOutputKey = useCallback(
     (payload: Record<string, unknown>, memberId: string): string => stableEventId(
       'member-output-key',
@@ -1368,8 +1402,9 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
       webClient.on('chat.reasoning', ({ payload }) => {
         if (!shouldHandleSessionEvent(payload)) return;
 
-        // 页面刷新后，如果收到活跃事件但 isProcessing=false，自动恢复执行状态
-        if (!useChatStore.getState().isProcessing && !useChatStore.getState().isLoadingHistory) {
+        // 只在明确属于当前活跃请求时恢复 processing，避免 evolution 后置 reasoning
+        // 把已完成会话重新拉回处理中。
+        if (shouldRecoverProcessingFromReasoning(payload)) {
           setProcessing(true);
         }
       }),
@@ -1456,9 +1491,12 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
           const cronMeta = payload.cron as Record<string, unknown> | undefined;
           const cronRunId =
             typeof cronMeta?.run_id === 'string' ? cronMeta.run_id.trim() : '';
-          const isCronPlaceholderContent = /^\[cron\].*正在执行中/.test(content);
+          const isCronPlaceholderContent =
+            cronMeta?.is_placeholder === true ||
+            /正在执行中，结果稍后补发/.test(content) ||
+            /^\[cron\].*正在执行中/.test(content);
 
-          // 正式结果：替换同 run_id 的占位气泡，或最近的 [cron]…正在执行中…
+          // 正式结果：替换同 run_id 的占位气泡，或最近的定时任务「正在执行中」占位
           if (!isCronPlaceholderContent) {
             let placeholderId: string | null = null;
             if (cronRunId) {
@@ -1469,7 +1507,10 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
               for (let i = messages.length - 1; i >= 0; i -= 1) {
                 const msg = messages[i];
                 if (msg.role !== 'assistant' || typeof msg.content !== 'string') continue;
-                if (/^\[cron\].*正在执行中/.test(msg.content)) {
+                if (
+                  /正在执行中，结果稍后补发/.test(msg.content) ||
+                  /^\[cron\].*正在执行中/.test(msg.content)
+                ) {
                   placeholderId = msg.id;
                   break;
                 }
@@ -2447,6 +2488,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
     updateSession,
     shouldHandleSessionEvent,
     shouldDropDuplicatedEvent,
+    shouldRecoverProcessingFromReasoning,
     startStreaming,
     stopStreaming,
     t,

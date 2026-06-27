@@ -1404,9 +1404,7 @@ async def test_process_team_message_stream_routes_evolution_interrupt_to_active_
         {"answers": {"approve": True}},
     )
 
-    class _FakeManager:
-        active_session_id = "sess-team-evolution-resume"
-        pending_session_id = None
+    class _FakeManager(_InactiveTeamRuntimeManagerMixin):
         interact_calls: list[tuple[str, Any]] = []
 
         @staticmethod

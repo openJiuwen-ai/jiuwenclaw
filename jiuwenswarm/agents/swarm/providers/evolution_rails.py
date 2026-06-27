@@ -396,6 +396,9 @@ class TeamSkillEvolutionInput(ConstructionInput):
     auto_scan: bool = param_field(
         default=False, description="Evolution auto-scan flag."
     )
+    auto_save: bool = param_field(
+        default=False, description="Evolution auto-save approval flag."
+    )
     team_skills_dir: str | None = context_field(
         attr="team_skills_dir", description="Team shared skills directory."
     )
@@ -467,7 +470,7 @@ def build_team_skill_evolution_rail(
             trajectory_sink=bound_registry,
             member_role=inp.role,
             auto_scan=False,
-            auto_save=False,
+            auto_save=inp.auto_save,
             fuzzy_review=False,
             completion_followup_enabled=inp.auto_scan,
             team_id=inp.team_id,
@@ -493,7 +496,7 @@ def build_team_skill_evolution_rail(
         return _build_evolution_approval_stack(
             rail,
             review_runtime=review_runtime,
-            auto_save=False,
+            auto_save=inp.auto_save,
             language=inp.language,
         )
     except Exception as exc:

@@ -37,7 +37,39 @@ git --version
 
 ## First-time installation
 
-### Option 1: pip install
+### Option 1: Desktop installer (dmg / exe)
+
+For Windows and macOS users who want a ready-to-run app without setting up Python / Node.js themselves. Download the installer for your platform from the gitcode [Release](https://gitcode.com/openJiuwen/jiuwenswarm/releases) page.
+
+| Platform | Artifact |
+|----------|----------|
+| Windows | `JiuwenSwarm-setup-<version>.exe` |
+| macOS | `JiuwenSwarm-<version>.dmg` |
+
+Releases: https://gitcode.com/openJiuwen/jiuwenswarm/releases
+
+#### 1. macOS: download the dmg with curl (recommended)
+
+> ⚠️ **Important:** A `.dmg` downloaded through a browser gets a macOS quarantine flag (`com.apple.quarantine`). When opened it triggers a Gatekeeper check and may report "damaged and can't be opened" or "can't be verified developer". Downloading from the terminal with `curl` does not add the quarantine flag, so the dmg mounts and installs normally.
+
+```bash
+# Replace <version> with the target version
+curl -L --fail -o JiuwenSwarm-<version>.dmg \
+  https://gitcode.com/openJiuwen/jiuwenswarm/releases/download/JiuwenSwarm<version>/JiuwenSwarm-<version>.dmg
+```
+
+#### 2. Install and first launch
+
+- **macOS**: double-click to mount the dmg, then drag `JiuwenSwarm.app` into `Applications`. You may right-click it in Finder and choose "Open".
+- **Windows**: double-click the downloaded installer (`.exe`) and follow the prompts; it initializes the workspace automatically. For the portable onedir build, run `jiuwenswarm.exe init` once manually.
+
+On first launch the app creates `~/.jiuwenswarm/`. Then follow [Post-start verification](#3-post-start-verification) to finish model configuration.
+
+> Match the version to the actual download link on the Release page. For Windows auto-update behavior, see [Windows auto-update design](WindowsAutoUpdateDesign.md).
+
+---
+
+### Option 2: pip install
 
 #### 1. Installation steps
 
@@ -52,7 +84,15 @@ jiuwenswarm-env\Scripts\activate
 source jiuwenswarm-env/bin/activate
 
 # Install JiuwenSwarm
+## Option 1: default install
 pip install jiuwenswarm
+
+## Option 2: use a China mirror (recommended)
+# Tsinghua mirror
+pip install jiuwenswarm -i https://pypi.tuna.tsinghua.edu.cn/simple
+
+# Aliyun mirror
+pip install jiuwenswarm -i https://mirrors.aliyun.com/pypi/simple/
 ```
 
 #### 2. First launch
@@ -92,7 +132,7 @@ jiuwenswarm-start
 
 ---
 
-### Option 2: Install from source (uv)
+### Option 3: Install from source (uv)
 
 #### 1. Environment setup
 
@@ -163,7 +203,7 @@ jiuwenswarm-init
 jiuwenswarm-start
 ```
 
-#### 5. Post-start verification (same as Option 1)
+#### 5. Post-start verification (same as Option 2)
 
 Use the checklist under [Post-start verification](#3-post-start-verification).
 
@@ -176,7 +216,7 @@ jiuwenswarm-start
 
 ---
 
-### Option 3: Install from source (conda)
+### Option 4: Install from source (conda)
 
 #### 1. Environment setup
 
@@ -254,7 +294,7 @@ jiuwenswarm-init
 jiuwenswarm-start
 ```
 
-#### 6. Post-start verification (same as Option 1)
+#### 6. Post-start verification (same as Option 2)
 
 Use the checklist under [Post-start verification](#3-post-start-verification).
 

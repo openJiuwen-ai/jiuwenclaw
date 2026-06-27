@@ -50,6 +50,8 @@ def build_external_memory_rail(
             provider = _build_mem0_provider(ext_cfg)
         elif provider_name == "openviking":
             provider = _build_openviking_provider(ext_cfg)
+        elif provider_name == "lakebase":
+            provider = _build_lakebase_provider(ext_cfg)
         else:
             provider = _load_plugin_provider(provider_name, ext_cfg.get("allowed_plugins") or None)
     except Exception as exc:
@@ -127,6 +129,60 @@ def _build_openviking_provider(ext_cfg: Dict[str, Any]):
     if not provider.is_available():
         logger.warning("[ExternalMemoryBuilder] OpenViking unavailable (no endpoint)")
         return None
+    return provider
+
+
+def _build_lakebase_provider(ext_cfg: Dict[str, Any]):
+    """Build LakeBase (DBay) external memory provider.
+
+    LakeBase provides:
+    - Semantic memory storage and retrieval via pgvector
+    - Multiple memory types (fact, episode, procedural, etc.)
+    - Trait extraction via digest API
+    - Multi-workspace support via base switching
+
+    Config shape (memory.external.lakebase):
+        api_key: str       # LakeBase API key (required)
+        base_url: str      # LakeBase API endpoint (default: localhost:8080)
+        base_id: str       # Memory base ID (workspace)
+        database_id: str   # Database ID for branching
+        timeout: float     # HTTP request timeout
+    """
+    from openjiuwen.core.memory.external.lakebase_memory_provider import (
+        LakeBaseMemoryProvider,
+    )
+
+    lb_cfg = ext_cfg.get("lakebase") or {}
+    api_key = lb_cfg.get("api_key") or os.environ.get("LAKEBASE_API_KEY", "")
+    base_url = lb_cfg.get("base_url") or os.environ.get(
+        "LAKEBASE_API_URL", "http://localhost:8080/api/v1"
+    )
+    base_id = lb_cfg.get("base_id") or os.environ.get("LAKEBASE_MEM_BASE_ID", "mem_default")
+    database_id = lb_cfg.get("database_id") or os.environ.get(
+        "LAKEBASE_DATABASE_ID", "db_agent_memory"
+    )
+    timeout = float(lb_cfg.get("timeout") or 60.0)
+
+    if not api_key:
+        logger.warning("[ExternalMemoryBuilder] LakeBase unavailable (no api_key)")
+        return None
+
+    provider = LakeBaseMemoryProvider(
+        api_key=api_key,
+        base_url=base_url,
+        base_id=base_id,
+        database_id=database_id,
+        timeout=timeout,
+    )
+
+    if not provider.is_available():
+        logger.warning("[ExternalMemoryBuilder] LakeBase unavailable (config incomplete)")
+        return None
+
+    logger.info(
+        "[ExternalMemoryBuilder] LakeBase provider built: base_url=%s, base_id=%s",
+        base_url, base_id,
+    )
     return provider
 
 

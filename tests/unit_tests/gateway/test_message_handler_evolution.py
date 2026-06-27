@@ -69,20 +69,24 @@ class _TestMessageHandler(MessageHandler):
         session_id: str,
         request_id: str,
     ) -> None:
-        marker = getattr(self, "_mark_pending_evolution_approval")
-        marker(session_id, request_id)
+        coordinator = getattr(self, "_evolution_approval")
+        coordinator.mark_pending(session_id, request_id)
 
     def seed_session_evolution_in_progress(self, session_id: str) -> None:
-        marker = getattr(self, "_mark_session_evolution_in_progress")
-        marker(session_id)
+        coordinator = getattr(self, "_evolution_approval")
+        coordinator.mark_session_in_progress(session_id)
 
     def seed_queued_supplement_input(
         self,
         session_id: str,
         payload: dict[str, object],
     ) -> None:
-        queued_inputs = getattr(self, "_queued_supplement_input")
-        queued_inputs[session_id] = payload
+        coordinator = getattr(self, "_evolution_approval")
+        coordinator.queue_supplement(
+            session_id,
+            str(payload.get("new_input") or ""),
+            payload.get("attachments") if isinstance(payload.get("attachments"), list) else None,
+        )
 
     async def handle_evolution_chunk(
         self,
@@ -93,29 +97,40 @@ class _TestMessageHandler(MessageHandler):
         handler = getattr(self, "_handle_evolution_chunk")
         await handler(chunk, session_id, request_metadata)
 
-    def finish_evolution_approval_if_current(
+    async def handle_agent_server_push(self, wire: dict[str, object]) -> None:
+        await self._handle_agent_server_push(wire)
+
+    async def complete_evolution_approval_if_current(
         self,
-        session_id: str,
+        msg: Message,
         answered_request_id: str,
-    ) -> dict[str, object] | None:
-        finisher = getattr(self, "_finish_evolution_approval_if_current")
-        return finisher(session_id, answered_request_id)
+    ) -> None:
+        completer = getattr(self, "_complete_evolution_approval_if_current")
+        await completer(msg, answered_request_id)
 
     def pending_evolution_approval(self, session_id: str) -> str | None:
-        approvals = getattr(self, "_pending_evolution_approval")
-        return approvals.get(session_id)
+        coordinator = getattr(self, "_evolution_approval")
+        return coordinator.pending_request_id(session_id)
+
+    def deferred_evolution_approvals(self, session_id: str) -> list[str]:
+        coordinator = getattr(self, "_evolution_approval")
+        return coordinator.deferred_request_ids(session_id)
 
     def has_session_evolution_in_progress(self, session_id: str) -> bool:
-        checker = getattr(self, "_is_session_evolution_in_progress")
-        return checker(session_id)
+        coordinator = getattr(self, "_evolution_approval")
+        return coordinator.is_session_in_progress(session_id)
 
     def queued_supplement_input(self, session_id: str) -> dict[str, object] | None:
-        queued_inputs = getattr(self, "_queued_supplement_input")
-        return queued_inputs.get(session_id)
+        coordinator = getattr(self, "_evolution_approval")
+        return coordinator.queued_supplement(session_id)
 
     def pop_user_message_nowait(self):
         user_messages = getattr(self, "_user_messages")
         return user_messages.get_nowait()
+
+    def user_message_queue_empty(self) -> bool:
+        user_messages = getattr(self, "_user_messages")
+        return user_messages.empty()
 
     def should_emit_processing_status_for_stream(self, msg: Message) -> bool:
         return self._should_emit_processing_status_for_stream(msg)
@@ -211,6 +226,21 @@ def _evolution_question_chunk(
     *,
     include_approval_context: bool = False,
 ) -> SimpleNamespace:
+    return SimpleNamespace(
+        channel_id="web",
+        request_id="stream-1",
+        payload=_evolution_question_payload(
+            request_id,
+            include_approval_context=include_approval_context,
+        ),
+    )
+
+
+def _evolution_question_payload(
+    request_id: str,
+    *,
+    include_approval_context: bool = False,
+) -> dict[str, object]:
     payload: dict[str, object] = {
         "event_type": "chat.ask_user_question",
         "request_id": request_id,
@@ -223,10 +253,45 @@ def _evolution_question_chunk(
                 "approval_schema": _APPROVAL_SCHEMA,
             }
         )
-    return SimpleNamespace(
-        channel_id="web",
-        request_id="stream-1",
-        payload=payload,
+    return payload
+
+
+def _set_evolution_auto_save(
+    monkeypatch: pytest.MonkeyPatch,
+    enabled: bool,
+) -> None:
+    monkeypatch.setattr(
+        "jiuwenswarm.gateway.message_handler.message_handler.get_evolution_auto_save_enabled",
+        lambda: enabled,
+    )
+
+
+async def _deliver_evolution_question(
+    handler: _TestMessageHandler,
+    path: str,
+    request_id: str,
+    metadata: dict[str, object] | None = None,
+) -> None:
+    payload = _evolution_question_payload(request_id)
+    if path == "stream":
+        _FakeAgentClient.stream_payloads = [payload]
+        await handler.process_stream(
+            SimpleNamespace(request_id="stream-1", channel="web", params={}),
+            "sess-1",
+            metadata,
+            emit_processing_status=False,
+        )
+        return
+
+    await handler.handle_agent_server_push(
+        {
+            "request_id": "stream-1",
+            "channel_id": "web",
+            "session_id": "sess-1",
+            "is_complete": False,
+            "payload": payload,
+            "metadata": metadata or {},
+        }
     )
 
 
@@ -347,21 +412,69 @@ def test_chat_send_query_context_is_remembered_for_supplement():
 
 
 @pytest.mark.asyncio
-async def test_handle_evolution_chunk_auto_accepts_previous_pending_approval() -> None:
+async def test_resolved_approval_replays_deferred_approval_before_supplement(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _set_evolution_auto_save(monkeypatch, False)
     handler = _TestMessageHandler.create()
     handler.seed_pending_evolution_approval("sess-1", "team_skill_evolve_old")
+    handler.seed_session_evolution_in_progress("sess-1")
+    handler.seed_queued_supplement_input("sess-1", {"new_input": "继续补充"})
 
     await handler.handle_evolution_chunk(
         _evolution_question_chunk("team_skill_evolve_new"),
         "sess-1",
         {"k": "v"},
     )
+    await handler.complete_evolution_approval_if_current(
+        _answer_message(_approval_answer_params("team_skill_evolve_old", ["接收"])),
+        "team_skill_evolve_old",
+    )
 
+    out = await handler.consume_robot_messages(timeout=0)
+
+    assert out is not None
+    assert out.payload["event_type"] == "chat.ask_user_question"
+    assert out.payload["request_id"] == "team_skill_evolve_new"
+    assert out.metadata == {"k": "v"}
     assert handler.pending_evolution_approval("sess-1") == "team_skill_evolve_new"
+    assert handler.queued_supplement_input("sess-1") == {"new_input": "继续补充"}
+    assert _FakeAgentClient.sent_stream_requests == []
+
+
+@pytest.mark.parametrize("path", ["stream", "server_push"])
+@pytest.mark.asyncio
+async def test_evolution_approval_paths_suppress_deferred_chunk(
+    monkeypatch: pytest.MonkeyPatch,
+    path: str,
+) -> None:
+    _set_evolution_auto_save(monkeypatch, False)
+    handler = _TestMessageHandler.create()
+    handler.seed_pending_evolution_approval("sess-1", "team_skill_evolve_old")
+
+    await _deliver_evolution_question(handler, path, "team_skill_evolve_new", {"k": "v"})
+
+    assert handler.pending_evolution_approval("sess-1") == "team_skill_evolve_old"
+    assert handler.deferred_evolution_approvals("sess-1") == ["team_skill_evolve_new"]
+    assert await handler.consume_robot_messages(timeout=0) is None
+    assert handler.user_message_queue_empty() is True
+
+
+@pytest.mark.parametrize("path", ["stream", "server_push"])
+@pytest.mark.asyncio
+async def test_evolution_approval_paths_suppress_auto_saved_chunk(
+    monkeypatch: pytest.MonkeyPatch,
+    path: str,
+) -> None:
+    _set_evolution_auto_save(monkeypatch, True)
+    handler = _TestMessageHandler.create()
+
+    await _deliver_evolution_question(handler, path, "team_skill_evolve_new", {"k": "v"})
+
+    assert handler.pending_evolution_approval("sess-1") is None
+    assert await handler.consume_robot_messages(timeout=0) is None
     auto_msg = handler.pop_user_message_nowait()
-    assert auto_msg.session_id == "sess-1"
-    assert auto_msg.channel_id == "web"
-    assert auto_msg.params["request_id"] == "team_skill_evolve_old"
+    assert auto_msg.params["request_id"] == "team_skill_evolve_new"
     assert auto_msg.params["answers"] == [{"selected_options": ["接收"]}]
     assert auto_msg.params["approval_schema"] == _APPROVAL_SCHEMA
     assert auto_msg.params["evolution_meta"]["rail_kind"] == "regular"
@@ -369,7 +482,10 @@ async def test_handle_evolution_chunk_auto_accepts_previous_pending_approval() -
 
 
 @pytest.mark.asyncio
-async def test_handle_evolution_chunk_auto_accepts_replaced_regular_call_with_metadata() -> None:
+async def test_auto_save_regular_approval_preserves_pending_interrupt(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _set_evolution_auto_save(monkeypatch, True)
     handler = _TestMessageHandler.create()
     handler.seed_pending_evolution_approval("sess-1", "call_123")
 
@@ -379,44 +495,46 @@ async def test_handle_evolution_chunk_auto_accepts_replaced_regular_call_with_me
         {"k": "v"},
     )
 
-    assert handler.pending_evolution_approval("sess-1") == "skill_evolve_new"
+    assert handler.pending_evolution_approval("sess-1") == "call_123"
     auto_msg = handler.pop_user_message_nowait()
-    assert auto_msg.params["request_id"] == "call_123"
-    assert auto_msg.params["source"] == "evolution_interrupt"
-    assert auto_msg.params["approval_kind"] == "evolve"
-    assert "approval_schema" not in auto_msg.params
-    assert "evolution_meta" not in auto_msg.params
+    assert auto_msg.params["request_id"] == "skill_evolve_new"
+    assert auto_msg.params["source"] == _APPROVAL_SOURCE
+    assert auto_msg.params["approval_schema"] == _APPROVAL_SCHEMA
+    assert auto_msg.params["evolution_meta"]["rail_kind"] == "regular"
+    assert "approval_transport" not in auto_msg.params["evolution_meta"]
     assert auto_msg.metadata == {"k": "v"}
 
 
 @pytest.mark.asyncio
-async def test_handle_evolution_chunk_tracks_regular_approval_without_request_prefix() -> None:
+async def test_handle_evolution_chunk_tracks_regular_approval_without_request_prefix(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _set_evolution_auto_save(monkeypatch, False)
     handler = _TestMessageHandler.create()
 
     await handler.handle_evolution_chunk(
-        _evolution_question_chunk("call_123", include_approval_context=True),
+        _evolution_question_chunk("approval_123", include_approval_context=True),
         "sess-1",
         {"k": "v"},
     )
 
-    assert handler.pending_evolution_approval("sess-1") == "call_123"
+    assert handler.pending_evolution_approval("sess-1") == "approval_123"
 
 
 @pytest.mark.asyncio
-async def test_regular_evolution_approval_answer_resolved_clears_processing_status() -> None:
+async def test_regular_auto_save_answer_resolved_clears_processing_status(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _set_evolution_auto_save(monkeypatch, True)
     handler = _TestMessageHandler.create()
     old_response_payload = dict(_FakeAgentClient.response_payload)
     _FakeAgentClient.response_payload = {"accepted": True, "resolved": True}
     await handler.handle_evolution_chunk(
-        _evolution_question_chunk("call_123", include_approval_context=True),
+        _evolution_question_chunk("team_skill_evolve_123"),
         "sess-1",
     )
     await handler.start_forwarding()
     try:
-        await handler.publish_user_messages(
-            _answer_message(_approval_answer_params("call_123", ["接收"]))
-        )
-
         outputs = [
             await handler.consume_robot_messages(timeout=2),
             await handler.consume_robot_messages(timeout=2),
@@ -628,23 +746,6 @@ async def test_stream_interrupt_evolution_approval_chat_send_cleans_pending() ->
         assert _FakeAgentClient.sent_stream_requests[-1].params["supplement_input"] == "继续补充"
     finally:
         await handler.stop_forwarding()
-
-
-def test_finish_evolution_approval_if_current_keeps_newer_pending_request() -> None:
-    handler = _TestMessageHandler.create()
-    handler.seed_pending_evolution_approval("sess-2", "team_skill_evolve_new")
-    handler.seed_session_evolution_in_progress("sess-2")
-    handler.seed_queued_supplement_input("sess-2", {"new_input": "follow up"})
-
-    queued = handler.finish_evolution_approval_if_current(
-        "sess-2",
-        "team_skill_evolve_old",
-    )
-
-    assert queued is None
-    assert handler.pending_evolution_approval("sess-2") == "team_skill_evolve_new"
-    assert handler.has_session_evolution_in_progress("sess-2") is True
-    assert handler.queued_supplement_input("sess-2") == {"new_input": "follow up"}
 
 
 @pytest.mark.asyncio

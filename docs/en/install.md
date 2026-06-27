@@ -34,9 +34,35 @@ git --version
 
 ## First-time installation
 
-### Option 1: Desktop installer (exe)
+### Option 1: Desktop installer (dmg / exe)
 
-> To be filled in when a desktop installer is available. Prefer this method when offered.
+For Windows and macOS users who want a ready-to-run app without setting up Python / Node.js themselves. Download the installer for your platform from the gitcode [Release](https://gitcode.com/openJiuwen/jiuwenswarm/releases) page.
+
+| Platform | Artifact |
+|----------|----------|
+| Windows | `JiuwenSwarm-setup-<version>.exe` |
+| macOS | `JiuwenSwarm-<version>.dmg` |
+
+Releases: https://gitcode.com/openJiuwen/jiuwenswarm/releases
+
+#### 1. macOS: download the dmg with curl (recommended)
+
+> ⚠️ **Important:** A `.dmg` downloaded through a browser gets a macOS quarantine flag (`com.apple.quarantine`). When opened it triggers a Gatekeeper check and may report "damaged and can't be opened" or "can't be verified developer". Downloading from the terminal with `curl` does not add the quarantine flag, so the dmg mounts and installs normally.
+
+```bash
+# Replace <version> with the target version
+curl -L --fail -o JiuwenSwarm-<version>.dmg \
+  https://gitcode.com/openJiuwen/jiuwenswarm/releases/download/JiuwenSwarm<version>/JiuwenSwarm-<version>.dmg
+```
+
+#### 2. Install and first launch
+
+- **macOS**: double-click to mount the dmg, then drag `JiuwenSwarm.app` into `Applications`. You may right-click it in Finder and choose "Open".
+- **Windows**: double-click the downloaded installer (`.exe`) and follow the prompts; it initializes the workspace automatically.
+
+On first launch the app creates `~/.jiuwenswarm/`. Then follow [Post-start verification](#3-post-start-verification) to finish model configuration.
+
+> Match the version to the actual download link on the Release page. For Windows auto-update behavior, see [Windows auto-update design](WindowsAutoUpdateDesign.md).
 
 ---
 
@@ -55,12 +81,10 @@ jiuwenswarm-env\Scripts\activate
 source jiuwenswarm-env/bin/activate
 
 # Install JiuwenSwarm
+## Option 1: default install
 pip install jiuwenswarm
-```
 
-#### 2. Use China mainland mirrors (recommended)
-
-```bash
+## Option 2: use a China mirror (recommended)
 # Tsinghua mirror
 pip install jiuwenswarm -i https://pypi.tuna.tsinghua.edu.cn/simple
 
@@ -68,7 +92,7 @@ pip install jiuwenswarm -i https://pypi.tuna.tsinghua.edu.cn/simple
 pip install jiuwenswarm -i https://mirrors.aliyun.com/pypi/simple/
 ```
 
-#### 3. First launch
+#### 2. First launch
 
 ```bash
 # Initialize JiuwenSwarm (first run)
@@ -78,6 +102,21 @@ jiuwenswarm-start
 ```
 
 After the first start, the app creates the config directory `~/.jiuwenswarm/`.
+
+#### 3. Post-start verification
+
+After a successful start, verify the installation with these steps:
+
+1. **Open the Web UI**: in your browser go to `http://localhost:5173`
+2. **Open configuration**: in the left sidebar choose **Configuration**
+3. **Configure the model**: follow [Configuration](Configuration.md) to set up your model API
+4. **Confirm it works**:
+   - The Web UI loads
+   - After model configuration you can run a basic chat
+
+![Example: Web UI connected with a successful verification chat](../assets/images/天气.png)
+
+> 💡 **Tip:** If the Web UI does not load, check `~/.jiuwenswarm/logs/` for errors.
 
 #### 4. Restarting the service
 
