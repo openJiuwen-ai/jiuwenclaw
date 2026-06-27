@@ -2945,6 +2945,10 @@ class MessageHandler(ABC):
         Returns:
             True 如果需要传输文件
         """
+        # 企业级部署（AGENT_RUNTIME）：附件经 MinIO URL 传递，不做 Gateway→AgentServer 本地文件传输
+        if os.getenv("AGENT_RUNTIME", "").strip():
+            return False
+
         # 延迟初始化文件传输处理器
         if self._file_transfer_handler is None:
             from jiuwenclaw.gateway.file_transfer_handler import get_file_transfer_handler

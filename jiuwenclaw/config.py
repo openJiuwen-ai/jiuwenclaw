@@ -932,6 +932,13 @@ def get_file_transfer_config() -> FileTransferConfig:
     config = get_config()
     ft_config = config.get("file_transfer", {}) if isinstance(config, dict) else {}
     _file_transfer_config = FileTransferConfig.from_dict(ft_config)
+    
+    # 如果 AGENT_RUNTIME 环境变量存在（非空），则强制启用分布式模式
+    agent_runtime_env = os.getenv("AGENT_RUNTIME", "").strip()
+    logger.debug("AGENT_RUNTIME env var: '%s'", agent_runtime_env)
+    if agent_runtime_env:
+        _file_transfer_config.enabled = True
+    
     return _file_transfer_config
 
 
