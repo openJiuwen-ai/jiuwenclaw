@@ -26,6 +26,7 @@ STATE_FILENAME = "state.json"
 
 @dataclass(frozen=True)
 class _TreeCacheEntry:
+    path: str
     payload: dict[str, Any]
     tree_nodes: list[dict[str, Any]]
     branch_count: int
@@ -35,39 +36,35 @@ class _TreeCacheEntry:
 
 
 _tree_cache: _TreeCacheEntry | None = None
-_tree_cache_path: str | None = None
 
 
 def _get_cached_tree(tree_path: Path) -> _TreeCacheEntry | None:
-    global _tree_cache, _tree_cache_path
     try:
         stat = tree_path.stat()
     except OSError:
-        _tree_cache = None
-        _tree_cache_path = None
+        _clear_tree_cache()
         return None
     if (
         _tree_cache is not None
-        and _tree_cache_path == str(tree_path)
+        and _tree_cache.path == str(tree_path)
         and _tree_cache.mtime_ns == stat.st_mtime_ns
         and _tree_cache.size == stat.st_size
     ):
         return _tree_cache
-    _tree_cache = None
-    _tree_cache_path = None
+    _clear_tree_cache()
     return None
 
 
 def _set_cached_tree(tree_path: Path, entry: _TreeCacheEntry) -> None:
-    global _tree_cache, _tree_cache_path
+    global _tree_cache
     _tree_cache = entry
-    _tree_cache_path = str(tree_path)
 
 
 def _clear_tree_cache() -> None:
-    global _tree_cache, _tree_cache_path
+    global _tree_cache
     _tree_cache = None
-    _tree_cache_path = None
+
+
 LOGGER = logging.getLogger(__name__)
 BUILD_LOG_LIMIT = 40
 TREE_BUILD_PROGRESS_START = 0.35
@@ -507,6 +504,7 @@ class SkillIndexService:
                 _set_cached_tree(
                     tree_path,
                     _TreeCacheEntry(
+                        path=str(tree_path),
                         payload=payload,
                         tree_nodes=tree_nodes,
                         branch_count=branch_count,
