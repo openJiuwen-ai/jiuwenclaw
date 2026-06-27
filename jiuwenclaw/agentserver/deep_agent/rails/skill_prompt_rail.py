@@ -36,7 +36,7 @@ def _build_skill_protocol_section_text(language: str) -> str:
 随后按 SKILL 工作流执行；下列规范约束执行过程。
 
 1. **声明步骤**：每次行动前，必须在回复开头声明当前所在步骤，格式：`[当前步骤: <步骤名称>]`。**无需调用任何工具来"开始"步骤**——声明本身即代表进入该步。
-2. **必须使用 todo**：对于skill，必须创建 todo 列表。创建后，必须在执行过程中持续更新（如打勾已完成项、添加遗漏项等），确保 todo 与实际执行状态始终保持一致。
+2. **必须使用 todo**：在执行skill步骤前，必须先创建 todo 列表。创建后，必须在执行过程中持续更新（如打勾已完成项、添加遗漏项等），确保 todo 与实际执行状态始终保持一致。
 3. **严格顺序**：按 SKILL.md 定义的顺序逐步执行，**禁止跳过、合并或重排步骤**，除非 SKILL.md 或用户明确允许。
 4. **闸门等待**：遇到需要用户确认/审批的步骤时，**必须等待用户回复，禁止自行假设用户同意**。
 5. **不确定时重读**：只能再次调用 `skill_tool`，**不得**用其它工具获取 SKILL.md。
@@ -62,7 +62,7 @@ The "Skills" section of this prompt (from SkillUseRail) lists available skills a
 Then execute the workflow; the rules below govern execution.
 
 1. **Declare step**: Before each action, state your current step at the start of your reply: `[Current Step: <step name>]`. **You do NOT call any tool to "start" a step** — the declaration itself enters the step.
-2. **Use todo (mandatory)**：For skills, you MUST create a todo list. Once created, you MUST continuously update it throughout execution (e.g., check off completed items, add missing steps) to ensure the todo always reflects the actual execution state.
+2. **Use todo (mandatory)**: For skills, you MUST create a todo list before executing the skill steps. Once created, you MUST continuously update it throughout execution (e.g. check off completed items, add missing steps) to ensure the todo always reflects the actual execution state.
 3. **Strict order**: Execute steps in the order defined by SKILL.md. **Do not skip, merge, or reorder steps** unless SKILL.md or the user explicitly allows it.
 4. **Gate enforcement**: When a step requires user confirmation/approval, **you MUST wait for the user's response. Never assume approval.**
 5. **Re-read when unsure**: Refresh the SKILL.md body **only** by calling `skill_tool` again — **never** use any other tool to obtain SKILL.md.
