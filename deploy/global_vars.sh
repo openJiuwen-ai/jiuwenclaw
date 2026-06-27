@@ -6,49 +6,51 @@ set -euo >/dev/null 2>&1
 # =============================================================================
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CUSTOM_ENV_FILE="${SCRIPT_DIR}/.env.custom"
+TEMPLATE_DIR="${SCRIPT_DIR}/templates"
+CONFIG_DIR="${SCRIPT_DIR}/conf"
 
 # ===== Core project configuration (paths, ports, commands, OS info) =====
 declare -A CONFIG=(
-    ["GATEWAY_CONFIG_FILE"]="${SCRIPT_DIR}/conf/gateway-config.yaml"
+    ["GATEWAY_CONFIG_FILE"]="${CONFIG_DIR}/gateway-config.yaml"
 
-    ["GATEWAY_ENV_TEMPLATE_FILE"]="${SCRIPT_DIR}/conf/gateway.template.env"
-    ["GATEWAY_ENV_FILE"]="${SCRIPT_DIR}/conf/gateway.env"
+    ["GATEWAY_ENV_TEMPLATE_FILE"]="${TEMPLATE_DIR}/gateway.template.env"
+    ["GATEWAY_ENV_FILE"]="${CONFIG_DIR}/gateway.env"
 
-    ["GATEWAY_TEMPLATE_FILE"]="${SCRIPT_DIR}/conf/gateway.template.yaml"
-    ["GATEWAY_FILE"]="${SCRIPT_DIR}/conf/gateway.yaml"
+    ["GATEWAY_TEMPLATE_FILE"]="${TEMPLATE_DIR}/gateway.template.yaml"
+    ["GATEWAY_FILE"]="${CONFIG_DIR}/gateway.yaml"
 
-    ["NFS_TEMPLATE_FILE"]="${SCRIPT_DIR}/conf/nfs.template.yaml"
-    ["NFS_FILE"]="${SCRIPT_DIR}/conf/nfs.yaml"
+    ["NFS_TEMPLATE_FILE"]="${TEMPLATE_DIR}/nfs.template.yaml"
+    ["NFS_FILE"]="${CONFIG_DIR}/nfs.yaml"
 
-    ["RABBITMQ_TEMPLATE_FILE"]="${SCRIPT_DIR}/conf/rabbitmq.template.yaml"
-    ["RABBITMQ_FILE"]="${SCRIPT_DIR}/conf/rabbitmq.yaml"
+    ["RABBITMQ_TEMPLATE_FILE"]="${TEMPLATE_DIR}/rabbitmq.template.yaml"
+    ["RABBITMQ_FILE"]="${CONFIG_DIR}/rabbitmq.yaml"
 
-    ["MYSQL_TEMPLATE_FILE"]="${SCRIPT_DIR}/conf/mysql.template.yaml"
-    ["MYSQL_FILE"]="${SCRIPT_DIR}/conf/mysql.yaml"
+    ["MYSQL_TEMPLATE_FILE"]="${TEMPLATE_DIR}/mysql.template.yaml"
+    ["MYSQL_FILE"]="${CONFIG_DIR}/mysql.yaml"
 
-    ["REDIS_TEMPLATE_FILE"]="${SCRIPT_DIR}/conf/redis.template.yaml"
-    ["REDIS_FILE"]="${SCRIPT_DIR}/conf/redis.yaml"
+    ["REDIS_TEMPLATE_FILE"]="${TEMPLATE_DIR}/redis.template.yaml"
+    ["REDIS_FILE"]="${CONFIG_DIR}/redis.yaml"
 
-    ["POSTGRES_TEMPLATE_FILE"]="${SCRIPT_DIR}/conf/postgresql.template.yaml"
-    ["POSTGRES_FILE"]="${SCRIPT_DIR}/conf/postgresql.yaml"
+    ["POSTGRES_TEMPLATE_FILE"]="${TEMPLATE_DIR}/postgresql.template.yaml"
+    ["POSTGRES_FILE"]="${CONFIG_DIR}/postgresql.yaml"
 
-    ["MINIO_TEMPLATE_FILE"]="${SCRIPT_DIR}/conf/minio.template.yaml"
-    ["MINIO_FILE"]="${SCRIPT_DIR}/conf/minio.yaml"
+    ["MINIO_TEMPLATE_FILE"]="${TEMPLATE_DIR}/minio.template.yaml"
+    ["MINIO_FILE"]="${CONFIG_DIR}/minio.yaml"
 
-    ["WEB_TEMPLATE_FILE"]="${SCRIPT_DIR}/conf/web.template.yaml"
-    ["WEB_FILE"]="${SCRIPT_DIR}/conf/web.yaml"
+    ["WEB_TEMPLATE_FILE"]="${TEMPLATE_DIR}/web.template.yaml"
+    ["WEB_FILE"]="${CONFIG_DIR}/web.yaml"
 
-    ["MANAGER_SERVER_TEMPLATE_FILE"]="${SCRIPT_DIR}/conf/manager-server.template.yaml"
-    ["MANAGER_SERVER_FILE"]="${SCRIPT_DIR}/conf/manager-server.yaml"
+    ["MANAGER_SERVER_TEMPLATE_FILE"]="${TEMPLATE_DIR}/manager-server.template.yaml"
+    ["MANAGER_SERVER_FILE"]="${CONFIG_DIR}/manager-server.yaml"
 
-    ["MANAGER_WEB_TEMPLATE_FILE"]="${SCRIPT_DIR}/conf/manager-web.template.yaml"
-    ["MANAGER_WEB_FILE"]="${SCRIPT_DIR}/conf/manager-web.yaml"
+    ["MANAGER_WEB_TEMPLATE_FILE"]="${TEMPLATE_DIR}/manager-web.template.yaml"
+    ["MANAGER_WEB_FILE"]="${CONFIG_DIR}/manager-web.yaml"
 
-    ["PV_TEMPLATE_FILE"]="${SCRIPT_DIR}/conf/pv-nfs.template.yaml"
-    ["PV_FILE"]="${SCRIPT_DIR}/conf/pv-nfs.yaml"
+    ["PV_TEMPLATE_FILE"]="${TEMPLATE_DIR}/pv-nfs.template.yaml"
+    ["PV_FILE"]="${CONFIG_DIR}/pv-nfs.yaml"
 
-    ["PVC_TEMPLATE_FILE"]="${SCRIPT_DIR}/conf/pvc-nfs.template.yaml"
-    ["PVC_FILE"]="${SCRIPT_DIR}/conf/pvc-nfs.yaml"
+    ["PVC_TEMPLATE_FILE"]="${TEMPLATE_DIR}/pvc-nfs.template.yaml"
+    ["PVC_FILE"]="${CONFIG_DIR}/pvc-nfs.yaml"
 
     ["START_PORT"]="30000"
     ["END_PORT"]="32767"
@@ -159,6 +161,8 @@ declare -A DEPLOY_VARS=(
     ["ENABLE_EXTERNAL_REDIS"]="false"
     ["ENABLE_EXTERNAL_MINIO"]="false"
     ["IS_UP_MANAGER_WEB"]="true"
+    ["RENDER_ONLY"]="false"
+    ["ENABLE_GATEWAY_SCHED_LABEL"]="false"
 )
 
 

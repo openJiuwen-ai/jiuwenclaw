@@ -9,7 +9,7 @@ source "check_handler.sh"
 source "envfile_handler.sh"
 source "k8s_handler.sh"
 source "template_handler.sh"
-source "storage_handler.sh"
+source "nfs_handler.sh"
 source "oyr_handler.sh"
 source "gateway_handler.sh"
 source "web_handler.sh"
@@ -31,21 +31,35 @@ process_up() {
     done
     info "sorted_modules=${sorted_modules[@]}"
 
-    local namespace="${DEPLOY_VARS["NAMESPACE"]}"
-    if [ ${namespace} != "default" ]; then
-        create_k8s_resource "ns" ${namespace}
+    if [ "${DEPLOY_VARS["RENDER_ONLY"]}" != "true" ]; then
+        local namespace="${DEPLOY_VARS["NAMESPACE"]}"
+        if [ ${namespace} != "default" ]; then
+            create_k8s_resource "ns" ${namespace}
+        fi
+        collect_k8s_cluster_info
     fi
-    collect_k8s_cluster_info
+    
+    exec_cmd mkdir -p ${CONFIG_DIR}
 
     for module in "${sorted_modules[@]}"; do
         local lmodule=${module,,}
-        check_${lmodule}_up_dependency
-        deploy_${lmodule}
+
+        if [ "${DEPLOY_VARS["RENDER_ONLY"]}" == "true" ]; then
+            render_${lmodule}_files
+        else
+            check_${lmodule}_up_dependency
+            render_${lmodule}_files
+            deploy_${lmodule}
+        fi
     done
 }
 
 
 process_down() {
+    if [ "${DEPLOY_VARS["RENDER_ONLY"]}" == "true" ]; then
+        return
+    fi
+
     local namespace="${DEPLOY_VARS["NAMESPACE"]}"
     local client_type="${DEPLOY_VARS["AGENT_RUNTIME"]}"
 
@@ -74,6 +88,7 @@ process_restart() {
 main() {
     read_env_from_file "${CUSTOM_ENV_FILE}" "DEPLOY_VARS"
     parse_args "$@"
+    detect_os
     check_dependency
     process_${CMD}
 }

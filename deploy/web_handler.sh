@@ -49,13 +49,15 @@ gen_web_file() {
     add_resource_if_set "WEB" "${file}"
 }
 
+render_web_files() {
+    ensure_available_port "WEB_NODE_PORT"
+    gen_web_file
+}
+
 deploy_web() {
     local namespace="${DEPLOY_VARS["NAMESPACE"]}"
     local web_name="${DEPLOY_VARS["WEB_NAME"]}"
     local file="${CONFIG["WEB_FILE"]}"
-
-    ensure_available_port "WEB_NODE_PORT"
-    gen_web_file
 
     exec_cmd kubectl apply -f ${file}
     wait_k8s_resource_ready "deployment" "${web_name}" "${namespace}"
