@@ -328,7 +328,8 @@ export function AgentPoliciesTab({ instanceId }: { instanceId: string }) {
         ) : error ? (
           <div className="p-4 text-sm text-danger">{t('errors.loadFailed', { detail: error })}</div>
         ) : (
-          <table className="table">
+          <div className="overflow-x-auto">
+          <table className="table w-max min-w-full">
             <thead>
               <tr>
                 <th>
@@ -418,7 +419,7 @@ export function AgentPoliciesTab({ instanceId }: { instanceId: string }) {
                     onChange={(value) => handleSortChange('updated_at', value)}
                   />
                 </th>
-                <th>{t('common.actions')}</th>
+                <th className="whitespace-nowrap min-w-[9.5rem]">{t('common.actions')}</th>
               </tr>
             </thead>
             <tbody>
@@ -433,29 +434,29 @@ export function AgentPoliciesTab({ instanceId }: { instanceId: string }) {
                   const linkedServicePolicy = servicePolicyById.get(row.service_policy_id);
                   return (
                   <tr key={row.id}>
-                    <td>
-                      <div className="text-text-strong font-medium">
+                    <td className="align-top">
+                      <div className="text-text-strong font-medium break-words">
                         {row.policy_name || '—'}
                       </div>
-                      <div className="text-[11px] text-muted mono" title={row.policy_id}>
+                      <div className="text-[11px] text-muted mono break-all" title={row.policy_id}>
                         {row.policy_id}
                       </div>
                     </td>
-                    <td className="text-[11px] text-muted" title={row.policy_desc ?? undefined}>
+                    <td className="text-[11px] text-muted max-w-[14rem]" title={row.policy_desc ?? undefined}>
                       {row.policy_desc ? truncate(row.policy_desc, 48) : '—'}
                     </td>
-                    <td>
-                      <div className="text-text-strong font-medium">
+                    <td className="min-w-[10rem] max-w-[18rem] align-top">
+                      <div className="text-text-strong font-medium truncate" title={linkedServicePolicy?.policy_name}>
                         {linkedServicePolicy?.policy_name ||
                           (row.service_policy_id
                             ? t('policies.agent.servicePolicyUnavailable')
                             : '—')}
                       </div>
-                      <div className="text-[11px] text-muted mono" title={row.service_policy_id}>
+                      <div className="text-[11px] text-muted mono break-all" title={row.service_policy_id}>
                         {row.service_policy_id}
                       </div>
                     </td>
-                    <td>
+                    <td className="whitespace-nowrap">
                       <span className="pill accent mono text-[11px] tabular-nums">
                         {row.priority}
                       </span>
@@ -463,10 +464,10 @@ export function AgentPoliciesTab({ instanceId }: { instanceId: string }) {
                     <td className="mono text-[11px] text-muted max-w-[12rem]" title={row.match_expr ?? undefined}>
                       {row.match_expr ? truncate(row.match_expr, 36) : '—'}
                     </td>
-                    <td className="mono text-xs" title={row.agent_id}>
-                      {truncate(row.agent_id, 32)}
+                    <td className="mono text-xs min-w-[10rem] max-w-[18rem] break-all align-top" title={row.agent_id}>
+                      {row.agent_id}
                     </td>
-                    <td>
+                    <td className="whitespace-nowrap">
                       <Switch
                         checked={row.send_file_allowed}
                         disabled={togglingSendFileId === row.id}
@@ -474,10 +475,10 @@ export function AgentPoliciesTab({ instanceId }: { instanceId: string }) {
                         onChange={(sendFileAllowed) => void toggleSendFileAllowed(row, sendFileAllowed)}
                       />
                     </td>
-                    <td className="max-w-[18rem]">
+                    <td className="min-w-[12rem] max-w-[20rem] align-top">
                       <JsonHoverPreview value={row.template_ref} />
                     </td>
-                    <td>
+                    <td className="whitespace-nowrap">
                       <Switch
                         checked={row.enabled}
                         disabled={togglingEnabledId === row.id}
@@ -485,8 +486,8 @@ export function AgentPoliciesTab({ instanceId }: { instanceId: string }) {
                         onChange={(enabled) => void toggleEnabled(row, enabled)}
                       />
                     </td>
-                    <td className="mono text-[11px] text-muted">{formatTime(row.updated_at)}</td>
-                    <td>
+                    <td className="mono text-[11px] text-muted whitespace-nowrap">{formatTime(row.updated_at)}</td>
+                    <td className="whitespace-nowrap min-w-[9.5rem]">
                       <div className="flex items-center gap-1">
                         <button
                           className="btn sm ghost"
@@ -508,6 +509,7 @@ export function AgentPoliciesTab({ instanceId }: { instanceId: string }) {
               )}
             </tbody>
           </table>
+          </div>
         )}
       </div>
 

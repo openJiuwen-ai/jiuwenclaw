@@ -73,6 +73,7 @@
     "managePolicies": "策略管理",
     "noServices": "暂未发现 Gateway / AgentServer 服务（等待心跳上报）",
     "lastHeartbeat": "最近心跳",
+    "lastUpdated": "最近更新",
     "endpoint": "Endpoint",
     "version": "版本",
     "deleteConfirm": "确认删除该实例？",

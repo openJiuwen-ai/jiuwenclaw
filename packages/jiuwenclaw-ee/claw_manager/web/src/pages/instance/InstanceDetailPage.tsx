@@ -56,43 +56,54 @@ export function InstanceDetailPage({ instanceId, tab = 'detail' }: Props) {
   };
 
   return (
-    <div className="flex flex-col gap-4">
-      <div className="page-header">
-        <div className="flex items-center gap-3 flex-1 min-w-0">
-          <button className="btn ghost sm" onClick={() => navigate('/instances')}>
-            ← {t('instanceDetail.back')}
-          </button>
-          <div className="min-w-0">
-            <div className="page-title truncate">{instance.data?.jiuwenclaw_name ?? '…'}</div>
-            <div className="text-[11px] text-muted mono truncate">{instanceId}</div>
-          </div>
-          {instance.data?.status && <StatusBadge status={instance.data.status} />}
-        </div>
-
-        <div className="tabs-bar shrink-0 mx-3">
-          {mainTabs.map((it) => (
-            <button
-              key={it.key}
-              onClick={() => navigate(it.href)}
-              className={`tab ${tab === it.key ? 'active' : ''}`}
-            >
-              {it.label}
+    <>
+      <div className="flex min-w-0 flex-col gap-4 overflow-x-auto">
+        <div className="page-header w-max min-w-full shrink-0">
+          <div className="flex shrink-0 items-center gap-3">
+            <button className="btn ghost sm shrink-0" onClick={() => navigate('/instances')}>
+              ← {t('instanceDetail.back')}
             </button>
-          ))}
+            <div className="min-w-[7.5rem] max-w-[12rem] shrink-0 sm:max-w-[16rem]">
+              <div
+                className="page-title truncate"
+                title={instance.data?.jiuwenclaw_name ?? undefined}
+              >
+                {instance.data?.jiuwenclaw_name ?? '…'}
+              </div>
+              <div className="text-[11px] text-muted mono truncate" title={instanceId}>
+                {instanceId}
+              </div>
+            </div>
+            {instance.data?.status && <StatusBadge status={instance.data.status} />}
+          </div>
+
+          <div className="tabs-bar mx-3 shrink-0">
+            {mainTabs.map((it) => (
+              <button
+                key={it.key}
+                onClick={() => navigate(it.href)}
+                className={`tab ${tab === it.key ? 'active' : ''}`}
+              >
+                {it.label}
+              </button>
+            ))}
+          </div>
+
+          <div className="min-w-0 flex-1" />
         </div>
 
-        <div className="flex-1 min-w-0" />
+        <div className="w-full min-w-0 shrink-0">
+          {tab === 'detail' && (
+            <InstanceDetailPanel
+              instance={instance}
+              onOpenEdit={handleOpenEdit}
+              onRefresh={() => void instance.reload()}
+            />
+          )}
+          {tab === 'policies' && <InstancePoliciesPanel instanceId={instanceId} />}
+          {tab === 'config' && <InstanceConfigPanel instanceId={instanceId} />}
+        </div>
       </div>
-
-      {tab === 'detail' && (
-        <InstanceDetailPanel
-          instance={instance}
-          onOpenEdit={handleOpenEdit}
-          onRefresh={() => void instance.reload()}
-        />
-      )}
-      {tab === 'policies' && <InstancePoliciesPanel instanceId={instanceId} />}
-      {tab === 'config' && <InstanceConfigPanel instanceId={instanceId} />}
 
       <Modal
         open={editOpen}
@@ -112,6 +123,6 @@ export function InstanceDetailPage({ instanceId, tab = 'detail' }: Props) {
       >
         <JsonField label="instance_info.data" value={editText} onChange={setEditText} rows={14} />
       </Modal>
-    </div>
+    </>
   );
 }

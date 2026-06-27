@@ -272,7 +272,13 @@ async def list_instance_rows(
     if status:
         filters["status"] = status
     total = await handler.count_records(_INSTANCE_TABLE, filters)
-    rows = await handler.list_records(_INSTANCE_TABLE, filters, limit=limit, offset=offset)
+    rows = await handler.list_records(
+        _INSTANCE_TABLE,
+        filters,
+        limit=limit,
+        offset=offset,
+        order_by=[("updated_at", True)],
+    )
     return rows, int(total)
 
 
@@ -347,6 +353,7 @@ class InstanceService:
                 space_id=r.space_id,
                 created_at=iso_datetime(r.created_at),
                 last_heartbeat=iso_datetime(getattr(r, "last_heartbeat", None)),
+                updated_at=iso_datetime(getattr(r, "updated_at", None)),
             )
             for r in rows
         ]
@@ -370,6 +377,7 @@ class InstanceService:
             space_id=row.space_id,
             created_at=iso_datetime(row.created_at),
             last_heartbeat=iso_datetime(getattr(row, "last_heartbeat", None)),
+            updated_at=iso_datetime(getattr(row, "updated_at", None)),
             description=row.description,
             k8s_master_host=row.k8s_master_host,
             k8s_auth_type=row.k8s_auth_type,
