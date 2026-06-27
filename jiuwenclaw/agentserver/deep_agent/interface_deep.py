@@ -1202,6 +1202,7 @@ class JiuWenClawDeepAdapter:
         # request_id -> toolkit；session_id -> 关联的 request_id 集合（interrupt 时按会话精确取消）
         self._request_session_toolkits: dict[str, MultiSessionToolkit] = {}
         self._session_toolkit_requests: dict[str, set[str]] = {}
+        self._pending_evolution_summary_by_session: dict[str, str] = {}
         self._pending_reload: tuple[
             dict[str, Any] | None, dict[str, Any] | None, bool
         ] | None = None
@@ -6594,6 +6595,23 @@ class JiuWenClawDeepAdapter:
         cid = request.channel_id
         usage_accumulator = self._new_usage_accumulator()
 
+        pending_evolution_summary = self._take_pending_evolution_summary(session_id)
+        if pending_evolution_summary:
+            logger.info(
+                "[JiuWenClawDeepAdapter] emitting deferred evolution UI footnote after HITL resume: "
+                "request_id=%s session_id=%s chars=%d",
+                rid,
+                session_id,
+                len(pending_evolution_summary),
+                extra={"user_visible": "progress"},
+            )
+            yield AgentResponseChunk(
+                request_id=rid,
+                channel_id=cid,
+                payload={"event_type": "chat.delta", "content": pending_evolution_summary},
+                is_complete=False,
+            )
+
         # 尝试使用 RePlanAgent 流式处理
         logger.info(
             "[JiuWenClawDeepAdapter] 尝试使用 RePlanAgent 流式处理: request_id=%s, inputs=%s",
@@ -7043,6 +7061,18 @@ class JiuWenClawDeepAdapter:
                             suppress_stream_after_hitl = True
                             continue
 
+            evolution_summary_text = self._collect_evolution_run_summary_text(rid)
+
+            evolution_merged_into_final = False
+            if evolution_summary_text and accumulated_text and not hitl_pending_stream:
+                accumulated_text += evolution_summary_text
+                evolution_merged_into_final = True
+                logger.info(
+                    "[JiuWenClawDeepAdapter] merged evolution footnote into chat.final: request_id=%s",
+                    rid,
+                    extra={"user_visible": "progress"},
+                )
+
             if accumulated_text and not hitl_pending_stream:
                 log_chat_final(
                     session_id=session_id,
@@ -7084,6 +7114,35 @@ class JiuWenClawDeepAdapter:
                             payload=parsed,
                             is_complete=False,
                         )
+
+                if evolution_summary_text and not evolution_merged_into_final:
+                    if hitl_pending_stream:
+                        self._stash_pending_evolution_summary(
+                            session_id,
+                            evolution_summary_text,
+                            rid,
+                        )
+                    else:
+                        logger.info(
+                            "[JiuWenClawDeepAdapter] emitting evolution UI footnote via chat.delta: "
+                            "request_id=%s chars=%d preview=%r",
+                            rid,
+                            len(evolution_summary_text),
+                            evolution_summary_text[:200],
+                            extra={"user_visible": "progress"},
+                        )
+                        yield AgentResponseChunk(
+                            request_id=rid,
+                            channel_id=cid,
+                            payload={"event_type": "chat.delta", "content": evolution_summary_text},
+                            is_complete=False,
+                        )
+                elif not evolution_summary_text:
+                    logger.info(
+                        "[JiuWenClawDeepAdapter] no evolution UI footnote to emit: request_id=%s",
+                        rid,
+                        extra={"user_visible": "progress"},
+                    )
 
                 logger.info(
                     f"[JiuWenClawDeepAdapter] Agent执行成功: request_id={request.request_id}",
@@ -7194,6 +7253,127 @@ class JiuWenClawDeepAdapter:
                 payload=None,
                 is_complete=True,
             )
+
+    def _collect_evolution_run_summary_text(self, request_id: str) -> str:
+        """Drain and format evolution summary for UI footnote; log skip/drain outcomes."""
+        if self._skill_evolution_rail is None:
+            logger.info(
+                "[JiuWenClawDeepAdapter] evolution UI summary skipped: request_id=%s reason=skill_evolution_rail_none",
+                request_id,
+                extra={"user_visible": "progress"},
+            )
+            return ""
+        try:
+            evolution_summary = self._skill_evolution_rail.take_run_summary()
+            evolution_summary_text = self._format_evolution_summary_markdown(evolution_summary)
+        except Exception as exc:
+            logger.warning(
+                "[JiuWenClawDeepAdapter] evolution UI summary format failed: request_id=%s error=%s",
+                request_id,
+                exc,
+                exc_info=True,
+                extra={"user_visible": "progress"},
+            )
+            return ""
+        logger.info(
+            "[JiuWenClawDeepAdapter] evolution UI summary drain: request_id=%s has_summary=%s chars=%d",
+            request_id,
+            bool(evolution_summary),
+            len(evolution_summary_text),
+            extra={"user_visible": "progress"},
+        )
+        return evolution_summary_text
+
+    def _stash_pending_evolution_summary(
+        self,
+        session_id: str | None,
+        text: str,
+        request_id: str,
+    ) -> None:
+        sid = (session_id or "").strip()
+        if not sid or not text:
+            return
+        self._pending_evolution_summary_by_session[sid] = text
+        logger.info(
+            "[JiuWenClawDeepAdapter] stashed evolution UI footnote for HITL resume: "
+            "request_id=%s session_id=%s chars=%d",
+            request_id,
+            sid,
+            len(text),
+            extra={"user_visible": "progress"},
+        )
+
+    def _take_pending_evolution_summary(self, session_id: str | None) -> str:
+        sid = (session_id or "").strip()
+        if not sid:
+            return ""
+        return self._pending_evolution_summary_by_session.pop(sid, "")
+
+    @staticmethod
+    def _escape_markdown_literal(text: str) -> str:
+        """Escape user-controlled text embedded in Markdown footnotes."""
+        for old, new in (
+            ("\\", "\\\\"),
+            ("`", "\\`"),
+            ("[", "\\["),
+            ("]", "\\]"),
+            ("(", "\\("),
+            (")", "\\)"),
+        ):
+            text = text.replace(old, new)
+        return text
+
+    @staticmethod
+    def _safe_nonneg_int(value: Any, default: int = 0) -> int:
+        if isinstance(value, int):
+            return max(value, 0)
+        try:
+            return max(int(value), 0)
+        except (TypeError, ValueError):
+            return default
+
+    @staticmethod
+    def _iter_evolution_summary_items(raw: Any) -> list[Any]:
+        if isinstance(raw, (list, tuple)):
+            return list(raw)
+        return []
+
+    @staticmethod
+    def _format_evolution_summary_markdown(summary: dict[str, Any] | None) -> str:
+        """Format auto_save evolution summary as a chat.delta footnote for the frontend."""
+        if not summary:
+            return ""
+        display = summary.get("display_text")
+        if isinstance(display, str) and display.strip():
+            return JiuWenClawDeepAdapter._escape_markdown_literal(display.strip())
+        lines = ["\n\n---", "### 📚 技能演进"]
+        for item in JiuWenClawDeepAdapter._iter_evolution_summary_items(summary.get("skills")):
+            if not isinstance(item, dict):
+                continue
+            skill_name = str(item.get("skill_name", "")).strip()
+            if not skill_name:
+                continue
+            skill_name = JiuWenClawDeepAdapter._escape_markdown_literal(skill_name)
+            total = JiuWenClawDeepAdapter._safe_nonneg_int(item.get("records_count", 0))
+            body_count = JiuWenClawDeepAdapter._safe_nonneg_int(item.get("body_count", 0))
+            desc_count = JiuWenClawDeepAdapter._safe_nonneg_int(item.get("description_count", 0))
+            parts: list[str] = []
+            if body_count:
+                parts.append(f"body: {body_count}")
+            if desc_count:
+                parts.append(f"description: {desc_count}")
+            detail = f"（{', '.join(parts)}）" if parts else ""
+            lines.append(f"- `{skill_name}`：新增 {total} 条经验{detail}")
+        for item in JiuWenClawDeepAdapter._iter_evolution_summary_items(summary.get("new_skills")):
+            if not isinstance(item, dict):
+                continue
+            name = str(item.get("name", "")).strip()
+            if name:
+                name = JiuWenClawDeepAdapter._escape_markdown_literal(name)
+                lines.append(f"- 新建技能 `{name}`：已写入 skills 目录")
+        if len(lines) <= 2:
+            return ""
+        return "\n".join(lines)
 
     @staticmethod
     def _is_ask_user_payload(payload: Any) -> bool:

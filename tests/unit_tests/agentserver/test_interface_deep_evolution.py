@@ -5,6 +5,7 @@
 # pylint: disable=protected-access
 
 import os
+import logging
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -15,6 +16,26 @@ import pytest
 from jiuwenclaw.agentserver.deep_agent import interface_deep as interface_deep_module
 from jiuwenclaw.agentserver.deep_agent.interface_deep import JiuWenClawDeepAdapter
 from jiuwenclaw.schema.agent import AgentRequest
+
+
+def _attach_capture_handler(logger_obj: logging.Logger):
+    """Attach in-memory handler; jiuwenclaw loggers use propagate=False."""
+    records: list[logging.LogRecord] = []
+
+    class _CaptureHandler(logging.Handler):
+        def emit(self, record: logging.LogRecord) -> None:
+            records.append(record)
+
+    handler = _CaptureHandler(level=logging.DEBUG)
+    saved_level = logger_obj.level
+    logger_obj.addHandler(handler)
+    logger_obj.setLevel(logging.DEBUG)
+
+    def _detach() -> None:
+        logger_obj.removeHandler(handler)
+        logger_obj.setLevel(saved_level)
+
+    return records, _detach
 
 
 class DeepAdapterHarness(JiuWenClawDeepAdapter):
@@ -455,3 +476,163 @@ async def test_process_message_impl_skips_complete_rebuild_when_agent_fails(adap
         )
 
     assert _FakeRebuildService.complete_rebuild_calls == []
+
+
+@pytest.mark.unit
+def test_format_evolution_summary_markdown_escapes_display_text():
+    """LLM-generated display_text must not bypass MF-001 Markdown escaping."""
+    malicious = "[点击](javascript:alert(1))`break"
+    summary = {
+        "display_text": f"\n\n---\n### 📚 技能演进\n- `{malicious}`",
+        "skills": [
+            {
+                "skill_name": "ignored-when-display-text-present",
+                "records_count": 1,
+            }
+        ],
+    }
+
+    result = JiuWenClawDeepAdapter._format_evolution_summary_markdown(summary)
+
+    assert malicious not in result
+    assert "ignored-when-display-text-present" not in result
+    assert r"\[点击\]\(javascript:alert\(1\)\)" in result
+    assert r"\`break" in result
+
+
+@pytest.mark.unit
+def test_format_evolution_summary_markdown_escapes_untrusted_fields():
+    """skill_name/name from take_run_summary must not inject Markdown syntax."""
+    malicious_skill = "[点击](javascript:alert(1))`break"
+    malicious_name = "new[skill](x)`"
+    summary = {
+        "skills": [
+            {
+                "skill_name": malicious_skill,
+                "records_count": 2,
+                "body_count": 1,
+                "description_count": 1,
+            }
+        ],
+        "new_skills": [{"name": malicious_name}],
+    }
+
+    result = JiuWenClawDeepAdapter._format_evolution_summary_markdown(summary)
+
+    assert malicious_skill not in result
+    assert malicious_name not in result
+    assert r"\[点击\]\(javascript:alert\(1\)\)" in result
+    assert r"\`break" in result
+    assert r"new\[skill\]\(x\)" in result
+    assert r"\`" in result.split(r"new\[skill\]\(x\)")[1]
+
+
+@pytest.mark.unit
+def test_format_evolution_summary_markdown_tolerates_non_numeric_counts():
+    """Dirty persisted count fields should degrade to zero instead of raising."""
+    summary = {
+        "skills": [
+            {
+                "skill_name": "demo-skill",
+                "records_count": "not-a-number",
+                "body_count": "2x",
+                "description_count": None,
+            }
+        ],
+    }
+
+    result = JiuWenClawDeepAdapter._format_evolution_summary_markdown(summary)
+
+    assert "demo-skill" in result
+    assert "新增 0 条经验" in result
+
+
+@pytest.mark.unit
+def test_collect_evolution_run_summary_text_degrades_on_format_failure(adapter):
+    """Footnote formatting failures must not propagate to the main chat path."""
+    adapter._skill_evolution_rail = SimpleNamespace(  # pylint: disable=protected-access
+        take_run_summary=lambda: "corrupted-non-dict-summary",
+    )
+    records, detach = _attach_capture_handler(interface_deep_module.logger)
+    try:
+        result = adapter._collect_evolution_run_summary_text("req-format-fail")  # pylint: disable=protected-access
+    finally:
+        detach()
+
+    assert result == ""
+    assert any(
+        "evolution UI summary format failed" in record.message
+        for record in records
+        if record.levelno >= logging.WARNING
+    )
+
+
+@pytest.mark.unit
+def test_collect_evolution_run_summary_text_tolerates_dirty_records_count(adapter):
+    """Non-numeric records_count from persisted JSON must not raise."""
+    adapter._skill_evolution_rail = SimpleNamespace(  # pylint: disable=protected-access
+        take_run_summary=lambda: {
+            "skills": [
+                {
+                    "skill_name": "demo-skill",
+                    "records_count": "not-a-number",
+                }
+            ],
+        },
+    )
+
+    result = adapter._collect_evolution_run_summary_text("req-dirty-count")  # pylint: disable=protected-access
+
+    assert "demo-skill" in result
+    assert "新增 0 条经验" in result
+
+
+@pytest.mark.unit
+def test_collect_evolution_run_summary_text_skips_when_rail_none(adapter):
+    """rail is None should log skip reason for ops troubleshooting."""
+    adapter._skill_evolution_rail = None  # pylint: disable=protected-access
+    records, detach = _attach_capture_handler(interface_deep_module.logger)
+    try:
+        result = adapter._collect_evolution_run_summary_text("req-rail-none")  # pylint: disable=protected-access
+    finally:
+        detach()
+
+    assert result == ""
+    assert len(records) == 1
+    assert "evolution UI summary skipped" in records[0].message
+    assert "reason=skill_evolution_rail_none" in records[0].message
+    assert "request_id=req-rail-none" in records[0].message
+
+
+@pytest.mark.unit
+def test_stash_and_take_pending_evolution_summary(adapter):
+    """HITL-deferred footnote should survive until the next request for the session."""
+    footnote = "\n\n---\n### 📚 技能演进\n- `demo-skill`：新增 1 条经验"
+    adapter._stash_pending_evolution_summary("sess-hitl", footnote, "req-hitl-1")  # pylint: disable=protected-access
+
+    assert adapter._pending_evolution_summary_by_session["sess-hitl"] == footnote  # pylint: disable=protected-access
+
+    taken = adapter._take_pending_evolution_summary("sess-hitl")  # pylint: disable=protected-access
+    assert taken == footnote
+    assert adapter._take_pending_evolution_summary("sess-hitl") == ""  # pylint: disable=protected-access
+
+
+@pytest.mark.unit
+def test_stash_pending_evolution_summary_logs_hitl_deferral(adapter):
+    adapter._stash_pending_evolution_summary(  # pylint: disable=protected-access
+        "sess-hitl",
+        "footnote",
+        "req-hitl-2",
+    )
+    records, detach = _attach_capture_handler(interface_deep_module.logger)
+    try:
+        adapter._stash_pending_evolution_summary(  # pylint: disable=protected-access
+            "sess-hitl",
+            "footnote-2",
+            "req-hitl-3",
+        )
+    finally:
+        detach()
+
+    assert any("stashed evolution UI footnote for HITL resume" in r.message for r in records)
+    assert any("session_id=sess-hitl" in r.message for r in records)
