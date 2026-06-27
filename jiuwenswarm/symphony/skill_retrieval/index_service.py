@@ -6,6 +6,7 @@ import shutil
 import threading
 import time
 from contextlib import contextmanager, redirect_stderr, redirect_stdout
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -21,6 +22,52 @@ TREE_INDEX_FILENAME = "tree_index.yaml"
 CATALOG_FILENAME = "catalog.jsonl"
 MANIFEST_FILENAME = "manifest.json"
 STATE_FILENAME = "state.json"
+
+
+@dataclass(frozen=True)
+class _TreeCacheEntry:
+    payload: dict[str, Any]
+    tree_nodes: list[dict[str, Any]]
+    branch_count: int
+    leaf_count: int
+    mtime_ns: int
+    size: int
+
+
+_tree_cache: _TreeCacheEntry | None = None
+_tree_cache_path: str | None = None
+
+
+def _get_cached_tree(tree_path: Path) -> _TreeCacheEntry | None:
+    global _tree_cache, _tree_cache_path
+    try:
+        stat = tree_path.stat()
+    except OSError:
+        _tree_cache = None
+        _tree_cache_path = None
+        return None
+    if (
+        _tree_cache is not None
+        and _tree_cache_path == str(tree_path)
+        and _tree_cache.mtime_ns == stat.st_mtime_ns
+        and _tree_cache.size == stat.st_size
+    ):
+        return _tree_cache
+    _tree_cache = None
+    _tree_cache_path = None
+    return None
+
+
+def _set_cached_tree(tree_path: Path, entry: _TreeCacheEntry) -> None:
+    global _tree_cache, _tree_cache_path
+    _tree_cache = entry
+    _tree_cache_path = str(tree_path)
+
+
+def _clear_tree_cache() -> None:
+    global _tree_cache, _tree_cache_path
+    _tree_cache = None
+    _tree_cache_path = None
 LOGGER = logging.getLogger(__name__)
 BUILD_LOG_LIMIT = 40
 TREE_BUILD_PROGRESS_START = 0.35
@@ -430,21 +477,47 @@ class SkillIndexService:
             }
 
         tree_path = index_dir / TREE_INDEX_FILENAME
-        try:
-            payload = yaml.safe_load(tree_path.read_text(encoding="utf-8")) or {}
-        except Exception as exc:
-            return {"success": False, "result": f"# Skill Index Tree\n\nFailed to read `{tree_path}`: {exc}"}
+        cached = _get_cached_tree(tree_path)
+        if cached is not None:
+            payload = cached.payload
+            tree_nodes = cached.tree_nodes
+            branch_count = cached.branch_count
+            leaf_count = cached.leaf_count
+        else:
+            try:
+                payload = yaml.safe_load(tree_path.read_text(encoding="utf-8")) or {}
+            except Exception as exc:
+                return {"success": False, "result": f"# Skill Index Tree\n\nFailed to read `{tree_path}`: {exc}"}
 
-        nodes = payload.get("nodes") if isinstance(payload, dict) else None
-        if not isinstance(nodes, list):
-            return {
-                "success": False,
-                "result": f"# Skill Index Tree\n\n`{tree_path}` does not contain a valid nodes list.",
-            }
+            if isinstance(payload, dict):
+                nodes = payload.get("nodes")
+            else:
+                nodes = None
+            if not isinstance(nodes, list):
+                return {
+                    "success": False,
+                    "result": f"# Skill Index Tree\n\n`{tree_path}` does not contain a valid nodes list.",
+                }
 
-        branch_count = sum(1 for node in nodes if isinstance(node, dict) and node.get("type") == "branch")
-        leaf_count = sum(1 for node in nodes if isinstance(node, dict) and node.get("type") == "leaf")
-        tree_nodes = _tree_node_payload(nodes)
+            branch_count = sum(1 for node in nodes if isinstance(node, dict) and node.get("type") == "branch")
+            leaf_count = sum(1 for node in nodes if isinstance(node, dict) and node.get("type") == "leaf")
+            tree_nodes = _tree_node_payload(nodes)
+            try:
+                stat = tree_path.stat()
+                _set_cached_tree(
+                    tree_path,
+                    _TreeCacheEntry(
+                        payload=payload,
+                        tree_nodes=tree_nodes,
+                        branch_count=branch_count,
+                        leaf_count=leaf_count,
+                        mtime_ns=stat.st_mtime_ns,
+                        size=stat.st_size,
+                    ),
+                )
+            except OSError:
+                pass
+
         return {
             "success": True,
             "result": (
@@ -452,7 +525,7 @@ class SkillIndexService:
                 f"- Index directory: `{index_dir}`\n"
                 f"- Branch nodes: {branch_count}\n"
                 f"- Skill leaves: {leaf_count}\n\n"
-                f"{_render_tree_outline(nodes)}"
+                f"{_render_tree_outline(payload.get('nodes', []) if isinstance(payload, dict) else [])}"
             ),
             "nodes": tree_nodes,
             "branch_count": branch_count,

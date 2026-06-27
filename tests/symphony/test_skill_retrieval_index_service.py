@@ -18,7 +18,7 @@ from jiuwenswarm.symphony.skill_retrieval.config import (
     RetrieveSettings,
     SkillRetrievalSettings,
 )
-from jiuwenswarm.symphony.skill_retrieval.index_service import SkillIndexService, expected_index_fingerprint
+from jiuwenswarm.symphony.skill_retrieval.index_service import SkillIndexService, _clear_tree_cache, expected_index_fingerprint
 from jiuwenswarm.symphony.skill_retrieval.inventory import scan_skill_inventory
 
 
@@ -605,3 +605,157 @@ def test_build_error_normalizes_non_streaming_remote_model_error(monkeypatch, tm
     assert "non-streaming LLM calls" in result["result"]
     state = json.loads((artifact_root / "state.json").read_text(encoding="utf-8"))
     assert "non-streaming LLM calls" in state["build"]["error"]
+
+
+def test_tree_cache_hit(monkeypatch, tmp_path: Path) -> None:
+    """第二次 tree() 调用不再解析 YAML，直接命中缓存。"""
+    skills_dir = tmp_path / "skills"
+    skills_dir.mkdir()
+    _write_skill(skills_dir, "enabled-skill")
+    manager = SimpleNamespace(_skills_dir=skills_dir)
+    inventory = scan_skill_inventory(manager)
+    artifact_root = tmp_path / "artifact"
+    index_dir = artifact_root / "index"
+    index_dir.mkdir(parents=True)
+    (index_dir / "tree_index.yaml").write_text(
+        "nodes:\n  - cid: leaf1\n    type: leaf\n    worker_id: enabled-skill\n",
+        encoding="utf-8",
+    )
+    (index_dir / "catalog.jsonl").write_text("", encoding="utf-8")
+    (index_dir / "manifest.json").write_text(
+        json.dumps({"item_paths": inventory.item_paths}),
+        encoding="utf-8",
+    )
+    settings = SkillRetrievalSettings(
+        enabled=True,
+        artifact_root=artifact_root,
+        llm=LLMSettings(model="model", api_key="key", base_url=""),
+        build=BuildSettings(),
+        retrieve=RetrieveSettings(),
+    )
+    (artifact_root / "state.json").write_text(
+        json.dumps({"fingerprint": expected_index_fingerprint(inventory, settings)}),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.symphony.skill_retrieval.index_service.load_settings",
+        lambda: settings,
+    )
+    _clear_tree_cache()
+
+    real_read_text = Path.read_text
+
+    def _read_text_counting(self: Path, *args: Any, **kwargs: Any) -> str:
+        if self.name == "tree_index.yaml":
+            _read_text_counting.tree_calls += 1
+        return real_read_text(self, *args, **kwargs)
+
+    _read_text_counting.tree_calls = 0
+    monkeypatch.setattr(Path, "read_text", _read_text_counting)
+
+    result1 = SkillIndexService(manager).tree()
+    assert result1["success"] is True
+    first_tree_calls = _read_text_counting.tree_calls
+    assert first_tree_calls == 1, f"首次 tree() 应读取一次 tree_index.yaml，实际 {first_tree_calls}"
+
+    _read_text_counting.tree_calls = 0
+    result2 = SkillIndexService(manager).tree()
+    assert result2["success"] is True
+    assert _read_text_counting.tree_calls == 0, "缓存命中时不应再次读取 tree_index.yaml"
+
+
+def test_tree_cache_invalidates_on_file_change(monkeypatch, tmp_path: Path) -> None:
+    """tree_index.yaml 内容变化后缓存失效，重新解析。"""
+    skills_dir = tmp_path / "skills"
+    skills_dir.mkdir()
+    _write_skill(skills_dir, "enabled-skill")
+    manager = SimpleNamespace(_skills_dir=skills_dir)
+    inventory = scan_skill_inventory(manager)
+    artifact_root = tmp_path / "artifact"
+    index_dir = artifact_root / "index"
+    index_dir.mkdir(parents=True)
+    (index_dir / "tree_index.yaml").write_text(
+        "nodes:\n  - cid: first\n    type: leaf\n    worker_id: first-skill\n",
+        encoding="utf-8",
+    )
+    (index_dir / "catalog.jsonl").write_text("", encoding="utf-8")
+    (index_dir / "manifest.json").write_text(
+        json.dumps({"item_paths": inventory.item_paths}),
+        encoding="utf-8",
+    )
+    settings = SkillRetrievalSettings(
+        enabled=True,
+        artifact_root=artifact_root,
+        llm=LLMSettings(model="model", api_key="key", base_url=""),
+        build=BuildSettings(),
+        retrieve=RetrieveSettings(),
+    )
+    (artifact_root / "state.json").write_text(
+        json.dumps({"fingerprint": expected_index_fingerprint(inventory, settings)}),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.symphony.skill_retrieval.index_service.load_settings",
+        lambda: settings,
+    )
+    _clear_tree_cache()
+
+    result1 = SkillIndexService(manager).tree()
+    assert result1["success"] is True
+    assert result1["nodes"][0]["cid"] == "first"
+
+    (index_dir / "tree_index.yaml").write_text(
+        "nodes:\n  - cid: second\n    type: leaf\n    worker_id: second-skill\n",
+        encoding="utf-8",
+    )
+
+    result2 = SkillIndexService(manager).tree()
+    assert result2["success"] is True
+    assert result2["nodes"][0]["cid"] == "second", "文件变化后应重新解析新内容"
+
+
+def test_tree_no_cache_on_yaml_parse_error(monkeypatch, tmp_path: Path) -> None:
+    """YAML 解析失败时不缓存，修复文件后可正常解析。"""
+    skills_dir = tmp_path / "skills"
+    skills_dir.mkdir()
+    _write_skill(skills_dir, "enabled-skill")
+    manager = SimpleNamespace(_skills_dir=skills_dir)
+    inventory = scan_skill_inventory(manager)
+    artifact_root = tmp_path / "artifact"
+    index_dir = artifact_root / "index"
+    index_dir.mkdir(parents=True)
+    (index_dir / "tree_index.yaml").write_text("invalid: ::: yaml\n", encoding="utf-8")
+    (index_dir / "catalog.jsonl").write_text("", encoding="utf-8")
+    (index_dir / "manifest.json").write_text(
+        json.dumps({"item_paths": inventory.item_paths}),
+        encoding="utf-8",
+    )
+    settings = SkillRetrievalSettings(
+        enabled=True,
+        artifact_root=artifact_root,
+        llm=LLMSettings(model="model", api_key="key", base_url=""),
+        build=BuildSettings(),
+        retrieve=RetrieveSettings(),
+    )
+    (artifact_root / "state.json").write_text(
+        json.dumps({"fingerprint": expected_index_fingerprint(inventory, settings)}),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.symphony.skill_retrieval.index_service.load_settings",
+        lambda: settings,
+    )
+    _clear_tree_cache()
+
+    result1 = SkillIndexService(manager).tree()
+    assert result1["success"] is False
+    assert "Failed to read" in result1["result"]
+
+    (index_dir / "tree_index.yaml").write_text(
+        "nodes:\n  - cid: recovered\n    type: leaf\n    worker_id: enabled-skill\n",
+        encoding="utf-8",
+    )
+
+    result2 = SkillIndexService(manager).tree()
+    assert result2["success"] is True, "错误不应被缓存，修复文件后应能正常解析"
+    assert result2["nodes"][0]["cid"] == "recovered"
