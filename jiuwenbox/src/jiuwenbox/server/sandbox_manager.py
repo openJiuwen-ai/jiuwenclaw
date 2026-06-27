@@ -42,6 +42,19 @@ def _truncate_for_audit(text: str | None, *, limit: int = _AUDIT_OUTPUT_LIMIT) -
         return text
     return text[-limit:] + f"\n[truncated, total {len(text)} chars]"
 
+
+def _is_daemon_ipc_exec_failure(result: ExecResult) -> bool:
+    stderr = result.stderr or ""
+    if result.exit_code == 124 and "daemon IPC timeout" in stderr:
+        return True
+    return "daemon IPC channel unavailable" in stderr
+
+
+def _is_daemon_ipc_file_op_failure(result: RuntimeFileOpResult) -> bool:
+    if result.ok:
+        return False
+    return result.error in ("daemon_unavailable", "transport_failure")
+
 from jiuwenbox.logging_config import configure_logging
 from jiuwenbox.models.common import AuditEventType
 from jiuwenbox.models.policy import SecurityPolicy, TimeoutPolicy
@@ -67,6 +80,7 @@ from jiuwenbox.server.runtime.base import (
     RuntimeAdapter,
     RuntimeBackgroundExecRequest,
     RuntimeExecRequest,
+    RuntimeFileOpResult,
 )
 from jiuwenbox.server.runtime.process import BackgroundJobNotFoundError, ProcessRuntime
 from jiuwenbox.server.workspace import JIUWENBOX_HOME
@@ -689,17 +703,24 @@ class SandboxManager:
         # pre-call ``EXEC_COMMAND`` was dropped: it doubled the JSONL
         # volume without adding any information not already present here.
         start = time.monotonic()
+        runtime_request = RuntimeExecRequest(
+            command=request.command,
+            workdir=request.workdir,
+            env=request.env,
+            stdin_data=request.stdin_data,
+            timeout=request.timeout,
+        )
         try:
-            result = await self.runtime.exec(
-                sandbox_id,
-                RuntimeExecRequest(
-                    command=request.command,
-                    workdir=request.workdir,
-                    env=request.env,
-                    stdin_data=request.stdin_data,
-                    timeout=request.timeout,
-                ),
-            )
+            result = await self.runtime.exec(sandbox_id, runtime_request)
+            if _is_daemon_ipc_exec_failure(result):
+                logger.warning(
+                    "Daemon IPC exec failed for sandbox %s (exit=%s), "
+                    "restarting sandbox once",
+                    sandbox_id,
+                    result.exit_code,
+                )
+                await self.restart_sandbox(sandbox_id)
+                result = await self.runtime.exec(sandbox_id, runtime_request)
         except Exception as exc:
             self.audit.log(
                 AuditEventType.EXEC_COMMAND,
@@ -1028,6 +1049,14 @@ class SandboxManager:
         except Exception as exc:
             _emit_result(False, error=repr(exc), path="ipc")
             raise
+        if not result.ok and _is_daemon_ipc_file_op_failure(result):
+            logger.warning(
+                "Daemon IPC read failed for sandbox %s (%s), restarting sandbox once",
+                sandbox_id,
+                result.error,
+            )
+            await self.restart_sandbox(sandbox_id)
+            result = await self.runtime.read_file(sandbox_id, sandbox_path)
         if result.ok:
             content = result.content or b""
             _emit_result(True, size=len(content), path="ipc")

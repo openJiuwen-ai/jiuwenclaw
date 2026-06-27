@@ -166,6 +166,11 @@ DAEMON_STARTUP_LOG_MAX_BYTES = 16 * 1024
 # is just an open/read/write or scandir call. Cap the IPC roundtrip at a
 # short upper bound so a wedged daemon does not stall HTTP requests.
 DAEMON_FILE_OP_TIMEOUT_SECONDS = 30.0
+# When the caller omits an exec timeout the daemon still waits for the
+# child to finish before responding. Cap the IPC read at the common
+# agent-core default (300s) plus the same +5s cushion used for explicit
+# timeouts so a wedged daemon cannot hang HTTP requests forever.
+DEFAULT_EXEC_IPC_READ_TIMEOUT_SECONDS = 305.0
 
 # OS-level errors that mean the daemon is actually gone or its control
 # socket is permanently broken. When we see one of these, ``_daemon_socket_ready``
@@ -2226,12 +2231,12 @@ class ProcessRuntime(RuntimeAdapter):
         try:
             # The daemon waits for the user command to finish before
             # responding, so the receive timeout has to outlive the request
-            # timeout. ``None`` means "wait forever" which matches the
-            # legacy bwrap path when no timeout is configured.
+            # timeout. When no exec timeout is configured, use a bounded
+            # default instead of waiting forever on the socket.
             if call.timeout is not None:
                 sock.settimeout(call.timeout + 5.0)
             else:
-                sock.settimeout(None)
+                sock.settimeout(DEFAULT_EXEC_IPC_READ_TIMEOUT_SECONDS)
             self._send_request_blob(sock, header_blob, call.stdin_bytes)
             try:
                 sock.shutdown(socket.SHUT_WR)

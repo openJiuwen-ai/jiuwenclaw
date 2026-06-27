@@ -174,6 +174,36 @@ UDS 相关环境变量：
 | `JIUWENBOX_UDS_HOST_DIR` | `/tmp/jiuwenbox-sock` | `run_docker.sh` 把宿主 socket 目录挂载到容器内的位置。 |
 | `JIUWENBOX_UDS_CONTAINER_DIR` | `/run/jiuwenbox` | 容器内挂载点，必须与 `JIUWENBOX_LISTEN` 里 socket 路径所在的目录一致。 |
 
+### API 认证（opt-in）
+
+设置 `JIUWENBOX_API_TOKEN` 后，所有 HTTP 端点（含 `/health`、`/api/v1/*`、`/mcp`）均要求请求头：
+
+```http
+Authorization: Bearer <token>
+```
+
+未携带或 token 错误时返回 `401`，响应体 `{"error":"unauthorized"}`。
+
+```bash
+# 生成 token 并启动服务端
+export JIUWENBOX_API_TOKEN="$(openssl rand -hex 32)"
+JIUWENBOX_API_TOKEN=$JIUWENBOX_API_TOKEN jiuwenbox-server
+# 或: jiuwenbox-server --api-token "$JIUWENBOX_API_TOKEN"
+
+# CLI
+export JIUWENBOX_API_TOKEN=$JIUWENBOX_API_TOKEN
+jiuwenbox health
+
+# curl
+curl -H "Authorization: Bearer $JIUWENBOX_API_TOKEN" http://127.0.0.1:8321/health
+```
+
+| 变量 / 参数 | 说明 |
+| --- | --- |
+| `JIUWENBOX_API_TOKEN` | 服务端与 CLI **共用**；未设置 = 不启用认证 |
+| `jiuwenbox-server --api-token` | 启动参数，优先级高于 env |
+| `jiuwenbox --api-token` | CLI 参数，优先级高于 env |
+
 ### 持久化审计日志（`--save-logs DIR`）
 
 **默认情况下 jiuwenbox 不会写任何日志文件**：审计事件只在 Python 标
@@ -518,6 +548,7 @@ sandbox:
   enabled: true                     # 是否处于沙箱模式
   excluded_commands:                # shell glob，命中后绕过沙箱在本地执行
     - "git *"
+  fallback_on_failure: false        # jiuwenbox exec 异常时回退本地（非零 exit 不回退）
   files:                            # 用户配置的写入策略（auto-managed 路径不需要写在这里，服务端会自动注入）
     allow: []
     deny: []
@@ -534,6 +565,7 @@ sandbox:
 | `sandbox.preserve_file_sharing_mode` | `mount` | `mount` | intrinsic 文件（`AGENT.md` 等）与 `project_dir` 通过 bind mount 注入沙箱，`project_dir/config/config.yaml` 自动加进 `deny_write`。 写入其它值会被服务端拒绝 |
 | `sandbox.enabled` | bool | `false` | 启用后 agent 在重建时会切到 sandbox provider；可用 `/sandbox enable` 触发 |
 | `sandbox.excluded_commands` | list[str] | `[]` | shell glob 列表；按**整条命令字符串**匹配，命中后该次调用穿透到本地 |
+| `sandbox.fallback_on_failure` | bool | `false` | jiuwenbox exec 异常（连接失败、daemon 不可用等）时回退宿主机本地执行；沙箱内命令非零 exit 不回退 |
 | `sandbox.files.allow` / `sandbox.files.deny` | list | `[]` | 用户额外配置的写入策略；最终生效集合是 `auto_managed ∪ user_configured`，详见 [`/sandbox` 命令设计文档](../../agent-core/docs/zh/2.开发指南/沙箱与%20sandbox%20命令.md) |
 
 ### 两种典型部署方式
@@ -572,6 +604,52 @@ sandbox:
 此模式下 agent-server **不会**尝试拉起 jiuwenbox，`sandbox.policy_file` 也**不生效**（policy 由你启动 jiuwenbox-server 时通过 `JIUWENBOX_DEFAULT_POLICY_PATH` 指定）。jiuwenbox-server 的启动方式见前文 [`启动服务`](#启动服务) 与 [`通过 Unix Domain Socket 部署`](#通过-unix-domain-socket-部署)。
 
 跨机部署要求 jiuwenbox 主机能访问 jiuwenswarm 的固有 agent 文件路径——`preserve_file_sharing_mode` 现在只支持 `mount` jiuwenswarm 会把 intrinsic 文件（`AGENT.md` / `HEARTBEAT.md` / `IDENTITY.md` / `SOUL.md` / `USER.md` / `memory/daily_memory/`）和 `project_dir` 通过 bind mount 暴露给沙箱，因此目标主机必须能在同样的 host path 下看到这些文件（例如共享文件系统、容器 volume 等）。
+
+## 远程 MCP
+
+JiuwenBox 支持三种访问方式：**REST API**、**CLI** 和**远程 MCP**。
+
+MCP 端点路径为 `/mcp`（Streamable HTTP 传输）。当前 MCP 工具为
+`sandbox_run_command`，用于在 JiuwenBox 沙箱内执行命令并返回结果。
+
+### 快速启动
+
+```bash
+JIUWENBOX_POLICY_PATH=/path/to/default-policy.yaml \
+python -m uvicorn jiuwenbox.server.app:app --host 0.0.0.0 --port 8321 --log-level debug
+```
+
+### OpenCode 配置
+
+```json
+{
+  "mcpServers": {
+    "jiuwenbox": {
+      "url": "http://YOUR_HOST:8321/mcp",
+      "type": "remote",
+      "enabled": true
+    }
+  }
+}
+```
+
+### 外部 IP 部署
+
+当 JiuwenBox 部署在外部 IP（非 `localhost` / `127.0.0.1`）时，
+需设置 `JIUWENBOX_MCP_ALLOWED_HOSTS` 以允许客户端主机访问：
+
+```bash
+JIUWENBOX_MCP_ALLOWED_HOSTS=10.0.0.5,10.0.0.5:8321 \
+JIUWENBOX_POLICY_PATH=/path/to/default-policy.yaml \
+python -m uvicorn jiuwenbox.server.app:app --host 0.0.0.0 --port 8321 --log-level debug
+```
+
+### 注意事项
+
+- 直接 `GET /mcp` 可能返回 **406 Not Acceptable**，因为该端点期望
+  MCP Streamable HTTP 协议帧。请使用正确的 MCP 客户端进行交互。
+- MCP 使客户端能够调用 JiuwenBox，但**不代表**所有命令都必须经过
+  沙箱。客户端自行决定哪些命令通过 MCP 路由。
 
 ## 推理隐私代理
 
@@ -706,6 +784,22 @@ python3 -m pytest tests/integration/test_server_api_default.py::TestPolicyEnforc
 python3 -m pytest tests/integration/test_server_api_default.py::TestPolicyEnforcement::test_network_mode_isolated_blocked_ip_rejects_egress -s --server-endpoint 127.0.0.1:8321
 ```
 
+### MCP 集成测试
+
+`test_mcp_default.py` 针对 `/mcp` Streamable HTTP 端点和 `sandbox_run_command`
+MCP 工具进行集成测试。执行 `./tests/test.sh default` 时会自动包含该文件，也可以单独运行：
+
+```bash
+# TCP
+python3 -m pytest tests/integration/test_mcp_default.py -v --server-endpoint 127.0.0.1:8321
+
+# UDS
+python3 -m pytest tests/integration/test_mcp_default.py -v --server-endpoint=unix:///tmp/jiuwenbox.sock
+```
+
+MCP 测试会建立真实的 MCP 客户端会话，在沙箱中执行命令，并验证沙箱自动创建 /
+复用 / 删除、stdin / env / workdir 透传、命令失败透传、timeout 截断以及并发会话等边界行为。
+
 ### 性能测试
 
 运行日常办公 workload 性能测试：
@@ -786,6 +880,7 @@ jiuwenbox proxy logs openai --lines 50
 | 选项 | 默认值 | 环境变量 | 说明 |
 | --- | --- | --- | --- |
 | `--base-url` | `http://127.0.0.1:8321` | `JIUWENBOX_URL` | jiuwenbox 服务地址。接受 `http://host:port` 或 `unix:///abs/socket/path` |
+| `--api-token` | _未设置_ | `JIUWENBOX_API_TOKEN` | Bearer token；服务端启用认证时必须与服务端 token 一致 |
 | `--timeout` | `30` | `JIUWENBOX_TIMEOUT` | HTTP 超时秒数 |
 | `--verbose / -v` | 关闭 | – | stderr 打印 debug 日志 |
 | `--no-color` | 关闭 | `NO_COLOR` | 关闭 stderr ANSI 颜色 |
