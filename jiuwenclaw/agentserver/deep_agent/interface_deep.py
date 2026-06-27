@@ -5018,14 +5018,12 @@ class JiuWenClawDeepAdapter:
         }
 
     async def _handle_evolve_command(self, query: str, session_id: str) -> dict[str, Any]:
-        """/evolve [list | <skill_name>] handler using the optimizer path.
+        """/evolve [list | <skill_name>] handler.
 
-        Uses SkillEvolutionRail.generate_and_emit_experience to stage records
-        in memory and emit approval events.
-
-        Returns a result dict.  When evolution records are generated the dict
-        includes an ``approval_chunks`` list so the caller can forward the
-        approval event to the frontend.
+        When ``evolution.auto_save`` is enabled, generates experience records and
+        persists them directly (evolutions.json + solidify to SKILL.md) without
+        frontend approval. When disabled, returns a configuration hint and does
+        not generate or persist.
         """
         rail = self._skill_evolution_rail
         assert rail is not None
@@ -5065,6 +5063,15 @@ class JiuWenClawDeepAdapter:
                 "result_type": "error",
             }
 
+        if not rail.auto_save:
+            return {
+                "output": (
+                    "evolution.auto_save 未开启，无法执行 /evolve 落盘。\n"
+                    "请在配置中将 evolution.auto_save 设为 true 后重试。"
+                ),
+                "result_type": "answer",
+            }
+
         # 1) Collect conversation messages from the context engine cache
         parsed_messages = self._collect_messages_for_evolve(session_id)
         if not parsed_messages:
@@ -5092,9 +5099,9 @@ class JiuWenClawDeepAdapter:
                 "result_type": "answer",
             }
 
-        # 3) Generate experience records and emit approval event
+        # 3) Generate experience records and persist directly (auto_save path)
         try:
-            has_records = await rail.generate_and_emit_experience(
+            records = await rail._generate_experience_for_skill(  # pylint: disable=protected-access
                 skill_name, attributed, parsed_messages
             )
         except Exception as exc:
@@ -5104,45 +5111,42 @@ class JiuWenClawDeepAdapter:
                 "result_type": "error",
             }
 
-        if not has_records:
+        if not records:
             return {
-                "output": "当前对话未发现明确的演进信号（无工具执行失败、无用户纠正）。\n",
+                "output": "当前对话的演进信号未产生演进记录（已有相同演进经验或演进信号无关）\n",
                 "result_type": "answer",
             }
 
-        # 5) Drain the buffered approval event
-        events = rail.drain_pending_approval_events()
-        if not events:
+        try:
+            for record in records:
+                await store.append_record(skill_name, record)
+            solidified = await store.solidify(skill_name)
+        except Exception as exc:
+            logger.warning("[JiuWenClaw] evolve persist failed (skill=%s): %s", skill_name, exc)
             return {
-                "output": "演进经验生成失败：无法创建审批事件。",
+                "output": (
+                    f"演进经验已生成但落盘失败：{exc}\n"
+                    f"可使用 `/solidify {skill_name}` 重试固化。"
+                ),
                 "result_type": "error",
             }
 
-        # 6) Build response with approval chunks
-        event = events[0]
-        payload = event.payload or {}
-        request_id = payload.get("request_id", "")
-        questions = payload.get("questions", [])
-
-        # Build summary from questions
         summaries = "\n".join(
-            f"  {i + 1}. {q.get('question', '')[:200]}"
-            for i, q in enumerate(questions)
+            f"  {i + 1}. **[{record.change.section}]** {record.change.content[:200]}"
+            for i, record in enumerate(records)
         )
-
+        solidify_note = (
+            f"已将 {solidified} 条 BODY 经验固化到 SKILL.md。"
+            if solidified
+            else "（无 BODY 经验需固化到 SKILL.md）"
+        )
         return {
             "output": (
-                f"已为 Skill '{skill_name}' 生成 {len(questions)} 条演进经验，请审批：\n"
-                f"{summaries}"
+                f"已记录 {len(records)} 条演进经验到 Skill '{skill_name}'：\n"
+                f"{summaries}\n\n"
+                f"{solidify_note}"
             ),
             "result_type": "answer",
-            "approval_chunks": [
-                {
-                    "event_type": "chat.ask_user_question",
-                    "request_id": request_id,
-                    "questions": questions,
-                }
-            ],
         }
 
     def _collect_messages_for_evolve(self, session_id: str) -> list[dict]:
@@ -5160,6 +5164,43 @@ class JiuWenClawDeepAdapter:
         except Exception as exc:
             logger.debug("[JiuWenClaw] _collect_messages_for_evolve failed: %s", exc)
             return []
+
+        if not raw_messages:
+            try:
+                session_ref_getter = getattr(context, "get_session_ref", None)
+                session_ref = (
+                    session_ref_getter()
+                    if callable(session_ref_getter)
+                    else getattr(context, "_session_ref", None)
+                )
+                context_id_getter = getattr(context, "context_id", None)
+                context_id = context_id_getter() if callable(context_id_getter) else "default_context_id"
+                history = context_engine.get_history_qa_buffer(session_id, context_id)
+                qa_ids: list[str] = []
+                try:
+                    from openjiuwen.core.context_engine.qa_block.registry import load_registry
+                    if session_ref is not None:
+                        registry = load_registry(session_ref)
+                        sorted_blocks = sorted(
+                            registry.blocks.values(),
+                            key=lambda item: item.qa_index,
+                            reverse=True,
+                        )
+                        qa_ids = [entry.qa_id for entry in sorted_blocks]
+                except Exception as registry_exc:
+                    logger.debug("[JiuWenClaw] load QA block registry for evolve failed: %s", registry_exc)
+                if not qa_ids and hasattr(history, "recent_qa_ids"):
+                    qa_ids = list(reversed(history.recent_qa_ids()))
+                fallback_qa_ids = qa_ids[:3]
+                merged_messages = []
+                for qa_id in reversed(fallback_qa_ids):
+                    cached = history.get(qa_id)
+                    if cached:
+                        merged_messages.extend(list(cached))
+                if merged_messages:
+                    raw_messages = merged_messages
+            except Exception as fallback_exc:
+                logger.debug("[JiuWenClaw] collect QA block fallback for evolve failed: %s", fallback_exc)
 
         return JiuClawSkillEvolutionRail.parse_messages(raw_messages)
 

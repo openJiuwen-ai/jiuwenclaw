@@ -122,8 +122,11 @@ def test_config_default_auto_save_true(adapter, monkeypatch):
 
 
 class _FakeEvolutionStore:
-    def __init__(self, *, exists: bool = True) -> None:
+    def __init__(self, *, exists: bool = True, with_persist_mocks: bool = False) -> None:
         self.exists = exists
+        if with_persist_mocks:
+            self.append_record = AsyncMock()
+            self.solidify = AsyncMock(return_value=1)
 
     def skill_exists(self, _skill_name: str) -> bool:
         return self.exists
@@ -135,6 +138,97 @@ class _FakeEvolutionStore:
     @staticmethod
     def resolve_subject_payload(skill_name: str) -> dict[str, str]:
         return {"kind": "skill", "name": skill_name}
+
+
+def _make_evolve_test_signal(skill_name: str = "demo-skill"):
+    from openjiuwen.agent_evolving.signal.base import EvolutionCategory, EvolutionSignal
+
+    return EvolutionSignal(
+        signal_type="execution_failure",
+        evolution_type=EvolutionCategory.SKILL_EXPERIENCE,
+        section="Troubleshooting",
+        excerpt="tool failed",
+        skill_name=skill_name,
+    )
+
+
+def _make_evolve_test_record():
+    from openjiuwen.agent_evolving.checkpointing.types import EvolutionPatch, EvolutionRecord
+    from openjiuwen.agent_evolving.signal.base import EvolutionTarget
+
+    return EvolutionRecord.make(
+        source="execution_failure",
+        context="tool failed",
+        change=EvolutionPatch(
+            section="Troubleshooting",
+            action="append",
+            content="Handle timeout by retrying",
+            target=EvolutionTarget.BODY,
+        ),
+    )
+
+
+def _setup_evolve_command_rail(*, auto_save: bool):
+    store = _FakeEvolutionStore(with_persist_mocks=True)
+    generate = AsyncMock(return_value=[_make_evolve_test_record()])
+    rail = SimpleNamespace(
+        auto_save=auto_save,
+        store=store,
+        processed_signal_keys=set(),
+        _generate_experience_for_skill=generate,
+    )
+    return rail, store, generate
+
+
+@pytest.mark.asyncio
+async def test_evolve_command_auto_save_false_returns_message(adapter, monkeypatch):
+    rail, store, generate = _setup_evolve_command_rail(auto_save=False)
+    adapter._skill_evolution_rail = rail  # pylint: disable=protected-access
+    monkeypatch.setattr(
+        adapter,
+        "_collect_messages_for_evolve",
+        lambda _session_id: [{"role": "user", "content": "fix it"}],
+    )
+    monkeypatch.setattr(
+        interface_deep_module.SignalDetector,
+        "detect",
+        lambda self, _messages: [_make_evolve_test_signal()],
+    )
+
+    result = await adapter._handle_evolve_command("/evolve demo-skill", "sess-1")  # pylint: disable=protected-access
+
+    assert "evolution.auto_save 未开启" in result["output"]
+    assert result["result_type"] == "answer"
+    assert "approval_chunks" not in result
+    generate.assert_not_called()
+    store.append_record.assert_not_called()
+    store.solidify.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_evolve_command_auto_save_true_persists_without_approval(adapter, monkeypatch):
+    rail, store, generate = _setup_evolve_command_rail(auto_save=True)
+    adapter._skill_evolution_rail = rail  # pylint: disable=protected-access
+    monkeypatch.setattr(
+        adapter,
+        "_collect_messages_for_evolve",
+        lambda _session_id: [{"role": "user", "content": "fix it"}],
+    )
+    monkeypatch.setattr(
+        interface_deep_module.SignalDetector,
+        "detect",
+        lambda self, _messages: [_make_evolve_test_signal()],
+    )
+
+    result = await adapter._handle_evolve_command("/evolve demo-skill", "sess-1")  # pylint: disable=protected-access
+
+    assert result["result_type"] == "answer"
+    assert "approval_chunks" not in result
+    assert "已记录 1 条演进经验" in result["output"]
+    assert "Troubleshooting" in result["output"]
+    generate.assert_awaited_once()
+    store.append_record.assert_awaited_once()
+    store.solidify.assert_awaited_once_with("demo-skill")
 
 
 class _FakeRebuildService:
