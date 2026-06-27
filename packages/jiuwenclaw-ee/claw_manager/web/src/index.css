@@ -676,7 +676,7 @@ button, input, textarea, select { font: inherit; color: inherit; }
     font-size: var(--font-size-sm);
   }
   .table thead th {
-    position: sticky; top: 0; z-index: 1;
+    position: sticky; top: 0; z-index: 20;
     text-align: left;
     font-weight: 500;
     font-size: var(--font-size-xs);
@@ -686,6 +686,11 @@ button, input, textarea, select { font: inherit; color: inherit; }
     padding: 10px 14px;
     border-bottom: 1px solid var(--border);
     background: var(--panel-strong);
+  }
+  /* 展开下拉时整列表头置于相邻列之上，避免菜单被右侧列标题遮挡 */
+  .table thead th:has(.th-filter__btn.open) {
+    z-index: 130;
+    overflow: visible;
   }
   .table thead th:first-child { border-top-left-radius: var(--radius-lg); }
   .table thead th:last-child { border-top-right-radius: var(--radius-lg); }
@@ -709,6 +714,9 @@ button, input, textarea, select { font: inherit; color: inherit; }
     align-items: center;
     gap: 4px;
     max-width: 100%;
+  }
+  .th-filter:has(.th-filter__btn.open) {
+    z-index: 2;
   }
   .th-filter__label {
     white-space: nowrap;
@@ -745,13 +753,27 @@ button, input, textarea, select { font: inherit; color: inherit; }
     position: absolute;
     top: calc(100% + 6px);
     left: 0;
-    z-index: 20;
+    z-index: 3;
     min-width: 148px;
     padding: 4px;
     border: 1px solid var(--border);
     border-radius: var(--radius-md);
     background: var(--card);
-    box-shadow: var(--shadow-md);
+    box-shadow: var(--shadow-lg);
+  }
+
+  /* 表头筛选/排序菜单展开时，避免被表格区域裁剪或分页条遮挡 */
+  .card:has(.th-filter__btn.open) {
+    position: relative;
+    z-index: 50;
+    overflow: visible;
+  }
+  .card:has(.th-filter__btn.open) > .overflow-x-auto {
+    overflow: visible;
+  }
+  .page-header:has(.th-filter__btn.open) {
+    position: relative;
+    z-index: 50;
   }
   .th-filter__item {
     display: block;
@@ -798,12 +820,15 @@ button, input, textarea, select { font: inherit; color: inherit; }
   }
   .topo-hero__title {
     display: flex; align-items: center; gap: 12px;
+    min-width: 0;
+    flex: 1 1 12rem;
   }
   .topo-hero__name {
     font-size: 16px; font-weight: 700;
     color: var(--text-strong);
     letter-spacing: -0.01em;
     display: flex; align-items: center; gap: 8px;
+    flex-wrap: wrap;
   }
   .topo-hero__id {
     font-family: var(--mono);

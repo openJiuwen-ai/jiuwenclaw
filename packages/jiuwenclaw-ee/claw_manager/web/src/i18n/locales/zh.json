@@ -23,7 +23,16 @@
     "sortDefault": "默认",
     "filter": "筛选",
     "confirm": "确认",
-    "submit": "提交"
+    "submit": "提交",
+    "pagination": {
+      "total": "共 {{total}} 条",
+      "itemsPerPage": "条/页",
+      "prev": "上一页",
+      "next": "下一页",
+      "go": "跳转",
+      "jumpTo": "跳转到页码",
+      "nav": "分页导航"
+    }
   },
   "brand": {
     "title": "JiuwenClaw",
@@ -77,7 +86,12 @@
     "endpoint": "Endpoint",
     "version": "版本",
     "deleteConfirm": "确认删除该实例？",
-    "filterStatus": "按状态过滤"
+    "filterStatus": "按状态过滤",
+    "instanceName": "实例名称",
+    "modifiedAt": "修改时间",
+    "viewBrief": "简略视图",
+    "viewDetailed": "详细视图",
+    "searchPlaceholder": "搜索实例名称、实例 ID、状态、命名空间"
   },
   "instanceForm": {
     "name": "实例名称",
@@ -99,7 +113,6 @@
     "services": "纳管服务列表",
     "extraData": "扩展数据 (instance_info.data)",
     "editData": "编辑扩展数据",
-    "back": "返回实例列表",
     "tabs": {
       "detail": "实例详情",
       "policies": "实例策略",

@@ -10,9 +10,11 @@ from typing import Any
 from openjiuwen_runtime.foundation.db.handler import DBHandler
 
 from jiuwenclaw_manager.infrastructure.utils import iso_datetime, new_uuid4, utc_now
+from jiuwenclaw_manager.infrastructure.common import resolve_order_by
 from jiuwenclaw_manager.schemas.instance_schemas import (
     CreateInstanceBody,
     InstanceDetail,
+    InstanceListQuery,
     InstanceSummary,
     InstanceUpdateBody,
 )
@@ -22,6 +24,43 @@ logger = logging.getLogger(__name__)
 
 _INSTANCE_TABLE = INSTANCE_INFO_TABLE_DEF.table_name
 _LOG_MASKING_SEEDED_KEY = "log_masking_seeded"
+
+_ALLOWED_INSTANCE_SORT_FIELDS = frozenset({
+    "jiuwenclaw_name",
+    "status",
+    "last_heartbeat",
+    "k8s_namespace",
+    "updated_at",
+})
+_DEFAULT_INSTANCE_ORDER_BY: list[tuple[str, bool]] = [("updated_at", True)]
+
+
+def _matches_instance_search(row: Any, query: str) -> bool:
+    needle = query.strip().lower()
+    if not needle:
+        return True
+    fields = [
+        str(getattr(row, "jiuwenclaw_id", "") or ""),
+        str(getattr(row, "jiuwenclaw_name", "") or ""),
+        str(getattr(row, "status", "") or ""),
+        str(getattr(row, "k8s_namespace", "") or ""),
+    ]
+    return any(needle in field.lower() for field in fields)
+
+
+def _instance_row_to_summary(row: Any) -> dict:
+    summary = InstanceSummary(
+        jiuwenclaw_id=row.jiuwenclaw_id,
+        jiuwenclaw_name=row.jiuwenclaw_name,
+        status=row.status,
+        k8s_namespace=row.k8s_namespace,
+        group_id=row.group_id,
+        space_id=row.space_id,
+        created_at=iso_datetime(row.created_at),
+        last_heartbeat=iso_datetime(getattr(row, "last_heartbeat", None)),
+        updated_at=iso_datetime(getattr(row, "updated_at", None)),
+    )
+    return summary.model_dump()
 
 
 def _instance_data_dict(row: Any | None) -> dict[str, Any]:
@@ -267,17 +306,25 @@ async def list_instance_rows(
     status: str | None,
     offset: int,
     limit: int,
+    sort_by: str | None = None,
+    sort_order: str | None = None,
 ) -> tuple[Sequence[Any], int]:
     filters: dict[str, Any] = {}
     if status:
         filters["status"] = status
     total = await handler.count_records(_INSTANCE_TABLE, filters)
+    order_by = resolve_order_by(
+        sort_by,
+        sort_order,
+        allowed_sort_fields=_ALLOWED_INSTANCE_SORT_FIELDS,
+        default_order_by=_DEFAULT_INSTANCE_ORDER_BY,
+    )
     rows = await handler.list_records(
         _INSTANCE_TABLE,
         filters,
         limit=limit,
         offset=offset,
-        order_by=[("updated_at", True)],
+        order_by=order_by,
     )
     return rows, int(total)
 
@@ -334,31 +381,50 @@ class InstanceService:
         row = await create_instance_row(self._handler, row_data)
         return {"jiuwenclaw_id": jiuwenclaw_id, "status": getattr(row, "status", "online")}
 
-    async def list_instances(
-        self, *, page: int, page_size: int, status: str | None
-    ) -> dict:
-        page = max(page, 1)
-        page_size = min(max(page_size, 1), 200)
+    async def list_instances(self, query: InstanceListQuery) -> dict:
+        page = max(query.page, 1)
+        page_size = min(max(query.page_size, 1), 200)
+        search_query = (query.search or "").strip()
+        order_by = resolve_order_by(
+            query.sort_by,
+            query.sort_order,
+            allowed_sort_fields=_ALLOWED_INSTANCE_SORT_FIELDS,
+            default_order_by=_DEFAULT_INSTANCE_ORDER_BY,
+        )
+        filters: dict[str, Any] = {}
+        if query.status:
+            filters["status"] = query.status
+
+        if search_query:
+            rows = await self._handler.list_records(
+                _INSTANCE_TABLE,
+                filters,
+                limit=10_000,
+                offset=0,
+                order_by=order_by,
+            )
+            matched = [r for r in rows if _matches_instance_search(r, search_query)]
+            total = len(matched)
+            offset = (page - 1) * page_size
+            page_rows = matched[offset: offset + page_size]
+            return {
+                "items": [_instance_row_to_summary(r) for r in page_rows],
+                "total": total,
+                "page": page,
+                "page_size": page_size,
+            }
+
         offset = (page - 1) * page_size
         rows, total = await list_instance_rows(
-            self._handler, status=status, offset=offset, limit=page_size
+            self._handler,
+            status=query.status,
+            offset=offset,
+            limit=page_size,
+            sort_by=query.sort_by,
+            sort_order=query.sort_order,
         )
-        items = [
-            InstanceSummary(
-                jiuwenclaw_id=r.jiuwenclaw_id,
-                jiuwenclaw_name=r.jiuwenclaw_name,
-                status=r.status,
-                k8s_namespace=r.k8s_namespace,
-                group_id=r.group_id,
-                space_id=r.space_id,
-                created_at=iso_datetime(r.created_at),
-                last_heartbeat=iso_datetime(getattr(r, "last_heartbeat", None)),
-                updated_at=iso_datetime(getattr(r, "updated_at", None)),
-            )
-            for r in rows
-        ]
         return {
-            "items": [i.model_dump() for i in items],
+            "items": [_instance_row_to_summary(r) for r in rows],
             "total": total,
             "page": page,
             "page_size": page_size,

@@ -15,6 +15,7 @@ from jiuwenclaw_manager.manager_ws_server.pod_status_cache import (
 from jiuwenclaw_manager.schemas.common_schemas import ResponseModel
 from jiuwenclaw_manager.schemas.instance_schemas import (
     CreateInstanceBody,
+    InstanceListQuery,
     InstanceUpdateBody,
     ProvisionLocalInstanceBody,
 )
@@ -109,12 +110,10 @@ async def create_instance(
 @instance_router.get("/", response_model=ResponseModel)
 async def list_instances(
     handler: Annotated[DBHandler, Depends(get_db_handler)],
-    page: int = Query(1, ge=1),
-    page_size: int = Query(20, ge=1, le=200),
-    status: str | None = None,
+    query: Annotated[InstanceListQuery, Query()],
 ):
     svc = _svc(handler)
-    data = await svc.list_instances(page=page, page_size=page_size, status=status)
+    data = await svc.list_instances(query)
     return ResponseModel(code=200, message="success", data=data)
 
 

@@ -60,6 +60,25 @@ class InstanceSummary(BaseModel):
     updated_at: str | None = None
 
 
+class InstanceListQuery(BaseModel):
+    page: int = Field(1, ge=1)
+    page_size: int = Field(20, ge=1, le=200)
+    status: str | None = None
+    search: str | None = Field(
+        default=None,
+        max_length=256,
+        description="按实例名称、实例 ID、状态、命名空间模糊搜索",
+    )
+    sort_by: str | None = Field(
+        default=None,
+        description=(
+            "排序字段：jiuwenclaw_name、status、last_heartbeat、"
+            "k8s_namespace、updated_at"
+        ),
+    )
+    sort_order: str | None = Field(default=None, description="排序方向：asc、desc")
+
+
 class InstanceDetail(InstanceSummary):
     description: str | None
     k8s_master_host: str

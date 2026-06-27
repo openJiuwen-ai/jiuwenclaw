@@ -78,7 +78,7 @@ type AgentSortField =
 export function AgentPoliciesTab({ instanceId }: { instanceId: string }) {
   const { t } = useTranslation();
   const [page, setPage] = useState(1);
-  const [pageSize] = useState(20);
+  const [pageSize, setPageSize] = useState(20);
   const [enabledFilter, setEnabledFilter] = useState<string>('');
   const [sendFileAllowedFilter, setSendFileAllowedFilter] = useState<string>('');
   const [sortBy, setSortBy] = useState<AgentSortField | ''>('');
@@ -300,12 +300,13 @@ export function AgentPoliciesTab({ instanceId }: { instanceId: string }) {
 
   return (
     <div className="flex flex-col gap-4">
-      <div className="page-header justify-end">
-        <div className="flex items-center gap-2">
+      <div className="page-header w-full min-w-0 flex-wrap items-start justify-end gap-y-3">
+        <div className="flex min-w-0 flex-1 flex-wrap items-center justify-end gap-2">
           <ListSearchInput
             value={searchInput}
             onChange={setSearchInput}
             placeholder={t('policies.agent.searchPlaceholder')}
+            className="basis-full sm:basis-auto"
           />
           <button className="btn sm" onClick={() => void reload()}>
             {t('common.refresh')}
@@ -514,7 +515,15 @@ export function AgentPoliciesTab({ instanceId }: { instanceId: string }) {
       </div>
 
       {data && (
-        <Pagination page={page} pageSize={pageSize} total={data.total ?? data.items.length} onChange={setPage} />
+        <Pagination
+          page={page}
+          pageSize={pageSize}
+          total={data.total ?? data.items.length}
+          onChange={(p, ps) => {
+            setPage(p);
+            setPageSize(ps);
+          }}
+        />
       )}
 
       <Modal

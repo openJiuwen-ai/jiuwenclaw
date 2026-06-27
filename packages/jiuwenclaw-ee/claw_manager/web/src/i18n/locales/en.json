@@ -23,7 +23,16 @@
     "sortDefault": "Default",
     "filter": "Filter",
     "confirm": "Confirm",
-    "submit": "Submit"
+    "submit": "Submit",
+    "pagination": {
+      "total": "total {{total}} items",
+      "itemsPerPage": "items/page",
+      "prev": "Previous",
+      "next": "Next",
+      "go": "Go",
+      "jumpTo": "Jump to page",
+      "nav": "Pagination"
+    }
   },
   "brand": {
     "title": "JiuwenClaw",
@@ -77,7 +86,12 @@
     "endpoint": "Endpoint",
     "version": "Version",
     "deleteConfirm": "Delete this instance?",
-    "filterStatus": "Filter by status"
+    "filterStatus": "Filter by status",
+    "instanceName": "Instance Name",
+    "modifiedAt": "Modified At",
+    "viewBrief": "Brief view",
+    "viewDetailed": "Detailed view",
+    "searchPlaceholder": "Search instance name, ID, status, or namespace"
   },
   "instanceForm": {
     "name": "Instance Name",
@@ -99,7 +113,6 @@
     "services": "Managed Services",
     "extraData": "Extra Data (instance_info.data)",
     "editData": "Edit extra data",
-    "back": "Back to Instance List",
     "tabs": {
       "detail": "Detail",
       "policies": "Policies",

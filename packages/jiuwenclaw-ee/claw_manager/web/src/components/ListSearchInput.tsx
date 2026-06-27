@@ -1,3 +1,5 @@
+const BASE_CLASS_NAME = 'input min-w-[10rem] w-full max-w-[38rem]';
+
 type ListSearchInputProps = {
   value: string;
   onChange: (value: string) => void;
@@ -9,11 +11,11 @@ export function ListSearchInput({
   value,
   onChange,
   placeholder,
-  className = 'input !w-[38rem]',
+  className,
 }: ListSearchInputProps) {
   return (
     <input
-      className={className}
+      className={className ? `${BASE_CLASS_NAME} ${className}` : BASE_CLASS_NAME}
       placeholder={placeholder}
       value={value}
       onChange={(e) => onChange(e.target.value)}
