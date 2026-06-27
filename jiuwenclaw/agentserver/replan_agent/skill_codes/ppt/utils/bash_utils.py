@@ -25,6 +25,14 @@ def quote_path(path: str) -> str:
     return f'"{normalized}"'
 
 
+def fill_js_path(pptx_root: str) -> str:
+    """构建 fill.js 脚本路径（template-filler 子技能的脚本入口）。"""
+    fill_script = Path(pptx_root) / "template-filler" / "scripts" / "fill.js"
+    if not fill_script.is_file():
+        raise BashExecError(f"fill.js 不存在: {fill_script}")
+    return f"node {quote_path(str(fill_script))}"
+
+
 _PPT_DIR = Path(__file__).resolve().parent.parent
 
 
@@ -98,6 +106,38 @@ def parse_bash_payload(text: str) -> BashResult:
     return BashResult(exit_code=exit_code, stdout=stdout, stderr=stderr, raw=text)
 
 
+def _extract_bash_result(raw: Any) -> BashResult | None:
+    """从 raw tool 返回值直接提取 exit_code/stdout/stderr。
+
+    node.call_tool 返回的 raw 对象结构为 raw.result.data.exit_code（嵌套两层），
+    normalize_tool_text 只提取 stdout 纯文本会丢失 exit_code。
+    此函数兼容多种嵌套结构，提取失败时返回 None 由调用方 fallback。
+    """
+    data: dict[str, Any] | None = None
+
+    if hasattr(raw, "data") and isinstance(raw.data, dict):
+        data = raw.data
+    elif isinstance(raw, dict):
+        if "data" in raw and isinstance(raw["data"], dict):
+            data = raw["data"]
+        elif "result" in raw:
+            inner = raw["result"]
+            if hasattr(inner, "data") and isinstance(inner.data, dict):
+                data = inner.data
+            elif isinstance(inner, dict) and "data" in inner and isinstance(inner["data"], dict):
+                data = inner["data"]
+
+    if data is None:
+        return None
+
+    exit_code = int(data.get("exit_code", 0) or 0)
+    stdout = str(data.get("stdout") or "")
+    stderr = str(data.get("stderr") or "")
+    if exit_code == 0 and "[ERROR]" in stdout:
+        exit_code = 1
+    return BashResult(exit_code=exit_code, stdout=stdout, stderr=stderr, raw=str(raw))
+
+
 async def run_bash(
     node: PlanNode,
     command: str,
@@ -122,7 +162,9 @@ async def run_bash(
     for tool_name, kwargs in tool_attempts:
         try:
             raw = await node.call_tool(tool_name, **kwargs)
-            parsed = parse_bash_payload(normalize_tool_text(raw))
+            parsed = _extract_bash_result(raw) or parse_bash_payload(
+                normalize_tool_text(raw)
+            )
             if parsed.exit_code != 0 and required:
                 detail = parsed.stderr or parsed.stdout or parsed.raw
                 raise BashExecError(
