@@ -660,7 +660,7 @@ react:
     force_enable: false  # [TEMP-FORCE-REPLAN] 测试强制开关，前端【快速】按钮合入后删除
     # [TEMP-EXTERNAL-SKILL] PPT skill 的外部目录名（与原版 pptx-craft 区分）。
     # 测试在 skill_root 下放入该名称的 skill 子目录即可。
-    skill_name: pptx-craft-replan
+    skill_name: pptx-craft
     # [TEMP-EXTERNAL-SKILL] 外部 skill 目录的 SHA256 校验值。
     # 转测前由开发计算并填写，校验失败时打 WARNING 日志但不阻塞执行。
     # 计算方法（注意：导入 environment 而非 pipeline_init；Windows 路径需用 r'' 原始字符串）：
