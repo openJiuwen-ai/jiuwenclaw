@@ -115,6 +115,7 @@ def _flush_stderr() -> None:
 
 _ENV_BASE_URL = "JIUWENBOX_URL"
 _ENV_TIMEOUT = "JIUWENBOX_TIMEOUT"
+_ENV_API_TOKEN = "JIUWENBOX_API_TOKEN"
 _DEFAULT_BASE_URL = "http://127.0.0.1:8321"
 _DEFAULT_TIMEOUT = 30.0
 _API_PREFIX = "/api/v1"
@@ -222,20 +223,31 @@ class _CliClient:
     ``cannot connect to unix:///tmp/jw.sock``) 仍可读。
     """
 
-    def __init__(self, base_url: str, timeout_seconds: float = _DEFAULT_TIMEOUT) -> None:
+    def __init__(
+        self,
+        base_url: str,
+        timeout_seconds: float = _DEFAULT_TIMEOUT,
+        api_token: str | None = None,
+    ) -> None:
         cleaned = base_url.rstrip("/")
         self._base_url = cleaned
         self._timeout = timeout_seconds
+        client_headers: dict[str, str] = {}
+        if api_token:
+            client_headers["Authorization"] = f"Bearer {api_token}"
         uds_path = _split_uds_endpoint(cleaned)
         if uds_path is not None:
             self._client = httpx.Client(
                 transport=httpx.HTTPTransport(uds=uds_path),
                 base_url=_UDS_PLACEHOLDER_BASE_URL,
                 timeout=timeout_seconds,
+                headers=client_headers or None,
             )
         else:
             self._client = httpx.Client(
-                base_url=cleaned, timeout=timeout_seconds,
+                base_url=cleaned,
+                timeout=timeout_seconds,
+                headers=client_headers or None,
             )
 
     def __enter__(self) -> "_CliClient":
@@ -896,6 +908,14 @@ def _add_global_options(parser: argparse.ArgumentParser) -> None:
         help=f"HTTP client timeout seconds (env {_ENV_TIMEOUT}, default {int(_DEFAULT_TIMEOUT)})",
     )
     parser.add_argument(
+        "--api-token",
+        default=os.environ.get(_ENV_API_TOKEN),
+        help=(
+            f"Bearer token for API authentication (env {_ENV_API_TOKEN}; "
+            "must match server-side JIUWENBOX_API_TOKEN when enabled)"
+        ),
+    )
+    parser.add_argument(
         "--verbose", "-v",
         action="store_true",
         help="enable debug logging on stderr",
@@ -1263,8 +1283,15 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("no command specified")
 
     base_url = args.base_url
+    api_token = getattr(args, "api_token", None)
+    if isinstance(api_token, str):
+        api_token = api_token.strip() or None
     try:
-        with _CliClient(base_url=base_url, timeout_seconds=args.timeout) as client:
+        with _CliClient(
+            base_url=base_url,
+            timeout_seconds=args.timeout,
+            api_token=api_token,
+        ) as client:
             try:
                 result = handler(args, client)
             except _CliError:

@@ -32,6 +32,22 @@ unix:///run/jiuwenbox/jiuwenbox.sock          # 容器内 uvicorn 绑定的路�
 
 业务接口统一使用 `/api/v1` 前缀，健康检查接口为 `/health`。
 
+### API 认证（opt-in）
+
+设置环境变量 `JIUWENBOX_API_TOKEN`（或 `jiuwenbox-server --api-token`）后启用。
+所有 HTTP 端点（含 `/health`、`/api/v1/*`、`/mcp`）均需在请求头携带：
+
+```http
+Authorization: Bearer <token>
+```
+
+未设置 `JIUWENBOX_API_TOKEN` 时行为与旧版一致（无认证）。错误 token 返回
+`401`，响应体 `{"error":"unauthorized"}`。
+
+服务端与 jiuwenbox CLI 共用 `JIUWENBOX_API_TOKEN`；CLI 亦支持 `--api-token`
+（优先级高于 env）。jiuwenclaw / openjiuwen provider 当前不会自动发送该
+header，启用认证后需自行在 HTTP 客户端层携带 token。
+
 ### 通用接入示例
 
 以下三种方式分别通过 TCP 与 UDS 访问同一个 `/health`，请求行为完全等价；
@@ -42,6 +58,9 @@ curl：
 ```bash
 # TCP
 curl http://127.0.0.1:8321/health
+
+# TCP 并设置认证 token
+curl -H "Authorization: Bearer $JIUWENBOX_API_TOKEN" http://127.0.0.1:8321/health
 
 # UDS
 curl --unix-socket /tmp/jiuwenbox-sock/jiuwenbox.sock http://localhost/health
