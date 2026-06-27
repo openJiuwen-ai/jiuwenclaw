@@ -61,21 +61,7 @@ gen_gateway_file() {
         yq eval '.dependencies = {}' -i ${claw_code}/packages/jiuwenclaw-ee/gateway/extensions/manager_ws_client/extension.yaml
     fi
 
-    if [ -n "${DEPLOY_VARS["GATEWAY_CPU_REQUEST"]:-}" ]; then
-        yq eval 'select(.kind == "Deployment").spec.template.spec.containers[0].resources.requests.cpu = "'"${DEPLOY_VARS["GATEWAY_CPU_REQUEST"]}"'"' -i "${file}"
-    fi
-
-    if [ -n "${DEPLOY_VARS["GATEWAY_MEMORY_REQUEST"]:-}" ]; then
-        yq eval 'select(.kind == "Deployment").spec.template.spec.containers[0].resources.requests.memory = "'"${DEPLOY_VARS["GATEWAY_MEMORY_REQUEST"]}"'"' -i "${file}"
-    fi
-
-    if [ -n "${DEPLOY_VARS["GATEWAY_CPU_LIMIT"]:-}" ]; then
-        yq eval 'select(.kind == "Deployment").spec.template.spec.containers[0].resources.limits.cpu = "'"${DEPLOY_VARS["GATEWAY_CPU_LIMIT"]}"'"' -i "${file}"
-    fi
-
-    if [ -n "${DEPLOY_VARS["GATEWAY_MEMORY_LIMIT"]:-}" ]; then
-        yq eval 'select(.kind == "Deployment").spec.template.spec.containers[0].resources.limits.memory = "'"${DEPLOY_VARS["GATEWAY_MEMORY_LIMIT"]}"'"' -i "${file}"
-    fi
+    add_resource_if_set "GATEWAY" "${file}"
 
     # Bind dedicated ServiceAccount to grant pod creation privileges
     yq eval 'select(.kind == "Deployment").spec.template.spec.serviceAccountName = "'"${DEPLOY_VARS["GATEWAY_SERVICE_ACCOUNT"]}"'"' -i "${file}"
