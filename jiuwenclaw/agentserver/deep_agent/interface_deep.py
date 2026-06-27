@@ -6017,6 +6017,13 @@ class JiuWenClawDeepAdapter:
             "card": self._instance.card if self._instance is not None else None,
             # LLM 并发上限，同一 RePlanExecutor 内最多并行 LLM 调用数
             "llm_concurrency_limit": 20,
+            # 多模态能力透传：复用 DeepAdapter 已算好的可用性判断（config.yaml 各 model
+            # 是否配独立 api_key + 环境变量是否齐全），与主 agent 行为保持一致。
+            # 注意 _video_model_config 在 DeepAdapter 侧是 bool，replan 侧字段名为 video_model_enabled。
+            "vision_model_config": self._vision_model_config,
+            "audio_model_config": self._audio_model_config,
+            "video_model_enabled": bool(self._video_model_config),
+            "image_gen_enabled": bool(self._image_gen_enabled),
         }
 
     def _create_replan_fallback_handler(self) -> Any:
