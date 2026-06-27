@@ -23,7 +23,7 @@ logger = logging.getLogger(__name__)
 
 _ASK_TOOL_MAX_QUESTIONS = 4
 _ASK_TOOL_MIN_OPTIONS = 2
-_ASK_TOOL_MAX_OPTIONS = 4
+_ASK_TOOL_MAX_OPTIONS_DEFAULT = 4
 
 _OTHER_FALLBACK_LABEL = "其他"
 
@@ -91,7 +91,13 @@ def _normalize_user_answer_option_ids(answers: list[Any]) -> list[Any]:
     return out
 
 
-def _coerce_raw_options(opts: Any, question_index: int, *, has_preview: bool = False) -> list[dict[str, Any]]:
+def _coerce_raw_options(
+    opts: Any,
+    question_index: int,
+    *,
+    has_preview: bool = False,
+    max_options: int | None = None,
+) -> list[dict[str, Any]]:
     """Ensure 2–4 labeled options; trim excess, pad singles, tolerate str entries."""
     if has_preview:
         return [
@@ -127,14 +133,28 @@ def _coerce_raw_options(opts: Any, question_index: int, *, has_preview: bool = F
             has_other = True
         normalized.append(entry)
 
-    if len(normalized) > _ASK_TOOL_MAX_OPTIONS:
+    if max_options is not None:
+        try:
+            max_options = int(max_options)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                f"max_options 必须为整数，收到 {type(max_options).__name__}: {max_options}"
+            ) from exc
+        if max_options < _ASK_TOOL_MIN_OPTIONS:
+            raise ValueError(
+                f"max_options 必须 >= {_ASK_TOOL_MIN_OPTIONS}，收到 {max_options}"
+            )
+
+    effective_max = max_options if max_options is not None else _ASK_TOOL_MAX_OPTIONS_DEFAULT
+    if len(normalized) > effective_max:
         logger.info(
-            "[ask_user_question] questions[%s].options 共 %s 项，裁剪为 %s 项",
+            "[ask_user_question] questions[%s].options 共 %s 项，max_options=%s，裁剪为 %s 项",
             question_index,
             len(normalized),
-            _ASK_TOOL_MAX_OPTIONS,
+            max_options,
+            effective_max,
         )
-        normalized = normalized[: _ASK_TOOL_MAX_OPTIONS]
+        normalized = normalized[: effective_max]
 
     if len(normalized) == 1 and not has_other:
         logger.info(
@@ -152,7 +172,7 @@ def _coerce_raw_options(opts: Any, question_index: int, *, has_preview: bool = F
     return normalized
 
 
-def _normalize_questions(raw: Any) -> list[dict[str, Any]]:
+def _normalize_questions(raw: Any, max_options: int | None = None) -> list[dict[str, Any]]:
     if isinstance(raw, str):
         raw_st = raw.strip()
         if not raw_st:
@@ -184,7 +204,7 @@ def _normalize_questions(raw: Any) -> list[dict[str, Any]]:
 
         has_preview = preview_norm is not None
         raw_opts = item.get("options", item.get("Options", []))
-        coerced = _coerce_raw_options(raw_opts, i, has_preview=has_preview)
+        coerced = _coerce_raw_options(raw_opts, i, has_preview=has_preview, max_options=max_options)
         norm_opts: list[dict[str, str]] = []
         for opt in coerced:
             label = str(opt.get("label", "") or "").strip()
@@ -256,13 +276,13 @@ def _first_outline_preview(questions: list[dict[str, Any]]) -> dict[str, Any] | 
     return None
 
 
-async def _ask_user_question_impl(questions: Any) -> dict[str, Any]:
+async def _ask_user_question_impl(questions: Any, max_options: int | None = None) -> dict[str, Any]:
     interactive, session_id, stream_rid, channel_id = get_ask_request_context()
     reg = AskUserQuestionRegistry.get_instance()
     if stream_rid and not interactive:
         interactive = reg.stream_interactive_ask_enabled(stream_rid)
     try:
-        normalized = _normalize_questions(questions)
+        normalized = _normalize_questions(questions, max_options=max_options)
     except Exception as exc:
         return {"status": "error", "message": f"参数错误: {exc}", "answers": []}
 
@@ -323,6 +343,7 @@ _ASK_TOOL_CARD = ToolCard(
         "向用户展示一组带选项的结构化问题（可多题），推送选择 UI 并阻塞等待用户作答。"
         "questions 为 JSON 数组，每项含 question、"
         "options[{label, description?, id?, free_input?}]、可选 header、multi_select；free_input=true 的选项 label 自动设为「其他」；"
+        "可选 max_options 指定每题选项数量上限（默认4），当用户明确要求N个选项时应设为N，未指定时使用默认值；"
         "可选 preview{text,title?,format?,editable?,outline_ref?,meta?} "
         "用于 PPT 大纲 Markdown 审阅（将注入 outline_confirm / outline_use_edited 选项）；"
         "仅带 preview 的大纲确认受引导模式约束，未开启引导时返回 skipped 不弹窗。"
@@ -335,7 +356,12 @@ _ASK_TOOL_CARD = ToolCard(
                 # OpenAI 等校验器要求 array 必须带 items；对 string 实例 items 不适用。
                 "items": {"type": "object"},
                 "description": "问题列表：JSON 数组，或 JSON 数组的字符串形式",
-            }
+            },
+            "max_options": {
+                "type": "integer",
+                "minimum": 2,
+                "description": "每题选项数量上限，默认4。当用户明确要求N个选项时设为N；未指定时使用默认值。",
+            },
         },
         "required": ["questions"],
     },
