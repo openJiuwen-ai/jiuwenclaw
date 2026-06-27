@@ -6,6 +6,7 @@ import threading
 from pathlib import Path
 from types import SimpleNamespace
 
+from jiuwenswarm.symphony.skill_retrieval import index_service as index_service_module
 from jiuwenswarm.symphony.skill_retrieval.build_coordinator import (
     cancel_skill_index_build,
     start_skill_index_build,
@@ -652,16 +653,28 @@ def test_tree_cache_hit(monkeypatch, tmp_path: Path) -> None:
 
     _read_text_counting.tree_calls = 0
     monkeypatch.setattr(Path, "read_text", _read_text_counting)
+    real_safe_load = index_service_module.yaml.safe_load
+
+    def _safe_load_counting(*args: object, **kwargs: object) -> object:
+        if args and isinstance(args[0], str) and "nodes:" in args[0]:
+            _safe_load_counting.calls += 1
+        return real_safe_load(*args, **kwargs)
+
+    _safe_load_counting.calls = 0
+    monkeypatch.setattr(index_service_module.yaml, "safe_load", _safe_load_counting)
 
     result1 = SkillIndexService(manager).tree()
     assert result1["success"] is True
     first_tree_calls = _read_text_counting.tree_calls
     assert first_tree_calls == 1, f"首次 tree() 应读取一次 tree_index.yaml，实际 {first_tree_calls}"
+    assert _safe_load_counting.calls == 1, f"首次 tree() 应解析一次 YAML，实际 {_safe_load_counting.calls}"
 
     _read_text_counting.tree_calls = 0
+    _safe_load_counting.calls = 0
     result2 = SkillIndexService(manager).tree()
     assert result2["success"] is True
     assert _read_text_counting.tree_calls == 0, "缓存命中时不应再次读取 tree_index.yaml"
+    assert _safe_load_counting.calls == 0, "缓存命中时不应再次解析 YAML"
 
 
 def test_tree_cache_invalidates_on_file_change(monkeypatch, tmp_path: Path) -> None:
@@ -758,4 +771,51 @@ def test_tree_no_cache_on_yaml_parse_error(monkeypatch, tmp_path: Path) -> None:
 
     result2 = SkillIndexService(manager).tree()
     assert result2["success"] is True, "错误不应被缓存，修复文件后应能正常解析"
+    assert result2["nodes"][0]["cid"] == "recovered"
+
+
+def test_tree_no_cache_on_invalid_nodes_payload(monkeypatch, tmp_path: Path) -> None:
+    """nodes 结构无效时不缓存，修复文件后可正常解析。"""
+    skills_dir = tmp_path / "skills"
+    skills_dir.mkdir()
+    _write_skill(skills_dir, "enabled-skill")
+    manager = SimpleNamespace(_skills_dir=skills_dir)
+    inventory = scan_skill_inventory(manager)
+    artifact_root = tmp_path / "artifact"
+    index_dir = artifact_root / "index"
+    index_dir.mkdir(parents=True)
+    (index_dir / "tree_index.yaml").write_text("nodes: not-a-list\n", encoding="utf-8")
+    (index_dir / "catalog.jsonl").write_text("", encoding="utf-8")
+    (index_dir / "manifest.json").write_text(
+        json.dumps({"item_paths": inventory.item_paths}),
+        encoding="utf-8",
+    )
+    settings = SkillRetrievalSettings(
+        enabled=True,
+        artifact_root=artifact_root,
+        llm=LLMSettings(model="model", api_key="key", base_url=""),
+        build=BuildSettings(),
+        retrieve=RetrieveSettings(),
+    )
+    (artifact_root / "state.json").write_text(
+        json.dumps({"fingerprint": expected_index_fingerprint(inventory, settings)}),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.symphony.skill_retrieval.index_service.load_settings",
+        lambda: settings,
+    )
+    _clear_tree_cache()
+
+    result1 = SkillIndexService(manager).tree()
+    assert result1["success"] is False
+    assert "does not contain a valid nodes list" in result1["result"]
+
+    (index_dir / "tree_index.yaml").write_text(
+        "nodes:\n  - cid: recovered\n    type: leaf\n    worker_id: enabled-skill\n",
+        encoding="utf-8",
+    )
+
+    result2 = SkillIndexService(manager).tree()
+    assert result2["success"] is True, "无效 nodes 结果不应被缓存，修复文件后应能正常解析"
     assert result2["nodes"][0]["cid"] == "recovered"
