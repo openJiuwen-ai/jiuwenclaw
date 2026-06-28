@@ -19,7 +19,11 @@ from jiuwenswarm.symphony.skill_retrieval.config import (
     RetrieveSettings,
     SkillRetrievalSettings,
 )
-from jiuwenswarm.symphony.skill_retrieval.index_service import SkillIndexService, _clear_tree_cache, expected_index_fingerprint
+from jiuwenswarm.symphony.skill_retrieval.index_service import (
+    SkillIndexService,
+    _clear_tree_cache,
+    expected_index_fingerprint,
+)
 from jiuwenswarm.symphony.skill_retrieval.inventory import scan_skill_inventory
 
 
