@@ -3,6 +3,7 @@
 import asyncio
 import sqlite3
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import pytest
 
@@ -12,13 +13,25 @@ from jiuwenswarm.agents.harness.common.memory.manager import (
 )
 
 
+class MemoryIndexManagerForTest(MemoryIndexManager):
+    async def get_embedding(self, text: str) -> list[float] | None:
+        return await self._get_embedding(text)
+
+
+def create_settings() -> SimpleNamespace:
+    return SimpleNamespace(
+        store={
+            "fts": {"enabled": True},
+            "vector": {"enabled": True},
+        },
+        cache={"enabled": True},
+        sources=(),
+    )
+
+
 @pytest.mark.asyncio
 async def test_sync_serializes_concurrent_calls() -> None:
-    manager = object.__new__(MemoryIndexManager)
-    manager.closed = False
-    manager.dirty = False
-    manager.settings = SimpleNamespace(sources=())
-    manager._sync_lock = asyncio.Lock()
+    manager = MemoryIndexManager("test-agent", ".", create_settings())
 
     first_entered = asyncio.Event()
     release_first = asyncio.Event()
@@ -35,14 +48,17 @@ async def test_sync_serializes_concurrent_calls() -> None:
         active_calls -= 1
         return False
 
-    manager._should_full_reindex = should_full_reindex
-
-    first = asyncio.create_task(manager.sync(reason="first"))
-    await first_entered.wait()
-    second = asyncio.create_task(manager.sync(reason="second"))
-    await asyncio.sleep(0)
-    release_first.set()
-    await asyncio.gather(first, second)
+    with patch.object(
+        manager,
+        "_should_full_reindex",
+        side_effect=should_full_reindex,
+    ):
+        first = asyncio.create_task(manager.sync(reason="first"))
+        await first_entered.wait()
+        second = asyncio.create_task(manager.sync(reason="second"))
+        await asyncio.sleep(0)
+        release_first.set()
+        await asyncio.gather(first, second)
 
     assert max_active_calls == 1
 
@@ -56,11 +72,10 @@ async def test_get_embedding_leaves_commit_to_outer_transaction() -> None:
         async def embed_query(self, text: str) -> list[float]:
             return [1.0, 2.0]
 
-    manager = object.__new__(MemoryIndexManager)
+    manager = MemoryIndexManagerForTest("test-agent", ".", create_settings())
     manager.provider = Provider()
     manager.provider_key = "test-key"
     manager.cache_enabled = True
-    manager._event_loop = asyncio.get_running_loop()
     manager.db = sqlite3.connect(":memory:")
     manager.db.execute(
         f"""
@@ -78,7 +93,7 @@ async def test_get_embedding_leaves_commit_to_outer_transaction() -> None:
     manager.db.commit()
 
     try:
-        embedding = await manager._get_embedding("test input")
+        embedding = await manager.get_embedding("test input")
 
         assert embedding == [1.0, 2.0]
         assert manager.db.in_transaction
