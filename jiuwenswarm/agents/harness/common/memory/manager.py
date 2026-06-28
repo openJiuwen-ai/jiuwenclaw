@@ -91,6 +91,7 @@ class MemoryIndexManager:
         self._interval_timer: Optional[asyncio.Task] = None
         self._watch_timer: Optional[asyncio.Task] = None
         self._session_timer: Optional[asyncio.Task] = None
+        self._sync_lock = asyncio.Lock()
         self._session_pending_files: Set[str] = set()
         self._session_deltas: Dict[str, SessionDeltaState] = {}
 
@@ -473,24 +474,25 @@ class MemoryIndexManager:
             force: bool = False
     ) -> None:
         """Synchronize memory index."""
-        if self.closed:
-            return
+        async with self._sync_lock:
+            if self.closed:
+                return
 
-        needs_full_reindex = force or await self._should_full_reindex()
+            needs_full_reindex = force or await self._should_full_reindex()
 
-        if needs_full_reindex:
-            logger.info(f"Running full reindex (reason: {reason or 'unknown'})...")
-            await self._run_reindex()
-            return
+            if needs_full_reindex:
+                logger.info(f"Running full reindex (reason: {reason or 'unknown'})...")
+                await self._run_reindex()
+                return
 
-        logger.debug(f"Memory sync (reason: {reason or 'unknown'})...")
+            logger.debug(f"Memory sync (reason: {reason or 'unknown'})...")
 
-        if "memory" in self.settings.sources and self.dirty:
-            await self._sync_memory_files()
-            self.dirty = False
+            if "memory" in self.settings.sources and self.dirty:
+                await self._sync_memory_files()
+                self.dirty = False
 
-        if "sessions" in self.settings.sources:
-            await self._sync_session_files()
+            if "sessions" in self.settings.sources:
+                await self._sync_session_files()
 
     async def _should_full_reindex(self) -> bool:
         """Check if full reindex is needed."""
@@ -770,7 +772,6 @@ class MemoryIndexManager:
                     text_hash, vector_to_blob(embedding), len(embedding),
                     int(asyncio.get_event_loop().time()) if self._event_loop else 0
                 ))
-                self.db.commit()
 
             return embedding
 
