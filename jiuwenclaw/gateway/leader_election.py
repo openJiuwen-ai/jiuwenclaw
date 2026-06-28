@@ -218,10 +218,8 @@ class LeaderElection:
             if isinstance(current_value, bytes):
                 current_value = current_value.decode("utf-8")
             if current_value is not None and current_value == self._lock_value:
-                pipeline = store.pipeline()
-                await pipeline.expire(self._lock_key, self._lock_ttl)
-                await pipeline.execute()
-                logger.debug("[LeaderElection] Lock TTL renewed: %ds", self._lock_ttl)
+                await store.redis.expire(self._lock_key, self._lock_ttl)
+                logger.info("[LeaderElection] Lock TTL renewed: %ds", self._lock_ttl)
             else:
                 logger.warning("[LeaderElection] Lock lost during renewal, demoting to STANDBY")
                 await self._demote_to_standby()
