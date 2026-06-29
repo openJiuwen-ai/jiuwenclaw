@@ -90,7 +90,7 @@ Options:
   -n NAMESPACE              Specify Kubernetes namespace (defaults to default if unspecified)
   --web-port PORT           Set host port for web service （range: 30000-32767）
   --manager-web-port PORT   Set host port for manager web UI （range: 30000-32767）
-  --render-only                 Only render and output YAML manifests
+  --render-only             Only render and output YAML manifests to conf directory
   -h, --help                Display this help message and exit
 
 Examples:

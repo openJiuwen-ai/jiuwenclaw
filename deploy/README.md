@@ -96,7 +96,7 @@ JiuwenClaw_deployTool_0.0.74k_arm64/
 ├── update_conf.sh                        # 配置更新、重载处理脚本
 ├── update_docker_registry.py             # 镜像仓库地址批量更新工具
 ├── web_handler.sh                        # Web 前端模块部署、运维脚本
-└── conf/                                 # 所有 Kubernetes 资源模板配置目录
+└── templates/                            # 所有 Kubernetes 资源模板配置目录
     ├── gateway-config-jiuwen.template.yaml # 网关业务配置模板
     ├── gateway.template.env                # 网关环境变量配置模板
     ├── gateway.template.yaml               # 网关 Kubernetes 部署资源模板
@@ -233,7 +233,7 @@ FEISHU_BOTS="
 - `-n`:  指定部署目标命名空间, 从而实现模块多实例隔离部署，不同命名空间的资源不冲突，默认值：`default`。需要注意的是：操作基础依赖模块时，该参数强制失效，固定部署于 `default` 命名空间。
 - `--web-port`: 自定义Web模块对外访问端口，按需适配环境端口规划（范围：30000-32767）。若未传入该参数，且 `.env.custom` 文件中未配置 WEB_NODE_PORT 环境变量，程序将自动选取可用空闲端口。
 - `--manager-web-port`: 自定义 `Manager Web UI` 对外访问端口（范围：30000-32767）。若未传入该参数，且 `.env.custom` 文件中未配置 `MANAGER_WEB_NODE_PORT` 环境变量，程序将自动选取可用空闲端口。
-- `--render-only`：只渲染模板输出文件，不操作集群、不校验集群资源
+- `--render-only`：只渲染模板输出文件至 conf 目录，不操作集群、不校验集群资源
 
 **参数使用示例：**
 ```
