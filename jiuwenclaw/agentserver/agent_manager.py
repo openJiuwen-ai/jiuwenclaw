@@ -22,10 +22,14 @@ from jiuwenclaw.agentserver.memory import (
 from jiuwenclaw.local_env_config import (
     ENV_CONFIG_DICT,
     apply_env_overrides_to_active,
+    apply_env_removals,
     promote_staged_env,
     stage_env_overrides,
 )
-from jiuwenclaw.agentserver.tools.multimodal_config import infer_multimodal_env_removals
+from jiuwenclaw.agentserver.tools.multimodal_config import (
+    infer_multimodal_env_removals,
+    merge_reload_env_snapshot,
+)
 from jiuwenclaw.utils import get_agent_workspace_dir
 from jiuwenclaw.config import _sandbox_yaml_to_env_overlay
 
@@ -94,14 +98,10 @@ class AgentManager:
 
         # 应用初始 env_overrides（冷启动，尚无在途 session）
         if env_overrides is not None and isinstance(env_overrides, dict):
-            omission_removals = infer_multimodal_env_removals(
-                None,
-                env_overrides,
-                active_env=ENV_CONFIG_DICT,
-            )
+            omission_removals = infer_multimodal_env_removals(None, env_overrides)
             if omission_removals:
-                apply_env_overrides_to_active(omission_removals)
-            self._latest_env_overrides = dict(env_overrides)
+                apply_env_removals(omission_removals)
+            self._latest_env_overrides = merge_reload_env_snapshot(None, env_overrides)
             apply_env_overrides_to_active(env_overrides)
 
         # 把 config_base['sandbox'] 的 url/type/enabled 翻译成 active env,
@@ -392,7 +392,10 @@ class AgentManager:
         if reload_trace_id:
             self._last_reload_trace_id = reload_trace_id
         previous_config = self._latest_config_base
-        self._latest_env_overrides = dict(env) if isinstance(env, dict) else {}
+        self._latest_env_overrides = merge_reload_env_snapshot(
+            self._latest_env_overrides,
+            env,
+        )
         self._latest_config_base = config
 
         # 把 config['sandbox'] 的 url/type/enabled 翻译成 env overlay 并 stage,

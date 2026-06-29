@@ -12,8 +12,11 @@ from jiuwenclaw.agentserver.reload_result import (
     log_agent_config_hot_reload,
     log_reload_config_changes,
 )
-from jiuwenclaw.local_env_config import ENV_CONFIG_DICT, apply_env_overrides_to_active, stage_env_overrides
-from jiuwenclaw.agentserver.tools.multimodal_config import infer_multimodal_env_removals
+from jiuwenclaw.local_env_config import apply_env_removals, stage_env_overrides
+from jiuwenclaw.agentserver.tools.multimodal_config import (
+    infer_multimodal_env_removals,
+    merge_reload_env_snapshot,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -251,13 +254,13 @@ class TenantAgentPool:
             reload_trace_id=reload_trace_id,
             source="TenantAgentPool",
         )
+        previous_env = self._latest_env if isinstance(self._latest_env, dict) else None
         omission_removals = infer_multimodal_env_removals(
-            self._latest_env if isinstance(self._latest_env, dict) else None,
+            previous_env,
             env if isinstance(env, dict) else None,
-            active_env=ENV_CONFIG_DICT,
         )
         if omission_removals:
-            apply_env_overrides_to_active(omission_removals)
+            apply_env_removals(omission_removals)
             log_agent_config_hot_reload(
                 logger,
                 reload_trace_id=reload_trace_id,
@@ -266,7 +269,7 @@ class TenantAgentPool:
                 env_removed_by_omission_keys=sorted(omission_removals.keys()),
             )
         self._latest_config = config
-        self._latest_env = env
+        self._latest_env = merge_reload_env_snapshot(previous_env, env)
         stage_env_overrides(env)
 
         aggregate = ReloadAggregateResult()

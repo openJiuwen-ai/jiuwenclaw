@@ -76,6 +76,17 @@ def apply_env_overrides_to_active(env_overrides: dict[str, Any] | None) -> None:
             os.environ[key] = value
 
 
+def apply_env_removals(removals: dict[str, None] | None) -> None:
+    """Remove env keys from active storage, staged env, and ``os.environ``."""
+    if not isinstance(removals, dict) or not removals:
+        return
+    for env_key in removals:
+        key = str(env_key)
+        ENV_CONFIG_DICT.pop(key, None)
+        _STAGED_ENV.pop(key, None)
+        os.environ.pop(key, None)
+
+
 def build_effective_env_overlay(*extra: dict[str, Any] | None) -> dict[str, Any]:
     """Merge staged env with optional extra dicts for task overlay binding."""
     merged: dict[str, Any] = dict(ENV_CONFIG_DICT)

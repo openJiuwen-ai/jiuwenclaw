@@ -260,7 +260,9 @@ from jiuwenclaw.agentserver.tools.multimodal_config import (
     apply_image_gen_model_config_from_yaml,
     apply_video_model_config_from_yaml,
     apply_vision_model_config_from_yaml,
+    clear_multimodal_env_groups,
     dedicated_multimodal_model_configured,
+    MULTIMODAL_ENV_GROUP_KEYS,
 )
 from jiuwenclaw.agentserver.tools.image_gen_tools import create_session_text_to_image_tool
 from jiuwenclaw.agentserver.tools.video_tools import video_understanding
@@ -1703,6 +1705,10 @@ class JiuWenClawDeepAdapter:
             config_base: dict[str, Any],
     ) -> None:
         """Refresh cached multimodal configs and live tool instances."""
+        for group in MULTIMODAL_ENV_GROUP_KEYS:
+            if not dedicated_multimodal_model_configured(config_base, group):
+                clear_multimodal_env_groups([group])
+
         self._vision_model_config = self._build_vision_model_config(config_base)
         self._audio_model_config = self._build_audio_model_config(config_base)
         self._video_model_config = self._build_video_model_config(config_base)
@@ -1732,6 +1738,36 @@ class JiuWenClawDeepAdapter:
             if not tool_id or Runner.resource_mgr.get_tool(tool_id) is None:
                 return False
         return True
+
+    def _tools_in_ability_manager(self, tools: list[Any]) -> bool:
+        if not tools or self._instance is None:
+            return False
+        ability_manager = getattr(self._instance, "ability_manager", None)
+        if ability_manager is None:
+            return False
+        for tool in tools:
+            name = str(getattr(getattr(tool, "card", None), "name", "") or "")
+            if not name or ability_manager.get(name) is None:
+                return False
+        return True
+
+    def _sync_preinstance_runtime_tools_to_ability_manager(self) -> None:
+        """Sync tools registered before DeepAgent existed into ability_manager."""
+        if self._instance is None:
+            return
+        agent_card_id = self._resolve_agent_card_id()
+        for tools in (
+            list(self._vision_tools or []),
+            list(self._audio_tools or []),
+            list(self._image_gen_tools or []),
+        ):
+            if not tools:
+                continue
+            if not self._tools_in_resource_mgr(tools):
+                continue
+            if self._tools_in_ability_manager(tools):
+                continue
+            self._register_runtime_tools(tools, agent_card_id)
 
     def _cleanup_qualified_runtime_tools(self) -> None:
         for tool_id in list(self._qualified_runtime_tool_ids):
@@ -1794,11 +1830,32 @@ class JiuWenClawDeepAdapter:
         card_id = agent_card_id or self._resolve_agent_card_id()
         if not enabled:
             if registered:
+                logger.info(
+                    "[JiuWenClawDeepAdapter] multimodal tool group disabled, removing %s",
+                    warn_label,
+                )
                 self._remove_registered_tools(current_tools)
                 self._prune_tool_cards({t.card.name for t in current_tools})
             return [], False
-        if registered and current_tools and not self._tools_in_resource_mgr(current_tools):
-            registered = False
+        if registered and current_tools:
+            if not self._tools_in_resource_mgr(current_tools):
+                registered = False
+            elif (
+                self._instance is not None
+                and not self._tools_in_ability_manager(current_tools)
+            ):
+                try:
+                    ok = self._register_runtime_tools(current_tools, card_id)
+                    return current_tools, ok and bool(current_tools)
+                except Exception as exc:
+                    logger.warning(
+                        "[JiuWenClawDeepAdapter] %s ability sync failed: %s",
+                        warn_label,
+                        exc,
+                    )
+                    registered = False
+            else:
+                return current_tools, registered
         if not registered:
             try:
                 new_tools = create_fn()
@@ -3525,6 +3582,8 @@ class JiuWenClawDeepAdapter:
             agent_card_id,
         )
 
+        self._sync_preinstance_runtime_tools_to_ability_manager()
+
         # 动态加载用户自定义的 Rail 扩展
         await self.load_user_rails()
 
@@ -3873,6 +3932,9 @@ class JiuWenClawDeepAdapter:
             )
 
             self._instance.configure(deep_cfg)
+            # configure() rebuilds ability_manager from tool_cards; multimodal tools
+            # registered before configure are dropped — re-sync after configure.
+            self._sync_multimodal_tools_for_runtime()
             self._apply_model_to_react_agent(self._model)
             self._refresh_fork_agent_executor_model()
 

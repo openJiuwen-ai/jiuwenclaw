@@ -8,6 +8,7 @@
 3. 环境变量 MODEL_NAME, API_KEY, API_BASE
 """
 import os
+from collections.abc import Iterable, Mapping
 from typing import Any
 
 from jiuwenclaw.utils import resolve_env_vars
@@ -58,20 +59,80 @@ def is_full_env_reload_snapshot(env: dict[str, Any] | None) -> bool:
     return all(marker in env for marker in _FULL_ENV_SNAPSHOT_MARKERS)
 
 
+def _anchor_value_non_empty(env: dict[str, Any] | None, anchor: str) -> bool:
+    if not isinstance(env, dict):
+        return False
+    current = env.get(anchor)
+    return current is not None and str(current).strip() != ""
+
+
+def build_multimodal_reconcile_env(
+        *,
+        active_env: dict[str, Any] | None = None,
+        staged_env: dict[str, Any] | None = None,
+        os_environ: Mapping[str, str] | None = None,
+) -> dict[str, str]:
+    """Merge active, staged, and multimodal anchor ``os.environ`` for omission reconcile."""
+    from jiuwenclaw.local_env_config import ENV_CONFIG_DICT, get_staged_env
+
+    merged: dict[str, str] = {}
+    source_active = active_env if active_env is not None else ENV_CONFIG_DICT
+    if isinstance(source_active, dict):
+        for key, value in source_active.items():
+            if value is not None:
+                merged[str(key)] = str(value)
+    source_staged = staged_env if staged_env is not None else get_staged_env()
+    if isinstance(source_staged, dict):
+        for key, value in source_staged.items():
+            if value is not None:
+                merged[str(key)] = str(value)
+    environ = os_environ if os_environ is not None else os.environ
+    for keys in MULTIMODAL_ENV_GROUP_KEYS.values():
+        anchor = keys[0]
+        raw = environ.get(anchor)
+        if raw is not None and str(raw).strip():
+            merged[anchor] = str(raw)
+    return merged
+
+
 def _multimodal_anchor_was_active(
         anchor: str,
         previous_env: dict[str, Any] | None,
         active_env: dict[str, Any] | None,
 ) -> bool:
-    if isinstance(previous_env, dict):
-        prev = previous_env.get(anchor)
-        if prev is not None and str(prev).strip():
-            return True
-    if isinstance(active_env, dict):
-        current = active_env.get(anchor)
-        if current is not None and str(current).strip():
-            return True
-    return False
+    if _anchor_value_non_empty(previous_env, anchor):
+        return True
+    return _anchor_value_non_empty(active_env, anchor)
+
+
+def merge_reload_env_snapshot(
+        previous: dict[str, Any] | None,
+        env: Any,
+) -> dict[str, Any]:
+    """Update cached full env snapshot; preserve on config-only reload (``env is None``)."""
+    if env is None:
+        return dict(previous) if isinstance(previous, dict) else {}
+    if not isinstance(env, dict) or not env:
+        return dict(previous) if isinstance(previous, dict) else {}
+    if is_full_env_reload_snapshot(env):
+        return dict(env)
+    base = dict(previous) if isinstance(previous, dict) else {}
+    base.update(env)
+    return base
+
+
+def clear_multimodal_env_groups(group_names: Iterable[str]) -> None:
+    """Remove env keys for the given multimodal groups from all env layers."""
+    from jiuwenclaw.local_env_config import apply_env_removals
+
+    removals: dict[str, None] = {}
+    for group in group_names:
+        keys = MULTIMODAL_ENV_GROUP_KEYS.get(group)
+        if not keys:
+            continue
+        for key in keys:
+            removals[key] = None
+    apply_env_removals(removals)
 
 
 def infer_multimodal_env_removals(
@@ -85,12 +146,17 @@ def infer_multimodal_env_removals(
         return {}
     if not isinstance(new_env, dict):
         return {}
+    reconcile_env = (
+        active_env
+        if active_env is not None
+        else build_multimodal_reconcile_env()
+    )
     removals: dict[str, None] = {}
     for _group, keys in MULTIMODAL_ENV_GROUP_KEYS.items():
         anchor = keys[0]
         if anchor in new_env:
             continue
-        if not _multimodal_anchor_was_active(anchor, previous_env, active_env):
+        if not _multimodal_anchor_was_active(anchor, previous_env, reconcile_env):
             continue
         for key in keys:
             removals[key] = None

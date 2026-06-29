@@ -5,10 +5,14 @@
 from __future__ import annotations
 
 import logging
+import re
 from typing import TYPE_CHECKING, Any
 
 from openjiuwen.core.foundation.tool import ToolCard
 from openjiuwen.core.runner import Runner
+from openjiuwen.core.single_agent.rail.base import AgentCallbackContext
+from openjiuwen.harness.prompts import PromptSection
+from openjiuwen.harness.prompts.sections import SectionName
 from openjiuwen.harness.rails.skill_use_rail import SkillUseRail
 
 from jiuwenclaw.agentserver.deep_agent.tool_qualify import (
@@ -22,6 +26,64 @@ if TYPE_CHECKING:
     from openjiuwen.harness.deep_agent import DeepAgent
 
 logger = logging.getLogger(__name__)
+
+_SKILLS_QA_HINT = {
+    "cn": (
+        "列举/计数可用技能时，只答下方编号列表中的技能；"
+        "禁止调用 `office_claw_list_skills`；"
+        "禁止补充列表外技能名；勿参考对话历史"
+        "（用户说「检索/不要参考前面」亦同）。"
+    ),
+    "en": (
+        "When listing or counting available skills, answer only from the numbered list below; "
+        "do not call `office_claw_list_skills`; do not add skill names not in the list; "
+        "ignore conversation history (including when the user says search or "
+        "do not use prior answers)."
+    ),
+}
+
+_SKILLS_COUNT_PREFIX = {
+    "cn": "（以上编号列表共",
+    "en": "(The numbered list above contains",
+}
+
+_NUMBERED_SKILL_LINE = re.compile(r"^\d+\.\s")
+
+
+def _build_skills_count_line(lang: str, skill_count: int) -> str:
+    if lang == "en":
+        noun = "skill" if skill_count == 1 else "skills"
+        return (
+            f"(The numbered list above contains {skill_count} {noun}; "
+            f"when counting skills, answer must be {skill_count}.)"
+        )
+    return f"（以上编号列表共 {skill_count} 项；回答技能数量时必须为 {skill_count}。）"
+
+
+def _find_skills_list_end(text: str, marker: str) -> int:
+    """Return the index after the last numbered skill line following *marker*."""
+    marker_pos = text.find(marker)
+    if marker_pos < 0:
+        return len(text)
+    pos = marker_pos + len(marker)
+    last_line_end = pos
+    while pos < len(text):
+        if text[pos] == "\n":
+            pos += 1
+            continue
+        line_end = text.find("\n", pos)
+        if line_end < 0:
+            line_end = len(text)
+        line = text[pos:line_end].strip()
+        if not line:
+            pos = line_end + 1 if line_end < len(text) else len(text)
+            continue
+        if _NUMBERED_SKILL_LINE.match(line):
+            last_line_end = line_end
+            pos = line_end + 1 if line_end < len(text) else len(text)
+        else:
+            break
+    return last_line_end
 
 
 class JiuWenSkillUseRail(SkillUseRail):
@@ -132,6 +194,46 @@ class JiuWenSkillUseRail(SkillUseRail):
             remove_tool_from_resource_mgr(tool_id)
         self._qualified_tool_ids.clear()
         super().uninit(agent)
+
+    async def before_model_call(self, ctx: AgentCallbackContext) -> None:
+        await super().before_model_call(ctx)
+        builder = self.system_prompt_builder
+        if builder is None:
+            return
+        section = builder.get_section(SectionName.SKILLS)
+        if section is None:
+            return
+        lang = getattr(builder, "language", None) or "cn"
+        if lang == "zh":
+            lang = "cn"
+        raw = section.content.get(lang) or section.content.get("cn") or ""
+        hint = _SKILLS_QA_HINT.get(lang, _SKILLS_QA_HINT["cn"])
+        marker = "可用技能：" if lang == "cn" else "Available skills:"
+        count_prefix = _SKILLS_COUNT_PREFIX.get(lang, _SKILLS_COUNT_PREFIX["cn"])
+        if marker not in raw:
+            return
+
+        patched = raw
+        if hint not in patched:
+            marker_pos = patched.find(marker)
+            patched = patched[:marker_pos] + hint + "\n" + patched[marker_pos:]
+        if count_prefix not in patched:
+            skill_count = len(self.skills) if self.skills else 0
+            count_line = _build_skills_count_line(lang, skill_count)
+            insert_at = _find_skills_list_end(patched, marker)
+            patched = patched[:insert_at] + "\n" + count_line + patched[insert_at:]
+        if patched == raw:
+            return
+
+        content = dict(section.content)
+        content[lang] = patched
+        builder.add_section(
+            PromptSection(
+                name=SectionName.SKILLS,
+                content=content,
+                priority=section.priority,
+            )
+        )
 
 
 __all__ = ["JiuWenSkillUseRail"]
