@@ -346,6 +346,7 @@ class RuntimePromptRail(DeepAgentRail):
                 - 任务完成后产生了需要交付给用户的文件（报告、文档、数据文件、图片等）
                 - 用户明确请求下载、导出、发送文件
                 - 用户询问生成的文件如何获取
+                - 用户主动调用`write_file`、`write_text_file`这类文件生成/修改工具后
 
                 **调用方式**：使用文件的绝对路径作为参数调用 `send_file_to_user` 工具。"""
         else:
@@ -402,6 +403,7 @@ Your default workspace and related configuration live under the `.jiuwenclaw` di
                 data files, images, etc.)
                 - User explicitly requests to download, export, or receive files
                 - User asks how to obtain generated files
+                - After the user actively invokes file generation/modification tools such as `write_file` and `write_text_file`
 
                 **How to call**: Use the absolute file path(s) as the parameter to invoke the `send_file_to_user` 
                 tool."""
