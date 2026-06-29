@@ -286,6 +286,8 @@ class RePlanExecutor:
         # ASK 决策会抛出 AbortError(cause=ToolInterruptException(request, tool_call))，
         # 由 _run_rail_hook → use_tool 透传出去，最终被 adapter 转成 HITL 三件套 chunk。
         permission_rail = self._build_permission_rail()
+        # 保存引用：replay-skip 路径需跳过权限 rail，但保留事件发射类 rail
+        self._permission_rail = permission_rail
 
         # Rail列表（按优先级排序）
         self._rails = [self._stream_event_rail]
@@ -686,14 +688,22 @@ class RePlanExecutor:
         self,
         hook_name: str,
         ctx: AgentCallbackContext,
+        *,
+        skip_rails: set[Any] | None = None,
     ) -> None:
         """按 Rail 优先级执行 hook。
 
         关键：``AbortError``（PermissionInterruptRail HITL 中断）必须向上抛出，
         否则护栏会被悄悄吞掉，前端永远收不到审批请求。
         其它普通 ``Exception`` 仍按"单 Rail 失败不影响主链"打 warning 后继续。
+
+        ``skip_rails``：需跳过的 rail 实例集合。replay-skip 路径用此参数
+        跳过 ``PermissionInterruptRail``，但仍执行事件发射类 rail 的 ``before_tool_call``，
+        以补发 ``chat.tool_call`` / ``chat.tool_update`` 事件。
         """
         for rail in self._rails:
+            if skip_rails and rail in skip_rails:
+                continue
             hook = getattr(rail, hook_name, None)
             if hook is None:
                 continue
@@ -1191,6 +1201,19 @@ class RePlanExecutor:
                     " (already executed before interrupt)",
                     tool_name,
                     tool_call_id,
+                )
+                # 仅跳过权限检查（PermissionInterruptRail），仍执行事件发射类 rail
+                # （stream_event_rail 等）的 before_tool_call，以补发
+                # chat.tool_call / chat.tool_update 事件，避免前端工具结果凭空出现、
+                # 缺调用上下文。
+                await self._run_rail_hook(
+                    "before_tool_call",
+                    ctx,
+                    skip_rails=(
+                        {self._permission_rail}
+                        if self._permission_rail is not None
+                        else None
+                    ),
                 )
             else:
                 try:
