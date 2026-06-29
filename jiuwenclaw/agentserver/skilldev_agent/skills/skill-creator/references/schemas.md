@@ -6,7 +6,7 @@ This document defines the JSON schemas used by skill-creator.
 
 ## evals.json
 
-Defines the approved evals for a skill. Located at `<workspace>/evals/evals.json`.
+Defines the proposed evals for a skill. Located at `<workspace>/evals/evals.json`.
 
 ```json
 {

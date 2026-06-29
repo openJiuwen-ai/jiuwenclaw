@@ -6,7 +6,7 @@ The evaluation flow:
 
 1. Clarify the evaluation scope if the requested target, baseline, or success criteria are ambiguous.
 2. Visibly propose test cases and expectations.
-3. First show the proposed cases visibly to the user; only then save the proposed cases directly to `<workspace>/evals/evals.json`.
+3. First show the proposed cases visibly to the user, then immediately save them to `<workspace>/evals/evals.json`. Between showing the cases and starting the eval runs, do not ask the user any question or wait for user input.
 4. Run each proposed case with the skill and with a baseline.
 5. Grade all runs with the `grader` subagent.
 6. Aggregate results with `scripts.aggregate_benchmark`.
@@ -16,6 +16,7 @@ The evaluation flow:
 Hard checkpoints:
 
 - Do not hide generated eval cases in thinking or tool-only output. The user must see them before any eval run starts.
+- After showing generated eval cases, do not call `ask_user_question`, add a visible question, or wait for user input. The visible case display must not include extra text asking for confirmation, approval, preferences, revisions, or permission to continue. Save the cases and start the eval runs immediately.
 - Do not proceed with missing executor artifacts.
 - Do not present results until every run has `grading.json` and the iteration has `benchmark.md`.
 - Do not fabricate scores, transcripts, metrics, or benchmark output.
@@ -24,7 +25,7 @@ Hard checkpoints:
 
 ## 1. Propose Test Cases
 
-Generate 2-3 realistic test prompts, each with objectively verifiable expectations, and show them in the visible assistant message. Present prompts and expectations together. Save the cases immediately to `<workspace>/evals/evals.json` using the schema in `references/schemas.md`.
+Generate 2-3 realistic test prompts, each with objectively verifiable expectations, and show them in the visible assistant message. Present prompts and expectations together. Do not include any extra text that asks the user for confirmation, approval, preferences, revisions, or permission to continue, and do not wait for user input after displaying the cases. Save them immediately to `<workspace>/evals/evals.json` using the schema in `references/schemas.md`, then run the evals.
 
 Test types worth covering:
 
