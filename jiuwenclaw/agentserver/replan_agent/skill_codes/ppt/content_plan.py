@@ -961,6 +961,11 @@ class ContentPlanNode(PlanNode):
             try:
                 for subplan in self.sub_plans:
                     await self.execute_subplan(subplan, ctx)
+                ctx["__artifact__"] = {
+                    "files": [
+                        {"path": str(ctx.get("outline_path", "")), "desc": "PPT大纲"}
+                    ] if ctx.get("outline_path") else [],
+                }
                 return ctx
             except ContentPlanError as exc:
                 last_error = str(exc)

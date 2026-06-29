@@ -37,6 +37,10 @@ from jiuwenclaw.agentserver.llm_io_trace import (
     log_tool_call_output,
 )
 from jiuwenclaw.agentserver.replan_agent.rails import RePlanArtifactRail
+from jiuwenclaw.agentserver.replan_agent.node_artifact_store import (
+    clear_node_artifacts,
+    save_node_artifacts,
+)
 from jiuwenclaw.agentserver.replan_agent.permission_bridge import (
     REPLAN_RESUME_CTX_KEY,
     build_tool_ctx,
@@ -317,6 +321,11 @@ class RePlanExecutor:
         self._current_task_id_holder: dict[str, str | None] = {"task_id": None}
         self._task_states_holder: dict[str, dict[str, Any]] = {}
 
+        # 节点产物记录 holder：plan_name → 产物 dict。
+        # 运行期在 _after_subplan_execute 中累积，仅在中断前/流末 finally 落盘，
+        # 避免每节点 post_run 的 IO 开销与事件流冲突。
+        self._node_artifacts_holder: dict[str, dict[str, Any]] = {}
+
         # ──────────────────────── LLM 并发限制 ────────────────────────
         # 实例级 Semaphore，限制本 Executor 内 call_llm / stream_llm 的并发数。
         # 配置来源：environment.config["llm_concurrency_limit"]，<=0 表示不限制。
@@ -475,6 +484,11 @@ class RePlanExecutor:
             channel_id=channel_id,
             enable_task_tracking=True,
         )
+
+        # 新一轮 RePlan 执行：清除上轮残留的 node_artifacts，避免全新任务误复用旧产物。
+        # holder 此时必为空（每次请求新建 Executor），清的是 session 中持久化的旧记录。
+        await self._clear_stale_node_artifacts()
+
         logger.info(
             "[RePlanExecutor] execute_plan_stream start plan_code_len=%s input_keys=%s",
             len(plan_code),
@@ -622,6 +636,11 @@ class RePlanExecutor:
             )
             yield self._make_complete_chunk(request_id, channel_id)
         finally:
+            # 流末兜底落盘节点产物记录（中断路径已在 use_tool 中提前落盘，此处覆盖正常/异常完成）。
+            # 必须在 _reset_execution_context 之前执行，否则 session ContextVar 已被重置。
+            session = _session_var.get()
+            if session is not None and self._node_artifacts_holder:
+                await self._persist_node_artifacts(session)
             self._reset_execution_context(context_tokens)
             self._execution_inputs = {}
             await self._finish_trace(start)
@@ -823,6 +842,63 @@ class RePlanExecutor:
 
         if self._trace_collector and self._config.enable_trace:
             await self._send_trace()
+
+    async def _clear_stale_node_artifacts(self) -> None:
+        """新一轮 RePlan 执行前，清除 session 中残留的上轮 node_artifacts。
+
+        场景：上轮"做西湖PPT"中断落盘了 artifacts，本轮"做长城PPT"被 planner 判定为
+        全新任务进入 RePlan。若本轮在首个节点产出前就失败（如 plan_code 编译失败），
+        finally 因 holder 为空跳过落盘，旧 artifacts 残留 → 下轮误复用。
+
+        注意：必须使用独立 session 而非主 session（_session_var.get()），因为
+        post_run() 会调用 close_stream() 关闭 stream emitter，导致后续
+        _execute_node_stream 的 drain_session_stream 读不到 tool_call 等事件。
+        """
+        session = _session_var.get()
+        if session is None:
+            return
+        sid = getattr(session, "session_id", None) or getattr(session, "_session_id", None)
+        card = self._env.card
+        try:
+            clear_session = create_agent_session(
+                session_id=sid, card=card
+            ) if sid else create_agent_session(card=card)
+            await clear_session.pre_run(inputs=None)
+            await clear_node_artifacts(clear_session)
+            await clear_session.post_run()
+        except Exception:
+            logger.debug(
+                "[RePlanExecutor] clear stale node artifacts failed", exc_info=True
+            )
+
+    async def _persist_node_artifacts(
+        self, session: Any, *, skip_post_run: bool = False
+    ) -> None:
+        """将内存中的节点产物记录落盘到 session state（checkpointer 持久化）。
+
+        幂等：多次调用安全，每次用 holder 当前快照覆盖写入。
+        落盘后不清空 holder，允许后续节点继续累积。
+        holder 在 _setup_execution_context 间接通过 __init__ 之外不会被重置；
+        真正清空发生在下一次请求创建新 Executor 实例时。
+
+        Args:
+            skip_post_run: 仅 update_state 不 post_run，由调用方随后统一 post_run。
+                中断路径与 save_resume_ctx 合并落盘时使用，避免重复 post_run。
+        """
+        if not self._node_artifacts_holder:
+            return
+        skill = self._env.skill_name or ""
+        try:
+            await save_node_artifacts(
+                session,
+                skill=skill,
+                nodes=dict(self._node_artifacts_holder),
+                skip_post_run=skip_post_run,
+            )
+        except Exception as exc:
+            logger.warning(
+                "[RePlanExecutor] persist_node_artifacts failed: %s", exc, exc_info=True
+            )
 
     @staticmethod
     def _build_tool_call_context(
@@ -1128,6 +1204,11 @@ class RePlanExecutor:
                         tool_call_id,
                         tic is not None,
                     )
+                    # 中断前一并落盘节点产物记录，供恢复时复用。
+                    # 先 update artifacts（不 post_run），再 save_resume_ctx（其 post_run
+                    # 一次性持久化 artifacts + resume_ctx），避免对主 session 重复
+                    # post_run 触发 close_stream。
+                    await self._persist_node_artifacts(session, skip_post_run=True)
                     try:
                         await save_resume_ctx(
                             session,
@@ -1765,6 +1846,15 @@ class RePlanExecutor:
                     # Fallback 超限是终止性错误，向上传播让 execute_plan_stream 感知
                     raise item
                 if isinstance(item, BaseException):
+                    # cancel 中断（asyncio.CancelledError / KeyboardInterrupt）必须向上抛，
+                    # 不能当作普通节点错误处理 —— 否则节点会被误判 completed，
+                    # 产物记录为"已成功执行（无产物）"，DeepAgent 误以为步骤已完成而跳过。
+                    if isinstance(item, (asyncio.CancelledError, KeyboardInterrupt)):
+                        logger.warning(
+                            "[RePlanExecutor] _execute_node_stream propagate cancel interrupt: %s",
+                            type(item).__name__,
+                        )
+                        raise item
                     # HITL 中断（PermissionInterruptRail.AbortError）必须向上抛，
                     # 不能转成 node_error_chunk —— 否则 RePlanAgent.run_stream 看不到中断，
                     # adapter 也就拿不到 AbortError 来发 HITL 三件套。
@@ -2302,6 +2392,55 @@ class RePlanExecutor:
         current_task_holder = _current_task_holder_var.get()
         if current_task_holder is not None:
             current_task_holder["task_id"] = None
+
+        self._collect_node_artifact(subplan, result_or_error, task_id, timestamp, is_error)
+
+    def _collect_node_artifact(
+        self,
+        subplan: PlanNode,
+        result_or_error: Any,
+        task_id: str,
+        timestamp: float,
+        is_error: bool,
+    ) -> None:
+        """节点产物收集。
+
+        成功路径：仅当节点声明了 __artifact__ 时记录。
+        异常路径：仍需节点在异常对象上挂 _partial_artifact 才记录。
+        此处只更新内存 holder，落盘由流末 finally 统一完成。
+        读完立即从 result 中清除（pop）。
+        """
+        if is_error:
+            # 异常路径：仅记录带 partial artifact 的中断
+            artifact = getattr(result_or_error, "_partial_artifact", None)
+            if not isinstance(artifact, dict):
+                return
+            node_status = "interrupted"
+            info = artifact.get("info") if isinstance(artifact.get("info"), dict) else {}
+            files = artifact.get("files") if isinstance(artifact.get("files"), list) else []
+        else:
+            # 成功路径：仅记录带 __artifact__ 的节点
+            artifact = None
+            if isinstance(result_or_error, dict):
+                artifact = result_or_error.pop("__artifact__", None)
+            if not isinstance(artifact, dict):
+                return
+            node_status = "completed"
+            info = artifact.get("info") if isinstance(artifact.get("info"), dict) else {}
+            files = artifact.get("files") if isinstance(artifact.get("files"), list) else []
+        self._node_artifacts_holder[subplan.plan_name] = {
+            "task_id": task_id,
+            "status": node_status,
+            "info": info,
+            "files": files,
+            "finished_at": timestamp,
+        }
+        logger.debug(
+            "[RePlanExecutor] node_artifact collected: plan_name=%s status=%s has_artifact=%s",
+            subplan.plan_name,
+            node_status,
+            bool(info or files),
+        )
 
     def _get_or_create_task_state(
         self,

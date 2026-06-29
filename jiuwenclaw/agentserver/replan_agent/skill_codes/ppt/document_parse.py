@@ -428,6 +428,11 @@ class DocumentParseNode(PlanNode):
             inputs["topic"] = ""
             inputs["topic_inferred"] = False
 
+        if ok and inputs.get("doc_raw_path"):
+            inputs["__artifact__"] = {
+                "files": [{"path": inputs["doc_raw_path"], "desc": "解析后文档原文"}],
+                "info": {"topic_inferred": inputs.get("topic_inferred", False)},
+            }
         return inputs
 
     async def _execute_stream(self, inputs: dict[str, Any]) -> AsyncIterator[dict[str, Any]]:

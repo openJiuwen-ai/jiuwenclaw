@@ -1595,7 +1595,12 @@ class DeepResearchNode(PlanNode):
             research_path = ""
 
         logger.info("[P6] 深度研究完成 research_path=%s", research_path)
-        return {"research_path": research_path}
+        return {
+            "research_path": research_path,
+            "__artifact__": {
+                "files": [{"path": research_path, "desc": "深度研究报告"}] if research_path else []
+            },
+        }
 
     async def _execute_stream(self, inputs: dict[str, Any]) -> AsyncIterator[dict[str, Any]]:
         result = await self._execute(inputs)

@@ -101,7 +101,10 @@ class StylePrepareNode(PlanNode):
         style_file_path = f"{output_dir}/style-{style_id}.md"
         await self._write_style_file(style_file_path, style_content)
 
-        return {"style_file_path": style_file_path}
+        return {
+            "style_file_path": style_file_path,
+            "__artifact__": {"files": [{"path": style_file_path, "desc": "PPT风格文件"}]},
+        }
 
     async def _load_preset_style(self, style_id: str, pptx_root: str = "") -> str:
         candidates: list[Path] = []

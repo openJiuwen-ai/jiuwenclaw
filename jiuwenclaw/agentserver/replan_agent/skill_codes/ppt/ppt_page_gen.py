@@ -1522,6 +1522,14 @@ class PPTPageGenNode(PlanNode):
             "low_density_pages": low_density_pages,
             "fix_report": fix_report,
             "ppt_gen_status": ppt_gen_status,
+            "__artifact__": {
+                "info": {
+                    "ppt_gen_status": ppt_gen_status,
+                    "page_count": len(final_page_files),
+                    "missing_count": len(missing_pages),
+                },
+                "files": [{"path": f, "desc": "PPT页面"} for f in final_page_files] if final_page_files else [],
+            },
         }
 
     async def _execute_stream(self, inputs: dict[str, Any]) -> AsyncIterator[dict[str, Any]]:

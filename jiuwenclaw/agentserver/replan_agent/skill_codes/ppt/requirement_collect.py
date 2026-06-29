@@ -209,6 +209,19 @@ def _has_nonempty_topic(inputs: dict[str, Any]) -> bool:
     return isinstance(topic, str) and bool(topic.strip())
 
 
+def _set_requirement_artifact(ctx: dict[str, Any]) -> None:
+    """把 P2 需求收集的关键槽位写入 __artifact__，供跨请求复用。"""
+    ctx["__artifact__"] = {
+        "info": {
+            "topic": ctx.get("topic", ""),
+            "page_count": ctx.get("page_count"),
+            "style_id": ctx.get("style_id", ""),
+            "audience": ctx.get("audience", ""),
+            "presentation_purpose": ctx.get("presentation_purpose", ""),
+        },
+    }
+
+
 def _apply_slot_defaults(inputs: dict[str, Any]) -> None:
     if not inputs.get("audience"):
         inputs["audience"] = _DEFAULT_AUDIENCE
@@ -1355,6 +1368,7 @@ class RequirementCollectNode(PlanNode):
 
             if not _has_nonempty_topic(ctx):
                 raise RequirementCollectError("缺少演示主题 topic，无法继续 PPT 流水线")
+            _set_requirement_artifact(ctx)
             return ctx
 
         # 部分预填：把 P1 提取的已知槽位填入 ctx，让 P2.1 减少工作量
@@ -1373,4 +1387,5 @@ class RequirementCollectNode(PlanNode):
         if not _has_nonempty_topic(ctx):
             raise RequirementCollectError("缺少演示主题 topic，无法继续 PPT 流水线")
 
+        _set_requirement_artifact(ctx)
         return ctx

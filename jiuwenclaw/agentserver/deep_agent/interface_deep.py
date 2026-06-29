@@ -137,6 +137,9 @@ from jiuwenclaw.agentserver.deep_agent.interrupt_resume_helpers import (
     prepare_interrupt_resume_for_request,
     set_todo_resume_snapshot_pending,
 )
+from jiuwenclaw.agentserver.replan_agent.node_artifact_store import (
+    load_node_artifacts as _replan_load_node_artifacts,
+)
 from jiuwenclaw.agentserver.replan_agent.permission_bridge import (
     clear_resume_ctx as _replan_clear_resume_ctx,
     extract_tool_interrupt as _replan_extract_tool_interrupt,
@@ -6214,6 +6217,46 @@ class JiuWenClawDeepAdapter:
         params = request.params if isinstance(getattr(request, "params", None), dict) else {}
         answers: list = params.get("answers") or []
 
+        # ── 节点产物上下文注入：非 resume 请求且 session 有未消费的 RePlan 节点产物时，
+        #    将摘要注入 inputs["__replan_prior_artifacts__"]，供 planner LLM 判断
+        #    当前任务是"从零开始"还是"基于已有产物的增量操作"。 ──
+        if not answers and self._instance is not None:
+            artifact_check_session = None
+            try:
+                artifact_check_session = create_agent_session(
+                    session_id=request.session_id or "default",
+                    card=self._instance.card,
+                )
+                existing_artifacts = await _replan_load_node_artifacts(artifact_check_session)
+                if (
+                    existing_artifacts
+                    and isinstance(existing_artifacts.get("nodes"), dict)
+                    and existing_artifacts["nodes"]
+                ):
+                    nodes = existing_artifacts["nodes"]
+                    summaries = self._build_artifacts_summary(nodes)
+                    if summaries:
+                        inputs = dict(inputs)
+                        inputs["__replan_prior_artifacts__"] = "\n".join(summaries)
+                        logger.info(
+                            "[JiuWenClawDeepAdapter] RePlan node artifacts injected to context "
+                            "for planner routing: session_id=%s nodes=%d",
+                            request.session_id,
+                            len(nodes),
+                        )
+            except Exception as exc:
+                logger.debug(
+                    "[JiuWenClawDeepAdapter] load replan node artifacts for routing failed: %s",
+                    exc,
+                    exc_info=True,
+                )
+            finally:
+                if artifact_check_session is not None:
+                    try:
+                        await artifact_check_session.post_run()
+                    except Exception:
+                        pass
+
         # ── Resume 路径 ──
         if answers:
             session = create_agent_session(
@@ -6525,6 +6568,81 @@ class JiuWenClawDeepAdapter:
             is_complete=True,
         )
 
+    @staticmethod
+    def _build_artifacts_summary(nodes: dict[str, Any]) -> list[str]:
+        """将节点产物 nodes 构建为可读摘要列表。
+
+        格式: ``- {plan_name}: {info 摘要} | 文件: {路径列表}``
+        """
+        summaries: list[str] = []
+        for plan_name, node_info in nodes.items():
+            if not isinstance(node_info, dict):
+                continue
+            parts: list[str] = []
+            info = node_info.get("info")
+            if isinstance(info, dict) and info:
+                parts.append(", ".join(f"{k}={v}" for k, v in info.items() if v is not None))
+            files = node_info.get("files")
+            if isinstance(files, list) and files:
+                parts.append("文件: " + ", ".join(
+                    f.get("path", "") for f in files if isinstance(f, dict) and f.get("path")
+                ))
+            if parts:
+                summaries.append(f"- {plan_name}: {' | '.join(parts)}")
+        return summaries
+
+    async def _inject_replan_node_artifacts(
+        self,
+        session_id: str,
+        inputs: dict[str, Any],
+    ) -> dict[str, Any]:
+        """读取已持久化的 RePlan 节点产物，拼成补充提示注入 inputs。
+
+        不在此处清除——产物保留在 session 中，由下次 RePlan 启动时
+        _clear_stale_node_artifacts 覆盖。注入提示中已含守卫规则
+        （关键参数不一致则不复用），LLM 会自主判断。
+        """
+        artifact_session = None
+        try:
+            artifact_session = create_agent_session(
+                session_id=session_id,
+                card=self._instance.card if self._instance is not None else None,
+            )
+            node_artifacts = await _replan_load_node_artifacts(artifact_session)
+            if not (node_artifacts and isinstance(node_artifacts.get("nodes"), dict)):
+                return inputs
+
+            nodes = node_artifacts["nodes"]
+            summaries = self._build_artifacts_summary(nodes)
+
+            if summaries:
+                reuse_block = (
+                    "以下步骤已在上轮 RePlan 阶段成功完成，请勿重做：\n"
+                    + "\n".join(summaries)
+                    + "\n\n注意：若当前任务与上述产物的任意关键参数（主题 topic、"
+                    "页数 page_count、风格 style_id、受众 audience、演示目的 "
+                    "presentation_purpose）不一致，请勿复用，应从零开始重新制作。"
+                )
+                inputs = dict(inputs)
+                existing = inputs.get("query", "")
+                inputs["query"] = f"{existing}\n\n{reuse_block}" if existing else reuse_block
+                logger.info(
+                    "[JiuWenClawDeepAdapter] RePlan node artifacts reused: "
+                    "session_id=%s nodes=%d",
+                    session_id,
+                    len(nodes),
+                )
+            # 注入后不清除——产物保留供后续请求复用，由下次 RePlan 启动时覆盖
+        except Exception as exc:
+            logger.debug(
+                "[JiuWenClawDeepAdapter] load replan node artifacts failed: %s", exc,
+                exc_info=True,
+            )
+        finally:
+            if artifact_session is not None:
+                await artifact_session.post_run()
+        return inputs
+
     async def process_message_impl(
             self, request: AgentRequest, inputs: dict[str, Any]
     ) -> AgentResponse:
@@ -6772,6 +6890,8 @@ class JiuWenClawDeepAdapter:
                     "[JiuWenClawDeepAdapter] RePlanAgent 未完整完成，继续 DeepAgent 流程: request_id=%s",
                     request.request_id,
                 )
+        # ── RePlan 节点产物复用：降级到 DeepAgent 时，注入已持久化的节点产物。 ──
+        inputs = await self._inject_replan_node_artifacts(session_id, inputs)
         query = request.params.get("query", "")
         mode = request.params.get("mode", "agent.plan")
         self._last_runtime_mode = mode
