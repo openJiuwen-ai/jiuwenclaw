@@ -63,12 +63,12 @@ def _normalize_permissions_config_params(params: dict[str, Any]) -> dict[str, An
 def _hot_reload_permission_engine_from_config() -> None:
     from jiuwenclaw.agentserver.permissions.config_loader import (
         clear_permissions_config_cache,
-        get_effective_permissions_config,
+        get_base_permissions_config,
     )
     from jiuwenclaw.agentserver.permissions.core import get_permission_engine
 
     clear_permissions_config_cache()
-    get_permission_engine().update_config(get_effective_permissions_config(force_reload=True))
+    get_permission_engine().update_config(get_base_permissions_config(force_reload=True))
 
 
 def _err(request: AgentRequest, message: str, *, code: str = "BAD_REQUEST") -> AgentResponse:
@@ -116,9 +116,9 @@ def dispatch_permissions_config_request(request: AgentRequest) -> AgentResponse:
 
     try:
         if m == ReqMethod.PERMISSIONS_ENABLED_GET:
-            from jiuwenclaw.agentserver.permissions.config_loader import get_effective_permissions_config
+            from jiuwenclaw.agentserver.permissions.config_loader import get_base_permissions_config
 
-            enabled = bool(get_effective_permissions_config().get("enabled", True))
+            enabled = bool(get_base_permissions_config().get("enabled", True))
             return _ok(request, {"enabled": enabled})
 
         if m == ReqMethod.PERMISSIONS_ENABLED_SET:

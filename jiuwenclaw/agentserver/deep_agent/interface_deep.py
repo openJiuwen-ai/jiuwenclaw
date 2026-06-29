@@ -113,6 +113,10 @@ from jiuwenclaw.agentserver.memory import clear_memory_manager_cache
 from jiuwenclaw.agentserver.memory.config import (clear_config_cache, get_memory_mode, is_memory_enabled,
                                                   is_proactive_memory, clear_embed_config_db_cache)
 from jiuwenclaw.agentserver.permissions.checker import TOOL_PERMISSION_CHANNEL_ID
+from jiuwenclaw.agentserver.permissions.config_loader import (
+    reset_permissions_session_scope,
+    setup_permissions_session_scope,
+)
 from jiuwenclaw.agentserver.cron_config import should_register_cron_tools
 from jiuwenclaw.agentserver.skill_manager import SkillManager
 from jiuwenclaw.agentserver.tools.multimodal_config import (
@@ -4246,6 +4250,7 @@ class JiuWenClawDeepAdapter:
         )
         token_cid = TOOL_PERMISSION_CHANNEL_ID.set((request.channel_id or "").strip())
         token_perm = setup_permission_context(request)
+        token_perm_sid = setup_permissions_session_scope(session_id)
 
         # Set telemetry context for OpenTelemetry span creation
         if self._telemetry_rail is not None:
@@ -4270,6 +4275,7 @@ class JiuWenClawDeepAdapter:
         finally:
             TOOL_PERMISSION_CHANNEL_ID.reset(token_cid)
             cleanup_permission_context(token_perm)
+            reset_permissions_session_scope(token_perm_sid)
             self._reset_runtime_cron_context(cron_context_tokens)
             _LLM_TRACE_SESSION_ID.reset(token_trace_sid)
             _LLM_TRACE_REQUEST_ID.reset(token_trace_rid)
@@ -4412,6 +4418,7 @@ class JiuWenClawDeepAdapter:
             )
         token_cid = TOOL_PERMISSION_CHANNEL_ID.set((request.channel_id or "").strip())
         token_perm = setup_permission_context(request)
+        token_perm_sid = setup_permissions_session_scope(session_id)
         try:
             await self._update_runtime_config(_RuntimeConfigParams.from_agent_request(request, mode))
 
@@ -4712,6 +4719,7 @@ class JiuWenClawDeepAdapter:
         finally:
             TOOL_PERMISSION_CHANNEL_ID.reset(token_cid)
             cleanup_permission_context(token_perm)
+            reset_permissions_session_scope(token_perm_sid)
             self._reset_runtime_cron_context(cron_context_tokens)
             _LLM_TRACE_SESSION_ID.reset(token_trace_sid)
             _LLM_TRACE_REQUEST_ID.reset(token_trace_rid)

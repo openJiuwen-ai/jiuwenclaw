@@ -412,10 +412,14 @@ def classify_tool_file_action_kind(tool_name: str) -> Literal["read", "write", "
 # ---------- 持久化 ----------
 
 
-def _yaml_update_permissions(mutate_fn) -> None:
+def _yaml_update_permissions(
+    mutate_fn,
+    *,
+    session_id: str | None = None,
+) -> None:
     from jiuwenclaw.agentserver.permissions.config_loader import persist_permissions_mutate
 
-    persist_permissions_mutate(mutate_fn, source="runtime_persist")
+    persist_permissions_mutate(mutate_fn, session_id=session_id)
 
 
 def _ensure_file_guard_dict(permissions: dict[str, Any]) -> dict[str, Any]:
@@ -448,7 +452,11 @@ def _filter_persistable(operations: list[FileOperation]) -> list[FileOperation]:
     return out
 
 
-def persist_file_operations_allow(operations: list[FileOperation]) -> None:
+def persist_file_operations_allow(
+    operations: list[FileOperation],
+    *,
+    session_id: str | None = None,
+) -> None:
     """落地用户的 ``allow_always`` 决策到 ``file_guard.global`` / ``trusted_exec_directory``。"""
     if not operations:
         return
@@ -478,7 +486,7 @@ def persist_file_operations_allow(operations: list[FileOperation]) -> None:
                 cur = {**cur, "write_enable": True}
             gm[path_norm] = cur
 
-    _yaml_update_permissions(mutate)
+    _yaml_update_permissions(mutate, session_id=session_id)
     logger.info("[file_guard] persist_file_operations_allow count=%s", len(persistable))
 
 
