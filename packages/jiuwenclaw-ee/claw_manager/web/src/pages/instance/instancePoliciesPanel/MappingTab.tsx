@@ -6,6 +6,7 @@ import { useListSearch } from '../../../hooks/useListSearch';
 import type {
   ConfigDefaultTemplateMapping,
   ConfigDefaultTemplateMappingCreateBody,
+  MappingScopeType,
 } from '../../../types';
 import { Empty } from '../../../components/Empty';
 import { Pagination } from '../../../components/Pagination';
@@ -34,9 +35,10 @@ const MAPPING_TEMPLATE_SLOTS = TEMPLATE_REF_SLOTS;
 const FIELD_MAX_LENGTH = {
   policy_name: 128,
   policy_desc: 512,
-  user_id: 512,
-  group_id: 512,
+  scope_id: 512,
 } as const;
+
+const SCOPE_TYPES: MappingScopeType[] = ['user', 'group', 'bot'];
 
 function FieldLabel({ children, required }: { children: ReactNode; required?: boolean }) {
   return (
@@ -50,8 +52,8 @@ function FieldLabel({ children, required }: { children: ReactNode; required?: bo
 interface FormState {
   policy_name: string;
   policy_desc: string;
-  user_id: string;
-  group_id: string;
+  scope_type: MappingScopeType;
+  scope_id: string;
   priority: number;
   template_id: string;
   template_type: string;
@@ -60,8 +62,8 @@ interface FormState {
 const emptyForm: FormState = {
   policy_name: '',
   policy_desc: '',
-  user_id: '',
-  group_id: '',
+  scope_type: 'user',
+  scope_id: '',
   priority: 0,
   template_id: '',
   template_type: 'default_model',
@@ -71,8 +73,8 @@ type MappingSortField =
   | 'policy_name'
   | 'policy_desc'
   | 'priority'
-  | 'user_id'
-  | 'group_id'
+  | 'scope_type'
+  | 'scope_id'
   | 'template_type'
   | 'template_id'
   | 'updated_at';
@@ -157,8 +159,8 @@ export function MappingTab({ instanceId }: { instanceId: string }) {
       setForm({
         policy_name: editing.policy_name ?? '',
         policy_desc: editing.policy_desc ?? '',
-        user_id: editing.user_id ?? '',
-        group_id: editing.group_id ?? '',
+        scope_type: editing.scope_type ?? 'user',
+        scope_id: editing.scope_id ?? '',
         priority: editing.priority,
         template_id: editing.template_id,
         template_type: editing.template_type,
@@ -213,11 +215,15 @@ export function MappingTab({ instanceId }: { instanceId: string }) {
       toast('warn', t('policies.fieldRequired', { field: t('policies.mapping.priority') }));
       return;
     }
+    if (!form.scope_id.trim()) {
+      toast('warn', t('policies.fieldRequired', { field: t('policies.mapping.scopeId') }));
+      return;
+    }
     const body: ConfigDefaultTemplateMappingCreateBody = {
       policy_name: form.policy_name.trim(),
       policy_desc: form.policy_desc.trim() || undefined,
-      user_id: form.user_id.trim() || undefined,
-      group_id: form.group_id.trim() || undefined,
+      scope_type: form.scope_type,
+      scope_id: form.scope_id.trim(),
       priority: form.priority,
       template_id: form.template_id.trim(),
       template_type: form.template_type.trim(),
@@ -320,18 +326,18 @@ export function MappingTab({ instanceId }: { instanceId: string }) {
                 </th>
                 <th>
                   <TableColumnSort
-                    label={t('policies.mapping.userId')}
-                    value={sortBy === 'user_id' ? sortOrder : ''}
+                    label={t('policies.mapping.scopeType')}
+                    value={sortBy === 'scope_type' ? sortOrder : ''}
                     options={sortOptions}
-                    onChange={(value) => handleSortChange('user_id', value)}
+                    onChange={(value) => handleSortChange('scope_type', value)}
                   />
                 </th>
                 <th>
                   <TableColumnSort
-                    label={t('policies.mapping.groupId')}
-                    value={sortBy === 'group_id' ? sortOrder : ''}
+                    label={t('policies.mapping.scopeId')}
+                    value={sortBy === 'scope_id' ? sortOrder : ''}
                     options={sortOptions}
-                    onChange={(value) => handleSortChange('group_id', value)}
+                    onChange={(value) => handleSortChange('scope_id', value)}
                   />
                 </th>
                 <th>
@@ -427,17 +433,16 @@ export function MappingTab({ instanceId }: { instanceId: string }) {
                           {row.priority}
                         </span>
                       </td>
-                      <td
-                        className="mono text-xs min-w-[10rem] max-w-[18rem] break-all align-top"
-                        title={row.user_id ?? undefined}
-                      >
-                        {row.user_id || '—'}
+                      <td className="text-xs whitespace-nowrap align-top">
+                        {t(`policies.mapping.scopeTypes.${row.scope_type}`, {
+                          defaultValue: row.scope_type,
+                        })}
                       </td>
                       <td
                         className="mono text-xs min-w-[10rem] max-w-[18rem] break-all align-top"
-                        title={row.group_id ?? undefined}
+                        title={row.scope_id}
                       >
-                        {row.group_id || '—'}
+                        {row.scope_id || '—'}
                       </td>
                       <td className="text-xs max-w-[10rem] truncate" title={row.template_type}>
                         {truncate(slotLabel(t, row.template_type), 28)}
@@ -560,19 +565,25 @@ export function MappingTab({ instanceId }: { instanceId: string }) {
             />
           </div>
           <div>
-            <FieldLabel>{t('policies.mapping.userId')}</FieldLabel>
-            <LimitedTextInput
-              value={form.user_id}
-              maxLength={FIELD_MAX_LENGTH.user_id}
-              onChange={(v) => update('user_id', v)}
-            />
+            <FieldLabel required>{t('policies.mapping.scopeType')}</FieldLabel>
+            <select
+              className="select w-full"
+              value={form.scope_type}
+              onChange={(e) => update('scope_type', e.target.value as MappingScopeType)}
+            >
+              {SCOPE_TYPES.map((scopeType) => (
+                <option key={scopeType} value={scopeType}>
+                  {t(`policies.mapping.scopeTypes.${scopeType}`, { defaultValue: scopeType })}
+                </option>
+              ))}
+            </select>
           </div>
           <div>
-            <FieldLabel>{t('policies.mapping.groupId')}</FieldLabel>
+            <FieldLabel required>{t('policies.mapping.scopeId')}</FieldLabel>
             <LimitedTextInput
-              value={form.group_id}
-              maxLength={FIELD_MAX_LENGTH.group_id}
-              onChange={(v) => update('group_id', v)}
+              value={form.scope_id}
+              maxLength={FIELD_MAX_LENGTH.scope_id}
+              onChange={(v) => update('scope_id', v)}
             />
           </div>
           <div className="md:col-span-2 border-t border-[var(--border)] pt-3 mt-1 grid grid-cols-1 md:grid-cols-[1fr_3fr] gap-3">

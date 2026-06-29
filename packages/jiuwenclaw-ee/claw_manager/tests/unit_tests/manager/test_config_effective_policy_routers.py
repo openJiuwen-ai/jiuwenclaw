@@ -661,8 +661,8 @@ async def test_default_template_mapping_crud(manager_api: ManagerApiHarness):
     created = await h.post_json(
         "/config-default-template-mappings",
         {
-            "user_id": "carol",
-            "group_id": None,
+            "scope_type": "user",
+            "scope_id": "carol",
             "priority": 0,
             "template_id": template_id,
             "template_type": "default_model",
@@ -673,7 +673,8 @@ async def test_default_template_mapping_crud(manager_api: ManagerApiHarness):
 
     listed = await h.get_json(
         "/config-default-template-mappings",
-        user_id="carol",
+        scope_type="user",
+        scope_id="carol",
         template_type="default_model",
     )
     assert listed["total"] == 1
@@ -699,8 +700,8 @@ async def test_mapping_list_search(manager_api: ManagerApiHarness):
         {
             "policy_name": "Alpha Mapping",
             "policy_desc": "sales team default",
-            "user_id": "carol",
-            "group_id": "sales",
+            "scope_type": "user",
+            "scope_id": "carol",
             "priority": 42,
             "template_id": template_id,
             "template_type": "default_model",
@@ -712,8 +713,8 @@ async def test_mapping_list_search(manager_api: ManagerApiHarness):
         {
             "policy_name": "Beta Mapping",
             "policy_desc": "other team",
-            "user_id": "dave",
-            "group_id": "ops",
+            "scope_type": "user",
+            "scope_id": "dave",
             "priority": 7,
             "template_id": template_id,
             "template_type": "video_model",

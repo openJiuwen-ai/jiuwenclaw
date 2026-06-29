@@ -497,7 +497,8 @@ def phase_templates(instance_ids: list[str]) -> None:
     carol_map = post(
         f"/api/v1/instances/{full}/config-default-template-mappings",
         {
-            "user_id": "carol",
+            "scope_type": "user",
+            "scope_id": "carol",
             "priority": 0,
             "template_id": t_ds,
             "template_type": "default_model",
@@ -510,7 +511,8 @@ def phase_templates(instance_ids: list[str]) -> None:
     group_map = post(
         f"/api/v1/instances/{full}/config-default-template-mappings",
         {
-            "group_id": "g_demo_sales",
+            "scope_type": "group",
+            "scope_id": "g_demo_sales",
             "priority": 1,
             "template_id": t_qwen,
             "template_type": "default_model",
@@ -536,7 +538,8 @@ def phase_templates(instance_ids: list[str]) -> None:
     half_map = post(
         f"/api/v1/instances/{half}/config-default-template-mappings",
         {
-            "group_id": "g_prod_qa",
+            "scope_type": "group",
+            "scope_id": "g_prod_qa",
             "priority": 0,
             "template_id": t_qwen,
             "template_type": "default_model",

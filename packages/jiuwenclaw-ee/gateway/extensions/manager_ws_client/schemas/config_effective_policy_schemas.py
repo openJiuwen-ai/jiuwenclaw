@@ -77,8 +77,8 @@ class ConfigEffectiveGlobalPolicyCreateRequest(BaseModel):
 class ConfigDefaultTemplateMappingUpdateRequest(BaseModel):
     policy_name: str | None = Field(default=None, max_length=128, min_length=1)
     policy_desc: str | None = Field(default=None, max_length=512)
-    user_id: str | None = Field(default=None, max_length=512)
-    group_id: str | None = Field(default=None, max_length=512)
+    scope_type: str | None = Field(default=None, max_length=32)
+    scope_id: str | None = Field(default=None, max_length=512)
     priority: int | None = None
     template_id: str | None = Field(default=None, max_length=512)
     template_type: str | None = Field(default=None, max_length=512)
@@ -118,15 +118,15 @@ class ConfigEffectiveAgentPolicyCreateRequest(BaseModel):
 
 
 class ConfigDefaultTemplateMappingCreateRequest(BaseModel):
-    """创建用户/群组默认模板映射（WebSocket 同步用）。"""
+    """创建作用域默认模板映射（WebSocket 同步用）。"""
 
     model_config = ConfigDict(str_strip_whitespace=True)
 
     policy_id: str = Field(..., max_length=100, min_length=1)
     policy_name: str = Field(..., max_length=128, min_length=1)
     policy_desc: str | None = Field(default=None, max_length=512)
-    user_id: str | None = Field(default=None, max_length=512)
-    group_id: str | None = Field(default=None, max_length=512)
+    scope_type: str = Field(..., max_length=32, min_length=1)
+    scope_id: str = Field(..., max_length=512, min_length=1)
     priority: int = 0
     template_id: str = Field(..., max_length=512, min_length=1)
     template_type: str = Field(..., max_length=512, min_length=1)

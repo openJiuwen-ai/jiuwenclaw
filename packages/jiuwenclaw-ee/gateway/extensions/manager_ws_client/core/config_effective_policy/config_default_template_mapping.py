@@ -17,6 +17,7 @@ from ...models.config_effective_policy_models import (
 from ...schemas.config_effective_policy_schemas import (
     ConfigDefaultTemplateMappingUpdateRequest,
 )
+from ..enterprise_config.schemas import MAPPING_SCOPE_TYPES
 
 _TABLE = CONFIG_DEFAULT_TEMPLATE_MAPPING_TABLE_DEF.table_name
 logger = logging.getLogger(__name__)
@@ -48,14 +49,16 @@ def _validate_template_type(template_type: str) -> str:
     return normalized
 
 
-def _validate_dimension_keys(
-    user_id: str | None, group_id: str | None
-) -> tuple[str | None, str | None]:
-    uid = _optional_key(user_id)
-    gid = _optional_key(group_id)
-    if uid is None and gid is None:
-        raise ValueError("at least one of user_id or group_id is required")
-    return uid, gid
+def _validate_scope(scope_type: str, scope_id: str) -> tuple[str, str]:
+    st = str(scope_type or "").strip().lower()
+    if st not in MAPPING_SCOPE_TYPES:
+        raise ValueError(
+            f"scope_type must be one of {sorted(MAPPING_SCOPE_TYPES)}, got {scope_type!r}"
+        )
+    sid = str(scope_id or "").strip()
+    if not sid:
+        raise ValueError("scope_id is required")
+    return st, sid
 
 
 async def _get_row_for_instance(
@@ -88,14 +91,14 @@ async def update_config_default_template_mapping_record(
         updates["template_id"] = updates["template_id"].strip()
         if not updates["template_id"]:
             raise ValueError("template_id cannot be empty")
-    if "user_id" in updates:
-        updates["user_id"] = _optional_key(updates["user_id"])
-    if "group_id" in updates:
-        updates["group_id"] = _optional_key(updates["group_id"])
+    if "scope_type" in updates and updates["scope_type"] is not None:
+        updates["scope_type"] = str(updates["scope_type"]).strip().lower()
+    if "scope_id" in updates and updates["scope_id"] is not None:
+        updates["scope_id"] = str(updates["scope_id"]).strip()
 
-    merged_user = updates.get("user_id", getattr(existing, "user_id", None))
-    merged_group = updates.get("group_id", getattr(existing, "group_id", None))
-    _validate_dimension_keys(merged_user, merged_group)
+    merged_type = updates.get("scope_type", getattr(existing, "scope_type", None))
+    merged_id = updates.get("scope_id", getattr(existing, "scope_id", None))
+    _validate_scope(str(merged_type), str(merged_id))
 
     if not updates:
         raise ValueError("请求未包含任何可更新的业务字段")
@@ -140,8 +143,9 @@ async def apply_config_default_template_mapping(
         policy_name = str(mapping.get("policy_name") or "").strip()
         if not policy_name:
             raise ValueError("policy_name is required")
-        user_id, group_id = _validate_dimension_keys(
-            mapping.get("user_id"), mapping.get("group_id")
+        scope_type, scope_id = _validate_scope(
+            str(mapping.get("scope_type") or ""),
+            str(mapping.get("scope_id") or ""),
         )
         template_type = _validate_template_type(str(mapping["template_type"]))
         template_id = str(mapping["template_id"]).strip()
@@ -156,8 +160,8 @@ async def apply_config_default_template_mapping(
             "policy_id": mapping["policy_id"],
             "policy_name": policy_name,
             "policy_desc": mapping.get("policy_desc"),
-            "user_id": user_id,
-            "group_id": group_id,
+            "scope_type": scope_type,
+            "scope_id": scope_id,
             "priority": priority,
             "template_id": template_id,
             "template_type": template_type,

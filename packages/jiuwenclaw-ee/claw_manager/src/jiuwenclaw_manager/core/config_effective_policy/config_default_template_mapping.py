@@ -1,4 +1,4 @@
-"""用户与群组默认模板映射 config_default_template_mapping 业务逻辑。"""
+"""作用域默认模板映射 config_default_template_mapping 业务逻辑。"""
 
 from __future__ import annotations
 
@@ -31,6 +31,7 @@ from jiuwenclaw_manager.schemas.config_effective_policy_schemas import (
     ConfigDefaultTemplateMappingOut,
     ConfigDefaultTemplateMappingUpdateBody,
 )
+from jiuwenclaw_manager.schemas.template_slot_schemas import MAPPING_SCOPE_TYPES
 
 _TEMPLATE_MAPPING_TABLE = CONFIG_DEFAULT_TEMPLATE_MAPPING_TABLE_DEF.table_name
 _LIST_ALL_CAP = 10_000
@@ -38,8 +39,8 @@ _ALLOWED_SORT_FIELDS = frozenset({
     "policy_name",
     "policy_desc",
     "priority",
-    "user_id",
-    "group_id",
+    "scope_type",
+    "scope_id",
     "template_type",
     "template_id",
     "updated_at",
@@ -54,8 +55,8 @@ def _matches_search(row: Any, query: str) -> bool:
         str(getattr(row, "policy_id", "") or ""),
         str(getattr(row, "policy_name", "") or ""),
         str(getattr(row, "policy_desc", "") or ""),
-        str(getattr(row, "user_id", "") or ""),
-        str(getattr(row, "group_id", "") or ""),
+        str(getattr(row, "scope_type", "") or ""),
+        str(getattr(row, "scope_id", "") or ""),
         str(getattr(row, "template_type", "") or ""),
         str(getattr(row, "template_id", "") or ""),
         str(getattr(row, "priority", "") or ""),
@@ -89,14 +90,16 @@ def _mapping_pk(jiuwenclaw_id: str, mapping_id: int) -> dict[str, Any]:
     return {"jiuwenclaw_id": jiuwenclaw_id, "id": mapping_id}
 
 
-def _validate_dimension_keys(
-    user_id: str | None, group_id: str | None
-) -> tuple[str | None, str | None]:
-    uid = strip_optional(user_id)
-    gid = strip_optional(group_id)
-    if uid is None and gid is None:
-        raise ValueError("at least one of user_id or group_id is required")
-    return uid, gid
+def _validate_scope(scope_type: str, scope_id: str) -> tuple[str, str]:
+    st = str(scope_type or "").strip().lower()
+    if st not in MAPPING_SCOPE_TYPES:
+        raise ValueError(
+            f"scope_type must be one of {sorted(MAPPING_SCOPE_TYPES)}, got {scope_type!r}"
+        )
+    sid = str(scope_id or "").strip()
+    if not sid:
+        raise ValueError("scope_id is required")
+    return st, sid
 
 
 def _row_to_out(row: Any) -> ConfigDefaultTemplateMappingOut:
@@ -106,8 +109,8 @@ def _row_to_out(row: Any) -> ConfigDefaultTemplateMappingOut:
         policy_id=row.policy_id,
         policy_name=row.policy_name,
         policy_desc=row.policy_desc,
-        user_id=row.user_id,
-        group_id=row.group_id,
+        scope_type=row.scope_type,
+        scope_id=row.scope_id,
         priority=row.priority,
         template_id=row.template_id,
         template_type=row.template_type,
@@ -131,8 +134,8 @@ class ConfigDefaultTemplateMappingService:
             "policy_id": row["policy_id"],
             "policy_name": row.get("policy_name"),
             "policy_desc": row.get("policy_desc"),
-            "user_id": row.get("user_id"),
-            "group_id": row.get("group_id"),
+            "scope_type": row.get("scope_type"),
+            "scope_id": row.get("scope_id"),
             "priority": row["priority"],
             "template_id": row["template_id"],
             "template_type": row["template_type"],
@@ -148,7 +151,7 @@ class ConfigDefaultTemplateMappingService:
         body: ConfigDefaultTemplateMappingCreateBody,
     ) -> ConfigDefaultTemplateMappingOut:
         normalized = await validate_jiuwenclaw_id(self._handler, jiuwenclaw_id)
-        user_id, group_id = _validate_dimension_keys(body.user_id, body.group_id)
+        scope_type, scope_id = _validate_scope(body.scope_type, body.scope_id)
 
         now = utc_now()
         row = {
@@ -156,8 +159,8 @@ class ConfigDefaultTemplateMappingService:
             "policy_id": new_uuid4(),
             "policy_name": body.policy_name,
             "policy_desc": body.policy_desc,
-            "user_id": user_id,
-            "group_id": group_id,
+            "scope_type": scope_type,
+            "scope_id": scope_id,
             "priority": body.priority,
             "template_id": body.template_id,
             "template_type": body.template_type,
@@ -217,10 +220,10 @@ class ConfigDefaultTemplateMappingService:
         page = max(query.page, 1)
         page_size = min(max(query.page_size, 1), 200)
         filters: dict[str, Any] = {"jiuwenclaw_id": normalized}
-        if query.user_id:
-            filters["user_id"] = strip_optional(query.user_id)
-        if query.group_id:
-            filters["group_id"] = strip_optional(query.group_id)
+        if query.scope_type:
+            filters["scope_type"] = query.scope_type.strip().lower()
+        if query.scope_id:
+            filters["scope_id"] = strip_optional(query.scope_id)
         if template_type:
             filters["template_type"] = template_type
         if query.template_id:
@@ -284,10 +287,10 @@ class ConfigDefaultTemplateMappingService:
         normalized = await validate_jiuwenclaw_id(self._handler, jiuwenclaw_id)
 
         updates = body.model_dump(exclude_unset=True)
-        if "user_id" in updates:
-            updates["user_id"] = strip_optional(updates["user_id"])
-        if "group_id" in updates:
-            updates["group_id"] = strip_optional(updates["group_id"])
+        if "scope_type" in updates and updates["scope_type"] is not None:
+            updates["scope_type"] = str(updates["scope_type"]).strip().lower()
+        if "scope_id" in updates and updates["scope_id"] is not None:
+            updates["scope_id"] = str(updates["scope_id"]).strip()
 
         row = await self._handler.get(
             _TEMPLATE_MAPPING_TABLE, _mapping_pk(normalized, mapping_id)
@@ -295,9 +298,9 @@ class ConfigDefaultTemplateMappingService:
         if row is None:
             return None
 
-        merged_user = updates.get("user_id", row.user_id)
-        merged_group = updates.get("group_id", row.group_id)
-        _validate_dimension_keys(merged_user, merged_group)
+        merged_type = updates.get("scope_type", row.scope_type)
+        merged_id = updates.get("scope_id", row.scope_id)
+        _validate_scope(str(merged_type), str(merged_id))
 
         if not updates:
             return _row_to_out(row)

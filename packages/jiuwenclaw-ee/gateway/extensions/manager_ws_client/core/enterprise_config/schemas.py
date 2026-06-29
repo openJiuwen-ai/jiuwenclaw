@@ -24,6 +24,9 @@ class TemplateRefSlot(StrEnum):
     SERVICE_CONFIG = "service_config"
 
 
+MAPPING_SCOPE_TYPES: frozenset[str] = frozenset({"user", "group", "bot"})
+
+
 SLOT_ENTITY_TABLE: dict[TemplateRefSlot, str] = {
     TemplateRefSlot.DEFAULT_MODEL: "model_template",
     TemplateRefSlot.VIDEO_MODEL: "model_template",
@@ -107,6 +110,7 @@ __all__ = (
     "SERVICE_CONFIG_TABLE",
     "DEFAULT_AGENT_LOAD_SLOTS",
     "EffectiveEnterpriseConfig",
+    "MAPPING_SCOPE_TYPES",
     "MODEL_SLOT_KEYS",
     "RoutingContext",
     "SLOT_ENTITY_TABLE",

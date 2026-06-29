@@ -62,6 +62,22 @@ substitute_template = expressions.substitute_template
 _FALLBACK_TEMPLATE_ID = "11111111-1111-4111-8111-111111111111"
 
 
+def _mapping_scope_matches(
+    table: str,
+    filters: dict | None,
+    *,
+    scope_type: str,
+    scope_id: str,
+) -> bool:
+    if table != "config_default_template_mapping":
+        return False
+    scoped = filters or {}
+    return (
+        scoped.get("scope_type") == scope_type
+        and scoped.get("scope_id") == scope_id
+    )
+
+
 class _MappingStore:
     """测试用的映射 store，模拟模板映射查询。"""
 
@@ -311,7 +327,9 @@ async def test_resolve_template_slot_ref_mapping_or_fallback(
         filters: dict | None = None,
         order_by: str = "",
     ) -> list[dict]:
-        if table == "config_default_template_mapping" and (filters or {}).get("group_id") == "g_demo_sales":
+        if _mapping_scope_matches(
+            table, filters, scope_type="group", scope_id="g_demo_sales"
+        ):
             return [{"template_id": "2"}]
         return []
 
@@ -329,7 +347,9 @@ async def test_resolve_template_slot_ref_mapping_or_fallback(
         filters: dict | None = None,
         order_by: str = "",
     ) -> list[dict]:
-        if table == "config_default_template_mapping" and (filters or {}).get("user_id") == "carol":
+        if _mapping_scope_matches(
+            table, filters, scope_type="user", scope_id="carol"
+        ):
             return [{"template_id": "4"}]
         return []
 
@@ -378,7 +398,9 @@ async def test_resolve_template_slot_ref_rejects_nested_and_ambiguous(
         filters: dict | None = None,
         **_: object,
     ) -> list[dict]:
-        if table == "config_default_template_mapping" and (filters or {}).get("user_id") == "carol":
+        if _mapping_scope_matches(
+            table, filters, scope_type="user", scope_id="carol"
+        ):
             return [{"template_id": "99"}]
         return []
 
@@ -507,7 +529,9 @@ async def test_load_effective_config_fills_missing_slots_from_global(
                 ]
             return []
         if table == "config_default_template_mapping":
-            if scoped.get("group_id") == "g_demo_sales":
+            if _mapping_scope_matches(
+                table, scoped, scope_type="group", scope_id="g_demo_sales"
+            ):
                 return [{"template_id": m5}]
         return []
 

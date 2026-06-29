@@ -148,8 +148,8 @@ async def _seed_enterprise_demo(manager_api: ManagerApiHarness) -> dict[str, Any
     carol_map = await h.post_json(
         "/config-default-template-mappings",
         {
-            "user_id": "carol",
-            "group_id": None,
+            "scope_type": "user",
+            "scope_id": "carol",
             "priority": 0,
             "template_id": m4,
             "template_type": "default_model",
@@ -162,8 +162,8 @@ async def _seed_enterprise_demo(manager_api: ManagerApiHarness) -> dict[str, Any
     group_map = await h.post_json(
         "/config-default-template-mappings",
         {
-            "user_id": None,
-            "group_id": "g_demo_sales",
+            "scope_type": "group",
+            "scope_id": "g_demo_sales",
             "priority": 0,
             "template_id": m5,
             "template_type": "default_model",
@@ -226,13 +226,15 @@ async def test_seed_enterprise_demo_config_full_workflow(manager_api: ManagerApi
     carol = await h.get_json(
         f"/config-default-template-mappings/{ids['carol_map_id']}"
     )
-    assert carol["user_id"] == "carol"
+    assert carol["scope_type"] == "user"
+    assert carol["scope_id"] == "carol"
     assert carol["template_id"] == ids["m4"]
 
     group = await h.get_json(
         f"/config-default-template-mappings/{ids['group_map_id']}"
     )
-    assert group["group_id"] == "g_demo_sales"
+    assert group["scope_type"] == "group"
+    assert group["scope_id"] == "g_demo_sales"
     assert group["template_id"] == ids["m5"]
 
     service_list = await h.get_json("/config-effective/service-policies")
