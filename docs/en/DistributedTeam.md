@@ -21,6 +21,8 @@ The main config file is usually `~/.jiuwenswarm/config/config.yaml`. Override th
 
 **Session semantics**: distributed mode retains **single active session** per channel — creating or switching to a Team for a new session first tears down other active or pending session Teams in the same channel, so remote member bootstrap, transport connections, and runtime resources are not reused across sessions. **Local mode** instead allows multiple Team sessions to run concurrently in the same channel and does not apply this single-session switch policy.
 
+> **⚠️ Multi-TUI-window limitation**: Multiple TUI windows cannot run Team tasks concurrently under distributed mode — starting a Team session in a new window will automatically stop the existing Team session. 
+
 ---
 
 ## 2. Config keys you will touch

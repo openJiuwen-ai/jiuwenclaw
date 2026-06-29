@@ -1,150 +1,340 @@
 # Agent
 
-`workspace` is JiuwenSwarm’s runtime directory for agent memory, skills, session data, and configurable heartbeat tasks. On first run (via `init` or `app`), the template under `jiuwenswarm/resources/agent/workspace/` is copied to `~/.jiuwenswarm/agent/workspace/`. Built-in skills live in the package at `jiuwenswarm/resources/agent/workspace/skills/`; marketplace/installed skills are stored in the user workspace.
+This guide explains what an **Agent** is in JiuwenSwarm, how it is structured, where files live on disk, and how to view or adjust configuration safely.
 
-![Workspace](../assets/images/agent.png)
+---
 
-## Layout overview
+## Concepts
 
-The **installed** runtime layout (`~/.jiuwenswarm/`):
+### What is an agent?
 
-```
-~/.jiuwenswarm/
-├── .updates/             # Update state (generated)
-│   └── web_process.json
-├── agent/
-│   ├── .checkpoint/       # Checkpoint database (created at runtime)
-│   │   ├── checkpoint.db       # SQLite checkpoint
-│   │   ├── checkpoint.db-shm   # SQLite shared memory
-│   │   └── checkpoint.db-wal   # SQLite WAL log
-│   ├── .logs/             # Agent process logs
-│   │   ├── agent_server.log
-│   │   ├── channel.log
-│   │   ├── full.log
-│   │   ├── gateway.log
-│   │   ├── permissions.log
-│   │   └── ws-dev.log
-│   ├── sessions/          # Sessions (generated)
-│   │   ├── sess_<id>/     # Normal sessions
-│   │   │   ├── history.json  # Session history
-│   │   │   ├── metadata.json # Session metadata
-│   │   │   └── *.md, *.json
-│   │   └── heartbeat_<id>/   # Heartbeat sessions
-│   └── workspace/         # Agent workspace
-│       ├── agents/            # Agent work area (DeepAgent standard node)
-│       │   └── .workspace
-│       ├── coding_memory/     # Coding memory
-│       │   ├── .workspace
-│       │   └── MEMORY.md
-│       ├── context/           # Session context
-│       │   ├── .workspace
-│       │   └── session_memory.md
-│       ├── memory/            # Memory system
-│       │   ├── .workspace
-│       │   ├── MEMORY.md      # Long-term memory (from MEMORY_ZH.md or MEMORY_EN.md at init)
-│       │   ├── daily_memory/  # Daily memory files (created at runtime)
-│       │   │   ├── .workspace
-│       │   │   ├── YYYY-MM-DD.md
-│       │   │   └── ...
-│       │   ├── memory.db      # ChromaDB vector store (created at runtime)
-│       │   ├── memory.db-shm
-│       │   └── memory.db-wal
-│       ├── messages/          # Message work area (DeepAgent standard node)
-│       │   └── .workspace
-│       ├── skills/            # Marketplace/installed skills
-│       │   ├── .workspace
-│       │   ├── skills_state.json # Skill install/market state (generated)
-│       │   ├── _marketplace/     # Marketplace clone cache (created at runtime)
-│       │   └── <skill-name>/
-│       │       └── evolutions.json
-│       ├── todo/              # Todo work area (DeepAgent standard node)
-│       │   └── .workspace
-│       ├── extensions/        # Extension plugins (created at runtime)
-│       ├── interactions/      # Interaction contexts (created at runtime)
-│       ├── agent-data.json    # Agent list metadata
-│       ├── AGENT.md           # Agent identity
-│       ├── HEARTBEAT.md       # Heartbeat tasks
-│       ├── IDENTITY.md        # Identity
-│       ├── SOUL.md            # Persona for system prompts
-│       └── USER.md            # User profile
-├── auto-harness/         # Auto CI workflow (generated)
-│   └── config.yaml
-├── config/               # Configuration
-│   ├── config.yaml       # Main config
-│   ├── .env              # Environment variables
-│   ├── builtin_rules.yaml # Shell security rules
-│   └── runtime_state.yaml # Runtime state (generated)
-└── logs/                 # Business logs
-    └── logs/
-        ├── llm.log           # LLM call logs
-        ├── memory.log        # Memory module logs
-        ├── runner.log        # Runner logs
-        ├── session.log       # Session logs
-        ├── sys_operation.log # System operation logs
-        ├── interface/
-        │   ├── jiuwen_interface.log
-        │   └── jiuwen_prompt_builder_interface.log
-        ├── performance/
-        │   └── jiuwen_performance.log
-        └── run/
-            └── jiuwen.log
+In JiuwenSwarm, an **Agent** is a digital assistant that can act on its own. It is not just a large language model—it is an execution entity built from several cooperating parts.
+
+**Core definition:**
+
+**Agent = identity + tools + skills + memory + workspace**
+
+**How it differs from plain LLM chat:**
+
+| Aspect | Plain LLM chat | JiuwenSwarm agent |
+|--------|----------------|-------------------|
+| Execution | Text replies only | Can call tools (files, shell, web search, etc.) |
+| Memory | Short-term, within a session | Long-term across sessions; preferences and history |
+| Skills | Fixed capability | Loadable skill modules for specialized work |
+| Workspace | None | Dedicated workspace for tasks, todos, and state |
+| Personalization | None | Identity and config shape tone and behavior |
+
+**How the pieces fit together:**
+
+```text
+┌─────────────────────────────────────────────────────┐
+│                    Agent                             │
+├─────────────────────────────────────────────────────┤
+│  ┌─────────┐  ┌─────────┐  ┌─────────┐  ┌─────────┐ │
+│  │ Identity│  │  Tools  │  │ Skills  │  │ Memory  │ │
+│  └─────────┘  └─────────┘  └─────────┘  └─────────┘ │
+│  ┌───────────────────────────────────────────────┐ │
+│  │              Workspace                       │ │
+│  │  ┌─────────┐  ┌─────────┐  ┌─────────────────┐│ │
+│  │  │  Todo   │  │ Config  │  │    Sessions     ││ │
+│  │  └─────────┘  └─────────┘  └─────────────────┘│ │
+│  └───────────────────────────────────────────────┘ │
+└─────────────────────────────────────────────────────┘
 ```
 
-Built-in skills template lives at `jiuwenswarm/resources/agent/workspace/skills/`. These built-in skills are not copied to the user workspace on init (loaded directly from the package in source mode).
+**Takeaways:**
+
+1. **Identity** — who the agent is and how it communicates  
+2. **Tools** — “hands” for files, search, code, shell, and media  
+3. **Skills** — loadable modules (e.g. Git, document workflows)  
+4. **Memory** — user profile, history, and decisions across sessions  
+5. **Workspace** — the agent’s “desk” for tasks, config, and sessions  
+
+> This section is conceptual only. Later sections go into each part in more detail.
 
 ---
 
-## Pre-configured content
+## Structure
 
-Shipped with the package or source; you can use or edit as needed:
+### What an agent is made of
 
-| Path (in workspace) | Description |
-|------|-------------|
-| `AGENT.md` | Agent identity description. Copied from `AGENT_ZH.md`/`AGENT_EN.md` by language at init. |
-| `IDENTITY.md` | Identity description. Copied from `IDENTITY_ZH.md`/`IDENTITY_EN.md` by language at init. |
-| `SOUL.md` | Persona for system prompts. Copied from `SOUL_ZH.md`/`SOUL_EN.md` by language at init. |
-| `USER.md` | User profile. Copied from template at init. |
-| `HEARTBEAT.md` | Heartbeat template (`jiuwenswarm/resources/agent/workspace/HEARTBEAT_ZH.md` or `HEARTBEAT_EN.md`, copied by language at init). If present and valid, the agent reads it on each heartbeat; otherwise only `HEARTBEAT_OK` is returned. Editable in the web UI. |
-| `skills/` | Marketplace/installed skills. Each skill has `SKILL.md`, `prompts/`, `references/`, etc. |
-| `skills/_marketplace/` | Marketplace clone cache; empty by default. |
-| `memory/` | Memory layout. `MEMORY.md` is copied from template at init. |
+An agent has six main areas. You can focus on the ones you care about.
+
+**Overview:**
+
+| Part | Role | User focus | Main effect |
+|------|------|------------|-------------|
+| **Identity** | Who the agent is, tone, style | Customizable | Conversation style and behavior |
+| **Workspace** | Tasks, todos, sessions, runtime data | Good to understand | Task tracking and persistence |
+| **Tools** | Files, web, code, shell, media | Usually no edits | What operations are possible |
+| **Skills** | Professional modules (Git, PPT, etc.) | Load as needed | Extra capabilities |
+| **Memory** | Preferences, history, decisions | Mostly automatic | Continuity and personalization |
+| **Todo** | Task tracking | Day to day | Execution efficiency |
+| **Config** | Models, channels, permissions | Advanced users | Model, security, channel behavior |
+
+**Details:**
+
+#### 1. Identity
+
+Defines who the agent is and how it talks to you:
+
+- Role (e.g. personal assistant, technical advisor)  
+- Personality (concise vs. thorough)  
+- Principles (e.g. try first, then ask; respect trust)  
+
+**Files:** `IDENTITY.md`, `SOUL.md`
+
+#### 2. Workspace
+
+Runtime environment for:
+
+- Current tasks and todos  
+- Session history and state  
+- Skills and local overrides  
+- Temporary outputs  
+
+**Location:** under the `.jiuwenswarm/` directory
+
+#### 3. Tools
+
+Built-in capabilities, including:
+
+- Files: read, write, edit, search  
+- Web: search, fetch pages  
+- Code: Python, JavaScript  
+- System: shell commands  
+- Media: image OCR, audio transcription, video analysis  
+
+**Note:** Tools are provided by the system; you normally do not change them manually.
+
+#### 4. Skills
+
+Loadable modules. Each skill typically defines goals, steps, tool usage, and output rules.
+
+**Examples:**
+
+- `gitcode-pr` — open a Pull Request on GitCode  
+- `gitcode-pr-review-fix` — address PR review comments and update code  
+
+**Location:** `skills/` directory
+
+#### 5. Memory
+
+Three kinds:
+
+- **User profile** — who you are, preferences, habits  
+- **Episodic** — events, decisions, conversation snippets  
+- **Semantic** — background knowledge and concepts  
+
+**Note:** Memory is mostly automatic; you can search history when needed.
+
+#### 6. Config
+
+Controls runtime behavior:
+
+- Model choice and parameters (temperature, timeout, etc.)  
+- Channels (Feishu, WeChat, Telegram, etc.)  
+- Permissions (what needs your approval)  
+- Memory and logging  
+
+**File:** `config/config.yaml`
+
+> You do not need to edit everything by hand. In practice, focus on **identity** and **skills**; the rest is largely managed by the system.
 
 ---
 
-## Dynamically generated content
+## Directory layout
 
-Created or updated at runtime:
+### Local paths and key files
 
-| Path | Description |
-|------|-------------|
-| `agent/.checkpoint/checkpoint.db` | SQLite checkpoint database (.db-shm, .db-wal). |
-| `agent/.logs/*.log` | Agent process logs (gateway, agent_server, channel, full, permissions, ws-dev). |
-| `agent/sessions/<session_id>/` | One folder per session, containing `history.json`, `metadata.json`, and session-generated `*.md` / `*.json` files. |
-| `agent/sessions/<session_id>/todo.md` | Todo list created by `TodoToolkit` (optional). |
-| `agent/workspace/agent-data.json` | Generated by `scripts/generate-agent-folders.js` for the web UI. |
-| `agent/workspace/coding_memory/MEMORY.md` | Coding memory content. |
-| `agent/workspace/context/session_memory.md` | Session context memory. |
-| `agent/workspace/memory/daily_memory/YYYY-MM-DD.md` | Daily memory files created by `write_memory` tool. |
-| `agent/workspace/memory/memory.db` | ChromaDB vector store for `memory_search` (with `.db-shm`, `.db-wal`). |
-| `agent/workspace/skills/skills_state.json` | Maintained by `SkillManager` for installed marketplace plugins. |
-| `agent/workspace/skills/<skill>/evolutions.json` | Skill evolution records. |
-| `agent/workspace/skills/_marketplace/` | Marketplace clone cache (created by `_sync_marketplace_repos`). |
-| `agent/workspace/extensions/` | Extension plugins directory (created at runtime). |
-| `agent/workspace/interactions/` | Interaction contexts (created at runtime). |
-| `.updates/web_process.json` | Web process update state. |
-| `auto-harness/config.yaml` | Auto CI workflow configuration. |
-| `config/runtime_state.yaml` | Runtime state. |
-| `logs/logs/*.log` | Business logs (llm, memory, runner, session, sys_operation). |
-| `logs/logs/interface/jiuwen_interface.log` | Interface module logs. |
-| `logs/logs/interface/jiuwen_prompt_builder_interface.log` | Prompt builder interface logs. |
-| `logs/logs/performance/jiuwen_performance.log` | Performance logs. |
-| `logs/logs/run/jiuwen.log` | Runner logs. |
+High-level layout under your user data directory:
+
+**Overview:**
+
+```text
+C:\Users\<username>\.jiuwenswarm\
+│
+├── config/                          # Configuration
+│   ├── config.yaml                  # Main config (models, channels, permissions)
+│   └── builtin_rules.yaml           # Built-in rules
+│
+├── agent/                           # Agent-related data
+│   └── <service_id>/                # Service instance
+│       └── <agent_id>/              # Agent instance
+│           ├── agent/               # Agent workspace
+│           │   ├── AGENT.md         # Agent bootstrap config
+│           │   ├── IDENTITY.md      # Identity
+│           │   ├── SOUL.md          # Values and persona
+│           │   ├── HEARTBEAT.md     # Heartbeat tasks
+│           │   └── sessions/        # Session data
+│           ├── config/              # Per-agent config overrides (optional)
+│           ├── memory/              # Agent memory store
+│           ├── skills/              # Skills
+│           └── todo/                # Todos
+│
+├── gateway/                         # Gateway data
+├── logs/                            # Log files
+├── memory/                          # Global memory store
+├── received_files/                  # Incoming external files
+└── web/                             # Web channel assets
+```
+
+**Key files:**
+
+| Path | Purpose | Edit? | If you change it |
+|------|---------|-------|------------------|
+| `config/config.yaml` | Models, channels, permissions, memory | Advanced users, carefully | Affects models, channels, security; restart required |
+| `config/builtin_rules.yaml` | Built-in rules | Not recommended | Changes default system behavior |
+| `agent/<id>/agent/AGENT.md` | Bootstrap config | Yes, when needed | Affects startup behavior |
+| `agent/<id>/agent/IDENTITY.md` | Identity | Customizable | Affects how the agent sees its role |
+| `agent/<id>/agent/SOUL.md` | Values and persona | Customizable | Affects tone and style |
+| `agent/<id>/agent/HEARTBEAT.md` | Heartbeat tasks | Adjustable | Affects scheduled / proactive behavior |
+| `agent/<id>/skills/` | Skills | Add skills | Extends capabilities |
+| `agent/<id>/memory/` | Memory store | Do not edit by hand | Risk of corrupting memory data |
+| `agent/<id>/todo/` | Todos | System-managed | Affects task tracking |
+| `logs/` | Logs | View only | Used for troubleshooting |
+
+**Example (Windows):**
+
+```text
+C:\Users\Administrator\.jiuwenswarm\
+├── config\config.yaml
+├── service_default_service_id\
+│   └── agent_default_agent_id\
+│       └── agent\
+│           ├── AGENT.md
+│           ├── IDENTITY.md
+│           ├── SOUL.md
+│           ├── skills\
+│           └── sessions\
+```
+
+> **Notes:**  
+> 1. Restart the service after changing config files.  
+> 2. Do not hand-edit memory or session stores unless you know what you are doing.  
+> 3. New skills must follow the skill format (see [Skills](Skills.md)).
 
 ---
 
-## Related configuration
+## Operations
 
-- **Skill root**: `skill_base_dir` in `config/config.yaml`, default `agent/skills`.
-- **Agent workspace**: `~/.jiuwenswarm/agent/workspace/` (`get_agent_workspace_dir()`).
-- **Sessions**: `~/.jiuwenswarm/agent/sessions/`, one subfolder per `session_id`.
-- **SkillNet usage in Swarm**: see [Skills.md §5](Skills.md#5-how-skills-installed-via-skillnet-are-used-in-swarm).
+### Viewing and understanding agent configuration
+
+How to inspect settings and what is safe to change.
+
+#### View configuration
+
+**Option 1: Ask the agent**
+
+Examples:
+
+- “Show me the current configuration.”  
+- “Where is my agent config file?”  
+- “Read config.yaml for me.”  
+
+The agent can read and summarize the files.
+
+**Option 2: Open the file directly**
+
+Use an editor (VS Code, Notepad++, etc.):
+
+```text
+C:\Users\<username>\.jiuwenswarm\config\config.yaml
+```
+
+#### Risk levels
+
+**Category 1 — safe to read**
+
+| Key | Meaning | Suggestion |
+|-----|---------|------------|
+| `preferred_language` | Preferred language | Read-only OK |
+| `logging.level` | Log level | Read-only OK |
+| `heartbeat.every` | Heartbeat interval | Read-only OK |
+| `channels.*.enabled` | Channel on/off | Read-only OK |
+
+**Category 2 — change with care**
+
+| Key | Meaning | Effect | Suggestion |
+|-----|---------|--------|------------|
+| `models.default.model_name` | Default model | Quality and speed | Confirm the model works first |
+| `models.default.temperature` | Temperature | Creativity vs. stability | Often 0.7–1.0 |
+| `heartbeat.active_hours` | Active window | When proactive runs fire | Match your schedule |
+| `permissions.tools.*` | Tool permissions | Safety | Understand risk before changing |
+
+**Category 3 — avoid unless you know why**
+
+| Key | Meaning | Risk | Suggestion |
+|-----|---------|------|------------|
+| `models.default.api_key` | API key | Leakage | Prefer environment variables |
+| `memory.external.*` | External memory engine | Memory may break | Keep defaults |
+| `gateway.*` | Gateway settings | Connectivity | Change only when deploying |
+| `permissions.rules.*` | Security rules | Security holes | Keep defaults |
+
+#### After you change config
+
+**Restart is required for changes to take effect.**
+
+```bash
+# Windows (depends on how you installed)
+# If running as a service:
+net stop jiuwenswarm
+net start jiuwenswarm
+
+# If running from the command line:
+# Stop the current process, then:
+jiuwenswarm-start
+# or: python -m jiuwenswarm.app
+```
+
+#### Common scenarios
+
+**Scenario 1: Switch model**
+
+```yaml
+# In config.yaml
+models:
+  default:
+    model_client_config:
+      model_name: "your-model-name"  # e.g. deepseek-chat, gpt-4o
+```
+
+Restart the service.
+
+**Scenario 2: Adjust reply style**
+
+```yaml
+models:
+  default:
+    model_config_obj:
+      temperature: 0.8   # more creative
+      # temperature: 0.3  # more stable
+```
+
+**Scenario 3: Enable or disable a channel**
+
+```yaml
+channels:
+  feishu:
+    enabled: true
+  telegram:
+    enabled: false
+```
+
+#### Troubleshooting
+
+If something breaks after a config change:
+
+1. **Check logs** under `logs/`  
+2. **Revert** the changed values  
+3. **Restart** the service  
+4. **Ask the agent** to help interpret errors  
+
+> **Safety:**  
+> - Back up `config.yaml` before editing.  
+> - When unsure, ask the agent first.  
+> - Put API keys in environment variables (`.env`), not plain text in YAML when possible.
+
+---
+
+*Simplified Chinese: [智能体](../zh/智能体.md)*

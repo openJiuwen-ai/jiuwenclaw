@@ -39,7 +39,7 @@ export class DiffComponent implements Component {
       const trackedFiles: GitDiffFile[] = [];
       const untrackedFiles: GitDiffFile[] = [];
       for (const f of Object.values(gitDiff!.files)) {
-        (f.isNewFile ? untrackedFiles : trackedFiles).push(f);
+        (f.isUntracked ? untrackedFiles : trackedFiles).push(f);
       }
 
       lines.push(...renderWrappedText(innerWidth,
@@ -53,7 +53,7 @@ export class DiffComponent implements Component {
 
       // Untracked
       for (const f of untrackedFiles) {
-        lines.push(...this._renderCompactFile(f, innerWidth, "(untracked)"));
+        lines.push(...this._renderCompactFile(f, innerWidth));
       }
 
       // separator before turns
@@ -91,16 +91,35 @@ export class DiffComponent implements Component {
   private _renderCompactFile(
     fileDiff: FileDiff | GitDiffFile,
     width: number,
-    tag?: string,
   ): string[] {
     const fileName = fileDiff.filePath.split(/[/\\]/).pop() || fileDiff.filePath;
-    const label = tag || (fileDiff.isNewFile ? "(new)" : "");
-    const added = palette.status.success(`+${fileDiff.linesAdded}`);
-    const removed = palette.status.error(`-${fileDiff.linesRemoved}`);
+
+    // 构建右侧状态信息:
+    // - untracked → "untracked"
+    // - binary → "Binary file"
+    // - large file → "Large file modified"
+    // - normal/truncated → +N -N [ (truncated)]
+    let statsText: string;
+    if (fileDiff.isUntracked) {
+      statsText = palette.text.dim("untracked");
+    } else if (fileDiff.isBinary) {
+      statsText = palette.text.dim("Binary file");
+    } else if (fileDiff.isLargeFile) {
+      statsText = palette.text.dim("Large file modified");
+    } else {
+      const added = palette.status.success(`+${fileDiff.linesAdded}`);
+      const removed = palette.status.error(`-${fileDiff.linesRemoved}`);
+      statsText = `${added} ${removed}`;
+      if (fileDiff.isTruncated) {
+        statsText += palette.text.dim(" (truncated)");
+      }
+    }
+
+    const label = fileDiff.isNewFile && !fileDiff.isUntracked ? palette.text.dim("(new) ") : "";
 
     const lines: string[] = [];
     lines.push(...renderWrappedText(width,
-      `│   ${fileName} ${label}  ${added} ${removed}`,
+      `│   ${fileName} ${label} ${statsText}`,
       palette.text.assistant));
     return lines;
   }

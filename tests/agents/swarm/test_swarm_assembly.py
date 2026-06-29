@@ -1039,9 +1039,11 @@ def test_vision_audio_config_params_empty_when_unconfigured() -> None:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.parametrize("auto_save", [False, True])
 def test_team_skill_evolution_provider_passes_review_runtime(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    auto_save: bool,
 ) -> None:
     monkeypatch.setattr(
         evolution_rails,
@@ -1069,18 +1071,19 @@ def test_team_skill_evolution_provider_passes_review_runtime(
     )
 
     built = evolution_rails.build_team_skill_evolution_rail(
-        {"evolution_model_config": {}, "auto_scan": True},
+        {"evolution_model_config": {}, "auto_scan": True, "auto_save": auto_save},
         ctx,
     )
 
     _assert_evolution_approval_stack(
         built,
         _FakeEvolutionRail,
-        auto_save=False,
+        auto_save=auto_save,
         language="cn",
     )
     rail = built[1]
     assert rail.kwargs["auto_scan"] is False
+    assert rail.kwargs["auto_save"] is auto_save
     assert rail.kwargs["completion_followup_enabled"] is True
 
 
@@ -1180,6 +1183,7 @@ def test_member_skill_evolution_provider_passes_review_runtime(
     )
     assert rail.kwargs["language"] == "en"
     assert rail.kwargs["auto_scan"] is False
+    assert rail.kwargs["auto_save"] is True
     assert rail.bound_sink == (registry_obj, "t", "teammate")
 
 
@@ -2003,3 +2007,169 @@ def test_swarm_assembly_hint_from_seed_and_legacy() -> None:
     assert rmb._swarm_assembly_hint(legacy) == {}
     # Defensive: a team agent without a spec yields no hint.
     assert rmb._swarm_assembly_hint(types.SimpleNamespace()) == {}
+
+
+# ---------------------------------------------------------------------------
+# Browser isolation (feat/team-browser-isolation)
+# ---------------------------------------------------------------------------
+
+from jiuwenswarm.agents.swarm.providers.code_subagents import (
+    _browser_key,
+    _PARENT_MODEL_EXTRAS_KEY,
+    build_swarm_browser_agent,
+    SWARM_BROWSER_AGENT,
+)
+
+
+def test_browser_key_derivation() -> None:
+    """_browser_key composes session+member into a unique, stable key."""
+    # Normal: session_id + member_name → "sess-alice"
+    assert _browser_key("sess", "alice", "teammate") == "sess-alice"
+    # Leader also keyed by member_name, not role
+    assert _browser_key("sess", "leader", "leader") == "sess-leader"
+    # Different sessions never collide on the same member_name
+    assert _browser_key("s1", "alice", "teammate") != _browser_key("s2", "alice", "teammate")
+    # Different member_names in same session are distinct
+    assert _browser_key("sess", "alice", "teammate") != _browser_key("sess", "bob", "teammate")
+    # Empty member_name falls back to role
+    assert _browser_key("sess", "", "leader") == "sess-leader"
+    # Both empty → empty (preserves shared-browser legacy behaviour)
+    assert _browser_key("", "", "") == ""
+    # No session → just the discriminator
+    assert _browser_key("", "alice", "teammate") == "alice"
+
+
+def test_browser_subagent_spec_included_when_enabled() -> None:
+    """browser_agent SubAgentSpec uses SWARM_BROWSER_AGENT factory when enabled."""
+    register_swarm_providers()
+    config = {"react": {"subagents": {"browser_agent": {"enabled": True}}}}
+    subs = build_member_subagent_specs(config, "code.team", "leader")
+    factory_names = [s.factory_name for s in subs]
+    assert SWARM_BROWSER_AGENT in factory_names
+
+
+def test_browser_subagent_spec_excluded_when_disabled() -> None:
+    """browser_agent is absent from SubAgentSpecs when disabled or absent."""
+    register_swarm_providers()
+    subs_disabled = build_member_subagent_specs(
+        {"react": {"subagents": {"browser_agent": {"enabled": False}}}},
+        "code.team",
+        "leader",
+    )
+    subs_absent = build_member_subagent_specs({}, "code.team", "leader")
+    for subs in (subs_disabled, subs_absent):
+        assert all(s.factory_name != SWARM_BROWSER_AGENT for s in subs)
+
+
+def test_browser_subagent_provider_skips_without_model(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """build_swarm_browser_agent returns None when no parent model is on the context."""
+    register_swarm_providers()
+    ctx = SwarmBuildContext(
+        mode="code.team",
+        role="leader",
+        member_name="leader",
+        session_id="s",
+        config={},
+    )
+    # No _parent_model in ctx.extras → provider must short-circuit to None.
+    result = build_swarm_browser_agent({}, ctx)
+    assert result is None
+
+
+def test_browser_subagent_provider_passes_correct_browser_key(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """build_swarm_browser_agent passes the per-member browser_key to agent-core."""
+    from unittest.mock import MagicMock, call
+    from jiuwenswarm.agents.swarm.providers import code_subagents as _cs
+
+    captured: list[dict] = []
+
+    def _fake_build(*args, **kwargs):
+        captured.append(kwargs)
+        spec = MagicMock()
+        spec.factory_kwargs = {}
+        return spec
+
+    monkeypatch.setattr(_cs, "build_browser_agent_config", _fake_build)
+
+    fake_model = object()
+    ctx = SwarmBuildContext(
+        mode="code.team",
+        role="teammate",
+        member_name="browser-usd-sgd",
+        session_id="sess42",
+        config={},
+    )
+    ctx.extras[_PARENT_MODEL_EXTRAS_KEY] = fake_model
+
+    result = build_swarm_browser_agent({}, ctx)
+
+    assert result is not None
+    assert len(captured) == 1
+    assert captured[0]["browser_key"] == "sess42-browser-usd-sgd"
+
+
+def test_browser_subagent_teammates_get_distinct_keys(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Two teammates in the same session never share a browser_key."""
+    from unittest.mock import MagicMock
+    from jiuwenswarm.agents.swarm.providers import code_subagents as _cs
+
+    keys: list[str] = []
+
+    def _fake_build(*args, **kwargs):
+        keys.append(kwargs.get("browser_key", ""))
+        spec = MagicMock()
+        spec.factory_kwargs = {}
+        return spec
+
+    monkeypatch.setattr(_cs, "build_browser_agent_config", _fake_build)
+    fake_model = object()
+
+    for name in ("browser-usd-sgd", "browser-eur-usd"):
+        ctx = SwarmBuildContext(
+            mode="code.team",
+            role="teammate",
+            member_name=name,
+            session_id="sess42",
+            config={},
+        )
+        ctx.extras[_PARENT_MODEL_EXTRAS_KEY] = fake_model
+        build_swarm_browser_agent({}, ctx)
+
+    assert len(keys) == 2
+    assert keys[0] != keys[1], "Teammates must not share a browser_key"
+
+
+def test_team_mode_deep_spec_replaces_shared_browser_agent() -> None:
+    """shared browser_agent is replaced by SWARM_BROWSER_AGENT for each member."""
+    register_swarm_providers()
+    from openjiuwen.agent_teams.schema.deep_agent_spec import SubAgentSpec
+    from openjiuwen.core.single_agent import AgentCard
+
+    shared_browser = SubAgentSpec(
+        agent_card=AgentCard(name="browser_agent"),
+        system_prompt="",
+        subagent_type="browser_agent",
+    )
+    base = DeepAgentSpec(
+        subagents=[shared_browser],
+        workspace=WorkspaceSpec(root_path="/tmp/ws"),
+    )
+    config = {"react": {"subagents": {"browser_agent": {"enabled": True}}}}
+    spec = build_member_deep_agent_spec(config, "team", "leader", base)
+
+    # The shared entry must be gone and exactly one SWARM_BROWSER_AGENT present.
+    subagent_factories = [
+        getattr(s, "factory_name", None) for s in (spec.subagents or [])
+    ]
+    shared_entries = []
+    for s in (spec.subagents or []):
+        if getattr(s, "factory_name", None) is None and getattr(s, "subagent_type", None) == "browser_agent":
+            shared_entries.append(s)
+    assert not shared_entries, "shared playwright_official_stdio entry must be removed"
+    assert subagent_factories.count(SWARM_BROWSER_AGENT) == 1

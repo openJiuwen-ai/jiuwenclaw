@@ -195,6 +195,10 @@ const DEFERRED_TRANSCRIPT_EVENTS = new Set([
   "harness.activate_interaction",
 ]);
 
+function isPlanClientMode(mode: ClientMode): boolean {
+  return mode === "agent.plan" || mode === "code.plan" || mode === "team.plan";
+}
+
 // ── Auto-recap (自动回顾) 常量 ──
 /** 用户空闲多久后自动触发回顾（5分钟）。 */
 const AUTO_RECAP_IDLE_THRESHOLD_MS = 5 * 60_000;
@@ -233,6 +237,43 @@ async function hasExternalNetwork(): Promise<boolean> {
 
 function isLocalFileSearchTool(name: string): boolean {
   return LOCAL_FILE_SEARCH_TOOL_NAMES.has(name.trim().toLowerCase());
+}
+
+function isRejectOption(label: string): boolean {
+  const normalized = label.trim();
+  return (
+    normalized.includes("拒绝") || /^reject\b/i.test(normalized) || /^deny\b/i.test(normalized)
+  );
+}
+
+function isPlanApprovalRejectWithoutFeedback(
+  pendingQuestion: PendingQuestion,
+  answers: UserAnswer[],
+): boolean {
+  if (
+    pendingQuestion.source !== "confirm_interrupt" ||
+    pendingQuestion.planApprovalKind !== "plan_approval"
+  ) {
+    return false;
+  }
+
+  const rejected = answers.some((answer) =>
+    answer.selected_options.some((option) => isRejectOption(option)),
+  );
+  if (!rejected) {
+    return false;
+  }
+
+  return answers.every((answer) => !answer.custom_input?.trim());
+}
+
+function withPlanApprovalCancelFeedback(answers: UserAnswer[]): UserAnswer[] {
+  return answers.map((answer) => ({
+    ...answer,
+    custom_input:
+      answer.custom_input?.trim() ||
+      "用户取消了本次计划审批。请保持 plan 模式并等待用户下一条指令，不要继续调用 exit_plan_mode。",
+  }));
 }
 
 function detectRipgrep(): boolean {
@@ -334,6 +375,7 @@ export class CliPiAppState {
   private activeCommandRequestId: string | null = null;
   /** 当前正在执行的命令名称，用于追踪不可中断命令。 */
   private runningCommand: string | null = null;
+  private pendingPlanEntrySource: "slash_command" | null = null;
   private lastVisibleUserRequest: VisibleUserRequest | null = null;
   /** 保存 askQuestions 之前的 streamingState，用于在对话框关闭后恢复。 */
   private streamingStateBeforeQuestion: StreamingState | null = null;
@@ -1019,6 +1061,7 @@ export class CliPiAppState {
       connectionStatus: snapshot.connectionStatus,
       mode: snapshot.mode,
       setMode: this.setMode,
+      markPlanEntryFromSlashCommand: this.markPlanEntryFromSlashCommand,
       setModel: this.setModel,
       setPreferredLanguage: this.setPreferredLanguage,
       setThemeName: this.setThemeName,
@@ -1237,6 +1280,7 @@ export class CliPiAppState {
     this.workflowRuns = [];
     this.btwOverlay = null;
     this._btwActive = false;
+    this.pendingPlanEntrySource = null;
     if (this.accentColor !== "default") {
       this.accentColor = "default";
       setCurrentAccentColor("default");
@@ -1373,10 +1417,17 @@ export class CliPiAppState {
   };
 
   readonly setMode = (mode: ClientMode): void => {
+    if (!isPlanClientMode(mode)) {
+      this.pendingPlanEntrySource = null;
+    }
     if (this.mode !== mode) {
       this.mode = mode;
       this.emitChange();
     }
+  };
+
+  readonly markPlanEntryFromSlashCommand = (): void => {
+    this.pendingPlanEntrySource = "slash_command";
   };
 
   readonly setModel = (name: string): void => {
@@ -1475,9 +1526,17 @@ export class CliPiAppState {
   ): string | null => {
     if (this.connectionStatus !== "connected") return null;
     const mode = modeOverride ?? this.mode;
+    const planEntrySource = isPlanClientMode(mode) ? this.pendingPlanEntrySource : null;
+    const params = {
+      content,
+      query: content,
+      mode,
+      ...(attachments?.length ? { attachments } : {}),
+      ...(planEntrySource ? { plan_entry_source: planEntrySource } : {}),
+    };
     // Pre-check: reject messages whose serialized frame exceeds 7 MB (gateway
     // server max_size is 8 MB; leave 1 MB margin for JSON overhead).
-    const estimatedSize = JSON.stringify({ type: "req", method: "chat.send", params: { content, query: content, mode, ...(attachments?.length ? { attachments } : {}) } }).length;
+    const estimatedSize = JSON.stringify({ type: "req", method: "chat.send", params }).length;
     if (estimatedSize > 7 * 1024 * 1024) {
       this.addItem(addError(this.sessionId, `消息过大（约 ${Math.round(estimatedSize / 1024 / 1024)} MB），请缩短输入内容。`));
       this.emitChange();
@@ -1490,14 +1549,12 @@ export class CliPiAppState {
     }
     const requestId = this.sendEventOnly(
       "chat.send",
-      {
-        content,
-        query: content,
-        mode,
-        ...(attachments?.length ? { attachments } : {}),
-      },
+      params,
       true,
     );
+    if (planEntrySource) {
+      this.pendingPlanEntrySource = null;
+    }
     this.lastError = null;
     this.resetCurrentUsageTokens();
     if (options?.logAsUser !== false) {
@@ -1619,6 +1676,24 @@ export class CliPiAppState {
       this.streamingState = this.streamingStateBeforeQuestion ?? StreamingState.Idle;
       this.streamingStateBeforeQuestion = null;
       resolver.resolve(answers);
+      this.emitChange();
+      return;
+    }
+    if (isPlanApprovalRejectWithoutFeedback(this.pendingQuestion, answers)) {
+      const resumeMode = this.pendingQuestion.resumeMode ?? this.mode;
+      this.sendEventOnly("chat.send", {
+        query: "",
+        request_id: this.pendingQuestion.requestId,
+        answers: withPlanApprovalCancelFeedback(answers),
+        source: this.pendingQuestion.source,
+        mode: resumeMode,
+        plan_approval_kind: this.pendingQuestion.planApprovalKind,
+        plan_content: this.pendingQuestion.planContent ?? "",
+        plan_language: this.pendingQuestion.planLanguage ?? "cn",
+      });
+      this.pendingQuestion = null;
+      this.setStreamingStateInternal(StreamingState.Idle);
+      this.streamingStateBeforeQuestion = null;
       this.emitChange();
       return;
     }

@@ -50,6 +50,7 @@ The left bar is the main entry to features.
 | **Configuration** | System and model settings | Change behavior or switch models |
 | **Browser** | Browser automation | When the agent should drive a real browser |
 | **Logs** | Application logs and traces | Debug issues and audit what happened |
+| **Update** | App updates: check for new versions, download, install and restart | When upgrading to the latest version |
 
 ### Version info
 
@@ -109,14 +110,16 @@ While a task is **running**, you can often **manually** control the current run 
 
 | State | Meaning | What you can do (typical) |
 |------|---------|----------------------------|
-| **Running** | The model is replying to your input | Wait; in supported versions you can often **Cancel / stop** the run |
-| **Cancelled** | Stopped; the same user instruction will not continue | Usually nothing more for that run; you can send a new input |
+| **Running** | The model is replying to your input | Wait; you can click **Stop** to terminate the current execution |
+| **Stopped** | Stopped; the same user instruction will not continue | You can send a new input |
+
+> 💡 **Tip**: In Cluster mode, clicking Stop pauses the current execution and you can resume it.
 
 **Running (example)**  
 ![Task running](../assets/images/jiuwenswarm处理中.png)
 
-**Cancelled (example)**  
-![Task cancelled](../assets/images/jiuwenswarm取消.png)
+**Stopped (example)**  
+![Task stopped](../assets/images/jiuwenswarm取消.png)
 
 ---
 
@@ -139,8 +142,9 @@ The right side shows system status and supporting context.
 | Block | What it is | Why it helps |
 |-------|------------|--------------|
 | **Task list** | Current and queued work | See progress and queue |
-| **Context compression** | Context compression state | Understand long threads |
-| **Time** | Current time and optional uptime | Reference |
+| **Context compression** | Context compression state and compression ratio | Understand long threads |
+| **Memory usage** | Current system memory consumption | Monitor resource usage |
+| **Heartbeat** | System heartbeat status | Monitor system health |
 
 > **Tip:** The info panel content updates in real time; you usually do not need to refresh manually.
 

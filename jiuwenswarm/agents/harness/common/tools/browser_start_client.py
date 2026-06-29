@@ -28,6 +28,7 @@ import os
 import platform
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -281,8 +282,8 @@ def start_browser(*, dry_run: bool = False, config_file: str = "") -> int:
         kwargs["start_new_session"] = True
 
     if dry_run:
-        print("Dry run: browser launch command prepared.")
-        print(" ".join(args))
+        logger.info("Dry run: browser launch command prepared.")
+        logger.info(" ".join(args))
         return 0
 
     logger.info(
@@ -298,9 +299,9 @@ def start_browser(*, dry_run: bool = False, config_file: str = "") -> int:
         user_data_dir=user_data_dir,
         profile_directory=profile_directory,
     )
-    print(f"Chrome started (pid={proc.pid}) at {host}:{port}")
-    print(f"Executable: {chrome_exec}")
-    print(f"Profile dir: {user_data_dir}")
+    logger.info(f"Chrome started (pid={proc.pid}) at {host}:{port}")
+    logger.info(f"Executable: {chrome_exec}")
+    logger.info(f"Profile dir: {user_data_dir}")
     return 0
 
 
@@ -320,7 +321,7 @@ def main() -> int:
     try:
         return start_browser(dry_run=args.dry_run, config_file=args.config)
     except Exception as exc:
-        print(f"Failed to start Chrome: {exc}", file=sys.stderr)
+        logger.info(f"Failed to start Chrome: {exc}", file=sys.stderr)
         return 1
 
 

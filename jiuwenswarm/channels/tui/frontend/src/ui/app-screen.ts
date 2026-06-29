@@ -364,6 +364,9 @@ interface DiffFileEntry {
   linesRemoved: number;
   isNewFile: boolean;
   isUntracked: boolean;
+  isBinary: boolean;
+  isLargeFile: boolean;
+  isTruncated: boolean;
   hunks: Hunk[];
   source: "working" | string;
 }
@@ -1487,7 +1490,10 @@ export class AppScreen implements Component, Focusable {
           linesAdded: f.linesAdded,
           linesRemoved: f.linesRemoved,
           isNewFile: f.isNewFile,
-          isUntracked: f.isNewFile,
+          isUntracked: f.isUntracked ?? f.isNewFile,
+          isBinary: f.isBinary ?? false,
+          isLargeFile: f.isLargeFile ?? false,
+          isTruncated: f.isTruncated ?? false,
           hunks: f.hunks || [],
           source: "working",
         });
@@ -1501,7 +1507,10 @@ export class AppScreen implements Component, Focusable {
           linesAdded: f.linesAdded,
           linesRemoved: f.linesRemoved,
           isNewFile: f.isNewFile,
-          isUntracked: false,
+          isUntracked: f.isUntracked ?? false,
+          isBinary: f.isBinary ?? false,
+          isLargeFile: f.isLargeFile ?? false,
+          isTruncated: f.isTruncated ?? false,
           hunks: f.hunks || [],
           source: `Turn ${turn.turnIndex}`,
         });
@@ -1510,8 +1519,13 @@ export class AppScreen implements Component, Focusable {
 
     const totalAdded = files.reduce((s, f) => s + f.linesAdded, 0);
     const totalRemoved = files.reduce((s, f) => s + f.linesRemoved, 0);
-    const title = `Diff`;
-    const subtitle = `${files.length} files changed  +${totalAdded} -${totalRemoved}`;
+    const workingCount = gitDiff ? Object.keys(gitDiff.files).length : 0;
+    const turnCount = turns.length;
+    const title = `Diff (git diff HEAD)`;
+    const parts: string[] = [`${files.length} files changed  +${totalAdded} -${totalRemoved}`];
+    if (workingCount > 0) parts.push(`working:${workingCount}`);
+    if (turnCount > 0) parts.push(`turns:${turnCount}`);
+    const subtitle = parts.join("  ·  ");
 
     this.diffViewerState = {
       viewMode: "list",
@@ -1544,13 +1558,12 @@ export class AppScreen implements Component, Focusable {
     }
 
     if (this.diffViewerState.viewMode === "list") {
-      const visibleFiles = Math.max(1, height - 5);
+      // List view paginates a 5-file centered window derived from
+      // selectedIndex at render time, so navigation only needs to move the
+      // selection; the window follows automatically.
       if (matchesKey(data, "up") || data.toLowerCase() === "k") {
         if (this.diffViewerState.selectedIndex > 0) {
           this.diffViewerState.selectedIndex--;
-          if (this.diffViewerState.selectedIndex < this.diffViewerState.scrollOffset) {
-            this.diffViewerState.scrollOffset = this.diffViewerState.selectedIndex;
-          }
           this.tui.requestRender();
         }
         return;
@@ -1558,9 +1571,6 @@ export class AppScreen implements Component, Focusable {
       if (matchesKey(data, "down") || data.toLowerCase() === "j") {
         if (this.diffViewerState.selectedIndex < this.diffViewerState.files.length - 1) {
           this.diffViewerState.selectedIndex++;
-          if (this.diffViewerState.selectedIndex >= this.diffViewerState.scrollOffset + visibleFiles) {
-            this.diffViewerState.scrollOffset = this.diffViewerState.selectedIndex - visibleFiles + 1;
-          }
           this.tui.requestRender();
         }
         return;
@@ -1576,13 +1586,11 @@ export class AppScreen implements Component, Focusable {
       }
       if (matchesKey(data, "home") || data.toLowerCase() === "g") {
         this.diffViewerState.selectedIndex = 0;
-        this.diffViewerState.scrollOffset = 0;
         this.tui.requestRender();
         return;
       }
       if (matchesKey(data, "end") || data.toLowerCase() === "shift+g") {
         this.diffViewerState.selectedIndex = Math.max(0, this.diffViewerState.files.length - 1);
-        this.diffViewerState.scrollOffset = Math.max(0, this.diffViewerState.files.length - visibleFiles);
         this.tui.requestRender();
         return;
       }
@@ -1662,17 +1670,55 @@ export class AppScreen implements Component, Focusable {
   private _renderDiffDetailLines(file: DiffFileEntry, width: number): string[] {
     const lines: string[] = [];
     const displayPath = this._toRelativePath(file.filePath);
-    const label = file.isUntracked ? "(untracked)" : file.isNewFile ? "(new)" : "";
+    const label = file.isUntracked
+      ? palette.text.dim("(untracked)")
+      : file.isNewFile
+        ? palette.text.dim("(new)")
+        : "";
 
-    lines.push(`│   ${displayPath} ${label} +${file.linesAdded} -${file.linesRemoved}`);
+    const added = palette.status.success(`+${file.linesAdded}`);
+    const removed = palette.status.error(`-${file.linesRemoved}`);
+    lines.push(`│   ${displayPath} ${label} ${added} ${removed}`);
     lines.push(`│   ${"─".repeat(Math.max(0, width - 4))}`);
 
+    if (file.isUntracked) {
+      lines.push(palette.text.dim("│     New file not yet staged."));
+      lines.push(palette.text.dim(`│     Run \`git add ${displayPath}\` to see line counts.`));
+      return lines;
+    }
+
+    if (file.isBinary) {
+      lines.push(palette.text.dim("│     Binary file - cannot display diff"));
+      return lines;
+    }
+
+    if (file.isLargeFile) {
+      lines.push(palette.text.dim("│     Large file - diff exceeds 1 MB limit"));
+      return lines;
+    }
+
     for (const hunk of file.hunks) {
-      lines.push(`│     @@ -${hunk.oldStart},${hunk.oldLines} +${hunk.newStart},${hunk.newLines} @@`);
+      lines.push(
+        palette.text.dim(
+          `│     @@ -${hunk.oldStart},${hunk.oldLines} +${hunk.newStart},${hunk.newLines} @@`,
+        ),
+      );
       for (const line of hunk.lines) {
         const display = `│     ${line}`;
-        lines.push(truncateToWidth(display, width, ""));
+        let styled: string;
+        if (line.startsWith("+")) {
+          styled = palette.diff.add(display);
+        } else if (line.startsWith("-")) {
+          styled = palette.diff.remove(display);
+        } else {
+          styled = palette.diff.context(display);
+        }
+        lines.push(truncateToWidth(styled, width, ""));
       }
+    }
+
+    if (file.isTruncated) {
+      lines.push(palette.text.dim("│     … diff truncated (exceeded 400 line limit)"));
     }
     return lines;
   }
@@ -1690,28 +1736,95 @@ export class AppScreen implements Component, Focusable {
     lines.push(padToWidth(palette.text.dim(`  ${"─".repeat(Math.max(0, safeWidth - 4))}`), safeWidth));
 
     if (this.diffViewerState.viewMode === "list") {
-      const availableHeight = Math.max(1, this.tui.terminal.rows - 5);
+      // Paginate to MAX_VISIBLE files with the selected file centered,
+      // mirroring Claude Code's DiffFileList. When there are more files than
+      // the window, show ↑/↓ "N more files" hints above/below the window.
+      const MAX_VISIBLE = 5;
+      const total = this.diffViewerState.files.length;
 
-      for (let i = this.diffViewerState.scrollOffset; i < this.diffViewerState.files.length; i++) {
-        const file = this.diffViewerState.files[i]!;
-        const isSelected = i === this.diffViewerState.selectedIndex;
-        const pointer = isSelected ? "❯ " : "  ";
-        const relativePath = this._toRelativePath(file.filePath);
-        const displayPath = relativePath.length > safeWidth - 16
-          ? relativePath.slice(0, safeWidth - 19) + "..."
-          : relativePath;
-        const label = file.isUntracked ? "untracked" : file.source;
-        const stats = `+${file.linesAdded} -${file.linesRemoved}`;
-        const line = `${pointer}${displayPath}`;
-        const padded = padToWidth(line, safeWidth - stats.length - label.length - 3);
-        const fullLine = `${padded}${label} ${stats}`;
-        if (isSelected) {
-          lines.push(palette.text.accent(fullLine));
+      if (total === 0) {
+        lines.push(padToWidth(palette.text.dim("  No file changes in this session"), safeWidth));
+      } else {
+        let start: number;
+        let end: number;
+        if (total <= MAX_VISIBLE) {
+          start = 0;
+          end = total;
         } else {
-          lines.push(fullLine);
+          start = Math.max(0, this.diffViewerState.selectedIndex - Math.floor(MAX_VISIBLE / 2));
+          end = start + MAX_VISIBLE;
+          if (end > total) {
+            end = total;
+            start = Math.max(0, end - MAX_VISIBLE);
+          }
         }
 
-        if (lines.length >= availableHeight + 4) break;
+        if (start > 0) {
+          const more = start;
+          lines.push(padToWidth(
+            palette.text.dim(`  ↑ ${more} more ${more === 1 ? "file" : "files"}`),
+            safeWidth,
+          ));
+        }
+
+        for (let i = start; i < end; i++) {
+          const file = this.diffViewerState.files[i]!;
+          const isSelected = i === this.diffViewerState.selectedIndex;
+          const pointer = isSelected ? "❯ " : "  ";
+          const relativePath = this._toRelativePath(file.filePath);
+          const displayPath = relativePath.length > safeWidth - 16
+            ? relativePath.slice(0, safeWidth - 19) + "..."
+            : relativePath;
+
+          // 构建右侧状态标签（对齐 Claude Code FileStats）:
+          // - untracked → "untracked"
+          // - binary → "Binary file"
+          // - large file → "Large file modified"
+          // - normal/truncated → +N -N [ (truncated)]
+          let statsLabel: string;
+          let statsStyled: string;
+          if (file.isUntracked) {
+            statsLabel = "untracked";
+            statsStyled = palette.text.dim("untracked");
+          } else if (file.isBinary) {
+            statsLabel = "Binary file";
+            statsStyled = palette.text.dim("Binary file");
+          } else if (file.isLargeFile) {
+            statsLabel = "Large file modified";
+            statsStyled = palette.text.dim("Large file modified");
+          } else {
+            const addPart = palette.status.success(`+${file.linesAdded}`);
+            const removePart = palette.status.error(`-${file.linesRemoved}`);
+            statsLabel = `+${file.linesAdded} -${file.linesRemoved}`;
+            statsStyled = `${addPart} ${removePart}`;
+            if (file.isTruncated) {
+              statsLabel += " (truncated)";
+              statsStyled += palette.text.dim(" (truncated)");
+            }
+          }
+
+          const sourceLabel = file.isUntracked
+            ? "untracked"
+            : file.isNewFile
+              ? "(new)"
+              : file.source;
+          const line = `${pointer}${displayPath}`;
+          const padded = padToWidth(line, safeWidth - statsLabel.length - sourceLabel.length - 3);
+          const fullLine = `${padded}${palette.text.dim(sourceLabel)} ${statsStyled}`;
+          if (isSelected) {
+            lines.push(palette.text.accent(fullLine));
+          } else {
+            lines.push(fullLine);
+          }
+        }
+
+        if (end < total) {
+          const more = total - end;
+          lines.push(padToWidth(
+            palette.text.dim(`  ↓ ${more} more ${more === 1 ? "file" : "files"}`),
+            safeWidth,
+          ));
+        }
       }
     } else {
       const file = this.diffViewerState.files[this.diffViewerState.selectedIndex];
@@ -1886,64 +1999,71 @@ export class AppScreen implements Component, Focusable {
       return;
     }
 
-    const handled = handleAppScreenKeyInput(data, {
-      interruptTask: () => this.interruptTask(),
-      exitApp: () => this.exit(),
-      toggleTodos: () => {
-        this.todosCollapsed = !this.todosCollapsed;
-        this.tui.requestRender();
-      },
-      toggleTeamPanel: () => {
-        this.showTeamPanel = !this.showTeamPanel;
-        if (!this.showTeamPanel) {
-          this.viewedTeamMemberId = null;
-        }
-        this.tui.requestRender();
-      },
-      toggleTranscript: () => {
-        const snapshot = this.state.getSnapshot();
-        this.state.setTranscriptMode(
-          snapshot.transcriptMode === "detailed" ? "compact" : "detailed",
-        );
-      },
-      redraw: () => {
-        this.tui.invalidate();
-        this.tui.requestRender(true);
-        this.transientNotice = "Screen redrawn";
-        if (this.transientNoticeTimer) {
-          clearTimeout(this.transientNoticeTimer);
-        }
-        this.transientNoticeTimer = setTimeout(() => {
-          this.transientNotice = null;
-          this.transientNoticeTimer = null;
+    // Global ctrl+l/t/g/o only apply on the main screen — defer while an overlay
+    // or the team panel is active so context-specific bindings (e.g. ResumeList)
+    // can use the same physical keys.
+    const skipGlobalMainScreenKeys = hasOverlay || this.showTeamPanel;
+    let handled = false;
+    if (!skipGlobalMainScreenKeys) {
+      handled = handleAppScreenKeyInput(data, {
+        interruptTask: () => this.interruptTask(),
+        exitApp: () => this.exit(),
+        toggleTodos: () => {
+          this.todosCollapsed = !this.todosCollapsed;
           this.tui.requestRender();
-        }, 1200);
-        this.tui.requestRender();
-      },
-      clearInput: () => {
-        this.editor.setText("");
-        this.tui.requestRender();
-      },
-      isIdle: () => {
-        return !snapshot.isProcessing && !snapshot.pendingQuestion && !snapshot.cancellableWork;
-      },
-      hasServerTask: () => this.state.hasServerTask(),
-      requestLocalInterrupt: () => {
-        return this.state.requestLocalInterrupt();
-      },
-      showCtrlCExitHint: () => {
-        if (this.transientNoticeTimer) {
-          clearTimeout(this.transientNoticeTimer);
-        }
-        this.transientNotice = "Press Ctrl+C again to exit";
-        this.transientNoticeTimer = setTimeout(() => {
-          this.transientNotice = null;
-          this.transientNoticeTimer = null;
+        },
+        toggleTeamPanel: () => {
+          this.showTeamPanel = !this.showTeamPanel;
+          if (!this.showTeamPanel) {
+            this.viewedTeamMemberId = null;
+          }
           this.tui.requestRender();
-        }, 3000);
-        this.tui.requestRender();
-      },
-    });
+        },
+        toggleTranscript: () => {
+          const snapshot = this.state.getSnapshot();
+          this.state.setTranscriptMode(
+            snapshot.transcriptMode === "detailed" ? "compact" : "detailed",
+          );
+        },
+        redraw: () => {
+          this.tui.invalidate();
+          this.tui.requestRender(true);
+          this.transientNotice = "Screen redrawn";
+          if (this.transientNoticeTimer) {
+            clearTimeout(this.transientNoticeTimer);
+          }
+          this.transientNoticeTimer = setTimeout(() => {
+            this.transientNotice = null;
+            this.transientNoticeTimer = null;
+            this.tui.requestRender();
+          }, 1200);
+          this.tui.requestRender();
+        },
+        clearInput: () => {
+          this.editor.setText("");
+          this.tui.requestRender();
+        },
+        isIdle: () => {
+          return !snapshot.isProcessing && !snapshot.pendingQuestion && !snapshot.cancellableWork;
+        },
+        hasServerTask: () => this.state.hasServerTask(),
+        requestLocalInterrupt: () => {
+          return this.state.requestLocalInterrupt();
+        },
+        showCtrlCExitHint: () => {
+          if (this.transientNoticeTimer) {
+            clearTimeout(this.transientNoticeTimer);
+          }
+          this.transientNotice = "Press Ctrl+C again to exit";
+          this.transientNoticeTimer = setTimeout(() => {
+            this.transientNotice = null;
+            this.transientNoticeTimer = null;
+            this.tui.requestRender();
+          }, 3000);
+          this.tui.requestRender();
+        },
+      });
+    }
     if (handled) {
       return;
     }
@@ -5114,12 +5234,16 @@ export class AppScreen implements Component, Focusable {
           const newQuery = state.searchQuery.slice(0, -1);
           this.updateConfigSearchQuery(newQuery);
         } else if (matchesKey(data, "escape")) {
-          // Layered ESC: clear search query first, then exit search mode
+          // Layered ESC: clear search query first; once the query is empty, a
+          // second ESC exits the editor entirely (back to StatusView config tab
+          // when invoked from /status, or closed when invoked via /config).
+          // We must NOT burn an ESC just to flip searchMode true→false while
+          // staying on the search_list — that is what forced the extra ESC.
           if (state.searchQuery) {
             this.updateConfigSearchQuery("");
             this.configEditorState = { ...this.configEditorState!, searchMode: false };
           } else {
-            this.configEditorState = { ...this.configEditorState!, searchMode: false };
+            this.closeConfigEditor();
           }
         } else if (matchesKey(data, "return") || matchesKey(data, "space")) {
           const selectedItem = state.list.getSelectedItem();

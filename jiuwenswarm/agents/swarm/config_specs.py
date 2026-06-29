@@ -36,10 +36,13 @@ from openjiuwen.core.single_agent import AgentCard
 from openjiuwen.harness.prompts import resolve_language
 from openjiuwen.harness.rails import SkillUseRail
 
-from jiuwenswarm.agents.harness.team.team_runtime_inheritance import (
-    get_context_engine_enabled,
+from jiuwenswarm.common.config import (
+    get_evolution_auto_save_enabled,
     get_evolution_auto_scan_enabled,
     get_skill_create_enabled,
+)
+from jiuwenswarm.agents.harness.team.team_runtime_inheritance import (
+    get_context_engine_enabled,
     resolve_model_config,
 )
 from jiuwenswarm.agents.swarm import registry
@@ -267,8 +270,17 @@ def _permission_params(config: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _evolution_rail_params(config: dict[str, Any]) -> dict[str, Any]:
-    """Attribute params for the team / member skill-evolution rails."""
+def _team_evolution_rail_params(config: dict[str, Any]) -> dict[str, Any]:
+    """Attribute params for the leader team skill-evolution rail."""
+    return {
+        "evolution_model_config": _evolution_model_config(config),
+        "auto_scan": get_evolution_auto_scan_enabled(config),
+        "auto_save": get_evolution_auto_save_enabled(config),
+    }
+
+
+def _member_evolution_rail_params(config: dict[str, Any]) -> dict[str, Any]:
+    """Attribute params for the member skill-evolution rail."""
     return {
         "evolution_model_config": _evolution_model_config(config),
         "auto_scan": get_evolution_auto_scan_enabled(config),
@@ -339,7 +351,7 @@ def _role_evolution_rails(config: dict[str, Any], role: str) -> list[RailSpec]:
         return [
             RailSpec(
                 type=registry.TEAM_SKILL_EVOLUTION,
-                params=_evolution_rail_params(config),
+                params=_team_evolution_rail_params(config),
             ),
             RailSpec(
                 type=registry.TEAM_SKILL_CREATE,
@@ -348,7 +360,8 @@ def _role_evolution_rails(config: dict[str, Any], role: str) -> list[RailSpec]:
         ]
     return [
         RailSpec(
-            type=registry.MEMBER_SKILL_EVOLUTION, params=_evolution_rail_params(config)
+            type=registry.MEMBER_SKILL_EVOLUTION,
+            params=_member_evolution_rail_params(config),
         ),
     ]
 
@@ -587,7 +600,7 @@ def build_member_subagent_specs(
         if _is_subagent_enabled(subagents_cfg.get("browser_agent")):
             specs.append(
                 _code_subagent_spec(
-                    "browser_agent", registry.BROWSER_AGENT, react, language
+                    "browser_agent", registry.SWARM_BROWSER_AGENT, react, language
                 )
             )
     return specs
@@ -638,8 +651,38 @@ def build_member_deep_agent_spec(
         update["enable_skill_discovery"] = True
 
     subagent_specs = build_member_subagent_specs(config, mode, role)
-    if subagent_specs:
+
+    # In team mode, base_spec includes a browser_agent with hardcoded
+    # server_id="playwright_official_stdio". All members share that single
+    # @playwright/mcp subprocess → single Chrome window. Replace it with
+    # SWARM_BROWSER_AGENT which builds a unique server_id per member
+    # (session_id + role), giving each member their own isolated Chrome.
+    # In code mode build_member_subagent_specs already returns SWARM_BROWSER_AGENT,
+    # so this branch only runs for non-code modes.
+    team_browser_spec: SubAgentSpec | None = None
+    if not _is_code_mode(mode):
+        react_cfg = (config or {}).get("react", {})
+        react_cfg = react_cfg if isinstance(react_cfg, dict) else {}
+        subagents_cfg = react_cfg.get("subagents", {}) if isinstance(react_cfg, dict) else {}
+        if isinstance(subagents_cfg, dict) and _is_subagent_enabled(subagents_cfg.get("browser_agent")):
+            language = _subagent_language(mode, role, config)
+            team_browser_spec = _code_subagent_spec(
+                "browser_agent", registry.SWARM_BROWSER_AGENT, react_cfg, language
+            )
+
+    if subagent_specs or team_browser_spec:
         merged_subagents = list(base_spec.subagents or [])
+        # Remove any browser_agent from base_spec to prevent the shared
+        # playwright_official_stdio entry from co-existing with our isolated one.
+        if team_browser_spec or any(
+            getattr(s, "subagent_type", None) == "browser_agent" for s in subagent_specs
+        ):
+            merged_subagents = [
+                s for s in merged_subagents
+                if getattr(s, "subagent_type", None) != "browser_agent"
+            ]
+        if team_browser_spec:
+            merged_subagents.append(team_browser_spec)
         merged_subagents.extend(subagent_specs)
         update["subagents"] = merged_subagents
 

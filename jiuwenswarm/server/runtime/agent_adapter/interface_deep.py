@@ -65,6 +65,7 @@ from openjiuwen.harness.rails import (
     configure_skill_evolution_runtime,
     unconfigure_skill_evolution,
 )
+from openjiuwen.harness.rails.evolution import EvolutionReviewRuntime
 from openjiuwen.harness.rails.context_engineer.context_assemble_rail import ContextAssembleRail
 from openjiuwen.harness.rails.context_engineer.context_processor_rail import ContextProcessorRail
 from openjiuwen.harness.subagents.browser_agent import build_browser_agent_config
@@ -243,8 +244,11 @@ from jiuwenswarm.agents.harness.common.tools.xiaoyi_phone_tools import (
 from jiuwenswarm.common.config import (
     get_config,
     get_default_models,
+    get_evolution_auto_scan_enabled,
+    get_evolution_auto_save_enabled,
     get_sandbox_runtime,
     get_sandbox_startup_mode,
+    get_skill_create_enabled,
     resolve_env_vars,
 )
 from jiuwenswarm.common.mcp_config import (
@@ -323,40 +327,6 @@ _SKILL_RETRIEVAL_TOOL_NAMES = frozenset(
         "skill_branch_peek",
     }
 )
-
-
-def _get_skill_create_enabled(config: dict[str, Any] | None) -> bool:
-    """读取 skill_create 配置，环境变量优先，不存在时从 config.yaml 读取.
-
-    Args:
-        config: 配置字典（包含 evolution.skill_create）
-
-    Returns:
-        True 表示启用 SkillCreateRail，False 表示不启用
-    """
-    env_skill_create = os.getenv("SKILL_CREATE")
-    if env_skill_create is not None:
-        return env_skill_create.lower() in ("true", "1", "yes")
-    return _get_evolution_config(config).get("skill_create", False)
-
-
-def _get_evolution_config(config: dict[str, Any] | None) -> dict[str, Any]:
-    if not isinstance(config, dict):
-        return {}
-    react_config = config.get("react")
-    if isinstance(react_config, dict) and isinstance(react_config.get("evolution"), dict):
-        return react_config["evolution"]
-    evolution_config = config.get("evolution")
-    if isinstance(evolution_config, dict):
-        return evolution_config
-    return {}
-
-
-def _get_evolution_auto_scan_enabled(config: dict[str, Any] | None) -> bool:
-    env_auto_scan = os.getenv("EVOLUTION_AUTO_SCAN")
-    if env_auto_scan is not None:
-        return env_auto_scan.lower() in ("true", "1", "yes")
-    return _get_evolution_config(config).get("auto_scan", False)
 
 
 def _set_skill_evolution_auto_scan(rail: Any, enabled: bool) -> None:
@@ -1349,6 +1319,55 @@ class JiuWenSwarmDeepAdapter:
         browser_agent_cfg = (
             subagents_cfg.get("browser_agent") if isinstance(subagents_cfg, dict) else {}
         )
+
+        # Apply headless setting unconditionally — PLAYWRIGHT_MCP_ARGS must be set
+        # even when the main-agent browser subagent is disabled, because swarm members
+        # also spawn @playwright/mcp subprocesses that read this env var at spec-build time.
+        headless = self._resolve_headless_from_config()
+        # @playwright/mcp@latest uses --headless CLI flag (not an env var).
+        # Rebuild PLAYWRIGHT_MCP_ARGS to add or strip --headless as needed.
+        _mcp_args_raw = (os.getenv("PLAYWRIGHT_MCP_ARGS") or "-y @playwright/mcp@latest").strip()
+        _mcp_args_list = _mcp_args_raw.split() if _mcp_args_raw else ["-y", "@playwright/mcp@latest"]
+        _mcp_args_list = [a for a in _mcp_args_list if a != "--headless"]
+        if headless:
+            _mcp_args_list.append("--headless")
+            os.environ["BROWSER_MANAGED_ARGS"] = "--headless=new"
+            # Purge any stale managed-browser profile whose extra_args lack
+            # --headless=new. The managed driver reuses a persisted profile
+            # by name and would inherit its stale extra_args=[] otherwise.
+            try:
+                from pathlib import Path as _Path
+                from jiuwenswarm.common.utils import get_user_workspace_dir as _get_ws
+                _profile_store = _Path(
+                    os.getenv("BROWSER_PROFILE_STORE_PATH", "").strip()
+                    or str(_get_ws() / ".browser" / "profiles.json")
+                ).expanduser()
+                if _profile_store.exists():
+                    _profile_store.unlink()
+                    logger.info(
+                        "[JiuWenSwarmDeepAdapter] cleared stale browser profile store "
+                        "for headless mode: %s",
+                        _profile_store,
+                    )
+            except Exception as _e:
+                logger.debug(
+                    "[JiuWenSwarmDeepAdapter] could not clear browser profile store: %s", _e
+                )
+            logger.info(
+                "[JiuWenSwarmDeepAdapter] browser headless=True → "
+                "BROWSER_MANAGED_ARGS=--headless=new, PLAYWRIGHT_MCP_ARGS=%s",
+                " ".join(_mcp_args_list),
+            )
+        else:
+            os.environ.pop("BROWSER_MANAGED_ARGS", None)
+            logger.info(
+                "[JiuWenSwarmDeepAdapter] browser headless=False → "
+                "headed mode (BROWSER_MANAGED_ARGS cleared, PLAYWRIGHT_MCP_ARGS=%s)",
+                " ".join(_mcp_args_list),
+            )
+        os.environ["PLAYWRIGHT_MCP_ARGS"] = " ".join(_mcp_args_list)
+        self._browser_headless_setting = headless
+
         browser_enabled = self._browser_runtime_enabled()
         if browser_enabled:
             if not str(os.getenv("BROWSER_DRIVER") or "").strip():
@@ -2663,15 +2682,17 @@ class JiuWenSwarmDeepAdapter:
     def _build_skill_evolution_rail(self, config: dict[str, Any]) -> SkillEvolutionRail | None:
         """Build SkillEvolutionRail."""
         try:
-            evolution_auto_scan = _get_evolution_auto_scan_enabled(config)
+            evolution_auto_scan = get_evolution_auto_scan_enabled(config)
+            evolution_auto_save = get_evolution_auto_save_enabled(config)
             model_name = self._default_model_name or config.get("model_name", "gpt-4")
             skill_evolution_rail = SkillEvolutionRail(
                 skills_dir=str(get_agent_skills_dir()),
                 llm=self._model,
                 model=model_name,
+                review_runtime=EvolutionReviewRuntime(),
                 auto_scan=evolution_auto_scan,
                 fuzzy_review=evolution_auto_scan,
-                auto_save=False,
+                auto_save=evolution_auto_save,
                 disabled_skills=self._skill_manager.list_execution_disabled_skills(),
             )
             self._skill_evolution_rail = skill_evolution_rail
@@ -2687,7 +2708,8 @@ class JiuWenSwarmDeepAdapter:
             return
 
         resolved_language = self._resolve_runtime_language()
-        evolution_auto_scan = _get_evolution_auto_scan_enabled(self._config_cache)
+        evolution_auto_scan = get_evolution_auto_scan_enabled(self._config_cache)
+        evolution_auto_save = get_evolution_auto_save_enabled(self._config_cache)
         if (
             self._skill_evolution_rail is not None
             and getattr(self._skill_evolution_rail, "_language", None) != resolved_language
@@ -2707,7 +2729,7 @@ class JiuWenSwarmDeepAdapter:
             or self._config_cache.get("model_name", "gpt-4"),
             auto_scan=evolution_auto_scan,
             fuzzy_review=evolution_auto_scan,
-            auto_save=False,
+            auto_save=evolution_auto_save,
             disabled_skills=disabled_skills,
             language=resolved_language,
         )
@@ -2786,7 +2808,7 @@ class JiuWenSwarmDeepAdapter:
         Env: SKILL_CREATE - takes precedence over config.yaml.
         """
         try:
-            skill_create_enabled = _get_skill_create_enabled(config)
+            skill_create_enabled = get_skill_create_enabled(config)
             # Check if skill_create is explicitly enabled
             if not skill_create_enabled:
                 logger.debug("[JiuWenSwarmDeepAdapter] SkillCreateRail disabled by config")
@@ -3082,8 +3104,8 @@ class JiuWenSwarmDeepAdapter:
             True if task-loop should be enabled, False otherwise.
         """
         config_base = config_base or get_config()
-        skill_create_enabled = _get_skill_create_enabled(config_base)
-        evolution_auto_scan_enabled = _get_evolution_auto_scan_enabled(config_base)
+        skill_create_enabled = get_skill_create_enabled(config_base)
+        evolution_auto_scan_enabled = get_evolution_auto_scan_enabled(config_base)
         configured_value = config.get("enable_task_loop", True)
 
         if skill_create_enabled:
@@ -3181,7 +3203,7 @@ class JiuWenSwarmDeepAdapter:
             self._skill_evolution_rail.update_llm(self._model, self._default_model_name)
             _set_skill_evolution_auto_scan(
                 self._skill_evolution_rail,
-                _get_evolution_auto_scan_enabled(config),
+                get_evolution_auto_scan_enabled(config),
             )
 
         # Reuse existing SkillUseRail to preserve dynamically loaded skills
@@ -3896,7 +3918,7 @@ class JiuWenSwarmDeepAdapter:
                 logger.info("[JiuWenSwarmDeepAdapter] SkillEvolutionRail unregistered (evolution.enabled=false)")
 
         # SkillCreateRail
-        skill_create_enabled = _get_skill_create_enabled(self._config_cache)
+        skill_create_enabled = get_skill_create_enabled(self._config_cache)
         if skill_create_enabled:
             # Warn if task_loop is disabled
             deep_config = getattr(self._instance, "deep_config", None) if self._instance else None
@@ -5299,7 +5321,7 @@ class JiuWenSwarmDeepAdapter:
             return "演进功能初始化失败。"
 
         # SkillCreateRail requires skill_create config
-        if _get_skill_create_enabled(self._config_cache):
+        if get_skill_create_enabled(self._config_cache):
             if self._skill_create_rail is None:
                 self._skill_create_rail = self._build_skill_create_rail(self._config_cache)
         return None

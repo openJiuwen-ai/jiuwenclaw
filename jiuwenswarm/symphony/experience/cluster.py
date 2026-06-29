@@ -141,9 +141,6 @@ def _faiss_cluster(
 
     # Normalize vectors for inner-product = cosine similarity
     arr = np.array(embeddings, dtype=np.float32)
-    norms = np.linalg.norm(arr, axis=1, keepdims=True)
-    norms[norms == 0] = 1.0
-    arr = arr / norms
 
     # Auto-determine k: aim for clusters of 3-8 items
     if n_clusters is None:

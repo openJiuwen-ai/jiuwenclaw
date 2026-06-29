@@ -124,6 +124,10 @@ function connectionStatusLabel(status: AppSnapshot["connectionStatus"]): string 
   }
 }
 
+function isPlanMode(mode: AppSnapshot["mode"]): boolean {
+  return mode === "agent.plan" || mode === "code.plan" || mode === "team.plan";
+}
+
 function buildStatusLines(
   snapshot: AppSnapshot,
   width: number,
@@ -142,6 +146,7 @@ function buildStatusLines(
     left.push(displayTitle);
   }
   left.push(`mode:${snapshot.mode}`);
+  if (isPlanMode(snapshot.mode)) left.push("使用 /mode 退出plan模式");
   if (snapshot.transcriptFoldMode !== "none") left.push(`fold:${snapshot.transcriptFoldMode}`);
   const teamWorking =
     isTeamMode(snapshot.mode) &&

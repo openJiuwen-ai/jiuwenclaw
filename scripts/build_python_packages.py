@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import logging
 import os
 import shutil
 import subprocess
@@ -27,7 +28,7 @@ TUI_TARGETS = {
 
 
 def run(cmd: list[str], cwd: Path, env: dict[str, str] | None = None) -> None:
-    print(f"[build] ({cwd.relative_to(ROOT) if cwd != ROOT else '.'}) {' '.join(cmd)}")
+    logging.info(f"[build] ({cwd.relative_to(ROOT) if cwd != ROOT else '.'}) {' '.join(cmd)}")
     subprocess.run(cmd, cwd=cwd, check=True, env=env)
 
 
@@ -204,13 +205,13 @@ def main() -> None:
     if not args.skip_jiuwenbox:
         build_jiuwenbox_wheel()
 
-    print("\n[build] done")
+    logging.info("\n[build] done")
     if not args.skip_root:
-        print(f"[build] main wheel: {SIDE_CAR_DIST}")
+        logging.info(f"[build] main wheel: {SIDE_CAR_DIST}")
     if not args.skip_sidecar:
-        print(f"[build] tui wheel(s): {SIDE_CAR_DIST}")
+        logging.info(f"[build] tui wheel(s): {SIDE_CAR_DIST}")
     if not args.skip_jiuwenbox:
-        print(f"[build] jiuwenbox wheel: {JIUWENBOX_DIST}")
+        logging.info(f"[build] jiuwenbox wheel: {JIUWENBOX_DIST}")
 
 
 if __name__ == "__main__":

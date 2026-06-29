@@ -545,6 +545,11 @@
 
 键名格式需符合 pi-tui 的 `matchesKey` 约定：小写修饰键 `ctrl` / `shift` / `alt`，特殊键如 `pageUp`、`escape`、`return` 等；不支持 chord（空格分隔的多段按键）。
 
+**不支持的按键**：
+- **`win` / `cmd` / `super` / `meta`**：这些修饰键依赖 Kitty 键盘协议，普通终端（Windows CMD、VS Code 内置终端等）无法发送，快捷键不会生效。
+- **`ctrl+shift+字母`**：在 Windows CMD 等传统终端中，`ctrl+shift+l` 与 `ctrl+l` 发送的字节码相同，终端层面无法区分，不建议使用。如需使用此类组合建议换用 Windows Terminal、WezTerm 等支持 VT 模式的终端。
+- **chord 组合键**（空格分隔，如 `"ctrl+x ctrl+k"`）：当前版本不支持。
+
 #### 可配置的 Context 与 Action
 
 | Context | 生效场景 | 主要默认键 |

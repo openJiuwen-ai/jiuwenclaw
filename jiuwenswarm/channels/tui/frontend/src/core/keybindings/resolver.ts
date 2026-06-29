@@ -1,7 +1,7 @@
 import { type KeyId, matchesKey } from "@mariozechner/pi-tui";
 
 import type { KeybindingAction, KeybindingContextName } from "./actions.js";
-import { loadKeybindings } from "./store.js";
+import { loadKeybindings, startKeybindingsWatcher } from "./store.js";
 import type { KeybindingWarning, ResolvedBindings } from "./types.js";
 
 // Initialized at module load from defaults + user file. /keybindings triggers
@@ -14,6 +14,10 @@ export function reloadResolver(): KeybindingWarning[] {
   current = result.resolved;
   return result.warnings;
 }
+
+// Start watching keybindings.json for external changes (edit / delete / create).
+// Automatically reloads to defaults when the file is deleted at runtime.
+startKeybindingsWatcher(() => reloadResolver());
 
 /**
  * Resolve a terminal input string to an action within a context.

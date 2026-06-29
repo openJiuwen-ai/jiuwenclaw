@@ -13,6 +13,7 @@
 """
 
 import email
+import logging
 from dataclasses import dataclass, field
 from datetime import datetime
 from email.header import decode_header
@@ -154,7 +155,6 @@ class EmailCollector:
             self._connection.login(self.email_address, self.auth_code)
             return True
         except Exception as e:
-            print(f"连接邮箱失败: {e}")
             return False
 
     def disconnect(self):
@@ -232,7 +232,7 @@ class EmailCollector:
                 pass  # 发件箱可能不存在或无权限
 
         except Exception as e:
-            print(f"获取邮件统计失败: {e}")
+            logging.info(f"获取邮件统计失败: {e}")
 
         return stats
 
@@ -274,41 +274,3 @@ class EmailCollector:
     def __exit__(self, exc_type, exc_val, exc_tb):
         self.disconnect()
         return False
-
-
-def main():
-    """测试入口"""
-    import os
-    import sys
-
-    if len(sys.argv) < 3:
-        print("Usage: python email_collector.py <email> <auth_code> [provider]")
-        sys.exit(1)
-
-    email_address = sys.argv[1]
-    auth_code = sys.argv[2]
-    provider = sys.argv[3] if len(sys.argv) > 3 else "163"
-
-    print(f"连接 {provider} 邮箱: {email_address}")
-
-    try:
-        with EmailCollector(email_address, auth_code, provider) as collector:
-            stats = collector.get_stats()
-
-            print(f"\n邮件统计:")
-            print(f"  今日收件: {stats.received_today} 封")
-            print(f"  今日发件: {stats.sent_today} 封")
-            print(f"  未读邮件: {stats.unread} 封")
-            print(f"  星标邮件: {stats.starred} 封")
-
-            if stats.important_emails:
-                print("\n未读邮件:")
-                for email_info in stats.important_emails:
-                    print(f"  - [{email_info.sender}] {email_info.subject}")
-
-    except Exception as e:
-        print(f"错误: {e}")
-
-
-if __name__ == "__main__":
-    main()

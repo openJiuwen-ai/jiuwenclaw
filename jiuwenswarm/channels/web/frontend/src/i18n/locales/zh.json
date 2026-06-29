@@ -444,7 +444,8 @@
       "saveConfig": "保存心跳配置失败",
       "invalidEvery": "心跳间隔必须是大于 0 的正数",
       "invalidActiveHours": "active_hours 需使用 HH:MM 格式（例如 08:00）",
-      "invalidRange": "结束时间必须大于开始时间"
+      "invalidRange": "结束时间必须大于开始时间",
+      "feishuNoTarget": "飞书机器人尚未与用户对话，无法推送心跳。请先在飞书中与机器人对话一次。"
     }
   },
   "heartbeatModal": {
@@ -1064,6 +1065,7 @@
       "fullRebuild": "全量重新构建",
       "building": "构建中...",
       "buildFailed": "构建失败",
+      "lastBuildFailedUsingExisting": "上次重新构建失败，当前仍在使用上一次成功构建的索引。",
       "cancel": "取消构建",
       "cancelling": "取消中...",
       "cancelled": "构建已取消",

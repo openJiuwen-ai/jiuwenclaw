@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import io
 import zipfile
+from pathlib import Path
 
 import pytest
 
@@ -352,3 +353,108 @@ async def test_handle_skills_team_skills_hub_install_rejects_zip_slip(tmp_path):
     assert "非法路径" in payload["detail"] or "越界" in payload["detail"]
     assert payload["detail_key"] == "skills.teamskillshub.errors.installFailed"
     assert not (tmp_path / "evil.txt").exists()
+
+
+# ---------------------------------------------------------------------------
+# skills.teamskillshub.init —— path 路径穿越防护
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_handle_skills_team_skills_hub_init_success_under_skills_dir(tmp_path):
+    """默认 path（.）在 skills 目录内创建脚手架。"""
+    manager = TeamSkillsHubHarnessSkillManager(workspace_dir=str(tmp_path))
+    skills_dir = tmp_path / "skills"
+    skills_dir.mkdir(parents=True, exist_ok=True)
+
+    payload = await manager.handle_skills_team_skills_hub_init({"name": "demo-skill"})
+    assert payload["success"] is True
+    target = skills_dir / "demo-skill"
+    assert payload["path"] == str(target)
+    assert (target / "SKILL.md").is_file()
+
+
+@pytest.mark.asyncio
+async def test_handle_skills_team_skills_hub_init_success_with_relative_subdir(tmp_path):
+    """相对子路径作为父目录时应在 skills 目录内创建（父目录需存在）。"""
+    manager = TeamSkillsHubHarnessSkillManager(workspace_dir=str(tmp_path))
+    skills_dir = tmp_path / "skills"
+    (skills_dir / "group").mkdir(parents=True, exist_ok=True)
+
+    payload = await manager.handle_skills_team_skills_hub_init(
+        {"name": "demo-skill", "path": "group"}
+    )
+    assert payload["success"] is True
+    assert (skills_dir / "group" / "demo-skill" / "SKILL.md").is_file()
+
+
+@pytest.mark.asyncio
+async def test_handle_skills_team_skills_hub_init_rejects_absolute_posix_path(tmp_path):
+    """POSIX 风格绝对/盘符相对路径必须被拒绝，且不创建任何内容。
+
+    在 POSIX 平台 ``/etc`` 为绝对路径，命中绝对路径分支；在 Windows 平台
+    ``/etc`` 是盘符相对路径，解析到 ``<盘符>:/etc``，命中越界分支。两者均被拒。
+    """
+    manager = TeamSkillsHubHarnessSkillManager(workspace_dir=str(tmp_path))
+    payload = await manager.handle_skills_team_skills_hub_init(
+        {"name": "evil", "path": "/etc/evil-target"}
+    )
+    assert payload["success"] is False
+    assert "相对路径" in payload["detail"] or "越界" in payload["detail"]
+    # 关键：未在 skills 目录外创建任何内容
+    assert not (tmp_path / "evil").exists()
+    skills_dir = tmp_path / "skills"
+    assert not any((skills_dir / "etc").rglob("evil")) if (skills_dir / "etc").exists() else True
+
+
+@pytest.mark.asyncio
+async def test_handle_skills_team_skills_hub_init_rejects_absolute_windows_path(tmp_path):
+    """Windows 盘符绝对路径必须被拒绝，且不在该目录创建任何内容。"""
+    manager = TeamSkillsHubHarnessSkillManager(workspace_dir=str(tmp_path))
+    import tempfile
+
+    foreign_dir = Path(tempfile.gettempdir()) / "jiuwenswarm_init_traversal_marker"
+    foreign_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        payload = await manager.handle_skills_team_skills_hub_init(
+            {"name": "evil", "path": str(foreign_dir)}
+        )
+        assert payload["success"] is False
+        assert "相对路径" in payload["detail"]
+        # 关键：未在越界目录下创建子目录或文件
+        assert not (foreign_dir / "evil").exists()
+    finally:
+        if foreign_dir.exists():
+            _safe_rmtree_for_test(foreign_dir)
+
+
+@pytest.mark.asyncio
+async def test_handle_skills_team_skills_hub_init_rejects_traversal(tmp_path):
+    """相对穿越路径（..）解析后逃逸 skills 目录，必须被拒绝。"""
+    manager = TeamSkillsHubHarnessSkillManager(workspace_dir=str(tmp_path))
+    payload = await manager.handle_skills_team_skills_hub_init(
+        {"name": "evil", "path": "../../.."}
+    )
+    assert payload["success"] is False
+    assert "越界" in payload["detail"]
+    assert not (tmp_path.parent / "evil").exists()
+
+
+@pytest.mark.asyncio
+async def test_handle_skills_team_skills_hub_init_rejects_home_abs_path(tmp_path, monkeypatch):
+    """~ 展开后为绝对路径，必须被拒绝（路径穿越变种）。"""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
+    manager = TeamSkillsHubHarnessSkillManager(workspace_dir=str(tmp_path))
+    payload = await manager.handle_skills_team_skills_hub_init(
+        {"name": "evil", "path": "~"}
+    )
+    assert payload["success"] is False
+    assert "相对路径" in payload["detail"] or "越界" in payload["detail"]
+    assert not (tmp_path / "evil").exists()
+
+
+def _safe_rmtree_for_test(path: Path) -> None:
+    import shutil
+
+    shutil.rmtree(path, ignore_errors=True)

@@ -1357,6 +1357,12 @@ class AgentWebSocketServer:
         return method in _CODE_MODE_SYNC_METHODS
 
     @staticmethod
+    def _is_explicit_plan_entry_request(request: AgentRequest) -> bool:
+        if not isinstance(request.params, dict):
+            return False
+        return request.params.get("plan_entry_source") == "slash_command"
+
+    @staticmethod
     def _session_mode_sync_lock(session_id: str) -> asyncio.Lock:
         lock = _session_mode_sync_locks.get(session_id)
         if lock is None:
@@ -1454,8 +1460,8 @@ class AgentWebSocketServer:
     ) -> bool:
         """code 模式：确保 agent 的 plan_mode 状态正确，必要时执行 switch_mode 并持久化.
 
-        当 plan 已完成（plan_slug 存在且 mode 不为 "plan"）时跳过 switch_mode，
-        避免 exit_plan_mode 已恢复的模式被覆盖.
+        当 plan 刚完成时跳过陈旧的 normal→plan switch_mode，
+        避免 exit_plan_mode 已恢复的模式被覆盖；显式用户 /plan 进入除外.
         switch_mode 内部已通过 save_state 写入正确的 "deepagent" key，
         此处只需 post_run 持久化到 checkpointer.
 
@@ -1495,12 +1501,16 @@ class AgentWebSocketServer:
             mode_changed_to_plan = False
             if state.plan_mode.mode != sub_mode:
                 # Guard: block stale normal→plan switches when plan was already exited.
+                # Explicit user /plan requests bypass this guard and start a fresh plan.
                 # Two mechanisms:
                 #   1. _plan_exited_sessions flag (precise — set by _check_post_process_plan_exit)
                 #   2. plan_slug fallback (defense-in-depth — plan exists but mode is normal)
                 if state.plan_mode.mode == "normal" and sub_mode == "plan":
                     blocked = False
-                    if session_id in _plan_exited_sessions:
+                    explicit_plan_entry = self._is_explicit_plan_entry_request(request)
+                    if explicit_plan_entry:
+                        _plan_exited_sessions.discard(session_id)
+                    elif session_id in _plan_exited_sessions:
                         _plan_exited_sessions.discard(session_id)
                         blocked = True
                         logger.info(
@@ -3258,7 +3268,7 @@ class AgentWebSocketServer:
 
         name = str(entry.get("name", "")).strip()
         transport = str(entry.get("transport", "")).strip().lower()
-        if not name or transport not in {"stdio", "sse"}:
+        if not name or transport not in {"stdio", "sse", "http", "streamable-http", "streamable_http"}:
             logger.warning("[command.mcp] _fetch skipped: name=%r transport=%r", name, transport)
             return []
 
@@ -3326,8 +3336,8 @@ class AgentWebSocketServer:
         transport = str(merged.get("transport", "")).strip().lower()
         if not name:
             raise ValueError("MCP server name is required")
-        if transport not in {"stdio", "sse"}:
-            raise ValueError("transport must be one of stdio|sse")
+        if transport not in {"stdio", "sse", "http", "streamable-http", "streamable_http"}:
+            raise ValueError("transport must be one of stdio|sse|http")
 
         payload: dict[str, Any] = {
             "name": name,

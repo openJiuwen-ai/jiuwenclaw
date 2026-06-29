@@ -639,6 +639,10 @@ Alias: `/keybind`.
 
 - Built-in defaults are merged with user JSON per **context**; set a key to `null` to unbind a default.
 - Key ids must match pi-tui `matchesKey` format (`ctrl`/`shift`/`alt` + main key); chords are not supported.
+- **Unsupported keys**:
+  - **`win` / `cmd` / `super` / `meta`**: These modifiers require the Kitty keyboard protocol, which is not available in standard terminals (Windows CMD, VS Code integrated terminal, etc.). Bindings using these will never fire.
+  - **`ctrl+shift+letter`**: On legacy terminals like Windows CMD, `ctrl+shift+l` and `ctrl+l` produce the same byte — the terminal cannot distinguish them. This combination is not recommended. Use Windows Terminal, WezTerm, or another VT-mode capable terminal if you need these combos.
+  - **Chords** (space-separated multi-key sequences, e.g. `"ctrl+x ctrl+k"`): Not supported in the current version.
 - **Non-rebindable**: `ctrl+c`, `ctrl+d`, `ctrl+m` (reserved keys).
 - Select-list navigation, config editor text input, Resume preview/rename sub-states, etc. remain hardcoded.
 

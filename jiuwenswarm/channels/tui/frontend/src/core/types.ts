@@ -144,6 +144,10 @@ export interface FileDiff {
   filePath: string;
   hunks: Hunk[];
   isNewFile: boolean;
+  isBinary?: boolean;
+  isLargeFile?: boolean;
+  isTruncated?: boolean;
+  isUntracked?: boolean;
   linesAdded: number;
   linesRemoved: number;
   lastEditTime?: string;
@@ -165,6 +169,10 @@ export interface GitDiffFile {
   filePath: string;
   hunks: Hunk[];
   isNewFile: boolean;
+  isBinary?: boolean;
+  isLargeFile?: boolean;
+  isTruncated?: boolean;
+  isUntracked?: boolean;
   linesAdded: number;
   linesRemoved: number;
   lastEditTime: string | null;

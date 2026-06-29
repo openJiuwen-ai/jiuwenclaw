@@ -318,8 +318,8 @@ class MemoryIndexManager:
             if self.vector_dims is not None and self.vector_dims != dims:
                 try:
                     self.db.execute(f"DROP TABLE IF EXISTS {VECTOR_TABLE}")
-                except:
-                    pass
+                except Exception as e:
+                    logger.warning(f"Failed to drop existing vector table {VECTOR_TABLE}: {e}")
 
             self.db.execute(f"""
                 CREATE VIRTUAL TABLE IF NOT EXISTS {VECTOR_TABLE} USING vec0(
@@ -650,8 +650,8 @@ class MemoryIndexManager:
             if self.fts_available:
                 try:
                     self.db.execute(f"DELETE FROM {FTS_TABLE} WHERE path = ?", (entry["path"],))
-                except:
-                    pass
+                except Exception as e:
+                    logger.warning(f"Failed to delete FTS rows for path {entry['path']}: {e}")
 
             for chunk in chunks:
                 await self._index_chunk(entry["path"], source, chunk)
@@ -722,16 +722,16 @@ class MemoryIndexManager:
                 for row in cursor.fetchall():
                     try:
                         self.db.execute(f"DELETE FROM {VECTOR_TABLE} WHERE rowid = ?", (row["rowid"],))
-                    except:
-                        pass
+                    except Exception as e:
+                        logger.warning(f"Failed to delete vector row {row['rowid']} for path {file_path}: {e}")
 
             if self.fts_available:
                 cursor = self.db.execute("SELECT rowid FROM chunks WHERE path = ?", (file_path,))
                 for row in cursor.fetchall():
                     try:
                         self.db.execute(f"DELETE FROM {FTS_TABLE} WHERE rowid = ?", (row["rowid"],))
-                    except:
-                        pass
+                    except Exception as e:
+                        logger.warning(f"Failed to delete FTS row {row['rowid']} for path {file_path}: {e}")
 
             self.db.execute("DELETE FROM chunks WHERE path = ?", (file_path,))
             self.db.execute("DELETE FROM files WHERE path = ?", (file_path,))
@@ -1196,8 +1196,8 @@ class MemoryIndexManager:
             try:
                 self._file_observer.stop()
                 self._file_observer.join()
-            except:
-                pass
+            except Exception as e:
+                logger.warning(f"Failed to stop file observer cleanly: {e}")
 
         if self.db:
             self.db.close()

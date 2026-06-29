@@ -71,6 +71,7 @@ export interface CommandContext {
   connectionStatus: ConnectionStatus;
   mode: ClientMode;
   setMode: (mode: ClientMode) => void;
+  markPlanEntryFromSlashCommand?: () => void;
   setModel: (name: string) => void;
   setPreferredLanguage: (language: PreferredLanguage) => void;
   setThemeName: (theme: ThemeName) => void;

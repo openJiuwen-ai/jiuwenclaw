@@ -338,9 +338,11 @@ def test_build_member_rails_creates_leader_team_skill_evolution_rail_with_comple
     assert team_skill_rails[0].kwargs["completion_followup_enabled"] is expected_auto_scan
 
 
+@pytest.mark.parametrize("auto_save", [False, True])
 def test_build_member_rails_wires_leader_team_skill_evolution_active_review_rails(
     tmp_path,
     monkeypatch,
+    auto_save,
 ):
     class _FakeEvolutionInterruptRail:
         def __init__(self, **kwargs):
@@ -372,7 +374,7 @@ def test_build_member_rails_wires_leader_team_skill_evolution_active_review_rail
         runtime=RuntimeInfo(channel="web"),
         team_workspace=TeamWorkspaceInfo(
             skills_dir=str(tmp_path / "skills"),
-            config={"evolution": {"auto_scan": False}},
+            config={"evolution": {"auto_scan": False, "auto_save": auto_save}},
         ),
     )
 
@@ -392,8 +394,9 @@ def test_build_member_rails_wires_leader_team_skill_evolution_active_review_rail
         interrupt_rail.kwargs["submission_service"]
         is team_rail.experience_manager.experience_submission_service
     )
-    assert interrupt_rail.kwargs["auto_save"] is False
+    assert interrupt_rail.kwargs["auto_save"] is auto_save
     assert interrupt_rail.kwargs["language"] == "cn"
+    assert team_rail.kwargs["auto_save"] is auto_save
 
 
 def test_build_member_rails_keeps_member_skill_evolution_when_auto_scan_disabled(
@@ -406,6 +409,7 @@ def test_build_member_rails_keeps_member_skill_evolution_when_auto_scan_disabled
     class _FakeSkillEvolutionRail:
         def __init__(self, **kwargs):
             self.auto_scan = kwargs["auto_scan"]
+            self.auto_save = kwargs["auto_save"]
             self._review_runtime = kwargs.get("review_runtime")
             self.experience_manager = SimpleNamespace(
                 experience_submission_service=object()
@@ -430,18 +434,20 @@ def test_build_member_rails_keeps_member_skill_evolution_when_auto_scan_disabled
         runtime=RuntimeInfo(channel="web"),
         team_workspace=TeamWorkspaceInfo(
             skills_dir=str(tmp_path / "skills"),
-            config={"evolution": {"auto_scan": False}},
+            config={"react": {"evolution": {"auto_scan": False, "auto_save": False}}},
         ),
     )
 
     evo_rails = [rail for rail in rails if isinstance(rail, _FakeSkillEvolutionRail)]
     assert len(evo_rails) == 1
     assert evo_rails[0].auto_scan is False
+    assert evo_rails[0].auto_save is True
     interrupt_index = next(
         index for index, rail in enumerate(rails) if isinstance(rail, _FakeEvolutionInterruptRail)
     )
     skill_index = next(index for index, rail in enumerate(rails) if isinstance(rail, _FakeSkillEvolutionRail))
     assert interrupt_index < skill_index
+    assert rails[interrupt_index].kwargs["auto_save"] is True
 
 
 def test_build_member_rails_keeps_team_skill_create_when_auto_scan_disabled(

@@ -1306,11 +1306,39 @@ class SkillManager:
         if skill_type not in {"teamskills", "skill"}:
             return {"success": False, "detail": "type 仅支持: teamskills 或 skill"}
         force = bool(params.get("force", False))
-        parent_dir = Path(parent_raw).expanduser().resolve()
+        # 安全：path 仅允许为 skills 目录内的相对路径，禁止绝对路径与目录穿越。
+        # skill_name 已由 _safe_path_name 校验，此处对父目录 path 收敛边界，
+        # 避免 path 传入绝对路径（含 ~ 展开后的家目录）而在任意目录创建子目录
+        # 并写入固定模板 SKILL.md。
+        if parent_raw == "~" or parent_raw.startswith(("~/", "~\\")):
+            return {
+                "success": False,
+                "detail": "path 仅支持相对路径（限制在 skills 目录内）",
+            }
+        parent_path_raw = Path(parent_raw)
+        if parent_path_raw.is_absolute() or PureWindowsPath(parent_raw).is_absolute():
+            return {
+                "success": False,
+                "detail": "path 仅支持相对路径（限制在 skills 目录内）",
+            }
+        skills_root = self._skills_dir.resolve()
+        try:
+            parent_dir = (self._skills_dir / parent_raw).resolve()
+        except (ValueError, OSError) as exc:
+            return {"success": False, "detail": f"path 无效: {exc}"}
+        try:
+            parent_dir.relative_to(skills_root)
+        except ValueError:
+            return {"success": False, "detail": "path 越界：仅允许在 skills 目录内创建"}
         if not parent_dir.exists() or not parent_dir.is_dir():
             return {"success": False, "detail": f"path 不是有效目录: {parent_dir}"}
 
-        target_dir = parent_dir / skill_name
+        # target_dir 双保险：skill_name 已校验，仍确认最终落点不逃逸 skills 目录。
+        target_dir = (parent_dir / skill_name).resolve()
+        try:
+            target_dir.relative_to(skills_root)
+        except ValueError:
+            return {"success": False, "detail": "目标路径越界：仅允许在 skills 目录内创建"}
         try:
             if target_dir.exists():
                 if not target_dir.is_dir():

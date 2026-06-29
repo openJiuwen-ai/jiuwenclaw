@@ -1,6 +1,7 @@
 import { existsSync, readFileSync } from "node:fs";
+import { watch } from "node:fs";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 
 import {
   isKeybindingAction,
@@ -235,4 +236,48 @@ export function loadKeybindings(): LoadResult {
   }
 
   return { resolved, warnings, userFileLoaded: true };
+}
+
+// ---------------------------------------------------------------------------
+// File watcher — detect external changes (edit / delete / create) to
+// keybindings.json at runtime and reload immediately, mirroring Claude Code.
+// ---------------------------------------------------------------------------
+
+let _watcher: ReturnType<typeof watch> | null = null;
+
+/**
+ * Start watching the keybindings.json file for external changes.
+ *
+ * Calls `onReload` whenever the file is created, changed, or deleted so the
+ * caller can reload the resolver and reflect the change immediately.
+ *
+ * Uses a directory watch + basename filter because `fs.watch` on individual
+ * files is unreliable on some platforms (especially Windows).
+ */
+export function startKeybindingsWatcher(onReload: () => void): void {
+  if (_watcher) return;
+
+  const filePath = KEYBINDINGS_FILE;
+  const dirPath = dirname(filePath);
+  const fileName = join(filePath).split(/[/\\]/).pop() ?? "keybindings.json";
+
+  try {
+    _watcher = watch(dirPath, { persistent: false }, (_eventType, filename) => {
+      // Ignore unrelated files in the same directory.
+      if (filename !== fileName) return;
+      onReload();
+    });
+  } catch {
+    // Directory doesn't exist yet — nothing to watch.
+  }
+}
+
+/**
+ * Stop the file watcher. Idempotent.
+ */
+export function stopKeybindingsWatcher(): void {
+  if (_watcher) {
+    _watcher.close();
+    _watcher = null;
+  }
 }

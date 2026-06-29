@@ -444,7 +444,8 @@
       "saveConfig": "Failed to save heartbeat settings",
       "invalidEvery": "Heartbeat interval must be greater than 0",
       "invalidActiveHours": "active_hours must use HH:MM format (for example 08:00)",
-      "invalidRange": "End time must be later than start time"
+      "invalidRange": "End time must be later than start time",
+      "feishuNoTarget": "Feishu bot has not had any conversation yet. Heartbeat cannot be sent. Please chat with the bot in Feishu first."
     }
   },
   "heartbeatModal": {
@@ -1065,6 +1066,7 @@
       "fullRebuild": "Full Rebuild",
       "building": "Building...",
       "buildFailed": "Build failed",
+      "lastBuildFailedUsingExisting": "The last rebuild failed. The previous successful index is still in use.",
       "cancel": "Cancel Build",
       "cancelling": "Cancelling...",
       "cancelled": "Build cancelled",

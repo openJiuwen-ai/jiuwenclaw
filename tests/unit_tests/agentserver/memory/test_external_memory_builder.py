@@ -77,6 +77,23 @@ class _FakeVikingProvider:
         return _FakeVikingProvider.available
 
 
+class _FakeLakeBaseProvider:
+    last_init_kwargs = None
+    available = True
+
+    def __init__(self, *, api_key="", base_url="", base_id="", database_id="", timeout=60.0):
+        _FakeLakeBaseProvider.last_init_kwargs = {
+            "api_key": api_key, "base_url": base_url,
+            "base_id": base_id, "database_id": database_id,
+            "timeout": timeout,
+        }
+        self._api_key = api_key
+
+    @staticmethod
+    def is_available() -> bool:
+        return _FakeLakeBaseProvider.available
+
+
 def _ensure_module(name: str) -> ModuleType:
     mod = sys.modules.get(name)
     if mod is None:
@@ -110,6 +127,9 @@ def _install_agent_core_stubs():
 
     vk_mod = _ensure_module("openjiuwen.core.memory.external.openviking_memory_provider")
     vk_mod.OpenVikingMemoryProvider = _FakeVikingProvider
+
+    lb_mod = _ensure_module("openjiuwen.core.memory.external.lakebase_memory_provider")
+    lb_mod.LakeBaseMemoryProvider = _FakeLakeBaseProvider
 
 
 def _install_jiuwenswarm_stubs():
@@ -161,6 +181,7 @@ _AGENT_CORE_STUB_MODULES = [
     "openjiuwen.core.memory.external.openjiuwen_memory_provider",
     "openjiuwen.core.memory.external.mem0_provider",
     "openjiuwen.core.memory.external.openviking_memory_provider",
+    "openjiuwen.core.memory.external.lakebase_memory_provider",
 ]
 
 _STUB_ATTR_OVERRIDES = [
@@ -169,6 +190,7 @@ _STUB_ATTR_OVERRIDES = [
     ("openjiuwen.core.memory.external.openjiuwen_memory_provider", "OpenJiuwenMemoryProvider"),
     ("openjiuwen.core.memory.external.mem0_provider", "Mem0MemoryProvider"),
     ("openjiuwen.core.memory.external.openviking_memory_provider", "OpenVikingMemoryProvider"),
+    ("openjiuwen.core.memory.external.lakebase_memory_provider", "LakeBaseMemoryProvider"),
 ]
 
 _saved_sys_modules: dict = {
@@ -245,6 +267,8 @@ def reset_spy_state():
     _FakeMem0Provider.available = True
     _FakeVikingProvider.last_init_kwargs = None
     _FakeVikingProvider.available = True
+    _FakeLakeBaseProvider.last_init_kwargs = None
+    _FakeLakeBaseProvider.available = True
     yield
 
 
@@ -373,6 +397,101 @@ def test_openviking_unavailable_returns_none(monkeypatch):
     monkeypatch.delenv("OPENVIKING_ENDPOINT", raising=False)
     cfg = {"memory": {"external": {"provider": "openviking", "openviking": {}}}}
     assert emb.build_external_memory_rail(cfg) is None
+
+
+# ---------------------------------------------------------------------------
+# LakeBase branch
+# ---------------------------------------------------------------------------
+
+def test_lakebase_yaml_config(monkeypatch):
+    monkeypatch.delenv("LAKEBASE_API_KEY", raising=False)
+    monkeypatch.delenv("LAKEBASE_API_URL", raising=False)
+    monkeypatch.delenv("LAKEBASE_MEM_BASE_ID", raising=False)
+    monkeypatch.delenv("LAKEBASE_DATABASE_ID", raising=False)
+    cfg = {"memory": {"external": {
+        "provider": "lakebase",
+        "lakebase": {
+            "api_key": "lb-key",
+            "base_url": "http://lakebase:9090/api/v1",
+            "base_id": "mem_custom",
+            "database_id": "db_test",
+            "timeout": 30.0,
+        },
+    }}}
+    assert emb.build_external_memory_rail(cfg) is not None
+    assert _FakeLakeBaseProvider.last_init_kwargs == {
+        "api_key": "lb-key",
+        "base_url": "http://lakebase:9090/api/v1",
+        "base_id": "mem_custom",
+        "database_id": "db_test",
+        "timeout": 30.0,
+    }
+
+
+def test_lakebase_env_fallback_when_yaml_empty(monkeypatch):
+    monkeypatch.setenv("LAKEBASE_API_KEY", "env-lb-key")
+    monkeypatch.setenv("LAKEBASE_API_URL", "http://env-lb:7070/api/v1")
+    monkeypatch.setenv("LAKEBASE_MEM_BASE_ID", "env_base")
+    monkeypatch.setenv("LAKEBASE_DATABASE_ID", "env_db")
+    cfg = {"memory": {"external": {"provider": "lakebase", "lakebase": {}}}}
+    assert emb.build_external_memory_rail(cfg) is not None
+    init = _FakeLakeBaseProvider.last_init_kwargs
+    assert init["api_key"] == "env-lb-key"
+    assert init["base_url"] == "http://env-lb:7070/api/v1"
+    assert init["base_id"] == "env_base"
+    assert init["database_id"] == "env_db"
+
+
+def test_lakebase_defaults_when_no_config(monkeypatch):
+    monkeypatch.setenv("LAKEBASE_API_KEY", "lb-key")
+    monkeypatch.delenv("LAKEBASE_API_URL", raising=False)
+    monkeypatch.delenv("LAKEBASE_MEM_BASE_ID", raising=False)
+    monkeypatch.delenv("LAKEBASE_DATABASE_ID", raising=False)
+    cfg = {"memory": {"external": {"provider": "lakebase", "lakebase": {}}}}
+    assert emb.build_external_memory_rail(cfg) is not None
+    init = _FakeLakeBaseProvider.last_init_kwargs
+    assert init["api_key"] == "lb-key"
+    assert init["base_url"] == "http://localhost:8080/api/v1"
+    assert init["base_id"] == "mem_default"
+    assert init["database_id"] == "db_agent_memory"
+
+
+def test_lakebase_no_api_key_returns_none(monkeypatch):
+    monkeypatch.delenv("LAKEBASE_API_KEY", raising=False)
+    monkeypatch.delenv("LAKEBASE_API_URL", raising=False)
+    monkeypatch.delenv("LAKEBASE_MEM_BASE_ID", raising=False)
+    monkeypatch.delenv("LAKEBASE_DATABASE_ID", raising=False)
+    cfg = {"memory": {"external": {"provider": "lakebase", "lakebase": {}}}}
+    assert emb.build_external_memory_rail(cfg) is None
+
+
+def test_lakebase_unavailable_returns_none(monkeypatch):
+    _FakeLakeBaseProvider.available = False
+    monkeypatch.delenv("LAKEBASE_API_KEY", raising=False)
+    cfg = {"memory": {"external": {
+        "provider": "lakebase",
+        "lakebase": {"api_key": "lb-key"},
+    }}}
+    assert emb.build_external_memory_rail(cfg) is None
+
+
+def test_lakebase_partial_yaml_env_blend(monkeypatch):
+    """YAML values take precedence; env vars fill only the missing ones."""
+    monkeypatch.setenv("LAKEBASE_API_URL", "http://env-lb:7070/api/v1")
+    monkeypatch.setenv("LAKEBASE_MEM_BASE_ID", "env_base")
+    cfg = {"memory": {"external": {
+        "provider": "lakebase",
+        "lakebase": {
+            "api_key": "yaml-key",
+            "base_url": "http://yaml-lb:9090/api/v1",
+        },
+    }}}
+    assert emb.build_external_memory_rail(cfg) is not None
+    init = _FakeLakeBaseProvider.last_init_kwargs
+    assert init["api_key"] == "yaml-key"
+    assert init["base_url"] == "http://yaml-lb:9090/api/v1"  # YAML wins
+    assert init["base_id"] == "env_base"                     # env fills
+    assert init["database_id"] == "db_agent_memory"                 # default fills
 
 
 # ---------------------------------------------------------------------------

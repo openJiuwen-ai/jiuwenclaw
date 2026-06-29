@@ -18,6 +18,12 @@ from jiuwenswarm.server.runtime.session.session_history import load_history_reco
 logger = logging.getLogger(__name__)
 
 
+MAX_FILES = 50
+MAX_DIFF_SIZE_BYTES = 1_000_000
+MAX_LINES_PER_FILE = 400
+MAX_FILES_FOR_DETAILS = 500
+
+
 class DiffService:
     """提供 turn-based diff 查询服务."""
 
@@ -88,18 +94,24 @@ class DiffService:
                         "filePath": file_path,
                         "hunks": [],
                         "isNewFile": False,
+                        "isBinary": False,
+                        "isLargeFile": False,
+                        "isTruncated": False,
+                        "isUntracked": False,
                         "linesAdded": 0,
                         "linesRemoved": 0,
                         "lastEditTime": None,
                     }
 
                 for op in edit_info["operations"]:
-                    hunks = self._compute_hunks(
+                    hunks, truncated = self._compute_hunks(
                         op["old_content"],
                         op["new_content"],
                     )
                     turn["files"][file_path]["hunks"].extend(hunks)
                     turn["files"][file_path]["lastEditTime"] = op["timestamp"]
+                    if truncated:
+                        turn["files"][file_path]["isTruncated"] = True
 
                     if op["action"] == "write" and op["old_content"] is None:
                         turn["files"][file_path]["isNewFile"] = True
@@ -326,68 +338,160 @@ class DiffService:
     def _compute_hunks(
         old_content: str | None,
         new_content: str | None,
-    ) -> list[dict[str, Any]]:
-        """计算结构化 diff hunks."""
+        max_lines: int = MAX_LINES_PER_FILE,
+    ) -> tuple[list[dict[str, Any]], bool]:
+        """计算结构化 diff hunks.
+
+        Returns:
+            (hunks, truncated): hunks 列表和是否被截断的标志。
+        """
         # 处理删除文件的情况：new_content 为 None
         if new_content is None:
             if old_content is None:
-                return []
+                return [], False
             # 文件被删除：显示所有行被移除
             lines = old_content.splitlines()
+            truncated = len(lines) > max_lines
+            if truncated:
+                lines = lines[:max_lines]
             return [{
                 "oldStart": 1,
                 "oldLines": len(lines),
                 "newStart": 0,
                 "newLines": 0,
                 "lines": [f"-{line}" for line in lines],
-            }]
+            }], truncated
 
         # 处理新建文件的情况：old_content 为 None
         if old_content is None:
             lines = new_content.splitlines()
+            truncated = len(lines) > max_lines
+            if truncated:
+                lines = lines[:max_lines]
             return [{
                 "oldStart": 0,
                 "oldLines": 0,
                 "newStart": 1,
                 "newLines": len(lines),
                 "lines": [f"+{line}" for line in lines],
-            }]
+            }], truncated
 
         old_lines = old_content.splitlines(keepends=True)
         new_lines = new_content.splitlines(keepends=True)
 
         if not old_lines and not new_lines:
-            return []
+            return [], False
 
-        matcher = difflib.SequenceMatcher(None, old_lines, new_lines)
+        # Emit unified hunks with context_lines of surrounding context and
+        # merge adjacent changes whose context windows overlap, matching
+        # `git diff --unified=3` / jsdiff's structuredPatch. The previous
+        # implementation skipped equal opcodes entirely, producing context-less
+        # isolated hunks that showed far less content than `git diff`.
+        context_lines = 3
+        opcodes = difflib.SequenceMatcher(
+            None, old_lines, new_lines
+        ).get_opcodes()
+        n_old = len(old_lines)
+        n_new = len(new_lines)
+
         hunks: list[dict[str, Any]] = []
+        total_lines = 0
+        truncated = False
 
-        for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+        i = 0
+        while i < len(opcodes):
+            tag, i1, i2, j1, j2 = opcodes[i]
             if tag == "equal":
+                i += 1
                 continue
 
-            old_start = i1 + 1
-            old_count = i2 - i1
-            new_start = j1 + 1
-            new_count = j2 - j1
+            # First change of this hunk is at opcodes[i]; absorb following
+            # changes whose separating equal run is short enough that their
+            # context windows bridge the gap (run length <= 2*context_lines).
+            change_start = i
+            o_lo = max(0, i1 - context_lines)
+            n_lo = max(0, j1 - context_lines)
+            last_i2 = i2
+            last_j2 = j2
+            k = i + 1
+            while k < len(opcodes):
+                ntag, ni1, ni2, nj1, nj2 = opcodes[k]
+                if ntag == "equal":
+                    if (ni2 - ni1) > 2 * context_lines:
+                        break
+                    k += 1
+                    continue
+                last_i2 = ni2
+                last_j2 = nj2
+                k += 1
+
+            o_hi = min(n_old, last_i2 + context_lines)
+            n_hi = min(n_new, last_j2 + context_lines)
+
+            # Include the leading equal opcode (i-1) and the trailing equal
+            # opcode (k, when present) so leading/trailing context lines are
+            # emitted; both are clamped to the window below.
+            start_idx = (
+                i - 1 if i - 1 >= 0 and opcodes[i - 1][0] == "equal" else i
+            )
+            end_idx = (
+                k + 1
+                if k < len(opcodes) and opcodes[k][0] == "equal"
+                else k
+            )
 
             lines: list[str] = []
-
-            for k in range(i1, i2):
-                lines.append(f"-{old_lines[k].rstrip()}")
-
-            for k in range(j1, j2):
-                lines.append(f"+{new_lines[k].rstrip()}")
+            for idx in range(start_idx, end_idx):
+                tag2, ii1, ii2, jj1, jj2 = opcodes[idx]
+                if tag2 == "equal":
+                    for m in range(max(ii1, o_lo), min(ii2, o_hi)):
+                        if total_lines >= max_lines:
+                            truncated = True
+                            break
+                        lines.append(f" {old_lines[m].rstrip()}")
+                        total_lines += 1
+                elif tag2 == "delete":
+                    for m in range(max(ii1, o_lo), min(ii2, o_hi)):
+                        if total_lines >= max_lines:
+                            truncated = True
+                            break
+                        lines.append(f"-{old_lines[m].rstrip()}")
+                        total_lines += 1
+                elif tag2 == "insert":
+                    for m in range(max(jj1, n_lo), min(jj2, n_hi)):
+                        if total_lines >= max_lines:
+                            truncated = True
+                            break
+                        lines.append(f"+{new_lines[m].rstrip()}")
+                        total_lines += 1
+                else:  # replace
+                    for m in range(max(ii1, o_lo), min(ii2, o_hi)):
+                        if total_lines >= max_lines:
+                            truncated = True
+                            break
+                        lines.append(f"-{old_lines[m].rstrip()}")
+                        total_lines += 1
+                    for m in range(max(jj1, n_lo), min(jj2, n_hi)):
+                        if total_lines >= max_lines:
+                            truncated = True
+                            break
+                        lines.append(f"+{new_lines[m].rstrip()}")
+                        total_lines += 1
+                if truncated:
+                    break
 
             hunks.append({
-                "oldStart": old_start,
-                "oldLines": old_count,
-                "newStart": new_start,
-                "newLines": new_count,
+                "oldStart": o_lo + 1,
+                "oldLines": o_hi - o_lo,
+                "newStart": n_lo + 1,
+                "newLines": n_hi - n_lo,
                 "lines": lines,
             })
+            if truncated:
+                break
+            i = k
 
-        return hunks
+        return hunks, truncated
 
     @staticmethod
     def _run_git_command(project_dir: str, args: list[str]) -> str | None:
@@ -426,6 +530,39 @@ class DiffService:
             return False
 
     @staticmethod
+    def _is_in_transient_git_state(project_dir: str) -> bool:
+        """检测是否处于 merge/rebase/cherry-pick/revert 等瞬态 git 状态.
+
+        这些状态下工作区包含 incoming 改动（非用户意图编辑），
+        应跳过 diff 计算以避免显示误导性内容。
+        """
+        import subprocess
+
+        try:
+            result = subprocess.run(
+                ["git", "rev-parse", "--git-dir"],
+                cwd=project_dir,
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+            if result.returncode != 0:
+                return False
+            git_dir = Path(result.stdout.strip())
+            if not git_dir.is_absolute():
+                git_dir = Path(project_dir) / git_dir
+        except Exception:
+            return False
+
+        transient_files = [
+            "MERGE_HEAD",
+            "REBASE_HEAD",
+            "CHERRY_PICK_HEAD",
+            "REVERT_HEAD",
+        ]
+        return any((git_dir / name).exists() for name in transient_files)
+
+    @staticmethod
     def _parse_git_numstat(output: str) -> dict[str, dict[str, int | bool]]:
         """解析 git diff --numstat 输出为 per-file 统计.
 
@@ -453,6 +590,27 @@ class DiffService:
         return result
 
     @staticmethod
+    def _parse_shortstat(output: str) -> dict[str, int] | None:
+        """解析 git diff --shortstat 输出.
+
+        格式: " N files changed, N insertions(+), N deletions(-)"
+        用于在加载完整 diff 前快速探测规模。
+        """
+        import re
+
+        match = re.match(
+            r"(\d+)\s+files?\s+changed(?:,\s+(\d+)\s+insertions?\(\+\))?(?:,\s+(\d+)\s+deletions?\(-\))?",
+            output.strip(),
+        )
+        if not match:
+            return None
+        return {
+            "filesChanged": int(match.group(1) or "0"),
+            "linesAdded": int(match.group(2) or "0"),
+            "linesRemoved": int(match.group(3) or "0"),
+        }
+
+    @staticmethod
     def _parse_git_diff_hunks(output: str) -> dict[str, list[dict[str, Any]]]:
         """解析 git diff 输出为按文件分组的 hunk 列表.
 
@@ -468,6 +626,8 @@ class DiffService:
         files: dict[str, list[dict[str, Any]]] = {}
         current_file: str | None = None
         current_hunk: dict[str, Any] | None = None
+        line_counts: dict[str, int] = {}
+        truncated: set[str] = set()
 
         # 匹配 diff 头部: diff --git a/path b/path, --- a/path, +++ b/path
         # 对于删除文件，+++ b/ 行是 +++ /dev/null 不会匹配，需要回退到 --- a/ 行
@@ -485,6 +645,7 @@ class DiffService:
                 current_file = file_match.group(1)
                 if current_file not in files:
                     files[current_file] = []
+                    line_counts[current_file] = 0
                 current_hunk = None
                 continue
 
@@ -497,6 +658,7 @@ class DiffService:
                     current_file = path
                     if current_file not in files:
                         files[current_file] = []
+                        line_counts[current_file] = 0
                     current_hunk = None
                 continue
 
@@ -526,12 +688,50 @@ class DiffService:
 
             # 收集 hunk 行（+, -, 空格前缀的上下文行）
             if line.startswith("+") or line.startswith("-") or line.startswith(" "):
+                if line_counts[current_file] >= MAX_LINES_PER_FILE:
+                    truncated.add(current_file)
+                    continue
                 current_hunk["lines"].append(line)
+                line_counts[current_file] += 1
 
-        return files
+        return files, truncated
+
+    @staticmethod
+    def _split_large_file_diffs(
+        output: str,
+    ) -> tuple[str, set[str]]:
+        """将 git diff 输出按文件切分，跳过超过 MAX_DIFF_SIZE_BYTES 的文件块.
+
+        返回 (过滤后的 diff 输出, 被跳过的大文件路径集合)。
+        被跳过的文件不参与 hunk 解析，但 numstat 统计仍会保留。
+        """
+        import re
+
+        if not output:
+            return "", set()
+        # 以 "diff --git " 为分隔切分（首段通常为空）
+        chunks = output.split("diff --git ")
+        kept: list[str] = []
+        large_files: set[str] = set()
+        for chunk in chunks:
+            if not chunk:
+                continue
+            full = "diff --git " + chunk
+            if len(full.encode("utf-8", errors="replace")) > MAX_DIFF_SIZE_BYTES:
+                # 提取文件路径用于标记
+                m = re.search(r"^\+\+\+ b/(.+)$", full, re.MULTILINE)
+                if m:
+                    large_files.add(m.group(1))
+                else:
+                    m2 = re.search(r"^--- a/(.+)$", full, re.MULTILINE)
+                    if m2 and m2.group(1) != "/dev/null":
+                        large_files.add(m2.group(1))
+                continue
+            kept.append(full)
+        return "".join(kept), large_files
 
     def _get_untracked_files(
-        self, project_dir: str
+        self, project_dir: str, max_files: int = MAX_FILES
     ) -> dict[str, dict[str, Any]]:
         """获取未跟踪文件列表并生成合成 diff（全部为新增行）."""
         output = self._run_git_command(
@@ -543,6 +743,8 @@ class DiffService:
 
         files: dict[str, dict[str, Any]] = {}
         for rel_path in output.strip().splitlines():
+            if len(files) >= max_files:
+                break
             rel_path = rel_path.strip()
             if not rel_path:
                 continue
@@ -555,6 +757,9 @@ class DiffService:
 
             if content is not None:
                 lines = content.splitlines()
+                is_truncated = len(lines) > MAX_LINES_PER_FILE
+                if is_truncated:
+                    lines = lines[:MAX_LINES_PER_FILE]
                 hunks = [{
                     "oldStart": 0,
                     "oldLines": 0,
@@ -566,11 +771,16 @@ class DiffService:
             else:
                 hunks = []
                 lines_added = 0
+                is_truncated = False
 
             files[abs_path] = {
                 "filePath": abs_path,
                 "hunks": hunks,
                 "isNewFile": True,
+                "isBinary": content is None,
+                "isLargeFile": False,
+                "isTruncated": is_truncated,
+                "isUntracked": True,
                 "linesAdded": lines_added,
                 "linesRemoved": 0,
                 "lastEditTime": None,
@@ -600,25 +810,48 @@ class DiffService:
             return None
         if not self._is_git_repo(project_dir):
             return None
+        if self._is_in_transient_git_state(project_dir):
+            return None
 
         files: dict[str, dict[str, Any]] = {}
         total_added = 0
         total_removed = 0
 
         # 1. 已跟踪文件的改动: git diff HEAD
+        # 先用 --shortstat 快速探测规模，避免对超大 diff 加载完整内容
         shortstat = self._run_git_command(project_dir, ["diff", "HEAD", "--shortstat"])
         has_tracked_changes = shortstat and shortstat.strip() != ""
+
+        # 解析 shortstat 取得准确的文件/行数总计
+        shortstat_stats = self._parse_shortstat(shortstat) if has_tracked_changes else None
+        if shortstat_stats and shortstat_stats["filesChanged"] > MAX_FILES_FOR_DETAILS:
+            # 文件数过多，仅返回统计以避免加载数百 MB 内容
+            return {
+                "stats": {
+                    "filesChanged": shortstat_stats["filesChanged"],
+                    "linesAdded": shortstat_stats["linesAdded"],
+                    "linesRemoved": shortstat_stats["linesRemoved"],
+                },
+                "files": {},
+            }
 
         if has_tracked_changes:
             numstat_output = self._run_git_command(project_dir, ["diff", "HEAD", "--numstat"])
             diff_output = self._run_git_command(project_dir, ["diff", "HEAD"])
             if numstat_output and diff_output:
                 per_file_stats = self._parse_git_numstat(numstat_output)
-                all_hunks = self._parse_git_diff_hunks(diff_output)
+                filtered_output, large_files = self._split_large_file_diffs(diff_output)
+                all_hunks, truncated_files = self._parse_git_diff_hunks(filtered_output)
 
-                for rel_path, stats in per_file_stats.items():
+                for rel_path, stats in list(per_file_stats.items())[:MAX_FILES]:
                     abs_path = str(Path(project_dir) / rel_path)
-                    hunks = all_hunks.get(rel_path, [])
+                    is_binary = bool(stats.get("isBinary", False))
+                    is_large = rel_path in large_files
+                    is_truncated = rel_path in truncated_files
+                    if is_binary or is_large:
+                        hunks = []
+                    else:
+                        hunks = all_hunks.get(rel_path, [])
                     lines_added = stats["added"]
                     lines_removed = stats["removed"]
                     total_added += lines_added
@@ -628,15 +861,23 @@ class DiffService:
                         "filePath": abs_path,
                         "hunks": hunks,
                         "isNewFile": False,
+                        "isBinary": is_binary,
+                        "isLargeFile": is_large,
+                        "isTruncated": is_truncated,
+                        "isUntracked": False,
                         "linesAdded": lines_added,
                         "linesRemoved": lines_removed,
                         "lastEditTime": None,
                     }
 
-        # 2. 未跟踪的新文件: git ls-files --others --exclude-standard
-        untracked = self._get_untracked_files(project_dir)
+        # 2. 未跟踪的新文件: 仅填充剩余名额，避免无限加载
+        remaining_slots = max(0, MAX_FILES - len(files))
+        untracked = self._get_untracked_files(project_dir, max_files=remaining_slots)
         for abs_path, file_info in untracked.items():
             if abs_path not in files:  # 避免重复（理论上不会）
+                file_info.setdefault("isBinary", False)
+                file_info.setdefault("isLargeFile", False)
+                file_info.setdefault("isTruncated", False)
                 files[abs_path] = file_info
                 total_added += file_info["linesAdded"]
 

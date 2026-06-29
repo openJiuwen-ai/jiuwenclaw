@@ -80,6 +80,10 @@ class HumanRenderer:
     def spinner_idx(self) -> int:
         return self._spinner_idx
 
+    def reset_streamed_text(self) -> None:
+        """Reset the accumulated streamed text for a new response turn."""
+        self._streamed_text = ""
+
     def clear_loading(self) -> None:
         if not self._loading:
             return

@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import shlex
 from dataclasses import dataclass
@@ -15,6 +16,8 @@ from typing import Any, Dict, List, Tuple
 
 from openjiuwen.core.foundation.tool import McpServerConfig
 from playwright_runtime import REPO_ROOT
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -34,8 +37,8 @@ def parse_args(value: str) -> List[str]:
             parsed = json.loads(value)
             if isinstance(parsed, list):
                 return [str(x) for x in parsed]
-        except Exception:
-            pass
+        except json.JSONDecodeError as e:
+            logger.debug("parse_args: JSON decode failed, falling back to shlex: %s", e)
     return shlex.split(value)
 
 
@@ -154,8 +157,12 @@ def build_playwright_mcp_config() -> McpServerConfig:
         timeout_s = int(timeout_raw)
         if timeout_s > 0:
             params["timeout_s"] = timeout_s
-    except (TypeError, ValueError):
-        pass
+    except (TypeError, ValueError) as e:
+        logger.warning(
+            "Invalid PLAYWRIGHT_MCP_TIMEOUT_S/BROWSER_TIMEOUT_S value %r, "
+            "using MCP server default: %s",
+            timeout_raw, e,
+        )
     if env_map:
         params["env"] = env_map
 

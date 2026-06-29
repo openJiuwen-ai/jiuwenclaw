@@ -224,38 +224,3 @@ class TodoCollector:
                     stats.cancelled += 1
 
         return stats
-
-
-def main():
-    """测试入口"""
-    import sys
-
-    if len(sys.argv) < 2:
-        print("Usage: python todo_collector.py <workspace_dir>")
-        sys.exit(1)
-
-    workspace_dir = sys.argv[1]
-    collector = TodoCollector(workspace_dir)
-    stats = collector.collect()
-
-    print("待办统计:")
-    print(f"  总数: {stats.total}")
-    print(f"  已完成: {stats.completed}")
-    print(f"  进行中: {stats.running}")
-    print(f"  待处理: {stats.waiting}")
-    print(f"  完成率: {stats.completion_rate:.1%}")
-
-    if stats.tasks:
-        print("\n任务列表:")
-        for task in stats.tasks:
-            status_icon = {
-                "completed": "✅",
-                "running": "🔄",
-                "waiting": "⏳",
-                "cancelled": "❌",
-            }.get(task.status, "❓")
-            print(f"  {status_icon} [{task.id}] {task.content}")
-
-
-if __name__ == "__main__":
-    main()
