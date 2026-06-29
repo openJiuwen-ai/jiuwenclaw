@@ -83,13 +83,21 @@ def build_tui_binary(target: str, clean: bool) -> None:
     run(cmd, ROOT)
 
 
+class MissingJsDependenciesError(RuntimeError):
+    """Raised when TUI frontend node_modules is missing and auto-install is disabled."""
+
+
+class InvalidTargetError(ValueError):
+    """Raised when --target contains unknown TUI build target(s)."""
+
+
 def ensure_js_dependencies(install: bool) -> None:
     node_modules = TUI_ROOT / "node_modules"
     if node_modules.exists():
         return
 
     if not install:
-        raise SystemExit(
+        raise MissingJsDependenciesError(
             "\n".join(
                 [
                     "missing JavaScript dependencies for jiuwenswarm/channels/tui/frontend",
@@ -121,7 +129,7 @@ def resolve_requested_targets(raw: str) -> list[str]:
     unknown = [value for value in values if value not in TUI_TARGETS]
     if unknown:
         valid = ", ".join(["current", "all", *TUI_TARGETS.keys()])
-        raise SystemExit(f"unknown target(s): {', '.join(unknown)}; valid: {valid}")
+        raise InvalidTargetError(f"unknown target(s): {', '.join(unknown)}; valid: {valid}")
     return values
 
 
@@ -217,5 +225,7 @@ def main() -> None:
 if __name__ == "__main__":
     try:
         main()
+    except (MissingJsDependenciesError, InvalidTargetError) as exc:
+        raise SystemExit(str(exc)) from exc
     except subprocess.CalledProcessError as exc:
         raise SystemExit(exc.returncode) from exc

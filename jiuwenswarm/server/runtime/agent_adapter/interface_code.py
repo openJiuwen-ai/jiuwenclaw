@@ -93,14 +93,16 @@ output redirection, file edits outside the plan file, or git commit/push/add),
 and must NOT make any changes to the system. This constraint takes priority
 over any other instructions you receive.
 
-CRITICAL: You MUST call `enter_plan_mode` as your very first action, before
-doing anything else. This tool will create the plan file and give you full
-plan mode instructions. Until then, you may only read files and explore the
-codebase using read-only tools (read_file, grep, list_files, glob, bash for
-read-only commands).
+Read-only actions are allowed directly: you may read files and explore the
+codebase, and run read-only commands (read_file, grep, list_files, glob, bash
+for read-only operations such as gh pr list/view/diff or git status/diff/log).
+Write operations and non-read-only tools are blocked by the runtime.
 
-Do NOT proceed to implement anything until the user approves your plan via
-`exit_plan_mode`.
+If you need to design an implementation approach and produce a plan, call
+`enter_plan_mode` — it creates the plan file and gives you full plan mode
+instructions. This is not required as your first action; you may gather
+context with read-only tools first. Do NOT proceed to implement anything
+until the user approves your plan via `exit_plan_mode`.
 """
 
 # ---------------------------------------------------------------------------
@@ -979,6 +981,31 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
 
             # browser_agent
             browser_agent_cfg = subagents_cfg.get("browser_agent")
+
+            # Headless setup is unconditional: swarm members also spawn @playwright/mcp
+            # subprocesses and ManagedBrowserDriver both read BROWSER_MANAGED_ARGS.
+            # This must run regardless of whether the main-agent browser subagent is enabled.
+            headless = self._resolve_headless_from_config()
+            _mcp_args_raw = (os.getenv("PLAYWRIGHT_MCP_ARGS") or "-y @playwright/mcp@latest").strip()
+            _mcp_args_list = _mcp_args_raw.split() if _mcp_args_raw else ["-y", "@playwright/mcp@latest"]
+            _mcp_args_list = [a for a in _mcp_args_list if a != "--headless"]
+            if headless:
+                _mcp_args_list.append("--headless")
+                os.environ["BROWSER_MANAGED_ARGS"] = "--headless=new"
+                logger.info(
+                    "[JiuwenSwarmCodeAdapter] browser headless=True → "
+                    "BROWSER_MANAGED_ARGS=--headless=new, PLAYWRIGHT_MCP_ARGS=%s",
+                    " ".join(_mcp_args_list),
+                )
+            else:
+                os.environ.pop("BROWSER_MANAGED_ARGS", None)
+                logger.info(
+                    "[JiuwenSwarmCodeAdapter] browser headless=False → "
+                    "headed mode (BROWSER_MANAGED_ARGS cleared)",
+                )
+            os.environ["PLAYWRIGHT_MCP_ARGS"] = " ".join(_mcp_args_list)
+            self._browser_headless_setting = headless
+
             browser_enabled = self._browser_runtime_enabled()
             if browser_enabled:
                 if not str(os.getenv("BROWSER_DRIVER") or "").strip():

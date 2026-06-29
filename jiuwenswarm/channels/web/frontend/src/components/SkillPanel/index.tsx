@@ -14,6 +14,7 @@ import { TeamSkillsHubModal } from "../../features/TeamSkillsHubModal";
 import { SkillEvolutionModal } from "../../features/SkillEvolutionModal";
 import { normalizeSkillNetUrl } from "../../utils/skillNetUrl";
 import { SkillGraphPanel, type SkillGraphPanelHandle } from "../SkillGraphPanel";
+import { MarkdownRenderer } from "../MarkdownRenderer";
 import { Switch } from "../Switch";
 
 /** 刷新会 git pull marketplace，略放宽；普通进页单次 RPC 一般很快。 */
@@ -578,6 +579,7 @@ export function SkillPanel({ sessionId, onNavigateToConfig, isActive = false }: 
   const [retrievalTreeNodes, setRetrievalTreeNodes] = useState<SkillIndexNode[]>([]);
   const [retrievalTreeCounts, setRetrievalTreeCounts] = useState({ branches: 0, skills: 0 });
   const [selectedTreeNodeCid, setSelectedTreeNodeCid] = useState<string | null>(null);
+  const [retrievalShowExistingIndexFailureNotice, setRetrievalShowExistingIndexFailureNotice] = useState(false);
   const [retrievalLoading, setRetrievalLoading] = useState<"idle" | "status" | "tree" | "build" | "cancel">("idle");
 
   useEffect(() => {
@@ -893,10 +895,17 @@ export function SkillPanel({ sessionId, onNavigateToConfig, isActive = false }: 
   }, [fetchRetrievalStatus]);
 
   useEffect(() => {
-    if (activeTab !== "index") return;
+    if (retrievalStatus?.build_status === "running") {
+      setRetrievalShowExistingIndexFailureNotice(false);
+    }
+  }, [retrievalStatus?.build_status]);
+
+  useEffect(() => {
+    if (!isActive || activeTab !== "index") return;
+    setRetrievalShowExistingIndexFailureNotice(true);
     void fetchRetrievalStatus();
     void fetchRetrievalTree();
-  }, [activeTab, fetchRetrievalStatus, fetchRetrievalTree]);
+  }, [activeTab, fetchRetrievalStatus, fetchRetrievalTree, isActive]);
 
   useEffect(() => {
     const disabled = retrievalStatus?.enabled === false;
@@ -956,6 +965,7 @@ export function SkillPanel({ sessionId, onNavigateToConfig, isActive = false }: 
   ]);
 
   const handleBuildRetrievalIndex = useCallback(async (force = false) => {
+    setRetrievalShowExistingIndexFailureNotice(false);
     setRetrievalLoading("build");
     try {
       await webRequest<{ success: boolean; result?: string }>(
@@ -1409,24 +1419,34 @@ export function SkillPanel({ sessionId, onNavigateToConfig, isActive = false }: 
       ? t('skills.retrieval.disabled')
       : retrievalStatus.build_status === "running"
       ? t('skills.retrieval.building')
-      : retrievalStatus.build_status === "failed"
-      ? t('skills.retrieval.buildFailed')
-      : retrievalStatus.build_status === "cancelled"
-      ? t('skills.retrieval.cancelled')
       : retrievalStatus.index_exists
       ? retrievalStatus.fresh
         ? t('skills.retrieval.ready')
         : t('skills.retrieval.stale')
+      : retrievalStatus.build_status === "failed"
+      ? t('skills.retrieval.buildFailed')
+      : retrievalStatus.build_status === "cancelled"
+      ? t('skills.retrieval.cancelled')
       : t('skills.retrieval.missing')
     : t('common.loading');
+  const retrievalLastBuildFailureText = retrievalStatus
+    && retrievalShowExistingIndexFailureNotice
+    && retrievalStatus.enabled !== false
+    && retrievalStatus.build_status === "failed"
+    && retrievalStatus.index_exists
+    && retrievalStatus.fresh
+    ? t('skills.retrieval.lastBuildFailedUsingExisting')
+    : "";
   const retrievalBuildRunning = retrievalStatus?.build_status === "running";
   const retrievalBuildProgress = Math.round(Math.max(0, Math.min(1, retrievalStatus?.build_progress ?? 0)) * 100);
   const retrievalBuildLogs = Array.isArray(retrievalStatus?.build_logs)
     ? retrievalStatus.build_logs.slice(-12)
     : [];
+  const retrievalUsingExistingAfterFailure = Boolean(retrievalLastBuildFailureText);
   const retrievalHasBuildInfo = Boolean(
     retrievalStatus
       && retrievalStatus.enabled !== false
+      && !retrievalUsingExistingAfterFailure
       && (
         retrievalBuildRunning
         || ["success", "failed", "cancelled"].includes(String(retrievalStatus.build_status || ""))
@@ -1616,6 +1636,11 @@ export function SkillPanel({ sessionId, onNavigateToConfig, isActive = false }: 
                         })}`
                       : ""}
                   </div>
+                  {retrievalLastBuildFailureText ? (
+                    <div className="mt-1 text-xs text-amber-600">
+                      {retrievalLastBuildFailureText}
+                    </div>
+                  ) : null}
                 </div>
                 <div className="flex items-center gap-2">
                   <button
@@ -1651,6 +1676,7 @@ export function SkillPanel({ sessionId, onNavigateToConfig, isActive = false }: 
                   ) : null}
                   <button
                     onClick={() => {
+                      setRetrievalShowExistingIndexFailureNotice(true);
                       void fetchRetrievalStatus();
                       void fetchRetrievalTree();
                     }}
@@ -1672,8 +1698,8 @@ export function SkillPanel({ sessionId, onNavigateToConfig, isActive = false }: 
                 />
               ) : null}
             </div>
-            <div className="grid flex-1 min-h-0 grid-cols-1 gap-4 lg:grid-cols-[minmax(320px,1fr)_minmax(320px,0.9fr)]">
-              <div className="rounded-lg border border-border bg-panel p-4 min-h-0 flex flex-col">
+            <div className="grid grid-cols-1 gap-4 lg:grid-cols-[minmax(320px,1fr)_minmax(320px,0.9fr)]">
+              <div className="rounded-lg border border-border bg-panel p-4 min-h-[420px] flex flex-col">
                 <div className="mb-3 flex items-center justify-between gap-2">
                   <div>
                     <div className="text-sm font-medium text-text-strong">
@@ -1702,13 +1728,17 @@ export function SkillPanel({ sessionId, onNavigateToConfig, isActive = false }: 
                       skillLabel={t('skills.retrieval.nodeTypes.skill')}
                     />
                   ) : (
-                    <div className="whitespace-pre-wrap text-xs text-text-muted">
-                      {retrievalTree || (retrievalLoading === "tree" ? t('common.loading') : t('skills.retrieval.noTree'))}
-                    </div>
+                    <MarkdownRenderer
+                      content={
+                        retrievalTree
+                        || (retrievalLoading === "tree" ? t('common.loading') : t('skills.retrieval.noTree'))
+                      }
+                      className="chat-markdown text-xs text-text-muted"
+                    />
                   )}
                 </div>
               </div>
-              <div className="rounded-lg border border-border bg-panel p-4 min-h-0 flex flex-col">
+              <div className="rounded-lg border border-border bg-panel p-4 min-h-[420px] flex flex-col">
                 <div className="text-sm font-medium text-text-strong mb-3">
                   {t('skills.retrieval.nodeDetails')}
                 </div>

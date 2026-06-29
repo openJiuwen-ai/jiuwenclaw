@@ -132,7 +132,7 @@ def _decode_response_text(response: requests.Response) -> str:
         seen.add(enc)
         try:
             return raw.decode(enc, errors="strict")
-        except Exception:
+        except (UnicodeDecodeError, LookupError):
             continue
 
     # Last-resort fallback.

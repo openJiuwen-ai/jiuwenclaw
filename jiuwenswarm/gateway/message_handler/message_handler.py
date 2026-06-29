@@ -2819,7 +2819,8 @@ class MessageHandler(ABC):
                                     msg.params["content"] = review_prompt
                                 content = review_prompt
                                 logger.info(
-                                    "[MessageHandler] /review prompt injected for chat.send channel=%s pr_arg=%s",
+                                    "[MessageHandler] /review prompt injected for chat.send "
+                                    "channel=%s pr_arg=%s",
                                     getattr(msg, "channel_id", ""),
                                     pr_arg or "<none>",
                                 )

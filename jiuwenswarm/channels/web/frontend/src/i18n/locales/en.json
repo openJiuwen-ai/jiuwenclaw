@@ -1066,6 +1066,7 @@
       "fullRebuild": "Full Rebuild",
       "building": "Building...",
       "buildFailed": "Build failed",
+      "lastBuildFailedUsingExisting": "The last rebuild failed. The previous successful index is still in use.",
       "cancel": "Cancel Build",
       "cancelling": "Cancelling...",
       "cancelled": "Build cancelled",

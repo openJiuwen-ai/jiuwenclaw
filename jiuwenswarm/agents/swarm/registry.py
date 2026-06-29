@@ -112,6 +112,7 @@ EXPLORE_AGENT = _OJ_EXPLORE_AGENT
 PLAN_AGENT = _OJ_PLAN_AGENT
 BROWSER_AGENT = _OJ_BROWSER_AGENT
 CODE_AGENT = _code_subagents.CODE_AGENT
+SWARM_BROWSER_AGENT = _code_subagents.SWARM_BROWSER_AGENT
 
 # Swarm-owned no-parameter class rails declared in ``builtin_rails``.
 RESPONSE_PROMPT = _builtin_rails.RESPONSE_PROMPT
@@ -238,5 +239,6 @@ __all__ = [
     "EXPLORE_AGENT",
     "PLAN_AGENT",
     "CODE_AGENT",
+    "SWARM_BROWSER_AGENT",
     "BROWSER_AGENT",
 ]
