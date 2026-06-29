@@ -600,7 +600,7 @@ def build_member_subagent_specs(
         if _is_subagent_enabled(subagents_cfg.get("browser_agent")):
             specs.append(
                 _code_subagent_spec(
-                    "browser_agent", registry.BROWSER_AGENT, react, language
+                    "browser_agent", registry.SWARM_BROWSER_AGENT, react, language
                 )
             )
     return specs
@@ -651,8 +651,38 @@ def build_member_deep_agent_spec(
         update["enable_skill_discovery"] = True
 
     subagent_specs = build_member_subagent_specs(config, mode, role)
-    if subagent_specs:
+
+    # In team mode, base_spec includes a browser_agent with hardcoded
+    # server_id="playwright_official_stdio". All members share that single
+    # @playwright/mcp subprocess → single Chrome window. Replace it with
+    # SWARM_BROWSER_AGENT which builds a unique server_id per member
+    # (session_id + role), giving each member their own isolated Chrome.
+    # In code mode build_member_subagent_specs already returns SWARM_BROWSER_AGENT,
+    # so this branch only runs for non-code modes.
+    team_browser_spec: SubAgentSpec | None = None
+    if not _is_code_mode(mode):
+        react_cfg = (config or {}).get("react", {})
+        react_cfg = react_cfg if isinstance(react_cfg, dict) else {}
+        subagents_cfg = react_cfg.get("subagents", {}) if isinstance(react_cfg, dict) else {}
+        if isinstance(subagents_cfg, dict) and _is_subagent_enabled(subagents_cfg.get("browser_agent")):
+            language = _subagent_language(mode, role, config)
+            team_browser_spec = _code_subagent_spec(
+                "browser_agent", registry.SWARM_BROWSER_AGENT, react_cfg, language
+            )
+
+    if subagent_specs or team_browser_spec:
         merged_subagents = list(base_spec.subagents or [])
+        # Remove any browser_agent from base_spec to prevent the shared
+        # playwright_official_stdio entry from co-existing with our isolated one.
+        if team_browser_spec or any(
+            getattr(s, "subagent_type", None) == "browser_agent" for s in subagent_specs
+        ):
+            merged_subagents = [
+                s for s in merged_subagents
+                if getattr(s, "subagent_type", None) != "browser_agent"
+            ]
+        if team_browser_spec:
+            merged_subagents.append(team_browser_spec)
         merged_subagents.extend(subagent_specs)
         update["subagents"] = merged_subagents
 

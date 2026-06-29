@@ -1065,6 +1065,7 @@
       "fullRebuild": "全量重新构建",
       "building": "构建中...",
       "buildFailed": "构建失败",
+      "lastBuildFailedUsingExisting": "上次重新构建失败，当前仍在使用上一次成功构建的索引。",
       "cancel": "取消构建",
       "cancelling": "取消中...",
       "cancelled": "构建已取消",

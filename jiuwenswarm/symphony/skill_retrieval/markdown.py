@@ -5,11 +5,17 @@ from typing import Any
 from .inventory import SkillInventory
 
 
-def render_disabled() -> str:
+def render_disabled(language: str = "en") -> str:
+    normalized = str(language or "").lower()
+    if normalized.startswith(("zh", "cn")):
+        return (
+            "技能检索当前已关闭。\n\n"
+            "可以继续使用 jiuwenswarm 原有流程；如需使用技能索引，请在设置中开启 Agentic 技能检索并重新加载配置。"
+        )
     return (
-        "# Skill Retrieval Unavailable\n\n"
-        "Skill retrieval is disabled by `symphony.skill_retrieval.enabled=false`.\n\n"
-        "Proceed with the original jiuwenswarm flow, or enable the feature in settings and reload configuration."
+        "Skill retrieval is currently disabled.\n\n"
+        "Proceed with the original jiuwenswarm flow, or enable Agentic skill retrieval in settings and reload "
+        "configuration."
     )
 
 
