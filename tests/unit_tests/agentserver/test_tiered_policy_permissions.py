@@ -443,7 +443,7 @@ def test_persist_shell_allow_rule_writes_minimal_approval_override(monkeypatch):
         encoding="utf-8",
     )
     config_mod = importlib.import_module("jiuwenclaw.config")
-    monkeypatch.setattr(config_mod, "_CONFIG_YAML_PATH", config_path)
+    monkeypatch.setattr(config_mod, "_current_config_yaml_path", lambda: config_path)
     _config_dir_with_builtin(base_dir, monkeypatch, [])
     set_permission_engine(PermissionEngine({"enabled": True, "tools": {"bash": "ask"}}))
 
@@ -479,7 +479,7 @@ def test_persist_shell_allow_rule_fallback_uses_ask_subcommands(monkeypatch):
         encoding="utf-8",
     )
     config_mod = importlib.import_module("jiuwenclaw.config")
-    monkeypatch.setattr(config_mod, "_CONFIG_YAML_PATH", config_path)
+    monkeypatch.setattr(config_mod, "_current_config_yaml_path", lambda: config_path)
     _config_dir_with_builtin(base_dir, monkeypatch, [])
     set_permission_engine(PermissionEngine({"enabled": True, "tools": {"bash": "ask"}}))
 
@@ -498,7 +498,7 @@ def test_persist_shell_allow_rule_prefers_preview_patterns(monkeypatch):
         encoding="utf-8",
     )
     config_mod = importlib.import_module("jiuwenclaw.config")
-    monkeypatch.setattr(config_mod, "_CONFIG_YAML_PATH", config_path)
+    monkeypatch.setattr(config_mod, "_current_config_yaml_path", lambda: config_path)
     _config_dir_with_builtin(base_dir, monkeypatch, [])
     set_permission_engine(PermissionEngine({"enabled": True, "tools": {"bash": "ask"}}))
 
@@ -539,7 +539,7 @@ def test_persist_shell_allow_rule_expands_preseeded_approval_overrides(monkeypat
         encoding="utf-8",
     )
     config_mod = importlib.import_module("jiuwenclaw.config")
-    monkeypatch.setattr(config_mod, "_CONFIG_YAML_PATH", config_path)
+    monkeypatch.setattr(config_mod, "_current_config_yaml_path", lambda: config_path)
     _config_dir_with_builtin(base_dir, monkeypatch, [])
     set_permission_engine(PermissionEngine({"enabled": True, "tools": {"bash": "ask"}}))
 
@@ -567,7 +567,7 @@ def test_persist_shell_allow_rule_uses_short_stable_id_for_long_exact_pattern(mo
         encoding="utf-8",
     )
     config_mod = importlib.import_module("jiuwenclaw.config")
-    monkeypatch.setattr(config_mod, "_CONFIG_YAML_PATH", config_path)
+    monkeypatch.setattr(config_mod, "_current_config_yaml_path", lambda: config_path)
     _config_dir_with_builtin(base_dir, monkeypatch, [])
     set_permission_engine(PermissionEngine({"enabled": True, "tools": {"bash": "ask"}}))
 
@@ -597,7 +597,7 @@ def test_persist_non_shell_allow_rule_updates_whole_tool(monkeypatch):
         encoding="utf-8",
     )
     config_mod = importlib.import_module("jiuwenclaw.config")
-    monkeypatch.setattr(config_mod, "_CONFIG_YAML_PATH", config_path)
+    monkeypatch.setattr(config_mod, "_current_config_yaml_path", lambda: config_path)
     _config_dir_with_builtin(base_dir, monkeypatch, [])
     set_permission_engine(PermissionEngine({"enabled": True, "tools": {"Write": "ask"}}))
 
@@ -2176,3 +2176,89 @@ def test_user_ask_works_when_builtin_deny_misses(monkeypatch):
 
     assert perm == PermissionLevel.ASK
     assert "ask_git_push" in mr
+
+
+def test_persist_writes_to_live_path_ignoring_import_time_frozen_constant(monkeypatch):
+    """回归：persist 必须用实时 ``_current_config_yaml_path()``，而非 import 期冻结的 ``_CONFIG_YAML_PATH``。
+
+    复现云上依赖包场景：import ``jiuwenclaw.config`` 时 workspace 尚未初始化，
+    ``_CONFIG_YAML_PATH`` 被固化为包内 resources 路径；后续 workspace 初始化后
+    实时路径才指向正确文件。persist 应写到实时路径，不被冻结常量误导而写进包内。
+    """
+    base_dir = _tmp_dir("persist-live-vs-frozen")
+    live_config = base_dir / "config.yaml"
+    live_config.write_text(
+        yaml.safe_dump(
+            {"permissions": {"enabled": True, "tools": {"bash": "ask"}, "rules": []}},
+            allow_unicode=True,
+        ),
+        encoding="utf-8",
+    )
+    # 仿真 import 期固化的「包内路径」——一个不该被写入的诱饵文件
+    frozen_config = base_dir / "frozen_resources_config.yaml"
+    frozen_config.write_text(
+        yaml.safe_dump(
+            {"permissions": {"enabled": True, "tools": {"bash": "ask"}, "rules": []}},
+            allow_unicode=True,
+        ),
+        encoding="utf-8",
+    )
+
+    config_mod = importlib.import_module("jiuwenclaw.config")
+    monkeypatch.setattr(config_mod, "_CONFIG_YAML_PATH", frozen_config)
+    monkeypatch.setattr(config_mod, "_current_config_yaml_path", lambda: live_config)
+    _config_dir_with_builtin(base_dir, monkeypatch, [])
+    set_permission_engine(PermissionEngine({"enabled": True, "tools": {"bash": "ask"}}))
+
+    assert persist_permission_allow_rule(
+        "bash",
+        {"command": "git status"},
+        permission_context={"would_persist_patterns": ["git *"]},
+    )
+
+    live_saved = yaml.safe_load(live_config.read_text(encoding="utf-8"))
+    frozen_saved = yaml.safe_load(frozen_config.read_text(encoding="utf-8"))
+    assert any(
+        item.get("pattern") == "git *"
+        for item in live_saved["permissions"].get("approval_overrides", [])
+    )
+    # 冻结常量指向的诱饵文件不应被写入
+    assert not frozen_saved["permissions"].get("approval_overrides")
+
+
+def test_persist_cli_trusted_directory_writes_to_live_path_not_frozen_constant(monkeypatch):
+    """回归：persist_cli_trusted_directory 用实时路径，不写 import 期冻结常量指向的诱饵文件。
+
+    与 ``persist_permission_allow_rule`` 同模式但独立持久化 CLI 信任目录段
+    （``permissions.file_guard.global`` / ``trusted_exec_directory`` + ``approval_overrides``）。
+    若该 writer 被误改回 ``_CONFIG_YAML_PATH``，本测试应捕获。
+    """
+    from jiuwenclaw.agentserver.permissions.patterns import persist_cli_trusted_directory
+
+    base_dir = _tmp_dir("persist-cli-live-vs-frozen")
+    live_config = base_dir / "config.yaml"
+    live_config.write_text(
+        yaml.safe_dump({"permissions": {"enabled": True, "rules": []}}, allow_unicode=True),
+        encoding="utf-8",
+    )
+    frozen_config = base_dir / "frozen_resources_config.yaml"
+    frozen_config.write_text(
+        yaml.safe_dump({"permissions": {"enabled": True, "rules": []}}, allow_unicode=True),
+        encoding="utf-8",
+    )
+
+    config_mod = importlib.import_module("jiuwenclaw.config")
+    monkeypatch.setattr(config_mod, "_CONFIG_YAML_PATH", frozen_config)
+    monkeypatch.setattr(config_mod, "_current_config_yaml_path", lambda: live_config)
+    set_permission_engine(PermissionEngine({"enabled": True, "rules": []}))
+
+    trusted = base_dir / "trusted_dir"
+    trusted.mkdir()
+    result = persist_cli_trusted_directory(str(trusted))
+    assert result.get("ok"), result
+
+    live_saved = yaml.safe_load(live_config.read_text(encoding="utf-8"))
+    frozen_saved = yaml.safe_load(frozen_config.read_text(encoding="utf-8"))
+    live_global = live_saved["permissions"].get("file_guard", {}).get("global", {})
+    assert live_global, "信任目录应写入实时配置的 file_guard.global"
+    assert not frozen_saved["permissions"].get("file_guard", {}).get("global"), "诱饵文件不应被写入"

@@ -415,18 +415,18 @@ def classify_tool_file_action_kind(tool_name: str) -> Literal["read", "write", "
 def _yaml_update_permissions(mutate_fn) -> None:
     from jiuwenclaw.agentserver.permissions.core import get_permission_engine
     from jiuwenclaw.config import (
-        _CONFIG_YAML_PATH,
+        _current_config_yaml_path,
         _load_yaml_round_trip,
         _dump_yaml_round_trip,
     )
 
-    data = _load_yaml_round_trip(_CONFIG_YAML_PATH)
+    data = _load_yaml_round_trip(_current_config_yaml_path())
     permissions = data.get("permissions")
     if not isinstance(permissions, dict):
         permissions = {}
         data["permissions"] = permissions
     mutate_fn(permissions)
-    _dump_yaml_round_trip(_CONFIG_YAML_PATH, data)
+    _dump_yaml_round_trip(_current_config_yaml_path(), data)
     get_permission_engine().update_config(data.get("permissions", {}))
 
 

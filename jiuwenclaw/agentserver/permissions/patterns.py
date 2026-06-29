@@ -282,13 +282,13 @@ def persist_permission_allow_rule(
         )
         from jiuwenclaw.agentserver.permissions.models import PermissionLevel
         from jiuwenclaw.config import (
-            _CONFIG_YAML_PATH,
+            _current_config_yaml_path,
             _load_yaml_round_trip,
             _dump_yaml_round_trip,
         )
 
-        logger.debug("[PermissionEngine] permission.persist.config_path path=%s", _CONFIG_YAML_PATH)
-        data = _load_yaml_round_trip(_CONFIG_YAML_PATH)
+        logger.debug("[PermissionEngine] permission.persist.config_path path=%s", _current_config_yaml_path())
+        data = _load_yaml_round_trip(_current_config_yaml_path())
         permissions = data.get("permissions")
         if permissions is None:
             logger.warning(
@@ -358,10 +358,10 @@ def persist_permission_allow_rule(
                 persisted,
             )
 
-        _dump_yaml_round_trip(_CONFIG_YAML_PATH, data)
+        _dump_yaml_round_trip(_current_config_yaml_path(), data)
         logger.info("[PermissionEngine] permission.persist.write tool=%s target=config_yaml persisted=true", tool_name)
 
-        verify_data = _load_yaml_round_trip(_CONFIG_YAML_PATH)
+        verify_data = _load_yaml_round_trip(_current_config_yaml_path())
         engine = get_permission_engine()
         engine.update_config(verify_data.get("permissions", {}))
         logger.info("[PermissionEngine] permission.persist.reload tool=%s reloaded=true", tool_name)
@@ -591,12 +591,12 @@ def persist_cli_trusted_directory(raw_path: str) -> dict[str, Any]:
             apply_cli_trusted_to_permissions_dict,
         )
         from jiuwenclaw.config import (
-            _CONFIG_YAML_PATH,
+            _current_config_yaml_path,
             _load_yaml_round_trip,
             _dump_yaml_round_trip,
         )
 
-        data = _load_yaml_round_trip(_CONFIG_YAML_PATH)
+        data = _load_yaml_round_trip(_current_config_yaml_path())
         permissions = data.get("permissions")
         if permissions is None:
             permissions = {}
@@ -639,7 +639,7 @@ def persist_cli_trusted_directory(raw_path: str) -> dict[str, Any]:
                 sorted(SHELL_PERMISSION_TOOLS),
             )
 
-        _dump_yaml_round_trip(_CONFIG_YAML_PATH, data)
+        _dump_yaml_round_trip(_current_config_yaml_path(), data)
         engine = get_permission_engine()
         engine.update_config(data.get("permissions", {}))
         return {
