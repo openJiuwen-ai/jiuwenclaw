@@ -14,7 +14,7 @@ from .schemas import RoutingContext, TemplateRefSlot
 
 _VAR_PATTERN = re.compile(r"\$\{(\w+)\}")
 _OR_SPLIT_PATTERN = re.compile(r"\s+or\s+", flags=re.IGNORECASE)
-_MAPPING_DIM_PATTERN = re.compile(r"^\$\{(user|group)::([^}]+)\}$", re.IGNORECASE)
+_MAPPING_DIM_PATTERN = re.compile(r"^\$\{(user|group|bot)::([^}]+)\}$", re.IGNORECASE)
 
 
 async def _list_records(*args: Any, **kwargs: Any) -> list[dict[str, Any]]:
@@ -26,9 +26,9 @@ async def _lookup_mapping_by_part(
     *,
     template_type: str,
 ) -> str | None:
-    """将 ``${user::…}`` / ``${group::…}`` 片段解析为映射表中的 ``template_id``。
+    """将 ``${user::…}`` / ``${group::…}`` / ``${bot::…}`` 片段解析为映射表中的 ``template_id``。
 
-    按 ``template_type``（槽位键）与 ``user_id`` / ``group_id`` 查询
+    按 ``template_type``（槽位键）与 ``scope_type`` / ``scope_id`` 查询
     ``config_default_template_mapping``，命中则返回 **priority 最高、同 priority 时 updated_at 最新** 的一条。
 
     入参举例::
@@ -39,7 +39,7 @@ async def _lookup_mapping_by_part(
     返回值举例::
 
         "f5555555-5555-4555-8555-555555555505"  # 映射表命中
-        None  # 非 ``${user::}`` / ``${group::}`` 格式，或库中无启用映射行
+        None  # 非 ``${user::}`` / ``${group::}`` / ``${bot::}`` 格式，或库中无启用映射行
     """
     dim_match = _MAPPING_DIM_PATTERN.fullmatch(part.strip())
     if not dim_match:
@@ -53,11 +53,9 @@ async def _lookup_mapping_by_part(
     base_filters: dict[str, Any] = {
         "enabled": True,
         "template_type": str(template_type or "").strip(),
+        "scope_type": dim,
+        "scope_id": key,
     }
-    if dim == "user":
-        base_filters["user_id"] = key
-    else:
-        base_filters["group_id"] = key
 
     rows = await _list_records(
         "config_default_template_mapping",
@@ -78,7 +76,7 @@ async def resolve_template_slot_ref(
 ) -> str | None:
     """解析**单个槽位**的 ``template_ref`` 原始字符串，返回最终 ``template_id``（非整表映射）。
 
-    支持字面 ``template_id``（UUID）、``${user::key}`` / ``${group::key}``（查默认映射表），
+    支持字面 ``template_id``（UUID）、``${user::key}`` / ``${group::key}`` / ``${bot::key}``（查默认映射表），
     以及 ``<映射表达式> or <回退 template_id>``：按 ``or`` 从左到右尝试，先命中先返回。
     ``template_type`` 须与当前槽位键一致；由 ``resolve_slot_template_id_map`` 汇总为
     ``slot -> template_id`` 字典。

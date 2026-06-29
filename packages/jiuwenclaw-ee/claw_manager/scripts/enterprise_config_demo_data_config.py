@@ -654,8 +654,8 @@ def seed_demo_config(client: ManagerClient) -> dict[str, Any]:
         "/config-default-template-mappings/",
         {
             "policy_name": "carol 默认 default_model",
-            "user_id": "carol",
-            "group_id": None,
+            "scope_type": "user",
+            "scope_id": "carol",
             "priority": 0,
             "template_id": m4,
             "template_type": "default_model",
@@ -678,8 +678,8 @@ def seed_demo_config(client: ManagerClient) -> dict[str, Any]:
         "/config-default-template-mappings/",
         {
             "policy_name": "销售组 default_model 映射",
-            "user_id": None,
-            "group_id": "g_demo_sales",
+            "scope_type": "group",
+            "scope_id": "g_demo_sales",
             "priority": 1,
             "template_id": m5,
             "template_type": "default_model",

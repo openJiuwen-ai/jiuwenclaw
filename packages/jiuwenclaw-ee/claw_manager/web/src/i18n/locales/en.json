@@ -294,15 +294,20 @@
     },
     "mapping": {
       "new": "New Mapping",
-      "searchPlaceholder": "Search policy ID, name, description, User ID, Group ID, slot, template ID, or priority",
+      "searchPlaceholder": "Search policy ID, name, description, scope type, scope ID, slot, template ID, or priority",
       "templateType": "Template Type",
       "templateTypeHint": "default_model / video_model / audio_model / vision_model / skill_whitelist / channel / service_resource",
       "templateId": "Template ID",
       "template": "Template",
       "templateUnavailable": "Template unavailable",
       "slotUnavailable": "Slot unavailable",
-      "userId": "User ID",
-      "groupId": "Group ID",
+      "scopeType": "Scope Type",
+      "scopeId": "Scope ID",
+      "scopeTypes": {
+        "user": "User",
+        "group": "Group",
+        "bot": "Bot"
+      },
       "priority": "Priority"
     },
     "global": {
@@ -326,8 +331,10 @@
       "modeTemplate": "Template",
       "modeUser": "User Mapping",
       "modeGroup": "Group Mapping",
+      "modeBot": "Bot Mapping",
       "userIdPlaceholder": "User ID, e.g. alice",
       "groupIdPlaceholder": "Group ID, e.g. g_demo_sales",
+      "botIdPlaceholder": "Bot ID, e.g. bot_main",
       "refItem": "Reference",
       "orLabel": "or",
       "addOrSegment": "Add or segment",

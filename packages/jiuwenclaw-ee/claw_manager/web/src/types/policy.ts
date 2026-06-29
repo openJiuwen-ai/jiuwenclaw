@@ -1,11 +1,13 @@
+export type MappingScopeType = 'user' | 'group' | 'bot';
+
 export interface ConfigDefaultTemplateMapping {
   id: number;
   jiuwenclaw_id: string;
   policy_id: string;
   policy_name: string;
   policy_desc?: string | null;
-  user_id?: string | null;
-  group_id?: string | null;
+  scope_type: MappingScopeType;
+  scope_id: string;
   priority: number;
   template_id: string;
   template_type: string;
@@ -18,8 +20,8 @@ export interface ConfigDefaultTemplateMapping {
 export interface ConfigDefaultTemplateMappingCreateBody {
   policy_name: string;
   policy_desc?: string;
-  user_id?: string;
-  group_id?: string;
+  scope_type: MappingScopeType;
+  scope_id: string;
   priority?: number;
   template_id: string;
   template_type: string;
