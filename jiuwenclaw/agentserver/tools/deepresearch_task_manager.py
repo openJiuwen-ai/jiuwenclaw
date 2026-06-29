@@ -128,6 +128,12 @@ class DeepResearchTaskManager:
         "framework": ("框架层", "框架级事件或异常信号"),
     }
 
+    # 仅发单次 summary_response 的终态节点：首次收到 chunk 时推 start + 立即推 done
+    # 这些节点不调用 custom_stream_output（不发 event=start/done），
+    # 只通过 write_custom_stream 发一次 event=summary_response。
+    # 从消费者角度，chunk 到达即表示节点已完成（尽管节点内部可能有 LLM 调用耗时）。
+    INSTANT_COMPLETE_NODES: ClassVar[set[str]] = {"collector_summary"}
+
     def __new__(cls):
         """实现单例模式."""
         if cls._instance is None:
@@ -958,10 +964,10 @@ class DeepResearchTaskManager:
             chunk_count = 0
 
             # === 进度追踪变量 ===
-            # 使用 (agent_name, section_idx) 元组追踪当前节点，
-            # 确保并行执行的不同 section 的同名节点（如 sub_reporter）被独立追踪。
-            current_tracking: tuple[str, str] | None = None  # (agent_name, section_idx)
-            agent_started: dict[str, bool] = {}  # node_key → 是否已发送 start
+            # 使用字典追踪所有活跃节点的状态，支持并行执行的多个章节。
+            # 每个节点独立管理生命周期，避免并行节点相互干扰。
+            # node_key -> {"started": bool, "done": bool, "agent_name": str, "section_idx": str}
+            active_nodes: dict[str, dict[str, Any]] = {}
 
             # === 内容收集变量 ===
             outline_content_parts: list[str] = []
@@ -1015,27 +1021,15 @@ class DeepResearchTaskManager:
                                     section_titles,
                                 )
 
-                # === 通过 node_key 变化推断节点切换 ===
+                # === 节点生命周期管理（支持并行执行） ===
                 # DeepSearch 引擎的多数节点不发送 event=start CustomSchema chunk，
-                # 但每个 chunk 都携带 agent 字段。当 node_key（agent_name + section_idx）
-                # 变化时，可推断：上一个节点完成、新节点开始执行。
-                # 使用复合键确保并行 section 的同名节点（如多个 sub_reporter）被独立追踪。
-                if agent_name and node_key != (current_tracking[0] if current_tracking else None):
+                # 但每个 chunk 都携带 agent 字段。当首次收到某节点的 chunk 时，
+                # 视为该节点开始执行；收到显式 event=done 时，视为节点完成。
+                # 使用 active_nodes 字典独立追踪每个节点的状态，支持并行章节。
+                if agent_name and node_key not in active_nodes:
                     display_info = self.NODE_DISPLAY_INFO.get(agent_name)
                     if display_info:
-                        # 1. 发送上一节点的完成推送（如果有）
-                        if current_tracking:
-                            prev_agent, prev_section = current_tracking
-                            prev_node_key = f"{prev_agent}_{prev_section}" if prev_section != "0" else prev_agent
-                            if agent_started.get(prev_node_key):
-                                await self._send_progress_push(
-                                    session_id, channel_id, request_id,
-                                    prev_agent, "done", prev_section,
-                                    section_titles=section_titles,
-                                )
-                                agent_started[prev_node_key] = False
-
-                        # 2. 构建新节点的进度条目和推送
+                        # 首次收到该节点的 chunk，发送开始推送
                         display_name = display_info[0]
                         description = display_info[1]
                         push_preview = self._build_push_preview(
@@ -1049,24 +1043,46 @@ class DeepResearchTaskManager:
                             )
                             if entry:
                                 progress_entries.append(entry)
+                        # 修改1：推同一 section 内未完成节点的 done
+                        # 同一 section 内节点串行执行，新节点出现意味着上一节点已完成。
+                        # 必须按 section_idx 过滤，避免并行 section 的误推。
+                        for other_key, other_state in active_nodes.items():
+                            if (other_state["started"] and not other_state["done"]
+                                    and other_state["section_idx"] == section_idx
+                                    and other_key != node_key):
+                                await self._send_progress_push(
+                                    session_id, channel_id, request_id,
+                                    other_state["agent_name"], "done", other_state["section_idx"],
+                                    section_titles=section_titles,
+                                )
+                                other_state["done"] = True
                         # WebSocket 推送（前端实时进度）
                         await self._send_progress_push(
                             session_id, channel_id, request_id,
                             agent_name, "start", section_idx, push_preview,
                             section_titles=section_titles,
                         )
-                        agent_started[node_key] = True
-                        current_tracking = (agent_name, section_idx)
+                        # 记录节点状态
+                        active_nodes[node_key] = {
+                            "started": True,
+                            "done": False,
+                            "agent_name": agent_name,
+                            "section_idx": section_idx,
+                        }
+                        # 修改2：终态节点立即推 done
+                        if agent_name in self.INSTANT_COMPLETE_NODES:
+                            await self._send_progress_push(
+                                session_id, channel_id, request_id,
+                                agent_name, "done", section_idx,
+                                section_titles=section_titles,
+                            )
+                            active_nodes[node_key]["done"] = True
 
-                # === 兼容保留：显式 event=start/done 事件处理 ===
+                # === 处理显式 event=done 事件 ===
                 # 部分节点（outline、plan_reasoning）通过 custom_stream_output
-                # 显式发送 event=start/done，这些事件可能携带更精确的信息
+                # 显式发送 event=done，这些事件可能携带更精确的信息
                 # （如 outline 的 done 触发 section_titles 最终解析）。
-                # 为避免重复推送，仅处理尚未被 node_key 变化检测覆盖的场景。
-                if agent_name and event == "start" and current_tracking and node_key == current_tracking[0]:
-                    # 同一节点的显式 start 事件（已在上方处理，跳过以避免重复）
-                    pass
-                elif agent_name and event == "done":
+                if agent_name and event == "done":
                     # outline 完成时：对累积大纲做最终一次 section_titles 解析
                     if agent_name == "outline" and outline_content_parts:
                         full_outline = "".join(outline_content_parts)
@@ -1080,14 +1096,15 @@ class DeepResearchTaskManager:
                             )
                             section_titles = final_parsed
 
-                    # 节点完成：仅在未通过 node_key 变化检测到完成时推送
-                    if agent_started.get(node_key) and current_tracking and node_key == current_tracking[0]:
+                    # 节点完成：仅在已开始且未完成时推送
+                    node_state = active_nodes.get(node_key)
+                    if node_state and node_state["started"] and not node_state["done"]:
                         await self._send_progress_push(
                             session_id, channel_id, request_id,
                             agent_name, "done", section_idx,
                             section_titles=section_titles,
                         )
-                        agent_started[node_key] = False
+                        node_state["done"] = True
 
                 # 现有逻辑：解析最终报告
                 report_result = parse_endnode_content(chunk_content)
@@ -1099,16 +1116,18 @@ class DeepResearchTaskManager:
                         extra={'user_visible': 'critical'}
                     )
 
-            # === 发送最后一个节点的完成通知 ===
-            if current_tracking:
-                last_agent, last_section = current_tracking
-                last_node_key = f"{last_agent}_{last_section}" if last_section != "0" else last_agent
-                if agent_started.get(last_node_key):
+            # === 发送所有活跃节点的完成通知 ===
+            # 遍历所有已开始但未完成的节点，发送完成推送。
+            # 这确保即使 DeepSearch 引擎没有显式发送 event=done，
+            # 前端也能收到所有节点的完成通知。
+            for node_key, node_state in active_nodes.items():
+                if node_state["started"] and not node_state["done"]:
                     await self._send_progress_push(
                         session_id, channel_id, request_id,
-                        last_agent, "done", last_section,
+                        node_state["agent_name"], "done", node_state["section_idx"],
                         section_titles=section_titles,
                     )
+                    node_state["done"] = True
 
             logger.info(
                 "[DeepResearchTaskManager] Workflow completed. Total chunks: %d",
