@@ -553,6 +553,231 @@ def _sanitize_wire_tool_arguments(params: dict[str, Any]) -> None:
             )
 
 
+def _is_assistant_with_tool_calls(msg: Any) -> bool:
+    """True if ``msg`` is an assistant message carrying a non-empty tool_calls list."""
+    return (
+        isinstance(msg, dict)
+        and msg.get("role") == "assistant"
+        and isinstance(msg.get("tool_calls"), list)
+        and bool(msg["tool_calls"])
+    )
+
+
+def _is_tool_message(msg: Any) -> bool:
+    """True if ``msg`` is a tool result message."""
+    return isinstance(msg, dict) and msg.get("role") == "tool"
+
+
+def _tool_call_id_of(msg: Any) -> str:
+    """Return the tool_call_id of a tool message as str ("" if absent)."""
+    tid = msg.get("tool_call_id") if isinstance(msg, dict) else None
+    return str(tid) if tid is not None else ""
+
+
+def _wire_payload_is_paired(messages: list[dict]) -> bool:
+    """Return True iff every ``tool`` result is adjacent to its declaring assistant.
+
+    A tool is adjacent iff the previous message is either an
+    assistant-with-tool_calls or an already-adsorbed tool resolving to the
+    most recent assistant, and its ``tool_call_id`` is still owed by some
+    preceding assistant (the pending set). Consecutive tools answering the
+    most recent assistant are legal. Cheap O(n) scan; lets the hot path
+    skip the rebuild entirely when the wire payload is already well-formed.
+    """
+    pending_ids: set[str] = set()
+    prev_was_assistant_tc = False
+    prev_was_segment_tool = False
+    for m in messages:
+        if _is_assistant_with_tool_calls(m):
+            for tc in m["tool_calls"]:
+                if isinstance(tc, dict) and tc.get("id"):
+                    pending_ids.add(str(tc["id"]))
+            prev_was_assistant_tc = True
+            prev_was_segment_tool = False
+        elif _is_tool_message(m):
+            tid = _tool_call_id_of(m)
+            if not (tid and tid in pending_ids):
+                return False
+            pending_ids.discard(tid)
+            if not prev_was_assistant_tc and not prev_was_segment_tool:
+                return False
+            prev_was_assistant_tc = False
+            prev_was_segment_tool = True
+        else:
+            prev_was_assistant_tc = False
+            prev_was_segment_tool = False
+    return True
+
+
+def _downgrade_orphan_tool(msg: dict, tid: str) -> dict:
+    """Build a ``role=user`` copy of an orphan tool message (content preserved).
+
+    A NEW dict is returned so callers still holding the source message list see
+    a stable snapshot. ``role``/``content``/``tool_call_id`` are replaced; any
+    other keys the tool carried are kept. Content is stringified in a marker so
+    non-str content (structured parts) survives without crashing.
+    """
+    original_content = msg.get("content", "")
+    content_repr = (
+        original_content
+        if isinstance(original_content, str)
+        else json.dumps(original_content, ensure_ascii=False)
+    )
+    downgraded = {k: v for k, v in msg.items() if k not in ("role", "content", "tool_call_id")}
+    downgraded["role"] = "user"
+    downgraded["content"] = (
+        "[orphan_tool_downgraded_to_user] "
+        f"tool_call_id={tid} original_tool_content={content_repr}"
+    )
+    return downgraded
+
+
+def _sanitize_wire_tool_pairing(params: dict[str, Any]) -> None:
+    """Repair ``assistant.tool_calls`` ↔ ``tool`` adjacency on the wire payload, in place.
+
+    Final gate before the model call. ``FullCompactProcessor`` reinjects
+    ``[FULL_COMPACT_STATE]`` as ``user`` messages between an
+    ``assistant.tool_calls`` and its ``tool`` result, which triggers
+    ``ModelArts.81001`` (tool result not adjacent to its call).
+
+    Policy: adsorb (re-order), never delete. Pull each ``tool`` result back
+    behind its declaring ``assistant``; defer any wedged ``user``/``system``
+    behind the adsorbed tools. A ``tool`` whose ``tool_call_id`` no assistant
+    ever declared is a true orphan — downgraded to ``role=user`` with its
+    content preserved in a marker.
+
+    Orphan detection assumes the upstream context layer
+    (``stream_event_rail._fix_incomplete_tool_context``) already guarantees
+    every ``tool`` answers some ``assistant.tool_calls`` and that an assistant
+    missing its tool result is patched upstream. The only breakage that
+    normally reaches here is a compact-injected ``user`` splitting a valid
+    pair; the stranded-recover and orphan-downgrade branches additionally
+    defend against non-compact sources (history replay, subagent context
+    inheritance) that can deliver misordered payloads.
+
+    Rebuild strategy — per-assistant segments, not positional indices:
+    each assistant opens a segment ``{head, tools[], deferred[]}`` and every
+    tool result it owes (whether adsorbed forward or recovered from downstream)
+    is appended to that segment's ``tools`` list by reference. Because the
+    segment travels with its assistant, later splices cannot invalidate
+    earlier positions — avoiding the index-drift regression where a second
+    stranded tool landed *before* its declaring assistant.
+    """
+    messages = params.get("messages")
+    if not isinstance(messages, list) or not messages:
+        return
+    if _wire_payload_is_paired(messages):
+        return
+
+    before_count = len(messages)
+    llm_logger.warning(
+        "[tool_pairing] action=repair_triggered layer=wire before_count=%s %s",
+        before_count,
+        _llm_log_ctx(),
+    )
+
+    # tool_call_id → its assistant's segment. Indexed during the rebuild as each
+    # assistant is opened, so the orphan branch can tell a valid tool result
+    # stranded downstream (its id was declared by some assistant — recover it)
+    # from a true orphan (no assistant owns the id — downgrade). A stranded
+    # result may appear before its declaring assistant is processed in the
+    # forward pass; the segment-by-id lookup covers both forward-adsorb and
+    # stranded-recover without a separate id-set pass, so neither drifts on
+    # reordering.
+    segment_by_tid: dict[str, dict] = {}
+    segments: list[dict] = []  # ordered: assistant segments + standalone msgs
+    adsorbed_tools = 0
+    shifted_user_rounds = 0
+    downgraded = 0
+
+    for msg in messages:
+        if _is_assistant_with_tool_calls(msg):
+            seg: dict = {"head": msg, "tools": [], "deferred": []}
+            # ids this assistant still expects results for in its forward window
+            expected = {
+                str(tc["id"])
+                for tc in msg["tool_calls"]
+                if isinstance(tc, dict) and tc.get("id")
+            }
+            seg["expected"] = expected
+            for tc in msg["tool_calls"]:
+                if isinstance(tc, dict) and tc.get("id"):
+                    segment_by_tid[str(tc["id"])] = seg
+            segments.append(seg)
+        elif _is_tool_message(msg):
+            tid = _tool_call_id_of(msg)
+            seg = segment_by_tid.get(tid)
+            if seg is None:
+                # True orphan: no assistant declares this id. Downgrade to user.
+                segments.append({"head": _downgrade_orphan_tool(msg, tid)})
+                downgraded += 1
+                llm_logger.warning(
+                    "[tool_pairing] action=orphan_downgrade layer=wire "
+                    "tool_call_id=%s reason=no_preceding_assistant_tool_calls %s",
+                    tid,
+                    _llm_log_ctx(),
+                )
+            elif tid in seg["expected"]:
+                # Forward adsorb: tool sits in this assistant's window (possibly
+                # split by injected user/system, which we defer behind it).
+                seg["tools"].append(msg)
+                seg["expected"].discard(tid)
+                adsorbed_tools += 1
+            else:
+                # Stranded-valid: a later assistant truncated this one's window
+                # before the result arrived. Recover into the owning segment
+                # rather than downgrading — the id is declared, so it's legal.
+                seg["tools"].append(msg)
+                adsorbed_tools += 1
+                llm_logger.warning(
+                    "[tool_pairing] action=stranded_recover layer=wire "
+                    "tool_call_id=%s reason=valid_id_stranded_downstream %s",
+                    tid,
+                    _llm_log_ctx(),
+                )
+        elif isinstance(msg, dict) and msg.get("role") in ("user", "system"):
+            # A wedged user/system inside an open assistant window is deferred
+            # behind that assistant's tools (so it can't split the pair).
+            # system-in-the-middle is rare (compact injects role=user); we defer
+            # rather than break on it, so it can't strand a later resolvable tool
+            # into orphan-downgrade. Standalone (no open window) → own segment.
+            tail = segments[-1] if segments else None
+            if tail is not None and "deferred" in tail and tail.get("expected"):
+                tail["deferred"].append(msg)
+                shifted_user_rounds += 1
+                llm_logger.warning(
+                    "[tool_pairing] action=adsorb layer=wire adsorbed_tools_so_far=%s "
+                    "shifted_user=1 %s",
+                    adsorbed_tools,
+                    _llm_log_ctx(),
+                )
+            else:
+                segments.append({"head": msg})
+        else:
+            segments.append({"head": msg})
+
+    repaired: list[dict] = []
+    for seg in segments:
+        if "tools" in seg:
+            repaired.append(seg["head"])
+            repaired.extend(seg["tools"])
+            repaired.extend(seg["deferred"])
+        else:
+            repaired.append(seg["head"])
+
+    params["messages"] = repaired
+    llm_logger.warning(
+        "[tool_pairing] action=repair_summary layer=wire before_count=%s "
+        "after_count=%s adsorbed_tools=%s shifted_user_rounds=%s downgraded=%s %s",
+        before_count,
+        len(repaired),
+        adsorbed_tools,
+        shifted_user_rounds,
+        downgraded,
+        _llm_log_ctx(),
+    )
+
+
 def _patched_build_request_params(self, *, stream: bool, **kwargs) -> dict:
     """Patched version: ensure usage chunks and sanitize tool arguments before provider calls."""
     params = _ORIGINAL_BUILD_REQUEST_PARAMS(self, stream=stream, **kwargs)
@@ -571,6 +796,7 @@ def _patched_build_request_params(self, *, stream: bool, **kwargs) -> dict:
         elif isinstance(existing, dict) and "include_usage" not in existing:
             existing["include_usage"] = True
     _sanitize_wire_tool_arguments(params)
+    _sanitize_wire_tool_pairing(params)
     # Fallback max_tokens to environment variable if not configured
     if params.get("max_tokens") is None:
         env_max_tokens = os.environ.get("LLM_MAX_TOKENS")
