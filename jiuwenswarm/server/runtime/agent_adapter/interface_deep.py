@@ -148,6 +148,7 @@ from jiuwenswarm.server.runtime.session.session_history import append_history_re
 from jiuwenswarm.server.runtime.skill import filter_visible_skill_names
 from jiuwenswarm.server.runtime.skill.skill_manager import SkillManager
 from jiuwenswarm.server.runtime.prompt_attachment_loader import PromptAttachmentLoader
+from jiuwenswarm.server.runtime.prewarm import PrewarmConfig, PrewarmCoordinator, PrewarmRail
 from jiuwenswarm.server.runtime.agent_adapter.evolution_helpers import (
     EVOLUTION_ACCEPT_LABELS,
     EVOLUTION_EXECUTE_LABELS,
@@ -617,6 +618,7 @@ class JiuWenSwarmDeepAdapter:
         self._subagent_rail: SubagentRail | None = None
         self._permission_rail: Any = None
         self._avatar_rail: Any = None
+        self._prewarm_rail: PrewarmRail | None = None
         self._tool_cards = None
         self._evolution_watcher_tasks: set[asyncio.Task] = set()
         self._sys_operation = None
@@ -3014,6 +3016,28 @@ class JiuWenSwarmDeepAdapter:
             logger.warning("[JiuWenSwarmDeepAdapter] SkillRetrievalPromptRail create failed: %s", exc)
             return None
 
+    def _build_prewarm_rail(self) -> PrewarmRail | None:
+        """Build the KV-cache prewarm rail.
+
+        Disabled unless JIUWENSWARM_PREWARM_ENABLED=true. The rail is a
+        no-op for non-InferenceAffinity (non-vLLM) clients — the
+        coordinator checks ``__client_name__`` at fire time.
+        """
+        config = PrewarmConfig.from_env()
+        if not config.enabled:
+            return None
+        try:
+            coordinator = PrewarmCoordinator(config)
+            rail = PrewarmRail(coordinator)
+            logger.info(
+                "[JiuWenSwarmDeepAdapter] PrewarmRail built: scenario_a=%s scenario_bc=%s timeout=%s",
+                config.scenario_a, config.scenario_bc, config.timeout,
+            )
+            return rail
+        except Exception as exc:
+            logger.warning("[JiuWenSwarmDeepAdapter] PrewarmRail create failed: %s", exc)
+            return None
+
     def _build_agent_rails(
         self, config: dict[str, Any], config_base: dict[str, Any], *, mode: str = "agent.plan"
     ) -> list[Any]:
@@ -3058,6 +3082,7 @@ class JiuWenSwarmDeepAdapter:
                 _build_context_processor_rail,
                 {"config": self._config_cache},
             ),
+            _RailBuildInfo("_prewarm_rail", self._build_prewarm_rail),
         ]
 
         # SkillEvolutionRail 不在冷启动时挂载，由 _update_rails_for_mode 按 mode 按需注册/注销
@@ -3280,6 +3305,8 @@ class JiuWenSwarmDeepAdapter:
             rails_list.append(self._avatar_rail)
         if self._permission_rail is not None:
             rails_list.append(self._permission_rail)
+        if self._prewarm_rail is not None:
+            rails_list.append(self._prewarm_rail)
         return rails_list
 
     async def _get_tool_cards(self, agent_id: str):
