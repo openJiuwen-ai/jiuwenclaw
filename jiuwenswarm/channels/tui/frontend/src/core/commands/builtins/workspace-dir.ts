@@ -1,5 +1,77 @@
+import { readdirSync, statSync } from "node:fs";
+import { homedir } from "node:os";
+import { basename, dirname, isAbsolute, join, resolve } from "node:path";
+
 import { addError, addInfo } from "../helpers.js";
 import { CommandKind, type CommandContext, type SlashCommand } from "../types.js";
+
+/**
+ * Suggest directory paths matching the partial input for tab-completion.
+ * Used by /workspace add|set|remove subcommands.
+ *
+ * Handles: absolute paths (/Users/...), home-relative (~/...), cwd-relative (./..., ../...),
+ * and bare names. Returns only directories (not files).
+ */
+function completeDirPath(partial: string): string[] {
+  const trimmed = partial.trim();
+
+  // Expand ~ to home directory
+  let input = trimmed;
+  if (input === "~") {
+    input = homedir();
+  } else if (input.startsWith("~/")) {
+    input = join(homedir(), input.slice(2));
+  }
+
+  let searchDir: string;
+  let prefixFilter: string;
+
+  if (!input) {
+    // Empty input → suggest cwd subdirectories (absolute paths)
+    searchDir = process.cwd();
+    prefixFilter = "";
+  } else if (input.endsWith("/")) {
+    // Ends with / → list contents of that directory
+    searchDir = isAbsolute(input) ? input : resolve(process.cwd(), input);
+    prefixFilter = "";
+  } else {
+    // Partial path → search parent dir, filter by basename
+    const d = dirname(input);
+    searchDir = isAbsolute(input) ? d : resolve(process.cwd(), d);
+    prefixFilter = basename(input);
+  }
+
+  let entries;
+  try {
+    entries = readdirSync(searchDir, { withFileTypes: true });
+  } catch {
+    return [];
+  }
+
+  const results: string[] = [];
+  for (const entry of entries) {
+    // Skip hidden files/directories by default
+    if (entry.name.startsWith(".")) continue;
+    if (!entry.name.toLowerCase().startsWith(prefixFilter.toLowerCase())) continue;
+
+    let isDir = entry.isDirectory();
+    if (!isDir && entry.isSymbolicLink()) {
+      try {
+        isDir = statSync(join(searchDir, entry.name)).isDirectory();
+      } catch {
+        continue;
+      }
+    }
+    if (!isDir) continue;
+
+    const fullPath = join(searchDir, entry.name);
+    // Return absolute paths with trailing / so the user can continue tab-completing
+    results.push(fullPath + "/");
+  }
+
+  results.sort((a, b) => a.toLowerCase().localeCompare(b.toLowerCase()));
+  return results;
+}
 
 function showAllTrustedPaths(ctx: CommandContext): void {
   const trustedDirs = ctx.getTrustedDirs();
@@ -67,6 +139,7 @@ export function createWorkspaceCommand(): SlashCommand {
         usage: "/workspace add [path]",
         kind: CommandKind.BUILT_IN,
         takesArgs: true,
+        completion: async (_ctx, partial) => completeDirPath(partial),
         action: async (ctx, args) => {
           const directoryPath = args.trim();
           // Default to cwd if no path specified
@@ -111,6 +184,7 @@ export function createWorkspaceCommand(): SlashCommand {
         usage: "/workspace set <path>",
         kind: CommandKind.BUILT_IN,
         takesArgs: true,
+        completion: async (_ctx, partial) => completeDirPath(partial),
         action: async (ctx, args) => {
           const rawPath = args.trim();
           if (!rawPath) {
@@ -167,6 +241,7 @@ export function createWorkspaceCommand(): SlashCommand {
         usage: "/workspace remove <path>",
         kind: CommandKind.BUILT_IN,
         takesArgs: true,
+        completion: async (_ctx, partial) => completeDirPath(partial),
         action: async (ctx, args) => {
           const directoryPath = args.trim();
           if (!directoryPath) {

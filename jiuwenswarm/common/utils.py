@@ -314,7 +314,7 @@ def _load_logging_config_from_yaml() -> dict[str, Any]:
         if isinstance(raw, dict):
             return raw
     except Exception as e:
-        logger.error(f"load logging config failed, caused by={e}")
+        logger.warning("load logging config failed, caused by=%s", e)
     return {}
 
 
@@ -547,6 +547,130 @@ def _get_builtin_skill_names() -> set[str]:
     if not builtin_skills_dir.exists():
         return set()
     return {item.name for item in builtin_skills_dir.iterdir() if item.is_dir()}
+
+
+def _update_skills_state_for_builtin(
+    user_skills_dir: Path,
+    skill_names: list[str],
+) -> None:
+    """更新 skills_state.json，记录默认安装的内置技能.
+
+    Args:
+        user_skills_dir: 用户技能目录路径
+        skill_names: 已安装的技能名称列表
+    """
+    state_file = user_skills_dir / "skills_state.json"
+
+    # 加载现有状态
+    if state_file.exists():
+        try:
+            state = json.loads(state_file.read_text(encoding="utf-8"))
+        except Exception as e:
+            logger.warning(f"读取技能状态文件失败，将创建新文件: {e}")
+            state = {"marketplaces": [], "installed_plugins": [], "local_skills": []}
+    else:
+        state = {"marketplaces": [], "installed_plugins": [], "local_skills": []}
+
+    # 确保必要的字段存在
+    if "installed_plugins" not in state:
+        state["installed_plugins"] = []
+    if not isinstance(state["installed_plugins"], list):
+        state["installed_plugins"] = []
+
+    # 获取已记录的技能名称
+    existing_names = {
+        item.get("name") for item in state["installed_plugins"]
+        if isinstance(item, dict) and item.get("name")
+    }
+
+    # 添加新安装的技能记录
+    installed_at = datetime.datetime.now(tz=datetime.timezone.utc).isoformat()
+    for skill_name in skill_names:
+        if skill_name not in existing_names:
+            state["installed_plugins"].append({
+                "name": skill_name,
+                "marketplace": "builtin",
+                "version": "",
+                "commit": "",
+                "source": "builtin",
+                "installed_at": installed_at,
+            })
+            logger.info(f"已将默认技能记录到状态文件: {skill_name}")
+
+    # 保存状态文件
+    try:
+        state_file.parent.mkdir(parents=True, exist_ok=True)
+        state_file.write_text(
+            json.dumps(state, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        logger.info(f"技能状态文件已更新: {state_file}")
+    except Exception as e:
+        logger.error(f"保存技能状态文件失败: {e}")
+
+
+def _install_default_builtin_skills(
+    builtin_dir: Path,
+    user_skills_dir: Path,
+    overwrite: bool,
+    cumulative_diff: CopyDiffResult,
+) -> None:
+    """安装默认的内置技能到用户技能目录.
+
+    默认安装的技能：
+    - skill-creator: 技能创建助手
+    - swarmskill-creator: Swarm技能创建助手
+
+    Args:
+        builtin_dir: 内置技能目录路径
+        user_skills_dir: 用户技能目录路径
+        overwrite: 是否覆盖已存在的技能
+        cumulative_diff: 累积的文件变更追踪结果
+    """
+    # 定义默认安装的技能列表
+    default_skills = ["skill-creator", "swarmskill-creator"]
+
+    if not builtin_dir.exists() or not builtin_dir.is_dir():
+        logger.warning(f"内置技能目录不存在，跳过默认技能安装: {builtin_dir}")
+        return
+
+    user_skills_dir.mkdir(parents=True, exist_ok=True)
+
+    # 记录成功安装的技能，用于后续更新状态文件
+    installed_skills = []
+
+    for skill_name in default_skills:
+        builtin_skill_path = builtin_dir / skill_name
+        user_skill_path = user_skills_dir / skill_name
+
+        # 检查内置技能是否存在
+        if not builtin_skill_path.exists() or not builtin_skill_path.is_dir():
+            logger.warning(f"内置技能不存在，跳过安装: {skill_name}")
+            continue
+
+        # 如果用户目录已存在该技能且不是覆盖模式，则跳过
+        if user_skill_path.exists() and not overwrite:
+            logger.info(f"技能已存在，跳过安装: {skill_name}")
+            continue
+
+        # 复制技能到用户目录
+        try:
+            with TrackCopyDiff(
+                dest=user_skill_path,
+                cumulative=cumulative_diff,
+                overwrite=overwrite,
+            ):
+                if user_skill_path.exists() and overwrite:
+                    shutil.rmtree(user_skill_path)
+                shutil.copytree(builtin_skill_path, user_skill_path)
+            logger.info(f"已安装默认技能: {skill_name}")
+            installed_skills.append(skill_name)
+        except Exception as e:
+            logger.error(f"安装默认技能失败 {skill_name}: {e}")
+
+    # 更新 skills_state.json，记录已安装的技能
+    if installed_skills:
+        _update_skills_state_for_builtin(user_skills_dir, installed_skills)
 
 
 def _migrate_from_jiuwenclaw_root() -> bool:
@@ -805,7 +929,7 @@ def cleanup_team_files(workspace_dir: Path) -> None:
     - Old: {workspace_dir}/agent/team.db-shm (旧版本 team SHM 文件)
 
     Args:
-        workspace_dir: JiuWenClaw 用户工作空间根目录 (~/.jiuwenswarm)
+        workspace_dir: JiuWenSwarm 用户工作空间根目录 (~/.jiuwenswarm)
     """
     agent_dir = workspace_dir / "agent"
 
@@ -1087,6 +1211,14 @@ def prepare_workspace(
     migrate_config_from_template(config_yaml_src, config_yaml_dest)
     set_preferred_language_in_config_file(config_yaml_dest, resolved_lang)
 
+    # ----- 默认安装内置技能: skill-creator 和 swarmskill-creator -----
+    _install_default_builtin_skills(
+        builtin_dir=get_builtin_skills_dir(),
+        user_skills_dir=agent_skills,
+        overwrite=overwrite,
+        cumulative_diff=cumulative_diff,
+    )
+
     return cumulative_diff
 
 
@@ -1154,7 +1286,7 @@ def init_user_workspace(
     - ~/.jiuwenswarm/agent/...
 
     注意：PRINCIPLE.md、TONE.md、HEARTBEAT.md 已被 SOUL.md 和新的心跳机制替代，
-    不再由 JiuwenClaw 复制到用户工作区。
+    不再由 JiuwenSwarm 复制到用户工作区。
 
     交互式 init 会先询问语言；首次启动 app 时非交互 prepare_workspace 则沿用模板 config 中的语言。
 
@@ -1430,6 +1562,45 @@ def get_builtin_skills_dir() -> Path:
 
 def get_agent_sessions_dir() -> Path:
     return get_agent_root_dir() / "sessions"
+
+
+# 当前 git 分支解析（带短 TTL 缓存），用于 /resume 按分支过滤会话。
+# 对齐 Claude Code：非 git 目录 / detached HEAD / 任何失败一律返回 "HEAD" 哨兵值。
+_GIT_BRANCH_CACHE: dict[str, tuple[float, str]] = {}
+_GIT_BRANCH_TTL_SECONDS = 5.0
+
+
+def resolve_git_branch(project_dir: str | None) -> str:
+    """返回 ``project_dir`` 当前 git 分支，取不到时返回哨兵 ``"HEAD"``。
+
+    结果按 ``project_dir`` 缓存数秒，避免在 session.list / 每次聊天请求时
+    频繁 spawn git 进程。
+    """
+    if not project_dir or not os.path.isdir(project_dir):
+        return "HEAD"
+    now = time.time()
+    cached = _GIT_BRANCH_CACHE.get(project_dir)
+    if cached and now - cached[0] < _GIT_BRANCH_TTL_SECONDS:
+        return cached[1]
+    branch = "HEAD"
+    git_bin = shutil.which("git")
+    if git_bin:
+        try:
+            import subprocess
+
+            result = subprocess.run(
+                [git_bin, "rev-parse", "--abbrev-ref", "HEAD"],
+                capture_output=True,
+                text=True,
+                timeout=5,
+                cwd=project_dir,
+            )
+            if result.returncode == 0:
+                branch = result.stdout.strip() or "HEAD"
+        except Exception:
+            branch = "HEAD"
+    _GIT_BRANCH_CACHE[project_dir] = (now, branch)
+    return branch
 
 
 _legacy_migration_done: bool = False
@@ -1726,5 +1897,5 @@ def wait_for_pid_exit(pid: int, timeout: float = 60.0) -> None:
     logger.warning("process %d did not exit within %.1f seconds", pid, timeout)
 
 
-setup_logger()
 logger = logging.getLogger(__name__)
+setup_logger()

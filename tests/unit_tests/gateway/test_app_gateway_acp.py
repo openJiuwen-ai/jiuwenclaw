@@ -1528,3 +1528,108 @@ async def test_gateway_server_send_event_routes_same_session_id_by_channel():
             },
         }
     ]
+
+
+@pytest.mark.asyncio
+async def test_gateway_server_routes_event_by_payload_session_id_only():
+    """Fallback routes by payload session_id when msg.session_id is unset."""
+    server = build_server()
+    ws_a = FakeWebSocket()
+    ws_b = FakeWebSocket()
+    server.bind_session_client("sess-a", ws_a, channel_id="tui")
+    server.bind_session_client("sess-b", ws_b, channel_id="tui")
+
+    await server.send(
+        Message(
+            id="req-a",
+            type="event",
+            channel_id="tui",
+            session_id=None,
+            params={},
+            timestamp=time.time(),
+            ok=True,
+            payload={"content": "for a", "session_id": "sess-a"},
+            event_type=EventType.CHAT_DELTA,
+        )
+    )
+
+    assert len(ws_a.sent_frames) == 1
+    assert ws_b.sent_frames == []
+
+
+@pytest.mark.asyncio
+async def test_gateway_server_session_less_event_broadcasts_to_all_tui_clients():
+    """Session-less channel notifications (e.g. cron) broadcast to all TUI clients."""
+    server = build_server()
+    ws_a = FakeWebSocket()
+    ws_b = FakeWebSocket()
+    server.bind_session_client("sess-a", ws_a, channel_id="tui")
+    server.bind_session_client("sess-b", ws_b, channel_id="tui")
+
+    await server.send(
+        Message(
+            id="cron-push-1",
+            type="event",
+            channel_id="tui",
+            session_id=None,
+            params={},
+            timestamp=time.time(),
+            ok=True,
+            payload={"content": "cron reminder", "cron": {"job_id": "j1"}},
+            event_type=EventType.CHAT_FINAL,
+        )
+    )
+
+    assert len(ws_a.sent_frames) == 1
+    assert len(ws_b.sent_frames) == 1
+    assert ws_a.sent_frames[0]["payload"]["content"] == "cron reminder"
+    assert ws_b.sent_frames[0]["payload"]["content"] == "cron reminder"
+
+
+@pytest.mark.asyncio
+async def test_gateway_server_drops_event_when_session_client_gone():
+    """Known session_id with no connected client is dropped, not broadcast."""
+    server = build_server()
+    ws_b = FakeWebSocket()
+    server.bind_session_client("sess-b", ws_b, channel_id="tui")
+
+    await server.send(
+        Message(
+            id="req-gone",
+            type="event",
+            channel_id="tui",
+            session_id="sess-gone",
+            params={},
+            timestamp=time.time(),
+            ok=True,
+            payload={"content": "stale"},
+            event_type=EventType.CHAT_DELTA,
+        )
+    )
+
+    assert ws_b.sent_frames == []
+
+
+@pytest.mark.asyncio
+async def test_gateway_server_routes_by_params_session_id_when_payload_empty():
+    """params.session_id is checked even when payload is an empty dict."""
+    server = build_server()
+    ws = FakeWebSocket()
+    server.bind_session_client("sess-params", ws, channel_id="tui")
+
+    await server.send(
+        Message(
+            id="req-params",
+            type="event",
+            channel_id="tui",
+            session_id=None,
+            params={"session_id": "sess-params"},
+            timestamp=time.time(),
+            ok=True,
+            payload={},
+            event_type=EventType.CHAT_DELTA,
+        )
+    )
+
+    assert len(ws.sent_frames) == 1
+    assert ws.sent_frames[0]["payload"].get("session_id") is None

@@ -14,6 +14,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from jiuwenswarm.server.runtime.session.session_history import (
+    _read_history,
+    _read_history_jsonl,
+)
+
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
@@ -160,10 +165,7 @@ class Sweeper:
         if succeeded_ids:
             sessions_root = Path(self._sessions_dir)
             for sid in succeeded_ids:
-                try:
-                    history_mtime = (sessions_root / sid / "history.json").stat().st_mtime
-                except OSError:
-                    history_mtime = 0.0
+                history_mtime = self._get_session_history_mtime(sid) or 0.0
                 events = self._parse_history(sessions_root / sid)
                 rounds = self._detect_rounds(events)
                 self.scanned_sessions[sid] = {
@@ -209,10 +211,8 @@ class Sweeper:
         new_ids = brand_new.copy()
 
         for sid in all_ids & scanned_ids:
-            history_path = sessions_root / sid / "history.json"
-            try:
-                current_mtime = history_path.stat().st_mtime
-            except OSError:
+            current_mtime = self._get_session_history_mtime(sid)
+            if current_mtime is None:
                 continue
             snapshot = self.scanned_sessions.get(sid, {})
             if current_mtime <= snapshot.get("history_mtime", 0):
@@ -297,16 +297,30 @@ class Sweeper:
             return False
         return session_mode.startswith(self._mode)
 
+    def _get_session_history_mtime(self, session_id: str) -> float | None:
+        session_dir = Path(self._sessions_dir) / session_id
+        history_jsonl = session_dir / "history.jsonl"
+        history_json = session_dir / "history.json"
+        history_path = history_jsonl if history_jsonl.exists() else history_json
+        if not history_path.exists():
+            return None
+        try:
+            return history_path.stat().st_mtime
+        except OSError:
+            return None
+
     @staticmethod
     def _parse_history(session_dir: Path) -> list[dict]:
-        path = session_dir / "history.json"
-        if not path.exists():
-            return []
+        history_jsonl = session_dir / "history.jsonl"
+        history_json = session_dir / "history.json"
         try:
-            data = json.loads(path.read_text(encoding="utf-8", errors="replace"))
+            if history_jsonl.exists():
+                data = _read_history_jsonl(history_jsonl)
+            else:
+                data = _read_history(history_json)
             if not isinstance(data, list):
                 return []
-        except (OSError, json.JSONDecodeError):
+        except Exception:
             return []
 
         def _should_keep(entry: dict) -> bool:

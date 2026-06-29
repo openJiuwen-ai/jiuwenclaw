@@ -105,4 +105,11 @@ TEMPLATE NOTES (delete before publishing):
 
 6. Per-role `purpose:` field has a ≤150-char HARD CAP (validator enforces).
    Detail goes in roles/<id>.md, not here.
+
+7. If generating a SwarmFlow-backed full spec, add this row to `## Files`:
+   `| [scripts/workflow.py](scripts/workflow.py) | Executable workflow script | When running in SwarmFlow mode |`
+   For script-only SwarmFlow mode, use a minimal `SKILL.md` containing only
+   frontmatter plus `## Workflow` and `## Files`; omit `roles/`, `workflow.md`,
+   `bind.md`, and `dependencies.yaml` intentionally, and do not declare non-empty
+   `roles:` in frontmatter. All prompts live inside `scripts/workflow.py`.
 -->

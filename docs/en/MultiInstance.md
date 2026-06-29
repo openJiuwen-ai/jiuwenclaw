@@ -8,6 +8,8 @@ Run multiple independent JiuwenSwarm instances on the same machine, each with is
 - **Multi-tenant environment**: Create independent Agent instances for different users or projects
 - **Parallel modes**: Run Agents with different configurations (models, permission policies) concurrently
 
+> **Not the same as multi-window TUI**: This page covers **separate backend instances** (different workspaces and ports). To open several TUI terminals against one Gateway, see [TUI Usage Guide (zh) — Multi-window TUI](../zh/TUI使用指南.md#多窗口-tui); you do not need extra instances for that.
+
 ---
 
 ## Core Concepts

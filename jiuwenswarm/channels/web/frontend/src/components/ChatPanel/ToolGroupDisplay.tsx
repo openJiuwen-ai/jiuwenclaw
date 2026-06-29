@@ -10,11 +10,14 @@ import clsx from 'clsx';
 import { ToolExecution } from '../../types';
 import { formatToolArguments, formatToolResult } from '../../utils';
 import { TeamMemberAvatar } from '../TeamMemberAvatar';
+import { SkillTreePath } from './SkillTreePath';
 
 interface ToolGroupDisplayProps {
   executions: ToolExecution[];
   showAvatar?: boolean;
   teamLayout?: boolean;
+  collapseSkillTreeWhenContentStarts?: boolean;
+  viewedSkillIds?: string[];
 }
 
 interface ToolDetailModalProps {
@@ -81,6 +84,67 @@ function getExecutionLabel(execution: ToolExecution, sessionCompletedLabel: stri
   }
 
   return execution.toolCall.name;
+}
+
+function isSkillToolName(name: string): boolean {
+  const normalized = name.trim().toLowerCase();
+  const compact = normalized.replace(/[\s-]+/g, '_');
+  return (
+    compact === 'skill_tool' ||
+    compact.endsWith('.skill_tool') ||
+    compact.endsWith('/skill_tool') ||
+    compact.endsWith(':skill_tool')
+  );
+}
+
+function addViewedSkillName(out: Set<string>, value: unknown) {
+  if (typeof value !== 'string') {
+    return;
+  }
+  const skillName = value.trim();
+  if (skillName) {
+    out.add(skillName);
+  }
+}
+
+function addViewedSkillNameFromArgs(out: Set<string>, args: Record<string, unknown> | null | undefined) {
+  if (!args) {
+    return;
+  }
+  addViewedSkillName(out, args.skill_name);
+  addViewedSkillName(out, args.skillName);
+}
+
+function addViewedSkillNameFromText(out: Set<string>, value: string | undefined) {
+  const text = String(value || '').trim();
+  if (!text) {
+    return;
+  }
+
+  try {
+    const parsed = JSON.parse(text);
+    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+      addViewedSkillNameFromArgs(out, parsed as Record<string, unknown>);
+      return;
+    }
+  } catch {
+    // formatted_args is often a display string, not JSON.
+  }
+
+  const match = text.match(/["']?skill[_-]?name["']?\s*[:=]\s*["']?([^"',}\]\s]+)/i);
+  addViewedSkillName(out, match?.[1]);
+}
+
+export function collectViewedSkillIds(executions: ToolExecution[]): string[] {
+  const out = new Set<string>();
+  executions.forEach((execution) => {
+    if (!isSkillToolName(execution.toolCall.name)) {
+      return;
+    }
+    addViewedSkillNameFromArgs(out, execution.toolCall.arguments);
+    addViewedSkillNameFromText(out, execution.toolCall.formatted_args);
+  });
+  return Array.from(out);
 }
 
 function ToolDetailModal({ execution, onClose }: ToolDetailModalProps) {
@@ -217,22 +281,30 @@ function ToolDetailModal({ execution, onClose }: ToolDetailModalProps) {
                   )}
                 </span>
               </div>
-              <pre
-                className="p-4 rounded-lg overflow-auto whitespace-pre-wrap break-all"
-                style={{
-                  fontFamily: 'var(--mono)',
-                  fontSize: 'var(--font-size-sm)',
-                  lineHeight: '1.5',
-                  backgroundColor: 'var(--bg-elevated)',
-                  border: '1px solid var(--border)',
-                  color: resultSuccess
-                    ? 'var(--text)'
-                    : 'var(--danger)',
-                  wordBreak: 'break-word',
-                }}
-              >
-                {formatToolResult(result.result)}
-              </pre>
+              {result.skillTree && (
+                <SkillTreePath tree={result.skillTree} stepIntervalMs={0} />
+              )}
+              {(!result.skillTree || result.result) && (
+                <pre
+                  className={clsx(
+                    'p-4 rounded-lg overflow-auto whitespace-pre-wrap break-all',
+                    result.skillTree && 'mt-4'
+                  )}
+                  style={{
+                    fontFamily: 'var(--mono)',
+                    fontSize: 'var(--font-size-sm)',
+                    lineHeight: '1.5',
+                    backgroundColor: 'var(--bg-elevated)',
+                    border: '1px solid var(--border)',
+                    color: resultSuccess
+                      ? 'var(--text)'
+                      : 'var(--danger)',
+                    wordBreak: 'break-word',
+                  }}
+                >
+                  {formatToolResult(result.result)}
+                </pre>
+              )}
             </div>
           )}
 
@@ -309,6 +381,8 @@ export function ToolGroupDisplay({
   executions,
   showAvatar = true,
   teamLayout = false,
+  collapseSkillTreeWhenContentStarts = false,
+  viewedSkillIds: turnViewedSkillIds = [],
 }: ToolGroupDisplayProps) {
   const { t } = useTranslation();
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -358,6 +432,16 @@ export function ToolGroupDisplay({
   }, [scrollInner]);
 
   const headerLabel = t('chatUi.toolGroup.executed', { totalPairs });
+  const skillTreeExecutions = visibleExecutions.filter(
+    (execution) => execution.result?.skillTree
+  );
+  const skillTrees = skillTreeExecutions
+    .map((execution) => execution.result?.skillTree)
+    .filter((tree): tree is NonNullable<typeof tree> => Boolean(tree));
+  const viewedSkillIds = Array.from(new Set([
+    ...turnViewedSkillIds,
+    ...collectViewedSkillIds(executions),
+  ]));
   if (visibleExecutions.length === 0) {
     return null;
   }
@@ -411,6 +495,14 @@ export function ToolGroupDisplay({
             </>
           )}
         </div>
+
+        {skillTrees.length > 0 && (
+          <SkillTreePath
+            trees={skillTrees}
+            viewedSkillIds={viewedSkillIds}
+            autoCollapse={collapseSkillTreeWhenContentStarts}
+          />
+        )}
       </div>
     </div>
   );

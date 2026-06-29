@@ -29,7 +29,7 @@
   background: #f5f7f9;
   color: var(--text);
   padding: 26px 18px 28px;
-  font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-family: var(--font-body);
 }
 
 .share-image-document *,
@@ -196,6 +196,16 @@
 .share-image-document .chat-bubble + div button,
 .share-image-document .chat-bubble + div svg {
   display: none;
+}
+
+/* Keep the full Mermaid diagram visible in share image */
+.share-image-document .mermaid-canvas {
+  overflow: visible !important;
+}
+
+/* Prevent Mermaid from squeezing wide diagrams in share images. */
+.share-image-document .mermaid-canvas svg {
+  max-width: none !important;
 }
 
 .share-image-document .chat-bubble,

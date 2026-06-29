@@ -10,7 +10,6 @@ introspection, and the unification of class rails with factory rails.
 
 from __future__ import annotations
 
-import inspect
 import json
 import logging
 
@@ -22,6 +21,8 @@ from openjiuwen.agent_teams.schema.deep_agent_spec import RailSpec
 
 from jiuwenswarm.agents.swarm import register_swarm_providers, registry
 from jiuwenswarm.agents.swarm.context import SwarmBuildContext
+from jiuwenswarm.agents.harness.common.prompt.prompt_builder import LocalSectionName
+from jiuwenswarm.server.runtime.a2ui.config import A2UIConfig
 from openjiuwen.agent_teams.harness.manifest import (
     ElementKind,
     HarnessElementDescriptor,
@@ -61,6 +62,18 @@ def _swarm_catalog() -> dict[str, HarnessElementDescriptor]:
         for name, descriptor in get_catalog().items()
         if name.startswith("swarm.")
     }
+
+
+class _FakePromptBuilder:
+    def __init__(self) -> None:
+        self.language = "cn"
+        self.sections = {}
+
+    def add_section(self, section) -> None:
+        self.sections[section.name] = section
+
+    def remove_section(self, name: str) -> None:
+        self.sections.pop(name, None)
 
 
 def test_every_registry_name_has_descriptor() -> None:
@@ -210,17 +223,23 @@ def test_config_specs_bakes_attribute_params() -> None:
         "permissions": {"enabled": True},
         "models": {"default": {"model_client_config": {"model_name": "gpt-4o"}}},
     }
-    rails, _ = build_member_capability_specs(config, "code.team", "leader")
+    # PERMISSION_INTERRUPT is excluded from code-profile rails;
+    # when enable_permissions=True the leader gets TEAM_PERMISSION_POLICY instead.
+    rails_no_perm, _ = build_member_capability_specs(config, "code.team", "leader")
+    by_type_no_perm = {spec.type: spec.params for spec in rails_no_perm}
+    assert registry.PERMISSION_INTERRUPT not in by_type_no_perm
+
+    rails, _ = build_member_capability_specs(config, "code.team", "leader", enable_permissions=True)
     by_type = {spec.type: spec.params for spec in rails}
 
     assert (
         by_type[registry.CODE_SKILL_USE]["skill_mode"]
         == SkillUseRail.SKILL_MODE_AUTO_LIST
     )
-    assert by_type[registry.PERMISSION_INTERRUPT]["permissions_config"] == {
+    assert registry.PERMISSION_INTERRUPT not in by_type
+    assert by_type[registry.TEAM_PERMISSION_POLICY]["permissions_config"] == {
         "enabled": True
     }
-    assert by_type[registry.PERMISSION_INTERRUPT]["model_name"] == "gpt-4o"
     assert (
         by_type[registry.TEAM_SKILL_EVOLUTION]["evolution_model_config"]["model_name"]
         == "gpt-4o"
@@ -296,8 +315,13 @@ def test_catalog_covers_all_kinds_without_swarm_rail_types() -> None:
     assert swarm_rails <= _swarm_keys(das._RAIL_PROVIDER_REGISTRY)
 
 
-def test_class_rail_builds_via_railspec() -> None:
-    """A unified class rail resolves and builds through openjiuwen RailSpec.build."""
+@pytest.mark.asyncio
+async def test_response_prompt_rail_builds_via_railspec_with_channel(monkeypatch) -> None:
+    """The response rail provider should carry context channel into A2UI gating."""
+    monkeypatch.setattr(
+        "jiuwenswarm.server.runtime.a2ui.config.get_current_a2ui_config",
+        lambda: A2UIConfig(enabled=True),
+    )
     register_swarm_providers()
     ctx = SwarmBuildContext(language="cn", channel="web")
 
@@ -305,6 +329,9 @@ def test_class_rail_builds_via_railspec() -> None:
 
     assert rail is not None
     assert type(rail).__name__ == "ResponsePromptRail"
-    assert inspect.isclass(
-        resolve_factory(get_catalog()[registry.RESPONSE_PROMPT].factory_ref)
-    )
+    builder = _FakePromptBuilder()
+    rail.init(type("Agent", (), {"system_prompt_builder": builder})())
+
+    await rail.before_model_call(type("Ctx", (), {"inputs": type("Inputs", (), {})()})())
+
+    assert LocalSectionName.A2UI in builder.sections

@@ -231,8 +231,13 @@ export function HeartbeatPanel() {
       }
       setSuccess(t('heartbeat.saved'));
     } catch (saveError) {
-      const message = saveError instanceof Error ? saveError.message : t('heartbeat.errors.saveConfig');
-      setError(message);
+      const code = (saveError as { code?: string }).code;
+      if (code === 'feishuNoTarget') {
+        setError(t('heartbeat.errors.feishuNoTarget'));
+      } else {
+        const message = saveError instanceof Error ? saveError.message : t('heartbeat.errors.saveConfig');
+        setError(message);
+      }
     } finally {
       setSaving(false);
     }

@@ -1,6 +1,6 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 
-"""Launch JiuWenClaw frontend/backend services with one command.
+"""Launch JiuWenSwarm frontend/backend services with one command.
 
 Supports ``--dotenv <path>`` for multi-instance isolation.
 
@@ -15,6 +15,7 @@ Multi-instance management commands:
 from __future__ import annotations
 
 import argparse
+import logging
 import os
 import signal
 import subprocess
@@ -108,14 +109,15 @@ class InstanceCommand:
         # Validate instance name
         error = validate_instance_name(self.name)
         if error:
-            print(f"[start_services] ERROR: {error}")
+            logging.info(f"[start_services] ERROR: {error}")
             return 1
 
         # Load instance config from instances.yaml
         self.config = get_instance_config(self.name)
         if self.config is None:
-            print(f"[start_services] ERROR: Instance '{self.name}' not found in instances.yaml")
-            print(f"[start_services] Run 'jiuwenswarm-init --name {self.name}' to create it.")
+            logging.info(f"[start_services] ERROR: Instance '{self.name}' not found in instances.yaml")
+            logging.info(f"[start_services] Run 'jiuwenswarm-init --name {self.name}' to create it.")
+
             return 1
 
         # Get current status
@@ -131,8 +133,9 @@ class InstanceCommand:
         if self.config is None:
             return 1
         if not self.config.workspace.exists():
-            print(f"[start_services] ERROR: Workspace directory not found: {self.config.workspace}")
-            print(f"[start_services] Run 'jiuwenswarm-init --name {self.name}' to create it.")
+            logging.info(f"[start_services] ERROR: Workspace directory not found: {self.config.workspace}")
+            logging.info(f"[start_services] Run 'jiuwenswarm-init --name {self.name}' to create it.")
+
             return 1
         return None
 
@@ -155,18 +158,18 @@ class InstanceCommand:
         if self.config is None:
             return 1
 
-        print(f"[start_services] Checking ports for instance '{self.name}'...")
+        logging.info(f"[start_services] Checking ports for instance '{self.name}'...")
         conflicts = []
 
         for port_type, port in self.config.ports.items():
             if not is_port_available("127.0.0.1", port):
                 conflicts.append((port_type, port))
-                print(f"  ✗ {port_type}: {port} - already in use")
+                logging.info(f"  ✗ {port_type}: {port} - already in use")
             else:
-                print(f"  ✓ {port_type}: {port} - available")
+                logging.info(f"  ✓ {port_type}: {port} - available")
 
         if conflicts:
-            print("[start_services] ERROR: Port conflicts detected, cannot start instance.")
+            logging.info("[start_services] ERROR: Port conflicts detected, cannot start instance.")
             return 1
 
         return None
@@ -178,19 +181,20 @@ def print_instance_details(status: InstanceStatus) -> None:
     Args:
         status: InstanceStatus to display
     """
-    print(f"Instance:     {status.name}")
-    print(f"Status:       {'running' if status.running else 'stopped'}")
-    print(f"PID:          {status.pid or '-'}")
-    print(f"Workspace:    {status.workspace}")
-    print("Ports:")
+    logging.info(f"Instance:     {status.name}")
+    logging.info(f"Status:       {'running' if status.running else 'stopped'}")
+    logging.info(f"PID:          {status.pid or '-'}")
+    logging.info(f"Workspace:    {status.workspace}")
+    logging.info("Ports:")
+
     for port_type in PORT_TYPES:
         port = status.ports.get(port_type, 0)
-        print(f"  {port_type}: {port}")
+        logging.info(f"  {port_type}: {port}")
 
     if status.started_at:
         from datetime import datetime
         started_dt = datetime.fromtimestamp(status.started_at)
-        print(f"Started at:   {started_dt.isoformat()}")
+        logging.info(f"Started at:   {started_dt.isoformat()}")
 
 
 def do_stop_instance(cmd: InstanceCommand) -> int:
@@ -206,7 +210,7 @@ def do_stop_instance(cmd: InstanceCommand) -> int:
         return 1
 
     pid = cmd.status.pid
-    print(f"[start_services] Stopping instance '{cmd.name}' (PID={pid})...")
+    logging.info(f"[start_services] Stopping instance '{cmd.name}' (PID={pid})...")
 
     if cmd.is_default:
         success = stop_process_by_pid(pid, timeout=10.0)
@@ -214,10 +218,10 @@ def do_stop_instance(cmd: InstanceCommand) -> int:
         success = stop_instance_process(cmd.config, timeout=10.0)
 
     if success:
-        print(f"[start_services] Instance '{cmd.name}' stopped.")
+        logging.info(f"[start_services] Instance '{cmd.name}' stopped.")
         return 0
     else:
-        print(f"[start_services] Failed to stop instance '{cmd.name}'.")
+        logging.info(f"[start_services] Failed to stop instance '{cmd.name}'.")
         return 1
 
 
@@ -238,7 +242,7 @@ def _run_instance_with_pid(commands: list[tuple[str, list[str], Path]],
             processes[cmd_name] = _start_process(cmd_name, cmd_args, cwd)
 
         write_pid_file(config, os.getpid(), time.time())
-        print(f"[start_services] Instance '{config.name}' started")
+        logging.info(f"[start_services] Instance '{config.name}' started")
 
         _wait_for_services_ready(config.ports, processes)
 
@@ -246,12 +250,12 @@ def _run_instance_with_pid(commands: list[tuple[str, list[str], Path]],
             for cmd_name, proc in processes.items():
                 code = proc.poll()
                 if code is not None:
-                    print(f"[start_services] {cmd_name} exited with code {code}")
+                    logging.info(f"[start_services] {cmd_name} exited with code {code}")
                     return code
             time.sleep(0.5)
 
     except KeyboardInterrupt:
-        print("\n[start_services] Keyboard interrupt received, shutting down...")
+        logging.info("\n[start_services] Keyboard interrupt received, shutting down...")
         return 130
     finally:
         _terminate_processes(processes)
@@ -300,7 +304,7 @@ def _build_commands(mode: str, dotenv_path: Path | None = None) -> list[tuple[st
 def _start_process(name: str, cmd: list[str], cwd: Path) -> subprocess.Popen[bytes]:
     """Start a single subprocess."""
     import json
-    print(f"[start_services] starting {name}: {' '.join(cmd)} (cwd={cwd})")
+    logging.info(f"[start_services] starting {name}: {' '.join(cmd)} (cwd={cwd})")
     env = os.environ.copy()
     env["JIUWENSWARM_START_CMD"] = json.dumps(sys.argv[:])
     return subprocess.Popen(cmd, cwd=str(cwd), env=env)
@@ -310,7 +314,7 @@ def _terminate_processes(processes: dict[str, subprocess.Popen[bytes]]) -> None:
     """Terminate all running processes gracefully."""
     for name, proc in processes.items():
         if proc.poll() is None:
-            print(f"[start_services] terminating {name} (pid={proc.pid})")
+            logging.info(f"[start_services] terminating {name} (pid={proc.pid})")
             proc.terminate()
 
     deadline = time.time() + 8
@@ -321,7 +325,7 @@ def _terminate_processes(processes: dict[str, subprocess.Popen[bytes]]) -> None:
 
     for name, proc in processes.items():
         if proc.poll() is None:
-            print(f"[start_services] killing {name} (pid={proc.pid})")
+            logging.info(f"[start_services] killing {name} (pid={proc.pid})")
             proc.kill()
 
 
@@ -358,9 +362,9 @@ def _wait_for_services_ready(ports: dict[str, int], processes: dict[str, subproc
         path_suffix = "/ws" if port_key == "web" else ""
 
         if _check_port(port):
-            print(f"[start_services] ✓ {svc_name} ready at {url_prefix}127.0.0.1:{port}{path_suffix}")
+            logging.info(f"[start_services] ✓ {svc_name} ready at {url_prefix}127.0.0.1:{port}{path_suffix}")
         else:
-            print(f"[start_services] ⏳ {svc_name} starting... (port {port})")
+            logging.info(f"[start_services] ⏳ {svc_name} starting... (port {port})")
 
 
 def _run_processes(commands: list[tuple[str, list[str], Path]]) -> int:
@@ -381,11 +385,11 @@ def _run_processes(commands: list[tuple[str, list[str], Path]]) -> int:
             for name, proc in processes.items():
                 code = proc.poll()
                 if code is not None:
-                    print(f"[start_services] {name} exited with code {code}")
+                    logging.info(f"[start_services] {name} exited with code {code}")
                     return code
             time.sleep(0.5)
     except KeyboardInterrupt:
-        print("\n[start_services] keyboard interrupt received, shutting down...")
+        logging.info("\n[start_services] keyboard interrupt received, shutting down...")
         return 130
     finally:
         _terminate_processes(processes)
@@ -395,7 +399,7 @@ def _run(mode: str) -> int:
     """Run default instance (existing behavior)."""
     commands = _build_commands(mode)
     if not commands:
-        print(f"[start_services] no commands to run for mode: {mode}")
+        logging.info(f"[start_services] no commands to run for mode: {mode}")
         return 2
     return _run_processes(commands)
 
@@ -409,16 +413,17 @@ def _action_list() -> int:
     statuses = list_all_instances(include_default=True)
 
     if not statuses:
-        print("[start_services] No instances configured.")
-        print("[start_services] Run 'jiuwenswarm-init' to initialize default instance.")
+        logging.info("[start_services] No instances configured.")
+        logging.info("[start_services] Run 'jiuwenswarm-init' to initialize default instance.")
+
         return 0
 
     # Print table header
-    print("INSTANCE     STATUS     PID     WORKSPACE                               PORTS")
-    print("-" * 80)
+    logging.info("INSTANCE     STATUS     PID     WORKSPACE                               PORTS")
+    logging.info("-" * 80)
 
     for status in statuses:
-        print(format_status_line(status))
+        logging.info(format_status_line(status))
 
     return 0
 
@@ -459,7 +464,7 @@ def _action_stop(name: str) -> int:
     if running is None:
         return 1
     if not running:
-        print(f"[start_services] Instance '{name}' is not running.")
+        logging.info(f"[start_services] Instance '{name}' is not running.")
         return 0
 
     # Execute stop
@@ -476,7 +481,7 @@ def _action_restart(name: str, mode: str = "all") -> int:
     Returns:
         Exit code
     """
-    print(f"[start_services] Restarting instance '{name}'...")
+    logging.info(f"[start_services] Restarting instance '{name}'...")
 
     # Validate and load first (common check for both stop and start)
     cmd = InstanceCommand(name)
@@ -488,7 +493,7 @@ def _action_restart(name: str, mode: str = "all") -> int:
     if cmd.check_running():
         stop_result = do_stop_instance(cmd)
         if stop_result != 0:
-            print("[start_services] Restart aborted: stop failed.")
+            logging.info("[start_services] Restart aborted: stop failed.")
             return stop_result
         # Wait for process to fully exit
         time.sleep(1)
@@ -500,10 +505,10 @@ def _action_restart(name: str, mode: str = "all") -> int:
         start_result = _start_named_instance(name, mode)
 
     if start_result != 0:
-        print("[start_services] Restart failed: start failed.")
+        logging.info("[start_services] Restart failed: start failed.")
         return start_result
 
-    print(f"[start_services] Instance '{name}' restarted.")
+    logging.info(f"[start_services] Instance '{name}' restarted.")
     return 0
 
 
@@ -523,7 +528,7 @@ def _start_named_instance(name: str, mode: str) -> int:
     if cmd.check_workspace_exists():
         return 1
     if cmd.check_running():
-        print(f"[start_services] ERROR: Instance '{cmd.name}' is already running (PID={cmd.status.pid})")
+        logging.info(f"[start_services] ERROR: Instance '{cmd.name}' is already running (PID={cmd.status.pid})")
         return 1
     if cmd.check_ports_available():
         return 1
@@ -535,15 +540,15 @@ def _start_named_instance(name: str, mode: str) -> int:
     # Acquire startup lock to prevent concurrent starts
     lock = InstanceLock(config)
     if not lock.acquire(timeout=5.0):
-        print(f"[start_services] ERROR: Instance '{name}' startup in progress by another process")
-        print(f"[start_services] Wait a few seconds or check if another terminal is starting this instance.")
+        logging.info(f"[start_services] ERROR: Instance '{name}' startup in progress by another process")
+        logging.info(f"[start_services] Wait a few seconds or check if another terminal is starting this instance.")
         return 1
 
     try:
         dotenv_path = create_bootstrap_env(config)
         commands = _build_commands(mode, dotenv_path)
         if not commands:
-            print(f"[start_services] ERROR: No commands for mode: {mode}")
+            logging.info(f"[start_services] ERROR: No commands for mode: {mode}")
             return 2
 
         return _run_instance_with_pid(commands, config)
@@ -554,7 +559,7 @@ def _start_named_instance(name: str, mode: str) -> int:
 def _parse_args() -> argparse.Namespace:
     """Parse CLI arguments."""
     parser = argparse.ArgumentParser(
-        description="Launch JiuWenClaw services (frontend/backend).",
+        description="Launch JiuWenSwarm services (frontend/backend).",
     )
 
     # Basic start parameter: mode (optional, default all)
@@ -606,7 +611,7 @@ def _validate_args(args: argparse.Namespace) -> int | None:
 
     # Additional validation: --restart needs valid mode
     if args.restart and args.mode not in ("all", "app", "web"):
-        print(f"[start_services] ERROR: Invalid mode '{args.mode}' for --restart")
+        logging.info(f"[start_services] ERROR: Invalid mode '{args.mode}' for --restart")
         return 1
 
     return None

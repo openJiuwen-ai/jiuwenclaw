@@ -3,9 +3,13 @@ import { CommandKind, type SlashCommand } from "../types.js";
 
 export interface ModelMeta {
   name: string;
+  alias?: string;
   model_name?: string;
-  client_provider?: string;
+  model_provider?: string;
   api_base?: string;
+  api_key_prefix?: string;
+  is_current?: boolean;
+  reasoning_level?: string;
 }
 
 export interface ModelListPayload {
@@ -24,9 +28,9 @@ export function isReservedMultimodalModelKey(name: string): boolean {
 export function createModelCommand(): SlashCommand {
   return {
     name: "model",
-    description: "View, add, or switch AI models defined in config.yaml",
+    description: "View, add, edit, delete, or switch AI models defined in config.yaml",
     usage: "/model [name] | /model add <name> <key=value>...",
-    example: "/model work (switch)\n/model add work model=gpt-4 api_key=xxx",
+    example: "/model work (switch)\n/model add work model_name=gpt-4 api_key=xxx model_provider=OpenAI",
     kind: CommandKind.BUILT_IN,
     takesArgs: true,
     action: async (ctx, args) => {
@@ -51,7 +55,8 @@ export function createModelCommand(): SlashCommand {
         for (let i = 2; i < parts.length; i++) {
           const eqIdx = parts[i].indexOf("=");
           if (eqIdx > 0) {
-            const key = parts[i].substring(0, eqIdx);
+            const rawKey = parts[i].substring(0, eqIdx);
+            const key = rawKey === "model_provider" ? "provider" : rawKey;
             const val = parts[i].substring(eqIdx + 1);
             settings[key] = val;
           }
@@ -107,15 +112,17 @@ export function createModelCommand(): SlashCommand {
             return;
           }
           const modelsMeta = payload.models ?? [];
-          // 与web端一致：同名模型通过编号区分（如 model_name #1, model_name #2）
-          // 后端 available_models 和 models 位置对齐，用索引匹配而非名称查找
+          // 优先用后端 is_current 标记判断当前模型（同名模型仅靠名字无法区分），
+          // 回退到 name-matching（兼容不带 is_current 的旧后端）
+          const currentIdx = selectable.findIndex((m, i) => {
+            const meta = modelsMeta[i];
+            return meta?.is_current === true;
+          });
+          const fallbackCurrentIdx = currentIdx < 0 ? selectable.findIndex((m) => m === current) : currentIdx;
           const nameOccurrence: Record<string, number> = {};
-          // current 是defaults首位的display name，对应selectable中第一个未被reserved过滤的条目
-          // 当同名模型有多条时，只有名字等于current且是selectable中首次出现的条目才是current
-          const currentIdx = selectable.findIndex((m) => m === current);
           const items = selectable.map((m, i) => {
             const meta = modelsMeta[i];
-            const isCurrent = i === currentIdx;
+            const isCurrent = i === fallbackCurrentIdx;
             // 统计同名出现次序
             const seq = (nameOccurrence[m] ?? 0) + 1;
             nameOccurrence[m] = seq;
@@ -130,7 +137,15 @@ export function createModelCommand(): SlashCommand {
             } else {
               displayName = m;
             }
-            const suffix = meta?.api_base && sameNameTotal > 1 ? ` [${meta.api_base}]` : "";
+            // 同名模型显示 api_key_prefix + api_base 作为区分标识
+            const suffixParts: string[] = [];
+            if (sameNameTotal > 1 && meta?.api_key_prefix) {
+              suffixParts.push(`key:${meta.api_key_prefix}…`);
+            }
+            if (sameNameTotal > 1 && meta?.api_base) {
+              suffixParts.push(meta.api_base);
+            }
+            const suffix = suffixParts.length > 0 ? ` [${suffixParts.join(" | ")}]` : "";
             return {
               label: String(i + 1),
               value: `${displayName}${suffix}${isCurrent ? " (current)" : ""}`,

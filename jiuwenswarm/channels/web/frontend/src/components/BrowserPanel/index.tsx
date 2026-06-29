@@ -1,8 +1,10 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
+import { Switch } from '../Switch';
 
 interface BrowserPathPayload {
   chrome_path?: unknown;
+  headless?: unknown;
 }
 
 interface BrowserStartPayload {
@@ -20,6 +22,12 @@ function normalizeChromePath(payload: unknown): string {
   return typeof data.chrome_path === 'string' ? data.chrome_path : '';
 }
 
+function normalizeHeadless(payload: unknown): boolean {
+  if (!payload || typeof payload !== 'object') return true;
+  const data = payload as BrowserPathPayload;
+  return typeof data.headless === 'boolean' ? data.headless : true;
+}
+
 function normalizeReturnCode(payload: unknown): number | null {
   if (!payload || typeof payload !== 'object') return null;
   const data = payload as BrowserStartPayload;
@@ -31,6 +39,8 @@ export function BrowserPanel({ isConnected, request }: BrowserPanelProps) {
   const { t } = useTranslation();
   const [chromePath, setChromePath] = useState('');
   const [initialPath, setInitialPath] = useState('');
+  const [headless, setHeadless] = useState(true);
+  const [initialHeadless, setInitialHeadless] = useState(true);
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
   const [starting, setStarting] = useState(false);
@@ -38,7 +48,10 @@ export function BrowserPanel({ isConnected, request }: BrowserPanelProps) {
   const [success, setSuccess] = useState<string | null>(null);
   const [showPathError, setShowPathError] = useState(false);
 
-  const hasChanges = useMemo(() => chromePath !== initialPath, [chromePath, initialPath]);
+  const hasChanges = useMemo(
+    () => chromePath !== initialPath || headless !== initialHeadless,
+    [chromePath, initialPath, headless, initialHeadless]
+  );
   const isPathValid = useMemo(() => chromePath.trim().length > 0, [chromePath]);
   const canStart = useMemo(
     () => isConnected && !starting && !saving && !loading && isPathValid && !hasChanges,
@@ -56,8 +69,11 @@ export function BrowserPanel({ isConnected, request }: BrowserPanelProps) {
     try {
       const payload = await request<BrowserPathPayload>('path.get');
       const value = normalizeChromePath(payload);
+      const headlessValue = normalizeHeadless(payload);
       setChromePath(value);
       setInitialPath(value);
+      setHeadless(headlessValue);
+      setInitialHeadless(headlessValue);
     } catch (loadError) {
       const message = loadError instanceof Error ? loadError.message : t('browser.errors.loadPath');
       setError(message);
@@ -88,10 +104,13 @@ export function BrowserPanel({ isConnected, request }: BrowserPanelProps) {
     clearFeedback();
     try {
       const nextPath = chromePath.trim();
-      const payload = await request<BrowserPathPayload>('path.set', { chrome_path: nextPath });
+      const payload = await request<BrowserPathPayload>('path.set', { chrome_path: nextPath, headless });
       const savedPath = normalizeChromePath(payload) || nextPath;
+      const savedHeadless = normalizeHeadless(payload);
       setChromePath(savedPath);
       setInitialPath(savedPath);
+      setHeadless(savedHeadless);
+      setInitialHeadless(savedHeadless);
       setSuccess(t('browser.success.pathSaved'));
     } catch (saveError) {
       const message = saveError instanceof Error ? saveError.message : t('browser.errors.savePath');
@@ -191,12 +210,25 @@ export function BrowserPanel({ isConnected, request }: BrowserPanelProps) {
               <div className="text-xs text-danger">{t('browser.errors.pathRequired')}</div>
             ) : null}
 
+            <div className="flex items-center justify-between gap-4 py-1">
+              <div>
+                <span className="text-xs uppercase tracking-wide text-text-muted">{t('browser.showBrowser')}</span>
+                <p className="text-xs text-text-muted mt-0.5">{t('browser.showBrowserDesc')}</p>
+              </div>
+              <Switch
+                checked={!headless}
+                onChange={(val) => setHeadless(!val)}
+                disabled={loading || saving || starting}
+              />
+            </div>
+
             <div className="flex items-center gap-2">
               <button
                 type="button"
                 className="btn !px-3 !py-1.5 disabled:opacity-50 disabled:cursor-not-allowed"
                 onClick={() => {
                   setChromePath(initialPath);
+                  setHeadless(initialHeadless);
                   clearFeedback();
                 }}
                 disabled={!hasChanges || saving || starting}

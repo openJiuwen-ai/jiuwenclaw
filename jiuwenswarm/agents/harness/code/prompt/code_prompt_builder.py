@@ -2,8 +2,8 @@
 
 """Code mode prompt builder — English-only.
 
-Provides 7 static prompt sections aligned with Claude Code's getSystemPrompt()
-section structure. Each section is a PromptSection with English-only content.
+Provides 7 static prompt sections.
+Each section is a PromptSection with English-only content.
 
 Sections are injected once at agent creation time (build_code_system_prompt).
 Dynamic content (time, runtime state, memory) is injected per-request by Rails.
@@ -147,6 +147,11 @@ def _code_session_guidance_prompt() -> PromptSection:
         "across multiple locations and naming conventions.\n"
         "- plan_agent is for designing implementation approaches "
         "before writing code.\n"
+        "- For browser automation tasks (taking screenshots, navigating pages, "
+        "interacting with web UIs, or scraping dynamic content), "
+        "use task_tool with subagent_type=\"browser_agent\". "
+        "Do not write Playwright scripts or use bash/subprocess to launch a browser — "
+        "delegate to browser_agent instead.\n"
         "- Before writing code, thoroughly understand the APIs of "
         "frameworks and libraries you will use. "
         "Read framework source code (not just example files) "

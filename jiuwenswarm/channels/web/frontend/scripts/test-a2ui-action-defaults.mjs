@@ -6,9 +6,10 @@ import ts from 'typescript';
 
 const root = new URL('..', import.meta.url);
 const sourceUrl = new URL('src/features/a2ui/actionDefaults.ts', root);
+const helperUrl = new URL('src/features/a2ui/formDefaults.ts', root);
 const tempDir = await mkdtemp(join(tmpdir(), 'a2ui-action-defaults-'));
 
-async function importTsModule(url) {
+async function transpileTsModule(url, outputFileName) {
   const source = await readFile(url, 'utf8');
   const transpiled = ts.transpileModule(source, {
     compilerOptions: {
@@ -17,8 +18,17 @@ async function importTsModule(url) {
       importsNotUsedAsValues: ts.ImportsNotUsedAsValues.Remove,
     },
   });
-  const outputPath = join(tempDir, 'actionDefaults.mjs');
-  await writeFile(outputPath, transpiled.outputText, 'utf8');
+  const outputPath = join(tempDir, outputFileName);
+  const outputText = outputFileName === 'actionDefaults.mjs'
+    ? transpiled.outputText.replaceAll("from './formDefaults'", "from './formDefaults.mjs'")
+    : transpiled.outputText;
+  await writeFile(outputPath, outputText, 'utf8');
+  return outputPath;
+}
+
+async function importTsModule(url) {
+  await transpileTsModule(helperUrl, 'formDefaults.mjs');
+  const outputPath = await transpileTsModule(url, 'actionDefaults.mjs');
   return import(`file://${outputPath.replace(/\\/g, '/')}`);
 }
 
@@ -326,6 +336,130 @@ assert.deepEqual(
   }).userAction.context,
   { foodType: ['chinese'] },
   'defaults recorded in an earlier surface update should be available to later buttons',
+);
+
+clearA2UIActionDefaults();
+recordA2UIActionDefaults([
+  {
+    surfaceUpdate: {
+      surfaceId: 'surface-1',
+      components: [
+        {
+          id: 'multi-choice',
+          component: {
+            MultipleChoice: {
+              variant: 'checkbox',
+              selections: { path: '/foods' },
+              options: [
+                { label: { literalString: 'Chinese' }, value: 'chinese' },
+                { label: { literalString: 'Western' }, value: 'western' },
+              ],
+            },
+          },
+        },
+        {
+          id: 'submit',
+          component: {
+            Button: {
+              child: 'submit-label',
+              action: {
+                name: 'submit_form',
+                context: [{ key: 'foods', value: { path: '/foods' } }],
+              },
+            },
+          },
+        },
+      ],
+    },
+  },
+]);
+
+assert.deepEqual(
+  enrichA2UIClientEventWithDefaults({
+    userAction: {
+      name: 'submit_form',
+      sourceComponentId: 'submit',
+      surfaceId: 'surface-1',
+      timestamp: '2026-05-30T00:00:00.000Z',
+      context: { foods: null },
+    },
+  }).userAction.context,
+  { foods: null },
+  'checkbox-style MultipleChoice should not submit the first option as an invisible default',
+);
+
+clearA2UIActionDefaults();
+recordA2UIActionDefaults([
+  {
+    surfaceUpdate: {
+      surfaceId: 'surface-1',
+      components: [
+        {
+          id: 'form-field',
+          component: {
+            TextField: {
+              text: { path: '/name', literalString: 'Alice' },
+            },
+          },
+        },
+        {
+          id: 'slider-field',
+          component: {
+            Slider: {
+              value: { path: '/age', literalNumber: 30 },
+            },
+          },
+        },
+        {
+          id: 'checkbox-field',
+          component: {
+            CheckBox: {
+              value: { path: '/accepted', literalBoolean: true },
+            },
+          },
+        },
+        {
+          id: 'date-field',
+          component: {
+            DateTimeInput: {
+              value: { path: '/date', literalString: '2026-06-14' },
+            },
+          },
+        },
+        {
+          id: 'submit',
+          component: {
+            Button: {
+              child: 'submit-label',
+              action: {
+                name: 'submit_form',
+                context: [
+                  { key: 'name', value: { path: '/name' } },
+                  { key: 'age', value: { path: '/age' } },
+                  { key: 'accepted', value: { path: '/accepted' } },
+                  { key: 'date', value: { path: '/date' } },
+                ],
+              },
+            },
+          },
+        },
+      ],
+    },
+  },
+]);
+
+assert.deepEqual(
+  enrichA2UIClientEventWithDefaults({
+    userAction: {
+      name: 'submit_form',
+      sourceComponentId: 'submit',
+      surfaceId: 'surface-1',
+      timestamp: '2026-05-30T00:00:00.000Z',
+      context: { name: null, age: null, accepted: null, date: null },
+    },
+  }).userAction.context,
+  { name: 'Alice', age: 30, accepted: true, date: '2026-06-14' },
+  'literal defaults for TextField, Slider, CheckBox, and DateTimeInput should be submitted',
 );
 
 await rm(tempDir, { recursive: true, force: true });

@@ -1,6 +1,12 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 
-"""CodeAgentModeRail — defer plan-mode exit until the user approves in chat."""
+"""CodeAgentModeRail — plan-mode write enforcement for code mode.
+
+Plan approval is handled by ``PlanApprovalInterruptRail`` with an
+immediate dialog (aligned with Claude Code).  This rail handles:
+- Blocking ``switch_mode`` from exiting plan mode
+- Blocking non-git write operations via bash in plan mode
+"""
 
 from __future__ import annotations
 
@@ -8,33 +14,12 @@ import json
 import re
 from typing import TYPE_CHECKING, Any
 
+from openjiuwen.core.common.logging import logger
 from openjiuwen.core.single_agent.rail.base import AgentCallbackContext
 from openjiuwen.harness.rails.agent_mode_rail import AgentModeRail
 
-from jiuwenswarm.agents.harness.code.rails.code_plan_approval_rail import (
-    PENDING_EXIT_RESULT_PREFIX,
-)
-
 if TYPE_CHECKING:
     from openjiuwen.harness.deep_agent import DeepAgent
-
-_EMPTY_EXIT_MSG = {
-    "cn": "规划模式已结束。你现在可以结束本轮。\n计划文件：{plan_path}",
-    "en": "Plan mode ended. You can now exit the turn.\nPlan file: {plan_path}",
-}
-
-_SWITCH_MODE_EXIT_PLAN_MSG = {
-    "cn": (
-        "[AgentModeRail] plan 模式下不能用 switch_mode 退出。"
-        "请先调用 exit_plan_mode 提交计划，再在对话中回复「按计划实现」等批准执行；"
-        "或使用 /mode code.normal 切换模式。"
-    ),
-    "en": (
-        "[AgentModeRail] switch_mode cannot exit plan mode. "
-        "Call exit_plan_mode, then approve in chat (e.g. implement the plan), "
-        "or use /mode code.normal."
-    ),
-}
 
 _NON_GIT_WRITE_RE = re.compile(
     r"\b(mkdir|touch|mv|cp|chmod|chown|dd|tee|wget|curl\s+.*\s*-[a-zA-Z]*O)\b"
@@ -45,22 +30,19 @@ _NON_GIT_WRITE_RE = re.compile(
 )
 
 
-def _plan_tool_language(language: str | None) -> str:
-    return "cn" if language == "cn" else "en"
-
-
 class CodeAgentModeRail(AgentModeRail):
     """AgentModeRail variant for jiuwenswarm code mode.
 
-    ``exit_plan_mode`` presents the plan for review but does **not** restore
-    normal mode until the user approves via chat (handled by the server-side
-    pending-approval gate).
+    Plan approval is handled by ``PlanApprovalInterruptRail`` which intercepts
+    ``exit_plan_mode`` with an immediate approval dialog (aligned with Claude Code).
+    Mode restoration happens inside ``ExitPlanModeTool.invoke()`` on approval.
     """
 
     def init(self, agent: "DeepAgent") -> None:
-        """Register tools and patch ``exit_plan_mode`` to defer mode restore."""
+        """Register tools. No exit_plan_mode patching needed —
+        ``PlanApprovalInterruptRail`` handles the approval gate.
+        """
         super().init(agent)
-        self._patch_exit_plan_mode_tool()
 
     async def before_tool_call(self, ctx: AgentCallbackContext) -> None:
         """Enforce plan-mode write blocks beyond the parent git-only guard."""
@@ -72,8 +54,17 @@ class CodeAgentModeRail(AgentModeRail):
         if plan_state.mode == "plan" and tool_name == "switch_mode":
             target = self._parse_switch_mode_target(ctx)
             if target in {"normal", "auto"}:
-                lang = "cn" if self._language_is_cn() else "en"
-                self._reject_tool(ctx, _SWITCH_MODE_EXIT_PLAN_MSG[lang])
+                if self._language_is_cn():
+                    msg = (
+                        "[AgentModeRail] plan 模式下不能用 switch_mode 退出。"
+                        "请先调用 exit_plan_mode 提交计划等待审批。"
+                    )
+                else:
+                    msg = (
+                        "[AgentModeRail] switch_mode cannot exit plan mode. "
+                        "Call exit_plan_mode to submit your plan for approval."
+                    )
+                self._reject_tool(ctx, msg)
                 return
 
         await super().before_tool_call(ctx)
@@ -95,43 +86,54 @@ class CodeAgentModeRail(AgentModeRail):
                 self._reject_tool(ctx, msg)
 
     async def after_tool_call(self, ctx: AgentCallbackContext) -> None:
-        """Skip default exit handling while the plan awaits user approval."""
-        if (
-            ctx.inputs.tool_name == "exit_plan_mode"
-            and not ctx.extra.get("_skip_tool")
-            and ctx.inputs.tool_result is not None
-        ):
-            return
-        await super().after_tool_call(ctx)
+        """Override parent to fix mode restoration on user rejection.
 
-    def _patch_exit_plan_mode_tool(self) -> None:
-        """Read plan for review without calling ``restore_mode_after_plan_exit``."""
-        for tool in self._tools:
-            if getattr(tool.card, "name", "") != "exit_plan_mode":
-                continue
+        The parent ``AgentModeRail.after_tool_call()`` has a supplement
+        mode-restoration block that calls ``restore_mode_after_plan_exit()``
+        when ``tool_result is not None``.  However, when
+        ``PlanApprovalInterruptRail`` rejects the call (user clicks Reject),
+        ``_skip_tool()`` sets ``tool_result`` to the feedback string — so the
+        ``is not None`` check passes and the mode is erroneously restored.
 
-            language = _plan_tool_language(getattr(tool, "_language", "cn"))
+        **Important**: we check ``_plan_rejected`` instead of ``_skip_tool``
+        because ``ability_manager._railed_execute_single_tool_call`` **pops**
+        ``_skip_tool`` from ``ctx.extra`` before ``after_tool_call`` runs.
+        ``PlanApprovalInterruptRail`` sets ``_plan_rejected`` which persists
+        through the pop.
+        """
+        tool_name = ctx.inputs.tool_name
+        agent = self._agent
+        rejected = ctx.extra.get("_plan_rejected", False)
 
-            async def patched_invoke(inputs, _tool=tool, _lang=language, **kwargs):
-                agent = _tool._agent_ref  # pylint: disable=protected-access
-                session = kwargs.get("session")
-                plan_path = agent.get_plan_file_path(session)
-                plan_text = ""
-                if plan_path and plan_path.exists():
-                    plan_text = plan_path.read_text(encoding="utf-8")
-                plan_path_str = str(plan_path) if plan_path else ""
-                if not plan_text.strip():
-                    return _EMPTY_EXIT_MSG[_lang].format(plan_path=plan_path_str)
-                prefix = PENDING_EXIT_RESULT_PREFIX[_lang].format(
-                    plan_path=plan_path_str,
-                )
-                return prefix + plan_text
+        # Segment 1: register / unregister task_tool (same as parent)
+        if tool_name == "enter_plan_mode" and not rejected:
+            self._register_task_tool(agent)
+        elif tool_name == "exit_plan_mode" and not rejected:
+            self._unregister_task_tool(agent)
 
-            tool.invoke = patched_invoke
-            break
+        # Segment 2: supplement mode restoration (PARENT BUG FIXED)
+        # Only restore when the tool was NOT rejected — i.e. it actually
+        # executed but the plan was empty (ExitPlanModeTool.invoke() returns
+        # early without calling restore_mode_after_plan_exit).
+        if tool_name == "exit_plan_mode" and not rejected:
+            session = ctx.session
+            state = agent.load_state(session)
+            if (state.plan_mode.mode == "plan"
+                    and ctx.inputs.tool_result is not None):
+                try:
+                    agent.restore_mode_after_plan_exit(session)
+                    logger.info(
+                        "[CodeAgentModeRail] Restored mode after plan exit "
+                        "(plan was empty, tool did not restore)"
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "[CodeAgentModeRail] Failed to restore mode: %s", exc
+                    )
 
     @staticmethod
     def _parse_switch_mode_target(ctx: AgentCallbackContext) -> str:
+        """Parse the target mode from a switch_mode tool-call context."""
         raw: Any = None
         tool_call = getattr(ctx.inputs, "tool_call", None)
         if tool_call is not None:

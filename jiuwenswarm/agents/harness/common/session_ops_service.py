@@ -5,10 +5,18 @@ import json
 import logging
 import re
 import shutil
+import time
 from pathlib import Path
 from typing import Any, TYPE_CHECKING
 
 from jiuwenswarm.common.utils import get_agent_sessions_dir, get_agent_workspace_dir
+from jiuwenswarm.server.runtime.session.session_history import (
+    get_read_history_path,
+    history_exists,
+    load_history_records,
+    write_history_records,
+    _write_records_to_path,
+)
 
 if TYPE_CHECKING:
     from openjiuwen.harness import DeepAgent
@@ -72,23 +80,24 @@ def fork_session(
 
     target_dir.mkdir(parents=True, exist_ok=True)
 
-    source_history = source_dir / "history.json"
-    target_history = target_dir / "history.json"
     history_data: list[dict[str, Any]] = []
-    if source_history.exists():
-        shutil.copy2(source_history, target_history)
+    if history_exists(source_session_id):
         try:
-            data = json.loads(target_history.read_text(encoding="utf-8"))
+            data = load_history_records(source_session_id)
             if isinstance(data, list):
                 history_data = data
+                forked_records: list[dict[str, Any]] = []
                 for record in data:
-                    record["forked_from"] = {
+                    forked_record = dict(record)
+                    forked_record["forked_from"] = {
                         "session_id": source_session_id,
                         "original_id": record.get("id", ""),
                     }
-                target_history.write_text(
-                    json.dumps(data, ensure_ascii=False, indent=2),
-                    encoding="utf-8",
+                    forked_records.append(forked_record)
+                write_history_records(
+                    target_session_id,
+                    forked_records,
+                    preserve_existing_format=False,
                 )
         except Exception as exc:
             logger.warning("fork: failed to add forked_from to history: %s", exc)
@@ -136,6 +145,10 @@ def fork_session(
         "mode": source_mode,
         "forked_from": source_session_id,
     }
+    # 复制源会话的 channel_metadata，确保分叉会话在 /resume 按项目目录过滤时可见
+    source_channel_meta = source_meta.get("channel_metadata")
+    if source_channel_meta and isinstance(source_channel_meta, dict):
+        metadata["channel_metadata"] = dict(source_channel_meta)
     _enqueue_write(target_session_id, metadata)
 
     return {
@@ -153,14 +166,13 @@ def rewind_session(
     if turn_index < 1:
         raise ValueError("turn_index must be >= 1")
 
-    sessions_dir = get_agent_sessions_dir()
-    history_path = sessions_dir / session_id / "history.json"
+    history_path = get_read_history_path(session_id)
     if not history_path.exists():
         raise ValueError("session history not found")
 
     from jiuwenswarm.server.runtime.session.session_history import truncate_history_records
 
-    history = json.loads(history_path.read_text(encoding="utf-8"))
+    history = load_history_records(session_id)
     if not isinstance(history, list):
         raise ValueError("invalid history format")
 
@@ -219,6 +231,169 @@ def rewind_session(
     }
 
 
+def compact_partial_session(
+    *,
+    session_id: str,
+    turn_index: int,
+    direction: str = "from",
+    llm_summary: str | None = None,
+) -> dict[str, Any]:
+    if turn_index < 1:
+        raise ValueError("turn_index must be >= 1")
+
+    history_path = get_read_history_path(session_id)
+    if not history_path.exists():
+        raise ValueError("session history not found")
+
+    history = load_history_records(session_id)
+    if not isinstance(history, list):
+        raise ValueError("invalid history format")
+
+    user_positions = []
+    for i, record in enumerate(history):
+        if record.get("role") == "user":
+            user_positions.append(i)
+
+    total_turns = len(user_positions)
+    if total_turns == 0:
+        raise ValueError("no user messages in session")
+    if turn_index > total_turns:
+        raise ValueError(
+            f"turn_index {turn_index} exceeds total turns ({total_turns})"
+        )
+
+    target_user_index = user_positions[turn_index - 1]
+
+    import uuid
+    from jiuwenswarm.server.runtime.session.session_history import (
+        _FILE_LOCK,
+        _WRITE_QUEUE,
+        truncate_history_records,
+    )
+    from jiuwenswarm.server.runtime.session.session_metadata import update_session_metadata
+
+    removed_turn_content = ""
+    if 0 <= target_user_index < len(history):
+        content = history[target_user_index].get("content", "")
+        raw = content if isinstance(content, str) else str(content)
+        removed_turn_content = re.sub(r"<file-content[^>]*>.*?</file-content>", "", raw, flags=re.DOTALL).strip()
+
+    if direction == "from":
+        cut_timestamp = history[target_user_index].get("timestamp")
+        summarized_count = len(history) - target_user_index
+
+        result = truncate_history_records(session_id=session_id, cut_index=target_user_index)
+        remaining = result["remaining_records"]
+        removed = result["removed_records"]
+
+        if cut_timestamp is not None:
+            try:
+                from jiuwenswarm.server.utils.diff_service import get_diff_service
+                get_diff_service().truncate_file_ops_by_timestamp(session_id, cut_timestamp)
+            except Exception as exc:
+                logger.warning("compact_partial_session: failed to truncate file_ops: %s", exc)
+
+    elif direction == "up_to":
+        kept = history[target_user_index:]
+        summarized_count = target_user_index
+        removed = summarized_count
+        remaining = len(kept)
+
+        _WRITE_QUEUE.join()
+        with _FILE_LOCK:
+            _write_records_to_path(history_path, kept)
+    else:
+        raise ValueError(f"unknown direction: {direction}")
+
+    update_session_metadata(
+        session_id=session_id,
+        set_message_count=remaining,
+    )
+
+    request_id = str(uuid.uuid4())
+    now = time.time()
+
+    short_text = (
+        f"Summarized {summarized_count} messages from this point."
+        if direction == "from"
+        else f"Summarized {summarized_count} messages up to this point."
+    )
+
+    boundary_record = {
+        "id": f"{request_id}:assistant",
+        "role": "assistant",
+        "request_id": request_id,
+        "channel_id": "tui",
+        "timestamp": now,
+        "content": "Conversation compacted",
+        "event_type": "context.compact_boundary",
+        "compact_metadata": {
+            "trigger": "manual_rewind",
+            "direction": direction,
+            "turn_index": turn_index,
+            "summarized_messages": summarized_count,
+        },
+    }
+
+    summary_record = {
+        "id": f"{request_id}:assistant_summary",
+        "role": "assistant",
+        "request_id": request_id,
+        "channel_id": "tui",
+        "timestamp": now + 0.001,
+        "content": short_text,
+        "event_type": "context.rewind_summary",
+        "compact_metadata": {
+            "trigger": "manual_rewind",
+            "direction": direction,
+            "turn_index": turn_index,
+            "summarized_messages": summarized_count,
+        },
+        "is_compact_summary": True,
+    }
+
+    _WRITE_QUEUE.join()
+    with _FILE_LOCK:
+        existing = load_history_records(session_id) if history_path.exists() else []
+        if not isinstance(existing, list):
+            existing = []
+        existing.append(boundary_record)
+        existing.append(summary_record)
+
+        if llm_summary:
+            compact_summary_record = {
+                "id": f"{request_id}:assistant_csummary",
+                "role": "assistant",
+                "request_id": request_id,
+                "channel_id": "tui",
+                "timestamp": now + 0.002,
+                "content": llm_summary,
+                "event_type": "context.compact_summary",
+                "compact_metadata": {
+                    "trigger": "manual_rewind",
+                    "direction": direction,
+                    "turn_index": turn_index,
+                    "summarized_messages": summarized_count,
+                },
+                "is_compact_summary": True,
+                "transcript_only": True,
+            }
+            existing.append(compact_summary_record)
+
+        _write_records_to_path(history_path, existing)
+
+    return {
+        "session_id": session_id,
+        "turn_index": turn_index,
+        "content": removed_turn_content,
+        "content_preview": removed_turn_content[:80] if removed_turn_content else "",
+        "remaining_records": remaining + 2,
+        "removed_records": removed,
+        "summarized_messages": summarized_count,
+        "direction": direction,
+    }
+
+
 _NON_USER_AUTHORED_TAGS = (
     "<local-command-stdout>",
     "<local-command-stderr>",
@@ -242,14 +417,11 @@ def list_session_turns(
     session_id: str,
     project_dir: str | None = None,
 ) -> dict[str, Any]:
-    sessions_dir = get_agent_sessions_dir()
-    history_path = sessions_dir / session_id / "history.json"
-
-    if not history_path.exists():
+    if not history_exists(session_id):
         return {"turns": [], "total": 0}
 
     try:
-        history = json.loads(history_path.read_text(encoding="utf-8"))
+        history = load_history_records(session_id)
     except Exception as exc:
         logger.warning("list_session_turns: failed to read history: %s", exc)
         return {"turns": [], "total": 0}
@@ -394,9 +566,7 @@ async def rewind_session_context(
     compressed by ``round_level_compressor`` / ``dialogue_compressor``), so we
     cannot simply slice the in-memory buffer.  Instead we reload the truncated
     history.json, convert its records to openjiuwen messages, tear down the old
-    context, and build a fresh one — analogous to Claude Code's
-    ``setMessages(prev.slice(0, messageIndex))`` followed by
-    ``resetMicrocompactState``.
+    context, and build a fresh one.
     """
     from openjiuwen.core.foundation.llm.schema.message import (
         UserMessage,
@@ -411,18 +581,15 @@ async def rewind_session_context(
         return False
 
     # --- 1. Load truncated history.json (already cut by caller) ---
-    sessions_dir = get_agent_sessions_dir()
-    history_path = sessions_dir / session_id / "history.json"
+    history_path = get_read_history_path(session_id)
     if not history_path.exists():
-        logger.warning("rewind_session_context: history.json not found for %s", session_id)
+        logger.warning("rewind_session_context: history not found for %s", session_id)
         return False
 
     try:
-        history_records: list[dict[str, Any]] = json.loads(
-            history_path.read_text(encoding="utf-8"),
-        )
-    except (json.JSONDecodeError, OSError) as exc:
-        logger.warning("rewind_session_context: failed to read history.json for %s: %s", session_id, exc)
+        history_records = load_history_records(session_id)
+    except OSError as exc:
+        logger.warning("rewind_session_context: failed to read history for %s: %s", session_id, exc)
         return False
 
     if not isinstance(history_records, list) or not history_records:
@@ -576,9 +743,22 @@ async def rewind_session_context(
                     reasoning_content=reasoning if reasoning else None,
                 ))
 
+        elif event_type == "context.compact_summary":
+            if current_tool_calls:
+                _flush_pending_assistant()
+            if content.strip():
+                context_messages.append(UserMessage(content=content))
+
+        elif event_type == "context.rewind_summary":
+            if current_tool_calls:
+                _flush_pending_assistant()
+            if content.strip():
+                context_messages.append(UserMessage(content=content))
+
         else:
             # chat.delta, chat.tool_update, chat.usage_metadata,
-            # chat.usage_summary, chat.ask_user_question
+            # chat.usage_summary, chat.ask_user_question,
+            # context.compact_boundary
             skipped += 1
 
     # Flush any remaining state (e.g. interrupted turn with only reasoning)
@@ -773,7 +953,7 @@ async def copy_session_state(
     modified_state["stop_condition_state"] = None
     modified_state["pending_follow_ups"] = []
 
-    # Generate new plan slug and copy plan file (like Claude Code's /branch)
+    # Generate new plan slug and copy plan file
     plan_mode = modified_state.get("plan_mode") or {}
     old_slug = plan_mode.get("plan_slug")
     if old_slug:

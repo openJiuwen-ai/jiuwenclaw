@@ -24,7 +24,8 @@ from jiuwenswarm.common.schema.agent import AgentResponse, AgentResponseChunk
 
 logger = logging.getLogger(__name__)
 _STREAM_TRAILING_MESSAGE_GRACE_SECONDS = 0.7
-_UNARY_REQUEST_TIMEOUT_SECONDS = 600.0
+AGENT_REQUEST_TIMEOUT_SECONDS: float = 600.0
+_UNARY_REQUEST_TIMEOUT_SECONDS = AGENT_REQUEST_TIMEOUT_SECONDS
 _WS_MAX_SIZE = 8 * 2**20
 
 

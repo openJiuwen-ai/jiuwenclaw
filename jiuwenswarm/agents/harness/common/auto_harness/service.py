@@ -4,13 +4,13 @@
 
 This service handles:
 - Repo URL resolution and cloning/updating
-- AutoHarnessConfig construction from JiuwenClaw model config
+- AutoHarnessConfig construction from JiuwenSwarm model config
 - Orchestrator creation and session streaming
 - Chunk to WebSocket event mapping
 - Active run management with cancel support
 
 Design per §5.1-5.6 of auto_harness.md:
-- Service is instantiated as member variable of JiuWenClawDeepAdapter
+- Service is instantiated as member variable of JiuWenSwarmDeepAdapter
 - Base config.yaml loaded once at init
 - Per-request: repo_url from request params, clone repo, build config with overrides
 """
@@ -56,13 +56,15 @@ from openjiuwen.auto_harness.stages.activate import ExtendActivateStage
 from openjiuwen.core.foundation.llm import Model, ModelClientConfig, ModelRequestConfig
 from openjiuwen.core.session.stream.base import OutputSchema
 
-from jiuwenswarm.agents.harness.common.rails.stream_event_rail import JiuClawStreamEventRail
+from jiuwenswarm.agents.harness.common.rails.stream_event_rail import JiuSwarmStreamEventRail
 from jiuwenswarm.common.schema.agent import AgentResponseChunk
 from jiuwenswarm.common.utils import get_user_workspace_dir
 
+from .capabilities import AutoHarnessCapabilityRegistry, create_default_capability_registry
 from .scheduler import Scheduler
 from .task_store import TaskStore
 from .config_validator import ConfigValidator
+from .repo_auth import configure_gitcode_auth
 
 logger = logging.getLogger(__name__)
 
@@ -77,6 +79,46 @@ _DEFAULT_LOCAL_REPO = _AUTO_HARNESS_DATA_DIR / "repo" / "openJiuwen--agent-core"
 # Default values for ci_gate config
 _DEFAULT_CI_GATE_PYTHON_EXECUTABLE = sys.executable
 _DEFAULT_CI_GATE_INSTALL_COMMAND = "uv sync --active --group dev --extra cli"
+
+
+def _serialize_optimization_task(task: OptimizationTask | dict[str, Any]) -> dict[str, Any]:
+    """Serialize an explicit optimization task into scheduler-safe metadata."""
+    if isinstance(task, OptimizationTask):
+        status = getattr(task.status, "value", task.status)
+        return {
+            "topic": task.topic,
+            "description": task.description,
+            "files": list(task.files or []),
+            "issue_ref": task.issue_ref,
+            "expected_effect": task.expected_effect,
+            "pipeline_name": task.pipeline_name,
+            "status": status,
+        }
+    return dict(task)
+
+
+def _build_auto_harness_task(query: str, payload: Optional[dict[str, Any]] = None) -> OptimizationTask:
+    """Build the auto-harness task for a run.
+
+    Ordinary queries become plain tasks. Scenario-specific callers can pass an
+    explicit payload so the main auto-harness flow does not infer task type from
+    natural-language query text.
+    """
+    if payload:
+        return OptimizationTask(
+            topic=str(payload.get("topic") or query),
+            description=str(payload.get("description") or query),
+            files=list(payload.get("files") or []),
+            issue_ref=payload.get("issue_ref") or None,
+            expected_effect=str(payload.get("expected_effect") or ""),
+            pipeline_name=str(payload.get("pipeline_name") or ""),
+            status=payload.get("status") or "pending",
+        )
+    return OptimizationTask(
+        topic=query,
+        description=query,
+        status="pending",
+    )
 
 
 def reset_harness_packages_state() -> None:
@@ -165,12 +207,13 @@ class ActiveAutoHarnessRun:
     current_stage_name: str = "assess"
     pending_interaction_id: str = ""
     completed: bool = False
+    pipeline_preference: str = ""
 
 
 class AutoHarnessService:
-    """Service for auto_harness mode integration with JiuwenClaw Web.
+    """Service for auto_harness mode integration with JiuwenSwarm Web.
 
-    Instantiated as member variable of JiuWenClawDeepAdapter for proper lifecycle management.
+    Instantiated as member variable of JiuWenSwarmDeepAdapter for proper lifecycle management.
     """
 
     def __init__(
@@ -213,6 +256,7 @@ class AutoHarnessService:
         self._scheduler: Optional[Scheduler] = None
         self._task_store: Optional[TaskStore] = None
         self._config_validator: Optional[ConfigValidator] = None
+        self._capabilities: Optional[AutoHarnessCapabilityRegistry] = None
 
         # Initialize scheduler components
         self._init_scheduler()
@@ -220,10 +264,10 @@ class AutoHarnessService:
     def update_agent_instance(self, agent: Any):
         self._agent = agent.get_instance()
         try:
-            stream_event_rail = JiuClawStreamEventRail()
-            logger.info("[AutoHarnessService] JiuClawStreamEventRail create success")
+            stream_event_rail = JiuSwarmStreamEventRail()
+            logger.info("[AutoHarnessService] JiuSwarmStreamEventRail create success")
         except Exception as exc:
-            logger.warning("[AutoHarnessService] JiuClawStreamEventRail create failed: %s", exc)
+            logger.warning("[AutoHarnessService] JiuSwarmStreamEventRail create failed: %s", exc)
             stream_event_rail = None
         self._stream_event_rail = stream_event_rail
 
@@ -353,6 +397,13 @@ class AutoHarnessService:
                 service=self,
                 task_store=self._task_store,
             )
+            self._capabilities = create_default_capability_registry(
+                data_dir=self.data_dir,
+                task_store=self._task_store,
+                harness_service=self,
+                base_config_getter=lambda: self._base_config,
+                default_repo_url=_DEFAULT_REPO_URL,
+            )
             logger.info("[AutoHarnessService] Scheduler components initialized")
         except Exception as e:
             logger.warning("[AutoHarnessService] Failed to init scheduler: %s", e)
@@ -361,11 +412,13 @@ class AutoHarnessService:
         """Start the scheduling loop (called by AgentWebSocketServer)."""
         if self._scheduler is None:
             self._init_scheduler()
-        # Reconcile legacy task statuses (async — requires file I/O)
-        if self._task_store is not None and self._task_store.has_legacy_completed_tasks():
+        # Reconcile stale task statuses (async — requires file I/O).
+        # This also fixes runs that emitted a terminal harness.session_finished
+        # event but were left as "running" by an older scheduler process.
+        if self._task_store is not None:
             corrected = await self._task_store.reconcile_task_statuses()
             if corrected > 0:
-                logger.info("[AutoHarnessService] Reconciled %d legacy task statuses", corrected)
+                logger.info("[AutoHarnessService] Reconciled %d stale task statuses", corrected)
         if self._scheduler is not None:
             await self._scheduler.start()
             logger.info("[AutoHarnessService] Scheduler started")
@@ -407,6 +460,51 @@ class AutoHarnessService:
             self._load_base_config()
 
         return result
+
+    async def handle_capability(
+        self,
+        capability: str,
+        action: str,
+        params: dict[str, Any],
+        model: Optional[Model] = None,
+    ) -> dict[str, Any]:
+        """Dispatch a scenario-specific auto-harness capability."""
+        if self._capabilities is None:
+            self._init_scheduler()
+        if self._capabilities is None:
+            return {"error": "auto-harness 能力服务未初始化"}
+        return await self._capabilities.handle(capability, action, params, model)
+
+    async def process_gitcode_issues_once(
+        self,
+        params: dict[str, Any],
+        model: Optional[Model] = None,
+    ) -> dict[str, Any]:
+        """Compatibility entry for GitCode issue processing."""
+        return await self.handle_capability("issue", "process_once", params, model)
+
+    async def watch_gitcode_issues_once(
+        self,
+        params: dict[str, Any],
+        model: Optional[Model] = None,
+    ) -> dict[str, Any]:
+        """Compatibility entry for the existing issue.watch_once RPC command."""
+        return await self.process_gitcode_issues_once(params, model)
+
+    async def list_gitcode_issue_states(self) -> dict[str, Any]:
+        """Compatibility entry for GitCode issue state listing."""
+        result = await self.handle_capability("issue", "state_list", {})
+        if "issues" not in result:
+            return {"issues": [], **result}
+        return result
+
+    async def delete_issue_states(self, params: dict[str, Any]) -> dict[str, Any]:
+        """删除 GitCode issue 处理记录和运行日志。"""
+        return await self.handle_capability("issue", "delete", params)
+
+    async def refresh_issue_matrix(self, params: dict[str, Any]) -> dict[str, Any]:
+        """刷新 issue 矩阵，增量更新分析结果。"""
+        return await self.handle_capability("issue", "matrix", params)
 
     @staticmethod
     def _extract_repo_name(repo_url: str) -> str:
@@ -490,6 +588,7 @@ class AutoHarnessService:
             ret, _, stderr = await self._run_git_command(
                 ["fetch", "origin"],
                 cwd=local_path,
+                env=git_env,
             )
             if ret != 0:
                 logger.warning("[AutoHarnessService] Git fetch failed: %s", stderr)
@@ -497,6 +596,7 @@ class AutoHarnessService:
             ret, _, stderr = await self._run_git_command(
                 ["reset", "--hard", "origin/HEAD"],
                 cwd=local_path,
+                env=git_env,
             )
             if ret != 0:
                 logger.warning("[AutoHarnessService] Git reset failed: %s", stderr)
@@ -522,16 +622,16 @@ class AutoHarnessService:
         # to the fork repo, not the upstream repo.
         fork_owner = cfg.fork_owner if cfg else ""
         upstream_owner = cfg.upstream_owner if cfg else ""
-        if git_remote_name and git_remote_name != "origin":
-            # Derive fork URL from repo_url by replacing upstream_owner
-            # with fork_owner. If they are the same, reuse repo_url directly.
-            fork_url = repo_url
-            if fork_owner and upstream_owner and fork_owner != upstream_owner:
-                fork_url = repo_url.replace(
-                    f"/{upstream_owner}/",
-                    f"/{fork_owner}/",
-                )
+        # Derive fork URL from repo_url by replacing upstream_owner with
+        # fork_owner. If they are the same, reuse repo_url directly.
+        fork_url = repo_url
+        if fork_owner and upstream_owner and fork_owner != upstream_owner:
+            fork_url = repo_url.replace(
+                f"/{upstream_owner}/",
+                f"/{fork_owner}/",
+            )
 
+        if git_remote_name and git_remote_name != "origin":
             # Check if the remote already exists
             ret, stdout, _ = await self._run_git_command(
                 ["remote"],
@@ -556,6 +656,23 @@ class AutoHarnessService:
                 git_remote_name,
                 fork_url,
             )
+
+        # Keep origin as the upstream fetch remote, but route accidental
+        # `git push origin <branch>` calls to the fork. Some LLM-driven command
+        # paths may bypass GitOperations.push(), so this prevents writes to the
+        # upstream repo and makes manual push commands use the configured fork.
+        if fork_url != repo_url:
+            await self._run_git_command(
+                ["remote", "set-url", "--push", "origin", fork_url],
+                cwd=local_path,
+            )
+
+        await configure_gitcode_auth(
+            local_path,
+            username=gitcode_username,
+            token=gitcode_token,
+            push_remote=git_remote_name or "origin",
+        )
 
         # Configure git user identity in the local repo so commits have
         # proper authorship even on servers without global git config.
@@ -589,7 +706,7 @@ class AutoHarnessService:
         Args:
             repo_url: Remote repository URL (from request params per §5.5)
             local_repo: Local path to cloned repository
-            model: Model instance from JiuwenClaw
+            model: Model instance from JiuwenSwarm
 
         Returns:
             Configured AutoHarnessConfig instance
@@ -629,7 +746,7 @@ class AutoHarnessService:
         # config.yaml so that GitOperations.push() uses a named remote instead
         # of a raw URL. The named remote is added in clone_or_update_repo().
         if not config.git_base_branch:
-            config.git_base_branch = "develop-auto-harness"
+            config.git_base_branch = "develop"
         if config.pipeline_preference == EXTENDED_EVOLVE_PIPELINE:
             config.git_base_branch = "develop"
         if not config.git_remote:
@@ -992,6 +1109,7 @@ class AutoHarnessService:
                 orchestrator=orchestrator,
                 stream_queue=stream_queue,
                 current_stage_name="activate",
+                pipeline_preference=config.pipeline_preference,
             )
             self._active_runs[session_id] = active_run
 
@@ -1183,6 +1301,7 @@ class AutoHarnessService:
                 orchestrator=orchestrator,
                 stream_queue=stream_queue,
                 current_stage_name="implement_ext",
+                pipeline_preference=config.pipeline_preference,
             )
             self._active_runs[session_id] = active_run
 
@@ -1253,7 +1372,7 @@ class AutoHarnessService:
             session_id: Session identifier
             request_id: Request identifier
             query: User's optimization goal input
-            model: JiuwenClaw's current model config
+            model: JiuwenSwarm's current model config
 
         Yields:
             AgentResponseChunk instances mapped from orchestrator chunks
@@ -1284,14 +1403,20 @@ class AutoHarnessService:
             )
             return
 
-        # Resolve repo_url from base config (per §5.6.3)
-        # repo_url is configured in config.yaml, not passed in request
-        if self._base_config and self._base_config.repo_url:
+        # Resolve repo_url: priority is passed repo_url > config default
+        params = getattr(request, "params", {}) or {}
+
+        passed_repo_url = str(params.get("repo_url") or "").strip()
+
+        if passed_repo_url:
+            repo_url = passed_repo_url
+            logger.info("[AutoHarnessService] Using passed repo_url: %s", repo_url)
+        elif self._base_config and self._base_config.repo_url:
             repo_url = self._base_config.repo_url
+            logger.info("[AutoHarnessService] Using repo_url from config: %s", repo_url)
         else:
-            # Fallback to default if config not loaded
             repo_url = _DEFAULT_REPO_URL
-        logger.info("[AutoHarnessService] Using repo_url from config: %s", repo_url)
+            logger.info("[AutoHarnessService] Using default repo_url: %s", repo_url)
 
         # Emit processing status
         yield AgentResponseChunk(
@@ -1306,7 +1431,6 @@ class AutoHarnessService:
         )
 
         active_run: Optional[ActiveAutoHarnessRun] = None
-        params = getattr(request, "params", {}) or {}
         pipeline_preference = params.get("pipeline_preference")
         try:
             # Clone/update repository
@@ -1325,14 +1449,15 @@ class AutoHarnessService:
                 pipeline_preference=pipeline_preference
             )
 
-            # Build optimization task from query
-            tasks = [
-                OptimizationTask(
-                    topic=query,
-                    description=query,
-                    status="pending",
-                )
-            ]
+            # Issue fix flow: repo_url from request params, force develop branch
+            if passed_repo_url:
+                config.git_base_branch = "develop"
+
+            # Build optimization task from explicit request metadata when a
+            # scenario provides one; otherwise keep ordinary query handling
+            # generic and free of scenario-specific parsing.
+            optimization_task_payload = params.get("optimization_task")
+            tasks = [_build_auto_harness_task(query, optimization_task_payload)]
 
             # Create orchestrator
             orchestrator = create_auto_harness_orchestrator(
@@ -1397,6 +1522,7 @@ class AutoHarnessService:
                 cancelled=False,
                 orchestrator=orchestrator,
                 stream_queue=stream_queue,
+                pipeline_preference=config.pipeline_preference,
             )
             self._active_runs[session_id] = active_run
 
@@ -1452,6 +1578,23 @@ class AutoHarnessService:
             )
 
         finally:
+            # Refresh packages cache in finally block to ensure it runs regardless of exit path
+            # (success/failure/cancellation/disconnect)
+            if active_run and active_run.pipeline_preference == EXTENDED_EVOLVE_PIPELINE:
+                try:
+                    data = await asyncio.to_thread(self.scan_runtime_extensions)
+                    await asyncio.to_thread(self.save_packages, data)
+                    logger.info(
+                        "[AutoHarnessService] Packages cache refreshed in finally block after %s, session=%s",
+                        active_run.pipeline_preference,
+                        session_id,
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "[AutoHarnessService] Failed to refresh packages cache in finally block: %s",
+                        exc,
+                    )
+
             if session_id in self._active_runs:
                 del self._active_runs[session_id]
 
@@ -1492,11 +1635,11 @@ class AutoHarnessService:
         results: list[AgentResponseChunk] = []
 
         # Import _parse_stream_chunk from DeepAdapter to reuse OutputSchema parsing logic
-        from jiuwenswarm.server.runtime.agent_adapter.interface_deep import JiuWenClawDeepAdapter
+        from jiuwenswarm.server.runtime.agent_adapter.interface_deep import JiuWenSwarmDeepAdapter
 
         # Handle OutputSchema - delegate to shared _parse_stream_chunk
         if isinstance(chunk, OutputSchema):
-            parsed = JiuWenClawDeepAdapter._parse_stream_chunk(
+            parsed = getattr(JiuWenSwarmDeepAdapter, '_parse_stream_chunk')(
                 chunk,
                 _has_streamed_content=False,
                 _stage=current_stage_name,
@@ -1551,7 +1694,7 @@ class AutoHarnessService:
                 )
             elif "type" in chunk:
                 # Treat as OutputSchema-like dict, use _parse_stream_chunk
-                parsed = JiuWenClawDeepAdapter._parse_stream_chunk(
+                parsed = getattr(JiuWenSwarmDeepAdapter, '_parse_stream_chunk')(
                     chunk,
                     _has_streamed_content=False,
                     _stage=current_stage_name,
@@ -1689,13 +1832,13 @@ class AutoHarnessService:
 
                 # When EXTENDED_EVOLVE_PIPELINE finishes, refresh packages cache
                 # so other channels can pick up newly generated packages.
-                if self._base_config and self._base_config.pipeline_preference == EXTENDED_EVOLVE_PIPELINE:
+                if active_run.pipeline_preference == EXTENDED_EVOLVE_PIPELINE:
                     try:
                         data = await asyncio.to_thread(self.scan_runtime_extensions)
                         await asyncio.to_thread(self.save_packages, data)
                         logger.info(
                             "[AutoHarnessService] Packages cache refreshed after %s, session=%s",
-                            self._base_config.pipeline_preference,
+                            active_run.pipeline_preference,
                             active_run.session_id,
                         )
                     except Exception as exc:
@@ -2629,7 +2772,7 @@ class AutoHarnessService:
             query: The optimization goal/task description
             interval_hours: Execution interval in hours
             run_immediately: If True, trigger immediate execution after creation
-            model: Model configuration from JiuwenClaw (model_name stored for execution)
+            model: Model configuration from JiuwenSwarm (model_name stored for execution)
             pipeline: Pipeline preference (extended_evolve_pipeline or meta_evolve_pipeline)
 
         Returns:
@@ -2689,7 +2832,9 @@ class AutoHarnessService:
         self,
         query: str,
         model: Optional[Model] = None,
-        pipeline: Optional[str] = None
+        pipeline: Optional[str] = None,
+        optimization_task: Optional[OptimizationTask | dict[str, Any]] = None,
+        repo_url: str = "",
     ) -> dict[str, Any]:
         """Create and immediately execute a one-time task.
 
@@ -2699,8 +2844,10 @@ class AutoHarnessService:
 
         Args:
             query: The optimization goal/task description
-            model: Model configuration from JiuwenClaw
+            model: Model configuration from JiuwenSwarm
             pipeline: Pipeline preference (extended_evolve_pipeline or meta_evolve_pipeline)
+            optimization_task: Optional explicit task metadata for specialized callers
+            repo_url: Target repository URL for the task (stored at task_data level)
 
         Returns:
             {"task_id": str, "status": "running", "message": str}
@@ -2730,6 +2877,10 @@ class AutoHarnessService:
             "model_name": model_name,
             "pipeline": pipeline,  # Pipeline preference
         }
+        if optimization_task is not None:
+            task_data["optimization_task"] = _serialize_optimization_task(optimization_task)
+        if repo_url:
+            task_data["repo_url"] = repo_url
 
         await self._task_store.add_task(task_data)
 
@@ -2814,7 +2965,10 @@ class AutoHarnessService:
         """
         if self._task_store is None:
             return None
-        return self._task_store.get_task(task_id)
+        task = self._task_store.get_task(task_id)
+        if task is None:
+            return None
+        return await self._task_store.enrich_task_with_progress(task)
 
     async def list_scheduled_tasks(self) -> list[dict[str, Any]]:
         """List all scheduled tasks.
@@ -2824,7 +2978,9 @@ class AutoHarnessService:
         """
         if self._task_store is None:
             return []
-        return self._task_store.list_tasks()
+        return await self._task_store.enrich_tasks_with_progress(
+            self._task_store.list_tasks()
+        )
 
     async def get_scheduled_task_logs(
         self,

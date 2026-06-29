@@ -157,8 +157,52 @@ function makeA2UIPart(messages: ServerToClientMessage[]): A2UIContentPart {
 function invalidA2UIFallback(): A2UIContentPart {
   return {
     kind: 'text',
-    text: '[A2UI content could not be rendered]',
+    text: '界面内容暂时无法显示，请稍后重试或重新生成结果。',
   };
+}
+
+/**
+ * Try to extract readable text from malformed A2UI content.
+ * This helps when the model generates A2UI-like content but with syntax errors.
+ */
+function extractTextFromMalformedA2UI(content: string): string | null {
+  // Try to extract content between tags even if JSON is invalid
+  const openTagIndex = content.indexOf(A2UI_OPEN_TAG);
+  const closeTagIndex = content.indexOf(A2UI_CLOSE_TAG);
+
+  if (openTagIndex >= 0 && closeTagIndex > openTagIndex) {
+    const body = content.slice(
+      openTagIndex + A2UI_OPEN_TAG.length,
+      closeTagIndex,
+    );
+    // Try to find any readable text in the body
+    // Look for text content in JSON-like structures
+    const textMatches = body.match(/"text"\s*:\s*"([^"]+)"/g);
+    if (textMatches && textMatches.length > 0) {
+      const extractedTexts = textMatches
+        .map((match) => {
+          const textContent = match.match(/"text"\s*:\s*"([^"]+)"/);
+          return textContent?.[1] ?? '';
+        })
+        .filter(Boolean);
+      if (extractedTexts.length > 0) {
+        return extractedTexts.join('\n');
+      }
+    }
+
+    // Try to find any string values that look like text content
+    const anyStringMatches = body.match(/"([^"]{10,})"/g);
+    if (anyStringMatches && anyStringMatches.length > 0) {
+      const potentialTexts = anyStringMatches
+        .map((match) => match.slice(1, -1)) // Remove quotes
+        .filter((text) => text.length > 10 && !text.startsWith('{') && !text.startsWith('['));
+      if (potentialTexts.length > 0) {
+        return potentialTexts[0]; // Return the first substantial text found
+      }
+    }
+  }
+
+  return null;
 }
 
 function pendingA2UIFallback(): A2UIContentPart {
@@ -234,7 +278,17 @@ export function parseA2UIContent(
 
     const body = content.slice(bodyStart, closeIndex);
     const messages = parseJsonMessageList(body);
-    parts.push(messages ? makeA2UIPart(messages) : invalidA2UIFallback());
+    if (messages) {
+      parts.push(makeA2UIPart(messages));
+    } else {
+      // Try to extract readable text from malformed A2UI content
+      const extractedText = extractTextFromMalformedA2UI(content.slice(openIndex, closeIndex + A2UI_CLOSE_TAG.length));
+      if (extractedText) {
+        parts.push({ kind: 'text', text: extractedText });
+      } else {
+        parts.push(invalidA2UIFallback());
+      }
+    }
     cursor = closeIndex + A2UI_CLOSE_TAG.length;
   }
 
@@ -245,19 +299,23 @@ export function namespaceA2UIMessages(
   messages: ServerToClientMessage[],
   namespace: string
 ): ServerToClientMessage[] {
+  const namespaceSurfaceId = (surfaceId: string): string => (
+    /^msg_[A-Za-z0-9_-]+:/.test(surfaceId) ? surfaceId : `${namespace}:${surfaceId}`
+  );
+
   return messages.map((message) => {
     const cloned = structuredClone(message) as ServerToClientMessage;
     if (cloned.beginRendering?.surfaceId) {
-      cloned.beginRendering.surfaceId = `${namespace}:${cloned.beginRendering.surfaceId}`;
+      cloned.beginRendering.surfaceId = namespaceSurfaceId(cloned.beginRendering.surfaceId);
     }
     if (cloned.surfaceUpdate?.surfaceId) {
-      cloned.surfaceUpdate.surfaceId = `${namespace}:${cloned.surfaceUpdate.surfaceId}`;
+      cloned.surfaceUpdate.surfaceId = namespaceSurfaceId(cloned.surfaceUpdate.surfaceId);
     }
     if (cloned.dataModelUpdate?.surfaceId) {
-      cloned.dataModelUpdate.surfaceId = `${namespace}:${cloned.dataModelUpdate.surfaceId}`;
+      cloned.dataModelUpdate.surfaceId = namespaceSurfaceId(cloned.dataModelUpdate.surfaceId);
     }
     if (cloned.deleteSurface?.surfaceId) {
-      cloned.deleteSurface.surfaceId = `${namespace}:${cloned.deleteSurface.surfaceId}`;
+      cloned.deleteSurface.surfaceId = namespaceSurfaceId(cloned.deleteSurface.surfaceId);
     }
     return cloned;
   });
@@ -273,4 +331,45 @@ export function a2uiContentToText(content: string): string {
     })
     .filter(Boolean)
     .join('\n\n');
+}
+
+/**
+ * 检查内容是否为 A2UI client event（内部交互事件，不应显示）。
+ * 只判断 content，不判断 role —— 调用处应明确只过滤 user role。
+ * 支持: object / string JSON / array / JSON-ish fallback
+ */
+export function isA2UIClientEventContent(content: unknown): boolean {
+  if (content == null) return false;
+
+  if (Array.isArray(content)) {
+    return content.some(isA2UIClientEventContent);
+  }
+
+  if (typeof content === 'object') {
+    const record = content as Record<string, unknown>;
+    if (record.type === 'a2ui.client_event') return true;
+    if (isA2UIClientEventContent(record.content)) return true;
+    if (isA2UIClientEventContent(record.event)) return true;
+    if (isA2UIClientEventContent(record.data)) return true;
+    return false;
+  }
+
+  if (typeof content !== 'string') return false;
+
+  const trimmed = content.trim();
+  if (!trimmed) return false;
+
+  try {
+    const parsed = JSON.parse(trimmed);
+    return isA2UIClientEventContent(parsed);
+  } catch {
+    const looksStructured = trimmed.startsWith('{') || trimmed.startsWith('[');
+    if (!looksStructured) return false;
+
+    return (
+      trimmed.includes('"type"') && trimmed.includes('a2ui.client_event')
+    ) || (
+      trimmed.includes("'type'") && trimmed.includes('a2ui.client_event')
+    );
+  }
 }

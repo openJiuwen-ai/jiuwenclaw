@@ -8,7 +8,6 @@ TeamMember 专用 Rail、Ability 继承逻辑，不依赖主 agent adapter。
 from __future__ import annotations
 
 import logging
-import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -18,19 +17,27 @@ from openjiuwen.harness.rails import (
     SysOperationRail,
     HeartbeatRail,
     SecurityRail,
+    EvolutionInterruptRail,
     SkillEvolutionRail,
     TaskPlanningRail,
     TeamSkillEvolutionRail,
     TeamSkillCreateRail,
 )
+from openjiuwen.harness.rails.evolution import EvolutionReviewRuntime
 from openjiuwen.harness.rails.context_engineer import ContextProcessorRail
 
 from jiuwenswarm.agents.harness.common.rails.avatar_rail import AvatarPromptRail
 from jiuwenswarm.agents.harness.common.rails.response_prompt_rail import ResponsePromptRail
 from jiuwenswarm.agents.harness.common.rails.runtime_prompt_rail import RuntimePromptRail
-from jiuwenswarm.agents.harness.common.rails.stream_event_rail import JiuClawStreamEventRail
+from jiuwenswarm.agents.harness.common.rails.stream_event_rail import JiuSwarmStreamEventRail
 from jiuwenswarm.agents.harness.team.rails.team_workspace_report_path_rail import TeamWorkspaceReportPathRail
-from jiuwenswarm.common.config import get_config
+from jiuwenswarm.common.config import (
+    get_config,
+    get_evolution_auto_save_enabled,
+    get_evolution_auto_scan_enabled,
+    get_skill_create_enabled,
+)
+from jiuwenswarm.common.reasoning_injector import build_reasoning_model_request_kwargs
 from jiuwenswarm.server.runtime.skill import load_execution_disabled_skills
 
 logger = logging.getLogger(__name__)
@@ -64,7 +71,7 @@ class TeamWorkspaceInfo:
 RAIL_WHITELIST = frozenset({
     "RuntimePromptRail",
     "ResponsePromptRail",
-    "JiuClawStreamEventRail",
+    "JiuSwarmStreamEventRail",
     "TaskPlanningRail",
     "SecurityRail",
     "HeartbeatRail",
@@ -73,6 +80,7 @@ RAIL_WHITELIST = frozenset({
     "SysOperationRail",
     "TeamSkillEvolutionRail",
     "TeamSkillCreateRail",
+    "EvolutionInterruptRail",
     "SkillEvolutionRail",
     "TeamWorkspaceReportPathRail",
     "ContextProcessorRail",
@@ -94,6 +102,9 @@ TOOL_WHITELIST = frozenset({
     "search_skill",
     "install_skill",
     "uninstall_skill",
+    "skill_index_build",
+    "skill_branch_explore",
+    "skill_branch_peek",
     "user_todos",
     "get_user_location",
     "create_note",
@@ -120,8 +131,6 @@ TOOL_WHITELIST = frozenset({
     "web_fetch_webpage",
     "web_paid_search",
     "skill_toolkit",
-    "enter_worktree",
-    "exit_worktree",
     "acp_chat",
 })
 
@@ -145,9 +154,6 @@ def build_member_rails(
     runtime = runtime or RuntimeInfo()
     team_workspace = team_workspace or TeamWorkspaceInfo()
 
-    # 从 dataclass 提取参数
-    agent_name = member_info.agent_name
-    model_name = member_info.model_name
     role = member_info.role
     channel = runtime.channel
     language = runtime.language
@@ -171,8 +177,9 @@ def build_member_rails(
 
     try:
         rail = ResponsePromptRail()
+        rail.set_channel(channel)
         rails_list.append(rail)
-        logger.info("[TeamRuntime] ResponsePromptRail created")
+        logger.info("[TeamRuntime] ResponsePromptRail created: channel=%s", channel)
     except Exception as exc:
         logger.warning("[TeamRuntime] ResponsePromptRail failed: %s", exc)
 
@@ -184,14 +191,14 @@ def build_member_rails(
         logger.warning("[TeamRuntime] FileSystemRail failed: %s", exc)
 
     try:
-        rail = JiuClawStreamEventRail(
+        rail = JiuSwarmStreamEventRail(
             member_name=member_info.agent_name,
             role=member_info.role,
         )
         rails_list.append(rail)
-        logger.info("[TeamRuntime] JiuClawStreamEventRail created")
+        logger.info("[TeamRuntime] JiuSwarmStreamEventRail created")
     except Exception as exc:
-        logger.warning("[TeamRuntime] JiuClawStreamEventRail failed: %s", exc)
+        logger.warning("[TeamRuntime] JiuSwarmStreamEventRail failed: %s", exc)
 
     try:
         rail = TaskPlanningRail()
@@ -242,26 +249,40 @@ def build_member_rails(
             Path(team_ws_skills_dir).mkdir(parents=True, exist_ok=True)
             llm_model, actual_model_name = build_evolution_llm()
             evolution_auto_scan = get_evolution_auto_scan_enabled(config)
+            evolution_auto_save = get_evolution_auto_save_enabled(config)
             bound_team_trajectory_registry = team_trajectory_registry if team_id else None
+            review_runtime = EvolutionReviewRuntime()
             team_skill_rail = TeamSkillEvolutionRail(
                 skills_dir=team_ws_skills_dir,
                 llm=llm_model,
                 model=actual_model_name,
+                review_runtime=review_runtime,
                 language=language,
                 trajectory_source=bound_team_trajectory_registry,
                 trajectory_sink=bound_team_trajectory_registry,
                 member_role=role,
-                auto_scan=evolution_auto_scan,
-                auto_save=False,
+                auto_scan=False,
+                auto_save=evolution_auto_save,
+                fuzzy_review=False,
+                completion_followup_enabled=evolution_auto_scan,
                 team_id=team_id,
                 disabled_skills=load_execution_disabled_skills(),
+            )
+            rails_list.append(
+                EvolutionInterruptRail(
+                    review_runtime=review_runtime,
+                    submission_service=team_skill_rail.experience_manager.experience_submission_service,
+                    auto_save=evolution_auto_save,
+                    language=language,
+                )
             )
             rails_list.append(team_skill_rail)
             logger.info(
                 "[TeamRuntime] TeamSkillEvolutionRail created: skills_dir=%s, "
-                "model=%s, auto_scan=%s, team_trajectory_registry=%s",
+                "model=%s, auto_scan=%s, completion_followup_enabled=%s, team_trajectory_registry=%s",
                 team_ws_skills_dir,
                 actual_model_name,
+                False,
                 evolution_auto_scan,
                 bool(bound_team_trajectory_registry),
             )
@@ -288,13 +309,27 @@ def build_member_rails(
 
     # Non-leader: SkillEvolutionRail for member skill self-evolution.
     if role != "leader" and team_ws_skills_dir:
+        review_runtime = EvolutionReviewRuntime()
         evo_rail = build_skill_evolution_rail(
             skills_dir=team_ws_skills_dir,
             config=config,
             team_trajectory_sink=team_trajectory_registry,
             team_id=team_id,
+            review_runtime=review_runtime,
         )
         if evo_rail is not None:
+            try:
+                rails_list.append(
+                    EvolutionInterruptRail(
+                        review_runtime=review_runtime,
+                        submission_service=evo_rail.experience_manager.experience_submission_service,
+                        auto_save=True,
+                        language=language,
+                    )
+                )
+                logger.info("[TeamRuntime] EvolutionInterruptRail created for member skill evolution")
+            except Exception as exc:
+                logger.warning("[TeamRuntime] EvolutionInterruptRail failed: %s", exc, exc_info=True)
             rails_list.append(evo_rail)
 
     # Context compression rail for all members (leader + teammates).
@@ -361,38 +396,6 @@ def get_default_model_name(config: dict[str, Any] | None = None) -> str:
         logger.warning("[TeamRuntime] Failed to resolve default model name: %s", exc)
 
     return "gpt-4"
-
-
-def _get_bool_env(value: str | None) -> bool | None:
-    if value is None:
-        return None
-    return value.lower() in ("true", "1", "yes")
-
-
-def _get_evolution_config(config: dict[str, Any] | None) -> dict[str, Any]:
-    if not isinstance(config, dict):
-        return {}
-    react_config = config.get("react")
-    if isinstance(react_config, dict) and isinstance(react_config.get("evolution"), dict):
-        return react_config["evolution"]
-    evolution_config = config.get("evolution")
-    if isinstance(evolution_config, dict):
-        return evolution_config
-    return {}
-
-
-def get_evolution_auto_scan_enabled(config: dict[str, Any] | None) -> bool:
-    env_auto_scan = _get_bool_env(os.getenv("EVOLUTION_AUTO_SCAN"))
-    if env_auto_scan is not None:
-        return env_auto_scan
-    return _get_evolution_config(config).get("auto_scan", False)
-
-
-def get_skill_create_enabled(config: dict[str, Any] | None) -> bool:
-    env_skill_create = _get_bool_env(os.getenv("SKILL_CREATE"))
-    if env_skill_create is not None:
-        return env_skill_create
-    return _get_evolution_config(config).get("skill_create", False)
 
 
 def resolve_model_config(
@@ -475,8 +478,11 @@ def build_evolution_llm(
     inject_attribution_headers(model_client_config)
 
     request_config = ModelRequestConfig(
-        model=model_name,
-        temperature=model_config_obj.get("temperature", 0.95),
+        **build_reasoning_model_request_kwargs(
+            model_client_config=model_client_config,
+            model_config_obj=model_config_obj,
+            model_name=model_name,
+        )
     )
     client_config = ModelClientConfig(**model_client_config)
     return Model(model_client_config=client_config, model_config=request_config), model_name
@@ -487,6 +493,7 @@ def build_skill_evolution_rail(
     config: dict[str, Any] | None = None,
     team_trajectory_sink: Any | None = None,
     team_id: str | None = None,
+    review_runtime: EvolutionReviewRuntime | None = None,
 ) -> Any | None:
     """为 Team member 构造 SkillEvolutionRail.
 
@@ -500,16 +507,20 @@ def build_skill_evolution_rail(
     try:
         llm, model_name = build_evolution_llm(config)
         evolution_auto_scan = get_evolution_auto_scan_enabled(config)
+        review_runtime = review_runtime or EvolutionReviewRuntime()
 
         rail = SkillEvolutionRail(
             skills_dir=skills_dir,
             llm=llm,
             model=model_name,
+            review_runtime=review_runtime,
             auto_scan=evolution_auto_scan,
             auto_save=True,
+            fuzzy_review=False,
             disabled_skills=load_execution_disabled_skills(),
         )
-        if team_trajectory_sink is not None and team_id:
+        has_team_trajectory_sink = team_trajectory_sink is not None and bool(team_id)
+        if has_team_trajectory_sink:
             rail.set_trajectory_sink(
                 team_trajectory_sink,
                 team_id=team_id,
@@ -520,7 +531,7 @@ def build_skill_evolution_rail(
             "team_trajectory_sink=%s",
             model_name,
             evolution_auto_scan,
-            team_trajectory_sink is not None and bool(team_id),
+            has_team_trajectory_sink,
         )
         return rail
     except Exception as exc:

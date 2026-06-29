@@ -25,10 +25,18 @@ from openjiuwen.agent_teams.harness.manifest import (
     harness_element,
     param_field,
 )
+from openjiuwen.agent_teams.rails.team_context import (
+    get_messager,
+    get_permissions_override,
+    get_team_backend,
+)
 
 from jiuwenswarm.agents.harness.common.plugins.rail_manager import get_rail_manager
 from jiuwenswarm.agents.harness.common.rails.runtime_prompt_rail import (
     RuntimePromptRail,
+)
+from jiuwenswarm.agents.harness.common.rails.skill_retrieval_prompt_rail import (
+    SkillRetrievalPromptRail,
 )
 from jiuwenswarm.agents.harness.team.rails.team_skill_storage_policy_rail import (
     TeamSkillStoragePolicyRail,
@@ -52,12 +60,50 @@ TEAM_SHARED_SKILL_LINK_REFRESH = "swarm.team_shared_skill_link_refresh"
 TEAM_WORKSPACE_REPORT_PATH = "swarm.team_workspace_report_path"
 CONTEXT_PROCESSOR = "swarm.context_processor"
 PLUGIN_RAILS = "swarm.plugin_rails"
+SKILL_RETRIEVAL_PROMPT = "swarm.skill_retrieval_prompt"
+TEAM_PERMISSION_POLICY = "swarm.team_permission_policy"
 
 
 def _workspace_root(ctx: SwarmBuildContext) -> str | None:
     """Resolve the member workspace root path."""
     workspace = getattr(ctx, "workspace", None)
     return getattr(workspace, "root_path", None) if workspace else None
+
+
+class SkillRetrievalPromptInput(ConstructionInput):
+    """Construction inputs for the agentic skill retrieval prompt rail."""
+
+    global_skills_dir: str | None = context_field(
+        attr="global_skills_dir",
+        description="Global installed skills source directory.",
+    )
+
+
+@harness_element(
+    kind=ElementKind.RAIL,
+    name=SKILL_RETRIEVAL_PROMPT,
+    description="Lightweight prompt guidance for agentic installed-skill tree retrieval.",
+    input_model=SkillRetrievalPromptInput,
+)
+def _build_skill_retrieval_prompt_rail(
+    params: dict[str, Any],
+    context: SwarmBuildContext,
+) -> SkillRetrievalPromptRail | None:
+    """Build the skill retrieval prompt rail when the feature is enabled."""
+    from jiuwenswarm.agents.harness.common.tools.skill_retrieval_toolkits import (
+        is_skill_retrieval_enabled,
+    )
+    from jiuwenswarm.agents.swarm.providers.tools import visible_skill_names_for_list_skill
+    from jiuwenswarm.server.runtime.skill.skill_manager import SkillManager
+
+    if not is_skill_retrieval_enabled():
+        return None
+    SkillRetrievalPromptInput.resolve(params, context)
+    manager = SkillManager()
+    return SkillRetrievalPromptRail(
+        manager=manager,
+        visible_skill_names=lambda: visible_skill_names_for_list_skill(context),
+    )
 
 
 class RuntimePromptInput(ConstructionInput):
@@ -72,6 +118,10 @@ class RuntimePromptInput(ConstructionInput):
         attr="channel",
         default="default",
         description="Resolved channel key.",
+    )
+    project_dir: str | None = context_field(
+        attr="project_dir",
+        description="Resolved user project directory (seeds the TUI cwd policy).",
     )
 
 
@@ -95,7 +145,14 @@ def _build_runtime_prompt_rail(
         A ``RuntimePromptRail`` bound to the member's language and channel.
     """
     inp = RuntimePromptInput.resolve(params, context)
-    return RuntimePromptRail(language=inp.language, channel=inp.channel)
+    rail = RuntimePromptRail(language=inp.language, channel=inp.channel)
+    # Seed cwd/project_dir so the TUI branch injects the "current project
+    # directory" policy and the model answers with the project dir instead of
+    # calling `pwd` (which would surface the per-member workspace path).
+    # Mirrors the code-team rail (code_rails.build_code_runtime_prompt).
+    if inp.project_dir:
+        rail.set_runtime_paths(cwd=inp.project_dir, project_dir=inp.project_dir)
+    return rail
 
 
 class TeamSkillStoragePolicyInput(ConstructionInput):
@@ -341,4 +398,131 @@ __all__ = [
     "TEAM_WORKSPACE_REPORT_PATH",
     "CONTEXT_PROCESSOR",
     "PLUGIN_RAILS",
+    "SKILL_RETRIEVAL_PROMPT",
+    "TEAM_PERMISSION",
+    "TEAM_PERMISSION_POLICY",
 ]
+
+
+# ---------------------------------------------------------------------------
+# team.permission_policy — TeamPermissionPolicyRail (leader prompt section)
+# ---------------------------------------------------------------------------
+
+
+TEAM_PERMISSION_POLICY = "swarm.team_permission_policy"
+
+
+class TeamPermissionPolicyInput(ConstructionInput):
+    """Construction inputs for the team permission policy prompt rail."""
+
+    permissions_config: dict[str, Any] = param_field(
+        default_factory=dict,
+        description="Permission config dict used to generate permission "
+        "rule descriptions via format_base_permissions_for_desc.",
+    )
+    language: str = context_field(
+        attr="language",
+        default="cn",
+        description="Resolved member language code.",
+    )
+
+
+@harness_element(
+    kind=ElementKind.RAIL,
+    name=TEAM_PERMISSION_POLICY,
+    description="Injects teammate permission rules into the leader's system prompt.",
+    input_model=TeamPermissionPolicyInput,
+)
+def _build_team_permission_policy_rail(
+    params: dict[str, Any],
+    context: SwarmBuildContext,
+) -> Any | None:
+    """Build the permission policy prompt rail for the leader."""
+    inp = TeamPermissionPolicyInput.resolve(params, context)
+    if not inp.permissions_config.get("enabled"):
+        return None
+
+    from jiuwenswarm.agents.harness.team.rails.team_permission_policy_rail import (
+        TeamPermissionPolicyRail,
+    )
+
+    return TeamPermissionPolicyRail(
+        permissions_config=inp.permissions_config,
+        language=inp.language,
+    )
+
+
+# ---------------------------------------------------------------------------
+# team.permission — TeamPermissionRail (swarm-side thin provider)
+# ---------------------------------------------------------------------------
+
+
+TEAM_PERMISSION = "swarm.team_permission"
+
+
+class TeamPermissionInput(ConstructionInput):
+    """Construction inputs for the team permission rail."""
+
+    permissions_config: dict[str, Any] = param_field(
+        default_factory=dict,
+        description="Full permission config dict (as consumed by "
+        "openjiuwen.harness.security.engine.PermissionEngine).",
+    )
+
+
+@harness_element(
+    kind=ElementKind.RAIL,
+    name=TEAM_PERMISSION,
+    description="Team-mode permission guardrail with leader-mediated ASK resolution.",
+    input_model=TeamPermissionInput,
+)
+def _build_team_permission_rail(params: dict[str, Any], context: Any) -> Any | None:
+    """Build the team permission rail (gated on backend + messager + permissions enabled).
+
+    Thin swarm provider: reads ``permissions_config`` from ``RailSpec.params``
+    (baked by config_specs) and runtime handles from ``BuildContext.extras``
+    (injected by AgentConfigurator). The actual permission logic —
+    openjiuwen.harness.security.engine.PermissionEngine,
+    openjiuwen.agent_teams.rails.team_permission_rail.TeamPermissionRail,
+    openjiuwen.agent_teams.rails.team_permission_rail.TeamApprovalOrchestrator —
+    lives in openjiuwen.
+    """
+    backend = get_team_backend(context)
+    messager = get_messager(context)
+    if backend is None or messager is None:
+        return None
+
+    inp = TeamPermissionInput.resolve(params, context)
+    if not inp.permissions_config.get("enabled"):
+        return None
+
+    from openjiuwen.agent_teams.rails.team_permission_rail import (
+        TeamApprovalOrchestrator,
+        TeamPermissionRail,
+    )
+    from openjiuwen.agent_teams.tools.message_manager import TeamMessageManager
+    from openjiuwen.harness.security.host import ToolPermissionHost
+    from openjiuwen.agent_teams.security.narrowing import narrow_permissions
+
+    override = get_permissions_override(context)
+    narrowed_config = narrow_permissions(inp.permissions_config, override) if override else inp.permissions_config
+
+    message_manager = TeamMessageManager(
+        backend.team_name,
+        backend.member_name,
+        backend.db,
+        messager,
+    )
+    orchestrator = TeamApprovalOrchestrator(
+        message_manager=message_manager,
+        leader_member_name=backend.leader_member_name,
+    )
+
+    host = ToolPermissionHost(
+        request_permission_confirmation=orchestrator.handle_approval_request,
+    )
+
+    return TeamPermissionRail(
+        config=narrowed_config,
+        host=host,
+    )

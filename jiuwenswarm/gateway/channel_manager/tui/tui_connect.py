@@ -10,7 +10,7 @@ import shutil
 import sys
 import time
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Optional
 
 import yaml
 
@@ -29,6 +29,7 @@ from jiuwenswarm.common.config import (
     get_default_models,
     load_yaml_round_trip,
     resolve_env_vars,
+    update_auto_recap_enabled_in_config,
     update_context_engine_enabled_in_config,
     update_memory_forbidden_enabled_in_config,
     update_permissions_enabled_in_config,
@@ -39,6 +40,7 @@ from jiuwenswarm.common.config import (
     ensure_defaults_list_in_config,
     update_preferred_language_in_config,
 )
+from jiuwenswarm.common.reasoning_injector import build_reasoning_model_request_kwargs
 from jiuwenswarm.gateway.routing.route_binding import GatewayRouteBinding
 from jiuwenswarm.common.version import __version__
 from jiuwenswarm.common.utils import get_user_workspace_dir
@@ -164,11 +166,14 @@ def _update_auto_harness_gitcode_access_token(value: str) -> None:
 CLI_FORWARD_REQ_METHODS = frozenset(
     {
         "command.add_dir",
+        "command.btw",
         "command.chrome",
         "command.compact",
+        "command.compact_partial",
         "command.context",
         "command.recap",
         "command.diff",
+        "command.simplify",
         "command.mcp",
         "command.resume",
         "command.sandbox",
@@ -211,6 +216,11 @@ CLI_FORWARD_REQ_METHODS = frozenset(
         "skills.evolution.status",
         "skills.evolution.get",
         "skills.evolution.save",
+        "symphony.build_score",
+        "symphony.pause_build",
+        "symphony.score_status",
+        "symphony.graph",
+        "symphony.plan",
         "plugins.list",
         "plugins.install",
         "plugins.uninstall",
@@ -219,9 +229,11 @@ CLI_FORWARD_REQ_METHODS = frozenset(
         "plugins.reload",
         "permissions.tools.get",
         "permissions.tools.update",
+        "permissions.tools.delete",
         "permissions.rules.get",
         "permissions.rules.create",
         "permissions.rules.update",
+        "permissions.rules.delete",
         "extensions.list",
         "extensions.import",
         "extensions.delete",
@@ -246,17 +258,24 @@ CLI_FORWARD_REQ_METHODS = frozenset(
         "schedule.logs",
         "schedule.cancel",
         "schedule.delete",
+        "issue.watch_once",
+        "issue.state.list",
+        "issue.matrix",
+        "issue.delete",
     }
 )
 
 CLI_FORWARD_NO_LOCAL_HANDLER_METHODS = frozenset(
     {
         "command.add_dir",
+        "command.btw",
         "command.chrome",
         "command.compact",
+        "command.compact_partial",
         "command.context",
         "command.recap",
         "command.diff",
+        "command.simplify",
         "command.mcp",
         "command.resume",
         "command.sandbox",
@@ -294,6 +313,11 @@ CLI_FORWARD_NO_LOCAL_HANDLER_METHODS = frozenset(
         "skills.evolution.status",
         "skills.evolution.get",
         "skills.evolution.save",
+        "symphony.build_score",
+        "symphony.pause_build",
+        "symphony.score_status",
+        "symphony.graph",
+        "symphony.plan",
         "plugins.list",
         "plugins.install",
         "plugins.uninstall",
@@ -302,9 +326,11 @@ CLI_FORWARD_NO_LOCAL_HANDLER_METHODS = frozenset(
         "plugins.reload",
         "permissions.tools.get",
         "permissions.tools.update",
+        "permissions.tools.delete",
         "permissions.rules.get",
         "permissions.rules.create",
         "permissions.rules.update",
+        "permissions.rules.delete",
         "extensions.list",
         "extensions.import",
         "extensions.delete",
@@ -329,6 +355,10 @@ CLI_FORWARD_NO_LOCAL_HANDLER_METHODS = frozenset(
         "schedule.logs",
         "schedule.cancel",
         "schedule.delete",
+        "issue.watch_once",
+        "issue.state.list",
+        "issue.matrix",
+        "issue.delete",
     }
 )
 
@@ -399,6 +429,7 @@ _CLI_CONFIG_SET_ENV_MAP = {
 }
 
 _CLI_CONFIG_YAML_SETTERS: dict[str, Any] = {
+    "auto_recap_enabled": update_auto_recap_enabled_in_config,
     "context_engine_enabled": update_context_engine_enabled_in_config,
     "permissions_enabled": update_permissions_enabled_in_config,
     "memory_forbidden_enabled": update_memory_forbidden_enabled_in_config,
@@ -506,6 +537,8 @@ def _build_config_schema() -> list[dict]:
          "type": "toggle", "source": "yaml", "default": "false"},
         {"key": "preferred_language", "label": "显示语言", "group": "Features", "type": "select",
          "options": ["zh", "en"], "source": "yaml", "default": "zh"},
+        {"key": "auto_recap_enabled", "label": "自动回顾", "group": "Features",
+         "type": "toggle", "source": "yaml", "default": "true"},
         {"key": "evolution_auto_scan", "label": "自动扫描技能", "group": "Features",
          "type": "toggle", "source": "env", "default": "false"},
         # Auto-Harness (定时任务配置) - 合并为三项
@@ -644,6 +677,10 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
                 "true" if mem_cfg.get("enabled", False) else "false"
             )
             payload["preferred_language"] = raw.get("preferred_language") or "zh"
+            auto_recap_cfg = raw.get("auto_recap") or {}
+            payload["auto_recap_enabled"] = (
+                "true" if auto_recap_cfg.get("enabled", True) else "false"
+            )
 
             # Resolve model-related fields from config.yaml.
             # When models.defaults list is in use, it is the canonical source
@@ -700,12 +737,13 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
                 except Exception as e:
                     logger.warning("[config.get] Failed to resolve %s model config: %s", _section_name, e)
         except Exception:
+            payload.setdefault("auto_recap_enabled", "true")
             payload.setdefault("context_engine_enabled", "false")
             payload.setdefault("permissions_enabled", "false")
             payload.setdefault("memory_forbidden_enabled", "false")
             payload.setdefault("preferred_language", "zh")
         
-        # Auto-Harness config values (from ~/.jiuwenclaw/auto-harness/config.yaml)
+        # Auto-Harness config values (from ~/.jiuwenswarm/auto-harness/config.yaml)
         # 合并显示：用户名、邮箱、Access Token 三项
         try:
             ah_config = _get_auto_harness_config()
@@ -1015,7 +1053,20 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
             api_base = api_base.rsplit("/chat/completions", 1)[0]
         api_base = api_base.rstrip("/")
 
-        model_request_config = ModelRequestConfig(model=model, temperature=0)
+        model_config_obj = {"temperature": 0}
+        if "reasoning_level" in params:
+            model_config_obj["reasoning_level"] = params.get("reasoning_level")
+        reasoning_mcc = {
+            "client_provider": model_provider,
+            "api_base": api_base,
+        }
+        model_request_config = ModelRequestConfig(
+            **build_reasoning_model_request_kwargs(
+                model_client_config=reasoning_mcc,
+                model_config_obj=model_config_obj,
+                model_name=model,
+            )
+        )
         model_client_config = ModelClientConfig(
             client_id="config-validate",
             client_provider=model_provider,
@@ -1126,7 +1177,29 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
             if isinstance(resp.payload, dict)
             else []
         )
+        # 过滤掉 None/非 dict/无效 session_id，防止前端 SelectList.render() 崩溃
+        normalized_sessions = []
+        for s in all_sessions:
+            if not s or not isinstance(s, dict):
+                continue
+            raw_sid = s.get("session_id")
+            if isinstance(raw_sid, str):
+                session_id = raw_sid.strip()
+            elif raw_sid is not None:
+                session_id = str(raw_sid).strip()
+            else:
+                session_id = ""
+            if not session_id:
+                continue
+            s["session_id"] = session_id
+            normalized_sessions.append(s)
+        all_sessions = normalized_sessions
         # 按项目目录过滤 + 排除当前会话（对齐 Claude Code /resume 行为）
+        # all_projects=True 时跳过项目过滤，列出所有项目的会话（对齐 CC 的 Ctrl+A）
+        show_all_projects = (
+            bool(params.get("all_projects"))
+            if isinstance(params, dict) else False
+        )
         project_dir = (
             str(params.get("project_dir", "")).strip()
             if isinstance(params, dict) else ""
@@ -1140,6 +1213,8 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
         current_sid = str(session_id or "").strip()
 
         def _session_matches_project(s):
+            if show_all_projects:
+                return True
             if not project_dir:
                 return True
             ch_meta = s.get("channel_metadata") or {}
@@ -1147,7 +1222,7 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
                 ch_meta.get("project_dir") or ch_meta.get("cwd") or ""
             ).strip()
             if not session_project:
-                return True  # 无项目信息的会话作为兜底保留
+                return False  # 无项目信息的会话无法匹配当前项目，排除
             try:
                 session_project = os.path.realpath(session_project)
             except OSError:
@@ -1172,7 +1247,7 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
         )
         cli_sessions = cli_sessions[:limit]
 
-        # 附带每个会话的 project_dir 供前端判断跨项目恢复
+        # 附带每个会话的 project_dir / git_branch 供前端判断跨项目恢复 + 按分支过滤
         for s in cli_sessions:
             ch_meta = s.get("channel_metadata") or {}
             sp = (ch_meta.get("project_dir") or ch_meta.get("cwd") or "").strip()
@@ -1182,8 +1257,20 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
                 except OSError:
                     pass
             s["project_dir"] = sp
+            # 会话首条消息时记录的分支；存量会话无该字段时回填空串（前端按"兜底显示"处理）
+            s["git_branch"] = str(ch_meta.get("git_branch") or "").strip()
 
-        await channel.send_response(ws, req_id, ok=True, payload={"sessions": cli_sessions})
+        # 当前项目的 git 分支，供前端 Ctrl+B 过滤对比（非 git/失败为哨兵 "HEAD"）
+        from jiuwenswarm.common.utils import resolve_git_branch
+
+        current_branch = resolve_git_branch(project_dir or None)
+
+        await channel.send_response(
+            ws,
+            req_id,
+            ok=True,
+            payload={"sessions": cli_sessions, "current_branch": current_branch},
+        )
 
     async def _session_create(ws, req_id, params, session_id):
         from jiuwenswarm.common.utils import get_agent_sessions_dir
@@ -1311,9 +1398,9 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
     async def _forward_rewind_e2a(params: ForwardRewindE2AParams) -> bool:
         """Try to forward a rewind request to AgentServer via E2A.
 
-        Returns True if the request was fully handled (success or error response
-        sent to the client).  Returns False if E2A is unavailable and the caller
-        should fall back to local-only processing.
+        Returns True if the request was successfully handled by AgentServer.
+        Returns False if E2A is unavailable or AgentServer returned an error,
+        so the caller should fall back to local-only processing.
         """
         from jiuwenswarm.common.e2a.gateway_normalize import e2a_from_agent_fields
 
@@ -1342,18 +1429,54 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
                 return True
             pl = resp.payload if isinstance(resp.payload, dict) else {}
             err = pl.get("error", params.error_label)
-            code = pl.get("code") or None
-            if isinstance(code, str) and not code.strip():
-                code = None
-            await channel.send_response(params.ws, params.req_id, ok=False, error=str(err), code=code)
-            return True
+            logger.warning("[cli %s] AgentServer returned error, fallback local: %s", params.error_label, err)
+            return False
         except Exception as e:
             logger.warning("[cli %s] forward to agent failed, fallback local: %s", params.error_label, e)
             return False
 
+    async def _compact_partial_via_e2a(target_sid: str, turn_index: int, direction: str) -> tuple[Optional[str], int]:
+        """通过 E2A 转发 LLM 摘要请求到 AgentServer。返回 (summary, summarized_count)。"""
+        from jiuwenswarm.common.e2a.gateway_normalize import e2a_from_agent_fields
+        from jiuwenswarm.common.schema.message import ReqMethod
+
+        real_client = (
+            agent_client.get("value")
+            if isinstance(agent_client, dict)
+            else agent_client
+        )
+        if real_client is None:
+            return None, 0
+
+        try:
+            env = e2a_from_agent_fields(
+                request_id=str(time.time()),
+                channel_id="tui",
+                session_id=target_sid,
+                req_method=ReqMethod.COMMAND_COMPACT_PARTIAL,
+                params={
+                    "session_id": target_sid,
+                    "turn_index": turn_index,
+                    "direction": direction,
+                },
+                is_stream=False,
+                timestamp=time.time(),
+            )
+            resp = await real_client.send_request(env)
+            if resp.ok:
+                pl = resp.payload if isinstance(resp.payload, dict) else {}
+                summary = pl.get("summary") if pl.get("status") == "ok" else None
+                summarized_count = pl.get("summarized_count", 0)
+                return summary, summarized_count
+            logger.warning("[compact_partial_via_e2a] E2A failed: %s", resp.payload)
+        except Exception as e:
+            logger.warning("[compact_partial_via_e2a] E2A call failed: %s", e)
+
+        return None, 0
+
     async def _session_rewind(ws, req_id, params, session_id):
+        """session.rewind: E2A → AgentServer（权威写入者），fallback 本地."""
         from jiuwenswarm.agents.harness.common.session_ops_service import rewind_session
-        """session.rewind: 优先转发到 AgentServer（同时截断 history + context），失败则 fallback 本地仅截断 history."""
         from jiuwenswarm.common.schema.message import ReqMethod
 
         if not isinstance(params, dict):
@@ -1381,7 +1504,6 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
             )
             return
 
-        # 优先通过 E2A 转发到 AgentServer（同时处理 history + context 截断）
         if await _forward_rewind_e2a(
             ForwardRewindE2AParams(
                 ws=ws,
@@ -1394,8 +1516,6 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
         ):
             return
 
-        # Fallback: 仅本地截断 history.json（不含 context 截断）
-        from jiuwenswarm.agents.harness.common.session_ops_service import rewind_session
         try:
             result = rewind_session(session_id=target_sid, turn_index=turn_index)
             await channel.send_response(ws, req_id, ok=True, payload=result)
@@ -1422,12 +1542,11 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
             await channel.send_response(ws, req_id, ok=False, error=str(e), code="INTERNAL_ERROR")
 
     async def _session_rewind_and_restore(ws, req_id, params, session_id):
-        """session.rewind_and_restore: 截断对话 + 恢复文件."""
+        """session.rewind_and_restore: E2A → AgentServer（权威写入者），fallback 本地."""
         from jiuwenswarm.agents.harness.common.session_ops_service import (
             restore_session_files,
             rewind_session,
         )
-        """session.rewind_and_restore: 优先转发到 AgentServer（history + context + 文件恢复），失败则 fallback 本地."""
         from jiuwenswarm.common.schema.message import ReqMethod
 
         if not isinstance(params, dict):
@@ -1455,7 +1574,6 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
             )
             return
 
-        # 优先通过 E2A 转发到 AgentServer
         if await _forward_rewind_e2a(
             ForwardRewindE2AParams(
                 ws=ws,
@@ -1468,11 +1586,6 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
         ):
             return
 
-        # Fallback: 仅本地操作
-        from jiuwenswarm.agents.harness.common.session_ops_service import (
-            restore_session_files,
-            rewind_session,
-        )
         try:
             restore_result = restore_session_files(session_id=target_sid, turn_index=turn_index)
             rewind_result = rewind_session(session_id=target_sid, turn_index=turn_index)
@@ -1522,6 +1635,101 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
         except ValueError as e:
             await channel.send_response(ws, req_id, ok=False, error=str(e), code="BAD_REQUEST")
         except Exception as e:
+            await channel.send_response(ws, req_id, ok=False, error=str(e), code="INTERNAL_ERROR")
+
+    async def _command_rewind_compact(ws, req_id, params, session_id):
+        """command.rewind_compact: LLM 摘要(E2A→AgentServer) + 截断 + 记录写入(AgentServer E2A)。"""
+        if not isinstance(params, dict):
+            await channel.send_response(
+                ws, req_id, ok=False, error="params must be object", code="BAD_REQUEST"
+            )
+            return
+        target_sid = str(params.get("session_id") or session_id or "").strip()
+        turn_index = params.get("turn_index")
+        direction = str(params.get("direction") or "from").strip()
+        if not target_sid:
+            await channel.send_response(
+                ws, req_id, ok=False, error="session_id is required", code="BAD_REQUEST"
+            )
+            return
+        if turn_index is None:
+            await channel.send_response(
+                ws, req_id, ok=False, error="turn_index is required", code="BAD_REQUEST"
+            )
+            return
+        try:
+            turn_index = int(turn_index)
+        except (ValueError, TypeError):
+            await channel.send_response(
+                ws, req_id, ok=False, error="turn_index must be an integer", code="BAD_REQUEST"
+            )
+            return
+        if direction not in ("from", "up_to"):
+            await channel.send_response(
+                ws, req_id, ok=False, error="direction must be 'from' or 'up_to'", code="BAD_REQUEST"
+            )
+            return
+
+        try:
+            llm_summary, summarized_count = await _compact_partial_via_e2a(target_sid, turn_index, direction)
+        except Exception as e:
+            logger.warning("[cli command.rewind_compact] LLM summary failed: %s", e)
+            llm_summary = None
+            summarized_count = 0
+
+        # Step 2: Send rewind to AgentServer (truncation + agent-internal record writing)
+        from jiuwenswarm.common.e2a.gateway_normalize import e2a_from_agent_fields
+        from jiuwenswarm.common.schema.message import ReqMethod
+
+        real_client = (
+            agent_client.get("value")
+            if isinstance(agent_client, dict)
+            else agent_client
+        )
+        if real_client is not None:
+            try:
+                env = e2a_from_agent_fields(
+                    request_id=req_id,
+                    channel_id="tui",
+                    session_id=target_sid,
+                    req_method=ReqMethod.SESSION_REWIND_COMPACT,
+                    params={
+                        "session_id": target_sid,
+                        "turn_index": turn_index,
+                        "direction": direction,
+                        "compact_summary": llm_summary,
+                        "summarized_count": summarized_count,
+                    },
+                    is_stream=False,
+                    timestamp=time.time(),
+                )
+                resp = await real_client.send_request(env)
+                if resp.ok:
+                    pl = resp.payload if isinstance(resp.payload, dict) else {}
+                    pl["summary"] = llm_summary
+                    pl["summarized_messages"] = summarized_count
+                    await channel.send_response(ws, req_id, ok=True, payload=pl)
+                    return
+                logger.warning("[cli command.rewind_compact] E2A failed: %s", resp.payload)
+            except Exception as e:
+                logger.warning("[cli command.rewind_compact] E2A failed, fallback local: %s", e)
+
+        # Fallback: local truncation + record writing
+        try:
+            from jiuwenswarm.agents.harness.common.session_ops_service import compact_partial_session
+            result = compact_partial_session(
+                session_id=target_sid,
+                turn_index=turn_index,
+                direction=direction,
+                llm_summary=llm_summary,
+            )
+            result["summary"] = llm_summary
+            result["summarized_messages"] = summarized_count
+            await channel.send_response(ws, req_id, ok=True, payload=result)
+        except ValueError as e:
+            await channel.send_response(ws, req_id, ok=False, error=str(e), code="BAD_REQUEST")
+        except Exception as e:
+            logger.exception("[cli command.rewind_compact] %s", e)
             await channel.send_response(ws, req_id, ok=False, error=str(e), code="INTERNAL_ERROR")
 
     async def _session_rename(ws, req_id, params, session_id):
@@ -1630,6 +1838,85 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
             payload={"session_id": target, "accent_color": str(color)}
         )
 
+    async def _session_preview(ws, req_id, params, session_id):
+        """获取 session 预览信息，包括最新几条完整对话内容。"""
+        from jiuwenswarm.server.runtime.session.session_history import load_history_records
+
+        if not isinstance(params, dict):
+            await channel.send_response(
+                ws, req_id, ok=False, error="params must be object", code="BAD_REQUEST"
+            )
+            return
+        target = str(params.get("session_id") or session_id).strip()
+        if not target:
+            await channel.send_response(
+                ws, req_id, ok=False, error="session_id is required", code="BAD_REQUEST"
+            )
+            return
+
+        # 预览消息数量，默认 30 条
+        preview_count = 30
+        raw_count = params.get("count")
+        if isinstance(raw_count, int):
+            preview_count = max(1, min(raw_count, 100))
+        elif isinstance(raw_count, str) and raw_count.strip().isdigit():
+            preview_count = max(1, min(int(raw_count.strip()), 100))
+
+        # 读取历史记录（自动兼容 history.json 和 history.jsonl）
+        preview_messages = []
+        try:
+            raw = load_history_records(target)
+            if isinstance(raw, list):
+                # history.json 的写入很宽松：interface.py 中所有 event_type 以 "chat." 开头
+                # 的记录（外加 team.message）都会以 role="assistant" 落盘，因此历史里混有大量
+                # 非对话内容。预览只需展示真正代表"对话"的两类，用白名单显式放行：
+                #   - chat.final ：assistant 的完整最终回复（单人模式与团队成员回复都用它）
+                #   - team.message：团队消息
+                # 刻意排除（均非完整对话文本，纳入会造成碎片化/重复/噪声）：
+                #   - chat.delta（流式增量片段，内容已包含在 chat.final 中）
+                #   - chat.reasoning（思考过程）/ chat.tool_call / chat.tool_update / chat.tool_result
+                #   - chat.error / chat.processing_status / chat.usage_* / chat.media / chat.file 等
+                # 注：用白名单而非黑名单，是为了让将来新增的 chat.* 状态类型不会意外混入预览。
+                _chat_event_types = frozenset({
+                    "chat.final",  # assistant 最终回复
+                    "team.message",  # team 消息
+                })
+
+                def _is_previewable(item):
+                    if not isinstance(item, dict):
+                        return False
+                    role = item.get("role")
+                    content = item.get("content")
+                    has_content = isinstance(content, str) and bool(content.strip())
+                    if role == "user":
+                        return has_content
+                    # 非 user 记录只放行白名单内的对话类型（不依赖 role，
+                    # 以兼容团队成员回复可能带 teammate 等非 assistant role 的情况）
+                    event_type = item.get("event_type")
+                    if event_type in _chat_event_types:
+                        return has_content
+                    return False
+
+                previewable = [item for item in raw if _is_previewable(item)]
+                # 取时间顺序下最新的 N 条（保持原顺序：旧的在上、新的在下）
+                recent = previewable[-preview_count:]
+                for msg in recent:
+                    role = msg.get("role", "unknown")
+                    content = msg.get("content", "")
+                    event_type = msg.get("event_type", "")
+                    preview_messages.append({
+                        "role": role,
+                        "content": content if isinstance(content, str) else "",
+                        "event_type": event_type,
+                    })
+        except Exception as exc:
+            logger.warning("[session.preview] read history failed: %s", exc)
+
+        await channel.send_response(
+            ws, req_id, ok=True,
+            payload={"session_id": target, "preview_messages": preview_messages}
+        )
+
     async def _chat_send(ws, req_id, params, session_id):
         await channel.send_response(
             ws, req_id, ok=True, payload={"accepted": True, "session_id": session_id}
@@ -1684,6 +1971,28 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
             )
             return
 
+        async def _reload_model_config_background(config_payload: dict[str, Any], label: str) -> None:
+            _reload_env = e2a_from_agent_fields(
+                request_id=req_id,
+                channel_id="cli",
+                session_id=session_id,
+                req_method=ReqMethod.AGENT_RELOAD_CONFIG,
+                params={"config": config_payload, "env": {}},
+                is_stream=False,
+                timestamp=time.time(),
+            )
+            try:
+                await real_client.send_request(_reload_env)
+            except Exception as _e_reload:
+                logger.warning("[cli command.model] %s AGENT_RELOAD_CONFIG failed: %s", label, _e_reload)
+            if on_config_saved:
+                try:
+                    _cb = on_config_saved(set(), env_updates={}, config_payload=config_payload)
+                    if inspect.isawaitable(_cb):
+                        await _cb
+                except Exception as _e_saved:
+                    logger.warning("[cli command.model] %s on_config_saved failed: %s", label, _e_saved)
+
         if action == "add_model":
             target = str(params.get("target", "")).strip()
             configs = params.get("config", {})
@@ -1693,9 +2002,16 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
                 )
                 return
             client_cfg = {}
+            model_config_obj = configs.get("model_config_obj", {})
+            if not isinstance(model_config_obj, dict):
+                model_config_obj = {}
             key_map = {
                 "model": "model_name",
+                "model_name": "model_name",
                 "provider": "client_provider",
+                "model_provider": "client_provider",
+                "client_provider": "client_provider",
+                "reasoning_level": "reasoning_level",
                 "api_key": "api_key",
                 "key": "api_key",
                 "api_base": "api_base",
@@ -1710,19 +2026,40 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
             if "=" in target:
                 _eq = target.index("=")
                 _k, _v = target[:_eq].strip().lower(), target[_eq + 1:].strip()
-                client_cfg[key_map.get(_k, _k)] = _v
+                _mapped_target_key = key_map.get(_k, _k)
+                if _mapped_target_key == "reasoning_level":
+                    if _v:
+                        model_config_obj["reasoning_level"] = _v
+                else:
+                    client_cfg[_mapped_target_key] = _v
                 if _k in ("model", "model_name"):
                     target = _v
             for k, v in configs.items():
-                mapped_k = key_map.get(k.lower(), k)
+                mapped_k = key_map.get(str(k).lower(), str(k))
+                if mapped_k == "model_config_obj":
+                    continue
+                if mapped_k == "reasoning_level":
+                    if str(v).strip():
+                        model_config_obj["reasoning_level"] = str(v).strip()
+                    else:
+                        model_config_obj.pop("reasoning_level", None)
+                    continue
                 client_cfg[mapped_k] = v
             if "verify_ssl" not in client_cfg:
                 client_cfg["verify_ssl"] = False
             if "timeout" not in client_cfg:
                 client_cfg["timeout"] = 1800
-            model_cfg_obj = configs.get("model_config_obj", {})
-            if not model_cfg_obj:
-                model_cfg_obj = {"temperature": 0.95}
+            if "temperature" not in model_config_obj:
+                model_config_obj["temperature"] = 0.95
+            _reasoning_level = str(model_config_obj.get("reasoning_level", "")).strip()
+            if _reasoning_level and _reasoning_level not in {"off", "low", "medium", "high"}:
+                await channel.send_response(
+                    ws,
+                    req_id,
+                    ok=False,
+                    error="reasoning_level must be one of: off, low, medium, high",
+                )
+                return
             # target 作为 model_name 的回退：若未通过 model= 参数指定，则以 target 为准
             if not client_cfg.get("model_name"):
                 client_cfg["model_name"] = target
@@ -1734,7 +2071,7 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
 
             new_entry = {
                 "model_client_config": client_cfg,
-                "model_config_obj": model_cfg_obj,
+                "model_config_obj": model_config_obj,
             }
             new_entry["alias"] = effective_alias
             try:
@@ -1742,7 +2079,7 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
                 _raw_defs = ensure_defaults_list_in_config()
                 # 与web端一致：允许同名 model_name 多条目（不同 api_key/api_base 即为不同配置），
                 # 仅拒绝完全相同的配置重复添加（model_name + api_base + api_key 全部一致）
-                _is_duplicate = False
+                _has_same_config = False
                 _effective_api_base = resolve_env_vars(str(client_cfg.get("api_base", "")))
                 _effective_api_key = resolve_env_vars(str(client_cfg.get("api_key", "")))
                 for _e in _raw_defs:
@@ -1751,14 +2088,12 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
                     _emn = resolve_env_vars(str((_e.get("model_client_config") or {}).get("model_name", "")))
                     _eab = resolve_env_vars(str((_e.get("model_client_config") or {}).get("api_base", "")))
                     _eak = resolve_env_vars(str((_e.get("model_client_config") or {}).get("api_key", "")))
-                    _ea = resolve_env_vars(str(_e.get("alias", ""))) if _e.get("alias") else ""
                     _same_config = _emn == effective_name and _eab == _effective_api_base and _eak == _effective_api_key
-                    _same_alias = _ea and _ea == effective_alias
-                    if _same_config or _same_alias:
-                        _is_duplicate = True
+                    if _same_config:
+                        _has_same_config = True
                         break
                 # 完全重复时拒绝添加
-                if _is_duplicate:
+                if _has_same_config:
                     await channel.send_response(
                         ws, req_id, ok=False,
                         error=f"Model '{effective_name}' with the same api_base and api_key already exists",
@@ -1768,8 +2103,8 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
                 _required = {
                     "api_key": "api_key",
                     "api_base": "api_base",
-                    "model_name": "model_name/model",
-                    "client_provider": "client_provider/provider",
+                    "model_name": "model_name",
+                    "client_provider": "model_provider",
                 }
                 _missing = []
                 for field, display in _required.items():
@@ -1782,7 +2117,7 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
                         f"Required fields missing: {', '.join(_missing)}. "
                         f"Usage: /model add <name> "
                         f"api_base=xxx api_key=xxx "
-                        f"model=<name> provider=<provider>"
+                        f"model=<name> model_provider=<provider>"
                     )
                     await channel.send_response(
                         ws, req_id, ok=False,
@@ -1813,25 +2148,162 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
                 logger.info(
                     "[cli command.model] 新增模型: name=%s, "
                     "client_cfg=%s, model_config_obj=%s",
-                    effective_name, client_cfg, model_cfg_obj,
+                    effective_name, client_cfg, model_config_obj,
                 )
             except Exception as e:
                 await channel.send_response(ws, req_id, ok=False, error=str(e))
                 return
-            _reload_env = e2a_from_agent_fields(
-                request_id=req_id,
-                channel_id="cli",
-                session_id=session_id,
-                req_method=ReqMethod.AGENT_RELOAD_CONFIG,
-                params={},
-                is_stream=False,
-                timestamp=time.time(),
-            )
-            await real_client.send_request(_reload_env)
+            _config_payload = get_config()
+            await _reload_model_config_background(_config_payload, "model.add")
             await channel.send_response(
                 ws, req_id, ok=True,
                 payload={"type": "model_added", "name": target},
             )
+            return
+
+        if action == "update_model":
+            configs = params.get("config", {})
+            if not isinstance(configs, dict):
+                await channel.send_response(ws, req_id, ok=False, error="config must be object")
+                return
+            try:
+                _idx = int(model_index)
+            except (ValueError, TypeError):
+                await channel.send_response(ws, req_id, ok=False, error="index is required")
+                return
+            _raw_defs = ensure_defaults_list_in_config()
+            if _idx < 0 or _idx >= len(_raw_defs) or not isinstance(_raw_defs[_idx], dict):
+                await channel.send_response(ws, req_id, ok=False, error="model index not found")
+                return
+
+            _entry = _raw_defs[_idx]
+            _client_cfg = _entry.get("model_client_config")
+            if not isinstance(_client_cfg, dict):
+                _client_cfg = {}
+                _entry["model_client_config"] = _client_cfg
+            key_map = {
+                "model": "model_name",
+                "model_name": "model_name",
+                "provider": "client_provider",
+                "model_provider": "client_provider",
+                "client_provider": "client_provider",
+                "reasoning_level": "reasoning_level",
+                "api_key": "api_key",
+                "key": "api_key",
+                "api_base": "api_base",
+                "url": "api_base",
+                "base_url": "api_base",
+                "timeout": "timeout",
+                "verify_ssl": "verify_ssl",
+                "ssl_cert": "ssl_cert",
+                "alias": "alias",
+            }
+            _model_cfg_obj = _entry.get("model_config_obj")
+            if not isinstance(_model_cfg_obj, dict):
+                _model_cfg_obj = {}
+                _entry["model_config_obj"] = _model_cfg_obj
+            for k, v in configs.items():
+                mapped_k = key_map.get(str(k).lower(), str(k))
+                if mapped_k == "alias":
+                    _entry["alias"] = str(v).strip()
+                elif mapped_k == "reasoning_level":
+                    _reasoning_level = str(v).strip()
+                    if _reasoning_level:
+                        _model_cfg_obj["reasoning_level"] = _reasoning_level
+                    else:
+                        _model_cfg_obj.pop("reasoning_level", None)
+                elif mapped_k == "model_config_obj":
+                    continue
+                else:
+                    _client_cfg[mapped_k] = v
+            _reasoning_level = str(_model_cfg_obj.get("reasoning_level", "")).strip()
+            if _reasoning_level and _reasoning_level not in {"off", "low", "medium", "high"}:
+                await channel.send_response(
+                    ws,
+                    req_id,
+                    ok=False,
+                    error="reasoning_level must be one of: off, low, medium, high",
+                )
+                return
+            if "verify_ssl" not in _client_cfg:
+                _client_cfg["verify_ssl"] = False
+            if "timeout" not in _client_cfg:
+                _client_cfg["timeout"] = 1800
+
+            _missing_fields = []
+            for _req_field, _display in [
+                ("api_key", "api_key"),
+                ("api_base", "api_base"),
+                ("model_name", "model_name"),
+                ("client_provider", "model_provider"),
+            ]:
+                _val = resolve_env_vars(str(_client_cfg.get(_req_field, "")))
+                if not _val:
+                    _missing_fields.append(_display)
+            if _missing_fields:
+                await channel.send_response(
+                    ws, req_id, ok=False,
+                    error=f"Model missing required config: {', '.join(_missing_fields)}",
+                )
+                return
+
+            _effective_alias = resolve_env_vars(str(_entry.get("alias", ""))) if _entry.get("alias") else ""
+            if _effective_alias:
+                for _other_idx, _other in enumerate(_raw_defs):
+                    if _other_idx == _idx or not isinstance(_other, dict):
+                        continue
+                    _other_mn = resolve_env_vars(str((_other.get("model_client_config") or {}).get("model_name", "")))
+                    _other_alias = resolve_env_vars(str(_other.get("alias", ""))) if _other.get("alias") else ""
+                    if _other_alias == _effective_alias:
+                        await channel.send_response(
+                            ws, req_id, ok=False,
+                            error=f"Alias '{_effective_alias}' is already used by model '{_other_mn}'",
+                        )
+                        return
+                    if _other_mn == _effective_alias:
+                        await channel.send_response(
+                            ws, req_id, ok=False,
+                            error=f"Alias '{_effective_alias}' conflicts with model name '{_other_mn}'",
+                        )
+                        return
+
+            update_default_models_in_config(_raw_defs)
+            _updated_name = resolve_env_vars(str(_client_cfg.get("model_name", "")))
+            _current_name = resolve_env_vars(str((_raw_defs[0].get("model_client_config") or {}).get("model_name", "")))
+            _config_payload = get_config()
+            await _reload_model_config_background(_config_payload, "model.update")
+            await channel.send_response(ws, req_id, ok=True, payload={
+                "type": "model_updated",
+                "name": _updated_name,
+                "index": _idx,
+                "current": _current_name,
+            })
+            return
+
+        if action == "delete_model":
+            try:
+                _idx = int(model_index)
+            except (ValueError, TypeError):
+                await channel.send_response(ws, req_id, ok=False, error="index is required")
+                return
+            _raw_defs = ensure_defaults_list_in_config()
+            if len(_raw_defs) <= 1:
+                await channel.send_response(ws, req_id, ok=False, error="Cannot delete the last model")
+                return
+            if _idx < 0 or _idx >= len(_raw_defs) or not isinstance(_raw_defs[_idx], dict):
+                await channel.send_response(ws, req_id, ok=False, error="model index not found")
+                return
+            _removed = _raw_defs.pop(_idx)
+            update_default_models_in_config(_raw_defs)
+            _removed_name = resolve_env_vars(str((_removed.get("model_client_config") or {}).get("model_name", "")))
+            _current_name = resolve_env_vars(str((_raw_defs[0].get("model_client_config") or {}).get("model_name", "")))
+            _config_payload = get_config()
+            await _reload_model_config_background(_config_payload, "model.delete")
+            await channel.send_response(ws, req_id, ok=True, payload={
+                "type": "model_deleted",
+                "name": _removed_name,
+                "current": _current_name,
+            })
             return
 
         if not model_name or not str(model_name).strip():
@@ -1858,10 +2330,25 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
                     {
                         "name": resolve_env_vars(str(e.get("alias", ""))) or
                                 resolve_env_vars(str((e.get("model_client_config") or {}).get("model_name", ""))),
+                        "alias": resolve_env_vars(str(e.get("alias", ""))) if e.get("alias") else "",
                         "model_name": resolve_env_vars(str((e.get("model_client_config") or {}).get("model_name", ""))),
+                        "model_provider": resolve_env_vars(
+                            str((e.get("model_client_config") or {}).get("client_provider", ""))),
                         "api_base": resolve_env_vars(str((e.get("model_client_config") or {}).get("api_base", ""))),
+                        "reasoning_level": resolve_env_vars(
+                            str((e.get("model_config_obj") or {}).get("reasoning_level", ""))),
+                        "api_key_prefix": (
+                            resolve_env_vars(
+                                str((e.get("model_client_config") or {}).get("api_key", ""))
+                            )[:8]
+                            if resolve_env_vars(
+                                str((e.get("model_client_config") or {}).get("api_key", ""))
+                            )
+                            else ""
+                        ),
+                        "is_current": i == 0,
                     }
-                    for e in _defs if isinstance(e, dict)
+                    for i, e in enumerate(_defs) if isinstance(e, dict)
                 ]
             else:
                 payload["current"] = os.getenv("MODEL_NAME", "unknown")
@@ -1869,7 +2356,7 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
             return
 
         target = str(model_name).strip()
-        logger.info("[cli command.model] 切换模型: target=%s", target)
+        logger.info("[cli command.model] 切换模型: target=%s, model_index=%s, params=%s", target, model_index, params)
         _raw_defs_check = (get_config_raw().get("models") or {}).get("defaults") or []
         _valid_names: set[str] = set()
         for _e in _raw_defs_check:
@@ -1959,6 +2446,17 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
                 error=f"Model '{target}' missing required config: {', '.join(_missing_fields)}",
             )
             return
+        # 切换后确保目标条目 is_default=True，清除其他同名模型的 is_default
+        # AgentServer 用 is_default=True 确定默认模型，defaults[0] 位置不够——同名模型
+        # 需靠 is_default 标记来区分哪个是当前激活的
+        _target_model_name_resolved = resolve_env_vars(str(_target_mcc.get("model_name", "")))
+        _target_entry["is_default"] = True
+        for _e in _other_entries:
+            if isinstance(_e, dict):
+                _other_mcc = _e.get("model_client_config") or {}
+                _other_name = resolve_env_vars(str(_other_mcc.get("model_name", "")))
+                if _other_name == _target_model_name_resolved and _e.get("is_default") is True:
+                    _e["is_default"] = False
         update_default_models_in_config([_target_entry] + _other_entries)
         logger.info("[cli command.model] 切换，已更新 models.defaults 首位: %s", target)
         _target_model_name = resolve_env_vars(
@@ -1974,13 +2472,15 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
         })
 
         # 后台触发 AgentServer reload + on_config_saved（不阻塞 WS 消息循环）
+        _config_payload = get_config()
+
         async def _model_switch_background():
             _reload_env = e2a_from_agent_fields(
                 request_id=req_id,
                 channel_id="cli",
                 session_id=session_id,
                 req_method=ReqMethod.AGENT_RELOAD_CONFIG,
-                params={},
+                params={"config": _config_payload, "env": {}},
                 is_stream=False,
                 timestamp=time.time(),
             )
@@ -1990,7 +2490,7 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
                 logger.warning("[cli model.switch] AGENT_RELOAD_CONFIG failed: %s", _e_reload)
             if on_config_saved:
                 try:
-                    _cb = on_config_saved(set(), env_updates={}, config_payload=get_config())
+                    _cb = on_config_saved(set(), env_updates={}, config_payload=_config_payload)
                     if inspect.isawaitable(_cb):
                         await _cb
                 except Exception as _e2:
@@ -2022,6 +2522,7 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
                     "api_key": mcc.get("api_key", ""),
                     "model_provider": mcc.get("client_provider", ""),
                     "temperature": mco.get("temperature", 0.95),
+                    "reasoning_level": "off" if mco.get("reasoning_level") is False else mco.get("reasoning_level", ""),
                     "alias": entry.get("alias", ""),
                     "context_window_tokens": context_window_tokens,
                 })
@@ -2043,9 +2544,11 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
     channel.register_local_handler(path, "session.delete", _session_delete)
     channel.register_local_handler(path, "session.rename", _session_rename)
     channel.register_local_handler(path, "session.color_set", _session_color_set)
+    channel.register_local_handler(path, "session.preview", _session_preview)
     channel.register_local_handler(path, "session.rewind", _session_rewind)
     channel.register_local_handler(path, "session.rewind_and_restore", _session_rewind_and_restore)
     channel.register_local_handler(path, "session.restore_files", _session_restore_files)
+    channel.register_local_handler(path, "command.rewind_compact", _command_rewind_compact)
     channel.register_local_handler(path, "history.list_turns", _history_list_turns)
     channel.register_local_handler(path, "chat.send", _chat_send)
     channel.register_local_handler(path, "chat.resume", _chat_resume)
@@ -2179,6 +2682,17 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
             logger.warning("[cron.job.list] %s", exc)
             await channel.send_response(ws, req_id, ok=False, error=str(exc), code="INTERNAL_ERROR")
 
+    async def _cron_job_meta(ws, req_id, params, session_id):
+        cc = _get_cron()
+        if cc is None:
+            await channel.send_response(ws, req_id, ok=False, error="cron not available", code="INTERNAL_ERROR")
+            return
+        try:
+            await channel.send_response(ws, req_id, ok=True, payload=cc.job_metadata())
+        except Exception as exc:
+            logger.warning("[cron.job.meta] %s", exc)
+            await channel.send_response(ws, req_id, ok=False, error=str(exc), code="INTERNAL_ERROR")
+
     async def _cron_job_get(ws, req_id, params, session_id):
         cc = _get_cron()
         if cc is None:
@@ -2237,8 +2751,15 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
         try:
             job = await cc.update_job(job_id, patch)
             await channel.send_response(ws, req_id, ok=True, payload={"job": job})
-        except KeyError:
-            await channel.send_response(ws, req_id, ok=False, error="job not found", code="NOT_FOUND")
+        except KeyError as exc:
+            # ZoneInfoNotFoundError is a subclass of KeyError; only treat
+            # bare "job not found" KeyError as NOT_FOUND, otherwise surface
+            # the real error message.
+            if "job not found" in str(exc):
+                await channel.send_response(ws, req_id, ok=False, error="job not found", code="NOT_FOUND")
+            else:
+                logger.warning("[cron.job.update] %s", exc)
+                await channel.send_response(ws, req_id, ok=False, error=str(exc), code="BAD_REQUEST")
         except Exception as exc:
             logger.warning("[cron.job.update] %s", exc)
             await channel.send_response(ws, req_id, ok=False, error=str(exc), code="BAD_REQUEST")
@@ -2334,6 +2855,7 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
             await channel.send_response(ws, req_id, ok=False, error=str(exc), code="INTERNAL_ERROR")
 
     channel.register_local_handler(path, "cron.job.list", _cron_job_list)
+    channel.register_local_handler(path, "cron.job.meta", _cron_job_meta)
     channel.register_local_handler(path, "cron.job.get", _cron_job_get)
     channel.register_local_handler(path, "cron.job.create", _cron_job_create)
     channel.register_local_handler(path, "cron.job.update", _cron_job_update)

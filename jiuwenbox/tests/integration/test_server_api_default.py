@@ -2,12 +2,16 @@
 """Integration tests for box-server API endpoints."""
 
 import copy
+import ipaddress
+import json
 import logging
 import posixpath
+import re
 import socket
 import textwrap
 import time
 import uuid
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 import httpx
@@ -16,6 +20,7 @@ import yaml
 
 from jiuwenbox.bundled_configs import default_policy_path
 from jiuwenbox.models.policy import SecurityPolicy
+from jiuwenbox.models.sandbox import JOB_ID_FORMAT_MESSAGE, SANDBOX_ID_FORMAT_MESSAGE
 from jiuwenbox.supervisor import network as network_module
 from jiuwenbox.supervisor.bwrap import BwrapConfig
 
@@ -195,6 +200,91 @@ def _unused_host_network_tcp_port_from_sandbox(client, sandbox_id: str) -> int:
     return int(data["stdout"].strip())
 
 
+def _isolated_network_policy(*, uplink_subnet: str = "") -> dict:
+    network = {
+        "mode": "isolated",
+        "egress": {"default": "allow"},
+    }
+    if uplink_subnet:
+        network["uplink"] = {"subnet": uplink_subnet}
+    return {
+        "name": "uplink-test-policy",
+        "filesystem_policy": {
+            "read_only": ["/usr", "/lib", "/lib64", "/etc", "/opt"],
+            "read_write": ["/tmp"],
+        },
+        "network": network,
+    }
+
+
+_UPLINK_INFO_SCRIPT = textwrap.dedent(
+    """
+    import ipaddress
+    import json
+    import re
+    import subprocess
+    import sys
+
+    def run_ip(args):
+        try:
+            return subprocess.check_output(
+                ["ip", *args],
+                stderr=subprocess.DEVNULL,
+                text=True,
+            )
+        except (FileNotFoundError, subprocess.CalledProcessError):
+            return ""
+
+    default_route = run_ip(["-4", "route", "show", "default"])
+    dev_match = re.search(r"dev\\s+(\\S+)", default_route)
+    if not dev_match:
+        sys.exit(1)
+    device = dev_match.group(1)
+
+    addr_output = run_ip(["-4", "-o", "addr", "show", "dev", device])
+    inet_match = re.search(r"inet\\s+(\\d+\\.\\d+\\.\\d+\\.\\d+)/(\\d+)", addr_output)
+    if not inet_match:
+        sys.exit(2)
+    sandbox_ip = ipaddress.IPv4Address(inet_match.group(1))
+    prefix_len = int(inet_match.group(2))
+
+    gateway_match = re.search(r"via\\s+(\\d+\\.\\d+\\.\\d+\\.\\d+)", default_route)
+    if not gateway_match:
+        sys.exit(3)
+    gateway = ipaddress.IPv4Address(gateway_match.group(1))
+
+    block = ipaddress.ip_network(f"{sandbox_ip}/{prefix_len}", strict=False)
+    print(json.dumps({
+        "block": str(block),
+        "sandbox_ip": str(sandbox_ip),
+        "gateway": str(gateway),
+    }))
+    """
+).strip()
+
+
+def _uplink_info_from_sandbox(
+    client,
+    sandbox_id: str,
+) -> tuple[ipaddress.IPv4Network, ipaddress.IPv4Address, ipaddress.IPv4Address]:
+    """Read uplink /30 details from inside the sandbox (works when server runs in a container)."""
+    response = client.post(f"/api/v1/sandboxes/{sandbox_id}/exec", json={
+        "command": ["python3", "-c", _UPLINK_INFO_SCRIPT],
+        "timeout_seconds": 5,
+    })
+    assert response.status_code == 200, response.text
+    data = response.json()
+    assert data["exit_code"] == 0, data
+    payload = json.loads(data["stdout"])
+    block = ipaddress.ip_network(payload["block"], strict=False)
+    sandbox_ip = ipaddress.IPv4Address(payload["sandbox_ip"])
+    gateway = ipaddress.IPv4Address(payload["gateway"])
+    assert block.prefixlen == 30, block
+    assert sandbox_ip == block.network_address + 2, (sandbox_ip, block)
+    assert gateway == block.network_address + 1, (gateway, block)
+    return block, sandbox_ip, gateway
+
+
 def _capability_check_script(cap_bit: int) -> str:
     return textwrap.dedent(
         f"""
@@ -310,7 +400,6 @@ def client(server_endpoint):
 def create_sandbox_with_policy(client):
     def factory(
         *,
-        name_prefix: str,
         policy: dict,
         policy_mode: str = "override",
     ) -> dict:
@@ -393,6 +482,82 @@ class TestSandboxCRUD:
         resp = client.get(f"/api/v1/sandboxes/{sandbox_id}")
         assert resp.status_code == 404
 
+    @staticmethod
+    def test_create_sandbox_auto_generated_id_format(client):
+        resp = client.post("/api/v1/sandboxes", json={})
+        assert resp.status_code == 201, resp.text
+        sandbox_id = resp.json()["id"]
+        assert re.fullmatch(r"^[0-9a-f]{8}-[0-9a-f]{3}$", sandbox_id), sandbox_id
+
+    @staticmethod
+    def test_create_sandbox_with_custom_id(client):
+        custom_id = f"my-sb_{uuid.uuid4().hex[:6]}"
+        resp = client.post("/api/v1/sandboxes", json={"sandbox_id": custom_id})
+        assert resp.status_code == 201, resp.text
+        assert resp.json()["id"] == custom_id
+
+    @staticmethod
+    def test_create_sandbox_with_custom_id_abcd(client):
+        custom_id = f"abcd-{uuid.uuid4().hex[:4]}"
+        resp = client.post("/api/v1/sandboxes", json={"sandbox_id": custom_id})
+        assert resp.status_code == 201, resp.text
+        assert resp.json()["id"] == custom_id
+
+    @staticmethod
+    def test_create_sandbox_empty_sandbox_id_generates(client):
+        resp = client.post("/api/v1/sandboxes", json={"sandbox_id": ""})
+        assert resp.status_code == 201, resp.text
+        sandbox_id = resp.json()["id"]
+        assert re.fullmatch(r"^[0-9a-f]{8}-[0-9a-f]{3}$", sandbox_id), sandbox_id
+
+    @staticmethod
+    @pytest.mark.parametrize(
+        "invalid_id",
+        [
+            "abc",
+            "ABC123",
+            "my sb",
+            " abcd ",
+            "a" * 17,
+            "id!",
+        ],
+    )
+    def test_create_sandbox_rejects_invalid_custom_id(client, invalid_id):
+        resp = client.post("/api/v1/sandboxes", json={"sandbox_id": invalid_id})
+        assert resp.status_code == 400, resp.text
+        assert SANDBOX_ID_FORMAT_MESSAGE in resp.json()["error"]
+
+    @staticmethod
+    def test_create_sandbox_rejects_duplicate_id(client):
+        custom_id = f"dup-{uuid.uuid4().hex[:4]}"
+        first = client.post("/api/v1/sandboxes", json={"sandbox_id": custom_id})
+        assert first.status_code == 201, first.text
+
+        second = client.post("/api/v1/sandboxes", json={"sandbox_id": custom_id})
+        assert second.status_code == 409, second.text
+        assert custom_id in second.json()["error"]
+
+    @staticmethod
+    def test_create_sandbox_concurrent_duplicate_id(server_endpoint):
+        custom_id = f"race-{uuid.uuid4().hex[:4]}"
+
+        def _create() -> httpx.Response:
+            with _build_httpx_client(server_endpoint, timeout=30.0) as thread_client:
+                return thread_client.post(
+                    "/api/v1/sandboxes",
+                    json={"sandbox_id": custom_id},
+                )
+
+        try:
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                futures = [pool.submit(_create) for _ in range(2)]
+                statuses = sorted(f.result().status_code for f in as_completed(futures))
+
+            assert statuses == [201, 409], statuses
+        finally:
+            with _build_httpx_client(server_endpoint, timeout=30.0) as cleanup_client:
+                cleanup_client.delete(f"/api/v1/sandboxes/{custom_id}")
+
 
 class TestSandboxLifecycle:
     @staticmethod
@@ -429,12 +594,10 @@ class TestSandboxLifecycle:
     @staticmethod
     def test_sandbox_process_cannot_target_sandbox_daemon(client):
         # The long-running daemon shares the sandbox PID namespace with
-        # user-spawned children (the daemon is PID 1 in that namespace).
-        # The kernel protects PID 1 of a namespace from in-namespace senders
-        # for any signal that PID 1 has not registered a handler for; the
-        # daemon registers no handlers, so SIGTERM/SIGINT/SIGKILL from user
-        # code must all be silently dropped and the daemon must continue to
-        # service requests.
+        # user-spawned children.  bwrap's monitor is typically PID 1 and
+        # the daemon is PID 2; seccomp blocks kill-family syscalls that
+        # target those PIDs (plus broadcast/process-group forms), and each
+        # exec runs in its own session so kill(0) cannot reach the daemon.
         create_resp = client.post("/api/v1/sandboxes", json={})
         assert create_resp.status_code == 201
         sandbox = create_resp.json()
@@ -455,24 +618,35 @@ class TestSandboxLifecycle:
                     targets = [signal.SIGTERM, signal.SIGINT, signal.SIGKILL,
                                signal.SIGHUP, signal.SIGUSR1, signal.SIGUSR2]
                     delivered = []
-                    for sig in targets:
+                    for pid in (1, 2):
+                        for sig in targets:
+                            try:
+                                os.kill(pid, sig)
+                            except ProcessLookupError:
+                                delivered.append(f"missing:{pid}:{sig}")
+                            except PermissionError:
+                                continue
+                            except OSError as exc:
+                                delivered.append(f"error:{pid}:{sig}:{exc.errno}")
+                    for pid in (0, -1, -2):
                         try:
-                            os.kill(1, sig)
+                            os.kill(pid, signal.SIGKILL)
                         except ProcessLookupError:
-                            delivered.append(f"missing:{sig}")
+                            delivered.append(f"missing:{pid}")
                         except PermissionError:
                             continue
                         except OSError as exc:
-                            delivered.append(f"error:{sig}:{exc.errno}")
+                            delivered.append(f"error:{pid}:{exc.errno}")
                     time.sleep(0.5)
 
-                    try:
-                        os.kill(1, 0)
-                    except ProcessLookupError:
-                        print("daemon-killed")
-                        sys.exit(1)
-                    except PermissionError:
-                        pass
+                    for pid in (1, 2):
+                        try:
+                            os.kill(pid, 0)
+                        except ProcessLookupError:
+                            print(f"daemon-killed:{pid}")
+                            sys.exit(1)
+                        except PermissionError:
+                            pass
 
                     if delivered:
                         print(f"unexpected:{','.join(delivered)}")
@@ -487,6 +661,21 @@ class TestSandboxLifecycle:
         kill_data = kill_resp.json()
         assert kill_data["exit_code"] == 0, kill_data
         assert kill_data["stdout"].strip() == "daemon-survived"
+
+        shell_kill_resp = client.post(f"/api/v1/sandboxes/{sandbox_id}/exec", json={
+            "command": [
+                "sh",
+                "-c",
+                "kill -9 1 2>/dev/null; kill -9 2 2>/dev/null; "
+                "kill -9 0 2>/dev/null; kill -9 -1 2>/dev/null; "
+                "kill -9 -2 2>/dev/null; echo daemon-survived",
+            ],
+            "timeout_seconds": 10,
+        })
+        assert shell_kill_resp.status_code == 200
+        shell_kill_data = shell_kill_resp.json()
+        assert shell_kill_data["exit_code"] == 0, shell_kill_data
+        assert shell_kill_data["stdout"].strip() == "daemon-survived"
 
         status_resp = client.get(f"/api/v1/sandboxes/{sandbox_id}")
         assert status_resp.status_code == 200
@@ -503,12 +692,11 @@ class TestSandboxLifecycle:
 
     @staticmethod
     def test_sandbox_process_cannot_inspect_sandbox_daemon_memory(client):
-        # PID 1 of the sandbox PID namespace is the long-running daemon.
-        # Reading the daemon's address space (``/proc/1/mem``) requires
-        # CAP_SYS_PTRACE (stripped by the default policy) and
-        # ``ptrace(PTRACE_ATTACH, 1)`` is blocked by seccomp. Together
-        # these prevent a sandboxed process from extracting secrets from
-        # or hijacking the long-running daemon.
+        # The sandbox infrastructure occupies PID 1/2 (bwrap monitor and
+        # daemon). Reading either process' address space requires
+        # CAP_SYS_PTRACE (stripped by the default policy), and ptrace attach is
+        # blocked by seccomp. Together these prevent a sandboxed process from
+        # extracting secrets from or hijacking the long-running daemon.
         create_resp = client.post("/api/v1/sandboxes", json={})
         assert create_resp.status_code == 201
         sandbox = create_resp.json()
@@ -521,34 +709,36 @@ class TestSandboxLifecycle:
             import os
             import sys
 
-            try:
-                fd = os.open('/proc/1/mem', os.O_RDONLY)
-            except PermissionError:
-                pass
-            except FileNotFoundError:
-                pass
-            else:
+            for pid in (1, 2):
                 try:
-                    os.read(fd, 16)
+                    fd = os.open(f'/proc/{pid}/mem', os.O_RDONLY)
                 except PermissionError:
-                    pass
+                    continue
+                except FileNotFoundError:
+                    continue
+                else:
+                    try:
+                        os.read(fd, 16)
+                    except PermissionError:
+                        pass
+                    except OSError:
+                        pass
+                    else:
+                        os.close(fd)
+                        print(f'infrastructure-memory-readable:{pid}')
+                        sys.exit(2)
+                    os.close(fd)
+
+            libc = ctypes.CDLL('libc.so.6', use_errno=True)
+            PTRACE_ATTACH = 16
+            for pid in (1, 2):
+                try:
+                    rc = libc.ptrace(PTRACE_ATTACH, pid, 0, 0)
+                    if rc == 0:
+                        print(f'infrastructure-ptraceable:{pid}')
+                        sys.exit(3)
                 except OSError:
                     pass
-                else:
-                    os.close(fd)
-                    print('daemon-memory-readable')
-                    sys.exit(2)
-                os.close(fd)
-
-            try:
-                libc = ctypes.CDLL('libc.so.6', use_errno=True)
-                PTRACE_ATTACH = 16
-                rc = libc.ptrace(PTRACE_ATTACH, 1, 0, 0)
-                if rc == 0:
-                    print('daemon-ptraceable')
-                    sys.exit(3)
-            except OSError:
-                pass
 
             print('daemon-protected')
             """
@@ -561,6 +751,111 @@ class TestSandboxLifecycle:
         data = response.json()
         assert data["exit_code"] == 0, data
         assert data["stdout"].strip() == "daemon-protected"
+
+    @staticmethod
+    def test_default_policy_seccomp_allows_sandbox_startup(client):
+        # End-to-end regression for the seccomp BPF chain: the default policy
+        # blocks many syscalls and uses isolated networking. A malformed filter
+        # used to make bwrap exit with SIGSEGV (code 139) before the daemon
+        # printed anything, leaving the sandbox stuck in ``error``.
+        create_resp = client.post("/api/v1/sandboxes", json={})
+        assert create_resp.status_code == 201
+        sandbox = create_resp.json()
+        assert sandbox["phase"] == "ready", sandbox
+        assert sandbox.get("error_message") in (None, ""), sandbox
+
+        exec_resp = client.post(f"/api/v1/sandboxes/{sandbox['id']}/exec", json={
+            "command": ["echo", "seccomp-ok"],
+            "timeout_seconds": 5,
+        })
+        assert exec_resp.status_code == 200
+        exec_data = exec_resp.json()
+        assert exec_data["exit_code"] == 0, exec_data
+        assert exec_data["stdout"].strip() == "seccomp-ok"
+
+    @staticmethod
+    def test_default_policy_blocked_syscall_is_enforced(client):
+        # Prove the installed default-policy seccomp filter still denies blocked
+        # syscalls at exec time (not only at sandbox startup).
+        create_resp = client.post("/api/v1/sandboxes", json={})
+        assert create_resp.status_code == 201
+        sandbox = create_resp.json()
+        assert sandbox["phase"] == "ready", sandbox
+        sandbox_id = sandbox["id"]
+
+        response = client.post(f"/api/v1/sandboxes/{sandbox_id}/exec", json={
+            "command": [
+                "python3",
+                "-c",
+                textwrap.dedent(
+                    """
+                    import ctypes
+                    import errno
+                    import platform
+                    import sys
+
+                    syscall_numbers = {
+                        "x86_64": 165,
+                        "AMD64": 165,
+                        "aarch64": 40,
+                    }
+                    nr = syscall_numbers.get(platform.machine())
+                    if nr is None:
+                        print(f"unsupported-arch:{platform.machine()}")
+                        sys.exit(2)
+
+                    libc = ctypes.CDLL("libc.so.6", use_errno=True)
+                    libc.syscall.restype = ctypes.c_long
+                    ctypes.set_errno(0)
+                    result = libc.syscall(nr)
+                    err = ctypes.get_errno()
+                    if result == -1 and err == errno.EPERM:
+                        print("syscall-blocked")
+                        sys.exit(7)
+
+                    print(f"unexpected-success:{result}:{err}")
+                    """
+                ).strip(),
+            ],
+            "timeout_seconds": 5,
+        })
+        assert response.status_code == 200
+        data = response.json()
+        assert data["exit_code"] == 7, data
+        assert "syscall-blocked" in data["stdout"]
+        assert "unexpected-success" not in data["stdout"]
+
+    @staticmethod
+    def test_sandbox_process_can_kill_unprotected_child(client):
+        # Seccomp only guards infrastructure PIDs (0/1/2 and broadcast forms).
+        # User payloads must still be able to signal their own children.
+        create_resp = client.post("/api/v1/sandboxes", json={})
+        assert create_resp.status_code == 201
+        sandbox = create_resp.json()
+        assert sandbox["phase"] == "ready", sandbox
+        sandbox_id = sandbox["id"]
+
+        kill_child_resp = client.post(f"/api/v1/sandboxes/{sandbox_id}/exec", json={
+            "command": [
+                "sh",
+                "-c",
+                "sleep 30 & pid=$!; "
+                "kill -0 $pid || exit 11; "
+                "kill -9 $pid || exit 12; "
+                "wait $pid; "
+                "echo killed:$pid",
+            ],
+            "timeout_seconds": 10,
+        })
+        assert kill_child_resp.status_code == 200
+        kill_child_data = kill_child_resp.json()
+        assert kill_child_data["exit_code"] == 0, kill_child_data
+        assert kill_child_data["stdout"].strip().startswith("killed:")
+        assert "Operation not permitted" not in kill_child_data["stderr"]
+
+        status_resp = client.get(f"/api/v1/sandboxes/{sandbox_id}")
+        assert status_resp.status_code == 200
+        assert status_resp.json()["phase"] == "ready", status_resp.json()
 
     @staticmethod
     def test_get_logs(client):
@@ -612,7 +907,7 @@ class TestPolicyAPI:
         }
         assert data["capabilities"] == {"add": [], "drop": []}
         assert data["landlock"]["compatibility"] == "best_effort"
-        assert data["network"]["mode"] == "host"
+        assert data["network"]["mode"] == "isolated"
         assert data["network"]["egress"]["allowed_domains"] == ["baidu.com"]
         assert data["network"]["egress"]["allowed_ips"] == ["127.0.0.1/32", "::1/128"]
         assert data["network"]["egress"]["blocked_ips"] == ["169.254.169.254/32"]
@@ -1149,7 +1444,6 @@ class TestPolicyEnforcement:
         create_sandbox_with_policy,
     ):
         sandbox = create_sandbox_with_policy(
-            name_prefix="fs-rw",
             policy={
                 "name": "fs-rw-policy",
                 "filesystem_policy": {
@@ -1183,7 +1477,6 @@ class TestPolicyEnforcement:
         create_sandbox_with_policy,
     ):
         sandbox = create_sandbox_with_policy(
-            name_prefix="fs-ro",
             policy={
                 "name": "fs-ro-policy",
                 "filesystem_policy": {
@@ -1210,7 +1503,6 @@ class TestPolicyEnforcement:
         create_sandbox_with_policy,
     ):
         sandbox = create_sandbox_with_policy(
-            name_prefix="fs-dir",
             policy={
                 "name": "fs-dir-policy",
                 "filesystem_policy": {
@@ -1255,7 +1547,6 @@ class TestPolicyEnforcement:
         create_sandbox_with_policy,
     ):
         sandbox = create_sandbox_with_policy(
-            name_prefix="fs-nested-dir",
             policy={
                 "name": "fs-nested-dir-policy",
                 "filesystem_policy": {
@@ -1303,7 +1594,6 @@ class TestPolicyEnforcement:
         create_sandbox_with_policy,
     ):
         sandbox = create_sandbox_with_policy(
-            name_prefix="fs-file",
             policy={
                 "name": "fs-file-policy",
                 "filesystem_policy": {
@@ -1354,7 +1644,6 @@ class TestPolicyEnforcement:
         create_sandbox_with_policy,
     ):
         sandbox = create_sandbox_with_policy(
-            name_prefix="fs-home-dir",
             policy={
                 "name": "fs-home-dir-policy",
                 "filesystem_policy": {
@@ -1418,7 +1707,6 @@ class TestPolicyEnforcement:
         create_sandbox_with_policy,
     ):
         sandbox = create_sandbox_with_policy(
-            name_prefix="exec-options",
             policy={
                 "name": "exec-options-policy",
                 "filesystem_policy": {
@@ -1455,7 +1743,6 @@ class TestPolicyEnforcement:
         create_sandbox_with_policy,
     ):
         sandbox = create_sandbox_with_policy(
-            name_prefix="policy-env",
             policy={
                 "name": "policy-env-policy",
                 "environment": {
@@ -1502,7 +1789,6 @@ class TestPolicyEnforcement:
         create_sandbox_with_policy,
     ):
         sandbox = create_sandbox_with_policy(
-            name_prefix="exec-js",
             policy={
                 "name": "exec-js-policy",
                 "filesystem_policy": {
@@ -1538,7 +1824,6 @@ class TestPolicyEnforcement:
         create_sandbox_with_policy,
     ):
         sandbox = create_sandbox_with_policy(
-            name_prefix="download-missing",
             policy={
                 "name": "download-missing-policy",
                 "filesystem_policy": {
@@ -1563,7 +1848,6 @@ class TestPolicyEnforcement:
         create_sandbox_with_policy,
     ):
         sandbox = create_sandbox_with_policy(
-            name_prefix="download-dir",
             policy={
                 "name": "download-dir-policy",
                 "filesystem_policy": {
@@ -1588,7 +1872,6 @@ class TestPolicyEnforcement:
         create_sandbox_with_policy,
     ):
         sandbox = create_sandbox_with_policy(
-            name_prefix="list-files",
             policy={
                 "name": "list-files-policy",
                 "filesystem_policy": {
@@ -1646,7 +1929,6 @@ class TestPolicyEnforcement:
         create_sandbox_with_policy,
     ):
         sandbox = create_sandbox_with_policy(
-            name_prefix="search-files",
             policy={
                 "name": "search-files-policy",
                 "filesystem_policy": {
@@ -1694,7 +1976,6 @@ class TestPolicyEnforcement:
         create_sandbox_with_policy,
     ):
         sandbox = create_sandbox_with_policy(
-            name_prefix="process-root",
             policy={
                 "name": "process-root-policy",
                 "filesystem_policy": {
@@ -1734,8 +2015,11 @@ class TestPolicyEnforcement:
         client,
         create_sandbox_with_policy,
     ):
+        # Use ``mount`` rather than ``getpid``: seccomp is installed once for the
+        # whole sandbox lifecycle (daemon + user exec children), so blocking a
+        # syscall the daemon needs during startup would prevent the sandbox from
+        # reaching ``ready``.
         sandbox = create_sandbox_with_policy(
-            name_prefix="syscall-block",
             policy={
                 "name": "syscall-block-policy",
                 "filesystem_policy": {
@@ -1743,8 +2027,8 @@ class TestPolicyEnforcement:
                     "read_write": ["/tmp"],
                 },
                 "syscall": {
-                    "x86_64": {"blocked": ["getpid"]},
-                    "arm64": {"blocked": ["getpid"]},
+                    "x86_64": {"blocked": ["mount"]},
+                    "arm64": {"blocked": ["mount"]},
                 },
                 "network": {
                     "mode": "host",
@@ -1764,9 +2048,9 @@ class TestPolicyEnforcement:
                     import sys
 
                     syscall_numbers = {
-                        "x86_64": 39,
-                        "AMD64": 39,
-                        "aarch64": 172,
+                        "x86_64": 165,
+                        "AMD64": 165,
+                        "aarch64": 40,
                     }
                     nr = syscall_numbers.get(platform.machine())
                     if nr is None:
@@ -1800,7 +2084,6 @@ class TestPolicyEnforcement:
         create_sandbox_with_policy,
     ):
         sandbox = create_sandbox_with_policy(
-            name_prefix="pid-ns",
             policy={
                 "name": "pid-ns-policy",
                 "filesystem_policy": {
@@ -1834,7 +2117,6 @@ class TestPolicyEnforcement:
         create_sandbox_with_policy,
     ):
         sandbox = create_sandbox_with_policy(
-            name_prefix="cap-drop",
             policy={
                 "name": "cap-drop-policy",
                 "filesystem_policy": {
@@ -1873,7 +2155,6 @@ class TestPolicyEnforcement:
         create_sandbox_with_policy,
     ):
         sandbox = create_sandbox_with_policy(
-            name_prefix="cap-add",
             policy={
                 "name": "cap-add-policy",
                 "filesystem_policy": {
@@ -1989,15 +2270,13 @@ class TestPolicyEnforcement:
         assert "unexpected-success" not in data["stdout"]
 
     @staticmethod
-    def test_network_mode_isolated_blocks_http_requests(
+    def test_network_mode_isolated_allows_external_http_requests(
         client,
         create_sandbox_with_policy,
-        server_endpoint,
     ):
         sandbox = create_sandbox_with_policy(
-            name_prefix="net-isolated",
             policy={
-                "name": "net-isolated-policy",
+                "name": "net-isolated-uplink-policy",
                 "filesystem_policy": {
                     "read_only": ["/usr", "/lib", "/lib64", "/etc", "/opt"],
                     "read_write": ["/tmp"],
@@ -2009,18 +2288,70 @@ class TestPolicyEnforcement:
             },
         )
 
-        script = (
-            "import sys, urllib.request; "
-            "urllib.request.urlopen(sys.argv[1], timeout=2).read(); "
-            "print('unexpected-success')"
-        )
+        script = textwrap.dedent(
+            """
+            import sys
+            import urllib.request
+
+            request = urllib.request.Request(
+                sys.argv[1],
+                headers={"User-Agent": "jiuwenbox-integration-test"},
+            )
+            with urllib.request.urlopen(request, timeout=10) as response:
+                print(response.status)
+                print(response.geturl())
+            """
+        ).strip()
         response = client.post(f"/api/v1/sandboxes/{sandbox['id']}/exec", json={
-            "command": ["python", "-c", script, _sandbox_health_url(server_endpoint)],
-            "timeout_seconds": 5,
+            "command": ["python3", "-c", script, "https://www.baidu.com/"],
+            "timeout_seconds": 15,
         })
         assert response.status_code == 200
         data = response.json()
-        assert data["exit_code"] != 0
+        assert data["exit_code"] == 0, data
+        assert "baidu.com" in data["stdout"].lower()
+
+    @staticmethod
+    def test_network_mode_isolated_blocked_ip_rejects_egress(
+        client,
+        create_sandbox_with_policy,
+    ):
+        blocked_ip = socket.gethostbyname("www.baidu.com")
+        sandbox = create_sandbox_with_policy(
+            policy={
+                "name": "net-isolated-block-policy",
+                "filesystem_policy": {
+                    "read_only": ["/usr", "/lib", "/lib64", "/etc", "/opt"],
+                    "read_write": ["/tmp"],
+                },
+                "network": {
+                    "mode": "isolated",
+                    "egress": {
+                        "default": "allow",
+                        "blocked_ips": [f"{blocked_ip}/32"],
+                    },
+                },
+            },
+        )
+
+        script = textwrap.dedent(
+            """
+            import sys
+            import socket
+
+            ip = sys.argv[1]
+            with socket.create_connection((ip, 443), timeout=10):
+                pass
+            print("unexpected-success")
+            """
+        ).strip()
+        response = client.post(f"/api/v1/sandboxes/{sandbox['id']}/exec", json={
+            "command": ["python3", "-c", script, blocked_ip],
+            "timeout_seconds": 15,
+        })
+        assert response.status_code == 200
+        data = response.json()
+        assert data["exit_code"] != 0, data
         assert "unexpected-success" not in data["stdout"]
 
     @staticmethod
@@ -2029,7 +2360,6 @@ class TestPolicyEnforcement:
         create_sandbox_with_policy,
     ):
         sandbox = create_sandbox_with_policy(
-            name_prefix="net-host",
             policy={
                 "name": "net-host-policy",
                 "filesystem_policy": {
@@ -2072,7 +2402,6 @@ class TestPolicyEnforcement:
         create_sandbox_with_policy,
     ):
         sandbox = create_sandbox_with_policy(
-            name_prefix="net-host-listener",
             policy={
                 "name": "net-host-listener-policy",
                 "filesystem_policy": {
@@ -2114,6 +2443,7 @@ class TestPolicyEnforcement:
         assert response.status_code == 200, response.text
         background = response.json()
         assert background["started"] is True, background
+        assert isinstance(background.get("job_id"), str) and background["job_id"]
         assert isinstance(background["pid"], int), background
         assert background["error_message"] is None
 
@@ -2254,7 +2584,6 @@ class TestPolicyEnforcement:
         create_sandbox_with_policy,
     ):
         sandbox = create_sandbox_with_policy(
-            name_prefix="ingress-allow",
             policy={
                 "name": "ingress-allow-policy",
                 "filesystem_policy": {
@@ -2288,7 +2617,6 @@ class TestPolicyEnforcement:
         create_sandbox_with_policy,
     ):
         sandbox = create_sandbox_with_policy(
-            name_prefix="ingress-block",
             policy={
                 "name": "ingress-block-policy",
                 "filesystem_policy": {
@@ -2323,7 +2651,6 @@ class TestPolicyEnforcement:
         create_sandbox_with_policy,
     ):
         sandbox = create_sandbox_with_policy(
-            name_prefix="netns-persist",
             policy={
                 "name": "netns-persist-policy",
                 "filesystem_policy": {
@@ -2429,7 +2756,6 @@ class TestPolicyEnforcement:
         the happy path here is the locked-down path.
         """
         sandbox = create_sandbox_with_policy(
-            name_prefix="reserved-script-integrity",
             policy=TestPolicyEnforcement._RESERVED_INTEGRITY_POLICY,
         )
 
@@ -2582,7 +2908,6 @@ class TestPolicyEnforcement:
         download) still produce the expected results.
         """
         sandbox = create_sandbox_with_policy(
-            name_prefix="reserved-script-survival",
             policy=TestPolicyEnforcement._RESERVED_INTEGRITY_POLICY,
         )
         sandbox_id = sandbox["id"]
@@ -2891,7 +3216,6 @@ class TestReservedSandboxPaths:
             },
         }
         sandbox = create_sandbox_with_policy(
-            name_prefix="non-reserved",
             policy=policy,
         )
         assert sandbox["phase"] == "ready", sandbox
@@ -3005,6 +3329,102 @@ class TestBwrapFilesystem:
         assert _has_arg_pair(args, "--remount-ro", "/etc")
 
 
+class TestNetworkUplink:
+    @staticmethod
+    def test_isolated_uplink_auto_allocates_cgnat_pool_block(
+        client,
+        create_sandbox_with_policy,
+    ):
+        sandbox = create_sandbox_with_policy(policy=_isolated_network_policy())
+        block, sandbox_ip, _gateway = _uplink_info_from_sandbox(client, sandbox["id"])
+        assert block.subnet_of(ipaddress.ip_network("100.64.0.0/10"))
+        assert sandbox_ip == block.network_address + 2
+
+    @staticmethod
+    def test_isolated_uplink_user_pool_allocates_within_subnet(
+        client,
+        create_sandbox_with_policy,
+    ):
+        pool = "10.55.0.0/24"
+        sandbox = create_sandbox_with_policy(
+            policy=_isolated_network_policy(uplink_subnet=pool),
+        )
+        block, _sandbox_ip, _gateway = _uplink_info_from_sandbox(client, sandbox["id"])
+        assert block.subnet_of(ipaddress.ip_network(pool, strict=False))
+
+    @staticmethod
+    def test_isolated_uplink_skips_route_occupied_block(client):
+        pool = "10.55.0.0/24"
+        policy = _with_runtime_support(_isolated_network_policy(uplink_subnet=pool))
+
+        first_response = client.post("/api/v1/sandboxes", json={
+            "policy_mode": "override",
+            "policy": policy,
+            "sandbox_id": f"uplk1_{uuid.uuid4().hex[:6]}",
+        })
+        assert first_response.status_code == 201, first_response.text
+        first = first_response.json()
+        assert first["phase"] == "ready", first
+        first_block, _, _ = _uplink_info_from_sandbox(client, first["id"])
+
+        second_response = client.post("/api/v1/sandboxes", json={
+            "policy_mode": "override",
+            "policy": policy,
+            "sandbox_id": f"uplk2_{uuid.uuid4().hex[:6]}",
+        })
+        assert second_response.status_code == 201, second_response.text
+        second = second_response.json()
+        assert second["phase"] == "ready", second
+        second_block, _, _ = _uplink_info_from_sandbox(client, second["id"])
+        assert first_block != second_block
+
+    @staticmethod
+    def test_isolated_uplink_concurrent_sandboxes_use_distinct_blocks(client):
+        policy = _with_runtime_support(
+            _isolated_network_policy(uplink_subnet="10.55.0.0/24"),
+        )
+
+        def create_one(index: int):
+            return client.post("/api/v1/sandboxes", json={
+                "policy_mode": "override",
+                "policy": policy,
+                "sandbox_id": f"uplk{index:02d}_{uuid.uuid4().hex[:6]}",
+            })
+
+        with ThreadPoolExecutor(max_workers=4) as executor:
+            responses = list(executor.map(create_one, range(4)))
+
+        sandbox_ids: list[str] = []
+        for response in responses:
+            assert response.status_code == 201, response.text
+            sandbox = response.json()
+            assert sandbox["phase"] == "ready", sandbox
+            sandbox_ids.append(sandbox["id"])
+
+        blocks = [
+            _uplink_info_from_sandbox(client, sandbox_id)[0]
+            for sandbox_id in sandbox_ids
+        ]
+        assert len({str(block) for block in blocks}) == len(blocks)
+
+    @staticmethod
+    def test_isolated_uplink_reports_error_when_pool_has_no_free_block(client):
+        # Policy allows pools up to /24; /30 is rejected at validation time.
+        # 169.254.0.0/24 is a valid pool, but every /30 overlaps the reserved
+        # link-local range and is filtered out by the allocator.
+        pool = "169.254.0.0/24"
+        response = client.post("/api/v1/sandboxes", json={
+            "policy_mode": "override",
+            "policy": _with_runtime_support(
+                _isolated_network_policy(uplink_subnet=pool),
+            ),
+            "sandbox_id": f"uplkex_{uuid.uuid4().hex[:6]}",
+        })
+        assert response.status_code == 201, response.text
+        sandbox = response.json()
+        assert sandbox["phase"] == "error", sandbox
+
+
 class TestNetworkIptables:
     @staticmethod
     def test_iptables_backend_falls_back_to_legacy(monkeypatch):
@@ -3079,6 +3499,273 @@ class TestSandboxExec:
             "command": ["echo", "hello"],
         })
         assert resp.status_code == 409
+
+
+def _exec_background(client, sandbox_id: str, command: list[str], **kwargs):
+    body = {"command": command, **kwargs}
+    response = client.post(
+        f"/api/v1/sandboxes/{sandbox_id}/exec_background",
+        json=body,
+    )
+    assert response.status_code == 200, response.text
+    return response.json()
+
+
+def _wait_background_job_finished(
+    client,
+    sandbox_id: str,
+    job_id: str,
+    *,
+    timeout: float = 10.0,
+) -> dict:
+    deadline = time.monotonic() + timeout
+    status: dict = {}
+    while time.monotonic() < deadline:
+        response = client.get(f"/api/v1/sandboxes/{sandbox_id}/background/{job_id}")
+        assert response.status_code == 200, response.text
+        status = response.json()
+        if not status.get("running"):
+            return status
+        time.sleep(0.1)
+    raise AssertionError(
+        f"background job {job_id!r} did not finish within {timeout}s; last={status}"
+    )
+
+
+class TestBackgroundJobs:
+    @staticmethod
+    def test_instant_task_captures_output(client):
+        create_resp = client.post("/api/v1/sandboxes", json={})
+        sandbox_id = create_resp.json()["id"]
+        assert create_resp.json()["phase"] == "ready"
+
+        started = _exec_background(
+            client,
+            sandbox_id,
+            ["python3", "--version"],
+        )
+        assert started["started"] is True
+        assert isinstance(started.get("job_id"), str) and started["job_id"]
+
+        status = _wait_background_job_finished(
+            client, sandbox_id, started["job_id"],
+        )
+        assert status["exit_code"] == 0, status
+        assert "Python" in status["stdout"]
+
+    @staticmethod
+    def test_long_running_job_with_custom_job_id(client):
+        create_resp = client.post("/api/v1/sandboxes", json={})
+        sandbox_id = create_resp.json()["id"]
+        job_id = f"sleep-{uuid.uuid4().hex[:4]}"
+
+        started = _exec_background(
+            client,
+            sandbox_id,
+            ["python3", "-c", "import time; time.sleep(3600)"],
+            job_id=job_id,
+        )
+        assert started["started"] is True
+        assert started["job_id"] == job_id
+        assert started["running"] is True
+
+        status_resp = client.get(
+            f"/api/v1/sandboxes/{sandbox_id}/background/{job_id}",
+        )
+        assert status_resp.status_code == 200, status_resp.text
+        status = status_resp.json()
+        assert status["running"] is True
+        assert status["stdout"] == ""
+
+        list_resp = client.get(f"/api/v1/sandboxes/{sandbox_id}/background")
+        assert list_resp.status_code == 200
+        job_ids = [item["job_id"] for item in list_resp.json()["items"]]
+        assert job_id in job_ids
+
+        kill_resp = client.post(
+            f"/api/v1/sandboxes/{sandbox_id}/background/{job_id}/kill",
+            json={},
+        )
+        assert kill_resp.status_code == 200
+        assert kill_resp.json()["killed"] is True
+
+        finished = _wait_background_job_finished(client, sandbox_id, job_id)
+        assert finished["running"] is False
+
+    @staticmethod
+    def test_large_output_not_truncated(client):
+        create_resp = client.post("/api/v1/sandboxes", json={})
+        sandbox_id = create_resp.json()["id"]
+
+        started = _exec_background(
+            client,
+            sandbox_id,
+            ["python3", "-c", "print('x' * 10000)"],
+        )
+        status = _wait_background_job_finished(
+            client, sandbox_id, started["job_id"],
+        )
+        assert len(status["stdout"]) >= 10000
+
+    @staticmethod
+    def test_duplicate_job_id_returns_409(client):
+        create_resp = client.post("/api/v1/sandboxes", json={})
+        sandbox_id = create_resp.json()["id"]
+        job_id = f"dup-{uuid.uuid4().hex[:4]}"
+
+        first = client.post(
+            f"/api/v1/sandboxes/{sandbox_id}/exec_background",
+            json={
+                "command": ["python3", "-c", "import time; time.sleep(3600)"],
+                "job_id": job_id,
+            },
+        )
+        assert first.status_code == 200, first.text
+
+        second = client.post(
+            f"/api/v1/sandboxes/{sandbox_id}/exec_background",
+            json={
+                "command": ["python3", "-c", "import time; time.sleep(3600)"],
+                "job_id": job_id,
+            },
+        )
+        assert second.status_code == 409, second.text
+        assert job_id in second.json()["error"]
+
+        client.post(
+            f"/api/v1/sandboxes/{sandbox_id}/background/{job_id}/kill",
+            json={},
+        )
+
+    @staticmethod
+    @pytest.mark.parametrize("invalid_id", ["ab", "ABC123", "my job", "a" * 17])
+    def test_invalid_job_id_returns_400(client, invalid_id):
+        create_resp = client.post("/api/v1/sandboxes", json={})
+        sandbox_id = create_resp.json()["id"]
+
+        resp = client.post(
+            f"/api/v1/sandboxes/{sandbox_id}/exec_background",
+            json={
+                "command": ["python3", "--version"],
+                "job_id": invalid_id,
+            },
+        )
+        assert resp.status_code == 400, resp.text
+        assert JOB_ID_FORMAT_MESSAGE in resp.json()["error"]
+
+    @staticmethod
+    def test_capture_output_false(client):
+        create_resp = client.post("/api/v1/sandboxes", json={})
+        sandbox_id = create_resp.json()["id"]
+
+        started = _exec_background(
+            client,
+            sandbox_id,
+            ["python3", "--version"],
+            capture_output=False,
+        )
+        status = _wait_background_job_finished(
+            client, sandbox_id, started["job_id"],
+        )
+        assert status["capture_output"] is False
+        assert status["stdout"] == ""
+        assert status["stderr"] == ""
+        assert status["exit_code"] == 0
+
+    @staticmethod
+    def test_kill_already_exited_job(client):
+        create_resp = client.post("/api/v1/sandboxes", json={})
+        sandbox_id = create_resp.json()["id"]
+        job_id = f"done-{uuid.uuid4().hex[:4]}"
+
+        started = _exec_background(
+            client,
+            sandbox_id,
+            ["python3", "--version"],
+            job_id=job_id,
+        )
+        _wait_background_job_finished(client, sandbox_id, job_id)
+
+        kill_resp = client.post(
+            f"/api/v1/sandboxes/{sandbox_id}/background/{job_id}/kill",
+            json={},
+        )
+        assert kill_resp.status_code == 200
+        payload = kill_resp.json()
+        assert payload["killed"] is False
+        assert payload["reason"] == "already_exited"
+        assert payload["exit_code"] == 0
+
+    @staticmethod
+    def test_kill_unknown_job_returns_404(client):
+        create_resp = client.post("/api/v1/sandboxes", json={})
+        sandbox_id = create_resp.json()["id"]
+
+        resp = client.post(
+            f"/api/v1/sandboxes/{sandbox_id}/background/no-such-job/kill",
+            json={},
+        )
+        assert resp.status_code == 404, resp.text
+
+    @staticmethod
+    def test_list_running_only(client):
+        create_resp = client.post("/api/v1/sandboxes", json={})
+        sandbox_id = create_resp.json()["id"]
+
+        finished_job = f"fin-{uuid.uuid4().hex[:4]}"
+        _exec_background(
+            client,
+            sandbox_id,
+            ["python3", "--version"],
+            job_id=finished_job,
+        )
+        _wait_background_job_finished(client, sandbox_id, finished_job)
+
+        running_job = f"run-{uuid.uuid4().hex[:4]}"
+        _exec_background(
+            client,
+            sandbox_id,
+            ["python3", "-c", "import time; time.sleep(3600)"],
+            job_id=running_job,
+        )
+
+        list_resp = client.get(
+            f"/api/v1/sandboxes/{sandbox_id}/background",
+            params={"running_only": "true"},
+        )
+        assert list_resp.status_code == 200
+        items = list_resp.json()["items"]
+        job_ids = {item["job_id"] for item in items}
+        assert running_job in job_ids
+        assert finished_job not in job_ids
+        assert all(item["running"] for item in items)
+
+        client.post(
+            f"/api/v1/sandboxes/{sandbox_id}/background/{running_job}/kill",
+            json={},
+        )
+
+    @staticmethod
+    def test_get_job_after_sandbox_destroy_returns_404(client):
+        create_resp = client.post("/api/v1/sandboxes", json={})
+        sandbox_id = create_resp.json()["id"]
+        job_id = f"gone-{uuid.uuid4().hex[:4]}"
+
+        started = _exec_background(
+            client,
+            sandbox_id,
+            ["python3", "-c", "import time; time.sleep(3600)"],
+            job_id=job_id,
+        )
+        assert started["started"] is True
+
+        delete_resp = client.delete(f"/api/v1/sandboxes/{sandbox_id}")
+        assert delete_resp.status_code in (200, 202, 204)
+
+        get_resp = client.get(
+            f"/api/v1/sandboxes/{sandbox_id}/background/{job_id}",
+        )
+        assert get_resp.status_code == 404, get_resp.text
 
 
 class TestSandboxListing:
@@ -3297,7 +3984,6 @@ class TestBindRootEntries:
     ):
         host_root = bind_root_entries_host_tree
         sandbox = create_sandbox_with_policy(
-            name_prefix="bind-root-entries-ro",
             policy={
                 "name": "bind-root-entries-ro-policy",
                 "filesystem_policy": {
@@ -3356,7 +4042,6 @@ class TestBindRootEntries:
     ):
         host_root = bind_root_entries_host_tree
         sandbox = create_sandbox_with_policy(
-            name_prefix="bind-root-entries-rw",
             policy={
                 "name": "bind-root-entries-rw-policy",
                 "filesystem_policy": {
@@ -3402,7 +4087,6 @@ class TestBindRootEntries:
         # confirm the bind actually shares the host inode rather than landing
         # on a tmpfs unique to this sandbox.
         verify_sandbox = create_sandbox_with_policy(
-            name_prefix="bind-root-entries-rw-verify",
             policy={
                 "name": "bind-root-entries-rw-verify-policy",
                 "filesystem_policy": {
@@ -3441,7 +4125,6 @@ class TestBindRootEntries:
     ):
         host_root = bind_root_entries_host_tree
         sandbox = create_sandbox_with_policy(
-            name_prefix="bind-root-entries-filter",
             policy={
                 "name": "bind-root-entries-filter-policy",
                 "filesystem_policy": {
@@ -3485,7 +4168,6 @@ class TestBindRootEntries:
         # to be independent of that topology.
         missing = f"/tmp/jiuwenbox-bind-root-entries-missing-{uuid.uuid4().hex}"
         sandbox = create_sandbox_with_policy(
-            name_prefix="bind-root-entries-missing",
             policy={
                 "name": "bind-root-entries-missing-policy",
                 "filesystem_policy": {
@@ -3530,7 +4212,6 @@ class TestBindRootEntries:
         host_root = bind_root_entries_host_tree
         nested_host_root = f"{host_root}/nested_dir"
         sandbox = create_sandbox_with_policy(
-            name_prefix="bind-root-entries-roundtrip",
             policy={
                 "name": "bind-root-entries-roundtrip-policy",
                 "filesystem_policy": {
@@ -3678,7 +4359,6 @@ class TestBindRootEntries:
 
         try:
             sandbox = create_sandbox_with_policy(
-                name_prefix="bind-root-entries-app-build-rw-overlay",
                 policy={
                     "name": "bind-root-entries-app-build-rw-overlay-policy",
                     "filesystem_policy": {
@@ -3774,7 +4454,6 @@ class TestBindRootEntries:
             # wrote, proving the rw bind shares the host inode rather than a
             # per-sandbox tmpfs.
             verify_sandbox = create_sandbox_with_policy(
-                name_prefix="bind-root-entries-app-build-verify",
                 policy={
                     "name": "bind-root-entries-app-build-verify-policy",
                     "filesystem_policy": {
@@ -3941,7 +4620,6 @@ class TestCgroupPolicy:
     @staticmethod
     def test_no_cgroup_field_skips_setup_entirely(client, create_sandbox_with_policy):
         sandbox = create_sandbox_with_policy(
-            name_prefix="cgroup-skip-noField",
             policy=TestCgroupPolicy._expect_no_limit_policy(None),
         )
         TestCgroupPolicy._assert_skip_path_runs_cleanly(client, sandbox["id"])
@@ -3949,7 +4627,6 @@ class TestCgroupPolicy:
     @staticmethod
     def test_empty_cgroup_field_skips_setup(client, create_sandbox_with_policy):
         sandbox = create_sandbox_with_policy(
-            name_prefix="cgroup-skip-empty",
             policy=TestCgroupPolicy._expect_no_limit_policy({}),
         )
         TestCgroupPolicy._assert_skip_path_runs_cleanly(client, sandbox["id"])
@@ -3957,7 +4634,6 @@ class TestCgroupPolicy:
     @staticmethod
     def test_all_null_cgroup_field_skips_setup(client, create_sandbox_with_policy):
         sandbox = create_sandbox_with_policy(
-            name_prefix="cgroup-skip-allNull",
             policy=TestCgroupPolicy._expect_no_limit_policy({
                 "memory_max": None,
                 "cpu_max": None,
@@ -4087,7 +4763,6 @@ class TestCgroupPolicy:
         create_sandbox_with_policy,
     ):
         sandbox = create_sandbox_with_policy(
-            name_prefix="cgroup-roundtrip",
             policy={
                 "name": "cgroup-roundtrip-policy",
                 "filesystem_policy": {
@@ -4121,7 +4796,6 @@ class TestCgroupPolicy:
         create_sandbox_with_policy,
     ):
         sandbox = create_sandbox_with_policy(
-            name_prefix="cgroup-memory-limit",
             policy={
                 "name": "cgroup-memory-policy",
                 "filesystem_policy": {
@@ -4169,7 +4843,6 @@ class TestCgroupPolicy:
         create_sandbox_with_policy,
     ):
         sandbox = create_sandbox_with_policy(
-            name_prefix="cgroup-pids-limit",
             policy={
                 "name": "cgroup-pids-policy",
                 "filesystem_policy": {
@@ -4233,7 +4906,6 @@ class TestCgroupPolicy:
         create_sandbox_with_policy,
     ):
         sandbox = create_sandbox_with_policy(
-            name_prefix="cgroup-cpu-throttle",
             policy={
                 "name": "cgroup-cpu-policy",
                 "filesystem_policy": {

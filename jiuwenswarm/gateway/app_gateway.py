@@ -275,6 +275,25 @@ class GatewayServer:
             if isinstance(key, tuple) and key[0] == channel_id and not getattr(client_ws, "closed", False)
         ]
 
+    @staticmethod
+    def _extract_routing_session_id(msg, *, include_top_level: bool = True) -> str | None:
+        """Best-effort session id from message fields for outbound event routing."""
+        if include_top_level:
+            sid = getattr(msg, "session_id", None)
+            if sid is not None and str(sid).strip():
+                return str(sid).strip()
+        payload = getattr(msg, "payload", None)
+        if isinstance(payload, dict):
+            sid = payload.get("session_id")
+            if sid is not None and str(sid).strip():
+                return str(sid).strip()
+        params = getattr(msg, "params", None)
+        if isinstance(params, dict):
+            sid = params.get("session_id")
+            if sid is not None and str(sid).strip():
+                return str(sid).strip()
+        return None
+
     def on_message(self, callback) -> None:
         self._on_message_cb = callback
 
@@ -428,20 +447,44 @@ class GatewayServer:
         if ws is None or bool(getattr(ws, "closed", False)):
             if ws is None:
                 channel_id = getattr(msg, "channel_id", None)
-                if channel_id and channel_id != "acp" and msg.type != "res":
-                    clients = self._find_channel_clients(channel_id)
-                    if clients:
+                # 多 TUI 窗口：有 session_id 时精确路由；无 session_id 时广播（如 cron 推送到 TUI）。
+                if channel_id and channel_id != "acp":
+                    if msg.type == "res":
+                        payload_data = dict(msg.payload or {}) if isinstance(msg.payload, dict) else {}
+                        frame = {"type": "res", "id": msg.id, "ok": bool(msg.ok), "payload": payload_data}
+                    else:
                         frame = _build_event_frame(msg)
-                        data = json.dumps(frame, ensure_ascii=False)
-                        logger.info(
-                            "[GatewayServer] broadcast fallback: channel_id=%s clients=%d id=%s",
-                            channel_id, len(clients), getattr(msg, "id", None),
-                        )
-                        await asyncio.gather(
-                            *[c.send(data) for c in clients],
-                            return_exceptions=True,
-                        )
-                        return
+
+                    session_id = self._extract_routing_session_id(msg, include_top_level=False)
+                    if session_id:
+                        session_key = self._client_route_key(channel_id, session_id)
+                        if session_key:
+                            client = self._session_to_client.get(session_key)
+                            if client is not None and not bool(getattr(client, "closed", False)):
+                                data = json.dumps(frame, ensure_ascii=False)
+                                try:
+                                    await client.send(data)
+                                except Exception:
+                                    logger.debug(
+                                        "[GatewayServer] session-routed send failed: session_id=%s",
+                                        session_id,
+                                        exc_info=True,
+                                    )
+                                return
+                    elif not self._extract_routing_session_id(msg, include_top_level=True):
+                        clients = self._find_channel_clients(channel_id)
+                        if clients:
+                            data = json.dumps(frame, ensure_ascii=False)
+                            logger.info(
+                                "[GatewayServer] broadcast fallback (no session_id): "
+                                "channel_id=%s clients=%d id=%s type=%s",
+                                channel_id, len(clients), getattr(msg, "id", None), msg.type,
+                            )
+                            await asyncio.gather(
+                                *[c.send(data) for c in clients],
+                                return_exceptions=True,
+                            )
+                            return
                 logger.warning(
                     "[GatewayServer] message dropped: no WebSocket client found for channel_id=%s session_id=%s id=%s",
                     getattr(msg, "channel_id", None),
@@ -674,6 +717,11 @@ class GatewayServer:
             project_dir = params.get("project_dir")
             if project_dir and isinstance(project_dir, str) and project_dir.strip():
                 metadata["project_dir"] = project_dir.strip()
+                # 记录会话首条消息时所在的 git 分支，供 /resume 按分支过滤（Ctrl+B）。
+                # 非 git/detached/失败时为哨兵 "HEAD"，对齐 Claude Code。
+                from jiuwenswarm.common.utils import resolve_git_branch
+
+                metadata["git_branch"] = resolve_git_branch(project_dir.strip())
 
             is_stream = bool(data.get("is_stream", False))
 
@@ -795,6 +843,7 @@ async def _run(
         DiscordChannelConfig
     from jiuwenswarm.gateway.channel_manager.im_platforms.wecom.wecom_connect import WecomChannel, WecomConfig
     from jiuwenswarm.common.config import get_config
+    from jiuwenswarm.common.cleanup import start_background_cleanup
     from jiuwenswarm.gateway.routing.agent_client import WebSocketAgentServerClient
     from jiuwenswarm.gateway.channel_manager.channel_manager import ChannelManager
     from jiuwenswarm.gateway.cron import CronController, CronJobStore, CronSchedulerService
@@ -931,6 +980,8 @@ async def _run(
         message_handler=message_handler,
     )
     await heartbeat_service.start()
+
+    _cleanup_task = start_background_cleanup()
 
     initial_channels_conf: dict = channels_cfg if isinstance(channels_cfg, dict) else {}
     channel_manager = ChannelManager(message_handler, config=initial_channels_conf)
@@ -1110,13 +1161,13 @@ async def _run(
             ).strip()
                                or "/agent/authenticatedExtendedCard",
             app_name=str(
-                os.getenv("A2A_SERVER_APP_NAME", "JiuwenClaw Gateway A2A Server")
+                os.getenv("A2A_SERVER_APP_NAME", "JiuwenSwarm Gateway A2A Server")
             ).strip()
-                     or "JiuwenClaw Gateway A2A Server",
+                     or "JiuwenSwarm Gateway A2A Server",
             app_description=str(
-                os.getenv("A2A_SERVER_APP_DESCRIPTION", "A2A ingress for JiuwenClaw Gateway")
+                os.getenv("A2A_SERVER_APP_DESCRIPTION", "A2A ingress for JiuwenSwarm Gateway")
             ).strip()
-                            or "A2A ingress for JiuwenClaw Gateway",
+                            or "A2A ingress for JiuwenSwarm Gateway",
             app_version=str(
                 os.getenv("A2A_SERVER_APP_VERSION", "0.1.0")
             ).strip()
@@ -1759,6 +1810,12 @@ async def _run(
         await message_handler.stop_forwarding()
         await client.disconnect()
 
+        _cleanup_task.cancel()
+        try:
+            await _cleanup_task
+        except (asyncio.CancelledError, Exception):
+            pass
+
         logger.info("[App] Gateway stopped")
 
 
@@ -1767,7 +1824,7 @@ def main() -> None:
 
     parser = argparse.ArgumentParser(
         prog="jiuwenswarm-gateway",
-        description="Start JiuwenClaw Gateway + Channels (split deployment; connects to jiuwenswarm-agentserver).",
+        description="Start JiuwenSwarm Gateway + Channels (split deployment; connects to jiuwenswarm-agentserver).",
     )
     parser.add_argument(
         "--agent-server-url",

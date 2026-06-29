@@ -21,7 +21,7 @@ _WEB_CONFIG_KEY_MAP: dict[str, str] = {
 }
 
 _A2UI_CONFIG_DEFAULT_PAYLOAD: dict[str, str] = {
-    "a2ui_enabled": "true",
+    "a2ui_enabled": "false",
 }
 
 _A2UI_CHANNEL_ID = "web"
@@ -92,6 +92,7 @@ async def finalize_assistant_response_if_a2ui(
     user_query: Any,
     request_id: str,
     repair_call: Any,
+    retry_without_a2ui_call: Any = None,
 ) -> str:
     """Validate/repair assistant A2UI content while keeping host modules generic."""
     if not is_a2ui_channel(channel):
@@ -111,6 +112,7 @@ async def finalize_assistant_response_if_a2ui(
         request_id=request_id,
         repair_call=repair_call if callable(repair_call) else None,
         a2ui_enabled=a2ui_config.enabled,
+        retry_without_a2ui_call=retry_without_a2ui_call if callable(retry_without_a2ui_call) else None,
     )
 
 

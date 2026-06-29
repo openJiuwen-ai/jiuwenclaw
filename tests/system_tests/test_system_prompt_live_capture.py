@@ -29,7 +29,7 @@ import pytest
 from openjiuwen.core.runner import Runner
 from openjiuwen.core.runner.callback.events import LLMCallEvents
 
-from jiuwenswarm.server.runtime.agent_adapter.interface_deep import JiuWenClawDeepAdapter
+from jiuwenswarm.server.runtime.agent_adapter.interface_deep import JiuWenSwarmDeepAdapter
 from jiuwenswarm.server.runtime.agent_adapter.interface import build_user_prompt
 from jiuwenswarm.common.config import get_config
 from jiuwenswarm.common.schema.agent import AgentRequest
@@ -242,16 +242,16 @@ async def _run_live_capture(
         pass
 
     with mock.patch.object(
-        JiuWenClawDeepAdapter, "set_checkpoint", staticmethod(_noop_checkpoint)
+        JiuWenSwarmDeepAdapter, "set_checkpoint", staticmethod(_noop_checkpoint)
     ), mock.patch.object(
-        JiuWenClawDeepAdapter, "load_user_rails", _noop_load_user_rails
+        JiuWenSwarmDeepAdapter, "load_user_rails", _noop_load_user_rails
     ), mock.patch.dict(
         "os.environ", {"BROWSER_RUNTIME_MCP_ENABLED": "true"}
     ), mock.patch(
         "jiuwenswarm.server.runtime.agent_adapter.interface_deep.get_config",
         return_value=config_base,
     ):
-        adapter = JiuWenClawDeepAdapter()
+        adapter = JiuWenSwarmDeepAdapter()
         try:
             await adapter.create_instance()
             response = await adapter.process_message_impl(request, inputs)

@@ -14,6 +14,7 @@ from openjiuwen.core.foundation.llm import Model
 from openjiuwen.core.foundation.llm.schema.config import ModelClientConfig, ModelRequestConfig
 
 from jiuwenswarm.common.config import _parse_custom_headers
+from jiuwenswarm.common.reasoning_injector import build_reasoning_model_request_kwargs
 from jiuwenswarm.gateway.routing.interaction_context import PendingInteraction
 from jiuwenswarm.common.schema.message import Message, ReqMethod
 from jiuwenswarm.gateway.message_handler.command_parser.slash_command import CONTROL_MESSAGE_TEXTS
@@ -147,11 +148,11 @@ class IMConversationProcessor:
             if user_profile_path is not None
             else get_deepagent_user_md_path()
         )
-        self._model_name, self._model_client_raw = self._load_model_config(model_name)
+        self._model_name, self._model_client_raw, self._model_config_raw = self._load_model_config(model_name)
         self._llm: Model | None = None
 
     @staticmethod
-    def _load_model_config(model_name_override: str | None = None) -> tuple[str, dict]:
+    def _load_model_config(model_name_override: str | None = None) -> tuple[str, dict, dict]:
         """与 react agent 一致的模型配置读取：config.yaml → 环境变量 → 默认值。"""
         try:
             from jiuwenswarm.common.config import get_config
@@ -160,13 +161,15 @@ class IMConversationProcessor:
             cfg = {}
         react = cfg.get("react") or {}
         mcc = react.get("model_client_config") or {}
+        mco = react.get("model_config_obj") or {}
         name = (
             (model_name_override or "").strip()
             or react.get("model_name", "")
+            or mcc.get("model_name", "")
             or os.getenv("MODEL_NAME", "").strip()
             or "gpt-4o"
         )
-        return name, mcc
+        return name, mcc, mco
 
     async def process(
         self,
@@ -383,18 +386,30 @@ class IMConversationProcessor:
         if self._llm is not None:
             return self._llm
         try:
-            model_cfg = ModelRequestConfig(
-                model=self._model_name,
-                temperature=0.2,
-                top_p=0.7,
-            )
             mcc = self._model_client_raw
+            model_config_obj = {
+                **(self._model_config_raw or {}),
+                "temperature": 0.2,
+                "top_p": 0.7,
+            }
             api_key = (mcc.get("api_key") or os.getenv("API_KEY") or "").strip()
             api_base = (mcc.get("api_base") or os.getenv("API_BASE") or "").strip()
             if api_base.endswith("/chat/completions"):
                 api_base = api_base.rsplit("/chat/completions", 1)[0]
             client_provider = mcc.get("client_provider") or os.getenv("MODEL_PROVIDER", "OpenAI")
             custom_headers = _parse_custom_headers(mcc.get("custom_headers") or os.getenv("CUSTOM_HEADERS"))
+            reasoning_mcc = {
+                **dict(mcc or {}),
+                "client_provider": client_provider,
+                "api_base": api_base,
+            }
+            model_cfg = ModelRequestConfig(
+                **build_reasoning_model_request_kwargs(
+                    model_client_config=reasoning_mcc,
+                    model_config_obj=model_config_obj,
+                    model_name=self._model_name,
+                )
+            )
             model_client_cfg = ModelClientConfig(
                 client_id="im_conversation_processor_client",
                 client_provider=client_provider,

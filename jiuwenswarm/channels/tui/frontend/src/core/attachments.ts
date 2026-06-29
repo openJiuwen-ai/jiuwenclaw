@@ -170,6 +170,21 @@ export function extractAgentMentions(content: string): string[] {
   return [...new Set(results)];
 }
 
+/**
+ * Check if pasted text contains only file paths (pure drag-and-drop)
+ * with no command/message text interspersed.
+ * Terminal file drag-and-drop inserts only the file path(s); any other
+ * text means it's a clipboard paste of a command or message.
+ */
+export function isPurePathPaste(text: string): boolean {
+  const matches = [...text.matchAll(PASTED_PATH_RE)];
+  let remaining = text;
+  for (const m of matches) {
+    remaining = remaining.replace(m[0], "");
+  }
+  return remaining.trim().length === 0;
+}
+
 export function extractFilePathsFromPaste(
   text: string,
   options: Omit<AttachmentExtractionOptions, "classifyAttachment"> = {},

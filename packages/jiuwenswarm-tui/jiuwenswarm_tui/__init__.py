@@ -1,1 +1,1 @@
-"""Native JiuwenClaw CLI launcher package."""
+"""Native JiuwenSwarm CLI launcher package."""

@@ -13,6 +13,7 @@ interface CronJobPayload {
   targets: string;
   mode: string;
   delete_after_run: boolean;
+  timeout_seconds?: number | null;
   created_at: number | null;
   updated_at: number | null;
 }
@@ -21,8 +22,129 @@ interface CronJobListPayload {
   jobs: CronJobPayload[];
 }
 
+interface CronJobMetaPayload {
+  modes: string[];
+  default_mode: string;
+  default_timeout_seconds?: number;
+  default_team_timeout_seconds?: number;
+}
+
 const TARGET_CHANNELS = ["tui", "web", "feishu", "whatsapp", "wecom", "xiaoyi", "wechat", "dingtalk"];
-const MODES = ["agent", "plan"];
+
+let cachedCronMeta: CronJobMetaPayload | null = null;
+
+async function loadCronJobMeta(ctx: CommandContext): Promise<CronJobMetaPayload> {
+  if (cachedCronMeta) {
+    return cachedCronMeta;
+  }
+  const payload = await ctx.request("cron.job.meta", {}) as CronJobMetaPayload;
+  cachedCronMeta = {
+    modes: Array.isArray(payload.modes) ? payload.modes : [],
+    default_mode: payload.default_mode || "agent.fast",
+    default_timeout_seconds: payload.default_timeout_seconds ?? 600,
+    default_team_timeout_seconds: payload.default_team_timeout_seconds ?? 1200,
+  };
+  return cachedCronMeta;
+}
+
+function isValidCronMode(modes: string[], mode: string): boolean {
+  return modes.includes(mode.trim().toLowerCase());
+}
+
+const TEAM_MODES = new Set(["team", "team.plan", "code.team"]);
+
+function resolveDefaultTimeoutSeconds(job: Pick<CronJobPayload, "mode">, cronMeta: CronJobMetaPayload): number {
+  const mode = String(job.mode || cronMeta.default_mode || "agent.fast").trim().toLowerCase();
+  return TEAM_MODES.has(mode)
+    ? (cronMeta.default_team_timeout_seconds ?? 1200)
+    : (cronMeta.default_timeout_seconds ?? 600);
+}
+
+function formatTimeoutLabel(
+  job: Pick<CronJobPayload, "mode" | "timeout_seconds">,
+  cronMeta: CronJobMetaPayload,
+): string {
+  const seconds = job.timeout_seconds ?? resolveDefaultTimeoutSeconds(job, cronMeta);
+  const minutes = Math.round(seconds / 60);
+  if (job.timeout_seconds == null) {
+    return `${seconds}s (${minutes}min, default)`;
+  }
+  return `${seconds}s (${minutes}min)`;
+}
+
+const CRON_MAX_TIMEOUT_SECONDS = 72 * 60 * 60;
+
+function validateTimeoutSeconds(raw: string): string | null {
+  const value = parseInt(raw, 10);
+  if (isNaN(value) || value < 60) {
+    return `Invalid timeout_seconds: "${raw}". Must be an integer >= 60`;
+  }
+  if (value > CRON_MAX_TIMEOUT_SECONDS) {
+    return `Invalid timeout_seconds: "${raw}". Must be <= ${CRON_MAX_TIMEOUT_SECONDS}`;
+  }
+  return null;
+}
+
+// ── field validation constants ──
+
+// Keys auto-managed by backend — never accepted in add/update input
+// These exist in cron_jobs.json but are always set by the system.
+const READ_ONLY_KEYS = new Set(["id", "created_at", "updated_at"]);
+
+// Keys that exist in the backend schema but should NOT be set manually by the user.
+// session_id / chat_type are derived from the channel context at runtime.
+// enabled is toggled via /cron toggle; expired is auto-managed by the scheduler.
+const ADD_RESTRICTED_KEYS: Record<string, string> = {
+  session_id: "由系统根据投递渠道自动生成，不可手动设置",
+  chat_type: "由系统根据对话上下文自动生成，不可手动设置",
+  enabled: "请使用 /cron toggle <id> on|off 来开关，不可在 add 中设置",
+  expired: "由调度器自动管理，不可手动设置",
+};
+
+const UPDATE_RESTRICTED_KEYS: Record<string, string> = {
+  session_id: "由系统根据投递渠道自动生成，不可手动修改",
+  chat_type: "由系统根据对话上下文自动生成，不可手动修改",
+};
+
+// Keys allowed for /cron add (user-writable fields that make sense on creation)
+const ADD_ALLOWED_KEYS = new Set(["name", "cron_expr", "description", "targets", "timezone", "mode", "wake_offset_seconds", "delete_after_run", "timeout_seconds"]);
+
+// Keys allowed for /cron update (user-writable fields; includes enabled/expired for power-users)
+const UPDATE_ALLOWED_KEYS = new Set([
+  "name", "cron_expr", "description", "targets", "timezone", "mode",
+  "wake_offset_seconds", "delete_after_run", "enabled", "expired", "timeout_seconds",
+]);
+
+/**
+ * Validate user-supplied keys against allowed / read-only / restricted lists.
+ * Returns an error message string if any key is invalid, or null if all keys are fine.
+ * The `restrictedMap` differs between add and update (some keys are restricted only on add).
+ */
+function validateKeys(keys: string[], allowed: Set<string>, restrictedMap: Record<string, string>): string | null {
+  // 1) Read-only keys (id, created_at, updated_at)
+  const readOnlyHits = keys.filter((k) => READ_ONLY_KEYS.has(k));
+  if (readOnlyHits.length > 0) {
+    return `以下字段为系统自动管理，不可设置: ${readOnlyHits.join(", ")}（只读字段: ${[...READ_ONLY_KEYS].join(", ")}）`;
+  }
+
+  // 2) Restricted keys (exist in schema but not user-settable)
+  const restrictedHits = keys.filter((k) => k in restrictedMap);
+  if (restrictedHits.length > 0) {
+    const hints = restrictedHits.map((k) => `${k} — ${restrictedMap[k]}`);
+    return `以下字段不可手动设置:\n  ${hints.join("\n  ")}`;
+  }
+
+  // 3) Completely unknown keys (not in any known list)
+  const allKnown = new Set([...READ_ONLY_KEYS, ...Object.keys(restrictedMap), ...allowed]);
+  const unknownHits = keys.filter((k) => !allKnown.has(k));
+  if (unknownHits.length > 0) {
+    return `未知字段: ${unknownHits.join(", ")}。可用字段: ${[...allowed].join(", ")}`;
+  }
+
+  return null;
+}
+
+// ── end field validation constants ──
 
 // ── cron expression syntax validation ──
 
@@ -134,6 +256,7 @@ export function createCronCommand(): SlashCommand {
       '/cron list\n' +
       '/cron show <id>\n' +
       '/cron add name=晨报 cron_expr="0 9 * * *" description="生成简短的中文健康打卡提醒" targets=tui\n' +
+      '/cron add name=日报 cron_expr="0 9 * * *" description="汇总团队进展" mode=team targets=tui\n' +
       '/cron update <id> description="新的任务内容"\n' +
       "/cron delete <id>\n" +
       "/cron toggle <id> on|off\n" +
@@ -164,7 +287,7 @@ export function createCronCommand(): SlashCommand {
         name: "add",
         description: "创建定时任务",
         usage: "/cron add name=... cron_expr=\"...\" description=\"...\"",
-        argGuide: "name=任务名 cron_expr=\"时间表达式(5字段或7字段)\" description=\"让Agent做什么\" targets=tui",
+        argGuide: "name=任务名 cron_expr=\"时间表达式(5字段或7字段)\" description=\"让Agent做什么\" mode=agent.fast|team targets=tui (默认 agent.fast；mode=team 走 Team+SwarmFlow)",
         kind: CommandKind.BUILT_IN,
         takesArgs: true,
         action: async (ctx, args) => _handleAdd(ctx, `add ${args}`),
@@ -311,6 +434,7 @@ async function _handleShow(ctx: CommandContext, parts: string[]): Promise<void> 
     }
 
     const job = payload.job;
+    const cronMeta = await loadCronJobMeta(ctx);
     const statusTag = job.expired ? "EXPIRED" : job.enabled ? "ON" : "OFF";
     const isOneShot = job.delete_after_run === true;
     const taskType = isOneShot ? "单次任务" : "周期任务";
@@ -327,7 +451,8 @@ async function _handleShow(ctx: CommandContext, parts: string[]): Promise<void> 
           { label: "timezone", value: job.timezone },
           { label: "description", value: job.description || "-" },
           { label: "targets", value: job.targets },
-          { label: "mode", value: job.mode || "agent" },
+          { label: "mode", value: job.mode || cronMeta.default_mode },
+          { label: "timeout_seconds", value: formatTimeoutLabel(job, cronMeta) },
           { label: "wake_offset_seconds", value: String(job.wake_offset_seconds ?? 300) },
           { label: "delete_after_run", value: String(isOneShot) },
         ],
@@ -358,13 +483,21 @@ async function _handleAdd(ctx: CommandContext, raw: string): Promise<void> {
     }
   }
 
+  // ── key validity check ──
+  const keyError = validateKeys(Object.keys(kvPairs), ADD_ALLOWED_KEYS, ADD_RESTRICTED_KEYS);
+  if (keyError) {
+    ctx.addItem(addError(ctx.sessionId, keyError));
+    return;
+  }
+  // ── end key validity check ──
+
   const requiredFields = ["name", "cron_expr", "description"];
   const missing = requiredFields.filter((f) => !kvPairs[f] || kvPairs[f].trim() === "");
   if (missing.length > 0) {
     ctx.addItem(
       addError(
         ctx.sessionId,
-        `缺少必填字段: ${missing.join(", ")}。必填: name(任务名)、cron_expr(时间)、description(让Agent做什么)。示例: /cron add name=晨报 cron_expr="0 9 * * *" description="生成健康打卡提醒" targets=tui`,
+        `缺少必填字段: ${missing.join(", ")}。必填: name(任务名)、cron_expr(时间)、description(让Agent做什么)。示例: /cron add name=晨报 cron_expr="0 9 * * *" description="生成健康打卡提醒" mode=team targets=tui`,
       ),
     );
     return;
@@ -372,7 +505,6 @@ async function _handleAdd(ctx: CommandContext, raw: string): Promise<void> {
 
   if (!kvPairs.targets) kvPairs.targets = "tui";
   if (!kvPairs.timezone) kvPairs.timezone = "Asia/Shanghai";
-  if (!kvPairs.mode) kvPairs.mode = "agent";
 
   // cron_expr syntax validation
   const cronError = validateCronExpr(kvPairs.cron_expr);
@@ -395,9 +527,20 @@ async function _handleAdd(ctx: CommandContext, raw: string): Promise<void> {
     return;
   }
 
-  if (!MODES.includes(kvPairs.mode.toLowerCase())) {
+  let cronMeta: CronJobMetaPayload;
+  try {
+    cronMeta = await loadCronJobMeta(ctx);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    ctx.addItem(addError(ctx.sessionId, `Failed to load cron mode list: ${message}`));
+    return;
+  }
+
+  if (!kvPairs.mode) kvPairs.mode = cronMeta.default_mode;
+
+  if (!isValidCronMode(cronMeta.modes, kvPairs.mode)) {
     ctx.addItem(
-      addError(ctx.sessionId, `Invalid mode: "${kvPairs.mode}". Valid: ${MODES.join(", ")}`),
+      addError(ctx.sessionId, `Invalid mode: "${kvPairs.mode}". Valid: ${cronMeta.modes.join(", ")}`),
     );
     return;
   }
@@ -417,6 +560,13 @@ async function _handleAdd(ctx: CommandContext, raw: string): Promise<void> {
       return;
     }
   }
+  if (kvPairs.timeout_seconds) {
+    const timeoutError = validateTimeoutSeconds(kvPairs.timeout_seconds);
+    if (timeoutError) {
+      ctx.addItem(addError(ctx.sessionId, timeoutError));
+      return;
+    }
+  }
 
   try {
     const payload = await ctx.request("cron.job.create", {
@@ -428,6 +578,9 @@ async function _handleAdd(ctx: CommandContext, raw: string): Promise<void> {
       mode: kvPairs.mode,
       wake_offset_seconds: parseInt(kvPairs.wake_offset_seconds || "300", 10),
       delete_after_run: kvPairs.delete_after_run === "true",
+      ...(kvPairs.timeout_seconds
+        ? { timeout_seconds: parseInt(kvPairs.timeout_seconds, 10) }
+        : {}),
     }) as { job: CronJobPayload };
 
     const job = payload.job;
@@ -443,6 +596,7 @@ async function _handleAdd(ctx: CommandContext, raw: string): Promise<void> {
           { label: "timezone", value: job.timezone },
           { label: "targets", value: job.targets },
           { label: "mode", value: job.mode },
+          { label: "timeout_seconds", value: job.timeout_seconds == null ? "-" : String(job.timeout_seconds) },
           { label: "enabled", value: String(job.enabled) },
           { label: "delete_after_run", value: String(job.delete_after_run) },
         ],
@@ -508,6 +662,14 @@ async function _handleUpdate(ctx: CommandContext, raw: string, parts: string[]):
     return;
   }
 
+  // ── key validity check ──
+  const keyError = validateKeys(Object.keys(patch), UPDATE_ALLOWED_KEYS, UPDATE_RESTRICTED_KEYS);
+  if (keyError) {
+    ctx.addItem(addError(ctx.sessionId, keyError));
+    return;
+  }
+  // ── end key validity check ──
+
   // Validate each field in the patch
   if ("name" in patch && !String(patch.name).trim()) {
     ctx.addItem(addError(ctx.sessionId, "name 不能为空"));
@@ -532,11 +694,35 @@ async function _handleUpdate(ctx: CommandContext, raw: string, parts: string[]):
     }
   }
   if ("mode" in patch) {
-    const m = String(patch.mode).trim().toLowerCase();
-    if (!MODES.includes(m)) {
-      ctx.addItem(addError(ctx.sessionId, `Invalid mode: "${patch.mode}". Valid: ${MODES.join(", ")}`));
+    let cronMeta: CronJobMetaPayload;
+    try {
+      cronMeta = await loadCronJobMeta(ctx);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      ctx.addItem(addError(ctx.sessionId, `Failed to load cron mode list: ${message}`));
       return;
     }
+    const m = String(patch.mode).trim();
+    if (!isValidCronMode(cronMeta.modes, m)) {
+      ctx.addItem(addError(ctx.sessionId, `Invalid mode: "${patch.mode}". Valid: ${cronMeta.modes.join(", ")}`));
+      return;
+    }
+  }
+  if ("enabled" in patch) {
+    const raw = String(patch.enabled).trim().toLowerCase();
+    if (raw !== "true" && raw !== "false" && raw !== "on" && raw !== "off") {
+      ctx.addItem(addError(ctx.sessionId, `Invalid enabled: "${patch.enabled}". Valid: "true", "false", "on", "off"`));
+      return;
+    }
+    patch.enabled = raw === "true" || raw === "on";
+  }
+  if ("expired" in patch) {
+    const raw = String(patch.expired).trim().toLowerCase();
+    if (raw !== "true" && raw !== "false") {
+      ctx.addItem(addError(ctx.sessionId, `Invalid expired: "${patch.expired}". Valid: "true" or "false"`));
+      return;
+    }
+    patch.expired = raw === "true";
   }
   if ("delete_after_run" in patch) {
     const raw = String(patch.delete_after_run).toLowerCase();
@@ -553,6 +739,14 @@ async function _handleUpdate(ctx: CommandContext, raw: string, parts: string[]):
       return;
     }
     patch.wake_offset_seconds = wos;
+  }
+  if ("timeout_seconds" in patch) {
+    const timeoutError = validateTimeoutSeconds(String(patch.timeout_seconds));
+    if (timeoutError) {
+      ctx.addItem(addError(ctx.sessionId, timeoutError));
+      return;
+    }
+    patch.timeout_seconds = parseInt(String(patch.timeout_seconds), 10);
   }
 
   try {

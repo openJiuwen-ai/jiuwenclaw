@@ -33,6 +33,7 @@ from jiuwenswarm.agents.harness.common.tools.ssl_config import get_insecure_ssl_
 from jiuwenswarm.agents.harness.team.bootstrap import configure_agent_teams_home
 from jiuwenswarm.common.utils import get_agent_root_dir, get_logs_dir, \
     get_agent_sessions_dir, get_root_dir, get_user_workspace_dir, is_package_installation, wait_for_tcp_port
+from jiuwenswarm.server.runtime.session.session_history import history_exists, load_history_records
 
 configure_agent_teams_home()
 
@@ -583,12 +584,11 @@ class _SpaStaticHandler(SimpleHTTPRequestHandler):
         except ValueError as exc:
             raise FileNotFoundError("history_not_found") from exc
 
-        history_path = session_dir / "history.json"
-        if not session_dir.exists() or not history_path.exists():
+        if not session_dir.exists() or not history_exists(session_id):
             raise FileNotFoundError("history_not_found")
         try:
-            history_raw = json.loads(history_path.read_text(encoding="utf-8"))
-        except json.JSONDecodeError as exc:
+            history_raw = load_history_records(session_id)
+        except Exception as exc:
             raise ValueError("invalid_history_json") from exc
         if not isinstance(history_raw, list):
             raise ValueError("invalid_history_shape")
@@ -1033,7 +1033,7 @@ def main() -> None:
     web_port = os.getenv("WEB_PORT", "19000")  # WebChannel websocket port (proxy target)
     default_proxy = os.getenv("GATEWAY_URL", f"http://127.0.0.1:{web_port}")
 
-    parser = argparse.ArgumentParser(description="Serve JiuwenClaw frontend static files.")
+    parser = argparse.ArgumentParser(description="Serve JiuwenSwarm frontend static files.")
     parser.add_argument("--host", default=default_host, help="Host to bind.")
     parser.add_argument("--port", type=int, default=default_port, help="Port to bind.")
     parser.add_argument(

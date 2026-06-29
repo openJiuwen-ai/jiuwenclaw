@@ -67,6 +67,7 @@ type AgentsTeamsSavePayload = {
     lifecycle: string;
     teammate_mode: string;
     spawn_mode: string;
+    enable_permissions: boolean;
     leader: { member_name: string; display_name: string; persona: string; agent_key: string };
     teammate: { agent_key: string };
     predefined_members: Array<{ member_name: string; display_name: string; persona: string; prompt_hint: string; agent_key: string }>;
@@ -204,6 +205,7 @@ function AppContent() {
   const [shareExportSnapshot, setShareExportSnapshot] = useState<ShareImageSnapshot | null>(null);
   const [restartSeenDisconnect, setRestartSeenDisconnect] = useState(false);
   const [appliedWithoutRestart, setAppliedWithoutRestart] = useState(false);
+  const [a2uiRefreshPending, setA2uiRefreshPending] = useState(false);
   const [newSessionToastVisible, setNewSessionToastVisible] = useState(false);
   const [heartbeatToastVisible, setHeartbeatToastVisible] = useState(false);
   const [heartbeatToastMessage, setHeartbeatToastMessage] = useState('');
@@ -445,14 +447,19 @@ function AppContent() {
   }, [request, t, setAvailableModels]);
 
   useEffect(() => {
-    if (!FEATURE_APP_UPDATER_UI || !isConnected || startupUpdateCheckRef.current) {
+    if (!FEATURE_APP_UPDATER_UI || !isConnected || !initialDataLoaded || startupUpdateCheckRef.current) {
       return;
     }
     startupUpdateCheckRef.current = true;
-    void request('updater.check', { manual: false }).catch((updateError) => {
-      console.warn('Startup updater check failed:', updateError);
-    });
-  }, [isConnected, request]);
+    const timeoutId = window.setTimeout(() => {
+      void request('updater.check', { manual: false }).catch((updateError) => {
+        console.warn('Startup updater check failed:', updateError);
+      });
+    }, 30000);
+    return () => {
+      window.clearTimeout(timeoutId);
+    };
+  }, [initialDataLoaded, isConnected, request]);
 
   const clearRestartAutoCloseTimer = useCallback(() => {
     if (restartAutoCloseTimerRef.current != null) {
@@ -467,6 +474,7 @@ function AppContent() {
     setRestartSuccess(false);
     setRestartSeenDisconnect(false);
     setAppliedWithoutRestart(false);
+    setA2uiRefreshPending(false);
   }, [clearRestartAutoCloseTimer]);
 
   const clearNewSessionToastTimer = useCallback(() => {
@@ -510,6 +518,7 @@ function AppContent() {
       api_key: string;
       model: string;
       model_provider: string;
+      reasoning_level?: string;
     }) => {
       await request('config.validate_model', fields, { timeoutMs: 60000 });
     },
@@ -536,14 +545,11 @@ function AppContent() {
       'config.set',
       updates
     );
-    if ('a2ui_enabled' in updates) {
-      setA2UIFeatureEnabled(normalizeA2UIEnabled(updates.a2ui_enabled));
-    }
     setServerConfig((prev) => {
       if (!prev) return updates;
       const next: Record<string, unknown> = { ...prev, ...updates };
       // Keep the bilingual memory_forbidden_description dictionary structure.
-      if (typeof prev.memory_forbidden_description === 'object' && prev.memory_forbidden_description !== null
+      if (typeof prev?.memory_forbidden_description === 'object' && prev.memory_forbidden_description !== null
           && !Array.isArray(prev.memory_forbidden_description) && updates.memory_forbidden_description !== undefined) {
         const prevDict = prev.memory_forbidden_description as Record<string, string>;
         const lang = i18n.language || 'zh';
@@ -555,13 +561,24 @@ function AppContent() {
     setRestartModalOpen(true);
     setRestartSuccess(false);
     setRestartSeenDisconnect(false);
-    setAppliedWithoutRestart(payload?.applied_without_restart === true);
-    clearRestartAutoCloseTimer();
-    if (payload?.applied_without_restart === true) {
+    if ('a2ui_enabled' in updates) {
+      setAppliedWithoutRestart(false);
+      setA2uiRefreshPending(true);
       setRestartSuccess(true);
+      clearRestartAutoCloseTimer();
       restartAutoCloseTimerRef.current = window.setTimeout(() => {
         closeRestartModal();
+        window.location.reload();
       }, 5000);
+    } else {
+      setAppliedWithoutRestart(payload?.applied_without_restart === true);
+      clearRestartAutoCloseTimer();
+      if (payload?.applied_without_restart === true) {
+        setRestartSuccess(true);
+        restartAutoCloseTimerRef.current = window.setTimeout(() => {
+          closeRestartModal();
+        }, 5000);
+      }
     }
   }, [clearRestartAutoCloseTimer, closeRestartModal, request]);
 
@@ -594,30 +611,34 @@ function AppContent() {
       updates[`agent_skills_${i}`] = "";
     }
     payload.team.forEach((team, idx) => {
-      updates[`team_name_${idx}`] = team.team_name;
-      updates[`team_lifecycle_${idx}`] = team.lifecycle;
-      updates[`team_teammate_mode_${idx}`] = team.teammate_mode;
-      updates[`team_spawn_mode_${idx}`] = team.spawn_mode;
-      updates[`team_leader_member_name_${idx}`] = team.leader.member_name;
-      updates[`team_leader_display_name_${idx}`] = team.leader.display_name;
-      updates[`team_leader_persona_${idx}`] = team.leader.persona;
-      updates[`team_leader_agent_key_${idx}`] = team.leader.agent_key;
-      updates[`team_teammate_agent_key_${idx}`] = team.teammate.agent_key;
-      updates[`team_predefined_members_${idx}`] = team.predefined_members?.length
+      // 使用与后端一致的键名格式：team_${idx}_name
+      updates[`team_${idx}_name`] = team.team_name;
+      updates[`team_${idx}_lifecycle`] = team.lifecycle;
+      updates[`team_${idx}_teammate_mode`] = team.teammate_mode;
+      updates[`team_${idx}_spawn_mode`] = team.spawn_mode;
+      updates[`team_${idx}_enable_permissions`] = String(team.enable_permissions);
+      updates[`team_${idx}_leader_member_name`] = team.leader.member_name;
+      updates[`team_${idx}_leader_display_name`] = team.leader.display_name;
+      updates[`team_${idx}_leader_persona`] = team.leader.persona;
+      updates[`team_${idx}_leader_agent_key`] = team.leader.agent_key;
+      updates[`team_${idx}_teammate_agent_key`] = team.teammate.agent_key;
+      updates[`team_${idx}_predefined_members`] = team.predefined_members?.length
         ? JSON.stringify(team.predefined_members)
         : "";
     });
-for (let i = payload.team.length; i < 10; i++) {
-      updates[`team_name_${i}`] = "";
-      updates[`team_lifecycle_${i}`] = "";
-      updates[`team_teammate_mode_${i}`] = "";
-      updates[`team_spawn_mode_${i}`] = "";
-      updates[`team_leader_member_name_${i}`] = "";
-      updates[`team_leader_display_name_${i}`] = "";
-      updates[`team_leader_persona_${i}`] = "";
-      updates[`team_leader_agent_key_${i}`] = "";
-      updates[`team_teammate_agent_key_${i}`] = "";
-      updates[`team_predefined_members_${i}`] = "";
+    for (let i = payload.team.length; i < 10; i++) {
+      // 使用与后端一致的键名格式：team_${i}_name
+      updates[`team_${i}_name`] = "";
+      updates[`team_${i}_lifecycle`] = "";
+      updates[`team_${i}_teammate_mode`] = "";
+      updates[`team_${i}_spawn_mode`] = "";
+      updates[`team_${i}_enable_permissions`] = "";
+      updates[`team_${i}_leader_member_name`] = "";
+      updates[`team_${i}_leader_display_name`] = "";
+      updates[`team_${i}_leader_persona`] = "";
+      updates[`team_${i}_leader_agent_key`] = "";
+      updates[`team_${i}_teammate_agent_key`] = "";
+      updates[`team_${i}_predefined_members`] = "";
     }
     return updates;
   }, []);
@@ -634,6 +655,7 @@ for (let i = payload.team.length; i < 10; i++) {
   }, [applyConfigSaveUiState, buildAgentsTeamsFlatConfig, request]);
 
   const saveAllConfigAndRestart = useCallback(async (payload: ConfigSaveAllPayload) => {
+    const isA2UIChange = payload.config && 'a2ui_enabled' in payload.config;
     const result = await request<{ updated?: string[]; applied_without_restart?: boolean }>(
       'config.save_all',
       payload as unknown as Record<string, unknown>
@@ -663,7 +685,22 @@ for (let i = payload.team.length; i < 10; i++) {
       }
       return next;
     });
-    applyConfigSaveUiState(result?.applied_without_restart === true);
+    if (isA2UIChange) {
+      // Show modal then refresh page after 5 seconds
+      setConfigError(null);
+      setRestartModalOpen(true);
+      setRestartSuccess(true);
+      setRestartSeenDisconnect(false);
+      setAppliedWithoutRestart(false);
+      setA2uiRefreshPending(true);
+      clearRestartAutoCloseTimer();
+      restartAutoCloseTimerRef.current = window.setTimeout(() => {
+        closeRestartModal();
+        window.location.reload();
+      }, 5000);
+    } else {
+      applyConfigSaveUiState(result?.applied_without_restart === true);
+    }
   }, [applyConfigSaveUiState, buildAgentsTeamsFlatConfig, i18n.language, request]);
 
   useEffect(() => {
@@ -845,6 +882,7 @@ for (let i = payload.team.length; i < 10; i++) {
                 success: n.success,
                 toolCallId: n.toolCallId,
                 summary: n.summary,
+                skillTree: n.skillTree,
               },
               { updatedAt: item.at }
             );
@@ -1062,14 +1100,15 @@ for (let i = payload.team.length; i < 10; i++) {
   const handleSendMessage = useCallback((content: string) => {
     const currentSessionId = sessionIdRef.current;
     if (!currentSessionId || currentSessionId === 'new') return;
+    disposeInFlightHistoryHandles();
     void sendMessage(content, currentSessionId);
-  }, [sendMessage]);
+  }, [disposeInFlightHistoryHandles, sendMessage]);
 
   useEffect(() => {
     return setA2UIActionHandler((message) => {
       const currentSessionId = sessionIdRef.current;
       if (!currentSessionId || currentSessionId === 'new') return;
-      void sendStructuredChatContent(
+      return sendStructuredChatContent(
         buildA2UIClientEventContent(message),
         currentSessionId,
       );
@@ -1149,6 +1188,7 @@ for (let i = payload.team.length; i < 10; i++) {
                 success: n.success,
                 toolCallId: n.toolCallId,
                 summary: n.summary,
+                skillTree: n.skillTree,
               },
               { updatedAt: item.at }
             );
@@ -1412,7 +1452,7 @@ for (let i = payload.team.length; i < 10; i++) {
               {configError}. {t('app.configErrorHint')}
               <span className="mono"> python -m tests.web_gateway_jiuwenclaw_integration </span>
               {t('app.configErrorDefault')}
-              <span className="mono"> jiuwenclaw/channels/web/frontend/.env.local </span>
+              <span className="mono"> jiuwenswarm/channels/web/frontend/.env.local </span>
               {t('app.configErrorEnv')} <span className="mono">VITE_API_BASE</span> {t('common.and')} <span className="mono">VITE_WS_BASE</span>.
             </div>
           </div>
@@ -1438,6 +1478,7 @@ for (let i = payload.team.length; i < 10; i++) {
                     onExportShare={handleExportShare}
                     isExportingShare={isExportingShare}
                     canExportShare={Boolean(sessionId && sessionId !== 'new' && (!isProcessing || isPaused))}
+                    teamAreaExpanded={isTeamAreaExpanded}
                     historyPager={
                       historyPagerMeta
                         ? {
@@ -1543,6 +1584,7 @@ for (let i = payload.team.length; i < 10; i++) {
           <div className={`app-section ${activeNav === 'skills' ? '' : 'is-hidden'}`}>
             <SkillPanel
               sessionId={sessionId}
+              isActive={activeNav === 'skills'}
               onNavigateToConfig={() => {
                 setConfigInitialExpandGroup('third_party_api');
                 setActiveNav('configpanel');
@@ -1669,19 +1711,33 @@ for (let i = payload.team.length; i < 10; i++) {
                 </div>
               )}
               <h3 className="text-base font-semibold text-text mb-1">
-                {!restartSuccess ? t('app.restarting') : appliedWithoutRestart ? t('app.configApplied') : t('app.restartSuccess')}
+                {!restartSuccess
+                  ? t('app.restarting')
+                  : a2uiRefreshPending
+                    ? t('app.a2uiRefresh')
+                    : appliedWithoutRestart
+                      ? t('app.configApplied')
+                      : t('app.restartSuccess')}
               </h3>
               <p className="text-sm text-text-muted mb-5">
                 {!restartSuccess
                   ? t('app.restartWaiting')
-                  : appliedWithoutRestart
-                    ? t('app.configAppliedDesc')
-                    : t('app.restartSuccessDesc')}
+                  : a2uiRefreshPending
+                    ? t('app.a2uiRefreshDesc')
+                    : appliedWithoutRestart
+                      ? t('app.configAppliedDesc')
+                      : t('app.restartSuccessDesc')}
               </p>
               {restartSuccess && (
                 <button
                   type="button"
-                  onClick={closeRestartModal}
+                  onClick={() => {
+                    if (a2uiRefreshPending) {
+                      window.location.reload();
+                    } else {
+                      closeRestartModal();
+                    }
+                  }}
                   className="btn primary !px-4 !py-2"
                 >
                   {t('common.ok')}

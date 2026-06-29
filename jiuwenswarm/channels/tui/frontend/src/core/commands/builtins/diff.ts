@@ -12,16 +12,19 @@ export function createDiffCommand(): SlashCommand {
   return {
     name: "diff",
     description: "View uncommitted changes and per-turn diffs",
-    usage: "/diff [--detail]",
+    usage: "/diff",
     example: "/diff",
     kind: CommandKind.BUILT_IN,
     action: async (ctx, args) => {
       try {
-        const showDetail = (args || "").split(/\s+/).filter(Boolean).includes("--detail");
-
         const payload = await ctx.request<DiffPayload>("command.diff", {});
         const turns = payload.turns || [];
         const gitDiff = payload.gitDiff || null;
+
+        if (ctx.enterDiffViewer) {
+          ctx.enterDiffViewer(payload as unknown as Record<string, unknown>);
+          return;
+        }
 
         const parts: string[] = [];
         if (gitDiff && gitDiff.stats.filesChanged > 0) {
@@ -37,7 +40,7 @@ export function createDiffCommand(): SlashCommand {
           : "No file changes in this session";
 
         ctx.addItem(
-          addDiff(ctx.sessionId, summary, { turns, gitDiff, showDetail }),
+          addDiff(ctx.sessionId, summary, { turns, gitDiff }),
         );
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);

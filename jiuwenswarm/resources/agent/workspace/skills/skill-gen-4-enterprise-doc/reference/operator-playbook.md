@@ -29,7 +29,7 @@ This replaces a manual **apply** / **Import** handoff: the driving agent perform
 
 ## Path resolution (portable)
 
-Do **not** assume a fixed home-directory prefix or legacy **`…/workspace/…`** segments. JiuwenClaw (and forks) may relocate data roots via config or environment; always prefer **whatever path helpers the host exposes** in the system prompt or tool context.
+Do **not** assume a fixed home-directory prefix or legacy **`…/workspace/…`** segments. JiuwenSwarm (and forks) may relocate data roots via config or environment; always prefer **whatever path helpers the host exposes** in the system prompt or tool context.
 
 When **`get_agent_workspace_dir()`** / **`get_agent_skills_dir()`** / **`get_agent_root_dir()`** are named in the prompt, use them to build **absolute** paths for drafts, imports, and file tools. If only a virtual tree (e.g. `agent/workspace/...`) is shown, map it through the host’s documented root before writing to disk.
 
@@ -93,4 +93,4 @@ Optionally run **`scripts/skill_gen/validator.py`** on the draft directory befor
 | **Required keys** | `name` (kebab-case), `description` (no `<` / `>` in text). |
 | **Then** | Closing `---`, then Markdown body (inputs, processing, deliverables, …). |
 
-Same layout as other Jiuwenclaw skills; **`validate_skill`** in `scripts/skill_gen/validator.py` checks frontmatter and basic structure.
+Same layout as other Jiuwenswarm skills; **`validate_skill`** in `scripts/skill_gen/validator.py` checks frontmatter and basic structure.

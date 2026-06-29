@@ -162,7 +162,6 @@ function Tooltip({
           y="22"
           fill="#FFFFFF"
           fontSize="14"
-          fontFamily="HarmonyOS Sans SC, PingFang SC, sans-serif"
           fontWeight="400"
         >
           {text}

@@ -1,4 +1,4 @@
-import { visibleWidth } from "@mariozechner/pi-tui";
+import { visibleWidth, wrapTextWithAnsi } from "@mariozechner/pi-tui";
 import type { ConnectionStatus } from "../core/ws-client.js";
 import { padToWidth } from "./rendering/text.js";
 import { chalk } from "./theme.js";
@@ -121,7 +121,10 @@ export function buildWelcomeLines(
       centerLine(cmdBottom, width),
       ...(hint ? [centerLine(chalk.hex("#FFFFFF")(hint), width)] : []),
       ...(memoryWarnings.length > 0
-        ? memoryWarnings.map((w) => centerLine(chalk.hex("#FFD700")(`Warning: ${w.message}`), width))
+        ? memoryWarnings.flatMap((w) => {
+            const msg = chalk.hex("#FFD700")(`Warning: ${w.message}`);
+            return wrapTextWithAnsi(msg, Math.max(1, width)).map((line) => padToWidth(line, width));
+          })
         : []),
     ];
   }
@@ -146,7 +149,10 @@ export function buildWelcomeLines(
     padToWidth(chalk.hex("#FFFFFF")("└────────────────────────────────────────────────────────────┘"), width),
     ...(hint ? [padToWidth(chalk.hex("#FFFFFF")(hint), width)] : []),
     ...(memoryWarnings.length > 0
-      ? memoryWarnings.map((w) => padToWidth(chalk.hex("#FFD700")(`Warning: ${w.message}`), width))
+      ? memoryWarnings.flatMap((w) => {
+          const msg = chalk.hex("#FFD700")(`Warning: ${w.message}`);
+          return wrapTextWithAnsi(msg, Math.max(1, width)).map((line) => padToWidth(line, width));
+        })
       : []),
   ];
 }

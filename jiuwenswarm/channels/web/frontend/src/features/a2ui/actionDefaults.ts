@@ -1,6 +1,14 @@
 // Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 
 import type { A2UIClientEventMessage, ServerToClientMessage } from '@a2ui/react';
+import {
+  a2uiDebug,
+  a2uiPathCandidates,
+  isRecord,
+  normalizeA2UIPath,
+  shouldFillEmptyActionValue,
+  visibleChoiceDefault,
+} from './formDefaults';
 
 type UnknownRecord = Record<string, unknown>;
 
@@ -13,10 +21,6 @@ interface ActionDefaultEntry {
 
 const actionDefaults = new Map<string, ActionDefaultEntry>();
 const surfaceDefaultsByPath = new Map<string, Map<string, unknown>>();
-
-function isRecord(value: unknown): value is UnknownRecord {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
-}
 
 function componentType(component: unknown): string | null {
   if (!isRecord(component)) {
@@ -36,34 +40,6 @@ function componentProps(component: unknown): UnknownRecord | null {
   return component[type];
 }
 
-function normalizePath(path: unknown): string | null {
-  if (typeof path !== 'string' || !path.trim()) {
-    return null;
-  }
-  const trimmed = path.trim();
-  return trimmed.startsWith('/') ? trimmed : `/${trimmed}`;
-}
-
-function visibleChoiceDefault(props: UnknownRecord): unknown {
-  const options = Array.isArray(props.options) ? props.options : [];
-  const firstOption = options.find(isRecord);
-  if (
-    firstOption &&
-    Object.prototype.hasOwnProperty.call(firstOption, 'value') &&
-    firstOption.value !== null &&
-    firstOption.value !== undefined
-  ) {
-    return firstOption.value;
-  }
-
-  const selections = isRecord(props.selections) ? props.selections : null;
-  const literalArray = Array.isArray(selections?.literalArray)
-    ? selections.literalArray
-    : [];
-  const firstLiteral = literalArray.find((value) => value !== null && value !== undefined);
-  return firstLiteral ?? null;
-}
-
 function actionName(action: UnknownRecord): string | null {
   return typeof action.name === 'string'
     ? action.name
@@ -76,13 +52,58 @@ function actionKey(surfaceId: string, sourceComponentId: string, name: string): 
   return `${surfaceId}\u0000${sourceComponentId}\u0000${name}`;
 }
 
-function isEmptyActionValue(value: unknown): boolean {
-  return (
-    value === null ||
-    value === undefined ||
-    (Array.isArray(value) && value.length === 0) ||
-    (isRecord(value) && Object.keys(value).length === 0)
-  );
+function rememberDefault(
+  defaultsByPath: Map<string, unknown>,
+  path: string | null,
+  value: unknown,
+): void {
+  if (!path || value === null || value === undefined) {
+    return;
+  }
+  for (const candidate of a2uiPathCandidates(path)) {
+    defaultsByPath.set(candidate, value);
+  }
+}
+
+function recordComponentDefault(
+  defaultsByPath: Map<string, unknown>,
+  component: UnknownRecord,
+): void {
+  const type = componentType(component);
+  const props = componentProps(component);
+  if (!type || !props) {
+    return;
+  }
+
+  if (type === 'MultipleChoice' || type === 'SingleChoice') {
+    const selections = isRecord(props.selections) ? props.selections : null;
+    const selectionsPath = normalizeA2UIPath(selections?.path);
+    rememberDefault(defaultsByPath, selectionsPath, visibleChoiceDefault(props));
+    return;
+  }
+
+  if (type === 'TextField') {
+    const text = isRecord(props.text) ? props.text : null;
+    rememberDefault(defaultsByPath, normalizeA2UIPath(text?.path), text?.literalString);
+    return;
+  }
+
+  if (type === 'Slider') {
+    const value = isRecord(props.value) ? props.value : null;
+    rememberDefault(defaultsByPath, normalizeA2UIPath(value?.path), value?.literalNumber);
+    return;
+  }
+
+  if (type === 'CheckBox') {
+    const value = isRecord(props.value) ? props.value : null;
+    rememberDefault(defaultsByPath, normalizeA2UIPath(value?.path), value?.literalBoolean);
+    return;
+  }
+
+  if (type === 'DateTimeInput') {
+    const value = isRecord(props.value) ? props.value : null;
+    rememberDefault(defaultsByPath, normalizeA2UIPath(value?.path), value?.literalString);
+  }
 }
 
 export function clearA2UIActionDefaults(): void {
@@ -110,16 +131,10 @@ export function recordA2UIActionDefaults(messages: ServerToClientMessage[]): voi
 
     const defaultsByPath = surfaceDefaultsByPath.get(update.surfaceId) ?? new Map<string, unknown>();
     for (const instance of update.components) {
-      const props = componentProps(instance.component);
-      if (!props) {
+      if (!isRecord(instance.component)) {
         continue;
       }
-      const selections = isRecord(props.selections) ? props.selections : null;
-      const selectionsPath = normalizePath(selections?.path);
-      const defaultValue = visibleChoiceDefault(props);
-      if (selectionsPath && defaultValue !== null) {
-        defaultsByPath.set(selectionsPath, [defaultValue]);
-      }
+      recordComponentDefault(defaultsByPath, instance.component);
     }
     if (defaultsByPath.size > 0) {
       surfaceDefaultsByPath.set(update.surfaceId, defaultsByPath);
@@ -141,13 +156,19 @@ export function recordA2UIActionDefaults(messages: ServerToClientMessage[]): voi
         if (!isRecord(contextItem) || typeof contextItem.key !== 'string' || !isRecord(contextItem.value)) {
           continue;
         }
-        const path = normalizePath(contextItem.value.path);
+        const path = normalizeA2UIPath(contextItem.value.path);
         if (path && defaultsByPath.has(path)) {
           defaults[contextItem.key] = defaultsByPath.get(path);
         }
       }
 
       if (Object.keys(defaults).length > 0) {
+        a2uiDebug('[A2UI-AD] recording action defaults:', {
+          surfaceId: update.surfaceId,
+          componentId: instance.id,
+          actionName: name,
+          defaults,
+        });
         actionDefaults.set(actionKey(update.surfaceId, instance.id, name), {
           surfaceId: update.surfaceId,
           sourceComponentId: instance.id,
@@ -183,7 +204,9 @@ export function enrichA2UIClientEventWithDefaults(
   const nextContext: Record<string, unknown> = { ...currentContext };
   let changed = false;
   for (const [key, value] of Object.entries(entry.defaults)) {
-    if (isEmptyActionValue(nextContext[key])) {
+    const oldValue = nextContext[key];
+    if (shouldFillEmptyActionValue(oldValue)) {
+      a2uiDebug('[A2UI-AD] enriching visible default:', { key, defaultValue: value });
       nextContext[key] = value;
       changed = true;
     }

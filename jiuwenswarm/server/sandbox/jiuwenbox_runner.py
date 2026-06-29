@@ -143,6 +143,21 @@ class JiuwenBoxRunner:
         except Exception:
             return False
 
+    async def fetch_health(self, host: str | None = None, port: int | None = None) -> dict[str, Any] | None:
+        """Return parsed jiuwenbox ``/health`` JSON, or ``None`` on failure."""
+        target_host = host or self._host
+        target_port = port or self._port
+        url = f"http://{target_host}:{target_port}/health"
+        try:
+            async with httpx.AsyncClient(timeout=2.0) as client:
+                resp = await client.get(url)
+                if resp.status_code != 200:
+                    return None
+                data = resp.json()
+                return data if isinstance(data, dict) else None
+        except Exception:
+            return None
+
     async def ensure_running(
         self,
         host: str = "127.0.0.1",

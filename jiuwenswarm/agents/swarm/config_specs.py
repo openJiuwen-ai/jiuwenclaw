@@ -31,14 +31,18 @@ from openjiuwen.agent_teams.schema.deep_agent_spec import (
     RailSpec,
     SubAgentSpec,
 )
+from openjiuwen.core.foundation.tool import McpServerConfig
 from openjiuwen.core.single_agent import AgentCard
 from openjiuwen.harness.prompts import resolve_language
 from openjiuwen.harness.rails import SkillUseRail
 
-from jiuwenswarm.agents.harness.team.team_runtime_inheritance import (
-    get_context_engine_enabled,
+from jiuwenswarm.common.config import (
+    get_evolution_auto_save_enabled,
     get_evolution_auto_scan_enabled,
     get_skill_create_enabled,
+)
+from jiuwenswarm.agents.harness.team.team_runtime_inheritance import (
+    get_context_engine_enabled,
     resolve_model_config,
 )
 from jiuwenswarm.agents.swarm import registry
@@ -63,6 +67,7 @@ _COMMON_RAIL_NAMES: tuple[str, ...] = (
     registry.TEAM_WORKSPACE_REPORT_PATH,
     registry.CONTEXT_PROCESSOR,
     registry.PLUGIN_RAILS,
+    registry.SKILL_RETRIEVAL_PROMPT,
 )
 
 # Tools common to both roles. Each element self-gates on config, so all are
@@ -78,6 +83,8 @@ _COMMON_TOOL_NAMES: tuple[str, ...] = (
     # link-refresh callback. Declaring SKILL_TOOLKIT here too only double-
     # registers the same-named tools, logging a refresh + duplicate-ability
     # warning per tool every build; the rail is the sole registrar.
+    registry.SKILL_RETRIEVAL,
+    registry.SYMPHONY_TOOLKIT,
     registry.USER_TODOS,
     registry.VIDEO,
     registry.IMAGE_GEN,
@@ -106,7 +113,7 @@ _CODE_RAIL_NAMES: tuple[str, ...] = (
     registry.CODE_AGENT_RAIL,
     registry.USER_HOOKS,
     registry.CODE_SKILL_USE,
-    registry.CODE_WORKTREE,
+    registry.SKILL_RETRIEVAL_PROMPT,
 )
 
 # Rails shared with the team profile, appended to the code profile.
@@ -124,6 +131,8 @@ _CODE_TOOL_NAMES: tuple[str, ...] = (
     registry.AUDIO,
     # See _COMMON_TOOL_NAMES: skill tools come from the MEMBER_SKILL_TOOLKIT
     # rail; declaring SKILL_TOOLKIT here too would double-register them.
+    registry.SKILL_RETRIEVAL,
+    registry.SYMPHONY_TOOLKIT,
     registry.USER_TODOS,
     registry.VIDEO,
     registry.IMAGE_GEN,
@@ -195,10 +204,25 @@ def _evolution_model_config(config: dict[str, Any]) -> dict[str, Any]:
 
 def _skill_mode(config: dict[str, Any]) -> str:
     """Resolve the validated skill-use mode from ``react.skill_mode``."""
+    if _retrieval_enabled(config):
+        return SkillUseRail.SKILL_MODE_AUTO_LIST
     react = _config_section(config, "react")
     raw = react.get("skill_mode", SkillUseRail.SKILL_MODE_ALL)
     valid = {SkillUseRail.SKILL_MODE_AUTO_LIST, SkillUseRail.SKILL_MODE_ALL}
     return raw if isinstance(raw, str) and raw in valid else SkillUseRail.SKILL_MODE_ALL
+
+
+def _retrieval_enabled(config: dict[str, Any] | None = None) -> bool:
+    """Return whether agentic skill retrieval is enabled for this config."""
+    env_value = os.getenv("SYMPHONY_SKILL_RETRIEVAL_ENABLED")
+    if env_value is not None and env_value.strip():
+        return env_value.strip().lower() in {"1", "true", "yes", "on", "enabled"}
+
+    symphony = _config_section(config or {}, "symphony")
+    retrieval = symphony.get("skill_retrieval")
+    if isinstance(retrieval, dict):
+        return bool(retrieval.get("enabled", False))
+    return False
 
 
 def _additional_directories(config: dict[str, Any]) -> list[str]:
@@ -246,8 +270,17 @@ def _permission_params(config: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _evolution_rail_params(config: dict[str, Any]) -> dict[str, Any]:
-    """Attribute params for the team / member skill-evolution rails."""
+def _team_evolution_rail_params(config: dict[str, Any]) -> dict[str, Any]:
+    """Attribute params for the leader team skill-evolution rail."""
+    return {
+        "evolution_model_config": _evolution_model_config(config),
+        "auto_scan": get_evolution_auto_scan_enabled(config),
+        "auto_save": get_evolution_auto_save_enabled(config),
+    }
+
+
+def _member_evolution_rail_params(config: dict[str, Any]) -> dict[str, Any]:
+    """Attribute params for the member skill-evolution rail."""
     return {
         "evolution_model_config": _evolution_model_config(config),
         "auto_scan": get_evolution_auto_scan_enabled(config),
@@ -261,11 +294,20 @@ _RAIL_PARAM_BUILDERS: dict[str, Callable[[dict[str, Any]], dict[str, Any]]] = {
         "additional_directories": _additional_directories(c)
     },
     registry.PERMISSION_INTERRUPT: _permission_params,
+    registry.TEAM_PERMISSION: lambda c: {
+        "permissions_config": _config_section(c, "permissions"),
+    },
+    registry.TEAM_PERMISSION_POLICY: lambda c: {
+        "permissions_config": _config_section(c, "permissions"),
+    },
     registry.CODE_CODING_MEMORY: lambda c: {
         "embed_config": _config_section(c, "embed")
     },
     registry.USER_HOOKS: lambda c: {"hooks_section": _config_section(c, "hooks")},
-    registry.CODE_SKILL_USE: lambda c: {"skill_mode": _skill_mode(c)},
+    registry.CODE_SKILL_USE: lambda c: {
+        "skill_mode": _skill_mode(c),
+        "include_tools": not _retrieval_enabled(c),
+    },
     registry.CODE_WORKTREE: lambda c: {"enabled": True},
 }
 
@@ -309,7 +351,7 @@ def _role_evolution_rails(config: dict[str, Any], role: str) -> list[RailSpec]:
         return [
             RailSpec(
                 type=registry.TEAM_SKILL_EVOLUTION,
-                params=_evolution_rail_params(config),
+                params=_team_evolution_rail_params(config),
             ),
             RailSpec(
                 type=registry.TEAM_SKILL_CREATE,
@@ -318,7 +360,8 @@ def _role_evolution_rails(config: dict[str, Any], role: str) -> list[RailSpec]:
         ]
     return [
         RailSpec(
-            type=registry.MEMBER_SKILL_EVOLUTION, params=_evolution_rail_params(config)
+            type=registry.MEMBER_SKILL_EVOLUTION,
+            params=_member_evolution_rail_params(config),
         ),
     ]
 
@@ -326,6 +369,8 @@ def _role_evolution_rails(config: dict[str, Any], role: str) -> list[RailSpec]:
 def _build_team_capability_specs(
     config: dict[str, Any],
     role: str,
+    *,
+    enable_permissions: bool = False,
 ) -> tuple[list[RailSpec], list[BuiltinToolSpec]]:
     """Build the chat-team profile rail/tool specs for a member."""
     rails_specs: list[RailSpec] = [
@@ -338,6 +383,23 @@ def _build_team_capability_specs(
             params={"skills": _resolve_member_skills(config, role)},
         )
     )
+
+    if enable_permissions and role == "teammate":
+        rails_specs.append(
+            RailSpec(
+                type=registry.TEAM_PERMISSION,
+                params=_rail_params(registry.TEAM_PERMISSION, config),
+            ),
+        )
+
+    if enable_permissions and role == "leader":
+        rails_specs.append(
+            RailSpec(
+                type=registry.TEAM_PERMISSION_POLICY,
+                params=_rail_params(registry.TEAM_PERMISSION_POLICY, config),
+            ),
+        )
+
     rails_specs.extend(_role_evolution_rails(config, role))
 
     tool_specs: list[BuiltinToolSpec] = [
@@ -349,19 +411,64 @@ def _build_team_capability_specs(
 
 def _build_code_capability_specs(
     config: dict[str, Any],
+    mode: str,
     role: str,
+    *,
+    enable_permissions: bool = False,
 ) -> tuple[list[RailSpec], list[BuiltinToolSpec]]:
-    """Build the code profile (code.team / team.plan) rail/tool specs for a member."""
+    """Build the code profile (code.team / team.plan) rail/tool specs for a member.
+
+    PermissionInterruptRail (``swarm.permission_interrupt``) cannot resolve ASK
+    interrupts on headless team members: the user-facing confirmation path
+    requires a frontend connection that team members lack.  When
+    ``enable_permissions`` is true the team permission rails replace it —
+    ``TeamPermissionRail`` for teammates (leader-mediated ASK resolution) and
+    ``TeamPermissionPolicyRail`` for the leader (prompt section injection).
+    When ``enable_permissions`` is false the permission interrupt rail is
+    removed entirely: it would deadlock a teammate on any ASK-level tool call.
+    """
+    is_team_plan_leader = mode == "team.plan" and role == "leader"
+
+    # Exclude PERMISSION_INTERRUPT from code-profile rails for team members.
+    # It relies on a frontend user response that headless teammates cannot
+    # provide, and even the leader's interrupt path is unreliable in a team
+    # context (TOOL_PERMISSION_CHANNEL_ID is never set).
+    base_rail_names = [
+        name for name in _CODE_RAIL_NAMES
+        if name != registry.PERMISSION_INTERRUPT
+    ]
+
     rails_specs: list[RailSpec] = [
         RailSpec(type=name, params=_rail_params(name, config))
-        for name in _CODE_RAIL_NAMES
+        for name in base_rail_names
     ]
-    rails_specs.append(
-        RailSpec(
-            type=registry.CODE_CONFIRM_INTERRUPT,
-            params={"tool_names": ["switch_mode", "exit_plan_mode"]},
+
+    if is_team_plan_leader:
+        rails_specs.append(RailSpec(type=registry.TEAM_PLAN_APPROVAL))
+
+    if enable_permissions and role == "teammate":
+        rails_specs.append(
+            RailSpec(
+                type=registry.TEAM_PERMISSION,
+                params=_rail_params(registry.TEAM_PERMISSION, config),
+            ),
         )
-    )
+
+    if enable_permissions and role == "leader":
+        rails_specs.append(
+            RailSpec(
+                type=registry.TEAM_PERMISSION_POLICY,
+                params=_rail_params(registry.TEAM_PERMISSION_POLICY, config),
+            ),
+        )
+
+    if mode != "team.plan":
+        rails_specs.append(
+            RailSpec(
+                type=registry.CODE_CONFIRM_INTERRUPT,
+                params={"tool_names": ["switch_mode", "exit_plan_mode"]},
+            ),
+        )
     rails_specs.append(
         RailSpec(
             type=registry.MEMBER_SKILL_TOOLKIT,
@@ -385,6 +492,8 @@ def build_member_capability_specs(
     config: dict[str, Any],
     mode: str,
     role: str,
+    *,
+    enable_permissions: bool = False,
 ) -> tuple[list[RailSpec], list[BuiltinToolSpec]]:
     """Build the rail and tool specs for a team member.
 
@@ -397,13 +506,14 @@ def build_member_capability_specs(
         config: The resolved ``config.yaml`` mapping (team blueprint shape).
         mode: The request mode ("team" / "code.team" / "team.plan").
         role: The member role ("leader" or "teammate").
+        enable_permissions: Effective team permission toggle from TeamAgentSpec.
 
     Returns:
         A ``(rails_specs, tool_specs)`` tuple of openjiuwen specs.
     """
     if _is_code_mode(mode):
-        return _build_code_capability_specs(config, role)
-    return _build_team_capability_specs(config, role)
+        return _build_code_capability_specs(config, mode, role, enable_permissions=enable_permissions)
+    return _build_team_capability_specs(config, role, enable_permissions=enable_permissions)
 
 
 def _is_subagent_enabled(sub_cfg: Any) -> bool:
@@ -490,7 +600,7 @@ def build_member_subagent_specs(
         if _is_subagent_enabled(subagents_cfg.get("browser_agent")):
             specs.append(
                 _code_subagent_spec(
-                    "browser_agent", registry.BROWSER_AGENT, react, language
+                    "browser_agent", registry.SWARM_BROWSER_AGENT, react, language
                 )
             )
     return specs
@@ -501,6 +611,9 @@ def build_member_deep_agent_spec(
     mode: str,
     role: str,
     base_spec: DeepAgentSpec,
+    *,
+    enable_permissions: bool = False,
+    mcp_configs: list[McpServerConfig] | None = None,
 ) -> DeepAgentSpec:
     """Fold the member capability specs onto *base_spec*.
 
@@ -513,24 +626,63 @@ def build_member_deep_agent_spec(
         mode: The request mode ("team" / "code.team" / "team.plan").
         role: The member role ("leader" or "teammate").
         base_spec: The base member ``DeepAgentSpec`` to extend.
+        enable_permissions: Effective team permission toggle from TeamAgentSpec.
+        mcp_configs: MCP server configs inherited from ``config.yaml``.
 
     Returns:
         A new ``DeepAgentSpec`` with the capability specs applied.
     """
-    rails_specs, tool_specs = build_member_capability_specs(config, mode, role)
+    rails_specs, tool_specs = build_member_capability_specs(
+        config, mode, role, enable_permissions=enable_permissions,
+    )
 
     merged_rails = list(base_spec.rails or [])
     merged_rails.extend(rails_specs)
     merged_tools = list(base_spec.tools or [])
     merged_tools.extend(tool_specs)
+    merged_mcps = _merge_mcp_configs(base_spec.mcps, mcp_configs)
 
-    update: dict[str, Any] = {"rails": merged_rails, "tools": merged_tools}
+    update: dict[str, Any] = {
+        "rails": merged_rails,
+        "tools": merged_tools,
+        "mcps": merged_mcps,
+    }
     if not _is_code_mode(mode):
         update["enable_skill_discovery"] = True
 
     subagent_specs = build_member_subagent_specs(config, mode, role)
-    if subagent_specs:
+
+    # In team mode, base_spec includes a browser_agent with hardcoded
+    # server_id="playwright_official_stdio". All members share that single
+    # @playwright/mcp subprocess → single Chrome window. Replace it with
+    # SWARM_BROWSER_AGENT which builds a unique server_id per member
+    # (session_id + role), giving each member their own isolated Chrome.
+    # In code mode build_member_subagent_specs already returns SWARM_BROWSER_AGENT,
+    # so this branch only runs for non-code modes.
+    team_browser_spec: SubAgentSpec | None = None
+    if not _is_code_mode(mode):
+        react_cfg = (config or {}).get("react", {})
+        react_cfg = react_cfg if isinstance(react_cfg, dict) else {}
+        subagents_cfg = react_cfg.get("subagents", {}) if isinstance(react_cfg, dict) else {}
+        if isinstance(subagents_cfg, dict) and _is_subagent_enabled(subagents_cfg.get("browser_agent")):
+            language = _subagent_language(mode, role, config)
+            team_browser_spec = _code_subagent_spec(
+                "browser_agent", registry.SWARM_BROWSER_AGENT, react_cfg, language
+            )
+
+    if subagent_specs or team_browser_spec:
         merged_subagents = list(base_spec.subagents or [])
+        # Remove any browser_agent from base_spec to prevent the shared
+        # playwright_official_stdio entry from co-existing with our isolated one.
+        if team_browser_spec or any(
+            getattr(s, "subagent_type", None) == "browser_agent" for s in subagent_specs
+        ):
+            merged_subagents = [
+                s for s in merged_subagents
+                if getattr(s, "subagent_type", None) != "browser_agent"
+            ]
+        if team_browser_spec:
+            merged_subagents.append(team_browser_spec)
         merged_subagents.extend(subagent_specs)
         update["subagents"] = merged_subagents
 
@@ -542,6 +694,39 @@ def build_member_deep_agent_spec(
         update["system_prompt"] = build_code_system_prompt()
 
     return base_spec.model_copy(update=update)
+
+
+def _merge_mcp_configs(
+    base_mcps: list[McpServerConfig] | None,
+    config_mcps: list[McpServerConfig] | None,
+) -> list[McpServerConfig] | None:
+    merged = list(base_mcps or [])
+    if not config_mcps:
+        return merged or None
+
+    existing_ids = {
+        str(getattr(cfg, "server_id", "") or "").strip()
+        for cfg in merged
+    }
+    existing_names = {
+        str(getattr(cfg, "server_name", "") or "").strip()
+        for cfg in merged
+    }
+
+    for cfg in config_mcps:
+        server_id = str(getattr(cfg, "server_id", "") or "").strip()
+        server_name = str(getattr(cfg, "server_name", "") or "").strip()
+        duplicate_id = bool(server_id and server_id in existing_ids)
+        duplicate_name = bool(server_name and server_name in existing_names)
+        if duplicate_id or duplicate_name:
+            continue
+        merged.append(cfg.model_copy(deep=True))
+        if server_id:
+            existing_ids.add(server_id)
+        if server_name:
+            existing_names.add(server_name)
+
+    return merged or None
 
 
 __all__ = [

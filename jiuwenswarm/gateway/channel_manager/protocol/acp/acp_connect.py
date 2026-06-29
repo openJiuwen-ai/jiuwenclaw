@@ -365,6 +365,7 @@ class AcpGatewayBridge:
             EventType.CHAT_TOOL_CALL,
             EventType.CHAT_TOOL_UPDATE,
             EventType.CHAT_TOOL_RESULT,
+            EventType.CHAT_SYMPHONY_STATUS,
             EventType.TODO_UPDATED,
             EventType.CHAT_SUBTASK_UPDATE,
         ):
@@ -801,6 +802,15 @@ class AcpChannel(BaseChannel):
             response_mode="e2a",
             session_id=msg.session_id,
         )
+        # Mirror the JSON-RPC session/prompt path (line ~1168): register the
+        # session→request mapping so gateway events (_message_from_gateway_event)
+        # can resolve their request_id and emit responses. Without this,
+        # streaming events on the envelope path are silently dropped and the
+        # channel hangs waiting for a final frame that never arrives. Scope
+        # this to session/prompt only -- non-prompt envelopes (session/cancel,
+        # session/load, etc.) must not clobber an in-flight prompt's mapping.
+        if msg.session_id and env.method == "session/prompt":
+            self._active_prompt_request_by_session[msg.session_id] = msg.id
 
         await self._dispatch_message(msg)
 
@@ -1350,6 +1360,7 @@ class AcpChannel(BaseChannel):
             EventType.CHAT_TOOL_CALL,
             EventType.CHAT_TOOL_UPDATE,
             EventType.CHAT_TOOL_RESULT,
+            EventType.CHAT_SYMPHONY_STATUS,
             EventType.TODO_UPDATED,
             EventType.CHAT_SUBTASK_UPDATE,
         ):
@@ -1777,7 +1788,7 @@ def main() -> None:
 
     parser = argparse.ArgumentParser(
         prog="jiuwenswarm-acp",
-        description="Start JiuwenClaw ACP stdio entrypoint.",
+        description="Start JiuwenSwarm ACP stdio entrypoint.",
     )
     parser.add_argument(
         "--gateway-url",

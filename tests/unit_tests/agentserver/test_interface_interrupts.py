@@ -6,12 +6,12 @@ from __future__ import annotations
 
 import pytest
 
-from jiuwenswarm.server.runtime.agent_adapter.interface import JiuWenClaw
+from jiuwenswarm.server.runtime.agent_adapter.interface import JiuWenSwarm
 from jiuwenswarm.common.schema.agent import AgentRequest
 from jiuwenswarm.common.schema.message import ReqMethod
 
 
-class _InterruptHarness(JiuWenClaw):
+class _InterruptHarness(JiuWenSwarm):
     @property
     def session_manager_for_test(self):
         return getattr(self, "_session_manager")

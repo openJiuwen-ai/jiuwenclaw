@@ -228,7 +228,7 @@ def build_command_part(command: dict[str, Any]) -> dict[str, Any]:
 # ==================== Main Formatter Functions ====================
 
 class MessageFormatter:
-    """消息格式化器，用于将 JiuwenClaw 消息转换为 A2A 格式。"""
+    """消息格式化器，用于将 JiuwenSwarm 消息转换为 A2A 格式。"""
 
     def __init__(self, agent_id: str):
         self.agent_id = agent_id

@@ -52,6 +52,12 @@ export interface CommandContext {
   accentColor: AccentColorName;
   updateSession: (id: string) => void;
   addItem: (item: HistoryItem) => void;
+  /** 设置 /btw 侧问题覆盖层（独立于 transcript 渲染，不受滚动影响） */
+  setBtwOverlay?: (question: string, answer: string) => void;
+  /** 清除 /btw 侧问题覆盖层 */
+  clearBtwOverlay?: () => void;
+  /** 设置 BTW 活动状态（加载中或 overlay 可见），用于 Esc 优先级判断 */
+  setBtwActive?: (active: boolean) => void;
   clearEntries: () => void;
   restoreHistory: (sessionId: string) => Promise<void>;
   exitApp: () => void;
@@ -60,9 +66,12 @@ export interface CommandContext {
   isInterruptRequested: () => boolean;
   /** Clear local interrupt flag (for long-running commands to reset after handling interrupt) */
   clearInterruptRequested: () => void;
+  /** Set the currently running command name (for tracking uninterruptible commands) */
+  setRunningCommand?: (name: string | null) => void;
   connectionStatus: ConnectionStatus;
   mode: ClientMode;
   setMode: (mode: ClientMode) => void;
+  markPlanEntryFromSlashCommand?: () => void;
   setModel: (name: string) => void;
   setPreferredLanguage: (language: PreferredLanguage) => void;
   setThemeName: (theme: ThemeName) => void;
@@ -96,8 +105,12 @@ export interface CommandContext {
   ) => void;
   enterStatusView?: (tab?: StatusViewTab) => void;
   openInEditor?: (filePath: string) => void;
+  /** Open a folder in system file explorer (Windows: explorer, macOS: open -R, Linux: xdg-open) */
+  openFolder?: (folderPath: string) => void;
   /** Enter FileViewer mode to view large content (e.g., formatted logs) */
   enterFileViewer?: (content: string, title: string, source: string) => void;
+  /** Enter DiffViewer mode to browse git/turn diffs interactively */
+  enterDiffViewer?: (payload: Record<string, unknown>) => void;
   restartStatusLine?: () => void;
   /** Get the current JSON data that would be piped to the statusline command */
   getStatusLineJsonInput?: () => Record<string, unknown>;

@@ -18,7 +18,7 @@ logger = logging.getLogger(__name__)
 class UserHookRail(DeepAgentRail):
     """用户配置的 hooks 执行引擎.
 
-    Priority=60: 在 SecurityRail (80) 之后，JiuClawStreamEventRail (50) 之前。
+    Priority=60: 在 SecurityRail (80) 之后，JiuSwarmStreamEventRail (50) 之前。
     确保安全检查先于用户 hook，用户 hook 先于流式事件发送。
     """
 

@@ -259,7 +259,7 @@ export function TeamMembersPanel({
   }
 
   return (
-    <div className="flex min-w-0 flex-1 overflow-hidden border border-border rounded-lg mt-0 mx-6 mb-6 ">
+    <div className="flex min-w-0 flex-1 overflow-x-auto overflow-y-hidden border border-border rounded-lg mt-0 mx-6 mb-6 ">
       {activeDetailTab === 'members' && (
         <aside className="w-[260px] shrink-0 overflow-y-auto border-r border-border bg-card">
           <div className="px-3 pt-4">
@@ -511,7 +511,7 @@ function MemberTaskDetail({
   };
 
   return (
-    <section className="flex min-w-0 flex-1 flex-col bg-card">
+    <section className="flex min-w-[400px] flex-1 flex-col bg-card">
       <div className="flex shrink-0 items-center bg-card px-7 pt-3 h-[34px]">
         <div className="text-sm font-semibold text-text">
           {t('team.memberTasksTitle', { member: displayName })}

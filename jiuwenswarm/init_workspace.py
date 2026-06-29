@@ -54,18 +54,18 @@ def run_init(force: bool = False, name: Optional[str] = None) -> int:
     if name:
         validation_error = validate_instance_name(name)
         if validation_error:
-            print(f"[jiuwenswarm-init] ERROR: {validation_error}")
+            logging.info(f"[jiuwenswarm-init] ERROR: {validation_error}")
             return 1
 
     # 2. Determine target workspace path and set env var
     if name:
         workspace_path = get_instance_workspace_path(name)
-        print(f"[jiuwenswarm-init] Creating instance: {name}")
-        print(f"[jiuwenswarm-init] Workspace: {workspace_path}")
+        logging.info(f"[jiuwenswarm-init] Creating instance: {name}")
+        logging.info(f"[jiuwenswarm-init] Workspace: {workspace_path}")
     else:
         workspace_path = get_user_home() / ".jiuwenswarm"
-        print(f"[jiuwenswarm-init] Initializing default workspace")
-        print(f"[jiuwenswarm-init] Workspace: {workspace_path}")
+        logging.info(f"[jiuwenswarm-init] Initializing default workspace")
+        logging.info(f"[jiuwenswarm-init] Workspace: {workspace_path}")
 
     # 3. Check if instance is running (for named instances, always check)
     if name:
@@ -79,15 +79,15 @@ def run_init(force: bool = False, name: Optional[str] = None) -> int:
 
         status = get_instance_status(config)
         if status.running:
-            print(f"[jiuwenswarm-init] ERROR: Instance '{name}' is running (PID={status.pid}).")
-            print(f"[jiuwenswarm-init] Stop it first with: jiuwenswarm-start --stop {name}")
+            logging.info(f"[jiuwenswarm-init] ERROR: Instance '{name}' is running (PID={status.pid}).")
+            logging.info(f"[jiuwenswarm-init] Stop it first with: jiuwenswarm-start --stop {name}")
             return 1
     elif force:
         # For default instance, use get_default_instance_status which includes port detection
         status = get_default_instance_status()
         if status.running:
-            print(f"[jiuwenswarm-init] ERROR: Default instance is running (PID={status.pid or '-'}).")
-            print(f"[jiuwenswarm-init] Stop it first with: jiuwenswarm-start --stop default")
+            logging.info(f"[jiuwenswarm-init] ERROR: Default instance is running (PID={status.pid or '-'}).")
+            logging.info(f"[jiuwenswarm-init] Stop it first with: jiuwenswarm-start --stop default")
             return 1
 
     # 4. Call init_user_workspace with workspace path
@@ -106,14 +106,14 @@ def run_init(force: bool = False, name: Optional[str] = None) -> int:
         # Create bootstrap .env with the same ports
         config = InstanceConfig(name=name, workspace=workspace_path, ports=ports)
         create_bootstrap_env(config)
-
-        print(f"[jiuwenswarm-init] Instance '{name}' initialized successfully.")
+        logging.info(f"[jiuwenswarm-init] Instance '{name}' initialized successfully.")
         return 0
 
     if target == "cancelled":
         return 1
 
-    print(f"[jiuwenswarm-init] initialized: {target}")
+    logging.info(f"[jiuwenswarm-init] initialized: {target}")
+
     return 0
 
 

@@ -62,6 +62,106 @@ def _normalize_targets_str(raw: str) -> str:
     return normalize_target_channel_id(raw, default=CronTargetChannel.WEB.value)
 
 
+# Cron job execution modes (passed to AgentServer as chat.send params["mode"]).
+CRON_JOB_MODES: frozenset[str] = frozenset(
+    {
+        "agent",       # default → agent.plan at runtime
+        "plan",        # legacy shorthand (AgentServer resolves separately)
+        "team",        # multi-agent team mode
+        "agent.plan",
+        "agent.fast",
+        "team.plan",
+        "code.team",
+    }
+)
+
+
+# Canonical default when create/update/runtime do not specify mode.
+CRON_JOB_DEFAULT_MODE: str = "agent.fast"
+
+
+def normalize_cron_job_mode(raw: Any, *, default: str = CRON_JOB_DEFAULT_MODE) -> str:
+    """Normalize and validate a cron job execution mode (strict, for create/update APIs)."""
+    if raw is None:
+        return default
+    value = str(raw).strip().lower()
+    if not value:
+        return default
+    if value not in CRON_JOB_MODES:
+        raise ValueError(
+            f"Invalid cron job mode {raw!r}. "
+            f"Valid: {', '.join(sorted(CRON_JOB_MODES))}"
+        )
+    return value
+
+
+def coerce_cron_job_mode(raw: Any, *, default: str = CRON_JOB_DEFAULT_MODE) -> str:
+    """Normalize mode for runtime/persistence; unknown values pass through lowercased."""
+    if raw is None:
+        return default
+    value = str(raw).strip().lower()
+    if not value:
+        return default
+    if value in CRON_JOB_MODES:
+        return value
+    return value
+
+
+def cron_job_modes_for_tools() -> list[str]:
+    return sorted(CRON_JOB_MODES)
+
+
+def cron_job_metadata() -> dict[str, str | list[str] | int]:
+    """Cron job schema for clients (TUI/Web); single source for supported modes."""
+    return {
+        "modes": cron_job_modes_for_tools(),
+        "default_mode": CRON_JOB_DEFAULT_MODE,
+        "default_timeout_seconds": CRON_DEFAULT_TIMEOUT_SECONDS,
+        "default_team_timeout_seconds": CRON_TEAM_DEFAULT_TIMEOUT_SECONDS,
+        "max_timeout_seconds": CRON_MAX_TIMEOUT_SECONDS,
+    }
+
+
+_TEAM_CRON_MODES: frozenset[str] = frozenset({"team", "team.plan", "code.team"})
+
+CRON_DEFAULT_TIMEOUT_SECONDS: int = 10 * 60
+CRON_TEAM_DEFAULT_TIMEOUT_SECONDS: int = 20 * 60
+CRON_MAX_TIMEOUT_SECONDS: int = 72 * 60 * 60
+# Backward-compatible alias used by older imports/tests.
+CRON_TEAM_STREAM_TIMEOUT_SECONDS: float = float(CRON_TEAM_DEFAULT_TIMEOUT_SECONDS)
+
+
+def normalize_cron_job_timeout_seconds(raw: Any) -> int | None:
+    """Validate optional per-job timeout override (seconds)."""
+    if raw is None:
+        return None
+    try:
+        value = int(raw)
+    except Exception as exc:  # noqa: BLE001
+        raise ValueError("timeout_seconds must be int") from exc
+    if value < 60:
+        raise ValueError("timeout_seconds must be at least 60")
+    if value > CRON_MAX_TIMEOUT_SECONDS:
+        raise ValueError(f"timeout_seconds must be at most {CRON_MAX_TIMEOUT_SECONDS}")
+    return value
+
+
+def resolve_cron_job_timeout_seconds(job: "CronJob") -> float:
+    """Return effective execution timeout for a cron job."""
+    raw = getattr(job, "timeout_seconds", None)
+    if raw is not None:
+        return float(int(raw))
+    if is_team_cron_mode(job.mode):
+        return float(CRON_TEAM_DEFAULT_TIMEOUT_SECONDS)
+    return float(CRON_DEFAULT_TIMEOUT_SECONDS)
+
+
+def is_team_cron_mode(mode: str | None) -> bool:
+    """Return True when a cron job should run via Team + SwarmFlow streaming."""
+    value = str(mode or "").strip().lower()
+    return value in _TEAM_CRON_MODES
+
+
 @dataclass(frozen=True)
 class CronTarget:
     """Where to push cron results."""
@@ -107,10 +207,12 @@ class CronJob:
     updated_at: float | None = None
     # 记录定时任务是在群聊("group")还是私聊("p2p")中创建的，用于推送时决定是否走 IMOutboundPipeline
     chat_type: str | None = None
-    # 定时任务执行时使用的 mode（"plan" 或 "agent"），创建时从对话上下文继承；无上下文时默认 "agent"
-    mode: str = "agent"
+    # 定时任务执行时使用的 Agent 模式；未指定时默认 agent.fast
+    mode: str = CRON_JOB_DEFAULT_MODE
     # 执行一次后自动删除（用于提醒类任务）
     delete_after_run: bool = False
+    # 单次执行超时（秒）；未配置时普通模式 10 分钟，team 模式 20 分钟
+    timeout_seconds: int | None = None
 
     def to_dict(self) -> dict[str, Any]:
         d: dict[str, Any] = {
@@ -134,6 +236,8 @@ class CronJob:
             d["mode"] = self.mode
         if self.delete_after_run:
             d["delete_after_run"] = bool(self.delete_after_run)
+        if self.timeout_seconds is not None:
+            d["timeout_seconds"] = int(self.timeout_seconds)
         return d
 
     @staticmethod
@@ -201,13 +305,17 @@ class CronJob:
         )
 
         mode_raw = data.get("mode", None)
-        job_mode = (
-            str(mode_raw).strip().lower()
-            if isinstance(mode_raw, str) and str(mode_raw).strip()
-            else "agent"
-        )
+        if isinstance(mode_raw, str) and str(mode_raw).strip():
+            job_mode = coerce_cron_job_mode(mode_raw)
+        else:
+            job_mode = CRON_JOB_DEFAULT_MODE
 
         delete_after_run = bool(data.get("delete_after_run", False))
+
+        timeout_seconds_raw = data.get("timeout_seconds", None)
+        timeout_seconds = None
+        if timeout_seconds_raw is not None:
+            timeout_seconds = normalize_cron_job_timeout_seconds(timeout_seconds_raw)
 
         return CronJob(
             id=job_id,
@@ -225,6 +333,7 @@ class CronJob:
             chat_type=job_chat_type,
             mode=job_mode,
             delete_after_run=delete_after_run,
+            timeout_seconds=timeout_seconds,
         )
 
 

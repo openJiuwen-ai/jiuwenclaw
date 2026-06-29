@@ -1,6 +1,6 @@
-#define MyAppName "JiuwenClaw"
+#define MyAppName "JiuwenSwarm"
 #define MyAppVersion "0.1.7"
-#define MyAppPublisher "JiuwenClaw"
+#define MyAppPublisher "JiuwenSwarm"
 #define MyAppURL "https://github.com/"
 #define MyAppExeName "jiuwenswarm.exe"
 #define MyDistDir "..\dist\jiuwenswarm"

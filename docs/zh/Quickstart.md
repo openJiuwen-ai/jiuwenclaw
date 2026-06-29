@@ -58,7 +58,23 @@ jiuwenswarm-start
 
 当看到类似上述提示时，表示服务已启动，在浏览器中访问 `http://localhost:5173` 即可使用。
 
-适合基于JiuwenSwarm进行二次开发适配的用户。
+### 终端 CLI
+
+也可以直接在终端中与 JiuwenSwarm 对话：
+
+```bash
+jiuwenswarm chat "你好，介绍一下你自己"
+```
+
+详情见 [命令行指令 / 终端 CLI](命令行指令.md#终端-clijiuwenswarm-chat)。
+
+**配置目录自动创建**：
+首次启动服务后，系统会自动创建配置目录：
+- **Windows**：`C:\Users\<你的用户名>\.jiuwenswarm`
+- **Linux/Mac**：`~/.jiuwenswarm/`
+
+配置文件、记忆文件等数据将存储在该目录下。
+​适合基于JiuwenSwarm进行二次开发适配的用户。
 
 ### `uv`方式安装
 - 使用`uv`新建虚拟环境
@@ -268,7 +284,9 @@ jiuwenswarm-app
 
 **清空记忆操作步骤：**
 
-记忆文件存储在 `{workspace_dir}/memory/` 目录下：
+记忆文件存储路径：
+- **Windows**：`C:\Users\<你的用户名>\.jiuwenswarm\agent\workspace\memory\`
+- **Linux/Mac**：`~/.jiuwenswarm/agent/workspace/memory/`
 
 **方式一：通过 Agent 删除**
 直接告诉 JiuwenSwarm："请删除所有记忆文件" 或 "清空我的记忆"，Agent 会调用文件工具删除 memory 目录下的文件。

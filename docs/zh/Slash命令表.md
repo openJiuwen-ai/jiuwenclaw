@@ -18,6 +18,7 @@
 | `/copy` | 复制上一条消息 |
 | `/exit` | 退出 |
 | `/help` | 查看可用命令 |
+| `/keybindings` | 查看/编辑/重置 TUI 快捷键（别名 `/keybind`） |
 | `/theme` | 切换主题 |
 | `/config` | 修改配置（当前为本地实现，后续计划统一到 Gateway） |
 | `/context` | 查看上下文窗口占用与 Token 用量明细（见下文） |
@@ -32,9 +33,11 @@
 | `/evolve_simplify` | 整理、合并某个 Skill 的演进经验（见下文） |
 | `/evolve_rebuild` | 基于归档与演进记录重建 `SKILL.md`（见下文） |
 | `/hooks` | 浏览已配置的 hooks（只读，见下文） |
+| `/simplify` | 代码精简审查：检查复用性、质量、效率并自动修复（仅 `code.*`，见下文） |
 | `/sandbox` | 设置沙箱模式（见下文） |
 | `/agents` | 管理 Agent 配置（list, get, create, update, enable, disable, delete，见下文） |
-| `/auto-harness` | Auto-Harness 任务管理（`run`/`schedule`，见下文） |
+| `/auto-harness` | Auto-Harness 任务管理（`run`/`schedule`/`issue`，见下文） |
+| `/btw` | 旁路快速提问，不中断主对话（见下文） |
 
 > 说明：本页的 `/mode` 与 `/switch` 以 Gateway 受控通道行为为主。TUI 本地命令另支持 `/mode plan`、`/mode team.normal`，详见 [TUI 使用指南](TUI使用指南.md)。
 
@@ -49,7 +52,7 @@
 | `/new_session` | 新建会话（仅 IM 生效） |
 | `/mode` | 模式切换（支持一级入口与直达写法） |
 | `/switch` | 在当前模式族内切换二级模式 |
-| `/skills` | 技能管理（列表、安装、卸载、市场源） |
+| `/skills` | 技能管理（列表、安装、卸载、市场源、ClawHub、SkillNet） |
 | `/model` | 模型查看、新增、切换（见下文） |
 | `/mcp` | MCP 服务管理（见下文） |
 | `/diff` | 查看当前会话按轮次改动（见下文） |
@@ -59,6 +62,8 @@
 | `/rewind` | 回退对话到指定轮次之前（见下文） |
 | `/memory` | 记忆管理（见下文） |
 | `/cron` | 定时任务管理（见下文） |
+| `/review` | 代码审查 PR（见下文） |
+| `/security-review` | 安全审查当前分支待定变更（见下文） |
 
 ---
 
@@ -124,6 +129,32 @@
 - `/resume list`：列出历史会话。
 - `/resume <conversation_id>`：恢复指定会话。
 
+#### 交互式选择器（TUI）
+
+输入 **`/resume`** 或 **`/continue`** 且无参数时，打开交互式会话选择器：
+
+| 按键 | 功能 |
+| --- | --- |
+| `↑` / `↓` | 移动焦点 |
+| `Enter` | 恢复焦点会话 |
+| 输入字符 | 实时搜索（会话 ID / 标题 / 项目目录） |
+| `Backspace` | 删除搜索字符 |
+| `Space` | 预览焦点会话信息卡；预览态 `Enter` 恢复、`Space`/`Esc` 返回 |
+| `Ctrl+R` | 重命名焦点会话；编辑态 `Enter` 保存、`Esc` 取消、留空清除标题 |
+| `Ctrl+A` | 「全部项目」与「仅当前项目」范围切换 |
+| `Ctrl+B` | 开关 git 分支过滤（严格匹配当前项目分支名） |
+| `Esc` | 有搜索词时清空；否则关闭选择器 |
+
+> 上表 `Space` / `Ctrl+R` / `Ctrl+A` / `Ctrl+B` / `Esc` 可在 `ResumeList` context 下通过 `/keybindings` 重绑；预览态、重命名编辑态与搜索文本输入除外。
+
+说明：
+
+- **默认列出全部项目** 的会话（`Ctrl+A` 切回仅当前项目）；当前项目无会话时仍打开（空）选择器以便按 `Ctrl+A`。
+- **分支过滤** 仅按分支名严格匹配，存量无分支记录与 `HEAD` 会话会被过滤；按名比对不区分仓库，「全部项目 + 分支过滤」时同名分支会一并显示。
+- **恢复范围**：仅恢复会话上下文（历史、会话 ID、accent 颜色、workflow 快照、窗口标题），**不切换 workspace / 当前工作目录**。
+
+> 完整快捷键与行为详见 [TUI 使用指南](TUI使用指南.md#resume-与-continue-在-tui-中的特殊行为)；自定义快捷键见 [快捷键](TUI使用指南.md#快捷键)。
+
 ### `/model`（查看 / 新增 / 切换模型）
 
 - 用法：
@@ -136,14 +167,27 @@
   - 切换模型会校验配置与环境变量占位符，更新 `MODEL_NAME` / `MODEL_PROVIDER` / `API_BASE` / `API_KEY`，并回写 `.env`。
 - 安全展示：涉及 `api_key`、`token` 等敏感字段会掩码显示。
 
-### `/diff`（会话改动回顾）
+### `/diff`（交互式改动回顾）
 
 - 用法：`/diff`（无子命令）。
-- 数据来源：TUI 通过 `command.diff` 请求 Agent 侧 diff 服务，按当前 `session_id` 返回 `turns`（每轮改动集合）。
-- 展示规则：
-  - 有改动：显示 `Found N turn(s) with file changes` 并附结构化 `turns`；
-  - 无改动：显示 `No file changes in this session`。
-- 作用范围：用于查看当前会话内未提交的按轮次改动轨迹，不替代 `git diff` 的完整版本控制视角。
+- 数据来源：TUI 通过 `command.diff` 请求 Agent 侧 diff 服务，按当前 `session_id` 返回 `turns`（每轮改动集合）及 `gitDiff`（未提交的工作树改动）。
+- 展示方式：打开 **交互式 Diff 查看器**（全屏覆盖模式）：
+  - **列表视图**：展示所有变更文件（含工作树 `working` 和按轮次 `Turn N`），显示相对路径、来源、增删行数；
+  - **详情视图**：选中文件后 `Enter` 进入，展示完整的 hunk diff，支持上下滚动。
+- 列表视图快捷键：
+  - `↑` / `↓` — 移动选择，自动滚动；
+  - `Enter` — 查看选中文件的完整 diff；
+  - `Home` / `g` — 跳至列表顶部；
+  - `End` / `Shift+g` — 跳至列表底部；
+  - `Esc` / `Ctrl+C` — 关闭。
+- 详情视图快捷键：
+  - `↑` / `↓` — 逐行滚动；
+  - `PgUp` / `PgDn` — 上下翻页；
+  - `Home` / `g` — 跳至文件开头；
+  - `End` / `Shift+g` — 跳至文件末尾；
+  - `←` / `Esc` — 返回列表视图。
+- 作用范围：同时覆盖工作树（`git diff HEAD`）和会话按轮次改动轨迹，不替代 `git diff` 的完整版本控制视角。
+- 回退行为：当 TUI 不提供 `enterDiffViewer` 能力时，回退为内联展示（仅显示文件名、来源和增删行数）。
 
 ### `/compact`（上下文压缩）
 
@@ -358,49 +402,58 @@
 | `name` | 是 | 任务名称 |
 | `cron_expr` | 是 | Cron 表达式，支持两种格式：5 字段（分 时 日 月 周）或 7 字段 Quartz（秒 分 时 日 月 周 年）。5 字段会自动转换为 7 字段（补 second=0, year=*）。示例：每天 9 点 = `0 9 * * *`（5 字段）或 `0 0 9 * * ? *`（7 字段） |
 | `description` | 是 | 任务描述，即 Agent 执行时收到的输入指令 |
-| `targets` | 否 | 推送渠道，默认 `tui`；可选：`tui`、`web`、`feishu`、`whatsapp`、`wecom`、`xiaoyi`、`wechat`、`dingtalk` 或 `feishu_enterprise:<app_id>` |
+| `targets` | 否 | 推送渠道，默认 `tui`；可选：`tui`、`web`、`feishu`、`whatsapp`、`wecom`、`xiaoyi`、`wechat`、`dingtalk` 或 `feishu_enterprise:<app_id>`。`targets=tui` 时结果会广播到所有已连接的 TUI 窗口，详见 [定时任务 — 推送到 TUI](定时任务.md#5-推送到-tui-频道) |
 | `timezone` | 否 | IANA 时区，默认 `Asia/Shanghai` |
-| `mode` | 否 | 执行模式：`agent`（默认，适用于简单提醒类任务）或 `plan`（较复杂的推理任务，让Agent先规划步骤再执行） |
+| `mode` | 否 | 执行模式，默认 `agent.fast`。可选：`agent`、`agent.fast`、`agent.plan`、`plan`、`team`、`team.plan`、`code.team`。`team` 系列走多 Agent 流式执行，详见 [定时任务 — Team 模式](定时任务.md#6-team-模式与-swarmflow多智能体定时任务) |
+| `timeout_seconds` | 否 | 单次执行超时（秒），范围 60～259200。未设置时普通模式默认 600，Team 模式默认 1200 |
 | `wake_offset_seconds` | 否 | 提前唤醒秒数，默认 300 |
 | `delete_after_run` | 否 | 执行一次后自动删除，默认 false |
 
 - `add` 示例：
   - `/cron add name=每分钟测试 cron_expr="0 * * * *" description="告诉我现在几点了" targets=tui`
-  - `/cron add name=晨报 cron_expr="0 9 * * *" description="生成今日晨报摘要" targets=tui mode=plan`
+  - `/cron add name=晨报 cron_expr="0 9 * * *" description="生成今日晨报摘要" targets=tui mode=agent.plan`
+  - `/cron add name=模型周报 cron_expr="0 9 * * 1" description="对比 GLM 与 DeepSeek 并输出报告" targets=tui mode=team`
   - `/cron add name=提醒 cron_expr="0 30 17 29 4 ? 2026" description="别忘了开会" targets=tui delete_after_run=true`
   - `/cron add name=每周一报 cron_expr="0 9 * * 1" description="生成本周周报" targets=web`
 
 - `update` 用法：只需传入要修改的字段，如 `/cron update <id> name=新名称 enabled=false`
-- `show` 显示内容：以 key-value 格式展示任务全部字段（id、name、status、cron_expr、timezone、description、targets、mode、wake_offset_seconds、delete_after_run）
+- `show` 显示内容：以 key-value 格式展示任务全部字段（id、name、status、cron_expr、timezone、description、targets、mode、timeout_seconds、wake_offset_seconds、delete_after_run）
 - `list` 显示内容：序号、完整 job ID、名称、cron 表达式、启用状态、描述摘要
 - `preview` 显示内容：每次执行计划的唤醒时间和推送时间
 
 ### `/skills`（技能管理）
 
-管理技能的完整生命周期：列表查看、安装、卸载以及市场源管理。
+管理技能的完整生命周期：列表查看、安装、卸载、市场源管理、ClawHub 和 SkillNet 在线技能库。
 
 #### 子命令
 
 | 命令 | 说明 |
 |---|---|
 | `/skills` 或 `/skills list` | 列出技能（分两组：已安装 / 可安装） |
-| `/skills install <skill>` 或 `/skills install <skill@marketplace>` 或 `/skills install <path_or_url>` | 安装技能：内置技能可直接用名称，市场技能需用 `<名称>@<市场源>` 格式，本地路径或远程 URL 可直接传入路径 |
+| `/skills install <skill>` 或 `/skills install <slug@clawhub>` 或 `/skills install <name@skillnet>` 或 `/skills install <skill@marketplace>` 或 `/skills install <path_or_url>` | 安装技能：内置技能可直接用名称，ClawHub 用 `<slug>@clawhub`，SkillNet 用 `<名称>@skillnet`（自动搜索获取 URL），市场源用 `<名称>@<市场源>`，本地路径或远程 URL 直接传入 |
 | `/skills uninstall <name>` | 按名称卸载技能 |
 | `/skills marketplace` 或 `/skills marketplace list` | 列出市场源（名称、URL、启用状态、最后更新时间） |
 | `/skills marketplace add <name> <url>` | 添加新的市场源 |
 | `/skills marketplace remove <name>` | 移除市场源（同时清理缓存） |
 | `/skills marketplace toggle <name> <on或off>` | 启用或禁用市场源（`on`/`true`/`1` 为启用，其余为禁用） |
+| `/skills marketplace clawhub` | 查看 ClawHub token 状态（已配置/未配置） |
+| `/skills marketplace clawhub token <value>` | 设置 ClawHub CLI token |
+| `/skills marketplace clawhub token` | 查看 ClawHub token 状态 |
+| `/skills skillnet` 或 `/skills skillnet search <query>` | 搜索 SkillNet 技能库（显示名称、简介、作者、星标、分类、URL） |
+| `/skills skillnet install <skill_url>` | 通过 SkillNet URL 安装技能（异步下载，自动轮询进度） |
 | `/skills use <skill_name>, <query>` | 使用指定技能执行查询 |
 
 #### 概念说明
 
-- **技能（Skill）**：可从市场源、内置目录或本地路径安装的扩展能力，为 Agent 提供额外功能。
+- **技能（Skill）**：可从市场源、ClawHub、SkillNet、内置目录或本地路径安装的扩展能力，为 Agent 提供额外功能。
 - **内置技能（Builtin skill）**：随软件打包发布的预置技能，安装时可直接使用技能名称（如 `/skills install advanced-daily-report`），无需指定市场源。
-- **市场源（Marketplace source）**：托管可用技能的远程仓库（通常为 Git URL），每个源包含名称、URL 和启用/禁用状态。
-- **规格标识（Spec）**：从市场源安装时使用的标识格式 `<技能名>@<市场源名>`；内置技能安装时可不带 `@`，自动识别为 `@builtin`。
+- **ClawHub**：在线技能库（[clawhub.ai](https://clawhub.ai)），托管社区发布的技能。安装时使用 `<slug>@clawhub` 格式，其中 slug 是技能的唯一标识符（而非展示名）。使用前需先配置 ClawHub CLI token。
+- **SkillNet**：学术技能库（支持两种安装方式：`<名称>@skillnet`（自动搜索获取 URL 后安装）和 `/skills skillnet install <url>`（直接用 URL 安装）。
+- **市场源（Marketplace source）**：托管可用技能的远程 Git 仓库，每个源包含名称、URL 和启用/禁用状态。
+- **规格标识（Spec）**：安装时使用的标识格式，支持以下几种：`<技能名>@builtin`（内置）、`<slug>@clawhub`（ClawHub）、`<技能名>@<市场源名>`（Git 市场源）；裸名不带 `@` 时系统会自动检测是否为内置技能。
 - **本地安装（Local install）**：通过 `/skills install <path>` 将本地目录（需包含 `SKILL.md`）或远程归档 URL 安装为自定义技能；路径/URL 会自动识别并走本地导入流程。
 - **安装位置（Install location）**：技能安装后的存储目录（`~/.jiuwenswarm/agent/jiuwenswarm_workspace/skills/`）。
-- **来源标签（Source tag）**：列表中每项技能标注来源，`[builtin]` 表示内置、`[local]` 表示本地导入、`[project]` 或市场源名表示其他来源。
+- **来源标签（Source tag）**：列表中每项技能标注来源，`[builtin]` 表示内置、`[local]` 表示本地导入、`[clawhub]` 表示从 ClawHub 安装、`[project]` 或市场源名表示其他来源。
 
 #### 列表分组展示
 
@@ -424,7 +477,16 @@
 
 - **超时**：`install`、`uninstall`、`marketplace toggle` 请求在 TUI 侧有 120 秒超时；其余子命令无显式超时设置。
 - **内置技能自动识别**：使用 `/skills install <skill>` 安装时，若技能名称不带 `@`，系统会自动检查是否为内置技能并重定向到内置安装流程；若不是内置技能则返回格式提示。
-- **路径/URL 自动识别**：使用 `/skills install <path>` 安装时，若参数为本地路径（如 `/path/to/skill`、`C:\skill`）或远程 URL（`https://...`），系统自动走本地导入流程。
+- **路径/URL 自动识别**：使用 `/skills install <path_or_url>` 安装时，若参数为本地路径（如 `/path/to/skill`、`C:\skill`）或远程 URL（如 `https://...`），系统自动走本地导入流程（`skills.import_local`）。所有 URL 统一走 import_local，不自动路由 SkillNet。
+- **`@skillnet` 搜索安装**：使用 `/skills install <name>@skillnet` 时，前端先调用 `skills.skillnet.search` 搜索。**只有精确匹配 skill_name 时才自动安装**；无精确匹配时只展示搜索结果列表（含 URL 和名称），不自动安装第一个结果，用户需从中选择后用 `/skills skillnet install <url>` 或 `/skills install <精确名称>@skillnet` 安装。这是因为 SkillNet 搜索是语义匹配，搜索 "code" 可能返回 "taskflow"、"coding-agent" 等名称不含 "code" 的技能。
+- **ClawHub token 必需**：从 ClawHub 安装技能前必须先配置 CLI token（通过 `/skills marketplace clawhub token <value>`）。未配置 token 时，`@clawhub` 安装会失败并提示配置方法。Token 可在 [clawhub.ai](https://clawhub.ai) 注册获取。
+- **ClawHub slug 与展示名**：ClawHub 技能的唯一标识是 **slug**（如 `code-review-security`），而非展示名（如 "Code Review Assistant"）。当直接使用 slug 安装失败时，系统会自动搜索 ClawHub 并列出匹配结果（含真实 slug 和简介），帮助用户找到正确的技能。
+- **ClawHub 重名覆盖确认**：当目标 slug 的技能已存在时（同名不同源也算已安装），TUI 会弹出交互式确认："Skill xxx 已安装，是否强制覆盖？"。用户选择"是"则用 `force: true` 重新安装并覆盖旧技能；选择"否"或退出则保持原技能不变。Web 端则直接以 `force: true` 覆盖，不弹确认。
+- **SkillNet 异步安装**：SkillNet 安装是异步的——先发起下载任务获取 `install_id`，然后自动轮询 `install_status` 直到完成或失败。TUI 每 800ms 轮询一次，最长等待 15 分钟。安装过程中会显示 `Downloading... (install_id: xxx)`。
+- **SkillNet 重名覆盖确认**：与 ClawHub 一致，TUI 在技能已存在时弹出交互确认。Web 端直接以 `force: true` 覆盖。
+- **SkillNet 国内可访问**：SkillNet API 在 `http://api-skillnet.openkg.cn`（OpenKG 平台），国内可直接访问，无需 VPN。技能本体托管在 GitHub，GitHub 访问可能受限。
+- **同名技能不可共存**：技能以目录名存储在 `skills/{name}/`，文件系统不允许同名目录共存。因此从不同源安装同名技能时，后安装的会覆盖前一个（需用户确认）。`/skills use` 只使用技能名，无法区分来源。
+- **ClawHub 网络访问**：ClawHub API 地址为 `https://clawhub.ai`，在国内可能需要 VPN 才能正常访问。
 - **缓存清理**：`marketplace remove` 发送 `{ name, remove_cache: true }` 以同时清理该源的本地缓存。
 - **自动刷新**：`marketplace add`、`marketplace remove`、`marketplace toggle` 在操作成功后会自动重新列出市场源。
 - **离线处理**：`/skills use` 会检查连接状态；离线时显示 `offline: waiting for reconnect before sending /skills use request`。
@@ -435,15 +497,21 @@
 - `/skills list` — 列出技能（显式子命令）
 - `/skills install advanced-daily-report` — 安装内置技能（裸名自动识别）
 - `/skills install advanced-daily-report@builtin` — 安装内置技能（显式指定）
-- `/skills install my-skill@marketplace` — 从市场源安装技能
+- `/skills install code-review@clawhub` — 从 ClawHub 安装技能（使用 slug）
+- `/skills install code-review@skillnet` — 从 SkillNet 安装技能（自动搜索获取 URL）
+- `/skills skillnet search code-review` — 搜索 SkillNet 技能库
+- `/skills skillnet install https://github.com/user/skill-repo` — 通过 SkillNet 子命令安装技能（直接用 URL）
+- `/skills install my-skill@marketplace` — 从 Git 市场源安装技能
 - `/skills install /path/to/my-skill` — 从本地目录安装技能
-- `/skills install https://example.com/skill.zip` — 从远程 URL 安装技能
+- `/skills install https://example.com/skill.zip` — 从远程 URL 安装技能（走本地导入）
 - `/skills uninstall my-skill` — 卸载技能
 - `/skills marketplace list` — 列出市场源
 - `/skills marketplace add community https://github.com/user/skills-repo` — 添加名为"community"的市场源
 - `/skills marketplace remove community` — 移除"community"市场源
 - `/skills marketplace toggle community on` — 启用"community"市场源
 - `/skills marketplace toggle community off` — 禁用"community"市场源
+- `/skills marketplace clawhub` — 查看 ClawHub token 状态
+- `/skills marketplace clawhub token abc123xyz` — 设置 ClawHub CLI token
 - `/skills use my-skill, Code and execute a Hello World program.` — 使用技能执行查询
 
 ### `/export`（导出会话）
@@ -489,6 +557,49 @@
 - `/export my-chat` — 保存到工作空间下的 `my-chat.txt`
 - `/export 2026-05-09-debug-session.txt` — 使用显式时间戳文件名保存
 
+### `/simplify`（代码精简审查）
+
+在 **TUI 本地解析**，通过专用 RPC `command.simplify` 获取服务端生成的三阶段审查 prompt，然后注入为 Agent 消息（`logAsUser: false`）。Agent 自动审查代码变更的复用性、质量与效率，并直接修复发现的问题。
+
+- **别名**：无。
+- **适用模式**：**仅 `code.*`**。非 code 模式下提示先执行 `/mode code`。
+- **解析位置**：TUI 本地（非 Gateway 受控通道），IM 不可用。
+
+#### 用法
+
+| 命令 | 说明 |
+|---|---|
+| `/simplify` | 审查当前 git 变更（或最近编辑的文件），自动修复问题 |
+| `/simplify <target>` | 附加关注点：文件路径、模块名或特定审查维度 |
+
+#### 执行流程
+
+1. **TUI 校验**：确认当前处于 `code.*` 模式，否则返回错误提示。
+2. **RPC 请求**：调用 `command.simplify`（携带可选 `target`），超时 30 秒。
+3. **服务端生成 prompt**：基于 `_SIMPLIFY_PROMPT_TEMPLATE` 构建三阶段审查指令；若有 `target`，追加 `## Additional Focus` 段落。
+4. **注入 Agent**：TUI 通过 `ctx.sendMessage(prompt, ..., { logAsUser: false })` 注入 prompt，Agent 开始执行。
+5. **离线处理**：离线时提示重试。
+
+#### 三阶段审查
+
+**阶段 1 — 识别变更**：执行 `git diff`（或 `git diff HEAD`）获取变更文件列表；无 git 变更时审查对话中最近编辑的文件。
+
+**阶段 2 — 并行启动三个审查 Agent**（若有子 Agent 工具则并发执行；否则自行完成三项审查）：
+
+| 审查维度 | 关注点 |
+|---|---|
+| **代码复用审查** | 是否存在可替代新代码的现有工具/工具函数；重复实现已有功能；手写逻辑是否可用已有工具替代 |
+| **代码质量审查** | 冗余状态；参数膨胀；复制粘贴变体；抽象泄漏；字符串硬编码（应用已有常量/枚举）；不必要的 JSX 嵌套；不必要的注释（仅保留说明 WHY 的注释） |
+| **效率审查** | 不必要的工作（重复计算/文件读取/N+1）；错失并发机会；热路径膨胀；无条件触发的无效更新；TOCTOU 反模式（先检查再操作）；内存泄漏/未清理的监听器；过度操作（读取整文件但只需部分） |
+
+**阶段 3 — 修复问题**：汇总所有发现，逐一修复；误报跳过即可，不争论；完成后简要总结修复内容（或确认代码已足够精简）。
+
+#### 示例
+
+- `/simplify` — 审查所有变更
+- `/simplify src/auth/` — 关注 `src/auth/` 目录下的变更
+- `/simplify focus on error handling patterns` — 重点关注错误处理模式
+
 ### `/sandbox`（沙箱模式管理）
 
 进入/离开 jiuwenbox 沙箱模式，并调整其运行时策略。通过 `command.sandbox` 与 agent-server 交互。
@@ -497,14 +608,14 @@
 
 | 命令 | 说明 |
 |---|---|
-| `/sandbox` 或 `/sandbox status` | 显示当前 runtime（`enabled`、`excluded_commands`、`files.allow_write`、`files.deny_write`） |
+| `/sandbox` 或 `/sandbox status` | 显示当前 runtime（`enabled`、`landlock`、`excluded_commands`、`files.allow_write`、`files.deny_write`） |
 | `/sandbox enable` | 进入沙箱模式（需要时启动 jiuwenbox，并重建 agent） |
 | `/sandbox disable` | 离开沙箱模式（重建 agent；jiuwenbox 只在 jiuwenswarm 启动时才停掉） |
 | `/sandbox exclude add <pattern>` | 加入一条 shell glob，命中后在本地而非沙箱内执行 |
 | `/sandbox exclude remove <pattern>` | 移除一条 pattern |
 | `/sandbox exclude list` | 列出当前 `excluded_commands` |
-| `/sandbox files allow <path> [perm]` | 允许沙箱内写 `<path>` |
-| `/sandbox files deny <path>` | 拒绝沙箱内写 `<path>` |
+| `/sandbox files allow <path>` | 允许沙箱内写 `<path>`（显示为 rw） |
+| `/sandbox files deny <path>` | 拒绝沙箱内写 `<path>`（仍可读，显示为 ro） |
 | `/sandbox files remove <path>` | 从 user-configured allow & deny 中移除该 path |
 | `/sandbox files list` | 列出生效的 `allow_write` / `deny_write` |
 | `/sandbox help` | 打印用法 |
@@ -512,7 +623,9 @@
 #### 概念说明
 
 - **平台限制**：`/sandbox` 仅支持 Linux 平台（jiuwenbox 依赖 bwrap / Landlock / Linux namespace 等内核能力）。 在 Windows / macOS 上运行的 agent-server 收到任何 `/sandbox` 子命令都会返回 `SANDBOX_BAD_REQUEST` 错误；如果 TUI 在 Mac/Windows 上、agent-server 在 Linux 主机上，是支持的（看 agent-server 所在主机的平台）。
-- **生效写入策略**：状态面板里的 `files.allow_write` / `files.deny_write` 是 auto-managed 与 user-configured 合并后的视图。auto-managed 条目由服务端自动注入（intrinsic 文件 `AGENT.md`、`HEARTBEAT.md`、`IDENTITY.md`、`SOUL.md`、`USER.md`，`memory/daily_memory/` 目录，以及按 mode 决定的 `project_dir` 与 `config/config.yaml`），不能通过 `/sandbox files remove` 移除。
+- **写入策略语义**：`allow` / `deny` 控制的是沙箱内的**写访问**（rw/ro），不是 Unix 八进制权限；enforcement 由 bwrap bind mount + `--remount-ro` 实现，Landlock 为纵深防御（`landlock.compatibility=disabled` 时主要依赖 bwrap）。
+- **嵌套路径**：支持「父 allow + 子 deny」（例如 allow `/tmp`、deny `/tmp/secret`）；不支持「子 allow + 父 deny」（父 deny 会覆盖子 allow），服务端会拒绝此类配置。
+- **生效写入策略**：状态面板里的 `files.allow_write` / `files.deny_write` 是 auto-managed 与 user-configured 合并后的视图，每条路径显示 `(rw)` 或 `(ro)`。auto-managed 条目由服务端自动注入（intrinsic 文件 `AGENT.md`、`HEARTBEAT.md`、`IDENTITY.md`、`SOUL.md`、`USER.md`，`memory/daily_memory/` 目录，以及按 mode 决定的 `project_dir` 与 `config/config.yaml`），不能通过 `/sandbox files remove` 移除。
 - **preserve_file_sharing_mode**：由 jiuwenswarm 配置决定，不通过 `/sandbox` 切换。仅支持 `mount`：intrinsic 文件与 `project_dir` 通过 bind mount 注入沙箱，`project_dir/config/config.yaml` 会显式加进 `deny_write`；yaml 里写入其它值会被服务端拒绝。
 - **excluded_commands**：按完整命令字符串匹配（不是只看 `argv[0]`），命中后该次调用穿透到本地，相当于把对应命令的副作用授权给本地环境。
 - **add / remove 的去重与冲突**：`exclude add` 在已存在同名 pattern 时报错；`exclude remove` 在不存在该 pattern 时报错。`files allow|deny` 在同一 bucket 已有同 path 时报错，在对侧 bucket（allow vs deny）已登记同 path 时也报错，需要先 `files remove` 再 add；`files remove` 在用户配置里找不到该 path 时报错。
@@ -522,8 +635,33 @@
 
 - `/sandbox enable` — 打开沙箱模式
 - `/sandbox status` — 查看 runtime 与生效路径
-- `/sandbox files allow ./tmp/ 0777` — 允许沙箱以 0777 写入 `./tmp/`
+- `/sandbox files allow ./tmp/` — 允许沙箱写入 `./tmp/`（rw）
+- `/sandbox files deny ./tmp/secret/` — 在已 allow 的父目录下禁止写入子目录（ro）
 - `/sandbox exclude add "git *"` — 让 `git` 命令穿透到本地执行，不进沙箱
+
+### `/keybindings`（快捷键配置）
+
+查看、编辑或重置 TUI 键盘快捷键。配置文件：`~/.jiuwenswarm-tui/keybindings.json`。
+
+#### 用法
+
+| 命令 | 作用 |
+|------|------|
+| `/keybindings` | 同 `/keybindings edit` |
+| `/keybindings edit` | 创建或打开配置文件；关闭外部编辑器后重新加载 |
+| `/keybindings list` | 列出当前生效的快捷键（按 context 分组） |
+| `/keybindings reset` | 删除用户配置，恢复内置默认 |
+
+别名：`/keybind`。
+
+#### 配置说明
+
+- 以内置默认绑定为底，用户 JSON 按 **context** 覆盖；键设为 `null` 可取消默认绑定。
+- 键名需符合 pi-tui `matchesKey` 格式（`ctrl`/`shift`/`alt` + 主键）；不支持 chord。
+- **不可重绑**：`ctrl+c`、`ctrl+d`、`ctrl+m`（保留键）。
+- Select 列表内部导航、Config 编辑器文本输入、Resume 预览/重命名子态等仍为硬编码。
+
+详见 [TUI 使用指南 · 快捷键](TUI使用指南.md#快捷键)。
 
 ### `/hooks`（浏览 Hooks 配置）
 
@@ -937,6 +1075,10 @@ Pipeline 执行过程中，扩展包**默认自动激活生效**，无需用户�
 | `/auto-harness schedule logs <task_id> [--history <n>]` | 查看任务执行日志 |
 | `/auto-harness schedule cancel <task_id>` | 取消任务 |
 | `/auto-harness schedule delete <task_id>` | 删除任务 |
+| `/auto-harness issue fix <issue_numbers>` | 指定 GitCode issue 创建独立修复任务 |
+| `/auto-harness issue scan [--repo <repo>] [--page <n>] [--labels <labels>] [--force-refresh]` | 扫描仓库 GitCode issue |
+| `/auto-harness issue status` | 查看 GitCode issue 处理状态列表 |
+| `/auto-harness issue delete <issue_numbers>` | 删除 issue 处理记录 |
 
 #### `/auto-harness run`（一次性执行）
 
@@ -973,12 +1115,175 @@ Pipeline 执行过程中，扩展包**默认自动激活生效**，无需用户�
   - 默认：实时跟踪当前运行日志（`tail -f` 模式），支持 Ctrl+C 中断
   - `--history <n>`：查看历史执行日志（`view` 模式，`n` 为历史索引，0 为最近一次）
 
+### `/auto-harness issue`（GitCode Issue 自动处理）
+
+管理 GitCode issue 的自动处理：扫描 issue 矩阵、创建修复任务、查看处理状态、清理记录。
+
+需要先配置 `git.user_name`、`git.user_email` 和 `gitcode.access_token`（或 `GITCODE_ACCESS_TOKEN` 环境变量）。
+
+#### 子命令
+
+| 命令 | 说明 |
+|---|---|
+| `/auto-harness issue fix <issue_numbers>` | 为指定 GitCode issue 创建修复任务 |
+| `/auto-harness issue scan [--repo <repo>] [选项]` | 扫描仓库 GitCode issue |
+| `/auto-harness issue status` | 查看 issue 处理状态 |
+| `/auto-harness issue delete <issue_numbers>` | 删除 issue 处理记录 |
+
+#### `/auto-harness issue fix`（创建修复任务）
+
+- 用法：`/auto-harness issue fix <issue_numbers>`
+- 参数：
+  - `<issue_numbers>`：issue 编号，多个用逗号分隔，如 `1272,1271,1270`
+  - `--repo <repo>`：目标仓库，支持 `jiuwenswarm` / `agent_core`，未指定时交互选择
+- 已关联 PR（open 或 merged）的 issue 自动跳过，不会创建重复任务
+- 示例：
+  - `/auto-harness issue fix 1286`
+  - `/auto-harness issue fix 1272,1271,1270`
+
+#### `/auto-harness issue scan`（扫描 Issue ）
+
+- 用法：`/auto-harness issue scan`
+- 参数：
+  - `--repo <repo>`：目标仓库，未指定时交互选择
+  - `--page <n>`：页码，默认 1
+  - `--labels <labels>`：标签过滤，逗号分隔，默认只显示 bug 类型
+  - `--force-refresh`：强制从 GitCode API 刷新数据（默认使用缓存）
+- 展示内容：issue 编号、标题、标签、难度评估、更新时间
+- 示例：
+  - `/auto-harness issue scan`
+  - `/auto-harness issue scan --repo jiuwenswarm --page 1`
+  - `/auto-harness issue scan --repo agent_core --force-refresh`
+
+#### `/auto-harness issue status`（查看处理状态）
+
+- 用法：`/auto-harness issue status`（无参数）
+- 以表格列出所有 issue 处理记录：编号、状态、阶段、进度、详情
+- 示例：`/auto-harness issue status`
+
+#### `/auto-harness issue delete`（删除记录）
+
+- 用法：`/auto-harness issue delete <issue_numbers>`
+- 参数：
+  - `<issue_numbers>`：要删除的 issue 编号
+- 示例：
+  - `/auto-harness issue delete 123`
+  - `/auto-harness issue delete 123 456`
+
+### `/btw`（旁路提问）
+
+在 **TUI 本地解析**，通过专用 RPC `command.btw` 向 AgentServer 发起一个独立的、无工具的、单轮 LLM 查询，基于当前对话上下文快速回答旁路问题，**不中断主对话**。
+
+- **别名**：无。
+- **适用模式**：全部。
+- **约束**：必须提供问题文本；无对话上下文时返回 `no_context`。
+
+#### 用法
+
+| 命令 | 说明 |
+|---|---|
+| `/btw <question>` | 基于当前对话上下文，发起旁路提问 |
+
+#### 行为细节
+
+- **参数必填**：`/btw` 必须带问题文本，否则提示 `Usage: /btw <your question>`。
+- **思考指示器**：发送请求后显示 `💭 Answering: <question>`（dim 样式）。
+- **RPC 超时**：120 秒。
+- **服务端处理**：
+  - 后端通过 `command.btw` RPC 接收请求，获取当前 Agent 实例。
+  - 与主 Agent 共享 system prompt（项目上下文、技能、CLAUDE.md 等），获取最近对话消息作为上下文。
+  - 构建专用 btw prompt，通过 `<system-reminder>` 告知模型：无工具可用、单次回复、不中断主 Agent。
+  - 直接调用模型（无工具、单轮），不修改对话历史（只读操作）。
+- **返回状态**：
+  - `ok`：显示 `💡 /btw <question>` + 回答内容。
+  - `no_context`：提示 `No conversation context available yet — send a message first.`。
+  - `failed`：显示错误信息或 `Couldn't answer the side question.`。
+
+#### 示例
+
+- `/btw what does git status do?` — 询问 git status 命令的作用
+- `/btw 这段代码的时间复杂度是多少？` — 基于上下文分析算法复杂度
+
+### `/review`（代码审查 PR）
+
+在 **TUI** 中输入时，将原始 `/review` 文本作为聊天消息发送给 Gateway。Gateway 识别后注入 review prompt，由 Agent 使用 `gh` CLI 审查 PR。
+
+在 **IM 受控通道**（飞书等）中，Gateway 拦截 `/review` 并注入 prompt，转发给 AgentServer 执行。
+
+- **别名**：无。
+- **适用模式**：全部（Agent、Code、Team）。
+- **解析位置**：Gateway 受控通道（`scope: "gateway"`），TUI 作为聊天消息发送。
+
+#### 用法
+
+| 命令 | 说明 |
+|---|---|
+| `/review` | 无参数时，Agent 执行 `gh pr list` 展示开放 PR 列表 |
+| `/review <PR 编号或 URL>` | 审查指定 PR：Agent 执行 `gh pr view/diff` 并分析 |
+
+#### 行为细节
+
+- **TUI 执行**：通过 `ctx.sendMessage()` 将 `/review [args]` 作为用户消息发送；离线时提示 `offline: waiting for reconnect before sending review request`。
+- **Gateway 拦截**（IM 侧）：
+  - 精确匹配 `/review` 或前缀匹配 `/review <arg>`。
+  - 参数最长 2048 字节；含控制字符返回 `非法指令`。
+  - 注入 review prompt 到 `msg.params["query"]`，继续转发给 AgentServer。
+- **Agent 执行**：收到 review prompt 后，Agent 使用 `gh` CLI：
+  1. 无参数时运行 `gh pr list` 展示开放 PR 列表。
+  2. 有参数时运行 `gh pr view <number>` 获取详情、`gh pr diff <number>` 获取 diff。
+  3. 分析变更并提供全面审查（正确性、约定、性能、测试覆盖、安全）。
+- **无 git/gh 预检**：Gateway 不检查 `git` 或 `gh` 是否安装，由 Agent 自行处理。
+
+#### 示例
+
+- `/review` — 列出当前仓库的开放 PR
+- `/review 123` — 审查 PR #123
+
+### `/security-review`（安全审查）
+
+在 **TUI** 中输入时，将原始 `/security-review` 文本作为聊天消息发送给 Gateway。Gateway 识别后注入安全审查 prompt，由 Agent 使用 `git` 命令分析当前分支的待定变更。
+
+在 **IM 受控通道**（飞书等）中，Gateway 拦截 `/security-review` 并注入 prompt，转发给 AgentServer 执行。
+
+- **别名**：无。
+- **适用模式**：全部（Agent、Code、Team）。
+- **解析位置**：Gateway 受控通道（`scope: "gateway"`），TUI 作为聊天消息发送。
+
+#### 用法
+
+| 命令 | 说明 |
+|---|---|
+| `/security-review` | 审查当前分支相对于 `origin/HEAD` 的所有待定变更 |
+| `/security-review <附加说明>` | 附带焦点说明或约束（如"重点关注认证模块"） |
+
+#### 行为细节
+
+- **TUI 执行**：通过 `ctx.sendMessage()` 将 `/security-review [args]` 作为用户消息发送；离线时提示 `offline: waiting for reconnect before sending security review request`。
+- **Gateway 拦截**（IM 侧）：
+  - 精确匹配 `/security-review` 或前缀匹配 `/security-review <arg>`。
+  - 参数最长 2048 字节；含控制字符返回 `非法指令`。
+  - 注入安全审查 prompt 到 `msg.params["query"]`，继续转发给 AgentServer。
+- **Agent 执行**：收到安全审查 prompt 后，Agent 执行以下步骤：
+  1. **仓库上下文研究**：`git status`、`git diff --name-only origin/HEAD...`、`git log` 获取变更概览。
+  2. **比较分析**：`git diff origin/HEAD...` 逐文件审查 diff。
+  3. **漏洞评估**：按以下类别审查：
+     - 输入验证漏洞
+     - 身份认证和授权问题
+     - 密码学与密钥管理
+     - 注入与代码执行
+     - 数据暴露
+  4. 使用子任务识别漏洞、并行子任务进行误报过滤，仅报告置信度 > 80% 的发现。
+  5. 输出结构化 Markdown 报告：文件、行号、严重级别、类别、描述、利用场景、修复建议。
+- **硬排除列表**：不报告拒绝服务、密钥存储、限速、竞态条件等问题类型。
+- **无 git 预检**：Gateway 不检查 `git` 是否安装，由 Agent 自行处理。
+
+#### 示例
+
+- `/security-review` — 审查当前分支所有待定变更
+- `/security-review 重点关注认证模块的安全性` — 附带焦点说明
+
 ---
 
 ## 待开发
 
-| 命令             | 说明      |
-|----------------|---------|
-| `/btw`         | 提问      |
-| `/export`      | 导出相关文件  |
-| `/permissions` | 权限管理    |
+（暂无）

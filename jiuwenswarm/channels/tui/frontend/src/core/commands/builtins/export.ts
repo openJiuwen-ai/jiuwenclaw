@@ -1,9 +1,20 @@
 import { writeFileSync } from "node:fs";
-import { resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import { copyToClipboard } from "../clipboard.js";
 import { addError, addInfo } from "../helpers.js";
 import { CommandKind, type SlashCommand } from "../types.js";
 import type { HistoryItem, ToolCallDisplay } from "../../types.js";
+
+/**
+ * Ensure the filename (last path component) ends with .txt.
+ * Only the basename is modified — path prefixes like "../" or "subdir/" are preserved.
+ */
+function ensureTxtExtension(inputPath: string): string {
+  const dir = dirname(inputPath);
+  const base = basename(inputPath);
+  const finalBase = base.endsWith(".txt") ? base : base.replace(/\.[^.]+$/, "") + ".txt";
+  return dir === "." ? finalBase : join(dir, finalBase);
+}
 
 function formatTimestamp(date: Date): string {
   const year = date.getFullYear();
@@ -134,7 +145,7 @@ export function createExportCommand(): SlashCommand {
 
       // Direct export when filename is provided — skip dialog
       if (arg) {
-        const filename = arg.endsWith(".txt") ? arg : arg.replace(/\.[^.]+$/, "") + ".txt";
+        const filename = ensureTxtExtension(arg);
         const workspaceDir = ctx.getWorkspaceDir() || process.cwd();
         const filepath = resolve(workspaceDir, filename);
 
@@ -231,9 +242,7 @@ export function createExportCommand(): SlashCommand {
           chosenFilename = filenameAnswer.selected_options[0];
         }
 
-        chosenFilename = chosenFilename.endsWith(".txt")
-          ? chosenFilename
-          : chosenFilename.replace(/\.[^.]+$/, "") + ".txt";
+        chosenFilename = ensureTxtExtension(chosenFilename);
         const chosenFilepath = resolve(workspaceDir, chosenFilename);
 
         try {

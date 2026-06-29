@@ -10,23 +10,27 @@ def test_list_session_turns_includes_project_file_change_stats(tmp_path, monkeyp
     session_dir = sessions_dir / session_id
     session_dir.mkdir(parents=True)
 
-    (session_dir / "history.json").write_text(
-        json.dumps(
+    (session_dir / "history.jsonl").write_text(
+        "\n".join(
             [
-                {
-                    "role": "user",
-                    "content": "change the file",
-                    "timestamp": 1000.0,
-                    "id": "u1",
-                    "request_id": "r1",
-                },
-                {
-                    "role": "assistant",
-                    "content": "done",
-                    "timestamp": 1002.0,
-                },
+                json.dumps(
+                    {
+                        "role": "user",
+                        "content": "change the file",
+                        "timestamp": 1000.0,
+                        "id": "u1",
+                        "request_id": "r1",
+                    }
+                ),
+                json.dumps(
+                    {
+                        "role": "assistant",
+                        "content": "done",
+                        "timestamp": 1002.0,
+                    }
+                ),
             ]
-        ),
+        ) + "\n",
         encoding="utf-8",
     )
 
@@ -51,6 +55,10 @@ def test_list_session_turns_includes_project_file_change_stats(tmp_path, monkeyp
 
     monkeypatch.setattr(
         "jiuwenswarm.agents.harness.common.session_ops_service.get_agent_sessions_dir",
+        lambda: sessions_dir,
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.server.runtime.session.session_history.get_agent_sessions_dir",
         lambda: sessions_dir,
     )
     monkeypatch.setattr(

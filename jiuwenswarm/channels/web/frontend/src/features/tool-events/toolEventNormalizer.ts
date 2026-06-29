@@ -1,3 +1,5 @@
+import { parseSkillTreePath, type SkillTreePath } from '../../types/skillTree';
+
 type UnknownPayload = Record<string, unknown>;
 
 function asRecord(value: unknown): UnknownPayload | null {
@@ -75,6 +77,7 @@ export interface NormalizedToolResult {
   result: string;
   success: boolean;
   summary?: string;
+  skillTree?: SkillTreePath;
 }
 
 export function normalizeToolCallPayload(payload: UnknownPayload): NormalizedToolCall {
@@ -106,7 +109,14 @@ export function normalizeToolCallPayload(payload: UnknownPayload): NormalizedToo
 
 export function normalizeToolResultPayload(payload: UnknownPayload): NormalizedToolResult {
   const toolResultPayload = asRecord(payload.tool_result) ?? payload;
+  const rawOutputRecord =
+    asRecord(toolResultPayload.raw_output) ?? asRecord(toolResultPayload.rawOutput);
+  const rawOutputResult =
+    typeof rawOutputRecord?.result === 'string'
+      ? rawOutputRecord.result
+      : undefined;
   const result =
+    rawOutputResult ||
     (typeof toolResultPayload.result === 'string' &&
       toolResultPayload.result) ||
     (toolResultPayload.data != null ? String(toolResultPayload.data) : '') ||
@@ -134,6 +144,9 @@ export function normalizeToolResultPayload(payload: UnknownPayload): NormalizedT
     typeof toolResultPayload.summary === 'string'
       ? toolResultPayload.summary
       : success ? undefined : '❌';
+  const skillTree =
+    parseSkillTreePath(toolResultPayload.raw_output) ??
+    parseSkillTreePath(toolResultPayload.rawOutput);
 
   return {
     toolName,
@@ -141,5 +154,6 @@ export function normalizeToolResultPayload(payload: UnknownPayload): NormalizedT
     result,
     success,
     summary,
+    skillTree,
   };
 }

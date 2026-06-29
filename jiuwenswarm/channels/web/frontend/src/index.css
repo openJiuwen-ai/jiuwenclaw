@@ -1,34 +1,9 @@
-@import url("https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500&display=swap");
-
-/* HarmonyOS Sans SC - 鸿蒙字体，中英文兼顾 */
-@font-face {
-  font-family: 'HarmonyOS Sans SC';
-  font-style: normal;
-  font-weight: 400;
-  font-display: swap;
-  src: url('https://cdn.jsdelivr.net/npm/@ayahub/webfont-harmony-sans-sc@1.0.0/fonts/HarmonyOS_Sans_SC_Regular.woff2') format('woff2');
-}
-@font-face {
-  font-family: 'HarmonyOS Sans SC';
-  font-style: normal;
-  font-weight: 500;
-  font-display: swap;
-  src: url('https://cdn.jsdelivr.net/npm/@ayahub/webfont-harmony-sans-sc@1.0.0/fonts/HarmonyOS_Sans_SC_Medium.woff2') format('woff2');
-}
-@font-face {
-  font-family: 'HarmonyOS Sans SC';
-  font-style: normal;
-  font-weight: 700;
-  font-display: swap;
-  src: url('https://cdn.jsdelivr.net/npm/@ayahub/webfont-harmony-sans-sc@1.0.0/fonts/HarmonyOS_Sans_SC_Bold.woff2') format('woff2');
-}
-
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
 
 /* ===========================================
-   CSS Variables - JiuwenClaw Design System
+   CSS Variables - JiuwenSwarm Design System
    =========================================== */
 
 :root {
@@ -112,10 +87,10 @@
   /* Grid */
   --grid-line: rgba(255, 255, 255, 0.04);
 
-  /* Typography - HarmonyOS Sans SC 鸿蒙字体，JetBrains Mono 等宽 */
-  --mono: "JetBrains Mono", ui-monospace, SFMono-Regular, "SF Mono", Menlo, Monaco, Consolas, monospace;
-  --font-body: "HarmonyOS Sans SC", -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
-  --font-display: "HarmonyOS Sans SC", -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+  /* Typography */
+  --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Monaco, Consolas, monospace;
+  --font-body: "Microsoft YaHei", "PingFang SC", "Segoe UI", sans-serif;
+  --font-display: "Microsoft YaHei", "PingFang SC", "Segoe UI", sans-serif;
 
   /* Shadows - Richer with subtle color */
   --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.2);
@@ -799,10 +774,6 @@ select {
     background: var(--bg-muted);
   }
 
-  .chat-bubble.assistant.markdown {
-    padding: 0 14px;
-  }
-
   :root[data-theme="light"] .chat-bubble.assistant {
     border-color: var(--border);
     background: #ffffff;
@@ -856,6 +827,8 @@ select {
 
   .chat-markdown {
     @apply prose prose-sm max-w-none;
+    max-width: 100%;
+    min-width: 0;
     --tw-prose-body: var(--chat-text);
     --tw-prose-headings: var(--text-strong);
     --tw-prose-lead: var(--muted);
@@ -872,7 +845,45 @@ select {
     --tw-prose-pre-bg: var(--secondary);
     --tw-prose-th-borders: var(--border);
     --tw-prose-td-borders: var(--border);
+    overflow-wrap: anywhere;
+    word-break: break-word;
     white-space: normal;
+  }
+
+  .chat-markdown :where(p, li, blockquote, h1, h2, h3, h4, h5, h6) {
+    max-width: 100%;
+    overflow-wrap: anywhere;
+    word-break: break-word;
+  }
+
+  .chat-markdown :where(ul, ol) {
+    max-width: 100%;
+  }
+
+  .chat-markdown :where(pre, table) {
+    max-width: 100%;
+    overflow-x: auto;
+  }
+
+  .chat-markdown :where(pre code) {
+    overflow-wrap: normal;
+    word-break: normal;
+    white-space: pre;
+  }
+
+  .chat-markdown :where(:not(pre) > code) {
+    overflow-wrap: anywhere;
+    white-space: break-spaces;
+  }
+
+  /* Remove the default prose paragraph margins so single-line messages sit flush
+     inside the bubble. Keep spacing between consecutive paragraphs. */
+  .chat-markdown p {
+    margin-block: 0;
+  }
+
+  .chat-markdown p + p {
+    margin-top: 1em;
   }
 
   .chat-bubble.assistant.streaming .chat-text {
@@ -1056,6 +1067,7 @@ select {
   .team-member-message__card {
     width: fit-content;
     max-width: min(82%, 720px);
+    min-width: 0;
     border-radius: var(--radius-lg);
     border: 1px solid var(--border);
     background: color-mix(in srgb, var(--secondary) 72%, transparent);
@@ -1066,12 +1078,19 @@ select {
     word-break: break-word;
   }
 
+  .team-member-message__content {
+    max-width: 100%;
+    min-width: 0;
+  }
+
   :root[data-theme="light"] .team-member-message__card {
     background: var(--bg-muted);
   }
 
   .team-member-message__plain {
     max-width: min(82%, 720px);
+    min-width: 0;
+    overflow-x: auto;
     color: var(--text);
     font-size: var(--font-size-sm);
     line-height: 1.75;
@@ -1639,8 +1658,9 @@ select {
 
   /* Skill action button - white/black in light mode, gray/white in dark mode */
   .skill-action-btn {
-    width: 76px;
+    min-width: 76px;
     height: 28px;
+    padding: 0 12px;
     border-radius: 24px;
     font-size: var(--font-size-sm);
     border: 1px solid #000000;

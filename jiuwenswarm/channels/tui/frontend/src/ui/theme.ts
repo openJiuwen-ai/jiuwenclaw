@@ -77,7 +77,7 @@ type ThemeDefinition = {
 
 const THEME_DEFINITIONS: Record<"light" | "dark", ThemeDefinition> = {
   light: {
-    textPrimary: "#000000",
+    textPrimary: "#ffffff",
     textSecondary: "#d77757",
     textDim: "#666666",
     textSubtle: "#afafaf",
@@ -148,7 +148,7 @@ const ACCENT_COLORS: Record<Exclude<AccentColorName, "default">, string> = {
 };
 
 const _initConfig = loadTuiConfig();
-let currentThemeName: ThemeName = _initConfig.theme ?? "default";
+let currentThemeName: ThemeName = _initConfig.theme ?? "dark";
 let currentAccentColor: AccentColorName = "default";
 
 function detectSystemTheme(): "light" | "dark" {

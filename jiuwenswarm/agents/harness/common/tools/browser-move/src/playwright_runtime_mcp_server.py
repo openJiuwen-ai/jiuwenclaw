@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import logging
 import os
 import sys
 from contextlib import asynccontextmanager
@@ -26,6 +27,8 @@ _REPO_ROOT = _SRC_ROOT.parent
 for _p in (str(_REPO_ROOT), str(_SRC_ROOT)):
     if _p not in sys.path:
         sys.path.insert(0, _p)
+
+logger = logging.getLogger(__name__)
 
 from fastmcp import Context, FastMCP
 from playwright_runtime.openjiuwen_monkeypatch import apply_openjiuwen_monkeypatch
@@ -70,6 +73,23 @@ def _build_runtime() -> "BrowserAgentRuntime":
     provider, api_key, api_base = resolve_model_settings()
     if not api_key:
         raise RuntimeError("Missing API key. Set OPENROUTER_API_KEY or OPENAI_API_KEY.")
+
+    # Sync --headless flag in PLAYWRIGHT_MCP_ARGS from config.yaml.
+    # @playwright/mcp@latest uses the --headless CLI flag, not an env var.
+    try:
+        from jiuwenswarm.common.config import get_config
+        _cfg = get_config() or {}
+        _browser_cfg = _cfg.get("browser", {}) if isinstance(_cfg, dict) else {}
+        _headless_val = _browser_cfg.get("headless", True) if isinstance(_browser_cfg, dict) else True
+        _headless = bool(_headless_val) if isinstance(_headless_val, bool) else True
+        _mcp_args_raw = (os.getenv("PLAYWRIGHT_MCP_ARGS") or "-y @playwright/mcp@latest").strip()
+        _mcp_args_list = _mcp_args_raw.split() if _mcp_args_raw else ["-y", "@playwright/mcp@latest"]
+        _mcp_args_list = [a for a in _mcp_args_list if a != "--headless"]
+        if _headless:
+            _mcp_args_list.append("--headless")
+        os.environ["PLAYWRIGHT_MCP_ARGS"] = " ".join(_mcp_args_list)
+    except Exception:
+        logger.warning("Failed to sync headless flag from config; using PLAYWRIGHT_MCP_ARGS as-is", exc_info=True)
 
     model_name = (os.getenv("MODEL_NAME") or "anthropic/claude-sonnet-4.5").strip()
     guardrails = BrowserRunGuardrails(

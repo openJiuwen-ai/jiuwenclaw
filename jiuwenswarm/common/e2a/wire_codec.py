@@ -6,6 +6,8 @@ from __future__ import annotations
 
 import logging
 from dataclasses import asdict
+from datetime import date, datetime
+from enum import Enum
 from typing import Any
 
 from jiuwenswarm.common.e2a.constants import (
@@ -31,6 +33,29 @@ from jiuwenswarm.common.e2a.models import (
 from jiuwenswarm.common.schema.agent import AgentResponse, AgentResponseChunk
 
 logger = logging.getLogger(__name__)
+
+
+def _json_safe(value: Any) -> Any:
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    if isinstance(value, (datetime, date)):
+        return value.isoformat()
+    if isinstance(value, Enum):
+        return value.value
+    if isinstance(value, dict):
+        return {str(k): _json_safe(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple, set)):
+        return [_json_safe(v) for v in value]
+    if hasattr(value, "model_dump"):
+        try:
+            return _json_safe(value.model_dump(mode="json"))
+        except Exception:
+            return _json_safe(value.model_dump())
+    if hasattr(value, "dict"):
+        return _json_safe(value.dict())
+    if hasattr(value, "__dict__"):
+        return _json_safe(vars(value))
+    return str(value)
 
 
 def _raw_dict_to_agent_response(data: dict[str, Any]) -> AgentResponse:
@@ -226,7 +251,10 @@ def encode_agent_response_for_wire(
                 te,
             )
             return _fallback_wire_unary_from_legacy(
-                asdict(resp), response_id=response_id, sequence=sequence, exc=te
+                _json_safe(asdict(resp)),
+                response_id=response_id,
+                sequence=sequence,
+                exc=te,
             )
         logger.info(
             "[E2A][wire][out] unary request_id=%s response_id=%s response_kind=%s legacy_stashed=false",
@@ -234,7 +262,7 @@ def encode_agent_response_for_wire(
             response_id,
             e2a.response_kind,
         )
-        return wire
+        return _json_safe(wire)
     except Exception as e:
         logger.exception(
             "[E2A][wire][out][FAIL] stage=encode unary request_id=%s response_id=%s err=%s legacy_stashed=true",
@@ -243,7 +271,10 @@ def encode_agent_response_for_wire(
             e,
         )
         return _fallback_wire_unary_from_legacy(
-            asdict(resp), response_id=response_id, sequence=sequence, exc=e
+            _json_safe(asdict(resp)),
+            response_id=response_id,
+            sequence=sequence,
+            exc=e,
         )
 
 
@@ -277,13 +308,13 @@ def encode_agent_chunk_for_wire(
                 te,
             )
             return _fallback_wire_chunk_from_legacy(
-                asdict(chunk),
+                _json_safe(asdict(chunk)),
                 response_id=response_id,
                 sequence=sequence,
                 exc=te,
                 is_stream=is_stream,
             )
-        return wire
+        return _json_safe(wire)
     except Exception as e:
         logger.exception(
             "[E2A][wire][out][FAIL] stage=encode chunk request_id=%s response_id=%s seq=%s err=%s legacy_stashed=true",
@@ -293,7 +324,7 @@ def encode_agent_chunk_for_wire(
             e,
         )
         return _fallback_wire_chunk_from_legacy(
-            asdict(chunk),
+            _json_safe(asdict(chunk)),
             response_id=response_id,
             sequence=sequence,
             exc=e,

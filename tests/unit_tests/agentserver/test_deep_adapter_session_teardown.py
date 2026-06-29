@@ -6,12 +6,12 @@ import asyncio
 
 import pytest
 
-from jiuwenswarm.server.runtime.agent_adapter.interface_deep import JiuWenClawDeepAdapter
+from jiuwenswarm.server.runtime.agent_adapter.interface_deep import JiuWenSwarmDeepAdapter
 
 
-def _make_adapter(**state: object) -> JiuWenClawDeepAdapter:
+def _make_adapter(**state: object) -> JiuWenSwarmDeepAdapter:
     """Create a bare adapter with internal state set via setattr."""
-    adapter = object.__new__(JiuWenClawDeepAdapter)
+    adapter = object.__new__(JiuWenSwarmDeepAdapter)
     for name, value in state.items():
         setattr(adapter, name, value)
     return adapter
@@ -56,7 +56,7 @@ async def test_cancel_session_agent_tasks_cancels_registered_task() -> None:
     getattr(adapter, "_session_agent_tasks")["sess_x"] = {task}
     await asyncio.sleep(0)
 
-    cancelled_count = getattr(adapter, "_cancel_session_agent_tasks")("sess_x")
+    cancelled_count = await getattr(adapter, "_cancel_session_agent_tasks")("sess_x")
     assert cancelled_count == 1
     await asyncio.wait_for(cancelled.wait(), timeout=2)
 

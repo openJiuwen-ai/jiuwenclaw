@@ -8,7 +8,16 @@ from pathlib import Path
 import pytest
 import yaml
 
-from jiuwenswarm.common.config import get_config_raw, replace_teams_in_config, resolve_env_vars
+from jiuwenswarm.common.config import (
+    get_config_raw,
+    get_evolution_auto_save_enabled,
+    get_evolution_auto_scan_enabled,
+    get_skill_create_enabled,
+    migrate_config_from_template,
+    replace_teams_in_config,
+    resolve_env_vars,
+    update_skill_retrieval_in_config,
+)
 
 
 class TestResolveEnvVars:
@@ -106,6 +115,104 @@ class TestResolveEnvVars:
 class TestConfigFunctions:
     """Test config module functions."""
 
+    @pytest.mark.parametrize(
+        ("config", "expected"),
+        [
+            ({}, False),
+            ({"react": {"evolution": {"auto_save": False}}}, False),
+            ({"react": {"evolution": {"auto_save": True}}}, True),
+            ({"evolution": {"auto_save": True}}, True),
+            ({"react": {"evolution": {"auto_save": "true"}}}, False),
+        ],
+    )
+    def test_evolution_auto_save_config_values(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        config,
+        expected,
+    ):
+        monkeypatch.delenv("EVOLUTION_AUTO_SAVE", raising=False)
+        assert get_evolution_auto_save_enabled(config) is expected
+
+    @staticmethod
+    def test_evolution_auto_save_read_failure_returns_false(monkeypatch: pytest.MonkeyPatch):
+        def _raise() -> dict:
+            raise OSError("config unavailable")
+
+        monkeypatch.delenv("EVOLUTION_AUTO_SAVE", raising=False)
+        monkeypatch.setattr("jiuwenswarm.common.config.get_config", _raise)
+
+        assert get_evolution_auto_save_enabled() is False
+
+    @pytest.mark.parametrize(
+        ("env_value", "config", "expected"),
+        [
+            (None, {"react": {"evolution": {"auto_save": True}}}, True),
+            (None, {"evolution": {"auto_save": True}}, True),
+            ("false", {"react": {"evolution": {"auto_save": True}}}, False),
+            ("true", {"react": {"evolution": {"auto_save": False}}}, True),
+        ],
+    )
+    def test_evolution_auto_save_config_and_env_values(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        env_value,
+        config,
+        expected,
+    ):
+        if env_value is None:
+            monkeypatch.delenv("EVOLUTION_AUTO_SAVE", raising=False)
+        else:
+            monkeypatch.setenv("EVOLUTION_AUTO_SAVE", env_value)
+
+        assert get_evolution_auto_save_enabled(config) is expected
+
+    @pytest.mark.parametrize(
+        ("env_value", "config", "expected"),
+        [
+            (None, {"react": {"evolution": {"auto_scan": True}}}, True),
+            (None, {"evolution": {"auto_scan": True}}, True),
+            ("false", {"react": {"evolution": {"auto_scan": True}}}, False),
+            ("true", {"react": {"evolution": {"auto_scan": False}}}, True),
+        ],
+    )
+    def test_evolution_auto_scan_config_and_env_values(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        env_value,
+        config,
+        expected,
+    ):
+        if env_value is None:
+            monkeypatch.delenv("EVOLUTION_AUTO_SCAN", raising=False)
+        else:
+            monkeypatch.setenv("EVOLUTION_AUTO_SCAN", env_value)
+
+        assert get_evolution_auto_scan_enabled(config) is expected
+
+    @pytest.mark.parametrize(
+        ("env_value", "config", "expected"),
+        [
+            (None, {"react": {"evolution": {"skill_create": True}}}, True),
+            (None, {"evolution": {"skill_create": True}}, True),
+            ("false", {"react": {"evolution": {"skill_create": True}}}, False),
+            ("true", {"react": {"evolution": {"skill_create": False}}}, True),
+        ],
+    )
+    def test_skill_create_config_and_env_values(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        env_value,
+        config,
+        expected,
+    ):
+        if env_value is None:
+            monkeypatch.delenv("SKILL_CREATE", raising=False)
+        else:
+            monkeypatch.setenv("SKILL_CREATE", env_value)
+
+        assert get_skill_create_enabled(config) is expected
+
     @staticmethod
     def test_get_config_raw(temp_config_file: Path):
         config = get_config_raw()
@@ -119,12 +226,143 @@ class TestConfigFunctions:
         actual_keys = set(config.keys())
         assert len(actual_keys & expected_keys) > 0, "Config should have at least some expected keys"
 
+    @staticmethod
+    def test_migrate_config_from_template_deep_merges_symphony(
+        tmp_path: Path,
+    ):
+        template_path = tmp_path / "template.yaml"
+        user_config_path = tmp_path / "config.yaml"
+        template_path.write_text(
+            """
+preferred_language: zh
+symphony:
+  fingerprint:
+    scan:
+      max_depth:
+    extraction:
+      workers: 1
+      batch_size: 1
+      body_limit:
+    normalization:
+      workers: 1
+      batch_size: 1
+      duplicate_name_similarity_threshold: 0.86
+      max_vocab_size:
+""",
+            encoding="utf-8",
+        )
+        user_config_path.write_text(
+            """
+preferred_language: en
+symphony:
+  fingerprint:
+    extraction:
+      workers: 3
+""",
+            encoding="utf-8",
+        )
+
+        assert migrate_config_from_template(template_path, user_config_path) is True
+
+        migrated = yaml.safe_load(user_config_path.read_text(encoding="utf-8"))
+        assert migrated["preferred_language"] == "en"
+        assert migrated["symphony"]["fingerprint"]["scan"]["max_depth"] is None
+        assert migrated["symphony"]["fingerprint"]["extraction"]["workers"] == 3
+        assert migrated["symphony"]["fingerprint"]["extraction"]["batch_size"] == 1
+        assert migrated["symphony"]["fingerprint"]["normalization"]["workers"] == 1
+
+    @staticmethod
+    def test_update_skill_retrieval_preserves_existing_hidden_config(
+        monkeypatch: pytest.MonkeyPatch,
+        temp_config_file: Path,
+    ):
+        temp_config_file.write_text(
+            """
+symphony:
+  skill_retrieval:
+    enabled: false
+    build:
+      branching_factor: 96
+      root_categories: old
+      max_depth: 7
+      request_timeout_seconds: 300
+      max_workers: 4
+      max_retries: 2
+      classification_batch_limit: 24
+      discovery_seed: 42
+      postprocess_enabled: true
+      postprocess_max_passes: 1
+      postprocess_min_skills: 6
+      equivalence_enabled: true
+    retrieve:
+      top_k: 8
+      compact_codes_enabled: true
+      flatten_tree: true
+      max_exposure_depth: 12
+      max_branch_choices: 3
+      max_parallel_branches: 4
+""",
+            encoding="utf-8",
+        )
+        monkeypatch.setattr("jiuwenswarm.common.config.CONFIG_YAML_PATH", temp_config_file)
+
+        update_skill_retrieval_in_config(
+            {
+                "build": {
+                    "root_categories": "new",
+                    "max_depth": 9,
+                    "max_workers": 8,
+                    "max_retries": 3,
+                    "classification_batch_limit": 12,
+                    "discovery_seed": 7,
+                    "postprocess_enabled": False,
+                    "postprocess_max_passes": 4,
+                    "postprocess_min_skills": 10,
+                    "equivalence_enabled": False,
+                },
+                "retrieve": {
+                    "top_k": 6,
+                    "max_branch_choices": 5,
+                },
+            }
+        )
+
+        raw = yaml.safe_load(temp_config_file.read_text(encoding="utf-8"))
+        section = raw["symphony"]["skill_retrieval"]
+        assert section["build"] == {
+            "branching_factor": 96,
+            "root_categories": "new",
+            "max_depth": 9,
+            "request_timeout_seconds": 300,
+            "max_workers": 8,
+            "max_retries": 3,
+            "classification_batch_limit": 12,
+            "discovery_seed": 7,
+            "postprocess_enabled": False,
+            "postprocess_max_passes": 4,
+            "postprocess_min_skills": 10,
+            "equivalence_enabled": False,
+        }
+        assert section["retrieve"] == {
+            "top_k": 6,
+            "compact_codes_enabled": True,
+            "flatten_tree": True,
+            "max_exposure_depth": 12,
+            "max_branch_choices": 5,
+            "max_parallel_branches": 4,
+        }
+
 
 class TestTeamModesConfig:
     """Test team config persistence under modes.team."""
 
     @staticmethod
-    def _front_payload(team_names: list[str] | None = None, *, include_teammate: bool = False) -> dict:
+    def _front_payload(
+        team_names: list[str] | None = None,
+        *,
+        include_teammate: bool = False,
+        enable_permissions: bool = False,
+    ) -> dict:
         names = team_names or ["alpha_team", "beta_team"]
         return {
             "agents": {
@@ -163,6 +401,7 @@ class TestTeamModesConfig:
                     "lifecycle": "persistent",
                     "teammate_mode": "build_mode",
                     "spawn_mode": "inprocess",
+                    "enable_permissions": enable_permissions,
                     "leader": {
                         "member_name": f"{team_name}_leader",
                         "display_name": f"{team_name} leader",
@@ -225,12 +464,13 @@ modes:
         )
         monkeypatch.setattr("jiuwenswarm.common.config.CONFIG_YAML_PATH", temp_config_file)
 
-        replace_teams_in_config(TestTeamModesConfig._front_payload(["alpha_team"]))
+        replace_teams_in_config(TestTeamModesConfig._front_payload(["alpha_team"], enable_permissions=True))
 
         raw = yaml.safe_load(temp_config_file.read_text(encoding="utf-8"))
         assert raw["team"] == {"team_name": "legacy_team"}
         saved = raw["modes"]["team"]["alpha_team"]
         assert saved["team_name"] == "alpha_team"
+        assert saved["enable_permissions"] is True
         assert saved["leader"] == {
             "member_name": "alpha_team_leader",
             "display_name": "alpha_team leader",

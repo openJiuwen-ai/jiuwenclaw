@@ -1,5 +1,20 @@
 import { makeItem, parseArgs } from "../helpers.js";
 import { CommandKind, type SlashCommand } from "../types.js";
+import type { ClientMode } from "../../modes.js";
+
+const EVOLUTION_SUPPORTED_MODES = new Set<ClientMode>([
+  "agent.plan",
+  "team",
+  "team.plan",
+  "code.team",
+]);
+
+function unsupportedEvolutionModeMessage(mode: ClientMode): string | null {
+  if (EVOLUTION_SUPPORTED_MODES.has(mode)) {
+    return null;
+  }
+  return `${mode} 模式下演进功能不可用。`;
+}
 
 /**
  * /evolve - Trigger skill evolution
@@ -15,6 +30,12 @@ export function createEvolveCommand(): SlashCommand {
     hidden: true,
     takesArgs: true,
     action: (ctx, args) => {
+      const unsupportedMode = unsupportedEvolutionModeMessage(ctx.mode);
+      if (unsupportedMode) {
+        ctx.addItem(makeItem(ctx.sessionId, "error", unsupportedMode));
+        return;
+      }
+
       const skillArg = args.trim();
       // Forward as-is. Agent mode still accepts bare /evolve for a pending-record summary.
       const text = skillArg ? `/evolve ${skillArg}` : `/evolve`;
@@ -81,6 +102,12 @@ export function createEvolveSimplifyCommand(): SlashCommand {
     hidden: true,
     takesArgs: true,
     action: (ctx, args) => {
+      const unsupportedMode = unsupportedEvolutionModeMessage(ctx.mode);
+      if (unsupportedMode) {
+        ctx.addItem(makeItem(ctx.sessionId, "error", unsupportedMode));
+        return;
+      }
+
       const parsedArgs = parseArgs(args);
       const skillName = parsedArgs[0];
 

@@ -2,7 +2,7 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 """Project memory file discovery + merge.
 
-Used by :class:`ProjectMemoryRail` to collect JiuwenClaw project-memory files,
+Used by :class:`ProjectMemoryRail` to collect JiuwenSwarm project-memory files,
 expand ``@include`` references, apply frontmatter ``paths:`` scoping against
 the current workspace/cwd, and
 merge the effective sources into a single prompt section.

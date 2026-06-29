@@ -61,10 +61,11 @@ import {
   setCurrentCwd,
   getCurrentCwd,
 } from "./core/tui-trusted-dirs-store.js";
-import { loadTuiConfig, type StatusLineSetting } from "./core/tui-config-store.js";
-import { applyWorkflowUpdate, type WorkflowRun } from "./core/workflows.js";
+import { loadTuiConfig } from "./core/tui-config-store.js";
+import { applyWorkflowUpdate, normalizeWorkflowRun, type WorkflowRun } from "./core/workflows.js";
 import { execFile, spawnSync } from "node:child_process";
 import { writeFileSync } from "node:fs";
+import { createConnection } from "node:net";
 import { tmpdir } from "node:os";
 import { join, sep } from "node:path";
 
@@ -80,6 +81,12 @@ export interface SessionUsageSummary {
   total_output_tokens: number;
   total_tokens: number;
   byModel: ModelUsageEntry[];
+}
+
+export interface CurrentQueryUsage {
+  input_tokens: number;
+  output_tokens: number;
+  total_tokens: number;
 }
 
 interface VisibleUserRequest {
@@ -131,6 +138,15 @@ export interface AppSnapshot {
     threshold: number;
     message: string;
   }[];
+  /** 当前正在执行的命令名称，用于追踪不可中断命令。 */
+  runningCommand: string | null;
+  streamStalled: boolean;
+  streamIdleMs: number | null;
+  currentQueryUsage: CurrentQueryUsage;
+  /** /btw 侧问题覆盖层：独立于 transcript 渲染，不受滚动影响 */
+  btwOverlay: { question: string; answer: string } | null;
+  /** BTW 是否处于活动状态（加载中或 overlay 可见），Esc 优先消费 */
+  btwActive: boolean;
 }
 
 function formatElapsed(ms: number): string {
@@ -161,6 +177,7 @@ const DEFERRED_TRANSCRIPT_EVENTS = new Set([
   "chat.error",
   "chat.tool_call",
   "chat.tool_result",
+  "chat.symphony_status",
   "chat.interrupt_result",
   "chat.ask_user_question",
   "chat.media",
@@ -178,14 +195,85 @@ const DEFERRED_TRANSCRIPT_EVENTS = new Set([
   "harness.activate_interaction",
 ]);
 
+function isPlanClientMode(mode: ClientMode): boolean {
+  return mode === "agent.plan" || mode === "code.plan" || mode === "team.plan";
+}
+
 // ── Auto-recap (自动回顾) 常量 ──
 /** 用户空闲多久后自动触发回顾（5分钟）。 */
 const AUTO_RECAP_IDLE_THRESHOLD_MS = 5 * 60_000;
 /** 周期性检查空闲状态的时间间隔（30秒）。 */
 const AUTO_RECAP_CHECK_INTERVAL_MS = 30_000;
+const ACTIVE_TURN_RECONNECT_TIMEOUT_MS = 60_000;
+const ACTIVE_NETWORK_CHECK_INTERVAL_MS = 8_000;
+
+function probeTcp(host: string, port: number, timeoutMs: number): Promise<boolean> {
+  return new Promise((resolve) => {
+    const socket = createConnection({ host, port });
+    let settled = false;
+    const finish = (ok: boolean) => {
+      if (settled) return;
+      settled = true;
+      socket.removeAllListeners();
+      socket.destroy();
+      resolve(ok);
+    };
+    socket.setTimeout(timeoutMs);
+    socket.once("connect", () => finish(true));
+    socket.once("timeout", () => finish(false));
+    socket.once("error", () => finish(false));
+  });
+}
+
+async function hasExternalNetwork(): Promise<boolean> {
+  const probes = [
+    probeTcp("223.5.5.5", 53, 1500),
+    probeTcp("114.114.114.114", 53, 1500),
+    probeTcp("1.1.1.1", 443, 1500),
+  ];
+  const results = await Promise.all(probes);
+  return results.some(Boolean);
+}
 
 function isLocalFileSearchTool(name: string): boolean {
   return LOCAL_FILE_SEARCH_TOOL_NAMES.has(name.trim().toLowerCase());
+}
+
+function isRejectOption(label: string): boolean {
+  const normalized = label.trim();
+  return (
+    normalized.includes("拒绝") || /^reject\b/i.test(normalized) || /^deny\b/i.test(normalized)
+  );
+}
+
+function isPlanApprovalRejectWithoutFeedback(
+  pendingQuestion: PendingQuestion,
+  answers: UserAnswer[],
+): boolean {
+  if (
+    pendingQuestion.source !== "confirm_interrupt" ||
+    pendingQuestion.planApprovalKind !== "plan_approval"
+  ) {
+    return false;
+  }
+
+  const rejected = answers.some((answer) =>
+    answer.selected_options.some((option) => isRejectOption(option)),
+  );
+  if (!rejected) {
+    return false;
+  }
+
+  return answers.every((answer) => !answer.custom_input?.trim());
+}
+
+function withPlanApprovalCancelFeedback(answers: UserAnswer[]): UserAnswer[] {
+  return answers.map((answer) => ({
+    ...answer,
+    custom_input:
+      answer.custom_input?.trim() ||
+      "用户取消了本次计划审批。请保持 plan 模式并等待用户下一条指令，不要继续调用 exit_plan_mode。",
+  }));
 }
 
 function detectRipgrep(): boolean {
@@ -250,6 +338,11 @@ export class CliPiAppState {
   private statusLineText: string | null = null;
   private statusLineTimer: ReturnType<typeof setInterval> | null = null;
   private usageByModel = new Map<string, ModelUsageEntry>();
+  private currentQueryUsage: CurrentQueryUsage = {
+    input_tokens: 0,
+    output_tokens: 0,
+    total_tokens: 0,
+  };
   private modelInfo: { provider: string; model: string; version: string } = {
     provider: "",
     model: "",
@@ -264,12 +357,25 @@ export class CliPiAppState {
     message: string;
   }[] = [];
   private memoryRefreshTimer: ReturnType<typeof setInterval> | null = null;
+  private activeTurnReconnectTimer: ReturnType<typeof setTimeout> | null = null;
+  private activeTurnReconnectNoticeShown = false;
+  private lastStreamActivityAt: number | null = null;
+  private streamStallNoticeTimer: ReturnType<typeof setTimeout> | null = null;
+  private streamStallNoticeShown = false;
+  private streamStalled = false;
   /** 当 closeUi 中 cancelBeforeExit 调 cancel({showNotice:false}) 时置 true，抑制 chat.interrupt_result 的 UI 通知。 */
   private suppressInterruptResult = false;
+  /** /btw 侧问题覆盖层：独立于 transcript 渲染 */
+  private btwOverlay: { question: string; answer: string } | null = null;
+  /** BTW 是否处于活动状态（加载中或 overlay 可见），用于 Esc 优先级判断 */
+  private _btwActive = false;
   /** 本地中断请求标志，cancel() 调用时立即置 true，用于 long-running 命令的中断检测。 */
   private interruptRequested = false;
   /** 当前正在执行的斜杠命令 WS 请求 ID，用于 Ctrl+C 时立即取消。 */
   private activeCommandRequestId: string | null = null;
+  /** 当前正在执行的命令名称，用于追踪不可中断命令。 */
+  private runningCommand: string | null = null;
+  private pendingPlanEntrySource: "slash_command" | null = null;
   private lastVisibleUserRequest: VisibleUserRequest | null = null;
   /** 保存 askQuestions 之前的 streamingState，用于在对话框关闭后恢复。 */
   private streamingStateBeforeQuestion: StreamingState | null = null;
@@ -282,6 +388,8 @@ export class CliPiAppState {
   private autoRecapState: "idle" | "pending" | "generated" = "idle";
   /** 周期检查空闲状态的定时器。 */
   private autoRecapTimer: ReturnType<typeof setInterval> | null = null;
+  /** 是否启用自动回顾（从 config.yaml 读取，默认 true）。 */
+  private autoRecapEnabled: boolean = true;
   private ripgrepAvailable: boolean | null = null;
   private ripgrepSearchTipShown = false;
   /** Harness extension ready info (for file tree display) */
@@ -307,7 +415,7 @@ export class CliPiAppState {
       this.entries = entries;
     },
     setStreamingState: (state) => {
-      this.streamingState = state;
+      this.setStreamingStateInternal(state);
       this.emitChange();
     },
     setPendingQuestion: (question) => {
@@ -396,20 +504,10 @@ export class CliPiAppState {
     },
     tryAutoRestoreAfterCancel: () => this.tryAutoRestoreAfterCancel(),
     appendUsageSummary: (usage, model) => {
-      const key = model || "unknown";
-      const existing = this.usageByModel.get(key);
-      const u = usage as Record<string, unknown>;
-      const entry: ModelUsageEntry = {
-        model: key,
-        input_tokens:
-          (existing?.input_tokens ?? 0) + (typeof u.input_tokens === "number" ? u.input_tokens : 0),
-        output_tokens:
-          (existing?.output_tokens ?? 0) +
-          (typeof u.output_tokens === "number" ? u.output_tokens : 0),
-        total_tokens:
-          (existing?.total_tokens ?? 0) + (typeof u.total_tokens === "number" ? u.total_tokens : 0),
-      };
-      this.usageByModel.set(key, entry);
+      this.appendUsageDelta(usage, model);
+    },
+    appendUsageMetadata: (usage) => {
+      this.updateCurrentUsageTokens(usage);
     },
     addWorkedForEntry: () => {
       if (this.turnStartedAt === null) return;
@@ -460,6 +558,7 @@ export class CliPiAppState {
   start(): void {
     this.unlistenStatus = this.wsClient.onStatusChange(async (status) => {
       this.connectionStatus = status;
+      this.handleConnectionStatusChanged(status);
       this.emitChange();
       if (status === "connected") {
         await this.fetchModelInfo();
@@ -475,7 +574,8 @@ export class CliPiAppState {
 
     this.wsClient.connect();
     this.startStatusLinePoll();
-    this.startAutoRecapTimer();
+    // auto-recap timer 由 fetchModelInfo() 在拿到配置后启动，
+    // 避免在配置为 disabled 时仍提前启动 timer。
   }
 
   stop(): void {
@@ -491,6 +591,8 @@ export class CliPiAppState {
       clearTimeout(this.toolTimeoutTimer);
       this.toolTimeoutTimer = null;
     }
+    this.clearActiveTurnReconnectTimer();
+    this.clearStreamStallWatchdog();
     this.unlistenStatus?.();
     this.unlistenStatus = null;
     this.unlistenFrames?.();
@@ -528,6 +630,15 @@ export class CliPiAppState {
         ? models.find((m) => m.model_name === activeModelName)
         : models[0];
       this.preferredLanguage = normalizePreferredLanguage(config.preferred_language);
+      this.autoRecapEnabled = config.auto_recap_enabled !== "false";
+      // 同步 auto-recap timer：WS 连接后才拿到配置，需根据实际值启停 timer
+      if (this.autoRecapEnabled) {
+        if (!this.autoRecapTimer) {
+          this.startAutoRecapTimer();
+        }
+      } else {
+        this.stopAutoRecapTimer();
+      }
       this.modelInfo = {
         provider: String(activeModel?.model_provider ?? config.model_provider ?? ""),
         model: activeModelName || String(config.model ?? ""),
@@ -560,8 +671,14 @@ export class CliPiAppState {
       this.emitChange();
     } catch {
       // ignore error, use defaults
+      // config.get 失败时，按默认值 true 启动 auto-recap timer
+      this.startAutoRecapTimer();
     }
   }
+
+  readonly refreshModelInfo = async (): Promise<void> => {
+    await this.fetchModelInfo();
+  };
 
   private startMemoryRefresh(): void {
     this.stopMemoryRefresh();
@@ -596,6 +713,189 @@ export class CliPiAppState {
     }
   }
 
+  private hasActiveResponseStream(): boolean {
+    return this.connectionStatus === "connected" && this.streamingState === StreamingState.Responding;
+  }
+
+  private handleStreamingStateChanged(wasActiveResponseStream: boolean): void {
+    const isActiveResponseStream = this.hasActiveResponseStream();
+    if (isActiveResponseStream && !wasActiveResponseStream) {
+      this.noteStreamActivity();
+      return;
+    }
+    if (!isActiveResponseStream) {
+      this.clearStreamStallWatchdog();
+    }
+  }
+
+  private setStreamingStateInternal(state: StreamingState): void {
+    const wasActiveResponseStream = this.hasActiveResponseStream();
+    this.streamingState = state;
+    this.handleStreamingStateChanged(wasActiveResponseStream);
+  }
+
+  private noteStreamActivity(): void {
+    if (!this.hasActiveResponseStream()) {
+      return;
+    }
+    this.lastStreamActivityAt = Date.now();
+    this.streamStalled = false;
+    this.streamStallNoticeShown = false;
+    this.scheduleStreamStallWatchdog();
+  }
+
+  private scheduleStreamStallWatchdog(): void {
+    this.clearStreamStallTimers();
+    if (!this.hasActiveResponseStream() || this.lastStreamActivityAt === null) {
+      return;
+    }
+    const idleMs = Date.now() - this.lastStreamActivityAt;
+    this.streamStallNoticeTimer = setTimeout(() => {
+      this.streamStallNoticeTimer = null;
+      void this.handleStreamStallNotice();
+    }, Math.max(0, ACTIVE_NETWORK_CHECK_INTERVAL_MS - idleMs));
+  }
+
+  private clearStreamStallTimers(): void {
+    if (this.streamStallNoticeTimer) {
+      clearTimeout(this.streamStallNoticeTimer);
+      this.streamStallNoticeTimer = null;
+    }
+  }
+
+  private clearStreamStallWatchdog(): void {
+    this.clearStreamStallTimers();
+    this.lastStreamActivityAt = null;
+    this.streamStallNoticeShown = false;
+    this.streamStalled = false;
+  }
+
+  private async handleStreamStallNotice(): Promise<void> {
+    if (!this.hasActiveResponseStream()) {
+      return;
+    }
+    if (await hasExternalNetwork()) {
+      this.lastStreamActivityAt = Date.now();
+      this.scheduleStreamStallWatchdog();
+      return;
+    }
+    if (this.streamStallNoticeShown) {
+      return;
+    }
+    this.streamStallNoticeShown = true;
+    this.failActiveTurnAfterConnectionLoss(
+      "Network appears offline while the task is running. Stopped the current TUI response; reconnect and retry.",
+    );
+  }
+
+  private frameBelongsToActiveSession(frame: EventFrame): boolean {
+    const eventSessionId = typeof frame.payload.session_id === "string" ? frame.payload.session_id : "";
+    return !eventSessionId || eventSessionId === this.sessionId;
+  }
+
+  private isStreamProgressFrame(frame: EventFrame): boolean {
+    const event = typeof frame.payload.event_type === "string" ? frame.payload.event_type : frame.event;
+    return event !== "chat.processing_status" &&
+      event !== "connection.ack" &&
+      event !== "history.message" &&
+      event !== "context.usage" &&
+      event !== "context.compression_state";
+  }
+
+  private handleConnectionStatusChanged(status: ConnectionStatus): void {
+    if (status === "reconnecting") {
+      this.clearStreamStallWatchdog();
+      this.startActiveTurnReconnectWatchdog();
+      return;
+    }
+    if (status === "connected") {
+      const hadReconnectNotice = this.activeTurnReconnectNoticeShown;
+      this.clearActiveTurnReconnectTimer();
+      this.activeTurnReconnectNoticeShown = false;
+      if (hadReconnectNotice) {
+        this.addItem(
+          addInfo(
+            this.sessionId,
+            "Connection restored. Syncing session updates from the backend.",
+            "i",
+            { view: "dim" },
+          ),
+        );
+      }
+      if (this.streamingState === StreamingState.Responding) {
+        this.noteStreamActivity();
+      }
+      return;
+    }
+    if (status === "auth_failed" || status === "message_too_big") {
+      this.failActiveTurnAfterConnectionLoss(
+        status === "auth_failed"
+          ? "Backend connection failed authentication. Stopped waiting for the current response."
+          : "Backend closed the connection because the message was too large. Stopped waiting for the current response.",
+      );
+    }
+  }
+
+  private startActiveTurnReconnectWatchdog(): void {
+    const snapshot = this.getSnapshot();
+    if (!snapshot.cancellableWork && !snapshot.pendingQuestion) {
+      return;
+    }
+    if (!this.activeTurnReconnectNoticeShown) {
+      this.activeTurnReconnectNoticeShown = true;
+      this.addItem(
+        addInfo(this.sessionId, "Connection lost. Retrying backend connection...", "!", {
+          view: "dim",
+        }),
+      );
+    }
+    if (this.activeTurnReconnectTimer) {
+      return;
+    }
+    this.activeTurnReconnectTimer = setTimeout(() => {
+      this.activeTurnReconnectTimer = null;
+      if (this.connectionStatus === "connected") {
+        return;
+      }
+      this.failActiveTurnAfterConnectionLoss(
+        "Connection lost for over 60 seconds. Stopped waiting for the current response; the backend may still finish it after reconnect.",
+      );
+    }, ACTIVE_TURN_RECONNECT_TIMEOUT_MS);
+  }
+
+  private clearActiveTurnReconnectTimer(): void {
+    if (this.activeTurnReconnectTimer) {
+      clearTimeout(this.activeTurnReconnectTimer);
+      this.activeTurnReconnectTimer = null;
+    }
+  }
+
+  private failActiveTurnAfterConnectionLoss(message: string): void {
+    this.clearActiveTurnReconnectTimer();
+    this.clearStreamStallWatchdog();
+    const snapshot = this.getSnapshot();
+    if (!snapshot.cancellableWork && !snapshot.pendingQuestion) {
+      return;
+    }
+    if (this.localPendingQuestion) {
+      this.localPendingQuestion.reject(new Error(message));
+      this.localPendingQuestion = null;
+    }
+    if (this.activeCommandRequestId) {
+      this.wsClient.cancelRequest(this.activeCommandRequestId, message);
+      this.activeCommandRequestId = null;
+    }
+    this.pendingQuestion = null;
+    this.setStreamingStateInternal(StreamingState.Idle);
+    this.streamingStateBeforeQuestion = null;
+    this.activeSubtasks.clear();
+    this.todos = [];
+    this.evolutionStatus = "idle";
+    this.clearInterruptRequested();
+    this.markRunningToolsConnectionLost();
+    this.addItem(addError(this.sessionId, message));
+  }
+
   onChange(listener: () => void): () => void {
     this.listeners.add(listener);
     return () => {
@@ -615,12 +915,15 @@ export class CliPiAppState {
       (s) => s.status !== "completed" && s.status !== "error",
     );
     // 与「Ctrl+C 强制结束当前任务」对齐：有任一进行中工作则为 true。
+    // 包含 activeCommandRequestId 以确保 /btw 等命令请求在等待响应期间
+    // 也能被 Esc 取消（WS 请求会被立即中止，避免等待超时）。
     const cancellableWork =
       isProcessing ||
       this.streamingState === StreamingState.Paused ||
       hasRunningTools ||
       hasActiveSubtasks ||
       this.evolutionStatus === "running" ||
+      this.activeCommandRequestId !== null ||
       (isTeamMode(this.mode) && isTeamWorking(this.teamMemberEvents, this.teamMessageEvents));
     return {
       connectionStatus: this.connectionStatus,
@@ -657,9 +960,10 @@ export class CliPiAppState {
       teamMessageEvents: [...this.teamMessageEvents],
       workflowRuns: this.workflowRuns.map((workflow) => ({
         ...workflow,
-        phases: workflow.phases.map((phase) => ({
+        logs: workflow.logs ? [...workflow.logs] : undefined,
+        phases: (workflow.phases ?? []).map((phase) => ({
           ...phase,
-          agents: phase.agents.map((agent) => ({
+          agents: (phase.agents ?? []).map((agent) => ({
             ...agent,
             activity: agent.activity ? [...agent.activity] : undefined,
           })),
@@ -674,6 +978,13 @@ export class CliPiAppState {
       sessionTitle: this.sessionTitle,
       statusLineText: this.statusLineText,
       memoryWarnings: [...this.memoryWarnings],
+      runningCommand: this.runningCommand,
+      streamStalled: this.streamStalled,
+      streamIdleMs:
+        this.lastStreamActivityAt === null ? null : Date.now() - this.lastStreamActivityAt,
+      currentQueryUsage: { ...this.currentQueryUsage },
+      btwOverlay: this.btwOverlay,
+      btwActive: this._btwActive,
     };
   }
 
@@ -704,6 +1015,12 @@ export class CliPiAppState {
     this.interruptRequested = false;
   }
 
+  /** Set the currently running command name (for tracking uninterruptible commands) */
+  setRunningCommand(name: string | null): void {
+    this.runningCommand = name;
+    this.emitChange();
+  }
+
   /** Check if there's a server task running (for deciding whether to send chat.interrupt) */
   hasServerTask(): boolean {
     const snapshot = this.getSnapshot();
@@ -728,6 +1045,9 @@ export class CliPiAppState {
       accentColor: snapshot.accentColor,
       updateSession: this.updateSession,
       addItem: this.addItem,
+      setBtwOverlay: this.setBtwOverlay,
+      clearBtwOverlay: this.clearBtwOverlay,
+      setBtwActive: this.setBtwActive,
       clearEntries: this.clearEntries,
       restoreHistory: this.restoreHistory,
       exitApp: () => {
@@ -741,6 +1061,7 @@ export class CliPiAppState {
       connectionStatus: snapshot.connectionStatus,
       mode: snapshot.mode,
       setMode: this.setMode,
+      markPlanEntryFromSlashCommand: this.markPlanEntryFromSlashCommand,
       setModel: this.setModel,
       setPreferredLanguage: this.setPreferredLanguage,
       setThemeName: this.setThemeName,
@@ -768,6 +1089,8 @@ export class CliPiAppState {
       getCurrentProjectDir: getCurrentProjectDir,
       getWorkspaceDir: () => getCurrentCwd() || process.cwd(),
       enterConfigEditor: undefined, // AppScreen injects the real handler when executing slash commands.
+      enterFileViewer: undefined, // AppScreen injects the real handler when executing slash commands.
+      enterDiffViewer: undefined, // AppScreen injects the real handler when executing slash commands.
       setInput: this._setInputRef ?? undefined,
       enterStatusView: undefined,
       getUsageSummary: () => this.getUsageSummary(),
@@ -778,6 +1101,7 @@ export class CliPiAppState {
         // Use cancellableWork which covers all stages: processing, running tools, subtasks, team working
         return snapshot.cancellableWork;
       },
+      setRunningCommand: (name: string | null) => this.setRunningCommand(name),
     };
   }
 
@@ -788,6 +1112,53 @@ export class CliPiAppState {
       total_output_tokens: entries.reduce((s, e) => s + e.output_tokens, 0),
       total_tokens: entries.reduce((s, e) => s + e.total_tokens, 0),
       byModel: entries,
+    };
+  }
+
+  private appendUsageDelta(usage: Record<string, unknown>, model?: string): void {
+    const key = model || "unknown";
+    const existing = this.usageByModel.get(key);
+    const inputDelta = this.safeTokenCount(usage.input_tokens);
+    const outputDelta = this.safeTokenCount(usage.output_tokens);
+    const totalDelta =
+      typeof usage.total_tokens === "number" && Number.isFinite(usage.total_tokens)
+        ? Math.max(0, usage.total_tokens)
+        : inputDelta + outputDelta;
+    const entry: ModelUsageEntry = {
+      model: key,
+      input_tokens: (existing?.input_tokens ?? 0) + inputDelta,
+      output_tokens: (existing?.output_tokens ?? 0) + outputDelta,
+      total_tokens: (existing?.total_tokens ?? 0) + totalDelta,
+    };
+    this.usageByModel.set(key, entry);
+  }
+
+  private updateCurrentUsageTokens(usage: Record<string, unknown>): void {
+    const inputDelta = this.safeTokenCount(usage.input_tokens);
+    const outputDelta = this.safeTokenCount(usage.output_tokens);
+    const totalDelta =
+      typeof usage.total_tokens === "number" && Number.isFinite(usage.total_tokens)
+        ? Math.max(0, usage.total_tokens)
+        : inputDelta + outputDelta;
+    if (inputDelta === 0 && outputDelta === 0 && totalDelta === 0) {
+      return;
+    }
+    this.currentQueryUsage = {
+      input_tokens: this.currentQueryUsage.input_tokens + inputDelta,
+      output_tokens: this.currentQueryUsage.output_tokens + outputDelta,
+      total_tokens: this.currentQueryUsage.total_tokens + totalDelta,
+    };
+  }
+
+  private safeTokenCount(value: unknown): number {
+    return typeof value === "number" && Number.isFinite(value) ? Math.max(0, value) : 0;
+  }
+
+  private resetCurrentUsageTokens(): void {
+    this.currentQueryUsage = {
+      input_tokens: 0,
+      output_tokens: 0,
+      total_tokens: 0,
     };
   }
 
@@ -892,7 +1263,7 @@ export class CliPiAppState {
   };
 
   readonly setWorkflowRuns = (workflows: WorkflowRun[]): void => {
-    this.workflowRuns = workflows;
+    this.workflowRuns = workflows.map((workflow) => normalizeWorkflowRun(workflow));
     this.emitChange();
   };
 
@@ -905,7 +1276,11 @@ export class CliPiAppState {
     this.sessionId = newId;
     this.lastVisibleUserRequest = null;
     this.usageByModel.clear();
+    this.resetCurrentUsageTokens();
     this.workflowRuns = [];
+    this.btwOverlay = null;
+    this._btwActive = false;
+    this.pendingPlanEntrySource = null;
     if (this.accentColor !== "default") {
       this.accentColor = "default";
       setCurrentAccentColor("default");
@@ -941,8 +1316,49 @@ export class CliPiAppState {
     // 用户发言后重置自动回顾状态，允许下一次空闲时触发新的回顾
     if (item.kind === "user") {
       this.autoRecapState = "idle";
+      // 用户发送新消息时自动清除 /btw overlay
+      if (this.btwOverlay !== null) {
+        this.btwOverlay = null;
+        this._btwActive = false;
+      }
     }
     this.emitChange();
+  };
+
+  /** 设置 /btw 侧问题覆盖层（独立于 transcript 渲染，不受滚动影响） */
+  readonly setBtwOverlay = (question: string, answer: string): void => {
+    this.btwOverlay = { question, answer };
+    this.emitChange();
+  };
+
+  /** 设置 BTW 活动状态（加载中或 overlay 可见），用于 Esc 优先级判断 */
+  readonly setBtwActive = (active: boolean): void => {
+    if (this._btwActive !== active) {
+      this._btwActive = active;
+      this.emitChange();
+    }
+  };
+
+  /** 清除 /btw 侧问题覆盖层 */
+  readonly clearBtwOverlay = (): void => {
+    if (this.btwOverlay !== null) {
+      this.btwOverlay = null;
+      this._btwActive = false;
+      this.emitChange();
+    }
+  };
+
+  readonly isHelpVisible = (): boolean => {
+    if (this.entries.length === 0) return false;
+    const lastEntry = this.entries[this.entries.length - 1];
+    return lastEntry?.kind === "info" && lastEntry.meta?.view === "help";
+  };
+
+  readonly dismissHelp = (): boolean => {
+    if (!this.isHelpVisible()) return false;
+    this.entries = this.entries.slice(0, -1);
+    this.emitChange();
+    return true;
   };
 
   readonly beginDeferredTranscript = (): void => {
@@ -973,7 +1389,9 @@ export class CliPiAppState {
     this.entries = [];
     this.pendingQuestion = null;
     this.lastError = null;
-    this.streamingState = StreamingState.Idle;
+    this.btwOverlay = null;
+    this._btwActive = false;
+    this.setStreamingStateInternal(StreamingState.Idle);
     this.collapsedToolGroupIds.clear();
     this.activeSubtasks.clear();
     this.todos = [];
@@ -992,14 +1410,24 @@ export class CliPiAppState {
     this.harnessActivateInteraction = null;
     this.deferTranscriptFrames = false;
     this.deferredTranscriptFrames = [];
+    this.clearActiveTurnReconnectTimer();
+    this.activeTurnReconnectNoticeShown = false;
+    this.clearStreamStallWatchdog();
     this.emitChange();
   };
 
   readonly setMode = (mode: ClientMode): void => {
+    if (!isPlanClientMode(mode)) {
+      this.pendingPlanEntrySource = null;
+    }
     if (this.mode !== mode) {
       this.mode = mode;
       this.emitChange();
     }
+  };
+
+  readonly markPlanEntryFromSlashCommand = (): void => {
+    this.pendingPlanEntrySource = "slash_command";
   };
 
   readonly setModel = (name: string): void => {
@@ -1015,6 +1443,11 @@ export class CliPiAppState {
       this.preferredLanguage = language;
       this.emitChange();
     }
+  };
+
+  readonly setLastError = (error: string | null): void => {
+    this.lastError = error;
+    this.emitChange();
   };
 
   readonly setThemeName = (theme: ThemeName): void => {
@@ -1093,29 +1526,37 @@ export class CliPiAppState {
   ): string | null => {
     if (this.connectionStatus !== "connected") return null;
     const mode = modeOverride ?? this.mode;
+    const planEntrySource = isPlanClientMode(mode) ? this.pendingPlanEntrySource : null;
+    const params = {
+      content,
+      query: content,
+      mode,
+      ...(attachments?.length ? { attachments } : {}),
+      ...(planEntrySource ? { plan_entry_source: planEntrySource } : {}),
+    };
     // Pre-check: reject messages whose serialized frame exceeds 7 MB (gateway
     // server max_size is 8 MB; leave 1 MB margin for JSON overhead).
-    const estimatedSize = JSON.stringify({ type: "req", method: "chat.send", params: { content, query: content, mode, ...(attachments?.length ? { attachments } : {}) } }).length;
+    const estimatedSize = JSON.stringify({ type: "req", method: "chat.send", params }).length;
     if (estimatedSize > 7 * 1024 * 1024) {
       this.addItem(addError(this.sessionId, `消息过大（约 ${Math.round(estimatedSize / 1024 / 1024)} MB），请缩短输入内容。`));
       this.emitChange();
       return null;
     }
-    if (this.streamingState !== StreamingState.Idle) {
+    // Team 模式允许在 stream 未结束时直接 chat.send，不先发 cancel interrupt。
+    if (this.streamingState !== StreamingState.Idle && !isTeamMode(mode)) {
       this.suppressInterruptResult = true;
       this.sendEventOnly("chat.interrupt", { intent: "cancel", mode: this.mode });
     }
     const requestId = this.sendEventOnly(
       "chat.send",
-      {
-        content,
-        query: content,
-        mode,
-        ...(attachments?.length ? { attachments } : {}),
-      },
+      params,
       true,
     );
+    if (planEntrySource) {
+      this.pendingPlanEntrySource = null;
+    }
     this.lastError = null;
+    this.resetCurrentUsageTokens();
     if (options?.logAsUser !== false) {
       this.lastVisibleUserRequest = { requestId, content, sessionId: this.sessionId };
       // 用户发言后重置自动回顾状态，允许下一次空闲时触发新的回顾
@@ -1133,7 +1574,7 @@ export class CliPiAppState {
     } else {
       this.lastVisibleUserRequest = null;
     }
-    this.streamingState = StreamingState.Responding;
+    this.setStreamingStateInternal(StreamingState.Responding);
     this.turnStartedAt = Date.now();
     this.emitChange();
     return requestId;
@@ -1157,6 +1598,7 @@ export class CliPiAppState {
       ...(attachments?.length ? { attachments } : {}),
     });
     this.lastError = null;
+    this.resetCurrentUsageTokens();
     // 用户发言后重置自动回顾状态（supplement 也是用户消息）
     this.autoRecapState = "idle";
     this.entries = [
@@ -1169,7 +1611,7 @@ export class CliPiAppState {
         at: new Date().toISOString(),
       },
     ];
-    this.streamingState = StreamingState.Responding;
+    this.setStreamingStateInternal(StreamingState.Responding);
     this.emitChange();
     return requestId;
   }
@@ -1190,7 +1632,7 @@ export class CliPiAppState {
       this.localPendingQuestion.reject(new Error("interrupted by Ctrl+C"));
       this.localPendingQuestion = null;
       this.pendingQuestion = null;
-      this.streamingState = StreamingState.Idle;
+      this.setStreamingStateInternal(StreamingState.Idle);
     }
     // Set local interrupt flag immediately for long-running command detection
     this.interruptRequested = true;
@@ -1237,14 +1679,47 @@ export class CliPiAppState {
       this.emitChange();
       return;
     }
+    if (isPlanApprovalRejectWithoutFeedback(this.pendingQuestion, answers)) {
+      const resumeMode = this.pendingQuestion.resumeMode ?? this.mode;
+      this.sendEventOnly("chat.send", {
+        query: "",
+        request_id: this.pendingQuestion.requestId,
+        answers: withPlanApprovalCancelFeedback(answers),
+        source: this.pendingQuestion.source,
+        mode: resumeMode,
+        plan_approval_kind: this.pendingQuestion.planApprovalKind,
+        plan_content: this.pendingQuestion.planContent ?? "",
+        plan_language: this.pendingQuestion.planLanguage ?? "cn",
+      });
+      this.pendingQuestion = null;
+      this.setStreamingStateInternal(StreamingState.Idle);
+      this.streamingStateBeforeQuestion = null;
+      this.emitChange();
+      return;
+    }
     const source = this.pendingQuestion.source;
-
-    if (
+    const approvalTransport =
+      this.pendingQuestion.evolutionMeta &&
+      typeof this.pendingQuestion.evolutionMeta.approval_transport === "string"
+        ? this.pendingQuestion.evolutionMeta.approval_transport
+        : undefined;
+    const shouldResumeInterrupt =
       source === "permission_interrupt" ||
       source === "confirm_interrupt" ||
-      source === "ask_user_interrupt"
-    ) {
+      source === "ask_user_interrupt" ||
+      source === "evolution_interrupt" ||
+      (source === "skill_evolution_approval" && approvalTransport === "interrupt");
+
+    if (shouldResumeInterrupt) {
       const resumeMode = this.pendingQuestion.resumeMode ?? this.mode;
+      const structuredPlanPayload =
+        this.pendingQuestion.planApprovalKind === "plan_approval"
+          ? {
+              plan_approval_kind: this.pendingQuestion.planApprovalKind,
+              plan_content: this.pendingQuestion.planContent ?? "",
+              plan_language: this.pendingQuestion.planLanguage ?? "cn",
+            }
+          : {};
       this.sendEventOnly(
         "chat.send",
         {
@@ -1253,10 +1728,11 @@ export class CliPiAppState {
           answers,
           source,
           mode: resumeMode,
+          ...structuredPlanPayload,
         },
         true,
       );
-      this.streamingState = StreamingState.Responding;
+      this.setStreamingStateInternal(StreamingState.Responding);
     } else {
       const params: Record<string, unknown> = {
         request_id: this.pendingQuestion.requestId,
@@ -1273,7 +1749,7 @@ export class CliPiAppState {
     }
     this.pendingQuestion = null;
     if (this.streamingState !== StreamingState.Responding) {
-      this.streamingState = StreamingState.Idle;
+      this.setStreamingStateInternal(StreamingState.Idle);
     }
     this.streamingStateBeforeQuestion = null;
     this.emitChange();
@@ -1302,7 +1778,7 @@ export class CliPiAppState {
       source,
       questions,
     };
-    this.streamingState = StreamingState.Idle;
+    this.setStreamingStateInternal(StreamingState.Idle);
     this.emitChange();
 
     return new Promise<UserAnswer[]>((resolve, reject) => {
@@ -1618,7 +2094,15 @@ export class CliPiAppState {
 
     this.entries = [...sorted];
     this.rebuildToolExecutionState();
+    this.collapseAllToolGroupsAfterRestore();
     this.emitChange();
+  }
+
+  private collapseAllToolGroupsAfterRestore(): void {
+    const ids = getToolGroupIds(this.entries, Array.from(this.toolExecutions.values()));
+    for (const id of ids) {
+      this.collapsedToolGroupIds.add(id);
+    }
   }
 
   private readonly clearToolExecutionState = (): void => {
@@ -1673,6 +2157,38 @@ export class CliPiAppState {
         ...execution.tool,
         status: "completed",
         summary: execution.tool.summary?.trim() ? execution.tool.summary : "Interrupted",
+      };
+      this.toolExecutions.set(toolCallId, {
+        ...execution,
+        tool: nextTool,
+        updatedAt: nowIso,
+      });
+      this.entries = upsertToolGroupDisplay(
+        this.entries,
+        execution.sessionId,
+        execution.requestId,
+        nextTool,
+      );
+      changed = true;
+    }
+    if (changed) {
+      this.scheduleToolTimeoutCheck();
+      this.emitChange();
+    }
+  }
+
+  private markRunningToolsConnectionLost(): void {
+    const nowIso = new Date().toISOString();
+    let changed = false;
+    for (const [toolCallId, execution] of this.toolExecutions) {
+      if (execution.tool.status !== "running") {
+        continue;
+      }
+      const nextTool: ToolCallDisplay = {
+        ...execution.tool,
+        status: "error",
+        isError: true,
+        summary: execution.tool.summary?.trim() ? execution.tool.summary : "Connection lost",
       };
       this.toolExecutions.set(toolCallId, {
         ...execution,
@@ -1971,8 +2487,16 @@ export class CliPiAppState {
     ) {
       return null;
     }
-    if (status === "in_progress" || status === "completed" || status === "pending") {
+    if (
+      status === "in_progress" ||
+      status === "completed" ||
+      status === "pending" ||
+      status === "error"
+    ) {
       return status;
+    }
+    if (status === "failed") {
+      return "error";
     }
     return undefined;
   }
@@ -2072,6 +2596,9 @@ export class CliPiAppState {
   }
 
   private startAutoRecapTimer(): void {
+    if (this.autoRecapTimer) {
+      return; // 防止重复启动导致 timer 泄漏
+    }
     this.autoRecapTimer = setInterval(() => {
       this.checkAutoRecap();
     }, AUTO_RECAP_CHECK_INTERVAL_MS);
@@ -2101,6 +2628,10 @@ export class CliPiAppState {
     }
     // 条件4：WebSocket 已连接
     if (this.connectionStatus !== "connected") {
+      return;
+    }
+    // 条件5：对话中至少要有用户或助手的消息可回顾（排除 command_echo / info 等系统条目）
+    if (!this.entries.some((e) => e.kind === "user" || e.kind === "assistant")) {
       return;
     }
 
@@ -2268,6 +2799,9 @@ export class CliPiAppState {
       return;
     }
     const typedFrame = frame as EventFrame;
+    if (this.frameBelongsToActiveSession(typedFrame) && this.isStreamProgressFrame(typedFrame)) {
+      this.noteStreamActivity();
+    }
     if (this.shouldDeferTranscriptFrame(typedFrame)) {
       this.deferredTranscriptFrames.push(typedFrame);
       return;

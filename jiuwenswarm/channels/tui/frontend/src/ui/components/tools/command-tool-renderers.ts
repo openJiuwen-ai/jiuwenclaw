@@ -19,6 +19,14 @@ import {
   toolStateColor,
 } from "./tool-render-shared.js";
 
+function firstNonEmptyLines(...values: unknown[]): string[] {
+  for (const value of values) {
+    const lines = nonEmptyLines(value);
+    if (lines.length > 0) return lines;
+  }
+  return [];
+}
+
 export function renderRunTool(
   tool: ToolCallDisplay,
   width: number,
@@ -50,41 +58,40 @@ export function renderRunTool(
     const exitCode =
       getNumericArg(payload ?? {}, "exit_code", "exitCode", "code") ??
       getNumericArg(args, "exit_code", "exitCode", "code");
-    const stdoutLines =
-      nonEmptyLines(payload?.stdout) ||
-      nonEmptyLines(payload?.output) ||
-      nonEmptyLines(payload?.content) ||
-      nonEmptyLines(payload?.result);
+    const stdoutLines = firstNonEmptyLines(
+      payload?.stdout,
+      payload?.output,
+      payload?.content,
+      payload?.result,
+    );
     const stderrLines = nonEmptyLines(payload?.stderr);
 
     const summaryParts: string[] = [];
     if (exitCode !== undefined) {
       summaryParts.push(`exit ${exitCode}`);
     }
-    if (stdoutLines.length > 0) {
-      summaryParts.push(`${stdoutLines.length} line${stdoutLines.length === 1 ? "" : "s"}`);
-    } else if (stderrLines.length > 0) {
-      summaryParts.push(`${stderrLines.length} stderr line${stderrLines.length === 1 ? "" : "s"}`);
+    const outputLines = stdoutLines.length > 0 || stderrLines.length > 0;
+    const summaryText = tool.summary ?? summaryParts.join(" | ");
+    if (summaryText || !outputLines) {
+      lines.push(
+        ...renderToolTail(
+          width,
+          summaryText || summarize(tool.result, 120),
+          toolStateColor(tool),
+        ),
+      );
     }
 
-    lines.push(
-      ...renderToolTail(
-        width,
-        tool.summary ?? (summaryParts.join(" | ") || summarize(tool.result, 120)),
-        toolStateColor(tool),
-      ),
-    );
-
-    if (stdoutLines.length > 0 || stderrLines.length > 0) {
+    if (outputLines) {
       if (tool.isError || tool.status === "timeout") {
         lines.push(
           ...renderPreviewLines(
             width,
             stderrLines.length > 0 ? stderrLines : stdoutLines,
-            palette.status.warning,
+            tool.isError ? palette.status.error : palette.status.warning,
             4,
             2,
-            false,
+            options.showDetails,
             "lines",
           ),
         );

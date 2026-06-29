@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import heapq
+import json
 import logging
 import time
 from dataclasses import dataclass
@@ -10,7 +11,14 @@ from typing import Any, Callable
 from zoneinfo import ZoneInfo
 
 from jiuwenswarm.gateway.routing.agent_client import AgentServerClient
-from jiuwenswarm.gateway.cron.models import CronJob, CronRunState
+from jiuwenswarm.gateway.cron.models import (
+    CRON_JOB_DEFAULT_MODE,
+    CronJob,
+    CronRunState,
+    CronTargetChannel,
+    is_team_cron_mode,
+    resolve_cron_job_timeout_seconds,
+)
 from jiuwenswarm.gateway.cron.store import CronJobStore
 from jiuwenswarm.gateway.message_handler.message_handler import MessageHandler
 from jiuwenswarm.common.e2a.gateway_normalize import e2a_from_agent_fields
@@ -21,6 +29,152 @@ logger = logging.getLogger(__name__)
 
 def _now_utc_ts() -> float:
     return time.time()
+
+
+def _resolve_cron_execution_context(
+    job: CronJob,
+    *,
+    ts: str,
+    message_handler: MessageHandler | None = None,
+) -> tuple[str, str]:
+    """Resolve channel_id and session_id for team cron agent execution.
+
+    Team jobs always use an isolated ``cron_*`` session so scheduled runs start
+    fresh and are not cancelled when the creator TUI/web window closes
+    (``cancel_agent_sessions_on_disconnect``). ``job.session_id`` is kept for IM
+    push routing only.
+    """
+    _ = message_handler
+    channel_id = (job.targets or CronTargetChannel.TUI.value).strip() or CronTargetChannel.TUI.value
+    return channel_id, f"cron_{ts}_{job.id}"
+
+
+def _normalize_workflow_result_text(result: str) -> str:
+    text = result.strip()
+    prefix = "Workflow completed, result:"
+    if not text.startswith(prefix):
+        return text
+    remainder = text[len(prefix):].strip()
+    try:
+        parsed = json.loads(remainder)
+    except json.JSONDecodeError:
+        return remainder
+    if not isinstance(parsed, dict):
+        return remainder
+    for key in ("final_report", "executive_summary", "summary", "report"):
+        value = parsed.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return remainder
+
+
+def _extract_workflow_result_text(payload: dict | None) -> str | None:
+    if not isinstance(payload, dict):
+        return None
+    if str(payload.get("event_type") or "").strip() != "workflow.updated":
+        return None
+    workflow = payload.get("workflow")
+    if not isinstance(workflow, dict):
+        return None
+    status = str(workflow.get("status") or "").strip().lower()
+    if status not in ("completed", "failed"):
+        return None
+
+    summary = workflow.get("summary")
+    if isinstance(summary, str) and summary.strip():
+        return summary.strip()
+
+    result = workflow.get("result")
+    if isinstance(result, str) and result.strip():
+        return _normalize_workflow_result_text(result)
+
+    phases = workflow.get("phases")
+    if isinstance(phases, list):
+        for phase in reversed(phases):
+            if not isinstance(phase, dict):
+                continue
+            agents = phase.get("agents")
+            if not isinstance(agents, list):
+                continue
+            for agent in reversed(agents):
+                if not isinstance(agent, dict):
+                    continue
+                outcome = agent.get("outcome")
+                if isinstance(outcome, str) and outcome.strip():
+                    return outcome.strip()
+
+    if status == "failed":
+        error = workflow.get("error")
+        if error is not None:
+            return f"[cron] SwarmFlow 执行失败: {error}"
+    return None
+
+
+def _extract_text_from_stream_payload(payload: dict | None) -> str | None:
+    if not isinstance(payload, dict):
+        return None
+    event_type = str(payload.get("event_type") or "").strip()
+    if event_type == "chat.final":
+        content = payload.get("content")
+        if isinstance(content, str) and content.strip():
+            return content
+    if event_type == "chat.error":
+        error = payload.get("error")
+        if error is not None:
+            return f"[cron] 任务执行失败: {error}"
+    workflow_text = _extract_workflow_result_text(payload)
+    if workflow_text:
+        return workflow_text
+    content = payload.get("content")
+    if isinstance(content, str) and content.strip():
+        return content
+    return None
+
+
+from jiuwenswarm.common.cron_team_completion import (
+    apply_cron_team_round_event,
+    cron_team_round_should_end,
+    is_cron_leader_placeholder_text as _is_cron_leader_placeholder_text,
+    new_cron_team_round_state,
+)
+
+
+def _is_cron_team_result_insufficient(*, text: str) -> bool:
+    normalized = str(text or "").strip()
+    if not normalized:
+        return True
+    return _is_cron_leader_placeholder_text(normalized)
+
+
+def _pick_cron_team_result_text(*, leader_text: str, workflow_text: str) -> str:
+    leader = str(leader_text or "").strip()
+    workflow = str(workflow_text or "").strip()
+    if leader and not _is_cron_leader_placeholder_text(leader):
+        return leader
+    if workflow:
+        return workflow
+    return leader
+
+
+def _resolve_cron_team_timeout_result(
+    *,
+    leader_text: str,
+    workflow_text: str,
+    workflow_completed: bool,
+    timeout_min: int,
+) -> tuple[str, bool]:
+    result_text = _pick_cron_team_result_text(
+        leader_text=leader_text,
+        workflow_text=workflow_text,
+    )
+    if result_text and workflow_completed and not _is_cron_leader_placeholder_text(result_text):
+        return result_text, True
+    if result_text and not _is_cron_leader_placeholder_text(result_text):
+        return (
+            f"{result_text}\n\n[cron] 任务流超时（>{timeout_min}min），以上为已获取的结果。",
+            False,
+        )
+    return f"[cron] 任务执行超时（>{timeout_min}min）", False
 
 
 def _extract_text_from_agent_payload(payload: dict | None) -> str:
@@ -45,6 +199,16 @@ def _extract_text_from_agent_payload(payload: dict | None) -> str:
     if isinstance(text, str) and text:
         return text
     return ""
+
+
+def _format_cron_broadcast_text(*, job_name: str, text: str, is_placeholder: bool) -> str:
+    body = str(text or "").strip()
+    if not body:
+        return body
+    if is_placeholder or body.startswith("[cron]"):
+        return body
+    name = str(job_name or "").strip() or "cron"
+    return f"{name} result:\n\n{body}"
 
 
 def _cron_next_push_dt(cron_expr: str, base_dt: datetime) -> datetime:
@@ -115,9 +279,13 @@ class CronSchedulerService:
         self._last_store_mtime = self._get_store_mtime()
 
     async def _check_store_changed(self) -> bool:
-        """If cron_jobs.json was modified externally, reload and return True."""
+        """If cron_jobs.json was modified or deleted externally, reload and return True."""
         mtime = self._get_store_mtime()
-        if mtime and mtime != self._last_store_mtime and self._last_store_mtime != 0.0:
+        # Detect: file modified (mtime changed, both nonzero),
+        #         file deleted (mtime became 0.0 from nonzero),
+        #         file recreated (mtime became nonzero from 0.0).
+        # Skip: no change (mtime == last), or both 0.0 (never had a file).
+        if mtime != self._last_store_mtime and (mtime or self._last_store_mtime):
             logger.info(
                 "[Cron] store file changed (mtime %.3f -> %.3f), reloading",
                 self._last_store_mtime,
@@ -129,6 +297,42 @@ class CronSchedulerService:
 
     def is_running(self) -> bool:
         return self._running
+
+    async def _cancel_agent_session(self, state: CronRunState) -> None:
+        """Fire-and-forget: 向 AgentServer 发送 CHAT_CANCEL 中断请求。
+
+        当 cron_jobs.json 被删除或 job 被移除后，gateway 的 asyncio Task
+        被 task.cancel() 取消，但这只终止了 gateway 端等待响应的协程。
+        AgentServer 不知道请求已被取消，会继续执行 LLM 调用。此方法
+        主动发送中断请求，让后端也停止处理，彻底消灭"幽灵任务"。
+        """
+        try:
+            interrupt_env = e2a_from_agent_fields(
+                request_id=f"cron-cancel-{state.run_id}",
+                channel_id="__cron__",
+                session_id=f"cron_{state.job_id}",
+                req_method=ReqMethod.CHAT_CANCEL,
+                params={"cron": {"job_id": state.job_id, "run_id": state.run_id}},
+                is_stream=False,
+                timestamp=self._now_fn(),
+            )
+            await self._agent_client.send_request(interrupt_env)
+            logger.info(
+                "[Cron] AgentServer interrupt sent for ghost task: "
+                "job_id=%s run_id=%s",
+                state.job_id,
+                state.run_id,
+            )
+        except (OSError, RuntimeError) as exc:
+            # Fire-and-forget: 网络断开、连接超时或 AgentServer 不可达
+            # 都不影响主流程，只是最佳努力的中断
+            logger.warning(
+                "[Cron] AgentServer interrupt failed for ghost task "
+                "(non-critical): job_id=%s run_id=%s error=%s",
+                state.job_id,
+                state.run_id,
+                exc,
+            )
 
     async def start(self) -> None:
         if self._running:
@@ -155,19 +359,58 @@ class CronSchedulerService:
         logger.info("[Cron] scheduler stopped")
 
     async def reload(self) -> None:
-        """Reload jobs from store and rebuild the event queue."""
+        """Reload jobs from store and rebuild the event queue.
+
+        When the store is empty (e.g. cron_jobs.json was deleted externally),
+        all in-memory running tasks for jobs that no longer exist in the store
+        are cancelled and their state cleaned up, preventing "ghost" tasks that
+        continue executing and pushing results despite having no persistent record.
+        """
         jobs = await self._store.list_jobs()
         self._jobs = {j.id: j for j in jobs}
-        # 保留飞行中的 push_update 事件（单次任务 push 后即 disabled，但补发结果还未完成）
+        new_job_ids = set(self._jobs.keys())
+
+        # 保留飞行中的 push_update 事件，但仅限于仍存在于 store 中的 job。
+        # 不存在的 job 的 push_update 不应继续推送：store 已无记录意味着
+        # 用户已明确删除了这些任务（或删除了整个文件），它们的运行结果
+        # 也应该中止，否则会形成"幽灵任务"——/cron 显示无任务但后台仍在推送。
         pending_push_updates = [
             (at_ts, seq, ev)
             for at_ts, seq, ev in self._events
-            if ev.kind == "push_update"
+            if ev.kind == "push_update" and ev.job_id in new_job_ids
         ]
         self._events.clear()
         self._seq = 0
         for item in pending_push_updates:
             heapq.heappush(self._events, item)
+
+        # 取消并清理不再存在于 store 中的运行任务（ghost tasks）。
+        # 这些 task 的 job 已经没有持久化记录了，继续运行只会产生
+        # 无法被用户管理（无 job_id 可删除）的后台任务。
+        # 同时向 AgentServer 发送 CHAT_CANCEL 中断请求，否则
+        # task.cancel() 只取消 gateway 端的等待协程，AgentServer
+        # 仍会继续执行 LLM 请求（用户看到的"后台还在派发"现象）。
+        ghost_run_ids = [
+            rid for rid, state in self._runs.items()
+            if state.job_id not in new_job_ids
+        ]
+        for rid in ghost_run_ids:
+            state = self._runs[rid]
+            task = self._run_tasks.pop(rid, None)
+            if task is not None and not task.done():
+                logger.info(
+                    "[Cron] cancelling ghost run task: job_id=%s run_id=%s "
+                    "(job no longer in store)",
+                    state.job_id,
+                    rid,
+                )
+                task.cancel()
+                # 向 AgentServer 发送 fire-and-forget 中断请求，让后端真正停止 LLM 处理
+                asyncio.create_task(
+                    self._cancel_agent_session(state),
+                    name=f"cron-ghost-cancel-{state.job_id}",
+                )
+            self._runs.pop(rid, None)
 
         now = self._now_fn()
         for job in jobs:
@@ -283,7 +526,36 @@ class CronSchedulerService:
         job = self._jobs.get(ev.job_id)
         if job is None and ev.kind != "push_update":
             return
+        # For wake/push/push_update events: if the job no longer exists in the
+        # persistent store (e.g. cron_jobs.json was deleted), skip execution.
+        # This prevents "ghost tasks" — tasks that continue running and pushing
+        # results even though the user sees no tasks in /cron and has no job_id
+        # to manage or delete them.
+        # Note: push_update was previously exempted to deliver already-computed
+        # results, but that exemption creates the ghost task problem. When the
+        # store is gone, the job is gone, and its results should not be pushed.
+        store_job = await self._store.get_job(ev.job_id)
+        if store_job is None:
+            # If job was in memory but not in store, reload to clear stale data
+            if ev.kind in ("wake", "push") and job is not None:
+                logger.info(
+                    "[Cron] job %s no longer in store (file may have been deleted), "
+                    "skipping event %s and triggering reload",
+                    ev.job_id, ev.kind,
+                )
+                await self.reload()
+            elif ev.kind == "push_update":
+                logger.info(
+                    "[Cron] push_update skipped: job %s no longer in store "
+                    "(file may have been deleted), skipping ghost push job_id=%s run_id=%s",
+                    ev.job_id, ev.job_id, ev.run_id,
+                )
+            return
         if job is None and ev.kind == "push_update":
+            # Job not in _jobs but still in store (e.g. disabled/expired job):
+            # rebuild from state for routing purposes. This is legitimate —
+            # push_update for a disabled one-shot job that's still in the store
+            # must still deliver its result.
             state = self._runs.get(ev.run_id)
             if state is None:
                 logger.info("[Cron] push_update skipped: no state and no job job_id=%s run_id=%s", ev.job_id, ev.run_id)
@@ -372,78 +644,287 @@ class CronSchedulerService:
             state.started_at = self._now_fn()
             try:
                 ts = format(int(time.time() * 1000), "x")
+                mode = str(job.mode or CRON_JOB_DEFAULT_MODE).strip() or CRON_JOB_DEFAULT_MODE
+                if is_team_cron_mode(mode):
+                    channel_id, exec_session_id = _resolve_cron_execution_context(
+                        job,
+                        ts=ts,
+                        message_handler=self._message_handler,
+                    )
+                else:
+                    channel_id = "__cron__"
+                    exec_session_id = f"cron_{ts}_{job.id}"
+                cron_meta = {
+                    "job_id": job.id,
+                    "job_name": job.name,
+                    "run_id": run_id,
+                    "push_at": state.push_at_iso,
+                    "wake_at": state.wake_at_iso,
+                }
                 envelope = e2a_from_agent_fields(
                     request_id=f"cron-{run_id}",
-                    channel_id="__cron__",
-                    session_id=f"cron_{ts}_{job.id}",
+                    channel_id=channel_id,
+                    session_id=exec_session_id,
                     req_method=ReqMethod.CHAT_SEND,
                     params={
                         "content": job.description,
                         "query": job.description,
-                        "mode": job.mode or "agent",
-                        "cron": {
-                            "job_id": job.id,
-                            "job_name": job.name,
-                            "run_id": run_id,
-                            "push_at": state.push_at_iso,
-                            "wake_at": state.wake_at_iso,
-                        },
+                        "mode": mode,
+                        "cron": cron_meta,
                     },
-                    is_stream=False,
+                    is_stream=is_team_cron_mode(mode),
                     timestamp=self._now_fn(),
                     metadata={"cron": {"job_id": job.id, "run_id": run_id}},
                 )
-                resp = await self._agent_client.send_request(envelope)
-                text = _extract_text_from_agent_payload(resp.payload)
+                if is_team_cron_mode(mode):
+                    timeout_seconds = resolve_cron_job_timeout_seconds(job)
+                    text, ok = await self._run_team_stream_job(
+                        envelope=envelope,
+                        exec_session_id=exec_session_id,
+                        cron_meta=cron_meta,
+                        timeout_seconds=timeout_seconds,
+                    )
+                else:
+                    envelope.is_stream = False
+                    timeout_seconds = resolve_cron_job_timeout_seconds(job)
+                    text, ok = await self._run_unary_cron_job(
+                        envelope=envelope,
+                        timeout_seconds=timeout_seconds,
+                    )
                 if not text:
                     text = "[cron] 任务完成，但未返回可展示文本"
                 state.result_text = text
-                state.status = "succeeded" if resp.ok else "failed"
+                state.status = "succeeded" if ok else "failed"
             except asyncio.CancelledError:
                 state.status = "failed"
                 state.error = "cancelled"
+                # Ghost task: cancelled by reload because job no longer in store.
+                # Do NOT schedule push_update — the user has removed this job and
+                # should not see any result from it. Raising CancelledError here
+                # so the finally block can detect it via state.error == "cancelled"
+                # and skip push_update scheduling.
                 raise
             except Exception as exc:  # noqa: BLE001
                 state.status = "failed"
                 state.error = str(exc)
             finally:
                 state.finished_at = self._now_fn()
-                # Ensure failed runs also produce result_text so push logic can deliver it
-                if not state.result_text and state.error:
+                is_cancelled_ghost = state.error == "cancelled"
+                should_deliver_result = bool(state.result_text) and not is_cancelled_ghost
+                # Ensure failed runs also produce result_text so push logic can deliver it.
+                # But for cancelled ghost tasks, skip — no result should be pushed for
+                # a job the user has removed.
+                if not state.result_text and state.error and not is_cancelled_ghost:
                     state.result_text = f"[cron] 任务执行失败: {state.error}"
-                # if placeholder already sent, push update immediately
-                if state.placeholder_sent and not state.pushed_final and state.result_text:
+                if not state.pushed_final and state.result_text and not is_cancelled_ghost:
                     logger.info(
-                        "[Cron] scheduling immediate push_update after agent finished "
+                        "[Cron] scheduling push_update after agent finished "
                         "job=%s run_id=%s text_len=%d",
                         job.id,
                         run_id,
                         len(state.result_text or ""),
                     )
+                    push_dt = datetime.fromisoformat(state.push_at_iso)
+                    now_dt = datetime.fromtimestamp(self._now_fn(), tz=ZoneInfo(job.timezone))
+                    scheduled_dt = max(now_dt, push_dt)
                     self._schedule_event(
-                        datetime.fromtimestamp(self._now_fn(), tz=ZoneInfo(job.timezone)),
+                        scheduled_dt,
                         "push_update", job.id, run_id,
                     )
-                # if push time already passed, also try to push update
-                try:
-                    push_dt = datetime.fromisoformat(state.push_at_iso)
-                    if push_dt.timestamp() <= self._now_fn() and not state.pushed_final and state.result_text:
-                        logger.info(
-                            "[Cron] scheduling late push_update because push_at<=now "
-                            "job=%s run_id=%s text_len=%d",
-                            job.id,
-                            run_id,
-                            len(state.result_text or ""),
-                        )
-                        self._schedule_event(
-                            datetime.fromtimestamp(self._now_fn(), tz=ZoneInfo(job.timezone)),
-                            "push_update", job.id, run_id,
-                        )
-                except Exception:
-                    pass
 
         task = asyncio.create_task(_run_agent(), name=f"cron-run-{job.id}")
         self._run_tasks[run_id] = task
+
+    async def _cancel_cron_team_agent_session(
+        self,
+        *,
+        envelope: Any,
+        exec_session_id: str,
+        mode: str = "team",
+    ) -> None:
+        """Stop lingering AgentServer team work after cron stream ends or times out."""
+        cancel_fn = getattr(self._message_handler, "_cancel_agent_work_for_session", None)
+        if not callable(cancel_fn):
+            logger.warning(
+                "[Cron] cannot cancel team agent: message_handler missing "
+                "_cancel_agent_work_for_session request_id=%s",
+                getattr(envelope, "request_id", ""),
+            )
+            return
+        channel_id = str(
+            getattr(envelope, "channel", None)
+            or getattr(envelope, "channel_id", None)
+            or ""
+        ).strip()
+        cancel_msg = Message(
+            id=f"cron-cancel-{getattr(envelope, 'request_id', '')}",
+            type="req",
+            channel_id=channel_id,
+            session_id=exec_session_id,
+            params={
+                "intent": "cancel",
+                "mode": mode,
+                "session_id": exec_session_id,
+            },
+            req_method=ReqMethod.CHAT_CANCEL,
+            timestamp=self._now_fn(),
+            ok=True,
+        )
+        try:
+            await cancel_fn(
+                cancel_msg,
+                exec_session_id,
+                publish_interrupt_result=False,
+                channel_id=channel_id or None,
+                cancel_gateway_tasks=False,
+            )
+            logger.info(
+                "[Cron] cancelled team agent session request_id=%s session_id=%s",
+                getattr(envelope, "request_id", ""),
+                exec_session_id,
+            )
+        except (OSError, RuntimeError, ValueError) as exc:
+            logger.warning(
+                "[Cron] failed to cancel team agent session request_id=%s session_id=%s error=%s",
+                getattr(envelope, "request_id", ""),
+                exec_session_id,
+                exc,
+            )
+
+    async def _run_unary_cron_job(
+        self,
+        *,
+        envelope: Any,
+        timeout_seconds: float,
+    ) -> tuple[str, bool]:
+        try:
+            resp = await asyncio.wait_for(
+                self._agent_client.send_request(envelope),
+                timeout=timeout_seconds,
+            )
+            return _extract_text_from_agent_payload(resp.payload), bool(resp.ok)
+        except asyncio.TimeoutError:
+            timeout_min = max(1, int(timeout_seconds // 60))
+            logger.warning(
+                "[Cron] unary request timed out after %ss request_id=%s",
+                timeout_seconds,
+                getattr(envelope, "request_id", ""),
+            )
+            return f"[cron] 任务执行超时（>{timeout_min}min）", False
+
+    async def _run_team_stream_job(
+        self,
+        *,
+        envelope: Any,
+        exec_session_id: str,
+        cron_meta: dict[str, Any],
+        timeout_seconds: float,
+    ) -> tuple[str, bool]:
+        """Run a team-mode cron job via streaming so SwarmFlow events reach the TUI."""
+        request_metadata = dict(envelope.channel_context or {})
+        request_metadata.setdefault("source", "cron")
+        request_metadata.setdefault("cron", cron_meta)
+
+        round_state = new_cron_team_round_state()
+        consume_meta: dict[str, Any] = {"ok": True, "ended_early": False}
+        stream_gen = self._agent_client.send_request_stream(envelope)
+
+        async def _consume() -> tuple[str, bool]:
+            publish_chunk = getattr(self._message_handler, "publish_stream_chunk", None)
+            if publish_chunk is None:
+                logger.warning(
+                    "[Cron] message_handler.publish_stream_chunk unavailable; "
+                    "team stream chunks will not be forwarded request_id=%s",
+                    getattr(envelope, "request_id", ""),
+                )
+            try:
+                async for chunk in stream_gen:
+                    if callable(publish_chunk):
+                        await publish_chunk(
+                            chunk,
+                            session_id=exec_session_id,
+                            request_metadata=request_metadata,
+                        )
+                    payload = chunk.payload if isinstance(chunk.payload, dict) else None
+                    event_type = str((payload or {}).get("event_type") or "").strip()
+                    if payload:
+                        apply_cron_team_round_event(round_state, payload)
+                        if event_type == "chat.error":
+                            consume_meta["ok"] = False
+                        # _extract_workflow_result_text normalizes result JSON and
+                        # walks phases; run it after apply_cron_team_round_event so
+                        # the richer value wins over the plain summary fallback.
+                        if event_type == "workflow.updated":
+                            workflow_text = _extract_workflow_result_text(payload)
+                            if workflow_text:
+                                round_state["workflow_text"] = workflow_text
+                    if cron_team_round_should_end(
+                        round_state,
+                        chunk_complete=bool(chunk.is_complete),
+                    ):
+                        consume_meta["ended_early"] = not chunk.is_complete
+                        break
+            finally:
+                try:
+                    await stream_gen.aclose()
+                except Exception:
+                    pass
+
+            text = _pick_cron_team_result_text(
+                leader_text=str(round_state.get("leader_text") or ""),
+                workflow_text=str(round_state.get("workflow_text") or ""),
+            )
+            if _is_cron_team_result_insufficient(text=text):
+                return "[cron] 定时任务未产生有效报告", False
+            return text, bool(consume_meta["ok"])
+
+        try:
+            text, ok = await asyncio.wait_for(
+                _consume(),
+                timeout=timeout_seconds,
+            )
+            if consume_meta.get("ended_early"):
+                await self._cancel_cron_team_agent_session(
+                    envelope=envelope,
+                    exec_session_id=exec_session_id,
+                )
+            return text, ok
+        except asyncio.TimeoutError:
+            logger.warning(
+                "[Cron] team stream timed out after %ss request_id=%s",
+                timeout_seconds,
+                getattr(envelope, "request_id", ""),
+            )
+            try:
+                await stream_gen.aclose()
+            except Exception:
+                pass
+            await self._cancel_cron_team_agent_session(
+                envelope=envelope,
+                exec_session_id=exec_session_id,
+            )
+            timeout_min = max(1, int(timeout_seconds // 60))
+            return _resolve_cron_team_timeout_result(
+                leader_text=str(round_state.get("leader_text") or ""),
+                workflow_text=str(round_state.get("workflow_text") or ""),
+                workflow_completed=bool(round_state.get("workflow_completed")),
+                timeout_min=timeout_min,
+            )
+        except Exception:
+            logger.warning(
+                "[Cron] team stream failed request_id=%s",
+                getattr(envelope, "request_id", ""),
+                exc_info=True,
+            )
+            try:
+                await stream_gen.aclose()
+            except Exception:
+                pass
+            await self._cancel_cron_team_agent_session(
+                envelope=envelope,
+                exec_session_id=exec_session_id,
+            )
+            raise
 
     async def _on_push(self, job: CronJob, run_id: str) -> None:
         state = self._runs.get(run_id)
@@ -477,7 +958,7 @@ class CronSchedulerService:
             return
 
         # Not ready: send placeholder
-        placeholder = f"[cron] {job.name} 正在执行中，结果稍后补发（push_at={state.push_at_iso}）"
+        placeholder = f"{job.name} 正在执行中，结果稍后补发（push_at={state.push_at_iso}）"
         await self._push_to_targets(job, state, text=placeholder, is_placeholder=True)
         state.placeholder_sent = True
 
@@ -512,8 +993,13 @@ class CronSchedulerService:
             len(text or ""),
             state.status,
         )
+        broadcast_text = _format_cron_broadcast_text(
+            job_name=job.name,
+            text=text,
+            is_placeholder=is_placeholder,
+        )
         payload_extra = {
-            "content": text,
+            "content": broadcast_text,
             "cron": {
                 "job_id": job.id,
                 "job_name": job.name,

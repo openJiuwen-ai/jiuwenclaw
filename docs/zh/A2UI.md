@@ -38,7 +38,7 @@ A2UI 是 JiuwenSwarm 的可选生成式界面能力，目前仅 Web channel 原�
 
 ```yaml
 a2ui:
-  enabled: true
+  enabled: false
   protocol_version: "0.8"
   stream_validation_enabled: true
   non_web_fallback_enabled: false
@@ -49,6 +49,8 @@ a2ui:
 - Web 配置页：`A2UI` 顶层开关。
 - 用户工作区配置：修改 `config.yaml` 中的 `a2ui.enabled`。
 - 环境变量：`JIUWENSWARM_A2UI_ENABLED=false` 或 `true`。
+
+A2UI 默认关闭，需要显式开启后才会向 Web channel 注入 A2UI prompt 并执行 response finalizer。
 
 `non_web_fallback_enabled` 是兼容旧配置的保留字段；当前 A2UI 为 Web-only，非 Web channel 始终 bypass A2UI。
 

@@ -10,17 +10,16 @@ from copy import deepcopy
 from pathlib import Path
 from typing import Any, Optional
 
-import yaml
-
-logger = logging.getLogger(__name__)
 from ruamel.yaml import YAML
 from ruamel.yaml.scalarstring import DoubleQuotedScalarString
+import yaml
 
 from jiuwenswarm.common.utils import get_config_dir, get_config_file
 
+logger = logging.getLogger(__name__)
+
 _CONFIG_MODULE_DIR = Path(__file__).parent
 CONFIG_YAML_PATH = get_config_file()
-
 # Check if user workspace exists and use it if configured via env
 _user_config = os.getenv("JIUWENSWARM_CONFIG_DIR")
 if _user_config:
@@ -122,6 +121,79 @@ def get_config_raw():
 def set_config(config):
     with open(CONFIG_YAML_PATH, "w", encoding="utf-8") as f:
         yaml.safe_dump(config, f, allow_unicode=True, sort_keys=False)
+
+
+def is_auto_memory_enabled() -> bool:
+    """Check if auto-memory feature is enabled in config.
+
+    Returns:
+        True if auto_memory_enabled is True in config.yaml, False otherwise.
+        Defaults to True if not configured.
+    """
+    try:
+        config = get_config()
+        return bool(config.get("auto_memory_enabled", False))
+    except Exception:
+        # Default to True if config cannot be read
+        return True
+
+
+def _get_bool_env(value: str | None) -> bool | None:
+    if value is None:
+        return None
+    return value.lower() in ("true", "1", "yes")
+
+
+def _get_evolution_config(config: dict[str, Any] | None) -> dict[str, Any]:
+    if not isinstance(config, dict):
+        return {}
+    react_config = config.get("react")
+    if isinstance(react_config, dict) and isinstance(react_config.get("evolution"), dict):
+        return react_config["evolution"]
+    evolution_config = config.get("evolution")
+    if isinstance(evolution_config, dict):
+        return evolution_config
+    return {}
+
+
+def get_evolution_auto_scan_enabled(config: dict[str, Any] | None) -> bool:
+    env_auto_scan = _get_bool_env(os.getenv("EVOLUTION_AUTO_SCAN"))
+    if env_auto_scan is not None:
+        return env_auto_scan
+    return _get_evolution_config(config).get("auto_scan", False)
+
+
+def get_skill_create_enabled(config: dict[str, Any] | None) -> bool:
+    env_skill_create = _get_bool_env(os.getenv("SKILL_CREATE"))
+    if env_skill_create is not None:
+        return env_skill_create
+    return _get_evolution_config(config).get("skill_create", False)
+
+
+def get_evolution_auto_save_enabled(config: dict[str, Any] | None = None) -> bool:
+    """Return whether evolution approvals may auto-save without user action."""
+    try:
+        env_auto_save = _get_bool_env(os.getenv("EVOLUTION_AUTO_SAVE"))
+        if env_auto_save is not None:
+            return env_auto_save
+        if config is None:
+            config = get_config()
+        if not isinstance(config, dict):
+            return False
+        return _get_evolution_config(config).get("auto_save") is True
+    except Exception:
+        return False
+
+
+def set_auto_memory_enabled(enabled: bool) -> None:
+    """Set auto-memory enabled status in config.
+
+    Args:
+        enabled: True to enable, False to disable.
+    """
+    data = load_yaml_round_trip(CONFIG_YAML_PATH)
+    data["auto_memory_enabled"] = enabled
+    dump_yaml_round_trip(CONFIG_YAML_PATH, data)
 
 
 def load_yaml_round_trip(config_path: Path):
@@ -257,12 +329,56 @@ def update_kv_cache_affinity_enabled_in_config(value: bool) -> None:
     dump_yaml_round_trip(CONFIG_YAML_PATH, data)
 
 
+def _merge_config_dict(target: dict[str, Any], patch: dict[str, Any]) -> None:
+    for key, value in patch.items():
+        if isinstance(value, dict):
+            child = target.get(key)
+            if not isinstance(child, dict):
+                child = {}
+                target[key] = child
+            _merge_config_dict(child, value)
+        else:
+            target[key] = value
+
+
+def update_symphony_in_config(updates: dict[str, Any]) -> None:
+    """更新 symphony 配置段并写回。"""
+    data = load_yaml_round_trip(CONFIG_YAML_PATH)
+    if "symphony" not in data or data["symphony"] is None:
+        data["symphony"] = {}
+    symphony = data["symphony"]
+    _merge_config_dict(symphony, updates)
+    dump_yaml_round_trip(CONFIG_YAML_PATH, data)
+
+
+def update_skill_retrieval_in_config(updates: dict[str, Any]) -> None:
+    """更新 symphony.skill_retrieval 配置段并写回。"""
+    data = load_yaml_round_trip(CONFIG_YAML_PATH)
+    if "symphony" not in data or data["symphony"] is None:
+        data["symphony"] = {}
+    symphony = data["symphony"]
+    if "skill_retrieval" not in symphony or symphony["skill_retrieval"] is None:
+        symphony["skill_retrieval"] = {}
+    section = symphony["skill_retrieval"]
+    _merge_config_dict(section, updates)
+    dump_yaml_round_trip(CONFIG_YAML_PATH, data)
+
+
 def update_permissions_enabled_in_config(value: bool) -> None:
     """更新 permissions.enabled（工具安全护栏开关）并写回。"""
     data = load_yaml_round_trip(CONFIG_YAML_PATH)
     if "permissions" not in data:
         data["permissions"] = {}
     data["permissions"]["enabled"] = value
+    dump_yaml_round_trip(CONFIG_YAML_PATH, data)
+
+
+def update_auto_recap_enabled_in_config(value: bool) -> None:
+    """更新 auto_recap.enabled（自动回顾开关）并写回。"""
+    data = load_yaml_round_trip(CONFIG_YAML_PATH)
+    if "auto_recap" not in data:
+        data["auto_recap"] = {}
+    data["auto_recap"]["enabled"] = value
     dump_yaml_round_trip(CONFIG_YAML_PATH, data)
 
 
@@ -1440,6 +1556,7 @@ def get_model_config(name: str, index: int | None = None) -> dict[str, Any] | No
 #     files: { allow: [...], deny: [...] }
 #     idle_ttl_seconds: 600         # 可选, 默认 None = 不进行 idle 驱逐
 #     idle_check_interval: 60       # 可选, 默认 None = 让 jiuwenbox 端用自身默认值
+#     fallback_on_failure: false    # jiuwenbox exec 异常时回退本地 (见 agent-core jiuwenbox provider)
 #
 # ``get_sandbox_runtime`` 把这些 key 读出来填默认值;
 # ``update_sandbox_runtime`` 写回时也只动这几个 key, 不动 endpoint 字段。
@@ -1456,6 +1573,7 @@ _SANDBOX_RUNTIME_DEFAULTS: dict[str, Any] = {
     "files": {"allow": [], "deny": []},
     "idle_ttl_seconds": None,
     "idle_check_interval": None,
+    "fallback_on_failure": False,
 }
 
 # 受 ``get_sandbox_runtime`` / ``update_sandbox_runtime`` 管辖的 sandbox 字段。
@@ -1511,6 +1629,8 @@ def _ensure_sandbox_runtime_shape(runtime: Any) -> dict[str, Any]:
     out = dict(base)
     if "enabled" in runtime:
         out["enabled"] = bool(runtime["enabled"])
+    if "fallback_on_failure" in runtime:
+        out["fallback_on_failure"] = bool(runtime["fallback_on_failure"])
     raw_excluded = runtime.get("excluded_commands")
     if isinstance(raw_excluded, list):
         out["excluded_commands"] = [
@@ -1877,7 +1997,8 @@ def update_sandbox_runtime(patch: dict[str, Any]) -> dict[str, Any]:
 
     Args:
         patch: 部分字段更新；支持顶层键 ``enabled`` / ``excluded_commands``
-            / ``files`` / ``idle_ttl_seconds`` / ``idle_check_interval``。
+            / ``files`` / ``idle_ttl_seconds`` / ``idle_check_interval``
+            / ``fallback_on_failure``。
             ``files`` 字典若提供则整体替换；其余键按值合并。 ``idle_*`` 字段
             接受整数秒数 (``<= 0`` 归一化为 ``None`` = 禁用淘汰) 或 ``None``。
     """
@@ -1889,6 +2010,8 @@ def update_sandbox_runtime(patch: dict[str, Any]) -> dict[str, Any]:
 
     if "enabled" in patch:
         merged["enabled"] = bool(patch["enabled"])
+    if "fallback_on_failure" in patch:
+        merged["fallback_on_failure"] = bool(patch["fallback_on_failure"])
     if "excluded_commands" in patch:
         value = patch["excluded_commands"]
         if not isinstance(value, list):

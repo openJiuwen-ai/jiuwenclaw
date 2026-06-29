@@ -1,6 +1,7 @@
 import { Message, MessageRole, UsageSummary, FileDownloadItem, WsEvent } from '../types';
 import { webClient } from '../services/webClient';
 import { normalizeFinalContent } from '../utils/finalContent';
+import { isA2UIClientEventContent } from './a2ui/a2uiContent';
 
 export const HISTORY_GET_METHOD = 'history.get';
 export const HISTORY_MESSAGE_EVENT = 'history.message';
@@ -253,7 +254,11 @@ function parseHistoryTimelineEntry(
   const at = recordTimestampIso(record);
 
   if (role === 'user') {
-    const content = pickFirstString(record, ['content', 'text', 'body']) ?? '';
+    const rawContent = record.content ?? record.text ?? record.body;
+    if (isA2UIClientEventContent(rawContent)) {
+      return null;
+    }
+    const content = typeof rawContent === 'string' ? rawContent : String(rawContent ?? '');
     if (!content.trim()) {
       return null;
     }

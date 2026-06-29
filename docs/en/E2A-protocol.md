@@ -280,6 +280,52 @@ After parse: `channel`=`feishu`, `method`=`chat.send`, `timestamp` normalized to
 
 After `merge_params_to_acp_prompt`, `params` gains a `prompt` equivalent to `content_blocks` if there was no `prompt` before.
 
+### 11.6 `session/prompt` + per-request `workspace_dir`
+
+External clients (IDE plugins, headless evaluators, MCP drivers) can
+scope one prompt's filesystem root to a per-invocation directory by
+passing `workspace_dir` in `params`. The AgentServer resolves the path,
+creates it on demand (`mkdir -p`), and threads the absolute path through
+to `init_cwd(cwd=workspace_dir, workspace=workspace_dir)` so openjiuwen's
+per-task `CwdState` ContextVar is reseeded for the duration of the
+prompt. Both layers get the override:
+
+- **`get_cwd()`** returns the scratch dir, so tools resolving relative
+  paths land there.
+- **`get_workspace()`** also returns the scratch dir, so
+  `fs_operation`'s sandbox enforcement (which gates absolute-path writes
+  by workspace membership) accepts writes anywhere under it.
+
+Memory files, `.workspace`, and other artifact-root consumers therefore
+land under the scratch dir for that request — useful for hermetic
+evaluators that want one fresh slate per task. Long-lived agents whose
+memory must persist should *not* pass `workspace_dir`; they fall back to
+the agent's instance-level workspace as before.
+
+Precedence and behavior:
+
+- **Precedence:** when `workspace_dir` is set and `mkdir` succeeds, it
+  wins over `params.cwd`. When `workspace_dir` is set but `mkdir` fails
+  (e.g. permission denied), the request degrades to `params.cwd` (if
+  any), then to the agent's global default; a warning is logged.
+- **Path form:** absolute paths are recommended. Relative paths are
+  resolved against the AgentServer process cwd, not the client's.
+
+```json
+{
+  "method": "session/prompt",
+  "session_id": "s1",
+  "jsonrpc_id": 1,
+  "params": {
+    "content": "Create the project under datautils-project/",
+    "workspace_dir": "/tmp/eval-task-42"
+  }
+}
+```
+
+`jiuwenswarm-tui` (the ACP stdio bridge) exposes this as
+`--workspace-dir <path>`.
+
 ---
 
 ## 12. E2A response protocol (`E2AResponse`)
@@ -375,6 +421,21 @@ Runtime list: **`constants.E2A_RESPONSE_KINDS`**; **`body`** is a **dict**. Norm
 ```
 
 Cross-reference: request log normalization in **`E2A-AgentRequest-log-migration.md`**; response logging can adopt the same single-line JSON convention later.
+
+### 12.9 Streaming `chat.error` carries `error_type`
+
+When the inner agent loop raises, the streaming aggregator emits a
+`chat.error` event whose payload carries the originating exception class.
+Consumers can group failures structurally instead of regexing the message
+string.
+
+```json
+{"event_type":"chat.error","error":"rate limited (429)","error_type":"RateLimitError"}
+```
+
+The same `error_type` field appears at the top level of the persisted
+`history.json` record. Cancellation (`asyncio.CancelledError`) propagates
+as cancellation rather than being classified as a `chat.error`.
 
 ---
 

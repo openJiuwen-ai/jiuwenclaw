@@ -3,6 +3,7 @@ import { useTranslation } from 'react-i18next';
 import { FileViewer } from '../AgentPanel/FileViewer';
 import { webRequest } from '../../services/webClient';
 import { containsIgnoredDirectory } from '../../features/fileTreeFilters';
+import { isHistoryPreviewFile } from '../../features/historyFilePreview';
 
 interface SessionListResponse {
   sessions?: unknown[];
@@ -30,7 +31,7 @@ function normalizePath(path: string): string {
 
 function isPreviewableFile(fileName: string): boolean {
   const lowerName = fileName.toLowerCase();
-  return lowerName.endsWith('.md') || lowerName.endsWith('.mdx') || lowerName.endsWith('.json');
+  return lowerName.endsWith('.md') || lowerName.endsWith('.mdx') || lowerName.endsWith('.json') || isHistoryPreviewFile(fileName);
 }
 
 function getParentPath(filePath: string): string {

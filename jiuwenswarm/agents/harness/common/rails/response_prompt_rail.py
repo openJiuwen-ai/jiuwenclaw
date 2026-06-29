@@ -19,6 +19,8 @@ from jiuwenswarm.agents.harness.common.prompt.prompt_builder import (
 
 logger = logging.getLogger(__name__)
 
+SKIP_A2UI_PROMPT_CONTEXT_KEY = "skip_a2ui"
+
 
 class ResponsePromptRail(DeepAgentRail):
     """Inject the response section as an independent prompt section."""
@@ -49,6 +51,8 @@ class ResponsePromptRail(DeepAgentRail):
         extra = getattr(ctx, "extra", None)
         if isinstance(extra, dict) and channel:
             extra[JIUWENSWARM_CHANNEL_CONTEXT_KEY] = channel
+        if isinstance(extra, dict) and self._should_skip_a2ui(ctx):
+            extra[SKIP_A2UI_PROMPT_CONTEXT_KEY] = True
 
     async def before_model_call(self, ctx: AgentCallbackContext) -> None:
         if self.system_prompt_builder is None:
@@ -56,7 +60,20 @@ class ResponsePromptRail(DeepAgentRail):
 
         language = self.system_prompt_builder.language or "cn"
         self.system_prompt_builder.add_section(_response_prompt(language))
-        self._sync_a2ui_prompt_section(self._resolve_channel(ctx))
+        self._sync_a2ui_prompt_section(
+            self._resolve_channel(ctx),
+            skip_a2ui=self._should_skip_a2ui(ctx),
+        )
+
+    def _should_skip_a2ui(self, ctx: AgentCallbackContext) -> bool:
+        inputs = getattr(ctx, "inputs", None)
+        if isinstance(inputs, dict) and inputs.get(SKIP_A2UI_PROMPT_CONTEXT_KEY) is True:
+            return True
+        if getattr(inputs, SKIP_A2UI_PROMPT_CONTEXT_KEY, False) is True:
+            return True
+
+        extra = getattr(ctx, "extra", None)
+        return isinstance(extra, dict) and extra.get(SKIP_A2UI_PROMPT_CONTEXT_KEY) is True
 
     def _resolve_channel(self, ctx: AgentCallbackContext) -> str | None:
         """Read the request channel from callback inputs when available."""
@@ -93,13 +110,17 @@ class ResponsePromptRail(DeepAgentRail):
 
         return None
 
-    def _sync_a2ui_prompt_section(self, channel: str | None) -> None:
+    def _sync_a2ui_prompt_section(self, channel: str | None, *, skip_a2ui: bool = False) -> None:
         """Inject or remove the A2UI prompt section from runtime config."""
         if self.system_prompt_builder is None:
             return
 
         try:
             from jiuwenswarm.server.runtime.a2ui.integration import is_a2ui_channel
+
+            if skip_a2ui:
+                self.system_prompt_builder.remove_section(LocalSectionName.A2UI)
+                return
 
             if not is_a2ui_channel(channel):
                 self.system_prompt_builder.remove_section(LocalSectionName.A2UI)

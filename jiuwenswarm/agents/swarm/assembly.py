@@ -25,17 +25,42 @@ from typing import Any
 
 from openjiuwen.agent_evolving.trajectory import InMemoryTrajectoryRegistry
 from openjiuwen.agent_teams.paths import team_home
+from openjiuwen.agent_teams.schema.deep_agent_spec import WorkspaceSpec
 
 from jiuwenswarm.agents.swarm.config_specs import build_member_deep_agent_spec
 from jiuwenswarm.agents.swarm.context import SwarmBuildContext
 from jiuwenswarm.agents.swarm.registry import register_swarm_providers
 from jiuwenswarm.common.config import get_config
+from jiuwenswarm.common.mcp_config import build_enabled_mcp_server_configs
 from jiuwenswarm.common.utils import get_agent_skills_dir
 
 logger = logging.getLogger(__name__)
 
 # Member roles enriched in place, in deterministic order.
 _MEMBER_ROLES: tuple[str, ...] = ("leader", "teammate")
+
+
+def _with_project_workspace(member_spec: Any, project_dir: str | None) -> Any:
+    """Default a member workspace to the request project directory."""
+    project_root = str(project_dir or "").strip()
+    if not project_root:
+        return member_spec
+
+    workspace = getattr(member_spec, "workspace", None)
+    if workspace is not None and str(getattr(workspace, "root_path", "") or "").strip() not in {"", "./"}:
+        return member_spec
+
+    if workspace is None:
+        workspace = WorkspaceSpec(root_path=project_root)
+    else:
+        workspace = workspace.model_copy(update={"root_path": project_root})
+    return member_spec.model_copy(update={"workspace": workspace})
+
+
+def _worktree_enabled(spec: Any) -> bool:
+    """Return whether the team spec requested managed worktree isolation."""
+    worktree = getattr(spec, "worktree", None)
+    return bool(worktree is not None and getattr(worktree, "enabled", False))
 
 
 def enrich_team_spec_for_swarm(
@@ -90,15 +115,24 @@ def enrich_team_spec_for_swarm(
         trajectory_registry=InMemoryTrajectoryRegistry(),
         config=config,
     )
+    mcp_configs = build_enabled_mcp_server_configs(
+        config,
+        server_id_scope=f"team:{spec.team_name}",
+    )
 
     for role in _MEMBER_ROLES:
         if role in spec.agents:
-            spec.agents[role] = build_member_deep_agent_spec(
+            member_spec = build_member_deep_agent_spec(
                 config,
                 mode,
                 role,
                 spec.agents[role],
+                enable_permissions=spec.enable_permissions,
+                mcp_configs=mcp_configs,
             )
+            if _worktree_enabled(spec):
+                member_spec = _with_project_workspace(member_spec, project_dir)
+            spec.agents[role] = member_spec
 
     spec.build_context = base
     # Carry a serializable seed alongside the live context so members rebuilt
@@ -106,10 +140,11 @@ def enrich_team_spec_for_swarm(
     # cold recovery) can reconstruct the context via the registered factory.
     spec.build_context_seed = base.to_seed()
     logger.info(
-        "[swarm.assembly] enriched team spec '%s' (roles=%s, session=%s)",
+        "[swarm.assembly] enriched team spec '%s' (roles=%s, session=%s, mcps=%d)",
         spec.team_name,
         [role for role in _MEMBER_ROLES if role in spec.agents],
         session_id,
+        len(mcp_configs),
     )
 
 

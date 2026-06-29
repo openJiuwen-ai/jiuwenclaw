@@ -14,7 +14,9 @@ from jiuwenswarm.gateway.cron.store import CronJobStore
 from jiuwenswarm.gateway.cron.scheduler import _cron_next_push_dt, CronSchedulerService
 from jiuwenswarm.gateway.cron.models import (
     CronTargetChannel,
+    cron_job_modes_for_tools,
     is_valid_target_channel_id,
+    normalize_cron_job_mode,
     normalize_target_channel_id,
 )
 from jiuwenswarm.server.gateway_push import (
@@ -101,6 +103,11 @@ class CronTools:
             if agent_client is None:
                 logger.warning("[CronTools] Cannot start scheduler: AgentServerClient not available")
                 self._scheduler_started = True  # Mark as tried
+                return None
+
+            if message_handler is None:
+                logger.warning("[CronTools] Cannot start scheduler: MessageHandler not available")
+                self._scheduler_started = True
                 return None
             
             self._scheduler = CronSchedulerService(
@@ -250,6 +257,10 @@ class CronTools:
         chat_type = self._route().chat_type
         if chat_type:
             session_kw["chat_type"] = chat_type
+        mode_kw: dict[str, Any] = {}
+        mode_raw = normalized.get("mode")
+        if mode_raw is not None and str(mode_raw).strip():
+            mode_kw["mode"] = normalize_cron_job_mode(mode_raw)
         job = await self._local_store.create_job(
             job_id=str(normalized.get("id") or "").strip() or None,
             name=str(normalized.get("name") or "").strip(),
@@ -261,6 +272,7 @@ class CronTools:
             wake_offset_seconds=normalized.get("wake_offset_seconds"),
             delete_after_run=normalized.get("delete_after_run"),
             **session_kw,
+            **mode_kw,
         )
         try:
             await self._send("create", job.to_dict())
@@ -286,6 +298,8 @@ class CronTools:
                     normalized_patch["session_id"] = sid.strip()
             else:
                 normalized_patch["session_id"] = None
+        if "mode" in normalized_patch:
+            normalized_patch["mode"] = normalize_cron_job_mode(normalized_patch.get("mode"))
         chat_type = self._route().chat_type
         normalized_patch["chat_type"] = chat_type if chat_type else None
         job = await self._local_store.update_job(job_id, normalized_patch)
@@ -361,6 +375,9 @@ class CronTools:
         wake_offset_seconds = kwargs.get("wake_offset_seconds")
         if wake_offset_seconds is not None:
             params["wake_offset_seconds"] = wake_offset_seconds
+        mode = kwargs.get("mode")
+        if mode is not None and str(mode).strip():
+            params["mode"] = mode
         return await self.create_job(params)
 
     async def _update_job_tool(self, job_id: str, patch: dict[str, Any]) -> Any:
@@ -408,6 +425,14 @@ class CronTools:
                         "targets": {"type": "string"},
                         "enabled": {"type": "boolean"},
                         "wake_offset_seconds": {"type": "integer"},
+                        "mode": {
+                            "type": "string",
+                            "enum": cron_job_modes_for_tools(),
+                            "description": (
+                                "Agent runtime mode when the job runs "
+                                "(agent, team, agent.plan, agent.fast, ...). Default: agent.fast."
+                            ),
+                        },
                     },
                     "required": ["name", "cron_expr", "timezone", "description"],
                 },
@@ -415,12 +440,42 @@ class CronTools:
             ),
             make_tool(
                 name="cron_update_job",
-                description="Update cron job.",
+                description=(
+                    "Update an existing cron job. Pass job_id and a patch dict with fields to update "
+                    "(name, enabled, cron_expr, timezone, description, wake_offset_seconds, targets, mode)."
+                ),
                 input_params={
                     "type": "object",
                     "properties": {
-                        "job_id": {"type": "string"},
-                        "patch": {"type": "object"},
+                        "job_id": {"type": "string", "description": "Job id to update"},
+                        "patch": {
+                            "type": "object",
+                            "description": (
+                                "Fields to update (name, enabled, cron_expr, timezone, "
+                                "description, wake_offset_seconds, targets, mode)"
+                            ),
+                            "properties": {
+                                "name": {"type": "string"},
+                                "enabled": {"type": "boolean"},
+                                "cron_expr": {"type": "string"},
+                                "timezone": {"type": "string"},
+                                "description": {"type": "string"},
+                                "wake_offset_seconds": {"type": "integer"},
+                                "delete_after_run": {"type": "boolean"},
+                                "targets": {
+                                    "type": "string",
+                                    "enum": [e.value for e in CronTargetChannel],
+                                    "description": (
+                                        "推送频道：web/tui/feishu/dingtalk/whatsapp/wecom/xiaoyi/wechat"
+                                    ),
+                                },
+                                "mode": {
+                                    "type": "string",
+                                    "enum": cron_job_modes_for_tools(),
+                                    "description": "Agent runtime mode (agent, team, agent.plan, ...)",
+                                },
+                            },
+                        },
                     },
                     "required": ["job_id", "patch"],
                 },

@@ -9,7 +9,10 @@ from openjiuwen.core.foundation.tool import LocalFunction, Tool, ToolCard
 from jiuwenswarm.gateway.cron.cron_expr import normalize_cron_expr
 from jiuwenswarm.gateway.cron.models import (
     CronTargetChannel,
+    cron_job_metadata,
+    cron_job_modes_for_tools,
     is_valid_target_channel_id,
+    normalize_cron_job_mode,
     normalize_target_channel_id,
 )
 from jiuwenswarm.gateway.cron.scheduler import CronSchedulerService, _cron_next_push_dt
@@ -124,6 +127,10 @@ class CronController:
         job = await self._store.get_job(job_id)
         return job.to_dict() if job else None
 
+    @staticmethod
+    def job_metadata() -> dict[str, Any]:
+        return cron_job_metadata()
+
     async def create_job(self, params: dict[str, Any]) -> dict[str, Any]:
         name = str(params.get("name") or "").strip()
         cron_expr = normalize_cron_expr(str(params.get("cron_expr") or "").strip())
@@ -133,6 +140,10 @@ class CronController:
         wake_offset_seconds = params.get("wake_offset_seconds", None)
         raw_targets = params.get("targets")
         mode = params.get("mode")
+        if mode is not None and str(mode).strip():
+            mode = normalize_cron_job_mode(mode)
+        else:
+            mode = None
         targets = self._normalize_targets(raw_targets)
 
         self._validate_schedule(cron_expr=cron_expr, timezone=timezone)
@@ -141,6 +152,7 @@ class CronController:
         routing_sid = self._routing_session_id(targets, params.get("session_id"))
         chat_type = params.get("chat_type")
         delete_after_run = params.get("delete_after_run")
+        timeout_seconds = params.get("timeout_seconds")
         job = await self._store.create_job(
             job_id=str(params.get("id") or "").strip() or None,
             name=name,
@@ -154,12 +166,15 @@ class CronController:
             chat_type=chat_type,
             mode=mode,
             delete_after_run=delete_after_run,
+            timeout_seconds=timeout_seconds,
         )
         await self._scheduler.reload()
         return job.to_dict()
 
     async def update_job(self, job_id: str, patch: dict[str, Any]) -> dict[str, Any]:
         patch = dict(patch or {})
+        if "mode" in patch:
+            patch["mode"] = normalize_cron_job_mode(patch.get("mode"))
         if "targets" in patch:
             patch["targets"] = self._normalize_targets(patch["targets"])
         existing = await self._store.get_job(job_id)
@@ -237,6 +252,8 @@ class CronController:
         targets: str = "",
         enabled: bool = True,
         wake_offset_seconds: int | None = None,
+        mode: str | None = None,
+        timeout_seconds: int | None = None,
     ) -> dict[str, Any]:
         params: dict[str, Any] = {
             "name": name,
@@ -248,6 +265,10 @@ class CronController:
         }
         if wake_offset_seconds is not None:
             params["wake_offset_seconds"] = wake_offset_seconds
+        if mode is not None and str(mode).strip():
+            params["mode"] = mode
+        if timeout_seconds is not None:
+            params["timeout_seconds"] = timeout_seconds
         return await self.create_job(params)
 
     async def _update_job_tool(
@@ -387,6 +408,21 @@ class CronController:
                             "description": "Seconds to wake before push. Default 300",
                             "default": 300,
                         },
+                        "mode": {
+                            "type": "string",
+                            "enum": cron_job_modes_for_tools(),
+                            "description": (
+                                "Agent runtime mode when the job runs. "
+                                "Default agent.fast. Use team for multi-agent team execution."
+                            ),
+                        },
+                        "timeout_seconds": {
+                            "type": "integer",
+                            "description": (
+                                "Execution timeout in seconds (60-259200). "
+                                "Default 600 for normal modes and 1200 for team modes."
+                            ),
+                        },
                     },
                     "required": ["name", "cron_expr", "timezone", "description"],
                 },
@@ -396,7 +432,7 @@ class CronController:
                 name="cron_update_job",
                 description=(
                     "Update an existing cron job. Pass job_id and a patch dict with fields to update "
-                    "(name, enabled, cron_expr, timezone, description, wake_offset_seconds, targets)."
+                    "(name, enabled, cron_expr, timezone, description, wake_offset_seconds, targets, mode)."
                 ),
                 input_params={
                     "type": "object",
@@ -406,7 +442,7 @@ class CronController:
                             "type": "object",
                             "description": (
                                 "Fields to update (name, enabled, cron_expr, timezone, "
-                                "description, wake_offset_seconds, targets)"
+                                "description, wake_offset_seconds, targets, mode)"
                             ),
                             "properties": {
                                 "targets": {
@@ -415,6 +451,11 @@ class CronController:
                                     "description": (
                                         "推送频道：web/tui/feishu/dingtalk/whatsapp/wecom/xiaoyi/wechat"
                                     ),
+                                },
+                                "mode": {
+                                    "type": "string",
+                                    "enum": cron_job_modes_for_tools(),
+                                    "description": "Agent runtime mode (agent, team, agent.plan, ...)",
                                 },
                             },
                         },

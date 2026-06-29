@@ -38,3 +38,14 @@ def resolve_project_coding_memory_dir(
         "coding_memory",
         resolve_coding_memory_project_name(project_dir),
     )
+
+
+def resolve_project_coding_memory_workspace_path(
+    *,
+    project_dir: str | PathLike[str] | None,
+) -> str:
+    """Resolve the workspace-relative ``coding_memory/<project_name>`` path."""
+    return os.path.join(
+        "coding_memory",
+        resolve_coding_memory_project_name(project_dir),
+    )
