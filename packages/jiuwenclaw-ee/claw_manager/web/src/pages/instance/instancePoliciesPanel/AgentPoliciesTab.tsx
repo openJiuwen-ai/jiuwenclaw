@@ -624,15 +624,15 @@ export function AgentPoliciesTab({ instanceId }: { instanceId: string }) {
               />
               <div className="text-[11px] text-muted mt-1">{t('policies.agent.agentIdHint')}</div>
             </div>
-            <div className="min-w-0">
-              <FieldLabel>{t('policies.agent.sendFileAllowed')}</FieldLabel>
-              <div className="flex h-10 items-center">
-                <Switch
-                  checked={form.send_file_allowed}
-                  aria-label={t('policies.agent.sendFileAllowed')}
-                  onChange={(v) => update('send_file_allowed', v)}
-                />
-              </div>
+          </div>
+          <div className="md:col-span-2 border-b border-[var(--border)] pb-3 mb-1">
+            <FieldLabel>{t('policies.agent.sendFileAllowed')}</FieldLabel>
+            <div className="flex h-10 items-center">
+              <Switch
+                checked={form.send_file_allowed}
+                aria-label={t('policies.agent.sendFileAllowed')}
+                onChange={(v) => update('send_file_allowed', v)}
+              />
             </div>
           </div>
           <div className="md:col-span-2">

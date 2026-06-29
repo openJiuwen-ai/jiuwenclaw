@@ -383,7 +383,7 @@
       "pickServicePolicy": "Select a service policy",
       "loadingServicePolicies": "Loading service policies…",
       "servicePolicyUnavailable": "Current policy unavailable",
-      "sendFileAllowed": "Allow Send File"
+      "sendFileAllowed": "Allow agent to send generated files to user"
     },
     "deleteConfirm": "Delete this policy? Effective for Gateway immediately.",
     "policyId": "Policy ID",
