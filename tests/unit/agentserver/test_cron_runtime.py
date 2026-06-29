@@ -7,6 +7,7 @@ import pytest
 from jiuwenclaw.agentserver.deep_agent.cron_runtime import (
     _CronToolsCronBackend,
     _extract_legacy_params,
+    _patch_cron_create_job_tools,
 )
 
 
@@ -122,3 +123,24 @@ async def test_cron_backend_create_job_pushes_and_resets_route() -> None:
     assert cron_tools.routes[0].session_id == "sess-1"
     assert cron_tools.reset_tokens == ["token-1"]
     assert cron_tools.create_payloads[0]["id"] == "job-1"
+
+
+def test_patch_cron_create_job_tools_adds_delay_seconds() -> None:
+    tool = SimpleNamespace(
+        card=SimpleNamespace(
+            name="cron_create_job",
+            description="old",
+            input_params={
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string"},
+                    "cron_expr": {"type": "string", "description": "old"},
+                },
+                "required": ["name", "cron_expr", "timezone", "description"],
+            },
+        )
+    )
+    _patch_cron_create_job_tools([tool])
+    props = tool.card.input_params["properties"]
+    assert "delay_seconds" in props
+    assert tool.card.input_params["required"] == ["name", "timezone", "description"]

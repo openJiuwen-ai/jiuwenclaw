@@ -34,6 +34,12 @@
       "nav": "分页导航"
     }
   },
+  "time": {
+    "secondsAgo": "{{count}}s 前",
+    "minutesAgo": "{{count}}m 前",
+    "hoursAgo": "{{count}}h 前",
+    "daysAgo": "{{count}}d 前"
+  },
   "brand": {
     "title": "JiuwenClaw",
     "sub": "Claw Manager"

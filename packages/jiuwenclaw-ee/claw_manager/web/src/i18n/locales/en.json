@@ -34,6 +34,12 @@
       "nav": "Pagination"
     }
   },
+  "time": {
+    "secondsAgo": "{{count}}s ago",
+    "minutesAgo": "{{count}}m ago",
+    "hoursAgo": "{{count}}h ago",
+    "daysAgo": "{{count}}d ago"
+  },
   "brand": {
     "title": "JiuwenClaw",
     "sub": "Claw Manager"

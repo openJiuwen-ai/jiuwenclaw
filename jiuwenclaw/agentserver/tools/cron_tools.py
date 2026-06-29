@@ -11,6 +11,7 @@ from zoneinfo import ZoneInfo
 from openjiuwen.core.foundation.tool import LocalFunction, Tool, ToolCard
 from jiuwenclaw.gateway.cron.store import CronJobStore
 from jiuwenclaw.gateway.cron.store_base import CronJobStoreBackend
+from jiuwenclaw.gateway.cron.cron_expr import iso_to_seven_field_cron, validate_cron_schedule_not_stale
 from jiuwenclaw.gateway.cron.scheduler import _cron_next_push_dt, CronSchedulerService
 from jiuwenclaw.gateway.cron.models import (
     CronTargetChannel,
@@ -324,6 +325,22 @@ class CronTools:
         targets_str = self._normalize_targets_param(normalized.get("targets"))
         targets_str = self._upgrade_bare_feishu_to_route_app_id(str(targets_str))
         normalized["targets"] = targets_str
+        timezone = str(normalized.get("timezone") or "Asia/Shanghai").strip() or "Asia/Shanghai"
+        cron_expr = str(normalized.get("cron_expr") or "").strip()
+        delete_after_run = normalized.get("delete_after_run")
+        delay_raw = normalized.get("delay_seconds")
+        if delay_raw is not None:
+            delay = float(delay_raw)
+            if delay <= 0:
+                raise ValueError("delay_seconds must be positive")
+            run_at = datetime.now(tz=ZoneInfo(timezone)) + timedelta(seconds=delay)
+            cron_expr = iso_to_seven_field_cron(run_at.isoformat(), timezone=timezone)
+            delete_after_run = True if delete_after_run is None else delete_after_run
+            logger.info("[CronTools] schedule one-shot via delay_seconds=%s cron_expr=%s", delay, cron_expr)
+        elif not cron_expr:
+            raise ValueError("cron_expr or delay_seconds is required")
+        else:
+            validate_cron_schedule_not_stale(cron_expr=cron_expr, timezone=timezone)
         logger.info(
             "[CronTools] create_job: route(channel=%s session=%s request=%s) input.targets=%s normalized.targets=%s",
             self._route().channel_id,
@@ -343,13 +360,13 @@ class CronTools:
         job = await self._local_store.create_job(
             job_id=str(normalized.get("id") or "").strip() or None,
             name=str(normalized.get("name") or "").strip(),
-            cron_expr=str(normalized.get("cron_expr") or "").strip(),
-            timezone=str(normalized.get("timezone") or "Asia/Shanghai").strip() or "Asia/Shanghai",
+            cron_expr=cron_expr,
+            timezone=timezone,
             description=str(normalized.get("description") or ""),
             targets=targets_str,
             enabled=bool(normalized.get("enabled", True)),
             wake_offset_seconds=normalized.get("wake_offset_seconds"),
-            delete_after_run=normalized.get("delete_after_run"),
+            delete_after_run=delete_after_run,
             **session_kw,
         )
         try:
