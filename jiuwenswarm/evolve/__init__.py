@@ -17,6 +17,7 @@ import logging
 from pathlib import Path
 from typing import Any
 
+from jiuwenswarm.common.config import resolve_env_vars
 from jiuwenswarm.evolve.registry import (
     Registry,
     apply_writers,
@@ -38,6 +39,8 @@ __all__ = [
 
 # Cached merged config, loaded once per process.
 _evolve_config: dict[str, Any] | None = None
+# Flag to prevent repeated logger level initialization.
+_evolve_logger_initialized: bool = False
 
 
 def get_evolve_config() -> dict[str, Any]:
@@ -46,8 +49,11 @@ def get_evolve_config() -> dict[str, Any]:
     Loads ``jiuwenswarm/evolve/config.yaml`` as the base and merges
     ``config.yaml``'s ``evolve:`` section on top (main config wins).
     The result is cached in-process.
+
+    Also sets the ``jiuwenswarm.evolve`` logger level from the ``log_level``
+    field in the config (supports environment variable override).
     """
-    global _evolve_config
+    global _evolve_config, _evolve_logger_initialized
     if _evolve_config is not None:
         return _evolve_config
 
@@ -72,6 +78,9 @@ def get_evolve_config() -> dict[str, Any]:
     ):
         own_cfg = own_cfg["evolve"]
 
+    # 1.5. Resolve environment variables (${VAR:-default} syntax)
+    own_cfg = resolve_env_vars(own_cfg)
+
     # 2. Merge with main config's evolve: section (main wins)
     try:
         from jiuwenswarm.common.config import get_config
@@ -84,6 +93,12 @@ def get_evolve_config() -> dict[str, Any]:
         logger.debug("Could not load main config evolve section: %s", exc)
 
     _evolve_config = own_cfg
+
+    # 3. Set jiuwenswarm.evolve logger level from config
+    if not _evolve_logger_initialized:
+        _evolve_logger_initialized = True
+        _apply_evolve_log_level(_evolve_config)
+
     return _evolve_config
 
 
@@ -96,4 +111,25 @@ def _deep_merge(base: dict, override: dict) -> dict:
         else:
             result[key] = value
     return result
+
+
+def _apply_evolve_log_level(cfg: dict[str, Any]) -> None:
+    """Set the ``jiuwenswarm.evolve`` logger level from config.
+
+    Uses ``log_level`` from evolve config (default INFO).
+    Only the ``jiuwenswarm.evolve`` hierarchy is affected;
+    other modules (channel, agent_server, gateway) are untouched.
+    """
+    level_str = str(cfg.get("log_level", "INFO"))
+    level = _parse_evolve_log_level(level_str)
+    evolve_root = logging.getLogger("jiuwenswarm.evolve")
+    evolve_root.setLevel(level)
+    logger.debug("evolve logger level set to %s (%d)", level_str, level)
+
+
+def _parse_evolve_log_level(name: str, default: int = logging.INFO) -> int:
+    """Parse level name to logging module constant."""
+    if not name or not isinstance(name, str):
+        return default
+    return getattr(logging, name.strip().upper(), default)
 

@@ -339,23 +339,33 @@ class ExperienceGovernor:
     def _find_replaceable(entries: list[dict]) -> list[dict]:
         """Find candidate experiences that can be replaced.
 
-        Replaceable criteria:
-        - state = "candidate" (not yet proven effective)
-        - hit_count = 0 (never used)
+        Replaceable criteria (EXISTING format):
+        - usage_stats.times_used = 0 (never used)
+        - score < 0.6 (low quality)
+        - OR applied = false (not yet applied)
         """
         replaceable = []
         for entry in entries:
-            metadata = entry.get("metadata", {})
-            state = metadata.get("state", "active")
-            hit_count = metadata.get("hit_count", 0)
+            # Read from EXISTING format: usage_stats.times_used
+            usage_stats = entry.get("usage_stats", {})
+            times_used = usage_stats.get("times_used", 0)
 
-            # Candidate experiences with low usage are replaceable
-            if state == "candidate" and hit_count == 0:
+            # Read from EXISTING format: change.content
+            change = entry.get("change", {})
+            content = change.get("content", "")[:100]
+
+            # Read score and applied status
+            score = entry.get("score", 0.0)
+            applied = entry.get("applied", False)
+
+            # Low-quality or unused experiences are replaceable
+            if times_used == 0 or score < 0.6 or not applied:
                 replaceable.append({
                     "id": entry.get("id", ""),
-                    "state": state,
-                    "hit_count": hit_count,
-                    "content": entry.get("change", {}).get("content", "")[:100],
+                    "times_used": times_used,
+                    "score": score,
+                    "applied": applied,
+                    "content": content,
                 })
         return replaceable
 
@@ -363,17 +373,23 @@ class ExperienceGovernor:
     def _find_protected(entries: list[dict]) -> list[str]:
         """Find experience IDs that should not be replaced or deprecated.
 
-        Protected criteria:
-        - state = "active" (proven effective)
-        - hit_count > 0 (has been used successfully)
+        Protected criteria (EXISTING format):
+        - usage_stats.times_used > 0 (has been used)
+        - score >= 0.7 (high quality)
+        - AND applied = true (already applied)
         """
         protected = []
         for entry in entries:
-            metadata = entry.get("metadata", {})
-            state = metadata.get("state", "active")
-            hit_count = metadata.get("hit_count", 0)
+            # Read from EXISTING format: usage_stats.times_used
+            usage_stats = entry.get("usage_stats", {})
+            times_used = usage_stats.get("times_used", 0)
 
-            if state == "active" and hit_count > 0:
+            # Read score and applied status
+            score = entry.get("score", 0.0)
+            applied = entry.get("applied", False)
+
+            # High-quality, used experiences are protected
+            if times_used > 0 and score >= 0.7 and applied:
                 protected.append(entry.get("id", ""))
         return protected
 

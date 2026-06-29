@@ -8,6 +8,7 @@
 
 evolve:
   enabled: false                    # 总开关，默认关闭
+  log_level: ${EVOLVE_LOG_LEVEL:-INFO}  # evolve 模块统一日志级别（支持环境变量覆盖）
 
   pipeline:
     # Proposal 生成器列表（按列表顺序执行）

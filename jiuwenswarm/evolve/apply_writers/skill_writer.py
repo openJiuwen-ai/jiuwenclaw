@@ -328,22 +328,37 @@ class SkillExperienceWriter(ApplyWriter):
     def _build_record(proposal: Proposal):
         """Build an evolution record dict from a Proposal.
 
-        Uses dict format (no openjiuwen dependency).
+        Uses EXISTING format compatible with openjiuwen EvolutionStore:
+        - change: nested structure (section, action, content, target)
+        - usage_stats: nested structure for statistics
+        - applied: boolean flag
         """
         content = _build_content(proposal)
 
-        # Build record as dict
+        # Build record using EXISTING format (benchmark/skills/json-validator/evolutions.json)
         record = {
             "id": f"exp-{proposal.proposal_id[:8]}-{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')}",
+            "source": "ahe_evolution",
             "timestamp": datetime.now(timezone.utc).isoformat(),
-            "proposal_id": proposal.proposal_id,
-            "section": _DEFAULT_SECTION,
-            "action": _DEFAULT_ACTION,
-            "content": content,
-            "target": "BODY",
+            "context": proposal.root_cause.strip() or f"Auto-generated from AHE proposal: {proposal.proposal_id}",
+            "change": {
+                "section": _DEFAULT_SECTION,
+                "action": _DEFAULT_ACTION,
+                "content": content,
+                "target": "body",
+            },
+            "applied": False,
             "score": float(proposal.metadata.get("max_score", 0.6)),
-            "summary": content[:300] if content else None,  # Use content snippet as summary (more actionable)
-            "reason": proposal.root_cause.strip() or None,
+            "usage_stats": {
+                "times_presented": 0,
+                "times_used": 0,
+                "times_positive": 0,
+                "times_negative": 0,
+                "last_presented_at": None,
+                "last_evaluated_at": None,
+            },
+            "summary": content[:300] if content else None,
+            "proposal_id": proposal.proposal_id,
             "evidence": [
                 {
                     "trace_id": e.trace_id,
@@ -384,27 +399,42 @@ class SkillExperienceWriter(ApplyWriter):
     def _apply_add(
         self, evolution_log, proposal: Proposal, op: ExperienceOperation
     ) -> dict:
-        """ADD a new experience entry with state=candidate.
+        """ADD a new experience entry using EXISTING format.
 
-        Uses dict format (no openjiuwen dependency).
+        Uses EXISTING format compatible with openjiuwen EvolutionStore:
+        - change: nested structure
+        - usage_stats: nested structure
+        - applied: boolean flag
 
         Returns:
             The created record dict for logging purposes.
         """
         content = op.new_content or _build_content(proposal)
 
-        # Build record dict
+        # Build record using EXISTING format
         record = {
             "id": f"exp-{proposal.proposal_id[:8]}-{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')}",
+            "source": "ahe_evolution",
             "timestamp": datetime.now(timezone.utc).isoformat(),
-            "proposal_id": proposal.proposal_id,
-            "section": _DEFAULT_SECTION,
-            "action": _DEFAULT_ACTION,
-            "content": content,
-            "target": "BODY",
+            "context": op.reason or f"AHE evolution proposal: {proposal.proposal_id}",
+            "change": {
+                "section": _DEFAULT_SECTION,
+                "action": _DEFAULT_ACTION,
+                "content": content,
+                "target": "body",
+            },
+            "applied": False,
             "score": float(proposal.metadata.get("max_score", 0.6)),
-            "summary": content[:200] if content else None,  # Use content snippet as summary (more actionable)
-            "reason": op.reason,
+            "usage_stats": {
+                "times_presented": 0,
+                "times_used": 0,
+                "times_positive": 0,
+                "times_negative": 0,
+                "last_presented_at": None,
+                "last_evaluated_at": None,
+            },
+            "summary": content[:200] if content else None,
+            "proposal_id": proposal.proposal_id,
             "evidence": [
                 {
                     "trace_id": e.trace_id,
@@ -412,13 +442,6 @@ class SkillExperienceWriter(ApplyWriter):
                 }
                 for e in op.evidence_refs
             ],
-            "metadata": {
-                "state": "candidate",
-                "proposal_id": proposal.proposal_id,
-                "created_at": datetime.now(timezone.utc).isoformat(),
-                "hit_count": 0,
-                "success_after_hit_count": 0,
-            },
         }
 
         evolution_log["entries"].append(record)
@@ -429,23 +452,27 @@ class SkillExperienceWriter(ApplyWriter):
     ) -> None:
         """MERGE evidence_refs into an existing entry.
 
-        Uses dict format (no openjiuwen dependency).
+        Preserves EXISTING format - does not modify change structure.
         """
         target_id = op.target_experience_id
         for entry in evolution_log.get("entries", []):
             if entry.get("id") == target_id:
-                if "metadata" not in entry:
-                    entry["metadata"] = {}
-                existing_ev = entry["metadata"].get("evidence_refs", [])
-                existing_ev.extend([
+                # Merge evidence into existing list
+                existing_evidence = entry.get("evidence", [])
+                existing_evidence.extend([
                     {
                         "trace_id": e.trace_id,
                         "description": e.description,
                     }
                     for e in op.evidence_refs
                 ])
-                entry["metadata"]["evidence_refs"] = existing_ev
+                entry["evidence"] = existing_evidence
+
+                # Record merge metadata
+                if "metadata" not in entry:
+                    entry["metadata"] = {}
                 entry["metadata"]["merged_from"] = proposal.proposal_id
+
                 logger.info("MERGE evidence to %s (%d refs)", target_id, len(op.evidence_refs))
                 return
         logger.warning("MERGE target %s not found", target_id)
@@ -453,19 +480,33 @@ class SkillExperienceWriter(ApplyWriter):
     def _apply_replace(
         self, evolution_log, proposal: Proposal, op: ExperienceOperation
     ) -> None:
-        """REPLACE an existing entry's content.
+        """REPLACE an existing entry's content using EXISTING format.
 
-        Uses dict format (no openjiuwen dependency).
+        Modifies change.content (nested structure) to maintain compatibility
+        with openjiuwen EvolutionStore.
         """
         target_id = op.target_experience_id
         new_content = op.new_content or _build_content(proposal)
         for entry in evolution_log.get("entries", []):
             if entry.get("id") == target_id:
-                entry["content"] = new_content
-                if "metadata" not in entry:
-                    entry["metadata"] = {}
-                entry["metadata"]["replaced_by"] = proposal.proposal_id
-                entry["metadata"]["replaced_at"] = datetime.now(timezone.utc).isoformat()
+                # Modify change.content (EXISTING format)
+                if "change" in entry:
+                    entry["change"]["content"] = new_content
+                else:
+                    # Fallback: create change structure if missing
+                    entry["change"] = {
+                        "section": entry.get("section", _DEFAULT_SECTION),
+                        "action": entry.get("action", _DEFAULT_ACTION),
+                        "content": new_content,
+                        "target": entry.get("target", "body"),
+                    }
+
+                # Clear flat fields if they exist (legacy cleanup)
+                entry.pop("content", None)
+                entry.pop("section", None)
+                entry.pop("action", None)
+                entry.pop("target", None)
+
                 logger.info("REPLACE %s with new content", target_id)
                 return
         logger.warning("REPLACE target %s not found", target_id)
@@ -481,16 +522,18 @@ class SkillExperienceWriter(ApplyWriter):
     ) -> None:
         """DEPRECATE an existing entry.
 
-        Uses dict format (no openjiuwen dependency).
+        Sets metadata.state to "deprecated" while preserving EXISTING format.
         """
         target_id = op.target_experience_id
         for entry in evolution_log.get("entries", []):
             if entry.get("id") == target_id:
+                # Add metadata for state tracking (new field, compatible)
                 if "metadata" not in entry:
                     entry["metadata"] = {}
                 entry["metadata"]["state"] = "deprecated"
                 entry["metadata"]["deprecated_by"] = proposal.proposal_id
                 entry["metadata"]["deprecated_at"] = datetime.now(timezone.utc).isoformat()
+
                 logger.info("DEPRECATE %s", target_id)
                 return
         logger.warning("DEPRECATE target %s not found", target_id)

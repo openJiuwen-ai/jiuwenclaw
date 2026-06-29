@@ -184,7 +184,7 @@ class AheProposer(ProposalGenerator):
             (nt, oc) for nt, oc in zip(normalized_traces, outcomes)
             if oc.outcome in ("fail", "uncertain")
         ]
-
+        logger.info("evaluate result is %s", outcomes)
         if not failed:
             logger.info("Batch: no fail/uncertain traces")
             return []
@@ -265,8 +265,8 @@ class AheProposer(ProposalGenerator):
         proposals = self._parse_proposals(proposals_raw, batch_id)
 
         logger.info(
-            "Generated %d proposals for trace %s",
-            len(proposals), trace_id
+            "Generated %d proposals for trace %s, propose is %s",
+            len(proposals), trace_id, proposals
         )
 
         return proposals
