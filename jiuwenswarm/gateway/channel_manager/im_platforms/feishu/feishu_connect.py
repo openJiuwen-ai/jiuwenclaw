@@ -25,6 +25,11 @@ from jiuwenswarm.gateway.channel_manager.im_platforms.feishu.feishu_file_service
     is_audio_file,
     is_video_file,
 )
+from jiuwenswarm.gateway.channel_manager.im_platforms.message_text import (
+    extract_human_text,
+    get_outbound_artifacts,
+    strip_think_tags,
+)
 
 
 
@@ -1355,8 +1360,6 @@ class FeishuChannel(BaseChannel):
             payload = msg.payload if isinstance(msg.payload, dict) else {}
             event_name = getattr(msg.event_type, "value", None) or payload.get("event_type") or ""
             stream_key = str(getattr(msg, "id", "") or "")
-            _msg_streaming = getattr(msg, "enable_streaming", None)
-            streaming_enabled = bool(_msg_streaming if _msg_streaming is not None else self.config.enable_streaming)
 
             meta = dict(getattr(msg, "metadata", None) or {})
 
@@ -1395,42 +1398,43 @@ class FeishuChannel(BaseChannel):
                     )
                 return
 
-            # 非 streaming 模式下仅下发最终结果，屏蔽执行过程类事件。
-            if (not streaming_enabled) and event_name in {"chat.tool_call", "chat.tool_result", "todo.updated"}:
+            # 三方 IM 只下发最终可读文本，工具/待办/推理过程不进入对话页。
+            if event_name in {
+                "chat.tool_call",
+                "chat.tool_update",
+                "chat.tool_result",
+                "todo.updated",
+                "chat.reasoning",
+                "chat.usage_metadata",
+                "chat.usage_summary",
+                "context.usage",
+                "chat.evolution_status",
+                "chat.subtask_update",
+            }:
                 return
 
             # 流式结束兜底：有些场景不会携带非空 chat.final，使用 processing_status=false 冲刷缓存。
             if event_name == "chat.processing_status":
                 is_processing = payload.get("is_processing")
                 if is_processing is not False:
-                    if not streaming_enabled:
-                        await self._handle_processing_status_event(msg, meta, payload)
-                        return
-                    content_str = self._extract_message_content(msg)
-                    if not content_str.strip():
-                        return
-                else:
-                    content_str = self._stream_text_buffers.pop(stream_key, "")
-                    if not content_str.strip():
-                        if not streaming_enabled:
-                            await self._handle_processing_status_event(msg, meta, payload)
-                            return
-                        content_str = self._extract_message_content(msg)
-                        if not content_str.strip():
-                            return
+                    return
+                content_str = strip_think_tags(self._stream_text_buffers.pop(stream_key, "")).strip()
+                if not content_str:
+                    return
             else:
                 buffered_text = ""
                 if event_name == "chat.final":
                     buffered_text = self._stream_text_buffers.pop(stream_key, "")
                 elif event_name in {"chat.error", "chat.interrupt_result"}:
                     self._stream_text_buffers.pop(stream_key, None)
-                content_str = self._extract_message_content(msg)
+                content_str = extract_human_text(msg)
                 is_complete = msg.payload.get("is_complete", False)
                 if is_complete:
                     content_str = self._merge_stream_and_final_content(
                         buffered_text,
                         content_str,
                     )
+                content_str = strip_think_tags(content_str).strip()
 
             receive_id, id_type = self._extract_receive_info(msg)
             payload = getattr(msg, "payload", None) or {}
@@ -1447,6 +1451,15 @@ class FeishuChannel(BaseChannel):
                 and payload.get("heartbeat")
             ):
                 content_str = str(payload.get("heartbeat"))
+
+            if event_name == "chat.final" and self.config.enable_file_upload:
+                for artifact in get_outbound_artifacts(msg, "image"):
+                    image_path = str(artifact.get("path") or "").strip()
+                    if image_path:
+                        try:
+                            await self._send_image_message(receive_id, id_type, image_path)
+                        except Exception as image_err:
+                            logger.error("飞书发送结构化图片附件失败: %s", image_err)
 
             if not content_str.strip():
                 logger.warning("飞书发送：消息内容为空，跳过发送")
@@ -2198,7 +2211,7 @@ class FeishuChannel(BaseChannel):
 
             # 解析消息内容（支持文件类型）
             content, file_info = await self._parse_message_content_with_file(message)
-            if content == "/mode team" and self.config.enable_streaming == False:
+            if content == "/mode team" and not self.config.enable_streaming:
                 # 非流式情况下不支持team模式，向用户发送提示
                 try:
                     # 提取发送者open_id

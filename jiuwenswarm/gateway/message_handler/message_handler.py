@@ -185,6 +185,8 @@ class MessageHandler(ABC):
             ChannelType.WHATSAPP.value,
             ChannelType.WECOM.value,
             ChannelType.WECHAT.value,
+            ChannelType.QQ.value,
+            ChannelType.WEIBO.value,
         }
         # 使用 SessionMap 的 channel 族（由 config 中 gateway.session_map_scope 决定是否在 key 中含 user）
         self._session_map_channel_types = frozenset({

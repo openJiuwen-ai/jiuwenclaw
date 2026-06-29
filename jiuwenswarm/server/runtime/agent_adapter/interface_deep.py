@@ -142,7 +142,10 @@ from jiuwenswarm.agents.harness.common.memory.config import (
     is_proactive_memory,
 )
 from jiuwenswarm.agents.harness.common.memory.external_memory_config import is_builtin_memory_allowed
-from jiuwenswarm.agents.harness.common.rails.permissions.tool_permission_context import TOOL_PERMISSION_CHANNEL_ID
+from jiuwenswarm.agents.harness.common.channel_runtime_context import (
+    CURRENT_CHANNEL_ID,
+    CURRENT_SESSION_ID,
+)
 from jiuwenswarm.server.runtime.session.session_metadata import build_server_push_message
 from jiuwenswarm.server.runtime.session.session_history import append_history_record, load_history_records
 from jiuwenswarm.server.runtime.skill import filter_visible_skill_names
@@ -210,6 +213,10 @@ from jiuwenswarm.agents.harness.common.rails.skill_retrieval_prompt_rail import 
 from jiuwenswarm.symphony.config import load_symphony_config
 from jiuwenswarm.agents.harness.common.tools.wiki_tools import wiki_ingest, wiki_query, wiki_lint
 from jiuwenswarm.agents.harness.common.tools.acp_output_tools import get_tools as get_acp_output_tools
+from jiuwenswarm.agents.harness.common.tools.channel_config_tools import (
+    configure_channel,
+    get_wechat_login_status,
+)
 from jiuwenswarm.agents.harness.common.tools.multi_session_toolkits import MultiSessionToolkit
 from jiuwenswarm.agents.harness.common.tools.acp_chat import acp_chat
 from jiuwenswarm.agents.harness.common.tools.xiaoyi_phone_tools import (
@@ -3206,6 +3213,11 @@ class JiuWenSwarmDeepAdapter:
                 Runner.resource_mgr.add_tool(wtool)
             tool_cards.append(wtool.card)
 
+        for channel_tool in (configure_channel, get_wechat_login_status):
+            if not Runner.resource_mgr.get_tool(channel_tool.card.id):
+                Runner.resource_mgr.add_tool(channel_tool)
+            tool_cards.append(channel_tool.card)
+
         # 付费搜索工具：有任意一个付费 key 就注册
         if is_paid_search_enabled():
             self._paid_search_tool = WebPaidSearchTool(
@@ -5453,7 +5465,8 @@ class JiuWenSwarmDeepAdapter:
             request_id=request.request_id,
             mode=mode,
         )
-        token_cid = TOOL_PERMISSION_CHANNEL_ID.set((request.channel_id or "").strip())
+        token_cid = CURRENT_CHANNEL_ID.set((request.channel_id or "").strip())
+        token_sid = CURRENT_SESSION_ID.set((request.session_id or "").strip())
         token_perm = setup_permission_context(request)
         # 按请求选择模型
         resolved_model = self._resolve_model_for_request(request)
@@ -5491,7 +5504,8 @@ class JiuWenSwarmDeepAdapter:
             raise
         finally:
             self._unregister_session_agent_task(session_id)
-            TOOL_PERMISSION_CHANNEL_ID.reset(token_cid)
+            CURRENT_CHANNEL_ID.reset(token_cid)
+            CURRENT_SESSION_ID.reset(token_sid)
             cleanup_permission_context(token_perm)
             self._reset_runtime_cron_context(cron_context_tokens)
             self._unmark_session_active(session_id)
@@ -5690,7 +5704,8 @@ class JiuWenSwarmDeepAdapter:
             request_id=request.request_id,
             mode=mode,
         )
-        token_cid = TOOL_PERMISSION_CHANNEL_ID.set((request.channel_id or "").strip())
+        token_cid = CURRENT_CHANNEL_ID.set((request.channel_id or "").strip())
+        token_sid = CURRENT_SESSION_ID.set((request.session_id or "").strip())
         token_perm = setup_permission_context(request)
         # 按请求选择模型
         resolved_model = self._resolve_model_for_request(request)
@@ -5940,7 +5955,8 @@ class JiuWenSwarmDeepAdapter:
             )
         finally:
             self._unregister_session_agent_task(session_id)
-            TOOL_PERMISSION_CHANNEL_ID.reset(token_cid)
+            CURRENT_CHANNEL_ID.reset(token_cid)
+            CURRENT_SESSION_ID.reset(token_sid)
             cleanup_permission_context(token_perm)
             if not stream_consumer_cancelled:
                 self._reset_runtime_cron_context(cron_context_tokens)

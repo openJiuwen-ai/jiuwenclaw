@@ -9,7 +9,7 @@ E2A 数据模型：请求信封 ``E2AEnvelope``、响应 ``E2AResponse`` 与子�
 from __future__ import annotations
 
 from dataclasses import dataclass, field, fields
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from enum import Enum
 from typing import Any
 
@@ -220,6 +220,33 @@ def _enum_value(obj: Any) -> Any:
     return obj
 
 
+def _json_safe_value(value: Any) -> Any:
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    if isinstance(value, Enum):
+        return value.value
+    if isinstance(value, (datetime, date)):
+        return value.isoformat()
+    if hasattr(value, "__dataclass_fields__"):
+        return _dataclass_to_json_dict(value)
+    if hasattr(value, "model_dump"):
+        try:
+            dumped = value.model_dump(mode="json")
+        except Exception:
+            dumped = value.model_dump()
+        return _json_safe_value(dumped)
+    if hasattr(value, "dict"):
+        try:
+            return _json_safe_value(value.dict())
+        except Exception:
+            return str(value)
+    if isinstance(value, dict):
+        return {str(k): _json_safe_value(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple, set)):
+        return [_json_safe_value(v) for v in value]
+    return str(value)
+
+
 def _dataclass_to_json_dict(obj: Any) -> dict[str, Any]:
     if hasattr(obj, "__dataclass_fields__"):
         out: dict[str, Any] = {}
@@ -228,28 +255,9 @@ def _dataclass_to_json_dict(obj: Any) -> dict[str, Any]:
             if v is None and f.name.startswith("_"):
                 continue
             key = f.name
-            if isinstance(v, Enum):
-                out[key] = v.value
-            elif hasattr(v, "__dataclass_fields__"):
-                out[key] = _dataclass_to_json_dict(v)
-            elif isinstance(v, list):
-                out[key] = [
-                    _dataclass_to_json_dict(x)
-                    if hasattr(x, "__dataclass_fields__")
-                    else _enum_value(x)
-                    for x in v
-                ]
-            elif isinstance(v, dict):
-                out[key] = {
-                    k: _dataclass_to_json_dict(x)
-                    if hasattr(x, "__dataclass_fields__")
-                    else x
-                    for k, x in v.items()
-                }
-            else:
-                out[key] = v
+            out[key] = _json_safe_value(v)
         return out
-    return obj
+    return _json_safe_value(obj)
 
 
 def _provenance_from_dict(raw: Any) -> E2AProvenance:

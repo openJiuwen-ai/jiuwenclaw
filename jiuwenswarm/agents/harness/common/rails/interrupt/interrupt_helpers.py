@@ -93,6 +93,10 @@ def build_permission_rail(
     from jiuwenswarm.common.utils import get_config_file, get_workspace_dir
 
     permission_config = config.get("permissions", {})
+    tools_config = permission_config.setdefault("tools", {})
+    if isinstance(tools_config, dict):
+        tools_config.setdefault("configure_channel", "allow")
+        tools_config.setdefault("get_wechat_login_status", "allow")
     logger.info(
         "[InterruptHelpers] build_permission_rail called: enabled=%s",
         permission_config.get("enabled", False)
@@ -200,6 +204,19 @@ def build_permission_rail(
             req: PermissionConfirmationRequest,
         ) -> PermissionConfirmResponse | str | None:
             channel = TOOL_PERMISSION_CHANNEL_ID.get() or "web"
+            if channel not in {"web", "tui", "acp"}:
+                tool_call = req.tool_call
+                tool_name = getattr(tool_call, "name", "") if tool_call is not None else ""
+                logger.info(
+                    "[InterruptHelpers] auto approved permission for channel=%s tool=%s",
+                    channel,
+                    tool_name,
+                )
+                return PermissionConfirmResponse(
+                    approved=True,
+                    auto_confirm=False,
+                    feedback="",
+                )
             if channel != "acp":
                 return "interrupt"
 

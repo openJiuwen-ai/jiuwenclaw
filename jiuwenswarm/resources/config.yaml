@@ -610,7 +610,26 @@ channels:
     long_poll_timeout_sec: 45
     backoff_base_sec: 1.0
     backoff_max_sec: 30.0
-    credential_file: ~/.wx-ai-bridge/credentials.json
+    credential_file: ./wechat/credentials.json
+    enabled: false
+  qq:
+    # QQ 官方机器人配置（频道、群聊和单聊）
+    app_id:
+    app_secret:
+    allow_from: []
+    enable_streaming: true
+    enable_guild: true
+    enable_group: true
+    enable_c2c: true
+    enabled: false
+  weibo:
+    # 微博智能助手私信 WebSocket 配置
+    app_id:
+    app_secret:
+    allow_from: []
+    enable_streaming: true
+    ws_endpoint: wss://open-im.api.weibo.com/ws/stream
+    token_endpoint: https://open-im.api.weibo.com/open/auth/ws_token
     enabled: false
   wecom:
     # 企业微信 AI 机器人配置
@@ -691,6 +710,8 @@ permissions:
     cron_delete_job: allow
     cron_toggle_job: allow
     cron_preview_job: allow
+    configure_channel: allow
+    get_wechat_login_status: allow
     acp_chat: ask
 
   rules:

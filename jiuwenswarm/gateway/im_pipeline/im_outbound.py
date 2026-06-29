@@ -21,6 +21,12 @@ from typing import TYPE_CHECKING, Any
 from jiuwenswarm.common.config import _parse_custom_headers
 from jiuwenswarm.common.reasoning_injector import build_reasoning_model_request_kwargs
 from jiuwenswarm.gateway.routing.interaction_context import PendingInteraction
+from jiuwenswarm.gateway.channel_manager.im_platforms.message_text import (
+    extract_human_text,
+    outbound_event_name,
+    should_skip_intermediate_message,
+)
+from jiuwenswarm.gateway.im_pipeline.outbound_artifacts import outbound_artifact_store
 
 if TYPE_CHECKING:
     from jiuwenswarm.gateway.im_pipeline.im_inbound import IMPlatformAdapter
@@ -64,6 +70,31 @@ class IMOutboundPipeline:
 
     def unregister_adapter(self, channel_id: str) -> None:
         self._adapters.pop(channel_id, None)
+
+    async def _normalize_delivery(self, msg: "Message") -> None:
+        """Normalize human text and attach pending structured delivery data."""
+        if msg.channel_id in {"web", "tui", "acp", "a2a"}:
+            return
+        if should_skip_intermediate_message(msg):
+            return
+
+        event_name = outbound_event_name(msg)
+        payload = dict(msg.payload) if isinstance(msg.payload, dict) else {}
+        human_text = extract_human_text(msg)
+        if human_text:
+            payload["content"] = human_text
+
+        if event_name == "chat.final":
+            delivery = await outbound_artifact_store.consume(msg.channel_id, msg.session_id or "")
+            if delivery is not None:
+                delivery_text = str(delivery.get("text") or "").strip()
+                if delivery_text:
+                    payload["content"] = delivery_text
+                metadata = dict(msg.metadata or {})
+                metadata["outbound_delivery"] = delivery
+                msg.metadata = metadata
+
+        msg.payload = payload
 
     # ---- LLM 初始化（与 react agent 一致） ----
 
@@ -146,6 +177,7 @@ class IMOutboundPipeline:
 
     async def apply(self, msg: "Message") -> None:
         """对出站消息执行路由决策，结果写入 msg.metadata（原地修改）。"""
+        await self._normalize_delivery(msg)
         meta = dict(msg.metadata or {})
         is_digital_avatar = msg.group_digital_avatar or bool(meta.get("avatar_mode"))
         if not is_digital_avatar:

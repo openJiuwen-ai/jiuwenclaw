@@ -423,7 +423,7 @@ channels:
     long_poll_timeout_sec: 45
     backoff_base_sec: 1.0
     backoff_max_sec: 30.0
-    credential_file: ~/.wx-ai-bridge/credentials.json
+    credential_file: ./wechat/credentials.json
     enabled: false
   wecom:
     # 企业微信 AI 机器人配置

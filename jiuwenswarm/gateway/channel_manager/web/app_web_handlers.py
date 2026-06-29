@@ -30,7 +30,7 @@ from jiuwenswarm.common.config import (
     replace_teams_in_config,
     update_default_models_in_config,
     update_heartbeat_in_config,
-    update_channel_in_config,
+    update_channel_in_config,  # compatibility export for existing integrations/tests
     update_browser_in_config,
     update_preferred_language_in_config,
     update_context_engine_enabled_in_config,
@@ -2003,10 +2003,9 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             await cm.set_conf("xiaoyi", params)
             conf = cm.get_conf("xiaoyi")
             try:
-                update_channel_in_config("xiaoyi", conf)
                 await _clear_agent_config_cache(_resolve(agent_client))
             except Exception as e:  # noqa: BLE001
-                logger.warning("[channel.xiaoyi.set_conf] 写回 config.yaml 失败: %s", e)
+                logger.warning("[channel.xiaoyi.set_conf] 清理 Agent 配置缓存失败: %s", e)
             await channel.send_response(ws, req_id, ok=True, payload={"config": conf})
         except Exception as e:  # noqa: BLE001
             logger.exception("[channel.xiaoyi.set_conf] %s", e)
@@ -2056,10 +2055,9 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             await cm.set_conf("telegram", params)
             conf = cm.get_conf("telegram")
             try:
-                update_channel_in_config("telegram", conf)
                 await _clear_agent_config_cache(_resolve(agent_client))
             except Exception as e:  # noqa: BLE001
-                logger.warning("[channel.telegram.set_conf] 写回 config.yaml 失败: %s", e)
+                logger.warning("[channel.telegram.set_conf] 清理 Agent 配置缓存失败: %s", e)
             await channel.send_response(ws, req_id, ok=True, payload={"config": conf})
         except Exception as e:  # noqa: BLE001
             logger.exception("[channel.telegram.set_conf] %s", e)
@@ -2163,10 +2161,9 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             await cm.set_conf("whatsapp", params)
             conf = cm.get_conf("whatsapp")
             try:
-                update_channel_in_config("whatsapp", conf)
                 await _clear_agent_config_cache(_resolve(agent_client))
             except Exception as e:  # noqa: BLE001
-                logger.warning("[channel.whatsapp.set_conf] 写回 config.yaml 失败: %s", e)
+                logger.warning("[channel.whatsapp.set_conf] 清理 Agent 配置缓存失败: %s", e)
             await channel.send_response(ws, req_id, ok=True, payload={"config": conf})
         except Exception as e:  # noqa: BLE001
             logger.exception("[channel.whatsapp.set_conf] %s", e)
@@ -2214,10 +2211,9 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             await cm.set_conf("discord", params)
             conf = cm.get_conf("discord")
             try:
-                update_channel_in_config("discord", conf)
                 await _clear_agent_config_cache(_resolve(agent_client))
             except Exception as e:  # noqa: BLE001
-                logger.warning("[channel.discord.set_conf] 写回 config.yaml 失败: %s", e)
+                logger.warning("[channel.discord.set_conf] 清理 Agent 配置缓存失败: %s", e)
             await channel.send_response(ws, req_id, ok=True, payload={"config": conf})
         except Exception as e:  # noqa: BLE001
             logger.exception("[channel.discord.set_conf] %s", e)
@@ -2265,10 +2261,9 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             await cm.set_conf("wecom", params)
             conf = cm.get_conf("wecom")
             try:
-                update_channel_in_config("wecom", conf)
                 await _clear_agent_config_cache(_resolve(agent_client))
             except Exception as e:  # noqa: BLE001
-                logger.warning("[channel.wecom.set_conf] 写回 config.yaml 失败: %s", e)
+                logger.warning("[channel.wecom.set_conf] 清理 Agent 配置缓存失败: %s", e)
             await channel.send_response(ws, req_id, ok=True, payload={"config": conf})
         except Exception as e:  # noqa: BLE001
             logger.exception("[channel.wecom.set_conf] %s", e)
@@ -2313,13 +2308,20 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             )
             return
         try:
+            from jiuwenswarm.gateway.channel_manager.im_platforms.wechat.login_service import (
+                wechat_login_service,
+            )
+
+            await wechat_login_service.begin(
+                requester_channel_id="web",
+                requester_session_id=str(session_id or ""),
+            )
             await cm.set_conf("wechat", params)
             conf = cm.get_conf("wechat")
             try:
-                update_channel_in_config("wechat", conf)
                 await _clear_agent_config_cache(_resolve(agent_client))
             except Exception as e:  # noqa: BLE001
-                logger.warning("[channel.wechat.set_conf] 写回 config.yaml 失败: %s", e)
+                logger.warning("[channel.wechat.set_conf] 清理 Agent 配置缓存失败: %s", e)
             await channel.send_response(ws, req_id, ok=True, payload={"config": conf})
         except Exception as e:  # noqa: BLE001
             logger.exception("[channel.wechat.set_conf] %s", e)
@@ -2351,21 +2353,27 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             )
             return
         try:
+            from jiuwenswarm.gateway.channel_manager.im_platforms.wechat.login_service import (
+                wechat_login_service,
+            )
             from jiuwenswarm.gateway.channel_manager.im_platforms.wechat.wechat_connect import \
                 clear_wechat_bound_session, reset_wechat_login_ui_state
 
             conf = cm.get_conf("wechat")
             new_conf = clear_wechat_bound_session(conf)
+            await wechat_login_service.begin(
+                requester_channel_id="web",
+                requester_session_id=str(session_id or ""),
+            )
             await reset_wechat_login_ui_state()
             # 若 YAML 里 bot_token 本就为空，仅删凭据文件时 dict 与上次相同，_should_restart_channel 不会重启，扫码 UI 会一直停在 idle
             cm.mark_channel_restart_pending("wechat")
             await cm.set_conf("wechat", new_conf)
             final = cm.get_conf("wechat")
             try:
-                update_channel_in_config("wechat", final)
                 await _clear_agent_config_cache(_resolve(agent_client))
             except Exception as e:  # noqa: BLE001
-                logger.warning("[channel.wechat.unbind] 写回 config.yaml 失败: %s", e)
+                logger.warning("[channel.wechat.unbind] 清理 Agent 配置缓存失败: %s", e)
             await channel.send_response(ws, req_id, ok=True, payload={"config": final})
         except Exception as e:  # noqa: BLE001
             logger.exception("[channel.wechat.unbind] %s", e)

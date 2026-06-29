@@ -488,7 +488,6 @@ class XiaoyiChannel(BaseChannel):
             self._clear_task_timeout(session_id)
             self._clear_session_timeout(session_id)
             self._mark_session_completed(session_id)
-
             # Check if session was waiting for push and send notification
             if self._is_session_waiting_for_push(session_id, task_id) and accumulated_text:
                 summary = accumulated_text[:30] + "..." if len(accumulated_text) > 30 else accumulated_text
@@ -541,7 +540,7 @@ class XiaoyiChannel(BaseChannel):
         async with websockets.connect(
                 url,
                 additional_headers=headers,
-                ssl=ssl_context,
+                # ssl=ssl_context,
                 ping_interval=15,
                 ping_timeout=15,
                 close_timeout=5,

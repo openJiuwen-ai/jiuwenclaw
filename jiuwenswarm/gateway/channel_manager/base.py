@@ -28,6 +28,8 @@ class ChannelType(str, Enum):
     WHATSAPP = "whatsapp"
     WECOM = "wecom"
     WECHAT = "wechat"
+    QQ = "qq"
+    WEIBO = "weibo"
     CLI = "tui"
 
 
@@ -192,4 +194,3 @@ class BaseChannel(ABC):
     def is_running(self) -> bool:
         """Check if the channel_id is running."""
         return self._running
-
