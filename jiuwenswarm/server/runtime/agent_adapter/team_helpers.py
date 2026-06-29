@@ -1430,6 +1430,42 @@ async def _consume_stream_with_query(
                         session_id,
                         source="runtime_ready",
                     )
+                elif parsed.get("event_type") == "team.interact.failed":
+                    reason = str(parsed.get("reason") or "").strip()
+                    error_msg = _INTERACT_REASON_ERROR_MAP.get(
+                        reason,
+                        "Failed to send message, please try again later",
+                    )
+                    logger.warning(
+                        "[TeamHelpers] initial team interact failed: "
+                        "channel_id=%s session_id=%s reason=%s",
+                        _resolve_channel_id(channel_id),
+                        session_id,
+                        reason,
+                    )
+                    _broadcast_event(
+                        channel_id,
+                        session_id,
+                        {
+                            "event_type": "chat.error",
+                            "error": error_msg,
+                            "reason": reason,
+                            "session_id": session_id,
+                            "rid": round_id,
+                        },
+                    )
+                    _broadcast_event(
+                        channel_id,
+                        session_id,
+                        {
+                            "event_type": "chat.processing_status",
+                            "session_id": session_id,
+                            "rid": round_id,
+                            "is_processing": False,
+                            "is_complete": True,
+                        },
+                    )
+                    continue
                 elif parsed.get("event_type") == "team.completed":
                     # Team completed this round — broadcast a single
                     # round-complete signal that also carries team stats.

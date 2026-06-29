@@ -351,7 +351,7 @@ react:
   model_name: ${MODEL_NAME:-deepseek-chat}
   skill_mode: all
   # code_agent / research_agent 默认不启用；只有显式配置 enabled: true 才会显示并可被 task_tool 调用
-  # browser_agent 保持原行为，仍由浏览器 runtime 开关决定是否默认注册；这里只支持覆盖其参数
+  # browser_agent: code.team 路径通过此 key 门控（单 agent 路径仍由 browser runtime 开关决定）
   subagents:
     general_agent:
       enabled: true
@@ -360,6 +360,9 @@ react:
       # max_iterations: 15
     research_agent:
       enabled: false
+      # max_iterations: 15
+    browser_agent:
+      enabled: true
       # max_iterations: 15
   answer_chunk_size: 500
   stream_chunk_threshold: 50

@@ -371,7 +371,7 @@ class RuntimePromptRail(DeepAgentRail):
             browser_tool_policy = (
                 "# Browser Tool Policy\n\n"
                 "- For browser tasks such as opening pages, navigation, clicking, typing, login, screenshots, "
-                "page inspection, or extracting data from a live website, use `spawn_sub_agent` with "
+                "page inspection, or extracting data from a live website, use `task_tool` with "
                 '`subagent_type` set to `"browser_agent"` and put the full browser objective in '
                 "`task_description`.\n"
                 "- Before spawning `browser_agent` for booking, ticketing, purchasing, reservation, or "
@@ -416,7 +416,7 @@ class RuntimePromptRail(DeepAgentRail):
                 "stops without publishing.\n"
                 "- Do not use bash, execute_code, subprocess, shell commands, or direct Chrome/Edge launches "
                 "for browser automation.\n"
-                "- If `spawn_sub_agent` or `browser_agent` is unavailable, say that the browser "
+                "- If `task_tool` or `browser_agent` is unavailable, say that the browser "
                 "subagent is unavailable before trying to start a browser through commands."
             )
             self.system_prompt_builder.add_section(PromptSection(

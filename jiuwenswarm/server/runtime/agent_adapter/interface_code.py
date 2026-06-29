@@ -979,6 +979,31 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
 
             # browser_agent
             browser_agent_cfg = subagents_cfg.get("browser_agent")
+
+            # Headless setup is unconditional: swarm members also spawn @playwright/mcp
+            # subprocesses and ManagedBrowserDriver both read BROWSER_MANAGED_ARGS.
+            # This must run regardless of whether the main-agent browser subagent is enabled.
+            headless = self._resolve_headless_from_config()
+            _mcp_args_raw = (os.getenv("PLAYWRIGHT_MCP_ARGS") or "-y @playwright/mcp@latest").strip()
+            _mcp_args_list = _mcp_args_raw.split() if _mcp_args_raw else ["-y", "@playwright/mcp@latest"]
+            _mcp_args_list = [a for a in _mcp_args_list if a != "--headless"]
+            if headless:
+                _mcp_args_list.append("--headless")
+                os.environ["BROWSER_MANAGED_ARGS"] = "--headless=new"
+                logger.info(
+                    "[JiuwenSwarmCodeAdapter] browser headless=True → "
+                    "BROWSER_MANAGED_ARGS=--headless=new, PLAYWRIGHT_MCP_ARGS=%s",
+                    " ".join(_mcp_args_list),
+                )
+            else:
+                os.environ.pop("BROWSER_MANAGED_ARGS", None)
+                logger.info(
+                    "[JiuwenSwarmCodeAdapter] browser headless=False → "
+                    "headed mode (BROWSER_MANAGED_ARGS cleared)",
+                )
+            os.environ["PLAYWRIGHT_MCP_ARGS"] = " ".join(_mcp_args_list)
+            self._browser_headless_setting = headless
+
             browser_enabled = self._browser_runtime_enabled()
             if browser_enabled:
                 if not str(os.getenv("BROWSER_DRIVER") or "").strip():

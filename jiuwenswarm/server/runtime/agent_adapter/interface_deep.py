@@ -1319,6 +1319,55 @@ class JiuWenSwarmDeepAdapter:
         browser_agent_cfg = (
             subagents_cfg.get("browser_agent") if isinstance(subagents_cfg, dict) else {}
         )
+
+        # Apply headless setting unconditionally — PLAYWRIGHT_MCP_ARGS must be set
+        # even when the main-agent browser subagent is disabled, because swarm members
+        # also spawn @playwright/mcp subprocesses that read this env var at spec-build time.
+        headless = self._resolve_headless_from_config()
+        # @playwright/mcp@latest uses --headless CLI flag (not an env var).
+        # Rebuild PLAYWRIGHT_MCP_ARGS to add or strip --headless as needed.
+        _mcp_args_raw = (os.getenv("PLAYWRIGHT_MCP_ARGS") or "-y @playwright/mcp@latest").strip()
+        _mcp_args_list = _mcp_args_raw.split() if _mcp_args_raw else ["-y", "@playwright/mcp@latest"]
+        _mcp_args_list = [a for a in _mcp_args_list if a != "--headless"]
+        if headless:
+            _mcp_args_list.append("--headless")
+            os.environ["BROWSER_MANAGED_ARGS"] = "--headless=new"
+            # Purge any stale managed-browser profile whose extra_args lack
+            # --headless=new. The managed driver reuses a persisted profile
+            # by name and would inherit its stale extra_args=[] otherwise.
+            try:
+                from pathlib import Path as _Path
+                from jiuwenswarm.common.utils import get_user_workspace_dir as _get_ws
+                _profile_store = _Path(
+                    os.getenv("BROWSER_PROFILE_STORE_PATH", "").strip()
+                    or str(_get_ws() / ".browser" / "profiles.json")
+                ).expanduser()
+                if _profile_store.exists():
+                    _profile_store.unlink()
+                    logger.info(
+                        "[JiuWenSwarmDeepAdapter] cleared stale browser profile store "
+                        "for headless mode: %s",
+                        _profile_store,
+                    )
+            except Exception as _e:
+                logger.debug(
+                    "[JiuWenSwarmDeepAdapter] could not clear browser profile store: %s", _e
+                )
+            logger.info(
+                "[JiuWenSwarmDeepAdapter] browser headless=True → "
+                "BROWSER_MANAGED_ARGS=--headless=new, PLAYWRIGHT_MCP_ARGS=%s",
+                " ".join(_mcp_args_list),
+            )
+        else:
+            os.environ.pop("BROWSER_MANAGED_ARGS", None)
+            logger.info(
+                "[JiuWenSwarmDeepAdapter] browser headless=False → "
+                "headed mode (BROWSER_MANAGED_ARGS cleared, PLAYWRIGHT_MCP_ARGS=%s)",
+                " ".join(_mcp_args_list),
+            )
+        os.environ["PLAYWRIGHT_MCP_ARGS"] = " ".join(_mcp_args_list)
+        self._browser_headless_setting = headless
+
         browser_enabled = self._browser_runtime_enabled()
         if browser_enabled:
             if not str(os.getenv("BROWSER_DRIVER") or "").strip():
