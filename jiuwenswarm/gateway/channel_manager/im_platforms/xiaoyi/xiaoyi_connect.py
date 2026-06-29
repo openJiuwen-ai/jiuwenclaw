@@ -21,6 +21,7 @@ from urllib.parse import urlparse
 
 import aiohttp
 
+from jiuwenswarm.common.device_rpc.models import DeviceCommandRequest
 from jiuwenswarm.gateway.channel_manager.base import BaseChannel, ChannelMetadata, RobotMessageRouter
 from jiuwenswarm.common.schema.message import EventType, Message, ReqMethod
 from jiuwenswarm.gateway.channel_manager.im_platforms.xiaoyi.xiaoyi_utils.push import XiaoYiPushService, PushConfig
@@ -31,6 +32,14 @@ from jiuwenswarm.gateway.channel_manager.im_platforms.xiaoyi.xiaoyi_utils.format
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _is_data_event_status_success(status: Any) -> bool:
+    if status is True:
+        return True
+    if status is None or status is False:
+        return False
+    return str(status).strip().lower() in ("success", "succeed", "successful", "ok")
 
 FILE_TYPE_TO_MIME_TYPE: dict[str, str] = {
     "txt": "text/plain",
@@ -262,6 +271,7 @@ class XiaoyiChannel(BaseChannel):
         self._gui_agent_handlers: List[Callable[[dict[str, Any]], Any]] = []
         # GUI 工具互斥：避免并发注册多个 handler 导致回包串单；不影响其他工具并发
         self._gui_tool_lock = asyncio.Lock()
+        self._device_command_locks: dict[tuple[str, str], asyncio.Lock] = {}
 
     @property
     def channel_id(self) -> str:
@@ -779,7 +789,10 @@ class XiaoyiChannel(BaseChannel):
         metadata = {
             "method": "message/stream",
             "xiaoyi_session_id": session_id,
+            "xiaoyi_root_session_id": session_id,
+            "xiaoyi_params_session_id": message.get("params", {}).get("sessionId", ""),
             "xiaoyi_task_id": task_id,
+            "xiaoyi_rpc_id": str(message.get("id") or ""),
         }
         # Add media payload to metadata
         params = {"query": text, "task_id": task_id}
@@ -1281,6 +1294,99 @@ class XiaoyiChannel(BaseChannel):
                     logger.warning(f"XiaoyiChannel 发送 command 失败 ({url_key}): {e}")
 
         return sent
+
+    async def execute_phone_tool_command(
+        self,
+        request: DeviceCommandRequest,
+    ) -> dict[str, Any]:
+        context = request.context
+        session_id = (
+            context.xiaoyi_root_session_id
+            or context.xiaoyi_params_session_id
+            or context.jiuwen_session_id
+            or ""
+        )
+        if not session_id:
+            raise RuntimeError("Xiaoyi session_id is missing")
+        task_id = context.xiaoyi_task_id or session_id
+        message_id = f"cmd_{request.operation_id}"
+        lock_key = (session_id, request.intent_name)
+        lock = self._device_command_locks.setdefault(lock_key, asyncio.Lock())
+        async with lock:
+            return await self._execute_phone_tool_command_locked(
+                request=request,
+                session_id=session_id,
+                task_id=task_id,
+                message_id=message_id,
+            )
+
+    async def _execute_phone_tool_command_locked(
+        self,
+        *,
+        request: DeviceCommandRequest,
+        session_id: str,
+        task_id: str,
+        message_id: str,
+    ) -> dict[str, Any]:
+        result_event = asyncio.Event()
+        result_data: dict[str, Any] | None = None
+        error: Exception | None = None
+        started_at = time.monotonic()
+
+        def on_data_event(event: DataEvent) -> None:
+            nonlocal result_data, error
+            if event.intent_name != request.intent_name:
+                return
+            if _is_data_event_status_success(event.status):
+                result_data = {} if event.outputs is None else event.outputs
+            else:
+                error = RuntimeError(f"Device execution failed: {event.status}")
+            result_event.set()
+
+        self.register_data_event_handler(request.intent_name, on_data_event)
+        try:
+            logger.info(
+                "[XiaoyiChannel] device command send: rpc_id=%s operation_id=%s source_request_id=%s "
+                "session_id=%s task_id=%s intent_name=%s pid=%s",
+                request.rpc_id,
+                request.operation_id,
+                request.context.source_request_id,
+                session_id,
+                task_id,
+                request.intent_name,
+                os.getpid(),
+            )
+            sent = await self.send_xiaoyi_phone_tools_command(
+                session_id=session_id,
+                task_id=task_id,
+                message_id=message_id,
+                command=request.command,
+            )
+            if not sent:
+                raise RuntimeError("Xiaoyi WebSocket is not connected")
+
+            await asyncio.wait_for(
+                result_event.wait(),
+                timeout=request.timeout_seconds,
+            )
+            if error is not None:
+                raise error
+            return {} if result_data is None else result_data
+        finally:
+            elapsed_ms = int((time.monotonic() - started_at) * 1000)
+            logger.info(
+                "[XiaoyiChannel] device command finished: rpc_id=%s operation_id=%s source_request_id=%s "
+                "session_id=%s task_id=%s intent_name=%s pid=%s elapsed_ms=%s",
+                request.rpc_id,
+                request.operation_id,
+                request.context.source_request_id,
+                session_id,
+                task_id,
+                request.intent_name,
+                os.getpid(),
+                elapsed_ms,
+            )
+            self.unregister_data_event_handler(request.intent_name, on_data_event)
 
     def _get_a2a_parts(self, message: dict[str, Any]) -> list[dict[str, Any]]:
         """从直连或 Wrapped A2A 消息中取出 message.parts."""

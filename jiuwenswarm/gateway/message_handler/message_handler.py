@@ -17,8 +17,16 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, Dict, Literal
 from jiuwenswarm.gateway.channel_manager.base import ChannelType
-from jiuwenswarm.common.e2a.constants import E2A_WIRE_INTERNAL_METADATA_KEYS
+
+from jiuwenswarm.common.e2a.constants import (
+    E2A_RESPONSE_KIND_XIAOYI_DEVICE_COMMAND_REQUEST,
+    E2A_WIRE_INTERNAL_METADATA_KEYS,
+)
+from jiuwenswarm.gateway.gateway_push.xiaoyi_device_command_handler import (
+    XiaoyiDeviceCommandHandler,
+)
 from jiuwenswarm.common.config import get_evolution_auto_save_enabled
+
 from jiuwenswarm.gateway.routing.session_map import SessionMap
 from jiuwenswarm.gateway.message_handler.command_parser.slash_command import (
     ParsedControlAction,
@@ -195,6 +203,7 @@ class MessageHandler(ABC):
         self._channel_states: Dict[str, ChannelControlState] = {}
         self._session_map = SessionMap()
         self._cron_controller = None
+        self._xiaoyi_device_handler = XiaoyiDeviceCommandHandler(self._agent_client)
 
         # IM Pipeline（数字分身）— None 时不执行，不影响原有逻辑
         self._inbound_pipeline = None   # type: Any  # IMInboundPipeline | None
@@ -1958,6 +1967,11 @@ class MessageHandler(ABC):
     async def _handle_agent_server_push(self, wire: dict[str, Any]) -> None:
         """AgentServer ``send_push`` 下行：与 RPC 共用连接但不得占用 unary/stream 等待队列。"""
         from jiuwenswarm.common.e2a.wire_codec import parse_agent_server_wire_chunk
+
+        response_kind = str(wire.get("response_kind") or "")
+        if response_kind == E2A_RESPONSE_KIND_XIAOYI_DEVICE_COMMAND_REQUEST:
+            await self._xiaoyi_device_handler.handle(wire)
+            return
 
         try:
             chunk = parse_agent_server_wire_chunk(wire)
