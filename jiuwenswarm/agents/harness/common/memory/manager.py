@@ -445,7 +445,7 @@ class MemoryIndexManager:
         try:
             self._event_loop.call_soon_threadsafe(schedule_sync)
         except Exception as e:
-            logger.debug(f"Failed to schedule sync: {e}")
+            logger.debug("Failed to schedule sync: %s", e)
 
     def _ensure_interval_sync(self) -> None:
         """Setup interval-based sync if configured."""
@@ -485,7 +485,7 @@ class MemoryIndexManager:
                 await self._run_reindex()
                 return
 
-            logger.debug(f"Memory sync (reason: {reason or 'unknown'})...")
+            logger.debug("Memory sync (reason: %s)...", reason or 'unknown')
 
             if "memory" in self.settings.sources and self.dirty:
                 await self._sync_memory_files()
@@ -581,7 +581,7 @@ class MemoryIndexManager:
         """
         files = list_memory_files(self.workspace_dir, self.settings.extraPaths)
 
-        logger.debug(f"Syncing {len(files)} memory files")
+        logger.debug("Syncing %d memory files", len(files))
 
         active_paths = set()
 
@@ -617,7 +617,7 @@ class MemoryIndexManager:
                 if f.endswith(".jsonl"):
                     session_files.append(os.path.join(root, f))
 
-        logger.debug(f"Syncing {len(session_files)} session files")
+        logger.debug("Syncing %d session files", len(session_files))
 
         active_paths = set()
         for session_file in session_files:
@@ -702,7 +702,7 @@ class MemoryIndexManager:
                     VALUES (?, ?, ?, ?, ?)
                 """, (chunk_rowid, chunk_id, file_path, source, chunk.text))
             except Exception as e:
-                logger.debug(f"Failed to insert into FTS: {e}")
+                logger.debug("Failed to insert into FTS: %s", e)
 
         if self.vector_available and embedding and chunk_rowid:
             try:
@@ -712,7 +712,7 @@ class MemoryIndexManager:
                         VALUES (?, vec_f32(?))
                     """, (chunk_rowid, vector_to_blob(embedding)))
             except Exception as e:
-                logger.debug(f"Failed to insert into vector table: {e}")
+                logger.debug("Failed to insert into vector table: %s", e)
 
     def _remove_file_from_index(self, file_path: str) -> None:
         """Remove file from index."""
@@ -772,6 +772,7 @@ class MemoryIndexManager:
                     text_hash, vector_to_blob(embedding), len(embedding),
                     int(asyncio.get_event_loop().time()) if self._event_loop else 0
                 ))
+                self.db.commit()
 
             return embedding
 
@@ -813,7 +814,7 @@ class MemoryIndexManager:
             try:
                 keyword_results = await self._search_keyword(cleaned, candidates)
             except Exception as e:
-                logger.debug(f"Keyword search failed: {e}")
+                logger.debug("Keyword search failed: %s", e)
 
         query_vec = await self._embed_query_with_timeout(cleaned)
         has_vector = any(v != 0 for v in query_vec)
@@ -823,7 +824,7 @@ class MemoryIndexManager:
             try:
                 vector_results = await self._search_vector(query_vec, candidates)
             except Exception as e:
-                logger.debug(f"Vector search failed: {e}")
+                logger.debug("Vector search failed: %s", e)
 
         if not hybrid.get("enabled", True):
             return [
@@ -909,7 +910,7 @@ class MemoryIndexManager:
             return results
 
         except Exception as e:
-            logger.debug(f"Vector search with sqlite-vec failed: {e}")
+            logger.debug("Vector search with sqlite-vec failed: %s", e)
             return await self._search_vector_fallback(query_vec, limit)
 
     async def _search_vector_fallback(
@@ -1021,7 +1022,7 @@ class MemoryIndexManager:
             return results
 
         except Exception as e:
-            logger.debug(f"Keyword search failed: {e}")
+            logger.debug("Keyword search failed: %s", e)
             return []
 
     def _build_source_filter(self) -> str:

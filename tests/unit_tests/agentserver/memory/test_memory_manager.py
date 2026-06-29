@@ -64,7 +64,7 @@ async def test_sync_serializes_concurrent_calls() -> None:
 
 
 @pytest.mark.asyncio
-async def test_get_embedding_leaves_commit_to_outer_transaction() -> None:
+async def test_get_embedding_commits_cache_write() -> None:
     class Provider:
         id = "test-provider"
         model = "test-model"
@@ -96,7 +96,11 @@ async def test_get_embedding_leaves_commit_to_outer_transaction() -> None:
         embedding = await manager.get_embedding("test input")
 
         assert embedding == [1.0, 2.0]
-        assert manager.db.in_transaction
+        assert not manager.db.in_transaction
+        cached_rows = manager.db.execute(
+            f"SELECT COUNT(*) FROM {EMBEDDING_CACHE_TABLE}"
+        ).fetchone()[0]
+        assert cached_rows == 1
     finally:
         manager.db.rollback()
         manager.db.close()
