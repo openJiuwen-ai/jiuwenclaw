@@ -89,14 +89,6 @@ async def _run(host: str, port: int) -> None:
     from jiuwenclaw.extensions.manager import ExtensionManager
     from jiuwenclaw.extensions.registry import ExtensionRegistry
     from jiuwenclaw.telemetry import init_telemetry
-
-    # 检查是否启用 OA 模式
-    oa_ws_url = os.getenv("AGENTSERVER_TO_OA_WS_URL", "").strip()
-    if oa_ws_url:
-        logger.info("[AgentServer] starting in OA mode, will connect to: %s", oa_ws_url)
-    else:
-        logger.info("[AgentServer] starting: ws://%s:%s", host, port)
-
     from jiuwenclaw.agentserver.session_metadata import remove_team_mode_session_dirs_at_startup
 
     remove_team_mode_session_dirs_at_startup()
@@ -116,6 +108,22 @@ async def _run(host: str, port: int) -> None:
 
     # ---------- Telemetry 初始化 ----------
     init_telemetry()
+
+    # 阻塞等待从 Gateway 传入的环境变量文件
+    if (os.getenv("SANDBOX_ENABLE") or "").lower() == "true":
+        from jiuwenclaw.agentserver.env_loader import wait_and_load_env
+
+        try:
+            await wait_and_load_env()
+        except Exception as e:
+            logger.warning("[AgentServer] Failed to load env from gateway: %s, using local env", e)
+
+    # 检查是否启用 OA 模式
+    oa_ws_url = os.getenv("AGENTSERVER_TO_OA_WS_URL", "").strip()
+    if oa_ws_url:
+        logger.info("[AgentServer] starting in OA mode, will connect to: %s", oa_ws_url)
+    else:
+        logger.info("[AgentServer] starting: ws://%s:%s", host, port)
 
     server = AgentWebSocketServer.get_instance(
         host=host,
@@ -198,4 +206,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
