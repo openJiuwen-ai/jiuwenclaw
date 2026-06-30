@@ -75,12 +75,15 @@ async def upload_sandbox_init_data(
     *,
     sandbox_id: str,
     api_key: str,
+    user_id: str,
     remote_path: str | None = None,
 ) -> None:
+    effective_user_id = str(user_id).strip()
     if sandbox_sidecar_enabled():
         sidecar_result = await sandbox_client.upload_apikey_to_sidecar(
             sandbox_id,
             api_key,
+            effective_user_id,
         )
         if not sidecar_result.success:
             raise RuntimeError(

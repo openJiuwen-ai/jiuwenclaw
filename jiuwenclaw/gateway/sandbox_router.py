@@ -702,7 +702,10 @@ class SandboxRouterAgentClient(AgentServerClient):
                         "routing NX lost but no adoptable sandbox in DCS"
                     )
 
-            registration = await self._register_sandbox_record(sandbox_id)
+            registration = await self._register_sandbox_record(
+                sandbox_id,
+                user_id=str(user_id or session_id or "").strip(),
+            )
             dcs_registered = bool(registration.get("api_key"))
             metadata = {
                 "routing_key": routing_key,
@@ -995,12 +998,17 @@ class SandboxRouterAgentClient(AgentServerClient):
             )
             return False
 
-    async def _register_sandbox_record(self, sandbox_id: str) -> dict[str, str]:
+    async def _register_sandbox_record(
+        self,
+        sandbox_id: str,
+        *,
+        user_id: str,
+    ) -> dict[str, str]:
         store = self._get_dcs_store()
         api_key = get_claw_api_key()
         record = await store.save_sandbox(sandbox_id, api_key=api_key)
         interface_info.mark_current(interface_info.TimingPoint.SANDBOX_DCS_WRITTEN)
-        await self._upload_sandbox_init_data(sandbox_id, api_key)
+        await self._upload_sandbox_init_data(sandbox_id, api_key, user_id=user_id)
         interface_info.mark_current(
             interface_info.TimingPoint.SANDBOX_API_KEY_UPLOADED
         )
@@ -1010,12 +1018,19 @@ class SandboxRouterAgentClient(AgentServerClient):
             "api_key_sha256": record.api_key_sha256,
         }
 
-    async def _upload_sandbox_init_data(self, sandbox_id: str, api_key: str) -> None:
+    async def _upload_sandbox_init_data(
+        self,
+        sandbox_id: str,
+        api_key: str,
+        *,
+        user_id: str,
+    ) -> None:
         sandbox_client = self._get_sandbox_client()
         await upload_sandbox_init_data(
             sandbox_client,
             sandbox_id=sandbox_id,
             api_key=api_key,
+            user_id=user_id,
         )
 
     async def _delete_sandbox_dcs_record(self, sandbox_id: str) -> None:

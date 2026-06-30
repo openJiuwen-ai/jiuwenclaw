@@ -113,10 +113,14 @@ class SandboxClient:
         self,
         sandbox_id: str,
         apikey: str,
+        user_id: str,
     ) -> ExecutionResult:
         return ExecutionResult(
             success=True,
-            output=f"placeholder upload_apikey_to_sidecar: sandbox_id={sandbox_id}",
+            output=(
+                "placeholder upload_apikey_to_sidecar: "
+                f"sandbox_id={sandbox_id} user_id={user_id}"
+            ),
         )
 
     async def download_file(
