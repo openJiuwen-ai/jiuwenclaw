@@ -72,6 +72,32 @@ def _resolve_enable_cache_sharing(agent: Any) -> bool:
     return bool(getattr(ce, "enable_kv_cache_release", False))
 
 
+def _log_cache_hit(response: Any, scenario: str, session_id: Optional[str],
+                   model_name: Optional[str]) -> None:
+    """Log cache-hit ratio for the real LLM response (debug only).
+
+    Reads ``response.usage_metadata.cache_tokens`` (populated by agent-core's
+    ``_extract_cache_tokens`` from vLLM's ``prompt_cache_hit_tokens`` /
+    ``prompt_tokens_details.cached_tokens``). ``input_tokens`` is the total
+    prompt tokens for this call; hit ratio = cache_read / input.
+    """
+    usage = getattr(response, "usage_metadata", None)
+    if usage is None:
+        logger.info(
+            "[PrewarmRail] after_model_call scenario=%s sid=%s model=%s "
+            "usage=none (no cache stats available)", scenario, session_id, model_name,
+        )
+        return
+    cache_read = int(getattr(usage, "cache_tokens", 0) or 0)
+    input_tokens = int(getattr(usage, "input_tokens", 0) or 0)
+    ratio = (cache_read / input_tokens) if input_tokens else 0.0
+    logger.info(
+        "[PrewarmRail] after_model_call scenario=%s sid=%s model=%s "
+        "cache_read=%d input=%d hit_ratio=%.2f",
+        scenario, session_id, model_name, cache_read, input_tokens, ratio,
+    )
+
+
 def _resolve_session_id(ctx: AgentCallbackContext) -> Optional[str]:
     session = getattr(ctx, "session", None)
     if session is None:
@@ -157,6 +183,9 @@ class PrewarmRail(AgentRail):
 
         has_tool_calls = bool(getattr(response, "tool_calls", None))
         scenario = "B" if has_tool_calls else "C"
+
+        if self._coordinator.config.debug:
+            _log_cache_hit(response, scenario, session_id, model_name)
 
         await self._coordinator.prewarm(
             client,

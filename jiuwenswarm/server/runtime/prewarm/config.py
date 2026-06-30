@@ -7,6 +7,7 @@ Env vars:
   JIUWENSWARM_PREWARM_SCENARIO_A   (bool, default true)  static-prefix prewarm on first call
   JIUWENSWARM_PREWARM_SCENARIO_BC  (bool, default true)  per-round prewarm at after_model_call
   JIUWENSWARM_PREWARM_TIMEOUT      (float, default 10.0) per-request timeout in seconds
+  JIUWENSWARM_PREWARM_DEBUG        (bool, default false) log cache-hit ratio per real LLM call
 """
 from __future__ import annotations
 
@@ -37,6 +38,7 @@ class PrewarmConfig:
     scenario_a: bool = True
     scenario_bc: bool = True
     timeout: float = 10.0
+    debug: bool = False
 
     @classmethod
     def from_env(cls) -> "PrewarmConfig":
@@ -45,4 +47,5 @@ class PrewarmConfig:
             scenario_a=_env_bool("JIUWENSWARM_PREWARM_SCENARIO_A", True),
             scenario_bc=_env_bool("JIUWENSWARM_PREWARM_SCENARIO_BC", True),
             timeout=_env_float("JIUWENSWARM_PREWARM_TIMEOUT", 10.0),
+            debug=_env_bool("JIUWENSWARM_PREWARM_DEBUG", False),
         )

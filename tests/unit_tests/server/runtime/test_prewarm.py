@@ -305,9 +305,16 @@ class TestPrewarmCoordinatorSwallows:
 # PrewarmRail
 # --------------------------------------------------------------------------- #
 
+class _FakeUsageMetadata:
+    def __init__(self, cache_tokens: int = 0, input_tokens: int = 0):
+        self.cache_tokens = cache_tokens
+        self.input_tokens = input_tokens
+
+
 class _FakeAssistantMessage:
-    def __init__(self, tool_calls=None):
+    def __init__(self, tool_calls=None, usage_metadata=None):
         self.tool_calls = tool_calls
+        self.usage_metadata = usage_metadata
 
 
 class _FakeInputs:
@@ -473,3 +480,80 @@ class TestPrewarmRailCacheSharingFlag:
         await rail.after_model_call(ctx)
         await asyncio.sleep(0.05)
         assert client.calls[0]["enable_cache_sharing"] is False
+
+
+class TestPrewarmRailDebugLog:
+    @staticmethod
+    def _patch_stdlib_logger(monkeypatch):
+        """Force the rail module's logger to a stdlib logger so caplog can see it."""
+        import logging
+        import jiuwenswarm.server.runtime.prewarm.rail as rail_mod
+        stdlib_logger = logging.getLogger("prewarm_test")
+        monkeypatch.setattr(rail_mod, "logger", stdlib_logger)
+        return "prewarm_test"
+
+    async def test_debug_log_emits_cache_hit_ratio(self, monkeypatch, caplog):
+        import logging
+        log_name = self._patch_stdlib_logger(monkeypatch)
+        coord = PrewarmCoordinator(PrewarmConfig(enabled=True, debug=True))
+        rail = PrewarmRail(coord)
+        client = _FakeModelClient()
+        agent = _FakeReActAgent(client)
+        _patch_aiohttp_session(monkeypatch)
+
+        usage = _FakeUsageMetadata(cache_tokens=800, input_tokens=1000)
+        response = _FakeAssistantMessage(tool_calls=None, usage_metadata=usage)
+        ctx = _FakeRailCtx(agent, _FakeInputs(
+            messages=[{"role": "user", "content": "hi"}], tools=None,
+            response=response))
+
+        with caplog.at_level(logging.INFO, logger=log_name):
+            await rail.after_model_call(ctx)
+            await asyncio.sleep(0.05)
+
+        assert any(
+            "cache_read=800" in r.message and "input=1000" in r.message
+            and "hit_ratio=0.80" in r.message
+            for r in caplog.records
+        )
+
+    async def test_debug_log_silent_when_disabled(self, monkeypatch, caplog):
+        import logging
+        log_name = self._patch_stdlib_logger(monkeypatch)
+        coord = PrewarmCoordinator(PrewarmConfig(enabled=True, debug=False))
+        rail = PrewarmRail(coord)
+        client = _FakeModelClient()
+        agent = _FakeReActAgent(client)
+        _patch_aiohttp_session(monkeypatch)
+
+        usage = _FakeUsageMetadata(cache_tokens=800, input_tokens=1000)
+        response = _FakeAssistantMessage(usage_metadata=usage)
+        ctx = _FakeRailCtx(agent, _FakeInputs(
+            messages=[{"role": "user", "content": "hi"}], tools=None,
+            response=response))
+
+        with caplog.at_level(logging.INFO, logger=log_name):
+            await rail.after_model_call(ctx)
+            await asyncio.sleep(0.05)
+
+        assert not any("hit_ratio" in r.message for r in caplog.records)
+
+    async def test_debug_log_handles_missing_usage(self, monkeypatch, caplog):
+        import logging
+        log_name = self._patch_stdlib_logger(monkeypatch)
+        coord = PrewarmCoordinator(PrewarmConfig(enabled=True, debug=True))
+        rail = PrewarmRail(coord)
+        client = _FakeModelClient()
+        agent = _FakeReActAgent(client)
+        _patch_aiohttp_session(monkeypatch)
+
+        response = _FakeAssistantMessage(usage_metadata=None)
+        ctx = _FakeRailCtx(agent, _FakeInputs(
+            messages=[{"role": "user", "content": "hi"}], tools=None,
+            response=response))
+
+        with caplog.at_level(logging.INFO, logger=log_name):
+            await rail.after_model_call(ctx)
+            await asyncio.sleep(0.05)
+
+        assert any("usage=none" in r.message for r in caplog.records)
