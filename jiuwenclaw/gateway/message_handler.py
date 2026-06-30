@@ -1641,16 +1641,12 @@ class MessageHandler(ABC):
                 request_mode = self._stream_modes.get(request_id)
                 if request_mode:
                     params["mode"] = request_mode
-                if (
-                    str(params.get("targets") or "").strip() == "web"
-                    and session_id
-                    and not params.get("session_id")
-                ):
-                    params = dict(params)
-                    params["session_id"] = session_id
                 data = await cc.create_job(params)
             elif action == "update":
-                data = await cc.update_job(str(params.get("job_id") or ""), dict(params.get("patch") or {}))
+                data = await cc.update_job(
+                    str(params.get("job_id") or ""),
+                    dict(params.get("patch") or {}),
+                )
             elif action == "delete":
                 data = {"deleted": await cc.delete_job(str(params.get("job_id") or ""))}
             elif action == "toggle":

@@ -19,7 +19,7 @@ from jiuwenclaw.gateway.cron.models import (
     normalize_target_channel_id,
     upgrade_bare_feishu_target_for_multi_bot_config,
 )
-from jiuwenclaw.agentserver.cron_tool_context import (
+from jiuwenclaw.agentserver.tools.cron_tool_context import (
     get_cron_tool_channel_id,
     get_cron_tool_metadata,
     get_cron_tool_session_id,
@@ -272,6 +272,16 @@ class CronTools:
         )
         return fallback
 
+    def _routing_session_id_for_targets(self, targets_str: str) -> str | None:
+        """Bind delivery session for web and feishu:<app_id> cron targets."""
+        t = str(targets_str or "").strip()
+        sid = self._route().session_id
+        if not isinstance(sid, str) or not sid.strip():
+            return None
+        if t == CronTargetChannel.WEB.value or t.startswith("feishu:"):
+            return sid.strip()
+        return None
+
     def _upgrade_bare_feishu_to_route_app_id(self, targets_str: str) -> str:
         """多 bot 仅注册 feishu:<app_id>；若 LLM 显式写了 targets=feishu，则改为当前会话 bot。"""
         t = str(targets_str or "").strip()
@@ -350,10 +360,9 @@ class CronTools:
             targets_str,
         )
         session_kw: dict[str, Any] = {}
-        if str(targets_str).strip().startswith("feishu:"):
-            sid = self._route().session_id
-            if isinstance(sid, str) and sid.strip():
-                session_kw["session_id"] = sid.strip()
+        routing_sid = self._routing_session_id_for_targets(targets_str)
+        if routing_sid:
+            session_kw["session_id"] = routing_sid
         chat_type = self._route().chat_type
         if chat_type:
             session_kw["chat_type"] = chat_type
@@ -388,12 +397,9 @@ class CronTools:
                 str(normalized_patch.get("targets") or "")
             )
             t = str(normalized_patch.get("targets") or "").strip()
-            if t.startswith("feishu:"):
-                sid = self._route().session_id
-                if isinstance(sid, str) and sid.strip():
-                    normalized_patch["session_id"] = sid.strip()
-            else:
-                normalized_patch["session_id"] = None
+            routing_sid = self._routing_session_id_for_targets(t)
+            if routing_sid:
+                normalized_patch["session_id"] = routing_sid
         chat_type = self._route().chat_type
         normalized_patch["chat_type"] = chat_type if chat_type else None
         job = await self._local_store.update_job(job_id, normalized_patch)
