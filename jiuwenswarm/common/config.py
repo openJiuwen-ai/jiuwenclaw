@@ -58,7 +58,11 @@ def resolve_env_vars(value: Any) -> Any:
                     if is_need_decrypt and crypto:
                         current = crypto.decrypt(current)
                 except Exception:
-                    pass
+                    logger.debug(
+                        "Crypto provider unavailable while resolving env var %s; using raw value",
+                        var_name,
+                        exc_info=True,
+                    )
             # Bash: ${VAR:-default} uses default when VAR is unset OR empty.
             # ${VAR} (no :-) keeps getenv behavior; unset -> "".
             if default is not None:
@@ -798,7 +802,11 @@ def _decrypt_model_entries(entries: list[dict[str, Any]]) -> list[dict[str, Any]
         try:
             crypto = reg_mod.ExtensionRegistry.get_instance().get_crypto_provider()
         except Exception:
-            pass
+            logger.debug(
+                "Crypto provider unavailable while decrypting model entries; "
+                "api_key fields will be returned as stored",
+                exc_info=True,
+            )
 
     for entry in result:
         mcc = entry.get("model_client_config")
@@ -807,7 +815,10 @@ def _decrypt_model_entries(entries: list[dict[str, Any]]) -> list[dict[str, Any]
                 try:
                     mcc["api_key"] = crypto.decrypt(mcc["api_key"])
                 except Exception:
-                    pass
+                    logger.warning(
+                        "Failed to decrypt api_key for model entry; using raw value",
+                        exc_info=True,
+                    )
             if "custom_headers" in mcc:
                 mcc["custom_headers"] = _parse_custom_headers(mcc["custom_headers"])
 

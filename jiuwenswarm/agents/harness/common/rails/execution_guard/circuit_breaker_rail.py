@@ -6,7 +6,7 @@
   - generic_repeat:      相同工具+参数重复 (WARNING≥10)
   - unknown_tool_repeat: 错误工具连续调用 (CRITICAL≥10)
   - global_breaker:      工具无进展兜底中断 (CRITICAL≥30)
-  - ping_pong:           两工具交替循环 (WARNING≥10, CRITICAL≥20)
+  - ping_pong:           两工具交替循环，尾部无进展轮次 (WARNING≥10, CRITICAL≥20)
 """
 
 from __future__ import annotations
@@ -53,7 +53,7 @@ _MESSAGES: dict[str, dict[str, str]] = {
         "global_circuit_breaker": "全局断路器: {tool_name} 连续 {count} 次无进展",
         "unknown_tool_repeat": "未知工具 {tool_name} 连续调用 {count} 次，停止重试",
         "ping_pong_critical": "Ping-Pong 循环: {count} 轮交替无进展，阻断",
-        "ping_pong_warning": "Ping-Pong 警告: {count} 轮交替调用",
+        "ping_pong_warning": "Ping-Pong 警告: {count} 轮交替无进展",
         "generic_repeat": "工具 {tool_name} 已重复调用 {count} 次，请检查是否有效",
     },
     "en": {
@@ -66,7 +66,7 @@ _MESSAGES: dict[str, dict[str, str]] = {
         "ping_pong_critical": (
             "Ping-pong loop: {count} alternating calls with no progress, blocked"
         ),
-        "ping_pong_warning": "Ping-pong warning: {count} alternating calls",
+        "ping_pong_warning": "Ping-pong warning: {count} alternating calls with no progress",
         "generic_repeat": (
             "Tool {tool_name} has been repeated {count} times, please verify it is effective"
         ),
@@ -74,6 +74,13 @@ _MESSAGES: dict[str, dict[str, str]] = {
 }
 
 _DEFAULT_LANGUAGE = "cn"
+
+# 按工具排除不影响执行语义的顶层 metadata 键（不参与 args_hash）。
+_METADATA_ONLY_TOP_LEVEL: dict[str, frozenset[str]] = {
+    "bash": frozenset({"description"}),
+    "powershell": frozenset({"description"}),
+    "Agent": frozenset({"description"}),
+}
 
 __all__ = [
     "CircuitBreakerConfig",
@@ -252,7 +259,7 @@ class DetectionResult:
 
 @dataclass
 class PingPongResult:
-    count: int = 0
+    no_progress_rounds: int = 0
     paired_tool: str | None = None
     no_progress: bool = False
 
@@ -416,13 +423,19 @@ class CircuitBreakerRail(DeepAgentRail):
                 msg_key="unknown_tool_repeat", tool_name=tool_name)
 
         ping_pong = self._get_ping_pong_streak(history, args_hash)
-        if ping_pong.count >= cfg.critical_threshold and ping_pong.no_progress:
+        if (
+            ping_pong.no_progress
+            and ping_pong.no_progress_rounds >= cfg.critical_threshold
+        ):
             return DetectionResult(stuck=True, level="critical",
-                detector="ping_pong", count=ping_pong.count,
+                detector="ping_pong", count=ping_pong.no_progress_rounds,
                 msg_key="ping_pong_critical", tool_name=tool_name)
-        if ping_pong.count >= cfg.warning_threshold:
+        if (
+            ping_pong.no_progress
+            and ping_pong.no_progress_rounds >= cfg.warning_threshold
+        ):
             return DetectionResult(stuck=True, level="warning",
-                detector="ping_pong", count=ping_pong.count,
+                detector="ping_pong", count=ping_pong.no_progress_rounds,
                 msg_key="ping_pong_warning", tool_name=tool_name)
 
         recent = self._count_recent_same(history, tool_name, args_hash)
@@ -434,8 +447,22 @@ class CircuitBreakerRail(DeepAgentRail):
         return DetectionResult(stuck=False)
 
     @staticmethod
+    def _canonicalize_args_for_hash(tool_name: str, params: Any) -> Any:
+        """Strip tool-specific metadata keys before args hashing."""
+        if not isinstance(params, dict):
+            return params
+        excluded = _METADATA_ONLY_TOP_LEVEL.get(tool_name, frozenset())
+        if not excluded:
+            return params
+        return {key: value for key, value in params.items() if key not in excluded}
+
+    @staticmethod
     def _hash_args(tool_name: str, params: dict) -> str:
-        canonical = json.dumps(params, sort_keys=True, default=str)
+        canonical = json.dumps(
+            CircuitBreakerRail._canonicalize_args_for_hash(tool_name, params),
+            sort_keys=True,
+            default=str,
+        )
         return hashlib.sha256(f"{tool_name}:{canonical}".encode()).hexdigest()
 
     def _hash_outcome(self, result: Any) -> str | None:
@@ -484,12 +511,31 @@ class CircuitBreakerRail(DeepAgentRail):
         return streak
 
     @staticmethod
-    def _side_outputs_stable(records: list[ToolCallRecord]) -> bool:
-        """单侧所有 result_hash 非 None 且全部相等."""
-        hashes = [r.result_hash for r in records if r.result_hash is not None]
-        if len(hashes) != len(records) or not hashes:
-            return False
-        return all(h == hashes[0] for h in hashes)
+    def _get_side_tail_streak(records: list[ToolCallRecord]) -> int:
+        """从该侧最后一次调用向前，统计连续相同 result_hash 次数."""
+        streak = 0
+        latest_hash = None
+        for record in reversed(records):
+            if record.result_hash is None:
+                break
+            if latest_hash is None:
+                latest_hash = record.result_hash
+                streak = 1
+            elif record.result_hash == latest_hash:
+                streak += 1
+            else:
+                break
+        return streak
+
+    @staticmethod
+    def _compute_ping_pong_no_progress_rounds(
+        side_a: list[ToolCallRecord],
+        side_b: list[ToolCallRecord],
+    ) -> int:
+        return min(
+            CircuitBreakerRail._get_side_tail_streak(side_a),
+            CircuitBreakerRail._get_side_tail_streak(side_b),
+        )
 
     def _collect_alternating_streak(
         self,
@@ -527,22 +573,21 @@ class CircuitBreakerRail(DeepAgentRail):
         if len(streak) < 2:
             return PingPongResult()
 
-        count = len(streak) // 2
         hash_last = streak[-1].args_hash
         hash_other = next(r.args_hash for r in streak if r.args_hash != hash_last)
 
         side_last = [r for r in streak if r.args_hash == hash_last]
         side_other = [r for r in streak if r.args_hash == hash_other]
 
-        no_progress = (
-            len(side_last) >= 2
-            and len(side_other) >= 2
-            and self._side_outputs_stable(side_last)
-            and self._side_outputs_stable(side_other)
+        no_progress_rounds = self._compute_ping_pong_no_progress_rounds(
+            side_last, side_other,
         )
+        no_progress = no_progress_rounds >= 2
 
         return PingPongResult(
-            count=count, paired_tool=paired_tool, no_progress=no_progress,
+            no_progress_rounds=no_progress_rounds,
+            paired_tool=paired_tool,
+            no_progress=no_progress,
         )
 
     def _count_recent_same(

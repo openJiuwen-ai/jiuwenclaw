@@ -6744,8 +6744,11 @@ class JiuWenSwarmDeepAdapter:
         if not messages:
             return {"status": "no_turn"}
 
+        # 透传主 agent tools schema 保 cache key（工具执行由单轮 + tool_use 丢弃禁止）
+        tools = await self._get_agent_tools(session_id)
+
         prompt = build_recap_prompt(memory=None, language=self._resolve_prompt_language())
-        summary_text = await self._call_model_for_recap(messages, prompt)
+        summary_text = await self._call_model_for_recap(messages, prompt, tools=tools or None)
         if not summary_text:
             return {"status": "failed", "error": "Model returned empty response"}
 
@@ -6854,6 +6857,49 @@ class JiuWenSwarmDeepAdapter:
             logger.debug("[JiuWenSwarmDeepAdapter] _get_recent_messages disk fallback failed: %s", exc)
             return []
 
+    async def _get_agent_tools(self, session_id: str) -> list[Any]:
+        """取主 agent 当前 tools 列表（List[ToolInfo]），用于 btw/recap 透传给模型。
+
+        透传 tools schema 是为了与主 agent 保持 cache key 一致（openjiuwen 的
+        prompt cache 布局为 tools → system → messages，tools 段缺失会破坏前缀
+        匹配）。工具执行仍被禁用：btw/recap 单轮 + tool_use 检测丢弃。
+
+        查找顺序与 _get_recent_messages 一致：先当前 adapter 的 react_agent，
+        再 session-scoped child adapter（btw 在 parent 执行时 tools 在 child）。
+        返回空列表表示无工具可用，调用方应按不传 tools 处理（tools or None）。
+        """
+        async def _from(inst: Any) -> list[Any]:
+            ra = getattr(inst, "react_agent", None)
+            if ra is None:
+                return []
+            am = getattr(ra, "ability_manager", None)
+            if am is None or not callable(getattr(am, "list_tool_info", None)):
+                return []
+            try:
+                return list(await am.list_tool_info() or [])
+            except Exception as exc:
+                logger.debug(
+                    "[JiuWenSwarmDeepAdapter] _get_agent_tools list_tool_info failed: %s",
+                    exc,
+                )
+                return []
+
+        # 1) 当前 adapter
+        if self._instance is not None:
+            tools = await _from(self._instance)
+            if tools:
+                return tools
+
+        # 2) session-scoped child adapter（btw 等侧查询在 parent 执行时 tools 在 child）
+        if not getattr(self, "_is_session_scoped_adapter", False):
+            session_adapter = self._get_cached_session_adapter(session_id)
+            if session_adapter is not None:
+                inst = getattr(session_adapter, "_instance", None)
+                if inst is not None:
+                    return await _from(inst)
+
+        return []
+
     def _get_agent_system_prompt(self) -> str:
         """Return the current agent's system prompt, or empty string if unavailable.
 
@@ -6880,12 +6926,14 @@ class JiuWenSwarmDeepAdapter:
         prompt: str,
         system_prompt: str = "",
         enable_prompt_caching: bool = True,
+        tools: list[Any] | None = None,
     ) -> str | None:
-        """调用 model 生成简短回答（单轮、无工具）。
+        """调用 model 生成简短回答（单轮、禁工具执行）。
 
         - system_prompt 非空时以 SystemMessage 形式前置
         - prompt 作为最后一条 user message 追加到对话末尾
-        - 不传 tools（通过 btw prompt 中的 <system-reminder> 告知模型无工具可用）
+        - tools 非空时透传给模型以保 cache key（与主 agent 一致），但单轮 +
+          tool_use 检测丢弃 = 工具不被执行（对齐 claude-code canUseTool:deny）
         - 不设置 temperature（继承模型默认值，与主 agent 保持一致以复用 prompt cache）
 
         prompt cache 策略：
@@ -6944,7 +6992,22 @@ class JiuWenSwarmDeepAdapter:
         try:
             # No temperature override — inherit model default to match main agent
             # API params (thinking config is part of the Anthropic cache key).
-            result = await self._model.invoke(recap_messages)
+            result = await self._model.invoke(recap_messages, tools=tools)
+            # Tool-use guard: tools schema is passed only to preserve the cache
+            # key (matches the main agent). Single turn + discard any tool_use
+            # the model emits → tools are never executed. Aligned with
+            # claude-code's canUseTool:{behavior:'deny'} + tool_use fallback.
+            tool_calls = getattr(result, "tool_calls", None)
+            if tool_calls:
+                names = ", ".join(getattr(tc, "name", "tool") for tc in tool_calls)
+                logger.info(
+                    "[btw/recap] model emitted tool_use despite no-tool constraint: %s",
+                    names,
+                )
+                return (
+                    f"(模型尝试调用工具 {names} 而非直接回答。"
+                    "请重新措辞或在主对话中提问。)"
+                )
             content = getattr(result, "content", None) or str(result)
             # Log cache metrics for observability
             usage = getattr(result, "usage_metadata", None)
@@ -6968,7 +7031,7 @@ class JiuWenSwarmDeepAdapter:
         - 保持消息原始格式（含 structured content blocks）以实现 byte-identical 前缀
         - 最后一条 pre-prompt 消息添加 cache_control marker（ephemeral）
         - btw prompt 不添加 cache_control（skipCacheWrite）
-        - 直接调用模型（无工具、单轮）
+        - 透传主 agent tools schema 保 cache key，但单轮 + tool_use 丢弃 = 禁止执行
         - 不修改对话历史（read-only）
 
         Args:
@@ -6991,6 +7054,10 @@ class JiuWenSwarmDeepAdapter:
         if not messages and not system_prompt:
             return {"status": "no_context"}
 
+        # 2.5) 取主 agent tools（透传给模型以保 cache key；工具执行由单轮 +
+        #      tool_use 检测丢弃禁止，对齐 claude-code canUseTool:deny）
+        tools = await self._get_agent_tools(session_id)
+
         # 3) 构建 btw prompt（system prompt 通过 SystemMessage 传递，不嵌入文本）
         prompt = _build_btw_prompt(
             question=question,
@@ -7001,6 +7068,7 @@ class JiuWenSwarmDeepAdapter:
         # enable_prompt_caching=True 启用 cache_control marker
         answer = await self._call_model_for_recap(
             messages, prompt, system_prompt=system_prompt, enable_prompt_caching=True,
+            tools=tools or None,
         )
         if not answer:
             return {"status": "failed", "error": "Model returned empty response"}

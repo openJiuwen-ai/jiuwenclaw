@@ -1,4 +1,4 @@
-import { existsSync, readdirSync, statSync, readFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, statSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, parse, relative } from "node:path";
 import { addError, addInfo, makeItem } from "../helpers.js";
@@ -148,8 +148,13 @@ function getDisplayPath(filePath: string, projectDir: string): string {
   const candidates: string[] = [];
 
   // Candidate 1: relative from git root (if inside git repo)
+  // 守卫:仅当文件位于 projectDir 内部时才采用 git-root 相对路径候选。
+  // 否则(文件在 projectDir 的父级/祖先目录)git-root 相对路径会丢掉 ../
+  // 前缀,把父目录文件伪装成当前目录文件,误导用户。此时应只保留 candidate 2
+  // 的 projectDir 相对路径(必带 ../ 前缀)。
+  const fileInsideProject = isAncestorOrSelfDir(projectDir, filePath);
   const gitRoot = findGitRoot(projectDir);
-  if (gitRoot) {
+  if (gitRoot && fileInsideProject) {
     const gitRootSlashes = gitRoot.replace(/\\/g, "/");
     const gitRootNorm = process.platform === "win32" ? gitRootSlashes.toLowerCase() : gitRootSlashes;
     const projectDirSlashes = projectDir.replace(/\\/g, "/");
@@ -212,6 +217,23 @@ function findGitRoot(cwd: string): string | null {
     current = dirname(current);
   }
   return null;
+}
+
+/**
+ * 判断 ancestor 是否是 target 的祖先目录或本身(Windows 大小写不敏感)。
+ *
+ * 用于识别"文件位于 projectDir 的上级目录"这一场景——后端
+ * `_validate_edit_path` 只白名单 project_dir 单层,会拒绝编辑 projectDir
+ * 祖先目录里的 JIUWENSWARM.md / JIUWENSWARM.local.md;同时 getDisplayPath
+ * 在父目录是 git root 时会把这类文件显示成无 ../ 的当前目录文件(伪装)。
+ * 两处都需要用此函数识别并特殊处理。
+ */
+function isAncestorOrSelfDir(ancestor: string, target: string): boolean {
+  const a = ancestor.replace(/\\/g, "/").replace(/\/$/, "");
+  const t = target.replace(/\\/g, "/").replace(/\/$/, "");
+  const aNorm = process.platform === "win32" ? a.toLowerCase() : a;
+  const tNorm = process.platform === "win32" ? t.toLowerCase() : t;
+  return aNorm === tNorm || tNorm.startsWith(aNorm + "/");
 }
 
 // ---------------------------------------------------------------------------
@@ -726,6 +748,53 @@ async function editMemoryByPath(
 ): Promise<void> {
   try {
     const trustedDirs = ctx.getTrustedDirs();
+    const projectDir = ctx.getCurrentProjectDir();
+
+    // 后端 _validate_edit_path 只白名单 project_dir 单层,会拒绝编辑 projectDir
+    // 祖先目录里的 JIUWENSWARM.md / JIUWENSWARM.local.md。这类文件是合法的
+    // project memory(前端 discoverMemoryFilesFromFs 已识别并列入选择器),
+    // 且由用户主动从列表选中,故绕过 memory.edit RPC,直接用本地 openInEditor
+    // 打开(与 keybindings.ts 打开配置文件同级风险,不经后端校验)。
+    const baseName = path.replace(/\\/g, "/").split("/").pop() ?? "";
+    const fileParent = path.replace(/[/\\][^/\\]*$/, "");
+    const isAncestorMemFile =
+      (baseName === "JIUWENSWARM.md" || baseName === "JIUWENSWARM.local.md")
+      && !!projectDir
+      && !isAncestorOrSelfDir(projectDir, path) // 文件不在 projectDir 内部
+      && isAncestorOrSelfDir(fileParent, projectDir); // 其父目录是 projectDir 的祖先/本身
+
+    if (isAncestorMemFile) {
+      const displayPath = getDisplayPath(path, projectDir);
+      // 文件不存在则先创建(与后端 handle_memory_edit 的 touch 行为对齐)
+      if (!existsSync(path)) {
+        mkdirSync(dirname(path), { recursive: true });
+        writeFileSync(path, "");
+      }
+      if (ctx.openInEditor) {
+        ctx.openInEditor(path);
+        const { source, value } = getEditorInfo();
+        const editorHint = source !== "default"
+          ? `(${source}="${value}")`
+          : "(default: vi)";
+        ctx.addItem(
+          addInfo(
+            ctx.sessionId,
+            `Opened memory file at ${displayPath} ${editorHint}`,
+            "m",
+          ),
+        );
+      } else {
+        ctx.addItem(
+          addInfo(
+            ctx.sessionId,
+            `Edit with:  $EDITOR ${displayPath}`,
+            "i",
+          ),
+        );
+      }
+      return;
+    }
+
     const payload = await ctx.request<MemoryEditResult>("memory.edit", {
       path,
       trusted_dirs: trustedDirs.length > 0 ? trustedDirs : undefined,

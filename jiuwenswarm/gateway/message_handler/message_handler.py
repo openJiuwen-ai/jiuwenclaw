@@ -2412,11 +2412,22 @@ class MessageHandler(ABC):
         在 process_stream 和 _handle_agent_server_push 两条路径中复用。
         返回 False 表示该 chunk 已被延后处理，不应继续发布给前端。
         """
+        payload = getattr(chunk, "payload", None)
+        auto_save_enabled = (
+            get_evolution_auto_save_enabled()
+            if (
+                isinstance(payload, dict)
+                and payload.get("event_type") == "chat.ask_user_question"
+                and self._is_evolution_approval_payload(payload)
+                and not self._is_interrupt_evolution_approval_answer_payload(payload)
+            )
+            else False
+        )
         decision = self._evolution_approval.handle_chunk(
             chunk,
             session_id,
             request_metadata,
-            auto_save_enabled=get_evolution_auto_save_enabled(),
+            auto_save_enabled=auto_save_enabled,
         )
         if decision.user_message is not None:
             self._user_messages.put_nowait(decision.user_message)
@@ -2819,7 +2830,8 @@ class MessageHandler(ABC):
                                     msg.params["content"] = review_prompt
                                 content = review_prompt
                                 logger.info(
-                                    "[MessageHandler] /review prompt injected for chat.send channel=%s pr_arg=%s",
+                                    "[MessageHandler] /review prompt injected for chat.send "
+                                    "channel=%s pr_arg=%s",
                                     getattr(msg, "channel_id", ""),
                                     pr_arg or "<none>",
                                 )

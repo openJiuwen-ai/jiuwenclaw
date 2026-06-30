@@ -513,21 +513,24 @@ class DiffService:
             return None
 
     @staticmethod
-    def _is_git_repo(project_dir: str) -> bool:
-        """检查 project_dir 是否是一个 git 仓库."""
+    def _get_git_toplevel(project_dir: str) -> str | None:
+        """返回 git 仓库根目录；project_dir 可以是仓库内任意子目录."""
         import subprocess
 
         try:
             result = subprocess.run(
-                ["git", "rev-parse", "--git-dir"],
+                ["git", "rev-parse", "--show-toplevel"],
                 cwd=project_dir,
                 capture_output=True,
                 text=True,
                 timeout=5,
             )
-            return result.returncode == 0
+            if result.returncode != 0:
+                return None
+            root = result.stdout.strip()
+            return str(Path(root).resolve()) if root else None
         except Exception:
-            return False
+            return None
 
     @staticmethod
     def _is_in_transient_git_state(project_dir: str) -> bool:
@@ -734,9 +737,12 @@ class DiffService:
         self, project_dir: str, max_files: int = MAX_FILES
     ) -> dict[str, dict[str, Any]]:
         """获取未跟踪文件列表并生成合成 diff（全部为新增行）."""
+        # core.quotepath=false 让 git 直接输出原始 UTF-8 文件名，
+        # 而非八进制转义串（如 "aaa_design/Code\346\250\241..."），
+        # 否则中文路径无法对应到磁盘真实路径，read_text 会失败、hunk 为空。
         output = self._run_git_command(
             project_dir,
-            ["ls-files", "--others", "--exclude-standard"],
+            ["-c", "core.quotepath=false", "ls-files", "--others", "--exclude-standard"],
         )
         if not output or not output.strip():
             return {}
@@ -808,9 +814,10 @@ class DiffService:
         """
         if not project_dir:
             return None
-        if not self._is_git_repo(project_dir):
+        repo_dir = self._get_git_toplevel(project_dir)
+        if not repo_dir:
             return None
-        if self._is_in_transient_git_state(project_dir):
+        if self._is_in_transient_git_state(repo_dir):
             return None
 
         files: dict[str, dict[str, Any]] = {}
@@ -819,7 +826,7 @@ class DiffService:
 
         # 1. 已跟踪文件的改动: git diff HEAD
         # 先用 --shortstat 快速探测规模，避免对超大 diff 加载完整内容
-        shortstat = self._run_git_command(project_dir, ["diff", "HEAD", "--shortstat"])
+        shortstat = self._run_git_command(repo_dir, ["diff", "HEAD", "--shortstat"])
         has_tracked_changes = shortstat and shortstat.strip() != ""
 
         # 解析 shortstat 取得准确的文件/行数总计
@@ -836,15 +843,15 @@ class DiffService:
             }
 
         if has_tracked_changes:
-            numstat_output = self._run_git_command(project_dir, ["diff", "HEAD", "--numstat"])
-            diff_output = self._run_git_command(project_dir, ["diff", "HEAD"])
+            numstat_output = self._run_git_command(repo_dir, ["diff", "HEAD", "--numstat"])
+            diff_output = self._run_git_command(repo_dir, ["diff", "HEAD"])
             if numstat_output and diff_output:
                 per_file_stats = self._parse_git_numstat(numstat_output)
                 filtered_output, large_files = self._split_large_file_diffs(diff_output)
                 all_hunks, truncated_files = self._parse_git_diff_hunks(filtered_output)
 
                 for rel_path, stats in list(per_file_stats.items())[:MAX_FILES]:
-                    abs_path = str(Path(project_dir) / rel_path)
+                    abs_path = str(Path(repo_dir) / rel_path)
                     is_binary = bool(stats.get("isBinary", False))
                     is_large = rel_path in large_files
                     is_truncated = rel_path in truncated_files
@@ -872,7 +879,7 @@ class DiffService:
 
         # 2. 未跟踪的新文件: 仅填充剩余名额，避免无限加载
         remaining_slots = max(0, MAX_FILES - len(files))
-        untracked = self._get_untracked_files(project_dir, max_files=remaining_slots)
+        untracked = self._get_untracked_files(repo_dir, max_files=remaining_slots)
         for abs_path, file_info in untracked.items():
             if abs_path not in files:  # 避免重复（理论上不会）
                 file_info.setdefault("isBinary", False)
