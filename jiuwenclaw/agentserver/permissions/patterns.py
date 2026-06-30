@@ -530,8 +530,12 @@ def _build_approval_override_id(pattern: str) -> str:
 
 
 def _existing_allow_override_patterns(permissions: dict) -> set[str]:
+    # 只收集 approval_overrides 段：rules 的 allow（Phase 4）优先级低于 ask（Phase 3），
+    # 无法覆盖 ask 命中；approval_overrides（Phase 2）高于 ask，才是「总是允许」覆盖 ask 的手段。
+    # 若把 rules allow 也算作「已存在」去重，当 rules 有 allow ``npm *`` + ask ``npm --help``
+    # 时，persist 提取的 ``npm *`` 会被跳过 → ``npm --help`` 永远 ASK、用户「总是允许」无效。
     patterns: set[str] = set()
-    for section_name in ("rules", "approval_overrides"):
+    for section_name in ("approval_overrides",):
         raw = permissions.get(section_name)
         if not isinstance(raw, list):
             continue

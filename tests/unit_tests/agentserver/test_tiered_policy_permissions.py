@@ -2178,6 +2178,52 @@ def test_user_ask_works_when_builtin_deny_misses(monkeypatch):
     assert "ask_git_push" in mr
 
 
+def test_persist_writes_approval_override_when_rules_allow_conflicts_with_ask(monkeypatch):
+    """回归：rules 有 allow ``npm *`` + ask ``npm --help`` 时，persist 仍须写入 approval_override。
+
+    根因：``_existing_allow_override_patterns`` 曾把 ``rules`` 的 allow 也算作「已存在」去重，
+    导致 persist 提取的 ``npm *`` 被跳过，``npm --help`` 永远 ASK（用户「总是允许」无效）。
+    approval_override（Phase 2）优先级高于 ask（Phase 3），写入后应让 ``npm --help`` 放行。
+    """
+    rules = [
+        {"id": "allow_npm", "pattern": "npm *", "action": "allow"},
+        {"id": "ask_npm_help", "pattern": "npm --help", "action": "ask"},
+    ]
+    permissions = {
+        "enabled": True,
+        "tools": {"bash": "guard"},
+        "rules": rules,
+        "approval_overrides": [],
+    }
+
+    base_dir = _tmp_dir("persist-rules-allow-ask-conflict")
+    config_path = base_dir / "config.yaml"
+    config_path.write_text(
+        yaml.safe_dump({"permissions": permissions}, allow_unicode=True),
+        encoding="utf-8",
+    )
+    config_mod = importlib.import_module("jiuwenclaw.config")
+    monkeypatch.setattr(config_mod, "_current_config_yaml_path", lambda: config_path)
+    _config_dir_with_builtin(base_dir, monkeypatch, [])
+    set_permission_engine(PermissionEngine(permissions))
+
+    # 前提：ask（Phase 3）优先于 rules allow（Phase 4）→ npm --help 判 ASK
+    perm_before, _ = evaluate_tiered_policy(permissions, "bash", {"command": "npm --help"})
+    assert perm_before == PermissionLevel.ASK
+
+    assert persist_permission_allow_rule("bash", {"command": "npm --help"})
+
+    saved = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    overrides = saved["permissions"].get("approval_overrides", [])
+    assert any(item.get("pattern") == "npm *" for item in overrides), (
+        "应写入 approval_override ``npm *`` 以覆盖 ask"
+    )
+
+    # 写入后：approval_override（Phase 2）覆盖 ask → npm --help 判 ALLOW
+    perm_after, _ = evaluate_tiered_policy(saved["permissions"], "bash", {"command": "npm --help"})
+    assert perm_after == PermissionLevel.ALLOW
+
+
 def test_persist_writes_to_live_path_ignoring_import_time_frozen_constant(monkeypatch):
     """回归：persist 必须用实时 ``_current_config_yaml_path()``，而非 import 期冻结的 ``_CONFIG_YAML_PATH``。
 
