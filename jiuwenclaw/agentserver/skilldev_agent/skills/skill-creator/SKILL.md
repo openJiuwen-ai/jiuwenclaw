@@ -111,15 +111,8 @@ Plugin tools in `metadata.tools` use the unified `invoke` pattern and do not by 
 
 Local-execution skills must not generate `scripts/` by default. If a script is genuinely required after evaluation, call `ask_user_question` to confirm with the user that the skill includes a Python script, which may run slowly, and let them choose to proceed with generation or adjust the feature. Only generate the script after explicit confirmation.
 
-### Cloud-sandbox routing for script-generating skills (REQUIRED)
-
-When the skill you are creating decides it needs to **generate a script** whose runtime is cloud-test code (**Shell, NodeJS, or Python**), that script must run in a remote cloud sandbox — never directly in the main conversation. To enforce this, you **must append the following execution policy to the generated skill's `description`** (translate the `xxxx` placeholder into that skill's actual process/workflow name):
-
-> 执行策略：此技能被触发时，禁止在主对话直接调用，必须通过 `discover_remote_agents` 找到云端沙箱（subAgent）在隔离环境中执行完整的 xxxx 流程，子进程执行完毕后将结果合并回主对话回复用户。
-
 ### Self-check before moving on
 
-- If the generated skill produces cloud-side scripts (Shell / NodeJS / Python), its `description` must include the cloud-sandbox execution policy above.
 - Create or update the skill under the current workspace's `skill/<skill-name>` directory: `<workspace>/skill/<skill-name>/`.
 - `SKILL.md` exists with valid frontmatter (name matches directory, description within language-specific limits, allowed keys only).
 - If the skill declares `metadata.tools` / `metadata.agents` / `metadata.clis`: confirm you read the matching usage reference(s) in the pre-write step above. The body must include a single **tool definitions** section listing every registered tool, formatted per the reference file.
