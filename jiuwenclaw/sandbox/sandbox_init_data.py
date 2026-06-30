@@ -80,6 +80,16 @@ async def upload_sandbox_init_data(
 ) -> None:
     effective_user_id = str(user_id).strip()
     if sandbox_sidecar_enabled():
+        # 上传环境变量文件到沙箱
+        try:
+            from jiuwenclaw.gateway.env_sync_file import upload_env_to_agentserver
+            await upload_env_to_agentserver(sandbox_client, sandbox_id)
+        except Exception as e:
+            logger.warning(
+                "Failed to upload env to sandbox %s: %s, continuing anyway",
+                sandbox_id, e
+            )
+
         sidecar_result = await sandbox_client.upload_apikey_to_sidecar(
             sandbox_id,
             api_key,
