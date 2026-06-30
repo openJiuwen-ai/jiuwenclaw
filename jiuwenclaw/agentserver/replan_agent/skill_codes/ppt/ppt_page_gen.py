@@ -35,9 +35,10 @@ def _looks_like_path(value: str) -> bool:
 _DEFAULT_STRUCTURAL_PAGES = 2
 
 _DESIGN_RULES_DIGEST = (
-    "### 视觉与布局硬约束（精选 14 条）\n"
+    "### 视觉与布局硬约束（精选 17 条）\n"
     "1. 容器：`.ppt-slide { width:1280px; height:720px; overflow:hidden; box-sizing:border-box }`\n"
-    "2. 安全区：`.content-safe { width:1220px; height:660px; margin:30px auto }`，主要内容必须放在安全区内\n"
+    "2. 安全区：`.content-safe { width:1220px; height:660px; margin:30px auto }`，主要内容必须放在安全区内；"
+    "子元素禁止额外加 padding，否则导致双重边距\n"
     "3. 三级字号：标题 36-48px / 副标题 24-28px / 正文 16-20px\n"
     "4. 图表类型：时序数据→柱状图(bar)；趋势数据→折线图(line)；对比数据→分组柱状图(grouped bar)；占比数据→饼图(pie)；禁止混用，禁止用图片占位\n"
     "5. 步骤/流程页 → 用 HTML/CSS 绘制节点+连线+文字，禁止纯文字描述\n"
@@ -51,13 +52,18 @@ _DESIGN_RULES_DIGEST = (
     "12. 页脚：底部必须有数据来源汇总条（如'数据来源：央行、财政部、...'），即使卡片内已有来源标注也必须保留页脚，禁止纯数字编号\n"
     "13. 布局实现：所有区域用 `flex-1 min-h-0` 自动分配高度，禁止手动计算 px 值；子元素用 `h-full min-h-0 overflow-hidden` 防溢出，信任 flex/grid 自动布局\n"
     "14. 全局禁止 `rounded-*` 类，所有元素 border-radius:0（饼图/环形图的圆形不受此限制）\n"
+    "15. 内容页根节点必须同时携带 `class=\"ppt-slide\"`、`type=\"content\"` 与 `data-page-role=\"content\"`；"
+    "`data-page-role` 不是旧 `type` 属性的替代品，两者并存\n"
+    "16. 标题栏、页脚为跨页锚点片段（见风格文件「四、组件样式库」开头的「跨页锚点片段」说明），"
+    "必须逐字复用 HTML 结构/class/间距，只改文字内容，禁止自行重新设计\n"
+    "17. 标题、正文、图表标签、数据来源和数据卡片必须完整显示，禁止裁切或隐藏\n"
 )
 
 
 _HTML_SKELETON = (
     "### 标准 HTML 骨架（所有页面必须遵循，禁止改动结构）\n"
     "```html\n"
-    '<div class="ppt-slide">\n'
+    '<div class="ppt-slide" type="content" data-page-role="content">\n'
     '  <div class="content-safe flex flex-col gap-3 h-full">\n'
     '    <header class="flex-shrink-0">标题区</header>\n'
     '    <main class="flex-1 min-h-0 grid grid-cols-2 gap-3">\n'
@@ -69,6 +75,7 @@ _HTML_SKELETON = (
     '</div>\n'
     "```\n"
     "规则：\n"
+    "- 根节点必须同时携带 `class=\"ppt-slide\"`、`type=\"content\"`、`data-page-role=\"content\"`\n"
     "- `content-safe` 用 `flex flex-col` 纵向排列 header/main/footer 三段\n"
     "- `main` 用 `grid grid-cols-2` 左右分列，恰好 2 个 `<section>` 直接子元素\n"
     "- 禁止把 header/footer 放进 main 内部；禁止 main 只有 1 个子元素\n"
@@ -220,7 +227,7 @@ _STRUCTURAL_DENSITY_CHECKLIST = (
 )
 
 _DENSITY_CHECKLIST_DIGEST = (
-    "### 内容密度检查（8 项，全部必须通过）\n"
+    "### 内容密度检查（10 项，全部必须通过）\n"
     "1. 数据可视化：≥1 个 ECharts 图表 或 ≥3 个数据卡片（no_search 模式且页面为'数据有限'时可降至 2 个数据卡片）\n"
     "2. 核心要点：6-10 个列表项或卡片\n"
     "3. 装饰图标：≥3 个 FontAwesome 图标（class 含 `fa-`）\n"
@@ -229,6 +236,8 @@ _DENSITY_CHECKLIST_DIGEST = (
     "6. 无大段文字：无连续 > 100 字段落\n"
     "7. 视觉层级：标题 → 副标题 → 正文 → 注释 层级清晰\n"
     "8. 布局正确：main 元素 class 含 `grid grid-cols-2`，且恰好 2 个直接子元素（`<section>` 或 `<div>`）\n"
+    "9. 完整显示：核心内容未使用 line-clamp、省略号、滚动或折叠隐藏\n"
+    "10. 内容完整：标题、正文、图表标签、数据来源和数据卡片全部完整显示，无裁切\n"
 )
 
 
@@ -298,6 +307,8 @@ _REWRITE_ACTIONS = {
     "大段文字": "拆分为多个列表项/小节，添加小标题",
     "视觉层级混乱": "调整字号梯度，建立明确的标题→副标题→正文→注释层级",
     "布局错误": "main 改为 `grid grid-cols-2 gap-3`，恰好 2 个 `<section>` 子元素；header/footer 放在 main 外部的 content-safe 内",
+    "内容被隐藏": "移除 line-clamp、text-overflow:ellipsis、overflow:auto/scroll、max-height 限制等隐藏手段，确保核心内容完整可见",
+    "核心内容缺失": "检查标题、正文、图表标签、数据来源和数据卡片是否全部完整显示，补充缺失的内容元素",
 }
 
 
@@ -528,9 +539,16 @@ def _build_page_prompt(
         f"{fusion_rules}"
         f"{rewrite_section}"
         "\n"
-        "## 4. 任务\n"
+        "## 4. 页面内容预算（写 HTML 前必须先完成）\n"
+        "- 逐项识别核心结论、关键数据、必要论据和可舍弃的辅助细节\n"
+        "- 制定预算：页面类型、密度、标题行数、区域比例、卡片/要点上限、正文行数、最小字号、目标留白区间\n"
+        "- 预留至少 8% 的垂直缓冲，用于字体差异、图表标签和 PPTX 转换误差\n"
+        "- 若核心内容超过预算，先提炼与重排；仍无法容纳时拆页，禁止裁切或持续缩小字号\n"
+        "\n"
+        "## 5. 任务\n"
         f"你负责生成**第 {page_number} 页** HTML。仅生成该页，直接输出 HTML 原文。"
-        "生成时必须同时满足上述「内容密度检查（8 项）」全部要求，"
+        "先产出可运行 HTML，再按密度检查清单做小步修正；禁止在写文件前反复做像素级完整规划。"
+        "生成时必须同时满足上述「内容密度检查（10 项）」全部要求，"
         "确保首次生成即通过密度检查，避免后续重写。"
     )
 
@@ -701,8 +719,8 @@ class PageWorkerNode(PlanNode):
                 "调 LLM 生成 HTML；剥 ```html 包裹 → 校验（含 <!DOCTYPE> + ppt-slide 容器）→ write_file 落盘\n"
                 "   - 失败按 gen_retry_round 重试（仅本页）\n"
                 "   - 重试后仍失败 → 进 missing_pages，该页闭环终止\n"
-                "2. 密度判定阶段：调 LLM 做 8 项密度检查（受控 JSON 输出），叠加程序化后置校验（echarts/card 计数）\n"
-                "   - 检查项：数据可视化 / 核心要点 / 装饰图标 / 空白率 / 数据来源 / 大段文字 / 视觉层级 / 布局正确\n"
+                "2. 密度判定阶段：调 LLM 做 10 项密度检查（受控 JSON 输出），叠加程序化后置校验（echarts/card 计数）\n"
+                "   - 检查项：数据可视化 / 核心要点 / 装饰图标 / 空白率 / 数据来源 / 大段文字 / 视觉层级 / 布局正确 / 完整显示 / 内容完整\n"
                 "   - 数据可视化阈值：≥1 个 ECharts 图表 或 ≥3 个数据卡片（no_search 模式降至 2 个）\n"
                 "3. 不通过 → 修复阶段（按 density_retry_round 轮）：\n"
                 "   a. 分析缺失项，判断是否需要搜索补充数据\n"
@@ -966,7 +984,8 @@ class PageWorkerNode(PlanNode):
                 )
             failed_enum = (
                 "缺数据可视化 / 核心要点不足 / 缺装饰图标 / 空白率过高 / "
-                "缺数据来源 / 大段文字 / 视觉层级混乱 / 布局错误"
+                "缺数据来源 / 大段文字 / 视觉层级混乱 / 布局错误 / "
+                "内容被隐藏 / 核心内容缺失"
             )
 
         prompt = (
