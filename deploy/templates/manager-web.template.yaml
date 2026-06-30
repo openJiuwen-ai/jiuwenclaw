@@ -30,6 +30,8 @@ spec:
               value: "<<MANAGER_WEB_PORT>>"
             - name: MANAGER_WEB_PROXY_TARGET
               value: "http://<<MANAGER_SERVER_NAME>>:<<MANAGER_REST_PORT>>"
+            - name: TZ
+              value: "<<TIMEZONE>>"
 
 ---
 # NodePort Service：供外连接 Manager Web UI

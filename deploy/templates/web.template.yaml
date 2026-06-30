@@ -37,6 +37,8 @@ spec:
               value: "<<ENTERPRISE_WEB_WS_PORT>>"
             - name: WS_ORIGIN_CHECK_ENABLED
               value: "false"
+            - name: TZ
+              value: "<<TIMEZONE>>"
 
 ---
 # 集群内部访问： 提供稳定 DNS 域名

@@ -84,3 +84,5 @@ spec:
           value: "0.0.0.0"
         - name: MANAGER_WS_PORT
           value: "<<MANAGER_WS_PORT>>"
+        - name: TZ
+          value: "<<TIMEZONE>>"

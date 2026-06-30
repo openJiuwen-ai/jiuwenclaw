@@ -69,7 +69,7 @@ spec:
             - name: MINIO_ROOT_PASSWORD
               value: "<<MINIO_ROOT_PASSWORD>>"
             - name: TZ
-              value: "Asia/Shanghai"
+              value: "<<TIMEZONE>>"
           ports:
             - containerPort: 9000
               name: minio-api

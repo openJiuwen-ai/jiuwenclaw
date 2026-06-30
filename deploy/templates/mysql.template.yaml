@@ -54,7 +54,7 @@ spec:
             - name: MYSQL_ROOT_PASSWORD
               value: "<<MYSQL_ROOT_PASSWORD>>"  # 生产环境请务必修改！
             - name: TZ
-              value: "Asia/Shanghai" # 时区（重要）
+              value: "<<TIMEZONE>>"
             - name: MYSQL_ROOT_HOST
               value: "%"              # 允许 root 从任意地址登录（外部工具可用）
           ports:

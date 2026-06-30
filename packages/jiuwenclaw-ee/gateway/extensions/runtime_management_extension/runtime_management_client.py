@@ -375,6 +375,7 @@ class RuntimeManagementAgentClient(AgentServerClient):
         self.gateway_id = uuid_mod.uuid4().hex[:8]
         self.namespace = os.getenv("NAMESPACE")
         self.kubeconfig = os.getenv("AGENT_SERVER_KUBECONFIG") or None
+        timezone = os.getenv("TZ", "Asia/Shanghai")
 
         agent_image = os.getenv("AGENT_SERVER_IMAGE")
         agent_cpu_request = os.getenv("AGENT_SERVER_CPU_REQUEST")
@@ -436,8 +437,7 @@ class RuntimeManagementAgentClient(AgentServerClient):
         node_name = os.getenv("NODE_NAME")
         ready_timeout = int(os.getenv("AGENT_SERVER_READY_TIMEOUT", "300"))
         ready_poll_interval = int(os.getenv("AGENT_SERVER_READY_POLL_INTERVAL", "5"))
-        deploy_mode = (os.getenv("AGENT_SERVER_DEPLOY_MODE") or "k8s").strip().lower()
-        self.deploy_mode = deploy_mode
+        self.deploy_mode = (os.getenv("AGENT_SERVER_DEPLOY_MODE") or "k8s").strip().lower()
 
         # jiuwenbox sidecar: agentserver 与 jiuwenbox 同 Pod，使用 127.0.0.1 访问。
         jiuwenbox_enabled = _env_bool("JIUWENBOX_ENABLED", False)
@@ -448,15 +448,10 @@ class RuntimeManagementAgentClient(AgentServerClient):
         jiuwenbox_cpu_limit = os.getenv("JIUWENBOX_CPU_LIMIT")
         jiuwenbox_memory_limit = os.getenv("JIUWENBOX_MEMORY_LIMIT")
         jiuwenbox_container_name = os.getenv("JIUWENBOX_CONTAINER_NAME", "jiuwenbox" )
-        jiuwenbox_url = os.getenv("JIUWENBOX_URL",f"http://127.0.0.1:{jiuwenbox_port}")
         jiuwenbox_readiness_initial_delay = int(os.getenv("JIUWENBOX_READINESS_INITIAL_DELAY", "10"))
         jiuwenbox_readiness_period = int(os.getenv("JIUWENBOX_READINESS_PERIOD", "5"))
-        jiuwenbox_excluded_commands = os.getenv("JIUWENBOX_EXCLUDED_COMMANDS", "")
-        jiuwenbox_idle_ttl_seconds = os.getenv("JIUWENBOX_IDLE_TTL_SECONDS", "")
-        jiuwenbox_idle_check_interval = os.getenv("JIUWENBOX_IDLE_CHECK_INTERVAL", "")
         jiuwenbox_listen = os.getenv("JIUWENBOX_LISTEN", f"tcp://0.0.0.0:{jiuwenbox_port}")
         jiuwenbox_policy_path = os.getenv("JIUWENBOX_POLICY_PATH", "/app/configs/enterprise-policy.yaml")
-        jiuwenbox_fallback_on_failure = _env_bool("JIUWENBOX_FALLBACK_ON_FAILURE", False)
         jiuwenbox_host_mounts: list[HostPathMount] = []
         if _env_bool("JIUWENBOX_MOUNT_CGROUP", True):
             jiuwenbox_host_mounts.append(
@@ -471,6 +466,7 @@ class RuntimeManagementAgentClient(AgentServerClient):
         def _agent_env_vars() -> dict[str, str]:
             base: dict[str, str] = {
                 "AGENT_SERVER_HOST": "0.0.0.0",
+                "TZ": timezone,
             }
 
             for key, value in (
@@ -497,6 +493,21 @@ class RuntimeManagementAgentClient(AgentServerClient):
             ):
                 if value is not None:
                     base[key] = value
+
+            if jiuwenbox_enabled and self.deploy_mode == "k8s":
+                base.update(
+                    {
+                        "JIUWENCLAW_SANDBOX_ENABLED": str(jiuwenbox_enabled).lower(),
+                        "JIUWENCLAW_SANDBOX_URL": os.getenv("JIUWENBOX_URL", f"http://127.0.0.1:{jiuwenbox_port}"),
+                        "JIUWENCLAW_SANDBOX_TYPE": "jiuwenbox",
+                        "JIUWENCLAW_SANDBOX_STARTUP_MODE": "external",
+                        "JIUWENCLAW_SANDBOX_PRESERVE_FILE_SHARING_MODE": "mount",
+                        "JIUWENCLAW_SANDBOX_EXCLUDED_COMMANDS": os.getenv("JIUWENBOX_EXCLUDED_COMMANDS", ""),
+                        "JIUWENCLAW_SANDBOX_IDLE_TTL_SECONDS": os.getenv("JIUWENBOX_IDLE_TTL_SECONDS", ""),
+                        "JIUWENCLAW_SANDBOX_IDLE_CHECK_INTERVAL": os.getenv("JIUWENBOX_IDLE_CHECK_INTERVAL", ""),
+                        "JIUWENBOX_FALLBACK_ON_FAILURE": _env_bool("JIUWENBOX_FALLBACK_ON_FAILURE", False),
+                    }
+                )
 
             if mode == "dev":
                 base["LOG_ROOT_PATH"] = "/root/.logs"
@@ -540,7 +551,7 @@ class RuntimeManagementAgentClient(AgentServerClient):
                         service_template.get("agent_id"),
                     )
 
-                if deploy_mode == "process":
+                if _client.deploy_mode == "process":
                     process_host = "127.0.0.1"
                     target_port = _pick_free_port(process_host)
                     target_container = None
@@ -561,31 +572,13 @@ class RuntimeManagementAgentClient(AgentServerClient):
                     )
                     deploy_controller: Any = ProcessDeployController(process_handler)
                 else:
-                    agent_container_env = _agent_env_vars()
-                    if jiuwenbox_enabled:
-                        agent_container_env.update(
-                            {
-                                "JIUWENCLAW_SANDBOX_ENABLED": str(
-                                    jiuwenbox_enabled
-                                ).lower(),
-                                "JIUWENCLAW_SANDBOX_URL": jiuwenbox_url,
-                                "JIUWENCLAW_SANDBOX_TYPE": "jiuwenbox",
-                                "JIUWENCLAW_SANDBOX_STARTUP_MODE": "external",
-                                "JIUWENCLAW_SANDBOX_PRESERVE_FILE_SHARING_MODE": "mount",
-                                "JIUWENCLAW_SANDBOX_EXCLUDED_COMMANDS": jiuwenbox_excluded_commands,
-                                "JIUWENCLAW_SANDBOX_IDLE_TTL_SECONDS": jiuwenbox_idle_ttl_seconds,
-                                "JIUWENCLAW_SANDBOX_IDLE_CHECK_INTERVAL": jiuwenbox_idle_check_interval,
-                                "JIUWENBOX_FALLBACK_ON_FAILURE": jiuwenbox_fallback_on_failure,
-                            }
-                        )
-
                     agent_server_container = ContainerSpec(
                         name=cfg.get("container_name") or container_name,
                         image=cfg.get("agent_image") or agent_image,
                         port_name=cfg.get("port_name") or port_name,
                         port=int(cfg["container_port"]) if cfg.get("container_port") is not None else container_port,
                         image_pull_policy=cfg.get("image_pull_policy") or image_pull_policy,
-                        env_vars=agent_container_env,
+                        env_vars=_agent_env_vars(),
                         host_path_mounts=agent_host_mounts,
                         allow_privilege_escalation=True if mode == "dev" else None,
                         run_as_non_root=False if mode == "dev" else None,
@@ -610,6 +603,7 @@ class RuntimeManagementAgentClient(AgentServerClient):
                             env_vars={
                                 "JIUWENBOX_LISTEN": jiuwenbox_listen,
                                 "JIUWENBOX_POLICY_PATH": jiuwenbox_policy_path,
+                                "TZ": timezone,
                             },
                             capabilities_add=["SYS_ADMIN", "NET_ADMIN"],
                             seccomp_unconfined=True,

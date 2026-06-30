@@ -163,6 +163,7 @@ declare -A DEPLOY_VARS=(
     ["IS_UP_MANAGER_WEB"]="true"
     ["RENDER_ONLY"]="false"
     ["ENABLE_GATEWAY_SCHED_LABEL"]="false"
+    ["TIMEZONE"]="Asia/Shanghai"
 )
 
 
