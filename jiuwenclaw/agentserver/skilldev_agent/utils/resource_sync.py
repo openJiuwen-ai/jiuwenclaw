@@ -258,6 +258,10 @@ def _format_ref_file_hint_line(name: str, archive_path: Path, resource: dict[str
     return line
 
 
+def _format_ref_file_removed_hint_line(name: str) -> str:
+    return f"- {name} -> 已移除（用户本轮未再上传）"
+
+
 def _resource_has_payload(resource: dict[str, Any]) -> bool:
     return bool(
         str(resource.get("url") or "").strip()
@@ -280,6 +284,24 @@ def _current_ref_file_resources(
     return resources
 
 
+def _current_ref_skill_resources(
+    skill_packages: Any,
+    direct_imported: set[str],
+) -> list[dict[str, Any]]:
+    resources: list[dict[str, Any]] = []
+    for res in _resource_list(skill_packages):
+        name = _resource_filename(res)
+        if not name or name in direct_imported:
+            continue
+        suffix = Path(name).suffix.lower()
+        if suffix not in (".zip", ".skill"):
+            raise ValueError(f"不支持的文件类型: {name}")
+        if not _resource_has_payload(res):
+            continue
+        resources.append(res)
+    return resources
+
+
 def _ref_files_extract_to_stem_dir(resources: list[dict[str, Any]]) -> bool:
     """Mirror ``write_resource_group`` URL-batch detection for ref-files."""
     return not bool(resources and str(resources[0].get("url") or "").strip())
@@ -292,8 +314,16 @@ def _ref_file_extract_dir(ref_dir: Path, filename: str, *, extract_to_stem_dir: 
     return ref_dir / filename
 
 
-def build_current_ref_file_hint_lines(task_workspace: str | Path, files: Any) -> list[str]:
-    """Build per-file hint lines for ref-files uploaded in the current round."""
+def build_current_ref_file_hint_lines(
+    task_workspace: str | Path,
+    files: Any,
+    *,
+    previous_ref_files: Any | None = None,
+) -> tuple[list[str], list[str]]:
+    """Build per-file hint lines for ref-files uploaded in the current round.
+
+    Returns a tuple of (added_lines, removed_lines) compared to the previous state.
+    """
     task_workspace = Path(task_workspace)
     ref_dir = task_workspace / "resources" / "ref-files"
     state = load_resource_state(task_workspace)
@@ -302,16 +332,39 @@ def build_current_ref_file_hint_lines(task_workspace: str | Path, files: Any) ->
         for item in state.get(STATE_DIRECT_IMPORTED, [])
         if str(item).strip()
     }
+    previous_entries = _state_entries(previous_ref_files or [])
+    previous_keys = {_entry_key(entry) for entry in previous_entries}
     resources = _current_ref_file_resources(files, direct_imported)
-    if not resources:
-        return []
+    current_entries = [
+        _resource_state_entry(res, _resource_filename(res))
+        for res in resources
+        if _resource_filename(res)
+    ]
+    current_keys = {_entry_key(entry) for entry in current_entries}
 
-    extract_to_stem_dir = _ref_files_extract_to_stem_dir(resources)
-    lines: list[str] = []
-    for res in resources:
+    removed_lines: list[str] = []
+    for entry in previous_entries:
+        if _entry_key(entry) in current_keys:
+            continue
+        name = entry.get("filename", "")
+        if not name:
+            continue
+        removed_lines.append(_format_ref_file_removed_hint_line(name))
+
+    pending_resources = [
+        res
+        for res in resources
+        if _entry_key(_resource_state_entry(res, _resource_filename(res))) not in previous_keys
+    ]
+    if not pending_resources:
+        return ([], removed_lines)
+
+    extract_to_stem_dir = _ref_files_extract_to_stem_dir(pending_resources)
+    added_lines: list[str] = []
+    for res in pending_resources:
         name = _resource_filename(res)
         archive_path = (ref_dir / name).resolve()
-        lines.append(_format_ref_file_hint_line(name, archive_path, res))
+        added_lines.append(_format_ref_file_hint_line(name, archive_path, res))
         suffix = Path(name).suffix.lower()
         if suffix in (".zip", ".skill"):
             extract_dir = _ref_file_extract_dir(
@@ -319,8 +372,131 @@ def build_current_ref_file_hint_lines(task_workspace: str | Path, files: Any) ->
                 name,
                 extract_to_stem_dir=extract_to_stem_dir,
             ).resolve()
-            lines.append(f"  - 解压目录 -> {extract_dir}")
-    return lines
+            added_lines.append(f"  - 解压目录 -> {extract_dir}")
+    return (added_lines, removed_lines)
+
+
+def build_current_ref_skill_hint_lines(
+    task_workspace: str | Path,
+    skill_packages: Any,
+    *,
+    previous_ref_skills: Any | None = None,
+) -> tuple[list[str], list[str]]:
+    """Build per-file hint lines for ref-skills uploaded in the current round.
+
+    Returns a tuple of (added_lines, removed_lines) compared to the previous state.
+    """
+    task_workspace = Path(task_workspace)
+    ref_dir = task_workspace / "resources" / "ref-skills"
+    state = load_resource_state(task_workspace)
+    direct_imported = {
+        str(item)
+        for item in state.get(STATE_DIRECT_IMPORTED, [])
+        if str(item).strip()
+    }
+    previous_entries = _state_entries(previous_ref_skills or [])
+    previous_keys = {_entry_key(entry) for entry in previous_entries}
+    resources = _current_ref_skill_resources(skill_packages, direct_imported)
+    current_entries = [
+        _resource_state_entry(res, _resource_filename(res))
+        for res in resources
+        if _resource_filename(res)
+    ]
+    current_keys = {_entry_key(entry) for entry in current_entries}
+
+    removed_lines: list[str] = []
+    for entry in previous_entries:
+        if _entry_key(entry) in current_keys:
+            continue
+        name = entry.get("filename", "")
+        if not name:
+            continue
+        removed_lines.append(_format_ref_file_removed_hint_line(name))
+
+    pending_resources = [
+        res
+        for res in resources
+        if _entry_key(_resource_state_entry(res, _resource_filename(res))) not in previous_keys
+    ]
+    if not pending_resources:
+        return ([], removed_lines)
+
+    extract_to_stem_dir = _ref_files_extract_to_stem_dir(pending_resources)
+    added_lines: list[str] = []
+    for res in pending_resources:
+        name = _resource_filename(res)
+        archive_path = (ref_dir / name).resolve()
+        added_lines.append(f"- {name} -> 本地路径: {archive_path}")
+        extract_dir = _ref_file_extract_dir(
+            ref_dir,
+            name,
+            extract_to_stem_dir=extract_to_stem_dir,
+        ).resolve()
+        added_lines.append(f"  - 解压目录 -> {extract_dir}")
+    return (added_lines, removed_lines)
+
+
+def build_current_tool_spec_hint_lines(
+    task_workspace: str | Path,
+    tool_spec_files: Any,
+    *,
+    previous_tool_specs: Any | None = None,
+) -> tuple[list[str], list[str]]:
+    """Build per-tool hint lines for tool specs uploaded in the current round.
+
+    Returns a tuple of (added_lines, removed_lines) compared to the previous state.
+    """
+    task_workspace = Path(task_workspace)
+    tools_dir = task_workspace / "resources" / "available-tools"
+
+    from jiuwenclaw.agentserver.skilldev_agent.meta_tools.external_tool_registry import (
+        resolve_tool_spec_identity,
+        tool_spec_filename,
+    )
+
+    prev_entries = _tool_state_entries(previous_tool_specs or [])
+    prev_filenames = {e.get("filename", "") for e in prev_entries if e.get("filename")}
+
+    tool_defs = _collect_tool_definitions(_resource_list(tool_spec_files))
+    current_entries: list[dict[str, str]] = []
+    current_filenames: set[str] = set()
+    for tool_def in tool_defs:
+        plugin_id, tool_name = resolve_tool_spec_identity(tool_def)
+        if not plugin_id or not tool_name:
+            continue
+        filename = tool_spec_filename(plugin_id, tool_name)
+        current_filenames.add(filename)
+        current_entries.append(
+            {"pluginId": plugin_id, "toolName": tool_name, "filename": filename}
+        )
+
+    removed_lines: list[str] = []
+    for entry in prev_entries:
+        filename = entry.get("filename", "")
+        if not filename or filename in current_filenames:
+            continue
+        plugin_id = entry.get("pluginId", "")
+        tool_name = entry.get("toolName", "")
+        if plugin_id and tool_name:
+            removed_lines.append(
+                f"- {plugin_id}/{tool_name} -> 已移除（用户本轮未再上传）"
+            )
+        else:
+            removed_lines.append(_format_ref_file_removed_hint_line(filename))
+
+    added_lines: list[str] = []
+    for entry in current_entries:
+        filename = entry.get("filename", "")
+        if not filename or filename in prev_filenames:
+            continue
+        plugin_id = entry.get("pluginId", "")
+        tool_name = entry.get("toolName", "")
+        if not plugin_id or not tool_name:
+            continue
+        tool_path = (tools_dir / filename).resolve()
+        added_lines.append(f"- {plugin_id}/{tool_name} -> 本地路径: {tool_path}")
+
+    return (added_lines, removed_lines)
 
 
 def _resource_state_entry(resource: dict[str, Any], name: str) -> dict[str, str]:

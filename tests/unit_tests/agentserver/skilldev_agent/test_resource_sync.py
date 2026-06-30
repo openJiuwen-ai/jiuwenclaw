@@ -15,6 +15,8 @@ from jiuwenclaw.agentserver.skilldev_agent.adapter import SkillDevDeepAdapter
 from jiuwenclaw.agentserver.skilldev_agent.utils import resource_sync
 from jiuwenclaw.agentserver.skilldev_agent.utils.resource_sync import (
     build_current_ref_file_hint_lines,
+    build_current_ref_skill_hint_lines,
+    build_current_tool_spec_hint_lines,
     load_resource_state,
     record_direct_imported_skills,
     resource_state_path,
@@ -223,7 +225,7 @@ def test_build_current_ref_file_hint_lines_single_and_multiple(tmp_path: Path) -
     ref_dir = tmp_path / "resources" / "ref-files"
     ref_dir.mkdir(parents=True)
 
-    lines = build_current_ref_file_hint_lines(
+    added_lines, removed_lines = build_current_ref_file_hint_lines(
         tmp_path,
         [
             {"filename": "requirement.md", "base64Data": _b64("# req")},
@@ -231,38 +233,41 @@ def test_build_current_ref_file_hint_lines_single_and_multiple(tmp_path: Path) -
         ],
     )
 
-    assert lines == [
+    assert added_lines == [
         f"- requirement.md -> 本地路径: {(ref_dir / 'requirement.md').resolve()}",
         f"- notes.txt -> 本地路径: {(ref_dir / 'notes.txt').resolve()}",
     ]
+    assert removed_lines == []
 
 
 def test_build_current_ref_file_hint_lines_zip_includes_extract_dir(tmp_path: Path) -> None:
     ref_dir = tmp_path / "resources" / "ref-files"
 
-    lines = build_current_ref_file_hint_lines(
+    added_lines, removed_lines = build_current_ref_file_hint_lines(
         tmp_path,
         [{"filename": "demo.zip", "base64Data": _zip_b64()}],
     )
 
-    assert lines == [
+    assert added_lines == [
         f"- demo.zip -> 本地路径: {(ref_dir / 'demo.zip').resolve()}",
         f"  - 解压目录 -> {(ref_dir / 'demo').resolve()}",
     ]
+    assert removed_lines == []
 
 
 def test_build_current_ref_file_hint_lines_url_zip_extracts_to_ref_dir(tmp_path: Path) -> None:
     ref_dir = tmp_path / "resources" / "ref-files"
 
-    lines = build_current_ref_file_hint_lines(
+    added_lines, removed_lines = build_current_ref_file_hint_lines(
         tmp_path,
         [{"filename": "remote.zip", "url": "https://example.com/remote.zip"}],
     )
 
-    assert lines == [
+    assert added_lines == [
         f"- remote.zip -> 本地路径: {(ref_dir / 'remote.zip').resolve()}",
         f"  - 解压目录 -> {ref_dir.resolve()}",
     ]
+    assert removed_lines == []
 
 
 def test_build_current_ref_file_hint_lines_skips_direct_import_and_empty_payload(
@@ -270,7 +275,7 @@ def test_build_current_ref_file_hint_lines_skips_direct_import_and_empty_payload
 ) -> None:
     record_direct_imported_skills(tmp_path, [{"filename": "imported.skill"}])
 
-    lines = build_current_ref_file_hint_lines(
+    added_lines, removed_lines = build_current_ref_file_hint_lines(
         tmp_path,
         [
             {"filename": "imported.skill", "base64Data": _b64("x")},
@@ -279,7 +284,8 @@ def test_build_current_ref_file_hint_lines_skips_direct_import_and_empty_payload
         ],
     )
 
-    assert lines == []
+    assert added_lines == []
+    assert removed_lines == []
 
 
 def test_build_current_ref_file_hint_lines_image_appends_source_url(tmp_path: Path) -> None:
@@ -287,7 +293,7 @@ def test_build_current_ref_file_hint_lines_image_appends_source_url(tmp_path: Pa
     ref_dir.mkdir(parents=True)
     image_url = "https://xiaoyi.example.com/files/222.jpg"
 
-    lines = build_current_ref_file_hint_lines(
+    added_lines, removed_lines = build_current_ref_file_hint_lines(
         tmp_path,
         [
             {
@@ -298,16 +304,17 @@ def test_build_current_ref_file_hint_lines_image_appends_source_url(tmp_path: Pa
         ],
     )
 
-    assert lines == [
+    assert added_lines == [
         f"- 222.jpg -> 本地路径: {(ref_dir / '222.jpg').resolve()} ; 可下载url: {image_url}",
     ]
+    assert removed_lines == []
 
 
 def test_build_current_ref_file_hint_lines_non_image_does_not_append_url(tmp_path: Path) -> None:
     ref_dir = tmp_path / "resources" / "ref-files"
     ref_dir.mkdir(parents=True)
 
-    lines = build_current_ref_file_hint_lines(
+    added_lines, removed_lines = build_current_ref_file_hint_lines(
         tmp_path,
         [
             {
@@ -318,22 +325,175 @@ def test_build_current_ref_file_hint_lines_non_image_does_not_append_url(tmp_pat
         ],
     )
 
-    assert lines == [f"- notes.txt -> 本地路径: {(ref_dir / 'notes.txt').resolve()}"]
+    assert added_lines == [f"- notes.txt -> 本地路径: {(ref_dir / 'notes.txt').resolve()}"]
+    assert removed_lines == []
 
 
 def test_build_resource_hint_header_and_file_lines(tmp_path: Path) -> None:
     ref_dir = tmp_path / "resources" / "ref-files"
     ref_dir.mkdir(parents=True)
+    added_lines, removed_lines = build_current_ref_file_hint_lines(
+        tmp_path,
+        [{"filename": "requirement.md", "base64Data": _b64("req")}],
+    )
 
     hint = SkillDevDeepAdapter._build_resource_hint(
         tmp_path,
         {"files": [{"filename": "requirement.md", "base64Data": _b64("req")}]},
         "task-1",
+        added_file_lines=added_lines,
+        removed_file_lines=removed_lines,
     )
 
     assert "【用户需求】" not in hint
     assert "【工作区信息】" in hint
     assert "【本轮上传资源索引（已落盘，可直接读取）】" in hint
+    assert "【本轮已移除资源】" not in hint
     assert "【执行要求】" in hint
     assert "用户上传资源已写入" not in hint
     assert f"- requirement.md -> 本地路径: {(ref_dir / 'requirement.md').resolve()}" in hint
+
+
+def test_build_current_ref_file_hint_lines_skips_reuploaded_files(tmp_path: Path) -> None:
+    added_lines, removed_lines = build_current_ref_file_hint_lines(
+        tmp_path,
+        [{"filename": "a.txt", "base64Data": _b64("same")}],
+        previous_ref_files=[{"filename": "a.txt"}],
+    )
+
+    assert added_lines == []
+    assert removed_lines == []
+
+
+def test_build_current_ref_file_hint_lines_only_adds_new_files(tmp_path: Path) -> None:
+    ref_dir = tmp_path / "resources" / "ref-files"
+
+    added_lines, removed_lines = build_current_ref_file_hint_lines(
+        tmp_path,
+        [
+            {"filename": "a.txt", "base64Data": _b64("a")},
+            {"filename": "b.txt", "base64Data": _b64("b")},
+        ],
+        previous_ref_files=[{"filename": "a.txt"}],
+    )
+
+    assert added_lines == [f"- b.txt -> 本地路径: {(ref_dir / 'b.txt').resolve()}"]
+    assert removed_lines == []
+
+
+def test_build_current_ref_file_hint_lines_only_reports_removed_files(tmp_path: Path) -> None:
+    added_lines, removed_lines = build_current_ref_file_hint_lines(
+        tmp_path,
+        [],
+        previous_ref_files=[{"filename": "a.txt"}],
+    )
+
+    assert added_lines == []
+    assert removed_lines == ["- a.txt -> 已移除（用户本轮未再上传）"]
+
+
+def test_build_current_ref_file_hint_lines_add_and_remove_together(tmp_path: Path) -> None:
+    ref_dir = tmp_path / "resources" / "ref-files"
+
+    added_lines, removed_lines = build_current_ref_file_hint_lines(
+        tmp_path,
+        [
+            {"filename": "a.txt", "base64Data": _b64("a")},
+            {"filename": "c.txt", "base64Data": _b64("c")},
+        ],
+        previous_ref_files=[
+            {"filename": "a.txt"},
+            {"filename": "b.txt"},
+        ],
+    )
+
+    assert added_lines == [f"- c.txt -> 本地路径: {(ref_dir / 'c.txt').resolve()}"]
+    assert removed_lines == ["- b.txt -> 已移除（用户本轮未再上传）"]
+
+
+def test_build_current_ref_file_hint_lines_zip_removal_has_no_extract_dir(tmp_path: Path) -> None:
+    added_lines, removed_lines = build_current_ref_file_hint_lines(
+        tmp_path,
+        [],
+        previous_ref_files=[{"filename": "demo.zip"}],
+    )
+
+    assert added_lines == []
+    assert removed_lines == ["- demo.zip -> 已移除（用户本轮未再上传）"]
+
+
+def test_build_resource_hint_includes_removed_section_when_only_deletions(tmp_path: Path) -> None:
+    hint = SkillDevDeepAdapter._build_resource_hint(
+        tmp_path,
+        {},
+        "task-1",
+        added_file_lines=[],
+        removed_file_lines=["- drop.txt -> 已移除（用户本轮未再上传）"],
+        added_skill_lines=[],
+        removed_skill_lines=[],
+        added_tool_lines=[],
+        removed_tool_lines=[],
+    )
+
+    assert "【工作区信息】" in hint
+    assert "【本轮上传资源索引（已落盘，可直接读取）】" not in hint
+    assert "【本轮已移除资源】" in hint
+    assert "- drop.txt -> 已移除（用户本轮未再上传）" in hint
+    assert "【执行要求】" in hint
+
+
+def test_build_current_ref_skill_hint_lines_add_and_remove(tmp_path: Path) -> None:
+    ref_dir = tmp_path / "resources" / "ref-skills"
+    added_lines, removed_lines = build_current_ref_skill_hint_lines(
+        tmp_path,
+        [{"filename": "new.skill", "base64Data": _b64("x")}],
+        previous_ref_skills=[{"filename": "old.skill"}],
+    )
+
+    assert added_lines == [
+        f"- new.skill -> 本地路径: {(ref_dir / 'new.skill').resolve()}",
+        f"  - 解压目录 -> {(ref_dir / 'new').resolve()}",
+    ]
+    assert removed_lines == ["- old.skill -> 已移除（用户本轮未再上传）"]
+
+
+def test_build_current_ref_skill_hint_lines_skips_reuploaded(tmp_path: Path) -> None:
+    added_lines, removed_lines = build_current_ref_skill_hint_lines(
+        tmp_path,
+        [{"filename": "keep.zip", "base64Data": _zip_b64()}],
+        previous_ref_skills=[{"filename": "keep.zip"}],
+    )
+
+    assert added_lines == []
+    assert removed_lines == []
+
+
+def test_build_current_tool_spec_hint_lines_add_and_remove(tmp_path: Path) -> None:
+    tools_dir = tmp_path / "resources" / "available-tools"
+    added_lines, removed_lines = build_current_tool_spec_hint_lines(
+        tmp_path,
+        [{"pluginId": "new", "toolName": "search"}],
+        previous_tool_specs=[{"filename": "old__tool.json", "pluginId": "old", "toolName": "tool"}],
+    )
+
+    assert added_lines == [f"- new/search -> 本地路径: {(tools_dir / 'new__search.json').resolve()}"]
+    assert removed_lines == ["- old/tool -> 已移除（用户本轮未再上传）"]
+
+
+def test_build_resource_hint_includes_skill_and_tool_sections(tmp_path: Path) -> None:
+    hint = SkillDevDeepAdapter._build_resource_hint(
+        tmp_path,
+        {},
+        "task-1",
+        added_file_lines=[],
+        removed_file_lines=[],
+        added_skill_lines=["- demo.skill -> 本地路径: X", "  - 解压目录 -> Y"],
+        removed_skill_lines=["- old.skill -> 已移除（用户本轮未再上传）"],
+        added_tool_lines=["- a/b -> 本地路径: Z"],
+        removed_tool_lines=["- c/d -> 已移除（用户本轮未再上传）"],
+    )
+
+    assert "【本轮新增参考 Skill 包】" in hint
+    assert "【本轮已移除参考 Skill 包】" in hint
+    assert "【本轮新增可用工具】" in hint
+    assert "【本轮已移除可用工具】" in hint

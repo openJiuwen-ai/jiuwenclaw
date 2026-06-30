@@ -34,7 +34,13 @@ from jiuwenclaw.agentserver.deep_agent.ask_user_question_registry import (
 from jiuwenclaw.agentserver.deep_agent.rails import JiuClawStreamEventRail
 from jiuwenclaw.agentserver.stream_utils import tool_calls_payload_to_json_list
 from jiuwenclaw.agentserver.skilldev_agent.utils.resource_sync import (
+    STATE_REF_FILES,
+    STATE_REF_SKILLS,
+    STATE_TOOL_SPECS,
     build_current_ref_file_hint_lines,
+    build_current_ref_skill_hint_lines,
+    build_current_tool_spec_hint_lines,
+    load_resource_state,
     record_direct_imported_skills,
     write_skill_searched,
     write_uploaded_resources,
@@ -544,12 +550,38 @@ class SkillDevDeepAdapter:
 
         # 初始化工作区，写入上传资源，写入搜索到的技能
         self._init_workspace_dirs(task_workspace)
+        previous_state = load_resource_state(task_workspace)
         await write_uploaded_resources(task_workspace, params)
         if params.get("skill_searched"):
             await write_skill_searched(task_workspace, params.get("skill_searched"))
         await self.update_workspace(task_workspace)
 
-        resource_hint = self._build_resource_hint(task_workspace, params, task_id)
+        added_file_lines, removed_file_lines = build_current_ref_file_hint_lines(
+            task_workspace,
+            params.get("files") or [],
+            previous_ref_files=previous_state.get(STATE_REF_FILES, []),
+        )
+        added_skill_lines, removed_skill_lines = build_current_ref_skill_hint_lines(
+            task_workspace,
+            params.get("skill_packages") or params.get("skillPackages") or [],
+            previous_ref_skills=previous_state.get(STATE_REF_SKILLS, []),
+        )
+        added_tool_lines, removed_tool_lines = build_current_tool_spec_hint_lines(
+            task_workspace,
+            params.get("tool_spec_files") or params.get("toolSpecFiles") or [],
+            previous_tool_specs=previous_state.get(STATE_TOOL_SPECS, []),
+        )
+        resource_hint = self._build_resource_hint(
+            task_workspace,
+            params,
+            task_id,
+            added_file_lines=added_file_lines,
+            removed_file_lines=removed_file_lines,
+            added_skill_lines=added_skill_lines,
+            removed_skill_lines=removed_skill_lines,
+            added_tool_lines=added_tool_lines,
+            removed_tool_lines=removed_tool_lines,
+        )
         raw_session_id = str(request.session_id or task_id)
         combined_parts: list[str] = []
         combined_parts.append(f"【用户需求】\n{query}")
@@ -1080,21 +1112,26 @@ class SkillDevDeepAdapter:
             (task_workspace / rel).mkdir(parents=True, exist_ok=True)
 
     @staticmethod
-    def _build_resource_hint(task_workspace: Path, params: dict[str, Any], task_id: str) -> str:
-        files = params.get("files") or []
-        skills = params.get("skill_packages") or params.get("skillPackages") or []
-        tools = params.get("tool_spec_files") or params.get("toolSpecFiles") or []
+    def _build_resource_hint(
+        task_workspace: Path,
+        params: dict[str, Any],
+        task_id: str,
+        *,
+        added_file_lines: list[str] | None = None,
+        removed_file_lines: list[str] | None = None,
+        added_skill_lines: list[str] | None = None,
+        removed_skill_lines: list[str] | None = None,
+        added_tool_lines: list[str] | None = None,
+        removed_tool_lines: list[str] | None = None,
+    ) -> str:
         agents = params.get("agent_definitions") or params.get("agentDefinitions")
         clis = params.get("cli_definitions") or params.get("cliDefinitions")
-        file_lines: list[str] = []
-        if files:
-            file_lines.extend(build_current_ref_file_hint_lines(task_workspace, files))
-        skill_lines: list[str] = []
-        if skills:
-            skill_lines.append(f"- ref_skills_dir：{task_workspace / 'resources' / 'ref-skills'}")
-        tool_lines: list[str] = []
-        if tools:
-            tool_lines.append(f"- tools_dir：{task_workspace / 'resources' / 'available-tools'}")
+        added_file_lines = added_file_lines or []
+        removed_file_lines = removed_file_lines or []
+        added_skill_lines = added_skill_lines or []
+        removed_skill_lines = removed_skill_lines or []
+        added_tool_lines = added_tool_lines or []
+        removed_tool_lines = removed_tool_lines or []
         other_lines: list[str] = []
         if agents:
             other_lines.append(
@@ -1106,7 +1143,18 @@ class SkillDevDeepAdapter:
             )
 
         skill_searched = params.get("skill_searched")
-        if not (file_lines or skill_lines or tool_lines or other_lines) and not skill_searched:
+        if (
+            not (
+                added_file_lines
+                or removed_file_lines
+                or added_skill_lines
+                or removed_skill_lines
+                or added_tool_lines
+                or removed_tool_lines
+                or other_lines
+            )
+            and not skill_searched
+        ):
             return ""
 
         parts: list[str] = []
@@ -1115,12 +1163,20 @@ class SkillDevDeepAdapter:
             f"- task_id：{task_id}\n"
             f"- workspace：{task_workspace}"
         )
-        if file_lines:
-            parts.append("【本轮上传资源索引（已落盘，可直接读取）】\n" + "\n".join(file_lines))
-        if skill_lines:
-            parts.append("【参考 Skill 包】\n" + "\n".join(skill_lines))
-        if tool_lines:
-            parts.append("【可用工具说明】\n" + "\n".join(tool_lines))
+        if added_file_lines:
+            parts.append(
+                "【本轮上传资源索引（已落盘，可直接读取）】\n" + "\n".join(added_file_lines)
+            )
+        if removed_file_lines:
+            parts.append("【本轮已移除资源】\n" + "\n".join(removed_file_lines))
+        if added_skill_lines:
+            parts.append("【本轮新增参考 Skill 包】\n" + "\n".join(added_skill_lines))
+        if removed_skill_lines:
+            parts.append("【本轮已移除参考 Skill 包】\n" + "\n".join(removed_skill_lines))
+        if added_tool_lines:
+            parts.append("【本轮新增可用工具】\n" + "\n".join(added_tool_lines))
+        if removed_tool_lines:
+            parts.append("【本轮已移除可用工具】\n" + "\n".join(removed_tool_lines))
         if other_lines:
             parts.append("【其他可用定义】\n" + "\n".join(other_lines))
         if skill_searched:
