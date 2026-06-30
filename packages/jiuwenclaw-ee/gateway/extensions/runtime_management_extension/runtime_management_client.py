@@ -74,6 +74,9 @@ from jiuwenclaw.gateway.message_handler import MessageHandler
 
 logger = logging.getLogger(__name__)
 
+# 企业版流式请求空闲超时（秒）：超过此时间未收到真实业务 chunk 则判定为卡死
+_STREAM_IDLE_TIMEOUT_SECONDS = 600.0  # 10分钟
+
 
 def _pick_free_port(host: str = "127.0.0.1") -> int:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
@@ -1139,8 +1142,41 @@ class RuntimeManagementAgentClient(AgentServerClient):
         )
 
         try:
+            # 企业版空闲超时机制：跟踪最后一个真实业务 chunk 的时间
+            last_real_chunk_time = asyncio.get_event_loop().time()
+            chunk_count = 0
+            
             async for chunk in self._access.send_message(session_request):
+                chunk_count += 1
+                
+                # 检查是否是真实业务 chunk（排除 keepalive）
+                is_keepalive = (
+                    isinstance(chunk.payload, dict) 
+                    and chunk.payload.get("event_type") == "keepalive"
+                )
+                
+                if not is_keepalive:
+                    # 更新最后真实业务 chunk 时间
+                    last_real_chunk_time = asyncio.get_event_loop().time()
+                
+                # 检查是否超时（每次收到 chunk 时检查）
+                current_time = asyncio.get_event_loop().time()
+                idle_duration = current_time - last_real_chunk_time
+                if idle_duration > _STREAM_IDLE_TIMEOUT_SECONDS:
+                    logger.error(
+                        "[RuntimeManagementAgentClient] 流式请求空闲超时: request_id=%s "
+                        "已 %.1f 秒无真实业务输出，共收到 %d 个 chunk",
+                        request.request_id, idle_duration, chunk_count,
+                    )
+                    raise TimeoutError(
+                        f"Stream idle timeout after {idle_duration:.1f}s without real business chunks"
+                    )
+                
                 yield chunk
+                
+        except TimeoutError:
+            # 重新抛出超时异常，让上层处理
+            raise
         except Exception as exc:
             logger.exception("[RuntimeManagementAgentClient] send_request_stream failed: %s", exc)
             yield AgentResponseChunk(
