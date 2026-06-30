@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import importlib.util
+import logging
 import os
+from collections.abc import Callable
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -17,77 +20,201 @@ _spec = importlib.util.spec_from_file_location("multimodal_config_under_test", _
 assert _spec and _spec.loader
 _multimodal_config = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(_multimodal_config)
+
+MULTIMODAL_ENV_GROUP_KEYS = _multimodal_config.MULTIMODAL_ENV_GROUP_KEYS
+apply_audio_model_config_from_yaml = _multimodal_config.apply_audio_model_config_from_yaml
 apply_image_gen_model_config_from_yaml = (
     _multimodal_config.apply_image_gen_model_config_from_yaml
 )
+apply_video_model_config_from_yaml = _multimodal_config.apply_video_model_config_from_yaml
+apply_vision_model_config_from_yaml = _multimodal_config.apply_vision_model_config_from_yaml
 dedicated_multimodal_model_configured = (
     _multimodal_config.dedicated_multimodal_model_configured
+)
+sync_multimodal_env_omission_state = _multimodal_config.sync_multimodal_env_omission_state
+reset_multimodal_env_omission_disabled = (
+    _multimodal_config.reset_multimodal_env_omission_disabled
+)
+
+from jiuwenclaw.local_env_config import ENV_CONFIG_DICT
+
+_APPLY_FN_BY_GROUP: dict[str, Callable[[dict[str, Any] | None], None]] = {
+    "audio": apply_audio_model_config_from_yaml,
+    "vision": apply_vision_model_config_from_yaml,
+    "video": apply_video_model_config_from_yaml,
+    "image_gen": apply_image_gen_model_config_from_yaml,
+}
+
+_MULTIMODAL_GROUP_PARAMS = [
+    pytest.param(
+        group,
+        MULTIMODAL_ENV_GROUP_KEYS[group][0],
+        MULTIMODAL_ENV_GROUP_KEYS[group][2],
+        _APPLY_FN_BY_GROUP[group],
+        id=group,
+    )
+    for group in ("audio", "vision", "video", "image_gen")
+]
+
+_ALL_MULTIMODAL_ENV_KEYS = tuple(
+    key for keys in MULTIMODAL_ENV_GROUP_KEYS.values() for key in keys
 )
 
 
 @pytest.fixture(autouse=True)
-def _clear_image_gen_env(monkeypatch: pytest.MonkeyPatch) -> None:
+def _clear_multimodal_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    reset_multimodal_env_omission_disabled()
+    ENV_CONFIG_DICT.clear()
     for key in (
-        "IMAGE_GEN_API_KEY",
-        "IMAGE_GEN_API_BASE",
-        "IMAGE_GEN_MODEL_NAME",
-        "IMAGE_GEN_PROVIDER",
+        *_ALL_MULTIMODAL_ENV_KEYS,
         "API_KEY",
         "API_BASE",
         "MODEL_NAME",
         "MODEL_PROVIDER",
+        "VIDEO_UNDERSTANDING_STRICT",
     ):
         monkeypatch.delenv(key, raising=False)
 
 
-def test_apply_image_gen_model_config_from_yaml_writes_env() -> None:
-    config = {
-        "models": {
-            "image_gen": {
-                "model_client_config": {
-                    "api_key": "img-key",
-                    "api_base": "https://img.example/v1",
-                    "model_name": "wanx-v1",
-                    "client_provider": "DashScope",
-                }
-            }
-        }
-    }
-    apply_image_gen_model_config_from_yaml(config)
-    assert os.environ["IMAGE_GEN_API_KEY"] == "img-key"
-    assert os.environ["IMAGE_GEN_API_BASE"] == "https://img.example/v1"
-    assert os.environ["IMAGE_GEN_MODEL_NAME"] == "wanx-v1"
-    assert os.environ["IMAGE_GEN_PROVIDER"] == "DashScope"
+def _model_config(group: str, **fields: str) -> dict[str, Any]:
+    return {"models": {group: {"model_client_config": dict(fields)}}}
 
 
-def test_apply_image_gen_falls_back_to_main_api(monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize(
+    ("group", "anchor_key", "model_name_key", "apply_fn"),
+    _MULTIMODAL_GROUP_PARAMS,
+)
+def test_apply_literal_yaml_bootstraps_env_without_preexisting_anchor(
+    group: str,
+    anchor_key: str,
+    model_name_key: str,
+    apply_fn: Callable[[dict[str, Any] | None], None],
+) -> None:
+    config = _model_config(
+        group,
+        api_key="group-key",
+        api_base=f"https://{group}.example/v1",
+        model_name=f"{group}-model",
+        model_provider="OpenAI",
+    )
+    apply_fn(config)
+    assert os.environ[anchor_key] == "group-key"
+    assert os.environ[model_name_key] == f"{group}-model"
+
+
+@pytest.mark.parametrize(
+    ("group", "anchor_key", "model_name_key", "apply_fn"),
+    _MULTIMODAL_GROUP_PARAMS,
+)
+def test_apply_skips_when_env_omission_disabled(
+    group: str,
+    anchor_key: str,
+    model_name_key: str,
+    apply_fn: Callable[[dict[str, Any] | None], None],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    sync_multimodal_env_omission_state({anchor_key: None}, None)
+    config = _model_config(
+        group,
+        api_key="group-key",
+        model_name=f"{group}-model",
+    )
+    with caplog.at_level(logging.DEBUG, logger=_multimodal_config.logger.name):
+        apply_fn(config)
+
+    assert anchor_key not in os.environ
+    assert model_name_key not in os.environ
+    assert "disabled by env omission reconcile" in caplog.text
+
+
+@pytest.mark.parametrize(
+    ("group", "anchor_key", "model_name_key", "apply_fn"),
+    _MULTIMODAL_GROUP_PARAMS,
+)
+def test_apply_literal_yaml_falls_back_to_main_api(
+    group: str,
+    anchor_key: str,
+    model_name_key: str,
+    apply_fn: Callable[[dict[str, Any] | None], None],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "jiuwenclaw.config.get_config_raw",
+        lambda: {"models": {group: {"model_client_config": {}}}},
+    )
     monkeypatch.setenv("API_KEY", "main-key")
     monkeypatch.setenv("API_BASE", "https://main.example/v1")
     monkeypatch.setenv("MODEL_NAME", "main-model")
     monkeypatch.setenv("MODEL_PROVIDER", "OpenAI")
-    config = {"models": {"image_gen": {"model_client_config": {}}}}
-    apply_image_gen_model_config_from_yaml(config)
-    assert os.environ["IMAGE_GEN_API_KEY"] == "main-key"
-    assert os.environ["IMAGE_GEN_API_BASE"] == "https://main.example/v1"
-    assert os.environ["IMAGE_GEN_MODEL_NAME"] == "main-model"
-    assert os.environ["IMAGE_GEN_PROVIDER"] == "OpenAI"
+    apply_fn(_model_config(group))
+    assert os.environ[anchor_key] == "main-key"
+    assert os.environ[model_name_key] == "main-model"
 
 
-def test_dedicated_multimodal_model_configured_image_gen() -> None:
-    with_key = {
+def test_apply_env_bound_skips_main_api_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("API_KEY", "main-key")
+    raw_config = _model_config("image_gen", api_key="${IMAGE_GEN_API_KEY}")
+    resolved_config = _model_config("image_gen", api_key="")
+    monkeypatch.setattr(
+        "jiuwenclaw.config.get_config_raw",
+        lambda: raw_config,
+    )
+    apply_image_gen_model_config_from_yaml(resolved_config)
+    assert os.environ.get("IMAGE_GEN_API_KEY") is None
+
+
+@pytest.mark.parametrize("group", ["audio", "vision", "video", "image_gen"])
+def test_dedicated_multimodal_model_configured_from_literal_yaml(group: str) -> None:
+    with_key = _model_config(group, api_key="dedicated")
+    without_key = _model_config(group, api_key="")
+
+    assert dedicated_multimodal_model_configured(with_key, group) is True
+    assert dedicated_multimodal_model_configured(without_key, group) is False
+    assert dedicated_multimodal_model_configured(None, group) is False
+
+
+@pytest.mark.parametrize("group", ["audio", "vision", "video", "image_gen"])
+def test_dedicated_false_when_env_omission_disabled_despite_literal_yaml(
+    group: str,
+) -> None:
+    anchor_key = MULTIMODAL_ENV_GROUP_KEYS[group][0]
+    sync_multimodal_env_omission_state({anchor_key: None}, None)
+    config = _model_config(group, api_key="dedicated")
+
+    assert dedicated_multimodal_model_configured(config, group) is False
+
+
+def test_dedicated_placeholder_resolves_from_env() -> None:
+    config = {
         "models": {
             "image_gen": {
-                "model_client_config": {"api_key": "dedicated"},
+                "model_client_config": {"api_key": "${IMAGE_GEN_API_KEY}"},
             }
         }
     }
-    without_key = {
-        "models": {
-            "image_gen": {
-                "model_client_config": {"api_key": ""},
-            }
-        }
+    assert dedicated_multimodal_model_configured(config, "image_gen") is False
+    ENV_CONFIG_DICT["IMAGE_GEN_API_KEY"] = "resolved-key"
+    assert dedicated_multimodal_model_configured(config, "image_gen") is True
+
+
+def test_sync_omission_clears_disable_when_anchor_reappears() -> None:
+    sync_multimodal_env_omission_state({"IMAGE_GEN_API_KEY": None}, None)
+    config = _model_config("image_gen", api_key="dedicated")
+    assert dedicated_multimodal_model_configured(config, "image_gen") is False
+
+    sync_multimodal_env_omission_state(
+        {},
+        _full_snapshot_with_image_gen(),
+    )
+    assert dedicated_multimodal_model_configured(config, "image_gen") is True
+
+
+def _full_snapshot_with_image_gen() -> dict[str, str]:
+    return {
+        "API_KEY": "main-key",
+        "MODEL_NAME": "glm-5.1",
+        "API_BASE": "https://example/v1",
+        "IMAGE_GEN_API_KEY": "img-key",
     }
-    assert dedicated_multimodal_model_configured(with_key, "image_gen") is True
-    assert dedicated_multimodal_model_configured(without_key, "image_gen") is False
-    assert dedicated_multimodal_model_configured(None, "image_gen") is False

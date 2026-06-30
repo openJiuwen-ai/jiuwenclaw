@@ -481,6 +481,7 @@ class ForkAgentExecutor:
                 language=language,
                 profile="subagent",
                 agent_id=task_id,
+                agent_card_id=task_id,
                 subagent_kind=kind,
             )
         except Exception as exc:

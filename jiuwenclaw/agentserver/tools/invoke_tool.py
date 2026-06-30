@@ -11,6 +11,8 @@ from pydantic import BaseModel, Field
 
 from openjiuwen.core.foundation.tool import Tool, ToolCard
 
+from jiuwenclaw.agentserver.deep_agent.tool_qualify import qualify_tool_id
+
 logger = logging.getLogger(__name__)
 
 
@@ -51,10 +53,14 @@ class InvokeToolTool(Tool):
         ],
         *,
         language: str = "cn",
+        agent_card_id: str | None = None,
         agent_id: str | None = None,
     ) -> None:
         _ = language
-        tool_id = f"{self.TOOL_ID}_{agent_id}" if agent_id else self.TOOL_ID
+        scope_id = str(agent_card_id or agent_id or "").strip()
+        tool_id = (
+            qualify_tool_id(self.TOOL_ID, scope_id) if scope_id else self.TOOL_ID
+        )
         super().__init__(
             ToolCard(
                 id=tool_id,

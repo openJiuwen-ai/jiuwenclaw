@@ -262,6 +262,7 @@ from jiuwenclaw.agentserver.tools.multimodal_config import (
     apply_vision_model_config_from_yaml,
     clear_multimodal_env_groups,
     dedicated_multimodal_model_configured,
+    multimodal_env_anchor_present,
     MULTIMODAL_ENV_GROUP_KEYS,
 )
 from jiuwenclaw.agentserver.tools.image_gen_tools import create_session_text_to_image_tool
@@ -561,6 +562,7 @@ def build_jiuwen_progressive_tool_rail_from_react_config(
     language: str,
     profile: str = "main",
     agent_id: str | None = None,
+    agent_card_id: str | None = None,
     subagent_kind: str | None = None,
 ) -> JiuWenProgressiveToolRail | None:
     """Build JiuWenProgressiveToolRail from react.tool_lazy_load config.
@@ -620,11 +622,13 @@ def build_jiuwen_progressive_tool_rail_from_react_config(
 
     normalized_language = resolve_language(language)
     logger.info(
-        "[ProgressiveToolRail] enabled profile=%s kind=%s eager_tools=%s agent_id=%s enable_for_models=%s",
+        "[ProgressiveToolRail] enabled profile=%s kind=%s eager_tools=%s "
+        "agent_id=%s agent_card_id=%s enable_for_models=%s",
         normalized_profile,
         subagent_kind or "",
         eager_tools,
         agent_id,
+        agent_card_id,
         enable_for_models,
     )
 
@@ -633,6 +637,7 @@ def build_jiuwen_progressive_tool_rail_from_react_config(
         eager_tools=eager_tools,
         language=normalized_language,
         agent_id=agent_id,
+        agent_card_id=agent_card_id,
         enable_for_models=enable_for_models,
     )
 
@@ -1706,8 +1711,11 @@ class JiuWenClawDeepAdapter:
     ) -> None:
         """Refresh cached multimodal configs and live tool instances."""
         for group in MULTIMODAL_ENV_GROUP_KEYS:
-            if not dedicated_multimodal_model_configured(config_base, group):
-                clear_multimodal_env_groups([group])
+            if dedicated_multimodal_model_configured(config_base, group):
+                continue
+            if multimodal_env_anchor_present(group):
+                continue
+            clear_multimodal_env_groups([group])
 
         self._vision_model_config = self._build_vision_model_config(config_base)
         self._audio_model_config = self._build_audio_model_config(config_base)
@@ -2867,12 +2875,30 @@ class JiuWenClawDeepAdapter:
             language=self._resolve_runtime_language(),
             profile="main",
             agent_id=self._agent_id,
+            agent_card_id=self._resolve_agent_card_id(),
         )
         if rail is not None:
             logger.info(
                 "[JiuWenClawDeepAdapter] ProgressiveToolRail enabled (fixed schema mode)"
             )
         return rail
+
+    def _rebind_progressive_tool_rail_after_reload(self) -> None:
+        """Rebind PTR to post-configure instance so deferred cache matches ability_manager."""
+        rail = getattr(self, "_progressive_tool_rail", None)
+        instance = self._instance
+        if rail is None or instance is None:
+            return
+        card_id = self._resolve_agent_card_id()
+        if card_id:
+            rail.update_agent_card_id(card_id)
+        rail.init(instance)
+        rail.invalidate_deferred_tool_cache()
+        logger.info(
+            "[JiuWenClawDeepAdapter] PTR rebind after configure agent_id=%s agent_card_id=%s",
+            self._agent_id,
+            rail.agent_card_id,
+        )
 
     def _build_fast_subagent_permission_rail(self) -> Any | None:
         """为 agent.fast 子 ReActAgent 构造独立的 PermissionInterruptRail（每实例新建）。"""
@@ -3583,6 +3609,7 @@ class JiuWenClawDeepAdapter:
         )
 
         self._sync_preinstance_runtime_tools_to_ability_manager()
+        self._sync_multimodal_tools_for_runtime()
 
         # 动态加载用户自定义的 Rail 扩展
         await self.load_user_rails()
@@ -3935,6 +3962,7 @@ class JiuWenClawDeepAdapter:
             # configure() rebuilds ability_manager from tool_cards; multimodal tools
             # registered before configure are dropped — re-sync after configure.
             self._sync_multimodal_tools_for_runtime()
+            self._rebind_progressive_tool_rail_after_reload()
             self._apply_model_to_react_agent(self._model)
             self._refresh_fork_agent_executor_model()
 

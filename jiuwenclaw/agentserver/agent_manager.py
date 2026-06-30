@@ -23,12 +23,16 @@ from jiuwenclaw.local_env_config import (
     ENV_CONFIG_DICT,
     apply_env_overrides_to_active,
     apply_env_removals,
+    bind_task_env_overlay,
+    build_effective_env_overlay,
     promote_staged_env,
+    reset_task_env_overlay,
     stage_env_overrides,
 )
 from jiuwenclaw.agentserver.tools.multimodal_config import (
     infer_multimodal_env_removals,
     merge_reload_env_snapshot,
+    sync_multimodal_env_omission_state,
 )
 from jiuwenclaw.utils import get_agent_workspace_dir
 from jiuwenclaw.config import _sandbox_yaml_to_env_overlay
@@ -101,6 +105,7 @@ class AgentManager:
             omission_removals = infer_multimodal_env_removals(None, env_overrides)
             if omission_removals:
                 apply_env_removals(omission_removals)
+            sync_multimodal_env_omission_state(omission_removals, env_overrides)
             self._latest_env_overrides = merge_reload_env_snapshot(None, env_overrides)
             apply_env_overrides_to_active(env_overrides)
 
@@ -175,27 +180,36 @@ class AgentManager:
             "agent_name",
             f"agent_{self.agent_id}_{self.service_id}_{agent_key}_{session_id}",
         )
-        await agent.create_instance(merged_config, mode=mode, session_id=session_id)
-        self.agents.setdefault(agent_key, {}).setdefault(mode, {})[session_id] = agent
+        overlay_token = None
+        if self._latest_env_overrides:
+            overlay = build_effective_env_overlay(self._latest_env_overrides)
+            if overlay:
+                overlay_token = bind_task_env_overlay(overlay)
+        try:
+            await agent.create_instance(merged_config, mode=mode, session_id=session_id)
+            self.agents.setdefault(agent_key, {}).setdefault(mode, {})[session_id] = agent
 
-        # 创建后如果有保存的配置，重放 reload_agent_config
-        if self._latest_config_base is not None or self._latest_env_overrides:
-            try:
-                await agent.reload_agent_config(
-                    config_base=self._latest_config_base,
-                    env_overrides=self._latest_env_overrides,
-                )
-                log_agent_config_hot_reload_replay(
-                    logger,
-                    reload_trace_id=self._last_reload_trace_id,
-                    session=session_id,
-                    agent_key=agent_key,
-                    mode=mode,
-                    config=self._latest_config_base,
-                    env=self._latest_env_overrides,
-                )
-            except Exception as e:
-                logger.warning("[AgentManager] Replay reload_agent_config failed: %s", e)
+            # 创建后如果有保存的配置，重放 reload_agent_config
+            if self._latest_config_base is not None or self._latest_env_overrides:
+                try:
+                    await agent.reload_agent_config(
+                        config_base=self._latest_config_base,
+                        env_overrides=self._latest_env_overrides,
+                    )
+                    log_agent_config_hot_reload_replay(
+                        logger,
+                        reload_trace_id=self._last_reload_trace_id,
+                        session=session_id,
+                        agent_key=agent_key,
+                        mode=mode,
+                        config=self._latest_config_base,
+                        env=self._latest_env_overrides,
+                    )
+                except Exception as e:
+                    logger.warning("[AgentManager] Replay reload_agent_config failed: %s", e)
+        finally:
+            if overlay_token is not None:
+                reset_task_env_overlay(overlay_token)
 
         session_key = self._build_session_key(agent_key, mode, session_id)
         try:
