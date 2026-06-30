@@ -1182,6 +1182,18 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
                 cwd=runtime_config.cwd,
                 project_dir=runtime_config.project_dir or self._project_dir,
             )
+        # PermissionInterruptRail: per-request trusted_dirs 注入，使 external_directory
+        # 检查将这些子树视为 internal 而跳过 ask/deny（与 RuntimePromptRail 对齐）。
+        # 用 getattr 兼容绕过 __init__ 的测试构造（_permission_rail 仅在 rail 构建流程赋值）。
+        permission_rail = getattr(self, "_permission_rail", None)
+        if permission_rail is not None:
+            try:
+                permission_rail.set_trusted_dirs(runtime_config.trusted_dirs)
+            except Exception:
+                logger.debug(
+                    "[JiuwenSwarmCodeAdapter] permission_rail.set_trusted_dirs failed",
+                    exc_info=True,
+                )
         self._write_runtime_state(
             mode=runtime_config.mode,
             language=self._resolve_output_language(),

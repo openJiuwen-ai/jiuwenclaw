@@ -4258,6 +4258,18 @@ class JiuWenSwarmDeepAdapter:
             self._runtime_prompt_rail.set_mode(runtime_config.mode)
         if self._response_prompt_rail:
             self._response_prompt_rail.set_channel(resolved_channel)
+        # PermissionInterruptRail: per-request trusted_dirs 注入，使 external_directory
+        # 检查将这些子树视为 internal 而跳过 ask/deny（与 RuntimePromptRail 对齐）。
+        # 用 getattr 兼容绕过 __init__ 的测试构造（_permission_rail 仅在 rail 构建流程赋值）。
+        permission_rail = getattr(self, "_permission_rail", None)
+        if permission_rail is not None:
+            try:
+                permission_rail.set_trusted_dirs(runtime_config.trusted_dirs)
+            except Exception:
+                logger.debug(
+                    "[JiuWenSwarmDeepAdapter] permission_rail.set_trusted_dirs failed",
+                    exc_info=True,
+                )
         circuit_breaker_rail = getattr(self, "_circuit_breaker_rail", None)
         if circuit_breaker_rail is not None:
             circuit_breaker_rail.set_language(resolved_language)

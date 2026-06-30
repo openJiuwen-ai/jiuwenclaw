@@ -1323,6 +1323,18 @@ export class AppScreen implements Component, Focusable {
     this.startupPromptList.onSelect = (item) => {
       if (item.value === "yes") {
         addTrustedDir(cwd);
+        // Sync to server so the dir lands in permissions.external_directory
+        // allow-list (persist_cli_trusted_directory), otherwise external_dir
+        // checks would still intercept paths under this trusted directory.
+        // Mirrors /workspace add (workspace-dir.ts).
+        try {
+          this.state.sendEventOnly("command.add_dir", {
+            path: cwd,
+            remember: true,
+          });
+        } catch (error) {
+          console.warn("Failed to sync trusted startup directory to server:", error);
+        }
       }
       this.startupPromptList = null;
       this.tui.requestRender();
