@@ -7,11 +7,15 @@
 2. embed.{audio_model/video_model/vision_model/image_gen_model} 和 embed.embed_api_key/embed_api_base
 3. 环境变量 MODEL_NAME, API_KEY, API_BASE
 """
+import logging
 import os
 from collections.abc import Iterable, Mapping
 from typing import Any
 
+from jiuwenclaw.local_env_config import read_env
 from jiuwenclaw.utils import resolve_env_vars
+
+logger = logging.getLogger(__name__)
 
 # Full env reload snapshots from officeclaw include main LLM credentials.
 _FULL_ENV_SNAPSHOT_MARKERS = ("API_KEY", "MODEL_NAME")
@@ -50,6 +54,9 @@ MULTIMODAL_ENV_GROUP_KEYS: dict[str, tuple[str, ...]] = {
         "VIDEO_PROVIDER",
     ),
 }
+
+# Groups disabled by UI env omission reconcile (yaml literal must not re-enable).
+_MULTIMODAL_ENV_OMISSION_DISABLED: set[str] = set()
 
 
 def is_full_env_reload_snapshot(env: dict[str, Any] | None) -> bool:
@@ -119,6 +126,88 @@ def merge_reload_env_snapshot(
     base = dict(previous) if isinstance(previous, dict) else {}
     base.update(env)
     return base
+
+
+def multimodal_env_anchor_present(group: str) -> bool:
+    """Return True when the group's anchor key is set in effective env (incl. overlay)."""
+    anchor = MULTIMODAL_ENV_ANCHOR_KEYS.get(group)
+    if not anchor:
+        return False
+    return bool(str(read_env(anchor) or "").strip())
+
+
+def multimodal_env_omission_disabled(group: str) -> bool:
+    """Return True when the group was disabled via env omission reconcile."""
+    return group in _MULTIMODAL_ENV_OMISSION_DISABLED
+
+
+def reset_multimodal_env_omission_disabled() -> None:
+    """Clear omission-disabled flags (e.g. between tests)."""
+    _MULTIMODAL_ENV_OMISSION_DISABLED.clear()
+
+
+def sync_multimodal_env_omission_state(
+    removals: dict[str, None],
+    new_env: dict[str, Any] | None,
+) -> None:
+    """Mark groups disabled on env omission; re-enable when anchor reappears in snapshot."""
+    if removals:
+        for group, keys in MULTIMODAL_ENV_GROUP_KEYS.items():
+            anchor = keys[0]
+            if anchor in removals:
+                _MULTIMODAL_ENV_OMISSION_DISABLED.add(group)
+    if not isinstance(new_env, dict):
+        return
+    for group, anchor in MULTIMODAL_ENV_ANCHOR_KEYS.items():
+        value = new_env.get(anchor)
+        if value is not None and str(value).strip():
+            _MULTIMODAL_ENV_OMISSION_DISABLED.discard(group)
+
+
+def _api_key_is_env_bound(raw_api_key: Any) -> bool:
+    """Return True when raw yaml api_key uses env placeholder syntax."""
+    return isinstance(raw_api_key, str) and "${" in raw_api_key
+
+
+def _raw_model_api_key(model_type: str) -> Any:
+    """Read unresolved api_key from raw config.yaml snapshot."""
+    from jiuwenclaw.config import get_config_raw
+
+    return _get_model_config(get_config_raw(), model_type).get("api_key")
+
+
+def _allow_embed_main_api_fallback(
+    model_type: str,
+    config_base: dict[str, Any],
+    *,
+    strict: bool,
+) -> bool:
+    """Env-bound yaml api_key with empty resolution must not fall back to main API."""
+    if strict:
+        return True
+    mc = _get_model_config(config_base, model_type)
+    resolved = str(mc.get("api_key") or "").strip()
+    if resolved:
+        return True
+    raw_passed = mc.get("api_key")
+    if isinstance(raw_passed, str) and _api_key_is_env_bound(raw_passed):
+        return False
+    raw_yaml = _raw_model_api_key(model_type)
+    if _api_key_is_env_bound(raw_yaml):
+        return False
+    return True
+
+
+def _skip_apply_after_env_omission(group: str, *, caller: str) -> bool:
+    """Return True when apply should skip because env omission disabled the group."""
+    if not multimodal_env_omission_disabled(group):
+        return False
+    logger.debug(
+        "%s skipped: group %s disabled by env omission reconcile",
+        caller,
+        group,
+    )
+    return True
 
 
 def clear_multimodal_env_groups(group_names: Iterable[str]) -> None:
@@ -230,12 +319,15 @@ def dedicated_multimodal_model_configured(
 
     Used to gate image / video / **audio** tools (含 ``audio_metadata`` 与 LLM 音频能力)，在未配置
     ``models.{type}.model_config`` 独立 ``api_key`` 时不挂载，避免仅存在主对话 ``API_KEY`` 时误注册。
+    Groups disabled via env omission reconcile return False even when yaml still has literal ``api_key``.
     （``apply_*_model_config_from_yaml`` 仍可能回落到 embed / 主 API 写环境变量，与是否注册工具无关。）
     与 ``get_mcp_tools`` 仅注册 ``web_search`` 作为搜索入口同理。
     """
     if model_type not in ("audio", "vision", "video", "image_gen"):
         return False
     if not isinstance(config_base, dict):
+        return False
+    if multimodal_env_omission_disabled(model_type):
         return False
     mc = _get_model_config(config_base, model_type)
     raw_api_key = mc.get("api_key")
@@ -271,6 +363,10 @@ def apply_audio_model_config_from_yaml(config_base: dict[str, Any] | None) -> No
     """
     if not isinstance(config_base, dict):
         return
+    if _skip_apply_after_env_omission(
+        "audio", caller="apply_audio_model_config_from_yaml"
+    ):
+        return
 
     mc = _get_model_config(config_base, "audio")
     embed_cfg = _get_embed_config(config_base)
@@ -280,23 +376,26 @@ def apply_audio_model_config_from_yaml(config_base: dict[str, Any] | None) -> No
     model_name = str(mc.get("model_name") or mc.get("model") or "").strip()
     provider = str(mc.get("model_provider") or "").strip()
     strict = _parse_bool(mc.get("strict"), default=False)
+    allow_fallback = _allow_embed_main_api_fallback(
+        "audio", config_base, strict=strict
+    )
 
     if not strict:
-        if not api_key:
+        if not api_key and allow_fallback:
             api_key = str(
-                embed_cfg.get("embed_api_key") or os.getenv("API_KEY", "")
+                embed_cfg.get("embed_api_key") or read_env("API_KEY", "")
             ).strip()
-        if not api_base:
+        if not api_base and allow_fallback:
             api_base = str(
-                embed_cfg.get("embed_api_base") or os.getenv("API_BASE", "")
+                embed_cfg.get("embed_api_base") or read_env("API_BASE", "")
             ).strip()
-        if not model_name:
+        if not model_name and allow_fallback:
             model_name = (
                 _get_embed_model_name(embed_cfg, "audio")
-                or os.getenv("MODEL_NAME", "").strip()
+                or read_env("MODEL_NAME", "").strip()
             )
-        if not provider:
-            provider = os.getenv("MODEL_PROVIDER", "").strip()
+        if not provider and allow_fallback:
+            provider = read_env("MODEL_PROVIDER", "").strip()
 
     if api_key:
         os.environ["AUDIO_API_KEY"] = api_key
@@ -319,6 +418,10 @@ def apply_vision_model_config_from_yaml(config_base: dict[str, Any] | None) -> N
     """
     if not isinstance(config_base, dict):
         return
+    if _skip_apply_after_env_omission(
+        "vision", caller="apply_vision_model_config_from_yaml"
+    ):
+        return
 
     mc = _get_model_config(config_base, "vision")
     embed_cfg = _get_embed_config(config_base)
@@ -328,23 +431,26 @@ def apply_vision_model_config_from_yaml(config_base: dict[str, Any] | None) -> N
     model_name = str(mc.get("model_name") or mc.get("model") or "").strip()
     provider = str(mc.get("model_provider") or "").strip()
     strict = _parse_bool(mc.get("strict"), default=False)
+    allow_fallback = _allow_embed_main_api_fallback(
+        "vision", config_base, strict=strict
+    )
 
     if not strict:
-        if not api_key:
+        if not api_key and allow_fallback:
             api_key = str(
-                embed_cfg.get("embed_api_key") or os.getenv("API_KEY", "")
+                embed_cfg.get("embed_api_key") or read_env("API_KEY", "")
             ).strip()
-        if not api_base:
+        if not api_base and allow_fallback:
             api_base = str(
-                embed_cfg.get("embed_api_base") or os.getenv("API_BASE", "")
+                embed_cfg.get("embed_api_base") or read_env("API_BASE", "")
             ).strip()
-        if not model_name:
+        if not model_name and allow_fallback:
             model_name = (
                 _get_embed_model_name(embed_cfg, "vision")
-                or os.getenv("MODEL_NAME", "").strip()
+                or read_env("MODEL_NAME", "").strip()
             )
-        if not provider:
-            provider = os.getenv("MODEL_PROVIDER", "").strip()
+        if not provider and allow_fallback:
+            provider = read_env("MODEL_PROVIDER", "").strip()
 
     if api_key:
         os.environ["VISION_API_KEY"] = api_key
@@ -368,6 +474,10 @@ def apply_video_model_config_from_yaml(config_base: dict[str, Any] | None) -> No
     if not isinstance(config_base, dict):
         os.environ.pop("VIDEO_UNDERSTANDING_STRICT", None)
         return
+    if _skip_apply_after_env_omission(
+        "video", caller="apply_video_model_config_from_yaml"
+    ):
+        return
 
     mc = _get_model_config(config_base, "video")
     embed_cfg = _get_embed_config(config_base)
@@ -377,26 +487,29 @@ def apply_video_model_config_from_yaml(config_base: dict[str, Any] | None) -> No
     model_name = str(mc.get("model_name") or mc.get("model") or "").strip()
     provider = str(mc.get("model_provider") or "").strip()
     strict = _parse_bool(mc.get("strict"), default=False)
+    allow_fallback = _allow_embed_main_api_fallback(
+        "video", config_base, strict=strict
+    )
 
     if strict:
         os.environ["VIDEO_UNDERSTANDING_STRICT"] = "1"
     else:
         os.environ.pop("VIDEO_UNDERSTANDING_STRICT", None)
-        if not api_key:
+        if not api_key and allow_fallback:
             api_key = str(
-                embed_cfg.get("embed_api_key") or os.getenv("API_KEY", "")
+                embed_cfg.get("embed_api_key") or read_env("API_KEY", "")
             ).strip()
-        if not api_base:
+        if not api_base and allow_fallback:
             api_base = str(
-                embed_cfg.get("embed_api_base") or os.getenv("API_BASE", "")
+                embed_cfg.get("embed_api_base") or read_env("API_BASE", "")
             ).strip()
-        if not model_name:
+        if not model_name and allow_fallback:
             model_name = (
                 _get_embed_model_name(embed_cfg, "video")
-                or os.getenv("MODEL_NAME", "").strip()
+                or read_env("MODEL_NAME", "").strip()
             )
-        if not provider:
-            provider = os.getenv("MODEL_PROVIDER", "").strip()
+        if not provider and allow_fallback:
+            provider = read_env("MODEL_PROVIDER", "").strip()
 
     if api_key:
         os.environ["VIDEO_API_KEY"] = api_key
@@ -419,6 +532,10 @@ def apply_image_gen_model_config_from_yaml(config_base: dict[str, Any] | None) -
     """
     if not isinstance(config_base, dict):
         return
+    if _skip_apply_after_env_omission(
+        "image_gen", caller="apply_image_gen_model_config_from_yaml"
+    ):
+        return
 
     mc = _get_model_config(config_base, "image_gen")
     embed_cfg = _get_embed_config(config_base)
@@ -428,23 +545,26 @@ def apply_image_gen_model_config_from_yaml(config_base: dict[str, Any] | None) -
     model_name = str(mc.get("model_name") or mc.get("model") or "").strip()
     provider = str(mc.get("model_provider") or mc.get("client_provider") or "").strip()
     strict = _parse_bool(mc.get("strict"), default=False)
+    allow_fallback = _allow_embed_main_api_fallback(
+        "image_gen", config_base, strict=strict
+    )
 
     if not strict:
-        if not api_key:
+        if not api_key and allow_fallback:
             api_key = str(
-                embed_cfg.get("embed_api_key") or os.getenv("API_KEY", "")
+                embed_cfg.get("embed_api_key") or read_env("API_KEY", "")
             ).strip()
-        if not api_base:
+        if not api_base and allow_fallback:
             api_base = str(
-                embed_cfg.get("embed_api_base") or os.getenv("API_BASE", "")
+                embed_cfg.get("embed_api_base") or read_env("API_BASE", "")
             ).strip()
-        if not model_name:
+        if not model_name and allow_fallback:
             model_name = (
                 _get_embed_model_name(embed_cfg, "image_gen")
-                or os.getenv("MODEL_NAME", "").strip()
+                or read_env("MODEL_NAME", "").strip()
             )
-        if not provider:
-            provider = os.getenv("MODEL_PROVIDER", "").strip()
+        if not provider and allow_fallback:
+            provider = read_env("MODEL_PROVIDER", "").strip()
 
     if api_key:
         os.environ["IMAGE_GEN_API_KEY"] = api_key

@@ -16,6 +16,7 @@ from jiuwenclaw.local_env_config import apply_env_removals, stage_env_overrides
 from jiuwenclaw.agentserver.tools.multimodal_config import (
     infer_multimodal_env_removals,
     merge_reload_env_snapshot,
+    sync_multimodal_env_omission_state,
 )
 
 logger = logging.getLogger(__name__)
@@ -268,6 +269,10 @@ class TenantAgentPool:
                 source="TenantAgentPool",
                 env_removed_by_omission_keys=sorted(omission_removals.keys()),
             )
+        sync_multimodal_env_omission_state(
+            omission_removals,
+            env if isinstance(env, dict) else None,
+        )
         self._latest_config = config
         self._latest_env = merge_reload_env_snapshot(previous_env, env)
         stage_env_overrides(env)

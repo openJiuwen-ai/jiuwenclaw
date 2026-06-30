@@ -28,6 +28,10 @@ from jiuwenclaw.agentserver.tools.invoke_tool import (
     InvokeToolInput,
     InvokeToolTool,
 )
+from jiuwenclaw.agentserver.deep_agent.tool_qualify import (
+    add_tool_to_resource_mgr,
+    remove_tool_from_resource_mgr,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -63,6 +67,7 @@ class JiuWenProgressiveToolRail(DeepAgentRail):
         eager_tools: list[str] | None = None,
         language: str = "cn",
         agent_id: str | None = None,
+        agent_card_id: str | None = None,
         enable_for_models: list[str] | None = None,
     ) -> None:
         super().__init__()
@@ -70,6 +75,7 @@ class JiuWenProgressiveToolRail(DeepAgentRail):
         self.eager_tools = list(eager_tools or [])
         self.language = language or "cn"
         self.agent_id = agent_id
+        self.agent_card_id = str(agent_card_id or "").strip() or None
         self._enable_for_models = [
             str(item).strip().lower()
             for item in (enable_for_models or [])
@@ -83,6 +89,7 @@ class JiuWenProgressiveToolRail(DeepAgentRail):
             self.eager_tools.insert(1, "invoke_tool")
 
         self._deep_agent: Any = None
+        self._runtime_agent: Any = None
         self._meta_tools: list[Any] | None = None
         self._meta_active = False
         self._owned_tool_ids: set[str] = set()
@@ -156,29 +163,99 @@ class JiuWenProgressiveToolRail(DeepAgentRail):
             return False
         return True
 
+    def update_agent_card_id(self, card_id: str | None) -> None:
+        """Update session card id and invalidate cached meta tools when it changes."""
+        resolved = str(card_id or "").strip() or None
+        if resolved and resolved != self.agent_card_id:
+            self.agent_card_id = resolved
+            self._meta_tools = None
+            self._meta_active = False
+
     def init(self, agent: Any) -> None:
+        card = getattr(agent, "card", None)
+        resolved_card_id = str(getattr(card, "id", "") or "").strip() or None
+        self.update_agent_card_id(resolved_card_id)
         self._deep_agent = agent
+        self._runtime_agent = agent
+        self.invalidate_deferred_tool_cache()
+
+    def _meta_tool_scope_id(self) -> str | None:
+        """Session/subagent scope for meta tool resource ids."""
+        return self.agent_card_id or (
+            str(self.agent_id or "").strip() or None
+        )
+
+    @staticmethod
+    def _legacy_meta_tool_ids(tool: Any, tenant_agent_id: str | None) -> set[str]:
+        """Unqualified or tenant-scoped ids that must not shadow session tools."""
+        base = str(getattr(type(tool), "TOOL_ID", "") or "").strip()
+        if not base:
+            return set()
+        legacy = {base}
+        if tenant_agent_id:
+            legacy.add(f"{base}_{tenant_agent_id}")
+        return legacy
 
     def uninit(self, agent: Any) -> None:
         self._set_meta_tools_active(False)
         self._deep_agent = None
+        self._runtime_agent = None
         self._meta_tools = None
+
+    def invalidate_deferred_tool_cache(self) -> None:
+        """Clear deferred tool caches (after agent rebind or configure reload)."""
+        self._cached_all_tool_infos = []
+        self._cached_deferred_tool_infos = []
+
+    def _resolve_runtime_agent(
+        self,
+        ctx: AgentCallbackContext | None = None,
+    ) -> Any:
+        """Resolve the agent whose ability_manager is authoritative for this invoke."""
+        agent = None
+        if ctx is not None:
+            agent = getattr(ctx, "agent", None)
+        if agent is None:
+            agent = self._runtime_agent
+        if agent is None:
+            agent = self._deep_agent
+        if agent is not None and agent is not self._deep_agent:
+            logger.debug(
+                "%s runtime agent swap old_id=%s new_id=%s",
+                _LOG_PREFIX,
+                id(self._deep_agent),
+                id(agent),
+            )
+            self._deep_agent = agent
+            self.invalidate_deferred_tool_cache()
+        return agent
 
     def _meta_tool_instances(self) -> list[Any]:
         if self._meta_tools is None:
+            scope_id = self._meta_tool_scope_id()
             self._meta_tools = [
                 ToolsSearchTool(
                     self._search_tools,
                     language=self.language,
-                    agent_id=self.agent_id,
+                    agent_card_id=scope_id,
                 ),
                 InvokeToolTool(
                     self._invoke_target_tool,
                     language=self.language,
-                    agent_id=self.agent_id,
+                    agent_card_id=scope_id,
                 ),
             ]
         return self._meta_tools
+
+    def _register_meta_tool_in_resource_mgr(self, tool: Any) -> None:
+        """Register or replace session-scoped meta tool in resource_mgr."""
+        qualified_id = str(tool.card.id)
+        for stale_id in self._legacy_meta_tool_ids(tool, self.agent_id):
+            if stale_id != qualified_id:
+                remove_tool_from_resource_mgr(stale_id)
+        remove_tool_from_resource_mgr(qualified_id)
+        add_tool_to_resource_mgr(tool)
+        self._owned_tool_ids.add(qualified_id)
 
     def _set_meta_tools_active(self, active: bool) -> None:
         if active == self._meta_active or self._deep_agent is None:
@@ -190,9 +267,7 @@ class JiuWenProgressiveToolRail(DeepAgentRail):
         for tool in self._meta_tool_instances():
             if active:
                 try:
-                    if Runner.resource_mgr.get_tool(tool.card.id) is None:
-                        Runner.resource_mgr.add_tool(tool)
-                        self._owned_tool_ids.add(tool.card.id)
+                    self._register_meta_tool_in_resource_mgr(tool)
                 except Exception as exc:
                     logger.warning(
                         "%s failed to add meta tool resource %s: %s",
@@ -202,6 +277,9 @@ class JiuWenProgressiveToolRail(DeepAgentRail):
                     )
                 if ability_manager is not None:
                     try:
+                        existing = ability_manager.get(tool.card.name)
+                        if existing is not None:
+                            ability_manager.remove(tool.card.name)
                         ability_manager.add(tool.card)
                     except Exception as exc:
                         logger.warning(
@@ -236,36 +314,75 @@ class JiuWenProgressiveToolRail(DeepAgentRail):
             self._owned_tool_ids.discard(tool.card.id)
 
         if not active:
-            self._cached_all_tool_infos = []
-            self._cached_deferred_tool_infos = []
+            self.invalidate_deferred_tool_cache()
 
     async def before_invoke(self, ctx: AgentCallbackContext) -> None:
         """Register meta tools when active; cache deferred tools for navigation."""
+        if getattr(ctx, "agent", None) is not None:
+            self._runtime_agent = ctx.agent
+        self._resolve_runtime_agent(ctx)
         active = self._lazy_load_active_for_ctx(ctx)
         self._set_meta_tools_active(active)
         if not active:
             return
 
-        all_tools = await self._get_all_tool_infos()
-        self._cached_all_tool_infos = all_tools
+        await self._refresh_deferred_tool_cache()
 
+        logger.info(
+            "%s invoke total=%s eager=%s deferred=%s",
+            _LOG_PREFIX,
+            len(self._cached_all_tool_infos),
+            len(self.eager_tools),
+            len(self._cached_deferred_tool_infos),
+        )
+
+    async def _refresh_deferred_tool_cache(self, agent: Any = None) -> None:
+        """Refresh cached tool lists from live ability_manager."""
+        resolved = agent or self._resolve_runtime_agent()
+        all_tools = await self._get_all_tool_infos(resolved)
+        self._cached_all_tool_infos = all_tools
         self._cached_deferred_tool_infos = [
             tool for tool in all_tools
             if str(getattr(tool, "name", "") or "") not in self.eager_tools
         ]
 
-        logger.info(
-            "%s invoke total=%s eager=%s deferred=%s",
-            _LOG_PREFIX,
-            len(all_tools),
-            len(self.eager_tools),
-            len(self._cached_deferred_tool_infos),
-        )
+    @staticmethod
+    def _tool_name_set(tools: list[Any]) -> set[str]:
+        """Return registered tool names from ability_manager entries."""
+        return {
+            str(getattr(tool, "name", "") or "")
+            for tool in tools
+            if str(getattr(tool, "name", "") or "")
+        }
+
+    async def _refresh_deferred_tool_cache_if_stale(self) -> None:
+        """Refresh cache when ability_manager has tools not reflected in cache."""
+        agent = self._resolve_runtime_agent()
+        live_tools = await self._get_all_tool_infos(agent)
+        if len(live_tools) != len(self._cached_all_tool_infos):
+            await self._refresh_deferred_tool_cache(agent)
+            return
+        if self._tool_name_set(live_tools) != self._tool_name_set(
+            self._cached_all_tool_infos
+        ):
+            await self._refresh_deferred_tool_cache(agent)
+            return
+        live_deferred = [
+            tool for tool in live_tools
+            if str(getattr(tool, "name", "") or "") not in self.eager_tools
+        ]
+        if live_deferred and not self._cached_deferred_tool_infos:
+            await self._refresh_deferred_tool_cache(agent)
 
     async def before_model_call(self, ctx: AgentCallbackContext) -> None:
         """Filter tools to only include eager_tools."""
         if not self._lazy_load_active_for_ctx(ctx):
             return
+
+        if getattr(ctx, "agent", None) is not None:
+            self._runtime_agent = ctx.agent
+        self._resolve_runtime_agent(ctx)
+        await self._refresh_deferred_tool_cache_if_stale()
 
         inputs = getattr(ctx, "inputs", None)
         if inputs is None:
@@ -398,12 +515,13 @@ class JiuWenProgressiveToolRail(DeepAgentRail):
 
         return header + ("\n".join(items) if items else empty)
 
-    async def _get_all_tool_infos(self) -> list[Any]:
+    async def _get_all_tool_infos(self, agent: Any = None) -> list[Any]:
         """Get all registered tool infos from ability_manager."""
-        if self._deep_agent is None:
+        resolved = agent or self._runtime_agent or self._deep_agent
+        if resolved is None:
             return []
 
-        ability_manager = getattr(self._deep_agent, "ability_manager", None)
+        ability_manager = getattr(resolved, "ability_manager", None)
         if ability_manager is None:
             return []
 
@@ -411,6 +529,15 @@ class JiuWenProgressiveToolRail(DeepAgentRail):
             return list(ability_manager.list())
         except Exception:
             return []
+
+    def _find_deferred_tool_matches(self, tool_name_key: str) -> list[Any]:
+        """Return deferred tools whose name matches tool_name_key (case-insensitive)."""
+        matches = []
+        for tool in self._cached_deferred_tool_infos:
+            name = str(getattr(tool, "name", "") or "")
+            if name.lower() == tool_name_key:
+                matches.append(tool)
+        return matches
 
     async def _search_tools(
         self,
@@ -428,11 +555,23 @@ class JiuWenProgressiveToolRail(DeepAgentRail):
                 "message": "tool_name is required",
             }
 
-        matches = []
-        for tool in self._cached_deferred_tool_infos:
-            name = str(getattr(tool, "name", "") or "")
-            if name.lower() == tool_name_key:
-                matches.append(tool)
+        matches = self._find_deferred_tool_matches(tool_name_key)
+        if not matches:
+            await self._refresh_deferred_tool_cache()
+            matches = self._find_deferred_tool_matches(tool_name_key)
+        if not matches:
+            runtime = self._runtime_agent
+            if runtime is not None and runtime is not self._deep_agent:
+                logger.info(
+                    "%s search retry with runtime agent old_id=%s new_id=%s",
+                    _LOG_PREFIX,
+                    id(self._deep_agent),
+                    id(runtime),
+                )
+                self._deep_agent = runtime
+                self.invalidate_deferred_tool_cache()
+                await self._refresh_deferred_tool_cache(runtime)
+                matches = self._find_deferred_tool_matches(tool_name_key)
 
         result_matches = []
         for tool in matches:

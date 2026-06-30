@@ -47,6 +47,11 @@ _SKILLS_COUNT_PREFIX = {
     "en": "(The numbered list above contains",
 }
 
+_COUNT_LINE_CN = re.compile(r"^（以上编号列表共.*）\s*$")
+_COUNT_LINE_EN = re.compile(
+    r"^\(The numbered list above contains.*\)\s*$"
+)
+
 _NUMBERED_SKILL_LINE = re.compile(r"^\d+\.\s")
 
 
@@ -84,6 +89,49 @@ def _find_skills_list_end(text: str, marker: str) -> int:
         else:
             break
     return last_line_end
+
+
+def _strip_skills_qa_annotations(text: str, lang: str) -> str:
+    """Remove prior skills QA hint and count lines so patches can be reapplied."""
+    hint_cn = _SKILLS_QA_HINT["cn"].strip()
+    hint_en = _SKILLS_QA_HINT["en"].strip()
+    count_prefix_cn = _SKILLS_COUNT_PREFIX["cn"]
+    count_prefix_en = _SKILLS_COUNT_PREFIX["en"]
+    count_prefix = _SKILLS_COUNT_PREFIX.get(lang, count_prefix_cn)
+
+    kept: list[str] = []
+    for line in text.split("\n"):
+        stripped = line.strip()
+        if not stripped:
+            kept.append(line)
+            continue
+        if stripped in (hint_cn, hint_en):
+            continue
+        if _COUNT_LINE_CN.match(stripped) or _COUNT_LINE_EN.match(stripped):
+            continue
+        if (
+            stripped.startswith(count_prefix)
+            or stripped.startswith(count_prefix_cn)
+            or stripped.startswith(count_prefix_en)
+        ):
+            continue
+        kept.append(line)
+    return "\n".join(kept)
+
+
+def _patch_skills_section_text(raw: str, lang: str, skill_count: int) -> str | None:
+    """Strip stale QA annotations and inject fresh hint + skill count line."""
+    marker = "可用技能：" if lang == "cn" else "Available skills:"
+    if marker not in raw:
+        return None
+
+    hint = _SKILLS_QA_HINT.get(lang, _SKILLS_QA_HINT["cn"])
+    stripped = _strip_skills_qa_annotations(raw, lang)
+    marker_pos = stripped.find(marker)
+    patched = stripped[:marker_pos] + hint + "\n" + stripped[marker_pos:]
+    count_line = _build_skills_count_line(lang, skill_count)
+    insert_at = _find_skills_list_end(patched, marker)
+    return patched[:insert_at] + "\n" + count_line + patched[insert_at:]
 
 
 class JiuWenSkillUseRail(SkillUseRail):
@@ -207,22 +255,12 @@ class JiuWenSkillUseRail(SkillUseRail):
         if lang == "zh":
             lang = "cn"
         raw = section.content.get(lang) or section.content.get("cn") or ""
-        hint = _SKILLS_QA_HINT.get(lang, _SKILLS_QA_HINT["cn"])
-        marker = "可用技能：" if lang == "cn" else "Available skills:"
-        count_prefix = _SKILLS_COUNT_PREFIX.get(lang, _SKILLS_COUNT_PREFIX["cn"])
-        if marker not in raw:
+        if "可用技能：" not in raw and "Available skills:" not in raw:
             return
 
-        patched = raw
-        if hint not in patched:
-            marker_pos = patched.find(marker)
-            patched = patched[:marker_pos] + hint + "\n" + patched[marker_pos:]
-        if count_prefix not in patched:
-            skill_count = len(self.skills) if self.skills else 0
-            count_line = _build_skills_count_line(lang, skill_count)
-            insert_at = _find_skills_list_end(patched, marker)
-            patched = patched[:insert_at] + "\n" + count_line + patched[insert_at:]
-        if patched == raw:
+        skill_count = len(self.skills) if self.skills else 0
+        patched = _patch_skills_section_text(raw, lang, skill_count)
+        if patched is None or patched == raw:
             return
 
         content = dict(section.content)

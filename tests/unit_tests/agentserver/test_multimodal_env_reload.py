@@ -25,6 +25,9 @@ _spec.loader.exec_module(_mm)
 dedicated_multimodal_model_configured = _mm.dedicated_multimodal_model_configured
 infer_multimodal_env_removals = _mm.infer_multimodal_env_removals
 is_full_env_reload_snapshot = _mm.is_full_env_reload_snapshot
+sync_multimodal_env_omission_state = _mm.sync_multimodal_env_omission_state
+reset_multimodal_env_omission_disabled = _mm.reset_multimodal_env_omission_disabled
+apply_image_gen_model_config_from_yaml = _mm.apply_image_gen_model_config_from_yaml
 
 from jiuwenclaw.local_env_config import (
     ENV_CONFIG_DICT,
@@ -39,8 +42,12 @@ from jiuwenclaw.local_env_config import (
 @pytest.fixture(autouse=True)
 def _reset_env_state():
     saved = dict(os.environ)
+    reset_multimodal_env_omission_disabled()
     ENV_CONFIG_DICT.clear()
     clear_staged_env()
+    for keys in _mm.MULTIMODAL_ENV_GROUP_KEYS.values():
+        for key in keys:
+            os.environ.pop(key, None)
     yield
     ENV_CONFIG_DICT.clear()
     clear_staged_env()
@@ -156,3 +163,26 @@ def test_dedicated_multimodal_resolves_empty_env_placeholder() -> None:
 
     ENV_CONFIG_DICT["IMAGE_GEN_API_KEY"] = "resolved-key"
     assert dedicated_multimodal_model_configured(config, "image_gen") is True
+
+
+def test_sync_omission_state_disables_literal_yaml_group() -> None:
+    literal_config = {
+        "models": {
+            "image_gen": {
+                "model_client_config": {"api_key": "literal-img-key"},
+            }
+        }
+    }
+    assert dedicated_multimodal_model_configured(literal_config, "image_gen") is True
+
+    previous = _full_snapshot_base(
+        IMAGE_GEN_API_KEY="img-key",
+        IMAGE_GEN_API_BASE="https://img/v1",
+    )
+    new_env = _full_snapshot_base()
+    removals = infer_multimodal_env_removals(previous, new_env, active_env={})
+    sync_multimodal_env_omission_state(removals, new_env)
+
+    assert dedicated_multimodal_model_configured(literal_config, "image_gen") is False
+    apply_image_gen_model_config_from_yaml(literal_config)
+    assert os.environ.get("IMAGE_GEN_API_KEY") is None
