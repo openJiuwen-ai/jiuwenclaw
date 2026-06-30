@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import importlib
 import os
@@ -3428,6 +3429,7 @@ class JiuWenClawDeepAdapter:
             await self._clear_session_persisted_interrupt_state(
                 request.session_id,
                 reason="interrupt(supplement)",
+                clear_interrupt=True,
             )
             # 4. 不清理 todo — 保留给新任务继续
             logger.info(
@@ -3450,17 +3452,19 @@ class JiuWenClawDeepAdapter:
                 f"interrupt(cancel) request_id={request.request_id}: ",
             )
             AskUserQuestionRegistry.get_instance().cancel_for_session(str(request.session_id or ""))
-            await self._clear_session_persisted_interrupt_state(
-                request.session_id,
-                reason="interrupt(cancel)",
-            )
-            # 4. 将未完成的 todo 项标记为 cancelled，并获取更新后的 todo 列表
+            # 4. 标记未完成的 todo 为 cancelled（通知前端），并清空 todo.json
             updated_todos = None
             if request.session_id:
                 try:
                     updated_todos = await self._cancel_pending_todos(request.session_id)
                 except Exception as exc:
                     logger.warning("[JiuWenClawDeepAdapter] 标记 todo cancelled 失败: %s", exc)
+            await self._clear_session_persisted_interrupt_state(
+                request.session_id,
+                reason="interrupt(cancel)",
+                clear_interrupt=True,
+                clear_task_plan=True,
+            )
 
             logger.info(
                 "[JiuWenClawDeepAdapter] interrupt(cancel): 已停止执行 request_id=%s",
@@ -3517,20 +3521,57 @@ class JiuWenClawDeepAdapter:
         session_id: str | None,
         *,
         reason: str,
+        clear_interrupt: bool = False,
+        clear_task_plan: bool = False,
+        clear_task_plan_if_todo_empty: bool = False,
     ) -> None:
-        if not session_id:
+        """Clear persisted session checkpoint state (interrupt / TaskPlan) in one pre_run."""
+        if not session_id or self._instance is None:
             return
-        if self._instance is None:
+
+        should_clear_plan = clear_task_plan
+        if clear_task_plan_if_todo_empty and not should_clear_plan:
+            try:
+                deep_config = self._instance.deep_config
+                modify_tool = TodoModifyTool(
+                    operation=deep_config.sys_operation,
+                    workspace=str(deep_config.workspace.get_node_path(WorkspaceNode.TODO)),
+                    language=self._resolve_runtime_language(),
+                )
+                file_path = modify_tool.file_path_for_session(session_id)
+                if not os.path.isfile(file_path):
+                    should_clear_plan = True
+                else:
+                    with open(file_path, encoding="utf-8") as f:
+                        data = json.load(f)
+                    should_clear_plan = not isinstance(data, list) or len(data) == 0
+            except Exception:
+                should_clear_plan = True
+
+        if not clear_interrupt and not should_clear_plan:
             return
 
         try:
             session = create_agent_session(session_id=session_id, card=self._instance.card)
             await session.pre_run(inputs=None)
-            clear_session_interrupt_state(session)
+            if clear_interrupt:
+                clear_session_interrupt_state(session)
+            if should_clear_plan:
+                state = self._instance.load_state(session)
+                if state.task_plan is not None:
+                    state.task_plan = None
+                    self._instance.save_state(session, state)
+                    session.update_state({"deep_agent_state": state.to_session_dict()})
             await session.post_run()
+            cleared = []
+            if clear_interrupt:
+                cleared.append("interrupt")
+            if should_clear_plan:
+                cleared.append("task_plan")
             logger.info(
-                "[JiuWenClawDeepAdapter] %s: cleared persisted interrupt state session_id=%s",
+                "[JiuWenClawDeepAdapter] %s: cleared %s session_id=%s",
                 reason,
+                "+".join(cleared),
                 session_id,
             )
         except Exception as exc:
@@ -4138,7 +4179,7 @@ class JiuWenClawDeepAdapter:
         try:
             tool_card = self._instance.ability_manager.get("todo_modify")
             registered_tool = Runner.resource_mgr.get_tool(tool_card.id)
-            if registered_tool is not None:
+            if isinstance(registered_tool, TodoModifyTool):
                 modify_tool = registered_tool
         except Exception:
             pass
@@ -4151,10 +4192,19 @@ class JiuWenClawDeepAdapter:
                 language=self._resolve_runtime_language(),
             )
 
-        modify_tool.set_file(session_id)
+        file_path = modify_tool.file_path_for_session(session_id)
 
         try:
-            todos = await modify_tool.load_todos()
+            try:
+                todos = await modify_tool.load_todos(file_path)
+            except Exception as load_exc:
+                logger.debug(
+                    "[JiuWenClawDeepAdapter] session %s 无 todo 文件或加载失败: %s",
+                    session_id,
+                    load_exc,
+                )
+                return None
+
             if not todos:
                 return None
 
@@ -4169,17 +4219,30 @@ class JiuWenClawDeepAdapter:
                     ids_to_cancel.append(todo.id)
 
             if ids_to_cancel:
-                await modify_tool._cancel_todos(ids_to_cancel, todos)
+                await modify_tool.invoke(
+                    {"action": "cancel", "ids": ids_to_cancel},
+                    session_id=session_id,
+                )
                 logger.info(
                     "[JiuWenClawDeepAdapter] 已将 session %s 的未完成任务标记为 cancelled",
                     session_id,
                 )
 
-            # 重新加载并返回前端格式的 todo 列表
-            updated_todos = await modify_tool.load_todos()
+            # 重新加载并返回前端格式的 todo 列表，然后清空文件避免 TaskScheduler 续跑
+            updated_todos = await modify_tool.load_todos(file_path)
+            frontend = None
             if updated_todos and self._stream_event_rail is not None:
-                return self._stream_event_rail._format_todos_for_frontend(updated_todos)
-            return None
+                frontend = JiuClawStreamEventRail.format_todos_for_frontend(updated_todos)
+            try:
+                with open(file_path, "w", encoding="utf-8") as f:
+                    f.write("[]\n")
+            except Exception as clear_exc:
+                logger.warning(
+                    "[JiuWenClawDeepAdapter] 清空 session %s todo 文件失败: %s",
+                    session_id,
+                    clear_exc,
+                )
+            return frontend
         except Exception as exc:
             logger.warning("[JiuWenClawDeepAdapter] 标记 todo cancelled 失败: %s", exc)
             return None
@@ -4216,6 +4279,8 @@ class JiuWenClawDeepAdapter:
             await self._clear_session_persisted_interrupt_state(
                 session_id,
                 reason="plain_user_message_before_agent_run",
+                clear_interrupt=True,
+                clear_task_plan_if_todo_empty=True,
             )
 
         token_trace_sid = _LLM_TRACE_SESSION_ID.set(session_id)
@@ -4383,6 +4448,8 @@ class JiuWenClawDeepAdapter:
             await self._clear_session_persisted_interrupt_state(
                 session_id,
                 reason="plain_user_message_before_agent_run",
+                clear_interrupt=True,
+                clear_task_plan_if_todo_empty=True,
             )
 
         has_streamed_content = False

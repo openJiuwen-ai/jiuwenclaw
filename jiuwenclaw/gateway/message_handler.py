@@ -420,9 +420,12 @@ class MessageHandler(ABC):
         if tasks_to_cancel:
             await asyncio.gather(*tasks_to_cancel, return_exceptions=True)
 
-        for rid in rids_cancelled:
+        # 与 pause/resume 一致：interrupt_result 使用前端 chat.interrupt 的 ws id，
+        # 而非被 cancel 的 chat.send 流式 request_id（否则 web_enterprise 会丢弃该事件）。
+        interrupt_notify_id = (msg.id or "").strip()
+        if interrupt_notify_id:
             await self._send_interrupt_result_notification(
-                rid, msg.channel_id, old_sid, "cancel",
+                interrupt_notify_id, msg.channel_id, old_sid, "cancel",
             )
 
         if old_sid is None and not rids_cancelled:

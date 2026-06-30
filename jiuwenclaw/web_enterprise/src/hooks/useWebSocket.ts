@@ -164,6 +164,8 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
   const activeRequestIdRef = useRef<string | null>(null);
   /** 本会话实例发出的 interrupt 请求的 ws req id（用于识别属于本 tab 的 interrupt_result） */
   const pendingInterruptRequestIdsRef = useRef<Set<string>>(new Set());
+  /** 已 cancel 的 chat.send request_id，用于丢弃取消后仍滞留在网关队列中的流式事件 */
+  const suppressedChatRequestIdsRef = useRef<Set<string>>(new Set());
 
   // Stores
   const {
@@ -263,6 +265,23 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
       activeRequestId: activeRequestIdRef.current,
       pendingInterruptRequestIds: pendingInterruptRequestIdsRef.current,
     });
+  }, []);
+
+  useEffect(() => {
+    webClient.setStreamEventFilter((event) => {
+      const rid = typeof event.request_id === 'string' ? event.request_id.trim() : '';
+      if (!rid) {
+        return true;
+      }
+      const name = event.event;
+      if (!name.startsWith('chat.') && !name.startsWith('context.')) {
+        return true;
+      }
+      return !suppressedChatRequestIdsRef.current.has(rid);
+    });
+    return () => {
+      webClient.setStreamEventFilter(null);
+    };
   }, []);
 
   const handleConnectionAck = useCallback(
@@ -426,6 +445,17 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
       }
       const interruptRequestId = makeClientRequestId('interrupt');
       pendingInterruptRequestIdsRef.current.add(interruptRequestId);
+      if (intent === 'cancel') {
+        const rid = activeRequestIdRef.current;
+        if (rid) {
+          suppressedChatRequestIdsRef.current.add(rid);
+        }
+        setProcessing(false);
+        setThinking(false);
+        stopStreaming();
+        activeRequestIdRef.current = null;
+        setPendingQuestion(null);
+      }
       try {
         const params: Record<string, unknown> = {
           session_id: sessionId,
@@ -450,7 +480,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
         onErrorRef.current?.(webError.message || i18n.t('network.interruptFailed'));
       }
     },
-    [addMessage, request, setConnectionStats]
+    [addMessage, request, setConnectionStats, setPendingQuestion, setProcessing, setThinking, stopStreaming]
   );
 
   // 暂停 - 显式暂停当前任务

@@ -82,6 +82,7 @@ class WebClient {
   private lastConnectOptions: WebConnectOptions = {};
   private activeWsUrl: string | null = null;
   private requestSeq = 0;
+  private streamEventFilter: ((event: WsEvent) => boolean) | null = null;
 
   getState(): WebConnectionState {
     return this.state;
@@ -96,6 +97,11 @@ class WebClient {
     return () => {
       this.stateHandlers.delete(handler);
     };
+  }
+
+  /** 丢弃已 cancel 的 chat/context 流式事件（在 dispatch 前统一过滤） */
+  setStreamEventFilter(filter: ((event: WsEvent) => boolean) | null): void {
+    this.streamEventFilter = filter;
   }
 
   on(eventName: string, handler: EventHandler): () => void {
@@ -352,6 +358,14 @@ class WebClient {
         direction: 'incoming',
         data: { parsed, normalize: 'ignored' },
       });
+      return;
+    }
+
+    if (
+      message.type === 'event' &&
+      this.streamEventFilter &&
+      !this.streamEventFilter(message)
+    ) {
       return;
     }
 

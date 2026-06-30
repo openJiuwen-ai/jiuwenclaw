@@ -6,16 +6,20 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from jiuwenclaw.agentserver.tools.cron_tools import CronToolRoute, CronTools
-from jiuwenclaw.gateway.cron.store import FileCronJobStore
 
 
 @pytest.fixture
-def cron_tools(tmp_path: Path) -> CronTools:
-    store = FileCronJobStore(path=tmp_path / "cron_jobs.json")
-    tools = CronTools(gateway_push=MagicMock())
-    tools._local_store = store
-    tools._gateway_push.send_push = AsyncMock()
-    tools._reload_scheduler = AsyncMock()
+def cron_tools(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> CronTools:
+    (tmp_path / "agent" / "home").mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(
+        "jiuwenclaw.agentserver.tools.cron_tools.get_user_workspace_dir",
+        lambda: tmp_path,
+    )
+
+    gateway_push = MagicMock()
+    gateway_push.send_push = AsyncMock()
+    tools = CronTools(gateway_push=gateway_push)
+    monkeypatch.setattr(tools, "ensure_scheduler", AsyncMock(return_value=None))
     return tools
 
 
