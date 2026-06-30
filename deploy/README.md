@@ -306,25 +306,41 @@ DB_TYPE="sqlite"
 **MySQL 外部服务的配置：**
 ```
 # 外部 MySQL 服务的连接地址
-MYSQL_HOST=""
+DB_HOST=""
 
 # 外部 MySQL 服务的连接端口
-MYSQL_PORT=""
+DB_PORT=""
 
-# 外部 MySQL root的密码
-MYSQL_ROOT_PASSWORD=""
+# 外部 MySQL 服务的用户名跟密码，账号权限区分规则：
+# 1. 分库独立账号配置：分别定义 MANAGER_DB_USER / MANAGER_DB_PASSWORD、GATEWAY_DB_USER / GATEWAY_DB_PASSWORD，实现两个业务库账号、密码完全隔离
+# 2. 全局统一账号配置：仅配置 DB_USER、DB_PASSWORD，Manager、Gateway 共用同一套数据库访问凭证
+# 优先级规则：分库专属账号变量优先级 > 全局通用账号变量；若两类变量同时配置，以分库专属账号为准，全局账号配置自动失效
+DB_USER=""
+DB_PASSWORD=""
+GATEWAY_DB_USER=""
+GATEWAY_DB_PASSWORD=""
+MANAGER_DB_USER=""
+MANAGER_DB_PASSWORD=""
 ```
 
 **PostgreSQL 外部服务的配置：**
 ```
 # 外部 PostgreSQL 服务的连接地址
-POSTGRES_HOST=""
+DB_HOST=""
 
 # 外部 PostgreSQL 服务的连接端口
-POSTGRES_PORT=
+DB_PORT=
 
-# 外部 PostgreSQL 服务的密码
-POSTGRES_PASSWORD=""
+# 外部 PostgreSQL 服务的用户名跟密码，账号权限区分规则：
+# 1. 分库独立账号配置：分别定义 MANAGER_DB_USER / MANAGER_DB_PASSWORD、GATEWAY_DB_USER / GATEWAY_DB_PASSWORD，实现两个业务库账号、密码完全隔离
+# 2. 全局统一账号配置：仅配置 DB_USER、DB_PASSWORD，Manager、Gateway 共用同一套数据库访问凭证
+# 优先级规则：分库专属账号变量优先级 > 全局通用账号变量；若两类变量同时配置，以分库专属账号为准，全局账号配置自动失效
+DB_USER=""
+DB_PASSWORD=""
+GATEWAY_DB_USER=""
+GATEWAY_DB_PASSWORD=""
+MANAGER_DB_USER=""
+MANAGER_DB_PASSWORD=""
 
 # Manager 模块 PostgreSQL 专属 Schema 名称, 默认为public
 MANAGER_PG_SCHEMA=""

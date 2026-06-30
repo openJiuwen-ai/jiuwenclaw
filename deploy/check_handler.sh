@@ -174,12 +174,12 @@ check_if_mysql_up() {
     fi
 
     # Check if external MySQL server
-    if [ -n "${DEPLOY_VARS["MYSQL_HOST"]:-}" ]; then
+    if [ -n "${DEPLOY_VARS["DB_HOST"]:-}" ]; then
         info "Use external MySQL server"
-        DEPLOY_VARS["DB_HOST"]=${DEPLOY_VARS["MYSQL_HOST"]}
-        DEPLOY_VARS["DB_PORT"]=${DEPLOY_VARS["MYSQL_PORT"]}
-        DEPLOY_VARS["DB_USER"]="root"
-        DEPLOY_VARS["DB_PASSWORD"]=${DEPLOY_VARS["MYSQL_ROOT_PASSWORD"]}
+        if [ -z "${DEPLOY_VARS["DB_PORT"]:-}" ]; then
+            error "Please define DB_PORT."
+
+        fi
         DEPLOY_VARS["ENABLE_EXTERNAL_MYSQL"]="true"
         return
     fi
@@ -204,12 +204,12 @@ check_if_postgresql_up() {
     fi
 
     # Check if external PostgreSQL server
-    if [ -n "${DEPLOY_VARS["POSTGRES_HOST"]:-}" ]; then
+    if [ -n "${DEPLOY_VARS["DB_HOST"]:-}" ]; then
         info "Use external PostgreSQL server"
-        DEPLOY_VARS["DB_HOST"]=${DEPLOY_VARS["POSTGRES_HOST"]}
-        DEPLOY_VARS["DB_PORT"]=${DEPLOY_VARS["POSTGRES_PORT"]}
-        DEPLOY_VARS["DB_USER"]="postgres"
-        DEPLOY_VARS["DB_PASSWORD"]=${DEPLOY_VARS["POSTGRES_PASSWORD"]}
+        if [ -z "${DEPLOY_VARS["DB_PORT"]:-}" ]; then
+            error "Please define DB_PORT."
+
+        fi
         DEPLOY_VARS["ENABLE_EXTERNAL_POSTGRES"]="true"
         return
     fi
@@ -235,6 +235,36 @@ check_if_db_up() {
         return
     fi 
     check_if_${db_type}_up
+
+    if [ ${DEPLOY_VARS["ENABLE_EXTERNAL_MYSQL"]} == "true" ]; then
+        if [ -z "${DEPLOY_VARS["MANAGER_DB_USER"]:-}" ]; then
+            DEPLOY_VARS["MANAGER_DB_USER"]=${DEPLOY_VARS["DB_USER"]}
+        fi
+        if [ -z "${DEPLOY_VARS["MANAGER_DB_USER"]:-}" ]; then
+            error "Please set up MANAGER_DB_USER or DB_USER."
+        fi
+
+        if [ -z "${DEPLOY_VARS["MANAGER_DB_PASSWORD"]:-}" ]; then
+            DEPLOY_VARS["MANAGER_DB_PASSWORD"]=${DEPLOY_VARS["DB_PASSWORD"]}
+        fi
+        if [ -z "${DEPLOY_VARS["MANAGER_DB_PASSWORD"]:-}" ]; then
+            error "Please set up MANAGER_DB_PASSWORD or DB_PASSWORD."
+        fi
+
+        if [ -z "${DEPLOY_VARS["GATEWAY_DB_USER"]:-}" ]; then
+            DEPLOY_VARS["GATEWAY_DB_USER"]=${DEPLOY_VARS["DB_USER"]}
+        fi
+        if [ -z "${DEPLOY_VARS["GATEWAY_DB_USER"]:-}" ]; then
+            error "Please set up GATEWAY_DB_USER or DB_USER."
+        fi
+
+        if [ -z "${DEPLOY_VARS["GATEWAY_DB_PASSWORD"]:-}" ]; then
+            DEPLOY_VARS["GATEWAY_DB_PASSWORD"]=${DEPLOY_VARS["DB_PASSWORD"]}
+        fi
+        if [ -z "${DEPLOY_VARS["GATEWAY_DB_PASSWORD"]:-}" ]; then
+            error "Please set up GATEWAY_DB_PASSWORD or DB_PASSWORD."
+        fi
+    fi
 }
 
 check_if_minio_up() {
