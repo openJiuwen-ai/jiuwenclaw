@@ -104,11 +104,20 @@ def build_acp_session_update(
     state: AcpSessionUpdateState,
 ) -> dict[str, Any] | None:
     event_type = msg.event_type
-    if event_type in (EventType.CHAT_DELTA, EventType.CHAT_REASONING):
+    if event_type == EventType.CHAT_SYMPHONY_STATUS:
+        return None
+
+    if event_type in (
+        EventType.CHAT_DELTA,
+        EventType.CHAT_REASONING,
+    ):
         text = str(payload.get("content", "") or "")
         if not text:
             return None
-        if is_reasoning_event(event_type, payload):
+        if is_reasoning_event(
+            event_type,
+            payload,
+        ):
             _append_state_text(state, "thought_text", text)
             return {
                 "sessionUpdate": "agent_thought_chunk",

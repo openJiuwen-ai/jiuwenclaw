@@ -230,3 +230,157 @@ Cancel operation:
 - Mode is stored **per channel** (`channel_id` → `mode`). All subsequent messages on that channel will automatically include the current mode.
 - `default_mode` can be set in `config.yaml` as the initial value; `MessageHandler` reads it on startup.
 - `/new_session` and `/mode` changes will automatically cancel tasks currently running in the session.
+
+---
+
+## Terminal CLI: `jiuwenswarm chat`
+
+Starting from v0.2.3, JiuwenSwarm provides a first-party command-line chat entry point to interact with JiuwenSwarm directly from the terminal.
+
+### Quick Start
+
+```bash
+# Start Gateway and AgentServer (if not running)
+jiuwenswarm-start app
+
+# Send a message
+jiuwenswarm chat "Hello, introduce yourself"
+```
+
+`jiuwenswarm chat` calls JiuwenSwarm's runtime through the Gateway's `/tui` WebSocket route (`channel_id="tui"`), sharing the same MessageHandler and AgentServer path as the TUI.
+
+### Basic Usage
+
+| Command | Description |
+|---|---|
+| `jiuwenswarm chat "hello"` | Send a single message |
+| `jiuwenswarm chat check the repo and suggest` | Multi-word args joined into one prompt |
+| `echo "analyze main.py" \| jiuwenswarm chat` | Pipe stdin |
+| `jiuwenswarm chat` | No args + interactive TTY → enter REPL mode |
+
+### Options
+
+| Option | Default | Description |
+|---|---|---|
+| `--mode <mode>` | `code.normal` | Execution mode, see [Modes](Modes.md) |
+| `--session <id>` | Auto-generated | Reuse or create a named session id |
+| `--cwd <path>` | Current dir | Working directory for file mentions and agent context |
+| `--project-dir <path>` | `--cwd` | Project identity for session and agent cache |
+| `--trusted-dir <path>` | `--project-dir` | Trusted directory (repeatable) |
+| `--gateway-url <url>` | `ws://127.0.0.1:19001/tui` | Explicit Gateway WebSocket URL |
+| `--name <instance>` | — | Named instance for env isolation |
+| `--dotenv <path>` | — | Path to .env file |
+| `--json` | — | Print one final JSON object |
+| `--jsonl` | — | Print each Gateway event frame as JSON Lines |
+| `--show-reasoning` | — | Include reasoning output (to stderr) |
+| `--show-tools` | — | Include compact tool call/result status (to stderr) |
+| `--timeout <seconds>` | — | Total response timeout in seconds |
+
+### Modes (`--mode`)
+
+Supported mode values match those in [Modes](Modes.md):
+
+| Mode | Alias | Description |
+|---|---|---|
+| `code.normal` | `code`, `normal` | Default, code normal mode |
+| `code.plan` | — | Code planning mode |
+| `code.team` | — | Code team mode |
+| `agent.plan` | `agent` | Agent planning mode |
+| `agent.fast` | `fast` | Agent fast mode |
+| `team` | `team.normal` | Team mode |
+
+```bash
+# Using aliases
+jiuwenswarm chat --mode fast "quick answer"
+jiuwenswarm chat --mode agent "help me plan"
+
+# Using canonical values
+jiuwenswarm chat --mode code.plan "design a user system"
+```
+
+### Session Reuse
+
+```bash
+# First: specify a session name
+jiuwenswarm chat --session project-a "analyze the project architecture"
+
+# Follow-up: reuse the same session, preserving context
+jiuwenswarm chat --session project-a "any improvement suggestions?"
+
+# Without --session, auto-generates cli-YYYYMMDD-HHMMSS-xxxxxxxx
+```
+
+### REPL Mode
+
+Run without a prompt argument to enter multi-turn conversation:
+
+```bash
+jiuwenswarm chat
+# Session: cli-20260616-120500-abc12345
+# > show me the files in the current directory
+# > analyze main.py
+# > /exit
+```
+
+All messages in REPL mode share the same session, maintaining continuous context.
+
+**Exit the REPL** with any of:
+
+- `/exit`, `/quit`, or `/q`
+- `Ctrl+D` (Unix) / `Ctrl+Z`+Enter (Windows)
+- `Ctrl+C` at the input prompt
+
+### Loading Spinner
+
+While waiting for the first response, a dynamic loading indicator displays on stderr:
+
+```
+✢ analyzing (3s)
+```
+
+- **12-frame ping-pong animation**: `␣ · ✢ ✳ ✶ ✻ ✽` forward then reverse
+- **Random verb per turn**: analyzing, thinking, planning, exploring, searching, reading, computing, processing, generating, understanding, writing, compiling, checking, optimizing, learning
+- **Elapsed timer**: shows after 1 second
+- **Stall detection**: glyph turns red after 3s of no new content
+- Auto-clears on first delta
+
+### Output Modes
+
+| Mode | Flag | Description |
+|---|---|---|
+| Human-readable (default) | — | Stream deltas to stdout |
+| JSON | `--json` | Buffer all events, output one final JSON object |
+| JSONL | `--jsonl` | Output each event frame as a JSON Line |
+
+```bash
+# JSON output
+jiuwenswarm chat --json "analyze README"
+# → {"ok": true, "content": "..."}
+
+# JSONL output (pipe-friendly)
+jiuwenswarm chat --jsonl "analyze README" | jq
+```
+
+### Interrupts
+
+| Action | Behavior |
+|---|---|
+| First Ctrl+C | Sends `chat.interrupt` to Agent, graceful cancel. In REPL, stays in the loop for the next prompt |
+| Second Ctrl+C | Force exit (exit code 130) |
+
+> **Windows note**: `loop.add_signal_handler` is not supported on Windows. The CLI falls back to `signal.signal(SIGINT, ...)` so Ctrl+C still triggers graceful cancel (sends `chat.interrupt`) instead of raising an unhandled `KeyboardInterrupt`. Two rapid Ctrl+C presses force-exit on Windows as well.
+
+### Exit Codes
+
+| Code | Meaning |
+|---|---|
+| 0 | Success |
+| 1 | Agent returned an error |
+| 2 | CLI usage or invalid mode |
+| 3 | Gateway unavailable |
+| 4 | Interactive input required but stdin is not a TTY |
+| 130 | Interrupted by user |
+
+### Relationship with TUI
+
+`jiuwenswarm chat` reuses the TUI's `/tui` route (`channel_id="tui"`), sharing the same MessageHandler and AgentServer pipeline. Only one TUI/CLI connection per `channel_id="tui"` is active at a time — opening the TUI while `jiuwenswarm chat` is running (or vice versa) will replace the previous WebSocket client on that channel. The first version of the terminal CLI does not aim to replicate all TUI slash commands.

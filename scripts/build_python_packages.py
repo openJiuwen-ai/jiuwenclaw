@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import logging
 import os
 import shutil
 import subprocess
@@ -12,6 +13,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 SIDECAR_ROOT = ROOT / "packages" / "jiuwenswarm-tui"
 SIDE_CAR_DIST = SIDECAR_ROOT / "dist"
+JIUWENBOX_ROOT = ROOT / "jiuwenbox"
+JIUWENBOX_DIST = JIUWENBOX_ROOT / "dist"
 TUI_ROOT = ROOT / "jiuwenswarm" / "channels" / "tui" / "frontend"
 
 TUI_TARGETS = {
@@ -25,7 +28,7 @@ TUI_TARGETS = {
 
 
 def run(cmd: list[str], cwd: Path, env: dict[str, str] | None = None) -> None:
-    print(f"[build] ({cwd.relative_to(ROOT) if cwd != ROOT else '.'}) {' '.join(cmd)}")
+    logging.info(f"[build] ({cwd.relative_to(ROOT) if cwd != ROOT else '.'}) {' '.join(cmd)}")
     subprocess.run(cmd, cwd=cwd, check=True, env=env)
 
 
@@ -47,6 +50,11 @@ def clean_sidecar() -> None:
         remove_path(SIDECAR_ROOT / relative)
 
 
+def clean_jiuwenbox() -> None:
+    for relative in ("dist", "build", "jiuwenbox.egg-info"):
+        remove_path(JIUWENBOX_ROOT / relative)
+
+
 def build_root_wheel() -> None:
     SIDE_CAR_DIST.mkdir(parents=True, exist_ok=True)
     run(["uv", "build", "--wheel", "--out-dir", str(SIDE_CAR_DIST)], ROOT)
@@ -59,6 +67,13 @@ def build_sidecar_wheel(platform_tag: str | None = None) -> None:
     if platform_tag:
         env["JWC_TUI_WHEEL_PLATFORM"] = platform_tag
     run(["uv", "build", "--wheel"], SIDECAR_ROOT, env=env)
+
+
+def build_jiuwenbox_wheel() -> None:
+    for relative in ("build", "jiuwenbox.egg-info"):
+        remove_path(JIUWENBOX_ROOT / relative)
+    JIUWENBOX_DIST.mkdir(parents=True, exist_ok=True)
+    run(["uv", "build", "--wheel", "--out-dir", str(JIUWENBOX_DIST)], JIUWENBOX_ROOT)
 
 
 def build_tui_binary(target: str, clean: bool) -> None:
@@ -112,7 +127,10 @@ def resolve_requested_targets(raw: str) -> list[str]:
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Build JiuwenClaw Python distributions (main package and optional TUI sidecar).",
+        description=(
+            "Build JiuwenSwarm Python distributions "
+            "(main package, optional TUI sidecar, and optional jiuwenbox wheel)."
+        ),
     )
     parser.add_argument(
         "--target",
@@ -140,6 +158,11 @@ def main() -> None:
         help="Skip building the jiuwenswarm-tui sidecar wheel",
     )
     parser.add_argument(
+        "--skip-jiuwenbox",
+        action="store_true",
+        help="Skip building the jiuwenbox wheel",
+    )
+    parser.add_argument(
         "--clean",
         action="store_true",
         help="Clean dist/build/egg-info before building",
@@ -157,9 +180,11 @@ def main() -> None:
             clean_root()
         if not args.skip_sidecar:
             clean_sidecar()
+        if not args.skip_jiuwenbox:
+            clean_jiuwenbox()
 
-    if args.skip_sidecar and args.skip_root:
-        raise SystemExit("nothing to build: both --skip-root and --skip-sidecar were set")
+    if args.skip_sidecar and args.skip_root and args.skip_jiuwenbox:
+        raise SystemExit("nothing to build: --skip-root, --skip-sidecar, and --skip-jiuwenbox were all set")
 
     if args.skip_binary and not args.skip_sidecar and len(targets) > 1:
         raise SystemExit("--skip-binary only supports a single sidecar wheel target")
@@ -177,11 +202,16 @@ def main() -> None:
             platform_tag = None if target == "current" else TUI_TARGETS[target]
             build_sidecar_wheel(platform_tag=platform_tag)
 
-    print("\n[build] done")
+    if not args.skip_jiuwenbox:
+        build_jiuwenbox_wheel()
+
+    logging.info("\n[build] done")
     if not args.skip_root:
-        print(f"[build] main wheel: {SIDE_CAR_DIST}")
+        logging.info(f"[build] main wheel: {SIDE_CAR_DIST}")
     if not args.skip_sidecar:
-        print(f"[build] tui wheel(s): {SIDE_CAR_DIST}")
+        logging.info(f"[build] tui wheel(s): {SIDE_CAR_DIST}")
+    if not args.skip_jiuwenbox:
+        logging.info(f"[build] jiuwenbox wheel: {JIUWENBOX_DIST}")
 
 
 if __name__ == "__main__":

@@ -23,28 +23,40 @@ import json
 import logging
 import types
 from pathlib import Path
+from types import SimpleNamespace
+from typing import Any
 
 import pytest
 
+from openjiuwen.agent_evolving.trajectory import InMemoryTrajectoryRegistry
 from openjiuwen.agent_teams.schema import deep_agent_spec as das
+from openjiuwen.agent_teams.harness.manifest import get_catalog, resolve_factory
 from openjiuwen.agent_teams.schema.blueprint import LeaderSpec, TeamAgentSpec
 from openjiuwen.agent_teams.schema.deep_agent_spec import (
     BuiltinToolSpec,
     DeepAgentSpec,
     RailSpec,
+    TeamModelConfig,
+    WorkspaceSpec,
+    register_rail_provider,
 )
-from openjiuwen.core.single_agent.rail.base import AgentCallbackContext, ToolCallInputs
+from openjiuwen.core.foundation.llm import ModelClientConfig
+from openjiuwen.core.foundation.tool import McpServerConfig
+from openjiuwen.core.single_agent.rail.base import (
+    AgentCallbackContext,
+    AgentCallbackEvent,
+    AgentRail,
+    ToolCallInputs,
+)
+from openjiuwen.harness.tools.worktree import WorktreeConfig
 from openjiuwen.harness.prompts.builder import SystemPromptBuilder
+from openjiuwen.harness.rails import SkillUseRail
 
 from jiuwenswarm.agents.swarm import (
     SwarmBuildContext,
     enrich_team_spec_for_swarm,
     register_swarm_providers,
 )
-from openjiuwen.agent_teams.schema.deep_agent_spec import TeamModelConfig, WorkspaceSpec
-from openjiuwen.agent_evolving.trajectory import InMemoryTrajectoryRegistry
-from openjiuwen.core.foundation.llm import ModelClientConfig
-
 from jiuwenswarm.agents.swarm import registry
 from jiuwenswarm.agents.swarm.config_specs import (
     build_member_capability_specs,
@@ -58,8 +70,9 @@ from jiuwenswarm.agents.swarm.providers import (
     runtime_tools,
     tools,
 )
-from jiuwenswarm.agents.harness.team.team_runtime_inheritance import (
-    resolve_model_config,
+from jiuwenswarm.common.coding_memory_paths import (
+    resolve_project_coding_memory_dir,
+    resolve_project_coding_memory_workspace_path,
 )
 from jiuwenswarm.common.config import get_config
 
@@ -82,6 +95,7 @@ _COMMON_RAIL_NAMES: frozenset[str] = frozenset(
         registry.TEAM_WORKSPACE_REPORT_PATH,
         registry.CONTEXT_PROCESSOR,
         registry.PLUGIN_RAILS,
+        registry.SKILL_RETRIEVAL_PROMPT,
         registry.MEMBER_SKILL_TOOLKIT,
     }
 )
@@ -95,6 +109,9 @@ _COMMON_TOOL_NAMES: frozenset[str] = frozenset(
         registry.AUDIO,
         # SKILL_TOOLKIT is no longer declared as a tool; the
         # MEMBER_SKILL_TOOLKIT rail is the sole registrar of skill tools.
+        # Skill retrieval is a separate self-gated tool provider.
+        registry.SKILL_RETRIEVAL,
+        registry.SYMPHONY_TOOLKIT,
         registry.USER_TODOS,
         registry.VIDEO,
         registry.IMAGE_GEN,
@@ -120,6 +137,58 @@ def _make_team_spec() -> TeamAgentSpec:
         team_name="unit_team",
         leader=LeaderSpec(member_name="team_leader"),
     )
+
+
+def _agentic_retrieval_config(enabled: bool = True) -> dict:
+    return {"symphony": {"skill_retrieval": {"enabled": enabled}}}
+
+
+class _FakeEvolutionInterruptRail:
+    def __init__(self, **kwargs):
+        self.kwargs = kwargs
+
+
+class _FakeEvolutionRail:
+    def __init__(self, *args, **kwargs):
+        self.args = args
+        self.kwargs = kwargs
+        self.swarm_context = {}
+        self.approval_submission_service = object()
+
+    def bind_swarm_context(self, **kwargs) -> None:
+        self.swarm_context.update(kwargs)
+
+
+class _FakeMemberSkillEvolutionRail(_FakeEvolutionRail):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.bound_sink = None
+
+    def set_trajectory_sink(self, sink, *, team_id, member_role) -> None:
+        self.bound_sink = (sink, team_id, member_role)
+
+
+def _assert_evolution_approval_stack(
+    built: list[object],
+    rail_type: type,
+    *,
+    auto_save: bool,
+    language: str,
+):
+    assert len(built) == 2
+    interrupt_rail, rail = built
+    assert isinstance(rail, rail_type)
+    assert isinstance(interrupt_rail, _FakeEvolutionInterruptRail)
+    assert "review_runtime" in rail.kwargs
+    assert rail.kwargs["review_runtime"] is not None
+    assert rail.kwargs["fuzzy_review"] is False
+    assert interrupt_rail.kwargs == {
+        "review_runtime": rail.kwargs["review_runtime"],
+        "submission_service": rail.approval_submission_service,
+        "auto_save": auto_save,
+        "language": language,
+    }
+    return rail
 
 
 def test_register_swarm_providers_is_idempotent() -> None:
@@ -181,7 +250,7 @@ def test_runtime_prompt_rail_resolves_via_registry() -> None:
     rail = RailSpec(type=registry.RUNTIME_PROMPT).build(language="cn", context=fake_ctx)
 
     assert rail is not None
-    assert type(rail).__name__ == "RuntimePromptRail"
+    assert rail.__class__.__name__ == "RuntimePromptRail"
 
 
 @pytest.mark.asyncio
@@ -289,8 +358,19 @@ def test_unknown_swarm_rail_type_raises() -> None:
 @pytest.mark.parametrize(
     ("role", "extra_rails"),
     [
-        ("leader", {registry.TEAM_SKILL_EVOLUTION, registry.TEAM_SKILL_CREATE}),
-        ("teammate", {registry.MEMBER_SKILL_EVOLUTION}),
+        (
+            "leader",
+            {
+                registry.TEAM_SKILL_EVOLUTION,
+                registry.TEAM_SKILL_CREATE,
+            },
+        ),
+        (
+            "teammate",
+            {
+                registry.MEMBER_SKILL_EVOLUTION,
+            },
+        ),
     ],
 )
 def test_build_member_capability_specs_rail_names(
@@ -310,9 +390,9 @@ def test_build_member_capability_specs_rail_names(
 
     assert _COMMON_RAIL_NAMES <= rail_names
     assert extra_rails <= rail_names
-    # The common set has exactly 14 entries; the role adds only its evolution
+    # The common set has exactly 15 entries; the role adds only its evolution
     # rails on top.
-    assert len(_COMMON_RAIL_NAMES) == 14
+    assert len(_COMMON_RAIL_NAMES) == 15
     assert rail_names == _COMMON_RAIL_NAMES | extra_rails
     # No DeepAgent is involved; every entry is a plain declarative RailSpec.
     assert all(isinstance(spec, RailSpec) for spec in rails_specs)
@@ -349,26 +429,201 @@ def test_member_skill_toolkit_carries_selected_skills() -> None:
     assert toolkit.params == {"skills": ["alpha", "beta"]}
 
 
+def test_swarm_skill_retrieval_tools_use_global_skill_manager(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Skill retrieval indexes globally installed skills, not member workspace skills."""
+    calls: list[str | None] = []
+
+    class FakeSkillManager:
+        def __init__(self, workspace_dir: str | None = None) -> None:
+            calls.append(workspace_dir)
+
+    class FakeToolkit:
+        def __init__(
+            self,
+            manager: FakeSkillManager,
+            visible_skill_names: object | None = None,
+        ) -> None:
+            self.manager = manager
+            self.visible_skill_names = visible_skill_names
+
+        @staticmethod
+        def get_tools() -> list:
+            return []
+
+    monkeypatch.setattr(tools, "is_skill_retrieval_enabled", lambda: True)
+    monkeypatch.setattr(tools, "SkillManager", FakeSkillManager)
+    monkeypatch.setattr(tools, "SkillRetrievalToolkit", FakeToolkit)
+
+    factory = resolve_factory(get_catalog()[registry.SKILL_RETRIEVAL].factory_ref)
+    built = factory({}, SwarmBuildContext())
+
+    assert built == []
+    assert calls == [None]
+
+
+def test_swarm_skill_retrieval_prompt_uses_global_skill_manager(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """The retrieval prompt must match the same global index as the retrieval tools."""
+    workspace_root = str(tmp_path / "member-workspace")
+    calls: list[str | None] = []
+
+    class FakeSkillManager:
+        def __init__(self, workspace_dir: str | None = None) -> None:
+            calls.append(workspace_dir)
+
+    monkeypatch.setattr(
+        "jiuwenswarm.agents.harness.common.tools.skill_retrieval_toolkits.is_skill_retrieval_enabled",
+        lambda: True,
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.server.runtime.skill.skill_manager.SkillManager",
+        FakeSkillManager,
+    )
+
+    factory = resolve_factory(get_catalog()[registry.SKILL_RETRIEVAL_PROMPT].factory_ref)
+    rail = factory(
+        {},
+        SwarmBuildContext(
+            global_skills_dir=str(tmp_path / "global-skills"),
+            workspace=types.SimpleNamespace(root_path=workspace_root),
+        ),
+    )
+
+    assert rail is not None
+    assert calls == [None]
+
+
+def test_code_skill_use_rail_kept_as_auto_list_when_retrieval_enabled(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Agentic retrieval hides list_skill later, but skill_tool stays available."""
+    monkeypatch.setattr(
+        "jiuwenswarm.agents.harness.common.tools.skill_retrieval_toolkits.is_skill_retrieval_enabled",
+        lambda: True,
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.common.utils.get_agent_skills_dir",
+        lambda: tmp_path,
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.server.runtime.skill.load_execution_disabled_skills",
+        lambda: [],
+    )
+
+    rail = code_rails.build_code_skill_use(
+        {"skill_mode": SkillUseRail.SKILL_MODE_ALL},
+        SwarmBuildContext(),
+    )
+
+    assert isinstance(rail, SkillUseRail)
+    assert rail.skill_mode == SkillUseRail.SKILL_MODE_AUTO_LIST
+
+
 @pytest.mark.parametrize("role", ["leader", "teammate"])
-def test_team_member_deep_agent_spec_enables_skill_discovery(role: str) -> None:
-    """Chat-team members rely on the core default SkillUseRail."""
+def test_team_member_deep_agent_spec_uses_agentic_skill_disclosure(role: str) -> None:
+    """Chat-team members keep skill_tool while retrieval owns discovery."""
     base = DeepAgentSpec(enable_skill_discovery=False)
 
-    spec = build_member_deep_agent_spec({}, "team", role, base)
+    spec = build_member_deep_agent_spec(_agentic_retrieval_config(), "team", role, base)
+
+    assert spec.enable_skill_discovery is True
+
+
+@pytest.mark.parametrize("role", ["leader", "teammate"])
+def test_team_member_deep_agent_spec_keeps_core_skill_discovery_when_retrieval_disabled(role: str) -> None:
+    """Chat-team members keep the original skill discovery path when retrieval is disabled."""
+    base = DeepAgentSpec(enable_skill_discovery=False)
+
+    spec = build_member_deep_agent_spec(_agentic_retrieval_config(False), "team", role, base)
 
     assert spec.enable_skill_discovery is True
 
 
 @pytest.mark.parametrize("mode", ["code.team", "team.plan"])
-def test_code_member_deep_agent_spec_keeps_explicit_skill_use_rail(mode: str) -> None:
-    """Code profiles keep their explicit SkillUseRail provider path."""
+def test_code_member_deep_agent_spec_keeps_skill_use_rail_when_retrieval_enabled(mode: str) -> None:
+    """Code profiles keep skill_tool while retrieval owns discovery."""
     base = DeepAgentSpec(enable_skill_discovery=False)
 
-    spec = build_member_deep_agent_spec({}, mode, "leader", base)
+    spec = build_member_deep_agent_spec(_agentic_retrieval_config(), mode, "leader", base)
     rail_names = {rail.type for rail in (spec.rails or [])}
 
     assert spec.enable_skill_discovery is False
     assert registry.CODE_SKILL_USE in rail_names
+
+
+@pytest.mark.parametrize("mode", ["code.team", "team.plan"])
+def test_code_member_deep_agent_spec_keeps_skill_use_rail_when_retrieval_disabled(mode: str) -> None:
+    """Code profiles keep their explicit SkillUseRail provider when retrieval is disabled."""
+    base = DeepAgentSpec(enable_skill_discovery=False)
+
+    spec = build_member_deep_agent_spec(_agentic_retrieval_config(False), mode, "leader", base)
+    rail_names = {rail.type for rail in (spec.rails or [])}
+
+    assert spec.enable_skill_discovery is False
+    assert registry.CODE_SKILL_USE in rail_names
+
+
+def test_member_deep_agent_spec_merges_config_mcp_configs() -> None:
+    """Member specs inherit MCP declarations from config while preserving base MCPs."""
+    base_mcp = McpServerConfig(
+        server_id="base-id",
+        server_name="base_mcp",
+        server_path="stdio://base_mcp",
+        client_type="stdio",
+        params={"command": "python"},
+    )
+    config_mcp = McpServerConfig(
+        server_id="config-id",
+        server_name="config_mcp",
+        server_path="stdio://config_mcp",
+        client_type="stdio",
+        params={"command": "node"},
+    )
+    base = DeepAgentSpec(enable_skill_discovery=False, mcps=[base_mcp])
+
+    spec = build_member_deep_agent_spec(
+        _agentic_retrieval_config(),
+        "team",
+        "leader",
+        base,
+        mcp_configs=[config_mcp],
+    )
+
+    assert [cfg.server_name for cfg in (spec.mcps or [])] == ["base_mcp", "config_mcp"]
+    assert spec.mcps[1] is not config_mcp
+
+
+def test_member_deep_agent_spec_keeps_base_mcp_on_duplicate_name() -> None:
+    """An explicitly declared member MCP wins over config with the same server name."""
+    base_mcp = McpServerConfig(
+        server_id="base-id",
+        server_name="shared_mcp",
+        server_path="stdio://shared_mcp",
+        client_type="stdio",
+        params={"command": "python"},
+    )
+    config_mcp = McpServerConfig(
+        server_id="config-id",
+        server_name="shared_mcp",
+        server_path="stdio://shared_mcp",
+        client_type="stdio",
+        params={"command": "node"},
+    )
+
+    spec = build_member_deep_agent_spec(
+        _agentic_retrieval_config(),
+        "team",
+        "leader",
+        DeepAgentSpec(mcps=[base_mcp]),
+        mcp_configs=[config_mcp],
+    )
+
+    assert [cfg.server_id for cfg in (spec.mcps or [])] == ["base-id"]
 
 
 def test_enrich_team_spec_for_swarm_has_no_deep_agent_param() -> None:
@@ -419,8 +674,63 @@ def test_enrich_team_spec_for_swarm_rewrites_spec_in_place() -> None:
     assert not hasattr(spec, "agent_customizer")
 
 
-def test_enrich_team_spec_appends_after_existing_rails() -> None:
+def test_enrich_team_spec_defaults_member_workspace_to_project_dir() -> None:
+    """Core receives project-rooted member workspaces from swarm enrichment."""
+    spec = _make_team_spec()
+    spec.worktree = WorktreeConfig(enabled=True)
+
+    enrich_team_spec_for_swarm(
+        spec,
+        session_id="s",
+        mode="code.team",
+        project_dir="/tmp/project",
+        channel_id="web",
+    )
+
+    assert spec.agents["leader"].workspace.root_path == "/tmp/project"
+    assert spec.agents["teammate"].workspace.root_path == "/tmp/project"
+
+
+def test_enrich_team_spec_leaves_workspace_when_worktree_disabled() -> None:
+    """Non-worktree teams keep their existing member workspace semantics."""
+    spec = _make_team_spec()
+
+    enrich_team_spec_for_swarm(
+        spec,
+        session_id="s",
+        mode="code.team",
+        project_dir="/tmp/project",
+        channel_id="web",
+    )
+
+    assert spec.agents["leader"].workspace is None
+    assert spec.agents["teammate"].workspace is None
+
+
+def test_enrich_team_spec_preserves_explicit_member_workspace() -> None:
+    """A configured member workspace is not overwritten by project_dir."""
+    spec = _make_team_spec()
+    spec.worktree = WorktreeConfig(enabled=True)
+    spec.agents["leader"].workspace = WorkspaceSpec(root_path="/tmp/custom")
+
+    enrich_team_spec_for_swarm(
+        spec,
+        session_id="s",
+        mode="code.team",
+        project_dir="/tmp/project",
+        channel_id="web",
+    )
+
+    assert spec.agents["leader"].workspace.root_path == "/tmp/custom"
+    assert spec.agents["teammate"].workspace.root_path == "/tmp/project"
+
+
+def test_enrich_team_spec_appends_after_existing_rails(monkeypatch) -> None:
     """Provider rails are appended after a member's pre-existing rails."""
+    monkeypatch.setattr(
+        "jiuwenswarm.agents.swarm.config_specs._retrieval_enabled",
+        lambda config=None: False,
+    )
     spec = _make_team_spec()
     # Seed the leader with a non-swarm rail to prove ordering is preserved.
     spec.agents["leader"].rails = [RailSpec(type="skill_use")]
@@ -431,6 +741,60 @@ def test_enrich_team_spec_appends_after_existing_rails() -> None:
     assert leader_rail_types[0] == "skill_use"
     assert leader_rail_types.count("skill_use") == 1
     assert len(leader_rail_types) > 1
+
+
+@pytest.mark.parametrize("mode", ["team", "code.team", "team.plan"])
+def test_enrich_team_spec_for_swarm_injects_config_mcp_servers(
+    mode: str,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Enabled config MCP servers are mounted on every declarative team member."""
+    config = {
+        "mcp": {
+            "servers": [
+                {
+                    "name": "local_tool",
+                    "enabled": True,
+                    "transport": "stdio",
+                    "command": "python",
+                    "args": ["server.py"],
+                    "cwd": str(tmp_path),
+                },
+                {
+                    "name": "disabled_tool",
+                    "enabled": False,
+                    "transport": "stdio",
+                    "command": "python",
+                },
+                {
+                    "name": "invalid_tool",
+                    "enabled": True,
+                    "transport": "stdio",
+                },
+            ],
+        },
+    }
+    monkeypatch.setattr("jiuwenswarm.agents.swarm.assembly.get_config", lambda: config)
+    monkeypatch.setattr(
+        "jiuwenswarm.agents.swarm.assembly.get_agent_skills_dir",
+        lambda: tmp_path / "global-skills",
+    )
+    spec = _make_team_spec()
+
+    enrich_team_spec_for_swarm(spec, session_id="s", mode=mode, channel_id="web")
+
+    leader_mcps = spec.agents["leader"].mcps or []
+    teammate_mcps = spec.agents["teammate"].mcps or []
+    assert [cfg.server_name for cfg in leader_mcps] == ["local_tool"]
+    assert [cfg.server_name for cfg in teammate_mcps] == ["local_tool"]
+    assert leader_mcps[0].server_id == teammate_mcps[0].server_id
+    assert leader_mcps[0].client_type == "stdio"
+    assert leader_mcps[0].params == {
+        "command": "python",
+        "args": ["server.py"],
+        "cwd": str(tmp_path),
+    }
 
 
 def test_enrich_skips_absent_roles_gracefully() -> None:
@@ -571,12 +935,14 @@ def test_video_tool_gated_by_config(monkeypatch: pytest.MonkeyPatch) -> None:
     # Gate closed: empty config has no dedicated video model.
     assert tools._build_video_tools(ctx) == []
 
-    # Gate open: dedicated key reported + VIDEO_API_KEY present.
+    # Gate open: complete config reported + VIDEO_API_KEY present.
     monkeypatch.setattr(tools, "apply_video_model_config_from_yaml", lambda cfg: None)
     monkeypatch.setattr(
-        tools, "dedicated_multimodal_model_configured", lambda cfg, kind: True
+        tools, "complete_multimodal_model_configured", lambda cfg, kind: True
     )
     monkeypatch.setenv("VIDEO_API_KEY", "k")
+    monkeypatch.setenv("VIDEO_API_BASE", "https://video.example/v1")
+    monkeypatch.setenv("VIDEO_MODEL_NAME", "video-model")
     built = tools._build_video_tools(ctx)
     assert [tool.card.name for tool in built] == ["video_understanding"]
 
@@ -593,6 +959,49 @@ def test_image_gen_tool_gated_by_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("IMAGE_GEN_API_KEY", "k")
     built = tools._build_image_gen_tools(ctx)
     assert [tool.card.name for tool in built] == ["generate_image"]
+
+
+def test_symphony_toolkit_is_leader_only(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Symphony tools are built only for the team leader."""
+    seen_configs: list[dict] = []
+    fake_tool = types.SimpleNamespace(
+        card=types.SimpleNamespace(name="symphony_compose_score")
+    )
+
+    class FakeSymphonyToolkit:
+        @staticmethod
+        def get_tools(config_base):
+            seen_configs.append(config_base)
+            return [fake_tool] if config_base["symphony"]["enabled"] else []
+
+    monkeypatch.setattr(tools, "SymphonyToolkit", FakeSymphonyToolkit)
+    monkeypatch.setattr(
+        tools,
+        "get_config",
+        lambda: {"symphony": {"enabled": True}},
+    )
+
+    leader = SwarmBuildContext(role="leader")
+    teammate = SwarmBuildContext(role="teammate")
+
+    built = tools.build_symphony_toolkit({}, leader)
+
+    assert [tool.card.name for tool in built] == ["symphony_compose_score"]
+    assert tools.build_symphony_toolkit({}, teammate) == []
+    assert seen_configs == [{"symphony": {"enabled": True}}]
+
+
+def test_symphony_toolkit_respects_disabled_config(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The provider delegates symphony.enabled gating to SymphonyToolkit."""
+    monkeypatch.setattr(
+        tools,
+        "get_config",
+        lambda: {"symphony": {"enabled": False}},
+    )
+
+    assert tools.build_symphony_toolkit({}, SwarmBuildContext(role="leader")) == []
 
 
 def test_vision_model_config_params_gating(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -628,6 +1037,182 @@ def test_vision_audio_config_params_empty_when_unconfigured() -> None:
 # ---------------------------------------------------------------------------
 # Evolution hot-reload: full TeamWorkspaceInfo on the registered rail context
 # ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("auto_save", [False, True])
+def test_team_skill_evolution_provider_passes_review_runtime(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    auto_save: bool,
+) -> None:
+    monkeypatch.setattr(
+        evolution_rails,
+        "SwarmTeamSkillEvolutionRail",
+        _FakeEvolutionRail,
+    )
+    monkeypatch.setattr(evolution_rails, "EvolutionInterruptRail", _FakeEvolutionInterruptRail)
+    monkeypatch.setattr(
+        evolution_rails,
+        "_build_evolution_llm_from",
+        lambda config: (object(), "model"),
+    )
+    monkeypatch.setattr(evolution_rails, "load_execution_disabled_skills", lambda: [])
+
+    ctx = SwarmBuildContext(
+        language="cn",
+        role="leader",
+        session_id="sess",
+        channel="web",
+        team_id="t",
+        team_ws_root=str(tmp_path),
+        team_skills_dir=str(tmp_path / "skills"),
+        trajectory_registry=object(),
+        config={},
+    )
+
+    built = evolution_rails.build_team_skill_evolution_rail(
+        {"evolution_model_config": {}, "auto_scan": True, "auto_save": auto_save},
+        ctx,
+    )
+
+    _assert_evolution_approval_stack(
+        built,
+        _FakeEvolutionRail,
+        auto_save=auto_save,
+        language="cn",
+    )
+    rail = built[1]
+    assert rail.kwargs["auto_scan"] is False
+    assert rail.kwargs["auto_save"] is auto_save
+    assert rail.kwargs["completion_followup_enabled"] is True
+
+
+def test_swarm_team_skill_evolution_registration_retries_deferred_watcher(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[str] = []
+
+    class _FakeManager:
+        @staticmethod
+        def register_team_live_rail(session_id, agent, rail) -> None:
+            calls.append(f"live:{session_id}")
+
+        @staticmethod
+        def register_team_skill_rail(session_id, rail) -> None:
+            calls.append(f"skill:{session_id}")
+
+        @staticmethod
+        def consume_team_evolution_watcher_deferred(session_id) -> bool:
+            calls.append(f"consume:{session_id}")
+            return True
+
+    manager = _FakeManager()
+    monkeypatch.setattr(
+        "jiuwenswarm.agents.harness.team.team_manager.get_team_manager",
+        lambda channel: manager,
+    )
+    monkeypatch.setattr(evolution_rails.TeamSkillEvolutionRail, "init", lambda self, agent: None)
+    monkeypatch.setattr(evolution_rails, "_register_team_rail_context", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        "jiuwenswarm.server.runtime.agent_adapter.team_helpers.ensure_team_evolution_watcher",
+        lambda channel, session_id, *, source: calls.append(f"watcher:{channel}:{session_id}:{source}"),
+    )
+
+    rail = evolution_rails.SwarmTeamSkillEvolutionRail.__new__(
+        evolution_rails.SwarmTeamSkillEvolutionRail
+    )
+    rail.bind_swarm_context(
+        channel="web",
+        session_id="sess-1",
+        team_ws_root=None,
+        team_skills_dir="/tmp/team-skills",
+        team_id="team-1",
+        config={},
+        trajectory_registry=object(),
+    )
+
+    rail.init(SimpleNamespace(card=SimpleNamespace(name="leader")))
+
+    assert calls == [
+        "live:sess-1",
+        "skill:sess-1",
+        "consume:sess-1",
+        "watcher:web:sess-1:rail_registered",
+    ]
+
+
+def test_member_skill_evolution_provider_passes_review_runtime(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        evolution_rails,
+        "SwarmMemberSkillEvolutionRail",
+        _FakeMemberSkillEvolutionRail,
+    )
+    monkeypatch.setattr(evolution_rails, "EvolutionInterruptRail", _FakeEvolutionInterruptRail)
+    monkeypatch.setattr(
+        evolution_rails,
+        "_build_evolution_llm_from",
+        lambda config: (object(), "model"),
+    )
+    monkeypatch.setattr(evolution_rails, "load_execution_disabled_skills", lambda: [])
+
+    registry_obj = object()
+    ctx = SwarmBuildContext(
+        language="en",
+        role="teammate",
+        session_id="sess",
+        channel="web",
+        team_id="t",
+        team_skills_dir=str(tmp_path / "skills"),
+        trajectory_registry=registry_obj,
+        config={},
+    )
+
+    built = evolution_rails.build_member_skill_evolution_rail(
+        {"evolution_model_config": {}, "auto_scan": False},
+        ctx,
+    )
+
+    rail = _assert_evolution_approval_stack(
+        built,
+        _FakeMemberSkillEvolutionRail,
+        auto_save=True,
+        language="en",
+    )
+    assert rail.kwargs["language"] == "en"
+    assert rail.kwargs["auto_scan"] is False
+    assert rail.kwargs["auto_save"] is True
+    assert rail.bound_sink == (registry_obj, "t", "teammate")
+
+
+def test_rail_spec_build_flattens_single_and_list_provider_returns() -> None:
+    """Declarative rail providers may return either one rail or a rail stack."""
+    single_rail = AgentRail()
+    first_stack_rail = AgentRail()
+    second_stack_rail = AgentRail()
+
+    register_rail_provider("swarm.test_single_rail", lambda params, ctx: single_rail)
+    register_rail_provider(
+        "swarm.test_rail_stack",
+        lambda params, ctx: [first_stack_rail, second_stack_rail],
+    )
+
+    spec = DeepAgentSpec(
+        rails=[
+            RailSpec(type="swarm.test_single_rail"),
+            RailSpec(type="swarm.test_rail_stack"),
+        ],
+    )
+
+    parts = spec.resolve_parts(context=SwarmBuildContext(language="cn"))
+
+    assert parts.rails[:3] == [
+        single_rail,
+        first_stack_rail,
+        second_stack_rail,
+    ]
 
 
 def test_team_skill_create_rail_registers_full_workspace(
@@ -708,7 +1293,6 @@ _EXPECTED_CODE_RAIL_NAMES: frozenset[str] = frozenset(
         registry.SECURITY,
         registry.CODE_LSP,
         registry.CODE_PROJECT_MEMORY,
-        registry.PERMISSION_INTERRUPT,
         registry.SYS_OPERATION,
         registry.CODE_CODING_MEMORY,
         registry.CODE_AGENT_MODE,
@@ -718,7 +1302,7 @@ _EXPECTED_CODE_RAIL_NAMES: frozenset[str] = frozenset(
         registry.CODE_AGENT_RAIL,
         registry.USER_HOOKS,
         registry.CODE_SKILL_USE,
-        registry.CODE_WORKTREE,
+        registry.SKILL_RETRIEVAL_PROMPT,
         registry.CODE_CONFIRM_INTERRUPT,
         registry.MEMBER_SKILL_TOOLKIT,
         registry.TEAM_WORKSPACE_REPORT_PATH,
@@ -733,10 +1317,25 @@ def test_code_capability_specs_rail_and_tool_names(mode: str) -> None:
     register_swarm_providers()
     rails_specs, tool_specs = build_member_capability_specs({}, mode, "leader")
     rail_names = {spec.type for spec in rails_specs}
+    rail_params = {spec.type: spec.params for spec in rails_specs}
     tool_names = {spec.type for spec in tool_specs}
 
-    assert _EXPECTED_CODE_RAIL_NAMES <= rail_names
+    expected_rails = _EXPECTED_CODE_RAIL_NAMES
+    if mode == "team.plan":
+        expected_rails = expected_rails - {registry.CODE_CONFIRM_INTERRUPT}
+    assert expected_rails <= rail_names
     assert registry.TEAM_SKILL_EVOLUTION in rail_names
+    assert registry.STRUCTURED_ASK_USER in rail_names
+    if mode == "team.plan":
+        assert registry.TEAM_PLAN_APPROVAL in rail_names
+        assert registry.CODE_CONFIRM_INTERRUPT not in rail_names
+    else:
+        assert registry.TEAM_PLAN_APPROVAL not in rail_names
+        assert registry.CODE_CONFIRM_INTERRUPT in rail_names
+        assert rail_params[registry.CODE_CONFIRM_INTERRUPT]["tool_names"] == [
+            "switch_mode",
+            "exit_plan_mode",
+        ]
     # The chat-team common runtime prompt is replaced by the code variant.
     assert registry.RUNTIME_PROMPT not in rail_names
     assert tool_names == {
@@ -746,14 +1345,30 @@ def test_code_capability_specs_rail_and_tool_names(mode: str) -> None:
         registry.VISION,
         registry.AUDIO,
         # SKILL_TOOLKIT moved to the MEMBER_SKILL_TOOLKIT rail (see common set).
+        registry.SKILL_RETRIEVAL,
         registry.USER_TODOS,
         registry.VIDEO,
         registry.IMAGE_GEN,
         registry.XIAOYI_PHONE,
+        registry.SYMPHONY_TOOLKIT,
         registry.CODE_EXTRA_TOOLS,
         registry.CRON_TOOLS,
         registry.SEND_FILE,
     }
+
+
+def test_team_plan_approval_only_mounts_on_leader() -> None:
+    """Only team.plan leader uses the code.plan-style plan approval interrupt."""
+    register_swarm_providers()
+    leader_rails, _ = build_member_capability_specs({}, "team.plan", "leader")
+    teammate_rails, _ = build_member_capability_specs({}, "team.plan", "teammate")
+    code_team_rails, _ = build_member_capability_specs({}, "code.team", "leader")
+
+    assert registry.TEAM_PLAN_APPROVAL in {spec.type for spec in leader_rails}
+    assert registry.TEAM_PLAN_APPROVAL not in {spec.type for spec in teammate_rails}
+    assert registry.TEAM_PLAN_APPROVAL not in {spec.type for spec in code_team_rails}
+    assert registry.CODE_CONFIRM_INTERRUPT not in {spec.type for spec in leader_rails}
+    assert registry.CODE_CONFIRM_INTERRUPT not in {spec.type for spec in teammate_rails}
 
 
 def test_code_subagent_specs_use_factory_names() -> None:
@@ -786,6 +1401,226 @@ def test_code_runtime_language_by_mode_and_role() -> None:
     assert code_rails.code_runtime_language(code_team) == "en"
 
 
+def test_code_runtime_prompt_provider_carries_project_dir(tmp_path: Path) -> None:
+    """code.team runtime prompts keep the user's project scope visible."""
+    register_swarm_providers()
+    project_dir = tmp_path / "project"
+    project_dir.mkdir()
+    ctx = SwarmBuildContext(
+        mode="code.team",
+        role="leader",
+        channel="tui",
+        project_dir=str(project_dir),
+    )
+
+    rail = RailSpec(type=registry.CODE_RUNTIME_PROMPT).build(
+        language="cn",
+        context=ctx,
+    )
+
+    assert getattr(rail, "_project_dir") == str(project_dir)
+    assert getattr(rail, "_cwd") == str(project_dir)
+
+
+def test_team_plan_approval_provider_builds_only_for_leader() -> None:
+    """The code.plan-style approval rail is scoped to the team.plan leader."""
+    register_swarm_providers()
+    plan_leader = SwarmBuildContext(mode="team.plan", role="leader")
+    plan_teammate = SwarmBuildContext(mode="team.plan", role="teammate")
+    code_team_leader = SwarmBuildContext(mode="code.team", role="leader")
+
+    rail = RailSpec(type=registry.TEAM_PLAN_APPROVAL).build(
+        language="cn",
+        context=plan_leader,
+    )
+
+    from jiuwenswarm.agents.harness.code.rails import PlanApprovalInterruptRail
+
+    assert isinstance(rail, PlanApprovalInterruptRail)
+    assert RailSpec(type=registry.TEAM_PLAN_APPROVAL).build(
+        language="cn",
+        context=plan_teammate,
+    ) is None
+    assert RailSpec(type=registry.TEAM_PLAN_APPROVAL).build(
+        language="cn",
+        context=code_team_leader,
+    ) is None
+
+
+@pytest.mark.asyncio
+async def test_team_plan_approval_reuses_code_plan_copy(
+    tmp_path: Path,
+) -> None:
+    """team.plan reuses the same raw approval copy as code.plan."""
+    register_swarm_providers()
+    plan_leader = SwarmBuildContext(mode="team.plan", role="leader")
+    rail = RailSpec(type=registry.TEAM_PLAN_APPROVAL).build(
+        language="cn",
+        context=plan_leader,
+    )
+    plan_file = tmp_path / "team-plan.md"
+    plan_file.write_text("## 团队计划\n\n- T1", encoding="utf-8")
+    rail.init(
+        SimpleNamespace(
+            system_prompt_builder=SimpleNamespace(language="cn"),
+            get_plan_file_path=lambda _session: plan_file,
+        )
+    )
+
+    decision = await rail.resolve_interrupt(
+        SimpleNamespace(session=SimpleNamespace(), extra={}),
+        SimpleNamespace(name="exit_plan_mode", arguments="{}"),
+        None,
+    )
+    message = decision.request.message
+
+    assert "**计划审批**" in message
+    assert "Agent 已完成计划制定，等待你审批：" in message
+    assert "## 团队计划" in message
+    assert "请选择：" in message
+    assert "- **批准**" in message
+    assert "- **拒绝**" in message
+
+
+@pytest.mark.asyncio
+async def test_code_plan_approval_still_contains_inline_choices(tmp_path: Path) -> None:
+    """The original code.plan rail copy stays unchanged."""
+    from jiuwenswarm.agents.harness.code.rails import PlanApprovalInterruptRail
+
+    plan_file = tmp_path / "code-plan.md"
+    plan_file.write_text("## 计划\n\n- T1", encoding="utf-8")
+    rail = PlanApprovalInterruptRail()
+    rail.init(
+        SimpleNamespace(
+            system_prompt_builder=SimpleNamespace(language="cn"),
+            get_plan_file_path=lambda _session: plan_file,
+        )
+    )
+    decision = await rail.resolve_interrupt(
+        SimpleNamespace(session=SimpleNamespace(), extra={}),
+        SimpleNamespace(name="exit_plan_mode", arguments="{}"),
+        None,
+    )
+    message = decision.request.message
+
+    assert "请选择：" in message
+    assert "- **批准**" in message
+    assert "- **拒绝**" in message
+
+
+def test_team_plan_leader_code_agent_mode_has_team_exit_notification(monkeypatch) -> None:
+    """Approved team plans should resume the Leader into team execution semantics."""
+    from jiuwenswarm.server.runtime.agent_adapter.interface_code import (
+        _ENTER_PLAN_MODE_INSTRUCTIONS_EN,
+        _PLAN_MODE_SYSTEM_NOTE,
+    )
+
+    plan_leader = SwarmBuildContext(mode="team.plan", role="leader")
+    code_team_leader = SwarmBuildContext(mode="code.team", role="leader")
+    captured_configs: list[dict[str, object]] = []
+
+    class FakeCodeAgentModeRail:
+        def __init__(
+            self,
+            *,
+            allowed_tools,
+            plan_mode_system_note,
+            enter_plan_instructions,
+            exit_plan_notification,
+        ):
+            captured_configs.append(
+                {
+                    "allowed_tools": allowed_tools,
+                    "plan_mode_system_note": plan_mode_system_note,
+                    "enter_plan_instructions": enter_plan_instructions,
+                    "exit_plan_notification": exit_plan_notification,
+                }
+            )
+
+    monkeypatch.setattr(
+        "jiuwenswarm.agents.harness.code.rails.code_agent_mode_rail.CodeAgentModeRail",
+        FakeCodeAgentModeRail,
+    )
+    code_rails.build_code_agent_mode({}, plan_leader)
+    code_rails.build_code_agent_mode({}, code_team_leader)
+
+    team_config, code_config = captured_configs
+    assert team_config["plan_mode_system_note"] == _PLAN_MODE_SYSTEM_NOTE
+    assert team_config["enter_plan_instructions"] == _ENTER_PLAN_MODE_INSTRUCTIONS_EN
+    assert "Team Leader" in team_config["exit_plan_notification"]
+    assert "build_team" in team_config["exit_plan_notification"]
+    assert code_config["plan_mode_system_note"] == _PLAN_MODE_SYSTEM_NOTE
+    assert code_config["enter_plan_instructions"] == _ENTER_PLAN_MODE_INSTRUCTIONS_EN
+    assert code_config["exit_plan_notification"] is None
+    assert "ask_user" in team_config["allowed_tools"]
+    assert "ask_user" in code_config["allowed_tools"]
+
+
+def test_team_plan_leader_structured_ask_user_provider_builds() -> None:
+    """team.plan leader keeps code-mode structured ask_user clarification."""
+    register_swarm_providers()
+    plan_leader = SwarmBuildContext(mode="team.plan", role="leader")
+    code_team_leader = SwarmBuildContext(mode="code.team", role="leader")
+
+    assert type(
+        RailSpec(type=registry.STRUCTURED_ASK_USER).build(
+            language="cn",
+            context=plan_leader,
+        )
+    ).__name__ == "StructuredAskUserRail"
+    assert type(
+        RailSpec(type=registry.STRUCTURED_ASK_USER).build(
+            language="cn",
+            context=code_team_leader,
+        )
+    ).__name__ == "StructuredAskUserRail"
+
+
+@pytest.mark.asyncio
+async def test_team_plan_leader_permission_rail_skips_exit_plan_mode(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Plan approval owns exit_plan_mode; permission rail still checks other tools."""
+    from jiuwenswarm.agents.harness.common.rails.interrupt import interrupt_helpers
+
+    calls: list[str] = []
+    created: list[object] = []
+
+    class FakePermissionRail:
+        priority = 90
+
+        def get_callbacks(self) -> dict[AgentCallbackEvent, object]:
+            return {AgentCallbackEvent.BEFORE_TOOL_CALL: self.before_tool_call}
+
+        async def before_tool_call(self, ctx: object) -> None:
+            calls.append(ctx.inputs.tool_name)
+
+    def fake_build_permission_rail(**_kwargs: object) -> FakePermissionRail:
+        rail = FakePermissionRail()
+        created.append(rail)
+        return rail
+
+    monkeypatch.setattr(interrupt_helpers, "build_permission_rail", fake_build_permission_rail)
+
+    plan_rail = code_rails.build_permission_interrupt(
+        {"permissions_config": {"enabled": True}, "model_name": "gpt-4"},
+        SwarmBuildContext(mode="team.plan", role="leader"),
+    )
+    code_rail = code_rails.build_permission_interrupt(
+        {"permissions_config": {"enabled": True}, "model_name": "gpt-4"},
+        SwarmBuildContext(mode="code.team", role="leader"),
+    )
+
+    assert plan_rail is not created[0]
+    assert code_rail is created[1]
+    assert plan_rail.get_callbacks()[AgentCallbackEvent.BEFORE_TOOL_CALL] == plan_rail.before_tool_call
+
+    await plan_rail.before_tool_call(types.SimpleNamespace(inputs=types.SimpleNamespace(tool_name="exit_plan_mode")))
+    await plan_rail.before_tool_call(types.SimpleNamespace(inputs=types.SimpleNamespace(tool_name="bash")))
+
+    assert calls == ["bash"]
+
+
 def test_code_extra_tools_gated_by_config() -> None:
     """The code-exclusive tool provider only builds when ``acp_agents`` is configured."""
     register_swarm_providers()
@@ -794,6 +1629,86 @@ def test_code_extra_tools_gated_by_config() -> None:
 
     assert tools.build_code_extra_tools({}, disabled) == []
     assert isinstance(tools.build_code_extra_tools({}, enabled), list)
+
+
+def test_code_coding_memory_provider_mounts_workspace_node(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The declarative coding-memory provider must also mount the workspace node."""
+    register_swarm_providers()
+
+    import jiuwenswarm.server.runtime.agent_adapter.interface_code as interface_code
+
+    project_dir = tmp_path / "project"
+    workspace_root = tmp_path / "member-workspace"
+    project_dir.mkdir()
+    workspace_root.mkdir()
+
+    created: dict[str, Any] = {}
+    rail = object()
+
+    def _fake_create_coding_memory_rail(
+        *,
+        project_dir: str | None,
+        agent_workspace_dir: str,
+        config: dict[str, Any] | None,
+    ) -> object:
+        created["project_dir"] = project_dir
+        created["agent_workspace_dir"] = agent_workspace_dir
+        created["config"] = config
+        return rail
+
+    monkeypatch.setattr(
+        interface_code,
+        "create_coding_memory_rail",
+        _fake_create_coding_memory_rail,
+    )
+
+    class Workspace:
+        def __init__(self, root_path: Path) -> None:
+            self.root_path = str(root_path)
+            self.directories: list[dict[str, Any]] = []
+
+        def set_directory(self, directory: dict[str, Any]) -> None:
+            self.directories.append(directory)
+
+    workspace = Workspace(workspace_root)
+    ctx = SwarmBuildContext(
+        mode="code.team",
+        project_dir=str(project_dir),
+        workspace=workspace,
+        config={},
+    )
+
+    built = code_rails.build_code_coding_memory({"embed_config": {}}, ctx)
+
+    assert built is rail
+    assert ctx.extras[code_rails.CODING_MEMORY_EXTRAS_KEY] is rail
+    assert created == {
+        "project_dir": str(project_dir),
+        "agent_workspace_dir": str(workspace_root),
+        "config": {"embed": {}},
+    }
+    assert workspace.directories == [
+        {
+            "name": "coding_memory",
+            "description": "Coding Agent memory",
+            "path": resolve_project_coding_memory_workspace_path(
+                project_dir=str(project_dir),
+            ),
+            "children": [
+                {
+                    "name": "MEMORY.md",
+                    "description": "Coding 记忆索引",
+                    "path": "MEMORY.md",
+                    "children": [],
+                    "is_file": True,
+                    "default_content": "",
+                }
+            ],
+        }
+    ]
 
 
 def test_code_member_builds_declaratively_without_post_processing(
@@ -809,10 +1724,14 @@ def test_code_member_builds_declaratively_without_post_processing(
     """
     register_swarm_providers()
     config = get_config()
-    model_client_config, _, _ = resolve_model_config(config)
     base = DeepAgentSpec(
         model=TeamModelConfig(
-            model_client_config=ModelClientConfig(**model_client_config)
+            model_client_config=ModelClientConfig(
+                client_provider="OpenAI",
+                api_key="test-key",
+                api_base="https://example.test/v1",
+                verify_ssl=False,
+            )
         ),
         workspace=WorkspaceSpec(root_path=str(tmp_path), language="en"),
     )
@@ -847,7 +1766,7 @@ def test_code_member_builds_declaratively_without_post_processing(
     rails = list(getattr(agent, "_pending_rails", [])) + list(
         getattr(agent, "_registered_rails", [])
     )
-    rail_types = {type(rail).__name__ for rail in rails}
+    rail_types = {rail.__class__.__name__ for rail in rails}
 
     # Zero post-processing: the legacy code customizer is never invoked.
     assert post_processing_calls == []
@@ -856,13 +1775,38 @@ def test_code_member_builds_declaratively_without_post_processing(
         "CodeTaskPlanningRail",
         "CodeAgentModeRail",
         "StructuredAskUserRail",
-        "WorktreeRail",
     ):
         assert expected in rail_types, (expected, sorted(rail_types))
+    assert "WorktreeRail" not in rail_types
     # The code system prompt is set declaratively on the spec.
     assert agent.deep_config.system_prompt
     # CodingMemoryRail is published for the code_agent sub-agent to reuse.
     assert ctx.extras.get(code_rails.CODING_MEMORY_EXTRAS_KEY) is not None
+    coding_memory_dir = resolve_project_coding_memory_dir(
+        agent_workspace_dir=str(tmp_path),
+        project_dir=str(tmp_path),
+    )
+    coding_memory_workspace_path = resolve_project_coding_memory_workspace_path(
+        project_dir=str(tmp_path),
+    )
+    coding_memory_node = next(
+        node
+        for node in agent.deep_config.workspace.directories
+        if node.get("name") == "coding_memory"
+    )
+    assert coding_memory_node["path"] == coding_memory_workspace_path
+    assert Path(coding_memory_node["path"]).is_absolute() is False
+    assert Path(coding_memory_dir).is_dir()
+    assert coding_memory_node["children"] == [
+        {
+            "name": "MEMORY.md",
+            "description": "Coding 记忆索引",
+            "path": "MEMORY.md",
+            "children": [],
+            "is_file": True,
+            "default_content": "",
+        }
+    ]
     logger.info("code member declarative build rail types: %s", sorted(rail_types))
 
 
@@ -1026,7 +1970,7 @@ def test_rebuilt_member_spec_keeps_provider_declarations() -> None:
     rail_types = {rail.type for rail in teammate.rails}
     assert registry.CODE_TASK_PLANNING in rail_types
     assert registry.CODE_AGENT_MODE in rail_types
-    assert registry.CODE_WORKTREE in rail_types
+    assert registry.CODE_WORKTREE not in rail_types
     # The code runtime prompt replaces the chat-team common runtime prompt.
     assert registry.CODE_RUNTIME_PROMPT in rail_types
     assert registry.RUNTIME_PROMPT not in rail_types
@@ -1063,3 +2007,169 @@ def test_swarm_assembly_hint_from_seed_and_legacy() -> None:
     assert rmb._swarm_assembly_hint(legacy) == {}
     # Defensive: a team agent without a spec yields no hint.
     assert rmb._swarm_assembly_hint(types.SimpleNamespace()) == {}
+
+
+# ---------------------------------------------------------------------------
+# Browser isolation (feat/team-browser-isolation)
+# ---------------------------------------------------------------------------
+
+from jiuwenswarm.agents.swarm.providers.code_subagents import (
+    _browser_key,
+    _PARENT_MODEL_EXTRAS_KEY,
+    build_swarm_browser_agent,
+    SWARM_BROWSER_AGENT,
+)
+
+
+def test_browser_key_derivation() -> None:
+    """_browser_key composes session+member into a unique, stable key."""
+    # Normal: session_id + member_name → "sess-alice"
+    assert _browser_key("sess", "alice", "teammate") == "sess-alice"
+    # Leader also keyed by member_name, not role
+    assert _browser_key("sess", "leader", "leader") == "sess-leader"
+    # Different sessions never collide on the same member_name
+    assert _browser_key("s1", "alice", "teammate") != _browser_key("s2", "alice", "teammate")
+    # Different member_names in same session are distinct
+    assert _browser_key("sess", "alice", "teammate") != _browser_key("sess", "bob", "teammate")
+    # Empty member_name falls back to role
+    assert _browser_key("sess", "", "leader") == "sess-leader"
+    # Both empty → empty (preserves shared-browser legacy behaviour)
+    assert _browser_key("", "", "") == ""
+    # No session → just the discriminator
+    assert _browser_key("", "alice", "teammate") == "alice"
+
+
+def test_browser_subagent_spec_included_when_enabled() -> None:
+    """browser_agent SubAgentSpec uses SWARM_BROWSER_AGENT factory when enabled."""
+    register_swarm_providers()
+    config = {"react": {"subagents": {"browser_agent": {"enabled": True}}}}
+    subs = build_member_subagent_specs(config, "code.team", "leader")
+    factory_names = [s.factory_name for s in subs]
+    assert SWARM_BROWSER_AGENT in factory_names
+
+
+def test_browser_subagent_spec_excluded_when_disabled() -> None:
+    """browser_agent is absent from SubAgentSpecs when disabled or absent."""
+    register_swarm_providers()
+    subs_disabled = build_member_subagent_specs(
+        {"react": {"subagents": {"browser_agent": {"enabled": False}}}},
+        "code.team",
+        "leader",
+    )
+    subs_absent = build_member_subagent_specs({}, "code.team", "leader")
+    for subs in (subs_disabled, subs_absent):
+        assert all(s.factory_name != SWARM_BROWSER_AGENT for s in subs)
+
+
+def test_browser_subagent_provider_skips_without_model(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """build_swarm_browser_agent returns None when no parent model is on the context."""
+    register_swarm_providers()
+    ctx = SwarmBuildContext(
+        mode="code.team",
+        role="leader",
+        member_name="leader",
+        session_id="s",
+        config={},
+    )
+    # No _parent_model in ctx.extras → provider must short-circuit to None.
+    result = build_swarm_browser_agent({}, ctx)
+    assert result is None
+
+
+def test_browser_subagent_provider_passes_correct_browser_key(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """build_swarm_browser_agent passes the per-member browser_key to agent-core."""
+    from unittest.mock import MagicMock, call
+    from jiuwenswarm.agents.swarm.providers import code_subagents as _cs
+
+    captured: list[dict] = []
+
+    def _fake_build(*args, **kwargs):
+        captured.append(kwargs)
+        spec = MagicMock()
+        spec.factory_kwargs = {}
+        return spec
+
+    monkeypatch.setattr(_cs, "build_browser_agent_config", _fake_build)
+
+    fake_model = object()
+    ctx = SwarmBuildContext(
+        mode="code.team",
+        role="teammate",
+        member_name="browser-usd-sgd",
+        session_id="sess42",
+        config={},
+    )
+    ctx.extras[_PARENT_MODEL_EXTRAS_KEY] = fake_model
+
+    result = build_swarm_browser_agent({}, ctx)
+
+    assert result is not None
+    assert len(captured) == 1
+    assert captured[0]["browser_key"] == "sess42-browser-usd-sgd"
+
+
+def test_browser_subagent_teammates_get_distinct_keys(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Two teammates in the same session never share a browser_key."""
+    from unittest.mock import MagicMock
+    from jiuwenswarm.agents.swarm.providers import code_subagents as _cs
+
+    keys: list[str] = []
+
+    def _fake_build(*args, **kwargs):
+        keys.append(kwargs.get("browser_key", ""))
+        spec = MagicMock()
+        spec.factory_kwargs = {}
+        return spec
+
+    monkeypatch.setattr(_cs, "build_browser_agent_config", _fake_build)
+    fake_model = object()
+
+    for name in ("browser-usd-sgd", "browser-eur-usd"):
+        ctx = SwarmBuildContext(
+            mode="code.team",
+            role="teammate",
+            member_name=name,
+            session_id="sess42",
+            config={},
+        )
+        ctx.extras[_PARENT_MODEL_EXTRAS_KEY] = fake_model
+        build_swarm_browser_agent({}, ctx)
+
+    assert len(keys) == 2
+    assert keys[0] != keys[1], "Teammates must not share a browser_key"
+
+
+def test_team_mode_deep_spec_replaces_shared_browser_agent() -> None:
+    """shared browser_agent is replaced by SWARM_BROWSER_AGENT for each member."""
+    register_swarm_providers()
+    from openjiuwen.agent_teams.schema.deep_agent_spec import SubAgentSpec
+    from openjiuwen.core.single_agent import AgentCard
+
+    shared_browser = SubAgentSpec(
+        agent_card=AgentCard(name="browser_agent"),
+        system_prompt="",
+        subagent_type="browser_agent",
+    )
+    base = DeepAgentSpec(
+        subagents=[shared_browser],
+        workspace=WorkspaceSpec(root_path="/tmp/ws"),
+    )
+    config = {"react": {"subagents": {"browser_agent": {"enabled": True}}}}
+    spec = build_member_deep_agent_spec(config, "team", "leader", base)
+
+    # The shared entry must be gone and exactly one SWARM_BROWSER_AGENT present.
+    subagent_factories = [
+        getattr(s, "factory_name", None) for s in (spec.subagents or [])
+    ]
+    shared_entries = []
+    for s in (spec.subagents or []):
+        if getattr(s, "factory_name", None) is None and getattr(s, "subagent_type", None) == "browser_agent":
+            shared_entries.append(s)
+    assert not shared_entries, "shared playwright_official_stdio entry must be removed"
+    assert subagent_factories.count(SWARM_BROWSER_AGENT) == 1

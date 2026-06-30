@@ -6,7 +6,6 @@ const CODE_MODES = new Set(["code.normal", "code.team", "code.plan"]);
 export function createPlanCommand(): SlashCommand {
   return {
     name: "plan",
-
     description: "Switch to plan mode, or send a planning request",
     usage: "/plan [open|<description>]",
     example: "/plan outline the migration steps",
@@ -30,6 +29,7 @@ export function createPlanCommand(): SlashCommand {
       if (ctx.mode !== target) {
         ctx.setMode(target);
       }
+      ctx.markPlanEntryFromSlashCommand?.();
 
       if (!value) {
         ctx.addItem(addInfo(ctx.sessionId, "Plan mode enabled", "p"));

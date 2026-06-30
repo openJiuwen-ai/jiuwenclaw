@@ -2,7 +2,7 @@
 
 """System tests for jiuwenswarm-init command.
 
-These tests verify the initialization process of the JiuwenClaw workspace,
+These tests verify the initialization process of the JiuwenSwarm workspace,
 including directory creation, file copying, and configuration generation.
 
 Note: Tests that call prepare_workspace() directly are skipped because that

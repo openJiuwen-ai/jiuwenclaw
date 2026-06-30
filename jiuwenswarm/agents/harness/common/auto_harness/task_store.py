@@ -13,7 +13,19 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
-from .scheduler import _determine_pipeline_status_from_log
+from .run_log_status import (
+    META_EVOLVE_STAGE_ORDER,
+    ProgressEnricher,
+    STAGE_DISPLAY_NAMES,
+    SkippedStageInferer,
+    TERMINAL_STATUSES,
+    determine_pipeline_status_from_log,
+    has_terminal_session_event,
+    read_key_events_reverse,
+    resolve_latest_task_log_path,
+    summarize_progress_from_logs,
+    summarize_progress_from_key_events,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -45,6 +57,8 @@ class TaskStore:
         self._runs_dir = data_dir / "runs"
         self._tasks_cache: Optional[dict[str, Any]] = None
         self._save_lock: asyncio.Lock = asyncio.Lock()
+        self._skipped_stage_inferers: list[SkippedStageInferer] = []
+        self._progress_enrichers: list[ProgressEnricher] = []
         self._ensure_dirs()
 
     def _ensure_dirs(self) -> None:
@@ -108,6 +122,88 @@ class TaskStore:
         """List all tasks — reads from in-memory cache (zero I/O)."""
         data = self._load_tasks()
         return data.get("tasks", [])
+
+    def register_run_log_status_extension(
+        self,
+        *,
+        skipped_stage_inferer: SkippedStageInferer | None = None,
+        progress_enricher: ProgressEnricher | None = None,
+    ) -> None:
+        """Register optional run-log status extensions for specialized capabilities."""
+        if skipped_stage_inferer is not None and skipped_stage_inferer not in self._skipped_stage_inferers:
+            self._skipped_stage_inferers.append(skipped_stage_inferer)
+        if progress_enricher is not None and progress_enricher not in self._progress_enrichers:
+            self._progress_enrichers.append(progress_enricher)
+
+    def summarize_progress_from_logs(self, logs: Optional[list[dict[str, Any]]] = None) -> dict[str, Any]:
+        """Summarize stage progress from structured harness logs."""
+        if logs is None:
+            logs = []
+        return summarize_progress_from_logs(
+            logs,
+            skipped_stage_inferers=self._skipped_stage_inferers,
+            progress_enrichers=self._progress_enrichers,
+        )
+
+    def determine_pipeline_status_from_log(self, log_path: Path) -> dict[str, Any]:
+        """Determine pipeline status with registered run-log extensions."""
+        return determine_pipeline_status_from_log(
+            log_path,
+            skipped_stage_inferers=self._skipped_stage_inferers,
+        )
+
+    async def summarize_task_progress(self, task: dict[str, Any]) -> dict[str, Any]:
+        """Read the latest task log and return a compact progress summary.
+
+        对所有任务（含终态）都读取日志获取阶段数据。
+        终态任务读取完整日志（以运行 enrichers 提取 PR URL 等），
+        运行中任务反向读取关键事件以提升性能。
+        """
+        log_path = resolve_latest_task_log_path(task, self._runs_dir)
+        if not log_path:
+            return {
+                "summary": "暂无执行日志",
+                "stages": [
+                    {
+                        "stage": stage,
+                        "name": STAGE_DISPLAY_NAMES.get(stage, stage),
+                        "status": "pending",
+                        "messages": [],
+                    }
+                    for stage in META_EVOLVE_STAGE_ORDER
+                ],
+                "completed_stages": [],
+                "current_stage": "",
+                "failed_stage": "",
+            }
+
+        task_status = str(task.get("status") or "")
+        if task_status in TERMINAL_STATUSES:
+            # 终态任务：读取完整日志以运行 enrichers（如提取 PR URL）
+            logs = await asyncio.to_thread(self.read_log, log_path, 0, -1)
+            progress = self.summarize_progress_from_logs(logs)
+        else:
+            # 运行中任务：反向读取关键事件
+            key_events = await asyncio.to_thread(read_key_events_reverse, log_path, 20)
+            if key_events:
+                progress = summarize_progress_from_key_events(key_events)
+            else:
+                # 关键事件为空，读取完整日志
+                logs = await asyncio.to_thread(self.read_log, log_path, 0, -1)
+                progress = self.summarize_progress_from_logs(logs)
+
+        progress["log_path"] = str(log_path)
+        return progress
+
+    async def enrich_task_with_progress(self, task: dict[str, Any]) -> dict[str, Any]:
+        """Return a shallow task copy with latest progress attached."""
+        enriched = dict(task)
+        enriched["progress"] = await self.summarize_task_progress(task)
+        return enriched
+
+    async def enrich_tasks_with_progress(self, tasks: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Attach progress summaries to a list of tasks."""
+        return [await self.enrich_task_with_progress(task) for task in tasks]
 
     def list_pending_tasks(self) -> list[dict[str, Any]]:
         """List tasks with status 'pending' that are due for execution."""
@@ -349,12 +445,12 @@ class TaskStore:
         return {"error": f"未知的 log_type: {log_type}"}
 
     def has_legacy_completed_tasks(self) -> bool:
-        """Check if any task still has the blanket "completed" status (pre-migration)."""
+        """Check if any task may need log-based status reconciliation."""
         data = self._load_tasks()
-        return any(t.get("status") == "completed" for t in data.get("tasks", []))
+        return any(t.get("status") in {"completed", "running"} for t in data.get("tasks", []))
 
     async def reconcile_task_statuses(self) -> int:
-        """Re-check completed tasks against their logs and fix stale status values."""
+        """Re-check task logs and fix stale status values."""
         data = self._load_tasks()
         corrected = 0
 
@@ -362,27 +458,34 @@ class TaskStore:
             task_id = task.get("task_id")
             old_status = task.get("status")
 
-            if old_status not in ("completed", "success", "failed"):
+            if old_status not in ("completed", "success", "failed", "running"):
                 continue
 
             history = task.get("execution_history", [])
-            if not history:
+            latest = history[-1] if history else None
+            current_execution_id = str(task.get("current_execution_id") or "")
+            log_path = resolve_latest_task_log_path(task, self._runs_dir)
+            if log_path is None:
                 continue
 
-            latest = history[-1]
-            log_path_str = latest.get("log_path", "")
-            if not log_path_str:
+            if old_status == "running" and not has_terminal_session_event(log_path):
                 continue
 
-            log_path = Path(log_path_str)
-            if not log_path.exists():
-                continue
-
-            result = _determine_pipeline_status_from_log(log_path)
+            result = self.determine_pipeline_status_from_log(log_path)
             new_status = "failed" if result["failed"] else "success"
 
             if new_status != old_status:
                 task["status"] = new_status
+                task["current_execution_id"] = None
+                if latest is None or latest.get("execution_id") != current_execution_id:
+                    latest = {
+                        "execution_id": current_execution_id,
+                        "started_at": task.get("created_at"),
+                        "completed_at": datetime.now(timezone.utc).isoformat(),
+                        "log_path": str(log_path),
+                    }
+                    history.append(latest)
+                    task["execution_history"] = history
                 latest["status"] = new_status
                 if result["error"]:
                     latest["error"] = result["error"]

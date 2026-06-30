@@ -123,7 +123,7 @@ function showUsage(ctx: import("../types.js").CommandContext, summary: SessionUs
 export function createStatusCommand(): SlashCommand {
   return {
     name: "status",
-    description: "Show jiuwenclaw status (overview, usage, config)",
+    description: "Show jiuwenswarm status (overview, usage, config)",
     usage: "/status [overview|usage|config]",
     example: "/status",
     kind: CommandKind.BUILT_IN,

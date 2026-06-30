@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import shutil
 import subprocess
@@ -18,6 +19,8 @@ from urllib.error import URLError
 from urllib.request import urlopen
 
 from playwright_runtime.profiles import BrowserProfile
+
+logger = logging.getLogger(__name__)
 
 
 def _default_chrome_user_data_dir() -> str:
@@ -101,8 +104,10 @@ def _cleanup_chrome_singleton_files(user_data_dir: str) -> None:
         try:
             if target.is_symlink() or target.exists():
                 target.unlink(missing_ok=True)
-        except OSError:
-            pass
+        except OSError as e:
+            logger.warning(
+                "Failed to remove stale Chrome singleton file %s: %s", target, e
+            )
 
 
 def _candidate_chrome_binaries() -> list[str]:
@@ -272,8 +277,15 @@ class ManagedBrowserDriver:
         try:
             process.terminate()
             process.wait(timeout=max(0.5, float(wait_timeout_s)))
-        except Exception:
+        except Exception as terminate_err:
+            logger.warning(
+                "Managed browser terminate failed (pid=%s), escalating to kill: %s",
+                getattr(process, "pid", None), terminate_err,
+            )
             try:
                 process.kill()
-            except Exception:
-                pass
+            except Exception as kill_err:
+                logger.error(
+                    "Managed browser kill failed (pid=%s); process may be leaked: %s",
+                    getattr(process, "pid", None), kill_err,
+                )

@@ -1,7 +1,7 @@
 {
   "name": "jiuwenswarm-tui",
   "version": "0.1.0",
-  "description": "Terminal CLI for JiuwenClaw",
+  "description": "Terminal CLI for JiuwenSwarm",
   "bin": {
     "jiuwenswarm-tui": "dist/index.js"
   },

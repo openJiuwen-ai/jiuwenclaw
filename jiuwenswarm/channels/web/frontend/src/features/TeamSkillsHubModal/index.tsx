@@ -229,9 +229,8 @@ export function TeamSkillsHubModal({
           throw new Error(data.detail || t("skills.teamskillshub.errors.installFailed"));
         }
         const skillName = data.skill?.name || item.name;
-        const displayName = item.display_name || skillName;
         setInstalledNames((prev) => new Set([...prev, skillName]));
-        showMessage("success", t("skills.teamskillshub.messages.installed", { name: displayName }));
+        showMessage("success", t("skills.teamskillshub.messages.installed", { name: skillName }));
         await onInstalled?.(skillName);
       } catch (error) {
         console.error(error);
@@ -278,7 +277,7 @@ export function TeamSkillsHubModal({
           )}
 
           {loadState === "loading" && (
-            <div className="text-sm text-text-muted">{t("common.loading")}</div>
+            <div className="flex items-center justify-center h-full text-text-muted">{t("common.loading")}</div>
           )}
           {loadState === "error" && (
             <div className="text-sm text-text-muted">{t("skills.teamskillshub.errors.searchFailed")}</div>
@@ -292,7 +291,7 @@ export function TeamSkillsHubModal({
                     const isInstalled =
                       installedNames.has(item.name) || (installedSkillNames?.has(item.name) ?? false);
                     const isInstalling = installingAssetId === item.asset_id;
-                    const avatar = getSkillAvatar(item.display_name || item.name);
+                    const avatar = getSkillAvatar(item.name);
                     return (
                       <div
                         key={item.asset_id}
@@ -307,7 +306,7 @@ export function TeamSkillsHubModal({
                               </div>
                               <div className="min-w-0 flex-1">
                                 <div className="text-base font-semibold text-text-strong truncate">
-                                  {item.display_name || item.name}
+                                  {item.name}
                                 </div>
                                 <div className="text-sm text-text-muted mt-1 line-clamp-3">
                                   {item.summary || t("skills.noDescription")}
@@ -324,7 +323,7 @@ export function TeamSkillsHubModal({
                                   type="button"
                                   onClick={() => void handleInstall(item)}
                                   disabled={isInstalling}
-                                  className={`w-[76px] h-[28px] rounded-[24px] text-sm text-[#191919] border border-[#191919] hover:bg-secondary/50 transition-colors whitespace-nowrap ${
+                                  className={`min-w-[76px] h-[28px] px-3 rounded-[24px] text-sm text-[#191919] border border-[#191919] hover:bg-secondary/50 transition-colors whitespace-nowrap ${
                                     isInstalling
                                       ? "text-text-muted cursor-not-allowed"
                                       : "text-text"
@@ -345,7 +344,7 @@ export function TeamSkillsHubModal({
                               </div>
                               <div className="min-w-0 flex-1">
                                 <div className="text-sm font-semibold text-text-strong truncate">
-                                  {item.display_name || item.name}
+                                  {item.name}
                                 </div>
                                 <div className="text-xs text-text-muted mt-1 line-clamp-2">
                                   {item.summary || t("skills.noDescription")}
@@ -370,7 +369,7 @@ export function TeamSkillsHubModal({
                                     type="button"
                                     onClick={() => void handleInstall(item)}
                                     disabled={isInstalling}
-                                    className={`w-[76px] h-[28px] rounded-[24px] text-sm text-[#191919] border border-[#191919] hover:bg-secondary/50 transition-colors whitespace-nowrap ${
+                                    className={`min-w-[76px] h-[28px] px-3 rounded-[24px] text-sm text-[#191919] border border-[#191919] hover:bg-secondary/50 transition-colors whitespace-nowrap ${
                                       isInstalling
                                         ? "text-text-muted cursor-not-allowed"
                                         : "text-text"
@@ -485,7 +484,7 @@ export function TeamSkillsHubModal({
                     const isInstalled =
                       installedNames.has(item.name) || (installedSkillNames?.has(item.name) ?? false);
                     const isInstalling = installingAssetId === item.asset_id;
-                    const avatar = getSkillAvatar(item.display_name || item.name);
+                    const avatar = getSkillAvatar(item.name);
                     return (
                       <div
                         key={item.asset_id}
@@ -497,7 +496,7 @@ export function TeamSkillsHubModal({
                           </div>
                           <div className="min-w-0 flex-1">
                             <div className="text-base font-semibold text-text-strong truncate">
-                              {item.display_name || item.name}
+                              {item.name}
                             </div>
                             <div className="text-sm text-text-muted mt-1 line-clamp-3">
                               {item.summary || t("skills.noDescription")}
@@ -517,7 +516,7 @@ export function TeamSkillsHubModal({
                                 type="button"
                                 onClick={() => void handleInstall(item)}
                                 disabled={isInstalling}
-                                className={`w-[76px] h-[28px] rounded-[24px] text-sm text-[#191919] border border-[#191919] hover:bg-secondary/50 transition-colors whitespace-nowrap ${
+                                className={`min-w-[76px] h-[28px] px-3 rounded-[24px] text-sm text-[#191919] border border-[#191919] hover:bg-secondary/50 transition-colors whitespace-nowrap ${
                                   isInstalling
                                     ? "text-text-muted cursor-not-allowed"
                                     : "text-text"

@@ -54,7 +54,7 @@ def main() -> None:
 
     parser = argparse.ArgumentParser(
         prog="jiuwenswarm-app",
-        description="Start JiuWenClaw AgentServer + Gateway (split layout, one command).",
+        description="Start JiuWenSwarm AgentServer + Gateway (split layout, one command).",
     )
     parser.add_argument(
         "--dotenv",

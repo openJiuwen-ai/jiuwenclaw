@@ -1,6 +1,6 @@
 # OpenJiuwen Web Frontend
 
-AI coding assistant web UI built with React + TypeScript + Tailwind CSS, with design inspired by JiuwenClaw.
+AI coding assistant web UI built with React + TypeScript + Tailwind CSS, with design inspired by JiuwenSwarm.
 
 ## Features
 

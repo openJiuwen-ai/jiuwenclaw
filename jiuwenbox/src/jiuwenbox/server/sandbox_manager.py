@@ -16,7 +16,6 @@ import logging
 import os
 import textwrap
 import time
-import uuid
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -43,22 +42,47 @@ def _truncate_for_audit(text: str | None, *, limit: int = _AUDIT_OUTPUT_LIMIT) -
         return text
     return text[-limit:] + f"\n[truncated, total {len(text)} chars]"
 
+
+def _is_daemon_ipc_exec_failure(result: ExecResult) -> bool:
+    stderr = result.stderr or ""
+    if result.exit_code == 124 and "daemon IPC timeout" in stderr:
+        return True
+    return "daemon IPC channel unavailable" in stderr
+
+
+def _is_daemon_ipc_file_op_failure(result: RuntimeFileOpResult) -> bool:
+    if result.ok:
+        return False
+    return result.error in ("daemon_unavailable", "transport_failure")
+
 from jiuwenbox.logging_config import configure_logging
 from jiuwenbox.models.common import AuditEventType
 from jiuwenbox.models.policy import SecurityPolicy, TimeoutPolicy
 from jiuwenbox.models.sandbox import (
     BackgroundExecResult,
+    BackgroundJobStatus,
+    BackgroundJobSummary,
     ExecResult,
+    KillBackgroundJobResult,
     PolicyMode,
     SandboxPhase,
     SandboxRef,
     SandboxSpec,
+    generate_job_id,
+    generate_sandbox_id,
+    validate_custom_job_id,
+    validate_custom_sandbox_id,
 )
 from jiuwenbox.server.audit_logger import AuditLogger
 from jiuwenbox.server.policy_engine import PolicyEngine
 from jiuwenbox.server.policy_reader import PolicyReader
-from jiuwenbox.server.runtime.base import RuntimeAdapter, RuntimeExecRequest
-from jiuwenbox.server.runtime.process import ProcessRuntime
+from jiuwenbox.server.runtime.base import (
+    RuntimeAdapter,
+    RuntimeBackgroundExecRequest,
+    RuntimeExecRequest,
+    RuntimeFileOpResult,
+)
+from jiuwenbox.server.runtime.process import BackgroundJobNotFoundError, ProcessRuntime
 from jiuwenbox.server.workspace import JIUWENBOX_HOME
 
 configure_logging()
@@ -72,6 +96,16 @@ class SandboxExecRequest:
     env: dict[str, str] | None = None
     stdin_data: bytes | None = None
     timeout: float | None = None
+
+
+@dataclass(frozen=True)
+class SandboxBackgroundExecRequest:
+    command: list[str]
+    job_id: str | None = None
+    workdir: str | None = None
+    env: dict[str, str] | None = None
+    stdin_data: bytes | None = None
+    capture_output: bool = True
 
 
 @dataclass(frozen=True)
@@ -93,6 +127,10 @@ class SandboxStateError(Exception):
     def __init__(self, *args: object) -> None:
         super().__init__(*args)
         logger.error("%s: %s", self.__class__.__name__, str(self))
+
+
+class SandboxConflictError(Exception):
+    """Raised for expected request conflicts such as duplicate sandbox IDs."""
 
 
 class SandboxManager:
@@ -304,26 +342,6 @@ class SandboxManager:
         new_timeout: TimeoutPolicy,
     ) -> TimeoutPolicy:
         """Replace the server-level ``timeout`` policy and restart the reaper.
-
-        Atomically: stops the currently running reaper (if any), swaps in
-        ``new_timeout`` on the root policy, then starts a fresh reaper using
-        the new values. The new reaper only actually launches when
-        ``idle_timeout`` is configured (``not None``); otherwise the call
-        leaves no reaper running. Returns the resulting ``TimeoutPolicy`` so
-        callers (e.g. the PUT route) can echo back the canonical state.
-
-        This only mutates the *root* policy used by the reaper; per-sandbox
-        policies cached in ``self._policies`` are unaffected (timeout has no
-        bearing on sandbox isolation anyway).
-
-        Idempotency: if ``new_timeout`` 与当前 ``self.policy.timeout`` 字段值
-        完全一致 *且* 已有活着的 reaper task (或两者都为 ``None`` 即"禁用且
-        未运行"), 直接 no-op 返回, 不做 stop/start。 这一短路对反复调用
-        ``PUT /api/v1/timeout`` 写入同一组值的客户端 (典型场景: 每次创建
-        沙箱前都重申 idle 配置) 至关重要 —— 否则 ``stop_idle_reaper`` 要等
-        当前 reaper 从 ``stop_event.wait(timeout=check_interval)`` 这一觉
-        醒过来 (最坏 5s 兜底超时), 整个 PUT 调用会平白多出几秒延迟, 把
-        沙箱创建链路一起拖慢。
         """
         if new_timeout == self.policy.timeout:
             reaper_alive = (
@@ -504,7 +522,17 @@ class SandboxManager:
     ) -> SandboxRef:
         """Create a new sandbox."""
         async with self._lock:
-            sandbox_id = str(uuid.uuid4())[:12]
+            if spec.sandbox_id is None:
+                sandbox_id = generate_sandbox_id()
+                while sandbox_id in self._sandboxes:
+                    sandbox_id = generate_sandbox_id()
+            else:
+                validate_custom_sandbox_id(spec.sandbox_id)
+                if spec.sandbox_id in self._sandboxes:
+                    raise SandboxConflictError(
+                        f"Sandbox '{spec.sandbox_id}' already exists"
+                    )
+                sandbox_id = spec.sandbox_id
             policy = self._resolve_effective_policy(policy_data, policy_mode)
             logger.debug("Creating sandbox %s with policy %s", sandbox_id, str(policy))
             self.policy_engine.validate_policy(policy)
@@ -675,17 +703,24 @@ class SandboxManager:
         # pre-call ``EXEC_COMMAND`` was dropped: it doubled the JSONL
         # volume without adding any information not already present here.
         start = time.monotonic()
+        runtime_request = RuntimeExecRequest(
+            command=request.command,
+            workdir=request.workdir,
+            env=request.env,
+            stdin_data=request.stdin_data,
+            timeout=request.timeout,
+        )
         try:
-            result = await self.runtime.exec(
-                sandbox_id,
-                RuntimeExecRequest(
-                    command=request.command,
-                    workdir=request.workdir,
-                    env=request.env,
-                    stdin_data=request.stdin_data,
-                    timeout=request.timeout,
-                ),
-            )
+            result = await self.runtime.exec(sandbox_id, runtime_request)
+            if _is_daemon_ipc_exec_failure(result):
+                logger.warning(
+                    "Daemon IPC exec failed for sandbox %s (exit=%s), "
+                    "restarting sandbox once",
+                    sandbox_id,
+                    result.exit_code,
+                )
+                await self.restart_sandbox(sandbox_id)
+                result = await self.runtime.exec(sandbox_id, runtime_request)
         except Exception as exc:
             self.audit.log(
                 AuditEventType.EXEC_COMMAND,
@@ -713,7 +748,7 @@ class SandboxManager:
     async def exec_background_in_sandbox(
         self,
         sandbox_id: str,
-        request: SandboxExecRequest,
+        request: SandboxBackgroundExecRequest,
     ) -> BackgroundExecResult:
         async with self._lock:
             ref = self._get_sandbox(sandbox_id)
@@ -723,20 +758,28 @@ class SandboxManager:
                 )
             self._mark_active(ref)
 
-        # Background exec returns a "started yes/no + pid" envelope
-        # rather than stdout/stderr — the raw byte stream is dropped
-        # at the kernel level (runtime.log was removed). One audit row
-        # per call, post-return.
+        job_id = (
+            generate_job_id()
+            if request.job_id is None or request.job_id.strip() == ""
+            else validate_custom_job_id(request.job_id.strip())
+        )
+        existing = await self.runtime.list_background_jobs(sandbox_id)
+        if any(item.job_id == job_id for item in existing):
+            raise SandboxConflictError(
+                f"Background job '{job_id}' already exists in sandbox '{sandbox_id}'",
+            )
+
         start = time.monotonic()
         try:
             result = await self.runtime.exec_background(
                 sandbox_id,
-                RuntimeExecRequest(
+                RuntimeBackgroundExecRequest(
                     command=request.command,
+                    job_id=job_id,
                     workdir=request.workdir,
                     env=request.env,
                     stdin_data=request.stdin_data,
-                    timeout=request.timeout,
+                    capture_output=request.capture_output,
                 ),
             )
         except Exception as exc:
@@ -759,8 +802,80 @@ class SandboxManager:
             background=True,
             ok=result.started,
             started=result.started,
+            job_id=result.job_id,
             pid=result.pid,
+            running=result.running,
+            exit_code=result.exit_code,
             error=result.error_message,
+            duration_ms=int((time.monotonic() - start) * 1000),
+        )
+        return result
+
+    async def get_background_job_in_sandbox(
+        self,
+        sandbox_id: str,
+        job_id: str,
+    ) -> BackgroundJobStatus:
+        async with self._lock:
+            self._get_sandbox(sandbox_id)
+        return await self.runtime.get_background_job(sandbox_id, job_id)
+
+    async def list_background_jobs_in_sandbox(
+        self,
+        sandbox_id: str,
+        *,
+        running_only: bool = False,
+    ) -> list[BackgroundJobSummary]:
+        async with self._lock:
+            self._get_sandbox(sandbox_id)
+        return await self.runtime.list_background_jobs(
+            sandbox_id,
+            running_only=running_only,
+        )
+
+    async def kill_background_job_in_sandbox(
+        self,
+        sandbox_id: str,
+        job_id: str,
+        signal: int = 15,
+    ) -> KillBackgroundJobResult:
+        async with self._lock:
+            ref = self._get_sandbox(sandbox_id)
+            if ref.phase != SandboxPhase.READY:
+                raise SandboxStateError(
+                    f"Cannot kill background job in sandbox '{sandbox_id}': "
+                    f"state is {ref.phase.value}"
+                )
+            self._mark_active(ref)
+
+        start = time.monotonic()
+        try:
+            result = await self.runtime.kill_background_job(
+                sandbox_id,
+                job_id,
+                signum=signal,
+            )
+        except BackgroundJobNotFoundError:
+            raise
+        except Exception as exc:
+            self.audit.log(
+                AuditEventType.KILL_BACKGROUND_JOB,
+                sandbox_id,
+                job_id=job_id,
+                signal=signal,
+                killed=False,
+                reason=repr(exc),
+                duration_ms=int((time.monotonic() - start) * 1000),
+            )
+            raise
+        self.audit.log(
+            AuditEventType.KILL_BACKGROUND_JOB,
+            sandbox_id,
+            job_id=job_id,
+            signal=signal,
+            killed=result.killed,
+            reason=result.reason,
+            exit_code=result.exit_code,
             duration_ms=int((time.monotonic() - start) * 1000),
         )
         return result
@@ -934,6 +1049,14 @@ class SandboxManager:
         except Exception as exc:
             _emit_result(False, error=repr(exc), path="ipc")
             raise
+        if not result.ok and _is_daemon_ipc_file_op_failure(result):
+            logger.warning(
+                "Daemon IPC read failed for sandbox %s (%s), restarting sandbox once",
+                sandbox_id,
+                result.error,
+            )
+            await self.restart_sandbox(sandbox_id)
+            result = await self.runtime.read_file(sandbox_id, sandbox_path)
         if result.ok:
             content = result.content or b""
             _emit_result(True, size=len(content), path="ipc")

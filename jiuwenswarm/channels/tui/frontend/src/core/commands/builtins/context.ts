@@ -12,6 +12,14 @@ export interface ContextUsagePayload {
   context_occupancy: unknown;
 }
 
+function formatTokenCount(n: number | undefined): string {
+  const value = n ?? 0;
+  if (value < 1000) {
+    return value.toLocaleString("en-US");
+  }
+  return `${Number((value / 1000).toFixed(1))}k`;
+}
+
 function toLocale(n: number | undefined): string {
   return (n ?? 0).toLocaleString("en-US");
 }
@@ -38,7 +46,7 @@ function showContextUsage(
       items: [
         {
           label: "context_window",
-          value: `${toLocale(payload.total_tokens)} / ${toLocale(payload.context_window_limit)} tokens`,
+          value: `${formatTokenCount(payload.total_tokens)} / ${formatTokenCount(payload.context_window_limit)} tokens`,
         },
         { label: "occupancy", value: `${pct}%` },
         { label: "messages", value: toLocale(payload.message_count) },
@@ -51,10 +59,10 @@ function showContextUsage(
       view: "kv",
       title: "Context — Token Breakdown",
       items: [
-        { label: "system_prompt", value: toLocale(payload.system_prompt_tokens) },
-        { label: "messages", value: toLocale(payload.messages_tokens) },
-        { label: "tools", value: toLocale(payload.tools_tokens) },
-        { label: "total", value: toLocale(payload.total_tokens) },
+        { label: "system_prompt", value: formatTokenCount(payload.system_prompt_tokens) },
+        { label: "messages", value: formatTokenCount(payload.messages_tokens) },
+        { label: "tools", value: formatTokenCount(payload.tools_tokens) },
+        { label: "total", value: formatTokenCount(payload.total_tokens) },
       ],
     }),
   );
@@ -63,7 +71,7 @@ function showContextUsage(
     const occ = payload.context_occupancy as Record<string, unknown>;
     const occItems = Object.entries(occ).map(([k, v]) => ({
       label: k,
-      value: typeof v === "number" ? toLocale(v) : String(v),
+      value: typeof v === "number" ? formatTokenCount(v) : String(v),
     }));
     ctx.addItem(
       addInfo(ctx.sessionId, "DeepAgent context occupancy details", "d", {

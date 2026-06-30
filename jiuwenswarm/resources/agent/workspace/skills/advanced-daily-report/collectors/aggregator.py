@@ -9,6 +9,7 @@
 """
 
 import json
+import logging
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -131,14 +132,14 @@ class DataAggregator:
                     provider=self.email_config.get("provider", "163"),
                 )
             except Exception as e:
-                print(f"邮件采集器初始化失败: {e}")
+                logging.info(f"邮件采集器初始化失败: {e}")
 
         if self.email_collector:
             try:
                 with self.email_collector:
                     data.email = self.email_collector.get_stats(date)
             except Exception as e:
-                print(f"邮件数据采集失败: {e}")
+                logging.info(f"邮件数据采集失败: {e}")
 
         # 历史对比
         if include_comparison:
@@ -241,62 +242,3 @@ class DataAggregator:
         if self.git_collector:
             return self.git_collector.get_commits_for_pattern_analysis(days)
         return []
-
-
-def main():
-    """测试入口"""
-    import sys
-
-    if len(sys.argv) < 2:
-        print("Usage: python aggregator.py <workspace_dir> [git_repo] [email] [auth_code]")
-        sys.exit(1)
-
-    workspace_dir = sys.argv[1]
-    git_repo = sys.argv[2] if len(sys.argv) > 2 else None
-    email_config = None
-
-    if len(sys.argv) > 4:
-        email_config = {
-            "address": sys.argv[3],
-            "auth_code": sys.argv[4],
-            "provider": "163",
-        }
-
-    aggregator = DataAggregator(
-        workspace_dir=workspace_dir,
-        git_repo=git_repo,
-        email_config=email_config,
-    )
-
-    print("采集数据中...")
-    data = aggregator.collect()
-
-    print(f"\n=== 数据采集结果 ({data.date}) ===\n")
-
-    print("Git 统计:")
-    print(f"  提交次数: {data.git.total_commits}")
-    print(f"  修改文件: {data.git.total_files_changed}")
-    print(f"  代码变更: +{data.git.total_insertions}/-{data.git.total_deletions}")
-
-    print("\n邮件统计:")
-    print(f"  今日收件: {data.email.received_today}")
-    print(f"  今日发件: {data.email.sent_today}")
-    print(f"  未读邮件: {data.email.unread}")
-
-    print("\n待办统计:")
-    print(f"  总数: {data.todo.total}")
-    print(f"  已完成: {data.todo.completed}")
-    print(f"  完成率: {data.todo.completion_rate:.1%}")
-
-    print("\n记忆数据:")
-    print(f"  今日记录: {len(data.memory.work_summaries)} 条")
-
-    if data.comparison:
-        print("\n历史对比:")
-        if "yesterday" in data.comparison:
-            y = data.comparison["yesterday"]
-            print(f"  vs 昨日: 提交 {y['git_commits']['change']:+d}, 任务 {y['todo_completed']['change']:+d}")
-
-
-if __name__ == "__main__":
-    main()

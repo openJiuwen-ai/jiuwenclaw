@@ -65,16 +65,21 @@ async def test_before_tool_call_blocks_non_git_write_in_plan_mode() -> None:
     assert ctx.extra.get("_skip_tool") is True
 
 
-def test_init_patches_exit_plan_mode_invoke() -> None:
+def test_init_no_longer_patches_exit_plan_mode_invoke() -> None:
+    """After removing the pending-approval pattern, CodeAgentModeRail.init()
+    should NOT patch exit_plan_mode.invoke. The parent AgentModeRail's
+    ExitPlanModeTool handles mode restoration directly inside invoke().
+    """
     rail = CodeAgentModeRail(allowed_tools=["exit_plan_mode"])
     tool = MagicMock()
+    original_invoke = object()
+    tool.invoke = original_invoke
     tool.card.name = "exit_plan_mode"
     tool._language = "cn"
-    tool._agent_ref = MagicMock()
-    tool._agent_ref.get_plan_file_path.return_value = None
     rail._tools = [tool]
 
     agent = MagicMock()
     rail.init(agent)
 
-    assert tool.invoke is not rail._patch_exit_plan_mode_tool
+    # Verify the tool's invoke was NOT replaced
+    assert tool.invoke is original_invoke

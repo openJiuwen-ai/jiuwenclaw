@@ -1,9 +1,8 @@
 ﻿// Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 
 import { useEffect, useMemo } from 'react';
-import ReactMarkdown from 'react-markdown';
-import remarkGfm from 'remark-gfm';
 import { useA2UIActions } from '@a2ui/react';
+import { MarkdownRenderer } from '../../components/MarkdownRenderer';
 import {
   extractA2UISurfaceIds,
   namespaceA2UIMessages,
@@ -13,11 +12,14 @@ import {
 import { recordA2UIActionDefaults } from './actionDefaults';
 import { isA2UIFeatureEnabled } from './featureConfig';
 import { getA2UIRenderer } from './rendererRegistry';
+import { A2UIErrorBoundary } from './A2UIErrorBoundary';
+import { a2uiError } from './formDefaults';
 
 interface A2UIMessageContentProps {
   content: string;
   messageId: string;
   isStreaming?: boolean;
+  disableInteraction?: boolean;
   testId?: string;
 }
 
@@ -29,33 +31,26 @@ type RenderPart =
       protocolVersion: string;
       messages: Extract<A2UIContentPart, { kind: 'a2ui' }>['messages'];
       surfaceIds: string[];
+      resetKey: string;
     };
 
 function safeNamespace(input: string): string {
   return input.replace(/[^A-Za-z0-9_-]/g, '_');
 }
 
-function MarkdownPart({ text }: { text: string }) {
-  return (
-    <ReactMarkdown
-      remarkPlugins={[remarkGfm]}
-      components={{
-        a: ({ href, children, ...props }) => (
-          <a href={href} target="_blank" rel="noopener noreferrer" {...props}>
-            {children}
-          </a>
-        ),
-      }}
-    >
-      {text}
-    </ReactMarkdown>
-  );
+function stableHash(input: string): string {
+  let hash = 0;
+  for (let index = 0; index < input.length; index += 1) {
+    hash = (hash * 31 + input.charCodeAt(index)) | 0;
+  }
+  return Math.abs(hash).toString(36);
 }
 
 export function A2UIMessageContent({
   content,
   messageId,
   isStreaming = false,
+  disableInteraction = false,
   testId,
 }: A2UIMessageContentProps) {
   const { processMessages } = useA2UIActions();
@@ -63,10 +58,11 @@ export function A2UIMessageContent({
   const a2uiEnabled = isA2UIFeatureEnabled();
 
   const renderParts = useMemo<RenderPart[]>(() => {
-    return parseA2UIContent(content, {
+    const parsed = parseA2UIContent(content, {
       enabled: a2uiEnabled,
       isStreaming,
-    }).map((part, index) => {
+    });
+    return parsed.map((part, index) => {
       if (part.kind === 'text') {
         return {
           kind: 'text',
@@ -76,30 +72,97 @@ export function A2UIMessageContent({
       }
 
       const messages = namespaceA2UIMessages(part.messages, namespace);
+      const resetKey = `${namespace}:${index}:${stableHash(JSON.stringify(messages))}`;
       return {
         kind: 'a2ui',
         key: `a2ui-${index}`,
         protocolVersion: part.protocolVersion,
         messages,
         surfaceIds: extractA2UISurfaceIds(messages),
+        resetKey,
       };
     });
-  }, [a2uiEnabled, content, isStreaming, namespace]);
+  }, [a2uiEnabled, content, isStreaming, namespace, messageId]);
 
   useEffect(() => {
     for (const part of renderParts) {
       if (a2uiEnabled && part.kind === 'a2ui') {
         recordA2UIActionDefaults(part.messages);
-        processMessages(part.messages);
+
+        try {
+          processMessages(part.messages);
+        } catch (err) {
+          // Enhanced error logging with context
+          const surfaceIds = part.surfaceIds.join(', ');
+          const msgCount = part.messages.length;
+          a2uiError('[A2UI] processMessages failed:', {
+            error: err instanceof Error ? err.message : String(err),
+            protocolVersion: part.protocolVersion,
+            surfaceIds,
+            messageCount: msgCount,
+            stack: err instanceof Error ? err.stack : undefined,
+          });
+
+          // Also log the raw A2UI messages for debugging (truncated)
+          try {
+            const raw = JSON.stringify(part.messages);
+            if (raw.length > 2000) {
+              a2uiError('[A2UI] Raw A2UI payload (truncated):', raw.substring(0, 2000) + '...');
+            } else {
+              a2uiError('[A2UI] Raw A2UI payload:', part.messages);
+            }
+          } catch {
+            a2uiError('[A2UI] Could not serialize A2UI messages');
+          }
+        }
       }
     }
   }, [a2uiEnabled, processMessages, renderParts]);
+
+  // Dev-only diagnostic: log horizontal overflow containers after DOM layout
+  useEffect(() => {
+    if (!import.meta.env.DEV) return;
+
+    const rafId = window.requestAnimationFrame(() => {
+      const selectors = [
+        '.a2ui-surface .a2ui-row > section',
+        '.a2ui-surface .a2ui-list[data-direction="horizontal"] > section',
+      ];
+
+      document.querySelectorAll(selectors.join(',')).forEach((el, index) => {
+        const element = el as HTMLElement;
+        const style = getComputedStyle(element);
+        const hasOverflow = element.scrollWidth > element.clientWidth + 2;
+
+        if (hasOverflow) {
+          console.log('[A2UI-SCROLL] horizontal overflow:', {
+            index,
+            tag: element.tagName,
+            clientWidth: element.clientWidth,
+            scrollWidth: element.scrollWidth,
+            hasOverflow,
+            overflowX: style.overflowX,
+            scrollbarWidth: style.scrollbarWidth,
+            className: element.className,
+          });
+        }
+      });
+    });
+
+    return () => window.cancelAnimationFrame(rafId);
+  }, [renderParts]);
 
   return (
     <div className="chat-text a2ui-message-content" data-testid={testId}>
       {renderParts.map((part) => {
         if (part.kind === 'text') {
-          return <MarkdownPart key={part.key} text={part.text} />;
+          return (
+            <MarkdownRenderer
+              key={part.key}
+              content={part.text}
+              className="chat-markdown"
+            />
+          );
         }
 
         const Renderer = getA2UIRenderer(part.protocolVersion);
@@ -114,7 +177,18 @@ export function A2UIMessageContent({
         return (
           <div key={part.key} className="a2ui-message-content__surfaces">
             {part.surfaceIds.map((surfaceId) => (
-              <Renderer key={surfaceId} surfaceId={surfaceId} />
+              <A2UIErrorBoundary
+                key={`${surfaceId}:${part.resetKey}`}
+                resetKey={part.resetKey}
+              >
+                {disableInteraction ? (
+                  <div className="pointer-events-none opacity-75">
+                    <Renderer surfaceId={surfaceId} />
+                  </div>
+                ) : (
+                  <Renderer surfaceId={surfaceId} />
+                )}
+              </A2UIErrorBoundary>
             ))}
           </div>
         );

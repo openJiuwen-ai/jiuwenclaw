@@ -3,7 +3,7 @@ import { CommandKind, type SlashCommand } from "../types.js";
 
 type SandboxFileEntry =
   | string
-  | { path: string; permissions?: string; kind?: "file" | "directory" };
+  | { path: string; access?: string; kind?: "file" | "directory" };
 
 type SandboxRuntime = {
   enabled?: boolean;
@@ -40,12 +40,12 @@ function formatBool(value: unknown): string {
   return value === true ? "on" : "off";
 }
 
-function formatFileEntry(entry: SandboxFileEntry): string {
+function formatFileEntry(entry: SandboxFileEntry, defaultAccess?: string): string {
   if (typeof entry === "string") return entry;
   if (entry && typeof entry === "object") {
     const path = String(entry.path ?? "");
-    const perm = entry.permissions ? ` (${entry.permissions})` : "";
-    return `${path}${perm}`;
+    const access = entry.access ?? defaultAccess;
+    return access ? `${path} (${access})` : path;
   }
   return String(entry);
 }
@@ -59,33 +59,35 @@ function showRuntime(
   const excludes = rt.excluded_commands ?? [];
   const allowWrite = effective?.allow_write ?? rt.files?.allow ?? [];
   const denyWrite = effective?.deny_write ?? rt.files?.deny ?? [];
+  const items = [
+    { label: "enabled", value: formatBool(rt.enabled) },
+    {
+      label: "excluded_commands",
+      value: excludes.length ? excludes.join(", ") : "(empty)",
+    },
+    {
+      label: "files.allow_write",
+      value: allowWrite.length
+        ? allowWrite.map((e) => formatFileEntry(e, "rw")).join(", ")
+        : "(empty)",
+    },
+    {
+      label: "files.deny_write",
+      value: denyWrite.length
+        ? denyWrite.map((e) => formatFileEntry(e, "ro")).join(", ")
+        : "(empty)",
+    },
+  ];
   ctx.addItem(
     addInfo(ctx.sessionId, "Sandbox status", "s", {
       view: "kv",
       title: "Sandbox Runtime",
-      items: [
-        { label: "enabled", value: formatBool(rt.enabled) },
-        {
-          label: "excluded_commands",
-          value: excludes.length ? excludes.join(", ") : "(empty)",
-        },
-        {
-          label: "files.allow_write",
-          value: allowWrite.length ? allowWrite.map(formatFileEntry).join(", ") : "(empty)",
-        },
-        {
-          label: "files.deny_write",
-          value: denyWrite.length ? denyWrite.map(formatFileEntry).join(", ") : "(empty)",
-        },
-      ],
+      items,
     }),
   );
 }
 
 function usageText(): string {
-  // The InfoMessageComponent renderer only prepends the "· " bullet to the
-  // first physical line of the content, so we indent every subsequent line
-  // with two spaces to keep "/sandbox …" left-aligned with line 1.
   const lines = [
     "/sandbox                              show current runtime status",
     "/sandbox enable                       enter sandbox mode (spawns jiuwenbox + recreates agent)",
@@ -93,8 +95,8 @@ function usageText(): string {
     "/sandbox exclude add <pattern>        add a glob whose match runs locally instead of sandbox",
     "/sandbox exclude remove <pattern>     remove a previously added pattern",
     "/sandbox exclude list                 list current excluded_commands",
-    "/sandbox files allow <path> [perm]    allow accessing <path> in sandbox (trailing / => directory)",
-    "/sandbox files deny <path>            deny accessing <path> in sandbox",
+    "/sandbox files allow <path>           allow write access to <path> in sandbox",
+    "/sandbox files deny <path>            deny write access to <path> in sandbox (read still allowed)",
     "/sandbox files remove <path>          remove the path from both allow & deny",
     "/sandbox files list                   list configured files",
   ];
@@ -220,11 +222,15 @@ export function createSandboxCommand(): SlashCommand {
                 items: [
                   {
                     label: "allow_write",
-                    value: allowWrite.length ? allowWrite.map(formatFileEntry).join(", ") : "(empty)",
+                    value: allowWrite.length
+                      ? allowWrite.map((e) => formatFileEntry(e, "rw")).join(", ")
+                      : "(empty)",
                   },
                   {
                     label: "deny_write",
-                    value: denyWrite.length ? denyWrite.map(formatFileEntry).join(", ") : "(empty)",
+                    value: denyWrite.length
+                      ? denyWrite.map((e) => formatFileEntry(e, "ro")).join(", ")
+                      : "(empty)",
                   },
                 ],
               }),
@@ -232,16 +238,23 @@ export function createSandboxCommand(): SlashCommand {
             return;
           }
           if (op === "allow" || op === "deny" || op === "remove") {
+            if (tokens.length > 3) {
+              ctx.addItem(
+                addError(
+                  ctx.sessionId,
+                  `Too many arguments. Usage: /sandbox files ${op} <path>`,
+                ),
+              );
+              return;
+            }
             const path = tokens[2];
-            const perm = tokens[3];
             if (!path) {
-              ctx.addItem(addError(ctx.sessionId, `Missing path. Usage: /sandbox files ${op} <path> [permissions]`));
+              ctx.addItem(addError(ctx.sessionId, `Missing path. Usage: /sandbox files ${op} <path>`));
               return;
             }
             const subAction =
               op === "allow" ? "files.allow" : op === "deny" ? "files.deny" : "files.remove";
             const params: Record<string, unknown> = { sub: subAction, path };
-            if (perm) params.permissions = perm;
             const payload = await ctx.request<SandboxResponse>("command.sandbox", params);
             ctx.addItem(
               addInfo(
@@ -251,6 +264,15 @@ export function createSandboxCommand(): SlashCommand {
               ),
             );
             showRuntime(ctx, payload.runtime, payload.effective_files);
+            return;
+          }
+          if (op === "add") {
+            ctx.addItem(
+              addError(
+                ctx.sessionId,
+                "Unknown files sub-command 'add'; use 'allow' or 'deny'",
+              ),
+            );
             return;
           }
           ctx.addItem(addError(ctx.sessionId, "Usage: /sandbox files <allow|deny|remove|list> [path]"));

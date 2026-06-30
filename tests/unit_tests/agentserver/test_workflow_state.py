@@ -13,7 +13,12 @@ from jiuwenswarm.agents.harness.team.handlers.workflow_state import (
 )
 
 
+_DEFAULT_RUN_ID = "wf_testrun00001"
+
+
 def _make_progress(kind: str, **kwargs) -> WorkflowProgress:
+    if "run_id" not in kwargs:
+        kwargs["run_id"] = _DEFAULT_RUN_ID
     return WorkflowProgress(kind=kind, **kwargs)
 
 
@@ -57,25 +62,25 @@ class TestWorkflowRunStateLifecycle:
         assert all(p["status"] == "planned" for p in delta["phases"])
 
     @staticmethod
-    def test_planned_phase_activated_on_phase_event():
-        """A planned phase becomes running when the engine sends a PHASE event."""
+    def test_planned_phase_activated_on_agent_started():
+        """A planned phase becomes running when an agent starts within it."""
         phases_meta = [PhasePlan(title="发牌"), PhasePlan(title="游戏进行")]
         state = WorkflowRunState()
         state.apply(_make_progress("workflow_started", workflow_name="test", phases=phases_meta))
         assert state.phases[0].status == "planned"
         assert len(state.phases) == 2
 
-        delta = state.apply(_make_progress("phase", phase="发牌"))
+        delta = state.apply(_make_progress("agent_started", phase="发牌", label="dealer"))
         assert state.phases[0].status == "running"
         assert state.phases[1].status == "planned"
         assert delta["phases"][0]["name"] == "发牌"
         assert delta["phases"][0]["status"] == "running"
 
     @staticmethod
-    def test_phase_adds_running_phase():
+    def test_agent_started_creates_running_phase():
         state = WorkflowRunState()
         state.apply(_make_progress("workflow_started", workflow_name="test"))
-        progress = _make_progress("phase", phase="Night 1")
+        progress = _make_progress("agent_started", phase="Night 1", label="agent-a")
         delta = state.apply(progress)
         assert len(state.phases) == 1
         assert state.phases[0].name == "Night 1"
@@ -84,14 +89,13 @@ class TestWorkflowRunStateLifecycle:
         assert delta["phases"][0]["id"] == state.phases[0].id
 
     @staticmethod
-    def test_phase_started_adds_phase():
+    def test_phase_started_event_ignored():
+        """phase_started is no longer handled — ignored, no state change."""
         state = WorkflowRunState()
         state.apply(_make_progress("workflow_started", workflow_name="test"))
-        progress = _make_progress("phase_started", phase="Day Vote")
-        delta = state.apply(progress)
-        assert len(state.phases) == 1
-        assert state.phases[0].name == "Day Vote"
-        assert state.phases[0].status == "running"
+        delta = state.apply(_make_progress("phase_started", phase="Day Vote"))
+        assert delta is None
+        assert len(state.phases) == 0
 
     @staticmethod
     def test_agent_started_adds_agent_to_current_phase():
@@ -132,13 +136,15 @@ class TestWorkflowRunStateLifecycle:
         assert state.phases[0].agents[0].error is not None
 
     @staticmethod
-    def test_phase_completed_marks_phase_done():
+    def test_phase_sealed_on_switch_to_next_phase():
+        """A running phase is sealed to completed when an agent starts in the next phase."""
         state = WorkflowRunState()
         state.apply(_make_progress("workflow_started", workflow_name="test"))
-        state.apply(_make_progress("phase", phase="Night 1"))
-        progress = _make_progress("phase_completed", phase="Night 1")
-        delta = state.apply(progress)
+        state.apply(_make_progress("agent_started", phase="Night 1", label="agent-a"))
+        assert state.phases[0].status == "running"
+        state.apply(_make_progress("agent_started", phase="Day 1", label="agent-b"))
         assert state.phases[0].status == "completed"
+        assert state.phases[1].status == "running"
 
     @staticmethod
     def test_workflow_completed_marks_terminal():
@@ -279,12 +285,11 @@ class TestWorkflowRunStateDelta:
 
     @staticmethod
     def test_delta_contains_finalized_and_new_phase():
-        """When entering a new phase, delta includes both the finalized previous phase and the new phase."""
+        """Entering a new phase via agent_started: delta includes finalized previous + new phase."""
         state = WorkflowRunState()
         state.apply(_make_progress("workflow_started", workflow_name="test"))
-        state.apply(_make_progress("phase", phase="Phase 1"))
         state.apply(_make_progress("agent_started", phase="Phase 1", label="agent-a"))
-        progress = _make_progress("phase", phase="Phase 2")
+        progress = _make_progress("agent_started", phase="Phase 2", label="agent-b")
         delta = state.apply(progress)
         # Delta includes finalized Phase 1 + new Phase 2
         assert len(delta["phases"]) == 2
@@ -390,9 +395,9 @@ class TestIDGeneration:
     def test_phase_id_is_slug_with_sequence():
         state = WorkflowRunState()
         state.apply(_make_progress("workflow_started", workflow_name="test"))
-        state.apply(_make_progress("phase", phase="Night 1"))
+        state.apply(_make_progress("agent_started", phase="Night 1", label="a"))
         assert state.phases[0].id == "night-1-1"
-        state.apply(_make_progress("phase", phase="Day Vote"))
+        state.apply(_make_progress("agent_started", phase="Day Vote", label="b"))
         assert state.phases[1].id == "day-vote-2"
 
     @staticmethod

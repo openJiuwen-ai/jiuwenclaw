@@ -509,6 +509,33 @@ class TestConfirmAndPermissionInterrupts:
         assert result is not None
         assert result["source"] == "confirm_interrupt"
 
+    @staticmethod
+    def test_plan_approval_message_falls_back_to_approve_reject_options():
+        result = convert_interactions_to_ask_user_question([
+            {
+                "id": "req_plan_approval",
+                "value": {
+                    "tool_name": "exit_plan_mode",
+                    "message": "**计划审批**\n\nAgent 已完成计划制定，等待你审批：\n\n计划内容",
+                    "tool_args": {},
+                },
+            }
+        ])
+
+        assert result is not None
+        assert result["source"] == "confirm_interrupt"
+        assert result["plan_approval_kind"] == "plan_approval"
+        assert result["plan_content"] == "计划内容"
+        assert result["plan_language"] == "cn"
+        assert result["questions"][0]["header"] == "Exit Plan and Execute"
+        assert "请选择：" not in result["questions"][0]["question"]
+        assert "- **批准**" not in result["questions"][0]["question"]
+        assert result["questions"][0]["question"].endswith("计划内容")
+        assert [option["label"] for option in result["questions"][0]["options"]] == [
+            "批准",
+            "拒绝",
+        ]
+
 
 # =====================================================================
 # 6. StructuredAskUserRail resolve_interrupt Tests

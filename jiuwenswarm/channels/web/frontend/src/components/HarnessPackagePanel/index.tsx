@@ -11,6 +11,7 @@ import { useHarnessStore } from '../../stores';
 import { webRequest } from '../../services/webClient';
 import { PackageInfo, PackagesPayload, ActivatePayload, DeactivatePayload } from '../../types';
 import { HarnessExtensionTree } from '../ToolPanel/HarnessExtensionTree';
+import { resolveHarnessError } from '../../utils';
 import './HarnessPackagePanel.css';
 
 interface HarnessPackagePanelProps {
@@ -159,15 +160,15 @@ export function HarnessPackagePanel({ sessionId }: HarnessPackagePanelProps) {
       setDeactivateSuccess(null);
 
       try {
-        const payload = await webRequest<DeactivatePayload>('harness.deactivate', {
+        await webRequest<DeactivatePayload>('harness.deactivate', {
           package_id: selectedPackageId,
         });
 
-        setDeactivateSuccess(payload.message);
+        setDeactivateSuccess(t('harnessPackage.deactivateSuccess'));
         await fetchPackages();
       } catch (err) {
         console.error('Failed to deactivate package:', err);
-        setDeactivateError(err instanceof Error ? err.message : t('harnessPackage.deactivateFailed'));
+        setDeactivateError(resolveHarnessError(err, 'harnessPackage.deactivateFailed'));
       } finally {
         setDeactivatingPackage(false);
       }
@@ -183,7 +184,7 @@ export function HarnessPackagePanel({ sessionId }: HarnessPackagePanelProps) {
           session_id: sessionId,
         });
 
-        setActivateSuccess(payload.message);
+        setActivateSuccess(t('harnessPackage.activateSuccess'));
 
         // Update extensionReady for the activated package
         setExtensionReady({
@@ -197,7 +198,7 @@ export function HarnessPackagePanel({ sessionId }: HarnessPackagePanelProps) {
         await fetchPackages();
       } catch (err) {
         console.error('Failed to activate package:', err);
-        setActivateError(err instanceof Error ? err.message : t('harnessPackage.activateFailed'));
+        setActivateError(resolveHarnessError(err, 'harnessPackage.activateFailed'));
       } finally {
         setActivatingPackage(false);
       }
@@ -225,7 +226,7 @@ export function HarnessPackagePanel({ sessionId }: HarnessPackagePanelProps) {
       await fetchPackages();
     } catch (err) {
       console.error('Failed to deactivate all packages:', err);
-      setDeactivateError(err instanceof Error ? err.message : t('harnessPackage.deactivateFailed'));
+      setDeactivateError(resolveHarnessError(err, 'harnessPackage.deactivateFailed'));
     } finally {
       setDeactivatingAll(false);
     }
@@ -261,11 +262,11 @@ export function HarnessPackagePanel({ sessionId }: HarnessPackagePanelProps) {
       // Refresh packages list
       await fetchPackages();
 
-      setDeleteSuccess(payload.message);
+      setDeleteSuccess(t('harnessPackage.deleteSuccess'));
       setDeleteConfirmOpen(false);
     } catch (err) {
       console.error('Failed to delete package:', err);
-      setDeleteError(err instanceof Error ? err.message : t('harnessPackage.deleteFailed'));
+      setDeleteError(resolveHarnessError(err, 'harnessPackage.deleteFailed'));
     } finally {
       setDeletingPackage(false);
     }
@@ -323,7 +324,7 @@ export function HarnessPackagePanel({ sessionId }: HarnessPackagePanelProps) {
       setExportSuccess(t('harnessPackage.exportSuccess'));
     } catch (err) {
       console.error('Export failed:', err);
-      setExportError(err instanceof Error ? err.message : t('harnessPackage.exportError'));
+      setExportError(resolveHarnessError(err, 'harnessPackage.exportError'));
     } finally {
       setExporting(false);
     }
@@ -363,7 +364,7 @@ export function HarnessPackagePanel({ sessionId }: HarnessPackagePanelProps) {
       await fetchPackages();
     } catch (err) {
       console.error('Import failed:', err);
-      setImportError(err instanceof Error ? err.message : t('harnessPackage.importError'));
+      setImportError(resolveHarnessError(err, 'harnessPackage.importError'));
     } finally {
       setImporting(false);
       // Reset file input

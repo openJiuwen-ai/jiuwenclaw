@@ -2,7 +2,7 @@
 
 """PlanApprovalRail — pending-approval lifecycle for plan mode exit.
 
-Aligns with Claude Code: ``exit_plan_mode`` presents the plan for review
+``exit_plan_mode`` presents the plan for review
 but the agent **stays in plan mode** until the user approves via chat.
 Mode restoration (``restore_mode_after_plan_exit``) happens only after
 approval, when the server injects the approved notification on the next

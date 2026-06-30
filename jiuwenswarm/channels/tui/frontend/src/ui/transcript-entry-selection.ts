@@ -69,15 +69,39 @@ export function selectTranscriptEntries(snapshot: AppSnapshot): SelectedTranscri
       .find((entry) => entry.kind === "thinking")?.id ?? undefined;
 
   const isLiveTurn = snapshot.isProcessing || snapshot.cancellableWork;
+  // A thinking block is only "live" while the current turn is still in flight
+  // AND no finalized assistant message has arrived after it. Once chat.final
+  // lands, the assistant entry flips to streaming:false — at that point the
+  // turn's thinking is settled history, not live, so it must NOT be pinned to
+  // the bottom. Without this guard, during the brief window after chat.final
+  // sets Idle but before isLiveTurn fully relaxes (or while cancellableWork
+  // lingers), the PREVIOUS turn's already-finished thinking gets re-pinned and
+  // rendered (e.g. "· The user is asking me to analyze..."), flashing above the
+  // /status panel for a few seconds until isLiveTurn finally turns false.
   const liveThinking =
     isLiveTurn && latestThinkingId
-      ? entries.find((entry) => entry.kind === "thinking" && entry.id === latestThinkingId)
+      ? entries.find(
+          (entry) => entry.kind === "thinking" && entry.id === latestThinkingId,
+        )
       : undefined;
+  const liveThinkingIndex = liveThinking
+    ? entries.findIndex((entry) => entry.id === liveThinking.id)
+    : -1;
+  const hasFinalizedAssistantAfterLiveThinking =
+    liveThinkingIndex !== -1 &&
+    entries
+      .slice(liveThinkingIndex + 1)
+      .some(
+        (entry) =>
+          entry.kind === "assistant" && entry.streaming !== true,
+      );
+  const effectiveLiveThinking =
+    liveThinking && !hasFinalizedAssistantAfterLiveThinking ? liveThinking : undefined;
   // compact 始终隐藏 thinking；detailed 仅在任务进行中把 live thinking 钉在底部，避免穿插在工具输出中间。
   if (snapshot.transcriptMode === "compact" || isLiveTurn) {
     entries = entries.filter((entry) => entry.kind !== "thinking");
-    if (liveThinking) {
-      entries = [...entries, liveThinking];
+    if (effectiveLiveThinking) {
+      entries = [...entries, effectiveLiveThinking];
     }
   }
   if (snapshot.transcriptMode === "compact") {

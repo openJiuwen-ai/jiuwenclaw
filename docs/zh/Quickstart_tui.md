@@ -55,6 +55,8 @@ JiuwenSwarm提供两种安装方式：`pip安装`或`源码安装`。
   jiuwenswarm-tui
   ```
 
+  可在**多个终端**重复执行上述命令，连接同一 Gateway（默认 `ws://127.0.0.1:19001/tui`），实现多窗口并行会话。详见 [TUI 使用指南 — 多窗口 TUI](TUI使用指南.md#多窗口-tui)。
+
 ## **方式二：源码运行** 
 
 ​适合基于JiuwenSwarm进行二次开发适配的用户。
@@ -125,6 +127,8 @@ JiuwenSwarm提供两种安装方式：`pip安装`或`源码安装`。
   npm run dev
   ```
 
+  可在多个终端重复运行 TUI，连接同一 Gateway 实现多窗口并行会话（详见 [TUI 使用指南 — 多窗口 TUI](TUI使用指南.md#多窗口-tui)）。
+
 ### `conda`方式安装
 - 使用`conda`新建虚拟环境
   ```bash
@@ -186,3 +190,5 @@ JiuwenSwarm提供两种安装方式：`pip安装`或`源码安装`。
   ```bash
   npm run dev
   ```
+
+  可在多个终端重复运行 TUI，连接同一 Gateway 实现多窗口并行会话（详见 [TUI 使用指南 — 多窗口 TUI](TUI使用指南.md#多窗口-tui)）。

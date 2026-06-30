@@ -101,12 +101,14 @@ def _get_state_file() -> "Path":
 
 
 from jiuwenswarm.server.runtime.skill.skilldev.state_utils import (
+    get_registered_skill_names,
     get_skill_enabled,
     get_state_file,
     list_disabled_skills,
     list_execution_disabled_skills,
     normalize_local_skills,
     normalize_skill_configs,
+    remove_skill_config,
     set_skill_enabled,
 )
 
@@ -375,6 +377,9 @@ class SkillManager:
             self._state_file = _get_state_file()
         self._skills_dir.mkdir(parents=True, exist_ok=True)
         self._state: dict[str, Any] = self._load_state()
+        # 把手动拷入 skills 目录、未经任何安装流程登记的本地技能，自动补登记到
+        # local_skills，使其与"导入本地技能"完全等价（可展示/卸载/查看详情/禁用）。
+        self._register_unmanaged_local_skills()
         # SkillNet 异步安装：install 立即返回 install_id，后台下载；完成后调用 hook 重载 Agent
         self._skillnet_install_jobs: dict[str, dict[str, Any]] = {}
         self._skillnet_install_complete_hook: Callable[[], Awaitable[None]] | None = None
@@ -400,6 +405,9 @@ class SkillManager:
         refresh_marketplaces = bool(params.get("refresh_marketplaces", False))
         if refresh_marketplaces:
             await self._sync_marketplace_repos()
+        # 每次列举前，把手动拷入 skills 目录、尚未登记的本地技能补登记为 local，
+        # 使其无需重启 server、刷新"我的技能"即可显示（与导入本地技能一致）。
+        self._register_unmanaged_local_skills()
         local = self._scan_local_skills()
         builtin = self._scan_builtin_skills()
         marketplace = self._scan_marketplace_skills()
@@ -451,7 +459,13 @@ class SkillManager:
             if md is None:
                 continue
             meta = self._parse_skill_md(md)
-            if meta and meta.get("name") == name:
+            if meta is None:
+                continue
+            # 与 _scan_local_skills 保持一致：无 frontmatter 时 name 退化为文件名(SKILL)，
+            # 此处用目录名修正，否则前端列表(目录名)与详情(文件名)对不上导致“未找到 skill”
+            if meta.get("name") == md.stem:
+                meta["name"] = child.name
+            if meta.get("name") == name:
                 # 字段转换以符合前端期望
                 meta["content"] = meta.pop("body", "")
                 meta["file_path"] = meta.pop("path", "")
@@ -479,7 +493,11 @@ class SkillManager:
                     if md is None:
                         continue
                     meta = self._parse_skill_md(md)
-                    if meta and meta.get("name") == name:
+                    if meta is None:
+                        continue
+                    if meta.get("name") == md.stem:
+                        meta["name"] = plugin_dir.name
+                    if meta.get("name") == name:
                         # 字段转换以符合前端期望
                         meta["content"] = meta.pop("body", "")
                         meta["file_path"] = meta.pop("path", "")
@@ -516,6 +534,41 @@ class SkillManager:
             "config": {"enabled": enabled},
             "detail": "配置已更新；下次 reload / rebuild / 新会话后执行面生效。",
         }
+
+    async def handle_skills_retrieval_status(self, params: dict) -> dict:
+        """返回本地 skill retrieval 索引状态."""
+        from jiuwenswarm.symphony.skill_retrieval import get_skill_retrieval_status
+
+        return await asyncio.to_thread(get_skill_retrieval_status, self)
+
+    async def handle_skills_retrieval_index_build(self, params: dict) -> dict:
+        """构建或复用本地 skill retrieval 索引."""
+        from jiuwenswarm.symphony.skill_retrieval.build_coordinator import start_skill_index_build
+
+        params = params or {}
+        force = bool(params.get("force", False))
+        source = str(params.get("source") or "web").strip() or "web"
+        return await asyncio.to_thread(start_skill_index_build, self, force=force, source=source)
+
+    async def handle_skills_retrieval_index_cancel(self, params: dict) -> dict:
+        """请求取消本地 skill retrieval 索引构建."""
+        from jiuwenswarm.symphony.skill_retrieval import cancel_skill_index_build
+
+        return await asyncio.to_thread(cancel_skill_index_build, self)
+
+    async def handle_skills_retrieval_search(self, params: dict) -> dict:
+        """基于本地索引检索已安装 skills."""
+        from jiuwenswarm.symphony.skill_retrieval import retrieve_skills
+
+        query = str((params or {}).get("query") or "").strip()
+        return await asyncio.to_thread(retrieve_skills, query, self)
+
+    async def handle_skills_retrieval_tree(self, params: dict) -> dict:
+        """返回本地 skill retrieval 树索引概览."""
+        from jiuwenswarm.symphony.skill_retrieval import get_skill_retrieval_tree
+
+        language = str((params or {}).get("language") or "cn").strip() or "cn"
+        return await asyncio.to_thread(get_skill_retrieval_tree, self, language=language)
 
     async def handle_skills_evolution_status(self, params: dict) -> dict:
         """检查某个 skill 是否存在 evolutions.json."""
@@ -1253,11 +1306,39 @@ class SkillManager:
         if skill_type not in {"teamskills", "skill"}:
             return {"success": False, "detail": "type 仅支持: teamskills 或 skill"}
         force = bool(params.get("force", False))
-        parent_dir = Path(parent_raw).expanduser().resolve()
+        # 安全：path 仅允许为 skills 目录内的相对路径，禁止绝对路径与目录穿越。
+        # skill_name 已由 _safe_path_name 校验，此处对父目录 path 收敛边界，
+        # 避免 path 传入绝对路径（含 ~ 展开后的家目录）而在任意目录创建子目录
+        # 并写入固定模板 SKILL.md。
+        if parent_raw == "~" or parent_raw.startswith(("~/", "~\\")):
+            return {
+                "success": False,
+                "detail": "path 仅支持相对路径（限制在 skills 目录内）",
+            }
+        parent_path_raw = Path(parent_raw)
+        if parent_path_raw.is_absolute() or PureWindowsPath(parent_raw).is_absolute():
+            return {
+                "success": False,
+                "detail": "path 仅支持相对路径（限制在 skills 目录内）",
+            }
+        skills_root = self._skills_dir.resolve()
+        try:
+            parent_dir = (self._skills_dir / parent_raw).resolve()
+        except (ValueError, OSError) as exc:
+            return {"success": False, "detail": f"path 无效: {exc}"}
+        try:
+            parent_dir.relative_to(skills_root)
+        except ValueError:
+            return {"success": False, "detail": "path 越界：仅允许在 skills 目录内创建"}
         if not parent_dir.exists() or not parent_dir.is_dir():
             return {"success": False, "detail": f"path 不是有效目录: {parent_dir}"}
 
-        target_dir = parent_dir / skill_name
+        # target_dir 双保险：skill_name 已校验，仍确认最终落点不逃逸 skills 目录。
+        target_dir = (parent_dir / skill_name).resolve()
+        try:
+            target_dir.relative_to(skills_root)
+        except ValueError:
+            return {"success": False, "detail": "目标路径越界：仅允许在 skills 目录内创建"}
         try:
             if target_dir.exists():
                 if not target_dir.is_dir():
@@ -1946,6 +2027,8 @@ class SkillManager:
 
         self._remove_installed_plugin(raw_name)
         self._remove_local_skill(raw_name)
+        # 卸载时一并清掉该 skill 的 enabled 配置，避免重装同名 skill 时沿用旧的禁用状态。
+        self.remove_skill_config(raw_name)
         self._refresh_agent_data_indexes()
         return {"success": True}
 
@@ -3751,6 +3834,20 @@ class SkillManager:
         """返回本地技能安装记录的拷贝。"""
         return list(self._state.get("local_skills", []))
 
+    @staticmethod
+    def _resolve_skill_name(child: Path, md: Path, meta: dict) -> str:
+        """Canonical skill name for a folder: parsed name, or folder name as fallback.
+
+        ``_parse_skill_md`` degrades ``name`` to the markdown file stem (e.g.
+        "SKILL") when there is no frontmatter; in that case the folder name is the
+        authoritative name used at runtime. Keep this consistent everywhere that
+        derives a skill name from disk.
+        """
+        parsed_name = str(meta.get("name") or "").strip()
+        if parsed_name in ("", md.stem):
+            return child.name
+        return parsed_name
+
     def _collect_existing_local_skill_names(self) -> set[str]:
         names: set[str] = set()
         if not self._skills_dir.exists():
@@ -3765,10 +3862,55 @@ class SkillManager:
             meta = self._parse_skill_md(md)
             if not isinstance(meta, dict):
                 continue
-            name = str(meta.get("name") or child.name).strip()
+            name = self._resolve_skill_name(child, md, meta)
             if name:
                 names.add(name)
         return names
+
+    def _register_unmanaged_local_skills(self) -> None:
+        """Auto-register skills that exist on disk but were never recorded.
+
+        A skill folder manually copied into the skills dir (or otherwise present
+        without going through any install flow) has no entry in installed_plugins
+        nor local_skills. Such skills run fine but are treated as ``source=project``
+        by the UI and are excluded from the registry, so they can't be shown in
+        "我的技能", uninstalled, or disabled the same way imported skills are.
+
+        Here we give each of them a local_skills record (identical shape to the
+        one ``import_local`` writes), making them fully equivalent to skills
+        imported via the UI. Built-in skills (folders that also exist under the
+        package builtin dir) are deliberately excluded so their source/behavior
+        is preserved.
+        """
+        if not self._skills_dir.exists():
+            return
+
+        registered = get_registered_skill_names(self._state)
+        builtin_dir = get_builtin_skills_dir()
+        builtin_exists = builtin_dir.exists()
+        changed = False
+
+        for child in self._skills_dir.iterdir():
+            if not child.is_dir() or child.name.startswith("_"):
+                continue
+            md = self._try_find_skill_file(child)
+            if md is None:
+                continue
+            meta = self._parse_skill_md(md)
+            if not isinstance(meta, dict):
+                continue
+            name = self._resolve_skill_name(child, md, meta)
+            if not name or name in registered:
+                continue
+            # 排除内置技能（用户目录下与 builtin 目录同名的文件夹），避免改变其来源/行为。
+            if builtin_exists and (builtin_dir / child.name).is_dir():
+                continue
+            self._add_local_skill({"name": name, "origin": "local", "source": "local"})
+            registered.add(name)
+            changed = True
+
+        if changed:
+            self._refresh_agent_data_indexes()
 
     def _apply_enabled_config(
         self,
@@ -3791,6 +3933,10 @@ class SkillManager:
     def set_skill_enabled(self, skill_name: str, enabled: bool) -> None:
         set_skill_enabled(self._state, skill_name, enabled)
         self._save_state()
+
+    def remove_skill_config(self, skill_name: str) -> None:
+        if remove_skill_config(self._state, skill_name):
+            self._save_state()
 
     def list_disabled_skills(self) -> list[str]:
         return list_disabled_skills(self._state)

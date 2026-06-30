@@ -30,8 +30,8 @@ class A2AChannelConfig:
     extended_card_path: str = "/agent/authenticatedExtendedCard"
     protocol_version: str = "1.0.0"
     channel_id: str = "a2a"
-    app_name: str = "JiuwenClaw Gateway A2A Server"
-    app_description: str = "A2A ingress for JiuwenClaw Gateway"
+    app_name: str = "JiuwenSwarm Gateway A2A Server"
+    app_description: str = "A2A ingress for JiuwenSwarm Gateway"
     app_version: str = "0.1.0"
 
 
@@ -228,7 +228,7 @@ class A2AChannel(BaseChannel):
                 AgentSkill(
                     id="chat",
                     name="chat",
-                    description="Send user prompt to JiuwenClaw via Gateway",
+                    description="Send user prompt to JiuwenSwarm via Gateway",
                     tags=["chat", "gateway", "jiuwenswarm"],
                     examples=["Hello", "Summarize this"],
                     input_modes=["text/plain"],
@@ -456,7 +456,7 @@ class A2AChannel(BaseChannel):
 
     @staticmethod
     def map_a2a_parts_to_params(a2a_message: Any) -> tuple[str, list[dict[str, Any]]]:
-        """Map A2A message parts to JiuwenClaw-friendly query/files params."""
+        """Map A2A message parts to JiuwenSwarm-friendly query/files params."""
         if a2a_message is None:
             return "", []
 

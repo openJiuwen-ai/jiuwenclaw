@@ -28,6 +28,7 @@ import os
 import platform
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -251,10 +252,13 @@ def start_browser(*, dry_run: bool = False, config_file: str = "") -> int:
     user_data_dir = _resolve_user_data_dir(browser_cfg.get("user_data_dir"), os_name)
     profile_directory = str(browser_cfg.get("profile_directory") or "Default").strip()
 
+    raw_headless = browser_cfg.get("headless", True)
+    headless = bool(raw_headless) if isinstance(raw_headless, bool) else True
+
     logger.info(
         "Resolved browser launch parameters: "
         f"host={host}, port={port}, user_data_dir={user_data_dir}, "
-        f"profile_directory={profile_directory or '(empty)'}"
+        f"profile_directory={profile_directory or '(empty)'}, headless={headless}"
     )
 
     args = [
@@ -263,6 +267,8 @@ def start_browser(*, dry_run: bool = False, config_file: str = "") -> int:
         f"--remote-debugging-port={port}",
         f"--user-data-dir={user_data_dir}",
     ]
+    if headless:
+        args.append("--headless=new")
     if profile_directory:
         args.append(f"--profile-directory={profile_directory}")
 
@@ -276,8 +282,8 @@ def start_browser(*, dry_run: bool = False, config_file: str = "") -> int:
         kwargs["start_new_session"] = True
 
     if dry_run:
-        print("Dry run: browser launch command prepared.")
-        print(" ".join(args))
+        logger.info("Dry run: browser launch command prepared.")
+        logger.info(" ".join(args))
         return 0
 
     logger.info(
@@ -293,9 +299,9 @@ def start_browser(*, dry_run: bool = False, config_file: str = "") -> int:
         user_data_dir=user_data_dir,
         profile_directory=profile_directory,
     )
-    print(f"Chrome started (pid={proc.pid}) at {host}:{port}")
-    print(f"Executable: {chrome_exec}")
-    print(f"Profile dir: {user_data_dir}")
+    logger.info(f"Chrome started (pid={proc.pid}) at {host}:{port}")
+    logger.info(f"Executable: {chrome_exec}")
+    logger.info(f"Profile dir: {user_data_dir}")
     return 0
 
 
@@ -315,7 +321,7 @@ def main() -> int:
     try:
         return start_browser(dry_run=args.dry_run, config_file=args.config)
     except Exception as exc:
-        print(f"Failed to start Chrome: {exc}", file=sys.stderr)
+        logger.info(f"Failed to start Chrome: {exc}", file=sys.stderr)
         return 1
 
 

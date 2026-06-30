@@ -11,6 +11,7 @@ import { useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useHarnessStore, CachedFileTreeEntry } from '../../stores';
 import { webRequest } from '../../services/webClient';
+import { resolveHarnessError } from '../../utils';
 import { ReadOnlyFileModal } from './ReadOnlyFileModal';
 
 interface FileInfo {
@@ -262,7 +263,7 @@ export function HarnessExtensionTree(props?: HarnessExtensionTreeProps) {
       }
     } catch (err) {
       console.error('Export failed:', err);
-      setExportError(err instanceof Error ? err.message : t('harnessPackage.exportError'));
+      setExportError(resolveHarnessError(err, 'harnessPackage.exportError'));
     } finally {
       setExporting(false);
     }

@@ -1,12 +1,73 @@
 # 前端显示语言：zh（中文）/ en（英文），与 Web 界面语言切换同步
 preferred_language: zh
 
-a2ui:
+# auto-recap：用户空闲5分钟后自动生成会话摘要（TUI 端）
+auto_recap:
   enabled: true
+
+a2ui:
+  enabled: false
   protocol_version: "0.8"
   stream_validation_enabled: true
   non_web_fallback_enabled: false
   dev_smoke_tools_enabled: false
+
+symphony:
+  enabled: false
+  paths:
+    skills_root: ""
+    score_dir: ""
+
+  fingerprint:
+    scan:
+      max_depth:
+    extraction:
+      workers: 4
+      batch_size: 2
+      body_limit:
+    normalization:
+      workers: 4
+      batch_size: 2
+      duplicate_name_similarity_threshold: 0.8
+      max_vocab_size:
+
+  build:
+    workers: 4
+    batch_size: 16
+    require_consensus: false
+    min_edge_confidence: 0.1
+
+  orchestration:
+    mode: fast
+    top_k: 3
+    max_depth: 4
+    min_edge_confidence: 0.3
+
+  skill_retrieval:
+    enabled: false
+    artifact_root: ${SYMPHONY_SKILL_RETRIEVAL_ROOT:-}
+    build:
+      branching_factor: 12
+      max_depth: 6
+      root_categories: ""
+      max_workers: 2
+      max_retries: 2
+      request_timeout_seconds: 420
+      classification_batch_limit: 32
+      discovery_seed: 42
+      postprocess_enabled: true
+      postprocess_max_passes: 1
+      postprocess_min_skills: 6
+      equivalence_enabled: false
+    retrieve:
+      compact_codes_enabled: false
+      flatten_tree: false
+      max_exposure_depth: 1
+
+# Auto Memory：对话结束后自动提取记忆，按项目隔离存储
+# 存储路径：~/.jiuwenswarm/projects/{sanitized-project-path}/memory/
+# 类似 Claude Code 的 auto-memory 功能
+auto_memory_enabled: false
 
 # 日志目录：~/.jiuwenswarm/agent/.logs/
 # gateway.log / channel.log / agent_server.log 按源码路径分流；full.log 为汇总。
@@ -86,7 +147,7 @@ memory:
   # - 失败降级：provider 构建失败或网络异常不阻塞主流程
   external:
     # 选哪家 provider。空字符串 = 禁用外接（等价于 engine=builtin）
-    provider: ${MEMORY_EXTERNAL_PROVIDER:-}   # '' | openjiuwen | mem0 | openviking | <plugin-name>
+    provider: ${MEMORY_EXTERNAL_PROVIDER:-}   # '' | openjiuwen | mem0 | openviking | lakebase | <plugin-name>
     # 数据隔离标识（所有 provider 共用）
     user_id: ${MEMORY_USER_ID:-__default__}
     scope_id: ${MEMORY_SCOPE_ID:-__default__}
@@ -119,6 +180,12 @@ memory:
       api_key: ${OPENVIKING_API_KEY:-}
       account: ${OPENVIKING_ACCOUNT:-root}
       user: ${OPENVIKING_USER:-default}
+
+    lakebase:
+      api_key: ${LAKEBASE_API_KEY:-}
+      base_url: ${LAKEBASE_API_URL:-}
+      base_id: ${LAKEBASE_MEM_BASE_ID:-}
+      database_id: ${LAKEBASE_DATABASE_ID:-}
 
 models:
   defaults:
@@ -254,6 +321,30 @@ telemetry:
     protocol:                       # metrics protocol，默认回退到 telemetry.protocol
     headers: {}                     # metrics headers，默认回退到 telemetry.headers
 
+# ============================================================
+# Team 可观测性配置（OTel + Langfuse）
+# ============================================================
+# 与 telemetry 不同，team_observability 专门用于 TeamAgent 的
+# 可观测性追踪，包括 team/member/task/message 级别的 span。
+# 启用后会自动将 OtelTeamMonitorHandler 注册到 TeamAgent，
+# 将事件转为 OTel span 导出到 Langfuse / OTLP Collector。
+#
+# 前置条件：
+#   1. 启动 OTel Collector + Langfuse
+#   2. 在用户配置中设置 team_observability.enabled: true
+# ============================================================
+team_observability:
+  enabled: false                     # Team observability 总开关
+  exporter: otlp_grpc               # otlp_grpc / otlp_http / console
+  endpoint: http://localhost:4317   # OTLP gRPC endpoint
+  service_name: jiuwenswarm         # 服务名称（OTel resource service.name）
+  sample_rate: 1.0                  # 采样率 (0.0-1.0)
+  redact_prompts: false             # 是否脱敏 prompt 内容
+  redact_completions: false         # 是否脱敏 completion 内容
+  attribute_value_max_length: 10240 # OTel attribute value 最大长度
+  langfuse_public_key: ""           # Langfuse OTLP 认证 public key（可选）
+  langfuse_secret_key: ""           # Langfuse OTLP 认证 secret key（可选）
+
 # tokenjuice — 工具输出确定性压缩（减少 LLM context token 消耗）
 tokenjuice:
   enabled: true                     # 总开关，设为 false 关闭压缩
@@ -266,7 +357,7 @@ react:
   model_name: ${MODEL_NAME:-deepseek-chat}
   skill_mode: all
   # code_agent / research_agent 默认不启用；只有显式配置 enabled: true 才会显示并可被 task_tool 调用
-  # browser_agent 保持原行为，仍由浏览器 runtime 开关决定是否默认注册；这里只支持覆盖其参数
+  # browser_agent: code.team 路径通过此 key 门控（单 agent 路径仍由 browser runtime 开关决定）
   subagents:
     general_agent:
       enabled: true
@@ -275,6 +366,9 @@ react:
       # max_iterations: 15
     research_agent:
       enabled: false
+      # max_iterations: 15
+    browser_agent:
+      enabled: true
       # max_iterations: 15
   answer_chunk_size: 500
   stream_chunk_threshold: 50
@@ -332,6 +426,7 @@ react:
   evolution:
     enabled: true             # true = 启用在线 Skills 自演进
     auto_scan: false           # true = 每轮对话后自动扫描（建议先用手动 /evolve）
+    auto_save: false           # true = 自演进审批无需用户点击自动通过（内部开关）
     skill_create: false        # true = 注册 SkillCreateRail（单 agent）及 TeamSkillCreateRail（leader）
     skill_base_dir: "agent/skills"  # Skill 根目录
   a2x_registry:
@@ -862,12 +957,18 @@ modes:
       rails:
       tools:
   code:
+    # 记忆开关 — 控制 CodingMemoryRail 和 ProjectMemoryRail 加载
+    # 关闭后，coding_memory_read/write/edit 工具不可用，项目记忆文件不自动加载
+    memory:
+      enabled: true
+
     # 动态 Rails — 列表中出现的 = 启用；不出现的 = 不启用
     # 固定 Rails（以下 Rails 已在代码中固定挂载，无需在此配置）：
-    #   RuntimePromptRail, ResponsePromptRail, JiuClawStreamEventRail, SecurityRail,
+    #   RuntimePromptRail, ResponsePromptRail, JiuSwarmStreamEventRail, SecurityRail,
     #   PermissionInterruptRail, SysOperationRail(FileSystemRail), LspRail,
-    #   ProjectMemoryRail, CodingMemoryRail, AgentModeRail, StructuredAskUserRail,
-    #   ConfirmInterruptRail, ContextProcessorRail
+    #   AgentModeRail, StructuredAskUserRail, ConfirmInterruptRail, ContextProcessorRail
+    # 注意：ProjectMemoryRail, CodingMemoryRail 受 memory.enabled 开关控制，
+    #       开关关闭时不加载，开关开启时固定挂载。
     rails:
       - SkillUseRail
       - WorktreeRail
@@ -881,6 +982,7 @@ modes:
       - web_paid_search
       - user_todos
       - skill_toolkit
+      - skill_retrieval
 
     embedding_config:
       model_name: null
@@ -893,6 +995,9 @@ modes:
       teammate_mode: build_mode
       spawn_mode: inprocess
       enable_swarmflow: true
+
+      # Team-specific permission control.
+      enable_permissions: false
 
       leader:
         member_name: team-leader

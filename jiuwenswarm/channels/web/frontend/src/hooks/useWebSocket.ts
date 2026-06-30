@@ -46,6 +46,28 @@ import {
 
 const WS_RECONNECT_EVENT = 'jiuwenclaw:ws-reconnect-request';
 
+function isCompletedResumeResult(interruptResult: unknown): boolean {
+  if (!interruptResult || typeof interruptResult !== 'object') {
+    return false;
+  }
+  const result = interruptResult as {
+    intent?: unknown;
+    success?: unknown;
+    has_active_task?: unknown;
+  };
+  return result.intent === 'resume' && result.success === true && result.has_active_task === false;
+}
+
+function getConnectSignature(options: WebConnectOptions): string {
+  return JSON.stringify({
+    provider: options.provider || '',
+    apiKey: options.apiKey || '',
+    apiBase: options.apiBase || '',
+    model: options.model || '',
+    projectPath: options.projectPath || '',
+  });
+}
+
 const TEAM_TASK_STATUS_SET = new Set<TeamTaskStatus>([
   'pending',
   'blocked',
@@ -73,6 +95,15 @@ function pickString(...values: unknown[]) {
   return undefined;
 }
 
+function resolveInterruptResumeMode(sessionId: string): AgentMode {
+  const sessionStore = useSessionStore.getState();
+  const session =
+    sessionStore.currentSession?.session_id === sessionId
+      ? sessionStore.currentSession
+      : sessionStore.sessions.find((item) => item.session_id === sessionId);
+  return normalizeAgentMode(session?.mode);
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
 }
@@ -96,6 +127,21 @@ function getPayloadSessionId(payload: Record<string, unknown>): string | undefin
   const event = payload.event;
   if (isRecord(event)) {
     return pickString(event.session_id);
+  }
+  return undefined;
+}
+
+function getPayloadRequestId(payload: Record<string, unknown>): string | undefined {
+  const direct = pickString(payload.request_id, payload.rid);
+  if (direct) {
+    return direct;
+  }
+  const nestedPayload = payload.payload;
+  if (isRecord(nestedPayload)) {
+    const nested = pickString(nestedPayload.request_id, nestedPayload.rid);
+    if (nested) {
+      return nested;
+    }
   }
   return undefined;
 }
@@ -301,6 +347,19 @@ function normalizeAgentMode(rawMode: unknown): AgentMode {
   return 'agent.plan';
 }
 
+function unsupportedEvolutionModeMessage(content: string, mode: AgentMode): string | null {
+  const trimmed = content.trim();
+  const isEvolutionCommand =
+    trimmed === '/evolve' ||
+    trimmed.startsWith('/evolve ') ||
+    trimmed === '/evolve_simplify' ||
+    trimmed.startsWith('/evolve_simplify ');
+  if (!isEvolutionCommand || mode === 'agent.plan' || mode === 'team') {
+    return null;
+  }
+  return `${mode} 模式下演进功能不可用。`;
+}
+
 const EVENT_DEDUP_WINDOW_MS = 1500;
 const CONTEXT_COMPRESSION_START_DELAY_MS = 300;
 
@@ -413,6 +472,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
   const [isConnected, setIsConnected] = useState(false);
   const [connectionState, setConnectionState] =
     useState<WebConnectionState>('idle');
+  const lastConnectSignatureRef = useRef<string>('');
   const onConnectRef = useRef(onConnect);
   const onDisconnectRef = useRef(onDisconnect);
   const onErrorRef = useRef(onError);
@@ -423,6 +483,9 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
   const clearedTeamPanelSessionRef = useRef<string | null>(null);
   const teamMemberOutputEventRef = useRef<Map<string, string>>(new Map());
   const eventDedupDroppedRef = useRef<Record<string, number>>({});
+  const symphonyStatusTargetRef = useRef<Map<string, { messageId: string; baseContent: string }>>(
+    new Map()
+  );
   const contextCompressionSummaryRef = useRef<ContextCompressionSummary>({
     count: 0,
     summaries: [],
@@ -689,6 +752,18 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
     async (content: string, sessionId: string) => {
       if (!content.trim()) return;
 
+      const currentMode = useSessionStore.getState().mode;
+      const unsupportedEvolutionMode = unsupportedEvolutionModeMessage(content, currentMode);
+      if (unsupportedEvolutionMode) {
+        addMessage({
+          id: `error-${Date.now()}`,
+          role: 'system',
+          content: unsupportedEvolutionMode,
+          timestamp: new Date().toISOString(),
+        });
+        return;
+      }
+
       const isInitialUserMessage = !useChatStore
         .getState()
         .messages.some((message) => message.role === 'user');
@@ -722,7 +797,6 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
       setThinking(true);
 
       // 正常调用接口
-      const currentMode = useSessionStore.getState().mode;
       const selectedModel = useSessionStore.getState().selectedModelName;
       if (currentMode === 'auto_harness') {
         useHarnessStore.getState().reset();
@@ -962,25 +1036,55 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
     async (sessionId: string, requestId: string, answers: UserAnswer[], source?: string) => {
       try {
         const pendingQuestion = useChatStore.getState().pendingQuestion;
+        const pendingMatches = pendingQuestion?.request_id === requestId;
+        const effectiveSource = source ?? (pendingMatches ? pendingQuestion?.source : undefined);
+        const approvalSchema =
+          pendingMatches
+            ? pendingQuestion?.approvalSchema
+            : undefined;
         const evolutionMeta =
-          pendingQuestion?.request_id === requestId
+          pendingMatches
             ? pendingQuestion.evolutionMeta
             : undefined;
         const evolutionMetaPayload =
           evolutionMeta && typeof evolutionMeta === 'object'
             ? { evolution_meta: evolutionMeta }
             : {};
+        const approvalSchemaPayload = approvalSchema ? { approval_schema: approvalSchema } : {};
+        const sourcePayload = effectiveSource ? { source: effectiveSource } : {};
+        const structuredPlanPayload =
+          pendingMatches && pendingQuestion?.planApprovalKind === 'plan_approval'
+            ? {
+                plan_approval_kind: pendingQuestion.planApprovalKind,
+                plan_content: pendingQuestion.planContent ?? '',
+                plan_language: pendingQuestion.planLanguage ?? 'cn',
+              }
+            : {};
+        const approvalTransport =
+          evolutionMeta && typeof evolutionMeta.approval_transport === 'string'
+            ? evolutionMeta.approval_transport
+            : undefined;
         // 如果是需要走 interrupt/interact 的确认，发送 chat.send
-        if (source === 'permission_interrupt' || source === 'confirm_interrupt') {
+        if (
+          effectiveSource === 'permission_interrupt' ||
+          effectiveSource === 'confirm_interrupt' ||
+          effectiveSource === 'ask_user_interrupt' ||
+          effectiveSource === 'evolution_interrupt' ||
+          (effectiveSource === 'skill_evolution_approval' && approvalTransport === 'interrupt')
+        ) {
+          const resolvedResumeMode = resolveInterruptResumeMode(sessionId);
           await request('chat.send', {
             session_id: sessionId,
             query: '',
+            mode: resolvedResumeMode,
             request_id: requestId,
             answers: answers,
-            source,
+            ...sourcePayload,
+            ...structuredPlanPayload,
+            ...approvalSchemaPayload,
             ...evolutionMetaPayload,
           });
-        } else if (source === 'activate_confirm') {
+        } else if (effectiveSource === 'activate_confirm') {
           const action = answers[0]?.selected_options[0] === '拒绝' ? 'reject' : 'accept';
           const interactionId = requestId || useHarnessStore.getState().activateInteraction?.interactionId || '';
           if (!interactionId) {
@@ -1003,6 +1107,8 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
             session_id: sessionId,
             request_id: requestId,
             answers,
+            ...sourcePayload,
+            ...approvalSchemaPayload,
             ...evolutionMetaPayload,
           });
         }
@@ -1110,6 +1216,25 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
     }
     setThinking(false);
   }, [setThinking]);
+
+  const shouldRecoverProcessingFromReasoning = useCallback((payload: Record<string, unknown>): boolean => {
+    const chatState = useChatStore.getState();
+    if (chatState.isProcessing || chatState.isLoadingHistory) {
+      return false;
+    }
+    if (chatState.currentStreamId) {
+      return true;
+    }
+    if (webClient.getInflightCount() > 0) {
+      return true;
+    }
+    const payloadRequestId = getPayloadRequestId(payload);
+    return Boolean(
+      payloadRequestId &&
+      activeRequestIdRef.current &&
+      payloadRequestId === activeRequestIdRef.current
+    );
+  }, []);
 
   const getTeamMemberOutputKey = useCallback(
     (payload: Record<string, unknown>, memberId: string): string => stableEventId(
@@ -1277,8 +1402,9 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
       webClient.on('chat.reasoning', ({ payload }) => {
         if (!shouldHandleSessionEvent(payload)) return;
 
-        // 页面刷新后，如果收到活跃事件但 isProcessing=false，自动恢复执行状态
-        if (!useChatStore.getState().isProcessing && !useChatStore.getState().isLoadingHistory) {
+        // 只在明确属于当前活跃请求时恢复 processing，避免 evolution 后置 reasoning
+        // 把已完成会话重新拉回处理中。
+        if (shouldRecoverProcessingFromReasoning(payload)) {
           setProcessing(true);
         }
       }),
@@ -1308,6 +1434,16 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
             });
           }
           return;
+        }
+        // Defensive: chat.final is the definitive end-of-response marker.
+        // The primary transition is driven by chat.processing_status
+        // (is_processing=false), but if that frame is lost the UI would be stuck
+        // showing the stop button. Setting isProcessing=false here is safe —
+        // processing_status will override if needed.
+        if (!useChatStore.getState().isLoadingHistory) {
+          setProcessing(false);
+          setThinking(false);
+          clearSubtasks();
         }
         if (content) {
           revealPendingContextUsage();
@@ -1355,9 +1491,12 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
           const cronMeta = payload.cron as Record<string, unknown> | undefined;
           const cronRunId =
             typeof cronMeta?.run_id === 'string' ? cronMeta.run_id.trim() : '';
-          const isCronPlaceholderContent = /^\[cron\].*正在执行中/.test(content);
+          const isCronPlaceholderContent =
+            cronMeta?.is_placeholder === true ||
+            /正在执行中，结果稍后补发/.test(content) ||
+            /^\[cron\].*正在执行中/.test(content);
 
-          // 正式结果：替换同 run_id 的占位气泡，或最近的 [cron]…正在执行中…
+          // 正式结果：替换同 run_id 的占位气泡，或最近的定时任务「正在执行中」占位
           if (!isCronPlaceholderContent) {
             let placeholderId: string | null = null;
             if (cronRunId) {
@@ -1368,7 +1507,10 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
               for (let i = messages.length - 1; i >= 0; i -= 1) {
                 const msg = messages[i];
                 if (msg.role !== 'assistant' || typeof msg.content !== 'string') continue;
-                if (/^\[cron\].*正在执行中/.test(msg.content)) {
+                if (
+                  /正在执行中，结果稍后补发/.test(msg.content) ||
+                  /^\[cron\].*正在执行中/.test(msg.content)
+                ) {
                   placeholderId = msg.id;
                   break;
                 }
@@ -1667,12 +1809,13 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
         if (useChatStore.getState().switchingMode) return;
         // 加载历史消息时忽略处理状态更新
         if (useChatStore.getState().isLoadingHistory) return;
+        const isProcessingNow = Boolean(payload.is_processing);
         // 如果 interrupt_result 指示任务已完成，忽略 processing_status=true
         const { interruptResult } = useChatStore.getState();
-        if (interruptResult && interruptResult.intent === 'resume' && interruptResult.success && interruptResult.has_active_task === false) {
+        const resumeAlreadyCompleted = isCompletedResumeResult(interruptResult);
+        if (isProcessingNow && resumeAlreadyCompleted) {
           return;
         }
-        const isProcessingNow = Boolean(payload.is_processing);
         if (isProcessingNow && useChatStore.getState().isPaused) {
           return;
         }
@@ -1680,11 +1823,16 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
         if (!isProcessingNow) {
           setThinking(false);
           clearSubtasks();
+          stopStreaming();
 
           // 检查是否有等待的任务队列
           const currentMode = useSessionStore.getState().mode;
           const { taskQueue } = useChatStore.getState();
-          if (currentMode === 'agent.fast' && taskQueue.length > 0) {
+          if (
+            currentMode === 'agent.fast' &&
+            !resumeAlreadyCompleted &&
+            taskQueue.length > 0
+          ) {
             // 智能执行模式下，自动处理队列中的下一个任务
             const nextTask = taskQueue[0];
             if (nextTask && activeSessionIdRef.current && sendMessageRef.current) {
@@ -1695,6 +1843,60 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
             }
           }
         }
+      }),
+      webClient.on('chat.symphony_status', ({ payload }) => {
+        if (!shouldHandleSessionEvent(payload)) return;
+        const content = typeof payload.content === 'string' ? payload.content.trim() : '';
+        if (!content) return;
+        const operationId =
+          typeof payload.operation_id === 'string' && payload.operation_id.trim()
+            ? payload.operation_id.trim()
+            : typeof payload.request_id === 'string' && payload.request_id.trim()
+              ? payload.request_id.trim()
+              : `${Date.now()}`;
+        const messageId = `symphony-status-${operationId}`;
+        const status = typeof payload.status === 'string' ? payload.status : '';
+        const detail = typeof payload.detail === 'string' ? payload.detail.trim() : '';
+        const displayContent =
+          status === 'failed' && detail && !content.includes(detail)
+            ? `${content}\n${detail}`
+            : content;
+        const chatState = useChatStore.getState();
+        const cachedTarget = symphonyStatusTargetRef.current.get(operationId);
+        const targetMessage = cachedTarget
+          ? chatState.messages.find((message) => message.id === cachedTarget.messageId)
+          : [...chatState.messages].reverse().find(
+            (message) =>
+              message.role === 'assistant' ||
+              (message.role === 'system' && message.id?.startsWith('team-leader-'))
+          );
+        if (targetMessage) {
+          const target = cachedTarget || {
+            messageId: targetMessage.id,
+            baseContent: targetMessage.content || '',
+          };
+          symphonyStatusTargetRef.current.set(operationId, target);
+          const baseContent = target.baseContent.trimEnd();
+          chatState.updateMessage(target.messageId, {
+            content: baseContent ? `${baseContent}\n\n${displayContent}` : displayContent,
+            timestamp: new Date().toISOString(),
+          });
+          return;
+        }
+        const existing = chatState.messages.find((message) => message.id === messageId);
+        if (existing) {
+          chatState.updateMessage(messageId, {
+            content: displayContent,
+            timestamp: new Date().toISOString(),
+          });
+          return;
+        }
+        chatState.addMessage({
+          id: messageId,
+          role: 'system',
+          content: displayContent,
+          timestamp: new Date().toISOString(),
+        });
       }),
       webClient.on('chat.evolution_status', ({ payload }) => {
         if (!shouldHandleSessionEvent(payload)) return;
@@ -1846,11 +2048,32 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
             : questionPayload._evolution_meta && typeof questionPayload._evolution_meta === 'object'
               ? (questionPayload._evolution_meta as Record<string, unknown>)
               : undefined;
+        const questions = Array.isArray(questionPayload.questions) ? questionPayload.questions : [];
+        const approvalSchema =
+          typeof questionPayload.approval_schema === 'string'
+            ? questionPayload.approval_schema
+            : undefined;
+        const planApprovalKind =
+          typeof questionPayload.plan_approval_kind === 'string'
+            ? questionPayload.plan_approval_kind
+            : undefined;
+        const planContent =
+          typeof questionPayload.plan_content === 'string'
+            ? questionPayload.plan_content
+            : undefined;
+        const planLanguage =
+          questionPayload.plan_language === 'cn' || questionPayload.plan_language === 'en'
+            ? questionPayload.plan_language
+            : undefined;
         const normalizedPayload: AskUserQuestionPayload = {
           request_id: typeof questionPayload.request_id === 'string' ? questionPayload.request_id : '',
           source: typeof questionPayload.source === 'string' ? questionPayload.source : undefined,
-          questions: Array.isArray(questionPayload.questions) ? questionPayload.questions : [],
+          questions,
+          ...(approvalSchema ? { approvalSchema } : {}),
           ...(evolutionMeta ? { evolutionMeta } : {}),
+          ...(planApprovalKind ? { planApprovalKind } : {}),
+          ...(planContent !== undefined ? { planContent } : {}),
+          ...(planLanguage ? { planLanguage } : {}),
         };
         setPendingQuestion(normalizedPayload);
       }),
@@ -2265,6 +2488,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
     updateSession,
     shouldHandleSessionEvent,
     shouldDropDuplicatedEvent,
+    shouldRecoverProcessingFromReasoning,
     startStreaming,
     stopStreaming,
     t,
@@ -2281,13 +2505,42 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
       model,
       projectPath,
     };
-    void webClient.connect(connectOptions).catch((error) => {
-      const webError = error as WebError;
-      setConnectionStats({ lastError: webError.message });
-      onErrorRef.current?.(webError.message || 'WebSocket connection error');
-    });
+    const nextSignature = getConnectSignature(connectOptions);
+    const previousSignature = lastConnectSignatureRef.current;
+    const state = webClient.getState();
 
+    if (nextSignature === previousSignature && state !== 'closed') {
+      return;
+    }
+
+    lastConnectSignatureRef.current = nextSignature;
+
+    const runConnect = async () => {
+      try {
+        if (previousSignature && previousSignature !== nextSignature && state !== 'closed') {
+          await webClient.disconnect('connect options changed');
+        }
+        await webClient.connect(connectOptions);
+      } catch (error) {
+        const webError = error as WebError;
+        setConnectionStats({ lastError: webError.message });
+        onErrorRef.current?.(webError.message || 'WebSocket connection error');
+      }
+    };
+
+    void runConnect();
+  }, [
+    apiBase,
+    apiKey,
+    model,
+    projectPath,
+    provider,
+    setConnectionStats,
+  ]);
+
+  useEffect(() => {
     return () => {
+      lastConnectSignatureRef.current = '';
       webClient.disconnect();
       clearMessages();
       clearTodos();
@@ -2299,14 +2552,9 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
       setConnectionStats({ state: 'closed', inflight: 0 });
     };
   }, [
-    apiBase,
-    apiKey,
     clearMessages,
     clearSubtasks,
     clearTodos,
-    model,
-    projectPath,
-    provider,
     setContextCompressionStats,
     setConnectionStats,
     setConnected,

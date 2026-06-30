@@ -118,22 +118,51 @@ export class InfoMessageComponent implements Component {
     if (meta?.view === "compact_summary") {
       const lines: string[] = [];
       lines.push(...renderWrappedText(Math.max(1, width), "· Compaction summary", palette.text.info));
-      lines.push(
-        ...renderClaudeResponseLines(
-          width,
-          renderWrappedText(
-            Math.max(1, width - 4),
-            "The earlier conversation has been compacted into the following memory block, which will be used as historical context going forward:",
+      const isRewindCompact = meta.title && meta.title.startsWith("Summarized");
+      if (!isRewindCompact) {
+        lines.push(
+          ...renderClaudeResponseLines(
+            width,
+            renderWrappedText(
+              Math.max(1, width - 4),
+              "The earlier conversation has been compacted into the following memory block, which will be used as historical context going forward:",
+              palette.text.dim,
+            ),
             palette.text.dim,
           ),
-          palette.text.dim,
-        ),
-      );
+        );
+      }
       lines.push(
         ...renderClaudeResponseLines(
           width,
           renderWrappedText(Math.max(1, width - 4), this.entry.content, palette.text.assistant),
           palette.text.assistant,
+        ),
+      );
+      return lines;
+    }
+
+    if (meta?.view === "rewind_summary") {
+      const lines: string[] = [];
+      lines.push(
+        ...renderWrappedText(Math.max(1, width), "⏺ Summarized conversation", palette.text.info),
+      );
+      lines.push(
+        ...renderClaudeResponseLines(
+          width,
+          renderWrappedText(
+            Math.max(1, width - 4),
+            this.entry.content,
+            palette.text.assistant,
+          ),
+          palette.text.assistant,
+        ),
+      );
+      lines.push(
+        ...renderWrappedText(
+          Math.max(1, width),
+          "   (ctrl+o to expand history)",
+          palette.text.dim,
         ),
       );
       return lines;

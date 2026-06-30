@@ -5,7 +5,7 @@
 from types import SimpleNamespace
 
 from jiuwenswarm.server.runtime.agent_adapter import interface_code
-from jiuwenswarm.server.runtime.agent_adapter.interface_code import JiuwenClawCodeAdapter
+from jiuwenswarm.server.runtime.agent_adapter.interface_code import JiuwenSwarmCodeAdapter
 
 
 class _FakeResourceMgr:
@@ -32,7 +32,7 @@ def test_code_adapter_builds_acp_chat_when_profile_configured(monkeypatch):
         SimpleNamespace(resource_mgr=_FakeResourceMgr()),
     )
 
-    cards = JiuwenClawCodeAdapter().build_code_tool_cards("agent-id")
+    cards = JiuwenSwarmCodeAdapter().build_code_tool_cards("agent-id")
 
     assert [card.name for card in cards] == ["acp_chat"]
 
@@ -50,7 +50,7 @@ def test_code_adapter_skips_acp_chat_without_profiles(monkeypatch):
         SimpleNamespace(resource_mgr=_FakeResourceMgr()),
     )
 
-    cards = JiuwenClawCodeAdapter().build_code_tool_cards("agent-id")
+    cards = JiuwenSwarmCodeAdapter().build_code_tool_cards("agent-id")
 
     assert cards == []
 

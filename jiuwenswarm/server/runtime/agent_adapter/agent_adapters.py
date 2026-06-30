@@ -1,6 +1,6 @@
 # Copyright (c) Huawei Technologies, Co., Ltd. 2025. All rights reserved.
 
-"""Unified adapter protocol for JiuWenClaw SDK backends.
+"""Unified adapter protocol for JiuWenSwarm SDK backends.
 
 Defines the minimal interface every SDK adapter must implement so that
 the Facade (interface.py) can drive any backend without knowing its
@@ -25,7 +25,7 @@ _DEFAULT_SDK = "harness"
 class AgentAdapter(Protocol):
     """Minimal capability set every SDK adapter must satisfy.
 
-    The Facade (JiuWenClaw) depends only on this interface; individual
+    The Facade (JiuWenSwarm) depends only on this interface; individual
     adapter modules implement it without any coupling to each other.
     """
 
@@ -131,10 +131,10 @@ def create_adapter(sdk: str | None = None, *, mode: str = "agent") -> AgentAdapt
 
     if sdk_name == "harness":
         if mode == "code":
-            from jiuwenswarm.server.runtime.agent_adapter.interface_code import JiuwenClawCodeAdapter
-            return JiuwenClawCodeAdapter()
-        from jiuwenswarm.server.runtime.agent_adapter.interface_deep import JiuWenClawDeepAdapter
-        return JiuWenClawDeepAdapter()
+            from jiuwenswarm.server.runtime.agent_adapter.interface_code import JiuwenSwarmCodeAdapter
+            return JiuwenSwarmCodeAdapter()
+        from jiuwenswarm.server.runtime.agent_adapter.interface_deep import JiuWenSwarmDeepAdapter
+        return JiuWenSwarmDeepAdapter()
 
     if sdk_name == "pi":
         raise NotImplementedError(

@@ -30,10 +30,12 @@ from openjiuwen.agent_teams.harness.manifest import (
     param_field,
 )
 from openjiuwen.harness.rails import (
+    EvolutionInterruptRail,
     SkillEvolutionRail,
     TeamSkillCreateRail,
     TeamSkillEvolutionRail,
 )
+from openjiuwen.harness.rails.evolution import EvolutionReviewRuntime
 
 from jiuwenswarm.agents.swarm.context import SwarmBuildContext
 from jiuwenswarm.server.runtime.skill import load_execution_disabled_skills
@@ -44,6 +46,7 @@ logger = logging.getLogger(__name__)
 TEAM_SKILL_EVOLUTION = "swarm.team_skill_evolution"
 TEAM_SKILL_CREATE = "swarm.team_skill_create"
 MEMBER_SKILL_EVOLUTION = "swarm.member_skill_evolution"
+EVOLUTION_INTERRUPT = "swarm.evolution_interrupt"
 
 
 def _build_team_workspace_info(
@@ -188,6 +191,16 @@ class SwarmTeamSkillEvolutionRail(TeamSkillEvolutionRail):
             team_manager = get_team_manager(self._swarm_channel)
             team_manager.register_team_live_rail(self._swarm_session_id, agent, self)
             team_manager.register_team_skill_rail(self._swarm_session_id, self)
+            if team_manager.consume_team_evolution_watcher_deferred(self._swarm_session_id):
+                from jiuwenswarm.server.runtime.agent_adapter.team_helpers import (
+                    ensure_team_evolution_watcher,
+                )
+
+                ensure_team_evolution_watcher(
+                    self._swarm_channel,
+                    self._swarm_session_id,
+                    source="rail_registered",
+                )
             _register_team_rail_context(
                 self._swarm_channel,
                 self._swarm_session_id,
@@ -328,18 +341,49 @@ def _build_evolution_llm_from(model_config: dict[str, Any]) -> tuple[Any, str]:
         ModelClientConfig,
         ModelRequestConfig,
     )
+    from jiuwenswarm.common.reasoning_injector import build_reasoning_model_request_kwargs
 
     model_client_config = model_config.get("model_client_config") or {}
     model_config_obj = model_config.get("model_config_obj") or {}
     model_name = model_config.get("model_name") or "gpt-4"
     request_config = ModelRequestConfig(
-        model=model_name,
-        temperature=model_config_obj.get("temperature", 0.95),
+        **build_reasoning_model_request_kwargs(
+            model_client_config=model_client_config,
+            model_config_obj=model_config_obj,
+            model_name=model_name,
+        )
     )
     client_config = ModelClientConfig(**model_client_config)
     return Model(
         model_client_config=client_config, model_config=request_config
     ), model_name
+
+
+def _build_evolution_approval_stack(
+    rail: SkillEvolutionRail,
+    *,
+    review_runtime: EvolutionReviewRuntime,
+    auto_save: bool,
+    language: str,
+) -> list[Any]:
+    """Return the approval interrupt plus evolution rail in registration order."""
+    return [
+        EvolutionInterruptRail(
+            review_runtime=review_runtime,
+            submission_service=rail.approval_submission_service,
+            auto_save=auto_save,
+            language=language,
+        ),
+        rail,
+    ]
+
+
+harness_element(
+    kind=ElementKind.RAIL,
+    name=EVOLUTION_INTERRUPT,
+    description="Active Skill evolution mutation approval interrupt rail.",
+    builder=EvolutionInterruptRail,
+)
 
 
 class TeamSkillEvolutionInput(ConstructionInput):
@@ -351,6 +395,9 @@ class TeamSkillEvolutionInput(ConstructionInput):
     )
     auto_scan: bool = param_field(
         default=False, description="Evolution auto-scan flag."
+    )
+    auto_save: bool = param_field(
+        default=False, description="Evolution auto-save approval flag."
     )
     team_skills_dir: str | None = context_field(
         attr="team_skills_dir", description="Team shared skills directory."
@@ -384,7 +431,7 @@ class TeamSkillEvolutionInput(ConstructionInput):
 def build_team_skill_evolution_rail(
     params: dict[str, Any],
     ctx: SwarmBuildContext,
-) -> SwarmTeamSkillEvolutionRail | None:
+) -> list[Any]:
     """Build the leader-only team skill evolution rail from the config source.
 
     Mirrors the leader branch of the legacy ``build_member_rails``: builds the
@@ -397,12 +444,13 @@ def build_team_skill_evolution_rail(
         ctx: The per-member build context.
 
     Returns:
-        A ``SwarmTeamSkillEvolutionRail`` for the leader, or ``None`` when the
-        member is not the leader or no team skills directory is configured.
+        ``[EvolutionInterruptRail, SwarmTeamSkillEvolutionRail]`` for the leader,
+        or ``[]`` when the member is not the leader or no team skills directory
+        is configured.
     """
     # Cheap gate before resolving (avoids building the evolution LLM for non-leaders).
     if ctx.role != "leader" or not ctx.team_skills_dir:
-        return None
+        return []
 
     try:
         inp = TeamSkillEvolutionInput.resolve(params, ctx)
@@ -411,16 +459,20 @@ def build_team_skill_evolution_rail(
             inp.evolution_model_config
         )
         bound_registry = inp.trajectory_registry if inp.team_id else None
+        review_runtime = EvolutionReviewRuntime()
         rail = SwarmTeamSkillEvolutionRail(
             inp.team_skills_dir,
             llm=llm_model,
             model=actual_model_name,
+            review_runtime=review_runtime,
             language=inp.language,
             trajectory_source=bound_registry,
             trajectory_sink=bound_registry,
             member_role=inp.role,
-            auto_scan=inp.auto_scan,
-            auto_save=False,
+            auto_scan=False,
+            auto_save=inp.auto_save,
+            fuzzy_review=False,
+            completion_followup_enabled=inp.auto_scan,
             team_id=inp.team_id,
             disabled_skills=load_execution_disabled_skills(),
         )
@@ -434,17 +486,24 @@ def build_team_skill_evolution_rail(
             trajectory_registry=inp.trajectory_registry,
         )
         logger.info(
-            "[swarm.team_skill_evolution] built: skills_dir=%s, model=%s, auto_scan=%s",
+            "[swarm.team_skill_evolution] built: skills_dir=%s, model=%s, "
+            "auto_scan=%s, completion_followup_enabled=%s",
             inp.team_skills_dir,
             actual_model_name,
+            False,
             inp.auto_scan,
         )
-        return rail
+        return _build_evolution_approval_stack(
+            rail,
+            review_runtime=review_runtime,
+            auto_save=inp.auto_save,
+            language=inp.language,
+        )
     except Exception as exc:
         logger.warning(
             "[swarm.team_skill_evolution] build failed: %s", exc, exc_info=True
         )
-        return None
+        return []
 
 
 class TeamSkillCreateInput(ConstructionInput):
@@ -545,6 +604,9 @@ class MemberSkillEvolutionInput(ConstructionInput):
     team_skills_dir: str | None = context_field(
         attr="team_skills_dir", description="Team shared skills directory."
     )
+    language: str = context_field(
+        attr="language", default="cn", description="Member language code."
+    )
     trajectory_registry: Any = context_field(
         attr="trajectory_registry", description="Per-team trajectory registry."
     )
@@ -567,7 +629,7 @@ class MemberSkillEvolutionInput(ConstructionInput):
 def build_member_skill_evolution_rail(
     params: dict[str, Any],
     ctx: SwarmBuildContext,
-) -> SwarmMemberSkillEvolutionRail | None:
+) -> list[Any]:
     """Build the teammate-only member skill evolution rail from the config source.
 
     Replicates ``build_skill_evolution_rail`` (auto-scan, ``auto_save=True``,
@@ -580,27 +642,33 @@ def build_member_skill_evolution_rail(
         ctx: The per-member build context.
 
     Returns:
-        A ``SwarmMemberSkillEvolutionRail`` for non-leader members, or ``None``
-        when the member is the leader or no team skills directory is configured.
+        ``[EvolutionInterruptRail, SwarmMemberSkillEvolutionRail]`` for non-leader
+        members, or ``[]`` when the member is the leader or no team skills
+        directory is configured.
     """
     # Cheap gate before resolving (avoids building the evolution LLM for the leader).
     if ctx.role == "leader" or not ctx.team_skills_dir:
-        return None
+        return []
 
     try:
         inp = MemberSkillEvolutionInput.resolve(params, ctx)
         llm_model, actual_model_name = _build_evolution_llm_from(
             inp.evolution_model_config
         )
+        review_runtime = EvolutionReviewRuntime()
         rail = SwarmMemberSkillEvolutionRail(
             inp.team_skills_dir,
             llm=llm_model,
             model=actual_model_name,
+            review_runtime=review_runtime,
+            language=inp.language,
             auto_scan=inp.auto_scan,
             auto_save=True,
+            fuzzy_review=False,
             disabled_skills=load_execution_disabled_skills(),
         )
-        if inp.trajectory_registry is not None and inp.team_id:
+        has_team_trajectory_sink = inp.trajectory_registry is not None and bool(inp.team_id)
+        if has_team_trajectory_sink:
             rail.set_trajectory_sink(
                 inp.trajectory_registry,
                 team_id=inp.team_id,
@@ -612,17 +680,23 @@ def build_member_skill_evolution_rail(
             "team_trajectory_sink=%s",
             actual_model_name,
             inp.auto_scan,
-            inp.trajectory_registry is not None and bool(inp.team_id),
+            has_team_trajectory_sink,
         )
-        return rail
+        return _build_evolution_approval_stack(
+            rail,
+            review_runtime=review_runtime,
+            auto_save=True,
+            language=inp.language,
+        )
     except Exception as exc:
         logger.warning(
             "[swarm.member_skill_evolution] build failed: %s", exc, exc_info=True
         )
-        return None
+        return []
 
 
 __all__ = [
+    "EVOLUTION_INTERRUPT",
     "TEAM_SKILL_EVOLUTION",
     "TEAM_SKILL_CREATE",
     "MEMBER_SKILL_EVOLUTION",

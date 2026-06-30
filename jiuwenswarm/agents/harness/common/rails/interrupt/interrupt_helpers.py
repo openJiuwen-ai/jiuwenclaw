@@ -11,7 +11,55 @@ import json
 import re
 from typing import Any
 
+from jiuwenswarm.agents.harness.code.rails.code_plan_approval_interrupt_rail import (
+    build_plan_approval_options_from_message,
+    extract_plan_approval_content,
+    is_plan_approval_message,
+    strip_inline_plan_approval_choices,
+)
 from jiuwenswarm.common.utils import logger
+
+SKILL_EVOLUTION_APPROVAL_SCHEMA = "openjiuwen.skill_evolution_approval.v1"
+EVOLUTION_INTERRUPT_SOURCE = "evolution_interrupt"
+LEGACY_SKILL_EVOLUTION_APPROVAL_SOURCE = "skill_evolution_approval"
+INTERRUPT_RESUME_SOURCES = frozenset({
+    "permission_interrupt",
+    "confirm_interrupt",
+    "ask_user_interrupt",
+    EVOLUTION_INTERRUPT_SOURCE,
+})
+EVOLUTION_INTERRUPT_METADATA_SOURCES = frozenset({
+    EVOLUTION_INTERRUPT_SOURCE,
+    LEGACY_SKILL_EVOLUTION_APPROVAL_SOURCE,
+})
+SKILL_EVOLUTION_APPROVAL_TOOL_KINDS = {
+    "evolve_skill_experiences": "evolve",
+    "simplify_skill_experiences": "simplify",
+}
+
+
+def has_interrupt_resume_payload(params: Any) -> bool:
+    if not isinstance(params, dict):
+        return False
+    if not str(params.get("request_id") or "").strip():
+        return False
+    answers = params.get("answers")
+    return isinstance(answers, list) and bool(answers)
+
+
+def is_interrupt_resume_payload(params: Any) -> bool:
+    if not has_interrupt_resume_payload(params):
+        return False
+    source = str(params.get("source") or "").strip()
+    if source in INTERRUPT_RESUME_SOURCES:
+        return True
+    if source != LEGACY_SKILL_EVOLUTION_APPROVAL_SOURCE:
+        return False
+    evolution_meta = params.get("evolution_meta")
+    return (
+        isinstance(evolution_meta, dict)
+        and evolution_meta.get("approval_transport") == "interrupt"
+    )
 
 
 def build_permission_rail(
@@ -95,6 +143,14 @@ def build_permission_rail(
             """Persist merged `permissions` config back to config.yaml.
 
             openjiuwen PermissionInterruptRail calls this when user selects "always allow".
+
+            Instead of replacing the entire ``permissions`` section with the
+            in-memory snapshot (which may contain stale entries that were
+            already deleted from config.yaml), we first re-read the current
+            on-disk permissions, then merge only the *approval_overrides*
+            and *external_directory* deltas from ``permissions`` into it.
+            This prevents re-creating tool-level entries (e.g. ``bash: ask``)
+            that the user has already removed via the webui.
             """
             try:
                 from jiuwenswarm.common.config import _dump_yaml_round_trip, _load_yaml_round_trip
@@ -103,7 +159,23 @@ def build_permission_rail(
                 data = _load_yaml_round_trip(yaml_path)
                 if not isinstance(data, dict):
                     data = {}
-                data["permissions"] = permissions
+
+                on_disk_perms = data.get("permissions")
+                if not isinstance(on_disk_perms, dict):
+                    on_disk_perms = {}
+
+                # Only overlay approval_overrides & external_directory;
+                # keep on-disk tools/defaults/rules to avoid restoring
+                # entries the user already deleted via webui.
+                merged = dict(on_disk_perms)
+                overrides_new = permissions.get("approval_overrides")
+                if overrides_new is not None:
+                    merged["approval_overrides"] = overrides_new
+                ext_dir_new = permissions.get("external_directory")
+                if ext_dir_new is not None:
+                    merged["external_directory"] = ext_dir_new
+
+                data["permissions"] = merged
                 _dump_yaml_round_trip(yaml_path, data)
                 return True
             except Exception as exc:
@@ -239,7 +311,8 @@ def build_permission_rail(
             if not principal_user_id or not channel_id:
                 return None
 
-            perm_all = get_config().get("permissions") if isinstance(get_config(), dict) else {}
+            perm_cfg = get_config()
+            perm_all = perm_cfg.get("permissions") if isinstance(perm_cfg, dict) else {}
             owner_scopes = perm_all.get("owner_scopes") if isinstance(perm_all, dict) else None
             if not isinstance(owner_scopes, dict) or not owner_scopes:
                 return None
@@ -254,10 +327,12 @@ def build_permission_rail(
                 return ("approve",)
             return ("reject", f"[PERMISSION_DENIED] 该工具未被授权 (owner_scopes: {owner_level})")
 
+        def _get_permissions_snapshot():
+            cfg = get_config()
+            return cfg.get("permissions") if isinstance(cfg, dict) else {}
+
         host = ToolPermissionHost(
-            get_permissions_snapshot=lambda: (
-                get_config().get("permissions") if isinstance(get_config(), dict) else {}
-            ),
+            get_permissions_snapshot=_get_permissions_snapshot,
             persist_allow_rule=_persist_allow_rule,
             resolve_workspace_dir=get_workspace_dir,
             permission_yaml_path=get_config_file(),
@@ -352,7 +427,8 @@ _PERMISSION_INTERRUPT_MARKERS = (
     "Permission denied",
     "安全风险评估",
 )
-_CONFIRM_INTERRUPT_TOOLS = frozenset({"switch_mode", "exit_plan_mode"})
+# exit_plan_mode uses PlanApprovalInterruptRail (extends ConfirmInterruptRail)
+_CONFIRM_INTERRUPT_TOOLS = frozenset({"switch_mode", "exit_plan_mode"})  
 
 
 def _read_interrupt_fields(value_obj: Any) -> tuple[str, str, dict | None]:
@@ -484,12 +560,24 @@ def convert_interactions_to_ask_user_question(state_outputs: list) -> dict | Non
             "questions": [question_data],
             "source": source,
         }
+        if (
+            source == "confirm_interrupt"
+            and tool_name == "exit_plan_mode"
+            and is_plan_approval_message(message)
+        ):
+            plan_content, plan_language = extract_plan_approval_content(message)
+            payload["plan_content"] = plan_content
+            payload["plan_language"] = "en" if plan_language == "en" else "cn"
+            payload["plan_approval_kind"] = "plan_approval"
         plan_path = str(question_data.get("plan_path") or "").strip()
         plan_slug = str(question_data.get("plan_slug") or "").strip()
         if plan_path:
             payload["plan_path"] = plan_path
         if plan_slug:
             payload["plan_slug"] = plan_slug
+        structured_approval = _classify_structured_approval(value_obj, question_data)
+        if structured_approval:
+            payload.update(structured_approval)
         return payload
 
     return None
@@ -565,18 +653,119 @@ def _build_multi_questions(questions_data: list) -> list:
     for q in questions_data:
         raw_options = q.get("options", [])
         if raw_options:
-            options = [{"label": opt["label"], "description": opt.get("description", "")}
-                       for opt in raw_options]
+            options = [_normalize_question_option(opt) for opt in raw_options if isinstance(opt, dict)]
             options.append({"label": "Other", "description": "Custom input"})
         else:
             options = []
-        questions.append({
+        question_payload = {
             "question": q["question"],
             "header": q["header"],
             "options": options,
             "multi_select": q.get("multi_select", False),
-        })
+        }
+        questions.append(question_payload)
     return questions
+
+
+def _extract_ui_options(value_obj: Any) -> list[dict[str, Any]]:
+    options = getattr(value_obj, "ui_options", None) if hasattr(value_obj, "ui_options") else None
+    if options is None and isinstance(value_obj, dict):
+        options = value_obj.get("ui_options")
+    return [item for item in options or [] if isinstance(item, dict)]
+
+
+def _extract_tool_name(value_obj: Any) -> str:
+    if hasattr(value_obj, "tool_name"):
+        return str(getattr(value_obj, "tool_name", "") or "")
+    if isinstance(value_obj, dict):
+        return str(value_obj.get("tool_name") or "")
+    return ""
+
+
+def _extract_interrupt_metadata(value_obj: Any) -> dict[str, Any]:
+    metadata = getattr(value_obj, "metadata", None)
+    if metadata is None and isinstance(value_obj, dict):
+        metadata = value_obj.get("metadata")
+    return dict(metadata) if isinstance(metadata, dict) else {}
+
+
+def _normalize_question_option(option: dict[str, Any]) -> dict[str, Any]:
+    normalized = {
+        "label": str(option.get("label") or option.get("value") or "").strip(),
+        "description": str(option.get("description") or "").strip(),
+    }
+    value = option.get("value")
+    if isinstance(value, str) and value:
+        normalized["value"] = value
+    return normalized
+
+
+def _default_interrupt_options() -> list[dict[str, str]]:
+    return [
+        {"label": "本次允许", "description": "仅本次授权执行"},
+        {"label": "总是允许", "description": "记住该规则，以后自动放行"},
+        {"label": "拒绝", "description": "拒绝执行此工具"},
+    ]
+
+
+def _plan_approval_interrupt_options(
+    source: str,
+    tool_name: str,
+    message: str,
+) -> list[dict[str, str]] | None:
+    if not (
+        source == "confirm_interrupt"
+        and tool_name == "exit_plan_mode"
+        and is_plan_approval_message(message)
+    ):
+        return None
+    return build_plan_approval_options_from_message(message)
+
+
+def _question_options_from_ui_options(
+    value_obj: Any,
+    source: str,
+    tool_name: str,
+    message: str,
+) -> list[dict[str, Any]]:
+    options = []
+    for option in _extract_ui_options(value_obj):
+        normalized = _normalize_question_option(option)
+        if normalized["label"]:
+            options.append(normalized)
+    if options:
+        return options
+    return _plan_approval_interrupt_options(source, tool_name, message) or _default_interrupt_options()
+
+
+def _classify_structured_approval(
+    value_obj: Any,
+    question_data: dict[str, Any],
+) -> dict[str, Any] | None:
+    del question_data
+    metadata = _extract_interrupt_metadata(value_obj)
+    source = str(metadata.get("source") or "").strip()
+    interrupt_kind = str(metadata.get("interrupt_kind") or "").strip()
+    tool_name = _extract_tool_name(value_obj)
+
+    is_evolution_interrupt = (
+        source in EVOLUTION_INTERRUPT_METADATA_SOURCES
+        or interrupt_kind == LEGACY_SKILL_EVOLUTION_APPROVAL_SOURCE
+    )
+    if not is_evolution_interrupt and tool_name not in SKILL_EVOLUTION_APPROVAL_TOOL_KINDS:
+        return None
+    approval_kind = str(metadata.get("approval_kind") or "").strip()
+    if approval_kind not in {"evolve", "simplify"}:
+        approval_kind = SKILL_EVOLUTION_APPROVAL_TOOL_KINDS.get(tool_name, "evolve")
+
+    payload: dict[str, Any] = {
+        "source": EVOLUTION_INTERRUPT_SOURCE,
+        "approval_kind": approval_kind,
+    }
+    evolution_context = str(metadata.get("evolution_context") or "").strip()
+    if evolution_context in {"agent", "team"}:
+        payload["evolution_context"] = evolution_context
+    return payload
 
 
 def extract_question_from_interaction(payload: Any) -> dict | None:
@@ -613,18 +802,20 @@ def extract_question_from_interaction(payload: Any) -> dict | None:
         elif not message:
             message = f"工具 `{tool_name}` 需要授权才能执行"
 
-    if source == "confirm_interrupt":
+    plan_approval_options = _plan_approval_interrupt_options(source, tool_name, message)
+    if plan_approval_options:
+        header = "Exit Plan and Execute"
+        question = strip_inline_plan_approval_choices(message)
+    elif source == "confirm_interrupt":
         header = f"操作确认: {tool_name}" if tool_name else "操作确认"
+        question = message
     else:
         header = f"权限审批: {tool_name}" if tool_name else "权限审批"
+        question = message
 
     return {
-        "question": message,
+        "question": question,
         "header": header,
-        "options": [
-            {"label": "本次允许", "description": "仅本次授权执行"},
-            {"label": "总是允许", "description": "记住该规则，以后自动放行"},
-            {"label": "拒绝", "description": "拒绝执行此工具"},
-        ],
+        "options": _question_options_from_ui_options(value_obj, source, tool_name, message),
         "multi_select": False,
     }

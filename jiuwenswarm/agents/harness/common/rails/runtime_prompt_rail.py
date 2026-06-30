@@ -18,13 +18,15 @@ from openjiuwen.core.single_agent.rail.base import AgentCallbackContext
 from openjiuwen.harness.prompts import PromptSection
 from openjiuwen.harness.prompts.prompt_attachment_manager import (
     PromptAttachmentKind,
-    PromptAttachmentScope,
 )
+
 from openjiuwen.harness.rails.base import DeepAgentRail
 from jiuwenswarm.agents.harness.common.prompt.shell_environment import build_shell_environment_prompt
 from jiuwenswarm.common.utils import get_config_dir, logger
 
 from jiuwenswarm.common.utils import get_agent_workspace_dir
+
+_LANGUAGE_NAMES = {"cn": "Chinese", "zh": "Chinese", "en": "English"}
 
 _LANGUAGE_NAMES = {"cn": "Chinese", "zh": "Chinese", "en": "English"}
 
@@ -61,12 +63,11 @@ class RuntimePromptRail(DeepAgentRail):
         """清理注入的 section 并释放引用。"""
         if self.system_prompt_builder is not None:
             self.system_prompt_builder.remove_section("time")
-            self.system_prompt_builder.remove_section("runtime")
+            self.system_prompt_builder.remove_section("runtime.model_answer_policy")
             self.system_prompt_builder.remove_section("language_output")
             self.system_prompt_builder.remove_section("env")
-            self.system_prompt_builder.remove_section("git_status")
             self.system_prompt_builder.remove_section("browser_tool_policy")
-            self.system_prompt_builder.remove_section("trusted_dirs_policy")
+            self.system_prompt_builder.remove_section("tui_current_project_policy")
         self.system_prompt_builder = None
         self.attachment_manager = None
 
@@ -134,9 +135,16 @@ class RuntimePromptRail(DeepAgentRail):
         if not self.system_prompt_builder:
             return
 
-        for name in ("runtime", "language_output", "env", "git_status", "trusted_dirs_policy"):
+        for name in (
+            "time",
+            "runtime.model_answer_policy",
+            "language_output",
+            "env",
+            "browser_tool_policy",
+            "tui_current_project_policy"):
             self.system_prompt_builder.remove_section(name)
 
+        # ── time ──
         if not self._force_english and self._language == "cn":
             time_content = (
                 f"# 时间说明\n\n"
@@ -156,6 +164,7 @@ class RuntimePromptRail(DeepAgentRail):
             priority=92,
         ))
 
+        # ── runtime ──
         runtime_state: dict[str, Any] = {}
         try:
             with open(get_config_dir() / "runtime_state.yaml", encoding="utf-8") as f:
@@ -180,9 +189,12 @@ class RuntimePromptRail(DeepAgentRail):
                 f"- 当前模型：{model}\n"
                 f"- 当前模式：{mode}\n"
                 f"- 当前语言：{language_val}\n"
-                f"- 当前渠道：{channel}\n"
+                f"- 当前渠道：{channel}"
+            )
+            model_answer_policy = (
+                "# 模型名称回答策略\n\n"
                 "- 当用户询问「你是什么模型」「当前用的是哪个模型」等问题时，"
-                "直接用上方「当前模型」的值回答，只说模型名称，不要介绍身份或列出能力"
+                "直接使用 `runtime.setting` 中的当前模型值回答，只说模型名称，不要介绍身份或列出能力。"
             )
         else:
             runtime_content = (
@@ -190,23 +202,30 @@ class RuntimePromptRail(DeepAgentRail):
                 f"- Current model: {model}\n"
                 f"- Current mode: {mode}\n"
                 f"- Current language: {language_val}\n"
-                f"- Current channel: {channel}\n"
-                "- When the user asks \"what model are you\" or similar questions, "
-                "answer with only the model name above in one sentence — "
-                "do NOT introduce yourself or list capabilities."
+                f"- Current channel: {channel}"
+            )
+            model_answer_policy = (
+                "# Model Name Answer Policy\n\n"
+                "- When the user asks what model you are using, answer with only the current model "
+                "value from `runtime.setting`. Do not introduce yourself or list capabilities."
             )
 
+        self.system_prompt_builder.add_section(PromptSection(
+            name="runtime.model_answer_policy",
+            content={"cn": model_answer_policy, "en": model_answer_policy},
+            priority=95,
+        ))
+
+        await self._clear_prompt_attachment(ctx, section="runtime.setting")
         await self._upsert_prompt_attachment(
             ctx,
-            section="runtime",
+            section="runtime.setting",
             content=runtime_content,
-            scope=PromptAttachmentScope.TURN,
             kind=PromptAttachmentKind.RUNTIME,
-            source="jiuwenswarm.runtime_prompt.runtime",
             priority=95,
         )
 
-        # ── Language output constraint (injected near end, like Claude Code) ──
+        # ── Language output constraint (injected near end) ──
         language_name = _LANGUAGE_NAMES.get(language_val, language_val)
         language_output_content = (
             "# Language\n\n"
@@ -216,15 +235,28 @@ class RuntimePromptRail(DeepAgentRail):
             f"Technical terms and code identifiers should remain "
             f"in their original form."
         )
-        await self._upsert_prompt_attachment(
-            ctx,
-            section="language_output",
-            content=language_output_content,
-            scope=PromptAttachmentScope.TURN,
-            kind=PromptAttachmentKind.RUNTIME,
-            source="jiuwenswarm.runtime_prompt.language_output",
+        self.system_prompt_builder.add_section(PromptSection(
+            name="language_output",
+            content={"cn": language_output_content, "en": language_output_content},
             priority=93,
+        ))
+
+        # ── Language output constraint (injected near end) ──
+        self.system_prompt_builder.remove_section("language_output")
+        language_name = _LANGUAGE_NAMES.get(language_val, language_val)
+        language_output_content = (
+            "# Language\n\n"
+            f"Always respond in {language_name}. "
+            f"Use {language_name} for all explanations, comments, "
+            f"and communications with the user. "
+            f"Technical terms and code identifiers should remain "
+            f"in their original form."
         )
+        self.system_prompt_builder.add_section(PromptSection(
+            name="language_output",
+            content={"cn": language_output_content, "en": language_output_content},
+            priority=93,
+        ))
 
         # ── Platform / OS environment section ──
         os_type = sys.platform
@@ -325,46 +357,73 @@ class RuntimePromptRail(DeepAgentRail):
                 ctx,
                 section="git_status",
                 content=git_content,
-                scope=PromptAttachmentScope.SESSION,
                 kind=PromptAttachmentKind.WORKSPACE_DELTA,
-                source="jiuwenswarm.runtime_prompt.git_status",
                 priority=87,
             )
         else:
             await self._clear_prompt_attachment(
                 ctx,
                 section="git_status",
-                scope=PromptAttachmentScope.SESSION,
             )
 
-        self.system_prompt_builder.remove_section("browser_tool_policy")
+        # ── Channel: browser_tool_policy or trusted_dirs_policy──
         if self._channel == "web":
             browser_tool_policy = (
                 "# Browser Tool Policy\n\n"
                 "- For browser tasks such as opening pages, navigation, clicking, typing, login, screenshots, "
-                "page inspection, or extracting data from a live website, use `spawn_sub_agent` with "
+                "page inspection, or extracting data from a live website, use `task_tool` with "
                 '`subagent_type` set to `"browser_agent"` and put the full browser objective in '
                 "`task_description`.\n"
+                "- Before spawning `browser_agent` for booking, ticketing, purchasing, reservation, or "
+                "form-filling tasks, check whether the user has supplied enough confirmed details. "
+                "If required details are missing and A2UI is available, render a preflight A2UI form "
+                "with action name `browser_preflight_submit` instead of starting browser automation. "
+                "Do not use plain natural-language questions or `ask_user` for those missing "
+                "browser-task details when A2UI is available on the Web channel.\n"
+                "- Mandatory Web A2UI account-action gate: Gmail, email, mailbox cleanup, social "
+                "media posting, comments, and other externally visible account actions MUST use A2UI "
+                "when A2UI is available. Do not use `todo_create`, `todo_modify`, `memory_search`, "
+                "`task_tool`, plain text, Markdown, or `ask_user` as a substitute for A2UI preflight, "
+                "candidate selection, draft review, or final confirmation. For requests such as "
+                "finding emails and replying to the ones that need a reply, first use A2UI preflight "
+                "if filters or reply preferences are incomplete; after Gmail search, show the "
+                "emails/threads as A2UI candidates before opening, summarizing multiple messages, "
+                "drafting replies, or modifying mail; and show final A2UI confirmation before any "
+                "send, archive, delete, unsubscribe, label, mark-read, post, publish, comment, like, "
+                "follow, or delete action.\n"
+                "- For hotel booking flows, after `browser_agent` returns candidate hotels, render the "
+                "candidate list with A2UI selection actions named `hotel_option_select`. Include "
+                "`next_action=\"continue_hotel_booking\"`, the selected hotel identity, and the "
+                "confirmed city/date/guest context in each action context. When the user selects a "
+                "hotel, call `browser_agent` to continue from the current browser state and selected "
+                "candidate; do not restart the broad hotel search unless browser-state recovery is "
+                "needed. At the payment/order summary page, render a final A2UI confirmation using "
+                "`hotel_payment_confirm` and `hotel_payment_cancel` actions.\n"
+                "- For Gmail search, summarization, reply drafting, and cleanup flows, render search "
+                "results with `gmail_email_select` actions and cleanup candidates with "
+                "`gmail_cleanup_select` actions. When the user selects an email, continue from the "
+                "current Gmail browser state; do not repeat the broad Gmail search unless recovery is "
+                "needed. Filling a reply draft must use `gmail_reply_draft_select` and must stop "
+                "before sending. After `gmail_send_confirm`, send the email only if the visible "
+                "Gmail compose state matches the confirmed context. Final cleanup requires "
+                "`gmail_cleanup_confirm`. Respect `gmail_send_cancel` and `gmail_cleanup_cancel` "
+                "by stopping without side effects.\n"
+                "- For social media posting flows, render draft variants with "
+                "`social_post_draft_select`. After draft selection, use `browser_agent` to fill the "
+                "current platform compose UI but stop before any externally visible action. Final "
+                "publishing requires `social_post_confirm`; after confirmation, publish only if "
+                "the visible compose state matches the confirmed context. `social_post_cancel` "
+                "stops without publishing.\n"
                 "- Do not use bash, execute_code, subprocess, shell commands, or direct Chrome/Edge launches "
                 "for browser automation.\n"
-                "- If `spawn_sub_agent` or `browser_agent` is unavailable, say that the browser "
+                "- If `task_tool` or `browser_agent` is unavailable, say that the browser "
                 "subagent is unavailable before trying to start a browser through commands."
             )
-            await self._upsert_prompt_attachment(
-                ctx,
-                section="browser_tool_policy",
-                content=browser_tool_policy,
-                scope=PromptAttachmentScope.TURN,
-                kind=PromptAttachmentKind.RUNTIME,
-                source="jiuwenswarm.runtime_prompt.browser_tool_policy",
+            self.system_prompt_builder.add_section(PromptSection(
+                name="browser_tool_policy",
+                content={"cn": browser_tool_policy, "en": browser_tool_policy},
                 priority=98,
-            )
-        else:
-            await self._clear_prompt_attachment(
-                ctx,
-                section="browser_tool_policy",
-                scope=PromptAttachmentScope.TURN,
-            )
+            ))
 
         if self._channel == "tui":
             # Trusted directories policy for TUI mode
@@ -384,6 +443,15 @@ class RuntimePromptRail(DeepAgentRail):
                 cn_dirs_display = ", ".join(other_dirs) if other_dirs else "无"
                 en_dirs_display = ", ".join(other_dirs) if other_dirs else "none"
                 if not self._force_english and self._language == "cn":
+                    current_project_policy = (
+                        "# 当前项目工作空间\n\n"
+                        f"- 当前项目目录：{project_dir}\n"
+                        f"- 系统目录：{workspace_dir}\n\n"
+                        "- 当用户询问“当前工作空间”“当前工作目录”“当前项目目录”“项目空间”或 workspace，"
+                        "且没有明确限定 team workspace、系统目录或其他目录时，直接回答当前项目目录。\n"
+                        "- 不要为了回答这类问题调用 `pwd`、`ls` 或读取内部 Team Leader workspace；"
+                        "也不要把系统目录、team-workspace 或 Team Leader workspace 称为当前工作空间。\n"
+                    )
                     trusted_dirs_content = (
                         "# 工作目录策略\n\n"
                         f"- 系统目录（不要在其中查找或运行项目文件）：{workspace_dir}\n"
@@ -400,6 +468,19 @@ class RuntimePromptRail(DeepAgentRail):
                         "- 确认时需明确告知：操作的完整路径、操作类型（读取/编辑/执行）、潜在风险\n"
                     )
                 else:
+                    current_project_policy = (
+                        "# Current Project Workspace\n\n"
+                        f"- Current project directory: {project_dir}\n"
+                        f"- System directory: {workspace_dir}\n\n"
+                        "- When the user asks for the current workspace, current working directory, "
+                        "current project directory, project space, or workspace without explicitly "
+                        "saying team workspace, "
+                        "system directory, or another directory, answer directly with the current "
+                        "project directory.\n"
+                        "- Do not call `pwd`, `ls`, or inspect the internal Team Leader workspace "
+                        "to answer this question, and do not call the system directory, "
+                        "team-workspace, or Team Leader workspace the current workspace.\n"
+                    )
                     trusted_dirs_content = (
                         "# Working Directory Policy\n\n"
                         f"- System directory (never search or run project files here): {workspace_dir}\n"
@@ -423,17 +504,22 @@ class RuntimePromptRail(DeepAgentRail):
                         "- When confirming, clearly state: the full path, operation type (read/edit/execute), "
                         "potential risks\n"
                     )
+                self.system_prompt_builder.add_section(PromptSection(
+                    name="tui_current_project_policy",
+                    content={"cn": current_project_policy, "en": current_project_policy},
+                    priority=99,
+                ))
                 await self._upsert_prompt_attachment(
                     ctx,
-                    section="trusted_dirs",
+                    section="trusted_dirs_policy",
                     content=trusted_dirs_content,
-                    scope=PromptAttachmentScope.TURN,
                     kind=PromptAttachmentKind.WORKSPACE_DELTA,
-                    source="jiuwenswarm.runtime_prompt.trusted_dirs",
                     priority=90,
                 )
             else:
-                self.system_prompt_builder.remove_section("trusted_dirs_policy")
+                await self._clear_prompt_attachment(ctx, section="trusted_dirs_policy")
+        else:
+            await self._clear_prompt_attachment(ctx, section="trusted_dirs_policy")
 
     async def _upsert_prompt_attachment(
         self,
@@ -441,9 +527,7 @@ class RuntimePromptRail(DeepAgentRail):
         *,
         section: str,
         content: str,
-        scope: PromptAttachmentScope,
         kind: PromptAttachmentKind,
-        source: str,
         priority: int,
     ) -> None:
         if self.attachment_manager is None:
@@ -453,13 +537,12 @@ class RuntimePromptRail(DeepAgentRail):
             )
             return
         try:
-            writer = self.attachment_manager.for_context(ctx)
-            await writer.upsert_section(
-                section=section,
-                content=content,
-                scope=scope,
-                kind=kind,
-                source=source,
+            writer = self.attachment_manager.bind_context(ctx)
+            await writer.add_section(
+                section,
+                content,
+                kind,
+                "jiuwenswarm.runtime_prompt_rail",
                 priority=priority,
                 content_kind="text/markdown",
             )
@@ -471,14 +554,10 @@ class RuntimePromptRail(DeepAgentRail):
         ctx: AgentCallbackContext,
         *,
         section: str,
-        scope: PromptAttachmentScope,
     ) -> None:
         if self.attachment_manager is None:
             return
         try:
-            await self.attachment_manager.for_context(ctx).clear_section(
-                section=section,
-                scope=scope,
-            )
+            await self.attachment_manager.bind_context(ctx).clear_section(section)
         except ValueError as exc:
             logger.warning("[RuntimePromptRail] skip clearing prompt attachment section=%s: %s", section, exc)

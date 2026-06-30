@@ -35,15 +35,25 @@ from jiuwenswarm.common.schema.agent import AgentRequest, AgentResponse, AgentRe
 from jiuwenswarm.common.version import __version__
 from jiuwenswarm.extensions.hook_event import AgentServerHookEvents
 from jiuwenswarm.agents.harness.common.plugins.rail_manager import get_rail_manager
+from jiuwenswarm.agents.harness.common.rails.interrupt.interrupt_helpers import (
+    is_interrupt_resume_payload,
+)
 from jiuwenswarm.agents.harness.common.rails.permissions.permissions_persist import persist_cli_trusted_directory
 from jiuwenswarm.extensions.hooks_context import AgentServerChatHookContext
 from jiuwenswarm.server.runtime.agent_manager import AgentManager, ACP_DEFAULT_CAPABILITIES
 from jiuwenswarm.server.runtime.session.session_metadata import get_all_sessions_metadata, remove_session_metadata_cache
-from jiuwenswarm.server.runtime.session.session_history import append_compact_history_records, read_team_history_records
+from jiuwenswarm.server.runtime.session.session_history import (
+    append_compact_history_records,
+    history_exists,
+    load_history_records,
+    read_team_history_records,
+)
 from jiuwenswarm.server.runtime.agent_adapter.sysop_builder import (
     build_filesystem_policy,
     find_auto_managed_match,
+    find_nested_files_conflict,
     list_effective_sandbox_files,
+    validate_sandbox_files_runtime,
 )
 from jiuwenswarm.server.utils.utils import is_team_params
 from jiuwenswarm.agents.harness.common.rails.permissions.permissions_config_rpc import (
@@ -58,6 +68,7 @@ from jiuwenswarm.common.config import (
     get_mcp_servers,
     get_sandbox_endpoint,
     get_sandbox_runtime,
+    get_sandbox_startup_mode,
     get_sandbox_startup_mode_explicit,
     remove_mcp_server_in_config,
     resolve_preserve_file_sharing_mode_default,
@@ -79,32 +90,19 @@ from jiuwenswarm.common.security.ws_origin import (
     is_allowed_browser_origin,
 )
 from jiuwenswarm.agents.harness.code.prompt.plan_approval import (
-    APPROVE_CMD_PREFIX,
-    APPROVED_NOTIFICATION,
-    FEEDBACK_INJECTION,
     PLAN_MODE_EXITED_EVENT_TYPE,
-    PLAN_USER_APPROVED_FLAG,
-    REJECT_CMD_PREFIX,
-    classify_plan_user_intent,
-    extract_feedback_from_reject,
-    is_direct_plan_implement_request,
 )
 from jiuwenswarm.common.schema.message import ReqMethod
 
 logger = logging.getLogger(__name__)
 
-# ── Plan approval state store (session_id → PlanApprovalState) ────────────
-# Populated by PlanApprovalRail.after_tool_call after exit_plan_mode,
-# consumed by _handle_pending_plan_approval before the next user turn.
-_pending_plan_approvals: dict[str, dict] = {}
-
-# Sessions where the user approved the plan on the latest chat turn.
-# Consumed by _ensure_code_mode_state (session-scoped, not request.params) so
-# concurrent skills.list RPCs cannot steal the approval flag.
-_plan_approved_sessions: set[str] = set()
-
 # Serialize plan-mode restore per session to avoid checkpoint races.
 _session_mode_sync_locks: dict[str, asyncio.Lock] = {}
+
+# Sessions that have successfully exited plan mode via exit_plan_mode tool.
+# Set by _check_post_process_plan_exit, consumed by _ensure_code_mode_state
+# to prevent TUI-race re-entrance to plan mode.
+_plan_exited_sessions: set[str] = set()
 
 _CODE_MODE_SYNC_METHODS = frozenset({
     ReqMethod.CHAT_SEND,
@@ -127,6 +125,7 @@ _HISTORY_RESTORABLE_ASSISTANT_EVENT_TYPES = frozenset(
         "team.message",
         "context.compact_boundary",
         "context.compact_summary",
+        "context.rewind_summary",
     }
 )
 
@@ -139,6 +138,80 @@ def _request_query_text(request: AgentRequest) -> str:
     if not isinstance(query, str):
         return ""
     return query.strip()
+
+
+# /simplify prompt template — adapted /simplify skill for jiuwenswarm.
+# Guides the agent through three phases: identify changes → three-dimension review
+# (reuse/quality/efficiency) → aggregate and fix.
+# Note: jiuwenswarm's sub-agents (task_tool / Agent tool) can only be dispatched to registered
+# types (explore/plan/code, etc.) and cannot create custom reviewer roles on the fly. The prompt
+# therefore presents parallel sub-agent review as an optional optimization — the agent may also
+# perform all three reviews itself directly.
+_SIMPLIFY_PROMPT_TEMPLATE = """\
+# Simplify: Code Review and Cleanup
+
+Review all changed files for reuse, quality, and efficiency. Fix any issues found.
+
+## Phase 1: Identify Changes
+
+Run `git diff` (or `git diff HEAD` if there are staged changes) to see what changed. If there are no git changes, review the most recently modified files that the user mentioned or that you edited earlier in this conversation.
+
+## Phase 2: Launch Three Review Agents in Parallel
+
+If sub-agent tools are available (e.g. task_tool / Agent tool), launch all three agents concurrently in a single message. Pass each agent the full diff so it has the complete context. Otherwise, perform all three reviews yourself directly.
+
+### Agent 1: Code Reuse Review
+
+For each change:
+
+1. **Search for existing utilities and helpers** that could replace newly written code. Look for similar patterns elsewhere in the codebase — common locations are utility directories, shared modules, and files adjacent to the changed ones.
+2. **Flag any new function that duplicates existing functionality.** Suggest the existing function to use instead.
+3. **Flag any inline logic that could use an existing utility** — hand-rolled string manipulation, manual path handling, custom environment checks, ad-hoc type guards, and similar patterns are common candidates.
+
+### Agent 2: Code Quality Review
+
+Review the same changes for hacky patterns:
+
+1. **Redundant state**: state that duplicates existing state, cached values that could be derived, observers/effects that could be direct calls
+2. **Parameter sprawl**: adding new parameters to a function instead of generalizing or restructuring existing ones
+3. **Copy-paste with slight variation**: near-duplicate code blocks that should be unified with a shared abstraction
+4. **Leaky abstractions**: exposing internal details that should be encapsulated, or breaking existing abstraction boundaries
+5. **Stringly-typed code**: using raw strings where constants, enums (string unions), or branded types already exist in the codebase
+6. **Unnecessary JSX nesting**: wrapper Boxes/elements that add no layout value — check if inner component props (flexShrink, alignItems, etc.) already provide the needed behavior
+7. **Unnecessary comments**: comments explaining WHAT the code does (well-named identifiers already do that), narrating the change, or referencing the task/caller — delete; keep only non-obvious WHY (hidden constraints, subtle invariants, workarounds)
+
+### Agent 3: Efficiency Review
+
+Review the same changes for efficiency:
+
+1. **Unnecessary work**: redundant computations, repeated file reads, duplicate network/API calls, N+1 patterns
+2. **Missed concurrency**: independent operations run sequentially when they could run in parallel
+3. **Hot-path bloat**: new blocking work added to startup or per-request/per-render hot paths
+4. **Recurring no-op updates**: state/store updates inside polling loops, intervals, or event handlers that fire unconditionally — add a change-detection guard so downstream consumers aren't notified when nothing changed. Also: if a wrapper function takes an updater/reducer callback, verify it honors same-reference returns (or whatever the "no change" signal is) — otherwise callers' early-return no-ops are silently defeated
+5. **Unnecessary existence checks**: pre-checking file/resource existence before operating (TOCTOU anti-pattern) — operate directly and handle the error
+6. **Memory**: unbounded data structures, missing cleanup, event listener leaks
+7. **Overly broad operations**: reading entire files when only a portion is needed, loading all items when filtering for one
+
+## Phase 3: Fix Issues
+
+Wait for all reviewers to complete. Aggregate their findings and fix each issue directly. If a finding is a false positive or not worth addressing, note it and move on — do not argue with the finding, just skip it.
+
+When done, briefly summarize what was fixed (or confirm the code was already clean).
+"""
+
+
+def _build_simplify_prompt(target: str = "") -> str:
+    """Build the prompt for the /simplify command.
+
+    Args:
+        target: Optional additional focus (e.g. file path, module name, specific dimension
+            to emphasize), appended to the end of the prompt.
+    """
+    prompt = _SIMPLIFY_PROMPT_TEMPLATE
+    if target:
+        prompt += f"\n\n## Additional Focus\n\n{target}"
+    return prompt
+
 
 # System prompt for LLM-based agent generation
 _AGENT_CREATION_SYSTEM_PROMPT = """\
@@ -226,6 +299,24 @@ def resolve_request_project_dir(request: AgentRequest) -> str | None:
         if isinstance(first, str) and first.strip():
             return first.strip()
     return None
+
+
+def _harness_error_code(exc: BaseException) -> str:
+    """Map a harness package exception to a wire ``code`` for the frontend.
+
+    Mirrors the import/export code mapping in app_web_handlers.py so the web UI
+    can localize the error via ``err.code`` instead of showing the raw backend
+    message (which is locale-unaware). Keep in sync with the frontend
+    ``resolveHarnessError`` code→i18n mapping.
+    """
+    msg = str(exc).lower()
+    if "already active" in msg or "already exists" in msg:
+        return "CONFLICT"
+    if "not found" in msg:
+        return "NOT_FOUND"
+    if "native" in msg:
+        return "BAD_REQUEST"
+    return "BAD_REQUEST"
 
 
 def resolve_agent_request_mode(raw_mode: Any) -> tuple[str, str | None, str]:
@@ -366,10 +457,32 @@ def _canonicalize_sandbox_files_path(path: str) -> str:
         return path
 
 
+_SANDBOX_FILES_PARAMS = frozenset(
+    {
+        "sub",
+        "path",
+        "session_id",
+        "trusted_dirs",
+        "project_dir",
+        "cwd",
+        "mode",  # injected by gateway for agent routing
+    }
+)
+
+
+def _reject_extra_sandbox_files_params(params: dict[str, Any]) -> None:
+    extra = set(params.keys()) - _SANDBOX_FILES_PARAMS
+    if extra:
+        raise ValueError(
+            f"unexpected parameter(s): {', '.join(sorted(extra))}; "
+            "/sandbox files allow|deny|remove accepts a single path only"
+        )
+
+
 def _inject_plan_mode_activation_reminder(request: AgentRequest) -> None:
     """在用户消息中注入 <system-reminder> 告知 LLM 调用 enter_plan_mode.
 
-    对齐 Claude Code：plan 模式行为指令不进 system prompt，
+    plan 模式行为指令不进 system prompt，
     而是通过对话中的 tool_result 传递。此提醒是进入 plan 模式后的
     第一个引导，告诉 LLM 调用 enter_plan_mode 以获取完整指令。
 
@@ -402,200 +515,6 @@ def _inject_plan_mode_activation_reminder(request: AgentRequest) -> None:
             "request.params is not a dict (type=%s), session=%s",
             type(request.params).__name__, request.session_id,
         )
-
-
-# ── Plan approval helpers ──────────────────────────────────────────────
-
-
-def _store_pending_approval_from_agent(
-    session_id: str,
-    agent_instance: Any,
-) -> None:
-    """Pick up ``_plan_approval_state`` from the agent instance and store it.
-
-    Called after ``agent.process_message`` / ``process_message_stream``
-    completes.  The rail sets ``agent_instance._plan_approval_state`` during
-    ``after_tool_call``; we read it and store it in the session-level dict so
-    the next request can inspect it.
-
-    Args:
-        session_id: The session identifier.
-        agent_instance: The DeepAgent instance that just processed a request.
-    """
-    approval_state = getattr(agent_instance, "_plan_approval_state", None)
-    if approval_state is None:
-        return
-    # Convert dataclass to dict if needed
-    if hasattr(approval_state, "to_dict"):
-        _pending_plan_approvals[session_id] = approval_state.to_dict()
-    elif isinstance(approval_state, dict):
-        _pending_plan_approvals[session_id] = approval_state
-    else:
-        _pending_plan_approvals[session_id] = {
-            "pending": True,
-            "plan_slug": getattr(approval_state, "plan_slug", ""),
-            "plan_content": getattr(approval_state, "plan_content", ""),
-            "plan_path": getattr(approval_state, "plan_path", ""),
-        }
-    try:
-        delattr(agent_instance, "_plan_approval_state")
-    except (AttributeError, TypeError):
-        pass
-    logger.info(
-        "[_store_pending_approval] Session %s has pending plan approval",
-        session_id,
-    )
-
-
-def _is_resuming_tool_interrupt(request: AgentRequest) -> bool:
-    """Return True when the request resumes a paused tool-call interrupt."""
-    params = request.params if isinstance(request.params, dict) else {}
-    request_id = str(params.get("request_id") or "").strip()
-    answers = params.get("answers")
-    if not request_id or not answers:
-        return False
-    source = str(params.get("source") or "").strip()
-    return source in {
-        "permission_interrupt",
-        "confirm_interrupt",
-        "ask_user_interrupt",
-    }
-
-
-def _check_and_handle_pending_approval(
-    request: AgentRequest,
-    language: str = "cn",
-) -> bool:
-    """Check for pending plan approval and handle user's response.
-
-    Must be called BEFORE agent processing (before _ensure_code_mode_state).
-    If there is a pending approval and the user's message is a response to it,
-    this function will:
-
-    - **On approval**: Return ``True``, having already modified ``request``
-      to inject the approval notification into the query (which will be
-      visible to the model in normal mode).
-    - **On feedback**: Return ``True``, having injected the feedback as a
-      ``<system-reminder>`` and kept plan mode active.
-    - **No pending approval**: Return ``False`` (no changes).
-
-    Args:
-        request: The incoming request (will be mutated if approval is handled).
-        language: ``"cn"`` or ``"en"``.
-
-    Returns:
-        ``True`` if a pending approval was found and handled; ``False`` otherwise.
-    """
-    if _is_resuming_tool_interrupt(request):
-        return False
-
-    session_id = request.session_id
-    if not session_id:
-        return False
-
-    pending = _pending_plan_approvals.pop(session_id, None)
-    if not pending or not pending.get("pending"):
-        return False
-
-    # Read the user's response
-    user_msg = _request_query_text(request)
-    if not user_msg:
-        # Empty user message — keep pending state
-        _pending_plan_approvals[session_id] = pending
-        return False
-
-    plan_content = pending.get("plan_content", "")
-    lang = "cn" if language == "cn" else "en"
-
-    # Classify: approve → exit plan and implement; revise → stay in plan.
-    is_reject_cmd = user_msg.startswith(REJECT_CMD_PREFIX)
-    intent = classify_plan_user_intent(user_msg)
-
-    if intent == "approve":
-        # ── User approves the plan ──
-        _plan_approved_sessions.add(session_id)
-        if isinstance(request.params, dict):
-            request.params["mode"] = "code.normal"
-            request.params[PLAN_USER_APPROVED_FLAG] = True
-        approval_text = APPROVED_NOTIFICATION[lang].format(plan_content=plan_content)
-        if isinstance(request.params, dict):
-            request.params["query"] = approval_text
-        logger.info(
-            "[_check_and_handle_pending_approval] User APPROVED plan for session %s",
-            session_id,
-        )
-    else:
-        # ── User wants plan revisions only ──
-        feedback_msg = user_msg
-        if is_reject_cmd:
-            feedback_msg = extract_feedback_from_reject(user_msg)
-        feedback_text = FEEDBACK_INJECTION[lang].format(user_message=feedback_msg)
-        _plan_approved_sessions.discard(session_id)
-        if isinstance(request.params, dict):
-            request.params["mode"] = "code.plan"
-            request.params.pop(PLAN_USER_APPROVED_FLAG, None)
-            request.params["query"] = feedback_text
-        logger.info(
-            "[_check_and_handle_pending_approval] User REVISE plan for session %s",
-            session_id,
-        )
-
-    return True
-
-
-async def _try_handle_direct_plan_implement(
-    request: AgentRequest,
-    agent: Any,
-    language: str = "cn",
-) -> bool:
-    """Approve plan via chat when ``exit_plan_mode`` left no pending gate.
-
-    Covers cases where the user says e.g. 「按计划实现」 after rejecting a
-    misleading ``switch_mode`` confirm, without re-calling ``exit_plan_mode``.
-    """
-    if _is_resuming_tool_interrupt(request):
-        return False
-
-    session_id = request.session_id
-    if not session_id or not isinstance(request.params, dict):
-        return False
-    if request.params.get(PLAN_USER_APPROVED_FLAG):
-        return False
-    user_msg = _request_query_text(request)
-    if not is_direct_plan_implement_request(user_msg):
-        return False
-
-    from openjiuwen.core.single_agent import create_agent_session
-
-    session = create_agent_session(
-        session_id=request.session_id,
-        card=agent.get_instance().card,
-    )
-    await session.pre_run(inputs=None)
-    state = agent.get_instance().load_state(session)
-    if state.plan_mode.mode != "plan":
-        return False
-
-    plan_path = agent.get_instance().get_plan_file_path(session)
-    plan_content = ""
-    if plan_path and plan_path.exists():
-        plan_content = plan_path.read_text(encoding="utf-8")
-    if not plan_content.strip():
-        return False
-
-    lang = "cn" if language == "cn" else "en"
-    _plan_approved_sessions.add(session_id)
-    request.params["mode"] = "code.normal"
-    request.params[PLAN_USER_APPROVED_FLAG] = True
-    request.params["query"] = APPROVED_NOTIFICATION[lang].format(
-        plan_content=plan_content,
-    )
-    logger.info(
-        "[_try_handle_direct_plan_implement] User APPROVED plan via chat "
-        "for session %s",
-        session_id,
-    )
-    return True
 
 
 class AgentWebSocketServer:
@@ -1098,6 +1017,9 @@ class AgentWebSocketServer:
             if request.req_method == ReqMethod.SESSION_REWIND_AND_RESTORE:
                 await self._handle_session_rewind_full(ws, request, send_lock, restore_files=True)
                 return
+            if request.req_method == ReqMethod.SESSION_REWIND_COMPACT:
+                await self._handle_session_rewind_full(ws, request, send_lock, compact=True)
+                return
             if request.req_method == ReqMethod.SESSION_REWIND_CONTEXT:
                 await self._handle_session_rewind_context(ws, request, send_lock)
                 return
@@ -1131,14 +1053,23 @@ class AgentWebSocketServer:
             if request.req_method == ReqMethod.COMMAND_COMPACT:
                 await self._handle_command_compact(ws, request, send_lock)
                 return
+            if request.req_method == ReqMethod.COMMAND_COMPACT_PARTIAL:
+                await self._handle_command_compact_partial(ws, request, send_lock)
+                return
             if request.req_method == ReqMethod.COMMAND_CONTEXT:
                 await self._handle_command_context(ws, request, send_lock)
                 return
             if request.req_method == ReqMethod.COMMAND_RECAP:
                 await self._handle_command_recap(ws, request, send_lock)
                 return
+            if request.req_method == ReqMethod.COMMAND_BTW:
+                await self._handle_command_btw(ws, request, send_lock)
+                return
             if request.req_method == ReqMethod.COMMAND_DIFF:
                 await self._handle_command_diff(ws, request, send_lock)
+                return
+            if request.req_method == ReqMethod.COMMAND_SIMPLIFY:
+                await self._handle_command_simplify(ws, request, send_lock)
                 return
             if request.req_method == ReqMethod.COMMAND_MODEL:
                 await self._handle_command_model(ws, request, send_lock)
@@ -1228,6 +1159,18 @@ class AgentWebSocketServer:
             if request.req_method == ReqMethod.SCHEDULE_DELETE:
                 await self._handle_schedule_request(ws, request, send_lock, "delete")
                 return
+            if request.req_method == ReqMethod.ISSUE_WATCH_ONCE:
+                await self._handle_schedule_request(ws, request, send_lock, "issue_watch_once")
+                return
+            if request.req_method == ReqMethod.ISSUE_STATE_LIST:
+                await self._handle_schedule_request(ws, request, send_lock, "issue_state_list")
+                return
+            if request.req_method == ReqMethod.ISSUE_DELETE:
+                await self._handle_schedule_request(ws, request, send_lock, "issue_delete")
+                return
+            if request.req_method == ReqMethod.ISSUE_MATRIX:
+                await self._handle_schedule_request(ws, request, send_lock, "issue_matrix")
+                return
             if request.req_method == ReqMethod.AGENTS_LIST:
                 await self._handle_agents_list(ws, request, send_lock)
                 return
@@ -1259,6 +1202,7 @@ class AgentWebSocketServer:
 
                 # 只有 cancel/supplement 才取消流式任务
                 # pause/resume 不取消，因为任务仍在运行（pause 在 checkpoint 阻塞，resume 解除阻塞）
+                stream_task: asyncio.Task | None = None
                 if intent in ("cancel", "supplement"):
                     stream_task = self._session_stream_tasks.get(sid)
                     if stream_task is not None and not stream_task.done():
@@ -1271,6 +1215,14 @@ class AgentWebSocketServer:
 
                 # 专门处理 cancel，复用已有 agent（不再 fallthrough 到 _handle_unary）
                 await self._handle_cancel(ws, request, send_lock)
+
+                # 等待被取消的 stream task 完成清理（finally 块中的 heartbeat 取消、
+                # _session_stream_tasks 清理、plan mode exit 检查等），避免僵尸调用。
+                if stream_task is not None and not stream_task.done():
+                    try:
+                        await stream_task
+                    except asyncio.CancelledError:
+                        pass
                 return
             if request.is_stream:
                 await self._handle_stream(ws, request, send_lock)
@@ -1405,6 +1357,12 @@ class AgentWebSocketServer:
         return method in _CODE_MODE_SYNC_METHODS
 
     @staticmethod
+    def _is_explicit_plan_entry_request(request: AgentRequest) -> bool:
+        if not isinstance(request.params, dict):
+            return False
+        return request.params.get("plan_entry_source") == "slash_command"
+
+    @staticmethod
     def _session_mode_sync_lock(session_id: str) -> asyncio.Lock:
         lock = _session_mode_sync_locks.get(session_id)
         if lock is None:
@@ -1426,22 +1384,58 @@ class AgentWebSocketServer:
             },
         })
 
-    @staticmethod
-    def _is_resuming_tool_interrupt(request: AgentRequest) -> bool:
-        """Return True when the request resumes a paused tool-call interrupt."""
-        return _is_resuming_tool_interrupt(request)
+    async def _check_post_process_plan_exit(
+        self,
+        request: AgentRequest,
+        agent: Any,
+    ) -> None:
+        """Detect plan→normal transition that happened inside tool execution.
+
+        When ``exit_plan_mode`` is approved, ``ExitPlanModeTool.invoke()``
+        calls ``restore_mode_after_plan_exit()`` to persist the mode change
+        to the session checkpointer.  This runs AFTER ``_ensure_code_mode_state``
+        has already completed (which only syncs the mode BEFORE processing).
+
+        We check the persisted state here and push a ``plan.mode_exited``
+        event so the TUI status bar updates immediately, rather than waiting
+        for the next user request.
+
+        Only checks requests whose sub_mode is ``"plan"`` — the transition
+        from plan→normal can only happen during a plan-mode request (the LLM
+        calls ``exit_plan_mode``).  Checking ``sub_mode == "normal"`` requests
+        would produce false positives for every background RPC (e.g.
+        ``skills.list``) that uses ``code.normal`` but never had an active
+        plan session.
+        """
+        session_id = request.session_id
+        if not session_id:
+            return
+        mode, sub_mode = _apply_resolved_mode_to_request(request)
+        if mode != "code" or sub_mode != "plan":
+            return
+
+        from openjiuwen.core.single_agent import create_agent_session
+        session = create_agent_session(
+            session_id=session_id,
+            card=agent.get_instance().card,
+        )
+        await session.pre_run(inputs=None)
+        state = agent.get_instance().load_state(session)
+        if state.plan_mode.mode == "normal":
+            _plan_exited_sessions.add(session_id)
+            await self._push_plan_mode_exited(request)
+            logger.info(
+                "[_check_post_process_plan_exit] Detected plan→normal after "
+                "tool execution for session=%s",
+                session_id,
+            )
 
     async def _prepare_code_mode_chat_turn(
         self,
         request: AgentRequest,
         channel_id: str,
     ) -> tuple[str, str | None, Any]:
-        """Plan approval gates, mode resolution, and correct agent instance selection."""
-        language = self._resolve_code_language()
-
-        if not _is_resuming_tool_interrupt(request):
-            _check_and_handle_pending_approval(request, language=language)
-
+        """Mode resolution and correct agent instance selection."""
         mode, sub_mode = _apply_resolved_mode_to_request(request)
         agent_mode = "agent" if mode == "auto_harness" else mode
         project_dir = resolve_request_project_dir(request)
@@ -1455,24 +1449,6 @@ class AgentWebSocketServer:
         if agent is None:
             raise ValueError("Failed to get agent")
 
-        if (
-            not _is_resuming_tool_interrupt(request)
-            and await _try_handle_direct_plan_implement(
-                request, agent, language=language
-            )
-        ):
-            prev_sub_mode = sub_mode
-            mode, sub_mode = _apply_resolved_mode_to_request(request)
-            if sub_mode != prev_sub_mode:
-                agent = await self._agent_manager.get_agent(
-                    channel_id=channel_id,
-                    mode=agent_mode,
-                    project_dir=project_dir,
-                    sub_mode=sub_mode,
-                )
-                if agent is None:
-                    raise ValueError("Failed to get agent")
-
         return mode, sub_mode, agent
 
     async def _ensure_code_mode_state(
@@ -1484,22 +1460,26 @@ class AgentWebSocketServer:
     ) -> bool:
         """code 模式：确保 agent 的 plan_mode 状态正确，必要时执行 switch_mode 并持久化.
 
-        当 plan 已完成（plan_slug 存在且 mode 不为 "plan"）时跳过 switch_mode，
-        避免 exit_plan_mode 已恢复的模式被覆盖.
+        当 plan 刚完成时跳过陈旧的 normal→plan switch_mode，
+        避免 exit_plan_mode 已恢复的模式被覆盖；显式用户 /plan 进入除外.
         switch_mode 内部已通过 save_state 写入正确的 "deepagent" key，
         此处只需 post_run 持久化到 checkpointer.
 
         切换到 plan 模式且尚未调用 enter_plan_mode 时，注入 <system-reminder>
-        告知 LLM 调用 enter_plan_mode（对齐 Claude Code：plan 指令不进 system prompt）。
+        告知 LLM 调用 enter_plan_mode。
+
+        ``exit_plan_mode`` now restores mode immediately inside the tool
+        (via ``restore_mode_after_plan_exit``), so this method no longer needs
+        to gate plan→normal transitions with an approval flag.
 
         Returns:
-            ``True`` if plan mode was restored to normal after user approval.
+            ``True`` if plan mode was restored to normal (mode sync occurred).
         """
         if mode != "code" or sub_mode == "team":
             return False
         if not self._should_sync_code_mode_state(request):
             return False
-        if self._is_resuming_tool_interrupt(request):
+        if is_interrupt_resume_payload(request.params):
             logger.info(
                 "[_ensure_code_mode_state] Skip mode sync while resuming tool interrupt "
                 "for session=%s source=%s",
@@ -1517,43 +1497,67 @@ class AgentWebSocketServer:
             )
             await session.pre_run(inputs=None)  # 从 checkpointer 加载历史 state
             state = agent.get_instance().load_state(session)
-            # 仅在目标模式与当前模式不同时执行模式切换，避免：
-            # 1. exit_plan_mode 已恢复的模式被覆盖（plan 完成 → mode=normal, sub_mode=normal → 跳过）
-            # 2. 已在 plan 模式时冗余调用 switch_mode（pre_plan_mode 被污染）
-            # 3. 强制退出后无法重新进入 plan 模式（plan_slug 残留 + mode=normal → sub_mode=plan → 执行）
+            # 仅在目标模式与当前模式不同时执行模式切换
+            mode_changed_to_plan = False
             if state.plan_mode.mode != sub_mode:
-                approved_this_turn = session_id in _plan_approved_sessions
-                if isinstance(request.params, dict):
-                    request.params.pop(PLAN_USER_APPROVED_FLAG, None)
-                # 仅当用户明确批准计划时才允许 plan → normal。
-                if state.plan_mode.mode == "plan" and sub_mode == "normal":
-                    if approved_this_turn:
-                        _plan_approved_sessions.discard(session_id)
-                        agent.get_instance().restore_mode_after_plan_exit(session)
-                        restored_after_approval = True
+                # Guard: block stale normal→plan switches when plan was already exited.
+                # Explicit user /plan requests bypass this guard and start a fresh plan.
+                # Two mechanisms:
+                #   1. _plan_exited_sessions flag (precise — set by _check_post_process_plan_exit)
+                #   2. plan_slug fallback (defense-in-depth — plan exists but mode is normal)
+                if state.plan_mode.mode == "normal" and sub_mode == "plan":
+                    blocked = False
+                    explicit_plan_entry = self._is_explicit_plan_entry_request(request)
+                    if explicit_plan_entry:
+                        _plan_exited_sessions.discard(session_id)
+                    elif session_id in _plan_exited_sessions:
+                        _plan_exited_sessions.discard(session_id)
+                        blocked = True
                         logger.info(
-                            "[_ensure_code_mode_state] Restored plan→normal after user "
-                            "approval for session=%s",
+                            "[_ensure_code_mode_state] Blocked stale plan re-entry via "
+                            "flag for session=%s",
                             session_id,
                         )
-                    else:
+                    elif state.plan_mode.plan_slug is not None:
+                        # Fallback: plan was completed, checkpoint is authoritative.
+                        # Clear slug so this guard is one-shot.
+                        state.plan_mode.plan_slug = None
+                        agent.get_instance().save_state(session, state)
+                        await session.post_run()
+                        blocked = True
+                        logger.info(
+                            "[_ensure_code_mode_state] Blocked stale plan re-entry via "
+                            "plan_slug for session=%s",
+                            session_id,
+                        )
+                    if blocked:
                         if isinstance(request.params, dict):
-                            request.params["mode"] = "code.plan"
-                        logger.info(
-                            "[_ensure_code_mode_state] Blocked plan→normal without approval "
-                            "for session=%s request_id=%s",
-                            session_id,
-                            request.request_id,
-                        )
-                else:
-                    agent.get_instance().switch_mode(session=session, mode=sub_mode)
-                # switch_mode/restore 内部已通过 save_state 写入 "deepagent" key，
+                            request.params["mode"] = "code.normal"
+                        await self._push_plan_mode_exited(request)
+                        return False
+                agent.get_instance().switch_mode(session=session, mode=sub_mode)
+                if state.plan_mode.mode == "plan" and sub_mode == "normal":
+                    restored_after_approval = True
+                    logger.info(
+                        "[_ensure_code_mode_state] Synced plan→normal for session=%s",
+                        session_id,
+                    )
+                if sub_mode == "plan":
+                    mode_changed_to_plan = True
+                    # Clear stale plan_slug from previous plan session so
+                    # enter_plan_mode creates a fresh plan file.
+                    state = agent.get_instance().load_state(session)
+                    if state.plan_mode.plan_slug:
+                        state.plan_mode.plan_slug = None
+                        agent.get_instance().save_state(session, state)
+                # switch_mode 内部已通过 save_state 写入 "deepagent" key，
                 # 只需 post_run 持久化到 checkpointer
                 await session.post_run()
 
-            # 切换到 plan 模式且尚未调用 enter_plan_mode 时，
-            # 注入 <system-reminder> 告知 LLM 调用 enter_plan_mode。
-            if sub_mode == "plan" and not state.plan_mode.plan_slug:
+            # 切换到 plan 模式时注入 <system-reminder> 告知 LLM 调用 enter_plan_mode。
+            # 使用 mode_changed_to_plan 而非 plan_slug 判断，因为 restore_mode_after_plan_exit
+            # 不清除 plan_slug，导致后续 /plan 时提醒被错误跳过。
+            if sub_mode == "plan" and mode_changed_to_plan:
                 _inject_plan_mode_activation_reminder(request)
 
         return restored_after_approval
@@ -1586,13 +1590,12 @@ class AgentWebSocketServer:
         if restored_plan:
             await self._push_plan_mode_exited(request)
 
-        resp = await agent.process_message(request)
-
-        # ── Pick up pending approval state from agent ──
-        _store_pending_approval_from_agent(
-            request.session_id or "default",
-            agent.get_instance(),
-        )
+        resp = None
+        try:
+            resp = await agent.process_message(request)
+        finally:
+            # Push plan.mode_exited if exit_plan_mode restored mode during processing
+            await self._check_post_process_plan_exit(request, agent)
 
         wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
         async with send_lock:
@@ -1686,11 +1689,8 @@ class AgentWebSocketServer:
             if self._session_stream_tasks.get(session_id) is current_task:
                 self._session_stream_tasks.pop(session_id, None)
 
-            # ── Pick up pending approval state from agent ──
-            _store_pending_approval_from_agent(
-                session_id,
-                agent.get_instance(),
-            )
+            # Push plan.mode_exited if exit_plan_mode restored mode during processing
+            await self._check_post_process_plan_exit(request, agent)
 
         logger.info(
             "[AgentWebSocketServer] 流式响应已发送: request_id=%s 共 %s 个 chunk",
@@ -2025,6 +2025,7 @@ class AgentWebSocketServer:
                         )
                     else:
                         shutil.rmtree(session_dir)
+                        _plan_exited_sessions.discard(target)
                         remove_session_metadata_cache(target)
                         resp = AgentResponse(
                             request_id=request.request_id,
@@ -2076,6 +2077,7 @@ class AgentWebSocketServer:
     async def _handle_session_rewind_full(
         self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock,
         restore_files: bool = False,
+        compact: bool = False,
     ) -> None:
         """Full rewind: truncate history.json + context_engine + update checkpointer."""
         from jiuwenswarm.agents.harness.common.session_ops_service import (
@@ -2086,6 +2088,9 @@ class AgentWebSocketServer:
         params = request.params if isinstance(request.params, dict) else {}
         target_sid = str(params.get("session_id") or request.session_id or "").strip()
         turn_index = params.get("turn_index")
+        compact_summary = params.get("compact_summary") if compact else None
+        direction = str(params.get("direction") or "from").strip() if compact else "from"
+        summarized_count = int(params.get("summarized_count", 0) or 0) if compact else 0
 
         if not target_sid or turn_index is None:
             wire = AgentWebSocketServer._send_error_response(
@@ -2115,9 +2120,24 @@ class AgentWebSocketServer:
                 restore_result = restore_session_files(session_id=target_sid, turn_index=turn_index)
 
             # Step 2: Truncate history.json (local file operation)
-            rewind_result = rewind_session(session_id=target_sid, turn_index=turn_index)
+            # "up_to" direction: keep messages from turn_index onward, summarize the prefix.
+            # compact_partial_session handles this correctly (rewind_session only supports
+            # the "from" direction — keeping the prefix and truncating the tail).
+            if compact and direction == "up_to":
+                from jiuwenswarm.agents.harness.common.session_ops_service import compact_partial_session
+                rewind_result = compact_partial_session(
+                    session_id=target_sid,
+                    turn_index=turn_index,
+                    direction="up_to",
+                    llm_summary=compact_summary,
+                )
+            else:
+                rewind_result = rewind_session(session_id=target_sid, turn_index=turn_index)
 
-            # Step 3: Truncate context_engine in-place + persist to checkpointer
+            # Step 3: Truncate context_engine in-place + persist to checkpointer.
+            # rewind_session_context reads the already-truncated history.json and
+            # converts ALL records to context messages, so it naturally produces the
+            # correct result for both "from" and "up_to" directions.
             context_ok = False
             pair = self._resolve_rewind_agent(request.channel_id or "default")
             if pair is not None:
@@ -2138,6 +2158,81 @@ class AgentWebSocketServer:
                 payload["restored_files"] = restore_result.get("restored_files", [])
                 payload["deleted_files"] = restore_result.get("deleted_files", [])
                 payload["restore_errors"] = restore_result.get("errors", [])
+
+            # Step 4: For compact mode, append boundary + rewind_summary + compact_summary records.
+            # compact_partial_session already writes these for "up_to", so only append for "from".
+            if compact and direction == "from":
+                import uuid as _uuid
+                import time as _time
+                from jiuwenswarm.server.runtime.session.session_history import append_history_record
+                request_id = str(_uuid.uuid4())
+                now = _time.time()
+
+                short_text = (
+                    f"Summarized {summarized_count} messages from this point."
+                    if direction == "from"
+                    else f"Summarized {summarized_count} messages up to this point."
+                )
+
+                append_history_record(
+                    session_id=target_sid,
+                    request_id=request_id,
+                    channel_id=request.channel_id or "tui",
+                    role="assistant",
+                    event_type="context.compact_boundary",
+                    content="Conversation compacted",
+                    timestamp=now,
+                    extra={
+                        "compact_metadata": {
+                            "trigger": "manual_rewind",
+                            "direction": direction,
+                            "turn_index": turn_index,
+                            "summarized_messages": summarized_count,
+                        },
+                    },
+                )
+
+                append_history_record(
+                    session_id=target_sid,
+                    request_id=request_id,
+                    channel_id=request.channel_id or "tui",
+                    role="assistant",
+                    event_type="context.rewind_summary",
+                    content=short_text,
+                    timestamp=now + 0.001,
+                    extra={
+                        "compact_metadata": {
+                            "trigger": "manual_rewind",
+                            "direction": direction,
+                            "turn_index": turn_index,
+                            "summarized_messages": summarized_count,
+                        },
+                        "is_compact_summary": True,
+                    },
+                )
+
+                if isinstance(compact_summary, str) and compact_summary.strip():
+                    append_history_record(
+                        session_id=target_sid,
+                        request_id=request_id,
+                        channel_id=request.channel_id or "tui",
+                        role="assistant",
+                        event_type="context.compact_summary",
+                        content=compact_summary.strip(),
+                        timestamp=now + 0.002,
+                        extra={
+                            "compact_metadata": {
+                                "trigger": "manual_rewind",
+                                "direction": direction,
+                                "turn_index": turn_index,
+                                "summarized_messages": summarized_count,
+                            },
+                            "is_compact_summary": True,
+                            "transcript_only": True,
+                        },
+                    )
+
+                payload["summarized_messages"] = summarized_count
 
             resp = AgentResponse(
                 request_id=request.request_id,
@@ -2256,6 +2351,25 @@ class AgentWebSocketServer:
             dispatch_permissions_config_request
 
         resp = dispatch_permissions_config_request(request)
+
+        # After any successful mutation (delete / update / set / create),
+        # reload agent config so the PermissionInterruptRail picks up the
+        # change immediately instead of waiting for the next tool call's
+        # get_permissions_snapshot refresh.
+        read_only_methods = {
+            ReqMethod.PERMISSIONS_TOOLS_GET,
+            ReqMethod.PERMISSIONS_RULES_GET,
+            ReqMethod.PERMISSIONS_APPROVAL_OVERRIDES_GET,
+        }
+        if resp.ok and request.req_method not in read_only_methods:
+            try:
+                await self._agent_manager.reload_agents_config(get_config(), None)
+            except Exception:
+                logger.debug(
+                    "[AgentWebSocketServer] post-permissions reload failed (non-critical)",
+                    exc_info=True,
+                )
+
         wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
         async with send_lock:
             await ws.send(json.dumps(wire, ensure_ascii=False))
@@ -2345,18 +2459,37 @@ class AgentWebSocketServer:
         workflow_handler = team_manager.get_workflow_handler(session_id)
 
         if workflow_handler is None:
-            # WF_DBG: 维测日志 — 无 handler（返回空快照）
+            # No live handler (runtime not active / torn down by cancel-stop).
+            # The snapshot is a read-only pull and must not depend on runtime
+            # liveness — fall back to the persisted checkpoint so historical /
+            # terminal workflow runs remain queryable after the team session
+            # is cancelled or stopped.
+            from jiuwenswarm.server.runtime.agent_adapter.team_helpers import (
+                restore_workflow_runs,
+            )
+
+            restored = restore_workflow_runs(session_id)
+            workflows = (
+                [run.to_workflow_run_dict() for run in restored.values()]
+                if restored
+                else []
+            )
             logger.info(
-                "[WF_DBG command_workflows] no handler found: "
-                "channel_id=%s session_id=%s → returning empty snapshot",
+                "[WF_DBG command_workflows] no live handler, restored from checkpoint: "
+                "channel_id=%s session_id=%s workflows_count=%d",
                 channel_id,
                 session_id,
+                len(workflows),
             )
             resp = AgentResponse(
                 request_id=request.request_id,
                 channel_id=channel_id,
                 ok=True,
-                payload={"type": "workflow_run_snapshot", "workflows": [], "session_id": session_id},
+                payload={
+                    "type": "workflow_run_snapshot",
+                    "workflows": workflows,
+                    "session_id": session_id,
+                },
             )
             wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
             async with send_lock:
@@ -2389,9 +2522,7 @@ class AgentWebSocketServer:
                 },
             )
         except Exception as e:
-            logger.warning("[AgentWebSocketServer] command.workflows failed: %s", e)
-            # WF_DBG: 维测日志 — 记录异常
-            logger.info(
+            logger.warning(
                 "[WF_DBG command_workflows] exception: "
                 "channel_id=%s session_id=%s error=%s → returning empty snapshot",
                 channel_id,
@@ -2480,6 +2611,7 @@ class AgentWebSocketServer:
                     payload={
                         "event_type": "history.message",
                         "message": item,
+                        "session_id": str(session_id or ""),
                         "total_pages": total_pages,
                         "page_idx": page,
                     },
@@ -2499,6 +2631,7 @@ class AgentWebSocketServer:
             payload={
                 "event_type": "history.message",
                 "status": "done",
+                "session_id": str(session_id or ""),
                 "total_pages": total_pages,
                 "page_idx": page,
             },
@@ -2525,6 +2658,14 @@ class AgentWebSocketServer:
                 persist = {"ok": False, "error": "path is required"}
             else:
                 persist = persist_cli_trusted_directory(str(directory_path))
+                if persist.get("ok", False):
+                    try:
+                        await self._agent_manager.reload_agents_config(get_config(), None)
+                    except Exception:
+                        logger.debug(
+                            "[AgentWebSocketServer] command.add_dir reload failed (non-critical)",
+                            exc_info=True,
+                        )
             resp = AgentResponse(
                 request_id=request.request_id,
                 channel_id=request.channel_id,
@@ -2674,6 +2815,55 @@ class AgentWebSocketServer:
         async with send_lock:
             await ws.send(json.dumps(wire, ensure_ascii=False))
 
+    async def _handle_command_compact_partial(self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock) -> None:
+        try:
+            session_id = request.session_id or "default"
+            params = request.params or {}
+            turn_index = int(params.get("turn_index", 0))
+            direction = str(params.get("direction") or "from").strip()
+
+            channel_id = request.channel_id or "default"
+            mode, sub_mode, _ = resolve_agent_request_mode(params.get("mode", "agent.plan"))
+            agent_mode = "agent" if mode == "auto_harness" else mode
+            agent = await self._agent_manager.get_agent(
+                channel_id=channel_id,
+                mode=agent_mode,
+                project_dir=resolve_request_project_dir(request),
+                sub_mode=sub_mode,
+            )
+
+            if agent is None:
+                raise ValueError("Failed to get agent")
+
+            result_data = await agent.compact_partial(
+                session_id=session_id,
+                turn_index=turn_index,
+                direction=direction,
+            )
+
+            resp = AgentResponse(
+                request_id=request.request_id,
+                channel_id=request.channel_id,
+                ok=True,
+                payload=result_data,
+            )
+        except BaseException as e:
+            if isinstance(e, (KeyboardInterrupt, asyncio.CancelledError)):
+                raise
+            logger.exception("[AgentWebSocketServer] command.compact_partial failed: %s", e)
+            resp = AgentResponse(
+                request_id=request.request_id,
+                channel_id=request.channel_id,
+                ok=False,
+                payload={
+                    "status": "failed",
+                    "error": str(e),
+                },
+            )
+        wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
+        async with send_lock:
+            await ws.send(json.dumps(wire, ensure_ascii=False))
+
     async def _handle_command_context(self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock) -> None:
         try:
             session_id = request.session_id or "default"
@@ -2754,6 +2944,83 @@ class AgentWebSocketServer:
         async with send_lock:
             await ws.send(json.dumps(wire, ensure_ascii=False))
 
+    async def _handle_command_btw(self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock) -> None:
+        """处理 /btw 命令：独立、无工具、单轮 LLM 侧问题查询。
+
+        - 获取当前会话上下文（最近消息）
+        - 用隔离的 LLM 查询回答问题
+        - 不修改对话历史
+        - 不使用任何工具（纯文本回答）
+        - 仅单轮（无后续 token 消耗）
+        """
+        try:
+            session_id = request.session_id or "default"
+            params = request.params or {}
+            channel_id = request.channel_id or "default"
+            question = (params.get("question") or "").strip()
+
+            logger.info(
+                "[AgentWebSocketServer] command.btw received: session_id=%s question=%s",
+                session_id,
+                question[:100] if question else "",
+            )
+
+            if not question:
+                resp = AgentResponse(
+                    request_id=request.request_id,
+                    channel_id=request.channel_id,
+                    ok=True,
+                    payload={"status": "failed", "error": "Question is required"},
+                )
+                wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
+                async with send_lock:
+                    await ws.send(json.dumps(wire, ensure_ascii=False))
+                return
+
+            mode, sub_mode, _ = resolve_agent_request_mode(params.get("mode", "agent.plan"))
+            agent_mode = "agent" if mode == "auto_harness" else mode
+
+            agent = await self._agent_manager.get_agent(
+                channel_id=channel_id,
+                mode=agent_mode,
+                project_dir=resolve_request_project_dir(request),
+                sub_mode=sub_mode,
+            )
+
+            if agent is None:
+                raise ValueError("Failed to get agent")
+
+            result_data = await agent.generate_btw_answer(
+                session_id=session_id,
+                question=question,
+            )
+
+            logger.info(
+                "[AgentWebSocketServer] command.btw result: status=%s",
+                result_data.get("status"),
+            )
+
+            resp = AgentResponse(
+                request_id=request.request_id,
+                channel_id=request.channel_id,
+                ok=True,
+                payload=result_data,
+            )
+        except Exception as e:  # noqa: BLE001
+            logger.exception("[AgentWebSocketServer] command.btw failed: %s", e)
+            resp = AgentResponse(
+                request_id=request.request_id,
+                channel_id=request.channel_id,
+                ok=False,
+                payload={
+                    "status": "failed",
+                    "error": str(e),
+                },
+            )
+        wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
+        async with send_lock:
+            await ws.send(json.dumps(wire, ensure_ascii=False))
+
     async def _handle_command_diff(self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock) -> None:
         from jiuwenswarm.server.utils.diff_service import get_diff_service
 
@@ -2787,6 +3054,38 @@ class AgentWebSocketServer:
             )
         except Exception as e:
             logger.exception("[AgentWebSocketServer] command.diff failed: %s", e)
+            resp = AgentResponse(
+                request_id=request.request_id,
+                channel_id=request.channel_id,
+                ok=False,
+                payload={"error": str(e)},
+            )
+        wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
+        async with send_lock:
+            await ws.send(json.dumps(wire, ensure_ascii=False))
+
+    async def _handle_command_simplify(self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock) -> None:
+        """处理 /simplify 命令：组装代码精简审查 prompt 并返回（由前端作为消息发送给 Agent）。
+
+        prompt 指导 Agent 分三阶段完成
+        1) 识别改动（git diff）
+        2) 三维度审查（复用 / 质量 / 效率）—— 子 Agent 并行审查为可选优化手段
+        3) 聚合发现并直接修复
+        """
+        try:
+            params = request.params or {}
+            target = str(params.get("target", "")).strip()
+
+            prompt = _build_simplify_prompt(target)
+
+            resp = AgentResponse(
+                request_id=request.request_id,
+                channel_id=request.channel_id,
+                ok=True,
+                payload={"prompt": prompt},
+            )
+        except Exception as e:  # noqa: BLE001
+            logger.exception("[AgentWebSocketServer] command.simplify failed: %s", e)
             resp = AgentResponse(
                 request_id=request.request_id,
                 channel_id=request.channel_id,
@@ -2969,7 +3268,7 @@ class AgentWebSocketServer:
 
         name = str(entry.get("name", "")).strip()
         transport = str(entry.get("transport", "")).strip().lower()
-        if not name or transport not in {"stdio", "sse"}:
+        if not name or transport not in {"stdio", "sse", "http", "streamable-http", "streamable_http"}:
             logger.warning("[command.mcp] _fetch skipped: name=%r transport=%r", name, transport)
             return []
 
@@ -3037,8 +3336,8 @@ class AgentWebSocketServer:
         transport = str(merged.get("transport", "")).strip().lower()
         if not name:
             raise ValueError("MCP server name is required")
-        if transport not in {"stdio", "sse"}:
-            raise ValueError("transport must be one of stdio|sse")
+        if transport not in {"stdio", "sse", "http", "streamable-http", "streamable_http"}:
+            raise ValueError("transport must be one of stdio|sse|http")
 
         payload: dict[str, Any] = {
             "name": name,
@@ -3190,15 +3489,32 @@ class AgentWebSocketServer:
                             logger.info("[command.mcp] add pre-check ok: %s", check_msg)
 
                 if not pre_check_failed:
+                    # 对于 update，先读旧配置，判断是否真有变化
+                    name = server_payload.get("name", "")
+                    old_item = get_mcp_server_config(name) if name else None
+
                     _, created = upsert_mcp_server_in_config(server_payload)
                     applied = True
                     error_message = ""
-                    try:
-                        await self._agent_manager.reload_agents_config(get_config(), None)
-                    except Exception as reload_exc:  # noqa: BLE001
-                        applied = False
-                        error_message = str(reload_exc)
-                        logger.warning("[command.mcp] reload after add failed: %s", reload_exc)
+
+                    # 判断是否需要 reload: 新增必然需要；更新时做完整比较，
+                    # 配置完全一致才跳过（dict 比较成本极低，避免漏字段导致改了不生效）。
+                    config_changed = created
+                    if not created and old_item is not None:
+                        config_changed = (dict(old_item) != dict(server_payload))
+                        if not config_changed:
+                            logger.info(
+                                "[command.mcp] add/update skipped reload: '%s' config unchanged", name
+                            )
+
+                    if config_changed:
+                        try:
+                            await self._agent_manager.reload_agents_config(get_config(), None)
+                        except Exception as reload_exc:  # noqa: BLE001
+                            applied = False
+                            error_message = str(reload_exc)
+                            logger.warning("[command.mcp] reload after add failed: %s", reload_exc)
+
                     resp_payload: dict[str, Any] = {
                         "type": "added" if created else "updated",
                         "name": server_payload["name"],
@@ -3217,15 +3533,40 @@ class AgentWebSocketServer:
                 if not name:
                     raise ValueError("MCP server name is required")
                 enabled = action == "enable"
+
+                # 读取旧状态以判断 enabled 是否真的变化（容忍读取失败/不存在，
+                # 此时回退为"按变化处理"，由 set_mcp_server_enabled_in_config 自己
+                # 校验存在性并在缺失时抛 KeyError 交外层统一处理）。
+                old_enabled = None
+                try:
+                    old_item = get_mcp_server_config(name)
+                    if old_item is not None:
+                        old_enabled = bool(old_item.get("enabled", True))
+                except Exception:  # noqa: BLE001
+                    old_enabled = None
+
+                # set_mcp_server_enabled_in_config 在 server 不存在时抛 KeyError，
+                # 由外层统一返回 MCP_NOT_FOUND。
                 item = set_mcp_server_enabled_in_config(name, enabled)
+
+                # 只有 enabled 状态真的改变才需要 reload；无法判断旧状态时保守 reload。
+                config_changed = (old_enabled is None) or (old_enabled != enabled)
+                if not config_changed:
+                    logger.info(
+                        "[command.mcp] %s skipped reload: '%s' already %s",
+                        action, name, "enabled" if enabled else "disabled",
+                    )
+
                 applied = True
                 error_message = ""
-                try:
-                    await self._agent_manager.reload_agents_config(get_config(), None)
-                except Exception as reload_exc:  # noqa: BLE001
-                    applied = False
-                    error_message = str(reload_exc)
-                    logger.warning("[command.mcp] reload after %s failed: %s", action, reload_exc)
+                if config_changed:
+                    try:
+                        await self._agent_manager.reload_agents_config(get_config(), None)
+                    except Exception as reload_exc:  # noqa: BLE001
+                        applied = False
+                        error_message = str(reload_exc)
+                        logger.warning("[command.mcp] reload after %s failed: %s", action, reload_exc)
+
                 payload = {
                     "type": "enabled" if enabled else "disabled",
                     "name": name,
@@ -3244,6 +3585,8 @@ class AgentWebSocketServer:
                 name = str(params.get("name", "")).strip()
                 if not name:
                     raise ValueError("MCP server name is required")
+                # remove_mcp_server_in_config 在 server 不存在时抛 KeyError，
+                # 由外层统一返回 MCP_NOT_FOUND，且不会触发 reload（删除不存在 = 无变化）。
                 removed = remove_mcp_server_in_config(name)
                 applied = True
                 error_message = ""
@@ -3395,6 +3738,7 @@ class AgentWebSocketServer:
             # 故意的, 让 ValueError 命中下方 ``except ValueError`` 分支转成
             # ``SANDBOX_BAD_REQUEST`` 回执, 跟其它入参校验失败的处理一致。
             _require_sandbox_supported()
+            validate_sandbox_files_runtime(get_sandbox_runtime().get("files"))
             if sub == "status":
                 payload = {"runtime": get_sandbox_runtime()}
             elif sub == "enable":
@@ -3418,6 +3762,7 @@ class AgentWebSocketServer:
             else:
                 raise ValueError(f"unknown sub: {sub!r}")
             self._attach_effective_sandbox_files(payload, channel_id, params)
+            await self._attach_landlock_status(payload)
             resp = AgentResponse(
                 request_id=request.request_id,
                 channel_id=request.channel_id,
@@ -3630,19 +3975,6 @@ class AgentWebSocketServer:
         params: dict[str, Any],
         files: dict[str, Any],
     ) -> None:
-        """在 ``update_sandbox_runtime`` 之前用候选 ``files`` 跑一次
-        :func:`build_filesystem_policy` 试压, 失败立刻抛 ``ValueError`` 给 TUI.
-
-        没有这层 dry-run 时, ``/sandbox files allow|deny|remove`` 的处理顺序是
-        "先 ``update_sandbox_runtime`` 写盘 → 再 ``_apply_sandbox_runtime_patch``
-        调 adapter 触发 ``build_filesystem_policy``"; 一旦 build 抛
-        ``FileNotFoundError`` (典型场景: ``allow /no/such/path``——files.allow /
-        files.deny 都要求 path 在 host 上真实存在),
-        :meth:`_apply_sandbox_runtime_patch` 的 ``except Exception`` 会把异常
-        吞成 warning, 但 yaml 已经写了 ——用户视角是"runtime 看着更新, 沙箱却
-        没重建, 而且 TUI 上没任何报错". 本函数就是消除这个不可见的中间态:
-        校验失败时直接拒绝命令, 不让 yaml 进入"build 不出 policy"的死局。
-        """
         project_dir = self._resolve_active_project_dir(channel_id, params)
         is_code_agent = self._resolve_active_is_code_agent(channel_id)
         try:
@@ -3650,6 +3982,7 @@ class AgentWebSocketServer:
                 files,
                 project_dir=project_dir,
                 is_code_agent=is_code_agent,
+                startup_mode=get_sandbox_startup_mode(),
             )
         except FileNotFoundError as exc:
             raise ValueError(str(exc)) from exc
@@ -3657,6 +3990,7 @@ class AgentWebSocketServer:
     async def _handle_sandbox_files_set(
         self, channel_id: str, params: dict[str, Any], *, bucket: str
     ) -> dict[str, Any]:
+        _reject_extra_sandbox_files_params(params)
         path = str(params.get("path") or "").strip()
         if not path:
             raise ValueError("path is required")
@@ -3685,6 +4019,7 @@ class AgentWebSocketServer:
             path,
             project_dir=project_dir,
             is_code_agent=is_code_agent,
+            startup_mode=get_sandbox_startup_mode(),
         )
         if match is not None:
             matched_bucket, canonical = match
@@ -3692,14 +4027,11 @@ class AgentWebSocketServer:
                 f"path is auto-managed (always in {matched_bucket}): {canonical}; "
                 f"cannot add via /sandbox files {bucket}"
             )
-        permissions = params.get("permissions")
         current = get_sandbox_runtime()
         files = dict(current.get("files") or {})
         files.setdefault("allow", [])
         files.setdefault("deny", [])
         # 1) 同 bucket 内已经存在等价条目 → 直接报错, 不做 "先删后加" 的隐式覆盖。
-        #    permissions 的差异也算冲突: 让用户先 ``files remove`` 再重新 add,
-        #    确保 yaml 落盘前后 TUI 看到的差异与他实际打的命令一一对应。
         target_list: list[Any] = list(files.get(bucket) or [])
         for existing in target_list:
             if _file_entry_matches_path(existing, path):
@@ -3718,9 +4050,10 @@ class AgentWebSocketServer:
                     f"cannot add the same path to {bucket}. "
                     f"`/sandbox files remove {path}` first if you want to flip it"
                 )
+        nested_error = find_nested_files_conflict(path, bucket, files)
+        if nested_error is not None:
+            raise ValueError(nested_error)
         entry: dict[str, Any] = {"path": path}
-        if isinstance(permissions, str) and permissions.strip():
-            entry["permissions"] = permissions.strip()
         target_list.append(entry)
         files[bucket] = target_list
         # 在写盘前做一次 dry-run, 防止后续 build_filesystem_policy 抛错时,
@@ -3734,6 +4067,7 @@ class AgentWebSocketServer:
     async def _handle_sandbox_files_remove(
         self, channel_id: str, params: dict[str, Any]
     ) -> dict[str, Any]:
+        _reject_extra_sandbox_files_params(params)
         path = str(params.get("path") or "").strip()
         if not path:
             raise ValueError("path is required")
@@ -3758,6 +4092,7 @@ class AgentWebSocketServer:
             path,
             project_dir=project_dir,
             is_code_agent=is_code_agent,
+            startup_mode=get_sandbox_startup_mode(),
         )
         if match is not None:
             matched_bucket, canonical = match
@@ -3856,7 +4191,7 @@ class AgentWebSocketServer:
 
         Returns ``False`` on any failure path (no agent, no adapter, attr
         absent) — that matches the base class default and keeps the dry-run
-        / display strictly aligned with what :class:`JiuWenClawDeepAdapter`
+        / display strictly aligned with what :class:`JiuWenSwarmDeepAdapter`
         emits when ``_is_code_agent`` was never set.
         """
         try:
@@ -3914,9 +4249,54 @@ class AgentWebSocketServer:
                 files_runtime,
                 project_dir=project_dir,
                 is_code_agent=is_code_agent,
+                startup_mode=get_sandbox_startup_mode(),
             )
         except Exception as exc:  # noqa: BLE001
             logger.warning("[command.sandbox] attach effective_files failed: %s", exc)
+
+    @staticmethod
+    def _read_landlock_compatibility(policy_path: Path | None) -> str:
+        if policy_path is None or not policy_path.is_file():
+            return "best_effort"
+        try:
+            import yaml
+
+            data = yaml.safe_load(policy_path.read_text(encoding="utf-8"))
+            if isinstance(data, dict):
+                landlock = data.get("landlock")
+                if isinstance(landlock, dict):
+                    compat = landlock.get("compatibility")
+                    if isinstance(compat, str) and compat.strip():
+                        return compat.strip()
+        except Exception as exc:
+            logger.debug("[command.sandbox] read landlock compatibility failed: %s", exc)
+        return "best_effort"
+
+    async def _attach_landlock_status(self, payload: dict[str, Any]) -> None:
+        """Attach jiuwenbox Landlock capability summary to sandbox responses."""
+        try:
+            endpoint = get_sandbox_endpoint()
+            jb = payload.get("jiuwenbox")
+            if isinstance(jb, dict) and jb.get("host") and jb.get("port"):
+                host = str(jb["host"])
+                port = int(jb["port"])
+            else:
+                url = endpoint.get("url") or "http://127.0.0.1:8321"
+                host, port = self._parse_sandbox_host_port(url)
+
+            health = await self._jiuwenbox_runner.fetch_health(host, port)
+            landlock_supported = bool(health.get("landlock_supported")) if health else False
+
+            policy_file = endpoint.get("policy_file") or DEFAULT_SANDBOX_POLICY_FILE
+            policy_path = resolve_sandbox_policy_path(policy_file)
+            compatibility = self._read_landlock_compatibility(policy_path)
+
+            payload["landlock"] = {
+                "supported": landlock_supported,
+                "compatibility": compatibility,
+            }
+        except Exception as exc:
+            logger.warning("[command.sandbox] attach landlock status failed: %s", exc)
 
     async def _apply_sandbox_runtime_patch(
         self, channel_id: str, runtime: dict[str, Any], *, files_changed: bool
@@ -3928,13 +4308,8 @@ class AgentWebSocketServer:
         try:
             await adapter.apply_sandbox_runtime_patch(runtime, files_changed=files_changed)
         except (FileNotFoundError, ValueError) as exc:
-            # User-facing 配置冲突 (典型: ``/sandbox files allow|deny`` path 在
-            # host 上不存在) 必须直接抛到 TUI——上层 _handle_command_sandbox 的
-            # 大 try/except 会把 ValueError 路由成 ``SANDBOX_BAD_REQUEST`` 回执,
-            # 用户能立刻看到错误原因; 而不是被 ``except Exception`` 吞成一行
-            # 后台 warning, runtime config 已经写盘但沙箱悄悄没重建。
             raise ValueError(str(exc)) from exc
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             logger.warning("[command.sandbox] apply_sandbox_runtime_patch failed: %s", exc)
 
     @staticmethod
@@ -4850,6 +5225,10 @@ class AgentWebSocketServer:
                 payload={"error": str(e)},
             )
 
+        wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
+        async with send_lock:
+            await ws.send(json.dumps(wire, ensure_ascii=False))
+
     async def send_push(self, msg) -> None:
         """AgentServer 主动向 Gateway 推送消息。
 
@@ -4897,11 +5276,11 @@ class AgentWebSocketServer:
         if not isinstance(page_idx, int) or page_idx <= 0:
             return None
 
-        history_path: Path = get_agent_sessions_dir() / session_id.strip() / "history.json"
-        if not history_path.exists():
+        normalized_session_id = session_id.strip()
+        if not history_exists(normalized_session_id):
             return None
         try:
-            raw = json.loads(history_path.read_text(encoding="utf-8"))
+            raw = load_history_records(normalized_session_id)
         except Exception:
             return None
         if not isinstance(raw, list):
@@ -4923,7 +5302,7 @@ class AgentWebSocketServer:
         page_messages = ordered[start:end]
         logger.debug(
             "[history.get] session_id=%s page_idx=%s raw_total=%s restorable_total=%s total_pages=%s returned=%s",
-            session_id.strip(),
+            normalized_session_id,
             page_idx,
             len(raw),
             total,
@@ -5120,7 +5499,7 @@ class AgentWebSocketServer:
             await copy_session_state(
                 source_session_id=source,
                 target_session_id=target,
-                card=deep_agent.card if deep_agent is not None else AgentCard(id="jiuwenclaw", name="jiuwenclaw"),
+                card=deep_agent.card if deep_agent is not None else AgentCard(id="jiuwenswarm", name="jiuwenswarm"),
                 deep_agent=deep_agent,
             )
 
@@ -5288,7 +5667,7 @@ class AgentWebSocketServer:
                 request_id=request.request_id,
                 channel_id=request.channel_id,
                 ok=False,
-                payload={"error": "missing package_id"},
+                payload={"error": "missing package_id", "code": "BAD_REQUEST"},
             )
             wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
             async with send_lock:
@@ -5333,7 +5712,7 @@ class AgentWebSocketServer:
                 request_id=request.request_id,
                 channel_id=request.channel_id,
                 ok=False,
-                payload={"error": str(exc)},
+                payload={"error": str(exc), "code": _harness_error_code(exc)},
             )
         except Exception as exc:
             logger.exception("[AgentServer] harness.packages.activate failed: %s", exc)
@@ -5341,7 +5720,7 @@ class AgentWebSocketServer:
                 request_id=request.request_id,
                 channel_id=request.channel_id,
                 ok=False,
-                payload={"error": str(exc)},
+                payload={"error": str(exc), "code": "INTERNAL_ERROR"},
             )
 
         wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
@@ -5360,7 +5739,7 @@ class AgentWebSocketServer:
                 request_id=request.request_id,
                 channel_id=request.channel_id,
                 ok=False,
-                payload={"error": "missing package_id"},
+                payload={"error": "missing package_id", "code": "BAD_REQUEST"},
             )
             wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
             async with send_lock:
@@ -5400,7 +5779,7 @@ class AgentWebSocketServer:
                 request_id=request.request_id,
                 channel_id=request.channel_id,
                 ok=False,
-                payload={"error": str(exc)},
+                payload={"error": str(exc), "code": _harness_error_code(exc)},
             )
         except Exception as exc:
             logger.exception("[AgentServer] harness.packages.deactivate failed: %s", exc)
@@ -5408,7 +5787,7 @@ class AgentWebSocketServer:
                 request_id=request.request_id,
                 channel_id=request.channel_id,
                 ok=False,
-                payload={"error": str(exc)},
+                payload={"error": str(exc), "code": "INTERNAL_ERROR"},
             )
 
         wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
@@ -5427,7 +5806,7 @@ class AgentWebSocketServer:
                 request_id=request.request_id,
                 channel_id=request.channel_id,
                 ok=False,
-                payload={"error": "missing package_id"},
+                payload={"error": "missing package_id", "code": "BAD_REQUEST"},
             )
             wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
             async with send_lock:
@@ -5439,7 +5818,7 @@ class AgentWebSocketServer:
                 request_id=request.request_id,
                 channel_id=request.channel_id,
                 ok=False,
-                payload={"error": "Cannot delete native agent version"},
+                payload={"error": "Cannot delete native agent version", "code": "BAD_REQUEST"},
             )
             wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
             async with send_lock:
@@ -5477,7 +5856,7 @@ class AgentWebSocketServer:
                 request_id=request.request_id,
                 channel_id=request.channel_id,
                 ok=False,
-                payload={"error": str(exc)},
+                payload={"error": str(exc), "code": _harness_error_code(exc)},
             )
         except Exception as exc:
             logger.exception("[AgentServer] harness.packages.delete failed: %s", exc)
@@ -5485,7 +5864,7 @@ class AgentWebSocketServer:
                 request_id=request.request_id,
                 channel_id=request.channel_id,
                 ok=False,
-                payload={"error": str(exc)},
+                payload={"error": str(exc), "code": "INTERNAL_ERROR"},
             )
 
         wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
@@ -5512,12 +5891,12 @@ class AgentWebSocketServer:
 
     def _build_model_cache(self) -> None:
         """Build model cache from jiuwenswarm config.yaml (reuse interface_deep logic)."""
-        from jiuwenswarm.server.runtime.agent_adapter.interface_deep import JiuWenClawDeepAdapter
+        from jiuwenswarm.server.runtime.agent_adapter.interface_deep import JiuWenSwarmDeepAdapter
 
         config = get_config()
 
         # Use the same model building method as interface_deep
-        build_model_from_entry = JiuWenClawDeepAdapter._build_model_from_entry
+        build_model_from_entry = getattr(JiuWenSwarmDeepAdapter, '_build_model_from_entry')
 
         # Build from models.defaults list
         for entry in get_default_models(config):
@@ -5580,7 +5959,7 @@ class AgentWebSocketServer:
             payload: dict[str, Any] = {}
 
             # For actions that need agent: get agent and set on service (similar to _handle_command_compact)
-            needs_agent = action in ("create", "run", "cancel", "delete")
+            needs_agent = action in ("create", "run", "cancel", "delete", "issue_watch_once")
             if needs_agent:
                 mode, sub_mode = _apply_resolved_mode_to_request(request)
                 agent_mode = "agent" if mode == "auto_harness" else mode
@@ -5650,6 +6029,20 @@ class AgentWebSocketServer:
             elif action == "delete":
                 task_id = params.get("task_id", "")
                 payload = await self._scheduler_service.delete_scheduled_task(task_id)
+
+            elif action == "issue_watch_once":
+                model_name = params.get("model_name")
+                model = self._resolve_model(model_name)
+                payload = await self._scheduler_service.watch_gitcode_issues_once(params, model)
+
+            elif action == "issue_state_list":
+                payload = await self._scheduler_service.list_gitcode_issue_states()
+
+            elif action == "issue_delete":
+                payload = await self._scheduler_service.delete_issue_states(params)
+
+            elif action == "issue_matrix":
+                payload = await self._scheduler_service.refresh_issue_matrix(params)
 
             else:
                 payload = {"error": f"未知的调度操作: {action}"}

@@ -22,7 +22,7 @@ CASE_SCRIPTS = {
 
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Run JiuwenClaw Web UI E2E reports and collect their output directories.",
+        description="Run JiuwenSwarm Web UI E2E reports and collect their output directories.",
     )
     parser.add_argument(
         "--cases",

@@ -10,6 +10,21 @@
 - TUI 通过 **WebSocket** 连接本机 Gateway 的 TUI 端点（默认 `ws://127.0.0.1:19001/tui`）。请先按 [快速开始(TUI)](Quickstart_tui.md) 启动后端服务，再打开 TUI。
 - TUI 需要 **交互式 TTY**；在管道或非 TTY 环境下会报错退出。
 
+### 多窗口 TUI
+
+同一套 **Gateway 后端**（同一 `GATEWAY_PORT`，默认 `ws://127.0.0.1:19001/tui`）可**同时打开多个 TUI 终端窗口**。每个窗口维护独立的 `session_id` 与进行中的对话/任务：
+
+| 行为 | 说明 |
+|------|------|
+| **事件隔离** | Gateway 按 `session_id` 将流式响应、工具输出等事件精确投递到对应窗口，不会串到其他窗口。 |
+| **并发任务** | 不同 session 可并行执行 Agent 任务。 |
+| **同窗口新消息** | 在同一窗口（相同 `session_id`）再次发送聊天，仍会取消该 session 上旧的流式任务。 |
+| **与 ACP 差异** | ACP 仍为 single-user channel（新消息会取消同 channel 上所有进行中任务）；TUI/CLI 已改为按 session 隔离。 |
+
+**打开多窗口**：在多个终端分别运行 `jiuwenswarm-tui` 或 `jiuwenswarm-cli` 即可。需要恢复特定会话时使用 `--session <id>` 或 `/resume`。
+
+> **与「单机多实例」的区别**：[单机多实例运行](单机多实例运行.md) 指不同工作区、不同端口的独立后端；**多窗口 TUI** 指多个终端共享同一 Gateway 后端。二者可同时使用（例如 `dev` 实例上开两个 TUI 窗口），但不要混淆端口与工作区。
+
 ---
 
 ## CLI 参考
@@ -56,7 +71,7 @@
 | 命令 | 别名 | 用途 | 示例 | 适用模式 |
 |------|------|------|------|----------|
 | `/help` | - | 列出已注册 Slash 命令 | `/help` | 全部 |
-| `/hotkey` | - | 显示快捷键与 `/help` 提示 | `/hotkey` | 全部 |
+| `/keybindings` | `/keybind` | 查看/编辑/重置 TUI 快捷键配置 | `/keybindings`、`/keybindings list` | 全部 |
 | `/hooks` | - | 浏览已配置的 hooks（只读） | `/hooks` | 全部 |
 | `/exit` | `/quit` | 退出 TUI | `/exit` | 全部 |
 | `/clear` | `/reset`, `/new` | 新建会话 ID、清空当前 transcript（忙时拒绝） | `/clear` | 全部 |
@@ -66,7 +81,7 @@
 | `/compact` | - | 压缩上下文，保留摘要 | `/compact` | 全部 |
 | `/config` | `/settings`, `/setting` | 查看/设置后端配置 | `/config`、`/config get`、`/config set key value` | 全部 |
 | `/context` | - | 查看上下文窗口占用与 Token 用量明细 | `/context` | 全部 |
-| `/diff` | - | 查看本会话按轮次的文件改动 | `/diff` | 全部 |
+| `/diff` | - | 交互式查看工作树与按轮次的文件改动 | `/diff` | 全部 |
 | `/evolve` | - | 触发技能演进 | `/evolve myskill 修正错误处理` | `agent.plan` / `team`（见下） |
 | `/evolve_list` | - | 列出某技能的演进条目 | `/evolve_list myskill --sort score` | `agent.plan` / `team` |
 | `/evolve_rebuild` | - | 从归档与演进记录重建 SKILL.md | `/evolve_rebuild myskill 强化错误处理` | `agent.plan` / `team` |
@@ -77,6 +92,7 @@
 | `/permissions` | - | 设置 `permissions.tools` 中单工具的 allow/ask/deny | `/permissions ask write_file` | 全部 |
 | `/plan` | - | 进入 Agent 规划模式，或发送规划请求 | `/plan`、`/plan open`、`/plan 迁移步骤` | 非 `team` |
 | `/rename` | - | 查看/重命名/清空当前会话标题 | `/rename`、`/rename 标题`、`/rename clear` | 全部 |
+| `/review` | - | 审查 PR（TUI 发送聊天消息，Gateway 拦截注入 prompt） | `/review`、`/review 123` | 全部 |
 | `/resume` | `/continue` | 列出或恢复历史会话；无参 `/resume` 与 `/continue` 在 TUI 中可打开交互列表（见下） | `/resume list`、`/resume <id>` | 全部 |
 | `/skills` | - | 技能与市场源管理 | `/skills`、`/skills install ...` | 全部 |
 | `/teamskills` | - | TeamSkills Hub（初始化、校验、打包、搜索、安装等） | `/teamskills list` | 全部 |
@@ -86,14 +102,39 @@
 | `/status` | - | 查看运行状态概览、用量、配置 | `/status`、`/status usage` | 全部 |
 | `/agents` | - | 管理 Agent 配置（list, get, create, update, enable, disable, delete） | `/agents list`、`/agents get Explore` | 全部 |
 | `/branch` | `/fork` | 从当前对话点创建分支会话 | `/branch fix-login-bug` | 全部 |
+| `/btw` | - | 旁路快速提问，不中断主对话 | `/btw what does git status do?` | 全部 |
 | `/rewind` | `/checkpoint` | 回退对话到指定轮次之前 | `/rewind 2` | 全部 |
 | `/memory` | `/mem` | 记忆管理（状态、文件、开关、目录） | `/memory status` | 全部 |
 | `/sandbox` | - | 进出沙箱模式 / 管理 excluded_commands / files | `/sandbox enable`、`/sandbox status`、`/sandbox files allow ./tmp/` | 全部 |
+| `/security-review` | - | 安全审查当前分支待定变更 | `/security-review`、`/security-review 重点关注认证` | 全部 |
+| `/simplify` | - | 代码精简审查（复用性、质量、效率），自动修复问题 | `/simplify`、`/simplify src/auth/` | **仅 `code.*`** |
 
 #### `/resume` 与 `/continue` 在 TUI 中的特殊行为
 
-- 输入 **`/resume`** 或 **`/continue`** 且 **无其它参数** 时，TUI 会打开 **会话列表** 供选择恢复，而不走纯文本 `session.list` 展示（`app-screen.ts`）。
+- 输入 **`/resume`** 或 **`/continue`** 且 **无其它参数** 时，TUI 会打开 **交互式会话选择器** 供选择恢复，而不走纯文本 `session.list` 展示（`app-screen.ts`）。
 - 带参数时仍走命令实现：`/resume list`、`/resume <conversation_id>` 等。
+
+交互式选择器的快捷键：
+
+| 按键 | 功能 |
+| --- | --- |
+| `↑` / `↓` | 在会话间移动焦点 |
+| `Enter` | 恢复当前焦点的会话 |
+| 输入字符 | 实时搜索（按会话 ID / 标题 / 项目目录过滤） |
+| `Backspace` | 删除搜索字符 |
+| `Space` | 预览当前焦点会话的信息卡（标题、ID、项目目录、分支、消息数、最近活跃/创建时间）；预览态 `Enter` 恢复、`Space`/`Esc` 返回 |
+| `Ctrl+R` | 重命名当前焦点会话；编辑态 `Enter` 保存、`Esc` 取消、留空则清除标题 |
+| `Ctrl+A` | 在「全部项目」与「仅当前项目」范围间切换 |
+| `Ctrl+B` | 开关 git 分支过滤（仅显示 `git_branch` 严格等于当前项目分支的会话） |
+| `Esc` | 有搜索词时清空搜索；否则关闭选择器 |
+
+> 上表 `Space` / `Ctrl+R` / `Ctrl+A` / `Ctrl+B` / `Esc` 属于 **`ResumeList` context**，可通过 `/keybindings` 重绑；预览态、重命名编辑态内的 `Enter` / `Esc` / `Backspace` 及搜索框文本输入仍为硬编码。
+
+行为说明：
+
+- **默认列出全部项目** 的会话（进入后可按 `Ctrl+A` 切回仅当前项目）。当前项目无会话时仍会打开（空）选择器，便于按 `Ctrl+A` 查看其它项目。
+- **分支记录与过滤（`Ctrl+B`）**：会话首条消息时会按其 `project_dir` 记录 git 分支（非 git/detached 记为 `HEAD`）。开启过滤后按「分支名」**严格匹配**当前项目分支，存量无分支记录的会话与 `HEAD` 会话都会被过滤掉；关掉过滤即可看到全部。注意分支过滤仅按名字比对，不区分仓库——「全部项目 + 分支过滤」同时开启时，不同目录下的同名分支会一并显示。
+- **恢复范围**：resume 仅恢复 **会话上下文**（对话历史、会话 ID、accent 颜色、workflow 快照、窗口标题），**不切换 workspace / 当前工作目录**。
 
 ---
 
@@ -177,9 +218,24 @@
 - 交互选择范围：团队共享 `JIUWENSWARM.md`、个人 `JIUWENSWARM.local.md` 或两者；然后向后端发送编排提示（`logAsUser: false`）。
 - 详见 [Slash命令表.md](Slash命令表.md) 与源码 `init.ts`。
 
-#### `/diff` 与 `/compact`
+#### `/diff`（交互式改动回顾）
 
-- **`/diff`**：调用 `command.diff`，展示本会话内有文件变更的轮次（非完整 `git diff` 替代）。
+- **`/diff`**：调用 `command.diff`，获取工作树（uncommitted changes）及本会话内有文件变更的轮次，然后打开 **交互式 Diff 查看器**（全屏覆盖模式）。
+
+  **快捷键**：
+
+  | 按键 | 功能 |
+  |------|------|
+  | `↑` / `↓` | 在文件列表间移动焦点 |
+  | `Enter` | 查看焦点文件的完整 diff（进入详情视图） |
+  | `Esc` / `Ctrl+C` | 详情视图 → 返回列表；列表视图 → 关闭 |
+  | `←` | 从详情视图返回列表 |
+  | `PgUp` / `PgDn` | 详情视图上下翻页 |
+  | `Home` / `g` | 列表 → 跳至顶部；详情 → 跳至文件开头 |
+  | `End` / `Shift+g` | 列表 → 跳至底部；详情 → 跳至文件末尾 |
+
+  注意：未提交的工作树改动通过 `git diff HEAD` 获取；同一文件在工作树和某轮次中均出现时会重复列出，来源标注为 `working` 或 `Turn N`。
+
 - **`/compact`**：调用 `command.compact`，返回 `busy` | `compressed` | `noop`；成功时展示 token 节省比例（`compact.ts`）。
 
 #### `/context`（上下文窗口用量）
@@ -280,6 +336,20 @@
 - 行为：生成新 `session_id` 并调用 `session.fork`；TUI 自动切换到新分支会话，清空 transcript 并恢复分支历史。提示用户可用 `/resume <原会话ID>` 返回原会话。
 - 示例：`/branch`、`/branch fix-login-bug`。
 
+#### `/btw`（旁路提问）
+
+- **别名**：无。
+- **适用模式**：全部。
+- 在 TUI 本地解析，通过专用 RPC `command.btw` 向 AgentServer 发起独立、无工具、单轮 LLM 查询，基于当前对话上下文快速回答旁路问题，**不中断主对话**。
+- **参数必填**：`/btw <question>`，无参数时提示 `Usage: /btw <your question>`。
+- 发送后显示 `💭 Answering: <question>`（dim 样式），RPC 超时 120 秒。
+- 返回状态：
+  - `ok`：显示 `💡 /btw <question>` + 回答。
+  - `no_context`：提示无对话上下文。
+  - `failed`：显示错误信息。
+- 服务端与主 Agent 共享 system prompt，直接调用模型（无工具、单轮），不修改对话历史（只读操作）。
+- 示例：`/btw what does git status do?`、`/btw 这段代码的时间复杂度是多少？`
+
 #### `/rewind`（回退对话）
 
 - 别名：`/checkpoint`。
@@ -316,11 +386,48 @@
 - 状态面板字段：
   - `enabled` — 当前开关。
   - `excluded_commands` — 命中后穿透到本地执行的 shell glob 列表。
-  - `files.allow_write` / `files.deny_write` — 生效（auto-managed ∪ user-configured，去重）的写入策略。
+  - `landlock` — jiuwenbox Landlock 支持情况（`supported` + `compatibility`）。
+  - `files.allow_write` / `files.deny_write` — 生效（auto-managed ∪ user-configured，去重）的写入策略，显示 `(rw)` / `(ro)`。
 - 自动配置路径：文件 `AGENT.md`、`HEARTBEAT.md`、`IDENTITY.md`、`SOUL.md`、`USER.md`，目录 `memory/daily_memory/`，以及 `project_dir`（allow_write）与 `project_dir/config/config.yaml`（deny_write）。`preserve_file_sharing_mode` 仅支持 `mount`。
 - `excluded_commands` 的匹配：按完整命令字符串匹配，不仅看 `argv[0]`；写 glob 时要把参数也覆盖进去（例如 `"git *"` 而不是 `git`）。本质等同于沙箱穿透口，不要对 `rm -rf` / `curl` 这类高风险命令使用。
 - add / remove 严格校验：`exclude add` 已存在 pattern、`exclude remove` 不存在 pattern 都会报错；`files allow|deny` 在同 bucket 已有 path 或对侧 bucket 已有 path（allow/deny 冲突）会报错，先 `files remove` 再 add；`files remove` 没匹配到也会报错。避免"看起来执行了实际什么也没改"。
-- 示例：`/sandbox enable`、`/sandbox status`、`/sandbox files allow ./tmp/ 0777`、`/sandbox exclude add "git *"`。
+- 写入策略：`allow` / `deny` 控制写访问（rw/ro），不是 Unix 八进制权限；支持「父 allow + 子 deny」，不支持「子 allow + 父 deny」。
+- 示例：`/sandbox enable`、`/sandbox status`、`/sandbox files allow ./tmp/`、`/sandbox exclude add "git *"`。
+
+#### `/review`（代码审查 PR）
+
+- **别名**：无。
+- **适用模式**：全部。
+- TUI 通过 `ctx.sendMessage()` 将 `/review [args]` 作为聊天消息发送给 Gateway；离线时提示错误。
+- Gateway 识别后注入 review prompt，由 Agent 使用 `gh` CLI 执行审查。
+- 无参数时 Agent 执行 `gh pr list` 展示开放 PR 列表；有参数时执行 `gh pr view/diff` 并分析变更（正确性、约定、性能、测试覆盖、安全）。
+- 无 git/gh 预检，由 Agent 自行处理缺失工具的情况。
+- 示例：`/review`（列出 PR）、`/review 123`（审查 PR #123）。
+
+#### `/security-review`（安全审查）
+
+- **别名**：无。
+- **适用模式**：全部。
+- TUI 通过 `ctx.sendMessage()` 将 `/security-review [args]` 作为聊天消息发送给 Gateway；离线时提示错误。
+- Gateway 识别后注入安全审查 prompt，由 Agent 使用 `git` 命令分析当前分支相对于 `origin/HEAD` 的待定变更。
+- Agent 执行三步分析：仓库上下文研究（`git status`/`diff --name-only`/`log`）→ 比较分析（`git diff`）→ 漏洞评估（输入验证、认证授权、密码学、注入、数据暴露）。
+- 仅报告置信度 > 80% 的发现，输出结构化 Markdown 报告（文件、行号、严重级别、类别、描述、利用场景、修复建议）。
+- `[args]` 可选，用于附加焦点说明（如"重点关注认证模块"）。
+- 示例：`/security-review`、`/security-review 重点关注认证模块的安全性`。
+
+#### `/simplify`（代码精简审查）
+
+- **别名**：无。
+- **适用模式**：**仅 `code.*`**。非 code 模式下提示先执行 `/mode code`。
+- TUI 本地解析，调用 `command.simplify` RPC（30 秒超时）获取服务端生成的三阶段审查 prompt，然后通过 `ctx.sendMessage(prompt, ..., { logAsUser: false })` 注入为 Agent 消息。
+- 可选参数 `[target]`：附加关注点（文件路径、模块名或特定审查维度）。
+- **执行流程**：校验 code 模式 → RPC 获取 prompt → 注入 Agent → Agent 执行三阶段审查并自动修复。
+- **三阶段**：
+  1. **识别变更**：`git diff` 获取变更列表。
+  2. **并行审查**（三个维度）：代码复用（现有工具/重复功能）、代码质量（冗余状态/参数膨胀/复制粘贴/抽象泄漏/字符串硬编码/不必要注释）、效率（不必要工作/错失并发/热路径膨胀/无效更新/TOCTOU/内存泄漏）。
+  3. **修复问题**：逐一修复，误报跳过，完成后总结。
+- 离线时提示重试。
+- 示例：`/simplify`（审查所有变更）、`/simplify src/auth/`（关注特定目录）、`/simplify focus on error handling`（关注错误处理）。
 
 #### `/hooks`（浏览 Hooks 配置）
 
@@ -392,23 +499,95 @@
 
 ### 快捷键
 
+#### 默认全局快捷键
+
 | 按键 | 行为 |
 |------|------|
-| `Ctrl+C` | **第一次**：中断当前任务（`chat.interrupt`）；**1 秒内第二次**：退出 TUI |
+| `Ctrl+C` | **第一次**：中断当前任务（`chat.interrupt`）；**3 秒内第二次**：退出 TUI（**不可重绑**） |
+| `Ctrl+D` | 中断任务；连按两次退出（**不可重绑**） |
 | `Ctrl+L` | 重绘整屏 |
 | `Ctrl+T` | 显示/隐藏 Todos 面板 |
 | `Ctrl+G` | 显示/隐藏 Team 面板 |
 | `Ctrl+O` | 在 transcript **紧凑 / 详细** 视图间切换 |
-| `Esc` | 无待处理问题时，若存在可取消的工作，则发送取消 |
+| `Esc` | 无 overlay 且存在可取消工作时，发送取消 |
 
-权限类问答中，`y` / `n` 可快速选择允许/拒绝类选项（`app-screen.ts`）。
+权限类问答中，`y` / `n` 可快速选择允许/拒绝类选项（`Confirmation` context）。
+
+底部 shortcut 提示栏仍显示**默认键名**；若已自定义，请以 `/keybindings list` 或实际按键行为为准。
+
+#### 自定义快捷键（`/keybindings`）
+
+配置文件路径：`~/.jiuwenswarm-tui/keybindings.json`（首次 `/keybindings` 会按当前默认值生成模板）。
+
+| 子命令 | 作用 |
+|--------|------|
+| `/keybindings` 或 `/keybindings edit` | 创建或打开配置文件；关闭外部编辑器后自动重新加载 |
+| `/keybindings list` | 列出当前**生效**的快捷键（按 context 分组） |
+| `/keybindings reset` | 删除用户配置文件，恢复内置默认 |
+
+**合并规则**：以内置 `DEFAULT_BINDINGS` 为底，用户 JSON 按 context 覆盖；某键设为 `null` 表示取消该默认绑定。非法键名、未知 action、保留键等会给出 warning，TUI 仍用合法部分继续运行。
+
+**示例**（将重绘改为 `F5`，并取消 Esc 取消任务）：
+
+```json
+{
+  "bindings": [
+    {
+      "context": "Global",
+      "bindings": {
+        "f5": "app:redraw",
+        "escape": null
+      }
+    }
+  ]
+}
+```
+
+键名格式需符合 pi-tui 的 `matchesKey` 约定：小写修饰键 `ctrl` / `shift` / `alt`，特殊键如 `pageUp`、`escape`、`return` 等；不支持 chord（空格分隔的多段按键）。
+
+**不支持的按键**：
+- **`win` / `cmd` / `super` / `meta`**：这些修饰键依赖 Kitty 键盘协议，普通终端（Windows CMD、VS Code 内置终端等）无法发送，快捷键不会生效。
+- **`ctrl+shift+字母`**：在 Windows CMD 等传统终端中，`ctrl+shift+l` 与 `ctrl+l` 发送的字节码相同，终端层面无法区分，不建议使用。如需使用此类组合建议换用 Windows Terminal、WezTerm 等支持 VT 模式的终端。
+- **chord 组合键**（空格分隔，如 `"ctrl+x ctrl+k"`）：当前版本不支持。
+
+#### 可配置的 Context 与 Action
+
+| Context | 生效场景 | 主要默认键 |
+|---------|----------|------------|
+| `Global` | 主界面（无 overlay 时部分 Esc 行为） | `ctrl+l/t/g/o`，`escape` → 取消任务 |
+| `Scroll` | Transcript 滚动 | `pageUp` / `pageDown`，`ctrl+home/end` |
+| `FileViewer` | 全屏文件/日志查看 | `esc`/`q` 退出，`↑↓`/`jk` 行移，`g`/`shift+g` 顶/底 |
+| `Confirmation` | 权限/确认问答 | `y` / `n` |
+| `TeamPanel` | Team 面板打开 | `←` 返回列表，`↑↓` 选成员，`Enter` 查看 |
+| `SwarmWorkflows` | Swarm 工作流视图 | `esc` 返回，`tab`/`→` 切焦点，`l/p/o/e/r` 等 |
+| `StatusView` | 状态/配置视图 | `esc` 关闭，`←`/`→` 切标签（搜索框输入仍硬编码） |
+| `ResumeList` | 会话选择器列表 | `space` 预览，`ctrl+r` 重命名，`ctrl+a/b`，`esc` 关闭 |
+| `Overlay` | MCP 详情/工具子视图 | `esc` 关闭 |
+
+完整 action 名称与说明见 `/keybindings list` 或生成的 `keybindings.json` 模板。
+
+#### 刻意不可重绑或仍硬编码的部分
+
+- **保留键**：`ctrl+c`、`ctrl+d`、`ctrl+m`（终端语义 / 连按退出，见 `reserved.ts`）。
+- **Select 列表内部**：`/model`、`/theme`、`/mcp` 等 pi-tui `SelectList` 的上下移动、回车选中、typeahead 过滤。
+- **Config 编辑器**：搜索框与值输入阶段的文本键、`/status` 配置 Tab 的 `/` 进入搜索等。
+- **Resume 子态**：只读预览态、重命名输入态内的按键逻辑。
+- **Diff 查看器**、**Startup 提示**等尚未接入 resolver 的视图。
+
+如需扩展可配置范围，需在 `actions.ts` / `defaultBindings.ts` 声明 action，并在 `app-screen.ts` 对应输入路径改为 `resolveAction`。
 
 ### 输入、附件与 `@` 引用
 
-- **文件/图片附件**：在输入中使用 `@路径` 或 `@"含空格路径"`；解析规则见 `attachments.ts`。
-- **图片扩展名**：`.png`、`.jpg`、`.jpeg`、`.gif`、`.webp`。
+- **`@` 路径自动补全**：在输入框中键入 `@` 后，TUI 会自动弹出文件路径补全下拉框，支持：
+  - 相对路径补全（基于当前工作目录 `cwd`）；
+  - 绝对路径补全（`/` 开头）；
+  - home 目录简写补全（`~` / `~/` 开头）；
+  - 含空格路径补全：使用 `@"路径"` 语法。
+  - 选择补全项后自动补全路径并追加一个空格。
+  - 补全来源为文件系统实时扫描，目录优先排序。
+- **文件附件**：在输入中使用 `@路径` 或 `@"含空格路径"` 后，`@` 引用的文件会作为消息附件发送给 Agent；解析规则见 `attachments.ts`。
 - **常见作为附件的文件扩展名**：含源码、文档、配置、压缩包、Office 文档等一大类扩展名（见 `SUPPORTED_FILE_EXTENSIONS`）；未在列表中的扩展名可能不会生成附件。
-- **粘贴路径**：支持引号路径、`file://`、Windows 盘符路径等，由 `extractFilePathsFromPaste` 解析。
+- **粘贴路径**：支持拖拽文件到终端（纯文件路径粘贴）、`file://` 协议路径、Windows 盘符路径等，由 `extractFilePathsFromPaste` 解析并自动转换为 `@路径` 引用。
 
 ### 命令与路径补全
 
@@ -477,6 +656,8 @@
 | 文件路径不在允许范围 | 使用 `/workspace add` 将仓库根或子目录加入可信列表 |
 | 连接失败 | 检查 Gateway 是否监听、`--url` 是否正确、防火墙 |
 | 未安装 `rg` | 安装 ripgrep 以改善搜索体验（欢迎屏提示） |
+| Cron 通知出现在所有 TUI 窗口 | 预期行为：`targets=tui` 的定时任务会广播到所有已连接终端，详见 [定时任务](定时任务.md#5-推送到-tui-频道) |
+| 多窗口之间聊天/流式输出串台 | 请确认 Gateway 为 multi-tui 版本；各窗口应使用不同 `session_id`，事件按 session 精确路由 |
 
 ---
 

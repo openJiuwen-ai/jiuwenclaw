@@ -20,6 +20,7 @@
    =========================== */
 
 .chat-input-container {
+  container-type: inline-size;
   display: flex;
   flex-direction: column;
   border: 1px solid var(--chat-composer-border);
@@ -310,6 +311,7 @@
   display: flex;
   align-items: center;
   gap: 12px;
+  flex: 1 1 0;
   min-width: 0;
 }
 
@@ -349,12 +351,15 @@
 
 .chat-mode-select {
   position: relative;
+  min-width: 0;
 }
 
 .chat-mode-select__trigger {
   display: inline-flex;
   align-items: center;
   gap: 8px;
+  max-width: 100%;
+  min-width: 0;
   min-height: 34px;
   padding: 0 12px;
   border-radius: 10px;
@@ -407,6 +412,8 @@
 }
 
 .chat-mode-select__label {
+  overflow: hidden;
+  text-overflow: ellipsis;
   white-space: nowrap;
 }
 
@@ -509,7 +516,8 @@
   display: flex;
   align-items: center;
   gap: 6px;
-  flex-shrink: 0;
+  flex: 0 1 auto;
+  min-width: 0;
 }
 
 .chat-input-btn {
@@ -569,7 +577,8 @@
   border-radius: var(--radius-sm);
   background: transparent;
   color: var(--muted-strong);
-  max-width: 140px;
+  max-width: min(140px, 34cqi);
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   cursor: pointer;
@@ -614,6 +623,32 @@
 .chat-input-btn-icon {
   width: 16px;
   height: 16px;
+}
+
+@container (max-width: 300px) {
+  .chat-input-toolbar {
+    gap: 8px;
+    padding-inline: 12px;
+  }
+
+  .chat-input-toolbar-left {
+    flex: 0 1 auto;
+    gap: 8px;
+  }
+
+  .chat-mode-select__trigger {
+    width: 34px;
+    padding-inline: 10px;
+  }
+
+  .chat-mode-select__trigger .chat-mode-select__label,
+  .chat-mode-select__trigger .chat-mode-select__chevron {
+    display: none;
+  }
+
+  .chat-model-selector {
+    max-width: 72px;
+  }
 }
 
 .share-export-btn {
@@ -1163,27 +1198,38 @@
   display: flex;
   flex-direction: column;
   gap: 0.75rem;
+  max-width: 100%;
   min-width: 0;
+  overflow-wrap: anywhere;
 }
 
 .a2ui-message-content__surfaces {
   display: flex;
   flex-direction: column;
   gap: 0.75rem;
+  max-width: 100%;
   min-width: 0;
 }
 
 .a2ui-message-content .a2ui-surface {
+  box-sizing: border-box;
   max-width: 100%;
+  min-width: 0;
   color: var(--text);
+  overflow-x: auto;
+  overflow-y: visible;
 }
 
 .a2ui-message-content .a2ui-card > section {
+  max-width: 100%;
+  min-width: 0;
+  max-height: min(70vh, 720px);
   border: 1px solid rgba(148, 163, 184, 0.26);
   border-radius: 12px;
   background: linear-gradient(180deg, rgba(255, 255, 255, 0.08), rgba(255, 255, 255, 0.03));
   box-shadow: 0 12px 28px rgba(15, 23, 42, 0.16);
-  overflow: hidden;
+  overflow: auto;
+  overflow-wrap: anywhere;
 }
 
 :root.a2ui-material-symbols-unavailable .a2ui-message-content .a2ui-icon {

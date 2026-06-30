@@ -48,8 +48,10 @@ def _create_valid_session(sessions_root: Path, sid: str, num_rounds: int = 5,
     for i in range(num_rounds):
         entries.append(_make_history_entry("user", f"请问第{i+1}个问题"))
         entries.append(_make_history_entry("assistant", f"这是第{i+1}个回答", event_type="chat.final"))
-    (session_dir / "history.json").write_text(
-        json.dumps(entries, ensure_ascii=False), encoding="utf-8")
+    history_payload = "\n".join(json.dumps(item, ensure_ascii=False) for item in entries)
+    if history_payload:
+        history_payload += "\n"
+    (session_dir / "history.jsonl").write_text(history_payload, encoding="utf-8")
     metadata = {"mode": mode, "session_id": sid, "created_at": time.time()}
     (session_dir / "metadata.json").write_text(
         json.dumps(metadata, ensure_ascii=False), encoding="utf-8")
@@ -157,7 +159,7 @@ class TestDreamingE2EAgent:
         for sid in ["sess_001", "sess_a", "sess_b"]:
             _create_valid_session(sessions_root, sid, num_rounds=5)
         session_dir = sessions_root / "sess_001"
-        orig_mtime = (session_dir / "history.json").stat().st_mtime
+        orig_mtime = (session_dir / "history.jsonl").stat().st_mtime
 
         sweeper1 = Sweeper(str(sessions_root), str(output_dir), mode="agent")
         sweeper1.init()
@@ -171,11 +173,11 @@ class TestDreamingE2EAgent:
 
         # mark sess_a and sess_b as scanned, then update them too
         sweeper1.scanned_sessions["sess_a"] = {
-            "history_mtime": (sessions_root / "sess_a" / "history.json").stat().st_mtime,
+            "history_mtime": (sessions_root / "sess_a" / "history.jsonl").stat().st_mtime,
             "round_count": 5,
         }
         sweeper1.scanned_sessions["sess_b"] = {
-            "history_mtime": (sessions_root / "sess_b" / "history.json").stat().st_mtime,
+            "history_mtime": (sessions_root / "sess_b" / "history.jsonl").stat().st_mtime,
             "round_count": 5,
         }
 
@@ -183,7 +185,10 @@ class TestDreamingE2EAgent:
         # add 4 more rounds to sess_001, sess_a and sess_b
         for sid in ["sess_001", "sess_a", "sess_b"]:
             sdir = sessions_root / sid
-            existing = json.loads((sdir / "history.json").read_text(encoding="utf-8"))
+            existing = [
+                json.loads(line)
+                for line in (sdir / "history.jsonl").read_text(encoding="utf-8").splitlines() if line.strip()
+            ]
             existing.extend([
                 _make_history_entry("user", "新问题6"),
                 _make_history_entry("assistant", "新回答6", event_type="chat.final"),
@@ -194,7 +199,9 @@ class TestDreamingE2EAgent:
                 _make_history_entry("user", "新问题9"),
                 _make_history_entry("assistant", "新回答9", event_type="chat.final"),
             ])
-            (sdir / "history.json").write_text(json.dumps(existing), encoding="utf-8")
+            (sdir / "history.jsonl").write_text(
+                "\n".join(json.dumps(item, ensure_ascii=False) for item in existing) + "\n", encoding="utf-8"
+            )
 
         sweeper2 = Sweeper(str(sessions_root), str(output_dir), mode="agent")
         sweeper2.init()

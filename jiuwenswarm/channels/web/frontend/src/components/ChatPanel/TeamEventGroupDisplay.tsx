@@ -32,6 +32,7 @@ interface AgentTeamActivityCardProps {
 interface TeamMemberLike {
   member_id: string;
   name?: string;
+  status?: string;
 }
 
 interface MemberActivity {
@@ -114,31 +115,9 @@ function isVisibleTeamMember(memberId?: string): memberId is string {
   return Boolean(memberId) && memberId !== 'user' && !isTeamLeaderMember(memberId);
 }
 
-function collectMemberIds(
-  events: ParsedTeamEvent[],
-  tasks: TeamTask[],
-  todos: TodoItem[],
-  taskEvents: TeamTaskEvent[],
-  executionEvents: TeamMemberExecutionEvent[]
-): string[] {
-  const ids = new Set<string>();
-  events.forEach((event) => {
-    if (isVisibleTeamMember(event.fromMember)) ids.add(event.fromMember);
-  });
-  tasks.forEach((task) => {
-    if (isVisibleTeamMember(task.assignee)) ids.add(task.assignee);
-  });
-  todos.forEach((todo) => {
-    if (isVisibleTeamMember(todo.claimedBy)) ids.add(todo.claimedBy);
-  });
-  taskEvents.forEach((event) => {
-    if (isVisibleTeamMember(event.assignee)) ids.add(event.assignee);
-    if (isVisibleTeamMember(event.member_id)) ids.add(event.member_id);
-  });
-  executionEvents.forEach((event) => {
-    if (isVisibleTeamMember(event.member_id)) ids.add(event.member_id);
-  });
-  return Array.from(ids);
+function isActiveTeamMember(member: TeamMemberLike): boolean {
+  const status = `${member.status || ''}`.toLowerCase();
+  return isVisibleTeamMember(member.member_id) && !status.includes('shutdown') && !status.includes('down');
 }
 
 function pickTaskActivity(
@@ -184,7 +163,7 @@ function getLatestTask(candidates: TaskCandidate[]): TaskCandidate | undefined {
 function buildTaskActivity(task: TaskCandidate, t: Translate): ActivityCandidate {
   const statusLabel = getTaskStatusLabel(task.status, t);
   return {
-    summary: t('chatUi.teamActivity.summary.task', { status: statusLabel, content: compactText(task.title) }),
+    summary: compactText(task.title),
     statusLabel,
     timestamp: task.timestamp,
   };
@@ -196,16 +175,19 @@ function pickMessageActivity(
   t: Translate
 ): ActivityCandidate | null {
   const latest = getLatestByTimestamp(
-    eventItems.filter(({ event }) => event.fromMember === memberId),
+    eventItems.filter(({ event }) => event.fromMember === memberId || event.toMember === memberId),
     ({ event, message }) => toEventTime(event, message)
   );
   if (!latest) {
     return null;
   }
 
+  const isReceived = latest.event.toMember === memberId;
   return {
-    summary: t('chatUi.teamActivity.summary.message', { content: compactText(latest.event.content || latest.event.type) }),
-    statusLabel: t('chatUi.teamActivity.status.message'),
+    summary: compactText(latest.event.content || latest.event.type),
+    statusLabel: isReceived
+      ? t('chatUi.teamActivity.status.receivedMessage')
+      : t('chatUi.teamActivity.status.message'),
     timestamp: toEventTime(latest.event, latest.message),
   };
 }
@@ -235,12 +217,12 @@ function getExecutionActivityLabel(event: TeamMemberExecutionEvent, t: Translate
   const content = event.content || event.tool_name || event.title;
   if (event.kind === 'file') {
     return {
-      summary: t('chatUi.teamActivity.summary.file', { content: compactText(content) }),
+      summary: compactText(content),
       statusLabel: t('chatUi.teamActivity.status.file'),
     };
   }
   return {
-    summary: t('chatUi.teamActivity.summary.tool', { content: compactText(content) }),
+    summary: compactText(content),
     statusLabel: event.kind === 'tool_call'
       ? t('chatUi.teamActivity.status.executingTool')
       : t('chatUi.teamActivity.status.toolCall'),
@@ -275,18 +257,13 @@ function buildMemberActivities(
   members: TeamMemberLike[],
   tasks: TeamTask[],
   todos: TodoItem[],
-  taskEvents: TeamTaskEvent[],
   executionEvents: TeamMemberExecutionEvent[],
   t: Translate
 ): MemberActivity[] {
   const eventItems = parseTeamEventItems(messages);
-  const memberIds = collectMemberIds(
-    eventItems.map((item) => item.event),
-    tasks,
-    todos,
-    taskEvents,
-    executionEvents
-  );
+  const memberIds = members
+    .filter(isActiveTeamMember)
+    .map((member) => member.member_id);
 
   return memberIds
     .map((memberId) => {
@@ -295,7 +272,13 @@ function buildMemberActivities(
       const toolActivity = pickToolActivity(memberId, executionEvents, t);
       const selected = pickLatestActivity([toolActivity, messageActivity, taskActivity]);
       if (!selected) {
-        return null;
+        return {
+          memberId,
+          displayName: getMemberName(memberId, members),
+          statusLabel: t('chatUi.teamActivity.status.idle'),
+          summary: '',
+          timestamp: 0,
+        };
       }
       return {
         memberId,
@@ -305,7 +288,6 @@ function buildMemberActivities(
         timestamp: selected.timestamp,
       };
     })
-    .filter((activity): activity is MemberActivity => activity !== null)
     .sort(compareRecentActivity);
 }
 
@@ -322,20 +304,13 @@ function buildMemberCompletionSummaries(
   executionEvents: TeamMemberExecutionEvent[]
 ): MemberActivityWithCounts[] {
   const eventItems = parseTeamEventItems(messages);
-  const memberIds = collectMemberIds(
-    eventItems.map((item) => item.event),
-    tasks,
-    todos,
-    taskEvents,
-    executionEvents
-  );
+  const memberIds = members
+    .filter(isActiveTeamMember)
+    .map((member) => member.member_id);
 
   return memberIds
     .map((memberId) => {
       const counts = countMemberActivity(memberId, eventItems, tasks, todos, taskEvents, executionEvents);
-      if (counts.taskCount + counts.messageCount + counts.toolCount === 0) {
-        return null;
-      }
       const latestTimestamp = getLatestMemberTimestamp(memberId, eventItems, tasks, todos, taskEvents, executionEvents);
 
       return {
@@ -347,7 +322,6 @@ function buildMemberCompletionSummaries(
         counts,
       };
     })
-    .filter((activity): activity is MemberActivityWithCounts => activity !== null)
     .sort(compareRecentActivity);
 }
 
@@ -544,27 +518,31 @@ export function AgentTeamActivityCard({
   const { t } = useTranslation();
   const { teamMembers } = useSessionStore();
   const members = teamMembers as TeamMemberLike[];
-  const activities = useMemo(
-    () => {
-      if (!isProcessing) {
-        return buildMemberCompletionSummaries(messages, members, tasks, todos, taskEvents, executionEvents);
-      }
-      return buildMemberActivities(messages, members, tasks, todos, taskEvents, executionEvents, t);
-    },
-    [messages, members, tasks, todos, taskEvents, executionEvents, isProcessing, t]
-  );
+  const { activities, activeCount } = useMemo(() => {
+    const count = members.filter(isActiveTeamMember).length;
+    if (!isProcessing) {
+      const acts = buildMemberCompletionSummaries(
+        messages, members, tasks, todos, taskEvents, executionEvents
+      );
+      return { activities: acts, activeCount: count };
+    }
+    const acts = buildMemberActivities(
+      messages, members, tasks, todos, executionEvents, t
+    );
+    return { activities: acts, activeCount: count };
+  }, [messages, members, tasks, todos, taskEvents, executionEvents, isProcessing, t]);
 
   if (activities.length === 0) {
     return null;
   }
 
-  const currentActivity = activities[0];
+  const currentActivity = activities.find((a) => a.timestamp > 0);
 
   return (
     <div className="chat-active-team-group animate-rise">
       <div className="team-event-group team-event-group--activity">
         <AgentTeamHeader
-          memberCount={activities.length}
+          memberCount={activeCount}
           expanded={expanded}
           isProcessing={isProcessing}
           currentActivity={currentActivity}

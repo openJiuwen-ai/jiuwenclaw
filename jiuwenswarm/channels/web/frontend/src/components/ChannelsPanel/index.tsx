@@ -34,7 +34,8 @@ type SupportedChannelId =
   | 'dingtalk'
   | 'telegram'
   | 'discord'
-  | 'whatsapp';
+  | 'whatsapp'
+  | 'wechat';
 
 const ADAPTING_CHANNEL_IDS = new Set<SupportedChannelId>([]);
 
@@ -272,6 +273,7 @@ const SUPPORTED_CHANNELS: Array<{ channel_id: SupportedChannelId; logo_src: stri
   { channel_id: 'telegram', logo_src: '/telegram.webp' },
   { channel_id: 'discord', logo_src: '/discord.webp' },
   { channel_id: 'whatsapp', logo_src: '/whatsapp.png' },
+  { channel_id: 'wechat', logo_src: '/wechat.png' },
 ];
 
 

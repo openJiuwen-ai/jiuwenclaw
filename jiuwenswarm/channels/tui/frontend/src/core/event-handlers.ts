@@ -35,6 +35,9 @@ export interface PendingQuestion {
   source?: string;
   /** Mode active when the interrupt was raised; used when resuming the tool call. */
   resumeMode?: ClientMode;
+  planApprovalKind?: string;
+  planContent?: string;
+  planLanguage?: "cn" | "en";
   planPath?: string;
   planSlug?: string;
   evolutionMeta?: Record<string, unknown>;
@@ -53,6 +56,7 @@ export interface PendingQuestionItem {
 export interface PendingQuestionOption {
   label: string;
   description?: string;
+  value?: string;
   details?: string[];
 }
 
@@ -150,6 +154,8 @@ export interface AppEventDelegate {
   tryAutoRestoreAfterCancel(): Promise<void>;
   /** 累加 chat.usage_summary 事件的 token/cost 数据（按 model 分桶）。 */
   appendUsageSummary(usage: Record<string, unknown>, model?: string): void;
+  /** 累计已完成 model call 的 provider token 用量。 */
+  appendUsageMetadata(usage: Record<string, unknown>): void;
   /** 回合结束时记录执行耗时条目到对话区。 */
   addWorkedForEntry(): void;
   /** Set harness extension ready info (for file tree display) */
@@ -224,11 +230,6 @@ function _getToolResultPayload(payload: Record<string, unknown>): Record<string,
     return nested as Record<string, unknown>;
   }
   return payload;
-}
-
-function normalizeVisibleMode(mode: ClientMode): ClientMode {
-  if (mode === "team.plan") return "team";
-  return mode;
 }
 
 function _extractPathFromToolResult(
@@ -436,6 +437,7 @@ function normalizePendingQuestion(payload: Record<string, unknown>): PendingQues
             .map((option) => ({
               label: typeof option.label === "string" ? option.label : "",
               description: typeof option.description === "string" ? option.description : undefined,
+              value: typeof option.value === "string" ? option.value : undefined,
             }))
             .filter((option) => option.label.length > 0)
         : [],
@@ -907,8 +909,11 @@ function normalizeTodoStatus(status: unknown): TodoItem["status"] | null {
   if (status === "deleted" || status === "cancelled" || status === "canceled") {
     return null;
   }
-  if (status === "in_progress" || status === "completed") {
+  if (status === "in_progress" || status === "completed" || status === "error") {
     return status;
+  }
+  if (status === "failed") {
+    return "error";
   }
   return "pending";
 }
@@ -1055,6 +1060,7 @@ function handleWorkflowUpdated(
   if (typeof (workflow as Record<string, unknown>).id !== "string") {
     return false;
   }
+
   delegate.applyWorkflowUpdate(workflow as unknown as WorkflowRun);
   return true;
 }
@@ -1103,6 +1109,30 @@ export function handleIncomingFrame(delegate: AppEventDelegate, frame: EventFram
       );
       _handleWorktreeToolResult(delegate, payload);
       return true;
+
+    case "chat.symphony_status": {
+      const content = typeof payload.content === "string" ? payload.content.trim() : "";
+      if (!content) return true;
+      if (payload.status === "failed") {
+        appendEntry(delegate, {
+          kind: "error",
+          id: createId("symphony-status"),
+          sessionId: activeSessionId,
+          content,
+          at: new Date().toISOString(),
+        });
+      } else {
+        appendEntry(delegate, {
+          kind: "info",
+          id: createId("symphony-status"),
+          sessionId: activeSessionId,
+          content,
+          icon: "i",
+          at: new Date().toISOString(),
+        });
+      }
+      return true;
+    }
 
     case "chat.processing_status":
       delegate.setStreamingState(
@@ -1187,6 +1217,14 @@ export function handleIncomingFrame(delegate: AppEventDelegate, frame: EventFram
             ? (payload._evolution_meta as Record<string, unknown>)
             : undefined;
       const source = typeof payload.source === "string" ? payload.source : undefined;
+      const planApprovalKind =
+        typeof payload.plan_approval_kind === "string" ? payload.plan_approval_kind : undefined;
+      const planContent =
+        typeof payload.plan_content === "string" ? payload.plan_content : undefined;
+      const planLanguage =
+        payload.plan_language === "cn" || payload.plan_language === "en"
+          ? payload.plan_language
+          : undefined;
       const planPath =
         typeof payload.plan_path === "string" && payload.plan_path.trim()
           ? payload.plan_path.trim()
@@ -1199,6 +1237,9 @@ export function handleIncomingFrame(delegate: AppEventDelegate, frame: EventFram
         requestId,
         source,
         resumeMode: delegate.getMode(),
+        planApprovalKind,
+        planContent,
+        planLanguage,
         planPath,
         planSlug,
         evolutionMeta,
@@ -1259,7 +1300,7 @@ export function handleIncomingFrame(delegate: AppEventDelegate, frame: EventFram
     case "session.updated": {
       const mode = typeof payload.mode === "string" ? payload.mode : "";
       if (isClientMode(mode)) {
-        delegate.setMode(normalizeVisibleMode(mode));
+        delegate.setMode(mode);
       }
       if (typeof payload.title === "string") {
         delegate.setSessionTitle(payload.title);
@@ -1278,6 +1319,27 @@ export function handleIncomingFrame(delegate: AppEventDelegate, frame: EventFram
 
     case "workflow.updated":
       return handleWorkflowUpdated(delegate, payload);
+
+    case "chat.usage_metadata": {
+      const metadata =
+        typeof payload.metadata === "object" && payload.metadata !== null
+          ? (payload.metadata as Record<string, unknown>)
+          : {};
+      const usage =
+        typeof metadata.usage_metadata === "object" && metadata.usage_metadata !== null
+          ? (metadata.usage_metadata as Record<string, unknown>)
+          : {};
+      delegate.appendUsageMetadata(usage);
+      return true;
+    }
+
+    case "chat.llm_usage":
+      delegate.appendUsageMetadata(
+        typeof payload.usage_metadata === "object" && payload.usage_metadata !== null
+          ? (payload.usage_metadata as Record<string, unknown>)
+          : {},
+      );
+      return true;
 
     case "chat.usage_summary":
       delegate.appendUsageSummary(

@@ -35,6 +35,8 @@ from jiuwenswarm.common.config import (
     update_preferred_language_in_config,
     update_context_engine_enabled_in_config,
     update_kv_cache_affinity_enabled_in_config,
+    update_skill_retrieval_in_config,
+    update_symphony_in_config,
     update_permissions_enabled_in_config,
     update_memory_forbidden_enabled_in_config,
     update_memory_forbidden_description_in_config,
@@ -46,6 +48,7 @@ from jiuwenswarm.server.runtime.a2ui.integration import (
     get_default_a2ui_config_payload,
     validate_a2ui_config_update,
 )
+from jiuwenswarm.common.reasoning_injector import build_reasoning_model_request_kwargs
 from jiuwenswarm.common.updater import UpdaterService
 from jiuwenswarm.common.utils import (
     get_agent_sessions_dir,
@@ -56,6 +59,10 @@ from jiuwenswarm.common.utils import (
 from jiuwenswarm.agents.harness.common.auto_harness import AutoHarnessService
 from jiuwenswarm.agents.harness.common.tools.web_file_download import build_file_download_info
 from jiuwenswarm.common.version import __version__
+from jiuwenswarm.symphony.skill_retrieval.taxonomy_config import (
+    coerce_root_categories_value,
+    root_categories_to_text,
+)
 
 for _jiuwen_log in LogManager.get_all_loggers().values():
     _jiuwen_log.set_level(logging.INFO)
@@ -65,6 +72,13 @@ logger = logging.getLogger(__name__)
 _PROJECT_ROOT = get_root_dir()
 _ENV_FILE = get_env_file()
 load_dotenv(dotenv_path=_ENV_FILE, override=True)
+
+
+_ENV_VAR_PLACEHOLDER_RE = re.compile(r"^\$\{([^:}]+)(?::-([^}]*))?\}$")
+
+
+def _is_env_var_placeholder(value: Any) -> bool:
+    return isinstance(value, str) and bool(_ENV_VAR_PLACEHOLDER_RE.match(value.strip()))
 
 
 def _values_match(parsed_val: Any, resolved_val: Any) -> bool:
@@ -84,6 +98,18 @@ def _values_match(parsed_val: Any, resolved_val: Any) -> bool:
     return str(parsed_val if parsed_val is not None else "") == str(
         resolved_val if resolved_val is not None else ""
     )
+
+
+def _serialize_reasoning_level(value: Any) -> Any:
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    from ruamel.yaml.scalarstring import DoubleQuotedScalarString
+    # Always emit a quoted YAML string so the same field never round-trips
+    # as a mix of plain scalars and quoted scalars.
+    return DoubleQuotedScalarString(text)
 
 
 def _merge_models_for_replace_all(
@@ -124,10 +150,22 @@ def _merge_models_for_replace_all(
                 new_mcc["model_name"] = item["model_name"]
             if not _values_match(item["api_base"], resolved_mcc.get("api_base")):
                 new_mcc["api_base"] = item["api_base"]
-            if not _values_match(item["model_provider"], resolved_mcc.get("client_provider")):
+            # client_provider: 当 YAML 仍是 ${MODEL_PROVIDER} 占位符时，其解析值会与前端
+            # 选择（如 OpenAI）一致而被误判为"未改"，导致首次配置后占位符残留。只要原值是
+            # 占位符就用前端值固化它。
+            if item["model_provider"] and (
+                _is_env_var_placeholder(new_mcc.get("client_provider"))
+                or not _values_match(item["model_provider"], resolved_mcc.get("client_provider"))
+            ):
                 new_mcc["client_provider"] = item["model_provider"]
             if not _values_match(item["temperature"], resolved_mco.get("temperature")):
                 new_mco["temperature"] = item["temperature"]
+            reasoning_level = item.get("reasoning_level", "")
+            if not _values_match(reasoning_level, resolved_mco.get("reasoning_level")):
+                if reasoning_level:
+                    new_mco["reasoning_level"] = _serialize_reasoning_level(reasoning_level)
+                else:
+                    new_mco.pop("reasoning_level", None)
             if not _values_match(item["timeout"], resolved_mcc.get("timeout")):
                 new_mcc["timeout"] = item["timeout"]
             if not _values_match(item["alias"], (resolved_entry or {}).get("alias")):
@@ -154,6 +192,8 @@ def _merge_models_for_replace_all(
                 },
                 "model_config_obj": {
                     "temperature": item["temperature"],
+                    **({"reasoning_level": _serialize_reasoning_level(item.get("reasoning_level"))}
+                       if item.get("reasoning_level") else {}),
                 },
                 "is_default": item["is_default"],
                 "alias": item["alias"],
@@ -216,9 +256,19 @@ _FORWARD_REQ_METHODS = frozenset({
     "skills.teamskillshub.install",
     "skills.teamskillshub.publish",
     "skills.teamskillshub.delete",
+    "skills.retrieval.status",
+    "skills.retrieval.index_build",
+    "skills.retrieval.index_cancel",
+    "skills.retrieval.search",
+    "skills.retrieval.tree",
     "skills.evolution.status",
     "skills.evolution.get",
     "skills.evolution.save",
+    "symphony.build_score",
+    "symphony.pause_build",
+    "symphony.score_status",
+    "symphony.graph",
+    "symphony.plan",
     "plugins.list",
     "plugins.install",
     "plugins.uninstall",
@@ -250,6 +300,10 @@ _FORWARD_REQ_METHODS = frozenset({
     "schedule.logs",
     "schedule.cancel",
     "schedule.delete",
+    "issue.watch_once",
+    "issue.state.list",
+    "issue.matrix",
+    "issue.delete",
 })
 
 _FORWARD_NO_LOCAL_HANDLER_METHODS = frozenset({
@@ -288,9 +342,19 @@ _FORWARD_NO_LOCAL_HANDLER_METHODS = frozenset({
     "skills.teamskillshub.install",
     "skills.teamskillshub.publish",
     "skills.teamskillshub.delete",
+    "skills.retrieval.status",
+    "skills.retrieval.index_build",
+    "skills.retrieval.index_cancel",
+    "skills.retrieval.search",
+    "skills.retrieval.tree",
     "skills.evolution.status",
     "skills.evolution.get",
     "skills.evolution.save",
+    "symphony.build_score",
+    "symphony.pause_build",
+    "symphony.score_status",
+    "symphony.graph",
+    "symphony.plan",
     "plugins.list",
     "plugins.install",
     "plugins.uninstall",
@@ -384,6 +448,129 @@ _CONFIG_YAML_KEYS = frozenset({
     "a2ui_enabled",
 })
 
+_SYMPHONY_CONFIG_SPECS: dict[str, tuple[tuple[str, ...], str, Any]] = {
+    "symphony_enabled": (("enabled",), "bool", False),
+}
+_SYMPHONY_CONFIG_KEYS = tuple(_SYMPHONY_CONFIG_SPECS.keys())
+_SKILL_RETRIEVAL_CONFIG_SPECS: dict[str, tuple[tuple[str, ...], str, Any]] = {
+    "skill_retrieval_enabled": (("enabled",), "bool", False),
+    "skill_retrieval_build_branching_factor": (("build", "branching_factor"), "int", 128),
+    "skill_retrieval_build_max_depth": (("build", "max_depth"), "int", 6),
+    "skill_retrieval_build_root_categories": (("build", "root_categories"), "root_categories", ""),
+    "skill_retrieval_build_max_workers": (("build", "max_workers"), "int", 2),
+    "skill_retrieval_build_max_retries": (("build", "max_retries"), "non_negative_int", 2),
+    "skill_retrieval_build_request_timeout_seconds": (("build", "request_timeout_seconds"), "float", 420.0),
+    "skill_retrieval_build_total_timeout_seconds": (("build", "total_timeout_seconds"), "float", 0.0),
+    "skill_retrieval_build_classification_batch_limit": (("build", "classification_batch_limit"), "int", 32),
+    "skill_retrieval_build_discovery_seed": (("build", "discovery_seed"), "raw_int", 42),
+    "skill_retrieval_build_postprocess_enabled": (("build", "postprocess_enabled"), "bool", True),
+    "skill_retrieval_build_postprocess_max_passes": (("build", "postprocess_max_passes"), "non_negative_int", 1),
+    "skill_retrieval_build_postprocess_min_skills": (("build", "postprocess_min_skills"), "int", 6),
+    "skill_retrieval_build_equivalence_enabled": (("build", "equivalence_enabled"), "bool", True),
+    "skill_retrieval_retrieve_compact_codes_enabled": (("retrieve", "compact_codes_enabled"), "bool", False),
+    "skill_retrieval_retrieve_flatten_tree": (("retrieve", "flatten_tree"), "bool", False),
+    "skill_retrieval_retrieve_max_exposure_depth": (("retrieve", "max_exposure_depth"), "int", 1),
+}
+_SKILL_RETRIEVAL_CONFIG_KEYS = tuple(_SKILL_RETRIEVAL_CONFIG_SPECS.keys())
+
+
+def _coerce_config_panel_value(value: Any, value_type: str, default: Any) -> Any:
+    if value_type == "bool":
+        return str(value).strip().lower() in ("true", "1", "yes", "on", "enabled")
+    if value_type == "int":
+        try:
+            return max(1, int(value))
+        except (TypeError, ValueError):
+            return default
+    if value_type == "non_negative_int":
+        try:
+            return max(0, int(value))
+        except (TypeError, ValueError):
+            return default
+    if value_type == "raw_int":
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return default
+    if value_type == "float":
+        try:
+            return max(0.0, float(value))
+        except (TypeError, ValueError):
+            return default
+    if value_type == "root_categories":
+        return coerce_root_categories_value(value, allow_path=False) or ""
+    return str(value if value is not None else default)
+
+
+def _set_nested_config_value(target: dict[str, Any], path: tuple[str, ...], value: Any) -> None:
+    current = target
+    for segment in path[:-1]:
+        child = current.get(segment)
+        if not isinstance(child, dict):
+            child = {}
+            current[segment] = child
+        current = child
+    current[path[-1]] = value
+
+
+def _get_nested_config_value(source: dict[str, Any], path: tuple[str, ...], default: Any) -> Any:
+    current: Any = source
+    for segment in path:
+        if not isinstance(current, dict) or segment not in current:
+            return default
+        current = current.get(segment)
+    return default if current is None else current
+
+
+def _flatten_symphony_for_config_panel(raw: dict[str, Any]) -> dict[str, str]:
+    symphony = raw.get("symphony") if isinstance(raw.get("symphony"), dict) else {}
+    flat: dict[str, str] = {}
+    for key, (path, value_type, default) in _SYMPHONY_CONFIG_SPECS.items():
+        value = _get_nested_config_value(symphony, path, default)
+        if value_type == "bool":
+            flat[key] = "true" if bool(value) else "false"
+        elif value_type == "root_categories":
+            flat[key] = root_categories_to_text(value)
+        else:
+            flat[key] = str(value)
+    flat.update(_flatten_skill_retrieval_for_config_panel(raw))
+    return flat
+
+
+def _flatten_skill_retrieval_for_config_panel(raw: dict[str, Any]) -> dict[str, str]:
+    symphony = raw.get("symphony") if isinstance(raw.get("symphony"), dict) else {}
+    section = symphony.get("skill_retrieval") if isinstance(symphony.get("skill_retrieval"), dict) else {}
+    flat: dict[str, str] = {}
+    for key, (path, value_type, default) in _SKILL_RETRIEVAL_CONFIG_SPECS.items():
+        value = _get_nested_config_value(section, path, default)
+        if value_type == "bool":
+            flat[key] = "true" if bool(value) else "false"
+        elif value_type == "root_categories":
+            flat[key] = root_categories_to_text(value)
+        else:
+            flat[key] = str(value)
+    return flat
+
+
+def _build_symphony_config_update(params: dict[str, Any]) -> dict[str, Any]:
+    updates: dict[str, Any] = {}
+    for key, (path, value_type, default) in _SYMPHONY_CONFIG_SPECS.items():
+        if key not in params:
+            continue
+        value = _coerce_config_panel_value(params[key], value_type, default)
+        _set_nested_config_value(updates, path, value)
+    return updates
+
+
+def _build_skill_retrieval_config_update(params: dict[str, Any]) -> dict[str, Any]:
+    updates: dict[str, Any] = {}
+    for key, (path, value_type, default) in _SKILL_RETRIEVAL_CONFIG_SPECS.items():
+        if key not in params:
+            continue
+        value = _coerce_config_panel_value(params[key], value_type, default)
+        _set_nested_config_value(updates, path, value)
+    return updates
+
 
 def _flatten_modes_team_for_config_panel(raw: dict[str, Any]) -> dict[str, str]:
     """Return the legacy flat fields consumed by the web config panel."""
@@ -432,6 +619,9 @@ def _flatten_modes_team_for_config_panel(raw: dict[str, Any]) -> dict[str, str]:
         flat[f"{team_prefix}lifecycle"] = str(team_spec.get("lifecycle") or "")
         flat[f"{team_prefix}teammate_mode"] = str(team_spec.get("teammate_mode") or "")
         flat[f"{team_prefix}spawn_mode"] = str(team_spec.get("spawn_mode") or "")
+        flat[f"{team_prefix}enable_permissions"] = (
+            "true" if bool(team_spec.get("enable_permissions", False)) else "false"
+        )
 
         agents = team_spec.get("agents")
         if not isinstance(agents, dict):
@@ -556,6 +746,12 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             return ref.get(key)
         return ref
 
+    def _schedule_clear_agent_config_cache(name: str) -> None:
+        asyncio.create_task(
+            _clear_agent_config_cache(_resolve(agent_client)),
+            name=f"{name}.clear_agent_config_cache",
+        )
+
     def _resolve_env_vars(value: Any) -> Any:
         """Recursively resolve environment variables in config values."""
         if isinstance(value, str):
@@ -644,6 +840,7 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             memory_desc = memory_cfg.get("description") or {}
             payload["memory_forbidden_description"] = memory_desc
             payload.update(get_a2ui_config_payload(raw))
+            payload.update(_flatten_symphony_for_config_panel(raw))
             if not payload.get("free_search_ddg_enabled"):
                 payload["free_search_ddg_enabled"] = "false"
             if not payload.get("free_search_bing_enabled"):
@@ -659,6 +856,17 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             payload.setdefault("memory_forbidden_description", "")
             for key, value in get_default_a2ui_config_payload().items():
                 payload.setdefault(key, value)
+            for key, (_, value_type, default) in {
+                **_SYMPHONY_CONFIG_SPECS,
+                **_SKILL_RETRIEVAL_CONFIG_SPECS,
+            }.items():
+                if value_type == "bool":
+                    default_text = "true" if default else "false"
+                elif value_type == "root_categories":
+                    default_text = root_categories_to_text(default)
+                else:
+                    default_text = str(default)
+                payload.setdefault(key, default_text)
             payload.setdefault("free_search_ddg_enabled", "false")
             payload.setdefault("free_search_bing_enabled", "false")
         await channel.send_response(ws, req_id, ok=True, payload=payload)
@@ -766,6 +974,25 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             except Exception as e:  # noqa: BLE001
                 logger.warning("[config.set] 写回 config.yaml 失败 %s: %s", param_key, e)
 
+        symphony_updates = _build_symphony_config_update(params)
+        if symphony_updates:
+            try:
+                update_symphony_in_config(symphony_updates)
+                yaml_updated.extend(k for k in _SYMPHONY_CONFIG_KEYS if k in params)
+            except Exception as e:
+                logger.warning("[config.set] 写回 symphony 失败: %s", e)
+
+        try:
+            skill_retrieval_updates = _build_skill_retrieval_config_update(params)
+        except ValueError as exc:
+            raise _ConfigBadRequest(str(exc)) from exc
+        if skill_retrieval_updates:
+            try:
+                update_skill_retrieval_in_config(skill_retrieval_updates)
+                yaml_updated.extend(k for k in _SKILL_RETRIEVAL_CONFIG_KEYS if k in params)
+            except Exception as e:
+                logger.warning("[config.set] 写回 skill_retrieval 失败: %s", e)
+
         for env_key, value in env_updates.items():
             os.environ[env_key] = value
         if env_updates:
@@ -839,6 +1066,7 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             verify_ssl = bool(item.get("verify_ssl", False))
             is_default = bool(item.get("is_default", False))
             alias = str(item.get("alias") or "").strip()
+            reasoning_level = str(item.get("reasoning_level") or "").strip()
 
             if alias:
                 if alias in aliases_seen:
@@ -856,6 +1084,7 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
                 "timeout": timeout,
                 "verify_ssl": verify_ssl,
                 "alias": alias,
+                "reasoning_level": reasoning_level,
                 "origin_index": origin_index,
             })
 
@@ -957,9 +1186,19 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
 
         verify_ssl = bool(params.get("verify_ssl", False))
 
+        model_config_obj = {"temperature": 0}
+        if "reasoning_level" in params:
+            model_config_obj["reasoning_level"] = params.get("reasoning_level")
+        reasoning_mcc = {
+            "client_provider": model_provider,
+            "api_base": api_base,
+        }
         model_request_config = ModelRequestConfig(
-            model=model,
-            temperature=0,
+            **build_reasoning_model_request_kwargs(
+                model_client_config=reasoning_mcc,
+                model_config_obj=model_config_obj,
+                model_name=model,
+            )
         )
         model_client_config = ModelClientConfig(
             client_id="config-validate",
@@ -1018,8 +1257,8 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
         # tokens into reasoning_content while leaving content empty.  Treat a
         # non-empty reasoning_content as a valid response as well.
         reasoning_content = getattr(resp, "reasoning_content", None) if hasattr(resp, "reasoning_content") else None
-        has_valid_response = (isinstance(content, str) and content.strip()) or (
-                isinstance(reasoning_content, str) and reasoning_content.strip()
+        has_valid_response = (isinstance(content, str) and content) or (
+                isinstance(reasoning_content, str) and reasoning_content
         )
         if not has_valid_response:
             await channel.send_response(
@@ -1068,6 +1307,7 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
                     "api_key": mcc.get("api_key", ""),
                     "model_provider": mcc.get("client_provider", ""),
                     "temperature": mco.get("temperature", 0.95),
+                    "reasoning_level": "off" if mco.get("reasoning_level") is False else mco.get("reasoning_level", ""),
                     "is_default": is_default,
                     "alias": entry.get("alias", ""),
                     "origin_index": idx,
@@ -1400,7 +1640,7 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
                 ws,
                 req_id,
                 ok=True,
-                payload={"chrome_path": ""},
+                payload={"chrome_path": "", "headless": True},
             )
             return
 
@@ -1410,15 +1650,18 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
         config = _resolve_env_vars(config_base)
         browser_cfg = config.get("browser", {}) if isinstance(config, dict) else {}
         chrome_path = ""
+        headless = True
         if isinstance(browser_cfg, dict):
             value = browser_cfg.get("chrome_path", "")
             if isinstance(value, str):
                 chrome_path = value
+            raw_headless = browser_cfg.get("headless", True)
+            headless = bool(raw_headless) if isinstance(raw_headless, bool) else True
 
-        await channel.send_response(ws, req_id, ok=True, payload={"chrome_path": chrome_path})
+        await channel.send_response(ws, req_id, ok=True, payload={"chrome_path": chrome_path, "headless": headless})
 
     async def _path_set(ws, req_id, params, session_id):
-        """更新 browser.chrome_path 并写回 config。"""
+        """更新 browser.chrome_path / browser.headless 并写回 config。"""
         if not isinstance(params, dict):
             await channel.send_response(ws, req_id, ok=False, error="params must be object", code="BAD_REQUEST")
             return
@@ -1429,15 +1672,33 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             return
         chrome_path = chrome_path.strip()
 
+        raw_headless = params.get("headless", True)
+        headless = bool(raw_headless) if isinstance(raw_headless, bool) else True
+
         try:
-            update_browser_in_config({"chrome_path": chrome_path})
+            update_browser_in_config({"chrome_path": chrome_path, "headless": headless})
             await _clear_agent_config_cache(_resolve(agent_client))
         except Exception as e:  # noqa: BLE001
             logger.warning("[path.set] 写回 config.yaml 失败: %s", e)
             await channel.send_response(ws, req_id, ok=False, error=str(e), code="INTERNAL_ERROR")
             return
 
-        await channel.send_response(ws, req_id, ok=True, payload={"chrome_path": chrome_path})
+        # When switching to headless, purge any persisted headed-Chrome profile so the
+        # managed driver doesn't reuse an existing visible window on the next browser task.
+        if headless:
+            try:
+                from pathlib import Path as _Path
+                _profile_store = _Path(
+                    os.getenv("BROWSER_PROFILE_STORE_PATH", "").strip()
+                    or str(get_user_workspace_dir() / ".browser" / "profiles.json")
+                ).expanduser()
+                if _profile_store.exists():
+                    _profile_store.unlink()
+                    logger.info("[path.set] Cleared browser profile store for headless mode: %s", _profile_store)
+            except Exception as _e:
+                logger.debug("[path.set] Could not clear browser profile store: %s", _e)
+
+        await channel.send_response(ws, req_id, ok=True, payload={"chrome_path": chrome_path, "headless": headless})
 
     async def _memory_compute(ws, req_id, params, session_id):
 
@@ -1576,14 +1837,44 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
                 elif active_hours and ("start" not in active_hours or "end" not in active_hours):
                     # 必须同时包含 start/end，否则视为清除时间段（始终生效）
                     active_hours = None
+
+            # 先检查：如果目标渠道是飞书，检测是否有可用的推送目标
+            if target == "feishu":
+                try:
+                    raw = get_config_raw() or {}
+                    ch_cfg = (raw.get("channels") or {}).get("feishu") or {}
+                    has_target = bool(
+                        str(ch_cfg.get("last_chat_id") or "").strip()
+                        or str(ch_cfg.get("chat_id") or "").strip()
+                    )
+                    if not has_target:
+                        await channel.send_response(
+                            ws, req_id, ok=False,
+                            error="feishuNoTarget",
+                            code="feishuNoTarget",
+                        )
+                        return
+                except Exception as e:
+                    logger.debug("[heartbeat.set_conf] 飞书目标检测异常: %s", e)
+                    await channel.send_response(
+                        ws, req_id, ok=False, error=str(e), code="INTERNAL_ERROR",
+                    )
+                    return
+
+            # 检查通过后再保存配置
             await hb.set_heartbeat_conf(every=every, target=target, active_hours=active_hours)
             payload = dict(hb.get_heartbeat_conf())
+            should_clear_agent_config_cache = False
             try:
                 update_heartbeat_in_config(payload)
-                await _clear_agent_config_cache(_resolve(agent_client))
+                should_clear_agent_config_cache = True
             except Exception as e:  # noqa: BLE001
                 logger.warning("[heartbeat.set_conf] 写回 config.yaml 失败: %s", e)
-            await channel.send_response(ws, req_id, ok=True, payload=payload)
+            try:
+                await channel.send_response(ws, req_id, ok=True, payload=payload)
+            finally:
+                if should_clear_agent_config_cache:
+                    _schedule_clear_agent_config_cache("heartbeat.set_conf")
         except ValueError as e:
             await channel.send_response(ws, req_id, ok=False, error=str(e), code="BAD_REQUEST")
         except Exception as e:
@@ -1653,12 +1944,17 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
         try:
             await cm.set_conf("feishu", params)
             conf = cm.get_conf("feishu")
+            should_clear_agent_config_cache = False
             try:
                 update_channel_in_config("feishu", conf)
-                await _clear_agent_config_cache(_resolve(agent_client))
+                should_clear_agent_config_cache = True
             except Exception as e:  # noqa: BLE001
                 logger.warning("[channel.feishu.set_conf] 写回 config.yaml 失败: %s", e)
-            await channel.send_response(ws, req_id, ok=True, payload={"config": conf})
+            try:
+                await channel.send_response(ws, req_id, ok=True, payload={"config": conf})
+            finally:
+                if should_clear_agent_config_cache:
+                    _schedule_clear_agent_config_cache("channel.feishu.set_conf")
         except Exception as e:  # noqa: BLE001
             logger.exception("[channel.feishu.set_conf] %s", e)
             await channel.send_response(ws, req_id, ok=False, error=str(e), code="INTERNAL_ERROR")
@@ -1810,12 +2106,17 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
         try:
             await cm.set_conf("dingtalk", params)
             conf = cm.get_conf("dingtalk")
+            should_clear_agent_config_cache = False
             try:
                 update_channel_in_config("dingtalk", conf)
-                await _clear_agent_config_cache(_resolve(agent_client))
+                should_clear_agent_config_cache = True
             except Exception as e:  # noqa: BLE001
                 logger.warning("[channel.dingtalk.set_conf] 写回 config.yaml 失败: %s", e)
-            await channel.send_response(ws, req_id, ok=True, payload={"config": conf})
+            try:
+                await channel.send_response(ws, req_id, ok=True, payload={"config": conf})
+            finally:
+                if should_clear_agent_config_cache:
+                    _schedule_clear_agent_config_cache("channel.dingtalk.set_conf")
         except Exception as e:  # noqa: BLE001
             logger.exception("[channel.dingtalk.set_conf] %s", e)
             await channel.send_response(ws, req_id, ok=False, error=str(e), code="INTERNAL_ERROR")
@@ -2083,6 +2384,13 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
         jobs = await cc.list_jobs()
         await channel.send_response(ws, req_id, ok=True, payload={"jobs": jobs})
 
+    async def _cron_job_meta(ws, req_id, params, session_id):
+        cc = _get_cron()
+        if cc is None:
+            await channel.send_response(ws, req_id, ok=False, error="cron not available", code="INTERNAL_ERROR")
+            return
+        await channel.send_response(ws, req_id, ok=True, payload=cc.job_metadata())
+
     async def _cron_job_get(ws, req_id, params, session_id):
         cc = _get_cron()
         if cc is None:
@@ -2110,6 +2418,8 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             await channel.send_response(ws, req_id, ok=False, error="params must be object", code="BAD_REQUEST")
             return
         try:
+            if session_id:
+                params["session_id"] = session_id
             job = await cc.create_job(params)
             await channel.send_response(ws, req_id, ok=True, payload={"job": job})
         except Exception as e:  # noqa: BLE001
@@ -2289,6 +2599,7 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
     channel.register_method("channel.wechat.get_login_ui", _channel_wechat_get_login_ui)
     channel.register_method("channel.wechat.unbind", _channel_wechat_unbind)
     channel.register_method("cron.job.list", _cron_job_list)
+    channel.register_method("cron.job.meta", _cron_job_meta)
     channel.register_method("cron.job.get", _cron_job_get)
     channel.register_method("cron.job.create", _cron_job_create)
     channel.register_method("cron.job.update", _cron_job_update)
@@ -2320,6 +2631,7 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             owner_scopes = params.get("owner_scopes", {})
             deny_guidance = params.get("deny_guidance_message")
             update_permissions_owner_scopes_in_config(owner_scopes, deny_guidance)
+            await _notify_config_saved_once({}, ["permissions"], force=True)
             await channel.send_response(ws, req_id, ok=True, payload={"ok": True})
         except Exception as e:
             logger.exception("[permissions.owner_scopes.set] %s", e)
@@ -2363,6 +2675,12 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
                 )
                 return
             out = resp.payload if isinstance(resp.payload, dict) else {}
+            if resp.ok and req_method not in (
+                ReqMethod.PERMISSIONS_TOOLS_GET,
+                ReqMethod.PERMISSIONS_RULES_GET,
+                ReqMethod.PERMISSIONS_APPROVAL_OVERRIDES_GET,
+            ):
+                await _notify_config_saved_once({}, ["permissions"], force=True)
             await channel.send_response(ws, req_id, ok=True, payload=out)
             return
 
@@ -2628,7 +2946,6 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
                 "download_token": download_info["download_token"],
                 "filename": download_info["name"],
                 "file_size": download_info["size"],
-                "expires_at": download_info["expires_at"],
                 "message": "Package exported successfully",
             })
             # No cleanup here - file will be served via HTTP download endpoint

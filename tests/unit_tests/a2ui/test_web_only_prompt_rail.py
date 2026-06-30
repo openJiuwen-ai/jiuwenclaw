@@ -57,6 +57,25 @@ async def test_response_prompt_rail_keeps_a2ui_for_web_channel(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_response_prompt_rail_removes_a2ui_when_request_skips_it(monkeypatch):
+    """Repair fallback retries need a request-scoped way to remove A2UI instructions."""
+    monkeypatch.setattr(
+        "jiuwenswarm.server.runtime.a2ui.config.get_current_a2ui_config",
+        lambda: A2UIConfig(enabled=True),
+    )
+    rail = ResponsePromptRail()
+    rail.system_prompt_builder = _FakePromptBuilder()
+
+    await rail.before_model_call(SimpleNamespace(inputs={"channel": "web"}))
+    assert LocalSectionName.A2UI in rail.system_prompt_builder.sections
+
+    await rail.before_model_call(SimpleNamespace(inputs={"channel": "web", "skip_a2ui": True}))
+
+    assert "response" in rail.system_prompt_builder.sections
+    assert LocalSectionName.A2UI not in rail.system_prompt_builder.sections
+
+
+@pytest.mark.asyncio
 async def test_response_prompt_rail_keeps_web_channel_from_invoke_context(monkeypatch):
     """Model-call inputs drop channel, so Web channel must survive via invoke context."""
     monkeypatch.setattr(

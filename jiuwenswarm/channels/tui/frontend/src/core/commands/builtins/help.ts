@@ -4,11 +4,11 @@ import { makeItem } from "../helpers.js";
 const COMMAND_GROUPS: Record<string, { name: string; commands: string[] }> = {
   core: {
     name: "Core",
-    commands: ["help", "clear", "exit", "init", "copy", "export"],
+    commands: ["help", "clear", "exit", "init", "simplify", "copy", "export", "review", "security-review"],
   },
   session: {
     name: "Session",
-    commands: ["resume", "rename", "session", "compact", "sessions", "new"],
+    commands: ["resume", "rename", "session", "compact", "sessions", "new", "recap"],
   },
   model: {
     name: "Model",
@@ -24,7 +24,7 @@ const COMMAND_GROUPS: Record<string, { name: string; commands: string[] }> = {
   },
   config: {
     name: "Config",
-    commands: ["config", "workspace", "diff", "plan"],
+    commands: ["config", "workspace", "diff", "plan", "permissions"],
   },
 };
 

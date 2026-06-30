@@ -16,7 +16,7 @@ SUPPORTED_A2UI_PROTOCOL_VERSIONS = frozenset({"0.8"})
 class A2UIConfig:
     """Runtime switches controlling the optional A2UI feature."""
 
-    enabled: bool = True
+    enabled: bool = False
     protocol_version: str = "0.8"
     stream_validation_enabled: bool = True
     non_web_fallback_enabled: bool = False
@@ -43,7 +43,7 @@ def get_a2ui_config(config: dict[str, Any] | None = None) -> A2UIConfig:
     section = raw.get("a2ui") if isinstance(raw, dict) else {}
     section = section if isinstance(section, dict) else {}
 
-    enabled = _to_bool(section.get("enabled"), True)
+    enabled = _to_bool(section.get("enabled"), False)
     env_enabled = os.getenv("JIUWENSWARM_A2UI_ENABLED")
     if env_enabled is not None:
         enabled = _to_bool(env_enabled, enabled)

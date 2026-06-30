@@ -23,9 +23,13 @@ def _resolve_mode_memory(mode: str, config: Optional[Dict[str, Any]]) -> Dict[st
     token = (mode or "").strip()
     if "." in token:
         top, sub = token.split(".", 1)
-        node = modes_cfg.get(top, {})
-        if isinstance(node, dict):
-            node = node.get(sub, {})
+        # Special handling for "code.*" -> modes.code (ignore sub_mode)
+        if top == "code":
+            node = modes_cfg.get("code", {})
+        else:
+            node = modes_cfg.get(top, {})
+            if isinstance(node, dict):
+                node = node.get(sub, {})
     elif token == "code":
         node = modes_cfg.get("code", {})
     else:
@@ -85,6 +89,13 @@ def test_code_token_reads_modes_code(cfg):
     # modes.code.memory is empty → disabled
     assert is_memory_enabled("code", cfg) is False
     assert is_proactive_memory("code", cfg) is False
+
+
+@pytest.mark.parametrize("token", ["code.normal", "code.team", "code.anything"])
+def test_code_sub_tokens_route_to_modes_code(cfg, token):
+    # "code.*" should resolve to modes.code, same as bare "code"
+    assert is_memory_enabled(token, cfg) is False
+    assert is_proactive_memory(token, cfg) is False
 
 
 @pytest.mark.parametrize("token", ["weird", ""])

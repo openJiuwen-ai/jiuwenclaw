@@ -35,7 +35,6 @@ export function createRecapCommand(): SlashCommand {
     usage: "/recap",
     example: "/recap",
     kind: CommandKind.BUILT_IN,
-    hidden: true,
     takesArgs: false,
     action: async (ctx) => {
       // 如果在开始前就已经被中断（比如上一轮残留的中断标志），立即退出

@@ -23,4 +23,4 @@ if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
   exit 0
 fi
 
-docker build -f "$PROJECT_DIR/docker/Dockerfile" --no-cache -t "$IMAGE_REF" "$PROJECT_DIR" "$@"
+docker build -f "$PROJECT_DIR/docker/Dockerfile" -t "$IMAGE_REF" "$PROJECT_DIR" "$@"

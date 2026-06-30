@@ -6,9 +6,9 @@
 
 ## 1. 定位与目标
 
-SkillDev 是 JiuWenClaw 平台的一种**运行模式**，专门用于辅助开发者端到端地创建、测试、优化并打包一个 Agent Skill（`.skill` 包）。
+SkillDev 是 JiuWenSwarm 平台的一种**运行模式**，专门用于辅助开发者端到端地创建、测试、优化并打包一个 Agent Skill（`.skill` 包）。
 
-它不是一个对话式 Agent，而是一条**确定性工程流水线**：接受用户需求描述，依次经过规划、代码生成、格式校验、测试、评测、改进、打包、描述优化等阶段，最终输出可以直接安装到 JiuWenClaw 的 Skill 产物。
+它不是一个对话式 Agent，而是一条**确定性工程流水线**：接受用户需求描述，依次经过规划、代码生成、格式校验、测试、评测、改进、打包、描述优化等阶段，最终输出可以直接安装到 JiuWenSwarm 的 Skill 产物。
 
 **三个入口模式**（系统自动识别，无需前端传入标志位）：
 
@@ -22,14 +22,14 @@ SkillDev 是 JiuWenClaw 平台的一种**运行模式**，专门用于辅助开�
 
 ## 2. 整体架构
 
-### 2.1 在 JiuWenClaw 中的位置
+### 2.1 在 JiuWenSwarm 中的位置
 
 ```
 前端（对话框 + 弹窗 + Todo列表 + 产物列表）
     ↕ WebSocket / HTTP（E2A 协议，AgentResponseChunk 流）
 Gateway 层（路由层保证同一 task_id 的请求到同一实例）
     ↓
-JiuWenClaw.process_message_stream()
+JiuWenSwarm.process_message_stream()
     ├── 普通 chat 请求  → ReActAgent
     ├── skills.* 请求   → SkillManager
     └── skilldev.* 请求 → SkillDevService   ← 本文档的范围
@@ -288,7 +288,7 @@ _STAGE_GROUPS = [
 
 ## 6. 外部 API 接口
 
-前端通过以下 7 个 Method 与 SkillDev 交互，所有请求统一走 `JiuWenClaw.process_message_stream()`，由 `_SKILLDEV_METHODS` 前缀匹配自动路由到 `SkillDevService`。
+前端通过以下 7 个 Method 与 SkillDev 交互，所有请求统一走 `JiuWenSwarm.process_message_stream()`，由 `_SKILLDEV_METHODS` 前缀匹配自动路由到 `SkillDevService`。
 
 ### 6.1 接口总览
 
@@ -539,7 +539,7 @@ await provider.sync_to_remote(task_id)            # 扩展点：同步到远程�
 
 ### 8.3 SkillDevDeps — 依赖注入
 
-`SkillDevService` 不依赖 `JiuWenClaw` 实例，只接收最小外部依赖：
+`SkillDevService` 不依赖 `JiuWenSwarm` 实例，只接收最小外部依赖：
 
 ```python
 @dataclass
@@ -552,7 +552,7 @@ class SkillDevDeps:
     workspace_provider: WorkspaceProvider # 工作区管理
 ```
 
-由 `JiuWenClaw._get_skilldev_service()` 懒初始化并注入（首次 `skilldev.*` 请求触发）。
+由 `JiuWenSwarm._get_skilldev_service()` 懒初始化并注入（首次 `skilldev.*` 请求触发）。
 
 ---
 
@@ -683,7 +683,7 @@ class MyStageHandler(StageHandler):
 **当前状态**：`create_stage_agent()` 接口已定义，实际接入 `openjiuwen ReActAgent` 的代码待实现（已有占位标注）。
 
 ### 决策五：工作区路径统一
-**Why**：SkillDev 的任务目录必须在 JiuWenClaw 的统一工作区下，避免数据散落在系统各处。
+**Why**：SkillDev 的任务目录必须在 JiuWenSwarm 的统一工作区下，避免数据散落在系统各处。
 **约定**：`~/.jiuwenswarm/agent/workspace/skilldev/{task_id}/`，由 `get_workspace_dir() / "skilldev"` 构造。
 
 ---

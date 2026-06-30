@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# JiuwenClaw 打包脚本
+# JiuwenSwarm 打包脚本
 # 1. 编译前端 (jiuwenswarm/channels/web/frontend)
 # 2. 构建 wheel 包（包含前端 dist）
 

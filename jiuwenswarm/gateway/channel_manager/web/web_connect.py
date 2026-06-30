@@ -359,6 +359,7 @@ class WebChannel(BaseChannel):
                               "chat.error", "heartbeat.relay",
                               "context.usage", "context.compression_state",
                               "chat.ask_user_question", "chat.subtask_update",
+                              "chat.symphony_status",
                               "history.message",
                               "chat.session_result", "chat.usage_metadata",
                               "chat.usage_summary", "chat.file",

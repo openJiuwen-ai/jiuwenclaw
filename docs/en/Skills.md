@@ -56,10 +56,10 @@ JiuwenSwarm supports multiple sources:
 
 | Source | Description                                                                     | Characteristics |
 |------|---------------------------------------------------------------------------------|------|
-| **Built-in skills** | Core skills shipped with the product; you still install them from the Skills UI | Matches the product release |
-| **SkillNet** | A general AI skill management and connection platform                           | Anonymous usage allowed; configuring a GitHub token improves API quota and stability |
-| **ClawHub** | Skill “app store” in the JiuwenSwarm ecosystem                                  | Search and install in the web UI; https://clawhub.ai/skills |
-| **Marketplace** | Third-party marketplace sources                                                 | Add the source URL first; community-contributed |
+| **Built-in skills** | Core skills shipped with the product; installed under **Skill Marketplace → Built-in** | Matches the product release |
+| **SkillNet** | A general AI skill management and connection platform (open-source skill registry) | Anonymous usage allowed; configuring a GitHub token improves API quota and stability |
+| **ClawHub** | Skill “app store” in the JiuwenSwarm ecosystem (enterprise skill registry) | Requires a CLI token; https://clawhub.ai/skills |
+| **SwarmSkills** | Team/cluster skill registry, searched under **Skill Marketplace → SwarmSkills online search** | No extra configuration needed |
 | **Local import** | User-authored skill files                                                       | Fully customizable; ideal for development/debug |
 
 > **Security notice:** Skills may involve file modification, command execution, or external service calls. Always check source and description first; prefer trusted sources.
@@ -70,7 +70,7 @@ JiuwenSwarm supports multiple sources:
 
 ### Skill installation
 
-Whether skills come from built-in packages, SkillNet, ClawHub, third-party marketplace sources, or a local folder, **installation and activation are done in the web UI under Skills**. The sections below list prerequisites and paths by source.
+Whether skills come from built-in packages, SkillNet, ClawHub, or a local folder, **installation and activation are done in the web UI under Skills**. The Skills page has four top tabs: **My Skills**, **Skill Marketplace**, **Skill Graph**, and **Skill Index**. Online installation happens in **Skill Marketplace**, while installed skills are managed under **My Skills**. The sections below list prerequisites and paths by source.
 
 #### Built-in skills
 
@@ -78,7 +78,7 @@ Built-in skills are skill resources packaged with JiuwenSwarm.
 
 1. **Install**
 
-   Left sidebar → **Skills** → **Install**.  
+   Left sidebar → **Skills** → **Skill Marketplace** → **Built-in**, find the target skill and click **Install**.  
    ![Skill install](../assets/images/技能安装.png)
 
 #### Install from SkillNet
@@ -93,25 +93,26 @@ SkillNet is based on GitHub-hosted skill repositories.
 
 1. **(Optional) Configure GitHub token**
 
-   Open left sidebar → **Skills** → **SkillNet online search**, then enter your GitHub token on the page (optional; improves GitHub API quota and stability).
+   Open left sidebar → **Configuration** → **Other** → **Third-party service configuration**, then fill in `github_token` (optional; improves GitHub API quota and stability).
    ![github token set](../assets/images/github_token配置.png)
 
-   Or in `config.yaml`:
+   Or set it in `~/.jiuwenswarm/config/.env`:
 
-   ```yaml
-   skill_toolkit:
-     github_token: ${GITHUB_TOKEN}
+   ```dotenv
+   GITHUB_TOKEN=ghp_your_token_here
    ```
+
+   (The Configuration page writes to this same `.env`; the token is read from the `GITHUB_TOKEN` environment variable.)
 
 2. **Install**
 
    Install from the web UI:  
-   Left sidebar → **Skills** → **SkillNet online search** → enter a keyword → **Install**.
+   Left sidebar → **Skills** → **Skill Marketplace** → **Skills online search**, click **Source management** in the top-right, choose **SkillNet**, then type a keyword in the search box and click **Install** to the right of the target skill.
    ![skillnet search](../assets/images/skillNet搜索.png)
 
 3. **Confirm success**
 
-   After installation, confirm the new skill appears in the skill list under left sidebar → **Skills**.
+   After installation, confirm the new skill appears in **Skills** → **My Skills**.
 
 #### Install from ClawHub
 
@@ -129,41 +130,12 @@ ClawHub URL: https://clawhub.ai/skills
 
 2. **Configure token in the web UI and complete installation**
 
-   Left sidebar → **Skills** → **ClawHub online search**.  
-   On first visit, complete token configuration on this page:
+   Left sidebar → **Skills** → **Source management** in the top-right → choose **ClawHub**.  
+   On first use, fill in the CLI token obtained from the ClawHub platform and save it:
    ![clawhub token config](../assets/images/CliToken配置.png)
 
-   Search for the target skill, then click **Install**:  
-   Same page: **ClawHub online search** → search → **Install**.
-   ![clawhub install](../assets/images/clawhub安装skill.png)
-
-#### Install from Marketplace / third-party sources
-
-Marketplace is not a single official store; it is a collection of community sources.
-
-**Key concepts:**
-- **Source**: a skill repository URL (e.g., GitHub repo or private server).
-- Users obtain the source URL first, then add it in the Skills panel.
-
-**Steps:**
-
-1. **Get source URL**
-
-   From community, docs, or shared links, e.g.:
-
-   ```text
-   https://github.com/xxx/skill-marketplace
-   ```
-
-2. **Add marketplace source**
-
-   Left sidebar → **Skills** → **Source management** → **Add source**, enter the source URL (e.g. `https://github.com/xxx/skill-marketplace`), then save.  
-   For step-by-step instructions, see **Add source** under [Skill source management](#skill-source-management) below.
-   ![Add marketplace source](../assets/images/市场源添加.png)
-
-3. **Install from source**
-
-   On the same **Skills** page, search for the target skill and click **Install** in the results; when done, confirm the skill appears in the skill list.
+   Once configured, go to **Skill Marketplace** → **Skills online search**, search for the target skill, and click **Install**:
+   ![clawhub install](../assets/images/技能搜索安装.png)
 
 #### Import local skills
 
@@ -187,7 +159,7 @@ Best for:
 
 2. **Local import (web UI)**
 
-   Left sidebar → **Skills** → **Local import** → select the local skill folder.
+   Left sidebar → **Skills** → **Import local skill** in the top-right, enter the server-side local skill path (a `SKILL.md` file or a skill directory) in the dialog, then confirm.
    ![Local skill import](../assets/images/本地导入skill.png)
 
 3. **Manual copy (optional)**
@@ -200,26 +172,34 @@ Best for:
 
 4. **Verify**
 
-   After installation, confirm the new skill appears in the skill list under left sidebar → **Skills**.
+   After installation, confirm the new skill appears in **Skills** → **My Skills**.
 
 ---
 
 ### Skill management page
 
-The Skills management page is the main place to manage and browse all skills. Open it from **Skills** in the left sidebar.
+The Skills management page is the main place to manage and browse all skills. Open it from **Skills** in the left sidebar. The page has four top tabs, with **Source management**, **Refresh**, and **Import local skill** in the top-right.
+
+| Tab | Function |
+|--------|------|
+| **My Skills** | Browse and search installed skills, filter by "All / Enabled / Disabled", toggle skills on/off, and open details |
+| **Skill Marketplace** | Install new skills; contains three sub-pages: **Built-in**, **SwarmSkills online search**, and **Skills online search** (SkillNet / ClawHub) |
+| **Skill Graph** | Visualize capability relationships among installed skills; see [Symphony](symphony.md) |
+| **Skill Index** | Build a local skill retrieval index and find matching skills by task need; see [Symphony](symphony.md) |
 
 ![Skills management page](../assets/images/skill_page_auto.png)
 
 #### What the page shows
 
-In the skill list, each entry shows:
+In the **My Skills** list, each entry shows:
 
 | Field | Description |
 |--------|-------------|
 | **Skill name** | Unique id, e.g. `gitcode-pr`, `weather` |
-| **Open source** | Whether the skill is open source, for transparency of origin |
-| **Purpose** | Short description of what the skill does |
-| **Status** | Current state, e.g. installed / not installed / enabled / disabled |
+| **Description** | Short description of what the skill does |
+| **Source** | Where the skill came from, e.g. `local`, `built-in`, `skillnet`, `clawhub` |
+| **Status** | Current state, e.g. installed / not installed |
+| **Enable toggle** | Controls whether the skill can be loaded in chat |
 
 #### View skill experience
 
@@ -235,60 +215,26 @@ In the list, use **View skill experience** to browse evolution entries for that 
 
 > **Why it helps:** Skill experience reflects self-evolution and improvements from real use, so you can judge ongoing usefulness and maintainers get actionable input.
 
+#### Skill graph and skill index
+
+The **Skill Graph** and **Skill Index** tabs are part of Symphony. The skill index helps the agent find candidate skills from a large installed-skill set, while the skill graph uses `can_feed` relationships to show whether skills can connect. For multi-skill orchestration, graph building, graph reading, and chat usage, see [Symphony: Skill Orchestration and Dispatch](symphony.md).
+
 ---
 
-### Skill source management
+### Source management
 
-Source management includes add, enable, disable, and delete.
+**Source management** selects the online skill source used by **Skill Marketplace → Skills online search** and completes the related credential configuration.
 
-#### When source management is needed
+Path: left sidebar → **Skills** → **Source management** in the top-right.
 
-| Scenario | Need source management? |
-|------|----------------|
-| Built-in skills only | No |
-| SkillNet/ClawHub install | No (preconfigured source path) |
-| Third-party community skills | Yes, add source first |
-| Enterprise internal skills | Yes, add internal source |
-| Source migration/retirement | Yes, remove old source and add new |
+| Action | Description |
+|------|------|
+| **Choose SkillNet** | Skills online search retrieves from SkillNet (open-source skill registry); the dialog includes network and GitHub API rate-limit tips—if it fails frequently, go to the configuration page and fill in `github_token` |
+| **Choose ClawHub** | Skills online search retrieves from ClawHub (enterprise skill registry); on first use, fill in and save the CLI token in the dialog |
 
-> **Tip:** Most users only need SkillNet and ClawHub. Source management is mainly for third-party/internal registries.
+![Skill source](../assets/images/skillNet搜索.png)
 
-#### Source operations
-
-**Add source:**
-
-1. Open **Skills** from left sidebar.  
-2. Open **Source Management** (source list).  
-3. Click **Add source**.  
-4. Enter source URL (e.g. `https://github.com/anthropics/skills`) and optional name.  
-5. Click **Confirm/Save**.  
-
-After success, source appears in list. If source is enabled, its skills become searchable.
-
-**Enable source:**
-
-1. In **Skills → Source Management**, locate target source (e.g. `xxx-source`).  
-2. Click **Enable** (or switch toggle ON).  
-3. Refresh list or run one search for validation.  
-
-After enabling, source skills appear in search results and can be installed directly.
-
-**Disable source:**
-
-1. In **Skills → Source Management**, locate target source.  
-2. Click **Disable** (or switch toggle OFF).  
-
-After disabling, source skills are hidden from search, but already installed skills remain usable.
-
-**Delete source:**
-
-1. In **Skills → Source Management**, locate target source.  
-2. Click **Delete** and confirm in popup.  
-
-Deleting source removes source config (and related cache) only; it does not uninstall already installed skills.
-
-**Frontend screenshot**
-![Skill source](../assets/images/技能源管理.png)
+> **Tip:** Built-in skills (Skill Marketplace → Built-in) and SwarmSkills online search do not depend on source management and can be used directly. Switching the source does not affect already installed skills.
 
 ---
 
@@ -300,7 +246,7 @@ After installing skills, you can inspect, verify, and uninstall.
 
 **Method 1: Web UI**
 
-Left sidebar → **Skills** to open the Skills management page and browse installed skills (same layout as the “skill list and search” screenshot above; no duplicate figure here).
+Left sidebar → **Skills** → **My Skills** to browse installed skills, where you can filter by "All / Enabled / Disabled" or search by name, description, and tags (same layout as the “skill list and search” screenshot above; no duplicate figure here).
 
 **Method 2: Chat**
 
@@ -335,21 +281,23 @@ The agent summarizes key fields in the conversation (similar to the screenshot b
 
 **Method 2: From the web UI**
 
-Path: left sidebar → **Skills** → **click the target skill** in the list to open its detail page.
+Path: left sidebar → **Skills** → **My Skills** → **click the target skill** to open its detail page.
 ![Skill detail page](../assets/images/技能详情gitcode-pr.png)
 
 Details include:
-- source (SkillNet / ClawHub / Marketplace / local)
-- description
-- allowed tools
-- version
-- `SKILL.md` content
+- **Source / version / author**: where the skill came from (local / built-in / skillnet / clawhub, etc.) and version info
+- **Description**: what the skill does
+- **Enable toggle and uninstall button**: in the top-right of the detail page
+- **Allowed tools**: the tools the skill may call (shows "Unrestricted" when not declared)
+- **Content preview**: the full `SKILL.md` definition
 
 #### Uninstall skill
 
-You can uninstall from the Skills management page (screenshot below):
+The uninstall entry is on the **skill detail page**:
 
-![Skill uninstall](../assets/images/技能卸载.png)
+1. In the **My Skills** list, click the target skill to open its detail page.
+2. Click the **Uninstall** button in the top-right of the detail page and confirm.
+   ![Skill uninstall](../assets/images/技能卸载.png)
 
 After uninstall:
 - Skill files are removed from the `skills` directory
@@ -440,6 +388,10 @@ Before using a skill, check:
 Show gitcode-pr details and SKILL.md content.
 ```
 
+### Multi-skill tasks: Skill Symphony
+
+When a task needs several skills to work together, such as "recognize text from an image, translate it, write copy, and send an email," Skill Symphony can first produce a skill chain and then wait for confirmation before execution. For setup, prompt examples, and how to read the orchestration result, see [Symphony: Skill Orchestration and Dispatch](symphony.md).
+
 ---
 
 ## Practical examples
@@ -450,10 +402,10 @@ Show gitcode-pr details and SKILL.md content.
 The user wants a quick weather summary and short-term forecast for a city.
 
 **Skill acquisition (reproducible, from SkillNet):**
-1. Open **Skills** in the left sidebar.  
-2. Open **SkillNet Online Search** and search for `weather`.  
-3. Click install, then confirm `weather` appears in your skill list.  
-4. If search rate is limited, configure a GitHub Token on the same page and retry.  
+1. Open left sidebar → **Skills** → **Skill Marketplace** → **Skills online search** (choose SkillNet in **Source management** in the top-right).  
+2. Search for `weather` in the search box.  
+3. Click install, then confirm `weather` appears in your **My Skills** list.  
+4. If search rate is limited, fill in `github_token` under **Configuration → Other → Third-party service configuration** and retry.  
 
 **Prerequisites (for stable reproduction):**
 - `weather` skill is installed (using the SkillNet steps above)
@@ -494,10 +446,10 @@ Beijing weather:
 You need to process PDF files quickly (for example merge files, split pages, or extract text) and get directly usable outputs.
 
 **Skill acquisition (reproducible, from SkillNet):**
-1. Open **Skills** in the left sidebar.  
-2. Search `pdf` in **SkillNet Online Search**.  
-3. Click install and confirm it appears in the installed list.  
-4. If search is limited, configure GitHub Token first, then install.  
+1. Open left sidebar → **Skills** → **Skill Marketplace** → **Skills online search** (choose SkillNet in **Source management** in the top-right).  
+2. Search for `pdf` in the search box.  
+3. Click install and confirm it appears in your **My Skills** list.  
+4. If search is limited, fill in `github_token` on the configuration page first, then install.  
 
 **Prerequisites (for stable reproduction):**
 - `pdf` skill is installed (using SkillNet steps above)
@@ -538,9 +490,9 @@ Done:
 
 | Possible cause | Resolution |
 |----------|----------|
-| Missing/invalid token | Check token env config |
+| Missing/invalid token | Check `github_token` / ClawHub CLI token config |
 | Network issue | Check connection and retry |
-| Invalid source URL | Verify source accessibility |
+| Online source unreachable | Verify the runtime can reach GitHub (SkillNet) or the ClawHub service |
 | Skill not found | Verify skill name |
 
 **Issue 2: Skill not visible after install**
@@ -579,7 +531,7 @@ Done:
 
 1. **Prefer trusted sources**
    - SkillNet and built-in catalogs are relatively centralized—still read descriptions before installing
-   - For ClawHub/Marketplace, verify author and source trust
+   - For online sources such as ClawHub, verify author and source trust
 
 2. **Read documentation first**
    - Check `SKILL.md` before running a skill
@@ -648,7 +600,7 @@ When this skill is selected, follow the instructions below.
 | `tags` | Optional | YAML list or comma-separated string |
 | `allowed_tools` | Optional | Related tool names (comma-separated string also allowed); **actual invocation depends on agent tool config and permissions** |
 
-**Screenshots:** Loading a custom skill folder into the product matches the **Local import** screenshot under [Import local skills](#import-local-skills); generic install UI matches [Built-in skills](#built-in-skills).
+**Screenshots:** Loading a custom skill folder into the product matches the **Import local skill** screenshot under [Import local skills](#import-local-skills); generic install UI matches [Built-in skills](#built-in-skills).
 
 #### Modify an existing skill
 
@@ -668,11 +620,3 @@ The output only includes basic items such as temperature, wind speed, precipitat
 ### After optimization
 When you call it again, the output includes not only temperature and wind speed, but also UV intensity.
 ![Skill effect after improved](../assets/images/skill优化后效果.png)
-
-
----
-
-*Document version: v1.0*  
-*Audience: JiuwenSwarm users*  
-*Last updated: 2026-05-11*  
-*Simplified Chinese: [技能](../zh/技能.md)*

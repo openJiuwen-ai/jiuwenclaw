@@ -1,6 +1,6 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 
-"""User todos tool for JiuWenClaw - Managing todo items per channel."""
+"""User todos tool for JiuWenSwarm - Managing todo items per channel."""
 
 import os
 import re

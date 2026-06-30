@@ -14,15 +14,18 @@ import {
   truncateToWidth,
 } from "@mariozechner/pi-tui";
 import { spawnSync } from "node:child_process";
-import { statSync, realpathSync } from "node:fs";
+import * as fs from "node:fs";
+import * as path from "node:path";
+import * as os from "node:os";
 import type { CliPiAppState } from "../app-state.js";
-import { openFileInEditor as openInExternalEditor } from "../core/utils/editor.js";
+import { openFileInEditor as openInExternalEditor, openFolderInExplorer } from "../core/utils/editor.js";
 import {
   extractAttachmentsFromText,
   extractFilePathsFromPaste,
   findAttachmentTokenAtCursor,
   formatAttachmentMention,
   isImageAttachment,
+  isPurePathPaste,
   isSupportedAttachment,
   syncComposerImageTokens,
 } from "../core/attachments.js";
@@ -36,10 +39,15 @@ import { addCommandEcho, addError, addInfo } from "../core/commands/helpers.js";
 import { CheckboxList, CheckboxGroup as CheckboxGroupType } from "./components/checkbox-list.js";
 import type { FileAttachment } from "../core/protocol.js";
 import {
+  type ModelMeta,
   type ModelListPayload,
   isReservedMultimodalModelKey,
 } from "../core/commands/builtins/model.js";
-import type { SessionListPayload, SessionMeta } from "../core/commands/builtins/resume.js";
+import {
+  sanitizeSessionList,
+  type SessionListPayload,
+  type SessionMeta,
+} from "../core/commands/builtins/resume.js";
 import type { ConfigItemSchema } from "../core/commands/builtins/config.js";
 import type { McpListItem, McpListPayload } from "../core/commands/builtins/mcp.js";
 import { buildModeAutocompleteItems } from "../core/commands/builtins/mode.js";
@@ -49,6 +57,9 @@ import {
   countCompletedWorkflowAgents,
   countWorkflowAgents,
   findWorkflowAgent,
+  formatWorkflowTimingText,
+  runningWorkflowsBannerText,
+  workflowStatusBannerText,
   workflowStatusIcon,
   type WorkflowRun,
   type WorkflowStatus,
@@ -56,13 +67,21 @@ import {
 import {
   addTrustedDir,
   getCurrentCwd,
-  getCurrentProjectDir,
   getTrustedDirs,
   isTrustedDir,
   setCurrentCwd,
   setCurrentProjectDir,
 } from "../core/tui-trusted-dirs-store.js";
+import { consumeParseError } from "../core/tui-config-store.js";
+import {
+  expandPastedTextMarkers,
+  formatPastedTextMarker,
+  normalizePastedText,
+  shouldCollapsePastedText,
+  stripBracketedPasteMarkers,
+} from "../core/pasted-text.js";
 import { handleAppScreenKeyInput } from "./keymap.js";
+import { resolveAction } from "../core/keybindings/resolver.js";
 import { buildAppScreenLines } from "./screen-layout.js";
 import { buildTranscriptLines } from "./transcript-renderer.js";
 import {
@@ -70,17 +89,23 @@ import {
   orderedMemberIds,
   teamWorkingStartedAtMs,
 } from "./components/team-shared.js";
-import { padToWidth, renderWrappedText } from "./rendering/text.js";
-import { editorTheme, palette, selectListTheme, setCurrentThemeName } from "./theme.js";
+import { padToWidth, prefixedLines, renderStyledMarkdownLines, renderWrappedText } from "./rendering/text.js";
+import { chalk, editorTheme, palette, selectListTheme, setCurrentThemeName } from "./theme.js";
+import type { Hunk, GitDiffData, TurnDiff } from "../core/types.js";
 
 const END_CURSOR = "\x1b[7m \x1b[0m";
 const ENABLE_MOUSE_TRACKING = "\x1b[?1000h\x1b[?1006h";
 const DISABLE_MOUSE_TRACKING = "\x1b[?1000l\x1b[?1006l";
 const TRANSCRIPT_WHEEL_SCROLL_LINES = 3;
 const SWARM_WORKFLOW_AGENT_PREVIEW_LIMIT = 8;
+// 不可中断的命令列表（ESC 按下时显示提示）
+const UNINTERRUPTIBLE_COMMANDS = ["compact"];
+const SWARM_WORKFLOW_LOG_PREVIEW_ROWS = 8;
+const SWARM_WORKFLOW_AGENT_TEXT_PREVIEW_ROWS = 6;
 const PERMISSION_TOOL_RE = /工具\s+`([^`]+)`\s+需要授权/;
 const CONFIRM_TOOL_RE = /(?:Tool|工具)\s*:\s*`([^`]+)`/i;
 const CONFIRM_ACTION_RE = /\*\*(?:Agent wants to|Tool `[^`]+` requires your approval)([^*]*)\*\*/i;
+const PLAN_REJECT_INPUT_RE = /(\s+\[ .+ \])$/;
 const PERMISSION_RISK_RE = /安全风险评估：\**\s*([^\s*]+)?\s*\**([^*\n]+?风险)\**/m;
 const PERMISSION_QUOTE_RE = /^>\s*(.+)$/gm;
 const PERMISSION_JSON_BLOCK_RE = /```json\s*([\s\S]*?)\s*```/i;
@@ -153,13 +178,59 @@ type ResumeSessionListState = {
   sessions: SessionMeta[];
   total: number;
   searchQuery: string;
+  showAllProjects: boolean;
+  branchFilterEnabled: boolean;
+  currentBranch: string;
+  /** 非空时进入只读预览态（Space 触发，对齐 Claude Code preview）：展示选中会话的信息卡 */
+  preview: SessionMeta | null;
+  /** 预览时的最新对话摘要列表 */
+  previewMessages: PreviewMessage[];
+  /** 预览消息是否仍在请求中（用于区分"加载中"与"已加载但为空"） */
+  previewLoading: boolean;
+  /** 预览消息滚动偏移（行数），正数表示向上滚动查看更早内容 */
+  previewScrollOffset: number;
+  /** 非空时进入重命名态（Ctrl+R 触发，对齐 Claude Code Ctrl+R）：编辑选中会话标题 */
+  rename: { sessionId: string; value: string } | null;
+};
+
+/** 预览消息（完整对话内容，对齐 Claude Code session preview） */
+type PreviewMessage = {
+  role: string;
+  content: string;
+  event_type: string;
+};
+
+type ModelFormField = "model_name" | "alias" | "api_base" | "api_key" | "model_provider" | "reasoning_level";
+
+type ModelFormState = {
+  fields: Record<ModelFormField, string>;
+  selectedField: number;
+  original: Record<ModelFormField, string>;
 };
 
 type ModelListState = {
-  list: SelectList;
+  phase: "list" | "input" | "delete_confirm";
+  list: SelectList | null;
   models: string[];
   current: string;
+  modelsMeta: ModelMeta[];
+  emptyMessage?: string;
+  inputMode?: "add" | "edit";
+  target?: { name: string; index: number };
+  form?: ModelFormState;
+  inputError?: string;
 };
+
+const MODEL_VALUE_SEPARATOR = "\x00";
+const MODEL_FORM_FIELDS: ModelFormField[] = ["model_name", "alias", "api_base", "api_key", "model_provider", "reasoning_level"];
+const MODEL_REQUIRED_FIELDS: ModelFormField[] = ["model_name", "api_base", "api_key", "model_provider"];
+const DEFAULT_MODEL_PROVIDER = "OpenAI";
+const MODEL_PROVIDER_OPTIONS = ["OpenAI", "OpenRouter", "DashScope", "SiliconFlow", "InferenceAffinity", "DeepSeek"];
+const REASONING_LEVEL_OPTIONS = ["", "off", "low", "medium", "high"];
+const MAX_MODEL_NAME_LENGTH = 100;
+const MAX_ALIAS_LENGTH = 100;
+const MAX_API_BASE_LENGTH = 100;
+const MAX_API_KEY_LENGTH = 500;
 
 type ToolSelectorState = {
   list: CheckboxList;
@@ -287,10 +358,210 @@ type FileViewerState = {
   searchTerm: string;    // Search term
 };
 
-class ComposerAutocompleteProvider implements AutocompleteProvider {
-  constructor(private readonly inner: AutocompleteProvider) {}
+interface DiffFileEntry {
+  filePath: string;
+  linesAdded: number;
+  linesRemoved: number;
+  isNewFile: boolean;
+  isUntracked: boolean;
+  isBinary: boolean;
+  isLargeFile: boolean;
+  isTruncated: boolean;
+  hunks: Hunk[];
+  source: "working" | string;
+}
 
-  getSuggestions(
+type DiffViewerState = {
+  viewMode: "list" | "detail";
+  selectedIndex: number;
+  files: DiffFileEntry[];
+  scrollOffset: number;
+  title: string;
+  subtitle: string;
+};
+
+const PATH_DELIMITERS = new Set([" ", "\t", '"', "'", "="]);
+
+function findLastPathDelimiter(text: string): number {
+  for (let i = text.length - 1; i >= 0; i--) {
+    if (PATH_DELIMITERS.has(text[i] ?? "")) return i;
+  }
+  return -1;
+}
+
+function isPathTokenStart(text: string, index: number): boolean {
+  return index === 0 || PATH_DELIMITERS.has(text[index - 1] ?? "");
+}
+
+function extractQuotedAtPrefix(text: string): string | null {
+  let inQuotes = false;
+  let quoteStart = -1;
+  for (let i = 0; i < text.length; i++) {
+    if (text[i] === '"') {
+      inQuotes = !inQuotes;
+      if (inQuotes) quoteStart = i;
+    }
+  }
+  if (!inQuotes) return null;
+  if (quoteStart > 0 && text[quoteStart - 1] === "@") {
+    if (!isPathTokenStart(text, quoteStart - 1)) return null;
+    return text.slice(quoteStart - 1);
+  }
+  if (!isPathTokenStart(text, quoteStart)) return null;
+  return text.slice(quoteStart);
+}
+
+function extractAtPrefix(textBeforeCursor: string): string | null {
+  const quotedPrefix = extractQuotedAtPrefix(textBeforeCursor);
+  if (quotedPrefix?.startsWith('@"')) return quotedPrefix;
+  const lastDelim = findLastPathDelimiter(textBeforeCursor);
+  const tokenStart = lastDelim === -1 ? 0 : lastDelim + 1;
+  if (textBeforeCursor[tokenStart] === "@") {
+    return textBeforeCursor.slice(tokenStart);
+  }
+  return null;
+}
+
+interface ParsedPathPrefix {
+  rawPrefix: string;
+  isAtPrefix: boolean;
+  isQuotedPrefix: boolean;
+}
+
+function parseAtPathPrefix(prefix: string): ParsedPathPrefix {
+  if (prefix.startsWith('@"')) return { rawPrefix: prefix.slice(2), isAtPrefix: true, isQuotedPrefix: true };
+  if (prefix.startsWith('"')) return { rawPrefix: prefix.slice(1), isAtPrefix: false, isQuotedPrefix: true };
+  if (prefix.startsWith("@")) return { rawPrefix: prefix.slice(1), isAtPrefix: true, isQuotedPrefix: false };
+  return { rawPrefix: prefix, isAtPrefix: false, isQuotedPrefix: false };
+}
+
+function expandHomePrefix(filePath: string): string {
+  if (filePath.startsWith("~/")) {
+    const expanded = path.join(os.homedir(), filePath.slice(2));
+    return filePath.endsWith("/") && !expanded.endsWith(path.sep) ? `${expanded}/` : expanded;
+  }
+  if (filePath === "~") return os.homedir();
+  return filePath;
+}
+
+function buildAtCompletionValue(filePath: string, opts: { isAtPrefix: boolean; isQuotedPrefix: boolean }): string {
+  const needsQuotes = opts.isQuotedPrefix || filePath.includes(" ");
+  const at = opts.isAtPrefix ? "@" : "";
+  if (!needsQuotes) return `${at}${filePath}`;
+  return `${at}"${filePath}"`;
+}
+
+function fallbackAtFileSuggestions(
+  textBeforeCursor: string,
+  cwd: string,
+): { items: AutocompleteItem[]; prefix: string } | null {
+  const atPrefix = extractAtPrefix(textBeforeCursor);
+  if (!atPrefix) return null;
+
+  const { rawPrefix, isAtPrefix, isQuotedPrefix } = parseAtPathPrefix(atPrefix);
+  let expandedPrefix = rawPrefix;
+  if (expandedPrefix.startsWith("~")) {
+    expandedPrefix = expandHomePrefix(expandedPrefix);
+  }
+
+  const isRootPrefix =
+    rawPrefix === "" ||
+    rawPrefix === "./" ||
+    rawPrefix === "../" ||
+    rawPrefix === "~" ||
+    rawPrefix === "~/" ||
+    rawPrefix === "/" ||
+    (isAtPrefix && rawPrefix === "");
+
+  let searchDir: string;
+  let searchPrefix: string;
+
+  if (isRootPrefix) {
+    searchDir = rawPrefix.startsWith("~") || expandedPrefix.startsWith("/") ? expandedPrefix : path.join(cwd, expandedPrefix);
+    searchPrefix = "";
+  } else if (rawPrefix.endsWith("/")) {
+    searchDir = rawPrefix.startsWith("~") || expandedPrefix.startsWith("/") ? expandedPrefix : path.join(cwd, expandedPrefix);
+    searchPrefix = "";
+  } else {
+    const dir = path.dirname(expandedPrefix);
+    const file = path.basename(expandedPrefix);
+    searchDir = rawPrefix.startsWith("~") || expandedPrefix.startsWith("/") ? dir : path.join(cwd, dir);
+    searchPrefix = file;
+  }
+
+  let entries: fs.Dirent[];
+  try {
+    entries = fs.readdirSync(searchDir, { withFileTypes: true });
+  } catch {
+    return null;
+  }
+
+  const suggestions: AutocompleteItem[] = [];
+  for (const entry of entries) {
+    if (!entry.name.toLowerCase().startsWith(searchPrefix.toLowerCase())) continue;
+
+    let isDirectory = entry.isDirectory();
+    if (!isDirectory && entry.isSymbolicLink()) {
+      try {
+        isDirectory = fs.statSync(path.join(searchDir, entry.name)).isDirectory();
+      } catch {
+        continue;
+      }
+    }
+
+    const name = entry.name;
+    const displayPrefix = rawPrefix;
+    let relativePath: string;
+
+    if (displayPrefix.endsWith("/")) {
+      relativePath = displayPrefix + name;
+    } else if (displayPrefix.includes("/") || displayPrefix.includes("\\")) {
+      if (displayPrefix.startsWith("~/")) {
+        const homeRelativeDir = displayPrefix.slice(2);
+        const parentDir = path.dirname(homeRelativeDir);
+        relativePath = `~/${parentDir === "." ? name : path.join(parentDir, name)}`;
+      } else if (displayPrefix.startsWith("/")) {
+        const parentDir = path.dirname(displayPrefix);
+        relativePath = parentDir === "/" ? `/${name}` : `${parentDir}/${name}`;
+      } else {
+        relativePath = path.join(path.dirname(displayPrefix), name);
+        if (displayPrefix.startsWith("./") && !relativePath.startsWith("./")) {
+          relativePath = `./${relativePath}`;
+        }
+      }
+    } else {
+      relativePath = displayPrefix.startsWith("~") ? `~/${name}` : name;
+    }
+
+    relativePath = relativePath.replace(/\\/g, "/");
+    const pathValue = isDirectory ? `${relativePath}/` : relativePath;
+    const value = buildAtCompletionValue(pathValue, { isAtPrefix, isQuotedPrefix });
+    const displayLabel = relativePath + (isDirectory ? "/" : "");
+    suggestions.push({
+      value,
+      label: displayLabel,
+      description: isDirectory ? "directory" : undefined,
+    });
+  }
+
+  suggestions.sort((a, b) => {
+    const aIsDir = a.value.endsWith("/");
+    const bIsDir = b.value.endsWith("/");
+    if (aIsDir && !bIsDir) return -1;
+    if (!aIsDir && bIsDir) return 1;
+    return a.label.localeCompare(b.label);
+  });
+
+  return suggestions.length > 0 ? { items: suggestions, prefix: atPrefix } : null;
+}
+
+class ComposerAutocompleteProvider implements AutocompleteProvider {
+  constructor(
+    private readonly inner: AutocompleteProvider,
+    private readonly cwd: string,
+  ) {}
+
+  async getSuggestions(
     lines: string[],
     cursorLine: number,
     cursorCol: number,
@@ -302,10 +573,20 @@ class ComposerAutocompleteProvider implements AutocompleteProvider {
       textBeforeCursor.startsWith("/") && !textBeforeCursor.includes(" ");
 
     if (isCommandNameCompletion && cursorCol !== currentLine.length) {
-      return Promise.resolve(null);
+      return null;
     }
 
-    return this.inner.getSuggestions(lines, cursorLine, cursorCol, options);
+    const innerResult = await this.inner.getSuggestions(lines, cursorLine, cursorCol, options);
+    if (innerResult) return innerResult;
+
+    if (options.signal.aborted) return null;
+
+    const atPrefix = extractAtPrefix(textBeforeCursor);
+    if (atPrefix) {
+      return fallbackAtFileSuggestions(textBeforeCursor, this.cwd);
+    }
+
+    return null;
   }
 
   applyCompletion(
@@ -323,7 +604,16 @@ class ComposerAutocompleteProvider implements AutocompleteProvider {
       return { lines, cursorLine, cursorCol };
     }
 
-    return this.inner.applyCompletion(lines, cursorLine, cursorCol, item, prefix);
+    const result = this.inner.applyCompletion(lines, cursorLine, cursorCol, item, prefix);
+
+    if (prefix.startsWith("@") && !result.lines[result.cursorLine]?.endsWith(" ")) {
+      const line = result.lines[result.cursorLine] ?? "";
+      const newLines = [...result.lines];
+      newLines[result.cursorLine] = line + " ";
+      return { lines: newLines, cursorLine: result.cursorLine, cursorCol: result.cursorCol + 1 };
+    }
+
+    return result;
   }
 }
 
@@ -348,6 +638,16 @@ function resolveFdBinary(): string | null {
   return null;
 }
 
+export function isPlanApprovalRequest(
+  source: string | undefined,
+  planApprovalKind?: string,
+): boolean {
+  if (planApprovalKind) {
+    return source === "confirm_interrupt" && planApprovalKind === "plan_approval";
+  }
+  return false;
+}
+
 function isPermissionRequest(source: string | undefined, questionText: string): boolean {
   return (
     source === "permission_interrupt" ||
@@ -357,6 +657,24 @@ function isPermissionRequest(source: string | undefined, questionText: string): 
     CONFIRM_ACTION_RE.test(questionText) ||
     /\*\*Tool `/i.test(questionText)
   );
+}
+
+export function getPendingQuestionTitle(
+  source: string | undefined,
+  progress: string,
+  activeQuestionIndex: number,
+  total: number,
+  planApprovalKind?: string,
+): string {
+  if (isPlanApprovalRequest(source, planApprovalKind)) {
+    return progress
+      ? `Exit Plan and Execute: ${activeQuestionIndex + 1}/${total}`
+      : "Exit Plan and Execute:";
+  }
+  if (source === "confirm_interrupt") {
+    return progress ? `Confirm ${activeQuestionIndex + 1}/${total}` : "Confirm action";
+  }
+  return progress ? `Permission ${activeQuestionIndex + 1}/${total}` : "Permission";
 }
 
 function parsePermissionSummary(questionText: string): PermissionSummary {
@@ -528,6 +846,18 @@ function normalizePermissionOptionLabel(label: string): string {
   return trimmed;
 }
 
+export function formatQuestionOptionLabelForDisplay(label: string, planApproval: boolean): string {
+  if (!planApproval) {
+    return normalizePermissionOptionLabel(label);
+  }
+  return isRejectOption(label) ? "Reject" : "Approve";
+}
+
+function isAlwaysAllowOption(label: string): boolean {
+  const normalized = label.trim();
+  return normalized.includes("总是允许") || /^always allow\b/i.test(normalized);
+}
+
 function isAllowOption(label: string): boolean {
   const normalized = label.trim();
   return normalized.includes("允许") || /^allow\b/i.test(normalized);
@@ -539,6 +869,76 @@ function isRejectOption(label: string): boolean {
     normalized.includes("拒绝") || /^reject\b/i.test(normalized) || /^deny\b/i.test(normalized)
   );
 }
+
+export function shouldCollectPlanRejectFeedback(
+  source: string | undefined,
+  label: string,
+  planApprovalKind?: string,
+): boolean {
+  return isPlanApprovalRequest(source, planApprovalKind) && isRejectOption(label);
+}
+
+export function shouldAppendPlanRejectFeedback(
+  source: string | undefined,
+  label: string,
+  planApprovalKind?: string,
+): boolean {
+  return shouldCollectPlanRejectFeedback(source, label, planApprovalKind);
+}
+
+export function getPlanRejectFeedbackHint(
+  feedback: string,
+  showCursor = false,
+  cursorIndex?: number,
+): string {
+  const trimmed = feedback.trim();
+  if (!showCursor) {
+    return `[ ${trimmed || "tell jiuwenswarm what to change"} ]`;
+  }
+  const cursor = Math.max(0, Math.min(cursorIndex ?? feedback.length, feedback.length));
+  return trimmed
+    ? `[ ${feedback.slice(0, cursor)}${END_CURSOR}${feedback.slice(cursor)} ]`
+    : `[ ${END_CURSOR}tell jiuwenswarm what to change ]`;
+}
+
+export function buildPlanApprovalQuestionItems(
+  options: Array<{ label: string; description?: string }>,
+  feedback: string,
+  showRejectCursor = false,
+  cursorIndex?: number,
+): SelectItem[] {
+  return options
+    .filter((option) => !isAlwaysAllowOption(option.label))
+    .map((option) => ({
+      value: option.label,
+      label: formatQuestionOptionLabelForDisplay(option.label, true),
+      description: isRejectOption(option.label)
+        ? getPlanRejectFeedbackHint(feedback, showRejectCursor, cursorIndex)
+        : undefined,
+    }));
+}
+
+export function getPlanApprovalListLayout(): {
+  minPrimaryColumnWidth: number;
+  maxPrimaryColumnWidth: number;
+} {
+  return { minPrimaryColumnWidth: 10, maxPrimaryColumnWidth: 10 };
+}
+
+const planApprovalSelectListTheme = {
+  ...selectListTheme,
+  selectedText: (value: string) => {
+    const match = PLAN_REJECT_INPUT_RE.exec(value);
+    if (!match?.index) {
+      return selectListTheme.selectedText(value);
+    }
+    return (
+      selectListTheme.selectedText(value.slice(0, match.index)) +
+      chalk.dim(match[1])
+    );
+  },
+  description: (value: string) => chalk.dim(value),
+};
 
 function wrapPlainText(text: string, width: number): string[] {
   const maxWidth = Math.max(12, width - 1);
@@ -591,11 +991,20 @@ function formatWorkflowStatus(status: WorkflowStatus): string {
   return workflowStatusTone(status)(`${workflowStatusIcon(status)} ${status}`);
 }
 
-function formatWorkflowElapsed(startedAt: number): string {
-  const totalSeconds = Math.max(0, Math.floor((Date.now() - startedAt) / 1000));
-  const minutes = Math.floor(totalSeconds / 60);
-  const seconds = totalSeconds % 60;
-  return minutes > 0 ? `${minutes}m ${seconds}s` : `${seconds}s`;
+function formatWorkflowDuration(durationMs?: number | null): string | null {
+  if (typeof durationMs !== "number" || !Number.isFinite(durationMs) || durationMs < 0) {
+    return null;
+  }
+  if (durationMs < 1000) {
+    return `${Math.round(durationMs)}ms`;
+  }
+  const totalSeconds = Math.floor(durationMs / 1000);
+  if (totalSeconds >= 60) {
+    const minutes = Math.floor(totalSeconds / 60);
+    const seconds = totalSeconds % 60;
+    return `${minutes}m ${seconds}s`;
+  }
+  return `${(durationMs / 1000).toFixed(1)}s`;
 }
 
 function formatRelativeTime(timestamp: number | undefined): string {
@@ -609,13 +1018,18 @@ function formatRelativeTime(timestamp: number | undefined): string {
 }
 
 function getDisplayLabel(s: SessionMeta): string {
-  return s.title?.trim() || s.session_id;
+  const title = s.title?.trim();
+  if (title) {
+    return `${s.session_id}  |  ${title}`;
+  }
+  return s.session_id;
 }
 
-function sessionToSelectItem(s: SessionMeta): SelectItem {
+function sessionToSelectItem(s: SessionMeta, showProject = false): SelectItem {
   const parts: string[] = [formatRelativeTime(s.last_message_at)];
   const msgCount = s.message_count ?? 0;
   if (msgCount > 0) parts.push(`${msgCount} msgs`);
+  if (showProject && s.project_dir?.trim()) parts.push(s.project_dir.trim());
   return {
     value: s.session_id,
     label: getDisplayLabel(s),
@@ -623,19 +1037,34 @@ function sessionToSelectItem(s: SessionMeta): SelectItem {
   };
 }
 
-function buildResumeSessionItems(sessions: SessionMeta[]): SelectItem[] {
-  return sessions.map(sessionToSelectItem);
-}
+type ResumeItemOptions = {
+  query: string;
+  showProject: boolean;
+  branchFilter: boolean;
+  currentBranch: string;
+};
 
-function filterResumeSessions(sessions: SessionMeta[], query: string): SelectItem[] {
-  const normalizedQuery = query.toLowerCase();
-  return sessions
-    .filter((s) => {
+function computeResumeItems(sessions: SessionMeta[], opts: ResumeItemOptions): SelectItem[] {
+  let list = sanitizeSessionList(sessions);
+  // 按 git 分支过滤（对齐 Claude Code Ctrl+B）：严格匹配当前分支。
+  // 无分支记录的存量会话、以及非 git/HEAD 会话都会被过滤掉；关掉 Ctrl+B 即可看到全部。
+  if (opts.branchFilter && opts.currentBranch) {
+    list = list.filter((s) => (s.git_branch ?? "").trim() === opts.currentBranch);
+  }
+  const normalizedQuery = opts.query.toLowerCase();
+  if (normalizedQuery) {
+    list = list.filter((s) => {
       const label = getDisplayLabel(s).toLowerCase();
-      const sid = s.session_id.toLowerCase();
-      return label.includes(normalizedQuery) || sid.includes(normalizedQuery);
-    })
-    .map(sessionToSelectItem);
+      const sid = s.session_id.toLowerCase(); // session_id 已由 sanitizeSessionList 保证非空
+      const proj = (s.project_dir ?? "").toLowerCase();
+      return (
+        label.includes(normalizedQuery) ||
+        sid.includes(normalizedQuery) ||
+        (opts.showProject && proj.includes(normalizedQuery))
+      );
+    });
+  }
+  return list.map((s) => sessionToSelectItem(s, opts.showProject));
 }
 
 function formatConfigValue(schema: ConfigItemSchema, val: string): string {
@@ -754,8 +1183,14 @@ export class AppScreen implements Component, Focusable {
   private lastTranscriptLineWidth = 0;
   /** Image attachments keyed by composer `@path` tokens (e.g. cached base64 for terminal preview). */
   private composerAttachments: FileAttachment[] = [];
+  private pastedTextById = new Map<number, string>();
+  private pastedTextIdByContent = new Map<string, number>();
+  private nextPastedTextId = 1;
+  private pastedTextClearTimer: ReturnType<typeof setTimeout> | null = null;
   /** FileViewer state for viewing large content (e.g., formatted logs) */
   private fileViewerState: FileViewerState | null = null;
+  /** DiffViewer state for interactive diff browsing */
+  private diffViewerState: DiffViewerState | null = null;
   /** Previous session title for terminal window title sync. */
   private previousSessionTitle: string = "";
 
@@ -777,6 +1212,11 @@ export class AppScreen implements Component, Focusable {
       this.editor.setAutocompleteProvider(this.composerAutocompleteProvider);
     };
     this.editor.onChange = () => {
+      if (!this.editor.getText()) {
+        this.schedulePastedTextStateClear();
+      } else {
+        this.cancelPastedTextStateClear();
+      }
       this.tui.requestRender();
     };
     this.editor.onSubmit = async (value) => {
@@ -786,12 +1226,20 @@ export class AppScreen implements Component, Focusable {
     this.unsubscribe = this.state.onChange(() => {
       this.handleStateChange();
     });
+    // Ensure VSCode user settings have terminal.integrated.tabs.title
+    // set to ${sequence} so OSC 0 sequences update the tab title.
+    this.ensureVscodeSettings();
     // Set initial terminal window title
     this.tui.terminal.setTitle("jiuwenswarm");
     // Inject editor refs into app-state so tryAutoRestoreAfterCancel can
     // check input emptiness and populate the input field after auto-restore.
     this.state.setInputRef((text: string) => {
       this.editor.setText(text);
+      if (!text) {
+        this.schedulePastedTextStateClear();
+      } else {
+        this.cancelPastedTextStateClear();
+      }
     });
     this.state.getInputValueRef(() => this.editor.getText());
     // Initialize project scope from the user's actual cwd
@@ -799,6 +1247,56 @@ export class AppScreen implements Component, Focusable {
     setCurrentCwd(process.cwd());
     // Initialize startup prompt for workspace trust
     this.initStartupPrompt();
+    // 检查一次 config.json 解析错误，用 setTimeout(0) 延迟到 TUI 初始化完成
+    setTimeout(() => {
+      const parseError = consumeParseError();
+      if (parseError) {
+        this.state.setLastError("Invalid config.json. Please fix and restart.");
+        this.tui.requestRender();
+      }
+    }, 0);
+  }
+
+  private ensureVscodeSettings(): void {
+    if (process.env.TERM_PROGRAM !== "vscode") return;
+    try {
+      const userSettingsPath = this.getVscodeUserSettingsPath();
+      if (!userSettingsPath) return;
+
+      let settings: Record<string, unknown> = {};
+      try {
+        const raw = fs.readFileSync(userSettingsPath, "utf-8");
+        settings = JSON.parse(raw);
+      } catch {
+        // File doesn't exist or is invalid — start fresh.
+      }
+
+      if (settings["terminal.integrated.tabs.title"] === "${sequence}") return;
+      settings["terminal.integrated.tabs.title"] = "${sequence}";
+      fs.mkdirSync(path.dirname(userSettingsPath), { recursive: true });
+      fs.writeFileSync(userSettingsPath, JSON.stringify(settings, null, 2), "utf-8");
+    } catch {
+      // Best-effort only — silent failure.
+    }
+  }
+
+  private getVscodeUserSettingsPath(): string | null {
+    switch (process.platform) {
+      case "win32":
+        return process.env.APPDATA
+          ? path.join(process.env.APPDATA, "Code", "User", "settings.json")
+          : null;
+      case "darwin":
+        return process.env.HOME
+          ? path.join(process.env.HOME, "Library", "Application Support", "Code", "User", "settings.json")
+          : null;
+      case "linux":
+        return process.env.HOME
+          ? path.join(process.env.HOME, ".config", "Code", "User", "settings.json")
+          : null;
+      default:
+        return null;
+    }
   }
 
   private initStartupPrompt(): void {
@@ -810,7 +1308,7 @@ export class AppScreen implements Component, Focusable {
       {
         label: "Yes, I trust this folder",
         value: "yes",
-        description: "JiuwenClaw will be able to read, edit, and execute files here",
+        description: "JiuwenSwarm will be able to read, edit, and execute files here",
       },
       {
         label: "No, use default workspace",
@@ -905,56 +1403,38 @@ export class AppScreen implements Component, Focusable {
     const contentLines = this.fileViewerState.content.split("\n");
     const height = this.tui.terminal.rows;
     const availableHeight = Math.max(1, height - 2); // Reserve for title + hint
+    const maxScroll = Math.max(0, contentLines.length - availableHeight);
 
-    // Esc or q to exit
-    if (matchesKey(data, "escape") || data.toLowerCase() === "q") {
-      this.exitFileViewer();
-      return;
-    }
-
-    // Scroll up (up arrow or k)
-    if (matchesKey(data, "up") || data.toLowerCase() === "k") {
-      this.fileViewerState.scrollOffset = Math.max(0, this.fileViewerState.scrollOffset - 1);
-      this.tui.requestRender();
-      return;
-    }
-
-    // Scroll down (down arrow or j)
-    if (matchesKey(data, "down") || data.toLowerCase() === "j") {
-      const maxScroll = Math.max(0, contentLines.length - availableHeight);
-      this.fileViewerState.scrollOffset = Math.min(maxScroll, this.fileViewerState.scrollOffset + 1);
-      this.tui.requestRender();
-      return;
-    }
-
-    // Page up
-    if (matchesKey(data, "pageUp")) {
-      this.fileViewerState.scrollOffset = Math.max(0, this.fileViewerState.scrollOffset - availableHeight);
-      this.tui.requestRender();
-      return;
-    }
-
-    // Page down
-    if (matchesKey(data, "pageDown")) {
-      const maxScroll = Math.max(0, contentLines.length - availableHeight);
-      this.fileViewerState.scrollOffset = Math.min(maxScroll, this.fileViewerState.scrollOffset + availableHeight);
-      this.tui.requestRender();
-      return;
-    }
-
-    // Go to top (Home)
-    if (matchesKey(data, "home") || data.toLowerCase() === "g") {
-      this.fileViewerState.scrollOffset = 0;
-      this.tui.requestRender();
-      return;
-    }
-
-    // Go to bottom (End)
-    if (matchesKey(data, "end") || data.toLowerCase() === "shift+g") {
-      const maxScroll = Math.max(0, contentLines.length - availableHeight);
-      this.fileViewerState.scrollOffset = maxScroll;
-      this.tui.requestRender();
-      return;
+    switch (resolveAction("FileViewer", data)) {
+      case "fileViewer:exit":
+        this.exitFileViewer();
+        return;
+      case "fileViewer:lineUp":
+        this.fileViewerState.scrollOffset = Math.max(0, this.fileViewerState.scrollOffset - 1);
+        this.tui.requestRender();
+        return;
+      case "fileViewer:lineDown":
+        this.fileViewerState.scrollOffset = Math.min(maxScroll, this.fileViewerState.scrollOffset + 1);
+        this.tui.requestRender();
+        return;
+      case "fileViewer:pageUp":
+        this.fileViewerState.scrollOffset = Math.max(0, this.fileViewerState.scrollOffset - availableHeight);
+        this.tui.requestRender();
+        return;
+      case "fileViewer:pageDown":
+        this.fileViewerState.scrollOffset = Math.min(maxScroll, this.fileViewerState.scrollOffset + availableHeight);
+        this.tui.requestRender();
+        return;
+      case "fileViewer:top":
+        this.fileViewerState.scrollOffset = 0;
+        this.tui.requestRender();
+        return;
+      case "fileViewer:bottom":
+        this.fileViewerState.scrollOffset = maxScroll;
+        this.tui.requestRender();
+        return;
+      default:
+        return;
     }
   }
 
@@ -997,6 +1477,387 @@ export class AppScreen implements Component, Focusable {
     return lines;
   }
 
+  /** Enter DiffViewer mode to browse git/turn diffs interactively */
+  enterDiffViewer(payload: Record<string, unknown>): void {
+    const turns = (payload.turns || []) as TurnDiff[];
+    const gitDiff = (payload.gitDiff || null) as GitDiffData | null;
+    const files: DiffFileEntry[] = [];
+
+    if (gitDiff) {
+      for (const f of Object.values(gitDiff.files)) {
+        files.push({
+          filePath: f.filePath,
+          linesAdded: f.linesAdded,
+          linesRemoved: f.linesRemoved,
+          isNewFile: f.isNewFile,
+          isUntracked: f.isUntracked ?? f.isNewFile,
+          isBinary: f.isBinary ?? false,
+          isLargeFile: f.isLargeFile ?? false,
+          isTruncated: f.isTruncated ?? false,
+          hunks: f.hunks || [],
+          source: "working",
+        });
+      }
+    }
+
+    for (const turn of turns) {
+      for (const f of Object.values(turn.files)) {
+        files.push({
+          filePath: f.filePath,
+          linesAdded: f.linesAdded,
+          linesRemoved: f.linesRemoved,
+          isNewFile: f.isNewFile,
+          isUntracked: f.isUntracked ?? false,
+          isBinary: f.isBinary ?? false,
+          isLargeFile: f.isLargeFile ?? false,
+          isTruncated: f.isTruncated ?? false,
+          hunks: f.hunks || [],
+          source: `Turn ${turn.turnIndex}`,
+        });
+      }
+    }
+
+    const totalAdded = files.reduce((s, f) => s + f.linesAdded, 0);
+    const totalRemoved = files.reduce((s, f) => s + f.linesRemoved, 0);
+    const workingCount = gitDiff ? Object.keys(gitDiff.files).length : 0;
+    const turnCount = turns.length;
+    const title = `Diff (git diff HEAD)`;
+    const parts: string[] = [`${files.length} files changed  +${totalAdded} -${totalRemoved}`];
+    if (workingCount > 0) parts.push(`working:${workingCount}`);
+    if (turnCount > 0) parts.push(`turns:${turnCount}`);
+    const subtitle = parts.join("  ·  ");
+
+    this.diffViewerState = {
+      viewMode: "list",
+      selectedIndex: 0,
+      files,
+      scrollOffset: 0,
+      title,
+      subtitle,
+    };
+    this.tui.requestRender();
+  }
+
+  exitDiffViewer(): void {
+    this.diffViewerState = null;
+    this.tui.requestRender();
+  }
+
+  private handleDiffViewerInput(data: string, height: number): void {
+    if (!this.diffViewerState) return;
+
+    if (matchesKey(data, "escape") || matchesKey(data, "ctrl+c")) {
+      if (this.diffViewerState.viewMode === "detail") {
+        this.diffViewerState.viewMode = "list";
+        this.diffViewerState.scrollOffset = 0;
+      } else {
+        this.exitDiffViewer();
+      }
+      this.tui.requestRender();
+      return;
+    }
+
+    if (this.diffViewerState.viewMode === "list") {
+      // List view paginates a 5-file centered window derived from
+      // selectedIndex at render time, so navigation only needs to move the
+      // selection; the window follows automatically.
+      if (matchesKey(data, "up") || data.toLowerCase() === "k") {
+        if (this.diffViewerState.selectedIndex > 0) {
+          this.diffViewerState.selectedIndex--;
+          this.tui.requestRender();
+        }
+        return;
+      }
+      if (matchesKey(data, "down") || data.toLowerCase() === "j") {
+        if (this.diffViewerState.selectedIndex < this.diffViewerState.files.length - 1) {
+          this.diffViewerState.selectedIndex++;
+          this.tui.requestRender();
+        }
+        return;
+      }
+      if (matchesKey(data, "return")) {
+        const file = this.diffViewerState.files[this.diffViewerState.selectedIndex];
+        if (file) {
+          this.diffViewerState.viewMode = "detail";
+          this.diffViewerState.scrollOffset = 0;
+          this.tui.requestRender();
+        }
+        return;
+      }
+      if (matchesKey(data, "home") || data.toLowerCase() === "g") {
+        this.diffViewerState.selectedIndex = 0;
+        this.tui.requestRender();
+        return;
+      }
+      if (matchesKey(data, "end") || data.toLowerCase() === "shift+g") {
+        this.diffViewerState.selectedIndex = Math.max(0, this.diffViewerState.files.length - 1);
+        this.tui.requestRender();
+        return;
+      }
+      return;
+    }
+
+    if (this.diffViewerState.viewMode === "detail") {
+      const file = this.diffViewerState.files[this.diffViewerState.selectedIndex];
+      if (!file) return;
+
+      if (matchesKey(data, "left") || data.toLowerCase() === "h") {
+        this.diffViewerState.viewMode = "list";
+        this.diffViewerState.scrollOffset = 0;
+        this.tui.requestRender();
+        return;
+      }
+
+      const totalLines = this._countDiffLines(file);
+      const availableHeight = Math.max(1, height - 3);
+
+      if (matchesKey(data, "up") || data.toLowerCase() === "k") {
+        this.diffViewerState.scrollOffset = Math.max(0, this.diffViewerState.scrollOffset - 1);
+        this.tui.requestRender();
+        return;
+      }
+      if (matchesKey(data, "down") || data.toLowerCase() === "j") {
+        const maxScroll = Math.max(0, totalLines - availableHeight);
+        this.diffViewerState.scrollOffset = Math.min(maxScroll, this.diffViewerState.scrollOffset + 1);
+        this.tui.requestRender();
+        return;
+      }
+      if (matchesKey(data, "pageUp")) {
+        this.diffViewerState.scrollOffset = Math.max(0, this.diffViewerState.scrollOffset - availableHeight);
+        this.tui.requestRender();
+        return;
+      }
+      if (matchesKey(data, "pageDown")) {
+        const maxScroll = Math.max(0, totalLines - availableHeight);
+        this.diffViewerState.scrollOffset = Math.min(maxScroll, this.diffViewerState.scrollOffset + availableHeight);
+        this.tui.requestRender();
+        return;
+      }
+      if (matchesKey(data, "home") || data.toLowerCase() === "g") {
+        this.diffViewerState.scrollOffset = 0;
+        this.tui.requestRender();
+        return;
+      }
+      if (matchesKey(data, "end") || data.toLowerCase() === "shift+g") {
+        const maxScroll = Math.max(0, totalLines - availableHeight);
+        this.diffViewerState.scrollOffset = maxScroll;
+        this.tui.requestRender();
+        return;
+      }
+      return;
+    }
+  }
+
+  private _countDiffLines(file: DiffFileEntry): number {
+    let count = 2;
+    for (const hunk of file.hunks) {
+      count++;
+      count += hunk.lines.length;
+    }
+    return count;
+  }
+
+  private _toRelativePath(absPath: string): string {
+    const cwd = getCurrentCwd() || process.cwd();
+    const normalized = path.resolve(absPath);
+    if (normalized.startsWith(cwd + path.sep) || normalized === cwd) {
+      const rel = path.relative(cwd, normalized);
+      return rel || path.basename(absPath);
+    }
+    return absPath;
+  }
+
+  private _renderDiffDetailLines(file: DiffFileEntry, width: number): string[] {
+    const lines: string[] = [];
+    const displayPath = this._toRelativePath(file.filePath);
+    const label = file.isUntracked
+      ? palette.text.dim("(untracked)")
+      : file.isNewFile
+        ? palette.text.dim("(new)")
+        : "";
+
+    const added = palette.status.success(`+${file.linesAdded}`);
+    const removed = palette.status.error(`-${file.linesRemoved}`);
+    lines.push(`│   ${displayPath} ${label} ${added} ${removed}`);
+    lines.push(`│   ${"─".repeat(Math.max(0, width - 4))}`);
+
+    if (file.isUntracked) {
+      lines.push(palette.text.dim("│     New file not yet staged."));
+      lines.push(palette.text.dim(`│     Run \`git add ${displayPath}\` to see line counts.`));
+      return lines;
+    }
+
+    if (file.isBinary) {
+      lines.push(palette.text.dim("│     Binary file - cannot display diff"));
+      return lines;
+    }
+
+    if (file.isLargeFile) {
+      lines.push(palette.text.dim("│     Large file - diff exceeds 1 MB limit"));
+      return lines;
+    }
+
+    for (const hunk of file.hunks) {
+      lines.push(
+        palette.text.dim(
+          `│     @@ -${hunk.oldStart},${hunk.oldLines} +${hunk.newStart},${hunk.newLines} @@`,
+        ),
+      );
+      for (const line of hunk.lines) {
+        const display = `│     ${line}`;
+        let styled: string;
+        if (line.startsWith("+")) {
+          styled = palette.diff.add(display);
+        } else if (line.startsWith("-")) {
+          styled = palette.diff.remove(display);
+        } else {
+          styled = palette.diff.context(display);
+        }
+        lines.push(truncateToWidth(styled, width, ""));
+      }
+    }
+
+    if (file.isTruncated) {
+      lines.push(palette.text.dim("│     … diff truncated (exceeded 400 line limit)"));
+    }
+    return lines;
+  }
+
+  private renderDiffViewer(width: number): string[] {
+    if (!this.diffViewerState) return [];
+
+    const safeWidth = Math.max(1, width);
+    const lines: string[] = [];
+
+    // Title
+    lines.push(padToWidth(palette.border.panel(`━━━ ${this.diffViewerState.title} ━━━`), safeWidth));
+    // Subtitle
+    lines.push(padToWidth(palette.text.dim(`  ${this.diffViewerState.subtitle}`), safeWidth));
+    lines.push(padToWidth(palette.text.dim(`  ${"─".repeat(Math.max(0, safeWidth - 4))}`), safeWidth));
+
+    if (this.diffViewerState.viewMode === "list") {
+      // Paginate to MAX_VISIBLE files with the selected file centered,
+      // mirroring Claude Code's DiffFileList. When there are more files than
+      // the window, show ↑/↓ "N more files" hints above/below the window.
+      const MAX_VISIBLE = 5;
+      const total = this.diffViewerState.files.length;
+
+      if (total === 0) {
+        lines.push(padToWidth(palette.text.dim("  No file changes in this session"), safeWidth));
+      } else {
+        let start: number;
+        let end: number;
+        if (total <= MAX_VISIBLE) {
+          start = 0;
+          end = total;
+        } else {
+          start = Math.max(0, this.diffViewerState.selectedIndex - Math.floor(MAX_VISIBLE / 2));
+          end = start + MAX_VISIBLE;
+          if (end > total) {
+            end = total;
+            start = Math.max(0, end - MAX_VISIBLE);
+          }
+        }
+
+        if (start > 0) {
+          const more = start;
+          lines.push(padToWidth(
+            palette.text.dim(`  ↑ ${more} more ${more === 1 ? "file" : "files"}`),
+            safeWidth,
+          ));
+        }
+
+        for (let i = start; i < end; i++) {
+          const file = this.diffViewerState.files[i]!;
+          const isSelected = i === this.diffViewerState.selectedIndex;
+          const pointer = isSelected ? "❯ " : "  ";
+          const relativePath = this._toRelativePath(file.filePath);
+          const displayPath = relativePath.length > safeWidth - 16
+            ? relativePath.slice(0, safeWidth - 19) + "..."
+            : relativePath;
+
+          // 构建右侧状态标签（对齐 Claude Code FileStats）:
+          // - untracked → "untracked"
+          // - binary → "Binary file"
+          // - large file → "Large file modified"
+          // - normal/truncated → +N -N [ (truncated)]
+          let statsLabel: string;
+          let statsStyled: string;
+          if (file.isUntracked) {
+            statsLabel = "untracked";
+            statsStyled = palette.text.dim("untracked");
+          } else if (file.isBinary) {
+            statsLabel = "Binary file";
+            statsStyled = palette.text.dim("Binary file");
+          } else if (file.isLargeFile) {
+            statsLabel = "Large file modified";
+            statsStyled = palette.text.dim("Large file modified");
+          } else {
+            const addPart = palette.status.success(`+${file.linesAdded}`);
+            const removePart = palette.status.error(`-${file.linesRemoved}`);
+            statsLabel = `+${file.linesAdded} -${file.linesRemoved}`;
+            statsStyled = `${addPart} ${removePart}`;
+            if (file.isTruncated) {
+              statsLabel += " (truncated)";
+              statsStyled += palette.text.dim(" (truncated)");
+            }
+          }
+
+          const sourceLabel = file.isUntracked
+            ? "untracked"
+            : file.isNewFile
+              ? "(new)"
+              : file.source;
+          const line = `${pointer}${displayPath}`;
+          const padded = padToWidth(line, safeWidth - statsLabel.length - sourceLabel.length - 3);
+          const fullLine = `${padded}${palette.text.dim(sourceLabel)} ${statsStyled}`;
+          if (isSelected) {
+            lines.push(palette.text.accent(fullLine));
+          } else {
+            lines.push(fullLine);
+          }
+        }
+
+        if (end < total) {
+          const more = total - end;
+          lines.push(padToWidth(
+            palette.text.dim(`  ↓ ${more} more ${more === 1 ? "file" : "files"}`),
+            safeWidth,
+          ));
+        }
+      }
+    } else {
+      const file = this.diffViewerState.files[this.diffViewerState.selectedIndex];
+      if (!file) return lines;
+
+      const detailLines = this._renderDiffDetailLines(file, safeWidth);
+      const availableHeight = Math.max(1, this.tui.terminal.rows - 4);
+
+      const offset = this.diffViewerState.scrollOffset;
+      const maxLines = Math.min(detailLines.length, offset + availableHeight);
+
+      for (let i = offset; i < maxLines; i++) {
+        lines.push(detailLines[i] || "");
+      }
+
+      const totalLines = detailLines.length;
+      const scrollPercent = totalLines > 0 ? Math.round((offset / totalLines) * 100) : 0;
+      const positionInfo = totalLines > availableHeight
+        ? ` [${offset + 1}-${Math.min(offset + availableHeight, totalLines)}/${totalLines} (${scrollPercent}%)]`
+        : "";
+      const hintText = `  ↑/↓ scroll · ← back · Esc back${positionInfo}`;
+      lines.push(padToWidth(palette.text.dim(hintText), safeWidth));
+      return lines;
+    }
+
+    const hintText = this.diffViewerState.files.length > 0
+      ? "  ↑/↓ to select · Enter to view · Esc to close"
+      : "  Esc to close";
+    lines.push(padToWidth(palette.text.dim(hintText), safeWidth));
+
+    return lines;
+  }
+
   /**
    * Ctrl+C / SIGINT 始终尝试向服务端发送当前 session 的中断请求。
    * 是否真的存在运行任务由服务端判断；CLI/TUI 本身不退出。
@@ -1014,6 +1875,12 @@ export class AppScreen implements Component, Focusable {
     // FileViewer mode: handle input separately
     if (this.fileViewerState) {
       this.handleFileViewerInput(data);
+      return;
+    }
+
+    // DiffViewer mode: handle input separately
+    if (this.diffViewerState) {
+      this.handleDiffViewerInput(data, this.tui.terminal.rows);
       return;
     }
 
@@ -1037,19 +1904,68 @@ export class AppScreen implements Component, Focusable {
       this.toolSelector !== null ||
       this.themeList !== null ||
       this.swarmWorkflowsViewState !== null ||
-      this.configEditorState !== null;
+      this.configEditorState !== null ||
+      this.diffViewerState !== null;
 
     if (!pendingQuestion && !hasOverlay && this.handleTranscriptScrollInput(data)) {
       return;
     }
 
-    if (!pendingQuestion && snapshot.cancellableWork && matchesKey(data, "escape") && !hasOverlay) {
+    const isCancelWorkKey = !hasOverlay && resolveAction("Global", data) === "app:cancelWork";
+
+    // BTW 浮层优先消费 Esc（不干扰主会话）
+    // 只要 btw 浮层弹窗存在（可见、加载中、正在输出），按一次 Esc 只关闭/终止 btw 旁路
+    if (!pendingQuestion && isCancelWorkKey && snapshot.btwActive) {
+      // 关闭 BTW overlay（如果可见）
+      if (snapshot.btwOverlay) {
+        this.state.clearBtwOverlay();
+      }
+      // 取消正在进行的 BTW WS 请求（加载中状态），不影响主会话
+      this.state.requestLocalInterrupt();
+      this.state.setBtwActive(false);
+      this.tui.requestRender();
+      return;
+    }
+
+    if (!pendingQuestion && snapshot.cancellableWork && isCancelWorkKey) {
       if (isTeamMode(snapshot.mode)) {
         this.state.pause();
       } else {
         this.state.cancel();
       }
       return;
+    }
+
+    // 检查不可中断命令列表（ESC 显示提示）
+    if (!pendingQuestion && snapshot.runningCommand && UNINTERRUPTIBLE_COMMANDS.includes(snapshot.runningCommand) && isCancelWorkKey) {
+      this.transientNotice = `${snapshot.runningCommand} 命令执行中，无法中断`;
+      if (this.transientNoticeTimer) {
+        clearTimeout(this.transientNoticeTimer);
+      }
+      this.transientNoticeTimer = setTimeout(() => {
+        this.transientNotice = null;
+        this.transientNoticeTimer = null;
+        this.tui.requestRender();
+      }, 3500);
+      this.tui.requestRender();
+      return;
+    }
+
+    // ESC 关闭 /btw overlay（独立于 transcript 的覆盖层）
+    if (!pendingQuestion && !hasOverlay && !snapshot.cancellableWork && isCancelWorkKey) {
+      if (snapshot.btwOverlay) {
+        this.state.clearBtwOverlay();
+        this.tui.requestRender();
+        return;
+      }
+    }
+
+    // ESC 关闭 help 视图（只读，无输入栏）
+    if (!pendingQuestion && !hasOverlay && !snapshot.cancellableWork && isCancelWorkKey) {
+      if (this.state.dismissHelp()) {
+        this.tui.requestRender();
+        return;
+      }
     }
 
     if (this.startupPromptList !== null && matchesKey(data, "ctrl+c")) {
@@ -1083,78 +1999,85 @@ export class AppScreen implements Component, Focusable {
       return;
     }
 
-    const handled = handleAppScreenKeyInput(data, {
-      interruptTask: () => this.interruptTask(),
-      exitApp: () => this.exit(),
-      toggleTodos: () => {
-        this.todosCollapsed = !this.todosCollapsed;
-        this.tui.requestRender();
-      },
-      toggleTeamPanel: () => {
-        this.showTeamPanel = !this.showTeamPanel;
-        if (!this.showTeamPanel) {
-          this.viewedTeamMemberId = null;
-        }
-        this.tui.requestRender();
-      },
-      toggleTranscript: () => {
-        const snapshot = this.state.getSnapshot();
-        this.state.setTranscriptMode(
-          snapshot.transcriptMode === "detailed" ? "compact" : "detailed",
-        );
-      },
-      redraw: () => {
-        this.tui.invalidate();
-        this.tui.requestRender(true);
-        this.transientNotice = "Screen redrawn";
-        if (this.transientNoticeTimer) {
-          clearTimeout(this.transientNoticeTimer);
-        }
-        this.transientNoticeTimer = setTimeout(() => {
-          this.transientNotice = null;
-          this.transientNoticeTimer = null;
+    // Global ctrl+l/t/g/o only apply on the main screen — defer while an overlay
+    // or the team panel is active so context-specific bindings (e.g. ResumeList)
+    // can use the same physical keys.
+    const skipGlobalMainScreenKeys = hasOverlay || this.showTeamPanel;
+    let handled = false;
+    if (!skipGlobalMainScreenKeys) {
+      handled = handleAppScreenKeyInput(data, {
+        interruptTask: () => this.interruptTask(),
+        exitApp: () => this.exit(),
+        toggleTodos: () => {
+          this.todosCollapsed = !this.todosCollapsed;
           this.tui.requestRender();
-        }, 1200);
-        this.tui.requestRender();
-      },
-      clearInput: () => {
-        this.editor.setText("");
-        this.tui.requestRender();
-      },
-      isIdle: () => {
-        return !snapshot.isProcessing && !snapshot.pendingQuestion && !snapshot.cancellableWork;
-      },
-      hasServerTask: () => this.state.hasServerTask(),
-      requestLocalInterrupt: () => {
-        return this.state.requestLocalInterrupt();
-      },
-      showCtrlCExitHint: () => {
-        if (this.transientNoticeTimer) {
-          clearTimeout(this.transientNoticeTimer);
-        }
-        this.transientNotice = "Press Ctrl+C again to exit";
-        this.transientNoticeTimer = setTimeout(() => {
-          this.transientNotice = null;
-          this.transientNoticeTimer = null;
+        },
+        toggleTeamPanel: () => {
+          this.showTeamPanel = !this.showTeamPanel;
+          if (!this.showTeamPanel) {
+            this.viewedTeamMemberId = null;
+          }
           this.tui.requestRender();
-        }, 3000);
-        this.tui.requestRender();
-      },
-    });
+        },
+        toggleTranscript: () => {
+          const snapshot = this.state.getSnapshot();
+          this.state.setTranscriptMode(
+            snapshot.transcriptMode === "detailed" ? "compact" : "detailed",
+          );
+        },
+        redraw: () => {
+          this.tui.invalidate();
+          this.tui.requestRender(true);
+          this.transientNotice = "Screen redrawn";
+          if (this.transientNoticeTimer) {
+            clearTimeout(this.transientNoticeTimer);
+          }
+          this.transientNoticeTimer = setTimeout(() => {
+            this.transientNotice = null;
+            this.transientNoticeTimer = null;
+            this.tui.requestRender();
+          }, 1200);
+          this.tui.requestRender();
+        },
+        clearInput: () => {
+          this.editor.setText("");
+          this.tui.requestRender();
+        },
+        isIdle: () => {
+          return !snapshot.isProcessing && !snapshot.pendingQuestion && !snapshot.cancellableWork;
+        },
+        hasServerTask: () => this.state.hasServerTask(),
+        requestLocalInterrupt: () => {
+          return this.state.requestLocalInterrupt();
+        },
+        showCtrlCExitHint: () => {
+          if (this.transientNoticeTimer) {
+            clearTimeout(this.transientNoticeTimer);
+          }
+          this.transientNotice = "Press Ctrl+C again to exit";
+          this.transientNoticeTimer = setTimeout(() => {
+            this.transientNotice = null;
+            this.transientNoticeTimer = null;
+            this.tui.requestRender();
+          }, 3000);
+          this.tui.requestRender();
+        },
+      });
+    }
     if (handled) {
       return;
     }
 
     if (permissionRequest && activeQuestion) {
-      const lower = data.toLowerCase();
-      if (lower === "y") {
+      const confirmAction = resolveAction("Confirmation", data);
+      if (confirmAction === "confirm:yes") {
         const allow = activeQuestion.options.find((option) => isAllowOption(option.label));
         if (allow) {
           this.handleQuestionSelection(allow.label);
           return;
         }
       }
-      if (lower === "n") {
+      if (confirmAction === "confirm:no") {
         const reject = activeQuestion.options.find((option) => isRejectOption(option.label));
         if (reject) {
           this.handleQuestionSelection(reject.label);
@@ -1171,6 +2094,77 @@ export class AppScreen implements Component, Focusable {
     }
 
     if (!snapshot.pendingQuestion && this.resumeSessionList !== null) {
+      // 重命名态：Enter 保存，Esc 取消，其余按键编辑标题（允许空格）
+      if (this.resumeSessionList.rename !== null) {
+        if (matchesKey(data, "return")) {
+          void this.submitResumeRename();
+        } else if (matchesKey(data, "escape")) {
+          this.resumeSessionList = { ...this.resumeSessionList, rename: null };
+          this.tui.requestRender();
+        } else if (matchesKey(data, "backspace")) {
+          const r = this.resumeSessionList.rename;
+          this.resumeSessionList = {
+            ...this.resumeSessionList,
+            rename: { ...r, value: r.value.slice(0, -1) },
+          };
+          this.tui.requestRender();
+        } else {
+          const ch = this.getPrintableChar(data);
+          if (ch !== undefined) {
+            const r = this.resumeSessionList.rename;
+            this.resumeSessionList = {
+              ...this.resumeSessionList,
+              rename: { ...r, value: r.value + ch },
+            };
+            this.tui.requestRender();
+          }
+        }
+        return;
+      }
+      // 只读预览态：Enter 恢复该会话，Space/Esc 返回列表，其余按键忽略
+      if (this.resumeSessionList.preview !== null) {
+        if (matchesKey(data, "return")) {
+          this.setMouseTrackingEnabled(false);
+          void this.handleResumeSessionSelection(this.resumeSessionList.preview.session_id);
+        } else if (matchesKey(data, "space") || matchesKey(data, "escape")) {
+          this.resumeSessionList = { ...this.resumeSessionList, preview: null, previewMessages: [], previewLoading: false };
+          this.setMouseTrackingEnabled(false);
+          this.tui.requestRender();
+        } else {
+          // Handle scroll in preview
+          const wheelOffset = getSgrMouseWheelOffset(data, this.resumeSessionList.previewScrollOffset);
+          if (wheelOffset !== null) {
+            this.resumeSessionList = { ...this.resumeSessionList, previewScrollOffset: Math.max(0, wheelOffset) };
+            this.tui.requestRender();
+            return;
+          }
+          const pageSize = Math.max(1, Math.floor(this.tui.terminal.rows * 0.8));
+          const scrollAction = resolveAction("Scroll", data);
+          if (scrollAction === "scroll:pageUp" || matchesKey(data, "pageUp")) {
+            this.resumeSessionList = { ...this.resumeSessionList, previewScrollOffset: this.resumeSessionList.previewScrollOffset + pageSize };
+            this.tui.requestRender();
+            return;
+          }
+          if (scrollAction === "scroll:pageDown" || matchesKey(data, "pageDown")) {
+            this.resumeSessionList = { ...this.resumeSessionList, previewScrollOffset: Math.max(0, this.resumeSessionList.previewScrollOffset - pageSize) };
+            this.tui.requestRender();
+            return;
+          }
+        }
+        return;
+      }
+      const resumeAction = resolveAction("ResumeList", data);
+      // These shortcuts must win over search-text input: the default for
+      // resume:preview is Space, which would otherwise be typed into the query
+      // (intentionally sacrificing the ability to type a space in search).
+      if (resumeAction === "resume:preview") {
+        void this.openResumeSessionPreview();
+        return;
+      }
+      if (resumeAction === "resume:rename") {
+        this.openResumeRename();
+        return;
+      }
       const printableChar = this.getPrintableChar(data);
       if (printableChar !== undefined) {
         const newQuery = this.resumeSessionList.searchQuery + printableChar;
@@ -1178,7 +2172,11 @@ export class AppScreen implements Component, Focusable {
       } else if (matchesKey(data, "backspace")) {
         const newQuery = this.resumeSessionList.searchQuery.slice(0, -1);
         this.updateResumeSearchQuery(newQuery);
-      } else if (matchesKey(data, "escape")) {
+      } else if (resumeAction === "resume:toggleAllProjects") {
+        void this.toggleResumeAllProjects();
+      } else if (resumeAction === "resume:toggleBranchFilter") {
+        this.toggleResumeBranchFilter();
+      } else if (resumeAction === "resume:close") {
         if (this.resumeSessionList.searchQuery) {
           this.updateResumeSearchQuery("");
         } else {
@@ -1215,11 +2213,11 @@ export class AppScreen implements Component, Focusable {
           this.tui.requestRender();
           return;
         }
-        if (matchesKey(data, "left")) {
+        if (resolveAction("StatusView", data) === "status:prevTab") {
           this.switchStatusViewTab(-1);
           return;
         }
-        if (matchesKey(data, "right")) {
+        if (resolveAction("StatusView", data) === "status:nextTab") {
           this.switchStatusViewTab(1);
           return;
         }
@@ -1234,8 +2232,11 @@ export class AppScreen implements Component, Focusable {
           return;
         }
         // Printable character → append to search query
-        if (data.length === 1 && !matchesKey(data, "up") && !matchesKey(data, "tab")) {
-          this.statusViewState.searchQuery += data;
+        // Use getPrintableChar() to handle Kitty CSI-u sequences (VSCode terminal)
+        // and UTF-8 multi-byte chars (IME input), not just raw data.length === 1
+        const searchPrintableChar = this.getPrintableChar(data);
+        if (searchPrintableChar !== undefined && !matchesKey(data, "up") && !matchesKey(data, "tab")) {
+          this.statusViewState.searchQuery += searchPrintableChar;
           this.rebuildStatusViewTabList();
           this.tui.requestRender();
           return;
@@ -1243,19 +2244,21 @@ export class AppScreen implements Component, Focusable {
         return;
       }
       // Normal mode: Esc to close, / or printable char on config tab enters search
-      if (matchesKey(data, "escape")) {
-        this.closeStatusView();
-        return;
-      }
-      if (matchesKey(data, "left")) {
-        this.switchStatusViewTab(-1);
-        return;
-      }
-      if (matchesKey(data, "right")) {
-        this.switchStatusViewTab(1);
-        return;
+      switch (resolveAction("StatusView", data)) {
+        case "status:close":
+          this.closeStatusView();
+          return;
+        case "status:prevTab":
+          this.switchStatusViewTab(-1);
+          return;
+        case "status:nextTab":
+          this.switchStatusViewTab(1);
+          return;
+        default:
+          break;
       }
       // On config tab, / enters search mode; printable chars also enter search mode
+      // Use getPrintableChar() for Kitty CSI-u (VSCode) + UTF-8 multi-byte (IME) support
       if (this.statusViewState.tab === "config") {
         if (data === "/") {
           this.statusViewState.searchMode = true;
@@ -1263,9 +2266,10 @@ export class AppScreen implements Component, Focusable {
           this.tui.requestRender();
           return;
         }
-        if (data.length === 1 && !matchesKey(data, "up") && !matchesKey(data, "down") && !matchesKey(data, "return") && !matchesKey(data, "tab") && !matchesKey(data, "backspace") && !matchesKey(data, "delete") && !matchesKey(data, "escape")) {
+        const initialPrintableChar = this.getPrintableChar(data);
+        if (initialPrintableChar !== undefined && !matchesKey(data, "up") && !matchesKey(data, "down") && !matchesKey(data, "return") && !matchesKey(data, "tab") && !matchesKey(data, "backspace") && !matchesKey(data, "delete") && !matchesKey(data, "escape")) {
           this.statusViewState.searchMode = true;
-          this.statusViewState.searchQuery = data;
+          this.statusViewState.searchQuery = initialPrintableChar;
           this.rebuildStatusViewTabList();
           this.tui.requestRender();
           return;
@@ -1283,7 +2287,7 @@ export class AppScreen implements Component, Focusable {
     }
 
     if (!snapshot.pendingQuestion && this.modelList !== null) {
-      this.modelList.list.handleInput(data);
+      this.handleModelListInput(data);
       this.tui.requestRender();
       return;
     }
@@ -1301,7 +2305,7 @@ export class AppScreen implements Component, Focusable {
     }
 
     if (this.mcpDetail !== null) {
-      if (matchesKey(data, "escape")) {
+      if (resolveAction("Overlay", data) === "overlay:close") {
         this.mcpDetail = null;
         this.openMcpList();
         return;
@@ -1314,7 +2318,7 @@ export class AppScreen implements Component, Focusable {
     }
 
     if (this.mcpToolDetail !== null) {
-      if (matchesKey(data, "escape")) {
+      if (resolveAction("Overlay", data) === "overlay:close") {
         const serverName = this.mcpToolDetail.serverName;
         this.mcpToolDetail = null;
         void this.openMcpToolsList(serverName);
@@ -1324,7 +2328,7 @@ export class AppScreen implements Component, Focusable {
     }
 
     if (this.mcpTools !== null) {
-      if (matchesKey(data, "escape")) {
+      if (resolveAction("Overlay", data) === "overlay:close") {
         const serverName = this.mcpTools.serverName;
         this.mcpTools = null;
         void this.handleMcpSelection(serverName);
@@ -1347,40 +2351,55 @@ export class AppScreen implements Component, Focusable {
     }
 
     if (!snapshot.pendingQuestion && this.showTeamPanel) {
-      if (matchesKey(data, "left")) {
-        this.viewedTeamMemberId = null;
-        this.tui.requestRender();
-        return;
+      switch (resolveAction("TeamPanel", data)) {
+        case "team:back":
+          this.viewedTeamMemberId = null;
+          this.tui.requestRender();
+          return;
+        case "team:viewMember":
+          this.viewedTeamMemberId = this.selectedTeamMemberId;
+          this.tui.requestRender();
+          return;
+        case "team:prev":
+          this.moveTeamPanelSelection(snapshot, -1);
+          this.tui.requestRender();
+          return;
+        case "team:next":
+          this.moveTeamPanelSelection(snapshot, 1);
+          this.tui.requestRender();
+          return;
+        default:
+          break;
       }
-      if (matchesKey(data, "return")) {
-        this.viewedTeamMemberId = this.selectedTeamMemberId;
-        this.tui.requestRender();
-        return;
-      }
-      if (matchesKey(data, "up")) {
-        this.moveTeamPanelSelection(snapshot, -1);
-        this.tui.requestRender();
-        return;
-      }
-      if (matchesKey(data, "down")) {
-        this.moveTeamPanelSelection(snapshot, 1);
-        this.tui.requestRender();
-        return;
-      }
+    }
+
+    if (!snapshot.pendingQuestion && this.state.isHelpVisible()) {
+      return;
     }
 
     // Detect pasted file paths (drag-and-drop) in the terminal
     // When files are dragged in, they arrive as a pasted string.
     // Windows/PowerShell may not send bracketed paste markers,
     // so we detect file paths in any multi-character input.
+    // Only intercept when the paste is *pure* file paths (drag-and-drop).
+    // If there's command text interleaved, treat it as a normal paste.
     if (!snapshot.pendingQuestion && data.length > 4) {
-      const pastedContent = data.replace(/\x1b\[200~/, "").replace(/\x1b\[201~/, "");
+      const hasPasteStart = data.includes("\x1b[200~");
+      const hasPasteEnd = data.includes("\x1b[201~");
+      if (hasPasteStart !== hasPasteEnd) {
+        this.editor.handleInput(data);
+        return;
+      }
+      const pastedContent = stripBracketedPasteMarkers(data);
       const filePaths = extractFilePathsFromPaste(pastedContent);
-      if (filePaths.length > 0) {
+      if (filePaths.length > 0 && isPurePathPaste(pastedContent)) {
         // 若解析出路径但无一通过附件校验（扩展名不在白名单等），须把原文交给编辑器，避免粘贴被吞掉
         if (this.handleDroppedFiles(filePaths)) {
           return;
         }
+      }
+      if (this.handlePastedTextCollapse(pastedContent)) {
+        return;
       }
     }
 
@@ -1391,6 +2410,11 @@ export class AppScreen implements Component, Focusable {
     // FileViewer mode: render file viewer instead of normal view
     if (this.fileViewerState) {
       return this.renderFileViewer(width);
+    }
+
+    // DiffViewer mode: render diff viewer instead of normal view
+    if (this.diffViewerState) {
+      return this.renderDiffViewer(width);
     }
 
     const snapshot = this.state.getSnapshot();
@@ -1404,8 +2428,18 @@ export class AppScreen implements Component, Focusable {
     // IME composing text from appearing in the bottom input box instead of the config panel.
     // input_value phase: editor is rendered inside buildConfigEditorLines.
     // search_list/select_value phase: no text input needed in the main editor.
+    // The resume picker has its own search input, so hide the main editor while it is
+    // open to avoid a misleading second input bar (restored on Esc). Mirrors Claude Code.
+    // /help is read-only transcript content — hide the composer until Esc dismisses it.
     const isConfigEditorActive = this.configEditorState !== null;
-    const editorLines = isConfigEditorActive
+    const hideEditorForInlinePlanReject = this.isEditingInlinePlanReject(snapshot);
+    const hideMainEditor =
+      isConfigEditorActive ||
+      hideEditorForInlinePlanReject ||
+      this.resumeSessionList !== null ||
+      this.state.isHelpVisible() ||
+      this.modelList !== null;
+    const editorLines = hideMainEditor
       ? []
       : this.applySlashCommandHint(this.editor.render(width), width);
     const composerPreviewLines: string[] = [];
@@ -1472,7 +2506,9 @@ export class AppScreen implements Component, Focusable {
       },
       runningElapsedMs:
         !snapshot.isInterrupted &&
-        (snapshot.isProcessing || teamWorking) &&
+        (snapshot.isProcessing ||
+          teamWorking ||
+          snapshot.workflowRuns.some((workflow) => workflow.status === "running")) &&
         this.runningStartedAtMs !== null
           ? Date.now() - this.runningStartedAtMs
           : undefined,
@@ -1482,7 +2518,8 @@ export class AppScreen implements Component, Focusable {
   }
 
   private async handleSubmit(raw: string): Promise<void> {
-    const text = raw.trim();
+    const editorText = raw.trim();
+    const text = this.expandPastedText(editorText).trim();
     if (!text) return;
 
     // 更新用户活动时间戳（用于 auto-recap 空闲检测）
@@ -1503,11 +2540,20 @@ export class AppScreen implements Component, Focusable {
       return;
     }
 
+    if (this.modelList !== null) {
+      if (this.modelList.phase === "input") {
+        void this.submitModelInput();
+      } else if (this.modelList.phase === "delete_confirm") {
+        void this.submitModelDelete();
+      }
+      return;
+    }
+
     const { content, attachments } = this.buildOutgoingMessage(text);
 
-    if (!content) return;
-
     const snapshot = this.state.getSnapshot();
+    if (!content && !(snapshot.pendingQuestion && this.otherInputMode)) return;
+
     if (snapshot.pendingQuestion) {
       if (this.questionList !== null) {
         const selected = this.questionList.getSelectedItem();
@@ -1534,11 +2580,19 @@ export class AppScreen implements Component, Focusable {
 
         const answers = pendingQuestion.questions.map((question, index) => {
           const label = this.pendingQuestionAnswers.get(index) ?? "";
-          if (label === "Other") {
+          const isPlanRejectFeedback = shouldAppendPlanRejectFeedback(
+            pendingQuestion.source,
+            label,
+            pendingQuestion.planApprovalKind,
+          );
+          if (label === "Other" || isPlanRejectFeedback) {
             return {
               question: question.question,
               selected_options: [label],
-              custom_input: index === this.activeQuestionIndex ? text : undefined,
+              custom_input:
+                index === this.activeQuestionIndex && (label === "Other" || text)
+                  ? text
+                  : undefined,
             };
           }
           return {
@@ -1681,7 +2735,22 @@ export class AppScreen implements Component, Focusable {
         this.editor.addToHistory(text);
         this.editor.setText("");
         this.state.addItem(addCommandEcho(snapshot.sessionId, text));
-        await this.openResumeSessionList();
+        // 默认仅列出当前项目的会话；进入后可按 Ctrl+A 查看全部项目
+        await this.openResumeSessionList(false);
+        return;
+      }
+      if (/^\/model\s+add\s*$/.test(text)) {
+        this.editor.addToHistory(text);
+        this.editor.setText("");
+        this.state.addItem(addCommandEcho(snapshot.sessionId, text));
+        await this.openModelList("add");
+        return;
+      }
+      if (/^\/model\s+delete\s*$/.test(text)) {
+        this.editor.addToHistory(text);
+        this.editor.setText("");
+        this.state.addItem(addCommandEcho(snapshot.sessionId, text));
+        await this.openModelList("delete");
         return;
       }
       if (/^\/model\s*$/.test(text)) {
@@ -1742,8 +2811,14 @@ export class AppScreen implements Component, Focusable {
           openInEditor: (filePath: string) => {
             openInExternalEditor(this.tui, filePath);
           },
+          openFolder: (folderPath: string) => {
+            openFolderInExplorer(folderPath);
+          },
           enterFileViewer: (content, title, source) => {
             this.enterFileViewer(content, title, source);
+          },
+          enterDiffViewer: (payload) => {
+            this.enterDiffViewer(payload);
           },
         });
       } finally {
@@ -1752,7 +2827,8 @@ export class AppScreen implements Component, Focusable {
       return;
     }
 
-    if (snapshot.isProcessing || snapshot.isPaused) {
+    // Team 模式持续对话走 chat.send（interact），不通过 supplement 中断当前 stream。
+    if ((snapshot.isProcessing || snapshot.isPaused) && !isTeamMode(snapshot.mode)) {
       this.beginPendingSubmittedInput(text, snapshot);
       const requestId = this.state.supplement(content, attachments);
       if (!requestId) {
@@ -1827,6 +2903,7 @@ export class AppScreen implements Component, Focusable {
       this.pendingQuestionAnswers.clear();
       this.questionList = null;
       this.questionDetailsMap = null;
+      this.setMouseTrackingEnabled(false);
       if (!this.editor.getText() && this.draftBeforeQuestion) {
         this.editor.setText(this.draftBeforeQuestion);
       }
@@ -1868,27 +2945,27 @@ export class AppScreen implements Component, Focusable {
     }
 
     const pageSize = Math.max(1, Math.floor(this.tui.terminal.rows * 0.8));
-    if (matchesKey(data, "pageUp") || matchesKey(data, "shift+pageUp")) {
-      this.transcriptScrollOffset += pageSize;
-      this.tui.requestRender();
-      return true;
+    const scrollAction = resolveAction("Scroll", data);
+    switch (scrollAction) {
+      case "scroll:pageUp":
+        this.transcriptScrollOffset += pageSize;
+        this.tui.requestRender();
+        return true;
+      case "scroll:pageDown":
+        this.transcriptScrollOffset = Math.max(0, this.transcriptScrollOffset - pageSize);
+        this.tui.requestRender();
+        return true;
+      case "scroll:top":
+        this.transcriptScrollOffset = Number.MAX_SAFE_INTEGER;
+        this.tui.requestRender();
+        return true;
+      case "scroll:bottom":
+        this.transcriptScrollOffset = 0;
+        this.tui.requestRender();
+        return true;
+      default:
+        return false;
     }
-    if (matchesKey(data, "pageDown") || matchesKey(data, "shift+pageDown")) {
-      this.transcriptScrollOffset = Math.max(0, this.transcriptScrollOffset - pageSize);
-      this.tui.requestRender();
-      return true;
-    }
-    if (matchesKey(data, "ctrl+home")) {
-      this.transcriptScrollOffset = Number.MAX_SAFE_INTEGER;
-      this.tui.requestRender();
-      return true;
-    }
-    if (matchesKey(data, "ctrl+end")) {
-      this.transcriptScrollOffset = 0;
-      this.tui.requestRender();
-      return true;
-    }
-    return false;
   }
 
   private clearPendingSubmittedInput(requestRender = true): void {
@@ -1936,31 +3013,60 @@ export class AppScreen implements Component, Focusable {
     }
   }
 
-  private async openResumeSessionList(): Promise<void> {
+  private makeResumeSelectList(items: SelectItem[]): SelectList {
+    const list = new SelectList(items, Math.min(Math.max(items.length, 1), 8), selectListTheme, {
+      minPrimaryColumnWidth: 24,
+      maxPrimaryColumnWidth: 42,
+    });
+    list.onSelect = (item) => {
+      if (item && item.value) {
+        void this.handleResumeSessionSelection(item.value);
+      }
+    };
+    list.onCancel = () => {
+      this.resumeSessionList = null;
+      this.tui.requestRender();
+    };
+    return list;
+  }
+
+  private async openResumeSessionList(allProjects = false): Promise<void> {
     const snapshot = this.state.getSnapshot();
     try {
-      const payload = await this.state.request<SessionListPayload>("session.list", {});
-      const sessions = payload.sessions ?? [];
+      const payload = await this.state.request<SessionListPayload>("session.list", {
+        all_projects: allProjects,
+      });
+      const sessions = sanitizeSessionList(payload.sessions);
       const total = payload.total ?? sessions.length;
-      if (sessions.length === 0) {
+      const currentBranch = payload.current_branch ?? "HEAD";
+      // 全部项目仍为空：确无可恢复会话，直接提示，不打开选择器
+      if (sessions.length === 0 && allProjects) {
         this.resumeSessionList = null;
         this.state.addItem(addInfo(snapshot.sessionId, "No sessions found", "r"));
         return;
       }
+      // 当前项目为空：仍打开（空）选择器，便于用户按 Ctrl+A 切到全部项目
 
-      const items = buildResumeSessionItems(sessions);
-      const list = new SelectList(items, Math.min(Math.max(items.length, 1), 8), selectListTheme, {
-        minPrimaryColumnWidth: 24,
-        maxPrimaryColumnWidth: 42,
+      const items = computeResumeItems(sessions, {
+        query: "",
+        showProject: allProjects,
+        branchFilter: false,
+        currentBranch,
       });
-      list.onSelect = (item) => {
-        void this.handleResumeSessionSelection(item.value);
+      this.resumeSessionList = {
+        list: this.makeResumeSelectList(items),
+        sessions,
+        total,
+        searchQuery: "",
+        showAllProjects: allProjects,
+        branchFilterEnabled: false,
+        currentBranch,
+        preview: null,
+        previewMessages: [],
+        previewLoading: false,
+        previewScrollOffset: 0,
+        rename: null,
       };
-      list.onCancel = () => {
-        this.resumeSessionList = null;
-        this.tui.requestRender();
-      };
-      this.resumeSessionList = { list, sessions, total, searchQuery: "" };
       this.tui.requestRender();
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
@@ -1969,7 +3075,67 @@ export class AppScreen implements Component, Focusable {
     }
   }
 
+  private async toggleResumeAllProjects(): Promise<void> {
+    if (!this.resumeSessionList) return;
+    const next = !this.resumeSessionList.showAllProjects;
+    const { searchQuery, branchFilterEnabled } = this.resumeSessionList;
+    const snapshot = this.state.getSnapshot();
+    try {
+      const payload = await this.state.request<SessionListPayload>("session.list", {
+        all_projects: next,
+      });
+      const sessions = sanitizeSessionList(payload.sessions);
+      const total = payload.total ?? sessions.length;
+      const currentBranch = payload.current_branch ?? this.resumeSessionList.currentBranch;
+      const items = computeResumeItems(sessions, {
+        query: searchQuery,
+        showProject: next,
+        branchFilter: branchFilterEnabled,
+        currentBranch,
+      });
+      this.resumeSessionList = {
+        list: this.makeResumeSelectList(items),
+        sessions,
+        total,
+        searchQuery,
+        showAllProjects: next,
+        branchFilterEnabled,
+        currentBranch,
+        preview: null,
+        previewMessages: [],
+        previewLoading: false,
+        previewScrollOffset: 0,
+        rename: null,
+      };
+      this.tui.requestRender();
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.state.addItem(addError(snapshot.sessionId, `resume failed: ${message}`));
+    }
+  }
+
+  private toggleResumeBranchFilter(): void {
+    if (!this.resumeSessionList) return;
+    const st = this.resumeSessionList;
+    const next = !st.branchFilterEnabled;
+    const items = computeResumeItems(st.sessions, {
+      query: st.searchQuery,
+      showProject: st.showAllProjects,
+      branchFilter: next,
+      currentBranch: st.currentBranch,
+    });
+    this.resumeSessionList = {
+      ...st,
+      list: this.makeResumeSelectList(items),
+      branchFilterEnabled: next,
+    };
+    this.tui.requestRender();
+  }
+
   private async handleResumeSessionSelection(sessionId: string): Promise<void> {
+    if (!sessionId || typeof sessionId !== "string") {
+      return;
+    }
     const nextSessionId = sessionId.trim();
     if (!nextSessionId) {
       return;
@@ -1979,33 +3145,24 @@ export class AppScreen implements Component, Focusable {
     const matchedSession = sessions.find((s) => s.session_id === nextSessionId);
     const accentColor = matchedSession?.accent_color ?? "default";
 
-    // 跨项目恢复保护（对齐 Claude Code checkCrossProjectResume）
-    // 使用 realpathSync 规范化路径以处理 macOS 符号链接（如 /tmp → /private/tmp）
-    let currentProject = (getCurrentProjectDir() || process.cwd()).trim();
-    let sessionProject = (matchedSession?.project_dir || "").trim();
-    try { currentProject = realpathSync(currentProject); } catch { /* path may not exist */ }
-    if (sessionProject) {
-      try { sessionProject = realpathSync(sessionProject); } catch { /* path may not exist */ }
-    }
-    if (sessionProject && currentProject && sessionProject !== currentProject
-        && !sessionProject.startsWith(currentProject + "/")
-        && !currentProject.startsWith(sessionProject + "/")) {
-      this.resumeSessionList = null;
-      const dirName = sessionProject.split("/").pop() || sessionProject;
-      this.state.addItem(addInfo(
-        this.state.getSnapshot().sessionId,
-        `Session belongs to project "${dirName}". Please cd to that directory first.`,
-        "r",
-      ));
-      this.tui.requestRender();
-      return;
-    }
+    // 跨项目目录已由后端 session.list 完成过滤（_session_matches_project），
+    // 此处不再重复校验，避免前后端路径规范化差异（resolve vs realpath）
+    // 导致误拦截本已通过后端过滤的会话。
 
     this.resumeSessionList = null;
     this.state.updateSession(nextSessionId);
     this.state.clearEntries();
     this.state.setAccentColor(accentColor);
-    await this.state.restoreHistory(nextSessionId);
+    try {
+      await this.state.restoreHistory(nextSessionId);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.state.addItem(
+        addError(this.state.getSnapshot().sessionId, "Failed to restore session: " + message),
+      );
+      this.tui.requestRender();
+      return;
+    }
     try {
       await this.state.loadWorkflowSnapshot(nextSessionId);
     } catch {
@@ -2058,18 +3215,209 @@ export class AppScreen implements Component, Focusable {
 
   private updateResumeSearchQuery(query: string): void {
     if (!this.resumeSessionList) return;
-    const filteredItems = filterResumeSessions(this.resumeSessionList.sessions, query);
-    const list = new SelectList(filteredItems, Math.min(Math.max(filteredItems.length, 1), 8), selectListTheme, {
-      minPrimaryColumnWidth: 24,
-      maxPrimaryColumnWidth: 42,
+    const st = this.resumeSessionList;
+    const filteredItems = computeResumeItems(st.sessions, {
+      query,
+      showProject: st.showAllProjects,
+      branchFilter: st.branchFilterEnabled,
+      currentBranch: st.currentBranch,
     });
-    list.onSelect = (item) => void this.handleResumeSessionSelection(item.value);
-    list.onCancel = () => {
-      this.resumeSessionList = null;
-      this.tui.requestRender();
+    this.resumeSessionList = {
+      ...st,
+      list: this.makeResumeSelectList(filteredItems),
+      searchQuery: query,
     };
-    this.resumeSessionList = { ...this.resumeSessionList, list, searchQuery: query };
     this.tui.requestRender();
+  }
+
+  /** 打开选中会话的只读预览（信息卡 + 最新对话）。Space 触发，对齐 Claude Code 的 preview。 */
+  private async openResumeSessionPreview(): Promise<void> {
+    if (!this.resumeSessionList) return;
+    const selected = this.resumeSessionList.list.getSelectedItem();
+    if (!selected) return;
+    const session = this.resumeSessionList.sessions.find(
+      (s) => s.session_id === selected.value,
+    );
+    if (!session) return;
+    // 先设置 preview 状态并标记加载中，显示基本信息
+    this.resumeSessionList = {
+      ...this.resumeSessionList,
+      preview: session,
+      previewMessages: [],
+      previewLoading: true,
+      previewScrollOffset: 0,
+    };
+    this.setMouseTrackingEnabled(true);
+    this.tui.requestRender();
+    // 异步获取预览消息
+    try {
+      const resp = await this.state.request<{ session_id: string; preview_messages: PreviewMessage[] }>(
+        "session.preview",
+        { session_id: session.session_id, count: 30 },
+      );
+      if (this.resumeSessionList && this.resumeSessionList.preview?.session_id === session.session_id) {
+        this.resumeSessionList = {
+          ...this.resumeSessionList,
+          previewMessages: resp.preview_messages ?? [],
+          previewLoading: false,
+        };
+        this.tui.requestRender();
+      }
+    } catch (error) {
+      // 获取失败不影响预览基本信息显示，但需结束加载态
+      console.debug("[openResumeSessionPreview] session.preview failed:", error);
+      if (this.resumeSessionList && this.resumeSessionList.preview?.session_id === session.session_id) {
+        this.resumeSessionList = { ...this.resumeSessionList, previewLoading: false };
+        this.tui.requestRender();
+      }
+    }
+  }
+
+  /** 进入重命名态，初始值取当前标题。Ctrl+R 触发，对齐 Claude Code。 */
+  private openResumeRename(): void {
+    if (!this.resumeSessionList) return;
+    const selected = this.resumeSessionList.list.getSelectedItem();
+    if (!selected) return;
+    const session = this.resumeSessionList.sessions.find(
+      (s) => s.session_id === selected.value,
+    );
+    if (!session) return;
+    this.resumeSessionList = {
+      ...this.resumeSessionList,
+      rename: { sessionId: session.session_id, value: session.title?.trim() ?? "" },
+    };
+    this.tui.requestRender();
+  }
+
+  /** 提交重命名：调用 session.rename 写入标题，成功后就地更新列表并退出重命名态。 */
+  private async submitResumeRename(): Promise<void> {
+    if (!this.resumeSessionList || !this.resumeSessionList.rename) return;
+    const st = this.resumeSessionList;
+    const { sessionId, value } = st.rename!;
+    const title = value.trim();
+    try {
+      const resp = await this.state.request<{ session_id: string; title: string }>(
+        "session.rename",
+        { session_id: sessionId, title },
+      );
+      const newTitle = resp.title ?? title;
+      // 就地更新本地会话标题并重建列表项
+      const sessions = sanitizeSessionList(
+        st.sessions.map((s) =>
+          s.session_id === sessionId ? { ...s, title: newTitle } : s,
+        ),
+      );
+      const items = computeResumeItems(sessions, {
+        query: st.searchQuery,
+        showProject: st.showAllProjects,
+        branchFilter: st.branchFilterEnabled,
+        currentBranch: st.currentBranch,
+      });
+      this.resumeSessionList = {
+        ...st,
+        sessions,
+        list: this.makeResumeSelectList(items),
+        rename: null,
+      };
+      // 若重命名的是当前活动会话，同步终端窗口标题
+      if (sessionId === this.state.getSnapshot().sessionId) {
+        this.state.setSessionTitle(newTitle);
+      }
+      this.tui.requestRender();
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.resumeSessionList = { ...st, rename: null };
+      this.state.addItem(
+        addError(this.state.getSnapshot().sessionId, `rename failed: ${message}`),
+      );
+      this.tui.requestRender();
+    }
+  }
+
+  private buildResumeSessionRenameLines(width: number, session: SessionMeta | undefined, value: string): string[] {
+    const placeholder = session?.title?.trim() || session?.session_id || "";
+    return [
+      padToWidth(palette.status.warning("Rename session"), width),
+      padToWidth(palette.text.dim(session?.session_id ?? ""), width),
+      "",
+      padToWidth(`${palette.text.dim("Title: ")}${palette.text.primary(value)}${END_CURSOR}`, width),
+      value.length === 0
+        ? padToWidth(palette.text.dim(`(current: ${placeholder})`), width)
+        : "",
+      "",
+      padToWidth(palette.text.dim("Enter save · Esc cancel · empty clears title"), width),
+    ].filter((l) => l !== "");
+  }
+
+  private buildResumeSessionPreviewLines(width: number, session: SessionMeta, previewMessages: PreviewMessage[]): string[] {
+    const title = session.title?.trim() || "(untitled)";
+    const project = session.project_dir?.trim() || "-";
+
+    // Build preview message lines: full transcript style, matching Claude Code SessionPreview
+    const messageLines: string[] = [];
+    if (previewMessages.length > 0) {
+      previewMessages.forEach((msg, msgIdx) => {
+        const isUser = msg.role === "user";
+        if (isUser) {
+          const lines = renderStyledMarkdownLines(
+            Math.max(1, width - 2),
+            msg.content,
+            { color: palette.text.dim },
+            0,
+            0,
+          );
+          messageLines.push(...prefixedLines(lines, width, "> ", palette.text.user, "  "));
+        } else {
+          const lines = renderStyledMarkdownLines(
+            width,
+            msg.content,
+            { color: palette.text.assistant },
+            0,
+            0,
+          );
+          messageLines.push(...lines);
+        }
+        if (msgIdx < previewMessages.length - 1) {
+          messageLines.push("");
+        }
+      });
+    } else if (this.resumeSessionList?.previewLoading) {
+      messageLines.push(padToWidth(palette.text.dim("Loading session\u2026"), width));
+    } else {
+      messageLines.push(padToWidth(palette.text.dim("No conversation to preview"), width));
+    }
+
+    // Clip message lines to fit terminal height with scroll offset.
+    // Overhead: 7 header lines + 2 footer lines in this method,
+    // plus ~4 lines for status bar / welcome / transcript in the screen layout.
+    const overhead = 13;
+    const availableHeight = Math.max(3, this.tui.terminal.rows - overhead);
+    let visibleMessages = messageLines;
+    let scrollHint = "";
+    if (messageLines.length > availableHeight) {
+      const maxOffset = messageLines.length - availableHeight;
+      // previewScrollOffset can temporarily exceed maxOffset (pageUp past bounds);
+      // Math.min clamps it here so display is always correct.
+      const offset = Math.min(maxOffset, this.resumeSessionList?.previewScrollOffset ?? 0);
+      // start from the end of the conversation, moving backwards as offset increases
+      const start = messageLines.length - availableHeight - offset;
+      visibleMessages = messageLines.slice(start, start + availableHeight);
+      const pct = Math.round((offset / maxOffset) * 100);
+      scrollHint = `  \u2195 scroll (${pct}%)`;
+    }
+
+    return [
+      padToWidth(palette.status.warning("Session preview"), width),
+      padToWidth(palette.text.primary(title), width),
+      "",
+      padToWidth(`${palette.text.dim("Project:   ")}${palette.text.primary(project)}`, width),
+      "",
+      padToWidth(palette.text.dim("Recent conversation"), width),
+      "",
+      ...visibleMessages,
+      "",
+      padToWidth(palette.text.dim(`Enter resume · Space/Esc back${scrollHint}`), width),
+    ];
   }
 
   private buildStartupPromptLines(width: number): string[] {
@@ -2096,36 +3444,73 @@ export class AppScreen implements Component, Focusable {
     if (!this.resumeSessionList) {
       return [];
     }
+    if (this.resumeSessionList.rename !== null) {
+      const r = this.resumeSessionList.rename;
+      const session = this.resumeSessionList.sessions.find((s) => s.session_id === r.sessionId);
+      return this.buildResumeSessionRenameLines(width, session, r.value);
+    }
+    if (this.resumeSessionList.preview !== null) {
+      return this.buildResumeSessionPreviewLines(width, this.resumeSessionList.preview, this.resumeSessionList.previewMessages);
+    }
+    const showAll = this.resumeSessionList.showAllProjects;
+    const branchOn = this.resumeSessionList.branchFilterEnabled;
+    const scopeLabel = showAll ? "all projects" : "current dir";
+    const projectHint = showAll ? "Ctrl+A to show current dir" : "Ctrl+A to show all projects";
+    const branchHint = branchOn
+      ? `Ctrl+B to show all branches`
+      : `Ctrl+B to filter by branch`;
+    const toggleHint = `${projectHint} · ${branchHint}`;
+    const scopeSuffix = branchOn ? ` · branch:${this.resumeSessionList.currentBranch}` : "";
     const searchBox = this.resumeSessionList.searchQuery
       ? padToWidth(palette.text.primary(`Search: ${this.resumeSessionList.searchQuery}${END_CURSOR}`), width)
-      : padToWidth(palette.text.dim("Type to search · ↑/↓ choose · Enter resume · Esc cancel"), width);
+      : padToWidth(
+          palette.text.dim(`Type to search · ↑/↓ to choose · Enter to resume · Space to preview · Ctrl+R to rename · ${toggleHint} · Esc to cancel`),
+          width,
+        );
+    const st = this.resumeSessionList;
+    const visibleCount = computeResumeItems(st.sessions, {
+      query: st.searchQuery,
+      showProject: st.showAllProjects,
+      branchFilter: st.branchFilterEnabled,
+      currentBranch: st.currentBranch,
+    }).length;
+    const emptyMessage = st.searchQuery
+      ? "No matches"
+      : showAll
+        ? "No sessions found"
+        : "No sessions in current project · press Ctrl+A to search all projects";
+    const listLines =
+      visibleCount === 0
+        ? [padToWidth(palette.text.dim(emptyMessage), width)]
+        : this.resumeSessionList.list.render(width);
     return [
       padToWidth(
-        palette.status.warning(`Resume session (${this.resumeSessionList.total} total)`),
+        palette.status.warning(
+          `Resume session (${this.resumeSessionList.total} total · ${scopeLabel}${scopeSuffix})`,
+        ),
         width,
       ),
       searchBox,
-      ...this.resumeSessionList.list.render(width),
+      ...listLines,
       padToWidth(
         palette.text.dim(
           this.resumeSessionList.searchQuery
-            ? "Backspace delete · Enter resume · Esc clear"
-            : "↑/↓ choose · Enter resume · Esc cancel"
+            ? `Backspace to delete · Enter to resume · Space to preview · Ctrl+R to rename · ${toggleHint} · Esc to clear`
+            : `↑/↓ to choose · Enter to resume · Space to preview · Ctrl+R to rename · ${toggleHint} · Esc to cancel`
         ),
         width,
       ),
     ];
   }
 
-  async openModelList(): Promise<void> {
+  async openModelList(openAction?: "add" | "delete"): Promise<void> {
     const snapshot = this.state.getSnapshot();
     try {
       const payload = await this.state.request<ModelListPayload>("command.model", {});
       const models = payload.available_models ?? [];
       const current = payload.current ?? "unknown";
       if (models.length === 0) {
-        this.modelList = null;
-        this.state.addItem(addInfo(snapshot.sessionId, "No models configured", "m"));
+        this.openEmptyModelList(current, "No models configured");
         return;
       }
 
@@ -2145,20 +3530,23 @@ export class AppScreen implements Component, Focusable {
         );
       }
       if (selectable.length === 0) {
-        this.modelList = null;
-        this.state.addItem(addInfo(snapshot.sessionId, "No switchable models in list", "m"));
+        this.openEmptyModelList(current, "No switchable models");
         return;
       }
 
       const modelsMeta = payload.models ?? [];
-      // 与web端一致：同名模型通过编号区分（如 model_name #1, model_name #2）
-      // 后端 available_models 和 models 位置对齐，用索引匹配而非名称查找
+      // 优先用后端 is_current 标记判断当前模型（同名模型仅靠名字无法区分），
+      // 回退到 name-matching（兼容不带 is_current 的旧后端）
+      const currentIdx = selectableWithOrigIdx.findIndex((entry) => {
+        const meta = modelsMeta[entry.origIdx];
+        return meta?.is_current === true;
+      });
+      const fallbackCurrentIdx = currentIdx < 0 ? selectable.findIndex((m) => m === current) : currentIdx;
       const nameOccurrence: Record<string, number> = {};
-      const currentIdx = selectable.findIndex((m) => m === current);
       const items = selectableWithOrigIdx.map((entry, i) => {
         const m = entry.name;
         const meta = modelsMeta[entry.origIdx];
-        const isCurrent = i === currentIdx;
+        const isCurrent = i === fallbackCurrentIdx;
         const seq = (nameOccurrence[m] ?? 0) + 1;
         nameOccurrence[m] = seq;
         const sameNameTotal = selectable.filter((x) => x === m).length;
@@ -2172,16 +3560,31 @@ export class AppScreen implements Component, Focusable {
         } else {
           displayName = m;
         }
-        const suffix = meta?.api_base && sameNameTotal > 1 ? ` [${meta.api_base}]` : "";
+        // 同名模型显示 api_key_prefix + api_base 作为区分标识
+        const suffixParts: string[] = [];
+        if (sameNameTotal > 1 && meta?.api_key_prefix) {
+          suffixParts.push(`key:${meta.api_key_prefix}…`);
+        }
+        if (sameNameTotal > 1 && meta?.api_base) {
+          suffixParts.push(meta.api_base);
+        }
+        const suffix = suffixParts.length > 0 ? ` [${suffixParts.join(" | ")}]` : "";
+        const provider = meta?.model_provider ? ` · ${meta.model_provider}` : "";
+        const apiBase = meta?.api_base ? ` · ${meta.api_base}` : "";
+        const reasoning = meta?.reasoning_level ? ` · reasoning:${meta.reasoning_level}` : "";
         return {
-          label: `${i + 1}. ${displayName}${suffix}${isCurrent ? " (current)" : ""}`,
-          value: `${m}\x00${entry.origIdx}`,
+          label: `${i + 1}. ${displayName}${isCurrent ? " (current)" : ""}`,
+          description: `${provider}${apiBase}${reasoning}`.replace(/^ · /, ""),
+          value: `${m}${MODEL_VALUE_SEPARATOR}${entry.origIdx}`,
         };
       });
       const list = new SelectList(items, Math.min(Math.max(items.length, 1), 8), selectListTheme, {
         minPrimaryColumnWidth: 24,
         maxPrimaryColumnWidth: 42,
       });
+      if (currentIdx >= 0) {
+        list.setSelectedIndex(currentIdx);
+      }
       list.onSelect = (item) => {
         void this.handleModelSelection(item.value);
       };
@@ -2189,7 +3592,21 @@ export class AppScreen implements Component, Focusable {
         this.modelList = null;
         this.tui.requestRender();
       };
-      this.modelList = { list, models: selectable, current };
+      this.modelList = {
+        phase: "list",
+        list,
+        models: selectable,
+        current,
+        modelsMeta,
+      };
+      if (openAction === "add") {
+        this.openModelInput("add");
+      } else if (openAction === "delete") {
+        const target = this.getSelectedModelTarget();
+        if (target) {
+          this.openModelDeleteConfirm(target);
+        }
+      }
       this.tui.requestRender();
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
@@ -2277,14 +3694,357 @@ export class AppScreen implements Component, Focusable {
     }
   }
 
+  private openEmptyModelList(current: string, emptyMessage: string): void {
+    this.modelList = {
+      phase: "list",
+      list: null,
+      models: [],
+      current,
+      modelsMeta: [],
+      emptyMessage,
+    };
+    this.tui.requestRender();
+  }
+
+  private parseModelValue(modelValue: string): { modelName: string; modelIndex?: number } {
+    const sepIdx = modelValue.indexOf(MODEL_VALUE_SEPARATOR);
+    const modelName = sepIdx >= 0 ? modelValue.substring(0, sepIdx) : modelValue;
+    const modelIndex = sepIdx >= 0 ? parseInt(modelValue.substring(sepIdx + 1), 10) : undefined;
+    return { modelName, modelIndex };
+  }
+
+  private getSelectedModelTarget(): { name: string; index: number; value: string } | null {
+    const selected = this.modelList?.list?.getSelectedItem();
+    if (!selected) return null;
+    const { modelName, modelIndex } = this.parseModelValue(selected.value);
+    if (modelIndex === undefined || isNaN(modelIndex)) return null;
+    return { name: modelName, index: modelIndex, value: selected.value };
+  }
+
+  private createModelForm(mode: "add" | "edit", target?: { index: number }): ModelFormState {
+    const meta = target ? this.modelList?.modelsMeta[target.index] : undefined;
+    const fields: Record<ModelFormField, string> = {
+      model_name: mode === "edit" ? meta?.model_name ?? "" : "",
+      alias: mode === "edit" ? meta?.alias ?? "" : "",
+      api_base: mode === "edit" ? meta?.api_base ?? "" : "",
+      api_key: "",
+      model_provider: mode === "edit"
+        ? meta?.model_provider ?? DEFAULT_MODEL_PROVIDER
+        : DEFAULT_MODEL_PROVIDER,
+      reasoning_level: mode === "edit" ? meta?.reasoning_level ?? "" : "",
+    };
+    return {
+      fields,
+      selectedField: 0,
+      original: { ...fields },
+    };
+  }
+
+  private openModelInput(mode: "add" | "edit", target?: { name: string; index: number }): void {
+    if (!this.modelList) return;
+    this.editor.setText("");
+    this.modelList = {
+      ...this.modelList,
+      phase: "input",
+      inputMode: mode,
+      target,
+      form: this.createModelForm(mode, target),
+    };
+    this.tui.requestRender();
+  }
+
+  private openModelDeleteConfirm(target: { name: string; index: number }): void {
+    if (!this.modelList) return;
+    this.modelList = {
+      ...this.modelList,
+      phase: "delete_confirm",
+      target,
+    };
+    this.tui.requestRender();
+  }
+
+  private returnToModelList(): void {
+    if (!this.modelList) return;
+    this.editor.setText("");
+    this.modelList = {
+      ...this.modelList,
+      phase: "list",
+      inputMode: undefined,
+      target: undefined,
+      form: undefined,
+    };
+    this.tui.requestRender();
+  }
+
+  private handleModelFormInput(data: string): void {
+    const state = this.modelList;
+    const form = state?.form;
+    if (!form) return;
+    state.inputError = undefined;
+    if (matchesKey(data, "up")) {
+      form.selectedField = form.selectedField === 0 ? MODEL_FORM_FIELDS.length - 1 : form.selectedField - 1;
+      return;
+    }
+    if (matchesKey(data, "down") || matchesKey(data, "tab")) {
+      form.selectedField = form.selectedField === MODEL_FORM_FIELDS.length - 1 ? 0 : form.selectedField + 1;
+      return;
+    }
+    const field = MODEL_FORM_FIELDS[form.selectedField];
+    if (field === "reasoning_level" || field === "model_provider") {
+      if (matchesKey(data, "left") || matchesKey(data, "backspace") || matchesKey(data, "delete")) {
+        this.cycleModelFormOption(field, -1);
+        return;
+      }
+      if (matchesKey(data, "right") || matchesKey(data, "space")) {
+        this.cycleModelFormOption(field, 1);
+        return;
+      }
+    }
+    if (matchesKey(data, "backspace") || matchesKey(data, "delete")) {
+      form.fields[field] = form.fields[field].slice(0, -1);
+      return;
+    }
+    if (data === "\x15") {
+      form.fields[field] = "";
+      return;
+    }
+    const printableChar = this.getPrintableChar(data);
+    if (printableChar !== undefined) {
+      form.fields[field] += printableChar;
+    }
+  }
+
+  private cycleModelFormOption(field: "model_provider" | "reasoning_level", direction: -1 | 1): void {
+    const form = this.modelList?.form;
+    if (!form) return;
+    const options = field === "model_provider" ? MODEL_PROVIDER_OPTIONS : REASONING_LEVEL_OPTIONS;
+    const current = form.fields[field].trim();
+    const currentIndex = options.indexOf(current);
+    const nextIndex = currentIndex >= 0
+      ? (currentIndex + direction + options.length) % options.length
+      : 0;
+    form.fields[field] = options[nextIndex];
+  }
+
+  private modelFormConfigForSubmit(state: ModelListState): Record<string, string> {
+    const form = state.form;
+    if (!form) return {};
+    const config: Record<string, string> = {};
+    for (const field of MODEL_FORM_FIELDS) {
+      const value = form.fields[field].trim();
+      const configKey = field === "model_provider" ? "provider" : field;
+      if (state.inputMode === "edit") {
+        if (field === "api_key") {
+          if (value) config[configKey] = value;
+          continue;
+        }
+        if (field === "alias") {
+          if (value !== form.original[field]) config[configKey] = value;
+          continue;
+        }
+        if (value !== form.original[field]) config[configKey] = value;
+      } else if (value) {
+        config[configKey] = value;
+      }
+    }
+    return config;
+  }
+
+  private handleModelListInput(data: string): void {
+    if (!this.modelList) return;
+    if (this.modelList.phase === "input") {
+      if (matchesKey(data, "escape")) {
+        this.returnToModelList();
+        return;
+      }
+      if (matchesKey(data, "return")) {
+        void this.submitModelInput();
+        return;
+      }
+      this.handleModelFormInput(data);
+      return;
+    }
+    if (this.modelList.phase === "delete_confirm") {
+      if (matchesKey(data, "escape")) {
+        this.returnToModelList();
+        return;
+      }
+      if (matchesKey(data, "return")) {
+        void this.submitModelDelete();
+      }
+      return;
+    }
+
+    const lower = data.toLowerCase();
+    if (matchesKey(data, "escape")) {
+      this.modelList = null;
+      return;
+    }
+    if (lower === "a") {
+      this.openModelInput("add");
+      return;
+    }
+    if (matchesKey(data, "return")) {
+      const target = this.getSelectedModelTarget();
+      if (target) {
+        void this.handleModelSelection(target.value);
+      }
+      return;
+    }
+    if (lower === "e") {
+      const target = this.getSelectedModelTarget();
+      if (target) {
+        this.openModelInput("edit", target);
+      }
+      return;
+    }
+    if (lower === "d") {
+      const target = this.getSelectedModelTarget();
+      if (target) {
+        this.openModelDeleteConfirm(target);
+      }
+      return;
+    }
+    this.modelList.list?.handleInput(data);
+  }
+
+  private async submitModelInput(): Promise<void> {
+    const state = this.modelList;
+    if (!state || state.phase !== "input" || !state.inputMode || !state.form) return;
+    state.inputError = undefined;
+    const config = this.modelFormConfigForSubmit(state);
+    const validationError = this.validateModelForm(state);
+    if (validationError) {
+      state.inputError = validationError;
+      this.tui.requestRender();
+      return;
+    }
+    if (state.inputMode === "add") {
+      try {
+        await this.state.request("command.model", {
+          action: "add_model",
+          target: config.model_name,
+          config,
+        });
+        this.state.addItem(addInfo(this.state.getSnapshot().sessionId, `Added model: ${config.alias || config.model_name}`, "m"));
+        await this.state.refreshModelInfo();
+        this.editor.setText("");
+        await this.openModelList();
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        state.inputError = message.startsWith("Failed to add model")
+          ? message
+          : `Failed to add model: ${message}`;
+        this.tui.requestRender();
+      }
+      return;
+    }
+
+    if (!state.target) return;
+    if (Object.keys(config).length === 0) {
+      this.state.addItem(addInfo(this.state.getSnapshot().sessionId, "No model changes", "m"));
+      this.returnToModelList();
+      return;
+    }
+    try {
+      const payload = await this.state.request<{ type?: string }>("command.model", {
+        action: "update_model",
+        index: state.target.index,
+        config,
+      });
+      if (payload.type !== "model_updated") {
+        state.inputError = "Failed to edit model: backend does not support model editing yet. Restart the TUI/backend and try again.";
+        this.tui.requestRender();
+        return;
+      }
+      this.state.addItem(addInfo(this.state.getSnapshot().sessionId, `Updated model: ${state.target.name}`, "m"));
+      await this.state.refreshModelInfo();
+      this.editor.setText("");
+      await this.openModelList();
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      state.inputError = message.startsWith("Failed to edit model")
+        ? message
+        : `Failed to edit model: ${message}`;
+      this.tui.requestRender();
+    }
+  }
+
+  private validateModelForm(state: ModelListState): string | null {
+    const form = state.form;
+    if (!form) return null;
+    const fields = form.fields;
+    const trimmed = {
+      model_name: fields.model_name.trim(),
+      alias: fields.alias.trim(),
+      api_base: fields.api_base.trim(),
+      api_key: fields.api_key.trim(),
+      model_provider: fields.model_provider.trim(),
+      reasoning_level: fields.reasoning_level.trim(),
+    };
+    const missing = MODEL_REQUIRED_FIELDS
+      .filter((field) => !(state.inputMode === "edit" && field === "api_key"))
+      .filter((field) => !trimmed[field]);
+    if (missing.length > 0) {
+      return `Missing: ${missing.join(", ")}`;
+    }
+    if (trimmed.model_name.length > MAX_MODEL_NAME_LENGTH) {
+      return `model_name must be ${MAX_MODEL_NAME_LENGTH} characters or fewer`;
+    }
+    if (trimmed.alias.length > MAX_ALIAS_LENGTH) {
+      return `alias must be ${MAX_ALIAS_LENGTH} characters or fewer`;
+    }
+    if (trimmed.api_base.length > MAX_API_BASE_LENGTH) {
+      return `api_base must be ${MAX_API_BASE_LENGTH} characters or fewer`;
+    }
+    if (trimmed.api_key.length > MAX_API_KEY_LENGTH) {
+      return `api_key must be ${MAX_API_KEY_LENGTH} characters or fewer`;
+    }
+    if (trimmed.api_base && !/^https?:\/\//i.test(trimmed.api_base)) {
+      return "api_base must start with http:// or https://";
+    }
+    if (!MODEL_PROVIDER_OPTIONS.includes(trimmed.model_provider)) {
+      return `model_provider must be one of: ${MODEL_PROVIDER_OPTIONS.join(", ")}`;
+    }
+    if (!REASONING_LEVEL_OPTIONS.includes(trimmed.reasoning_level)) {
+      return "reasoning_level must be default, off, low, medium, or high";
+    }
+    if (trimmed.alias) {
+      const conflict = state.modelsMeta.find((model, index) => {
+        if (state.inputMode === "edit" && index === state.target?.index) return false;
+        return (model.alias || "") === trimmed.alias || model.model_name === trimmed.alias;
+      });
+      if (conflict) {
+        return `Alias '${trimmed.alias}' is already used by model '${conflict.model_name || conflict.name}'`;
+      }
+    }
+    return null;
+  }
+
+  private async submitModelDelete(): Promise<void> {
+    const target = this.modelList?.target;
+    if (!target) return;
+    try {
+      await this.state.request("command.model", {
+        action: "delete_model",
+        index: target.index,
+      });
+      this.state.addItem(addInfo(this.state.getSnapshot().sessionId, `Deleted model: ${target.name}`, "m"));
+      await this.state.refreshModelInfo();
+      await this.openModelList();
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.state.addItem(addError(this.state.getSnapshot().sessionId, `Failed to delete model: ${message}`));
+      this.returnToModelList();
+    }
+  }
+
   private async handleModelSelection(modelValue: string): Promise<void> {
     if (!modelValue) {
       return;
     }
     // Parse "modelName\x00origIdx" format from SelectList (null separator avoids collision with model names)
-    const sepIdx = modelValue.indexOf("\x00");
-    const modelName = sepIdx >= 0 ? modelValue.substring(0, sepIdx) : modelValue;
-    const modelIndex = sepIdx >= 0 ? parseInt(modelValue.substring(sepIdx + 1), 10) : undefined;
+    const { modelName, modelIndex } = this.parseModelValue(modelValue);
 
     if (isReservedMultimodalModelKey(modelName)) {
       this.modelList = null;
@@ -2384,14 +4144,78 @@ export class AppScreen implements Component, Focusable {
     if (!this.modelList) {
       return [];
     }
+    if (this.modelList.phase === "input") {
+      const isAdd = this.modelList.inputMode === "add";
+      const targetName = this.modelList.target?.name ?? "";
+      const title = isAdd ? "Add model" : `Edit model: ${targetName}`;
+      const hint = "  ↑/↓ field · type value · ←/→ option · Ctrl+U clear · Enter save · Esc back";
+      return [
+        padToWidth(palette.status.warning(title), width),
+        padToWidth(palette.text.dim(hint), width),
+        ...this.buildModelFormLines(width),
+      ];
+    }
+    if (this.modelList.phase === "delete_confirm") {
+      return [
+        padToWidth(palette.status.error(`Delete model: ${this.modelList.target?.name ?? "unknown"}`), width),
+        padToWidth(palette.text.dim("Enter confirm · Esc cancel"), width),
+      ];
+    }
+    const listLines = this.modelList.list
+      ? this.modelList.list.render(width)
+      : [padToWidth(palette.text.dim(this.modelList.emptyMessage ?? "No models configured"), width)];
+    const hint = this.modelList.models.length > 0
+      ? "↑/↓ choose · Enter switch · a add · e edit · d delete · Esc close"
+      : "a add · Esc close";
     return [
       padToWidth(
         palette.status.warning(`Available models (${this.modelList.models.length} total)`),
         width,
       ),
-      ...this.modelList.list.render(width),
-      padToWidth(palette.text.dim("choose model · Enter switch · Esc cancel"), width),
+      ...listLines,
+      padToWidth(palette.text.dim(hint), width),
     ];
+  }
+
+  private buildModelFormLines(width: number): string[] {
+    const state = this.modelList;
+    const form = state?.form;
+    if (!state || !form) return [];
+    const activeField = MODEL_FORM_FIELDS[form.selectedField];
+    const activeValue = this.formatModelFormValue(activeField, form.fields[activeField], state.inputMode);
+    const activeHint = activeField === "reasoning_level"
+      ? "    ←/→ default, off, low, medium, high"
+      : activeField === "model_provider"
+        ? `    ←/→ ${MODEL_PROVIDER_OPTIONS.join(", ")}`
+        : "";
+    const lines = [
+      padToWidth(`${palette.text.primary(`${activeField}: ${activeValue}${END_CURSOR}`)}${palette.text.dim(activeHint)}`, width),
+    ];
+    if (state.inputError) {
+      lines.push(padToWidth(palette.status.error(`! ${state.inputError}`), width));
+    }
+    for (const [index, field] of MODEL_FORM_FIELDS.entries()) {
+      const selected = index === form.selectedField;
+      const required = MODEL_REQUIRED_FIELDS.includes(field) && !(state.inputMode === "edit" && field === "api_key");
+      const label = `${selected ? "> " : "  "}${field}${required ? " *" : ""}`;
+      const value = this.formatModelFormValue(field, form.fields[field], state.inputMode);
+      const line = `${label.padEnd(24, " ")}${value}`;
+      lines.push(padToWidth(selected ? palette.text.primary(line) : palette.text.dim(line), width));
+    }
+    return lines;
+  }
+
+  private formatModelFormValue(field: ModelFormField, rawValue: string, mode?: "add" | "edit"): string {
+    if (field === "reasoning_level" && !rawValue) {
+      return "<default>";
+    }
+    if (field !== "api_key") {
+      return rawValue;
+    }
+    if (rawValue) {
+      return "*".repeat(Math.min(rawValue.length, 12));
+    }
+    return mode === "edit" ? "<unchanged>" : "";
   }
 
   private buildToolSelectorLines(width: number): string[] {
@@ -2411,7 +4235,7 @@ export class AppScreen implements Component, Focusable {
       }
 
       const selectItems: SelectItem[] = items.map((x) => ({
-        label: `${x.name} | ${x.transport}${x.enabled ? " · ✔ enabled" : " · ◯ disabled"}`,
+        label: `${x.name} | ${x.transport}${x.enabled ? " · ✔ enabled" : " · ○ disabled"}`,
         value: x.name,
       }));
       const list = new SelectList(
@@ -2539,7 +4363,7 @@ export class AppScreen implements Component, Focusable {
 
     // Detail fields
     boxedLines.push(padToWidth(
-      `  Status: ${enabled ? palette.status.success("✔ enabled") : palette.text.dim("◯ disabled")}`,
+      `  Status: ${enabled ? palette.status.success("✔ enabled") : palette.text.dim("○ disabled")}`,
       contentWidth,
     ));
     if (info.transport) {
@@ -2756,7 +4580,14 @@ export class AppScreen implements Component, Focusable {
   }
 
   private async openSwarmWorkflowsView(): Promise<void> {
-    this.swarmWorkflowsViewState = this.buildSwarmWorkflowsListState(true);
+    const selectedWorkflowId =
+      this.swarmWorkflowsViewState?.phase === "list"
+        ? this.swarmWorkflowsViewState.list.getSelectedItem()?.value
+        : this.swarmWorkflowsViewState?.phase === "workflow" ||
+            this.swarmWorkflowsViewState?.phase === "agent"
+          ? this.swarmWorkflowsViewState.workflowId
+          : undefined;
+    this.swarmWorkflowsViewState = this.buildSwarmWorkflowsListState(true, selectedWorkflowId);
     this.tui.requestRender();
     try {
       await this.state.loadWorkflowSnapshot();
@@ -2766,7 +4597,7 @@ export class AppScreen implements Component, Focusable {
         addError(this.state.getSnapshot().sessionId, `workflow list failed: ${message}`),
       );
     }
-    this.swarmWorkflowsViewState = this.buildSwarmWorkflowsListState(false);
+    this.swarmWorkflowsViewState = this.buildSwarmWorkflowsListState(false, selectedWorkflowId);
     this.tui.requestRender();
   }
 
@@ -2786,14 +4617,20 @@ export class AppScreen implements Component, Focusable {
     const current = this.swarmWorkflowsViewState;
     if (!current) return;
     if (current.phase === "list") {
-      this.swarmWorkflowsViewState = this.buildSwarmWorkflowsListState();
+      this.swarmWorkflowsViewState = this.buildSwarmWorkflowsListState(
+        false,
+        current.list.getSelectedItem()?.value,
+      );
       return;
     }
     if (current.phase === "workflow") {
+      const selectedAgentId =
+        current.focus === "agents" ? current.agentList.getSelectedItem()?.value : undefined;
       this.swarmWorkflowsViewState = this.buildSwarmWorkflowDetailState(
         current.workflowId,
         current.selectedPhaseId,
         current.focus,
+        selectedAgentId,
       );
       return;
     }
@@ -2803,7 +4640,7 @@ export class AppScreen implements Component, Focusable {
       current.agentId,
     );
     if (!lookup) {
-      this.swarmWorkflowsViewState = this.buildSwarmWorkflowsListState();
+      this.swarmWorkflowsViewState = this.buildSwarmWorkflowsListState(false, current.workflowId);
     } else {
       this.swarmWorkflowsViewState = {
         phase: "agent",
@@ -2813,7 +4650,10 @@ export class AppScreen implements Component, Focusable {
     }
   }
 
-  private buildSwarmWorkflowsListState(loading = false): SwarmWorkflowsViewState {
+  private buildSwarmWorkflowsListState(
+    loading = false,
+    selectedWorkflowId?: string,
+  ): SwarmWorkflowsViewState {
     const workflows = this.state.getSnapshot().workflowRuns;
     const items: SelectItem[] = workflows.map((workflow) => {
       const total = workflow.agent_count ?? countWorkflowAgents(workflow);
@@ -2829,6 +4669,12 @@ export class AppScreen implements Component, Focusable {
       minPrimaryColumnWidth: 24,
       maxPrimaryColumnWidth: 42,
     });
+    const selectedWorkflowIndex = selectedWorkflowId
+      ? items.findIndex((workflow) => workflow.value === selectedWorkflowId)
+      : -1;
+    if (selectedWorkflowIndex >= 0) {
+      list.setSelectedIndex(selectedWorkflowIndex);
+    }
     list.onSelect = (item) => {
       this.swarmWorkflowsViewState = this.buildSwarmWorkflowDetailState(item.value);
       this.tui.requestRender();
@@ -2843,9 +4689,10 @@ export class AppScreen implements Component, Focusable {
     workflowId: string,
     selectedPhaseId?: string,
     focus: "phases" | "agents" = "phases",
+    selectedAgentId?: string,
   ): SwarmWorkflowsViewState {
     const workflow = this.state.getSnapshot().workflowRuns.find((item) => item.id === workflowId);
-    if (!workflow) return this.buildSwarmWorkflowsListState();
+    if (!workflow) return this.buildSwarmWorkflowsListState(false, workflowId);
     const selectedPhaseIndex = Math.max(
       0,
       workflow.phases.findIndex((phase) => phase.id === selectedPhaseId),
@@ -2857,10 +4704,9 @@ export class AppScreen implements Component, Focusable {
       const phaseCompleted =
         phase.completed_agent_count ??
         phase.agents.filter((agent) => agent.status === "completed").length;
-      const selectedMark = phase.id === activePhaseId ? palette.text.accent("•") : " ";
       return {
         value: phase.id,
-        label: `${selectedMark} ${formatWorkflowStatus(phase.status)} ${phase.name}`,
+        label: `${formatWorkflowStatus(phase.status)} ${phase.name}`,
         description: `${phaseCompleted}/${phaseTotal}`,
       };
     });
@@ -2891,7 +4737,7 @@ export class AppScreen implements Component, Focusable {
       this.tui.requestRender();
     };
     phaseList.onCancel = () => {
-      this.swarmWorkflowsViewState = this.buildSwarmWorkflowsListState();
+      this.swarmWorkflowsViewState = this.buildSwarmWorkflowsListState(false, workflowId);
       this.tui.requestRender();
     };
 
@@ -2909,6 +4755,11 @@ export class AppScreen implements Component, Focusable {
         maxPrimaryColumnWidth: 44,
       },
     );
+    const selectedAgentIndex = Math.max(
+      0,
+      agentItems.findIndex((agent) => agent.value === selectedAgentId),
+    );
+    agentList.setSelectedIndex(selectedAgentIndex);
     agentList.onSelect = (item) => {
       this.swarmWorkflowsViewState = {
         phase: "agent",
@@ -2938,11 +4789,12 @@ export class AppScreen implements Component, Focusable {
   private handleSwarmWorkflowsInput(data: string): void {
     const state = this.swarmWorkflowsViewState;
     if (!state) return;
-    if (matchesKey(data, "escape")) {
+    const action = resolveAction("SwarmWorkflows", data);
+    if (action === "swarm:back") {
       if (state.phase === "list") {
         this.closeSwarmWorkflowsView();
       } else if (state.phase === "workflow") {
-        this.swarmWorkflowsViewState = this.buildSwarmWorkflowsListState();
+        this.swarmWorkflowsViewState = this.buildSwarmWorkflowsListState(false, state.workflowId);
       } else {
         const lookup = findWorkflowAgent(
           this.state.getSnapshot().workflowRuns,
@@ -2953,12 +4805,13 @@ export class AppScreen implements Component, Focusable {
           state.workflowId,
           lookup?.phase.id,
           "agents",
+          state.agentId,
         );
       }
       this.tui.requestRender();
       return;
     }
-    if (matchesKey(data, "left")) {
+    if (action === "swarm:left") {
       if (state.phase === "agent") {
         const lookup = findWorkflowAgent(
           this.state.getSnapshot().workflowRuns,
@@ -2969,17 +4822,23 @@ export class AppScreen implements Component, Focusable {
           state.workflowId,
           lookup?.phase.id,
           "agents",
+          state.agentId,
         );
       } else if (state.phase === "workflow") {
         this.swarmWorkflowsViewState =
           state.focus === "agents"
-            ? this.buildSwarmWorkflowDetailState(state.workflowId, state.selectedPhaseId, "phases")
-            : this.buildSwarmWorkflowsListState();
+            ? this.buildSwarmWorkflowDetailState(
+                state.workflowId,
+                state.selectedPhaseId,
+                "phases",
+                state.agentList.getSelectedItem()?.value,
+              )
+            : this.buildSwarmWorkflowsListState(false, state.workflowId);
       }
       this.tui.requestRender();
       return;
     }
-    if (state.phase === "workflow" && (matchesKey(data, "right") || data === "\t")) {
+    if (state.phase === "workflow" && action === "swarm:nextFocus") {
       const nextFocus = state.focus === "phases" ? "agents" : "phases";
       this.swarmWorkflowsViewState = this.buildSwarmWorkflowDetailState(
         state.workflowId,
@@ -2989,7 +4848,25 @@ export class AppScreen implements Component, Focusable {
       this.tui.requestRender();
       return;
     }
-    if (matchesKey(data, "r")) {
+    if (state.phase === "workflow" && action === "swarm:logs") {
+      this.openSwarmWorkflowLogs(state.workflowId);
+      return;
+    }
+    if (state.phase === "agent") {
+      if (action === "swarm:viewPrompt") {
+        this.openSwarmWorkflowAgentText(state.workflowId, state.agentId, "prompt");
+        return;
+      }
+      if (action === "swarm:viewOutcome") {
+        this.openSwarmWorkflowAgentText(state.workflowId, state.agentId, "outcome");
+        return;
+      }
+      if (action === "swarm:viewError") {
+        this.openSwarmWorkflowAgentText(state.workflowId, state.agentId, "error");
+        return;
+      }
+    }
+    if (action === "swarm:refresh") {
       void this.openSwarmWorkflowsView();
       this.tui.requestRender();
       return;
@@ -3006,6 +4883,32 @@ export class AppScreen implements Component, Focusable {
     }
   }
 
+  private openSwarmWorkflowLogs(workflowId: string): void {
+    const workflow = this.state
+      .getSnapshot()
+      .workflowRuns.find((item) => item.id === workflowId);
+    if (!workflow) return;
+    const logs = (workflow.logs ?? []).filter((log) => log.trim().length > 0);
+    this.enterFileViewer(
+      logs.length > 0 ? logs.join("\n") : "No logs",
+      `Workflow logs - ${workflow.name}`,
+      workflow.id,
+    );
+  }
+
+  private openSwarmWorkflowAgentText(
+    workflowId: string,
+    agentId: string,
+    field: "prompt" | "outcome" | "error",
+  ): void {
+    const lookup = findWorkflowAgent(this.state.getSnapshot().workflowRuns, workflowId, agentId);
+    if (!lookup) return;
+    const value = lookup.agent[field];
+    if (!value) return;
+    const label = field.charAt(0).toUpperCase() + field.slice(1);
+    this.enterFileViewer(value, `${label} - ${lookup.agent.name}`, lookup.workflow.name);
+  }
+
   private buildSwarmWorkflowsLines(width: number): string[] {
     const state = this.swarmWorkflowsViewState;
     if (!state) return [];
@@ -3019,18 +4922,39 @@ export class AppScreen implements Component, Focusable {
   }
 
   private buildWorkflowRuntimeLines(width: number): string[] {
-    const workflow = this.state
+    const runningWorkflows = this.state
       .getSnapshot()
-      .workflowRuns.find((item) => item.status === "running");
-    if (!workflow) return [];
-    const spinner = ["◐", "◓", "◑", "◒"][this.animationPhase % 4]!;
-    const elapsed = formatWorkflowElapsed(Date.parse(workflow.started_at ?? "") || Date.now());
-    return [
+      .workflowRuns.filter((item) => item.status === "running");
+    if (runningWorkflows.length === 0) return [];
+    const spinner = palette.status.warning(["◐", "◓", "◑", "◒"][this.animationPhase % 4]!);
+
+    const renderRow = (workflow: WorkflowRun, prefix: string): string =>
       padToWidth(
-        `${palette.status.warning(spinner)} ${palette.text.assistant(`Workflow ${workflow.name} running...`)} ${palette.text.dim(`(${elapsed})`)}`,
+        `${prefix}${palette.text.dim(workflow.name)} ${palette.text.dim(formatWorkflowTimingText(workflow))}`,
+        width,
+      );
+
+    if (runningWorkflows.length === 1) {
+      const workflow = runningWorkflows[0]!;
+      return [
+        padToWidth(
+          `${spinner} ${palette.text.assistant(runningWorkflowsBannerText(1))}`,
+          width,
+        ),
+        renderRow(workflow, "  "),
+      ];
+    }
+
+    const lines = [
+      padToWidth(
+        `${spinner} ${palette.text.assistant(runningWorkflowsBannerText(runningWorkflows.length))}`,
         width,
       ),
     ];
+    for (const workflow of runningWorkflows) {
+      lines.push(renderRow(workflow, "  "));
+    }
+    return lines;
   }
 
   private buildSwarmWorkflowsListLines(
@@ -3072,17 +4996,35 @@ export class AppScreen implements Component, Focusable {
     if (!workflow) return [padToWidth(palette.status.error("Workflow not found"), width)];
     const total = workflow.agent_count ?? countWorkflowAgents(workflow);
     const completed = workflow.completed_agent_count ?? countCompletedWorkflowAgents(workflow);
+    const statusBanner = workflowStatusBannerText(workflow.status);
     const selectedPhase =
       workflow.phases.find((phase) => phase.id === state.selectedPhaseId) ?? workflow.phases[0];
+    const workflowSummary = workflow.summary.trim();
+    const summaryLines =
+      workflowSummary.length > 0 && workflowSummary !== workflow.name.trim()
+        ? wrapPlainText(workflowSummary, width).map((line) =>
+            padToWidth(palette.text.dim(line), width),
+          )
+        : [];
     const lines: string[] = [
       padToWidth(palette.text.accent(workflow.name), width),
-      ...wrapPlainText(workflow.summary, width).map((line) =>
-        padToWidth(palette.text.dim(line), width),
-      ),
+      ...summaryLines,
       padToWidth(
         `${formatWorkflowStatus(workflow.status)} ${palette.text.dim(`· ${completed}/${total} agents`)}`,
         width,
       ),
+      padToWidth(palette.text.dim(formatWorkflowTimingText(workflow)), width),
+      ...(workflow.status === "failed" && workflow.error
+        ? wrapPlainText(workflow.error, width).map((line) =>
+            padToWidth(palette.status.error(line), width),
+          )
+        : []),
+      ...(statusBanner
+        ? [padToWidth(workflowStatusTone(workflow.status)(statusBanner), width)]
+        : []),
+      "",
+      padToWidth(palette.text.secondary("Logs"), width),
+      ...this.renderSwarmWorkflowLogRows(workflow, width),
       "",
       padToWidth(
         state.focus === "phases" ? palette.text.accent("Phases") : palette.text.secondary("Phases"),
@@ -3109,7 +5051,7 @@ export class AppScreen implements Component, Focusable {
     } else if (selectedPhase) {
       lines.push(
         ...this.renderSwarmWorkflowAgentRows(
-          selectedPhase.agents,
+          selectedPhase.agents ?? [],
           width,
           SWARM_WORKFLOW_AGENT_PREVIEW_LIMIT,
         ),
@@ -3117,6 +5059,7 @@ export class AppScreen implements Component, Focusable {
     } else {
       lines.push(padToWidth(palette.text.dim("No agents"), width));
     }
+    lines.push(padToWidth(palette.text.dim("press l to see full logs"), width));
     lines.push(
       padToWidth(
         palette.text.dim(
@@ -3128,6 +5071,23 @@ export class AppScreen implements Component, Focusable {
       ),
     );
     return lines;
+  }
+
+  private renderSwarmWorkflowLogRows(workflow: WorkflowRun, width: number): string[] {
+    const logs = (workflow.logs ?? []).filter((log) => log.trim().length > 0);
+    if (logs.length === 0) return [padToWidth(palette.text.dim("No logs"), width)];
+    const rows = logs.flatMap((log) =>
+      wrapPlainText(`  ${log}`, width).map((line) => padToWidth(palette.text.dim(line), width)),
+    );
+    if (rows.length <= SWARM_WORKFLOW_LOG_PREVIEW_ROWS) return rows;
+    const visibleRows = rows.slice(-(SWARM_WORKFLOW_LOG_PREVIEW_ROWS - 1));
+    return [
+      padToWidth(
+        palette.text.dim(`  ... ${rows.length - visibleRows.length} earlier log lines`),
+        width,
+      ),
+      ...visibleRows,
+    ];
   }
 
   private renderSwarmWorkflowPhaseRows(
@@ -3185,6 +5145,7 @@ export class AppScreen implements Component, Focusable {
     );
     if (!lookup) return [padToWidth(palette.status.error("Agent not found"), width)];
     const { workflow, phase, agent } = lookup;
+    const duration = formatWorkflowDuration(agent.duration_ms);
     const lines: string[] = [
       padToWidth(palette.text.accent(agent.name), width),
       padToWidth(palette.text.dim(`${workflow.name} · ${phase.name}`), width),
@@ -3194,7 +5155,10 @@ export class AppScreen implements Component, Focusable {
       ),
       "",
     ];
-    this.appendLabeledWrappedLines(lines, width, "Prompt", agent.prompt);
+    if (duration) {
+      lines.splice(3, 0, padToWidth(palette.text.dim(`duration ${duration}`), width));
+    }
+    this.appendLabeledWrappedPreview(lines, width, "Prompt", agent.prompt, "p");
     if (agent.activity?.length) {
       lines.push(padToWidth(palette.text.secondary("Activity"), width));
       for (const item of agent.activity) {
@@ -3207,17 +5171,21 @@ export class AppScreen implements Component, Focusable {
       }
       lines.push("");
     }
-    this.appendLabeledWrappedLines(lines, width, "Outcome", agent.outcome);
-    this.appendLabeledWrappedLines(lines, width, "Error", agent.error, true);
+    this.appendLabeledWrappedPreview(lines, width, "Outcome", agent.outcome, "o");
+    this.appendLabeledWrappedPreview(lines, width, "Error", agent.error, "e", true);
+    lines.push(
+      padToWidth(palette.text.dim("press p to see full prompt - o outcome - e error"), width),
+    );
     lines.push(padToWidth(palette.text.dim("Esc/← back"), width));
     return lines;
   }
 
-  private appendLabeledWrappedLines(
+  private appendLabeledWrappedPreview(
     lines: string[],
     width: number,
     label: string,
     value?: string,
+    fullViewKey?: string,
     error = false,
   ): void {
     if (!value) return;
@@ -3225,14 +5193,28 @@ export class AppScreen implements Component, Focusable {
       padToWidth(error ? palette.status.error(label) : palette.text.secondary(label), width),
     );
     const color = error ? palette.status.error : palette.text.dim;
-    lines.push(...wrapPlainText(value, width).map((line) => padToWidth(color(line), width)));
+    const wrapped = wrapPlainText(value, width);
+    const visible = wrapped.slice(0, SWARM_WORKFLOW_AGENT_TEXT_PREVIEW_ROWS);
+    lines.push(...visible.map((line) => padToWidth(color(line), width)));
+    if (wrapped.length > visible.length) {
+      const keyHint = fullViewKey
+        ? ` - press ${fullViewKey} to see full ${label.toLowerCase()}`
+        : "";
+      lines.push(
+        padToWidth(
+          palette.text.dim(`... ${wrapped.length - visible.length} more lines${keyHint}`),
+          width,
+        ),
+      );
+    }
     lines.push("");
   }
 
   private buildOutgoingMessage(text: string): { content: string; attachments: FileAttachment[] } {
+    const expandedText = this.expandPastedText(text);
     return {
-      content: text.replace(/[ \t]{2,}/g, " ").replace(/[ \t]+\n/g, "\n").trim(),
-      attachments: this.collectComposerAttachments(text),
+      content: this.expandPastedText(text.replace(/[ \t]{2,}/g, " ").replace(/[ \t]+\n/g, "\n").trim()),
+      attachments: this.collectComposerAttachments(expandedText),
     };
   }
 
@@ -3252,12 +5234,16 @@ export class AppScreen implements Component, Focusable {
           const newQuery = state.searchQuery.slice(0, -1);
           this.updateConfigSearchQuery(newQuery);
         } else if (matchesKey(data, "escape")) {
-          // Layered ESC: clear search query first, then exit search mode
+          // Layered ESC: clear search query first; once the query is empty, a
+          // second ESC exits the editor entirely (back to StatusView config tab
+          // when invoked from /status, or closed when invoked via /config).
+          // We must NOT burn an ESC just to flip searchMode true→false while
+          // staying on the search_list — that is what forced the extra ESC.
           if (state.searchQuery) {
             this.updateConfigSearchQuery("");
             this.configEditorState = { ...this.configEditorState!, searchMode: false };
           } else {
-            this.configEditorState = { ...this.configEditorState!, searchMode: false };
+            this.closeConfigEditor();
           }
         } else if (matchesKey(data, "return") || matchesKey(data, "space")) {
           const selectedItem = state.list.getSelectedItem();
@@ -4042,6 +6028,35 @@ export class AppScreen implements Component, Focusable {
     this.tui.requestRender();
   }
 
+  private clearPastedTextState(): void {
+    this.cancelPastedTextStateClear();
+    this.pastedTextById.clear();
+    this.pastedTextIdByContent.clear();
+    this.nextPastedTextId = 1;
+  }
+
+  private cancelPastedTextStateClear(): void {
+    if (!this.pastedTextClearTimer) {
+      return;
+    }
+    clearTimeout(this.pastedTextClearTimer);
+    this.pastedTextClearTimer = null;
+  }
+
+  private schedulePastedTextStateClear(): void {
+    if (this.pastedTextClearTimer) {
+      clearTimeout(this.pastedTextClearTimer);
+    }
+    // Editor clears text and emits onChange("") before onSubmit(value), so keep paste data for that submit.
+    this.pastedTextClearTimer = setTimeout(() => {
+      this.clearPastedTextState();
+    }, 0);
+  }
+
+  private expandPastedText(text: string): string {
+    return expandPastedTextMarkers(text, this.pastedTextById);
+  }
+
   private syncComposerAttachmentsFromEditor(): void {
     if (this.syncingComposerInput) {
       return;
@@ -4110,7 +6125,7 @@ export class AppScreen implements Component, Focusable {
     }
 
     try {
-      const stats = statSync(path);
+      const stats = fs.statSync(path);
       if (!stats.isFile()) {
         return false;
       }
@@ -4122,6 +6137,25 @@ export class AppScreen implements Component, Focusable {
 
   private isComposerImageFile(path: string): boolean {
     return this.isAcceptedAttachment(path) && isImageAttachment(path);
+  }
+
+  private handlePastedTextCollapse(text: string): boolean {
+    const normalizedText = normalizePastedText(text);
+    if (!shouldCollapsePastedText(normalizedText)) {
+      return false;
+    }
+
+    let pasteId = this.pastedTextIdByContent.get(normalizedText);
+    if (!pasteId) {
+      pasteId = this.nextPastedTextId;
+      this.nextPastedTextId += 1;
+      this.pastedTextIdByContent.set(normalizedText, pasteId);
+      this.pastedTextById.set(pasteId, normalizedText);
+    }
+
+    this.editor.insertTextAtCursor(formatPastedTextMarker(pasteId, normalizedText));
+    this.tui.requestRender();
+    return true;
   }
 
   /** Handle pasted/dragged content - detects file paths and converts to @path references. */
@@ -4153,9 +6187,13 @@ export class AppScreen implements Component, Focusable {
       snapshot.teamMemberEvents,
       snapshot.teamMessageEvents,
     );
-    const runningWorkflow = snapshot.workflowRuns.find((workflow) => workflow.status === "running");
+    const runningWorkflows = snapshot.workflowRuns.filter(
+      (workflow) => workflow.status === "running",
+    );
+    const hasRunningWorkflow = runningWorkflows.length > 0;
+    const runningWorkflow = runningWorkflows[0];
     const shouldAnimate =
-      !snapshot.isInterrupted && (snapshot.isProcessing || hasRunningTools || teamWorking || Boolean(runningWorkflow));
+      !snapshot.isInterrupted && (snapshot.isProcessing || hasRunningTools || teamWorking || hasRunningWorkflow);
     if (!shouldAnimate) {
       const nowMs = Date.now();
       if (this.runningStoppedAtMs === null) {
@@ -4184,9 +6222,12 @@ export class AppScreen implements Component, Focusable {
       }
     } else if (teamWorking) {
       this.runningStartedAtMs = teamStartedAt ?? this.runningStartedAtMs ?? Date.now();
-    } else if (runningWorkflow) {
-      this.runningStartedAtMs =
-        Date.parse(runningWorkflow.started_at ?? "") || this.runningStartedAtMs || Date.now();
+    } else if (hasRunningWorkflow) {
+      const earliestStartedAt = runningWorkflows.reduce((earliest, workflow) => {
+        const startedAt = Date.parse(workflow.started_at ?? "") || Date.now();
+        return startedAt < earliest ? startedAt : earliest;
+      }, Date.now());
+      this.runningStartedAtMs = earliestStartedAt || this.runningStartedAtMs || Date.now();
     }
     this.runningStoppedAtMs = null;
     if (this.animationTimer) {
@@ -4347,17 +6388,20 @@ export class AppScreen implements Component, Focusable {
         getCurrentCwd() || process.cwd(),
         resolveFdBinary(),
       ),
+      getCurrentCwd() || process.cwd(),
     );
   }
 
   private buildSlashCommands(): TuiSlashCommand[] {
     const hasAnyCompletion = (cmd: SlashCommand): boolean =>
       !!cmd.completion || (cmd.subCommands?.some(hasAnyCompletion) ?? false);
-    return this.commands.getAll().map((command) => ({
-      name: command.name,
-      description: command.description,
-      getArgumentCompletions: hasAnyCompletion(command)
-        ? async (argumentPrefix: string): Promise<AutocompleteItem[] | null> => {
+    const result: TuiSlashCommand[] = [];
+    for (const command of this.commands.getAll()) {
+      result.push({
+        name: command.name,
+        description: command.description,
+        getArgumentCompletions: hasAnyCompletion(command)
+          ? async (argumentPrefix: string): Promise<AutocompleteItem[] | null> => {
             const trimmed = argumentPrefix.trim();
             // Traverse subcommand chain to find the deepest command with completion
             let currentCommand: typeof command = command;
@@ -4459,7 +6503,9 @@ export class AppScreen implements Component, Focusable {
             return null;
           }
         : undefined,
-    }));
+      });
+    }
+    return result;
   }
 
   private buildPendingQuestionLines(
@@ -4479,19 +6525,34 @@ export class AppScreen implements Component, Focusable {
 
     const total = pendingQuestion.questions.length;
     const progress = total > 1 ? ` (${this.activeQuestionIndex + 1}/${total})` : "";
-    const permissionRequest = isPermissionRequest(pendingQuestion.source, question.question);
+    const planApprovalRequest = isPlanApprovalRequest(
+      pendingQuestion.source,
+      pendingQuestion.planApprovalKind,
+    );
+    const permissionRequest = !planApprovalRequest &&
+      isPermissionRequest(pendingQuestion.source, question.question);
     const lines: string[] = [];
 
-    if (permissionRequest) {
+    if (planApprovalRequest && !this.otherInputMode) {
+      const title = getPendingQuestionTitle(
+        pendingQuestion.source,
+        progress,
+        this.activeQuestionIndex,
+        total,
+        pendingQuestion.planApprovalKind,
+      );
+      lines.push(
+        ...wrapPlainText(title, width).map((line) => padToWidth(palette.status.warning(line), width)),
+      );
+    } else if (permissionRequest && !this.otherInputMode) {
       const summary = parsePermissionSummary(question.question);
-      const title =
-        pendingQuestion.source === "confirm_interrupt"
-          ? progress
-            ? `Confirm ${this.activeQuestionIndex + 1}/${total}`
-            : "Confirm action"
-          : progress
-            ? `Permission ${this.activeQuestionIndex + 1}/${total}`
-            : "Permission";
+      const title = getPendingQuestionTitle(
+        pendingQuestion.source,
+        progress,
+        this.activeQuestionIndex,
+        total,
+        pendingQuestion.planApprovalKind,
+      );
       lines.push(...renderPermissionBlock(width, summary, title));
     } else if (this.otherInputMode) {
       lines.push(
@@ -4509,12 +6570,20 @@ export class AppScreen implements Component, Focusable {
       }
       lines.push("");
       lines.push(
-        ...wrapPlainText(
-          `[Answer] Please enter your answer:`,
-          width,
-        ).map((line) => padToWidth(palette.status.info(line), width)),
+        ...wrapPlainText(`[Answer] Please enter your answer:`, width).map((line) =>
+          padToWidth(palette.status.info(line), width),
+        ),
       );
-      lines.push(padToWidth(palette.text.dim("Type your answer · Enter submit · Esc back to options"), width));
+      lines.push(
+        padToWidth(
+          palette.text.dim(
+            planApprovalRequest
+              ? "tell jiuwenswarm what to change · Enter submit · Esc back to options"
+              : "Type your answer · Enter submit · Esc back to options",
+          ),
+          width,
+        ),
+      );
     } else {
       lines.push(
         ...wrapPlainText(
@@ -4561,7 +6630,9 @@ export class AppScreen implements Component, Focusable {
         padToWidth(
           palette.text.dim(
             permissionRequest
-              ? "↑/↓ review · Enter/click confirm · Esc reject"
+              ? planApprovalRequest
+                ? "↑/↓ review · Type feedback on Reject · Enter/click confirm"
+                : "↑/↓ review · Enter/click confirm · Esc reject"
               : "↑/↓ choose · Enter/click confirm · Esc reject",
           ),
           width,
@@ -4582,16 +6653,33 @@ export class AppScreen implements Component, Focusable {
       return false;
     }
 
-    const mouse = parseSgrMouseRelease(data);
-    if (mouse?.button === 0 && this.questionList !== null) {
-      const hit = this.questionOptionRows.find((entry) => entry.row === mouse.row);
-      if (hit) {
-        this.handleQuestionSelection(hit.value);
+    if (this.questionList !== null) {
+      const question =
+        snapshot.pendingQuestion.questions[this.activeQuestionIndex] ??
+        snapshot.pendingQuestion.questions[0];
+      const selected = this.questionList.getSelectedItem();
+      const editingPlanReject = !!question &&
+        !!selected &&
+        shouldAppendPlanRejectFeedback(
+          snapshot.pendingQuestion.source,
+          selected.value,
+          snapshot.pendingQuestion.planApprovalKind,
+        );
+      const printableChar = this.getPrintableChar(data);
+      if (
+        editingPlanReject &&
+        (printableChar !== undefined ||
+          matchesKey(data, "backspace") ||
+          matchesKey(data, "delete") ||
+          this.isInlinePlanRejectCursorInput(data))
+      ) {
+        this.pendingQuestionAnswers.set(this.activeQuestionIndex, selected.value);
+        this.editor.handleInput(data);
+        this.syncQuestionList(this.state.getSnapshot());
+        this.syncEditorSubmitState(this.state.getSnapshot());
+        this.tui.requestRender();
         return true;
       }
-    }
-
-    if (this.questionList !== null) {
       this.questionList.handleInput(data);
       return true;
     }
@@ -4627,15 +6715,31 @@ export class AppScreen implements Component, Focusable {
       return;
     }
 
-    for (const option of question.options) {
-      const displayLabel = normalizePermissionOptionLabel(option.label);
+    const planApprovalRequest = isPlanApprovalRequest(
+      snapshot.pendingQuestion.source,
+      snapshot.pendingQuestion.planApprovalKind,
+    );
+    const rowItems = planApprovalRequest
+      ? buildPlanApprovalQuestionItems(
+          question.options,
+          this.editor.getText(),
+          this.isEditingInlinePlanReject(snapshot),
+          this.editor.getCursor().col,
+        )
+      : question.options.map((option) => ({
+          value: option.label,
+          label: formatQuestionOptionLabelForDisplay(option.label, false),
+        }));
+
+    for (const option of rowItems) {
+      const displayLabel = option.label ?? option.value;
       for (let i = 0; i < screenLines.length; i++) {
         const plain = stripAnsi(screenLines[i]);
         if (
           (plain.startsWith("→ ") || plain.startsWith("  ")) &&
           plain.includes(displayLabel)
         ) {
-          this.questionOptionRows.push({ row: i + 1, value: option.label });
+          this.questionOptionRows.push({ row: i + 1, value: option.value });
           break;
         }
       }
@@ -4647,7 +6751,44 @@ export class AppScreen implements Component, Focusable {
     this.editor.disableSubmit =
       !!pendingQuestion &&
       !this.otherInputMode &&
+      !this.isEditingInlinePlanReject(snapshot) &&
       (this.questionList !== null || (pendingQuestion.questions[0]?.options.length ?? 0) > 0);
+  }
+
+  private isEditingInlinePlanReject(snapshot: ReturnType<CliPiAppState["getSnapshot"]>): boolean {
+    const pendingQuestion = snapshot.pendingQuestion;
+    if (!pendingQuestion || this.questionList === null) {
+      return false;
+    }
+    const question =
+      pendingQuestion.questions[this.activeQuestionIndex] ?? pendingQuestion.questions[0];
+    const selected = this.questionList.getSelectedItem();
+    return !!question &&
+      !!selected &&
+      shouldAppendPlanRejectFeedback(
+        pendingQuestion.source,
+        selected.value,
+        pendingQuestion.planApprovalKind,
+      );
+  }
+
+  private isInlinePlanRejectCursorInput(data: string): boolean {
+    return (
+      matchesKey(data, "left") ||
+      matchesKey(data, "right") ||
+      matchesKey(data, "home") ||
+      matchesKey(data, "end") ||
+      matchesKey(data, "ctrl+b") ||
+      matchesKey(data, "ctrl+f") ||
+      matchesKey(data, "ctrl+a") ||
+      matchesKey(data, "ctrl+e") ||
+      matchesKey(data, "alt+left") ||
+      matchesKey(data, "alt+right") ||
+      matchesKey(data, "ctrl+left") ||
+      matchesKey(data, "ctrl+right") ||
+      matchesKey(data, "alt+b") ||
+      matchesKey(data, "alt+f")
+    );
   }
 
   private syncQuestionList(snapshot: ReturnType<CliPiAppState["getSnapshot"]>): void {
@@ -4660,6 +6801,10 @@ export class AppScreen implements Component, Focusable {
     }
 
     const question = pendingQuestion.questions[this.activeQuestionIndex];
+    const planApprovalRequest = isPlanApprovalRequest(
+      pendingQuestion.source,
+      pendingQuestion.planApprovalKind,
+    );
     if (!question || question.options.length === 0) {
       this.questionList = null;
       this.questionDetailsMap = null;
@@ -4667,15 +6812,32 @@ export class AppScreen implements Component, Focusable {
       return;
     }
 
-    const items: SelectItem[] = question.options.map((option) => ({
-      value: option.label,
-      label:
-        pendingQuestion.source === "permission_interrupt" ||
-        pendingQuestion.source === "confirm_interrupt"
-          ? normalizePermissionOptionLabel(option.label)
-          : option.label,
-      description: option.description,
-    }));
+    const currentSelectedValue = this.questionList?.getSelectedItem()?.value;
+    const showRejectCursor =
+      planApprovalRequest &&
+      !!currentSelectedValue &&
+      shouldAppendPlanRejectFeedback(
+        pendingQuestion.source,
+        currentSelectedValue,
+        pendingQuestion.planApprovalKind,
+      );
+
+    const items: SelectItem[] = planApprovalRequest
+      ? buildPlanApprovalQuestionItems(
+          question.options,
+          this.editor.getText(),
+          showRejectCursor,
+          this.editor.getCursor().col,
+        )
+      : question.options.map((option) => ({
+          value: option.label,
+          label:
+            pendingQuestion.source === "permission_interrupt" ||
+            pendingQuestion.source === "confirm_interrupt"
+              ? formatQuestionOptionLabelForDisplay(option.label, false)
+              : option.label,
+          description: option.description,
+        }));
 
     // Build details map for options that have sub-lines (e.g. rewind file changes)
     const detailsMap = new Map<string, string[]>();
@@ -4690,19 +6852,24 @@ export class AppScreen implements Component, Focusable {
       pendingQuestion.source === "permission_interrupt" ||
       pendingQuestion.source === "confirm_interrupt"
         ? 4
-        : 6;
-    // For memory edit, use a layout that shows short labels with full-path details sub-lines.
+        : 20;
+    // For memory edit, use a layout that mirrors Claude Code's /memory selector:
+    //   - Short labels ("Project memory", "User memory", ".jiuwen/rules/foo.md")
+    //   - Descriptions ("Checked in at ./JIUWENSWARM.md", "Saved in ~/.jiuwen/...")
+    //   - Allow wider primary column so rule paths aren't truncated
     // For rewind and other questions with details sub-lines, use a narrower label column
     // so the description starts sooner and details can align beneath it.
-    const layout = pendingQuestion.source === "local_command_memory_edit"
-      ? { minPrimaryColumnWidth: 24, maxPrimaryColumnWidth: 30 }
-      : detailsMap.size > 0
-        ? { minPrimaryColumnWidth: 10, maxPrimaryColumnWidth: 10 }
-        : { minPrimaryColumnWidth: 34, maxPrimaryColumnWidth: 42 };
+    const layout = planApprovalRequest
+      ? getPlanApprovalListLayout()
+      : pendingQuestion.source === "local_command_memory_edit"
+        ? { minPrimaryColumnWidth: 20, maxPrimaryColumnWidth: 50 }
+        : detailsMap.size > 0
+          ? { minPrimaryColumnWidth: 10, maxPrimaryColumnWidth: 10 }
+          : { minPrimaryColumnWidth: 34, maxPrimaryColumnWidth: 42 };
     const list = new SelectList(
       items,
       Math.min(Math.max(items.length, 1), maxVisible),
-      selectListTheme,
+      planApprovalRequest ? planApprovalSelectListTheme : selectListTheme,
       layout,
     );
     list.onSelect = (item) => {
@@ -4719,7 +6886,8 @@ export class AppScreen implements Component, Focusable {
     list.onSelectionChange = () => {
       this.invalidate();
     };
-    let selectedValue = this.pendingQuestionAnswers.get(this.activeQuestionIndex);
+    let selectedValue =
+      currentSelectedValue ?? this.pendingQuestionAnswers.get(this.activeQuestionIndex);
     // For memory edit, restore cursor to the last selected file within this session
     if (!selectedValue && pendingQuestion.source === "local_command_memory_edit" && lastMemorySelection) {
       selectedValue = lastMemorySelection;
@@ -4740,6 +6908,14 @@ export class AppScreen implements Component, Focusable {
     if (!pendingQuestion) {
       return;
     }
+
+    const question =
+      pendingQuestion.questions[this.activeQuestionIndex] ?? pendingQuestion.questions[0];
+    const collectPlanRejectFeedback = shouldCollectPlanRejectFeedback(
+      pendingQuestion.source,
+      label,
+      pendingQuestion.planApprovalKind,
+    );
 
     if (label === "Other") {
       this.otherInputMode = true;
@@ -4766,11 +6942,29 @@ export class AppScreen implements Component, Focusable {
 
     const answers = pendingQuestion.questions.map((question, index) => {
       const answerValue = this.pendingQuestionAnswers.get(index) ?? question.options[0]?.label ?? "";
-      return {
+      const answer = {
         question: question.question,
         selected_options: [answerValue],
       };
+      if (
+        index === this.activeQuestionIndex &&
+        collectPlanRejectFeedback &&
+        shouldAppendPlanRejectFeedback(
+          pendingQuestion.source,
+          answerValue,
+          pendingQuestion.planApprovalKind,
+        )
+      ) {
+        const feedback = this.editor.getText().trim();
+        if (feedback) {
+          return { ...answer, custom_input: feedback };
+        }
+      }
+      return answer;
     });
     this.state.submitQuestionAnswers(answers);
+    if (collectPlanRejectFeedback) {
+      this.editor.setText("");
+    }
   }
 }

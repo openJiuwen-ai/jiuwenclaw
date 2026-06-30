@@ -26,6 +26,11 @@ def _is_extension_root(path: Path) -> bool:
     return _find_manifest(path) is not None or _find_entry_script(path) is not None
 
 
+def _extension_display_name(manifest: dict, root: Path) -> str:
+    name = str(manifest.get("name", "")).strip()
+    return name or root.name
+
+
 class ExtensionLoader:
     def __init__(self, registry: ExtensionRegistry):
         self.registry = registry
@@ -74,6 +79,7 @@ class ExtensionLoader:
         dependencies = manifest.get("dependencies", {})
         if not dependencies:
             return
+        extension_name = _extension_display_name(manifest, root)
 
         import shutil
         import subprocess
@@ -86,12 +92,12 @@ class ExtensionLoader:
             package_name = f"{package}{version_spec}" if version_spec else package
             try:
                 importlib.metadata.version(package)
-                logger.info(f"[ExtensionLoader] 扩展 {root.name} 依赖 {package} 已安装")
+                logger.info(f"[ExtensionLoader] 扩展 {extension_name} 依赖 {package} 已安装")
                 continue
             except importlib.metadata.PackageNotFoundError:
                 pass
 
-            logger.info(f"[ExtensionLoader] 正在安装扩展 {root.name} 的依赖: {package_name}")
+            logger.info(f"[ExtensionLoader] 正在安装扩展 {extension_name} 的依赖: {package_name}")
             try:
                 if use_uv:
                     subprocess.check_call(
@@ -107,11 +113,11 @@ class ExtensionLoader:
                         stderr=subprocess.PIPE,
                         timeout=120,
                     )
-                logger.info(f"[ExtensionLoader] 扩展 {root.name} 依赖 {package} 安装成功")
+                logger.info(f"[ExtensionLoader] 扩展 {extension_name} 依赖 {package} 安装成功")
             except subprocess.TimeoutExpired:
-                logger.error(f"[ExtensionLoader] 扩展 {root.name} 依赖 {package} 安装超时 (120秒)")
+                logger.error(f"[ExtensionLoader] 扩展 {extension_name} 依赖 {package} 安装超时 (120秒)")
             except subprocess.CalledProcessError as e:
-                logger.error(f"[ExtensionLoader] 扩展 {root.name} 依赖 {package} 安装失败: {e}")
+                logger.error(f"[ExtensionLoader] 扩展 {extension_name} 依赖 {package} 安装失败: {e}")
 
     @staticmethod
     def _import_module(root: Path) -> Any:

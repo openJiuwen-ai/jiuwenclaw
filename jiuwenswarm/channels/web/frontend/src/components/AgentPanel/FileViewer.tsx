@@ -5,6 +5,7 @@ import {
   parseHistoryJsonFilePreviewMode,
   parseHistoryJsonFileToPreviewMessages,
 } from '../../features/historyRestore';
+import { isHistoryPreviewFile, parseHistoryFileContent } from '../../features/historyFilePreview';
 import { ChatTimelineList } from '../ChatPanel/MessageList';
 import '../ChatPanel/ChatPanel.css';
 
@@ -92,8 +93,8 @@ export function FileViewer({ filePath, fileName, reloadNonce = 0 }: FileViewerPr
   const [fileEncoding, setFileEncoding] = useState<string>('auto');
   const lowerFileName = fileName.toLowerCase();
   const isMarkdown = lowerFileName.endsWith('.md') || lowerFileName.endsWith('.mdx');
-  const isJson = lowerFileName.endsWith('.json');
-  const isHistoryJson = lowerFileName === 'history.json';
+  const isHistoryJson = isHistoryPreviewFile(fileName);
+  const isJson = lowerFileName.endsWith('.json') || lowerFileName.endsWith('.jsonl');
   const isTodoJson = lowerFileName === 'todo.json';
   const isPreviewable = isMarkdown || isJson;
   const fileNotFound = Boolean(error && error.includes('HTTP 404'));
@@ -107,12 +108,12 @@ export function FileViewer({ filePath, fileName, reloadNonce = 0 }: FileViewerPr
       };
     }
     try {
-      const parsed: unknown = JSON.parse(content);
+      const parsed: unknown = isHistoryJson ? parseHistoryFileContent(content) : JSON.parse(content);
       return { parsed, invalid: false };
     } catch {
       return { parsed: null as unknown, invalid: true };
     }
-  }, [isJson, content]);
+  }, [isJson, isHistoryJson, content]);
 
   const historyMessages = useMemo(() => {
     if (!isHistoryJson || !historyChatPreview || !Array.isArray(jsonParseResult.parsed)) {
@@ -314,17 +315,6 @@ export function FileViewer({ filePath, fileName, reloadNonce = 0 }: FileViewerPr
             <div className="flex flex-shrink-0 items-center gap-2 self-stretch">
               <span className="inline-flex items-center gap-1 text-xs leading-snug text-text-muted whitespace-nowrap">
                 {t('fileViewer.chatPreview')}
-                <span
-                  tabIndex={0}
-                  role="img"
-                  aria-label={t('fileViewer.chatPreviewHint')}
-                  className="group relative inline-flex h-4 w-4 items-center justify-center rounded-full border border-border bg-secondary text-[10px] font-medium text-text-muted outline-none transition-colors hover:border-border-hover hover:text-text focus-visible:border-accent focus-visible:text-text"
-                >
-                  ?
-                  <span className="pointer-events-none absolute right-0 top-[calc(100%+6px)] z-50 hidden w-max max-w-[180px] rounded-md border border-border bg-[var(--popover)] px-2 py-1 text-xs font-normal leading-snug text-[var(--popover-foreground)] shadow-lg group-hover:block group-focus-visible:block">
-                    {t('fileViewer.chatPreviewHint')}
-                  </span>
-                </span>
               </span>
               <button
                 type="button"
@@ -427,6 +417,7 @@ export function FileViewer({ filePath, fileName, reloadNonce = 0 }: FileViewerPr
                 <ChatTimelineList
                   messages={historyMessages}
                   mode={historyPreviewMode ?? undefined}
+                  disableA2UIInteraction={true}
                 />
               </div>
             )

@@ -48,7 +48,7 @@ class SkillDevPipeline:
     """SkillDev 确定性状态机.
 
     生命周期：每次请求创建 → run()/resume() 执行 → checkpoint → 对象释放。
-    不长驻内存，不持有 JiuWenClaw 实例。
+    不长驻内存，不持有 JiuWenSwarm 实例。
     """
 
     # PLAN_CONFIRM / REVIEW / DESC_OPTIMIZE_CONFIRM 是挂起点，由 SUSPENSION_POINTS 处理

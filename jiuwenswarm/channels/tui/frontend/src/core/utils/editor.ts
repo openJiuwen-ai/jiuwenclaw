@@ -1,5 +1,6 @@
 import { spawnSync, type SpawnSyncOptions, type SpawnSyncReturns } from "node:child_process";
 import { basename } from "node:path";
+import { existsSync, mkdirSync } from "node:fs";
 import type { TUI } from "@mariozechner/pi-tui";
 
 const GUI_EDITORS = [
@@ -127,4 +128,34 @@ function spawnFallback(filePath: string): SpawnSyncReturns<string | Buffer> {
   }
 
   return spawnSync("vi", [filePath], spawnOptions);
+}
+
+/**
+ * Open a folder in the system file explorer (not an editor).
+ * - Windows: explorer
+ * - macOS: open -R (reveals in Finder)
+ * - Linux: xdg-open
+ */
+export function openFolderInExplorer(folderPath: string): void {
+  const spawnOptions: SpawnSyncOptions = { stdio: "inherit" };
+
+  // Ensure folder exists before opening (explorer opens Documents if path doesn't exist)
+  if (!existsSync(folderPath)) {
+    try {
+      mkdirSync(folderPath, { recursive: true });
+    } catch {
+      // Ignore errors - just try to open anyway
+    }
+  }
+
+  if (process.platform === "win32") {
+    // Windows: use explorer to open folder
+    spawnSync(`explorer "${folderPath}"`, { ...spawnOptions, shell: true });
+  } else if (process.platform === "darwin") {
+    // macOS: use open -R to reveal in Finder
+    spawnSync("open", ["-R", folderPath], spawnOptions);
+  } else {
+    // Linux: use xdg-open
+    spawnSync("xdg-open", [folderPath], spawnOptions);
+  }
 }

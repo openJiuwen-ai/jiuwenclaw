@@ -2,7 +2,7 @@
 """Standalone AgentServer entrypoint.
 
 This process only starts:
-- JiuWenClaw (agent runtime)
+- JiuWenSwarm (agent runtime)
 - AgentWebSocketServer (ws server for Gateway)
 
 Gateway should be started separately and connect to this ws server.
@@ -123,6 +123,11 @@ from jiuwenswarm.agents.harness.common.tools.bash_tool_safety import (
 
 install_shell_tool_safety_hooks()
 
+# 兼容 SSE-only 网关：让非流式 invoke()（subagent / 心跳等）能解析 text/event-stream 响应
+from jiuwenswarm.llm_sse_patch import apply_openai_sse_invoke_patch
+
+apply_openai_sse_invoke_patch()
+
 
 async def _run(host: str, port: int) -> None:
     from openjiuwen.core.runner import Runner
@@ -190,6 +195,12 @@ async def _run(host: str, port: int) -> None:
             except Exception as exc:
                 logger.warning("[AgentServer] teammate bootstrap daemon stop failed: %s", exc)
         await server.stop()
+        # Shutdown team observability (flush & close spans)
+        try:
+            from jiuwenswarm.agents.harness.team.team_manager import shutdown_team_observability
+            shutdown_team_observability()
+        except Exception as exc:
+            logger.warning("[AgentServer] team observability shutdown failed: %s", exc)
         logger.info("[AgentServer] stopped")
 
 
@@ -198,7 +209,7 @@ def main() -> None:
 
     parser = argparse.ArgumentParser(
         prog="jiuwenswarm-agentserver",
-        description="Start JiuwenClaw AgentServer (standalone process for Gateway to connect).",
+        description="Start JiuwenSwarm AgentServer (standalone process for Gateway to connect).",
     )
     parser.add_argument(
         "--port",

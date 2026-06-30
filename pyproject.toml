@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "jiuwenswarm"
-version = "0.2.1"
+version = "0.2.2"
 description = "JiuwenSwarm"
 requires-python = ">=3.11,<3.14"
 license = { text = "Apache-2.0" }
@@ -42,14 +42,18 @@ dependencies = [
     "python-multipart>=0.0.9",
     "pydantic>=2.0",
     "pyyaml>=6.0",
-    "httpx>=0.27",
+    "httpx[socks]>=0.27",
+    "json-repair>=0.30.0",
+    "gitcode-api>=1.2.20",
+    "faiss-cpu>=1.7.0",
+    "numpy>=1.24.0",
 ]
 
 [project.optional-dependencies]
 a2a = ["a2a-sdk[http-server]==1.0.0"]
 desktop = ["pywebview>=5.4"]
 dev = ["pyinstaller>=6.0.0", "pywebview>=5.4"]
-tui = ["jiuwenswarm-tui==0.2.1"]
+tui = ["jiuwenswarm-tui==0.2.2"]
 distribute = ["openjiuwen[postgres,zmq]"]
 shell-ast = [
     "tree-sitter>=0.25.0,<0.26.0",
@@ -68,6 +72,7 @@ test = [
 ]
 
 [project.scripts]
+jiuwenswarm = "jiuwenswarm.cli.main:main"
 jiuwenswarm-app = "jiuwenswarm.app:main"
 jiuwenswarm-agentserver = "jiuwenswarm.server.app_agentserver:main"
 jiuwenswarm-gateway = "jiuwenswarm.gateway.app_gateway:main"
@@ -75,7 +80,6 @@ jiuwenswarm-web = "jiuwenswarm.channels.web.app_web:main"
 jiuwenswarm-start = "jiuwenswarm.start_services:main"
 jiuwenswarm-init = "jiuwenswarm.init_workspace:main"
 jiuwenswarm-desktop = "jiuwenswarm.channels.desktop.desktop_app:main"
-jiuwenswarm-tui = "jiuwenswarm.channels.acp.app_acp:main"
 jiuwenswarm-acp = "jiuwenswarm.gateway.channel_manager.protocol.acp.acp_connect:main"
 jiuwenswarm-acp-chat = "jiuwenswarm.acp.cli:main"
 jiuwenbox = "jiuwenbox.cli.jiuwenbox:main"
@@ -90,7 +94,7 @@ package-dir = {"jiuwenbox" = "jiuwenbox/src/jiuwenbox"}
 [tool.setuptools.packages.find]
 where = [".", "jiuwenbox/src"]
 include = ["jiuwenswarm*", "jiuwenbox*"]
-exclude = ["jiuwenswarm.cli*", "jiuwenswarm.web*"]
+exclude = ["jiuwenswarm.web*"]
 namespaces = false
 
 [tool.setuptools.package-data]
@@ -102,6 +106,13 @@ jiuwenswarm = [
     "resources/**/*",
     "resources/*",
     "resources/.env.template",
+    "symphony/**/*.yaml",
+    "symphony/**/*.yml",
+    "symphony/**/*.json",
+    "symphony/**/*.md",
+    "extensions/**/*.yaml",
+    "extensions/**/*.yml",
+    "extensions/**/*.md",
 ]
 jiuwenbox = [
     "configs/**/*",
@@ -135,6 +146,6 @@ lint = [
     "pylint>=3.0.0",
     "mypy>=1.12.0",
     "codespell>=2.2.4",
-    "httpx>=0.28.1",
+    "httpx[socks]>=0.28.1",
 ]
 dev = [{ include-group = "test" }, { include-group = "lint" }]

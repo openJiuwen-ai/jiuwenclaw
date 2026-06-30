@@ -16,7 +16,7 @@ Agent 可以通过以下工具操控协程
 协程管理原则：
 1. 协程创建后，任务信息保存在self.sessions中
 2. 协程取消后，对应信息需要同步在self.sessions中
-3. 某一协程结束后，会调用notify方法，通过MessageHandler将消息发送出去
+3. 某一协程结束后，会调用notify方法，通过AgentWebSocketServer将消息推送出去
 """
 
 from __future__ import annotations
@@ -36,7 +36,6 @@ from pydantic import BaseModel
 from openjiuwen.core.foundation.tool import LocalFunction, Tool, ToolCard
 
 from jiuwenswarm.agents.harness.common.tools.mcp_toolkits import get_mcp_tools
-from jiuwenswarm.gateway.message_handler.message_handler import MessageHandler
 
 logger = logging.getLogger(__name__)
 
@@ -95,14 +94,6 @@ class MultiSessionToolkit:
             max_concurrent_tasks,
             task_timeout,
         )
-        # 检查 MessageHandler 是否可用
-        try:
-            MessageHandler.get_instance()
-        except RuntimeError as e:
-            logger.error(
-                "[MultiSessionToolkit] MessageHandler 未初始化，通知功能不可用: %s", e
-            )
-            raise RuntimeError(f"MultiSessionToolkit 需要 MessageHandler 初始化: {e}") from e
 
     async def get_sub_agent(self) -> ReActAgent:
         """Create and return a sub-agent instance. Override in subclass."""
@@ -263,7 +254,7 @@ class MultiSessionToolkit:
             result: str = "",
             error: str = "",
     ) -> None:
-        """Send subtask update to MessageHandler. Called on completion (success/cancel/error/timeout)."""
+        """Send subtask update via AgentWebSocketServer. Called on completion (success/cancel/error/timeout)."""
         # 发送单个任务的状态更新
         await self._send_task_notification(session_id, status, result, error)
 
@@ -276,42 +267,62 @@ class MultiSessionToolkit:
             for st in self.sessions:
                 session_result_summary += (f"\nsession_id: {st.session_id}\n"
                                            f"description: {st.description}\nresult: {st.result}\n")
-            inputs = {
-                "conversation_id": self.session_id,
-                "query": json.dumps({
-                    "source": "system",
-                    "content": session_result_summary,
-                    "type": "notify"
-                }),
-            }
-            # 使用 run_agent_streaming 而非 run_agent，以确保 session.post_run() 被调用，
-            # 从而将对话历史持久化到 checkpoint。run_agent 不会创建 Session 或调用 post_run，
-            # 导致 notify 中的 agent 对话未保存。
-            accumulated: list[str] = []
+
+            agent_wrapper = server.get_agent_manager().get_agent_nowait(self.channel_id)
+            if agent_wrapper is None:
+                agent_wrapper = server.get_agent()
+            agent_instance = (
+                agent_wrapper.get_instance() if agent_wrapper is not None else None
+            )
+
             final_output: str | None = None
-            async for chunk in Runner.run_agent_streaming(
-                    server.get_agent(),
-                    inputs=inputs,
-            ):
-                if not hasattr(chunk, "type") or not hasattr(chunk, "payload"):
-                    continue
-                payload = chunk.payload if isinstance(chunk.payload, dict) else {}
-                if chunk.type == "content_chunk":
-                    c = payload.get("content", "")
-                    if c:
-                        accumulated.append(str(c))
-                elif chunk.type == "answer":
-                    out = payload.get("output")
-                    if isinstance(out, dict):
-                        temp = out.get("output", str(out)) or "".join(accumulated)
-                        if temp != "":
-                            final_output = temp
-                    elif out is not None:
-                        final_output = str(out)
-                    else:
-                        final_output = "".join(accumulated) if accumulated else ""
+            if agent_instance is not None:
+                inputs = {
+                    "conversation_id": self.session_id,
+                    "query": json.dumps({
+                        "source": "system",
+                        "content": session_result_summary,
+                        "type": "notify"
+                    }),
+                }
+                # 使用 run_agent_streaming 而非 run_agent，以确保 session.post_run() 被调用，
+                # 从而将对话历史持久化到 checkpoint。run_agent 不会创建 Session 或调用 post_run，
+                # 导致 notify 中的 agent 对话未保存。
+                accumulated: list[str] = []
+                async for chunk in Runner.run_agent_streaming(
+                        agent_instance,
+                        inputs=inputs,
+                ):
+                    if not hasattr(chunk, "type") or not hasattr(chunk, "payload"):
+                        continue
+                    payload = chunk.payload if isinstance(chunk.payload, dict) else {}
+                    if chunk.type == "content_chunk":
+                        c = payload.get("content", "")
+                        if c:
+                            accumulated.append(str(c))
+                    elif chunk.type == "answer":
+                        out = payload.get("output")
+                        if isinstance(out, dict):
+                            temp = out.get("output", str(out)) or "".join(accumulated)
+                            if temp != "":
+                                final_output = temp
+                        elif out is not None:
+                            final_output = str(out)
+                        else:
+                            final_output = "".join(accumulated) if accumulated else ""
+                if final_output is None:
+                    final_output = "".join(accumulated)
+            else:
+                logger.error(
+                    "[MultiSessionToolkit] notify 无法获取 agent 实例，使用原始汇总 "
+                    "channel_id=%s session_id=%s",
+                    self.channel_id,
+                    self.session_id,
+                )
+                final_output = session_result_summary
+
             result = {
-                "output": final_output if final_output is not None else "".join(accumulated),
+                "output": final_output,
                 "result_type": "answer",
             }
             payload = {

@@ -1,4 +1,4 @@
-# Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
+# Copyright (c) Huawei Technologies Co., Ltd. 2025-2026. All rights reserved.
 
 """MessageHandler - 消息处理抽象与双队列实现（入队经 AgentServerClient 发往 AgentServer）."""
 
@@ -14,13 +14,26 @@ from abc import ABC
 from dataclasses import dataclass, replace
 from enum import Enum
 from pathlib import Path
+from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, Dict, Literal
 from jiuwenswarm.gateway.channel_manager.base import ChannelType
 from jiuwenswarm.common.e2a.constants import E2A_WIRE_INTERNAL_METADATA_KEYS
+from jiuwenswarm.common.config import get_evolution_auto_save_enabled
 from jiuwenswarm.gateway.routing.session_map import SessionMap
 from jiuwenswarm.gateway.message_handler.command_parser.slash_command import (
     ParsedControlAction,
     parse_channel_control_text,
+)
+from jiuwenswarm.gateway.message_handler.evolution_approval import (
+    EvolutionApprovalCoordinator,
+    ensure_regular_evolution_approval_metadata,
+    is_evolution_approval_payload,
+    is_evolution_approval_request_id,
+    is_interrupt_evolution_approval_answer_payload,
+)
+from jiuwenswarm.gateway.message_handler.prompts.review_prompt import build_review_prompt
+from jiuwenswarm.gateway.message_handler.prompts.security_review_prompt import (
+    build_security_review_prompt,
 )
 from jiuwenswarm.extensions.hook_event import GatewayHookEvents
 from jiuwenswarm.extensions.hooks_context import GatewayChatHookContext
@@ -31,11 +44,10 @@ logger = logging.getLogger(__name__)
 
 _ACP_CHANNEL_ID = "acp"
 _ACP_ORIGINAL_SESSION_ID_KEY = "acp_original_session_id"
-# TUI/ACP/legacy CLI: one in-flight chat replaces any prior work on that channel.
+# ACP: one in-flight chat replaces any prior work on that channel.
+# TUI/CLI 已移除此列表：多窗口 TUI 各自维护独立 session，互不干扰。
 _SINGLE_USER_CHANNEL_IDS = frozenset({
     ChannelType.ACP.value,
-    ChannelType.CLI.value,
-    "cli",
 })
 _DEFAULT_INLINE_FILE_SIZE_LIMIT = 128 * 1024
 _KNOWN_JIUWENSWARM_SESSION_PREFIXES = (
@@ -52,7 +64,12 @@ _KNOWN_JIUWENSWARM_SESSION_PREFIXES = (
     "discord_",
     "whatsapp_",
 )
-
+_INTERRUPT_RESUME_SOURCES = frozenset({
+    "ask_user_interrupt",
+    "confirm_interrupt",
+    "permission_interrupt",
+    "evolution_interrupt",
+})
 _A2UI_OPEN_TAG_MARKER = "<a2ui-json>"
 
 
@@ -154,10 +171,8 @@ class MessageHandler(ABC):
         self._stream_modes: dict[str, str] = {}  # request_id -> mode
         self._stream_emits_processing_status: dict[str, bool] = {}  # request_id -> emits chat.processing_status
         self._fire_and_forget_tasks: set[asyncio.Task] = set()  # prevent GC of fire-and-forget tasks
-        self._pending_evolution_approval: dict[str, str] = {}  # session_id -> approval_request_id
-        self._queued_supplement_input: dict[str, dict[str, Any]] = {}  # session_id -> queued supplement payload
+        self._evolution_approval = EvolutionApprovalCoordinator()
         self._session_last_user_query: dict[str, str] = {}
-        self._session_evolution_in_progress: set[str] = set()
         self._acp_session_aliases: dict[str, str] = {}  # external_session_id -> internal_session_id
         self._acp_session_alias_lock = asyncio.Lock()
 
@@ -262,11 +277,51 @@ class MessageHandler(ABC):
             return ""
         return self._session_last_user_query.get(str(session_id), "")
 
+    def _attach_original_request_to_ask_user_answer(self, msg: "Message") -> "Message":
+        if not isinstance(msg.params, dict):
+            return msg
+        if str(msg.params.get("source") or "").strip() != "ask_user_interrupt":
+            return msg
+        if msg.params.get("original_request"):
+            return msg
+        original_request = self._get_session_last_user_query(msg.session_id)
+        if not original_request:
+            return msg
+
+        params = dict(msg.params)
+        params["original_request"] = original_request
+        return replace(msg, params=params)
+
     @staticmethod
     def _is_chat_send_message(msg: "Message") -> bool:
         method = getattr(msg, "req_method", None)
         value = getattr(method, "value", method)
         return value == "chat.send" or str(value) == "ReqMethod.CHAT_SEND"
+
+    @staticmethod
+    def _is_team_chat_send(msg: "Message") -> bool:
+        if not isinstance(msg.params, dict):
+            return False
+        return str(msg.params.get("mode") or "").strip().lower() == "team"
+
+    @classmethod
+    def _is_interrupt_resume_chat_send(cls, msg: "Message") -> bool:
+        if not isinstance(msg.params, dict):
+            return False
+        source = str(msg.params.get("source") or "").strip()
+        answers = msg.params.get("answers")
+        request_id = str(msg.params.get("request_id") or "").strip()
+        if bool(request_id) and isinstance(answers, list) and source in _INTERRUPT_RESUME_SOURCES:
+            return True
+        return cls._is_interrupt_evolution_approval_answer_payload(msg.params)
+
+    @classmethod
+    def _should_cancel_existing_stream_before_chat_send(cls, msg: "Message") -> bool:
+        return (
+            cls._is_chat_send_message(msg)
+            and not cls._is_team_chat_send(msg)
+            and not cls._is_interrupt_resume_chat_send(msg)
+        )
 
     def _get_channel_default_state(self, channel_id: str) -> ChannelControlState:
         """从 config.yaml 读取 Channel 的默认 session_id / mode."""
@@ -413,7 +468,7 @@ class MessageHandler(ABC):
 
     @staticmethod
     def _is_single_user_channel(channel_id: str) -> bool:
-        """Channels where only one user interacts at a time (TUI, ACP, CLI)."""
+        """Channels where a new chat.send replaces all in-flight work on that channel (ACP only)."""
         return channel_id in _SINGLE_USER_CHANNEL_IDS
 
     def _clone_message_for_session_cancel(
@@ -470,7 +525,8 @@ class MessageHandler(ABC):
         """Cancel in-flight stream work on *msg.channel_id* before starting a new chat.send.
 
         Stops both gateway stream consumers and AgentServer work (via interrupt).
-        Single-user channels (TUI/ACP) also drop orphan tasks from other session_ids.
+        ACP also drops orphan tasks from other session_ids; TUI/CLI only cancel
+        streams that share the same session_id as the incoming chat.send.
         """
         channel_id = msg.channel_id
         new_session_id = msg.session_id
@@ -1115,6 +1171,55 @@ class MessageHandler(ABC):
             )
             return True
 
+        if parsed.action is ParsedControlAction.REVIEW_BAD:
+            asyncio.create_task(
+                self._send_channel_notice(
+                    user_infos,
+                    ch,
+                    msg.session_id,
+                    "非法指令，/review 参数过长或含有非法控制字符",
+                )
+            )
+            return True
+
+        if parsed.action is ParsedControlAction.REVIEW_OK:
+            # /review [args]：注入 review prompt，转发 Agent 执行 gh pr list/view/diff 并分析
+            pr_arg = parsed.pr_arg or ""
+            review_prompt = build_review_prompt(pr_arg)
+            if msg.params is None:
+                msg.params = {}
+            msg.params["query"] = review_prompt
+            logger.info(
+                "[MessageHandler] /review prompt injected channel=%s pr_arg=%s",
+                channel_type,
+                pr_arg or "<none>",
+            )
+            return False  # 继续转发给 AgentServer，让 Agent 执行审查
+
+        if parsed.action is ParsedControlAction.SECURITY_REVIEW_BAD:
+            asyncio.create_task(
+                self._send_channel_notice(
+                    user_infos,
+                    ch,
+                    msg.session_id,
+                    "非法指令，/security-review 参数过长或含有非法控制字符",
+                )
+            )
+            return True
+
+        if parsed.action is ParsedControlAction.SECURITY_REVIEW_OK:
+            extra_arg = parsed.security_review_arg or ""
+            security_prompt = build_security_review_prompt(extra_arg)
+            if msg.params is None:
+                msg.params = {}
+            msg.params["query"] = security_prompt
+            logger.info(
+                "[MessageHandler] /security-review prompt injected channel=%s extra_arg=%s",
+                channel_type,
+                extra_arg or "<none>",
+            )
+            return False
+
         return False
 
     async def _skills_slash_notice(
@@ -1522,6 +1627,7 @@ class MessageHandler(ABC):
     async def _prepare_agent_dispatch_message(self, msg: "Message") -> "Message":
         from jiuwenswarm.common.schema.message import ReqMethod
 
+        msg = self._attach_original_request_to_ask_user_answer(msg)
         if msg.channel_id != _ACP_CHANNEL_ID:
             return msg
         if msg.req_method in (ReqMethod.INITIALIZE, ReqMethod.SESSION_CREATE):
@@ -1899,7 +2005,8 @@ class MessageHandler(ABC):
             return
 
         # Track evolution state on the server_push path as well.
-        await self._handle_evolution_chunk(chunk, session_id, bus_metadata)
+        if not await self._handle_evolution_chunk(chunk, session_id, bus_metadata):
+            return
 
         out = self._chunk_to_message(
             chunk, session_id=session_id, metadata=bus_metadata
@@ -2040,6 +2147,29 @@ class MessageHandler(ABC):
             return False
         return payload.get("is_complete") is True and set(payload.keys()) <= {"is_complete"}
 
+    async def publish_stream_chunk(
+        self,
+        chunk: AgentResponseChunk,
+        *,
+        session_id: str | None,
+        request_metadata: dict[str, Any] | None = None,
+    ) -> bool:
+        """Publish one AgentServer stream chunk (evolution + robot_messages).
+
+        Returns False when the chunk is a terminal stream sentinel.
+        """
+        if self._is_terminal_stream_chunk(chunk):
+            return False
+        if not await self._handle_evolution_chunk(chunk, session_id, request_metadata):
+            return False
+        out = self._chunk_to_message(
+            chunk,
+            session_id=session_id,
+            metadata=request_metadata,
+        )
+        await self.publish_robot_messages(out)
+        return True
+
     async def _publish_stream_cancelled_final(
         self,
         request_id: str,
@@ -2087,7 +2217,7 @@ class MessageHandler(ABC):
         """
         from jiuwenswarm.common.schema.message import ReqMethod
 
-        m = env.method
+        m = getattr(env.method, "value", env.method)
         if not m:
             return False
         return m not in (
@@ -2134,188 +2264,166 @@ class MessageHandler(ABC):
 
     @staticmethod
     def _is_evolution_approval_request_id(request_id: Any) -> bool:
-        # Support skill evolution (skill_evolve_*) and team skill evolution (team_skill_evolve_*).
-        # Note: skill creation (SkillCreateRail/TeamSkillCreateRail) uses ask_user + skill-creator
-        # flow, not the approval-based routing.
-        return isinstance(request_id, str) and (
-            request_id.startswith("skill_evolve_") or
-            request_id.startswith("team_skill_evolve_")
-        )
+        return is_evolution_approval_request_id(request_id)
 
-    def _queue_supplement_input(
+    @staticmethod
+    def _is_evolution_approval_payload(payload: Any) -> bool:
+        return is_evolution_approval_payload(payload)
+
+    def _is_current_pending_evolution_approval(
         self,
         session_id: str | None,
-        new_input: str,
-        attachments: list[dict[str, Any]] | None = None,
-    ) -> None:
-        if not session_id:
-            return
-        payload: dict[str, Any] = {"new_input": new_input}
-        if attachments:
-            payload["attachments"] = attachments
-        self._queued_supplement_input[session_id] = payload
+        request_id: Any,
+    ) -> bool:
+        return self._evolution_approval.is_current_pending(session_id, request_id)
 
-    def _pop_queued_supplement_input(self, session_id: str | None) -> dict[str, Any] | None:
-        if not session_id:
-            return None
-        return self._queued_supplement_input.pop(session_id, None)
-
-    def _mark_pending_evolution_approval(self, session_id: str | None, request_id: Any) -> None:
-        if not session_id:
-            return
-        if self._is_evolution_approval_request_id(request_id):
-            self._pending_evolution_approval[session_id] = str(request_id)
-
-    def _build_auto_accept_evolution_answer(
+    def _is_interrupt_evolution_approval_chat_send(
         self,
+        msg: "Message",
         *,
-        channel_id: str,
-        session_id: str,
-        request_id: str,
-        metadata: dict[str, Any] | None = None,
-    ) -> "Message":
-        from jiuwenswarm.common.schema.message import Message, ReqMethod
+        method: Any | None = None,
+    ) -> bool:
+        effective_method = getattr(method, "value", method)
+        if effective_method is None:
+            if not self._is_chat_send_message(msg):
+                return False
+        elif effective_method != "chat.send":
+            return False
+        if not isinstance(msg.params, dict):
+            return False
+        return self._is_interrupt_evolution_approval_answer_payload(msg.params)
 
-        return Message(
-            id=f"auto_evolve_answer_{int(time.time() * 1000):x}_{secrets.token_hex(3)}",
-            type="req",
-            channel_id=channel_id,
-            session_id=session_id,
-            params={
-                "request_id": request_id,
-                "answers": [{"selected_options": ["接收"]}],
-                "source": "auto_accept",
-            },
-            timestamp=time.time(),
-            ok=True,
-            req_method=ReqMethod.CHAT_ANSWER,
-            is_stream=False,
-            metadata=metadata,
-        )
+    @staticmethod
+    def _is_interrupt_evolution_approval_answer_payload(payload: Any) -> bool:
+        return is_interrupt_evolution_approval_answer_payload(payload)
 
-    def _maybe_auto_accept_replaced_evolution_approval(
+    async def _dispatch_interrupt_evolution_approval_as_chat_send(
         self,
-        *,
-        session_id: str | None,
-        incoming_request_id: str,
-        channel_id: str,
-        metadata: dict[str, Any] | None = None,
+        msg: "Message",
     ) -> None:
-        if not session_id or not incoming_request_id:
-            return
+        from jiuwenswarm.common.schema.message import ReqMethod
 
-        previous_request_id = self._pending_evolution_approval.get(session_id)
-        if not previous_request_id or previous_request_id == incoming_request_id:
-            return
-
-        auto_answer = self._build_auto_accept_evolution_answer(
-            channel_id=channel_id,
-            session_id=session_id,
-            request_id=previous_request_id,
-            metadata=metadata,
-        )
-        self._user_messages.put_nowait(auto_answer)
-        logger.info(
-            "[MessageHandler] auto-accept superseded evolution approval: session_id=%s old=%s new=%s",
-            session_id,
-            previous_request_id,
-            incoming_request_id,
-        )
-
-    def _clear_pending_evolution_approval(self, session_id: str | None) -> None:
-        if not session_id:
-            return
-        self._pending_evolution_approval.pop(session_id, None)
-
-    def _mark_session_evolution_in_progress(self, session_id: str | None) -> None:
-        if not session_id:
-            return
-        self._session_evolution_in_progress.add(session_id)
-
-    def _clear_session_evolution_in_progress(self, session_id: str | None) -> None:
-        if not session_id:
-            return
-        self._session_evolution_in_progress.discard(session_id)
-
-    def _is_session_evolution_in_progress(self, session_id: str | None) -> bool:
-        return isinstance(session_id, str) and session_id in self._session_evolution_in_progress
-
-    def _finish_evolution_approval_if_current(
-        self,
-        session_id: str | None,
-        answered_request_id: str | None,
-    ) -> dict[str, Any] | None:
-        if not session_id or not answered_request_id:
-            return None
-
-        current_request_id = self._pending_evolution_approval.get(session_id)
-        if current_request_id != answered_request_id:
-            logger.info(
-                "[MessageHandler] stale evolution approval resolved, "
-                "keep current pending: session_id=%s answered=%s current=%s",
-                session_id,
-                answered_request_id,
-                current_request_id,
+        if self._is_current_pending_evolution_approval(
+            msg.session_id,
+            (msg.params or {}).get("request_id") if isinstance(msg.params, dict) else None,
+        ):
+            self._user_messages.put_nowait(
+                replace(msg, req_method=ReqMethod.CHAT_SEND, is_stream=True)
             )
-            return None
+            return
+        logger.info(
+            "[MessageHandler] stale interrupt evolution approval answer ignored: "
+            "session_id=%s request_id=%s",
+            msg.session_id,
+            (msg.params or {}).get("request_id") if isinstance(msg.params, dict) else None,
+        )
 
-        self._clear_pending_evolution_approval(session_id)
-        self._clear_session_evolution_in_progress(session_id)
-        return self._pop_queued_supplement_input(session_id)
+    @staticmethod
+    def _ensure_regular_evolution_approval_metadata(payload: dict[str, Any]) -> dict[str, Any]:
+        return ensure_regular_evolution_approval_metadata(payload)
+
+    async def _complete_evolution_approval_if_current(
+        self,
+        msg: "Message",
+        answered_request_id: str | None,
+    ) -> None:
+        finish_result = self._evolution_approval.finish_if_current(
+            msg.session_id,
+            answered_request_id,
+        )
+        if finish_result is None:
+            return
+
+        promoted_approval = finish_result.promoted_approval
+        if promoted_approval is not None:
+            promoted_chunk = SimpleNamespace(
+                request_id=promoted_approval.chunk_request_id,
+                channel_id=promoted_approval.channel_id,
+                payload=promoted_approval.payload,
+            )
+            out = self._chunk_to_message(
+                promoted_chunk,
+                session_id=msg.session_id,
+                metadata=promoted_approval.metadata,
+            )
+            await self.publish_robot_messages(out)
+            logger.info(
+                "[MessageHandler] evolution approval answered (resolved), "
+                "deferred approval published: request_id=%s session_id=%s",
+                promoted_approval.request_id,
+                msg.session_id,
+            )
+            await self._send_processing_status(
+                msg.id,
+                msg.session_id,
+                msg.channel_id,
+                is_processing=False,
+            )
+            return
+
+        queued_payload = finish_result.queued_supplement
+        queued_input = str((queued_payload or {}).get("new_input") or "").strip()
+        queued_attachments = (queued_payload or {}).get("attachments")
+        if queued_input:
+            queued_msg = self._build_queued_chat_send_message(
+                msg,
+                queued_input,
+                queued_attachments if isinstance(queued_attachments, list) else None,
+                self._get_session_last_user_query(msg.session_id),
+            )
+            self._user_messages.put_nowait(queued_msg)
+            logger.info(
+                "[MessageHandler] evolution approval answered (resolved), "
+                "queued supplement dispatched: id=%s session_id=%s",
+                queued_msg.id,
+                msg.session_id,
+            )
+        else:
+            logger.info(
+                "[MessageHandler] evolution approval answered (resolved), "
+                "no queued supplement: request_id=%s session_id=%s",
+                answered_request_id,
+                msg.session_id,
+            )
+        await self._send_processing_status(
+            msg.id,
+            msg.session_id,
+            msg.channel_id,
+            is_processing=False,
+        )
+
+    @staticmethod
+    def _approval_response_resolved(resp: Any) -> bool:
+        return (
+            resp is not None
+            and hasattr(resp, "payload")
+            and isinstance(resp.payload, dict)
+            and resp.payload.get("resolved", False) is True
+        )
 
     async def _handle_evolution_chunk(
         self,
         chunk,
         session_id: str | None,
         request_metadata: dict[str, Any] | None = None,
-    ) -> None:
+    ) -> bool:
         """处理 chunk 中的演进状态和审批事件，更新 Gateway 状态机。
 
         在 process_stream 和 _handle_agent_server_push 两条路径中复用。
+        返回 False 表示该 chunk 已被延后处理，不应继续发布给前端。
         """
-        if not isinstance(chunk.payload, dict):
-            return
-        event_type = chunk.payload.get("event_type")
-        if event_type == "chat.evolution_status":
-            status = str(chunk.payload.get("status", "")).strip().lower()
-            if status == "start":
-                self._mark_session_evolution_in_progress(session_id)
-                rid = getattr(chunk, "request_id", "")
-                logger.info(
-                    "[MessageHandler] evolution status start: session_id=%s request_id=%s",
-                    session_id,
-                    rid,
-                )
-            elif status == "end":
-                self._clear_session_evolution_in_progress(session_id)
-                rid = getattr(chunk, "request_id", "")
-                logger.info(
-                    "[MessageHandler] evolution status end: session_id=%s request_id=%s",
-                    session_id,
-                    rid,
-                )
-        approval_request_id = chunk.payload.get("request_id")
-        if (
-            event_type == "chat.ask_user_question"
-            and self._is_evolution_approval_request_id(approval_request_id)
-        ):
-            self._maybe_auto_accept_replaced_evolution_approval(
-                session_id=session_id,
-                incoming_request_id=str(approval_request_id),
-                channel_id=str(getattr(chunk, "channel_id", "") or ""),
-                metadata=request_metadata,
-            )
-            self._mark_pending_evolution_approval(session_id, approval_request_id)
-            logger.info(
-                "[MessageHandler] evolution approval detected: session_id=%s request_id=%s",
-                session_id,
-                approval_request_id,
-            )
+        decision = self._evolution_approval.handle_chunk(
+            chunk,
+            session_id,
+            request_metadata,
+            auto_save_enabled=get_evolution_auto_save_enabled(),
+        )
+        if decision.user_message is not None:
+            self._user_messages.put_nowait(decision.user_message)
+        return decision.should_publish_chunk
 
     def _clear_session_evolution_states(self, session_id: str | None) -> None:
-        self._clear_session_evolution_in_progress(session_id)
-        self._clear_pending_evolution_approval(session_id)
-        self._pop_queued_supplement_input(session_id)
+        self._evolution_approval.clear_session(session_id)
 
     @staticmethod
     def _build_supplement_continuation_query(
@@ -2391,6 +2499,16 @@ class MessageHandler(ABC):
                 resp.request_id,
                 resp.channel_id,
             )
+            if (
+                self._is_interrupt_evolution_approval_chat_send(msg, method=env.method)
+                and self._approval_response_resolved(resp)
+            ):
+                answer_payload = msg.params if isinstance(msg.params, dict) else {}
+                answer_request_id = answer_payload.get("request_id")
+                await self._complete_evolution_approval_if_current(
+                    msg,
+                    str(answer_request_id or ""),
+                )
             return resp
         except Exception as e:
             logger.exception("AgentServer send_request failed for %s: %s", msg.id, e)
@@ -2443,36 +2561,24 @@ class MessageHandler(ABC):
 
                 # 检查是否是中断请求
                 if msg.req_method == ReqMethod.CHAT_ANSWER:
+                    answer_payload = msg.params if isinstance(msg.params, dict) else {}
+                    is_evolution_approval_answer = self._is_evolution_approval_payload(answer_payload)
+                    if is_evolution_approval_answer:
+                        msg.params = self._ensure_regular_evolution_approval_metadata(answer_payload)
+                        if self._is_interrupt_evolution_approval_answer_payload(msg.params):
+                            await self._dispatch_interrupt_evolution_approval_as_chat_send(msg)
+                            continue
                     agent_msg = await self._prepare_agent_dispatch_message(msg)
                     env = self.message_to_e2a(agent_msg)
                     resp = await self._process_non_stream_request(msg, env)
-                    answer_request_id = (msg.params or {}).get("request_id")
-                    if self._is_evolution_approval_request_id(answer_request_id):
-                        # Check whether the response indicates the approval was actually resolved.
-                        resolved = False
-                        if resp is not None and hasattr(resp, "payload") and isinstance(resp.payload, dict):
-                            resolved = resp.payload.get("resolved", False) is True
-                        if resolved:
-                            queued_payload = self._finish_evolution_approval_if_current(
-                                msg.session_id,
+                    answer_payload = msg.params if isinstance(msg.params, dict) else {}
+                    answer_request_id = answer_payload.get("request_id")
+                    if is_evolution_approval_answer:
+                        if self._approval_response_resolved(resp):
+                            await self._complete_evolution_approval_if_current(
+                                msg,
                                 str(answer_request_id or ""),
                             )
-                            queued_input = str((queued_payload or {}).get("new_input") or "").strip()
-                            queued_attachments = (queued_payload or {}).get("attachments")
-                            if queued_input:
-                                queued_msg = self._build_queued_chat_send_message(
-                                    msg,
-                                    queued_input,
-                                    queued_attachments if isinstance(queued_attachments, list) else None,
-                                    self._get_session_last_user_query(msg.session_id),
-                                )
-                                self._user_messages.put_nowait(queued_msg)
-                                logger.info(
-                                    "[MessageHandler] evolution approval answered (resolved), "
-                                    "queued supplement dispatched: id=%s session_id=%s",
-                                    queued_msg.id,
-                                    msg.session_id,
-                                )
                         else:
                             logger.info(
                                 "[MessageHandler] evolution approval answered but not resolved: "
@@ -2497,15 +2603,9 @@ class MessageHandler(ABC):
                     intent = (msg.params or {}).get("intent", "cancel")
 
                     if has_new_input:
-                        if (
-                            self._is_session_evolution_in_progress(msg.session_id)
-                            or (
-                                isinstance(msg.session_id, str)
-                                and msg.session_id in self._pending_evolution_approval
-                            )
-                        ):
+                        if self._evolution_approval.should_queue_supplement(msg.session_id):
                             queued_input = new_input.strip()
-                            self._queue_supplement_input(
+                            self._evolution_approval.queue_supplement(
                                 msg.session_id,
                                 queued_input,
                                 supplement_attachments,
@@ -2696,6 +2796,58 @@ class MessageHandler(ABC):
                     content = msg.params.get("query") or msg.params.get("content") or ""
                     attachments = msg.params.get("attachments")
                     if isinstance(content, str):
+                        # ---- Resolve /review and /security-review slash commands (all channels) ----
+                        stripped = content.strip()
+                        if stripped:
+                            parsed = parse_channel_control_text(stripped)
+                            if parsed.action is ParsedControlAction.REVIEW_BAD:
+                                asyncio.create_task(
+                                    self._send_channel_notice(
+                                        {"id": msg.id, "meta_data": msg.metadata},
+                                        msg.channel_id,
+                                        msg.session_id,
+                                        "非法指令，/review 参数过长或含有非法控制字符",
+                                    )
+                                )
+                                continue
+                            if parsed.action is ParsedControlAction.REVIEW_OK:
+                                pr_arg = parsed.pr_arg or ""
+                                review_prompt = build_review_prompt(pr_arg)
+                                msg.params = dict(msg.params)
+                                msg.params["query"] = review_prompt
+                                if "content" in msg.params:
+                                    msg.params["content"] = review_prompt
+                                content = review_prompt
+                                logger.info(
+                                    "[MessageHandler] /review prompt injected for chat.send channel=%s pr_arg=%s",
+                                    getattr(msg, "channel_id", ""),
+                                    pr_arg or "<none>",
+                                )
+                            elif parsed.action is ParsedControlAction.SECURITY_REVIEW_BAD:
+                                asyncio.create_task(
+                                    self._send_channel_notice(
+                                        {"id": msg.id, "meta_data": msg.metadata},
+                                        msg.channel_id,
+                                        msg.session_id,
+                                        "非法指令，/security-review 参数过长或含有非法控制字符",
+                                    )
+                                )
+                                continue
+                            elif parsed.action is ParsedControlAction.SECURITY_REVIEW_OK:
+                                extra_arg = parsed.security_review_arg or ""
+                                security_prompt = build_security_review_prompt(extra_arg)
+                                msg.params = dict(msg.params)
+                                msg.params["query"] = security_prompt
+                                if "content" in msg.params:
+                                    msg.params["content"] = security_prompt
+                                content = security_prompt
+                                logger.info(
+                                    "[MessageHandler] /security-review prompt injected "
+                                    "for chat.send channel=%s extra_arg=%s",
+                                    getattr(msg, "channel_id", ""),
+                                    extra_arg or "<none>",
+                                )
+
                         cwd = None
                         if isinstance(msg.metadata, dict):
                             cwd = msg.metadata.get("cwd")
@@ -2744,6 +2896,20 @@ class MessageHandler(ABC):
                     "[MessageHandler] 从 user_messages 取出，发往 AgentServer: id=%s channel_id=%s is_stream=%s",
                     msg.id, msg.channel_id, msg.is_stream,
                 )
+                if self._is_interrupt_evolution_approval_chat_send(msg):
+                    if self._is_current_pending_evolution_approval(
+                        msg.session_id,
+                        (msg.params or {}).get("request_id") if isinstance(msg.params, dict) else None,
+                    ):
+                        msg = replace(msg, is_stream=True)
+                    else:
+                        logger.info(
+                            "[MessageHandler] stale interrupt evolution approval chat.send ignored: "
+                            "session_id=%s request_id=%s",
+                            msg.session_id,
+                            (msg.params or {}).get("request_id") if isinstance(msg.params, dict) else None,
+                        )
+                        continue
                 agent_msg = await self._prepare_agent_dispatch_message(msg)
                 await self._trigger_before_chat_request_hook(agent_msg)
                 env = self.message_to_e2a(agent_msg)
@@ -2752,7 +2918,7 @@ class MessageHandler(ABC):
                     if env.is_stream:
                         # 取消同一 channel 上已有的流式任务，避免会话孤岛
                         # （例如 TUI 发送新消息时，旧 session 仍在后台空跑）
-                        if msg.req_method == ReqMethod.CHAT_SEND:
+                        if self._should_cancel_existing_stream_before_chat_send(msg):
                             await self._cancel_stream_tasks_for_channel(msg)
                         # 流式处理：启动后台任务
                         # 通知前端新任务开始处理
@@ -2826,31 +2992,40 @@ class MessageHandler(ABC):
         has_processing_status_false = False  # 追踪 AgentServer 是否已发送 processing_status=false
         try:
             async for chunk in self._agent_client.send_request_stream(env):
-                # 跳过终止 chunk（仅作为流结束信号，不含实际数据）
                 if self._is_terminal_stream_chunk(chunk):
                     logger.debug(
                         "[MessageHandler] 跳过终止 chunk: request_id=%s",
                         chunk.request_id,
                     )
                     continue
-                await self._handle_evolution_chunk(chunk, session_id, request_metadata)
-                # 携带 request metadata，供 Feishu/Xiaoyi 用平台身份回发
-                # 检查是否是 processing_status=false 事件
-                payload = chunk.payload or {}
-                if isinstance(payload, dict):
-                    if payload.get("event_type") == "chat.processing_status":
-                        if payload.get("is_processing") is False:
-                            has_processing_status_false = True
-
-                out = self._chunk_to_message(
+                published = await self.publish_stream_chunk(
                     chunk,
                     session_id=session_id,
-                    metadata=request_metadata,
+                    request_metadata=request_metadata,
                 )
-                await self.publish_robot_messages(out)
+                if not published:
+                    continue
+                payload = chunk.payload or {}
+                if isinstance(payload, dict):
+                    event_type = payload.get("event_type")
+                    if event_type == "chat.processing_status":
+                        if payload.get("is_processing") is False:
+                            has_processing_status_false = True
+                    elif event_type == "chat.processing_status_deferred":
+                        # Internal placeholder from the cluster-mode
+                        # follow-up short stream: the real round-complete
+                        # signal will be broadcast by the background team
+                        # stream on team.completed. This marker only
+                        # prevents the Gateway from auto-emitting
+                        # is_processing=False when this short stream
+                        # ends, and is NOT forwarded to the frontend.
+                        has_processing_status_false = True
+                        continue
+
                 logger.debug(
                     "[MessageHandler] Stream chunk 已写入 robot_messages: request_id=%s event_type=%s",
-                    chunk.request_id, out.event_type,
+                    chunk.request_id,
+                    payload.get("event_type") if isinstance(payload, dict) else None,
                 )
             logger.info(
                 "[MessageHandler] Stream 正常完成: request_id=%s",
@@ -2867,11 +3042,33 @@ class MessageHandler(ABC):
             )
             raise  # 重新抛出，让调用者知道任务被取消
         finally:
+            if (
+                not cancelled
+                and self._is_interrupt_evolution_approval_answer_payload(env.params)
+            ):
+                from jiuwenswarm.common.schema.message import Message, ReqMethod
+
+                await self._complete_evolution_approval_if_current(
+                    Message(
+                        id=rid,
+                        type="req",
+                        channel_id=channel_id,
+                        session_id=session_id,
+                        params=dict(env.params or {}),
+                        timestamp=time.time(),
+                        ok=True,
+                        req_method=ReqMethod.CHAT_SEND,
+                        is_stream=True,
+                        metadata=request_metadata,
+                    ),
+                    str((env.params or {}).get("request_id") or ""),
+                )
+                has_processing_status_false = True
             # 清理状态
             self._pop_stream_tracking(rid)
             if session_id is not None and session_id not in self._stream_sessions.values():
                 # Fallback cleanup when stream exits unexpectedly without evolution end signal.
-                self._clear_session_evolution_in_progress(session_id)
+                self._evolution_approval.clear_session_in_progress(session_id)
             logger.debug(
                 "[MessageHandler] Stream 任务状态已清理: request_id=%s",
                 rid,
@@ -3018,6 +3215,12 @@ class MessageHandler(ABC):
             metadata=None,
         )
         await self.publish_robot_messages(status_msg)
+        logger.info(
+            "[MessageHandler] processing status sent: request_id=%s session_id=%s is_processing=%s",
+            request_id,
+            session_id,
+            is_processing,
+        )
 
     def _build_error_out_message(self, msg: "Message", error: Exception) -> "Message":
         from jiuwenswarm.common.schema.message import Message
@@ -3114,9 +3317,7 @@ class MessageHandler(ABC):
         self._stream_metadata.clear()
         self._stream_emits_processing_status.clear()
         self._stream_modes.clear()
-        self._session_evolution_in_progress.clear()
-        self._pending_evolution_approval.clear()
-        self._queued_supplement_input.clear()
+        self._evolution_approval.clear_all()
         self._session_last_user_query.clear()
 
         # 取消转发循环

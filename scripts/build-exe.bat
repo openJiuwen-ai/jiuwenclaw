@@ -1,10 +1,10 @@
 @echo off
-REM JiuwenClaw 打包 exe 脚本
+REM JiuwenSwarm 打包 exe 脚本
 REM 用法: scripts\build-exe.bat  或双击运行
 
 cd /d "%~dp0\.."
 
-echo === JiuwenClaw 打包 exe ===
+echo === JiuwenSwarm 打包 exe ===
 echo.
 
 echo [1/3] 安装 Python 依赖...

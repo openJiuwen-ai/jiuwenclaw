@@ -7,9 +7,12 @@ from __future__ import annotations
 import logging
 import math
 import os
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
+
+import yaml
 
 from jiuwenswarm.server.runtime.skill import filter_visible_skill_names
 
@@ -53,6 +56,11 @@ TEAM_EVOLUTION_VISIBLE_PROGRESS_STAGES = {
     "approval_required",
     "completed",
     *TEAM_EVOLUTION_NOOP_STAGES,
+}
+REGULAR_EVOLUTION_VISIBLE_START_STAGES = {
+    "generating",
+    "approval_required",
+    "completed",
 }
 
 
@@ -100,7 +108,15 @@ _SDK_PROGRESS_TERMINAL_STAGES = {
     "timed_out",
 }
 
-EVOLUTION_ACCEPT_LABELS = ("accept", "接收", "接受")
+EVOLUTION_ACCEPT_LABELS = (
+    "accept",
+    "接收",
+    "接受",
+    "allow_once",
+    "allow_always",
+    "本次允许",
+    "总是允许",
+)
 EVOLUTION_EXECUTE_LABELS = ("execute", "执行")
 REGULAR_EVOLUTION_SLASH_WARNING_PHRASES = (
     "未生成可保存经验",
@@ -137,6 +153,28 @@ def _resolve_skill_dir(store: Any, skill_name: str) -> Path | None:
         candidate = Path(base_dir) / skill_name
         if candidate.is_dir():
             return candidate
+    return None
+
+
+def read_skill_kind(store: Any, skill_name: str) -> str | None:
+    """Read the ``kind`` field from a skill's SKILL.md frontmatter."""
+    skill_dir = _resolve_skill_dir(store, skill_name)
+    if skill_dir is None:
+        return None
+    skill_md = skill_dir / "SKILL.md"
+    if not skill_md.is_file():
+        return None
+    try:
+        content = skill_md.read_text(encoding="utf-8")
+        m = re.match(r"^---\s*\n(.*?)\n---", content, re.DOTALL)
+        if not m:
+            return None
+        fm = yaml.safe_load(m.group(1))
+        if isinstance(fm, dict):
+            kind = fm.get("kind")
+            return str(kind).strip() if isinstance(kind, str) else None
+    except Exception:
+        return None
     return None
 
 
@@ -181,8 +219,32 @@ def validate_evolution_skill(
     if not _skill_exists(store, skill_name):
         return f"未找到 Skill '{skill_name}'。当前可用：{_available_skill_names(store)}"
 
-    if require_skill_md and not _skill_definition_exists(store, skill_name):
-        return f"Skill '{skill_name}' 缺少 SKILL.md，无法执行演进生成。"
+    if require_skill_md:
+        if not _skill_definition_exists(store, skill_name):
+            return f"Skill '{skill_name}' 缺少 SKILL.md，无法执行演进生成。"
+
+        skill_dir = _resolve_skill_dir(store, skill_name)
+        if skill_dir is not None:
+            skill_md = skill_dir / "SKILL.md"
+            if skill_md.exists() and not os.access(skill_md, os.W_OK):
+                return f"Skill '{skill_name}' 的 SKILL.md 不可写，无法执行演进。"
+
+    return None
+
+
+def validate_team_evolution_skill(
+    store: Any,
+    skill_name: str,
+    require_skill_md: bool,
+) -> str | None:
+    """Validate that an evolution command can target ``skill_name`` in team mode."""
+    base_error = validate_evolution_skill(store, skill_name, require_skill_md)
+    if base_error is not None:
+        return base_error
+
+    kind = read_skill_kind(store, skill_name)
+    if kind is not None and kind not in ("swarm-skill", "team-skill"):
+        return f"集群模式下仅支持演进 Swarm Skill，指定 Skill '{skill_name}' 不是 Swarm Skill。"
 
     return None
 
@@ -550,6 +612,16 @@ def visible_evolution_progress_from_events(events: list[Any]) -> list[EvolutionP
         progress
         for progress in (evolution_progress_status_from_event(evt) for evt in events)
         if progress is not None and progress.stage in TEAM_EVOLUTION_VISIBLE_PROGRESS_STAGES
+    ]
+
+
+def visible_regular_evolution_start_progress(
+    progress_statuses: list[EvolutionProgressStatus],
+) -> list[EvolutionProgressStatus]:
+    return [
+        progress
+        for progress in progress_statuses
+        if progress.stage in REGULAR_EVOLUTION_VISIBLE_START_STAGES
     ]
 
 

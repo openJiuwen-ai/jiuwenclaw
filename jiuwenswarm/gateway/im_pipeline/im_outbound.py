@@ -19,6 +19,7 @@ import secrets
 from typing import TYPE_CHECKING, Any
 
 from jiuwenswarm.common.config import _parse_custom_headers
+from jiuwenswarm.common.reasoning_injector import build_reasoning_model_request_kwargs
 from jiuwenswarm.gateway.routing.interaction_context import PendingInteraction
 
 if TYPE_CHECKING:
@@ -79,11 +80,17 @@ class IMOutboundPipeline:
 
         react = cfg.get("react") or {}
         mcc_raw = react.get("model_client_config") or {}
+        model_config_obj = react.get("model_config_obj") or {}
         api_key = (mcc_raw.get("api_key") or os.getenv("API_KEY") or "").strip()
         api_base = (mcc_raw.get("api_base") or os.getenv("API_BASE") or "").strip()
         if api_base.endswith("/chat/completions"):
             api_base = api_base.rsplit("/chat/completions", 1)[0]
-        model_name = (react.get("model_name") or os.getenv("MODEL_NAME") or "gpt-4o").strip()
+        model_name = (
+            react.get("model_name")
+            or mcc_raw.get("model_name")
+            or os.getenv("MODEL_NAME")
+            or "gpt-4o"
+        ).strip()
         client_provider = mcc_raw.get("client_provider", "OpenAI")
         custom_headers = _parse_custom_headers(mcc_raw.get("custom_headers") or os.getenv("CUSTOM_HEADERS"))
 
@@ -106,10 +113,22 @@ class IMOutboundPipeline:
                 verify_ssl=False,
                 custom_headers=custom_headers,
             )
+            reasoning_mcc = {
+                **dict(mcc_raw or {}),
+                "client_provider": client_provider,
+                "api_base": api_base,
+            }
+            runtime_model_config_obj = {
+                **dict(model_config_obj or {}),
+                "temperature": 0.1,
+                "top_p": 0.1,
+            }
             model_config = ModelRequestConfig(
-                model_name=model_name,
-                temperature=0.1,
-                top_p=0.1,
+                **build_reasoning_model_request_kwargs(
+                    model_client_config=reasoning_mcc,
+                    model_config_obj=runtime_model_config_obj,
+                    model_name=model_name,
+                )
             )
             self._llm = Model(model_client_config=client_config, model_config=model_config)
             self._llm_model_name = model_name

@@ -3,6 +3,7 @@
  */
 
 export * from './message';
+export * from './skillTree';
 export * from './todo';
 export * from './websocket';
 
@@ -20,6 +21,7 @@ export interface Session {
   is_processing?: boolean;
   current_task?: string;
   tools?: string[];
+  team_name?: string;
   // ---- session.list 扩展字段 ----
   channel_id?: string;         // 渠道ID
   user_id?: string;            // 创建人ID
@@ -36,6 +38,7 @@ export interface ModelEntry {
   model_provider: string;
   timeout?: number;
   temperature?: number;
+  reasoning_level?: string;
   context_window_tokens?: number;
   /** 同 model_name 组内的默认勾选标识 */
   is_default?: boolean;

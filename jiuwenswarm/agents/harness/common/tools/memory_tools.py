@@ -1,6 +1,6 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 
-"""Memory tools for JiuWenClaw - Using @tool decorator for openjiuwen."""
+"""Memory tools for JiuWenSwarm - Using @tool decorator for openjiuwen."""
 
 import contextvars
 import logging

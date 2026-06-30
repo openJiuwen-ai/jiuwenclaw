@@ -71,6 +71,27 @@ parse_channel_control_text = _MOD.parse_channel_control_text
         ("/rewind confirm 0", ParsedControlAction.REWIND_BAD, None, None, None),
         ("/rewind confirm abc", ParsedControlAction.REWIND_BAD, None, None, None),
         ("/rewind cancel", ParsedControlAction.REWIND_CANCEL, None, None, None),
+        ("/review", ParsedControlAction.REVIEW_OK, None, None, None),
+        ("/review 123", ParsedControlAction.REVIEW_OK, None, None, None),
+        (
+            "/review https://github.com/org/repo/pull/123",
+            ParsedControlAction.REVIEW_OK,
+            None,
+            None,
+            None,
+        ),
+        ("/review abc", ParsedControlAction.REVIEW_OK, None, None, None),
+        ("/review 123 focus on security", ParsedControlAction.REVIEW_OK, None, None, None),
+        ("/review bb37e71c33b87199", ParsedControlAction.REVIEW_OK, None, None, None),
+        ("/review bad-arg", ParsedControlAction.REVIEW_OK, None, None, None),
+        ("/security-review", ParsedControlAction.SECURITY_REVIEW_OK, None, None, None),
+        (
+            "/security-review focus on auth",
+            ParsedControlAction.SECURITY_REVIEW_OK,
+            None,
+            None,
+            None,
+        ),
     ],
 )
 def test_parse_channel_control_text(
@@ -90,6 +111,38 @@ def test_parse_channel_control_text(
         assert p.switch_subcommand is None
     assert p.branch_name == branch_name
     assert p.rewind_turn == rewind_turn
+    if action is ParsedControlAction.REVIEW_OK:
+        if text == "/review":
+            assert p.pr_arg == ""
+        elif text.startswith("/review "):
+            assert p.pr_arg == text[len("/review "):].strip()
+    elif action is ParsedControlAction.REVIEW_BAD:
+        assert p.pr_arg is None
+    elif action is ParsedControlAction.SECURITY_REVIEW_OK:
+        if text == "/security-review":
+            assert p.security_review_arg == ""
+        elif text.startswith("/security-review "):
+            assert p.security_review_arg == text[len("/security-review "):].strip()
+    elif action is ParsedControlAction.SECURITY_REVIEW_BAD:
+        assert p.security_review_arg is None
+
+
+def test_parse_channel_control_text_review_rejects_unsafe_args() -> None:
+    too_long = "x" * 2049
+    p = parse_channel_control_text(f"/review {too_long}")
+    assert p.action is ParsedControlAction.REVIEW_BAD
+
+    p = parse_channel_control_text("/review bad\x00arg")
+    assert p.action is ParsedControlAction.REVIEW_BAD
+
+
+def test_parse_channel_control_text_security_review_rejects_unsafe_args() -> None:
+    too_long = "x" * 2049
+    p = parse_channel_control_text(f"/security-review {too_long}")
+    assert p.action is ParsedControlAction.SECURITY_REVIEW_BAD
+
+    p = parse_channel_control_text("/security-review bad\x00arg")
+    assert p.action is ParsedControlAction.SECURITY_REVIEW_BAD
 
 
 def test_control_message_texts_contains_mode_variants_and_skills() -> None:
@@ -122,6 +175,11 @@ def test_is_control_like_for_im_batching() -> None:
     assert is_control_like_for_im_batching("/branch fix-login")
     assert is_control_like_for_im_batching("/rewind 3")
     assert is_control_like_for_im_batching("/rewind")
+    assert is_control_like_for_im_batching("/review")
+    assert is_control_like_for_im_batching("/review 123")
+    assert is_control_like_for_im_batching("/review bad-arg")
+    assert is_control_like_for_im_batching("/security-review")
+    assert is_control_like_for_im_batching("/security-review focus on auth")
     assert not is_control_like_for_im_batching("/skills")
     assert not is_control_like_for_im_batching("/skills extra")
     assert not is_control_like_for_im_batching("")
@@ -146,6 +204,6 @@ def test_first_batch_registry_ids() -> None:
     ids = {e.id for e in FIRST_BATCH_REGISTRY}
     expected = {
         "new_session", "mode", "switch", "skills", "resume",
-        "workspace_dir", "branch", "rewind", "recap", "agents",
+        "workspace_dir", "branch", "rewind", "recap", "agents", "review", "security-review",
     }
     assert ids == expected

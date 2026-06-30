@@ -23,15 +23,76 @@ def test_a2ui_prompt_is_autonomous_not_forced():
     assert "A2UI is optional" in instruction
     assert "If A2UI is not appropriate, answer in plain text" in instruction
     assert "Do not promise to show the result with A2UI and then output only Markdown" in instruction
+    assert "Mandatory A2UI account-action gate" in instruction
+    assert "This is not optional" in instruction
+
+
+def test_a2ui_prompt_discourages_nested_templates():
+    instruction = build_a2ui_autonomy_instruction("en")
+
+    assert "Do not nest templates" in instruction
+    assert "flatten repeated item details" in instruction
+
+
+def test_a2ui_prompt_defines_hotel_booking_actions():
+    instruction = build_a2ui_autonomy_instruction("en")
+
+    assert "hotel_option_select" in instruction
+    assert "continue_hotel_booking" in instruction
+    assert "hotel_payment_confirm" in instruction
+    assert "hotel_payment_cancel" in instruction
+
+
+def test_a2ui_prompt_discourages_unsupported_popup_components():
+    instruction = build_a2ui_autonomy_instruction("en")
+
+    assert "modal" in instruction
+    assert "floating overlay" in instruction
+    assert "inline status" in instruction
+    assert "plain text" in instruction
+
+
+def test_a2ui_zh_prompt_discourages_unsupported_popup_components():
+    instruction = build_a2ui_autonomy_instruction("zh")
+
+    assert "弹窗" in instruction
+    assert "浮层" in instruction
+    assert "行内状态" in instruction
+    assert "纯文本" in instruction
+
+
+def test_a2ui_prompt_defines_gmail_and_social_actions():
+    instruction = build_a2ui_autonomy_instruction("en")
+
+    assert "Mandatory A2UI account-action gate" in instruction
+    assert "task_tool as a substitute" in instruction
+    assert "Never search multiple emails and send replies in the same uninterrupted run" in instruction
+    assert "returned emails/threads MUST still be shown as A2UI candidates" in instruction
+    assert "gmail_email_select" in instruction
+    assert "gmail_reply_draft_select" in instruction
+    assert "gmail_send_confirm" in instruction
+    assert "gmail_cleanup_select" in instruction
+    assert "gmail_cleanup_confirm" in instruction
+    assert "social_post_draft_select" in instruction
+    assert "social_post_confirm" in instruction
+    assert "social_post_cancel" in instruction
 
 
 def test_a2ui_zh_prompt_section_is_readable():
     prompt = build_a2ui_prompt_section("zh")
 
-    assert "你是 jiuwenswarm 的 A2UI 生成器" in prompt
+    assert "你是 jiuwenswarm 的 A2UI 生成器" not in prompt
+    assert "JiuwenSwarm 支持可选的 A2UI 输出格式" in prompt
     assert "当用户需要列表、卡片、表单" in prompt
     assert "浣犳槸" not in prompt
     assert "鐢熸垚" not in prompt
+
+
+def test_a2ui_en_prompt_does_not_use_generator_identity():
+    prompt = build_a2ui_prompt_section("en")
+
+    assert "You are jiuwenswarm's A2UI generator" not in prompt
+    assert "JiuwenSwarm supports an optional A2UI output format" in prompt
 
 
 def test_a2ui_zh_client_event_prompt_is_readable():

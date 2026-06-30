@@ -6,6 +6,100 @@ from __future__ import annotations
 
 
 def build_a2ui_autonomy_instruction(language: str = "en") -> str:
+    browser_preflight_rule_en = (
+        " Browser task preflight: when the user asks you to perform a browser "
+        "automation task such as booking tickets, reserving hotels, buying "
+        "products, filling forms, handling webmail, posting to social media, or "
+        "comparing purchasable options, first check "
+        "whether the task has enough user-confirmed details before calling any "
+        "browser tool or browser subagent. If required details are missing and "
+        "the Web A2UI channel is available, do not start browser automation yet. "
+        "Instead, render an A2UI information-collection or confirmation form. "
+        "Do not ask for those missing browser-task details through plain natural "
+        "language, Markdown, or the ask_user tool when A2UI is available. "
+        "The submit Button action name MUST be 'browser_preflight_submit'. Its "
+        "action.context MUST include original_query, task_type, next_action with "
+        "the value 'run_browser_agent', must_confirm_before_payment with true, "
+        "and all form values using path references. After this action is "
+        "submitted, combine the original request and submitted values, then use "
+        "spawn_sub_agent with subagent_type 'browser_agent'. Never buy, book, "
+        "pay, or place an order without a final explicit user confirmation."
+    )
+    mandatory_account_action_rule_en = (
+        " Mandatory A2UI account-action gate: on the Web channel, Gmail, email, "
+        "mailbox cleanup, social-media posting, comments, or any externally "
+        "visible account action MUST use A2UI when A2UI is available. This is "
+        "not optional. Do not use plain text, Markdown, ask_user, todo tools, "
+        "memory tools, task planning, or task_tool as a substitute for the A2UI "
+        "preflight, candidate selection, draft review, or final confirmation. "
+        "For a request like finding emails and replying to those that need a "
+        "reply, first render an A2UI preflight if filters or reply preferences "
+        "are incomplete; after Gmail search, render an A2UI email/thread "
+        "candidate list before opening or replying to selected messages; after "
+        "drafting, render a final A2UI send confirmation before sending. Never "
+        "search multiple emails and send replies in the same uninterrupted run "
+        "without an A2UI user selection and final send confirmation."
+    )
+    hotel_booking_flow_rule_en = (
+        " Hotel booking A2UI flow: after browser_agent returns candidate hotels, "
+        "present the candidates as A2UI cards or a comparable list. Each hotel's "
+        "selection Button action name MUST be 'hotel_option_select'. Its "
+        "action.context MUST include task_type='hotel', next_action with the "
+        "value 'continue_hotel_booking', original_query, selected hotel name, "
+        "candidate index or id, and the confirmed city/check-in/check-out/guest "
+        "and room criteria. Include a candidate/detail URL, provider, room type, "
+        "price, currency, and cancellation policy when available. After the user "
+        "selects a hotel, continue the existing browser state for that candidate; "
+        "do not restart the broad city/date search. At the payment or order "
+        "summary page, render a final A2UI confirmation whose confirm Button "
+        "action name is 'hotel_payment_confirm' and whose cancel Button action "
+        "name is 'hotel_payment_cancel'."
+    )
+    gmail_flow_rule_en = (
+        " Gmail A2UI flow: for Gmail search, summarization, reply drafting, or "
+        "mailbox cleanup requests, collect missing filters with preflight A2UI "
+        "before browser automation. If the user already provided enough filters, "
+        "browser_agent may search Gmail, but the returned emails/threads MUST "
+        "still be shown as A2UI candidates before summarizing multiple messages, "
+        "drafting replies, modifying labels, archiving, deleting, unsubscribing, "
+        "or sending anything. After browser_agent returns Gmail search "
+        "results, render emails or threads as A2UI cards/lists. Each email "
+        "selection Button action name MUST be 'gmail_email_select'. Its "
+        "action.context MUST include task_type='gmail', next_action with the "
+        "value 'continue_gmail_email_review', original_query, search query or "
+        "filters, sender, subject, date/time, message/thread id or index, and "
+        "thread URL when available. For reply drafts, render draft options whose "
+        "selection Button action name is 'gmail_reply_draft_select' with "
+        "next_action='continue_gmail_reply_draft', recipient, subject, selected "
+        "draft body, tone, and selected thread context. At the final send step, "
+        "render a confirmation with confirm action 'gmail_send_confirm' and "
+        "cancel action 'gmail_send_cancel'; after the user clicks confirm, send "
+        "the email only if the visible Gmail compose state still matches the "
+        "A2UI confirmation context. For mailbox cleanup, candidate "
+        "selection actions MUST use 'gmail_cleanup_select' with "
+        "next_action='review_gmail_cleanup'. The final cleanup confirmation MUST "
+        "use confirm action 'gmail_cleanup_confirm' and cancel action "
+        "'gmail_cleanup_cancel'. Never send, delete, archive, unsubscribe, mark "
+        "read, label, or otherwise modify Gmail without the relevant final "
+        "confirmation action."
+    )
+    social_post_flow_rule_en = (
+        " Social media A2UI flow: for posting to social media websites, first "
+        "collect missing platform, account, audience, visibility, tone, media, "
+        "link, and post intent details with A2UI. Render draft variants as A2UI "
+        "cards. Each draft selection Button action name MUST be "
+        "'social_post_draft_select'. Its action.context MUST include "
+        "task_type='social_post', next_action with the value "
+        "'continue_social_post_draft', original_query, platform, account or "
+        "account_hint, selected draft body, visibility, media/link state, and "
+        "target audience. After a draft is selected, fill the compose UI but do "
+        "not publish. The final publish confirmation MUST use confirm action "
+        "'social_post_confirm' and cancel action 'social_post_cancel'; after "
+        "the user clicks confirm, publish the post only if the visible compose "
+        "state still matches the A2UI confirmation context. Never publish, post, "
+        "comment, like, follow, delete, or perform externally visible social "
+        "actions without final explicit confirmation."
+    )
     template_binding_rule_en = (
         " For repeated list/card data, use A2UI template binding correctly: "
         "Duplicate dataModelUpdate keys are invalid. Encode arrays as one "
@@ -13,7 +107,10 @@ def build_a2ui_autonomy_instruction(language: str = "en") -> str:
         "each item contains its own nested valueMap fields. Inside template "
         "components, use item-relative paths like 'name', 'price', or "
         "'/item/name' for Text, Image, and Button.action.context values; do not "
-        "use collection-absolute paths such as '/phones/name' inside templates."
+        "use collection-absolute paths such as '/phones/name' inside templates. "
+        "Do not nest templates inside template-rendered components in A2UI 0.8; "
+        "flatten repeated item details into fields on the outer item, or use "
+        "explicit child components that bind to those fields."
     )
     image_url_rule_en = (
         " Do not invent image URLs. If external facts or images are needed, use "
@@ -26,6 +123,14 @@ def build_a2ui_autonomy_instruction(language: str = "en") -> str:
         "Avoid A2UI Icon for semantic content such as product or status icons; "
         "use Text literalString emoji or text labels instead so ligature fallback "
         "text does not appear."
+    )
+    unsupported_component_rule_en = (
+        " A2UI 0.8 does not support modal, dialog, popup, alert, toast, "
+        "floating overlay, or closeable window components. Do not simulate these "
+        "with absolute-positioned cards or fake close buttons. If the request can "
+        "be approximated, use an inline status, inline card, or confirmation area "
+        "inside the normal surface. If it cannot be approximated faithfully, answer "
+        "in plain text that the requested component is not currently supported."
     )
     autonomy_rule_en = (
         " A2UI is optional. Use A2UI only when a generated interface improves "
@@ -55,6 +160,7 @@ def build_a2ui_autonomy_instruction(language: str = "en") -> str:
         + template_binding_rule_en
         + image_url_rule_en
         + icon_font_rule_en
+        + unsupported_component_rule_en
     )
 
     template_binding_rule_zh = (
@@ -62,12 +168,20 @@ def build_a2ui_autonomy_instruction(language: str = "en") -> str:
         "请把数组编码为一个集合 key，并在 valueMap 中使用 \"0\"、\"1\" 这类索引项；"
         "每个 item 包含自己的嵌套 valueMap 字段。模板组件和 Button.action.context "
         "内使用 item-relative path，例如 name、price 或 /item/name；"
-        "不要在模板内使用 /phones/name 这类集合绝对路径。"
+        "不要在模板内使用 /phones/name 这类集合绝对路径。A2UI 0.8 不要在模板渲染出的"
+        "组件内部再嵌套 template；请把重复 item 的明细拍平成外层 item 字段，或使用显式"
+        "子组件绑定这些字段。"
     )
     image_url_rule_zh = (
         " 不要编造图片 URL。如果需要外部事实或图片，可以短暂使用可用工具，"
         "随后必须收敛到最终 A2UI 响应。使用用户提供的 HTTPS URL "
         "或已验证的稳定来源 URL；不要使用猜测出来的 upload.wikimedia.org thumbnail 路径。"
+    )
+    unsupported_component_rule_zh = (
+        " A2UI 0.8 不支持弹窗、模态框、dialog、popup、alert、toast、浮层、"
+        "悬浮覆盖层或可关闭窗口组件。不要用绝对定位卡片或假的关闭按钮模拟这些组件。"
+        "如果可以近似表达，请在普通 surface 内使用行内状态、行内卡片或确认区域；"
+        "如果无法忠实近似，请用纯文本说明当前暂不支持该组件。"
     )
     autonomy_rule_zh = (
         " A2UI 是可选能力。只有当生成式 UI 比纯文本更能改善用户体验时才使用 A2UI。"
@@ -89,7 +203,13 @@ def build_a2ui_autonomy_instruction(language: str = "en") -> str:
         + template_binding_rule_zh
         + image_url_rule_zh
         + icon_font_rule_en
+        + unsupported_component_rule_zh
         + autonomy_rule_zh
+        + mandatory_account_action_rule_en
+        + browser_preflight_rule_en
+        + hotel_booking_flow_rule_en
+        + gmail_flow_rule_en
+        + social_post_flow_rule_en
     )
 
     if language in {"zh", "cn"}:
@@ -115,6 +235,11 @@ def build_a2ui_autonomy_instruction(language: str = "en") -> str:
         "server-to-client message list, with beginRendering before "
         "surfaceUpdate and dataModelUpdate only when needed."
         + autonomy_rule_en
+        + mandatory_account_action_rule_en
+        + browser_preflight_rule_en
+        + hotel_booking_flow_rule_en
+        + gmail_flow_rule_en
+        + social_post_flow_rule_en
         + requested_component_rule_en
     )
 

@@ -1,6 +1,6 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 
-"""Unit tests for LspRail registration and degradation in JiuwenClawCodeAdapter.
+"""Unit tests for LspRail registration and degradation in JiuwenSwarmCodeAdapter.
 
 Covers:
 - TC-001: RAIL_BUILD_NAMES does not contain LspRail entry
@@ -29,8 +29,8 @@ import jiuwenswarm.server.runtime.agent_adapter.interface_code as _ic_mod
 
 _RAIL_BUILD_NAMES = getattr(_ic_mod, "_RAIL_BUILD_NAMES")
 _RailBuildInfo = getattr(_ic_mod, "_RailBuildInfo")
-JiuwenClawCodeAdapter = _ic_mod.JiuwenClawCodeAdapter
-_FIXED_RAIL_NAMES = getattr(JiuwenClawCodeAdapter, "_FIXED_RAIL_NAMES")
+JiuwenSwarmCodeAdapter = _ic_mod.JiuwenSwarmCodeAdapter
+_FIXED_RAIL_NAMES = getattr(JiuwenSwarmCodeAdapter, "_FIXED_RAIL_NAMES")
 
 
 def _make_log_capture():
@@ -83,7 +83,7 @@ def test_rail_build_names_still_contains_other_required_entries():
 
 def test_rail_build_names_lsp_rail_via_config_method_still_accessible():
     """Verify build_lsp_rail_via_config method still exists on the adapter instance."""
-    adapter = JiuwenClawCodeAdapter()
+    adapter = JiuwenSwarmCodeAdapter()
     assert hasattr(adapter, "_build_lsp_rail_via_config"), (
         "build_lsp_rail_via_config should still exist as a method "
         "since it is called by the fixed rail list"
@@ -95,7 +95,7 @@ def test_rail_build_names_lsp_rail_via_config_method_still_accessible():
 
 def test_import_error_logs_config_error_label():
     """Verify ImportError produces [config_error] classification label."""
-    adapter = JiuwenClawCodeAdapter()
+    adapter = JiuwenSwarmCodeAdapter()
     log_capture, handler = _make_log_capture()
     _ic_mod.logger.addHandler(handler)
 
@@ -115,7 +115,7 @@ def test_import_error_logs_config_error_label():
 
 def test_file_not_found_error_logs_server_start_failed_label():
     """Verify FileNotFoundError produces [server_start_failed] classification label."""
-    adapter = JiuwenClawCodeAdapter()
+    adapter = JiuwenSwarmCodeAdapter()
     log_capture, handler = _make_log_capture()
     _ic_mod.logger.addHandler(handler)
 
@@ -135,7 +135,7 @@ def test_file_not_found_error_logs_server_start_failed_label():
 
 def test_os_error_logs_server_start_failed_label():
     """Verify OSError produces [server_start_failed] classification label."""
-    adapter = JiuwenClawCodeAdapter()
+    adapter = JiuwenSwarmCodeAdapter()
     log_capture, handler = _make_log_capture()
     _ic_mod.logger.addHandler(handler)
 
@@ -155,7 +155,7 @@ def test_os_error_logs_server_start_failed_label():
 
 def test_generic_exception_logs_unknown_label():
     """Verify other exceptions produce [unknown] classification label."""
-    adapter = JiuwenClawCodeAdapter()
+    adapter = JiuwenSwarmCodeAdapter()
     log_capture, handler = _make_log_capture()
     _ic_mod.logger.addHandler(handler)
 
@@ -175,7 +175,7 @@ def test_generic_exception_logs_unknown_label():
 
 def test_degradation_log_is_warning_level():
     """Verify degradation log is WARNING level, not ERROR."""
-    adapter = JiuwenClawCodeAdapter()
+    adapter = JiuwenSwarmCodeAdapter()
     log_capture, handler = _make_log_capture()
     _ic_mod.logger.addHandler(handler)
 
@@ -216,7 +216,7 @@ def test_fixed_rail_names_is_frozenset():
 
 def test_build_lsp_rail_via_config_in_fixed_list():
     """Verify build_lsp_rail_via_config method is callable on the adapter."""
-    adapter = JiuwenClawCodeAdapter()
+    adapter = JiuwenSwarmCodeAdapter()
     build_func = getattr(adapter, "_build_lsp_rail_via_config")
     assert callable(build_func), (
         "build_lsp_rail_via_config should be callable "
@@ -226,9 +226,9 @@ def test_build_lsp_rail_via_config_in_fixed_list():
 
 def test_lsp_rail_attr_name_in_fixed_list_context():
     """Verify lsp_rail attribute name is expected in the adapter."""
-    adapter = JiuwenClawCodeAdapter()
+    adapter = JiuwenSwarmCodeAdapter()
     assert hasattr(adapter, "_lsp_rail"), (
-        "JiuwenClawCodeAdapter should have lsp_rail attribute slot"
+        "JiuwenSwarmCodeAdapter should have lsp_rail attribute slot"
     )
 
 
@@ -237,7 +237,7 @@ def test_lsp_rail_attr_name_in_fixed_list_context():
 
 def test_build_lsp_rail_returns_none_on_failure():
     """Verify build_lsp_rail returns None when LspRail creation fails."""
-    adapter = JiuwenClawCodeAdapter()
+    adapter = JiuwenSwarmCodeAdapter()
 
     with patch.object(_ic_mod, "LspRail", side_effect=ImportError("test import error")), \
          patch.object(_ic_mod, "InitializeOptions", MagicMock(cwd="/test/project")):

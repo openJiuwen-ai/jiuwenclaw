@@ -204,12 +204,14 @@ class ToolMgr:
         for tool_id in tools:
             try:
                 self.remove_tool(tool_id)
-            except Exception:
+            except Exception as e:
+                logger.warning(f"Failed to remove MCP tool {tool_id}: {e}")
                 continue
 
     async def release(self):
         for res in self._mcp_server_resources.values():
             try:
                 await res.client.disconnect()
-            except Exception:
+            except Exception as e:
+                logger.warning(f"Failed to disconnect MCP client during release: {e}")
                 continue
