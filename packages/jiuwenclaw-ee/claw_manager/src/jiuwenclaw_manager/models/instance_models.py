@@ -30,6 +30,6 @@ INSTANCE_INFO_TABLE_DEF = TableDefinition(
     ],
     indexes=[
         IndexDefinition(["status"], unique=False),
-        IndexDefinition(["created_at"], unique=False),
+        IndexDefinition(["updated_at"], unique=False),
     ],
 )

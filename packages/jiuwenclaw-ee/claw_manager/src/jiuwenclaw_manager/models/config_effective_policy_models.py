@@ -30,10 +30,7 @@ CONFIG_EFFECTIVE_GLOBAL_POLICY_TABLE_DEF = TableDefinition(
         ColumnDefinition("updated_at", "datetime", nullable=False),
     ],
     indexes=[
-        IndexDefinition(["jiuwenclaw_id"], unique=False),
-        IndexDefinition(["policy_id"], unique=True),
-        IndexDefinition(["jiuwenclaw_id", "priority"], unique=False),
-        IndexDefinition(["enabled"], unique=False),
+        IndexDefinition(["jiuwenclaw_id", "policy_id"], unique=True),
     ],
 )
 
@@ -61,10 +58,7 @@ CONFIG_EFFECTIVE_SERVICE_POLICY_TABLE_DEF = TableDefinition(
         ColumnDefinition("updated_at", "datetime", nullable=False),
     ],
     indexes=[
-        IndexDefinition(["jiuwenclaw_id"], unique=False),
-        IndexDefinition(["policy_id"], unique=True),
-        IndexDefinition(["jiuwenclaw_id", "priority"], unique=False),
-        IndexDefinition(["enabled"], unique=False),
+        IndexDefinition(["jiuwenclaw_id", "policy_id"], unique=True),
     ],
 )
 
@@ -94,11 +88,7 @@ CONFIG_EFFECTIVE_AGENT_POLICY_TABLE_DEF = TableDefinition(
         ColumnDefinition("updated_at", "datetime", nullable=False),
     ],
     indexes=[
-        IndexDefinition(["jiuwenclaw_id"], unique=False),
-        IndexDefinition(["policy_id"], unique=True),
-        IndexDefinition(["jiuwenclaw_id", "priority"], unique=False),
-        IndexDefinition(["service_policy_id"], unique=False),
-        IndexDefinition(["enabled"], unique=False),
+        IndexDefinition(["jiuwenclaw_id", "policy_id"], unique=True),
     ],
 )
 
@@ -127,13 +117,6 @@ CONFIG_DEFAULT_TEMPLATE_MAPPING_TABLE_DEF = TableDefinition(
         ColumnDefinition("updated_at", "datetime", nullable=False),
     ],
     indexes=[
-        IndexDefinition(["jiuwenclaw_id"], unique=False),
-        IndexDefinition(["policy_id"], unique=True),
-        IndexDefinition(["jiuwenclaw_id", "priority"], unique=False),
-        IndexDefinition(["scope_type"], unique=False),
-        IndexDefinition(["scope_id"], unique=False),
-        IndexDefinition(["scope_type", "scope_id"], unique=False),
-        IndexDefinition(["template_type"], unique=False),
-        IndexDefinition(["enabled"], unique=False),
+        IndexDefinition(["jiuwenclaw_id", "policy_id"], unique=True),
     ],
 )
