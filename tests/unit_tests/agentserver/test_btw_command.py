@@ -108,6 +108,9 @@ def _make_adapter(**overrides: Any) -> Any:
     adapter._last_system_prompt = overrides.get("_last_system_prompt", "")
     adapter._model = overrides.get("_model", None)
     adapter._resolve_prompt_language = MagicMock(return_value="en")
+    # _get_agent_tools touches _session_adapters/_get_cached_session_adapter which
+    # the bare test object lacks; default to returning no tools (→ tools=None path).
+    adapter._get_agent_tools = AsyncMock(return_value=[])
     return adapter
 
 
@@ -394,6 +397,7 @@ class TestCallModelForRecap:
         mock_model = AsyncMock()
         mock_result = MagicMock()
         mock_result.content = "answer"
+        mock_result.tool_calls = None  # MagicMock auto-attr guard: no tool_use
         mock_model.invoke.return_value = mock_result
         adapter._model = mock_model
 
@@ -419,6 +423,7 @@ class TestCallModelForRecap:
         mock_model = AsyncMock()
         mock_result = MagicMock()
         mock_result.content = "answer"
+        mock_result.tool_calls = None  # MagicMock auto-attr guard: no tool_use
         mock_model.invoke.return_value = mock_result
         adapter._model = mock_model
 
@@ -444,6 +449,7 @@ class TestCallModelForRecap:
         mock_model = AsyncMock()
         mock_result = MagicMock()
         mock_result.content = "answer"
+        mock_result.tool_calls = None  # MagicMock auto-attr guard: no tool_use
         mock_model.invoke.return_value = mock_result
         adapter._model = mock_model
 
@@ -464,6 +470,7 @@ class TestCallModelForRecap:
         mock_model = AsyncMock()
         mock_result = MagicMock()
         mock_result.content = "answer"
+        mock_result.tool_calls = None  # MagicMock auto-attr guard: no tool_use
         mock_model.invoke.return_value = mock_result
         adapter._model = mock_model
 
@@ -482,6 +489,7 @@ class TestCallModelForRecap:
         mock_model = AsyncMock()
         mock_result = MagicMock()
         mock_result.content = "answer"
+        mock_result.tool_calls = None  # MagicMock auto-attr guard: no tool_use
         mock_model.invoke.return_value = mock_result
         adapter._model = mock_model
 
@@ -500,6 +508,7 @@ class TestCallModelForRecap:
         mock_model = AsyncMock()
         mock_result = MagicMock()
         mock_result.content = "answer"
+        mock_result.tool_calls = None  # MagicMock auto-attr guard: no tool_use
         mock_model.invoke.return_value = mock_result
         adapter._model = mock_model
 
@@ -527,6 +536,7 @@ class TestCallModelForRecap:
         mock_model = AsyncMock()
         mock_result = MagicMock()
         mock_result.content = "answer"
+        mock_result.tool_calls = None  # MagicMock auto-attr guard: no tool_use
         mock_model.invoke.return_value = mock_result
         adapter._model = mock_model
 
@@ -554,6 +564,7 @@ class TestCallModelForRecap:
         mock_model = AsyncMock()
         mock_result = MagicMock()
         mock_result.content = "answer"
+        mock_result.tool_calls = None  # MagicMock auto-attr guard: no tool_use
         mock_model.invoke.return_value = mock_result
         adapter._model = mock_model
 
@@ -570,6 +581,7 @@ class TestCallModelForRecap:
         mock_model = AsyncMock()
         mock_result = MagicMock()
         mock_result.content = "answer"
+        mock_result.tool_calls = None  # MagicMock auto-attr guard: no tool_use
         mock_model.invoke.return_value = mock_result
         adapter._model = mock_model
 
@@ -587,6 +599,8 @@ class TestCallModelForRecap:
         mock_model = AsyncMock()
         mock_result = MagicMock()
         mock_result.content = "answer"
+        mock_result.tool_calls = None  # MagicMock auto-attr guard: no tool_use
+        mock_result.tool_calls = None  # no tool_use → cache-log path, not fallback
         mock_usage = MagicMock()
         mock_usage.cache_tokens = 42
         mock_usage.input_tokens = 100
@@ -625,6 +639,7 @@ class TestCallModelForRecap:
         mock_model = AsyncMock()
         mock_result = MagicMock()
         mock_result.content = "answer"
+        mock_result.tool_calls = None  # MagicMock auto-attr guard: no tool_use
         mock_model.invoke.return_value = mock_result
         adapter._model = mock_model
 
@@ -643,6 +658,7 @@ class TestCallModelForRecap:
         mock_model = AsyncMock()
         mock_result = MagicMock()
         mock_result.content = "answer"
+        mock_result.tool_calls = None  # MagicMock auto-attr guard: no tool_use
         mock_model.invoke.return_value = mock_result
         adapter._model = mock_model
 
@@ -658,6 +674,123 @@ class TestCallModelForRecap:
         roles_found = [getattr(m, "role", type(m).__name__) for m in invoke_args]
         # Should contain UserMessage, AssistantMessage, UserMessage for system
         assert "user" in roles_found or any("UserMessage" in str(type(m)) for m in invoke_args)
+
+    @pytest.mark.asyncio
+    async def test_passes_tools_to_model_invoke(self):
+        """tools arg must be forwarded to model.invoke to preserve the cache key."""
+        adapter = _make_adapter()
+        mock_model = AsyncMock()
+        mock_result = MagicMock()
+        mock_result.content = "answer"
+        mock_result.tool_calls = None  # MagicMock auto-attr guard: no tool_use
+        mock_model.invoke.return_value = mock_result
+        adapter._model = mock_model
+
+        sentinel_tools = [{"name": "Read"}]
+        await adapter._call_model_for_recap(
+            [_make_msg(role="user", content="hello")], "prompt",
+            tools=sentinel_tools,
+        )
+
+        assert mock_model.invoke.call_args[1]["tools"] is sentinel_tools
+
+    @pytest.mark.asyncio
+    async def test_default_tools_is_none_keeps_no_tools_path(self):
+        """Omitting tools (recap path) must pass tools=None — no tools in request."""
+        adapter = _make_adapter()
+        mock_model = AsyncMock()
+        mock_result = MagicMock()
+        mock_result.content = "answer"
+        mock_result.tool_calls = None  # MagicMock auto-attr guard: no tool_use
+        mock_model.invoke.return_value = mock_result
+        adapter._model = mock_model
+
+        await adapter._call_model_for_recap(
+            [_make_msg(role="user", content="hello")], "prompt",
+        )
+
+        assert mock_model.invoke.call_args[1]["tools"] is None
+
+    @pytest.mark.asyncio
+    async def test_tool_use_emitted_returns_fallback_not_tool_content(self):
+        adapter = _make_adapter()
+        mock_model = AsyncMock()
+        mock_result = MagicMock()
+        mock_result.content = ""  # no text — only tool_use
+        tool_call = MagicMock()
+        tool_call.name = "Read"
+        mock_result.tool_calls = [tool_call]
+        mock_model.invoke.return_value = mock_result
+        adapter._model = mock_model
+
+        result = await adapter._call_model_for_recap(
+            [_make_msg(role="user", content="hello")], "prompt",
+            tools=[{"name": "Read"}],
+        )
+
+        # Fallback surfaced to the user, mentioning the attempted tool name
+        assert result is not None
+        assert "Read" in result
+        assert "工具" in result or "tool" in result.lower()
+
+    @pytest.mark.asyncio
+    async def test_tool_use_discarded_even_with_text_content(self):
+        adapter = _make_adapter()
+        mock_model = AsyncMock()
+        mock_result = MagicMock()
+        mock_result.content = "let me read that for you"
+        tool_call = MagicMock()
+        tool_call.name = "Read"
+        mock_result.tool_calls = [tool_call]
+        mock_model.invoke.return_value = mock_result
+        adapter._model = mock_model
+
+        result = await adapter._call_model_for_recap(
+            [_make_msg(role="user", content="hello")], "prompt",
+            tools=[{"name": "Read"}],
+        )
+
+        assert "Read" in result
+        # The action-promise text must NOT be returned as the answer
+        assert "let me read that for you" not in result
+
+    @pytest.mark.asyncio
+    async def test_no_tool_calls_returns_normal_content(self):
+        """When tool_calls is absent/None, return content as before."""
+        adapter = _make_adapter()
+        mock_model = AsyncMock()
+        mock_result = MagicMock()
+        mock_result.content = "plain answer"
+        mock_result.tool_calls = None
+        mock_result.usage_metadata = None  # avoid MagicMock auto-attr in cache-log guard
+        mock_model.invoke.return_value = mock_result
+        adapter._model = mock_model
+
+        result = await adapter._call_model_for_recap(
+            [_make_msg(role="user", content="hello")], "prompt",
+            tools=[{"name": "Read"}],
+        )
+
+        assert result == "plain answer"
+
+    @pytest.mark.asyncio
+    async def test_empty_tool_calls_list_returns_normal_content(self):
+        """An empty tool_calls list must not trigger the fallback path."""
+        adapter = _make_adapter()
+        mock_model = AsyncMock()
+        mock_result = MagicMock()
+        mock_result.content = "plain answer"
+        mock_result.tool_calls = []
+        mock_result.usage_metadata = None  # avoid MagicMock auto-attr in cache-log guard
+        mock_model.invoke.return_value = mock_result
+        adapter._model = mock_model
+
+        result = await adapter._call_model_for_recap(
+            [_make_msg(role="user", content="hello")], "prompt",
+            tools=[{"name": "Read"}],
+        )
+
+        assert result == "plain answer"
 
 
 # =============================================================================
@@ -705,7 +838,7 @@ class TestGenerateBtwAnswer:
             return [_make_msg(role="user", content="hello")]
         adapter._get_recent_messages = _get_recent_messages
 
-        async def _call_model(messages, prompt, system_prompt="", enable_prompt_caching=True):
+        async def _call_model(messages, prompt, system_prompt="", enable_prompt_caching=True, **kwargs):
             return "  \n  the answer \n  "
         adapter._call_model_for_recap = _call_model
 
@@ -730,6 +863,46 @@ class TestGenerateBtwAnswer:
         adapter._call_model_for_recap = _capture_call
         await adapter.generate_btw_answer("s1", "q?")
         assert received_kwargs.get("enable_prompt_caching") is True
+
+    @pytest.mark.asyncio
+    async def test_fetches_and_forwards_tools(self):
+        adapter = _make_adapter(_last_system_prompt="sys")
+
+        def _get_recent_messages(session_id, window=30):
+            return [_make_msg()]
+        adapter._get_recent_messages = _get_recent_messages
+
+        fetched_tools = [{"name": "Read"}, {"name": "Bash"}]
+        adapter._get_agent_tools = AsyncMock(return_value=fetched_tools)
+
+        received_kwargs = {}
+
+        async def _capture_call(*args, **kwargs):
+            received_kwargs.update(kwargs)
+            return "answer"
+
+        adapter._call_model_for_recap = _capture_call
+        await adapter.generate_btw_answer("s1", "q?")
+        assert received_kwargs.get("tools") is fetched_tools
+
+    @pytest.mark.asyncio
+    async def test_empty_tools_normalized_to_none(self):
+        adapter = _make_adapter(_last_system_prompt="sys")
+
+        def _get_recent_messages(session_id, window=30):
+            return [_make_msg()]
+        adapter._get_recent_messages = _get_recent_messages
+        adapter._get_agent_tools = AsyncMock(return_value=[])
+
+        received_kwargs = {}
+
+        async def _capture_call(*args, **kwargs):
+            received_kwargs.update(kwargs)
+            return "answer"
+
+        adapter._call_model_for_recap = _capture_call
+        await adapter.generate_btw_answer("s1", "q?")
+        assert received_kwargs.get("tools") is None
 
     @pytest.mark.asyncio
     async def test_no_context_with_messages_but_no_system_prompt_still_calls_model(self):

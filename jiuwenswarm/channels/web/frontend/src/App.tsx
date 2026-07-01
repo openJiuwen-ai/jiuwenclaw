@@ -87,6 +87,7 @@ function clearTeamRuntimeState(): void {
   sessionStore.setTeamTaskEvents([]);
   sessionStore.setTeamTasks([]);
   sessionStore.setTeamMemberExecutionEvents([]);
+  sessionStore.clearAllTeamMemberContextCompressionStatus();
   sessionStore.setTeamHistoryMessages([]);
 }
 

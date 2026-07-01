@@ -3,7 +3,16 @@
  */
 
 import { create } from 'zustand';
-import { Session, AgentMode, WebConnectionState, ModelEntry, Message } from '../types';
+import {
+  Session,
+  AgentMode,
+  WebConnectionState,
+  ModelEntry,
+  Message,
+  ContextCompressionRuntime,
+  ContextCompressionSummary,
+  TeamMemberContextCompressionState,
+} from '../types';
 
 const STORAGE_KEY = 'jiuwenclaw_context_compression';
 const MODE_STORAGE_KEY = 'jiuwenclaw_mode';
@@ -225,6 +234,7 @@ interface SessionState {
   teamMembers: TeamMember[];
   teamLeaderMemberIds: string[];
   teamMemberExecutionEvents: TeamMemberExecutionEvent[];
+  teamMemberContextCompression: Record<string, TeamMemberContextCompressionState>;
   teamHistoryMessages: Message[];
   availableModels: ModelEntry[];
   selectedModelName: string | null;
@@ -261,6 +271,13 @@ interface SessionState {
   updateTeamMemberStatus: (memberId: string, newStatus: string, timestamp?: number) => void;
   setTeamMemberExecutionEvents: (events: TeamMemberExecutionEvent[]) => void;
   addTeamMemberExecutionEvent: (event: TeamMemberExecutionEvent) => void;
+  setTeamMemberContextCompressionStatus: (
+    memberId: string,
+    runtime?: ContextCompressionRuntime,
+    summary?: ContextCompressionSummary
+  ) => void;
+  clearTeamMemberContextCompressionStatus: (memberId: string) => void;
+  clearAllTeamMemberContextCompressionStatus: () => void;
   setTeamHistoryMessages: (messages: Message[]) => void;
   setAvailableModels: (models: ModelEntry[], activeModel?: string) => void;
   setSelectedModelName: (name: string) => void;
@@ -293,6 +310,7 @@ export const useSessionStore = create<SessionState>((set) => ({
   teamMembers: [],
   teamLeaderMemberIds: [],
   teamMemberExecutionEvents: [],
+  teamMemberContextCompression: {},
   teamHistoryMessages: [],
   availableModels: [],
   chatAvailableModels: [],
@@ -529,7 +547,16 @@ export const useSessionStore = create<SessionState>((set) => ({
     });
   },
   setTeamMembers: (members) => {
-    set({ teamMembers: members });
+    set((state) => {
+      const memberIds = new Set(members.map((member) => member.member_id));
+      const nextCompression = Object.fromEntries(
+        Object.entries(state.teamMemberContextCompression).filter(([memberId]) => memberIds.has(memberId))
+      );
+      return {
+        teamMembers: members,
+        teamMemberContextCompression: nextCompression,
+      };
+    });
   },
   setTeamLeaderMemberIds: (memberIds) => {
     const normalized = Array.from(
@@ -621,6 +648,35 @@ export const useSessionStore = create<SessionState>((set) => ({
         teamMemberExecutionEvents: [eventPatch, ...state.teamMemberExecutionEvents].slice(0, 300),
       };
     });
+  },
+  setTeamMemberContextCompressionStatus: (memberId, runtime, summary) => {
+    const normalizedMemberId = memberId.trim();
+    if (!normalizedMemberId) return;
+    set((state) => {
+      const next = { ...state.teamMemberContextCompression };
+      if (!runtime && !summary) {
+        delete next[normalizedMemberId];
+      } else {
+        const existing = next[normalizedMemberId];
+        next[normalizedMemberId] = { runtime, summary: summary ?? existing?.summary };
+      }
+      return { teamMemberContextCompression: next };
+    });
+  },
+  clearTeamMemberContextCompressionStatus: (memberId) => {
+    const normalizedMemberId = memberId.trim();
+    if (!normalizedMemberId) return;
+    set((state) => {
+      if (!state.teamMemberContextCompression[normalizedMemberId]) {
+        return state;
+      }
+      const next = { ...state.teamMemberContextCompression };
+      delete next[normalizedMemberId];
+      return { teamMemberContextCompression: next };
+    });
+  },
+  clearAllTeamMemberContextCompressionStatus: () => {
+    set({ teamMemberContextCompression: {} });
   },
   setTeamHistoryMessages: (messages) => {
     set({ teamHistoryMessages: messages });

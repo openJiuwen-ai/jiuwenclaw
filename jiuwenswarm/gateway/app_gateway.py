@@ -275,6 +275,25 @@ class GatewayServer:
             if isinstance(key, tuple) and key[0] == channel_id and not getattr(client_ws, "closed", False)
         ]
 
+    def get_active_session_ids(self, channel_id: str, exclude_ws: Any = None) -> set[str]:
+        """返回当前已绑定到活跃连接的 session_id 集合（排除 exclude_ws 自身）。
+
+        用于 /resume 冲突检测：当目标 session 已在另一个 TUI 窗口打开时，
+        前端可据此给出提示而非切换 session。
+        """
+        result: set[str] = set()
+        for key, ws in self._session_to_client.items():
+            if not isinstance(key, tuple) or len(key) < 2 or key[0] != channel_id:
+                continue
+            if ws is exclude_ws:
+                continue
+            if bool(getattr(ws, "closed", False)):
+                continue
+            sid = str(key[1] or "").strip()
+            if sid:
+                result.add(sid)
+        return result
+
     @staticmethod
     def _extract_routing_session_id(msg, *, include_top_level: bool = True) -> str | None:
         """Best-effort session id from message fields for outbound event routing."""
@@ -675,7 +694,8 @@ class GatewayServer:
             )
             return
 
-        session_id = str(params.get("session_id") or "").strip() or req_id
+        explicit_session_id = bool(str(params.get("session_id") or "").strip())
+        session_id = (str(params.get("session_id") or "").strip()) or req_id
 
         # 1. forward 优先：方法在 forward_methods 中则转发到 MessageHandler
         if method in route.forward_methods:
@@ -695,9 +715,32 @@ class GatewayServer:
                 return
 
             request_key = self._client_route_key(route.channel_id, req_id)
+            # 仅当客户端显式提供 session_id 时才计算 session_key，
+            # 避免 session_id 回退到 req_id 时在 _session_to_client 中积累
+            # 无用的逐请求条目（污染 get_active_session_ids 遍历与冲突检测）。
+            session_key = self._client_route_key(route.channel_id, session_id) if explicit_session_id else None
+            # 检测 session 是否已在其他窗口打开：若已绑定到另一个仍活跃的连接，
+            # 拒绝当前请求，避免多窗口 session 冲突（事件路由串台、binding 被覆盖）。
+            # 前端 session.list 的 active_in_window 标记是"事后快照"，此处是实时防线。
+            if session_key is not None:
+                existing_ws = self._session_to_client.get(session_key)
+                if (
+                    existing_ws is not None
+                    and existing_ws is not ws
+                    and not bool(getattr(existing_ws, "closed", False))
+                ):
+                    logger.warning(
+                        "GatewayServer reject %s: session %s already active in another %s connection",
+                        method, session_id, route.channel_id,
+                    )
+                    await self.send_response(
+                        ws, req_id, ok=False,
+                        error=f"Session {session_id} is already active in another window. Close that window first.",
+                        code="SESSION_IN_USE",
+                    )
+                    return
             if request_key is not None:
                 self._request_to_client[request_key] = ws
-            session_key = self._client_route_key(route.channel_id, session_id)
             if session_key is not None:
                 self._session_to_client[session_key] = ws
 

@@ -8,6 +8,7 @@ Supports ``--dotenv <path>`` for multi-instance isolation.
 from __future__ import annotations
 
 import argparse
+import errno
 import http.client
 import json
 import logging
@@ -477,14 +478,33 @@ class _SpaStaticHandler(SimpleHTTPRequestHandler):
                         data = b""
                     if not data:
                         return
+                    target = upstream if sock is self.connection else self.connection
                     if sock is self.connection:
                         for text_message in client_parser.feed(data):
                             self._log_ws_business_message("frontend->backend", text_message)
-                        upstream.sendall(data)
                     else:
                         for text_message in server_parser.feed(data):
                             self._log_ws_business_message("backend->frontend", text_message)
-                        self.connection.sendall(data)
+                    # 非阻塞 socket 写入：循环增量 send，缓冲区满时等待可写后继续，
+                    # 跨平台覆盖 Windows WSAEWOULDBLOCK (10035) 与 POSIX EAGAIN/EWOULDBLOCK。
+                    pending = data
+                    while pending:
+                        try:
+                            sent = target.send(pending)
+                        except OSError as e:
+                            would_block = (
+                                getattr(e, "winerror", None) == 10035
+                                or e.errno in (errno.EAGAIN, errno.EWOULDBLOCK)
+                            )
+                            if not would_block:
+                                raise
+                            _, writable, _ = select.select([], [target], [], 1.0)
+                            if not writable:
+                                # 长时间不可写，对端疑似卡死，关闭隧道避免空转
+                                self.log_error("proxy ws write stalled, closing tunnel")
+                                return
+                            continue
+                        pending = pending[sent:]
         except Exception as exc:  # noqa: BLE001
             self.log_error("proxy ws error: %s", exc)
             try:

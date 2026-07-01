@@ -122,6 +122,7 @@ from jiuwenswarm.agents.harness.common.rails import (
     JiuSwarmStreamEventRail,
     ResponsePromptRail,
     RuntimePromptRail,
+    StructuredAskUserRail,
 )
 from jiuwenswarm.agents.harness.common.rails.execution_guard import (
     CircuitBreakerRail,
@@ -145,7 +146,6 @@ from jiuwenswarm.agents.harness.common.memory.external_memory_config import is_b
 from jiuwenswarm.agents.harness.common.rails.permissions.tool_permission_context import TOOL_PERMISSION_CHANNEL_ID
 from jiuwenswarm.server.runtime.session.session_metadata import build_server_push_message
 from jiuwenswarm.server.runtime.session.session_history import append_history_record, load_history_records
-from jiuwenswarm.server.runtime.skill import filter_visible_skill_names
 from jiuwenswarm.server.runtime.skill.skill_manager import SkillManager
 from jiuwenswarm.server.runtime.prompt_attachment_loader import PromptAttachmentLoader
 from jiuwenswarm.server.runtime.agent_adapter.evolution_helpers import (
@@ -165,7 +165,6 @@ from jiuwenswarm.server.runtime.agent_adapter.evolution_helpers import (
     evolution_meta_from_params,
     evolution_slash_command_name,
     evolution_slash_result,
-    evolution_status_response,
     is_evolution_approval_event,
     is_evolution_outcome_event,
     push_evolution_event,
@@ -176,8 +175,6 @@ from jiuwenswarm.server.runtime.agent_adapter.evolution_helpers import (
     resolve_evolution_event_timeout_sec,
     team_evolution_terminal_progress,
     terminal_stage,
-    validate_evolution_log_writable,
-    validate_evolution_skill,
     visible_evolution_progress_from_events,
     visible_regular_evolution_start_progress,
 )
@@ -615,6 +612,7 @@ class JiuWenSwarmDeepAdapter:
         self._evolution_interrupt_rail: EvolutionInterruptRail | None = None
         self._skill_create_rail: SkillCreateRail | None = None
         self._subagent_rail: SubagentRail | None = None
+        self._ask_user_rail: StructuredAskUserRail | None = None
         self._permission_rail: Any = None
         self._avatar_rail: Any = None
         self._tool_cards = None
@@ -2860,6 +2858,14 @@ class JiuWenSwarmDeepAdapter:
             subagent_rail = None
         return subagent_rail
 
+    def _build_structured_ask_user_rail(self) -> StructuredAskUserRail | None:
+        """Build StructuredAskUserRail for agent.plan clarification."""
+        try:
+            return StructuredAskUserRail(language=self._resolve_runtime_language())
+        except Exception as exc:
+            logger.warning("[JiuWenSwarmDeepAdapter] StructuredAskUserRail create failed: %s", exc)
+            return None
+
     @staticmethod
     def _build_security_rail() -> SecurityRail | None:
         """Build SecurityPromptRail."""
@@ -3045,6 +3051,8 @@ class JiuWenSwarmDeepAdapter:
             3 if self._filesystem_rail_enabled_for_profile() else 2,
             _RailBuildInfo("_skill_retrieval_prompt_rail", self._build_skill_retrieval_prompt_rail),
         )
+        if isinstance(mode, str) and mode.startswith("agent"):
+            rail_infos.append(_RailBuildInfo("_ask_user_rail", self._build_structured_ask_user_rail))
 
         rails_list = []
         for info in rail_infos:
@@ -3865,6 +3873,11 @@ class JiuWenSwarmDeepAdapter:
             if self._task_planning_rail is not None:
                 await self._instance.register_rail(self._task_planning_rail)
                 logger.info("[JiuWenSwarmDeepAdapter] TaskPlanningRail registered for plan mode")
+        if self._ask_user_rail is None:
+            self._ask_user_rail = self._build_structured_ask_user_rail()
+            if self._ask_user_rail is not None:
+                await self._instance.register_rail(self._ask_user_rail)
+                logger.info("[JiuWenSwarmDeepAdapter] StructuredAskUserRail registered for plan mode")
         # 卸载 multi-session 工具
         for existing in list(self._instance.ability_manager.list() or []):
             if getattr(existing, "name", "").startswith(
@@ -3959,6 +3972,15 @@ class JiuWenSwarmDeepAdapter:
                 logger.info(
                     "[JiuWenSwarmDeepAdapter] %s unregistered for %s mode",
                     label,
+                    mode or "agent",
+                )
+
+        if self._ask_user_rail is None:
+            self._ask_user_rail = self._build_structured_ask_user_rail()
+            if self._ask_user_rail is not None:
+                await self._instance.register_rail(self._ask_user_rail)
+                logger.info(
+                    "[JiuWenSwarmDeepAdapter] StructuredAskUserRail registered for %s mode",
                     mode or "agent",
                 )
 
@@ -4258,6 +4280,18 @@ class JiuWenSwarmDeepAdapter:
             self._runtime_prompt_rail.set_mode(runtime_config.mode)
         if self._response_prompt_rail:
             self._response_prompt_rail.set_channel(resolved_channel)
+        # PermissionInterruptRail: per-request trusted_dirs 注入，使 external_directory
+        # 检查将这些子树视为 internal 而跳过 ask/deny（与 RuntimePromptRail 对齐）。
+        # 用 getattr 兼容绕过 __init__ 的测试构造（_permission_rail 仅在 rail 构建流程赋值）。
+        permission_rail = getattr(self, "_permission_rail", None)
+        if permission_rail is not None:
+            try:
+                permission_rail.set_trusted_dirs(runtime_config.trusted_dirs)
+            except Exception:
+                logger.debug(
+                    "[JiuWenSwarmDeepAdapter] permission_rail.set_trusted_dirs failed",
+                    exc_info=True,
+                )
         circuit_breaker_rail = getattr(self, "_circuit_breaker_rail", None)
         if circuit_breaker_rail is not None:
             circuit_breaker_rail.set_language(resolved_language)
@@ -5174,88 +5208,6 @@ class JiuWenSwarmDeepAdapter:
             invalid_output=f"已为 Skill '{skill_name}' 生成演进经验，但审批事件为空或格式无效。",
         )
 
-    async def _handle_evolve_rollback_command(self, query: str) -> dict[str, Any]:
-        """/evolve_rollback <skill_name> [version] — Rollback skill to archived version."""
-        rail = self._skill_evolution_rail
-        assert rail is not None
-        store = rail.store
-
-        parts = query.split(maxsplit=2)
-        skill_name = parts[1] if len(parts) > 1 else ""
-        version = parts[2].strip() if len(parts) > 2 else None
-
-        if not skill_name:
-            archives_hint = ""
-            for name in filter_visible_skill_names(store.list_skill_names()):
-                archives = store.list_archives(name)
-                if archives:
-                    body_versions = [a for a in archives if a.startswith("SKILL.v")]
-                    archives_hint += f"\n  - **{name}**: {len(body_versions)} 个版本"
-            return {
-                "output": (
-                    "请指定 Skill 名称：`/evolve_rollback <skill_name> [version]`"
-                    + (f"\n\n可回滚的 Skill：{archives_hint}" if archives_hint else "")
-                ),
-                "result_type": "error",
-            }
-
-        validation_error = validate_evolution_skill(store, skill_name, require_skill_md=False)
-        if validation_error is not None:
-            return {"output": validation_error, "result_type": "error"}
-
-        archives = store.list_archives(skill_name)
-        body_versions = [a for a in archives if a.startswith("SKILL.v")]
-        if not body_versions:
-            return {
-                "output": f"Skill '{skill_name}' 没有归档版本可回滚。",
-                "result_type": "error",
-            }
-
-        # No version specified → list available versions for user to pick
-        if not version:
-            lines = [f"**Skill '{skill_name}' 可用归档版本（最新在前）：**\n"]
-            for i, v in enumerate(body_versions):
-                ts = v.replace("SKILL.v", "").replace(".md", "")
-                if len(ts) >= 15:
-                    display_ts = f"{ts[:4]}-{ts[4:6]}-{ts[6:8]} {ts[9:11]}:{ts[11:13]}:{ts[13:15]} UTC"
-                else:
-                    display_ts = ts
-                marker = " ← 最近" if i == 0 else ""
-                lines.append(f"  {i+1}. `{v}` ({display_ts}){marker}")
-            lines.append(f"\n用法：`/evolve_rollback {skill_name} SKILL.v<时间戳>.md`")
-            lines.append(f"快捷回滚到最近版本：`/evolve_rollback {skill_name} latest`")
-            return {"output": "\n".join(lines), "result_type": "answer"}
-
-        # "latest" shorthand → pick newest
-        if version == "latest":
-            version = body_versions[0]
-
-        if version not in body_versions:
-            hint = "、".join(f"`{v}`" for v in body_versions[:5])
-            return {
-                "output": f"版本 `{version}` 不存在。可用版本：{hint}",
-                "result_type": "error",
-            }
-
-        try:
-            success = await rail.rollback_skill(skill_name, version)
-        except Exception as exc:
-            logger.warning("[JiuWenSwarmDeepAdapter] evolve_rollback failed: %s", exc)
-            return {"output": f"回滚失败：{exc}", "result_type": "error"}
-
-        if success:
-            return {
-                "output": (
-                    f"Skill '{skill_name}' 已成功回滚到 `{version}`。\n\n"
-                    f"（当前状态已自动归档，可再次回滚恢复。）"
-                ),
-                "result_type": "answer",
-            }
-        return {
-            "output": f"Skill '{skill_name}' 回滚失败，请检查归档版本是否有效。",
-            "result_type": "error",
-        }
-
     async def _handle_governance_approval(
         self, request_id: str, answers: list, kind: str
     ) -> bool:
@@ -5358,18 +5310,6 @@ class JiuWenSwarmDeepAdapter:
                 evolution_slash_command_name(stripped),
                 slash_result,
                 warning_phrases=REGULAR_EVOLUTION_SLASH_WARNING_PHRASES,
-            )
-
-        if stripped.startswith("/evolve_rollback"):
-            err = await self._ensure_evolution_rail_for_slash(mode)
-            if err:
-                return evolution_slash_result(
-                    "evolve_rollback",
-                    {"output": err, "result_type": "error"},
-                )
-            return evolution_slash_result(
-                "evolve_rollback",
-                await self._handle_evolve_rollback_command(stripped),
             )
 
         return None
@@ -6744,8 +6684,11 @@ class JiuWenSwarmDeepAdapter:
         if not messages:
             return {"status": "no_turn"}
 
+        # 透传主 agent tools schema 保 cache key（工具执行由单轮 + tool_use 丢弃禁止）
+        tools = await self._get_agent_tools(session_id)
+
         prompt = build_recap_prompt(memory=None, language=self._resolve_prompt_language())
-        summary_text = await self._call_model_for_recap(messages, prompt)
+        summary_text = await self._call_model_for_recap(messages, prompt, tools=tools or None)
         if not summary_text:
             return {"status": "failed", "error": "Model returned empty response"}
 
@@ -6854,6 +6797,49 @@ class JiuWenSwarmDeepAdapter:
             logger.debug("[JiuWenSwarmDeepAdapter] _get_recent_messages disk fallback failed: %s", exc)
             return []
 
+    async def _get_agent_tools(self, session_id: str) -> list[Any]:
+        """取主 agent 当前 tools 列表（List[ToolInfo]），用于 btw/recap 透传给模型。
+
+        透传 tools schema 是为了与主 agent 保持 cache key 一致（openjiuwen 的
+        prompt cache 布局为 tools → system → messages，tools 段缺失会破坏前缀
+        匹配）。工具执行仍被禁用：btw/recap 单轮 + tool_use 检测丢弃。
+
+        查找顺序与 _get_recent_messages 一致：先当前 adapter 的 react_agent，
+        再 session-scoped child adapter（btw 在 parent 执行时 tools 在 child）。
+        返回空列表表示无工具可用，调用方应按不传 tools 处理（tools or None）。
+        """
+        async def _from(inst: Any) -> list[Any]:
+            ra = getattr(inst, "react_agent", None)
+            if ra is None:
+                return []
+            am = getattr(ra, "ability_manager", None)
+            if am is None or not callable(getattr(am, "list_tool_info", None)):
+                return []
+            try:
+                return list(await am.list_tool_info() or [])
+            except Exception as exc:
+                logger.debug(
+                    "[JiuWenSwarmDeepAdapter] _get_agent_tools list_tool_info failed: %s",
+                    exc,
+                )
+                return []
+
+        # 1) 当前 adapter
+        if self._instance is not None:
+            tools = await _from(self._instance)
+            if tools:
+                return tools
+
+        # 2) session-scoped child adapter（btw 等侧查询在 parent 执行时 tools 在 child）
+        if not getattr(self, "_is_session_scoped_adapter", False):
+            session_adapter = self._get_cached_session_adapter(session_id)
+            if session_adapter is not None:
+                inst = getattr(session_adapter, "_instance", None)
+                if inst is not None:
+                    return await _from(inst)
+
+        return []
+
     def _get_agent_system_prompt(self) -> str:
         """Return the current agent's system prompt, or empty string if unavailable.
 
@@ -6880,12 +6866,14 @@ class JiuWenSwarmDeepAdapter:
         prompt: str,
         system_prompt: str = "",
         enable_prompt_caching: bool = True,
+        tools: list[Any] | None = None,
     ) -> str | None:
-        """调用 model 生成简短回答（单轮、无工具）。
+        """调用 model 生成简短回答（单轮、禁工具执行）。
 
         - system_prompt 非空时以 SystemMessage 形式前置
         - prompt 作为最后一条 user message 追加到对话末尾
-        - 不传 tools（通过 btw prompt 中的 <system-reminder> 告知模型无工具可用）
+        - tools 非空时透传给模型以保 cache key（与主 agent 一致），但单轮 +
+          tool_use 检测丢弃 = 工具不被执行（对齐 claude-code canUseTool:deny）
         - 不设置 temperature（继承模型默认值，与主 agent 保持一致以复用 prompt cache）
 
         prompt cache 策略：
@@ -6944,7 +6932,22 @@ class JiuWenSwarmDeepAdapter:
         try:
             # No temperature override — inherit model default to match main agent
             # API params (thinking config is part of the Anthropic cache key).
-            result = await self._model.invoke(recap_messages)
+            result = await self._model.invoke(recap_messages, tools=tools)
+            # Tool-use guard: tools schema is passed only to preserve the cache
+            # key (matches the main agent). Single turn + discard any tool_use
+            # the model emits → tools are never executed. Aligned with
+            # claude-code's canUseTool:{behavior:'deny'} + tool_use fallback.
+            tool_calls = getattr(result, "tool_calls", None)
+            if tool_calls:
+                names = ", ".join(getattr(tc, "name", "tool") for tc in tool_calls)
+                logger.info(
+                    "[btw/recap] model emitted tool_use despite no-tool constraint: %s",
+                    names,
+                )
+                return (
+                    f"(模型尝试调用工具 {names} 而非直接回答。"
+                    "请重新措辞或在主对话中提问。)"
+                )
             content = getattr(result, "content", None) or str(result)
             # Log cache metrics for observability
             usage = getattr(result, "usage_metadata", None)
@@ -6968,7 +6971,7 @@ class JiuWenSwarmDeepAdapter:
         - 保持消息原始格式（含 structured content blocks）以实现 byte-identical 前缀
         - 最后一条 pre-prompt 消息添加 cache_control marker（ephemeral）
         - btw prompt 不添加 cache_control（skipCacheWrite）
-        - 直接调用模型（无工具、单轮）
+        - 透传主 agent tools schema 保 cache key，但单轮 + tool_use 丢弃 = 禁止执行
         - 不修改对话历史（read-only）
 
         Args:
@@ -6991,6 +6994,10 @@ class JiuWenSwarmDeepAdapter:
         if not messages and not system_prompt:
             return {"status": "no_context"}
 
+        # 2.5) 取主 agent tools（透传给模型以保 cache key；工具执行由单轮 +
+        #      tool_use 检测丢弃禁止，对齐 claude-code canUseTool:deny）
+        tools = await self._get_agent_tools(session_id)
+
         # 3) 构建 btw prompt（system prompt 通过 SystemMessage 传递，不嵌入文本）
         prompt = _build_btw_prompt(
             question=question,
@@ -7001,6 +7008,7 @@ class JiuWenSwarmDeepAdapter:
         # enable_prompt_caching=True 启用 cache_control marker
         answer = await self._call_model_for_recap(
             messages, prompt, system_prompt=system_prompt, enable_prompt_caching=True,
+            tools=tools or None,
         )
         if not answer:
             return {"status": "failed", "error": "Model returned empty response"}

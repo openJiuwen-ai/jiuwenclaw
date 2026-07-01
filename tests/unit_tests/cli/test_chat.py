@@ -438,14 +438,17 @@ class TestHumanRenderer:
         assert cout.getvalue() == " world"
 
     @staticmethod
-    def test_final_full_replacement():
+    def test_final_no_duplicate_on_different_format():
         r, cout, _ = TestHumanRenderer._make_renderer()
         r.handle_delta({"content": "partial"})
         cout.truncate(0)
         cout.seek(0)
 
         r.handle_final({"content": "completely different"})
-        assert cout.getvalue() == "completely different"
+        # Terminal can't undo already-streamed text; final should not reprint
+        assert cout.getvalue() == ""
+        # Internal state keeps the longer version
+        assert r.streamed_text == "completely different"
 
     @staticmethod
     def test_final_only_called_once():

@@ -183,8 +183,8 @@ class DataAggregator:
                 },
             }
 
-        except Exception:
-            pass
+        except Exception as e:
+            logging.warning(f"生成历史对比数据失败，返回已采集的部分结果: {e}", exc_info=True)
 
         return comparison
 

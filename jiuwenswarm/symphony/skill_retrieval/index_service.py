@@ -21,7 +21,6 @@ from .inventory import SkillInventory, scan_skill_inventory
 from .markdown import render_build_failure, render_build_success, render_disabled
 
 TREE_INDEX_FILENAME = "tree_index.yaml"
-CATALOG_FILENAME = "catalog.jsonl"
 MANIFEST_FILENAME = "manifest.json"
 STATE_FILENAME = "state.json"
 
@@ -527,6 +526,7 @@ class SkillIndexService:
                 )
             except OSError:
                 pass
+
 
         return {
             "success": True,

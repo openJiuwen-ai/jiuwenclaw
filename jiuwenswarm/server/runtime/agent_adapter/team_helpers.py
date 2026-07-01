@@ -24,7 +24,6 @@ from jiuwenswarm.common.cron_team_completion import (
     _drain_cron_delegation_grace_events,
     apply_cron_team_round_event,
     cron_team_round_should_end,
-    is_cron_leader_placeholder_text as _is_cron_leader_placeholder_text,
     new_cron_team_round_state,
 )
 from jiuwenswarm.agents.harness.team.handlers.workflow_monitor_handler import WorkflowMonitorHandler
@@ -86,7 +85,15 @@ _TEAM_CREATE_KINDS = {
 }
 _HIDE_DM_PREFIX = "/hide_dm"
 _STREAM_TRACE_ENV_KEY = "JIUWENSWARM_TEAM_STREAM_TRACE"
+# When set to "true", non-leader teammate frames are filtered out in team
+# streaming so the frontend only receives leader output.
+_HIDE_TEAMMATE_ENV_KEY = "JIUWENSWARM_TEAM_HIDE_TEAMMATE"
 _DEBUG_PREFIX = "/debug"
+
+
+def _team_hide_teammate_enabled() -> bool:
+    """Return whether non-leader teammate frames should be filtered out in team mode."""
+    return os.environ.get(_HIDE_TEAMMATE_ENV_KEY, "").strip().lower() == "true"
 
 _INTERACT_REASON_ERROR_MAP: dict[str, str] = {
     "not_active": "Team is initializing, please try again later",
@@ -694,6 +701,33 @@ def _enrich_teammate_event(parsed: dict[str, Any], chunk: Any) -> dict[str, Any]
     return parsed
 
 
+_TEAM_TOOL_RESULT_TEXT_LIMIT = 512
+
+
+def _truncate_team_tool_result_event(parsed: dict[str, Any]) -> dict[str, Any]:
+    """Trim large team tool result fields before forwarding them to clients."""
+    if parsed.get("event_type") != "chat.tool_result":
+        return parsed
+
+    next_event = dict(parsed)
+    truncated = False
+    original_size = 0
+    for key in ("result", "raw_output"):
+        value = next_event.get(key)
+        if not isinstance(value, str):
+            continue
+        original_size += len(value)
+        if len(value) <= _TEAM_TOOL_RESULT_TEXT_LIMIT:
+            continue
+        next_event[key] = value[:_TEAM_TOOL_RESULT_TEXT_LIMIT]
+        truncated = True
+
+    if truncated:
+        next_event["truncated"] = True
+        next_event["original_size"] = original_size
+    return next_event
+
+
 def _is_duplicate_ask_user_question(
     parsed: dict[str, Any],
     emitted_request_ids: set[str],
@@ -813,6 +847,7 @@ async def _handle_team_slash_command(
     if not (
         stripped.startswith("/evolve_list")
         or stripped.startswith("/evolve_rebuild")
+        or stripped.startswith("/evolve_rollback")
         or stripped.startswith("/evolve_simplify")
         or stripped == "/evolve"
         or stripped.startswith("/evolve ")
@@ -1389,8 +1424,16 @@ async def _consume_stream_with_query(
             is_teammate = _is_teammate_output(chunk)
             if not is_leader and not is_teammate:
                 continue
+            # Optional: filter out all non-leader frames so the frontend only
+            # sees leader output. Leader-level control events
+            # (team.runtime_ready / team.completed) are kept because
+            # _is_leader_output returns True.
+            if _team_hide_teammate_enabled() and not is_leader:
+                continue
             parsed = parse_stream_chunk(chunk)
             if parsed is not None:
+                if not is_leader and parsed.get("event_type") == "chat.reasoning":
+                    continue
                 if _is_duplicate_ask_user_question(parsed, emitted_ask_user_request_ids):
                     continue
                 # Skip non-leader __interaction__ (permission ASK) — approval
@@ -1401,6 +1444,7 @@ async def _consume_stream_with_query(
                 parsed["rid"] = round_id
                 if is_teammate:
                     parsed = _enrich_teammate_event(parsed, chunk)
+                parsed = _truncate_team_tool_result_event(parsed)
                 if parsed.get("event_type") == "team.runtime_ready":
                     ready_team_name = str(parsed.get("team_name") or team_spec.team_name)
                     activation_kind = str(parsed.get("activation_kind") or "").strip()

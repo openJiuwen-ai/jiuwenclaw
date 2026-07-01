@@ -227,8 +227,10 @@ export function InlineQuestionCard({ onSubmit }: InlineQuestionCardProps) {
                     const isAccept = option.label === t('chatUi.inlineQuestion.accept')
                       || option.label === t('chatUi.inlineQuestion.allowOnce')
                       || option.label === '本次允许';
+                    const isSessionAllow = option.label === t('chatUi.inlineQuestion.sessionAllow')
+                      || option.label === '会话内记住';
                     const isAlwaysAllow = option.label === t('chatUi.inlineQuestion.alwaysAllow')
-                      || option.label === '总是允许';
+                      || option.label === '永久记住';
                     const isReject = option.label === t('chatUi.inlineQuestion.reject')
                       || option.label === '拒绝';
                     const isSelected = selectedValue === optionValue;
@@ -243,41 +245,49 @@ export function InlineQuestionCard({ onSubmit }: InlineQuestionCardProps) {
                           backgroundColor: isSelected
                             ? (isAccept
                                 ? 'var(--ok-subtle, rgba(34,197,94,0.12))'
-                                : isReject
-                                  ? 'var(--danger-subtle, rgba(239,68,68,0.12))'
-                                  : 'var(--accent-subtle)')
+                                : isSessionAllow
+                                  ? 'var(--session-allow-subtle, rgba(59,130,246,0.08))'
+                                  : isAlwaysAllow
+                                    ? 'var(--accent-subtle)'
+                                    : isReject
+                                      ? 'var(--danger-subtle, rgba(239,68,68,0.12))'
+                                      : 'var(--accent-subtle)')
                             : 'var(--bg-elevated)',
                           border: `1px solid ${
                             isSelected
-                              ? (isAccept ? 'var(--ok)' : isReject ? 'var(--danger)' : 'var(--accent)')
+                              ? (isAccept ? 'var(--ok)' : isSessionAllow ? 'var(--session-allow, #3b82f6)' : isAlwaysAllow ? 'var(--accent)' : isReject ? 'var(--danger)' : 'var(--accent)')
                               : 'var(--border)'
                           }`,
                           color: isSelected
-                            ? (isAccept ? 'var(--ok)' : isReject ? 'var(--danger)' : 'var(--text-strong)')
+                            ? (isAccept ? 'var(--ok)' : isSessionAllow ? 'var(--session-allow, #3b82f6)' : isAlwaysAllow ? 'var(--accent)' : isReject ? 'var(--danger)' : 'var(--text-strong)')
                             : 'var(--text)',
                           opacity: submitted ? 0.6 : 1,
                           cursor: submitted ? 'default' : 'pointer',
                         }}
-                        onMouseOver={(e) => {
-                          if (submitted || isSelected) return;
-                          const el = e.currentTarget;
-                          if (isAccept) {
-                            el.style.backgroundColor = 'var(--ok-subtle, rgba(34,197,94,0.12))';
-                            el.style.borderColor = 'var(--ok)';
-                            el.style.color = 'var(--ok)';
-                          } else if (isAlwaysAllow) {
-                            el.style.backgroundColor = 'var(--accent-subtle, rgba(59,130,246,0.12))';
-                            el.style.borderColor = 'var(--accent)';
-                            el.style.color = 'var(--accent)';
-                          } else if (isReject) {
-                            el.style.backgroundColor = 'var(--danger-subtle, rgba(239,68,68,0.12))';
-                            el.style.borderColor = 'var(--danger)';
-                            el.style.color = 'var(--danger)';
-                          } else {
-                            el.style.backgroundColor = 'var(--bg-hover)';
-                            el.style.borderColor = 'var(--border-strong)';
-                          }
-                        }}
+                          onMouseOver={(e) => {
+                            if (submitted || isSelected) return;
+                            const el = e.currentTarget;
+                            if (isAccept) {
+                              el.style.backgroundColor = 'var(--ok-subtle, rgba(34,197,94,0.12))';
+                              el.style.borderColor = 'var(--ok)';
+                              el.style.color = 'var(--ok)';
+                            } else if (isSessionAllow) {
+                              el.style.backgroundColor = 'var(--session-allow-subtle, rgba(59,130,246,0.08))';
+                              el.style.borderColor = 'var(--session-allow, #3b82f6)';
+                              el.style.color = 'var(--session-allow, #3b82f6)';
+                            } else if (isAlwaysAllow) {
+                              el.style.backgroundColor = 'var(--accent-subtle, rgba(59,130,246,0.12))';
+                              el.style.borderColor = 'var(--accent)';
+                              el.style.color = 'var(--accent)';
+                            } else if (isReject) {
+                              el.style.backgroundColor = 'var(--danger-subtle, rgba(239,68,68,0.12))';
+                              el.style.borderColor = 'var(--danger)';
+                              el.style.color = 'var(--danger)';
+                            } else {
+                              el.style.backgroundColor = 'var(--bg-hover)';
+                              el.style.borderColor = 'var(--border-strong)';
+                            }
+                          }}
                         onMouseOut={(e) => {
                           if (submitted || isSelected) return;
                           const el = e.currentTarget;

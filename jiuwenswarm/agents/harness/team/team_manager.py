@@ -27,6 +27,7 @@ from openjiuwen.harness.rails import (
     TeamSkillEvolutionRail,
 )
 from jiuwenswarm.agents.harness.team.bootstrap import configure_agent_teams_home
+from jiuwenswarm.common.utils import get_user_workspace_dir
 
 configure_agent_teams_home()
 
@@ -120,13 +121,21 @@ def sync_team_observability() -> None:
                 redact_completions=cfg.get("redact_completions", False),
                 langfuse_public_key=cfg.get("langfuse_public_key", ""),
                 langfuse_secret_key=cfg.get("langfuse_secret_key", ""),
+                traces_dir=cfg.get("traces_dir") or str(get_user_workspace_dir() / ".trace"),
+                file_retention_days=cfg.get("file_retention_days", 7),
             )
             init_observability(obs_cfg)
             _observability_active = True
-            logger.info(
-                "[TeamObservability] enabled: exporter=%s endpoint=%s",
-                obs_cfg.exporter, obs_cfg.endpoint,
-            )
+            if obs_cfg.exporter == "file":
+                logger.info(
+                    "[TeamObservability] enabled: exporter=%s traces_dir=%s",
+                    obs_cfg.exporter, obs_cfg.traces_dir,
+                )
+            else:
+                logger.info(
+                    "[TeamObservability] enabled: exporter=%s endpoint=%s",
+                    obs_cfg.exporter, obs_cfg.endpoint,
+                )
         except Exception as exc:
             logger.warning("[TeamObservability] init failed: %s", exc)
 

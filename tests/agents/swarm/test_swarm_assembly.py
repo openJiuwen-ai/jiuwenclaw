@@ -526,12 +526,12 @@ def test_code_skill_use_rail_kept_as_auto_list_when_retrieval_enabled(
 
 @pytest.mark.parametrize("role", ["leader", "teammate"])
 def test_team_member_deep_agent_spec_uses_agentic_skill_disclosure(role: str) -> None:
-    """Chat-team members keep skill_tool while retrieval owns discovery."""
+    """Chat-team members avoid the core full-skill discovery path."""
     base = DeepAgentSpec(enable_skill_discovery=False)
 
     spec = build_member_deep_agent_spec(_agentic_retrieval_config(), "team", role, base)
 
-    assert spec.enable_skill_discovery is True
+    assert spec.enable_skill_discovery is False
 
 
 @pytest.mark.parametrize("role", ["leader", "teammate"])
@@ -546,14 +546,14 @@ def test_team_member_deep_agent_spec_keeps_core_skill_discovery_when_retrieval_d
 
 @pytest.mark.parametrize("mode", ["code.team", "team.plan"])
 def test_code_member_deep_agent_spec_keeps_skill_use_rail_when_retrieval_enabled(mode: str) -> None:
-    """Code profiles keep skill_tool while retrieval owns discovery."""
+    """Code profiles remove the legacy SkillUseRail when retrieval owns discovery."""
     base = DeepAgentSpec(enable_skill_discovery=False)
 
     spec = build_member_deep_agent_spec(_agentic_retrieval_config(), mode, "leader", base)
     rail_names = {rail.type for rail in (spec.rails or [])}
 
     assert spec.enable_skill_discovery is False
-    assert registry.CODE_SKILL_USE in rail_names
+    assert registry.CODE_SKILL_USE not in rail_names
 
 
 @pytest.mark.parametrize("mode", ["code.team", "team.plan"])

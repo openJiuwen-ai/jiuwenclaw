@@ -31,6 +31,7 @@ from openjiuwen.agent_teams.schema.deep_agent_spec import (
     RailSpec,
     SubAgentSpec,
 )
+from openjiuwen.agent_teams.rails.builtin_elements import SKILL_USE as CORE_SKILL_USE
 from openjiuwen.core.foundation.tool import McpServerConfig
 from openjiuwen.core.single_agent import AgentCard
 from openjiuwen.harness.prompts import resolve_language
@@ -223,6 +224,12 @@ def _retrieval_enabled(config: dict[str, Any] | None = None) -> bool:
     if isinstance(retrieval, dict):
         return bool(retrieval.get("enabled", False))
     return False
+
+
+def _remove_skill_use_rails_for_agentic_retrieval(rails: list[RailSpec]) -> list[RailSpec]:
+    """Remove legacy SkillUseRail when agentic retrieval owns discovery."""
+    skill_rail_types = {CORE_SKILL_USE, "skill_use", registry.CODE_SKILL_USE}
+    return [rail for rail in rails if rail.type not in skill_rail_types]
 
 
 def _additional_directories(config: dict[str, Any]) -> list[str]:
@@ -642,13 +649,17 @@ def build_member_deep_agent_spec(
     merged_tools.extend(tool_specs)
     merged_mcps = _merge_mcp_configs(base_spec.mcps, mcp_configs)
 
+    retrieval_enabled = _retrieval_enabled(config)
+    if retrieval_enabled:
+        merged_rails = _remove_skill_use_rails_for_agentic_retrieval(merged_rails)
+
     update: dict[str, Any] = {
         "rails": merged_rails,
         "tools": merged_tools,
         "mcps": merged_mcps,
     }
     if not _is_code_mode(mode):
-        update["enable_skill_discovery"] = True
+        update["enable_skill_discovery"] = not retrieval_enabled
 
     subagent_specs = build_member_subagent_specs(config, mode, role)
 

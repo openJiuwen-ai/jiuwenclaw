@@ -162,8 +162,8 @@ class EmailCollector:
         if self._connection:
             try:
                 self._connection.logout()
-            except Exception:
-                pass
+            except Exception as e:
+                logging.info(f"IMAP logout 失败（连接将直接释放）: {e}", exc_info=True)
             self._connection = None
 
     def get_stats(self, date: Optional[str] = None) -> EmailStats:
