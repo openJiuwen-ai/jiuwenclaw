@@ -1,10 +1,6 @@
 ---
 name: dovescore-evaluator
-version: 0.1.0
-author: Danna Zheng
 description: Evaluate long-form information alignment between source and target text with DoveScore, including factual accuracy, descriptive facts, event extraction, and event-order consistency. Use when checking whether generated, summarized, rewritten, or reordered text preserves source facts and temporal or causal sequence.
-tags: [evaluation, factuality, alignment, dovescore]
-allowed_tools: [bash, read_file, write_file]
 ---
 
 # DoveScore Evaluator
@@ -15,11 +11,11 @@ Use this skill when a user asks whether a target text is faithful to a source te
 
 DoveScore Evaluator 用于评估源文本与目标文本之间的长文本信息对齐情况。它不仅检查目标文本中的事实是否被源文本支持，还会关注事件顺序是否一致，适合用于摘要、改写、时间线、新闻报道、人物传记和其他包含事件链条的长文本评估。
 
-该 skill 会调用 DoveScore 输出整体分数、事件事实准确率、事件顺序一致性、描述性事实准确率，以及用于评分的事件和描述性事实列表。
+该 skill 会调用 DoveScore 输出整体分数、事件事实准确率、事件顺序一致性、描述性事实准确率。默认只展示必要摘要，避免界面输出过长；如果需要排查具体事件和描述性事实，可使用 `--include-details` 输出原始明细。
 
 ## 配置方式
 
-DoveScore 依赖在默认 JiuwenClaw 环境中不强制安装，避免影响常规 CI 和普通用户的依赖同步。需要使用该 skill 时，先安装 DoveScore：
+DoveScore 依赖在默认 JiuwenSwarm 环境中不强制安装，避免影响常规 CI 和普通用户的依赖同步。需要使用该 skill 时，先安装 DoveScore：
 
 ```bash
 pip install git+https://github.com/dannalily/DoveScore.git
@@ -64,8 +60,15 @@ python scripts/run_dovescore.py --source-file source.txt --target-file target.tx
 python scripts/run_dovescore.py --source "source text" --target "target text"
 ```
 
-4. Report the overall score first, then explain event accuracy, order consistency, descriptive accuracy, and any extracted facts that clarify the judgment.
-5. If the user needs machine-readable output, pass `--output result.json`.
+4. For a UI-safe contrast demo that does not require dependencies or an API key, run:
+
+```bash
+python scripts/run_dovescore.py --demo
+```
+
+5. Report the overall score first, then explain event accuracy, order consistency, descriptive accuracy, and any extracted facts that clarify the judgment.
+6. If the user needs machine-readable output, pass `--output result.json`.
+7. Use `--include-details` only when the user asks for extracted events, descriptives, or per-fact debugging details.
 
 ## Output Fields
 
@@ -77,8 +80,11 @@ Core fields:
 - `event_score`: factual correctness of event facts.
 - `order_score`: consistency of verified event order between source and target.
 - `descriptive_score`: factual correctness of descriptive facts.
-- `events` and `descriptives`: extracted facts used for scoring.
+- `interpretation`: short description of what the score means.
+- `details`: raw DoveScore output, present only when `--include-details` is used.
 
 ## Boundaries
 
 Do not present DoveScore as a general semantic similarity metric. It evaluates source-target information alignment and is especially useful when temporal, causal, or ordered-event consistency is part of the question.
+
+For a contrast demo, see [references/demo.md](references/demo.md).

@@ -39,11 +39,28 @@ Long text:
 python scripts/run_dovescore.py --source-file source.txt --target-file target.txt --output result.json
 ```
 
+Include raw extracted events and descriptives:
+
+```bash
+python scripts/run_dovescore.py \
+  --source-file source.txt \
+  --target-file target.txt \
+  --include-details
+```
+
 Custom model:
 
 ```bash
 python scripts/run_dovescore.py --source-file source.txt --target-file target.txt --backbone gpt-4o-mini
 ```
+
+UI-safe demo:
+
+```bash
+python scripts/run_dovescore.py --demo
+```
+
+`--demo` does not require DoveScore, an API key, or network access. Use it when presenting the skill in the interface.
 
 ## Troubleshooting
 
@@ -58,3 +75,17 @@ If authentication fails, set:
 ```bash
 export OPENAI_API_KEY="..."
 ```
+
+## Interface Output Guidance
+
+Default output is intentionally concise:
+
+- `total_score`
+- `alignment_level`
+- `event_score`
+- `order_score`
+- `descriptive_score`
+- `interpretation`
+- `note`
+
+Only show raw `events`, `descriptives`, `ordered_source`, `ordered_target`, and per-fact scores when the user explicitly asks for debugging details or when using `--include-details`.
