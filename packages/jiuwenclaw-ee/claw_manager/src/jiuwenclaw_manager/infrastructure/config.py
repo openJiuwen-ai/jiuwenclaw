@@ -91,6 +91,14 @@ class Settings(BaseSettings):
         default=8766, validation_alias="MANAGER_WS_PORT"
     )
 
+    # ---- 资源服务器：验签认证服务(jiuwenclaw_identity)签发的 RS256 JWT ----
+    identity_public_key_url: str = Field(
+        default="http://127.0.0.1:8770/v1/auth/public_key",
+        validation_alias="IDENTITY_PUBLIC_KEY_URL",
+    )
+    jwt_issuer: str = Field(default="jiuwenclaw-identity", validation_alias="IDENTITY_JWT_ISSUER")
+    jwt_audience: str = Field(default="jiuwenclaw", validation_alias="IDENTITY_JWT_AUDIENCE")
+
     @property
     def host(self) -> str:
         return self.rest_host

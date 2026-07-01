@@ -10,7 +10,7 @@ from pathlib import Path
 import httpx
 import uvicorn
 from fastapi import FastAPI, Request, Response
-from fastapi.staticfiles import StaticFiles
+from fastapi.responses import FileResponse
 
 _SKIP_REQ_HEADERS = frozenset({"host", "content-length", "transfer-encoding", "connection"})
 _SKIP_RESP_HEADERS = frozenset({"content-encoding", "content-length", "transfer-encoding", "connection"})
@@ -27,7 +27,35 @@ def _coerce_backend_url(raw: str) -> str:
     return url
 
 
-def create_manager_web_app(dist_root: Path, backend_url: str) -> FastAPI:
+async def _relay(request: Request, upstream_url: str, tag: str) -> Response:
+    """反向代理一个请求到 upstream_url（本机目标，trust_env=False 不读环境代理）。"""
+    if request.url.query:
+        upstream_url = f"{upstream_url}?{request.url.query}"
+    outbound_headers = {
+        name: value
+        for name, value in request.headers.items()
+        if name.lower() not in _SKIP_REQ_HEADERS
+    }
+    payload = await request.body()
+    try:
+        async with httpx.AsyncClient(timeout=30.0, trust_env=False) as client:
+            upstream = await client.request(
+                request.method, upstream_url, content=payload, headers=outbound_headers,
+            )
+    except httpx.HTTPError as exc:
+        logging.getLogger("jiuwenclaw-manager-web").error("%s relay failed: %s", tag, exc)
+        return Response(content=f"{tag} relay failed".encode(), status_code=502)
+    response_headers = {
+        name: value
+        for name, value in upstream.headers.items()
+        if name.lower() not in _SKIP_RESP_HEADERS
+    }
+    return Response(
+        content=upstream.content, status_code=upstream.status_code, headers=response_headers,
+    )
+
+
+def create_manager_web_app(dist_root: Path, backend_url: str, idp_url: str) -> FastAPI:
     application = FastAPI(title="jiuwenclaw-manager-web", docs_url=None, redoc_url=None)
 
     @application.api_route(
@@ -35,39 +63,16 @@ def create_manager_web_app(dist_root: Path, backend_url: str) -> FastAPI:
         methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", "HEAD"],
     )
     async def relay_manager_api(request: Request, tail: str) -> Response:
-        upstream_url = f"{backend_url}/api/{tail}"
-        if request.url.query:
-            upstream_url = f"{upstream_url}?{request.url.query}"
+        # 平台管理 API → 本机 Manager API(8765)。
+        return await _relay(request, f"{backend_url}/api/{tail}", "api")
 
-        outbound_headers = {
-            name: value
-            for name, value in request.headers.items()
-            if name.lower() not in _SKIP_REQ_HEADERS
-        }
-        payload = await request.body()
-
-        try:
-            async with httpx.AsyncClient(timeout=30.0) as client:
-                upstream = await client.request(
-                    request.method,
-                    upstream_url,
-                    content=payload,
-                    headers=outbound_headers,
-                )
-        except httpx.HTTPError as exc:
-            logging.getLogger("jiuwenclaw-manager-web").error("api relay failed: %s", exc)
-            return Response(content=b"api relay failed", status_code=502)
-
-        response_headers = {
-            name: value
-            for name, value in upstream.headers.items()
-            if name.lower() not in _SKIP_RESP_HEADERS
-        }
-        return Response(
-            content=upstream.content,
-            status_code=upstream.status_code,
-            headers=response_headers,
-        )
+    @application.api_route(
+        "/idp/{tail:path}",
+        methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", "HEAD"],
+    )
+    async def relay_idp_api(request: Request, tail: str) -> Response:
+        # 认证/目录 API → 独立认证服务(jiuwenclaw_identity, 8770)。单源避免 CORS。
+        return await _relay(request, f"{idp_url}/{tail}", "idp")
 
     @application.middleware("http")
     async def static_cache_control(request: Request, call_next) -> Response:
@@ -83,11 +88,21 @@ def create_manager_web_app(dist_root: Path, backend_url: str) -> FastAPI:
             )
         return response
 
-    application.mount(
-        "/",
-        StaticFiles(directory=str(dist_root), html=True),
-        name="manager-web-static",
-    )
+    # SPA history 路由回退:存在的静态文件直接发,其余路径(/auth、/manager/*、/user/* 等
+    # 深链刷新)回退 index.html,交给前端路由(生产由 nginx try_files 承担,这里给构建版兜底)。
+    _index = dist_root / "index.html"
+
+    @application.get("/{full_path:path}")
+    async def spa_fallback(full_path: str) -> Response:
+        candidate = (dist_root / full_path).resolve()
+        if (
+            full_path
+            and str(candidate).startswith(str(dist_root.resolve()))
+            and candidate.is_file()
+        ):
+            return FileResponse(candidate)
+        return FileResponse(_index)
+
     return application
 
 
@@ -106,6 +121,11 @@ def main() -> None:
         help="Claw Manager REST base URL for /api relay.",
     )
     parser.add_argument(
+        "--idp-target",
+        default=os.getenv("MANAGER_WEB_IDP_TARGET", "http://127.0.0.1:8770"),
+        help="Identity service base URL for /idp relay.",
+    )
+    parser.add_argument(
         "--log-level",
         default=os.getenv("MANAGER_WEB_LOG_LEVEL", "info"),
     )
@@ -117,6 +137,7 @@ def main() -> None:
 
     try:
         backend_url = _coerce_backend_url(args.proxy_target)
+        idp_url = _coerce_backend_url(args.idp_target)
     except ValueError as exc:
         raise SystemExit(str(exc)) from exc
 
@@ -124,8 +145,9 @@ def main() -> None:
     log.info("serving %s", dist_root)
     log.info("http://%s:%s", args.host, args.port)
     log.info("/api relay -> %s", backend_url)
+    log.info("/idp relay -> %s", idp_url)
 
-    app = create_manager_web_app(dist_root, backend_url)
+    app = create_manager_web_app(dist_root, backend_url, idp_url)
     uvicorn.run(app, host=args.host, port=args.port, log_level=args.log_level.lower())
 
 

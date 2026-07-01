@@ -2312,3 +2312,110 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
 
     channel.register_method("memory.forbidden.get", _memory_forbidden_get)
     channel.register_method("memory.forbidden.set", _memory_forbidden_set)
+
+    def _classify_memory_file(rel_path: str, name: str) -> str:
+        """记忆文件分类（仅用于前端展示分组）。"""
+        if name in ("MEMORY.md", "memory.md"):
+            return "index"
+        if name == "USER.md":
+            return "profile"
+        # memory/YYYY-MM-DD.md 形式的按日会话文件
+        stem = name[:-3] if name.endswith(".md") else name
+        parts = stem.split("-")
+        if len(parts) == 3 and all(p.isdigit() for p in parts):
+            return "daily"
+        return "fact"
+
+    async def _memory_list(ws, req_id, params, session_id):
+        """只读：列出 agent 工作区里的记忆文件（MEMORY.md 索引 + memory/*.md）。"""
+        from jiuwenclaw.utils import get_agent_workspace_dir, get_agent_memory_dir
+        try:
+            workspace_dir = str(get_agent_workspace_dir())
+            memory_dir = str(get_agent_memory_dir())
+            files = []
+            # 工作区根的记忆索引
+            for filename in ("MEMORY.md", "memory.md"):
+                fp = os.path.join(workspace_dir, filename)
+                if os.path.isfile(fp):
+                    st = os.stat(fp)
+                    files.append({
+                        "path": filename,
+                        "name": filename,
+                        "type": "index",
+                        "size": st.st_size,
+                        "mtime": st.st_mtime,
+                    })
+            # memory/ 目录下的 .md 文件
+            if os.path.isdir(memory_dir):
+                for root, _dirs, names in os.walk(memory_dir):
+                    for n in sorted(names):
+                        if not n.endswith(".md"):
+                            continue
+                        abs_path = os.path.join(root, n)
+                        rel_path = os.path.relpath(abs_path, workspace_dir).replace(os.sep, "/")
+                        st = os.stat(abs_path)
+                        files.append({
+                            "path": rel_path,
+                            "name": n,
+                            "type": _classify_memory_file(rel_path, n),
+                            "size": st.st_size,
+                            "mtime": st.st_mtime,
+                        })
+            # 索引置顶，其余按修改时间倒序
+            order = {"index": 0, "profile": 1}
+            files.sort(key=lambda f: (order.get(f["type"], 2), -f["mtime"]))
+            await channel.send_response(ws, req_id, ok=True, payload={"files": files})
+        except Exception as e:
+            logger.exception("[memory.list] %s", e)
+            await channel.send_response(ws, req_id, ok=False, error=str(e), code="INTERNAL_ERROR")
+
+    async def _memory_get(ws, req_id, params, session_id):
+        """只读：读取单个记忆文件（仅限 MEMORY.md 与 memory/* ，禁目录穿越）。"""
+        from jiuwenclaw.utils import get_agent_workspace_dir
+        if not isinstance(params, dict):
+            await channel.send_response(ws, req_id, ok=False, error="params must be object", code="BAD_REQUEST")
+            return
+        path = str(params.get("path") or "").strip().replace("\\", "/")
+        if not path:
+            await channel.send_response(ws, req_id, ok=False, error="path is required", code="BAD_REQUEST")
+            return
+        # 白名单：根索引或 memory/ 下；禁绝对路径与目录穿越
+        allowed = path in ("MEMORY.md", "memory.md") or path.startswith("memory/")
+        if not allowed or ".." in path.split("/") or path.startswith("/"):
+            await channel.send_response(ws, req_id, ok=False, error="path not allowed", code="BAD_REQUEST")
+            return
+        try:
+            workspace_dir = str(get_agent_workspace_dir())
+            full_path = os.path.normpath(os.path.join(workspace_dir, path))
+            # 二次防穿越：归一化后必须仍在工作区内
+            if not full_path.startswith(os.path.normpath(workspace_dir) + os.sep):
+                await channel.send_response(ws, req_id, ok=False, error="path not allowed", code="BAD_REQUEST")
+                return
+            if not os.path.isfile(full_path):
+                await channel.send_response(ws, req_id, ok=False, error=f"file not found: {path}", code="NOT_FOUND")
+                return
+            with open(full_path, "r", encoding="utf-8", errors="replace") as f:
+                all_lines = f.readlines()
+            total = len(all_lines)
+            start, end = 0, total
+            from_line = params.get("from_line")
+            lines = params.get("lines")
+            if isinstance(from_line, int) and from_line > 0:
+                start = min(from_line - 1, total)
+                if isinstance(lines, int) and lines > 0:
+                    end = min(total, start + lines)
+            text = "".join(all_lines[start:end])
+            await channel.send_response(ws, req_id, ok=True, payload={
+                "path": path,
+                "text": text,
+                "totalLines": total,
+                "fromLine": start + 1 if total else 0,
+                "toLine": end,
+                "truncated": end < total,
+            })
+        except Exception as e:
+            logger.exception("[memory.get] %s", e)
+            await channel.send_response(ws, req_id, ok=False, error=str(e), code="INTERNAL_ERROR")
+
+    channel.register_method("memory.list", _memory_list)
+    channel.register_method("memory.get", _memory_get)

@@ -86,3 +86,10 @@ spec:
           value: "<<MANAGER_WS_PORT>>"
         - name: TZ
           value: "<<TIMEZONE>>"
+        # 资源服务器:去独立认证中心拉公钥验签 JWT(集群内 Service DNS)
+        - name: IDENTITY_PUBLIC_KEY_URL
+          value: "http://<<IDENTITY_NAME>>:<<IDENTITY_PORT>>/v1/auth/public_key"
+        - name: IDENTITY_JWT_ISSUER
+          value: "<<IDENTITY_JWT_ISSUER>>"
+        - name: IDENTITY_JWT_AUDIENCE
+          value: "<<IDENTITY_JWT_AUDIENCE>>"

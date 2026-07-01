@@ -39,6 +39,21 @@ spec:
               value: "false"
             - name: TZ
               value: "<<TIMEZONE>>"
+            # 文件上传 /file-api/upload-obs 写 MinIO(infra 在 default 命名空间,跨 ns 用 .default)
+            - name: JIUWENCLAW_MINIO_ENDPOINT
+              value: "<<MINIO_NAME>>-headless.default:9000"
+            - name: JIUWENCLAW_MINIO_ACCESS_KEY
+              value: "<<MINIO_ROOT_USER>>"
+            - name: JIUWENCLAW_MINIO_SECRET_KEY
+              value: "<<MINIO_ROOT_PASSWORD>>"
+            - name: JIUWENCLAW_MINIO_BUCKET
+              value: "<<OBS_BUCKET>>"
+            - name: JIUWENCLAW_MINIO_SECURE
+              value: "<<MINIO_SECURE>>"
+            - name: JIUWENCLAW_MINIO_REGION
+              value: "<<MINIO_REGION>>"
+            - name: JIUWENCLAW_MINIO_PUBLIC_BASE_URL
+              value: "<<OBS_PUBLIC_BASE_URL>>"
 
 ---
 # 集群内部访问： 提供稳定 DNS 域名

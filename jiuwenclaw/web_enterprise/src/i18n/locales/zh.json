@@ -429,7 +429,7 @@
     "selectModelProvider": "请选择模型提供商",
     "enterValue": "请输入配置值",
     "keys": {
-      "freeSearchProxyUrl": "\u4ee3\u7406\u5730\u5740",
+      "freeSearchProxyUrl": "代理地址",
       "freeSearchProxyUrlPlaceholder": "http://username:password@proxyhk.huawei.com:8080",
       "memoryForbiddenEnabled": "启用",
       "memoryForbiddenDescription": "禁止记忆内容描述",
@@ -458,21 +458,66 @@
       "setDefault": "设为默认"
     },
     "groups": {
-      "modelDefault": { "label": "默认模型（主对话）", "hint": "主对话模型服务与鉴权参数" },
-      "modelVideo": { "label": "视频模型", "hint": "视频理解（可选）" },
-      "modelAudio": { "label": "音频模型", "hint": "语音识别（可选）" },
-      "modelVision": { "label": "视觉模型", "hint": "图像理解（可选）" },
-      "model": { "label": "模型配置", "hint": "模型服务与鉴权参数" },
-      "embed": { "label": "Embed配置", "hint": "Embed 服务与鉴权参数" },
-      "thirdParty": { "label": "第三方服务配置", "hint": "API Key 配置" },
-      "freeSearch": { "label": "免费搜索引擎配置", "hint": "控制搜索引擎启用和企业内网代理" },
-      "evolution": { "label": "自演进配置", "hint": "Skills 在线自演进参数" },
-      "deepResearch": { "label": "深度研究工具配置", "hint": "针对专业或高风险决策等场景中需要多步骤、多源验证、逻辑严谨、结构化输出的任务进行处理和报告输出。" },
-      "contextEngine": { "label": "上下文压缩", "hint": "控制对话上下文是否启用压缩" },
-      "permissions": { "label": "工具安全护栏", "hint": "控制工具调用时的权限检查" },
-      "memory": { "label": "记忆系统敏感信息过滤", "hint": "配置禁止写入记忆的敏感信息类型" },
-      "email": { "label": "邮箱配置", "hint": "邮件账号与令牌参数" },
-      "other": { "label": "其他配置", "hint": "未归类的扩展参数" }
+      "modelDefault": {
+        "label": "默认模型（主对话）",
+        "hint": "主对话模型服务与鉴权参数"
+      },
+      "modelVideo": {
+        "label": "视频模型",
+        "hint": "视频理解（可选）"
+      },
+      "modelAudio": {
+        "label": "音频模型",
+        "hint": "语音识别（可选）"
+      },
+      "modelVision": {
+        "label": "视觉模型",
+        "hint": "图像理解（可选）"
+      },
+      "model": {
+        "label": "模型配置",
+        "hint": "模型服务与鉴权参数"
+      },
+      "embed": {
+        "label": "Embed配置",
+        "hint": "Embed 服务与鉴权参数"
+      },
+      "thirdParty": {
+        "label": "第三方服务配置",
+        "hint": "API Key 配置"
+      },
+      "freeSearch": {
+        "label": "免费搜索引擎配置",
+        "hint": "控制搜索引擎启用和企业内网代理"
+      },
+      "evolution": {
+        "label": "自演进配置",
+        "hint": "Skills 在线自演进参数"
+      },
+      "deepResearch": {
+        "label": "深度研究工具配置",
+        "hint": "针对专业或高风险决策等场景中需要多步骤、多源验证、逻辑严谨、结构化输出的任务进行处理和报告输出。"
+      },
+      "contextEngine": {
+        "label": "上下文压缩",
+        "hint": "控制对话上下文是否启用压缩"
+      },
+      "permissions": {
+        "label": "工具安全护栏",
+        "hint": "控制工具调用时的权限检查"
+      },
+      "memory": {
+        "label": "记忆系统敏感信息过滤",
+        "hint": "配置禁止写入记忆的敏感信息类型"
+      },
+      "email": {
+        "label": "邮箱配置",
+        "hint": "邮件账号与令牌参数"
+      },
+      "other": {
+        "label": "其他配置",
+        "hint": "未归类的扩展参数"
+      }
     },
     "booleanLabels": {
       "evolutionAutoScan": "自动检测可演进信号",
@@ -511,77 +556,30 @@
     }
   },
   "cron": {
-    "title": "定时任务管理",
-    "subtitle": "使用 cron 表达式管理定时任务，支持添加、启用和删除操作",
-    "createJob": "创建任务",
+    "title": "定时任务",
+    "refresh": "刷新",
+    "new": "新建任务",
+    "name": "任务名",
+    "cronExpr": "Cron 表达式",
+    "cronExprHint": "5 段式:分 时 日 月 周。例:0 9 * * * = 每天 9:00",
+    "timezone": "时区",
+    "description": "任务内容(发给 Agent 的指令)",
+    "enabled": "启用",
+    "actions": "操作",
     "create": "创建",
-    "cancelCreate": "取消创建",
-    "update": "更新",
+    "cancel": "取消",
     "delete": "删除",
-    "runNow": "立即执行",
-    "previewAction": "预览",
-    "enable": "启动",
-    "disable": "停用",
-    "loading": "正在加载任务列表...",
     "empty": "暂无定时任务",
-    "deleteConfirm": "确定要删除这个任务吗？",
-    "status": {
-      "enabled": "启用",
-      "disabled": "禁用",
-      "expired": "过期"
-    },
-    "columns": {
-      "name": "任务名称",
-      "cron": "Cron 表达式",
-      "status": "状态",
-      "description": "描述",
-      "wakeOffset": "唤醒偏移秒数",
-      "timezone": "时区",
-      "target": "推送频道",
-      "actions": "操作"
-    },
-    "placeholders": {
-      "name": "输入任务名称",
-      "cron": "5段式：分 时 日 月 周。例：每天9点='0 9 * * *'；每周一11时58分='58 11 * * 1'",
-      "cronShort": "5段式：分 时 日 月 周。",
-      "description": "输入描述",
-      "wakeOffset": "唤醒偏移秒数"
-    },
-    "targets": {
-      "web": "网页 (web)",
-      "feishu": "飞书 (feishu)",
-      "wechat": "微信 (wechat)",
-      "wecom": "企业微信 (wecom)",
-      "xiaoyi": "小艺 (xiaoyi)",
-      "dingtalk": "钉钉 (dingtalk)"
-    },
-    "success": {
-      "created": "任务创建成功",
-      "updated": "任务更新成功",
-      "deleted": "任务删除成功",
-      "statusUpdated": "任务状态更新成功",
-      "runNow": "任务已触发立即执行"
-    },
-    "preview": {
-      "loading": "正在加载下次触发时间...",
-      "empty": "暂无未来触发时间",
-      "label": "第 {{index}} 次"
-    },
-    "errors": {
-      "loadJobs": "加载定时任务失败",
-      "createFailed": "创建任务失败",
-      "updateFailed": "更新任务失败",
-      "deleteFailed": "删除任务失败",
-      "toggleFailed": "更新任务状态失败",
-      "previewFailed": "预览触发时间失败",
-      "runNowFailed": "立即执行失败",
-      "loadDetailFailed": "获取任务详情失败",
-      "nameRequired": "任务名称不能为空",
-      "cronRequired": "Cron 表达式不能为空",
-      "timezoneRequired": "时区不能为空",
-      "targetRequired": "推送频道不能为空",
-      "descriptionRequired": "描述不能为空"
-    }
+    "confirmDelete": "删除定时任务「{{name}}」?",
+    "loadFailed": "加载失败",
+    "created": "已创建",
+    "deleted": "已删除",
+    "saveFailed": "保存失败",
+    "namePlaceholder": "例:每日晨报",
+    "descPlaceholder": "例:总结今天的新闻要点并发给我",
+    "on": "开",
+    "off": "关",
+    "connecting": "连接中…"
   },
   "browser": {
     "title": "浏览器服务",
@@ -629,182 +627,46 @@
     }
   },
   "skills": {
-    "title": "技能管理",
-    "subtitle": "管理并安装智能体可用的技能。",
-    "actions": {
-      "install": "安装",
-      "uninstall": "卸载",
-      "importLocal": "导入本地技能",
-      "sourceManager": "源管理",
-      "backToList": "返回列表",
-      "viewEvolution": "查看技能经验"
-    },
-    "builtIn": "内置",
-    "status": {
-      "installed": "已安装",
-      "notInstalled": "未安装",
-      "builtIn": "内置"
-    },
-    "source": {
-      "local": "本地",
-      "project": "项目",
-      "builtin": "内置",
-      "unknown": "未知"
-    },
-    "sourceLabel": "来源",
-    "statusLabel": "状态",
-    "versionLabel": "版本",
-    "authorLabel": "作者",
-    "allowedTools": "允许工具",
-    "unlimited": "无限制",
-    "contentPreview": "内容预览",
-    "noDescription": "暂无描述",
-    "noContent": "暂无内容",
-    "searchPlaceholder": "搜索技能名称、描述或标签",
-    "totalCount": "共 {{count}} 个",
-    "listError": "获取技能失败，请检查后端服务",
-    "noMatches": "暂无匹配的技能",
-    "detailLoading": "加载详情中...",
-    "detailError": "加载详情失败",
-    "evolution": {
-      "closeAria": "关闭技能经验弹窗",
-      "title": "技能经验：{{name}}",
-      "subtitle": "可编辑经验内容（change.content），并支持删除条目后保存。",
-      "empty": "暂无经验条目",
-      "deleteConfirm": "确认删除该条经验吗？",
-      "actions": {
-        "delete": "删除"
-      },
-      "fields": {
-        "id": "ID",
-        "source": "来源",
-        "section": "Section",
-        "target": "Target",
-        "applied": "已应用",
-        "timestamp": "时间",
-        "context": "上下文",
-        "content": "经验内容"
-      },
-      "messages": {
-        "saved": "保存成功"
-      },
-      "errors": {
-        "loadFailed": "加载技能经验失败",
-        "saveFailed": "保存技能经验失败",
-        "invalidFile": "经验文件格式错误，请先修复 evolutions.json"
-      }
-    },
-    "skillNet": {
-      "title": "SkillNet 在线搜索",
-      "titleRepoLinkText": "SkillNet 开源仓库",
-      "titleRepoAria": "SkillNet 官方 GitHub 仓库",
-      "search": "搜索",
-      "collapse": "收起",
-      "expand": "展开",
-      "searchPlaceholder": "输入关键词（例如 小红书）",
-      "noResults": "未找到相关技能，可换个关键词再试。",
-      "installFromResult": "安装",
-      "concurrentLimitReached": "最多同时安装 {{max}} 个技能，请等待部分完成后再试。",
-      "installingInProgress": "安装中…",
-      "meta": "作者 {{author}} · ⭐ {{stars}}",
-      "showDetail": "点击展开详情",
-      "hideDetail": "点击收起详情",
-      "category": "分类",
-      "url": "地址",
-      "installTimeout": "SkillNet 安装超时（后台可能仍在进行），请稍后刷新技能列表",
-      "usageNoticeTitle": "提示",
-      "usageNotice1": "从 SkillNet 安装技能时，文件实际从 GitHub 下载，<strong>请保证运行 JiuwenClaw 的环境能访问 GitHub</strong>（网络、代理等）。",
-      "usageNotice2": "从 GitHub 拉取依赖其 API：未认证（匿名）约 60 次/小时/本机 IP；若安装失败并提示限流，请隔一段时间再试。如需提高速率限制，请在<configLink>配置页面</configLink>中配置 github_token。",
-      "configPageLinkAria": "前往配置页面",
-      "usageNotice3": "SkillNet 在线搜索走公网服务，若出现超时或失败，可能是网络拥堵或服务繁忙，请稍后再试。",
-      "usageNotice4": "若因访问 GitHub 延迟或不稳定导致安装失败或很慢（如中国大陆等地区），可在下方填写可选的下载镜像地址。",
-      "mirrorLabel": "下载镜像地址（可选）",
-      "mirrorPlaceholder": "https://ghfast.top/",
-      "mirrorExamples": "示例：https://ghfast.top/, https://ghproxy.com/",
-      "mirrorInvalid": "请输入有效的 http(s) 地址，或留空。",
-      "evaluateSkill": "评估",
-      "evaluating": "评估中…",
-      "evaluateFailed": "评估失败",
-      "evaluateEmptyResult": "未返回评估结果",
-      "evaluateModalTitle": "SkillNet 质量评估",
-      "evaluateModalSubtitle": "五维评分由模型根据技能内容生成，仅供参考。",
-      "evaluateModalClose": "关闭",
-      "evaluateCancel": "取消",
-      "evaluateModalBackdrop": "关闭评估结果",
-      "evalDim": {
-        "safety": "安全性",
-        "completeness": "完整性",
-        "executability": "可执行性",
-        "maintainability": "可维护性",
-        "cost_awareness": "成本意识"
-      },
-      "errors": {
-        "evaluateNoApiKey": "未配置对话模型的 API Key，无法使用 SkillNet 评估。请在配置中填写。",
-        "evaluateFailedFallback": "评估失败，请稍后重试。",
-        "skillnetAiMissing": "未安装 skillnet-ai 依赖。",
-        "searchFailedFallback": "搜索失败，请稍后重试。",
-        "sessionExpired": "安装会话已过期，请重新点击安装。",
-        "downloadTimeout": "下载超时（超过 {{seconds}} 秒），请稍后重试。若网络较慢，可稍后在技能列表中查看是否已安装成功。",
-        "installFailedFallback": "安装失败，请重试。",
-        "saveConfigFailed": "安装完成但保存配置失败，请刷新页面重试。",
-        "reloadRequired": "技能已安装，请手动刷新页面生效。",
-        "downloadFailed": "下载失败，请重试。",
-        "emptyDownloadResult": "SkillNet 未下载到任何内容。可能原因：链接无效或路径下无文件；或已从 GitHub 列出文件但从 raw.githubusercontent.com 拉取全部失败（网络超时、防火墙、仅 API 可达而 raw 不可达等）。{{hint}}",
-        "skillMdNotFound": "下载未完成或内容不完整，未找到 SKILL.md，请重试。",
-        "parseSkillFailed": "无法解析下载的技能文件",
-        "skillAlreadyInstalled": "该技能已安装。",
-        "invalidMirrorUrl": "mirror_url 不是有效的 http(s) 地址。"
-      }
-    },
-    "clawhub": {
-      "title": "ClawHub 在线搜索",
-      "search": "搜索",
-      "searchPlaceholder": "输入关键词搜索技能",
-      "noResults": "未找到相关技能，可换个关键词再试。",
-      "install": "安装",
-      "installing": "安装中…",
-      "updatedAt": "更新于 {{date}}",
-      "configTitle": "配置 ClawHub CLI Token",
-      "configDescription": "请输入从 ClawHub 平台获取的 CLI Token，用于访问 ClawHub 技能库。",
-      "tokenLabel": "CLI Token",
-      "tokenPlaceholder": "请输入 ClawHub CLI Token (clh_...)",
-      "tokenConfigured": "已配置 Token: {{token}}",
-      "messages": {
-        "tokenSaved": "Token 已保存",
-        "installed": "已安装：{{name}}"
-      },
-      "errors": {
-        "saveTokenFailed": "保存 Token 失败",
-        "searchFailed": "搜索失败",
-        "downloadFailed": "下载失败",
-        "tokenNotConfigured": "未配置 ClawHub CLI Token，请先配置",
-        "skillAlreadyInstalled": "该技能已安装",
-        "httpError": "请求失败，请检查token或者访问太频繁，稍后重试"
-      }
-    },
-    "marketplacesAvailable": "可用 marketplace: {{names}}",
-    "marketplacesDefault": "默认 marketplace: anthropics",
-    "installPrompt": "请输入插件规格 (plugin@marketplace)",
-    "importPrompt": "请输入服务端本地 skill 路径（SKILL.md 或目录）",
-    "uninstallConfirm": "确认卸载 {{pluginName}} ?",
-    "messages": {
-      "installed": "已安装：{{spec}}",
-      "imported": "已导入：{{name}}",
-      "uninstalled": "已卸载：{{pluginName}}",
-      "skillNetInstalled": "已从 SkillNet 安装：{{name}}"
-    },
-    "errors": {
-      "installFailed": "安装失败",
-      "installFailedHint": "安装失败，请检查插件规格或网络",
-      "skillNetSearchFailed": "搜索失败",
-      "skillNetSearchFailedHint": "搜索暂时不可用",
-      "skillNetSearchErrorBanner": "{{detail}} 请重试。",
-      "skillNetInstallFailed": "SkillNet 安装失败",
-      "skillNetInstallFailedHint": "SkillNet 安装失败，请检查 skill URL 或依赖",
-      "importFailed": "导入失败",
-      "importFailedHint": "导入失败，请检查路径或权限",
-      "uninstallFailed": "卸载失败",
-      "uninstallFailedHint": "卸载失败，请稍后重试"
+    "title": "技能",
+    "refresh": "刷新",
+    "search": "搜索技能…",
+    "installed": "已安装",
+    "catalog": "技能目录",
+    "install": "安装",
+    "uninstall": "卸载",
+    "builtin": "内置",
+    "version": "版本",
+    "author": "作者",
+    "noInstalled": "暂无已安装技能",
+    "noSkills": "暂无可用技能",
+    "connecting": "连接中…",
+    "loadFailed": "加载失败",
+    "confirmUninstall": "卸载技能「{{name}}」?",
+    "installedOk": "已安装",
+    "uninstalledOk": "已卸载",
+    "installFailed": "安装失败",
+    "uninstallFailed": "卸载失败",
+    "manualOnly": "非内置技能需在管理端配置来源后安装",
+    "installing": "安装中…",
+    "uninstalling": "卸载中…"
+  },
+  "memory": {
+    "title": "记忆",
+    "refresh": "刷新",
+    "search": "搜索记忆…",
+    "connecting": "连接中…",
+    "loadFailed": "加载失败",
+    "empty": "暂无记忆文件",
+    "emptyFile": "（空文件）",
+    "selectHint": "从左侧选择一个记忆文件查看。",
+    "loadingDoc": "正在加载…",
+    "lines": "{{count}} 行",
+    "truncated": "已截断",
+    "type": {
+      "index": "索引",
+      "profile": "用户画像",
+      "daily": "按日记录",
+      "fact": "事实"
     }
   },
   "agent": {

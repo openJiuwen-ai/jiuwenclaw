@@ -1,7 +1,11 @@
 ARG BASE_IMAGE
 FROM ${BASE_IMAGE}
 
-RUN useradd --create-home --shell /bin/bash app
+# 复用 registry 的 manager 镜像当 base,它结尾切到了非 root 的 app 用户;先切回 root
+USER root
+
+# base 可能已自带 app 用户,幂等处理
+RUN id app >/dev/null 2>&1 || useradd --create-home --shell /bin/bash app
 
 WORKDIR /app/jiuwenclaw
 COPY . /app/jiuwenclaw/

@@ -39,7 +39,40 @@ import type {
   ListItemsResult,
 } from '../types';
 
+// 平台管理 API(claw_manager) 与 认证/目录 API(独立认证服务) 两个反代前缀。
 const API_BASE = (import.meta.env.VITE_API_BASE ?? '/api').replace(/\/$/, '');
+const IDP_BASE = (import.meta.env.VITE_IDP_BASE ?? '/idp').replace(/\/$/, '');
+
+// ---------- 认证 token（access JWT + refresh，localStorage 持久化）----------
+const ACCESS_KEY = 'claw_access_token';
+const REFRESH_KEY = 'claw_refresh_token';
+let accessToken: string | null = localStorage.getItem(ACCESS_KEY);
+let refreshToken: string | null = localStorage.getItem(REFRESH_KEY);
+let unauthorizedHandler: (() => void) | null = null;
+
+export function setTokens(access: string | null, refresh?: string | null): void {
+  accessToken = access;
+  if (access) localStorage.setItem(ACCESS_KEY, access);
+  else localStorage.removeItem(ACCESS_KEY);
+  if (refresh !== undefined) {
+    refreshToken = refresh;
+    if (refresh) localStorage.setItem(REFRESH_KEY, refresh);
+    else localStorage.removeItem(REFRESH_KEY);
+  }
+}
+export function clearTokens(): void {
+  setTokens(null, null);
+}
+export function getAccessToken(): string | null {
+  return accessToken;
+}
+export function hasSession(): boolean {
+  return !!accessToken;
+}
+/** 注册"会话失效(401)"回调：由 AuthProvider 设置为登出并回到登录页。 */
+export function setUnauthorizedHandler(fn: (() => void) | null): void {
+  unauthorizedHandler = fn;
+}
 
 interface FastApiValidationErrorItem {
   type?: string;
@@ -97,40 +130,63 @@ function buildQuery(query?: RequestOptions['query']) {
   return s ? `?${s}` : '';
 }
 
-async function http<T>(path: string, opts: RequestOptions = {}): Promise<T> {
-  const url = `${API_BASE}${path}${buildQuery(opts.query)}`;
-  const init: RequestInit = {
-    method: opts.method ?? 'GET',
-    headers: { 'Content-Type': 'application/json' },
-  };
-  if (opts.body !== undefined) {
-    init.body = JSON.stringify(opts.body);
+/** 用 refresh token 续期一次（成功则写入新 token）。 */
+async function tryRefresh(): Promise<boolean> {
+  if (!refreshToken) return false;
+  try {
+    const resp = await fetch(`${IDP_BASE}/v1/auth/refresh`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ refresh_token: refreshToken }),
+    });
+    if (!resp.ok) return false;
+    const t = (await resp.json()) as TokenResponse;
+    setTokens(t.access_token, t.refresh_token);
+    return true;
+  } catch {
+    return false;
   }
+}
+
+async function requestCore<T>(
+  base: string, path: string, opts: RequestOptions, unwrap: boolean, retried = false,
+): Promise<T> {
+  const url = `${base}${path}${buildQuery(opts.query)}`;
+  const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+  if (accessToken) headers.Authorization = `Bearer ${accessToken}`;
+  const init: RequestInit = { method: opts.method ?? 'GET', headers };
+  if (opts.body !== undefined) init.body = JSON.stringify(opts.body);
+
   let resp: Response;
   try {
     resp = await fetch(url, init);
   } catch (e) {
     throw new ApiError(0, `network error: ${(e as Error).message}`);
   }
+
+  // 会话失效：401 且不是 token/refresh 端点 → 先试 refresh 续期重试一次,失败再全局登出。
+  if (
+    resp.status === 401 && accessToken && !retried &&
+    !path.includes('/auth/token') && !path.includes('/auth/refresh')
+  ) {
+    if (await tryRefresh()) return requestCore<T>(base, path, opts, unwrap, true);
+    unauthorizedHandler?.();
+  }
+
   let json: unknown = null;
   const text = await resp.text();
   if (text) {
-    try {
-      json = JSON.parse(text);
-    } catch {
-      // 非 JSON 响应
-    }
+    try { json = JSON.parse(text); } catch { /* 非 JSON 响应 */ }
   }
   if (!resp.ok) {
     const rawDetail =
       json && typeof json === 'object' && 'detail' in (json as Record<string, unknown>)
         ? (json as { detail: unknown }).detail
         : undefined;
-    const detail = formatApiErrorDetail(rawDetail) || resp.statusText;
-    throw new ApiError(resp.status, detail, json);
+    throw new ApiError(resp.status, formatApiErrorDetail(rawDetail) || resp.statusText, json);
   }
-  // 兼容 ResponseModel<T> 包装
-  if (json && typeof json === 'object' && 'code' in (json as Record<string, unknown>) && 'data' in (json as Record<string, unknown>)) {
+  // manager API 返回 ResponseModel<T> 包装；认证服务返回原始 JSON(unwrap=false)。
+  if (unwrap && json && typeof json === 'object' && 'code' in (json as Record<string, unknown>) && 'data' in (json as Record<string, unknown>)) {
     const wrapped = json as ResponseModel<T>;
     if (wrapped.code !== 200) {
       throw new ApiError(resp.status, wrapped.message || 'unknown error', json);
@@ -140,11 +196,157 @@ async function http<T>(path: string, opts: RequestOptions = {}): Promise<T> {
   return json as T;
 }
 
+/** 平台管理 API(claw_manager, /api)——拆 ResponseModel。 */
+function http<T>(path: string, opts: RequestOptions = {}): Promise<T> {
+  return requestCore<T>(API_BASE, path, opts, true);
+}
+/** 认证/目录 API(独立认证服务, /idp)——原始 JSON。 */
+function idpHttp<T>(path: string, opts: RequestOptions = {}): Promise<T> {
+  return requestCore<T>(IDP_BASE, path, opts, false);
+}
+
 // ---------- System ----------
 
 export const SystemApi = {
   health: () => http<{ status: string }>('/health'),
   managerWsStatus: () => http<ManagerWsStatus>('/manager-ws/status'),
+};
+
+// ---------- Auth ----------
+
+export interface AuthUser {
+  user_id: string;
+  display_name: string;
+  is_admin: boolean;
+  status: string;
+  groups?: string[];
+}
+export interface TokenResponse {
+  access_token: string;
+  token_type: string;
+  expires_in: number;
+  refresh_token: string;
+}
+
+// 认证全部走独立认证服务(经 /idp 反代)。claw_manager 不再有登录端点。
+export const AuthApi = {
+  /** OAuth2 密码流：表单 POST /token → 存 access+refresh，再取 /me 返回用户。 */
+  login: async (username: string, password: string): Promise<AuthUser> => {
+    const body = new URLSearchParams({ username, password });
+    const resp = await fetch(`${IDP_BASE}/v1/auth/token`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body,
+    });
+    if (!resp.ok) {
+      let detail = resp.statusText;
+      try {
+        const j = (await resp.json()) as { detail?: unknown };
+        detail = formatApiErrorDetail(j?.detail) || detail;
+      } catch { /* 非 JSON */ }
+      throw new ApiError(resp.status, detail);
+    }
+    const t = (await resp.json()) as TokenResponse;
+    setTokens(t.access_token, t.refresh_token);
+    return idpHttp<AuthUser>('/v1/auth/me');
+  },
+  me: () => idpHttp<AuthUser>('/v1/auth/me'),
+  myOrgs: () => idpHttp<{ orgs: Org[] }>('/v1/auth/me/orgs'),
+  logout: async (): Promise<void> => {
+    try {
+      if (refreshToken) {
+        await idpHttp('/v1/auth/logout', { method: 'POST', body: { refresh_token: refreshToken } });
+      }
+    } catch { /* 忽略登出请求错误 */ }
+    clearTokens();
+  },
+};
+
+// ---------- IAM（组织 / 用户 / bot）----------
+
+export interface Org {
+  group_id: string;
+  name: string;
+  status: string;
+  created_at: string | null;
+  updated_at: string | null;
+}
+export interface IamUser {
+  user_id: string;
+  display_name: string;
+  is_admin: boolean;
+  status: string;
+  created_at: string | null;
+  updated_at: string | null;
+  group_ids?: string[];
+}
+export type BotScopeType = 'global' | 'org' | 'user';
+export interface BotVisibility {
+  id: number;
+  bot_id: string;
+  scope_type: BotScopeType;
+  scope_id: string;
+}
+export interface Bot {
+  bot_id: string;
+  name: string;
+  description: string | null;
+  status: string;
+  created_at: string | null;
+  updated_at: string | null;
+  visibility?: BotVisibility[];
+}
+interface IamPaged<T> {
+  items: T[];
+  total: number;
+  page: number;
+  page_size: number;
+}
+
+export const OrgApi = {
+  list: (page = 1, page_size = 200) => idpHttp<IamPaged<Org>>('/v1/orgs/', { query: { page, page_size } }),
+  create: (body: { group_id?: string; name: string }) => idpHttp<Org>('/v1/orgs/', { method: 'POST', body }),
+  update: (gid: string, body: { name?: string; status?: string }) =>
+    idpHttp<Org>(`/v1/orgs/${encodeURIComponent(gid)}`, { method: 'PATCH', body }),
+  remove: (gid: string) => idpHttp<{ deleted: boolean }>(`/v1/orgs/${encodeURIComponent(gid)}`, { method: 'DELETE' }),
+  listMembers: (gid: string) => idpHttp<{ users: IamUser[] }>(`/v1/orgs/${encodeURIComponent(gid)}/members`),
+  addMembers: (gid: string, user_ids: string[]) =>
+    idpHttp<{ added: string[] }>(`/v1/orgs/${encodeURIComponent(gid)}/members`, { method: 'POST', body: { user_ids } }),
+  removeMember: (gid: string, userId: string) =>
+    idpHttp<{ removed: boolean }>(`/v1/orgs/${encodeURIComponent(gid)}/members/${encodeURIComponent(userId)}`, { method: 'DELETE' }),
+};
+
+/** 无组织保留组的 group_id（与后端 NO_ORG_GROUP_ID 一致）。 */
+export const NO_ORG_GROUP_ID = '__none__';
+
+export const UserApi = {
+  list: (page = 1, page_size = 200) => idpHttp<IamPaged<IamUser>>('/v1/users/', { query: { page, page_size } }),
+  get: (id: string) => idpHttp<IamUser>(`/v1/users/${encodeURIComponent(id)}`),
+  create: (body: { user_id?: string; display_name: string; is_admin?: boolean; username: string; password: string }) =>
+    idpHttp<IamUser>('/v1/users/', { method: 'POST', body }),
+  update: (id: string, body: { display_name?: string; is_admin?: boolean; status?: string; password?: string }) =>
+    idpHttp<IamUser>(`/v1/users/${encodeURIComponent(id)}`, { method: 'PATCH', body }),
+  remove: (id: string) => idpHttp<{ deleted: boolean }>(`/v1/users/${encodeURIComponent(id)}`, { method: 'DELETE' }),
+  setOrgs: (id: string, group_ids: string[]) =>
+    idpHttp<{ group_ids: string[] }>(`/v1/users/${encodeURIComponent(id)}/orgs`, { method: 'PUT', body: { group_ids } }),
+};
+
+export const BotApi = {
+  list: (page = 1, page_size = 200) => http<IamPaged<Bot>>('/v1/bots/', { query: { page, page_size } }),
+  get: (id: string) => http<Bot>(`/v1/bots/${encodeURIComponent(id)}`),
+  create: (body: { bot_id?: string; name: string; description?: string }) =>
+    http<Bot>('/v1/bots/', { method: 'POST', body }),
+  update: (id: string, body: { name?: string; description?: string; status?: string }) =>
+    http<Bot>(`/v1/bots/${encodeURIComponent(id)}`, { method: 'PATCH', body }),
+  remove: (id: string) => http<{ deleted: boolean }>(`/v1/bots/${encodeURIComponent(id)}`, { method: 'DELETE' }),
+  setVisibility: (id: string, scopes: { scope_type: string; scope_id: string | null }[]) =>
+    http<{ visibility: BotVisibility[] }>(`/v1/bots/${encodeURIComponent(id)}/visibility`, { method: 'PUT', body: { scopes } }),
+};
+
+// 当前登录用户视角（用户面）：组织来自认证服务,可见 bot 来自管理 API。
+export const MeApi = {
+  orgs: () => idpHttp<{ orgs: Org[] }>('/v1/auth/me/orgs'),
+  bots: (groupId: string) => http<{ bots: Bot[] }>('/v1/me/bots', { query: { group_id: groupId } }),
 };
 
 // ---------- Instances ----------

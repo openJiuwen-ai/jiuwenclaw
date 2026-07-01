@@ -1,0 +1,25 @@
+# 本机统一前端(nginx + SPA)。复用与 k8s 同一份 nginx 模板(docker/webui-default.conf.template),
+# upstream 经环境变量指向**宿主机上**跑着的后端(本机用 setsid 跑的 manager API / 认证中心 / web 后端)。
+#
+# 用法(在仓库根目录):
+#   docker compose -f docker/docker-compose.webui.yml up --build
+#   浏览器访问 http://localhost:8080
+#
+# 前提:宿主机已起好 manager API(8765)、认证中心(8770)、web 后端 broker(19000)。
+
+services:
+  webui:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.webui
+    image: jiuwenclaw-webui:local
+    ports:
+      - "8080:80" # 浏览器入口
+    environment:
+      NGINX_ENVSUBST_FILTER: "^BACKEND_"
+      BACKEND_API: "http://host.docker.internal:8765"
+      BACKEND_IDP: "http://host.docker.internal:8770"
+      BACKEND_WS: "http://host.docker.internal:19000"
+    extra_hosts:
+      - "host.docker.internal:host-gateway" # Linux 上让容器能访问宿主机
+    restart: unless-stopped

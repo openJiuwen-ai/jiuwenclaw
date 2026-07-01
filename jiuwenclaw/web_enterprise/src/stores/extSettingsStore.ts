@@ -73,6 +73,31 @@ function loadFromStorage(): ExtSettingsSnapshot {
   }
 }
 
+/**
+ * 初始快照：以 localStorage 为底，若 URL query 带 user_id/group_id/bot_id
+ * （内嵌到 claw_manager 用户面时由外壳注入），则用 query 覆盖这三项。
+ * 独立运行(无这些 query)时行为与原先完全一致。
+ */
+function loadInitial(): ExtSettingsSnapshot {
+  const base = loadFromStorage();
+  if (typeof window === 'undefined') return base;
+  try {
+    const q = new URLSearchParams(window.location.search);
+    const uid = q.get('user_id');
+    const gid = q.get('group_id');
+    const bid = q.get('bot_id');
+    if (uid === null && gid === null && bid === null) return base;
+    return {
+      ...base,
+      userId: uid ?? base.userId,
+      groupId: gid ?? base.groupId,
+      botId: bid ?? base.botId,
+    };
+  } catch {
+    return base;
+  }
+}
+
 function saveToStorage(snapshot: ExtSettingsSnapshot): void {
   try {
     localStorage.setItem(STORAGE_KEY, JSON.stringify(snapshot));
@@ -95,7 +120,7 @@ interface ExtSettingsState extends ExtSettingsSnapshot {
 }
 
 export const useExtSettingsStore = create<ExtSettingsState>((set) => ({
-  ...loadFromStorage(),
+  ...loadInitial(),
   saveAndApply: (next) => {
     const prev = useExtSettingsStore.getState();
     const sanitized: ExtSettingsSnapshot = {

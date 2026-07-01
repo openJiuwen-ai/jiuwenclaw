@@ -1,27 +1,24 @@
 ARG BASE_IMAGE
 FROM ${BASE_IMAGE}
 
-# 创建 app 用户
-RUN useradd --create-home --shell /bin/bash app
-RUN mkdir -p /app
+# 复用 registry 的 web 镜像当 base,它结尾切到了非 root 的 app 用户;先切回 root
+USER root
 
-# 拷贝代码（所有权直接给 app）
-COPY --chown=app:app . /app/jiuwenclaw/
+# base 可能已自带 app 用户,幂等处理
+RUN id app >/dev/null 2>&1 || useradd --create-home --shell /bin/bash app
 
-# 先用 ROOT 全局安装 Python 包
 WORKDIR /app/jiuwenclaw
+COPY . /app/jiuwenclaw/
+RUN chown -R app:app /app/jiuwenclaw
+
+# 重装我们的 Python 源码(含把 /file-api 挂到 broker 的改动)。
+# 不再 npm build 前端:broker 只跑 ws + /file-api,静态由 webui(/、/chat)同源提供。
 RUN pip install -i https://pypi.tuna.tsinghua.edu.cn/simple -e ".[all]" --no-cache-dir
 
-# 切换成 app 用户，再执行 npm 构建
 USER app
-WORKDIR /app/jiuwenclaw/jiuwenclaw/web_enterprise
-RUN npm install
-RUN npm run build
-
-# 配置环境变量
 WORKDIR /app/jiuwenclaw
 ENV PATH=$PATH:/home/app/.local/bin
 
-# 暴露端口 + 启动
-EXPOSE 5173
+# 企业版 broker(WS + /file-api),端口 19000
+EXPOSE 19000
 CMD ["jiuwenclaw-start", "web-enterprise"]

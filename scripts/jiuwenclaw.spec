@@ -87,7 +87,20 @@ hiddenimports = webview_hiddenimports + [
     "webview",
     "jiuwenclaw.app_web",  # 静态文件服务
     "jiuwenclaw.desktop_app",  # 桌面入口
+    "jiuwenclaw.app_enterprise_web",  # 企业版 web 后端入口
+    "jiuwenclaw.webserver",
+    "jiuwenclaw.webserver.app",
+    "jiuwenclaw.webserver.common",
+    "jiuwenclaw.webserver.file_api",
+    "jiuwenclaw.webserver.ws_proxy",
+    "jiuwenclaw.webserver.enterprise_broker",
+    "fastapi",
+    "uvicorn",
 ]
+hiddenimports += collect_submodules("uvicorn")
+hiddenimports += collect_submodules("websockets")
+hiddenimports += collect_submodules("jiuwenclaw.webserver")
+
 
 # 排除不需要的模块以减小体积（pandas 为 pymilvus/openjiuwen 所需，不可排除）
 excludes = [

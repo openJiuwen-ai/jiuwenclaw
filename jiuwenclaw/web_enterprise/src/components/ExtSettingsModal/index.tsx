@@ -200,12 +200,15 @@ function ExtSettingsModal({ onClose }: ExtSettingsModalProps) {
                 type="text"
                 value={userId}
                 onChange={(e) => setUserId(e.target.value)}
+                readOnly
+                title={t('extSettings.injectedHint', '由所在应用注入，不可手动修改')}
                 placeholder={t('extSettings.userIdPlaceholder')}
                 className="w-full px-3 py-2 rounded-md text-sm outline-none transition-colors"
                 style={{
-                  backgroundColor: 'var(--input-bg)',
+                  backgroundColor: 'rgba(128,128,128,0.15)',
                   border: '1px solid var(--border)',
-                  color: 'var(--fg)',
+                  color: 'var(--fg-muted)',
+                  cursor: 'not-allowed',
                 }}
               />
             </div>
@@ -220,12 +223,15 @@ function ExtSettingsModal({ onClose }: ExtSettingsModalProps) {
                 type="text"
                 value={groupId}
                 onChange={(e) => setGroupId(e.target.value)}
+                readOnly
+                title={t('extSettings.injectedHint', '由所在应用注入，不可手动修改')}
                 placeholder={t('extSettings.groupIdPlaceholder')}
                 className="w-full px-3 py-2 rounded-md text-sm outline-none transition-colors"
                 style={{
-                  backgroundColor: 'var(--input-bg)',
+                  backgroundColor: 'rgba(128,128,128,0.15)',
                   border: '1px solid var(--border)',
-                  color: 'var(--fg)',
+                  color: 'var(--fg-muted)',
+                  cursor: 'not-allowed',
                 }}
               />
             </div>
@@ -240,12 +246,15 @@ function ExtSettingsModal({ onClose }: ExtSettingsModalProps) {
                 type="text"
                 value={botId}
                 onChange={(e) => setBotId(e.target.value)}
+                readOnly
+                title={t('extSettings.injectedHint', '由所在应用注入，不可手动修改')}
                 placeholder={t('extSettings.botIdPlaceholder')}
                 className="w-full px-3 py-2 rounded-md text-sm outline-none transition-colors"
                 style={{
-                  backgroundColor: 'var(--input-bg)',
+                  backgroundColor: 'rgba(128,128,128,0.15)',
                   border: '1px solid var(--border)',
-                  color: 'var(--fg)',
+                  color: 'var(--fg-muted)',
+                  cursor: 'not-allowed',
                 }}
               />
             </div>

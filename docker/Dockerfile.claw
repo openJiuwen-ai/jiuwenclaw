@@ -18,7 +18,8 @@ RUN npm run build
 # Install server dependencies
 WORKDIR /app/jiuwenclaw
 ENV PATH=$PATH:/home/app/.local/bin
-RUN sed -i '/--host/ s/default="localhost"/default="0.0.0.0"/' /app/jiuwenclaw/jiuwenclaw/app_web.py
+# 容器内 web 后端绑 0.0.0.0（app_web/app_enterprise_web 的 --host 读此 env，取代旧的 sed 改源码）
+ENV JIUWENCLAW_WEB_HOST=0.0.0.0
 RUN pip install -i https://pypi.tuna.tsinghua.edu.cn/simple -e ".[all]" --no-cache-dir
 
 # Start claw app

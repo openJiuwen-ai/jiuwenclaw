@@ -1,0 +1,67 @@
+# 统一前端 nginx:发 SPA(三段路由 /auth /user /manager)+ 反代三类后端。
+#
+# upstream 由环境变量注入(官方 nginx 镜像启动时 envsubst,仅替换 BACKEND_* 占位;
+# nginx 自身的 $uri/$host/$http_upgrade 等由 NGINX_ENVSUBST_FILTER=^BACKEND_ 保护):
+#   BACKEND_API = http://<管理API>:8765      (claw_manager,路由本就在 /api 下,保留前缀)
+#   BACKEND_IDP = http://<认证中心>:8770      (jiuwenclaw_identity,路由在 /v1 下,剥 /idp 前缀)
+#   BACKEND_WS  = http://<web后端>:19000       (企业版 WS broker + /file-api 文件)
+# 本机 docker-compose 指 host.docker.internal,k8s 指 service 名 —— 同一份模板。
+
+server {
+    listen 80;
+    server_name _;
+
+    root /usr/share/nginx/html;
+    index index.html;
+
+    # 文件上传可能较大,放开请求体限制(/file-api)。
+    client_max_body_size 0;
+
+    # 管理 API(保留 /api 前缀)
+    location /api/ {
+        proxy_pass ${BACKEND_API};
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+
+    # 认证中心(剥掉 /idp 前缀:/idp/v1/auth/token → 认证中心 /v1/auth/token)
+    location /idp/ {
+        rewrite ^/idp/(.*)$ /$1 break;
+        proxy_pass ${BACKEND_IDP};
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+
+    # 聊天 WebSocket(web 后端 broker;需 Upgrade 头 + 长超时)
+    location /ws {
+        proxy_pass ${BACKEND_WS};
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_set_header Host $host;
+        proxy_read_timeout 3600s;
+        proxy_send_timeout 3600s;
+    }
+
+    # 文件上传/下载(web 后端 file-api;关闭请求缓冲以流式上传大文件)
+    location /file-api/ {
+        proxy_pass ${BACKEND_WS};
+        proxy_set_header Host $host;
+        proxy_request_buffering off;
+    }
+
+    # 企业版聊天 SPA(同源内嵌:web_enterprise dist,base=/chat/;由 user面 iframe 加载)
+    # 其 API/WS 走根路径 /ws、/file-api(上面已反代),故此处只发静态 + SPA 回退。
+    location /chat/ {
+        try_files $uri $uri/ /chat/index.html;
+    }
+
+    # SPA history 回退:三段路由(/auth /user /manager …)深链/刷新均发 index.html
+    location / {
+        try_files $uri /index.html;
+    }
+}

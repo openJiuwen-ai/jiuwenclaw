@@ -46,6 +46,9 @@ declare -A CONFIG=(
     ["MANAGER_WEB_TEMPLATE_FILE"]="${TEMPLATE_DIR}/manager-web.template.yaml"
     ["MANAGER_WEB_FILE"]="${CONFIG_DIR}/manager-web.yaml"
 
+    ["WEBUI_TEMPLATE_FILE"]="${TEMPLATE_DIR}/webui.template.yaml"
+    ["WEBUI_FILE"]="${CONFIG_DIR}/webui.yaml"
+
     ["PV_TEMPLATE_FILE"]="${TEMPLATE_DIR}/pv-nfs.template.yaml"
     ["PV_FILE"]="${CONFIG_DIR}/pv-nfs.yaml"
 
@@ -65,7 +68,7 @@ declare -A ARGS=(
 
 # ==== All available modules ====
 #declare -ga ALL_MODULES=("NFS" "RABBITMQ" "YR_CLAW" "GATEWAY" "WEB" "MANAGER")
-declare -ga ALL_MODULES=("NFS" "RABBITMQ" "MYSQL" "REDIS" "POSTGRESQL" "MINIO" "GATEWAY" "WEB" "MANAGER")
+declare -ga ALL_MODULES=("NFS" "RABBITMQ" "MYSQL" "REDIS" "POSTGRESQL" "MINIO" "GATEWAY" "WEB" "MANAGER" "WEBUI")
 
 declare -ga MODULES=()
 
@@ -144,6 +147,17 @@ declare -A DEPLOY_VARS=(
     ["MANAGER_REST_PORT"]="8765"
     ["MANAGER_WS_PORT"]="8766"
     ["MANAGER_WEB_PORT"]="5273"
+    # 认证中心(独立服务+独立身份库)与统一前端 webui(对外唯一入口)
+    ["IDENTITY_NAME"]="jiuwenclaw-identity"
+    ["IDENTITY_PORT"]="8770"
+    ["IDENTITY_DB_NAME"]="identity"
+    ["IDENTITY_DB_USER"]=""
+    ["IDENTITY_DB_PASSWORD"]=""
+    ["IDENTITY_SQLITE_PATH"]="identity.db"
+    ["IDENTITY_PG_SCHEMA"]="public"
+    ["IDENTITY_JWT_ISSUER"]="jiuwenclaw-identity"
+    ["IDENTITY_JWT_AUDIENCE"]="jiuwenclaw"
+    ["WEBUI_NAME"]="jiuwenclaw-webui"
     ["OBS_TYPE"]="minio"
     ["OBS_BUCKET"]="jiuwenclaw"
     ["OBS_PUBLIC_BASE_URL"]=""

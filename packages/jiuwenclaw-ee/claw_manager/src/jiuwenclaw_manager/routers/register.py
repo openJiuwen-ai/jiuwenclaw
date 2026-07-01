@@ -9,6 +9,7 @@ from jiuwenclaw_manager.manager_ws_server import ManagerWsServer
 
 from .application_config_routers import application_config_router
 from .config_effective_policy_routers import config_effective_policy_router
+from .iam_routers import bot_router, me_router
 from .instance_routers import instance_router
 from .template_routers import templates_router
 
@@ -19,6 +20,9 @@ INSTANCES_PREFIX = "/instances"
 
 def router_register(app: FastAPI) -> None:
     v1_router = APIRouter(prefix="/v1")
+    # 登录/用户/组织 已迁至独立认证服务(jiuwenclaw_identity);此处只留 bot 与"我可见的 bot"。
+    v1_router.include_router(bot_router, prefix="/bots", tags=["IAM Bots"])
+    v1_router.include_router(me_router, prefix="/me", tags=["Me"])
     v1_router.include_router(
         instance_router,
         prefix=INSTANCES_PREFIX,

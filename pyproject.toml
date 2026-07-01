@@ -56,6 +56,10 @@ dependencies = [
     "pypandoc",
     "markdown",
     "minio>=7.2.0",
+    # Web 后端 FastAPI 重构：ASGI 框架 + 服务器 + HTTP 客户端（/api 反代）
+    "fastapi>=0.110.0",
+    "uvicorn[standard]>=0.29.0",
+    "httpx>=0.27.0",
 ]
 
 [project.optional-dependencies]

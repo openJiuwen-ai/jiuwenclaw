@@ -157,20 +157,26 @@ mount_runtime_code_path() {
 add_resource_if_set() {
     local module=$1
     local file=$2
+    local dep_name=${3:-}   # 可选:仅作用于指定名字的 Deployment(合并模板时按名区分);为空则作用于全部
+
+    local sel='.kind == "Deployment"'
+    if [ -n "${dep_name}" ]; then
+        sel="${sel} and .metadata.name == \"${dep_name}\""
+    fi
 
     if [ -n "${DEPLOY_VARS["${module}_CPU_REQUEST"]:-}" ]; then
-        yq eval 'select(.kind == "Deployment").spec.template.spec.containers[0].resources.requests.cpu = "'"${DEPLOY_VARS["${module}_CPU_REQUEST"]}"'"' -i "${file}"
+        yq eval "select(${sel}).spec.template.spec.containers[0].resources.requests.cpu = \"${DEPLOY_VARS["${module}_CPU_REQUEST"]}\"" -i "${file}"
     fi
 
     if [ -n "${DEPLOY_VARS["${module}_MEMORY_REQUEST"]:-}" ]; then
-        yq eval 'select(.kind == "Deployment").spec.template.spec.containers[0].resources.requests.memory = "'"${DEPLOY_VARS["${module}_MEMORY_REQUEST"]}"'"' -i "${file}"
+        yq eval "select(${sel}).spec.template.spec.containers[0].resources.requests.memory = \"${DEPLOY_VARS["${module}_MEMORY_REQUEST"]}\"" -i "${file}"
     fi
 
     if [ -n "${DEPLOY_VARS["${module}_CPU_LIMIT"]:-}" ]; then
-        yq eval 'select(.kind == "Deployment").spec.template.spec.containers[0].resources.limits.cpu = "'"${DEPLOY_VARS["${module}_CPU_LIMIT"]}"'"' -i "${file}"
+        yq eval "select(${sel}).spec.template.spec.containers[0].resources.limits.cpu = \"${DEPLOY_VARS["${module}_CPU_LIMIT"]}\"" -i "${file}"
     fi
 
     if [ -n "${DEPLOY_VARS["${module}_MEMORY_LIMIT"]:-}" ]; then
-        yq eval 'select(.kind == "Deployment").spec.template.spec.containers[0].resources.limits.memory = "'"${DEPLOY_VARS["${module}_MEMORY_LIMIT"]}"'"' -i "${file}"
+        yq eval "select(${sel}).spec.template.spec.containers[0].resources.limits.memory = \"${DEPLOY_VARS["${module}_MEMORY_LIMIT"]}\"" -i "${file}"
     fi
 }

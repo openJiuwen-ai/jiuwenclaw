@@ -1,0 +1,35 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "jiuwenclaw-identity"
+version = "0.1.0"
+description = "JiuwenClaw identity / auth service (OAuth2 + JWT, standalone identity DB)"
+requires-python = ">=3.11.4,<3.14"
+license = { text = "Apache-2.0" }
+classifiers = [
+    "License :: OSI Approved :: Apache Software License",
+]
+dependencies = [
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.30",
+    "pydantic>=2.0",
+    "pydantic-settings>=2.0",
+    "structlog>=24.0",
+    "PyJWT>=2.8",
+    "cryptography>=42.0",
+    "python-multipart>=0.0.9",
+    "openjiuwen_runtime_foundation @ git+https://gitcode.com/openJiuwen/agent-runtime.git@develop#subdirectory=foundation",
+    "asyncpg>=0.29",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=9.0.2",
+    "pytest-asyncio>=1.3.0",
+    "ruff>=0.6",
+]
+
+[project.scripts]
+jiuwenclaw-identity = "jiuwenclaw_identity.main:main"

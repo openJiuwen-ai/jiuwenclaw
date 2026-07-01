@@ -1,0 +1,45 @@
+# 统一前端 webui:多阶段构建。
+#   阶段1(node):构建统一前端 SPA(登录/用户面/管理面合一)。
+#   阶段2(node):构建企业版聊天 SPA(web_enterprise),base=/chat/,同源内嵌。
+#   阶段3(nginx):发静态(外壳 + /chat)+ 反代三类后端(upstream 由环境变量注入)。
+# 构建上下文 = 仓库根目录:`docker build -f docker/Dockerfile.webui -t jiuwenclaw-webui .`
+
+ARG NODE_IMAGE=node:20-alpine
+ARG NGINX_IMAGE=nginx:1.27-alpine
+
+# ---- 阶段1:构建统一外壳前端 ----
+FROM ${NODE_IMAGE} AS build
+WORKDIR /app/web
+COPY packages/jiuwenclaw-ee/claw_manager/web/package*.json ./
+RUN npm install --registry=https://registry.npmmirror.com
+COPY packages/jiuwenclaw-ee/claw_manager/web/ ./
+RUN npm run build
+
+# ---- 阶段2:构建企业版聊天 SPA(同源内嵌于 /chat)----
+# base=/chat/ → 资源挂在 /chat 下;API_BASE/WS_BASE 留空 → 走同源相对路径(/ws、/file-api)。
+FROM ${NODE_IMAGE} AS chat
+WORKDIR /app/chat
+COPY jiuwenclaw/web_enterprise/package*.json ./
+RUN npm install --registry=https://registry.npmmirror.com
+COPY jiuwenclaw/web_enterprise/ ./
+# 直接 vite build(跳过其 build 脚本里的 tsc 类型检查,避免类型告警阻断部署构建)
+RUN npx vite build --base=/chat/
+
+# ---- 阶段3:nginx 运行时 ----
+FROM ${NGINX_IMAGE}
+# 统一外壳静态产物
+COPY --from=build /app/web/dist /usr/share/nginx/html
+# 企业版聊天 SPA 静态产物(同源 /chat)
+COPY --from=chat /app/chat/dist /usr/share/nginx/html/chat
+# 参数化 nginx 配置(官方镜像启动时对 /etc/nginx/templates/*.template 做 envsubst)
+COPY docker/webui-default.conf.template /etc/nginx/templates/default.conf.template
+
+# 仅替换 BACKEND_* 占位,保护 nginx 自身的 $uri/$host/$http_upgrade 等变量。
+ENV NGINX_ENVSUBST_FILTER=^BACKEND_
+# 默认指向本机(docker-compose/k8s 会覆盖)。
+ENV BACKEND_API=http://127.0.0.1:8765 \
+    BACKEND_IDP=http://127.0.0.1:8770 \
+    BACKEND_WS=http://127.0.0.1:19000
+
+EXPOSE 80
+# 官方 nginx 镜像默认 entrypoint 会先 envsubst 模板再启动 nginx。

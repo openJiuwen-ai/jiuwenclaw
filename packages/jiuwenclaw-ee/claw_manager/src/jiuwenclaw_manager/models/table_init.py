@@ -26,6 +26,7 @@ from jiuwenclaw_manager.models.application_config_models import (
 from jiuwenclaw_manager.models.jid_template_ref_models import (
     JID_TEMPLATE_REF_TABLE_DEF,
 )
+from jiuwenclaw_manager.models.iam_models import IAM_TABLE_DEFINITIONS
 from jiuwenclaw_manager.models.template_models import (
     EXTENSION_CONFIG_TEMPLATE_TABLE_DEF,
     MODEL_TEMPLATE_TABLE_DEF,
@@ -52,6 +53,7 @@ ALL_TABLE_DEFINITIONS = (
     CONFIG_EFFECTIVE_SERVICE_POLICY_TABLE_DEF,
     CONFIG_EFFECTIVE_AGENT_POLICY_TABLE_DEF,
     JID_TEMPLATE_REF_TABLE_DEF,
+    *IAM_TABLE_DEFINITIONS,
 )
 
 
