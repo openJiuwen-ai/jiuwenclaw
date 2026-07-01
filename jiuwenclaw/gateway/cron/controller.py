@@ -100,7 +100,7 @@ class CronController:
         return description
 
     @staticmethod
-    def _routing_session_id_for_feishu_multi(targets: str, raw: Any) -> str | None:
+    def _routing_session_id_for_targets(targets: str, raw: Any) -> str | None:
         """Persist delivery session for web and feishu:<app_id> targets."""
         targets_s = str(targets or "").strip()
         if targets_s == "web":
@@ -142,7 +142,7 @@ class CronController:
         self._validate_schedule(cron_expr=cron_expr, timezone=timezone)
         description = self._normalize_description(description, name)
 
-        routing_sid = self._routing_session_id_for_feishu_multi(targets, params.get("session_id"))
+        routing_sid = self._routing_session_id_for_targets(targets, params.get("session_id"))
         chat_type = params.get("chat_type")
         delete_after_run = params.get("delete_after_run")
         job = await self._store.create_job(
@@ -179,14 +179,9 @@ class CronController:
 
         final_targets = str(patch.get("targets") or existing.targets).strip()
         if "session_id" in patch:
-            if final_targets.startswith("feishu:"):
-                patch["session_id"] = self._routing_session_id_for_feishu_multi(
-                    final_targets, patch.get("session_id")
-                )
-            else:
-                patch["session_id"] = None
-        elif "targets" in patch and not final_targets.startswith("feishu:"):
-            patch["session_id"] = None
+            patch["session_id"] = self._routing_session_id_for_targets(
+                final_targets, patch.get("session_id")
+            )
 
         job = await self._store.update_job(job_id, patch)
         await self._scheduler.reload()

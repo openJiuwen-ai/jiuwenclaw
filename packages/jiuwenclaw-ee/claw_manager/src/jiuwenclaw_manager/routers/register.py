@@ -37,8 +37,11 @@ def router_register(app: FastAPI) -> None:
     )
 
     @api_router.get("/health", tags=["System"])
-    async def health_check() -> dict[str, str]:
-        return {"status": "ok"}
+    async def health_check() -> dict[str, str | bool]:
+        return {
+            "status": "ok",
+            "allow_local_provision": settings.allow_local_provision,
+        }
 
     @api_router.get("/manager-ws/status", tags=["System"])
     async def manager_ws_status() -> dict:

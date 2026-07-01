@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { InstanceApi } from '../../services/api';
+import { InstanceApi, SystemApi } from '../../services/api';
 import type { InstanceSummary } from '../../types';
 import { useAsync } from '../../hooks/useAsync';
 import { useListSearch } from '../../hooks/useListSearch';
@@ -366,6 +366,9 @@ export function InstanceListPage() {
   const apiSortOrder =
     viewMode === 'brief' ? 'desc' : sortBy ? sortOrder : undefined;
 
+  const systemHealth = useAsync(() => SystemApi.health(), []);
+  const allowLocalProvision = systemHealth.data?.allow_local_provision === true;
+
   const instances = useAsync(
     () =>
       InstanceApi.list({
@@ -411,9 +414,11 @@ export function InstanceListPage() {
             <button className="btn sm" onClick={refresh}>
               {t('common.refresh')}
             </button>
-            <button className="btn sm" onClick={() => setProvisionOpen(true)}>
-              {t('topology.provisionLocal')}
-            </button>
+            {allowLocalProvision && (
+              <button className="btn sm" onClick={() => setProvisionOpen(true)}>
+                {t('topology.provisionLocal')}
+              </button>
+            )}
             <button className="btn primary sm" onClick={() => setCreateOpen(true)}>
               + {t('topology.createInstance')}
             </button>
@@ -472,14 +477,16 @@ export function InstanceListPage() {
           refresh();
         }}
       />
-      <ProvisionLocalModal
-        open={provisionOpen}
-        onClose={() => setProvisionOpen(false)}
-        onProvisioned={() => {
-          setProvisionOpen(false);
-          refresh();
-        }}
-      />
+      {allowLocalProvision && (
+        <ProvisionLocalModal
+          open={provisionOpen}
+          onClose={() => setProvisionOpen(false)}
+          onProvisioned={() => {
+            setProvisionOpen(false);
+            refresh();
+          }}
+        />
+      )}
     </>
   );
 }
