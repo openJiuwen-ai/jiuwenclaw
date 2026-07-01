@@ -21,6 +21,69 @@ NUMBERED_HEADING_RE = re.compile(
     r"^(?P<indent>\s{0,3})(?P<number>\d+(?:\.\d+)*)(?:\.\s+|\s+)(?P<title>.+?)\s*$"
 )
 LIST_ITEM_RE = re.compile(r"^\s{0,3}(?:[-*+]\s+|\d+\.\s+)")
+BLOCK_MATH_RE = re.compile(r"\$\$.+?\$\$", re.DOTALL)
+SIMPLE_VARIABLE_MATH_RE = re.compile(r"[A-Za-z\u0370-\u03ff]")
+VARIABLE_ATOM_PATTERN = (
+    r"(?:\\[A-Za-z]+|[A-Za-z\u0370-\u03ff](?:_\{?[\w\\]+\}?|\^\{?[\w\\]+\}?)?)"
+)
+COMPACT_VARIABLE_MATH_RE = re.compile(
+    r"[A-Za-z\u0370-\u03ff]{2,}(?:_\{?[\w\\]+\}?|\^\{?[\w\\]+\}?)*"
+)
+ALNUM_VARIABLE_MATH_RE = re.compile(
+    r"[A-Za-z\u0370-\u03ff]+\d+(?:_\{?[\w\\]+\}?|\^\{?[\w\\]+\}?)*"
+)
+VARIABLE_LIST_ELLIPSIS_PATTERN = r"(?:\.{3}|\u2026|\\ldots|\\cdots)"
+VARIABLE_LIST_PATTERN = (
+    rf"{VARIABLE_ATOM_PATTERN}(?:\s*,\s*{VARIABLE_ATOM_PATTERN})+"
+    rf"(?:\s*,\s*{VARIABLE_LIST_ELLIPSIS_PATTERN})?"
+)
+VARIABLE_LIST_MATH_RE = re.compile(VARIABLE_LIST_PATTERN)
+PAREN_VARIABLE_LIST_MATH_RE = re.compile(rf"\(\s*{VARIABLE_LIST_PATTERN}\s*\)")
+MATH_NAME_PATTERN = (
+    r"(?:\\?[A-Za-z\u0370-\u03ff]+|[0-9]+|\\[A-Za-z]+)"
+    r"(?:_\{?[\w\\]+\}?|\^\{?[\w\\]+\}?|\\[A-Za-z]+)*"
+)
+MATH_FUNCTION_CALL_PATTERN = rf"{MATH_NAME_PATTERN}\s*[\(\[][^)\]\n]+[\)\]]"
+MATH_SPACING_PATTERN = r"(?:\s+|\\[,;:! ]|\\quad|\\qquad)"
+MATH_DELIMITED_CONTENT_PATTERN = r"[^|\n]+"
+MATH_FEATURE_RE = re.compile(
+    r"(\\[A-Za-z]+|[_^={}]|[+\-*/!%]|[\u00d7\u00f7\u2212\u2211\u220f\u221a\u2264\u2265\u2260\u2248<>])"
+)
+STRONG_NUMERIC_MATH_FEATURE_RE = re.compile(
+    r"(\\[A-Za-z]+|[_^{}]|[+\-*/!%]|[\u00d7\u00f7\u2212=<>])"
+)
+MATH_FUNCTION_CALL_RE = re.compile(MATH_FUNCTION_CALL_PATTERN)
+PRIME_FUNCTION_CALL_RE = re.compile(rf"{MATH_NAME_PATTERN}'{{1,3}}\s*[\(\[][^)\]\n]+[\)\]]")
+FUNCTION_CALL_SEQUENCE_RE = re.compile(
+    rf"{MATH_FUNCTION_CALL_PATTERN}(?:{MATH_SPACING_PATTERN}{MATH_FUNCTION_CALL_PATTERN})+"
+)
+ABSOLUTE_VALUE_MATH_RE = re.compile(rf"\|{MATH_DELIMITED_CONTENT_PATTERN}\|")
+NORM_MATH_RE = re.compile(
+    rf"(?:\|\|{MATH_DELIMITED_CONTENT_PATTERN}\|\||"
+    rf"\\\|{MATH_DELIMITED_CONTENT_PATTERN}\\\||"
+    rf"\\lVert\s*.+?\s*\\rVert)"
+)
+PERCENT_MATH_RE = re.compile(rf"(?:[+-]?\d+(?:\.\d+)?|{MATH_NAME_PATTERN})\s*\\?%")
+EQUATION_REFERENCE_RE = re.compile(r"\((?:Eq\.?|Equation)\s*\d+[A-Za-z]?\)", re.IGNORECASE)
+NUMERIC_TUPLE_RE = re.compile(r"\(\s*[+-]?\d+(?:\.\d+)?(?:\s*,\s*[+-]?\d+(?:\.\d+)?)+\s*\)")
+PRIME_VARIABLE_RE = re.compile(
+    r"(?:\\[A-Za-z]+|[A-Za-z\u0370-\u03ff])(?:_\{?[\w\\]+\}?|\^\{?[\w\\]+\}?)*'+"
+)
+PLAIN_CURRENCY_RE = re.compile(
+    r"\d{1,3}(?:,\d{3})*(?:\.\d+)?"
+    r"(?:\s*(?:[-\u2013\u2014]|to)\s*\d{1,3}(?:,\d{3})*(?:\.\d+)?)?"
+)
+MATH_PLACEHOLDER = "\x00MATH{}\x00"
+MATH_PLACEHOLDER_RE = re.compile(r"\x00MATH(\d+)\x00")
+INLINE_MATH_DOLLAR_RE = re.compile(r"^\$(?!\$)(.*?)(?<!\$)\$$", re.DOTALL)
+HTML_TAG_RE = re.compile(r"</?[A-Za-z][A-Za-z0-9:-]*(?:\s+[^<>]*)?>")
+MARKDOWN_LINK_RE = re.compile(r"!?\[[^\]\n]+\]\([^)]+\)")
+CODE_PLACEHOLDER = "\x00CODE{}\x00"
+CODE_PLACEHOLDER_RE = re.compile(r"\x00CODE(\d+)\x00")
+FENCED_CODE_RE = re.compile(
+    r"(?ms)^(?P<indent>[ \t]{0,3})(?P<fence>`{3,}|~{3,})[^\n]*\n.*?\n(?P=indent)(?P=fence)[ \t]*$"
+)
+INLINE_CODE_RE = re.compile(r"`+[^`\n]*`+")
 LIST_ITEM_WITH_INDENT_RE = re.compile(
     r"^(?P<indent>[ \t]*)(?P<marker>(?:[-*+]\s+|\d+\.\s+).*)$"
 )
@@ -639,6 +702,240 @@ def postprocess_html(html_text: str) -> str:
     html_text = CITATION_ANCHOR_RE.sub(_wrap_citation, html_text)
     html_text = re.sub(r'[ \t]+(<sup class="citation">)', r"\1", html_text)
     return re.sub(r'(</sup>)[ \t]+(<sup class="citation">)', r"\1\2", html_text)
+
+
+def protect_math_spans(text: str) -> tuple[str, list[str]]:
+    """Protect LaTeX math spans from Markdown emphasis/link parsing."""
+    formulas: list[str] = []
+    code_spans: list[str] = []
+
+    def _store_code(match: re.Match[str]) -> str:
+        code_spans.append(match.group(0))
+        return CODE_PLACEHOLDER.format(len(code_spans) - 1)
+
+    def _store_math(match: re.Match[str]) -> str:
+        formulas.append(match.group(0))
+        return MATH_PLACEHOLDER.format(len(formulas) - 1)
+
+    text = FENCED_CODE_RE.sub(_store_code, text)
+    text = INLINE_CODE_RE.sub(_store_code, text)
+    text = BLOCK_MATH_RE.sub(_store_math, text)
+    text = _protect_inline_math_spans(text, formulas)
+
+    def _restore_code(match: re.Match[str]) -> str:
+        index = int(match.group(1))
+        if 0 <= index < len(code_spans):
+            return code_spans[index]
+        return match.group(0)
+
+    return CODE_PLACEHOLDER_RE.sub(_restore_code, text), formulas
+
+
+def _protect_inline_math_spans(text: str, formulas: list[str]) -> str:
+    parts: list[str] = []
+    cursor = 0
+    index = 0
+
+    while index < len(text):
+        start = text.find("$", index)
+        if start == -1:
+            break
+        if _should_skip_inline_math_start(text, start):
+            index = start + 1
+            continue
+
+        end = _find_inline_math_end(text, start + 1)
+        if end is None:
+            index = start + 1
+            continue
+
+        formula = text[start:end + 1]
+        if _is_likely_inline_math(formula[1:-1].strip()):
+            parts.append(text[cursor:start])
+            formulas.append(formula)
+            parts.append(MATH_PLACEHOLDER.format(len(formulas) - 1))
+            cursor = end + 1
+            index = end + 1
+        else:
+            index = end + 1
+
+    if not parts:
+        return text
+
+    parts.append(text[cursor:])
+    return "".join(parts)
+
+
+def _find_inline_math_end(text: str, start_index: int) -> int | None:
+    index = start_index
+    while index < len(text):
+        end = text.find("$", index)
+        if end == -1:
+            return None
+        if "\n" in text[start_index:end]:
+            return None
+        if _is_valid_inline_math_end(text, start_index, end):
+            return end
+        index = end + 1
+    return None
+
+
+def _should_skip_inline_math_start(text: str, index: int) -> bool:
+    if _is_escaped(text, index):
+        return True
+    if _is_double_dollar(text, index):
+        return True
+    if _is_likely_currency_start(text, index):
+        return True
+    return not _is_valid_inline_math_start(text, index)
+
+
+def _is_valid_inline_math_end(text: str, start_index: int, end_index: int) -> bool:
+    if _is_escaped(text, end_index):
+        return False
+    if _is_double_dollar(text, end_index):
+        return False
+    if end_index <= start_index:
+        return False
+    if text[end_index - 1].isspace():
+        return False
+    return not (end_index + 1 < len(text) and text[end_index + 1].isdigit())
+
+
+def _is_likely_inline_math(content: str) -> bool:
+    if not content:
+        return False
+    if HTML_TAG_RE.search(content) or MARKDOWN_LINK_RE.search(content):
+        return False
+    if PLAIN_CURRENCY_RE.fullmatch(content):
+        return False
+    return bool(
+        SIMPLE_VARIABLE_MATH_RE.fullmatch(content)
+        or COMPACT_VARIABLE_MATH_RE.fullmatch(content)
+        or ALNUM_VARIABLE_MATH_RE.fullmatch(content)
+        or VARIABLE_LIST_MATH_RE.fullmatch(content)
+        or PAREN_VARIABLE_LIST_MATH_RE.fullmatch(content)
+        or MATH_FEATURE_RE.search(content)
+        or MATH_FUNCTION_CALL_RE.fullmatch(content)
+        or PRIME_FUNCTION_CALL_RE.fullmatch(content)
+        or FUNCTION_CALL_SEQUENCE_RE.fullmatch(content)
+        or ABSOLUTE_VALUE_MATH_RE.fullmatch(content)
+        or NORM_MATH_RE.fullmatch(content)
+        or PERCENT_MATH_RE.fullmatch(content)
+        or _is_balanced_math_function_call(content)
+        or EQUATION_REFERENCE_RE.fullmatch(content)
+        or NUMERIC_TUPLE_RE.fullmatch(content)
+        or PRIME_VARIABLE_RE.fullmatch(content)
+    )
+
+
+def _is_balanced_math_function_call(content: str) -> bool:
+    name_match = re.match(
+        r"(?:\\?[A-Za-z\u0370-\u03ff]+|[0-9]+|\\[A-Za-z]+)"
+        r"\s*(?:_\{?[\w\\]+\}?|\^\{?[\w\\]+\}?|\\[A-Za-z]+)*\s*",
+        content,
+    )
+    if name_match is None:
+        return False
+
+    open_index = name_match.end()
+    if open_index >= len(content) or content[open_index] not in "([":
+        return False
+
+    pairs = {"(": ")", "[": "]"}
+    closing_char = pairs.get(content[open_index])
+    if closing_char is None:
+        return False
+    stack = [closing_char]
+    index = open_index + 1
+    saw_argument = False
+
+    while index < len(content):
+        char = content[index]
+        if char == "\\":
+            index += 2
+            saw_argument = True
+            continue
+        closing_char = pairs.get(char)
+        if closing_char is not None:
+            stack.append(closing_char)
+            saw_argument = True
+        elif stack and char == stack[-1]:
+            stack.pop()
+            if not stack:
+                return saw_argument and index == len(content) - 1
+        elif char in ")]":
+            return False
+        elif not char.isspace():
+            saw_argument = True
+        index += 1
+
+    return False
+
+
+def _is_valid_inline_math_start(text: str, index: int) -> bool:
+    next_index = index + 1
+    if next_index >= len(text):
+        return False
+    next_char = text[next_index]
+    if next_char.isspace() or next_char in "，。；：、.!?;:)]}）】」』":
+        return False
+    return True
+
+
+def _is_likely_currency_start(text: str, index: int) -> bool:
+    match = re.match(r"\$(?:\d{1,3}(?:,\d{3})*|\d+)(?:\.\d+)?", text[index:])
+    if not match:
+        return False
+    next_index = index + len(match.group(0))
+    if next_index >= len(text):
+        return True
+    if text.startswith(r"\%", next_index) or text[next_index] == "%":
+        return False
+    end = _find_inline_math_end(text, index + 1)
+    if end is not None and "|" in text[next_index:end]:
+        return True
+    if end is not None and STRONG_NUMERIC_MATH_FEATURE_RE.search(text[next_index:end]):
+        return False
+    return text[next_index] not in "([{_^=\\"
+
+
+def _is_double_dollar(text: str, index: int) -> bool:
+    return (
+        (index > 0 and text[index - 1] == "$")
+        or (index + 1 < len(text) and text[index + 1] == "$")
+    )
+
+
+def _is_escaped(text: str, index: int) -> bool:
+    slash_count = 0
+    cursor = index - 1
+    while cursor >= 0 and text[cursor] == "\\":
+        slash_count += 1
+        cursor -= 1
+    return slash_count % 2 == 1
+
+
+def restore_math_spans(html_text: str, formulas: list[str]) -> str:
+    """Restore math placeholders produced by protect_math_spans."""
+
+    def _restore(match: re.Match[str]) -> str:
+        index = int(match.group(1))
+        if 0 <= index < len(formulas):
+            return normalize_math_span_for_rendering(formulas[index])
+        return match.group(0)
+
+    return MATH_PLACEHOLDER_RE.sub(_restore, html_text)
+
+
+def normalize_math_span_for_rendering(formula: str) -> str:
+    """Normalize protected dollar math to MathJax-friendly delimiters."""
+    match = INLINE_MATH_DOLLAR_RE.match(formula)
+    if match:
+        return rf"\({html.escape(match.group(1), quote=False)}\)"
+    if BLOCK_MATH_RE.fullmatch(formula):
+        return f"$${html.escape(formula[2:-2], quote=False)}$$"
+    return html.escape(formula, quote=False)
 
 
 def _neighbor_numbered_line(lines: list[str], index: int, *, reverse: bool) -> str | None:

@@ -10,14 +10,25 @@ from urllib.parse import unquote, urlparse
 
 from bs4 import BeautifulSoup, NavigableString
 from docx.enum.text import WD_LINE_SPACING
-from docx.oxml import OxmlElement
-from docx.oxml.ns import qn
+from docx.oxml import OxmlElement, parse_xml
+from docx.oxml.ns import nsdecls, qn
 from docx.opc.constants import RELATIONSHIP_TYPE
 from docx.shared import Pt
+from latex2mathml.converter import convert as latex_to_mathml
+from mathml2omml import convert as mathml_to_omml
 
 MAX_HTML_BLOCK_DEPTH = 100
 HEADING_TAGS = frozenset(f"h{i}" for i in range(1, 10))
 REMOTE_IMAGE_SCHEMES = frozenset({"http", "https"})
+LATEX_TOKEN_RE = re.compile(r"(\$\$.*?\$\$|\\\(.*?\\\))", re.DOTALL)
+LATEX_GROUPED_COMMANDS_WITH_POWER = frozenset({"binom", "frac"})
+LATEX_NORMALIZATION_MAX_PASSES = 8
+LATEX_ALIGNMENT_ENV_RE = re.compile(
+    r"\\begin\{(?P<env>align\*?|aligned|split|gathered)\}"
+    r"(?P<body>.*?)"
+    r"\\end\{(?P=env)\}",
+    re.DOTALL,
+)
 HTML_FORMATTING_WHITESPACE_RE = re.compile(r"[ \t]*\n[ \t]*")
 DOCX_LIST_LEVELS = 9
 DOCX_BULLET_SYMBOLS = ("•", "○", "▪")
@@ -41,7 +52,10 @@ class HtmlToDocContext:
     max_image_width: int | None = None
     max_depth: int = MAX_HTML_BLOCK_DEPTH
     style_r_fonts: object | None = None
-    current_run: object | None = None
+    bold: bool = False
+    italic: bool = False
+    underline: bool = False
+    in_code: bool = False
     superscript: bool = False
 
 
@@ -150,29 +164,186 @@ def _apply_style_font_on_run(run, style_r_fonts) -> None:
             r_fonts.set(qn(attr), val)
 
 
-def _apply_inline_style(run, tag_name: str) -> None:
-    if tag_name in ("strong", "b"):
-        run.bold = True
-    elif tag_name in ("em", "i"):
-        run.italic = True
-    elif tag_name == "u":
-        run.underline = True
-    elif tag_name == "sup":
-        run.font.superscript = True
-    elif tag_name == "code":
-        run.font.name = "Consolas"
-
-
 def _add_text_run(paragraph, text: str, context: HtmlToDocContext):
-    run = context.current_run
-    if run is None:
-        run = paragraph.add_run(text)
-    else:
-        run.add_text(text)
+    run = paragraph.add_run(text)
     _apply_style_font_on_run(run, context.style_r_fonts)
+    if context.bold:
+        run.bold = True
+    if context.italic:
+        run.italic = True
+    if context.underline:
+        run.underline = True
+    if context.in_code:
+        run.font.name = "Consolas"
     if context.superscript:
         run.font.superscript = True
     return run
+
+
+def _latex_token_content(token: str) -> str:
+    if token.startswith("$$") and token.endswith("$$"):
+        return token[2:-2].strip()
+    if token.startswith(r"\(") and token.endswith(r"\)"):
+        return token[2:-2].strip()
+    return token.strip()
+
+
+def _add_latex_math(paragraph, latex_token: str, context: HtmlToDocContext) -> None:
+    latex = _latex_token_content(latex_token)
+    if not latex:
+        return
+    try:
+        _append_child_to_paragraph(paragraph, _latex_to_omml(latex, context))
+    except ValueError:
+        _add_text_run(paragraph, latex_token, context)
+
+
+def _process_text_with_latex(paragraph, text: str, context: HtmlToDocContext) -> None:
+    if context.in_code:
+        _add_text_run(paragraph, text, context)
+        return
+
+    cursor = 0
+    for match in LATEX_TOKEN_RE.finditer(text):
+        if match.start() > cursor:
+            _add_text_run(paragraph, text[cursor:match.start()], context)
+        _add_latex_math(paragraph, match.group(0), context)
+        cursor = match.end()
+    if cursor < len(text):
+        _add_text_run(paragraph, text[cursor:], context)
+
+
+def _latex_to_omml(latex: str, context: HtmlToDocContext):
+    """Create a real Word math element for LaTeX content."""
+    latex = _normalize_latex_for_omml(latex)
+    if not latex:
+        raise ValueError("empty latex")
+
+    try:
+        mathml = latex_to_mathml(latex)
+        omml = mathml_to_omml(mathml)
+        return parse_xml(omml.replace("<m:oMath", f"<m:oMath {nsdecls('m')}", 1))
+    except Exception as exc:
+        raise ValueError(f"Unable to convert LaTeX to OMML: {latex}") from exc
+
+
+def _normalize_latex_for_omml(latex: str) -> str:
+    """Normalize valid LaTeX forms that Word math import handles more reliably."""
+    previous = _strip_latex_alignment_markers(latex)
+    for _ in range(LATEX_NORMALIZATION_MAX_PASSES):
+        current = _wrap_grouped_command_powers(previous)
+        if current == previous:
+            return current
+        previous = current
+    return previous
+
+
+def _strip_latex_alignment_markers(latex: str) -> str:
+    """Remove unescaped alignment markers from LaTeX alignment environments."""
+
+    def _strip_environment(match: re.Match[str]) -> str:
+        env = match.group("env")
+        body = _strip_unescaped_latex_char(match.group("body"), "&")
+        return rf"\begin{{{env}}}{body}\end{{{env}}}"
+
+    return LATEX_ALIGNMENT_ENV_RE.sub(_strip_environment, latex)
+
+
+def _strip_unescaped_latex_char(text: str, target: str) -> str:
+    parts: list[str] = []
+    index = 0
+    while index < len(text):
+        char = text[index]
+        if char == "\\" and index + 1 < len(text):
+            parts.append(text[index:index + 2])
+            index += 2
+            continue
+        if char != target:
+            parts.append(char)
+        index += 1
+    return "".join(parts)
+
+
+def _wrap_grouped_command_powers(latex: str) -> str:
+    parts: list[str] = []
+    cursor = 0
+    index = 0
+
+    while index < len(latex):
+        match = re.search(r"\\([A-Za-z]+)", latex[index:])
+        if match is None:
+            break
+
+        command_start = index + match.start()
+        command_end = index + match.end()
+        command_name = match.group(1)
+        if command_name not in LATEX_GROUPED_COMMANDS_WITH_POWER:
+            index = command_end
+            continue
+
+        first_group_end = _find_latex_group_end(latex, command_end)
+        if first_group_end is None:
+            index = command_end
+            continue
+        second_group_end = _find_latex_group_end(latex, first_group_end + 1)
+        if second_group_end is None:
+            index = first_group_end + 1
+            continue
+
+        power_end = _find_latex_power_end(latex, second_group_end + 1)
+        if power_end is None:
+            index = command_end
+            continue
+
+        parts.append(latex[cursor:command_start])
+        parts.append("{")
+        parts.append(latex[command_start:second_group_end + 1])
+        parts.append("}")
+        parts.append(latex[second_group_end + 1:power_end])
+        cursor = power_end
+        index = power_end
+
+    if not parts:
+        return latex
+
+    parts.append(latex[cursor:])
+    return "".join(parts)
+
+
+def _find_latex_group_end(text: str, open_index: int) -> int | None:
+    if open_index >= len(text) or text[open_index] != "{":
+        return None
+
+    depth = 0
+    index = open_index
+    while index < len(text):
+        char = text[index]
+        if char == "\\":
+            index += 2
+            continue
+        if char == "{":
+            depth += 1
+        elif char == "}":
+            depth -= 1
+            if depth == 0:
+                return index
+        index += 1
+    return None
+
+
+def _find_latex_power_end(text: str, caret_index: int) -> int | None:
+    if caret_index >= len(text) or text[caret_index] != "^":
+        return None
+
+    value_start = caret_index + 1
+    if value_start >= len(text):
+        return None
+    if text[value_start] == "{":
+        group_end = _find_latex_group_end(text, value_start)
+        return None if group_end is None else group_end + 1
+    if text[value_start].isalnum():
+        return value_start + 1
+    return None
 
 
 def _apply_r_fonts_to_r_pr(r_pr, style_r_fonts) -> None:
@@ -287,7 +458,7 @@ def _process_inline(paragraph, node, context: HtmlToDocContext) -> None:
             if not text.strip():
                 return
             text = HTML_FORMATTING_WHITESPACE_RE.sub(" ", text)
-        _add_text_run(paragraph, text, context)
+        _process_text_with_latex(paragraph, text, context)
         return
 
     if node.name == "br":
@@ -311,11 +482,17 @@ def _process_inline(paragraph, node, context: HtmlToDocContext) -> None:
         return
 
     if node.name in ("strong", "b", "em", "i", "u", "code"):
-        run = context.current_run or paragraph.add_run()
-        _apply_style_font_on_run(run, context.style_r_fonts)
-        _apply_inline_style(run, node.name)
+        inline_context = context
+        if node.name in ("strong", "b"):
+            inline_context = replace(inline_context, bold=True)
+        elif node.name in ("em", "i"):
+            inline_context = replace(inline_context, italic=True)
+        elif node.name == "u":
+            inline_context = replace(inline_context, underline=True)
+        elif node.name == "code":
+            inline_context = replace(inline_context, in_code=True)
         for child in node.contents:
-            _process_inline(paragraph, child, replace(context, current_run=run))
+            _process_inline(paragraph, child, inline_context)
         return
 
     for child in node.contents:

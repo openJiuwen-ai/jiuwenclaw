@@ -13,7 +13,9 @@ import markdown
 from jiuwenclaw.agentserver.tools.deepresearch_plugin.conversion_utils import (
     postprocess_html,
     preprocess_markdown_text,
+    protect_math_spans,
     read_text_with_fallback,
+    restore_math_spans,
 )
 
 logger = logging.getLogger(__name__)
@@ -25,6 +27,22 @@ HTML_TEMPLATE = """<!DOCTYPE html>
     <meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>{title}</title>
+    <script>
+        window.MathJax = {{
+            tex: {{
+                inlineMath: [['\\\\(', '\\\\)']],
+                displayMath: [['$$', '$$'], ['\\\\[', '\\\\]']],
+                processEscapes: true,
+                macros: {{
+                    bm: ['{{\\\\boldsymbol{{#1}}}}', 1]
+                }}
+            }},
+            options: {{
+                skipHtmlTags: ['script', 'noscript', 'style', 'textarea', 'pre', 'code']
+            }}
+        }};
+    </script>
+    <script defer src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js"></script>
     <style>
         :root {{
             --text: #222;
@@ -287,12 +305,14 @@ def convert_md_to_html(
 
     md_content = read_text_with_fallback(input_path)
     md_content = preprocess_markdown(md_content, options)
+    md_content, math_spans = protect_math_spans(md_content)
     html_body = markdown.markdown(
         md_content,
         extensions=["extra", "toc", "md_in_html"],
         output_format="html",
     )
     html_body = _sanitize_html_content(html_body)
+    html_body = restore_math_spans(html_body, math_spans)
     full_html = HTML_TEMPLATE.format(
         title=html.escape(options.title, quote=True),
         content=postprocess_html(html_body),
