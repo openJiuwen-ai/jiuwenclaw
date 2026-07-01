@@ -1,4 +1,4 @@
-# Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
+﻿# Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 """Evolution Pipeline orchestrator.
 
 Wires ProposalGenerators → DecisionPolicies → ApplyWriters into the
@@ -116,9 +116,6 @@ class EvolutionPipeline:
 
         # 4. Persist
         await self._persist(proposals, result.decision_results, apply_records, batch)
-
-        # 5. Feed training_candidates for ALL proposals' traces
-        await self._feed_training_candidates(proposals, batch.batch_id)
 
         logger.info(
             "Pipeline complete: batch=%s, proposals=%d (active=%d, rejected=%d), "
@@ -355,27 +352,3 @@ class EvolutionPipeline:
                          len(proposals), len(decisions), len(apply_records))
         except Exception as exc:
             logger.error("Persist failed: %s", exc)
-
-    async def _feed_training_candidates(
-        self,
-        proposals: list[Proposal],
-        batch_id: str,
-    ) -> None:
-        """Insert trace_ids from ALL proposals' failure_evidence into
-        the training_candidates table."""
-        if self._store is None:
-            return
-        for prop in proposals:
-            for evidence in prop.failure_evidence:
-                try:
-                    self._store.save_training_candidate(
-                        trace_id=evidence.trace_id,
-                        proposal_id=prop.proposal_id,
-                        batch_id=batch_id,
-                    )
-                except Exception as exc:
-                    logger.warning(
-                        "Failed to insert training_candidate for trace_id=%s: %s",
-                        evidence.trace_id,
-                        exc,
-                    )

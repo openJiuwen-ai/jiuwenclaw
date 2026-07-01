@@ -259,8 +259,9 @@ class Proposal(BaseModel):
     """List of specific trace locations supporting this proposal.
 
     MUST be non-empty.  Each entry must include at least a ``trace_id``
-    and a ``description``.  The pipeline uses the trace_ids here to
-    populate ``training_candidates``.
+    and a ``description``.  For ``training`` proposals, the
+    :class:`~apply_writers.TrainingCandidateWriter` uses these trace IDs
+    after Decision promotes the proposal to ``active``.
     """
 
     root_cause: str
