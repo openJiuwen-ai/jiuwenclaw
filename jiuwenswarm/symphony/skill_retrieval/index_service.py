@@ -14,6 +14,7 @@ from typing import Any
 
 import yaml
 
+from .catalog import CATALOG_FILENAME, load_catalog_by_worker
 from .config import SkillRetrievalSettings, load_settings
 from .dispatch_imports import dispatch_import_path
 from .inventory import SkillInventory, scan_skill_inventory
@@ -508,7 +509,8 @@ class SkillIndexService:
 
             branch_count = sum(1 for node in nodes if isinstance(node, dict) and node.get("type") == "branch")
             leaf_count = sum(1 for node in nodes if isinstance(node, dict) and node.get("type") == "leaf")
-            tree_nodes = _tree_node_payload(nodes)
+            catalog_by_worker = load_catalog_by_worker(index_dir)
+            tree_nodes = _tree_node_payload(nodes, catalog_by_worker=catalog_by_worker)
             try:
                 stat = tree_path.stat()
                 _set_cached_tree(
@@ -1242,7 +1244,7 @@ def _render_tree_outline(nodes: list[Any], *, max_nodes: int = 400) -> str:
     return "\n".join(lines) if lines else "(empty tree)"
 
 
-def _tree_node_payload(nodes: list[Any]) -> list[dict[str, Any]]:
+def _tree_node_payload(nodes: list[Any], *, catalog_by_worker: dict[str, dict[str, Any]]) -> list[dict[str, Any]]:
     out: list[dict[str, Any]] = []
     known_cids: set[str] = set()
     for raw in nodes:
@@ -1263,6 +1265,8 @@ def _tree_node_payload(nodes: list[Any]) -> list[dict[str, Any]]:
             parent_cid = ""
         node_type = str(raw.get("type") or "").strip() or "branch"
         worker_id = str(raw.get("worker_id") or "").strip()
+        catalog = catalog_by_worker.get(worker_id, {})
+        skill_name = str(catalog.get("name") or "").strip() if node_type == "leaf" else ""
         fallback_label = worker_id if node_type == "leaf" and worker_id else cid.rsplit(".", 1)[-1]
         out.append(
             {
@@ -1275,6 +1279,7 @@ def _tree_node_payload(nodes: list[Any]) -> list[dict[str, Any]]:
                 "dont_select_when": str(raw.get("dont_select_when") or "").strip(),
                 "source_description": str(raw.get("source_description") or "").strip(),
                 "worker_id": worker_id,
+                "skill_name": skill_name,
                 "category": str(raw.get("category") or "").strip(),
                 "keywords": _string_list(raw.get("keywords")),
                 "examples": _string_list(raw.get("examples")),
