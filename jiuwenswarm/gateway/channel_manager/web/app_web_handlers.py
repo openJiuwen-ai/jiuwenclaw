@@ -1253,13 +1253,17 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             content = resp.get("content", "")
         else:
             content = str(resp)
-        # For reasoning models (e.g. deepseek-v4-flash), the model may put all
-        # tokens into reasoning_content while leaving content empty.  Treat a
-        # non-empty reasoning_content as a valid response as well.
+        # For reasoning models (e.g. deepseek-v4-flash, vLLM-hosted models),
+        # the model may put all tokens into reasoning_content while leaving
+        # content empty.  Treat a non-empty reasoning_content as a valid
+        # response as well.  When finish_reason=="length" (token-budget
+        # truncation) but reasoning is non-empty, the connection is healthy —
+        # the probe simply asked for too few tokens — so also accept it.
         reasoning_content = getattr(resp, "reasoning_content", None) if hasattr(resp, "reasoning_content") else None
+        finish_reason = getattr(resp, "finish_reason", None) if hasattr(resp, "finish_reason") else None
         has_valid_response = (isinstance(content, str) and content) or (
                 isinstance(reasoning_content, str) and reasoning_content
-        )
+        ) or (finish_reason == "length" and isinstance(reasoning_content, str) and reasoning_content)
         if not has_valid_response:
             await channel.send_response(
                 ws, req_id, ok=False,

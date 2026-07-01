@@ -1115,7 +1115,18 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
         else:
             content = str(response)
 
-        if not (isinstance(content, str) and content.strip()):
+        # Reasoning models may put all tokens into reasoning_content (or the
+        # vLLM-style `reasoning` field, surfaced as reasoning_content after
+        # upstream parsing) while leaving content empty.  Also accept a
+        # length-truncated response with non-empty reasoning as a healthy
+        # connection — the probe simply asked for too few tokens.
+        reasoning_content = getattr(response, "reasoning_content", None) if hasattr(response, "reasoning_content") else None
+        finish_reason = getattr(response, "finish_reason", None) if hasattr(response, "finish_reason") else None
+        has_valid_response = (isinstance(content, str) and content.strip()) or (
+            isinstance(reasoning_content, str) and reasoning_content
+        ) or (finish_reason == "length" and isinstance(reasoning_content, str) and reasoning_content)
+
+        if not has_valid_response:
             await channel.send_response(
                 ws,
                 req_id,
