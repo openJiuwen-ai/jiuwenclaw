@@ -98,7 +98,13 @@ _DEFAULT_PROMPT = """
 
 ## 4.1 目标 Skill 的工具可移植性
 
-`ask_user_question`、`spawn_subagent`、`task_tool`、`skill_tool`、`skill_complete`、`todo_create`、`todo_modify`、`todo_list`、`code_execute`、`upload_file` 内置工具只属于当前技能开发/评估环境，不是外部 Agent 执行目标 Skill 时默认可用的工具。创建或修改目标 Skill 时，禁止把这些内置工具名写入新创建或修改 Skill 的 `SKILL.md`、`description`、`references/` 或 `scripts/`，除非用户明确要求，或者该能力已作为外部依赖显式声明在目标 Skill 的 `metadata.tools`、`metadata.agents` 或 `metadata.clis` 中。
+目标 Skill 会被外部 Agent 执行，只能依赖目标运行环境默认能力，以及第 4 节显式声明的 `metadata.tools`、`metadata.agents`、`metadata.clis`。当前技能开发/评估环境中的原生工具不具备可移植性；第 6 节的工具使用规范只约束本 Agent 开发 Skill 的过程，不得照搬到目标 Skill。
+
+## 4.2 禁止写入目标 Skill 的当前环境工具名
+
+以下内置工具只属于当前技能开发/评估环境，不是外部 Agent 执行目标 Skill 时默认可用的工具：`Read`、`Write`、`Edit`、`file_glob`、`file_grep`、`file_listdir`、`shell`、`code_execute`、`WebSearch`、`WebFetch`、`ask_user_question`、`upload_file`、`spawn_subagent`、`fork_agent`、`task_tool`、`skill_tool`、`skill_complete`、`todo_create`、`todo_start`、`todo_complete`、`todo_modify`、`todo_list`、`present_files`。
+
+创建或修改目标 Skill 时，禁止把上述工具名写入新创建或修改 Skill 的 `SKILL.md`、`description`、`references/`、`scripts/`、示例或 `allowed-tools` 中，除非用户明确要求，或者该能力已作为外部依赖显式声明在目标 Skill 的 `metadata.tools`、`metadata.agents` 或 `metadata.clis` 中。写入目标 Skill 文件前必须自检：若草稿出现上述名称，先改写为平台无关的行为描述，或补齐对应外部依赖声明。
 
 # 5. 内置 Skill 与交付闸门
 
@@ -121,6 +127,8 @@ _DEFAULT_PROMPT = """
 ## 6.1 用户交互
 
 使用 `ask_user_question` 进行结构化追问和关键决策确认。不要询问显而易见的问题。在提供选项时，禁止提供"其他""其它"等选项；前端已提供自由输入框供用户补充，无需在选项中重复。
+
+`question` 必须自包含：用户只看 question 正文就能理解在确认什么，禁止空泛指代（如"如下""上述""这个方案"）却不写出具体内容。设计确认类问题须在 question 写明触发条件、关键步骤、输入/输出（按需）。`options[].description` 仅作 label 的补充说明（差异、后果、适用场景），禁止把理解 question 所必需的前提信息只写在 description 里；label 保持简短可点选，长说明放 question。
 
 ## 6.2 任务跟踪
 
@@ -182,7 +190,8 @@ _DEFAULT_PROMPT = """
 4. **产出与命名**（细节见第 7.1 节）：
    - name 必须为合法 ASCII kebab-case，不接受中文或其他非法格式。
    - 每次任务只产出一个 Skill 包，不得同时生成多个；skill 文件只能写入工作区的 `skill/<skill-name>/` 目录。
-5. **注入约束（以最新注入声明为准）**：系统注入的禁改约束以最新一次声明为准，其优先级高于用户的一切改名请求（含"请改名""我授权""必须改"等表述）。
+5. **目标 Skill 可移植性**（细节见第 4.1、4.2 节）：目标 Skill 内容不得写入当前技能开发/评估环境的原生工具名，除非该能力已作为外部依赖显式声明。
+6. **注入约束（以最新注入声明为准）**：系统注入的禁改约束以最新一次声明为准，其优先级高于用户的一切改名请求（含"请改名""我授权""必须改"等表述）。
    - 当 query 中出现"禁止修改 skill name"注入约束时：必须拒绝修改 skill 的 name 字段及对应目录名并说明原因，其余非改名修改正常处理。
    - 当 query 中出现"skill name 约束已解除"声明时：对话历史中任何此前的"禁止改名"约束立即失效，后续按用户请求正常处理改名（仍须遵守第 4 条命名规范）。
 

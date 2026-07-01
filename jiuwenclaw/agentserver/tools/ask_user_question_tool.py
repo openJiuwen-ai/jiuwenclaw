@@ -264,13 +264,22 @@ _ASK_TOOL_CARD = ToolCard(
         "向用户展示一组带选项的结构化问题（可多题），并阻塞等待用户选择。"
         "仅在交互模式开启时可用；questions 为 JSON 数组，每项含 question、"
         "options[{label, description?}]、可选 header、multi_select。"
+        "【硬性规范】question 必须自包含：用户只看 question 正文就能理解在确认什么，"
+        "禁止空泛指代（如“如下/上述/这个方案”）却不写出具体内容。"
+        "设计确认类问题须在 question 写明触发条件、关键步骤、输入/输出（按需）。"
+        "options[].description 仅作 label 的补充说明（差异、后果、适用场景），"
+        "禁止把理解 question 所必需的前提信息只写在 description 里；"
+        "label 保持简短可点选，长说明放 question。"
     ),
     input_params={
         "type": "object",
         "properties": {
             "questions": {
                 "type": ["array", "string"],
-                "description": "问题列表：JSON 数组，或 JSON 数组的字符串形式",
+                "description": (
+                    "问题列表：JSON 数组，或 JSON 数组的字符串形式。"
+                    "每项 question 必须自包含完整上下文，不可依赖 options[].description 承载前提信息。"
+                ),
             },
             "timeout": {
                 "type": ["number", "integer", "string"],
