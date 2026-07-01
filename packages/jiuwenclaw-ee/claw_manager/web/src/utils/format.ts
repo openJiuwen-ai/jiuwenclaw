@@ -1,3 +1,5 @@
+import i18n from '../i18n';
+
 export function formatTime(iso?: string | null): string {
   if (!iso) return '-';
   const d = new Date(iso);
@@ -11,10 +13,16 @@ export function relativeTime(iso?: string | null): string {
   const d = new Date(iso);
   if (Number.isNaN(d.getTime())) return iso;
   const diff = (Date.now() - d.getTime()) / 1000;
-  if (diff < 60) return `${Math.max(0, Math.floor(diff))}s 前`;
-  if (diff < 3600) return `${Math.floor(diff / 60)}m 前`;
-  if (diff < 86400) return `${Math.floor(diff / 3600)}h 前`;
-  return `${Math.floor(diff / 86400)}d 前`;
+  if (diff < 60) {
+    return i18n.t('time.secondsAgo', { count: Math.max(0, Math.floor(diff)) });
+  }
+  if (diff < 3600) {
+    return i18n.t('time.minutesAgo', { count: Math.floor(diff / 60) });
+  }
+  if (diff < 86400) {
+    return i18n.t('time.hoursAgo', { count: Math.floor(diff / 3600) });
+  }
+  return i18n.t('time.daysAgo', { count: Math.floor(diff / 86400) });
 }
 
 export function truncate(s: string, max = 80): string {

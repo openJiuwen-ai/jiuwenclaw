@@ -28,9 +28,6 @@ CHANNEL_CONFIG_TABLE_DEF = TableDefinition(
     ],
     indexes=[
         IndexDefinition(["channel_id"], unique=True),
-        IndexDefinition(["channel_type"], unique=False),
-        IndexDefinition(["bot_id"], unique=False),
-        IndexDefinition(["status"], unique=False),
     ],
 )
 
@@ -65,9 +62,6 @@ LOG_MASKING_RULE_TABLE_DEF = TableDefinition(
     ],
     indexes=[
         IndexDefinition(["jiuwenclaw_id", "rule_id"], unique=True),
-        IndexDefinition(["jiuwenclaw_id"], unique=False),
-        IndexDefinition(["enabled"], unique=False),
-        IndexDefinition(["priority"], unique=False),
     ],
 )
 

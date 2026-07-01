@@ -52,7 +52,7 @@ spec:
             - name: POSTGRES_HOST_AUTH_METHOD
               value: "scram-sha-256"
             - name: TZ
-              value: "Asia/Shanghai"
+              value: "<<TIMEZONE>>"
             - name: PGDATA
               value: "/var/lib/postgresql/data/pgdata"
           ports:

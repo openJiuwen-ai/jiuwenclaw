@@ -254,6 +254,7 @@ def persist_permission_allow_rule(
     tool_args: dict | str,
     *,
     permission_context: dict[str, Any] | None = None,
+    session_id: str | None = None,
 ) -> bool:
     """用户选择「总是允许」时，将 allow 规则写入 config.yaml.
 
@@ -285,7 +286,7 @@ def persist_permission_allow_rule(
         )
         from jiuwenclaw.agentserver.permissions.models import PermissionLevel
 
-        permissions = get_effective_permissions_config()
+        permissions = get_effective_permissions_config(session_id=session_id)
         if not permissions:
             logger.warning(
                 "[PermissionEngine] permission.persist.abort tool=%s reason=no_permissions_section",
@@ -344,7 +345,7 @@ def persist_permission_allow_rule(
             def mutate(perms: dict[str, Any]) -> None:
                 _persist_tiered_approval_override_suggestions(perms, suggestions)
 
-            persist_permissions_mutate(mutate, source="runtime_persist")
+            persist_permissions_mutate(mutate, session_id=session_id)
             logger.info(
                 "[PermissionEngine] permission.persist.write tool=%s target=approval_overrides persisted=true",
                 tool_name,
@@ -354,7 +355,7 @@ def persist_permission_allow_rule(
         def mutate_tool(perms: dict[str, Any]) -> None:
             _persist_tiered_tool_allow(perms, tool_name)
 
-        persist_permissions_mutate(mutate_tool, source="runtime_persist")
+        persist_permissions_mutate(mutate_tool, session_id=session_id)
         logger.info(
             "[PermissionEngine] permission.persist.write tool=%s target=tools persisted=true",
             tool_name,
@@ -606,7 +607,7 @@ def persist_cli_trusted_directory(raw_path: str) -> dict[str, Any]:
                     "action": "allow",
                 })
 
-        persist_permissions_mutate(mutate, source="cli_add_dir")
+        persist_permissions_mutate(mutate, persist_scope="base")
         logger.info(
             "[PermissionEngine] permission.persist.cli_add_dir.file_guard.write path=%s targets=global+trusted_exec",
             dir_norm,

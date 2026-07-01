@@ -2,6 +2,7 @@ import type {
   ConfigDefaultTemplateMapping,
   ConfigDefaultTemplateMappingCreateBody,
   ConfigDefaultTemplateMappingUpdateBody,
+  MappingScopeType,
   ConfigEffectiveAgentPolicy,
   ConfigEffectiveAgentPolicyCreateBody,
   ConfigEffectiveAgentPolicyUpdateBody,
@@ -308,8 +309,8 @@ export const MappingApi = {
     params?: {
       page?: number;
       page_size?: number;
-      user_id?: string;
-      group_id?: string;
+      scope_type?: MappingScopeType;
+      scope_id?: string;
       template_type?: string;
       template_id?: string;
       enabled?: boolean;
@@ -318,8 +319,8 @@ export const MappingApi = {
         | 'policy_name'
         | 'policy_desc'
         | 'priority'
-        | 'user_id'
-        | 'group_id'
+        | 'scope_type'
+        | 'scope_id'
         | 'template_type'
         | 'template_id'
         | 'updated_at';

@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 set -euo >/dev/null 2>&1
 
-create_gateway_env_file() {
+gen_gateway_env_file() {
     local client_type="${DEPLOY_VARS["AGENT_RUNTIME"]}"
     local namespace="${DEPLOY_VARS["NAMESPACE"]}"
-    
     local mode="${DEPLOY_VARS["MODE"]}"
     local env_template_file="${CONFIG["GATEWAY_ENV_TEMPLATE_FILE"]}"
+    local env_name="${DEPLOY_VARS["GATEWAY_ENV_FILE_NAME"]}"
     local env_file="${CONFIG["GATEWAY_ENV_FILE"]}"
     local deploy_mode="${DEPLOY_VARS["DEPLOYMENT_MODE"]}"
 
@@ -25,14 +25,17 @@ create_gateway_env_file() {
     fi
 
     render_config_template "${env_template_file}" "${env_file}" "DEPLOY_VARS"
+    kubectl create configmap -n ${namespace} ${env_name} --from-env-file=${env_file} --dry-run=client -o yaml | yq eval 'del(.metadata.creationTimestamp)' > ${CONFIG_DIR}/gateway-env.configmap.yaml
 }
 
-create_gateway_config_file() {
+gen_gateway_config_file() {
     local client_type="${DEPLOY_VARS["AGENT_RUNTIME"]}"
     local field_name="feishu"
     local template_file="${TEMPLATE_DIR}/gateway-config-${client_type}.template.yaml"
     local file="${CONFIG["GATEWAY_CONFIG_FILE"]}"
     local namespace="${DEPLOY_VARS["NAMESPACE"]}"
+    local conf_name="${DEPLOY_VARS["GATEWAY_CONFIG_MAP_NAME"]}"
+    local conf_file="${CONFIG["GATEWAY_CONFIG_FILE"]}"
     
     info "AGENT_RUNTIME: ${client_type}"
     if [ "${client_type}" == "yuanrong" ]; then
@@ -66,6 +69,7 @@ create_gateway_config_file() {
     done
 
     success "ConfigMap file generation completed: ${file}"
+    kubectl create configmap -n ${namespace} ${conf_name} --from-file=config.yaml=${conf_file}  --dry-run=client -o yaml | yq eval 'del(.metadata.creationTimestamp)' > ${CONFIG_DIR}/gateway-config.configmap.yaml
 }
 
 gen_gateway_file() {
@@ -112,8 +116,8 @@ gen_gateway_file() {
 }
 
 render_gateway_files() {
-    create_gateway_env_file
-    create_gateway_config_file
+    gen_gateway_env_file
+    gen_gateway_config_file
     if [ "${DEPLOY_VARS["DEPLOYMENT_MODE"]}" == "active-standby" ]; then
         DEPLOY_VARS["GATEWAY_REPLICAS"]="2"
     fi

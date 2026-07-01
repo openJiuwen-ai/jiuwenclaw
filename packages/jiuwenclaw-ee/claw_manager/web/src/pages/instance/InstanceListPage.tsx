@@ -224,33 +224,41 @@ function InstanceListTable({
               </tr>
             </thead>
             <tbody>
-              {items.map((instance) => (
-                <tr key={instance.jiuwenclaw_id}>
-                  <td>
-                    <div className="font-medium text-text-strong">{instance.jiuwenclaw_name}</div>
-                    <div className="mono text-[11px] text-muted break-all">{instance.jiuwenclaw_id}</div>
-                  </td>
-                  <td>
-                    <StatusBadge status={instance.status} />
-                  </td>
-                  <td className="mono text-[11px] whitespace-nowrap">{formatTime(instance.last_heartbeat)}</td>
-                  <td className="mono text-[11px]">{instance.k8s_namespace || '-'}</td>
-                  <td className="mono text-[11px] whitespace-nowrap">{formatTime(instance.updated_at)}</td>
-                  <td>
-                    <div className="flex items-center gap-1">
-                      <button
-                        className="btn sm"
-                        onClick={() => navigate(`/instances/${instance.jiuwenclaw_id}`)}
-                      >
-                        {t('topology.viewDetail')}
-                      </button>
-                      <button className="btn sm danger" onClick={() => setDeleteTarget(instance)}>
-                        {t('common.delete')}
-                      </button>
-                    </div>
+              {items.length === 0 ? (
+                <tr>
+                  <td colSpan={6}>
+                    <Empty text={t('common.empty')} />
                   </td>
                 </tr>
-              ))}
+              ) : (
+                items.map((instance) => (
+                  <tr key={instance.jiuwenclaw_id}>
+                    <td>
+                      <div className="font-medium text-text-strong">{instance.jiuwenclaw_name}</div>
+                      <div className="mono text-[11px] text-muted break-all">{instance.jiuwenclaw_id}</div>
+                    </td>
+                    <td>
+                      <StatusBadge status={instance.status} />
+                    </td>
+                    <td className="mono text-[11px] whitespace-nowrap">{formatTime(instance.last_heartbeat)}</td>
+                    <td className="mono text-[11px]">{instance.k8s_namespace || '-'}</td>
+                    <td className="mono text-[11px] whitespace-nowrap">{formatTime(instance.updated_at)}</td>
+                    <td>
+                      <div className="flex items-center gap-1">
+                        <button
+                          className="btn sm"
+                          onClick={() => navigate(`/instances/${instance.jiuwenclaw_id}`)}
+                        >
+                          {t('topology.viewDetail')}
+                        </button>
+                        <button className="btn sm danger" onClick={() => setDeleteTarget(instance)}>
+                          {t('common.delete')}
+                        </button>
+                      </div>
+                    </td>
+                  </tr>
+                ))
+              )}
             </tbody>
           </table>
         </div>
@@ -419,13 +427,9 @@ export function InstanceListPage() {
             <div className="card text-sm text-danger">
               {t('errors.loadFailed', { detail: instances.error })}
             </div>
-          ) : !instances.data || instances.data.items.length === 0 ? (
-            <div className="card">
-              <Empty text={t('overview.noInstances')} />
-            </div>
           ) : viewMode === 'list' ? (
             <InstanceListTable
-              items={instances.data.items}
+              items={instances.data?.items ?? []}
               onChanged={refresh}
               sortBy={sortBy}
               sortOrder={sortOrder}
@@ -434,6 +438,10 @@ export function InstanceListPage() {
               statusFilter={statusFilter}
               onStatusFilterChange={handleStatusFilterChange}
             />
+          ) : !instances.data || instances.data.items.length === 0 ? (
+            <div className="card">
+              <Empty text={t('overview.noInstances')} />
+            </div>
           ) : (
             <div className="flex w-full min-w-0 flex-col gap-4">
               {instances.data.items.map((it) => (

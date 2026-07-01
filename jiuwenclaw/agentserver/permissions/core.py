@@ -142,16 +142,43 @@ class PermissionEngine:
             and not is_shell_permission_tool(tool_name)
         )
 
+    def _evaluation_config(
+        self,
+        session_id: str | None = None,
+        config: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        if config is not None:
+            return config
+        from jiuwenclaw.agentserver.permissions.config_loader import (
+            merge_session_permissions_overlay,
+        )
+
+        return merge_session_permissions_overlay(self.config, session_id=session_id)
+
+    def _evaluation_file_guard(
+        self,
+        config: dict[str, Any],
+        file_guard: FileGuardChecker | None = None,
+    ) -> FileGuardChecker:
+        if file_guard is not None:
+            return file_guard
+        if config is self.config:
+            return self._file_guard
+        return FileGuardChecker(config)
+
     def _evaluate_tier_for_tool(
         self,
         tool_name: str,
         tool_args: dict[str, Any],
+        *,
+        config: dict[str, Any] | None = None,
     ) -> tuple[PermissionLevel | None, str | None, list[tuple[str, PermissionLevel, str]] | None]:
         """子线 A：路径类工具仅 ``evaluate_tiered_policy_path_tool_pipeline_a``（仅 DENY），其余完整 tiered。"""
+        cfg = config if config is not None else self.config
         if PermissionEngine._is_registered_path_tool_non_shell(tool_name):
-            tier_perm, tier_rule = evaluate_tiered_policy_path_tool_pipeline_a(self.config, tool_name)
+            tier_perm, tier_rule = evaluate_tiered_policy_path_tool_pipeline_a(cfg, tool_name)
             return tier_perm, tier_rule, None
-        tp, tr, subs = evaluate_tiered_policy_detailed(self.config, tool_name, tool_args)
+        tp, tr, subs = evaluate_tiered_policy_detailed(cfg, tool_name, tool_args)
         return tp, tr, subs
 
     def evaluate_global_policy_with_details(
@@ -162,6 +189,9 @@ class PermissionEngine:
         *,
         include_external_directory: bool = True,
         extra_intents: list[CommandIntent] | None = None,
+        session_id: str | None = None,
+        config: dict[str, Any] | None = None,
+        file_guard: FileGuardChecker | None = None,
     ) -> tuple[
         PermissionLevel | None,
         str | None,
@@ -181,7 +211,14 @@ class PermissionEngine:
             )
             tool_args = {}
 
-        tier_perm, tier_rule, raw_subs = self._evaluate_tier_for_tool(tool_name, tool_args)
+        cfg = self._evaluation_config(session_id=session_id, config=config)
+        fg_checker = self._evaluation_file_guard(cfg, file_guard)
+
+        tier_perm, tier_rule, raw_subs = self._evaluate_tier_for_tool(
+            tool_name,
+            tool_args,
+            config=cfg,
+        )
         permission = tier_perm
         matched_rule = tier_rule
         subcommand_results: list[SubcommandPermissionResult] | None = None
@@ -194,7 +231,12 @@ class PermissionEngine:
         file_operations: list[FileOperation] | None = None
         merged_file_guard = bool(include_external_directory and permission != PermissionLevel.DENY)
         if merged_file_guard:
-            fg_result = self._evaluate_file_guard(tool_name, tool_args, extra_intents)
+            fg_result = self._evaluate_file_guard(
+                tool_name,
+                tool_args,
+                extra_intents,
+                file_guard=fg_checker,
+            )
             if fg_result is not None:
                 if permission is None:
                     permission = fg_result.permission
@@ -228,10 +270,13 @@ class PermissionEngine:
         tool_name: str,
         tool_args: dict[str, Any],
         extra_intents: list[CommandIntent] | None,
+        *,
+        file_guard: FileGuardChecker | None = None,
     ) -> list[tuple[Path, str, str]]:
         """合并工具参数通道与命令意图通道的路径访问列表（与子线 B 全量判定同源）。"""
-        accesses = self._file_guard.collect_tool_arg_accesses(tool_name, tool_args)
-        ws = self._file_guard.workspace_root()
+        fg = file_guard if file_guard is not None else self._file_guard
+        accesses = fg.collect_tool_arg_accesses(tool_name, tool_args)
+        ws = fg.workspace_root()
         if extra_intents:
             for intent in extra_intents:
                 action = getattr(intent, "action", None)
@@ -257,10 +302,18 @@ class PermissionEngine:
         tool_name: str,
         tool_args: dict[str, Any],
         extra_intents: list[CommandIntent] | None,
+        *,
+        file_guard: FileGuardChecker | None = None,
     ) -> PermissionResult | None:
         """合并工具参数通道 + 命令意图通道，得到一份 file_guard 结果。"""
-        accesses = self._collect_file_guard_accesses(tool_name, tool_args, extra_intents)
-        return self._file_guard.evaluate_accesses(accesses)
+        fg = file_guard if file_guard is not None else self._file_guard
+        accesses = self._collect_file_guard_accesses(
+            tool_name,
+            tool_args,
+            extra_intents,
+            file_guard=fg,
+        )
+        return fg.evaluate_accesses(accesses)
 
     # ---------- 异步主入口 ----------
 
@@ -328,15 +381,18 @@ class PermissionEngine:
                 reason=f"Skipped for channel: {normalized_channel}",
             )
 
+        eval_config = self._evaluation_config(session_id=session_id)
+        eval_file_guard = self._evaluation_file_guard(eval_config)
+
         # L1 + L3-Cmd 命令意图（仅对 shell / code 类工具有意义；其他工具返回空）
         extra_intents: list[CommandIntent] = []
-        if is_command_intent_enabled(self.config):
+        if is_command_intent_enabled(eval_config):
             try:
                 extra_intents = await collect_command_intents(
                     tool_name,
                     tool_args,
-                    self._file_guard.workspace_root(),
-                    self.config,
+                    eval_file_guard.workspace_root(),
+                    eval_config,
                     llm=self._llm,
                     model_name=self._model_name,
                 )
@@ -355,6 +411,9 @@ class PermissionEngine:
                 channel_id,
                 include_external_directory=True,
                 extra_intents=extra_intents or None,
+                session_id=session_id,
+                config=eval_config,
+                file_guard=eval_file_guard,
             )
         )
 

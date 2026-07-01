@@ -136,13 +136,16 @@ const OR_SPLIT_RE = /\s+or\s+/i;
 const USER_SEGMENT_RE = /^\$\{user::([^}]+)\}$/i;
 const GROUP_SEGMENT_RE = /^\$\{group::([^}]+)\}$/i;
 
-export type RefSegmentMode = 'template' | 'user' | 'group';
+const BOT_SEGMENT_RE = /^\$\{bot::([^}]+)\}$/i;
+
+export type RefSegmentMode = 'template' | 'user' | 'group' | 'bot';
 
 export interface RefSegment {
   mode: RefSegmentMode;
   templateId: string;
   userId: string;
   groupId: string;
+  botId: string;
 }
 
 export interface ParsedRefChain {
@@ -155,6 +158,7 @@ export function newRefSegment(mode: RefSegmentMode = 'template'): RefSegment {
     templateId: '',
     userId: '',
     groupId: '',
+    botId: '',
   };
 }
 
@@ -169,6 +173,7 @@ function parseRefSegment(text: string): RefSegment | null {
       templateId: '',
       userId: userMatch[1].trim(),
       groupId: '',
+      botId: '',
     };
   }
   const groupMatch = trimmed.match(GROUP_SEGMENT_RE);
@@ -178,6 +183,17 @@ function parseRefSegment(text: string): RefSegment | null {
       templateId: '',
       userId: '',
       groupId: groupMatch[1].trim(),
+      botId: '',
+    };
+  }
+  const botMatch = trimmed.match(BOT_SEGMENT_RE);
+  if (botMatch) {
+    return {
+      mode: 'bot',
+      templateId: '',
+      userId: '',
+      groupId: '',
+      botId: botMatch[1].trim(),
     };
   }
   if (!trimmed.includes('${')) {
@@ -186,6 +202,7 @@ function parseRefSegment(text: string): RefSegment | null {
       templateId: trimmed,
       userId: '',
       groupId: '',
+      botId: '',
     };
   }
   return null;
@@ -199,6 +216,10 @@ function refSegmentToString(segment: RefSegment): string {
   if (segment.mode === 'group') {
     const id = segment.groupId.trim();
     return id ? `\${group::${id}}` : '';
+  }
+  if (segment.mode === 'bot') {
+    const id = segment.botId.trim();
+    return id ? `\${bot::${id}}` : '';
   }
   return segment.templateId.trim();
 }

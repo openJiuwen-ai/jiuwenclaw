@@ -74,6 +74,9 @@ from jiuwenclaw.gateway.message_handler import MessageHandler
 
 logger = logging.getLogger(__name__)
 
+# 企业版流式请求空闲超时（秒）：超过此时间未收到真实业务 chunk 则判定为卡死
+_STREAM_IDLE_TIMEOUT_SECONDS = 600.0  # 10分钟
+
 
 def _pick_free_port(host: str = "127.0.0.1") -> int:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
@@ -375,6 +378,7 @@ class RuntimeManagementAgentClient(AgentServerClient):
         self.gateway_id = uuid_mod.uuid4().hex[:8]
         self.namespace = os.getenv("NAMESPACE")
         self.kubeconfig = os.getenv("AGENT_SERVER_KUBECONFIG") or None
+        timezone = os.getenv("TZ", "Asia/Shanghai")
 
         agent_image = os.getenv("AGENT_SERVER_IMAGE")
         agent_cpu_request = os.getenv("AGENT_SERVER_CPU_REQUEST")
@@ -436,8 +440,7 @@ class RuntimeManagementAgentClient(AgentServerClient):
         node_name = os.getenv("NODE_NAME")
         ready_timeout = int(os.getenv("AGENT_SERVER_READY_TIMEOUT", "300"))
         ready_poll_interval = int(os.getenv("AGENT_SERVER_READY_POLL_INTERVAL", "5"))
-        deploy_mode = (os.getenv("AGENT_SERVER_DEPLOY_MODE") or "k8s").strip().lower()
-        self.deploy_mode = deploy_mode
+        self.deploy_mode = (os.getenv("AGENT_SERVER_DEPLOY_MODE") or "k8s").strip().lower()
 
         # jiuwenbox sidecar: agentserver 与 jiuwenbox 同 Pod，使用 127.0.0.1 访问。
         jiuwenbox_enabled = _env_bool("JIUWENBOX_ENABLED", False)
@@ -448,15 +451,10 @@ class RuntimeManagementAgentClient(AgentServerClient):
         jiuwenbox_cpu_limit = os.getenv("JIUWENBOX_CPU_LIMIT")
         jiuwenbox_memory_limit = os.getenv("JIUWENBOX_MEMORY_LIMIT")
         jiuwenbox_container_name = os.getenv("JIUWENBOX_CONTAINER_NAME", "jiuwenbox" )
-        jiuwenbox_url = os.getenv("JIUWENBOX_URL",f"http://127.0.0.1:{jiuwenbox_port}")
         jiuwenbox_readiness_initial_delay = int(os.getenv("JIUWENBOX_READINESS_INITIAL_DELAY", "10"))
         jiuwenbox_readiness_period = int(os.getenv("JIUWENBOX_READINESS_PERIOD", "5"))
-        jiuwenbox_excluded_commands = os.getenv("JIUWENBOX_EXCLUDED_COMMANDS", "")
-        jiuwenbox_idle_ttl_seconds = os.getenv("JIUWENBOX_IDLE_TTL_SECONDS", "")
-        jiuwenbox_idle_check_interval = os.getenv("JIUWENBOX_IDLE_CHECK_INTERVAL", "")
         jiuwenbox_listen = os.getenv("JIUWENBOX_LISTEN", f"tcp://0.0.0.0:{jiuwenbox_port}")
         jiuwenbox_policy_path = os.getenv("JIUWENBOX_POLICY_PATH", "/app/configs/enterprise-policy.yaml")
-        jiuwenbox_fallback_on_failure = _env_bool("JIUWENBOX_FALLBACK_ON_FAILURE", False)
         jiuwenbox_host_mounts: list[HostPathMount] = []
         if _env_bool("JIUWENBOX_MOUNT_CGROUP", True):
             jiuwenbox_host_mounts.append(
@@ -471,6 +469,7 @@ class RuntimeManagementAgentClient(AgentServerClient):
         def _agent_env_vars() -> dict[str, str]:
             base: dict[str, str] = {
                 "AGENT_SERVER_HOST": "0.0.0.0",
+                "TZ": timezone,
             }
 
             for key, value in (
@@ -497,6 +496,21 @@ class RuntimeManagementAgentClient(AgentServerClient):
             ):
                 if value is not None:
                     base[key] = value
+
+            if jiuwenbox_enabled and self.deploy_mode == "k8s":
+                base.update(
+                    {
+                        "JIUWENCLAW_SANDBOX_ENABLED": str(jiuwenbox_enabled).lower(),
+                        "JIUWENCLAW_SANDBOX_URL": os.getenv("JIUWENBOX_URL", f"http://127.0.0.1:{jiuwenbox_port}"),
+                        "JIUWENCLAW_SANDBOX_TYPE": "jiuwenbox",
+                        "JIUWENCLAW_SANDBOX_STARTUP_MODE": "external",
+                        "JIUWENCLAW_SANDBOX_PRESERVE_FILE_SHARING_MODE": "mount",
+                        "JIUWENCLAW_SANDBOX_EXCLUDED_COMMANDS": os.getenv("JIUWENBOX_EXCLUDED_COMMANDS", ""),
+                        "JIUWENCLAW_SANDBOX_IDLE_TTL_SECONDS": os.getenv("JIUWENBOX_IDLE_TTL_SECONDS", ""),
+                        "JIUWENCLAW_SANDBOX_IDLE_CHECK_INTERVAL": os.getenv("JIUWENBOX_IDLE_CHECK_INTERVAL", ""),
+                        "JIUWENBOX_FALLBACK_ON_FAILURE": _env_bool("JIUWENBOX_FALLBACK_ON_FAILURE", False),
+                    }
+                )
 
             if mode == "dev":
                 base["LOG_ROOT_PATH"] = "/root/.logs"
@@ -540,7 +554,7 @@ class RuntimeManagementAgentClient(AgentServerClient):
                         service_template.get("agent_id"),
                     )
 
-                if deploy_mode == "process":
+                if _client.deploy_mode == "process":
                     process_host = "127.0.0.1"
                     target_port = _pick_free_port(process_host)
                     target_container = None
@@ -561,31 +575,13 @@ class RuntimeManagementAgentClient(AgentServerClient):
                     )
                     deploy_controller: Any = ProcessDeployController(process_handler)
                 else:
-                    agent_container_env = _agent_env_vars()
-                    if jiuwenbox_enabled:
-                        agent_container_env.update(
-                            {
-                                "JIUWENCLAW_SANDBOX_ENABLED": str(
-                                    jiuwenbox_enabled
-                                ).lower(),
-                                "JIUWENCLAW_SANDBOX_URL": jiuwenbox_url,
-                                "JIUWENCLAW_SANDBOX_TYPE": "jiuwenbox",
-                                "JIUWENCLAW_SANDBOX_STARTUP_MODE": "external",
-                                "JIUWENCLAW_SANDBOX_PRESERVE_FILE_SHARING_MODE": "mount",
-                                "JIUWENCLAW_SANDBOX_EXCLUDED_COMMANDS": jiuwenbox_excluded_commands,
-                                "JIUWENCLAW_SANDBOX_IDLE_TTL_SECONDS": jiuwenbox_idle_ttl_seconds,
-                                "JIUWENCLAW_SANDBOX_IDLE_CHECK_INTERVAL": jiuwenbox_idle_check_interval,
-                                "JIUWENBOX_FALLBACK_ON_FAILURE": jiuwenbox_fallback_on_failure,
-                            }
-                        )
-
                     agent_server_container = ContainerSpec(
                         name=cfg.get("container_name") or container_name,
                         image=cfg.get("agent_image") or agent_image,
                         port_name=cfg.get("port_name") or port_name,
                         port=int(cfg["container_port"]) if cfg.get("container_port") is not None else container_port,
                         image_pull_policy=cfg.get("image_pull_policy") or image_pull_policy,
-                        env_vars=agent_container_env,
+                        env_vars=_agent_env_vars(),
                         host_path_mounts=agent_host_mounts,
                         allow_privilege_escalation=True if mode == "dev" else None,
                         run_as_non_root=False if mode == "dev" else None,
@@ -610,6 +606,7 @@ class RuntimeManagementAgentClient(AgentServerClient):
                             env_vars={
                                 "JIUWENBOX_LISTEN": jiuwenbox_listen,
                                 "JIUWENBOX_POLICY_PATH": jiuwenbox_policy_path,
+                                "TZ": timezone,
                             },
                             capabilities_add=["SYS_ADMIN", "NET_ADMIN"],
                             seccomp_unconfined=True,
@@ -1145,8 +1142,41 @@ class RuntimeManagementAgentClient(AgentServerClient):
         )
 
         try:
+            # 企业版空闲超时机制：跟踪最后一个真实业务 chunk 的时间
+            last_real_chunk_time = asyncio.get_event_loop().time()
+            chunk_count = 0
+            
             async for chunk in self._access.send_message(session_request):
+                chunk_count += 1
+                
+                # 检查是否是真实业务 chunk（排除 keepalive）
+                is_keepalive = (
+                    isinstance(chunk.payload, dict) 
+                    and chunk.payload.get("event_type") == "keepalive"
+                )
+                
+                if not is_keepalive:
+                    # 更新最后真实业务 chunk 时间
+                    last_real_chunk_time = asyncio.get_event_loop().time()
+                
+                # 检查是否超时（每次收到 chunk 时检查）
+                current_time = asyncio.get_event_loop().time()
+                idle_duration = current_time - last_real_chunk_time
+                if idle_duration > _STREAM_IDLE_TIMEOUT_SECONDS:
+                    logger.error(
+                        "[RuntimeManagementAgentClient] 流式请求空闲超时: request_id=%s "
+                        "已 %.1f 秒无真实业务输出，共收到 %d 个 chunk",
+                        request.request_id, idle_duration, chunk_count,
+                    )
+                    raise TimeoutError(
+                        f"Stream idle timeout after {idle_duration:.1f}s without real business chunks"
+                    )
+                
                 yield chunk
+                
+        except TimeoutError:
+            # 重新抛出超时异常，让上层处理
+            raise
         except Exception as exc:
             logger.exception("[RuntimeManagementAgentClient] send_request_stream failed: %s", exc)
             yield AgentResponseChunk(

@@ -229,15 +229,15 @@ def update_kv_cache_affinity_enabled_in_config(value: bool) -> None:
 
 
 def _effective_permissions() -> dict[str, Any]:
-    from jiuwenclaw.agentserver.permissions.config_loader import get_effective_permissions_config
+    from jiuwenclaw.agentserver.permissions.config_loader import get_base_permissions_config
 
-    return get_effective_permissions_config()
+    return get_base_permissions_config()
 
 
 def _persist_permissions(mutate_fn) -> dict[str, Any]:
     from jiuwenclaw.agentserver.permissions.config_loader import persist_permissions_mutate
 
-    return persist_permissions_mutate(mutate_fn)
+    return persist_permissions_mutate(mutate_fn, persist_scope="base")
 
 
 def update_permissions_enabled_in_config(value: bool) -> None:

@@ -106,11 +106,11 @@ const empty: FormState = {
   jiuwenbox_memory_limit: '',
   min_idle_services: 1,
   max_services: 20,
-  service_concurrency: 30,
+  service_concurrency: 10,
   service_ttl: 180,
   autoscale_interval: 5,
   message_timeout: 60,
-  session_concurrency: 3,
+  session_concurrency: 10,
   session_ttl: 60,
 };
 

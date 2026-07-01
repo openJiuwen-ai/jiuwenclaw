@@ -2575,6 +2575,15 @@ class MessageHandler(ABC):
                         chunk.request_id,
                     )
                     continue
+
+                # 修复A：过滤 keepalive 心跳 chunk，不下发到前端
+                if isinstance(chunk.payload, dict) and chunk.payload.get("event_type") == "keepalive":
+                    logger.debug(
+                        "[MessageHandler] 过滤 keepalive chunk: request_id=%s",
+                        chunk.request_id,
+                    )
+                    continue
+
                 if isinstance(chunk.payload, dict):
                     event_type = chunk.payload.get("event_type")
                     if event_type == "chat.evolution_status":

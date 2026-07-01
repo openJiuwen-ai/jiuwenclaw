@@ -39,6 +39,8 @@ spec:
               value: "true"
             - name: WS_ALLOWED_WS_ORIGINS
               value: "<<WS_ALLOWED_WS_ORIGINS>>"
+            - name: TZ
+              value: "<<TIMEZONE>>"
 
 ---
 # 集群内部访问： 提供稳定 DNS 域名

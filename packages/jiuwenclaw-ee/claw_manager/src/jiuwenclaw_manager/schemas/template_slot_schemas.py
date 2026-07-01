@@ -38,6 +38,9 @@ DefaultTemplateMappingTypeLiteral = Literal[
     "service_config",
 ]
 
+MappingScopeTypeLiteral = Literal["user", "group", "bot"]
+MAPPING_SCOPE_TYPES: frozenset[str] = frozenset({"user", "group", "bot"})
+
 __all__ = (
     "MODEL_TEMPLATE_SLOTS",
     "SKILL_WHITELIST_SLOT",
@@ -46,4 +49,6 @@ __all__ = (
     "SINGLE_VALUE_TEMPLATE_REF_SLOTS",
     "TEMPLATE_REF_SLOTS",
     "DefaultTemplateMappingTypeLiteral",
+    "MappingScopeTypeLiteral",
+    "MAPPING_SCOPE_TYPES",
 )

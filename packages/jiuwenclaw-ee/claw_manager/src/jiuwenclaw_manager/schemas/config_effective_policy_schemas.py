@@ -16,6 +16,7 @@ from jiuwenclaw_manager.infrastructure.template_ref import (
 )
 from jiuwenclaw_manager.schemas.template_slot_schemas import (
     DefaultTemplateMappingTypeLiteral,
+    MappingScopeTypeLiteral,
     TEMPLATE_REF_SLOTS,
 )
 
@@ -221,8 +222,8 @@ class ConfigDefaultTemplateMappingCreateBody(BaseModel):
 
     policy_name: str = Field(..., max_length=128, min_length=1)
     policy_desc: str | None = Field(default=None, max_length=512)
-    user_id: str | None = Field(default=None, max_length=512)
-    group_id: str | None = Field(default=None, max_length=512)
+    scope_type: MappingScopeTypeLiteral
+    scope_id: str = Field(..., max_length=512, min_length=1)
     priority: int = 0
     template_id: str = Field(..., max_length=100, min_length=1)
     template_type: DefaultTemplateMappingTypeLiteral
@@ -235,8 +236,8 @@ class ConfigDefaultTemplateMappingUpdateBody(BaseModel):
 
     policy_name: str | None = Field(default=None, max_length=128, min_length=1)
     policy_desc: str | None = Field(default=None, max_length=512)
-    user_id: str | None = Field(default=None, max_length=512)
-    group_id: str | None = Field(default=None, max_length=512)
+    scope_type: MappingScopeTypeLiteral | None = None
+    scope_id: str | None = Field(default=None, max_length=512, min_length=1)
     priority: int | None = None
     template_id: str | None = Field(default=None, max_length=100, min_length=1)
     template_type: DefaultTemplateMappingTypeLiteral | None = None
@@ -250,8 +251,8 @@ class ConfigDefaultTemplateMappingOut(BaseModel):
     policy_id: str
     policy_name: str
     policy_desc: str | None
-    user_id: str | None
-    group_id: str | None
+    scope_type: MappingScopeTypeLiteral
+    scope_id: str
     priority: int
     template_id: str
     template_type: DefaultTemplateMappingTypeLiteral
@@ -266,8 +267,10 @@ class ConfigDefaultTemplateMappingListQuery(BaseModel):
 
     page: int = Field(1, ge=1)
     page_size: int = Field(20, ge=1, le=200)
-    user_id: str | None = Field(default=None, description="按 user_id 精确筛选")
-    group_id: str | None = Field(default=None, description="按 group_id 精确筛选")
+    scope_type: MappingScopeTypeLiteral | None = Field(
+        default=None, description="按 scope_type 精确筛选"
+    )
+    scope_id: str | None = Field(default=None, description="按 scope_id 精确筛选")
     template_type: DefaultTemplateMappingTypeLiteral | None = Field(
         default=None,
         description=f"模板类型：{' / '.join(sorted(TEMPLATE_REF_SLOTS))}",
@@ -276,12 +279,12 @@ class ConfigDefaultTemplateMappingListQuery(BaseModel):
     enabled: bool | None = None
     search: str | None = Field(
         default=None,
-        description="搜索策略 ID、名称、描述、User ID、Group ID、槽位、模板 ID 或优先级",
+        description="搜索策略 ID、名称、描述、作用域类型、作用域 ID、槽位、模板 ID 或优先级",
     )
     sort_by: str | None = Field(
         default=None,
         description=(
-            "排序字段：policy_name、policy_desc、priority、user_id、group_id、"
+            "排序字段：policy_name、policy_desc、priority、scope_type、scope_id、"
             "template_type、template_id、updated_at"
         ),
     )

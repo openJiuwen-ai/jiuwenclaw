@@ -96,7 +96,7 @@ JiuwenClaw_deployTool_0.0.74k_arm64/
 ├── update_conf.sh                        # 配置更新、重载处理脚本
 ├── update_docker_registry.py             # 镜像仓库地址批量更新工具
 ├── web_handler.sh                        # Web 前端模块部署、运维脚本
-└── conf/                                 # 所有 Kubernetes 资源模板配置目录
+└── templates/                            # 所有 Kubernetes 资源模板配置目录
     ├── gateway-config-jiuwen.template.yaml # 网关业务配置模板
     ├── gateway.template.env                # 网关环境变量配置模板
     ├── gateway.template.yaml               # 网关 Kubernetes 部署资源模板
@@ -233,7 +233,7 @@ FEISHU_BOTS="
 - `-n`:  指定部署目标命名空间, 从而实现模块多实例隔离部署，不同命名空间的资源不冲突，默认值：`default`。需要注意的是：操作基础依赖模块时，该参数强制失效，固定部署于 `default` 命名空间。
 - `--web-port`: 自定义Web模块对外访问端口，按需适配环境端口规划（范围：30000-32767）。若未传入该参数，且 `.env.custom` 文件中未配置 WEB_NODE_PORT 环境变量，程序将自动选取可用空闲端口。
 - `--manager-web-port`: 自定义 `Manager Web UI` 对外访问端口（范围：30000-32767）。若未传入该参数，且 `.env.custom` 文件中未配置 `MANAGER_WEB_NODE_PORT` 环境变量，程序将自动选取可用空闲端口。
-- `--render-only`：只渲染模板输出文件，不操作集群、不校验集群资源
+- `--render-only`：只渲染模板输出文件至 conf 目录，不操作集群、不校验集群资源
 
 **参数使用示例：**
 ```
@@ -306,25 +306,41 @@ DB_TYPE="sqlite"
 **MySQL 外部服务的配置：**
 ```
 # 外部 MySQL 服务的连接地址
-MYSQL_HOST=""
+DB_HOST=""
 
 # 外部 MySQL 服务的连接端口
-MYSQL_PORT=""
+DB_PORT=""
 
-# 外部 MySQL root的密码
-MYSQL_ROOT_PASSWORD=""
+# 外部 MySQL 服务的用户名跟密码，账号权限区分规则：
+# 1. 分库独立账号配置：分别定义 MANAGER_DB_USER / MANAGER_DB_PASSWORD、GATEWAY_DB_USER / GATEWAY_DB_PASSWORD，实现两个业务库账号、密码完全隔离
+# 2. 全局统一账号配置：仅配置 DB_USER、DB_PASSWORD，Manager、Gateway 共用同一套数据库访问凭证
+# 优先级规则：分库专属账号变量优先级 > 全局通用账号变量；若两类变量同时配置，以分库专属账号为准，全局账号配置自动失效
+DB_USER=""
+DB_PASSWORD=""
+GATEWAY_DB_USER=""
+GATEWAY_DB_PASSWORD=""
+MANAGER_DB_USER=""
+MANAGER_DB_PASSWORD=""
 ```
 
 **PostgreSQL 外部服务的配置：**
 ```
 # 外部 PostgreSQL 服务的连接地址
-POSTGRES_HOST=""
+DB_HOST=""
 
 # 外部 PostgreSQL 服务的连接端口
-POSTGRES_PORT=
+DB_PORT=
 
-# 外部 PostgreSQL 服务的密码
-POSTGRES_PASSWORD=""
+# 外部 PostgreSQL 服务的用户名跟密码，账号权限区分规则：
+# 1. 分库独立账号配置：分别定义 MANAGER_DB_USER / MANAGER_DB_PASSWORD、GATEWAY_DB_USER / GATEWAY_DB_PASSWORD，实现两个业务库账号、密码完全隔离
+# 2. 全局统一账号配置：仅配置 DB_USER、DB_PASSWORD，Manager、Gateway 共用同一套数据库访问凭证
+# 优先级规则：分库专属账号变量优先级 > 全局通用账号变量；若两类变量同时配置，以分库专属账号为准，全局账号配置自动失效
+DB_USER=""
+DB_PASSWORD=""
+GATEWAY_DB_USER=""
+GATEWAY_DB_PASSWORD=""
+MANAGER_DB_USER=""
+MANAGER_DB_PASSWORD=""
 
 # Manager 模块 PostgreSQL 专属 Schema 名称, 默认为public
 MANAGER_PG_SCHEMA=""

@@ -38,8 +38,6 @@ JID_TEMPLATE_REF_TABLE_DEF = TableDefinition(
         ColumnDefinition("updated_at", "datetime", nullable=False),
     ],
     indexes=[
-        IndexDefinition(["jiuwenclaw_id"], unique=False),
         IndexDefinition(["template_id"], unique=False),
-        IndexDefinition(["jiuwenclaw_id", "template_id"], unique=False),
     ],
 )

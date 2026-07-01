@@ -310,6 +310,10 @@ def _extract_legacy_params(
             out["enabled"] = bool(data.get("enabled"))
         if "wake_offset_seconds" in data:
             out["wake_offset_seconds"] = data.get("wake_offset_seconds")
+        if "delay_seconds" in data:
+            out["delay_seconds"] = data.get("delay_seconds")
+        if "delete_after_run" in data:
+            out["delete_after_run"] = bool(data.get("delete_after_run"))
         if "deleteAfterRun" in data:
             out["delete_after_run"] = bool(data.get("deleteAfterRun"))
 
@@ -327,6 +331,39 @@ def _extract_legacy_params(
         return out
 
     return data
+
+
+def _patch_cron_create_job_tools(tools: list[Any]) -> None:
+    """Augment harness cron_create_job schema with delay_seconds for relative one-shot tasks."""
+    for tool in tools:
+        card = getattr(tool, "card", None)
+        if card is None or str(getattr(card, "name", "")) != "cron_create_job":
+            continue
+        input_params = dict(getattr(card, "input_params", None) or {})
+        properties = dict(input_params.get("properties") or {})
+        properties["delay_seconds"] = {
+            "type": "number",
+            "description": "Run once after N seconds from now (for relative one-shot tasks)",
+        }
+        properties["delete_after_run"] = {
+            "type": "boolean",
+            "description": "Delete after run once. Defaults to true when delay_seconds is set.",
+        }
+        if "cron_expr" in properties:
+            cron_prop = dict(properties["cron_expr"])
+            cron_prop["description"] = (
+                "Cron expression (5 fields recurring, or 7 fields one-shot). "
+                "Not needed when delay_seconds is set."
+            )
+            properties["cron_expr"] = cron_prop
+        input_params["properties"] = properties
+        input_params["required"] = ["name", "timezone", "description"]
+        card.description = (
+            "Create a cron job. For relative one-shot tasks, use delay_seconds; "
+            "server computes cron. Do not hand-craft cron_expr for relative time."
+        )
+        card.input_params = input_params
+        return
 
 
 class CronRuntimeBridge:
@@ -391,6 +428,7 @@ class CronRuntimeBridge:
             default_target_channel=None,
             agent_id=agent_id
         )
+        _patch_cron_create_job_tools(tools)
         logger.info("[CronRuntimeBridge] Built %d cron tools: %s", 
                     len(tools), 
                     [tool.card.name if hasattr(tool, 'card') else str(tool) for tool in tools])

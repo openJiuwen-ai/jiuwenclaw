@@ -142,6 +142,13 @@ class ServiceConfigTemplateService:
         self,
         body: ServiceConfigTemplateCreateBody,
     ) -> ServiceConfigTemplateOut:
+        # Validate service_concurrency >= session_concurrency
+        if body.service_concurrency < body.session_concurrency:
+            raise ValueError(
+                f"service_concurrency ({body.service_concurrency}) must be greater than or equal to "
+                f"session_concurrency ({body.session_concurrency})"
+            )
+        
         template_uuid = new_uuid4()
         row = self._build_row_for_create(body, template_id=template_uuid)
         now = utc_now()
@@ -227,6 +234,17 @@ class ServiceConfigTemplateService:
         existing = await self._handler.get(_TABLE, {"template_id": template_id})
         if existing is None:
             return None
+
+        # Validate service_concurrency >= session_concurrency
+        # Get the values that will be used after update
+        final_service_concurrency = updates.get("service_concurrency", existing.service_concurrency)
+        final_session_concurrency = updates.get("session_concurrency", existing.session_concurrency)
+        
+        if final_service_concurrency < final_session_concurrency:
+            raise ValueError(
+                f"service_concurrency ({final_service_concurrency}) must be greater than or equal to "
+                f"session_concurrency ({final_session_concurrency})"
+            )
 
         await push_template_to_referencing_gateways(
             self._handler,

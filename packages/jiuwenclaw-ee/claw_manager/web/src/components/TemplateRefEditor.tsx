@@ -21,6 +21,10 @@ import {
   type TemplateRefMap,
   type TemplateRefSlotRow,
 } from '../utils/templateRef';
+import { LimitedTextInput } from './LimitedTextInput';
+
+/** 与 config_default_template_mapping.scope_id 及映射表达式键长度一致 */
+const MAPPING_SCOPE_ID_MAX_LENGTH = 512;
 
 export interface TemplateOption {
   template_id: string;
@@ -147,6 +151,7 @@ function RefSegmentEditor({
         <option value="template">{t('policies.templateRef.modeTemplate')}</option>
         <option value="user">{t('policies.templateRef.modeUser')}</option>
         <option value="group">{t('policies.templateRef.modeGroup')}</option>
+        <option value="bot">{t('policies.templateRef.modeBot')}</option>
       </select>
 
       <div className="flex-1 min-w-0">
@@ -164,18 +169,25 @@ function RefSegmentEditor({
             ))}
           </select>
         ) : segment.mode === 'user' ? (
-          <input
-            className="input w-full"
+          <LimitedTextInput
             value={segment.userId}
+            maxLength={MAPPING_SCOPE_ID_MAX_LENGTH}
             placeholder={t('policies.templateRef.userIdPlaceholder')}
-            onChange={(e) => onChange({ ...segment, mode: 'user', userId: e.target.value })}
+            onChange={(userId) => onChange({ ...segment, mode: 'user', userId })}
+          />
+        ) : segment.mode === 'group' ? (
+          <LimitedTextInput
+            value={segment.groupId}
+            maxLength={MAPPING_SCOPE_ID_MAX_LENGTH}
+            placeholder={t('policies.templateRef.groupIdPlaceholder')}
+            onChange={(groupId) => onChange({ ...segment, mode: 'group', groupId })}
           />
         ) : (
-          <input
-            className="input w-full"
-            value={segment.groupId}
-            placeholder={t('policies.templateRef.groupIdPlaceholder')}
-            onChange={(e) => onChange({ ...segment, mode: 'group', groupId: e.target.value })}
+          <LimitedTextInput
+            value={segment.botId}
+            maxLength={MAPPING_SCOPE_ID_MAX_LENGTH}
+            placeholder={t('policies.templateRef.botIdPlaceholder')}
+            onChange={(botId) => onChange({ ...segment, mode: 'bot', botId })}
           />
         )}
       </div>

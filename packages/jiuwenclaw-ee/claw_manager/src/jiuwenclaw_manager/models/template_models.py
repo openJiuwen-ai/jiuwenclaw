@@ -42,7 +42,6 @@ MODEL_TEMPLATE_TABLE_DEF = TableDefinition(
     ],
     indexes=[
         IndexDefinition(["template_id"], unique=True),
-        IndexDefinition(["enabled"], unique=False),
     ],
 )
 
@@ -70,9 +69,6 @@ EXTENSION_CONFIG_TEMPLATE_TABLE_DEF = TableDefinition(
     ],
     indexes=[
         IndexDefinition(["template_id"], unique=True),
-        IndexDefinition(["enabled"], unique=False),
-        IndexDefinition(["component"], unique=False),
-        IndexDefinition(["hook_type"], unique=False),
     ],
 )
 
@@ -99,8 +95,6 @@ SKILL_WHITELIST_TEMPLATE_TABLE_DEF = TableDefinition(
     ],
     indexes=[
         IndexDefinition(["template_id"], unique=True),
-        IndexDefinition(["enabled"], unique=False),
-        IndexDefinition(["skill_id"], unique=False),
     ],
 )
 
@@ -168,7 +162,5 @@ SERVICE_CONFIG_TEMPLATE_TABLE_DEF = TableDefinition(
     ],
     indexes=[
         IndexDefinition(["template_id"], unique=True),
-        IndexDefinition(["enabled"], unique=False),
-        IndexDefinition(["namespace"], unique=False),
     ],
 )

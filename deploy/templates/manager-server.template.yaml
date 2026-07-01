@@ -73,9 +73,9 @@ spec:
         - name: MANAGER_DB_PORT
           value: "<<DB_PORT>>"
         - name: MANAGER_DB_USER
-          value: "<<DB_USER>>"
+          value: "<<MANAGER_DB_USER>>"
         - name: MANAGER_DB_PASSWORD
-          value: "<<DB_PASSWORD>>"
+          value: "<<MANAGER_DB_PASSWORD>>"
         - name: MANAGER_DB_NAME
           value: "<<MANAGER_DB_NAME>>"
         - name: MANAGER_WS_ENABLED
@@ -84,3 +84,5 @@ spec:
           value: "0.0.0.0"
         - name: MANAGER_WS_PORT
           value: "<<MANAGER_WS_PORT>>"
+        - name: TZ
+          value: "<<TIMEZONE>>"

@@ -794,19 +794,31 @@ class PermissionInterruptRail(ConfirmInterruptRail):
             # 与磁盘上的 permissions 对齐：persist_cli_trusted_directory 等只更新了全局
             # PermissionEngine；若此处仍用旧的 _static_config 覆盖引擎，会抹掉刚写入的
             # approval_overrides / external_directory。
-            from jiuwenclaw.agentserver.permissions.config_loader import get_effective_permissions_config
+            from jiuwenclaw.agentserver.permissions.config_loader import (
+                get_base_permissions_config,
+                get_effective_permissions_config,
+                is_enterprise_runtime,
+            )
 
-            perm = get_effective_permissions_config()
-            if isinstance(perm, dict):
-                self.update_config(perm)
-            elif self._engine is get_permission_engine():
-                self._static_config = dict(self._engine.config)
+            session_id = self._resolve_session_id(ctx)
+            if is_enterprise_runtime():
+                perm = get_base_permissions_config()
+                if isinstance(perm, dict):
+                    self._static_config = dict(perm)
+                    self._engine.update_config(perm)
             else:
-                self._engine.update_config(self._static_config)
+                perm = get_effective_permissions_config()
+                if isinstance(perm, dict):
+                    self.update_config(perm)
+                elif self._engine is get_permission_engine():
+                    self._static_config = dict(self._engine.config)
+                else:
+                    self._engine.update_config(self._static_config)
             result = await self._engine.check_permission(
                 tool_name=normalized_name,
                 tool_args=tool_args,
                 channel_id=self._resolve_channel_id(),
+                session_id=session_id,
             )
 
             if result.permission == PermissionLevel.ALLOW:
@@ -859,6 +871,7 @@ class PermissionInterruptRail(ConfirmInterruptRail):
                     )
                 should_persist = confirm_payload.persist_allow
                 persisted = False
+                resolved_session_id = self._resolve_session_id(ctx)
                 if should_persist:
                     persisted = persist_permission_allow_rule(
                         normalized_name,
@@ -868,6 +881,7 @@ class PermissionInterruptRail(ConfirmInterruptRail):
                             tool_args,
                             result,
                         ),
+                        session_id=resolved_session_id,
                     )
                     logger.info(
                         "[PermissionEngine] permission.persist.result tool=%s channel=acp persisted=%s",
@@ -876,7 +890,10 @@ class PermissionInterruptRail(ConfirmInterruptRail):
                     )
                     if result.file_operations:
                         try:
-                            persist_file_operations_allow(list(result.file_operations))
+                            persist_file_operations_allow(
+                                list(result.file_operations),
+                                session_id=resolved_session_id,
+                            )
                             persisted = True
                             logger.info(
                                 "[PermissionEngine] permission.persist.file_operations tool=%s channel=acp count=%s",
@@ -962,11 +979,13 @@ class PermissionInterruptRail(ConfirmInterruptRail):
             normalized_name,
             tool_args,
         )
+        resolved_session_id = self._resolve_session_id(ctx)
         if payload.persist_allow:
             persisted = persist_permission_allow_rule(
                 normalized_name,
                 tool_args,
                 permission_context=pending_context,
+                session_id=resolved_session_id,
             )
             logger.info(
                 "[PermissionEngine] permission.persist.result tool=%s channel=%s persisted=%s",
@@ -977,7 +996,7 @@ class PermissionInterruptRail(ConfirmInterruptRail):
             file_ops = self._restore_file_operations(pending_context)
             if file_ops:
                 try:
-                    persist_file_operations_allow(file_ops)
+                    persist_file_operations_allow(file_ops, session_id=resolved_session_id)
                     persisted = True
                     logger.info(
                         "[PermissionEngine] permission.persist.file_operations tool=%s channel=%s count=%s",

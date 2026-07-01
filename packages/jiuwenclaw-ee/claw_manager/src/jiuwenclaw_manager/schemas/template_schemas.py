@@ -264,11 +264,11 @@ class ServiceConfigTemplateCreateBody(BaseModel):
     jiuwenbox_memory_limit: str | None = Field(default=None, max_length=32)
     min_idle_services: int = Field(default=1, ge=0)
     max_services: int = Field(default=20, ge=1)
-    service_concurrency: int = Field(default=30, ge=1)
+    service_concurrency: int = Field(default=10, ge=1)
     service_ttl: int = Field(default=180, ge=1)
     autoscale_interval: float = Field(default=5, gt=0)
     message_timeout: int = Field(default=60, ge=1)
-    session_concurrency: int = Field(default=3, ge=1)
+    session_concurrency: int = Field(default=10, ge=1)
     session_ttl: int = Field(default=60, ge=1)
     enabled: bool = True
     data: dict[str, Any] | None = None
