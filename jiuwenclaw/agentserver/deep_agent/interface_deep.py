@@ -3379,7 +3379,7 @@ class JiuWenClawDeepAdapter:
         - pause: 暂停循环（不取消任务）
         - resume: 恢复已暂停的循环
         - cancel: 取消所有运行中的任务
-        - supplement: 取消当前任务但保留 todo
+        - supplement: 取消当前任务并清空 todo / task_plan，再启动新任务
 
         Args:
             request: AgentRequest，params 中可包含：
@@ -3416,7 +3416,7 @@ class JiuWenClawDeepAdapter:
             message = "任务已恢复"
 
         elif intent == "supplement":
-            # supplement: 停止当前执行，但保留 todo（新任务会根据 todo 待办继续执行）
+            # supplement: 停止当前执行并清空 todo / task_plan，避免 TaskScheduler 续跑旧计划
             # 1. 通过 rail abort 在 checkpoint 抛 CancelledError，打断当前内层执行
             if self._stream_event_rail is not None:
                 self._stream_event_rail.abort()
@@ -3426,14 +3426,20 @@ class JiuWenClawDeepAdapter:
             # 3. 取消当前会话关联的 MultiSessionToolkit 子任务（按 request 跟踪，避免误停其它会话）
             await self._cancel_session_toolkits(request.session_id, "interrupt(supplement): ")
             AskUserQuestionRegistry.get_instance().cancel_for_session(str(request.session_id or ""))
+            # 4. 标记未完成的 todo 为 cancelled 并清空 todo.json（与 cancel 一致）
+            if request.session_id:
+                try:
+                    updated_todos = await self._cancel_pending_todos(request.session_id)
+                except Exception as exc:
+                    logger.warning("[JiuWenClawDeepAdapter] supplement 标记 todo cancelled 失败: %s", exc)
             await self._clear_session_persisted_interrupt_state(
                 request.session_id,
                 reason="interrupt(supplement)",
                 clear_interrupt=True,
+                clear_task_plan=True,
             )
-            # 4. 不清理 todo — 保留给新任务继续
             logger.info(
-                "[JiuWenClawDeepAdapter] interrupt(supplement): 已停止执行 request_id=%s",
+                "[JiuWenClawDeepAdapter] interrupt(supplement): 已停止执行并清空 todo/task_plan request_id=%s",
                 request.request_id,
             )
             message = "任务已切换"
@@ -3486,7 +3492,7 @@ class JiuWenClawDeepAdapter:
             payload["new_input"] = new_input
 
         # cancel 后附带更新的 todo 列表，通知前端刷新
-        if intent not in ("pause", "resume", "supplement") and updated_todos is not None:
+        if intent not in ("pause", "resume") and updated_todos is not None:
             payload["todos"] = updated_todos
 
         return AgentResponse(

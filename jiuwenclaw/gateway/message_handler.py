@@ -2342,7 +2342,7 @@ class MessageHandler(ABC):
                             )
                             continue
 
-                        # 有新输入：取消旧任务 → 保留 todo → 启动新任务（非并发）
+                        # 有新输入：取消旧任务 → 清空 todo / task_plan → 启动新任务（非并发）
 
                         # 1. 取消 gateway 侧当前 session 相关的流式任务（而非所有任务）
                         tasks_to_cancel = []
@@ -2368,7 +2368,7 @@ class MessageHandler(ABC):
                             msg.id, msg.channel_id, msg.session_id, "supplement",
                         )
 
-                        # 3. 发送 supplement intent 到 AgentServer（取消任务但保留 todo）
+                        # 3. 发送 supplement intent 到 AgentServer（取消任务并清空 todo / task_plan）
                         #    用 await 确保 agent 侧先完成取消再启动新任务
                         from jiuwenclaw.e2a.gateway_normalize import e2a_from_agent_fields
 

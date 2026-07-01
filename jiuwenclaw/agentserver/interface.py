@@ -663,7 +663,7 @@ class JiuWenClaw:
         - pause: 暂停 ReAct 循环（不取消任务）
         - resume: 恢复已暂停的 ReAct 循环
         - cancel: 取消所有运行中的任务
-        - supplement: 取消当前任务但保留 todo
+        - supplement: 取消当前任务并清空 todo / task_plan，再启动新任务
 
         Args:
             request: AgentRequest，params 中可包含：

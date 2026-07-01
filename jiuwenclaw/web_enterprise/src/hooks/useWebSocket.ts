@@ -1081,6 +1081,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
       }),
       webClient.on('chat.processing_status', (event: WsEvent) => {
         if (!shouldHandleSessionEvent(event.payload)) return;
+        if (shouldDropDuplicatedEvent('chat.processing_status', event.payload)) return;
         const isProcessingNow = Boolean(event.payload.is_processing);
         // 仅在本 tab 已发起 chat.send 后才进入「处理中」；其它流式请求（如 history.get）忽略
         if (isProcessingNow) {
@@ -1089,7 +1090,6 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
         } else if (activeRequestIdRef.current && !shouldHandleCurrentRequestEvent(event)) {
           return;
         }
-        if (shouldDropDuplicatedEvent('chat.processing_status', event.payload)) return;
         setProcessing(isProcessingNow);
         if (!isProcessingNow) {
           setThinking(false);
@@ -1147,10 +1147,11 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
           }
           setProcessing(false);
           setThinking(false);
-          activeRequestIdRef.current = null;
+          // 保留 activeRequestIdRef，恢复后 stream 事件仍能对齐原 chat.send
         } else if (resultPayload.intent === 'resume') {
           if (resultPayload.success) {
             setPaused(false);
+            setProcessing(true);
           }
         } else if (resultPayload.intent === 'cancel') {
           setPaused(false);
@@ -1158,7 +1159,11 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
           setThinking(false);
           activeRequestIdRef.current = null;
         } else if (resultPayload.intent === 'supplement') {
-          setPaused(false);
+          if (resultPayload.success) {
+            setPaused(false);
+            setProcessing(true);
+            setThinking(true);
+          }
         }
         const irid = typeof event.request_id === 'string' ? event.request_id.trim() : '';
         if (irid) {
