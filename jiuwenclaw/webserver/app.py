@@ -14,6 +14,8 @@ from jiuwenclaw.webserver.common import WebRuntime, add_api_proxy, add_static_sp
 from jiuwenclaw.webserver.enterprise_broker import EnterpriseWebWsServer, add_enterprise_ws_routes
 from jiuwenclaw.webserver.file_api import build_file_api_router
 from jiuwenclaw.webserver.ws_proxy import add_ws_proxy
+# [临时测试接口] 生产删除:删下一行 import + test_chat_api.py
+from jiuwenclaw.webserver.test_chat_api import build_test_chat_router
 
 
 def create_simple_web_app(rt: WebRuntime) -> FastAPI:
@@ -44,10 +46,16 @@ def create_enterprise_broker_app(
     统一前端(nginx)反代的 "web 后端"：``/ws`` 与 ``/file-api`` 同源(``--relay-only`` 下静态由
     nginx 承担,本进程只跑 broker + 文件)。``/file-api`` 为具体路径、无 catch-all,顺序无碍。
     """
-    app = FastAPI(title="jiuwenclaw-enterprise-web-broker", docs_url=None, redoc_url=None, openapi_url=None)
+    # [临时测试接口] docs_url/openapi_url 为测试打开 /docs;生产删除时改回 None
+    app = FastAPI(
+        title="jiuwenclaw-enterprise-web-broker",
+        docs_url="/docs", redoc_url=None, openapi_url="/openapi.json",
+    )
     if rt is not None:
         app.include_router(build_file_api_router(rt))
     add_enterprise_ws_routes(app, broker)
+    # [临时测试接口] 生产删除本行 + test_chat_api.py + 恢复上面 docs_url=None
+    app.include_router(build_test_chat_router(broker))
     return app
 
 
