@@ -36,7 +36,9 @@ spec:
             - name: ENTERPRISE_WEB_WS_PORT
               value: "<<ENTERPRISE_WEB_WS_PORT>>"
             - name: WS_ORIGIN_CHECK_ENABLED
-              value: "false"
+              value: "true"
+            - name: WS_ALLOWED_WS_ORIGINS
+              value: "<<WS_ALLOWED_WS_ORIGINS>>"
 
 ---
 # 集群内部访问： 提供稳定 DNS 域名
