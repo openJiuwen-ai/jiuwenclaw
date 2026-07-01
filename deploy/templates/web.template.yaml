@@ -36,7 +36,9 @@ spec:
             - name: ENTERPRISE_WEB_WS_PORT
               value: "<<ENTERPRISE_WEB_WS_PORT>>"
             - name: WS_ORIGIN_CHECK_ENABLED
-              value: "false"
+              value: "true"
+            - name: WS_ALLOWED_ORIGINS
+              value: "<<WS_ALLOWED_ORIGINS>>"
             - name: TZ
               value: "<<TIMEZONE>>"
 
