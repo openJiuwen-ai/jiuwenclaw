@@ -36,17 +36,45 @@ if TYPE_CHECKING:
 
 llm_logger = logging.getLogger("jiuwenclaw.app")
 
-_GLM_TOOL_XML_TAG_RE = re.compile(
-    r"</?(?:arg_value|arg_key)(?:\s[^>]*)?>",
-    re.IGNORECASE,
+_GLM_TOOL_XML_CLOSED_RE = re.compile(
+    r"<(arg_value|arg_key|tool_call)[^>]*?>.*?</\1>",
+    re.IGNORECASE | re.DOTALL,
+)
+_GLM_TOOL_XML_TRUNCATED_OPEN_RE = re.compile(
+    r"^.*?<(?:arg_value|arg_key|tool_call)[^>]*?>",
+    re.IGNORECASE | re.DOTALL,
 )
 
 
-def _sanitize_glm_tool_arguments(raw: str) -> str:
-    """Strip GLM native tool-call XML tags leaked into OpenAI-style arguments."""
-    if not raw or "<arg_" not in raw:
+def _sanitize_glm_tool_xml_tags(raw: str) -> str:
+    """Strip GLM native XML tags and their inner content.
+
+    Complete closed tags: remove entire segment including inner content.
+    The closing tag name must match the opening tag name, so nested tags
+    of different names are handled correctly without leaving stray
+    closing tags behind.
+    Truncated open tags: delete preceding text + the tag itself,
+    preserve content after the tag.
+      e.g. 'prefix<tool_call...>suffix' -> 'suffix'
+    The ^-anchored regex is applied repeatedly until no truncated
+    open tag remains, so multiple truncated tags are all removed.
+
+    The early-exit guard checks for '<arg_' and '<tool_call' in
+    lowercased input so that uppercase variants (e.g. <TOOL_CALL>)
+    are also caught by the subsequent regex substitutions that use
+    re.IGNORECASE.
+    """
+    if not raw:
         return raw
-    return _GLM_TOOL_XML_TAG_RE.sub("", raw)
+    lowered = raw.lower()
+    if "<arg_" not in lowered and "<tool_call" not in lowered:
+        return raw
+    result = _GLM_TOOL_XML_CLOSED_RE.sub("", raw)
+    prev = None
+    while prev != result:
+        prev = result
+        result = _GLM_TOOL_XML_TRUNCATED_OPEN_RE.sub("", result)
+    return result
 
 
 # Session context for retry notifications.
@@ -957,7 +985,7 @@ class PatchOpenAIModelClient(RetryMixin, OpenAIModelClient):
                 if hasattr(tc_delta, 'function') and tc_delta.function:
                     index = getattr(tc_delta, 'index', None)
                     function_name = getattr(tc_delta.function, 'name', None) or ""
-                    function_arguments = _sanitize_glm_tool_arguments(
+                    function_arguments = _sanitize_glm_tool_xml_tags(
                         getattr(tc_delta.function, 'arguments', None) or ""
                     )
 
