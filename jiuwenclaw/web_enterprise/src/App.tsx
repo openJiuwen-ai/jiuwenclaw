@@ -569,6 +569,10 @@ function AppContent() {
     setThinking(false);
     setPaused(false);
 
+    // 不再主动拉取历史会话：任何场景下都直接返回空，不发送 history.get 请求。
+    // 下方 beginHistoryRestore / request(HISTORY_GET_METHOD) 等逻辑保留但不再执行。
+    return;
+
     const historyRequestId = `history-${Date.now()}-${Math.random().toString(36).substring(2, 11)}`;
     logHistoryRestore('effect.start', { sessionId, historyRequestId, isConnected });
 
@@ -914,9 +918,14 @@ function AppContent() {
     if (!sessionId.startsWith('sess_') || !historyPagerMeta) return;
     if (historyLoadingMore || historyPagerMeta.loadedPages >= historyPagerMeta.totalPages) return;
 
+    // 不再主动拉取更早分页：任何场景下都直接返回空，不发送 history.get 请求。
+    // 下方 fetchHistoryPage / request(HISTORY_GET_METHOD) 等逻辑保留但不再执行。
+    return;
+
+    // 以下为不可达代码（保留以便后续恢复历史拉取功能）
     const sid = sessionId;
-    const nextPage = historyPagerMeta.loadedPages + 1;
-    const fallbackTotal = historyPagerMeta.totalPages;
+    const nextPage = historyPagerMeta!.loadedPages + 1;
+    const fallbackTotal = historyPagerMeta!.totalPages;
 
     setHistoryLoadingMore(true);
     const pageRequestId = `history-page-${Date.now()}-${Math.random().toString(36).substring(2, 11)}`;
