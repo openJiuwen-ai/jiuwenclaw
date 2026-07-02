@@ -51,6 +51,8 @@ class WebRuntime:
     workspace_root: Path = field(default_factory=Path)
     logs_root: Path = field(default_factory=Path)
     logger: logging.Logger = field(default_factory=lambda: logging.getLogger("jiuwenclaw.webserver"))
+    # 会话历史存储（ChatHistoryStore | None）；由 app_enterprise_web.main 注入，供 /api/sessions 使用。
+    history_store: Any = None
 
 
 # --------------------------------------------------------------------------- #

@@ -14,7 +14,7 @@ import contextlib
 import json
 import logging
 import uuid
-from typing import Any
+from typing import Any, Awaitable, Callable
 
 from fastapi import FastAPI, WebSocket
 from fastapi.websockets import WebSocketDisconnect
@@ -62,6 +62,8 @@ class EnterpriseWebWsServer:
         # request_ext 透传：记住每条浏览器连接握手时的 query（含透传字段）。
         self._browser_query: dict[str, dict[str, list[str]]] = {}
         self._logger = logger or logging.getLogger("jiuwenclaw.webserver")
+        # 历史采集回调：(direction, raw, conn_id)；None 表示不采集。由 main 注入。
+        self.on_frame: Callable[[str, str, str | None], Awaitable[None]] | None = None
 
     @property
     def logger(self) -> Any:
@@ -116,7 +118,19 @@ class EnterpriseWebWsServer:
         return request_id in self._pending_requests
 
     # ---- 网关 → 浏览器路由 ----
+    async def _fire_on_frame(self, direction: str, raw: str, conn_id: str | None) -> None:
+        """触发历史采集回调（异常隔离，绝不影响中继转发）。"""
+        if self.on_frame is None:
+            return
+        try:
+            await self.on_frame(direction, raw, conn_id)
+        except Exception:
+            self._logger.warning(
+                "[jiuwenclaw-enterprise-web] on_frame 回调异常 dir=%s", direction, exc_info=True
+            )
+
     async def route_uplink_frame(self, raw: str) -> None:
+        await self._fire_on_frame("uplink", raw, None)
         try:
             data = json.loads(raw)
         except json.JSONDecodeError:
@@ -262,6 +276,7 @@ class EnterpriseWebWsServer:
     # ---- 浏览器 → 网关 ----
     async def route_browser_frame(self, conn_id: str, raw: str) -> None:
         """处理一帧浏览器上行（公开入口）。"""
+        await self._fire_on_frame("browser", raw, conn_id)
         try:
             data = json.loads(raw)
         except json.JSONDecodeError:
