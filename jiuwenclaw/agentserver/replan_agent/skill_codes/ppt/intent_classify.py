@@ -17,6 +17,9 @@ _DOC_EXTENSIONS = (
     ".pdf",
     ".md",
     ".txt",
+)
+
+_IMAGE_EXTENSIONS = (
     ".png",
     ".jpg",
     ".jpeg",
@@ -50,13 +53,14 @@ _LLM_PATH_AND_SLOTS_SYSTEM_PROMPT = """你是 PPT 任务分析助手。从用户
 - style_id 可选值：business-classic / tech-minimal / elegant-narrative / industrial-tech / free / 其他风格名
 - audience 可选值：公司高管 / 技术团队 / 投资人 / 普通受众 / 其他
 - presentation_purpose 可选值：工作汇报 / 产品展示 / 教学分享 / auto / 其他
+- pack_dir: 用户提供的模板包目录绝对路径（字符串；未知则 ""）。当用户在消息中提到"用 XX 模板""用模板包""template pack"等，且给出了目录路径时提取该路径。路径可能是 Windows 格式（如 D:\\path\\to\\pack）或 Unix 格式（/path/to/pack）。仅提取用户明确给出的路径，不要编造。
 
 重要：如果找到了文件路径，slots 各字段留空，不需要提取需求信息；
       如果没有找到任何文件路径，则必须提取 slots 信息。
 
 必须只输出 JSON，格式：
 {"doc_paths": ["路径1"], "slots": {"topic": "", "page_count": null, "audience": "",
-"presentation_purpose": "", "style_id": ""}}
+"presentation_purpose": "", "style_id": "", "pack_dir": ""}}
 （page_count 为正整数或 null，禁止字符串）"""
 
 
@@ -88,7 +92,23 @@ def _dedupe_paths(paths: list[str]) -> list[str]:
 
 def _looks_like_document_path(path: str) -> bool:
     suffix = Path(path).suffix.casefold()
-    return suffix in _DOC_EXTENSIONS
+    return suffix in _DOC_EXTENSIONS or suffix in _IMAGE_EXTENSIONS
+
+
+def _is_image_path(path: str) -> bool:
+    return Path(path).suffix.casefold() in _IMAGE_EXTENSIONS
+
+
+def _split_image_paths(paths: list[str]) -> tuple[list[str], list[str]]:
+    """将路径列表分流为 (doc_paths, image_paths)。图片不进 doc_paths，避免触发 P3 Eve 解析。"""
+    docs: list[str] = []
+    images: list[str] = []
+    for p in paths:
+        if _is_image_path(p):
+            images.append(p)
+        else:
+            docs.append(p)
+    return docs, images
 
 
 _FILE_PATH_KEYS = ("path", "file_path", "filepath", "local_path", "uri")
@@ -142,7 +162,7 @@ def _collect_files_paths(inputs: dict[str, Any]) -> list[str]:
     return _collect_paths_from_file_entries(inputs.get("files"))
 
 
-_SLOT_NAMES = ("topic", "page_count", "audience", "presentation_purpose", "style_id")
+_SLOT_NAMES = ("topic", "page_count", "audience", "presentation_purpose", "style_id", "pack_dir")
 
 
 def _build_llm_path_prompt(text: str) -> str:
@@ -370,7 +390,10 @@ class IntentClassifyNode(PlanNode):
 
     async def _execute(self, inputs: dict[str, Any]) -> dict[str, Any]:
         doc_paths, slots = await self._collect_doc_paths(inputs)
+        # 图片路径分流：图片不进 doc_paths（不触发 P3 Eve），单独存 image_paths 供 Diana
+        doc_paths, image_paths = _split_image_paths(doc_paths)
         inputs["doc_paths"] = doc_paths
+        inputs["image_paths"] = image_paths
         inputs["has_documents"] = bool(doc_paths)
 
         # 仅在场景 C（无附件、无路径、slots 非空）时写入预填信息

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import re
 from collections.abc import AsyncIterator
@@ -28,16 +29,60 @@ _DEFAULT_GEN_RETRY_ROUND = 1
 _DEFAULT_DENSITY_RETRY_ROUND = 1
 
 
+# 页面类型 → 模板 ID 默认映射（当 manifest 无 page_intents 时兜底）
+_PAGE_TYPE_TO_TEMPLATE: dict[str, str] = {
+    "cover": "cover-base",
+    "intro": "cover-base",
+    "agenda": "section-base",
+    "chapter": "section-base",
+    "section": "section-base",
+    "conclusion": "section-base",
+    "ending": "section-base",
+    "data": "content-default",
+    "trend": "content-default",
+    "case": "content-cards",
+    "comparison": "content-two-column",
+    "technology": "content-default",
+}
+
+# 结构页类型集合（与 Charlie 分支一致）
+_TEMPLATE_STRUCTURAL_TYPES = {
+    "cover", "intro", "agenda", "chapter", "section", "conclusion", "ending",
+}
+
+
 def _looks_like_path(value: str) -> bool:
     return "/" in value or "\\" in value or value.endswith(".html")
 
 
 _DEFAULT_STRUCTURAL_PAGES = 2
 
+_CDN_HEAD_SNIPPET = (
+    "### <head> CDN 引用（必须逐字使用，禁止替换为其他 CDN）\n"
+    "```html\n"
+    "<!-- Tailwind CSS（必选） -->\n"
+    '<script src="https://cdn.digitalhumanai.top/slidagent/pptx-craft/assets/vendors/tailwind.js"></script>\n'
+    "\n"
+    "<!-- 字体引用 -->\n"
+    '<link href="https://cdn.digitalhumanai.top/slidagent/pptx-craft/assets/css/fonts.css" rel="stylesheet" />\n'
+    "\n"
+    "<!-- FontAwesome 图标 -->\n"
+    '<link href="https://cdn.digitalhumanai.top/slidagent/pptx-craft/assets/vendors/fontawesome/css/all.min.css"\n'
+    ' rel="stylesheet" />\n'
+    "\n"
+    "<!-- ECharts 图表库 -->\n"
+    '<script src="https://cdn.digitalhumanai.top/slidagent/pptx-craft/assets/vendors/echarts.min.js"></script>\n'
+    "```\n"
+    "⚠️ **禁止使用 cdn.tailwindcss.com、cdn.jsdelivr.net、cdnjs.cloudflare.com 等公共 CDN，"
+    "必须使用上述 cdn.digitalhumanai.top 地址。**\n"
+)
+
+
 _DESIGN_RULES_DIGEST = (
-    "### 视觉与布局硬约束（精选 14 条）\n"
+    "### 视觉与布局硬约束（精选 17 条）\n"
     "1. 容器：`.ppt-slide { width:1280px; height:720px; overflow:hidden; box-sizing:border-box }`\n"
-    "2. 安全区：`.content-safe { width:1220px; height:660px; margin:30px auto }`，主要内容必须放在安全区内\n"
+    "2. 安全区：`.content-safe { width:1220px; height:660px; margin:30px auto }`，主要内容必须放在安全区内；"
+    "子元素禁止额外加 padding，否则导致双重边距\n"
     "3. 三级字号：标题 36-48px / 副标题 24-28px / 正文 16-20px\n"
     "4. 图表类型：时序数据→柱状图(bar)；趋势数据→折线图(line)；对比数据→分组柱状图(grouped bar)；占比数据→饼图(pie)；禁止混用，禁止用图片占位\n"
     "5. 步骤/流程页 → 用 HTML/CSS 绘制节点+连线+文字，禁止纯文字描述\n"
@@ -51,13 +96,18 @@ _DESIGN_RULES_DIGEST = (
     "12. 页脚：底部必须有数据来源汇总条（如'数据来源：央行、财政部、...'），即使卡片内已有来源标注也必须保留页脚，禁止纯数字编号\n"
     "13. 布局实现：所有区域用 `flex-1 min-h-0` 自动分配高度，禁止手动计算 px 值；子元素用 `h-full min-h-0 overflow-hidden` 防溢出，信任 flex/grid 自动布局\n"
     "14. 全局禁止 `rounded-*` 类，所有元素 border-radius:0（饼图/环形图的圆形不受此限制）\n"
+    "15. 内容页根节点必须同时携带 `class=\"ppt-slide\"`、`type=\"content\"` 与 `data-page-role=\"content\"`；"
+    "`data-page-role` 不是旧 `type` 属性的替代品，两者并存\n"
+    "16. 标题栏、页脚为跨页锚点片段（见风格文件「四、组件样式库」开头的「跨页锚点片段」说明），"
+    "必须逐字复用 HTML 结构/class/间距，只改文字内容，禁止自行重新设计\n"
+    "17. 标题、正文、图表标签、数据来源和数据卡片必须完整显示，禁止裁切或隐藏\n"
 )
 
 
 _HTML_SKELETON = (
     "### 标准 HTML 骨架（所有页面必须遵循，禁止改动结构）\n"
     "```html\n"
-    '<div class="ppt-slide">\n'
+    '<div class="ppt-slide" type="content" data-page-role="content">\n'
     '  <div class="content-safe flex flex-col gap-3 h-full">\n'
     '    <header class="flex-shrink-0">标题区</header>\n'
     '    <main class="flex-1 min-h-0 grid grid-cols-2 gap-3">\n'
@@ -69,6 +119,7 @@ _HTML_SKELETON = (
     '</div>\n'
     "```\n"
     "规则：\n"
+    "- 根节点必须同时携带 `class=\"ppt-slide\"`、`type=\"content\"`、`data-page-role=\"content\"`\n"
     "- `content-safe` 用 `flex flex-col` 纵向排列 header/main/footer 三段\n"
     "- `main` 用 `grid grid-cols-2` 左右分列，恰好 2 个 `<section>` 直接子元素\n"
     "- 禁止把 header/footer 放进 main 内部；禁止 main 只有 1 个子元素\n"
@@ -220,7 +271,7 @@ _STRUCTURAL_DENSITY_CHECKLIST = (
 )
 
 _DENSITY_CHECKLIST_DIGEST = (
-    "### 内容密度检查（8 项，全部必须通过）\n"
+    "### 内容密度检查（10 项，全部必须通过）\n"
     "1. 数据可视化：≥1 个 ECharts 图表 或 ≥3 个数据卡片（no_search 模式且页面为'数据有限'时可降至 2 个数据卡片）\n"
     "2. 核心要点：6-10 个列表项或卡片\n"
     "3. 装饰图标：≥3 个 FontAwesome 图标（class 含 `fa-`）\n"
@@ -229,6 +280,8 @@ _DENSITY_CHECKLIST_DIGEST = (
     "6. 无大段文字：无连续 > 100 字段落\n"
     "7. 视觉层级：标题 → 副标题 → 正文 → 注释 层级清晰\n"
     "8. 布局正确：main 元素 class 含 `grid grid-cols-2`，且恰好 2 个直接子元素（`<section>` 或 `<div>`）\n"
+    "9. 完整显示：核心内容未使用 line-clamp、省略号、滚动或折叠隐藏\n"
+    "10. 内容完整：标题、正文、图表标签、数据来源和数据卡片全部完整显示，无裁切\n"
 )
 
 
@@ -298,6 +351,8 @@ _REWRITE_ACTIONS = {
     "大段文字": "拆分为多个列表项/小节，添加小标题",
     "视觉层级混乱": "调整字号梯度，建立明确的标题→副标题→正文→注释层级",
     "布局错误": "main 改为 `grid grid-cols-2 gap-3`，恰好 2 个 `<section>` 子元素；header/footer 放在 main 外部的 content-safe 内",
+    "内容被隐藏": "移除 line-clamp、text-overflow:ellipsis、overflow:auto/scroll、max-height 限制等隐藏手段，确保核心内容完整可见",
+    "核心内容缺失": "检查标题、正文、图表标签、数据来源和数据卡片是否全部完整显示，补充缺失的内容元素",
 }
 
 
@@ -401,6 +456,89 @@ def _split_md_pages(text: str) -> dict[int, str]:
     return pages
 
 
+# 按图片数量选择布局模板（精简自 SKILL.md 图片布局规范）
+_IMAGE_LAYOUT_TEMPLATES: dict[int, str] = {
+    1: (
+        "### 图片布局（1 张图）\n"
+        "- `usage=cover` → 全幅背景图，文字用 `z-10` 叠加\n"
+        "- `usage=content` → 单图占一侧，另一侧文字\n"
+        "```html\n"
+        '<img src="..." class="w-full h-full object-contain" />\n'
+        "```\n"
+    ),
+    2: (
+        "### 图片布局（2 张图）\n"
+        "- 推荐左右对半分或一大一小\n"
+        "```html\n"
+        '<div class="grid grid-cols-2 gap-3 flex-1 min-h-0">\n'
+        '  <img src="..." class="w-full h-full object-contain" />\n'
+        '  <img src="..." class="w-full h-full object-contain" />\n'
+        '</div>\n'
+        "```\n"
+    ),
+    3: (
+        "### 图片布局（3 张图）\n"
+        "- 推荐「左 1 右 2」：左侧大图，右侧上下两小图\n"
+        "```html\n"
+        '<div class="grid grid-cols-3 gap-3 flex-1 min-h-0">\n'
+        '  <div class="col-span-2"><img src="..." class="w-full h-full object-contain" /></div>\n'
+        '  <div class="flex flex-col gap-2">\n'
+        '    <img src="..." class="w-full flex-1 min-h-0 object-contain" />\n'
+        '    <img src="..." class="w-full flex-1 min-h-0 object-contain" />\n'
+        '  </div>\n'
+        '</div>\n'
+        "```\n"
+    ),
+    4: (
+        "### 图片布局（4 张图）\n"
+        "- 推荐 2×2 宫格\n"
+        "```html\n"
+        '<div class="grid grid-cols-2 grid-rows-2 gap-3 flex-1 min-h-0">\n'
+        '  <img src="..." class="w-full h-full object-contain" />\n'
+        '  <img src="..." class="w-full h-full object-contain" />\n'
+        '  <img src="..." class="w-full h-full object-contain" />\n'
+        '  <img src="..." class="w-full h-full object-contain" />\n'
+        '</div>\n'
+        "```\n"
+    ),
+}
+
+_IMAGE_LAYOUT_TEMPLATE_MANY = (
+    "### 图片布局（{n} 张图）\n"
+    "- 推荐网格布局，每行 3-4 张\n"
+    "```html\n"
+    '<div class="grid grid-cols-{cols} gap-3 flex-1 min-h-0">\n'
+    '  <!-- {n} 张图片，每张 object-contain -->\n'
+    '</div>\n'
+    "```\n"
+)
+
+
+def _build_image_section(image_map_page: str) -> str:
+    """根据本页图片素材描述和图片数量，构造图片素材 section。"""
+    if not image_map_page:
+        return ""
+    # 统计图片数量（每行一个 "- path:" 开头）
+    img_count = image_map_page.count("- path:")
+    layout = _IMAGE_LAYOUT_TEMPLATES.get(img_count)
+    if layout is None:
+        cols = 4 if img_count >= 7 else 3
+        layout = _IMAGE_LAYOUT_TEMPLATE_MANY.format(n=img_count, cols=cols)
+
+    return (
+        "\n### 图片素材（必须使用）\n"
+        f"{image_map_page}\n"
+        "- `usage=cover` → 用作全幅背景图："
+        "`<img src=\"...\" class=\"absolute inset-0 w-full h-full object-cover\">`，"
+        "文字内容用 `z-10` 叠加在上\n"
+        "- `usage=content` → 用作内容配图："
+        "`<img src=\"...\" class=\"w-full h-full object-contain\">`\n"
+        "- 使用 `<img>` 标签引用 `path` 字段指定的路径（相对路径，直接使用）\n"
+        "- 图片容器用 `min-h-0 overflow-hidden` 防溢出\n"
+        f"\n{layout}"
+    )
+
+
 def _build_page_prompt(
     page_number: int,
     style_id: str,
@@ -412,6 +550,7 @@ def _build_page_prompt(
     research_is_full: bool = False,
     rewrite_hint: str = "",
     original_html: str = "",
+    image_map_page: str = "",
 ) -> str:
     preset_clause = ""
     if style_id in _PRESET_STYLE_IDS:
@@ -508,6 +647,8 @@ def _build_page_prompt(
         f"{style_text}\n"
         f"{preset_clause}"
         "\n"
+        f"{_CDN_HEAD_SNIPPET}"
+        "\n"
         f"{design_rules}"
         "\n"
         f"{html_skeleton}"
@@ -523,14 +664,22 @@ def _build_page_prompt(
         "\n"
         f"### {research_label}\n"
         f"{research_page}\n"
+        f"{_build_image_section(image_map_page)}"
         "\n"
         "## 3. 内容融合规则\n"
         f"{fusion_rules}"
         f"{rewrite_section}"
         "\n"
-        "## 4. 任务\n"
+        "## 4. 页面内容预算（写 HTML 前必须先完成）\n"
+        "- 逐项识别核心结论、关键数据、必要论据和可舍弃的辅助细节\n"
+        "- 制定预算：页面类型、密度、标题行数、区域比例、卡片/要点上限、正文行数、最小字号、目标留白区间\n"
+        "- 预留至少 8% 的垂直缓冲，用于字体差异、图表标签和 PPTX 转换误差\n"
+        "- 若核心内容超过预算，先提炼与重排；仍无法容纳时拆页，禁止裁切或持续缩小字号\n"
+        "\n"
+        "## 5. 任务\n"
         f"你负责生成**第 {page_number} 页** HTML。仅生成该页，直接输出 HTML 原文。"
-        "生成时必须同时满足上述「内容密度检查（8 项）」全部要求，"
+        "先产出可运行 HTML，再按密度检查清单做小步修正；禁止在写文件前反复做像素级完整规划。"
+        "生成时必须同时满足上述「内容密度检查（10 项）」全部要求，"
         "确保首次生成即通过密度检查，避免后续重写。"
     )
 
@@ -546,6 +695,7 @@ class PageGenContext:
     research_page: str
     outline_is_full: bool
     research_is_full: bool
+    image_map_page: str  # 本页图片素材描述（空串=无图）
 
 
 class PrepareNode(PlanNode):
@@ -559,27 +709,29 @@ class PrepareNode(PlanNode):
                 "\n"
                 "### 前置条件\n"
                 "- `read_file` 工具可用\n"
-                "- `outline.md` / `research.md` / 风格文件均已落盘\n"
+                "- `outline.md` / `research-P{N}.md` / 风格文件均已落盘\n"
                 "\n"
                 "### 输入\n"
                 "- `page_count`（必填）: N 页\n"
-                "- `output_dir`（必填）: 工作目录（用于读 outline/research）\n"
+                "- `output_dir`（必填）: 工作目录（用于读 outline/research-P{N}.md）\n"
                 "- `style_file_path`（必填）: 风格文件绝对路径\n"
                 "\n"
                 "### 输出\n"
                 "- `prepare_status`: ok / failed\n"
-                "- `outline_pages` / `research_pages`: 按页拆分的 {页码: 片段}（拆分失败为空 dict，下游回退全文）\n"
-                "- `outline_text` / `research_text` / `style_text`: 全文（供下游回退与重写复用）\n"
+                "- `outline_pages`: 按页拆分的 {页码: 片段}（拆分失败为空 dict，下游回退全文）\n"
+                "- `research_pages`: 逐页读取的 {页码: research-P{N}.md 内容}（文件缺失时该页缺失）\n"
+                "- `outline_text` / `style_text`: 全文（供下游回退与重写复用）\n"
                 "- `all_pages`: 1..N 页码列表\n"
                 "\n"
                 "### 执行流程\n"
-                "1. 一次性读取 outline.md / research.md / style_file_path（任一失败 → prepare_status=failed）\n"
-                "2. 按 `### P{N}:` 章节拆分 outline 和 research，每页只取对应片段；拆分失败时回退全文\n"
-                "3. 返回共享只读数据，供 P8.1 per-page worker 复用\n"
+                "1. 读取 outline.md / style_file_path（任一失败 → prepare_status=failed）\n"
+                "2. 按 `### P{N}:` 章节拆分 outline，每页只取对应片段；拆分失败时回退全文\n"
+                "3. 逐页读取 research-P{N}.md（1..page_count），文件缺失时该页 research_pages 缺失\n"
+                "4. 返回共享只读数据，供 P8.1 per-page worker 复用\n"
                 "\n"
                 "### 失败兜底\n"
-                "- 读资料失败：prepare_status=failed，根节点直接终止，不进入 P8.1\n"
-                "- 拆分失败：outline_pages/research_pages 为空，下游 worker 回退全文\n"
+                "- 读 outline/style 失败：prepare_status=failed，根节点直接终止，不进入 P8.1\n"
+                "- 某页 research-P{N}.md 缺失：该页 research_pages 缺失，下游 worker 仅依据 outline 生成\n"
             ),
         )
 
@@ -592,14 +744,12 @@ class PrepareNode(PlanNode):
         style_file_path = str(inputs.get("style_file_path") or "").strip()
 
         outline_text = await self._read_file(f"{output_dir}/outline.md")
-        research_text = await self._read_file(f"{output_dir}/research.md")
         style_text = await self._read_file(style_file_path)
 
-        if not outline_text or not research_text or not style_text:
+        if not outline_text or not style_text:
             logger.error(
-                "[P8.0] 资料读取失败 outline=%d research=%d style=%d",
+                "[P8.0] 资料读取失败 outline=%d style=%d",
                 len(outline_text),
-                len(research_text),
                 len(style_text),
             )
             return {
@@ -607,31 +757,59 @@ class PrepareNode(PlanNode):
                 "outline_pages": {},
                 "research_pages": {},
                 "outline_text": outline_text,
-                "research_text": research_text,
                 "style_text": style_text,
                 "all_pages": list(range(1, total_pages + 1)) if total_pages > 0 else [],
             }
 
         outline_pages = _split_md_pages(outline_text)
-        research_pages = _split_md_pages(research_text)
         if not outline_pages:
             logger.warning("[P8.0] outline.md 未拆分到任何页面章节，下游回退全文")
-        if not research_pages:
-            logger.warning("[P8.0] research.md 未拆分到任何页面章节，下游回退全文")
+
+        # 逐页读取 research-P{N}.md（不再读取单文件 research.md）
+        # 遍历 total_pages（含结构页），❌ 页无 research 文件会跳过
+        all_pages = list(range(1, total_pages + 1)) if total_pages > 0 else sorted(outline_pages.keys())
+        research_pages: dict[int, str] = {}
+        for p in all_pages:
+            research_path = f"{output_dir}/research-P{p}.md"
+            research_text_p = await self._read_file(research_path)
+            # 校验内容是有效的 research 片段（以 ### P 开头），过滤 read_file 错误消息
+            if research_text_p and research_text_p.lstrip().startswith("### P"):
+                research_pages[p] = research_text_p
+            else:
+                logger.warning("[P8.0] research-P%d.md 不存在或内容无效", p)
+
+        # 读取 image_map.json（P6.5 产出，供 P8 注入图片素材）
+        image_map_path = str(inputs.get("image_map_path") or "").strip()
+        image_map: dict[str, Any] = {}
+        if image_map_path:
+            raw = await self._read_file(image_map_path)
+            if raw:
+                try:
+                    parsed = json.loads(raw)
+                    if isinstance(parsed, dict):
+                        # 只保留页码 key（过滤 metadata），转为 {str(page_num): [img, ...]}
+                        for key, value in parsed.items():
+                            if key != "metadata" and isinstance(value, list):
+                                image_map[key] = value
+                except Exception as e:
+                    if isinstance(e, AbortError):
+                        raise
+                    logger.warning("[P8.0] image_map.json 解析失败: %s", e)
 
         logger.info(
-            "[P8.0] 预处理完成 outline_pages=%d research_pages=%d",
+            "[P8.0] 预处理完成 outline_pages=%d research_pages=%d image_map_pages=%d",
             len(outline_pages),
             len(research_pages),
+            len(image_map),
         )
         return {
             "prepare_status": "ok",
             "outline_pages": outline_pages,
             "research_pages": research_pages,
             "outline_text": outline_text,
-            "research_text": research_text,
             "style_text": style_text,
-            "all_pages": list(range(1, total_pages + 1)),
+            "all_pages": all_pages,
+            "image_map": image_map,
         }
 
     async def _read_file(self, path: str) -> str:
@@ -681,7 +859,7 @@ class PageWorkerNode(PlanNode):
                 "- `pages_dir`（必填）: HTML 输出目录绝对路径\n"
                 "- `style_id`（必填）: 用于判定是否预设风格强约束\n"
                 "- `outline_pages` / `research_pages`（来自 P8.0）: 按页拆分片段\n"
-                "- `outline_text` / `research_text` / `style_text`（来自 P8.0）: 全文，拆分失败时回退\n"
+                "- `outline_text` / `style_text`（来自 P8.0）: 全文，拆分失败时回退\n"
                 "- `all_pages`（来自 P8.0）: 1..N 页码列表\n"
                 "- `topic`（可选）: PPT 主题，搜索补充关键词用\n"
                 "- `search_mode`（可选，影响数据可视化阈值）\n"
@@ -693,7 +871,7 @@ class PageWorkerNode(PlanNode):
                 "- `missing_pages`: 仍缺失的页码（用于上层标 partial）\n"
                 "- `low_density_pages`: 重写后仍未通过的页码\n"
                 "- `density_report`: 每页检查结果摘要\n"
-                "- `outline_text` / `research_text` / `style_text`（透传给 P8.3）\n"
+                "- `outline_text` / `style_text`（透传给 P8.2）\n"
                 "\n"
                 "### 执行流程（per-page 闭环，N 页 asyncio.gather 并发）\n"
                 "对每一页独立执行：\n"
@@ -701,8 +879,8 @@ class PageWorkerNode(PlanNode):
                 "调 LLM 生成 HTML；剥 ```html 包裹 → 校验（含 <!DOCTYPE> + ppt-slide 容器）→ write_file 落盘\n"
                 "   - 失败按 gen_retry_round 重试（仅本页）\n"
                 "   - 重试后仍失败 → 进 missing_pages，该页闭环终止\n"
-                "2. 密度判定阶段：调 LLM 做 8 项密度检查（受控 JSON 输出），叠加程序化后置校验（echarts/card 计数）\n"
-                "   - 检查项：数据可视化 / 核心要点 / 装饰图标 / 空白率 / 数据来源 / 大段文字 / 视觉层级 / 布局正确\n"
+                "2. 密度判定阶段：调 LLM 做 10 项密度检查（受控 JSON 输出），叠加程序化后置校验（echarts/card 计数）\n"
+                "   - 检查项：数据可视化 / 核心要点 / 装饰图标 / 空白率 / 数据来源 / 大段文字 / 视觉层级 / 布局正确 / 完整显示 / 内容完整\n"
                 "   - 数据可视化阈值：≥1 个 ECharts 图表 或 ≥3 个数据卡片（no_search 模式降至 2 个）\n"
                 "3. 不通过 → 修复阶段（按 density_retry_round 轮）：\n"
                 "   a. 分析缺失项，判断是否需要搜索补充数据\n"
@@ -711,7 +889,7 @@ class PageWorkerNode(PlanNode):
                 "      - 缺案例：搜索 `\"{主题} 应用案例 实践\"`，获取真实案例\n"
                 "      - 缺数据来源：搜索 `\"{主题} 行业报告\"`，获取权威机构名称\n"
                 "      - 搜索优先获取最近 1-2 年数据，优先权威来源\n"
-                "      - 数据来源标注使用 research.md 中的来源\n"
+                "      - 数据来源标注使用 research-P{N}.md 中的来源\n"
                 "   c. 将搜索结果 + 原有素材 + 不通过项提示词 + 上次产物构造重写 prompt，调 LLM 重新生成 HTML\n"
                 "   d. 若无需搜索（如缺装饰图标/大段文字/视觉层级/布局错误），直接用原有素材 + 不通过项提示词重写\n"
                 "   e. 重写产物校验通过 → 落盘覆盖 → 复检；仍不通过进 low_density_pages\n"
@@ -759,9 +937,9 @@ class PageWorkerNode(PlanNode):
         outline_pages: dict[int, str] = inputs.get("outline_pages") or {}
         research_pages: dict[int, str] = inputs.get("research_pages") or {}
         outline_full = str(inputs.get("outline_text") or "")
-        research_full = str(inputs.get("research_text") or "")
         style_text = str(inputs.get("style_text") or "")
         all_pages: list[int] = list(inputs.get("all_pages") or [])
+        image_map: dict[str, Any] = inputs.get("image_map") or {}
 
         if not pages_dir or not all_pages:
             logger.error("[P8.1] 必填输入缺失，跳过生成")
@@ -771,7 +949,6 @@ class PageWorkerNode(PlanNode):
                 "low_density_pages": [],
                 "density_report": {},
                 "outline_text": outline_full,
-                "research_text": research_full,
                 "style_text": style_text,
             }
 
@@ -782,13 +959,14 @@ class PageWorkerNode(PlanNode):
                 style_id=style_id,
                 style_text=style_text,
                 outline_page=outline_pages.get(p, outline_full),
-                research_page=research_pages.get(p, research_full),
+                research_page=research_pages.get(p, ""),
                 outline_is_full=p not in outline_pages,
-                research_is_full=p not in research_pages,
+                research_is_full=False,
                 search_mode=search_mode,
                 topic=topic,
                 gen_retry_round=gen_retry_round,
                 density_retry_round=density_retry_round,
+                image_map=image_map,
             )
             for p in all_pages
         ]
@@ -825,7 +1003,6 @@ class PageWorkerNode(PlanNode):
             "low_density_pages": low_density_pages,
             "density_report": density_report,
             "outline_text": outline_full,
-            "research_text": research_full,
             "style_text": style_text,
         }
 
@@ -844,9 +1021,24 @@ class PageWorkerNode(PlanNode):
         topic: str,
         gen_retry_round: int,
         density_retry_round: int,
+        image_map: dict[str, Any],
     ) -> dict[str, Any]:
         """单页闭环：生成(含重试) → 密度判定 → 搜索补充+重写(含重试)。"""
         path = f"{pages_dir}/page-{page_num}.pptx.html"
+
+        # 从 image_map 中提取本页图片素材描述
+        page_images = image_map.get(str(page_num), [])
+        image_map_page = ""
+        if page_images:
+            lines = []
+            for img in page_images:
+                path_val = str(img.get("path", ""))
+                lines.append(
+                    f"- path: {path_val}, usage: {img.get('usage', 'content')}, "
+                    f"description: {img.get('description', '')}, type: {img.get('type', '')}"
+                )
+            image_map_page = "\n".join(lines)
+
         ctx = PageGenContext(
             page_num=page_num,
             style_id=style_id,
@@ -855,6 +1047,7 @@ class PageWorkerNode(PlanNode):
             research_page=research_page,
             outline_is_full=outline_is_full,
             research_is_full=research_is_full,
+            image_map_page=image_map_page,
         )
 
         html = ""
@@ -927,6 +1120,7 @@ class PageWorkerNode(PlanNode):
                     research_page=ctx.research_page,
                     outline_is_full=ctx.outline_is_full,
                     research_is_full=False,
+                    image_map_page=ctx.image_map_page,
                 ),
                 system_prompt="你是资深演示文稿设计师，直接输出完整 HTML 原文，不输出任何解释。",
                 node_name=f"p8_1_page_{ctx.page_num}",
@@ -966,7 +1160,8 @@ class PageWorkerNode(PlanNode):
                 )
             failed_enum = (
                 "缺数据可视化 / 核心要点不足 / 缺装饰图标 / 空白率过高 / "
-                "缺数据来源 / 大段文字 / 视觉层级混乱 / 布局错误"
+                "缺数据来源 / 大段文字 / 视觉层级混乱 / 布局错误 / "
+                "内容被隐藏 / 核心内容缺失"
             )
 
         prompt = (
@@ -1072,6 +1267,7 @@ class PageWorkerNode(PlanNode):
                     research_is_full=ctx.research_is_full,
                     rewrite_hint=hint,
                     original_html=original_html,
+                    image_map_page=ctx.image_map_page,
                 ),
                 system_prompt="你是资深演示文稿设计师，直接输出完整 HTML 原文，不输出任何解释。",
                 node_name=f"p8_2_page_{ctx.page_num}",
@@ -1134,13 +1330,13 @@ class PageWorkerNode(PlanNode):
 
 
 class QAFixNode(PlanNode):
-    """P8.3 — 完整性检查 + cli.js fix（对应 SKILL Stage 7.5）。"""
+    """P8.2 — 完整性检查 + cli.js fix（对应 SKILL Stage 7.5）。"""
 
     def __init__(self) -> None:
         super().__init__(
-            plan_name="p8_3_qa_fix",
+            plan_name="p8_2_qa_fix",
             instruction=(
-                "## P8.3 QA 与自动修复\n"
+                "## P8.2 QA 与自动修复\n"
                 "\n"
                 "### 前置条件\n"
                 "- `bash` 工具可用\n"
@@ -1174,7 +1370,7 @@ class QAFixNode(PlanNode):
         )
 
         if not pages_dir:
-            logger.error("[P8.3] pages_dir 为空")
+            logger.error("[P8.2] pages_dir 为空")
             return {
                 "qa_status": "failed",
                 "final_page_files": [],
@@ -1187,22 +1383,49 @@ class QAFixNode(PlanNode):
         fix_report = ""
         try:
             pptx_root = str(inputs.get("pptx_root") or _PPT_DIR)
-            fix_cmd = f"{cli_path('fix', pptx_root)} {quote_path(pages_dir + '/')} --fix"
-            fix_result = await run_bash(
-                self, fix_cmd, timeout_seconds=600, required=False,
-                workdir=pptx_root,
-            )
-            fix_report = combined_output(fix_result)[:2000]
-            if fix_result.exit_code != 0:
-                logger.error(
-                    "[P8.3] cli.js fix 失败 exit=%d output=%s",
-                    fix_result.exit_code, fix_report,
-                )
-                qa_status = "partial"
+            # 按页并发 fix（1.1.19a+ 支持 --pages 参数）
+            page_nums = [int(f.replace("page-", "").replace(".pptx.html", ""))
+                         for f in page_files if f.startswith("page-") and f.endswith(".pptx.html")]
+            page_nums.sort()
+            if page_nums:
+                sem = asyncio.Semaphore(10)
+
+                async def _fix_one(pn: int) -> tuple[int, bool, str]:
+                    async with sem:
+                        cmd = f"{cli_path('fix', pptx_root)} {quote_path(pages_dir + '/')} --fix --pages {pn}"
+                        r = await run_bash(self, cmd, timeout_seconds=300, required=False, workdir=pptx_root)
+                        out = combined_output(r)[:500]
+                        ok = r.exit_code == 0
+                        if not ok:
+                            logger.warning("[P8.2] page-%d fix 失败 exit=%d", pn, r.exit_code)
+                        return pn, ok, out
+                results = await asyncio.gather(*[_fix_one(p) for p in page_nums], return_exceptions=True)
+                failed_pages = [
+                    r[0] for r in results
+                    if isinstance(r, tuple) and not r[1]
+                ] if results else []
+                # 处理异常情况
+                exc_pages = [page_nums[i] for i, r in enumerate(results) if isinstance(r, Exception)]
+                if exc_pages:
+                    logger.error("[P8.2] fix 异常页: %s", exc_pages)
+                    qa_status = "partial"
+                if failed_pages:
+                    logger.warning("[P8.2] fix 失败页: %s", failed_pages)
+                    qa_status = "partial"
+                else:
+                    logger.info("[P8.2] cli.js fix 完成 (per-page 并发 %d 页)", len(page_nums))
+                fix_parts = []
+                for r in results:
+                    if isinstance(r, tuple):
+                        pn, ok, _ = r
+                    else:
+                        pn, ok = 0, False
+                    fix_parts.append(f"page-{pn}: {'ok' if ok else 'fail'}")
+                fix_report = "; ".join(fix_parts)
             else:
-                logger.info("[P8.3] cli.js fix 完成")
+                fix_report = "no pages to fix"
         except BashExecError as e:
-            logger.error("[P8.3] cli.js fix 异常: %s", e)
+            logger.error("[P8.2] cli.js fix 异常: %s", e)
             qa_status = "failed"
             fix_report = f"bash_error: {e}"
 
@@ -1219,7 +1442,7 @@ class QAFixNode(PlanNode):
     ) -> tuple[bool, list[str]]:
         files: list[str] = []
         logger.debug(
-            "[P8.3] _check_completeness start pages_dir=%s page_count=%d has_list_dir=%s has_glob=%s",
+            "[P8.2] _check_completeness start pages_dir=%s page_count=%d has_list_dir=%s has_glob=%s",
             pages_dir,
             page_count,
             self.has_tool("list_dir"),
@@ -1229,11 +1452,11 @@ class QAFixNode(PlanNode):
             try:
                 result = await self.call_tool("list_dir", path=pages_dir)
                 files = self._parse_listing(result)
-                logger.debug("[P8.3] list_dir 解析结果 files=%d", len(files))
+                logger.debug("[P8.2] list_dir 解析结果 files=%d", len(files))
             except Exception as e:
                 if isinstance(e, AbortError):
                     raise
-                logger.warning("[P8.3] list_dir 失败，回退 glob: %s", e)
+                logger.warning("[P8.2] list_dir 失败，回退 glob: %s", e)
                 files = []
 
         if not files and self.has_tool("glob"):
@@ -1244,11 +1467,11 @@ class QAFixNode(PlanNode):
                     path=pages_dir,
                 )
                 files = self._parse_listing(result)
-                logger.debug("[P8.3] glob 解析结果 files=%d", len(files))
+                logger.debug("[P8.2] glob 解析结果 files=%d", len(files))
             except Exception as e:
                 if isinstance(e, AbortError):
                     raise
-                logger.warning("[P8.3] glob 失败: %s", e)
+                logger.warning("[P8.2] glob 失败: %s", e)
                 files = []
 
         page_files = sorted(
@@ -1261,7 +1484,7 @@ class QAFixNode(PlanNode):
         completeness_ok = len(page_files) == page_count
         if not completeness_ok:
             logger.warning(
-                "[P8.3] 完整性不足 actual=%d expected=%d",
+                "[P8.2] 完整性不足 actual=%d expected=%d",
                 len(page_files),
                 page_count,
             )
@@ -1271,7 +1494,7 @@ class QAFixNode(PlanNode):
         if result is None:
             return []
         logger.debug(
-            "[P8.3] _parse_listing input type=%s repr=%.500s",
+            "[P8.2] _parse_listing input type=%s repr=%.500s",
             type(result).__name__,
             repr(result),
         )
@@ -1321,7 +1544,7 @@ class QAFixNode(PlanNode):
         if isinstance(result, str):
             return self._parse_listing_text(result)
         logger.warning(
-            "[P8.3] _parse_listing 无法解析 result type=%s repr=%.300s",
+            "[P8.2] _parse_listing 无法解析 result type=%s repr=%.300s",
             type(result).__name__,
             repr(result),
         )
@@ -1380,13 +1603,13 @@ class PPTPageGenNode(PlanNode):
                 "## P8 幻灯片生成\n"
                 "\n"
                 "### 节点职责\n"
-                "1. 把 outline.md + research.md + 风格文件转成 N 个 page-{N}.pptx.html\n"
+                "1. 把 outline.md + research-P{N}.md + 风格文件转成 N 个 page-{N}.pptx.html\n"
                 "2. 三阶段串行编排：预处理 → per-page 闭环生成 → QA 与自动修复\n"
                 "   - per-page 闭环内部 N 页 asyncio.gather 并发，单页内生成→密度判定→搜索补充→重写串行\n"
                 "3. 不区分单 Agent 模式，LLM 并发度由框架 semaphore 控制\n"
                 "\n"
                 "### 输入\n"
-                "- `output_dir`（必填）: 工作目录（含 outline.md / research.md）\n"
+                "- `output_dir`（必填）: 工作目录（含 outline.md / research-P{N}.md）\n"
                 "- `pages_dir`（必填）: HTML 输出目录\n"
                 "- `style_file_path`（必填）: P7 落盘的风格文件\n"
                 "- `style_id`（必填）: 用于预设风格强约束\n"
@@ -1413,7 +1636,7 @@ class PPTPageGenNode(PlanNode):
                 "3. 调用 P8.1 PageWorkerNode → per-page 闭环"
                 "（生成→密度判定→搜索补充→重写）"
                 "→ page_files / missing_pages / low_density_pages\n"
-                "4. 调用 P8.3 QAFixNode → qa_status / final_page_files / fix_report\n"
+                "4. 调用 P8.2 QAFixNode → qa_status / final_page_files / fix_report\n"
                 "5. 汇总状态：missing 空 + low 空 + qa=ok → ok；qa=failed → failed；其余 partial\n"
                 "\n"
                 "### 失败兜底\n"
@@ -1429,6 +1652,36 @@ class PPTPageGenNode(PlanNode):
         )
 
     async def _execute(self, inputs: dict[str, Any]) -> dict[str, Any]:
+        # 模板包分支优先判断：style_mode == template_pack 时走 template-filler 流程
+        style_mode = str(inputs.get("style_mode") or "").strip()
+        if style_mode == "template_pack":
+            # template_pack 分支只需要 pack_dir，不需要 style_file_path
+            pack_dir = str(inputs.get("pack_dir") or "").strip()
+            if not pack_dir:
+                logger.error("[P8] template_pack 分支必填字段 pack_dir 为空")
+                return {
+                    "pages_dir": str(inputs.get("pages_dir") or ""),
+                    "page_files": [],
+                    "missing_pages": [],
+                    "low_density_pages": [],
+                    "ppt_gen_status": "failed",
+                }
+            page_count = int(inputs.get("page_count") or 0)
+            if page_count <= 0:
+                logger.error("[P8] page_count 非法 (%s)", inputs.get("page_count"))
+                return {
+                    "pages_dir": str(inputs.get("pages_dir") or ""),
+                    "page_files": [],
+                    "missing_pages": [],
+                    "low_density_pages": [],
+                    "ppt_gen_status": "failed",
+                }
+            total_pages = int(
+                inputs.get("total_pages") or (page_count + _DEFAULT_STRUCTURAL_PAGES)
+            )
+            return await self._execute_template_pack(inputs, page_count, total_pages)
+
+        # 非 template_pack 分支：需要 style_file_path 等字段
         required_fields = (
             "output_dir",
             "pages_dir",
@@ -1531,6 +1784,553 @@ class PPTPageGenNode(PlanNode):
                 "files": [{"path": f, "desc": "PPT页面"} for f in final_page_files] if final_page_files else [],
             },
         }
+
+    async def _execute_template_pack(
+        self,
+        inputs: dict[str, Any],
+        page_count: int,
+        total_pages: int,
+    ) -> dict[str, Any]:
+        """模板包分支：调用 template-filler 脚本 + LLM 填充生成页面。
+
+        流程：preflight → 逐页(seed → LLM 填充) → check
+        """
+        import json as _json
+
+        pack_dir = str(inputs.get("pack_dir") or "").strip()
+        output_dir = str(inputs.get("output_dir") or "").strip()
+        pages_dir = str(inputs.get("pages_dir") or "").strip()
+        pptx_root = str(inputs.get("pptx_root") or _PPT_DIR).strip()
+
+        if not pack_dir or not pages_dir:
+            logger.error("[P8-TP] pack_dir 或 pages_dir 为空")
+            return {
+                "pages_dir": pages_dir,
+                "page_files": [],
+                "missing_pages": list(range(1, total_pages + 1)),
+                "low_density_pages": [],
+                "ppt_gen_status": "failed",
+            }
+
+        # 1. preflight 预检
+        try:
+            preflight_cmd = (
+                f"{fill_js_path(pptx_root)} preflight "
+                f"{quote_path(pack_dir)} {quote_path(output_dir)} {quote_path(pages_dir)}"
+            )
+            await run_bash(
+                self, preflight_cmd,
+                timeout_seconds=60, required=True, workdir=pptx_root,
+            )
+            logger.info("[P8-TP] preflight 通过")
+        except BashExecError as e:
+            logger.error("[P8-TP] preflight 失败: %s", e)
+            return {
+                "pages_dir": pages_dir,
+                "page_files": [],
+                "missing_pages": list(range(1, total_pages + 1)),
+                "low_density_pages": [],
+                "ppt_gen_status": "failed",
+            }
+
+        # 2. 读取 outline.md 并按页拆分
+        outline_text = await self._read_file(f"{output_dir}/outline.md")
+        if not outline_text:
+            logger.error("[P8-TP] outline.md 读取失败")
+            return {
+                "pages_dir": pages_dir,
+                "page_files": [],
+                "missing_pages": list(range(1, total_pages + 1)),
+                "low_density_pages": [],
+                "ppt_gen_status": "failed",
+            }
+        outline_pages = _split_md_pages(outline_text)
+
+        # 3. 读取 template-manifest.json 获取模板列表
+        manifest = await self._load_template_manifest(pack_dir, pptx_root)
+
+        # 4. 逐页 seed + LLM 填充（并发）
+        all_pages = list(range(1, total_pages + 1))
+        tasks = [
+            self._template_fill_one(
+                page_num=p,
+                pack_dir=pack_dir,
+                pages_dir=pages_dir,
+                pptx_root=pptx_root,
+                outline_page=outline_pages.get(p, ""),
+                output_dir=output_dir,
+                manifest=manifest,
+            )
+            for p in all_pages
+        ]
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+
+        missing_pages: list[int] = []
+        page_files: list[str] = []
+        for p, r in zip(all_pages, results):
+            if isinstance(r, Exception):
+                logger.warning("[P8-TP] 页面 %d 填充异常: %s", p, r)
+                missing_pages.append(p)
+                continue
+            if r:
+                page_files.append(f"page-{p}.pptx.html")
+            else:
+                missing_pages.append(p)
+
+        # 5. check 自检 + 失败恢复循环（最多 2 轮）
+        check_ok = False
+        for retry_round in range(2):
+            check_ok = True
+            try:
+                check_cmd = (
+                    f"{fill_js_path(pptx_root)} check "
+                    f"{quote_path(pack_dir)} {quote_path(pages_dir)}"
+                )
+                check_result = await run_bash(
+                    self, check_cmd,
+                    timeout_seconds=300, required=False, workdir=pptx_root,
+                )
+                if check_result.exit_code != 0:
+                    check_ok = False
+                    check_output = check_result.stdout + "\n" + check_result.stderr
+                    logger.warning("[P8-TP] fill.js check 第 %d 轮失败 exit=%d", retry_round + 1, check_result.exit_code)
+
+                    # 解析失败的页码（跳过 manifest 声明类误报，re-seed 无法修复）
+                    # check 输出格式：page 行（含 page-N）后跟 HARD/WARN 行（不含 page-N），
+                    # 需用"当前页面"追踪方式把 HARD 行关联到最近的 page 行
+                    failed_pages: list[int] = []
+                    manifest_decl_pages: set[int] = set()
+                    current_page: int | None = None
+                    for line in check_output.splitlines():
+                        m = re.search(r'page-(\d+)', line)
+                        if m:
+                            current_page = int(m.group(1))
+                        if "HARD" not in line.upper():
+                            continue
+                        if current_page is None:
+                            continue
+                        p = current_page
+                        # "template-id 未在 manifest 中声明" 是 manifest 声明问题，
+                        # re-seed 不会修复（换模板也可能不在 manifest 中），跳过
+                        if "manifest" in line.lower() and "声明" in line:
+                            manifest_decl_pages.add(p)
+                            continue
+                        if p not in failed_pages:
+                            failed_pages.append(p)
+
+                    # 只报 manifest 声明问题的页不算失败
+                    manifest_only = manifest_decl_pages - set(failed_pages)
+                    if manifest_only:
+                        logger.info(
+                            "[P8-TP] 页面 %s 仅有 manifest 声明类警告，跳过 re-seed",
+                            sorted(manifest_only),
+                        )
+
+                    if not failed_pages:
+                        if manifest_decl_pages:
+                            # 所有 HARD 错误都是 manifest 声明类，内容本身没问题
+                            logger.info("[P8-TP] check 仅剩 manifest 声明类警告，视为通过")
+                            check_ok = True
+                            break
+                        # 无法解析失败页，取所有已生成页重试
+                        failed_pages = [p for p in all_pages if f"page-{p}.pptx.html" in page_files]
+
+                    if not failed_pages:
+                        logger.error("[P8-TP] check 失败但无法定位失败页，放弃重试")
+                        break
+
+                    logger.info("[P8-TP] 第 %d 轮恢复：重新 seed+填充 %d 个失败页 %s",
+                                retry_round + 1, len(failed_pages), failed_pages)
+
+                    # 重新 seed + 填充失败页（用 content-base 兜底模板）
+                    retry_tasks = [
+                        self._template_fill_one(
+                            page_num=p,
+                            pack_dir=pack_dir,
+                            pages_dir=pages_dir,
+                            pptx_root=pptx_root,
+                            outline_page=outline_pages.get(p, ""),
+                            output_dir=output_dir,
+                            manifest=manifest,
+                            force_template_id="content-base",
+                        )
+                        for p in failed_pages
+                    ]
+                    retry_results = await asyncio.gather(*retry_tasks, return_exceptions=True)
+                    for p, r in zip(failed_pages, retry_results):
+                        if isinstance(r, Exception) or not r:
+                            logger.warning("[P8-TP] 页面 %d 恢复失败", p)
+                        else:
+                            logger.info("[P8-TP] 页面 %d 恢复成功", p)
+                else:
+                    logger.info("[P8-TP] fill.js check 第 %d 轮通过", retry_round + 1)
+                    break
+            except BashExecError as e:
+                logger.error("[P8-TP] fill.js check 异常: %s", e)
+                check_ok = False
+                break
+
+        ppt_gen_status = "ok"
+        if missing_pages:
+            ppt_gen_status = "partial"
+        if not check_ok:
+            ppt_gen_status = "partial" if page_files else "failed"
+
+        logger.info(
+            "[P8-TP] 模板填充完成 status=%s success=%d/%d",
+            ppt_gen_status, len(page_files), total_pages,
+        )
+
+        return {
+            "pages_dir": pages_dir,
+            "page_files": page_files,
+            "missing_pages": missing_pages,
+            "low_density_pages": [],
+            "fix_report": "template-filler check " + ("passed" if check_ok else "failed"),
+            "ppt_gen_status": ppt_gen_status,
+            "__artifact__": {
+                "info": {
+                    "ppt_gen_status": ppt_gen_status,
+                    "page_count": len(page_files),
+                    "missing_count": len(missing_pages),
+                },
+                "files": [{"path": f, "desc": "PPT页面"} for f in page_files] if page_files else [],
+            },
+        }
+
+    async def _read_file(self, path: str) -> str:
+        """读取文件内容（PPTPageGenNode 自身用，模板分支）。"""
+        if not path:
+            return ""
+        if not self.has_tool("read_file"):
+            logger.warning("[P8-TP] read_file 工具不可用 %s", path)
+            return ""
+        try:
+            result = await self.call_tool("read_file", file_path=path)
+            content = PptCommon.parse_tool_file_content(result)
+            return content
+        except Exception as e:
+            if isinstance(e, AbortError):
+                raise
+            logger.warning("[P8-TP] 读取文件失败 %s: %s", path, e)
+            return ""
+
+    async def _write_file(self, path: str, content: str) -> bool:
+        """写入文件内容（PPTPageGenNode 自身用，模板分支）。"""
+        if not self.has_tool("write_file"):
+            logger.error("[P8-TP] write_file 工具不可用 %s", path)
+            return False
+        try:
+            await self.call_tool("write_file", file_path=path, content=content)
+            return True
+        except Exception as e:
+            if isinstance(e, AbortError):
+                raise
+            logger.error("[P8-TP] 写入文件失败 %s: %s", path, e)
+            return False
+
+    async def _load_template_manifest(
+        self, pack_dir: str, pptx_root: str,
+    ) -> dict[str, Any]:
+        """读取模板包的 template-manifest.json。"""
+        manifest_path = f"{pack_dir}/template-manifest.json"
+        content = await self._read_file(manifest_path)
+        if not content:
+            logger.warning("[P8-TP] template-manifest.json 不存在或为空")
+            return {}
+        try:
+            import json as _json
+            return _json.loads(content)
+        except Exception as e:
+            if isinstance(e, AbortError):
+                raise
+            logger.warning("[P8-TP] template-manifest.json 解析失败: %s", e)
+            return {}
+
+    @staticmethod
+    def _select_template_id(
+        page_type: str,
+        manifest: dict[str, Any],
+        outline_page: str = "",
+        research_page: str = "",
+    ) -> str:
+        """根据页面类型 + 内容形状选择模板 ID（容量感知）。
+
+        原版 skill 让 LLM 根据内容形状选模板，这里用 Python 做内容形状检测：
+        - 结构页（cover/agenda/chapter/conclusion）→ 固定映射
+        - 内容页：分析 research/outline 中的并列项数、对比模式、数据量
+          - 2 项对比 → content-two-column
+          - 3-5 并列 → content-cards
+          - 单主题 → content-default
+          - 超容量（>5 项或大量数据）→ content-base（自由排版）
+        """
+        # 构建 manifest 中已声明的 template_id 集合（layouts + bases）
+        valid_template_ids: set[str] = set()
+        for layout in (manifest.get("layouts") or []):
+            if isinstance(layout, dict):
+                tid = layout.get("template_id") or ""
+                if tid:
+                    valid_template_ids.add(tid)
+        for base in (manifest.get("bases") or []):
+            if isinstance(base, dict):
+                tid = base.get("template_id") or base.get("page_role") or ""
+                if tid:
+                    valid_template_ids.add(tid)
+
+        def _find_in_manifest(intent: str, fallback_id: str) -> str:
+            """从 manifest.page_intents 查找模板，找不到则用 fallback。
+
+            如果 page_intents 指向的 template 不在 layouts/bases 已声明集合中，
+            尝试按 page_role 找一个已声明的 layout 替代。
+            """
+            page_intents = manifest.get("page_intents") or []
+            selected = ""
+            selected_file = ""
+            if isinstance(page_intents, list):
+                for entry in page_intents:
+                    if not isinstance(entry, dict):
+                        continue
+                    if entry.get("intent") == intent:
+                        selected = entry.get("template") or ""
+                        selected_file = entry.get("file") or ""
+                        break
+            if not selected:
+                return fallback_id
+
+            # 已在 manifest 声明集合中，直接返回
+            if selected in valid_template_ids:
+                return selected
+
+            # 不在已声明集合中（base 模板未声明 template_id），
+            # 尝试按 page_role 找一个已声明的 layout 替代
+            base_page_role = ""
+            for base in (manifest.get("bases") or []):
+                if isinstance(base, dict) and base.get("file") == selected_file:
+                    base_page_role = base.get("page_role") or ""
+                    break
+
+            if base_page_role:
+                for layout in (manifest.get("layouts") or []):
+                    if isinstance(layout, dict) and layout.get("page_role") == base_page_role:
+                        alt_tid = layout.get("template_id") or ""
+                        if alt_tid and alt_tid in valid_template_ids:
+                            logger.info(
+                                "[P8-TP] 模板 %s 未在 manifest 声明，按 page_role=%s 替换为 %s",
+                                selected, base_page_role, alt_tid,
+                            )
+                            return alt_tid
+
+            # 找不到替代，保留原模板（fill.js seed 仍可使用，check 会报 manifest 声明警告）
+            logger.debug("[P8-TP] 模板 %s 未在 manifest layouts 中声明，保留使用", selected)
+            return selected
+
+        # 结构页：固定映射，不走内容感知
+        if page_type in _TEMPLATE_STRUCTURAL_TYPES:
+            type_to_intent = {
+                "intro": "cover", "cover": "cover",
+                "agenda": "toc",
+                "chapter": "section", "section": "section",
+                "conclusion": "closing", "ending": "closing",
+            }
+            target_intent = type_to_intent.get(page_type, "section")
+            return _find_in_manifest(
+                target_intent,
+                _PAGE_TYPE_TO_TEMPLATE.get(page_type, "section-base"),
+            )
+
+        # 内容页：内容形状检测
+        content_text = (research_page or "") + "\n" + (outline_page or "")
+
+        # 检测对比模式
+        comparison_patterns = [" vs ", "对比", "相较", " versus ", "compared to", " VS "]
+        is_comparison = any(p in content_text for p in comparison_patterns)
+
+        # 统计并列项数
+        bullet_count = 0
+        for line in content_text.splitlines():
+            stripped = line.strip()
+            if stripped.startswith("- ") or stripped.startswith("• ") or stripped.startswith("* "):
+                bullet_count += 1
+            elif stripped and stripped[0].isdigit() and "." in stripped[:3]:
+                bullet_count += 1
+
+        # 检测数据密度
+        numbers = re.findall(r'\d+\.?\d*%?', content_text)
+        data_density = len(numbers)
+
+        # 内容形状 → 模板选择
+        if is_comparison and bullet_count >= 2:
+            shape = "comparison"
+        elif bullet_count >= 6 or data_density >= 15:
+            shape = "overflow"
+        elif 3 <= bullet_count <= 5:
+            shape = "cards"
+        else:
+            shape = "single"
+
+        shape_to_intent = {
+            "comparison": "comparison",
+            "overflow": "general",
+            "cards": "image_text",
+            "single": "general",
+        }
+        shape_to_fallback = {
+            "comparison": "content-two-column",
+            "overflow": "content-base",
+            "cards": "content-cards",
+            "single": "content-default",
+        }
+        target_intent = shape_to_intent.get(shape, "general")
+        fallback_id = shape_to_fallback.get(shape, "content-default")
+        return _find_in_manifest(target_intent, fallback_id)
+
+    async def _template_fill_one(
+        self,
+        *,
+        page_num: int,
+        pack_dir: str,
+        pages_dir: str,
+        pptx_root: str,
+        outline_page: str,
+        output_dir: str,
+        manifest: dict[str, Any],
+        force_template_id: str = "",
+    ) -> bool:
+        """单页模板填充：seed → LLM 填充 → write_file。返回是否成功。"""
+        # 检测页面类型
+        page_type = _detect_page_type(outline_page)
+
+        # 3. 读取本页 research（提前读取，供选模板和填充使用）
+        research_path = f"{output_dir}/research-P{page_num}.md"
+        research_text = await self._read_file(research_path)
+
+        # 容量感知选模板：根据内容形状选模板（或使用强制兜底模板）
+        if force_template_id:
+            template_id = force_template_id
+        else:
+            template_id = self._select_template_id(
+                page_type, manifest,
+                outline_page=outline_page,
+                research_page=research_text,
+            )
+
+        # 1. seed 种子化
+        page_path = f"{pages_dir}/page-{page_num}.pptx.html"
+        try:
+            seed_cmd = (
+                f"{fill_js_path(pptx_root)} seed "
+                f"{quote_path(pack_dir)} {template_id} {quote_path(page_path)} copy"
+            )
+            await run_bash(
+                self, seed_cmd,
+                timeout_seconds=60, required=True, workdir=pptx_root,
+            )
+        except BashExecError as e:
+            logger.error("[P8-TP] 页面 %d seed 失败 template=%s: %s", page_num, template_id, e)
+            return False
+        except Exception as e:
+            if isinstance(e, AbortError):
+                raise
+            logger.error("[P8-TP] 页面 %d seed 异常: %s", page_num, e)
+            return False
+
+        # 2. 读取种子 HTML
+        seed_html = await self._read_file(page_path)
+        if not seed_html:
+            logger.error("[P8-TP] 页面 %d 种子 HTML 读取失败", page_num)
+            return False
+
+        # 4. LLM 填充内容
+        is_structural = page_type in _TEMPLATE_STRUCTURAL_TYPES
+        filled_html = await self._llm_fill_template(
+            page_num=page_num,
+            seed_html=seed_html,
+            outline_page=outline_page,
+            research_page=research_text,
+            is_structural=is_structural,
+        )
+        if not filled_html:
+            logger.error("[P8-TP] 页面 %d LLM 填充失败", page_num)
+            return False
+
+        # 5. 写入填充后的 HTML
+        ok = await self._write_file(page_path, filled_html)
+        if not ok:
+            logger.error("[P8-TP] 页面 %d 写入失败", page_num)
+            return False
+
+        logger.info("[P8-TP] 页面 %d 填充完成 template=%s", page_num, template_id)
+        return True
+
+    async def _llm_fill_template(
+        self,
+        *,
+        page_num: int,
+        seed_html: str,
+        outline_page: str,
+        research_page: str,
+        is_structural: bool,
+    ) -> str:
+        """调用 LLM 填充模板 HTML 中的 data-slot 占位文字。"""
+        research_section = ""
+        if research_page and not is_structural:
+            research_section = f"\n### 本页研究素材（research-P{page_num}.md）\n{research_page}\n"
+        elif is_structural:
+            research_section = "\n（结构页，无需研究素材，仅依据大纲内容填充标题/副标题）\n"
+
+        prompt = (
+            f"你是 PPT 模板填充师。请将以下模板种子 HTML 中的 data-slot 占位文字替换为真实内容，并做顺势增强。\n\n"
+            f"### 大纲 — 本页规划\n{outline_page}\n"
+            f"{research_section}\n"
+            "### 填充规则（必须遵守）\n"
+            "1. **保住 DNA**：不动 :root CSS 变量（配色/字号）、--font-*、.template-bg-image、.content-layer 骨架\n"
+            "2. **守容量**：文字长度/行数照模板该槽位的容量约束（max_chars/max_lines）\n"
+            "3. **安全写入**：内容中的 &、<、>、引号等特殊字符不得破坏 HTML 标签结构\n"
+            "4. **禁止改模板结构**：不得改 grid-template-columns 列数、不得删 overflow:hidden、不得降字号到 14px 以下\n"
+            "5. **所有文字必须是真实内容**，禁止占位文本（TODO、xxx 等）\n"
+            "6. **结构性页面必须填标题**：封面/章节/结尾页的 data-slot=\"title\" 必须写入大纲给出的标题\n"
+            "\n"
+            "### 顺势增强（内容页必做，结构页跳过）\n"
+            "在填满 data-slot 后，如果内容区仍有留白，按以下顺序增强（仅用 :root 变量和模板已有 CSS class）：\n"
+            "1. **从 research 多挖细节**填进现有槽位（研究通常比框能装的多——挖，不编造）\n"
+            "2. **加总结框**：主色左边框的小框，标题「关键洞察/核心总结」，对已有要点 1-2 句概括重述（非新事实），≤2 行\n"
+            "3. **内容→视觉转换**（轻量、纯 HTML/CSS、守 DNA）：\n"
+            "   - 一组数字/KPI → 大数字卡 / KPI 横条\n"
+            "   - 并列要点 → 图标 + 文字列表\n"
+            "   - 结论/金句 → 引用块 blockquote\n"
+            "   - 对比 → 左右对照卡\n"
+            "   - 流程/时序 → CSS 节点+连线 / 时间线\n"
+            "4. 仍空 → 把该页内容区用足，确保内容分散占据 .content-layer 高度（不要全堆到上半屏）\n"
+            "\n"
+            "### 超容量决策树（内容超出模板槽位时，按序处理）\n"
+            "1. 精简措辞压进槽位 → 2. 只保留核心要点，次要内容移到注释 → 3. 实在塞不下就少填，不要硬塞导致溢出\n"
+            "禁止：改 grid-template-columns 列数、调高 -webkit-line-clamp、删 overflow:hidden、降字号到 14px 以下\n"
+            "\n"
+            "### 内容页留白契约\n"
+            "- 内容必须分散占据 .content-layer 高度，不要全堆到顶部 30%\n"
+            "- 正文最小字号 14px；来源/注脚允许 12px 但必须用含 note/source/footnote 的 class\n"
+            "- 至少 8% 的垂直缓冲\n"
+            "\n"
+            "直接输出完整的填充后 HTML，不要输出解释或代码块包裹。\n\n"
+            f"### 模板种子 HTML\n{seed_html}"
+        )
+        try:
+            result = await self.stream_llm_collect(
+                prompt=prompt,
+                system_prompt="你是 PPT 模板填充师，直接输出填充后的完整 HTML 原文，不输出任何解释。",
+                node_name=f"p8_tp_page_{page_num}",
+                concurrent=True,
+            )
+            html = _strip_html_fence(result or "")
+            if not html or len(html) < 200:
+                logger.warning("[P8-TP] 页面 %d LLM 填充产物过短", page_num)
+                return ""
+            return html
+        except Exception as e:
+            if isinstance(e, AbortError):
+                raise
+            logger.warning("[P8-TP] 页面 %d LLM 填充失败: %s", page_num, e)
+            return ""
 
     async def _execute_stream(self, inputs: dict[str, Any]) -> AsyncIterator[dict[str, Any]]:
         result = await self._execute(inputs)

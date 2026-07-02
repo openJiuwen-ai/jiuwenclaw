@@ -369,7 +369,7 @@ class PageWorkerNode(PlanNode):
                 "- `source_material` / `search_mode` / `research_depth` / `topic` / `output_dir`（透传）\n"
                 "\n"
                 "### 输出\n"
-                "- `research_path`: research.md 的完整文件路径\n"
+                "- `research_paths`: {页码: research-P{N}.md 文件路径} 字典\n"
                 "\n"
                 "### 执行流程（per-page 闭环，N 页 asyncio.gather 并发）\n"
                 "对每一页独立执行：\n"
@@ -465,12 +465,8 @@ class PageWorkerNode(PlanNode):
                 "如文中无相关数据，输出\"本文无相关数据\"即可。\n"
                 "```\n"
                 "\n"
-                "### research.md 结构骨架\n"
+                "### research-P{N}.md 结构骨架（每页独立文件，不含全局 header）\n"
                 "```\n"
-                "# {topic} — 大纲研究报告\n"
-                "> 生成时间：自动 | 研究深度：{research_depth} | 搜索模式：{search_mode}\n"
-                "---\n"
-                "## 逐页研究成果\n"
                 "### P{N}: {页面标题}\n"
                 "> 页面类型：{type}\n"
                 "**核心论点**：{一句结论性陈述}\n"
@@ -519,7 +515,7 @@ class PageWorkerNode(PlanNode):
                 "- 撰写LLM失败：使用兜底骨架\n"
                 "- 按页校验LLM失败：保守视为通过（避免假阳性触发无意义重写）\n"
                 "- 重写LLM失败：保留当前版本\n"
-                "- write_file 不可用/失败：记录错误日志，返回空 research_path\n"
+                "- write_file 不可用/失败：记录错误日志，该页不写入 research_paths\n"
             ),
         )
 
@@ -543,21 +539,21 @@ class PageWorkerNode(PlanNode):
             no_data_fallback=no_data_fallback,
         )
 
-        research_path = f"{output_dir}/research.md"
-
-        # 降级路径：无研究数据
+        # 降级路径：无研究数据 — 逐页写 stub
         if no_data_fallback:
             logger.info("[P6.1] 无研究数据降级模式，跳过搜索/抓取/校验")
-            research_md = self._build_no_data_research(
-                pages, topic, search_mode, research_depth,
-            )
-            if not await self._write_file(research_path, research_md):
-                return {"research_path": ""}
-            return {"research_path": research_path}
+            research_paths: dict[int, str] = {}
+            for page in pages:
+                page_num = int(page["page_number"])
+                path = f"{output_dir}/research-P{page_num}.md"
+                stub = self._build_no_data_page_section(page, topic, search_mode, research_depth)
+                if await self._write_file(path, stub):
+                    research_paths[page_num] = path
+            return {"research_paths": research_paths}
 
         if not pages:
             logger.warning("[P6.1] pages 为空，无法撰写")
-            return {"research_path": ""}
+            return {"research_paths": {}}
 
         # per-page 并发闭环
         tasks = [
@@ -574,30 +570,23 @@ class PageWorkerNode(PlanNode):
         ]
         results = await asyncio.gather(*tasks, return_exceptions=True)
 
-        # 组装 research.md
-        header = (
-            f"# {topic} — 大纲研究报告\n"
-            f"> 生成时间：自动 | 研究深度：{research_depth} | 搜索模式：{search_mode}\n"
-            "---\n\n"
-            "## 逐页研究成果\n\n"
-        )
-
-        page_sections: list[str] = []
+        # 逐页写 research-P{N}.md（不再合并为单文件）
+        research_paths: dict[int, str] = {}
         for page, result in zip(pages, results):
             page_num = int(page["page_number"])
+            path = f"{output_dir}/research-P{page_num}.md"
             if isinstance(result, Exception):
                 logger.warning("[P6.1] 页面 P%d 闭环异常: %s", page_num, result)
-                page_sections.append(self._build_fallback_page_section(page))
+                section = self._build_fallback_page_section(page)
             else:
                 section = result.get("section", "")
-                page_sections.append(section if section else self._build_fallback_page_section(page))
+                if not section:
+                    section = self._build_fallback_page_section(page)
+            if await self._write_file(path, section):
+                research_paths[page_num] = path
 
-        research_md = header + "\n\n".join(page_sections)
-        if not await self._write_file(research_path, research_md):
-            return {"research_path": ""}
-
-        logger.info("[P6.1] per-page 闭环完成，research.md 已落盘 %s", research_path)
-        return {"research_path": research_path}
+        logger.info("[P6.1] per-page 闭环完成，已落盘 %d 个 research-P{N}.md", len(research_paths))
+        return {"research_paths": research_paths}
 
     async def _run_page_pipeline(
         self,
@@ -1346,56 +1335,44 @@ class PageWorkerNode(PlanNode):
             "- **关键数据清单**：待补充\n"
         )
 
-    def _build_no_data_research(
+    def _build_no_data_page_section(
         self,
-        pages: list[dict[str, Any]],
+        page: dict[str, Any],
         topic: str,
         search_mode: str,
         research_depth: str,
     ) -> str:
-        lines = [
-            f"# {topic} — 大纲研究报告",
-            f"> 生成时间：自动 | 研究深度：{research_depth} | 搜索模式：{search_mode}",
-            "",
-            "> ⚠️ **无研究数据降级模式**：未执行外部搜索且未提供用户素材，本报告仅输出大纲骨架，"
-            "需后续阶段补充具体数据。",
-            "",
-            "---",
-            "",
-            "## 逐页研究成果",
-            "",
-        ]
-        for page in pages:
-            page_num = page.get("page_number", "")
-            title = page.get("title", "")
-            page_type = page.get("page_type", page.get("type", ""))
-            data_needs = page.get("data_needs", []) or []
-            queries = page.get("research_queries", []) or []
+        """无研究数据降级模式：生成单页 stub（不含全局 header）。"""
+        page_num = page.get("page_number", "")
+        title = page.get("title", "")
+        page_type = page.get("page_type", page.get("type", ""))
+        data_needs = page.get("data_needs", []) or []
+        queries = page.get("research_queries", []) or []
 
-            lines.append(f"### P{page_num}: {title}")
-            lines.append(f"> 页面类型：{page_type}")
-            lines.append("")
-            lines.append("**核心论点**：[数据有限，基于大纲规划]")
-            lines.append("")
-            lines.append("#### PPT 内容建议")
-            lines.append(f"- **推荐主标题**：{title}")
-            lines.append("- **核心论点**：")
-            if queries:
-                for q in queries[:5]:
-                    lines.append(f"  - {q}（待补充数据）")
-            else:
-                lines.append("  - 待补充")
-            lines.append("- **关键数据清单**（无研究数据，待后续补充）：")
-            lines.append("  | 数据项 | 数值/结果 | 来源 | 时间 | 数据类型 |")
-            lines.append("  | --- | --- | --- | --- | --- |")
-            if data_needs:
-                for need in data_needs[:3]:
-                    lines.append(f"  | {need} | 待补充 | 待补充 | 待补充 | 待补充 |")
-            else:
-                lines.append("  | 待补充 | 待补充 | 待补充 | 待补充 | 待补充 |")
-            lines.append("- **数据有限**，本页未执行外部搜索，亦无用户素材。")
-            lines.append("")
-
+        lines: list[str] = []
+        lines.append(f"### P{page_num}: {title}")
+        lines.append(f"> 页面类型：{page_type}")
+        lines.append("")
+        lines.append("**核心论点**：[数据有限，基于大纲规划]")
+        lines.append("")
+        lines.append("#### PPT 内容建议")
+        lines.append(f"- **推荐主标题**：{title}")
+        lines.append("- **核心论点**：")
+        if queries:
+            for q in queries[:5]:
+                lines.append(f"  - {q}（待补充数据）")
+        else:
+            lines.append("  - 待补充")
+        lines.append("- **关键数据清单**（无研究数据，待后续补充）：")
+        lines.append("  | 数据项 | 数值/结果 | 来源 | 时间 | 数据类型 |")
+        lines.append("  | --- | --- | --- | --- | --- |")
+        if data_needs:
+            for need in data_needs[:3]:
+                lines.append(f"  | {need} | 待补充 | 待补充 | 待补充 | 待补充 |")
+        else:
+            lines.append("  | 待补充 | 待补充 | 待补充 | 待补充 | 待补充 |")
+        lines.append("- **数据有限**，本页未执行外部搜索，亦无用户素材。")
+        lines.append("")
         return "\n".join(lines)
 
     async def _validate_single_page(
@@ -1501,13 +1478,13 @@ class PageWorkerNode(PlanNode):
 
     async def _execute_stream(self, inputs: dict[str, Any]) -> AsyncIterator[dict[str, Any]]:
         result = await self._execute(inputs)
-        research_path = result.get("research_path", "")
-        ok = bool(research_path)
+        research_paths = result.get("research_paths", {})
+        ok = bool(research_paths)
         yield {
             **result,
             "node": self.plan_name,
             "status": "ok" if ok else "error",
-            "message": f"研究完成 research_path={research_path}" if ok else "研究失败",
+            "message": f"研究完成，已落盘 {len(research_paths)} 个 research-P{{N}}.md" if ok else "研究失败",
         }
 
 
@@ -1525,7 +1502,7 @@ class DeepResearchNode(PlanNode):
                 "- `read_file` 工具可用\n"
                 "\n"
                 "### 输入\n"
-                "- `output_dir`: 工作目录（读 outline.md，写 research.md）\n"
+                "- `output_dir`: 工作目录（读 outline.md，写 research-P{N}.md）\n"
                 "- `search_mode`: no_search / auto / force_search\n"
                 "- `research_depth`: L1 / L2 / L3\n"
                 "- `source_material`: 用户素材（可空）\n"
@@ -1533,7 +1510,7 @@ class DeepResearchNode(PlanNode):
                 "\n"
                 "### 输出\n"
                 "```json\n"
-                '{"research_path": "{output_dir}/research.md"}\n'
+                '{"research_paths": {"1": "{output_dir}/research-P1.md", "2": "{output_dir}/research-P2.md"}}\n'
                 "```\n"
                 "\n"
                 "### 执行流程（两阶段串行）\n"
@@ -1558,14 +1535,14 @@ class DeepResearchNode(PlanNode):
                 "    ├─ 输入: pages, searched_urls, need_search, no_data_fallback,\n"
                 "    │       page_coverage, min_words_per_page, source_material,\n"
                 "    │       search_mode, research_depth, topic, output_dir\n"
-                "    └─ 输出: research_path\n"
+                "    └─ 输出: research_paths（{页码: research-P{N}.md 路径}）\n"
                 "```\n"
                 "\n"
                 "### 失败兜底\n"
-                "- outline.md 为空/不存在：返回空 research_path\n"
-                "- P6.0 prepare_status=failed：返回空 research_path，不进入 P6.1\n"
+                "- outline.md 为空/不存在：返回空 research_paths\n"
+                "- P6.0 prepare_status=failed：返回空 research_paths，不进入 P6.1\n"
                 "- P6.1 内部 per-page 异常：单页降级为兜底骨架，不阻塞其他页\n"
-                "- write_file 不可用/失败：返回空 research_path\n"
+                "- write_file 不可用/失败：该页不写入 research_paths\n"
             ),
             sub_plans=[
                 PrepareNode(),
@@ -1574,14 +1551,11 @@ class DeepResearchNode(PlanNode):
         )
 
     async def _execute(self, inputs: dict[str, Any]) -> dict[str, Any]:
-        output_dir = inputs.get("output_dir", "")
-        research_path = f"{output_dir}/research.md" if output_dir else ""
-
         # P6.0 预处理
         prep_result = await self.execute_subplan(self.sub_plans[0], inputs)
         if not isinstance(prep_result, dict) or prep_result.get("prepare_status") != "ok":
             logger.error("[P6] P6.0 预处理失败，终止深度研究")
-            return {"research_path": ""}
+            return {"research_paths": {}}
 
         # 合并预处理结果到 inputs
         worker_inputs = {**inputs, **prep_result}
@@ -1589,26 +1563,26 @@ class DeepResearchNode(PlanNode):
         # P6.1 per-page 闭环
         worker_result = await self.execute_subplan(self.sub_plans[1], worker_inputs)
         if isinstance(worker_result, dict):
-            research_path = worker_result.get("research_path", "") or research_path
+            research_paths = worker_result.get("research_paths", {})
         else:
             logger.error("[P6] P6.1 执行异常")
-            research_path = ""
+            research_paths = {}
 
-        logger.info("[P6] 深度研究完成 research_path=%s", research_path)
+        logger.info("[P6] 深度研究完成，已落盘 %d 个 research-P{N}.md", len(research_paths))
         return {
-            "research_path": research_path,
+            "research_paths": research_paths,
             "__artifact__": {
-                "files": [{"path": research_path, "desc": "深度研究报告"}] if research_path else []
+                "files": [{"path": p, "desc": "深度研究报告"} for p in research_paths.values()] if research_paths else [],
             },
         }
 
     async def _execute_stream(self, inputs: dict[str, Any]) -> AsyncIterator[dict[str, Any]]:
         result = await self._execute(inputs)
-        research_path = result.get("research_path", "")
-        ok = bool(research_path)
+        research_paths = result.get("research_paths", {})
+        ok = bool(research_paths)
         yield {
             **result,
             "node": self.plan_name,
             "status": "ok" if ok else "error",
-            "message": f"深度研究完成 research_path={research_path}" if ok else "深度研究失败",
+            "message": f"深度研究完成，已落盘 {len(research_paths)} 个 research-P{{N}}.md" if ok else "深度研究失败",
         }

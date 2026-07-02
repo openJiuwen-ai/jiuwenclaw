@@ -61,6 +61,7 @@ _P21_SLOT_SYSTEM_PROMPT = ("""你是 PPT 需求槽位分析助手。从用户消
 - presentation_purpose: 汇报目的，如「工作汇报」「产品展示」「教学分享」「auto」；未知则 ""
 - style_id: 用户明确提及风格时填写：business-classic / tech-minimal / elegant-narrative / industrial-tech / free / custom；未知则 ""
 - style_description: style_id 为 custom 时的描述；否则 ""
+- pack_dir: 用户提供的模板包目录绝对路径（字符串；未知则 ""）。当用户在消息中提到"用 XX 模板""用模板包""template pack"等，且给出了目录路径时提取该路径。路径可能是 Windows 格式（如 D:\\path\\to\\pack）或 Unix 格式（/path/to/pack）。仅提取用户明确给出的路径，不要编造。
 - missing_fields: 仍缺失且需用户补充的字段名数组，取值限于 topic / page_count / audience / presentation_purpose / style_id
 - need_ask_style: 用户未明确风格时为 true，否则 false
 
@@ -70,10 +71,12 @@ _P21_SLOT_SYSTEM_PROMPT = ("""你是 PPT 需求槽位分析助手。从用户消
 3. 已知主题（来自上游 P3）时不要修改 topic，且 missing_fields 不得包含 topic。
 4. 不要输出 search_mode / source_type。
 5. topic 缺失时由下游 LLM 生成 4 个主题候选并 ask 用户选择，不要生成询问文案。
+6. pack_dir 存在时 style_id 填 "custom"（模板包优先于预设风格），need_ask_style 设 false。
 
 必须只输出 JSON："""
     + '{"topic":"","page_count":null,"audience":"","presentation_purpose":"",'
-    + '"style_id":"","style_description":"","missing_fields":[],"need_ask_style":true}')
+    + '"style_id":"","style_description":"","pack_dir":"",'
+    + '"missing_fields":[],"need_ask_style":true}')
 
 _TOPIC_SUGGEST_COUNT = 4
 
@@ -106,8 +109,10 @@ research_depth 规则（与 search_mode、page_count 联动；L1/L2/L3 含义见
 - page_count 在 8~15 → L2
 - 其余（含 auto 且页数 ≤7）→ L1
 
-必须只输出 JSON，三个字段均必填且取值必须在枚举内：
-{"search_mode":"auto","source_type":"topic","research_depth":"L2"}"""
+need_imagegen 规则：用户 query 明确要求 AI 生图/生成配图 → true，否则 → false
+
+必须只输出 JSON，四个字段均必填且取值必须在枚举内：
+{"search_mode":"auto","source_type":"topic","research_depth":"L2","need_imagegen":false}"""
 
 
 class RequirementCollectError(RuntimeError):
@@ -303,6 +308,14 @@ def _merge_slot_payload(
     if isinstance(style_description, str) and style_description.strip():
         inputs["style_description"] = style_description.strip()
 
+    pack_dir = payload.get("pack_dir")
+    if isinstance(pack_dir, str) and pack_dir.strip():
+        inputs["pack_dir"] = pack_dir.strip()
+        # pack_dir 存在时强制 style_id=custom，跳过风格询问
+        if not inputs.get("style_id"):
+            inputs["style_id"] = "custom"
+        inputs["need_ask_style"] = False
+
     missing = payload.get("missing_fields")
     if isinstance(missing, list):
         allowed = (
@@ -319,7 +332,7 @@ def _merge_slot_payload(
         inputs.setdefault("missing_fields", [])
 
     need_ask_style = payload.get("need_ask_style")
-    if isinstance(need_ask_style, bool):
+    if isinstance(need_ask_style, bool) and not inputs.get("pack_dir"):
         inputs["need_ask_style"] = need_ask_style
     elif "need_ask_style" not in inputs:
         inputs["need_ask_style"] = not bool(inputs.get("style_id"))
@@ -359,6 +372,7 @@ def _parse_slot_analysis_response(raw: str, *, preserve_topic: bool) -> dict[str
             "presentation_purpose": "",
             "style_id": "",
             "style_description": "",
+            "pack_dir": "",
             "missing_fields": default_missing,
             "need_ask_style": True,
         }
@@ -376,12 +390,13 @@ def _build_p24_prompt(inputs: dict[str, Any], user_text: str, doc_excerpt: str) 
         f"- style_id: {inputs.get('style_id', '')}\n"
         f"- has_documents: {bool(inputs.get('has_documents'))}\n"
         f"- doc_parse_ok: {bool(inputs.get('doc_parse_ok'))}\n"
+        f"- image_paths: {bool(inputs.get('image_paths'))}\n"
     )
     if user_text:
         parts.append(f"用户原文：\n{user_text}\n")
     if doc_excerpt:
         parts.append(f"文档摘要：\n{doc_excerpt}\n")
-    parts.append("按 JSON 返回 search_mode、source_type、research_depth。")
+    parts.append("按 JSON 返回 search_mode、source_type、research_depth、need_imagegen。")
     return "\n".join(parts)
 
 
@@ -455,10 +470,13 @@ def _parse_derive_params_response(raw: str) -> dict[str, str]:
     if research_depth not in _VALID_RESEARCH_DEPTHS:
         raise RequirementCollectError(f"派生参数无效：research_depth={research_depth!r}")
 
+    need_imagegen = bool(payload.get("need_imagegen", False))
+
     return {
         "search_mode": search_mode,
         "source_type": source_type,
         "research_depth": research_depth,
+        "need_imagegen": need_imagegen,
     }
 
 
@@ -1258,6 +1276,43 @@ class P24DeriveParamsNode(PlanNode):
     async def _execute(self, inputs: dict[str, Any]) -> dict[str, Any]:
         derived = await _derive_params_via_llm(self, inputs)
         inputs.update(derived)
+
+        # 写 imagegen_status.json（供 P6.5 读取）
+        need_imagegen = derived.get("need_imagegen", False)
+        output_dir = str(inputs.get("output_dir", "")).strip()
+        if need_imagegen and output_dir:
+            try:
+                content = json.dumps(
+                    {"supported": True},
+                    ensure_ascii=False,
+                )
+                await PptCommon.write_file(
+                    self, f"{output_dir}/imagegen_status.json",
+                    content, label="imagegen_status",
+                    error_type=RequirementCollectError,
+                )
+                logger.info("[P2.4] imagegen_status.json 已写入 (supported=true)")
+            except Exception as e:
+                if isinstance(e, AbortError):
+                    raise
+                logger.warning("[P2.4] 写 imagegen_status.json 失败: %s", e)
+        elif not need_imagegen and output_dir:
+            try:
+                content = json.dumps(
+                    {"supported": False},
+                    ensure_ascii=False,
+                )
+                await PptCommon.write_file(
+                    self, f"{output_dir}/imagegen_status.json",
+                    content, label="imagegen_status",
+                    error_type=RequirementCollectError,
+                )
+                logger.info("[P2.4] imagegen_status.json 已写入 (supported=false)")
+            except Exception as e:
+                if isinstance(e, AbortError):
+                    raise
+                logger.warning("[P2.4] 写 imagegen_status.json 失败: %s", e)
+
         return inputs
 
 
@@ -1348,6 +1403,41 @@ class RequirementCollectNode(PlanNode):
             ],
         )
 
+    def _ensure_image_vars(self, ctx: dict[str, Any]) -> None:
+        """图片变量兜底：image_paths 空数组 + image_sources 默认 local。
+
+        ai 源由 P6.5 读取 imagegen_status.json 动态启用，不在此处判断。
+        """
+        ctx.setdefault("image_paths", [])
+        ctx.setdefault("image_sources", ["local"])
+
+    def _set_style_mode(self, ctx: dict[str, Any]) -> None:
+        """根据 style_id / pack_dir 设置 style_mode（供下游 P3.5/P7/P8/P9 分支判断）。"""
+        if ctx.get("style_mode"):
+            return  # 已显式设置，不覆盖
+        pack_dir = str(ctx.get("pack_dir") or "").strip()
+        if pack_dir:
+            # 检查模板包完整性：template-manifest.json 是 fill.js check 的硬性依赖
+            manifest_path = Path(pack_dir) / "template-manifest.json"
+            if not manifest_path.is_file():
+                logger.warning(
+                    "[P2] 模板包不完整（缺少 template-manifest.json），降级为 custom 模式: %s",
+                    pack_dir,
+                )
+                ctx["style_mode"] = "custom"
+                ctx["style_id"] = "custom"
+                ctx["template_pack_degraded"] = True
+                return
+            ctx["style_mode"] = "template_pack"
+            return
+        style_id = str(ctx.get("style_id") or "").strip()
+        if style_id in _VALID_STYLE_IDS - {"free", "custom"}:
+            ctx["style_mode"] = "preset"
+        elif style_id == "custom":
+            ctx["style_mode"] = "custom"
+        else:
+            ctx["style_mode"] = "free"
+
     async def _execute(self, inputs: dict[str, Any]) -> dict[str, Any]:
         ctx = inputs
 
@@ -1355,7 +1445,7 @@ class RequirementCollectNode(PlanNode):
         pre_slots = ctx.get("slots_from_query", {})
         all_filled = ctx.get("slots_from_query_complete", False)
         if not ctx.get("has_documents") and all_filled and pre_slots:
-            for slot in ("topic", "page_count", "audience", "presentation_purpose", "style_id"):
+            for slot in ("topic", "page_count", "audience", "presentation_purpose", "style_id", "pack_dir"):
                 v = pre_slots.get(slot)
                 if slot == "page_count" and v is not None:
                     ctx[slot] = v
@@ -1368,6 +1458,10 @@ class RequirementCollectNode(PlanNode):
 
             if not _has_nonempty_topic(ctx):
                 raise RequirementCollectError("缺少演示主题 topic，无法继续 PPT 流水线")
+            self._set_style_mode(ctx)
+            # 图片变量兜底（供 P6.5 Diana 消费）
+            self._ensure_image_vars(ctx)
+            # 写入 __artifact__，供跨请求续跑复用需求上下文
             _set_requirement_artifact(ctx)
             return ctx
 
@@ -1387,5 +1481,9 @@ class RequirementCollectNode(PlanNode):
         if not _has_nonempty_topic(ctx):
             raise RequirementCollectError("缺少演示主题 topic，无法继续 PPT 流水线")
 
+        self._set_style_mode(ctx)
+        # 图片变量兜底（供 P6.5 Diana 消费）
+        self._ensure_image_vars(ctx)
+        # 写入 __artifact__，供跨请求续跑复用需求上下文
         _set_requirement_artifact(ctx)
         return ctx
