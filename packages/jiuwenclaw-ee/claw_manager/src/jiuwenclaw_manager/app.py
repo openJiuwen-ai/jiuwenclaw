@@ -37,9 +37,14 @@ async def lifespan(application: FastAPI):
     stop = asyncio.Event()
     scan_task = asyncio.create_task(run_heartbeat_scan_loop(stop, db_handler))
     if settings.manager_ws_enabled:
+        from jiuwenclaw_manager.core.instance.instance_data_lifecycle import (
+            sync_data_to_gateway_on_register,
+        )
+
         manager_ws_server = ManagerWsServer(
             host=settings.manager_ws_host,
             port=settings.manager_ws_port,
+            on_gateway_register=sync_data_to_gateway_on_register,
         )
         await manager_ws_server.start()
         ManagerWsServer.set_instance(manager_ws_server)

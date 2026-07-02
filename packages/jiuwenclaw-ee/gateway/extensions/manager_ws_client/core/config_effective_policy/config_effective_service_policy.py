@@ -24,60 +24,66 @@ from ...schemas.config_effective_policy_schemas import (
     ConfigEffectiveServicePolicyCreateRequest,
     ConfigEffectiveServicePolicyUpdateRequest,
 )
+from .config_record_ops import (
+    apply_create_from_row_builder,
+    apply_delete_by_id,
+    apply_update_by_id,
+    get_row_for_instance,
+    sync_records_by_policy_id,
+)
 
 _TABLE = CONFIG_EFFECTIVE_SERVICE_POLICY_TABLE_DEF.table_name
+_SECTION = "config_effective_service_policies"
 logger = logging.getLogger(__name__)
-
-
-async def _get_row_for_instance(
-    handler: DBHandler,
-    policy_id: int,
-    jiuwenclaw_id: str,
-) -> Any | None:
-    row = await handler.get(_TABLE, {"id": policy_id})
-    if row is None:
-        return None
-    if getattr(row, "jiuwenclaw_id", None) != jiuwenclaw_id:
-        return None
-    return row
 
 
 async def update_config_effective_service_policy_record(
     handler: DBHandler,
     policy_id: int,
-    request: ConfigEffectiveServicePolicyUpdateRequest,
+    updates: dict[str, Any],
 ) -> dict[str, Any] | None:
-    jiuwenclaw_id = get_jiuwenclaw_id()
-    existing = await _get_row_for_instance(handler, policy_id, jiuwenclaw_id)
+    request = ConfigEffectiveServicePolicyUpdateRequest.model_validate(updates)
+    existing = await get_row_for_instance(handler, _TABLE, policy_id)
     if existing is None:
         return None
 
-    updates = request.model_dump(exclude_unset=True)
-    if "service_id" in updates and updates["service_id"] is not None:
-        updates["service_id"] = updates["service_id"].strip()
-        if not updates["service_id"]:
+    field_updates = request.model_dump(exclude_unset=True)
+    if "service_id" in field_updates and field_updates["service_id"] is not None:
+        field_updates["service_id"] = field_updates["service_id"].strip()
+        if not field_updates["service_id"]:
             raise ValueError("service_id cannot be empty")
 
-    if not updates:
+    if not field_updates:
         raise ValueError("请求未包含任何可更新的业务字段")
 
-    updates = apply_template_ref_to_updates(updates, existing_row=existing)
-    updates["updated_at"] = utc_now()
-    updated = await handler.update(_TABLE, {"id": policy_id}, updates)
+    field_updates = apply_template_ref_to_updates(field_updates, existing_row=existing)
+    field_updates["updated_at"] = utc_now()
+    updated = await handler.update(_TABLE, {"id": policy_id}, field_updates)
     if updated is None:
         return None
     return {"id": getattr(updated, "id")}
 
 
-async def delete_config_effective_service_policy_record(
-    handler: DBHandler,
-    policy_id: int,
-) -> bool:
-    jiuwenclaw_id = get_jiuwenclaw_id()
-    existing = await _get_row_for_instance(handler, policy_id, jiuwenclaw_id)
-    if existing is None:
-        return False
-    return await handler.delete(_TABLE, {"id": policy_id})
+def _build_row_from_sync_policy(
+    policy: dict[str, Any],
+    jiuwenclaw_id: str,
+    now: Any,
+) -> dict[str, Any]:
+    req = ConfigEffectiveServicePolicyCreateRequest.model_validate(policy)
+    return {
+        "jiuwenclaw_id": jiuwenclaw_id,
+        "policy_id": req.policy_id,
+        "policy_name": req.policy_name,
+        "policy_desc": req.policy_desc,
+        "service_id": req.service_id,
+        "priority": req.priority,
+        "match_expr": req.match_expr,
+        "template_ref": normalize_template_ref(req.template_ref),
+        "enabled": req.enabled,
+        "data": req.data,
+        "created_at": parse_iso_datetime(policy.get("created_at")) or now,
+        "updated_at": parse_iso_datetime(policy.get("updated_at")) or now,
+    }
 
 
 async def apply_config_effective_service_policy(
@@ -86,7 +92,7 @@ async def apply_config_effective_service_policy(
     """应用 Claw Manager 经 WebSocket 下发的 config_effective_service_policies 变更。"""
     op = str(payload.get("op") or "").strip()
     if not op:
-        raise ValueError("config_effective_service_policies.op is required")
+        raise ValueError(f"{_SECTION}.op is required")
 
     jiuwenclaw_id = get_jiuwenclaw_id()
     if not jiuwenclaw_id:
@@ -94,69 +100,45 @@ async def apply_config_effective_service_policy(
     handler = await ensure_db_handler()
 
     if op == "create":
-        policy = payload.get("policy")
-        if not isinstance(policy, dict):
-            raise ValueError(
-                "config_effective_service_policies.create requires policy object"
-            )
-        req = ConfigEffectiveServicePolicyCreateRequest.model_validate(policy)
-        now = utc_now()
-        row_data: dict[str, Any] = {
-            "jiuwenclaw_id": jiuwenclaw_id,
-            "policy_id": req.policy_id,
-            "policy_name": req.policy_name,
-            "policy_desc": req.policy_desc,
-            "service_id": req.service_id,
-            "priority": req.priority,
-            "match_expr": req.match_expr,
-            "template_ref": normalize_template_ref(req.template_ref),
-            "enabled": req.enabled,
-            "data": req.data,
-            "created_at": parse_iso_datetime(policy.get("created_at")) or now,
-            "updated_at": parse_iso_datetime(policy.get("updated_at")) or now,
-        }
-        created = await handler.create(_TABLE, row_data)
-        new_id = int(getattr(created, "id", 0) or 0)
-        if new_id < 1:
-            raise ValueError(
-                "config_effective_service_policies.create: database did not return policy id"
-            )
-        result: dict[str, Any] | None = {"id": new_id}
-
+        result = await apply_create_from_row_builder(
+            handler,
+            _TABLE,
+            section=_SECTION,
+            jiuwenclaw_id=jiuwenclaw_id,
+            record=payload.get("policy"),
+            build_row=_build_row_from_sync_policy,
+        )
     elif op == "update":
-        row_id = payload.get("id")
-        updates = payload.get("updates")
-        if row_id is None:
-            raise ValueError(
-                "config_effective_service_policies.update requires id"
-            )
-        if not isinstance(updates, dict) or not updates:
-            raise ValueError(
-                "config_effective_service_policies.update requires non-empty updates"
-            )
-        req = ConfigEffectiveServicePolicyUpdateRequest.model_validate(updates)
-        row = await update_config_effective_service_policy_record(
-            handler, int(row_id), req
+        await apply_update_by_id(
+            handler,
+            section=_SECTION,
+            row_id=payload.get("id"),
+            updates=payload.get("updates"),
+            update_record=update_config_effective_service_policy_record,
+            not_found_message=f"config effective service policy id={payload.get('id')} not found",
         )
-        if row is None:
-            raise ValueError(f"config effective service policy id={row_id} not found")
         result = None
-
     elif op == "delete":
-        row_id = payload.get("id")
-        if row_id is None:
-            raise ValueError(
-                "config_effective_service_policies.delete requires id"
-            )
-        deleted = await delete_config_effective_service_policy_record(
-            handler, int(row_id)
+        await apply_delete_by_id(
+            handler,
+            section=_SECTION,
+            table=_TABLE,
+            row_id=payload.get("id"),
         )
-        if not deleted:
-            raise ValueError(f"config effective service policy id={row_id} not found")
         result = None
-
+    elif op == "sync":
+        policies = payload.get("policies")
+        if not isinstance(policies, list):
+            raise ValueError(f"{_SECTION}.sync requires policies array")
+        result = await sync_records_by_policy_id(
+            handler,
+            _TABLE,
+            policies,
+            jiuwenclaw_id=jiuwenclaw_id,
+            build_row=_build_row_from_sync_policy,
+        )
     else:
-        raise ValueError(f"unsupported config_effective_service_policies.op: {op!r}")
+        raise ValueError(f"unsupported {_SECTION}.op: {op!r}")
 
     logger.info(
         "[ManagerWsClient] config_effective_service_policies sync op=%s id=%s",

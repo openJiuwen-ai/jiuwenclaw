@@ -210,12 +210,12 @@ async def apply_model_template(payload: dict[str, Any]) -> dict[str, Any] | None
         template = payload.get("template")
         if not isinstance(template, dict):
             raise ValueError("model_templates.create requires template object")
-        now = utc_now()
-        row_data = _build_row_from_template(
-            template, jiuwenclaw_id=jiuwenclaw_id, now=now
+        await _upsert_model_template_from_sync(
+            handler, template, jiuwenclaw_id=jiuwenclaw_id
         )
-        await handler.create(_TABLE, row_data)
-        result: dict[str, Any] | None = {"template_id": row_data["template_id"]}
+        result: dict[str, Any] | None = {
+            "template_id": _normalize_template_id(template.get("template_id")),
+        }
 
     elif op == "update":
         template_id = payload.get("template_id")
@@ -236,9 +236,7 @@ async def apply_model_template(payload: dict[str, Any]) -> dict[str, Any] | None
         if template_id is None:
             raise ValueError("model_templates.delete requires template_id")
         tid = _normalize_template_id(template_id)
-        deleted = await delete_model_template(handler, tid)
-        if not deleted:
-            raise ValueError(f"model template template_id={tid!r} not found")
+        await delete_model_template(handler, tid)
         result = None
 
     elif op == "sync":

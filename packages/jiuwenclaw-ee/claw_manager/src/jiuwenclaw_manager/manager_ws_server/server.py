@@ -5,11 +5,13 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, ClassVar
 
 from openjiuwen_runtime.foundation.security.link_auth import NonceCache, InMemoryPinStore, build_token
+from openjiuwen_runtime.foundation.db.handler import DBHandler
 from sqlalchemy.exc import SQLAlchemyError
 
 from jiuwenclaw_manager.infrastructure.config import settings
@@ -39,8 +41,6 @@ from jiuwenclaw_manager.security.keys import (
     store_instance_enc_pubkey,
 )
 from jiuwenclaw_manager.core.instance.instance_service import (
-    bootstrap_gateway_log_masking,
-    bootstrap_gateway_templates,
     apply_gateway_ws_heartbeat,
     mark_instance_offline,
     register_gateway_via_ws,
@@ -62,6 +62,8 @@ from jiuwenclaw_manager.manager_ws_server.pod_status_cache import (
 )
 
 logger = get_logger(__name__)
+
+GatewayRegisterCallback = Callable[[DBHandler, str], Awaitable[None]]
 
 
 @dataclass
@@ -102,12 +104,14 @@ class ManagerWsServer:
         manager_id: str = "default",
         ping_interval: float | None = 30.0,
         ping_timeout: float | None = 300.0,
+        on_gateway_register: GatewayRegisterCallback | None = None,
     ) -> None:
         self._host = host
         self._port = port
         self._manager_id = manager_id
         self._ping_interval = ping_interval
         self._ping_timeout = ping_timeout
+        self._on_gateway_register = on_gateway_register
         self._server: Any = None
         self._clients: dict[int, _ConnectedClient] = {}
         # jiuwenclaw_id -> 当前活跃 WS 的 id(ws)
@@ -718,14 +722,11 @@ class ManagerWsServer:
             os.getpid(),
         )
         # 勿在 register 帧处理栈内 await push/ack：会阻塞同连接读循环，导致 config.ack 假超时。
-        asyncio.create_task(
-            bootstrap_gateway_log_masking(get_db_handler(), jiuwenclaw_id),
-            name=f"log_masking_bootstrap:{jiuwenclaw_id}",
-        )
-        asyncio.create_task(
-            bootstrap_gateway_templates(get_db_handler(), jiuwenclaw_id),
-            name=f"template_bootstrap:{jiuwenclaw_id}",
-        )
+        if self._on_gateway_register is not None:
+            asyncio.create_task(
+                self._on_gateway_register(handler, jiuwenclaw_id),
+                name=f"gateway_bootstrap:{jiuwenclaw_id}",
+            )
 
 
 async def push_config_op(

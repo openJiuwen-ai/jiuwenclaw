@@ -15,11 +15,20 @@ from ...models.config_effective_policy_models import (
     CONFIG_DEFAULT_TEMPLATE_MAPPING_TABLE_DEF,
 )
 from ...schemas.config_effective_policy_schemas import (
+    ConfigDefaultTemplateMappingCreateRequest,
     ConfigDefaultTemplateMappingUpdateRequest,
+)
+from .config_record_ops import (
+    apply_create_from_row_builder,
+    apply_delete_by_id,
+    apply_update_by_id,
+    get_row_for_instance,
+    sync_records_by_policy_id,
 )
 from ..enterprise_config.schemas import MAPPING_SCOPE_TYPES
 
 _TABLE = CONFIG_DEFAULT_TEMPLATE_MAPPING_TABLE_DEF.table_name
+_SECTION = "config_default_template_mappings"
 logger = logging.getLogger(__name__)
 
 _ALLOWED_TEMPLATE_TYPES = frozenset({
@@ -31,13 +40,6 @@ _ALLOWED_TEMPLATE_TYPES = frozenset({
     "extension_config",
     "service_config",
 })
-
-
-def _optional_key(value: str | None) -> str | None:
-    if value is None:
-        return None
-    stripped = value.strip()
-    return stripped or None
 
 
 def _validate_template_type(template_type: str) -> str:
@@ -61,64 +63,65 @@ def _validate_scope(scope_type: str, scope_id: str) -> tuple[str, str]:
     return st, sid
 
 
-async def _get_row_for_instance(
-    handler: DBHandler,
-    mapping_id: int,
-    jiuwenclaw_id: str,
-) -> Any | None:
-    row = await handler.get(_TABLE, {"id": mapping_id})
-    if row is None:
-        return None
-    if getattr(row, "jiuwenclaw_id", None) != jiuwenclaw_id:
-        return None
-    return row
-
-
 async def update_config_default_template_mapping_record(
     handler: DBHandler,
     mapping_id: int,
-    request: ConfigDefaultTemplateMappingUpdateRequest,
+    updates: dict[str, Any],
 ) -> dict[str, Any] | None:
-    jiuwenclaw_id = get_jiuwenclaw_id()
-    existing = await _get_row_for_instance(handler, mapping_id, jiuwenclaw_id)
+    request = ConfigDefaultTemplateMappingUpdateRequest.model_validate(updates)
+    existing = await get_row_for_instance(handler, _TABLE, mapping_id)
     if existing is None:
         return None
 
-    updates = request.model_dump(exclude_unset=True)
-    if "template_type" in updates and updates["template_type"] is not None:
-        updates["template_type"] = _validate_template_type(updates["template_type"])
-    if "template_id" in updates and updates["template_id"] is not None:
-        updates["template_id"] = updates["template_id"].strip()
-        if not updates["template_id"]:
+    field_updates = request.model_dump(exclude_unset=True)
+    if "template_type" in field_updates and field_updates["template_type"] is not None:
+        field_updates["template_type"] = _validate_template_type(field_updates["template_type"])
+    if "template_id" in field_updates and field_updates["template_id"] is not None:
+        field_updates["template_id"] = field_updates["template_id"].strip()
+        if not field_updates["template_id"]:
             raise ValueError("template_id cannot be empty")
-    if "scope_type" in updates and updates["scope_type"] is not None:
-        updates["scope_type"] = str(updates["scope_type"]).strip().lower()
-    if "scope_id" in updates and updates["scope_id"] is not None:
-        updates["scope_id"] = str(updates["scope_id"]).strip()
+    if "scope_type" in field_updates and field_updates["scope_type"] is not None:
+        field_updates["scope_type"] = str(field_updates["scope_type"]).strip().lower()
+    if "scope_id" in field_updates and field_updates["scope_id"] is not None:
+        field_updates["scope_id"] = str(field_updates["scope_id"]).strip()
 
-    merged_type = updates.get("scope_type", getattr(existing, "scope_type", None))
-    merged_id = updates.get("scope_id", getattr(existing, "scope_id", None))
+    merged_type = field_updates.get("scope_type", getattr(existing, "scope_type", None))
+    merged_id = field_updates.get("scope_id", getattr(existing, "scope_id", None))
     _validate_scope(str(merged_type), str(merged_id))
 
-    if not updates:
+    if not field_updates:
         raise ValueError("请求未包含任何可更新的业务字段")
 
-    updates["updated_at"] = utc_now()
-    updated = await handler.update(_TABLE, {"id": mapping_id}, updates)
+    field_updates["updated_at"] = utc_now()
+    updated = await handler.update(_TABLE, {"id": mapping_id}, field_updates)
     if updated is None:
         return None
     return {"id": getattr(updated, "id")}
 
 
-async def delete_config_default_template_mapping_record(
-    handler: DBHandler,
-    mapping_id: int,
-) -> bool:
-    jiuwenclaw_id = get_jiuwenclaw_id()
-    existing = await _get_row_for_instance(handler, mapping_id, jiuwenclaw_id)
-    if existing is None:
-        return False
-    return await handler.delete(_TABLE, {"id": mapping_id})
+def _build_row_from_sync_mapping(
+    mapping: dict[str, Any],
+    jiuwenclaw_id: str,
+    now: Any,
+) -> dict[str, Any]:
+    req = ConfigDefaultTemplateMappingCreateRequest.model_validate(mapping)
+    scope_type, scope_id = _validate_scope(req.scope_type, req.scope_id)
+    template_type = _validate_template_type(req.template_type)
+    return {
+        "jiuwenclaw_id": jiuwenclaw_id,
+        "policy_id": req.policy_id,
+        "policy_name": req.policy_name,
+        "policy_desc": req.policy_desc,
+        "scope_type": scope_type,
+        "scope_id": scope_id,
+        "priority": req.priority,
+        "template_id": req.template_id,
+        "template_type": template_type,
+        "enabled": req.enabled,
+        "data": req.data,
+        "created_at": parse_iso_datetime(mapping.get("created_at")) or now,
+        "updated_at": parse_iso_datetime(mapping.get("updated_at")) or now,
+    }
 
 
 async def apply_config_default_template_mapping(
@@ -127,7 +130,7 @@ async def apply_config_default_template_mapping(
     """应用 Claw Manager 经 WebSocket 下发的 config_default_template_mappings 变更。"""
     op = str(payload.get("op") or "").strip()
     if not op:
-        raise ValueError("config_default_template_mappings.op is required")
+        raise ValueError(f"{_SECTION}.op is required")
 
     jiuwenclaw_id = get_jiuwenclaw_id()
     if not jiuwenclaw_id:
@@ -135,83 +138,47 @@ async def apply_config_default_template_mapping(
     handler = await ensure_db_handler()
 
     if op == "create":
-        mapping = payload.get("mapping")
-        if not isinstance(mapping, dict):
-            raise ValueError(
-                "config_default_template_mappings.create requires mapping object"
-            )
-        policy_name = str(mapping.get("policy_name") or "").strip()
-        if not policy_name:
-            raise ValueError("policy_name is required")
-        scope_type, scope_id = _validate_scope(
-            str(mapping.get("scope_type") or ""),
-            str(mapping.get("scope_id") or ""),
+        result = await apply_create_from_row_builder(
+            handler,
+            _TABLE,
+            section=_SECTION,
+            jiuwenclaw_id=jiuwenclaw_id,
+            record=payload.get("mapping"),
+            build_row=_build_row_from_sync_mapping,
+            record_label="mapping",
+            entity="mapping",
         )
-        template_type = _validate_template_type(str(mapping["template_type"]))
-        template_id = str(mapping["template_id"]).strip()
-        if not template_id:
-            raise ValueError("template_id is required")
-
-        priority = int(mapping.get("priority", 0))
-
-        now = utc_now()
-        row_data: dict[str, Any] = {
-            "jiuwenclaw_id": jiuwenclaw_id,
-            "policy_id": mapping["policy_id"],
-            "policy_name": policy_name,
-            "policy_desc": mapping.get("policy_desc"),
-            "scope_type": scope_type,
-            "scope_id": scope_id,
-            "priority": priority,
-            "template_id": template_id,
-            "template_type": template_type,
-            "enabled": bool(mapping.get("enabled", True)),
-            "data": mapping.get("data"),
-            "created_at": parse_iso_datetime(mapping.get("created_at")) or now,
-            "updated_at": parse_iso_datetime(mapping.get("updated_at")) or now,
-        }
-        created = await handler.create(_TABLE, row_data)
-        new_id = int(getattr(created, "id", 0) or 0)
-        if new_id < 1:
-            raise ValueError(
-                "config_default_template_mappings.create: database did not return mapping id"
-            )
-        result: dict[str, Any] | None = {"id": new_id}
-
     elif op == "update":
-        row_id = payload.get("id")
-        updates = payload.get("updates")
-        if row_id is None:
-            raise ValueError(
-                "config_default_template_mappings.update requires id"
-            )
-        if not isinstance(updates, dict) or not updates:
-            raise ValueError(
-                "config_default_template_mappings.update requires non-empty updates"
-            )
-        req = ConfigDefaultTemplateMappingUpdateRequest.model_validate(updates)
-        row = await update_config_default_template_mapping_record(
-            handler, int(row_id), req
+        await apply_update_by_id(
+            handler,
+            section=_SECTION,
+            row_id=payload.get("id"),
+            updates=payload.get("updates"),
+            update_record=update_config_default_template_mapping_record,
+            not_found_message=f"config default template mapping id={payload.get('id')} not found",
         )
-        if row is None:
-            raise ValueError(f"config default template mapping id={row_id} not found")
         result = None
-
     elif op == "delete":
-        row_id = payload.get("id")
-        if row_id is None:
-            raise ValueError(
-                "config_default_template_mappings.delete requires id"
-            )
-        deleted = await delete_config_default_template_mapping_record(
-            handler, int(row_id)
+        await apply_delete_by_id(
+            handler,
+            section=_SECTION,
+            table=_TABLE,
+            row_id=payload.get("id"),
         )
-        if not deleted:
-            raise ValueError(f"config default template mapping id={row_id} not found")
         result = None
-
+    elif op == "sync":
+        mappings = payload.get("mappings")
+        if not isinstance(mappings, list):
+            raise ValueError(f"{_SECTION}.sync requires mappings array")
+        result = await sync_records_by_policy_id(
+            handler,
+            _TABLE,
+            mappings,
+            jiuwenclaw_id=jiuwenclaw_id,
+            build_row=_build_row_from_sync_mapping,
+        )
     else:
-        raise ValueError(f"unsupported config_default_template_mappings.op: {op!r}")
+        raise ValueError(f"unsupported {_SECTION}.op: {op!r}")
 
     logger.info(
         "[ManagerWsClient] config_default_template_mappings sync op=%s id=%s",

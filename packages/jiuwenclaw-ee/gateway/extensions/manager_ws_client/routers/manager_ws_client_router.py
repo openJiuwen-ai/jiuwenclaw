@@ -12,6 +12,7 @@ from ..core.application_config.log_masking_rule import apply_log_masking_rule
 from ..core.application_config.logging_config import apply_logging_config
 from ..core.application_config.task_memory_config import apply_task_memory_config
 from ..core.application_config.permissions_config import apply_permissions_config
+from ..core.instance import apply_instance_data_lifecycle
 from ..infrastructure.utils import assert_jiuwenclaw_id_matches
 from ..core.config_effective_policy.config_default_template_mapping import (
     apply_config_default_template_mapping,
@@ -94,8 +95,14 @@ async def apply_config_push(
     agent_policies = config.get("config_effective_agent_policies")
     global_policies = config.get("config_effective_global_policies")
     service_policies = config.get("config_effective_service_policies")
+    instance_data_lifecycle = config.get("instance_data_lifecycle")
 
-    if isinstance(channel_config, dict) and channel_config.get("op"):
+    if isinstance(instance_data_lifecycle, dict) and instance_data_lifecycle.get("op"):
+        matched_payload = instance_data_lifecycle
+        skip_runtime_update = True
+        result = await apply_instance_data_lifecycle(instance_data_lifecycle)
+
+    elif isinstance(channel_config, dict) and channel_config.get("op"):
         matched_payload = channel_config
         skip_runtime_update = True
         result = await apply_channel_config(channel_config)

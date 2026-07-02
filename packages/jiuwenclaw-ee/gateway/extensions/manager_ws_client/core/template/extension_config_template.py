@@ -222,12 +222,12 @@ async def apply_extension_config_template(
         template = payload.get("template")
         if not isinstance(template, dict):
             raise ValueError("extension_config_templates.create requires template object")
-        now = utc_now()
-        row_data = _build_row_from_template(
-            template, jiuwenclaw_id=jiuwenclaw_id, now=now
+        await _upsert_extension_config_template_from_sync(
+            handler, template, jiuwenclaw_id=jiuwenclaw_id
         )
-        await handler.create(_TABLE, row_data)
-        result: dict[str, Any] | None = {"template_id": row_data["template_id"]}
+        result: dict[str, Any] | None = {
+            "template_id": _normalize_template_id(template.get("template_id")),
+        }
 
     elif op == "update":
         template_id = payload.get("template_id")
@@ -251,9 +251,7 @@ async def apply_extension_config_template(
         if template_id is None:
             raise ValueError("extension_config_templates.delete requires template_id")
         tid = _normalize_template_id(template_id)
-        deleted = await delete_extension_config_template(handler, tid)
-        if not deleted:
-            raise ValueError(f"extension config template template_id={tid!r} not found")
+        await delete_extension_config_template(handler, tid)
         result = None
 
     elif op == "sync":

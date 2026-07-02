@@ -25,9 +25,17 @@ from ...schemas.config_effective_policy_schemas import (
     ConfigEffectiveAgentPolicyCreateRequest,
     ConfigEffectiveAgentPolicyUpdateRequest,
 )
+from .config_record_ops import (
+    apply_create_from_row_builder,
+    apply_delete_by_id,
+    apply_update_by_id,
+    get_row_for_instance,
+    sync_records_by_policy_id,
+)
 
 _AGENT_TABLE = CONFIG_EFFECTIVE_AGENT_POLICY_TABLE_DEF.table_name
 _SERVICE_TABLE = CONFIG_EFFECTIVE_SERVICE_POLICY_TABLE_DEF.table_name
+_SECTION = "config_effective_agent_policies"
 logger = logging.getLogger(__name__)
 
 
@@ -50,70 +58,84 @@ async def _validate_service_policy_ref(
         raise ValueError(f"unknown service_policy_id={normalized_id!r}")
 
 
-async def _get_row_for_instance(
+async def _before_agent_policy_create(
     handler: DBHandler,
-    policy_id: int,
     jiuwenclaw_id: str,
-) -> Any | None:
-    row = await handler.get(_AGENT_TABLE, {"id": policy_id})
-    if row is None:
-        return None
-    if getattr(row, "jiuwenclaw_id", None) != jiuwenclaw_id:
-        return None
-    return row
+    policy: dict[str, Any],
+) -> None:
+    req = ConfigEffectiveAgentPolicyCreateRequest.model_validate(policy)
+    await _validate_service_policy_ref(
+        handler,
+        jiuwenclaw_id=jiuwenclaw_id,
+        service_policy_id=req.service_policy_id,
+    )
 
 
 async def update_config_effective_agent_policy_record(
     handler: DBHandler,
     policy_id: int,
-    request: ConfigEffectiveAgentPolicyUpdateRequest,
+    updates: dict[str, Any],
 ) -> dict[str, Any] | None:
+    request = ConfigEffectiveAgentPolicyUpdateRequest.model_validate(updates)
     jiuwenclaw_id = get_jiuwenclaw_id()
-    existing = await _get_row_for_instance(handler, policy_id, jiuwenclaw_id)
+    existing = await get_row_for_instance(handler, _AGENT_TABLE, policy_id)
     if existing is None:
         return None
 
-    updates = request.model_dump(exclude_unset=True)
-    if "agent_id" in updates and updates["agent_id"] is not None:
-        updates["agent_id"] = updates["agent_id"].strip()
-        if not updates["agent_id"]:
+    field_updates = request.model_dump(exclude_unset=True)
+    if "agent_id" in field_updates and field_updates["agent_id"] is not None:
+        field_updates["agent_id"] = field_updates["agent_id"].strip()
+        if not field_updates["agent_id"]:
             raise ValueError("agent_id cannot be empty")
 
-    if "service_policy_id" in updates and updates["service_policy_id"] is not None:
-        updates["service_policy_id"] = str(updates["service_policy_id"]).strip()
-        if not updates["service_policy_id"]:
+    if "service_policy_id" in field_updates and field_updates["service_policy_id"] is not None:
+        field_updates["service_policy_id"] = str(field_updates["service_policy_id"]).strip()
+        if not field_updates["service_policy_id"]:
             raise ValueError("service_policy_id cannot be empty")
 
-    next_service_policy_id = updates.get(
+    next_service_policy_id = field_updates.get(
         "service_policy_id", getattr(existing, "service_policy_id")
     )
-    if "service_policy_id" in updates:
+    if "service_policy_id" in field_updates:
         await _validate_service_policy_ref(
             handler,
             jiuwenclaw_id=jiuwenclaw_id,
             service_policy_id=next_service_policy_id,
         )
 
-    if not updates:
+    if not field_updates:
         raise ValueError("请求未包含任何可更新的业务字段")
 
-    updates = apply_template_ref_to_updates(updates, existing_row=existing)
-    updates["updated_at"] = utc_now()
-    updated = await handler.update(_AGENT_TABLE, {"id": policy_id}, updates)
+    field_updates = apply_template_ref_to_updates(field_updates, existing_row=existing)
+    field_updates["updated_at"] = utc_now()
+    updated = await handler.update(_AGENT_TABLE, {"id": policy_id}, field_updates)
     if updated is None:
         return None
     return {"id": getattr(updated, "id")}
 
 
-async def delete_config_effective_agent_policy_record(
-    handler: DBHandler,
-    policy_id: int,
-) -> bool:
-    jiuwenclaw_id = get_jiuwenclaw_id()
-    existing = await _get_row_for_instance(handler, policy_id, jiuwenclaw_id)
-    if existing is None:
-        return False
-    return await handler.delete(_AGENT_TABLE, {"id": policy_id})
+def _build_row_from_sync_policy(
+    policy: dict[str, Any],
+    jiuwenclaw_id: str,
+    now: Any,
+) -> dict[str, Any]:
+    req = ConfigEffectiveAgentPolicyCreateRequest.model_validate(policy)
+    return {
+        "jiuwenclaw_id": jiuwenclaw_id,
+        "policy_id": req.policy_id,
+        "policy_name": req.policy_name,
+        "policy_desc": req.policy_desc,
+        "agent_id": req.agent_id,
+        "service_policy_id": req.service_policy_id,
+        "priority": req.priority,
+        "match_expr": req.match_expr,
+        "template_ref": normalize_template_ref(req.template_ref),
+        "send_file_allowed": req.send_file_allowed,
+        "enabled": req.enabled,
+        "data": req.data,
+        "created_at": parse_iso_datetime(policy.get("created_at")) or now,
+        "updated_at": parse_iso_datetime(policy.get("updated_at")) or now,
+    }
 
 
 async def apply_config_effective_agent_policy(
@@ -122,7 +144,7 @@ async def apply_config_effective_agent_policy(
     """应用 Claw Manager 经 WebSocket 下发的 config_effective_agent_policies 变更。"""
     op = str(payload.get("op") or "").strip()
     if not op:
-        raise ValueError("config_effective_agent_policies.op is required")
+        raise ValueError(f"{_SECTION}.op is required")
 
     jiuwenclaw_id = get_jiuwenclaw_id()
     if not jiuwenclaw_id:
@@ -130,77 +152,46 @@ async def apply_config_effective_agent_policy(
     handler = await ensure_db_handler()
 
     if op == "create":
-        policy = payload.get("policy")
-        if not isinstance(policy, dict):
-            raise ValueError(
-                "config_effective_agent_policies.create requires policy object"
-            )
-        req = ConfigEffectiveAgentPolicyCreateRequest.model_validate(policy)
-        await _validate_service_policy_ref(
+        result = await apply_create_from_row_builder(
             handler,
+            _AGENT_TABLE,
+            section=_SECTION,
             jiuwenclaw_id=jiuwenclaw_id,
-            service_policy_id=req.service_policy_id,
+            record=payload.get("policy"),
+            build_row=_build_row_from_sync_policy,
+            before_create=_before_agent_policy_create,
         )
-
-        now = utc_now()
-        row_data: dict[str, Any] = {
-            "jiuwenclaw_id": jiuwenclaw_id,
-            "policy_id": req.policy_id,
-            "policy_name": req.policy_name,
-            "policy_desc": req.policy_desc,
-            "agent_id": req.agent_id,
-            "service_policy_id": req.service_policy_id,
-            "priority": req.priority,
-            "match_expr": req.match_expr,
-            "template_ref": normalize_template_ref(req.template_ref),
-            "send_file_allowed": req.send_file_allowed,
-            "enabled": req.enabled,
-            "data": req.data,
-            "created_at": parse_iso_datetime(policy.get("created_at")) or now,
-            "updated_at": parse_iso_datetime(policy.get("updated_at")) or now,
-        }
-        created = await handler.create(_AGENT_TABLE, row_data)
-        new_id = int(getattr(created, "id", 0) or 0)
-        if new_id < 1:
-            raise ValueError(
-                "config_effective_agent_policies.create: database did not return policy id"
-            )
-        result: dict[str, Any] | None = {"id": new_id}
-
     elif op == "update":
-        row_id = payload.get("id")
-        updates = payload.get("updates")
-        if row_id is None:
-            raise ValueError(
-                "config_effective_agent_policies.update requires id"
-            )
-        if not isinstance(updates, dict) or not updates:
-            raise ValueError(
-                "config_effective_agent_policies.update requires non-empty updates"
-            )
-        req = ConfigEffectiveAgentPolicyUpdateRequest.model_validate(updates)
-        row = await update_config_effective_agent_policy_record(
-            handler, int(row_id), req
+        await apply_update_by_id(
+            handler,
+            section=_SECTION,
+            row_id=payload.get("id"),
+            updates=payload.get("updates"),
+            update_record=update_config_effective_agent_policy_record,
+            not_found_message=f"config effective agent policy id={payload.get('id')} not found",
         )
-        if row is None:
-            raise ValueError(f"config effective agent policy id={row_id} not found")
         result = None
-
     elif op == "delete":
-        row_id = payload.get("id")
-        if row_id is None:
-            raise ValueError(
-                "config_effective_agent_policies.delete requires id"
-            )
-        deleted = await delete_config_effective_agent_policy_record(
-            handler, int(row_id)
+        await apply_delete_by_id(
+            handler,
+            section=_SECTION,
+            table=_AGENT_TABLE,
+            row_id=payload.get("id"),
         )
-        if not deleted:
-            raise ValueError(f"config effective agent policy id={row_id} not found")
         result = None
-
+    elif op == "sync":
+        policies = payload.get("policies")
+        if not isinstance(policies, list):
+            raise ValueError(f"{_SECTION}.sync requires policies array")
+        result = await sync_records_by_policy_id(
+            handler,
+            _AGENT_TABLE,
+            policies,
+            jiuwenclaw_id=jiuwenclaw_id,
+            build_row=_build_row_from_sync_policy,
+        )
     else:
-        raise ValueError(f"unsupported config_effective_agent_policies.op: {op!r}")
+        raise ValueError(f"unsupported {_SECTION}.op: {op!r}")
 
     logger.info(
         "[ManagerWsClient] config_effective_agent_policies sync op=%s id=%s",

@@ -73,6 +73,7 @@ async def push_config_effective_service_policy_op(
     policy: dict[str, Any] | None = None,
     row_id: int | None = None,
     updates: dict[str, Any] | None = None,
+    policies: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """推送 Service 层级配置生效策略变更（``config.config_effective_service_policies``），返回 config.ack payload。"""
     payload: dict[str, Any] = {"op": op}
@@ -82,9 +83,38 @@ async def push_config_effective_service_policy_op(
         payload["id"] = row_id
     if updates is not None:
         payload["updates"] = updates
+    if policies is not None:
+        payload["policies"] = policies
     return await push_config_op(
         jiuwenclaw_id,
         {"config_effective_service_policies": payload},
+    )
+
+
+async def push_service_policies_sync_to_gateway(
+    handler: DBHandler,
+    jiuwenclaw_id: str,
+) -> dict[str, Any]:
+    """Gateway 注册后：将 MDB 中该实例全部 Service 策略 bulk push 到 GDB（``op=sync``）。"""
+    jid = str(jiuwenclaw_id or "").strip()
+    if not jid:
+        raise ValueError("jiuwenclaw_id is required")
+    rows = await handler.list_records(
+        _SERVICE_POLICY_TABLE,
+        {"jiuwenclaw_id": jid},
+        limit=_LIST_ALL_CAP,
+        offset=0,
+    )
+    policies = [_row_to_out(row).model_dump(mode="json") for row in rows]
+    return await push_config_op(
+        jid,
+        {
+            "config_effective_service_policies": {
+                "op": "sync",
+                "policies": policies,
+                "skip_runtime_update": True,
+            }
+        },
     )
 
 
