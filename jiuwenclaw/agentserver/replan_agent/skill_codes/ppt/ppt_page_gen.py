@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import re
 from collections.abc import AsyncIterator
@@ -412,6 +413,89 @@ def _split_md_pages(text: str) -> dict[int, str]:
     return pages
 
 
+# 按图片数量选择布局模板（精简自 SKILL.md 图片布局规范）
+_IMAGE_LAYOUT_TEMPLATES: dict[int, str] = {
+    1: (
+        "### 图片布局（1 张图）\n"
+        "- `usage=cover` → 全幅背景图，文字用 `z-10` 叠加\n"
+        "- `usage=content` → 单图占一侧，另一侧文字\n"
+        "```html\n"
+        '<img src="..." class="w-full h-full object-contain" />\n'
+        "```\n"
+    ),
+    2: (
+        "### 图片布局（2 张图）\n"
+        "- 推荐左右对半分或一大一小\n"
+        "```html\n"
+        '<div class="grid grid-cols-2 gap-3 flex-1 min-h-0">\n'
+        '  <img src="..." class="w-full h-full object-contain" />\n'
+        '  <img src="..." class="w-full h-full object-contain" />\n'
+        '</div>\n'
+        "```\n"
+    ),
+    3: (
+        "### 图片布局（3 张图）\n"
+        "- 推荐「左 1 右 2」：左侧大图，右侧上下两小图\n"
+        "```html\n"
+        '<div class="grid grid-cols-3 gap-3 flex-1 min-h-0">\n'
+        '  <div class="col-span-2"><img src="..." class="w-full h-full object-contain" /></div>\n'
+        '  <div class="flex flex-col gap-2">\n'
+        '    <img src="..." class="w-full flex-1 min-h-0 object-contain" />\n'
+        '    <img src="..." class="w-full flex-1 min-h-0 object-contain" />\n'
+        '  </div>\n'
+        '</div>\n'
+        "```\n"
+    ),
+    4: (
+        "### 图片布局（4 张图）\n"
+        "- 推荐 2×2 宫格\n"
+        "```html\n"
+        '<div class="grid grid-cols-2 grid-rows-2 gap-3 flex-1 min-h-0">\n'
+        '  <img src="..." class="w-full h-full object-contain" />\n'
+        '  <img src="..." class="w-full h-full object-contain" />\n'
+        '  <img src="..." class="w-full h-full object-contain" />\n'
+        '  <img src="..." class="w-full h-full object-contain" />\n'
+        '</div>\n'
+        "```\n"
+    ),
+}
+
+_IMAGE_LAYOUT_TEMPLATE_MANY = (
+    "### 图片布局（{n} 张图）\n"
+    "- 推荐网格布局，每行 3-4 张\n"
+    "```html\n"
+    '<div class="grid grid-cols-{cols} gap-3 flex-1 min-h-0">\n'
+    '  <!-- {n} 张图片，每张 object-contain -->\n'
+    '</div>\n'
+    "```\n"
+)
+
+
+def _build_image_section(image_map_page: str) -> str:
+    """根据本页图片素材描述和图片数量，构造图片素材 section。"""
+    if not image_map_page:
+        return ""
+    # 统计图片数量（每行一个 "- path:" 开头）
+    img_count = image_map_page.count("- path:")
+    layout = _IMAGE_LAYOUT_TEMPLATES.get(img_count)
+    if layout is None:
+        cols = 4 if img_count >= 7 else 3
+        layout = _IMAGE_LAYOUT_TEMPLATE_MANY.format(n=img_count, cols=cols)
+
+    return (
+        "\n### 图片素材（必须使用）\n"
+        f"{image_map_page}\n"
+        "- `usage=cover` → 用作全幅背景图："
+        "`<img src=\"...\" class=\"absolute inset-0 w-full h-full object-cover\">`，"
+        "文字内容用 `z-10` 叠加在上\n"
+        "- `usage=content` → 用作内容配图："
+        "`<img src=\"...\" class=\"w-full h-full object-contain\">`\n"
+        "- 使用 `<img>` 标签引用 `path` 字段指定的路径（相对路径，直接使用）\n"
+        "- 图片容器用 `min-h-0 overflow-hidden` 防溢出\n"
+        f"\n{layout}"
+    )
+
+
 def _build_page_prompt(
     page_number: int,
     style_id: str,
@@ -423,6 +507,7 @@ def _build_page_prompt(
     research_is_full: bool = False,
     rewrite_hint: str = "",
     original_html: str = "",
+    image_map_page: str = "",
 ) -> str:
     preset_clause = ""
     if style_id in _PRESET_STYLE_IDS:
@@ -534,6 +619,7 @@ def _build_page_prompt(
         "\n"
         f"### {research_label}\n"
         f"{research_page}\n"
+        f"{_build_image_section(image_map_page)}"
         "\n"
         "## 3. 内容融合规则\n"
         f"{fusion_rules}"
@@ -564,6 +650,7 @@ class PageGenContext:
     research_page: str
     outline_is_full: bool
     research_is_full: bool
+    image_map_page: str  # 本页图片素材描述（空串=无图）
 
 
 class PrepareNode(PlanNode):
@@ -577,27 +664,29 @@ class PrepareNode(PlanNode):
                 "\n"
                 "### 前置条件\n"
                 "- `read_file` 工具可用\n"
-                "- `outline.md` / `research.md` / 风格文件均已落盘\n"
+                "- `outline.md` / `research-P{N}.md` / 风格文件均已落盘\n"
                 "\n"
                 "### 输入\n"
                 "- `page_count`（必填）: N 页\n"
-                "- `output_dir`（必填）: 工作目录（用于读 outline/research）\n"
+                "- `output_dir`（必填）: 工作目录（用于读 outline/research-P{N}.md）\n"
                 "- `style_file_path`（必填）: 风格文件绝对路径\n"
                 "\n"
                 "### 输出\n"
                 "- `prepare_status`: ok / failed\n"
-                "- `outline_pages` / `research_pages`: 按页拆分的 {页码: 片段}（拆分失败为空 dict，下游回退全文）\n"
-                "- `outline_text` / `research_text` / `style_text`: 全文（供下游回退与重写复用）\n"
+                "- `outline_pages`: 按页拆分的 {页码: 片段}（拆分失败为空 dict，下游回退全文）\n"
+                "- `research_pages`: 逐页读取的 {页码: research-P{N}.md 内容}（文件缺失时该页缺失）\n"
+                "- `outline_text` / `style_text`: 全文（供下游回退与重写复用）\n"
                 "- `all_pages`: 1..N 页码列表\n"
                 "\n"
                 "### 执行流程\n"
-                "1. 一次性读取 outline.md / research.md / style_file_path（任一失败 → prepare_status=failed）\n"
-                "2. 按 `### P{N}:` 章节拆分 outline 和 research，每页只取对应片段；拆分失败时回退全文\n"
-                "3. 返回共享只读数据，供 P8.1 per-page worker 复用\n"
+                "1. 读取 outline.md / style_file_path（任一失败 → prepare_status=failed）\n"
+                "2. 按 `### P{N}:` 章节拆分 outline，每页只取对应片段；拆分失败时回退全文\n"
+                "3. 逐页读取 research-P{N}.md（1..page_count），文件缺失时该页 research_pages 缺失\n"
+                "4. 返回共享只读数据，供 P8.1 per-page worker 复用\n"
                 "\n"
                 "### 失败兜底\n"
-                "- 读资料失败：prepare_status=failed，根节点直接终止，不进入 P8.1\n"
-                "- 拆分失败：outline_pages/research_pages 为空，下游 worker 回退全文\n"
+                "- 读 outline/style 失败：prepare_status=failed，根节点直接终止，不进入 P8.1\n"
+                "- 某页 research-P{N}.md 缺失：该页 research_pages 缺失，下游 worker 仅依据 outline 生成\n"
             ),
         )
 
@@ -610,14 +699,12 @@ class PrepareNode(PlanNode):
         style_file_path = str(inputs.get("style_file_path") or "").strip()
 
         outline_text = await self._read_file(f"{output_dir}/outline.md")
-        research_text = await self._read_file(f"{output_dir}/research.md")
         style_text = await self._read_file(style_file_path)
 
-        if not outline_text or not research_text or not style_text:
+        if not outline_text or not style_text:
             logger.error(
-                "[P8.0] 资料读取失败 outline=%d research=%d style=%d",
+                "[P8.0] 资料读取失败 outline=%d style=%d",
                 len(outline_text),
-                len(research_text),
                 len(style_text),
             )
             return {
@@ -625,31 +712,61 @@ class PrepareNode(PlanNode):
                 "outline_pages": {},
                 "research_pages": {},
                 "outline_text": outline_text,
-                "research_text": research_text,
+                "research_text": "",
                 "style_text": style_text,
                 "all_pages": list(range(1, total_pages + 1)) if total_pages > 0 else [],
             }
 
         outline_pages = _split_md_pages(outline_text)
-        research_pages = _split_md_pages(research_text)
         if not outline_pages:
             logger.warning("[P8.0] outline.md 未拆分到任何页面章节，下游回退全文")
-        if not research_pages:
-            logger.warning("[P8.0] research.md 未拆分到任何页面章节，下游回退全文")
+
+        # 逐页读取 research-P{N}.md（不再读取单文件 research.md）
+        # 遍历 total_pages（含结构页），❌ 页无 research 文件会跳过
+        all_pages = list(range(1, total_pages + 1)) if total_pages > 0 else sorted(outline_pages.keys())
+        research_pages: dict[int, str] = {}
+        for p in all_pages:
+            research_path = f"{output_dir}/research-P{p}.md"
+            research_text_p = await self._read_file(research_path)
+            # 校验内容是有效的 research 片段（以 ### P 开头），过滤 read_file 错误消息
+            if research_text_p and research_text_p.lstrip().startswith("### P"):
+                research_pages[p] = research_text_p
+            else:
+                logger.warning("[P8.0] research-P%d.md 不存在或内容无效", p)
+
+        # 读取 image_map.json（P6.5 产出，供 P8 注入图片素材）
+        image_map_path = str(inputs.get("image_map_path") or "").strip()
+        image_map: dict[str, Any] = {}
+        if image_map_path:
+            raw = await self._read_file(image_map_path)
+            if raw:
+                try:
+                    parsed = json.loads(raw)
+                    if isinstance(parsed, dict):
+                        # 只保留页码 key（过滤 metadata），转为 {str(page_num): [img, ...]}
+                        for key, value in parsed.items():
+                            if key != "metadata" and isinstance(value, list):
+                                image_map[key] = value
+                except Exception as e:
+                    if isinstance(e, AbortError):
+                        raise
+                    logger.warning("[P8.0] image_map.json 解析失败: %s", e)
 
         logger.info(
-            "[P8.0] 预处理完成 outline_pages=%d research_pages=%d",
+            "[P8.0] 预处理完成 outline_pages=%d research_pages=%d image_map_pages=%d",
             len(outline_pages),
             len(research_pages),
+            len(image_map),
         )
         return {
             "prepare_status": "ok",
             "outline_pages": outline_pages,
             "research_pages": research_pages,
             "outline_text": outline_text,
-            "research_text": research_text,
+            "research_text": "",
             "style_text": style_text,
-            "all_pages": list(range(1, total_pages + 1)),
+            "all_pages": all_pages,
+            "image_map": image_map,
         }
 
     async def _read_file(self, path: str) -> str:
@@ -699,7 +816,7 @@ class PageWorkerNode(PlanNode):
                 "- `pages_dir`（必填）: HTML 输出目录绝对路径\n"
                 "- `style_id`（必填）: 用于判定是否预设风格强约束\n"
                 "- `outline_pages` / `research_pages`（来自 P8.0）: 按页拆分片段\n"
-                "- `outline_text` / `research_text` / `style_text`（来自 P8.0）: 全文，拆分失败时回退\n"
+                "- `outline_text` / `style_text`（来自 P8.0）: 全文，拆分失败时回退\n"
                 "- `all_pages`（来自 P8.0）: 1..N 页码列表\n"
                 "- `topic`（可选）: PPT 主题，搜索补充关键词用\n"
                 "- `search_mode`（可选，影响数据可视化阈值）\n"
@@ -711,7 +828,7 @@ class PageWorkerNode(PlanNode):
                 "- `missing_pages`: 仍缺失的页码（用于上层标 partial）\n"
                 "- `low_density_pages`: 重写后仍未通过的页码\n"
                 "- `density_report`: 每页检查结果摘要\n"
-                "- `outline_text` / `research_text` / `style_text`（透传给 P8.3）\n"
+                "- `outline_text` / `style_text`（透传给 P8.3）\n"
                 "\n"
                 "### 执行流程（per-page 闭环，N 页 asyncio.gather 并发）\n"
                 "对每一页独立执行：\n"
@@ -729,7 +846,7 @@ class PageWorkerNode(PlanNode):
                 "      - 缺案例：搜索 `\"{主题} 应用案例 实践\"`，获取真实案例\n"
                 "      - 缺数据来源：搜索 `\"{主题} 行业报告\"`，获取权威机构名称\n"
                 "      - 搜索优先获取最近 1-2 年数据，优先权威来源\n"
-                "      - 数据来源标注使用 research.md 中的来源\n"
+                "      - 数据来源标注使用 research-P{N}.md 中的来源\n"
                 "   c. 将搜索结果 + 原有素材 + 不通过项提示词 + 上次产物构造重写 prompt，调 LLM 重新生成 HTML\n"
                 "   d. 若无需搜索（如缺装饰图标/大段文字/视觉层级/布局错误），直接用原有素材 + 不通过项提示词重写\n"
                 "   e. 重写产物校验通过 → 落盘覆盖 → 复检；仍不通过进 low_density_pages\n"
@@ -780,6 +897,7 @@ class PageWorkerNode(PlanNode):
         research_full = str(inputs.get("research_text") or "")
         style_text = str(inputs.get("style_text") or "")
         all_pages: list[int] = list(inputs.get("all_pages") or [])
+        image_map: dict[str, Any] = inputs.get("image_map") or {}
 
         if not pages_dir or not all_pages:
             logger.error("[P8.1] 必填输入缺失，跳过生成")
@@ -800,13 +918,14 @@ class PageWorkerNode(PlanNode):
                 style_id=style_id,
                 style_text=style_text,
                 outline_page=outline_pages.get(p, outline_full),
-                research_page=research_pages.get(p, research_full),
+                research_page=research_pages.get(p, ""),
                 outline_is_full=p not in outline_pages,
-                research_is_full=p not in research_pages,
+                research_is_full=False,
                 search_mode=search_mode,
                 topic=topic,
                 gen_retry_round=gen_retry_round,
                 density_retry_round=density_retry_round,
+                image_map=image_map,
             )
             for p in all_pages
         ]
@@ -862,9 +981,24 @@ class PageWorkerNode(PlanNode):
         topic: str,
         gen_retry_round: int,
         density_retry_round: int,
+        image_map: dict[str, Any],
     ) -> dict[str, Any]:
         """单页闭环：生成(含重试) → 密度判定 → 搜索补充+重写(含重试)。"""
         path = f"{pages_dir}/page-{page_num}.pptx.html"
+
+        # 从 image_map 中提取本页图片素材描述
+        page_images = image_map.get(str(page_num), [])
+        image_map_page = ""
+        if page_images:
+            lines = []
+            for img in page_images:
+                path_val = str(img.get("path", ""))
+                lines.append(
+                    f"- path: {path_val}, usage: {img.get('usage', 'content')}, "
+                    f"description: {img.get('description', '')}, type: {img.get('type', '')}"
+                )
+            image_map_page = "\n".join(lines)
+
         ctx = PageGenContext(
             page_num=page_num,
             style_id=style_id,
@@ -873,6 +1007,7 @@ class PageWorkerNode(PlanNode):
             research_page=research_page,
             outline_is_full=outline_is_full,
             research_is_full=research_is_full,
+            image_map_page=image_map_page,
         )
 
         html = ""
@@ -945,6 +1080,7 @@ class PageWorkerNode(PlanNode):
                     research_page=ctx.research_page,
                     outline_is_full=ctx.outline_is_full,
                     research_is_full=False,
+                    image_map_page=ctx.image_map_page,
                 ),
                 system_prompt="你是资深演示文稿设计师，直接输出完整 HTML 原文，不输出任何解释。",
                 node_name=f"p8_1_page_{ctx.page_num}",
@@ -1091,6 +1227,7 @@ class PageWorkerNode(PlanNode):
                     research_is_full=ctx.research_is_full,
                     rewrite_hint=hint,
                     original_html=original_html,
+                    image_map_page=ctx.image_map_page,
                 ),
                 system_prompt="你是资深演示文稿设计师，直接输出完整 HTML 原文，不输出任何解释。",
                 node_name=f"p8_2_page_{ctx.page_num}",
@@ -1399,13 +1536,13 @@ class PPTPageGenNode(PlanNode):
                 "## P8 幻灯片生成\n"
                 "\n"
                 "### 节点职责\n"
-                "1. 把 outline.md + research.md + 风格文件转成 N 个 page-{N}.pptx.html\n"
+                "1. 把 outline.md + research-P{N}.md + 风格文件转成 N 个 page-{N}.pptx.html\n"
                 "2. 三阶段串行编排：预处理 → per-page 闭环生成 → QA 与自动修复\n"
                 "   - per-page 闭环内部 N 页 asyncio.gather 并发，单页内生成→密度判定→搜索补充→重写串行\n"
                 "3. 不区分单 Agent 模式，LLM 并发度由框架 semaphore 控制\n"
                 "\n"
                 "### 输入\n"
-                "- `output_dir`（必填）: 工作目录（含 outline.md / research.md）\n"
+                "- `output_dir`（必填）: 工作目录（含 outline.md / research-P{N}.md）\n"
                 "- `pages_dir`（必填）: HTML 输出目录\n"
                 "- `style_file_path`（必填）: P7 落盘的风格文件\n"
                 "- `style_id`（必填）: 用于预设风格强约束\n"

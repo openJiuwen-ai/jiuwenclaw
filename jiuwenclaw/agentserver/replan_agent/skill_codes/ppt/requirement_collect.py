@@ -106,8 +106,10 @@ research_depth 规则（与 search_mode、page_count 联动；L1/L2/L3 含义见
 - page_count 在 8~15 → L2
 - 其余（含 auto 且页数 ≤7）→ L1
 
-必须只输出 JSON，三个字段均必填且取值必须在枚举内：
-{"search_mode":"auto","source_type":"topic","research_depth":"L2"}"""
+need_imagegen 规则：用户 query 明确要求 AI 生图/生成配图 → true，否则 → false
+
+必须只输出 JSON，四个字段均必填且取值必须在枚举内：
+{"search_mode":"auto","source_type":"topic","research_depth":"L2","need_imagegen":false}"""
 
 
 class RequirementCollectError(RuntimeError):
@@ -376,12 +378,13 @@ def _build_p24_prompt(inputs: dict[str, Any], user_text: str, doc_excerpt: str) 
         f"- style_id: {inputs.get('style_id', '')}\n"
         f"- has_documents: {bool(inputs.get('has_documents'))}\n"
         f"- doc_parse_ok: {bool(inputs.get('doc_parse_ok'))}\n"
+        f"- image_paths: {bool(inputs.get('image_paths'))}\n"
     )
     if user_text:
         parts.append(f"用户原文：\n{user_text}\n")
     if doc_excerpt:
         parts.append(f"文档摘要：\n{doc_excerpt}\n")
-    parts.append("按 JSON 返回 search_mode、source_type、research_depth。")
+    parts.append("按 JSON 返回 search_mode、source_type、research_depth、need_imagegen。")
     return "\n".join(parts)
 
 
@@ -455,10 +458,13 @@ def _parse_derive_params_response(raw: str) -> dict[str, str]:
     if research_depth not in _VALID_RESEARCH_DEPTHS:
         raise RequirementCollectError(f"派生参数无效：research_depth={research_depth!r}")
 
+    need_imagegen = bool(payload.get("need_imagegen", False))
+
     return {
         "search_mode": search_mode,
         "source_type": source_type,
         "research_depth": research_depth,
+        "need_imagegen": need_imagegen,
     }
 
 
@@ -1258,6 +1264,43 @@ class P24DeriveParamsNode(PlanNode):
     async def _execute(self, inputs: dict[str, Any]) -> dict[str, Any]:
         derived = await _derive_params_via_llm(self, inputs)
         inputs.update(derived)
+
+        # 写 imagegen_status.json（供 P6.5 读取）
+        need_imagegen = derived.get("need_imagegen", False)
+        output_dir = str(inputs.get("output_dir", "")).strip()
+        if need_imagegen and output_dir:
+            try:
+                content = json.dumps(
+                    {"supported": True},
+                    ensure_ascii=False,
+                )
+                await PptCommon.write_file(
+                    self, f"{output_dir}/imagegen_status.json",
+                    content, label="imagegen_status",
+                    error_type=RequirementCollectError,
+                )
+                logger.info("[P2.4] imagegen_status.json 已写入 (supported=true)")
+            except Exception as e:
+                if isinstance(e, AbortError):
+                    raise
+                logger.warning("[P2.4] 写 imagegen_status.json 失败: %s", e)
+        elif not need_imagegen and output_dir:
+            try:
+                content = json.dumps(
+                    {"supported": False},
+                    ensure_ascii=False,
+                )
+                await PptCommon.write_file(
+                    self, f"{output_dir}/imagegen_status.json",
+                    content, label="imagegen_status",
+                    error_type=RequirementCollectError,
+                )
+                logger.info("[P2.4] imagegen_status.json 已写入 (supported=false)")
+            except Exception as e:
+                if isinstance(e, AbortError):
+                    raise
+                logger.warning("[P2.4] 写 imagegen_status.json 失败: %s", e)
+
         return inputs
 
 
@@ -1348,6 +1391,14 @@ class RequirementCollectNode(PlanNode):
             ],
         )
 
+    def _ensure_image_vars(self, ctx: dict[str, Any]) -> None:
+        """图片变量兜底：image_paths 空数组 + image_sources 默认 local。
+
+        ai 源由 P6.5 读取 imagegen_status.json 动态启用，不在此处判断。
+        """
+        ctx.setdefault("image_paths", [])
+        ctx.setdefault("image_sources", ["local"])
+
     async def _execute(self, inputs: dict[str, Any]) -> dict[str, Any]:
         ctx = inputs
 
@@ -1368,6 +1419,9 @@ class RequirementCollectNode(PlanNode):
 
             if not _has_nonempty_topic(ctx):
                 raise RequirementCollectError("缺少演示主题 topic，无法继续 PPT 流水线")
+            # 图片变量兜底（供 P6.5 Diana 消费）
+            self._ensure_image_vars(ctx)
+            # 写入 __artifact__，供跨请求续跑复用需求上下文
             _set_requirement_artifact(ctx)
             return ctx
 
@@ -1387,5 +1441,8 @@ class RequirementCollectNode(PlanNode):
         if not _has_nonempty_topic(ctx):
             raise RequirementCollectError("缺少演示主题 topic，无法继续 PPT 流水线")
 
+        # 图片变量兜底（供 P6.5 Diana 消费）
+        self._ensure_image_vars(ctx)
+        # 写入 __artifact__，供跨请求续跑复用需求上下文
         _set_requirement_artifact(ctx)
         return ctx
