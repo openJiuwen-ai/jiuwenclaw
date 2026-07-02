@@ -27,6 +27,25 @@ class LogMaskingRuleUpdateBody(BaseModel):
     data: dict[str, Any] | None = None
 
 
+class LogMaskingRuleListQuery(BaseModel):
+    enabled: bool | None = None
+    source: str | None = Field(
+        default=None,
+        description="按来源筛选：builtin、custom",
+    )
+    search: str | None = Field(
+        default=None,
+        description="搜索规则 ID、名称、描述、匹配正则表达式、替换文本、优先级、来源",
+    )
+    sort_by: str | None = Field(
+        default=None,
+        description=(
+            "排序字段：rule_name、description、pattern、replacement、priority、updated_at"
+        ),
+    )
+    sort_order: str | None = Field(default=None, description="排序方向：asc、desc")
+
+
 class LogMaskingRuleOut(BaseModel):
     id: int
     jiuwenclaw_id: str

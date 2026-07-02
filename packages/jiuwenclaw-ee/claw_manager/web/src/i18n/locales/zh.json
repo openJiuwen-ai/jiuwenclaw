@@ -149,12 +149,21 @@
       "new": "新建脱敏规则",
       "edit": "编辑脱敏规则",
       "ruleName": "规则名称",
-      "pattern": "匹配正则",
+      "ruleDescription": "规则描述",
+      "pattern": "匹配正则表达式",
+      "patternPlaceholder": "例如 (?i)(api[_-]?key)\\s*[:=]\\s*\\S+",
       "replacement": "替换文本",
       "priority": "优先级",
+      "priorityHint": "按优先级从大到小依次应用脱敏规则。",
+      "priorityInvalid": "请填写有效的优先级",
       "source": "来源",
+      "source_builtin": "内置",
+      "source_custom": "自定义",
       "data": "扩展数据 (JSON, 可选)",
-      "deleteConfirm": "确认删除该日志脱敏规则？将同步通知 Gateway。"
+      "updatedAt": "修改时间",
+      "searchPlaceholder": "搜索规则ID、名称、描述、匹配正则表达式、替换文本、优先级、来源",
+      "fieldRequired": "请填写{{field}}",
+      "deleteConfirm": "确认删除该日志脱敏规则？"
     },
     "permissions": {
       "sections": {

@@ -18,6 +18,7 @@ from jiuwenclaw_manager.core.application_config.log_masking_rule import (
 )
 from jiuwenclaw_manager.schemas.application_config_schemas import (
     LogMaskingRuleCreateBody,
+    LogMaskingRuleListQuery,
     LogMaskingRuleUpdateBody,
 )
 
@@ -182,11 +183,11 @@ async def delete_channel(
 async def list_log_masking_rules(
     jiuwenclaw_id: str,
     handler: Annotated[DBHandler, Depends(get_db_handler)],
-    enabled: bool | None = Query(default=None),
+    query: Annotated[LogMaskingRuleListQuery, Query()],
 ):
     svc = _log_masking_rule_svc(handler)
     try:
-        data = await svc.list(jiuwenclaw_id, enabled=enabled)
+        data = await svc.list(jiuwenclaw_id, query)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return ResponseModel(code=200, message="success", data=data)

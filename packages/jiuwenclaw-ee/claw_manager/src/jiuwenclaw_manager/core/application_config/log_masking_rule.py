@@ -7,11 +7,13 @@ from typing import Any
 
 from openjiuwen_runtime.foundation.db.handler import DBHandler
 
+from jiuwenclaw_manager.infrastructure.common import resolve_order_by
 from jiuwenclaw_manager.infrastructure.utils import format_ts, new_uuid4, utc_now
 from jiuwenclaw_manager.manager_ws_server.server import push_config_op
 from jiuwenclaw_manager.models.application_config_models import LOG_MASKING_RULE_TABLE_DEF
 from jiuwenclaw_manager.schemas.application_config_schemas import (
     LogMaskingRuleCreateBody,
+    LogMaskingRuleListQuery,
     LogMaskingRuleOut,
     LogMaskingRuleUpdateBody,
 )
@@ -45,6 +47,35 @@ def _builtin_seed_rows(jiuwenclaw_id: str) -> list[dict]:
 _REST_LOG_MASKING_SOURCE = "custom"
 
 _TABLE = LOG_MASKING_RULE_TABLE_DEF.table_name
+_LIST_ALL_CAP = 10_000
+_ALLOWED_SORT_FIELDS = frozenset({
+    "rule_name",
+    "description",
+    "pattern",
+    "replacement",
+    "priority",
+    "updated_at",
+})
+_DEFAULT_LOG_MASKING_ORDER_BY: list[tuple[str, bool]] = [
+    ("priority", True),
+    ("id", False),
+]
+
+
+def _matches_search(row: Any, query: str) -> bool:
+    needle = query.strip().lower()
+    if not needle:
+        return True
+    fields = [
+        str(getattr(row, "rule_id", "") or ""),
+        str(getattr(row, "rule_name", "") or ""),
+        str(getattr(row, "description", "") or ""),
+        str(getattr(row, "pattern", "") or ""),
+        str(getattr(row, "replacement", "") or ""),
+        str(getattr(row, "priority", "") or ""),
+        str(getattr(row, "source", "") or ""),
+    ]
+    return any(needle in field.lower() for field in fields)
 
 
 async def seed_builtin_log_masking_rules(
@@ -193,18 +224,35 @@ class LogMaskingRuleService:
     async def list(
         self,
         jiuwenclaw_id: str,
-        *,
-        enabled: bool | None = None,
+        query: LogMaskingRuleListQuery,
     ) -> dict[str, Any]:
         jid = str(jiuwenclaw_id).strip()
         filters: dict[str, Any] = {"jiuwenclaw_id": jid}
-        if enabled is not None:
-            filters["enabled"] = enabled
-        rows = await self._handler.list_records(_TABLE, filters)
-        items = [_row_to_out(r).model_dump(mode="json") for r in rows]
-        items.sort(
-            key=lambda r: (-int(r.get("priority") or 0), int(r.get("id") or 0)),
+        if query.enabled is not None:
+            filters["enabled"] = query.enabled
+        source = (query.source or "").strip()
+        if source:
+            filters["source"] = source
+
+        order_by = resolve_order_by(
+            query.sort_by,
+            query.sort_order,
+            allowed_sort_fields=_ALLOWED_SORT_FIELDS,
+            default_order_by=_DEFAULT_LOG_MASKING_ORDER_BY,
         )
+        rows = await self._handler.list_records(
+            _TABLE,
+            filters,
+            limit=_LIST_ALL_CAP,
+            offset=0,
+            order_by=order_by,
+        )
+
+        search_query = (query.search or "").strip()
+        if search_query:
+            rows = [row for row in rows if _matches_search(row, search_query)]
+
+        items = [_row_to_out(r).model_dump(mode="json") for r in rows]
         return {"items": items}
 
     async def get(self, jiuwenclaw_id: str, rule_id: str) -> LogMaskingRuleOut | None:

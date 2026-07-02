@@ -117,6 +117,7 @@ class ManagerWsServer:
         # jiuwenclaw_id -> 当前活跃 WS 的 id(ws)
         self._jiuwenclaw_id_ws_id_map: dict[str, int] = {}
         self._clients_lock = asyncio.Lock()
+        self._on_gateway_register_locks: dict[str, asyncio.Lock] = {}
         self._pending_acks: dict[str, _PendingConfigAck] = {}
         self._pending_acks_lock = asyncio.Lock()
         # link-auth: 防重放 nonce 缓存 + Gateway 公钥指纹固定表（仅当 CLAW_LINK_AUTH_MODE != off 时生效）
@@ -624,6 +625,29 @@ class ManagerWsServer:
             status_data.get("total"),
         )
 
+    async def _run_on_gateway_register(
+        self,
+        handler: DBHandler,
+        jiuwenclaw_id: str,
+    ) -> None:
+        """串行化同一 ``jiuwenclaw_id`` 的注册后回调，避免并发 rebuild 索引。"""
+        if self._on_gateway_register is None:
+            return
+        jid = str(jiuwenclaw_id or "").strip()
+        if not jid:
+            return
+        lock = self._on_gateway_register_locks.setdefault(jid, asyncio.Lock())
+        async with lock:
+            try:
+                await self._on_gateway_register(handler, jid)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "[ManagerWsServer] on_gateway_register failed jiuwenclaw_id=%s: %s",
+                    jid,
+                    exc,
+                    exc_info=True,
+                )
+
     async def _handle_register(self, ws: Any, key: int, data: dict[str, Any]) -> None:
         payload = data.get("payload")
         if not isinstance(payload, dict):
@@ -722,11 +746,10 @@ class ManagerWsServer:
             os.getpid(),
         )
         # 勿在 register 帧处理栈内 await push/ack：会阻塞同连接读循环，导致 config.ack 假超时。
-        if self._on_gateway_register is not None:
-            asyncio.create_task(
-                self._on_gateway_register(handler, jiuwenclaw_id),
-                name=f"gateway_bootstrap:{jiuwenclaw_id}",
-            )
+        asyncio.create_task(
+            self._run_on_gateway_register(handler, jiuwenclaw_id),
+            name=f"on_gateway_register:{jiuwenclaw_id}",
+        )
 
 
 async def push_config_op(

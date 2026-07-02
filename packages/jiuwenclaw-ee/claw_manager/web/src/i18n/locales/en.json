@@ -149,12 +149,21 @@
       "new": "New Rule",
       "edit": "Edit Rule",
       "ruleName": "Rule Name",
-      "pattern": "Pattern (regex)",
+      "ruleDescription": "Description",
+      "pattern": "Match Regex Pattern",
+      "patternPlaceholder": "e.g. (?i)(api[_-]?key)\\s*[:=]\\s*\\S+",
       "replacement": "Replacement",
       "priority": "Priority",
+      "priorityHint": "Masking rules are applied in descending priority order.",
+      "priorityInvalid": "Please enter a valid priority",
       "source": "Source",
+      "source_builtin": "Builtin",
+      "source_custom": "Custom",
       "data": "Extra Data (JSON, optional)",
-      "deleteConfirm": "Delete this log masking rule? Gateway will be notified."
+      "updatedAt": "Updated",
+      "searchPlaceholder": "Search rule ID, name, description, match regex pattern, replacement, priority, or source",
+      "fieldRequired": "Please fill in {{field}}",
+      "deleteConfirm": "Delete this log masking rule?"
     },
     "permissions": {
       "sections": {
