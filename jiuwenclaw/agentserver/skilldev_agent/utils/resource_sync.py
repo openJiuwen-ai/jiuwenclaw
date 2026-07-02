@@ -84,7 +84,7 @@ async def write_uploaded_resources(
         if str(item).strip()
     }
 
-    await _sync_resource_group(
+    await _sync_upload_only_resource_group(
         _resource_list(params.get("files")),
         task_workspace / "resources" / "ref-files",
         state=state,
@@ -92,7 +92,7 @@ async def write_uploaded_resources(
         extract_zip_to_subdir=True,
         exclude_names=direct_imported,
     )
-    await _sync_resource_group(
+    await _sync_upload_only_resource_group(
         _resource_list(params.get("skill_packages") or params.get("skillPackages")),
         task_workspace / "resources" / "ref-skills",
         state=state,
@@ -111,7 +111,7 @@ async def write_uploaded_resources(
     save_resource_state(task_workspace, state)
 
 
-async def _sync_resource_group(
+async def _sync_upload_only_resource_group(
     resources: list[dict[str, Any]],
     dest_dir: Path,
     *,
@@ -121,6 +121,10 @@ async def _sync_resource_group(
     allowed_suffixes: tuple[str, ...] | None = None,
     exclude_names: set[str] | None = None,
 ) -> None:
+    """Sync ref-files/ref-skills for the current upload batch only (no diff deletion)."""
+    if not resources:
+        return
+
     exclude_names = exclude_names or set()
     current_items: list[tuple[dict[str, Any], dict[str, str]]] = []
 
@@ -135,27 +139,20 @@ async def _sync_resource_group(
             continue
         current_items.append((res, _resource_state_entry(res, name)))
 
+    if not current_items:
+        return
+
+    pending_resources = [res for res, _ in current_items]
+    await write_resource_group(
+        pending_resources,
+        dest_dir,
+        extract_zip_to_subdir=extract_zip_to_subdir,
+        allowed_suffixes=allowed_suffixes,
+    )
+
     old_entries = _state_entries(state.get(state_key, []))
-    old_keys = {_entry_key(entry) for entry in old_entries}
     current_entries = [entry for _, entry in current_items]
-    current_keys = {_entry_key(entry) for entry in current_entries}
-
-    _delete_stale_resource_files(dest_dir, old_entries, current_keys)
-
-    pending_resources = [
-        res
-        for res, entry in current_items
-        if _entry_key(entry) not in old_keys
-    ]
-    if pending_resources:
-        await write_resource_group(
-            pending_resources,
-            dest_dir,
-            extract_zip_to_subdir=extract_zip_to_subdir,
-            allowed_suffixes=allowed_suffixes,
-        )
-
-    state[state_key] = _sorted_entries(current_entries)
+    state[state_key] = _sorted_entries(_merge_state_entries(old_entries, current_entries))
 
 
 async def _sync_tool_spec_files(
@@ -317,13 +314,8 @@ def _ref_file_extract_dir(ref_dir: Path, filename: str, *, extract_to_stem_dir: 
 def build_current_ref_file_hint_lines(
     task_workspace: str | Path,
     files: Any,
-    *,
-    previous_ref_files: Any | None = None,
-) -> tuple[list[str], list[str]]:
-    """Build per-file hint lines for ref-files uploaded in the current round.
-
-    Returns a tuple of (added_lines, removed_lines) compared to the previous state.
-    """
+) -> list[str]:
+    """Build hint lines for ref-files uploaded in the current round (no diff)."""
     task_workspace = Path(task_workspace)
     ref_dir = task_workspace / "resources" / "ref-files"
     state = load_resource_state(task_workspace)
@@ -332,39 +324,16 @@ def build_current_ref_file_hint_lines(
         for item in state.get(STATE_DIRECT_IMPORTED, [])
         if str(item).strip()
     }
-    previous_entries = _state_entries(previous_ref_files or [])
-    previous_keys = {_entry_key(entry) for entry in previous_entries}
     resources = _current_ref_file_resources(files, direct_imported)
-    current_entries = [
-        _resource_state_entry(res, _resource_filename(res))
-        for res in resources
-        if _resource_filename(res)
-    ]
-    current_keys = {_entry_key(entry) for entry in current_entries}
+    if not resources:
+        return []
 
-    removed_lines: list[str] = []
-    for entry in previous_entries:
-        if _entry_key(entry) in current_keys:
-            continue
-        name = entry.get("filename", "")
-        if not name:
-            continue
-        removed_lines.append(_format_ref_file_removed_hint_line(name))
-
-    pending_resources = [
-        res
-        for res in resources
-        if _entry_key(_resource_state_entry(res, _resource_filename(res))) not in previous_keys
-    ]
-    if not pending_resources:
-        return ([], removed_lines)
-
-    extract_to_stem_dir = _ref_files_extract_to_stem_dir(pending_resources)
-    added_lines: list[str] = []
-    for res in pending_resources:
+    extract_to_stem_dir = _ref_files_extract_to_stem_dir(resources)
+    lines: list[str] = []
+    for res in resources:
         name = _resource_filename(res)
         archive_path = (ref_dir / name).resolve()
-        added_lines.append(_format_ref_file_hint_line(name, archive_path, res))
+        lines.append(_format_ref_file_hint_line(name, archive_path, res))
         suffix = Path(name).suffix.lower()
         if suffix in (".zip", ".skill"):
             extract_dir = _ref_file_extract_dir(
@@ -372,20 +341,15 @@ def build_current_ref_file_hint_lines(
                 name,
                 extract_to_stem_dir=extract_to_stem_dir,
             ).resolve()
-            added_lines.append(f"  - 解压目录 -> {extract_dir}")
-    return (added_lines, removed_lines)
+            lines.append(f"  - 解压目录 -> {extract_dir}")
+    return lines
 
 
 def build_current_ref_skill_hint_lines(
     task_workspace: str | Path,
     skill_packages: Any,
-    *,
-    previous_ref_skills: Any | None = None,
-) -> tuple[list[str], list[str]]:
-    """Build per-file hint lines for ref-skills uploaded in the current round.
-
-    Returns a tuple of (added_lines, removed_lines) compared to the previous state.
-    """
+) -> list[str]:
+    """Build hint lines for ref-skills uploaded in the current round (no diff)."""
     task_workspace = Path(task_workspace)
     ref_dir = task_workspace / "resources" / "ref-skills"
     state = load_resource_state(task_workspace)
@@ -394,46 +358,23 @@ def build_current_ref_skill_hint_lines(
         for item in state.get(STATE_DIRECT_IMPORTED, [])
         if str(item).strip()
     }
-    previous_entries = _state_entries(previous_ref_skills or [])
-    previous_keys = {_entry_key(entry) for entry in previous_entries}
     resources = _current_ref_skill_resources(skill_packages, direct_imported)
-    current_entries = [
-        _resource_state_entry(res, _resource_filename(res))
-        for res in resources
-        if _resource_filename(res)
-    ]
-    current_keys = {_entry_key(entry) for entry in current_entries}
+    if not resources:
+        return []
 
-    removed_lines: list[str] = []
-    for entry in previous_entries:
-        if _entry_key(entry) in current_keys:
-            continue
-        name = entry.get("filename", "")
-        if not name:
-            continue
-        removed_lines.append(_format_ref_file_removed_hint_line(name))
-
-    pending_resources = [
-        res
-        for res in resources
-        if _entry_key(_resource_state_entry(res, _resource_filename(res))) not in previous_keys
-    ]
-    if not pending_resources:
-        return ([], removed_lines)
-
-    extract_to_stem_dir = _ref_files_extract_to_stem_dir(pending_resources)
-    added_lines: list[str] = []
-    for res in pending_resources:
+    extract_to_stem_dir = _ref_files_extract_to_stem_dir(resources)
+    lines: list[str] = []
+    for res in resources:
         name = _resource_filename(res)
         archive_path = (ref_dir / name).resolve()
-        added_lines.append(f"- {name} -> 本地路径: {archive_path}")
+        lines.append(f"- {name} -> 本地路径: {archive_path}")
         extract_dir = _ref_file_extract_dir(
             ref_dir,
             name,
             extract_to_stem_dir=extract_to_stem_dir,
         ).resolve()
-        added_lines.append(f"  - 解压目录 -> {extract_dir}")
-    return (added_lines, removed_lines)
+        lines.append(f"  - 解压目录 -> {extract_dir}")
+    return lines
 
 
 def build_current_tool_spec_hint_lines(
@@ -555,6 +496,16 @@ def _sorted_entries(entries: list[dict[str, str]]) -> list[dict[str, str]]:
     return sorted(entries, key=lambda item: (item.get("filename", ""), item.get("url", "")))
 
 
+def _merge_state_entries(
+    old_entries: list[dict[str, str]],
+    new_entries: list[dict[str, str]],
+) -> list[dict[str, str]]:
+    merged: dict[tuple[str, str], dict[str, str]] = {}
+    for entry in old_entries + new_entries:
+        merged[_entry_key(entry)] = entry
+    return list(merged.values())
+
+
 def _safe_child_path(dest_dir: Path, filename: str) -> Path | None:
     path = dest_dir / filename
     try:
@@ -564,18 +515,6 @@ def _safe_child_path(dest_dir: Path, filename: str) -> Path | None:
         return None
     return path
 
-
-def _delete_stale_resource_files(
-    dest_dir: Path,
-    old_entries: list[dict[str, str]],
-    current_keys: set[tuple[str, str]],
-) -> None:
-    for entry in old_entries:
-        if _entry_key(entry) in current_keys:
-            continue
-        file_path = _safe_child_path(dest_dir, entry["filename"])
-        if file_path is not None and file_path.is_file():
-            file_path.unlink()
 
 
 def _delete_stale_tool_files(

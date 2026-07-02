@@ -55,7 +55,7 @@ def test_record_direct_imported_skills_deduplicates(tmp_path: Path) -> None:
     assert _state(tmp_path)["direct_imported_skills"] == ["example.skill", "other.zip"]
 
 
-def test_ref_files_are_synchronized_and_stale_files_removed(tmp_path: Path) -> None:
+def test_ref_files_are_synchronized_without_stale_deletion(tmp_path: Path) -> None:
     asyncio.run(
         write_uploaded_resources(
             tmp_path,
@@ -74,13 +74,33 @@ def test_ref_files_are_synchronized_and_stale_files_removed(tmp_path: Path) -> N
     asyncio.run(
         write_uploaded_resources(
             tmp_path,
-            {"files": [{"filename": "keep.txt", "base64Data": _b64("keep")}]},
+            {"files": [{"filename": "keep.txt", "base64Data": _b64("keep-updated")}]},
         )
     )
 
-    assert (ref_dir / "keep.txt").is_file()
-    assert not (ref_dir / "drop.txt").exists()
-    assert _state(tmp_path)["ref_files"] == [{"filename": "keep.txt"}]
+    assert (ref_dir / "keep.txt").read_text(encoding="utf-8") == "keep-updated"
+    assert (ref_dir / "drop.txt").is_file()
+    assert _state(tmp_path)["ref_files"] == [
+        {"filename": "drop.txt"},
+        {"filename": "keep.txt"},
+    ]
+
+
+def test_ref_files_empty_round_does_not_touch_state_or_disk(tmp_path: Path) -> None:
+    asyncio.run(
+        write_uploaded_resources(
+            tmp_path,
+            {"files": [{"filename": "a.txt", "base64Data": _b64("a")}]},
+        )
+    )
+    ref_dir = tmp_path / "resources" / "ref-files"
+    assert (ref_dir / "a.txt").is_file()
+    state_before = _state(tmp_path)
+
+    asyncio.run(write_uploaded_resources(tmp_path, {}))
+
+    assert (ref_dir / "a.txt").is_file()
+    assert _state(tmp_path) == state_before
 
 
 def test_ref_skills_reject_unsupported_suffix(tmp_path: Path) -> None:
@@ -110,11 +130,11 @@ def test_direct_imported_packages_are_not_written_as_references(tmp_path: Path) 
     assert not (tmp_path / "resources" / "ref-skills" / "imported.skill").exists()
     state = _state(tmp_path)
     assert state["direct_imported_skills"] == ["imported.skill"]
-    assert state["ref_files"] == []
-    assert state["ref_skills"] == []
+    assert state.get("ref_files", []) == []
+    assert state.get("ref_skills", []) == []
 
 
-def test_existing_url_resource_skips_download_and_records_url(
+def test_existing_url_resource_is_rewritten_each_upload_round(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -140,8 +160,8 @@ def test_existing_url_resource_skips_download_and_records_url(
         )
     )
 
-    assert calls == []
-    assert (ref_dir / "remote.txt").read_text(encoding="utf-8") == "existing"
+    assert calls == [("https://example.com/remote.txt", str(ref_dir / "remote.txt"))]
+    assert (ref_dir / "remote.txt").read_text(encoding="utf-8") == "downloaded"
     assert _state(tmp_path)["ref_files"] == [
         {"filename": "remote.txt", "url": "https://example.com/remote.txt"}
     ]
@@ -225,7 +245,7 @@ def test_build_current_ref_file_hint_lines_single_and_multiple(tmp_path: Path) -
     ref_dir = tmp_path / "resources" / "ref-files"
     ref_dir.mkdir(parents=True)
 
-    added_lines, removed_lines = build_current_ref_file_hint_lines(
+    lines = build_current_ref_file_hint_lines(
         tmp_path,
         [
             {"filename": "requirement.md", "base64Data": _b64("# req")},
@@ -233,41 +253,38 @@ def test_build_current_ref_file_hint_lines_single_and_multiple(tmp_path: Path) -
         ],
     )
 
-    assert added_lines == [
+    assert lines == [
         f"- requirement.md -> 本地路径: {(ref_dir / 'requirement.md').resolve()}",
         f"- notes.txt -> 本地路径: {(ref_dir / 'notes.txt').resolve()}",
     ]
-    assert removed_lines == []
 
 
 def test_build_current_ref_file_hint_lines_zip_includes_extract_dir(tmp_path: Path) -> None:
     ref_dir = tmp_path / "resources" / "ref-files"
 
-    added_lines, removed_lines = build_current_ref_file_hint_lines(
+    lines = build_current_ref_file_hint_lines(
         tmp_path,
         [{"filename": "demo.zip", "base64Data": _zip_b64()}],
     )
 
-    assert added_lines == [
+    assert lines == [
         f"- demo.zip -> 本地路径: {(ref_dir / 'demo.zip').resolve()}",
         f"  - 解压目录 -> {(ref_dir / 'demo').resolve()}",
     ]
-    assert removed_lines == []
 
 
 def test_build_current_ref_file_hint_lines_url_zip_extracts_to_ref_dir(tmp_path: Path) -> None:
     ref_dir = tmp_path / "resources" / "ref-files"
 
-    added_lines, removed_lines = build_current_ref_file_hint_lines(
+    lines = build_current_ref_file_hint_lines(
         tmp_path,
         [{"filename": "remote.zip", "url": "https://example.com/remote.zip"}],
     )
 
-    assert added_lines == [
+    assert lines == [
         f"- remote.zip -> 本地路径: {(ref_dir / 'remote.zip').resolve()}",
         f"  - 解压目录 -> {ref_dir.resolve()}",
     ]
-    assert removed_lines == []
 
 
 def test_build_current_ref_file_hint_lines_skips_direct_import_and_empty_payload(
@@ -275,7 +292,7 @@ def test_build_current_ref_file_hint_lines_skips_direct_import_and_empty_payload
 ) -> None:
     record_direct_imported_skills(tmp_path, [{"filename": "imported.skill"}])
 
-    added_lines, removed_lines = build_current_ref_file_hint_lines(
+    lines = build_current_ref_file_hint_lines(
         tmp_path,
         [
             {"filename": "imported.skill", "base64Data": _b64("x")},
@@ -284,8 +301,7 @@ def test_build_current_ref_file_hint_lines_skips_direct_import_and_empty_payload
         ],
     )
 
-    assert added_lines == []
-    assert removed_lines == []
+    assert lines == []
 
 
 def test_build_current_ref_file_hint_lines_image_appends_source_url(tmp_path: Path) -> None:
@@ -293,7 +309,7 @@ def test_build_current_ref_file_hint_lines_image_appends_source_url(tmp_path: Pa
     ref_dir.mkdir(parents=True)
     image_url = "https://xiaoyi.example.com/files/222.jpg"
 
-    added_lines, removed_lines = build_current_ref_file_hint_lines(
+    lines = build_current_ref_file_hint_lines(
         tmp_path,
         [
             {
@@ -304,17 +320,16 @@ def test_build_current_ref_file_hint_lines_image_appends_source_url(tmp_path: Pa
         ],
     )
 
-    assert added_lines == [
+    assert lines == [
         f"- 222.jpg -> 本地路径: {(ref_dir / '222.jpg').resolve()} ; 可下载url: {image_url}",
     ]
-    assert removed_lines == []
 
 
 def test_build_current_ref_file_hint_lines_non_image_does_not_append_url(tmp_path: Path) -> None:
     ref_dir = tmp_path / "resources" / "ref-files"
     ref_dir.mkdir(parents=True)
 
-    added_lines, removed_lines = build_current_ref_file_hint_lines(
+    lines = build_current_ref_file_hint_lines(
         tmp_path,
         [
             {
@@ -325,14 +340,13 @@ def test_build_current_ref_file_hint_lines_non_image_does_not_append_url(tmp_pat
         ],
     )
 
-    assert added_lines == [f"- notes.txt -> 本地路径: {(ref_dir / 'notes.txt').resolve()}"]
-    assert removed_lines == []
+    assert lines == [f"- notes.txt -> 本地路径: {(ref_dir / 'notes.txt').resolve()}"]
 
 
 def test_build_resource_hint_header_and_file_lines(tmp_path: Path) -> None:
     ref_dir = tmp_path / "resources" / "ref-files"
     ref_dir.mkdir(parents=True)
-    added_lines, removed_lines = build_current_ref_file_hint_lines(
+    lines = build_current_ref_file_hint_lines(
         tmp_path,
         [{"filename": "requirement.md", "base64Data": _b64("req")}],
     )
@@ -341,8 +355,8 @@ def test_build_resource_hint_header_and_file_lines(tmp_path: Path) -> None:
         tmp_path,
         {"files": [{"filename": "requirement.md", "base64Data": _b64("req")}]},
         "task-1",
-        added_file_lines=added_lines,
-        removed_file_lines=removed_lines,
+        added_file_lines=lines,
+        removed_file_lines=[],
     )
 
     assert "【用户需求】" not in hint
@@ -354,118 +368,65 @@ def test_build_resource_hint_header_and_file_lines(tmp_path: Path) -> None:
     assert f"- requirement.md -> 本地路径: {(ref_dir / 'requirement.md').resolve()}" in hint
 
 
-def test_build_current_ref_file_hint_lines_skips_reuploaded_files(tmp_path: Path) -> None:
-    added_lines, removed_lines = build_current_ref_file_hint_lines(
+def test_build_current_ref_file_hint_lines_includes_reuploaded_files(tmp_path: Path) -> None:
+    ref_dir = tmp_path / "resources" / "ref-files"
+    lines = build_current_ref_file_hint_lines(
         tmp_path,
         [{"filename": "a.txt", "base64Data": _b64("same")}],
-        previous_ref_files=[{"filename": "a.txt"}],
     )
 
-    assert added_lines == []
-    assert removed_lines == []
+    assert lines == [f"- a.txt -> 本地路径: {(ref_dir / 'a.txt').resolve()}"]
 
 
-def test_build_current_ref_file_hint_lines_only_adds_new_files(tmp_path: Path) -> None:
-    ref_dir = tmp_path / "resources" / "ref-files"
-
-    added_lines, removed_lines = build_current_ref_file_hint_lines(
-        tmp_path,
-        [
-            {"filename": "a.txt", "base64Data": _b64("a")},
-            {"filename": "b.txt", "base64Data": _b64("b")},
-        ],
-        previous_ref_files=[{"filename": "a.txt"}],
-    )
-
-    assert added_lines == [f"- b.txt -> 本地路径: {(ref_dir / 'b.txt').resolve()}"]
-    assert removed_lines == []
+def test_build_current_ref_file_hint_lines_empty_round_returns_empty(tmp_path: Path) -> None:
+    assert build_current_ref_file_hint_lines(tmp_path, []) == []
 
 
-def test_build_current_ref_file_hint_lines_only_reports_removed_files(tmp_path: Path) -> None:
-    added_lines, removed_lines = build_current_ref_file_hint_lines(
-        tmp_path,
-        [],
-        previous_ref_files=[{"filename": "a.txt"}],
-    )
-
-    assert added_lines == []
-    assert removed_lines == ["- a.txt -> 已移除（用户本轮未再上传）"]
-
-
-def test_build_current_ref_file_hint_lines_add_and_remove_together(tmp_path: Path) -> None:
-    ref_dir = tmp_path / "resources" / "ref-files"
-
-    added_lines, removed_lines = build_current_ref_file_hint_lines(
-        tmp_path,
-        [
-            {"filename": "a.txt", "base64Data": _b64("a")},
-            {"filename": "c.txt", "base64Data": _b64("c")},
-        ],
-        previous_ref_files=[
-            {"filename": "a.txt"},
-            {"filename": "b.txt"},
-        ],
-    )
-
-    assert added_lines == [f"- c.txt -> 本地路径: {(ref_dir / 'c.txt').resolve()}"]
-    assert removed_lines == ["- b.txt -> 已移除（用户本轮未再上传）"]
-
-
-def test_build_current_ref_file_hint_lines_zip_removal_has_no_extract_dir(tmp_path: Path) -> None:
-    added_lines, removed_lines = build_current_ref_file_hint_lines(
-        tmp_path,
-        [],
-        previous_ref_files=[{"filename": "demo.zip"}],
-    )
-
-    assert added_lines == []
-    assert removed_lines == ["- demo.zip -> 已移除（用户本轮未再上传）"]
-
-
-def test_build_resource_hint_includes_removed_section_when_only_deletions(tmp_path: Path) -> None:
+def test_build_resource_hint_includes_removed_section_when_only_tool_deletions(tmp_path: Path) -> None:
     hint = SkillDevDeepAdapter._build_resource_hint(
         tmp_path,
         {},
         "task-1",
         added_file_lines=[],
-        removed_file_lines=["- drop.txt -> 已移除（用户本轮未再上传）"],
+        removed_file_lines=[],
         added_skill_lines=[],
         removed_skill_lines=[],
         added_tool_lines=[],
-        removed_tool_lines=[],
+        removed_tool_lines=["- old/tool -> 已移除（用户本轮未再上传）"],
     )
 
     assert "【工作区信息】" in hint
     assert "【本轮上传资源索引（已落盘，可直接读取）】" not in hint
-    assert "【本轮已移除资源】" in hint
-    assert "- drop.txt -> 已移除（用户本轮未再上传）" in hint
+    assert "【本轮已移除资源】" not in hint
+    assert "【本轮已移除可用工具】" in hint
+    assert "- old/tool -> 已移除（用户本轮未再上传）" in hint
     assert "【执行要求】" in hint
 
 
-def test_build_current_ref_skill_hint_lines_add_and_remove(tmp_path: Path) -> None:
+def test_build_current_ref_skill_hint_lines_current_round_only(tmp_path: Path) -> None:
     ref_dir = tmp_path / "resources" / "ref-skills"
-    added_lines, removed_lines = build_current_ref_skill_hint_lines(
+    lines = build_current_ref_skill_hint_lines(
         tmp_path,
         [{"filename": "new.skill", "base64Data": _b64("x")}],
-        previous_ref_skills=[{"filename": "old.skill"}],
     )
 
-    assert added_lines == [
+    assert lines == [
         f"- new.skill -> 本地路径: {(ref_dir / 'new.skill').resolve()}",
         f"  - 解压目录 -> {(ref_dir / 'new').resolve()}",
     ]
-    assert removed_lines == ["- old.skill -> 已移除（用户本轮未再上传）"]
 
 
-def test_build_current_ref_skill_hint_lines_skips_reuploaded(tmp_path: Path) -> None:
-    added_lines, removed_lines = build_current_ref_skill_hint_lines(
+def test_build_current_ref_skill_hint_lines_includes_reuploaded(tmp_path: Path) -> None:
+    ref_dir = tmp_path / "resources" / "ref-skills"
+    lines = build_current_ref_skill_hint_lines(
         tmp_path,
         [{"filename": "keep.zip", "base64Data": _zip_b64()}],
-        previous_ref_skills=[{"filename": "keep.zip"}],
     )
 
-    assert added_lines == []
-    assert removed_lines == []
+    assert lines == [
+        f"- keep.zip -> 本地路径: {(ref_dir / 'keep.zip').resolve()}",
+        f"  - 解压目录 -> {(ref_dir / 'keep').resolve()}",
+    ]
 
 
 def test_build_current_tool_spec_hint_lines_add_and_remove(tmp_path: Path) -> None:
