@@ -308,6 +308,52 @@ def resolve_request_project_dir(request: AgentRequest) -> str | None:
     return None
 
 
+def _sync_chat_request_metadata(
+    request: AgentRequest,
+    project_dir: str | None,
+    mode: str,
+) -> str | None:
+    """将本次 chat 请求的参数同步到会话元数据，返回生效的 project_path。
+
+    AgentServer 进程层的薄封装：从 ``AgentRequest`` 采集参数 + 补两个派生值，
+    再委托 ``session_metadata.sync_session_request_metadata`` 做真正的校验/写盘。
+    之所以放在本模块而非 session_metadata.py：避免存储层耦合 AgentRequest 结构、
+    os.getenv、当前时间等进程级关注点，保持 session_metadata 纯存储职责。
+
+    - project_path：首次锁定，已锁定则忽略不一致的请求值（仅告警），返回锁定值
+    - model：覆盖式（未显式指定时回退到进程 MODEL_NAME）
+    - last_user_message_at：覆盖式（每次请求刷新为当前时刻）
+    - mode：覆盖式（与 append_history_record 联动一致）
+
+    返回的生效 project_path 用于 agent 实例选择，保证会话锁定后
+    即便后续请求携带不同 project_dir 也仍用锁定值选 agent。
+    """
+    session_id = (request.session_id or "").strip()
+    if not session_id:
+        return project_dir
+    params = request.params if isinstance(request.params, dict) else {}
+    model_name = params.get("model_name")
+    if not (isinstance(model_name, str) and model_name.strip()):
+        model_name = os.getenv("MODEL_NAME", "") or None
+    else:
+        model_name = model_name.strip()
+    try:
+        from jiuwenswarm.server.runtime.session.session_metadata import (
+            sync_session_request_metadata,
+        )
+        return sync_session_request_metadata(
+            session_id=session_id,
+            channel_id=request.channel_id or None,
+            mode=mode,
+            model=model_name,
+            project_path=str(project_dir) if project_dir else None,
+            last_user_message_at=_dt.datetime.now(_dt.timezone.utc).timestamp(),
+        )
+    except (OSError, ValueError) as exc:
+        logger.warning("[AgentWebSocketServer] 同步 chat 请求元数据失败: %s", exc)
+        return project_dir
+
+
 def _harness_error_code(exc: BaseException) -> str:
     """Map a harness package exception to a wire ``code`` for the frontend.
 
@@ -1451,12 +1497,19 @@ class AgentWebSocketServer:
         """Mode resolution and correct agent instance selection."""
         mode, sub_mode = _apply_resolved_mode_to_request(request)
         agent_mode = "agent" if mode == "auto_harness" else mode
-        project_dir = resolve_request_project_dir(request)
+        # 纯解析：本次请求携带的 project_dir 候选值（不读磁盘、不锁定）
+        requested_project_dir = resolve_request_project_dir(request)
+
+        # 校验并同步会话元数据：对比磁盘 metadata，按字段语义写入 model/project_path/
+        # last_user_message_at/mode，并返回本会话生效的 project_path（锁定值优先）
+        effective_project_dir = _sync_chat_request_metadata(
+            request, requested_project_dir, mode
+        )
 
         agent = await self._agent_manager.get_agent(
             channel_id=channel_id,
             mode=agent_mode,
-            project_dir=project_dir,
+            project_dir=effective_project_dir,
             sub_mode=sub_mode,
         )
         if agent is None:

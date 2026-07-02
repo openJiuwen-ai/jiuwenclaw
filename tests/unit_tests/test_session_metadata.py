@@ -1,6 +1,7 @@
 """session_metadata 模块单元测试"""
 from __future__ import annotations
 
+import asyncio
 import json
 import time
 from pathlib import Path
@@ -20,6 +21,9 @@ def sessions_dir(tmp_path, monkeypatch):
         "jiuwenswarm.server.runtime.session.session_metadata.get_agent_sessions_dir",
         lambda: d,
     )
+    # 清空内存缓存，避免跨用例污染（不同用例可能复用同一 session_id）
+    from jiuwenswarm.server.runtime.session.session_metadata import _METADATA_CACHE
+    _METADATA_CACHE.clear()
     return d
 
 
@@ -100,6 +104,35 @@ class TestInitSessionMetadata:
         assert data["title"] == ""
         assert data["mode"] == "unknown"
         assert data["round_id"] == 0
+
+    @staticmethod
+    def test_init_new_fields(sessions_dir):
+        """init 写入新增字段：project_path / model / last_user_message_at / status"""
+        from jiuwenswarm.server.runtime.session.session_metadata import init_session_metadata
+
+        init_session_metadata(
+            session_id="sess_new",
+            project_path="E:\\myproj",
+            model="glm-5",
+        )
+        data = _read_json(sessions_dir / "sess_new" / "metadata.json")
+        assert data["project_path"] == "E:\\myproj"
+        assert data["model"] == "glm-5"
+        assert data["status"] == "idle"
+        assert isinstance(data["last_user_message_at"], float)
+        # created_at / last_message_at / last_user_message_at 各自独立取时间戳，
+        # 允许微秒级差异，仅断言三者都在创建时刻附近
+        assert abs(data["last_user_message_at"] - data["created_at"]) < 1.0
+
+    @staticmethod
+    def test_init_new_fields_default_empty(sessions_dir):
+        """init 不传新字段时为空默认值"""
+        from jiuwenswarm.server.runtime.session.session_metadata import init_session_metadata
+
+        init_session_metadata(session_id="sess_def")
+        data = _read_json(sessions_dir / "sess_def" / "metadata.json")
+        assert data["project_path"] == ""
+        assert data["model"] == ""
 
 
 # ===========================================================================
@@ -207,6 +240,92 @@ class TestUpdateSessionMetadata:
         data = _read_json(sessions_dir / "sess_mc" / "metadata.json")
         assert data["message_count"] == 3
 
+    @staticmethod
+    def test_project_path_first_lock_not_overwritten(sessions_dir):
+        """project_path 首次锁定后，后续传入不同值不覆盖"""
+        from jiuwenswarm.server.runtime.session.session_metadata import (
+            init_session_metadata,
+            update_session_metadata,
+            _METADATA_QUEUE,
+        )
+
+        init_session_metadata(session_id="sess_pp")
+        # 首次锁定
+        update_session_metadata(session_id="sess_pp", project_path="E:\\projA")
+        _METADATA_QUEUE.join()
+        # 二次传入不同值
+        update_session_metadata(session_id="sess_pp", project_path="E:\\projB")
+        _METADATA_QUEUE.join()
+
+        data = _read_json(sessions_dir / "sess_pp" / "metadata.json")
+        assert data["project_path"] == "E:\\projA", "project_path 锁定后不可改"
+
+    @staticmethod
+    def test_model_overwrites_each_request(sessions_dir):
+        """model 覆盖式：每次请求刷新为本次模型"""
+        from jiuwenswarm.server.runtime.session.session_metadata import (
+            init_session_metadata,
+            update_session_metadata,
+            _METADATA_QUEUE,
+        )
+
+        init_session_metadata(session_id="sess_m", model="glm-5")
+        update_session_metadata(session_id="sess_m", model="glm-5.2")
+        _METADATA_QUEUE.join()
+        update_session_metadata(session_id="sess_m", model="glm-5.3")
+        _METADATA_QUEUE.join()
+
+        data = _read_json(sessions_dir / "sess_m" / "metadata.json")
+        assert data["model"] == "glm-5.3", "model 应被最后一次请求覆盖"
+
+    @staticmethod
+    def test_last_user_message_at_overwrites_when_passed(sessions_dir):
+        """last_user_message_at 覆盖式：传入则刷新，不传(None)则保留旧值"""
+        from jiuwenswarm.server.runtime.session.session_metadata import (
+            init_session_metadata,
+            update_session_metadata,
+            _METADATA_QUEUE,
+        )
+
+        init_session_metadata(session_id="sess_lum")
+        # 传入时间戳 → 写入
+        update_session_metadata(
+            session_id="sess_lum",
+            last_user_message_at=1000.0,
+            user_content="hi",
+        )
+        _METADATA_QUEUE.join()
+        # 不传 last_user_message_at → 保留旧值
+        update_session_metadata(session_id="sess_lum")
+        _METADATA_QUEUE.join()
+
+        data = _read_json(sessions_dir / "sess_lum" / "metadata.json")
+        assert data["last_user_message_at"] == 1000.0, "不传时应保留上次的用户最后输入时间"
+
+    @staticmethod
+    def test_update_new_fields_fallback_create(sessions_dir):
+        """update 兜底新建分支也写入新字段"""
+        from jiuwenswarm.server.runtime.session.session_metadata import (
+            update_session_metadata,
+            _METADATA_QUEUE,
+        )
+
+        (sessions_dir / "sess_fb").mkdir()
+        update_session_metadata(
+            session_id="sess_fb",
+            channel_id="web",
+            project_path="E:\\fb",
+            model="glm-5",
+            last_user_message_at=2000.0,
+        )
+        _METADATA_QUEUE.join()
+
+        data = _read_json(sessions_dir / "sess_fb" / "metadata.json")
+        assert data["project_path"] == "E:\\fb"
+        assert data["model"] == "glm-5"
+        assert data["last_user_message_at"] == 2000.0
+        assert data["status"] == "idle"
+
 
 # ===========================================================================
 # get_session_metadata
@@ -229,6 +348,37 @@ class TestGetSessionMetadata:
 
         data = get_session_metadata("nonexistent")
         assert data == {}
+
+    @staticmethod
+    def test_backfill_new_fields_for_legacy_session(sessions_dir):
+        """存量会话（无新字段）读取时 setdefault 兜底，前端拿到稳定 schema"""
+        from jiuwenswarm.server.runtime.session.session_metadata import (
+            _write_metadata_sync,
+            get_session_metadata,
+        )
+
+        # 模拟旧版本会话：只有老字段，没有 project_path/model/last_user_message_at/status
+        _write_metadata_sync("sess_legacy", {
+            "session_id": "sess_legacy",
+            "channel_id": "web",
+            "user_id": "",
+            "created_at": 1000.0,
+            "last_message_at": 1000.0,
+            "title": "old",
+            "message_count": 0,
+            "mode": "unknown",
+            "team_name": "",
+            "round_id": 0,
+        })
+        # 清缓存确保从磁盘读
+        from jiuwenswarm.server.runtime.session.session_metadata import _METADATA_CACHE
+        _METADATA_CACHE.pop("sess_legacy", None)
+
+        data = get_session_metadata("sess_legacy", cache_bust=True)
+        assert data["project_path"] == ""
+        assert data["model"] == ""
+        assert data["status"] == "idle"
+        assert data["last_user_message_at"] == 1000.0  # 回退到 created_at
 
 
 # ===========================================================================
@@ -799,3 +949,574 @@ class TestTitleStability:
 
         data = _read_json(sessions_dir / "sess_noclear" / "metadata.json")
         assert data["title"] == "已有标题", "空字符串不应清除已有标题"
+
+
+# ===========================================================================
+# sync_session_request_metadata —— 请求参数 → 会话元数据校验/同步入口
+# ===========================================================================
+def _drain_queue():
+    from jiuwenswarm.server.runtime.session.session_metadata import _METADATA_QUEUE
+    _METADATA_QUEUE.join()
+
+
+class TestSyncSessionRequestMetadata:
+    """sync_session_request_metadata：校验请求参数 vs 磁盘 metadata，按字段语义写入。"""
+
+    @staticmethod
+    def test_project_path_first_lock_writes_and_returns(sessions_dir):
+        """project_path 首次锁定：磁盘为空 → 写入请求值并返回"""
+        from jiuwenswarm.server.runtime.session.session_metadata import (
+            init_session_metadata,
+            sync_session_request_metadata,
+            get_session_metadata,
+        )
+
+        init_session_metadata(session_id="s1")  # project_path 为空
+        effective = sync_session_request_metadata(
+            session_id="s1", project_path="E:\\projA"
+        )
+        _drain_queue()
+        assert effective == "E:\\projA"
+        assert get_session_metadata("s1")["project_path"] == "E:\\projA"
+
+    @staticmethod
+    def test_project_path_locked_ignores_inconsistent_request_value(
+        sessions_dir, monkeypatch
+    ):
+        """已锁定 project_path 时，请求带不同值 → 告警 + 不覆盖 + 返回锁定值"""
+        import jiuwenswarm.server.runtime.session.session_metadata as sm
+        from jiuwenswarm.server.runtime.session.session_metadata import (
+            init_session_metadata,
+            sync_session_request_metadata,
+            get_session_metadata,
+        )
+
+        init_session_metadata(session_id="s1")
+        sync_session_request_metadata(session_id="s1", project_path="E:\\locked")
+        _drain_queue()
+
+        # 拦截 logger.warning，避免依赖 logging propagation
+        warnings: list[str] = []
+        original_warning = sm.logger.warning
+
+        def _capture_warning(msg, *args, **kwargs):
+            warnings.append(msg % args if args else msg)
+            original_warning(msg, *args, **kwargs)
+
+        monkeypatch.setattr(sm.logger, "warning", _capture_warning)
+
+        effective = sync_session_request_metadata(
+            session_id="s1", project_path="E:\\other"
+        )
+        _drain_queue()
+
+        assert effective == "E:\\locked", "应返回锁定值而非请求值"
+        assert get_session_metadata("s1")["project_path"] == "E:\\locked", "不应被覆盖"
+        assert any("已锁定" in w for w in warnings), "应记告警"
+
+    @staticmethod
+    def test_project_path_locked_returns_locked_value_when_request_none(sessions_dir):
+        """已锁定后，请求不带 project_path → 返回锁定值"""
+        from jiuwenswarm.server.runtime.session.session_metadata import (
+            init_session_metadata,
+            sync_session_request_metadata,
+        )
+
+        init_session_metadata(session_id="s1")
+        sync_session_request_metadata(session_id="s1", project_path="E:\\locked")
+        _drain_queue()
+
+        effective = sync_session_request_metadata(session_id="s1")  # 不传 project_path
+        assert effective == "E:\\locked"
+
+    @staticmethod
+    def test_sync_empty_session_id_returns_none(sessions_dir):
+        """空 session_id → 直接返回 None，不做任何操作"""
+        from jiuwenswarm.server.runtime.session.session_metadata import (
+            sync_session_request_metadata,
+        )
+        assert sync_session_request_metadata(session_id="", project_path="E:\\x") is None
+        assert sync_session_request_metadata(session_id="   ", project_path="E:\\x") is None
+
+    @staticmethod
+    def test_sync_none_project_path_when_unlocked(sessions_dir):
+        """未锁定且请求不带 project_path → 返回 None，不写入"""
+        from jiuwenswarm.server.runtime.session.session_metadata import (
+            init_session_metadata,
+            sync_session_request_metadata,
+            get_session_metadata,
+        )
+
+        init_session_metadata(session_id="s1")
+        effective = sync_session_request_metadata(session_id="s1")
+        _drain_queue()
+        assert effective is None
+        assert get_session_metadata("s1")["project_path"] == ""
+
+    @staticmethod
+    def test_sync_model_overwritten_each_call(sessions_dir):
+        """model：覆盖式，每次请求刷新"""
+        from jiuwenswarm.server.runtime.session.session_metadata import (
+            init_session_metadata,
+            sync_session_request_metadata,
+            get_session_metadata,
+        )
+
+        init_session_metadata(session_id="s1", model="glm-5")
+        sync_session_request_metadata(session_id="s1", model="glm-5.1")
+        _drain_queue()
+        assert get_session_metadata("s1")["model"] == "glm-5.1"
+        sync_session_request_metadata(session_id="s1", model="deepseek-v4")
+        _drain_queue()
+        assert get_session_metadata("s1")["model"] == "deepseek-v4"
+
+    @staticmethod
+    def test_sync_model_none_keeps_existing(sessions_dir):
+        """model=None 不更新（保留上次）"""
+        from jiuwenswarm.server.runtime.session.session_metadata import (
+            init_session_metadata,
+            sync_session_request_metadata,
+            get_session_metadata,
+        )
+
+        init_session_metadata(session_id="s1", model="glm-5")
+        sync_session_request_metadata(session_id="s1")  # 不传 model
+        _drain_queue()
+        assert get_session_metadata("s1")["model"] == "glm-5"
+
+    @staticmethod
+    def test_sync_last_user_message_at_overwritten_when_provided(sessions_dir):
+        """last_user_message_at：覆盖式，传入则刷新"""
+        from jiuwenswarm.server.runtime.session.session_metadata import (
+            init_session_metadata,
+            sync_session_request_metadata,
+            get_session_metadata,
+        )
+
+        init_session_metadata(session_id="s1")
+        sync_session_request_metadata(session_id="s1", last_user_message_at=1000.0)
+        _drain_queue()
+        assert get_session_metadata("s1")["last_user_message_at"] == 1000.0
+        sync_session_request_metadata(session_id="s1", last_user_message_at=2000.0)
+        _drain_queue()
+        assert get_session_metadata("s1")["last_user_message_at"] == 2000.0
+
+    @staticmethod
+    def test_sync_last_user_message_at_kept_when_not_provided(sessions_dir):
+        """last_user_message_at：不传则保留旧值"""
+        from jiuwenswarm.server.runtime.session.session_metadata import (
+            init_session_metadata,
+            sync_session_request_metadata,
+            get_session_metadata,
+        )
+
+        init_session_metadata(session_id="s1")
+        original = get_session_metadata("s1")["last_user_message_at"]
+        sync_session_request_metadata(session_id="s1")  # 不传
+        _drain_queue()
+        assert get_session_metadata("s1")["last_user_message_at"] == original
+
+    @staticmethod
+    def test_sync_mode_overwritten(sessions_dir):
+        """mode：覆盖式"""
+        from jiuwenswarm.server.runtime.session.session_metadata import (
+            init_session_metadata,
+            sync_session_request_metadata,
+            get_session_metadata,
+        )
+
+        init_session_metadata(session_id="s1", mode="code")
+        sync_session_request_metadata(session_id="s1", mode="agent")
+        _drain_queue()
+        assert get_session_metadata("s1")["mode"] == "agent"
+
+    @staticmethod
+    def test_sync_creates_when_missing(sessions_dir):
+        """会话元数据不存在 → 兜底新建分支补齐字段"""
+        from jiuwenswarm.server.runtime.session.session_metadata import (
+            sync_session_request_metadata,
+            get_session_metadata,
+        )
+
+        effective = sync_session_request_metadata(
+            session_id="s_new",
+            channel_id="web",
+            mode="code",
+            model="glm-5",
+            project_path="E:\\newproj",
+            last_user_message_at=1234.0,
+        )
+        _drain_queue()
+        assert effective == "E:\\newproj"
+        meta = get_session_metadata("s_new")
+        assert meta["project_path"] == "E:\\newproj"
+        assert meta["model"] == "glm-5"
+        assert meta["mode"] == "code"
+        assert meta["last_user_message_at"] == 1234.0
+        assert meta["status"] == "idle"
+
+    @staticmethod
+    def test_sync_creates_with_defaults_when_minimal(sessions_dir):
+        """兜底新建：全默认参数"""
+        from jiuwenswarm.server.runtime.session.session_metadata import (
+            sync_session_request_metadata,
+            get_session_metadata,
+        )
+
+        effective = sync_session_request_metadata(session_id="s_min")  # 全默认
+        _drain_queue()
+        assert effective is None  # 无 project_path
+        meta = get_session_metadata("s_min")
+        assert meta["project_path"] == ""
+        assert meta["model"] == ""
+        assert meta["mode"] == "unknown"
+        assert meta["status"] == "idle"
+        assert meta["last_user_message_at"] > 0
+
+
+# ===========================================================================
+# _sync_chat_request_metadata —— AgentServer 进程层薄封装（模块级函数）
+# ===========================================================================
+@pytest.fixture()
+def clean_model_env(monkeypatch):
+    """默认 MODEL_NAME 不设，避免环境污染；需要时再 monkeypatch.setenv"""
+    monkeypatch.delenv("MODEL_NAME", raising=False)
+
+
+def _make_agent_request(params=None, metadata=None, session_id="sess_1", channel_id="web"):
+    from jiuwenswarm.common.schema.agent import AgentRequest
+
+    return AgentRequest(
+        request_id="req-1",
+        channel_id=channel_id,
+        session_id=session_id,
+        params=params or {},
+        metadata=metadata,
+    )
+
+
+class TestSyncChatRequestMetadata:
+    """_sync_chat_request_metadata：从 AgentRequest 采集参数 + 委托 sync 写盘。
+
+    覆盖 model_name 缺失回退 MODEL_NAME、无 session_id 不写盘、
+    异常退化为返回请求候选值、兜底新建等场景。
+    """
+
+    @staticmethod
+    def test_collects_and_persists(sessions_dir, clean_model_env):
+        """正常路径：采集 model_name/project_dir/mode → 写盘 → 返回生效 project_path"""
+        from jiuwenswarm.server.agent_ws_server import _sync_chat_request_metadata
+        from jiuwenswarm.server.runtime.session.session_metadata import (
+            init_session_metadata,
+            get_session_metadata,
+        )
+
+        init_session_metadata(session_id="sess_1")  # project_path 为空
+        req = _make_agent_request(
+            params={"model_name": "glm-5", "mode": "code", "project_dir": "E:\\projA"},
+        )
+        effective = _sync_chat_request_metadata(req, "E:\\projA", "code")
+        _drain_queue()
+
+        assert effective == "E:\\projA"
+        meta = get_session_metadata("sess_1")
+        assert meta["model"] == "glm-5"
+        assert meta["mode"] == "code"
+        assert meta["project_path"] == "E:\\projA"
+        assert meta["channel_id"] == "web"
+        # last_user_message_at 被刷新为当前时刻
+        assert abs(meta["last_user_message_at"] - time.time()) < 5.0
+
+    @staticmethod
+    def test_project_dir_passed_through_to_sync(sessions_dir, clean_model_env):
+        """project_dir 参数透传给 sync，由 sync 决定锁定/告警"""
+        from jiuwenswarm.server.agent_ws_server import _sync_chat_request_metadata
+        from jiuwenswarm.server.runtime.session.session_metadata import (
+            init_session_metadata,
+            update_session_metadata,
+            get_session_metadata,
+        )
+
+        init_session_metadata(session_id="sess_1")
+        update_session_metadata(session_id="sess_1", project_path="E:\\locked")
+        _drain_queue()
+
+        # 请求带不同 project_dir，但磁盘已锁定 → 返回锁定值
+        req = _make_agent_request(params={"model_name": "glm-5"})
+        effective = _sync_chat_request_metadata(req, "E:\\other", "code")
+        _drain_queue()
+        assert effective == "E:\\locked"
+
+    @staticmethod
+    def test_falls_back_to_env_model_name(sessions_dir, monkeypatch):
+        """params 不带 model_name → 用 os.getenv("MODEL_NAME")"""
+        from jiuwenswarm.server.agent_ws_server import _sync_chat_request_metadata
+        from jiuwenswarm.server.runtime.session.session_metadata import (
+            init_session_metadata,
+            get_session_metadata,
+        )
+
+        monkeypatch.setenv("MODEL_NAME", "env-glm-5")
+        init_session_metadata(session_id="sess_1")
+        req = _make_agent_request(params={})  # 不带 model_name
+        _sync_chat_request_metadata(req, None, "agent")
+        _drain_queue()
+
+        assert get_session_metadata("sess_1")["model"] == "env-glm-5"
+
+    @staticmethod
+    def test_empty_model_name_falls_back_to_env(sessions_dir, monkeypatch):
+        """params.model_name 为空字符串 → 也回退 env"""
+        from jiuwenswarm.server.agent_ws_server import _sync_chat_request_metadata
+        from jiuwenswarm.server.runtime.session.session_metadata import (
+            init_session_metadata,
+            get_session_metadata,
+        )
+
+        monkeypatch.setenv("MODEL_NAME", "env-glm-5")
+        init_session_metadata(session_id="sess_1")
+        req = _make_agent_request(params={"model_name": "   "})
+        _sync_chat_request_metadata(req, None, "agent")
+        _drain_queue()
+
+        assert get_session_metadata("sess_1")["model"] == "env-glm-5"
+
+    @staticmethod
+    def test_no_model_no_env_keeps_existing(sessions_dir, clean_model_env):
+        """params 不带 model_name 且 env 也没设 → model=None → 不覆盖"""
+        from jiuwenswarm.server.agent_ws_server import _sync_chat_request_metadata
+        from jiuwenswarm.server.runtime.session.session_metadata import (
+            init_session_metadata,
+            get_session_metadata,
+        )
+
+        init_session_metadata(session_id="sess_1", model="original-model")
+        req = _make_agent_request(params={})
+        _sync_chat_request_metadata(req, None, "agent")
+        _drain_queue()
+
+        assert get_session_metadata("sess_1")["model"] == "original-model"
+
+    @staticmethod
+    def test_no_session_id_returns_project_dir_without_writing(
+        sessions_dir, clean_model_env
+    ):
+        """session_id 为空 → 返回 project_dir，不调 sync（不写盘）"""
+        from jiuwenswarm.server.agent_ws_server import _sync_chat_request_metadata
+
+        req = _make_agent_request(
+            params={"model_name": "glm-5"}, session_id=None,
+        )
+        result = _sync_chat_request_metadata(req, "E:\\reqproj", "code")
+        assert result == "E:\\reqproj"
+
+    @staticmethod
+    def test_empty_session_id_returns_project_dir(sessions_dir, clean_model_env):
+        from jiuwenswarm.server.agent_ws_server import _sync_chat_request_metadata
+
+        req = _make_agent_request(params={"model_name": "glm-5"}, session_id="   ")
+        assert _sync_chat_request_metadata(req, "E:\\p", "code") == "E:\\p"
+
+    @staticmethod
+    def test_returns_project_dir_on_sync_failure(
+        sessions_dir, clean_model_env, monkeypatch
+    ):
+        """sync 抛 OSError → 返回 project_dir，不抛"""
+        from jiuwenswarm.server.agent_ws_server import _sync_chat_request_metadata
+        import jiuwenswarm.server.runtime.session.session_metadata as sm
+
+        def _boom(**kwargs):
+            raise OSError("disk full")
+
+        monkeypatch.setattr(sm, "sync_session_request_metadata", _boom)
+
+        req = _make_agent_request(params={"model_name": "glm-5"}, session_id="sess_1")
+        result = _sync_chat_request_metadata(req, "E:\\reqproj", "code")
+        assert result == "E:\\reqproj", "异常时应退化为返回请求候选值"
+
+    @staticmethod
+    def test_returns_project_dir_on_value_error(
+        sessions_dir, clean_model_env, monkeypatch
+    ):
+        from jiuwenswarm.server.agent_ws_server import _sync_chat_request_metadata
+        import jiuwenswarm.server.runtime.session.session_metadata as sm
+
+        def _boom(**kwargs):
+            raise ValueError("bad data")
+
+        monkeypatch.setattr(sm, "sync_session_request_metadata", _boom)
+
+        req = _make_agent_request(params={"model_name": "glm-5"}, session_id="sess_1")
+        assert _sync_chat_request_metadata(req, "E:\\p", "code") == "E:\\p"
+
+    @staticmethod
+    def test_creates_metadata_when_missing(sessions_dir, clean_model_env):
+        """不先 init，直接 _sync → 经 sync 兜底新建分支创建"""
+        from jiuwenswarm.server.agent_ws_server import _sync_chat_request_metadata
+        from jiuwenswarm.server.runtime.session.session_metadata import (
+            get_session_metadata,
+        )
+
+        req = _make_agent_request(
+            params={"model_name": "glm-5", "project_dir": "E:\\newproj"},
+            session_id="s_new",
+        )
+        effective = _sync_chat_request_metadata(req, "E:\\newproj", "code")
+        _drain_queue()
+
+        assert effective == "E:\\newproj"
+        meta = get_session_metadata("s_new")
+        assert meta["model"] == "glm-5"
+        assert meta["mode"] == "code"
+        assert meta["project_path"] == "E:\\newproj"
+        assert meta["status"] == "idle"
+
+
+# ===========================================================================
+# session.get_metadata RPC handler —— Gateway 层只读出口
+# ===========================================================================
+class _FakeWebChannel:
+    """最小 WebChannel 桩，记录 register_method / send_response 调用。"""
+
+    def __init__(self):
+        self.methods: dict[str, object] = {}
+        self.responses: list[dict] = []
+
+    def register_method(self, name, handler):
+        self.methods[name] = handler
+
+    def on_connect(self, handler):
+        pass
+
+    async def send_response(self, ws, req_id, *, ok, payload=None, error=None, code=None):
+        self.responses.append(
+            {
+                "id": req_id,
+                "ok": ok,
+                "payload": payload,
+                "error": error,
+                "code": code,
+            }
+        )
+
+
+@pytest.fixture()
+def registered_channel(sessions_dir):
+    """注册所有 web handler，返回 _FakeWebChannel（含 session.get_metadata）"""
+    from jiuwenswarm.gateway.channel_manager.web.app_web_handlers import (
+        WebHandlersBindParams,
+        _register_web_handlers,
+    )
+
+    channel = _FakeWebChannel()
+    _register_web_handlers(
+        WebHandlersBindParams(
+            channel=channel,
+        )
+    )
+    return channel
+
+
+async def _call_method(method_table, method, params):
+    """调用 handler 并返回最后一个响应"""
+    handler = method_table.methods[method]
+    await handler(object(), "req-1", params, "sess-caller")
+    return method_table.responses[-1]
+
+
+class TestSessionGetMetadataHandler:
+    """session.get_metadata：按 session_id 返回单个会话元数据（只读出口）。"""
+
+    @staticmethod
+    @pytest.mark.asyncio
+    async def test_returns_metadata_for_existing_session(registered_channel, sessions_dir):
+        """存在的会话返回完整 metadata（含新字段）"""
+        from jiuwenswarm.server.runtime.session.session_metadata import (
+            init_session_metadata,
+            update_session_metadata,
+            _METADATA_QUEUE,
+        )
+
+        init_session_metadata(
+            session_id="sess_x",
+            channel_id="web",
+            project_path="E:\\myproj",
+            model="glm-5",
+        )
+        update_session_metadata(
+            session_id="sess_x",
+            mode="agent.plan",
+            model="glm-5",
+            project_path="E:\\myproj",
+            last_user_message_at=1234.0,
+        )
+        _METADATA_QUEUE.join()
+
+        resp = await _call_method(
+            registered_channel, "session.get_metadata", {"session_id": "sess_x"}
+        )
+
+        assert resp["ok"] is True
+        payload = resp["payload"]
+        assert payload["session_id"] == "sess_x"
+        assert payload["mode"] == "agent.plan"
+        assert payload["model"] == "glm-5"
+        assert payload["project_path"] == "E:\\myproj"
+        assert payload["last_user_message_at"] == 1234.0
+        assert payload["status"] == "idle"
+
+    @staticmethod
+    @pytest.mark.asyncio
+    async def test_missing_session_id_returns_bad_request(registered_channel):
+        """session_id 缺失 → BAD_REQUEST"""
+        resp = await _call_method(
+            registered_channel, "session.get_metadata", {"session_id": ""}
+        )
+        assert resp["ok"] is False
+        assert resp["code"] == "BAD_REQUEST"
+
+        # params 不是 dict
+        resp2 = await _call_method(registered_channel, "session.get_metadata", None)
+        assert resp2["ok"] is False
+        assert resp2["code"] == "BAD_REQUEST"
+
+    @staticmethod
+    @pytest.mark.asyncio
+    async def test_nonexistent_session_returns_not_found(registered_channel):
+        """不存在的会话 → NOT_FOUND"""
+        resp = await _call_method(
+            registered_channel, "session.get_metadata", {"session_id": "no_such_session"}
+        )
+        assert resp["ok"] is False
+        assert resp["code"] == "NOT_FOUND"
+
+    @staticmethod
+    @pytest.mark.asyncio
+    async def test_method_registered(registered_channel):
+        """handler 已注册为 session.get_metadata"""
+        assert "session.get_metadata" in registered_channel.methods
+
+    @staticmethod
+    @pytest.mark.asyncio
+    async def test_single_session_isolation(registered_channel, sessions_dir):
+        """单会话隔离：A 会话的查询不返回 B 会话的数据"""
+        from jiuwenswarm.server.runtime.session.session_metadata import (
+            init_session_metadata,
+            _METADATA_QUEUE,
+        )
+
+        init_session_metadata(session_id="sess_A", model="modelA", project_path="E:\\A")
+        init_session_metadata(session_id="sess_B", model="modelB", project_path="E:\\B")
+        _METADATA_QUEUE.join()
+
+        resp_a = await _call_method(
+            registered_channel, "session.get_metadata", {"session_id": "sess_A"}
+        )
+        resp_b = await _call_method(
+            registered_channel, "session.get_metadata", {"session_id": "sess_B"}
+        )
+
+        assert resp_a["payload"]["model"] == "modelA"
+        assert resp_a["payload"]["project_path"] == "E:\\A"
+        assert resp_b["payload"]["model"] == "modelB"
+        assert resp_b["payload"]["project_path"] == "E:\\B"

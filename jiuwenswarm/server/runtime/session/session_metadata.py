@@ -173,6 +173,8 @@ def init_session_metadata(
     title: str = "",
     mode: str = "unknown",
     team_name: str = "",
+    project_path: str = "",
+    model: str = "",
 ) -> None:
     """初始化会话元数据(同步写,确保创建后立即可读)"""
     metadata = {
@@ -186,6 +188,10 @@ def init_session_metadata(
         "mode": mode,
         "team_name": team_name,
         "round_id": 0,
+        "project_path": project_path,
+        "model": model,
+        "last_user_message_at": _current_timestamp(),
+        "status": "idle",
     }
     _write_metadata_sync(session_id, metadata)
 
@@ -204,6 +210,9 @@ def update_session_metadata(
     mode: str | None = None,
     team_name: str | None = None,
     accent_color: str | None = None,
+    project_path: str | None = None,
+    model: str | None = None,
+    last_user_message_at: float | None = None,
 ) -> None:
     """更新会话元数据(异步写入,不阻塞调用方)
 
@@ -232,6 +241,10 @@ def update_session_metadata(
             "mode": mode if mode is not None else "unknown",
             "team_name": team_name or "",
             "round_id": 0,
+            "project_path": project_path or "",
+            "model": model or "",
+            "last_user_message_at": last_user_message_at if last_user_message_at is not None else _current_timestamp(),
+            "status": "idle",
         }
         # 首次创建时写入 channel_metadata
         if channel_metadata:
@@ -248,6 +261,15 @@ def update_session_metadata(
             metadata["team_name"] = team_name
         if accent_color is not None:
             metadata["accent_color"] = accent_color
+        # model：覆盖式——每次请求更新为本次模型
+        if model is not None:
+            metadata["model"] = model
+        # last_user_message_at：覆盖式——仅在用户消息时由调用方传入
+        if last_user_message_at is not None:
+            metadata["last_user_message_at"] = last_user_message_at
+        # project_path：首次锁定——仅当当前值为空时写入，后续不覆盖
+        if project_path and not metadata.get("project_path"):
+            metadata["project_path"] = project_path
         # 显式清除优先级高于 title 入参
         if clear_title:
             metadata["title"] = ""
@@ -272,6 +294,98 @@ def update_session_metadata(
     _enqueue_write(session_id, metadata)
 
 
+def sync_session_request_metadata(
+    *,
+    session_id: str,
+    channel_id: str | None = None,
+    mode: str | None = None,
+    model: str | None = None,
+    project_path: str | None = None,
+    last_user_message_at: float | None = None,
+) -> str | None:
+    """校验请求带来的参数与磁盘 metadata.json 是否需要更新，并按字段语义写入。
+
+    本接口是「请求级参数 → 会话级元数据」的统一校验/同步入口，职责是：
+    对比本次请求携带的参数与磁盘已持久化的 metadata，按各字段语义决定写不写。
+    不负责参数来源解析（那由渠道层 ``resolve_request_project_dir`` 等纯解析函数完成）。
+
+    字段语义：
+      - project_path：**首次锁定，不可改**。磁盘为空则写入请求值（首次锁定）；
+        磁盘已有值且与请求值不一致 → 记 warning（说明会话被换项目目录了，有问题），**不覆盖**。
+      - model：**覆盖式**，每次请求刷新为本次模型。
+      - last_user_message_at：**覆盖式**，调用方传入则刷新。
+      - mode：**覆盖式**（与 append_history_record 联动一致，重复无副作用）。
+
+    Args:
+        session_id: 会话 ID（空则直接返回 None，不做任何操作）
+        channel_id / mode / model / last_user_message_at: 请求级参数，按上述语义写入
+        project_path: 请求携带的项目目录候选值，用于首次锁定
+
+    Returns:
+        本会话**生效**的 project_path：磁盘已锁定则返回锁定值，否则返回请求候选值
+        （首次锁定后即为该值）；无 session_id 或无候选值时返回 None。
+    """
+    session_id = (session_id or "").strip()
+    if not session_id:
+        return None
+
+    metadata = _read_metadata(session_id)
+    effective_project_path: str | None = None
+
+    if not metadata:
+        # 会话元数据不存在：兜底新建（外部渠道隐式创建 session 的场景）
+        now = _current_timestamp()
+        metadata = {
+            "session_id": session_id,
+            "channel_id": channel_id or "",
+            "user_id": "",
+            "created_at": now,
+            "last_message_at": now,
+            "title": "",
+            "message_count": 0,
+            "mode": mode if mode is not None else "unknown",
+            "team_name": "",
+            "round_id": 0,
+            "project_path": project_path or "",
+            "model": model or "",
+            "last_user_message_at": last_user_message_at if last_user_message_at is not None else now,
+            "status": "idle",
+        }
+        effective_project_path = project_path or None
+    else:
+        # 校验 project_path：首次锁定 / 不一致告警不覆盖
+        locked_project = metadata.get("project_path")
+        if isinstance(locked_project, str) and locked_project.strip():
+            # 已锁定：以磁盘值为准
+            effective_project_path = locked_project.strip()
+            # 请求带了不同值 → 告警（会话被换项目目录，有问题），但不覆盖
+            if project_path and project_path.strip() and project_path.strip() != effective_project_path:
+                logger.warning(
+                    "会话 %s 的 project_path 已锁定为 %s，忽略请求带来的不一致值 %s（锁定不可改）",
+                    session_id, effective_project_path, project_path.strip(),
+                )
+        elif project_path and project_path.strip():
+            # 未锁定且请求带了值 → 首次锁定写入
+            metadata["project_path"] = project_path.strip()
+            effective_project_path = project_path.strip()
+
+        # model：覆盖式
+        if model is not None:
+            metadata["model"] = model
+        # last_user_message_at：覆盖式
+        if last_user_message_at is not None:
+            metadata["last_user_message_at"] = last_user_message_at
+        # mode：覆盖式
+        if mode is not None:
+            metadata["mode"] = mode
+        if channel_id is not None:
+            metadata["channel_id"] = channel_id
+        metadata["last_message_at"] = _current_timestamp()
+
+    _enqueue_write(session_id, metadata)
+    return effective_project_path
+
+
 def get_session_metadata(session_id: str, cache_bust: bool = False) -> dict[str, Any]:
     """获取会话元数据
 
@@ -280,11 +394,17 @@ def get_session_metadata(session_id: str, cache_bust: bool = False) -> dict[str,
         cache_bust: 强制跳过缓存，直接从磁盘读取（用于跨进程同步场景）
     """
     metadata = _read_metadata(session_id, cache_bust)
-    # 清理已有会话中可能被误写入的系统注入标签标题（<system-reminder>、<file-content> 等）
-    if isinstance(metadata, dict) and metadata.get("title"):
-        sanitized = _sanitize_title(metadata["title"])
-        if sanitized != metadata["title"]:
-            metadata["title"] = sanitized
+    if isinstance(metadata, dict) and metadata:
+        # 清理已有会话中可能被误写入的系统注入标签标题（<system-reminder>、<file-content> 等）
+        if metadata.get("title"):
+            sanitized = _sanitize_title(metadata["title"])
+            if sanitized != metadata["title"]:
+                metadata["title"] = sanitized
+        # 兜底：存量会话补默认值，前端永远能拿到稳定 schema
+        metadata.setdefault("project_path", "")
+        metadata.setdefault("model", "")
+        metadata.setdefault("last_user_message_at", metadata.get("created_at", 0.0))
+        metadata.setdefault("status", "idle")
     return metadata
 
 

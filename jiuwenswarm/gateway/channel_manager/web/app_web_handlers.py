@@ -1521,6 +1521,35 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             "offset": offset,
         })
 
+    async def _session_get_metadata(ws, req_id, params, session_id):
+        """返回单个会话的元数据（mode / model / project_path / last_user_message_at 等）。
+
+        按单个 session_id 读取，O(1) 不扫描目录，会话再多也不卡；相互隔离。
+        供前端恢复会话时还原模型/模式/项目路径选择器。
+        """
+        if not isinstance(params, dict):
+            await channel.send_response(
+                ws, req_id, ok=False, error="params must be object", code="BAD_REQUEST",
+            )
+            return
+        sid = params.get("session_id")
+        if not isinstance(sid, str) or not sid.strip():
+            await channel.send_response(
+                ws, req_id, ok=False, error="session_id is required", code="BAD_REQUEST",
+            )
+            return
+        sid = sid.strip()
+
+        from jiuwenswarm.server.runtime.session.session_metadata import get_session_metadata
+        # cache_bust=True 强制读盘，跨进程（Gateway 读 / AgentServer 写）拿最新
+        meta = get_session_metadata(sid, cache_bust=True)
+        if not meta:
+            await channel.send_response(
+                ws, req_id, ok=False, error="session not found", code="NOT_FOUND",
+            )
+            return
+        await channel.send_response(ws, req_id, ok=True, payload=meta)
+
     async def _session_create(ws, req_id, params, session_id):
         """创建一个新 session（在 agent/sessions 下创建一个新目录）。"""
         if not isinstance(params, dict):
@@ -2542,6 +2571,7 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
     channel.register_method("session.list", _session_list)
     channel.register_method("session.create", _session_create)
     channel.register_method("session.delete", _session_delete)
+    channel.register_method("session.get_metadata", _session_get_metadata)
 
     channel.register_method("path.get", _path_get)
     channel.register_method("path.set", _path_set)
