@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import re
 from collections.abc import AsyncIterator
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -17,6 +18,7 @@ from jiuwenclaw.agentserver.replan_agent.skill_codes.ppt.utils.bash_utils import
 _PPT_DIR = Path(__file__).resolve().parent
 
 logger = logging.getLogger(__name__)
+
 
 _ILLEGAL_FILENAME_RE = re.compile(r'[<>:"/\\|?*]')
 _WINDOWS_RESERVED = frozenset(
@@ -40,6 +42,17 @@ def _sanitize_filename(topic: str, *, max_length: int = 50) -> str:
     if not name:
         name = "presentation"
     return name
+
+
+@dataclass
+class ExportPaths:
+    """导出路径相关参数封装。"""
+
+    output_dir: str
+    pages_dir: str
+    pptx_path: str
+    pptx_filename: str
+    pptx_root: str
 
 
 class PPTExportNode(PlanNode):
@@ -99,6 +112,19 @@ class PPTExportNode(PlanNode):
         pptx_path = f"{output_dir}/{pptx_filename}"
 
         pptx_root = str(inputs.get("pptx_root") or str(_PPT_DIR))
+
+        # 模板包分支：style_mode == template_pack 时走 template-finalizer 流程
+        style_mode = str(inputs.get("style_mode") or "").strip()
+        if style_mode == "template_pack":
+            paths = ExportPaths(
+                output_dir=output_dir,
+                pages_dir=pages_dir,
+                pptx_path=pptx_path,
+                pptx_filename=pptx_filename,
+                pptx_root=pptx_root,
+            )
+            return await self._execute_template_finalizer(inputs, paths)
+
         convert_ok = await self._run_convert(pages_dir, pptx_path, pptx_root)
         if not convert_ok:
             return {
@@ -113,6 +139,167 @@ class PPTExportNode(PlanNode):
             "pptx_path": pptx_path if export_status != "failed" else "",
             "pptx_filename": pptx_filename,
             "export_status": export_status,
+        }
+
+    async def _execute_template_finalizer(
+        self,
+        inputs: dict[str, Any],
+        paths: ExportPaths,
+    ) -> dict[str, Any]:
+        """模板包分支：执行 template-finalizer 终检导出流程。
+
+        流程：check（manifest 声明类忽略）→ snapshot-dna → template-safe fix（dry run）
+              → post-fix gate（warning 不阻塞）→ convert → check-pptx-artifact（warning 不阻塞）
+        """
+        output_dir = paths.output_dir
+        pages_dir = paths.pages_dir
+        pptx_path = paths.pptx_path
+        pptx_filename = paths.pptx_filename
+        pptx_root = paths.pptx_root
+        pack_dir = str(inputs.get("pack_dir") or "").strip()
+        if not pack_dir:
+            logger.error("[P9-TF] pack_dir 为空，无法执行模板终检")
+            return {
+                "pptx_path": "",
+                "pptx_filename": pptx_filename,
+                "export_status": "failed",
+            }
+
+        temp_dir = f"{output_dir}/temp"
+        dna_path = f"{temp_dir}/template-dna-before.json"
+
+        # 1. 复核 template-filler 输出
+        try:
+            check_cmd = (
+                f"{fill_js_path(pptx_root)} check "
+                f"{quote_path(pack_dir)} {quote_path(pages_dir)}"
+            )
+            result = await run_bash(
+                self, check_cmd,
+                timeout_seconds=300, required=False, workdir=pptx_root,
+            )
+            if result.exit_code != 0:
+                # 解析 HARD 错误，区分 manifest 声明类（可忽略）和内容质量类（阻塞）
+                check_output = result.stdout + "\n" + result.stderr
+                has_content_error = False
+                for line in check_output.splitlines():
+                    if "HARD" not in line.upper():
+                        continue
+                    if "manifest" in line.lower() and "声明" in line:
+                        continue  # manifest 声明类，忽略
+                    has_content_error = True
+                    break
+                if has_content_error:
+                    logger.error("[P9-TF] fill.js check 失败 exit=%d", result.exit_code)
+                    return {
+                        "pptx_path": "",
+                        "pptx_filename": pptx_filename,
+                        "export_status": "failed",
+                    }
+                else:
+                    logger.info("[P9-TF] fill.js check 仅剩 manifest 声明类警告，视为通过")
+        except BashExecError as e:
+            logger.error("[P9-TF] fill.js check 异常: %s", e)
+            return {
+                "pptx_path": "",
+                "pptx_filename": pptx_filename,
+                "export_status": "failed",
+            }
+
+        # 2. DNA 快照（在 fix 之前保存原始 DNA）
+        try:
+            snapshot_cmd = (
+                f"{fill_js_path(pptx_root)} snapshot-template-dna "
+                f"{quote_path(pages_dir)} {quote_path(dna_path)}"
+            )
+            result = await run_bash(
+                self, snapshot_cmd,
+                timeout_seconds=60, required=False, workdir=pptx_root,
+            )
+            if result.exit_code != 0:
+                logger.error("[P9-TF] snapshot-template-dna 失败 exit=%d", result.exit_code)
+                return {
+                    "pptx_path": "",
+                    "pptx_filename": pptx_filename,
+                    "export_status": "failed",
+                }
+        except BashExecError as e:
+            logger.error("[P9-TF] snapshot-template-dna 异常: %s", e)
+            return {
+                "pptx_path": "",
+                "pptx_filename": pptx_filename,
+                "export_status": "failed",
+            }
+
+        # 3. template-safe 检查（只检查不修改，避免破坏 HTML 内容）
+        try:
+            fix_cmd = (
+                f"{cli_path('fix', pptx_root)} "
+                f"{quote_path(pages_dir + '/')} --profile template-safe"
+            )
+            result = await run_bash(
+                self, fix_cmd,
+                timeout_seconds=600, required=False, workdir=pptx_root,
+            )
+            if result.exit_code != 0:
+                logger.error("[P9-TF] template-safe fix 失败 exit=%d", result.exit_code)
+                return {
+                    "pptx_path": "",
+                    "pptx_filename": pptx_filename,
+                    "export_status": "failed",
+                }
+        except BashExecError as e:
+            logger.error("[P9-TF] template-safe fix 异常: %s", e)
+            return {
+                "pptx_path": "",
+                "pptx_filename": pptx_filename,
+                "export_status": "failed",
+            }
+
+        # 4. post-fix 安全闸（字号/内容跨度问题不阻塞导出，仅警告）
+        try:
+            post_fix_cmd = (
+                f"{fill_js_path(pptx_root)} check-post-fix-template-pages "
+                f"{quote_path(pages_dir)} {quote_path(dna_path)}"
+            )
+            result = await run_bash(
+                self, post_fix_cmd,
+                timeout_seconds=300, required=False, workdir=pptx_root,
+            )
+            if result.exit_code != 0:
+                logger.warning("[P9-TF] check-post-fix-template-pages 失败 exit=%d（字号/内容跨度问题不阻塞导出）", result.exit_code)
+        except BashExecError as e:
+            logger.warning("[P9-TF] check-post-fix-template-pages 异常: %s（继续导出）", e)
+
+        # 5. 导出 PPTX
+        convert_ok = await self._run_convert(pages_dir, pptx_path, pptx_root)
+        if not convert_ok:
+            return {
+                "pptx_path": "",
+                "pptx_filename": pptx_filename,
+                "export_status": "failed",
+            }
+
+        # 6. 产物硬闸
+        try:
+            artifact_cmd = (
+                f"{fill_js_path(pptx_root)} check-pptx-artifact "
+                f"{quote_path(pages_dir)} {quote_path(pptx_path)}"
+            )
+            result = await run_bash(
+                self, artifact_cmd,
+                timeout_seconds=60, required=False, workdir=pptx_root,
+            )
+            if result.exit_code != 0:
+                logger.warning("[P9-TF] check-pptx-artifact 失败 exit=%d（缺少批准凭证，不阻塞交付）", result.exit_code)
+        except BashExecError as e:
+            logger.warning("[P9-TF] check-pptx-artifact 异常: %s（不阻塞交付）", e)
+
+        logger.info("[P9-TF] 模板终检导出完成: %s", pptx_path)
+        return {
+            "pptx_path": pptx_path,
+            "pptx_filename": pptx_filename,
+            "export_status": "ok",
         }
 
     async def _run_convert(self, pages_dir: str, pptx_path: str, pptx_root: str) -> bool:

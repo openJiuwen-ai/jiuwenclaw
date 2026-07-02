@@ -1375,58 +1375,6 @@ class PageWorkerNode(PlanNode):
         lines.append("")
         return "\n".join(lines)
 
-    def _build_no_data_research(
-        self,
-        pages: list[dict[str, Any]],
-        topic: str,
-        search_mode: str,
-        research_depth: str,
-    ) -> str:
-        lines = [
-            f"# {topic} — 大纲研究报告",
-            f"> 生成时间：自动 | 研究深度：{research_depth} | 搜索模式：{search_mode}",
-            "",
-            "> ⚠️ **无研究数据降级模式**：未执行外部搜索且未提供用户素材，本报告仅输出大纲骨架，"
-            "需后续阶段补充具体数据。",
-            "",
-            "---",
-            "",
-            "## 逐页研究成果",
-            "",
-        ]
-        for page in pages:
-            page_num = page.get("page_number", "")
-            title = page.get("title", "")
-            page_type = page.get("page_type", page.get("type", ""))
-            data_needs = page.get("data_needs", []) or []
-            queries = page.get("research_queries", []) or []
-
-            lines.append(f"### P{page_num}: {title}")
-            lines.append(f"> 页面类型：{page_type}")
-            lines.append("")
-            lines.append("**核心论点**：[数据有限，基于大纲规划]")
-            lines.append("")
-            lines.append("#### PPT 内容建议")
-            lines.append(f"- **推荐主标题**：{title}")
-            lines.append("- **核心论点**：")
-            if queries:
-                for q in queries[:5]:
-                    lines.append(f"  - {q}（待补充数据）")
-            else:
-                lines.append("  - 待补充")
-            lines.append("- **关键数据清单**（无研究数据，待后续补充）：")
-            lines.append("  | 数据项 | 数值/结果 | 来源 | 时间 | 数据类型 |")
-            lines.append("  | --- | --- | --- | --- | --- |")
-            if data_needs:
-                for need in data_needs[:3]:
-                    lines.append(f"  | {need} | 待补充 | 待补充 | 待补充 | 待补充 |")
-            else:
-                lines.append("  | 待补充 | 待补充 | 待补充 | 待补充 | 待补充 |")
-            lines.append("- **数据有限**，本页未执行外部搜索，亦无用户素材。")
-            lines.append("")
-
-        return "\n".join(lines)
-
     async def _validate_single_page(
         self,
         page: dict[str, Any],
@@ -1621,7 +1569,12 @@ class DeepResearchNode(PlanNode):
             research_paths = {}
 
         logger.info("[P6] 深度研究完成，已落盘 %d 个 research-P{N}.md", len(research_paths))
-        return {"research_paths": research_paths}
+        return {
+            "research_paths": research_paths,
+            "__artifact__": {
+                "files": [{"path": p, "desc": "深度研究报告"} for p in research_paths.values()] if research_paths else [],
+            },
+        }
 
     async def _execute_stream(self, inputs: dict[str, Any]) -> AsyncIterator[dict[str, Any]]:
         result = await self._execute(inputs)

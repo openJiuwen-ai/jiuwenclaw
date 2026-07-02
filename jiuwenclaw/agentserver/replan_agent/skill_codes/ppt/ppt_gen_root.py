@@ -8,6 +8,7 @@ from jiuwenclaw.agentserver.replan_agent.skill_codes.ppt.pipeline_init import Pi
 from jiuwenclaw.agentserver.replan_agent.skill_codes.ppt.intent_classify import IntentClassifyNode
 from jiuwenclaw.agentserver.replan_agent.skill_codes.ppt.requirement_collect import RequirementCollectNode
 from jiuwenclaw.agentserver.replan_agent.skill_codes.ppt.document_parse import DocumentParseNode
+from jiuwenclaw.agentserver.replan_agent.skill_codes.ppt.template_context import TemplateContextNode
 from jiuwenclaw.agentserver.replan_agent.skill_codes.ppt.content_plan import ContentPlanNode
 from jiuwenclaw.agentserver.replan_agent.skill_codes.ppt.outline_review import OutlineReviewNode
 from jiuwenclaw.agentserver.replan_agent.skill_codes.ppt.deep_research import DeepResearchNode
@@ -50,6 +51,7 @@ class PPTGenRootNode(PlanNode):
         self._p1 = IntentClassifyNode()
         self._p2 = RequirementCollectNode()
         self._p3 = DocumentParseNode()
+        self._p3_5 = TemplateContextNode()
         self._tail_plans = [
             ContentPlanNode(),
             OutlineReviewNode(),
@@ -69,6 +71,7 @@ class PPTGenRootNode(PlanNode):
                 self._p1,
                 self._p3,
                 self._p2,
+                self._p3_5,
                 *self._tail_plans,
             ],
         )
@@ -123,6 +126,9 @@ class PPTGenRootNode(PlanNode):
         await self._run_subplan(self._p0, inputs, results)
         await self._run_subplan(self._p1, inputs, results)
         await self._run_p3_and_p2(inputs, results)
+
+        # P3.5 模板叙事上下文预处理（条件执行，节点内部判断 style_mode）
+        await self._run_subplan(self._p3_5, inputs, results)
 
         for subplan in self._tail_plans:
             await self._run_subplan(subplan, inputs, results)
@@ -266,7 +272,13 @@ class PPTGenRootNode(PlanNode):
         async for chunk in self._run_p3_and_p2_stream(inputs, results, total_steps=total_steps):
             yield chunk
 
-        for index, subplan in enumerate(self._tail_plans, start=5):
+        # P3.5 模板叙事上下文预处理（条件执行，节点内部判断 style_mode）
+        async for chunk in self._run_subplan_stream(
+            self._p3_5, inputs, results, index=5, total_steps=total_steps,
+        ):
+            yield chunk
+
+        for index, subplan in enumerate(self._tail_plans, start=6):
             async for chunk in self._run_subplan_stream(
                 subplan,
                 inputs,

@@ -71,6 +71,7 @@ class StylePrepareNode(PlanNode):
         )
 
     async def _execute(self, inputs: dict[str, Any]) -> dict[str, Any]:
+        style_mode = str(inputs.get("style_mode") or "").strip()
         style_id = str(inputs.get("style_id", "")).strip() or "free"
         topic = str(inputs.get("topic", "")).strip()
         style_description = str(inputs.get("style_description", "")).strip()
@@ -80,7 +81,29 @@ class StylePrepareNode(PlanNode):
             logger.error("[P7] output_dir 为空，无法落盘风格文件")
             return {"style_file_path": ""}
 
+        # 模板包模式：跳过风格文件读取，直接透传 pack_dir
+        if style_mode == "template_pack":
+            pack_dir = str(inputs.get("pack_dir") or "").strip()
+            if not pack_dir:
+                logger.error("[P7] style_mode=template_pack 但 pack_dir 为空")
+                return {"style_file_path": "", "pack_dir": ""}
+            logger.info("[P7] 模板包模式，跳过风格文件生成，pack_dir=%s", pack_dir)
+            return {
+                "style_file_path": "",
+                "pack_dir": pack_dir,
+                "__artifact__": {"files": [{"path": pack_dir, "desc": "PPT模板包目录"}]},
+            }
+
         pptx_root = str(inputs.get("pptx_root", "")).strip()
+
+        # 模板包降级：模板不完整时从 pack_dir 读取模板 md 内容作为 style_description
+        if inputs.get("template_pack_degraded"):
+            pack_dir = str(inputs.get("pack_dir") or "").strip()
+            if pack_dir:
+                template_md = await self._read_template_md(pack_dir)
+                if template_md:
+                    style_description = template_md
+                    logger.info("[P7] 模板包降级模式，使用模板 md 内容作为风格描述")
 
         style_content = ""
         if style_id in _PRESET_STYLES:
@@ -105,6 +128,30 @@ class StylePrepareNode(PlanNode):
             "style_file_path": style_file_path,
             "__artifact__": {"files": [{"path": style_file_path, "desc": "PPT风格文件"}]},
         }
+
+    async def _read_template_md(self, pack_dir: str) -> str:
+        """读取模板包目录下的模板 md 文件内容（降级时使用）。"""
+        pack_path = Path(pack_dir)
+        md_files = sorted(p for p in pack_path.iterdir() if p.suffix == ".md" and p.is_file())
+        if not md_files:
+            logger.warning("[P7] 模板包目录下未找到 md 文件: %s", pack_dir)
+            return ""
+        md_path = md_files[0]
+        if not self.has_tool("read_file"):
+            logger.warning("[P7] read_file 工具不可用，无法读取模板 md")
+            return ""
+        try:
+            result = await self.call_tool("read_file", file_path=str(md_path))
+            content = PptCommon.parse_tool_file_content(result)
+            if content:
+                logger.info("[P7] 读取模板 md 成功: %s", md_path)
+                return content
+            logger.warning("[P7] 模板 md 文件为空: %s", md_path)
+        except Exception as e:
+            if isinstance(e, AbortError):
+                raise
+            logger.warning("[P7] 读取模板 md 失败 %s: %s", md_path, e)
+        return ""
 
     async def _load_preset_style(self, style_id: str, pptx_root: str = "") -> str:
         candidates: list[Path] = []
