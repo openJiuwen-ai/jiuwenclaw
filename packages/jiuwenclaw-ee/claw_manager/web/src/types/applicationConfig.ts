@@ -95,3 +95,27 @@ export interface PermissionsConfig {
 export interface ListItemsResult<T> {
   items: T[];
 }
+
+export type LogLevel = 'DEBUG' | 'INFO' | 'WARNING' | 'ERROR' | 'CRITICAL' | 'NOTSET';
+
+export interface LoggingConfig {
+  id?: number;
+  jiuwenclaw_id: string;
+  level: LogLevel;
+  console_level?: LogLevel | null;
+  gateway?: LogLevel | null;
+  channel?: LogLevel | null;
+  agent_server?: LogLevel | null;
+  full?: LogLevel | null;
+  created_at?: string | null;
+  updated_at?: string | null;
+}
+
+export interface LoggingConfigUpsertBody {
+  level: LogLevel;
+  console_level?: LogLevel | null;
+  gateway?: LogLevel | null;
+  channel?: LogLevel | null;
+  agent_server?: LogLevel | null;
+  full?: LogLevel | null;
+}

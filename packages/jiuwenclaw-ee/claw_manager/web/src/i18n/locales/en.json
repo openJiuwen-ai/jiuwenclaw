@@ -129,6 +129,7 @@
     "tabs": {
       "channel": "Channel",
       "logMasking": "Log Masking",
+      "logging": "Log Levels",
       "permissions": "Permissions"
     },
     "channel": {
@@ -164,6 +165,23 @@
       "searchPlaceholder": "Search rule ID, name, description, match regex pattern, replacement, priority, or source",
       "fieldRequired": "Please fill in {{field}}",
       "deleteConfirm": "Delete this log masking rule?"
+    },
+    "logging": {
+      "intro": "Maps to config.yaml logging. Saving writes to Manager DB and hot-reloads Gateway; without managed config the instance uses local config.yaml.",
+      "managed": "Manager managed",
+      "yamlFallback": "Using config.yaml",
+      "resetToYaml": "Remove managed config",
+      "deleteConfirm": "Remove Manager-managed logging config? Gateway will fall back to config.yaml.",
+      "deleted": "Managed config removed; Gateway will fall back to config.yaml",
+      "level": "Default level (level)",
+      "levelHint": "Used when a log file level is not set separately",
+      "consoleLevel": "Console level (console_level)",
+      "consoleLevelHint": "Console output; falls back to level if omitted",
+      "gateway": "Gateway log (gateway)",
+      "channel": "Channel log (channel)",
+      "agentServer": "AgentServer log (agent_server)",
+      "full": "Full log (full)",
+      "fullHint": "Level for full.log aggregate output"
     },
     "permissions": {
       "sections": {
