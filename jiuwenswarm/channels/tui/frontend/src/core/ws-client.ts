@@ -15,6 +15,7 @@ export class WsClient {
   private ws: WebSocket | null = null;
   private readonly url: string;
   private readonly token: string;
+  private readonly userId: string;
   private handlers: FrameHandler[] = [];
   private pending = new Map<string, PendingRequest>();
   private retryCount = 0;
@@ -26,9 +27,10 @@ export class WsClient {
   private closeCode = 0;
   private closeReason = "";
 
-  constructor(url: string, token = "") {
+  constructor(url: string, token = "", userId = "") {
     this.url = url;
     this.token = token;
+    this.userId = userId;
   }
 
   get status(): ConnectionStatus {
@@ -115,6 +117,9 @@ export class WsClient {
     const headers: Record<string, string> = {};
     if (this.token) {
       headers.Authorization = `Bearer ${this.token}`;
+    }
+    if (this.userId) {
+      headers["X-User-Id"] = this.userId;
     }
 
     this.ws = new WebSocket(this.url, { headers });
