@@ -37,6 +37,7 @@ import type {
   LogMaskingRuleCreateBody,
   LogMaskingRuleUpdateBody,
   ListItemsResult,
+  PermissionsConfig,
 } from '../types';
 
 // 平台管理 API(claw_manager) 与 认证/目录 API(独立认证服务) 两个反代前缀。
@@ -708,4 +709,15 @@ export const LogMaskingRuleApi = {
     http<void>(`${instanceBase(instanceId)}/log-masking-rules/${encodeURIComponent(ruleId)}`, {
       method: 'DELETE',
     }),
+};
+
+export const PermissionsApi = {
+  get: (instanceId: string) => http<PermissionsConfig>(`${instanceBase(instanceId)}/permissions`),
+  upsert: (instanceId: string, body: Record<string, unknown>) =>
+    http<PermissionsConfig>(`${instanceBase(instanceId)}/permissions`, {
+      method: 'PUT',
+      body: { body },
+    }),
+  remove: (instanceId: string) =>
+    http<void>(`${instanceBase(instanceId)}/permissions`, { method: 'DELETE' }),
 };

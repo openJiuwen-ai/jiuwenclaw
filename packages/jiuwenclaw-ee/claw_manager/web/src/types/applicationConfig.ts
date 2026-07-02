@@ -47,6 +47,51 @@ export interface LogMaskingRuleCreateBody {
 
 export type LogMaskingRuleUpdateBody = Partial<LogMaskingRuleCreateBody>;
 
+export type PermissionAction = 'allow' | 'ask' | 'deny';
+export type PermissionRuleAction = 'allow' | 'deny';
+
+export interface PermissionToolEntry {
+  key: string;
+  name: string;
+  action: PermissionAction;
+}
+
+export interface PermissionRuleEntry {
+  key: string;
+  id: string;
+  description: string;
+  pattern: string;
+  action: PermissionRuleAction;
+}
+
+export interface PermissionsFormState {
+  enabled: boolean;
+  defaults: PermissionAction;
+  denyGuidanceMessage: string;
+  tools: PermissionToolEntry[];
+  rules: PermissionRuleEntry[];
+  approvalOverrides: unknown[];
+  ownerScopes: Record<string, unknown>;
+  externalDirectory?: Record<string, unknown>;
+  commandIntentEnabled: boolean;
+  commandIntentTimeout: number;
+  commandIntentExtraBody: Record<string, unknown>;
+  fileGuardWorkspaceRwEnabled: boolean;
+  fileGuardGlobalJson: string;
+  fileGuardTrustedExecJson: string;
+  fileGuardToolBindingsJson: string;
+}
+
+export interface PermissionsConfig {
+  id?: number;
+  jiuwenclaw_id: string;
+  body: Record<string, unknown>;
+  source?: string;
+  revision?: number;
+  created_at?: string | null;
+  updated_at?: string | null;
+}
+
 export interface ListItemsResult<T> {
   items: T[];
 }
