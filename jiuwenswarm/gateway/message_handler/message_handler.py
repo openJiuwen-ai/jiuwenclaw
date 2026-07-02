@@ -3554,6 +3554,16 @@ class MessageHandler(ABC):
                 rid, channel_id, session_id, request_metadata,
             )
             raise  # 重新抛出，让调用者知道任务被取消
+        except RuntimeError as exc:
+            if "AgentServer WebSocket connection closed" not in str(exc):
+                raise
+            await self._publish_stream_connection_error(
+                rid,
+                channel_id,
+                session_id,
+                request_metadata,
+                str(exc),
+            )
         finally:
             if (
                 not cancelled
