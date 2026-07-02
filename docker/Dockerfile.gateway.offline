@@ -11,7 +11,9 @@ COPY . /app/jiuwenclaw/
 
 ENV PATH=$PATH:/home/app/.local/bin
 
-RUN pip install -e ".[all]" \
+RUN sed -i '/openjiuwen_runtime_foundation/d' pyproject.toml
+
+RUN pip install -e . \
     git+${AGENT_RUNTIME_REPOS}@${AGENT_RUNTIME_BRANCH}#subdirectory=foundation \
     git+${AGENT_RUNTIME_REPOS}@${AGENT_RUNTIME_BRANCH}#subdirectory=management \
     kubernetes==35.0.0 \
