@@ -839,6 +839,7 @@
   },
   "chatUi": {
     "copyMessage": "Copy message",
+    "copied": "Copied",
     "stopReading": "Stop reading",
     "readMessage": "Read message",
     "fileExpired": "Expired",

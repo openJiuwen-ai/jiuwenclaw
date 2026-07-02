@@ -39,6 +39,8 @@ export function MessageItem({ message, autoSpeak = false }: MessageItemProps) {
   const [hasAutoSpoken, setHasAutoSpoken] = useState(false);
   const [isAudioPlaying, setIsAudioPlaying] = useState(false);
   const [isExpanded, setIsExpanded] = useState(false);
+  const [isCopied, setIsCopied] = useState(false);
+  const copyTimerRef = useRef<number | null>(null);
   const audioRef = useRef<HTMLAudioElement | null>(null);
 
   // TTS
@@ -115,17 +117,42 @@ export function MessageItem({ message, autoSpeak = false }: MessageItemProps) {
 
   const handleCopy = useCallback(async () => {
     if (!content) return;
+    const text = typeof content === 'string' ? content : String(content);
+    let ok = false;
     try {
-      await navigator.clipboard.writeText(content);
+      if (navigator.clipboard && window.isSecureContext) {
+        await navigator.clipboard.writeText(text);
+        ok = true;
+      } else {
+        throw new Error('clipboard api unavailable');
+      }
     } catch {
+      // Fallback: 兼容非安全上下文（HTTP）或 clipboard 权限被拒
       const textarea = document.createElement('textarea');
-      textarea.value = content;
+      textarea.value = text;
       textarea.style.position = 'fixed';
+      textarea.style.top = '0';
+      textarea.style.left = '0';
       textarea.style.opacity = '0';
       document.body.appendChild(textarea);
+      textarea.focus();
       textarea.select();
-      document.execCommand('copy');
+      try {
+        ok = document.execCommand('copy');
+      } catch {
+        ok = false;
+      }
       document.body.removeChild(textarea);
+    }
+    if (ok) {
+      setIsCopied(true);
+      if (copyTimerRef.current != null) {
+        window.clearTimeout(copyTimerRef.current);
+      }
+      copyTimerRef.current = window.setTimeout(() => {
+        setIsCopied(false);
+        copyTimerRef.current = null;
+      }, 4000);
     }
   }, [content]);
 
@@ -359,6 +386,10 @@ export function MessageItem({ message, autoSpeak = false }: MessageItemProps) {
   useEffect(() => {
     return () => {
       stopGeneratedAudio();
+      if (copyTimerRef.current != null) {
+        window.clearTimeout(copyTimerRef.current);
+        copyTimerRef.current = null;
+      }
     };
   }, [stopGeneratedAudio]);
 
@@ -454,12 +485,24 @@ export function MessageItem({ message, autoSpeak = false }: MessageItemProps) {
           {showCopy && (
             <button
               onClick={handleCopy}
-              className="p-1.5 rounded-md transition-colors hover:text-accent hover:bg-secondary"
-              title={t('chatUi.copyMessage')}
+              className={clsx(
+                'p-1.5 rounded-md transition-colors',
+                isCopied
+                  ? 'text-ok bg-ok/10'
+                  : 'hover:text-accent hover:bg-secondary'
+              )}
+              title={isCopied ? t('chatUi.copied', '已复制') : t('chatUi.copyMessage', '复制消息')}
+              aria-label={isCopied ? t('chatUi.copied', '已复制') : t('chatUi.copyMessage', '复制消息')}
             >
-              <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={1.5}>
-                <path strokeLinecap="round" strokeLinejoin="round" d="M8.25 6.75h7.5m-7.5 3h7.5m-7.5 3h4.5M6.75 3h7.5A2.25 2.25 0 0116.5 5.25v13.5A2.25 2.25 0 0114.25 21h-7.5A2.25 2.25 0 014.5 18.75V5.25A2.25 2.25 0 016.75 3z" />
-              </svg>
+              {isCopied ? (
+                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2}>
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" />
+                </svg>
+              ) : (
+                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={1.5}>
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M8.25 6.75h7.5m-7.5 3h7.5m-7.5 3h4.5M6.75 3h7.5A2.25 2.25 0 0116.5 5.25v13.5A2.25 2.25 0 0114.25 21h-7.5A2.25 2.25 0 014.5 18.75V5.25A2.25 2.25 0 016.75 3z" />
+                </svg>
+              )}
             </button>
           )}
 
