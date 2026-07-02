@@ -11,6 +11,10 @@ _current_device_context: ContextVar[DeviceCommandContext | None] = ContextVar(
     "current_device_context",
     default=None,
 )
+_current_agent_request: ContextVar[AgentRequest | None] = ContextVar(
+    "current_agent_request",
+    default=None,
+)
 
 
 def set_device_context(context: DeviceCommandContext) -> Token:
@@ -23,6 +27,18 @@ def get_device_context() -> DeviceCommandContext | None:
 
 def reset_device_context(token: Token) -> None:
     _current_device_context.reset(token)
+
+
+def set_current_agent_request(request: AgentRequest) -> Token:
+    return _current_agent_request.set(request)
+
+
+def get_current_agent_request() -> AgentRequest | None:
+    return _current_agent_request.get()
+
+
+def reset_current_agent_request(token: Token) -> None:
+    _current_agent_request.reset(token)
 
 
 def build_device_context_from_request(request: AgentRequest) -> DeviceCommandContext:

@@ -5559,6 +5559,23 @@ class JiuWenSwarmDeepAdapter:
         cid = request.channel_id
         query = request.params.get("query", "")
         mode = request.params.get("mode", "agent.plan")
+        request_metadata = request.metadata if isinstance(request.metadata, dict) else {}
+        is_xiaoyi_request = (
+            str(cid or "").strip().lower() == "xiaoyi"
+            or bool(request_metadata.get("xiaoyi_session_id"))
+            or bool(request_metadata.get("xiaoyi_task_id"))
+        )
+        if is_xiaoyi_request:
+            logger.info(
+                "[GUI_AGENT_DIAG] phase=RUNNER_STREAM_BEGIN request_id=%s "
+                "session_id=%s channel_id=%s query=%r mode=%s metadata=%r",
+                rid,
+                session_id,
+                cid,
+                query,
+                mode,
+                request_metadata,
+            )
 
         # Team 模式处理
         if mode in ("team", "team.plan", "code.team"):
@@ -5732,6 +5749,16 @@ class JiuWenSwarmDeepAdapter:
             inputs = dict(inputs)
             await self._sync_prompt_attachments_for_request(session_id)
             async for chunk in Runner.run_agent_streaming(self._instance, inputs):
+                if is_xiaoyi_request:
+                    logger.info(
+                        "[GUI_AGENT_DIAG] phase=RUNNER_RAW_EVENT request_id=%s "
+                        "session_id=%s chunk_type=%s payload=%r raw_chunk=%r",
+                        rid,
+                        session_id,
+                        getattr(chunk, "type", type(chunk).__name__),
+                        getattr(chunk, "payload", None),
+                        chunk,
+                    )
                 if not (hasattr(chunk, "type") and hasattr(chunk, "payload")):
                     parsed = self._parse_stream_chunk(chunk)
                     if parsed is not None:
@@ -5905,6 +5932,17 @@ class JiuWenSwarmDeepAdapter:
                         is_complete=False,
                     )
 
+            if is_xiaoyi_request:
+                logger.info(
+                    "[GUI_AGENT_DIAG] phase=RUNNER_STREAM_END request_id=%s "
+                    "session_id=%s has_streamed_content=%s "
+                    "accumulated_text=%r accumulated_reasoning=%r",
+                    rid,
+                    session_id,
+                    has_streamed_content,
+                    accumulated_text,
+                    accumulated_reasoning,
+                )
             if accumulated_text:
                 yield AgentResponseChunk(
                     request_id=rid,

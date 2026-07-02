@@ -216,7 +216,26 @@ class ChannelManager(ABC):
                 channel = self._channels.get(msg.channel_id)
                 if channel:
                     try:
+                        if str(msg.channel_id or "").strip().lower() == "xiaoyi":
+                            logger.info(
+                                "[GUI_AGENT_DIAG] phase=CHANNEL_DISPATCH_BEGIN "
+                                "message_id=%s session_id=%s event_type=%s "
+                                "payload=%r channel_type=%s",
+                                msg.id,
+                                msg.session_id,
+                                getattr(msg.event_type, "value", msg.event_type),
+                                msg.payload,
+                                type(channel).__name__,
+                            )
                         await channel.send(msg)
+                        if str(msg.channel_id or "").strip().lower() == "xiaoyi":
+                            logger.info(
+                                "[GUI_AGENT_DIAG] phase=CHANNEL_DISPATCH_DONE "
+                                "message_id=%s session_id=%s event_type=%s",
+                                msg.id,
+                                msg.session_id,
+                                getattr(msg.event_type, "value", msg.event_type),
+                            )
                     except Exception as e:
                         logger.error("send to channel %s: %s", msg.channel_id, e, exc_info=True)
                         if msg.id and msg.id.startswith("cron-push-"):
