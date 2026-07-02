@@ -4179,6 +4179,9 @@ class JiuWenClawDeepAdapter:
             else None
         )
         freeze_rail.attach_qa_artifact(mgr)
+        assembly_rail = self._qa_block_assembly_rail
+        if assembly_rail is not None:
+            assembly_rail.attach_freeze_rail(freeze_rail)
 
     async def _handle_qa_block_freeze_rail_for_plan(self) -> None:
         await self._handle_qa_block_rails_for_plan()
@@ -4673,6 +4676,63 @@ class JiuWenClawDeepAdapter:
                 selected_names.append(name)
         return selected_names
 
+    async def _freeze_qa_block_before_abort(
+        self,
+        session_id: str,
+        *,
+        reason: str,
+        persist_checkpoint: bool = False,
+    ) -> None:
+        """Freeze in-progress QA before interrupt abort (plan mode only)."""
+        if not session_id or self._instance is None:
+            return
+        if self._task_planning_rail is None:
+            return
+
+        freeze_session = None
+        freeze_owned = False
+        if self._qa_block_freeze_rail is not None:
+            try:
+                freeze_session, freeze_owned = await _resolve_session_for_checkpoint(
+                    self._instance,
+                    session_id,
+                    card=self._instance.card,
+                )
+                if freeze_owned:
+                    await freeze_session.pre_run(inputs=None)
+                await self._qa_block_freeze_rail.freeze_current_qa_sync(
+                    session_id,
+                    agent=self._instance,
+                    session=freeze_session,
+                    status="interrupted",
+                )
+                context_engine = resolve_context_engine(self._instance)
+                if context_engine is not None and freeze_session is not None:
+                    actual_session = getattr(freeze_session, "_parent", freeze_session) or freeze_session
+                    await context_engine.save_contexts(actual_session)
+                    await post_agent_execute_for_session(freeze_session)
+            except Exception as exc:
+                logger.warning(
+                    "[JiuWenClawDeepAdapter] qa_block %s freeze failed session_id=%s: %s",
+                    reason,
+                    session_id,
+                    exc,
+                    exc_info=True,
+                )
+            finally:
+                if freeze_owned and freeze_session is not None:
+                    await freeze_session.post_run()
+
+        if persist_checkpoint:
+            # freeze_session stays None when freeze_rail is absent or freeze failed;
+            # persist_checkpoint_for_session accepts session=None in that case.
+            await persist_checkpoint_for_session(
+                self._instance,
+                session_id,
+                card=self._instance.card,
+                session=freeze_session if freeze_session is not None and not freeze_owned else None,
+            )
+
     async def process_interrupt(self, request: AgentRequest) -> AgentResponse:
         """处理 interrupt 请求.
 
@@ -4718,6 +4778,13 @@ class JiuWenClawDeepAdapter:
 
         elif intent == "supplement":
             # supplement: 停止当前执行，但保留 todo（新任务会根据 todo 待办继续执行）
+            session_id = str(request.session_id or "").strip()
+            if session_id:
+                await self._freeze_qa_block_before_abort(
+                    session_id,
+                    reason="supplement",
+                    persist_checkpoint=True,
+                )
             # 1. 通过 rail abort 在 checkpoint 抛 CancelledError，打断当前内层执行
             if self._stream_event_rail is not None:
                 self._stream_event_rail.abort()
@@ -4747,46 +4814,11 @@ class JiuWenClawDeepAdapter:
             is_plan_mode = self._task_planning_rail is not None
 
             # plan 模式：abort 前 freeze + 落盘，保留 cancel 前 tool/assistant 上下文
-            freeze_session = None
-            freeze_owned = False
             if is_plan_mode and session_id and self._instance is not None:
-                if self._qa_block_freeze_rail is not None:
-                    try:
-                        freeze_session, freeze_owned = await _resolve_session_for_checkpoint(
-                            self._instance,
-                            session_id,
-                            card=self._instance.card,
-                        )
-                        if freeze_owned:
-                            await freeze_session.pre_run(inputs=None)
-                        await self._qa_block_freeze_rail.freeze_current_qa_sync(
-                            session_id,
-                            agent=self._instance,
-                            session=freeze_session,
-                            status="interrupted",
-                        )
-                        context_engine = resolve_context_engine(self._instance)
-                        if context_engine is not None and freeze_session is not None:
-                            actual_session = (
-                                getattr(freeze_session, "_parent", freeze_session) or freeze_session
-                            )
-                            await context_engine.save_contexts(actual_session)
-                            await post_agent_execute_for_session(freeze_session)
-                    except Exception as exc:
-                        logger.warning(
-                            "[JiuWenClawDeepAdapter] qa_block cancel freeze failed session_id=%s: %s",
-                            session_id,
-                            exc,
-                            exc_info=True,
-                        )
-                    finally:
-                        if freeze_owned and freeze_session is not None:
-                            await freeze_session.post_run()
-                await persist_checkpoint_for_session(
-                    self._instance,
+                await self._freeze_qa_block_before_abort(
                     session_id,
-                    card=self._instance.card,
-                    session=freeze_session if not freeze_owned else None,
+                    reason="cancel",
+                    persist_checkpoint=True,
                 )
 
             # 1. 通过 rail abort 在 checkpoint 抛 CancelledError，打断当前内层执行

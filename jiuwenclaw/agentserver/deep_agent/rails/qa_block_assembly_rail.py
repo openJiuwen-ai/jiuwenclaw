@@ -11,6 +11,9 @@ from typing import Any
 from openjiuwen.core.context_engine.qa_artifact.store import QAArtifactStore
 from openjiuwen.core.context_engine.qa_artifact.assembly_state import clear_assembly_qa_artifact_state
 from openjiuwen.core.context_engine.qa_artifact.window import make_processor_ctx
+from openjiuwen.core.context_engine.qa_block.messages import (
+    is_other_qa_message,
+)
 from openjiuwen.core.context_engine.qa_block.catalog import (
     build_catalog_section,
     build_catalog_text,
@@ -27,22 +30,128 @@ from openjiuwen.core.context_engine.qa_block.selector import (
     fallback_rule_last_n,
     resolve_selector_model,
 )
+from openjiuwen.core.context_engine.qa_block.schema import QABlockEntry, QABlockRegistry
 from openjiuwen.core.context_engine.qa_block.store import QABlockStore
-from openjiuwen.core.single_agent.rail.base import AgentCallbackContext
+from openjiuwen.core.session.interaction.interactive_input import InteractiveInput
+from openjiuwen.core.single_agent.rail.base import AgentCallbackContext, InvokeInputs
 from openjiuwen.harness.rails.base import DeepAgentRail
 
 from jiuwenclaw.agentserver.deep_agent.plan_pause_helpers import (
     resolve_actual_session,
     resolve_context_engine,
+    session_id_from_session,
 )
 
 logger = logging.getLogger(__name__)
 
-_ASSEMBLED_KEY = "_qa_block_assembled"
 _WINDOW_QAS_KEY = "_window_qas"
 _LAYER_KEY = "_qa_block_layer"
-_CURRENT_QA_KEY = "_current_qa_id"
 _PRELOADED_QA_IDS_KEY = "_preloaded_qa_ids"
+_PENDING_ORPHAN_SALVAGE_KEY = "_qa_block_pending_orphan_salvage"
+_ASSEMBLY_COMMITTED_QA_ID_KEY = "_qa_block_assembly_committed_qa_id"
+
+
+def _is_resume_invoke(ctx: AgentCallbackContext) -> bool:
+    inputs = ctx.inputs
+    if isinstance(inputs, InvokeInputs):
+        return isinstance(inputs.query, InteractiveInput)
+    return False
+
+
+def _is_frozen_entry(entry: QABlockEntry | None) -> bool:
+    return bool(
+        entry is not None
+        and entry.is_history
+        and entry.freeze_committed_at
+    )
+
+
+def _get_assembly_committed_qa_id(session: Any) -> str | None:
+    getter = getattr(session, "get_state", None)
+    if not callable(getter):
+        return None
+    qa_id = getter(_ASSEMBLY_COMMITTED_QA_ID_KEY)
+    return str(qa_id) if qa_id else None
+
+
+def _set_assembly_committed_qa_id(session: Any, qa_id: str) -> None:
+    updater = getattr(session, "update_state", None)
+    if callable(updater):
+        updater({_ASSEMBLY_COMMITTED_QA_ID_KEY: qa_id})
+
+
+def clear_assembly_committed_qa_id(session: Any) -> None:
+    """Clear per-user-turn assembly marker (also called from freeze rail)."""
+    updater = getattr(session, "update_state", None)
+    if callable(updater):
+        updater({_ASSEMBLY_COMMITTED_QA_ID_KEY: None})
+
+
+def _context_has_active_qa_work(ctx: AgentCallbackContext, qa_id: str) -> bool:
+    """True when context carries native messages for the active QA turn.
+
+    Aligns with ``_group_messages_by_qa`` / ``is_other_qa_message``: ReAct
+    messages without explicit ``metadata.qa_id`` belong to ``current_qa_id``.
+    """
+    context = ctx.context
+    if context is None:
+        return False
+    getter = getattr(context, "get_messages", None)
+    if not callable(getter):
+        return False
+    for message in getter() or ():
+        if not is_other_qa_message(message, qa_id):
+            return True
+    return False
+
+
+def _should_skip_reassembly(
+    ctx: AgentCallbackContext,
+    session: Any,
+    active_qa_id: str,
+    entry: QABlockEntry | None,
+) -> bool:
+    if _is_frozen_entry(entry):
+        return False
+    if (
+        entry is None
+        and _is_resume_invoke(ctx)
+        and not (ctx.context.get_messages() if ctx.context is not None else None)
+    ):
+        return False
+    if _get_assembly_committed_qa_id(session) == active_qa_id:
+        return True
+    if _context_has_active_qa_work(ctx, active_qa_id):
+        return True
+    return False
+
+
+def _clear_current_qa_pointer(session: Any, registry: QABlockRegistry, qa_id: str) -> None:
+    if registry.current_qa_id != qa_id:
+        return
+    registry.current_qa_id = None
+    save_registry(session, registry)
+    if _get_assembly_committed_qa_id(session) == qa_id:
+        clear_assembly_committed_qa_id(session)
+
+
+def _set_pending_orphan_salvage(session: Any, qa_id: str) -> None:
+    updater = getattr(session, "update_state", None)
+    if callable(updater):
+        updater({_PENDING_ORPHAN_SALVAGE_KEY: qa_id})
+
+
+def _pop_pending_orphan_salvage(session: Any) -> str | None:
+    getter = getattr(session, "get_state", None)
+    if not callable(getter):
+        return None
+    qa_id = getter(_PENDING_ORPHAN_SALVAGE_KEY)
+    if not qa_id:
+        return None
+    updater = getattr(session, "update_state", None)
+    if callable(updater):
+        updater({_PENDING_ORPHAN_SALVAGE_KEY: None})
+    return str(qa_id)
 
 
 class JiuClawQABlockAssemblyRail(DeepAgentRail):
@@ -51,15 +160,140 @@ class JiuClawQABlockAssemblyRail(DeepAgentRail):
     def __init__(self, config: QABlockConfig | None = None):
         super().__init__()
         self._config = config or QABlockConfig()
+        self._freeze_rail: Any | None = None
 
     @property
     def enabled(self) -> bool:
         return self._config.enabled
 
-    async def before_model_call(self, ctx: AgentCallbackContext) -> None:
+    def attach_freeze_rail(self, freeze_rail: Any | None) -> None:
+        """Wire freeze rail for orphan QA salvage on new user invoke."""
+        self._freeze_rail = freeze_rail
+
+    async def before_invoke(self, ctx: AgentCallbackContext) -> None:
+        """Detect orphan QA left from a prior user invoke.
+
+        Registered as a DeepAgent outer-only hook (not bridged to inner
+        ReAct invoke). Task-loop iterations only fire before_model_call;
+        they do not re-enter this hook, so in-progress QA within the same
+        outer invoke is not subject to orphan deferral here.
+        """
         if not self._config.enabled:
             return
-        if ctx.extra.get(_ASSEMBLED_KEY):
+        if _is_resume_invoke(ctx):
+            logger.debug("[QABlockAssemblyRail] before_invoke skipped: resume invoke")
+            return
+
+        session = resolve_actual_session(ctx.session)
+        if session is None:
+            logger.debug("[QABlockAssemblyRail] before_invoke skipped: no session")
+            return
+        clear_assembly_committed_qa_id(session)
+
+        session_id = session_id_from_session(session)
+        registry = load_registry(session)
+        qa_id = registry.current_qa_id
+        if not qa_id:
+            logger.debug(
+                "[QABlockAssemblyRail] before_invoke skipped: no current_qa_id session_id=%s",
+                session_id,
+            )
+            return
+
+        entry = registry.blocks.get(qa_id)
+        if _is_frozen_entry(entry):
+            _clear_current_qa_pointer(session, registry, qa_id)
+            logger.info(
+                "[QABlockAssemblyRail] repaired stale current_qa_id session_id=%s qa_id=%s",
+                session_id,
+                qa_id,
+            )
+            return
+
+        if entry is None or not entry.freeze_committed_at:
+            _set_pending_orphan_salvage(session, qa_id)
+            logger.info(
+                "[QABlockAssemblyRail] deferred orphan salvage session_id=%s qa_id=%s",
+                session_id,
+                qa_id,
+            )
+
+    async def _salvage_orphan_qa(
+        self,
+        ctx: AgentCallbackContext,
+        session: Any,
+        session_id: str,
+        qa_id: str,
+    ) -> bool:
+        freeze_rail = self._freeze_rail
+        if freeze_rail is None:
+            return False
+        try:
+            await freeze_rail.freeze_current_qa_sync(
+                session_id,
+                agent=ctx.agent,
+                session=session,
+                status="interrupted",
+            )
+        except Exception as exc:
+            logger.warning(
+                "[QABlockAssemblyRail] orphan salvage freeze failed session_id=%s qa_id=%s: %s",
+                session_id,
+                qa_id,
+                exc,
+                exc_info=True,
+            )
+            return False
+
+        registry = load_registry(session, force_reload=True)
+        entry = registry.blocks.get(qa_id)
+        if _is_frozen_entry(entry):
+            if registry.current_qa_id == qa_id:
+                _clear_current_qa_pointer(session, registry, qa_id)
+            logger.info(
+                "[QABlockAssemblyRail] orphan QA salvaged session_id=%s qa_id=%s",
+                session_id,
+                qa_id,
+            )
+            return True
+
+        logger.warning(
+            "[QABlockAssemblyRail] freeze completed but entry not fully frozen "
+            "session_id=%s qa_id=%s current_qa_id=%s",
+            session_id,
+            qa_id,
+            registry.current_qa_id,
+        )
+        return registry.current_qa_id != qa_id
+
+    async def _run_deferred_orphan_salvage(
+        self,
+        ctx: AgentCallbackContext,
+        session: Any,
+        session_id: str,
+    ) -> None:
+        pending = _pop_pending_orphan_salvage(session)
+        if not pending:
+            return
+
+        registry = load_registry(session)
+        if registry.current_qa_id != pending:
+            return
+
+        salvaged = await self._salvage_orphan_qa(ctx, session, session_id, pending)
+        if not salvaged:
+            if self._freeze_rail is not None:
+                registry = load_registry(session, force_reload=True)
+            _clear_current_qa_pointer(session, registry, pending)
+            logger.warning(
+                "[QABlockAssemblyRail] deferred salvage failed, cleared orphan "
+                "session_id=%s qa_id=%s",
+                session_id,
+                pending,
+            )
+
+    async def before_model_call(self, ctx: AgentCallbackContext) -> None:
+        if not self._config.enabled:
             return
         if ctx.context is None:
             logger.info("[QABlockAssemblyRail] skipped: context not ready")
@@ -75,10 +309,48 @@ class JiuClawQABlockAssemblyRail(DeepAgentRail):
             return
 
         assembly_start = time.perf_counter()
-        session_id = session.get_session_id() if hasattr(session, "get_session_id") else ""
+        session_id = session_id_from_session(session)
+        await self._run_deferred_orphan_salvage(ctx, session, session_id)
+
+        registry = load_registry(session)
+        if registry.current_qa_id:
+            active_qa_id = registry.current_qa_id
+            entry = registry.blocks.get(active_qa_id)
+            if _is_frozen_entry(entry):
+                _clear_current_qa_pointer(session, registry, active_qa_id)
+            elif (
+                entry is None
+                and _is_resume_invoke(ctx)
+                and not (ctx.context.get_messages() if ctx.context is not None else None)
+            ):
+                logger.warning(
+                    "[QABlockAssemblyRail] resume with empty context, clearing stale "
+                    "current_qa_id session_id=%s qa_id=%s",
+                    session_id,
+                    active_qa_id,
+                )
+                _clear_current_qa_pointer(session, registry, active_qa_id)
+            elif _should_skip_reassembly(ctx, session, active_qa_id, entry):
+                logger.info(
+                    "[QABlockAssemblyRail] skip re-assembly session_id=%s active_qa_id=%s "
+                    "committed=%s has_native_work=%s",
+                    session_id,
+                    active_qa_id,
+                    _get_assembly_committed_qa_id(session) == active_qa_id,
+                    _context_has_active_qa_work(ctx, active_qa_id),
+                )
+                return
+            else:
+                logger.warning(
+                    "[QABlockAssemblyRail] stale current_qa_id without assembly commit or "
+                    "native work session_id=%s qa_id=%s",
+                    session_id,
+                    active_qa_id,
+                )
+                _clear_current_qa_pointer(session, registry, active_qa_id)
+
         context = ctx.context
         clear_assembly_qa_artifact_state(context)
-        registry = load_registry(session)
         registry = maybe_compact_catalog_l1(registry, self._config)
 
         workspace_root = ""
@@ -165,6 +437,7 @@ class JiuClawQABlockAssemblyRail(DeepAgentRail):
         qa_id, _ = allocate_qa_id(registry)
         registry.current_qa_id = qa_id
         save_registry(session, registry)
+        _set_assembly_committed_qa_id(session, qa_id)
 
         window_qas = layer.build_window_qas(context)
 
@@ -180,10 +453,8 @@ class JiuClawQABlockAssemblyRail(DeepAgentRail):
                     context=context,
                 )
 
-        ctx.extra[_ASSEMBLED_KEY] = True
         ctx.extra[_WINDOW_QAS_KEY] = window_qas
         ctx.extra[_LAYER_KEY] = layer
-        ctx.extra[_CURRENT_QA_KEY] = qa_id
 
         preloaded = ctx.extra.get(_PRELOADED_QA_IDS_KEY, [])
         elapsed_ms = (time.perf_counter() - assembly_start) * 1000

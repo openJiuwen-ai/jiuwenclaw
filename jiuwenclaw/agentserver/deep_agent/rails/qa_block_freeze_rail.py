@@ -21,6 +21,9 @@ from jiuwenclaw.agentserver.deep_agent.plan_pause_helpers import (
     resolve_actual_session,
     resolve_context_engine,
 )
+from jiuwenclaw.agentserver.deep_agent.rails.qa_block_assembly_rail import (
+    clear_assembly_committed_qa_id,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -184,6 +187,7 @@ class JiuClawQABlockFreezeRail(DeepAgentRail):
             post_commit=lambda commit, s=actual_session, c=context: self._on_freeze_commit(s, c, commit),
         )
         if entry is not None:
+            clear_assembly_committed_qa_id(actual_session)
             await context_engine.save_contexts(actual_session)
             logger.info(
                 "[QABlockFreezeRail] cancel sync freeze done session_id=%s qa_id=%s status=%s",
@@ -245,6 +249,7 @@ class JiuClawQABlockFreezeRail(DeepAgentRail):
         if entry is None:
             return
 
+        clear_assembly_committed_qa_id(session)
         ctx.extra[_FREEZE_DONE_KEY] = entry.qa_id
         await context_engine.save_contexts(session)
         logger.info(

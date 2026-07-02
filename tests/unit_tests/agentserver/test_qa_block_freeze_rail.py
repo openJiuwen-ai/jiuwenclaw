@@ -1,5 +1,4 @@
 # coding: utf-8
-# pylint: disable=protected-access
 """Tests for JiuClawQABlockFreezeRail freeze-produce scheduling."""
 
 from __future__ import annotations
@@ -9,6 +8,7 @@ import importlib.util
 import pathlib
 import unittest
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import MagicMock, patch
 
 from openjiuwen.core.context_engine.qa_block.freezer import FreezeCommitResult
@@ -35,6 +35,14 @@ def _make_commit(*, qa_id: str = "qa_001") -> FreezeCommitResult:
     return FreezeCommitResult(entry=entry, native_messages=[SimpleNamespace(content="msg")])
 
 
+async def _schedule_freeze_artifact_produce_async(rail: Any, **kwargs: Any) -> None:
+    await getattr(rail, "_schedule_freeze_artifact_produce_async")(**kwargs)
+
+
+def _on_freeze_commit(rail: Any, session: Any, context: Any, commit: FreezeCommitResult) -> None:
+    getattr(rail, "_on_freeze_commit")(session, context, commit)
+
+
 class TestQABlockFreezeRailProduceSchedule(unittest.IsolatedAsyncioTestCase):
     def setUp(self) -> None:
         self.rail = JiuClawQABlockFreezeRail()
@@ -47,11 +55,12 @@ class TestQABlockFreezeRailProduceSchedule(unittest.IsolatedAsyncioTestCase):
         context = MagicMock()
         context.workspace_dir.return_value = "/tmp/ws"
         context.get_session_ref.return_value = SimpleNamespace(get_session_id=lambda: "session-1")
-        context._sys_operation = None
+        setattr(context, "_sys_operation", None)
         session = SimpleNamespace()
         messages = [SimpleNamespace(content="native")]
 
-        await self.rail._schedule_freeze_artifact_produce_async(
+        await _schedule_freeze_artifact_produce_async(
+            self.rail,
             _session=session,
             context=context,
             qa_id="qa_002",
@@ -69,7 +78,8 @@ class TestQABlockFreezeRailProduceSchedule(unittest.IsolatedAsyncioTestCase):
 
     async def test_schedule_async_skips_when_mgr_missing(self) -> None:
         self.rail.attach_qa_artifact(None)
-        await self.rail._schedule_freeze_artifact_produce_async(
+        await _schedule_freeze_artifact_produce_async(
+            self.rail,
             _session=object(),
             context=MagicMock(),
             qa_id="qa_001",
@@ -79,7 +89,8 @@ class TestQABlockFreezeRailProduceSchedule(unittest.IsolatedAsyncioTestCase):
 
     async def test_schedule_async_skips_when_workspace_missing(self) -> None:
         self.rail.workspace = None
-        await self.rail._schedule_freeze_artifact_produce_async(
+        await _schedule_freeze_artifact_produce_async(
+            self.rail,
             _session=object(),
             context=MagicMock(),
             qa_id="qa_001",
@@ -91,9 +102,10 @@ class TestQABlockFreezeRailProduceSchedule(unittest.IsolatedAsyncioTestCase):
         commit = _make_commit(qa_id="qa_003")
         context = MagicMock()
         session = SimpleNamespace()
+        schedule_attr = "_schedule_freeze_artifact_produce_async"
 
-        with patch.object(self.rail, "_schedule_freeze_artifact_produce_async", autospec=True) as mock_async:
-            self.rail._on_freeze_commit(session, context, commit)
+        with patch.object(self.rail, schedule_attr, autospec=True) as mock_async:
+            _on_freeze_commit(self.rail, session, context, commit)
             await asyncio.sleep(0)
 
         mock_async.assert_awaited_once_with(
@@ -106,7 +118,7 @@ class TestQABlockFreezeRailProduceSchedule(unittest.IsolatedAsyncioTestCase):
     def test_on_freeze_commit_without_running_loop_is_noop(self) -> None:
         commit = _make_commit()
         with patch.object(asyncio, "get_running_loop", side_effect=RuntimeError):
-            self.rail._on_freeze_commit(object(), MagicMock(), commit)
+            _on_freeze_commit(self.rail, object(), MagicMock(), commit)
         self.mgr.schedule_freeze_artifact_produce.assert_not_called()
 
 

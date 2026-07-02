@@ -434,6 +434,7 @@ react:
       full_compact_target_tokens: 92000    # 单轮 full compact 目标总窗 token（须 < trigger_total_tokens）
       # full_compact_max_qas: 4            # 每波最多并发压缩几个 QA（默认 4）
       # full_compact_max_waves: 8            # 单轮最多循环几波；仍超则整窗兜底（默认 8）
+      # active_qa_keep_tail: 2               # 压当前 QA 时保留最近 N 条原文（默认 2）
 
       # --- 块内目录（catalog.json）生成 ---
       catalog_long_message_tokens: 800     # 单 round 超此值 → offload + 一行摘要；否则原文进目录
