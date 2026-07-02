@@ -9,6 +9,23 @@
   display: none;
 }
 
+.chat-layout {
+  background: var(--panel);
+}
+
+:root[data-theme="light"] .chat-layout {
+  background: var(--shell-surface-light);
+}
+
+.chat-workspace {
+  overflow: hidden;
+  background: var(--card);
+}
+
+.chat-layout__surface {
+  background: var(--card);
+}
+
 .app-toast-wrapper {
   position: fixed;
   left: 50%;

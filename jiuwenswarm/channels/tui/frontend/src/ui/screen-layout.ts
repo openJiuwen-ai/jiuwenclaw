@@ -32,6 +32,10 @@ export interface ScreenLayoutOptions {
   onTranscriptScrollOffsetChange?: (offset: number) => void;
   btwOverlayScrollOffset?: number;
   onBtwOverlayScrollOffsetChange?: (offset: number) => void;
+  /** 当前 btw overlay 在历史中的下标（-1 无），用于提示 i/n */
+  btwOverlayIndex?: number;
+  /** btw 历史总数 */
+  btwOverlayTotal?: number;
 }
 
 function formatSubtaskStatus(status: string): string {
@@ -215,6 +219,8 @@ function renderBtwOverlay(
   width: number,
   maxHeight: number,
   scrollOffset: number,
+  overlayIndex?: number,
+  overlayTotal?: number,
 ): { lines: string[]; offset: number } {
   const lines: string[] = [];
   const safeWidth = Math.max(1, width);
@@ -234,10 +240,15 @@ function renderBtwOverlay(
   // 回答内容：完整展示，不折叠（btw 本身是单轮简短回答，不会过长）
   const bodyHeight = Math.max(0, availableHeight - lines.length - footerHeight);
   if (bodyHeight <= 0) {
+    const totalEarly = overlayTotal ?? (overlayIndex !== undefined && overlayIndex >= 0 ? 1 : 0);
+    const earlyHint =
+      totalEarly > 1
+        ? `Esc dismiss | ←/→ history ${(overlayIndex ?? 0) + 1}/${totalEarly} | c copy | x delete`
+        : "Esc dismiss | c copy | x delete";
     return {
       lines: [
         padToWidth(palette.text.accent(headerText), safeWidth),
-        padToWidth(palette.text.dim("Esc to dismiss"), safeWidth),
+        padToWidth(palette.text.dim(earlyHint), safeWidth),
       ].slice(-availableHeight),
       offset: 0,
     };
@@ -254,10 +265,18 @@ function renderBtwOverlay(
   }
   const rangeStart = answerLines.length === 0 ? 0 : offset + 1;
   const rangeEnd = Math.min(offset + visibleAnswerLines.length, answerLines.length);
-  const scrollHint =
-    answerLines.length > bodyHeight
-      ? `Esc to dismiss | ↑/↓ scroll | PgUp/PgDn page | ${rangeStart}-${rangeEnd}/${answerLines.length}`
-      : "Esc to dismiss";
+  const total = overlayTotal ?? (overlayIndex !== undefined && overlayIndex >= 0 ? 1 : 0);
+  const showHistory = total > 1;
+  const posLabel = showHistory ? `${(overlayIndex ?? 0) + 1}/${total}` : "";
+  // 用数组拼接避免尾部多余管道符（不可滚动分支末尾不再出现 " | "）
+  const hintParts = ["Esc dismiss"];
+  if (showHistory) hintParts.push(`←/→ history ${posLabel}`);
+  hintParts.push("c copy");
+  hintParts.push("x delete");
+  if (answerLines.length > bodyHeight) {
+    hintParts.push("↑/↓ scroll", "PgUp/PgDn page", `${rangeStart}-${rangeEnd}/${answerLines.length}`);
+  }
+  const scrollHint = hintParts.join(" | ");
 
   // 提示行: Esc to dismiss
   lines.push(padToWidth(palette.text.dim(scrollHint), safeWidth));
@@ -374,6 +393,8 @@ export function buildAppScreenLines(snapshot: AppSnapshot, options: ScreenLayout
         options.width,
         btwMaxHeight,
         requestedBtwOverlayScrollOffset,
+        options.btwOverlayIndex,
+        options.btwOverlayTotal,
       )
     : { lines: [], offset: 0 };
   if (renderedBtwOverlay.offset !== requestedBtwOverlayScrollOffset) {

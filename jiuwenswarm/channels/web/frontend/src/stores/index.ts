@@ -6,4 +6,5 @@ export { useChatStore } from './chatStore';
 export { useTodoStore } from './todoStore';
 export { useSessionStore } from './sessionStore';
 export { useHarnessStore } from './harnessStore';
+export { ensureSessionRuntimes } from './ensureSessionRuntimes';
 export type { HarnessStageInfo, HarnessStageStatus, CachedFileTreeEntry } from './harnessStore';

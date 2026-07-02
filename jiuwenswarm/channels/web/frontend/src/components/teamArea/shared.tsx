@@ -1,8 +1,7 @@
 import { Check, ChevronRight, Circle, Maximize2 } from 'lucide-react';
-import { useChatStore, useTodoStore } from '../../stores';
 import i18n from '../../i18n';
 import { ParsedTeamEvent, parseTeamEventMessage } from '../ChatPanel/teamEventUtils';
-import type { Message } from '../../types';
+import type { Message, TodoItem } from '../../types';
 import type {
   TeamTask as SessionTeamTask,
   TeamMemberExecutionEvent,
@@ -300,7 +299,7 @@ export function ExpandIcon() {
 
 export function buildTaskMap(
   memberId: string,
-  todos: ReturnType<typeof useTodoStore.getState>['todos'],
+  todos: TodoItem[],
   teamTaskEvents: TeamTaskEvent[],
   fallbackPrompt: string,
   teamTasks: SessionTeamTask[] = [],
@@ -375,7 +374,7 @@ export function buildProcessItems(
   memberId: string,
   memberTasks: MemberTask[],
   teamTaskEvents: TeamTaskEvent[],
-  messages: ReturnType<typeof useChatStore.getState>['messages'],
+  messages: Message[],
   executionEvents: TeamMemberExecutionEvent[] = [],
   t: Translate = i18n.t.bind(i18n),
 ): ProcessItem[] {
@@ -519,7 +518,7 @@ export function mergeUniqueMessages(messages: Message[]): Message[] {
   return merged;
 }
 
-export function latestUserPrompt(messages: ReturnType<typeof useChatStore.getState>['messages']): string {
+export function latestUserPrompt(messages: Message[]): string {
   for (let i = messages.length - 1; i >= 0; i -= 1) {
     const message = messages[i];
     if (message.role === 'user' && message.content.trim()) {

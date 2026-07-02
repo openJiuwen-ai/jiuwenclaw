@@ -13,7 +13,8 @@
   border: 1px solid transparent;
   background: transparent;
   color: var(--muted);
-  transition: color var(--duration-fast) ease,
+  transition:
+    color var(--duration-fast) ease,
     background-color var(--duration-fast) ease,
     border-color var(--duration-fast) ease;
   cursor: pointer;
@@ -119,21 +120,26 @@
 
 /* Canvas */
 .mermaid-canvas {
-  overflow: auto;
-  padding: 16px;
+  position: relative;
+  overflow: hidden;
+  user-select: none;
+  touch-action: none;
+  cursor: grab;
+}
+
+.mermaid-canvas--dragging {
+  cursor: grabbing;
 }
 
 /* SVG wrapper */
 .mermaid-svg-wrapper {
-  display: flex;
-  width: 100%;
-  justify-content: center;
+  position: absolute;
+  left: 50%;
+  top: 50%;
 }
 
 /* Prevent Mermaid from squeezing wide diagrams into the container width. */
 .mermaid-svg-wrapper svg {
-  width: 100%;
-  height: auto;
   max-width: none !important;
 }
 

@@ -15,7 +15,9 @@ interface UserQuestionModalProps {
 
 export function UserQuestionModal({ onSubmit }: UserQuestionModalProps) {
   const { t } = useTranslation();
-  const { pendingQuestion, setPendingQuestion } = useChatStore();
+  const pendingQuestion = useChatStore((s) => s.runtimes[s.activeSessionId ?? '']?.pendingQuestion ?? null);
+  const setPendingQuestion = useChatStore((s) => s.setPendingQuestion);
+  const activeSessionId = useChatStore((s) => s.activeSessionId);
   const [answers, setAnswers] = useState<Map<number, UserAnswer>>(new Map());
 
   // 处理选项选择
@@ -92,9 +94,9 @@ export function UserQuestionModal({ onSubmit }: UserQuestionModalProps) {
 
   // 取消/关闭
   const handleCancel = useCallback(() => {
-    setPendingQuestion(null);
+    if (activeSessionId) setPendingQuestion(activeSessionId, null);
     setAnswers(new Map());
-  }, [setPendingQuestion]);
+  }, [activeSessionId, setPendingQuestion]);
 
   if (!pendingQuestion) {
     return null;

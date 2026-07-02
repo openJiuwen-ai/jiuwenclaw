@@ -1,5 +1,8 @@
 /**
- * 聊天状态管理
+ * 聊天状态管理（多 session 版本）
+ *
+ * 所有对话运行态按 session 隔离存储在 runtimes 中。
+ * 组件通过 activeSessionId 读取当前会话的运行态。
  */
 
 import { create } from 'zustand';
@@ -17,12 +20,12 @@ import {
   FileDownloadItem,
   ContextCompressionRuntime,
   ContextCompressionSummary,
+  TodoItem,
 } from '../types';
 import { useTodoStore } from './todoStore';
 
 const TOOL_TIMEOUT_MS = 12_000_000;
 const EVOLUTION_STATUS_END_VISIBLE_MS = 3_000;
-let evolutionStatusClearTimer: ReturnType<typeof setTimeout> | null = null;
 
 function computeTimeoutAt(baseIso: string): string {
   return new Date(Date.parse(baseIso) + TOOL_TIMEOUT_MS).toISOString();
@@ -53,21 +56,31 @@ interface TaskItem {
   timestamp: number;
 }
 
-interface ChatState {
+export interface HistoryPagerMeta {
+  loadedPages: number;
+  totalPages: number;
+}
+
+/**
+ * 单个 session 的对话运行态。
+ * 原全局字段全部迁移到这里，按 session 隔离。
+ */
+export interface ChatRuntime {
   messages: Message[];
   isProcessing: boolean;
-  isThinking: boolean;  // 思考中状态（显示闪烁动画）
-  isLoadingHistory: boolean;  // 正在加载历史消息
+  isThinking: boolean;
+  isLoadingHistory: boolean;
+  historyPagerMeta: HistoryPagerMeta | null;
   evolutionStatus: EvolutionStatusPayload | null;
-  isPaused: boolean;    // 任务是否暂停
-  pausedTask: string | null;  // 暂停的任务描述
-  interruptResult: InterruptResultPayload | null;  // 最近的中断结果
-  switchingMode: boolean;  // 是否正在切换模式
-  isNewSession: boolean;  // 是否刚创建新会话（跳过历史加载）
+  isPaused: boolean;
+  pausedTask: string | null;
+  interruptResult: InterruptResultPayload | null;
+  switchingMode: boolean;
+  isNewSession: boolean;
   currentStreamContent: string;
   currentStreamId: string | null;
   streamBuffers: Map<string, string>;
-  activeSubtasks: Map<string, SubtaskState>;  // 活跃的子任务
+  activeSubtasks: Map<string, SubtaskState>;
   toolExecutions: Map<string, ToolExecution>;
   toolExecutionOrder: string[];
   orphanResults: Map<string, ToolResult>;
@@ -77,210 +90,424 @@ interface ChatState {
     toolCallDedupDropped: number;
     toolResultDedupDropped: number;
   };
-  // 任务队列
   taskQueue: TaskItem[];
-  // 用户问题相关
-  pendingQuestion: AskUserQuestionPayload | null;  // 待回答的问题
-  // 输入框内容
+  pendingQuestion: AskUserQuestionPayload | null;
   inputValue: string;
+  /** evolutionStatus 自动清除定时器，按 session 隔离 */
+  evolutionStatusClearTimer: ReturnType<typeof setTimeout> | null;
+  /** interruptResult 自动清除定时器，按 session 隔离 */
+  interruptResultClearTimer: ReturnType<typeof setTimeout> | null;
+}
 
-  // Actions
-  addMessage: (message: Message) => void;
-  updateMessage: (id: string, updates: Partial<Message>) => void;
-  appendStreamContent: (content: string, streamKey?: string) => void;
-  startStreaming: (messageId: string, streamKey?: string) => void;
-  stopStreaming: (streamKey?: string) => void;
-  setProcessing: (status: boolean) => void;
-  setThinking: (status: boolean) => void;
-  setLoadingHistory: (status: boolean) => void;
-  setEvolutionStatus: (status: EvolutionStatusPayload | null) => void;
-  setPaused: (paused: boolean, task?: string | null) => void;
-  setInterruptResult: (result: InterruptResultPayload | null) => void;
-  setSwitchingMode: (switching: boolean) => void;
-  setNewSession: (isNew: boolean) => void;
-  addToolCall: (toolCall: ToolCall, options?: { startedAt?: string; requestId?: string }) => void;
-  addToolResult: (toolResult: ToolResult, options?: { updatedAt?: string }) => void;
-  markTimedOutExecutions: () => void;
-  updateSubtask: (payload: SubtaskUpdatePayload) => void;
-  clearSubtasks: () => void;
-  clearMessages: () => void;
-  clearCurrentTurnData: (requestId?: string) => void;
-  /** 在列表头部插入更早的历史消息（数组内建议时间升序） */
-  prependMessages: (olderFirst: Message[]) => void;
-  // 任务队列相关
-  addToTaskQueue: (content: string) => void;
-  clearTaskQueue: () => void;
-  removeFromTaskQueue: (id: string) => void;
-  // 用户问题相关
-  setPendingQuestion: (question: AskUserQuestionPayload | null) => void;
-  // 输入框相关
-  setInputValue: (value: string) => void;
-  // Usage summary
-  setUsageSummary: (messageId: string, usage: UsageSummary) => void;
-  // File download items
-  addFileItems: (files: FileDownloadItem[]) => void;
+function createEmptyRuntime(): ChatRuntime {
+  return {
+    messages: [],
+    isProcessing: false,
+    isThinking: false,
+    isLoadingHistory: false,
+    historyPagerMeta: null,
+    evolutionStatus: null,
+    isPaused: false,
+    pausedTask: null,
+    interruptResult: null,
+    switchingMode: false,
+    isNewSession: false,
+    currentStreamContent: '',
+    currentStreamId: null,
+    streamBuffers: new Map(),
+    activeSubtasks: new Map(),
+    toolExecutions: new Map(),
+    toolExecutionOrder: [],
+    orphanResults: new Map(),
+    contextCompressionRuntime: undefined,
+    contextCompressionSummary: undefined,
+    toolMetrics: {
+      toolCallDedupDropped: 0,
+      toolResultDedupDropped: 0,
+    },
+    taskQueue: [],
+    pendingQuestion: null,
+    inputValue: '',
+    evolutionStatusClearTimer: null,
+    interruptResultClearTimer: null,
+  };
+}
+
+interface ChatState {
+  runtimes: Record<string, ChatRuntime>;
+  activeSessionId: string | null;
+
+  ensureRuntime: (sessionId: string) => ChatRuntime;
+  getRuntime: (sessionId: string | null) => ChatRuntime | undefined;
+  setActiveSessionId: (sessionId: string | null) => void;
+  removeRuntime: (sessionId: string) => void;
+
+  addMessage: (sessionId: string, message: Message) => void;
+  updateMessage: (sessionId: string, id: string, updates: Partial<Message>) => void;
+  appendStreamContent: (sessionId: string, content: string, streamKey?: string) => void;
+  startStreaming: (sessionId: string, messageId: string, streamKey?: string) => void;
+  stopStreaming: (sessionId: string, streamKey?: string) => void;
+  setProcessing: (sessionId: string, status: boolean) => void;
+  setThinking: (sessionId: string, status: boolean) => void;
+  setLoadingHistory: (sessionId: string, status: boolean) => void;
+  setHistoryPagerMeta: (sessionId: string, meta: HistoryPagerMeta | null) => void;
+  setEvolutionStatus: (sessionId: string, status: EvolutionStatusPayload | null) => void;
+  setPaused: (sessionId: string, paused: boolean, task?: string | null) => void;
+  setInterruptResult: (sessionId: string, result: InterruptResultPayload | null) => void;
+  setSwitchingMode: (sessionId: string, switching: boolean) => void;
+  setNewSession: (sessionId: string, isNew: boolean) => void;
+  addToolCall: (sessionId: string, toolCall: ToolCall, options?: { startedAt?: string; requestId?: string }) => void;
+  addToolResult: (sessionId: string, toolResult: ToolResult, options?: { updatedAt?: string }) => void;
+  markTimedOutExecutions: (sessionId: string) => void;
+  updateSubtask: (sessionId: string, payload: SubtaskUpdatePayload) => void;
+  clearSubtasks: (sessionId: string) => void;
+  clearMessages: (sessionId: string) => void;
+  clearCurrentTurnData: (sessionId: string, requestId?: string) => void;
+  prependMessages: (sessionId: string, olderFirst: Message[]) => void;
+  addToTaskQueue: (sessionId: string, content: string) => void;
+  clearTaskQueue: (sessionId: string) => void;
+  removeFromTaskQueue: (sessionId: string, id: string) => void;
+  setPendingQuestion: (sessionId: string, question: AskUserQuestionPayload | null) => void;
+  setInputValue: (sessionId: string, value: string) => void;
+  setUsageSummary: (sessionId: string, messageId: string, usage: UsageSummary) => void;
+  addFileItems: (sessionId: string, files: FileDownloadItem[]) => void;
   setContextCompressionStatus: (
+    sessionId: string,
     runtime?: ContextCompressionRuntime,
     summary?: ContextCompressionSummary
   ) => void;
 }
 
 export const useChatStore = create<ChatState>((set, get) => ({
-  messages: [],
-  isProcessing: false,
-  isThinking: false,
-  isLoadingHistory: false,
-  evolutionStatus: null,
-  isPaused: false,
-  pausedTask: null,
-  interruptResult: null,
-  switchingMode: false,
-  isNewSession: false,
-  currentStreamContent: '',
-  currentStreamId: null,
-  streamBuffers: new Map(),
-  activeSubtasks: new Map(),
-  toolExecutions: new Map(),
-  toolExecutionOrder: [],
-  orphanResults: new Map(),
-  contextCompressionRuntime: undefined,
-  contextCompressionSummary: undefined,
-  toolMetrics: {
-    toolCallDedupDropped: 0,
-    toolResultDedupDropped: 0,
-  },
-  taskQueue: [],
-  pendingQuestion: null,
-  inputValue: '',
+  runtimes: {},
+  activeSessionId: null,
 
-  addMessage: (message) => {
+  ensureRuntime: (sessionId) => {
+    const existing = get().runtimes[sessionId];
+    if (existing) return existing;
+    const runtime = createEmptyRuntime();
     set((state) => ({
-      messages: [...state.messages, message],
+      runtimes: { ...state.runtimes, [sessionId]: runtime },
     }));
+    return runtime;
   },
 
-  updateMessage: (id, updates) => {
-    set((state) => ({
-      messages: state.messages.map((msg) =>
-        msg.id === id ? { ...msg, ...updates } : msg
-      ),
-    }));
+  getRuntime: (sessionId) => {
+    if (!sessionId) return undefined;
+    return get().runtimes[sessionId];
   },
 
-  appendStreamContent: (content, streamKey = 'default') => {
-    const { currentStreamId } = get();
-    if (!currentStreamId) return;
-
-    const existingBuffer = get().streamBuffers.get(streamKey) || '';
-    const nextContent = existingBuffer + content;
-
-    set((state) => ({
-      currentStreamContent: nextContent,
-      streamBuffers: new Map(state.streamBuffers).set(streamKey, nextContent),
-      messages: state.messages.map((msg) =>
-        msg.id === currentStreamId
-          ? { ...msg, content: nextContent }
-          : msg
-      ),
-    }));
+  setActiveSessionId: (sessionId) => {
+    set({ activeSessionId: sessionId });
   },
 
-  startStreaming: (messageId, streamKey = 'default') => {
-    set((state) => ({
-      currentStreamId: messageId,
-      currentStreamContent: '',
-      streamBuffers: new Map(state.streamBuffers).set(streamKey, ''),
-    }));
-  },
-
-  stopStreaming: (streamKey = 'default') => {
-    const { currentStreamId } = get();
-    if (currentStreamId) {
-      set((state) => ({
-        messages: state.messages.map((msg) =>
-          msg.id === currentStreamId ? { ...msg, isStreaming: false } : msg
-        ),
-        currentStreamId: null,
-        currentStreamContent: '',
-        streamBuffers: new Map(state.streamBuffers).set(streamKey, ''),
-      }));
-    }
-  },
-
-  setProcessing: (status) => {
-    set({ isProcessing: status });
-  },
-
-  setThinking: (status) => {
-    set({ isThinking: status });
-  },
-
-  setLoadingHistory: (status) => {
-    set({ isLoadingHistory: status });
-  },
-
-  setEvolutionStatus: (status) => {
-    if (evolutionStatusClearTimer) {
-      clearTimeout(evolutionStatusClearTimer);
-      evolutionStatusClearTimer = null;
-    }
-    set({ evolutionStatus: status });
-    if (status?.status === 'end') {
-      evolutionStatusClearTimer = setTimeout(() => {
-        set((state) => {
-          if (state.evolutionStatus === status) {
-            return { evolutionStatus: null };
-          }
-          return {};
-        });
-        evolutionStatusClearTimer = null;
-      }, EVOLUTION_STATUS_END_VISIBLE_MS);
-    }
-  },
-
-  setPaused: (paused, task = null) => {
-    set({ isPaused: paused, pausedTask: task ?? null });
-  },
-
-  setInterruptResult: (result) => {
-    set({ interruptResult: result });
-    // 3 秒后自动清除中断结果提示
-    if (result) {
-      setTimeout(() => {
-        set((state) => {
-          // 只有当前结果没有变化时才清除
-          if (state.interruptResult === result) {
-            return { interruptResult: null };
-          }
-          return {};
-        });
-      }, 3000);
-    }
-  },
-
-  setSwitchingMode: (switching) => {
-    // 切换模式时，同时重置所有相关状态
-    if (switching) {
-      set({
-        switchingMode: true,
-        isProcessing: false,
-        isPaused: false,
-        pausedTask: null,
-        interruptResult: null
-      });
-    } else {
-      set({ switchingMode: false });
-    }
-  },
-
-  setNewSession: (isNew) => {
-    set({ isNewSession: isNew });
-  },
-
-  addToolCall: (toolCall, options) => {
+  removeRuntime: (sessionId) => {
     set((state) => {
+      const runtime = state.runtimes[sessionId];
+      if (runtime) {
+        if (runtime.evolutionStatusClearTimer) clearTimeout(runtime.evolutionStatusClearTimer);
+        if (runtime.interruptResultClearTimer) clearTimeout(runtime.interruptResultClearTimer);
+      }
+      const next = { ...state.runtimes };
+      delete next[sessionId];
+      return {
+        runtimes: next,
+        activeSessionId: state.activeSessionId === sessionId ? null : state.activeSessionId,
+      };
+    });
+  },
+
+  addMessage: (sessionId, message) => {
+    set((state) => {
+      const runtime = state.runtimes[sessionId];
+      if (!runtime) return state;
+      return {
+        runtimes: {
+          ...state.runtimes,
+          [sessionId]: {
+            ...runtime,
+            messages: [...runtime.messages, message],
+          },
+        },
+      };
+    });
+  },
+
+  updateMessage: (sessionId, id, updates) => {
+    set((state) => {
+      const runtime = state.runtimes[sessionId];
+      if (!runtime) return state;
+      return {
+        runtimes: {
+          ...state.runtimes,
+          [sessionId]: {
+            ...runtime,
+            messages: runtime.messages.map((msg) =>
+              msg.id === id ? { ...msg, ...updates } : msg
+            ),
+          },
+        },
+      };
+    });
+  },
+
+  appendStreamContent: (sessionId, content, streamKey = 'default') => {
+    set((state) => {
+      const runtime = state.runtimes[sessionId];
+      if (!runtime || !runtime.currentStreamId) return state;
+
+      const existingBuffer = runtime.streamBuffers.get(streamKey) || '';
+      const nextContent = existingBuffer + content;
+
+      return {
+        runtimes: {
+          ...state.runtimes,
+          [sessionId]: {
+            ...runtime,
+            currentStreamContent: nextContent,
+            streamBuffers: new Map(runtime.streamBuffers).set(streamKey, nextContent),
+            messages: runtime.messages.map((msg) =>
+              msg.id === runtime.currentStreamId
+                ? { ...msg, content: nextContent }
+                : msg
+            ),
+          },
+        },
+      };
+    });
+  },
+
+  startStreaming: (sessionId, messageId, streamKey = 'default') => {
+    set((state) => {
+      const runtime = state.runtimes[sessionId];
+      if (!runtime) return state;
+      return {
+        runtimes: {
+          ...state.runtimes,
+          [sessionId]: {
+            ...runtime,
+            currentStreamId: messageId,
+            currentStreamContent: '',
+            streamBuffers: new Map(runtime.streamBuffers).set(streamKey, ''),
+          },
+        },
+      };
+    });
+  },
+
+  stopStreaming: (sessionId, streamKey = 'default') => {
+    set((state) => {
+      const runtime = state.runtimes[sessionId];
+      if (!runtime || !runtime.currentStreamId) return state;
+      return {
+        runtimes: {
+          ...state.runtimes,
+          [sessionId]: {
+            ...runtime,
+            messages: runtime.messages.map((msg) =>
+              msg.id === runtime.currentStreamId ? { ...msg, isStreaming: false } : msg
+            ),
+            currentStreamId: null,
+            currentStreamContent: '',
+            streamBuffers: new Map(runtime.streamBuffers).set(streamKey, ''),
+          },
+        },
+      };
+    });
+  },
+
+  setProcessing: (sessionId, status) => {
+    set((state) => {
+      const runtime = state.runtimes[sessionId];
+      if (!runtime) return state;
+      if (!status && runtime.messages.some((msg) => msg.isStreaming)) {
+        return {
+          runtimes: {
+            ...state.runtimes,
+            [sessionId]: {
+              ...runtime,
+              isProcessing: status,
+              messages: runtime.messages.map((msg) =>
+                msg.isStreaming ? { ...msg, isStreaming: false } : msg
+              ),
+            },
+          },
+        };
+      }
+      return {
+        runtimes: {
+          ...state.runtimes,
+          [sessionId]: { ...runtime, isProcessing: status },
+        },
+      };
+    });
+  },
+
+  setThinking: (sessionId, status) => {
+    set((state) => {
+      const runtime = state.runtimes[sessionId];
+      if (!runtime) return state;
+      return {
+        runtimes: {
+          ...state.runtimes,
+          [sessionId]: { ...runtime, isThinking: status },
+        },
+      };
+    });
+  },
+
+  setLoadingHistory: (sessionId, status) => {
+    set((state) => {
+      const runtime = state.runtimes[sessionId];
+      if (!runtime) return state;
+      return {
+        runtimes: {
+          ...state.runtimes,
+          [sessionId]: { ...runtime, isLoadingHistory: status },
+        },
+      };
+    });
+  },
+
+  setHistoryPagerMeta: (sessionId, meta) => {
+    set((state) => {
+      const runtime = state.runtimes[sessionId];
+      if (!runtime) return state;
+      return {
+        runtimes: {
+          ...state.runtimes,
+          [sessionId]: { ...runtime, historyPagerMeta: meta },
+        },
+      };
+    });
+  },
+
+  setEvolutionStatus: (sessionId, status) => {
+    set((state) => {
+      const runtime = state.runtimes[sessionId];
+      if (!runtime) return state;
+      if (runtime.evolutionStatusClearTimer) {
+        clearTimeout(runtime.evolutionStatusClearTimer);
+      }
+      const nextRuntime: ChatRuntime = { ...runtime, evolutionStatus: status };
+      if (status?.status === 'end') {
+        nextRuntime.evolutionStatusClearTimer = setTimeout(() => {
+          set((s) => {
+            const r = s.runtimes[sessionId];
+            if (!r || r.evolutionStatus !== status) return s;
+            return {
+              runtimes: {
+                ...s.runtimes,
+                [sessionId]: { ...r, evolutionStatus: null, evolutionStatusClearTimer: null },
+              },
+            };
+          });
+        }, EVOLUTION_STATUS_END_VISIBLE_MS);
+      } else {
+        nextRuntime.evolutionStatusClearTimer = null;
+      }
+      return {
+        runtimes: {
+          ...state.runtimes,
+          [sessionId]: nextRuntime,
+        },
+      };
+    });
+  },
+
+  setPaused: (sessionId, paused, task = null) => {
+    set((state) => {
+      const runtime = state.runtimes[sessionId];
+      if (!runtime) return state;
+      return {
+        runtimes: {
+          ...state.runtimes,
+          [sessionId]: { ...runtime, isPaused: paused, pausedTask: task ?? null },
+        },
+      };
+    });
+  },
+
+  setInterruptResult: (sessionId, result) => {
+    set((state) => {
+      const runtime = state.runtimes[sessionId];
+      if (!runtime) return state;
+      if (runtime.interruptResultClearTimer) {
+        clearTimeout(runtime.interruptResultClearTimer);
+      }
+      const nextRuntime: ChatRuntime = { ...runtime, interruptResult: result };
+      if (result) {
+        nextRuntime.interruptResultClearTimer = setTimeout(() => {
+          set((s) => {
+            const r = s.runtimes[sessionId];
+            if (!r || r.interruptResult !== result) return s;
+            return {
+              runtimes: {
+                ...s.runtimes,
+                [sessionId]: { ...r, interruptResult: null, interruptResultClearTimer: null },
+              },
+            };
+          });
+        }, 3000);
+      } else {
+        nextRuntime.interruptResultClearTimer = null;
+      }
+      return {
+        runtimes: {
+          ...state.runtimes,
+          [sessionId]: nextRuntime,
+        },
+      };
+    });
+  },
+
+  setSwitchingMode: (sessionId, switching) => {
+    set((state) => {
+      const runtime = state.runtimes[sessionId];
+      if (!runtime) return state;
+      if (switching) {
+        return {
+          runtimes: {
+            ...state.runtimes,
+            [sessionId]: {
+              ...runtime,
+              switchingMode: true,
+              isProcessing: false,
+              isPaused: false,
+              pausedTask: null,
+              interruptResult: null,
+            },
+          },
+        };
+      }
+      return {
+        runtimes: {
+          ...state.runtimes,
+          [sessionId]: { ...runtime, switchingMode: false },
+        },
+      };
+    });
+  },
+
+  setNewSession: (sessionId, isNew) => {
+    set((state) => {
+      const runtime = state.runtimes[sessionId];
+      if (!runtime) return state;
+      return {
+        runtimes: {
+          ...state.runtimes,
+          [sessionId]: { ...runtime, isNewSession: isNew },
+        },
+      };
+    });
+  },
+
+  addToolCall: (sessionId, toolCall, options) => {
+    set((state) => {
+      const runtime = state.runtimes[sessionId];
+      if (!runtime) return state;
       if (!toolCall.id) {
-        const nextDropped = state.toolMetrics.toolCallDedupDropped + 1;
+        const nextDropped = runtime.toolMetrics.toolCallDedupDropped + 1;
         if (import.meta.env.DEV && (nextDropped === 1 || nextDropped % 10 === 0)) {
           console.debug('[ws][metrics] toolCallDedupDropped', {
             count: nextDropped,
@@ -288,15 +515,20 @@ export const useChatStore = create<ChatState>((set, get) => ({
           });
         }
         return {
-          ...state,
-          toolMetrics: {
-            ...state.toolMetrics,
-            toolCallDedupDropped: nextDropped,
+          runtimes: {
+            ...state.runtimes,
+            [sessionId]: {
+              ...runtime,
+              toolMetrics: {
+                ...runtime.toolMetrics,
+                toolCallDedupDropped: nextDropped,
+              },
+            },
           },
         };
       }
-      if (state.toolExecutions.has(toolCall.id)) {
-        const nextDropped = state.toolMetrics.toolCallDedupDropped + 1;
+      if (runtime.toolExecutions.has(toolCall.id)) {
+        const nextDropped = runtime.toolMetrics.toolCallDedupDropped + 1;
         if (import.meta.env.DEV && (nextDropped === 1 || nextDropped % 10 === 0)) {
           console.debug('[ws][metrics] toolCallDedupDropped', {
             count: nextDropped,
@@ -304,10 +536,15 @@ export const useChatStore = create<ChatState>((set, get) => ({
           });
         }
         return {
-          ...state,
-          toolMetrics: {
-            ...state.toolMetrics,
-            toolCallDedupDropped: nextDropped,
+          runtimes: {
+            ...state.runtimes,
+            [sessionId]: {
+              ...runtime,
+              toolMetrics: {
+                ...runtime.toolMetrics,
+                toolCallDedupDropped: nextDropped,
+              },
+            },
           },
         };
       }
@@ -316,9 +553,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
         typeof options?.startedAt === 'string' && options.startedAt.trim()
           ? options.startedAt.trim()
           : nowIso;
-      const orphanResult = state.orphanResults.get(toolCall.id);
-      const nextExecutions = new Map(state.toolExecutions);
-      const nextOrphanResults = new Map(state.orphanResults);
+      const orphanResult = runtime.orphanResults.get(toolCall.id);
+      const nextExecutions = new Map(runtime.toolExecutions);
+      const nextOrphanResults = new Map(runtime.orphanResults);
       if (orphanResult) {
         nextOrphanResults.delete(toolCall.id);
       }
@@ -335,20 +572,28 @@ export const useChatStore = create<ChatState>((set, get) => ({
         requestId: options?.requestId,
       });
 
-      const nextOrder = [...state.toolExecutionOrder, toolCall.id];
+      const nextOrder = [...runtime.toolExecutionOrder, toolCall.id];
       return {
-        toolExecutions: nextExecutions,
-        toolExecutionOrder: nextOrder,
-        orphanResults: nextOrphanResults,
+        runtimes: {
+          ...state.runtimes,
+          [sessionId]: {
+            ...runtime,
+            toolExecutions: nextExecutions,
+            toolExecutionOrder: nextOrder,
+            orphanResults: nextOrphanResults,
+          },
+        },
       };
     });
   },
 
-  addToolResult: (toolResult, options) => {
+  addToolResult: (sessionId, toolResult, options) => {
     set((state) => {
+      const runtime = state.runtimes[sessionId];
+      if (!runtime) return state;
       const incomingToolCallId = toolResult.toolCallId;
       if (!incomingToolCallId) {
-        const nextDropped = state.toolMetrics.toolResultDedupDropped + 1;
+        const nextDropped = runtime.toolMetrics.toolResultDedupDropped + 1;
         if (import.meta.env.DEV && (nextDropped === 1 || nextDropped % 10 === 0)) {
           console.debug('[ws][metrics] toolResultDedupDropped', {
             count: nextDropped,
@@ -356,10 +601,15 @@ export const useChatStore = create<ChatState>((set, get) => ({
           });
         }
         return {
-          ...state,
-          toolMetrics: {
-            ...state.toolMetrics,
-            toolResultDedupDropped: nextDropped,
+          runtimes: {
+            ...state.runtimes,
+            [sessionId]: {
+              ...runtime,
+              toolMetrics: {
+                ...runtime.toolMetrics,
+                toolResultDedupDropped: nextDropped,
+              },
+            },
           },
         };
       }
@@ -368,10 +618,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
         typeof options?.updatedAt === 'string' && options.updatedAt.trim()
           ? options.updatedAt.trim()
           : nowIso;
-      const existingExecution = state.toolExecutions.get(incomingToolCallId);
+      const existingExecution = runtime.toolExecutions.get(incomingToolCallId);
 
       if (!existingExecution) {
-        const nextOrphanResults = new Map(state.orphanResults);
+        const nextOrphanResults = new Map(runtime.orphanResults);
         const duplicatedOrphan = nextOrphanResults.get(incomingToolCallId);
         if (
           duplicatedOrphan &&
@@ -379,7 +629,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
           duplicatedOrphan.success === toolResult.success &&
           (duplicatedOrphan.summary || '') === (toolResult.summary || '')
         ) {
-          const nextDropped = state.toolMetrics.toolResultDedupDropped + 1;
+          const nextDropped = runtime.toolMetrics.toolResultDedupDropped + 1;
           if (import.meta.env.DEV && (nextDropped === 1 || nextDropped % 10 === 0)) {
             console.debug('[ws][metrics] toolResultDedupDropped', {
               count: nextDropped,
@@ -387,16 +637,24 @@ export const useChatStore = create<ChatState>((set, get) => ({
             });
           }
           return {
-            ...state,
-            toolMetrics: {
-              ...state.toolMetrics,
-              toolResultDedupDropped: nextDropped,
+            runtimes: {
+              ...state.runtimes,
+              [sessionId]: {
+                ...runtime,
+                toolMetrics: {
+                  ...runtime.toolMetrics,
+                  toolResultDedupDropped: nextDropped,
+                },
+              },
             },
           };
         }
         nextOrphanResults.set(incomingToolCallId, toolResult);
         return {
-          orphanResults: nextOrphanResults,
+          runtimes: {
+            ...state.runtimes,
+            [sessionId]: { ...runtime, orphanResults: nextOrphanResults },
+          },
         };
       }
 
@@ -406,7 +664,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
           existingExecution.result.success === toolResult.success &&
           (existingExecution.result.summary || '') === (toolResult.summary || '');
         if (duplicated) {
-          const nextDropped = state.toolMetrics.toolResultDedupDropped + 1;
+          const nextDropped = runtime.toolMetrics.toolResultDedupDropped + 1;
           if (import.meta.env.DEV && (nextDropped === 1 || nextDropped % 10 === 0)) {
             console.debug('[ws][metrics] toolResultDedupDropped', {
               count: nextDropped,
@@ -414,16 +672,21 @@ export const useChatStore = create<ChatState>((set, get) => ({
             });
           }
           return {
-            ...state,
-            toolMetrics: {
-              ...state.toolMetrics,
-              toolResultDedupDropped: nextDropped,
+            runtimes: {
+              ...state.runtimes,
+              [sessionId]: {
+                ...runtime,
+                toolMetrics: {
+                  ...runtime.toolMetrics,
+                  toolResultDedupDropped: nextDropped,
+                },
+              },
             },
           };
         }
       }
 
-      const nextExecutions = new Map(state.toolExecutions);
+      const nextExecutions = new Map(runtime.toolExecutions);
       const nextStatus = resolveExecutionStatus(toolResult);
       nextExecutions.set(incomingToolCallId, {
         ...existingExecution,
@@ -434,16 +697,21 @@ export const useChatStore = create<ChatState>((set, get) => ({
           existingExecution.status === 'timeout' ? true : existingExecution.resultArrivedAfterTimeout,
       });
       return {
-        toolExecutions: nextExecutions,
+        runtimes: {
+          ...state.runtimes,
+          [sessionId]: { ...runtime, toolExecutions: nextExecutions },
+        },
       };
     });
   },
 
-  markTimedOutExecutions: () => {
+  markTimedOutExecutions: (sessionId) => {
     const now = Date.now();
     set((state) => {
+      const runtime = state.runtimes[sessionId];
+      if (!runtime) return state;
       let changed = false;
-      const nextExecutions = new Map(state.toolExecutions);
+      const nextExecutions = new Map(runtime.toolExecutions);
       for (const [toolCallId, execution] of nextExecutions) {
         if (execution.status !== 'pending') {
           continue;
@@ -460,25 +728,25 @@ export const useChatStore = create<ChatState>((set, get) => ({
           updatedAt: new Date(now).toISOString(),
         });
       }
-      if (!changed) {
-        return state;
-      }
+      if (!changed) return state;
       return {
-        ...state,
-        toolExecutions: nextExecutions,
+        runtimes: {
+          ...state.runtimes,
+          [sessionId]: { ...runtime, toolExecutions: nextExecutions },
+        },
       };
     });
   },
 
-  updateSubtask: (payload: SubtaskUpdatePayload) => {
+  updateSubtask: (sessionId, payload) => {
     set((state) => {
-      const newSubtasks = new Map(state.activeSubtasks);
-      
+      const runtime = state.runtimes[sessionId];
+      if (!runtime) return state;
+      const newSubtasks = new Map(runtime.activeSubtasks);
+
       if (payload.status === 'completed' || payload.status === 'error') {
-        // 任务完成或出错，从活跃列表中移除
         newSubtasks.delete(payload.task_id);
       } else {
-        // 更新或添加子任务状态
         newSubtasks.set(payload.task_id, {
           task_id: payload.task_id,
           description: payload.description,
@@ -491,22 +759,27 @@ export const useChatStore = create<ChatState>((set, get) => ({
           is_parallel: payload.is_parallel || false,
         });
       }
-      
-      return { activeSubtasks: newSubtasks };
+
+      return {
+        runtimes: {
+          ...state.runtimes,
+          [sessionId]: { ...runtime, activeSubtasks: newSubtasks },
+        },
+      };
     });
 
-    // 同时更新 todoStore 中对应任务的 activeForm（如果能匹配）
     const todoState = useTodoStore.getState();
-    const { todos, setTodos } = todoState;
-    
-    // 尝试匹配子任务描述和 todo 内容
+    const todoRuntime = todoState.getRuntime(sessionId);
+    const todos = todoRuntime?.todos ?? [];
+    const setTodos = todoState.setTodos;
+
     const matchingTodo = todos.find(
-      (todo) =>
+      (todo: TodoItem) =>
         todo.status === 'in_progress' &&
         (todo.content.includes(payload.description) ||
          payload.description.includes(todo.content.slice(0, 20)))
     );
-    
+
     if (matchingTodo) {
       let activeForm = '';
       if (payload.status === 'starting') {
@@ -514,30 +787,41 @@ export const useChatStore = create<ChatState>((set, get) => ({
       } else if (payload.status === 'tool_call') {
         activeForm = `正在调用 ${payload.tool_name}...`;
       } else if (payload.status === 'completed') {
-        activeForm = '';  // 清除
+        activeForm = '';
       }
-      
+
       if (activeForm || payload.status === 'completed') {
-        const updatedTodos = todos.map((todo) =>
+        const updatedTodos = todos.map((todo: TodoItem) =>
           todo.id === matchingTodo.id
             ? { ...todo, activeForm }
             : todo
         );
-        setTodos(updatedTodos);
+        setTodos(sessionId, updatedTodos);
       }
     }
   },
 
-  clearSubtasks: () => {
-    set({ activeSubtasks: new Map() });
+  clearSubtasks: (sessionId) => {
+    set((state) => {
+      const runtime = state.runtimes[sessionId];
+      if (!runtime) return state;
+      return {
+        runtimes: {
+          ...state.runtimes,
+          [sessionId]: { ...runtime, activeSubtasks: new Map() },
+        },
+      };
+    });
   },
 
-  clearCurrentTurnData: (requestId) => {
+  clearCurrentTurnData: (sessionId, requestId) => {
     set((state) => {
+      const runtime = state.runtimes[sessionId];
+      if (!runtime) return state;
       if (requestId) {
-        const nextExecutions = new Map(state.toolExecutions);
+        const nextExecutions = new Map(runtime.toolExecutions);
         const nextOrder: string[] = [];
-        for (const id of state.toolExecutionOrder) {
+        for (const id of runtime.toolExecutionOrder) {
           const exec = nextExecutions.get(id);
           if (exec && exec.requestId === requestId) {
             nextExecutions.delete(id);
@@ -546,147 +830,258 @@ export const useChatStore = create<ChatState>((set, get) => ({
           }
         }
         return {
-          toolExecutions: nextExecutions,
-          toolExecutionOrder: nextOrder,
-          orphanResults: new Map(),
-          activeSubtasks: new Map(),
-          interruptResult: null,
-          pendingQuestion: null,
-          toolMetrics: {
-            toolCallDedupDropped: 0,
-            toolResultDedupDropped: 0,
+          runtimes: {
+            ...state.runtimes,
+            [sessionId]: {
+              ...runtime,
+              toolExecutions: nextExecutions,
+              toolExecutionOrder: nextOrder,
+              orphanResults: new Map(),
+              activeSubtasks: new Map(),
+              interruptResult: null,
+              pendingQuestion: null,
+              toolMetrics: {
+                toolCallDedupDropped: 0,
+                toolResultDedupDropped: 0,
+              },
+            },
           },
         };
       }
       return {
-        toolExecutions: new Map(),
-        toolExecutionOrder: [],
-        orphanResults: new Map(),
-        activeSubtasks: new Map(),
-        interruptResult: null,
-        pendingQuestion: null,
-        toolMetrics: {
-          toolCallDedupDropped: 0,
-          toolResultDedupDropped: 0,
+        runtimes: {
+          ...state.runtimes,
+          [sessionId]: {
+            ...runtime,
+            toolExecutions: new Map(),
+            toolExecutionOrder: [],
+            orphanResults: new Map(),
+            activeSubtasks: new Map(),
+            interruptResult: null,
+            pendingQuestion: null,
+            toolMetrics: {
+              toolCallDedupDropped: 0,
+              toolResultDedupDropped: 0,
+            },
+          },
         },
       };
     });
-    useTodoStore.getState().setTodos([]);
+    useTodoStore.getState().clearTodos(sessionId);
   },
 
-  prependMessages: (olderFirst) => {
-    if (!olderFirst.length) {
-      return;
-    }
-    set((state) => ({
-      messages: [...olderFirst, ...state.messages],
-    }));
-  },
-
-  clearMessages: () => {
-    if (evolutionStatusClearTimer) {
-      clearTimeout(evolutionStatusClearTimer);
-      evolutionStatusClearTimer = null;
-    }
-    set({
-      messages: [],
-      currentStreamContent: '',
-      currentStreamId: null,
-      streamBuffers: new Map(),
-      evolutionStatus: null,
-      isPaused: false,
-      pausedTask: null,
-      interruptResult: null,
-      switchingMode: false,
-      activeSubtasks: new Map(),
-      toolExecutions: new Map(),
-      toolExecutionOrder: [],
-      orphanResults: new Map(),
-      contextCompressionRuntime: undefined,
-      contextCompressionSummary: undefined,
-      toolMetrics: {
-        toolCallDedupDropped: 0,
-        toolResultDedupDropped: 0,
-      },
-      taskQueue: [],
-      pendingQuestion: null,
+  prependMessages: (sessionId, olderFirst) => {
+    if (!olderFirst.length) return;
+    set((state) => {
+      const runtime = state.runtimes[sessionId];
+      if (!runtime) return state;
+      return {
+        runtimes: {
+          ...state.runtimes,
+          [sessionId]: {
+            ...runtime,
+            messages: [...olderFirst, ...runtime.messages],
+          },
+        },
+      };
     });
   },
 
-  addToTaskQueue: (content) => {
-    set((state) => ({
-      taskQueue: [
-        ...state.taskQueue,
-        {
-          id: Date.now().toString() + Math.random().toString(36).substr(2, 9),
-          content,
-          timestamp: Date.now(),
-        },
-      ],
-    }));
-  },
-
-  clearTaskQueue: () => {
-    set({ taskQueue: [] });
-  },
-
-  removeFromTaskQueue: (id) => {
-    set((state) => ({
-      taskQueue: state.taskQueue.filter((task) => task.id !== id),
-    }));
-  },
-
-  setPendingQuestion: (question) => {
-    set({ pendingQuestion: question });
-  },
-  
-  setInputValue: (value) => {
-    set({ inputValue: value });
-  },
-
-  setUsageSummary: (messageId, usage) => {
-    set((state) => ({
-      messages: state.messages.map((msg) =>
-        msg.id === messageId ? { ...msg, usageSummary: usage } : msg
-      ),
-    }));
-  },
-
-  addFileItems: (files) => {
-    const { currentStreamId, messages } = get();
-    const lastMessage = messages[messages.length - 1];
-    const targetId =
-      currentStreamId ??
-      (lastMessage?.role === 'assistant' ? lastMessage.id : null);
-    if (!targetId) {
-      const msgId = `file-${Date.now()}`;
-      set((state) => ({
-        messages: [
-          ...state.messages,
-          {
-            id: msgId,
-            role: 'assistant',
-            content: '',
-            timestamp: new Date().toISOString(),
-            fileItems: files,
+  clearMessages: (sessionId) => {
+    set((state) => {
+      const runtime = state.runtimes[sessionId];
+      if (!runtime) return state;
+      if (runtime.evolutionStatusClearTimer) {
+        clearTimeout(runtime.evolutionStatusClearTimer);
+      }
+      return {
+        runtimes: {
+          ...state.runtimes,
+          [sessionId]: {
+            ...runtime,
+            messages: [],
+            currentStreamContent: '',
+            currentStreamId: null,
+            streamBuffers: new Map(),
+            evolutionStatus: null,
+            evolutionStatusClearTimer: null,
+            isPaused: false,
+            pausedTask: null,
+            interruptResult: null,
+            switchingMode: false,
+            activeSubtasks: new Map(),
+            toolExecutions: new Map(),
+            toolExecutionOrder: [],
+            orphanResults: new Map(),
+            contextCompressionRuntime: undefined,
+            contextCompressionSummary: undefined,
+            toolMetrics: {
+              toolCallDedupDropped: 0,
+              toolResultDedupDropped: 0,
+            },
+            taskQueue: [],
+            pendingQuestion: null,
           },
-        ],
-      }));
-      return;
-    }
-    set((state) => ({
-      messages: state.messages.map((msg) =>
-        msg.id === targetId
-          ? { ...msg, fileItems: [...(msg.fileItems || []), ...files] }
-          : msg
-      ),
-    }));
+        },
+      };
+    });
   },
 
-  setContextCompressionStatus: (runtime, summary) => {
-    set({
-      contextCompressionRuntime: runtime,
-      contextCompressionSummary: summary,
+  addToTaskQueue: (sessionId, content) => {
+    set((state) => {
+      const runtime = state.runtimes[sessionId];
+      if (!runtime) return state;
+      return {
+        runtimes: {
+          ...state.runtimes,
+          [sessionId]: {
+            ...runtime,
+            taskQueue: [
+              ...runtime.taskQueue,
+              {
+                id: Date.now().toString() + Math.random().toString(36).substr(2, 9),
+                content,
+                timestamp: Date.now(),
+              },
+            ],
+          },
+        },
+      };
+    });
+  },
+
+  clearTaskQueue: (sessionId) => {
+    set((state) => {
+      const runtime = state.runtimes[sessionId];
+      if (!runtime) return state;
+      return {
+        runtimes: {
+          ...state.runtimes,
+          [sessionId]: { ...runtime, taskQueue: [] },
+        },
+      };
+    });
+  },
+
+  removeFromTaskQueue: (sessionId, id) => {
+    set((state) => {
+      const runtime = state.runtimes[sessionId];
+      if (!runtime) return state;
+      return {
+        runtimes: {
+          ...state.runtimes,
+          [sessionId]: {
+            ...runtime,
+            taskQueue: runtime.taskQueue.filter((task) => task.id !== id),
+          },
+        },
+      };
+    });
+  },
+
+  setPendingQuestion: (sessionId, question) => {
+    set((state) => {
+      const runtime = state.runtimes[sessionId];
+      if (!runtime) return state;
+      return {
+        runtimes: {
+          ...state.runtimes,
+          [sessionId]: { ...runtime, pendingQuestion: question },
+        },
+      };
+    });
+  },
+
+  setInputValue: (sessionId, value) => {
+    set((state) => {
+      const runtime = state.runtimes[sessionId];
+      if (!runtime) return state;
+      return {
+        runtimes: {
+          ...state.runtimes,
+          [sessionId]: { ...runtime, inputValue: value },
+        },
+      };
+    });
+  },
+
+  setUsageSummary: (sessionId, messageId, usage) => {
+    set((state) => {
+      const runtime = state.runtimes[sessionId];
+      if (!runtime) return state;
+      return {
+        runtimes: {
+          ...state.runtimes,
+          [sessionId]: {
+            ...runtime,
+            messages: runtime.messages.map((msg) =>
+              msg.id === messageId ? { ...msg, usageSummary: usage } : msg
+            ),
+          },
+        },
+      };
+    });
+  },
+
+  addFileItems: (sessionId, files) => {
+    set((state) => {
+      const runtime = state.runtimes[sessionId];
+      if (!runtime) return state;
+      const lastMessage = runtime.messages[runtime.messages.length - 1];
+      const targetId =
+        runtime.currentStreamId ??
+        (lastMessage?.role === 'assistant' ? lastMessage.id : null);
+      if (!targetId) {
+        const msgId = `file-${Date.now()}`;
+        return {
+          runtimes: {
+            ...state.runtimes,
+            [sessionId]: {
+              ...runtime,
+              messages: [
+                ...runtime.messages,
+                {
+                  id: msgId,
+                  role: 'assistant',
+                  content: '',
+                  timestamp: new Date().toISOString(),
+                  fileItems: files,
+                },
+              ],
+            },
+          },
+        };
+      }
+      return {
+        runtimes: {
+          ...state.runtimes,
+          [sessionId]: {
+            ...runtime,
+            messages: runtime.messages.map((msg) =>
+              msg.id === targetId
+                ? { ...msg, fileItems: [...(msg.fileItems || []), ...files] }
+                : msg
+            ),
+          },
+        },
+      };
+    });
+  },
+
+  setContextCompressionStatus: (sessionId, runtime, summary) => {
+    set((state) => {
+      const r = state.runtimes[sessionId];
+      if (!r) return state;
+      return {
+        runtimes: {
+          ...state.runtimes,
+          [sessionId]: {
+            ...r,
+            contextCompressionRuntime: runtime,
+            contextCompressionSummary: summary,
+          },
+        },
+      };
     });
   },
 }));

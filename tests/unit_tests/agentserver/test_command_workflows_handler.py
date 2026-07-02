@@ -143,6 +143,51 @@ class TestHandleCommandWorkflows:
         assert payload["session_id"] == "sess-2"
 
     @pytest.mark.anyio
+    async def test_handler_bounds_large_snapshot_response(self, monkeypatch) -> None:
+        """Large workflow snapshots should not exceed the configured wire budget."""
+        from jiuwenswarm.server import agent_ws_server as agent_ws_server_module
+        from jiuwenswarm.server.agent_ws_server import AgentWebSocketServer
+
+        server = AgentWebSocketServer.__new__(AgentWebSocketServer)
+        ws = _FakeWS()
+        request = _make_request(session_id="sess-large-workflow", channel_id="web")
+        send_lock = asyncio.Lock()
+
+        large_output = "x" * 20_000
+        snapshot_data = [
+            {
+                "id": f"wf_{idx}",
+                "name": f"workflow-{idx}",
+                "status": "running",
+                "description": large_output,
+                "steps": [{"id": f"step-{idx}", "output": large_output}],
+            }
+            for idx in range(20)
+        ]
+        fake_handler = _FakeWorkflowHandler(snapshot=snapshot_data)
+        fake_tm = _FakeTeamManager(workflow_handler=fake_handler)
+
+        monkeypatch.setattr(agent_ws_server_module, "_WORKFLOW_SNAPSHOT_MAX_BYTES", 8192)
+
+        with patch(
+            "jiuwenswarm.agents.harness.team.get_team_manager",
+            return_value=fake_tm,
+        ):
+            await server._handle_command_workflows(ws, request, send_lock)
+
+        assert len(ws.sent) == 1
+        encoded_size = len(ws.sent[0].encode("utf-8"))
+        assert encoded_size <= 8192
+
+        payload = self._extract_payload_from_wire(json.loads(ws.sent[0]))
+        assert payload["type"] == "workflow_run_snapshot"
+        assert payload["session_id"] == "sess-large-workflow"
+        assert payload["workflows"]
+        assert len(payload["workflows"]) < len(snapshot_data)
+        assert payload["workflows"][0]["description"].endswith("[truncated]")
+        assert payload["truncated"] is True
+
+    @pytest.mark.anyio
     async def test_handler_exception_returns_empty_snapshot(self) -> None:
         """When handler raises exception, return empty workflows list."""
         from jiuwenswarm.server.agent_ws_server import AgentWebSocketServer

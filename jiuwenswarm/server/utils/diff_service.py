@@ -576,6 +576,8 @@ class DiffService:
         返回:
             { "/abs/path/file.py": {"added": 3, "removed": 2, "isBinary": false}, ... }
         """
+        import re
+
         result: dict[str, dict[str, int | bool]] = {}
         for line in output.strip().splitlines():
             if not line.strip():
@@ -584,6 +586,19 @@ class DiffService:
             if len(parts) < 3:
                 continue
             added_str, removed_str, file_path = parts[0], parts[1], parts[2]
+            # rename 的 numstat 路径需归一化为新路径，否则与 _parse_git_diff_hunks
+            # 从 "+++ b/new" 提取的 key 不一致，导致 hunks 丢失。
+            # 两种形式:
+            #   - brace 简写(有共同前/后缀): a/{b => c}/d.txt  -> a/c/d.txt
+            #     (可能嵌套或多段: a/{b => c}/{d => e}.txt)
+            #   - 裸形式(无共同前/后缀): old => new  -> new
+            while True:
+                m = re.search(r"\{([^{}]*)\s=>\s([^{}]*)\}", file_path)
+                if not m:
+                    break
+                file_path = file_path[:m.start()] + m.group(2) + file_path[m.end():]
+            if " => " in file_path:
+                file_path = file_path.rsplit(" => ", 1)[-1].strip()
             is_binary = added_str == "-" and removed_str == "-"
             result[file_path] = {
                 "added": 0 if is_binary else int(added_str),

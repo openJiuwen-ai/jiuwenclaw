@@ -29,6 +29,7 @@ from typing import Any
 import pytest
 
 from openjiuwen.agent_evolving.trajectory import InMemoryTrajectoryRegistry
+from openjiuwen.agent_teams.rails.builtin_elements import SKILL_USE as CORE_SKILL_USE
 from openjiuwen.agent_teams.schema import deep_agent_spec as das
 from openjiuwen.agent_teams.harness.manifest import get_catalog, resolve_factory
 from openjiuwen.agent_teams.schema.blueprint import LeaderSpec, TeamAgentSpec
@@ -530,8 +531,35 @@ def test_team_member_deep_agent_spec_uses_agentic_skill_disclosure(role: str) ->
     base = DeepAgentSpec(enable_skill_discovery=False)
 
     spec = build_member_deep_agent_spec(_agentic_retrieval_config(), "team", role, base)
+    skill_rails = [rail for rail in (spec.rails or []) if rail.type == CORE_SKILL_USE]
 
     assert spec.enable_skill_discovery is False
+    assert len(skill_rails) == 1
+    assert skill_rails[0].params["skill_mode"] == SkillUseRail.SKILL_MODE_AUTO_LIST
+    assert skill_rails[0].params["include_tools"] is False
+
+
+@pytest.mark.parametrize("role", ["leader", "teammate"])
+def test_team_member_deep_agent_spec_normalizes_existing_skill_use_rail(role: str) -> None:
+    """Chat-team members normalize an existing skill rail to auto-list mode."""
+    base = DeepAgentSpec(
+        enable_skill_discovery=False,
+        rails=[
+            RailSpec(
+                type="SkillUseRail",
+                params={"skill_mode": SkillUseRail.SKILL_MODE_ALL},
+            )
+        ],
+    )
+
+    spec = build_member_deep_agent_spec(_agentic_retrieval_config(), "team", role, base)
+    skill_rails = [rail for rail in (spec.rails or []) if rail.type in {CORE_SKILL_USE, "SkillUseRail"}]
+
+    assert spec.enable_skill_discovery is False
+    assert len(skill_rails) == 1
+    assert skill_rails[0].type == "SkillUseRail"
+    assert skill_rails[0].params["skill_mode"] == SkillUseRail.SKILL_MODE_AUTO_LIST
+    assert skill_rails[0].params["include_tools"] is False
 
 
 @pytest.mark.parametrize("role", ["leader", "teammate"])
@@ -546,14 +574,15 @@ def test_team_member_deep_agent_spec_keeps_core_skill_discovery_when_retrieval_d
 
 @pytest.mark.parametrize("mode", ["code.team", "team.plan"])
 def test_code_member_deep_agent_spec_keeps_skill_use_rail_when_retrieval_enabled(mode: str) -> None:
-    """Code profiles remove the legacy SkillUseRail when retrieval owns discovery."""
+    """Code profiles keep skill_tool access without all-mode skill injection."""
     base = DeepAgentSpec(enable_skill_discovery=False)
 
     spec = build_member_deep_agent_spec(_agentic_retrieval_config(), mode, "leader", base)
-    rail_names = {rail.type for rail in (spec.rails or [])}
+    skill_rails = [rail for rail in (spec.rails or []) if rail.type == registry.CODE_SKILL_USE]
 
     assert spec.enable_skill_discovery is False
-    assert registry.CODE_SKILL_USE not in rail_names
+    assert len(skill_rails) == 1
+    assert skill_rails[0].params["skill_mode"] == SkillUseRail.SKILL_MODE_AUTO_LIST
 
 
 @pytest.mark.parametrize("mode", ["code.team", "team.plan"])

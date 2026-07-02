@@ -1,17 +1,7 @@
 .toolpanel-status-card {
-  padding: 1rem;
+  padding: 1rem 0 0 0;
   overflow-y: auto;
   max-height: 13rem;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-lg);
-  background: var(--card);
-  box-shadow:
-    0 2px 8px rgba(15, 23, 42, 0.06),
-    inset 0 1px 0 var(--card-highlight);
-  transition:
-    box-shadow var(--duration-fast) ease,
-    border-color var(--duration-fast) ease,
-    transform var(--duration-fast) ease;
 }
 
 .toolpanel-status-card:hover {

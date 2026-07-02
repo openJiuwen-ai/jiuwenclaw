@@ -2835,8 +2835,8 @@ async def test_ensure_monitor_handlers_skips_workflow_handler_when_swarmflow_dis
 
 
 @pytest.mark.anyio
-async def test_consume_workflow_events_broadcasts_each_event(monkeypatch):
-    """_consume_workflow_events iterates over handler.events() and broadcasts each."""
+async def test_consume_workflow_events_broadcasts_raw_for_tui(monkeypatch):
+    """On the TUI channel _consume_workflow_events broadcasts workflow.updated as-is."""
     broadcasted: list[dict[str, object]] = []
     event = {
         "event_type": "workflow.updated",
@@ -2854,10 +2854,55 @@ async def test_consume_workflow_events_broadcasts_each_event(monkeypatch):
 
     handler = _FakeWorkflowHandler()
     await _TeamHelpersTestApi.consume_workflow_events(
-        "web", "sess-wf-consume", handler,
+        "tui", "sess-wf-consume", handler,
     )
 
     assert broadcasted == [event]
+
+
+@pytest.mark.anyio
+async def test_consume_workflow_events_converts_to_team_events_for_web(monkeypatch):
+    """On a web channel _consume_workflow_events converts workflow.updated into team events."""
+    broadcasted: list[dict[str, object]] = []
+    event = {
+        "event_type": "workflow.updated",
+        "session_id": "sess-wf-web",
+        "workflow": {
+            "id": "run-9",
+            "name": "test-flow",
+            "status": "running",
+            "phases": [
+                {
+                    "id": "planning-1",
+                    "name": "planning",
+                    "status": "running",
+                    "agents": [
+                        {"id": "researcher-1", "name": "researcher", "status": "running"}
+                    ],
+                }
+            ],
+        },
+    }
+
+    class _FakeWorkflowHandler:
+        is_running = True
+
+        async def events(self):
+            yield event
+
+    monkeypatch.setattr(team_helpers, "_broadcast_event", lambda *args: broadcasted.append(args[2]))
+
+    handler = _FakeWorkflowHandler()
+    await _TeamHelpersTestApi.consume_workflow_events(
+        "web", "sess-wf-web", handler,
+    )
+
+    # No raw workflow.updated leaks to web; only team.* envelopes.
+    assert broadcasted
+    assert all(e["event_type"] in ("team.member", "team.task") for e in broadcasted)
+    types = [e["event"]["type"] for e in broadcasted]
+    assert "team.task.claimed" in types
+    assert "team.member.spawned" in types
 
 
 @pytest.mark.anyio
@@ -3145,3 +3190,163 @@ async def test_broadcast_team_state_snapshot_noop_when_no_monitor(monkeypatch):
 
     await team_helpers._broadcast_team_state_snapshot("web", "sess-no-monitor")
     assert broadcast_events == []
+
+
+# ---------------------------------------------------------------------------
+# swarmflow workflow.updated -> web team.member / team.task conversion
+# ---------------------------------------------------------------------------
+
+
+def _wf_event(phases: list[dict], *, run_id: str = "run-1", name: str = "wf") -> dict:
+    return {
+        "event_type": "workflow.updated",
+        "session_id": "sess-wf",
+        "workflow": {"id": run_id, "name": name, "phases": phases},
+    }
+
+
+def test_workflow_updated_to_team_events_ignores_non_workflow_events():
+    out = team_helpers._workflow_updated_to_team_events(
+        {"event_type": "team.member", "event": {}}, "sess-wf", {}, {}, set()
+    )
+    assert out == []
+
+
+def test_workflow_updated_to_team_events_planned_phase_creates_task():
+    seen_phase, seen_agent, spawned = {}, {}, set()
+    out = team_helpers._workflow_updated_to_team_events(
+        _wf_event([{"id": "planning-1", "name": "planning", "status": "planned"}]),
+        "sess-wf",
+        seen_phase,
+        seen_agent,
+        spawned,
+    )
+    assert len(out) == 1
+    ev = out[0]
+    assert ev["event_type"] == "team.task"
+    assert ev["session_id"] == "sess-wf"
+    assert ev["event"]["type"] == "team.task.created"
+    assert ev["event"]["task_id"] == "run-1:planning-1"
+    assert ev["event"]["title"] == "planning"
+    assert ev["event"]["team_id"] == "wf"
+
+
+def test_workflow_updated_to_team_events_running_agent_spawns_member_and_claims_task():
+    seen_phase, seen_agent, spawned = {}, {}, set()
+    out = team_helpers._workflow_updated_to_team_events(
+        _wf_event(
+            [
+                {
+                    "id": "planning-1",
+                    "name": "planning",
+                    "status": "running",
+                    "agents": [
+                        {"id": "researcher-1", "name": "researcher", "status": "running"}
+                    ],
+                }
+            ]
+        ),
+        "sess-wf",
+        seen_phase,
+        seen_agent,
+        spawned,
+    )
+    types = [e["event"]["type"] for e in out]
+    assert "team.task.claimed" in types
+    assert "team.member.spawned" in types
+    member = next(e for e in out if e["event"]["type"] == "team.member.spawned")
+    assert member["event"]["member_id"] == "run-1:researcher-1"
+    assert member["event"]["name"] == "researcher"
+    # running agent should not also emit a status_changed
+    assert "team.member.status_changed" not in types
+
+
+def test_workflow_updated_to_team_events_dedups_repeated_running_delta():
+    seen_phase, seen_agent, spawned = {}, {}, set()
+    phases = [
+        {
+            "id": "planning-1",
+            "name": "planning",
+            "status": "running",
+            "agents": [{"id": "researcher-1", "name": "researcher", "status": "running"}],
+        }
+    ]
+    first = team_helpers._workflow_updated_to_team_events(
+        _wf_event(phases), "sess-wf", seen_phase, seen_agent, spawned
+    )
+    assert first  # first delta emits events
+    # Same delta again (e.g. another agent_started re-includes the running phase)
+    second = team_helpers._workflow_updated_to_team_events(
+        _wf_event(phases), "sess-wf", seen_phase, seen_agent, spawned
+    )
+    assert second == []  # no status change -> nothing re-emitted
+
+
+def test_workflow_updated_to_team_events_agent_completed_changes_member_status():
+    seen_phase, seen_agent, spawned = {}, {}, set()
+    # First: agent running
+    team_helpers._workflow_updated_to_team_events(
+        _wf_event(
+            [
+                {
+                    "id": "planning-1",
+                    "name": "planning",
+                    "status": "running",
+                    "agents": [{"id": "researcher-1", "name": "researcher", "status": "running"}],
+                }
+            ]
+        ),
+        "sess-wf",
+        seen_phase,
+        seen_agent,
+        spawned,
+    )
+    # Then: agent completed, phase completed
+    out = team_helpers._workflow_updated_to_team_events(
+        _wf_event(
+            [
+                {
+                    "id": "planning-1",
+                    "name": "planning",
+                    "status": "completed",
+                    "agents": [{"id": "researcher-1", "name": "researcher", "status": "completed"}],
+                }
+            ]
+        ),
+        "sess-wf",
+        seen_phase,
+        seen_agent,
+        spawned,
+    )
+    types = [e["event"]["type"] for e in out]
+    assert "team.task.completed" in types
+    status_changed = next(e for e in out if e["event"]["type"] == "team.member.status_changed")
+    assert status_changed["event"]["member_id"] == "run-1:researcher-1"
+    assert status_changed["event"]["new_status"] == "completed"
+    assert status_changed["event"]["old_status"] == "running"
+    # already spawned -> no second spawn
+    assert "team.member.spawned" not in types
+
+
+def test_workflow_updated_to_team_events_first_sight_terminal_spawns_then_status():
+    seen_phase, seen_agent, spawned = {}, {}, set()
+    out = team_helpers._workflow_updated_to_team_events(
+        _wf_event(
+            [
+                {
+                    "id": "exec-1",
+                    "name": "execution",
+                    "status": "failed",
+                    "agents": [{"id": "coder-1", "name": "coder", "status": "failed"}],
+                }
+            ]
+        ),
+        "sess-wf",
+        seen_phase,
+        seen_agent,
+        spawned,
+    )
+    member_types = [e["event"]["type"] for e in out if e["event_type"] == "team.member"]
+    assert member_types == ["team.member.spawned", "team.member.status_changed"]
+    task = next(e for e in out if e["event_type"] == "team.task")
+    assert task["event"]["type"] == "team.task.cancelled"

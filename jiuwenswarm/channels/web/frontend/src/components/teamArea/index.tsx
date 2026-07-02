@@ -5,7 +5,7 @@
 import { useMemo } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Minimize2, Users } from 'lucide-react';
-import { useSessionStore, useTodoStore } from '../../stores';
+import { useChatStore, useSessionStore, useTodoStore } from '../../stores';
 import type { Message } from '../../types';
 import { TaskPlanningPanel } from './TaskPlanningPanel';
 import { TeamMembersPanel } from './TeamMembersPanel';
@@ -19,8 +19,10 @@ import {
 } from './shared';
 
 function useTaskPlanningMetrics() {
-  const { todos } = useTodoStore();
-  const { teamTaskEvents, teamTasks } = useSessionStore();
+  const activeSessionId = useChatStore((s) => s.activeSessionId);
+  const todos = useTodoStore((s) => s.runtimes[activeSessionId ?? '']?.todos ?? []);
+  const teamTaskEvents = useSessionStore((s) => s.runtimes[activeSessionId ?? '']?.teamTaskEvents ?? []);
+  const teamTasks = useSessionStore((s) => s.runtimes[activeSessionId ?? '']?.teamTasks ?? []);
 
   const totalTasks = useMemo(() => {
     if (teamTasks.length > 0) return teamTasks.length;
@@ -132,7 +134,7 @@ function ExpandedTeamArea({
 
   return (
     <div className="flex h-full flex-col overflow-hidden bg-card">
-      <div className="flex shrink-0 items-center justify-between px-6 py-6 bg-card border-border">
+      <div className="flex shrink-0 items-center justify-between px-6 py-4 bg-card border-border">
         <div className="flex items-center gap-2">
           {tabs.map((tab) => (
             <button

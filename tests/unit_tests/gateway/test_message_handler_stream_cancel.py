@@ -34,6 +34,18 @@ class _FakeAgentClient:
             yield env
 
 
+class _DisconnectingStreamAgentClient:
+    @staticmethod
+    async def send_request(env: object) -> SimpleNamespace:
+        raise AssertionError("stream disconnect test should not call send_request")
+
+    @staticmethod
+    async def send_request_stream(env: object):
+        if False:  # pragma: no cover - keeps this an async generator
+            yield env
+        raise RuntimeError("AgentServer WebSocket connection closed")
+
+
 class _TestMessageHandler(MessageHandler):
     @classmethod
     def create(cls) -> "_TestMessageHandler":
@@ -41,6 +53,12 @@ class _TestMessageHandler(MessageHandler):
         setattr(cls, "_instance", None)
         _FakeAgentClient.sent_requests = []
         return cls(_FakeAgentClient())
+
+    @classmethod
+    def create_with_client(cls, client: object) -> "_TestMessageHandler":
+        setattr(MessageHandler, "_instance", None)
+        setattr(cls, "_instance", None)
+        return cls(client)
 
     async def cancel_stream_tasks_for_channel(self, msg: Message) -> int:
         return await getattr(self, "_cancel_stream_tasks_for_channel")(msg)
@@ -84,6 +102,15 @@ def _seed_stream_task(
     return task
 
 
+async def _drain_robot_messages(handler: _TestMessageHandler) -> list[Message]:
+    messages: list[Message] = []
+    while True:
+        msg = await handler.consume_robot_messages(timeout=0.01)
+        if msg is None:
+            return messages
+        messages.append(msg)
+
+
 @pytest.mark.asyncio
 async def test_cancel_stream_tasks_only_affects_same_channel() -> None:
     handler = _TestMessageHandler.create()
@@ -106,6 +133,38 @@ async def test_cancel_stream_tasks_only_affects_same_channel() -> None:
     assert "rid-web" in getattr(handler, "_stream_tasks")
     await asyncio.sleep(0)
     assert len(_FakeAgentClient.sent_requests) == 0
+
+
+@pytest.mark.asyncio
+async def test_process_stream_publishes_error_and_stops_processing_on_connection_close() -> None:
+    handler = _TestMessageHandler.create_with_client(_DisconnectingStreamAgentClient())
+    env = SimpleNamespace(
+        request_id="rid-stream-close",
+        channel="web",
+        params={"content": "hello"},
+    )
+
+    await handler.process_stream(
+        env,
+        session_id="sess-stream-close",
+        request_metadata={"source": "test"},
+    )
+
+    outputs = await _drain_robot_messages(handler)
+    payloads = [msg.payload for msg in outputs]
+
+    assert any(
+        payload.get("event_type") == "chat.error"
+        and "AgentServer WebSocket connection closed" in payload.get("error", "")
+        for payload in payloads
+        if isinstance(payload, dict)
+    )
+    assert any(
+        payload.get("event_type") == "chat.processing_status"
+        and payload.get("is_processing") is False
+        for payload in payloads
+        if isinstance(payload, dict)
+    )
 
 
 @pytest.mark.asyncio

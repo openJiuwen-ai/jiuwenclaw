@@ -34,9 +34,9 @@
   --text: #e4e4e7;
   --text-strong: #fafafa;
   --chat-text: #e4e4e7;
-  --muted: #71717a;
+  --muted: #777777;
   --muted-strong: #52525b;
-  --muted-foreground: #71717a;
+  --muted-foreground: #777777;
 
   /* Border - Subtle but defined */
   --border: #243049;
@@ -123,7 +123,7 @@
   --statusbar-right-space: var(--tool-panel-width);
   --shell-focus-duration: 200ms;
   --shell-focus-ease: var(--ease-out);
-  --shell-surface-light: #f5f7f9;
+  --shell-surface-light: #f3f3f3;
 
   /* Typography scale (desktop baseline) */
   --font-size-base: 14px;
@@ -156,12 +156,12 @@
   --chrome: rgba(255, 255, 255, 0.95);
   --chrome-strong: rgba(255, 255, 255, 0.98);
 
-  --text: #3f3f46;
+  --text: #191919;
   --text-strong: #18181b;
   --chat-text: #3f3f46;
-  --muted: #71717a;
+  --muted: #777777;
   --muted-strong: #52525b;
-  --muted-foreground: #71717a;
+  --muted-foreground: #777777;
 
   --border: #e4e4e7;
   --border-strong: #d4d4d8;
@@ -437,7 +437,7 @@ select {
   .shell--collapsed {
     grid-template-columns: 48px minmax(0, 1fr);
     grid-template-areas: "nav content";
-    --tool-panel-width: 396px;
+    --tool-panel-width: 300px;
   }
 
   /* Topbar */
@@ -492,10 +492,11 @@ select {
   }
 
   .brand-title {
+    height: 68px;
+    line-height: 68px;
+    padding: 0 8px;
     font-size: 16px;
     font-weight: 700;
-    letter-spacing: -0.03em;
-    line-height: 1.1;
     color: var(--text-strong);
   }
 
@@ -564,18 +565,12 @@ select {
   /* Content Area */
   .content {
     grid-area: content;
-    padding: 16px 16px 16px 0;
     display: flex;
     flex-direction: column;
     min-height: 0;
     overflow-y: auto;
     overflow-x: hidden;
     background: linear-gradient(180deg, var(--bg-accent), var(--bg));
-  }
-
-  /* Content when team area is expanded and nav is collapsed */
-  .content--team-expanded {
-    padding-left: 16px; /* 当导航栏收缩时，左侧也有 padding */
   }
 
   :root[data-theme="light"] .content {

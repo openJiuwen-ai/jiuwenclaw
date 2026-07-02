@@ -42,8 +42,19 @@ import {
 import { useWebSocket } from './hooks';
 import { webRequest } from './services/webClient';
 import { useTeamPanelState } from './features/teamPanelState';
-import { AgentMode, UserAnswer, ModelEntry } from './types';
-import { useSessionStore, useChatStore, useTodoStore, useHarnessStore } from './stores';
+import { AgentMode, UserAnswer, ModelEntry, type Session } from './types';
+import { ensureSessionRuntimes, useSessionStore, useChatStore, useTodoStore, useHarnessStore } from './stores';
+import { useChatRoute } from './multi-session/routing/useChatRoute';
+import { ConversationSidebar } from './multi-session/sidebar/ConversationSidebar';
+import { DeleteDialog } from './multi-session/dialogs/Dialogs';
+import {
+  NEW_CONVERSATION_ID,
+  forgetCreatedConversation,
+  isConversationMissing,
+  reconcileCreatedConversations,
+  registerCreatedConversation,
+  resetNewConversationRuntime,
+} from './multi-session/state/newConversationLifecycle';
 import { useTranslation } from 'react-i18next';
 import {
   normalizeA2UIEnabled,
@@ -81,14 +92,14 @@ type ConfigSaveAllPayload = {
   team?: AgentsTeamsSavePayload["team"];
 };
 
-function clearTeamRuntimeState(): void {
+function clearTeamRuntimeState(sessionId: string): void {
   const sessionStore = useSessionStore.getState();
-  sessionStore.setTeamMembers([]);
-  sessionStore.setTeamTaskEvents([]);
-  sessionStore.setTeamTasks([]);
-  sessionStore.setTeamMemberExecutionEvents([]);
-  sessionStore.clearAllTeamMemberContextCompressionStatus();
-  sessionStore.setTeamHistoryMessages([]);
+  sessionStore.setTeamMembers(sessionId, []);
+  sessionStore.setTeamTaskEvents(sessionId, []);
+  sessionStore.setTeamTasks(sessionId, []);
+  sessionStore.setTeamMemberExecutionEvents(sessionId, []);
+  sessionStore.clearAllTeamMemberContextCompressionStatus(sessionId);
+  sessionStore.setTeamHistoryMessages(sessionId, []);
 }
 
 // 错误边界组件
@@ -147,35 +158,12 @@ function ErrorFallback({ error }: { error: Error | null }) {
   );
 }
 
-
-
-// 会话 ID 持久化（使用 sessionStorage：同标签页刷新保留，多标签页隔离）
-const SESSION_STORAGE_KEY = 'openjiuwen_current_session';
+const SIDEBAR_COLLAPSED_KEY = 'jiuwenswarm_sidebar_collapsed';
 
 function generateSessionId(): string {
   const ts = Date.now().toString(16);
-  const rand = Math.random().toString(16).slice(2, 8);
+  const rand = crypto.randomUUID().replaceAll('-', '').slice(0, 12);
   return `sess_${ts}_${rand}`;
-}
-
-function getStoredSessionId(): string | null {
-  try {
-    return sessionStorage.getItem(SESSION_STORAGE_KEY);
-  } catch {
-    return null;
-  }
-}
-
-function storeSessionId(sessionId: string | null) {
-  try {
-    if (sessionId && sessionId !== 'new') {
-      sessionStorage.setItem(SESSION_STORAGE_KEY, sessionId);
-    } else {
-      sessionStorage.removeItem(SESSION_STORAGE_KEY);
-    }
-  } catch {
-    // ignore
-  }
 }
 
 function downloadDataUrl(dataUrl: string, filename: string): void {
@@ -189,11 +177,12 @@ function downloadDataUrl(dataUrl: string, filename: string): void {
 
 function AppContent() {
   const { t, i18n } = useTranslation();
+  const { route, navigate } = useChatRoute();
   const tRef = useRef(t);
   // 优先使用存储的会话 ID，避免每次刷新创建新会话
   const [sessionId, setSessionId] = useState<string>(() => {
-    const stored = getStoredSessionId();
-    return stored || 'new';
+    if (route.kind === 'chat-session') return route.sessionId;
+    return 'new';
   });
 
   const [activeNav, setActiveNav] = useState<MainNavKey>('chat');
@@ -207,7 +196,6 @@ function AppContent() {
   const [restartSeenDisconnect, setRestartSeenDisconnect] = useState(false);
   const [appliedWithoutRestart, setAppliedWithoutRestart] = useState(false);
   const [a2uiRefreshPending, setA2uiRefreshPending] = useState(false);
-  const [newSessionToastVisible, setNewSessionToastVisible] = useState(false);
   const [heartbeatToastVisible, setHeartbeatToastVisible] = useState(false);
   const [heartbeatToastMessage, setHeartbeatToastMessage] = useState('');
   const [heartbeatModalOpen, setHeartbeatModalOpen] = useState(false);
@@ -215,7 +203,11 @@ function AppContent() {
   const [securityAlertContent, setSecurityAlertContent] = useState('');
   const [hasVisitedSkills, setHasVisitedSkills] = useState(false);
   const [hasVisitedChannels, setHasVisitedChannels] = useState(false);
-  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(() => localStorage.getItem(SIDEBAR_COLLAPSED_KEY) !== 'false');
+  const [deleteTarget, setDeleteTarget] = useState<Session | null>(null);
+  const [dialogBusy, setDialogBusy] = useState(false);
+  const [dialogError, setDialogError] = useState<string | null>(null);
+  const [composerFocusNonce, setComposerFocusNonce] = useState(0);
   const startupUpdateCheckRef = useRef(false);
   /** 从 SkillNet 等入口跳转配置页时，首次展开对应配置分组（如第三方服务） */
   const [configInitialExpandGroup, setConfigInitialExpandGroup] = useState<string | null>(null);
@@ -230,27 +222,33 @@ function AppContent() {
     }
     if (activeNav === 'chat') {
       const { availableModels, setSelectedModelName } = useSessionStore.getState();
-      const defaultModel = availableModels[0]?.model_name;
-      if (defaultModel) {
-        setSelectedModelName(defaultModel);
+      const defaultModel = availableModels[0];
+      const runtime = useSessionStore.getState().getRuntime(sessionId);
+      if (defaultModel && !runtime?.selectedModelName) {
+        useSessionStore.getState().ensureRuntime(sessionId);
+        setSelectedModelName(sessionId, defaultModel.alias || defaultModel.model_name);
       }
     }
-  }, [activeNav]);
+  }, [activeNav, sessionId]);
 
   useEffect(() => {
     if (!FEATURE_APP_UPDATER_UI && activeNav === 'updatepanel') {
       setActiveNav('chat');
     }
   }, [activeNav]);
+
+  useEffect(() => {
+    const handler = (e: Event) => {
+      const nav = (e as CustomEvent<MainNavKey>).detail;
+      if (nav) setActiveNav(nav);
+    };
+    window.addEventListener('jiuwen:nav', handler);
+    return () => window.removeEventListener('jiuwen:nav', handler);
+  }, []);
+
   const restartAutoCloseTimerRef = useRef<number | null>(null);
-  const newSessionToastTimerRef = useRef<number | null>(null);
   const heartbeatToastTimerRef = useRef<number | null>(null);
   const lastHeartbeatToastKeyRef = useRef<string | null>(null);
-  /** 自「恢复会话」加载 history 后的分页元数据；用于聊天区顶部加载更早消息 */
-  const [historyPagerMeta, setHistoryPagerMeta] = useState<{
-    loadedPages: number;
-    totalPages: number;
-  } | null>(null);
   const [historyLoadingMore, setHistoryLoadingMore] = useState(false);
   /** 仅用于强制重跑「首屏 history」effect：从会话列表恢复时若 sessionId 未变，也要重新拉 history 并恢复 historyPagerMeta */
   const [historyBootstrapKey, setHistoryBootstrapKey] = useState(0);
@@ -258,6 +256,9 @@ function AppContent() {
   const historyLoadingMoreRef = useRef(false);
   const historyRestoreHandleRef = useRef<HistoryRestoreHandle | null>(null);
   const historyPageHandleRef = useRef<HistoryRestoreHandle | null>(null);
+  const creatingSessionRef = useRef(false);
+  const fetchSessionsRequestRef = useRef(0);
+  const promotedFromNewSessionIdsRef = useRef(new Set<string>());
   const shareExportRef = useRef<HTMLDivElement>(null);
   const shareExportFilenameRef = useRef('jiuwenswarm-share.png');
   const shareExportTokenRef = useRef(0);
@@ -268,7 +269,36 @@ function AppContent() {
     sessionIdRef.current = sessionId;
   }, [sessionId]);
 
-  const { setCurrentSession, setSessions, setAvailableModels, setMode, mode, heartbeatMessage, heartbeatUpdatedAt, teamTaskEvents, teamTasks, teamMembers, setTeamLeaderMemberIds } = useSessionStore();
+  useEffect(() => {
+    if (route.kind === 'chat-session') {
+      sessionIdRef.current = route.sessionId;
+      setSessionId(route.sessionId);
+      setActiveNav('chat');
+    } else if (route.kind === 'chat-new') {
+      if (window.location.pathname !== '/chat/new') navigate({ kind: 'chat-new' }, { replace: true });
+      sessionIdRef.current = 'new';
+      setSessionId('new');
+      setActiveNav('chat');
+    }
+  }, [navigate, route]);
+
+  useEffect(() => { localStorage.setItem(SIDEBAR_COLLAPSED_KEY, String(sidebarCollapsed)); }, [sidebarCollapsed]);
+
+  useEffect(() => {
+    ensureSessionRuntimes(sessionId);
+    useChatStore.getState().setActiveSessionId(sessionId);
+  }, [sessionId]);
+
+  const { setCurrentSession, setSessions, setAvailableModels, setMode, heartbeatMessage, heartbeatUpdatedAt, setTeamLeaderMemberIds } = useSessionStore();
+  const sessions = useSessionStore((s) => s.sessions);
+  const sessionTitle = useMemo(() => {
+    const session = sessions.find((s) => s.session_id === sessionId);
+    return session?.title?.trim() ?? '';
+  }, [sessions, sessionId]);
+  const mode = useSessionStore((s) => s.runtimes[sessionId]?.mode ?? 'agent.plan');
+  const teamTaskEvents = useSessionStore((s) => s.runtimes[sessionId]?.teamTaskEvents ?? []);
+  const teamTasks = useSessionStore((s) => s.runtimes[sessionId]?.teamTasks ?? []);
+  const teamMembers = useSessionStore((s) => s.runtimes[sessionId]?.teamMembers ?? []);
   const {
     teamAreaExpanded,
     teamAreaActiveTab,
@@ -304,46 +334,49 @@ function AppContent() {
     document.addEventListener('mouseup', onMouseUp);
   }, [chatPanelWidthPct]);
 
-  const {
-    clearMessages,
-    clearSubtasks,
-    addMessage,
-    addToolCall,
-    addToolResult,
-    prependMessages,
-    isProcessing,
-    isPaused,
-    setProcessing,
-    setThinking,
-    setLoadingHistory,
-    setPaused,
-    messages,
-  } = useChatStore();
+  const clearMessages = useChatStore((s) => s.clearMessages);
+  const clearSubtasks = useChatStore((s) => s.clearSubtasks);
+  const addMessage = useChatStore((s) => s.addMessage);
+  const addToolCall = useChatStore((s) => s.addToolCall);
+  const addToolResult = useChatStore((s) => s.addToolResult);
+  const prependMessages = useChatStore((s) => s.prependMessages);
+  const isProcessing = useChatStore((s) => s.runtimes[sessionId]?.isProcessing ?? false);
+  const isPaused = useChatStore((s) => s.runtimes[sessionId]?.isPaused ?? false);
+  const setProcessing = useChatStore((s) => s.setProcessing);
+  const setThinking = useChatStore((s) => s.setThinking);
+  const setLoadingHistory = useChatStore((s) => s.setLoadingHistory);
+  const setHistoryPagerMeta = useChatStore((s) => s.setHistoryPagerMeta);
+  /** 自「恢复会话」加载 history 后的分页元数据；与消息一样按 session 隔离。 */
+  const historyPagerMeta = useChatStore((s) => s.runtimes[sessionId]?.historyPagerMeta ?? null);
+  const setPaused = useChatStore((s) => s.setPaused);
+  const messages = useChatStore((s) => s.runtimes[sessionId]?.messages ?? []);
 
   useEffect(() => {
     if (!serverConfig) {
-      setTeamLeaderMemberIds([]);
+      if (sessionId) setTeamLeaderMemberIds(sessionId, []);
       return;
     }
     const leaderIds = Object.entries(serverConfig)
       .filter(([key]) => /^team_leader_member_name_\d+$/.test(key) || /^team_\d+_leader_member_name$/.test(key))
       .map(([, value]) => (typeof value === 'string' ? value.trim() : ''))
       .filter(Boolean);
-    setTeamLeaderMemberIds(leaderIds);
-  }, [serverConfig, setTeamLeaderMemberIds]);
+    if (sessionId) setTeamLeaderMemberIds(sessionId, leaderIds);
+  }, [serverConfig, sessionId, setTeamLeaderMemberIds]);
 
-  const disposeInFlightHistoryHandles = useCallback(() => {
+  const disposeInFlightHistoryHandles = useCallback((sid?: string) => {
     historyLoadingMoreRef.current = false;
-    setLoadingHistory(false);
+    if (sid) setLoadingHistory(sid, false);
     historyRestoreHandleRef.current?.dispose();
     historyRestoreHandleRef.current = null;
     historyPageHandleRef.current?.dispose();
     historyPageHandleRef.current = null;
   }, [setLoadingHistory]);
 
-  useEffect(() => () => disposeInFlightHistoryHandles(), [disposeInFlightHistoryHandles]);
-  const { todos, clearTodos } = useTodoStore();
-  const { extensionReady, reset: resetHarnessStore } = useHarnessStore();
+  useEffect(() => () => disposeInFlightHistoryHandles(sessionIdRef.current ?? undefined), [disposeInFlightHistoryHandles]);
+  const todos = useTodoStore((s) => s.runtimes[sessionId]?.todos ?? []);
+  const clearTodos = useTodoStore((s) => s.clearTodos);
+  const extensionReady = useHarnessStore((s) => s.runtimes[sessionId]?.extensionReady ?? null);
+  const resetHarnessStore = useHarnessStore((s) => s.reset);
 
   const toolPanelHasContent = useMemo(() => {
     const hasMessages = messages.length > 0;
@@ -368,30 +401,10 @@ function AppContent() {
     pause,
     cancel,
     supplement,
-    switchMode,
     sendUserAnswer,
   } = useWebSocket({
     activeSessionId: sessionId,
-    onConnect: (payload) => {
-      const currentStored = getStoredSessionId();
-      if (payload.session_id) {
-        // 仅在尚无有效 session 时采纳后端分配的 session_id；
-        // 重连时保持已有会话，防止被覆盖
-        if (!currentStored) {
-          console.log('Adopting backend session:', payload.session_id);
-          setSessionId(payload.session_id);
-          storeSessionId(payload.session_id);
-        } else {
-          console.log('Keeping existing session:', currentStored);
-        }
-      } else if (!currentStored) {
-        // 后端未提供 session_id 且本地也无有效 session：兜底生成
-        const fallbackSid = generateSessionId();
-        console.log('Generated fallback session:', fallbackSid);
-        setSessionId(fallbackSid);
-        storeSessionId(fallbackSid);
-      }
-    },
+    onConnect: () => console.log('Connected'),
     onDisconnect: () => {
       console.log('Disconnected');
     },
@@ -402,10 +415,12 @@ function AppContent() {
 
   // 获取会话列表
   const fetchSessions = useCallback(async () => {
+    const requestId = ++fetchSessionsRequestRef.current;
     try {
       const payload = await request<{ sessions?: unknown[] }>('session.list', {
-        limit: 20,
+        limit: 200,
       });
+      if (requestId !== fetchSessionsRequestRef.current) return;
       if (payload?.sessions && Array.isArray(payload.sessions)) {
         // 兼容新格式(对象数组)和旧格式(字符串数组)
         const normalized = payload.sessions.map((item) => {
@@ -417,7 +432,7 @@ function AppContent() {
           }
           return null;
         }).filter(Boolean) as Parameters<typeof setSessions>[0];
-        setSessions(normalized);
+        setSessions(reconcileCreatedConversations(normalized));
       }
     } catch (error) {
       console.error('Failed to fetch sessions:', error);
@@ -478,13 +493,6 @@ function AppContent() {
     setA2uiRefreshPending(false);
   }, [clearRestartAutoCloseTimer]);
 
-  const clearNewSessionToastTimer = useCallback(() => {
-    if (newSessionToastTimerRef.current != null) {
-      window.clearTimeout(newSessionToastTimerRef.current);
-      newSessionToastTimerRef.current = null;
-    }
-  }, []);
-
   const clearHeartbeatToastTimer = useCallback(() => {
     if (heartbeatToastTimerRef.current != null) {
       window.clearTimeout(heartbeatToastTimerRef.current);
@@ -501,7 +509,7 @@ function AppContent() {
       if (securityAlertTimerRef.current) {
         clearTimeout(securityAlertTimerRef.current);
       }
-      securityAlertTimerRef.current = setTimeout(() => {
+      securityAlertTimerRef.current = window.setTimeout(() => {
         setSecurityAlertVisible(false);
         securityAlertTimerRef.current = null;
       }, 5000);
@@ -731,10 +739,9 @@ function AppContent() {
   useEffect(() => {
     return () => {
       clearRestartAutoCloseTimer();
-      clearNewSessionToastTimer();
       clearHeartbeatToastTimer();
     };
-  }, [clearHeartbeatToastTimer, clearNewSessionToastTimer, clearRestartAutoCloseTimer]);
+  }, [clearHeartbeatToastTimer, clearRestartAutoCloseTimer]);
 
   useEffect(() => {
     const normalized = heartbeatMessage?.trim();
@@ -770,13 +777,18 @@ function AppContent() {
   }, [fetchConfig, fetchSessions, initialDataLoaded, isConnected]);
 
   // 聊天处理完成后刷新会话列表，以便拾取自动生成的标题等元数据更新
-  const prevProcessingRef = useRef(false);
+  const prevProcessingBySessionRef = useRef(new Map<string, boolean>());
   useEffect(() => {
-    if (prevProcessingRef.current && !isProcessing) {
+    if (!sessionId || sessionId === NEW_CONVERSATION_ID) {
+      return;
+    }
+
+    const prevProcessing = prevProcessingBySessionRef.current.get(sessionId) ?? false;
+    if (prevProcessing && !isProcessing) {
       void fetchSessions();
     }
-    prevProcessingRef.current = isProcessing;
-  }, [isProcessing, fetchSessions]);
+    prevProcessingBySessionRef.current.set(sessionId, isProcessing);
+  }, [sessionId, isProcessing, fetchSessions]);
 
   // 连接成功后从 config.yaml 同步 preferred_language 到前端显示
   useEffect(() => {
@@ -798,72 +810,87 @@ function AppContent() {
     // 仅处理以 sess_ 开头的会话 ID
     if (!sessionId.startsWith('sess_')) return;
 
+    if (promotedFromNewSessionIdsRef.current.has(sessionId)) {
+      setHistoryPagerMeta(sessionId, null);
+      setHistoryLoadingMore(false);
+      setLoadingHistory(sessionId, false);
+      return;
+    }
+
     // 新建会话时跳过历史加载
-    const isNew = useChatStore.getState().isNewSession;
+    const isNew = useChatStore.getState().runtimes[sessionId]?.isNewSession ?? false;
     if (isNew) {
-      useChatStore.getState().setNewSession(false);
-      setHistoryPagerMeta(null);  // 新会话无历史，不显示分页栏
-      setLoadingHistory(false);
+      useChatStore.getState().setNewSession(sessionId, false);
+      setHistoryPagerMeta(sessionId, null);  // 新会话无历史，不显示分页栏
+      setLoadingHistory(sessionId, false);
+      return;
+    }
+
+    // 已有 runtime 数据（用户之前打开过）则跳过历史加载，直接使用内存数据
+    const existingRuntime = useChatStore.getState().getRuntime(sessionId);
+    if (existingRuntime && existingRuntime.messages.length > 0) {
+      setLoadingHistory(sessionId, false);
       return;
     }
 
     // 清理之前的历史加载句柄
-    disposeInFlightHistoryHandles();
-    setHistoryPagerMeta(null);
+    disposeInFlightHistoryHandles(sessionId);
+    setHistoryPagerMeta(sessionId, null);
     setHistoryLoadingMore(false);
     
-    setLoadingHistory(true);
+    setLoadingHistory(sessionId, true);
     // 开始历史会话加载
     const restoreHandle = beginHistoryRestore({
       sessionId: sessionId,
       onReady: (messages, totalPages) => {
         if (sessionIdRef.current !== sessionId) {
-          setLoadingHistory(false);
+          setLoadingHistory(sessionId, false);
           return;
         }
         historyRestoreFromPanelHintRef.current = false;
-        clearMessages();
-        messages.forEach((message) => addMessage(message));
-        setHistoryPagerMeta({
+        clearMessages(sessionId);
+        messages.forEach((message) => addMessage(sessionId, message));
+        setHistoryPagerMeta(sessionId, {
           loadedPages: 1,
           totalPages: totalPages ?? 1,
         });
-        setLoadingHistory(false);
+        setLoadingHistory(sessionId, false);
         queueMicrotask(() => {
           historyRestoreHandleRef.current = null;
         });
       },
       onEmpty: (emptyTotalPages) => {
         if (sessionIdRef.current !== sessionId) {
-          setLoadingHistory(false);
+          setLoadingHistory(sessionId, false);
           return;
         }
-        clearMessages();
-        setHistoryPagerMeta({
+        clearMessages(sessionId);
+        setHistoryPagerMeta(sessionId, {
           loadedPages: 1,
           totalPages: emptyTotalPages ?? 1,
         });
         if (historyRestoreFromPanelHintRef.current) {
           historyRestoreFromPanelHintRef.current = false;
-          addMessage({
+          addMessage(sessionId, {
             id: `history-restore-empty-${Date.now()}`,
             role: 'system',
             content: tRef.current('sessions.restoreEmpty'),
             timestamp: new Date().toISOString(),
           });
         }
-        setLoadingHistory(false);
+        setLoadingHistory(sessionId, false);
         historyRestoreHandleRef.current = null;
       },
       onToolReplay: (items) => {
         if (sessionIdRef.current !== sessionId) {
           return;
         }
-        clearSubtasks();
+        clearSubtasks(sessionId);
         for (const item of items) {
           if (item.kind === 'tool_call') {
             const n = normalizeToolCallPayload(item.payload);
             addToolCall(
+              sessionId,
               {
                 id: n.id,
                 name: n.name,
@@ -877,6 +904,7 @@ function AppContent() {
           } else {
             const n = normalizeToolResultPayload(item.payload);
             addToolResult(
+              sessionId,
               {
                 toolName: n.toolName,
                 result: n.result,
@@ -895,17 +923,18 @@ function AppContent() {
           return;
         }
         const harnessStore = useHarnessStore.getState();
+        const harnessRuntime = harnessStore.getRuntime(sessionId);
         for (const item of items) {
           if (item.kind === 'harness_message') {
             const content = typeof item.payload.content === 'string' ? item.payload.content : '';
             const stage = typeof item.payload.stage === 'string' ? item.payload.stage : undefined;
             if (content) {
-              harnessStore.addHarnessMessage(content, stage);
+              harnessStore.addHarnessMessage(sessionId, content, stage);
               // Update stage result with running status and label from message
               if (stage && content) {
-                const existingStage = harnessStore.stageResults.find((s) => s.stage === stage);
+                const existingStage = harnessRuntime?.stageResults.find((s) => s.stage === stage);
                 if (existingStage?.status !== 'running') {
-                  harnessStore.updateStageResult({
+                  harnessStore.updateStageResult(sessionId, {
                     stage,
                     stageLabel: content,
                     status: 'running',
@@ -922,7 +951,7 @@ function AppContent() {
             const messages = Array.isArray(item.payload.messages) ? item.payload.messages : [];
             const metrics = item.payload.metrics || {};
             if (stage) {
-              harnessStore.updateStageResult({
+              harnessStore.updateStageResult(sessionId, {
                 stage,
                 status: status as 'success' | 'failed' | 'timeout',
                 error,
@@ -935,7 +964,7 @@ function AppContent() {
       },
       onError: (message) => {
         console.warn('[history.restore]', message);
-        setLoadingHistory(false);
+        setLoadingHistory(sessionId, false);
       },
     });
     historyRestoreHandleRef.current = restoreHandle;
@@ -952,14 +981,14 @@ function AppContent() {
         restoreHandle.dispose();
         historyRestoreHandleRef.current = null;
         // 发生错误时，设置 historyPagerMeta 为 null，显示欢迎信息
-        setHistoryPagerMeta(null);
+        setHistoryPagerMeta(sessionId, null);
         console.error('Failed to load history:', error);
-        setLoadingHistory(false);
+        setLoadingHistory(sessionId, false);
         // 忽略 "invalid page_idx or session history not found" 错误，因为这是新会话的正常情况
         const errorMessage = error instanceof Error ? error.message : String(error);
         if (sessionIdRef.current === sessionId && !errorMessage.includes('invalid page_idx or session history not found')) {
-          clearMessages();
-          addMessage({
+          clearMessages(sessionId);
+          addMessage(sessionId, {
             id: `history-load-failed-${Date.now()}`,
             role: 'system',
             content: tRef.current('sessions.errors.restoreFailed', { sessionId }),
@@ -980,130 +1009,88 @@ function AppContent() {
     clearSubtasks,
     disposeInFlightHistoryHandles,
     setLoadingHistory,
+    setHistoryPagerMeta,
   ]);
 
-  // 新建会话：立即生成可用的 session_id，避免停留在 'new' 导致无法发送消息
-  const handleNewSession = useCallback(async () => {
-    if (mode === 'team' && sessionId) {
-      cancel(sessionId);
-    }
-    // 切换模式/新建会话时直接设置状态，避免闪现
-    useChatStore.getState().setSwitchingMode(true);
-    useChatStore.getState().setNewSession(true);  // 标记新建会话，跳过历史加载
-    useChatStore.getState().setInterruptResult(null);
-    useChatStore.getState().setProcessing(false);
-    useChatStore.getState().setThinking(false);
-    useChatStore.getState().setPaused(false);
-    // 集群模式下新建会话时清空成员列表和事件列表
-    if (mode === 'team') {
-      clearTeamRuntimeState();
-      setTeamAreaExpanded(false);
-    }
-    disposeInFlightHistoryHandles();
-    setHistoryPagerMeta(null);
+  const requestComposerFocus = useCallback(() => {
+    setComposerFocusNonce((nonce) => nonce + 1);
+  }, []);
+
+  const enterNewConversation = useCallback((targetMode: AgentMode = mode) => {
+    const currentSessionId = sessionIdRef.current;
+    const currentRuntime = useSessionStore.getState().getRuntime(currentSessionId);
+    const selectedModelName = currentRuntime?.selectedModelName ?? null;
+    disposeInFlightHistoryHandles(
+      currentSessionId !== NEW_CONVERSATION_ID ? currentSessionId : undefined,
+    );
     setHistoryLoadingMore(false);
-    setProcessing(false);
-    setThinking(false);
-    setPaused(false);
-    clearMessages();
-    const { setContextCompressionStats } = useSessionStore.getState();
-    setContextCompressionStats({
-      rate: 0,
-      beforeCompressed: 0,
-      afterCompressed: 0,
-    });
-    clearTodos();
-    resetHarnessStore();
-    const newSid = generateSessionId();
-    const previousSid = sessionIdRef.current;
-    // 立即同步更新 ref 到新值，防止后续发送消息使用旧 ID
-    sessionIdRef.current = newSid;
-    setSessionId(newSid);
-    try {
-      const payload = await request<{ session_id?: string }>('session.create', {
-        session_id: newSid,
-      });
-      const createdSid =
-        typeof payload?.session_id === 'string' && payload.session_id
-          ? payload.session_id
-          : newSid;
-      // 如果后端返回的 ID 与生成的不一致，更新 ref
-      if (createdSid !== newSid) {
-        sessionIdRef.current = createdSid;
-        setSessionId(createdSid);
-      }
-      setCurrentSession(null);
-      storeSessionId(createdSid);
-      // 保持当前模式
-      if (switchMode) {
-        try {
-          await switchMode(createdSid, mode);
-        } catch (error) {
-          console.error('Failed to set mode for new session:', error);
-        }
-      }
-      await fetchSessions();
-    } catch (error) {
-      console.error('Failed to create session:', error);
-      // 创建失败时恢复旧的 session ID
-      sessionIdRef.current = previousSid;
-      setSessionId(previousSid);
-      return;
-    }
-    setNewSessionToastVisible(true);
-    clearNewSessionToastTimer();
-    newSessionToastTimerRef.current = window.setTimeout(() => {
-      setNewSessionToastVisible(false);
-      newSessionToastTimerRef.current = null;
-    }, 2000);
-    // 延迟重置切换模式状态
-    setTimeout(() => {
-      useChatStore.getState().setSwitchingMode(false);
-    }, 300);
-  }, [
-    cancel,
-    clearMessages,
-    clearNewSessionToastTimer,
-    clearTodos,
-    disposeInFlightHistoryHandles,
-    fetchSessions,
-    mode,
-    request,
-    resetHarnessStore,
-    sessionId,
-    setCurrentSession,
-    setTeamAreaExpanded,
-    setPaused,
-    setProcessing,
-    setThinking,
-    switchMode,
-  ]);
+    resetNewConversationRuntime({ mode: targetMode, selectedModelName });
+    sessionIdRef.current = NEW_CONVERSATION_ID;
+    setSessionId(NEW_CONVERSATION_ID);
+    setCurrentSession(null);
+    setTeamAreaExpanded(false);
+    navigate({ kind: 'chat-new' });
+    setActiveNav('chat');
+    requestComposerFocus();
+  }, [disposeInFlightHistoryHandles, mode, navigate, requestComposerFocus, setCurrentSession, setTeamAreaExpanded]);
+
+  const handleNewSession = useCallback(async () => {
+    enterNewConversation();
+  }, [enterNewConversation]);
 
   // 切换模式
-  const handleSwitchMode = useCallback((mode: AgentMode) => {
-    if (!sessionId || sessionId === 'new') return;
-    // 切换模式时直接设置状态，避免闪现
-    useChatStore.getState().setSwitchingMode(true);
-    useChatStore.getState().setProcessing(false);
-    useChatStore.getState().setThinking(false);
-    useChatStore.getState().setPaused(false);
-    // 切换到集群模式时清空成员列表和事件列表
-    if (mode === 'team') {
-      clearTeamRuntimeState();
+  const handleSwitchMode = useCallback((targetMode: AgentMode) => {
+    const currentId = sessionIdRef.current;
+    if (useChatStore.getState().getRuntime(currentId)?.isProcessing) return;
+    if (currentId === NEW_CONVERSATION_ID) {
+      setMode(NEW_CONVERSATION_ID, targetMode);
+      return;
     }
-    // 从集群模式切换到其他模式时，也需要清空成员列表和事件列表
-    if (mode !== 'team' && useSessionStore.getState().mode === 'team') {
-      clearTeamRuntimeState();
-    }
-    void switchMode(sessionId, mode);
-  }, [sessionId, switchMode]);
+    enterNewConversation(targetMode);
+  }, [enterNewConversation, setMode]);
 
-  const handleSendMessage = useCallback((content: string) => {
+  const handleSendMessage = useCallback(async (content: string) => {
     const currentSessionId = sessionIdRef.current;
-    if (!currentSessionId || currentSessionId === 'new') return;
-    disposeInFlightHistoryHandles();
-    void sendMessage(content, currentSessionId);
-  }, [disposeInFlightHistoryHandles, sendMessage]);
+    if (!currentSessionId) return;
+    if (currentSessionId === NEW_CONVERSATION_ID) {
+      if (creatingSessionRef.current) return;
+      creatingSessionRef.current = true;
+      useChatStore.getState().setProcessing(NEW_CONVERSATION_ID, true);
+      const newSid = generateSessionId();
+      const newRuntime = useSessionStore.getState().getRuntime(NEW_CONVERSATION_ID);
+      const runtimeSettings = {
+        mode: newRuntime?.mode ?? mode,
+        selectedModelName: newRuntime?.selectedModelName ?? null,
+      };
+      try {
+        const payload = await request<{ sessionId?: string }>('session.create', {
+          session_id: newSid,
+          mode: runtimeSettings.mode,
+        });
+        if (payload.sessionId !== newSid) throw new Error('session.create returned an unexpected session id');
+        registerCreatedConversation(newSid, runtimeSettings, Date.now(), content);
+        promotedFromNewSessionIdsRef.current.add(newSid);
+        useChatStore.getState().setProcessing(NEW_CONVERSATION_ID, false);
+        sessionIdRef.current = newSid;
+        setSessionId(newSid);
+        navigate({ kind: 'chat-session', sessionId: newSid }, { replace: true });
+        const sent = await sendMessage(content, newSid);
+        if (!sent) useChatStore.getState().setInputValue(newSid, content);
+      } catch (error) {
+        useChatStore.getState().setProcessing(NEW_CONVERSATION_ID, false);
+        useChatStore.getState().setThinking(NEW_CONVERSATION_ID, false);
+        useChatStore.getState().setInputValue(NEW_CONVERSATION_ID, content);
+        console.error('Failed to create conversation:', error);
+        window.alert(t('multiSession.errors.create'));
+      } finally {
+        creatingSessionRef.current = false;
+      }
+      return;
+    }
+    disposeInFlightHistoryHandles(currentSessionId);
+    const sent = await sendMessage(content, currentSessionId);
+    if (!sent) useChatStore.getState().setInputValue(currentSessionId, content);
+  }, [disposeInFlightHistoryHandles, mode, navigate, request, sendMessage, t]);
 
   useEffect(() => {
     return setA2UIActionHandler((message) => {
@@ -1150,12 +1137,12 @@ function AppContent() {
     const finishLoadingMore = () => {
       historyLoadingMoreRef.current = false;
       setHistoryLoadingMore(false);
-      setLoadingHistory(false);
+      setLoadingHistory(sid, false);
     };
 
     historyLoadingMoreRef.current = true;
     setHistoryLoadingMore(true);
-    setLoadingHistory(true);
+    setLoadingHistory(sid, true);
     const pageHandle = fetchHistoryPage({
       sessionId: sid,
       pageIdx: nextPage,
@@ -1165,11 +1152,12 @@ function AppContent() {
           historyPageHandleRef.current = null;
           return;
         }
-        prependMessages(messages);
+        prependMessages(sid, messages);
         for (const item of toolReplay) {
           if (item.kind === 'tool_call') {
             const n = normalizeToolCallPayload(item.payload);
             addToolCall(
+              sid,
               {
                 id: n.id,
                 name: n.name,
@@ -1183,6 +1171,7 @@ function AppContent() {
           } else {
             const n = normalizeToolResultPayload(item.payload);
             addToolResult(
+              sid,
               {
                 toolName: n.toolName,
                 result: n.result,
@@ -1196,17 +1185,18 @@ function AppContent() {
           }
         }
         const harnessStore = useHarnessStore.getState();
+        const harnessRuntime = harnessStore.getRuntime(sid);
         for (const item of harnessReplay) {
           if (item.kind === 'harness_message') {
             const content = typeof item.payload.content === 'string' ? item.payload.content : '';
             const stage = typeof item.payload.stage === 'string' ? item.payload.stage : undefined;
             if (content) {
-              harnessStore.addHarnessMessage(content, stage);
+              harnessStore.addHarnessMessage(sid, content, stage);
               // Update stage result with running status and label from message
               if (stage && content) {
-                const existingStage = harnessStore.stageResults.find((s) => s.stage === stage);
+                const existingStage = harnessRuntime?.stageResults.find((s) => s.stage === stage);
                 if (existingStage?.status !== 'running') {
-                  harnessStore.updateStageResult({
+                  harnessStore.updateStageResult(sid, {
                     stage,
                     stageLabel: content,
                     status: 'running',
@@ -1223,7 +1213,7 @@ function AppContent() {
             const messages = Array.isArray(item.payload.messages) ? item.payload.messages : [];
             const metrics = item.payload.metrics || {};
             if (stage) {
-              harnessStore.updateStageResult({
+              harnessStore.updateStageResult(sid, {
                 stage,
                 status: status as 'success' | 'failed' | 'timeout',
                 error,
@@ -1233,7 +1223,7 @@ function AppContent() {
             }
           }
         }
-        setHistoryPagerMeta({
+        setHistoryPagerMeta(sid, {
           loadedPages: nextPage,
           totalPages: totalPages ?? fallbackTotal,
         });
@@ -1246,7 +1236,7 @@ function AppContent() {
           historyPageHandleRef.current = null;
           return;
         }
-        setHistoryPagerMeta({
+        setHistoryPagerMeta(sid, {
           loadedPages: nextPage,
           totalPages: emptyTotalPages ?? fallbackTotal,
         });
@@ -1277,6 +1267,7 @@ function AppContent() {
     prependMessages,
     request,
     sessionId,
+    setHistoryPagerMeta,
   ]);
 
   const handleRestoreSession = useCallback(
@@ -1284,42 +1275,34 @@ function AppContent() {
       if (!targetSessionId.startsWith('sess_')) return;
 
       const resolvedMode = targetMode ?? mode;
-      if (resolvedMode === 'team' && sessionId && sessionId !== targetSessionId) {
-        try {
-          await request('session.switch', {
-            session_id: targetSessionId,
-            mode: 'team',
-          });
-        } catch (error) {
-          console.error('Failed to switch team session:', error);
-          window.alert(t('sessions.errors.switchSession'));
-          return;
-        }
-      }
-
-      disposeInFlightHistoryHandles();
-      setHistoryPagerMeta(null);
+      disposeInFlightHistoryHandles(targetSessionId);
       setHistoryLoadingMore(false);
-      setProcessing(false);
-      setThinking(false);
-      setPaused(false);
-      clearTeamRuntimeState();
-      clearMessages();
-      clearTodos();
-      clearSubtasks();
-      resetHarnessStore();
-      historyRestoreFromPanelHintRef.current = true;
+      const existingRuntime = useChatStore.getState().getRuntime(targetSessionId);
+      if (!existingRuntime) {
+        useChatStore.getState().ensureRuntime(targetSessionId);
+        setProcessing(targetSessionId, false);
+        setThinking(targetSessionId, false);
+        setPaused(targetSessionId, false);
+        clearTeamRuntimeState(targetSessionId);
+        clearMessages(targetSessionId);
+        clearTodos(targetSessionId);
+        clearSubtasks(targetSessionId);
+        resetHarnessStore(targetSessionId);
+        historyRestoreFromPanelHintRef.current = true;
+      }
+      // 确保 session runtime 存在；否则 useSessionStore.setMode 会因找不到 runtime 而直接跳过，
+      // 导致从会话页签恢复后前端 mode 不会切换到目标会话对应的 mode。
+      ensureSessionRuntimes(targetSessionId);
+      sessionIdRef.current = targetSessionId;
       setSessionId(targetSessionId);
       setCurrentSession(null);
-      storeSessionId(targetSessionId);
       if (resolvedMode) {
-        setMode(resolvedMode as AgentMode);
+        setMode(targetSessionId, resolvedMode as AgentMode);
       }
       setActiveNav('chat');
-      // 历史加载只由下方 useEffect 发起一次。若 sessionId 与当前相同，须 bump key 才会重跑 effect，
-      // 否则 historyPagerMeta 会停在 null，无法向上滚动加载更早分页。
+      navigate({ kind: 'chat-session', sessionId: targetSessionId });
       setHistoryBootstrapKey((k) => k + 1);
-      // 勿在此处再 beginHistoryRestore + history.get：会与 effect 并发双份 history.get，消息重复。
+      requestComposerFocus();
     },
     [
       clearMessages,
@@ -1327,21 +1310,46 @@ function AppContent() {
       clearTodos,
       disposeInFlightHistoryHandles,
       mode,
-      request,
+      navigate,
+      requestComposerFocus,
       resetHarnessStore,
-      sessionId,
       setActiveNav,
       setCurrentSession,
       setHistoryLoadingMore,
-      setHistoryPagerMeta,
       setMode,
       setPaused,
       setProcessing,
       setSessionId,
       setThinking,
-      t,
     ]
   );
+
+  const requestSessionNavigation = useCallback((target: Session | 'new') => {
+    if (target === 'new') { enterNewConversation(); return; }
+    void handleRestoreSession(target.session_id, target.mode);
+  }, [enterNewConversation, handleRestoreSession]);
+
+  const handleDeleteConversation = useCallback(async () => {
+    if (!deleteTarget) return;
+    const runtime = useChatStore.getState().getRuntime(deleteTarget.session_id);
+    if (runtime?.isProcessing || runtime?.pendingQuestion) return;
+    setDialogBusy(true); setDialogError(null);
+    try {
+      await request('session.delete', { session_id: deleteTarget.session_id });
+      forgetCreatedConversation(deleteTarget.session_id);
+      useSessionStore.getState().removeSession(deleteTarget.session_id);
+      useSessionStore.getState().removeRuntime(deleteTarget.session_id);
+      useChatStore.getState().removeRuntime(deleteTarget.session_id);
+      useTodoStore.getState().removeRuntime(deleteTarget.session_id);
+      useHarnessStore.getState().removeRuntime(deleteTarget.session_id);
+      const deletingCurrent = sessionIdRef.current === deleteTarget.session_id;
+      setDeleteTarget(null);
+      if (deletingCurrent) {
+        enterNewConversation();
+      }
+    } catch { setDialogError(t('multiSession.errors.delete')); }
+    finally { setDialogBusy(false); }
+  }, [deleteTarget, enterNewConversation, request, t]);
 
   const handleNavigate = useCallback((nav: MainNavKey) => {
     setActiveNav(nav);
@@ -1429,6 +1437,12 @@ function AppContent() {
   const heartbeatToastPreview = heartbeatToastPreviewRaw.length > 120
     ? `${heartbeatToastPreviewRaw.slice(0, 120)}...`
     : heartbeatToastPreviewRaw;
+  const routeSessionMissing = route.kind === 'chat-session'
+    && isConversationMissing(route.sessionId, initialDataLoaded, sessions);
+  const showConversationNotFound = route.kind === 'not-found' || routeSessionMissing;
+  const mostRecentSession = sessions[0];
+  const isNewSessionPromotion = Boolean(sessionId && promotedFromNewSessionIdsRef.current.has(sessionId));
+  const composerFocusKey = showConversationNotFound ? null : `${sessionId}:${composerFocusNonce}`;
 
   return (
     <div className={`shell ${sidebarCollapsed ? 'shell--collapsed' : ''}`} data-testid="app-shell" data-session-id={sessionId}>
@@ -1443,10 +1457,12 @@ function AppContent() {
         collapsed={sidebarCollapsed}
         onCollapse={() => setSidebarCollapsed(true)}
         onExpand={() => setSidebarCollapsed(false)}
+        showNewSession={false}
+        hiddenNavItems={['sessions']}
       />
 
       {/* Main Content */}
-      <main className={`content ${isTeamAreaExpanded ? 'content--team-expanded' : ''}`}>
+      <main className={`content ${activeNav === 'chat' ? 'content--chat' : ''} ${isTeamAreaExpanded ? 'content--team-expanded' : ''}`}>
         {configError && (
           <div className="card mb-4">
             <div className="text-sm text-text-muted">
@@ -1461,61 +1477,90 @@ function AppContent() {
 
         {activeNav === 'chat' && (
           <>
-            <div className={`flex-1 flex min-h-0 overflow-hidden ${isTeamAreaExpanded ? '' : 'card'}`}>
-              {/* Chat Panel - 在展开时可拖拽调整宽度 */}
-              <div
-                className={`flex flex-col min-w-0 min-h-0 ${isTeamAreaExpanded ? '' : 'flex-1'}`}
-                style={isTeamAreaExpanded ? { width: `${chatPanelWidthPct}%` } : undefined}
-              >
-                <div className={`flex-1 min-h-0 ${isTeamAreaExpanded ? 'card rounded-l-lg rounded-r-none' : ''}`}>
-                  <ChatPanel
-                    onSendMessage={handleSendMessage}
-                    onInterrupt={handleInterrupt}
-                    onCancel={handleCancel}
-                    onSwitchMode={handleSwitchMode}
-                    isProcessing={isProcessing}
-                    onNewSession={handleNewSession}
-                    onUserAnswer={handleUserAnswer}
-                    onExportShare={handleExportShare}
-                    isExportingShare={isExportingShare}
-                    canExportShare={Boolean(sessionId && sessionId !== 'new' && (!isProcessing || isPaused))}
-                    teamAreaExpanded={isTeamAreaExpanded}
-                    historyPager={
-                      historyPagerMeta
-                        ? {
-                            loadedPages: historyPagerMeta.loadedPages,
-                            totalPages: historyPagerMeta.totalPages,
-                            loadingMore: historyLoadingMore,
-                            onLoadMore: handleLoadMoreHistory,
-                          }
-                        : null
-                    }
-                  />
-                </div>
-              </div>
-
-              {/* 可拖拽分割线 */}
-              {isTeamAreaExpanded && (
+            <div className="chat-layout flex-1 flex min-h-0 overflow-hidden">
+              <ConversationSidebar
+                sessions={sessions}
+                activeSessionId={sessionId === 'new' ? null : sessionId}
+                onNew={() => requestSessionNavigation('new')}
+                onSelect={requestSessionNavigation}
+                onDelete={(session) => { setDialogError(null); setDeleteTarget(session); }}
+              />
+              <div className="chat-workspace flex-1 flex min-h-0 overflow-hidden">
+                {showConversationNotFound && (
+                  <div className="flex-1 flex flex-col items-center justify-center gap-4">
+                    <h1 className="text-lg font-semibold text-text">{t('multiSession.notFound.title')}</h1>
+                    <div className="flex gap-2">
+                      <button className="btn primary" onClick={() => enterNewConversation()}>
+                        {t('multiSession.notFound.newConversation')}
+                      </button>
+                      {mostRecentSession && (
+                        <button className="btn" onClick={() => void handleRestoreSession(mostRecentSession.session_id, mostRecentSession.mode)}>
+                          {t('multiSession.notFound.recentConversation')}
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                )}
+                {/* Chat Panel - 在展开时可拖拽调整宽度 */}
                 <div
-                  className="shrink-0 w-1 cursor-col-resize bg-[var(--bg)] hover:bg-gray-400 active:bg-gray-500 transition-colors"
-                  onMouseDown={handleDividerMouseDown}
-                />
-              )}
+                  className={`${showConversationNotFound ? 'hidden' : 'flex'} chat-layout__surface p-3 pt-0 flex-col min-w-0 min-h-0 ${isTeamAreaExpanded ? '' : 'flex-1'}`}
+                  style={isTeamAreaExpanded ? { width: `${chatPanelWidthPct}%` } : undefined}
+                >
+                  <div className={`flex-1 min-h-0`}>
+                    <ChatPanel
+                      onSendMessage={handleSendMessage}
+                      onInterrupt={handleInterrupt}
+                      onCancel={handleCancel}
+                      onSwitchMode={handleSwitchMode}
+                      isProcessing={isProcessing}
+                      onNewSession={handleNewSession}
+                      onUserAnswer={handleUserAnswer}
+                      onExportShare={handleExportShare}
+                      isExportingShare={isExportingShare}
+                      canExportShare={Boolean(sessionId && sessionId !== 'new' && (!isProcessing || isPaused))}
+                      sessionTitle={sessionTitle}
+                      teamAreaExpanded={isTeamAreaExpanded}
+                      autoFocusKey={composerFocusKey}
+                      onNavigateToSkills={() => handleNavigate('skills')}
+                      onToggleTeamArea={setTeamAreaExpanded}
+                      historyPager={
+                        historyPagerMeta
+                          ? {
+                              loadedPages: historyPagerMeta.loadedPages,
+                              totalPages: historyPagerMeta.totalPages,
+                              loadingMore: historyLoadingMore,
+                              onLoadMore: handleLoadMoreHistory,
+                            }
+                          : null
+                      }
+                    />
+                  </div>
+                </div>
 
-              {/* Tool Panel / Expanded Team Panel */}
-              {toolPanelHasContent && (
-                <ToolPanel
-                  sessionId={sessionId}
-                  teamAreaExpanded={teamAreaExpanded}
-                  teamAreaActiveTab={teamAreaActiveTab}
-                  teamAreaActiveDetailTab={teamAreaActiveDetailTab}
-                  teamAreaSelectedMemberId={teamAreaSelectedMemberId}
-                  setTeamAreaExpanded={setTeamAreaExpanded}
-                  setTeamAreaActiveTab={setTeamAreaActiveTab}
-                  setTeamAreaActiveDetailTab={setTeamAreaActiveDetailTab}
-                  setTeamAreaSelectedMemberId={setTeamAreaSelectedMemberId}
-                />
-              )}
+                {/* 可拖拽分割线 */}
+                {isTeamAreaExpanded && !showConversationNotFound && (
+                  <div
+                    className="shrink-0 w-1 cursor-col-resize bg-[var(--bg)] hover:bg-gray-400 active:bg-gray-500 transition-colors"
+                    onMouseDown={handleDividerMouseDown}
+                  />
+                )}
+
+                {/* Tool Panel / Expanded Team Panel */}
+                {toolPanelHasContent && !showConversationNotFound && (
+                  <ToolPanel
+                    sessionId={sessionId}
+                    isNewSessionPromotion={isNewSessionPromotion}
+                    teamAreaExpanded={teamAreaExpanded}
+                    teamAreaActiveTab={teamAreaActiveTab}
+                    teamAreaActiveDetailTab={teamAreaActiveDetailTab}
+                    teamAreaSelectedMemberId={teamAreaSelectedMemberId}
+                    setTeamAreaExpanded={setTeamAreaExpanded}
+                    setTeamAreaActiveTab={setTeamAreaActiveTab}
+                    setTeamAreaActiveDetailTab={setTeamAreaActiveDetailTab}
+                    setTeamAreaSelectedMemberId={setTeamAreaSelectedMemberId}
+                  />
+                )}
+              </div>
             </div>
           </>
         )}
@@ -1605,20 +1650,21 @@ function AppContent() {
         )}
       </main>
 
+      {deleteTarget && (
+        <DeleteDialog
+          title={deleteTarget.title || t('multiSession.untitled')}
+          deleting={dialogBusy}
+          error={dialogError}
+          onCancel={() => setDeleteTarget(null)}
+          onDelete={() => { void handleDeleteConversation(); }}
+        />
+      )}
+
       {/* 连接状态提示 */}
       {!isConnected && (
         <div className="app-toast-wrapper app-toast-wrapper--top">
           <div className="app-connection-toast animate-rise">
             {serverConfig ? t('connection.connecting') : t('connection.loadingConfig')}
-          </div>
-        </div>
-      )}
-
-      {/* 新建会话提示 */}
-      {newSessionToastVisible && (
-        <div className="app-toast-wrapper app-toast-wrapper--top-center">
-          <div className="app-session-toast animate-rise">
-            {t('chat.sessionCreated')}
           </div>
         </div>
       )}

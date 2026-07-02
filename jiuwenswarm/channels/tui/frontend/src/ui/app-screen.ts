@@ -37,6 +37,7 @@ import {
 } from "../core/commands/CommandService.js";
 import type { SlashCommand } from "../core/commands/types.js";
 import { addCommandEcho, addError, addInfo } from "../core/commands/helpers.js";
+import { copyToClipboard } from "../core/commands/clipboard.js";
 import { CheckboxList, CheckboxGroup as CheckboxGroupType } from "./components/checkbox-list.js";
 import type { FileAttachment } from "../core/protocol.js";
 import {
@@ -2643,6 +2644,8 @@ export class AppScreen implements Component, Focusable {
       onBtwOverlayScrollOffsetChange: (offset) => {
         this.btwOverlayScrollOffset = offset;
       },
+      btwOverlayIndex: snapshot.btwOverlayIndex,
+      btwOverlayTotal: snapshot.btwOverlayTotal,
       runningElapsedMs:
         !snapshot.isInterrupted &&
         (snapshot.isProcessing ||
@@ -3127,6 +3130,34 @@ export class AppScreen implements Component, Focusable {
       return true;
     }
 
+    // ←/→ 在 btw 历史间切换（必须在 scroll 之前消费，避免落入 composer）
+    if (matchesKey(data, "left")) {
+      this.state.navigateBtw(-1);
+      this.tui.requestRender();
+      return true;
+    }
+    if (matchesKey(data, "right")) {
+      this.state.navigateBtw(1);
+      this.tui.requestRender();
+      return true;
+    }
+    // 复制当前 /btw 整条记录（问题+回答）到剪贴板（按 c —— 对齐 claudecode /btw 快捷键）。
+    // 注意：overlay 显示时输入栏仍在，小写 c 会被吞触发复制；
+    // 想在输入框输入小写 c 需先 Esc 关闭 overlay。
+    if (matchesKey(data, "c")) {
+      const overlay = this.state.getSnapshot().btwOverlay;
+      if (overlay) {
+        void this.copyBtwEntry(overlay.question, overlay.answer);
+      }
+      return true;
+    }
+    // x 删除当前 btw 条目（剩余非空则跳到相邻，为空则关闭 overlay）
+    if (data.toLowerCase() === "x") {
+      this.state.deleteCurrentBtwEntry();
+      this.tui.requestRender();
+      return true;
+    }
+
     const pageSize = Math.max(1, Math.floor(this.tui.terminal.rows * 0.8));
     if (matchesKey(data, "up")) {
       this.btwOverlayScrollOffset = Math.max(0, this.btwOverlayScrollOffset - 1);
@@ -3160,6 +3191,28 @@ export class AppScreen implements Component, Focusable {
       default:
         return false;
     }
+  }
+
+  /**
+   * 复制 /btw 整条记录（问题 + 回答）到系统剪贴板，并在状态栏显示短暂反馈。
+   * 使用 transientNotice（独立于 transcript，固定在屏幕底部渲染），
+   * 与 /copy 命令的反馈保持一致。格式仿 overlay 标题行：/btw <question> + 回答。
+   */
+  private async copyBtwEntry(question: string, answer: string): Promise<void> {
+    const text = `/btw ${question}\n\n${answer}`;
+    const ok = await copyToClipboard(text);
+    this.transientNotice = ok
+      ? "已复制 /btw 问答到剪贴板"
+      : "无法访问剪贴板（系统不支持）";
+    if (this.transientNoticeTimer) {
+      clearTimeout(this.transientNoticeTimer);
+    }
+    this.transientNoticeTimer = setTimeout(() => {
+      this.transientNotice = null;
+      this.transientNoticeTimer = null;
+      this.tui.requestRender();
+    }, 2500);
+    this.tui.requestRender();
   }
 
   private clearPendingSubmittedInput(requestRender = true): void {

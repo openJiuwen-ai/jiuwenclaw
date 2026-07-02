@@ -219,7 +219,6 @@
     "placeholderVoice": "正在听取语音...",
     "welcomeLogoAlt": "JiuwenSwarm 标志",
     "welcomeHeading": "你好，我是JiuwenSwarm，很高兴认识你！",
-    "welcomeSubtext": "我可以帮你回答问题，解决疑惑，还可以帮你完成一些任务。",
     "welcomeSuggestions": {
       "journey": "让我们开启一段新的旅程吧！",
       "skills": "能告诉我你有哪些技能吗？"
@@ -239,11 +238,24 @@
     "send": "发送 (Enter)",
     "stop": "停止",
     "modelSelector": {
-      "tooltip": "切换对话使用的模型"
+      "tooltip": "切换对话使用的模型",
+      "configured": "已配置模型",
+      "addModel": "添加自定义模型",
+      "placeholder": "选择模型"
     },
     "newSessionDisabled": "处理中或录音中不可新建",
+    "modeSwitchDisabledProcessing": "当前对话运行中，请新建对话后选择模式",
+    "configLockedHistory": "会话已有消息，请新建会话后更改配置",
     "modeSwitchTitle": "切换模式",
     "modeSwitchConfirm": "当前会话有历史消息，切换模式将新建会话。是否继续？",
+    "skills": "技能",
+    "skillsToggle": "查看已安装技能",
+    "noInstalledSkills": "暂无已安装技能",
+    "skillsSearchPlaceholder": "搜索技能名称或描述",
+    "skillsManage": "技能管理",
+    "skillsAdd": "添加到输入栏",
+    "skillsRemove": "移除",
+    "recentTasks": "最近任务",
     "teamPause": "暂停",
     "teamPauseHint": "团队暂停后，直接发送下一条消息即可继续",
     "teamBroadcastTarget": "@所有人",
@@ -251,10 +263,28 @@
     "historyPager": {
       "loadedOfTotal": "历史已加载 {{loaded}} / {{total}} 页",
       "loadingMore": "加载中…",
-      "allLoaded": "已显示全部历史",
-      "wheelToLoadMore": "向上滚动加载更多",
-      "clickToLoadMore": "点击加载更多",
-      "clickOrScrollToLoadMore": "点击或向上滚动加载更多"
+      "clickOrScrollToLoadMore": "点击或向上滚动加载更多",
+      "allLoaded": "历史已全部加载"
+    },
+    "config": {
+      "mode": {
+        "cluster": "集群模式",
+        "clusterDesc": "深度推理，复杂需求，长任务处理",
+        "singleAgent": "单Agent模式"
+      },
+      "permission": {
+        "default": "默认权限",
+        "defaultDesc": "编辑外部文件和使用互联网时始终询问",
+        "fullAccess": "完全访问权限",
+        "fullAccessDesc": "可不受限制地访问互联网和您电脑上的任何文件",
+        "fullAccessWarning": {
+          "title": "告警",
+          "body1": "在完全访问模式下，Jiuwen无需你的批准即可编辑你电脑上的任何文件，并执行可联网的命令。",
+          "body2": "启用完全访问权限前请谨慎评估。此操作将显著增加数据丢失、泄露或异常行为的风险。",
+          "cancel": "取消",
+          "confirm": "仍然继续"
+        }
+      }
     }
   },
   "autoHarness": {
@@ -401,7 +431,6 @@
       "loadSessions": "会话列表加载失败",
       "loadFiles": "会话文件列表加载失败",
       "deleteSession": "删除会话失败：{{sessionId}}",
-      "switchSession": "切换团队会话失败",
       "restoreFailed": "恢复会话失败：{{sessionId}}"
     }
   },
@@ -1687,5 +1716,31 @@
   },
   "security": {
     "contentRetracted": "内容已因安全原因撤回"
+  },
+  "multiSession": {
+    "title": "工作",
+    "conversations": "对话",
+    "newConversation": "新建任务",
+    "empty": "暂无对话",
+    "untitled": "未命名对话",
+    "showMore": "展开更多",
+    "collapse": "折叠显示",
+    "waitingReply": "等待回复",
+    "completedUnread": "后台任务已完成",
+    "moreActions": "更多操作",
+    "delete": "删除",
+    "deleteRunningDisabled": "运行中或等待回复的对话不能删除",
+    "runtime": { "processing": "处理中" },
+    "deleteDialog": { "title": "删除对话", "description": "确定删除“{{title}}”吗？此操作不可撤销。" },
+    "notFound": { "title": "对话不存在或已删除", "newConversation": "新建对话", "recentConversation": "返回最近对话" },
+    "errors": { "delete": "删除对话失败", "create": "创建对话失败", "send": "发送消息失败" }
+  },
+  "mermaid": {
+    "image": "图片",
+    "code": "代码",
+    "copyCode": "复制代码",
+    "zoomIn": "放大",
+    "zoomOut": "缩小",
+    "fitView": "适应视图"
   }
 }

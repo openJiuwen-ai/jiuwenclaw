@@ -23,6 +23,12 @@ type TaskPlanningPanelProps = {
   totalTasks: number;
   completedTasks: number;
   onExpand?: () => void;
+  /** 紧凑态下隐藏右上角展开按钮（用于非集群模式复用本面板时） */
+  hideExpandButton?: boolean;
+  /** 紧凑态下隐藏任务行负责人头像（用于非集群模式复用本面板时） */
+  hideAssignee?: boolean;
+  /** 自定义标题（不传则默认用 team.taskOverview） */
+  title?: string;
 };
 
 export function TaskPlanningPanel({
@@ -32,6 +38,9 @@ export function TaskPlanningPanel({
   totalTasks,
   completedTasks,
   onExpand,
+  hideExpandButton = false,
+  hideAssignee = false,
+  title,
 }: TaskPlanningPanelProps) {
   const { t } = useTranslation();
   const groupedTasks = useMemo(() => {
@@ -71,18 +80,20 @@ export function TaskPlanningPanel({
     };
 
     return (
-      <div className="mb-3 flex flex-[2] flex-col overflow-hidden rounded-lg border border-border bg-card min-h-0">
-        <div className="flex w-full shrink-0 items-center justify-between bg-card px-4 py-3 border-b border-border">
+      <div className="flex flex-[2] flex-col overflow-hidden min-h-0 border-b border-border px-3 pb-3">
+        <div className="flex w-full shrink-0 items-center justify-between bg-card px-4 py-3">
           <div className="flex items-center gap-2">
-            <img src={teamProcessIcon} width={16} height={16} />            <span className="text-sm font-medium text-text">{t('team.taskOverview')}</span>
+            <img src={teamProcessIcon} width={16} height={16} />            <span className="text-sm font-medium text-text">{title ?? t('team.taskOverview')}</span>
           </div>
-          <button
-            onClick={onExpand}
-            className="rounded p-2 text-text-muted transition-colors hover:bg-secondary hover:text-text"
-            title={t('team.expand')}
-          >
-            <ExpandIcon />
-          </button>
+          {hideExpandButton ? null : (
+            <button
+              onClick={onExpand}
+              className="rounded p-2 text-text-muted transition-colors hover:bg-secondary hover:text-text"
+              title={t('team.expand')}
+            >
+              <ExpandIcon />
+            </button>
+          )}
         </div>
         <div className="px-4 py-3 shrink-0">
           {allTasks.length > 0 && (
@@ -105,9 +116,9 @@ export function TaskPlanningPanel({
             {(['completed', 'running', 'waiting', 'cancelled'] as const).map((key) => (
               <div
                 key={key}
-                className={`flex-1 flex flex-col items-center justify-center py-2 rounded-md bg-secondary`}
+                className={`flex-1 flex flex-col items-center justify-center py-2 rounded-md`}
               >
-                <span className="text-lg font-bold text-text-strong">{tabCounts[key]}</span>
+                <span className="text-sm font-normal text-text-strong">{tabCounts[key]}</span>
                 <span className="text-xs mt-1 text-text-muted">{tabLabels[key]}</span>
               </div>
             ))}
@@ -126,21 +137,23 @@ export function TaskPlanningPanel({
                 const title = getBoardTaskTitle(task);
                 const columnKey = getTaskColumnKey(task);
                 return (
-                  <div key={task.task_id} className="flex items-center gap-3 px-3 py-2 rounded-md bg-secondary">
-                    <span className="text-sm font-medium text-muted w-6">
+                  <div key={task.task_id} className="flex items-center gap-3 px-3 py-2 rounded-md">
+                    <span className="inline-flex items-center justify-center w-[20px] h-[20px] text-xs font-medium text-muted rounded-[16px] bg-[#F2F2F2]">
                       {String(index + 1).padStart(2, '0')}
                     </span>
-                    {assigneeExists ? (
-                      <TeamMemberAvatar
-                        member={task.assignee}
-                        alt={assigneeName}
-                        className="h-4 w-4 rounded-full shrink-0"
-                        imageClassName="rounded-full"
-                      />
-                    ) : (
-                      <UnassignedTeamAvatar className="h-4 w-4 rounded-full shrink-0" />
+                    {!hideAssignee && (
+                      assigneeExists ? (
+                        <TeamMemberAvatar
+                          member={task.assignee}
+                          alt={assigneeName}
+                          className="h-4 w-4 rounded-full shrink-0"
+                          imageClassName="rounded-full"
+                        />
+                      ) : (
+                        <UnassignedTeamAvatar className="h-4 w-4 rounded-full shrink-0" />
+                      )
                     )}
-                    <span className="flex-1 text-sm text-text truncate">{title}</span>
+                    <span className="flex-1 text-xs text-text truncate">{title}</span>
                     {columnKey === 'completed' && <CircleCheck className="w-4 h-4 text-ok shrink-0" />}
                     {columnKey === 'running' && (
                       <svg width="16" height="16" className="w-4 h-4 text-info animate-spin flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">

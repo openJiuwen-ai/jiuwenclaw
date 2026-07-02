@@ -5,18 +5,39 @@
  */
 
 import { useTranslation } from 'react-i18next';
-import { useChatStore, useSessionStore } from '../../stores';
-import { useEffect, useRef } from 'react';
+import { useChatStore, useSessionStore, useTodoStore } from '../../stores';
+import { useEffect, useMemo, useRef } from 'react';
 import { webRequest } from '../../services/webClient';
-import { TodoList } from '../TodoList';
 import { TeamArea } from '../teamArea';
+import { TaskPlanningPanel } from '../teamArea/TaskPlanningPanel';
 import { HarnessExtensionTree } from './HarnessExtensionTree';
 import { loadTeamHistoryPanelState } from '../../features/teamHistoryPanelRestore';
 import { type TabType, type TeamDetailTab } from '../teamArea/shared';
+import type { TeamTask, TeamTaskStatus } from '../../stores/sessionStore';
+import type { TodoItem, TodoStatus } from '../../types';
 import './ToolPanel.css';
+
+/** 规划/性能模式下把 TodoItem 降级映射为 TeamTask，复用 TaskPlanningPanel 紧凑态样式 */
+function todoItemToTeamTask(todo: TodoItem): TeamTask {
+  const statusMap: Record<TodoStatus, TeamTaskStatus> = {
+    pending: 'pending',
+    in_progress: 'claimed',
+    completed: 'completed',
+  };
+  const ts = todo.updatedAt ? Date.parse(todo.updatedAt) : NaN;
+  return {
+    task_id: todo.id,
+    title: todo.content || todo.activeForm || todo.id,
+    content: todo.activeForm && todo.activeForm !== todo.content ? todo.activeForm : undefined,
+    status: statusMap[todo.status] ?? 'pending',
+    assignee: todo.claimedBy,
+    timestamp: Number.isFinite(ts) ? ts : undefined,
+  };
+}
 
 interface ToolPanelProps {
   sessionId?: string;
+  isNewSessionPromotion?: boolean;
   teamAreaExpanded: boolean;
   teamAreaActiveTab: TabType;
   teamAreaActiveDetailTab: TeamDetailTab;
@@ -59,6 +80,7 @@ function mergeById<T>(
 
 export function ToolPanel({
   sessionId,
+  isNewSessionPromotion = false,
   teamAreaExpanded,
   teamAreaActiveTab,
   teamAreaActiveDetailTab,
@@ -69,23 +91,28 @@ export function ToolPanel({
   setTeamAreaSelectedMemberId,
 }: ToolPanelProps) {
   const { t } = useTranslation();
-  const {
-    contextCompressionRate,
-    contextCompressionBefore,
-    contextCompressionAfter,
-    isConnected,
-    memoryUsage,
-    setMemoryUsage,
-    mode,
-    teamMembers,
-    setTeamMembers,
-    setTeamTaskEvents,
-    setTeamTasks,
-    setTeamMemberExecutionEvents,
-    teamHistoryMessages,
-    setTeamHistoryMessages,
-  } = useSessionStore();
-  const { isProcessing, messages } = useChatStore();
+  const { isConnected, memoryUsage, setMemoryUsage } = useSessionStore();
+  const activeSessionId = useChatStore((s) => s.activeSessionId);
+  const contextCompressionRate = useSessionStore((s) => s.runtimes[activeSessionId ?? '']?.contextCompressionRate ?? 0);
+  const contextCompressionBefore = useSessionStore((s) => s.runtimes[activeSessionId ?? '']?.contextCompressionBefore ?? null);
+  const contextCompressionAfter = useSessionStore((s) => s.runtimes[activeSessionId ?? '']?.contextCompressionAfter ?? null);
+  const mode = useSessionStore((s) => s.runtimes[activeSessionId ?? '']?.mode ?? 'agent.plan');
+  const teamMembers = useSessionStore((s) => s.runtimes[activeSessionId ?? '']?.teamMembers ?? []);
+  const teamHistoryMessages = useSessionStore((s) => s.runtimes[activeSessionId ?? '']?.teamHistoryMessages ?? []);
+  const setTeamMembers = useSessionStore((s) => s.setTeamMembers);
+  const setTeamTaskEvents = useSessionStore((s) => s.setTeamTaskEvents);
+  const setTeamTasks = useSessionStore((s) => s.setTeamTasks);
+  const setTeamMemberExecutionEvents = useSessionStore((s) => s.setTeamMemberExecutionEvents);
+  const setTeamHistoryMessages = useSessionStore((s) => s.setTeamHistoryMessages);
+  const isProcessing = useChatStore((s) => s.runtimes[activeSessionId ?? '']?.isProcessing ?? false);
+  const messages = useChatStore((s) => s.runtimes[activeSessionId ?? '']?.messages ?? []);
+  // 规划/性能模式下复用 TaskPlanningPanel 紧凑态：把 TodoItem 降级为 TeamTask
+  const todos = useTodoStore((s) => s.runtimes[activeSessionId ?? '']?.todos ?? []);
+  const todoTeamTasks = useMemo(() => todos.map(todoItemToTeamTask), [todos]);
+  const todoCompletedTasks = useMemo(
+    () => todos.filter((t) => t.status === 'completed').length,
+    [todos],
+  );
   const hydratedTeamHistorySessionRef = useRef<string | null>(null);
   const loadingTeamHistorySessionRef = useRef<string | null>(null);
 
@@ -135,13 +162,19 @@ export function ToolPanel({
 
   useEffect(() => {
     if (mode !== 'team' || !isConnected || !sessionId?.startsWith('sess_')) {
-      setTeamHistoryMessages([]);
+      if (sessionId) setTeamHistoryMessages(sessionId, []);
       hydratedTeamHistorySessionRef.current = null;
       loadingTeamHistorySessionRef.current = null;
       return;
     }
+    if (isNewSessionPromotion) {
+      setTeamHistoryMessages(sessionId, []);
+      hydratedTeamHistorySessionRef.current = sessionId;
+      loadingTeamHistorySessionRef.current = null;
+      return;
+    }
     if (hydratedTeamHistorySessionRef.current !== sessionId) {
-      setTeamHistoryMessages([]);
+      setTeamHistoryMessages(sessionId, []);
     }
     if (hydratedTeamHistorySessionRef.current === sessionId) {
       return;
@@ -156,44 +189,44 @@ export function ToolPanel({
       .then((historyState) => {
         loadingTeamHistorySessionRef.current = null;
         hydratedTeamHistorySessionRef.current = sessionId;
-        const current = useSessionStore.getState();
+        const current = useSessionStore.getState().runtimes[sessionId];
         const mergedMembers = mergeById(
           historyState.members,
-          current.teamMembers,
+          current?.teamMembers ?? [],
           (member) => member.member_id
         );
         if (mergedMembers.length > 0) {
-          setTeamMembers(mergedMembers);
+          setTeamMembers(sessionId, mergedMembers);
         }
 
         const mergedTaskEvents = mergeById(
           historyState.taskEvents,
-          current.teamTaskEvents,
+          current?.teamTaskEvents ?? [],
           (event) => event.task_id
         );
         if (mergedTaskEvents.length > 0) {
-          setTeamTaskEvents(mergedTaskEvents);
+          setTeamTaskEvents(sessionId, mergedTaskEvents);
         }
 
         const mergedTasks = mergeById(
           historyState.tasks,
-          current.teamTasks,
+          current?.teamTasks ?? [],
           (task) => task.task_id
         );
         if (mergedTasks.length > 0) {
-          setTeamTasks(mergedTasks);
+          setTeamTasks(sessionId, mergedTasks);
         }
 
         const mergedExecutionEvents = mergeById(
           historyState.executionEvents,
-          current.teamMemberExecutionEvents,
+          current?.teamMemberExecutionEvents ?? [],
           (event) => event.id
         );
         if (mergedExecutionEvents.length > 0) {
-          setTeamMemberExecutionEvents(mergedExecutionEvents);
+          setTeamMemberExecutionEvents(sessionId, mergedExecutionEvents);
         }
 
-        setTeamHistoryMessages(historyState.messages);
+        setTeamHistoryMessages(sessionId, historyState.messages);
       })
       .catch((error) => {
         loadingTeamHistorySessionRef.current = null;
@@ -206,7 +239,7 @@ export function ToolPanel({
     return () => {
       controller.abort();
     };
-  }, [isConnected, mode, sessionId, setTeamHistoryMessages, setTeamMemberExecutionEvents, setTeamMembers, setTeamTaskEvents, setTeamTasks]);
+  }, [isConnected, isNewSessionPromotion, mode, sessionId, setTeamHistoryMessages, setTeamMemberExecutionEvents, setTeamMembers, setTeamTaskEvents, setTeamTasks]);
 
   const memoryDisplay =
     memoryUsage.rssMb == null
@@ -254,7 +287,7 @@ export function ToolPanel({
     return (
       <div
         data-testid="tool-panel"
-        className="bg-panel h-full overflow-hidden flex-1 flex flex-col rounded-r-lg"
+        className="bg-panel h-full overflow-hidden flex-1 flex flex-col"
       >
         <div className="h-full bg-panel flex flex-col overflow-hidden">
           <TeamArea
@@ -281,21 +314,21 @@ export function ToolPanel({
   return (
     <div
       data-testid="tool-panel"
-      className="bg-panel border-border h-full overflow-hidden px-3 shrink-0"
+      className="bg-panel border-l border-border h-full overflow-hidden py-3 shrink-0"
       style={{ width: 'var(--tool-panel-width)' }}
     >
       <div className="h-full bg-panel flex flex-col overflow-hidden">
         {/* Auto-harness extension file tree */}
         {mode === 'auto_harness' ? (
-          <div className="flex-1 overflow-hidden mb-4">
-            <div className="bg-card rounded-lg border border-border overflow-hidden h-full">
+          <div className="flex-1 overflow-hidden mb-3">
+            <div className="overflow-hidden h-full flex flex-col px-3">
               <HarnessExtensionTree />
             </div>
           </div>
         ) : mode === 'team' ? (
           /* 团队任务概览和成员列表 */
-          <div className="flex-1 overflow-hidden mb-4">
-            <div className="bg-card rounded-lg overflow-hidden h-full flex flex-col">
+          <div className="flex-1 overflow-hidden mb-3">
+            <div className="overflow-hidden h-full flex flex-col">
               <TeamArea
                 members={teamMembers}
                 historyMessages={teamHistoryMessages}
@@ -310,17 +343,26 @@ export function ToolPanel({
             </div>
           </div>
         ) : (
-          /* Todo 列表 */
-          <div className="flex-1 overflow-y-auto mb-4">
-            <div className="bg-card rounded-lg border border-border overflow-hidden h-full">
-              <TodoList />
-            </div>
+          /* 任务概述（复用集群模式紧凑态样式，数据来自 TodoItem） */
+          <div className="flex-1 overflow-hidden mb-3">
+            <TaskPlanningPanel
+              variant="compact"
+              tasks={todoTeamTasks}
+              members={teamMembers}
+              totalTasks={todos.length}
+              completedTasks={todoCompletedTasks}
+              hideExpandButton
+              hideAssignee
+              title={t('chat.recentTasks')}
+            />
           </div>
         )}
 
         {/* 状态显示 - 只在收起模式下显示 */}
         {!teamAreaExpanded && (
-          <div className="toolpanel-status-card">
+          <>
+            <hr className="border-0 border-t border-border m-0" />
+            <div className="toolpanel-status-card px-3">
             <h3 className="toolpanel-status-card__title">
               <svg width="14" height="14" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
                 <rect x="1" y="8" width="3" height="7" rx="0.5" fill="currentColor" opacity="0.5" />
@@ -340,18 +382,7 @@ export function ToolPanel({
               </div>
             </div>
           </div>
-        )}
-
-        {/* 底部信息区：与左侧版本信息保持一致 - 只在收起模式下显示 */}
-        {!teamAreaExpanded && (
-          <div
-            className="shrink-0 pt-4 text-text-muted text-center"
-            style={{ fontSize: 'var(--font-size-xs)' }}
-          >
-            <div className="px-2.5">
-              <span>{t('toolPanel.poweredBy')}</span>
-            </div>
-          </div>
+          </>
         )}
       </div>
     </div>

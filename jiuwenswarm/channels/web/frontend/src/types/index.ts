@@ -26,10 +26,12 @@ export interface Session {
   channel_id?: string;         // 渠道ID
   user_id?: string;            // 创建人ID
   last_message_at?: number;    // 最近对话时间(Unix时间戳)
+  last_user_message_at?: number; // 最后一条用户消息时间(Unix时间戳)
 }
 
 export type AgentMode = 'agent.fast' | 'agent.plan' | 'team' | 'auto_harness';
 export type SessionStatus = 'active' | 'paused' | 'completed' | 'interrupted';
+export type Permission = 'default' | 'full_access';
 
 export interface ModelEntry {
   model_name: string;

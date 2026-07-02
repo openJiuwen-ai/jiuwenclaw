@@ -1,5 +1,6 @@
 import json
 import time
+import asyncio
 from typing import Any
 
 import pytest
@@ -101,6 +102,75 @@ def test_normalize_gateway_message_maps_chat_resume_to_interrupt_resume():
     assert normalized.req_method == ReqMethod.CHAT_CANCEL
     assert normalized.params["intent"] == "resume"
     assert normalized.session_id == "sess-1"
+
+
+@pytest.mark.asyncio
+async def test_schedule_gateway_restart_sets_event_without_execv(monkeypatch):
+    import jiuwenswarm.gateway.app_gateway as gateway_module
+
+    execv_calls = []
+    monkeypatch.setattr(
+        gateway_module.os,
+        "execv",
+        lambda executable, argv: execv_calls.append((executable, argv)),
+    )
+    restart_request = gateway_module.GatewayRestartRequest()
+
+    gateway_module._schedule_gateway_restart(restart_request, delay=0.0)  # pylint: disable=protected-access
+
+    await asyncio.wait_for(restart_request.ready_event.wait(), timeout=1.0)
+    assert restart_request.requested is True
+    assert execv_calls == []
+
+
+@pytest.mark.asyncio
+async def test_wait_for_gateway_tasks_returns_false_when_services_finish():
+    import jiuwenswarm.gateway.app_gateway as gateway_module
+
+    service_task = asyncio.create_task(asyncio.sleep(0))
+    restart_request = gateway_module.GatewayRestartRequest()
+
+    result = await asyncio.wait_for(
+        gateway_module._wait_for_gateway_tasks_or_restart([service_task], restart_request),  # pylint: disable=protected-access
+        timeout=1.0,
+    )
+
+    assert result is False
+
+
+@pytest.mark.asyncio
+async def test_wait_for_gateway_tasks_keeps_delayed_restart_when_services_finish():
+    import jiuwenswarm.gateway.app_gateway as gateway_module
+
+    service_task = asyncio.create_task(asyncio.sleep(0))
+    restart_request = gateway_module.GatewayRestartRequest()
+
+    gateway_module._schedule_gateway_restart(restart_request, delay=1.0)  # pylint: disable=protected-access
+    result = await asyncio.wait_for(
+        gateway_module._wait_for_gateway_tasks_or_restart([service_task], restart_request),  # pylint: disable=protected-access
+        timeout=1.0,
+    )
+
+    assert result is True
+
+
+@pytest.mark.asyncio
+async def test_wait_for_gateway_tasks_keeps_delayed_restart_when_service_fails():
+    import jiuwenswarm.gateway.app_gateway as gateway_module
+
+    async def fail_service():
+        raise RuntimeError("service failed before restart delay")
+
+    service_task = asyncio.create_task(fail_service())
+    restart_request = gateway_module.GatewayRestartRequest()
+
+    gateway_module._schedule_gateway_restart(restart_request, delay=1.0)  # pylint: disable=protected-access
+    result = await asyncio.wait_for(
+        gateway_module._wait_for_gateway_tasks_or_restart([service_task], restart_request),  # pylint: disable=protected-access
+        timeout=1.0,
+    )
+
+    assert result is True
 
 
 @pytest.mark.asyncio

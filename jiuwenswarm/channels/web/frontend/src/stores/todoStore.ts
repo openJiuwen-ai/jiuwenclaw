@@ -1,62 +1,153 @@
 /**
- * Todo 状态管理
+ * Todo 状态管理（多 session 版本）
+ *
+ * Todo 列表按 session 隔离存储在 runtimes 中。
  */
 
 import { create } from 'zustand';
 import { TodoItem, TodoStatus } from '../types';
 
-interface TodoState {
+interface TodoRuntime {
   todos: TodoItem[];
-
-  // Actions
-  setTodos: (todos: TodoItem[]) => void;
-  addTodo: (todo: TodoItem) => void;
-  updateTodo: (id: string, updates: Partial<TodoItem>) => void;
-  updateTodoStatus: (id: string, status: TodoStatus) => void;
-  removeTodo: (id: string) => void;
-  clearTodos: () => void;
 }
 
-export const useTodoStore = create<TodoState>((set) => ({
-  todos: [],
+function createEmptyRuntime(): TodoRuntime {
+  return { todos: [] };
+}
 
-  setTodos: (todos) => {
-    set({ todos });
-  },
+interface TodoState {
+  runtimes: Record<string, TodoRuntime>;
 
-  addTodo: (todo) => {
+  ensureRuntime: (sessionId: string) => TodoRuntime;
+  getRuntime: (sessionId: string | null) => TodoRuntime | undefined;
+  removeRuntime: (sessionId: string) => void;
+
+  setTodos: (sessionId: string, todos: TodoItem[]) => void;
+  addTodo: (sessionId: string, todo: TodoItem) => void;
+  updateTodo: (sessionId: string, id: string, updates: Partial<TodoItem>) => void;
+  updateTodoStatus: (sessionId: string, id: string, status: TodoStatus) => void;
+  removeTodo: (sessionId: string, id: string) => void;
+  clearTodos: (sessionId: string) => void;
+}
+
+export const useTodoStore = create<TodoState>((set, get) => ({
+  runtimes: {},
+
+  ensureRuntime: (sessionId) => {
+    const existing = get().runtimes[sessionId];
+    if (existing) return existing;
+    const runtime = createEmptyRuntime();
     set((state) => ({
-      todos: [...state.todos, todo],
+      runtimes: { ...state.runtimes, [sessionId]: runtime },
     }));
+    return runtime;
   },
 
-  updateTodo: (id, updates) => {
-    set((state) => ({
-      todos: state.todos.map((todo) =>
-        todo.id === id || todo.id.startsWith(id)
-          ? { ...todo, ...updates, updatedAt: new Date().toISOString() }
-          : todo
-      ),
-    }));
+  getRuntime: (sessionId) => {
+    if (!sessionId) return undefined;
+    return get().runtimes[sessionId];
   },
 
-  updateTodoStatus: (id, status) => {
-    set((state) => ({
-      todos: state.todos.map((todo) =>
-        todo.id === id || todo.id.startsWith(id)
-          ? { ...todo, status, updatedAt: new Date().toISOString() }
-          : todo
-      ),
-    }));
+  removeRuntime: (sessionId) => {
+    set((state) => {
+      const next = { ...state.runtimes };
+      delete next[sessionId];
+      return { runtimes: next };
+    });
   },
 
-  removeTodo: (id) => {
-    set((state) => ({
-      todos: state.todos.filter((todo) => todo.id !== id && !todo.id.startsWith(id)),
-    }));
+  setTodos: (sessionId, todos) => {
+    set((state) => {
+      const runtime = state.runtimes[sessionId];
+      if (!runtime) return state;
+      return {
+        runtimes: {
+          ...state.runtimes,
+          [sessionId]: { ...runtime, todos },
+        },
+      };
+    });
   },
 
-  clearTodos: () => {
-    set({ todos: [] });
+  addTodo: (sessionId, todo) => {
+    set((state) => {
+      const runtime = state.runtimes[sessionId];
+      if (!runtime) return state;
+      return {
+        runtimes: {
+          ...state.runtimes,
+          [sessionId]: { ...runtime, todos: [...runtime.todos, todo] },
+        },
+      };
+    });
+  },
+
+  updateTodo: (sessionId, id, updates) => {
+    set((state) => {
+      const runtime = state.runtimes[sessionId];
+      if (!runtime) return state;
+      return {
+        runtimes: {
+          ...state.runtimes,
+          [sessionId]: {
+            ...runtime,
+            todos: runtime.todos.map((todo) =>
+              todo.id === id || todo.id.startsWith(id)
+                ? { ...todo, ...updates, updatedAt: new Date().toISOString() }
+                : todo
+            ),
+          },
+        },
+      };
+    });
+  },
+
+  updateTodoStatus: (sessionId, id, status) => {
+    set((state) => {
+      const runtime = state.runtimes[sessionId];
+      if (!runtime) return state;
+      return {
+        runtimes: {
+          ...state.runtimes,
+          [sessionId]: {
+            ...runtime,
+            todos: runtime.todos.map((todo) =>
+              todo.id === id || todo.id.startsWith(id)
+                ? { ...todo, status, updatedAt: new Date().toISOString() }
+                : todo
+            ),
+          },
+        },
+      };
+    });
+  },
+
+  removeTodo: (sessionId, id) => {
+    set((state) => {
+      const runtime = state.runtimes[sessionId];
+      if (!runtime) return state;
+      return {
+        runtimes: {
+          ...state.runtimes,
+          [sessionId]: {
+            ...runtime,
+            todos: runtime.todos.filter((todo) => todo.id !== id && !todo.id.startsWith(id)),
+          },
+        },
+      };
+    });
+  },
+
+  clearTodos: (sessionId) => {
+    set((state) => {
+      const runtime = state.runtimes[sessionId];
+      if (!runtime) return state;
+      return {
+        runtimes: {
+          ...state.runtimes,
+          [sessionId]: { ...runtime, todos: [] },
+        },
+      };
+    });
   },
 }));

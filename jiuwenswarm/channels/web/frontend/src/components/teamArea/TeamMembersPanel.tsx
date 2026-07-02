@@ -10,12 +10,12 @@ import { MarkdownMessageBody } from '../ChatPanel/MessageItem';
 import { parseTeamEventMessage, type ParsedTeamEvent } from '../ChatPanel/teamEventUtils';
 import { TeamMemberAvatar } from '../TeamMemberAvatar';
 import { isTeamLeaderMember, isUserMember } from '../../utils/teamMemberAvatar';
+import teamIcon from '../../assets/team.svg';
 import { MemberListItem } from './MemberListItem';
 import {
   buildProcessItems,
   buildTaskMap,
   Chevron,
-  ExpandIcon,
   formatTime,
   getMemberDisplayName,
   getTaskStatusLabel,
@@ -28,7 +28,7 @@ import {
   type TeamDetailTab,
   type TeamMember,
 } from './shared';
-import { AlertTriangle, CircleAlert, LoaderCircle, MessageSquare, Users, Wrench, X } from 'lucide-react';
+import { AlertTriangle, CircleAlert, LoaderCircle, MessageSquare, Wrench, X } from 'lucide-react';
 
 type TeamMembersPanelProps = {
   variant: 'compact' | 'expanded';
@@ -198,11 +198,11 @@ export function TeamMembersPanel({
   onSelectMember,
   onMemberClick,
   onDetailTabChange,
-  onExpand,
 }: TeamMembersPanelProps) {
   const { t } = useTranslation();
-  const { messages } = useChatStore();
-  const { teamLeaderMemberIds } = useSessionStore();
+  const activeSessionId = useChatStore((s) => s.activeSessionId);
+  const messages = useChatStore((s) => s.runtimes[activeSessionId ?? '']?.messages ?? []);
+  const teamLeaderMemberIds = useSessionStore((s) => s.runtimes[activeSessionId ?? '']?.teamLeaderMemberIds ?? []);
   const groupMessages = useMemo(
     () => buildGroupMessageItems(historyMessages, messages),
     [historyMessages, messages],
@@ -227,19 +227,12 @@ export function TeamMembersPanel({
 
   if (variant === 'compact') {
     return (
-      <div className="flex flex-1 flex-col overflow-hidden rounded-lg border border-border bg-card min-h-0">
-        <div className="flex w-full shrink-0 items-center justify-between bg-card px-4 py-3 border-b border-border">
+      <div className="flex flex-1 flex-col overflow-hidden rounded-b-lg bg-card min-h-0 px-3">
+        <div className="flex w-full shrink-0 items-center justify-between bg-card px-4 py-3 border-border">
           <div className="flex items-center gap-2">
-            <Users size={16} className="text-text-muted" />
-            <span className="text-sm font-medium text-text">{t('team.membersTab')}</span>
+            <img src={teamIcon} alt="" className="h-4 w-4 text-text-muted" />
+            <span className="text-sm font-medium text-text">Subagents ({visibleMembers.length})</span>
           </div>
-          <button
-            onClick={onExpand}
-            className="rounded p-2 text-text-muted transition-colors hover:bg-secondary hover:text-text"
-            title={t('team.expand')}
-          >
-            <ExpandIcon />
-          </button>
         </div>
         <div className="flex-1 space-y-2 overflow-y-auto px-4 py-3">
           {visibleMembers.length === 0 ? (
@@ -467,14 +460,13 @@ function MemberTaskDetail({
   const { t } = useTranslation();
   const [taskListExpanded, setTaskListExpanded] = useState(false);
   const [expandedProcessIds, setExpandedProcessIds] = useState<Set<string>>(new Set());
-  const { todos } = useTodoStore();
-  const {
-    teamTaskEvents,
-    teamMemberExecutionEvents,
-    teamMemberContextCompression,
-    clearTeamMemberContextCompressionStatus,
-  } = useSessionStore();
-  const { messages } = useChatStore();
+  const activeSessionId = useChatStore((s) => s.activeSessionId);
+  const todos = useTodoStore((s) => s.runtimes[activeSessionId ?? '']?.todos ?? []);
+  const teamTaskEvents = useSessionStore((s) => s.runtimes[activeSessionId ?? '']?.teamTaskEvents ?? []);
+  const teamMemberExecutionEvents = useSessionStore((s) => s.runtimes[activeSessionId ?? '']?.teamMemberExecutionEvents ?? []);
+  const teamMemberContextCompression = useSessionStore((s) => s.runtimes[activeSessionId ?? '']?.teamMemberContextCompression ?? {});
+  const clearTeamMemberContextCompressionStatus = useSessionStore((s) => s.clearTeamMemberContextCompressionStatus);
+  const messages = useChatStore((s) => s.runtimes[activeSessionId ?? '']?.messages ?? []);
   const processMessages = useMemo(
     () => mergeUniqueMessages([...historyMessages, ...messages]),
     [historyMessages, messages]
@@ -533,10 +525,14 @@ function MemberTaskDetail({
         <FinalSummaryList events={finalEvents} />
       </div>
 
-      <div className="shrink-0 border-border bg-card">
+      <div className="shrink-0 border-t border-border bg-card">
         <TeamMemberContextCompressionBar
           state={contextCompressionState}
-          onClose={() => clearTeamMemberContextCompressionStatus(member.member_id)}
+          onClose={() => {
+            if (activeSessionId) {
+              clearTeamMemberContextCompressionStatus(activeSessionId, member.member_id);
+            }
+          }}
         />
         <TaskListBar
           tasks={memberTasks}
@@ -793,7 +789,7 @@ function TaskListBar({
     <button
       type="button"
       onClick={onToggle}
-      className="flex w-full h-[54px] items-center justify-between px-5 text-left transition-colors hover:bg-secondary border-t"
+      className="flex w-full h-[54px] items-center justify-between px-5 text-left transition-colors hover:bg-secondary"
     >
       <div className="flex min-w-0 items-center gap-2">
         <span className="text-sm font-medium text-text">{t('team.memberTasks')}</span>

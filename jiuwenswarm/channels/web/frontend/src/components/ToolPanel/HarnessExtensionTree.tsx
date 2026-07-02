@@ -9,7 +9,7 @@
 
 import { useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { useHarnessStore, CachedFileTreeEntry } from '../../stores';
+import { useChatStore, useHarnessStore, CachedFileTreeEntry } from '../../stores';
 import { webRequest } from '../../services/webClient';
 import { resolveHarnessError } from '../../utils';
 import { ReadOnlyFileModal } from './ReadOnlyFileModal';
@@ -70,7 +70,6 @@ function fileInfoToCached(files: FileInfo[]): CachedFileTreeEntry[] {
 export function HarnessExtensionTree(props?: HarnessExtensionTreeProps) {
   const { t } = useTranslation();
   const {
-    extensionReady,
     packages,
     getFileTreeCache,
     setFileTreeCache,
@@ -78,6 +77,8 @@ export function HarnessExtensionTree(props?: HarnessExtensionTreeProps) {
     setFileTreeLoading,
     isFileTreeLoading,
   } = useHarnessStore();
+  const activeSessionId = useChatStore((s) => s.activeSessionId);
+  const extensionReady = useHarnessStore((s) => s.runtimes[activeSessionId ?? '']?.extensionReady ?? null);
   const [files, setFiles] = useState<FileInfo[]>([]);
   const [loading, setLoading] = useState(false);
   const [loadError, setLoadError] = useState<string | null>(null);

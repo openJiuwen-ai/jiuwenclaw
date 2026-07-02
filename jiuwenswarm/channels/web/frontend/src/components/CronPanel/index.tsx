@@ -250,7 +250,7 @@ function buildLegacyJobInput(job: CronJobInput | UpdateCronJob, mode?: string): 
 
 export default function CronPanel({ sessionId }: CronPanelProps) {
   const { t } = useTranslation();
-  const { mode } = useSessionStore();
+  const mode = useSessionStore((s) => s.runtimes[sessionId]?.mode ?? 'agent.plan');
   const [cronJobs, setCronJobs] = useState<CronJob[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);

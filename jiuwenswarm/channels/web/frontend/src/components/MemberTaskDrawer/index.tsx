@@ -6,7 +6,7 @@
 
 import { useState, useMemo } from 'react';
 import { useTranslation } from 'react-i18next';
-import { useTodoStore, useSessionStore } from '../../stores';
+import { useChatStore, useTodoStore, useSessionStore } from '../../stores';
 import { TeamMemberAvatar } from '../TeamMemberAvatar';
 
 interface MemberTaskDrawerProps {
@@ -119,8 +119,9 @@ function CollapsibleTaskGroup({ title, count, expanded, onToggle, children }: Co
 
 export function MemberTaskDrawer({ memberId, onClose }: MemberTaskDrawerProps) {
   const { t } = useTranslation();
-  const { todos } = useTodoStore();
-  const { teamTaskEvents } = useSessionStore();
+  const activeSessionId = useChatStore((s) => s.activeSessionId);
+  const todos = useTodoStore((s) => s.runtimes[activeSessionId ?? '']?.todos ?? []);
+  const teamTaskEvents = useSessionStore((s) => s.runtimes[activeSessionId ?? '']?.teamTaskEvents ?? []);
 
   const [inProgressExpanded, setInProgressExpanded] = useState(true);
   const [completedExpanded, setCompletedExpanded] = useState(false);

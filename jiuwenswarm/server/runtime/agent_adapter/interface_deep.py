@@ -251,7 +251,9 @@ from jiuwenswarm.common.config import (
 from jiuwenswarm.common.mcp_config import (
     build_mcp_server_config,
     extract_enabled_mcp_server_entries,
+    preflight_mcp_server_reachable,
 )
+from jiuwenswarm.common.mcp_call_timeout_patch import apply_mcp_call_timeout_patch
 from jiuwenswarm.common.reasoning_injector import build_reasoning_model_request_kwargs
 from jiuwenswarm.server.runtime.agent_adapter.sysop_builder import (
     build_filesystem_policy,
@@ -269,6 +271,7 @@ from jiuwenswarm.common.utils import (
     get_config_dir,
     get_env_file,
     get_prompt_attachment_dir,
+    get_runtime_state_path,
     get_user_workspace_dir,
     reset_free_search_runtime_flags,
 )
@@ -564,6 +567,12 @@ class JiuWenSwarmDeepAdapter:
     """
 
     def __init__(self) -> None:
+        # Apply the MCP per-call timeout patch once per process: wraps
+        # StreamableHttpClient/SseClient.call_tool & list_tools in
+        # asyncio.wait_for and honors config ``timeout_s`` (--timeout_s), so a
+        # killed remote MCP server fails fast instead of hanging on the MCP
+        # SDK's 300s SSE read timeout. Idempotent (module-level _PATCHED guard).
+        apply_mcp_call_timeout_patch()
         self._instance: DeepAgent | None = None
         self._project_dir: str | None = None
         self._workspace_dir: str = str(get_agent_workspace_dir())
@@ -725,6 +734,13 @@ class JiuWenSwarmDeepAdapter:
             self._session_adapters.pop(sid, None)
             self._session_adapter_locks.pop(sid, None)
             self._session_adapter_last_used.pop(sid, None)
+            try:
+                get_runtime_state_path(sid).unlink(missing_ok=True)
+            except Exception:
+                logger.debug(
+                    "[JiuWenSwarmDeepAdapter] remove runtime_state failed: session_id=%s",
+                    sid, exc_info=True,
+                )
             evicted += 1
 
     async def _get_or_create_session_adapter(self, session_id: str | None) -> "JiuWenSwarmDeepAdapter":
@@ -1149,9 +1165,10 @@ class JiuWenSwarmDeepAdapter:
         language: str,
         channel: str,
         *,
+        session_id: str | None = None,
         project_dir: str | None = None,
     ) -> None:
-        """将当前运行时状态写入 config 目录下的 runtime_state.yaml。"""
+        """将当前运行时状态写入 config 目录下按 session 隔离的 runtime_state 文件。"""
         try:
             git_branch = "N/A"
             git_main_branch = ""
@@ -1204,7 +1221,8 @@ class JiuWenSwarmDeepAdapter:
                 "git_recent_commits": git_recent_commits,
                 "git_user": git_user,
             }
-            path = get_config_dir() / "runtime_state.yaml"
+            path = get_runtime_state_path(session_id)
+            path.parent.mkdir(parents=True, exist_ok=True)
             with open(path, "w", encoding="utf-8") as f:
                 yaml.safe_dump(state, f, allow_unicode=True, sort_keys=False)
         except Exception as exc:
@@ -1476,6 +1494,19 @@ class JiuWenSwarmDeepAdapter:
 
     async def _register_mcp_server(self, cfg: McpServerConfig, *, tag: str) -> bool:
         if self._instance is None:
+            return False
+        # Pre-flight reachability check for HTTP-based MCP servers. If the host
+        # is down we skip registration here instead of entering the mcp
+        # streamable-http context — otherwise openjiuwen leaks orphaned anyio
+        # background tasks on the failed initialize() and logs noisy
+        # ``aclose()``/cancel-scope RuntimeErrors.
+        reachable, reason = await preflight_mcp_server_reachable(cfg)
+        if not reachable:
+            logger.warning(
+                "[JiuWenSwarmDeepAdapter] MCP server unreachable, skipping registration: "
+                "name=%s transport=%s path=%s reason=%s",
+                cfg.server_name, cfg.client_type, cfg.server_path, reason,
+            )
             return False
         try:
             result = await Runner.resource_mgr.add_mcp_server(cfg, tag=tag)
@@ -4278,6 +4309,7 @@ class JiuWenSwarmDeepAdapter:
             )
             self._runtime_prompt_rail.set_model_name(self._resolve_model_name())
             self._runtime_prompt_rail.set_mode(runtime_config.mode)
+            self._runtime_prompt_rail.set_session_id(runtime_config.session_id)
         if self._response_prompt_rail:
             self._response_prompt_rail.set_channel(resolved_channel)
         # PermissionInterruptRail: per-request trusted_dirs 注入，使 external_directory
@@ -4299,6 +4331,7 @@ class JiuWenSwarmDeepAdapter:
             mode=runtime_config.mode,
             language=resolved_language,
             channel=resolved_channel,
+            session_id=runtime_config.session_id,
             project_dir=runtime_config.project_dir
             or runtime_config.cwd
             or self._project_dir
@@ -5454,7 +5487,7 @@ class JiuWenSwarmDeepAdapter:
         try:
             await self._update_runtime_config(
                 self._RuntimeConfig(
-                    session_id=request.session_id,
+                    session_id=session_id,
                     mode=mode,
                     request_id=request.request_id,
                     channel_id=request.channel_id,
@@ -5546,11 +5579,16 @@ class JiuWenSwarmDeepAdapter:
             if self._runtime_prompt_rail:
                 self._runtime_prompt_rail.set_model_name(self._resolve_model_name())
                 self._runtime_prompt_rail.set_mode(mode)
+                self._runtime_prompt_rail.set_session_id(session_id)
             self._write_runtime_state(
                 mode=mode,
                 language=resolved_language,
                 channel=resolved_channel,
-                project_dir=inputs.get("project_dir") or self._project_dir or self._workspace_dir,
+                session_id=session_id,
+                project_dir=inputs.get("project_dir")
+                or inputs.get("cwd")
+                or self._project_dir
+                or self._workspace_dir,
             )
 
             async for chunk in process_team_message_stream(request, inputs, self._instance):
@@ -5567,7 +5605,7 @@ class JiuWenSwarmDeepAdapter:
 
             await self._update_runtime_config(
                 self._RuntimeConfig(
-                    session_id=request.session_id,
+                    session_id=session_id,
                     mode=mode,
                     request_id=request.request_id,
                     channel_id=request.channel_id,
@@ -5690,7 +5728,7 @@ class JiuWenSwarmDeepAdapter:
         try:
             await self._update_runtime_config(
                 self._RuntimeConfig(
-                    session_id=request.session_id,
+                    session_id=session_id,
                     mode=mode,
                     request_id=request.request_id,
                     channel_id=request.channel_id,

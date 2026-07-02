@@ -11,6 +11,7 @@ import time
 from pathlib import Path
 from typing import Any, AsyncIterator
 
+from openjiuwen.agent_teams.context import reset_session_id, set_session_id
 from openjiuwen.agent_teams.paths import get_agent_teams_home, team_home
 from openjiuwen.agent_teams.runtime import RunActionKind
 from openjiuwen.agent_teams.schema.team import TeamRole
@@ -252,11 +253,21 @@ async def ensure_monitor_handlers_for_active_runtime(
     # --- TeamMonitorHandler ---
     existing_monitor = tm.get_monitor(session_id)
     if existing_monitor is None or not existing_monitor.is_running:
-        monitor = await Runner.get_agent_team_monitor(
-            team_name=team_name,
-            session_id=session_id,
-            hide_dm=hide_dm,
-        )
+        # create_monitor inside Runner.get_agent_team_monitor freezes the
+        # current contextvar session_id into the TeamMonitor (self._session_id).
+        # runtime_ready fires before the leader's bind_session, so the
+        # contextvar is empty here; bind the explicit session_id so the
+        # monitor does not hash an empty session id and target non-existent
+        # per-session tables (team_task_<hash> / team_message_<hash>).
+        token = set_session_id(session_id)
+        try:
+            monitor = await Runner.get_agent_team_monitor(
+                team_name=team_name,
+                session_id=session_id,
+                hide_dm=hide_dm,
+            )
+        finally:
+            reset_session_id(token)
         if monitor is None:
             logger.warning(
                 "[TeamHelpers] active team monitor unavailable: channel_id=%s session_id=%s team_name=%s",
@@ -309,10 +320,17 @@ async def ensure_monitor_handlers_for_active_runtime(
         # No in-memory handler — restore from disk only
         initial_runs = restore_workflow_runs(session_id)
 
-    wf_monitor = await Runner.get_agent_team_monitor(
-        team_name=team_name,
-        session_id=session_id,
-    )
+    # Bind the explicit session_id so create_monitor freezes the real id
+    # instead of an empty contextvar (same rationale as the TeamMonitor
+    # path above).
+    wf_token = set_session_id(session_id)
+    try:
+        wf_monitor = await Runner.get_agent_team_monitor(
+            team_name=team_name,
+            session_id=session_id,
+        )
+    finally:
+        reset_session_id(wf_token)
     if wf_monitor is None:
         logger.warning(
             "[TeamHelpers] workflow monitor unavailable: channel_id=%s session_id=%s team_name=%s",
@@ -1659,17 +1677,147 @@ async def _consume_monitor_events(
         )
 
 
+# --- swarmflow workflow.updated → web team.member / team.task conversion ---
+#
+# TUI 前端能原生渲染 ``workflow.updated``（workflow 面板），但 web 前端只订阅
+# ``team.member`` / ``team.task``。当 web 端触发 swarmflow 时，把每个 worker 的状态
+# 转成 teammate 事件、把每个 phase 转成 task 事件，从而复用现有前端渲染。
+#
+# member_id / task_id 均以 run_id 前缀做命名空间，避免与真实 teammate/task 冲突。
+
+_WF_PHASE_STATUS_TO_TASK_TYPE: dict[str, str] = {
+    "planned": "team.task.created",
+    "running": "team.task.claimed",
+    "completed": "team.task.completed",
+    "failed": "team.task.cancelled",
+    "stopped": "team.task.cancelled",
+}
+
+
+def _team_event_envelope(
+    category: str, session_id: str, event: dict[str, Any]
+) -> dict[str, Any]:
+    """Wrap an inner team event dict in the standard broadcast envelope."""
+    return {"event_type": category, "session_id": session_id, "event": event}
+
+
+def _workflow_updated_to_team_events(
+    event: dict[str, Any],
+    session_id: str,
+    seen_phase: dict[str, str],
+    seen_agent: dict[str, str],
+    spawned_members: set[str],
+) -> list[dict[str, Any]]:
+    """Convert one ``workflow.updated`` event into web ``team.member`` / ``team.task`` events.
+
+    Each swarmflow phase becomes a ``team.task`` and each worker (agent) becomes a
+    ``team.member``. Only status *changes* produce events — the ``workflow.updated``
+    delta repeatedly re-includes a running phase (once per agent that starts inside
+    it), so ``seen_phase`` / ``seen_agent`` dedup by last-observed status.
+    """
+    if event.get("event_type") != "workflow.updated":
+        return []
+
+    wf = event.get("workflow") or {}
+    run_id = str(wf.get("id") or "")
+    team_id = str(wf.get("name") or run_id or "swarmflow")
+    if not run_id:
+        return []
+
+    out: list[dict[str, Any]] = []
+
+    for phase in wf.get("phases", []) or []:
+        phase_id = phase.get("id")
+        status = phase.get("status")
+        if not phase_id or not status:
+            continue
+        task_id = f"{run_id}:{phase_id}"
+        if seen_phase.get(task_id) != status:
+            seen_phase[task_id] = status
+            task_type = _WF_PHASE_STATUS_TO_TASK_TYPE.get(status)
+            if task_type is not None:
+                out.append(
+                    _team_event_envelope(
+                        "team.task",
+                        session_id,
+                        {
+                            "type": task_type,
+                            "team_id": team_id,
+                            "task_id": task_id,
+                            "title": phase.get("name") or phase_id,
+                            "status": status,
+                        },
+                    )
+                )
+
+        for agent in phase.get("agents", []) or []:
+            agent_id = agent.get("id")
+            agent_status = agent.get("status")
+            if not agent_id or not agent_status:
+                continue
+            member_id = f"{run_id}:{agent_id}"
+
+            # First sighting of a worker → spawn it before any status change, even
+            # when we first see it already terminal (missed the running delta).
+            if member_id not in spawned_members:
+                spawned_members.add(member_id)
+                seen_agent[member_id] = "running"
+                out.append(
+                    _team_event_envelope(
+                        "team.member",
+                        session_id,
+                        {
+                            "type": "team.member.spawned",
+                            "team_id": team_id,
+                            "member_id": member_id,
+                            "name": agent.get("name") or agent_id,
+                            "status": "busy",
+                        },
+                    )
+                )
+
+            if seen_agent.get(member_id) != agent_status:
+                old_status = seen_agent.get(member_id, "busy")
+                seen_agent[member_id] = agent_status
+                if agent_status != "running":
+                    out.append(
+                        _team_event_envelope(
+                            "team.member",
+                            session_id,
+                            {
+                                "type": "team.member.status_changed",
+                                "team_id": team_id,
+                                "member_id": member_id,
+                                "old_status": old_status,
+                                "new_status": agent_status,
+                            },
+                        )
+                    )
+
+    return out
+
+
 async def _consume_workflow_events(
     channel_id: str | None,
     session_id: str,
     workflow_handler: WorkflowMonitorHandler,
 ) -> None:
-    """Consume workflow events in the background and broadcast them."""
+    """Consume workflow events in the background and broadcast them.
+
+    TUI keeps the native ``workflow.updated`` stream. Every other channel (web)
+    gets the events translated into ``team.member`` / ``team.task`` so the
+    existing web frontend can render swarmflow workers/phases.
+    """
+    is_tui = _resolve_channel_id(channel_id) == "tui"
+    seen_phase: dict[str, str] = {}
+    seen_agent: dict[str, str] = {}
+    spawned_members: set[str] = set()
     try:
         logger.info(
-            "[TeamHelpers] workflow event loop started: channel_id=%s session_id=%s",
+            "[TeamHelpers] workflow event loop started: channel_id=%s session_id=%s is_tui=%s",
             _resolve_channel_id(channel_id),
             session_id,
+            is_tui,
         )
         async for event in workflow_handler.events():
             # WF_DBG: 维测日志 — 广播前打印事件关键字段
@@ -1689,7 +1837,14 @@ async def _consume_workflow_events(
                 wf.get("agent_count", 0),
                 wf.get("completed_agent_count", 0),
             )
-            _broadcast_event(channel_id, session_id, event)
+            if is_tui:
+                _broadcast_event(channel_id, session_id, event)
+                continue
+            for team_ev in _workflow_updated_to_team_events(
+                event, session_id, seen_phase, seen_agent, spawned_members
+            ):
+                _persist_team_history_event(channel_id, session_id, team_ev)
+                _broadcast_event(channel_id, session_id, team_ev)
 
         logger.info(
             "[TeamHelpers] workflow event loop ended: channel_id=%s session_id=%s",

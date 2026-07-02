@@ -22,7 +22,7 @@ from openjiuwen.harness.prompts.prompt_attachment_manager import (
 
 from openjiuwen.harness.rails.base import DeepAgentRail
 from jiuwenswarm.agents.harness.common.prompt.shell_environment import build_shell_environment_prompt
-from jiuwenswarm.common.utils import get_config_dir, logger
+from jiuwenswarm.common.utils import get_runtime_state_path, logger
 
 from jiuwenswarm.common.utils import get_agent_workspace_dir
 
@@ -52,6 +52,7 @@ class RuntimePromptRail(DeepAgentRail):
         self._project_dir: str | None = None
         self._model_name: str = ""
         self._mode: str = ""
+        self._session_id: str | None = None
         self._force_english: bool = False
 
     def init(self, agent) -> None:
@@ -99,6 +100,14 @@ class RuntimePromptRail(DeepAgentRail):
     def set_mode(self, mode: str) -> None:
         """per-request 更新运行模式，作为文件读取失败时的兜底。"""
         self._mode = mode or ""
+
+    def set_session_id(self, session_id: str | None) -> None:
+        """per-request 更新 session id，用于读取按 session 隔离的 runtime_state 文件。"""
+        self._session_id = (
+            session_id.strip()
+            if isinstance(session_id, str) and session_id.strip()
+            else None
+        )
 
     def set_force_english(self, force: bool) -> None:
         """Force English-only injected sections regardless of language (code mode)."""
@@ -166,13 +175,14 @@ class RuntimePromptRail(DeepAgentRail):
 
         # ── runtime ──
         runtime_state: dict[str, Any] = {}
+        state_path = get_runtime_state_path(self._session_id)
         try:
-            with open(get_config_dir() / "runtime_state.yaml", encoding="utf-8") as f:
+            with open(state_path, encoding="utf-8") as f:
                 runtime_state = yaml.safe_load(f) or {}
         except FileNotFoundError:
             pass
         except Exception as e:
-            logger.warning("Failed to read runtime_state.yaml: %s", e)
+            logger.warning("Failed to read runtime state file %s: %s", state_path, e)
 
         model = (runtime_state.get("model") or self._model_name or "unknown").strip()
         mode = (runtime_state.get("mode") or self._mode or "unknown").strip()

@@ -10,7 +10,7 @@ import { isTeamLeaderMember } from '../../utils/teamMemberAvatar';
 import { openTeamPanel } from '../../features/teamPanelState';
 import teamProcessIcon from '../../assets/team-process.svg';
 import { TeamMemberAvatar } from '../TeamMemberAvatar';
-import { useSessionStore } from '../../stores';
+import { useChatStore, useSessionStore } from '../../stores';
 import type {
   TeamMemberExecutionEvent,
   TeamTask,
@@ -516,7 +516,8 @@ export function AgentTeamActivityCard({
 }: AgentTeamActivityCardProps) {
   const [expanded, setExpanded] = useState(false);
   const { t } = useTranslation();
-  const { teamMembers } = useSessionStore();
+  const activeSessionId = useChatStore((s) => s.activeSessionId);
+  const teamMembers = useSessionStore((s) => s.runtimes[activeSessionId ?? '']?.teamMembers ?? []);
   const members = teamMembers as TeamMemberLike[];
   const { activities, activeCount } = useMemo(() => {
     const count = members.filter(isActiveTeamMember).length;

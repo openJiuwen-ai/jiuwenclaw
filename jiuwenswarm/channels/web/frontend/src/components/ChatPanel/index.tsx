@@ -13,6 +13,8 @@ import { AgentMode, Message, UserAnswer } from '../../types';
 import { MessageList } from './MessageList';
 import { ContextCompressionLines } from './MessageItem';
 import { InputArea } from './InputArea';
+import chatIcon from './chat.svg';
+import expandIcon from './expand.svg';
 import { SubtaskProgress } from './SubtaskProgress';
 import { InlineQuestionCard } from './InlineQuestionCard';
 import { HistoryPagerBar } from './HistoryPagerBar';
@@ -20,6 +22,7 @@ import { HarnessProgressBar } from './HarnessProgressBar';
 import { AgentTeamActivityCard } from './TeamEventGroupDisplay';
 import { isTeamActivityMessage, parseTeamEventMessage } from './teamEventUtils';
 import { isTeamLeaderMember } from '../../utils/teamMemberAvatar';
+import welcomeBanner from '../../assets/jiuwen-xiaobanner.png';
 import './ChatPanel.css';
 
 export interface ChatHistoryPagerProps {
@@ -40,10 +43,16 @@ interface ChatPanelProps {
   onExportShare?: () => void | Promise<void>;
   isExportingShare?: boolean;
   canExportShare?: boolean;
+  sessionTitle?: string;
   /** 自会话管理恢复历史后出现；支持分页加载更早消息 */
   historyPager?: ChatHistoryPagerProps | null;
   /** 右侧面板展开状态：展开时隐藏对话框上方的活跃成员 */
   teamAreaExpanded?: boolean;
+  autoFocusKey?: string | null;
+  /** 跳转到技能管理页 */
+  onNavigateToSkills?: () => void;
+  /** 切换右侧紧缩面板展开状态 */
+  onToggleTeamArea?: (expanded: boolean) => void;
 }
 
 function ThinkingIndicator() {
@@ -71,7 +80,8 @@ function SuggestionCard({ text, onClick }: { text: string; onClick: () => void }
 }
 
 function InterruptResultBubble() {
-  const { interruptResult } = useChatStore();
+  const activeSessionId = useChatStore((s) => s.activeSessionId);
+  const interruptResult = useChatStore((s) => s.runtimes[activeSessionId ?? '']?.interruptResult ?? null);
   const message = interruptResult?.message?.trim();
 
   if (!message || interruptResult?.success) {
@@ -89,16 +99,15 @@ function InterruptResultBubble() {
 }
 
 function ActiveTeamGroupEntry({ isProcessing, teamAreaExpanded }: { isProcessing: boolean; teamAreaExpanded?: boolean }) {
-  const { messages } = useChatStore();
-  const {
-    mode,
-    teamHistoryMessages,
-    teamMemberExecutionEvents,
-    teamTaskEvents,
-    teamTasks,
-    teamMembers,
-  } = useSessionStore();
-  const { todos } = useTodoStore();
+  const activeSessionId = useChatStore((s) => s.activeSessionId);
+  const messages = useChatStore((s) => s.runtimes[activeSessionId ?? '']?.messages ?? []);
+  const mode = useSessionStore((s) => s.runtimes[activeSessionId ?? '']?.mode ?? 'agent.plan');
+  const teamHistoryMessages = useSessionStore((s) => s.runtimes[activeSessionId ?? '']?.teamHistoryMessages ?? []);
+  const teamMemberExecutionEvents = useSessionStore((s) => s.runtimes[activeSessionId ?? '']?.teamMemberExecutionEvents ?? []);
+  const teamTaskEvents = useSessionStore((s) => s.runtimes[activeSessionId ?? '']?.teamTaskEvents ?? []);
+  const teamTasks = useSessionStore((s) => s.runtimes[activeSessionId ?? '']?.teamTasks ?? []);
+  const teamMembers = useSessionStore((s) => s.runtimes[activeSessionId ?? '']?.teamMembers ?? []);
+  const todos = useTodoStore((s) => s.runtimes[activeSessionId ?? '']?.todos ?? []);
   const activeTeamMessages = useMemo(
     () => getActiveTeamMessages(teamHistoryMessages, messages),
     [teamHistoryMessages, messages]
@@ -160,14 +169,14 @@ function WelcomeHeading() {
   if (isZh) {
     return (
       <>
-        我是<span className="chat-welcome__brand">JiuwenSwarm</span>，很高兴认识你!
+        JiuwenSwarm 轻松解决工作每个问题！
       </>
     );
   }
 
   return (
     <>
-      Hi, I&apos;m <span className="chat-welcome__brand">JiuwenSwarm</span>. Nice to meet you!
+      JiuwenSwarm makes work easier!
     </>
   );
 }
@@ -197,18 +206,21 @@ export function ChatPanel({
   onExportShare,
   isExportingShare = false,
   canExportShare = false,
+  sessionTitle,
   historyPager = null,
   teamAreaExpanded = false,
+  autoFocusKey = null,
+  onNavigateToSkills,
+  onToggleTeamArea,
 }: ChatPanelProps) {
   const { t } = useTranslation();
-  const {
-    messages,
-    isThinking,
-    toolExecutionOrder,
-    contextCompressionRuntime,
-    contextCompressionSummary,
-  } = useChatStore();
-  const { mode } = useSessionStore();
+  const activeSessionId = useChatStore((s) => s.activeSessionId);
+  const messages = useChatStore((s) => s.runtimes[activeSessionId ?? '']?.messages ?? []);
+  const isThinking = useChatStore((s) => s.runtimes[activeSessionId ?? '']?.isThinking ?? false);
+  const toolExecutionOrder = useChatStore((s) => s.runtimes[activeSessionId ?? '']?.toolExecutionOrder ?? []);
+  const contextCompressionRuntime = useChatStore((s) => s.runtimes[activeSessionId ?? '']?.contextCompressionRuntime);
+  const contextCompressionSummary = useChatStore((s) => s.runtimes[activeSessionId ?? '']?.contextCompressionSummary);
+  const mode = useSessionStore((s) => s.runtimes[activeSessionId ?? '']?.mode ?? 'agent.plan');
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const scrollContainerRef = useRef<HTMLDivElement>(null);
   const prependScrollSnapRef = useRef<{ sh: number; st: number } | null>(null);
@@ -224,7 +236,7 @@ export function ChatPanel({
     t('chat.welcomeSuggestions.journey'),
     t('chat.welcomeSuggestions.skills'),
   ];
-  const shouldShowShareExport = Boolean(onExportShare && hasConversation);
+  const shouldShowChatHeader = hasConversation;
   const shareExportTitle = getShareExportTitle(t, isExportingShare, canExportShare);
 
   // 跟踪用户是否正在查看历史消息（不在底部）
@@ -321,10 +333,12 @@ export function ChatPanel({
   );
   return (
     <div className="chat-panel-shell flex flex-col h-full" data-testid="chat-panel">
-      {/* HarnessProgressBar - sticky header, doesn't scroll with messages */}
-      <div className="sticky top-0 z-10 px-3 pt-2 bg-bg/95 backdrop-blur-sm">
-        {shouldShowShareExport && (
-          <div className="mb-2 flex justify-end">
+      {shouldShowChatHeader && (
+        <div className="chat-panel-header">
+          <div className="chat-panel-header__title" title={sessionTitle}>
+            {sessionTitle}
+          </div>
+          <div className="chat-panel-header__actions">
             <button
               type="button"
               className={`icon-btn share-export-btn ${isExportingShare ? 'share-export-btn--loading' : ''}`}
@@ -346,10 +360,23 @@ export function ChatPanel({
                 <Share2 size={16} strokeWidth={2} />
               )}
             </button>
+            <button
+              type="button"
+              className={`chat-header-icon-btn ${!teamAreaExpanded ? 'chat-header-icon-btn--active' : ''}`}
+              onClick={() => onToggleTeamArea?.(false)}
+            >
+              <img src={chatIcon} alt="" className="chat-header-icon-btn__icon" />
+            </button>
+            <button
+              type="button"
+              className={`chat-header-icon-btn ${teamAreaExpanded ? 'chat-header-icon-btn--active' : ''}`}
+              onClick={() => onToggleTeamArea?.(true)}
+            >
+              <img src={expandIcon} alt="" className="chat-header-icon-btn__icon" />
+            </button>
           </div>
-        )}
-        <HarnessProgressBar />
-      </div>
+        </div>
+      )}
       <div ref={scrollContainerRef} className="chat-scroll flex-1 overflow-y-auto" onScroll={handleScroll} onWheel={handleWheel}>
         <div className={chatContentClassName}>
           {hasConversation ? (
@@ -362,6 +389,9 @@ export function ChatPanel({
                   onLoadMore={historyPager.onLoadMore}
                 />
               )}
+              <div className="chat-harness-entry">
+                <HarnessProgressBar />
+              </div>
               {hasTimelineContent ? (
                 <>
                   <MessageList messages={messages} />
@@ -385,10 +415,8 @@ export function ChatPanel({
             </>
           ) : (
             <div className="chat-welcome">
+              <img className="chat-welcome__banner" src={welcomeBanner} alt={t('chat.welcomeLogoAlt')} />
               <h2 className="chat-welcome__heading"><WelcomeHeading /></h2>
-              <p className="chat-welcome__subtext">
-                {t('chat.welcomeSubtext')}
-              </p>
               <div className="chat-welcome__composer">
                 <ActiveTeamGroupEntry isProcessing={isProcessing} teamAreaExpanded={teamAreaExpanded} />
                 <InterruptResultBubble />
@@ -399,6 +427,8 @@ export function ChatPanel({
                   onSwitchMode={onSwitchMode}
                   isProcessing={isProcessing}
                   onNewSession={onNewSession}
+                  autoFocusKey={autoFocusKey}
+                  onNavigateToSkills={onNavigateToSkills}
                 />
               </div>
               <div className="chat-suggestions">
@@ -423,6 +453,8 @@ export function ChatPanel({
             onSwitchMode={onSwitchMode}
             isProcessing={isProcessing}
             onNewSession={onNewSession}
+            autoFocusKey={autoFocusKey}
+            onNavigateToSkills={onNavigateToSkills}
           />
         </div>
       )}

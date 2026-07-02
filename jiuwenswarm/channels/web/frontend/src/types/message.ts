@@ -66,6 +66,8 @@ export interface Message {
   usageSummary?: UsageSummary;
   // Harness message flag for special styling
   isHarnessMessage?: boolean;
+  // 用户消息附带的技能列表（输入栏选中并发送）
+  skills?: string[];
 }
 
 export interface ToolCall {

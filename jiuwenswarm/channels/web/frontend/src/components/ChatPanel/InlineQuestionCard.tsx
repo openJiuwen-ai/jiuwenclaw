@@ -29,7 +29,8 @@ function ApprovalQuestionContent({ question }: { question: Question }) {
 
 export function InlineQuestionCard({ onSubmit }: InlineQuestionCardProps) {
   const { t } = useTranslation();
-  const { pendingQuestion, setPendingQuestion } = useChatStore();
+  const activeSessionId = useChatStore((s) => s.activeSessionId);
+  const pendingQuestion = useChatStore((s) => s.runtimes[activeSessionId ?? '']?.pendingQuestion ?? null);
   const [selections, setSelections] = useState<Map<number, string>>(new Map());
   const [submitted, setSubmitted] = useState(false);
 
@@ -63,9 +64,12 @@ export function InlineQuestionCard({ onSubmit }: InlineQuestionCardProps) {
       if (!pendingQuestion) return;
       setSubmitted(true);
       onSubmit(pendingQuestion.request_id, buildAnswers(selMap), pendingQuestion.source);
-      setPendingQuestion(null);
+      const sid = useChatStore.getState().activeSessionId;
+      if (sid) {
+        useChatStore.getState().setPendingQuestion(sid, null);
+      }
     },
-    [pendingQuestion, buildAnswers, onSubmit, setPendingQuestion]
+    [pendingQuestion, buildAnswers, onSubmit]
   );
 
   const handleSelect = useCallback(

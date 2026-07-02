@@ -6,6 +6,7 @@ import { useChatStore, useSessionStore } from '../../stores';
 import type { ModelEntry } from '../../types';
 import { webRequest } from '../../services/webClient';
 import { PermissionsToolsEditor } from "./PermissionsToolsEditor";
+import { ModelProviderIcon } from '../ModelProviderIcon';
 
 function MultiSelectDropdown({
   options,
@@ -1220,6 +1221,7 @@ function MultiModelSection({
                   <svg className={`w-3 h-3 transition-transform shrink-0 ${isExpanded ? "rotate-90" : ""}`} fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2}>
                     <path strokeLinecap="round" strokeLinejoin="round" d="M9 5l7 7-7 7" />
                   </svg>
+                  <ModelProviderIcon model={model} className="shrink-0" />
                   <span className="truncate">{displayName || t("config.modelList.untitled")}</span>
                   {isPrimaryDefault && (
                     <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-accent/15 text-accent border border-accent/30">{t("config.modelList.primaryDefault")}</span>
@@ -2430,8 +2432,11 @@ export function ConfigPanel({
   onAgentsTeamsSave,
 }: ConfigPanelProps) {
   const { t, i18n } = useTranslation();
-  const isProcessing = useChatStore((s) => s.isProcessing);
-  const { availableModels: storeAvailableModels, mode } = useSessionStore();
+  const activeSessionId = useChatStore((s) => s.activeSessionId);
+  const isProcessing = useChatStore((s) => (activeSessionId ? s.runtimes[activeSessionId]?.isProcessing ?? false : false));
+  const availableModels = useSessionStore((s) => s.availableModels);
+  const mode = useSessionStore((s) => (activeSessionId ? s.runtimes[activeSessionId]?.mode ?? 'agent.plan' : 'agent.plan'));
+  const storeAvailableModels = availableModels;
   const [draftValues, setDraftValues] = useState<Record<string, string>>(() => {
     if (!config) return {};
     const next: Record<string, string> = {};

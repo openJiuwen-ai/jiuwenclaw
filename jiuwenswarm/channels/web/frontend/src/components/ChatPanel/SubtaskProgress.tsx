@@ -10,7 +10,8 @@ import clsx from 'clsx';
 
 export function SubtaskProgress() {
   const { t } = useTranslation();
-  const { activeSubtasks } = useChatStore();
+  const activeSessionId = useChatStore((s) => s.activeSessionId);
+  const activeSubtasks = useChatStore((s) => s.runtimes[activeSessionId ?? '']?.activeSubtasks ?? new Map());
 
   // 将 Map 转换为数组并按 index 排序
   const subtasks = Array.from(activeSubtasks.values()).sort(

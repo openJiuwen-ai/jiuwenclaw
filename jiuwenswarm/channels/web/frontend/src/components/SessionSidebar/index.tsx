@@ -21,7 +21,7 @@ import configIcon from '../../assets/sidebar/config.svg';
 import webIcon from '../../assets/sidebar/web.svg';
 import logsIcon from '../../assets/sidebar/logs.svg';
 import plusIcon from '../../assets/sidebar/plus.svg';
-import logoIcon from '../../assets/sidebar/logo.svg';
+import logoIcon from '/logo.svg';
 import advancedConfigIcon from '../../assets/sidebar/advanced-config-new.svg';
 import collapseIcon from '../../assets/sidebar/collapse.svg';
 import updateIcon from '../../assets/sidebar/advanced-config.svg';
@@ -42,6 +42,8 @@ interface SessionSidebarProps {
   collapsed?: boolean;
   onCollapse?: () => void;
   onExpand?: () => void;
+  showNewSession?: boolean;
+  hiddenNavItems?: MainNavKey[];
 }
 
 interface NavItem {
@@ -296,6 +298,8 @@ export function SessionSidebar({
   collapsed = false,
   onCollapse,
   onExpand,
+  showNewSession = true,
+  hiddenNavItems = [],
 }: SessionSidebarProps) {
   const { t } = useTranslation();
   const [advancedConfigOpen, setAdvancedConfigOpen] = useState(false);
@@ -362,12 +366,12 @@ export function SessionSidebar({
   };
 
   const getNavItemLabel = (item: NavItem) => t(item.labelKey);
+  const visibleMainNavItems = mainNavItems.filter((item) => !hiddenNavItems.includes(item.key));
 
   // Collapsed mode: 48px icon-only sidebar
   if (collapsed) {
     return (
       <aside ref={sidebarRef} className="sidebar sidebar--collapsed">
-        {/* Logo — SVG already contains gradient background + mark at 28×28 */}
         <Tooltip text={t('sessionSidebar.expandSidebar')} targetRef={logoRef} visible={hoveredNav === 'logo'} />
         <div
           ref={logoRef}
@@ -381,7 +385,7 @@ export function SessionSidebar({
         </div>
 
         {/* New Chat button */}
-        <Tooltip text={t('chat.newSession')} targetRef={newChatRef} visible={hoveredNav === 'newchat'} />
+        {showNewSession && <><Tooltip text={t('chat.newSession')} targetRef={newChatRef} visible={hoveredNav === 'newchat'} />
         <button
           ref={newChatRef}
           className="collapsed-nav-item"
@@ -391,10 +395,10 @@ export function SessionSidebar({
           title={t('chat.newSession')}
         >
           <img src={plusIcon} alt="" width="16" height="16" />
-        </button>
+        </button></>}
 
         {/* Main nav icons */}
-        {mainNavItems.map((item) => (
+        {visibleMainNavItems.map((item) => (
           <Tooltip
             key={item.key}
             text={getNavItemLabel(item)}
@@ -402,7 +406,7 @@ export function SessionSidebar({
             visible={hoveredNav === item.key}
           />
         ))}
-        {mainNavItems.map((item) => (
+        {visibleMainNavItems.map((item) => (
           <button
             key={item.key}
             ref={(el) => {
@@ -492,14 +496,14 @@ export function SessionSidebar({
       {/* 智能体 Section */}
       <div className="nav-section">
         <div className="nav-section-label">{t('nav.agent')}</div>
-        <button className="new-chat-btn" onClick={handleNewSession}>
+        {showNewSession && <button className="new-chat-btn" onClick={handleNewSession}>
           <span className="new-chat-btn__left">
             <img src={plusIcon} alt="" />
             <span className="new-chat-btn__text">{t('chat.newSession')}</span>
           </span>
-        </button>
+        </button>}
         <nav className="sidebar-nav">
-          {mainNavItems.map((item) => (
+          {visibleMainNavItems.map((item) => (
             <button
               key={item.key}
               className={`nav-item ${activeNav === item.key ? 'active' : ''}`}

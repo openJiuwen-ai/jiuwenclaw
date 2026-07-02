@@ -160,6 +160,31 @@ export function ContextCompressionLines({
   );
 }
 
+/** 解析 content 里的 {{skill:名称}} 标记，返回 chip 与文字交织的节点数组 */
+function renderRichContent(content: string): ReactNode[] {
+  const parts: ReactNode[] = [];
+  const regex = /\{\{skill:([^}]+)\}\}/g;
+  let lastIndex = 0;
+  let match: RegExpExecArray | null;
+  let key = 0;
+  while ((match = regex.exec(content)) !== null) {
+    if (match.index > lastIndex) {
+      parts.push(content.slice(lastIndex, match.index));
+    }
+    parts.push(
+      <span key={`skill-${key++}`} className="chat-message-skill-chip">
+        <span className="chat-message-skill-chip__icon" aria-hidden="true" />
+        <span className="chat-message-skill-chip__label">{match[1]}</span>
+      </span>
+    );
+    lastIndex = regex.lastIndex;
+  }
+  if (lastIndex < content.length) {
+    parts.push(content.slice(lastIndex));
+  }
+  return parts;
+}
+
 export function getMessageActor(message: Message): string | null {
   if (message.role !== 'system') {
     return null;
@@ -532,7 +557,7 @@ export function MessageItem({
               <>
                 {isUser ? (
                   <div className="chat-text">
-                    <span className="whitespace-pre-wrap">{content}</span>
+                    <span className="whitespace-pre-wrap">{renderRichContent(content)}</span>
                   </div>
                 ) : (
                   <A2UIMessageContent

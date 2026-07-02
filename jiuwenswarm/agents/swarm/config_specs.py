@@ -226,10 +226,23 @@ def _retrieval_enabled(config: dict[str, Any] | None = None) -> bool:
     return False
 
 
-def _remove_skill_use_rails_for_agentic_retrieval(rails: list[RailSpec]) -> list[RailSpec]:
-    """Remove legacy SkillUseRail when agentic retrieval owns discovery."""
-    skill_rail_types = {CORE_SKILL_USE, "skill_use", registry.CODE_SKILL_USE}
-    return [rail for rail in rails if rail.type not in skill_rail_types]
+def _normalize_skill_use_rails_for_agentic_retrieval(rails: list[RailSpec]) -> list[RailSpec]:
+    """Normalize skill-use rails to auto-list mode and remove duplicates."""
+    skill_rail_types = {CORE_SKILL_USE, "skill_use", "SkillUseRail", registry.CODE_SKILL_USE}
+    has_skill_rail = False
+    normalized: list[RailSpec] = []
+    for rail in rails:
+        if rail.type in skill_rail_types:
+            if has_skill_rail:
+                continue
+            has_skill_rail = True
+            params = dict(rail.params or {})
+            params["skill_mode"] = SkillUseRail.SKILL_MODE_AUTO_LIST
+            params["include_tools"] = False
+            normalized.append(rail.model_copy(update={"params": params}))
+            continue
+        normalized.append(rail)
+    return normalized
 
 
 def _additional_directories(config: dict[str, Any]) -> list[str]:
@@ -384,6 +397,16 @@ def _build_team_capability_specs(
         RailSpec(type=name, params=_rail_params(name, config))
         for name in _COMMON_RAIL_NAMES
     ]
+    if _retrieval_enabled(config):
+        rails_specs.append(
+            RailSpec(
+                type=CORE_SKILL_USE,
+                params={
+                    "skill_mode": SkillUseRail.SKILL_MODE_AUTO_LIST,
+                    "include_tools": False,
+                },
+            )
+        )
     rails_specs.append(
         RailSpec(
             type=registry.MEMBER_SKILL_TOOLKIT,
@@ -651,7 +674,7 @@ def build_member_deep_agent_spec(
 
     retrieval_enabled = _retrieval_enabled(config)
     if retrieval_enabled:
-        merged_rails = _remove_skill_use_rails_for_agentic_retrieval(merged_rails)
+        merged_rails = _normalize_skill_use_rails_for_agentic_retrieval(merged_rails)
 
     update: dict[str, Any] = {
         "rails": merged_rails,
